@@ -1,0 +1,270 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "report-v0.1.0.schema.json",
+  "title": "MemVeil derived report",
+  "description": "Deterministic offline analysis of one capture. Reconstructed producer contract, format version 0.1.0.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "session_id",
+    "synthetic",
+    "engine_version",
+    "environment",
+    "device_catalog",
+    "quality",
+    "metrics",
+    "findings",
+    "limitations"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1.0"
+    },
+    "session_id": {
+      "$ref": "#/$defs/opaque_id",
+      "description": "Must equal the analyzed session.json session_id."
+    },
+    "synthetic": {
+      "type": "boolean",
+      "description": "Must equal the analyzed session synthetic flag; provenance survives every export."
+    },
+    "engine_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "Report reducer identity that produced this report."
+    },
+    "environment": {
+      "type": "object",
+      "required": ["mode", "detection", "attestation", "evidence"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": ["none", "sev", "sev_es", "sev_snp", "tdx", "unknown"]
+        },
+        "detection": {
+          "enum": ["kernel_reported", "unverified", "conflicting"]
+        },
+        "asserted_mode": {
+          "enum": ["none", "sev", "sev_es", "sev_snp", "tdx", "unknown", null]
+        },
+        "attestation": {
+          "enum": ["not_performed", "external_verified", "failed"]
+        },
+        "evidence": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {"$ref": "#/$defs/evidence_item"}
+        }
+      }
+    },
+    "device_catalog": {
+      "$ref": "#/$defs/device_catalog"
+    },
+    "quality": {
+      "type": "object",
+      "required": ["detail", "aggregate", "correlation", "baseline", "terminal"],
+      "additionalProperties": false,
+      "properties": {
+        "detail": {"$ref": "#/$defs/channel"},
+        "aggregate": {"$ref": "#/$defs/channel"},
+        "correlation": {"$ref": "#/$defs/channel"},
+        "baseline": {"$ref": "#/$defs/channel"},
+        "terminal": {"$ref": "#/$defs/channel"}
+      }
+    },
+    "metrics": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "value",
+          "unit",
+          "measurement",
+          "coverage",
+          "aggregation",
+          "sample_count",
+          "dimensions",
+          "scope",
+          "notes"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Metric name, e.g. 'bounce_attempts'. Identical names with different dimensions stay distinct."
+          },
+          "value": {
+            "anyOf": [{"$ref": "#/$defs/u64"}, {"type": "null"}],
+            "description": "Canonical decimal string or null. A null value requires measurement 'unavailable'. Never zero for unknown."
+          },
+          "unit": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "description": "Integral base unit, e.g. 'count', 'bytes', 'nanoseconds'."
+          },
+          "measurement": {
+            "enum": ["observed", "derived", "estimated", "unavailable"]
+          },
+          "coverage": {
+            "enum": ["complete_for_scope", "partial", "unavailable", "not_applicable"],
+            "description": "Relative only to the explicitly named scope; never the whole guest."
+          },
+          "aggregation": {
+            "enum": ["counter", "gauge", "mean", "p50", "p95", "p99", null],
+            "description": "Null when no aggregation applies, e.g. an unavailable metric."
+          },
+          "sample_count": {
+            "anyOf": [{"$ref": "#/$defs/u64"}, {"type": "null"}],
+            "description": "Completed sample count; required for a populated lifetime mean/quantile, otherwise null when inapplicable."
+          },
+          "dimensions": {
+            "type": "object",
+            "required": ["device_id", "pool_id"],
+            "additionalProperties": false,
+            "properties": {
+              "device_id": {
+                "anyOf": [{"$ref": "#/$defs/opaque_id"}, {"type": "null"}],
+                "description": "Null means the metric's explicitly described global scope, not an unlabelled device."
+              },
+              "pool_id": {
+                "anyOf": [{"$ref": "#/$defs/opaque_id"}, {"type": "null"}]
+              }
+            }
+          },
+          "scope": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Explicit measured scope: window, filters, and source."
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 1024
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {"value": {"type": "null"}},
+              "required": ["value"]
+            },
+            "then": {
+              "properties": {"measurement": {"const": "unavailable"}}
+            },
+            "description": "A null value requires measurement unavailable; never zero for unknown."
+          }
+        ]
+      }
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 2048,
+      "description": "Evidence-linked observations. An empty array does not mean no problem exists.",
+      "items": {
+        "type": "object",
+        "required": ["code", "severity", "explanation", "evidence_refs", "scope", "limitations"],
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "enum": [
+              "CAPTURE_INCOMPLETE",
+              "PROBE_UNAVAILABLE",
+              "UNPAIRED_LIFECYCLE",
+              "CONVERSION_FAILED",
+              "POOL_PRESSURE",
+              "LONG_LIVED_ALLOCATION"
+            ]
+          },
+          "severity": {
+            "enum": ["informational", "warning"],
+            "description": "No security score; findings are observations, not verdicts."
+          },
+          "explanation": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "evidence_refs": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {"type": "string", "minLength": 1, "maxLength": 256}
+          },
+          "scope": {"type": "string", "minLength": 1, "maxLength": 256},
+          "limitations": {"type": "string", "maxLength": 1024}
+        }
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {"type": "string", "minLength": 1, "maxLength": 1024},
+      "description": "What was not measured and why. Optional absent capabilities are explained here."
+    }
+  },
+  "$defs": {
+    "u64": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})$",
+      "description": "Canonical unsigned 64-bit decimal string. The application must also check range 0..18446744073709551615."
+    },
+    "opaque_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+    },
+    "evidence_item": {
+      "type": "object",
+      "required": ["type", "source", "interpretation"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"type": "string", "minLength": 1, "maxLength": 64},
+        "source": {"type": "string", "minLength": 1, "maxLength": 256},
+        "interpretation": {"type": "string", "maxLength": 1024}
+      }
+    },
+    "device_catalog": {
+      "type": "object",
+      "required": ["devices"],
+      "additionalProperties": false,
+      "properties": {
+        "devices": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "type": "object",
+            "required": ["device_id", "name", "identity_status"],
+            "additionalProperties": false,
+            "properties": {
+              "device_id": {"$ref": "#/$defs/opaque_id"},
+              "name": {"type": "string", "maxLength": 256},
+              "driver": {"type": ["string", "null"], "minLength": 1, "maxLength": 128},
+              "identity_status": {"enum": ["resolved", "unresolved", "exhausted"]}
+            }
+          }
+        }
+      }
+    },
+    "channel": {
+      "type": "object",
+      "required": ["status", "loss_count", "scope", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {"enum": ["complete_for_scope", "partial", "unavailable", "not_applicable"]},
+        "loss_count": {
+          "anyOf": [{"$ref": "#/$defs/u64"}, {"type": "null"}]
+        },
+        "scope": {"type": "string", "minLength": 1, "maxLength": 256},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 512},
+        "evidence_refs": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {"type": "string", "minLength": 1, "maxLength": 256}
+        }
+      }
+    }
+  }
+}

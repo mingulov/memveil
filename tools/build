@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# memveil single supported build path.
+#
+# Usage: tools/build [--check-toolchain] [--help]
+#
+# Verifies the pinned toolchain and builds every registered compile target.
+# When no compile targets are registered yet, exit 0 covers toolchain
+# verification plus an explicit notice naming the missing targets.
+# Prints each underlying command before running it. Exit 0 only when every
+# step passes; exit 1 on build failure; exit 2 on invalid usage.
+# One action per invocation; extra arguments are rejected.
+
+set -u
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+LOCK="$ROOT/toolchain.lock.json"
+
+usage() {
+    sed -n '2,/^$/p' "$0" | sed 's/^# //; s/^#//'
+}
+
+log() {
+    echo "+ $*" >&2
+}
+
+check_toolchain() {
+    log "check pinned versions from toolchain.lock.json"
+    python3 - "$LOCK" <<'EOF'
+import json, subprocess, sys
+
+lock_path = sys.argv[1]
+with open(lock_path, "r", encoding="utf-8") as handle:
+    lock = json.load(handle)
+want_lines = lock["expected_first_lines"]
+
+checks = [
+    ("pixi", ["pixi", "--version"]),
+    ("mojo", ["pixi", "run", "--frozen", "mojo", "--version"]),
+    ("clang", ["clang", "--version"]),
+    ("bpftool", ["bpftool", "--version"]),
+    ("cmake", ["cmake", "--version"]),
+    ("ninja", ["ninja", "--version"]),
+    ("python", ["python3", "--version"]),
+]
+
+failed = 0
+for name, cmd in checks:
+    want = want_lines[name]
+    try:
+        out = subprocess.run(cmd, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True,
+                             check=False)
+    except FileNotFoundError:
+        print("FAIL %s: command not found: %s" % (name, cmd[0]))
+        failed += 1
+        continue
+    first = out.stdout.splitlines()[0] if out.stdout else ""
+    if out.returncode != 0:
+        print("FAIL %s: exit status %d" % (name, out.returncode))
+        failed += 1
+    elif first.strip() != want:
+        print("FAIL %s: want exactly %r, got %r"
+              % (name, want, first.strip()))
+        failed += 1
+    else:
+        print("ok %s: %s" % (name, first.strip()))
+sys.exit(1 if failed else 0)
+EOF
+}
+
+check_pixi_lock() {
+    log pixi install --frozen
+    (cd "$ROOT" && pixi install --frozen)
+}
+
+main() {
+    if [ $# -eq 0 ]; then
+        set -- ""
+    fi
+    if [ $# -gt 1 ]; then
+        echo "build: too many arguments" >&2
+        usage >&2
+        return 2
+    fi
+    case "$1" in
+        --help|-h)
+            usage
+            ;;
+        --check-toolchain)
+            cd "$ROOT"
+            check_pixi_lock && check_toolchain || return 1
+            ;;
+        "")
+            cd "$ROOT"
+            check_pixi_lock && check_toolchain || return 1
+            log tools/validate-schemas
+            "$ROOT/tools/validate-schemas" || return 1
+            if [ -f "$ROOT/src/memveil/main.mojo" ]; then
+                log pixi run --frozen mojo build -o build/memveil \
+                    src/memveil/main.mojo
+                mkdir -p build
+                pixi run --frozen mojo build -o build/memveil \
+                    src/memveil/main.mojo || return 1
+            else
+                echo "build: no Mojo targets registered yet" >&2
+            fi
+            ;;
+        *)
+            echo "build: unknown argument: $1" >&2
+            usage >&2
+            return 2
+            ;;
+    esac
+}
+
+main "$@"

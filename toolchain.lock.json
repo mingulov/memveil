@@ -1,0 +1,84 @@
+{
+  "lock_version": "1.0.0",
+  "recorded_on": "2026-10-05",
+  "note": "Exact pinned build inputs. Verify with: pixi install && tools/build --check-toolchain. The pixi.lock file carries authoritative conda package hashes; this file records the selected versions and their provenance.",
+  "toolchain": {
+    "mojo": {
+      "version": "1.1.0",
+      "build": "release",
+      "distribution": "pixi/conda",
+      "channel": "https://conda.modular.com/max",
+      "compiler_commit": "8189361e",
+      "verify": "pixi run mojo --version"
+    },
+    "pixi": {
+      "version": "0.81.0",
+      "verify": "pixi --version"
+    },
+    "libbpf_source": {
+      "version": "1.7.0",
+      "git_tag": "v1.7.0",
+      "commit": "f5dcbae736e5d7f83a35718e01be1a8e3010fa39",
+      "tarball_url": "https://github.com/libbpf/libbpf/archive/refs/tags/v1.7.0.tar.gz",
+      "tarball_sha256": "7ab5feffbf78557f626f2e3e3204788528394494715a30fc2070fcddc2051b7b",
+      "note": "Consumed through the libbpf-mojo bridge; MemVeil never links libbpf directly."
+    },
+    "clang": {
+      "version": "21.1.8",
+      "build_string": "6ubuntu1",
+      "origin": "system",
+      "role": "C eBPF program compilation",
+      "verify": "clang --version"
+    },
+    "bpftool": {
+      "version": "7.7.0",
+      "origin": "system",
+      "verify": "bpftool --version"
+    },
+    "cmake": {
+      "version": "4.2.3",
+      "verify": "cmake --version"
+    },
+    "ninja": {
+      "version": "1.13.2",
+      "verify": "ninja --version"
+    },
+    "python": {
+      "version": "3.14.4",
+      "role": "development validation only; never runtime collection or replay",
+      "verify": "python3 --version"
+    }
+  },
+  "product_contracts": {
+    "schema_version": "0.1.0",
+    "note": "External record contracts live in schemas/; native bridge ABI is owned by libbpf-mojo."
+  },
+  "dependencies": {
+    "libbpf-mojo": {
+      "status": "unpinned",
+      "note": "During development an explicit local path override may be used. Release builds resolve a pinned libbpf-mojo source archive or package; the pin is recorded here once the first library artifact exists."
+    }
+  },
+  "expected_first_lines": {
+    "pixi": "pixi 0.81.0",
+    "mojo": "Mojo 1.1.0 (8189361e)",
+    "clang": "Ubuntu clang version 21.1.8 (6ubuntu1)",
+    "bpftool": "bpftool v7.7.0",
+    "cmake": "cmake version 4.2.3",
+    "ninja": "1.13.2",
+    "python": "Python 3.14.4"
+  },
+  "platform_floor": {
+    "arch": "x86-64",
+    "kernel": ">= 7.0 for collection; doctor, help, version, and offline report have no kernel floor",
+    "note": "A version string is eligibility only. Each capability needs its own profile and live evidence."
+  },
+  "decisions": [
+    "D1: pixi (pixi.toml + pixi.lock) is the Mojo project manifest; one manifest per repository.",
+    "D2: Mojo 1.1.0 stable from the public max channel; nightly builds are not used.",
+    "D3: libbpf is consumed only through the pinned libbpf-mojo bridge, never linked directly.",
+    "D4: System clang 21.1.8 pinned by exact version string for C eBPF compilation. Revisit on BPF codegen issues.",
+    "D5: Validation tooling uses Python standard library only; no third-party Python dependencies.",
+    "D6: External schema version 0.1.0 is independent of product, bridge ABI, and BPF wire versions."
+  ]
+}

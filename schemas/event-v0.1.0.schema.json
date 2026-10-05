@@ -1,0 +1,392 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "event-v0.1.0.schema.json",
+  "title": "MemVeil normalized event",
+  "description": "One normalized event line in events.ndjson. Reconstructed producer contract, format version 0.1.0.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "session_id",
+    "seq",
+    "ts_ns",
+    "kind",
+    "source",
+    "data"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1.0"
+    },
+    "session_id": {
+      "$ref": "#/$defs/opaque_id",
+      "description": "Must equal the enclosing session.json session_id; foreign IDs are invalid."
+    },
+    "seq": {
+      "$ref": "#/$defs/u64",
+      "description": "Normalized session sequence. Must strictly increase within a capture."
+    },
+    "ts_ns": {
+      "$ref": "#/$defs/u64",
+      "description": "Monotonic timestamp in nanoseconds. Must lie in the session window [start_ns, end_ns). Ordering across unrelated CPUs need not be strict."
+    },
+    "kind": {
+      "enum": [
+        "bounce_attempt",
+        "map_result",
+        "unmap",
+        "copy",
+        "sync_request",
+        "transition_result",
+        "pool_sample",
+        "gap",
+        "marker",
+        "counter_snapshot"
+      ],
+      "description": "An unknown kind invalidates metrics that depend on complete interpretation; readers must refuse it, never silently discard it."
+    },
+    "source": {
+      "type": "object",
+      "required": ["hook", "backend", "profile_id", "measurement", "correlation"],
+      "additionalProperties": false,
+      "properties": {
+        "hook": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "Exact hook identity, e.g. 'swiotlb:swiotlb_bounced'."
+        },
+        "backend": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "Observation backend, e.g. 'tracepoint', 'tracing', 'synthetic'."
+        },
+        "profile_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Semantic profile that gives this hook its meaning."
+        },
+        "measurement": {
+          "enum": ["observed", "derived", "estimated"]
+        },
+        "correlation": {
+          "enum": ["direct", "unpaired"],
+          "description": "'direct' is direct within the recorded semantic model, not proof of host access or origin. 'unpaired' means no relation is established."
+        }
+      }
+    },
+    "observer_context": {
+      "type": "object",
+      "required": ["relation"],
+      "additionalProperties": false,
+      "description": "Execution context only, unless a separate adapter proves ownership.",
+      "properties": {
+        "cpu": {"type": "integer", "minimum": 0, "maximum": 1048575},
+        "pid": {"type": "integer", "minimum": 0, "maximum": 4194304},
+        "tgid": {"type": "integer", "minimum": 0, "maximum": 4194304},
+        "comm": {"type": "string", "maxLength": 64},
+        "cgroup_id": {"$ref": "#/$defs/opaque_id"},
+        "relation": {"const": "execution_context_only"}
+      }
+    },
+    "data": {
+      "type": "object",
+      "description": "Kind-specific payload; constrained by the kind below."
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"kind": {"const": "bounce_attempt"}}},
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": ["device_id", "requested_bytes", "forced", "operation_id"],
+            "additionalProperties": false,
+            "properties": {
+              "device_id": {"$ref": "#/$defs/opaque_id"},
+              "requested_bytes": {"$ref": "#/$defs/u64"},
+              "forced": {"type": "boolean"},
+              "operation_id": {"$ref": "#/$defs/opaque_id"}
+            },
+            "description": "A covered request reaching the bounce-attempt source. Not an allocation result."
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "map_result"}}},
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": ["operation_id", "success", "mapping_id", "return_code", "mapped_bytes"],
+            "additionalProperties": false,
+            "properties": {
+              "operation_id": {"$ref": "#/$defs/opaque_id"},
+              "success": {"type": "boolean"},
+              "mapping_id": {
+                "anyOf": [{"$ref": "#/$defs/opaque_id"}, {"type": "null"}],
+                "description": "Generation-specific mapping ID on success; null on failure. A failed allocation never acquires one."
+              },
+              "return_code": {
+                "type": ["integer", "null"],
+                "description": "Signed native result. Null is valid when the allocator returns an identity/failure sentinel instead of an errno."
+              },
+              "mapped_bytes": {
+                "anyOf": [{"$ref": "#/$defs/u64"}, {"type": "null"}],
+                "description": "Mapped length on success; null on failure."
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {"success": {"const": true}},
+                  "required": ["success"]
+                },
+                "then": {
+                  "required": ["mapping_id", "mapped_bytes"],
+                  "properties": {
+                    "mapping_id": {"$ref": "#/$defs/opaque_id"},
+                    "mapped_bytes": {"$ref": "#/$defs/u64"}
+                  }
+                },
+                "description": "Success carries a generation-specific mapping ID and length."
+              },
+              {
+                "if": {
+                  "properties": {"success": {"const": false}},
+                  "required": ["success"]
+                },
+                "then": {
+                  "properties": {
+                    "mapping_id": {"type": "null"},
+                    "mapped_bytes": {"type": "null"}
+                  }
+                },
+                "description": "A failed allocation never acquires a mapping."
+              }
+            ],
+            "description": "An internal bounce-allocation result."
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "unmap"}}},
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": ["mapping_id"],
+            "additionalProperties": false,
+            "properties": {
+              "mapping_id": {
+                "anyOf": [{"$ref": "#/$defs/opaque_id"}, {"type": "null"}],
+                "description": "Released mapping; null when the identity is unmatched."
+              }
+            },
+            "description": "A covered release boundary. Not erasure or reprivatization."
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "copy"}}},
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": ["operation_id", "mapping_id", "direction", "bytes"],
+            "additionalProperties": false,
+            "properties": {
+              "operation_id": {"$ref": "#/$defs/opaque_id"},
+              "mapping_id": {
+                "anyOf": [{"$ref": "#/$defs/opaque_id"}, {"type": "null"}],
+                "description": "Null when the copy precedes its allocation result; correlate on arrival."
+              },
+              "direction": {
+                "enum": ["original_to_bounce", "bounce_to_original"],
+                "description": "Actual CPU-copy direction, separate from the DMA request direction."
+              },
+              "bytes": {"$ref": "#/$defs/u64"}
+            },
+            "description": "An observed actual CPU bounce copy."
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "sync_request"}}},
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": ["operation_id", "mapping_id", "offset", "length"],
+            "additionalProperties": false,
+            "properties": {
+              "operation_id": {"$ref": "#/$defs/opaque_id"},
+              "mapping_id": {
+                "anyOf": [{"$ref": "#/$defs/opaque_id"}, {"type": "null"}]
+              },
+              "offset": {"$ref": "#/$defs/u64"},
+              "length": {"$ref": "#/$defs/u64"}
+            },
+            "description": "A synchronization request. Not a substitute for the copy that might follow."
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "transition_result"}}},
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": ["region_id", "requested_state", "success", "return_code", "offset", "length"],
+            "additionalProperties": false,
+            "properties": {
+              "region_id": {"$ref": "#/$defs/opaque_id"},
+              "requested_state": {"enum": ["shared", "private"]},
+              "success": {"type": "boolean"},
+              "return_code": {"type": ["integer", "null"]},
+              "offset": {"$ref": "#/$defs/u64"},
+              "length": {"$ref": "#/$defs/u64"},
+              "address_space": {
+                "enum": ["guest_physical", "kernel_virtual", "iova", "identity_only"],
+                "description": "Namespace of offset/length when the producer resolved it."
+              },
+              "resolution": {
+                "enum": ["resolved", "unresolved"],
+                "description": "Whether offset/length carry a validated identity. Full resolution rules arrive with region tracking."
+              }
+            },
+            "description": "A covered conversion API result and requested target state, subject to platform/profile interpretation."
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "pool_sample"}}},
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": ["pool_id", "used_bytes", "capacity_bytes", "unit"],
+            "additionalProperties": false,
+            "properties": {
+              "pool_id": {"$ref": "#/$defs/opaque_id"},
+              "used_bytes": {
+                "anyOf": [{"$ref": "#/$defs/u64"}, {"type": "null"}]
+              },
+              "capacity_bytes": {
+                "anyOf": [{"$ref": "#/$defs/u64"}, {"type": "null"}]
+              },
+              "unit": {
+                "enum": ["bytes", "unknown"],
+                "description": "Byte unit proof. 'unknown' disables ratio rules such as pool pressure."
+              }
+            },
+            "description": "Contemporaneous values for one explicitly identified allocator scope."
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "gap"}}},
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": ["channel", "lost_count", "reason", "window_start_ns", "window_end_ns"],
+            "additionalProperties": false,
+            "properties": {
+              "channel": {"enum": ["detail", "aggregate", "correlation", "baseline", "terminal"]},
+              "lost_count": {
+                "anyOf": [{"$ref": "#/$defs/u64"}, {"type": "null"}],
+                "description": "Null when the number of lost events is unknown; never zero for unknown."
+              },
+              "reason": {"type": "string", "minLength": 1, "maxLength": 512},
+              "window_start_ns": {"$ref": "#/$defs/u64"},
+              "window_end_ns": {"$ref": "#/$defs/u64"}
+            },
+            "description": "A known detail, aggregate, or correlation-quality failure."
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "marker"}}},
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": ["text"],
+            "additionalProperties": false,
+            "properties": {
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "description": "Bounded sanitized workflow annotation; never arbitrary payload data."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "counter_snapshot"}}},
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": ["counter_id", "epoch", "scope", "value", "unit"],
+            "additionalProperties": false,
+            "properties": {
+              "counter_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Stable counter identity, e.g. 'swiotlb.bounce_attempts'."
+              },
+              "epoch": {
+                "$ref": "#/$defs/u64",
+                "description": "Reset epoch. A delta requires two compatible readings within one epoch."
+              },
+              "scope": {
+                "type": "object",
+                "required": ["profile_id"],
+                "additionalProperties": false,
+                "properties": {
+                  "device_id": {
+                    "anyOf": [{"$ref": "#/$defs/opaque_id"}, {"type": "null"}]
+                  },
+                  "profile_id": {"type": "string", "minLength": 1, "maxLength": 128}
+                }
+              },
+              "value": {"$ref": "#/$defs/u64"},
+              "unit": {"type": "string", "minLength": 1, "maxLength": 32}
+            },
+            "description": "A cumulative independent counter reading. A delta and detailed events are alternative measurements, never added together."
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "u64": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})$",
+      "description": "Canonical unsigned 64-bit decimal string. The application must also check range 0..18446744073709551615."
+    },
+    "opaque_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+    }
+  }
+}

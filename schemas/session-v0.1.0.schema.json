@@ -1,0 +1,267 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "session-v0.1.0.schema.json",
+  "title": "MemVeil capture session",
+  "description": "Immutable session identity plus finalized status and health. Reconstructed producer contract, format version 0.1.0, independent of product version.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "session_id",
+    "synthetic",
+    "product",
+    "environment",
+    "capture",
+    "device_catalog",
+    "baseline",
+    "capabilities",
+    "quality"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1.0",
+      "description": "External format version. Unknown major versions fail; this schema accepts 0.1.0 only."
+    },
+    "session_id": {
+      "$ref": "#/$defs/opaque_id"
+    },
+    "boot_id": {
+      "$ref": "#/$defs/opaque_id",
+      "description": "Optional boot identity when the capture is tied to one boot."
+    },
+    "synthetic": {
+      "type": "boolean",
+      "description": "True when every value is authored test data. Must survive every reporting and export path."
+    },
+    "product": {
+      "type": "object",
+      "required": ["name", "version"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"const": "memveil"},
+        "version": {"type": "string", "minLength": 1, "maxLength": 64},
+        "build": {"type": ["string", "null"], "maxLength": 128}
+      }
+    },
+    "environment": {
+      "type": "object",
+      "required": ["mode", "detection", "attestation", "evidence"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": ["none", "sev", "sev_es", "sev_snp", "tdx", "unknown"],
+          "description": "Guest mode. 'none' requires sufficient negative evidence; missing access gives 'unknown'."
+        },
+        "detection": {
+          "enum": ["kernel_reported", "unverified", "conflicting"]
+        },
+        "asserted_mode": {
+          "enum": ["none", "sev", "sev_es", "sev_snp", "tdx", "unknown", null],
+          "description": "User-supplied hint only; never verification."
+        },
+        "attestation": {
+          "enum": ["not_performed", "external_verified", "failed"],
+          "description": "External attestation status referenced as context; never generated internally."
+        },
+        "evidence": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {"$ref": "#/$defs/evidence_item"}
+        }
+      }
+    },
+    "capture": {
+      "type": "object",
+      "required": ["mode", "window", "filters", "finalized"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": ["live", "synthetic"]
+        },
+        "window": {
+          "type": "object",
+          "required": ["start_ns", "end_ns"],
+          "additionalProperties": false,
+          "properties": {
+            "start_ns": {"$ref": "#/$defs/u64"},
+            "end_ns": {"$ref": "#/$defs/u64"}
+          },
+          "description": "Half-open monotonic observation window [start_ns, end_ns)."
+        },
+        "filters": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "device": {
+              "type": ["string", "null"],
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Literal exact device selector, or null for no filter."
+            }
+          }
+        },
+        "finalized": {
+          "type": "boolean",
+          "description": "True once session/window/health finalization ran. A finalized capture may still hold incomplete evidence."
+        },
+        "end_reason": {
+          "enum": ["duration", "size_limit", "signal", "error", "unknown", null]
+        }
+      }
+    },
+    "device_catalog": {
+      "$ref": "#/$defs/device_catalog"
+    },
+    "baseline": {
+      "type": "object",
+      "required": ["complete", "region_observations"],
+      "additionalProperties": false,
+      "properties": {
+        "complete": {
+          "type": "boolean",
+          "description": "Whether pre-existing state needed for totals was captured. False keeps stateful totals unavailable."
+        },
+        "region_observations": {
+          "type": "array",
+          "maxItems": 4096,
+          "description": "Actual initial region observations with provenance. Empty when initial state is unknown; never an invented transition.",
+          "items": {
+            "type": "object",
+            "required": ["region_id", "state", "offset", "length", "address_space", "provenance"],
+            "additionalProperties": false,
+            "properties": {
+              "region_id": {"$ref": "#/$defs/opaque_id"},
+              "state": {"enum": ["shared", "private", "unknown"]},
+              "offset": {"$ref": "#/$defs/u64"},
+              "length": {"$ref": "#/$defs/u64"},
+              "address_space": {"enum": ["guest_physical", "kernel_virtual", "iova", "identity_only"]},
+              "provenance": {"type": "string", "minLength": 1, "maxLength": 512}
+            }
+          }
+        }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "required": [
+        "bounce_attempts",
+        "mapping_lifecycle",
+        "copy_bytes",
+        "sync_requests",
+        "conversion_results",
+        "region_state",
+        "pool_stats",
+        "task_context"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "bounce_attempts": {"$ref": "#/$defs/capability"},
+        "mapping_lifecycle": {"$ref": "#/$defs/capability"},
+        "copy_bytes": {"$ref": "#/$defs/capability"},
+        "sync_requests": {"$ref": "#/$defs/capability"},
+        "conversion_results": {"$ref": "#/$defs/capability"},
+        "region_state": {"$ref": "#/$defs/capability"},
+        "pool_stats": {"$ref": "#/$defs/capability"},
+        "task_context": {"$ref": "#/$defs/capability"}
+      }
+    },
+    "quality": {
+      "type": "object",
+      "required": ["detail", "aggregate", "correlation", "baseline", "terminal"],
+      "additionalProperties": false,
+      "properties": {
+        "detail": {"$ref": "#/$defs/channel"},
+        "aggregate": {"$ref": "#/$defs/channel"},
+        "correlation": {"$ref": "#/$defs/channel"},
+        "baseline": {"$ref": "#/$defs/channel"},
+        "terminal": {"$ref": "#/$defs/channel"}
+      },
+      "description": "Independent quality channels. Detail loss never implies aggregate loss and conversely."
+    }
+  },
+  "$defs": {
+    "u64": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})$",
+      "description": "Canonical unsigned 64-bit decimal string: no sign, leading zeros, fraction, or exponent. The application must also check range 0..18446744073709551615."
+    },
+    "opaque_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$",
+      "description": "Session-local opaque identifier. Carries no address identity across namespaces."
+    },
+    "evidence_item": {
+      "type": "object",
+      "required": ["type", "source", "interpretation"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"type": "string", "minLength": 1, "maxLength": 64},
+        "source": {"type": "string", "minLength": 1, "maxLength": 256},
+        "interpretation": {"type": "string", "maxLength": 1024}
+      }
+    },
+    "device_catalog": {
+      "type": "object",
+      "required": ["devices"],
+      "additionalProperties": false,
+      "properties": {
+        "devices": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "type": "object",
+            "required": ["device_id", "name", "identity_status"],
+            "additionalProperties": false,
+            "properties": {
+              "device_id": {"$ref": "#/$defs/opaque_id"},
+              "name": {
+                "type": "string",
+                "maxLength": 256,
+                "description": "Bounded observed label; metadata, not a unique hardware serial number."
+              },
+              "driver": {"type": ["string", "null"], "minLength": 1, "maxLength": 128},
+              "identity_status": {"enum": ["resolved", "unresolved", "exhausted"]}
+            }
+          }
+        }
+      }
+    },
+    "capability": {
+      "type": "object",
+      "required": ["status", "reason", "hooks"],
+      "additionalProperties": false,
+      "description": "'verified' means the profile/probe combination passed the product test, not attestation.",
+      "properties": {
+        "status": {"enum": ["verified", "partial", "unavailable", "disabled"]},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 512},
+        "hooks": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {"type": "string", "minLength": 1, "maxLength": 256}
+        },
+        "profile_id": {"type": ["string", "null"], "minLength": 1, "maxLength": 128}
+      }
+    },
+    "channel": {
+      "type": "object",
+      "required": ["status", "loss_count", "scope", "reason"],
+      "additionalProperties": false,
+      "description": "One independent quality channel. loss_count is null when unobservable, zero only when measured as zero.",
+      "properties": {
+        "status": {"enum": ["complete_for_scope", "partial", "unavailable", "not_applicable"]},
+        "loss_count": {
+          "anyOf": [{"$ref": "#/$defs/u64"}, {"type": "null"}]
+        },
+        "scope": {"type": "string", "minLength": 1, "maxLength": 256},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 512},
+        "evidence_refs": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {"type": "string", "minLength": 1, "maxLength": 256}
+        }
+      }
+    }
+  }
+}
