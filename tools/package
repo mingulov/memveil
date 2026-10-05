@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# memveil standalone artifact builder.
+#
+# Usage: tools/package [--check] [--help]
+#
+# No binary artifacts are registered yet; binary packaging arrives with the
+# first tested collector and its clean-runtime gate. --check verifies the
+# packaging prerequisites (pinned toolchain and fresh pixi lock) today.
+# Exit 0 on success; 1 on failure; 2 on invalid usage.
+# One action per invocation; extra arguments are rejected.
+
+set -u
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+usage() {
+    sed -n '2,/^$/p' "$0" | sed 's/^# //; s/^#//'
+}
+
+if [ $# -eq 0 ]; then
+    set -- ""
+fi
+if [ $# -gt 1 ]; then
+    echo "package: too many arguments" >&2
+    usage >&2
+    exit 2
+fi
+case "$1" in
+    --help|-h)
+        usage
+        ;;
+    --check)
+        exec "$ROOT/tools/build" --check-toolchain
+        ;;
+    "")
+        echo "package: no binary artifacts registered yet" >&2
+        exit 2
+        ;;
+    *)
+        echo "package: unknown argument: $1" >&2
+        usage >&2
+        exit 2
+        ;;
+esac

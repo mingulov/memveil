@@ -1,0 +1,6 @@
+.pixi/
+build/
+dist/
+__pycache__/
+*.o
+*.bpf.o

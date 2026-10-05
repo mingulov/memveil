@@ -1,0 +1,1152 @@
+#!/usr/bin/env python3
+"""Validate MemVeil captures against the versioned external schemas.
+
+Two modes:
+  tools/validate-schemas          run the built-in acceptance suite
+  tools/validate-schemas DIR      validate one capture directory
+
+Strict producer validation: canonical integers with range checks, required
+fields, size/depth bounds enforced before unbounded parsing, and
+cross-record rules (session match, increasing sequence, window membership,
+identity resolution and uniqueness). Exit 0 on success, 1 on failure.
+
+Only the attempts slice is independently recomputed; lifecycle, region, and
+pool metrics need their own checks once captures carry those events.
+Mapping references must resolve within the capture in this strict mode;
+partial-capture recovery belongs to the product reader, not this tool.
+
+Python standard library only.
+"""
+
+import copy
+import json
+import os
+import re
+import sys
+
+VERSION = "0.1.0"
+U64MAX = 18446744073709551615
+U64RE = re.compile(r"(0|[1-9][0-9]{0,19})")
+IDRE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
+MAX_LINE = 65536
+MAX_FILE = 16777216
+MAX_DEPTH = 64
+MAX_DEVICES = 4096
+
+CAPABILITIES = ("bounce_attempts", "mapping_lifecycle", "copy_bytes",
+                "sync_requests", "conversion_results", "region_state",
+                "pool_stats", "task_context")
+CHANNELS = ("detail", "aggregate", "correlation", "baseline", "terminal")
+KINDS = ("bounce_attempt", "map_result", "unmap", "copy", "sync_request",
+         "transition_result", "pool_sample", "gap", "marker",
+         "counter_snapshot")
+
+
+class Error(Exception):
+    def __init__(self, reason, detail):
+        super().__init__("%s: %s" % (reason, detail))
+        self.reason = reason
+        self.detail = detail
+
+
+def fail(reason, detail):
+    raise Error(reason, detail)
+
+
+def check_u64(value, where):
+    if not isinstance(value, str):
+        fail("u64-type", "%s must be a decimal string, got %s"
+             % (where, type(value).__name__))
+    if not U64RE.fullmatch(value):
+        fail("u64-canonical", "%s is not canonical: %r" % (where, value))
+    number = int(value)
+    if number > U64MAX:
+        fail("u64-range", "%s exceeds u64: %s" % (where, value))
+    return number
+
+
+def check_id(value, where):
+    if not isinstance(value, str) or not IDRE.fullmatch(value):
+        fail("bad-id", "%s is not an opaque id: %r" % (where, value))
+    return value
+
+
+def check_enum(value, allowed, where):
+    if value not in allowed:
+        fail("bad-enum", "%s must be one of %s, got %r"
+             % (where, sorted(a for a in allowed if a is not None), value))
+    return value
+
+
+def check_text(value, max_len, where, allow_empty=False):
+    if not isinstance(value, str):
+        fail("bad-type", "%s must be a string" % where)
+    if len(value) > max_len:
+        fail("too-long", "%s exceeds %d chars" % (where, max_len))
+    if not allow_empty and not value:
+        fail("empty", "%s must not be empty" % where)
+    return value
+
+
+def check_keys(obj, required, optional, where):
+    if not isinstance(obj, dict):
+        fail("bad-type", "%s must be an object" % where)
+    keys = set(obj)
+    missing = set(required) - keys
+    if missing:
+        fail("missing-required", "%s lacks %s"
+             % (where, sorted(missing)))
+    unknown = keys - set(required) - set(optional)
+    if unknown:
+        fail("unknown-field", "%s has unknown fields %s"
+             % (where, sorted(unknown)))
+
+
+def json_depth(text):
+    stack = []
+    max_depth = 0
+    in_string = False
+    escaped = False
+    closers = {"]": "[", "}": "{"}
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char == "[" or char == "{":
+            stack.append(char)
+            if len(stack) > max_depth:
+                max_depth = len(stack)
+        elif char == "]" or char == "}":
+            if not stack or stack.pop() != closers[char]:
+                fail("malformed", "mismatched closing bracket")
+    if in_string:
+        fail("malformed", "unterminated string")
+    if stack:
+        fail("malformed", "unbalanced brackets")
+    return max_depth
+
+
+def check_depth(text, where):
+    depth = json_depth(text)
+    if depth > MAX_DEPTH:
+        fail("depth-exceeded", "%s nests to depth %d (limit %d)"
+             % (where, depth, MAX_DEPTH))
+    return depth
+
+
+def iter_lines(path):
+    """Yield (lineno, line bytes without newline); enforce the line bound."""
+    lineno = 0
+    pending = bytearray()
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(65536)
+            if not chunk:
+                break
+            start = 0
+            while True:
+                end = chunk.find(b"\n", start)
+                if end < 0:
+                    pending += chunk[start:]
+                    if len(pending) > MAX_LINE:
+                        fail("line-too-long",
+                             "%s line %d exceeds %d bytes"
+                             % (path, lineno + 1, MAX_LINE))
+                    break
+                pending += chunk[start:end]
+                if len(pending) + 1 > MAX_LINE:
+                    fail("line-too-long",
+                         "%s line %d exceeds %d bytes"
+                         % (path, lineno + 1, MAX_LINE))
+                lineno += 1
+                yield lineno, bytes(pending)
+                pending = bytearray()
+                start = end + 1
+    if pending:
+        fail("truncated-final-line",
+             "%s ends without a newline (%d bytes pending)"
+             % (path, len(pending)))
+
+
+def _no_dupes(pairs):
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            fail("duplicate-key", "duplicate field %r" % (key,))
+        obj[key] = value
+    return obj
+
+
+def parse_json(text, what):
+    try:
+        return json.loads(text, object_pairs_hook=_no_dupes)
+    except Error:
+        raise
+    except json.JSONDecodeError as exc:
+        fail("malformed", "%s is not JSON: %s" % (what, exc))
+
+
+def read_json_file(path, what):
+    with open(path, "rb") as handle:
+        raw = handle.read(MAX_FILE + 1)
+    if len(raw) > MAX_FILE:
+        fail("file-too-large", "%s exceeds %d bytes" % (what, MAX_FILE))
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        fail("bad-encoding", "%s is not UTF-8: %s" % (what, exc))
+    check_depth(text, what)
+    return parse_json(text, what)
+
+
+def check_quality(quality, where):
+    check_keys(quality, CHANNELS, (), where)
+    for name in CHANNELS:
+        channel = quality[name]
+        target = "%s.%s" % (where, name)
+        check_keys(channel, ("status", "loss_count", "scope", "reason"),
+                   ("evidence_refs",), target)
+        check_enum(channel["status"],
+                   ("complete_for_scope", "partial", "unavailable",
+                    "not_applicable"), target + ".status")
+        if channel["loss_count"] is not None:
+            check_u64(channel["loss_count"], target + ".loss_count")
+        check_text(channel["scope"], 256, target + ".scope")
+        check_text(channel["reason"], 512, target + ".reason")
+        refs = channel.get("evidence_refs", [])
+        if not isinstance(refs, list) or len(refs) > 32:
+            fail("bad-type", target + ".evidence_refs")
+        for ref in refs:
+            check_text(ref, 256, target + ".evidence_refs[]")
+
+
+def check_device_catalog(catalog, where):
+    check_keys(catalog, ("devices",), (), where)
+    devices = catalog["devices"]
+    if not isinstance(devices, list) or len(devices) > MAX_DEVICES:
+        fail("bad-type", "%s.devices" % where)
+    seen = set()
+    for device in devices:
+        check_keys(device, ("device_id", "name", "identity_status"),
+                   ("driver",), "%s.devices[]" % where)
+        device_id = check_id(device["device_id"],
+                             "%s.devices[].device_id" % where)
+        if device_id in seen:
+            fail("duplicate-id", "device %s listed twice" % device_id)
+        seen.add(device_id)
+        check_text(device["name"], 256, "device name", allow_empty=True)
+        check_enum(device["identity_status"],
+                   ("resolved", "unresolved", "exhausted"),
+                   "device identity_status")
+        if device.get("driver") is not None:
+            check_text(device["driver"], 128, "device driver")
+    return seen
+
+
+def check_environment(environment, where):
+    check_keys(environment, ("mode", "detection", "attestation", "evidence"),
+               ("asserted_mode",), where)
+    check_enum(environment["mode"],
+               ("none", "sev", "sev_es", "sev_snp", "tdx", "unknown"),
+               "%s.mode" % where)
+    check_enum(environment["detection"],
+               ("kernel_reported", "unverified", "conflicting"),
+               "%s.detection" % where)
+    if environment.get("asserted_mode") is not None:
+        check_enum(environment["asserted_mode"],
+                   ("none", "sev", "sev_es", "sev_snp", "tdx", "unknown"),
+                   "%s.asserted_mode" % where)
+    check_enum(environment["attestation"],
+               ("not_performed", "external_verified", "failed"),
+               "%s.attestation" % where)
+    evidence = environment["evidence"]
+    if not isinstance(evidence, list) or len(evidence) > 64:
+        fail("bad-type", "%s.evidence" % where)
+    for item in evidence:
+        check_keys(item, ("type", "source", "interpretation"), (),
+                   "%s.evidence[]" % where)
+        check_text(item["type"], 64, "evidence type")
+        check_text(item["source"], 256, "evidence source")
+        check_text(item["interpretation"], 1024, "evidence interpretation",
+                   allow_empty=True)
+
+
+def check_session(obj):
+    check_keys(obj,
+               ("schema_version", "session_id", "synthetic", "product",
+                "environment", "capture", "device_catalog", "baseline",
+                "capabilities", "quality"),
+               ("boot_id",), "session")
+    if obj["schema_version"] != VERSION:
+        fail("bad-version", "session schema_version %r"
+             % (obj["schema_version"],))
+    session_id = check_id(obj["session_id"], "session_id")
+    if "boot_id" in obj:
+        check_id(obj["boot_id"], "boot_id")
+    if not isinstance(obj["synthetic"], bool):
+        fail("bad-type", "synthetic must be a boolean")
+    product = obj["product"]
+    check_keys(product, ("name", "version"), ("build",), "product")
+    if product["name"] != "memveil":
+        fail("bad-product", "product.name %r" % (product["name"],))
+    check_text(product["version"], 64, "product.version")
+    if product.get("build") is not None:
+        check_text(product["build"], 128, "product.build", allow_empty=True)
+    check_environment(obj["environment"], "environment")
+    capture = obj["capture"]
+    check_keys(capture, ("mode", "window", "filters", "finalized"),
+               ("end_reason",), "capture")
+    check_enum(capture["mode"], ("live", "synthetic"), "capture.mode")
+    window = capture["window"]
+    check_keys(window, ("start_ns", "end_ns"), (), "window")
+    start = check_u64(window["start_ns"], "window.start_ns")
+    end = check_u64(window["end_ns"], "window.end_ns")
+    if start > end:
+        fail("bad-window", "window start exceeds end")
+    filters = capture["filters"]
+    check_keys(filters, (), ("device",), "filters")
+    if filters.get("device") is not None:
+        check_text(filters["device"], 256, "filters.device")
+    if not isinstance(capture["finalized"], bool):
+        fail("bad-type", "capture.finalized must be a boolean")
+    if capture.get("end_reason") is not None:
+        check_enum(capture["end_reason"],
+                   ("duration", "size_limit", "signal", "error", "unknown"),
+                   "capture.end_reason")
+    if obj["synthetic"] != (capture["mode"] == "synthetic"):
+        fail("contradictory-provenance",
+             "synthetic flag disagrees with capture mode")
+    devices = check_device_catalog(obj["device_catalog"], "device_catalog")
+    baseline = obj["baseline"]
+    check_keys(baseline, ("complete", "region_observations"), (),
+               "baseline")
+    if not isinstance(baseline["complete"], bool):
+        fail("bad-type", "baseline.complete must be a boolean")
+    observations = baseline["region_observations"]
+    if not isinstance(observations, list) or len(observations) > 4096:
+        fail("bad-type", "baseline.region_observations")
+    for obs in observations:
+        check_keys(obs, ("region_id", "state", "offset", "length",
+                         "address_space", "provenance"), (),
+                   "region_observation")
+        check_id(obs["region_id"], "region_id")
+        check_enum(obs["state"], ("shared", "private", "unknown"),
+                   "region state")
+        offset = check_u64(obs["offset"], "region offset")
+        length = check_u64(obs["length"], "region length")
+        if offset + length > U64MAX:
+            fail("u64-range", "region end offset overflows")
+        check_enum(obs["address_space"],
+                   ("guest_physical", "kernel_virtual", "iova",
+                    "identity_only"), "region address_space")
+        check_text(obs["provenance"], 512, "region provenance")
+    capabilities = obj["capabilities"]
+    check_keys(capabilities, CAPABILITIES, (), "capabilities")
+    for name in CAPABILITIES:
+        capability = capabilities[name]
+        check_keys(capability, ("status", "reason", "hooks"),
+                   ("profile_id",), "capability.%s" % name)
+        check_enum(capability["status"],
+                   ("verified", "partial", "unavailable", "disabled"),
+                   "capability.%s.status" % name)
+        check_text(capability["reason"], 512, "capability reason")
+        hooks = capability["hooks"]
+        if not isinstance(hooks, list) or len(hooks) > 32:
+            fail("bad-type", "capability hooks")
+        for hook in hooks:
+            check_text(hook, 256, "capability hook")
+        if capability.get("profile_id") is not None:
+            check_text(capability["profile_id"], 128, "profile_id")
+    check_quality(obj["quality"], "quality")
+    return {"id": session_id, "synthetic": obj["synthetic"],
+            "start": start, "end": end, "devices": devices,
+            "quality": obj["quality"],
+            "environment": obj["environment"],
+            "catalog": obj["device_catalog"]}
+
+
+def check_source(source, where):
+    check_keys(source, ("hook", "backend", "profile_id", "measurement",
+                        "correlation"), (), where)
+    check_text(source["hook"], 256, "%s.hook" % where)
+    check_text(source["backend"], 64, "%s.backend" % where)
+    check_text(source["profile_id"], 128, "%s.profile_id" % where)
+    check_enum(source["measurement"], ("observed", "derived", "estimated"),
+               "%s.measurement" % where)
+    check_enum(source["correlation"], ("direct", "unpaired"),
+               "%s.correlation" % where)
+
+
+def check_context(context, where):
+    check_keys(context, ("relation",),
+               ("cpu", "pid", "tgid", "comm", "cgroup_id"), where)
+    if context["relation"] != "execution_context_only":
+        fail("bad-context", "%s.relation" % where)
+    for key, limit in (("cpu", 1048575), ("pid", 4194304),
+                       ("tgid", 4194304)):
+        if key in context:
+            value = context[key]
+            if (not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or value < 0 or value > limit):
+                fail("bad-context", "%s.%s out of range" % (where, key))
+    if "comm" in context:
+        check_text(context["comm"], 64, "%s.comm" % where,
+                   allow_empty=True)
+    if "cgroup_id" in context:
+        check_id(context["cgroup_id"], "%s.cgroup_id" % where)
+
+
+def check_return_code(value, where):
+    if value is not None and (not isinstance(value, int)
+                              or isinstance(value, bool)):
+        fail("bad-type", "%s must be an integer" % where)
+
+
+def check_span(data, where):
+    offset = check_u64(data["offset"], "%s.offset" % where)
+    length = check_u64(data["length"], "%s.length" % where)
+    if offset + length > U64MAX:
+        fail("u64-range", "%s end offset overflows" % where)
+
+
+def check_data(kind, data, where, devices):
+    if not isinstance(data, dict):
+        fail("bad-type", "%s must be an object" % where)
+    summary = {}
+    if kind == "bounce_attempt":
+        check_keys(data, ("device_id", "requested_bytes", "forced",
+                          "operation_id"), (), where)
+        device = check_id(data["device_id"], "%s.device_id" % where)
+        if device not in devices:
+            fail("unknown-device", "%s.device_id %s" % (where, device))
+        summary["bytes"] = check_u64(data["requested_bytes"],
+                                     "%s.requested_bytes" % where)
+        if not isinstance(data["forced"], bool):
+            fail("bad-type", "%s.forced must be a boolean" % where)
+        summary["op"] = check_id(data["operation_id"],
+                                 "%s.operation_id" % where)
+        summary["device"] = device
+    elif kind == "map_result":
+        check_keys(data, ("operation_id", "success", "mapping_id",
+                          "return_code", "mapped_bytes"), (), where)
+        summary["op"] = check_id(data["operation_id"],
+                                 "%s.operation_id" % where)
+        if not isinstance(data["success"], bool):
+            fail("bad-type", "%s.success must be a boolean" % where)
+        if data["success"]:
+            if data["mapping_id"] is None:
+                fail("missing-mapping",
+                     "%s needs a mapping_id on success" % where)
+            summary["mapping"] = check_id(data["mapping_id"],
+                                          "%s.mapping_id" % where)
+            if data["mapped_bytes"] is None:
+                fail("missing-required",
+                     "%s needs mapped_bytes on success" % where)
+            summary["mapped"] = check_u64(data["mapped_bytes"],
+                                          "%s.mapped_bytes" % where)
+        else:
+            if data["mapping_id"] is not None:
+                fail("failed-with-mapping",
+                     "%s: failed allocation must not acquire a mapping"
+                     % where)
+            if data["mapped_bytes"] is not None:
+                fail("failed-with-mapping",
+                     "%s: failed allocation has no mapped bytes" % where)
+        check_return_code(data["return_code"], "%s.return_code" % where)
+    elif kind == "unmap":
+        check_keys(data, ("mapping_id",), (), where)
+        if data["mapping_id"] is not None:
+            summary["mapping_ref"] = check_id(data["mapping_id"],
+                                              "%s.mapping_id" % where)
+    elif kind == "copy":
+        check_keys(data, ("operation_id", "mapping_id", "direction",
+                          "bytes"), (), where)
+        summary["op"] = check_id(data["operation_id"],
+                                 "%s.operation_id" % where)
+        if data["mapping_id"] is not None:
+            summary["mapping_ref"] = check_id(data["mapping_id"],
+                                              "%s.mapping_id" % where)
+        check_enum(data["direction"],
+                   ("original_to_bounce", "bounce_to_original"),
+                   "%s.direction" % where)
+        summary["copy_bytes"] = check_u64(data["bytes"],
+                                          "%s.bytes" % where)
+        summary["direction"] = data["direction"]
+    elif kind == "sync_request":
+        check_keys(data, ("operation_id", "mapping_id", "offset",
+                          "length"), (), where)
+        summary["op"] = check_id(data["operation_id"],
+                                 "%s.operation_id" % where)
+        if data["mapping_id"] is not None:
+            summary["mapping_ref"] = check_id(data["mapping_id"],
+                                              "%s.mapping_id" % where)
+        check_span(data, where)
+    elif kind == "transition_result":
+        check_keys(data, ("region_id", "requested_state", "success",
+                          "return_code", "offset", "length"),
+                   ("address_space", "resolution"), where)
+        check_id(data["region_id"], "%s.region_id" % where)
+        check_enum(data["requested_state"], ("shared", "private"),
+                   "%s.requested_state" % where)
+        if not isinstance(data["success"], bool):
+            fail("bad-type", "%s.success must be a boolean" % where)
+        check_return_code(data["return_code"], "%s.return_code" % where)
+        check_span(data, where)
+        if "address_space" in data:
+            check_enum(data["address_space"],
+                       ("guest_physical", "kernel_virtual", "iova",
+                        "identity_only"),
+                       "%s.address_space" % where)
+        if "resolution" in data:
+            check_enum(data["resolution"], ("resolved", "unresolved"),
+                       "%s.resolution" % where)
+    elif kind == "pool_sample":
+        check_keys(data, ("pool_id", "used_bytes", "capacity_bytes",
+                          "unit"), (), where)
+        summary["pool"] = check_id(data["pool_id"], "%s.pool_id" % where)
+        if data["used_bytes"] is not None:
+            check_u64(data["used_bytes"], "%s.used_bytes" % where)
+        if data["capacity_bytes"] is not None:
+            check_u64(data["capacity_bytes"], "%s.capacity_bytes" % where)
+        check_enum(data["unit"], ("bytes", "unknown"), "%s.unit" % where)
+    elif kind == "gap":
+        check_keys(data, ("channel", "lost_count", "reason",
+                          "window_start_ns", "window_end_ns"), (), where)
+        check_enum(data["channel"], CHANNELS, "%s.channel" % where)
+        if data["lost_count"] is not None:
+            check_u64(data["lost_count"], "%s.lost_count" % where)
+        check_text(data["reason"], 512, "%s.reason" % where)
+        check_u64(data["window_start_ns"], "%s.window_start_ns" % where)
+        check_u64(data["window_end_ns"], "%s.window_end_ns" % where)
+    elif kind == "marker":
+        check_keys(data, ("text",), (), where)
+        check_text(data["text"], 256, "%s.text" % where)
+    elif kind == "counter_snapshot":
+        check_keys(data, ("counter_id", "epoch", "scope", "value",
+                          "unit"), (), where)
+        check_text(data["counter_id"], 128, "%s.counter_id" % where)
+        check_u64(data["epoch"], "%s.epoch" % where)
+        scope = data["scope"]
+        check_keys(scope, ("profile_id",), ("device_id",),
+                   "%s.scope" % where)
+        if scope.get("device_id") is not None:
+            device = check_id(scope["device_id"],
+                              "%s.scope.device_id" % where)
+            if device not in devices:
+                fail("unknown-device", "snapshot device %s" % device)
+        check_text(scope["profile_id"], 128,
+                   "%s.scope.profile_id" % where)
+        check_u64(data["value"], "%s.value" % where)
+        check_text(data["unit"], 32, "%s.unit" % where)
+    else:
+        fail("bad-kind", "unknown event kind %r" % (kind,))
+    return summary
+
+
+def check_event(obj, lineno, session):
+    where = "line %d" % lineno
+    check_keys(obj,
+               ("schema_version", "session_id", "seq", "ts_ns", "kind",
+                "source", "data"),
+               ("observer_context",), where)
+    if obj["schema_version"] != VERSION:
+        fail("bad-version", "%s schema_version %r"
+             % (where, obj["schema_version"]))
+    if obj["session_id"] != session["id"]:
+        fail("session-mismatch",
+             "%s belongs to session %r" % (where, obj["session_id"]))
+    seq = check_u64(obj["seq"], "%s.seq" % where)
+    timestamp = check_u64(obj["ts_ns"], "%s.ts_ns" % where)
+    if timestamp < session["start"] or timestamp >= session["end"]:
+        fail("outside-window", "%s timestamp outside capture window"
+             % where)
+    kind = obj["kind"]
+    if kind not in KINDS:
+        fail("bad-kind", "%s kind %r" % (where, kind))
+    check_source(obj["source"], "%s.source" % where)
+    if "observer_context" in obj:
+        check_context(obj["observer_context"],
+                      "%s.observer_context" % where)
+    summary = check_data(kind, obj["data"], "%s.data" % where,
+                         session["devices"])
+    summary["kind"] = kind
+    summary["seq"] = seq
+    return summary
+
+
+MAX_TRACKED_IDS = 4194304
+
+
+def validate_stream(session, events_path):
+    """Validate one NDJSON stream; return an incremental summary.
+
+    Events are checked and folded one line at a time; only identity sets
+    and running attempt totals are retained. Identity tracking is capped
+    so a hostile stream fails closed instead of exhausting memory. This
+    strict validator suits design-scale inputs; production-scale replay is
+    the product reader's bounded streaming job.
+    """
+    count = 0
+    attempts = 0
+    requested = 0
+    per_device = {}
+    kinds = set()
+    pools = set()
+    previous_seq = None
+    operations = set()
+    mappings = {}
+    pending_refs = []
+    for lineno, raw in iter_lines(events_path):
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            fail("bad-encoding", "line %d: %s" % (lineno, exc))
+        if not text.strip():
+            fail("blank-line", "line %d is blank" % lineno)
+        check_depth(text, "line %d" % lineno)
+        obj = parse_json(text, "line %d" % lineno)
+        event = check_event(obj, lineno, session)
+        if previous_seq is not None and event["seq"] <= previous_seq:
+            fail("bad-sequence",
+                 "line %d sequence does not increase" % lineno)
+        previous_seq = event["seq"]
+        if event.get("op") is not None:
+            key = (event["kind"], event["op"])
+            if key in operations:
+                fail("duplicate-id",
+                     "line %d repeats operation %s for kind %s"
+                     % (lineno, event["op"], event["kind"]))
+            operations.add(key)
+        if "mapping" in event:
+            if event["mapping"] in mappings:
+                fail("duplicate-id",
+                     "mapping %s repeats" % event["mapping"])
+            mappings[event["mapping"]] = {"seq": event["seq"],
+                                          "released": False}
+        ref = event.get("mapping_ref")
+        if ref is not None:
+            if event["kind"] == "unmap":
+                state = mappings.get(ref)
+                if state is None:
+                    fail("unknown-mapping",
+                         "line %d releases mapping %s without prior "
+                         "creation" % (lineno, ref))
+                if state["released"]:
+                    fail("double-release",
+                         "line %d releases mapping %s twice"
+                         % (lineno, ref))
+                state["released"] = True
+            else:
+                pending_refs.append((event["seq"], ref))
+        if len(operations) + len(mappings) > MAX_TRACKED_IDS:
+            fail("too-many-identities",
+                 "capture exceeds %d tracked identities" % MAX_TRACKED_IDS)
+        if event["kind"] == "bounce_attempt":
+            attempts += 1
+            requested += event["bytes"]
+            if requested > U64MAX:
+                fail("u64-range", "requested-bytes sum overflows")
+            device = event["device"]
+            dev_count, dev_total = per_device.get(device, (0, 0))
+            dev_total += event["bytes"]
+            if dev_total > U64MAX:
+                fail("u64-range", "per-device bytes sum overflows")
+            per_device[device] = (dev_count + 1, dev_total)
+        kinds.add(event["kind"])
+        if event["kind"] == "pool_sample":
+            pools.add(event["pool"])
+        count += 1
+    for seq, ref in pending_refs:
+        if ref not in mappings:
+            fail("unknown-mapping",
+                 "seq %d references unknown mapping %s" % (seq, ref))
+    return {"count": count, "attempts": attempts, "requested": requested,
+            "per_device": per_device, "kinds": kinds, "pools": pools}
+
+
+def validate_capture(path):
+    session_path = os.path.join(path, "session.json")
+    events_path = os.path.join(path, "events.ndjson")
+    if not os.path.isfile(session_path):
+        fail("missing-file", "no session.json in %s" % path)
+    if not os.path.isfile(events_path):
+        fail("missing-file", "no events.ndjson in %s" % path)
+    session = check_session(read_json_file(session_path, "session.json"))
+    return session, validate_stream(session, events_path)
+
+
+METRIC_SOURCES = {
+    "successful_allocations": ("map_result",),
+    "copy_original_to_bounce_bytes": ("copy",),
+    "copy_bounce_to_original_bytes": ("copy",),
+    "live_observed_allocation_bytes": ("map_result", "unmap"),
+    "observed_mapping_lifetime_ns": ("map_result", "unmap"),
+    "conversion_request_bytes": ("transition_result",),
+    "known_shared_region_bytes": ("transition_result",),
+    "pool_used_bytes": ("pool_sample",),
+    "pool_capacity_bytes": ("pool_sample",),
+}
+
+METRIC_UNITS = {
+    "bounce_attempts": "count",
+    "requested_bounce_bytes": "bytes",
+    "successful_allocations": "count",
+    "copy_original_to_bounce_bytes": "bytes",
+    "copy_bounce_to_original_bytes": "bytes",
+    "live_observed_allocation_bytes": "bytes",
+    "observed_mapping_lifetime_ns": "nanoseconds",
+    "conversion_request_bytes": "bytes",
+    "known_shared_region_bytes": "bytes",
+    "pool_used_bytes": "bytes",
+    "pool_capacity_bytes": "bytes",
+}
+
+
+def compare_report(path, session, summary):
+    return compare_report_obj(read_json_file(path, "report"),
+                              session, summary)
+
+
+def compare_report_obj(obj, session, summary):
+    check_keys(obj,
+               ("schema_version", "session_id", "synthetic",
+                "engine_version", "environment", "device_catalog",
+                "quality", "metrics", "findings", "limitations"), (),
+               "report")
+    if obj["schema_version"] != VERSION:
+        fail("bad-version", "report schema_version")
+    if obj["session_id"] != session["id"]:
+        fail("session-mismatch", "report session reference")
+    if not isinstance(obj["synthetic"], bool):
+        fail("bad-type", "report synthetic must be a boolean")
+    if obj["synthetic"] != session["synthetic"]:
+        fail("provenance-lost", "report synthetic flag differs")
+    check_text(obj["engine_version"], 64, "engine_version")
+    check_environment(obj["environment"], "report.environment")
+    if obj["environment"] != session["environment"]:
+        fail("environment-mismatch",
+             "report environment differs from session")
+    check_device_catalog(obj["device_catalog"], "report.device_catalog")
+    if obj["device_catalog"] != session["catalog"]:
+        fail("catalog-mismatch",
+             "report device catalog differs from session")
+    check_quality(obj["quality"], "report.quality")
+    metrics = obj["metrics"]
+    if not isinstance(metrics, list) or len(metrics) > 4096:
+        fail("bad-type", "report.metrics")
+    found = {}
+    for metric in metrics:
+        check_keys(metric,
+                   ("name", "value", "unit", "measurement", "coverage",
+                    "aggregation", "sample_count", "dimensions", "scope",
+                    "notes"), (), "metric")
+        check_text(metric["name"], 128, "metric.name")
+        if metric["value"] is not None:
+            check_u64(metric["value"], "metric.value")
+        elif metric["measurement"] != "unavailable":
+            fail("null-without-unavailable",
+                 "metric %s is null but %s"
+                 % (metric["name"], metric["measurement"]))
+        check_text(metric["unit"], 32, "metric.unit")
+        check_enum(metric["measurement"],
+                   ("observed", "derived", "estimated", "unavailable"),
+                   "metric.measurement")
+        check_enum(metric["coverage"],
+                   ("complete_for_scope", "partial", "unavailable",
+                    "not_applicable"), "metric.coverage")
+        if metric["aggregation"] is not None:
+            check_enum(metric["aggregation"],
+                       ("counter", "gauge", "mean", "p50", "p95", "p99"),
+                       "metric.aggregation")
+        if metric["sample_count"] is not None:
+            check_u64(metric["sample_count"], "metric.sample_count")
+        if (metric["name"] in METRIC_UNITS
+                and metric["unit"] != METRIC_UNITS[metric["name"]]):
+            fail("wrong-unit", "metric %s uses unit %r"
+                 % (metric["name"], metric["unit"]))
+        if metric["value"] is not None and metric["aggregation"] is None:
+            fail("missing-aggregation",
+                 "metric %s has a value without aggregation"
+                 % metric["name"])
+        if metric["value"] is None and metric["aggregation"] is not None:
+            fail("unexpected-aggregation",
+                 "metric %s is null with aggregation %r"
+                 % (metric["name"], metric["aggregation"]))
+        if metric["value"] is None and metric["coverage"] not in (
+                "unavailable", "not_applicable"):
+            fail("wrong-coverage",
+                 "null metric %s claims coverage %r"
+                 % (metric["name"], metric["coverage"]))
+        if (metric["value"] is not None
+                and metric["coverage"] == "complete_for_scope"
+                and session["quality"]["detail"]["status"]
+                != "complete_for_scope"):
+            fail("wrong-coverage",
+                 "metric %s claims complete scope with %s detail channel"
+                 % (metric["name"],
+                    session["quality"]["detail"]["status"]))
+        dimensions = metric["dimensions"]
+        check_keys(dimensions, ("device_id", "pool_id"), (),
+                   "metric.dimensions")
+        for dim in ("device_id", "pool_id"):
+            if dimensions[dim] is not None:
+                check_id(dimensions[dim], "metric.dimensions.%s" % dim)
+        if (dimensions["device_id"] is not None
+                and dimensions["device_id"] not in session["devices"]):
+            fail("unknown-device", "metric for unknown device %s"
+                 % dimensions["device_id"])
+        if (dimensions["pool_id"] is not None
+                and dimensions["pool_id"] not in summary["pools"]):
+            fail("unknown-pool", "metric for unobserved pool %s"
+                 % dimensions["pool_id"])
+        check_text(metric["scope"], 256, "metric.scope")
+        check_text(metric["notes"], 1024, "metric.notes", allow_empty=True)
+        key = (metric["name"], dimensions["device_id"],
+               dimensions["pool_id"])
+        if key in found:
+            fail("duplicate-id", "metric %s repeats" % (key,))
+        found[key] = metric
+    expected = {("bounce_attempts", None, None):
+                str(summary["attempts"]),
+                ("requested_bounce_bytes", None, None):
+                    str(summary["requested"])}
+    for device, (count, total) in summary["per_device"].items():
+        expected[("bounce_attempts", device, None)] = str(count)
+        expected[("requested_bounce_bytes", device, None)] = str(total)
+    for key, value in expected.items():
+        metric = found.get(key)
+        if metric is None:
+            fail("missing-metric", "report lacks %s" % (key,))
+        if metric["value"] != value:
+            fail("wrong-metric", "%s is %r, recomputed %s"
+                 % (key, metric["value"], value))
+        if metric["measurement"] != "observed":
+            fail("wrong-metric", "%s measurement is %r"
+                 % (key, metric["measurement"]))
+        if metric["aggregation"] != "counter":
+            fail("wrong-metric", "%s aggregation is %r"
+                 % (key, metric["aggregation"]))
+    for name, sources in METRIC_SOURCES.items():
+        if set(sources) & summary["kinds"]:
+            continue
+        metric = found.get((name, None, None))
+        if metric is None:
+            fail("missing-metric", "report lacks %s" % name)
+        if metric["value"] is not None:
+            fail("unexpected-value",
+                 "%s must be null without %s events"
+                 % (name, "/".join(sources)))
+    findings = obj["findings"]
+    if not isinstance(findings, list) or len(findings) > 2048:
+        fail("bad-type", "report.findings")
+    for finding in findings:
+        check_keys(finding, ("code", "severity", "explanation",
+                             "evidence_refs", "scope", "limitations"),
+                   (), "finding")
+        check_enum(finding["code"],
+                   ("CAPTURE_INCOMPLETE", "PROBE_UNAVAILABLE",
+                    "UNPAIRED_LIFECYCLE", "CONVERSION_FAILED",
+                    "POOL_PRESSURE", "LONG_LIVED_ALLOCATION"),
+                   "finding.code")
+        check_enum(finding["severity"], ("informational", "warning"),
+                   "finding.severity")
+        check_text(finding["explanation"], 1024, "finding.explanation")
+        refs = finding["evidence_refs"]
+        if not isinstance(refs, list) or len(refs) > 32:
+            fail("bad-type", "finding.evidence_refs")
+        for ref in refs:
+            check_text(ref, 256, "finding.evidence_refs[]")
+        check_text(finding["scope"], 256, "finding.scope")
+        check_text(finding["limitations"], 1024, "finding.limitations",
+                   allow_empty=True)
+    limitations = obj["limitations"]
+    if not isinstance(limitations, list) or len(limitations) > 256:
+        fail("bad-type", "report.limitations")
+    for limitation in limitations:
+        check_text(limitation, 1024, "limitation")
+    return summary
+
+
+def repo_path(*parts):
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(root, *parts)
+
+
+def expect_reject(label, func, reason_part):
+    try:
+        func()
+    except Error as exc:
+        if reason_part not in exc.reason:
+            return (False, "%s rejected with %s, wanted %s"
+                    % (label, exc.reason, reason_part))
+        return (True, "%s rejected (%s)" % (label, exc.reason))
+    except Exception as exc:  # noqa: BLE001 - a crash is not a rejection
+        return (False, "%s raised %r" % (label, exc))
+    return (False, "%s was accepted" % label)
+
+
+def run_selftest():
+    results = []
+
+    def check(label, func):
+        try:
+            detail = func()
+        except Error as exc:
+            results.append((False, "%s: %s" % (label, exc)))
+        except Exception as exc:  # noqa: BLE001 - report, do not crash
+            results.append((False, "%s: unexpected %r" % (label, exc)))
+        else:
+            results.append((True, "%s: %s" % (label, detail or "ok")))
+
+    schemas = ("session-v0.1.0.schema.json", "event-v0.1.0.schema.json",
+               "report-v0.1.0.schema.json")
+
+    def schema_files():
+        for name in schemas:
+            path = repo_path("schemas", name)
+            with open(path, "r", encoding="utf-8") as handle:
+                obj = json.load(handle, object_pairs_hook=_no_dupes)
+            want = "https://json-schema.org/draft/2020-12/schema"
+            if obj.get("$schema") != want:
+                fail("bad-schema", "%s $schema" % name)
+            if obj.get("$id") != name:
+                fail("bad-schema", "%s $id" % name)
+        return "%d schema files declare draft 2020-12" % len(schemas)
+
+    check("schema-files", schema_files)
+
+    fixture = repo_path("tests", "fixtures", "attempts")
+
+    def positive_fixture():
+        session, summary = validate_capture(fixture)
+        compare_report(
+            os.path.join(fixture, "expected-report.json"), session, summary)
+        if summary["attempts"] != 3 or summary["requested"] != 9216:
+            fail("wrong-metric", "fixture recompute %r" % (summary,))
+        return "3 attempts, 9216 bytes, report matches"
+
+    check("positive-fixture", positive_fixture)
+
+    def roundtrip():
+        value = "9007199254740993"
+        number = check_u64(value, "roundtrip")
+        if number != 9007199254740993 or str(number) != value:
+            fail("wrong-metric", "precision lost")
+        return "exact above 2^53"
+
+    check("u64-roundtrip", roundtrip)
+
+    def max_u64():
+        check_u64("18446744073709551615", "max")
+        return "max accepted"
+
+    check("u64-max", max_u64)
+
+    def size_ok():
+        path = repo_path("tests", "fixtures", "negative",
+                         "size-line-65536.ndjson")
+        lines = list(iter_lines(path))
+        if len(lines) != 1 or len(lines[0][1]) != MAX_LINE - 1:
+            fail("bad-fixture", "size-line-65536 shape")
+        return "65536 accepted via line reader"
+
+    check("size-65536", size_ok)
+
+    def depth_ok():
+        path = repo_path("tests", "fixtures", "negative", "depth-64.json")
+        with open(path, "r", encoding="utf-8") as handle:
+            text = handle.read()
+        depth = check_depth(text, "depth-64")
+        return "depth %d accepted" % depth
+
+    check("depth-64", depth_ok)
+
+    negative = repo_path("tests", "fixtures", "negative")
+    try:
+        session = check_session(read_json_file(
+            os.path.join(fixture, "session.json"), "session.json"))
+    except Error as exc:
+        results.append((False, "negative-setup: %s" % exc))
+        return results
+
+    def event_case(name):
+        def run():
+            path = os.path.join(negative, name)
+            lines = list(iter_lines(path))
+            if len(lines) != 1:
+                fail("bad-fixture", "%s has %d lines" % (name, len(lines)))
+            lineno, raw = lines[0]
+            text = raw.decode("utf-8")
+            check_depth(text, name)
+            check_event(parse_json(text, name), lineno, session)
+        return run
+
+    cases = (("overflow-bytes.ndjson", "u64-range"),
+             ("leading-zeros.ndjson", "u64-canonical"),
+             ("number-bytes.ndjson", "u64-type"),
+             ("bad-version.ndjson", "bad-version"),
+             ("bad-kind.ndjson", "bad-kind"),
+             ("foreign-session.ndjson", "session-mismatch"),
+             ("dup-keys.ndjson", "duplicate-key"))
+    for name, reason in cases:
+        results.append(expect_reject(name, event_case(name), reason))
+
+    def missing_synthetic():
+        obj = read_json_file(os.path.join(negative, "missing-synthetic.json"),
+                             "missing-synthetic.json")
+        check_session(obj)
+
+    results.append(expect_reject("missing-synthetic.json",
+                                 missing_synthetic, "missing-required"))
+
+    def long_line():
+        list(iter_lines(os.path.join(negative, "size-line-65537.ndjson")))
+
+    results.append(expect_reject("size-line-65537.ndjson", long_line,
+                                 "line-too-long"))
+
+    def deep():
+        path = os.path.join(negative, "depth-65.json")
+        with open(path, "r", encoding="utf-8") as handle:
+            check_depth(handle.read(), "depth-65")
+
+    results.append(expect_reject("depth-65.json", deep, "depth-exceeded"))
+
+    life = repo_path("tests", "fixtures", "lifecycle")
+    try:
+        life_session = check_session(read_json_file(
+            os.path.join(life, "session.json"), "lifecycle session"))
+    except Error as exc:
+        results.append((False, "lifecycle-setup: %s" % exc))
+        return results
+
+    def lifecycle_ok():
+        summary = validate_stream(
+            life_session, os.path.join(life, "events-ok.ndjson"))
+        if summary["count"] != 8 or summary["attempts"] != 2:
+            fail("wrong-metric", "lifecycle summary %r" % (summary,))
+        if summary["requested"] != 5120:
+            fail("wrong-metric", "lifecycle bytes %r" % (summary,))
+        return "cross-kind ops, nested copy, ordered releases"
+
+    check("lifecycle-mini", lifecycle_ok)
+
+    def double_unmap():
+        validate_stream(
+            life_session,
+            os.path.join(life, "events-double-unmap.ndjson"))
+
+    results.append(expect_reject("events-double-unmap.ndjson",
+                                 double_unmap, "double-release"))
+
+    def early_unmap():
+        validate_stream(
+            life_session,
+            os.path.join(life, "events-early-unmap.ndjson"))
+
+    results.append(expect_reject("events-early-unmap.ndjson",
+                                 early_unmap, "unknown-mapping"))
+
+    def provenance_clash():
+        obj = read_json_file(os.path.join(fixture, "session.json"),
+                             "session.json")
+        obj["synthetic"] = False
+        check_session(obj)
+
+    results.append(expect_reject("synthetic-vs-mode", provenance_clash,
+                                 "contradictory-provenance"))
+
+    base_report = read_json_file(
+        os.path.join(fixture, "expected-report.json"), "expected report")
+    base_session, base_summary = validate_capture(fixture)
+
+    def mutated(label, mutate, reason):
+        def run():
+            obj = copy.deepcopy(base_report)
+            mutate(obj)
+            compare_report_obj(obj, base_session, base_summary)
+        results.append(expect_reject(label, run, reason))
+
+    mutated("report-synthetic-num",
+            lambda o: o.update(synthetic=1), "bad-type")
+    mutated("report-env-altered",
+            lambda o: o["environment"].update(mode="none"),
+            "environment-mismatch")
+    mutated("report-catalog-emptied",
+            lambda o: o["device_catalog"].update(devices=[]),
+            "catalog-mismatch")
+    mutated("report-wrong-unit",
+            lambda o: o["metrics"][0].update(unit="nanoseconds"),
+            "wrong-unit")
+    mutated("report-wrong-aggregation",
+            lambda o: o["metrics"][0].update(aggregation="gauge"),
+            "wrong-metric")
+    mutated("report-unknown-device",
+            lambda o: o["metrics"].append({
+                "name": "bounce_attempts", "value": "999",
+                "unit": "count", "measurement": "observed",
+                "coverage": "complete_for_scope", "aggregation": "counter",
+                "sample_count": None,
+                "dimensions": {"device_id": "dev-9", "pool_id": None},
+                "scope": "rogue", "notes": ""}),
+            "unknown-device")
+    mutated("report-lifecycle-value",
+            lambda o: o["metrics"][4].update(
+                value="1", aggregation="counter"),
+            "unexpected-value")
+    mutated("report-null-observed",
+            lambda o: o["metrics"][4].update(measurement="observed"),
+            "null-without-unavailable")
+    mutated("report-value-no-aggregation",
+            lambda o: o["metrics"][0].update(aggregation=None),
+            "missing-aggregation")
+    mutated("report-wrong-count",
+            lambda o: o["metrics"][0].update(value="4"),
+            "wrong-metric")
+    return results
+
+
+def main(argv):
+    if len(argv) == 2 and argv[1] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    if len(argv) == 1:
+        results = run_selftest()
+        failed = 0
+        for passed, message in results:
+            print(("ok " if passed else "FAIL ") + message)
+            if not passed:
+                failed += 1
+        print("%d passed, %d failed, %d total"
+              % (len(results) - failed, failed, len(results)))
+        return 1 if failed else 0
+    if len(argv) == 2:
+        try:
+            session, summary = validate_capture(argv[1])
+        except Error as exc:
+            print("invalid: %s" % exc)
+            return 1
+        report_path = os.path.join(argv[1], "report.json")
+        if os.path.isfile(report_path):
+            try:
+                compare_report(report_path, session, summary)
+            except Error as exc:
+                print("report mismatch: %s" % exc)
+                return 1
+        print("capture OK: %d events, %d attempts, %d requested bytes"
+              % (summary["count"], summary["attempts"],
+                 summary["requested"]))
+        return 0
+    print("usage: tools/validate-schemas [CAPTURE_DIR]", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
