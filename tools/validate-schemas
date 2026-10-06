@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Validate MemVeil captures against the versioned external schemas.
 
-Two modes:
+Modes:
   tools/validate-schemas          run the built-in acceptance suite
   tools/validate-schemas DIR      validate one capture directory
+  tools/validate-schemas --check-profile FILE
+                                  validate one semantic profile document
+  tools/validate-schemas --check-doctor FILE
+                                  validate one doctor JSON report
 
 Strict producer validation: canonical integers with range checks, required
 fields, size/depth bounds enforced before unbounded parsing, and
@@ -874,6 +878,168 @@ def compare_report_obj(obj, session, summary):
     return summary
 
 
+PROFILE_CAPABILITIES = ("attempt-trace", "mapping-lifecycle", "copy-actual")
+DOCTOR_STATUSES = ("available", "unavailable", "unknown", "unsupported")
+MIN_KERNEL_RE = re.compile(r"[0-9]+\.[0-9]+(\.[0-9]+)?")
+_HOOK_SEG = r"([^\x00/.][^\x00/]*|\.[^\x00/.][^\x00/]*|\.\.[^\x00/]+)"
+HOOK_PATH_RE = re.compile(r"/" + _HOOK_SEG + r"(/" + _HOOK_SEG + r")*")
+
+
+def check_profile(obj):
+    check_keys(obj, ("schema_version", "profile_id", "status", "identity",
+                     "hooks", "capabilities"), ("notes",), "profile")
+    if obj["schema_version"] != VERSION:
+        fail("bad-version", "profile.schema_version")
+    check_id(obj["profile_id"], "profile.profile_id")
+    check_enum(obj["status"], ("validated", "reference-unvalidated"),
+               "profile.status")
+    ident = obj["identity"]
+    check_keys(ident, ("arch", "min_kernel", "source"), ("note",),
+               "profile.identity")
+    check_text(ident["arch"], 32, "profile.identity.arch")
+    floor = ident["min_kernel"]
+    if not isinstance(floor, str) or not MIN_KERNEL_RE.fullmatch(floor):
+        fail("bad-version", "profile.identity.min_kernel")
+    source = ident["source"]
+    check_keys(source, ("origin", "revision"), ("note",),
+               "profile.identity.source")
+    check_text(source["origin"], 64, "profile.identity.source.origin")
+    check_text(source["revision"], 128, "profile.identity.source.revision")
+    if "note" in source:
+        check_text(source["note"], 512, "profile.identity.source.note",
+                   allow_empty=True)
+    if "note" in ident:
+        check_text(ident["note"], 512, "profile.identity.note",
+                   allow_empty=True)
+    hooks = obj["hooks"]
+    if not isinstance(hooks, list) or len(hooks) > 32:
+        fail("bad-type", "profile.hooks")
+    names = set()
+    for hook in hooks:
+        check_keys(hook, ("name", "kind", "id_path", "format_path"),
+                   ("format_text", "note"), "profile.hooks[]")
+        check_text(hook["name"], 128, "profile.hooks[].name")
+        if hook["name"] in names:
+            fail("duplicate-key", "profile hook %r" % hook["name"])
+        names.add(hook["name"])
+        if hook["kind"] != "tracepoint":
+            fail("bad-enum", "profile.hooks[].kind")
+        check_text(hook["id_path"], 256, "profile.hooks[].id_path")
+        if not HOOK_PATH_RE.fullmatch(hook["id_path"]):
+            fail("bad-path", "profile.hooks[].id_path not canonical")
+        check_text(hook["format_path"], 256, "profile.hooks[].format_path")
+        if not HOOK_PATH_RE.fullmatch(hook["format_path"]):
+            fail("bad-path", "profile.hooks[].format_path not canonical")
+        if "format_text" in hook and hook["format_text"] is not None:
+            check_text(hook["format_text"], 65536,
+                       "profile.hooks[].format_text", allow_empty=True)
+        if "note" in hook:
+            check_text(hook["note"], 512, "profile.hooks[].note",
+                       allow_empty=True)
+    caps = obj["capabilities"]
+    if not isinstance(caps, list) or len(caps) > 16:
+        fail("bad-type", "profile.capabilities")
+    seen = set()
+    for cap in caps:
+        check_keys(cap, ("id", "status", "hooks", "reason"), (),
+                   "profile.capabilities[]")
+        check_enum(cap["id"], PROFILE_CAPABILITIES,
+                   "profile.capabilities[].id")
+        if cap["id"] in seen:
+            fail("duplicate-key", "profile capability %r" % cap["id"])
+        seen.add(cap["id"])
+        check_enum(cap["status"], ("candidate", "supported", "unsupported"),
+                   "profile.capabilities[].status")
+        if not isinstance(cap["hooks"], list) or len(cap["hooks"]) > 32:
+            fail("bad-type", "profile.capabilities[].hooks")
+        for name in cap["hooks"]:
+            check_text(name, 128, "profile.capabilities[].hooks[]")
+            if name not in names:
+                fail("unknown-hook", "capability hook %r" % name)
+        check_text(cap["reason"], 512, "profile.capabilities[].reason",
+                   allow_empty=True)
+    if "notes" in obj:
+        if not isinstance(obj["notes"], list) or len(obj["notes"]) > 32:
+            fail("bad-type", "profile.notes")
+        for note in obj["notes"]:
+            check_text(note, 512, "profile.notes[]", allow_empty=True)
+    return obj
+
+
+def check_doctor(obj):
+    check_keys(obj, ("schema_version", "mode", "provenance", "kernel",
+                     "guest", "profile", "capabilities", "privilege",
+                     "verdict", "summary"), (), "doctor")
+    if obj["schema_version"] != VERSION:
+        fail("bad-version", "doctor.schema_version")
+    if obj["mode"] != "passive":
+        fail("bad-enum", "doctor.mode")
+    check_keys(obj["provenance"], ("origin",), (), "doctor.provenance")
+    check_enum(obj["provenance"]["origin"], ("live", "fixture"),
+               "doctor.provenance.origin")
+    kernel = obj["kernel"]
+    check_keys(kernel, ("release", "arch", "eligible_floor",
+                        "floor_reason"), (), "doctor.kernel")
+    check_text(kernel["release"], 256, "doctor.kernel.release",
+               allow_empty=True)
+    check_text(kernel["arch"], 64, "doctor.kernel.arch",
+               allow_empty=True)
+    if not isinstance(kernel["eligible_floor"], bool):
+        fail("bad-type", "doctor.kernel.eligible_floor")
+    check_text(kernel["floor_reason"], 512, "doctor.kernel.floor_reason",
+               allow_empty=True)
+    guest = obj["guest"]
+    check_keys(guest, ("tech", "signals", "asserted", "conflict"),
+               (), "doctor.guest")
+    check_enum(guest["tech"], ("ordinary", "snp", "tdx", "sev-classic",
+                               "unknown"), "doctor.guest.tech")
+    if not isinstance(guest["signals"], list) or len(guest["signals"]) > 64:
+        fail("bad-type", "doctor.guest.signals")
+    for signal in guest["signals"]:
+        check_text(signal, 256, "doctor.guest.signals[]")
+    if not isinstance(guest["asserted"], bool):
+        fail("bad-type", "doctor.guest.asserted")
+    check_text(guest["conflict"], 512, "doctor.guest.conflict",
+               allow_empty=True)
+    profile = obj["profile"]
+    check_keys(profile, ("matched", "profile_id", "status", "reason"),
+               (), "doctor.profile")
+    if not isinstance(profile["matched"], bool):
+        fail("bad-type", "doctor.profile.matched")
+    if profile["profile_id"] is not None:
+        check_text(profile["profile_id"], 128, "doctor.profile.profile_id")
+    if profile["status"] is not None:
+        check_text(profile["status"], 32, "doctor.profile.status")
+    check_text(profile["reason"], 512, "doctor.profile.reason",
+               allow_empty=True)
+    caps = obj["capabilities"]
+    if not isinstance(caps, list) or len(caps) > 16:
+        fail("bad-type", "doctor.capabilities")
+    seen = set()
+    for cap in caps:
+        check_keys(cap, ("id", "status", "reason"), (), "doctor.cap[]")
+        check_text(cap["id"], 64, "doctor.cap[].id")
+        if cap["id"] in seen:
+            fail("duplicate-key", "doctor capability %r" % cap["id"])
+        seen.add(cap["id"])
+        check_enum(cap["status"], DOCTOR_STATUSES, "doctor.cap[].status")
+        check_text(cap["reason"], 512, "doctor.cap[].reason",
+                   allow_empty=True)
+    priv = obj["privilege"]
+    check_keys(priv, ("euid", "denied_paths"), (), "doctor.privilege")
+    if (not isinstance(priv["euid"], int)
+            or isinstance(priv["euid"], bool) or priv["euid"] < 0):
+        fail("bad-type", "doctor.privilege.euid")
+    denied = priv["denied_paths"]
+    if not isinstance(denied, list) or len(denied) > 128:
+        fail("bad-type", "doctor.privilege.denied_paths")
+    for path in denied:
+        check_text(path, 256, "doctor.privilege.denied_paths[]")
+    check_enum(obj["verdict"], ("ready", "unavailable"), "doctor.verdict")
+    check_text(obj["summary"], 1024, "doctor.summary", allow_empty=True)
+    return obj
+
+
 def repo_path(*parts):
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(root, *parts)
@@ -906,7 +1072,8 @@ def run_selftest():
             results.append((True, "%s: %s" % (label, detail or "ok")))
 
     schemas = ("session-v0.1.0.schema.json", "event-v0.1.0.schema.json",
-               "report-v0.1.0.schema.json")
+               "report-v0.1.0.schema.json", "profile-v0.1.0.schema.json",
+               "doctor-v0.1.0.schema.json")
 
     def schema_files():
         for name in schemas:
@@ -921,6 +1088,107 @@ def run_selftest():
         return "%d schema files declare draft 2020-12" % len(schemas)
 
     check("schema-files", schema_files)
+
+    def profile_reference():
+        obj = read_json_file(
+            repo_path("profiles", "linux-x86_64-7.0-reference.json"),
+            "reference profile")
+        check_profile(obj)
+        if obj["status"] == "validated":
+            fail("bad-enum", "reference profile must not be validated")
+        return "unvalidated reference accepted"
+
+    check("profile-reference", profile_reference)
+
+    def profile_reject_unknown_hook():
+        obj = read_json_file(
+            repo_path("profiles", "linux-x86_64-7.0-reference.json"),
+            "reference profile")
+        obj["capabilities"][0]["hooks"] = ["no-such-hook"]
+        check_profile(obj)
+
+    results.append(expect_reject("profile-unknown-hook",
+                                 profile_reject_unknown_hook,
+                                 "unknown-hook"))
+
+    def profile_empty_note():
+        obj = read_json_file(
+            repo_path("profiles", "linux-x86_64-7.0-reference.json"),
+            "reference profile")
+        obj["notes"] = [""]
+        check_profile(obj)
+        return "empty note accepted"
+
+    check("profile-empty-note", profile_empty_note)
+
+    def profile_reject_hook_path():
+        obj = read_json_file(
+            repo_path("profiles", "linux-x86_64-7.0-reference.json"),
+            "reference profile")
+        obj["hooks"][0]["id_path"] = "/../outside/id"
+        check_profile(obj)
+
+    results.append(expect_reject("profile-bad-hook-path",
+                                 profile_reject_hook_path,
+                                 "bad-path"))
+
+    def profile_reject_hook_nul():
+        obj = read_json_file(
+            repo_path("profiles", "linux-x86_64-7.0-reference.json"),
+            "reference profile")
+        obj["hooks"][0]["format_path"] += "\x00ignored"
+        check_profile(obj)
+
+    results.append(expect_reject("profile-bad-hook-nul",
+                                 profile_reject_hook_nul,
+                                 "bad-path"))
+
+    def doctor_positive():
+        obj = {
+            "schema_version": "0.1.0", "mode": "passive",
+            "provenance": {"origin": "fixture"},
+            "kernel": {"release": "7.0.0-test", "arch": "x86_64",
+                       "eligible_floor": True,
+                       "floor_reason": "7.0.0-test satisfies floor 7.0"},
+            "guest": {"tech": "ordinary",
+                      "signals": ["no sev/tdx cpu flags",
+                                  "/dev/sev-guest absent"],
+                      "asserted": False, "conflict": ""},
+            "profile": {"matched": True,
+                        "profile_id": "linux-x86_64-7.0-reference",
+                        "status": "reference-unvalidated",
+                        "reason": "exact identity match; unvalidated"},
+            "capabilities": [
+                {"id": "attempt-trace", "status": "unknown",
+                 "reason": "profile unvalidated"}],
+            "privilege": {"euid": 1001, "denied_paths": []},
+            "verdict": "unavailable",
+            "summary": "collection unavailable: no validated profile",
+        }
+        check_doctor(obj)
+        return "report shape accepted"
+
+    check("doctor-positive", doctor_positive)
+
+    def doctor_reject_status():
+        obj = {
+            "schema_version": "0.1.0", "mode": "passive",
+            "provenance": {"origin": "live"},
+            "kernel": {"release": "", "arch": "",
+                       "eligible_floor": False, "floor_reason": ""},
+            "guest": {"tech": "ordinary", "signals": [],
+                      "asserted": False, "conflict": ""},
+            "profile": {"matched": False, "profile_id": None,
+                        "status": None, "reason": ""},
+            "capabilities": [{"id": "attempt-trace", "status": "ready-ish",
+                              "reason": ""}],
+            "privilege": {"euid": 0, "denied_paths": []},
+            "verdict": "unavailable", "summary": "",
+        }
+        check_doctor(obj)
+
+    results.append(expect_reject("doctor-bad-status", doctor_reject_status,
+                                 "bad-enum"))
 
     fixture = repo_path("tests", "fixtures", "attempts")
 
@@ -1116,6 +1384,22 @@ def run_selftest():
 def main(argv):
     if len(argv) == 2 and argv[1] in ("-h", "--help"):
         print(__doc__.strip())
+        return 0
+    if len(argv) == 3 and argv[1] == "--check-profile":
+        try:
+            check_profile(read_json_file(argv[2], argv[2]))
+        except Error as exc:
+            print("invalid: %s" % exc)
+            return 1
+        print("profile OK: %s" % argv[2])
+        return 0
+    if len(argv) == 3 and argv[1] == "--check-doctor":
+        try:
+            check_doctor(read_json_file(argv[2], argv[2]))
+        except Error as exc:
+            print("invalid: %s" % exc)
+            return 1
+        print("doctor report OK: %s" % argv[2])
         return 0
     if len(argv) == 1:
         results = run_selftest()

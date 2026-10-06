@@ -3,10 +3,9 @@
 #
 # Usage: tools/test <suite> | tools/test --help
 #
-# Implemented suites: schemas, unit, reports.
+# Implemented suites: schemas, unit, reports, profiles, doctor.
 #
-# Planned suites: profiles, doctor, attempts, writer,
-# vm-attempts, package.
+# Planned suites: attempts, writer, vm-attempts, package.
 # A skipped privileged test is reported as skipped, never as success.
 # Exit 0 only when the suite passes; 1 on test failure; 2 on invalid usage.
 # One suite per invocation; extra arguments are rejected.
@@ -16,6 +15,10 @@
 # stdout bytes, exact exit codes (0 sufficient, 4 materially
 # incomplete, 2 invalid input), and independently recomputed counts
 # from tools/validate-schemas over generated JSON reports.
+# The profiles suite runs the reader/evidence/profile/discovery unit
+# tests. The doctor suite runs the doctor unit tests, then the built
+# doctor verb live: oracle-checked JSON, identity cross-checks against
+# uname/id, exit/verdict consistency, and usage errors.
 
 set -u
 
@@ -741,6 +744,83 @@ PYEOF
     return 0
 }
 
+suite_profiles() {
+    run_unit_file tests/unit/test_profiles.mojo
+}
+
+suite_doctor() {
+    run_unit_file tests/unit/test_doctor.mojo || return 1
+    BIN="$ROOT/build/memveil"
+    if [ ! -x "$BIN" ]; then
+        echo "doctor: missing $BIN (run tools/build first)" >&2
+        return 1
+    fi
+    TMP=$(mktemp -d)
+    trap 'rm -rf "$TMP"' EXIT
+    failed=0
+
+    (cd "$ROOT" && "$BIN" doctor --json >"$TMP/live.json" 2>"$TMP/err")
+    rc=$?
+    # No validated profile is admitted yet, so the live verdict is
+    # unavailable (exit 3) on every host; only the reason varies.
+    if [ "$rc" -ne 3 ]; then
+        echo "doctor: live doctor --json exit $rc, want 3" >&2
+        failed=1
+    fi
+    if ! "$ROOT/tools/validate-schemas" --check-doctor \
+        "$TMP/live.json" >/dev/null 2>&1; then
+        echo "doctor: oracle rejected live JSON" >&2
+        failed=1
+    fi
+    if ! python3 - "$TMP/live.json" <<'PYEOF'; then
+import json, os, sys
+doc = json.load(open(sys.argv[1]))
+un = os.uname()
+assert doc["mode"] == "passive", "mode"
+assert doc["kernel"]["release"] == un.release, "release"
+assert doc["kernel"]["arch"] == un.machine, "arch"
+assert doc["privilege"]["euid"] == os.geteuid(), "euid"
+assert doc["verdict"] == "unavailable", "verdict"
+PYEOF
+        echo "doctor: live facts mismatch uname/id" >&2
+        failed=1
+    fi
+
+    (cd "$ROOT" && "$BIN" doctor >"$TMP/live.txt" 2>"$TMP/err")
+    rc=$?
+    if [ "$rc" -ne 3 ]; then
+        echo "doctor: live doctor exit $rc, want 3" >&2
+        failed=1
+    elif ! head -1 "$TMP/live.txt" | grep -q "memveil doctor (passive, live evidence)"; then
+        echo "doctor: live text lacks header" >&2
+        failed=1
+    fi
+
+    (cd "$ROOT" && "$BIN" doctor --help >"$TMP/out" 2>"$TMP/err")
+    if [ "$?" -ne 0 ] || [ ! -s "$TMP/out" ]; then
+        echo "doctor: --help must exit 0 with usage" >&2
+        failed=1
+    fi
+    (cd "$ROOT" && "$BIN" doctor --bogus >"$TMP/out" 2>"$TMP/err")
+    if [ "$?" -ne 2 ]; then
+        echo "doctor: --bogus must exit 2" >&2
+        failed=1
+    elif [ -s "$TMP/out" ]; then
+        echo "doctor: --bogus must keep stdout empty" >&2
+        failed=1
+    elif [ ! -s "$TMP/err" ]; then
+        echo "doctor: --bogus must explain on stderr" >&2
+        failed=1
+    fi
+
+    if [ "$failed" -ne 0 ]; then
+        echo "doctor: FAILED" >&2
+        return 1
+    fi
+    echo "doctor: unit suite plus live checks passed"
+    return 0
+}
+
 if [ $# -eq 0 ]; then
     usage >&2
     exit 2
@@ -763,7 +843,13 @@ case "$1" in
     reports)
         suite_reports
         ;;
-    profiles|doctor|attempts|writer|vm-attempts|package)
+    profiles)
+        suite_profiles
+        ;;
+    doctor)
+        suite_doctor
+        ;;
+    attempts|writer|vm-attempts|package)
         echo "test: suite '$1' is not implemented yet" >&2
         exit 2
         ;;

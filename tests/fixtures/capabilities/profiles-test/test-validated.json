@@ -1,0 +1,48 @@
+{
+  "schema_version": "0.1.0",
+  "profile_id": "test-validated",
+  "status": "validated",
+  "identity": {
+    "arch": "x86_64",
+    "min_kernel": "7.0",
+    "source": {
+      "origin": "test",
+      "revision": "test-1",
+      "note": "Synthetic test profile. Its validated status is a test-device label, not a support claim."
+    },
+    "note": "Test-only profile for signature-match coverage. Never ship in profiles/."
+  },
+  "hooks": [
+    {
+      "name": "swiotlb:swiotlb_bounced",
+      "kind": "tracepoint",
+      "id_path": "/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/id",
+      "format_path": "/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format",
+      "format_text": "name: swiotlb_bounced\nID: 1901\nformat:\n\tfield:unsigned int test_field;\toffset:0;\tsize:4;\tsigned:0;\n\nprint fmt: \"test_field=%u\", REC->test_field\n",
+      "note": "Recorded format is byte-identical to the ready-validated fixture file."
+    }
+  ],
+  "capabilities": [
+    {
+      "id": "attempt-trace",
+      "status": "supported",
+      "hooks": ["swiotlb:swiotlb_bounced"],
+      "reason": "Test support declaration for the ready path."
+    },
+    {
+      "id": "mapping-lifecycle",
+      "status": "unsupported",
+      "hooks": [],
+      "reason": "No validated lifecycle mechanism exists in this profile."
+    },
+    {
+      "id": "copy-actual",
+      "status": "unsupported",
+      "hooks": [],
+      "reason": "No validated executed-length source exists in this profile."
+    }
+  ],
+  "notes": [
+    "Test-only. Not admitted by profiles/manifest.txt."
+  ]
+}

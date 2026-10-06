@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""Inventory kernel/BTF/tracepoint evidence for MemVeil profiles.
+
+Read-only: probes the live host's evidence sources and either prints
+a JSON inventory (default, for receipts) or writes a capability
+fixture directory (--emit-fixture DIR). The fixture mirrors the
+evidence root directly (host path P becomes DIR + P) plus a
+meta.txt header (arch/release/euid/denied) that the Mojo evidence
+reader consumes.
+
+Emitted content policy: doctor-consumed text (cpuinfo, os-release,
+tracepoint id/format) is copied with content; device nodes readable
+live become empty marker files (the doctor stats them only);
+binaries (BTF, configs) are omitted by default and their live
+dispositions recorded in blobs.txt, or copied byte for byte with
+--include-blobs for exact local reproduction. Missing vs
+unreadable is distinguished honestly (absent vs denied). Emission
+refuses an existing destination, so a re-emit can never mix fresh
+evidence with stale files from an older observation.
+"""
+
+import argparse
+import json
+import os
+import sys
+
+TEXT_SOURCES = [
+    "/proc/sys/kernel/osrelease",
+    "/proc/cpuinfo",
+    "/etc/os-release",
+]
+BLOB_SOURCES = [
+    "/sys/kernel/btf/vmlinux",
+]
+FORMAT_SOURCES = [
+    "/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/id",
+    "/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format",
+]
+NODE_SOURCES = [
+    "/dev/sev-guest",
+    "/dev/tdx_guest",
+]
+CONFIG_SOURCES = [
+    "/proc/config.gz",
+]
+EMIT_TEXT = [
+    "/proc/cpuinfo",
+    "/etc/os-release",
+    "/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/id",
+    "/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format",
+]
+MAX_TEXT_BYTES = 1048576
+MAX_FORMAT_BYTES = 65536
+
+
+def probe_text(path, cap):
+    try:
+        with open(path, "rb") as f:
+            data = f.read(cap + 1)
+    except FileNotFoundError:
+        return {"state": "absent"}
+    except PermissionError:
+        return {"state": "denied"}
+    except OSError as e:
+        return {"state": "error", "reason": e.strerror or "os error"}
+    truncated = len(data) > cap
+    try:
+        text = data[:cap].decode("utf-8")
+    except UnicodeDecodeError:
+        return {"state": "unreadable", "reason": "not UTF-8 text"}
+    out = {"state": "ok", "content": text}
+    if truncated:
+        out["truncated"] = True
+    return out
+
+
+def probe_blob(path):
+    try:
+        size = os.path.getsize(path)
+    except FileNotFoundError:
+        return {"state": "absent"}
+    except PermissionError:
+        return {"state": "denied"}
+    except OSError as e:
+        return {"state": "error", "reason": e.strerror or "os error"}
+    try:
+        with open(path, "rb") as f:
+            f.read(1)
+    except PermissionError:
+        return {"state": "denied", "size": size}
+    except OSError as e:
+        return {"state": "error", "reason": e.strerror or "os error"}
+    return {"state": "ok", "size": size}
+
+
+def probe_node(path):
+    try:
+        os.stat(path)
+    except FileNotFoundError:
+        return {"state": "absent"}
+    except PermissionError:
+        return {"state": "denied"}
+    except OSError as e:
+        return {"state": "error", "reason": e.strerror or "os error"}
+    if os.access(path, os.R_OK):
+        return {"state": "ok"}
+    return {"state": "denied"}
+
+
+def inventory():
+    un = os.uname()
+    files = {}
+    for path in TEXT_SOURCES:
+        files[path] = probe_text(path, MAX_TEXT_BYTES)
+    for path in BLOB_SOURCES:
+        files[path] = probe_blob(path)
+    for path in FORMAT_SOURCES:
+        files[path] = probe_text(path, MAX_FORMAT_BYTES)
+    for path in NODE_SOURCES:
+        files[path] = probe_node(path)
+    boot_config = "/boot/config-%s" % un.release
+    for path in CONFIG_SOURCES + [boot_config]:
+        files[path] = probe_blob(path)
+    return {
+        "release": un.release,
+        "arch": un.machine,
+        "euid": os.geteuid(),
+        "files": files,
+    }
+
+
+def emit_fixture(inv, dest, include_blobs):
+    denied = []
+    blobs = []
+    for path, info in sorted(inv["files"].items()):
+        state = info.get("state")
+        if state == "denied":
+            denied.append(path)
+        if path in BLOB_SOURCES or path in CONFIG_SOURCES or path.startswith(
+            "/boot/config-"
+        ):
+            size = info.get("size", "?")
+            blobs.append("%s=%s:%s" % (path, state, size))
+            if state != "ok" or not include_blobs:
+                continue
+            with open(path, "rb") as f:
+                content = f.read()
+            target = os.path.join(dest, path.lstrip("/"))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "wb") as f:
+                f.write(content)
+            continue
+        if state == "absent":
+            continue
+        if state != "ok":
+            continue
+        if path in NODE_SOURCES:
+            target = os.path.join(dest, path.lstrip("/"))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            open(target, "wb").close()
+        elif path in EMIT_TEXT and "content" in info:
+            target = os.path.join(dest, path.lstrip("/"))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w", encoding="utf-8") as f:
+                f.write(info["content"])
+    os.makedirs(dest, exist_ok=True)
+    with open(os.path.join(dest, "meta.txt"), "w", encoding="utf-8") as f:
+        f.write("arch=%s\n" % inv["arch"])
+        f.write("release=%s\n" % inv["release"])
+        f.write("euid=%d\n" % inv["euid"])
+        if denied:
+            f.write("denied=%s\n" % ",".join(denied))
+    if blobs:
+        with open(os.path.join(dest, "blobs.txt"), "w",
+                  encoding="utf-8") as f:
+            for line in blobs:
+                f.write(line + "\n")
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--emit-fixture", metavar="DIR",
+                        help="write a capability fixture directory")
+    parser.add_argument("--include-blobs", action="store_true",
+                        help="copy BTF/config bytes into the fixture")
+    args = parser.parse_args(argv)
+    if args.emit_fixture and os.path.exists(args.emit_fixture):
+        print("probe-inventory: refusing existing %s"
+              % args.emit_fixture, file=sys.stderr)
+        return 2
+    inv = inventory()
+    if args.emit_fixture:
+        emit_fixture(inv, args.emit_fixture, args.include_blobs)
+        return 0
+    json.dump(inv, sys.stdout, indent=2, sort_keys=True)
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

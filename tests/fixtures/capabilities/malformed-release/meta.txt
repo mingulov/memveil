@@ -1,0 +1,3 @@
+arch=x86_64
+release=not-a-kernel-release
+euid=1001

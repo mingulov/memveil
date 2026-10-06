@@ -1,0 +1,50 @@
+{
+  "schema_version": "0.1.0",
+  "profile_id": "linux-x86_64-7.0-reference",
+  "status": "reference-unvalidated",
+  "identity": {
+    "arch": "x86_64",
+    "min_kernel": "7.0",
+    "source": {
+      "origin": "upstream",
+      "revision": "028ef9c96e96197026887c0f092424679298aae8",
+      "note": "Upstream v7.0 inspected during planning. Inspection is not qualification evidence; this profile stays reference-unvalidated until test evidence admits it."
+    },
+    "note": "Reference identity only. A running kernel also needs its own source/config/BTF identity plus attachment and test evidence before any validated claim."
+  },
+  "hooks": [
+    {
+      "name": "swiotlb:swiotlb_bounced",
+      "kind": "tracepoint",
+      "id_path": "/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/id",
+      "format_path": "/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format",
+      "format_text": null,
+      "note": "No recorded format signature yet, so layout conformity cannot be verified under this profile."
+    }
+  ],
+  "capabilities": [
+    {
+      "id": "attempt-trace",
+      "status": "candidate",
+      "hooks": ["swiotlb:swiotlb_bounced"],
+      "reason": "Candidate collection source; availability is checked passively, semantics are unproven under this profile."
+    },
+    {
+      "id": "mapping-lifecycle",
+      "status": "unsupported",
+      "hooks": [],
+      "reason": "No validated lifecycle mechanism exists in this profile."
+    },
+    {
+      "id": "copy-actual",
+      "status": "unsupported",
+      "hooks": [],
+      "reason": "No validated executed-length source exists in this profile."
+    }
+  ],
+  "notes": [
+    "This file must not acquire validated status without the evidence gates in the execution plan.",
+    "Distro builds (for example 7.0.0-34-generic) need their own source/config/BTF identity before qualification.",
+    "Inventory status: upstream v7.0 source inspected during planning (see identity.source); distro patch set not recorded; kernel config identity not recorded; BTF build identity not recorded; tracepoint format signature not recorded; tracepoint call site not verified. None of these become evidence until a validated profile records them with test receipts."
+  ]
+}

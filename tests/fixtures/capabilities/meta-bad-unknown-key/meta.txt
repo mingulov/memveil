@@ -1,0 +1,4 @@
+arch=x86_64
+release=7.0.0
+euid=1001
+frobnicate=yes

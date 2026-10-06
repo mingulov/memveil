@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "doctor-v0.1.0.schema.json",
+  "title": "MemVeil doctor report",
+  "description": "Passive environment and capability report from memveil doctor. Never loads BPF, never changes the system, and never claims attachment from passive inspection.",
+  "type": "object",
+  "required": ["schema_version", "mode", "provenance", "kernel", "guest", "profile", "capabilities", "privilege", "verdict", "summary"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "0.1.0"},
+    "mode": {"const": "passive"},
+    "provenance": {
+      "type": "object",
+      "description": "Evidence origin: live host evidence, or a recorded fixture tree. Fixture runs never render as live.",
+      "required": ["origin"],
+      "additionalProperties": false,
+      "properties": {
+        "origin": {"enum": ["live", "fixture"]}
+      }
+    },
+    "kernel": {
+      "type": "object",
+      "required": ["release", "arch", "eligible_floor", "floor_reason"],
+      "additionalProperties": false,
+      "properties": {
+        "release": {"type": "string", "maxLength": 256},
+        "arch": {"type": "string", "maxLength": 64},
+        "eligible_floor": {"type": "boolean"},
+        "floor_reason": {"type": "string", "maxLength": 512}
+      }
+    },
+    "guest": {
+      "type": "object",
+      "required": ["tech", "signals", "asserted", "conflict"],
+      "additionalProperties": false,
+      "properties": {
+        "tech": {"enum": ["ordinary", "snp", "tdx", "sev-classic", "unknown"]},
+        "signals": {
+          "type": "array",
+          "description": "Evidence records behind the verdict: node states (sev-node/tdx-node:present|absent|denied), cpu-flags:ok:<tokens>|absent|denied|read-error, ordinary:absent-nodes-inference, asserted:<tech>, plus info:-prefixed environment context (btf, config-gz, os, boot-config) that never feeds the verdict.",
+          "maxItems": 64,
+          "items": {"type": "string", "maxLength": 256}
+        },
+        "asserted": {"type": "boolean"},
+        "conflict": {"type": "string", "maxLength": 512}
+      }
+    },
+    "profile": {
+      "type": "object",
+      "required": ["matched", "profile_id", "status", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "matched": {"type": "boolean"},
+        "profile_id": {"type": ["string", "null"], "maxLength": 128},
+        "status": {"type": ["string", "null"], "maxLength": 32},
+        "reason": {"type": "string", "maxLength": 512}
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "required": ["id", "status", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string", "minLength": 1, "maxLength": 64},
+          "status": {"enum": ["available", "unavailable", "unknown", "unsupported"]},
+          "reason": {"type": "string", "maxLength": 512}
+        }
+      }
+    },
+    "privilege": {
+      "type": "object",
+      "required": ["euid", "denied_paths"],
+      "additionalProperties": false,
+      "properties": {
+        "euid": {"type": "integer", "minimum": 0},
+        "denied_paths": {
+          "type": "array",
+          "description": "Union of environment denials (at most 7) and hook denials (at most 64 over 32 hooks). The bound carries headroom over the structural maximum of 71.",
+          "maxItems": 128,
+          "items": {"type": "string", "maxLength": 256}
+        }
+      }
+    },
+    "verdict": {"enum": ["ready", "unavailable"]},
+    "summary": {"type": "string", "maxLength": 1024}
+  }
+}

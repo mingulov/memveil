@@ -1,0 +1,177 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "profile-v0.1.0.schema.json",
+  "title": "MemVeil semantic profile manifest",
+  "description": "Exact-identity collection profile: kernel/source identity, hook locations and expected layouts, and per-capability support declarations. Only a profile whose status is validated, backed by test evidence, can support a validated live measurement; reference-unvalidated profiles describe candidates.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "profile_id",
+    "status",
+    "identity",
+    "hooks",
+    "capabilities"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1.0"
+    },
+    "profile_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.\\-]{0,127}$"
+    },
+    "status": {
+      "enum": [
+        "validated",
+        "reference-unvalidated"
+      ]
+    },
+    "identity": {
+      "type": "object",
+      "required": [
+        "arch",
+        "min_kernel",
+        "source"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "arch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "min_kernel": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+(\\.[0-9]+)?$"
+        },
+        "source": {
+          "type": "object",
+          "required": [
+            "origin",
+            "revision"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "origin": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "revision": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "note": {
+              "type": "string",
+              "maxLength": 512
+            }
+          }
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 512
+        }
+      }
+    },
+    "hooks": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "kind",
+          "id_path",
+          "format_path"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "kind": {
+            "const": "tracepoint"
+          },
+          "id_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^/([^\\x00/.][^\\x00/]*|\\.[^\\x00/.][^\\x00/]*|\\.\\.[^\\x00/]+)(/([^\\x00/.][^\\x00/]*|\\.[^\\x00/.][^\\x00/]*|\\.\\.[^\\x00/]+))*$"
+          },
+          "format_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^/([^\\x00/.][^\\x00/]*|\\.[^\\x00/.][^\\x00/]*|\\.\\.[^\\x00/]+)(/([^\\x00/.][^\\x00/]*|\\.[^\\x00/.][^\\x00/]*|\\.\\.[^\\x00/]+))*$"
+          },
+          "format_text": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 65536
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 512
+          }
+        }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "hooks",
+          "reason"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "enum": [
+              "attempt-trace",
+              "mapping-lifecycle",
+              "copy-actual"
+            ]
+          },
+          "status": {
+            "enum": [
+              "candidate",
+              "supported",
+              "unsupported"
+            ]
+          },
+          "hooks": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 512
+          }
+        }
+      }
+    },
+    "notes": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "string",
+        "maxLength": 512
+      }
+    }
+  }
+}

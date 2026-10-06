@@ -1,0 +1,6 @@
+name: swiotlb_bounced
+ID: 1901
+format:
+	field:unsigned int test_field;	offset:0;	size:8;	signed:0;
+
+print fmt: "test_field=%u", REC->test_field

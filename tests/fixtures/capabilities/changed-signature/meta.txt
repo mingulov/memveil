@@ -1,0 +1,3 @@
+arch=x86_64
+release=7.0.0-34-generic
+euid=1001
