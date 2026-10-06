@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Narrow grammar, identity reads, and binding checks."""
 
 from std.sys import exit

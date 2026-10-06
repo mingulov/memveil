@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Live writer source: WriterSource over an EventWriter.
 
 Thin ownership adapter, no policy: create() opens the

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Unit tests for packaging validators and the trace audit.
 
 No builds, no bundle, no subprocesses: tools/package validators
@@ -226,7 +228,8 @@ def _tree(tmp_path, names):
 def test_manifest_exact_match_passes(tmp_path):
     names = ("bin/memveil", "lib/libbpf_mojo.so.1",
              "bpf/swiotlb_attempt.bpf.o", "profiles/manifest.txt",
-             "docs/quickstart.md")
+             "docs/quickstart.md", "LICENSE",
+             "THIRD-PARTY-NOTICES.md")
     root = _tree(tmp_path, names + ("MANIFEST.json",))
     manifest = {"files": {n: "h" for n in names}}
     assert check_manifest(root, manifest) == []
@@ -234,11 +237,14 @@ def test_manifest_exact_match_passes(tmp_path):
 
 def test_manifest_flags_omitted_critical_and_extras(tmp_path):
     names = ("bin/memveil", "lib/libbpf_mojo.so.1",
-             "bpf/swiotlb_attempt.bpf.o", "profiles/manifest.txt")
+             "bpf/swiotlb_attempt.bpf.o", "profiles/manifest.txt",
+             "LICENSE", "THIRD-PARTY-NOTICES.md")
     root = _tree(tmp_path, names + ("stowaway", "MANIFEST.json"))
     manifest = {"files": {"lib/libbpf_mojo.so.1": "h",
                           "bpf/swiotlb_attempt.bpf.o": "h",
                           "profiles/manifest.txt": "h",
+                          "LICENSE": "h",
+                          "THIRD-PARTY-NOTICES.md": "h",
                           "ghost": "h"}}
     problems = check_manifest(root, manifest)
     assert any("critical bin/memveil" in p for p in problems), \

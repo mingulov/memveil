@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Generate admission-scan fixtures (roots + bound profile docs).
 
 Roots under tests/fixtures/scan/<ok,skew,noconfig,diffconfig>/

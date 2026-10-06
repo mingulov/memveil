@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+
 /* LD_PRELOAD fault injector for EventWriter tests.
  *
  * Modes come from MVSHIM as a comma-separated list:

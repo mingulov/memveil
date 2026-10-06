@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """LiveWriter adapter: real files on mkdtemp scratch dirs."""
 
 from std.ffi import external_call

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Collector close-out probe (attempts lane tool, not shipped).
 
 Usage: collector_probe <script> <dir>

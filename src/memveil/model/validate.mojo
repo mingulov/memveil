@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Shared scalar validators for the frozen v0.1.0 contracts.
 
 Canonical u64 strings, opaque identifiers, and bounded text appear in

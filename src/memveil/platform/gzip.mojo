@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Single-member gzip inflation via the system zlib.
 
 `/proc/config.gz` is gzip-framed deflate; the config

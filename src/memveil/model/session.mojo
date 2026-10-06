@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Typed capture session: session.json, format 0.1.0.
 
 The parser validates the whole document against the frozen session

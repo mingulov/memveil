@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Minimal BTF map-definition reader for admission.
 
 Locates the `.BTF` section of a BPF object, walks its type

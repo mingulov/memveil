@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Assemble the MemVeil owner bundle from exact pinned inputs.
 
 Builds the distributable binary (``$ORIGIN``-relative RUNPATH),
@@ -13,6 +14,9 @@ Layout of ``dist/memveil-<version>/``::
     profiles/              manifest plus shipped semantic profiles
     docs/                  quickstart, support, privacy
     examples/real-capture/ sanitized real capture (worked example)
+    LICENSE, LICENSES/   MemVeil's own license texts
+    licenses/              third-party texts + libbpf-mojo's own
+    THIRD-PARTY-NOTICES*   attribution (own + libbpf-mojo verbatim)
     MANIFEST.json          file hashes, versions, source revisions
 
 Usage: tools/package [--out DIR] [--tag NAME]
@@ -24,6 +28,7 @@ tools/build. Fails closed when the link closure names anything
 outside the shipped lib/ set and the system allowlist.
 """
 
+import gzip
 import hashlib
 import json
 import os
@@ -267,6 +272,59 @@ def main(argv):
     shutil.copytree(example,
                     os.path.join(staged, "examples", "real-capture"))
 
+    # License texts: MemVeil's own plus everything the bundle
+    # redistributes through the pinned bridge. The libbpf-mojo
+    # texts below are pinned by the tarball hash checked against
+    # the lock further down; a missing text fails the package.
+    lmb_dir = os.path.join(ROOT, "build", "deps", "lmb")
+    own_texts = ["LICENSE", "THIRD-PARTY-NOTICES.md"]
+    for name in own_texts:
+        src = os.path.join(ROOT, name)
+        if not os.path.isfile(src):
+            fail("missing %s" % src)
+        shutil.copy2(src, os.path.join(staged, name))
+    own_licenses = os.path.join(ROOT, "LICENSES")
+    for name in ("GPL-2.0-only.txt", "GPL-2.0-or-later.txt"):
+        if not os.path.isfile(os.path.join(own_licenses, name)):
+            fail("missing LICENSES/%s" % name)
+    shutil.copytree(own_licenses, os.path.join(staged, "LICENSES"))
+    staged_licenses = os.path.join(staged, "licenses")
+    os.makedirs(staged_licenses)
+    third_party = (
+        "GPL-3.0.txt",
+        "LICENSE.BSD-2-Clause.libbpf",
+        "LICENSE.mojo-compiler",
+        "LICENSE.zlib",
+        "NOTICE.mojo-runtime.md",
+        "RUNTIME.LIBRARY.EXCEPTION",
+        "Third-Party-Notices.mojo-compiler",
+    )
+    lmb_licenses = os.path.join(lmb_dir, "licenses")
+    for name in third_party:
+        src = os.path.join(lmb_licenses, name)
+        if not os.path.isfile(src):
+            fail("missing pinned license text %s" % src)
+        shutil.copy2(src, os.path.join(staged_licenses, name))
+    lmb_own = os.path.join(lmb_dir, "LICENSE")
+    if not os.path.isfile(lmb_own):
+        fail("missing pinned libbpf-mojo LICENSE")
+    shutil.copy2(lmb_own,
+                 os.path.join(staged_licenses, "libbpf-mojo-LICENSE"))
+    lmb_own_dir = os.path.join(lmb_dir, "LICENSES")
+    for name in ("GPL-2.0-only.txt", "GPL-2.0-or-later.txt"):
+        if not os.path.isfile(os.path.join(lmb_own_dir, name)):
+            fail("missing pinned libbpf-mojo LICENSES/%s" % name)
+    shutil.copytree(lmb_own_dir,
+                    os.path.join(staged_licenses,
+                                 "libbpf-mojo-LICENSES"))
+    lmb_notices = os.path.join(lmb_dir, "THIRD-PARTY-NOTICES.md")
+    if not os.path.isfile(lmb_notices):
+        fail("missing pinned libbpf-mojo notices")
+    shutil.copy2(lmb_notices,
+                 os.path.join(staged,
+                              "THIRD-PARTY-NOTICES.libbpf-mojo.md"))
+    print("package: license texts staged")
+
     lock = json.load(open(os.path.join(ROOT, "toolchain.lock.json")))
     lmb_pin = lock["dependencies"]["libbpf-mojo"]
     manifest = {
@@ -281,6 +339,17 @@ def main(argv):
         },
         "toolchain": lock["toolchain"],
         "system_libraries": sorted(SYSTEM_ALLOW),
+        "first_party": {
+            "license_default": "GPL-3.0-or-later",
+            "licenses": {
+                "GPL-2.0-only": "LICENSES/GPL-2.0-only.txt",
+                "GPL-2.0-or-later": "LICENSES/GPL-2.0-or-later.txt",
+                "GPL-3.0-or-later": "LICENSE",
+            },
+            "paths": {
+                "bpf/swiotlb_attempt.bpf.o": "GPL-2.0-only",
+            },
+        },
         "files": {},
     }
     if (manifest["libbpf_mojo"]["tarball_used_sha256"]
@@ -306,18 +375,26 @@ def main(argv):
         os.remove(tarball)
     mtime = int(run(["git", "-C", ROOT, "log", "-1",
                      "--format=%ct"]).stdout.strip())
-    with tarfile.open(tarball, "w:gz", compresslevel=9) as tar:
-        for base, dirs, files in os.walk(final):
-            dirs.sort()
-            for name in sorted(files):
-                full = os.path.join(base, name)
-                info = tar.gettarinfo(full,
-                                      os.path.relpath(full, out_dir))
-                info.mtime = mtime
-                info.uid = info.gid = 0
-                info.uname = info.gname = ""
-                with open(full, "rb") as handle:
-                    tar.addfile(info, handle)
+    # Zero-mtime gzip header: "w:gz" stamps the current time,
+    # which would make identical revisions hash differently.
+    with open(tarball, "wb") as raw:
+        gz = gzip.GzipFile(filename="", mode="wb", fileobj=raw,
+                           compresslevel=9, mtime=0)
+        try:
+            with tarfile.open(fileobj=gz, mode="w") as tar:
+                for base, dirs, files in os.walk(final):
+                    dirs.sort()
+                    for name in sorted(files):
+                        full = os.path.join(base, name)
+                        info = tar.gettarinfo(
+                            full, os.path.relpath(full, out_dir))
+                        info.mtime = mtime
+                        info.uid = info.gid = 0
+                        info.uname = info.gname = ""
+                        with open(full, "rb") as handle:
+                            tar.addfile(info, handle)
+        finally:
+            gz.close()
     digest = sha256_file(tarball)
     print("package: %s" % tarball)
     print("package: sha256 %s" % digest)

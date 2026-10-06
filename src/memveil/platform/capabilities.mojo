@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Passive capability discovery: profile declarations vs live evidence.
 
 ``discover_capabilities`` judges each known capability without

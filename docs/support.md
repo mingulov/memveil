@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # MemVeil support envelope (development bundle 0.1.0)
 
 ## Tested configuration

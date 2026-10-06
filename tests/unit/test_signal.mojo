@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Pure signal-source tests: read classifier + mask bits.
 
 No signals are raised here; live signalfd behavior runs

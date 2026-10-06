@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Renderer unit tests: escaping plus golden text/Markdown reports.
 
 Golden files pin the exact text and Markdown layouts; the JSON

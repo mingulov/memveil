@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Attempt payload decode and normalization.
 
 Decodes the 98-byte product payloads produced by the swiotlb

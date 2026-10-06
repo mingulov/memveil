@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Report metric and finding rows (report v0.1.0 shapes).
 
 Values stay numeric until rendering; the renderers format them with

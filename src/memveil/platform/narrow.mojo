@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Narrow identity bindings: grammar, live reads, checks.
 
 A profile carries narrow bindings in

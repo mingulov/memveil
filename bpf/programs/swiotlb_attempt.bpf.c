@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+
 /* MemVeil swiotlb attempt probe.
  *
  * Tracepoint program on swiotlb:swiotlb_bounced (format id 382).

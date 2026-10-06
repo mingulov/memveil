@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Agent instructions for MemVeil
 
 ## Purpose and status

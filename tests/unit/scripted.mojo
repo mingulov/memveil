@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Scripted collector sources for the close-out matrix.
 
 Test-only: deterministic poll/stats/snapshot/clock/signal

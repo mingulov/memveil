@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """memveil record: admitted attempt capture.
 
 ``run_record`` implements ``record --duration SEC --max-events-bytes

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Fixture round-trip checker (writer lane tool, not shipped).
 
 Usage: roundtrip_check.mojo <events.ndjson|session.json>

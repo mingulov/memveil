@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Format dispatch for report rendering."""
 
 from memveil.model.report import Report

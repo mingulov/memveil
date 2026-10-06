@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Markdown report renderer: tables for devices, quality, metrics.
 
 Free-text cells (names, drivers, scopes, reasons, notes, findings,

@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Build and toolchain guide
 
 This repository builds with a pinned Mojo toolchain managed by pixi, plus

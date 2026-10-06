@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """LmbKernel adapter: pre-open and open-failure paths.
 
 Live paths need privileges and run in the VM gate;

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """memveil doctor: passive environment and capability report.
 
 ``run_doctor`` implements the ``doctor [--json]`` verb against the

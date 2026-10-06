@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Live signal probe (signals lane tool, not shipped).
 
 Usage: signal_probe <mode> [args...]

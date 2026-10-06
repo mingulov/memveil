@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Semantic profiles: exact-identity collection manifests.
 
 ``parse_profile_bytes`` validates one profile JSON document against

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """BTF map-definition reads from BPF objects."""
 
 from std.sys import exit

@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+
 /* Counter-flow simulator: mirrors the 7 BPF steps (design 1.1)
  * over a scripted firing schedule with injectable
  * probe-read/ring failures. Every shared update follows

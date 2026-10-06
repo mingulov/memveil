@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Offline report command: read one capture, reduce, render, exit.
 
 The report verb wires the reader, the attempt analyzer, and the

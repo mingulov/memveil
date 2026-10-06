@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """A07 VM gate: live attempt capture with an ftrace oracle.
 
 Two boots of the frozen harness (virtme-ng 1.40, qemu 10.2.1,

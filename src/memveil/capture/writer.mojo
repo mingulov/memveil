@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Capture file writer: exclusive creation, explicit-offset appends.
 
 mkdir-0700 output,

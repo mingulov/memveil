@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Offline capture inspection for MemVeil.
 
 This package reads authored or recorded capture directories, reduces

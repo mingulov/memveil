@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """JSON report renderer: schema-valid report v0.1.0 output.
 
 Every string passes through escape_json, which emits the quoted JSON

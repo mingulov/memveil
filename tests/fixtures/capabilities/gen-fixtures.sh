@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Generate the evidence and manifest files under
 # tests/fixtures/capabilities/. Deterministic; rerunning reproduces
 # those files byte for byte. The test profile JSON, this script, and

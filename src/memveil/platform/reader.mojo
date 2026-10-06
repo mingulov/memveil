@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Passive evidence reader: live host or recorded fixture.
 
 A06: the doctor never loads BPF, never writes the system, and never

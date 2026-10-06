@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """A07 gate guest flow: stimulate, capture, ledger, export.
 
 Runs as root inside the virtme-ng guest (one boot per mode).

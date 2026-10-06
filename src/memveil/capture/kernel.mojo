@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Live kernel source: KernelSource over a libbpf-mojo Session.
 
 Thin ownership adapter, no policy: every trait method
@@ -28,7 +30,8 @@ from memveil.capture.collector import (
     StatsOut,
 )
 
-# abi-v1 frozen values (libbpf-mojo 0.2.0): tracepoint
+# abi-v1 frozen values (libbpf-mojo 0.2.0, unchanged in
+# 0.2.1): tracepoint
 # attach kind, and the retained-record ceiling. Raw
 # attempt records are 91 bytes; 4096 accepts everything
 # the probe can emit while bounding the staging slot.

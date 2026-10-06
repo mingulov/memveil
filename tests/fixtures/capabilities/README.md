@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Capability fixtures
 
 Synthetic evidence trees for the profiles and doctor test lanes.

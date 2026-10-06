@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Worked example: real bounce-attempt capture
 
 Thirty real `swiotlb_bounced` tracepoint events plus four counter

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Attempt-vector corpus generator (single source for C and Mojo tests).
 
 Emits tests/fixtures/attempts/corpus.bin (length-prefixed inputs)

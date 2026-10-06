@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Bounded JSON scanner over raw bytes.
 
 The reader parses session and event documents with a

@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # External schema notes
 
 These are **producer contracts**, not a generated description of existing
