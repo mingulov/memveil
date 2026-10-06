@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # memveil
 
 Attempt capture for swiotlb bounce analysis on x86-64 Linux:
@@ -9,8 +10,8 @@ requested bytes), never inferred copies.
 Status: development bundle 0.1.0. One validated profile
 (`linux-x86_64-7.0.0-34-generic`). Mapping lifecycle, actual
 copy bytes, sharing transitions, and physical unions are
-unavailable, never inferred. No release, packaging format, or
-license decision has been made yet.
+unavailable, never inferred. No release or packaging-format
+decision has been made yet.
 
 ## Use (from the bundle)
 
@@ -36,9 +37,22 @@ Pinned Mojo 1.1.0 toolchain via pixi; see `docs/build.md` and
 checkout.
 
     ./tools/build                                    # build everything
-    LMB_PACKAGE=/path/to/libbpf-mojo-0.2.0.tar.gz ./tools/test <suite>
+    LMB_PACKAGE=/path/to/libbpf-mojo-0.2.1.tar.gz ./tools/test <suite>
     ./tools/test --help                              # list suites
     LMB_PACKAGE=... ./tools/package                  # owner bundle + MANIFEST
 
 `report` and `doctor` work without the bridge library; only
 `record` loads it (lazily, at session open).
+
+## Licensing
+
+MemVeil is GPL-3.0-or-later (`LICENSE`), except the eBPF
+program (`bpf/programs/swiotlb_attempt.bpf.c`, GPL-2.0-only)
+and the BPF/userspace shared header
+(`bpf/include/memveil_events.h`, GPL-2.0-or-later); texts in
+`LICENSES/`. Every source file carries an SPDX header.
+Redistributed third-party components, with their staged
+license texts, are listed in `THIRD-PARTY-NOTICES.md`. The
+owner bundle stages all of these plus the pinned
+libbpf-mojo's own texts; `MANIFEST.json` records the
+first-party license map under `first_party`.

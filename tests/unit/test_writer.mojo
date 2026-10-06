@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """EventWriter unit tests: creation, gates, groups, finalize.
 
 In-process tests on mkdtemp scratch dirs (no shims here).

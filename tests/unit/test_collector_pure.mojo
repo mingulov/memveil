@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Pure collector unit tests: predicates, grammar, identities.
 
 No sources, no writer, no clock: exact assertions on the

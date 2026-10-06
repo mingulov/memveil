@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Valid-empty capture fixture
 
 Real privileged host recording (10 s window, kernel

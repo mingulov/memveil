@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+
 /* Attempt decode test: C reference extractor + shared decoder.
  *
  * Reads the corpus (corpus.bin inputs, corpus.txt expectations),

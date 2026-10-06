@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Clean-room consumer test for the MemVeil owner bundle.
 
 Extracts the tarball built by tools/package into a fresh directory
@@ -49,6 +51,21 @@ REQUIRED = (
     "docs/privacy.md",
     "examples/real-capture/events.ndjson",
     "examples/real-capture/session.json",
+    "LICENSE",
+    "LICENSES/GPL-2.0-only.txt",
+    "LICENSES/GPL-2.0-or-later.txt",
+    "THIRD-PARTY-NOTICES.md",
+    "THIRD-PARTY-NOTICES.libbpf-mojo.md",
+    "licenses/GPL-3.0.txt",
+    "licenses/LICENSE.BSD-2-Clause.libbpf",
+    "licenses/LICENSE.mojo-compiler",
+    "licenses/LICENSE.zlib",
+    "licenses/NOTICE.mojo-runtime.md",
+    "licenses/RUNTIME.LIBRARY.EXCEPTION",
+    "licenses/Third-Party-Notices.mojo-compiler",
+    "licenses/libbpf-mojo-LICENSE",
+    "licenses/libbpf-mojo-LICENSES/GPL-2.0-only.txt",
+    "licenses/libbpf-mojo-LICENSES/GPL-2.0-or-later.txt",
     "MANIFEST.json",
 )
 
@@ -116,6 +133,24 @@ def test_manifest_hashes(bundle):
     for rel, want in sorted(manifest["files"].items()):
         assert sha_file(root / rel) == want, \
             "hash mismatch on %s" % rel
+
+
+def test_license_texts_and_first_party(bundle):
+    root, manifest = bundle
+    first = manifest.get("first_party", {})
+    assert first.get("license_default") == "GPL-3.0-or-later"
+    assert first["licenses"]["GPL-3.0-or-later"] == "LICENSE"
+    assert first["paths"]["bpf/swiotlb_attempt.bpf.o"] == \
+        "GPL-2.0-only"
+    for rel in first["licenses"].values():
+        assert (root / rel).is_file(), "staged text lacks %s" % rel
+        assert (root / rel).stat().st_size > 1000, \
+            "staged text too small: %s" % rel
+    own = (root / "THIRD-PARTY-NOTICES.md").read_text()
+    assert manifest["libbpf_mojo"]["version"] in own
+    assert "licenses/LICENSE.mojo-compiler" in own
+    lmb = (root / "THIRD-PARTY-NOTICES.libbpf-mojo.md").read_text()
+    assert "BSD 2-Clause" in lmb
 
 
 def test_help_version(bundle):

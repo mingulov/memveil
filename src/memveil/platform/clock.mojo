@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Monotonic clock and time-namespace guard for record.
 
 MonoClock implements ClockSource over clock_gettime

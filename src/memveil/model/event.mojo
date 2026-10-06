@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Typed normalized event: one events.ndjson line, format 0.1.0.
 
 The parser validates a single line against the frozen event schema:

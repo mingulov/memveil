@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Canonical JSON encoding for events and sessions.
 
 Byte rules mirror the A05 parsers exactly: u64 as quoted

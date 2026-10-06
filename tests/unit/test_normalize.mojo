@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Normalize unit tests: decoder contract, device table, rejections.
 
 The corpus differential (dump_normalize.mojo vs the C reference)

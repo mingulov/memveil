@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Shared schema-directed parse helpers.
 
 Session and event parsing share nullable-scalar handling and the

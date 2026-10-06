@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
 # A07 VM gate: live attempt capture with an ftrace oracle.
 #
 # Runs tests/vm/test_attempt_capture.py (correctness + saturation)

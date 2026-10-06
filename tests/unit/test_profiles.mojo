@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Profile-layer unit tests: reader, evidence, and profiles.
 
 Reader tests pin the meta.txt grammar and the absent/denied split.

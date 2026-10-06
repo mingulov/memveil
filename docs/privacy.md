@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # MemVeil privacy: what a capture contains
 
 A capture directory holds exactly two files: `session.json`

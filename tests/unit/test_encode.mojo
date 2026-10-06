@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Canonical encoder unit tests: exact bytes, not vibes.
 
 Every scalar and representative kinds assert the exact JSON

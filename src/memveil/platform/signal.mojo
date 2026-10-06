@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Live signal source: signalfd(2) behind SignalSource.
 
 Setup blocks SIGINT/SIGTERM in the calling thread and

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Plain-text report renderer.
 
 Every echoed value passes through escape_text, so control bytes in

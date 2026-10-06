@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """MemVeil command line: capture, offline inspection, passive doctor."""
 
 from std.sys import argv, exit

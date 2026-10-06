@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Derived report document (report v0.1.0 shape).
 
 The analyzer builds this from one session plus its event stream;

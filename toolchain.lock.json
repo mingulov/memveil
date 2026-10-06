@@ -56,9 +56,9 @@
   "dependencies": {
     "libbpf-mojo": {
       "status": "pinned",
-      "version": "0.2.0",
-      "source_commit": "9f0f7f6",
-      "tarball_sha256": "1a1506fa548d677203dd460b14d26b53c22190cfbbc5f056f91a3d730282d079",
+      "version": "0.2.1",
+      "source_commit": "7c9a2d1",
+      "tarball_sha256": "a3c85e1c6f8958ced4a1594c8d14b3828f7bd1ff6fc78cc31efd20d88bac3dfe",
       "mojo_tree": "mojo/libbpf_mojo",
       "native_lib": "lib/libbpf_mojo.so.1",
       "note": "Consumed by path (LMB_PACKAGE) plus this hash. Memveil never reads libbpf-mojo sibling sources; standalone clones supply the tarball."

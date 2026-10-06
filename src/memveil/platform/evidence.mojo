@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Host identity and guest-technology evidence for the passive doctor.
 
 ``detect_environment`` gathers every profile-independent fact the

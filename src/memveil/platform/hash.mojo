@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """SHA-256 over bytes (narrow identity bindings).
 
 Pure Mojo, no dependencies: the standard FIPS 180-4

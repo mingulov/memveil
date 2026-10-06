@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Report renderers: text, JSON, and Markdown."""
 
 from memveil.render.json import escape_json, render_json

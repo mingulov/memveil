@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Doctor unit tests: report assembly, rendering, and exit codes.
 
 Assembly tests pin verdicts, summaries, and denied-path merges per

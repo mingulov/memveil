@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+
 /* MemVeil swiotlb attempt event layout and shared pure logic.
  *
  * This header compiles for BPF (--target=bpf) and for the host C

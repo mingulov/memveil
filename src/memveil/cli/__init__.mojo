@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Command-line verbs for offline inspection and passive doctor."""
 
 from memveil.cli.doctor import (

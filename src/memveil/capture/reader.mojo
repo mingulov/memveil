@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Streaming bounded capture reader: session.json plus events.ndjson.
 
 A capture directory holds session.json and events.ndjson. The reader

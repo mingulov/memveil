@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Attempt collector: kernel records to finalized capture.
 
 Implements design sections 2-4: transactional start,

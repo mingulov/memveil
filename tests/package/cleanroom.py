@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Pure clean-room audit helpers (unit-tested, no subprocesses).
 
 audit_trace() reassembles split strace records by PID, resolves
@@ -247,6 +249,8 @@ def check_manifest(root, manifest):
         "lib/libbpf_mojo.so.1",
         "bpf/swiotlb_attempt.bpf.o",
         "profiles/manifest.txt",
+        "LICENSE",
+        "THIRD-PARTY-NOTICES.md",
     )
     for rel in critical:
         if rel not in want:

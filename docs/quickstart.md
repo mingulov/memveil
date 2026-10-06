@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # MemVeil quickstart (development bundle 0.1.0)
 
 MemVeil captures swiotlb bounce **attempts** (try-counts, not copies)

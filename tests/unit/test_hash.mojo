@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """SHA-256 vectors (FIPS 180-4, cross-checked with hashlib)."""
 
 from std.sys import exit

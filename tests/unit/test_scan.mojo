@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Admission-scan decisions over fixture roots and bound docs."""
 
 from std.sys import exit

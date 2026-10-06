@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Inventory kernel/BTF/tracepoint evidence for MemVeil profiles.
 
 Read-only: probes the live host's evidence sources and either prints

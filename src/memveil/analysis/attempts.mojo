@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Attempt reducer: bounce counts, counter deltas, and report quality.
 
 The analyzer consumes validated events and finishes one Report. Its

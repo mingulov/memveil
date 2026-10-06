@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Reader unit tests: bounded JSON scanner, model validation, and
 capture reader limits plus cross-record checks (A05)."""
 

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Mojo side of the attempts differential (test tool, not shipped).
 
 Reads corpus.bin/corpus.txt, runs every vector through the
