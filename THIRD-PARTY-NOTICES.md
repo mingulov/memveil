@@ -3,12 +3,21 @@
 
 This bundle redistributes the following third-party components
 alongside MemVeil's own files (whose texts are `LICENSE` and
-`LICENSES/`). All paths below are bundle-relative.
+`LICENSES/`, and whose BPF object `bpf/swiotlb_attempt.bpf.o`
+is MemVeil's own GPL-2.0-only build, not third-party). All
+paths below are bundle-relative.
 
-- `lib/libbpf_mojo.so.1`, `bpf/*.bpf.o` toolchain aside, from
-  libbpf-mojo 0.2.1 (source commit `4e586be`, an independent
-  project; the exact tarball is named by sha256 in
-  `MANIFEST.json` under `libbpf_mojo`).
+Shipped libraries come from two origins: the pinned
+libbpf-mojo bundle (the bridge plus its upstream inventory
+below) and this bundle's own pixi build environment (the
+remaining `lib/*.so*`, resolved by the NEEDED closure walk
+in `tools/package`). The two origins are told apart in each
+entry.
+
+- `lib/libbpf_mojo.so.1` from libbpf-mojo 0.2.1 (source
+  commit `1ce369b`, an independent project; the exact
+  tarball is named by sha256 in `MANIFEST.json` under
+  `libbpf_mojo`).
   The bridge is GPL-3.0-or-later; its first-party texts are
   staged as `licenses/libbpf-mojo-LICENSE` and
   `licenses/libbpf-mojo-LICENSES/`, and its own notices are
@@ -21,24 +30,34 @@ alongside MemVeil's own files (whose texts are `LICENSE` and
   `licenses/LICENSE.BSD-2-Clause.libbpf`. Upstream:
   https://github.com/libbpf/libbpf (tag v1.7.0).
 
-- `lib/libgcc_s.so.1`, `lib/libstdc++.so.6` from conda-forge
-  GCC runtime packages (libgcc / libstdcxx 16.2.0).
+- `lib/libgcc_s.so.1` from this bundle's own pixi
+  environment: conda-forge package libgcc 16.2.0
+  (ha9f2e26_7).
   GPL-3.0-only WITH GCC-exception-3.1; full texts in
   `licenses/GPL-3.0.txt` plus
-  `licenses/RUNTIME.LIBRARY.EXCEPTION`. Exact package
-  identities and hashes are in
-  `THIRD-PARTY-NOTICES.libbpf-mojo.md`.
+  `licenses/RUNTIME.LIBRARY.EXCEPTION`.
+  Binary: https://conda.anaconda.org/conda-forge/linux-64/libgcc-16.2.0-ha9f2e26_7.conda
+  sha256: e031634c3a928f9594eba868bc46ef5230d6571a364a0c63215b06c4563bfcea
+  (Package identities come from this repository's
+  `pixi.lock`; the upstream bundle happens to resolve the
+  same frozen builds -- see
+  `THIRD-PARTY-NOTICES.libbpf-mojo.md` for its own copy.)
 
-- `lib/libz.so.1` from conda-forge libzlib 1.3.2.
-  Zlib; full text in `licenses/LICENSE.zlib`. Exact package
-  identity and hash are in
-  `THIRD-PARTY-NOTICES.libbpf-mojo.md`.
+- `lib/libstdc++.so.6` from this bundle's own pixi
+  environment: conda-forge package libstdcxx 16.2.0
+  (h934c35e_7).
+  GPL-3.0-only WITH GCC-exception-3.1; full texts in
+  `licenses/GPL-3.0.txt` plus
+  `licenses/RUNTIME.LIBRARY.EXCEPTION`.
+  Binary: https://conda.anaconda.org/conda-forge/linux-64/libstdcxx-16.2.0-h934c35e_7.conda
+  sha256: fa7018298629fc429971fffd6ecba3d27a7b02e4e890d6a93ea01ffebe8cb745
 
 - `lib/libAsyncRTRuntimeGlobals.so`,
   `lib/libKGENCompilerRTShared.so`,
-  `lib/libMSupportGlobals.so` from conda package
-  mojo-compiler 1.1.0 (release):
-  https://conda.modular.com/max/linux-64/mojo-compiler-1.1.0-release.conda
+  `lib/libMSupportGlobals.so` from this bundle's own pixi
+  environment: conda package mojo-compiler 1.1.0 (release).
+  Binary: https://conda.modular.com/max/linux-64/mojo-compiler-1.1.0-release.conda
+  sha256: 1ff52b39a0d2a1bedb8c4705aadc460205ca62fc19f63426bc545e4b60a31aa0
   These ship under the Modular MAX SDK license staged as
   `licenses/LICENSE.mojo-compiler` with
   `licenses/Third-Party-Notices.mojo-compiler`; provenance
@@ -55,11 +74,18 @@ alongside MemVeil's own files (whose texts are `LICENSE` and
   staged license texts before republishing beyond this
   owner handoff.
 
-- Host system libraries (`libc`, `libm`, `libdl`,
-  `libpthread`, `libelf`, `libz`, `libzstd`, the dynamic
-  loader; enumerated in `MANIFEST.json` under
-  `system_libraries`) are not shipped: the bundle links
-  them from the host at run time.
+- zlib (`libz.so.1`) is a host-provided system library,
+  not shipped in `lib/` (it is in `MANIFEST.json` under
+  `system_libraries`). `licenses/LICENSE.zlib` is staged
+  only because the upstream libbpf-mojo bundle -- whose
+  notices are staged verbatim -- ships its own copy; it
+  documents the upstream inventory, not this bundle.
+
+- Other host system libraries (`libc`, `libm`, `libdl`,
+  `libpthread`, `libelf`, `libzstd`, the dynamic loader;
+  enumerated in `MANIFEST.json` under `system_libraries`)
+  are not shipped: the bundle links them from the host at
+  run time.
 
 License texts: `LICENSE`, `LICENSES/` (MemVeil);
 `licenses/libbpf-mojo-LICENSE`,
@@ -67,7 +93,7 @@ License texts: `LICENSE`, `LICENSES/` (MemVeil);
 `licenses/LICENSE.BSD-2-Clause.libbpf` (libbpf);
 `licenses/GPL-3.0.txt` plus
 `licenses/RUNTIME.LIBRARY.EXCEPTION` (GCC runtimes);
-`licenses/LICENSE.zlib` (zlib);
+`licenses/LICENSE.zlib` (upstream-bundle copy only);
 `licenses/LICENSE.mojo-compiler`,
 `licenses/Third-Party-Notices.mojo-compiler`,
 `licenses/NOTICE.mojo-runtime.md` (Mojo runtimes).
