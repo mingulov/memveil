@@ -42,6 +42,12 @@ Exit 4 is the normal finalized code, including zero-event and
 signal stops. Exit 3 names the refusal reason (profile, bridge,
 privilege); exit 2 is a usage error; exit 1 is an error.
 
+The capture is root-owned (mode 0700/0600), so hand it to your
+user before the unprivileged replay below:
+
+    sudo cp -r /tmp/cap1 ~/cap1 && sudo chown -R $USER ~/cap1
+    chmod 700 ~/cap1 && chmod 600 ~/cap1/*
+
 An idle machine usually records zero attempts with complete
 counter snapshots: a valid-empty capture, visibly different
 from an unavailable one. See `examples/real-capture/README.md`
@@ -49,9 +55,9 @@ for a capture with 30 real events.
 
 ## 4. Replay offline (unprivileged)
 
-    ./bin/memveil report --format text /tmp/cap1
-    ./bin/memveil report --format json /tmp/cap1
-    ./bin/memveil report --format markdown /tmp/cap1
+    ./bin/memveil report --format text ~/cap1
+    ./bin/memveil report --format json ~/cap1
+    ./bin/memveil report --format markdown ~/cap1
 
 Report reads local files only: no BPF, no BTF, no libbpf, no
 network. Copy the capture directory to another machine (or

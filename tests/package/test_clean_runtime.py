@@ -33,6 +33,8 @@ import tarfile
 
 import pytest
 
+from cleanroom import audit_trace, check_manifest
+
 TARBALL = os.environ.get("MV_BUNDLE_TARBALL", "")
 REPO = os.environ.get("MV_REPO", "")
 VALID_EMPTY = os.environ.get("MV_VALID_EMPTY", "")
@@ -105,10 +107,13 @@ def test_manifest_hashes(bundle):
     assert manifest["memveil_revision"]
     assert manifest["libbpf_mojo"]["tarball_used_sha256"] == \
         manifest["libbpf_mojo"]["tarball_sha256"]
-    files = manifest["files"]
-    assert len(files) >= len(REQUIRED) - 1  # MANIFEST lists payload
-    for rel, want in sorted(files.items()):
-        assert (root / rel).is_file(), "manifest names missing %s" % rel
+    problems = check_manifest(str(root), manifest)
+    assert problems == [], problems
+    for rel in REQUIRED:
+        if rel != "MANIFEST.json":
+            assert rel in manifest["files"], \
+                "manifest omits required %s" % rel
+    for rel, want in sorted(manifest["files"].items()):
         assert sha_file(root / rel) == want, \
             "hash mismatch on %s" % rel
 
@@ -186,17 +191,26 @@ class TestCleanRoom:
         hide = tmp_path / "hide"
         hide.mkdir()
         libdir = os.path.join(REPO, ".pixi", "envs", "default", "lib")
+        missing = [n for n in HIDE_LIBS
+                   if not os.path.isfile(os.path.join(libdir, n))]
+        assert not missing, "pixi libs missing: %s" % missing
         moved = []
-        for name in HIDE_LIBS:
-            src = os.path.join(libdir, name)
-            assert os.path.isfile(src), "pixi lib missing: %s" % name
-            shutil.move(src, str(hide / name))
-            moved.append(name)
         try:
+            for name in HIDE_LIBS:
+                shutil.move(os.path.join(libdir, name),
+                            str(hide / name))
+                moved.append(name)
             yield
         finally:
+            errors = []
             for name in moved:
-                shutil.move(str(hide / name), os.path.join(libdir, name))
+                try:
+                    shutil.move(str(hide / name),
+                                os.path.join(libdir, name))
+                except OSError as err:
+                    errors.append("%s: %s" % (name, err))
+            assert not errors, \
+                "pixi restore failed: %s" % errors
 
     def test_replay_without_pixi_env_cwd(self, bundle, hidden_pixi,
                                          tmp_path):
@@ -218,41 +232,26 @@ class TestCleanRoom:
             assert ".pixi" not in hits[0], hits[0]
         # Replay under the audit: scrubbed env, foreign cwd.
         proc = run("strace", "-f", "-o", trace, "-e",
-                   "trace=openat,open,connect,sendto,execve",
+                   "trace=openat,open,openat2,socket,connect,"
+                   "sendto,bpf,execve,chdir,fchdir",
                    binary, "report", "--format", "json", cap,
                    env=env, cwd="/")
         assert proc.returncode == 4, proc.stderr
         report = json.loads(proc.stdout)
         assert metric(report, "bounce_attempts")["value"] == "30"
-        audit = open(trace, encoding="utf-8",
-                     errors="replace").read().splitlines()
-        # Failed lookups are harmless (the loader probes the
-        # stale absolute RUNPATH first, then falls through to
-        # $ORIGIN): only a successful call is a violation. The
-        # ban names collection inputs only: kernel introspection
-        # (BTF, tracefs, debugfs), pinned BPF objects, and
-        # anything outside /proc/self and /proc/cpuinfo. The
-        # language runtime's read-only device/cgroup inventory
-        # is not a collection input and cannot influence the
-        # byte-asserted report above.
-        for line in audit:
-            if "<unfinished" in line:
-                continue
-            for forbidden in (".pixi", "libbpf_mojo",
-                              "memveil-ws", "/sys/kernel/",
-                              "/sys/fs/bpf/"):
-                if forbidden in line and "= -1" not in line:
-                    pytest.fail(
-                        "clean-room violation: %s\n%s"
-                        % (forbidden, line))
-            if "/proc/" in line \
-                    and "/proc/self/" not in line \
-                    and "/proc/cpuinfo" not in line \
-                    and "= -1" not in line:
-                pytest.fail("clean-room violation: proc\n%s" % line)
-            if ("socket(" in line or "connect(" in line
-                    or "sendto(" in line) and "= -1" not in line:
-                pytest.fail("clean-room violation: net\n%s" % line)
+        text = open(trace, encoding="utf-8",
+                    errors="replace").read()
+        violations = audit_trace(
+            text, "/", os.path.realpath(REPO))
+        assert violations == [], violations
+
+
+# Exact refusal diagnostics for the deterministic denials (any
+# user, any host): the object bytes and the bridge lookup do not
+# depend on privilege or kernel identity.
+BAD_OBJECT_DIAG = "memveil record: object refused: object too small\n"
+NO_BRIDGE_DIAG = \
+    "memveil record: no bridge: pass --bridge or set LMB_NATIVE_LIB\n"
 
 
 def test_denied_bad_object(bundle, tmp_path):
@@ -264,9 +263,10 @@ def test_denied_bad_object(bundle, tmp_path):
     proc = run(binary, "record", "--output", str(out),
                "--object", str(junk),
                "--bridge", str(root / "lib" / "libbpf_mojo.so.1"),
-               "--duration", "2")
+               "--duration", "2",
+               env={"PATH": "/usr/bin:/bin"})
     assert proc.returncode == 3, (proc.returncode, proc.stderr)
-    assert "memveil record: " in proc.stderr
+    assert proc.stderr == BAD_OBJECT_DIAG, proc.stderr
     assert not out.exists(), "denied run must create no capture"
 
 
@@ -280,7 +280,7 @@ def test_denied_missing_bridge(bundle, tmp_path):
                str(root / "bpf" / "swiotlb_attempt.bpf.o"),
                "--duration", "2", env=env)
     assert proc.returncode == 3, (proc.returncode, proc.stderr)
-    assert "bridge" in proc.stderr
+    assert proc.stderr == NO_BRIDGE_DIAG, proc.stderr
     assert not out.exists(), "denied run must create no capture"
 
 
@@ -294,9 +294,17 @@ def test_denied_unprivileged_live(bundle, tmp_path):
                "--object",
                str(root / "bpf" / "swiotlb_attempt.bpf.o"),
                "--bridge", str(root / "lib" / "libbpf_mojo.so.1"),
-               "--duration", "2")
+               "--duration", "2",
+               env={"PATH": "/usr/bin:/bin"})
     assert proc.returncode == 3, (proc.returncode, proc.stderr)
-    assert "memveil record: " in proc.stderr
+    # The live reason is host-dependent (hook denial, unreadable
+    # format, unbound profile), so it is pinned by exclusion: a
+    # non-empty refusal naming neither deterministic boundary.
+    assert proc.stderr.startswith("memveil record: "), proc.stderr
+    reason = proc.stderr[len("memveil record: "):].strip()
+    assert reason, "empty refusal reason"
+    assert proc.stderr not in (BAD_OBJECT_DIAG, NO_BRIDGE_DIAG), \
+        "live attempt hit a static boundary: %s" % proc.stderr
     assert not out.exists(), "denied run must create no capture"
 
 

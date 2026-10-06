@@ -2247,7 +2247,7 @@ suite_package() {
     fi
     if ! MV_BUNDLE_TARBALL="$TARBALL" MV_REPO="$ROOT" \
         MV_VALID_EMPTY="$ROOT/tests/package/valid-empty" \
-        python3 -m pytest tests/package/test_clean_runtime.py \
+        python3 -m pytest tests/package/ \
         >"$PTMP/pytest.log" 2>&1; then
         echo "package: clean-runtime tests failed" >&2
         cat "$PTMP/pytest.log" >&2
