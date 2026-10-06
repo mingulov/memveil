@@ -20,6 +20,8 @@ decision has been made yet.
     export LMB_NATIVE_LIB=$PWD/lib/libbpf_mojo.so.1
     sudo -E ./bin/memveil record --output /tmp/cap1 \
         --object $PWD/bpf/swiotlb_attempt.bpf.o --duration 10
+    # If sudo drops the environment, pass the bridge directly:
+    # sudo ./bin/memveil record --bridge $PWD/lib/libbpf_mojo.so.1 ...
     sudo cp -r /tmp/cap1 ~/cap1 && sudo chown -R $USER ~/cap1
     ./bin/memveil report --format text ~/cap1       # unprivileged replay
 
