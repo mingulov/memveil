@@ -73,6 +73,267 @@ check_pixi_lock() {
     (cd "$ROOT" && pixi install --frozen)
 }
 
+fetch_libbpf_src() {
+    log "fetch pinned libbpf headers (stdlib only, cached)"
+    python3 - "$LOCK" "$ROOT/build/deps" <<'EOF'
+import hashlib, io, json, os, sys, tarfile, urllib.request
+
+lock_path, deps = sys.argv[1], sys.argv[2]
+with open(lock_path, "r", encoding="utf-8") as handle:
+    lock = json.load(handle)
+want = lock["toolchain"]["libbpf_source"]
+url, sha = want["tarball_url"], want["tarball_sha256"]
+headers = ("bpf_helpers.h", "bpf_helper_defs.h",
+           "bpf_core_read.h", "bpf_endian.h", "bpf_tracing.h")
+destdir = os.path.join(deps, "include", "bpf")
+stamp = os.path.join(destdir, ".digest")
+kept = os.path.join(deps, "libbpf.tgz")
+
+
+def sha_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1048576), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def cache_ok():
+    # Digest pins the lock revision; presence covers the full
+    # inventory; bytes compare against the kept tarball (itself
+    # sha-verified) catches mid-use tampering offline.
+    try:
+        with open(stamp, "r", encoding="utf-8") as handle:
+            if handle.read().strip() != sha:
+                return False
+    except OSError:
+        return False
+    for name in headers:
+        if not os.path.isfile(os.path.join(destdir, name)):
+            return False
+    if not os.path.isfile(kept) or sha_file(kept) != sha:
+        return False
+    with tarfile.open(kept, "r:gz") as tar:
+        for name in headers:
+            member = "libbpf-1.7.0/src/%s" % name
+            try:
+                want_bytes = tar.extractfile(member).read()
+            except (KeyError, AttributeError):
+                return False
+            with open(os.path.join(destdir, name), "rb") as handle:
+                if handle.read() != want_bytes:
+                    return False
+    return True
+
+
+if cache_ok():
+    print("libbpf headers cached: %s (digest %s)" % (destdir, sha[:16]))
+    sys.exit(0)
+print("libbpf headers refresh: cache missing, stale, or tampered")
+os.makedirs(deps, exist_ok=True)
+tmp = os.path.join(deps, "libbpf.tgz.part")
+print("fetch %s" % url)
+urllib.request.urlretrieve(url, tmp)
+if sha_file(tmp) != sha:
+    os.unlink(tmp)
+    print("FAIL libbpf tarball sha256 mismatch")
+    sys.exit(1)
+with tarfile.open(tmp, "r:gz") as tar:
+    members = tar.getmembers()
+    names = [m.name for m in members]
+    top = os.path.commonprefix(names)
+    if top != "libbpf-1.7.0" or any(
+            n != top and not n.startswith(top + "/")
+            for n in names):
+        print("FAIL libbpf tarball top dir: %r" % top)
+        sys.exit(1)
+    tar.extractall(deps, members=members)
+os.replace(tmp, kept)
+# The bpf/ install layout without building libbpf: only the
+# BPF-side headers are needed to compile the probe.
+import shutil
+srcdir = os.path.join(deps, "libbpf-1.7.0", "src")
+os.makedirs(destdir, exist_ok=True)
+for name in headers:
+    src = os.path.join(srcdir, name)
+    if not os.path.isfile(src):
+        print("FAIL libbpf header missing: %s" % name)
+        sys.exit(1)
+    shutil.copy(src, os.path.join(destdir, name))
+for name in headers:
+    if not os.path.isfile(os.path.join(destdir, name)):
+        print("FAIL libbpf headers missing after unpack")
+        sys.exit(1)
+with open(stamp, "w", encoding="utf-8") as handle:
+    handle.write(sha + "\n")
+print("libbpf headers ready: %s" % destdir)
+EOF
+}
+
+prepare_lmb() {
+    LMB_DIR="$ROOT/build/deps/lmb"
+    log "verify libbpf-mojo cache (${LMB_PACKAGE:-no LMB_PACKAGE})"
+    python3 - "$LOCK" "${LMB_PACKAGE:-}" "$LMB_DIR" \
+        "$ROOT/build/deps" <<'EOF'
+import hashlib, json, os, shutil, sys, tarfile
+
+lock_path, tarball, dest, deps = sys.argv[1:5]
+with open(lock_path, "r", encoding="utf-8") as handle:
+    lock = json.load(handle)
+pin = lock["dependencies"]["libbpf-mojo"]
+if pin["status"] != "pinned":
+    print("FAIL libbpf-mojo is not pinned in toolchain.lock.json")
+    sys.exit(1)
+want = pin["tarball_sha256"]
+version = pin["version"]
+top = "libbpf-mojo-%s/" % version
+required = (pin["mojo_tree"] + "/session.mojo", pin["native_lib"])
+stamp = os.path.join(dest, ".digest")
+kept = os.path.join(deps, "lmb-package.tgz")
+
+
+def sha_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1048576), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def resolve_tarball():
+    # Authoritative bytes: explicit LMB_PACKAGE first (verified,
+    # then kept), else the kept copy from a previous verified
+    # unpack. Returns a path or "".
+    if tarball:
+        if not os.path.isfile(tarball):
+            print("FAIL LMB_PACKAGE not found: %s" % tarball)
+            sys.exit(1)
+        if sha_file(tarball) != want:
+            print("FAIL LMB_PACKAGE sha256 mismatch; want %s" % want)
+            sys.exit(1)
+        if not os.path.isfile(kept) or sha_file(kept) != want:
+            shutil.copy2(tarball, kept)
+        return tarball
+    if os.path.isfile(kept) and sha_file(kept) == want:
+        return kept
+    return ""
+
+
+def unpack(src):
+    tmp = dest + ".part"
+    if os.path.isdir(tmp):
+        shutil.rmtree(tmp)
+    os.makedirs(tmp, exist_ok=True)
+    with tarfile.open(src, "r:gz") as tar:
+        names = tar.getnames()
+        if any(n != top.rstrip("/") and not n.startswith(top)
+               for n in names):
+            print("FAIL tarball top dir")
+            sys.exit(1)
+        tar.extractall(tmp)
+    root = os.path.join(tmp, top.rstrip("/"))
+    for rel in required:
+        if not os.path.isfile(os.path.join(root, rel)):
+            print("FAIL tarball missing %s" % rel)
+            sys.exit(1)
+    if os.path.isdir(dest):
+        shutil.rmtree(dest)
+    os.rename(root, dest)
+    shutil.rmtree(tmp)
+    with open(stamp, "w", encoding="utf-8") as handle:
+        handle.write(want + "\n")
+
+
+def cache_ok(src):
+    # Digest pins the lock revision; required files cover the
+    # consumed inventory; bytes compare against the verified
+    # tarball catches mid-use tampering. No tarball means no
+    # acceptance: a stamp plus presence alone cannot prove
+    # bytes, so stamp-valid caches without any archive are
+    # rejected and must be rebuilt from LMB_PACKAGE.
+    if not src:
+        return False
+    try:
+        with open(stamp, "r", encoding="utf-8") as handle:
+            if handle.read().strip() != want:
+                return False
+    except OSError:
+        return False
+    for rel in required:
+        if not os.path.isfile(os.path.join(dest, rel)):
+            return False
+    with tarfile.open(src, "r:gz") as tar:
+        members = {}
+        for m in tar.getmembers():
+            if m.isfile():
+                members[m.name] = m
+        seen = set()
+        for base, _, files in os.walk(dest):
+            for name in files:
+                full = os.path.join(base, name)
+                rel = os.path.relpath(full, dest)
+                if rel == ".digest":
+                    continue
+                seen.add(top + rel)
+                member = members.get(top + rel)
+                if member is None:
+                    return False
+                with open(full, "rb") as handle:
+                    if handle.read() != tar.extractfile(member).read():
+                        return False
+        want_members = {n for n in members if n != top.rstrip("/")}
+        if seen != want_members:
+            return False
+    return True
+
+
+src = resolve_tarball()
+if cache_ok(src):
+    print("libbpf-mojo %s cached: %s (digest %s)"
+          % (version, dest, want[:16]))
+    sys.exit(0)
+if not src:
+    if os.path.isdir(dest):
+        shutil.rmtree(dest)
+        print("FAIL libbpf-mojo cache missing, stale, or tampered;"
+              " set LMB_PACKAGE to the pinned %s tarball" % version)
+        sys.exit(1)
+    print("build: LMB_PACKAGE is not set; libbpf-mojo import path"
+          " unavailable (set LMB_PACKAGE to the pinned %s tarball"
+          " to enable collector targets)" % version)
+    sys.exit(0)
+print("libbpf-mojo %s refresh: cache missing, stale, or tampered"
+      % version)
+unpack(src)
+print("libbpf-mojo %s ready: %s" % (version, dest))
+EOF
+}
+
+build_bpf() {
+    fetch_libbpf_src || return 1
+    # x86-64-only floor (toolchain.lock.json platform_floor).
+    ARCH_INC="/usr/include/x86_64-linux-gnu"
+    if [ ! -f "$ARCH_INC/asm/types.h" ]; then
+        echo "build: missing $ARCH_INC/asm/types.h" >&2
+        return 1
+    fi
+    LIBBPF_INC="$ROOT/build/deps/include"
+    mkdir -p "$ROOT/build/bpf" || return 1
+    log clang --target=bpf production object
+    clang --target=bpf -O2 -g -Wall -Wextra -Werror -D__BPF__ \
+        -I bpf/include -I "$LIBBPF_INC" -I "$ARCH_INC" \
+        -c bpf/programs/swiotlb_attempt.bpf.c \
+        -o build/bpf/swiotlb_attempt.bpf.o || return 1
+    log clang --target=bpf saturation test object
+    clang --target=bpf -O2 -g -Wall -Wextra -Werror -D__BPF__ \
+        -DMV_RING_BYTES=4096 \
+        -I bpf/include -I "$LIBBPF_INC" -I "$ARCH_INC" \
+        -c bpf/programs/swiotlb_attempt.bpf.c \
+        -o build/bpf/swiotlb_attempt-test.bpf.o || return 1
+    sha256sum build/bpf/swiotlb_attempt.bpf.o \
+        build/bpf/swiotlb_attempt-test.bpf.o || return 1
+}
+
 main() {
     if [ $# -eq 0 ]; then
         set -- ""
@@ -95,16 +356,60 @@ main() {
             check_pixi_lock && check_toolchain || return 1
             log tools/validate-schemas
             "$ROOT/tools/validate-schemas" || return 1
+            prepare_lmb || return 1
+            MOJO_INCS=(-I src)
+            if [ -d "$ROOT/build/deps/lmb/mojo/libbpf_mojo" ]; then
+                MOJO_INCS+=(-I "$ROOT/build/deps/lmb/mojo")
+            fi
             if [ -f "$ROOT/src/memveil/main.mojo" ]; then
-                log pixi run --frozen mojo build -I src \
+                log pixi run --frozen mojo build "${MOJO_INCS[@]}" \
                     --target-cpu x86-64-v2 \
                     -o build/memveil src/memveil/main.mojo
                 mkdir -p build
-                pixi run --frozen mojo build -I src \
+                pixi run --frozen mojo build "${MOJO_INCS[@]}" \
                     --target-cpu x86-64-v2 \
                     -o build/memveil src/memveil/main.mojo || return 1
             else
                 echo "build: no Mojo targets registered yet" >&2
+            fi
+            if [ -f "$ROOT/tests/native/test_attempt_decode.c" ]; then
+                log clang -std=c11 -O2 -Wall -Wextra -Werror \
+                    -I bpf/include \
+                    -o build/native/test_attempt_decode \
+                    tests/native/test_attempt_decode.c
+                log clang -std=c11 -O2 -Wall -Wextra -Werror \
+                    -I bpf/include \
+                    -o build/native/test_counter_flow \
+                    tests/native/test_counter_flow.c
+                mkdir -p build/native
+                clang -std=c11 -O2 -Wall -Wextra -Werror \
+                    -I bpf/include \
+                    -o build/native/test_attempt_decode \
+                    tests/native/test_attempt_decode.c || return 1
+                clang -std=c11 -O2 -Wall -Wextra -Werror \
+                    -I bpf/include \
+                    -o build/native/test_counter_flow \
+                    tests/native/test_counter_flow.c || return 1
+            else
+                echo "build: no native targets registered yet" >&2
+            fi
+            if [ -f "$ROOT/tests/shim/mvshim.c" ]; then
+                log clang -std=c11 -O2 -Wall -Wextra -Werror \
+                    -shared -fPIC \
+                    -o build/shim/mvshim.so \
+                    tests/shim/mvshim.c
+                mkdir -p build/shim
+                clang -std=c11 -O2 -Wall -Wextra -Werror \
+                    -shared -fPIC \
+                    -o build/shim/mvshim.so \
+                    tests/shim/mvshim.c || return 1
+            else
+                echo "build: no shim targets registered yet" >&2
+            fi
+            if [ -f "$ROOT/bpf/programs/swiotlb_attempt.bpf.c" ]; then
+                build_bpf || return 1
+            else
+                echo "build: no BPF targets registered yet" >&2
             fi
             ;;
         *)

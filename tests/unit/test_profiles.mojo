@@ -643,12 +643,20 @@ def test_parse_minimal_ok() raises:
 
 def test_parse_reference_file() raises:
     var ps = load_profiles(String("profiles"))
-    assert_equal(len(ps), 1)
+    assert_equal(len(ps), 2)
     assert_equal(ps[0].profile_id, String("linux-x86_64-7.0-reference"))
     assert_equal(ps[0].status, String("reference-unvalidated"))
     assert_equal(len(ps[0].hooks), 1)
     assert_equal(len(ps[0].caps), 3)
     assert_equal(len(ps[0].notes), 3)
+    # Manifest order stays reference-first; the narrow gate
+    # doc appends for the two-phase collection scan. Its
+    # status is asserted by the VM gate, not pinned here.
+    assert_equal(
+        ps[1].profile_id, String("linux-x86_64-7.0.0-34-generic")
+    )
+    assert_equal(len(ps[1].hooks), 1)
+    assert_true(ps[1].hooks[0].format_has)
 
 
 def test_parse_validated_file() raises:

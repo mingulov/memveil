@@ -3,9 +3,10 @@
 #
 # Usage: tools/test <suite> | tools/test --help
 #
-# Implemented suites: schemas, unit, reports, profiles, doctor.
+# Implemented suites: schemas, unit, reports, profiles, doctor, attempts,
+# writer, signals, record, vm-attempts, buildcache.
 #
-# Planned suites: attempts, writer, vm-attempts, package.
+# Planned suites: package.
 # A skipped privileged test is reported as skipped, never as success.
 # Exit 0 only when the suite passes; 1 on test failure; 2 on invalid usage.
 # One suite per invocation; extra arguments are rejected.
@@ -28,9 +29,19 @@ usage() {
     sed -n '2,/^$/p' "$0" | sed 's/^# //; s/^#//'
 }
 
+mojo_inc_flags() {
+    # Extra -I flags, one per line, when the unpacked libbpf-mojo
+    # tree is present (tools/build prepares it from LMB_PACKAGE).
+    if [ -d "$ROOT/build/deps/lmb/mojo/libbpf_mojo" ]; then
+        printf '%s\n' "-I" "$ROOT/build/deps/lmb/mojo"
+    fi
+}
+
 run_unit_file() {
     file=$1
-    out=$(cd "$ROOT" && pixi run --frozen mojo run -I src "$file" 2>&1)
+    # shellcheck disable=SC2046
+    out=$(cd "$ROOT" && pixi run --frozen mojo run -I src \
+        $(mojo_inc_flags) "$file" 2>&1)
     rc=$?
     summary=$(printf '%s\n' "$out" | grep -E '[0-9]+ tests run' | tail -1)
     if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q '0 failed'; then
@@ -185,6 +196,18 @@ suite_reports() {
     expect_stdout "escape-markdown" tests/golden/report-escape.md 0 \
         report --format markdown "$ROOT/tests/fixtures/reader/escape"
 
+    expect_stdout "limits-at-cap" tests/golden/report-attempts.txt 0 \
+        report --max-line-bytes 65536 --max-session-bytes 16777216 \
+        --max-events-bytes 4294967296 "$ROOT/tests/fixtures/attempts"
+    expect_error "limits-line-cap" 2 \
+        report --max-line-bytes 65537 "$ROOT/tests/fixtures/attempts"
+    expect_error "limits-session-cap" 2 \
+        report --max-session-bytes 16777217 "$ROOT/tests/fixtures/attempts"
+    expect_error "limits-events-cap" 2 \
+        report --max-events-bytes 4294967297 "$ROOT/tests/fixtures/attempts"
+    expect_error "limits-tight-events" 2 \
+        report --max-events-bytes 10 "$ROOT/tests/fixtures/attempts"
+
     expect_json "attempts-json" tests/fixtures/attempts 0 \
         "capture OK: 3 events, 3 attempts, 9216 requested bytes"
     expect_json "multidev-json" tests/fixtures/reader/multidev 0 \
@@ -251,6 +274,32 @@ suite_reports() {
     expect_json "f13-literal-filter-json" \
         tests/fixtures/reader/literal-filter 0 \
         "capture OK: 3 events, 3 attempts, 9216 requested bytes"
+    expect_json "provenance-json" \
+        tests/fixtures/reader/provenance 0 \
+        "capture OK: 0 events, 0 attempts, 0 requested bytes"
+    "$BIN" report --format json "$ROOT/tests/fixtures/reader/provenance" \
+        >"$TMP/prov-report.json" 2>"$TMP/err"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        report_bad "provenance-retention: exit $rc, want 0"
+    elif ! python3 - "$TMP/prov-report.json" <<'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+ev = d.get("environment", {}).get("evidence", [])
+want = {
+    "kernel.release": "7.0.0-test",
+    "bridge.sha256": "ab" * 32,
+    "output.fs": "tmpfs",
+}
+got = {e["source"]: e["interpretation"] for e in ev
+       if e.get("type") == "provenance"}
+assert all(got.get(k) == v for k, v in want.items()), got
+PYEOF
+    then
+        report_bad "provenance-retention: evidence not retained"
+    else
+        report_ok "provenance-retention (3 items retained)"
+    fi
     "$BIN" report "$ROOT/tests/fixtures/reader/unsanitized-error" \
         >"$TMP/out" 2>"$TMP/err"
     rc=$?
@@ -620,7 +669,33 @@ with open(tmp + '/flood-cap/events.ndjson', 'wb') as f:
                       'value': '10', 'unit': 'count'}}
         f.write(json.dumps(d, separators=(', ', ': ')).encode() + b'\n')
 PYEOF
-    expect_error "f7-many-devices" 2 report "$TMP/manydev-cap"
+    # 2043 devices: the analyzer details the first 2041 and
+    # withholds the rest with a limitation note (R4D4); the
+    # oracle recomputes globals, detailed rows, the note, and
+    # the 4096-metric budget independently.
+    "$BIN" report --format json "$TMP/manydev-cap" \
+        >"$TMP/many.json" 2>"$TMP/err"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        report_bad "f7-many-devices: exit $rc, want 0"
+    else
+        rm -rf "$TMP/many-check"
+        mkdir -p "$TMP/many-check"
+        cp "$TMP/manydev-cap/session.json" "$TMP/many-check/session.json"
+        cp "$TMP/manydev-cap/events.ndjson" "$TMP/many-check/events.ndjson"
+        cp "$TMP/many.json" "$TMP/many-check/report.json"
+        counts=$("$ROOT/tools/validate-schemas" "$TMP/many-check" 2>&1)
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            report_bad "f7-many-devices: oracle rejected: $counts"
+        elif [ "$counts" != "capture OK: 2043 events, 2043 attempts, 8368128 requested bytes" ]; then
+            report_bad "f7-many-devices: counts '$counts'"
+        elif ! grep -q -F '2 devices lack detail rows: metric budget exhausted.' "$TMP/many.json"; then
+            report_bad "f7-many-devices: report lacks withhold note"
+        else
+            report_ok "f7-many-devices (exit 0, $counts)"
+        fi
+    fi
     "$BIN" report --format json "$TMP/flood-cap" \
         >"$TMP/flood.json" 2>"$TMP/err"
     rc=$?
@@ -745,7 +820,1115 @@ PYEOF
 }
 
 suite_profiles() {
-    run_unit_file tests/unit/test_profiles.mojo
+    run_unit_file tests/unit/test_profiles.mojo || return 1
+    run_unit_file tests/unit/test_narrow.mojo || return 1
+    run_unit_file tests/unit/test_scan.mojo
+}
+
+suite_attempts() {
+    # Corpus is the single vector source: regeneration must be
+    # byte-identical, then the C reference and the Mojo decoder
+    # run the same corpus and their verdict dumps must match.
+    python3 "$ROOT/tests/fixtures/attempts/gen_corpus.py" --check \
+        || return 1
+    NATIVE="$ROOT/build/native/test_attempt_decode"
+    if [ ! -x "$NATIVE" ]; then
+        echo "attempts: missing $NATIVE (run tools/build first)" >&2
+        return 1
+    fi
+    TMP=$(mktemp -d)
+    trap 'rm -rf "$TMP"' EXIT
+    (cd "$ROOT" && "$NATIVE" \
+        tests/fixtures/attempts/corpus.bin \
+        tests/fixtures/attempts/corpus.txt \
+        "$TMP/c.dump") || return 1
+    run_unit_file tests/unit/test_normalize.mojo || return 1
+    # shellcheck disable=SC2046
+    (cd "$ROOT" && pixi run --frozen mojo run -I src \
+        $(mojo_inc_flags) \
+        tests/unit/dump_normalize.mojo \
+        tests/fixtures/attempts/corpus.bin \
+        tests/fixtures/attempts/corpus.txt \
+        "$TMP/mojo.dump") || return 1
+    if ! cmp -s "$TMP/c.dump" "$TMP/mojo.dump"; then
+        echo "attempts: C/Mojo verdict dumps differ" >&2
+        diff "$TMP/c.dump" "$TMP/mojo.dump" | head -20 >&2
+        return 1
+    fi
+    FLOW="$ROOT/build/native/test_counter_flow"
+    if [ ! -x "$FLOW" ]; then
+        echo "attempts: missing $FLOW (run tools/build first)" >&2
+        return 1
+    fi
+    (cd "$ROOT" && "$FLOW" >"$TMP/flow.log" 2>&1) || {
+        cat "$TMP/flow.log" >&2
+        return 1
+    }
+    grep -qF "cut O=2 OB=0 E=0 EB=0 S=2 F=32" "$TMP/flow.log" || {
+        echo "attempts: counter-flow cut mismatch" >&2
+        cat "$TMP/flow.log" >&2
+        return 1
+    }
+    grep -qF "flow: 8 schedules passed" "$TMP/flow.log" || return 1
+    echo "attempts: corpus, native, mojo, and differential passed"
+    # Scripted close-out matrix: the REAL collector with
+    # scripted sources and a real writer per case. The
+    # lane asserts probe lines, session bytes via the
+    # independent python oracle, and replayed report
+    # metric values.
+    mkdir -p "$ROOT/build/probe"
+    # shellcheck disable=SC2046
+    (cd "$ROOT" && pixi run --frozen mojo build -I src \
+        $(mojo_inc_flags) -I tests/unit \
+        --target-cpu x86-64-v2 \
+        -o "$ROOT/build/probe/collector_probe" \
+        tests/unit/collector_probe.mojo) || return 1
+    CPROBE="$ROOT/build/probe/collector_probe"
+    JASSERT="$ROOT/tests/attempts/jassert.py"
+    afailed=0
+    awant() { # <case> <fixed-string>
+        grep -qF "$2" "$TMP/$1.log" || {
+            echo "attempts: case $1 missing [$2]" >&2
+            cat "$TMP/$1.log" >&2
+            afailed=1
+        }
+    }
+    areport() { # <case> : replay the capture, keep JSON
+        "$ROOT/build/memveil" report --format json \
+            "$TMP/$1" >"$TMP/$1.report.json" 2>"$TMP/$1.report.err"
+        rc=$?
+        echo "$rc" >"$TMP/$1.report.rc"
+    }
+    "$CPROBE" zero "$TMP/zero" >"$TMP/zero.log" 2>&1
+    awant zero "ready session=cap-1000000000-4242 start_ns=1000000000"
+    awant zero "exit=4"
+    awant zero "end=duration"
+    awant zero "outcome=finalized"
+    awant zero "polls=104"
+    awant zero "stats=5"
+    awant zero "snaps=4"
+    awant zero "reads=14"
+    python3 "$JASSERT" field "$TMP/zero/session.json" \
+        capture.end_reason duration || afailed=1
+    python3 "$JASSERT" field "$TMP/zero/session.json" \
+        quality.detail.status complete_for_scope || afailed=1
+    python3 "$JASSERT" field "$TMP/zero/session.json" \
+        quality.detail.loss_count 0 || afailed=1
+    python3 "$JASSERT" field "$TMP/zero/session.json" \
+        quality.aggregate.status complete_for_scope || afailed=1
+    python3 "$JASSERT" field "$TMP/zero/session.json" \
+        quality.aggregate.loss_count 0 || afailed=1
+    python3 "$JASSERT" field "$TMP/zero/session.json" \
+        quality.terminal.reason \
+        "terminal settlement unproven; stop protocol not yet proven" \
+        || afailed=1
+    python3 "$JASSERT" evidence "$TMP/zero/session.json" \
+        drain_closure proven || afailed=1
+    python3 "$JASSERT" events "$TMP/zero/events.ndjson" \
+        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot" \
+        || afailed=1
+    areport zero
+    # Replay exits 4: terminal is partial by design in A07
+    # (settlement unproven); metrics still assert exactly.
+    if [ "$(cat "$TMP/zero.report.rc")" != "4" ]; then
+        echo "attempts: zero replay exits $(cat "$TMP/zero.report.rc")" >&2
+        cat "$TMP/zero.report.err" >&2
+        afailed=1
+    fi
+    python3 "$JASSERT" metric "$TMP/zero.report.json" \
+        bounce_attempts 0 || afailed=1
+    python3 "$JASSERT" metric "$TMP/zero.report.json" \
+        counter_bounce_attempts 0 || afailed=1
+    python3 "$JASSERT" metric "$TMP/zero.report.json" \
+        counter_requested_bounce_bytes 0 || afailed=1
+    python3 "$JASSERT" field "$TMP/zero.report.json" \
+        quality.detail.status complete_for_scope || afailed=1
+    python3 "$JASSERT" evidence "$TMP/zero.report.json" \
+        measurement_scope "ordinals below observed at the end cut" \
+        || afailed=1
+    # Compact per-case assertions for the scripted matrix.
+    mcase() { # <case> <exit> <polls> <stats> <snaps> <reads> <committed> <events>
+        "$CPROBE" "$1" "$TMP/$1" >"$TMP/$1.log" 2>&1
+        awant "$1" "ready session=cap-1000000000-4242 start_ns=1000000000"
+        awant "$1" "exit=$2"
+        awant "$1" "end=duration"
+        awant "$1" "outcome=finalized"
+        awant "$1" "polls=$3"
+        awant "$1" "stats=$4"
+        awant "$1" "snaps=$5"
+        awant "$1" "reads=$6"
+        awant "$1" "committed=$7"
+        python3 "$JASSERT" events "$TMP/$1/events.ndjson" "$8" || afailed=1
+    }
+    mqual() { # <case> <dstatus> <dloss> <astatus> <aloss> <drain>
+        python3 "$JASSERT" field "$TMP/$1/session.json" \
+            capture.end_reason duration || afailed=1
+        python3 "$JASSERT" field "$TMP/$1/session.json" \
+            quality.detail.status "$2" || afailed=1
+        python3 "$JASSERT" field "$TMP/$1/session.json" \
+            quality.detail.loss_count "$3" || afailed=1
+        python3 "$JASSERT" field "$TMP/$1/session.json" \
+            quality.aggregate.status "$4" || afailed=1
+        python3 "$JASSERT" field "$TMP/$1/session.json" \
+            quality.aggregate.loss_count "$5" || afailed=1
+        python3 "$JASSERT" field "$TMP/$1/session.json" \
+            quality.terminal.reason \
+            "terminal settlement unproven; stop protocol not yet proven" \
+            || afailed=1
+        python3 "$JASSERT" evidence "$TMP/$1/session.json" \
+            drain_closure "$6" || afailed=1
+        python3 "$JASSERT" evidence "$TMP/$1/session.json" \
+            measurement_scope \
+            "ordinals below observed at the end cut" || afailed=1
+    }
+    mreplay4() { # <case> <bounce> <bytes> <cbounce> <cbytes>
+        areport "$1"
+        if [ "$(cat "$TMP/$1.report.rc")" != "4" ]; then
+            echo "attempts: $1 replay exits $(cat "$TMP/$1.report.rc")" >&2
+            cat "$TMP/$1.report.err" >&2
+            afailed=1
+        fi
+        python3 "$JASSERT" metric "$TMP/$1.report.json" \
+            bounce_attempts "$2" || afailed=1
+        python3 "$JASSERT" metric "$TMP/$1.report.json" \
+            requested_bounce_bytes "$3" || afailed=1
+        if [ "$4" = "absent" ]; then
+            python3 "$JASSERT" nometric "$TMP/$1.report.json" \
+                counter_bounce_attempts || afailed=1
+            python3 "$JASSERT" nometric "$TMP/$1.report.json" \
+                counter_requested_bounce_bytes || afailed=1
+        else
+            python3 "$JASSERT" metric "$TMP/$1.report.json" \
+                counter_bounce_attempts "$4" || afailed=1
+            python3 "$JASSERT" metric "$TMP/$1.report.json" \
+                counter_requested_bounce_bytes "$5" || afailed=1
+        fi
+    }
+    mgap() { # <case> <line> <reason>
+        python3 "$JASSERT" eventfield "$TMP/$1/events.ndjson" "$2" \
+            data.reason "$3" || afailed=1
+        python3 "$JASSERT" eventfield "$TMP/$1/events.ndjson" "$2" \
+            data.lost_count null || afailed=1
+    }
+    mcase detfail 4 104 5 4 14 1924 \
+        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
+    mqual detfail partial null complete_for_scope 0 \
+        "unknown: detach failed; shutdown evidence unresolved"
+    mgap detfail 4 "detail closure unproven: detach failed; shutdown evidence unresolved"
+    mreplay4 detfail 0 0 0 0
+    mcase stablen 4 103 5 6 16 1838 \
+        "bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
+    mqual stablen complete_for_scope 0 complete_for_scope 0 proven
+    mreplay4 stablen 1 64 1 64
+    mcase neverstable 4 104 5 22 32 406 "gap"
+    mqual neverstable partial null unavailable null \
+        "unknown: snapshot unresolved"
+    mgap neverstable 0 "detail closure unproven: snapshot unresolved"
+    mreplay4 neverstable 0 0 absent absent
+    mcase tornretry 4 103 5 5 14 1838 \
+        "bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
+    mqual tornretry complete_for_scope 0 complete_for_scope 0 proven
+    mreplay4 tornretry 1 64 1 64
+    mcase recvgt 4 104 5 4 16 2588 \
+        "bounce_attempt,bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
+    mqual recvgt partial null complete_for_scope 0 \
+        "unknown: ring count unproven"
+    mgap recvgt 6 "detail closure unproven: ring count unproven"
+    mreplay4 recvgt 2 128 2 128
+    mcase confirmact 4 104 5 4 14 1903 \
+        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
+    mqual confirmact partial null complete_for_scope 0 \
+        "unknown: post-snapshot activity"
+    mgap confirmact 4 "detail closure unproven: post-snapshot activity"
+    mreplay4 confirmact 0 0 1 0
+    mcase drainbudget 4 101 3 4 12 1903 \
+        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
+    mqual drainbudget partial null complete_for_scope 0 \
+        "unknown: drain budget exhausted"
+    mgap drainbudget 4 "detail closure unproven: drain budget exhausted"
+    mreplay4 drainbudget 0 0 0 0
+    mreason() { # <case> <reason>
+        python3 "$JASSERT" field "$TMP/$1/session.json" \
+            quality.detail.reason "$2" || afailed=1
+    }
+    mattempt() { # <case> <line> <device> <bytes> <op>
+        python3 "$JASSERT" eventfield "$TMP/$1/events.ndjson" "$2" \
+            data.device_id "$3" || afailed=1
+        python3 "$JASSERT" eventfield "$TMP/$1/events.ndjson" "$2" \
+            data.requested_bytes "$4" || afailed=1
+        python3 "$JASSERT" eventfield "$TMP/$1/events.ndjson" "$2" \
+            data.operation_id "$5" || afailed=1
+    }
+    mattempt stablen 0 d000001 64 op0
+    mcase delaysubmit 4 104 5 6 16 1495 \
+        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
+    mqual delaysubmit partial 1 complete_for_scope 0 proven
+    mreason delaysubmit "detail loss 1 (submit_fail=(1) malformed=(0) dropped=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
+    mreplay4 delaysubmit 0 0 1 64
+    mcase latesubmit 4 103 5 4 14 754 "bounce_attempt,gap"
+    mqual latesubmit partial null unavailable null \
+        "unknown: kernel identity unproven"
+    mgap latesubmit 1 "detail closure unproven: kernel identity unproven"
+    mattempt latesubmit 0 d000001 64 op0
+    mreplay4 latesubmit 1 64 absent absent
+    mcase lateemit 4 104 5 4 16 1097 "bounce_attempt,bounce_attempt,gap"
+    mqual lateemit partial null unavailable null \
+        "unknown: kernel identity unproven"
+    mgap lateemit 2 "detail closure unproven: kernel identity unproven"
+    mattempt lateemit 1 d000001 64 op1
+    mreplay4 lateemit 2 128 absent absent
+    mcase wrapobs 4 104 5 4 14 400 "gap"
+    mqual wrapobs partial null unavailable null "unknown: invalid epoch"
+    mgap wrapobs 0 "detail closure unproven: invalid epoch"
+    mreplay4 wrapobs 0 0 absent absent
+    mcase wrapemit 4 104 5 4 14 400 "gap"
+    mqual wrapemit partial null unavailable null "unknown: invalid epoch"
+    mgap wrapemit 0 "detail closure unproven: invalid epoch"
+    mreplay4 wrapemit 0 0 absent absent
+    mcase wrapsubmit 4 104 5 4 14 400 "gap"
+    mqual wrapsubmit partial null unavailable null "unknown: invalid epoch"
+    mgap wrapsubmit 0 "detail closure unproven: invalid epoch"
+    mreason wrapsubmit "detail loss unknown (invalid epoch; known: submit_fail=(unavailable) malformed=(0) dropped=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
+    mreplay4 wrapsubmit 0 0 absent absent
+    mcase wrapobsbytes 4 104 5 4 14 0 ""
+    mqual wrapobsbytes partial 1 unavailable null proven
+    mreplay4 wrapobsbytes 0 0 absent absent
+    mcase wrapemitbytes 4 104 5 4 14 0 ""
+    mqual wrapemitbytes partial 1 unavailable null proven
+    mreplay4 wrapemitbytes 0 0 absent absent
+    mcase bytecov 4 104 5 4 14 0 ""
+    mqual bytecov partial 1 unavailable null proven
+    mreplay4 bytecov 0 0 absent absent
+    mcase recoverable 4 106 5 4 18 1839 \
+        "bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
+    mqual recoverable partial 4 complete_for_scope 0 proven
+    mreason recoverable "detail loss 4 (submit_fail=(0) malformed=(1) dropped=(1) size_omitted=(0) duration_omitted=(1) signal_omitted=(0) rejected=(1) write_failed=(0))"
+    mattempt recoverable 0 d000001 64 op0
+    mreplay4 recoverable 1 64 5 144
+    merrcase() { # <case> <polls> <stats> <snaps> <reads> <committed> <events>
+        "$CPROBE" "$1" "$TMP/$1" >"$TMP/$1.log" 2>&1
+        awant "$1" "ready session=cap-1000000000-4242 start_ns=1000000000"
+        awant "$1" "exit=1"
+        awant "$1" "end=error"
+        awant "$1" "outcome=error"
+        awant "$1" "polls=$2"
+        awant "$1" "stats=$3"
+        awant "$1" "snaps=$4"
+        awant "$1" "reads=$5"
+        awant "$1" "committed=$6"
+        python3 "$JASSERT" events "$TMP/$1/events.ndjson" "$7" || afailed=1
+    }
+    mquale() { # <case> <dstatus> <dloss> <astatus> <aloss> <drain>
+        python3 "$JASSERT" field "$TMP/$1/session.json" \
+            capture.end_reason error || afailed=1
+        python3 "$JASSERT" field "$TMP/$1/session.json" \
+            quality.detail.status "$2" || afailed=1
+        python3 "$JASSERT" field "$TMP/$1/session.json" \
+            quality.detail.loss_count "$3" || afailed=1
+        python3 "$JASSERT" field "$TMP/$1/session.json" \
+            quality.aggregate.status "$4" || afailed=1
+        python3 "$JASSERT" field "$TMP/$1/session.json" \
+            quality.aggregate.loss_count "$5" || afailed=1
+        python3 "$JASSERT" field "$TMP/$1/session.json" \
+            quality.terminal.reason \
+            "terminal settlement unproven; stop protocol not yet proven" \
+            || afailed=1
+        python3 "$JASSERT" evidence "$TMP/$1/session.json" \
+            drain_closure "$6" || afailed=1
+    }
+    merrcase appendfail0 1 2 4 10 1896 \
+        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
+    mquale appendfail0 partial null complete_for_scope 0 \
+        "unknown: error shutdown"
+    mgap appendfail0 4 "detail closure unproven: error shutdown"
+    mreplay4 appendfail0 0 0 1 64
+    merrcase appendtorn 2 2 4 12 2240 \
+        "bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
+    mquale appendtorn partial null complete_for_scope 0 \
+        "unknown: error shutdown"
+    mgap appendtorn 5 "detail closure unproven: error shutdown"
+    mattempt appendtorn 0 d000001 64 op0
+    mreplay4 appendtorn 1 64 2 128
+    CATALOG_EVENTS=$(python3 -c "print(','.join(['bounce_attempt']*4096 + ['counter_snapshot']*4 + ['gap']))")
+    merrcase catalogfull 4097 2 4 8202 1429202 "$CATALOG_EVENTS"
+    mquale catalogfull partial null complete_for_scope 0 \
+        "unknown: error shutdown"
+    mgap catalogfull 4100 "detail closure unproven: error shutdown"
+    mattempt catalogfull 4095 d004096 64 op4095
+    mreplay4 catalogfull 4096 262144 4097 262208
+    merrcase hardpoll 2 2 4 11 2240 \
+        "bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
+    mquale hardpoll partial null complete_for_scope 0 \
+        "unknown: error shutdown"
+    mgap hardpoll 5 "detail closure unproven: error shutdown"
+    mreplay4 hardpoll 1 64 2 128
+    merrcase structfault 1 2 4 9 1896 \
+        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
+    mquale structfault partial null complete_for_scope 0 \
+        "unknown: error shutdown"
+    mgap structfault 4 "detail closure unproven: error shutdown"
+    mreplay4 structfault 0 0 1 64
+    merrcase structfaultq 1 2 4 9 1896 \
+        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
+    mquale structfaultq partial null complete_for_scope 0 \
+        "unknown: error shutdown"
+    mgap structfaultq 4 "detail closure unproven: error shutdown"
+    mreplay4 structfaultq 0 0 1 64
+    merrcase durhard 104 3 4 14 1895 \
+        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
+    mquale durhard partial null complete_for_scope 0 \
+        "unknown: error shutdown"
+    mgap durhard 4 "detail closure unproven: error shutdown"
+    mreplay4 durhard 0 0 1 0
+    merrcase sigclose 102 3 4 11 1895 \
+        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
+    mquale sigclose partial null complete_for_scope 0 \
+        "unknown: error shutdown"
+    mgap sigclose 4 "detail closure unproven: error shutdown"
+    mreplay4 sigclose 0 0 1 0
+    merrcase errdetfail 1 2 4 9 1925 \
+        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
+    mquale errdetfail partial null complete_for_scope 0 \
+        "unknown: detach failed; shutdown evidence unresolved"
+    mgap errdetfail 4 "detail closure unproven: detach failed; shutdown evidence unresolved"
+    mreplay4 errdetfail 0 0 1 64
+    merrcase combinederr 1 2 22 27 430 "gap"
+    mquale combinederr partial null unavailable null \
+        "unknown: detach failed; shutdown evidence unresolved"
+    mgap combinederr 0 "detail closure unproven: detach failed; shutdown evidence unresolved"
+    python3 "$JASSERT" evidence "$TMP/combinederr/session.json" \
+        shutdown.secondary_causes "snapshot unresolved" || afailed=1
+    mreplay4 combinederr 0 0 absent absent
+    mecase() { # <case> <exit> <end> <outcome> <polls> <stats> <snaps> <reads> <committed> <events>
+        "$CPROBE" "$1" "$TMP/$1" >"$TMP/$1.log" 2>&1
+        awant "$1" "exit=$2"
+        awant "$1" "end=$3"
+        awant "$1" "outcome=$4"
+        awant "$1" "polls=$5"
+        awant "$1" "stats=$6"
+        awant "$1" "snaps=$7"
+        awant "$1" "reads=$8"
+        awant "$1" "committed=$9"
+        python3 "$JASSERT" events "$TMP/$1/events.ndjson" "${10}" || afailed=1
+    }
+    mqualE() { # <case> <end> <dstatus> <dloss> <astatus> <aloss> <drain>
+        python3 "$JASSERT" field "$TMP/$1/session.json" \
+            capture.end_reason "$2" || afailed=1
+        python3 "$JASSERT" field "$TMP/$1/session.json" \
+            quality.detail.status "$3" || afailed=1
+        python3 "$JASSERT" field "$TMP/$1/session.json" \
+            quality.detail.loss_count "$4" || afailed=1
+        python3 "$JASSERT" field "$TMP/$1/session.json" \
+            quality.aggregate.status "$5" || afailed=1
+        python3 "$JASSERT" field "$TMP/$1/session.json" \
+            quality.aggregate.loss_count "$6" || afailed=1
+        python3 "$JASSERT" field "$TMP/$1/session.json" \
+            quality.terminal.reason \
+            "terminal settlement unproven; stop protocol not yet proven" \
+            || afailed=1
+        python3 "$JASSERT" evidence "$TMP/$1/session.json" \
+            drain_closure "$7" || afailed=1
+    }
+    mrefuse() { # <case> <exit> <outcome> <diag> <polls> <stats> <snaps> <reads>
+        "$CPROBE" "$1" "$TMP/$1" >"$TMP/$1.log" 2>&1
+        awant "$1" "exit=$2"
+        awant "$1" "end=unknown"
+        awant "$1" "outcome=$3"
+        awant "$1" "diag=$4"
+        awant "$1" "polls=$5"
+        awant "$1" "stats=$6"
+        awant "$1" "snaps=$7"
+        awant "$1" "reads=$8"
+        python3 "$JASSERT" nofile "$TMP/$1" || afailed=1
+    }
+    mecase siginhand 4 signal finalized 103 5 4 12 1495 \
+        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
+    mqualE siginhand signal partial 1 complete_for_scope 0 proven
+    mreason siginhand "detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(1) rejected=(0) write_failed=(0))"
+    mreplay4 siginhand 0 0 1 64
+    mecase sigreaderr 1 error error 103 5 4 12 1495 \
+        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
+    awant sigreaderr "diag=signal: scripted EIO"
+    mqualE sigreaderr error partial 1 complete_for_scope 0 proven
+    mreplay4 sigreaderr 0 0 1 64
+    mecase sigreaderr0 1 error error 102 5 4 11 1494 \
+        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
+    awant sigreaderr0 "diag=signal: scripted EIO"
+    mqualE sigreaderr0 error complete_for_scope 0 complete_for_scope 0 proven
+    mreplay4 sigreaderr0 0 0 0 0
+    mrefuse sigsetupfail 3 refused "signal setup: scripted mask failure" 0 0 0 0
+    mrefuse sigsetuprollback 1 refusal-rollback-failed "signal setup: scripted mask failure; close: scripted close failure" 0 0 0 0
+    mrefuse attachfail 3 refused "attach: scripted attach failure" 0 1 2 3
+    mrefuse rollbackfail 1 refusal-rollback-failed "attach: scripted attach failure; close: scripted close failure" 0 1 2 3
+    mrefuse nonzerostart 3 refused "start snapshot nonzero" 0 0 2 3
+    mcase clockseam 4 104 5 4 14 1494 \
+        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
+    mqual clockseam complete_for_scope 0 complete_for_scope 0 proven
+    python3 "$JASSERT" field "$TMP/clockseam/session.json" \
+        capture.window.end_ns 67100000002 || afailed=1
+    python3 "$JASSERT" eventfield "$TMP/clockseam/events.ndjson" 2 \
+        ts_ns 67100000001 || afailed=1
+    python3 "$JASSERT" eventfield "$TMP/clockseam/events.ndjson" 3 \
+        ts_ns 67100000001 || afailed=1
+    mreplay4 clockseam 0 0 0 0
+    mcase ooo100 4 104 5 4 18 2184 \
+        "bounce_attempt,bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
+    mqual ooo100 complete_for_scope 0 complete_for_scope 0 proven
+    python3 "$JASSERT" field "$TMP/ooo100/session.json" \
+        capture.window.end_ns 62100000068 || afailed=1
+    python3 "$JASSERT" eventfield "$TMP/ooo100/events.ndjson" 0 \
+        ts_ns 62100000057 || afailed=1
+    python3 "$JASSERT" eventfield "$TMP/ooo100/events.ndjson" 1 \
+        ts_ns 62100000017 || afailed=1
+    mreplay4 ooo100 2 128 2 128
+    SIZEREF_EVENTS=$(python3 -c "print(','.join(['bounce_attempt']*189 + ['counter_snapshot']*4))")
+    mecase sizerefused 4 size_limit finalized 292 5 4 391 66871 "$SIZEREF_EVENTS"
+    mqualE sizerefused size_limit partial 1 complete_for_scope 0 proven
+    mreason sizerefused "detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) size_omitted=(1) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
+    mreplay4 sizerefused 189 12096 190 12160
+    "$CPROBE" opcount "$TMP/opcount" >"$TMP/opcount.log" 2>&1
+    awant opcount "ready session=cap-1000000000-4242 start_ns=1000000000"
+    awant opcount "exit=4"
+    awant opcount "end=size_limit"
+    awant opcount "outcome=finalized"
+    awant opcount "polls=4194407"
+    awant opcount "stats=5"
+    awant opcount "snaps=4"
+    awant opcount "reads=8388621"
+    awant opcount "appends=4194308"
+    awant opcount "committed=1462702516"
+    mqualE opcount size_limit partial 1 complete_for_scope 0 proven
+    mreason opcount "detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) size_omitted=(1) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
+    python3 "$JASSERT" nofile "$TMP/opcount/events.ndjson" || afailed=1
+    mcase pausedbytes 4 103 5 4 14 753 "bounce_attempt,gap"
+    mqual pausedbytes partial null unavailable null \
+        "unknown: kernel identity unproven"
+    mgap pausedbytes 1 "detail closure unproven: kernel identity unproven"
+    mattempt pausedbytes 0 d000001 6 op0
+    mreplay4 pausedbytes 1 6 absent absent
+    mecase u64sum 4 size_limit finalized 104 5 4 15 1874 \
+        "bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
+    mqualE u64sum size_limit partial 1 complete_for_scope 0 proven
+    mreason u64sum "detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) size_omitted=(1) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
+    mattempt u64sum 0 d000001 18446744073709551615 op0
+    mreplay4 u64sum 1 18446744073709551615 2 18446744073709551615
+    mcase flowinject 4 104 5 4 14 0 ""
+    mqual flowinject partial 2 unavailable null proven
+    mreason flowinject "detail loss 2 (submit_fail=(2) malformed=(0) dropped=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
+    mreplay4 flowinject 0 0 absent absent
+    mecase unsynced 1 duration present_unsynced 104 5 4 14 1494 \
+        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
+    mqual unsynced complete_for_scope 0 complete_for_scope 0 proven
+    mreplay4 unsynced 0 0 0 0
+    # Live-adapter refusal contract: the real kernel (bad
+    # bridge) plus a real fresh writer must end refused
+    # (exit 3) with no residuals and no output dir.
+    "$CPROBE" live-refuse "$TMP/live-refuse" >"$TMP/live-refuse.log" 2>&1
+    awant live-refuse "exit=3"
+    awant live-refuse "end=unknown"
+    awant live-refuse "outcome=refused"
+    awant live-refuse "diag=open: op="
+    if grep -q "residual\|rollback-failed" "$TMP/live-refuse.log"; then
+        echo "attempts: live-refuse reports residuals" >&2
+        cat "$TMP/live-refuse.log" >&2
+        afailed=1
+    fi
+    if [ -e "$TMP/live-refuse" ]; then
+        echo "attempts: live-refuse left residual dir" >&2
+        afailed=1
+    fi
+    # Stuck construction unwind end to end: scripted kernel
+    # plus a real LiveWriter under fstat/unlink faults must
+    # end refusal-rollback-failed (exit 1) with the
+    # construction residuals in the diagnostic.
+    MVSHIM="fstat_fail_events,fail_unlink_events" \
+        LD_PRELOAD="$ROOT/build/shim/mvshim.so" \
+        "$CPROBE" live-create-residual "$TMP/live-stuck" \
+        >"$TMP/live-stuck.log" 2>&1
+    awant live-stuck "exit=1"
+    awant live-stuck "outcome=refusal-rollback-failed"
+    # Exact diagnostic: the residual list appears once, via
+    # abandon, never repeated from the creation error.
+    if ! grep -qxF "diag=output io: fstat failed: errno 5; writer residual: construction residuals: events,dir" "$TMP/live-stuck.log"; then
+        echo "attempts: live-stuck diagnostic mismatch" >&2
+        cat "$TMP/live-stuck.log" >&2
+        afailed=1
+    fi
+    if [ ! -d "$TMP/live-stuck" ]; then
+        echo "attempts: live-stuck unexpectedly clean" >&2
+        afailed=1
+    fi
+    if [ "$afailed" -ne 0 ]; then
+        echo "attempts: close-out matrix FAILED" >&2
+        return 1
+    fi
+    echo "attempts: close-out matrix passed (44 cases)"
+    return 0
+}
+
+suite_buildcache() {
+    # Warm-cache verification: tampered or incomplete caches
+    # heal from verified bytes, stale digests rebuild with a
+    # tarball and fail fast without any source. Needs
+    # LMB_PACKAGE (the pinned tarball path).
+    if [ -z "${LMB_PACKAGE:-}" ] || [ ! -f "$LMB_PACKAGE" ]; then
+        echo "buildcache: skipped (set LMB_PACKAGE to the pinned tarball)"
+        return 0
+    fi
+    BTMP=$(mktemp -d)
+    trap 'rm -rf "$BTMP"' EXIT
+    bfailed=0
+    bpin=$(python3 -c "
+import json
+lock = json.load(open('$ROOT/toolchain.lock.json'))
+print(lock['dependencies']['libbpf-mojo']['tarball_sha256'])
+")
+    # Case 1: combined tampering (edited lmb source, edited
+    # header, deleted header) heals in one build.
+    echo "BUILDCACHE-TAMPER" >>"$ROOT/build/deps/lmb/mojo/libbpf_mojo/session.mojo"
+    echo "BUILDCACHE-TAMPER" >>"$ROOT/build/deps/include/bpf/bpf_helpers.h"
+    rm "$ROOT/build/deps/include/bpf/bpf_endian.h"
+    if ! LMB_PACKAGE="$LMB_PACKAGE" "$ROOT/tools/build" \
+        >"$BTMP/heal.log" 2>&1; then
+        echo "buildcache: heal build failed" >&2
+        tail -20 "$BTMP/heal.log" >&2
+        bfailed=1
+    fi
+    grep -q "libbpf-mojo .* refresh" "$BTMP/heal.log" || {
+        echo "buildcache: lmb tamper not detected" >&2
+        bfailed=1
+    }
+    grep -q "libbpf headers refresh" "$BTMP/heal.log" || {
+        echo "buildcache: libbpf tamper not detected" >&2
+        bfailed=1
+    }
+    if grep -rq "BUILDCACHE-TAMPER" \
+        "$ROOT/build/deps/lmb/mojo/libbpf_mojo/session.mojo" \
+        "$ROOT/build/deps/include/bpf/bpf_helpers.h"; then
+        echo "buildcache: tamper marker survives heal" >&2
+        bfailed=1
+    fi
+    if [ ! -f "$ROOT/build/deps/include/bpf/bpf_endian.h" ]; then
+        echo "buildcache: deleted header not restored" >&2
+        bfailed=1
+    fi
+    if [ ! -f "$ROOT/build/deps/lmb-package.tgz" ] \
+        || [ ! -f "$ROOT/build/deps/libbpf.tgz" ]; then
+        echo "buildcache: verified tarballs not kept" >&2
+        bfailed=1
+    fi
+    # Case 2: a stale digest rebuilds with a tarball.
+    echo "deadbeef" >"$ROOT/build/deps/lmb/.digest"
+    if ! LMB_PACKAGE="$LMB_PACKAGE" "$ROOT/tools/build" \
+        >"$BTMP/stale.log" 2>&1; then
+        echo "buildcache: stale rebuild failed" >&2
+        tail -20 "$BTMP/stale.log" >&2
+        bfailed=1
+    fi
+    grep -q "libbpf-mojo .* refresh" "$BTMP/stale.log" || {
+        echo "buildcache: stale digest not detected" >&2
+        bfailed=1
+    }
+    if [ "$(cat "$ROOT/build/deps/lmb/.digest")" != "$bpin" ]; then
+        echo "buildcache: digest not re-pinned after rebuild" >&2
+        bfailed=1
+    fi
+    # Case 3: a stale digest without any source fails fast
+    # and removes the untrusted cache; then restore.
+    echo "deadbeef" >"$ROOT/build/deps/lmb/.digest"
+    mv "$ROOT/build/deps/lmb-package.tgz" "$BTMP/lmb-package.tgz"
+    if env -u LMB_PACKAGE "$ROOT/tools/build" \
+        >"$BTMP/offline.log" 2>&1; then
+        echo "buildcache: sourceless stale build exits 0" >&2
+        bfailed=1
+    fi
+    grep -q "FAIL libbpf-mojo cache missing, stale, or tampered" \
+        "$BTMP/offline.log" || {
+        echo "buildcache: missing stale-cache diagnostic" >&2
+        bfailed=1
+    }
+    if [ -e "$ROOT/build/deps/lmb" ]; then
+        echo "buildcache: untrusted cache not removed" >&2
+        bfailed=1
+    fi
+    mv "$BTMP/lmb-package.tgz" "$ROOT/build/deps/lmb-package.tgz"
+    if ! LMB_PACKAGE="$LMB_PACKAGE" "$ROOT/tools/build" \
+        >"$BTMP/restore.log" 2>&1; then
+        echo "buildcache: restore build failed (tree unhealthy)" >&2
+        tail -20 "$BTMP/restore.log" >&2
+        bfailed=1
+    fi
+    # Case 4: tampering heals from the kept tarball with no
+    # LMB_PACKAGE in the environment (offline byte-compare).
+    echo "BUILDCACHE-TAMPER" >>"$ROOT/build/deps/lmb/mojo/libbpf_mojo/batch.mojo"
+    if ! env -u LMB_PACKAGE "$ROOT/tools/build" \
+        >"$BTMP/kept.log" 2>&1; then
+        echo "buildcache: kept-tarball heal failed" >&2
+        tail -20 "$BTMP/kept.log" >&2
+        bfailed=1
+    fi
+    grep -q "libbpf-mojo .* refresh" "$BTMP/kept.log" || {
+        echo "buildcache: kept-tarball tamper not detected" >&2
+        bfailed=1
+    }
+    if grep -q "BUILDCACHE-TAMPER" \
+        "$ROOT/build/deps/lmb/mojo/libbpf_mojo/batch.mojo"; then
+        echo "buildcache: tamper marker survives kept heal" >&2
+        bfailed=1
+    fi
+    # Case 5: a valid stamp without any archive still fails
+    # when sources are tampered: stamps alone prove nothing.
+    echo "BUILDCACHE-TAMPER" >>"$ROOT/build/deps/lmb/mojo/libbpf_mojo/error.mojo"
+    mv "$ROOT/build/deps/lmb-package.tgz" "$BTMP/lmb-package.tgz"
+    if env -u LMB_PACKAGE "$ROOT/tools/build" \
+        >"$BTMP/archivless.log" 2>&1; then
+        echo "buildcache: archivless tampered build exits 0" >&2
+        bfailed=1
+    fi
+    grep -q "FAIL libbpf-mojo cache missing, stale, or tampered" \
+        "$BTMP/archivless.log" || {
+        echo "buildcache: missing archivless diagnostic" >&2
+        bfailed=1
+    }
+    if [ -e "$ROOT/build/deps/lmb" ]; then
+        echo "buildcache: untrusted cache not removed" >&2
+        bfailed=1
+    fi
+    mv "$BTMP/lmb-package.tgz" "$ROOT/build/deps/lmb-package.tgz"
+    if ! env -u LMB_PACKAGE "$ROOT/tools/build" \
+        >"$BTMP/restore2.log" 2>&1; then
+        echo "buildcache: kept restore failed (tree unhealthy)" >&2
+        tail -20 "$BTMP/restore2.log" >&2
+        bfailed=1
+    fi
+    if [ "$bfailed" -ne 0 ]; then
+        echo "buildcache: FAILED" >&2
+        return 1
+    fi
+    echo "buildcache: tamper-heal, stale, kept-tarball, and refusal cases passed"
+    return 0
+}
+
+suite_writer() {
+    run_unit_file tests/unit/test_encode.mojo || return 1
+    # Round-trip every fixture capture: parse/encode/reparse must
+    # preserve the struct exactly (exit 0). Exit 2 is accepted
+    # ONLY for the listed intentionally-invalid fixtures and the
+    # one regions fixture (encoder documents that lossy boundary
+    # by refusing it). Exit 1 (mismatch) always fails.
+    ROUNDTRIP="$ROOT/build/roundtrip_check"
+    (cd "$ROOT" && pixi run --frozen mojo build -I src \
+        --target-cpu x86-64-v2 \
+        -o "$ROUNDTRIP" tests/unit/roundtrip_check.mojo) || return 1
+    failed=0
+    checked=0
+    while IFS= read -r file; do
+        rel=${file#"$ROOT"/}
+        "$ROUNDTRIP" "$file" >/tmp/rt-out.log 2>&1
+        rc=$?
+        checked=$((checked + 1))
+        case "$rel" in
+            tests/fixtures/reader/badkind/events.ndjson|\
+            tests/fixtures/reader/corrupt-tail/events.ndjson|\
+            tests/fixtures/reader/f2-contradictory-provenance/session.json|\
+            tests/fixtures/reader/f3-baseline/session.json|\
+            tests/fixtures/reader/f3-span-sync/events.ndjson|\
+            tests/fixtures/reader/f3-span-transition/events.ndjson|\
+            tests/fixtures/reader/f4-definitive-dupkey/events.ndjson|\
+            tests/fixtures/reader/f4-definitive-version/events.ndjson|\
+            tests/fixtures/reader/f4-nocolon-dupkey/events.ndjson|\
+            tests/fixtures/reader/f4-nocolon-unknown/events.ndjson|\
+            tests/fixtures/reader/f4-truncated-nested/events.ndjson|\
+            tests/fixtures/reader/f4-truncated-primitive/events.ndjson|\
+            tests/fixtures/reader/f4-truncated-scope-device/events.ndjson|\
+            tests/fixtures/reader/f4-truncated-scope-profile/events.ndjson|\
+            tests/fixtures/reader/interior-corrupt/events.ndjson|\
+            tests/fixtures/reader/partial-tail/events.ndjson|\
+            tests/fixtures/reader/size-ok/events.ndjson|\
+            tests/fixtures/reader/size-over/events.ndjson|\
+            tests/fixtures/reader/unsanitized-error/events.ndjson|\
+            tests/fixtures/reader/unsanitized-session/session.json)
+                if [ "$rc" -ne 2 ]; then
+                    echo "writer: $rel exits $rc, want 2" >&2
+                    failed=1
+                fi
+                ;;
+            *)
+                if [ "$rc" -ne 0 ]; then
+                    echo "writer: $rel exits $rc, want 0" >&2
+                    cat /tmp/rt-out.log >&2
+                    failed=1
+                fi
+                ;;
+        esac
+    done <<EOF
+$(cd "$ROOT" && find tests/fixtures -name events.ndjson -o -name session.json | sort)
+EOF
+    if [ "$failed" -ne 0 ]; then
+        echo "writer: round-trip FAILED ($checked files)" >&2
+        return 1
+    fi
+    echo "writer: encoder and round-trip passed ($checked files)"
+    # EventWriter file primitive (creation, gates, groups, finalize):
+    # unit tests, then LD_PRELOAD fault injection plus a
+    # live path-replacement race. All unprivileged; every
+    # pwrite count is asserted so the short:N modes stay
+    # anchored to a verified op->call mapping.
+    run_unit_file tests/unit/test_writer.mojo || return 1
+    SHIM="$ROOT/build/shim/mvshim.so"
+    if [ ! -f "$SHIM" ]; then
+        echo "writer: missing $SHIM (run tools/build first)" >&2
+        return 1
+    fi
+    mkdir -p "$ROOT/build/probe"
+    (cd "$ROOT" && pixi run --frozen mojo build -I src \
+        --target-cpu x86-64-v2 \
+        -o "$ROOT/build/probe/shim_probe" \
+        tests/unit/shim_probe.mojo) || return 1
+    PROBE="$ROOT/build/probe/shim_probe"
+    WTMP=$(mktemp -d)
+    trap 'rm -rf "$WTMP"' EXIT
+    wfailed=0
+    run_script() { # <case> [<modes>]
+        if [ $# -ge 2 ]; then
+            MVSHIM="$2" MVSHIM_COUNT="$WTMP/$1.count" \
+                LD_PRELOAD="$SHIM" \
+                "$PROBE" script "$WTMP/$1" >"$WTMP/$1.log" 2>&1
+        else
+            "$PROBE" script "$WTMP/$1" >"$WTMP/$1.log" 2>&1
+        fi
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            echo "writer: case $1 exits $rc" >&2
+            cat "$WTMP/$1.log" >&2
+            wfailed=1
+        fi
+    }
+    want() { # <case> <fixed-string>
+        grep -qF "$2" "$WTMP/$1.log" || {
+            echo "writer: case $1 missing [$2]" >&2
+            cat "$WTMP/$1.log" >&2
+            wfailed=1
+        }
+    }
+    want_count() { # <case> <n>
+        got=$(cat "$WTMP/$1.count" 2>/dev/null || echo "?")
+        if [ "$got" != "$2" ]; then
+            echo "writer: case $1 pwrite count $got, want $2" >&2
+            wfailed=1
+        fi
+    }
+    want_file() { # <case> <rel> <expected>
+        cmp -s "$WTMP/$1/$2" "$3" || {
+            echo "writer: case $1 file $2 differs" >&2
+            ls -la "$WTMP/$1" >&2
+            wfailed=1
+        }
+    }
+    want_missing() { # <case> <rel>
+        if [ -e "$WTMP/$1/$2" ]; then
+            echo "writer: case $1 has unexpected $2" >&2
+            wfailed=1
+        fi
+    }
+    bytes_of() { # <char> <count> <file>
+        printf "$1%.0s" $(seq "$2") >"$3"
+    }
+    bytes_of A 99 "$WTMP/cA"
+    bytes_of B 99 "$WTMP/cB"
+    bytes_of C 99 "$WTMP/cC"
+    bytes_of D 99 "$WTMP/cD"
+    bytes_of E 99 "$WTMP/cE"
+    bytes_of '{' 49 "$WTMP/cS49"
+    for c in A B C D E; do printf '\n' >>"$WTMP/c$c"; done
+    printf '\n' >>"$WTMP/cS49"
+    cat "$WTMP/cA" "$WTMP/cB" "$WTMP/cE" >"$WTMP/full300"
+    cat "$WTMP/cA" >"$WTMP/pre100"
+    cat "$WTMP/cA" "$WTMP/cB" >"$WTMP/pre200"
+    cat "$WTMP/cA" "$WTMP/cB" "$WTMP/cC" "$WTMP/cD" >"$WTMP/full400"
+    head -c 50 "$WTMP/cC" >"$WTMP/torn250head"
+    cat "$WTMP/pre200" "$WTMP/torn250head" >"$WTMP/torn250"
+    : >"$WTMP/empty"
+    run_script pure
+    want pure "append1 ok committed=100"
+    want pure "append2 ok committed=200"
+    want pure "group ok mark=200 committed=200"
+    want pure "append3 ok committed=300"
+    want pure "finalize status=finalized"
+    want pure "events_len=300"
+    want pure "session_len=50"
+    want_file pure events.ndjson "$WTMP/full300"
+    want_file pure session.json "$WTMP/cS49"
+    run_script baseline ""
+    want baseline "finalize status=finalized"
+    want baseline "events_len=300"
+    want_count baseline 6
+    want_file baseline events.ndjson "$WTMP/full300"
+    run_script short2 "short:2"
+    want short2 "append2 ok committed=200"
+    want short2 "finalize status=finalized"
+    want_count short2 7
+    want_file short2 events.ndjson "$WTMP/full300"
+    run_script after2 "enospc_after:2"
+    want after2 "append1 ok committed=100"
+    want after2 "append2 error kind=append_failed"
+    want after2 "group error op=gc kind=append_failed"
+    want after2 "append3 error kind=append_failed"
+    want after2 "finalize status=unfinalized"
+    want after2 "events_len=100"
+    want after2 "session MISSING"
+    want_count after2 5
+    want_file after2 events.ndjson "$WTMP/pre100"
+    want_missing after2 session.json
+    run_script torn "short:3,enospc_after:4"
+    want torn "append2 ok committed=200"
+    want torn "group error op=gc kind=append_failed"
+    want torn "finalize status=unfinalized"
+    want torn "events_len=200"
+    want_count torn 6
+    want_file torn events.ndjson "$WTMP/pre200"
+    run_script fatal "short:3,enospc_after:4,fail_truncate"
+    want fatal "group error op=gc kind=fatal"
+    want fatal "append3 error kind=misuse"
+    want fatal "finalize error kind=misuse"
+    want fatal "events_len=250"
+    want_count fatal 4
+    want_file fatal events.ndjson "$WTMP/torn250"
+    run_script truncfail "fail_truncate"
+    want truncfail "group error op=abort kind=fatal"
+    want truncfail "append3 error kind=misuse"
+    want truncfail "events_len=400"
+    want_count truncfail 4
+    want_file truncfail events.ndjson "$WTMP/full400"
+    run_script evfull "enospc_events"
+    want evfull "append1 error kind=append_failed"
+    want evfull "finalize status=finalized"
+    want evfull "events_len=0"
+    want evfull "session_len=50"
+    want_count evfull 5
+    want_file evfull events.ndjson "$WTMP/empty"
+    want_file evfull session.json "$WTMP/cS49"
+    run_script tmpspc "enospc_tmp"
+    want tmpspc "append3 ok committed=300"
+    want tmpspc "finalize status=unfinalized"
+    want tmpspc "events_len=300"
+    want tmpspc "session MISSING"
+    want_count tmpspc 5
+    want_file tmpspc events.ndjson "$WTMP/full300"
+    want_missing tmpspc session.json
+    run_script norename "fail_rename"
+    want norename "finalize status=unfinalized"
+    want norename "session MISSING"
+    want_count norename 6
+    want_file norename events.ndjson "$WTMP/full300"
+    want_missing norename session.json
+    run_script dirfsync "fsync_dir"
+    want dirfsync "finalize status=present_unsynced"
+    want dirfsync "session_len=50"
+    want dirfsync "events_len=300"
+    want_count dirfsync 6
+    want_file dirfsync events.ndjson "$WTMP/full300"
+    want_file dirfsync session.json "$WTMP/cS49"
+    PARENT_REAL=$(realpath "$WTMP")
+    run_script parfsync "fsync_parent:$PARENT_REAL"
+    want parfsync "finalize status=present_unsynced note=parent fsync: $PARENT_REAL: errno 5"
+    want parfsync "session_len=50"
+    want parfsync "events_len=300"
+    want_count parfsync 6
+    want_file parfsync events.ndjson "$WTMP/full300"
+    want_file parfsync session.json "$WTMP/cS49"
+    run_createonly() { # <case> <modes>
+        MVSHIM="$2" MVSHIM_COUNT="$WTMP/$1.count" \
+            LD_PRELOAD="$SHIM" \
+            "$PROBE" createonly "$WTMP/$1" >"$WTMP/$1.log" 2>&1
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            echo "writer: case $1 exits $rc" >&2
+            cat "$WTMP/$1.log" >&2
+            wfailed=1
+        fi
+    }
+    # Construction pin failures unwind: a failed fstat on
+    # either the events file or the fresh dir raises io and
+    # leaves no directory behind.
+    run_createonly fstatev "fstat_fail_events"
+    want fstatev "createonly error kind=io"
+    if [ -e "$WTMP/fstatev" ]; then
+        echo "writer: fstatev left residual dir" >&2
+        ls -la "$WTMP/fstatev" >&2
+        wfailed=1
+    fi
+    FSTATDIR_REAL=$(realpath -m "$WTMP/fstatdir")
+    run_createonly fstatdir "fstat_fail_dir:$FSTATDIR_REAL"
+    want fstatdir "createonly error kind=io"
+    if [ -e "$WTMP/fstatdir" ]; then
+        echo "writer: fstatdir left residual dir" >&2
+        ls -la "$WTMP/fstatdir" >&2
+        wfailed=1
+    fi
+    run_livecreate() { # <case> <modes>
+        MVSHIM="$2" MVSHIM_COUNT="$WTMP/$1.count" \
+            LD_PRELOAD="$SHIM" \
+            "$PROBE" live-create "$WTMP/$1" >"$WTMP/$1.log" 2>&1
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            echo "writer: case $1 exits $rc" >&2
+            cat "$WTMP/$1.log" >&2
+            wfailed=1
+        fi
+    }
+    # Stuck construction unwind: fstat fails plus the events
+    # unlink fails, so artifacts remain and the LiveWriter
+    # abandon reports them (not a clean rollback).
+    run_livecreate stuckunwind "fstat_fail_events,fail_unlink_events"
+    want stuckunwind "live-create error kind=io"
+    want stuckunwind "live-create abandon=construction residuals: events,dir"
+    # Single-report boundary: the creation error keeps the
+    # cause without the residual suffix, and the second
+    # abandon drains nothing.
+    if grep -qF "; residuals:" "$WTMP/stuckunwind.log"; then
+        echo "writer: stuckunwind repeats residuals in error" >&2
+        cat "$WTMP/stuckunwind.log" >&2
+        wfailed=1
+    fi
+    if ! grep -qxF "live-create abandon2=" "$WTMP/stuckunwind.log"; then
+        echo "writer: stuckunwind second abandon not empty" >&2
+        cat "$WTMP/stuckunwind.log" >&2
+        wfailed=1
+    fi
+    if [ ! -d "$WTMP/stuckunwind" ]; then
+        echo "writer: stuckunwind unexpectedly clean" >&2
+        wfailed=1
+    fi
+    run_mutate() { # <mode> <case>
+        "$PROBE" "$1" "$WTMP/$2" >"$WTMP/$2.log" 2>&1
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            echo "writer: case $2 exits $rc" >&2
+            cat "$WTMP/$2.log" >&2
+            wfailed=1
+        fi
+    }
+    bytes_of J 10 "$WTMP/junk11"
+    printf '\n' >>"$WTMP/junk11"
+    run_mutate rename_events rnev
+    want rnev "mutate ok"
+    want rnev "finalize status=unfinalized note=namespace: events file replaced"
+    want_missing rnev session.json
+    want_file rnev events.ndjson "$WTMP/junk11"
+    run_mutate rename_dir rndir
+    want rndir "mutate ok"
+    want rndir "finalize status=unfinalized note=namespace: output dir lookup failed"
+    want_missing rndir.bak session.json
+    if [ ! -f "$WTMP/rndir.bak/events.ndjson" ]; then
+        echo "writer: rndir.bak lost its events file" >&2
+        wfailed=1
+    fi
+    # Live path-replacement race: an attacker loop swaps the
+    # output path between symlink (to an outside canary),
+    # file, dir, and missing while createonly runs. Every
+    # outcome must stay in the safe set; the canary must
+    # never be created. The mkdir->openat hit window is
+    # probabilistic, but safety is asserted on all 200 runs.
+    # Calm iterations kill the attacker outright so their
+    # success is deterministic (no STOP/CONT flake).
+    bytes_of x 1 "$WTMP/x1raw"
+    printf '\n' >>"$WTMP/x1raw"
+    bytes_of '{' 9 "$WTMP/s10raw"
+    printf '\n' >>"$WTMP/s10raw"
+    if ! (
+        RACE="$WTMP/race"
+        mkdir -p "$RACE"
+        CANARY="$WTMP/canary-target"
+        rm -rf "$CANARY"
+        start_attacker() {
+            (
+                while true; do
+                    ln -sfn "$CANARY" "$RACE/target" 2>/dev/null
+                    rm -f "$RACE/target" 2>/dev/null
+                    touch "$RACE/target" 2>/dev/null
+                    rm -f "$RACE/target" 2>/dev/null
+                    mkdir "$RACE/target" 2>/dev/null
+                    rmdir "$RACE/target" 2>/dev/null
+                done
+            ) &
+            ATTACKER=$!
+        }
+        start_attacker
+        trap 'kill -9 $ATTACKER 2>/dev/null' EXIT
+        ok_count=0
+        io_count=0
+        for i in $(seq 1 200); do
+            if [ $((i % 10)) -eq 0 ]; then
+                kill -9 "$ATTACKER" 2>/dev/null
+                wait "$ATTACKER" 2>/dev/null
+                rm -rf "$RACE/target" 2>/dev/null
+                out=$("$PROBE" createonly "$RACE/target" 2>&1)
+                rc=$?
+                if [ "$out" != \
+                    "createonly ok status=finalized committed=2" ]; then
+                    rm -rf "$RACE/target" 2>/dev/null
+                    out=$("$PROBE" createonly "$RACE/target" 2>&1)
+                    rc=$?
+                fi
+                if [ "$out" != \
+                    "createonly ok status=finalized committed=2" ]; then
+                    rm -rf "$RACE/target" 2>/dev/null
+                    out=$("$PROBE" createonly "$RACE/target" 2>&1)
+                    rc=$?
+                fi
+                start_attacker
+            else
+                rm -rf "$RACE/target" 2>/dev/null
+                out=$("$PROBE" createonly "$RACE/target" 2>&1)
+                rc=$?
+            fi
+            if [ "$rc" -ne 0 ]; then
+                echo "race iter $i exits $rc: $out" >&2
+                exit 1
+            fi
+            case "$out" in
+                "createonly ok status=finalized committed=2")
+                    ok_count=$((ok_count + 1))
+                    cmp -s "$RACE/target/events.ndjson" \
+                        "$WTMP/x1raw" || {
+                        echo "race iter $i bad events" >&2
+                        exit 1
+                    }
+                    cmp -s "$RACE/target/session.json" \
+                        "$WTMP/s10raw" || {
+                        echo "race iter $i bad session" >&2
+                        exit 1
+                    }
+                    ;;
+                "createonly error kind=exists") ;;
+                "createonly error kind=io")
+                    io_count=$((io_count + 1))
+                    ;;
+                *)
+                    echo "race iter $i unsafe output: $out" >&2
+                    exit 1
+                    ;;
+            esac
+        done
+        kill -9 "$ATTACKER" 2>/dev/null
+        trap - EXIT
+        if [ -e "$CANARY" ]; then
+            echo "race: CANARY ESCAPE at $CANARY" >&2
+            exit 1
+        fi
+        if [ "$ok_count" -lt 20 ]; then
+            echo "race: only $ok_count successes" >&2
+            exit 1
+        fi
+        echo "race: $ok_count/200 ok, ${io_count} io, canary absent"
+    ); then wfailed=1; fi
+    if [ "$wfailed" -ne 0 ]; then
+        echo "writer: EventWriter FAILED" >&2
+        return 1
+    fi
+    echo "writer: EventWriter primitive passed (unit + 17 shim cases + race)"
+    return 0
 }
 
 suite_doctor() {
@@ -821,6 +2004,327 @@ PYEOF
     return 0
 }
 
+suite_signals() {
+    run_unit_file tests/unit/test_signal.mojo || return 1
+    mkdir -p "$ROOT/build/probe"
+    # shellcheck disable=SC2046
+    (cd "$ROOT" && pixi run --frozen mojo build -I src \
+        $(mojo_inc_flags) -I tests/unit \
+        --target-cpu x86-64-v2 \
+        -o "$ROOT/build/probe/signal_probe" \
+        tests/unit/signal_probe.mojo) || return 1
+    PROBE="$ROOT/build/probe/signal_probe"
+    STMP=$(mktemp -d)
+    trap 'rm -rf "$STMP"' EXIT
+    failed=0
+    expect_line() { # <file> <line>
+        if ! grep -qxF "$2" "$1"; then
+            echo "signals: missing '$2' in $1" >&2
+            cat "$1" >&2
+            failed=1
+        fi
+    }
+    "$PROBE" none >"$STMP/none.log" 2>&1 || {
+        echo "signals: none exits nonzero" >&2
+        failed=1
+    }
+    expect_line "$STMP/none.log" "sigblk_initial=0000000000000000"
+    expect_line "$STMP/none.log" "setup=ok"
+    expect_line "$STMP/none.log" "check1=none"
+    expect_line "$STMP/none.log" "check2=none"
+    expect_line "$STMP/none.log" "sigblk_armed=0000000000004002"
+    expect_line "$STMP/none.log" "sigblk_restored=0000000000000000"
+    expect_line "$STMP/none.log" "post_teardown=error"
+    "$PROBE" repeat >"$STMP/repeat.log" 2>&1 || {
+        echo "signals: repeat exits nonzero" >&2
+        failed=1
+    }
+    expect_line "$STMP/repeat.log" "setup=ok"
+    expect_line "$STMP/repeat.log" "check1=pending"
+    expect_line "$STMP/repeat.log" "check2=pending"
+    expect_line "$STMP/repeat.log" "check3=none"
+    # Re-exec proof: the child sees the sentinel and every
+    # thread (main plus runtime workers) blocks SIGINT and
+    # SIGTERM, so no process-directed stop signal can land
+    # in a worker and miss signalfd.
+    "$PROBE" threads >"$STMP/threads.log" 2>&1 || {
+        echo "signals: threads exits nonzero" >&2
+        failed=1
+    }
+    expect_line "$STMP/threads.log" "sentinel_before=1"
+    nthreads=$(grep -c '^sigblk\[' "$STMP/threads.log" || true)
+    if [ "$nthreads" -lt 2 ]; then
+        echo "signals: want >=2 threads, got $nthreads" >&2
+        failed=1
+    fi
+    bad=0
+    while IFS= read -r line; do
+        hex=${line##*=}
+        last4=$(printf '%s' "$hex" | tail -c 4)
+        v=$((0x$last4))
+        if [ $((v & 0x4002)) -ne $((0x4002)) ]; then
+            echo "signals: thread mask missing bits: $line" >&2
+            bad=1
+        fi
+    done <<EOF
+$(grep '^sigblk\[' "$STMP/threads.log" || true)
+EOF
+    if [ "$bad" -ne 0 ]; then
+        failed=1
+    fi
+    # Spoofed sentinel: a pre-set MEMVEIL_SIGBLK=1 without the
+    # inherited mask must refuse (exit 3), never run with
+    # unblocked workers. Re-execing would loop, so refusal is
+    # the only fail-closed answer.
+    MEMVEIL_SIGBLK=1 "$PROBE" threads >"$STMP/spoof.log" 2>&1
+    rc=$?
+    if [ "$rc" -ne 3 ]; then
+        echo "signals: spoofed sentinel exits $rc, want 3" >&2
+        failed=1
+    fi
+    expect_line "$STMP/spoof.log" "reexec_refused=signal mask not inherited (MEMVEIL_SIGBLK set, SIGINT/SIGTERM unblocked); refusing"
+    # Big environment: ~1.2 MiB across 20 variables must
+    # still re-exec exactly once (getenv lookup, no read
+    # cap). timeout -s KILL bounds a re-exec loop: SIGTERM
+    # is blocked by design, so plain timeout cannot stop one.
+    if ! python3 - "$PROBE" "$STMP/bigenv.log" <<'PYEOF'
+import os, subprocess, sys
+env = dict(os.environ)
+for i in range(20):
+    env["MV_BIG%02d" % i] = "x" * 60000
+p = subprocess.run(
+    ["timeout", "-s", "KILL", "60", sys.argv[1], "threads"],
+    capture_output=True, text=True, env=env,
+)
+open(sys.argv[2], "w").write(p.stdout)
+sys.exit(0 if p.returncode == 0 else 1)
+PYEOF
+    then
+        echo "signals: big-environment run failed" >&2
+        failed=1
+    fi
+    expect_line "$STMP/bigenv.log" "sentinel_before=1"
+    bad=0
+    while IFS= read -r line; do
+        case "$line" in
+            sigblk\[*\]=*)
+                mask=${line#*=}
+                dec=$((16#$mask))
+                if [ $((dec & 0x4002)) -ne $((0x4002)) ]; then
+                    echo "signals: big-env unblocked: $line" >&2
+                    bad=1
+                fi
+                ;;
+        esac
+    done <"$STMP/bigenv.log"
+    if [ "$bad" -ne 0 ]; then
+        failed=1
+    fi
+    run_collector_case() { # <name> <mode> <signo>
+        dir="$STMP/$1"
+        "$PROBE" "$2" "$3" "$dir" >"$STMP/$1.log" 2>&1
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            echo "signals: $1 exits $rc" >&2
+            failed=1
+            return
+        fi
+        expect_line "$STMP/$1.log" "exit=4"
+        expect_line "$STMP/$1.log" "end=signal"
+        expect_line "$STMP/$1.log" "outcome=finalized"
+    }
+    run_collector_case latch15 latch 15
+    run_collector_case latch2 latch 2
+    expect_line "$STMP/latch15.log" "polls=105"
+    expect_line "$STMP/latch15.log" "stats=5"
+    expect_line "$STMP/latch15.log" "snaps=4"
+    expect_line "$STMP/latch15.log" "reads=14"
+    expect_line "$STMP/latch15.log" "committed=1494"
+    run_collector_case inhand15 inhand 15
+    expect_line "$STMP/inhand15.log" "polls=103"
+    expect_line "$STMP/inhand15.log" "stats=5"
+    expect_line "$STMP/inhand15.log" "snaps=4"
+    expect_line "$STMP/inhand15.log" "reads=12"
+    expect_line "$STMP/inhand15.log" "committed=1495"
+    for which in mask signalfd; do
+        dir="$STMP/fail-$which"
+        "$PROBE" setup_fail "$which" "$dir" >"$STMP/fail-$which.log" 2>&1
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            echo "signals: setup_fail $which exits $rc" >&2
+            failed=1
+        fi
+        expect_line "$STMP/fail-$which.log" "exit=3"
+        expect_line "$STMP/fail-$which.log" "end=unknown"
+        expect_line "$STMP/fail-$which.log" "outcome=refused"
+        expect_line "$STMP/fail-$which.log" \
+            "diag=signal setup: test $which failure"
+        expect_line "$STMP/fail-$which.log" \
+            "sigblk_initial=0000000000004002"
+        expect_line "$STMP/fail-$which.log" \
+            "sigblk_restored=0000000000004002"
+    done
+    # External process-directed signals: the probe runs to
+    # ready (printed after signalfd setup), then the lane
+    # kills it. A lost signal would hang to the timeout.
+    run_kill_case() { # <name> <signo>
+        dir="$STMP/$1"
+        "$PROBE" sigterm_run "$dir" >"$STMP/$1.log" 2>&1 &
+        pid=$!
+        (sleep 25; kill -KILL "$pid" 2>/dev/null) &
+        wd=$!
+        ready=0
+        for _ in $(seq 1 100); do
+            if grep -q '^ready session=' "$STMP/$1.log" 2>/dev/null; then
+                ready=1
+                break
+            fi
+            sleep 0.1
+        done
+        if [ "$ready" -ne 1 ]; then
+            echo "signals: $1 never reached ready" >&2
+            kill -KILL "$pid" 2>/dev/null
+            wait "$pid" 2>/dev/null
+            kill "$wd" 2>/dev/null
+            wait "$wd" 2>/dev/null
+            failed=1
+            return
+        fi
+        kill "-$2" "$pid" 2>/dev/null
+        wait "$pid"
+        rc=$?
+        kill "$wd" 2>/dev/null
+        wait "$wd" 2>/dev/null
+        if [ "$rc" -ne 0 ]; then
+            echo "signals: $1 exits $rc (want 0)" >&2
+            cat "$STMP/$1.log" >&2
+            failed=1
+            return
+        fi
+        expect_line "$STMP/$1.log" "end=signal"
+        expect_line "$STMP/$1.log" "outcome=finalized"
+    }
+    run_kill_case killterm TERM
+    run_kill_case killint INT
+    if [ "$failed" -ne 0 ]; then
+        echo "signals: FAILED" >&2
+        return 1
+    fi
+    echo "signals: live signalfd, re-exec, and kill cases passed"
+    return 0
+}
+
+suite_record() {
+    run_unit_file tests/unit/test_hash.mojo || return 1
+    run_unit_file tests/unit/test_gzip.mojo || return 1
+    run_unit_file tests/unit/test_clock.mojo || return 1
+    run_unit_file tests/unit/test_kernel.mojo || return 1
+    run_unit_file tests/unit/test_live.mojo || return 1
+    run_unit_file tests/unit/test_btf.mojo || return 1
+    echo "record: unit suites passed"
+    BIN="$ROOT/build/memveil"
+    if [ ! -x "$BIN" ]; then
+        echo "record: missing $BIN (run tools/build first)" >&2
+        return 1
+    fi
+    TMP=$(mktemp -d)
+    trap 'rm -rf "$TMP"' EXIT
+    rfailed=0
+    rexpect() { # <case> <want-exit> <want-err> <residual-or-empty> -- <args...>
+        cname=$1; want_exit=$2; want_err=$3; residual=$4
+        shift 4
+        if [ "$1" = "--" ]; then shift; fi
+        "$BIN" record "$@" >"$TMP/$cname.out" 2>"$TMP/$cname.err"
+        rc=$?
+        if [ "$rc" -ne "$want_exit" ]; then
+            echo "record: case $cname exit $rc, want $want_exit" >&2
+            cat "$TMP/$cname.err" >&2
+            rfailed=1
+            return 0
+        fi
+        if ! grep -qF "$want_err" "$TMP/$cname.err"; then
+            echo "record: case $cname missing [$want_err]" >&2
+            cat "$TMP/$cname.err" >&2
+            rfailed=1
+            return 0
+        fi
+        if [ -n "$residual" ] && [ -e "$residual" ]; then
+            echo "record: case $cname left residual $residual" >&2
+            rfailed=1
+            return 0
+        fi
+        echo "ok record-cli $cname (exit $rc)"
+    }
+    "$BIN" record --help >"$TMP/help.out" 2>"$TMP/help.err"
+    rc=$?
+    if [ "$rc" -ne 0 ] || ! grep -qF "usage: memveil record" "$TMP/help.out"; then
+        echo "record: case help failed (exit $rc)" >&2
+        rfailed=1
+    else
+        echo "ok record-cli help (exit 0)"
+    fi
+    rexpect no-args 2 "missing --output" "" --
+    rexpect unknown-flag 2 "unknown option" "" -- --bogus
+    rexpect bad-duration 2 "bad decimal" "" -- \
+        --output "$TMP/r" --object "$ROOT/tests/fixtures/elf/ok.o" \
+        --duration 0
+    rexpect duration-suffix 2 "bad decimal" "" -- \
+        --output "$TMP/r" --object "$ROOT/tests/fixtures/elf/ok.o" \
+        --duration 60s
+    rexpect budget-low 3 "below 131072" "$TMP/r-low" -- \
+        --output "$TMP/r-low" --object "$ROOT/tests/fixtures/elf/ok.o" \
+        --bridge "$TMP/nolib.so" --max-events-bytes 131071
+    rexpect budget-high 3 "above 4294967296" "$TMP/r-high" -- \
+        --output "$TMP/r-high" --object "$ROOT/tests/fixtures/elf/ok.o" \
+        --bridge "$TMP/nolib.so" --max-events-bytes 4294967297
+    env -u LMB_NATIVE_LIB "$BIN" record --output "$TMP/r-nobridge" \
+        --object "$ROOT/tests/fixtures/elf/ok.o" \
+        >"$TMP/nobridge.out" 2>"$TMP/nobridge.err"
+    rc=$?
+    if [ "$rc" -ne 3 ] || ! grep -qF "no bridge" "$TMP/nobridge.err" \
+        || [ -e "$TMP/r-nobridge" ]; then
+        echo "record: case no-bridge failed (exit $rc)" >&2
+        cat "$TMP/nobridge.err" >&2
+        rfailed=1
+    else
+        echo "ok record-cli no-bridge (exit 3)"
+    fi
+    host_ok=0
+    if [ "$(uname -m)" = "x86_64" ]; then
+        kmaj=$(uname -r | cut -d. -f1)
+        case $kmaj in
+            '' | *[!0-9]*) ;;
+            *) if [ "$kmaj" -ge 7 ]; then host_ok=1; fi ;;
+        esac
+    fi
+    if [ "$host_ok" -eq 1 ]; then
+        rexpect bad-object 3 "object refused: not a BPF object" \
+            "$TMP/r-badobj" -- \
+            --output "$TMP/r-badobj" \
+            --object "$ROOT/tests/fixtures/elf/badarch.o" \
+            --bridge "$TMP/nolib.so"
+        rexpect profile-miss 3 "unknown --profile" "$TMP/r-miss" -- \
+            --output "$TMP/r-miss" \
+            --object "$ROOT/tests/fixtures/elf/ok.o" \
+            --bridge "$TMP/nolib.so" --profile definitely-not-a-profile
+        if [ ! -f /sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format ]; then
+            rexpect no-format 3 "format unreadable" "$TMP/r-nofmt" -- \
+                --output "$TMP/r-nofmt" \
+                --object "$ROOT/tests/fixtures/elf/ok.o" \
+                --bridge "$TMP/nolib.so"
+        else
+            echo "record-cli: no-format skipped (live hook present)"
+        fi
+    else
+        echo "record-cli: env cases skipped (needs x86_64 kernel >= 7)"
+    fi
+    if [ "$rfailed" -ne 0 ]; then
+        return 1
+    fi
+    echo "record: CLI refusal cases passed"
+    return 0
+}
+
 if [ $# -eq 0 ]; then
     usage >&2
     exit 2
@@ -849,7 +2353,25 @@ case "$1" in
     doctor)
         suite_doctor
         ;;
-    attempts|writer|vm-attempts|package)
+    attempts)
+        suite_attempts
+        ;;
+    writer)
+        suite_writer
+        ;;
+    signals)
+        suite_signals
+        ;;
+    record)
+        suite_record
+        ;;
+    vm-attempts)
+        exec "$ROOT/tools/vm-attempts"
+        ;;
+    buildcache)
+        suite_buildcache
+        ;;
+    package)
         echo "test: suite '$1' is not implemented yet" >&2
         exit 2
         ;;

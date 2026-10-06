@@ -55,8 +55,13 @@
   },
   "dependencies": {
     "libbpf-mojo": {
-      "status": "unpinned",
-      "note": "During development an explicit local path override may be used. Release builds resolve a pinned libbpf-mojo source archive or package; the pin is recorded here once the first library artifact exists."
+      "status": "pinned",
+      "version": "0.2.0",
+      "source_commit": "9f0f7f6",
+      "tarball_sha256": "1a1506fa548d677203dd460b14d26b53c22190cfbbc5f056f91a3d730282d079",
+      "mojo_tree": "mojo/libbpf_mojo",
+      "native_lib": "lib/libbpf_mojo.so.1",
+      "note": "Consumed by path (LMB_PACKAGE) plus this hash. Memveil never reads libbpf-mojo sibling sources; standalone clones supply the tarball."
     }
   },
   "expected_first_lines": {

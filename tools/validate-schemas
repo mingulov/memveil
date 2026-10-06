@@ -36,6 +36,12 @@ MAX_LINE = 65536
 MAX_FILE = 16777216
 MAX_DEPTH = 64
 MAX_DEVICES = 4096
+# Devices with per-device detail rows: 2 global rows + 2 rows per
+# device + the 9-row fixed tail + 2 reserved counter rows must fit
+# the frozen 4096-metric budget. Further devices keep exact global
+# accounting; only their per-device rows are withheld with a
+# limitation note (analyzer R4D4 withholding rule).
+MAX_DETAILED_DEVICES = (4096 - 2 - 9 - 2) // 2
 
 CAPABILITIES = ("bounce_attempts", "mapping_lifecycle", "copy_bytes",
                 "sync_requests", "conversion_results", "region_state",
@@ -821,7 +827,9 @@ def compare_report_obj(obj, session, summary):
                 str(summary["attempts"]),
                 ("requested_bounce_bytes", None, None):
                     str(summary["requested"])}
-    for device, (count, total) in summary["per_device"].items():
+    detailed_ids = sorted(summary["per_device"])[:MAX_DETAILED_DEVICES]
+    for device in detailed_ids:
+        count, total = summary["per_device"][device]
         expected[("bounce_attempts", device, None)] = str(count)
         expected[("requested_bounce_bytes", device, None)] = str(total)
     for key, value in expected.items():
@@ -875,6 +883,24 @@ def compare_report_obj(obj, session, summary):
         fail("bad-type", "report.limitations")
     for limitation in limitations:
         check_text(limitation, 1024, "limitation")
+    n_withheld = len(summary["per_device"]) - len(detailed_ids)
+    if n_withheld > 0:
+        if n_withheld == 1:
+            noun = "device lacks detail rows:"
+        else:
+            noun = "devices lack detail rows:"
+        want = "%d %s metric budget exhausted." % (n_withheld, noun)
+        if want not in limitations:
+            fail("missing-note", "report lacks %r" % want)
+        for device in sorted(summary["per_device"])[MAX_DETAILED_DEVICES:]:
+            for name in ("bounce_attempts", "requested_bounce_bytes"):
+                if (name, device, None) in found:
+                    fail("unexpected-metric",
+                         "withheld device %s keeps %s rows" % (device, name))
+    else:
+        for limitation in limitations:
+            if "lack detail rows" in limitation:
+                fail("unexpected-note", "report notes %r" % limitation)
     return summary
 
 
