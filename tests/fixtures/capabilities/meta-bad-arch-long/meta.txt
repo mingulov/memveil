@@ -1,0 +1,3 @@
+arch=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+release=7.0.0
+euid=1001

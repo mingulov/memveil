@@ -1,7 +1,8 @@
-"""MemVeil command line: offline capture inspection."""
+"""MemVeil command line: offline inspection and passive doctor."""
 
 from std.sys import argv, exit
 
+from memveil.cli.doctor import run_doctor
 from memveil.cli.report import (
     EXIT_INTERNAL,
     EXIT_INVALID,
@@ -15,14 +16,16 @@ from memveil.model.report import ENGINE_VERSION
 def top_usage() -> String:
     """Usage text for the memveil program."""
     return (
-        "usage: memveil <report|help|version> [args]\n"
+        "usage: memveil <report|doctor|help|version> [args]\n"
         "\n"
-        "Offline capture inspection. Verbs:\n"
+        "Offline capture inspection and passive host check. Verbs:\n"
         "  report    read one capture and print attempt metrics.\n"
+        "  doctor    inspect the host passively and print capability.\n"
         "  help      print this text.\n"
         "  version   print the engine version.\n"
         "\n"
         "Run 'memveil report --help' for report options.\n"
+        "Run 'memveil doctor --help' for doctor options.\n"
     )
 
 
@@ -38,7 +41,7 @@ def main() raises:
     if verb == "version" or verb == "--version":
         print(ENGINE_VERSION)
         exit(EXIT_OK)
-    if verb != "report":
+    if verb != "report" and verb != "doctor":
         write_stderr(top_usage())
         exit(EXIT_INVALID)
     var rest = List[String]()
@@ -48,7 +51,10 @@ def main() raises:
         i += 1
     var code: Int
     try:
-        code = run_report(rest^)
+        if verb == "doctor":
+            code = run_doctor(rest^)
+        else:
+            code = run_report(rest^)
     except:
         code = EXIT_INTERNAL
     exit(code)
