@@ -1,0 +1,563 @@
+#!/usr/bin/env python3
+"""Generate ELF admission fixtures from the real build artifact.
+
+Derives small negative fixtures by byte-patching copies of the built BPF
+object, so fixtures stay structurally realistic (real section headers,
+real symbol table). The unpatched copy is the positive fixture.
+
+Inputs : build/bpf/swiotlb_attempt.bpf.o  (built by tools/build)
+Outputs: tests/fixtures/elf/*.o (10 base + 7 admission negatives).
+
+Patches (verified structurally after writing):
+  badarch : e_machine BPF(247) -> EM_X86_64(62).
+  nosym   : first byte of the "mv_swiotlb_attempt" symtab name -> 0x7f,
+            so the program symbol is unfindable (name lookup fails).
+  badsec  : shstrtab "tracepoint/swiotlb/swiotlb_bounced" section name
+            prefix "tracepoint" (10 bytes) -> "kprobe____", moving the
+            program symbol into a non-tracepoint section without
+            changing any offsets.
+  badring : mv_attempts max_entries 8388608 -> 4194304 (sane size,
+            refused only by the identity binding, never statically).
+  badmap  : mv_counts max_entries 6 -> 7 (geometry refused).
+  nobtf   : .BTF section renamed to .XTF (no map geometry knowable).
+  extern  : mv_counts linkage 1 -> 2 (declared, not defined here).
+  emptysec: tracepoint section sh_size -> 0 (program extent refused).
+  zerosym : program symbol st_size -> 0 (empty program refused).
+  mapsrange: .maps sh_offset -> past end of file (range refused).
+  typemaps: .maps sh_type PROGBITS -> NOBITS (type refused).
+  nodatasec: BTF ".maps" DATASEC name -> ".mXps" (no maps DATASEC).
+  unlisted: mv_counts secinfo type id -> 0 (VAR not in DATASEC).
+  dupvar  : synthetic ELF whose .BTF holds two mv_counts VARs
+            (duplicate map association refused).
+"""
+import struct
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+SRC = ROOT / "build/bpf/swiotlb_attempt.bpf.o"
+OUT = ROOT / "tests/fixtures/elf"
+WANT_SYM = b"mv_swiotlb_attempt\x00"
+SEC_NAME = b"tracepoint/swiotlb/swiotlb_bounced\x00"
+
+
+def read_elf(path: Path) -> bytearray:
+    data = bytearray(path.read_bytes())
+    assert data[0:4] == b"\x7fELF", "not an ELF file"
+    assert data[4] == 2 and data[5] == 1 and data[6] == 1, "not ELF64LE v1"
+    assert struct.unpack_from("<H", data, 18)[0] == 247, "not EM_BPF"
+    return data
+
+
+def find_bytes(data: bytes, needle: bytes, what: str) -> int:
+    off = data.find(needle)
+    assert off > 0, f"{what} not found"
+    assert data.find(needle, off + 1) < 0, f"{what} not unique"
+    return off
+
+
+def _sh_table(data: bytes):
+    e_shoff = struct.unpack_from("<Q", data, 0x28)[0]
+    e_shentsize, e_shnum, e_shstrndx = struct.unpack_from("<HHH", data, 0x3A)
+    assert e_shentsize == 64 and e_shnum > 0, "no section table"
+    return e_shoff, e_shentsize, e_shnum, e_shstrndx
+
+
+def _sec_range(data: bytes, index: int) -> tuple[int, int]:
+    e_shoff, e_shentsize, e_shnum, _ = _sh_table(data)
+    assert 0 <= index < e_shnum, "section index out of range"
+    base = e_shoff + index * e_shentsize
+    return struct.unpack_from("<Q", data, base + 24)[0], struct.unpack_from(
+        "<Q", data, base + 32
+    )[0]
+
+
+def _sec_index_by_name(data: bytes, sec_name: bytes) -> int:
+    e_shoff, e_shentsize, e_shnum, e_shstrndx = _sh_table(data)
+    shstr_off, _ = _sec_range(data, e_shstrndx)
+    for i in range(e_shnum):
+        name_off = struct.unpack_from("<I", data, e_shoff + i * e_shentsize)[0]
+        end = data.index(b"\x00", shstr_off + name_off)
+        if data[shstr_off + name_off : end] == sec_name:
+            return i
+    raise AssertionError(f"section {sec_name!r} not found")
+
+
+def find_in_section(data: bytes, needle: bytes, sec_name: bytes) -> int:
+    """Locate needle inside the named section (parsed via section headers)."""
+    sec_off, sec_size = _sec_range(data, _sec_index_by_name(data, sec_name))
+    seg = data[sec_off : sec_off + sec_size]
+    pos = seg.find(needle)
+    assert pos >= 0, f"needle missing in {sec_name!r}"
+    assert seg.find(needle, pos + 1) < 0, f"needle not unique in {sec_name!r}"
+    return sec_off + pos
+
+
+def find_in_shstrtab(data: bytes, needle: bytes) -> int:
+    """Locate needle inside the section-name table (via e_shstrndx)."""
+    _, _, _, e_shstrndx = _sh_table(data)
+    sec_off, sec_size = _sec_range(data, e_shstrndx)
+    seg = data[sec_off : sec_off + sec_size]
+    pos = seg.find(needle)
+    assert pos >= 0, "needle missing in shstrtab"
+    assert seg.find(needle, pos + 1) < 0, "needle not unique in shstrtab"
+    return sec_off + pos
+
+
+def _synthetic_wrongsec() -> bytes:
+    """Minimal valid BPF ELF whose program sits outside tracepoint/.
+
+    Sections: NULL, tracepoint/other/evt, kprobe/foo, .maps,
+    license, .symtab (NULL, LOCAL mv in section 1, GLOBAL mv
+    in section 2), .strtab, .shstrtab. The checker must walk
+    past the local decoy and refuse the global entry with
+    the section detail.
+    """
+    shstr = (
+        b"\x00tracepoint/other/evt\x00kprobe/foo\x00.maps\x00"
+        b"license\x00.symtab\x00.strtab\x00.shstrtab\x00"
+    )
+    strtab = b"\x00mv_swiotlb_attempt\x00"
+    sym_null = bytes(24)
+    sym_local = (
+        struct.pack("<I", 1) + bytes([0x02, 0]) + struct.pack("<HQQ", 1, 0, 0)
+    )
+    sym_global = struct.pack("<I", 1) + bytes([0x12]) + bytes([0]) + struct.pack(
+        "<HQQ", 2, 0, 0
+    )
+    symtab = sym_null + sym_local + sym_global
+    assert len(sym_null) == 24 and len(sym_local) == 24 and len(sym_global) == 24
+
+    ehdr_size = 64
+    shnum = 8
+    shoff = ehdr_size
+    data_off = shoff + shnum * 64
+    sym_off = data_off
+    str_off = sym_off + len(symtab)
+    shstr_off = str_off + len(strtab)
+
+    def sh(name: int, stype: int, off: int, size: int, link: int = 0) -> bytes:
+        return struct.pack(
+            "<IIQQQQIIQQ", name, stype, 0, 0, off, size, link, 0, 0, 0
+        )
+
+    n_tp = 1
+    n_kp = n_tp + len(b"tracepoint/other/evt\x00")
+    n_maps = n_kp + len(b"kprobe/foo\x00")
+    n_lic = n_maps + len(b".maps\x00")
+    n_sym = n_lic + len(b"license\x00")
+    n_str = n_sym + len(b".symtab\x00")
+    n_shstr = n_str + len(b".strtab\x00")
+    shdrs = [
+        sh(0, 0, 0, 0),
+        sh(n_tp, 1, 0, 0),
+        sh(n_kp, 1, 0, 0),
+        sh(n_maps, 1, 0, 0),
+        sh(n_lic, 1, 0, 0),
+        sh(n_sym, 2, sym_off, len(symtab), 6),
+        sh(n_str, 3, str_off, len(strtab)),
+        sh(n_shstr, 3, shstr_off, len(shstr)),
+    ]
+    # Section 5: symtab with link=strtab, info=first global, entsize=24.
+    shdrs[5] = struct.pack(
+        "<IIQQQQIIQQ", n_sym, 2, 0, 0, sym_off, len(symtab), 6, 2, 8, 24
+    )
+    ehdr = (
+        b"\x7fELF" + bytes([2, 1, 1, 0]) + b"\x00" * 8 + struct.pack("<HHI", 1, 247, 1)
+        + struct.pack("<QQQ", 0, 0, shoff)
+        + struct.pack("<IHHHHHH", 0, 64, 0, 0, 64, shnum, 7)
+    )
+    assert len(ehdr) == 64
+    blob = ehdr + b"".join(shdrs) + symtab + strtab + shstr
+    assert len(blob) == shstr_off + len(shstr)
+    return blob
+
+
+def _btf_walk(data: bytes):
+    """Walk .BTF types; return (recs, sname) with 1-based type ids."""
+    sec_idx = _sec_index_by_name(data, b".BTF")
+    sec_off, _ = _sec_range(data, sec_idx)
+    base = sec_off
+    magic, ver = struct.unpack_from("<HB", data, base)
+    assert magic == 0xEB9F and ver == 1, "BTF header"
+    hdr_len, type_off, type_len, str_off, str_len = struct.unpack_from(
+        "<IIIII", data, base + 4
+    )
+    tbase = base + hdr_len + type_off
+    tend = tbase + type_len
+    sbase = base + hdr_len + str_off
+
+    def sname(off: int) -> bytes:
+        end = data.index(b"\x00", sbase + off)
+        assert end < sbase + str_len, "BTF string bounds"
+        return data[sbase + off : end]
+
+    # Sequential walk: record each 1-based type id's record offset.
+    recs = {}
+    p, type_id = tbase, 1
+    while p < tend:
+        name_off, info, size = struct.unpack_from("<III", data, p)
+        kind, vlen = (info >> 24) & 0x1F, info & 0xFFFF
+        recs[type_id] = (p, kind, vlen, name_off, size)
+        extra = {
+            0: 0, 1: 4, 2: 0, 3: 12, 6: vlen * 8, 13: vlen * 8,
+            14: 4, 17: 4,
+        }.get(kind, 0)
+        if kind in (4, 5, 15):
+            extra = vlen * 12
+        elif kind == 19:
+            extra = vlen * 12
+        p += 12 + extra
+        type_id += 1
+    assert p == tend, "BTF type section walk"
+    return recs, sname
+
+
+def _sec_header_off(data: bytes, index: int) -> int:
+    e_shoff, e_shentsize, e_shnum, _ = _sh_table(data)
+    assert 0 <= index < e_shnum, "section index out of range"
+    return e_shoff + index * e_shentsize
+
+
+def _sym_entry_off(data: bytes, name: bytes, info: int) -> int:
+    """File offset of the symtab entry for (name, info byte)."""
+    sym_idx = _sec_index_by_name(data, b".symtab")
+    sym_base = _sec_header_off(data, sym_idx)
+    sym_off, sym_size = _sec_range(data, sym_idx)
+    link = struct.unpack_from("<I", data, sym_base + 40)[0]
+    entsize = struct.unpack_from("<Q", data, sym_base + 56)[0]
+    assert entsize == 24, "symtab entry size"
+    str_off, _ = _sec_range(data, link)
+    found = None
+    for pos in range(sym_off, sym_off + sym_size, 24):
+        st_name = struct.unpack_from("<I", data, pos)[0]
+        if data[pos + 4] != info:
+            continue
+        end = data.index(b"\x00", str_off + st_name)
+        if data[str_off + st_name : end] == name:
+            assert found is None, "symbol not unique"
+            found = pos
+    assert found is not None, "symbol not found"
+    return found
+
+
+def _btf_str_off(data: bytes, needle: bytes) -> int:
+    """File offset of needle inside the .BTF string area (unique)."""
+    sec_idx = _sec_index_by_name(data, b".BTF")
+    sec_off, _ = _sec_range(data, sec_idx)
+    hdr_len, _, _, str_off, str_len = struct.unpack_from(
+        "<IIIII", data, sec_off + 4
+    )
+    sbase = sec_off + hdr_len + str_off
+    seg = data[sbase : sbase + str_len]
+    pos = seg.find(needle)
+    assert pos >= 0, "BTF string missing"
+    assert seg.find(needle, pos + 1) < 0, "BTF string not unique"
+    return sbase + pos
+
+
+def _btf_datasec_entry_off(data: bytes, sec: bytes, var: bytes) -> int:
+    """File offset of VAR's secinfo type word in DATASEC sec."""
+    recs, sname = _btf_walk(data)
+    var_tid = None
+    for tid, (_, kind, _, name_off, _) in recs.items():
+        if kind == 14 and sname(name_off) == var:
+            assert var_tid is None, "VAR not unique"
+            var_tid = tid
+    assert var_tid, "VAR not found"
+    for _, (p, kind, vlen, name_off, _) in recs.items():
+        if kind == 15 and sname(name_off) == sec:
+            for m in range(vlen):
+                t = struct.unpack_from("<I", data, p + 12 + m * 12)[0]
+                if t == var_tid:
+                    return p + 12 + m * 12
+    raise AssertionError("secinfo entry not found")
+
+
+def _synthetic_dupvar() -> bytes:
+    """Minimal BPF ELF whose .BTF holds two mv_counts VARs.
+
+    Sections: NULL, .BTF, .shstrtab. The BTF blob is a header,
+    two identical VAR records, and one shared name string. The
+    checker must refuse the duplicate map association.
+    """
+    var = struct.pack("<III", 1, 14 << 24, 0) + struct.pack("<I", 1)
+    types = var + var
+    strings = b"\x00mv_counts\x00"
+    btf = struct.pack(
+        "<HBBIIIII",
+        0xEB9F, 1, 0, 24, 0, len(types), len(types), len(strings),
+    )
+    btf += types + strings
+    assert len(btf) == 24 + len(types) + len(strings)
+
+    shstr = b"\x00.BTF\x00.shstrtab\x00"
+    ehdr_size = 64
+    shnum = 3
+    shoff = ehdr_size
+    btf_off = shoff + shnum * 64
+    shstr_off = btf_off + len(btf)
+
+    def sh(name: int, stype: int, off: int, size: int) -> bytes:
+        return struct.pack(
+            "<IIQQQQIIQQ", name, stype, 0, 0, off, size, 0, 0, 0, 0
+        )
+
+    shdrs = [
+        sh(0, 0, 0, 0),
+        sh(1, 1, btf_off, len(btf)),
+        sh(6, 3, shstr_off, len(shstr)),
+    ]
+    ehdr = (
+        b"\x7fELF" + bytes([2, 1, 1, 0]) + b"\x00" * 8 + struct.pack("<HHI", 1, 247, 1)
+        + struct.pack("<QQQ", 0, 0, shoff)
+        + struct.pack("<IHHHHHH", 0, 64, 0, 0, 64, shnum, 2)
+    )
+    assert len(ehdr) == 64
+    blob = ehdr + b"".join(shdrs) + btf + shstr
+    assert len(blob) == shstr_off + len(shstr)
+    return blob
+
+
+def _btf_var_linkage_off(data: bytes, var: bytes) -> int:
+    """File offset of the btf_var linkage word for VAR."""
+    recs, sname = _btf_walk(data)
+    for _, (p, kind, _, name_off, _) in recs.items():
+        if kind == 14 and sname(name_off) == var:
+            return p + 12
+    raise AssertionError("VAR not found")
+
+
+def _btf_array_nelems_off(data: bytes, var: bytes, member: bytes) -> int:
+    """File offset of the ARRAY nelems behind VAR.member (via PTR)."""
+    recs, sname = _btf_walk(data)
+
+    want_var = want_mem = None
+    for tid, (p, kind, vlen, name_off, size) in recs.items():
+        if kind == 14 and sname(name_off) == var:
+            want_var = size
+            assert tid != size, "VAR self-reference"
+    assert want_var, "VAR not found"
+    p, kind, vlen, _, _ = recs[want_var]
+    assert kind == 4, "map def must be STRUCT"
+    for m in range(vlen):
+        mo, mt = struct.unpack_from("<II", data, p + 12 + m * 12)
+        if sname(mo) == member:
+            want_mem = mt
+    assert want_mem, "map member not found"
+    assert recs[want_mem][1] == 2, "member must be PTR"
+    arr = recs[want_mem][4]
+    assert recs[arr][1] == 3, "member must be PTR to ARRAY"
+    return recs[arr][0] + 20  # nelems: 12 type + 8 array head
+
+
+def main() -> int:
+    if not SRC.exists():
+        print(f"missing {SRC} -- run tools/build first", file=sys.stderr)
+        return 1
+    OUT.mkdir(parents=True, exist_ok=True)
+    base = read_elf(SRC)
+
+    ok = bytes(base)
+    (OUT / "ok.o").write_bytes(ok)
+
+    bad = bytearray(base)
+    struct.pack_into("<H", bad, 18, 62)  # e_machine = EM_X86_64
+    (OUT / "badarch.o").write_bytes(bytes(bad))
+
+    nosym = bytearray(base)
+    # Patch the .strtab occurrence (symtab names); the __btf_strings copy
+    # must survive so the fixture still parses as a realistic object.
+    sym_off = find_in_section(nosym, WANT_SYM, b".strtab")
+    nosym[sym_off] = 0x7F  # DEL -- no valid C string starts here now
+    (OUT / "nosym.o").write_bytes(bytes(nosym))
+
+    badsec = bytearray(base)
+    # Patch the .shstrtab occurrence (section names); a second copy may
+    # live in BTF aux data and must survive for realism.
+    sec_off = find_in_shstrtab(badsec, SEC_NAME)
+    badsec[sec_off : sec_off + 10] = b"kprobe____"  # same length
+    (OUT / "badsec.o").write_bytes(bytes(badsec))
+
+    (OUT / "tiny.o").write_bytes(ok[:40])  # truncated header
+
+    (OUT / "wrongsec.o").write_bytes(_synthetic_wrongsec())
+
+    # Valid shape, smaller ring: static checks pass with
+    # ring_bytes=4194304; only the identity binding refuses it.
+    badring = bytearray(base)
+    ring_off = _btf_array_nelems_off(
+        badring, b"mv_attempts", b"max_entries"
+    )
+    assert struct.unpack_from("<I", badring, ring_off)[0] == 8388608
+    struct.pack_into("<I", badring, ring_off, 4194304)
+    (OUT / "badring.o").write_bytes(bytes(badring))
+
+    # Corrupt counter geometry: the static map check refuses.
+    badmap = bytearray(base)
+    cnt_off = _btf_array_nelems_off(badmap, b"mv_counts", b"max_entries")
+    assert struct.unpack_from("<I", badmap, cnt_off)[0] == 6
+    struct.pack_into("<I", badmap, cnt_off, 7)
+    (OUT / "badmap.o").write_bytes(bytes(badmap))
+
+    # Missing BTF section: no map geometry is knowable.
+    nobtf = bytearray(base)
+    btf_off = find_in_shstrtab(nobtf, b".BTF\x00")
+    nobtf[btf_off : btf_off + 4] = b".XTF"
+    (OUT / "nobtf.o").write_bytes(bytes(nobtf))
+
+    # Extern counter VAR: declared but not defined here.
+    extern = bytearray(base)
+    link_off = _btf_var_linkage_off(extern, b"mv_counts")
+    assert struct.unpack_from("<I", extern, link_off)[0] == 1
+    struct.pack_into("<I", extern, link_off, 2)
+    (OUT / "extern.o").write_bytes(bytes(extern))
+
+    # Emptied program section: the program extent check refuses.
+    emptysec = bytearray(base)
+    tp_idx = _sec_index_by_name(
+        emptysec, b"tracepoint/swiotlb/swiotlb_bounced"
+    )
+    tp_hdr = _sec_header_off(emptysec, tp_idx)
+    assert struct.unpack_from("<Q", emptysec, tp_hdr + 32)[0] > 0
+    struct.pack_into("<Q", emptysec, tp_hdr + 32, 0)
+    (OUT / "emptysec.o").write_bytes(bytes(emptysec))
+
+    # Zero-sized program symbol: the empty-program check refuses.
+    zerosym = bytearray(base)
+    sym_pos = _sym_entry_off(zerosym, b"mv_swiotlb_attempt", 0x12)
+    assert struct.unpack_from("<Q", zerosym, sym_pos + 16)[0] > 0
+    struct.pack_into("<Q", zerosym, sym_pos + 16, 0)
+    (OUT / "zerosym.o").write_bytes(bytes(zerosym))
+
+    # .maps past end of file: the section range check refuses.
+    mapsrange = bytearray(base)
+    maps_idx = _sec_index_by_name(mapsrange, b".maps")
+    maps_hdr = _sec_header_off(mapsrange, maps_idx)
+    struct.pack_into("<Q", mapsrange, maps_hdr + 24, len(mapsrange) + 64)
+    (OUT / "mapsrange.o").write_bytes(bytes(mapsrange))
+
+    # .maps with the wrong section type: the type check refuses.
+    typemaps = bytearray(base)
+    tm_idx = _sec_index_by_name(typemaps, b".maps")
+    tm_hdr = _sec_header_off(typemaps, tm_idx)
+    assert struct.unpack_from("<I", typemaps, tm_hdr + 4)[0] == 1
+    struct.pack_into("<I", typemaps, tm_hdr + 4, 8)
+    (OUT / "typemaps.o").write_bytes(bytes(typemaps))
+
+    # Missing maps DATASEC: the BTF ".maps" name no longer exists.
+    nodatasec = bytearray(base)
+    maps_str = _btf_str_off(nodatasec, b".maps\x00")
+    nodatasec[maps_str : maps_str + 5] = b".mXps"
+    (OUT / "nodatasec.o").write_bytes(bytes(nodatasec))
+
+    # Counter VAR detached from the maps DATASEC: membership refuses.
+    unlisted = bytearray(base)
+    entry_off = _btf_datasec_entry_off(unlisted, b".maps", b"mv_counts")
+    assert struct.unpack_from("<I", unlisted, entry_off)[0] != 0
+    struct.pack_into("<I", unlisted, entry_off, 0)
+    (OUT / "unlisted.o").write_bytes(bytes(unlisted))
+
+    (OUT / "dupvar.o").write_bytes(_synthetic_dupvar())
+
+    tiny = (OUT / "tiny.o").read_bytes()
+    assert tiny == ok[:40] and len(tiny) == 40, "tiny.o"
+    # wrongsec.o is synthetic: validate its section table independently.
+    wrong = (OUT / "wrongsec.o").read_bytes()
+    assert wrong[0:4] == b"\x7fELF", "wrongsec.o magic"
+    assert struct.unpack_from("<H", wrong, 18)[0] == 247, "wrongsec.o machine"
+    for sec in (
+        b"tracepoint/other/evt",
+        b"kprobe/foo",
+        b".maps",
+        b"license",
+        b".symtab",
+        b".strtab",
+    ):
+        _sec_index_by_name(wrong, sec)
+    # BTF mutants: re-locate the patched nelems fields.
+    assert (
+        _btf_array_nelems_off(
+            (OUT / "badring.o").read_bytes(), b"mv_attempts", b"max_entries"
+        )
+        == ring_off
+    )
+    patched = (OUT / "badring.o").read_bytes()
+    assert struct.unpack_from("<I", patched, ring_off)[0] == 4194304
+    patched_map = (OUT / "badmap.o").read_bytes()
+    assert struct.unpack_from("<I", patched_map, cnt_off)[0] == 7
+    try:
+        _sec_index_by_name((OUT / "nobtf.o").read_bytes(), b".BTF")
+        raise SystemExit("nobtf.o still has .BTF")
+    except AssertionError:
+        pass
+    patched_ext = (OUT / "extern.o").read_bytes()
+    assert struct.unpack_from("<I", patched_ext, link_off)[0] == 2
+    # Admission negatives: re-locate every patched field.
+    patched_es = (OUT / "emptysec.o").read_bytes()
+    es_hdr = _sec_header_off(
+        patched_es,
+        _sec_index_by_name(patched_es, b"tracepoint/swiotlb/swiotlb_bounced"),
+    )
+    assert struct.unpack_from("<Q", patched_es, es_hdr + 32)[0] == 0
+    patched_zs = (OUT / "zerosym.o").read_bytes()
+    zs_pos = _sym_entry_off(patched_zs, b"mv_swiotlb_attempt", 0x12)
+    assert struct.unpack_from("<Q", patched_zs, zs_pos + 16)[0] == 0
+    patched_mr = (OUT / "mapsrange.o").read_bytes()
+    mr_hdr = _sec_header_off(
+        patched_mr, _sec_index_by_name(patched_mr, b".maps")
+    )
+    assert struct.unpack_from("<Q", patched_mr, mr_hdr + 24)[0] > len(
+        patched_mr
+    )
+    patched_tm = (OUT / "typemaps.o").read_bytes()
+    tm_hdr2 = _sec_header_off(
+        patched_tm, _sec_index_by_name(patched_tm, b".maps")
+    )
+    assert struct.unpack_from("<I", patched_tm, tm_hdr2 + 4)[0] == 8
+    patched_nd = (OUT / "nodatasec.o").read_bytes()
+    recs_nd, sname_nd = _btf_walk(patched_nd)
+    assert not any(
+        kind == 15 and sname_nd(no) == b".maps"
+        for _, (_, kind, _, no, _) in recs_nd.items()
+    ), "nodatasec.o still has a maps DATASEC"
+    patched_ul = (OUT / "unlisted.o").read_bytes()
+    assert struct.unpack_from("<I", patched_ul, entry_off)[0] == 0
+    patched_dv = (OUT / "dupvar.o").read_bytes()
+    recs_dv, sname_dv = _btf_walk(patched_dv)
+    dupes = sum(
+        1
+        for _, (_, kind, _, no, _) in recs_dv.items()
+        if kind == 14 and sname_dv(no) == b"mv_counts"
+    )
+    assert dupes == 2, "dupvar.o lacks duplicate VARs"
+    print(f"wrote 17 fixtures to {OUT}")
+
+    # Structural self-check of every fixture (.strtab-scoped symbol check,
+    # since __btf_strings legitimately repeats the program name).
+    for name, want_machine, want_sym, want_tp in [
+        ("ok.o", 247, True, True),
+        ("badarch.o", 62, True, True),
+        ("nosym.o", 247, False, True),
+        ("badsec.o", 247, True, False),
+    ]:
+        d = (OUT / name).read_bytes()
+        assert d[0:4] == b"\x7fELF", name
+        assert struct.unpack_from("<H", d, 18)[0] == want_machine, name
+        try:
+            find_in_section(d, WANT_SYM, b".strtab")
+            have_sym = True
+        except AssertionError:
+            have_sym = False
+        assert have_sym == want_sym, name
+        try:
+            find_in_shstrtab(d, SEC_NAME)
+            have_tp = True
+        except AssertionError:
+            have_tp = False
+        assert have_tp == want_tp, name
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

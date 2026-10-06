@@ -30,6 +30,15 @@ comptime _MAX_METRICS = 4096
 comptime _MAX_COUNTER_GROUPS = 4096
 comptime _MAX_LIMITATIONS = 256
 comptime _FIXED_TAIL_METRICS = 9
+# Devices with per-device detail rows: 2 global rows + 2 rows per
+# device + the fixed tail + 2 reserved counter rows must fit the
+# frozen 4096-metric budget. Further devices keep exact global
+# accounting; only their per-device rows are withheld (with a
+# limitation note), so a 4096-device capture (PRD NFR-03) always
+# replays with both aggregate metrics preserved.
+comptime _MAX_DETAILED_DEVICES = (
+    _MAX_METRICS - 2 - _FIXED_TAIL_METRICS - 2
+) // 2
 
 
 @fieldwise_init
@@ -1141,7 +1150,11 @@ struct AttemptAnalyzer:
             ids.append(self._devs[i].device_id)
         var sorted_ids = _sorted_strings(ids)
         var single = len(sorted_ids) == 1
-        for si in range(len(sorted_ids)):
+        var detailed = len(sorted_ids)
+        if detailed > _MAX_DETAILED_DEVICES:
+            detailed = _MAX_DETAILED_DEVICES
+        var withheld_devs = len(sorted_ids) - detailed
+        for si in range(detailed):
             var idx = self._dev_index[sorted_ids[si]]
             var dev_id = self._devs[idx].device_id
             var dev_count = self._devs[idx].count
@@ -1230,7 +1243,7 @@ struct AttemptAnalyzer:
                     + ": zero is unconfirmed.",
                 )
             )
-        for si in range(len(sorted_ids)):
+        for si in range(detailed):
             var idx = self._dev_index[sorted_ids[si]]
             var dev_id = self._devs[idx].device_id
             var scope = window + ", device " + dev_id + ", detail channel"
@@ -1282,8 +1295,17 @@ struct AttemptAnalyzer:
         var row_cov = _worse_coverage(
             agg_cov, _coverage(out.q_detail.status)
         )
+        if withheld_devs > 0:
+            self._note_fixed(
+                _plural(
+                    withheld_devs,
+                    "device lacks detail rows:",
+                    "devices lack detail rows:",
+                )
+                + " metric budget exhausted."
+            )
         var rows_left = (
-            _MAX_METRICS - 2 - 2 * len(sorted_ids) - _FIXED_TAIL_METRICS
+            _MAX_METRICS - 2 - 2 * detailed - _FIXED_TAIL_METRICS
         )
         var rows_withheld = 0
         for oi in range(len(order)):
@@ -1457,8 +1479,6 @@ struct AttemptAnalyzer:
             raise AnalysisError("horizon outside session window")
         if end_ns != self._session.window_end_ns:
             raise AnalysisError("narrowed horizon unsupported")
-        if 2 + 2 * len(self._devs) + _FIXED_TAIL_METRICS > _MAX_METRICS:
-            raise AnalysisError("too many devices to represent")
         var out = Report()
         out.session_id = self._session.session_id
         out.synthetic = self._session.synthetic

@@ -1,0 +1,57 @@
+#!/bin/sh
+# A07 VM gate: live attempt capture with an ftrace oracle.
+#
+# Runs tests/vm/test_attempt_capture.py (correctness + saturation)
+# under the frozen harness (virtme-ng 1.40, qemu 10.2.1). Exit 77
+# (SKIP) when vng, qemu, kvm, or the needed privilege is
+# missing; any other non-zero exit is a gate FAIL.
+set -u
+
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+VNG="${VNG:-}"
+
+if [ -z "$VNG" ]; then
+    VNG=$(command -v vng || true)
+fi
+if [ -z "$VNG" ] && [ -x "$HOME/.venv/vng/bin/vng" ]; then
+    VNG="$HOME/.venv/vng/bin/vng"
+fi
+if [ -z "$VNG" ]; then
+    echo "vm-attempts: SKIP: vng not available" >&2
+    exit 77
+fi
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+    echo "vm-attempts: SKIP: qemu-system-x86_64 not available" >&2
+    exit 77
+fi
+if [ ! -e /dev/kvm ]; then
+    echo "vm-attempts: SKIP: /dev/kvm not available" >&2
+    exit 77
+fi
+REL=$(uname -r)
+if [ ! -r "/boot/vmlinuz-$REL" ] || [ ! -w /dev/kvm ]; then
+    if ! sudo -n true 2>/dev/null; then
+        echo "vm-attempts: SKIP: vng needs root, no passwordless sudo" >&2
+        exit 77
+    fi
+    echo "vm-attempts: vng runs under sudo -n" >&2
+fi
+if [ ! -x "$ROOT/build/memveil" ]; then
+    echo "vm-attempts: missing $ROOT/build/memveil (run tools/build)" >&2
+    exit 1
+fi
+if [ ! -f "$ROOT/build/bpf/swiotlb_attempt.bpf.o" ]; then
+    echo "vm-attempts: missing production BPF object (run tools/build)" >&2
+    exit 1
+fi
+if [ ! -f "$ROOT/build/bpf/swiotlb_attempt-test.bpf.o" ]; then
+    echo "vm-attempts: missing saturation BPF object (run tools/build)" >&2
+    exit 1
+fi
+echo "vm-attempts: $($VNG --version 2>/dev/null)"
+echo "vm-attempts: $(qemu-system-x86_64 --version | head -n 1)"
+echo "vm-attempts: host $(uname -m) $(uname -r)"
+echo "vm-attempts: cpu $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)"
+export VNG
+cd "$ROOT" || exit 1
+exec python3 -m pytest tests/vm/test_attempt_capture.py -v "$@"

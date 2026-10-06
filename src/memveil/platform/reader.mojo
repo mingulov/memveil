@@ -42,6 +42,14 @@ comptime E_UNAME = UInt32(7)
 comptime _MODE_F_OK = 0
 comptime _MODE_R_OK = 4
 comptime _ENOENT = 2
+comptime _FS_TMPFS = 0x01021994
+comptime _FS_EXT = 0xEF53
+comptime _FS_OVERLAY = 0x794C7630
+comptime _FS_XFS = 0x58465342
+comptime _FS_BTRFS = 0x9123683E
+comptime _FS_NFS = 0x6969
+comptime _FS_9P = 0x01021997
+comptime _FS_FUSE = 0x65735546
 comptime _CHUNK_BYTES = 65536
 comptime _UTS_FIELDS = 6
 comptime _UTS_FIELD_LEN = 65
@@ -483,6 +491,59 @@ def read_host_file(path: String, what: String, cap: Int) raises EvidenceError ->
     failure and E_TOO_BIG past the cap.
     """
     return _read_bounded_local(path, what, cap)
+
+
+def _hex_trim(v: Int) -> String:
+    var digits = String("0123456789abcdef")
+    var out = String("")
+    var started = False
+    for i in range(16):
+        var nib = (v >> ((15 - i) * 4)) & 15
+        if nib != 0 or started or i == 15:
+            started = True
+            out += String(digits[byte=nib])
+    return out^
+
+
+def fs_type_name(path: String) -> String:
+    """Filesystem type holding path, or an unavailable marker.
+
+    statfs(2) f_type mapped for common filesystems; unknown
+    magics render as hex, failures as unavailable markers.
+    Never raises.
+    """
+    try:
+        var cstr = _to_cstr_local(path)
+        var buf = List[UInt8]()
+        for _ in range(120):
+            buf.append(UInt8(0))
+        var r = external_call["statfs", Int32](
+            Span(cstr).unsafe_ptr(), Span(buf).unsafe_ptr()
+        )
+        if Int(r) != 0:
+            return String("unavailable: statfs failed")
+        var magic = Int(0)
+        for i in range(8):
+            magic += Int(buf[i]) << (i * 8)
+        if magic == _FS_TMPFS:
+            return String("tmpfs")
+        if magic == _FS_EXT:
+            return String("ext2/ext3/ext4")
+        if magic == _FS_OVERLAY:
+            return String("overlay")
+        if magic == _FS_XFS:
+            return String("xfs")
+        if magic == _FS_BTRFS:
+            return String("btrfs")
+        if magic == _FS_NFS:
+            return String("nfs")
+        if magic == _FS_9P:
+            return String("9p")
+        if magic == _FS_FUSE:
+            return String("fuse")
+        return String("unknown:0x") + _hex_trim(magic)
+    except:
+        return String("unavailable: statfs failed")
 
 
 def bytes_to_text(data: List[UInt8]) -> String:

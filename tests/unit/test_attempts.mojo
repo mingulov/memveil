@@ -9,10 +9,12 @@ from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
 
 from memveil.analysis.attempts import AttemptAnalyzer
+from memveil.capture.normalize import device_id_for
 from memveil.capture.reader import default_limits, read_capture
 from memveil.model.event import Event
 from memveil.model.metric import Finding, Metric
 from memveil.model.report import ENGINE_VERSION, Report
+from memveil.model.session import Session
 from memveil.model.validate import checked_add, format_u64
 
 
@@ -441,23 +443,32 @@ def test_tail_metric_count_pinned() raises:
 
 
 def test_device_admission_bound() raises:
+    # Metric-budget contract: the analyzer never raises
+    # past the device budget. Per-device detail rows are
+    # withheld with a limitation note (counter-row
+    # precedent) so every 4096-device capture replays with
+    # exact globals. 2041 devices keep full detail and
+    # both aggregate rows; the rest keep exact global
+    # accounting without per-device rows.
     var r = read_capture(
         String("tests/fixtures/attempts"), False, default_limits()
     )
     var a = AttemptAnalyzer(r.session)
-    for i in range(2042):
+    for i in range(2041):
         a.consume(bounce_event(String("dev-") + String(i), String("op-") + String(i), UInt64(8)))
     var rep = a.finish(r.session.window_end_ns, False)
-    assert_equal(len(rep.metrics), 2 + 2 * 2042 + 9)
+    assert_equal(len(rep.metrics), 2 + 2 * 2041 + 9)
+    assert_true(not has_limitation(rep, String("lack detail rows")))
     var b = AttemptAnalyzer(r.session)
-    for i in range(2043):
+    for i in range(2042):
         b.consume(bounce_event(String("dev-") + String(i), String("op-") + String(i), UInt64(8)))
-    var raised = False
-    try:
-        _ = b.finish(r.session.window_end_ns, False)
-    except:
-        raised = True
-    assert_true(raised)
+    var rep2 = b.finish(r.session.window_end_ns, False)
+    assert_true(
+        has_limitation(rep2, String("1 device lacks detail rows"))
+    )
+    var all_m = metric_by_name(rep2, String("bounce_attempts"), String(""))
+    assert_equal(all_m.value, UInt64(2042))
+    assert_true(len(rep2.metrics) <= 4096)
 
 
 def test_counter_budget_withheld() raises:
@@ -465,32 +476,22 @@ def test_counter_budget_withheld() raises:
         String("tests/fixtures/attempts"), False, default_limits()
     )
     var a = AttemptAnalyzer(r.session)
-    for i in range(2042):
+    for i in range(2041):
         a.consume(bounce_event(String("dev-") + String(i), String("op-") + String(i), UInt64(8)))
-    a.consume(
-        snapshot_event(
-            String("swiotlb.bounce_attempts"), String("dev-1"),
-            String("p"), UInt64(3), UInt64(10),
+    for g in range(4):
+        var dev = String("dev-") + String(g + 1)
+        a.consume(
+            snapshot_event(
+                String("swiotlb.bounce_attempts"), dev,
+                String("p"), UInt64(3), UInt64(10),
+            )
         )
-    )
-    a.consume(
-        snapshot_event(
-            String("swiotlb.bounce_attempts"), String("dev-1"),
-            String("p"), UInt64(3), UInt64(13),
+        a.consume(
+            snapshot_event(
+                String("swiotlb.bounce_attempts"), dev,
+                String("p"), UInt64(3), UInt64(13),
+            )
         )
-    )
-    a.consume(
-        snapshot_event(
-            String("swiotlb.bounce_attempts"), String("dev-2"),
-            String("p"), UInt64(3), UInt64(100),
-        )
-    )
-    a.consume(
-        snapshot_event(
-            String("swiotlb.bounce_attempts"), String("dev-2"),
-            String("p"), UInt64(3), UInt64(110),
-        )
-    )
     var rep = a.finish(r.session.window_end_ns, False)
     assert_equal(len(rep.metrics), 4096)
     assert_true(
@@ -498,6 +499,7 @@ def test_counter_budget_withheld() raises:
             rep, String("1 counter delta withheld: metric budget exhausted.")
         )
     )
+    assert_true(not has_limitation(rep, String("lack detail rows")))
 
 
 def test_counter_groups_ignored() raises:
@@ -885,6 +887,130 @@ def test_finish_horizon() raises:
     assert_equal(rep.window_end_ns, UInt64(4000000000))
 
 
+def _many_device_report(ndevs: Int) raises -> Report:
+    """Reduce one single-event attempt per device id."""
+    var s = Session()
+    s.session_id = String("many-devices")
+    s.synthetic = False
+    s.product_version = String("0.0.0")
+    s.env_mode = String("unknown")
+    s.env_detection = String("unverified")
+    s.env_attestation = String("not_performed")
+    s.capture_mode = String("live")
+    s.window_start_ns = UInt64(0)
+    s.window_end_ns = UInt64(1000000000)
+    s.finalized = True
+    s.q_detail.status = String("complete_for_scope")
+    s.q_detail.has_loss_count = True
+    s.q_detail.loss_count = UInt64(0)
+    s.q_detail.scope = String("sc")
+    s.q_detail.reason = String("rs")
+    s.q_aggregate.status = String("complete_for_scope")
+    s.q_aggregate.has_loss_count = True
+    s.q_aggregate.loss_count = UInt64(0)
+    s.q_aggregate.scope = String("sc")
+    s.q_aggregate.reason = String("rs")
+    s.q_correlation.status = String("not_applicable")
+    s.q_correlation.scope = String("sc")
+    s.q_correlation.reason = String("rs")
+    s.q_baseline.status = String("not_applicable")
+    s.q_baseline.scope = String("sc")
+    s.q_baseline.reason = String("rs")
+    s.q_terminal.status = String("partial")
+    s.q_terminal.scope = String("sc")
+    s.q_terminal.reason = String("rs")
+    var a = AttemptAnalyzer(s)
+    for pair in range(2):
+        var counter = String("swiotlb.bounce_attempts")
+        var unit = String("count")
+        var total = UInt64(ndevs)
+        if pair == 1:
+            counter = String("swiotlb.requested_bytes")
+            unit = String("bytes")
+            total = UInt64(ndevs) * UInt64(8)
+        for end in range(2):
+            var snap = Event()
+            snap.kind = String("counter_snapshot")
+            snap.source_measurement = String("observed")
+            snap.snapshot.counter_id = counter
+            snap.snapshot.has_scope_device = False
+            snap.snapshot.scope_profile_id = String("p")
+            snap.snapshot.epoch = UInt64(0)
+            snap.snapshot.unit = unit
+            if end == 0:
+                snap.ts_ns = UInt64(0)
+                snap.snapshot.value = UInt64(0)
+            else:
+                snap.ts_ns = UInt64(999999999)
+                snap.snapshot.value = total
+            a.consume(snap)
+    for d in range(ndevs):
+        var ev = Event()
+        ev.session_id = String("many-devices")
+        ev.seq = UInt64(d)
+        ev.ts_ns = UInt64(d + 1)
+        ev.kind = String("bounce_attempt")
+        ev.source_hook = String("h")
+        ev.source_backend = String("tracepoint")
+        ev.source_profile_id = String("p")
+        ev.source_measurement = String("observed")
+        ev.source_correlation = String("direct")
+        ev.bounce.device_id = device_id_for(d + 1)
+        ev.bounce.requested_bytes = UInt64(8)
+        ev.bounce.forced = False
+        ev.bounce.operation_id = (
+            String("op") + format_u64(UInt64(d))
+        )
+        a.consume(ev)
+    return a.finish(UInt64(1000000000), False)
+
+
+def test_many_devices_2041_clean() raises:
+    var rep = _many_device_report(2041)
+    assert_true(not has_limitation(rep, String("lack detail rows")))
+    var all_m = metric_by_name(rep, String("bounce_attempts"), String(""))
+    assert_equal(all_m.value, UInt64(2041))
+    var last = metric_by_name(
+        rep, String("bounce_attempts"), String("d002041")
+    )
+    assert_equal(last.value, UInt64(1))
+    var cnt = metric_by_name(
+        rep, String("counter_bounce_attempts"), String("")
+    )
+    assert_equal(cnt.value, UInt64(2041))
+    var byt = metric_by_name(
+        rep, String("counter_requested_bounce_bytes"), String("")
+    )
+    assert_equal(byt.value, UInt64(2041) * UInt64(8))
+    assert_true(not rep.counter_disagreement)
+    assert_true(len(rep.metrics) <= 4096)
+
+
+def test_many_devices_2042_withheld() raises:
+    var rep = _many_device_report(2042)
+    assert_true(
+        has_limitation(rep, String("1 device lacks detail rows"))
+    )
+    var all_m = metric_by_name(rep, String("bounce_attempts"), String(""))
+    assert_equal(all_m.value, UInt64(2042))
+    var cnt = metric_by_name(
+        rep, String("counter_bounce_attempts"), String("")
+    )
+    assert_equal(cnt.value, UInt64(2042))
+    var byt = metric_by_name(
+        rep, String("counter_requested_bounce_bytes"), String("")
+    )
+    assert_equal(byt.value, UInt64(2042) * UInt64(8))
+    assert_true(not rep.counter_disagreement)
+    assert_true(len(rep.metrics) <= 4096)
+    var found = False
+    for i in range(len(rep.metrics)):
+        if rep.metrics[i].has_device_id:
+            if rep.metrics[i].device_id == String("d002042"):
+                found = True
+    assert_true(not found)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_format_u64]()
@@ -921,6 +1047,8 @@ def run() raises -> Int:
     suite.test[test_f13_literal_filter_scope]()
     suite.test[test_detail_unavailable_observed_zero]()
     suite.test[test_finish_horizon]()
+    suite.test[test_many_devices_2041_clean]()
+    suite.test[test_many_devices_2042_withheld]()
     suite^.run()
     return 0
 

@@ -12,7 +12,14 @@ failure on an accepted report is an internal error and exits 1.
 """
 
 from memveil.analysis.attempts import AttemptAnalyzer
-from memveil.capture.reader import CaptureReader, default_limits, read_capture
+from memveil.capture.reader import (
+    DEFAULT_MAX_EVENTS_BYTES,
+    DEFAULT_MAX_LINE_BYTES,
+    DEFAULT_MAX_SESSION_BYTES,
+    CaptureReader,
+    ReaderLimits,
+    read_capture,
+)
 from memveil.model.event import Event
 from memveil.model.report import Report
 from memveil.render.render import render
@@ -44,18 +51,26 @@ struct ReportOptions:
     var format: String
     var allow_partial: Bool
     var dir: String
+    var max_line_bytes: Int
+    var max_session_bytes: Int
+    var max_events_bytes: Int
 
     def __init__(out self):
         self.format = String("text")
         self.allow_partial = False
         self.dir = String("")
+        self.max_line_bytes = DEFAULT_MAX_LINE_BYTES
+        self.max_session_bytes = DEFAULT_MAX_SESSION_BYTES
+        self.max_events_bytes = DEFAULT_MAX_EVENTS_BYTES
 
 
 def report_usage() -> String:
     """Usage text for the report verb."""
     return (
         "usage: memveil report [--format text|json|markdown]"
-        " [--allow-partial] DIR\n"
+        " [--allow-partial]\n"
+        "       [--max-line-bytes N] [--max-session-bytes N]\n"
+        "       [--max-events-bytes N] DIR\n"
         "\n"
         "Read the capture in DIR, reduce its events to attempt metrics,\n"
         "and print one report on stdout. Diagnostics go to stderr.\n"
@@ -64,6 +79,12 @@ def report_usage() -> String:
         "  --format NAME     text (default), json, or markdown.\n"
         "  --allow-partial   drop a truncated final record and report\n"
         "                    the loss instead of failing.\n"
+        "  --max-line-bytes N\n"
+        "                    per-record cap, at most 65536.\n"
+        "  --max-session-bytes N\n"
+        "                    session file cap, at most 16777216.\n"
+        "  --max-events-bytes N\n"
+        "                    total work cap, at most 4294967296.\n"
         "\n"
         "Exit 0 for sufficient evidence, 4 for a usable but materially\n"
         "incomplete report, 2 for invalid input or usage.\n"
@@ -121,6 +142,25 @@ def _is_option(text: String) -> Bool:
     return len(raw) > 0 and raw[0] == UInt8(0x2D)
 
 
+def _parse_limit(text: String, what: String, cap: Int) raises CliError -> Int:
+    """Strict decimal limit: 1..cap, no leading zeros."""
+    var raw = text.as_bytes()
+    if len(raw) == 0 or len(raw) > 10:
+        raise CliError(what + " needs a decimal value")
+    if raw[0] < UInt8(0x31) or raw[0] > UInt8(0x39):
+        raise CliError(what + " needs a decimal value")
+    # Ten digits fit Int with room; the cap check below decides.
+    var v = 0
+    for i in range(len(raw)):
+        var b = raw[i]
+        if b < UInt8(0x30) or b > UInt8(0x39):
+            raise CliError(what + " needs a decimal value")
+        v = v * 10 + (Int(b) - 0x30)
+    if v > cap:
+        raise CliError(what + " above cap")
+    return v
+
+
 def parse_report_args(args: List[String]) raises CliError -> ReportOptions:
     """Parse report arguments without the leading verb."""
     var opts = ReportOptions()
@@ -138,6 +178,27 @@ def parse_report_args(args: List[String]) raises CliError -> ReportOptions:
         elif tok == "--allow-partial":
             opts.allow_partial = True
             i += 1
+        elif tok == "--max-line-bytes":
+            if i + 1 >= len(args):
+                raise CliError("--max-line-bytes needs a value")
+            opts.max_line_bytes = _parse_limit(
+                args[i + 1], "--max-line-bytes", 65536
+            )
+            i += 2
+        elif tok == "--max-session-bytes":
+            if i + 1 >= len(args):
+                raise CliError("--max-session-bytes needs a value")
+            opts.max_session_bytes = _parse_limit(
+                args[i + 1], "--max-session-bytes", 16777216
+            )
+            i += 2
+        elif tok == "--max-events-bytes":
+            if i + 1 >= len(args):
+                raise CliError("--max-events-bytes needs a value")
+            opts.max_events_bytes = _parse_limit(
+                args[i + 1], "--max-events-bytes", 4294967296
+            )
+            i += 2
         elif _is_option(tok):
             raise CliError("unknown option: " + tok)
         else:
@@ -210,7 +271,13 @@ def run_report(args: List[String]) raises -> Int:
     var reader: CaptureReader
     try:
         reader = read_capture(
-            opts.dir, opts.allow_partial, default_limits()
+            opts.dir,
+            opts.allow_partial,
+            ReaderLimits(
+                opts.max_session_bytes,
+                opts.max_line_bytes,
+                opts.max_events_bytes,
+            ),
         )
     except e:
         return _report_failed(
