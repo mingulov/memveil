@@ -164,6 +164,39 @@ def test_audit_catches_bpf_object_and_libbpf():
     assert len(violations) == 2, violations
 
 
+def test_audit_normalizes_alias_paths():
+    trace = ('910 openat(AT_FDCWD, "./proc/1/status", O_RDONLY) = 3\n'
+             '911 openat(AT_FDCWD, "/proc/self/../1/status", O_RDONLY) = 4\n'
+             '912 openat(AT_FDCWD, "/repo/./sub/data", O_RDONLY) = 5\n')
+    violations = audit_trace(trace, "/", "/repo")
+    assert len(violations) == 3, violations
+    assert any("proc:" in v for v in violations)
+    assert any("checkout:" in v for v in violations)
+
+
+def test_audit_ignores_near_miss_prefixes():
+    trace = ('913 openat(AT_FDCWD, "/repo-sibling/x", O_RDONLY) = 3\n'
+             '914 openat(AT_FDCWD, "/sys/kernell/x", O_RDONLY) = 4\n')
+    assert audit_trace(trace, "/", "/repo") == []
+
+
+def test_audit_parses_return_outside_quotes():
+    trace = ('915 openat(AT_FDCWD, "/sys/kernel/) = -1", O_RDONLY) = 3\n'
+             '916 openat(AT_FDCWD, "/tmp/) = 3", O_RDONLY)'
+             ' = -1 ENOENT (No such file)\n')
+    violations = audit_trace(trace, "/", "/repo")
+    assert len(violations) == 1, violations
+    assert "/sys/kernel" in violations[0]
+
+
+def test_audit_rejects_indeterminate_returns():
+    trace = ('917 openat(AT_FDCWD, "/x", O_RDONLY) =\n'
+             '918 connect(3, {...}, 16) = ?\n')
+    violations = audit_trace(trace, "/", "/repo")
+    assert len(violations) == 2, violations
+    assert all("indeterminate" in v for v in violations)
+
+
 def _tree(tmp_path, names):
     for rel in names:
         full = tmp_path / rel
