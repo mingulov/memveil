@@ -58,6 +58,35 @@ RUNTIME_LIB_DIR = os.path.join(
 )
 
 
+def validate_tag(tag):
+    """Bundle directory name: a single safe path segment."""
+    if not tag or tag in (".", ".."):
+        raise ValueError("bad bundle tag %r" % tag)
+    if "/" in tag or "\\" in tag or "\x00" in tag:
+        raise ValueError("bad bundle tag %r" % tag)
+    if tag.startswith("-"):
+        raise ValueError("bad bundle tag %r" % tag)
+    return tag
+
+
+def validate_lib_name(name, requirer):
+    """NEEDED name: a bare file name, never a path escape."""
+    if not name or name in (".", ".."):
+        raise ValueError("bad NEEDED %r from %s" % (name, requirer))
+    if "/" in name or "\\" in name or "\x00" in name:
+        raise ValueError("bad NEEDED %r from %s" % (name, requirer))
+    if os.path.basename(name) != name:
+        raise ValueError("bad NEEDED %r from %s" % (name, requirer))
+    return name
+
+
+def contained(path, directory):
+    """True when path stays inside directory after normalization."""
+    base = os.path.realpath(directory)
+    full = os.path.realpath(path)
+    return full == base or full.startswith(base + os.sep)
+
+
 def fail(message):
     print("package: %s" % message, file=sys.stderr)
     sys.exit(1)
@@ -176,6 +205,10 @@ def main(argv):
     version = proc.stdout.strip().split("-", 1)[1]
     if tag is None:
         tag = "memveil-" + version
+    try:
+        validate_tag(tag)
+    except ValueError as err:
+        fail(str(err))
 
     # Transitive closure over the binary and the bridge: every
     # NEEDED name outside the system allowlist must resolve to a
@@ -189,6 +222,10 @@ def main(argv):
         for name in needed(path):
             if name in SYSTEM_ALLOW or name in ship:
                 continue
+            try:
+                validate_lib_name(name, os.path.basename(path))
+            except ValueError as err:
+                fail(str(err))
             cand = os.path.join(RUNTIME_LIB_DIR, name)
             if name == "libbpf_mojo.so.1":
                 cand = bridge
@@ -198,7 +235,10 @@ def main(argv):
             ship[name] = cand
             queue.append(cand)
     for name in sorted(ship):
-        shutil.copy2(ship[name], os.path.join(libdir, name))
+        dest = os.path.join(libdir, name)
+        if not contained(dest, libdir):
+            fail("staging escapes lib/: %s" % name)
+        shutil.copy2(ship[name], dest)
     for name in sorted(os.listdir(libdir)):
         for dep in needed(os.path.join(libdir, name)):
             if dep in SYSTEM_ALLOW or dep in ship:
@@ -256,6 +296,9 @@ def main(argv):
         handle.write("\n")
 
     final = os.path.join(out_dir, tag)
+    if not contained(final, out_dir) \
+            or os.path.realpath(final) == os.path.realpath(out_dir):
+        fail("bundle target escapes output dir: %s" % tag)
     shutil.rmtree(final, ignore_errors=True)
     os.rename(staged, final)
     tarball = os.path.join(out_dir, tag + ".tar.gz")

@@ -8,7 +8,11 @@
 - x86-64-v2 baseline. The binary carries five Mojo runtime
   libraries plus the native bridge in `lib/`; the host must
   supply libc, libm, libdl, libelf, libz, libzstd, and the
-  dynamic loader (any current Ubuntu LTS satisfies this).
+  dynamic loader. Tested userland: Ubuntu 26.04 (glibc 2.43).
+  Offline floor (`report`, `doctor`): glibc >= 2.35, so
+  Ubuntu 22.04 LTS and later. Recording floor: glibc >= 2.38
+  (the native bridge), so Ubuntu 24.04 LTS and later; older
+  userlands fail to load the bridge.
 - Profiles resolve from the executable location
   (`<root>/bin/memveil` reads `<root>/profiles`), never from
   the caller's working directory.
