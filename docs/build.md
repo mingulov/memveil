@@ -55,10 +55,9 @@ disposable development checks, not shipped tests.
 - `mojo build` offers `-O` levels (default 3), `-g` levels (default
   none), and `--sanitize address|thread`. There is no Mojo UBSan flag.
 
-## Planned application behavior
+## Application behavior
 
-Not yet implemented. Each item lands with its owning feature and tests;
-no `src/` product code exists yet.
+Implemented in `src/memveil/` with owning tests per feature:
 
 - Capture parsing and report generation in owned Mojo modules with
   explicit size, depth, and nesting bounds; parsing and accounting are
@@ -69,10 +68,11 @@ no `src/` product code exists yet.
   without the bridge library present. String arguments to retrieved
   callables must use `as_c_string_span()`, never a raw `String`.
 - Atomic file replacement through one centralized `rename(2)` FFI helper.
-- Signal handling through centralized FFI: handlers set a flag only, and
-  normal control flow performs teardown.
-- Sanitizer test builds (Mojo address sanitizer; native C ASan+UBSan as
-  separate evidence).
+- Signal handling through centralized FFI: `record` re-execs once under
+  an inherited mask and consumes signals via signalfd; teardown runs in
+  normal control flow.
+- Sanitizer evidence is recorded per task; `mojo build --sanitize`
+  needs a root-owned compiler cache outside unprivileged containers.
 
 ## Compiler settings
 

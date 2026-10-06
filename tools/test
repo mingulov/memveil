@@ -4,9 +4,8 @@
 # Usage: tools/test <suite> | tools/test --help
 #
 # Implemented suites: schemas, unit, reports, profiles, doctor, attempts,
-# writer, signals, record, vm-attempts, buildcache.
+# writer, signals, record, vm-attempts, buildcache, package.
 #
-# Planned suites: package.
 # A skipped privileged test is reported as skipped, never as success.
 # Exit 0 only when the suite passes; 1 on test failure; 2 on invalid usage.
 # One suite per invocation; extra arguments are rejected.
@@ -2214,6 +2213,51 @@ PYEOF
     return 0
 }
 
+suite_package() {
+    if [ -z "${LMB_PACKAGE:-}" ]; then
+        echo "package: LMB_PACKAGE is not set" >&2
+        return 1
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "package: python3 not found" >&2
+        return 1
+    fi
+    if ! python3 -m pytest --version >/dev/null 2>&1; then
+        echo "package: pytest not importable" >&2
+        return 1
+    fi
+    if ! command -v strace >/dev/null 2>&1; then
+        echo "package: strace not found (clean-room audit needs it)" >&2
+        return 1
+    fi
+    PTMP=$(mktemp -d)
+    trap 'rm -rf "$PTMP"' EXIT
+    if ! LMB_PACKAGE="$LMB_PACKAGE" "$ROOT/tools/package" \
+        >"$PTMP/package.log" 2>&1; then
+        echo "package: tools/package failed" >&2
+        cat "$PTMP/package.log" >&2
+        return 1
+    fi
+    TARBALL=$(sed -n 's/^package: \(.*\.tar\.gz\)$/\1/p' \
+        "$PTMP/package.log" | tail -1)
+    if [ -z "$TARBALL" ] || [ ! -f "$TARBALL" ]; then
+        echo "package: no tarball in package log" >&2
+        cat "$PTMP/package.log" >&2
+        return 1
+    fi
+    if ! MV_BUNDLE_TARBALL="$TARBALL" MV_REPO="$ROOT" \
+        MV_VALID_EMPTY="$ROOT/tests/package/valid-empty" \
+        python3 -m pytest tests/package/test_clean_runtime.py \
+        >"$PTMP/pytest.log" 2>&1; then
+        echo "package: clean-runtime tests failed" >&2
+        cat "$PTMP/pytest.log" >&2
+        return 1
+    fi
+    tail -1 "$PTMP/pytest.log"
+    echo "package: owner bundle and clean-room replay passed"
+    return 0
+}
+
 suite_record() {
     run_unit_file tests/unit/test_hash.mojo || return 1
     run_unit_file tests/unit/test_gzip.mojo || return 1
@@ -2372,8 +2416,7 @@ case "$1" in
         suite_buildcache
         ;;
     package)
-        echo "test: suite '$1' is not implemented yet" >&2
-        exit 2
+        suite_package
         ;;
     *)
         echo "test: unknown suite: $1" >&2

@@ -1,44 +1,287 @@
-#!/usr/bin/env bash
-# memveil standalone artifact builder.
-#
-# Usage: tools/package [--check] [--help]
-#
-# No binary artifacts are registered yet; binary packaging arrives with the
-# first tested collector and its clean-runtime gate. --check verifies the
-# packaging prerequisites (pinned toolchain and fresh pixi lock) today.
-# Exit 0 on success; 1 on failure; 2 on invalid usage.
-# One action per invocation; extra arguments are rejected.
+#!/usr/bin/env python3
+"""Assemble the MemVeil owner bundle from exact pinned inputs.
 
-set -u
+Builds the distributable binary (``$ORIGIN``-relative RUNPATH),
+ships the Mojo runtime closure plus the pinned native bridge and
+BPF object, and records every payload hash in MANIFEST.json.
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+Layout of ``dist/memveil-<version>/``::
 
-usage() {
-    sed -n '2,/^$/p' "$0" | sed 's/^# //; s/^#//'
+    bin/memveil            relocatable binary (RUNPATH $ORIGIN/../lib)
+    lib/*.so*              Mojo runtime closure + libbpf_mojo.so.1
+    bpf/*.bpf.o            production BPF object
+    profiles/              manifest plus shipped semantic profiles
+    docs/                  quickstart, support, privacy
+    examples/real-capture/ sanitized real capture (worked example)
+    MANIFEST.json          file hashes, versions, source revisions
+
+Usage: tools/package [--out DIR] [--tag NAME]
+  --out DIR   stage directory (default: dist/)
+  --tag NAME  bundle directory name (default: memveil-<version>)
+
+Requires LMB_PACKAGE (pinned libbpf-mojo tarball) and a working
+tools/build. Fails closed when the link closure names anything
+outside the shipped lib/ set and the system allowlist.
+"""
+
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# NEEDED entries the bundle binary and bridge may name that must
+# resolve to the host C library set. Anything else must ship in
+# lib/ or the package refuses to assemble.
+SYSTEM_ALLOW = {
+    "libc.so.6",
+    "libm.so.6",
+    "libdl.so.2",
+    "libpthread.so.0",
+    "libelf.so.1",
+    "libz.so.1",
+    "libzstd.so.1",
+    "ld-linux-x86-64.so.2",
 }
 
-if [ $# -eq 0 ]; then
-    set -- ""
-fi
-if [ $# -gt 1 ]; then
-    echo "package: too many arguments" >&2
-    usage >&2
-    exit 2
-fi
-case "$1" in
-    --help|-h)
-        usage
-        ;;
-    --check)
-        exec "$ROOT/tools/build" --check-toolchain
-        ;;
-    "")
-        echo "package: no binary artifacts registered yet" >&2
-        exit 2
-        ;;
-    *)
-        echo "package: unknown argument: $1" >&2
-        usage >&2
-        exit 2
-        ;;
-esac
+# Mojo runtime NEEDED names expected from the pixi toolchain. The
+# closure walk derives the real set from the binary; this list only
+# locates the files. A name the toolchain stops emitting is harmless
+# (skipped when no NEEDED entry names it); a new NEEDED name outside
+# lib/ fails the build.
+RUNTIME_LIB_DIR = os.path.join(
+    ROOT, ".pixi", "envs", "default", "lib"
+)
+
+
+def fail(message):
+    print("package: %s" % message, file=sys.stderr)
+    sys.exit(1)
+
+
+def run(argv, **kwargs):
+    proc = subprocess.run(
+        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, cwd=ROOT, **kwargs,
+    )
+    return proc
+
+
+def needed(path):
+    proc = run(["readelf", "-d", path])
+    if proc.returncode != 0:
+        fail("readelf failed on %s:\n%s" % (path, proc.stderr))
+    names = []
+    for line in proc.stdout.splitlines():
+        if "(NEEDED)" in line and "[" in line:
+            names.append(line.split("[")[1].split("]")[0])
+    return names
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def git_rev(path):
+    proc = run(["git", "-C", path, "rev-parse", "HEAD"])
+    if proc.returncode != 0:
+        fail("cannot read HEAD of %s" % path)
+    return proc.stdout.strip()
+
+
+def git_clean(path):
+    proc = run(["git", "-C", path, "status", "--short"])
+    if proc.returncode != 0:
+        fail("cannot inspect %s" % path)
+    return proc.stdout.strip() == ""
+
+
+def main(argv):
+    out_dir = os.path.join(ROOT, "dist")
+    tag = None
+    args = list(argv)
+    while args:
+        opt = args.pop(0)
+        if opt in ("--help", "-h"):
+            print(__doc__)
+            return 0
+        if opt == "--out" and args:
+            out_dir = args.pop(0)
+            continue
+        if opt == "--tag" and args:
+            tag = args.pop(0)
+            continue
+        fail("unknown option: %s" % opt)
+    if not os.environ.get("LMB_PACKAGE"):
+        fail("LMB_PACKAGE is not set; refusing an unpinned bridge")
+    lmb_package = os.environ["LMB_PACKAGE"]
+    if not os.path.isfile(lmb_package):
+        fail("LMB_PACKAGE is not a file: %s" % lmb_package)
+    if not git_clean(ROOT):
+        fail("worktree has uncommitted changes; commit first")
+    memveil_rev = git_rev(ROOT)
+
+    build = run([os.path.join(ROOT, "tools", "build")])
+    if build.returncode != 0:
+        print(build.stdout)
+        print(build.stderr, file=sys.stderr)
+        fail("tools/build failed")
+    print(build.stdout.strip())
+
+    lmb_mojo = os.path.join(ROOT, "build", "deps", "lmb", "mojo")
+    lmb_lib = os.path.join(ROOT, "build", "deps", "lmb", "lib")
+    if not os.path.isdir(os.path.join(lmb_mojo, "libbpf_mojo")):
+        fail("libbpf-mojo import path missing after build")
+    bridge = os.path.join(lmb_lib, "libbpf_mojo.so.1")
+    if not os.path.isfile(bridge):
+        fail("native bridge missing: %s" % bridge)
+    bpf_obj = os.path.join(
+        ROOT, "build", "bpf", "swiotlb_attempt.bpf.o"
+    )
+    if not os.path.isfile(bpf_obj):
+        fail("BPF object missing: %s" % bpf_obj)
+
+    # Bundle version comes from the engine itself, never from a
+    # duplicated string here.
+    staged = os.path.join(out_dir, ".stage")
+    bindir = os.path.join(staged, "bin")
+    libdir = os.path.join(staged, "lib")
+    shutil.rmtree(staged, ignore_errors=True)
+    os.makedirs(bindir)
+    os.makedirs(libdir)
+    link = run([
+        "pixi", "run", "--frozen", "mojo", "build",
+        "-I", "src", "-I", "build/deps/lmb/mojo",
+        "--target-cpu", "x86-64-v2",
+        "-Xlinker", "-rpath", "-Xlinker", "$ORIGIN/../lib",
+        "-o", os.path.join(bindir, "memveil"),
+        "src/memveil/main.mojo",
+    ])
+    if link.returncode != 0:
+        print(link.stdout)
+        print(link.stderr, file=sys.stderr)
+        fail("relocatable link failed")
+    binary = os.path.join(bindir, "memveil")
+    proc = run([binary, "version"])
+    if proc.returncode != 0 or not proc.stdout.startswith("memveil-"):
+        fail("bundle binary version check failed: %r" % proc.stdout)
+    version = proc.stdout.strip().split("-", 1)[1]
+    if tag is None:
+        tag = "memveil-" + version
+
+    # Transitive closure over the binary and the bridge: every
+    # NEEDED name outside the system allowlist must resolve to a
+    # shippable file, and shipped libs must not widen the closure.
+    # Refuse unknown names instead of guessing.
+    # The bridge is dlopen'd, never a NEEDED entry: seed it.
+    ship = {"libbpf_mojo.so.1": bridge}
+    queue = [binary, bridge]
+    while queue:
+        path = queue.pop(0)
+        for name in needed(path):
+            if name in SYSTEM_ALLOW or name in ship:
+                continue
+            cand = os.path.join(RUNTIME_LIB_DIR, name)
+            if name == "libbpf_mojo.so.1":
+                cand = bridge
+            if not os.path.isfile(cand):
+                fail("no source for NEEDED %s (from %s)"
+                     % (name, os.path.basename(path)))
+            ship[name] = cand
+            queue.append(cand)
+    for name in sorted(ship):
+        shutil.copy2(ship[name], os.path.join(libdir, name))
+    for name in sorted(os.listdir(libdir)):
+        for dep in needed(os.path.join(libdir, name)):
+            if dep in SYSTEM_ALLOW or dep in ship:
+                continue
+            fail("shipped %s needs %s: outside closure" % (name, dep))
+    print("package: lib closure: %s" % ", ".join(sorted(ship)))
+
+    for sub in ("bpf", "profiles", "docs", "examples"):
+        os.makedirs(os.path.join(staged, sub))
+    shutil.copy2(bpf_obj, os.path.join(staged, "bpf",
+                                       "swiotlb_attempt.bpf.o"))
+    for name in sorted(os.listdir(os.path.join(ROOT, "profiles"))):
+        if name == "manifest.txt" or name.endswith(".json"):
+            shutil.copy2(os.path.join(ROOT, "profiles", name),
+                         os.path.join(staged, "profiles", name))
+    for name in ("quickstart.md", "support.md", "privacy.md"):
+        src = os.path.join(ROOT, "docs", name)
+        if not os.path.isfile(src):
+            fail("missing %s" % src)
+        shutil.copy2(src, os.path.join(staged, "docs", name))
+    example = os.path.join(ROOT, "examples", "real-capture")
+    for name in ("events.ndjson", "session.json"):
+        src = os.path.join(example, name)
+        if not os.path.isfile(src):
+            fail("missing %s" % src)
+    shutil.copytree(example,
+                    os.path.join(staged, "examples", "real-capture"))
+
+    lock = json.load(open(os.path.join(ROOT, "toolchain.lock.json")))
+    lmb_pin = lock["dependencies"]["libbpf-mojo"]
+    manifest = {
+        "bundle": tag,
+        "engine_version": version,
+        "memveil_revision": memveil_rev,
+        "libbpf_mojo": {
+            "version": lmb_pin["version"],
+            "source_commit": lmb_pin["source_commit"],
+            "tarball_sha256": lmb_pin["tarball_sha256"],
+            "tarball_used_sha256": sha256_file(lmb_package),
+        },
+        "toolchain": lock["toolchain"],
+        "system_libraries": sorted(SYSTEM_ALLOW),
+        "files": {},
+    }
+    if (manifest["libbpf_mojo"]["tarball_used_sha256"]
+            != lmb_pin["tarball_sha256"]):
+        fail("LMB_PACKAGE does not match the pinned hash")
+    for base, _, files in os.walk(staged):
+        for name in files:
+            full = os.path.join(base, name)
+            rel = os.path.relpath(full, staged)
+            manifest["files"][rel] = sha256_file(full)
+    with open(os.path.join(staged, "MANIFEST.json"), "w") as handle:
+        json.dump(manifest, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+    final = os.path.join(out_dir, tag)
+    shutil.rmtree(final, ignore_errors=True)
+    os.rename(staged, final)
+    tarball = os.path.join(out_dir, tag + ".tar.gz")
+    if os.path.exists(tarball):
+        os.remove(tarball)
+    mtime = int(run(["git", "-C", ROOT, "log", "-1",
+                     "--format=%ct"]).stdout.strip())
+    with tarfile.open(tarball, "w:gz", compresslevel=9) as tar:
+        for base, dirs, files in os.walk(final):
+            dirs.sort()
+            for name in sorted(files):
+                full = os.path.join(base, name)
+                info = tar.gettarinfo(full,
+                                      os.path.relpath(full, out_dir))
+                info.mtime = mtime
+                info.uid = info.gid = 0
+                info.uname = info.gname = ""
+                with open(full, "rb") as handle:
+                    tar.addfile(info, handle)
+    digest = sha256_file(tarball)
+    print("package: %s" % tarball)
+    print("package: sha256 %s" % digest)
+    print("package: %d files, MANIFEST.json recorded" %
+          len(manifest["files"]))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
