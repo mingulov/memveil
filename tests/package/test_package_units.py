@@ -197,6 +197,24 @@ def test_audit_rejects_indeterminate_returns():
     assert all("indeterminate" in v for v in violations)
 
 
+def test_audit_collapses_double_slash_aliases():
+    trace = ('920 openat(AT_FDCWD, "//proc/1/status", O_RDONLY) = 3\n'
+             '921 openat(AT_FDCWD, "//sys/kernel/btf/vmlinux", O_RDONLY) = 4\n'
+             '922 openat(AT_FDCWD, "//repo/data", O_RDONLY) = 5\n')
+    violations = audit_trace(trace, "/", "/repo")
+    assert len(violations) == 3, violations
+
+
+def test_audit_quoted_marker_with_truncation():
+    trace = ('923 openat(AT_FDCWD, "/sys/kernel/) = -1", O_RDONLY) =\n'
+             '924 openat(AT_FDCWD, "/x", O_RDONLY) = \n'
+             '\n'
+             '925 openat(AT_FDCWD, "/ok", O_RDONLY) = 3\n')
+    violations = audit_trace(trace, "/", "/repo")
+    assert len(violations) == 2, violations
+    assert all("indeterminate" in v for v in violations)
+
+
 def _tree(tmp_path, names):
     for rel in names:
         full = tmp_path / rel

@@ -40,6 +40,8 @@ def reassemble(records):
     completed = []
     problems = []
     for line in records:
+        if not line.split():
+            continue
         if "<unfinished" in line:
             pid = line.split(None, 1)[0]
             if pid in pending:
@@ -105,24 +107,62 @@ def _unquote(text):
 def _outcome(line):
     """Call outcome: True (success), False (failure), None (unknown).
 
-    The return marker is the LAST ") = " on the line: quoted
-    filenames may contain earlier copies. A missing marker or
-    an empty/unknown return is indeterminate, never a pass.
+    The return value is read after the call's own closing
+    parenthesis, found by a quote-aware scan: quoted filenames
+    may contain parens and ") = " markers. A missing
+    terminator, a missing "=", or an empty/unknown return is
+    indeterminate, never a pass.
     """
-    mark = ") = "
-    if mark not in line:
+    try:
+        open_i = line.index("(")
+    except ValueError:
         return None
-    ret = line.rsplit(mark, 1)[1].strip().split(None, 1)[0]
-    if ret in ("", "?"):
+    depth = 0
+    in_str = False
+    esc = False
+    close_i = None
+    for i in range(open_i, len(line)):
+        ch = line[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                close_i = i
+                break
+    if close_i is None:
         return None
-    return not ret.startswith("-")
+    tail = line[close_i + 1:].strip()
+    if not tail.startswith("="):
+        return None
+    toks = tail[1:].strip().split(None, 1)
+    if not toks or not toks[0] or toks[0] == "?":
+        return None
+    return not toks[0].startswith("-")
 
 
 def _resolve(path, cwd):
-    """Absolute normalized path for cwd-relative opens."""
+    """Absolute normalized path for cwd-relative opens.
+
+    Leading slash runs collapse to one (Linux treats //foo as
+    /foo, but normpath preserves exactly two).
+    """
     if not path.startswith("/"):
         path = os.path.join(cwd, path)
-    return os.path.normpath(path)
+    path = os.path.normpath(path)
+    while path.startswith("//"):
+        path = path[1:]
+    return path
 
 
 def _within(path, prefix):
@@ -141,6 +181,8 @@ def audit_trace(text, cwd, repo_prefix):
     completed, problems = reassemble(text.splitlines())
     violations = ["trace: %s" % p for p in problems]
     for line in completed:
+        if not line.split():
+            continue
         if "resumed>" in line or "<unfinished" in line:
             continue
         parts = line.split(None, 1)
