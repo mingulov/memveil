@@ -17,7 +17,8 @@ TRACED_FILE_CALLS = ("openat", "open", "openat2")
 # violation. The language runtime's read-only device/cgroup
 # inventory is deliberately not listed: it is not a collection
 # input and cannot influence the byte-asserted report.
-PATH_BANS = ("/sys/kernel/", "/sys/fs/bpf/", ".bpf.o")
+DIR_BANS = ("/sys/kernel", "/sys/fs/bpf")
+SUFFIX_BANS = (".bpf.o",)
 
 # Substrings that must never appear in a successfully opened path.
 SUBSTRING_BANS = (".pixi", "libbpf")
@@ -101,13 +102,32 @@ def _unquote(text):
     return text
 
 
-def _succeeded(line):
-    """True when the joined line reports a non-negative return."""
+def _outcome(line):
+    """Call outcome: True (success), False (failure), None (unknown).
+
+    The return marker is the LAST ") = " on the line: quoted
+    filenames may contain earlier copies. A missing marker or
+    an empty/unknown return is indeterminate, never a pass.
+    """
     mark = ") = "
     if mark not in line:
-        return False
-    ret = line.split(mark, 1)[1].strip().split(None, 1)[0]
-    return not ret.startswith("-") and ret not in ("?", "")
+        return None
+    ret = line.rsplit(mark, 1)[1].strip().split(None, 1)[0]
+    if ret in ("", "?"):
+        return None
+    return not ret.startswith("-")
+
+
+def _resolve(path, cwd):
+    """Absolute normalized path for cwd-relative opens."""
+    if not path.startswith("/"):
+        path = os.path.join(cwd, path)
+    return os.path.normpath(path)
+
+
+def _within(path, prefix):
+    """True when path equals prefix or sits below it."""
+    return path == prefix or path.startswith(prefix.rstrip("/") + "/")
 
 
 def audit_trace(text, cwd, repo_prefix):
@@ -128,41 +148,47 @@ def audit_trace(text, cwd, repo_prefix):
             continue
         call = parts[1]
         name = call.split("(", 1)[0]
+        if name not in TRACED_FILE_CALLS and name not in (
+                "chdir", "fchdir", "socket", "connect",
+                "sendto", "bpf"):
+            continue
+        outcome = _outcome(line)
+        if outcome is None:
+            violations.append("indeterminate: %s" % line)
+            continue
         if name in ("chdir", "fchdir"):
-            if _succeeded(line):
+            if outcome:
                 violations.append("chdir: %s" % line)
             continue
         if name in ("socket", "connect", "sendto", "bpf"):
-            if _succeeded(line):
+            if outcome:
                 violations.append("net/bpf: %s" % line)
             continue
-        if name not in TRACED_FILE_CALLS:
-            continue
-        if not _succeeded(line):
+        if not outcome:
             continue
         body = call.split("(", 1)[1].rsplit(")", 1)[0]
         args = _split_args(body)
         if name in ("openat", "openat2") and len(args) >= 2:
-            dirfd, path = args[0], _unquote(args[1])
-            if not path.startswith("/") and dirfd != "AT_FDCWD":
+            dirfd, raw = args[0], _unquote(args[1])
+            if not raw.startswith("/") and dirfd != "AT_FDCWD":
                 violations.append("dirfd-relative: %s" % line)
                 continue
-            if not path.startswith("/"):
-                path = os.path.join(cwd, path)
+            path = _resolve(raw, cwd)
         elif name == "open" and len(args) >= 1:
-            path = _unquote(args[0])
-            if not path.startswith("/"):
-                path = os.path.join(cwd, path)
+            path = _resolve(_unquote(args[0]), cwd)
         else:
             violations.append("unparsed: %s" % line)
             continue
-        for ban in PATH_BANS:
-            if ban in path:
+        for ban in DIR_BANS:
+            if _within(path, ban):
+                violations.append("banned %s: %s" % (ban, line))
+        for ban in SUFFIX_BANS:
+            if path.endswith(ban):
                 violations.append("banned %s: %s" % (ban, line))
         for ban in SUBSTRING_BANS:
             if ban in path:
                 violations.append("banned %s: %s" % (ban, line))
-        if repo_prefix and repo_prefix in path:
+        if repo_prefix and _within(path, repo_prefix):
             violations.append("checkout: %s" % line)
         if path.startswith("/proc/") \
                 and not path.startswith(PROC_BENIGN):
