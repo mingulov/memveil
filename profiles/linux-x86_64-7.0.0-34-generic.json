@@ -1,7 +1,7 @@
 {
   "schema_version": "0.1.0",
   "profile_id": "linux-x86_64-7.0.0-34-generic",
-  "status": "reference-unvalidated",
+  "status": "validated",
   "identity": {
     "arch": "x86_64",
     "min_kernel": "7.0.0",
