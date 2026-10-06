@@ -221,14 +221,19 @@ def percpu_stats():
 
 
 def main():
-    if len(sys.argv) != 9:
+    if len(sys.argv) not in (9, 10):
         print(
-            "usage: guest_flow.py MODE WORK EXPORT REPO PROFILE OBJECT BRIDGE DURATION",
+            "usage: guest_flow.py MODE WORK EXPORT REPO PROFILE OBJECT BRIDGE DURATION [PINGS]",
             file=sys.stderr,
         )
         return 2
     mode, work, export, repo, profile, obj, bridge, dur = sys.argv[1:9]
     duration = int(dur)
+    # Optional workload size for small example captures; the gate
+    # omits it and keeps 5000.
+    pings = sys.argv[9] if len(sys.argv) == 10 else "5000"
+    if not pings.isdigit() or int(pings) < 1:
+        fail(f"bad PINGS {pings}")
     if mode not in ("correctness", "saturation"):
         fail(f"bad mode {mode}")
     if os.geteuid() != 0:
@@ -308,7 +313,7 @@ def main():
         os.kill(rec.pid, signal.SIGSTOP)
         time.sleep(1)
     start_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
-    ping = sh(["timeout", "20", "ping", "-A", "-c", "5000", "-q", "10.0.3.2"])
+    ping = sh(["timeout", "20", "ping", "-A", "-c", pings, "-q", "10.0.3.2"])
     end_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
     ledger["workload_start_ns"] = start_ns
     ledger["workload_end_ns"] = end_ns
