@@ -3,13 +3,19 @@
 #
 # Usage: tools/test <suite> | tools/test --help
 #
-# Implemented suites: schemas.
+# Implemented suites: schemas, unit, reports.
 #
-# Planned suites: unit, reports, profiles, doctor, attempts, writer,
+# Planned suites: profiles, doctor, attempts, writer,
 # vm-attempts, package.
 # A skipped privileged test is reported as skipped, never as success.
 # Exit 0 only when the suite passes; 1 on test failure; 2 on invalid usage.
 # One suite per invocation; extra arguments are rejected.
+#
+# The unit suite runs every Mojo unit test through the pinned toolchain.
+# The reports suite drives the built report binary end to end: golden
+# stdout bytes, exact exit codes (0 sufficient, 4 materially
+# incomplete, 2 invalid input), and independently recomputed counts
+# from tools/validate-schemas over generated JSON reports.
 
 set -u
 
@@ -17,6 +23,722 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 usage() {
     sed -n '2,/^$/p' "$0" | sed 's/^# //; s/^#//'
+}
+
+run_unit_file() {
+    file=$1
+    out=$(cd "$ROOT" && pixi run --frozen mojo run -I src "$file" 2>&1)
+    rc=$?
+    summary=$(printf '%s\n' "$out" | grep -E '[0-9]+ tests run' | tail -1)
+    if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q '0 failed'; then
+        echo "ok $file: $summary"
+        return 0
+    fi
+    echo "FAIL $file (exit $rc)"
+    printf '%s\n' "$out"
+    return 1
+}
+
+suite_unit() {
+    failed=0
+    for t in tests/unit/test_reader.mojo \
+             tests/unit/test_attempts.mojo \
+             tests/unit/test_report.mojo; do
+        run_unit_file "$t" || failed=1
+    done
+    if [ "$failed" -ne 0 ]; then
+        echo "unit: FAILED" >&2
+        return 1
+    fi
+    echo "unit: all suites passed"
+    return 0
+}
+
+report_pass=0
+report_fail=0
+
+report_ok() {
+    echo "ok $1"
+    report_pass=$((report_pass + 1))
+}
+
+report_bad() {
+    echo "FAIL $1" >&2
+    report_fail=$((report_fail + 1))
+}
+
+# expect_stdout <label> <golden> <expected-exit> <args...>
+expect_stdout() {
+    label=$1
+    golden=$2
+    want_exit=$3
+    shift 3
+    if [ ! -f "$ROOT/$golden" ]; then
+        report_bad "$label: missing golden $golden"
+        return 0
+    fi
+    "$BIN" "$@" >"$TMP/out" 2>"$TMP/err"
+    rc=$?
+    if [ "$rc" -ne "$want_exit" ]; then
+        report_bad "$label: exit $rc, want $want_exit"
+        return 0
+    fi
+    if ! cmp -s "$TMP/out" "$ROOT/$golden"; then
+        report_bad "$label: stdout differs from $golden"
+        return 0
+    fi
+    report_ok "$label (exit $rc, golden match)"
+}
+
+# expect_json <label> <fixture> <expected-exit> <counts-line> [extra args...]
+expect_json() {
+    label=$1
+    fixture=$2
+    want_exit=$3
+    want_counts=$4
+    shift 4
+    rm -rf "$TMP/cap"
+    mkdir -p "$TMP/cap"
+    cp "$ROOT/$fixture/session.json" "$TMP/cap/session.json"
+    cp "$ROOT/$fixture/events.ndjson" "$TMP/cap/events.ndjson"
+    "$BIN" report "$@" --format json "$ROOT/$fixture" \
+        >"$TMP/cap/report.json" 2>"$TMP/err"
+    rc=$?
+    if [ "$rc" -ne "$want_exit" ]; then
+        report_bad "$label: exit $rc, want $want_exit"
+        return 0
+    fi
+    counts=$("$ROOT/tools/validate-schemas" "$TMP/cap" 2>&1)
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        report_bad "$label: oracle rejected generated report: $counts"
+        return 0
+    fi
+    if [ "$counts" != "$want_counts" ]; then
+        report_bad "$label: counts '$counts', want '$want_counts'"
+        return 0
+    fi
+    report_ok "$label (exit $want_exit, $counts)"
+}
+
+# expect_error <label> <expected-exit> <args...>
+expect_error() {
+    label=$1
+    want_exit=$2
+    shift 2
+    "$BIN" "$@" >"$TMP/out" 2>"$TMP/err"
+    rc=$?
+    if [ "$rc" -ne "$want_exit" ]; then
+        report_bad "$label: exit $rc, want $want_exit"
+        return 0
+    fi
+    if [ -s "$TMP/out" ]; then
+        report_bad "$label: stdout must be empty on exit $rc"
+        return 0
+    fi
+    if [ ! -s "$TMP/err" ]; then
+        report_bad "$label: stderr must explain exit $rc"
+        return 0
+    fi
+    report_ok "$label (exit $rc, quiet stdout)"
+}
+
+# expect_text_exit <label> <fixture> <expected-exit> [extra args...]
+expect_text_exit() {
+    label=$1
+    fixture=$2
+    want_exit=$3
+    shift 3
+    "$BIN" report "$@" "$ROOT/$fixture" >"$TMP/out" 2>"$TMP/err"
+    rc=$?
+    if [ "$rc" -ne "$want_exit" ]; then
+        report_bad "$label: exit $rc, want $want_exit"
+        return 0
+    fi
+    if [ ! -s "$TMP/out" ]; then
+        report_bad "$label: exit $rc must still print a report"
+        return 0
+    fi
+    report_ok "$label (exit $rc)"
+}
+
+suite_reports() {
+    BIN="$ROOT/build/memveil"
+    if [ ! -x "$BIN" ]; then
+        echo "reports: missing $BIN (run tools/build first)" >&2
+        return 1
+    fi
+    TMP=$(mktemp -d)
+    trap 'rm -rf "$TMP"' EXIT
+    report_pass=0
+    report_fail=0
+
+    expect_stdout "attempts-text" tests/golden/report-attempts.txt 0 \
+        report "$ROOT/tests/fixtures/attempts"
+    expect_stdout "attempts-markdown" tests/golden/report-attempts.md 0 \
+        report --format markdown "$ROOT/tests/fixtures/attempts"
+    expect_stdout "escape-text" tests/golden/report-escape.txt 0 \
+        report "$ROOT/tests/fixtures/reader/escape"
+    expect_stdout "escape-markdown" tests/golden/report-escape.md 0 \
+        report --format markdown "$ROOT/tests/fixtures/reader/escape"
+
+    expect_json "attempts-json" tests/fixtures/attempts 0 \
+        "capture OK: 3 events, 3 attempts, 9216 requested bytes"
+    expect_json "multidev-json" tests/fixtures/reader/multidev 0 \
+        "capture OK: 3 events, 3 attempts, 7168 requested bytes"
+    expect_json "counters-json" tests/fixtures/reader/counters 0 \
+        "capture OK: 7 events, 3 attempts, 9216 requested bytes"
+    expect_json "detail-gap-json" tests/fixtures/reader/detail-gap 4 \
+        "capture OK: 3 events, 2 attempts, 5120 requested bytes"
+    expect_json "empty-json" tests/fixtures/reader/empty-events 0 \
+        "capture OK: 0 events, 0 attempts, 0 requested bytes"
+    expect_json "unfinalized-json" tests/fixtures/reader/unfinalized 4 \
+        "capture OK: 3 events, 3 attempts, 9216 requested bytes"
+    expect_json "unavailable-detail-json" \
+        tests/fixtures/reader/unavailable-detail 4 \
+        "capture OK: 0 events, 0 attempts, 0 requested bytes"
+    expect_json "f6-absent-asserted-json" \
+        tests/fixtures/reader/f6-absent-asserted 0 \
+        "capture OK: 3 events, 3 attempts, 9216 requested bytes"
+    expect_json "f6-absent-driver-json" \
+        tests/fixtures/reader/f6-absent-driver 0 \
+        "capture OK: 3 events, 3 attempts, 9216 requested bytes"
+    expect_json "f8-terminal-gap-json" \
+        tests/fixtures/reader/f8-terminal-gap 4 \
+        "capture OK: 4 events, 3 attempts, 9216 requested bytes"
+    expect_json "f8-aggregate-gap-json" \
+        tests/fixtures/reader/f8-aggregate-gap 0 \
+        "capture OK: 4 events, 3 attempts, 9216 requested bytes"
+    expect_json "f8-detail-producer-loss-json" \
+        tests/fixtures/reader/f8-detail-producer-loss 0 \
+        "capture OK: 3 events, 3 attempts, 9216 requested bytes"
+    expect_json "f8-baseline-gap-json" \
+        tests/fixtures/reader/f8-baseline-gap 0 \
+        "capture OK: 4 events, 3 attempts, 9216 requested bytes"
+    expect_json "f9-mismatch-json" \
+        tests/fixtures/reader/f9-mismatch 4 \
+        "capture OK: 5 events, 3 attempts, 9216 requested bytes"
+    expect_json "f9-agree-json" \
+        tests/fixtures/reader/f9-agree 0 \
+        "capture OK: 5 events, 3 attempts, 9216 requested bytes"
+    expect_json "f9-inconclusive-scope-json" \
+        tests/fixtures/reader/f9-inconclusive-scope 0 \
+        "capture OK: 5 events, 3 attempts, 9216 requested bytes"
+    expect_json "f9-unit-json" \
+        tests/fixtures/reader/f9-unit 0 \
+        "capture OK: 5 events, 3 attempts, 9216 requested bytes"
+    expect_json "f9-inconclusive-loss-json" \
+        tests/fixtures/reader/f9-inconclusive-loss 4 \
+        "capture OK: 5 events, 2 attempts, 5120 requested bytes"
+    expect_json "f9-partial-detail-json" \
+        tests/fixtures/reader/f9-partial-detail 4 \
+        "capture OK: 5 events, 3 attempts, 9216 requested bytes"
+    expect_json "f9-profile-change-json" \
+        tests/fixtures/reader/f9-profile-change 0 \
+        "capture OK: 5 events, 3 attempts, 9216 requested bytes"
+    expect_json "f9-filtered-global-json" \
+        tests/fixtures/reader/f9-filtered-global 0 \
+        "capture OK: 5 events, 3 attempts, 9216 requested bytes"
+    expect_json "f10-optional-correlation-json" \
+        tests/fixtures/reader/optional-correlation 0 \
+        "capture OK: 3 events, 3 attempts, 9216 requested bytes"
+    expect_json "f10-correlation-gap-json" \
+        tests/fixtures/reader/f8-correlation-gap 0 \
+        "capture OK: 4 events, 3 attempts, 9216 requested bytes"
+    expect_json "f13-literal-filter-json" \
+        tests/fixtures/reader/literal-filter 0 \
+        "capture OK: 3 events, 3 attempts, 9216 requested bytes"
+    "$BIN" report "$ROOT/tests/fixtures/reader/unsanitized-error" \
+        >"$TMP/out" 2>"$TMP/err"
+    rc=$?
+    if [ "$rc" -ne 2 ]; then
+        report_bad "unsanitized-error: exit $rc, want 2"
+    elif [ -s "$TMP/out" ]; then
+        report_bad "unsanitized-error: stdout must be empty"
+    elif [ ! -s "$TMP/err" ]; then
+        report_bad "unsanitized-error: stderr must explain exit 2"
+    elif grep -q "dummy_pin_0000" "$TMP/err"; then
+        report_bad "unsanitized-error: hostile member name echoed"
+    elif grep -q $'\x1b' "$TMP/err"; then
+        report_bad "unsanitized-error: raw ESC byte in stderr"
+    else
+        report_ok "unsanitized-error (fixed diagnostic, no echo)"
+    fi
+    "$BIN" report "$ROOT/tests/fixtures/reader/unsanitized-session" \
+        >"$TMP/out" 2>"$TMP/err"
+    rc=$?
+    if [ "$rc" -ne 2 ]; then
+        report_bad "unsanitized-session: exit $rc, want 2"
+    elif [ -s "$TMP/out" ]; then
+        report_bad "unsanitized-session: stdout must be empty"
+    elif [ ! -s "$TMP/err" ]; then
+        report_bad "unsanitized-session: stderr must explain exit 2"
+    elif grep -q "sess_dummy_pin_9999" "$TMP/err"; then
+        report_bad "unsanitized-session: hostile member name echoed"
+    elif grep -q $'\x1b' "$TMP/err"; then
+        report_bad "unsanitized-session: raw ESC byte in stderr"
+    else
+        report_ok "unsanitized-session (fixed diagnostic, no echo)"
+    fi
+    "$BIN" report "$ROOT/tests/fixtures/reader/literal-filter" \
+        >"$TMP/filter.txt" 2>"$TMP/err"
+    if [ "$?" -ne 0 ]; then
+        report_bad "literal-filter-text: want exit 0"
+    elif ! grep -q "recorded devices (filter: testdev0)" "$TMP/filter.txt"; then
+        report_bad "literal-filter-text: filter literal missing from scope"
+    elif grep -q "all devices" "$TMP/filter.txt"; then
+        report_bad "literal-filter-text: unqualified all-devices claim"
+    else
+        report_ok "literal-filter-text (filter qualified, no all-devices claim)"
+    fi
+
+    expect_text_exit "partial-tail-recovered" \
+        tests/fixtures/reader/partial-tail 4 --allow-partial
+    expect_error "f4-definitive-version-strict" 2 \
+        report "$ROOT/tests/fixtures/reader/f4-definitive-version"
+    expect_error "f4-definitive-version-partial" 2 \
+        report --allow-partial \
+        "$ROOT/tests/fixtures/reader/f4-definitive-version"
+    expect_error "f4-definitive-dupkey-strict" 2 \
+        report "$ROOT/tests/fixtures/reader/f4-definitive-dupkey"
+    expect_error "f4-definitive-dupkey-partial" 2 \
+        report --allow-partial \
+        "$ROOT/tests/fixtures/reader/f4-definitive-dupkey"
+    expect_error "f4-nocolon-dupkey-strict" 2 \
+        report "$ROOT/tests/fixtures/reader/f4-nocolon-dupkey"
+    expect_error "f4-nocolon-dupkey-partial" 2 \
+        report --allow-partial \
+        "$ROOT/tests/fixtures/reader/f4-nocolon-dupkey"
+    expect_error "f4-nocolon-unknown-strict" 2 \
+        report "$ROOT/tests/fixtures/reader/f4-nocolon-unknown"
+    expect_error "f4-nocolon-unknown-partial" 2 \
+        report --allow-partial \
+        "$ROOT/tests/fixtures/reader/f4-nocolon-unknown"
+    expect_error "f4-truncated-primitive-strict" 2 \
+        report "$ROOT/tests/fixtures/reader/f4-truncated-primitive"
+    expect_error "f4-truncated-primitive-partial" 2 \
+        report --allow-partial \
+        "$ROOT/tests/fixtures/reader/f4-truncated-primitive"
+    expect_error "f4-truncated-nested-strict" 2 \
+        report "$ROOT/tests/fixtures/reader/f4-truncated-nested"
+    expect_error "f4-truncated-nested-partial" 2 \
+        report --allow-partial \
+        "$ROOT/tests/fixtures/reader/f4-truncated-nested"
+    expect_error "f4-truncated-scope-device-strict" 2 \
+        report "$ROOT/tests/fixtures/reader/f4-truncated-scope-device"
+    expect_error "f4-truncated-scope-device-partial" 2 \
+        report --allow-partial \
+        "$ROOT/tests/fixtures/reader/f4-truncated-scope-device"
+    expect_error "f4-truncated-scope-profile-strict" 2 \
+        report "$ROOT/tests/fixtures/reader/f4-truncated-scope-profile"
+    expect_error "f4-truncated-scope-profile-partial" 2 \
+        report --allow-partial \
+        "$ROOT/tests/fixtures/reader/f4-truncated-scope-profile"
+    # F4: the definitive-tail scan mirrors accepted event keys in
+    # _top/_source/_observer/_scope/_data_field_known, plus the per-key
+    # JSON value shape in _type_rows. Those mirrors must equal both
+    # the _parse_* accept lists and the frozen event schema, in both
+    # directions, or the scan drifts from the parser.
+    if python3 - "$ROOT/src/memveil/model/event.mojo" \
+        "$ROOT/schemas/event-v0.1.0.schema.json" <<'PYEOF'; then
+import json, re, sys
+src = open(sys.argv[1]).read()
+schema = json.load(open(sys.argv[2]))
+psrc = src.split('\ndef _top_field_known(')[0]
+names = ['parse_event', '_parse_source', '_parse_observer',
+         '_parse_snapshot_scope', '_parse_bounce', '_parse_map_result',
+         '_parse_unmap', '_parse_copy', '_parse_sync',
+         '_parse_transition', '_parse_pool', '_parse_gap',
+         '_parse_marker', '_parse_snapshot']
+starts = {}
+for n in names:
+    m = re.search(r'\ndef %s\(' % n, psrc)
+    if not m:
+        raise SystemExit('missing parser ' + n)
+    starts[n] = m.start()
+ordered = sorted(starts, key=starts.get)
+bodies = {}
+for i, n in enumerate(ordered):
+    end = starts[ordered[i + 1]] if i + 1 < len(ordered) else len(psrc)
+    bodies[n] = psrc[starts[n]:end]
+pkeys = {n: set(re.findall(r'key == "([^"]+)"', b))
+         for n, b in bodies.items()}
+ctx_of = {'parse_event': 'top', '_parse_source': 'source',
+          '_parse_observer': 'observer', '_parse_snapshot_scope': 'scope',
+          '_parse_bounce': 'bounce_attempt',
+          '_parse_map_result': 'map_result', '_parse_unmap': 'unmap',
+          '_parse_copy': 'copy', '_parse_sync': 'sync_request',
+          '_parse_transition': 'transition_result',
+          '_parse_pool': 'pool_sample', '_parse_gap': 'gap',
+          '_parse_marker': 'marker',
+          '_parse_snapshot': 'counter_snapshot'}
+mine = {}
+for fn, ctx in (('_top_field_known', 'top'),
+                ('_source_field_known', 'source'),
+                ('_observer_field_known', 'observer'),
+                ('_scope_field_known', 'scope')):
+    m = re.search(r'\ndef %s\(.*?\n(.*?)\n\n\ndef ' % fn, src, re.S)
+    if not m:
+        raise SystemExit('missing mirror ' + fn)
+    mine[ctx] = set(re.findall(r'key == "([^"]+)"', m.group(1)))
+m = re.search(r'\ndef _data_field_known\(.*?\n(.*?)\n\n\ndef ', src, re.S)
+if not m:
+    raise SystemExit('missing mirror _data_field_known')
+for sec in re.split(r'\n    if kind == "', m.group(1))[1:]:
+    kind = sec.split('"', 1)[0]
+    mine[kind] = set(re.findall(r'key == "([^"]+)"', sec))
+skeys = {'top': set(schema['properties'].keys()),
+         'source': set(schema['properties']['source']['properties'].keys()),
+         'observer': set(
+             schema['properties']['observer_context']['properties'].keys())}
+for b in schema['allOf']:
+    k = b['if']['properties']['kind']['const']
+    dp = b['then']['properties']['data']['properties']
+    skeys[k] = set(dp.keys())
+    if k == 'counter_snapshot':
+        skeys['scope'] = set(dp['scope']['properties'].keys())
+for n, ctx in ctx_of.items():
+    if pkeys[n] != mine.get(ctx, set()):
+        raise SystemExit(
+            'drift parser-vs-mirror at %s: %s vs %s'
+            % (ctx, sorted(pkeys[n]), sorted(mine.get(ctx, set()))))
+    if pkeys[n] != skeys.get(ctx, set()):
+        raise SystemExit(
+            'drift parser-vs-schema at %s: %s vs %s'
+            % (ctx, sorted(pkeys[n]), sorted(skeys.get(ctx, set()))))
+LEAD_OF = {'parse_string': 's', '_parse_id': 's',
+           'parse_u64_field': 's', 'parse_bool': 'b',
+           'parse_int': 'n', 'parse_maybe_string': 'S',
+           '_parse_maybe_id': 'S', 'parse_maybe_u64': 'S',
+           'parse_maybe_int': 'N', '_parse_source': 'o',
+           '_parse_observer': 'o', '_parse_snapshot_scope': 'o',
+           'skip_value': 'o'}
+TOK = re.compile(r'(parse_maybe_u64|parse_maybe_int|'
+                 r'parse_maybe_string|_parse_maybe_id|_parse_id|'
+                 r'parse_u64_field|parse_bool|parse_int|parse_string|'
+                 r'_parse_source|_parse_observer|'
+                 r'_parse_snapshot_scope|skip_value)\s*\(')
+ptypes = {}
+for n in names:
+    for sec in re.split(r'\n\s*(?:if|elif) key == "', bodies[n])[1:]:
+        key = sec.split('"', 1)[0]
+        m = TOK.search(sec)
+        if not m:
+            raise SystemExit('no value parser for %s %s' % (n, key))
+        ptypes[(ctx_of[n], key)] = LEAD_OF[m.group(1)]
+m = re.search(r'\ndef _type_rows\(.*?\n(.*?)\n\n\ndef ', src, re.S)
+if not m:
+    raise SystemExit('missing mirror _type_rows')
+mine_types = {}
+for row in re.findall(r'out\.append\(String\("([^"]+)"\)\)',
+                      m.group(1)):
+    parts = row.split(',')
+    if len(parts) != 4:
+        raise SystemExit('bad type row %r' % row)
+    ctx, kind, key, lead = parts
+    mine_types[(ctx, kind, key)] = lead
+want_types = {}
+for (c0, key), lead in ptypes.items():
+    if c0 in ('top', 'source', 'observer', 'scope'):
+        want_types[(c0, '', key)] = lead
+    else:
+        want_types[('data', c0, key)] = lead
+if want_types != mine_types:
+    only_parser = sorted(set(want_types) - set(mine_types))
+    only_mine = sorted(set(mine_types) - set(want_types))
+    clash = sorted(k for k in set(want_types) & set(mine_types)
+                   if want_types[k] != mine_types[k])
+    raise SystemExit(
+        'type drift parser-only=%s mine-only=%s clash=%s'
+        % (only_parser, only_mine,
+           [(k, want_types[k], mine_types[k]) for k in clash]))
+print('mirror sets match parser and schema')
+PYEOF
+        report_ok "f4-key-mirror (sets match parser and schema)"
+    else
+        report_bad "f4-key-mirror: accepted-key sets drifted"
+    fi
+    expect_error "overflow-rejected" 2 \
+        report "$ROOT/tests/fixtures/reader/overflow"
+
+    # F1: the reader streams events in 64 KiB chunks, so resident size
+    # stays flat no matter how large events.ndjson is. Both captures
+    # below are generated into $TMP (never committed); RSS is the
+    # child's getrusage maxrss in KiB. The 270MB capture must exit 2
+    # for exceeding the 256MiB bound while staying far below the
+    # 945MB RSS the whole-file reader needed for the same input.
+    python3 - "$TMP" "$ROOT/tests/fixtures/reader/corrupt-tail" <<'PYEOF'
+import json, os, sys
+tmp, src = sys.argv[1], sys.argv[2]
+tpl = json.loads(
+    open(src + '/events.ndjson', 'rb').read().split(b'\n')[0]
+)
+sess = open(src + '/session.json', 'rb').read()
+def line(i):
+    d = dict(tpl)
+    d['seq'] = str(i)
+    d['ts_ns'] = str(1000000000 + i * 1000)
+    dd = dict(tpl['data'])
+    dd['operation_id'] = 'op-%d' % i
+    d['data'] = dd
+    return json.dumps(d, separators=(', ', ': ')).encode() + b'\n'
+os.makedirs(tmp + '/sparse-cap', exist_ok=True)
+open(tmp + '/sparse-cap/session.json', 'wb').write(sess)
+with open(tmp + '/sparse-cap/events.ndjson', 'wb') as f:
+    i = 1
+    while f.tell() <= 270000000:
+        f.write(line(i))
+        i += 1
+os.makedirs(tmp + '/bigsession-cap', exist_ok=True)
+trimmed = sess.rstrip()
+pad = trimmed[:-1] + b', "pad": "' + b'x' * 17000000 + b'"}\n'
+open(tmp + '/bigsession-cap/session.json', 'wb').write(pad)
+open(tmp + '/bigsession-cap/events.ndjson', 'wb').write(
+    open(src + '/events.ndjson', 'rb').read())
+os.makedirs(tmp + '/large-cap', exist_ok=True)
+open(tmp + '/large-cap/session.json', 'wb').write(sess)
+with open(tmp + '/large-cap/events.ndjson', 'wb') as f:
+    for i in range(1, 164001):
+        f.write(line(i))
+PYEOF
+    python3 - "$BIN" report "$TMP/sparse-cap" \
+        "$TMP/sparse" >"$TMP/measure" 2>&1 <<'PYEOF'
+import subprocess, resource, sys
+binary, args, prefix = sys.argv[1], sys.argv[2:-1], sys.argv[-1]
+p = subprocess.run([binary] + args, capture_output=True)
+open(prefix + '.out', 'wb').write(p.stdout)
+open(prefix + '.err', 'wb').write(p.stderr)
+open(prefix + '.rc', 'w').write(str(p.returncode))
+ru = resource.getrusage(resource.RUSAGE_CHILDREN)
+print(ru.ru_maxrss)
+PYEOF
+    rc=$(cat "$TMP/sparse.rc")
+    rss=$(cat "$TMP/measure")
+    if [ "$rc" -ne 2 ]; then
+        report_bad "streaming-reject: exit $rc, want 2"
+    elif [ -s "$TMP/sparse.out" ]; then
+        report_bad "streaming-reject: stdout must be empty on exit 2"
+    elif [ ! -s "$TMP/sparse.err" ]; then
+        report_bad "streaming-reject: stderr must explain exit 2"
+    elif [ "$rss" -gt 200000 ]; then
+        report_bad "streaming-reject: RSS ${rss}KiB exceeds 200000KiB"
+    else
+        report_ok "streaming-reject (exit 2, ${rss}KiB RSS)"
+    fi
+    python3 - "$BIN" report "$TMP/large-cap" \
+        "$TMP/large" >"$TMP/measure" 2>&1 <<'PYEOF'
+import subprocess, resource, sys
+binary, args, prefix = sys.argv[1], sys.argv[2:-1], sys.argv[-1]
+p = subprocess.run([binary] + args, capture_output=True)
+open(prefix + '.out', 'wb').write(p.stdout)
+open(prefix + '.err', 'wb').write(p.stderr)
+open(prefix + '.rc', 'w').write(str(p.returncode))
+ru = resource.getrusage(resource.RUSAGE_CHILDREN)
+print(ru.ru_maxrss)
+PYEOF
+    rc=$(cat "$TMP/large.rc")
+    rss=$(cat "$TMP/measure")
+    if [ "$rc" -ne 0 ]; then
+        report_bad "streaming-large: exit $rc, want 0"
+    elif ! grep -q -F 'bounce_attempts = 164000 count' "$TMP/large.out"; then
+        report_bad "streaming-large: report lacks 164000 attempts"
+    elif ! grep -q -F 'requested_bounce_bytes = 671744000 bytes' \
+        "$TMP/large.out"; then
+        report_bad "streaming-large: report lacks 671744000 bytes"
+    elif [ "$rss" -gt 100000 ]; then
+        report_bad "streaming-large: RSS ${rss}KiB exceeds 100000KiB"
+    else
+        report_ok "streaming-large (exit 0, 164000 attempts, ${rss}KiB RSS)"
+    fi
+    python3 - "$BIN" report "$TMP/bigsession-cap" \
+        "$TMP/bigsession" >"$TMP/measure" 2>&1 <<'PYEOF'
+import subprocess, resource, sys
+binary, args, prefix = sys.argv[1], sys.argv[2:-1], sys.argv[-1]
+p = subprocess.run([binary] + args, capture_output=True)
+open(prefix + '.out', 'wb').write(p.stdout)
+open(prefix + '.err', 'wb').write(p.stderr)
+open(prefix + '.rc', 'w').write(str(p.returncode))
+ru = resource.getrusage(resource.RUSAGE_CHILDREN)
+print(ru.ru_maxrss)
+PYEOF
+    rc=$(cat "$TMP/bigsession.rc")
+    rss=$(cat "$TMP/measure")
+    if [ "$rc" -ne 2 ]; then
+        report_bad "session-reject: exit $rc, want 2"
+    elif [ -s "$TMP/bigsession.out" ]; then
+        report_bad "session-reject: stdout must be empty on exit 2"
+    elif ! grep -q -F 'session.json too large' "$TMP/bigsession.err"; then
+        report_bad "session-reject: stderr lacks size diagnostic"
+    elif [ "$rss" -gt 100000 ]; then
+        report_bad "session-reject: RSS ${rss}KiB exceeds 100000KiB"
+    else
+        report_ok "session-reject (exit 2, ${rss}KiB RSS)"
+    fi
+
+    # F7: 2043 observed devices need 4097 metric rows, past the 4096
+    # report budget, so the capture is unrepresentable (exit 2). The
+    # 300-flood capture stays representable: its 300 unknown-counter
+    # notes merge into at most 256 limitations (oracle-checked).
+    python3 - "$TMP" "$ROOT/tests/fixtures/attempts" <<'PYEOF'
+import json, os, sys
+tmp, src = sys.argv[1], sys.argv[2]
+base = json.load(open(src + '/session.json'))
+tpl = json.loads(open(src + '/events.ndjson', 'rb').read().split(b'\n')[0])
+os.makedirs(tmp + '/manydev-cap', exist_ok=True)
+sess = json.loads(json.dumps(base))
+sess['device_catalog']['devices'] = [
+    {'device_id': 'dev-%d' % i, 'name': 'testdev%d' % i,
+     'driver': 'synthetic-test', 'identity_status': 'resolved'}
+    for i in range(2043)
+]
+open(tmp + '/manydev-cap/session.json', 'w').write(json.dumps(sess))
+with open(tmp + '/manydev-cap/events.ndjson', 'wb') as f:
+    for i in range(2043):
+        d = json.loads(json.dumps(tpl))
+        d['seq'] = str(i + 1)
+        d['ts_ns'] = str(1000000000 + i * 1000)
+        d['data']['device_id'] = 'dev-%d' % i
+        d['data']['operation_id'] = 'op-%d' % i
+        f.write(json.dumps(d, separators=(', ', ': ')).encode() + b'\n')
+os.makedirs(tmp + '/flood-cap', exist_ok=True)
+open(tmp + '/flood-cap/session.json', 'w').write(json.dumps(base))
+with open(tmp + '/flood-cap/events.ndjson', 'wb') as f:
+    for i in range(300):
+        d = {'schema_version': '0.1.0',
+             'session_id': base['session_id'],
+             'seq': str(i + 1),
+             'ts_ns': str(1000000000 + i * 1000),
+             'kind': 'counter_snapshot',
+             'source': json.loads(json.dumps(tpl['source'])),
+             'data': {'counter_id': 'vendor.flood-%d' % i,
+                      'epoch': '3',
+                      'scope': {'device_id': None,
+                                'profile_id': 'synthetic-attempts-1'},
+                      'value': '10', 'unit': 'count'}}
+        f.write(json.dumps(d, separators=(', ', ': ')).encode() + b'\n')
+PYEOF
+    expect_error "f7-many-devices" 2 report "$TMP/manydev-cap"
+    "$BIN" report --format json "$TMP/flood-cap" \
+        >"$TMP/flood.json" 2>"$TMP/err"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        report_bad "f7-counter-flood: exit $rc, want 0"
+    else
+        rm -rf "$TMP/flood-check"
+        mkdir -p "$TMP/flood-check"
+        cp "$TMP/flood-cap/session.json" "$TMP/flood-check/session.json"
+        cp "$TMP/flood-cap/events.ndjson" "$TMP/flood-check/events.ndjson"
+        cp "$TMP/flood.json" "$TMP/flood-check/report.json"
+        counts=$("$ROOT/tools/validate-schemas" "$TMP/flood-check" 2>&1)
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            report_bad "f7-counter-flood: oracle rejected: $counts"
+        elif [ "$counts" != "capture OK: 300 events, 0 attempts, 0 requested bytes" ]; then
+            report_bad "f7-counter-flood: counts '$counts'"
+        elif ! grep -q -F 'further limitations withheld.' "$TMP/flood.json"; then
+            report_bad "f7-counter-flood: report lacks withheld note"
+        else
+            report_ok "f7-counter-flood (exit 0, $counts)"
+        fi
+    fi
+
+    expect_error "badkind" 2 report "$ROOT/tests/fixtures/reader/badkind"
+    expect_error "partial-tail-strict" 2 \
+        report "$ROOT/tests/fixtures/reader/partial-tail"
+    expect_error "corrupt-tail-allowed" 2 report --allow-partial \
+        "$ROOT/tests/fixtures/reader/corrupt-tail"
+    expect_error "valid-no-newline-strict" 2 \
+        report "$ROOT/tests/fixtures/reader/valid-no-newline"
+    expect_error "valid-no-newline-allowed" 2 report --allow-partial \
+        "$ROOT/tests/fixtures/reader/valid-no-newline"
+    expect_error "tail-foreign-allowed" 2 report --allow-partial \
+        "$ROOT/tests/fixtures/reader/tail-foreign"
+    expect_error "f2-unknown-device" 2 \
+        report "$ROOT/tests/fixtures/reader/f2-unknown-device"
+    expect_error "f2-unknown-snapshot-device" 2 \
+        report "$ROOT/tests/fixtures/reader/f2-unknown-snapshot-device"
+    expect_error "f2-duplicate-op" 2 \
+        report "$ROOT/tests/fixtures/reader/f2-duplicate-op"
+    expect_error "f2-duplicate-mapping" 2 \
+        report "$ROOT/tests/fixtures/reader/f2-duplicate-mapping"
+    expect_error "f2-early-unmap" 2 \
+        report "$ROOT/tests/fixtures/reader/f2-early-unmap"
+    expect_error "f2-unknown-copy" 2 \
+        report "$ROOT/tests/fixtures/reader/f2-unknown-copy"
+    expect_error "f2-unknown-sync" 2 \
+        report "$ROOT/tests/fixtures/reader/f2-unknown-sync"
+    expect_error "f2-double-unmap" 2 \
+        report "$ROOT/tests/fixtures/reader/f2-double-unmap"
+    expect_error "f2-contradictory-provenance" 2 \
+        report "$ROOT/tests/fixtures/reader/f2-contradictory-provenance"
+    expect_error "f3-sum-overflow" 2 \
+        report "$ROOT/tests/fixtures/reader/f3-sum-overflow"
+    expect_error "f3-span-sync" 2 \
+        report "$ROOT/tests/fixtures/reader/f3-span-sync"
+    expect_error "f3-span-transition" 2 \
+        report "$ROOT/tests/fixtures/reader/f3-span-transition"
+    expect_error "f3-baseline" 2 \
+        report "$ROOT/tests/fixtures/reader/f3-baseline"
+    expect_error "missing-dir" 2 report "$ROOT/tests/fixtures/reader/no-such"
+    expect_error "unknown-format" 2 report --format yaml \
+        "$ROOT/tests/fixtures/attempts"
+    expect_error "equals-format" 2 report --format=json \
+        "$ROOT/tests/fixtures/attempts"
+    expect_error "unknown-flag" 2 report --nope \
+        "$ROOT/tests/fixtures/attempts"
+    expect_error "report-no-dir" 2 report
+    expect_error "no-subcommand" 2
+    expect_error "unknown-subcommand" 2 frobnicate
+
+    # F5: the --horizon flag is gone; counts always cover the whole
+    # capture window, so any horizon argument is a usage error.
+    expect_error "horizon-removed" 2 report --horizon 2500000000 \
+        "$ROOT/tests/fixtures/attempts"
+
+    "$BIN" --help >"$TMP/out" 2>"$TMP/err"
+    if [ "$?" -ne 0 ] || [ ! -s "$TMP/out" ]; then
+        report_bad "top-help: must exit 0 with usage on stdout"
+    else
+        report_ok "top-help (exit 0)"
+    fi
+    "$BIN" report --help >"$TMP/out" 2>"$TMP/err"
+    if [ "$?" -ne 0 ] || [ ! -s "$TMP/out" ]; then
+        report_bad "report-help: must exit 0 with usage on stdout"
+    else
+        report_ok "report-help (exit 0)"
+    fi
+    "$BIN" --version >"$TMP/out" 2>"$TMP/err"
+    if [ "$?" -ne 0 ]; then
+        report_bad "version: must exit 0"
+    elif [ "$(cat "$TMP/out")" != "memveil-0.1.0" ]; then
+        report_bad "version: unexpected output '$(cat "$TMP/out")'"
+    else
+        report_ok "version (memveil-0.1.0)"
+    fi
+
+    if ldd "$BIN" 2>/dev/null | grep -qi bpf; then
+        report_bad "isolation: binary references bpf (native bridge leak)"
+    else
+        report_ok "isolation (no bpf linkage)"
+    fi
+
+    echo "PREVIOUS_DIAGNOSTIC" >"$TMP/stderr.log"
+    "$BIN" report 2>>"$TMP/stderr.log" >"$TMP/out"
+    if [ "$?" -ne 2 ]; then
+        report_bad "stderr-append: want exit 2"
+    elif ! head -1 "$TMP/stderr.log" | grep -q "PREVIOUS_DIAGNOSTIC"; then
+        report_bad "stderr-append: prior diagnostics truncated"
+    elif ! tail -1 "$TMP/stderr.log" | grep -q "memveil report:"; then
+        report_bad "stderr-append: new diagnostic missing"
+    else
+        report_ok "stderr-append (prior diagnostics preserved)"
+    fi
+
+    echo "reports: $report_pass passed, $report_fail failed"
+    if [ "$report_fail" -ne 0 ]; then
+        return 1
+    fi
+    return 0
 }
 
 if [ $# -eq 0 ]; then
@@ -35,7 +757,13 @@ case "$1" in
     schemas)
         exec "$ROOT/tools/validate-schemas"
         ;;
-    unit|reports|profiles|doctor|attempts|writer|vm-attempts|package)
+    unit)
+        suite_unit
+        ;;
+    reports)
+        suite_reports
+        ;;
+    profiles|doctor|attempts|writer|vm-attempts|package)
         echo "test: suite '$1' is not implemented yet" >&2
         exit 2
         ;;

@@ -96,11 +96,13 @@ main() {
             log tools/validate-schemas
             "$ROOT/tools/validate-schemas" || return 1
             if [ -f "$ROOT/src/memveil/main.mojo" ]; then
-                log pixi run --frozen mojo build -o build/memveil \
-                    src/memveil/main.mojo
+                log pixi run --frozen mojo build -I src \
+                    --target-cpu x86-64-v2 \
+                    -o build/memveil src/memveil/main.mojo
                 mkdir -p build
-                pixi run --frozen mojo build -o build/memveil \
-                    src/memveil/main.mojo || return 1
+                pixi run --frozen mojo build -I src \
+                    --target-cpu x86-64-v2 \
+                    -o build/memveil src/memveil/main.mojo || return 1
             else
                 echo "build: no Mojo targets registered yet" >&2
             fi
