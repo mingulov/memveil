@@ -148,7 +148,9 @@ def test_license_texts_and_first_party(bundle):
             "staged text too small: %s" % rel
     own = (root / "THIRD-PARTY-NOTICES.md").read_text()
     assert manifest["libbpf_mojo"]["version"] in own
+    assert manifest["libbpf_mojo"]["source_commit"] in own
     assert "licenses/LICENSE.mojo-compiler" in own
+    assert "not shipped in `lib/`" in own
     lmb = (root / "THIRD-PARTY-NOTICES.libbpf-mojo.md").read_text()
     assert "BSD 2-Clause" in lmb
 
