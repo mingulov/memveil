@@ -199,6 +199,110 @@ def test_orphan_release_invalidates_live() raises:
     assert_equal(live.measurement, String("unavailable"))
 
 
+def test_producer_loss_invalidates_live_keeps_aggregates() raises:
+    var t = MappingTracker()
+    t.consume(_attempt("op1", "d1", UInt64(1)))
+    t.consume(_map("op1", True, "m1", UInt64(4096), UInt64(100), UInt64(2)))
+    # Producer-reported detail loss may hide a release, exactly like
+    # an observed gap: live state is withheld, aggregates keep their
+    # values with partial coverage.
+    t.note_detail_loss()
+    var rows = t.metrics("window [0,1000)")
+    var live = _global(rows, "live_observed_allocation_bytes")
+    assert_true(not live.has_value)
+    assert_equal(live.measurement, String("unavailable"))
+    var opened = _global(rows, "open_mappings")
+    assert_true(not opened.has_value)
+    var allocs = _global(rows, "successful_allocations")
+    assert_equal(allocs.value, UInt64(1))
+    assert_equal(allocs.coverage, String("partial"))
+    assert_equal(_global(rows, "mapped_bytes_total").value, UInt64(4096))
+
+
+def test_peak_and_byte_time() raises:
+    var t = MappingTracker()
+    t.consume(_attempt("op1", "d1", UInt64(1)))
+    t.consume(_attempt("op2", "d1", UInt64(2)))
+    # m1: 4096 bytes over [100ms, 300ms); m2: 8192 bytes over
+    # [200ms, horizon). Live bytes: 4096, then 12288, then 8192.
+    t.consume(
+        _map("op1", True, "m1", UInt64(4096), UInt64(100000000), UInt64(3))
+    )
+    t.consume(
+        _map("op2", True, "m2", UInt64(8192), UInt64(200000000), UInt64(4))
+    )
+    t.consume(_unmap("m1", UInt64(300000000), UInt64(5)))
+    var rows = t.metrics_horizon(
+        "window [0,1000000000)", UInt64(1000000000)
+    )
+    assert_equal(
+        _global(rows, "peak_live_observed_allocation_bytes").value,
+        UInt64(12288),
+    )
+    # 4096*100ms + 12288*100ms + 8192*700ms, in byte-microseconds.
+    assert_equal(
+        _global(rows, "allocation_byte_microseconds").value,
+        UInt64(7372800000),
+    )
+
+
+def test_peak_and_byte_time_withheld_when_live_invalid() raises:
+    var t = MappingTracker()
+    t.consume(_attempt("op1", "d1", UInt64(1)))
+    t.consume(
+        _map("op1", True, "m1", UInt64(4096), UInt64(100000000), UInt64(2))
+    )
+    t.note_detail_loss()
+    var rows = t.metrics_horizon(
+        "window [0,1000000000)", UInt64(1000000000)
+    )
+    var peak = _global(rows, "peak_live_observed_allocation_bytes")
+    assert_true(not peak.has_value)
+    assert_equal(peak.measurement, String("unavailable"))
+    var bt = _global(rows, "allocation_byte_microseconds")
+    assert_true(not bt.has_value)
+    assert_equal(bt.measurement, String("unavailable"))
+
+
+def test_byte_time_withheld_without_horizon_while_open() raises:
+    var t = MappingTracker()
+    t.consume(_attempt("op1", "d1", UInt64(1)))
+    t.consume(
+        _map("op1", True, "m1", UInt64(4096), UInt64(100000000), UInt64(2))
+    )
+    # No horizon: the open mapping's contribution is unprovable,
+    # so completed-only would undercount and the row is withheld.
+    var rows = t.metrics("window [0,1000)")
+    var bt = _global(rows, "allocation_byte_microseconds")
+    assert_true(not bt.has_value)
+    var rows2 = t.metrics_horizon(
+        "window [0,1000000000)", UInt64(1000000000)
+    )
+    assert_equal(
+        _global(rows2, "allocation_byte_microseconds").value,
+        UInt64(3686400000),
+    )
+
+
+def test_lifetime_p95() raises:
+    var t = MappingTracker()
+    t.consume(_attempt("op1", "d1", UInt64(1)))
+    t.consume(_map("op1", True, "m1", UInt64(4096), UInt64(100), UInt64(2)))
+    t.consume(_unmap("m1", UInt64(300), UInt64(3)))
+    var rows = t.metrics("window [0,1000)")
+    # One completed lifetime: every percentile lands in its bucket.
+    assert_equal(
+        _global(rows, "lifetime_p95_ns").value,
+        _global(rows, "lifetime_p50_ns").value,
+    )
+    var t2 = MappingTracker()
+    t2.consume(_attempt("op1", "d1", UInt64(1)))
+    t2.consume(_map("op1", True, "m1", UInt64(4096), UInt64(100), UInt64(2)))
+    var rows2 = t2.metrics("window [0,1000)")
+    var p95 = _global(rows2, "lifetime_p95_ns")
+    assert_true(not p95.has_value)
+
+
 def test_detail_gap_invalidates_live() raises:
     var t = MappingTracker()
     t.consume(_attempt("op1", "d1", UInt64(1)))
@@ -510,6 +614,11 @@ def run() raises -> Int:
     suite.test[test_copy_before_failure]()
     suite.test[test_request_is_not_copy]()
     suite.test[test_orphan_release_invalidates_live]()
+    suite.test[test_producer_loss_invalidates_live_keeps_aggregates]()
+    suite.test[test_peak_and_byte_time]()
+    suite.test[test_peak_and_byte_time_withheld_when_live_invalid]()
+    suite.test[test_byte_time_withheld_without_horizon_while_open]()
+    suite.test[test_lifetime_p95]()
     suite.test[test_detail_gap_invalidates_live]()
     suite.test[test_duplicate_result_refused]()
     suite.test[test_reused_generation_two_samples]()

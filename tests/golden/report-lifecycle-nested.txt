@@ -19,7 +19,7 @@ quality:
   terminal: complete_for_scope loss=0
     scope: authored fixture finalization
     reason: Authored fixture: finalized.
-metrics (27):
+metrics (30):
   bounce_attempts = 1 count [observed, complete_for_scope, counter]
     scope: window [1000000000,2500000000), all devices, detail channel
     notes: 1 detail event; no counter snapshots to compare.
@@ -65,9 +65,15 @@ metrics (27):
   open_mappings = 0 count [observed, complete_for_scope, gauge]
     scope: window [1000000000,2500000000); observed mappings
     notes: Open mappings are censored from completed lifetimes, not leaks.
+  peak_live_observed_allocation_bytes = 4096 bytes [observed, complete_for_scope, gauge]
+    scope: window [1000000000,2500000000); observed mappings
+    notes: Maximum live mapped bytes reached; worst instantaneous exposure in this window.
   oldest_open_mapping_age_ns = unavailable nanoseconds [unavailable, unavailable]
     scope: window [1000000000,2500000000); observed mappings
     notes: No open mappings at the horizon.
+  allocation_byte_microseconds = 4096000000 byte_microseconds [observed, complete_for_scope, counter]
+    scope: window [1000000000,2500000000); observed mappings
+    notes: Time integral of live mapped bytes; exposure weighted by duration. Completed mappings use exact durations; open mappings integrate to the horizon.
   sync_requests = 1 count [observed, complete_for_scope, counter]
     scope: window [1000000000,2500000000); observed mappings
     notes: Sync requests observed; requests are not copies.
@@ -84,6 +90,9 @@ metrics (27):
     scope: window [1000000000,2500000000); observed mappings
     notes: Exact maximum completed lifetime.
   lifetime_p50_ns = 1073741823 nanoseconds [estimated, complete_for_scope, p50]
+    scope: window [1000000000,2500000000); observed mappings
+    notes: Estimated 65-bucket upper edge; exact min/max stay separate.
+  lifetime_p95_ns = 1073741823 nanoseconds [estimated, complete_for_scope, p95]
     scope: window [1000000000,2500000000); observed mappings
     notes: Estimated 65-bucket upper edge; exact min/max stay separate.
   lifetime_p99_ns = 1073741823 nanoseconds [estimated, complete_for_scope, p99]

@@ -132,6 +132,9 @@ struct MappingTracker[
     var _live_bytes: UInt64
     var _live_invalid: Bool
     var _live_cause: String
+    var _peak_live_bytes: UInt64
+    var _byte_us: UInt64
+    var _byte_us_overflow: Bool
     var _degraded: Bool
     var _degrade_cause: String
     var _completed: UInt64
@@ -178,6 +181,9 @@ struct MappingTracker[
         self._live_bytes = UInt64(0)
         self._live_invalid = False
         self._live_cause = String("")
+        self._peak_live_bytes = UInt64(0)
+        self._byte_us = UInt64(0)
+        self._byte_us_overflow = False
         self._degraded = False
         self._degrade_cause = String("")
         self._completed = UInt64(0)
@@ -204,13 +210,17 @@ struct MappingTracker[
         return self._unpaired
 
     def note_detail_loss(mut self):
-        """Degrade stateful rows: loss may hide lifecycle events.
+        """Invalidate live state and degrade aggregates.
 
-        Observed detail gaps already invalidate live state in
-        consume; this covers producer-claimed loss and recovered
-        tails the event stream never shows.
+        Producer-claimed loss may hide a release, exactly like an
+        observed detail gap, so open mappings and live bytes are
+        withheld; cumulative counters keep their values with
+        partial coverage. This covers producer-claimed loss and
+        recovered tails the event stream never shows.
         """
-        self._degrade("Detail loss may hide lifecycle events")
+        self._invalidate_live(
+            "Detail loss reported by the producer may hide a release"
+        )
 
     def _invalidate_live(mut self, cause: String):
         if not self._live_invalid:
@@ -222,6 +232,24 @@ struct MappingTracker[
         if not self._degraded:
             self._degraded = True
             self._degrade_cause = cause
+
+    def _note_live_level(mut self):
+        if self._live_bytes > self._peak_live_bytes:
+            self._peak_live_bytes = self._live_bytes
+
+    def _add_byte_us(mut self, byte_us: UInt64):
+        try:
+            self._byte_us = checked_add(self._byte_us, byte_us)
+        except:
+            self._latch_byte_us_overflow()
+
+    def _latch_byte_us_overflow(mut self):
+        if not self._byte_us_overflow:
+            self._byte_us_overflow = True
+            self._note(
+                "Allocation byte-time exceeds u64 range;"
+                " value withheld."
+            )
 
     def _note(mut self, text: String):
         self._notes.append(text)
@@ -393,6 +421,8 @@ struct MappingTracker[
             self._live_bytes = checked_add(self._live_bytes, mapped)
         except:
             self._invalidate_live("Live-byte total overflowed")
+            return
+        self._note_live_level()
 
     def _apply_copy(mut self, ev: Event, paired: Bool) raises:
         var direction = ev.copy.direction
@@ -495,6 +525,15 @@ struct MappingTracker[
             return
         var dur = ev.ts_ns - rec.map_ts
         self._lifetimes.add(dur)
+        # Completed byte-time: exact under any interleaving, since
+        # each mapping carries its own provable duration.
+        var dur_us = dur // UInt64(1000)
+        if dur_us > UInt64(0) and rec.mapped_bytes > UInt64(0):
+            var limit = UInt64(18446744073709551615) // rec.mapped_bytes
+            if dur_us > limit:
+                self._latch_byte_us_overflow()
+            else:
+                self._add_byte_us(rec.mapped_bytes * dur_us)
         try:
             self._lifetime_total = checked_add(
                 self._lifetime_total, dur
@@ -869,6 +908,14 @@ struct MappingTracker[
                     cause + "; open count withheld.",
                 )
             )
+            out.append(
+                self._missing(
+                    String("peak_live_observed_allocation_bytes"),
+                    String("bytes"),
+                    scope,
+                    cause + "; peak withheld with live state.",
+                )
+            )
         elif not has_mapping_state:
             var no_state = String(
                 "No map or release events in this capture."
@@ -885,6 +932,14 @@ struct MappingTracker[
                 self._missing(
                     String("open_mappings"),
                     String("count"),
+                    scope,
+                    no_state,
+                )
+            )
+            out.append(
+                self._missing(
+                    String("peak_live_observed_allocation_bytes"),
+                    String("bytes"),
                     scope,
                     no_state,
                 )
@@ -914,6 +969,21 @@ struct MappingTracker[
                     String(
                         "Open mappings are censored from completed"
                         " lifetimes, not leaks."
+                    ),
+                )
+            )
+            out.append(
+                self._valued(
+                    String("peak_live_observed_allocation_bytes"),
+                    String("bytes"),
+                    self._peak_live_bytes,
+                    String("gauge"),
+                    False,
+                    UInt64(0),
+                    scope,
+                    String(
+                        "Maximum live mapped bytes reached; worst"
+                        " instantaneous exposure in this window."
                     ),
                 )
             )
@@ -958,6 +1028,7 @@ struct MappingTracker[
                     age_why,
                 )
             )
+        out.append(self._byte_time_row(scope, horizon_ns, has_mapping_state))
         if self._saw_sync:
             out.append(
                 self._valued(
@@ -1054,6 +1125,14 @@ struct MappingTracker[
             )
             out.append(
                 self._missing(
+                    String("lifetime_p95_ns"),
+                    String("nanoseconds"),
+                    scope,
+                    reason,
+                )
+            )
+            out.append(
+                self._missing(
                     String("lifetime_p99_ns"),
                     String("nanoseconds"),
                     scope,
@@ -1117,6 +1196,27 @@ struct MappingTracker[
                     ),
                 )
             )
+            var p95 = self._lifetimes.estimate(95, 100)
+            out.append(
+                self._row(
+                    String("lifetime_p95_ns"),
+                    String("nanoseconds"),
+                    True,
+                    p95,
+                    String("estimated"),
+                    self._coverage(),
+                    String("p95"),
+                    True,
+                    self._completed,
+                    False,
+                    String(""),
+                    scope,
+                    String(
+                        "Estimated 65-bucket upper edge; exact"
+                        " min/max stay separate."
+                    ),
+                )
+            )
             var p99 = self._lifetimes.estimate(99, 100)
             out.append(
                 self._row(
@@ -1140,6 +1240,102 @@ struct MappingTracker[
             )
         self._device_rows(out, window)
         return out^
+
+    def _byte_time_row(
+        self, scope: String, horizon_ns: UInt64, has_mapping_state: Bool
+    ) -> Metric:
+        """Allocation byte-time: completed plus open mappings.
+
+        Each mapping contributes mapped bytes times its own
+        provable duration, so interleaved streams integrate
+        exactly. Open mappings need a horizon; without one the
+        row is withheld while anything is still open.
+        """
+        if self._live_invalid:
+            return self._missing(
+                String("allocation_byte_microseconds"),
+                String("byte_microseconds"),
+                scope,
+                self._live_cause + "; byte-time withheld with live state.",
+            )
+        if not has_mapping_state:
+            return self._missing(
+                String("allocation_byte_microseconds"),
+                String("byte_microseconds"),
+                scope,
+                String("No map or release events in this capture."),
+            )
+        if horizon_ns == UInt64(0) and len(self._live) > 0:
+            return self._missing(
+                String("allocation_byte_microseconds"),
+                String("byte_microseconds"),
+                scope,
+                String(
+                    "Open mappings need a horizon for byte-time;"
+                    " completed mappings alone would undercount."
+                ),
+            )
+        if self._byte_us_overflow:
+            return self._missing(
+                String("allocation_byte_microseconds"),
+                String("byte_microseconds"),
+                scope,
+                String(
+                    "Allocation byte-time exceeds u64 range;"
+                    " value withheld."
+                ),
+            )
+        var total = self._byte_us
+        if horizon_ns > UInt64(0):
+            for entry in self._live.items():
+                var rec = entry.value
+                if rec.map_ts >= horizon_ns:
+                    continue
+                var open_us = (horizon_ns - rec.map_ts) // UInt64(1000)
+                if open_us == UInt64(0) or rec.mapped_bytes == UInt64(0):
+                    continue
+                var limit = (
+                    UInt64(18446744073709551615) // rec.mapped_bytes
+                )
+                if open_us > limit:
+                    return self._missing(
+                        String("allocation_byte_microseconds"),
+                        String("byte_microseconds"),
+                        scope,
+                        String(
+                            "Allocation byte-time exceeds u64 range;"
+                            " value withheld."
+                        ),
+                    )
+                try:
+                    total = checked_add(
+                        total, rec.mapped_bytes * open_us
+                    )
+                except:
+                    return self._missing(
+                        String("allocation_byte_microseconds"),
+                        String("byte_microseconds"),
+                        scope,
+                        String(
+                            "Allocation byte-time exceeds u64 range;"
+                            " value withheld."
+                        ),
+                    )
+        return self._valued(
+            String("allocation_byte_microseconds"),
+            String("byte_microseconds"),
+            total,
+            String("counter"),
+            False,
+            UInt64(0),
+            scope,
+            String(
+                "Time integral of live mapped bytes; exposure"
+                " weighted by duration. Completed mappings use"
+                " exact durations; open mappings integrate to"
+                " the horizon."
+            ),
+        )
 
     def _mean_row(self, scope: String) raises -> Metric:
         if self._lifetime_overflow:
