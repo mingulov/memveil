@@ -356,10 +356,23 @@ build_bpf() {
         -I bpf/include -I "$LIBBPF_INC" -I "$ARCH_INC" \
         -c bpf/programs/swiotlb_copy.bpf.c \
         -o build/bpf/swiotlb_copy.bpf.o || return 1
+    log clang --target=bpf saturation lifecycle/copy test objects
+    clang --target=bpf -O2 -g -Wall -Wextra -Werror -D__BPF__ \
+        -DMV_RING_BYTES=4096 \
+        -I bpf/include -I "$LIBBPF_INC" -I "$ARCH_INC" \
+        -c bpf/programs/swiotlb_lifecycle.bpf.c \
+        -o build/bpf/swiotlb_lifecycle-test.bpf.o || return 1
+    clang --target=bpf -O2 -g -Wall -Wextra -Werror -D__BPF__ \
+        -DMV_RING_BYTES=4096 \
+        -I bpf/include -I "$LIBBPF_INC" -I "$ARCH_INC" \
+        -c bpf/programs/swiotlb_copy.bpf.c \
+        -o build/bpf/swiotlb_copy-test.bpf.o || return 1
     sha256sum build/bpf/swiotlb_attempt.bpf.o \
         build/bpf/swiotlb_attempt-test.bpf.o \
         build/bpf/swiotlb_lifecycle.bpf.o \
-        build/bpf/swiotlb_copy.bpf.o || return 1
+        build/bpf/swiotlb_copy.bpf.o \
+        build/bpf/swiotlb_lifecycle-test.bpf.o \
+        build/bpf/swiotlb_copy-test.bpf.o || return 1
 }
 
 main() {
@@ -438,6 +451,18 @@ main() {
                 build_bpf || return 1
             else
                 echo "build: no BPF targets registered yet" >&2
+            fi
+            if [ -f "$ROOT/tests/vm/mv_consume.mojo" ]; then
+                log pixi run --frozen mojo build "${MOJO_INCS[@]}" \
+                    --target-cpu x86-64-v2 \
+                    -o build/vm/mv_consume tests/vm/mv_consume.mojo
+                mkdir -p build/vm
+                pixi run --frozen mojo build "${MOJO_INCS[@]}" \
+                    --target-cpu x86-64-v2 \
+                    -o build/vm/mv_consume tests/vm/mv_consume.mojo \
+                    || return 1
+            else
+                echo "build: no VM consumer registered yet" >&2
             fi
             ;;
         *)

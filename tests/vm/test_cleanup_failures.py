@@ -3,16 +3,141 @@
 """Cleanup-failure VM gate: live resource-inventory cycles.
 
 Requires MEMVEIL_VM_CLEANUP=1 with qualified probes. Unarmed
-runs exit 77 without booting; armed runs fail loudly until
-the live cleanup flow (100 owned start/stop/error cycles
-against a resource baseline) is implemented.
+runs exit 77 without booting; armed runs boot one guest and
+drive 100 owned start/stop/error cycles (consumer windows
+with traffic every fifth cycle plus rotating error cases)
+against a resource baseline, then check the per-cycle ledger
+and the before/after inventory equality.
 """
 
+import json
 import os
+import shutil
+import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(ROOT)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from vm_boot import cleanup, run_guest, verify_exports
+
+CYCLES = 100
+
+
+def need(path, what):
+    if not os.path.isfile(path):
+        print(f"FAIL vm-cleanup: armed but {what} missing")
+        return False
+    return True
+
+
+def armed_preflight():
+    ok = need(os.path.join(REPO, "build", "bpf",
+                           "swiotlb_lifecycle.bpf.o"),
+              "lifecycle probes")
+    ok = need(os.path.join(REPO, "build", "bpf",
+                           "swiotlb_copy.bpf.o"),
+              "copy probes") and ok
+    ok = need(os.path.join(REPO, "build", "vm", "mv_consume"),
+              "consumer") and ok
+    ko = os.path.join(REPO, "tests", "kernel",
+                      "memveil_dma_oracle.ko")
+    if not os.path.isfile(ko):
+        kdir = "/lib/modules/%s/build" % os.uname().release
+        if not os.path.isfile(os.path.join(kdir, "Makefile")):
+            print("FAIL vm-cleanup: armed but no kernel tree")
+            return False
+        build = subprocess.run(
+            ["make", "-C", os.path.join(REPO, "tests", "kernel")],
+            capture_output=True, text=True)
+        if build.returncode != 0 or not os.path.isfile(ko):
+            print("FAIL vm-cleanup: armed but module failed")
+            return False
+    if not shutil.which("vng"):
+        print("FAIL vm-cleanup: armed but vng not available")
+        return False
+    if not shutil.which("qemu-system-x86_64"):
+        print("FAIL vm-cleanup: armed but qemu not available")
+        return False
+    if not os.path.exists("/dev/kvm"):
+        print("FAIL vm-cleanup: armed but /dev/kvm missing")
+        return False
+    probe = subprocess.run(["sudo", "-n", "true"],
+                           capture_output=True)
+    if probe.returncode != 0:
+        print("FAIL vm-cleanup: armed but no passwordless sudo")
+        return False
+    return ok
+
+
+def run_flow():
+    tmp, proc = run_guest("cleanup", timeout=1200)
+    try:
+        if proc.returncode != 0:
+            print("FAIL vm-cleanup: guest failed: %s"
+                  % proc.stderr[-2000:])
+            print(f"gate artifacts kept at {tmp}")
+            return 1
+        got = verify_exports(tmp, "cleanup",
+                             ["identity.json", "ledger.json",
+                              "inventory.json"])
+        ledger = json.loads(got["ledger.json"].read_text())
+        inventory = json.loads(got["inventory.json"].read_text())
+        bad = []
+        if len(ledger) != CYCLES:
+            bad.append("ledger has %d rows, want %d"
+                       % (len(ledger), CYCLES))
+        for row in ledger:
+            cycle = row["cycle"]
+            if row.get("traffic") != (cycle % 5 == 0):
+                bad.append("cycle %d traffic %r" % (cycle, row))
+            error = row.get("error", {})
+            want_case = {1: "insmod-unarmed", 3: "bad-object",
+                         5: "bad-ring"}.get(cycle % 7, "none")
+            if error.get("case") != want_case:
+                bad.append("cycle %d error case %r want %r"
+                           % (cycle, error.get("case"), want_case))
+            elif want_case == "none":
+                if error.get("rc") != 0:
+                    bad.append("cycle %d clean rc %r"
+                               % (cycle, error.get("rc")))
+            elif error.get("rc", 0) == 0:
+                bad.append("cycle %d %s exited 0"
+                           % (cycle, want_case))
+        baseline = inventory["baseline"]
+        after = inventory["after"]
+        if after["bpf"] != baseline["bpf"]:
+            bad.append("BPF inventory moved: %r -> %r"
+                       % (baseline["bpf"], after["bpf"]))
+        if min(after["io_tlb_used"]) != min(baseline["io_tlb_used"]):
+            bad.append("io_tlb floor moved: %r -> %r"
+                       % (baseline["io_tlb_used"],
+                          after["io_tlb_used"]))
+        # The guest samples `after` before writing the
+        # ledger/inventory, so equality proves no leftovers.
+        if after["files"] != baseline["files"]:
+            bad.append("work files moved: %r -> %r"
+                       % (baseline["files"], after["files"]))
+        if inventory["suspicious"]:
+            bad.append("suspicious dmesg: %r"
+                       % (inventory["suspicious"][:5],))
+        if bad:
+            print("FAIL vm-cleanup:")
+            for line in bad:
+                print("  " + line)
+            print(f"gate artifacts kept at {tmp}")
+            return 1
+        print("vm-cleanup: PASS: %d cycles, BPF %r, floor %d, "
+              "no leaks" % (CYCLES, after["bpf"],
+                            min(after["io_tlb_used"])))
+    except Exception as exc:
+        print(f"FAIL vm-cleanup: {exc}")
+        print(f"gate artifacts kept at {tmp}")
+        return 1
+    else:
+        cleanup(tmp)
+        return 0
 
 
 def main():
@@ -20,15 +145,9 @@ def main():
         print("vm-cleanup: SKIP: needs MEMVEIL_VM_CLEANUP=1 "
               "with qualified probes")
         return 77
-    probe = os.path.join(REPO, "build", "bpf",
-                         "swiotlb_lifecycle.bpf.o")
-    if not os.path.isfile(probe):
-        print("FAIL vm-cleanup: armed but lifecycle probes "
-              "not qualified")
+    if not armed_preflight():
         return 1
-    print("FAIL vm-cleanup: armed but the live cleanup flow "
-          "is not implemented")
-    return 1
+    return run_flow()
 
 
 if __name__ == "__main__":
