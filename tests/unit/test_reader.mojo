@@ -766,13 +766,36 @@ def test_parse_event_kinds() raises:
                 String("pool_sample"),
                 String(
                     '{"pool_id": "pool-0", "used_bytes": "1024",'
-                    ' "capacity_bytes": null, "unit": "bytes"}'
+                    ' "capacity_bytes": null, "unit": "bytes",'
+                    ' "allocator": "swiotlb", "unit_bytes": "2048",'
+                    ' "hiwater_bytes": "2048", "reason": "denied"}'
                 ),
             )
         )
     )
     assert_equal(p.pool.used_bytes, UInt64(1024))
     assert_true(not p.pool.has_capacity)
+    assert_equal(p.pool.allocator, String("swiotlb"))
+    assert_true(p.pool.has_unit_bytes)
+    assert_equal(p.pool.unit_bytes, UInt64(2048))
+    assert_true(p.pool.has_hiwater)
+    assert_equal(p.pool.hiwater_bytes, UInt64(2048))
+    assert_equal(p.pool.reason, String("denied"))
+    var q = parse_event(
+        utf8_bytes(
+            event_doc(
+                String("pool_sample"),
+                String(
+                    '{"pool_id": "pool-0", "used_bytes": null,'
+                    ' "capacity_bytes": null, "unit": "bytes"}'
+                ),
+            )
+        )
+    )
+    assert_equal(q.pool.allocator, String(""))
+    assert_true(not q.pool.has_unit_bytes)
+    assert_true(not q.pool.has_hiwater)
+    assert_equal(q.pool.reason, String(""))
     var g = parse_event(
         utf8_bytes(
             event_doc(
@@ -1234,6 +1257,26 @@ def test_event_rejects_payload_rules() raises:
             String(
                 '{"pool_id": "p", "used_bytes": null,'
                 ' "capacity_bytes": null, "unit": "litres"}'
+            ),
+        )
+    )
+    cases.append(
+        event_doc(
+            String("pool_sample"),
+            String(
+                '{"pool_id": "p", "used_bytes": null,'
+                ' "capacity_bytes": null, "unit": "bytes",'
+                ' "reason": "maybe"}'
+            ),
+        )
+    )
+    cases.append(
+        event_doc(
+            String("pool_sample"),
+            String(
+                '{"pool_id": "p", "used_bytes": "8",'
+                ' "capacity_bytes": null, "unit": "bytes",'
+                ' "unit_bytes": "0"}'
             ),
         )
     )

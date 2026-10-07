@@ -39,6 +39,7 @@
 | known\_shared\_region\_bytes | all | unavailable | bytes | unavailable | unavailable | high | window \[1000000000,4000000000), all devices | No region source in this fixture. |
 | pool\_used\_bytes | all | unavailable | bytes | unavailable | unavailable | high | window \[1000000000,4000000000), all devices | No pool source in this fixture. |
 | pool\_capacity\_bytes | all | unavailable | bytes | unavailable | unavailable | high | window \[1000000000,4000000000), all devices | No pool source in this fixture. |
+| pool\_hiwater\_bytes | all | unavailable | bytes | unavailable | unavailable | high | window \[1000000000,4000000000), all devices | No pool source in this fixture. |
 
 ## Findings
 

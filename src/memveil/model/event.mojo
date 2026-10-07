@@ -157,6 +157,12 @@ struct PoolSample(ImplicitlyCopyable):
     var has_capacity: Bool
     var capacity_bytes: UInt64
     var unit: String
+    var allocator: String
+    var has_unit_bytes: Bool
+    var unit_bytes: UInt64
+    var has_hiwater: Bool
+    var hiwater_bytes: UInt64
+    var reason: String
 
     def __init__(out self):
         self.pool_id = String("")
@@ -165,6 +171,12 @@ struct PoolSample(ImplicitlyCopyable):
         self.has_capacity = False
         self.capacity_bytes = UInt64(0)
         self.unit = String("")
+        self.allocator = String("")
+        self.has_unit_bytes = False
+        self.unit_bytes = UInt64(0)
+        self.has_hiwater = False
+        self.hiwater_bytes = UInt64(0)
+        self.reason = String("")
 
 
 struct Gap(ImplicitlyCopyable):
@@ -684,6 +696,10 @@ def _parse_pool(mut scan: Scanner, mut out: Event) raises:
     var has_used = False
     var has_cap = False
     var has_unit = False
+    var has_allocator = False
+    var has_unit_bytes = False
+    var has_hiwater = False
+    var has_reason = False
     if not object_is_empty(scan):
         while True:
             scan.skip_ws()
@@ -718,6 +734,42 @@ def _parse_pool(mut scan: Scanner, mut out: Event) raises:
                     raise ValidationError("pool.unit", "bad enum")
                 out.pool.unit = v
                 has_unit = True
+            elif key == "allocator":
+                if has_allocator:
+                    raise ValidationError("allocator", "duplicate")
+                out.pool.allocator = _parse_id(scan, "pool.allocator")
+                has_allocator = True
+            elif key == "unit_bytes":
+                if has_unit_bytes:
+                    raise ValidationError("unit_bytes", "duplicate")
+                var u = parse_u64_field(scan, "pool.unit_bytes")
+                if u == UInt64(0):
+                    raise ValidationError(
+                        "pool.unit_bytes", "must be positive"
+                    )
+                out.pool.unit_bytes = u
+                out.pool.has_unit_bytes = True
+                has_unit_bytes = True
+            elif key == "hiwater_bytes":
+                if has_hiwater:
+                    raise ValidationError("hiwater_bytes", "duplicate")
+                var h = parse_maybe_u64(scan)
+                if h.has:
+                    out.pool.hiwater_bytes = h.value
+                    out.pool.has_hiwater = True
+                has_hiwater = True
+            elif key == "reason":
+                if has_reason:
+                    raise ValidationError("reason", "duplicate")
+                var r = scan.parse_string()
+                if (
+                    r != "denied"
+                    and r != "absent"
+                    and r != "unparseable"
+                ):
+                    raise ValidationError("pool.reason", "bad enum")
+                out.pool.reason = r
+                has_reason = True
             else:
                 raise ValidationError("pool_sample", "unknown pool_sample field")
             if not object_next(scan, "pool_sample"):
@@ -1268,6 +1320,10 @@ def _data_field_known(kind: String, key: String) -> Bool:
             or key == "used_bytes"
             or key == "capacity_bytes"
             or key == "unit"
+            or key == "allocator"
+            or key == "unit_bytes"
+            or key == "hiwater_bytes"
+            or key == "reason"
         )
     if kind == "gap":
         return (
@@ -1353,6 +1409,10 @@ def _type_rows() -> List[String]:
     out.append(String("data,pool_sample,used_bytes,S"))
     out.append(String("data,pool_sample,capacity_bytes,S"))
     out.append(String("data,pool_sample,unit,s"))
+    out.append(String("data,pool_sample,allocator,s"))
+    out.append(String("data,pool_sample,unit_bytes,s"))
+    out.append(String("data,pool_sample,hiwater_bytes,S"))
+    out.append(String("data,pool_sample,reason,s"))
     out.append(String("data,gap,channel,s"))
     out.append(String("data,gap,lost_count,S"))
     out.append(String("data,gap,reason,s"))

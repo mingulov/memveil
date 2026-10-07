@@ -31,6 +31,8 @@ struct _PoolState(ImplicitlyCopyable):
     var used: UInt64
     var has_cap: Bool
     var cap: UInt64
+    var has_hiwater: Bool
+    var hiwater: UInt64
     var samples: Int
     var invalid: Int
 
@@ -40,6 +42,8 @@ struct _PoolState(ImplicitlyCopyable):
         self.used = UInt64(0)
         self.has_cap = False
         self.cap = UInt64(0)
+        self.has_hiwater = False
+        self.hiwater = UInt64(0)
         self.samples = 0
         self.invalid = 0
 
@@ -157,9 +161,14 @@ struct PoolTracker[POOL_N: Int = POOL_MAX]:
             return
         # Each available gauge lands independently; only the
         # pressure streak needs both halves of one sample.
+        # Hiwater lands independently too: it is a lifetime
+        # mark, not a streak input.
         if ev.pool.has_used:
             st.has_used = True
             st.used = ev.pool.used_bytes
+        if ev.pool.has_hiwater:
+            st.has_hiwater = True
+            st.hiwater = ev.pool.hiwater_bytes
         var usable_cap = False
         var cap = UInt64(0)
         if ev.pool.has_capacity:
@@ -265,4 +274,30 @@ struct PoolTracker[POOL_N: Int = POOL_MAX]:
                 + " invalid); pressure needs 3."
             )
             out.append(s^)
+            var h = Metric()
+            h.name = String("pool_hiwater_bytes")
+            h.has_value = st.has_hiwater
+            h.value = st.hiwater
+            h.unit = String("bytes")
+            h.confidence = String("high")
+            if st.has_hiwater:
+                h.measurement = String("observed")
+                h.has_aggregation = True
+                h.aggregation = String("gauge")
+                h.notes = String(
+                    "Latest allocator high-water mark. Lifetime"
+                    " scope: the sampler never resets it, so the"
+                    " reset epoch is unproved."
+                )
+                h.coverage = self._coverage()
+            else:
+                h.measurement = String("unavailable")
+                h.notes = String(
+                    "No high-water sample for this pool."
+                )
+                h.coverage = String("unavailable")
+            h.has_pool_id = True
+            h.pool_id = pool
+            h.scope = scope + "; allocator lifetime, reset epoch unproved"
+            out.append(h^)
         return out^

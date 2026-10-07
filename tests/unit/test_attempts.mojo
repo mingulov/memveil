@@ -69,7 +69,7 @@ def test_reducer_attempts_fixture() raises:
     assert_true(rep.synthetic)
     assert_equal(rep.engine_version, "memveil-0.1.0")
     assert_equal(ENGINE_VERSION, "memveil-0.1.0")
-    assert_equal(len(rep.metrics), 13)
+    assert_equal(len(rep.metrics), 14)
     var attempts = metric_by_name(rep, String("bounce_attempts"), String(""))
     assert_true(attempts.has_value)
     assert_equal(attempts.value, UInt64(3))
@@ -225,7 +225,7 @@ def test_counter_unusable() raises:
     var epoch = analyze(
         String("tests/fixtures/reader/counters-epoch"), False
     )
-    assert_equal(len(epoch.metrics), 11)
+    assert_equal(len(epoch.metrics), 12)
     assert_equal(
         epoch.limitations[len(epoch.limitations) - 1],
         "Counter swiotlb.bounce_attempts (all devices): epoch changed"
@@ -267,7 +267,7 @@ def test_counter_unknown_id() raises:
     var rep = analyze(
         String("tests/fixtures/reader/counters-unknown"), False
     )
-    assert_equal(len(rep.metrics), 11)
+    assert_equal(len(rep.metrics), 12)
     assert_equal(rep.q_aggregate.status, "partial")
     assert_equal(
         rep.limitations[len(rep.limitations) - 1],
@@ -289,7 +289,7 @@ def test_counter_same_scope_collapse() raises:
     var agg = aggregate_metric(rep, String("counter_bounce_attempts"))
     assert_equal(agg.value, UInt64(3))
     assert_equal(agg.measurement, "derived")
-    assert_equal(len(rep.metrics), 12)
+    assert_equal(len(rep.metrics), 13)
     assert_equal(
         rep.limitations[len(rep.limitations) - 1],
         "Additional swiotlb.bounce_attempts group (all devices, profile"
@@ -354,7 +354,7 @@ def test_partial_and_unfinalized() raises:
 
 def test_empty_capture() raises:
     var rep = analyze(String("tests/fixtures/reader/empty-events"), False)
-    assert_equal(len(rep.metrics), 11)
+    assert_equal(len(rep.metrics), 12)
     var attempts = metric_by_name(rep, String("bounce_attempts"), String(""))
     assert_true(attempts.has_value)
     assert_equal(attempts.value, UInt64(0))
@@ -429,7 +429,7 @@ def has_limitation(rep: Report, needle: String) -> Bool:
 
 def test_tail_metric_count_pinned() raises:
     var rep = analyze(String("tests/fixtures/attempts"), False)
-    assert_equal(len(rep.metrics), 13)
+    assert_equal(len(rep.metrics), 14)
     var names = List[String]()
     names.append(String("successful_allocations"))
     names.append(String("copy_original_to_bounce_bytes"))
@@ -459,7 +459,7 @@ def test_device_admission_bound() raises:
     for i in range(2041):
         a.consume(bounce_event(String("dev-") + String(i), String("op-") + String(i), UInt64(8)))
     var rep = a.finish(r.session.window_end_ns, False)
-    assert_equal(len(rep.metrics), 2 + 2 * 2041 + 9)
+    assert_equal(len(rep.metrics), 2 + 2 * 2041 + 10)
     assert_true(not has_limitation(rep, String("lack detail rows")))
     var b = AttemptAnalyzer(r.session)
     for i in range(2042):
@@ -498,7 +498,7 @@ def test_counter_budget_withheld() raises:
     assert_equal(len(rep.metrics), 4096)
     assert_true(
         has_limitation(
-            rep, String("1 counter delta withheld: metric budget exhausted.")
+            rep, String("2 counter deltas withheld: metric budget exhausted.")
         )
     )
     assert_true(not has_limitation(rep, String("lack detail rows")))

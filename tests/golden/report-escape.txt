@@ -19,7 +19,7 @@ quality:
   terminal: complete_for_scope loss=0
     scope: authored fixture finalization
     reason: Authored fixture: finalized.
-metrics (13):
+metrics (14):
   bounce_attempts = 1 count [observed, complete_for_scope, high, counter]
     scope: window [1000000000,4000000000), all devices, detail channel
     notes: 1 detail event; no counter snapshots to compare.
@@ -57,6 +57,9 @@ metrics (13):
     scope: window [1000000000,4000000000), all devices
     notes: No pool source in this fixture.
   pool_capacity_bytes = unavailable bytes [unavailable, unavailable, high]
+    scope: window [1000000000,4000000000), all devices
+    notes: No pool source in this fixture.
+  pool_hiwater_bytes = unavailable bytes [unavailable, unavailable, high]
     scope: window [1000000000,4000000000), all devices
     notes: No pool source in this fixture.
 findings: none

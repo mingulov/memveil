@@ -1729,6 +1729,22 @@ suite_attempts() {
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     mqual unsynced complete_for_scope 0 complete_for_scope 0 proven
     mreplay4 unsynced 0 0 0 0
+    mcase pool 4 103 5 4 15 2309 \
+        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,pool_sample,pool_sample"
+    mqual pool complete_for_scope 0 complete_for_scope 0 proven
+    mreplay4 pool 0 0 0 0
+    python3 "$JASSERT" field "$TMP/pool/session.json" \
+        capabilities.pool_stats.status partial || afailed=1
+    python3 "$JASSERT" metric "$TMP/pool.report.json" \
+        pool_used_bytes 24576 || afailed=1
+    python3 "$JASSERT" metric "$TMP/pool.report.json" \
+        pool_capacity_bytes 67108864 || afailed=1
+    python3 "$JASSERT" metric "$TMP/pool.report.json" \
+        pool_hiwater_bytes 131072 || afailed=1
+    python3 "$JASSERT" eventfield "$TMP/pool/events.ndjson" \
+        4 data.allocator swiotlb || afailed=1
+    python3 "$JASSERT" eventfield "$TMP/pool/events.ndjson" \
+        4 data.unit_bytes 2048 || afailed=1
     # Live-adapter refusal contract: the real kernel (bad
     # bridge) plus a real fresh writer must end refused
     # (exit 3) with no residuals and no output dir.
@@ -1771,7 +1787,7 @@ suite_attempts() {
         echo "attempts: close-out matrix FAILED" >&2
         return 1
     fi
-    echo "attempts: close-out matrix passed (44 cases)"
+    echo "attempts: close-out matrix passed (45 cases)"
     return 0
 }
 

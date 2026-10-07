@@ -23,6 +23,13 @@ from memveil.capture.normalize import (
     decode_payload,
     normalize_attempt,
 )
+from memveil.capture.pools import (
+    POOL_SWIOTLB_ALLOCATOR,
+    POOL_SWIOTLB_POOL_ID,
+    POOL_SWIOTLB_UNIT,
+    NormalizedPoolSample,
+    sample_default_pool,
+)
 from memveil.model.encode import (
     EncodeError,
     encode_event_line,
@@ -33,6 +40,7 @@ from memveil.model.event import (
     CounterSnapshot,
     Event,
     Gap,
+    PoolSample,
 )
 from memveil.model.report import ENGINE_VERSION
 from memveil.model.session import (
@@ -45,7 +53,11 @@ from memveil.model.session import (
 from memveil.model.validate import format_u64
 from memveil.platform.evidence import GuestInfo
 from memveil.platform.outcome import OpOut
-from memveil.platform.reader import fs_type_name
+from memveil.platform.reader import (
+    EvidenceReader,
+    fs_type_name,
+    open_evidence_reader,
+)
 from memveil.platform.signal import SignalOut, SignalSource
 
 comptime EXIT_ERROR = 1
@@ -251,6 +263,8 @@ struct CollectorConfig(Copyable, Movable):
     var boot_id: String
     var guest: GuestInfo
     var evidence: List[EvidenceItem]
+    var has_pool_sample: Bool
+    var pool_root: String
 
     def __init__(out self):
         self.duration_s = UInt64(60)
@@ -266,6 +280,8 @@ struct CollectorConfig(Copyable, Movable):
             String("unknown"), List[String](), False, String("")
         )
         self.evidence = List[EvidenceItem]()
+        self.has_pool_sample = False
+        self.pool_root = String("")
 
 
 @fieldwise_init
@@ -549,6 +565,14 @@ struct Collector:
     var secondary_causes: List[String]
     var signal_error: String
     var output_fs: String
+    var pool_baseline: NormalizedPoolSample
+    var pool_baseline_ts: UInt64
+    var pool_has_baseline: Bool
+    var pool_final: NormalizedPoolSample
+    var pool_final_ts: UInt64
+    var pool_has_final: Bool
+    var pool_ok: Bool
+    var pool_reason: String
 
     def __init__(out self, cfg: CollectorConfig):
         self.cfg = cfg.copy()
@@ -610,6 +634,14 @@ struct Collector:
         self.secondary_causes = List[String]()
         self.signal_error = String("")
         self.output_fs = String("")
+        self.pool_baseline = NormalizedPoolSample()
+        self.pool_baseline_ts = UInt64(0)
+        self.pool_has_baseline = False
+        self.pool_final = NormalizedPoolSample()
+        self.pool_final_ts = UInt64(0)
+        self.pool_has_final = False
+        self.pool_ok = False
+        self.pool_reason = String("")
 
     def note_unknown(mut self, cause: String):
         """First deviation wins; later ones are retained."""
@@ -765,6 +797,14 @@ struct Collector:
         if not attached.ok:
             return String("attach: ") + attached.message
         self.attach_ns = clock.now()
+        if self.cfg.has_pool_sample:
+            # Baseline pool sample, held for the closing path:
+            # pool samples are not bridge-delivered, so they
+            # persist as closing records, never as poll output.
+            var base = self._sample_pool_now(clock)
+            self.pool_baseline = base[0]
+            self.pool_baseline_ts = base[1]
+            self.pool_has_baseline = True
         print(
             String("ready session=")
             + self.session_id
@@ -958,6 +998,14 @@ struct Collector:
         else:
             self.note_unknown(String("error shutdown"))
         self.confirm(kernel)
+        if self.cfg.has_pool_sample:
+            # Final pool sample, held for the closing path with
+            # its true timestamp (always before t_close, so the
+            # window end covers it).
+            var fin = self._sample_pool_now(clock)
+            self.pool_final = fin[0]
+            self.pool_final_ts = fin[1]
+            self.pool_has_final = True
 
     def drain[K: KernelSource, C: ClockSource](
         mut self, mut kernel: K, mut clock: C
@@ -1035,6 +1083,11 @@ struct Collector:
         if not self.stable_pair(kernel, clock):
             self.note_unknown(String("snapshot unresolved"))
             self.has_end_cut = False
+        if self.cfg.has_pool_sample:
+            var fin = self._sample_pool_now(clock)
+            self.pool_final = fin[0]
+            self.pool_final_ts = fin[1]
+            self.pool_has_final = True
         if self.unknown_cause == String(""):
             self.note_unknown(String("error shutdown"))
         return self.finish(clock, writer)
@@ -1062,6 +1115,61 @@ struct Collector:
         ev.bounce.requested_bytes = normalized.requested_bytes
         ev.bounce.forced = normalized.forced
         ev.bounce.operation_id = normalized.operation_id
+        return encode_event_line(ev)
+
+    def _sample_pool_now[C: ClockSource](
+        self, mut clock: C
+    ) -> Tuple[NormalizedPoolSample, UInt64]:
+        """Sample the default pool now; failures stay in the sample.
+
+        The evidence reader opens the configured root (live host
+        when empty, one fixture in tests). An unreadable reader
+        yields an unavailable sample, never a failed run.
+        """
+        var ts = clock.now()
+        var sample: NormalizedPoolSample
+        try:
+            var reader = open_evidence_reader(self.cfg.pool_root)
+            sample = sample_default_pool(
+                reader,
+                POOL_SWIOTLB_POOL_ID,
+                UInt64(POOL_SWIOTLB_UNIT),
+            )
+        except:
+            sample = NormalizedPoolSample()
+            sample.pool_id = POOL_SWIOTLB_POOL_ID
+            sample.allocator = POOL_SWIOTLB_ALLOCATOR
+            sample.reason = String("denied")
+            sample.notes = String("evidence reader unavailable")
+        return (sample, ts)
+
+    def pool_sample_event(
+        mut self, sample: NormalizedPoolSample, ts_ns: UInt64
+    ) raises EncodeError -> List[UInt8]:
+        var ev = Event()
+        ev.session_id = self.session_id
+        ev.seq = self.next_seq
+        self.next_seq += UInt64(1)
+        ev.source_hook = String("swiotlb:debugfs")
+        ev.source_backend = String("debugfs")
+        ev.source_profile_id = self.cfg.profile_id
+        ev.source_measurement = String("observed")
+        ev.source_correlation = String("direct")
+        ev.ts_ns = ts_ns
+        ev.kind = String("pool_sample")
+        ev.pool = PoolSample()
+        ev.pool.pool_id = sample.pool_id
+        ev.pool.has_used = sample.has_used_bytes
+        ev.pool.used_bytes = sample.used_bytes
+        ev.pool.has_capacity = sample.has_capacity_bytes
+        ev.pool.capacity_bytes = sample.capacity_bytes
+        ev.pool.unit = sample.unit
+        ev.pool.allocator = sample.allocator
+        ev.pool.has_unit_bytes = sample.has_unit_bytes
+        ev.pool.unit_bytes = sample.unit_bytes
+        ev.pool.has_hiwater = sample.has_hiwater_bytes
+        ev.pool.hiwater_bytes = sample.hiwater_bytes
+        ev.pool.reason = sample.reason
         return encode_event_line(ev)
 
     def snapshot_event(
@@ -1119,8 +1227,42 @@ struct Collector:
             return String("count identity unproven")
         return String("byte coverage invalid")
 
+    def persist_pool_sample[W: WriterSource](
+        mut self, mut writer: W, sample: NormalizedPoolSample,
+        ts_ns: UInt64,
+    ):
+        """Append one pool sample as a closing record.
+
+        Pool samples are not bridge-delivered, so they never
+        touch poll/attempt counters; only the persisted-ts
+        maximum moves, honestly covering them. A failed sample
+        degrades the run to error state like a failed gap,
+        since the closing record set is incomplete.
+        """
+        var line: List[UInt8]
+        try:
+            line = self.pool_sample_event(sample, ts_ns)
+        except:
+            self.next_seq -= UInt64(1)
+            self.closing_error = True
+            self.result_state = String("error")
+            return
+        var wrote = writer.append_closing(line)
+        if wrote.ok:
+            if sample.has_used_bytes or sample.has_capacity_bytes:
+                self.pool_ok = True
+            if ts_ns > self.max_persisted_ts:
+                self.max_persisted_ts = ts_ns
+            if self.pool_reason == String(""):
+                if sample.reason != String(""):
+                    self.pool_reason = sample.reason
+            return
+        self.next_seq -= UInt64(1)
+        self.closing_error = True
+        self.result_state = String("error")
+
     def closing_records[W: WriterSource](mut self, mut writer: W) -> String:
-        """Append snapshots (rollback group) + gap; "" or fatal."""
+        """Append snapshots (rollback group) + pool + gap; "" or fatal."""
         if self.snapshots_eligible():
             var begun = writer.group_begin()
             if not begun.ok:
@@ -1181,6 +1323,14 @@ struct Collector:
                 self.result_state = String("error")
             else:
                 self.snapshots_present = True
+        if self.pool_has_baseline:
+            var base = self.pool_baseline
+            var base_ts = self.pool_baseline_ts
+            self.persist_pool_sample(writer, base, base_ts)
+        if self.pool_has_final:
+            var fin = self.pool_final
+            var fin_ts = self.pool_final_ts
+            self.persist_pool_sample(writer, fin, fin_ts)
         if self.unknown_cause != String(""):
             try:
                 var gap = self.gap_event()
@@ -1460,10 +1610,30 @@ struct Collector:
             out.cap_region_state,
             String("No region source in this capture."),
         )
-        self.unavailable_cap(
-            out.cap_pool_stats,
-            String("No pool source in this capture."),
-        )
+        if self.pool_ok:
+            var pcap = Capability()
+            pcap.status = String("partial")
+            pcap.reason = String(
+                "default-pool debugfs samples at capture start"
+                " and close; no continuous occupancy"
+            )
+            pcap.hooks.append(String("swiotlb:debugfs"))
+            pcap.has_profile_id = True
+            pcap.profile_id = self.cfg.profile_id
+            out.cap_pool_stats = pcap^
+        elif self.cfg.has_pool_sample:
+            var why = self.pool_reason
+            if why == String(""):
+                why = String("unreadable")
+            self.unavailable_cap(
+                out.cap_pool_stats,
+                String("pool counters unreadable: ") + why,
+            )
+        else:
+            self.unavailable_cap(
+                out.cap_pool_stats,
+                String("No pool source in this capture."),
+            )
         self.unavailable_cap(
             out.cap_task_context,
             String("No observer context in this capture."),

@@ -31,7 +31,7 @@ comptime MAX_SUMMANDS = 8
 comptime _MAX_METRICS = 4096
 comptime _MAX_COUNTER_GROUPS = 4096
 comptime _MAX_LIMITATIONS = 256
-comptime _FIXED_TAIL_METRICS = 9
+comptime _FIXED_TAIL_METRICS = 10
 # Devices with per-device detail rows: 2 global rows + 2 rows per
 # device + the fixed tail + 2 reserved counter rows must fit the
 # frozen 4096-metric budget. Further devices keep exact global
@@ -1516,6 +1516,14 @@ struct AttemptAnalyzer:
             out.metrics.append(
                 _unavailable_metric(
                     String("pool_capacity_bytes"),
+                    String("bytes"),
+                    uscope,
+                    "No pool source in this " + noun + ".",
+                )
+            )
+            out.metrics.append(
+                _unavailable_metric(
+                    String("pool_hiwater_bytes"),
                     String("bytes"),
                     uscope,
                     "No pool source in this " + noun + ".",

@@ -24,6 +24,12 @@ free-form payload channel.
 
 - Session id, window bounds, end reason, finalized flag.
 - Counter snapshots (bounded u64 attempt/byte counters).
+- Default-pool allocator counters (`io_tlb_used`,
+  `io_tlb_nslabs`, `io_tlb_used_hiwater`) sampled at
+  capture start and close: aggregate slot counts only, no
+  addresses or device state. Unreadable counters persist
+  as unavailable halves with a reason, never as zeros.
+  Transient and dynamic pools are not sampled.
 - Quality per channel (detail, aggregate, correlation,
   baseline, terminal) with loss counts and reasons.
 - Provenance: identity hashes of the admission inputs (BPF
