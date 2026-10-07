@@ -261,6 +261,12 @@
               "resolution": {
                 "enum": ["resolved", "unresolved"],
                 "description": "Whether offset/length carry a validated identity. Full resolution rules arrive with region tracking."
+              },
+              "generation": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9223372036854775807,
+                "description": "Region lineage generation; absent means 1."
               }
             },
             "description": "A covered conversion API result and requested target state, subject to platform/profile interpretation."

@@ -1,0 +1,78 @@
+memveil report gen-lineage-session (synthetic, engine memveil-0.1.0)
+window: [1000000000,2500000000)
+environment: mode=unknown detection=unverified attestation=not_performed evidence=0
+devices (1):
+  dev-1 testdev0 driver=synthetic-test identity=resolved
+quality:
+  detail: complete_for_scope loss=0
+    scope: 1 bounce_attempt event
+    reason: Authored fixture: no loss.
+  aggregate: unavailable loss=unknown
+    scope: counter snapshots
+    reason: No counter snapshots in this fixture.
+  correlation: complete_for_scope loss=0
+    scope: correlated region events
+    reason: Authored fixture: every relationship pairs.
+  baseline: complete_for_scope loss=0
+    scope: region baseline
+    reason: Authored fixture: known-empty initial state.
+  terminal: complete_for_scope loss=0
+    scope: authored fixture finalization
+    reason: Authored fixture: finalized.
+metrics (17):
+  bounce_attempts = 1 count [observed, complete_for_scope, counter]
+    scope: window [1000000000,2500000000), all devices, detail channel
+    notes: 1 detail event; no counter snapshots to compare.
+  bounce_attempts{device=dev-1} = 1 count [observed, complete_for_scope, counter]
+    scope: window [1000000000,2500000000), device dev-1, detail channel
+    notes: All 1 attempt observed device dev-1.
+  requested_bounce_bytes = 4096 bytes [observed, complete_for_scope, counter]
+    scope: window [1000000000,2500000000), all devices, detail channel
+    notes: 4096 requested bytes across 1 attempt; allocation outcomes are unavailable in this fixture.
+  requested_bounce_bytes{device=dev-1} = 4096 bytes [observed, complete_for_scope, counter]
+    scope: window [1000000000,2500000000), device dev-1, detail channel
+    notes: 4096 requested bytes on device dev-1.
+  successful_allocations = unavailable count [unavailable, unavailable]
+    scope: window [1000000000,2500000000), all devices
+    notes: No map_result source in this fixture; attempts are not successes.
+  copy_original_to_bounce_bytes = unavailable bytes [unavailable, unavailable]
+    scope: window [1000000000,2500000000), all devices
+    notes: No copy source in this fixture.
+  copy_bounce_to_original_bytes = unavailable bytes [unavailable, unavailable]
+    scope: window [1000000000,2500000000), all devices
+    notes: No copy source in this fixture.
+  live_observed_allocation_bytes = unavailable bytes [unavailable, unavailable]
+    scope: window [1000000000,2500000000), all devices
+    notes: No lifecycle source in this fixture.
+  observed_mapping_lifetime_ns = unavailable nanoseconds [unavailable, unavailable]
+    scope: window [1000000000,2500000000), all devices
+    notes: No lifecycle source in this fixture.
+  pool_used_bytes = unavailable bytes [unavailable, unavailable]
+    scope: window [1000000000,2500000000), all devices
+    notes: No pool source in this fixture.
+  pool_capacity_bytes = unavailable bytes [unavailable, unavailable]
+    scope: window [1000000000,2500000000), all devices
+    notes: No pool source in this fixture.
+  conversion_requests = 1 count [observed, complete_for_scope, counter]
+    scope: window [1000000000,2500000000)
+    notes: Observed conversion API results; requests are not bytes.
+  conversion_failures = 0 count [observed, complete_for_scope, counter]
+    scope: window [1000000000,2500000000)
+    notes: Failed conversion requests; affected intervals stay unknown without rollback proof.
+  conversion_request_bytes = 4096 bytes [observed, complete_for_scope, counter]
+    scope: window [1000000000,2500000000)
+    notes: Sum of requested lengths, not unique physical bytes.
+  known_shared_region_bytes = 12288 bytes [observed, complete_for_scope, gauge]
+    scope: window [1000000000,2500000000); guest-physical regions
+    notes: Sum over proved identities of disjoint known-shared guest-physical intervals.
+  known_private_region_bytes = 4096 bytes [observed, complete_for_scope, gauge]
+    scope: window [1000000000,2500000000); guest-physical regions
+    notes: Sum over proved identities of disjoint known-private guest-physical intervals.
+  unknown_region_bytes = 0 bytes [observed, complete_for_scope, gauge]
+    scope: window [1000000000,2500000000); guest-physical regions
+    notes: Sum over proved identities of disjoint unknown-state guest-physical intervals.
+findings: none
+limitations (3):
+  - Synthetic fixture: every value is authored test data; no guest was booted and no hook attached.
+  - This analyzer reduces bounce attempts, counter deltas, and observed lifecycle/pool/region scope; task-context metrics are unavailable.
+  - No counter snapshots: attempt totals rest on the detail channel alone.

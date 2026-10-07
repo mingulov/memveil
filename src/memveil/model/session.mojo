@@ -458,6 +458,7 @@ def _parse_region_observation(mut scan: Scanner) raises -> RegionObservation:
     var has_length = False
     var has_space = False
     var has_prov = False
+    var has_generation = False
     if not object_is_empty(scan):
         while True:
             scan.skip_ws()
@@ -504,6 +505,17 @@ def _parse_region_observation(mut scan: Scanner) raises -> RegionObservation:
                 check_bounded_text(v, 1, 512, "region_observation.provenance")
                 out.provenance = v
                 has_prov = True
+            elif key == "generation":
+                if has_generation:
+                    raise ValidationError("generation", "duplicate")
+                scan.skip_ws()
+                var g = scan.parse_int()
+                if g < Int64(1):
+                    raise ValidationError(
+                        "region_observation.generation", "must be positive"
+                    )
+                out.generation = Int(g)
+                has_generation = True
             else:
                 raise ValidationError("region_observation", "unknown region_observation field")
             if not object_next(scan, "region_observation"):

@@ -140,6 +140,7 @@ def events_equal(a: Event, b: Event) -> Bool:
         or tx.address_space != ty.address_space
         or tx.has_resolution != ty.has_resolution
         or tx.resolution != ty.resolution
+        or tx.generation != ty.generation
     ):
         return False
     var px = a.pool
@@ -279,6 +280,7 @@ def sessions_equal(a: Session, b: Session) -> Bool:
             or x.length != y.length
             or x.address_space != y.address_space
             or x.provenance != y.provenance
+            or x.generation != y.generation
         ):
             return False
     if (

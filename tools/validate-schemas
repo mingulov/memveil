@@ -351,8 +351,8 @@ def check_session(obj):
         fail("bad-type", "baseline.region_observations")
     for obs in observations:
         check_keys(obs, ("region_id", "state", "offset", "length",
-                         "address_space", "provenance"), (),
-                   "region_observation")
+                         "address_space", "provenance"),
+                   ("generation",), "region_observation")
         check_id(obs["region_id"], "region_id")
         check_enum(obs["state"], ("shared", "private", "unknown"),
                    "region state")
@@ -364,6 +364,8 @@ def check_session(obj):
                    ("guest_physical", "kernel_virtual", "iova",
                     "identity_only"), "region address_space")
         check_text(obs["provenance"], 512, "region provenance")
+        if "generation" in obs:
+            check_generation(obs["generation"], "region generation")
     capabilities = obj["capabilities"]
     check_keys(capabilities, CAPABILITIES, (), "capabilities")
     for name in CAPABILITIES:
@@ -428,6 +430,16 @@ def check_return_code(value, where):
     if value is not None and (not isinstance(value, int)
                               or isinstance(value, bool)):
         fail("bad-type", "%s must be an integer" % where)
+
+
+I64MAX = 9223372036854775807
+
+
+def check_generation(value, where):
+    if not isinstance(value, int) or isinstance(value, bool):
+        fail("bad-type", "%s must be an integer" % where)
+    if value < 1 or value > I64MAX:
+        fail("bad-generation", "%s out of range" % where)
 
 
 def check_span(data, where):
@@ -512,7 +524,7 @@ def check_data(kind, data, where, devices):
     elif kind == "transition_result":
         check_keys(data, ("region_id", "requested_state", "success",
                           "return_code", "offset", "length"),
-                   ("address_space", "resolution"), where)
+                   ("address_space", "resolution", "generation"), where)
         check_id(data["region_id"], "%s.region_id" % where)
         check_enum(data["requested_state"], ("shared", "private"),
                    "%s.requested_state" % where)
@@ -528,6 +540,9 @@ def check_data(kind, data, where, devices):
         if "resolution" in data:
             check_enum(data["resolution"], ("resolved", "unresolved"),
                        "%s.resolution" % where)
+        if "generation" in data:
+            check_generation(data["generation"],
+                             "%s.generation" % where)
     elif kind == "pool_sample":
         check_keys(data, ("pool_id", "used_bytes", "capacity_bytes",
                           "unit"), (), where)
@@ -1454,6 +1469,50 @@ def run_selftest():
     results.append(expect_reject("observation-in-baseline-gap",
                                  observation_in_baseline_gap,
                                  "outside-window"))
+
+    def transition_generation_ok():
+        baseline_event("transition_result", "1100000000", {
+            "region_id": "r-1", "requested_state": "shared",
+            "success": True, "return_code": 0,
+            "offset": "0", "length": "4096", "generation": 2})
+        return "gen-2 transition admitted"
+
+    check("transition-generation-ok", transition_generation_ok)
+
+    def transition_generation_zero():
+        baseline_event("transition_result", "1100000000", {
+            "region_id": "r-1", "requested_state": "shared",
+            "success": True, "return_code": 0,
+            "offset": "0", "length": "4096", "generation": 0})
+
+    results.append(expect_reject("transition-generation-zero",
+                                 transition_generation_zero,
+                                 "bad-generation"))
+
+    def obs_generation_ok():
+        obj = read_json_file(os.path.join(fixture, "session.json"),
+                             "session.json")
+        obj["baseline"]["region_observations"].append({
+            "region_id": "r1", "state": "shared", "offset": "0",
+            "length": "8192", "address_space": "guest_physical",
+            "provenance": "selftest", "generation": 2})
+        check_session(obj)
+        return "gen-2 observation admitted"
+
+    check("obs-generation-ok", obs_generation_ok)
+
+    def obs_generation_zero():
+        obj = read_json_file(os.path.join(fixture, "session.json"),
+                             "session.json")
+        obj["baseline"]["region_observations"].append({
+            "region_id": "r1", "state": "shared", "offset": "0",
+            "length": "8192", "address_space": "guest_physical",
+            "provenance": "selftest", "generation": 0})
+        check_session(obj)
+
+    results.append(expect_reject("obs-generation-zero",
+                                 obs_generation_zero,
+                                 "bad-generation"))
 
     base_report = read_json_file(
         os.path.join(fixture, "expected-report.json"), "expected report")
