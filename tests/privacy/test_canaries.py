@@ -100,6 +100,16 @@ def main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+    # Stderr diagnostics scrub directory components: an echoed
+    # argument keeps only its basename, never home layout.
+    p = run(["record", "/home/canary-alice/evil"])
+    check("stderr-arg-exit", p.returncode == 2, "exit %d" % p.returncode)
+    check("stderr-arg-basename",
+          b"unexpected argument: evil" in p.stderr, p.stderr[:200])
+    check("stderr-no-user", b"canary-alice" not in p.stderr)
+    check("stderr-no-home", b"/home/" not in p.stderr)
+    check("stderr-arg-silent", p.stdout == b"")
+
 
 if __name__ == "__main__":
     main()

@@ -23,6 +23,7 @@ from memveil.capture.normalize import (
     decode_payload,
     device_id_for,
     hex_to_bytes,
+    is_pci_scope,
     normalize_attempt,
 )
 
@@ -215,17 +216,44 @@ def test_bytes_to_hex() raises:
 
 def test_catalog_entries() raises:
     var table = DeviceTable()
-    var second = table.device_for(name_bytes(String("eth1")))
+    var second = table.device_for(name_bytes(String("0000:00:0c.0")))
     var first = table.device_for(name_bytes(String("eth0")))
     assert_equal(second, String("d000001"))
     assert_equal(first, String("d000002"))
-    assert_equal(table.device_for(name_bytes(String("eth1"))), second)
+    assert_equal(
+        table.device_for(name_bytes(String("0000:00:0c.0"))), second
+    )
     var got = table.entries()
     assert_equal(len(got), 2)
     assert_equal(got[0].device_id, String("d000001"))
-    assert_equal(got[0].name, String("eth1"))
+    assert_equal(got[0].name, String("0000:00:0c.0"))
     assert_equal(got[1].device_id, String("d000002"))
-    assert_equal(got[1].name, String("eth0"))
+    assert_equal(got[1].name, String("unresolved"))
+
+
+def test_pci_scope_vectors() raises:
+    var good = List[String]()
+    good.append(String("0000:00:0c.0"))
+    good.append(String("FFFF:FF:1F.7"))
+    good.append(String("abcd:12:34.5"))
+    for i in range(len(good)):
+        assert_true(is_pci_scope(good[i]))
+    var bad = List[String]()
+    bad.append(String(""))
+    bad.append(String("eth0"))
+    bad.append(String("ffff888012345000"))
+    bad.append(String("0000:00:0c"))
+    bad.append(String("0000:00:0c.00"))
+    bad.append(String("0000:00:0c.0 "))
+    bad.append(String(" 0000:00:0c.0"))
+    bad.append(String("0000-00-0c.0"))
+    bad.append(String("0000:00:0c:0"))
+    bad.append(String("gggg:00:0c.0"))
+    bad.append(String("0000:00:0c.g"))
+    bad.append(String("/etc/passwd"))
+    bad.append(String("0000:00:0c.0/extra"))
+    for i in range(len(bad)):
+        assert_true(not is_pci_scope(bad[i]))
 
 
 def test_hex_roundtrip() raises:
@@ -253,6 +281,7 @@ def test_hex_roundtrip() raises:
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_catalog_entries]()
+    suite.test[test_pci_scope_vectors]()
     suite.test[test_hex_roundtrip]()
     suite.test[test_decode_valid]()
     suite.test[test_decode_short]()

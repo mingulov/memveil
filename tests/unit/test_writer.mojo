@@ -83,6 +83,7 @@ def test_exists_variants() raises:
     except e:
         raised = True
         assert_equal(e.kind, String("exists"))
+        assert_equal(e.message, String("output exists"))
     assert_true(raised)
     # Empty dir.
     var empty_target = scratch + String("/empty")

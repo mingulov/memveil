@@ -253,7 +253,7 @@ struct EventWriter(Movable):
             var no = _errno_now()
             _close_quiet(parent_fd)
             if no == _EEXIST:
-                raise WriteError("exists", "output exists: " + dir_path)
+                raise WriteError("exists", "output exists")
             raise WriteError(
                 "io",
                 "mkdir failed: errno " + String(no),

@@ -18,6 +18,7 @@ from memveil.cli.report import (
     exit_for_report,
     neutralize_controls,
     sanitize_diagnostic,
+    scrub_paths,
 )
 from memveil.jsonscan import Scanner
 from memveil.model.report import Report
@@ -65,6 +66,38 @@ def test_escape_text_clean_passthrough() raises:
     assert_equal(
         escape_text(String("café ☺")), String("café ☺")
     )
+
+
+def test_scrub_paths() raises:
+    assert_equal(
+        scrub_paths(
+            String(
+                "/nonexistent-bridge-dir/nolib.so: cannot open shared"
+                " object file"
+            )
+        ),
+        String("nolib.so: cannot open shared object file"),
+    )
+    assert_equal(
+        scrub_paths(String("~/lib/x.so failed")),
+        String("x.so failed"),
+    )
+    # Spaced paths split into tokens; every token still loses
+    # everything through its last slash, so middle components
+    # (including home directories) never survive.
+    assert_equal(
+        scrub_paths(String("/opt/my dir/x.so: bad")),
+        String("my x.so: bad"),
+    )
+    assert_equal(
+        scrub_paths(String("op=open domain=bridge code=2: ok")),
+        String("op=open domain=bridge code=2: ok"),
+    )
+    assert_equal(scrub_paths(String("")), String(""))
+    assert_equal(scrub_paths(String("/")), String(""))
+    # Fail-closed direction: any slash token loses its head, even
+    # prose like and/or. Diagnostics must not rely on slashes.
+    assert_equal(scrub_paths(String("reads/writes")), String("writes"))
 
 
 def test_escape_json_roundtrip() raises:
@@ -281,6 +314,7 @@ def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_escape_text]()
     suite.test[test_escape_text_clean_passthrough]()
+    suite.test[test_scrub_paths]()
     suite.test[test_escape_json_roundtrip]()
     suite.test[test_escape_markdown]()
     suite.test[test_render_text_attempts]()

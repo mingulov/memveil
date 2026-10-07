@@ -13,6 +13,10 @@ free-form payload channel.
 - Force flag (`forced`: normal vs forced bounce path).
 - Synthetic device id (`d000001`, ...) plus the observed PCI
   name scope (`0000:00:0c.0`) with unresolved driver identity.
+  The catalog admits a name verbatim only when it matches the
+  canonical `DDDD:BB:DD.F` scope; any other observed name keeps
+  its distinct id but persists as `unresolved`. Distinct devices
+  never merge; only the human-readable label degrades.
 - Hook identity (`swiotlb:swiotlb_bounced`), backend, profile,
   measurement mode.
 
@@ -33,7 +37,14 @@ free-form payload channel.
 Payload bytes, encryption keys, PINs, hashes of captured
 content, raw virtual or DMA addresses, full command lines,
 environment dumps, hostnames, usernames, or IP/MAC addresses.
-Diagnostics on stderr are sanitized the same way.
+Diagnostics on stderr are sanitized the same way, and every
+slash-bearing token keeps only its final path component, so
+loader messages, refused paths, and echoed arguments cannot
+smuggle home directories or machine layout into logs.
+Basenames survive as operational identifiers; diagnostics must
+not rely on slashes in prose. (`doctor` stdout keeps the full
+probe paths from the operator's own profile: naming the denied
+path is that report's operational purpose.)
 
 ## Handling notes
 
@@ -53,6 +64,13 @@ Diagnostics on stderr are sanitized the same way.
   drivers, and observer context replay neutralized in every
   format; observer context never renders; opaque identities
   refuse hostile punctuation at parse.
+- `canary` close-out case: address-shaped, path-shaped,
+  overlong, and interface-style wire names yield distinct
+  `d00000N` ids with `unresolved` labels; the canary bytes
+  appear in neither capture file nor any replayed report.
+- Stderr canary: an echoed argument path keeps only its
+  basename on stderr; the username and home prefix never
+  appear.
 - The metadata allowlist audits schemas (no
   payload/key/address/cmdline/environment property), BPF
   (exactly the two admitted kernel reads, no user-memory or

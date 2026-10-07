@@ -1391,6 +1391,34 @@ suite_attempts() {
         python3 "$JASSERT" eventfield "$TMP/$1/events.ndjson" "$2" \
             data.lost_count null || afailed=1
     }
+    mcase canary 4 109 5 4 24 3211 \
+        "bounce_attempt,bounce_attempt,bounce_attempt,bounce_attempt,bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
+    mqual canary complete_for_scope 0 complete_for_scope 0 proven
+    python3 "$JASSERT" devices "$TMP/canary/session.json" \
+        "0000:00:0c.0,unresolved,unresolved,unresolved,unresolved" \
+        || afailed=1
+    for can in canary-alice ffff888012345000 AAAAAAAA eth0; do
+        if grep -qF "$can" "$TMP/canary/session.json" \
+            "$TMP/canary/events.ndjson" 2>/dev/null; then
+            echo "attempts: canary case leaks [$can]" >&2
+            afailed=1
+        fi
+    done
+    for fmt in text json markdown; do
+        "$ROOT/build/memveil" report --format "$fmt" "$TMP/canary" \
+            >"$TMP/canary.$fmt" 2>"$TMP/canary.$fmt.err"
+        rc=$?
+        if [ "$rc" != "4" ]; then
+            echo "attempts: canary $fmt replay exits $rc, want 4" >&2
+            afailed=1
+        fi
+        for can in canary-alice ffff888012345000 AAAAAAAA eth0; do
+            if grep -qF "$can" "$TMP/canary.$fmt" 2>/dev/null; then
+                echo "attempts: canary $fmt leaks [$can]" >&2
+                afailed=1
+            fi
+        done
+    done
     mcase detfail 4 104 5 4 14 1924 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
     mqual detfail partial null complete_for_scope 0 \
