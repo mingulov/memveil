@@ -40,8 +40,8 @@ re-gate evidence at this revision.
 - Sanitizers: 0 ASan/UBSan findings on the native bridge
   (instrumented build, privileged native suite 7/7).
 - Packaging: owner bundle + clean-room replay + release-runtime
-  lanes PASS on `84339ac`; final-HEAD re-run pending (this
-  commit adds docs only; bundle bytes unaffected).
+  lanes PASS on this HEAD, including the full manuals tree in
+  the bundle.
 
 ## Known limitations
 
