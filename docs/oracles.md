@@ -23,7 +23,7 @@ Scope limits:
   inside the capture. Partial-capture recovery belongs to the
   product reader, not to this tool.
 
-Run the built-in acceptance suite (48 cases) with no arguments;
+Run the built-in acceptance suite (49 cases) with no arguments;
 validate one capture by passing its directory. The reports lane
 runs this tool over generated JSON reports to recompute counts
 independently of the renderer.

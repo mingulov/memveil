@@ -252,6 +252,16 @@ def test_conversion_uncertain() raises:
         _find(rows, String("known_shared_region_bytes")).coverage,
         String("partial"),
     )
+    # Evidence classes: state interpretation is medium,
+    # request counting is high, independent of coverage.
+    assert_equal(
+        _find(rows, String("known_shared_region_bytes")).confidence,
+        String("medium"),
+    )
+    assert_equal(
+        _find(rows, String("conversion_requests")).confidence,
+        String("high"),
+    )
     assert_equal(
         _find(rows, String("conversion_failures")).value, UInt64(1)
     )

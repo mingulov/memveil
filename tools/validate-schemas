@@ -802,8 +802,8 @@ def compare_report_obj(obj, session, summary):
     for metric in metrics:
         check_keys(metric,
                    ("name", "value", "unit", "measurement", "coverage",
-                    "aggregation", "sample_count", "dimensions", "scope",
-                    "notes"), (), "metric")
+                    "confidence", "aggregation", "sample_count",
+                    "dimensions", "scope", "notes"), (), "metric")
         check_text(metric["name"], 128, "metric.name")
         if metric["value"] is not None:
             check_u64(metric["value"], "metric.value")
@@ -818,6 +818,8 @@ def compare_report_obj(obj, session, summary):
         check_enum(metric["coverage"],
                    ("complete_for_scope", "partial", "unavailable",
                     "not_applicable"), "metric.coverage")
+        check_enum(metric["confidence"],
+                   ("high", "medium", "proxy"), "metric.confidence")
         if metric["aggregation"] is not None:
             check_enum(metric["aggregation"],
                        ("counter", "gauge", "mean", "p50", "p95", "p99"),
@@ -1543,7 +1545,8 @@ def run_selftest():
             lambda o: o["metrics"].append({
                 "name": "bounce_attempts", "value": "999",
                 "unit": "count", "measurement": "observed",
-                "coverage": "complete_for_scope", "aggregation": "counter",
+                "coverage": "complete_for_scope", "confidence": "high",
+                "aggregation": "counter",
                 "sample_count": None,
                 "dimensions": {"device_id": "dev-9", "pool_id": None},
                 "scope": "rogue", "notes": ""}),
@@ -1561,6 +1564,9 @@ def run_selftest():
     mutated("report-wrong-count",
             lambda o: o["metrics"][0].update(value="4"),
             "wrong-metric")
+    mutated("report-bad-confidence",
+            lambda o: o["metrics"][0].update(confidence="certain"),
+            "bad-enum")
 
     def set_region_value(obj):
         for metric in obj["metrics"]:

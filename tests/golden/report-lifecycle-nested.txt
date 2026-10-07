@@ -20,94 +20,94 @@ quality:
     scope: authored fixture finalization
     reason: Authored fixture: finalized.
 metrics (30):
-  bounce_attempts = 1 count [observed, complete_for_scope, counter]
+  bounce_attempts = 1 count [observed, complete_for_scope, high, counter]
     scope: window [1000000000,2500000000), all devices, detail channel
     notes: 1 detail event; no counter snapshots to compare.
-  bounce_attempts{device=dev-1} = 1 count [observed, complete_for_scope, counter]
+  bounce_attempts{device=dev-1} = 1 count [observed, complete_for_scope, high, counter]
     scope: window [1000000000,2500000000), device dev-1, detail channel
     notes: All 1 attempt observed device dev-1.
-  requested_bounce_bytes = 4096 bytes [observed, complete_for_scope, counter]
+  requested_bounce_bytes = 4096 bytes [observed, complete_for_scope, high, counter]
     scope: window [1000000000,2500000000), all devices, detail channel
     notes: 4096 requested bytes across 1 attempt; see successful_allocations for observed outcomes.
-  requested_bounce_bytes{device=dev-1} = 4096 bytes [observed, complete_for_scope, counter]
+  requested_bounce_bytes{device=dev-1} = 4096 bytes [observed, complete_for_scope, high, counter]
     scope: window [1000000000,2500000000), device dev-1, detail channel
     notes: 4096 requested bytes on device dev-1.
-  conversion_request_bytes = unavailable bytes [unavailable, unavailable]
+  conversion_request_bytes = unavailable bytes [unavailable, unavailable, high]
     scope: window [1000000000,2500000000), all devices
     notes: No conversion source in this fixture.
-  known_shared_region_bytes = unavailable bytes [unavailable, unavailable]
+  known_shared_region_bytes = unavailable bytes [unavailable, unavailable, high]
     scope: window [1000000000,2500000000), all devices
     notes: No region source in this fixture.
-  pool_used_bytes = unavailable bytes [unavailable, unavailable]
+  pool_used_bytes = unavailable bytes [unavailable, unavailable, high]
     scope: window [1000000000,2500000000), all devices
     notes: No pool source in this fixture.
-  pool_capacity_bytes = unavailable bytes [unavailable, unavailable]
+  pool_capacity_bytes = unavailable bytes [unavailable, unavailable, high]
     scope: window [1000000000,2500000000), all devices
     notes: No pool source in this fixture.
-  successful_allocations = 1 count [observed, complete_for_scope, counter]
+  successful_allocations = 1 count [observed, complete_for_scope, high, counter]
     scope: window [1000000000,2500000000); observed mappings
     notes: Map successes with mapping identity.
-  failed_allocations = 0 count [observed, complete_for_scope, counter]
+  failed_allocations = 0 count [observed, complete_for_scope, high, counter]
     scope: window [1000000000,2500000000); observed mappings
     notes: Map failures; no mapping created.
-  mapped_bytes_total = 4096 bytes [observed, complete_for_scope, counter]
+  mapped_bytes_total = 4096 bytes [observed, complete_for_scope, high, counter]
     scope: window [1000000000,2500000000); observed mappings
     notes: Sum of mapped bytes over successes.
-  copy_original_to_bounce_bytes = 5120 bytes [observed, complete_for_scope, counter]
+  copy_original_to_bounce_bytes = 5120 bytes [observed, complete_for_scope, high, counter]
     scope: window [1000000000,2500000000); observed mappings
     notes: Observed original-to-bounce copies only; sync requests add nothing.
-  copy_bounce_to_original_bytes = 0 bytes [observed, complete_for_scope, counter]
+  copy_bounce_to_original_bytes = 0 bytes [observed, complete_for_scope, high, counter]
     scope: window [1000000000,2500000000); observed mappings
     notes: Observed bounce-to-original copies only; sync requests add nothing.
-  live_observed_allocation_bytes = 0 bytes [observed, complete_for_scope, gauge]
+  live_observed_allocation_bytes = 0 bytes [observed, complete_for_scope, high, gauge]
     scope: window [1000000000,2500000000); observed mappings
     notes: Mapped bytes still open at the horizon.
-  open_mappings = 0 count [observed, complete_for_scope, gauge]
+  open_mappings = 0 count [observed, complete_for_scope, high, gauge]
     scope: window [1000000000,2500000000); observed mappings
     notes: Open mappings are censored from completed lifetimes, not leaks.
-  peak_live_observed_allocation_bytes = 4096 bytes [observed, complete_for_scope, gauge]
+  peak_live_observed_allocation_bytes = 4096 bytes [observed, complete_for_scope, high, gauge]
     scope: window [1000000000,2500000000); observed mappings
     notes: Maximum live mapped bytes reached; worst instantaneous exposure in this window.
-  oldest_open_mapping_age_ns = unavailable nanoseconds [unavailable, unavailable]
+  oldest_open_mapping_age_ns = unavailable nanoseconds [unavailable, unavailable, high]
     scope: window [1000000000,2500000000); observed mappings
     notes: No open mappings at the horizon.
-  allocation_byte_microseconds = 4096000000 byte_microseconds [observed, complete_for_scope, counter]
+  allocation_byte_microseconds = 4096000000 byte_microseconds [observed, complete_for_scope, high, counter]
     scope: window [1000000000,2500000000); observed mappings
     notes: Time integral of live mapped bytes; exposure weighted by duration. Completed mappings use exact durations; open mappings integrate to the horizon.
-  sync_requests = 1 count [observed, complete_for_scope, counter]
+  sync_requests = 1 count [observed, complete_for_scope, high, counter]
     scope: window [1000000000,2500000000); observed mappings
     notes: Sync requests observed; requests are not copies.
-  completed_lifetime_count = 1 count [observed, complete_for_scope, counter]
+  completed_lifetime_count = 1 count [observed, complete_for_scope, high, counter]
     scope: window [1000000000,2500000000); observed mappings
     notes: Releases with provable durations; open and uncertain mappings excluded.
-  lifetime_mean_ns = 1000000000 nanoseconds [observed, complete_for_scope, mean]
+  lifetime_mean_ns = 1000000000 nanoseconds [observed, complete_for_scope, high, mean]
     scope: window [1000000000,2500000000); observed mappings
     notes: Floor mean over completed lifetimes.
-  lifetime_min_ns = 1000000000 nanoseconds [observed, complete_for_scope, gauge]
+  lifetime_min_ns = 1000000000 nanoseconds [observed, complete_for_scope, high, gauge]
     scope: window [1000000000,2500000000); observed mappings
     notes: Exact minimum completed lifetime.
-  lifetime_max_ns = 1000000000 nanoseconds [observed, complete_for_scope, gauge]
+  lifetime_max_ns = 1000000000 nanoseconds [observed, complete_for_scope, high, gauge]
     scope: window [1000000000,2500000000); observed mappings
     notes: Exact maximum completed lifetime.
-  lifetime_p50_ns = 1073741823 nanoseconds [estimated, complete_for_scope, p50]
+  lifetime_p50_ns = 1073741823 nanoseconds [estimated, complete_for_scope, high, p50]
     scope: window [1000000000,2500000000); observed mappings
     notes: Estimated 65-bucket upper edge; exact min/max stay separate.
-  lifetime_p95_ns = 1073741823 nanoseconds [estimated, complete_for_scope, p95]
+  lifetime_p95_ns = 1073741823 nanoseconds [estimated, complete_for_scope, high, p95]
     scope: window [1000000000,2500000000); observed mappings
     notes: Estimated 65-bucket upper edge; exact min/max stay separate.
-  lifetime_p99_ns = 1073741823 nanoseconds [estimated, complete_for_scope, p99]
+  lifetime_p99_ns = 1073741823 nanoseconds [estimated, complete_for_scope, high, p99]
     scope: window [1000000000,2500000000); observed mappings
     notes: Estimated 65-bucket upper edge; exact min/max stay separate.
-  successful_allocations{device=dev-1} = 1 count [observed, complete_for_scope, counter]
+  successful_allocations{device=dev-1} = 1 count [observed, complete_for_scope, high, counter]
     scope: window [1000000000,2500000000); device dev-1
     notes: Map successes on this device.
-  mapped_bytes_total{device=dev-1} = 4096 bytes [observed, complete_for_scope, counter]
+  mapped_bytes_total{device=dev-1} = 4096 bytes [observed, complete_for_scope, high, counter]
     scope: window [1000000000,2500000000); device dev-1
     notes: Mapped bytes on this device.
-  copy_original_to_bounce_bytes{device=dev-1} = 5120 bytes [observed, complete_for_scope, counter]
+  copy_original_to_bounce_bytes{device=dev-1} = 5120 bytes [observed, complete_for_scope, high, counter]
     scope: window [1000000000,2500000000); device dev-1
     notes: Attributed copies on this device.
-  copy_bounce_to_original_bytes{device=dev-1} = 0 bytes [observed, complete_for_scope, counter]
+  copy_bounce_to_original_bytes{device=dev-1} = 0 bytes [observed, complete_for_scope, high, counter]
     scope: window [1000000000,2500000000); device dev-1
     notes: Attributed copies on this device.
 findings: none

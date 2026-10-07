@@ -7,7 +7,23 @@ format_u64 so the JSON output carries canonical decimal strings.
 """
 
 struct Metric(ImplicitlyCopyable):
-    """One derived metric row."""
+    """One derived metric row.
+
+    Confidence is the evidence class behind the metric's
+    interpretation, independent of loss and coverage:
+
+    - high: directly observed quantity, no platform
+      interpretation (attempt counts, allocation bytes,
+      pool gauges, completed lifetimes).
+    - medium: observation interpreted through an admitted
+      profile (shared/private/unknown region state).
+    - proxy: an ordinary-guest number standing in for a
+      confidential-exposure question. No current metric
+      emits proxy: exposure-framed claims stay withheld
+      until platform sharing proof exists. Proxy never
+      downgrades an accurate allocator measurement and
+      never implies a calibrated probability.
+    """
 
     var name: String
     var has_value: Bool
@@ -15,6 +31,7 @@ struct Metric(ImplicitlyCopyable):
     var unit: String
     var measurement: String
     var coverage: String
+    var confidence: String
     var has_aggregation: Bool
     var aggregation: String
     var has_sample_count: Bool
@@ -33,6 +50,7 @@ struct Metric(ImplicitlyCopyable):
         self.unit = String("")
         self.measurement = String("unavailable")
         self.coverage = String("unavailable")
+        self.confidence = String("")
         self.has_aggregation = False
         self.aggregation = String("")
         self.has_sample_count = False

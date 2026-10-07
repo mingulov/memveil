@@ -132,6 +132,10 @@ def test_pressure_vector() raises:
     assert_equal(
         _find(rows, "pool_pressure_samples", "p1").value, UInt64(3)
     )
+    assert_equal(
+        _find(rows, "pool_used_bytes", "p1").confidence,
+        String("high"),
+    )
 
 
 def test_below_threshold_no_pressure() raises:

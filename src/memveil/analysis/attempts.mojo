@@ -394,6 +394,7 @@ def _detail_metric(
     if has_value:
         m.measurement = String("observed")
     m.coverage = coverage
+    m.confidence = String("high")
     if has_value:
         m.has_aggregation = True
         m.aggregation = String("counter")
@@ -410,6 +411,7 @@ def _unavailable_metric(name: String, unit: String, scope: String, notes: String
     m.unit = unit
     m.scope = scope
     m.notes = notes
+    m.confidence = String("high")
     return m^
 
 

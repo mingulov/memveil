@@ -184,6 +184,7 @@ def render_json(rep: Report, device_filter: String = "") raises -> String:
             out += ', "unit": ' + escape_json(m.unit)
             out += ', "measurement": ' + escape_json(m.measurement)
             out += ', "coverage": ' + escape_json(m.coverage)
+            out += ', "confidence": ' + escape_json(m.confidence)
             out += ', "aggregation": '
             if m.has_aggregation:
                 out += escape_json(m.aggregation)

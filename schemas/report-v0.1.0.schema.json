@@ -85,6 +85,7 @@
           "unit",
           "measurement",
           "coverage",
+          "confidence",
           "aggregation",
           "sample_count",
           "dimensions",
@@ -115,6 +116,10 @@
           "coverage": {
             "enum": ["complete_for_scope", "partial", "unavailable", "not_applicable"],
             "description": "Relative only to the explicitly named scope; never the whole guest."
+          },
+          "confidence": {
+            "enum": ["high", "medium", "proxy"],
+            "description": "Evidence class behind the interpretation, independent of loss and coverage. high: directly observed, no platform interpretation. medium: interpreted through an admitted profile. proxy: an ordinary-guest stand-in for an exposure question; never a calibrated probability."
           },
           "aggregation": {
             "enum": ["counter", "gauge", "mean", "p50", "p95", "p99", null],

@@ -161,6 +161,8 @@ def render_text(rep: Report, device_filter: String = "") raises -> String:
         out += escape_text(m.measurement)
         out += ", "
         out += escape_text(m.coverage)
+        out += ", "
+        out += escape_text(m.confidence)
         if m.has_aggregation:
             out += ", "
             out += escape_text(m.aggregation)

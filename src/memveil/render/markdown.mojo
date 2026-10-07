@@ -10,8 +10,8 @@ metadata cannot inject tags or comments, and Markdown-active
 punctuation (backslash, pipe, star, underscore, brackets, backtick)
 is backslash-escaped so tables and formatting cannot break.
 Fixed-vocabulary tokens (channels, statuses, measurements,
-coverages, severities, codes) render verbatim; their character
-sets are inert in table cells.
+coverages, confidences, severities, codes) render verbatim;
+their character sets are inert in table cells.
 """
 
 from memveil.model.report import Report
@@ -144,8 +144,8 @@ def render_markdown(rep: Report, device_filter: String = "") raises -> String:
     out += _quality_row(String("baseline"), rep.q_baseline)
     out += _quality_row(String("terminal"), rep.q_terminal)
     out += "\n## Metrics\n\n"
-    out += "| name | dimensions | value | unit | measurement | coverage | scope | notes |\n"
-    out += "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+    out += "| name | dimensions | value | unit | measurement | coverage | confidence | scope | notes |\n"
+    out += "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
     for i in range(len(rep.metrics)):
         var m = rep.metrics[i]
         if filt != "" and m.has_device_id:
@@ -168,6 +168,8 @@ def render_markdown(rep: Report, device_filter: String = "") raises -> String:
         out += escape_text(m.measurement)
         out += " | "
         out += escape_text(m.coverage)
+        out += " | "
+        out += escape_text(m.confidence)
         out += " | "
         out += escape_markdown(m.scope)
         out += " | "
