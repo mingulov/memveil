@@ -23,10 +23,11 @@ silently evicted, and no refusal corrupts unrelated state.
 | Reader line | 64 KiB | `line too large`; capture rejected (exit 2) |
 | Reader session document | 16 MiB | `session.json too large`; capture rejected |
 | Reader events total | 256 MiB | `events.ndjson too large`; capture rejected |
-| Reader tracked identities | 4,194,304 | `too many tracked identities`; capture rejected |
+| Reader tracked identities | 4,194,304 | operations plus mappings plus distinct copy/sync references; past budget, `too many tracked identities` and the capture is rejected |
 | Reader JSON depth | 64 | parse error; capture rejected |
 | Diagnostics findings | ≤ 8 per report | fixed code set; stateless by construction |
-| Region table | 4,096 (reserved) | no region store in this phase; budget reserved |
+| Region table | 4,096 | `region table exhausted`; observation refused, counted |
+| Region interval segments | 65,536 | `interval budget exceeded`; affected region excluded, counted |
 
 The `budgets` lane proves N/N+1 at the exact production
 ceilings for pending (65,536/65,537), active (65,536/65,537

@@ -16,7 +16,7 @@ the first failing gate in validation order (see
 | `object refused: ...` | file is not a usable BPF object | use the shipped object; ELFs from other tools are refused |
 | `format unreadable` | tracefs not readable here | run as root on a kernel the profile covers |
 | `binding failed: ...` | hook bindings do not hold | the profile does not match this kernel; stay unbound or pick the validated profile |
-| `cannot load profiles: ...` | shipped profiles unreadable | keep `profiles/` beside the binary; profiles resolve from the executable, never the working directory |
+| `cannot load profiles: ...` | shipped profiles unreadable | keep `profiles/` beside `bin/` (`<root>/bin/memveil` reads `<root>/profiles`); profiles resolve from the executable, never the working directory |
 
 A refused run exits 3 and creates nothing: there is no partial
 capture to clean up.

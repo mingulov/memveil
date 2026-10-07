@@ -69,7 +69,10 @@ Implemented in `src/memveil/` with owning tests per feature:
 - Lazy bridge loading through `OwnedDLHandle`, so offline commands work
   without the bridge library present. String arguments to retrieved
   callables must use `as_c_string_span()`, never a raw `String`.
-- Atomic file replacement through one centralized `rename(2)` FFI helper.
+- Atomic no-replace publication through an inline `renameat2`
+  FFI call with `RENAME_NOREPLACE`: if the target already
+  exists the run refuses to overwrite it instead of
+  replacing it.
 - Signal handling through centralized FFI: `record` re-execs once under
   an inherited mask and consumes signals via signalfd; teardown runs in
   normal control flow.
@@ -90,9 +93,12 @@ Implemented in `src/memveil/` with owning tests per feature:
 
 ## Dependencies
 
-`libbpf-mojo` is consumed as a pinned source archive, vendored at
+`libbpf-mojo` is consumed as a pinned bundle, vendored at
 `third_party/libbpf-mojo-<version>.tar.gz` and verified against the
 `tarball_sha256` pin in `toolchain.lock.json` on every build; release
-builds never use an implicit sibling path. `LMB_PACKAGE` overrides the
-vendored bytes with another tarball, which must match the same pin
-before the build accepts it.
+builds never use an implicit sibling path. The bundle carries the
+prebuilt native bridge plus Mojo wrapper sources and the C
+interface header (no native implementation sources); the build
+links the prebuilt bridge, it never compiles it. `LMB_PACKAGE`
+overrides the vendored bytes with another tarball, which must
+match the same pin before the build accepts it.

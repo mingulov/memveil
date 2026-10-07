@@ -39,8 +39,10 @@ details live in `permissions.md`; surprises go to
   128 KiB..4 GiB); ring buffer 8 MiB; BPF object and bridge
   passed explicitly (`--object`, `--bridge`/`LMB_NATIVE_LIB`).
 - Report caps: 64 KiB per record, 16 MiB session file,
-  256 MiB events total by default (each raisable: events to
-  4 GiB). `--allow-partial` drops a truncated final record
+  256 MiB events total by default. Only the events cap is
+  raisable (up to 4 GiB); the record and session caps accept
+  their default or lower (a higher value is refused with
+  exit 2). `--allow-partial` drops a truncated final record
   and reports the loss instead of failing.
 - Staged stop-protocol budget 5,000 ms (`StopController` is
   unit-tested but not yet wired into the live collector, which
@@ -60,7 +62,9 @@ details live in `permissions.md`; surprises go to
   2 usage/internal error, 1 stdout write failed.
 
 Exit codes never stand alone: every non-zero outcome carries a
-structured reason (stderr diagnostic, JSON field, or both).
+structured reason (stderr diagnostic, JSON field, or both),
+except when standard error itself is broken: with no channel
+to carry a diagnostic the run exits 1 without one.
 
 ## Unsupported (explicitly out of scope)
 
