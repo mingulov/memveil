@@ -15,7 +15,7 @@ in `tools/package`). The two origins are told apart in each
 entry.
 
 - `lib/libbpf_mojo.so.1` from libbpf-mojo 0.2.1 (source
-  commit `1ce369b`, an independent project; the exact
+  commit `b5d1661`, an independent project; the exact
   tarball is named by sha256 in `MANIFEST.json` under
   `libbpf_mojo`).
   The bridge is GPL-3.0-or-later; its first-party texts are
