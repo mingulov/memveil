@@ -402,6 +402,40 @@ def _script_zero(dir: String):
     _run(dir, kernel, clock, signal, writer)
 
 
+def _run_pool(
+    dir: String,
+    mut kernel: ScriptKernel,
+    mut clock: ScriptClock,
+    mut signal: ScriptSignal,
+    mut writer: ScriptWriter,
+    root: String,
+):
+    var cfg = _base_config(dir)
+    cfg.has_pool_sample = True
+    cfg.pool_root = root
+    var coll = Collector(cfg^)
+    var res = coll.run(kernel, clock, signal, writer)
+    _report(String(""), res)
+    print(String("polls=") + String(kernel.polls_done))
+    print(String("stats=") + String(kernel.stats_done))
+    print(String("snaps=") + String(kernel.snaps_done))
+    print(String("reads=") + String(clock.reads))
+    print(String("committed=") + String(writer.committed_len()))
+
+
+def _script_pool(dir: String):
+    var kernel = ScriptKernel()
+    kernel.add_poll(_timeout(), 104)
+    _zeros(kernel, 5, 4)
+    var clock = _clock(2)
+    var signal = ScriptSignal()
+    var writer = ScriptWriter()
+    _run_pool(
+        dir, kernel, clock, signal, writer,
+        String("tests/fixtures/pools/debugfs-ok"),
+    )
+
+
 def _script_detfail(dir: String):
     var kernel = ScriptKernel()
     kernel.detach_out = OpOut(False, String("scripted detach failure"))
@@ -1617,6 +1651,8 @@ def main() raises:
         _script_attachwin(args[2])
     elif args[1] == String("zero"):
         _script_zero(args[2])
+    elif args[1] == String("pool"):
+        _script_pool(args[2])
     elif args[1] == String("detfail"):
         _script_detfail(args[2])
     elif args[1] == String("stablen"):

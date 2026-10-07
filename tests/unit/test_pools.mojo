@@ -15,12 +15,15 @@ from std.testing import TestSuite, assert_equal, assert_true
 
 from memveil.analysis.pools import PoolTracker
 from memveil.capture.pools import (
+    POOL_SWIOTLB_ALLOCATOR,
     check_field_admitted,
     normalize_pool_sample,
+    read_pool_counters,
     slots_to_bytes,
 )
 from memveil.model.event import Event
 from memveil.model.metric import Metric
+from memveil.platform.reader import open_evidence_reader
 
 
 def u64max() -> UInt64:
@@ -65,20 +68,86 @@ def test_slots_to_bytes() raises:
 def test_normalize_sample() raises:
     var full = normalize_pool_sample(
         "pool0", True, UInt64(900), True, UInt64(1000), UInt64(1),
-        True, "debugfs",
+        True, "debugfs", POOL_SWIOTLB_ALLOCATOR, True, UInt64(950),
+        String(""),
     )
     assert_true(full.has_used_bytes)
     assert_equal(full.used_bytes, UInt64(900))
     assert_true(full.has_capacity_bytes)
     assert_equal(full.capacity_bytes, UInt64(1000))
     assert_equal(full.unit, String("bytes"))
+    assert_equal(full.allocator, POOL_SWIOTLB_ALLOCATOR)
+    assert_true(full.has_unit_bytes)
+    assert_equal(full.unit_bytes, UInt64(1))
+    assert_true(full.has_hiwater_bytes)
+    assert_equal(full.hiwater_bytes, UInt64(950))
+    assert_equal(full.reason, String(""))
     var nocap = normalize_pool_sample(
         "pool0", True, UInt64(900), False, UInt64(0), UInt64(1),
-        True, "debugfs",
+        True, "debugfs", POOL_SWIOTLB_ALLOCATOR, False, UInt64(0),
+        String("denied"),
     )
     assert_true(nocap.has_used_bytes)
     assert_true(not nocap.has_capacity_bytes)
     assert_true(nocap.notes != "")
+    assert_equal(nocap.reason, String("denied"))
+    assert_true(not nocap.has_hiwater_bytes)
+    var raised = False
+    try:
+        _ = normalize_pool_sample(
+            "pool0", True, UInt64(900), True, UInt64(1000),
+            UInt64(1), True, "debugfs", POOL_SWIOTLB_ALLOCATOR,
+            False, UInt64(0), String("bogus"),
+        )
+    except:
+        raised = True
+    assert_true(raised)
+
+
+def test_read_counters_ok() raises:
+    var reader = open_evidence_reader(
+        String("tests/fixtures/pools/debugfs-ok")
+    )
+    var got = read_pool_counters(reader)
+    assert_true(got.has_used)
+    assert_equal(got.used_slots, UInt64(12))
+    assert_true(got.has_cap)
+    assert_equal(got.cap_slots, UInt64(32768))
+    assert_true(got.has_hiwater)
+    assert_equal(got.hiwater_slots, UInt64(64))
+    assert_equal(got.reason, String(""))
+
+
+def test_read_counters_denied() raises:
+    var reader = open_evidence_reader(
+        String("tests/fixtures/pools/debugfs-denied")
+    )
+    var got = read_pool_counters(reader)
+    assert_true(not got.has_used)
+    assert_true(got.has_cap)
+    assert_true(not got.has_hiwater)
+    assert_equal(got.reason, String("denied"))
+
+
+def test_read_counters_absent() raises:
+    var reader = open_evidence_reader(
+        String("tests/fixtures/pools/debugfs-absent")
+    )
+    var got = read_pool_counters(reader)
+    assert_true(not got.has_used)
+    assert_true(not got.has_cap)
+    assert_true(not got.has_hiwater)
+    assert_equal(got.reason, String("absent"))
+
+
+def test_read_counters_bad() raises:
+    var reader = open_evidence_reader(
+        String("tests/fixtures/pools/debugfs-bad")
+    )
+    var got = read_pool_counters(reader)
+    assert_true(not got.has_used)
+    assert_true(got.has_cap)
+    assert_equal(got.reason, String("unparseable"))
 
 
 def _sample(
@@ -219,6 +288,34 @@ def test_latest_values() raises:
     )
 
 
+def test_hiwater_gauge() raises:
+    var t = PoolTracker()
+    var first = _sample("p1", True, UInt64(100), True, UInt64(1000), String("bytes"), UInt64(1))
+    first.pool.has_hiwater = True
+    first.pool.hiwater_bytes = UInt64(400)
+    t.consume(first)
+    var rows = t.metrics("window [0,2000)")
+    var h = _find(rows, "pool_hiwater_bytes", "p1")
+    assert_true(h.has_value)
+    assert_equal(h.value, UInt64(400))
+    assert_equal(h.unit, String("bytes"))
+    assert_equal(h.confidence, String("high"))
+    # Latest wins; a sample without hiwater keeps the old mark.
+    t.consume(_sample("p1", True, UInt64(100), True, UInt64(1000), String("bytes"), UInt64(2)))
+    rows = t.metrics("window [0,2000)")
+    assert_equal(
+        _find(rows, "pool_hiwater_bytes", "p1").value, UInt64(400)
+    )
+    var second = _sample("p1", True, UInt64(100), True, UInt64(1000), String("bytes"), UInt64(3))
+    second.pool.has_hiwater = True
+    second.pool.hiwater_bytes = UInt64(500)
+    t.consume(second)
+    rows = t.metrics("window [0,2000)")
+    assert_equal(
+        _find(rows, "pool_hiwater_bytes", "p1").value, UInt64(500)
+    )
+
+
 def _gap(channel: String, seq: UInt64) -> Event:
     var ev = Event()
     ev.session_id = String("s1")
@@ -302,6 +399,10 @@ def run() raises -> Int:
     suite.test[test_field_allowlist]()
     suite.test[test_slots_to_bytes]()
     suite.test[test_normalize_sample]()
+    suite.test[test_read_counters_ok]()
+    suite.test[test_read_counters_denied]()
+    suite.test[test_read_counters_absent]()
+    suite.test[test_read_counters_bad]()
     suite.test[test_pressure_vector]()
     suite.test[test_below_threshold_no_pressure]()
     suite.test[test_missing_sample_resets]()
@@ -311,6 +412,7 @@ def run() raises -> Int:
     suite.test[test_unknown_unit_invalid]()
     suite.test[test_pool_budget]()
     suite.test[test_latest_values]()
+    suite.test[test_hiwater_gauge]()
     suite.test[test_detail_gap_degrades_gauges]()
     suite.test[test_unrelated_gap_keeps_gauges_complete]()
     suite.test[test_partial_sample_keeps_known_half]()

@@ -545,13 +545,30 @@ def check_data(kind, data, where, devices):
                              "%s.generation" % where)
     elif kind == "pool_sample":
         check_keys(data, ("pool_id", "used_bytes", "capacity_bytes",
-                          "unit"), (), where)
+                          "unit"),
+                   ("allocator", "unit_bytes", "hiwater_bytes",
+                    "reason"), where)
         summary["pool"] = check_id(data["pool_id"], "%s.pool_id" % where)
         if data["used_bytes"] is not None:
             check_u64(data["used_bytes"], "%s.used_bytes" % where)
         if data["capacity_bytes"] is not None:
             check_u64(data["capacity_bytes"], "%s.capacity_bytes" % where)
         check_enum(data["unit"], ("bytes", "unknown"), "%s.unit" % where)
+        if "allocator" in data:
+            check_id(data["allocator"], "%s.allocator" % where)
+        if "unit_bytes" in data:
+            unit = check_u64(data["unit_bytes"],
+                             "%s.unit_bytes" % where)
+            if unit == 0:
+                fail("unexpected-value",
+                     "%s.unit_bytes must be positive" % where)
+        if "hiwater_bytes" in data and data["hiwater_bytes"] is not None:
+            check_u64(data["hiwater_bytes"],
+                      "%s.hiwater_bytes" % where)
+        if "reason" in data:
+            check_enum(data["reason"],
+                       ("denied", "absent", "unparseable"),
+                       "%s.reason" % where)
     elif kind == "gap":
         check_keys(data, ("channel", "lost_count", "reason",
                           "window_start_ns", "window_end_ns"), (), where)
@@ -735,6 +752,7 @@ METRIC_SOURCES = {
     "known_shared_region_bytes": ("transition_result",),
     "pool_used_bytes": ("pool_sample",),
     "pool_capacity_bytes": ("pool_sample",),
+    "pool_hiwater_bytes": ("pool_sample",),
 }
 
 # The shared-state union may also be sourced by retained baseline
@@ -763,6 +781,7 @@ METRIC_UNITS = {
     "unknown_region_bytes": "bytes",
     "pool_used_bytes": "bytes",
     "pool_capacity_bytes": "bytes",
+    "pool_hiwater_bytes": "bytes",
 }
 
 
@@ -1400,6 +1419,41 @@ def run_selftest():
 
     results.append(expect_reject("events-early-unmap.ndjson",
                                  early_unmap, "unknown-mapping"))
+
+    poolx = repo_path("tests", "fixtures", "pools", "extended")
+    try:
+        poolx_session = check_session(read_json_file(
+            os.path.join(poolx, "session.json"), "pool session"))
+    except Error as exc:
+        results.append((False, "pool-setup: %s" % exc))
+        return results
+
+    def pool_extended_ok():
+        summary = validate_stream(
+            poolx_session, os.path.join(poolx, "events-ok.ndjson"))
+        if summary["count"] != 2:
+            fail("wrong-metric", "pool summary %r" % (summary,))
+        if "pool_sample" not in summary["kinds"]:
+            fail("wrong-metric", "pool kinds %r" % (summary,))
+        return "allocator, unit, hiwater, reason round-trip"
+
+    check("pool-extended", pool_extended_ok)
+
+    def pool_bad_reason():
+        validate_stream(
+            poolx_session,
+            os.path.join(poolx, "events-bad-reason.ndjson"))
+
+    results.append(expect_reject("events-bad-reason.ndjson",
+                                 pool_bad_reason, "bad-enum"))
+
+    def pool_zero_unit():
+        validate_stream(
+            poolx_session,
+            os.path.join(poolx, "events-zero-unit.ndjson"))
+
+    results.append(expect_reject("events-zero-unit.ndjson",
+                                 pool_zero_unit, "unexpected-value"))
 
     def provenance_clash():
         obj = read_json_file(os.path.join(fixture, "session.json"),

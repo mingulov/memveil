@@ -19,7 +19,7 @@ quality:
   terminal: complete_for_scope loss=0
     scope: authored fixture finalization
     reason: Authored fixture: finalized.
-metrics (14):
+metrics (15):
   bounce_attempts = 1 count [observed, complete_for_scope, high, counter]
     scope: window [1000000000,2000000000), all devices, detail channel
     notes: 1 detail event; no counter snapshots to compare.
@@ -62,6 +62,9 @@ metrics (14):
   pool_pressure_samples{pool=pool-0} = 3 count [observed, complete_for_scope, high, gauge]
     scope: window [1000000000,2000000000); pool pool-0
     notes: Consecutive qualifying samples (3 total, 0 invalid); pressure needs 3.
+  pool_hiwater_bytes{pool=pool-0} = unavailable bytes [unavailable, unavailable, high]
+    scope: window [1000000000,2000000000); pool pool-0; allocator lifetime, reset epoch unproved
+    notes: No high-water sample for this pool.
 findings (1):
   [warning] POOL_PRESSURE: Pool pool-0 at or above 90% for 3 consecutive valid samples.
     scope: window [1000000000,2000000000); pool pool-0

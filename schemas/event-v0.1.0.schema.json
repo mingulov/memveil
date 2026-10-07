@@ -293,6 +293,22 @@
               "unit": {
                 "enum": ["bytes", "unknown"],
                 "description": "Byte unit proof. 'unknown' disables ratio rules such as pool pressure."
+              },
+              "allocator": {
+                "$ref": "#/$defs/opaque_id",
+                "description": "Allocator scope identity, e.g. 'swiotlb' for the default SWIOTLB pool. Optional; absent on older samples."
+              },
+              "unit_bytes": {
+                "$ref": "#/$defs/u64",
+                "description": "Verified slot size in bytes used for the slot-to-byte conversion. Must be positive when present."
+              },
+              "hiwater_bytes": {
+                "anyOf": [{"$ref": "#/$defs/u64"}, {"type": "null"}],
+                "description": "Allocator high-water occupancy in bytes. Historical since the allocator's last reset; the reset epoch is unproved unless the sample says otherwise."
+              },
+              "reason": {
+                "enum": ["denied", "absent", "unparseable"],
+                "description": "Why a sample half is missing: unreadable, no such allocator evidence, or unparsable content. Absent when both halves are known."
               }
             },
             "description": "Contemporaneous values for one explicitly identified allocator scope."

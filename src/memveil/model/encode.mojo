@@ -343,6 +343,28 @@ def _encode_data(ev: Event) raises EncodeError -> String:
         else:
             parts.append(_member(String("capacity_bytes"), _jnull()))
         parts.append(_member(String("unit"), _jstr(ev.pool.unit)))
+        if ev.pool.allocator != "":
+            parts.append(
+                _member(String("allocator"), _jstr(ev.pool.allocator))
+            )
+        if ev.pool.has_unit_bytes:
+            parts.append(
+                _member(
+                    String("unit_bytes"),
+                    _ju64(ev.pool.unit_bytes),
+                )
+            )
+        if ev.pool.has_hiwater:
+            parts.append(
+                _member(
+                    String("hiwater_bytes"),
+                    _ju64(ev.pool.hiwater_bytes),
+                )
+            )
+        if ev.pool.reason != "":
+            parts.append(
+                _member(String("reason"), _jstr(ev.pool.reason))
+            )
     elif kind == "gap":
         parts.append(
             _member(String("channel"), _jstr(ev.gap.channel))

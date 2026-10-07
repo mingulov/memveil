@@ -1,0 +1,4 @@
+arch=x86_64
+release=7.0.0-test
+euid=0
+denied=/sys/kernel/debug/swiotlb/io_tlb_used

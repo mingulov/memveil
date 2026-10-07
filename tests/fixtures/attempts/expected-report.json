@@ -221,6 +221,19 @@
       "dimensions": {"device_id": null, "pool_id": null},
       "scope": "window [1000000000,4000000000)",
       "notes": "No pool source in this fixture."
+    },
+    {
+      "name": "pool_hiwater_bytes",
+      "value": null,
+      "unit": "bytes",
+      "measurement": "unavailable",
+      "coverage": "unavailable",
+      "confidence": "high",
+      "aggregation": null,
+      "sample_count": null,
+      "dimensions": {"device_id": null, "pool_id": null},
+      "scope": "window [1000000000,4000000000)",
+      "notes": "No pool source in this fixture."
     }
   ],
   "findings": [],
