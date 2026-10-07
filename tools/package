@@ -23,8 +23,9 @@ Usage: tools/package [--out DIR] [--tag NAME]
   --out DIR   stage directory (default: dist/)
   --tag NAME  bundle directory name (default: memveil-<version>)
 
-Requires LMB_PACKAGE (pinned libbpf-mojo tarball) and a working
-tools/build. Fails closed when the link closure names anything
+Requires LMB_PACKAGE (pinned libbpf-mojo tarball), a working
+tools/build, and patchelf (apt install patchelf) to normalize the
+bundle RUNPATH. Fails closed when the link closure names anything
 outside the shipped lib/ set and the system allowlist.
 """
 
@@ -204,6 +205,22 @@ def main(argv):
         print(link.stderr, file=sys.stderr)
         fail("relocatable link failed")
     binary = os.path.join(bindir, "memveil")
+    # The Mojo driver prepends its own pixi RUNPATH entry ahead of
+    # ours; rewrite to exactly $ORIGIN/../lib so the bundle carries
+    # no absolute build-host paths, then verify the result.
+    if shutil.which("patchelf") is None:
+        fail("patchelf is required to stage a relocatable binary "
+             "(apt install patchelf)")
+    rewrite = run(["patchelf", "--set-rpath", "$ORIGIN/../lib",
+                   binary])
+    if rewrite.returncode != 0:
+        fail("patchelf RUNPATH rewrite failed:\n%s" % rewrite.stderr)
+    dyn = run(["readelf", "-d", binary])
+    if dyn.returncode != 0:
+        fail("readelf failed on staged binary:\n%s" % dyn.stderr)
+    if "/home/" in dyn.stdout or "/work/" in dyn.stdout:
+        fail("staged binary keeps absolute RUNPATH entries:\n%s"
+             % dyn.stdout)
     proc = run([binary, "version"])
     if proc.returncode != 0 or not proc.stdout.startswith("memveil-"):
         fail("bundle binary version check failed: %r" % proc.stdout)

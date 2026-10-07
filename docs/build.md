@@ -11,6 +11,7 @@ package hashes.
 - `pixi` 0.81.0 exactly, to create the Mojo environment.
 - System `clang` and `bpftool` at the locked versions, for C eBPF programs.
 - `python3` for development-only validation tooling.
+- `patchelf` for `tools/package` RUNPATH normalization (`apt install patchelf`).
 
 Run `pixi install` once after cloning. Every Mojo command below runs inside
 that environment; the `tools/` wrappers do this for you.
