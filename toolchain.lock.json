@@ -1,7 +1,7 @@
 {
   "lock_version": "1.0.0",
   "recorded_on": "2026-10-07",
-  "note": "Exact pinned build inputs. Verify with: pixi install && tools/build --check-toolchain. The pixi.lock file carries authoritative conda package hashes; this file records the selected versions and their provenance.",
+  "note": "Pinned build inputs: exact versions, except cmake which carries a minimum floor. Verify with: pixi install && tools/build --check-toolchain. The pixi.lock file carries authoritative conda package hashes; this file records the selected versions and their provenance.",
   "toolchain": {
     "mojo": {
       "version": "1.1.0",
@@ -36,7 +36,8 @@
       "verify": "bpftool --version"
     },
     "cmake": {
-      "version": "4.2.3",
+      "minimum_version": "4.2.3",
+      "role": "native build driver; default install in each environment",
       "verify": "cmake --version"
     },
     "ninja": {
@@ -69,9 +70,11 @@
     "mojo": "Mojo 1.1.0 (8189361e)",
     "clang": "Ubuntu clang version 21.1.8 (6ubuntu1)",
     "bpftool": "bpftool v7.7.0",
-    "cmake": "cmake version 4.2.3",
     "ninja": "1.13.2",
     "python": "Python 3.14.4"
+  },
+  "minimum_versions": {
+    "cmake": "4.2.3"
   },
   "platform_floor": {
     "arch": "x86-64",
@@ -84,6 +87,7 @@
     "D3: libbpf is consumed only through the pinned libbpf-mojo bridge, never linked directly.",
     "D4: System clang 21.1.8 pinned by exact version string for C eBPF compilation. Revisit on BPF codegen issues.",
     "D5: Validation tooling uses Python standard library only; no third-party Python dependencies.",
-    "D6: External schema version 0.1.0 is independent of product, bridge ABI, and BPF wire versions."
+    "D6: External schema version 0.1.0 is independent of product, bridge ABI, and BPF wire versions.",
+    "D7: cmake is a build driver, not a codegen input: the check enforces a minimum version (default install per environment), not an exact pin. Tools that affect output bits stay exact."
   ]
 }
