@@ -15,6 +15,7 @@
  * performs no DMA to real devices.
  */
 
+#include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/init.h>
 #include <linux/ktime.h>
@@ -23,20 +24,46 @@
 #include <linux/slab.h>
 
 #define MV_ORACLE_OPS 4
+#define MV_ORACLE_MAX_OPS 8192
 #define MV_ORACLE_SIZES { 512, 1024, 2048, 4096 }
 #define MV_ORACLE_DRVNAME "memveil-oracle"
+/* Upstream limit for the fail-probe op: the inner swiotlb
+ * allocator still finds slots (pool is reachable), but the
+ * outer dma_capable check rejects the bounce address against
+ * the clamped bus limit, so the mapping fails after a real
+ * map+bounce+cleanup-unmap. A restrictive DMA mask cannot do
+ * this: dma_supported refuses masks below the addressable
+ * floor before any mapping is attempted.
+ */
+#define MV_ORACLE_FAIL_BUS_LIMIT 0x100000ULL
 
 static bool mv_oracle_arm;
 module_param(mv_oracle_arm, bool, 0444);
 MODULE_PARM_DESC(mv_oracle_arm,
 		 "Arm the oracle traffic script (test-only, default off)");
 
+static unsigned int mv_oracle_ops = MV_ORACLE_OPS;
+module_param(mv_oracle_ops, uint, 0444);
+MODULE_PARM_DESC(mv_oracle_ops,
+		 "Scripted map/sync/unmap ops, 1..8192 (default 4)");
+
+static unsigned int mv_oracle_delay_ms;
+module_param(mv_oracle_delay_ms, uint, 0444);
+MODULE_PARM_DESC(mv_oracle_delay_ms,
+		 "Sleep between scripted ops in ms (default 0)");
+
+static int mv_oracle_fail_op = -1;
+module_param(mv_oracle_fail_op, int, 0444);
+MODULE_PARM_DESC(mv_oracle_fail_op,
+		 "Op index to fail via a clamped bus DMA limit (-1 off)");
+
 static struct platform_device *mv_pdev;
-static dma_addr_t mv_handle[MV_ORACLE_OPS];
-static void *mv_cpu[MV_ORACLE_OPS];
-static size_t mv_size[MV_ORACLE_OPS] = MV_ORACLE_SIZES;
-static u64 mv_map_ts[MV_ORACLE_OPS];
-static bool mv_mapped[MV_ORACLE_OPS];
+static dma_addr_t mv_handle[MV_ORACLE_MAX_OPS];
+static void *mv_cpu[MV_ORACLE_MAX_OPS];
+static size_t mv_size[MV_ORACLE_MAX_OPS];
+static u64 mv_map_ts[MV_ORACLE_MAX_OPS];
+static bool mv_mapped[MV_ORACLE_MAX_OPS];
+static unsigned int mv_nops;
 
 static void mv_log(const char *fmt, ...)
 {
@@ -107,6 +134,20 @@ static int __init mv_oracle_init(void)
 		pr_err("mv-oracle: refusing to load without mv_oracle_arm=1\n");
 		return -EPERM;
 	}
+	if (mv_oracle_ops < 1 || mv_oracle_ops > MV_ORACLE_MAX_OPS) {
+		pr_err("mv-oracle: bad mv_oracle_ops=%u\n", mv_oracle_ops);
+		return -EINVAL;
+	}
+	if (mv_oracle_delay_ms > 60000) {
+		pr_err("mv-oracle: bad mv_oracle_delay_ms=%u\n",
+		       mv_oracle_delay_ms);
+		return -EINVAL;
+	}
+	if (mv_oracle_fail_op >= (int)mv_oracle_ops) {
+		pr_err("mv-oracle: bad mv_oracle_fail_op=%d\n",
+		       mv_oracle_fail_op);
+		return -EINVAL;
+	}
 	mv_pdev = platform_device_register_simple(MV_ORACLE_DRVNAME, -1,
 						  NULL, 0);
 	if (IS_ERR(mv_pdev))
@@ -115,29 +156,45 @@ static int __init mv_oracle_init(void)
 	rc = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(64));
 	if (rc)
 		goto out_unregister;
+	mv_nops = mv_oracle_ops;
+	for (i = 0; i < mv_nops; i++) {
+		static const size_t sizes[] = MV_ORACLE_SIZES;
+
+		mv_size[i] = sizes[i % ARRAY_SIZE(sizes)];
+	}
 
 	/* Scripted traffic: even ops map/unmap cleanly, op 1 syncs
-	 * twice, op 3 stays mapped until exit to model an open
-	 * mapping at the horizon.
+	 * twice, the last op stays mapped until exit to model an
+	 * open mapping at the horizon. Sizes cycle 512/1024/2048/
+	 * 4096, directions alternate TO/FROM.
 	 */
-	for (i = 0; i < MV_ORACLE_OPS; i++) {
+	for (i = 0; i < mv_nops; i++) {
 		enum dma_data_direction dir =
 			(i % 2) ? DMA_FROM_DEVICE : DMA_TO_DEVICE;
 
+		if (mv_oracle_delay_ms && i > 0)
+			msleep(mv_oracle_delay_ms);
 		mv_log("op=%u attempt requested=%zu forced=0", i,
 		       mv_size[i]);
+		if ((int)i == mv_oracle_fail_op) {
+			dev->bus_dma_limit = MV_ORACLE_FAIL_BUS_LIMIT;
+			rc = mv_map_one(dev, i, dir);
+			mv_log("op=%u fail-probe map rc=%d", i, rc);
+			dev->bus_dma_limit = 0;
+			continue;
+		}
 		if (mv_map_one(dev, i, dir))
 			continue;
 		mv_sync_one(dev, i, dir);
 		if (i == 1)
 			mv_sync_one(dev, i, dir);
-		if (i == MV_ORACLE_OPS - 1) {
+		if (i == mv_nops - 1) {
 			mv_log("op=%u mapping=%u held-open", i, i);
 			continue;
 		}
 		mv_unmap_one(dev, i, dir);
 	}
-	mv_log("script complete ops=%d", MV_ORACLE_OPS);
+	mv_log("script complete ops=%u", mv_nops);
 	return 0;
 
 out_unregister:
@@ -154,7 +211,7 @@ static void __exit mv_oracle_exit(void)
 	if (!mv_pdev)
 		return;
 	dev = &mv_pdev->dev;
-	for (i = 0; i < MV_ORACLE_OPS; i++) {
+	for (i = 0; i < mv_nops; i++) {
 		enum dma_data_direction dir =
 			(i % 2) ? DMA_FROM_DEVICE : DMA_TO_DEVICE;
 
@@ -174,4 +231,4 @@ module_exit(mv_oracle_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("MemVeil test fixtures");
 MODULE_DESCRIPTION("Test-only owned-DMA oracle traffic generator");
-MODULE_VERSION("0.1.0");
+MODULE_VERSION("0.2.0");

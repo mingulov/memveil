@@ -21,6 +21,11 @@ REPO = os.path.dirname(
 LIFECYCLE_PROBE = os.path.join(
     REPO, "build", "bpf", "swiotlb_lifecycle.bpf.o")
 COPY_PROBE = os.path.join(REPO, "build", "bpf", "swiotlb_copy.bpf.o")
+CONSUMER = os.path.join(REPO, "build", "vm", "mv_consume")
+BRIDGE = os.path.join(
+    REPO, "build", "deps", "lmb", "lib", "libbpf_mojo.so.1")
+KERNEL_DIR = os.path.join(REPO, "tests", "kernel")
+ORACLE_KO = os.path.join(KERNEL_DIR, "memveil_dma_oracle.ko")
 BIN = os.path.join(REPO, "build", "memveil")
 
 
@@ -47,3 +52,22 @@ def require_lifecycle_env(*probes):
     probe = subprocess.run(["sudo", "-n", "true"], capture_output=True)
     if probe.returncode != 0:
         pytest.fail("armed but no passwordless sudo for vng")
+
+
+def ensure_oracle_module():
+    """Build the oracle .ko against the running kernel if missing.
+
+    Armed-only helper: failures fail loudly, never skip.
+    """
+    if os.path.isfile(ORACLE_KO):
+        return
+    kdir = "/lib/modules/%s/build" % os.uname().release
+    if not os.path.isfile(os.path.join(kdir, "Makefile")):
+        pytest.fail("armed but no kernel build tree: %s" % kdir)
+    if not shutil.which("make"):
+        pytest.fail("armed but make not available")
+    build = subprocess.run(["make", "-C", KERNEL_DIR],
+                           capture_output=True, text=True)
+    if build.returncode != 0 or not os.path.isfile(ORACLE_KO):
+        pytest.fail("armed but oracle module build failed: %s"
+                    % build.stderr[-2000:])

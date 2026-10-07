@@ -4,6 +4,12 @@ dist/
 __pycache__/
 *.o
 *.bpf.o
+*.ko
+Module.symvers
+*.mod
+*.mod.c
+*.cmd
+modules.order
 # Committed test fixtures (regenerate elf/ with tools/emit-elf-fixtures
 # after rebuilding the BPF object; narrow object.o files are static stubs).
 !tests/fixtures/elf/*.o
