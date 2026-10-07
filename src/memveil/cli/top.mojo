@@ -9,6 +9,14 @@ report. The final block renders the same rows and findings as
 ``report`` with the same policy, so replay-prefix equivalence
 holds by construction.
 
+Refresh membership follows consumption order, not timestamp
+order: a refresh at horizon H covers the events consumed so
+far, and a disordered event with a timestamp below an
+already-printed horizon is folded into the final summary
+only. Printed refreshes are never revised, so under
+disordered input a horizon may exclude an event its
+timestamp names.
+
 The device option is a display filter over per-device rows
 (exact device id or catalog name); analysis always covers
 the whole capture. Summaries are line-oriented plain text with escaped
@@ -86,6 +94,9 @@ def top_usage() -> String:
         "\n"
         "Replay the capture in DIR, printing one text summary per\n"
         "interval of capture time plus a final full-window report.\n"
+        "Refreshes cover events in consumption order; a disordered\n"
+        "event below a printed horizon reaches the final summary\n"
+        "only, never a revised refresh.\n"
         "Diagnostics go to stderr.\n"
         "\n"
         "  --interval DURATION\n"
@@ -372,19 +383,34 @@ def run_top(args: List[String]) raises -> Int:
 comptime _WAIT_SLICE_MS = 100
 
 
-def _wait_slices(total_ms: Int) -> List[Int]:
-    """Split a refresh wait into interruptible ≤100 ms slices."""
-    var out = List[Int]()
-    var left = total_ms
-    if left < 0:
-        left = 0
-    while left > 0:
-        var s = left
+struct WaitSlices:
+    """One-at-a-time ≤100 ms slices for a refresh wait.
+
+    A huge interval names far more slices than memory could
+    hold as a list, so the cursor yields them one at a time
+    with constant state: check with has_more, take with take.
+    The sequence matches splitting the total into 100 ms
+    slices with a short final slice.
+    """
+
+    var _left: Int
+
+    def __init__(out self, total_ms: Int):
+        self._left = total_ms
+        if self._left < 0:
+            self._left = 0
+
+    def has_more(self) -> Bool:
+        """True while an untaken slice remains."""
+        return self._left > 0
+
+    def take(mut self) -> Int:
+        """Take the next slice; call only when due."""
+        var s = self._left
         if s > _WAIT_SLICE_MS:
             s = _WAIT_SLICE_MS
-        out.append(s)
-        left -= s
-    return out^
+        self._left -= s
+        return s
 
 
 def _wait_interval(
@@ -399,9 +425,9 @@ def _wait_interval(
     var got = signal.check()
     if got.state != "none":
         return got^
-    var slices = _wait_slices(total_ms)
-    for i in range(len(slices)):
-        clock.sleep_ms(slices[i])
+    var slices = WaitSlices(total_ms)
+    while slices.has_more():
+        clock.sleep_ms(slices.take())
         got = signal.check()
         if got.state != "none":
             return got^

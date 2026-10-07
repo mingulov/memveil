@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Source-export gate: HEAD exports cleanly; the candidate needs a commit.
+"""Source-export gate: HEAD exports cleanly and packages git-free.
 
 Verifies the export mechanism against HEAD (required inputs
-present, sealed file set, no generated paths), then enforces the
-candidate rule: a dirty worktree cannot produce a candidate
-export. Post-commit flow: clean tree -> this lane -> build the
-export with tools/build --check-toolchain + tools/build ->
-tools/package. Exits nonzero while BLOCKED.
+present, sealed file set, no generated paths), then proves a
+git-free export builds and packages: tools/package runs inside
+the export with LMB_PACKAGE pointed at the export's own
+vendored tarball, and the resulting manifest records revision
+"export" with every referenced manual shipped. Finally enforces
+the candidate rule: a dirty worktree cannot produce a candidate
+export. Exits nonzero while BLOCKED.
 Standard library only.
 """
 
@@ -120,6 +122,50 @@ def main():
               seal(first) == seal(second))
         print("source-export: HEAD export verified "
               "(%d files, mechanism only)" % len(seal(first)))
+
+    # Git-free proof: build and package inside a fresh export.
+    # tools/package runs tools/build first; LMB_PACKAGE points
+    # at the export's own vendored tarball, never the checkout.
+    with tempfile.TemporaryDirectory(prefix="mv-export-c-") as third:
+        export_head(third)
+        vendored = os.path.join(
+            third, "third_party", "libbpf-mojo-0.2.1.tar.gz")
+        check("export-vendored-bridge", os.path.isfile(vendored),
+              vendored)
+        env = dict(os.environ)
+        env["LMB_PACKAGE"] = vendored
+        pkg = subprocess.run(
+            [os.path.join(third, "tools", "package"),
+             "--out", os.path.join(third, "dist")],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, cwd=third, env=env, timeout=1500)
+        if pkg.returncode != 0:
+            print("FAIL export-package: tools/package exited %d"
+                  % pkg.returncode)
+            print("--- stdout ---")
+            print(pkg.stdout[-3000:])
+            print("--- stderr ---")
+            print(pkg.stderr[-3000:])
+            sys.exit(1)
+        check("export-package", True)
+        import json as _json
+        bundles = [name for name in os.listdir(
+            os.path.join(third, "dist"))
+            if name.startswith("memveil-")
+            and os.path.isdir(os.path.join(third, "dist", name))]
+        check("export-bundle-dir", len(bundles) == 1,
+              "; ".join(bundles))
+        manifest = _json.load(open(os.path.join(
+            third, "dist", bundles[0], "MANIFEST.json")))
+        check("export-revision", manifest.get("memveil_revision")
+              == "export", repr(manifest.get("memveil_revision")))
+        for name in ("troubleshooting.md", "performance.md",
+                     "resource-limits.md", "permissions.md",
+                     "oracles.md"):
+            dest = os.path.join(third, "dist", bundles[0],
+                                "docs", name)
+            check("export-docs-%s" % name, os.path.isfile(dest),
+                  dest)
 
     status = subprocess.run(["git", "-C", ROOT, "status", "--short"],
                             stdout=subprocess.PIPE,
