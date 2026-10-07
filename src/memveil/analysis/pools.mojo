@@ -205,6 +205,7 @@ struct PoolTracker[POOL_N: Int = POOL_MAX]:
             u.has_value = st.has_used
             u.value = st.used
             u.unit = String("bytes")
+            u.confidence = String("high")
             if st.has_used:
                 u.measurement = String("observed")
                 u.has_aggregation = True
@@ -226,6 +227,7 @@ struct PoolTracker[POOL_N: Int = POOL_MAX]:
             c.has_value = st.has_cap
             c.value = st.cap
             c.unit = String("bytes")
+            c.confidence = String("high")
             if st.has_cap:
                 c.measurement = String("observed")
                 c.has_aggregation = True
@@ -247,6 +249,7 @@ struct PoolTracker[POOL_N: Int = POOL_MAX]:
             s.has_value = True
             s.value = UInt64(st.streak)
             s.unit = String("count")
+            s.confidence = String("high")
             s.measurement = String("observed")
             s.coverage = self._coverage()
             s.has_aggregation = True

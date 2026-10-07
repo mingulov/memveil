@@ -20,43 +20,43 @@ quality:
     scope: authored fixture finalization
     reason: Authored fixture: finalized.
 metrics (13):
-  bounce_attempts = 1 count [observed, complete_for_scope, counter]
+  bounce_attempts = 1 count [observed, complete_for_scope, high, counter]
     scope: window [1000000000,4000000000), all devices, detail channel
     notes: 1 detail event; no counter snapshots to compare.
-  bounce_attempts{device=dev-1} = 1 count [observed, complete_for_scope, counter]
+  bounce_attempts{device=dev-1} = 1 count [observed, complete_for_scope, high, counter]
     scope: window [1000000000,4000000000), device dev-1, detail channel
     notes: All 1 attempt observed device dev-1.
-  requested_bounce_bytes = 100 bytes [observed, complete_for_scope, counter]
+  requested_bounce_bytes = 100 bytes [observed, complete_for_scope, high, counter]
     scope: window [1000000000,4000000000), all devices, detail channel
     notes: 100 requested bytes across 1 attempt; allocation outcomes are unavailable in this fixture.
-  requested_bounce_bytes{device=dev-1} = 100 bytes [observed, complete_for_scope, counter]
+  requested_bounce_bytes{device=dev-1} = 100 bytes [observed, complete_for_scope, high, counter]
     scope: window [1000000000,4000000000), device dev-1, detail channel
     notes: 100 requested bytes on device dev-1.
-  successful_allocations = unavailable count [unavailable, unavailable]
+  successful_allocations = unavailable count [unavailable, unavailable, high]
     scope: window [1000000000,4000000000), all devices
     notes: No map_result source in this fixture; attempts are not successes.
-  copy_original_to_bounce_bytes = unavailable bytes [unavailable, unavailable]
+  copy_original_to_bounce_bytes = unavailable bytes [unavailable, unavailable, high]
     scope: window [1000000000,4000000000), all devices
     notes: No copy source in this fixture.
-  copy_bounce_to_original_bytes = unavailable bytes [unavailable, unavailable]
+  copy_bounce_to_original_bytes = unavailable bytes [unavailable, unavailable, high]
     scope: window [1000000000,4000000000), all devices
     notes: No copy source in this fixture.
-  live_observed_allocation_bytes = unavailable bytes [unavailable, unavailable]
+  live_observed_allocation_bytes = unavailable bytes [unavailable, unavailable, high]
     scope: window [1000000000,4000000000), all devices
     notes: No lifecycle source in this fixture.
-  observed_mapping_lifetime_ns = unavailable nanoseconds [unavailable, unavailable]
+  observed_mapping_lifetime_ns = unavailable nanoseconds [unavailable, unavailable, high]
     scope: window [1000000000,4000000000), all devices
     notes: No lifecycle source in this fixture.
-  conversion_request_bytes = unavailable bytes [unavailable, unavailable]
+  conversion_request_bytes = unavailable bytes [unavailable, unavailable, high]
     scope: window [1000000000,4000000000), all devices
     notes: No conversion source in this fixture.
-  known_shared_region_bytes = unavailable bytes [unavailable, unavailable]
+  known_shared_region_bytes = unavailable bytes [unavailable, unavailable, high]
     scope: window [1000000000,4000000000), all devices
     notes: No region source in this fixture.
-  pool_used_bytes = unavailable bytes [unavailable, unavailable]
+  pool_used_bytes = unavailable bytes [unavailable, unavailable, high]
     scope: window [1000000000,4000000000), all devices
     notes: No pool source in this fixture.
-  pool_capacity_bytes = unavailable bytes [unavailable, unavailable]
+  pool_capacity_bytes = unavailable bytes [unavailable, unavailable, high]
     scope: window [1000000000,4000000000), all devices
     notes: No pool source in this fixture.
 findings: none

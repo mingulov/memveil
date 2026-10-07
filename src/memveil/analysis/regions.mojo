@@ -250,6 +250,7 @@ struct RegionTracker[REGION_N: Int = REGION_MAX, SEG_N: Int = SEGMENTS_MAX]:
             rq.has_value = True
             rq.value = UInt64(self._requests)
             rq.unit = String("count")
+            rq.confidence = String("high")
             rq.measurement = String("observed")
             rq.coverage = self._counter_coverage()
             rq.has_aggregation = True
@@ -265,6 +266,7 @@ struct RegionTracker[REGION_N: Int = REGION_MAX, SEG_N: Int = SEGMENTS_MAX]:
             fl.has_value = True
             fl.value = UInt64(self._failures)
             fl.unit = String("count")
+            fl.confidence = String("high")
             fl.measurement = String("observed")
             fl.coverage = self._counter_coverage()
             fl.has_aggregation = True
@@ -280,6 +282,7 @@ struct RegionTracker[REGION_N: Int = REGION_MAX, SEG_N: Int = SEGMENTS_MAX]:
             rb.has_value = not self._bytes_overflow
             rb.value = self._request_bytes
             rb.unit = String("bytes")
+            rb.confidence = String("high")
             if self._bytes_overflow:
                 rb.measurement = String("unavailable")
                 rb.coverage = String("unavailable")
@@ -408,6 +411,7 @@ struct RegionTracker[REGION_N: Int = REGION_MAX, SEG_N: Int = SEGMENTS_MAX]:
         m.name = name
         m.unit = String("bytes")
         m.scope = scope
+        m.confidence = String("medium")
         if overflow:
             m.has_value = False
             m.measurement = String("unavailable")
@@ -456,6 +460,7 @@ struct RegionTracker[REGION_N: Int = REGION_MAX, SEG_N: Int = SEGMENTS_MAX]:
         m.unit = unit
         m.measurement = String("unavailable")
         m.coverage = String("unavailable")
+        m.confidence = String("high")
         m.scope = scope
         m.notes = String(
             "No transition_result events in this capture; baseline"
@@ -472,6 +477,7 @@ struct RegionTracker[REGION_N: Int = REGION_MAX, SEG_N: Int = SEGMENTS_MAX]:
         m.unit = String("bytes")
         m.measurement = String("unavailable")
         m.coverage = String("unavailable")
+        m.confidence = String("medium")
         m.scope = scope
         m.notes = reason
         return m^

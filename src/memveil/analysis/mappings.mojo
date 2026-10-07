@@ -648,6 +648,7 @@ struct MappingTracker[
         m.unit = unit
         m.measurement = measurement
         m.coverage = coverage
+        m.confidence = String("high")
         if aggregation != "":
             m.has_aggregation = True
             m.aggregation = aggregation
@@ -1386,6 +1387,7 @@ struct MappingTracker[
             m.has_value = self._saw_map
             m.value = acc.allocations
             m.unit = String("count")
+            m.confidence = String("high")
             if self._saw_map:
                 m.measurement = String("observed")
                 m.coverage = self._coverage()
@@ -1407,6 +1409,7 @@ struct MappingTracker[
             b.has_value = self._saw_map and not acc.mapped_overflow
             b.value = acc.mapped
             b.unit = String("bytes")
+            b.confidence = String("high")
             if not self._saw_map:
                 b.measurement = String("unavailable")
                 b.notes = String(
@@ -1432,6 +1435,7 @@ struct MappingTracker[
             o.has_value = self._saw_copy and not acc.o2b_overflow
             o.value = acc.o2b
             o.unit = String("bytes")
+            o.confidence = String("high")
             if not self._saw_copy:
                 o.measurement = String("unavailable")
                 o.notes = String("No copy events in this capture.")
@@ -1455,6 +1459,7 @@ struct MappingTracker[
             r.has_value = self._saw_copy and not acc.b2o_overflow
             r.value = acc.b2o
             r.unit = String("bytes")
+            r.confidence = String("high")
             if not self._saw_copy:
                 r.measurement = String("unavailable")
                 r.notes = String("No copy events in this capture.")

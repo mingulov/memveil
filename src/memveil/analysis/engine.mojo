@@ -175,6 +175,7 @@ struct Analyzer:
             um.has_value = True
             um.value = UInt64(unpaired)
             um.unit = String("count")
+            um.confidence = String("high")
             um.measurement = String("observed")
             um.coverage = String("partial")
             um.has_aggregation = True

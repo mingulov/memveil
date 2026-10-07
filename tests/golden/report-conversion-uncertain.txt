@@ -20,55 +20,55 @@ quality:
     scope: authored fixture finalization
     reason: Authored fixture: finalized.
 metrics (17):
-  bounce_attempts = 1 count [observed, complete_for_scope, counter]
+  bounce_attempts = 1 count [observed, complete_for_scope, high, counter]
     scope: window [1000000000,2500000000), all devices, detail channel
     notes: 1 detail event; no counter snapshots to compare.
-  bounce_attempts{device=dev-1} = 1 count [observed, complete_for_scope, counter]
+  bounce_attempts{device=dev-1} = 1 count [observed, complete_for_scope, high, counter]
     scope: window [1000000000,2500000000), device dev-1, detail channel
     notes: All 1 attempt observed device dev-1.
-  requested_bounce_bytes = 4096 bytes [observed, complete_for_scope, counter]
+  requested_bounce_bytes = 4096 bytes [observed, complete_for_scope, high, counter]
     scope: window [1000000000,2500000000), all devices, detail channel
     notes: 4096 requested bytes across 1 attempt; allocation outcomes are unavailable in this fixture.
-  requested_bounce_bytes{device=dev-1} = 4096 bytes [observed, complete_for_scope, counter]
+  requested_bounce_bytes{device=dev-1} = 4096 bytes [observed, complete_for_scope, high, counter]
     scope: window [1000000000,2500000000), device dev-1, detail channel
     notes: 4096 requested bytes on device dev-1.
-  successful_allocations = unavailable count [unavailable, unavailable]
+  successful_allocations = unavailable count [unavailable, unavailable, high]
     scope: window [1000000000,2500000000), all devices
     notes: No map_result source in this fixture; attempts are not successes.
-  copy_original_to_bounce_bytes = unavailable bytes [unavailable, unavailable]
+  copy_original_to_bounce_bytes = unavailable bytes [unavailable, unavailable, high]
     scope: window [1000000000,2500000000), all devices
     notes: No copy source in this fixture.
-  copy_bounce_to_original_bytes = unavailable bytes [unavailable, unavailable]
+  copy_bounce_to_original_bytes = unavailable bytes [unavailable, unavailable, high]
     scope: window [1000000000,2500000000), all devices
     notes: No copy source in this fixture.
-  live_observed_allocation_bytes = unavailable bytes [unavailable, unavailable]
+  live_observed_allocation_bytes = unavailable bytes [unavailable, unavailable, high]
     scope: window [1000000000,2500000000), all devices
     notes: No lifecycle source in this fixture.
-  observed_mapping_lifetime_ns = unavailable nanoseconds [unavailable, unavailable]
+  observed_mapping_lifetime_ns = unavailable nanoseconds [unavailable, unavailable, high]
     scope: window [1000000000,2500000000), all devices
     notes: No lifecycle source in this fixture.
-  pool_used_bytes = unavailable bytes [unavailable, unavailable]
+  pool_used_bytes = unavailable bytes [unavailable, unavailable, high]
     scope: window [1000000000,2500000000), all devices
     notes: No pool source in this fixture.
-  pool_capacity_bytes = unavailable bytes [unavailable, unavailable]
+  pool_capacity_bytes = unavailable bytes [unavailable, unavailable, high]
     scope: window [1000000000,2500000000), all devices
     notes: No pool source in this fixture.
-  conversion_requests = 2 count [observed, complete_for_scope, counter]
+  conversion_requests = 2 count [observed, complete_for_scope, high, counter]
     scope: window [1000000000,2500000000)
     notes: Observed conversion API results; requests are not bytes.
-  conversion_failures = 1 count [observed, complete_for_scope, counter]
+  conversion_failures = 1 count [observed, complete_for_scope, high, counter]
     scope: window [1000000000,2500000000)
     notes: Failed conversion requests; affected intervals stay unknown without rollback proof.
-  conversion_request_bytes = 12288 bytes [observed, complete_for_scope, counter]
+  conversion_request_bytes = 12288 bytes [observed, complete_for_scope, high, counter]
     scope: window [1000000000,2500000000)
     notes: Sum of requested lengths, not unique physical bytes.
-  known_shared_region_bytes = 4096 bytes [observed, partial, gauge]
+  known_shared_region_bytes = 4096 bytes [observed, partial, medium, gauge]
     scope: window [1000000000,2500000000); guest-physical regions
     notes: Sum over proved identities of disjoint known-shared guest-physical intervals; excludes 4096 unknown-state bytes and any refused or invalidated state.
-  known_private_region_bytes = 0 bytes [observed, partial, gauge]
+  known_private_region_bytes = 0 bytes [observed, partial, medium, gauge]
     scope: window [1000000000,2500000000); guest-physical regions
     notes: Sum over proved identities of disjoint known-private guest-physical intervals; excludes 4096 unknown-state bytes and any refused or invalidated state.
-  unknown_region_bytes = 4096 bytes [observed, partial, gauge]
+  unknown_region_bytes = 4096 bytes [observed, partial, medium, gauge]
     scope: window [1000000000,2500000000); guest-physical regions
     notes: Sum over proved identities of disjoint unknown-state guest-physical intervals; excludes 4096 unknown-state bytes and any refused or invalidated state.
 findings (1):

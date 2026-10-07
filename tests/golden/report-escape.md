@@ -24,21 +24,21 @@
 
 ## Metrics
 
-| name | dimensions | value | unit | measurement | coverage | scope | notes |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| bounce\_attempts | all | 1 | count | observed | complete_for_scope | window \[1000000000,4000000000), all devices, detail channel | 1 detail event; no counter snapshots to compare. |
-| bounce\_attempts | device=dev-1 | 1 | count | observed | complete_for_scope | window \[1000000000,4000000000), device dev-1, detail channel | All 1 attempt observed device dev-1. |
-| requested\_bounce\_bytes | all | 100 | bytes | observed | complete_for_scope | window \[1000000000,4000000000), all devices, detail channel | 100 requested bytes across 1 attempt; allocation outcomes are unavailable in this fixture. |
-| requested\_bounce\_bytes | device=dev-1 | 100 | bytes | observed | complete_for_scope | window \[1000000000,4000000000), device dev-1, detail channel | 100 requested bytes on device dev-1. |
-| successful\_allocations | all | unavailable | count | unavailable | unavailable | window \[1000000000,4000000000), all devices | No map\_result source in this fixture; attempts are not successes. |
-| copy\_original\_to\_bounce\_bytes | all | unavailable | bytes | unavailable | unavailable | window \[1000000000,4000000000), all devices | No copy source in this fixture. |
-| copy\_bounce\_to\_original\_bytes | all | unavailable | bytes | unavailable | unavailable | window \[1000000000,4000000000), all devices | No copy source in this fixture. |
-| live\_observed\_allocation\_bytes | all | unavailable | bytes | unavailable | unavailable | window \[1000000000,4000000000), all devices | No lifecycle source in this fixture. |
-| observed\_mapping\_lifetime\_ns | all | unavailable | nanoseconds | unavailable | unavailable | window \[1000000000,4000000000), all devices | No lifecycle source in this fixture. |
-| conversion\_request\_bytes | all | unavailable | bytes | unavailable | unavailable | window \[1000000000,4000000000), all devices | No conversion source in this fixture. |
-| known\_shared\_region\_bytes | all | unavailable | bytes | unavailable | unavailable | window \[1000000000,4000000000), all devices | No region source in this fixture. |
-| pool\_used\_bytes | all | unavailable | bytes | unavailable | unavailable | window \[1000000000,4000000000), all devices | No pool source in this fixture. |
-| pool\_capacity\_bytes | all | unavailable | bytes | unavailable | unavailable | window \[1000000000,4000000000), all devices | No pool source in this fixture. |
+| name | dimensions | value | unit | measurement | coverage | confidence | scope | notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| bounce\_attempts | all | 1 | count | observed | complete_for_scope | high | window \[1000000000,4000000000), all devices, detail channel | 1 detail event; no counter snapshots to compare. |
+| bounce\_attempts | device=dev-1 | 1 | count | observed | complete_for_scope | high | window \[1000000000,4000000000), device dev-1, detail channel | All 1 attempt observed device dev-1. |
+| requested\_bounce\_bytes | all | 100 | bytes | observed | complete_for_scope | high | window \[1000000000,4000000000), all devices, detail channel | 100 requested bytes across 1 attempt; allocation outcomes are unavailable in this fixture. |
+| requested\_bounce\_bytes | device=dev-1 | 100 | bytes | observed | complete_for_scope | high | window \[1000000000,4000000000), device dev-1, detail channel | 100 requested bytes on device dev-1. |
+| successful\_allocations | all | unavailable | count | unavailable | unavailable | high | window \[1000000000,4000000000), all devices | No map\_result source in this fixture; attempts are not successes. |
+| copy\_original\_to\_bounce\_bytes | all | unavailable | bytes | unavailable | unavailable | high | window \[1000000000,4000000000), all devices | No copy source in this fixture. |
+| copy\_bounce\_to\_original\_bytes | all | unavailable | bytes | unavailable | unavailable | high | window \[1000000000,4000000000), all devices | No copy source in this fixture. |
+| live\_observed\_allocation\_bytes | all | unavailable | bytes | unavailable | unavailable | high | window \[1000000000,4000000000), all devices | No lifecycle source in this fixture. |
+| observed\_mapping\_lifetime\_ns | all | unavailable | nanoseconds | unavailable | unavailable | high | window \[1000000000,4000000000), all devices | No lifecycle source in this fixture. |
+| conversion\_request\_bytes | all | unavailable | bytes | unavailable | unavailable | high | window \[1000000000,4000000000), all devices | No conversion source in this fixture. |
+| known\_shared\_region\_bytes | all | unavailable | bytes | unavailable | unavailable | high | window \[1000000000,4000000000), all devices | No region source in this fixture. |
+| pool\_used\_bytes | all | unavailable | bytes | unavailable | unavailable | high | window \[1000000000,4000000000), all devices | No pool source in this fixture. |
+| pool\_capacity\_bytes | all | unavailable | bytes | unavailable | unavailable | high | window \[1000000000,4000000000), all devices | No pool source in this fixture. |
 
 ## Findings
 

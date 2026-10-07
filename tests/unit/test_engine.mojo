@@ -356,6 +356,10 @@ def test_partial_tail_downgrades_stateful_metrics() raises:
         String("partial"),
     )
     assert_equal(
+        _find(rep.metrics, "successful_allocations").confidence,
+        String("high"),
+    )
+    assert_equal(
         _find_pool(rep.metrics, "pool_used_bytes", "p1").coverage,
         String("partial"),
     )
