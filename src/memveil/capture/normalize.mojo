@@ -172,6 +172,55 @@ def _hex_val(b: UInt8) -> Int:
     return -1
 
 
+def _is_hex(b: UInt8) -> Bool:
+    var v = Int(b)
+    if v >= 0x30 and v <= 0x39:
+        return True
+    if v >= 0x61 and v <= 0x66:
+        return True
+    if v >= 0x41 and v <= 0x46:
+        return True
+    return False
+
+
+def is_pci_scope(name: String) -> Bool:
+    """True for canonical PCI name scope DDDD:BB:DD.F.
+
+    Exactly twelve ASCII bytes: four hex digits, colon, two
+    hex digits, colon, two hex digits, dot, one hex digit.
+    Anything else (interface names, address-shaped blobs,
+    paths) is not an admittable scope.
+    """
+    var raw = name.as_bytes()
+    if len(raw) != 12:
+        return False
+    for i in range(4):
+        if not _is_hex(raw[i]):
+            return False
+    if raw[4] != UInt8(0x3A):
+        return False
+    if not _is_hex(raw[5]) or not _is_hex(raw[6]):
+        return False
+    if raw[7] != UInt8(0x3A):
+        return False
+    if not _is_hex(raw[8]) or not _is_hex(raw[9]):
+        return False
+    if raw[10] != UInt8(0x2E):
+        return False
+    return _is_hex(raw[11])
+
+
+def admitted_name(name: String) -> String:
+    """Persistable catalog name: PCI scope or opaque marker.
+
+    Interning keeps exact bytes so distinct devices stay
+    distinct; only the human-readable label degrades.
+    """
+    if is_pci_scope(name):
+        return name
+    return String("unresolved")
+
+
 def hex_to_bytes(text: String) raises NormalizeError -> List[UInt8]:
     """Strict inverse of bytes_to_hex (lowercase, even length).
 
@@ -193,7 +242,7 @@ def hex_to_bytes(text: String) raises NormalizeError -> List[UInt8]:
 
 @fieldwise_init
 struct CatalogEntry(Copyable, Movable):
-    """One interned device: first-seen id plus exact name."""
+    """One interned device: first-seen id plus admitted name."""
 
     var device_id: String
     var name: String
@@ -252,7 +301,8 @@ struct DeviceTable(Movable):
                 name = String(from_utf8=Span(raw))
             except:
                 raise NormalizeError("INTERNAL", True)
-            out.append(CatalogEntry(device_id_for(num), name^))
+            var shown = admitted_name(name^)
+            out.append(CatalogEntry(device_id_for(num), shown^))
         return out^
 
 

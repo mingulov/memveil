@@ -337,6 +337,61 @@ def _script_attachwin(dir: String):
     _run_dur(dir, kernel, clock, signal, writer, UInt64(2))
 
 
+def _script_canary(dir: String):
+    """Hostile device names: only PCI scope persists verbatim."""
+    var kernel = ScriptKernel()
+    var base = UInt64(1000000000)
+    kernel.add_poll(
+        _batch(_payload(
+            UInt64(0), base + UInt64(10), UInt64(64),
+            String("0000:00:0c.0"),
+        )), 1,
+    )
+    kernel.add_poll(
+        _batch(_payload(
+            UInt64(1), base + UInt64(11), UInt64(64),
+            String("ffff888012345000"),
+        )), 1,
+    )
+    kernel.add_poll(
+        _batch(_payload(
+            UInt64(2), base + UInt64(12), UInt64(64),
+            String("../../home/canary-alice/x"),
+        )), 1,
+    )
+    var long_name = String("")
+    for _ in range(70):
+        long_name += String("A")
+    kernel.add_poll(
+        _batch(_payload(
+            UInt64(3), base + UInt64(13), UInt64(64), long_name^
+        )), 1,
+    )
+    kernel.add_poll(
+        _batch(_payload(
+            UInt64(4), base + UInt64(14), UInt64(64),
+            String("eth0"),
+        )), 1,
+    )
+    kernel.add_poll(_timeout(), 110)
+    kernel.add_stats(_flow_stats(UInt64(0), UInt64(0)))
+    for _ in range(4):
+        kernel.add_stats(_flow_stats(UInt64(5), UInt64(5)))
+    _cuts(
+        kernel,
+        UInt64(5),
+        UInt64(320),
+        UInt64(5),
+        UInt64(320),
+        UInt64(0),
+        UInt64(0),
+    )
+    var clock = _clock(12)
+    var signal = ScriptSignal()
+    var writer = ScriptWriter()
+    _run(dir, kernel, clock, signal, writer)
+
+
 def _script_zero(dir: String):
     var kernel = ScriptKernel()
     kernel.add_poll(_timeout(), 104)
@@ -1556,7 +1611,9 @@ def main() raises:
     if len(args) != 3:
         print(String("usage: collector_probe <script> <dir>"))
         exit(2)
-    if args[1] == String("attachwin"):
+    if args[1] == String("canary"):
+        _script_canary(args[2])
+    elif args[1] == String("attachwin"):
         _script_attachwin(args[2])
     elif args[1] == String("zero"):
         _script_zero(args[2])

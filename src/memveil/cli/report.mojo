@@ -139,16 +139,62 @@ def neutralize_controls(text: String) raises -> String:
     return String(from_utf8=Span(out))
 
 
+def scrub_paths(text: String) raises -> String:
+    """Drop directory components from stderr diagnostics.
+
+    Every whitespace-delimited token keeps only the bytes after
+    its last slash, so loader messages, refused paths, and echoed
+    arguments cannot smuggle home directories or machine layout
+    into logs. Basenames survive as operational identifiers. The
+    rule is deliberately total: any slash token loses its head,
+    so diagnostics must not rely on slashes in prose.
+    """
+    var raw = text.as_bytes()
+    var out = List[UInt8]()
+    var i = 0
+    while i < len(raw):
+        var b = raw[i]
+        if (
+            b == UInt8(0x20)
+            or b == UInt8(0x09)
+            or b == UInt8(0x0A)
+            or b == UInt8(0x0D)
+        ):
+            out.append(b)
+            i += 1
+            continue
+        var start = i
+        while i < len(raw):
+            var c = raw[i]
+            if (
+                c == UInt8(0x20)
+                or c == UInt8(0x09)
+                or c == UInt8(0x0A)
+                or c == UInt8(0x0D)
+            ):
+                break
+            i += 1
+        var cut = start
+        for j in range(start, i):
+            if raw[j] == UInt8(0x2F):
+                cut = j + 1
+        for j in range(cut, i):
+            out.append(raw[j])
+    # Cuts land only after ASCII slashes, so no codepoint splits.
+    return String(from_utf8=Span(out))
+
+
 def write_stderr(text: String) raises:
     """Append text to standard error.
 
     Append mode preserves prior diagnostics when stderr is
     redirected to a file; write mode would truncate them. Control
-    bytes are neutralized at this boundary so no present or future
-    diagnostic can emit raw terminal sequences.
+    bytes are neutralized and directory components scrubbed at
+    this boundary so no present or future diagnostic can emit raw
+    terminal sequences or filesystem layout.
     """
     var err = open("/dev/stderr", "a")
-    err.write(neutralize_controls(text))
+    err.write(neutralize_controls(scrub_paths(text)))
     err.close()
 
 

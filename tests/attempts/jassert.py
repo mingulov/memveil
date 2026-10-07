@@ -178,6 +178,28 @@ def cmd_eventfield(path, index, dotted, expected):
     return 0
 
 
+def cmd_devices(path, expected):
+    try:
+        doc = load(path)
+    except Exception as exc:
+        return fail("%s: %s" % (path, exc))
+    try:
+        devices = doc["device_catalog"]["devices"]
+        got = ",".join(d["name"] for d in devices)
+        ids = ",".join(d["device_id"] for d in devices)
+    except (KeyError, TypeError) as exc:
+        return fail("%s: bad catalog: %s" % (path, exc))
+    if got != expected:
+        return fail("%s: device names %r, want %r"
+                    % (path, got, expected))
+    want_ids = ",".join("d%06d" % (i + 1)
+                        for i in range(len(devices)))
+    if ids != want_ids:
+        return fail("%s: device ids %r, want %r"
+                    % (path, ids, want_ids))
+    return 0
+
+
 def main(argv):
     if len(argv) < 3:
         print(__doc__, file=sys.stderr)
@@ -197,6 +219,8 @@ def main(argv):
         return cmd_nometric(argv[2], argv[3])
     if mode == "eventfield" and len(argv) == 6:
         return cmd_eventfield(argv[2], argv[3], argv[4], argv[5])
+    if mode == "devices" and len(argv) == 4:
+        return cmd_devices(argv[2], argv[3])
     print(__doc__, file=sys.stderr)
     return 2
 
