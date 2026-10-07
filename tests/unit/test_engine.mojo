@@ -344,8 +344,15 @@ def test_partial_tail_downgrades_stateful_metrics() raises:
     a.consume(_pool("p1", UInt64(900), UInt64(1000), UInt64(3)))
     a.consume(_transition("r1", "shared", UInt64(4)))
     var rep = a.finish(UInt64(2300000000), True)
+    # A partial tail may hide a release, so the live mapping gauge
+    # is withheld (null/unavailable), not a degraded number: unknown
+    # is not zero. Cumulative counters keep values with partial
+    # coverage, as do the point-in-time pool/region gauges.
+    var live = _find(rep.metrics, "live_observed_allocation_bytes")
+    assert_true(not live.has_value)
+    assert_equal(live.coverage, String("unavailable"))
     assert_equal(
-        _find(rep.metrics, "live_observed_allocation_bytes").coverage,
+        _find(rep.metrics, "successful_allocations").coverage,
         String("partial"),
     )
     assert_equal(
