@@ -205,22 +205,6 @@ def main(argv):
         print(link.stderr, file=sys.stderr)
         fail("relocatable link failed")
     binary = os.path.join(bindir, "memveil")
-    # The Mojo driver prepends its own pixi RUNPATH entry ahead of
-    # ours; rewrite to exactly $ORIGIN/../lib so the bundle carries
-    # no absolute build-host paths, then verify the result.
-    if shutil.which("patchelf") is None:
-        fail("patchelf is required to stage a relocatable binary "
-             "(apt install patchelf)")
-    rewrite = run(["patchelf", "--set-rpath", "$ORIGIN/../lib",
-                   binary])
-    if rewrite.returncode != 0:
-        fail("patchelf RUNPATH rewrite failed:\n%s" % rewrite.stderr)
-    dyn = run(["readelf", "-d", binary])
-    if dyn.returncode != 0:
-        fail("readelf failed on staged binary:\n%s" % dyn.stderr)
-    if "/home/" in dyn.stdout or "/work/" in dyn.stdout:
-        fail("staged binary keeps absolute RUNPATH entries:\n%s"
-             % dyn.stdout)
     proc = run([binary, "version"])
     if proc.returncode != 0 or not proc.stdout.startswith("memveil-"):
         fail("bundle binary version check failed: %r" % proc.stdout)
@@ -266,6 +250,28 @@ def main(argv):
             if dep in SYSTEM_ALLOW or dep in ship:
                 continue
             fail("shipped %s needs %s: outside closure" % (name, dep))
+    # The Mojo driver prepends its own pixi RUNPATH entry ahead of
+    # ours; now that lib/ is populated, rewrite to exactly
+    # $ORIGIN/../lib so the bundle carries no absolute build-host
+    # paths, then prove the binary still starts.
+    if shutil.which("patchelf") is None:
+        fail("patchelf is required to stage a relocatable binary "
+             "(apt install patchelf)")
+    rewrite = run(["patchelf", "--set-rpath", "$ORIGIN/../lib",
+                   binary])
+    if rewrite.returncode != 0:
+        fail("patchelf RUNPATH rewrite failed:\n%s" % rewrite.stderr)
+    dyn = run(["readelf", "-d", binary])
+    if dyn.returncode != 0:
+        fail("readelf failed on staged binary:\n%s" % dyn.stderr)
+    if "/home/" in dyn.stdout or "/work/" in dyn.stdout:
+        fail("staged binary keeps absolute RUNPATH entries:\n%s"
+             % dyn.stdout)
+    rerun = run([binary, "version"])
+    if rerun.returncode != 0 \
+            or rerun.stdout.strip() != "memveil-" + version:
+        fail("bundle binary fails to start after RUNPATH rewrite: %r"
+             % rerun.stdout)
     print("package: lib closure: %s" % ", ".join(sorted(ship)))
 
     for sub in ("bpf", "profiles", "docs", "examples"):
