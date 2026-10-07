@@ -160,7 +160,7 @@ def test_help_version(bundle):
     binary = str(root / "bin" / "memveil")
     proc = run(binary, "help")
     assert proc.returncode == 0, proc.stderr
-    assert "usage: memveil <record|report|doctor|help|version>" in proc.stdout
+    assert "usage: memveil <record|report|top|doctor|help|version>" in proc.stdout
     proc = run(binary, "version")
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == \
