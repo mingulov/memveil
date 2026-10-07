@@ -172,6 +172,26 @@ def _run(
     print(String("committed=") + String(writer.committed_len()))
 
 
+def _run_dur(
+    dir: String,
+    mut kernel: ScriptKernel,
+    mut clock: ScriptClock,
+    mut signal: ScriptSignal,
+    mut writer: ScriptWriter,
+    dur_s: UInt64,
+):
+    var cfg = _base_config(dir)
+    cfg.duration_s = dur_s
+    var coll = Collector(cfg^)
+    var res = coll.run(kernel, clock, signal, writer)
+    _report(String(""), res)
+    print(String("polls=") + String(kernel.polls_done))
+    print(String("stats=") + String(kernel.stats_done))
+    print(String("snaps=") + String(kernel.snaps_done))
+    print(String("reads=") + String(clock.reads))
+    print(String("committed=") + String(writer.committed_len()))
+
+
 def _run_null(
     dir: String,
     mut kernel: ScriptKernel,
@@ -294,6 +314,27 @@ def _steady_flow_md(
     kernel.add_stats(_flow_stats(UInt64(0), UInt64(0)))
     for _ in range(4):
         kernel.add_stats(stats_ok(r, d, UInt64(0), m, dr))
+
+
+def _script_attachwin(dir: String):
+    """Attach-anchored window: a 20s init/attach gap must not
+    burn the 2s duration budget or backdate the window."""
+    var kernel = ScriptKernel()
+    kernel.add_poll(_timeout(), 104)
+    _zeros(kernel, 5, 4)
+    var clock = ScriptClock()
+    clock.add(UInt64(1000))
+    clock.add(UInt64(1001))
+    clock.add(UInt64(1002))
+    clock.add(UInt64(20000000000))
+    clock.add(UInt64(20000000001))
+    clock.add(UInt64(20000000002))
+    clock.add(UInt64(22000000001))
+    for i in range(7):
+        clock.add(UInt64(22000000002) + UInt64(i))
+    var signal = ScriptSignal()
+    var writer = ScriptWriter()
+    _run_dur(dir, kernel, clock, signal, writer, UInt64(2))
 
 
 def _script_zero(dir: String):
@@ -1515,7 +1556,9 @@ def main() raises:
     if len(args) != 3:
         print(String("usage: collector_probe <script> <dir>"))
         exit(2)
-    if args[1] == String("zero"):
+    if args[1] == String("attachwin"):
+        _script_attachwin(args[2])
+    elif args[1] == String("zero"):
         _script_zero(args[2])
     elif args[1] == String("detfail"):
         _script_detfail(args[2])

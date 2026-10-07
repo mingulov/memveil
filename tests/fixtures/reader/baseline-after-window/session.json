@@ -1,0 +1,126 @@
+{
+  "schema_version": "0.1.0",
+  "session_id": "attempts-3-session",
+  "synthetic": true,
+  "product": {
+    "name": "memveil",
+    "version": "0.1.0",
+    "build": null
+  },
+  "environment": {
+    "mode": "unknown",
+    "detection": "unverified",
+    "asserted_mode": null,
+    "attestation": "not_performed",
+    "evidence": []
+  },
+  "capture": {
+    "mode": "synthetic",
+    "window": {
+      "start_ns": "100",
+      "end_ns": "1000",
+      "baseline_start_ns": "150"
+    },
+    "filters": {
+      "device": null
+    },
+    "finalized": true,
+    "end_reason": "duration"
+  },
+  "device_catalog": {
+    "devices": [
+      {
+        "device_id": "dev-1",
+        "name": "testdev0",
+        "driver": "synthetic-test",
+        "identity_status": "resolved"
+      }
+    ]
+  },
+  "baseline": {
+    "complete": false,
+    "region_observations": []
+  },
+  "capabilities": {
+    "bounce_attempts": {
+      "status": "verified",
+      "reason": "Fictional successful state for analyzer tests; this session is synthetic.",
+      "hooks": ["swiotlb:swiotlb_bounced"],
+      "profile_id": "synthetic-attempts-1"
+    },
+    "mapping_lifecycle": {
+      "status": "unavailable",
+      "reason": "No map_result source in this fixture.",
+      "hooks": [],
+      "profile_id": null
+    },
+    "copy_bytes": {
+      "status": "unavailable",
+      "reason": "No copy source in this fixture.",
+      "hooks": [],
+      "profile_id": null
+    },
+    "sync_requests": {
+      "status": "unavailable",
+      "reason": "No sync source in this fixture.",
+      "hooks": [],
+      "profile_id": null
+    },
+    "conversion_results": {
+      "status": "unavailable",
+      "reason": "No conversion source in this fixture.",
+      "hooks": [],
+      "profile_id": null
+    },
+    "region_state": {
+      "status": "unavailable",
+      "reason": "No region source in this fixture.",
+      "hooks": [],
+      "profile_id": null
+    },
+    "pool_stats": {
+      "status": "unavailable",
+      "reason": "No pool source in this fixture.",
+      "hooks": [],
+      "profile_id": null
+    },
+    "task_context": {
+      "status": "unavailable",
+      "reason": "No observer context in this fixture.",
+      "hooks": [],
+      "profile_id": null
+    }
+  },
+  "quality": {
+    "detail": {
+      "status": "complete_for_scope",
+      "loss_count": "0",
+      "scope": "3 bounce_attempt events",
+      "reason": "Authored fixture: no loss."
+    },
+    "aggregate": {
+      "status": "unavailable",
+      "loss_count": null,
+      "scope": "counter snapshots",
+      "reason": "No counter snapshots in this fixture."
+    },
+    "correlation": {
+      "status": "complete_for_scope",
+      "loss_count": "0",
+      "scope": "attempt counting",
+      "reason": "Attempt counting needs no cross-event correlation."
+    },
+    "baseline": {
+      "status": "not_applicable",
+      "loss_count": null,
+      "scope": "attempt metrics",
+      "reason": "Attempt metrics need no baseline."
+    },
+    "terminal": {
+      "status": "complete_for_scope",
+      "loss_count": "0",
+      "scope": "authored fixture finalization",
+      "reason": "Authored fixture: finalized."
+    }
+  }
+}
