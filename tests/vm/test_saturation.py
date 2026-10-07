@@ -22,8 +22,9 @@ def main():
     probe = os.path.join(REPO, "build", "bpf",
                          "swiotlb_lifecycle.bpf.o")
     if not os.path.isfile(probe):
-        print("vm-saturation: SKIP: lifecycle probes not qualified")
-        return 77
+        print("FAIL vm-saturation: armed but lifecycle probes "
+              "not qualified")
+        return 1
     print("FAIL vm-saturation: armed but the live saturation flow "
           "is not implemented")
     return 1

@@ -66,6 +66,12 @@ static const char *reason_name(enum mv_reason reason)
         return "PAY_NUL";
     case MV_PAY_PAD:
         return "PAY_PAD";
+    case MV_PAY_KIND:
+        return "PAY_KIND";
+    case MV_PAY_DIR:
+        return "PAY_DIR";
+    case MV_PAY_REASON:
+        return "PAY_REASON";
     }
     return "?";
 }

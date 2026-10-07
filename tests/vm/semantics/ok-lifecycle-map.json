@@ -1,0 +1,45 @@
+{
+  "definition": {
+    "hook": "fentry:swiotlb_tbl_map_single",
+    "kind": "fentry",
+    "target": "swiotlb_tbl_map_single",
+    "signature": {
+      "return": "phys_addr_t",
+      "params": [
+        "struct device *",
+        "phys_addr_t",
+        "size_t",
+        "unsigned int",
+        "enum dma_data_direction",
+        "unsigned long"
+      ]
+    },
+    "btf_anchor": {
+      "release": "7.0.0-34-generic",
+      "id": 154915
+    },
+    "authority": "kernel-source",
+    "adapter_len": 531,
+    "inlined": false,
+    "available": true
+  },
+  "recorded": {
+    "signature": {
+      "return": "phys_addr_t",
+      "params": [
+        "struct device *",
+        "phys_addr_t",
+        "size_t",
+        "unsigned int",
+        "enum dma_data_direction",
+        "unsigned long"
+      ]
+    },
+    "btf_anchor": {
+      "release": "7.0.0-34-generic",
+      "id": 154915
+    }
+  },
+  "expect_ok": true,
+  "expect_reason": ""
+}

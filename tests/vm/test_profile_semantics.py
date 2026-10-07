@@ -23,7 +23,7 @@ SEMANTICS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 def test_fixtures():
     paths = sorted(glob.glob(os.path.join(SEMANTICS, "*.json")))
-    assert len(paths) == 10, paths
+    assert len(paths) == 15, paths
     for path in paths:
         with open(path) as handle:
             case = json.load(handle)

@@ -4,8 +4,9 @@
 
 Statically audits the product tree: schemas expose no
 payload/key/address/cmdline/environment property; BPF reads
-only its two admitted kernel sites with no user-memory,
-skb, debug, or perf-output helper; Mojo reads only two
+only its frozen per-file kernel sites (probe-read plus
+CO-RE field reads) with no user-memory, skb, debug, or
+perf-output helper; Mojo reads only two
 allowlisted environment names and no /proc cmdline or
 environ file; and the CLI flag set is exactly the frozen
 fifteen (any new flag fails here until reviewed). Exits
@@ -104,14 +105,35 @@ def main():
 
     progs = sorted(glob.glob(os.path.join(REPO, "bpf", "programs", "*.c")))
     check("bpf-present", len(progs) >= 1)
+    # Frozen per-file audit: (bpf_probe_read_kernel,
+    # BPF_CORE_READ) counts. Attempt reads its fixed context
+    # plus the device name; lifecycle reads nothing (fentry
+    # args only); copy reads one pool slot plus the device
+    # align mask to replicate the hook's clamp. Transient
+    # kernel reads never reach a record: emitted bytes are
+    # sizes, directions, and outcome flags only. A new probe
+    # file, or a new read in an old file, fails here until
+    # reviewed.
+    read_sites = {
+        "swiotlb_attempt.bpf.c": (2, 0),
+        "swiotlb_copy.bpf.c": (2, 4),
+        "swiotlb_lifecycle.bpf.c": (0, 0),
+    }
+    check("bpf-files-frozen",
+          sorted(os.path.basename(p) for p in progs) ==
+          sorted(read_sites),
+          sorted(os.path.basename(p) for p in progs))
     for path in progs:
+        base = os.path.basename(path)
         text = open(path).read()
         for token in FORBIDDEN_BPF:
             check("bpf-no-%s" % token.replace("bpf_", ""),
-                  token not in text, os.path.basename(path))
+                  token not in text, base)
         sites = text.count("bpf_probe_read_kernel")
-        check("bpf-read-sites", sites == 2,
-              "%s has %d sites" % (os.path.basename(path), sites))
+        core = text.count("BPF_CORE_READ")
+        check("bpf-read-sites",
+              (sites, core) == read_sites[base],
+              "%s has %d+%d sites" % (base, sites, core))
     headers = sorted(glob.glob(os.path.join(REPO, "bpf", "include", "*.h")))
     for path in headers:
         text = open(path).read()

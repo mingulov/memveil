@@ -346,8 +346,20 @@ build_bpf() {
         -I bpf/include -I "$LIBBPF_INC" -I "$ARCH_INC" \
         -c bpf/programs/swiotlb_attempt.bpf.c \
         -o build/bpf/swiotlb_attempt-test.bpf.o || return 1
+    log clang --target=bpf lifecycle object
+    clang --target=bpf -O2 -g -Wall -Wextra -Werror -D__BPF__ \
+        -I bpf/include -I "$LIBBPF_INC" -I "$ARCH_INC" \
+        -c bpf/programs/swiotlb_lifecycle.bpf.c \
+        -o build/bpf/swiotlb_lifecycle.bpf.o || return 1
+    log clang --target=bpf copy object
+    clang --target=bpf -O2 -g -Wall -Wextra -Werror -D__BPF__ \
+        -I bpf/include -I "$LIBBPF_INC" -I "$ARCH_INC" \
+        -c bpf/programs/swiotlb_copy.bpf.c \
+        -o build/bpf/swiotlb_copy.bpf.o || return 1
     sha256sum build/bpf/swiotlb_attempt.bpf.o \
-        build/bpf/swiotlb_attempt-test.bpf.o || return 1
+        build/bpf/swiotlb_attempt-test.bpf.o \
+        build/bpf/swiotlb_lifecycle.bpf.o \
+        build/bpf/swiotlb_copy.bpf.o || return 1
 }
 
 main() {

@@ -8,7 +8,7 @@
     "source": {
       "origin": "distro",
       "revision": "7.0.0-34-generic",
-      "note": "config=sha256:e75c0adab6020e72844d7431cf801a02b94ed32efc251c3b0fb80c021d065180 config_src=file btf=sha256:16205476ae9b6d621e056249052a5789d7f22c6a8c27bf291eb787f3bda5090e format=sha256:7e95fff18d1bd16c18342d821e78680a0126ff84054936fbc641e181810f0b62 object=sha256:5a938a66d2a041b3aa3f601347db3ab3e8453174ec449b22ca7c308275b474b7 image=sha256:7efd88a7facf80874d781ccb2c2421f0aaaa575e3b94760430619e826f490117 image_bid=165b9a4f9609ede635b85d0d1241ee95208e4548 ring_bytes=4096"
+      "note": "config=sha256:e75c0adab6020e72844d7431cf801a02b94ed32efc251c3b0fb80c021d065180 config_src=file btf=sha256:16205476ae9b6d621e056249052a5789d7f22c6a8c27bf291eb787f3bda5090e format=sha256:7e95fff18d1bd16c18342d821e78680a0126ff84054936fbc641e181810f0b62 object=sha256:394b33e24f50e66c25dfab60aa6b38938e034970c41c7c10db58d168e97c018d image=sha256:7efd88a7facf80874d781ccb2c2421f0aaaa575e3b94760430619e826f490117 image_bid=165b9a4f9609ede635b85d0d1241ee95208e4548 ring_bytes=4096"
     },
     "note": "Narrow identity for the A07 gate kernel. The bindings name the exact config, BTF, tracepoint format, object, image, and build-id qualified by the live cross-check; any change fails admission until re-qualification."
   },
