@@ -73,7 +73,8 @@ path is that report's operational purpose.)
   appear.
 - The metadata allowlist audits schemas (no
   payload/key/address/cmdline/environment property), BPF
-  (exactly the two admitted kernel reads, no user-memory or
+  (pinned per-file read-site triples across probe, CO-RE
+  macro, and relocating builtin reads; no user-memory or
   debug helpers), environment reads (two names), and the
   frozen fifteen CLI flags.
 - Offline replay is byte-identical under a scrubbed
