@@ -2,9 +2,9 @@
 # Build and toolchain guide
 
 This repository builds with a pinned Mojo toolchain managed by pixi, plus
-system C tooling for eBPF programs and test fixtures. Exact versions live
-in `toolchain.lock.json`; the `pixi.lock` file carries authoritative conda
-package hashes.
+system C tooling for eBPF programs and test fixtures. Pinned versions live
+in `toolchain.lock.json` (cmake carries a minimum floor, the rest are
+exact); the `pixi.lock` file carries authoritative conda package hashes.
 
 ## Prerequisites
 

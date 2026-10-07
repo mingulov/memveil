@@ -25,14 +25,15 @@ log() {
 }
 
 check_toolchain() {
-    log "check pinned versions from toolchain.lock.json"
+    log "check toolchain versions from toolchain.lock.json"
     python3 - "$LOCK" <<'EOF'
-import json, subprocess, sys
+import json, re, subprocess, sys
 
 lock_path = sys.argv[1]
 with open(lock_path, "r", encoding="utf-8") as handle:
     lock = json.load(handle)
 want_lines = lock["expected_first_lines"]
+floors = lock.get("minimum_versions", {})
 
 checks = [
     ("pixi", ["pixi", "--version"]),
@@ -46,7 +47,6 @@ checks = [
 
 failed = 0
 for name, cmd in checks:
-    want = want_lines[name]
     try:
         out = subprocess.run(cmd, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, text=True,
@@ -59,9 +59,28 @@ for name, cmd in checks:
     if out.returncode != 0:
         print("FAIL %s: exit status %d" % (name, out.returncode))
         failed += 1
-    elif first.strip() != want:
+    elif name in floors:
+        floor = tuple(int(p) for p in floors[name].split("."))
+        match = re.search(r"(\d+(?:\.\d+)+)", first)
+        if match is None:
+            print("FAIL %s: want at least %s, got %r"
+                  % (name, floors[name], first.strip()))
+            failed += 1
+            continue
+        got = tuple(int(p) for p in match.group(1).split("."))
+        width = max(len(floor), len(got))
+        got = got + (0,) * (width - len(got))
+        floor = floor + (0,) * (width - len(floor))
+        if got < floor:
+            print("FAIL %s: want at least %s, got %r"
+                  % (name, floors[name], first.strip()))
+            failed += 1
+        else:
+            print("ok %s: %s (>= %s)"
+                  % (name, first.strip(), floors[name]))
+    elif first.strip() != want_lines[name]:
         print("FAIL %s: want exactly %r, got %r"
-              % (name, want, first.strip()))
+              % (name, want_lines[name], first.strip()))
         failed += 1
     else:
         print("ok %s: %s" % (name, first.strip()))

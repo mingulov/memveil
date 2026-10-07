@@ -5,7 +5,7 @@
 #
 # The lanes need the locked toolchain (toolchain.lock.json):
 # ubuntu-26.04 ships its generations, apt provisions the
-# system tools, and tools/build verifies every exact version
+# system tools, and tools/build verifies the locked versions
 # before compiling. The libbpf_mojo import tree comes from
 # the vendored pinned tarball via LMB_PACKAGE (hash-checked
 # here and re-verified by the build); without it the build
@@ -35,16 +35,8 @@ jobs:
       - name: Install system toolchain
         run: |
           sudo apt-get update
-          # The image preinstalls a newer cmake; the locked
-          # toolchain needs exactly the archive version.
           sudo apt-get install -y --no-install-recommends \
-            --allow-downgrades \
-            clang bpftool cmake=4.2.3-2ubuntu2 ninja-build
-          # The image also ships a Kitware cmake in /usr/local
-          # that shadows the archive binary; remove it so the
-          # locked cmake resolves (verified by tools/build).
-          sudo rm -f /usr/local/bin/cmake /usr/local/bin/ctest \
-            /usr/local/bin/cpack /usr/local/bin/ccmake
+            clang bpftool cmake ninja-build
       - name: Provision libbpf-mojo tarball
         run: |
           VER="$(python3 -c "import json; print(json.load(open('toolchain.lock.json'))['dependencies']['libbpf-mojo']['version'])")"
