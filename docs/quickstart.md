@@ -68,6 +68,13 @@ materially incomplete (the worked example exits 4 because
 terminal settlement is unproven by design); exit 2 is invalid
 input.
 
+Empty is not unavailable: an idle capture reports
+`bounce_attempts = 0` with complete detail quality, while rows
+without their event source render `unavailable` with a reason.
+A torn final record exits 2; rerun with `--allow-partial` to
+drop the torn tail and report the loss instead (exit 4). See
+`troubleshooting.md` for both recoveries.
+
 ## 5. Worked example
 
     ./bin/memveil report --format text examples/real-capture
@@ -81,5 +88,9 @@ Attempt counts only: lifecycle, actual copy bytes, sharing
 transitions, and physical unions are unavailable, never
 inferred. One validated kernel. Captures are written mode
 0600. There is no configuration file, daemon, or network
-access. See `support.md` for the tested envelope and
-`privacy.md` for exactly what a capture contains.
+access. Replay needs nothing live (see `performance.md` for
+the measured envelope: 600k records in seconds). Open mappings
+are live state, never automatic leaks (`resource-limits.md`).
+Findings are observations, not host-access or attestation
+verdicts (`support.md`). See `support.md` for the tested
+envelope and `privacy.md` for exactly what a capture contains.

@@ -10,9 +10,11 @@ U+FFFD, and printable text including multibyte characters passes
 through untouched.
 """
 
+from memveil.model.metric import Metric
 from memveil.model.report import Report
 from memveil.model.session import Channel
 from memveil.model.validate import format_u64
+from memveil.render.filter import resolve_device_filter
 
 
 def escape_text(s: String) raises -> String:
@@ -72,8 +74,18 @@ def _channel_block(label: String, ch: Channel) raises -> String:
     return out
 
 
-def render_text(rep: Report) raises -> String:
+def _shown(m: Metric, device_filter: String) -> Bool:
+    """True when the row survives the display device filter."""
+    if device_filter == "":
+        return True
+    if not m.has_device_id:
+        return True
+    return m.device_id == device_filter
+
+
+def render_text(rep: Report, device_filter: String = "") raises -> String:
     """Render the report as plain text, one trailing newline."""
+    var filt = resolve_device_filter(rep.devices, device_filter)
     var out = String("memveil report ")
     out += escape_text(rep.session_id)
     if rep.synthetic:
@@ -122,11 +134,17 @@ def render_text(rep: Report) raises -> String:
     out += _channel_block(String("correlation"), rep.q_correlation)
     out += _channel_block(String("baseline"), rep.q_baseline)
     out += _channel_block(String("terminal"), rep.q_terminal)
+    var shown = 0
+    for i in range(len(rep.metrics)):
+        if _shown(rep.metrics[i], filt):
+            shown += 1
     out += "metrics ("
-    out += String(len(rep.metrics))
+    out += String(shown)
     out += "):\n"
     for i in range(len(rep.metrics)):
         var m = rep.metrics[i]
+        if not _shown(m, filt):
+            continue
         out += "  "
         out += escape_text(m.name)
         out += _dims_text(

@@ -204,7 +204,9 @@ def sha_file(path):
 def resolve_tarball():
     # Authoritative bytes: explicit LMB_PACKAGE first (verified,
     # then kept), else the kept copy from a previous verified
-    # unpack. Returns a path or "".
+    # unpack, else the vendored in-tree tarball (verified, then
+    # kept). Every candidate must match the lock pin. Returns a
+    # path or "".
     if tarball:
         if not os.path.isfile(tarball):
             print("FAIL LMB_PACKAGE not found: %s" % tarball)
@@ -217,6 +219,19 @@ def resolve_tarball():
         return tarball
     if os.path.isfile(kept) and sha_file(kept) == want:
         return kept
+    root = os.path.dirname(os.path.dirname(deps))
+    vendored = os.path.join(
+        root, "third_party", "libbpf-mojo-%s.tar.gz" % version)
+    if os.path.isfile(vendored):
+        if sha_file(vendored) != want:
+            print("FAIL vendored libbpf-mojo tarball sha256 mismatch;"
+                  " want %s" % want)
+            sys.exit(1)
+        print("libbpf-mojo %s source: vendored third_party tarball"
+              % version)
+        if not os.path.isfile(kept) or sha_file(kept) != want:
+            shutil.copy2(vendored, kept)
+        return vendored
     return ""
 
 

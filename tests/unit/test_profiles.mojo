@@ -629,6 +629,25 @@ def expect_reject(doc: String) raises:
     assert_true(raised)
 
 
+def test_parse_conversion_capability() raises:
+    var doc = minimal_doc().replace(
+        String('"id":"attempt-trace"'),
+        String('"id":"conversion-observe"'),
+    )
+    var p = parse_profile_bytes(bytes_of(doc))
+    assert_equal(len(p.caps), 1)
+    assert_equal(p.caps[0].id, String("conversion-observe"))
+
+
+def test_admitted_profiles_lack_conversion() raises:
+    # Guard: no shipped profile declares conversion hooks
+    # until kernel-source evidence admits them (E02 blocked).
+    var ps = load_profiles(String("profiles"))
+    for i in range(len(ps)):
+        for j in range(len(ps[i].caps)):
+            assert_true(ps[i].caps[j].id != String("conversion-observe"))
+
+
 def test_parse_minimal_ok() raises:
     var p = parse_profile_bytes(bytes_of(minimal_doc()))
     assert_equal(p.profile_id, String("t"))
@@ -1424,6 +1443,8 @@ def run() raises -> Int:
     suite.test[test_denied_guest_node]()
     suite.test[test_btf_states]()
     suite.test[test_hostile_release]()
+    suite.test[test_parse_conversion_capability]()
+    suite.test[test_admitted_profiles_lack_conversion]()
     suite.test[test_parse_minimal_ok]()
     suite.test[test_parse_reference_file]()
     suite.test[test_parse_validated_file]()

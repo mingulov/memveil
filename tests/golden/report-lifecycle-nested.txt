@@ -1,0 +1,108 @@
+memveil report lifecycle-nested-session (synthetic, engine memveil-0.1.0)
+window: [1000000000,2500000000)
+environment: mode=unknown detection=unverified attestation=not_performed evidence=0
+devices (1):
+  dev-1 testdev0 driver=synthetic-test identity=resolved
+quality:
+  detail: complete_for_scope loss=0
+    scope: 1 bounce_attempt event
+    reason: Authored fixture: no loss.
+  aggregate: unavailable loss=unknown
+    scope: counter snapshots
+    reason: No counter snapshots in this fixture.
+  correlation: complete_for_scope loss=0
+    scope: correlated lifecycle events
+    reason: Authored fixture: every relationship pairs.
+  baseline: not_applicable loss=unknown
+    scope: lifecycle metrics
+    reason: Lifecycle metrics need no baseline.
+  terminal: complete_for_scope loss=0
+    scope: authored fixture finalization
+    reason: Authored fixture: finalized.
+metrics (27):
+  bounce_attempts = 1 count [observed, complete_for_scope, counter]
+    scope: window [1000000000,2500000000), all devices, detail channel
+    notes: 1 detail event; no counter snapshots to compare.
+  bounce_attempts{device=dev-1} = 1 count [observed, complete_for_scope, counter]
+    scope: window [1000000000,2500000000), device dev-1, detail channel
+    notes: All 1 attempt observed device dev-1.
+  requested_bounce_bytes = 4096 bytes [observed, complete_for_scope, counter]
+    scope: window [1000000000,2500000000), all devices, detail channel
+    notes: 4096 requested bytes across 1 attempt; see successful_allocations for observed outcomes.
+  requested_bounce_bytes{device=dev-1} = 4096 bytes [observed, complete_for_scope, counter]
+    scope: window [1000000000,2500000000), device dev-1, detail channel
+    notes: 4096 requested bytes on device dev-1.
+  conversion_request_bytes = unavailable bytes [unavailable, unavailable]
+    scope: window [1000000000,2500000000), all devices
+    notes: No conversion source in this fixture.
+  known_shared_region_bytes = unavailable bytes [unavailable, unavailable]
+    scope: window [1000000000,2500000000), all devices
+    notes: No region source in this fixture.
+  pool_used_bytes = unavailable bytes [unavailable, unavailable]
+    scope: window [1000000000,2500000000), all devices
+    notes: No pool source in this fixture.
+  pool_capacity_bytes = unavailable bytes [unavailable, unavailable]
+    scope: window [1000000000,2500000000), all devices
+    notes: No pool source in this fixture.
+  successful_allocations = 1 count [observed, complete_for_scope, counter]
+    scope: window [1000000000,2500000000); observed mappings
+    notes: Map successes with mapping identity.
+  failed_allocations = 0 count [observed, complete_for_scope, counter]
+    scope: window [1000000000,2500000000); observed mappings
+    notes: Map failures; no mapping created.
+  mapped_bytes_total = 4096 bytes [observed, complete_for_scope, counter]
+    scope: window [1000000000,2500000000); observed mappings
+    notes: Sum of mapped bytes over successes.
+  copy_original_to_bounce_bytes = 5120 bytes [observed, complete_for_scope, counter]
+    scope: window [1000000000,2500000000); observed mappings
+    notes: Observed original-to-bounce copies only; sync requests add nothing.
+  copy_bounce_to_original_bytes = 0 bytes [observed, complete_for_scope, counter]
+    scope: window [1000000000,2500000000); observed mappings
+    notes: Observed bounce-to-original copies only; sync requests add nothing.
+  live_observed_allocation_bytes = 0 bytes [observed, complete_for_scope, gauge]
+    scope: window [1000000000,2500000000); observed mappings
+    notes: Mapped bytes still open at the horizon.
+  open_mappings = 0 count [observed, complete_for_scope, gauge]
+    scope: window [1000000000,2500000000); observed mappings
+    notes: Open mappings are censored from completed lifetimes, not leaks.
+  oldest_open_mapping_age_ns = unavailable nanoseconds [unavailable, unavailable]
+    scope: window [1000000000,2500000000); observed mappings
+    notes: No open mappings at the horizon.
+  sync_requests = 1 count [observed, complete_for_scope, counter]
+    scope: window [1000000000,2500000000); observed mappings
+    notes: Sync requests observed; requests are not copies.
+  completed_lifetime_count = 1 count [observed, complete_for_scope, counter]
+    scope: window [1000000000,2500000000); observed mappings
+    notes: Releases with provable durations; open and uncertain mappings excluded.
+  lifetime_mean_ns = 1000000000 nanoseconds [observed, complete_for_scope, mean]
+    scope: window [1000000000,2500000000); observed mappings
+    notes: Floor mean over completed lifetimes.
+  lifetime_min_ns = 1000000000 nanoseconds [observed, complete_for_scope, gauge]
+    scope: window [1000000000,2500000000); observed mappings
+    notes: Exact minimum completed lifetime.
+  lifetime_max_ns = 1000000000 nanoseconds [observed, complete_for_scope, gauge]
+    scope: window [1000000000,2500000000); observed mappings
+    notes: Exact maximum completed lifetime.
+  lifetime_p50_ns = 1073741823 nanoseconds [estimated, complete_for_scope, p50]
+    scope: window [1000000000,2500000000); observed mappings
+    notes: Estimated 65-bucket upper edge; exact min/max stay separate.
+  lifetime_p99_ns = 1073741823 nanoseconds [estimated, complete_for_scope, p99]
+    scope: window [1000000000,2500000000); observed mappings
+    notes: Estimated 65-bucket upper edge; exact min/max stay separate.
+  successful_allocations{device=dev-1} = 1 count [observed, complete_for_scope, counter]
+    scope: window [1000000000,2500000000); device dev-1
+    notes: Map successes on this device.
+  mapped_bytes_total{device=dev-1} = 4096 bytes [observed, complete_for_scope, counter]
+    scope: window [1000000000,2500000000); device dev-1
+    notes: Mapped bytes on this device.
+  copy_original_to_bounce_bytes{device=dev-1} = 5120 bytes [observed, complete_for_scope, counter]
+    scope: window [1000000000,2500000000); device dev-1
+    notes: Attributed copies on this device.
+  copy_bounce_to_original_bytes{device=dev-1} = 0 bytes [observed, complete_for_scope, counter]
+    scope: window [1000000000,2500000000); device dev-1
+    notes: Attributed copies on this device.
+findings: none
+limitations (3):
+  - Synthetic fixture: every value is authored test data; no guest was booted and no hook attached.
+  - This analyzer reduces bounce attempts, counter deltas, and observed lifecycle/pool scope; conversion, region, and task-context metrics are unavailable.
+  - No counter snapshots: attempt totals rest on the detail channel alone.

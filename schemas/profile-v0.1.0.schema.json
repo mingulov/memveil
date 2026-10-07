@@ -139,7 +139,8 @@
             "enum": [
               "attempt-trace",
               "mapping-lifecycle",
-              "copy-actual"
+              "copy-actual",
+              "conversion-observe"
             ]
           },
           "status": {

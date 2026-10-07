@@ -1,0 +1,142 @@
+{
+  "schema_version": "0.1.0",
+  "session_id": "baseline-session",
+  "synthetic": true,
+  "product": {
+    "name": "memveil",
+    "version": "0.1.0",
+    "build": null
+  },
+  "environment": {
+    "mode": "unknown",
+    "detection": "unverified",
+    "asserted_mode": null,
+    "attestation": "not_performed",
+    "evidence": []
+  },
+  "capture": {
+    "mode": "synthetic",
+    "window": {
+      "start_ns": "1000000000",
+      "end_ns": "2500000000"
+    },
+    "filters": {
+      "device": null
+    },
+    "finalized": true,
+    "end_reason": "duration"
+  },
+  "device_catalog": {
+    "devices": [
+      {
+        "device_id": "dev-1",
+        "name": "testdev0",
+        "driver": "synthetic-test",
+        "identity_status": "resolved"
+      }
+    ]
+  },
+  "baseline": {
+    "complete": true,
+    "region_observations": [
+      {
+        "region_id": "r1",
+        "state": "shared",
+        "offset": "0",
+        "length": "8192",
+        "address_space": "guest_physical",
+        "provenance": "test-provenance-a"
+      },
+      {
+        "region_id": "r2",
+        "state": "unknown",
+        "offset": "8192",
+        "length": "4096",
+        "address_space": "iova",
+        "provenance": "test-provenance-b"
+      }
+    ]
+  },
+  "capabilities": {
+    "bounce_attempts": {
+      "status": "verified",
+      "reason": "Fictional successful state for analyzer tests; this session is synthetic.",
+      "hooks": ["swiotlb:swiotlb_bounced"],
+      "profile_id": "synthetic-regions-1"
+    },
+    "mapping_lifecycle": {
+      "status": "unavailable",
+      "reason": "No lifecycle source in this fixture.",
+      "hooks": [],
+      "profile_id": null
+    },
+    "copy_bytes": {
+      "status": "unavailable",
+      "reason": "No copy source in this fixture.",
+      "hooks": [],
+      "profile_id": null
+    },
+    "sync_requests": {
+      "status": "unavailable",
+      "reason": "No sync source in this fixture.",
+      "hooks": [],
+      "profile_id": null
+    },
+    "conversion_results": {
+      "status": "verified",
+      "reason": "Fictional successful state for analyzer tests; this session is synthetic.",
+      "hooks": ["synthetic:transition"],
+      "profile_id": "synthetic-regions-1"
+    },
+    "region_state": {
+      "status": "verified",
+      "reason": "Fictional successful state for analyzer tests; this session is synthetic.",
+      "hooks": ["synthetic:transition"],
+      "profile_id": "synthetic-regions-1"
+    },
+    "pool_stats": {
+      "status": "unavailable",
+      "reason": "No pool source in this fixture.",
+      "hooks": [],
+      "profile_id": null
+    },
+    "task_context": {
+      "status": "unavailable",
+      "reason": "No observer context in this fixture.",
+      "hooks": [],
+      "profile_id": null
+    }
+  },
+  "quality": {
+    "detail": {
+      "status": "complete_for_scope",
+      "loss_count": "0",
+      "scope": "1 region event",
+      "reason": "Authored fixture: no loss."
+    },
+    "aggregate": {
+      "status": "unavailable",
+      "loss_count": null,
+      "scope": "counter snapshots",
+      "reason": "No counter snapshots in this fixture."
+    },
+    "correlation": {
+      "status": "complete_for_scope",
+      "loss_count": "0",
+      "scope": "correlated region events",
+      "reason": "Authored fixture: every relationship pairs."
+    },
+    "baseline": {
+      "status": "complete_for_scope",
+      "loss_count": "0",
+      "scope": "region baseline",
+      "reason": "Authored fixture: one seeded shared interval."
+    },
+    "terminal": {
+      "status": "complete_for_scope",
+      "loss_count": "0",
+      "scope": "authored fixture finalization",
+      "reason": "Authored fixture: finalized."
+    }
+  }
+}

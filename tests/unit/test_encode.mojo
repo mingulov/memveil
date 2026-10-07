@@ -19,6 +19,7 @@ from memveil.model.encode import (
     quote_json,
 )
 from memveil.model.event import Event, parse_event
+from memveil.model.regions import RegionObservation
 from memveil.model.session import Session, parse_session
 
 
@@ -303,16 +304,34 @@ def test_session_roundtrip() raises:
     assert_equal(encode_session(back), text)
 
 
-def test_session_regions_refused() raises:
+def test_session_regions_roundtrip() raises:
     var s = _base_session()
-    s.baseline_region_count = 1
-    var raised = False
-    try:
-        _ = encode_session(s)
-    except e:
-        raised = True
-        assert_equal(e.what, String("baseline"))
-    assert_true(raised)
+    s.baseline_complete = True
+    s.baseline_region_count = 2
+    var first = RegionObservation()
+    first.region_id = String("r1")
+    first.state = String("shared")
+    first.offset = UInt64(0)
+    first.length = UInt64(8192)
+    first.address_space = String("guest_physical")
+    first.provenance = String("seed-a")
+    var second = RegionObservation()
+    second.region_id = String("r2")
+    second.state = String("unknown")
+    second.offset = UInt64(8192)
+    second.length = UInt64(4096)
+    second.address_space = String("iova")
+    second.provenance = String("seed-b")
+    s.baseline_regions.append(first^)
+    s.baseline_regions.append(second^)
+    var text = encode_session(s)
+    assert_true(text.find(String('"region_id":"r1"')) != -1)
+    assert_true(text.find(String('"length":"4096"')) != -1)
+    var back = parse_session(_bytes(text))
+    assert_equal(len(back.baseline_regions), 2)
+    assert_equal(back.baseline_regions[0].region_id, String("r1"))
+    assert_equal(back.baseline_regions[1].address_space, String("iova"))
+    assert_equal(encode_session(back), text)
 
 
 def run() raises -> Int:
@@ -330,7 +349,7 @@ def run() raises -> Int:
     suite.test[test_map_nulls]()
     suite.test[test_unknown_kind]()
     suite.test[test_session_roundtrip]()
-    suite.test[test_session_regions_refused]()
+    suite.test[test_session_regions_roundtrip]()
     suite^.run()
     return 0
 

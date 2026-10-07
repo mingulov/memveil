@@ -12,12 +12,13 @@ is clear); optional keys are emitted iff present.
 Output always reparses: any value the parser would reject
 also fails the round-trip tests gating this module, so
 validation checks are NOT duplicated here (a second copy
-of every enum list would drift). The one lossy boundary is
-baseline region detail (the parser keeps only a count):
-encoding a session with regions raises EncodeError.
+of every enum list would drift). Baseline region detail
+round-trips exactly: the parser retains every observation
+and the encoder reproduces the array in order.
 """
 
 from memveil.model.event import EVENT_SCHEMA_VERSION, Event
+from memveil.model.regions import RegionObservation
 from memveil.model.session import (
     PRODUCT_NAME,
     SESSION_SCHEMA_VERSION,
@@ -486,12 +487,24 @@ def _encode_evidence_item(it: EvidenceItem) raises EncodeError -> String:
     return _jobj(parts^)
 
 
+def _encode_region_observation(o: RegionObservation) raises EncodeError -> String:
+    """Encode one baseline observation in schema key order."""
+    var parts = List[String]()
+    parts.append(_member(String("region_id"), _jstr(o.region_id)))
+    parts.append(_member(String("state"), _jstr(o.state)))
+    parts.append(_member(String("offset"), _ju64(o.offset)))
+    parts.append(_member(String("length"), _ju64(o.length)))
+    parts.append(
+        _member(String("address_space"), _jstr(o.address_space))
+    )
+    parts.append(
+        _member(String("provenance"), _jstr(o.provenance))
+    )
+    return _jobj(parts^)
+
+
 def encode_session(s: Session) raises EncodeError -> String:
     """Encode one session in canonical form (no trailing newline)."""
-    if s.baseline_region_count > 0:
-        raise EncodeError(
-            "baseline", "region detail is not reproducible"
-        )
     var parts = List[String]()
     parts.append(
         _member(String("schema_version"), _jstr(SESSION_SCHEMA_VERSION))
@@ -563,8 +576,11 @@ def encode_session(s: Session) raises EncodeError -> String:
     baseline.append(
         _member(String("complete"), _jbool(s.baseline_complete))
     )
+    var obs = List[String]()
+    for i in range(len(s.baseline_regions)):
+        obs.append(_encode_region_observation(s.baseline_regions[i]))
     baseline.append(
-        _member(String("region_observations"), _jarr(List[String]()))
+        _member(String("region_observations"), _jarr(obs^))
     )
     parts.append(_member(String("baseline"), _jobj(baseline^)))
     var caps = List[String]()

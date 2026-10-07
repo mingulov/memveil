@@ -398,12 +398,15 @@ struct CaptureReader:
                     )
                 self._dead[target] = True
         elif ev.kind == "copy":
-            self._note_op(ev.kind, ev.copy.operation_id, tag, lineno)
+            # Copies repeat freely under one operation (nested,
+            # per-sync, and completion copies share it); only
+            # attempts and map results claim an operation once.
             if ev.copy.has_mapping_id:
                 self._ref_ids.append(ev.copy.mapping_id)
                 self._ref_lines.append(lineno)
         elif ev.kind == "sync_request":
-            self._note_op(ev.kind, ev.sync.operation_id, tag, lineno)
+            # Syncs repeat freely under one operation for the
+            # same reason as copies.
             if ev.sync.has_mapping_id:
                 self._ref_ids.append(ev.sync.mapping_id)
                 self._ref_lines.append(lineno)

@@ -209,6 +209,17 @@ def _plural(n: Int, one: String, many: String) -> String:
     return String(n) + " " + many
 
 
+def window_label(start_ns: UInt64, end_ns: UInt64) -> String:
+    """Half-open window label shared by every tracker."""
+    return (
+        "window ["
+        + format_u64(start_ns)
+        + ","
+        + format_u64(end_ns)
+        + ")"
+    )
+
+
 def _known_counter(counter_id: String) -> Bool:
     """True for counter ids with a metric mapping."""
     return (
@@ -424,6 +435,10 @@ struct AttemptAnalyzer:
     var _corr_gaps: Int
     var _base_gaps: Int
     var _term_gaps: Int
+    var _saw_map: Bool
+    var _saw_copy: Bool
+    var _saw_unmap: Bool
+    var _saw_sync: Bool
     var _ctrs_ignored: Int
     var _fixed_notes: List[String]
     var _data_notes: List[String]
@@ -459,6 +474,10 @@ struct AttemptAnalyzer:
         self._corr_gaps = 0
         self._base_gaps = 0
         self._term_gaps = 0
+        self._saw_map = False
+        self._saw_copy = False
+        self._saw_unmap = False
+        self._saw_sync = False
         self._ctrs_ignored = 0
         self._fixed_notes = List[String]()
         self._data_notes = List[String]()
@@ -481,6 +500,15 @@ struct AttemptAnalyzer:
     def _note_data(mut self, text: String):
         """Record one data-driven limitation (bounded at merge)."""
         self._data_notes.append(text)
+
+    def _saw_lifecycle(self) -> Bool:
+        """True once any lifecycle-kind event was consumed."""
+        return (
+            self._saw_map
+            or self._saw_copy
+            or self._saw_unmap
+            or self._saw_sync
+        )
 
     def _unscoped_devices(self) -> String:
         """Device phrase for totals spanning the recorded set.
@@ -506,6 +534,14 @@ struct AttemptAnalyzer:
             self._consume_snapshot(ev)
         elif ev.kind == "gap":
             self._consume_gap(ev)
+        elif ev.kind == "map_result":
+            self._saw_map = True
+        elif ev.kind == "copy":
+            self._saw_copy = True
+        elif ev.kind == "unmap":
+            self._saw_unmap = True
+        elif ev.kind == "sync_request":
+            self._saw_sync = True
 
     def _consume_bounce(mut self, ev: Event) raises:
         self._total_count += 1
@@ -1085,6 +1121,8 @@ struct AttemptAnalyzer:
         noun: String,
         order: List[Int],
         partial: Bool,
+        has_pools: Bool,
+        has_regions: Bool,
     ) raises:
         var detail_cov = _coverage(out.q_detail.status)
         var agg_cov = _coverage(out.q_aggregate.status)
@@ -1190,6 +1228,16 @@ struct AttemptAnalyzer:
             var text = _summand_text(
                 self._total_summands, self._total_bytes, self._total_count
             )
+            var outcome_frag = (
+                "; allocation outcomes are unavailable in this "
+                + noun
+                + "."
+            )
+            if self._saw_map:
+                outcome_frag = (
+                    "; see successful_allocations for observed"
+                    " outcomes."
+                )
             out.metrics.append(
                 _detail_metric(
                     String("requested_bounce_bytes"),
@@ -1205,9 +1253,7 @@ struct AttemptAnalyzer:
                     + _plural(
                         self._total_count, "attempt", "attempts"
                     )
-                    + "; allocation outcomes are unavailable in this "
-                    + noun
-                    + "."
+                    + outcome_frag
                     + gap_frag
                     + partial_frag,
                 )
@@ -1391,88 +1437,105 @@ struct AttemptAnalyzer:
                 + " metric budget exhausted."
             )
         var uscope = window + ", " + self._unscoped_devices()
-        out.metrics.append(
-            _unavailable_metric(
-                String("successful_allocations"),
-                String("count"),
-                uscope,
-                "No map_result source in this "
-                + noun
-                + "; attempts are not successes.",
+        # Placeholders are skipped exactly when the composed
+        # engine's tracker rows cover the same (name,
+        # dimensions) key, so each key keeps one measurement
+        # channel.
+        if not self._saw_lifecycle():
+            out.metrics.append(
+                _unavailable_metric(
+                    String("successful_allocations"),
+                    String("count"),
+                    uscope,
+                    "No map_result source in this "
+                    + noun
+                    + "; attempts are not successes.",
+                )
             )
-        )
-        out.metrics.append(
-            _unavailable_metric(
-                String("copy_original_to_bounce_bytes"),
-                String("bytes"),
-                uscope,
-                "No copy source in this " + noun + ".",
+            out.metrics.append(
+                _unavailable_metric(
+                    String("copy_original_to_bounce_bytes"),
+                    String("bytes"),
+                    uscope,
+                    "No copy source in this " + noun + ".",
+                )
             )
-        )
-        out.metrics.append(
-            _unavailable_metric(
-                String("copy_bounce_to_original_bytes"),
-                String("bytes"),
-                uscope,
-                "No copy source in this " + noun + ".",
+            out.metrics.append(
+                _unavailable_metric(
+                    String("copy_bounce_to_original_bytes"),
+                    String("bytes"),
+                    uscope,
+                    "No copy source in this " + noun + ".",
+                )
             )
-        )
-        out.metrics.append(
-            _unavailable_metric(
-                String("live_observed_allocation_bytes"),
-                String("bytes"),
-                uscope,
-                "No lifecycle source in this " + noun + ".",
+            out.metrics.append(
+                _unavailable_metric(
+                    String("live_observed_allocation_bytes"),
+                    String("bytes"),
+                    uscope,
+                    "No lifecycle source in this " + noun + ".",
+                )
             )
-        )
-        out.metrics.append(
-            _unavailable_metric(
-                String("observed_mapping_lifetime_ns"),
-                String("nanoseconds"),
-                uscope,
-                "No lifecycle source in this " + noun + ".",
+        if not self._saw_map and not self._saw_unmap:
+            out.metrics.append(
+                _unavailable_metric(
+                    String("observed_mapping_lifetime_ns"),
+                    String("nanoseconds"),
+                    uscope,
+                    "No lifecycle source in this " + noun + ".",
+                )
             )
-        )
-        out.metrics.append(
-            _unavailable_metric(
-                String("conversion_request_bytes"),
-                String("bytes"),
-                uscope,
-                "No conversion source in this " + noun + ".",
+        if not has_regions:
+            out.metrics.append(
+                _unavailable_metric(
+                    String("conversion_request_bytes"),
+                    String("bytes"),
+                    uscope,
+                    "No conversion source in this " + noun + ".",
+                )
             )
-        )
-        out.metrics.append(
-            _unavailable_metric(
-                String("known_shared_region_bytes"),
-                String("bytes"),
-                uscope,
-                "No region source in this " + noun + ".",
+            out.metrics.append(
+                _unavailable_metric(
+                    String("known_shared_region_bytes"),
+                    String("bytes"),
+                    uscope,
+                    "No region source in this " + noun + ".",
+                )
             )
-        )
-        out.metrics.append(
-            _unavailable_metric(
-                String("pool_used_bytes"),
-                String("bytes"),
-                uscope,
-                "No pool source in this " + noun + ".",
+        if not has_pools:
+            out.metrics.append(
+                _unavailable_metric(
+                    String("pool_used_bytes"),
+                    String("bytes"),
+                    uscope,
+                    "No pool source in this " + noun + ".",
+                )
             )
-        )
-        out.metrics.append(
-            _unavailable_metric(
-                String("pool_capacity_bytes"),
-                String("bytes"),
-                uscope,
-                "No pool source in this " + noun + ".",
+            out.metrics.append(
+                _unavailable_metric(
+                    String("pool_capacity_bytes"),
+                    String("bytes"),
+                    uscope,
+                    "No pool source in this " + noun + ".",
+                )
             )
-        )
 
-    def finish(mut self, end_ns: UInt64, partial: Bool) raises -> Report:
+    def finish(
+        mut self,
+        end_ns: UInt64,
+        partial: Bool,
+        has_pools: Bool = False,
+        has_regions: Bool = False,
+    ) raises -> Report:
         """Reduce the consumed stream to one Report.
 
         end_ns must equal the session window end: counts always
         cover the whole capture, so a narrowed horizon would label
         a scope the measurements do not match. Partial reports a
-        dropped truncated tail.
+        dropped truncated tail. The composed engine passes
+        has_pools/has_regions when it appends pool/region rows;
+        lifecycle scope is detected from the consumed stream
+        itself.
         """
         if (
             end_ns < self._session.window_start_ns
@@ -1481,6 +1544,63 @@ struct AttemptAnalyzer:
             raise AnalysisError("horizon outside session window")
         if end_ns != self._session.window_end_ns:
             raise AnalysisError("narrowed horizon unsupported")
+        return self._render(end_ns, partial, has_pools, has_regions)
+
+    def snapshot(
+        mut self,
+        end_ns: UInt64,
+        partial: Bool,
+        has_pools: Bool = False,
+        has_regions: Bool = False,
+    ) raises -> Report:
+        """Reduce the stream so far through the finish reducers.
+
+        Unlike finish, the horizon may narrow to a replay prefix.
+        The build checkpoints and restores its note state, so
+        snapshot and finish share every reducer with no
+        destructive finalization; the equivalence tests pin this.
+        """
+        if (
+            end_ns < self._session.window_start_ns
+            or end_ns > self._session.window_end_ns
+        ):
+            raise AnalysisError("horizon outside session window")
+        return self._render(end_ns, partial, has_pools, has_regions)
+
+    def _render(
+        mut self,
+        end_ns: UInt64,
+        partial: Bool,
+        has_pools: Bool,
+        has_regions: Bool,
+    ) raises -> Report:
+        """Build one report, restoring mutable build state after."""
+        var saved_fixed = List[String]()
+        for i in range(len(self._fixed_notes)):
+            saved_fixed.append(self._fixed_notes[i])
+        var saved_data = List[String]()
+        for i in range(len(self._data_notes)):
+            saved_data.append(self._data_notes[i])
+        var saved_text = self._disagree_text
+        var saved_extra = self._disagree_extra
+        var saved_refs = List[String]()
+        for i in range(len(self._disagree_refs)):
+            saved_refs.append(self._disagree_refs[i])
+        var out = self._build(end_ns, partial, has_pools, has_regions)
+        self._fixed_notes = saved_fixed^
+        self._data_notes = saved_data^
+        self._disagree_text = saved_text
+        self._disagree_extra = saved_extra
+        self._disagree_refs = saved_refs^
+        return out^
+
+    def _build(
+        mut self,
+        end_ns: UInt64,
+        partial: Bool,
+        has_pools: Bool,
+        has_regions: Bool,
+    ) raises -> Report:
         var out = Report()
         out.session_id = self._session.session_id
         out.synthetic = self._session.synthetic
@@ -1497,13 +1617,7 @@ struct AttemptAnalyzer:
             out.env.evidence.append(self._session.evidence[i])
         for i in range(len(self._session.devices)):
             out.devices.append(self._session.devices[i])
-        var window = (
-            "window ["
-            + format_u64(self._session.window_start_ns)
-            + ","
-            + format_u64(end_ns)
-            + ")"
-        )
+        var window = window_label(self._session.window_start_ns, end_ns)
         var noun = String("capture")
         if self._session.synthetic:
             noun = String("fixture")
@@ -1514,13 +1628,32 @@ struct AttemptAnalyzer:
                     " no guest was booted and no hook attached."
                 )
             )
-        self._note_fixed(
-            String(
-                "This analyzer reduces bounce attempts and counter deltas"
-                " only; lifecycle, copy, sync, conversion, region, pool, and"
-                " task-context metrics are unavailable."
+        if has_regions:
+            self._note_fixed(
+                String(
+                    "This analyzer reduces bounce attempts, counter"
+                    " deltas, and observed lifecycle/pool/region"
+                    " scope; task-context metrics are unavailable."
+                )
             )
-        )
+        elif self._saw_lifecycle() or has_pools:
+            self._note_fixed(
+                String(
+                    "This analyzer reduces bounce attempts, counter"
+                    " deltas, and observed lifecycle/pool scope;"
+                    " conversion, region, and task-context metrics"
+                    " are unavailable."
+                )
+            )
+        else:
+            self._note_fixed(
+                String(
+                    "This analyzer reduces bounce attempts and counter"
+                    " deltas only; lifecycle, copy, sync, conversion,"
+                    " region, pool, and task-context metrics are"
+                    " unavailable."
+                )
+            )
         if self._snapshot_total() == 0:
             self._note_fixed(
                 String(
@@ -1557,7 +1690,9 @@ struct AttemptAnalyzer:
                 )
             )
         out.q_terminal = self._build_terminal(partial)
-        self._build_metrics(out, window, noun, order, partial)
+        self._build_metrics(
+            out, window, noun, order, partial, has_pools, has_regions
+        )
         self._compare_counters(out)
         var causes = List[String]()
         var refs = List[String]()

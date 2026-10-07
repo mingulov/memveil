@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Tier 1: unprivileged offline suites. Safe for pull requests
+# from any source: no privileges, no network fixtures, no
+# secrets. Every lane must pass; none may skip silently.
+#
+# The lanes need the locked toolchain (toolchain.lock.json):
+# ubuntu-26.04 ships its generations, apt provisions the
+# system tools, and tools/build verifies every exact version
+# before compiling. The libbpf_mojo import tree comes from
+# the vendored pinned tarball via LMB_PACKAGE (hash-checked
+# here and re-verified by the build); without it the build
+# fails instead of compiling a bridge-less binary.
+name: offline
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  offline:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pixi
+        run: |
+          curl -fsSL https://pixi.sh/install.sh | \
+            PIXI_VERSION=0.81.0 bash
+          echo "$HOME/.pixi/bin" >> "$GITHUB_PATH"
+      - name: Install system toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang bpftool cmake ninja-build
+      - name: Provision libbpf-mojo tarball
+        run: |
+          VER="$(python3 -c "import json; print(json.load(open('toolchain.lock.json'))['dependencies']['libbpf-mojo']['version'])")"
+          TARBALL="third_party/libbpf-mojo-$VER.tar.gz"
+          WANT="$(python3 -c "import json; print(json.load(open('toolchain.lock.json'))['dependencies']['libbpf-mojo']['tarball_sha256'])")"
+          echo "$WANT  $TARBALL" | sha256sum --check -
+          echo "LMB_PACKAGE=$GITHUB_WORKSPACE/$TARBALL" >> "$GITHUB_ENV"
+      - name: Build
+        run: ./tools/build
+      - name: Offline suites
+        run: |
+          for suite in schemas unit reports profiles doctor \
+              identity correlation mappings lifetimes pools \
+              diagnostics top oracle-ledger profile-semantics \
+              stop budgets quality reader-adversarial \
+              fuzz-smoke record-failures output-paths privacy \
+              render-escaping offline-environment perf-replay \
+              preview-package; do
+            ./tools/test "$suite" || exit 1
+          done

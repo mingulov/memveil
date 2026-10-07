@@ -89,7 +89,9 @@ Implemented in `src/memveil/` with owning tests per feature:
 
 ## Dependencies
 
-`libbpf-mojo` is consumed as a pinned source archive or package; release
-builds never use an implicit sibling path. During development an explicit
-local path override may be used. The pin is recorded in
-`toolchain.lock.json` once the first library artifact exists.
+`libbpf-mojo` is consumed as a pinned source archive, vendored at
+`third_party/libbpf-mojo-<version>.tar.gz` and verified against the
+`tarball_sha256` pin in `toolchain.lock.json` on every build; release
+builds never use an implicit sibling path. `LMB_PACKAGE` overrides the
+vendored bytes with another tarball, which must match the same pin
+before the build accepts it.

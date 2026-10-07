@@ -623,6 +623,37 @@ def test_session_rejects_empty_reason() raises:
     assert_true(raised)
 
 
+def test_session_retains_baseline_observations() raises:
+    var base = fixture_text(ATTEMPTS_SESSION)
+    var seeded = base.replace(
+        String('"region_observations": []'),
+        String(
+            '"region_observations": [{"region_id": "r1", "state":'
+            ' "shared", "offset": "0", "length": "8192",'
+            ' "address_space": "guest_physical", "provenance":'
+            ' "test-seed"}, {"region_id": "r2", "state": "unknown",'
+            ' "offset": "8192", "length": "4096", "address_space":'
+            ' "guest_physical", "provenance": "test-seed"}]'
+        ),
+    )
+    var s = parse_session(utf8_bytes(seeded))
+    assert_equal(s.baseline_region_count, 2)
+    assert_equal(len(s.baseline_regions), 2)
+    assert_equal(s.baseline_regions[0].region_id, "r1")
+    assert_equal(s.baseline_regions[0].state, "shared")
+    assert_equal(s.baseline_regions[0].offset, UInt64(0))
+    assert_equal(s.baseline_regions[0].length, UInt64(8192))
+    assert_equal(
+        s.baseline_regions[0].address_space, "guest_physical"
+    )
+    assert_equal(s.baseline_regions[0].provenance, "test-seed")
+    assert_equal(s.baseline_regions[1].region_id, "r2")
+    assert_equal(s.baseline_regions[1].state, "unknown")
+    var c = s.copy()
+    assert_equal(len(c.baseline_regions), 2)
+    assert_equal(c.baseline_regions[0].region_id, "r1")
+
+
 def test_parse_event_bounce() raises:
     var line = first_line("tests/fixtures/attempts/events.ndjson")
     var e = parse_event(utf8_bytes(line))
@@ -1455,6 +1486,14 @@ def test_reader_f2_lifecycle_ok() raises:
     )
     assert_equal(len(drain_events(f)), 4)
     assert_true(not f.partial)
+    # Copies and syncs repeat freely under one operation; only
+    # attempts and map results claim an operation once.
+    var g = read_capture(
+        String("tests/fixtures/reader/f2-repeat-copy-sync-ok"), False,
+        default_limits(),
+    )
+    assert_equal(len(drain_events(g)), 8)
+    assert_true(not g.partial)
 
 
 def test_reader_multi_chunk() raises:
@@ -1629,6 +1668,7 @@ def run() raises -> Int:
     suite.test[test_session_optionals]()
     suite.test[test_session_tristate_optionals]()
     suite.test[test_session_rejects_empty_reason]()
+    suite.test[test_session_retains_baseline_observations]()
     suite.test[test_parse_event_bounce]()
     suite.test[test_parse_event_kinds]()
     suite.test[test_parse_event_observer]()

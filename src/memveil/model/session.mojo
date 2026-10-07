@@ -21,6 +21,11 @@ from memveil.model.common import (
     parse_maybe_string,
     parse_u64_field,
 )
+from memveil.model.regions import (
+    RegionObservation,
+    check_region_space,
+    check_region_state,
+)
 from memveil.model.validate import (
     ValidationError,
     check_bounded_text,
@@ -202,23 +207,6 @@ def _check_channel_status(v: String) raises:
     ):
         return
     raise ValidationError("channel.status", "bad enum")
-
-
-def _check_region_state(v: String) raises:
-    if v == "shared" or v == "private" or v == "unknown":
-        return
-    raise ValidationError("region_observation.state", "bad enum")
-
-
-def _check_address_space(v: String) raises:
-    if (
-        v == "guest_physical"
-        or v == "kernel_virtual"
-        or v == "iova"
-        or v == "identity_only"
-    ):
-        return
-    raise ValidationError("address_space", "bad enum")
 
 
 def _parse_evidence_item(mut scan: Scanner) raises -> EvidenceItem:
@@ -460,17 +448,16 @@ def _parse_channel(mut scan: Scanner, what: String) raises -> Channel:
     return out^
 
 
-def _parse_region_observation(mut scan: Scanner) raises:
-    """Validate one baseline region observation; only the count is kept."""
+def _parse_region_observation(mut scan: Scanner) raises -> RegionObservation:
+    """Parse one baseline region observation with full detail kept."""
     scan.begin_object()
+    var out = RegionObservation()
     var has_region = False
     var has_state = False
     var has_offset = False
     var has_length = False
     var has_space = False
     var has_prov = False
-    var offset = UInt64(0)
-    var length = UInt64(0)
     if not object_is_empty(scan):
         while True:
             scan.skip_ws()
@@ -484,32 +471,38 @@ def _parse_region_observation(mut scan: Scanner) raises:
                     check_opaque_id(v)
                 except e:
                     raise ValidationError("region_id", String(e))
+                out.region_id = v
                 has_region = True
             elif key == "state":
                 if has_state:
                     raise ValidationError("state", "duplicate")
-                _check_region_state(scan.parse_string())
+                var v = scan.parse_string()
+                check_region_state(v)
+                out.state = v
                 has_state = True
             elif key == "offset":
                 if has_offset:
                     raise ValidationError("offset", "duplicate")
-                offset = parse_u64_field(scan, "region_observation.offset")
+                out.offset = parse_u64_field(scan, "region_observation.offset")
                 has_offset = True
             elif key == "length":
                 if has_length:
                     raise ValidationError("length", "duplicate")
-                length = parse_u64_field(scan, "region_observation.length")
+                out.length = parse_u64_field(scan, "region_observation.length")
                 has_length = True
             elif key == "address_space":
                 if has_space:
                     raise ValidationError("address_space", "duplicate")
-                _check_address_space(scan.parse_string())
+                var v = scan.parse_string()
+                check_region_space(v)
+                out.address_space = v
                 has_space = True
             elif key == "provenance":
                 if has_prov:
                     raise ValidationError("provenance", "duplicate")
                 var v = scan.parse_string()
                 check_bounded_text(v, 1, 512, "region_observation.provenance")
+                out.provenance = v
                 has_prov = True
             else:
                 raise ValidationError("region_observation", "unknown region_observation field")
@@ -526,9 +519,10 @@ def _parse_region_observation(mut scan: Scanner) raises:
     ):
         raise ValidationError("region_observation", "missing field")
     try:
-        _ = checked_add(offset, length)
+        _ = checked_add(out.offset, out.length)
     except:
         raise ValidationError("region_observation", "span overflows")
+    return out^
 
 
 def _parse_environment(mut scan: Scanner, mut out: Session) raises:
@@ -788,13 +782,15 @@ def _parse_device_catalog(mut scan: Scanner) raises -> List[DeviceEntry]:
     return out^
 
 
-struct _Baseline(ImplicitlyCopyable):
+struct _Baseline(Copyable, Movable):
     var complete: Bool
     var region_count: Int
+    var regions: List[RegionObservation]
 
     def __init__(out self):
         self.complete = False
         self.region_count = 0
+        self.regions = List[RegionObservation]()
 
 
 def _parse_baseline(mut scan: Scanner) raises -> _Baseline:
@@ -822,7 +818,8 @@ def _parse_baseline(mut scan: Scanner) raises -> _Baseline:
                 if not array_is_empty(scan):
                     while True:
                         scan.skip_ws()
-                        _parse_region_observation(scan)
+                        var one = _parse_region_observation(scan)
+                        out.regions.append(one^)
                         out.region_count += 1
                         if out.region_count > MAX_REGION_OBSERVATIONS:
                             raise ValidationError(
@@ -874,6 +871,7 @@ struct Session(Copyable):
     var devices: List[DeviceEntry]
     var baseline_complete: Bool
     var baseline_region_count: Int
+    var baseline_regions: List[RegionObservation]
     var cap_bounce_attempts: Capability
     var cap_mapping_lifecycle: Capability
     var cap_copy_bytes: Capability
@@ -915,6 +913,7 @@ struct Session(Copyable):
         self.devices = List[DeviceEntry]()
         self.baseline_complete = False
         self.baseline_region_count = 0
+        self.baseline_regions = List[RegionObservation]()
         self.cap_bounce_attempts = Capability()
         self.cap_mapping_lifecycle = Capability()
         self.cap_copy_bytes = Capability()
@@ -956,6 +955,7 @@ struct Session(Copyable):
         self.devices = existing.devices.copy()
         self.baseline_complete = existing.baseline_complete
         self.baseline_region_count = existing.baseline_region_count
+        self.baseline_regions = existing.baseline_regions.copy()
         self.cap_bounce_attempts = existing.cap_bounce_attempts.copy()
         self.cap_mapping_lifecycle = existing.cap_mapping_lifecycle.copy()
         self.cap_copy_bytes = existing.cap_copy_bytes.copy()
@@ -1188,6 +1188,7 @@ def parse_session(data: List[UInt8]) raises -> Session:
                 var b = _parse_baseline(scan)
                 out.baseline_complete = b.complete
                 out.baseline_region_count = b.region_count
+                out.baseline_regions = b.regions.copy()
                 has_baseline = True
             elif key == "capabilities":
                 if has_caps:
