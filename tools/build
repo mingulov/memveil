@@ -206,7 +206,9 @@ def resolve_tarball():
     # then kept), else the kept copy from a previous verified
     # unpack, else the vendored in-tree tarball (verified, then
     # kept). Every candidate must match the lock pin. Returns a
-    # path or "".
+    # path or "". The deps dir may not exist on a first build
+    # from a fresh export, so create it before keeping bytes.
+    os.makedirs(deps, exist_ok=True)
     if tarball:
         if not os.path.isfile(tarball):
             print("FAIL LMB_PACKAGE not found: %s" % tarball)
