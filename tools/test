@@ -1304,6 +1304,24 @@ suite_attempts() {
     python3 "$JASSERT" evidence "$TMP/zero.report.json" \
         measurement_scope "ordinals below observed at the end cut" \
         || afailed=1
+    "$CPROBE" attachwin "$TMP/attachwin" >"$TMP/attachwin.log" 2>&1
+    awant attachwin "ready session=cap-1000-4242 start_ns=1000"
+    awant attachwin "exit=4"
+    awant attachwin "end=duration"
+    awant attachwin "outcome=finalized"
+    awant attachwin "polls=104"
+    awant attachwin "stats=5"
+    awant attachwin "snaps=4"
+    awant attachwin "reads=14"
+    python3 "$JASSERT" field "$TMP/attachwin/session.json" \
+        capture.end_reason duration || afailed=1
+    python3 "$JASSERT" field "$TMP/attachwin/session.json" \
+        capture.window.start_ns 20000000000 || afailed=1
+    python3 "$JASSERT" field "$TMP/attachwin/session.json" \
+        capture.window.baseline_start_ns 1002 || afailed=1
+    python3 "$JASSERT" events "$TMP/attachwin/events.ndjson" \
+        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot" \
+        || afailed=1
     # Compact per-case assertions for the scripted matrix.
     mcase() { # <case> <exit> <polls> <stats> <snaps> <reads> <committed> <events>
         "$CPROBE" "$1" "$TMP/$1" >"$TMP/$1.log" 2>&1
@@ -1944,6 +1962,7 @@ suite_writer() {
             tests/fixtures/reader/adv-nul/events.ndjson|\
             tests/fixtures/reader/adv-unknown-field/events.ndjson|\
             tests/fixtures/reader/badkind/events.ndjson|\
+            tests/fixtures/reader/baseline-after-window/session.json|\
             tests/fixtures/reader/compat-major/session.json|\
             tests/fixtures/reader/corrupt-tail/events.ndjson|\
             tests/fixtures/reader/f2-contradictory-provenance/session.json|\

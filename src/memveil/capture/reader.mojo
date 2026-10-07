@@ -321,7 +321,16 @@ struct CaptureReader:
             raise ReadError(
                 READ_INVALID, lineno, "line " + String(lineno) + ": seq order"
             )
-        if ev.ts_ns < self.session.window_start_ns:
+        # Snapshots are admissible from the vouched baseline cut
+        # (read before the ring existed); every other record must
+        # lie inside the readiness-anchored window.
+        var floor = self.session.window_start_ns
+        if (
+            ev.kind == "counter_snapshot"
+            and self.session.has_baseline_start_ns
+        ):
+            floor = self.session.baseline_start_ns
+        if ev.ts_ns < floor:
             raise ReadError(
                 READ_INVALID, lineno, "line " + String(lineno) + ": ts before"
             )

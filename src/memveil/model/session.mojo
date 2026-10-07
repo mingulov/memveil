@@ -606,6 +606,8 @@ struct _Capture(ImplicitlyCopyable):
     var mode: String
     var window_start_ns: UInt64
     var window_end_ns: UInt64
+    var has_baseline_start_ns: Bool
+    var baseline_start_ns: UInt64
     var has_filter_device: Bool
     var filter_device: String
     var finalized: Bool
@@ -616,6 +618,8 @@ struct _Capture(ImplicitlyCopyable):
         self.mode = String("")
         self.window_start_ns = UInt64(0)
         self.window_end_ns = UInt64(0)
+        self.has_baseline_start_ns = False
+        self.baseline_start_ns = UInt64(0)
         self.has_filter_device = False
         self.filter_device = String("")
         self.finalized = False
@@ -628,6 +632,7 @@ def _parse_window(mut scan: Scanner) raises -> _Capture:
     var out = _Capture()
     var has_start = False
     var has_end = False
+    var has_baseline = False
     if not object_is_empty(scan):
         while True:
             scan.skip_ws()
@@ -643,6 +648,16 @@ def _parse_window(mut scan: Scanner) raises -> _Capture:
                     raise ValidationError("window.end_ns", "duplicate")
                 out.window_end_ns = parse_u64_field(scan, "window.end_ns")
                 has_end = True
+            elif key == "baseline_start_ns":
+                if has_baseline:
+                    raise ValidationError(
+                        "window.baseline_start_ns", "duplicate"
+                    )
+                out.baseline_start_ns = parse_u64_field(
+                    scan, "window.baseline_start_ns"
+                )
+                out.has_baseline_start_ns = True
+                has_baseline = True
             else:
                 raise ValidationError("window", "unknown window field")
             if not object_next(scan, "window"):
@@ -705,6 +720,8 @@ def _parse_capture(mut scan: Scanner) raises -> _Capture:
                 var w = _parse_window(scan)
                 out.window_start_ns = w.window_start_ns
                 out.window_end_ns = w.window_end_ns
+                out.has_baseline_start_ns = w.has_baseline_start_ns
+                out.baseline_start_ns = w.baseline_start_ns
                 has_window = True
             elif key == "filters":
                 if has_filters:
@@ -738,6 +755,11 @@ def _parse_capture(mut scan: Scanner) raises -> _Capture:
         raise ValidationError("capture", "missing field")
     if out.window_start_ns > out.window_end_ns:
         raise ValidationError("window", "start after end")
+    if (
+        out.has_baseline_start_ns
+        and out.baseline_start_ns > out.window_start_ns
+    ):
+        raise ValidationError("window", "baseline after start")
     return out^
 
 
@@ -863,6 +885,8 @@ struct Session(Copyable):
     var capture_mode: String
     var window_start_ns: UInt64
     var window_end_ns: UInt64
+    var has_baseline_start_ns: Bool
+    var baseline_start_ns: UInt64
     var has_filter_device: Bool
     var filter_device: String
     var finalized: Bool
@@ -905,6 +929,8 @@ struct Session(Copyable):
         self.capture_mode = String("")
         self.window_start_ns = UInt64(0)
         self.window_end_ns = UInt64(0)
+        self.has_baseline_start_ns = False
+        self.baseline_start_ns = UInt64(0)
         self.has_filter_device = False
         self.filter_device = String("")
         self.finalized = False
@@ -947,6 +973,8 @@ struct Session(Copyable):
         self.capture_mode = existing.capture_mode
         self.window_start_ns = existing.window_start_ns
         self.window_end_ns = existing.window_end_ns
+        self.has_baseline_start_ns = existing.has_baseline_start_ns
+        self.baseline_start_ns = existing.baseline_start_ns
         self.has_filter_device = existing.has_filter_device
         self.filter_device = existing.filter_device
         self.finalized = existing.finalized
@@ -1171,6 +1199,8 @@ def parse_session(data: List[UInt8]) raises -> Session:
                 out.capture_mode = c.mode
                 out.window_start_ns = c.window_start_ns
                 out.window_end_ns = c.window_end_ns
+                out.has_baseline_start_ns = c.has_baseline_start_ns
+                out.baseline_start_ns = c.baseline_start_ns
                 out.has_filter_device = c.has_filter_device
                 out.filter_device = c.filter_device
                 out.finalized = c.finalized

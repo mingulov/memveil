@@ -815,7 +815,9 @@ struct Collector:
         var dur_ns = u64_max()
         if self.cfg.duration_s <= u64_max() // UInt64(1000000000):
             dur_ns = self.cfg.duration_s * UInt64(1000000000)
-        var deadline = checked_add(self.start_ns, dur_ns)
+        # The duration budget starts at readiness (attach),
+        # not at pre-init: init latency must not burn it.
+        var deadline = checked_add(self.attach_ns, dur_ns)
         while True:
             var sig = signal.check()
             if sig.state == String("pending"):
@@ -1091,7 +1093,7 @@ struct Collector:
         ev.gap.reason = (
             String("detail closure unproven: ") + self.unknown_cause
         )
-        ev.gap.window_start_ns = self.start_ns
+        ev.gap.window_start_ns = self.attach_ns
         ev.gap.window_end_ns = self.end_ns
         return encode_event_line(ev)
 
@@ -1397,8 +1399,10 @@ struct Collector:
         out.asserted_mode_present = False
         out.env_attestation = String("not_performed")
         out.capture_mode = String("live")
-        out.window_start_ns = self.start_ns
+        out.window_start_ns = self.attach_ns
         out.window_end_ns = self.end_ns
+        out.has_baseline_start_ns = True
+        out.baseline_start_ns = self.start_pair_ts
         out.has_filter_device = False
         out.finalized = True
         out.has_end_reason = True

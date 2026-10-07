@@ -231,6 +231,8 @@ def sessions_equal(a: Session, b: Session) -> Bool:
         or a.capture_mode != b.capture_mode
         or a.window_start_ns != b.window_start_ns
         or a.window_end_ns != b.window_end_ns
+        or a.has_baseline_start_ns != b.has_baseline_start_ns
+        or a.baseline_start_ns != b.baseline_start_ns
         or a.has_filter_device != b.has_filter_device
         or a.filter_device != b.filter_device
         or a.finalized != b.finalized

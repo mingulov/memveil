@@ -1346,6 +1346,37 @@ def test_reader_cross_record() raises:
     )
 
 
+def test_reader_baseline_floor() raises:
+    var old = parse_session(
+        fixture_bytes(
+            String("tests/fixtures/reader/counters-single/session.json")
+        )
+    )
+    assert_true(not old.has_baseline_start_ns)
+    var r = read_capture(
+        String("tests/fixtures/reader/snap-baseline-ok"),
+        False,
+        default_limits(),
+    )
+    assert_true(r.session.has_baseline_start_ns)
+    assert_equal(r.session.baseline_start_ns, UInt64(50))
+    var events = drain_events(r)
+    assert_equal(len(events), 3)
+    var limits = default_limits()
+    expect_read_error(
+        String("tests/fixtures/reader/snap-baseline-low"), False,
+        limits, READ_INVALID, 1,
+    )
+    expect_read_error(
+        String("tests/fixtures/reader/obs-baseline-gap"), False,
+        limits, READ_INVALID, 1,
+    )
+    expect_read_error(
+        String("tests/fixtures/reader/baseline-after-window"), False,
+        limits, READ_PARSE, 0,
+    )
+
+
 def test_reader_limits_exact() raises:
     var dir = String("tests/fixtures/attempts")
     var session_size = len(fixture_bytes(dir + "/session.json"))
@@ -1679,6 +1710,7 @@ def run() raises -> Int:
     suite.test[test_event_rejects_bad_observer]()
     suite.test[test_read_attempts_capture]()
     suite.test[test_reader_cross_record]()
+    suite.test[test_reader_baseline_floor]()
     suite.test[test_reader_limits_exact]()
     suite.test[test_reader_size_fixtures]()
     suite.test[test_reader_partial_tail]()

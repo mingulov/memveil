@@ -551,6 +551,13 @@ def encode_session(s: Session) raises EncodeError -> String:
         _member(String("start_ns"), _ju64(s.window_start_ns))
     )
     window.append(_member(String("end_ns"), _ju64(s.window_end_ns)))
+    if s.has_baseline_start_ns:
+        window.append(
+            _member(
+                String("baseline_start_ns"),
+                _ju64(s.baseline_start_ns),
+            )
+        )
     capture.append(_member(String("window"), _jobj(window^)))
     var filters = List[String]()
     if s.has_filter_device:
