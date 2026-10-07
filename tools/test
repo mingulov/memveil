@@ -1095,7 +1095,8 @@ suite_privacy() {
     fi
     python3 "$ROOT/tests/privacy/test_canaries.py" || return 1
     python3 "$ROOT/tests/privacy/test_metadata_allowlist.py" || return 1
-    python3 "$ROOT/tests/privacy/test_suite_skip_codes.py"
+    python3 "$ROOT/tests/privacy/test_suite_skip_codes.py" || return 1
+    python3 "$ROOT/tests/privacy/test_pytest_guard.py"
 }
 
 suite_render_escaping() {
