@@ -228,9 +228,11 @@ int BPF_PROG(mv_bounce, struct device *dev, mv_phys_addr_t tlb_addr,
         reason = MV_CP_REASON_BOUNDS;
     else if (bpf_probe_read_kernel(&slot, sizeof(slot), slots + idx))
         reason = MV_CP_REASON_SLOT_READ;
-    else if ((parms = BPF_CORE_READ(dev, dma_parms)) &&
-             bpf_probe_read_kernel(&mask, sizeof(mask),
-                                   &parms->min_align_mask))
+    else if (bpf_core_read(&parms, sizeof(parms), &dev->dma_parms))
+        reason = MV_CP_REASON_MASK_READ;
+    else if (parms &&
+             bpf_core_read(&mask, sizeof(mask),
+                           &parms->min_align_mask))
         reason = MV_CP_REASON_MASK_READ;
     else {
         /* The hook's tlb_offset math, verbatim signs: both

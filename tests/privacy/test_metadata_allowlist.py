@@ -108,16 +108,18 @@ def main():
     # Frozen per-file audit: (bpf_probe_read_kernel,
     # BPF_CORE_READ) counts. Attempt reads its fixed context
     # plus the device name; lifecycle reads nothing (fentry
-    # args only); copy reads one pool slot plus the device
-    # align mask to replicate the hook's clamp. Transient
-    # kernel reads never reach a record: emitted bytes are
-    # sizes, directions, and outcome flags only. A new probe
+    # args only); copy reads one pool slot (bulk copy over a
+    # relocated pointer) plus the device align mask through two
+    # checked relocating reads to replicate the hook's clamp.
+    # Transient kernel reads never reach a record: emitted bytes
+    # are sizes, directions, and outcome flags only. A new probe
     # file, or a new read in an old file, fails here until
-    # reviewed.
+    # reviewed. Tuples are (bpf_probe_read_kernel,
+    # BPF_CORE_READ, bpf_core_read) call sites.
     read_sites = {
-        "swiotlb_attempt.bpf.c": (2, 0),
-        "swiotlb_copy.bpf.c": (2, 4),
-        "swiotlb_lifecycle.bpf.c": (0, 0),
+        "swiotlb_attempt.bpf.c": (2, 0, 0),
+        "swiotlb_copy.bpf.c": (1, 3, 2),
+        "swiotlb_lifecycle.bpf.c": (0, 0, 0),
     }
     check("bpf-files-frozen",
           sorted(os.path.basename(p) for p in progs) ==
@@ -131,9 +133,10 @@ def main():
                   token not in text, base)
         sites = text.count("bpf_probe_read_kernel")
         core = text.count("BPF_CORE_READ")
+        core_fn = len(re.findall(r"bpf_core_read\s*\(", text))
         check("bpf-read-sites",
-              (sites, core) == read_sites[base],
-              "%s has %d+%d sites" % (base, sites, core))
+              (sites, core, core_fn) == read_sites[base],
+              "%s has %d+%d+%d sites" % (base, sites, core, core_fn))
     headers = sorted(glob.glob(os.path.join(REPO, "bpf", "include", "*.h")))
     for path in headers:
         text = open(path).read()
