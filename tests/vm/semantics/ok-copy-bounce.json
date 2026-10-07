@@ -1,0 +1,43 @@
+{
+  "definition": {
+    "hook": "fentry:swiotlb_bounce",
+    "kind": "fentry",
+    "target": "swiotlb_bounce",
+    "signature": {
+      "return": "void",
+      "params": [
+        "struct device *",
+        "phys_addr_t",
+        "size_t",
+        "enum dma_data_direction",
+        "struct io_tlb_pool *"
+      ]
+    },
+    "btf_anchor": {
+      "release": "7.0.0-34-generic",
+      "id": 154898
+    },
+    "authority": "kernel-source",
+    "adapter_len": 2037,
+    "inlined": false,
+    "available": true
+  },
+  "recorded": {
+    "signature": {
+      "return": "void",
+      "params": [
+        "struct device *",
+        "phys_addr_t",
+        "size_t",
+        "enum dma_data_direction",
+        "struct io_tlb_pool *"
+      ]
+    },
+    "btf_anchor": {
+      "release": "7.0.0-34-generic",
+      "id": 154898
+    }
+  },
+  "expect_ok": true,
+  "expect_reason": ""
+}

@@ -35,8 +35,9 @@ def main():
     probe = os.path.join(REPO, "build", "bpf",
                          "swiotlb_lifecycle.bpf.o")
     if not os.path.isfile(probe):
-        print("perf-workload: SKIP: lifecycle probes not qualified")
-        return 77
+        print("FAIL perf-workload: armed but lifecycle probes "
+              "not qualified")
+        return 1
     print("FAIL perf-workload: armed but the live workload flow "
           "is not implemented")
     return 1

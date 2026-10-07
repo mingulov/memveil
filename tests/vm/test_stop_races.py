@@ -22,8 +22,8 @@ def main():
     probe = os.path.join(REPO, "build", "bpf",
                          "swiotlb_lifecycle.bpf.o")
     if not os.path.isfile(probe):
-        print("vm-stop: SKIP: lifecycle probes not qualified")
-        return 77
+        print("FAIL vm-stop: armed but lifecycle probes not qualified")
+        return 1
     print("FAIL vm-stop: armed but the live stop-race flow "
           "is not implemented")
     return 1

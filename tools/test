@@ -968,8 +968,8 @@ vm_lifecycle_preflight() {
         return 77
     fi
     if [ ! -f "$ROOT/build/bpf/swiotlb_lifecycle.bpf.o" ]; then
-        echo "$1: SKIP: lifecycle probes not qualified" >&2
-        return 77
+        echo "$1: FAIL: armed but lifecycle probes not qualified" >&2
+        return 1
     fi
     return 0
 }

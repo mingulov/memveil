@@ -23,8 +23,9 @@ def main():
     probe = os.path.join(REPO, "build", "bpf",
                          "swiotlb_lifecycle.bpf.o")
     if not os.path.isfile(probe):
-        print("vm-cleanup: SKIP: lifecycle probes not qualified")
-        return 77
+        print("FAIL vm-cleanup: armed but lifecycle probes "
+              "not qualified")
+        return 1
     print("FAIL vm-cleanup: armed but the live cleanup flow "
           "is not implemented")
     return 1

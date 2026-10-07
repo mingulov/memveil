@@ -13,7 +13,13 @@
  *   OK, CTX_SHORT, CTX_LOC_OOB, CTX_DLEN_ZERO, CTX_DLEN_BIG,
  *   CTX_NUL_MISSING, CTX_NUL_EARLY, CTX_FORCE_BAD,
  *   PAY_SHORT, PAY_LONG, PAY_MAGIC, PAY_VERSION, PAY_FLAGS,
- *   PAY_NAMELEN, PAY_NUL, PAY_PAD.
+ *   PAY_NAMELEN, PAY_NUL, PAY_PAD,
+ *   PAY_KIND, PAY_DIR, PAY_REASON.
+ *
+ * Lifecycle (MVLC) and copy (MVCP) v1 records carry no device
+ * identity yet: pairing map/unmap across events is later
+ * product work and will extend the versioned wire. v1 proves
+ * attachment, per-event facts, and executed-byte exactness.
  */
 #ifndef MEMVEIL_EVENTS_H
 #define MEMVEIL_EVENTS_H
@@ -27,6 +33,7 @@ typedef uint8_t __u8;
 typedef uint16_t __u16;
 typedef uint32_t __u32;
 typedef uint64_t __u64;
+typedef int64_t __s64;
 #endif
 
 /* Product payload: exactly 98 bytes, little-endian, packed. */
@@ -85,7 +92,10 @@ enum mv_reason {
     MV_PAY_FLAGS,
     MV_PAY_NAMELEN,
     MV_PAY_NUL,
-    MV_PAY_PAD
+    MV_PAY_PAD,
+    MV_PAY_KIND,
+    MV_PAY_DIR,
+    MV_PAY_REASON
 };
 
 /* Decoded attempt fields (host struct, not wire layout). */
@@ -201,5 +211,250 @@ _Static_assert(MV_OFF_NAME + MV_NAME_MAX + 1 == MV_PAYLOAD_LEN,
 _Static_assert(MV_CTX_FIXED == 41, "dynamic-data floor");
 _Static_assert(MV_CTX_READ_CAP == 512, "context read cap");
 _Static_assert(MV_CNT_LEN == 6, "counter map length");
+
+/* Lifecycle v1 record: exactly 36 bytes, little-endian, packed.
+ * kind 1 = fexit swiotlb_tbl_map_single (ok = slots found),
+ * kind 2 = fentry __swiotlb_tbl_unmap_single (skip_sync from
+ * attrs bit 5). dir is the raw enum dma_data_direction value
+ * (0..2); 3+ never emits. No addresses, no names. */
+#define MV_LC_LEN 36
+#define MV_LC_MAGIC 0x434C564Du /* "MVLC" */
+#define MV_LC_VERSION 1u
+#define MV_LC_KIND_MAP 1u
+#define MV_LC_KIND_UNMAP 2u
+#define MV_LC_FLAG_OK 0x1u
+#define MV_LC_FLAG_SKIP_SYNC 0x2u
+
+#define MV_LC_OFF_MAGIC 0u
+#define MV_LC_OFF_VERSION 4u
+#define MV_LC_OFF_KIND 6u
+#define MV_LC_OFF_FLAGS 8u
+#define MV_LC_OFF_DIR 10u
+#define MV_LC_OFF_SEQ 12u
+#define MV_LC_OFF_KTIME 20u
+#define MV_LC_OFF_SIZE 28u
+
+/* Copy v1 record: exactly 48 bytes, little-endian, packed.
+ * kind 1 = sync request (carries no executed bytes by
+ * definition; to_device reads as for_device), kind 2 =
+ * executed swiotlb_bounce copy with replicated effective
+ * bytes. effective is valid only when KNOWN is set; an
+ * unknown record must name its reason, and a known record
+ * must carry reason NONE. Sync records always carry reason
+ * NOT_COPY; copy_exec dir is 1..2 only. */
+#define MV_CP_LEN 48
+#define MV_CP_MAGIC 0x5043564Du /* "MVCP" */
+#define MV_CP_VERSION 1u
+#define MV_CP_KIND_SYNC 1u
+#define MV_CP_KIND_COPY 2u
+#define MV_CP_FLAG_TO_DEVICE 0x1u
+#define MV_CP_FLAG_KNOWN 0x2u
+#define MV_CP_FLAG_CLAMPED 0x4u
+#define MV_CP_FLAG_EARLY_ZERO 0x8u
+#define MV_CP_REASON_NONE 0u
+#define MV_CP_REASON_SLOT_READ 1u
+#define MV_CP_REASON_MASK_READ 2u
+#define MV_CP_REASON_BOUNDS 3u
+#define MV_CP_REASON_NOT_COPY 4u
+
+#define MV_CP_OFF_MAGIC 0u
+#define MV_CP_OFF_VERSION 4u
+#define MV_CP_OFF_KIND 6u
+#define MV_CP_OFF_FLAGS 8u
+#define MV_CP_OFF_DIR 10u
+#define MV_CP_OFF_SEQ 12u
+#define MV_CP_OFF_KTIME 20u
+#define MV_CP_OFF_REQUESTED 28u
+#define MV_CP_OFF_EFFECTIVE 36u
+#define MV_CP_OFF_REASON 44u
+
+/* Failure sentinel shared by the map hooks: (phys_addr_t)
+ * DMA_MAPPING_ERROR, i.e. all bits set. */
+#define MV_INVALID_PHYS 0xFFFFFFFFFFFFFFFFULL
+
+/* Decoded lifecycle/copy fields (host structs, not wire). */
+struct mv_lifecycle {
+    __u16 kind;
+    __u8 ok;
+    __u8 skip_sync;
+    __u16 dir;
+    __u64 seq;
+    __u64 ktime;
+    __u64 size;
+};
+
+struct mv_copy {
+    __u16 kind;
+    __u8 to_device;
+    __u8 known;
+    __u8 clamped;
+    __u8 early_zero;
+    __u16 dir;
+    __u16 reason;
+    __u64 seq;
+    __u64 ktime;
+    __u64 requested;
+    __u64 effective;
+};
+
+/* Replicated swiotlb_bounce length rule: an invalid slot
+ * copies nothing (hook early return); otherwise the request
+ * is clamped to alloc_size - tlb_offset with the hook's
+ * signed offset math (negative offsets are valid and widen
+ * the room). Saturates instead of wrapping. */
+struct mv_effective {
+    __u64 effective;
+    __u8 clamped;
+    __u8 early_zero;
+};
+
+static __inline struct mv_effective mv_effective_bytes(__u64 size,
+                                                       __s64 tlb_offset,
+                                                       __u64 alloc_size,
+                                                       int orig_valid)
+{
+    struct mv_effective out;
+    __u64 room;
+
+    out.effective = 0;
+    out.clamped = 0;
+    out.early_zero = 0;
+    if (!orig_valid) {
+        out.early_zero = 1;
+        return out;
+    }
+    if (tlb_offset < 0) {
+        __u64 widen = (__u64)(-(tlb_offset + 1)) + (__u64)1;
+
+        if (widen > 0xFFFFFFFFFFFFFFFFULL - alloc_size)
+            room = 0xFFFFFFFFFFFFFFFFULL;
+        else
+            room = alloc_size + widen;
+    } else if ((__u64)tlb_offset >= alloc_size) {
+        room = 0;
+    } else {
+        room = alloc_size - (__u64)tlb_offset;
+    }
+    if (size > room) {
+        out.effective = room;
+        out.clamped = 1;
+    } else {
+        out.effective = size;
+    }
+    return out;
+}
+
+/* Decode and strictly validate one lifecycle record. */
+static __inline enum mv_reason mv_decode_lifecycle(const __u8 *buf,
+                                                  __u32 len,
+                                                  struct mv_lifecycle *out)
+{
+    __u16 kind, flags, dir;
+
+    if (len < MV_LC_LEN)
+        return MV_PAY_SHORT;
+    if (len > MV_LC_LEN)
+        return MV_PAY_LONG;
+    if (mv_read_le32(buf + MV_LC_OFF_MAGIC) != MV_LC_MAGIC)
+        return MV_PAY_MAGIC;
+    if (mv_read_le16(buf + MV_LC_OFF_VERSION) != MV_LC_VERSION)
+        return MV_PAY_VERSION;
+    kind = mv_read_le16(buf + MV_LC_OFF_KIND);
+    if (kind != MV_LC_KIND_MAP && kind != MV_LC_KIND_UNMAP)
+        return MV_PAY_KIND;
+    flags = mv_read_le16(buf + MV_LC_OFF_FLAGS);
+    if (flags & ~(__u16)(MV_LC_FLAG_OK | MV_LC_FLAG_SKIP_SYNC))
+        return MV_PAY_FLAGS;
+    dir = mv_read_le16(buf + MV_LC_OFF_DIR);
+    if (dir > 2)
+        return MV_PAY_DIR;
+    out->kind = kind;
+    out->ok = (__u8)((flags & MV_LC_FLAG_OK) != 0);
+    out->skip_sync = (__u8)((flags & MV_LC_FLAG_SKIP_SYNC) != 0);
+    out->dir = dir;
+    out->seq = mv_read_le64(buf + MV_LC_OFF_SEQ);
+    out->ktime = mv_read_le64(buf + MV_LC_OFF_KTIME);
+    out->size = mv_read_le64(buf + MV_LC_OFF_SIZE);
+    return MV_OK;
+}
+
+/* Decode and strictly validate one copy record. */
+static __inline enum mv_reason mv_decode_copy(const __u8 *buf,
+                                              __u32 len,
+                                              struct mv_copy *out)
+{
+    __u16 kind, flags, dir, reason;
+
+    if (len < MV_CP_LEN)
+        return MV_PAY_SHORT;
+    if (len > MV_CP_LEN)
+        return MV_PAY_LONG;
+    if (mv_read_le32(buf + MV_CP_OFF_MAGIC) != MV_CP_MAGIC)
+        return MV_PAY_MAGIC;
+    if (mv_read_le16(buf + MV_CP_OFF_VERSION) != MV_CP_VERSION)
+        return MV_PAY_VERSION;
+    kind = mv_read_le16(buf + MV_CP_OFF_KIND);
+    if (kind != MV_CP_KIND_SYNC && kind != MV_CP_KIND_COPY)
+        return MV_PAY_KIND;
+    flags = mv_read_le16(buf + MV_CP_OFF_FLAGS);
+    if (flags & ~(__u16)(MV_CP_FLAG_TO_DEVICE | MV_CP_FLAG_KNOWN |
+                         MV_CP_FLAG_CLAMPED | MV_CP_FLAG_EARLY_ZERO))
+        return MV_PAY_FLAGS;
+    dir = mv_read_le16(buf + MV_CP_OFF_DIR);
+    if (dir > 2 || (kind == MV_CP_KIND_COPY && dir == 0))
+        return MV_PAY_DIR;
+    reason = mv_read_le16(buf + MV_CP_OFF_REASON);
+    if (reason > MV_CP_REASON_NOT_COPY)
+        return MV_PAY_REASON;
+    if (flags & MV_CP_FLAG_KNOWN) {
+        if (reason != MV_CP_REASON_NONE)
+            return MV_PAY_REASON;
+    } else if (kind == MV_CP_KIND_SYNC) {
+        if (reason != MV_CP_REASON_NOT_COPY)
+            return MV_PAY_REASON;
+    } else if (reason == MV_CP_REASON_NONE ||
+               reason == MV_CP_REASON_NOT_COPY) {
+        return MV_PAY_REASON;
+    }
+    out->kind = kind;
+    out->to_device = (__u8)((flags & MV_CP_FLAG_TO_DEVICE) != 0);
+    out->known = (__u8)((flags & MV_CP_FLAG_KNOWN) != 0);
+    out->clamped = (__u8)((flags & MV_CP_FLAG_CLAMPED) != 0);
+    out->early_zero = (__u8)((flags & MV_CP_FLAG_EARLY_ZERO) != 0);
+    out->dir = dir;
+    out->reason = reason;
+    out->seq = mv_read_le64(buf + MV_CP_OFF_SEQ);
+    out->ktime = mv_read_le64(buf + MV_CP_OFF_KTIME);
+    out->requested = mv_read_le64(buf + MV_CP_OFF_REQUESTED);
+    out->effective = mv_read_le64(buf + MV_CP_OFF_EFFECTIVE);
+    return MV_OK;
+}
+
+_Static_assert(MV_LC_LEN == 36, "lifecycle record length");
+_Static_assert(MV_LC_MAGIC == 0x434C564D, "lifecycle magic");
+_Static_assert(MV_LC_OFF_MAGIC == 0, "lifecycle magic offset");
+_Static_assert(MV_LC_OFF_VERSION == 4, "lifecycle version offset");
+_Static_assert(MV_LC_OFF_KIND == 6, "lifecycle kind offset");
+_Static_assert(MV_LC_OFF_FLAGS == 8, "lifecycle flags offset");
+_Static_assert(MV_LC_OFF_DIR == 10, "lifecycle dir offset");
+_Static_assert(MV_LC_OFF_SEQ == 12, "lifecycle seq offset");
+_Static_assert(MV_LC_OFF_KTIME == 20, "lifecycle ktime offset");
+_Static_assert(MV_LC_OFF_SIZE == 28, "lifecycle size offset");
+_Static_assert(MV_LC_OFF_SIZE + 8 == MV_LC_LEN, "lifecycle ends at size");
+_Static_assert(MV_CP_LEN == 48, "copy record length");
+_Static_assert(MV_CP_MAGIC == 0x5043564D, "copy magic");
+_Static_assert(MV_CP_OFF_MAGIC == 0, "copy magic offset");
+_Static_assert(MV_CP_OFF_VERSION == 4, "copy version offset");
+_Static_assert(MV_CP_OFF_KIND == 6, "copy kind offset");
+_Static_assert(MV_CP_OFF_FLAGS == 8, "copy flags offset");
+_Static_assert(MV_CP_OFF_DIR == 10, "copy dir offset");
+_Static_assert(MV_CP_OFF_SEQ == 12, "copy seq offset");
+_Static_assert(MV_CP_OFF_KTIME == 20, "copy ktime offset");
+_Static_assert(MV_CP_OFF_REQUESTED == 28, "copy requested offset");
+_Static_assert(MV_CP_OFF_EFFECTIVE == 36, "copy effective offset");
+_Static_assert(MV_CP_OFF_REASON == 44, "copy reason offset");
+_Static_assert(MV_CP_OFF_REASON + 4 == MV_CP_LEN, "copy ends at pad");
+_Static_assert(MV_INVALID_PHYS == 0xFFFFFFFFFFFFFFFFULL,
+              "map failure sentinel");
 
 #endif /* MEMVEIL_EVENTS_H */

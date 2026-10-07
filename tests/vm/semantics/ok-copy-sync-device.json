@@ -1,0 +1,43 @@
+{
+  "definition": {
+    "hook": "fentry:__swiotlb_sync_single_for_device",
+    "kind": "fentry",
+    "target": "__swiotlb_sync_single_for_device",
+    "signature": {
+      "return": "void",
+      "params": [
+        "struct device *",
+        "phys_addr_t",
+        "size_t",
+        "enum dma_data_direction",
+        "struct io_tlb_pool *"
+      ]
+    },
+    "btf_anchor": {
+      "release": "7.0.0-34-generic",
+      "id": 88178
+    },
+    "authority": "kernel-source",
+    "adapter_len": 472,
+    "inlined": false,
+    "available": true
+  },
+  "recorded": {
+    "signature": {
+      "return": "void",
+      "params": [
+        "struct device *",
+        "phys_addr_t",
+        "size_t",
+        "enum dma_data_direction",
+        "struct io_tlb_pool *"
+      ]
+    },
+    "btf_anchor": {
+      "release": "7.0.0-34-generic",
+      "id": 88178
+    }
+  },
+  "expect_ok": true,
+  "expect_reason": ""
+}
