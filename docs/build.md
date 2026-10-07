@@ -11,6 +11,8 @@ exact); the `pixi.lock` file carries authoritative conda package hashes.
 - `pixi` 0.81.0 exactly, to create the Mojo environment.
 - System `clang` and `bpftool` at the locked versions, for C eBPF programs.
 - `python3` for development-only validation tooling.
+- `python3-pytest` (`apt install python3-pytest`): the pytest-driven suites fail loudly without it.
+- `strace` for the package clean-room audit (`apt install strace`).
 - `patchelf` for `tools/package` RUNPATH normalization (`apt install patchelf`).
 
 Run `pixi install` once after cloning. Every Mojo command below runs inside

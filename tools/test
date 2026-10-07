@@ -959,10 +959,18 @@ suite_oracle_ledger() {
             "(run tools/build first)" >&2
         return 1
     fi
+    if ! python3 -m pytest --version >/dev/null 2>&1; then
+        echo "oracle-ledger: pytest not importable" >&2
+        return 1
+    fi
     python3 -m pytest "$ROOT/tests/vm/test_oracle_ledger.py" -q
 }
 
 suite_profile_semantics() {
+    if ! python3 -m pytest --version >/dev/null 2>&1; then
+        echo "profile-semantics: pytest not importable" >&2
+        return 1
+    fi
     python3 -m pytest "$ROOT/tests/vm/test_profile_semantics.py" -q
 }
 
@@ -981,16 +989,28 @@ vm_lifecycle_preflight() {
 
 suite_vm_lifecycle() {
     vm_lifecycle_preflight "vm-lifecycle" || return $?
+    if ! python3 -m pytest --version >/dev/null 2>&1; then
+        echo "vm-lifecycle: pytest not importable" >&2
+        return 1
+    fi
     python3 -m pytest "$ROOT/tests/vm/test_lifecycle.py" -q
 }
 
 suite_vm_copy() {
     vm_lifecycle_preflight "vm-copy" || return $?
+    if ! python3 -m pytest --version >/dev/null 2>&1; then
+        echo "vm-copy: pytest not importable" >&2
+        return 1
+    fi
     python3 -m pytest "$ROOT/tests/vm/test_copy_semantics.py" -q
 }
 
 suite_vm_real_io() {
     vm_lifecycle_preflight "vm-real-io" || return $?
+    if ! python3 -m pytest --version >/dev/null 2>&1; then
+        echo "vm-real-io: pytest not importable" >&2
+        return 1
+    fi
     python3 -m pytest "$ROOT/tests/vm/test_real_io.py" -q
 }
 
@@ -1106,6 +1126,10 @@ suite_perf_replay() {
 }
 
 suite_perf_workload() {
+    if ! python3 -m pytest --version >/dev/null 2>&1; then
+        echo "perf-workload: pytest not importable" >&2
+        return 1
+    fi
     python3 -m pytest "$ROOT/tests/perf/test_compare.py" -q \
         || return 1
     python3 "$ROOT/tests/perf/workloads.py"
