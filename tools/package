@@ -37,6 +37,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -257,10 +258,24 @@ def main(argv):
     if shutil.which("patchelf") is None:
         fail("patchelf is required to stage a relocatable binary "
              "(apt install patchelf)")
-    rewrite = run(["patchelf", "--set-rpath", "$ORIGIN/../lib",
-                   binary])
-    if rewrite.returncode != 0:
-        fail("patchelf RUNPATH rewrite failed:\n%s" % rewrite.stderr)
+    rewrite = None
+    for attempt in range(6):
+        rewrite = run(["patchelf", "--set-rpath", "$ORIGIN/../lib",
+                       binary])
+        if rewrite.returncode == 0:
+            break
+        # ETXTBSY is transient (a just-reaped exec image still
+        # clearing); retry bounded, then fail with holder evidence.
+        if "Text file busy" not in rewrite.stderr or attempt == 5:
+            holders = ""
+            if shutil.which("fuser") is not None:
+                seen = run(["fuser", binary])
+                holders = (seen.stdout + seen.stderr).strip()
+            fail("patchelf RUNPATH rewrite failed "
+                 "(attempt %d; holders: %s):\n%s"
+                 % (attempt + 1, holders or "none observed",
+                    rewrite.stderr))
+        time.sleep(2)
     dyn = run(["readelf", "-d", binary])
     if dyn.returncode != 0:
         fail("readelf failed on staged binary:\n%s" % dyn.stderr)
