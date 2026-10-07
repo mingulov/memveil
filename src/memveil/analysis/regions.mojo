@@ -210,7 +210,7 @@ struct RegionTracker[REGION_N: Int = REGION_MAX, SEG_N: Int = SEGMENTS_MAX]:
             self._opaque += 1
             return
         var idx = self._region_for(
-            ev.transition.region_id, space, 1
+            ev.transition.region_id, space, ev.transition.generation
         )
         if idx < 0:
             return

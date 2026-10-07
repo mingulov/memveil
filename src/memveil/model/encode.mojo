@@ -316,6 +316,11 @@ def _encode_data(ev: Event) raises EncodeError -> String:
                     _jstr(ev.transition.resolution),
                 )
             )
+        parts.append(
+            _member(
+                String("generation"), String(ev.transition.generation)
+            )
+        )
     elif kind == "pool_sample":
         parts.append(
             _member(String("pool_id"), _jstr(ev.pool.pool_id))
@@ -499,6 +504,9 @@ def _encode_region_observation(o: RegionObservation) raises EncodeError -> Strin
     )
     parts.append(
         _member(String("provenance"), _jstr(o.provenance))
+    )
+    parts.append(
+        _member(String("generation"), String(o.generation))
     )
     return _jobj(parts^)
 

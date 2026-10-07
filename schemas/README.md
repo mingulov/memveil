@@ -118,6 +118,12 @@ establish a physical interval union. An interval must have positive length
 and a checked representable end offset; zero-sized requests may exist
 without becoming intervals.
 
+Region identity is the (token, namespace, generation) triple. Both
+`transition_result` events and `baseline.region_observations` carry an
+optional `generation` member (absent means 1); intervals split and merge
+only within one lineage, so a token reused under a new generation never
+merges with its earlier lineage.
+
 ## Cross-record checks
 
 Schemas alone cannot validate the whole state machine. Readers must also

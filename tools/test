@@ -217,6 +217,9 @@ suite_reports() {
     expect_stdout "region-union-text" \
         tests/golden/report-region-union.txt 0 \
         report "$ROOT/tests/fixtures/regions/region-union"
+    expect_stdout "gen-lineage-text" \
+        tests/golden/report-gen-lineage.txt 0 \
+        report "$ROOT/tests/fixtures/regions/gen-lineage"
     expect_stdout "conversion-uncertain-text" \
         tests/golden/report-conversion-uncertain.txt 4 \
         report "$ROOT/tests/fixtures/regions/conversion-uncertain"
@@ -253,6 +256,8 @@ suite_reports() {
         "capture OK: 4 events, 1 attempts, 512 requested bytes"
     expect_json "region-union-json" tests/fixtures/regions/region-union 0 \
         "capture OK: 4 events, 1 attempts, 4096 requested bytes"
+    expect_json "gen-lineage-json" tests/fixtures/regions/gen-lineage 0 \
+        "capture OK: 2 events, 1 attempts, 4096 requested bytes"
     expect_json "conversion-uncertain-json" \
         tests/fixtures/regions/conversion-uncertain 4 \
         "capture OK: 3 events, 1 attempts, 4096 requested bytes"

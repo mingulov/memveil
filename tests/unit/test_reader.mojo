@@ -654,6 +654,26 @@ def test_session_retains_baseline_observations() raises:
     assert_equal(c.baseline_regions[0].region_id, "r1")
 
 
+def test_session_region_generation() raises:
+    var base = fixture_text(ATTEMPTS_SESSION)
+    var seeded = base.replace(
+        String('"region_observations": []'),
+        String(
+            '"region_observations": [{"region_id": "r1", "state":'
+            ' "shared", "offset": "0", "length": "8192",'
+            ' "address_space": "guest_physical", "provenance":'
+            ' "test-seed", "generation": 2}, {"region_id": "r2",'
+            ' "state": "unknown", "offset": "8192", "length":'
+            ' "4096", "address_space": "guest_physical",'
+            ' "provenance": "test-seed"}]'
+        ),
+    )
+    var s = parse_session(utf8_bytes(seeded))
+    assert_equal(len(s.baseline_regions), 2)
+    assert_equal(s.baseline_regions[0].generation, 2)
+    assert_equal(s.baseline_regions[1].generation, 1)
+
+
 def test_parse_event_bounce() raises:
     var line = first_line("tests/fixtures/attempts/events.ndjson")
     var e = parse_event(utf8_bytes(line))
@@ -1251,6 +1271,63 @@ def test_event_rejects_payload_rules() raises:
         assert_true(raised)
 
 
+def test_transition_generation() raises:
+    var g2 = parse_event(
+        utf8_bytes(
+            event_doc(
+                String("transition_result"),
+                String(
+                    '{"region_id": "r-1", "requested_state": "shared",'
+                    ' "success": true, "return_code": 0,'
+                    ' "offset": "0", "length": "4096", "generation": 2}'
+                ),
+            )
+        )
+    )
+    assert_equal(g2.transition.generation, 2)
+    var g1 = parse_event(
+        utf8_bytes(
+            event_doc(
+                String("transition_result"),
+                String(
+                    '{"region_id": "r-1", "requested_state": "shared",'
+                    ' "success": true, "return_code": 0,'
+                    ' "offset": "0", "length": "4096"}'
+                ),
+            )
+        )
+    )
+    assert_equal(g1.transition.generation, 1)
+    var bad = List[String]()
+    bad.append(
+        event_doc(
+            String("transition_result"),
+            String(
+                '{"region_id": "r-1", "requested_state": "shared",'
+                ' "success": true, "return_code": 0,'
+                ' "offset": "0", "length": "4096", "generation": 0}'
+            ),
+        )
+    )
+    bad.append(
+        event_doc(
+            String("transition_result"),
+            String(
+                '{"region_id": "r-1", "requested_state": "shared",'
+                ' "success": true, "return_code": 0,'
+                ' "offset": "0", "length": "4096", "generation": -1}'
+            ),
+        )
+    )
+    for doc in bad:
+        var raised = False
+        try:
+            _ = parse_event(utf8_bytes(doc))
+        except:
+            raised = True
+        assert_true(raised)
+
+
 def test_event_rejects_bad_observer() raises:
     var base = event_doc(String("marker"), String('{"text": "m"}'))
     var cases = List[String]()
@@ -1700,6 +1777,7 @@ def run() raises -> Int:
     suite.test[test_session_tristate_optionals]()
     suite.test[test_session_rejects_empty_reason]()
     suite.test[test_session_retains_baseline_observations]()
+    suite.test[test_session_region_generation]()
     suite.test[test_parse_event_bounce]()
     suite.test[test_parse_event_kinds]()
     suite.test[test_parse_event_observer]()
@@ -1707,6 +1785,7 @@ def run() raises -> Int:
     suite.test[test_f12_hostile_member_not_echoed]()
     suite.test[test_partial_record_definitive]()
     suite.test[test_event_rejects_payload_rules]()
+    suite.test[test_transition_generation]()
     suite.test[test_event_rejects_bad_observer]()
     suite.test[test_read_attempts_capture]()
     suite.test[test_reader_cross_record]()

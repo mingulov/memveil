@@ -136,7 +136,13 @@
               "offset": {"$ref": "#/$defs/u64"},
               "length": {"$ref": "#/$defs/u64"},
               "address_space": {"enum": ["guest_physical", "kernel_virtual", "iova", "identity_only"]},
-              "provenance": {"type": "string", "minLength": 1, "maxLength": 512}
+              "provenance": {"type": "string", "minLength": 1, "maxLength": 512},
+              "generation": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9223372036854775807,
+                "description": "Region lineage generation; absent means 1."
+              }
             }
           }
         }

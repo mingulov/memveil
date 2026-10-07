@@ -133,6 +133,7 @@ struct TransitionResult(ImplicitlyCopyable):
     var address_space: String
     var has_resolution: Bool
     var resolution: String
+    var generation: Int
 
     def __init__(out self):
         self.region_id = String("")
@@ -146,6 +147,7 @@ struct TransitionResult(ImplicitlyCopyable):
         self.address_space = String("")
         self.has_resolution = False
         self.resolution = String("")
+        self.generation = 1
 
 
 struct PoolSample(ImplicitlyCopyable):
@@ -567,6 +569,7 @@ def _parse_transition(mut scan: Scanner, mut out: Event) raises:
     var has_code = False
     var has_offset = False
     var has_length = False
+    var has_generation = False
     var has_space = False
     var has_resolution = False
     if not object_is_empty(scan):
@@ -619,6 +622,17 @@ def _parse_transition(mut scan: Scanner, mut out: Event) raises:
                     scan, "transition.length"
                 )
                 has_length = True
+            elif key == "generation":
+                if has_generation:
+                    raise ValidationError("generation", "duplicate")
+                scan.skip_ws()
+                var g = scan.parse_int()
+                if g < Int64(1):
+                    raise ValidationError(
+                        "transition.generation", "must be positive"
+                    )
+                out.transition.generation = Int(g)
+                has_generation = True
             elif key == "address_space":
                 if has_space:
                     raise ValidationError("address_space", "duplicate")
@@ -1246,6 +1260,7 @@ def _data_field_known(kind: String, key: String) -> Bool:
             or key == "length"
             or key == "address_space"
             or key == "resolution"
+            or key == "generation"
         )
     if kind == "pool_sample":
         return (
@@ -1333,6 +1348,7 @@ def _type_rows() -> List[String]:
     out.append(String("data,transition_result,length,s"))
     out.append(String("data,transition_result,address_space,s"))
     out.append(String("data,transition_result,resolution,s"))
+    out.append(String("data,transition_result,generation,n"))
     out.append(String("data,pool_sample,pool_id,s"))
     out.append(String("data,pool_sample,used_bytes,S"))
     out.append(String("data,pool_sample,capacity_bytes,S"))

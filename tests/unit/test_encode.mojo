@@ -315,6 +315,7 @@ def test_session_regions_roundtrip() raises:
     first.length = UInt64(8192)
     first.address_space = String("guest_physical")
     first.provenance = String("seed-a")
+    first.generation = 2
     var second = RegionObservation()
     second.region_id = String("r2")
     second.state = String("unknown")
@@ -327,11 +328,97 @@ def test_session_regions_roundtrip() raises:
     var text = encode_session(s)
     assert_true(text.find(String('"region_id":"r1"')) != -1)
     assert_true(text.find(String('"length":"4096"')) != -1)
+    assert_true(text.find(String('"generation":2')) != -1)
+    assert_true(text.find(String('"generation":1')) != -1)
     var back = parse_session(_bytes(text))
     assert_equal(len(back.baseline_regions), 2)
     assert_equal(back.baseline_regions[0].region_id, String("r1"))
+    assert_equal(back.baseline_regions[0].generation, 2)
     assert_equal(back.baseline_regions[1].address_space, String("iova"))
+    assert_equal(back.baseline_regions[1].generation, 1)
     assert_equal(encode_session(back), text)
+
+
+def test_transition_exact() raises:
+    var ev = _base_event()
+    ev.kind = String("transition_result")
+    ev.transition.region_id = String("r-1")
+    ev.transition.requested_state = String("shared")
+    ev.transition.success = True
+    ev.transition.has_return_code = True
+    ev.transition.return_code = Int64(0)
+    ev.transition.offset = UInt64(0)
+    ev.transition.length = UInt64(4096)
+    ev.transition.has_address_space = True
+    ev.transition.address_space = String("guest_physical")
+    ev.transition.has_resolution = True
+    ev.transition.resolution = String("resolved")
+    ev.transition.generation = 2
+    assert_equal(
+        encode_event(ev),
+        String(
+            "{\"schema_version\":\"0.1.0\",\"session_id\":\"s1\","
+            "\"seq\":\"7\",\"ts_ns\":\"123\",\"kind\":\"transition_result\","
+            "\"source\":{\"hook\":\"h\",\"backend\":\"tracepoint\","
+            "\"profile_id\":\"p\",\"measurement\":\"observed\","
+            "\"correlation\":\"direct\"},\"data\":{\"region_id\":"
+            "\"r-1\",\"requested_state\":\"shared\",\"success\":true,"
+            "\"return_code\":0,\"offset\":\"0\",\"length\":\"4096\","
+            "\"address_space\":\"guest_physical\",\"resolution\":"
+            "\"resolved\",\"generation\":2}}"
+        ),
+    )
+    var back = parse_event(_bytes(encode_event(ev)))
+    assert_equal(back.transition.generation, 2)
+
+
+def test_generation_sweep() raises:
+    var vals = List[Int]()
+    vals.append(1)
+    vals.append(2)
+    vals.append(3)
+    vals.append(127)
+    vals.append(128)
+    vals.append(255)
+    vals.append(256)
+    vals.append(65535)
+    vals.append(65536)
+    vals.append(2147483647)
+    vals.append(2147483648)
+    vals.append(9223372036854775807)
+    for i in range(len(vals)):
+        var g = vals[i]
+        var ev = _base_event()
+        ev.kind = String("transition_result")
+        ev.transition.region_id = String("r-1")
+        ev.transition.requested_state = String("shared")
+        ev.transition.success = True
+        ev.transition.has_return_code = True
+        ev.transition.return_code = Int64(0)
+        ev.transition.offset = UInt64(0)
+        ev.transition.length = UInt64(4096)
+        ev.transition.generation = g
+        var line = encode_event(ev)
+        var back = parse_event(_bytes(line))
+        assert_equal(back.transition.generation, g)
+        assert_equal(encode_event(back), line)
+        var s = _base_session()
+        s.baseline_complete = True
+        s.baseline_region_count = 1
+        var o = RegionObservation()
+        o.region_id = String("r1")
+        o.state = String("shared")
+        o.offset = UInt64(0)
+        o.length = UInt64(8192)
+        o.address_space = String("guest_physical")
+        o.provenance = String("sweep")
+        o.generation = g
+        s.baseline_regions.append(o^)
+        var text = encode_session(s)
+        var bs = parse_session(_bytes(text))
+        assert_equal(len(bs.baseline_regions), 1)
+        assert_equal(bs.baseline_regions[0].generation, g)
+        assert_equal(encode_session(bs), text)
 
 
 def run() raises -> Int:
@@ -347,6 +434,8 @@ def run() raises -> Int:
     suite.test[test_snapshot_scopes]()
     suite.test[test_observer]()
     suite.test[test_map_nulls]()
+    suite.test[test_transition_exact]()
+    suite.test[test_generation_sweep]()
     suite.test[test_unknown_kind]()
     suite.test[test_session_roundtrip]()
     suite.test[test_session_regions_roundtrip]()

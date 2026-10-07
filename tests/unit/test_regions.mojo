@@ -590,6 +590,33 @@ def test_empty_world() raises:
     assert_true(not t.sees_regions())
 
 
+def test_generation_lineage_isolated() raises:
+    var t = RegionTracker()
+    var obs = List[RegionObservation]()
+    var g1 = _obs(String("r1"), String("shared"), UInt64(0), UInt64(8192))
+    g1.generation = 1
+    var g2 = _obs(String("r1"), String("private"), UInt64(0), UInt64(8192))
+    g2.generation = 2
+    obs.append(g1^)
+    obs.append(g2^)
+    t.seed_baseline(obs)
+    var tr = _transition(
+        String("r1"), String("shared"), True, UInt64(0),
+        UInt64(4096), UInt64(1),
+    )
+    tr.transition.generation = 2
+    t.consume(tr^)
+    var rows = t.metrics(String("window [0,2000)"))
+    assert_equal(
+        _find(rows, String("known_shared_region_bytes")).value,
+        UInt64(12288),
+    )
+    assert_equal(
+        _find(rows, String("known_private_region_bytes")).value,
+        UInt64(4096),
+    )
+
+
 def _gap(channel: String, seq: UInt64) -> Event:
     var ev = Event()
     ev.session_id = String("s1")
@@ -712,6 +739,7 @@ def run() raises -> Int:
     suite.test[test_segment_budget]()
     suite.test[test_namespace_isolation]()
     suite.test[test_empty_world]()
+    suite.test[test_generation_lineage_isolated]()
     suite.test[test_opaque_transition_degrades_known_unions]()
     suite.test[test_detail_gap_degrades_counts_and_unions]()
     suite.test[test_baseline_gap_degrades_unions_only]()
