@@ -10,6 +10,12 @@
 # the vendored pinned tarball via LMB_PACKAGE (hash-checked
 # here and re-verified by the build); without it the build
 # fails instead of compiling a bridge-less binary.
+#
+# Deliberately absent: confidential-ranges, confidential-real,
+# confidential-late-attach. Those gates need armed live kernels
+# (exit 77 unarmed), so they belong to Tier 3 runners with real
+# fixtures, not to this unprivileged tier. Everything else in
+# `tools/test --help` runs in Tier 1 or Tier 2.
 name: offline
 
 on:
@@ -44,10 +50,14 @@ jobs:
         run: |
           for suite in schemas unit reports profiles doctor \
               identity correlation mappings lifetimes pools \
+              regions conversion-normalize confidential-hooks \
+              region-resolution baseline confidential-inventory \
               diagnostics top oracle-ledger profile-semantics \
               stop budgets quality reader-adversarial \
-              fuzz-smoke record-failures output-paths privacy \
-              render-escaping offline-environment perf-replay \
-              preview-package; do
+              fuzz-smoke fuzz-campaign record-failures \
+              output-paths privacy render-escaping \
+              offline-environment perf-replay preview-package \
+              provenance docs examples package source-export \
+              release-runtime; do
             ./tools/test "$suite" || exit 1
           done
