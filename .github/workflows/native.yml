@@ -34,6 +34,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             --allow-downgrades \
             clang bpftool cmake=4.2.3-2ubuntu2 ninja-build
+          # The image also ships a Kitware cmake in /usr/local
+          # that shadows the archive binary; remove it so the
+          # locked cmake resolves (verified by tools/build).
+          sudo rm -f /usr/local/bin/cmake /usr/local/bin/ctest \
+            /usr/local/bin/cpack /usr/local/bin/ccmake
       - name: Provision libbpf-mojo tarball
         run: |
           VER="$(python3 -c "import json; print(json.load(open('toolchain.lock.json'))['dependencies']['libbpf-mojo']['version'])")"
