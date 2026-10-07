@@ -57,11 +57,11 @@
     "libbpf-mojo": {
       "status": "pinned",
       "version": "0.2.1",
-      "source_commit": "1ce369b",
-      "tarball_sha256": "e3e11583d0ada8911f04db2c121f190167305046cd45dc23379ca8d09951ab1f",
+      "source_commit": "b5d1661",
+      "tarball_sha256": "0fe0a4f6a25c6b05ea7458101c8847155994f2eef8b6c2e1fc55e88f18c0433b",
       "mojo_tree": "mojo/libbpf_mojo",
       "native_lib": "lib/libbpf_mojo.so.1",
-      "note": "Pre-release bytes: source_commit plus the uncommitted provenance/pin-check fix wave; 0.2.1 was never tagged or published, so re-pin from the tagged release before any distribution claim. Consumed by path (LMB_PACKAGE) plus this hash. Memveil never reads libbpf-mojo sibling sources; standalone clones supply the tarball."
+      "note": "Pre-release bytes built from clean b5d1661 (includes the map-access out-param fail-closed fix); 0.2.1 was never tagged or published, so re-pin from the tagged release before any distribution claim. Consumed by path (LMB_PACKAGE) plus this hash. Memveil never reads libbpf-mojo sibling sources; standalone clones supply the tarball."
     }
   },
   "expected_first_lines": {
