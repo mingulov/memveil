@@ -12,7 +12,8 @@ Layout of ``dist/memveil-<version>/``::
     lib/*.so*              Mojo runtime closure + libbpf_mojo.so.1
     bpf/*.bpf.o            production BPF object
     profiles/              manifest plus shipped semantic profiles
-    docs/                  quickstart, support, privacy
+    docs/                  the full manuals tree (every manual
+                           quickstart/support reference ships)
     examples/real-capture/ sanitized real capture (worked example)
     LICENSE, LICENSES/   MemVeil's own license texts
     licenses/              third-party texts + libbpf-mojo's own
@@ -126,10 +127,13 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def git_rev(path):
-    proc = run(["git", "-C", path, "rev-parse", "HEAD"])
+def git_rev_or_none(path):
+    try:
+        proc = run(["git", "-C", path, "rev-parse", "HEAD"])
+    except FileNotFoundError:
+        return None
     if proc.returncode != 0:
-        fail("cannot read HEAD of %s" % path)
+        return None
     return proc.stdout.strip()
 
 
@@ -161,9 +165,18 @@ def main(argv):
     lmb_package = os.environ["LMB_PACKAGE"]
     if not os.path.isfile(lmb_package):
         fail("LMB_PACKAGE is not a file: %s" % lmb_package)
-    if not git_clean(ROOT):
-        fail("worktree has uncommitted changes; commit first")
-    memveil_rev = git_rev(ROOT)
+    memveil_rev = git_rev_or_none(ROOT)
+    if memveil_rev is not None:
+        if not git_clean(ROOT):
+            fail("worktree has uncommitted changes; commit first")
+    else:
+        # Git-free source export: no commit identity to record
+        # and no worktree state to enforce. The manifest says
+        # "export" so nobody mistakes this for a commit-anchored
+        # build, and tarball mtimes fall back to the youngest
+        # staged file instead of the commit clock.
+        memveil_rev = "export"
+        print("package: git-free export; revision recorded as export")
 
     build = run([os.path.join(ROOT, "tools", "build")])
     if build.returncode != 0:
@@ -297,11 +310,24 @@ def main(argv):
         if name == "manifest.txt" or name.endswith(".json"):
             shutil.copy2(os.path.join(ROOT, "profiles", name),
                          os.path.join(staged, "profiles", name))
+    # Ship the whole manuals tree: quickstart and support
+    # reference troubleshooting, performance, resource-limits,
+    # and permissions, so staging a subset would ship dangling
+    # references. Every staged manual must resolve its local
+    # links inside the bundle (pinned by the package lane).
+    for base, dirs, files in os.walk(os.path.join(ROOT, "docs")):
+        dirs.sort()
+        for name in sorted(files):
+            if not name.endswith(".md"):
+                continue
+            src = os.path.join(base, name)
+            rel = os.path.relpath(src, os.path.join(ROOT, "docs"))
+            dest = os.path.join(staged, "docs", rel)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            shutil.copy2(src, dest)
     for name in ("quickstart.md", "support.md", "privacy.md"):
-        src = os.path.join(ROOT, "docs", name)
-        if not os.path.isfile(src):
-            fail("missing %s" % src)
-        shutil.copy2(src, os.path.join(staged, "docs", name))
+        if not os.path.isfile(os.path.join(staged, "docs", name)):
+            fail("missing docs/%s" % name)
     example = os.path.join(ROOT, "examples", "real-capture")
     for name in ("events.ndjson", "session.json"):
         src = os.path.join(example, name)
@@ -411,8 +437,17 @@ def main(argv):
     tarball = os.path.join(out_dir, tag + ".tar.gz")
     if os.path.exists(tarball):
         os.remove(tarball)
-    mtime = int(run(["git", "-C", ROOT, "log", "-1",
-                     "--format=%ct"]).stdout.strip())
+    if memveil_rev == "export":
+        mtime = 0
+        for base, _, files in os.walk(final):
+            for name in files:
+                stamp = int(os.path.getmtime(
+                    os.path.join(base, name)))
+                if stamp > mtime:
+                    mtime = stamp
+    else:
+        mtime = int(run(["git", "-C", ROOT, "log", "-1",
+                         "--format=%ct"]).stdout.strip())
     # Zero-mtime gzip header: "w:gz" stamps the current time,
     # which would make identical revisions hash differently.
     with open(tarball, "wb") as raw:

@@ -116,6 +116,7 @@ struct CaptureReader:
     var _dead: Dict[String, Bool]
     var _ref_ids: List[String]
     var _ref_lines: List[Int]
+    var _seen_refs: Dict[String, Bool]
     var _req_total: UInt64
     var _req_dev: Dict[String, UInt64]
 
@@ -143,6 +144,7 @@ struct CaptureReader:
         self._dead = Dict[String, Bool]()
         self._ref_ids = List[String]()
         self._ref_lines = List[Int]()
+        self._seen_refs = Dict[String, Bool]()
         self._req_total = UInt64(0)
         self._req_dev = Dict[String, UInt64]()
 
@@ -339,7 +341,9 @@ struct CaptureReader:
                 READ_INVALID, lineno, "line " + String(lineno) + ": ts after"
             )
         self._check_identities(ev, lineno)
-        var tracked = len(self._ops) + len(self._maps)
+        var tracked = (
+            len(self._ops) + len(self._maps) + len(self._ref_ids)
+        )
         if tracked > _MAX_TRACKED_IDS:
             raise ReadError(
                 READ_TOO_BIG, lineno, "too many tracked identities"
@@ -410,15 +414,16 @@ struct CaptureReader:
             # Copies repeat freely under one operation (nested,
             # per-sync, and completion copies share it); only
             # attempts and map results claim an operation once.
+            # Repeats record once: the deferred list keeps the
+            # first line per id, and distinct ids draw from the
+            # same identity budget as operations and mappings.
             if ev.copy.has_mapping_id:
-                self._ref_ids.append(ev.copy.mapping_id)
-                self._ref_lines.append(lineno)
+                self._note_ref(ev.copy.mapping_id, lineno)
         elif ev.kind == "sync_request":
             # Syncs repeat freely under one operation for the
             # same reason as copies.
             if ev.sync.has_mapping_id:
-                self._ref_ids.append(ev.sync.mapping_id)
-                self._ref_lines.append(lineno)
+                self._note_ref(ev.sync.mapping_id, lineno)
         elif ev.kind == "counter_snapshot":
             if ev.snapshot.has_scope_device:
                 if ev.snapshot.scope_device_id not in self._devices:
@@ -447,6 +452,20 @@ struct CaptureReader:
                 READ_INVALID, lineno, tag + "duplicate operation"
             )
         self._ops[key] = True
+
+    def _note_ref(mut self, mid: String, lineno: Int):
+        """Defer one copy/sync mapping reference, first line kept.
+
+        Repeats of an already-recorded id add nothing: forward
+        references still resolve at end of stream, and an
+        unknown id still reports its first line. Distinct ids
+        join the identity budget enforced after each event.
+        """
+        if mid in self._seen_refs:
+            return
+        self._seen_refs[mid] = True
+        self._ref_ids.append(mid)
+        self._ref_lines.append(lineno)
 
     def _finish_checks(self) raises ReadError:
         """Resolve deferred copy/sync mapping references at end."""

@@ -1604,6 +1604,32 @@ def test_reader_f2_lifecycle_ok() raises:
     assert_true(not g.partial)
 
 
+def test_reader_ref_dedup() raises:
+    # White-box bound check: repeated copy/sync references to
+    # one mapping record once (first line kept), so N repeats
+    # cost one deferred entry, not N.
+    var r = CaptureReader()
+    r._note_ref(String("m1"), 5)
+    r._note_ref(String("m1"), 7)
+    r._note_ref(String("m1"), 9)
+    r._note_ref(String("m2"), 11)
+    assert_equal(len(r._ref_ids), 2)
+    assert_equal(r._ref_ids[0], String("m1"))
+    assert_equal(r._ref_lines[0], 5)
+    assert_equal(r._ref_ids[1], String("m2"))
+    assert_equal(r._ref_lines[1], 11)
+    # An unknown id still reports its first line at finish.
+    var code = UInt32(0)
+    var line = -1
+    try:
+        r._finish_checks()
+    except e:
+        code = e.code
+        line = e.line_no
+    assert_equal(code, READ_INVALID)
+    assert_equal(line, 5)
+
+
 def test_reader_multi_chunk() raises:
     var r = read_capture(
         String("tests/fixtures/reader/multi-chunk"), False, default_limits()
@@ -1799,6 +1825,7 @@ def run() raises -> Int:
     suite.test[test_reader_tail_foreign_rejected]()
     suite.test[test_reader_f2_identities]()
     suite.test[test_reader_f2_lifecycle_ok]()
+    suite.test[test_reader_ref_dedup]()
     suite.test[test_reader_f3_overflow]()
     suite.test[test_reader_multi_chunk]()
     suite.test[test_reader_missing]()

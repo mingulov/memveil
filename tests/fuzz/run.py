@@ -6,9 +6,10 @@ Mutates seed captures with a seeded RNG and replays each case
 through the built report verb. The oracle is strict and
 independent of the mutator: every case must exit 0, 2, or 4
 within the timeout; exit 2 must leave stdout empty with a
-non-empty stderr; exit 0 JSON output must parse; no case may
-print a crash marker. Violations retain their seed and input
-under tests/fuzz/regressions/ and fail the run.
+non-empty stderr; exit 0 and exit 4 JSON output must parse;
+no case may print a crash marker. Violations retain their
+seed and input under tests/fuzz/regressions/ and fail the
+run.
 
 Usage: tests/fuzz/run.py --seeds N [--start S] [--binary PATH]
        [--regress DIR] [--timeout SEC]
@@ -106,8 +107,15 @@ def check(case, code, out, err):
             json.loads(out.decode("utf-8"))
         except Exception as exc:
             return "exit 0 with invalid JSON: %s" % (exc,)
-    if code == 4 and out == b"":
-        return "exit 4 with empty stdout"
+    if code == 4:
+        if out == b"":
+            return "exit 4 with empty stdout"
+        # run_case always requests --format json, so a usable
+        # incomplete report must still parse as JSON.
+        try:
+            json.loads(out.decode("utf-8"))
+        except Exception as exc:
+            return "exit 4 with invalid JSON: %s" % (exc,)
     return None
 
 
@@ -142,6 +150,11 @@ def main():
                     sdata = fh.read()
                 with open(os.path.join(tmp, "session.json"), "wb") as fh:
                     fh.write(mutate(rng, sdata))
+                # Mutated session beside intact events: a valid
+                # mutation proceeds through a complete capture
+                # instead of tripping on a missing events file.
+                with open(os.path.join(tmp, "events.ndjson"), "wb") as fh:
+                    fh.write(data)
             else:
                 with open(os.path.join(tmp, "events.ndjson"), "wb") as fh:
                     fh.write(mutate(rng, data))

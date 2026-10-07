@@ -16,8 +16,8 @@ from memveil.cli.durations import parse_duration_ns
 from memveil.cli.top import (
     BoundaryCursor,
     TopOptions,
+    WaitSlices,
     _wait_interval,
-    _wait_slices,
     parse_top_args,
 )
 from memveil.platform.clock import MonoClock
@@ -146,20 +146,38 @@ def _raise_self(signo: Int):
 
 
 def test_wait_slices_bounded() raises:
-    var parts = _wait_slices(250)
-    assert_equal(len(parts), 3)
-    assert_equal(parts[0], 100)
-    assert_equal(parts[1], 100)
-    assert_equal(parts[2], 50)
-    assert_equal(len(_wait_slices(0)), 0)
-    assert_equal(len(_wait_slices(-5)), 0)
-    var hour = _wait_slices(3600000)
-    assert_equal(len(hour), 36000)
+    var parts = WaitSlices(250)
+    assert_true(parts.has_more())
+    assert_equal(parts.take(), 100)
+    assert_true(parts.has_more())
+    assert_equal(parts.take(), 100)
+    assert_true(parts.has_more())
+    assert_equal(parts.take(), 50)
+    assert_true(not parts.has_more())
+    assert_true(not WaitSlices(0).has_more())
+    assert_true(not WaitSlices(-5).has_more())
+    var hour = WaitSlices(3600000)
+    var count = 0
     var total = 0
-    for i in range(len(hour)):
-        assert_true(hour[i] <= 100)
-        total += hour[i]
+    while hour.has_more():
+        var s = hour.take()
+        assert_true(s <= 100)
+        count += 1
+        total += s
+    assert_equal(count, 36000)
     assert_equal(total, 3600000)
+
+
+def test_wait_slices_stream_huge() raises:
+    # A trillion-ms wait would materialize ten billion slices
+    # as a list; the cursor yields them one at a time with
+    # constant memory, so this completes at all.
+    var big = WaitSlices(1000000000000)
+    assert_true(big.has_more())
+    assert_equal(big.take(), 100)
+    assert_equal(big.take(), 100)
+    assert_equal(big.take(), 100)
+    assert_true(big.has_more())
 
 
 def test_wait_interval_polls_before_sleep() raises:
@@ -211,6 +229,7 @@ def run() raises -> Int:
     suite.test[test_boundaries]()
     suite.test[test_cursor_streams_long_window]()
     suite.test[test_wait_slices_bounded]()
+    suite.test[test_wait_slices_stream_huge]()
     suite.test[test_wait_interval_polls_before_sleep]()
     suite.test[test_wait_interval_quiet_waits_full]()
     suite^.run()

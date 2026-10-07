@@ -49,6 +49,11 @@ REQUIRED = (
     "docs/quickstart.md",
     "docs/support.md",
     "docs/privacy.md",
+    "docs/troubleshooting.md",
+    "docs/performance.md",
+    "docs/resource-limits.md",
+    "docs/permissions.md",
+    "docs/oracles.md",
     "examples/real-capture/events.ndjson",
     "examples/real-capture/session.json",
     "LICENSE",
@@ -153,6 +158,24 @@ def test_license_texts_and_first_party(bundle):
     assert "not shipped in `lib/`" in own
     lmb = (root / "THIRD-PARTY-NOTICES.libbpf-mojo.md").read_text()
     assert "BSD 2-Clause" in lmb
+
+
+def test_shipped_manuals_resolve(bundle):
+    import re
+    root, _ = bundle
+    missing = []
+    for rel in ("docs/quickstart.md", "docs/support.md"):
+        text = (root / rel).read_text()
+        refs = set(re.findall(r"\(([\w./-]+\.md)(?:#[\w-]+)?\)", text))
+        refs |= set(re.findall(r"`([\w./-]+\.md)`", text))
+        for ref in sorted(refs):
+            if ref.startswith("examples/"):
+                target = root / ref
+            else:
+                target = root / "docs" / ref
+            if not target.is_file():
+                missing.append("%s -> %s" % (rel, ref))
+    assert missing == [], missing
 
 
 def test_help_version(bundle):

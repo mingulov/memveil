@@ -12,6 +12,7 @@ service claim. Exits nonzero on the first failure.
 
 import json
 import os
+import re
 import resource
 import shutil
 import subprocess
@@ -65,8 +66,9 @@ def main():
                     check("soak-exit", False,
                           "cycle %d fmt %s exit %d"
                           % (cycles, fmt, p.returncode))
+                text = p.stdout.decode("utf-8")
                 if fmt == "json":
-                    doc = json.loads(p.stdout.decode("utf-8"))
+                    doc = json.loads(text)
                     if (metric(doc, "bounce_attempts")["value"]
                             != str(COUNT)):
                         check("soak-count", False,
@@ -74,6 +76,39 @@ def main():
                     if (metric(doc, "requested_bounce_bytes")["value"]
                             != str(want)):
                         check("soak-bytes", False,
+                              "cycle %d" % cycles)
+                    detail = None
+                    for channel in doc.get("quality", {}).values():
+                        if "bounce_attempt events" in str(
+                                channel.get("scope", "")):
+                            detail = channel
+                    if (detail is None
+                            or detail.get("status")
+                            != "complete_for_scope"
+                            or str(detail.get("loss_count")) != "0"):
+                        check("soak-quality", False,
+                              "cycle %d" % cycles)
+                elif fmt == "text":
+                    if not re.search(
+                            r"^  bounce_attempts = %d count "
+                            % COUNT, text, re.M):
+                        check("soak-text-count", False,
+                              "cycle %d" % cycles)
+                    if not re.search(
+                            r"^  requested_bounce_bytes = %d bytes "
+                            % want, text, re.M):
+                        check("soak-text-bytes", False,
+                              "cycle %d" % cycles)
+                elif fmt == "markdown":
+                    if not re.search(
+                            r"^\| bounce\\_attempts \| all \| %d \|"
+                            % COUNT, text, re.M):
+                        check("soak-md-count", False,
+                              "cycle %d" % cycles)
+                    if not re.search(
+                            r"^\| requested\\_bounce\\_bytes \| all \| "
+                            r"%d \|" % want, text, re.M):
+                        check("soak-md-bytes", False,
                               "cycle %d" % cycles)
             # One 60 s refresh block: the soak watches replay
             # cost, not the 1 s wall pacing of default top.
@@ -83,6 +118,13 @@ def main():
             if p.returncode != 0:
                 check("soak-top", False, "cycle %d exit %d"
                       % (cycles, p.returncode))
+            # The final summary renders the same rows as the
+            # text report, so the exact count must appear.
+            if not re.search(
+                    r"^  bounce_attempts = %d count " % COUNT,
+                    p.stdout.decode("utf-8"), re.M):
+                check("soak-top-count", False,
+                      "cycle %d" % cycles)
             peak = resource.getrusage(
                 resource.RUSAGE_CHILDREN).ru_maxrss
             cycles += 1
