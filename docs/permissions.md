@@ -22,7 +22,12 @@ Profiles resolve from the executable location
 working directory. Without `--profile`, the first validated
 profile passing full identity binding wins, else the first
 covering profile runs partial; an explicit `--profile` that
-fails binding refuses.
+fails binding refuses. One distinct case is not a refusal:
+an explicit profile whose bindings note is unparseable can
+never have been identity-checked, so it proceeds as an
+unbound partial (`explicit <id> (unbound, no bindings)` for
+`validated` documents, `(reference, no bindings)` otherwise)
+with "validated" reserved for successful binding checks.
 
 ## Capture ownership and file modes
 
@@ -68,7 +73,9 @@ earlier refusal:
 7. Hook admission: `format unreadable` (tracefs not
    readable, the usual unprivileged refusal),
    `layout: ...`, `bad hook site`.
-8. Binding: `binding failed: ...`.
+8. Binding: `binding failed: ...` (an unparseable bindings
+   note is not a refusal: it proceeds as an unbound
+   partial, since no identity check could have run).
 9. Live collection: bridge load, attach, and privilege
    failures surface as sanitized diagnostics once every
    gate above passes.
