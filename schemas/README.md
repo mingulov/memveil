@@ -133,7 +133,9 @@ documented source ordering and direct correlation rather than sorting
 timestamps and assuming causality. For finalized captures, timestamps use
 the same monotonic epoch and lie in the half-open declared observation
 window `[start_ns, end_ns)`; wall-clock creation time is metadata, not an
-ordering source.
+ordering source. The window's optional `baseline_start_ns` vouches the
+start-cut read that predates readiness: `counter_snapshot` records are
+admissible from the baseline, every other record from `start_ns`.
 
 ## Size and depth bounds
 

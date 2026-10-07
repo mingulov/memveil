@@ -315,11 +315,18 @@ def check_session(obj):
                ("end_reason",), "capture")
     check_enum(capture["mode"], ("live", "synthetic"), "capture.mode")
     window = capture["window"]
-    check_keys(window, ("start_ns", "end_ns"), (), "window")
+    check_keys(window, ("start_ns", "end_ns"), ("baseline_start_ns",),
+               "window")
     start = check_u64(window["start_ns"], "window.start_ns")
     end = check_u64(window["end_ns"], "window.end_ns")
     if start > end:
         fail("bad-window", "window start exceeds end")
+    window_baseline = None
+    if "baseline_start_ns" in window:
+        window_baseline = check_u64(window["baseline_start_ns"],
+                                    "window.baseline_start_ns")
+        if window_baseline > start:
+            fail("bad-window", "window baseline exceeds start")
     filters = capture["filters"]
     check_keys(filters, (), ("device",), "filters")
     if filters.get("device") is not None:
@@ -376,7 +383,9 @@ def check_session(obj):
             check_text(capability["profile_id"], 128, "profile_id")
     check_quality(obj["quality"], "quality")
     return {"id": session_id, "synthetic": obj["synthetic"],
-            "start": start, "end": end, "devices": devices,
+            "start": start, "end": end,
+            "window_baseline": window_baseline,
+            "devices": devices,
             "quality": obj["quality"],
             "environment": obj["environment"],
             "catalog": obj["device_catalog"],
@@ -576,10 +585,14 @@ def check_event(obj, lineno, session):
              "%s belongs to session %r" % (where, obj["session_id"]))
     seq = check_u64(obj["seq"], "%s.seq" % where)
     timestamp = check_u64(obj["ts_ns"], "%s.ts_ns" % where)
-    if timestamp < session["start"] or timestamp >= session["end"]:
+    kind = obj["kind"]
+    floor = session["start"]
+    if (kind == "counter_snapshot"
+            and session["window_baseline"] is not None):
+        floor = session["window_baseline"]
+    if timestamp < floor or timestamp >= session["end"]:
         fail("outside-window", "%s timestamp outside capture window"
              % where)
-    kind = obj["kind"]
     if kind not in KINDS:
         fail("bad-kind", "%s kind %r" % (where, kind))
     check_source(obj["source"], "%s.source" % where)
@@ -1379,6 +1392,68 @@ def run_selftest():
 
     results.append(expect_reject("synthetic-vs-mode", provenance_clash,
                                  "contradictory-provenance"))
+
+    def baseline_session():
+        obj = read_json_file(os.path.join(fixture, "session.json"),
+                             "session.json")
+        obj["capture"]["window"]["baseline_start_ns"] = "999999900"
+        session = check_session(obj)
+        if session["window_baseline"] != 999999900:
+            fail("wrong-metric", "baseline floor %r" % (session,))
+        return "baseline floor vouched"
+
+    check("baseline-floor", baseline_session)
+
+    def baseline_after_start():
+        obj = read_json_file(os.path.join(fixture, "session.json"),
+                             "session.json")
+        obj["capture"]["window"]["baseline_start_ns"] = "1000000001"
+        check_session(obj)
+
+    results.append(expect_reject("baseline-after-start",
+                                 baseline_after_start, "bad-window"))
+
+    def baseline_event(kind, ts, data):
+        obj = read_json_file(os.path.join(fixture, "session.json"),
+                             "session.json")
+        obj["capture"]["window"]["baseline_start_ns"] = "999999900"
+        session = check_session(obj)
+        check_event({
+            "schema_version": "0.1.0", "session_id": session["id"],
+            "seq": "1", "ts_ns": ts, "kind": kind,
+            "source": {"hook": "h", "backend": "b",
+                       "profile_id": "p", "measurement": "observed",
+                       "correlation": "direct"},
+            "data": data,
+        }, 1, session)
+
+    def baseline_snapshot_ok():
+        baseline_event("counter_snapshot", "999999950", {
+            "counter_id": "c", "epoch": "0",
+            "scope": {"profile_id": "p"},
+            "value": "0", "unit": "count"})
+        return "pre-window snapshot admitted"
+
+    check("baseline-snapshot-ok", baseline_snapshot_ok)
+
+    def snapshot_below_baseline():
+        baseline_event("counter_snapshot", "999999899", {
+            "counter_id": "c", "epoch": "0",
+            "scope": {"profile_id": "p"},
+            "value": "0", "unit": "count"})
+
+    results.append(expect_reject("snapshot-below-baseline",
+                                 snapshot_below_baseline,
+                                 "outside-window"))
+
+    def observation_in_baseline_gap():
+        baseline_event("bounce_attempt", "999999950", {
+            "device_id": "dev-1", "requested_bytes": "4096",
+            "forced": True, "operation_id": "op-1"})
+
+    results.append(expect_reject("observation-in-baseline-gap",
+                                 observation_in_baseline_gap,
+                                 "outside-window"))
 
     base_report = read_json_file(
         os.path.join(fixture, "expected-report.json"), "expected report")

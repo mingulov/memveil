@@ -84,9 +84,10 @@
           "additionalProperties": false,
           "properties": {
             "start_ns": {"$ref": "#/$defs/u64"},
-            "end_ns": {"$ref": "#/$defs/u64"}
+            "end_ns": {"$ref": "#/$defs/u64"},
+            "baseline_start_ns": {"$ref": "#/$defs/u64"}
           },
-          "description": "Half-open monotonic observation window [start_ns, end_ns)."
+          "description": "Half-open monotonic observation window [start_ns, end_ns). Optional baseline_start_ns vouches the earlier start-cut read; counter snapshots are admissible from the baseline, every other record from start_ns."
         },
         "filters": {
           "type": "object",
