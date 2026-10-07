@@ -63,7 +63,7 @@ Serialize unsigned 64-bit counts, lengths, timestamps, offsets, and sequences as
 
 Initial resource requirements are an 8 MiB ring, 4,096 device records, and later 65,536 active mappings with visible exhaustion. Capture defaults are 60 seconds and 1 GiB of event data, with overwrite refused. Bound each serialized line to 64 KiB including newline, session/report documents to 16 MiB, and JSON nesting to 64. Report BPF memory separately from the 256 MiB userspace RSS target on the reference workload.
 
-Implement `doctor`, `record`, offline `report`, and later `top` with text/Markdown/JSON presentation as appropriate. Reports lead with mode, profile, window, quality, and measured scope; unavailable metrics display a reason. Device filters are exact literal names. Keep global conversion evidence separate from device-scoped DMA metrics.
+Implement `doctor`, `record`, offline `report`, and replay `top` with text/Markdown/JSON presentation as appropriate. Reports lead with mode, profile, window, quality, and measured scope; unavailable metrics display a reason. Device filters are exact literal names. Keep global conversion evidence separate from device-scoped DMA metrics.
 
 Exit codes: 0 sufficient evidence for the requested operation; 1 runtime/internal failure; 2 invalid usage/input/schema; 3 requested collection unavailable; 4 completed output with materially incomplete requested evidence. Optional unrequested capabilities do not force exit 4. Findings are evidence-linked observations, not security verdicts.
 

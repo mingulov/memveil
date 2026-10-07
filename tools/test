@@ -5,10 +5,22 @@
 # Usage: tools/test <suite> | tools/test --help
 #
 # Implemented suites: schemas, unit, reports, profiles, doctor, attempts,
-# writer, signals, record, vm-attempts, buildcache, package.
+# writer, signals, record, vm-attempts, buildcache, package, identity,
+# correlation, mappings, lifetimes, pools, regions, diagnostics,
+# conversion-normalize, confidential-hooks, region-resolution,
+# baseline, confidential-ranges, confidential-inventory,
+# confidential-real, confidential-late-attach, top,
+# oracle-ledger, vm-oracle, profile-semantics, vm-lifecycle,
+# vm-copy, vm-real-io, stop, vm-stop, budgets, quality,
+# vm-saturation, reader-adversarial, fuzz-smoke, fuzz-campaign,
+# record-failures, output-paths, vm-cleanup, privacy,
+# render-escaping, offline-environment, perf-replay,
+# perf-workload, soak, preview-package, provenance, source-export,
+# release-runtime, docs, examples.
 #
-# A skipped privileged test is reported as skipped, never as success.
-# Exit 0 only when the suite passes; 1 on test failure; 2 on invalid usage.
+# A skipped suite is reported as skipped, never as success.
+# Exit 0 only when the suite passes; 1 on test failure; 2 on
+# invalid usage; 77 when a suite with unmet inputs skips.
 # One suite per invocation; extra arguments are rejected.
 #
 # The unit suite runs every Mojo unit test through the pinned toolchain.
@@ -193,6 +205,21 @@ suite_reports() {
         report --format markdown "$ROOT/tests/fixtures/attempts"
     expect_stdout "escape-text" tests/golden/report-escape.txt 0 \
         report "$ROOT/tests/fixtures/reader/escape"
+    expect_stdout "lifecycle-nested-text" \
+        tests/golden/report-lifecycle-nested.txt 0 \
+        report "$ROOT/tests/fixtures/lifecycle/lifecycle-nested"
+    expect_stdout "copy-before-failure-text" \
+        tests/golden/report-copy-before-failure.txt 0 \
+        report "$ROOT/tests/fixtures/lifecycle/copy-before-failure"
+    expect_stdout "pool-pressure-text" \
+        tests/golden/report-pool-pressure.txt 0 \
+        report "$ROOT/tests/fixtures/pools/pressure"
+    expect_stdout "region-union-text" \
+        tests/golden/report-region-union.txt 0 \
+        report "$ROOT/tests/fixtures/regions/region-union"
+    expect_stdout "conversion-uncertain-text" \
+        tests/golden/report-conversion-uncertain.txt 4 \
+        report "$ROOT/tests/fixtures/regions/conversion-uncertain"
     expect_stdout "escape-markdown" tests/golden/report-escape.md 0 \
         report --format markdown "$ROOT/tests/fixtures/reader/escape"
 
@@ -210,6 +237,29 @@ suite_reports() {
 
     expect_json "attempts-json" tests/fixtures/attempts 0 \
         "capture OK: 3 events, 3 attempts, 9216 requested bytes"
+    expect_json "lifecycle-nested-json" \
+        tests/fixtures/lifecycle/lifecycle-nested 0 \
+        "capture OK: 6 events, 1 attempts, 4096 requested bytes"
+    expect_json "copy-before-failure-json" \
+        tests/fixtures/lifecycle/copy-before-failure 0 \
+        "capture OK: 3 events, 1 attempts, 4096 requested bytes"
+    expect_json "unpaired-json" \
+        tests/fixtures/lifecycle/unpaired 4 \
+        "capture OK: 2 events, 1 attempts, 4096 requested bytes"
+    expect_json "correlation-loss-attempts-json" \
+        tests/fixtures/reader/correlation-loss-attempts 0 \
+        "capture OK: 3 events, 3 attempts, 9216 requested bytes"
+    expect_json "pool-pressure-json" tests/fixtures/pools/pressure 0 \
+        "capture OK: 4 events, 1 attempts, 512 requested bytes"
+    expect_json "region-union-json" tests/fixtures/regions/region-union 0 \
+        "capture OK: 4 events, 1 attempts, 4096 requested bytes"
+    expect_json "conversion-uncertain-json" \
+        tests/fixtures/regions/conversion-uncertain 4 \
+        "capture OK: 3 events, 1 attempts, 4096 requested bytes"
+    expect_json "ordinary-noop-json" tests/fixtures/regions/ordinary-noop 0 \
+        "capture OK: 2 events, 1 attempts, 4096 requested bytes"
+    expect_json "late-attach-json" tests/fixtures/regions/late-attach 0 \
+        "capture OK: 1 events, 1 attempts, 4096 requested bytes"
     expect_json "multidev-json" tests/fixtures/reader/multidev 0 \
         "capture OK: 3 events, 3 attempts, 7168 requested bytes"
     expect_json "counters-json" tests/fixtures/reader/counters 0 \
@@ -825,6 +875,314 @@ suite_profiles() {
     run_unit_file tests/unit/test_scan.mojo
 }
 
+suite_identity() {
+    run_unit_file tests/unit/test_identity.mojo
+}
+
+suite_correlation() {
+    run_unit_file tests/unit/test_correlation.mojo
+}
+
+suite_mappings() {
+    run_unit_file tests/unit/test_metrics.mojo || return 1
+    run_unit_file tests/unit/test_mappings.mojo || return 1
+    run_unit_file tests/unit/test_engine.mojo
+}
+
+suite_lifetimes() {
+    run_unit_file tests/unit/test_lifetimes.mojo
+}
+
+suite_pools() {
+    run_unit_file tests/unit/test_pools.mojo
+}
+
+suite_regions() {
+    run_unit_file tests/unit/test_regions.mojo
+}
+
+suite_conversion_normalize() {
+    run_unit_file tests/unit/test_conversion_normalize.mojo
+}
+
+suite_confidential_hooks() {
+    python3 "$ROOT/tests/confidential/test_conversion_hooks.py"
+}
+
+suite_region_resolution() {
+    run_unit_file tests/unit/test_region_resolution.mojo
+}
+
+suite_baseline() {
+    run_unit_file tests/unit/test_baseline.mojo
+}
+
+suite_confidential_ranges() {
+    python3 "$ROOT/tests/confidential/test_range_checks.py"
+}
+
+suite_confidential_inventory() {
+    python3 -c "import json,sys; json.load(open(sys.argv[1]))" \
+        "$ROOT/tests/confidential/recipe.json" || return 1
+    python3 "$ROOT/tests/confidential/test_inventory.py"
+}
+
+suite_confidential_real() {
+    python3 "$ROOT/tests/confidential/test_real_guest.py"
+}
+
+suite_confidential_late_attach() {
+    python3 "$ROOT/tests/confidential/test_late_attach.py"
+}
+
+suite_diagnostics() {
+    run_unit_file tests/unit/test_diagnostics.mojo
+}
+
+suite_top() {
+    run_unit_file tests/unit/test_top.mojo || return 1
+    if [ ! -x "$ROOT/build/memveil" ]; then
+        echo "top: missing build/memveil (run tools/build first)" >&2
+        return 1
+    fi
+    python3 "$ROOT/tests/cli/test_top.py"
+}
+
+suite_oracle_ledger() {
+    if [ ! -x "$ROOT/build/memveil" ]; then
+        echo "oracle-ledger: missing build/memveil" \
+            "(run tools/build first)" >&2
+        return 1
+    fi
+    python3 -m pytest "$ROOT/tests/vm/test_oracle_ledger.py" -q
+}
+
+suite_profile_semantics() {
+    python3 -m pytest "$ROOT/tests/vm/test_profile_semantics.py" -q
+}
+
+vm_lifecycle_preflight() {
+    if [ "${MEMVEIL_VM_LIFECYCLE:-0}" != "1" ]; then
+        echo "$1: SKIP: needs MEMVEIL_VM_LIFECYCLE=1" \
+            "with qualified probes" >&2
+        return 77
+    fi
+    if [ ! -f "$ROOT/build/bpf/swiotlb_lifecycle.bpf.o" ]; then
+        echo "$1: SKIP: lifecycle probes not qualified" >&2
+        return 77
+    fi
+    return 0
+}
+
+suite_vm_lifecycle() {
+    vm_lifecycle_preflight "vm-lifecycle" || return $?
+    python3 -m pytest "$ROOT/tests/vm/test_lifecycle.py" -q
+}
+
+suite_vm_copy() {
+    vm_lifecycle_preflight "vm-copy" || return $?
+    python3 -m pytest "$ROOT/tests/vm/test_copy_semantics.py" -q
+}
+
+suite_vm_real_io() {
+    vm_lifecycle_preflight "vm-real-io" || return $?
+    python3 -m pytest "$ROOT/tests/vm/test_real_io.py" -q
+}
+
+suite_stop() {
+    run_unit_file tests/unit/test_stop.mojo
+}
+
+suite_vm_stop() {
+    python3 "$ROOT/tests/vm/test_stop_races.py"
+}
+
+suite_budgets() {
+    run_unit_file tests/unit/test_budgets.mojo
+}
+
+suite_quality() {
+    run_unit_file tests/unit/test_quality.mojo
+}
+
+suite_vm_saturation() {
+    python3 "$ROOT/tests/vm/test_saturation.py"
+}
+
+suite_reader_adversarial() {
+    run_unit_file tests/unit/test_reader_adversarial.mojo || return 1
+    if [ ! -x "$ROOT/build/memveil" ]; then
+        echo "reader-adversarial: missing build/memveil" \
+            "(run tools/build first)" >&2
+        return 1
+    fi
+    python3 "$ROOT/tests/cli/test_adversarial_cli.py"
+}
+
+suite_fuzz_smoke() {
+    if [ ! -x "$ROOT/build/memveil" ]; then
+        echo "fuzz-smoke: missing build/memveil" \
+            "(run tools/build first)" >&2
+        return 1
+    fi
+    python3 "$ROOT/tests/fuzz/run.py" --seeds 200
+}
+
+suite_fuzz_campaign() {
+    if [ ! -x "$ROOT/build/memveil" ]; then
+        echo "fuzz-campaign: missing build/memveil" \
+            "(run tools/build first)" >&2
+        return 1
+    fi
+    seeds=${MEMVEIL_FUZZ_SEEDS:-10000}
+    python3 "$ROOT/tests/fuzz/run.py" --seeds "$seeds"
+}
+
+suite_record_failures() {
+    run_unit_file tests/unit/test_stdout.mojo || return 1
+    if [ ! -x "$ROOT/build/memveil" ]; then
+        echo "record-failures: missing build/memveil" \
+            "(run tools/build first)" >&2
+        return 1
+    fi
+    python3 "$ROOT/tests/cli/test_stdout_errors.py" || return 1
+    python3 "$ROOT/tests/cli/test_record_failures.py"
+}
+
+suite_output_paths() {
+    if [ ! -x "$ROOT/build/memveil" ]; then
+        echo "output-paths: missing build/memveil" \
+            "(run tools/build first)" >&2
+        return 1
+    fi
+    python3 "$ROOT/tests/cli/test_output_paths.py"
+}
+
+suite_vm_cleanup() {
+    python3 "$ROOT/tests/vm/test_cleanup_failures.py"
+}
+
+suite_privacy() {
+    if [ ! -x "$ROOT/build/memveil" ]; then
+        echo "privacy: missing build/memveil" \
+            "(run tools/build first)" >&2
+        return 1
+    fi
+    python3 "$ROOT/tests/privacy/test_canaries.py" || return 1
+    python3 "$ROOT/tests/privacy/test_metadata_allowlist.py" || return 1
+    python3 "$ROOT/tests/privacy/test_suite_skip_codes.py"
+}
+
+suite_render_escaping() {
+    if [ ! -x "$ROOT/build/memveil" ]; then
+        echo "render-escaping: missing build/memveil" \
+            "(run tools/build first)" >&2
+        return 1
+    fi
+    python3 "$ROOT/tests/privacy/test_render_escaping.py"
+}
+
+suite_offline_environment() {
+    if [ ! -x "$ROOT/build/memveil" ]; then
+        echo "offline-environment: missing build/memveil" \
+            "(run tools/build first)" >&2
+        return 1
+    fi
+    python3 "$ROOT/tests/privacy/test_offline_environment.py"
+}
+
+suite_perf_replay() {
+    if [ ! -x "$ROOT/build/memveil" ]; then
+        echo "perf-replay: missing build/memveil" \
+            "(run tools/build first)" >&2
+        return 1
+    fi
+    python3 "$ROOT/tests/perf/replay.py"
+}
+
+suite_perf_workload() {
+    python3 -m pytest "$ROOT/tests/perf/test_compare.py" -q \
+        || return 1
+    python3 "$ROOT/tests/perf/workloads.py"
+}
+
+suite_soak() {
+    if [ ! -x "$ROOT/build/memveil" ]; then
+        echo "soak: missing build/memveil" \
+            "(run tools/build first)" >&2
+        return 1
+    fi
+    python3 "$ROOT/tests/perf/soak.py"
+}
+
+suite_preview_package() {
+    if [ ! -x "$ROOT/build/memveil" ]; then
+        echo "preview-package: missing build/memveil" \
+            "(run tools/build first)" >&2
+        return 1
+    fi
+    python3 "$ROOT/tests/package/test_preview.py"
+}
+
+suite_provenance() {
+    python3 "$ROOT/tests/provenance/test_provenance.py"
+}
+
+suite_source_export() {
+    python3 "$ROOT/tests/package/test_source_export.py"
+}
+
+suite_docs() {
+    python3 "$ROOT/tests/docs/test_docs.py"
+}
+
+suite_examples() {
+    python3 "$ROOT/tests/docs/test_examples.py"
+}
+
+suite_release_runtime() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "release-runtime: python3 not found" >&2
+        return 1
+    fi
+    if ! python3 -m pytest --version >/dev/null 2>&1; then
+        echo "release-runtime: pytest not importable" >&2
+        return 1
+    fi
+    TARBALL="${MV_BUNDLE_TARBALL:-}"
+    if [ -z "$TARBALL" ]; then
+        if [ -z "${LMB_PACKAGE:-}" ]; then
+            echo "release-runtime: BLOCKED: MV_BUNDLE_TARBALL is not" \
+                "set and LMB_PACKAGE is not set (build the candidate" \
+                "with tools/package from a clean tree first)" >&2
+            return 1
+        fi
+        RTMP=$(mktemp -d)
+        trap 'rm -rf "$RTMP"' EXIT
+        if ! LMB_PACKAGE="$LMB_PACKAGE" "$ROOT/tools/package" \
+            >"$RTMP/package.log" 2>&1; then
+            echo "release-runtime: BLOCKED: tools/package failed" >&2
+            cat "$RTMP/package.log" >&2
+            return 1
+        fi
+        TARBALL=$(sed -n 's/^package: \(.*\.tar\.gz\)$/\1/p' \
+            "$RTMP/package.log" | tail -1)
+        if [ -z "$TARBALL" ] || [ ! -f "$TARBALL" ]; then
+            echo "release-runtime: no tarball in package log" >&2
+            cat "$RTMP/package.log" >&2
+            return 1
+        fi
+    fi
+    if [ ! -f "$TARBALL" ]; then
+        echo "release-runtime: MV_BUNDLE_TARBALL is not a file:" \
+            "$TARBALL" >&2
+        return 1
+    fi
+    (cd "$ROOT" && MV_BUNDLE_TARBALL="$TARBALL" MV_REPO="$ROOT" \
+        MV_VALID_EMPTY="$ROOT/tests/package/valid-empty" \
+        python3 -m pytest tests/package/test_release_runtime.py)
+}
+
 suite_attempts() {
     # Corpus is the single vector source: regeneration must be
     # byte-identical, then the C reference and the Mojo decoder
@@ -1373,7 +1731,7 @@ suite_buildcache() {
     # LMB_PACKAGE (the pinned tarball path).
     if [ -z "${LMB_PACKAGE:-}" ] || [ ! -f "$LMB_PACKAGE" ]; then
         echo "buildcache: skipped (set LMB_PACKAGE to the pinned tarball)"
-        return 0
+        return 77
     fi
     BTMP=$(mktemp -d)
     trap 'rm -rf "$BTMP"' EXIT
@@ -1383,6 +1741,12 @@ import json
 lock = json.load(open('$ROOT/toolchain.lock.json'))
 print(lock['dependencies']['libbpf-mojo']['tarball_sha256'])
 ")
+    bver=$(python3 -c "
+import json
+lock = json.load(open('$ROOT/toolchain.lock.json'))
+print(lock['dependencies']['libbpf-mojo']['version'])
+")
+    bvendored="$ROOT/third_party/libbpf-mojo-$bver.tar.gz"
     # Case 1: combined tampering (edited lmb source, edited
     # header, deleted header) heals in one build.
     echo "BUILDCACHE-TAMPER" >>"$ROOT/build/deps/lmb/mojo/libbpf_mojo/session.mojo"
@@ -1434,9 +1798,14 @@ print(lock['dependencies']['libbpf-mojo']['tarball_sha256'])
         bfailed=1
     fi
     # Case 3: a stale digest without any source fails fast
-    # and removes the untrusted cache; then restore.
+    # and removes the untrusted cache; then restore. Every
+    # source (environment, kept copy, vendored tarball) is
+    # stashed so the premise holds.
     echo "deadbeef" >"$ROOT/build/deps/lmb/.digest"
     mv "$ROOT/build/deps/lmb-package.tgz" "$BTMP/lmb-package.tgz"
+    if [ -f "$bvendored" ]; then
+        mv "$bvendored" "$BTMP/lmb-vendored.tgz"
+    fi
     if env -u LMB_PACKAGE "$ROOT/tools/build" \
         >"$BTMP/offline.log" 2>&1; then
         echo "buildcache: sourceless stale build exits 0" >&2
@@ -1452,6 +1821,9 @@ print(lock['dependencies']['libbpf-mojo']['tarball_sha256'])
         bfailed=1
     fi
     mv "$BTMP/lmb-package.tgz" "$ROOT/build/deps/lmb-package.tgz"
+    if [ -f "$BTMP/lmb-vendored.tgz" ]; then
+        mv "$BTMP/lmb-vendored.tgz" "$bvendored"
+    fi
     if ! LMB_PACKAGE="$LMB_PACKAGE" "$ROOT/tools/build" \
         >"$BTMP/restore.log" 2>&1; then
         echo "buildcache: restore build failed (tree unhealthy)" >&2
@@ -1478,8 +1850,13 @@ print(lock['dependencies']['libbpf-mojo']['tarball_sha256'])
     fi
     # Case 5: a valid stamp without any archive still fails
     # when sources are tampered: stamps alone prove nothing.
+    # Every source (environment, kept copy, vendored tarball)
+    # is stashed so the premise holds.
     echo "BUILDCACHE-TAMPER" >>"$ROOT/build/deps/lmb/mojo/libbpf_mojo/error.mojo"
     mv "$ROOT/build/deps/lmb-package.tgz" "$BTMP/lmb-package.tgz"
+    if [ -f "$bvendored" ]; then
+        mv "$bvendored" "$BTMP/lmb-vendored.tgz"
+    fi
     if env -u LMB_PACKAGE "$ROOT/tools/build" \
         >"$BTMP/archivless.log" 2>&1; then
         echo "buildcache: archivless tampered build exits 0" >&2
@@ -1495,17 +1872,49 @@ print(lock['dependencies']['libbpf-mojo']['tarball_sha256'])
         bfailed=1
     fi
     mv "$BTMP/lmb-package.tgz" "$ROOT/build/deps/lmb-package.tgz"
+    if [ -f "$BTMP/lmb-vendored.tgz" ]; then
+        mv "$BTMP/lmb-vendored.tgz" "$bvendored"
+    fi
     if ! env -u LMB_PACKAGE "$ROOT/tools/build" \
         >"$BTMP/restore2.log" 2>&1; then
         echo "buildcache: kept restore failed (tree unhealthy)" >&2
         tail -20 "$BTMP/restore2.log" >&2
         bfailed=1
     fi
+    # Case 6: with the kept tarball stashed and no LMB_PACKAGE,
+    # a tampered cache heals from the vendored tarball alone,
+    # and the kept copy is refreshed from it; then restore.
+    echo "BUILDCACHE-TAMPER" >>"$ROOT/build/deps/lmb/mojo/libbpf_mojo/session.mojo"
+    mv "$ROOT/build/deps/lmb-package.tgz" "$BTMP/lmb-package.tgz"
+    if ! env -u LMB_PACKAGE "$ROOT/tools/build" \
+        >"$BTMP/vendored.log" 2>&1; then
+        echo "buildcache: vendored-tarball heal failed" >&2
+        tail -20 "$BTMP/vendored.log" >&2
+        bfailed=1
+    fi
+    grep -q "vendored third_party tarball" "$BTMP/vendored.log" || {
+        echo "buildcache: vendored source not used" >&2
+        bfailed=1
+    }
+    grep -q "libbpf-mojo .* refresh" "$BTMP/vendored.log" || {
+        echo "buildcache: vendored tamper not detected" >&2
+        bfailed=1
+    }
+    if grep -q "BUILDCACHE-TAMPER" \
+        "$ROOT/build/deps/lmb/mojo/libbpf_mojo/session.mojo"; then
+        echo "buildcache: tamper marker survives vendored heal" >&2
+        bfailed=1
+    fi
+    if [ ! -f "$ROOT/build/deps/lmb-package.tgz" ]; then
+        echo "buildcache: kept copy not refreshed from vendored" >&2
+        bfailed=1
+    fi
+    mv "$BTMP/lmb-package.tgz" "$ROOT/build/deps/lmb-package.tgz"
     if [ "$bfailed" -ne 0 ]; then
         echo "buildcache: FAILED" >&2
         return 1
     fi
-    echo "buildcache: tamper-heal, stale, kept-tarball, and refusal cases passed"
+    echo "buildcache: tamper-heal, stale, kept-tarball, vendored-tarball, and refusal cases passed"
     return 0
 }
 
@@ -1513,9 +1922,9 @@ suite_writer() {
     run_unit_file tests/unit/test_encode.mojo || return 1
     # Round-trip every fixture capture: parse/encode/reparse must
     # preserve the struct exactly (exit 0). Exit 2 is accepted
-    # ONLY for the listed intentionally-invalid fixtures and the
-    # one regions fixture (encoder documents that lossy boundary
-    # by refusing it). Exit 1 (mismatch) always fails.
+    # ONLY for the listed intentionally-invalid fixtures.
+    # Baseline region detail round-trips exactly since the parser
+    # retains every observation. Exit 1 (mismatch) always fails.
     ROUNDTRIP="$ROOT/build/roundtrip_check"
     (cd "$ROOT" && pixi run --frozen mojo build -I src \
         --target-cpu x86-64-v2 \
@@ -1528,7 +1937,14 @@ suite_writer() {
         rc=$?
         checked=$((checked + 1))
         case "$rel" in
+            tests/fixtures/reader/adv-bad-seq-int/events.ndjson|\
+            tests/fixtures/reader/adv-bad-utf8/events.ndjson|\
+            tests/fixtures/reader/adv-depth-64/events.ndjson|\
+            tests/fixtures/reader/adv-depth-65/events.ndjson|\
+            tests/fixtures/reader/adv-nul/events.ndjson|\
+            tests/fixtures/reader/adv-unknown-field/events.ndjson|\
             tests/fixtures/reader/badkind/events.ndjson|\
+            tests/fixtures/reader/compat-major/session.json|\
             tests/fixtures/reader/corrupt-tail/events.ndjson|\
             tests/fixtures/reader/f2-contradictory-provenance/session.json|\
             tests/fixtures/reader/f3-baseline/session.json|\
@@ -2418,6 +2834,141 @@ case "$1" in
         ;;
     package)
         suite_package
+        ;;
+    identity)
+        suite_identity
+        ;;
+    correlation)
+        suite_correlation
+        ;;
+    mappings)
+        suite_mappings
+        ;;
+    lifetimes)
+        suite_lifetimes
+        ;;
+    pools)
+        suite_pools
+        ;;
+    regions)
+        suite_regions
+        ;;
+    conversion-normalize)
+        suite_conversion_normalize
+        ;;
+    confidential-hooks)
+        suite_confidential_hooks
+        ;;
+    region-resolution)
+        suite_region_resolution
+        ;;
+    baseline)
+        suite_baseline
+        ;;
+    confidential-ranges)
+        suite_confidential_ranges
+        ;;
+    confidential-inventory)
+        suite_confidential_inventory
+        ;;
+    confidential-real)
+        suite_confidential_real
+        ;;
+    confidential-late-attach)
+        suite_confidential_late_attach
+        ;;
+    diagnostics)
+        suite_diagnostics
+        ;;
+    top)
+        suite_top
+        ;;
+    oracle-ledger)
+        suite_oracle_ledger
+        ;;
+    vm-oracle)
+        exec "$ROOT/tools/vm-oracle"
+        ;;
+    profile-semantics)
+        suite_profile_semantics
+        ;;
+    vm-lifecycle)
+        suite_vm_lifecycle
+        ;;
+    vm-copy)
+        suite_vm_copy
+        ;;
+    vm-real-io)
+        suite_vm_real_io
+        ;;
+    stop)
+        suite_stop
+        ;;
+    vm-stop)
+        suite_vm_stop
+        ;;
+    budgets)
+        suite_budgets
+        ;;
+    quality)
+        suite_quality
+        ;;
+    vm-saturation)
+        suite_vm_saturation
+        ;;
+    reader-adversarial)
+        suite_reader_adversarial
+        ;;
+    fuzz-smoke)
+        suite_fuzz_smoke
+        ;;
+    fuzz-campaign)
+        suite_fuzz_campaign
+        ;;
+    record-failures)
+        suite_record_failures
+        ;;
+    output-paths)
+        suite_output_paths
+        ;;
+    vm-cleanup)
+        suite_vm_cleanup
+        ;;
+    privacy)
+        suite_privacy
+        ;;
+    render-escaping)
+        suite_render_escaping
+        ;;
+    offline-environment)
+        suite_offline_environment
+        ;;
+    perf-replay)
+        suite_perf_replay
+        ;;
+    perf-workload)
+        suite_perf_workload
+        ;;
+    soak)
+        suite_soak
+        ;;
+    preview-package)
+        suite_preview_package
+        ;;
+    provenance)
+        suite_provenance
+        ;;
+    source-export)
+        suite_source_export
+        ;;
+    release-runtime)
+        suite_release_runtime
+        ;;
+    docs)
+        suite_docs
+        ;;
+    examples)
+        suite_examples
         ;;
     *)
         echo "test: unknown suite: $1" >&2

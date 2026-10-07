@@ -19,11 +19,13 @@ fragment is sanitized for its sink.
 """
 
 from memveil.cli.report import (
+    EXIT_INTERNAL,
     EXIT_INVALID,
     EXIT_OK,
     sanitize_diagnostic,
     write_stderr,
 )
+from memveil.platform.stdout import write_stdout
 from memveil.platform.capabilities import (
     CapEntry,
     CapabilityReport,
@@ -369,10 +371,14 @@ def run_doctor_with(
     var report = discover_capabilities(reader, decision)
     var drep = build_doctor_report(reader, env, decision^, report^)
     var ready = drep.verdict == "ready"
-    if as_json:
-        print(render_doctor_json(drep^), end="")
-    else:
-        print(render_doctor_text(drep^), end="")
+    try:
+        if as_json:
+            write_stdout(render_doctor_json(drep^))
+        else:
+            write_stdout(render_doctor_text(drep^))
+    except:
+        write_stderr("memveil doctor: cannot write stdout\n")
+        return EXIT_INTERNAL
     if ready:
         return EXIT_OK
     return EXIT_UNAVAILABLE
@@ -389,7 +395,11 @@ def run_doctor(args: List[String]) raises -> Int:
     var i = 0
     while i < len(args):
         if args[i] == "--help" or args[i] == "-h":
-            print(doctor_usage(), end="")
+            try:
+                write_stdout(doctor_usage())
+            except:
+                write_stderr("memveil doctor: cannot write stdout\n")
+                return EXIT_INTERNAL
             return EXIT_OK
         i += 1
     var as_json = False

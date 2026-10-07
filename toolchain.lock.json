@@ -1,6 +1,6 @@
 {
   "lock_version": "1.0.0",
-  "recorded_on": "2026-10-05",
+  "recorded_on": "2026-10-07",
   "note": "Exact pinned build inputs. Verify with: pixi install && tools/build --check-toolchain. The pixi.lock file carries authoritative conda package hashes; this file records the selected versions and their provenance.",
   "toolchain": {
     "mojo": {
@@ -58,10 +58,10 @@
       "status": "pinned",
       "version": "0.2.1",
       "source_commit": "1ce369b",
-      "tarball_sha256": "db822855cd209212c8154d6e118a60fe22062a6b50a834564dd574938e15c53b",
+      "tarball_sha256": "e3e11583d0ada8911f04db2c121f190167305046cd45dc23379ca8d09951ab1f",
       "mojo_tree": "mojo/libbpf_mojo",
       "native_lib": "lib/libbpf_mojo.so.1",
-      "note": "Consumed by path (LMB_PACKAGE) plus this hash. Memveil never reads libbpf-mojo sibling sources; standalone clones supply the tarball."
+      "note": "Pre-release bytes: source_commit plus the uncommitted provenance/pin-check fix wave; 0.2.1 was never tagged or published, so re-pin from the tagged release before any distribution claim. Consumed by path (LMB_PACKAGE) plus this hash. Memveil never reads libbpf-mojo sibling sources; standalone clones supply the tarball."
     }
   },
   "expected_first_lines": {

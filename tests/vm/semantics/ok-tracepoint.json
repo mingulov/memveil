@@ -1,0 +1,39 @@
+{
+  "definition": {
+    "hook": "swiotlb:swiotlb_bounced",
+    "kind": "tracepoint",
+    "target": "swiotlb_bounced",
+    "signature": {
+      "return": "void",
+      "params": [
+        "struct device *",
+        "dma_addr_t",
+        "size_t"
+      ]
+    },
+    "btf_anchor": {
+      "release": "7.0.0-34-generic",
+      "id": 382
+    },
+    "authority": "kernel-source",
+    "adapter_len": 512,
+    "inlined": false,
+    "available": true
+  },
+  "recorded": {
+    "signature": {
+      "return": "void",
+      "params": [
+        "struct device *",
+        "dma_addr_t",
+        "size_t"
+      ]
+    },
+    "btf_anchor": {
+      "release": "7.0.0-34-generic",
+      "id": 382
+    }
+  },
+  "expect_ok": true,
+  "expect_reason": ""
+}

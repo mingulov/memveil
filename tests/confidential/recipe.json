@@ -1,0 +1,29 @@
+{
+  "recipe_version": "1.0.0",
+  "description": "Machine-readable requirements for confidential-guest admission. One exact technology per qualification; nothing here provisions, spends, or converts.",
+  "guest": {
+    "arch": "x86_64",
+    "min_kernel": "7.0.0",
+    "modes": ["sev-snp", "tdx"],
+    "one_technology_required": true
+  },
+  "enabled_proof": {
+    "sev-snp": ["sev_snp CPU flag", "/dev/sev-guest node", "kernel SNP-active marker"],
+    "tdx": ["tdx_guest CPU flag", "/dev/tdx-guest node", "kernel TDX-guest marker"],
+    "never_sufficient_alone": ["CPU flags", "VM marketing name", "guest-root access", "user assertion"]
+  },
+  "permissions": {
+    "btf_readable": true,
+    "kallsyms_readable": true,
+    "trace_or_fentry_attach": true,
+    "notes": "Checks run unprivileged first; privileged steps need their own authorization and a disposable guest."
+  },
+  "owned_region_mechanism": {
+    "allocates_only_own_memory": true,
+    "converts_only_own_memory": true,
+    "restores_on_unload": true,
+    "never_touches_host_memory": true
+  },
+  "gates": ["confidential-inventory", "confidential-hooks", "confidential-ranges", "confidential-real", "confidential-late-attach"],
+  "forbidden": ["provisioning without authorization", "spending without authorization", "image-policy changes without authorization", "deliberate guest-memory corruption", "payload/key persistence", "full boot logs or command lines in artifacts"]
+}

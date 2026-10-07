@@ -1,0 +1,25 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Lifecycle VM gates: low-rate matrix, copy semantics, real I/O.
+#
+# Runs the three gate files. Each skips fast (no boot) unless
+# MEMVEIL_VM_LIFECYCLE=1 with qualified lifecycle probes and a
+# working virtme-ng harness; an armed gate with missing pieces
+# fails instead of skipping.
+set -u
+
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+
+if [ "${MEMVEIL_VM_LIFECYCLE:-0}" != "1" ]; then
+    echo "vm-lifecycle: SKIP: needs MEMVEIL_VM_LIFECYCLE=1" \
+        "with qualified probes" >&2
+    exit 77
+fi
+if [ ! -f "$ROOT/build/bpf/swiotlb_lifecycle.bpf.o" ]; then
+    echo "vm-lifecycle: SKIP: lifecycle probes not qualified" >&2
+    exit 77
+fi
+
+cd "$ROOT" || exit 1
+exec python3 -m pytest tests/vm/test_lifecycle.py \
+    tests/vm/test_copy_semantics.py tests/vm/test_real_io.py -v "$@"

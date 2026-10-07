@@ -461,6 +461,7 @@ def _parse_capability(mut scan: Scanner) raises -> ProfileCapability:
                     v != "attempt-trace"
                     and v != "mapping-lifecycle"
                     and v != "copy-actual"
+                    and v != "conversion-observe"
                 ):
                     raise ValidationError("capability.id", "bad enum")
                 out.id = v

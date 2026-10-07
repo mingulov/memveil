@@ -44,7 +44,9 @@ from memveil.model.session import (
 )
 from memveil.model.validate import format_u64
 from memveil.platform.evidence import GuestInfo
+from memveil.platform.outcome import OpOut
 from memveil.platform.reader import fs_type_name
+from memveil.platform.signal import SignalOut, SignalSource
 
 comptime EXIT_ERROR = 1
 comptime EXIT_INVALID = 2
@@ -76,14 +78,6 @@ comptime FLAG_BYTE_COVERAGE = UInt64(32)
 
 comptime MAP_TYPE_ARRAY = 2
 comptime MAP_TYPE_RINGBUF = 27
-
-
-@fieldwise_init
-struct OpOut(Copyable, Movable):
-    """One fallible kernel-side operation outcome."""
-
-    var ok: Bool
-    var message: String
 
 
 @fieldwise_init
@@ -208,24 +202,6 @@ trait ClockSource:
         ...
 
     def sleep_ms(mut self, ms: Int):
-        ...
-
-
-@fieldwise_init
-struct SignalOut(Copyable, Movable):
-    """One signal check: none, pending, or error."""
-
-    var state: String
-    var message: String
-
-
-trait SignalSource:
-    """Tristate SIGINT/SIGTERM source (signalfd live)."""
-
-    def setup(mut self) -> OpOut:
-        ...
-
-    def check(mut self) -> SignalOut:
         ...
 
 

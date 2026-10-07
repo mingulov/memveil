@@ -1,0 +1,582 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Replay top: periodic summaries over one capture directory.
+
+Top replays the capture's events through the shared composed
+analyzer and prints one text summary per refresh: at each
+interval boundary of capture time plus a final full-window
+report. The final block renders the same rows and findings as
+``report`` with the same policy, so replay-prefix equivalence
+holds by construction.
+
+The device option is a display filter over per-device rows
+(exact device id or catalog name); analysis always covers
+the whole capture. Summaries are line-oriented plain text with escaped
+fields, safe for non-TTY pipes. Between refreshes top waits
+the interval in wall time, polling for stops first and every
+100 ms; a pending SIGINT/SIGTERM finishes the remaining
+stream quietly, prints the final summary, and exits with the
+final report's code.
+"""
+
+from memveil.analysis.diagnostics import diagnose_report
+from memveil.analysis.engine import Analyzer
+from memveil.capture.reader import (
+    DEFAULT_MAX_EVENTS_BYTES,
+    DEFAULT_MAX_LINE_BYTES,
+    DEFAULT_MAX_SESSION_BYTES,
+    CaptureReader,
+    ReaderLimits,
+    read_capture,
+)
+from memveil.cli.durations import parse_duration_ns
+from memveil.cli.report import (
+    EXIT_INTERNAL,
+    EXIT_INVALID,
+    EXIT_OK,
+    MAX_RENDERED_BYTES,
+    CliError,
+    check_rendered_size,
+    exit_for_report,
+    sanitize_diagnostic,
+    write_stderr,
+)
+from memveil.model.event import Event
+from memveil.model.report import Report
+from memveil.model.validate import format_u64
+from memveil.platform.stdout import write_stdout
+from memveil.platform.clock import MonoClock
+from memveil.platform.signal import LiveSignalSource, SignalOut
+from memveil.render.render import render
+
+comptime DEFAULT_INTERVAL_NS = UInt64(1000000000)
+
+
+struct TopOptions:
+    """Parsed top arguments."""
+
+    var interval_ns: UInt64
+    var has_device: Bool
+    var device: String
+    var has_long_lived_after: Bool
+    var long_lived_after_ns: UInt64
+    var dir: String
+    var max_line_bytes: Int
+    var max_session_bytes: Int
+    var max_events_bytes: Int
+
+    def __init__(out self):
+        self.interval_ns = DEFAULT_INTERVAL_NS
+        self.has_device = False
+        self.device = String("")
+        self.has_long_lived_after = False
+        self.long_lived_after_ns = UInt64(0)
+        self.dir = String("")
+        self.max_line_bytes = DEFAULT_MAX_LINE_BYTES
+        self.max_session_bytes = DEFAULT_MAX_SESSION_BYTES
+        self.max_events_bytes = DEFAULT_MAX_EVENTS_BYTES
+
+
+def top_usage() -> String:
+    """Usage text for the top verb."""
+    return (
+        "usage: memveil top [--interval DURATION] [--device NAME]\n"
+        "       [--long-lived-after DURATION] [--max-line-bytes N]\n"
+        "       [--max-session-bytes N] [--max-events-bytes N] DIR\n"
+        "\n"
+        "Replay the capture in DIR, printing one text summary per\n"
+        "interval of capture time plus a final full-window report.\n"
+        "Diagnostics go to stderr.\n"
+        "\n"
+        "  --interval DURATION\n"
+        "                    wall sleep between refreshes, default 1s.\n"
+        "  --device NAME     show only this device's per-device rows\n"
+        "                    (exact device id or catalog name);\n"
+        "                    analysis still covers the whole capture.\n"
+        "  --long-lived-after DURATION\n"
+        "                    enable the informational long-lived\n"
+        "                    finding past this open age.\n"
+        "\n"
+        "DURATION is a decimal count with optional unit s, m, or h\n"
+        "(bare digits mean seconds); zero and overflow are refused.\n"
+        "\n"
+        "Exit 0 for sufficient evidence, 4 for a usable but materially\n"
+        "incomplete report, 2 for invalid input or usage.\n"
+    )
+
+
+struct BoundaryCursor:
+    """Incremental interval horizons strictly inside (start, end).
+
+    A long window at a small interval names far more horizons
+    than memory could hold as a list, so the cursor yields them
+    one at a time with constant state: peek with has_due, take
+    with pop. The sequence matches materializing every
+    start+k*interval below end, stopping before u64 overflow.
+    """
+
+    var _next: UInt64
+    var _end: UInt64
+    var _interval: UInt64
+    var _done: Bool
+
+    def __init__(
+        out self,
+        start_ns: UInt64,
+        end_ns: UInt64,
+        interval_ns: UInt64,
+    ):
+        self._next = UInt64(0)
+        self._end = end_ns
+        self._interval = interval_ns
+        self._done = True
+        if interval_ns == UInt64(0) or end_ns <= start_ns:
+            return
+        var b = start_ns + interval_ns
+        if b < start_ns:
+            return
+        if b >= end_ns:
+            return
+        self._next = b
+        self._done = False
+
+    def has_due(self, ts: UInt64) -> Bool:
+        """True when the next horizon is due at ts."""
+        return not self._done and ts >= self._next
+
+    def pop(mut self) -> UInt64:
+        """Take the next horizon and advance; call only when due."""
+        var h = self._next
+        if h > ~UInt64(0) - self._interval:
+            self._done = True
+        else:
+            var b = h + self._interval
+            if b >= self._end:
+                self._done = True
+            else:
+                self._next = b
+        return h
+
+
+def _is_option(text: String) -> Bool:
+    var raw = text.as_bytes()
+    return len(raw) > 0 and raw[0] == UInt8(0x2D)
+
+
+def _parse_limit(text: String, what: String, cap: Int) raises CliError -> Int:
+    """Strict decimal limit: 1..cap, no leading zeros."""
+    var raw = text.as_bytes()
+    if len(raw) == 0 or len(raw) > 10:
+        raise CliError(what + " needs a decimal value")
+    if raw[0] < UInt8(0x31) or raw[0] > UInt8(0x39):
+        raise CliError(what + " needs a decimal value")
+    var v = 0
+    for i in range(len(raw)):
+        var b = raw[i]
+        if b < UInt8(0x30) or b > UInt8(0x39):
+            raise CliError(what + " needs a decimal value")
+        v = v * 10 + (Int(b) - 0x30)
+    if v > cap:
+        raise CliError(what + " above cap")
+    return v
+
+
+def _parse_duration_opt(text: String, what: String) raises CliError -> UInt64:
+    try:
+        return parse_duration_ns(text)
+    except e:
+        raise CliError(what + " " + String(e))
+
+
+def parse_top_args(args: List[String]) raises CliError -> TopOptions:
+    """Parse top arguments without the leading verb."""
+    var opts = TopOptions()
+    var i = 0
+    while i < len(args):
+        var tok = args[i]
+        if tok == "--interval":
+            if i + 1 >= len(args):
+                raise CliError("--interval needs a value")
+            opts.interval_ns = _parse_duration_opt(
+                args[i + 1], "--interval"
+            )
+            i += 2
+        elif tok == "--device":
+            if i + 1 >= len(args):
+                raise CliError("--device needs a value")
+            if args[i + 1] == "":
+                raise CliError("--device needs a value")
+            opts.has_device = True
+            opts.device = args[i + 1]
+            i += 2
+        elif tok == "--long-lived-after":
+            if i + 1 >= len(args):
+                raise CliError("--long-lived-after needs a value")
+            opts.has_long_lived_after = True
+            opts.long_lived_after_ns = _parse_duration_opt(
+                args[i + 1], "--long-lived-after"
+            )
+            i += 2
+        elif tok == "--max-line-bytes":
+            if i + 1 >= len(args):
+                raise CliError("--max-line-bytes needs a value")
+            opts.max_line_bytes = _parse_limit(
+                args[i + 1], "--max-line-bytes", 65536
+            )
+            i += 2
+        elif tok == "--max-session-bytes":
+            if i + 1 >= len(args):
+                raise CliError("--max-session-bytes needs a value")
+            opts.max_session_bytes = _parse_limit(
+                args[i + 1], "--max-session-bytes", 16777216
+            )
+            i += 2
+        elif tok == "--max-events-bytes":
+            if i + 1 >= len(args):
+                raise CliError("--max-events-bytes needs a value")
+            opts.max_events_bytes = _parse_limit(
+                args[i + 1], "--max-events-bytes", 4294967296
+            )
+            i += 2
+        elif _is_option(tok):
+            raise CliError("unknown option: " + tok)
+        else:
+            if opts.dir != "":
+                raise CliError("too many arguments")
+            opts.dir = tok
+            i += 1
+    if opts.dir == "":
+        raise CliError("missing capture directory")
+    return opts^
+
+
+def _top_failed(prefix: String, detail: String) raises -> Int:
+    write_stderr(prefix + sanitize_diagnostic(detail) + "\n")
+    return EXIT_INVALID
+
+
+def _print_block(text: String, seq: Int, horizon_ns: UInt64) raises:
+    """Print one refresh block.
+
+    Every byte goes through the checked stdout writer: a short
+    write or error reports on stderr and raises, so a blocked
+    stdout fails the run instead of printing success.
+    """
+    var head = String("--- refresh ")
+    head += String(seq)
+    head += String(" @ ")
+    head += format_u64(horizon_ns)
+    head += String(" ns ---\n")
+    try:
+        write_stdout(head)
+        write_stdout(text)
+        var raw = text.as_bytes()
+        if len(raw) == 0 or raw[len(raw) - 1] != UInt8(0x0A):
+            write_stdout("\n")
+    except:
+        write_stderr("memveil top: cannot write stdout\n")
+        raise Error("cannot write stdout")
+
+
+def _diagnose(mut rep: Report, opts: TopOptions):
+    diagnose_report(
+        rep, opts.has_long_lived_after, opts.long_lived_after_ns
+    )
+
+
+def _snapshot_block(
+    mut analyzer: Analyzer,
+    opts: TopOptions,
+    horizon_ns: UInt64,
+    seq: Int,
+) raises -> Int:
+    """Render and print one refresh."""
+    var rep = analyzer.snapshot(horizon_ns, False)
+    _diagnose(rep, opts)
+    var filt = String("")
+    if opts.has_device:
+        filt = opts.device
+    var text = render(rep, String("text"), filt)
+    try:
+        check_rendered_size(text, MAX_RENDERED_BYTES)
+    except e:
+        return _top_failed("memveil top: ", e.message)
+    _print_block(text, seq, horizon_ns)
+    return 0
+
+
+def run_top(args: List[String]) raises -> Int:
+    """Run the top verb; return the process exit code.
+
+    args excludes the program name and the top word. Summaries
+    go to stdout and nothing else does; every diagnostic goes
+    to stderr. Only a broken standard error raises.
+    """
+    var i = 0
+    while i < len(args):
+        if args[i] == "--help" or args[i] == "-h":
+            try:
+                write_stdout(top_usage())
+            except:
+                write_stderr("memveil top: cannot write stdout\n")
+                return EXIT_INTERNAL
+            return EXIT_OK
+        i += 1
+    var opts: TopOptions
+    try:
+        opts = parse_top_args(args)
+    except e:
+        return _top_failed("memveil top: ", e.message)
+    var reader: CaptureReader
+    try:
+        reader = read_capture(
+            opts.dir,
+            False,
+            ReaderLimits(
+                opts.max_session_bytes,
+                opts.max_line_bytes,
+                opts.max_events_bytes,
+            ),
+        )
+    except e:
+        return _top_failed(
+            "memveil top: cannot read capture: ", e.message
+        )
+    var signal = LiveSignalSource()
+    var armed = signal.setup()
+    if not armed.ok:
+        try:
+            write_stderr(
+                "memveil top: cannot arm signals: "
+                + sanitize_diagnostic(armed.message)
+                + "\n"
+            )
+        except:
+            pass
+        return EXIT_INTERNAL
+    var analyzer = Analyzer(reader.session)
+    var clock = MonoClock()
+    var cursor = BoundaryCursor(
+        reader.session.window_start_ns,
+        reader.session.window_end_ns,
+        opts.interval_ns,
+    )
+    var seq = 0
+    var code = _drain(
+        reader, analyzer, opts, signal, clock, cursor, seq
+    )
+    signal.teardown()
+    return code
+
+
+comptime _WAIT_SLICE_MS = 100
+
+
+def _wait_slices(total_ms: Int) -> List[Int]:
+    """Split a refresh wait into interruptible ≤100 ms slices."""
+    var out = List[Int]()
+    var left = total_ms
+    if left < 0:
+        left = 0
+    while left > 0:
+        var s = left
+        if s > _WAIT_SLICE_MS:
+            s = _WAIT_SLICE_MS
+        out.append(s)
+        left -= s
+    return out^
+
+
+def _wait_interval(
+    mut clock: MonoClock, mut signal: LiveSignalSource, total_ms: Int
+) -> SignalOut:
+    """Poll-first interruptible wait; returns the last state.
+
+    The first poll runs before any sleep, then each slice
+    sleeps and re-polls, so a stop lands within about one
+    slice no matter how long the interval is.
+    """
+    var got = signal.check()
+    if got.state != "none":
+        return got^
+    var slices = _wait_slices(total_ms)
+    for i in range(len(slices)):
+        clock.sleep_ms(slices[i])
+        got = signal.check()
+        if got.state != "none":
+            return got^
+    return got^
+
+
+def _signal_failed(message: String) raises -> Int:
+    """Report a signal-check failure; always exits internal."""
+    try:
+        write_stderr(
+            "memveil top: signal check failed: "
+            + sanitize_diagnostic(message)
+            + "\n"
+        )
+    except:
+        pass
+    return EXIT_INTERNAL
+
+
+def _drain(
+    mut reader: CaptureReader,
+    mut analyzer: Analyzer,
+    opts: TopOptions,
+    mut signal: LiveSignalSource,
+    mut clock: MonoClock,
+    mut cursor: BoundaryCursor,
+    mut seq: Int,
+) raises -> Int:
+    """Stream events, refreshing at each boundary, then finish."""
+    while True:
+        var more: Bool
+        try:
+            more = reader.has_more()
+        except e:
+            return _top_failed(
+                "memveil top: cannot read capture: ", e.message
+            )
+        if not more:
+            break
+        var ev: Event
+        try:
+            ev = reader.next_event()
+        except e:
+            return _top_failed(
+                "memveil top: cannot read capture: ", e.message
+            )
+        var ts = ev.ts_ns
+        # Every boundary the event crosses renders BEFORE the
+        # event is consumed: a refresh at horizon H covers
+        # [start, H), so the crossing event belongs to the next
+        # refresh, never the one it triggers. Boundaries only
+        # advance, so a nonmonotonic event below an already
+        # rendered horizon renders nothing further.
+        #
+        # A stop observed mid-refresh only latches a flag: the
+        # signalfd record is consumed by the wait's polls, but
+        # the crossing event still folds first so the final
+        # summary covers every pulled event.
+        var stopped = False
+        var wait_ms = Int(opts.interval_ns // UInt64(1000000))
+        while cursor.has_due(ts) and not stopped:
+            var horizon = cursor.pop()
+            seq += 1
+            var rc = _snapshot_block(
+                analyzer, opts, horizon, seq
+            )
+            if rc != 0:
+                return rc
+            var wait = _wait_interval(clock, signal, wait_ms)
+            if wait.state == "error":
+                return _signal_failed(wait.message)
+            stopped = wait.state != "none"
+        try:
+            analyzer.consume(ev^)
+        except e:
+            return _top_failed(
+                "memveil top: cannot reduce capture: ", String(e)
+            )
+        if stopped:
+            return _finish_after_signal(
+                reader, analyzer, opts, seq
+            )
+        var outcome = _poll_signal(
+            reader, analyzer, opts, signal, seq
+        )
+        if outcome >= 0:
+            return outcome
+    seq += 1
+    var rep: Report
+    try:
+        rep = analyzer.finish(reader.session.window_end_ns, False)
+    except e:
+        return _top_failed("memveil top: ", String(e))
+    _diagnose(rep, opts)
+    var filt = String("")
+    if opts.has_device:
+        filt = opts.device
+    var text: String
+    try:
+        text = render(rep, String("text"), filt)
+    except e:
+        write_stderr(
+            "memveil top: internal error: cannot render report\n"
+        )
+        return EXIT_INTERNAL
+    try:
+        check_rendered_size(text, MAX_RENDERED_BYTES)
+    except e:
+        return _top_failed("memveil top: ", e.message)
+    _print_block(text, seq, reader.session.window_end_ns)
+    return exit_for_report(rep)
+
+
+def _poll_signal(
+    mut reader: CaptureReader,
+    mut analyzer: Analyzer,
+    opts: TopOptions,
+    mut signal: LiveSignalSource,
+    seq: Int,
+) raises -> Int:
+    """Handle a pending stop signal; -1 means keep going."""
+    var got = signal.check()
+    if got.state == "none":
+        return -1
+    if got.state == "error":
+        return _signal_failed(got.message)
+    return _finish_after_signal(reader, analyzer, opts, seq)
+
+
+def _finish_after_signal(
+    mut reader: CaptureReader,
+    mut analyzer: Analyzer,
+    opts: TopOptions,
+    seq: Int,
+) raises -> Int:
+    """Drain the rest quietly, print the final summary and code."""
+    while True:
+        var more: Bool
+        try:
+            more = reader.has_more()
+        except e:
+            return _top_failed(
+                "memveil top: cannot read capture: ", e.message
+            )
+        if not more:
+            break
+        var ev: Event
+        try:
+            ev = reader.next_event()
+        except e:
+            return _top_failed(
+                "memveil top: cannot read capture: ", e.message
+            )
+        try:
+            analyzer.consume(ev^)
+        except e:
+            return _top_failed(
+                "memveil top: cannot reduce capture: ", String(e)
+            )
+    var rep: Report
+    try:
+        rep = analyzer.finish(reader.session.window_end_ns, False)
+    except e:
+        return _top_failed("memveil top: ", String(e))
+    _diagnose(rep, opts)
+    var filt = String("")
+    if opts.has_device:
+        filt = opts.device
+    var text: String
+    try:
+        text = render(rep, String("text"), filt)
+    except e:
+        write_stderr(
+            "memveil top: internal error: cannot render report\n"
+        )
+        return EXIT_INTERNAL
+    _print_block(text, seq + 1, reader.session.window_end_ns)
+    return exit_for_report(rep)

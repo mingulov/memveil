@@ -14,6 +14,7 @@ empty.
 from memveil.model.report import Report
 from memveil.model.session import Channel
 from memveil.model.validate import format_u64
+from memveil.render.filter import resolve_device_filter
 
 comptime REPORT_SCHEMA_VERSION = "0.1.0"
 
@@ -52,7 +53,7 @@ def escape_json(s: String) raises -> String:
         elif b == UInt8(0x0C):
             out.append(UInt8(0x5C))
             out.append(UInt8(0x66))
-        elif b < UInt8(0x20):
+        elif b < UInt8(0x20) or b == UInt8(0x7F):
             out.append(UInt8(0x5C))
             out.append(UInt8(0x75))
             out.append(UInt8(0x30))
@@ -91,8 +92,9 @@ def _channel_json(label: String, ch: Channel, level: Int) raises -> String:
     return out
 
 
-def render_json(rep: Report) raises -> String:
+def render_json(rep: Report, device_filter: String = "") raises -> String:
     """Render the report as pretty JSON per report-v0.1.0.schema.json."""
+    var filt = resolve_device_filter(rep.devices, device_filter)
     var out = String("{\n")
     out += '  "schema_version": "' + REPORT_SCHEMA_VERSION + '",\n'
     out += "  \"session_id\": " + escape_json(rep.session_id) + ",\n"
@@ -156,12 +158,23 @@ def render_json(rep: Report) raises -> String:
     out += _channel_json(String("baseline"), rep.q_baseline, 2) + ",\n"
     out += _channel_json(String("terminal"), rep.q_terminal, 2) + "\n"
     out += "  },\n"
-    if len(rep.metrics) == 0:
+    var shown = 0
+    for i in range(len(rep.metrics)):
+        var probe = rep.metrics[i]
+        if filt == "" or not probe.has_device_id:
+            shown += 1
+        elif probe.device_id == filt:
+            shown += 1
+    if shown == 0:
         out += '  "metrics": [],\n'
     else:
         out += '  "metrics": [\n'
+        var emitted = 0
         for i in range(len(rep.metrics)):
             var m = rep.metrics[i]
+            if filt != "" and m.has_device_id:
+                if m.device_id != filt:
+                    continue
             out += '    {"name": ' + escape_json(m.name)
             out += ', "value": '
             if m.has_value:
@@ -194,7 +207,8 @@ def render_json(rep: Report) raises -> String:
             out += '}, "scope": ' + escape_json(m.scope)
             out += ', "notes": ' + escape_json(m.notes)
             out += "}"
-            if i + 1 < len(rep.metrics):
+            emitted += 1
+            if emitted < shown:
                 out += ","
             out += "\n"
         out += "  ],\n"

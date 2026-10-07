@@ -240,6 +240,26 @@ def test_f10_optional_correlation_exit() raises:
     assert_equal(exit_for_report(disagree), 4)
 
 
+def test_device_name_filter_resolves() raises:
+    var rep = analyze(String("tests/fixtures/attempts"))
+    # The catalog names dev-1 "testdev0": filtering by the name
+    # must show exactly the id-filtered rows.
+    var by_name = render_text(rep, String("testdev0"))
+    var by_id = render_text(rep, String("dev-1"))
+    assert_equal(by_name, by_id)
+    assert_true(by_name.find("{device=dev-1}") != -1)
+    var unknown = render_text(rep, String("nope"))
+    assert_true(unknown.find("{device=") == -1)
+    assert_equal(
+        render_json(rep, String("testdev0")),
+        render_json(rep, String("dev-1")),
+    )
+    assert_equal(
+        render_markdown(rep, String("testdev0")),
+        render_markdown(rep, String("dev-1")),
+    )
+
+
 def test_render_dispatch() raises:
     var rep = analyze(String("tests/fixtures/attempts"))
     var t = render(rep, String("text"))
@@ -271,6 +291,7 @@ def run() raises -> Int:
     suite.test[test_render_json_escapes]()
     suite.test[test_render_json_tristate_echo]()
     suite.test[test_rendered_size_limit]()
+    suite.test[test_device_name_filter_resolves]()
     suite.test[test_render_dispatch]()
     suite.test[test_f10_optional_correlation_exit]()
     suite.test[test_f12_sanitize_diagnostic]()

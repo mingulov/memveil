@@ -1,0 +1,14 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Oracle live gate: module build plus guest comparison.
+#
+# Runs tests/vm/test_oracle_live.py. The module build runs
+# everywhere the kernel headers exist; the guest comparison
+# skips (exit 77 via pytest skip) until the lifecycle BPF
+# probes it validates against are qualified.
+set -u
+
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+
+cd "$ROOT" || exit 1
+exec python3 -m pytest tests/vm/test_oracle_live.py -v "$@"

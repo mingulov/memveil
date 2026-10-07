@@ -265,6 +265,20 @@ def sessions_equal(a: Session, b: Session) -> Bool:
             or x.identity_status != y.identity_status
         ):
             return False
+    if len(a.baseline_regions) != len(b.baseline_regions):
+        return False
+    for i in range(len(a.baseline_regions)):
+        var x = a.baseline_regions[i]
+        var y = b.baseline_regions[i]
+        if (
+            x.region_id != y.region_id
+            or x.state != y.state
+            or x.offset != y.offset
+            or x.length != y.length
+            or x.address_space != y.address_space
+            or x.provenance != y.provenance
+        ):
+            return False
     if (
         not _caps_equal(a.cap_bounce_attempts, b.cap_bounce_attempts)
         or not _caps_equal(

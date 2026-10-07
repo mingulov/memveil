@@ -12,7 +12,25 @@ the errno number only (R7D1 sanitized form).
 from std.ffi import external_call
 from std.os import getenv
 
-from memveil.capture.collector import OpOut, SignalOut, SignalSource
+from memveil.platform.outcome import OpOut
+
+
+@fieldwise_init
+struct SignalOut(Copyable, Movable):
+    """One signal check: none, pending, or error."""
+
+    var state: String
+    var message: String
+
+
+trait SignalSource:
+    """Tristate SIGINT/SIGTERM source (signalfd live)."""
+
+    def setup(mut self) -> OpOut:
+        ...
+
+    def check(mut self) -> SignalOut:
+        ...
 
 
 comptime _SIG_BLOCK = 0

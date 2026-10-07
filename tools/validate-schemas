@@ -379,7 +379,8 @@ def check_session(obj):
             "start": start, "end": end, "devices": devices,
             "quality": obj["quality"],
             "environment": obj["environment"],
-            "catalog": obj["device_catalog"]}
+            "catalog": obj["device_catalog"],
+            "baseline_observations": len(observations)}
 
 
 def check_source(source, where):
@@ -629,12 +630,15 @@ def validate_stream(session, events_path):
                  "line %d sequence does not increase" % lineno)
         previous_seq = event["seq"]
         if event.get("op") is not None:
-            key = (event["kind"], event["op"])
-            if key in operations:
-                fail("duplicate-id",
-                     "line %d repeats operation %s for kind %s"
-                     % (lineno, event["op"], event["kind"]))
-            operations.add(key)
+            # Only attempts and map results claim an operation once;
+            # copies and syncs repeat freely under one operation.
+            if event["kind"] in ("bounce_attempt", "map_result"):
+                key = (event["kind"], event["op"])
+                if key in operations:
+                    fail("duplicate-id",
+                         "line %d repeats operation %s for kind %s"
+                         % (lineno, event["op"], event["kind"]))
+                operations.add(key)
         if "mapping" in event:
             if event["mapping"] in mappings:
                 fail("duplicate-id",
@@ -705,16 +709,30 @@ METRIC_SOURCES = {
     "pool_capacity_bytes": ("pool_sample",),
 }
 
+# The shared-state union may also be sourced by retained baseline
+# observations (late attach invents no transitions, but seeded
+# state is real). Conversion counters need transition evidence
+# of their own: baseline seeds state, never request counts.
+# The remaining region rows (conversion_requests, conversion_failures,
+# known_private_region_bytes, unknown_region_bytes) appear only with a
+# region source and stay structurally validated with pinned units.
+BASELINE_SOURCED_METRICS = ("known_shared_region_bytes",)
+
 METRIC_UNITS = {
     "bounce_attempts": "count",
     "requested_bounce_bytes": "bytes",
+    "unpaired_lifecycle_events": "count",
     "successful_allocations": "count",
     "copy_original_to_bounce_bytes": "bytes",
     "copy_bounce_to_original_bytes": "bytes",
     "live_observed_allocation_bytes": "bytes",
     "observed_mapping_lifetime_ns": "nanoseconds",
+    "conversion_requests": "count",
+    "conversion_failures": "count",
     "conversion_request_bytes": "bytes",
     "known_shared_region_bytes": "bytes",
+    "known_private_region_bytes": "bytes",
+    "unknown_region_bytes": "bytes",
     "pool_used_bytes": "bytes",
     "pool_capacity_bytes": "bytes",
 }
@@ -849,6 +867,9 @@ def compare_report_obj(obj, session, summary):
     for name, sources in METRIC_SOURCES.items():
         if set(sources) & summary["kinds"]:
             continue
+        if (name in BASELINE_SOURCED_METRICS
+                and session.get("baseline_observations")):
+            continue
         metric = found.get((name, None, None))
         if metric is None:
             fail("missing-metric", "report lacks %s" % name)
@@ -905,7 +926,8 @@ def compare_report_obj(obj, session, summary):
     return summary
 
 
-PROFILE_CAPABILITIES = ("attempt-trace", "mapping-lifecycle", "copy-actual")
+PROFILE_CAPABILITIES = ("attempt-trace", "mapping-lifecycle", "copy-actual",
+                            "conversion-observe")
 DOCTOR_STATUSES = ("available", "unavailable", "unknown", "unsupported")
 MIN_KERNEL_RE = re.compile(r"[0-9]+\.[0-9]+(\.[0-9]+)?")
 _HOOK_SEG = r"([^\x00/.][^\x00/]*|\.[^\x00/.][^\x00/]*|\.\.[^\x00/]+)"
@@ -1405,6 +1427,31 @@ def run_selftest():
     mutated("report-wrong-count",
             lambda o: o["metrics"][0].update(value="4"),
             "wrong-metric")
+
+    def set_region_value(obj):
+        for metric in obj["metrics"]:
+            if metric["name"] == "known_shared_region_bytes":
+                metric.update(value="8192", measurement="observed",
+                              coverage="complete_for_scope",
+                              aggregation="gauge")
+
+    def baseline_regions_ok():
+        obj = copy.deepcopy(base_report)
+        set_region_value(obj)
+        session = dict(base_session)
+        session["baseline_observations"] = 1
+        compare_report_obj(obj, session, base_summary)
+        return "baseline-seeded region values accepted"
+
+    check("report-baseline-regions", baseline_regions_ok)
+
+    def region_no_source():
+        obj = copy.deepcopy(base_report)
+        set_region_value(obj)
+        compare_report_obj(obj, base_session, base_summary)
+
+    results.append(expect_reject("report-region-no-source",
+                                 region_no_source, "unexpected-value"))
     return results
 
 

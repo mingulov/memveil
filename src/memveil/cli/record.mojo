@@ -38,6 +38,7 @@ from memveil.cli.report import (
 )
 from memveil.model.session import EvidenceItem
 from memveil.model.validate import check_opaque_id
+from memveil.platform.stdout import write_stdout
 from memveil.platform.btf import read_btf_maps
 from memveil.platform.clock import (
     MonoClock,
@@ -976,7 +977,14 @@ def run_record_with(
     var done = String(
         t"record: end={result.end_reason} outcome={result.outcome} exit={result.exit_code}"
     )
-    print(done)
+    try:
+        write_stdout(done + String("\n"))
+    except:
+        try:
+            write_stderr("memveil record: cannot write stdout\n")
+        except:
+            pass
+        return EXIT_ERROR
     return result.exit_code
 
 
@@ -990,7 +998,14 @@ def run_record(args: List[String]) raises -> Int:
     var i = 0
     while i < len(args):
         if args[i] == "--help" or args[i] == "-h":
-            print(record_usage(), end="")
+            try:
+                write_stdout(record_usage())
+            except:
+                try:
+                    write_stderr("memveil record: cannot write stdout\n")
+                except:
+                    pass
+                return EXIT_ERROR
             return EXIT_OK
         i += 1
     var opts: RecordOptions

@@ -17,6 +17,7 @@ sets are inert in table cells.
 from memveil.model.report import Report
 from memveil.model.session import Channel
 from memveil.model.validate import format_u64
+from memveil.render.filter import resolve_device_filter
 from memveil.render.text import escape_text
 
 
@@ -88,8 +89,9 @@ def _quality_row(label: String, ch: Channel) raises -> String:
     return out
 
 
-def render_markdown(rep: Report) raises -> String:
+def render_markdown(rep: Report, device_filter: String = "") raises -> String:
     """Render the report as Markdown, one trailing newline."""
+    var filt = resolve_device_filter(rep.devices, device_filter)
     var out = String("# Memveil report `")
     out += escape_text(rep.session_id)
     out += "`\n\n"
@@ -146,6 +148,9 @@ def render_markdown(rep: Report) raises -> String:
     out += "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
     for i in range(len(rep.metrics)):
         var m = rep.metrics[i]
+        if filt != "" and m.has_device_id:
+            if m.device_id != filt:
+                continue
         out += "| "
         out += escape_markdown(m.name)
         out += " | "

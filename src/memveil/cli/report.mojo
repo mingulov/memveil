@@ -2,7 +2,7 @@
 
 """Offline report command: read one capture, reduce, render, exit.
 
-The report verb wires the reader, the attempt analyzer, and the
+The report verb wires the reader, the composed analyzer, and the
 renderers into one offline pipeline. It never collects: no kernel,
 device, or native-bridge import is needed to use it.
 
@@ -13,7 +13,8 @@ disagreement), and 2 means invalid input or usage. A rendering
 failure on an accepted report is an internal error and exits 1.
 """
 
-from memveil.analysis.attempts import AttemptAnalyzer
+from memveil.analysis.diagnostics import diagnose_report
+from memveil.analysis.engine import Analyzer
 from memveil.capture.reader import (
     DEFAULT_MAX_EVENTS_BYTES,
     DEFAULT_MAX_LINE_BYTES,
@@ -22,8 +23,10 @@ from memveil.capture.reader import (
     ReaderLimits,
     read_capture,
 )
+from memveil.cli.durations import parse_duration_ns
 from memveil.model.event import Event
 from memveil.model.report import Report
+from memveil.platform.stdout import write_stdout
 from memveil.render.render import render
 from memveil.render.text import escape_text
 
@@ -52,6 +55,8 @@ struct ReportOptions:
 
     var format: String
     var allow_partial: Bool
+    var has_long_lived_after: Bool
+    var long_lived_after_ns: UInt64
     var dir: String
     var max_line_bytes: Int
     var max_session_bytes: Int
@@ -60,6 +65,8 @@ struct ReportOptions:
     def __init__(out self):
         self.format = String("text")
         self.allow_partial = False
+        self.has_long_lived_after = False
+        self.long_lived_after_ns = UInt64(0)
         self.dir = String("")
         self.max_line_bytes = DEFAULT_MAX_LINE_BYTES
         self.max_session_bytes = DEFAULT_MAX_SESSION_BYTES
@@ -71,16 +78,22 @@ def report_usage() -> String:
     return (
         "usage: memveil report [--format text|json|markdown]"
         " [--allow-partial]\n"
-        "       [--max-line-bytes N] [--max-session-bytes N]\n"
-        "       [--max-events-bytes N] DIR\n"
+        "       [--long-lived-after DURATION]"
+        " [--max-line-bytes N]\n"
+        "       [--max-session-bytes N] [--max-events-bytes N] DIR\n"
         "\n"
-        "Read the capture in DIR, reduce its events to attempt metrics,\n"
+        "Read the capture in DIR, reduce its events to metrics,\n"
         "and print one report on stdout. Diagnostics go to stderr.\n"
         "Counts always cover the whole capture window.\n"
         "\n"
         "  --format NAME     text (default), json, or markdown.\n"
         "  --allow-partial   drop a truncated final record and report\n"
         "                    the loss instead of failing.\n"
+        "  --long-lived-after DURATION\n"
+        "                    enable the informational long-lived\n"
+        "                    finding past this open age. DURATION is\n"
+        "                    a decimal count with optional unit s,\n"
+        "                    m, or h (bare digits mean seconds).\n"
         "  --max-line-bytes N\n"
         "                    per-record cap, at most 65536.\n"
         "  --max-session-bytes N\n"
@@ -180,6 +193,17 @@ def parse_report_args(args: List[String]) raises CliError -> ReportOptions:
         elif tok == "--allow-partial":
             opts.allow_partial = True
             i += 1
+        elif tok == "--long-lived-after":
+            if i + 1 >= len(args):
+                raise CliError("--long-lived-after needs a value")
+            try:
+                opts.long_lived_after_ns = parse_duration_ns(
+                    args[i + 1]
+                )
+            except e:
+                raise CliError("--long-lived-after " + String(e))
+            opts.has_long_lived_after = True
+            i += 2
         elif tok == "--max-line-bytes":
             if i + 1 >= len(args):
                 raise CliError("--max-line-bytes needs a value")
@@ -217,14 +241,15 @@ def exit_for_report(rep: Report) -> Int:
     """Map report quality to the process exit code.
 
     A report that never settled (terminal unsettled), lost detail
-    events, disagrees with its counter cross-check, or withholds a
-    headline attempt metric is usable but materially incomplete.
+    events, disagrees with its counter cross-check, withholds a
+    headline attempt metric, or carries a warning finding (other
+    than measured pool pressure, which is a system state rather
+    than an evidence gap) is usable but materially incomplete.
     Aggregate-only gaps leave the detail counts standing, so they
     keep the sufficient-evidence exit. Correlation and baseline
-    quality render for audit but never gate the exit: attempt
-    counting needs no cross-event correlation, so an unrequested or
-    gapped correlation channel cannot make sufficient attempt
-    evidence insufficient.
+    quality render for audit but never gate the exit directly:
+    unpaired lifecycle evidence gates through its warning finding
+    instead.
     """
     if rep.q_terminal.status != "complete_for_scope":
         return EXIT_INCOMPLETE
@@ -234,6 +259,12 @@ def exit_for_report(rep: Report) -> Int:
         return EXIT_INCOMPLETE
     if rep.counter_disagreement:
         return EXIT_INCOMPLETE
+    var f = 0
+    while f < len(rep.findings):
+        if rep.findings[f].severity == "warning":
+            if rep.findings[f].code != "POOL_PRESSURE":
+                return EXIT_INCOMPLETE
+        f += 1
     var i = 0
     while i < len(rep.metrics):
         var m = rep.metrics[i]
@@ -262,7 +293,11 @@ def run_report(args: List[String]) raises -> Int:
     var i = 0
     while i < len(args):
         if args[i] == "--help" or args[i] == "-h":
-            print(report_usage(), end="")
+            try:
+                write_stdout(report_usage())
+            except:
+                write_stderr("memveil report: cannot write stdout\n")
+                return EXIT_INTERNAL
             return EXIT_OK
         i += 1
     var opts: ReportOptions
@@ -285,7 +320,7 @@ def run_report(args: List[String]) raises -> Int:
         return _report_failed(
             "memveil report: cannot read capture: ", e.message
         )
-    var analyzer = AttemptAnalyzer(reader.session)
+    var analyzer = Analyzer(reader.session)
     while True:
         var more: Bool
         try:
@@ -314,6 +349,9 @@ def run_report(args: List[String]) raises -> Int:
         rep = analyzer.finish(reader.session.window_end_ns, reader.partial)
     except e:
         return _report_failed("memveil report: ", String(e))
+    diagnose_report(
+        rep, opts.has_long_lived_after, opts.long_lived_after_ns
+    )
     var text: String
     try:
         text = render(rep, opts.format)
@@ -326,8 +364,12 @@ def run_report(args: List[String]) raises -> Int:
         check_rendered_size(text, MAX_RENDERED_BYTES)
     except e:
         return _report_failed("memveil report: ", e.message)
-    print(text, end="")
-    var raw = text.as_bytes()
-    if len(raw) == 0 or raw[len(raw) - 1] != UInt8(0x0A):
-        print()
+    try:
+        write_stdout(text)
+        var raw = text.as_bytes()
+        if len(raw) == 0 or raw[len(raw) - 1] != UInt8(0x0A):
+            write_stdout("\n")
+    except:
+        write_stderr("memveil report: cannot write stdout\n")
+        return EXIT_INTERNAL
     return exit_for_report(rep)

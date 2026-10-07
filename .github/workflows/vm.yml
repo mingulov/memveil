@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Tier 3: privileged VM integration. Manual dispatch on a
+# trusted self-hosted runner only: it boots disposable VMs
+# with owned fixtures and must never run untrusted
+# pull-request code. Unarmed lanes exit 77; an armed run
+# needs qualified probes plus its MEMVEIL_VM_* lease.
+name: vm
+
+on:
+  workflow_dispatch:
+
+jobs:
+  vm:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: ./tools/build
+      - name: VM suites
+        run: |
+          for suite in vm-attempts vm-oracle vm-lifecycle \
+              vm-copy vm-real-io vm-stop vm-saturation \
+              vm-cleanup perf-workload soak; do
+            ./tools/test "$suite" || exit 1
+          done
