@@ -1006,7 +1006,7 @@ def check_profile(obj):
     check_text(source["origin"], 64, "profile.identity.source.origin")
     check_text(source["revision"], 128, "profile.identity.source.revision")
     if "note" in source:
-        check_text(source["note"], 512, "profile.identity.source.note",
+        check_text(source["note"], 1024, "profile.identity.source.note",
                    allow_empty=True)
     if "note" in ident:
         check_text(ident["note"], 512, "profile.identity.note",

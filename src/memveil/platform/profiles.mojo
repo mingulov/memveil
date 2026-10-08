@@ -273,7 +273,9 @@ def _parse_source(mut scan: Scanner) raises -> ProfileSource:
                     raise ValidationError("source.note", "duplicate")
                 var v = scan.parse_string()
                 try:
-                    check_bounded_text(v, 0, 512, "source.note")
+                    # Twelve-field narrow notes need ~700
+                    # chars; 8-field notes stay valid.
+                    check_bounded_text(v, 0, 1024, "source.note")
                 except e:
                     raise ValidationError("source.note", String(e))
                 out.note = v
