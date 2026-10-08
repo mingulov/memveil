@@ -8,12 +8,15 @@ recorded in its narrow bindings; anything else refuses.
 
 ## Attach points
 
-All five are laboratory sources with a frozen contract: they compile
-to `build/bpf/swiotlb_lifecycle.bpf.o` and `swiotlb_copy.bpf.o`,
-while only the attempt object ships. The tracing attaches resolve
-by function name through the bridge. Collector integration and
-multi-channel packaging, lifecycle/copy profile capabilities, and
-live VM qualification remain pending work.
+All five have a frozen contract: they compile to
+`build/bpf/swiotlb_lifecycle.bpf.o` and `swiotlb_copy.bpf.o`,
+and the owner bundle ships all three BPF objects (attempt,
+lifecycle, copy). The tracing attaches resolve by function
+name through the bridge. Collector integration, multi-channel
+packaging, and capability-requested profile selection are
+implemented; live VM qualification of lifecycle/copy
+collection remains pending work, and no shipped profile
+declares these capabilities supported yet.
 
 | Probe program | Attach | Kernel function |
 | --- | --- | --- |
@@ -25,6 +28,31 @@ live VM qualification remain pending work.
 
 The attempt tracepoint `swiotlb:swiotlb_bounced` is unchanged and
 stays the only attempt source.
+
+## Capability-requested selection
+
+`record` always captures the attempt channel. Extra channels are
+opt-in per run:
+
+```sh
+memveil record --output DIR --object attempt.bpf.o \
+    --capability attempt-trace,mapping-lifecycle,copy-actual \
+    --lc-object lifecycle.bpf.o --cp-object copy.bpf.o ...
+```
+
+`--capability` takes a comma-separated list without spaces
+(default: `attempt-trace`, which is always required).
+`mapping-lifecycle` needs `--lc-object` and `copy-actual` needs
+`--cp-object`. The winning profile must declare each requested
+capability `supported` (or `candidate`) with all named hooks
+present, and its narrow note must bind the exact extra object
+hashes and ring sizes (`lc_object`, `lc_ring_bytes`,
+`cp_object`, `cp_ring_bytes`); anything else refuses with
+exit 3 naming the capability, for example
+`capability mapping-lifecycle unsupported by <profile-id>` or
+`binding failed: mismatch lc_object`. Extra channels never run
+partial: without full narrow binding the run refuses instead of
+recording an unverified channel.
 
 ## Signatures
 

@@ -10,7 +10,8 @@ Layout of ``dist/memveil-<version>/``::
 
     bin/memveil            relocatable binary (RUNPATH $ORIGIN/../lib)
     lib/*.so*              Mojo runtime closure + libbpf_mojo.so.1
-    bpf/*.bpf.o            production BPF object
+    bpf/*.bpf.o            production BPF objects (attempt,
+                           lifecycle, copy)
     profiles/              manifest plus shipped semantic profiles
     docs/                  the full manuals tree (every manual
                            quickstart/support reference ships)
@@ -207,11 +208,20 @@ def main(argv):
     bridge = os.path.join(lmb_lib, "libbpf_mojo.so.1")
     if not os.path.isfile(bridge):
         fail("native bridge missing: %s" % bridge)
-    bpf_obj = os.path.join(
-        ROOT, "build", "bpf", "swiotlb_attempt.bpf.o"
-    )
-    if not os.path.isfile(bpf_obj):
-        fail("BPF object missing: %s" % bpf_obj)
+    bpf_objs = [
+        os.path.join(
+            ROOT, "build", "bpf", "swiotlb_attempt.bpf.o"
+        ),
+        os.path.join(
+            ROOT, "build", "bpf", "swiotlb_lifecycle.bpf.o"
+        ),
+        os.path.join(
+            ROOT, "build", "bpf", "swiotlb_copy.bpf.o"
+        ),
+    ]
+    for bpf_obj in bpf_objs:
+        if not os.path.isfile(bpf_obj):
+            fail("BPF object missing: %s" % bpf_obj)
 
     # Bundle version comes from the engine itself, never from a
     # duplicated string here.
@@ -319,8 +329,9 @@ def main(argv):
 
     for sub in ("bpf", "profiles", "docs", "examples"):
         os.makedirs(os.path.join(staged, sub))
-    shutil.copy2(bpf_obj, os.path.join(staged, "bpf",
-                                       "swiotlb_attempt.bpf.o"))
+    for bpf_obj in bpf_objs:
+        shutil.copy2(bpf_obj, os.path.join(
+            staged, "bpf", os.path.basename(bpf_obj)))
     for name in sorted(os.listdir(os.path.join(ROOT, "profiles"))):
         if name == "manifest.txt" or name.endswith(".json"):
             shutil.copy2(os.path.join(ROOT, "profiles", name),
@@ -427,6 +438,8 @@ def main(argv):
             },
             "paths": {
                 "bpf/swiotlb_attempt.bpf.o": "GPL-2.0-only",
+                "bpf/swiotlb_lifecycle.bpf.o": "GPL-2.0-only",
+                "bpf/swiotlb_copy.bpf.o": "GPL-2.0-only",
             },
         },
         "files": {},
