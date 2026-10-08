@@ -31,7 +31,8 @@ capture to clean up.
   `bounce_attempts = 0`; rows without their event source
   render `unavailable` with a reason, never zero. If a row
   you expect is unavailable, the capture carries no such
-  source (live captures carry attempts only).
+  source. Shipping captures provide attempts and optional readable
+  default-pool start/end samples; no lifecycle/copy/conversion source.
 - Truncated input: `report` exits 2 on a torn final record;
   rerun with `--allow-partial` to drop the torn tail and
   report the loss instead (`format-compatibility.md`).
