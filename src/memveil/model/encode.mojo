@@ -2,7 +2,7 @@
 
 """Canonical JSON encoding for events and sessions.
 
-Byte rules mirror the A05 parsers exactly: u64 as quoted
+Byte rules mirror the event parsers exactly: u64 as quoted
 canonical decimal, i64 and bool as bare JSON, strings quoted
 with short escapes (\\" \\\\ \\b \\f \\n \\r \\t) and \\u00XX
 for other controls, raw UTF-8 otherwise. Key order is fixed;

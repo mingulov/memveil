@@ -4,7 +4,7 @@
 
 Golden files pin the exact text and Markdown layouts; the JSON
 renderer is pinned here for well-formedness and escaping, and in the
-reports lane against the schema oracle plus A01's expected counts.
+reports lane against the schema oracle plus the fixture expected counts.
 """
 
 from std.pathlib import Path

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Attempt-analyzer unit tests: the A05 reducer over real captures.
+"""Attempt-analyzer unit tests: the analyzer reducers over real captures.
 
 The attempts/valid-* fixtures pin golden agreement on counts and
 flags; the reader/* captures pin counter, loss, limit, and
