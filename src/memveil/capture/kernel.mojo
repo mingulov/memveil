@@ -98,6 +98,28 @@ def _channel_tag(channel: Int) -> String:
     return String("ch") + String(channel) + String(" ")
 
 
+def poll_advance(order_len: Int, start: Int, k: Int) -> Int:
+    """Next poll position after a batch found at probe k.
+
+    Advances by order position, never by channel id, so a
+    sparse order like [0, 2] rotates instead of reselecting
+    a busy high channel and starving attempt.
+    """
+    return (start + k + 1) % order_len
+
+
+def join_op_message(acc: String, channel: Int, message: String) -> String:
+    """Accumulate one channel failure into a combined message.
+
+    Teardown attempts every owned channel and reports all
+    failures; the first error never silences the rest.
+    """
+    var piece = _channel_tag(channel) + message
+    if acc == String(""):
+        return piece
+    return acc + String("; ") + piece
+
+
 def _attempt_specs(
     program: String, tp_system: String, tp_event: String
 ) -> List[AttachSpec]:
@@ -646,7 +668,9 @@ struct LmbKernel(KernelSource):
                 wait = 0
             var out = self._poll_channel(ch, wait, capacity)
             if out.kind == String("batch"):
-                self._poll_next = (ch + 1) % len(order)
+                self._poll_next = poll_advance(
+                    len(order), start, k
+                )
                 return out^
             if out.kind == String("short"):
                 self._short_ch = ch
@@ -736,6 +760,8 @@ struct LmbKernel(KernelSource):
         if not self._any_open():
             return OpOut(False, String("session not open"))
         var order = self._order()
+        var failed = False
+        var msg = String("")
         for k in range(len(order)):
             var ch = order[k]
             var out: OpOut
@@ -746,9 +772,10 @@ struct LmbKernel(KernelSource):
             else:
                 out = self._ch0.detach()
             if not out.ok:
-                return OpOut(
-                    False, _channel_tag(ch) + out.message
-                )
+                failed = True
+                msg = join_op_message(msg, ch, out.message)
+        if failed:
+            return OpOut(False, msg^)
         return OpOut(True, String(""))
 
     def close(mut self) -> OpOut:
@@ -758,6 +785,8 @@ struct LmbKernel(KernelSource):
         # failure stays a clean refusal instead of a
         # rollback failure.
         var order = self._order()
+        var failed = False
+        var msg = String("")
         for k in range(len(order)):
             var ch = order[k]
             var out: OpOut
@@ -768,8 +797,9 @@ struct LmbKernel(KernelSource):
             else:
                 out = self._ch0.close()
             if not out.ok:
-                return OpOut(
-                    False, _channel_tag(ch) + out.message
-                )
+                failed = True
+                msg = join_op_message(msg, ch, out.message)
         self._short_ch = -1
+        if failed:
+            return OpOut(False, msg^)
         return OpOut(True, String(""))

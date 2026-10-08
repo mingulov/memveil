@@ -1355,7 +1355,7 @@ suite_attempts() {
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot" \
         || afailed=1
     areport zero
-    # Replay exits 4: terminal is partial by design in A07
+    # Replay exits 4: terminal is partial by design
     # (settlement unproven); metrics still assert exactly.
     if [ "$(cat "$TMP/zero.report.rc")" != "4" ]; then
         echo "attempts: zero replay exits $(cat "$TMP/zero.report.rc")" >&2
@@ -1731,8 +1731,9 @@ suite_attempts() {
     mreplay4 sigreaderr0 0 0 0 0
     mrefuse sigsetupfail 3 refused "signal setup: scripted mask failure" 0 0 0 0
     mrefuse sigsetuprollback 1 refusal-rollback-failed "signal setup: scripted mask failure; close: scripted close failure" 0 0 0 0
-    mrefuse attachfail 3 refused "attach: scripted attach failure" 0 1 2 3
-    mrefuse rollbackfail 1 refusal-rollback-failed "attach: scripted attach failure; close: scripted close failure" 0 1 2 3
+    # Attach-path reads include the pre-activation window floor.
+    mrefuse attachfail 3 refused "attach: scripted attach failure" 0 1 2 4
+    mrefuse rollbackfail 1 refusal-rollback-failed "attach: scripted attach failure; close: scripted close failure" 0 1 2 4
     mrefuse nonzerostart 3 refused "start snapshot nonzero" 0 0 2 3
     mcase clockseam 4 104 5 4 14 1494 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"

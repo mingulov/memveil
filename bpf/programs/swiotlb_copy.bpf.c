@@ -217,34 +217,40 @@ int BPF_PROG(mv_bounce, struct device *dev, mv_phys_addr_t tlb_addr,
     /* The shared emit path rejects dir outside 1..2 for a
      * copy, mirroring the decoder's per-kind rule. */
     flags = dir64 == MV_DMA_TO_DEVICE ? MV_CP_FLAG_TO_DEVICE : 0;
-    start = BPF_CORE_READ(pool, start);
-    nsl = BPF_CORE_READ(pool, nslabs);
-    slots = BPF_CORE_READ(pool, slots);
-    /* idx is only used on paths where start is trusted. */
-    idx = (tlb_addr - start) >> MV_IO_TLB_SHIFT;
-    if (slots == (struct io_tlb_slot *)0 || nsl == 0)
+    /* Checked pool header reads: any failure degrades to
+     * unknown-with-reason; start/nslabs/slots are trusted
+     * only inside the else branch. */
+    if (bpf_core_read(&start, sizeof(start), &pool->start) ||
+        bpf_core_read(&nsl, sizeof(nsl), &pool->nslabs) ||
+        bpf_core_read(&slots, sizeof(slots), &pool->slots)) {
         reason = MV_CP_REASON_SLOT_READ;
-    else if (tlb_addr < start || idx >= nsl)
-        reason = MV_CP_REASON_BOUNDS;
-    else if (bpf_probe_read_kernel(&slot, sizeof(slot), slots + idx))
+    } else if (slots == (struct io_tlb_slot *)0 || nsl == 0) {
         reason = MV_CP_REASON_SLOT_READ;
-    else if (bpf_core_read(&parms, sizeof(parms), &dev->dma_parms))
-        reason = MV_CP_REASON_MASK_READ;
-    else if (parms &&
-             bpf_core_read(&mask, sizeof(mask),
-                           &parms->min_align_mask))
-        reason = MV_CP_REASON_MASK_READ;
-    else {
-        /* The hook's tlb_offset math, verbatim signs: both
-         * terms are small, so the signed difference is exact. */
-        off = (__s64)(tlb_addr & MV_IO_TLB_MASK) -
-              (__s64)(slot.orig_addr & mask & MV_IO_TLB_MASK);
-        eff = mv_effective_bytes(size, off, slot.alloc_size,
-                                 slot.orig_addr != MV_INVALID_PHYS);
-        flags |= MV_CP_FLAG_KNOWN |
-                 (eff.clamped ? MV_CP_FLAG_CLAMPED : 0) |
-                 (eff.early_zero ? MV_CP_FLAG_EARLY_ZERO : 0);
-        effective = eff.effective;
+    } else {
+        /* idx is only used on paths where start is trusted. */
+        idx = (tlb_addr - start) >> MV_IO_TLB_SHIFT;
+        if (tlb_addr < start || idx >= nsl)
+            reason = MV_CP_REASON_BOUNDS;
+        else if (bpf_probe_read_kernel(&slot, sizeof(slot), slots + idx))
+            reason = MV_CP_REASON_SLOT_READ;
+        else if (bpf_core_read(&parms, sizeof(parms), &dev->dma_parms))
+            reason = MV_CP_REASON_MASK_READ;
+        else if (parms &&
+                 bpf_core_read(&mask, sizeof(mask),
+                               &parms->min_align_mask))
+            reason = MV_CP_REASON_MASK_READ;
+        else {
+            /* The hook's tlb_offset math, verbatim signs: both
+             * terms are small, so the signed difference is exact. */
+            off = (__s64)(tlb_addr & MV_IO_TLB_MASK) -
+                  (__s64)(slot.orig_addr & mask & MV_IO_TLB_MASK);
+            eff = mv_effective_bytes(size, off, slot.alloc_size,
+                                     slot.orig_addr != MV_INVALID_PHYS);
+            flags |= MV_CP_FLAG_KNOWN |
+                     (eff.clamped ? MV_CP_FLAG_CLAMPED : 0) |
+                     (eff.early_zero ? MV_CP_FLAG_EARLY_ZERO : 0);
+            effective = eff.effective;
+        }
     }
     return mv_emit_cp(MV_CP_KIND_COPY, flags, dir64, size,
                       effective, reason);
