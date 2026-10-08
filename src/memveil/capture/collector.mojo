@@ -14,7 +14,24 @@ libbpf-mojo Session/bridge calls.
 
 from libbpf_mojo.batch import decode_frame
 from libbpf_mojo.error import LmbError
+from memveil.capture.correlation import CorrelationRegistry
+from memveil.capture.lifecycle import (
+    CP_LEN,
+    HOOK_BOUNCE,
+    HOOK_MAP_RESULT,
+    HOOK_SYNC_CPU,
+    HOOK_SYNC_DEVICE,
+    HOOK_UNMAP,
+    LC_LEN,
+    DecodedCopy,
+    DecodedLifecycle,
+    decode_copy,
+    decode_lifecycle,
+    normalize_copy_event,
+    normalize_lifecycle_event,
+)
 from memveil.capture.normalize import (
+    PAYLOAD_LEN,
     CatalogEntry,
     DecodedAttempt,
     DeviceTable,
@@ -287,6 +304,10 @@ struct CollectorConfig(Copyable, Movable):
     var evidence: List[EvidenceItem]
     var has_pool_sample: Bool
     var pool_root: String
+    var has_lifecycle: Bool
+    var lifecycle_ring_bytes: UInt32
+    var has_copy: Bool
+    var copy_ring_bytes: UInt32
 
     def __init__(out self):
         self.duration_s = UInt64(60)
@@ -304,6 +325,10 @@ struct CollectorConfig(Copyable, Movable):
         self.evidence = List[EvidenceItem]()
         self.has_pool_sample = False
         self.pool_root = String("")
+        self.has_lifecycle = False
+        self.lifecycle_ring_bytes = UInt32(0)
+        self.has_copy = False
+        self.copy_ring_bytes = UInt32(0)
 
 
 @fieldwise_init
@@ -557,6 +582,11 @@ struct Collector:
     var result_state: String
     var unknown_cause: String
     var persisted: UInt64
+    var persisted_attempt: UInt64
+    var persisted_map: UInt64
+    var persisted_unmap: UInt64
+    var persisted_copy: UInt64
+    var persisted_sync: UInt64
     var persisted_sum: UInt64
     var size_omitted: UInt64
     var duration_omitted: UInt64
@@ -574,12 +604,25 @@ struct Collector:
     var start_vals: List[UInt64]
     var end_vals: List[UInt64]
     var has_end_cut: Bool
+    var start_vals_lc: List[UInt64]
+    var end_vals_lc: List[UInt64]
+    var has_end_cut_lc: Bool
+    var start_vals_cp: List[UInt64]
+    var end_vals_cp: List[UInt64]
+    var has_end_cut_cp: Bool
     var start_pair_ts: UInt64
     var end_pair_ts: UInt64
     var stats_start: StatsOut
     var stats_drain: StatsOut
     var stats_final: StatsOut
     var has_final_stats: Bool
+    var stats_start_ch0: StatsOut
+    var stats_final_ch0: StatsOut
+    var stats_start_lc: StatsOut
+    var stats_final_lc: StatsOut
+    var stats_start_cp: StatsOut
+    var stats_final_cp: StatsOut
+    var registry: CorrelationRegistry[]
     var closing_error: Bool
     var snapshots_present: Bool
     var attach_ns: UInt64
@@ -602,6 +645,11 @@ struct Collector:
         self.result_state = String("ok")
         self.unknown_cause = String("")
         self.persisted = UInt64(0)
+        self.persisted_attempt = UInt64(0)
+        self.persisted_map = UInt64(0)
+        self.persisted_unmap = UInt64(0)
+        self.persisted_copy = UInt64(0)
+        self.persisted_sync = UInt64(0)
         self.persisted_sum = UInt64(0)
         self.size_omitted = UInt64(0)
         self.duration_omitted = UInt64(0)
@@ -619,6 +667,12 @@ struct Collector:
         self.start_vals = List[UInt64]()
         self.end_vals = List[UInt64]()
         self.has_end_cut = False
+        self.start_vals_lc = List[UInt64]()
+        self.end_vals_lc = List[UInt64]()
+        self.has_end_cut_lc = False
+        self.start_vals_cp = List[UInt64]()
+        self.end_vals_cp = List[UInt64]()
+        self.has_end_cut_cp = False
         self.start_pair_ts = UInt64(0)
         self.end_pair_ts = UInt64(0)
         self.stats_start = StatsOut(
@@ -649,6 +703,61 @@ struct Collector:
             String(""),
         )
         self.has_final_stats = False
+        self.stats_start_ch0 = StatsOut(
+            False,
+            UInt64(0),
+            UInt64(0),
+            UInt64(0),
+            UInt64(0),
+            UInt64(0),
+            String(""),
+        )
+        self.stats_final_ch0 = StatsOut(
+            False,
+            UInt64(0),
+            UInt64(0),
+            UInt64(0),
+            UInt64(0),
+            UInt64(0),
+            String(""),
+        )
+        self.stats_start_lc = StatsOut(
+            False,
+            UInt64(0),
+            UInt64(0),
+            UInt64(0),
+            UInt64(0),
+            UInt64(0),
+            String(""),
+        )
+        self.stats_final_lc = StatsOut(
+            False,
+            UInt64(0),
+            UInt64(0),
+            UInt64(0),
+            UInt64(0),
+            UInt64(0),
+            String(""),
+        )
+        self.stats_start_cp = StatsOut(
+            False,
+            UInt64(0),
+            UInt64(0),
+            UInt64(0),
+            UInt64(0),
+            UInt64(0),
+            String(""),
+        )
+        self.stats_final_cp = StatsOut(
+            False,
+            UInt64(0),
+            UInt64(0),
+            UInt64(0),
+            UInt64(0),
+            UInt64(0),
+            String(""),
+        )
+        self.registry = CorrelationRegistry()
         self.closing_error = False
         self.snapshots_present = False
         self.attach_ns = UInt64(0)
@@ -696,35 +805,49 @@ struct Collector:
         elif self.stop_reason == String("signal"):
             self.signal_omitted += UInt64(1)
 
-    def stable_pair[
+    def stable_pair_at[
         K: KernelSource, C: ClockSource
-    ](mut self, mut kernel: K, mut clock: C) -> Bool:
-        """Run the stable protocol; on success store the cut.
+    ](mut self, mut kernel: K, mut clock: C, channel: Int) -> Bool:
+        """Run the stable protocol on one channel; store the cut.
 
         Reads full 6-entry vectors until two consecutive
         agree (bounded pairs) or any read fails over. The
-        second read's timestamp stamps the pair; every
+        second read's timestamp stamps the pair (channel 0
+        only; extra channels archive no snapshots); every
         reading's timestamp feeds max_snap_ts.
         """
         for _ in range(STABLE_PAIRS):
-            var first = kernel.read_full()
+            var first = kernel.read_full_at(channel)
             if not first.ok:
                 continue
             var ts_first = clock.now()
             if ts_first > self.max_snap_ts:
                 self.max_snap_ts = ts_first
-            var second = kernel.read_full()
+            var second = kernel.read_full_at(channel)
             if not second.ok:
                 continue
             var ts_second = clock.now()
             if ts_second > self.max_snap_ts:
                 self.max_snap_ts = ts_second
             if stable_cut(first.vals, second.vals):
-                self.end_vals = second.vals.copy()
-                self.end_pair_ts = ts_second
-                self.has_end_cut = True
+                self._store_cut(channel, second.vals, ts_second)
                 return True
         return False
+
+    def _store_cut(
+        mut self, channel: Int, vals: List[UInt64], ts: UInt64
+    ):
+        """Store one channel's stable cut."""
+        if channel == 1:
+            self.end_vals_lc = vals.copy()
+            self.has_end_cut_lc = True
+        elif channel == 2:
+            self.end_vals_cp = vals.copy()
+            self.has_end_cut_cp = True
+        else:
+            self.end_vals = vals.copy()
+            self.end_pair_ts = ts
+            self.has_end_cut = True
 
     def run[K: KernelSource, C: ClockSource, G: SignalSource, W: WriterSource](
         mut self, mut kernel: K, mut clock: C, mut signal: G,
@@ -758,6 +881,91 @@ struct Collector:
                 diag += String("; close: ") + closed.message
             return RunResult(EXIT_ERROR, String("unknown"), String("refusal-rollback-failed"), diag)
         return RunResult(EXIT_REFUSAL, String("unknown"), String("refused"), reason)
+
+    def _extra_channels(self) -> Bool:
+        return self.cfg.has_lifecycle or self.cfg.has_copy
+
+    def _check_channel_maps[
+        K: KernelSource
+    ](
+        mut self, mut kernel: K, channel: Int, tag: String,
+        ring_map: String, ring_bytes: UInt32,
+    ) -> String:
+        """Verify one extra channel's mv_counts + ring; "" ok."""
+        var counts = kernel.map_info_at(channel, String("mv_counts"))
+        if not counts.ok:
+            return (
+                String("map ")
+                + tag
+                + String(" mv_counts: ")
+                + counts.message
+            )
+        if (
+            counts.map_type != UInt32(MAP_TYPE_ARRAY)
+            or counts.key_size != UInt32(4)
+            or counts.value_size != UInt32(8)
+            or counts.max_entries != UInt32(6)
+        ):
+            return String("map ") + tag + String(" mv_counts geometry")
+        var ring = kernel.map_info_at(channel, ring_map)
+        if not ring.ok:
+            return (
+                String("map ")
+                + tag
+                + String(" ")
+                + ring_map
+                + String(": ")
+                + ring.message
+            )
+        if ring.map_type != UInt32(MAP_TYPE_RINGBUF):
+            return (
+                String("map ")
+                + tag
+                + String(" ")
+                + ring_map
+                + String(" geometry")
+            )
+        if ring.max_entries != ring_bytes:
+            return (
+                String("map ")
+                + tag
+                + String(" ")
+                + ring_map
+                + String(" ring size")
+            )
+        return String("")
+
+    def _admit_channel_hooks(mut self) -> String:
+        """Admit enabled hooks to the registry; "" ok else reason.
+
+        Admission (which hooks) follows record's
+        capability selection; the namespace is a frozen
+        semantic property (swiotlb hooks observe the IOVA
+        space). Events from unadmitted hooks stay
+        unpaired; a registry rejection here refuses before
+        any probe attaches.
+        """
+        try:
+            if self.cfg.has_lifecycle:
+                self.registry.admit_hook(
+                    String(HOOK_MAP_RESULT), String("iova")
+                )
+                self.registry.admit_hook(
+                    String(HOOK_UNMAP), String("iova")
+                )
+            if self.cfg.has_copy:
+                self.registry.admit_hook(
+                    String(HOOK_SYNC_DEVICE), String("iova")
+                )
+                self.registry.admit_hook(
+                    String(HOOK_SYNC_CPU), String("iova")
+                )
+                self.registry.admit_hook(
+                    String(HOOK_BOUNCE), String("iova")
+                )
+        except:
+            return String("hook admission failed")
+        return String("")
 
     def startup[
         K: KernelSource, C: ClockSource, G: SignalSource, W: WriterSource
@@ -800,21 +1008,68 @@ struct Collector:
             return String("map mv_attempts geometry")
         if self.cfg.has_ring_bytes and ring.max_entries != self.cfg.ring_bytes:
             return String("map mv_attempts ring size")
-        if not self.stable_pair(kernel, clock):
+        if self.cfg.has_lifecycle:
+            var lc_maps = self._check_channel_maps(
+                kernel, 1, String("lc"), String("mv_lifecycle"),
+                self.cfg.lifecycle_ring_bytes,
+            )
+            if lc_maps != String(""):
+                return lc_maps
+        if self.cfg.has_copy:
+            var cp_maps = self._check_channel_maps(
+                kernel, 2, String("cp"), String("mv_copies"),
+                self.cfg.copy_ring_bytes,
+            )
+            if cp_maps != String(""):
+                return cp_maps
+        if not self.stable_pair_at(kernel, clock, 0):
             return String("start snapshot unresolved")
         self.start_vals = self.end_vals.copy()
         self.start_pair_ts = self.end_pair_ts
         self.has_end_cut = False
         if not all_zero(self.start_vals):
             return String("start snapshot nonzero")
+        if self.cfg.has_lifecycle:
+            if not self.stable_pair_at(kernel, clock, 1):
+                return String("start lc snapshot unresolved")
+            self.start_vals_lc = self.end_vals_lc.copy()
+            self.has_end_cut_lc = False
+            if not all_zero(self.start_vals_lc):
+                return String("start lc snapshot nonzero")
+        if self.cfg.has_copy:
+            if not self.stable_pair_at(kernel, clock, 2):
+                return String("start cp snapshot unresolved")
+            self.start_vals_cp = self.end_vals_cp.copy()
+            self.has_end_cut_cp = False
+            if not all_zero(self.start_vals_cp):
+                return String("start cp snapshot nonzero")
         var baseline = kernel.stats()
         if not baseline.ok:
             return String("start stats: ") + baseline.message
         self.stats_start = baseline.copy()
+        if self._extra_channels():
+            var ch0 = kernel.stats_at(0)
+            if not ch0.ok:
+                return String("start ch0 stats: ") + ch0.message
+            self.stats_start_ch0 = ch0.copy()
+            if self.cfg.has_lifecycle:
+                var blc = kernel.stats_at(1)
+                if not blc.ok:
+                    return String("start lc stats: ") + blc.message
+                self.stats_start_lc = blc.copy()
+            if self.cfg.has_copy:
+                var bcp = kernel.stats_at(2)
+                if not bcp.ok:
+                    return String("start cp stats: ") + bcp.message
+                self.stats_start_cp = bcp.copy()
         var made = writer.create(self.cfg.output, self.cfg.max_events_bytes)
         if not made.ok:
             return String("output ") + made.kind + String(": ") + made.message
         self.output_fs = fs_type_name(self.cfg.output)
+        if self._extra_channels():
+            var admitted = self._admit_channel_hooks()
+            if admitted != String(""):
+                return admitted
         var attached = kernel.attach()
         if not attached.ok:
             return String("attach: ") + attached.message
@@ -925,13 +1180,26 @@ struct Collector:
             self.rejected += UInt64(1)
             self.fail(String("error"))
             return String("error-path")
-        var attempt: DecodedAttempt
-        try:
-            attempt = decode_payload(payload)
-        except:
-            self.rejected += UInt64(1)
-            self.fail(String("error"))
-            return String("error-path")
+        if len(payload) == PAYLOAD_LEN:
+            return self._admit_attempt(
+                payload, clock, signal, writer, deadline
+            )
+        if len(payload) == LC_LEN:
+            return self._admit_lifecycle(
+                payload, clock, signal, writer, deadline
+            )
+        if len(payload) == CP_LEN:
+            return self._admit_copy(
+                payload, clock, signal, writer, deadline
+            )
+        self.rejected += UInt64(1)
+        self.fail(String("error"))
+        return String("error-path")
+
+    def _gate[C: ClockSource, G: SignalSource](
+        mut self, mut clock: C, mut signal: G, deadline: UInt64
+    ) -> String:
+        """Pre-normalize latch gate; "" admits, else closed."""
         var sig = signal.check()
         if sig.state == String("pending"):
             self.latch(String("signal"))
@@ -952,11 +1220,64 @@ struct Collector:
             self.latch(String("size_limit"))
             self.omit_for_latch()
             return String("closed")
+        return String("")
+
+    def _persist_line[W: WriterSource](
+        mut self, mut writer: W, line: List[UInt8], byte_count: UInt64,
+        ts_ns: UInt64, kind: String,
+    ) -> String:
+        """Append one encoded event; "" persisted, else closed/error."""
+        var wrote = writer.append(line)
+        if wrote.ok:
+            self.persisted += UInt64(1)
+            self.persisted_sum += byte_count
+            if ts_ns > self.max_persisted_ts:
+                self.max_persisted_ts = ts_ns
+            if kind == String("bounce_attempt"):
+                self.persisted_attempt += UInt64(1)
+            elif kind == String("map_result"):
+                self.persisted_map += UInt64(1)
+            elif kind == String("unmap"):
+                self.persisted_unmap += UInt64(1)
+            elif kind == String("copy"):
+                self.persisted_copy += UInt64(1)
+            elif kind == String("sync_request"):
+                self.persisted_sync += UInt64(1)
+            return String("")
+        if wrote.kind == String("refused"):
+            self.next_seq -= UInt64(1)
+            self.latch(String("size_limit"))
+            self.omit_for_latch()
+            return String("closed")
+        self.next_seq -= UInt64(1)
+        self.write_failed += UInt64(1)
+        if wrote.kind == String("fatal") or wrote.kind == String("misuse"):
+            self.result_state = String("unfinalizable")
+            return String("unfinalizable")
+        self.fail(String("error"))
+        return String("error-path")
+
+    def _admit_attempt[
+        C: ClockSource, G: SignalSource, W: WriterSource
+    ](
+        mut self, payload: List[UInt8], mut clock: C, mut signal: G,
+        mut writer: W, deadline: UInt64,
+    ) -> String:
+        var attempt: DecodedAttempt
+        try:
+            attempt = decode_payload(payload)
+        except:
+            self.rejected += UInt64(1)
+            self.fail(String("error"))
+            return String("error-path")
+        var gate = self._gate(clock, signal, deadline)
+        if gate != String(""):
+            return gate
         var normalized: NormalizedAttempt
         try:
             normalized = normalize_attempt(attempt, self.table)
         except e:
-            if e.reason == String("UTF8") and not e.fatal:
+            if not e.fatal:
                 self.rejected += UInt64(1)
                 return String("")
             self.rejected += UInt64(1)
@@ -975,25 +1296,98 @@ struct Collector:
         except:
             self.result_state = String("unfinalizable")
             return String("unfinalizable")
-        var wrote = writer.append(line)
-        if wrote.ok:
-            self.persisted += UInt64(1)
-            self.persisted_sum += normalized.requested_bytes
-            if normalized.ts_ns > self.max_persisted_ts:
-                self.max_persisted_ts = normalized.ts_ns
-            return String("")
-        if wrote.kind == String("refused"):
-            self.next_seq -= UInt64(1)
+        return self._persist_line(
+            writer, line^, normalized.requested_bytes,
+            normalized.ts_ns, String("bounce_attempt"),
+        )
+
+    def _admit_lifecycle[
+        C: ClockSource, G: SignalSource, W: WriterSource
+    ](
+        mut self, payload: List[UInt8], mut clock: C, mut signal: G,
+        mut writer: W, deadline: UInt64,
+    ) -> String:
+        var decoded: DecodedLifecycle
+        try:
+            decoded = decode_lifecycle(payload)
+        except:
+            self.rejected += UInt64(1)
+            self.fail(String("error"))
+            return String("error-path")
+        var gate = self._gate(clock, signal, deadline)
+        if gate != String(""):
+            return gate
+        var ev = normalize_lifecycle_event(decoded)
+        if decoded.size > u64_max() - self.persisted_sum:
             self.latch(String("size_limit"))
             self.omit_for_latch()
             return String("closed")
-        self.next_seq -= UInt64(1)
-        self.write_failed += UInt64(1)
-        if wrote.kind == String("fatal") or wrote.kind == String("misuse"):
+        self.fill_source_hook(ev)
+        try:
+            ev = self.registry.normalize(ev^, String("capture"))
+        except:
+            self.rejected += UInt64(1)
+            self.fail(String("error"))
+            return String("error-path")
+        var line: List[UInt8]
+        try:
+            line = encode_event_line(ev)
+        except:
             self.result_state = String("unfinalizable")
             return String("unfinalizable")
-        self.fail(String("error"))
-        return String("error-path")
+        return self._persist_line(
+            writer, line^, decoded.size, decoded.ktime, ev.kind
+        )
+
+    def _admit_copy[
+        C: ClockSource, G: SignalSource, W: WriterSource
+    ](
+        mut self, payload: List[UInt8], mut clock: C, mut signal: G,
+        mut writer: W, deadline: UInt64,
+    ) -> String:
+        var decoded: DecodedCopy
+        try:
+            decoded = decode_copy(payload)
+        except:
+            self.rejected += UInt64(1)
+            self.fail(String("error"))
+            return String("error-path")
+        var gate = self._gate(clock, signal, deadline)
+        if gate != String(""):
+            return gate
+        var ev: Event
+        try:
+            ev = normalize_copy_event(decoded)
+        except e:
+            if not e.fatal:
+                self.rejected += UInt64(1)
+                return String("")
+            self.rejected += UInt64(1)
+            self.fail(String("error"))
+            return String("error-path")
+        var byte_count = decoded.requested
+        if ev.kind == String("copy"):
+            byte_count = decoded.effective
+        if byte_count > u64_max() - self.persisted_sum:
+            self.latch(String("size_limit"))
+            self.omit_for_latch()
+            return String("closed")
+        self.fill_source_hook(ev)
+        try:
+            ev = self.registry.normalize(ev^, String("capture"))
+        except:
+            self.rejected += UInt64(1)
+            self.fail(String("error"))
+            return String("error-path")
+        var line: List[UInt8]
+        try:
+            line = encode_event_line(ev)
+        except:
+            self.result_state = String("unfinalizable")
+            return String("unfinalizable")
+        return self._persist_line(
+            writer, line^, byte_count, decoded.ktime, ev.kind
+        )
 
     def normal_close[K: KernelSource, C: ClockSource, W: WriterSource](
         mut self, mut kernel: K, mut clock: C, mut writer: W
@@ -1005,10 +1399,18 @@ struct Collector:
             self.note_unknown(String("detach failed; shutdown evidence unresolved"))
         clock.sleep_ms(SETTLE_MS)
         self.drain(kernel, clock)
-        if not self.stable_pair(kernel, clock):
+        if not self.stable_pair_at(kernel, clock, 0):
             self.note_unknown(String("snapshot unresolved"))
             self.has_end_cut = False
         else:
+            if self.cfg.has_lifecycle:
+                if not self.stable_pair_at(kernel, clock, 1):
+                    self.note_unknown(String("lc snapshot unresolved"))
+                    self.has_end_cut_lc = False
+            if self.cfg.has_copy:
+                if not self.stable_pair_at(kernel, clock, 2):
+                    self.note_unknown(String("cp snapshot unresolved"))
+                    self.has_end_cut_cp = False
             var guard = 0
             var last_ts = self.end_pair_ts
             while last_ts <= self.max_persisted_ts and guard < ADVANCE_MAX:
@@ -1083,12 +1485,34 @@ struct Collector:
             return
         self.stats_final = final.copy()
         self.has_final_stats = True
+        if self._extra_channels():
+            self._read_channel_finals(kernel)
         if self.stats_drain.ok:
             if (
                 final.received != self.stats_drain.received
                 or final.malformed != self.stats_drain.malformed
             ):
                 self.note_unknown(String("post-snapshot activity"))
+
+    def _read_channel_finals[K: KernelSource](mut self, mut kernel: K):
+        """Read per-channel final transport stats; failures close."""
+        var ch0 = kernel.stats_at(0)
+        if not ch0.ok:
+            self.note_unknown(String("error shutdown"))
+            return
+        self.stats_final_ch0 = ch0.copy()
+        if self.cfg.has_lifecycle:
+            var lc = kernel.stats_at(1)
+            if not lc.ok:
+                self.note_unknown(String("error shutdown"))
+                return
+            self.stats_final_lc = lc.copy()
+        if self.cfg.has_copy:
+            var cp = kernel.stats_at(2)
+            if not cp.ok:
+                self.note_unknown(String("error shutdown"))
+                return
+            self.stats_final_cp = cp.copy()
 
     def error_close[K: KernelSource, C: ClockSource, W: WriterSource](
         mut self, mut kernel: K, mut clock: C, mut writer: W
@@ -1102,9 +1526,20 @@ struct Collector:
         if final.ok:
             self.stats_final = final.copy()
             self.has_final_stats = True
-        if not self.stable_pair(kernel, clock):
+        if self._extra_channels():
+            self._read_channel_finals(kernel)
+        if not self.stable_pair_at(kernel, clock, 0):
             self.note_unknown(String("snapshot unresolved"))
             self.has_end_cut = False
+        else:
+            if self.cfg.has_lifecycle:
+                if not self.stable_pair_at(kernel, clock, 1):
+                    self.note_unknown(String("lc snapshot unresolved"))
+                    self.has_end_cut_lc = False
+            if self.cfg.has_copy:
+                if not self.stable_pair_at(kernel, clock, 2):
+                    self.note_unknown(String("cp snapshot unresolved"))
+                    self.has_end_cut_cp = False
         if self.cfg.has_pool_sample:
             var fin = self._sample_pool_now(clock)
             self.pool_final = fin[0]
@@ -1124,6 +1559,19 @@ struct Collector:
         ev.source_profile_id = self.cfg.profile_id
         ev.source_measurement = String("observed")
         ev.source_correlation = String("direct")
+
+    def fill_source_hook(mut self, mut ev: Event):
+        """Stamp capture fields; keep probe hook/backend/correlation.
+
+        Lifecycle/copy normalizers set the per-probe hook
+        and backend; the registry sets correlation after
+        this stamp, so evidence refs carry real seqs.
+        """
+        ev.session_id = self.session_id
+        ev.seq = self.next_seq
+        self.next_seq += UInt64(1)
+        ev.source_profile_id = self.cfg.profile_id
+        ev.source_measurement = String("observed")
 
     def encode_attempt(
         mut self, normalized: NormalizedAttempt
@@ -1421,11 +1869,73 @@ struct Collector:
                 self.note_unknown(String("kernel identity unproven"))
             elif self.has_final_stats:
                 var emitted = vals[CNT_EMITTED]
-                var received_d = (
-                    self.stats_final.received - self.stats_start.received
-                )
+                var received_d: UInt64
+                if self._extra_channels():
+                    if not self.stats_final_ch0.ok:
+                        self.note_unknown(String("error shutdown"))
+                        return String("")
+                    received_d = (
+                        self.stats_final_ch0.received
+                        - self.stats_start_ch0.received
+                    )
+                else:
+                    received_d = (
+                        self.stats_final.received
+                        - self.stats_start.received
+                    )
                 if received_d != emitted:
                     self.note_unknown(String("ring count unproven"))
+        if self.cfg.has_lifecycle:
+            var lc_vals = self.end_vals_lc.copy()
+            var lc_start = self.stats_start_lc.copy()
+            var lc_final = self.stats_final_lc.copy()
+            if self._evaluate_channel(
+                lc_vals, self.has_end_cut_lc,
+                lc_start, lc_final, String("lifecycle"),
+            ) != String(""):
+                return String("unfinalizable")
+        if self.cfg.has_copy:
+            var cp_vals = self.end_vals_cp.copy()
+            var cp_start = self.stats_start_cp.copy()
+            var cp_final = self.stats_final_cp.copy()
+            if self._evaluate_channel(
+                cp_vals, self.has_end_cut_cp,
+                cp_start, cp_final, String("copy"),
+            ) != String(""):
+                return String("unfinalizable")
+        return String("")
+
+    def _evaluate_channel(
+        mut self, vals_in: List[UInt64], has_cut: Bool,
+        start: StatsOut, final: StatsOut, tag: String,
+    ) -> String:
+        """Close verification for one extra channel's cut."""
+        if not has_cut:
+            return String("")
+        var vals = vals_in.copy()
+        var epoch_ok = (
+            vals[CNT_FLAGS] & FLAG_OBSERVED_WRAP == UInt64(0)
+            and vals[CNT_FLAGS] & FLAG_EMITTED_WRAP == UInt64(0)
+            and vals[CNT_FLAGS] & FLAG_SUBMIT_WRAP == UInt64(0)
+        )
+        if not epoch_ok:
+            self.note_unknown(tag + String(" invalid epoch"))
+            return String("")
+        if not count_identity(vals):
+            self.note_unknown(tag + String(" kernel identity unproven"))
+            return String("")
+        if not final.ok:
+            return String("")
+        if (
+            final.received < start.received
+            or final.delivered < start.delivered
+            or final.malformed < start.malformed
+            or final.dropped < start.dropped
+        ):
+            return String("unfinalizable")
+        var received_d = final.received - start.received
+        if received_d != vals[CNT_EMITTED]:
+            self.note_unknown(tag + String(" ring count unproven"))
         return String("")
 
     def diagnostic(self, note: String) -> String:
@@ -1525,13 +2035,40 @@ struct Collector:
                 return False
         return True
 
+    def _submit_valid_all(self) -> Bool:
+        """Every enabled channel's submit_fail is readable."""
+        if not self.has_end_cut or not submit_valid(self.end_vals):
+            return False
+        if self.cfg.has_lifecycle and (
+            not self.has_end_cut_lc
+            or not submit_valid(self.end_vals_lc)
+        ):
+            return False
+        if self.cfg.has_copy and (
+            not self.has_end_cut_cp
+            or not submit_valid(self.end_vals_cp)
+        ):
+            return False
+        return True
+
+    def _submit_fail_total(self) -> UInt64:
+        """Summed submit_fail over enabled channels' end cuts."""
+        var total = UInt64(0)
+        if self.has_end_cut:
+            total += self.end_vals[CNT_SUBMIT_FAIL]
+        if self.cfg.has_lifecycle and self.has_end_cut_lc:
+            total += self.end_vals_lc[CNT_SUBMIT_FAIL]
+        if self.cfg.has_copy and self.has_end_cut_cp:
+            total += self.end_vals_cp[CNT_SUBMIT_FAIL]
+        return total
+
     def loss_pairs(self) -> List[String]:
         """Kernel/bridge components as decimal-or-unavailable."""
         var submit = String("unavailable")
         var malformed = String("unavailable")
         var dropped = String("unavailable")
-        if self.has_end_cut and submit_valid(self.end_vals):
-            submit = format_u64(self.end_vals[CNT_SUBMIT_FAIL])
+        if self._submit_valid_all():
+            submit = format_u64(self._submit_fail_total())
         if self.has_final_stats:
             malformed = format_u64(
                 self.stats_final.malformed - self.stats_start.malformed
@@ -1551,7 +2088,7 @@ struct Collector:
             return False
         if not self.has_end_cut or not self.has_final_stats:
             return False
-        if not submit_valid(self.end_vals):
+        if not self._submit_valid_all():
             return False
         return True
 
@@ -1603,7 +2140,7 @@ struct Collector:
             String("capture ")
             + self.result_state
             + String(", ")
-            + format_u64(self.persisted)
+            + format_u64(self.persisted_attempt)
             + String(" attempts persisted; admitted under ")
             + self.cfg.profile_id
             + String("; device detail grouped by observed name scope")
@@ -1612,18 +2149,77 @@ struct Collector:
         cap.has_profile_id = True
         cap.profile_id = self.cfg.profile_id
         out.cap_bounce_attempts = cap^
-        self.unavailable_cap(
-            out.cap_mapping_lifecycle,
-            String("No map_result source in this capture."),
-        )
-        self.unavailable_cap(
-            out.cap_copy_bytes,
-            String("No copy source in this capture."),
-        )
-        self.unavailable_cap(
-            out.cap_sync_requests,
-            String("No sync source in this capture."),
-        )
+        if self.cfg.has_lifecycle:
+            var lc_cap = Capability()
+            lc_cap.status = String("partial")
+            lc_cap.reason = (
+                String("capture ")
+                + self.result_state
+                + String(", ")
+                + format_u64(
+                    self.persisted_map + self.persisted_unmap
+                )
+                + String(
+                    " map_result/unmap events persisted; admitted"
+                    " under "
+                )
+                + self.cfg.profile_id
+                + String("; v1 wire carries no mapping identity")
+            )
+            lc_cap.hooks.append(String(HOOK_MAP_RESULT))
+            lc_cap.hooks.append(String(HOOK_UNMAP))
+            lc_cap.has_profile_id = True
+            lc_cap.profile_id = self.cfg.profile_id
+            out.cap_mapping_lifecycle = lc_cap^
+        else:
+            self.unavailable_cap(
+                out.cap_mapping_lifecycle,
+                String("No map_result source in this capture."),
+            )
+        if self.cfg.has_copy:
+            var cp_cap = Capability()
+            cp_cap.status = String("partial")
+            cp_cap.reason = (
+                String("capture ")
+                + self.result_state
+                + String(", ")
+                + format_u64(self.persisted_copy)
+                + String(" copy events persisted; admitted under ")
+                + self.cfg.profile_id
+                + String("; v1 wire carries no mapping identity")
+            )
+            cp_cap.hooks.append(String(HOOK_BOUNCE))
+            cp_cap.has_profile_id = True
+            cp_cap.profile_id = self.cfg.profile_id
+            out.cap_copy_bytes = cp_cap^
+            var sy_cap = Capability()
+            sy_cap.status = String("partial")
+            sy_cap.reason = (
+                String("capture ")
+                + self.result_state
+                + String(", ")
+                + format_u64(self.persisted_sync)
+                + String(
+                    " sync_request events persisted; admitted"
+                    " under "
+                )
+                + self.cfg.profile_id
+                + String("; v1 wire carries no mapping identity")
+            )
+            sy_cap.hooks.append(String(HOOK_SYNC_DEVICE))
+            sy_cap.hooks.append(String(HOOK_SYNC_CPU))
+            sy_cap.has_profile_id = True
+            sy_cap.profile_id = self.cfg.profile_id
+            out.cap_sync_requests = sy_cap^
+        else:
+            self.unavailable_cap(
+                out.cap_copy_bytes,
+                String("No copy source in this capture."),
+            )
+            self.unavailable_cap(
+                out.cap_sync_requests,
+                String("No sync source in this capture."),
+            )
         self.unavailable_cap(
             out.cap_conversion_results,
             String("No conversion source in this capture."),
@@ -1662,11 +2258,28 @@ struct Collector:
         )
         var pairs = self.loss_pairs()
         var scope = (
-            format_u64(self.persisted) + String(" bounce_attempt events")
+            format_u64(self.persisted_attempt)
+            + String(" bounce_attempt")
         )
+        if self.cfg.has_lifecycle:
+            scope += (
+                String(" + ")
+                + format_u64(self.persisted_map + self.persisted_unmap)
+                + String(" map_result/unmap")
+            )
+        if self.cfg.has_copy:
+            scope += (
+                String(" + ")
+                + format_u64(
+                    self.persisted_copy + self.persisted_sync
+                )
+                + String(" copy/sync_request")
+            )
+        scope += String(" events")
         if self.loss_known():
+            var submit_fail = self._submit_fail_total()
             var total = (
-                self.end_vals[CNT_SUBMIT_FAIL]
+                submit_fail
                 + (self.stats_final.malformed - self.stats_start.malformed)
                 + (self.stats_final.dropped - self.stats_start.dropped)
                 + self.size_omitted
@@ -1682,7 +2295,7 @@ struct Collector:
             out.q_detail.has_loss_count = True
             out.q_detail.loss_count = total
             out.q_detail.reason = detail_reason_known(
-                self.end_vals[CNT_SUBMIT_FAIL],
+                submit_fail,
                 self.stats_final.malformed - self.stats_start.malformed,
                 self.stats_final.dropped - self.stats_start.dropped,
                 self.size_omitted,
@@ -1717,13 +2330,32 @@ struct Collector:
             out.q_aggregate.reason = aggregate_reason(
                 False, self.snapshot_gate_cause()
             )
-        out.q_aggregate.scope = String("counter snapshots")
-        out.q_correlation.status = String("not_applicable")
-        out.q_correlation.has_loss_count = False
-        out.q_correlation.scope = String("attempt counting")
-        out.q_correlation.reason = String(
-            "Attempt counting needs no cross-event correlation."
-        )
+        if self._extra_channels():
+            # Lifecycle/copy counter cuts are verified at
+            # close and feed q_detail loss, but only the
+            # attempt channel archives counter snapshots.
+            out.q_aggregate.scope = String(
+                "counter snapshots (attempt channel)"
+            )
+        else:
+            out.q_aggregate.scope = String("counter snapshots")
+        if self._extra_channels():
+            var health = self.registry.health()
+            out.q_correlation.status = health.status
+            out.q_correlation.has_loss_count = health.has_loss_count
+            out.q_correlation.loss_count = health.loss_count
+            out.q_correlation.scope = health.scope
+            out.q_correlation.reason = health.reason
+            out.q_correlation.evidence_refs = (
+                health.evidence_refs.copy()
+            )
+        else:
+            out.q_correlation.status = String("not_applicable")
+            out.q_correlation.has_loss_count = False
+            out.q_correlation.scope = String("attempt counting")
+            out.q_correlation.reason = String(
+                "Attempt counting needs no cross-event correlation."
+            )
         out.q_baseline.status = String("not_applicable")
         out.q_baseline.has_loss_count = False
         out.q_baseline.scope = String("attempt metrics")

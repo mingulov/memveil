@@ -899,7 +899,8 @@ suite_mappings() {
 suite_lifetimes() {
     run_unit_file tests/unit/test_lifetimes.mojo || return 1
     run_unit_file tests/unit/test_lifecycle_wire.mojo || return 1
-    run_unit_file tests/unit/test_lifecycle_events.mojo
+    run_unit_file tests/unit/test_lifecycle_events.mojo || return 1
+    run_unit_file tests/unit/test_lifecycle_capture.mojo
 }
 
 suite_pools() {
@@ -1815,7 +1816,7 @@ suite_attempts() {
     awant live-refuse "exit=3"
     awant live-refuse "end=unknown"
     awant live-refuse "outcome=refused"
-    awant live-refuse "diag=open: op="
+    awant live-refuse "diag=open: ch0 op="
     if grep -q "residual\|rollback-failed" "$TMP/live-refuse.log"; then
         echo "attempts: live-refuse reports residuals" >&2
         cat "$TMP/live-refuse.log" >&2

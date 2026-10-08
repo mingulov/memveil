@@ -49,6 +49,8 @@ struct ScriptKernel(KernelSource):
     var load_out: OpOut
     var counts_geom: GeomOut
     var ring_geom: GeomOut
+    var ring_geom1: GeomOut
+    var ring_geom2: GeomOut
     var attach_out: OpOut
     var detach_out: OpOut
     var close_out: OpOut
@@ -87,6 +89,14 @@ struct ScriptKernel(KernelSource):
             True, UInt32(2), UInt32(4), UInt32(8), UInt32(6), String("")
         )
         self.ring_geom = GeomOut(
+            True, UInt32(27), UInt32(0), UInt32(0), UInt32(8388608),
+            String(""),
+        )
+        self.ring_geom1 = GeomOut(
+            True, UInt32(27), UInt32(0), UInt32(0), UInt32(8388608),
+            String(""),
+        )
+        self.ring_geom2 = GeomOut(
             True, UInt32(27), UInt32(0), UInt32(0), UInt32(8388608),
             String(""),
         )
@@ -141,7 +151,13 @@ struct ScriptKernel(KernelSource):
                 UInt32(0),
                 String("bad channel"),
             )
-        return self.map_info(name)
+        if name == String("mv_counts"):
+            return self.counts_geom.copy()
+        if channel == 1:
+            return self.ring_geom1.copy()
+        if channel == 2:
+            return self.ring_geom2.copy()
+        return self.ring_geom.copy()
 
     def channel_count(self) -> Int:
         return self.channels
@@ -213,6 +229,18 @@ struct ScriptKernel(KernelSource):
         return out^
 
     def stats_at(mut self, channel: Int) -> StatsOut:
+        if channel == 0 or channel < 0 or channel >= self.channels:
+            if channel < 0 or channel >= self.channels:
+                return StatsOut(
+                    False,
+                    UInt64(0),
+                    UInt64(0),
+                    UInt64(0),
+                    UInt64(0),
+                    UInt64(0),
+                    String("bad channel"),
+                )
+            return self.stats()
         self.stats_done += 1
         if channel == 1:
             if self.stats_idx1 >= len(self.stats_q1):
@@ -266,6 +294,12 @@ struct ScriptKernel(KernelSource):
         return out^
 
     def read_full_at(mut self, channel: Int) -> SnapOut:
+        if channel == 0 or channel < 0 or channel >= self.channels:
+            if channel < 0 or channel >= self.channels:
+                return SnapOut(
+                    False, List[UInt64](), String("bad channel")
+                )
+            return self.read_full()
         self.snaps_done += 1
         if channel == 1:
             if self.snap_idx1 >= len(self.snaps1):

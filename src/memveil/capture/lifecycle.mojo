@@ -27,6 +27,15 @@ from memveil.model.validate import checked_add, format_u64
 comptime LC_LEN = 36
 comptime CP_LEN = 48
 
+# Frozen probe hook identities shared by normalization,
+# registry admission, and session capabilities: one
+# definition so admission can never skew from emission.
+comptime HOOK_MAP_RESULT = "fexit:swiotlb_tbl_map_single"
+comptime HOOK_UNMAP = "fentry:__swiotlb_tbl_unmap_single"
+comptime HOOK_SYNC_DEVICE = "fentry:__swiotlb_sync_single_for_device"
+comptime HOOK_SYNC_CPU = "fentry:__swiotlb_sync_single_for_cpu"
+comptime HOOK_BOUNCE = "fentry:swiotlb_bounce"
+
 comptime _LC_MAGIC = 0x434C564D
 comptime _CP_MAGIC = 0x5043564D
 comptime _VERSION = 1
@@ -360,7 +369,7 @@ def normalize_lifecycle_event(d: DecodedLifecycle) -> Event:
     ev.ts_ns = d.ktime
     if d.kind == UInt16(_LC_KIND_MAP):
         ev.kind = String("map_result")
-        ev.source_hook = String("fexit:swiotlb_tbl_map_single")
+        ev.source_hook = String(HOOK_MAP_RESULT)
         ev.source_backend = String("tracing")
         ev.map_result.operation_id = _record_id(d.seq)
         ev.map_result.success = d.ok
@@ -371,7 +380,7 @@ def normalize_lifecycle_event(d: DecodedLifecycle) -> Event:
             ev.map_result.mapped_bytes = d.size
         return ev^
     ev.kind = String("unmap")
-    ev.source_hook = String("fentry:__swiotlb_tbl_unmap_single")
+    ev.source_hook = String(HOOK_UNMAP)
     ev.source_backend = String("tracing")
     ev.unmap.has_mapping_id = True
     ev.unmap.mapping_id = _record_id(d.seq)
@@ -397,13 +406,9 @@ def normalize_copy_event(
     if d.kind == UInt16(_CP_KIND_SYNC):
         ev.kind = String("sync_request")
         if d.to_device:
-            ev.source_hook = String(
-                "fentry:__swiotlb_sync_single_for_device"
-            )
+            ev.source_hook = String(HOOK_SYNC_DEVICE)
         else:
-            ev.source_hook = String(
-                "fentry:__swiotlb_sync_single_for_cpu"
-            )
+            ev.source_hook = String(HOOK_SYNC_CPU)
         ev.source_backend = String("tracing")
         ev.sync.operation_id = _record_id(d.seq)
         ev.sync.has_mapping_id = True
@@ -414,7 +419,7 @@ def normalize_copy_event(
     if not d.known:
         raise NormalizeError("UNKNOWN_COPY", False)
     ev.kind = String("copy")
-    ev.source_hook = String("fentry:swiotlb_bounce")
+    ev.source_hook = String(HOOK_BOUNCE)
     ev.source_backend = String("tracing")
     ev.copy.operation_id = _record_id(d.seq)
     if d.to_device:
