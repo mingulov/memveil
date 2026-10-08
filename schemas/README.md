@@ -52,7 +52,10 @@ origin, or attestation. A normalized `map_result.return_code = null` is
 valid when the underlying allocator returns a buffer identity/failure
 sentinel rather than an errno. Do not serialize that address as an error
 code. Conversion wrappers with an observable integer status should preserve
-it.
+it. `copy` means actual executed CPU bytes and therefore requires
+`source.measurement = observed`; estimated or derived copy records are
+invalid, even when mixed with observed copies. Other event kinds keep
+their measurement options.
 
 A capability's `verified` status describes tested **product support**, not
 platform security assurance. For live probe-based observations it requires a

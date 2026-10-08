@@ -90,8 +90,12 @@ struct PoolTracker[POOL_N: Int = POOL_MAX]:
         return self._samples > 0
 
     def note_detail_loss(mut self):
-        """Degrade every gauge: detail loss may hide samples."""
+        """Break the proved streak: a hidden sample may be below threshold."""
         self._detail_loss = True
+        for name in self._pools:
+            var st = self._pools.get(name, _PoolState())
+            st.streak = 0
+            self._pools[name] = st
 
     def _coverage(self) -> String:
         if self._detail_loss:

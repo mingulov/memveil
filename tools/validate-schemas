@@ -628,6 +628,8 @@ def check_event(obj, lineno, session):
     if kind not in KINDS:
         fail("bad-kind", "%s kind %r" % (where, kind))
     check_source(obj["source"], "%s.source" % where)
+    if obj["kind"] == "copy" and obj["source"]["measurement"] != "observed":
+        fail("bad-copy-measurement", "Executed copies require observed measurement")
     if "observer_context" in obj:
         check_context(obj["observer_context"],
                       "%s.observer_context" % where)

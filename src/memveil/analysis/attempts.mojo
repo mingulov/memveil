@@ -1718,6 +1718,26 @@ struct AttemptAnalyzer:
         if self._term_gaps > 0:
             causes.append(String("terminal gap observed"))
             refs.append(String("channel:terminal-gap"))
+        if (
+            self._detail_gaps == 0
+            and out.q_detail.status != "complete_for_scope"
+        ):
+            causes.append("Detail evidence incomplete: " + out.q_detail.reason)
+            refs.append(String("channel:detail"))
+        if (
+            self._term_gaps == 0
+            and out.q_terminal.status != "complete_for_scope"
+        ):
+            causes.append("Terminal evidence incomplete: " + out.q_terminal.reason)
+            refs.append(String("channel:terminal"))
+        if (
+            self._saw_lifecycle()
+            and out.q_correlation.status != "complete_for_scope"
+        ):
+            causes.append(
+                "Lifecycle correlation incomplete: " + out.q_correlation.reason
+            )
+            refs.append(String("channel:correlation"))
         if out.counter_disagreement:
             var cause = String("counter cross-check disagrees: ")
             cause += self._disagree_text
@@ -1729,7 +1749,8 @@ struct AttemptAnalyzer:
                 )
             causes.append(cause^)
             for i in range(len(self._disagree_refs)):
-                refs.append(self._disagree_refs[i])
+                if len(refs) < 32:
+                    refs.append(self._disagree_refs[i])
         if len(causes) > 0:
             var f = Finding()
             f.code = String("CAPTURE_INCOMPLETE")
@@ -1740,12 +1761,24 @@ struct AttemptAnalyzer:
                     expl += "; "
                 expl += causes[i]
             expl += "."
+            # Producer reasons remain in their quality channels;
+            # their combined finding must fit the report text budget.
+            if expl.count_codepoints() > 1024:
+                var prefix = String("")
+                var count = 0
+                for cp in expl.codepoint_slices():
+                    if count >= 1021:
+                        break
+                    prefix += String(cp)
+                    count += 1
+                expl = prefix + "..."
             f.explanation = expl
             f.evidence_refs = refs^
             f.scope = window
             f.limitations = String(
-                "Counts exclude missing evidence; rerun the capture to close"
-                " the gap."
+                "Counts exclude missing evidence. Terminal completeness"
+                " requires a proven settlement protocol; repeating a"
+                " capture does not by itself establish settlement."
             )
             out.findings.append(f^)
         self._merge_limitations(out)

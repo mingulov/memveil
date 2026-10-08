@@ -24,6 +24,11 @@ BTF, opens the network, or requires privileges.
   sign on u64 spellings; out-of-range and overflowing sums
   are refused, never wrapped.
 
+`copy` records describe actual executed CPU copies and require
+`source.measurement=observed`. Estimated or derived copy records
+are refused with exit 2, including streams mixing them with observed
+copies. Other event kinds retain their supported measurement enum.
+
 ## Partial mode
 
 `report --allow-partial` recovers exactly one shape: a final

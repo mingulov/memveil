@@ -17,7 +17,7 @@ tracked intervals per proved identity; distinct identities
 are assumed disjoint by the producer. A total that would
 cover unknown intervals stays unavailable: known subsets
 report with explicit partial scope instead. Detail loss
-degrades counters and unions; baseline loss degrades the
+degrades counters and withholds current unions; baseline loss degrades the
 unions alone, since observed transitions still count.
 """
 
@@ -101,7 +101,7 @@ struct RegionTracker[REGION_N: Int = REGION_MAX, SEG_N: Int = SEGMENTS_MAX]:
         return self._saw_transition or self._seeded or len(self._notes) > 0
 
     def note_detail_loss(mut self):
-        """Degrade counters and unions: loss may hide transitions."""
+        """Withhold current unions: an unseen transition can replace state."""
         self._detail_loss = True
 
     def note_baseline_loss(mut self):
@@ -412,6 +412,15 @@ struct RegionTracker[REGION_N: Int = REGION_MAX, SEG_N: Int = SEGMENTS_MAX]:
         m.unit = String("bytes")
         m.scope = scope
         m.confidence = String("medium")
+        if self._detail_loss:
+            m.has_value = False
+            m.measurement = String("unavailable")
+            m.coverage = String("unavailable")
+            m.notes = String(
+                "Detail loss may hide a shared/private transition;"
+                " current region state is unknown, not zero."
+            )
+            return m^
         if overflow:
             m.has_value = False
             m.measurement = String("unavailable")

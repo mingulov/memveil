@@ -70,13 +70,13 @@ metrics (31):
     notes: Open mappings are censored from completed lifetimes, not leaks.
   peak_live_observed_allocation_bytes = 4096 bytes [observed, complete_for_scope, high, gauge]
     scope: window [1000000000,2500000000); observed mappings
-    notes: Maximum live mapped bytes reached; worst instantaneous exposure in this window.
+    notes: Maximum live mapped bytes reached; peak observed allocation occupancy in this window; release does not prove reprivatization or erasure.
   oldest_open_mapping_age_ns = unavailable nanoseconds [unavailable, unavailable, high]
     scope: window [1000000000,2500000000); observed mappings
     notes: No open mappings at the horizon.
   allocation_byte_microseconds = 4096000000 byte_microseconds [observed, complete_for_scope, high, counter]
     scope: window [1000000000,2500000000); observed mappings
-    notes: Time integral of live mapped bytes; exposure weighted by duration. Completed mappings use exact durations; open mappings integrate to the horizon.
+    notes: Observed allocation byte-time, not a measured sharing lifetime. Completed mappings use exact durations; open mappings integrate to the horizon.
   sync_requests = 1 count [observed, complete_for_scope, high, counter]
     scope: window [1000000000,2500000000); observed mappings
     notes: Sync requests observed; requests are not copies.

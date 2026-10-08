@@ -647,7 +647,7 @@ def _gap(channel: String, seq: UInt64) -> Event:
     return ev^
 
 
-def test_detail_gap_degrades_counts_and_unions() raises:
+def test_detail_gap_withholds_current_unions() raises:
     var t = RegionTracker()
     t.consume(
         _transition(
@@ -663,7 +663,7 @@ def test_detail_gap_degrades_counts_and_unions() raises:
     )
     assert_equal(
         _find(rows, String("known_shared_region_bytes")).coverage,
-        String("partial"),
+        String("unavailable"),
     )
 
 
@@ -751,7 +751,7 @@ def run() raises -> Int:
     suite.test[test_empty_world]()
     suite.test[test_generation_lineage_isolated]()
     suite.test[test_opaque_transition_degrades_known_unions]()
-    suite.test[test_detail_gap_degrades_counts_and_unions]()
+    suite.test[test_detail_gap_withholds_current_unions]()
     suite.test[test_baseline_gap_degrades_unions_only]()
     suite.test[test_unrelated_gap_keeps_regions_complete]()
     suite^.run()

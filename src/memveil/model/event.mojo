@@ -1223,6 +1223,10 @@ def parse_event(data: List[UInt8]) raises -> Event:
         raise ValidationError("event", "trailing data")
     var span = scan.span_bytes(data_start, data_end)
     var kind = out.kind
+    if kind == "copy" and out.source_measurement != "observed":
+        raise ValidationError(
+            "copy.source.measurement", "executed copies require observed measurement"
+        )
     _parse_data_span(kind, span, out)
     return out^
 

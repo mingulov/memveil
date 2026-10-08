@@ -197,6 +197,10 @@
       "if": {"properties": {"kind": {"const": "copy"}}},
       "then": {
         "properties": {
+          "source": {
+            "properties": {"measurement": {"const": "observed"}},
+            "description": "Executed copies require observed measurement; estimates and derivations are not copy records."
+          },
           "data": {
             "type": "object",
             "required": ["operation_id", "mapping_id", "direction", "bytes"],

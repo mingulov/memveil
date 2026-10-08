@@ -293,9 +293,9 @@ def exit_for_report(rep: Report) -> Int:
     than an evidence gap) is usable but materially incomplete.
     Aggregate-only gaps leave the detail counts standing, so they
     keep the sufficient-evidence exit. Correlation and baseline
-    quality render for audit but never gate the exit directly:
-    unpaired lifecycle evidence gates through its warning finding
-    instead.
+    quality render for audit; materially incomplete lifecycle
+    correlation gates through its evidence-linked warning finding.
+    Optional unrequested correlation remains harmless.
     """
     if rep.q_terminal.status != "complete_for_scope":
         return EXIT_INCOMPLETE

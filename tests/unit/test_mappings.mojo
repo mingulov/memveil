@@ -123,6 +123,20 @@ def _global(metrics: List[Metric], name: String) raises -> Metric:
     return _find(metrics, name, "")
 
 
+def test_non_observed_copy_rejected() raises:
+    for measurement in [String("estimated"), String("derived")]:
+        var t = MappingTracker()
+        t.consume(_attempt("op1", "dev1", UInt64(1)))
+        var ev = _copy("op1", "", "original_to_bounce", UInt64(99), UInt64(2))
+        ev.source_measurement = measurement
+        var refused = False
+        try:
+            t.consume(ev)
+        except:
+            refused = True
+        assert_true(refused)
+
+
 def test_lifecycle_nested() raises:
     var t = MappingTracker()
     t.consume(_attempt("op1", "d1", UInt64(1)))
@@ -610,6 +624,7 @@ def test_snapshot_replay_equivalence() raises:
 
 def run() raises -> Int:
     var suite = TestSuite()
+    suite.test[test_non_observed_copy_rejected]()
     suite.test[test_lifecycle_nested]()
     suite.test[test_copy_before_failure]()
     suite.test[test_request_is_not_copy]()

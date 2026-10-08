@@ -45,7 +45,9 @@ def _session() -> Session:
     s.q_aggregate.loss_count = UInt64(0)
     s.q_aggregate.scope = String("sc")
     s.q_aggregate.reason = String("rs")
-    s.q_correlation.status = String("not_applicable")
+    s.q_correlation.status = String("complete_for_scope")
+    s.q_correlation.has_loss_count = True
+    s.q_correlation.loss_count = UInt64(0)
     s.q_correlation.scope = String("sc")
     s.q_correlation.reason = String("rs")
     s.q_baseline.status = String("not_applicable")
@@ -347,7 +349,8 @@ def test_partial_tail_downgrades_stateful_metrics() raises:
     # A partial tail may hide a release, so the live mapping gauge
     # is withheld (null/unavailable), not a degraded number: unknown
     # is not zero. Cumulative counters keep values with partial
-    # coverage, as do the point-in-time pool/region gauges.
+    # coverage. Latest observed pool samples keep their values;
+    # region current state is withheld because a transition may be missing.
     var live = _find(rep.metrics, "live_observed_allocation_bytes")
     assert_true(not live.has_value)
     assert_equal(live.coverage, String("unavailable"))
@@ -365,7 +368,7 @@ def test_partial_tail_downgrades_stateful_metrics() raises:
     )
     assert_equal(
         _find(rep.metrics, "known_shared_region_bytes").coverage,
-        String("partial"),
+        String("unavailable"),
     )
 
 
@@ -386,7 +389,7 @@ def test_detail_gap_downgrades_pool_and_region() raises:
     )
     assert_equal(
         _find(rep.metrics, "known_shared_region_bytes").coverage,
-        String("partial"),
+        String("unavailable"),
     )
 
 
@@ -404,6 +407,20 @@ def test_baseline_gap_downgrades_region_unions_only() raises:
         _find(rep.metrics, "conversion_requests").coverage,
         String("complete_for_scope"),
     )
+
+
+def test_post_gap_pool_run_survives_snapshots() raises:
+    var a = Analyzer(_session())
+    a.consume(_pool("p1", UInt64(900), UInt64(1000), UInt64(1)))
+    a.consume(_pool("p1", UInt64(900), UInt64(1000), UInt64(2)))
+    a.consume(_gap("detail", UInt64(3)))
+    a.consume(_pool("p1", UInt64(900), UInt64(1000), UInt64(4)))
+    var before = a.snapshot(UInt64(2300000000), False)
+    assert_equal(_find_pool(before.metrics, "pool_pressure_samples", "p1").value, UInt64(1))
+    a.consume(_pool("p1", UInt64(900), UInt64(1000), UInt64(5)))
+    a.consume(_pool("p1", UInt64(900), UInt64(1000), UInt64(6)))
+    var after = a.finish(UInt64(2300000000), False)
+    assert_equal(_find_pool(after.metrics, "pool_pressure_samples", "p1").value, UInt64(3))
 
 
 def test_sustained_churn_stable() raises:
@@ -515,6 +532,7 @@ def run() raises -> Int:
     suite.test[test_partial_tail_downgrades_stateful_metrics]()
     suite.test[test_detail_gap_downgrades_pool_and_region]()
     suite.test[test_baseline_gap_downgrades_region_unions_only]()
+    suite.test[test_post_gap_pool_run_survives_snapshots]()
     suite.test[test_sustained_churn_stable]()
     suite.test[test_limitations_capped_at_schema_budget]()
     suite.test[test_truncate_note]()
