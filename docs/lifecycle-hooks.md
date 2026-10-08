@@ -8,8 +8,12 @@ recorded in its narrow bindings; anything else refuses.
 
 ## Attach points
 
-All five live in the shipped BPF objects next to the attempt probe.
-The tracing attaches resolve by function name through the bridge.
+All five are laboratory sources with a frozen contract: they compile
+to `build/bpf/swiotlb_lifecycle.bpf.o` and `swiotlb_copy.bpf.o`,
+while only the attempt object ships. The tracing attaches resolve
+by function name through the bridge. Collector integration and
+multi-channel packaging, lifecycle/copy profile capabilities, and
+live VM qualification remain pending work.
 
 | Probe program | Attach | Kernel function |
 | --- | --- | --- |
@@ -25,7 +29,11 @@ stays the only attempt source.
 ## Signatures
 
 Argument lists are the kernel function signatures as the probes
-read them; the probes never read device names or addresses.
+read them. Map, unmap, and sync probes ignore address arguments;
+only `mv_bounce` reads address metadata (pool slot fields and
+`tlb_addr`) internally to replicate the copied length. No addresses
+or device names are emitted: MVLC/MVCP records carry sizes,
+directions, flags, and reasons only.
 
 - `swiotlb_tbl_map_single(dev, orig_addr, mapping_size,
   alloc_align_mask, dir, attrs)` returns the bounce address or the
@@ -78,7 +86,9 @@ the request fact (size, direction) is still emitted.
 ## Explicitly unsupported
 
 - Scatter-gather segments: only the single-mapping hooks above
-  are probed; no `*_sg` path is observed.
+  are probed. Whether SG paths call these inner helpers is
+  unconfirmed on the admitted kernel, so SG attribution and
+  segment reconstruction stay unavailable.
 - Coherent, direct, and non-swiotlb DMA paths: unobserved and
   unclaimed.
 - Map/unmap pairing, lifetimes, and per-mapping bytes: no v1

@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Lifecycle/copy wire decode and the v1 shipping ledger.
+"""Lifecycle/copy wire decode and the v1 laboratory ledger.
 
 Decodes the 36-byte MVLC and 48-byte MVCP records produced by the
 swiotlb lifecycle and copy probes. Byte layout, check order, and
 reason vocabulary mirror bpf/include/memveil_events.h; any
 intentional contract change must update the header, the corpus, and
-both decoders together.
+both decoders together. Decode and ledger only: collector attach,
+multi-channel packaging, profile admission, and live qualification
+are separate pending work.
 
 The v1 wire carries no device or mapping identity, so the ledger
 counts per-event facts only: map outcomes, unmaps, sync requests,
@@ -16,7 +18,7 @@ as explicitly unavailable with a reason.
 """
 
 from memveil.capture.normalize import DecodeError
-from memveil.model.validate import format_u64
+from memveil.model.validate import checked_add, format_u64
 
 comptime LC_LEN = 36
 comptime CP_LEN = 48
@@ -215,16 +217,16 @@ def effective_bytes(
     """
     if not orig_valid:
         return EffectiveOut(UInt64(0), False, True)
-    var room = UInt64(0)
+    var room: UInt64
     if tlb_offset < Int64(0):
-        if tlb_offset == Int64(-9223372036854775808):
+        # Same formula as mv_effective_bytes, including INT64_MIN:
+        # tlb_offset + 1 cannot overflow, so its negation fits and
+        # the +1 widening lands exactly at 2**63; no special case.
+        var widen = UInt64(-(tlb_offset + 1)) + UInt64(1)
+        if widen > ~UInt64(0) - alloc_size:
             room = ~UInt64(0)
         else:
-            var widen = UInt64(-(tlb_offset + 1)) + UInt64(1)
-            if widen > ~UInt64(0) - alloc_size:
-                room = ~UInt64(0)
-            else:
-                room = alloc_size + widen
+            room = alloc_size + widen
     elif UInt64(tlb_offset) >= alloc_size:
         room = UInt64(0)
     else:
@@ -241,7 +243,9 @@ struct LifecycleLedger:
     unmap never claims to close a specific map. The open
     estimate is maps minus unmaps saturated at zero, and
     lifetimes stay explicitly unavailable until a wire with
-    mapping identity exists.
+    mapping identity exists. Totals use checked u64
+    arithmetic: a note that would overflow raises and changes
+    nothing.
     """
 
     var maps_ok: UInt64
@@ -267,41 +271,54 @@ struct LifecycleLedger:
         self.copies_known_effective_bytes = UInt64(0)
         self.copies_unknown = UInt64(0)
 
-    def note_lifecycle(mut self, d: DecodedLifecycle) -> String:
+    def note_lifecycle(mut self, d: DecodedLifecycle) raises -> String:
         """Count one lifecycle record; mint a generation per map.
 
         Returns the new opaque generation id for a successful
         map, or the empty string for failed maps and unmaps
-        (which never pair and never mint).
+        (which never pair and never mint). Raises without
+        changing the ledger if any total would exceed u64.
         """
         if d.kind == UInt16(_LC_KIND_MAP):
             if d.ok:
-                self.maps_ok += UInt64(1)
-                self.maps_ok_bytes += d.size
+                var count = checked_add(self.maps_ok, UInt64(1))
+                var total = checked_add(self.maps_ok_bytes, d.size)
+                self.maps_ok = count
+                self.maps_ok_bytes = total
                 return String("lc-") + format_u64(d.seq)
-            self.maps_failed += UInt64(1)
+            self.maps_failed = checked_add(self.maps_failed, UInt64(1))
             return String("")
-        self.unmaps += UInt64(1)
-        self.unmaps_bytes += d.size
+        var ucount = checked_add(self.unmaps, UInt64(1))
+        var utotal = checked_add(self.unmaps_bytes, d.size)
+        var scount = self.unmaps_skip_sync
         if d.skip_sync:
-            self.unmaps_skip_sync += UInt64(1)
+            scount = checked_add(self.unmaps_skip_sync, UInt64(1))
+        self.unmaps = ucount
+        self.unmaps_bytes = utotal
+        self.unmaps_skip_sync = scount
         return String("")
 
-    def note_copy(mut self, d: DecodedCopy):
+    def note_copy(mut self, d: DecodedCopy) raises:
         """Count one copy record; sum effective bytes when KNOWN.
 
         Sync requests and unknown copies never contribute
         executed bytes; unknown copies count separately so a
         quiet effective total cannot hide missing evidence.
+        Raises without changing the ledger if any total would
+        exceed u64.
         """
         if d.kind == UInt16(_CP_KIND_SYNC):
-            self.sync_requests += UInt64(1)
+            self.sync_requests = checked_add(self.sync_requests, UInt64(1))
             return
         if d.known:
-            self.copies_known += UInt64(1)
-            self.copies_known_effective_bytes += d.effective
+            var count = checked_add(self.copies_known, UInt64(1))
+            var total = checked_add(
+                self.copies_known_effective_bytes, d.effective
+            )
+            self.copies_known = count
+            self.copies_known_effective_bytes = total
         else:
-            self.copies_unknown += UInt64(1)
+            self.copies_unknown = checked_add(self.copies_unknown, UInt64(1))
 
     def open_estimate(self) -> UInt64:
         """Maps minus unmaps, saturated: never a pairing claim."""
