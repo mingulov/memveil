@@ -1781,6 +1781,10 @@ def partial_record_definitive(data: List[UInt8], session_id: String) -> Bool:
                 try:
                     var scan = Scanner(span)
                     _parse_source(scan, dummy)
+                    if has_kind and kind == "copy" and (
+                        dummy.source_measurement != "observed"
+                    ):
+                        return True
                 except:
                     return True
                 continue
@@ -1810,6 +1814,25 @@ def partial_record_definitive(data: List[UInt8], session_id: String) -> Bool:
         var sv = tail_scan_members(data, sp, 1, MAX_DEPTH_DEFAULT, sub)
         if sv == TAIL_INVALID:
             return True
+        # Even an unfinished source object can contain a complete
+        # measurement token that proves this copy invalid. Kind
+        # was collected in the first pass, regardless of key order.
+        if key == "source" and has_kind and kind == "copy":
+            for member in sub:
+                if member.val_verdict != TAIL_COMPLETE:
+                    continue
+                try:
+                    var source_key = _decode_span(
+                        _span_bytes(data, member.key_start, member.key_end)
+                    )
+                    if source_key == "measurement":
+                        var measurement = _decode_span(
+                            _span_bytes(data, member.val_start, member.val_end)
+                        )
+                        if measurement != "observed":
+                            return True
+                except:
+                    return True
         var child = String("")
         var child_kind = String("")
         if key == "source":

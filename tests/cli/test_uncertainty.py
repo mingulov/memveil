@@ -203,6 +203,92 @@ class Uncertainty(unittest.TestCase):
         for finding in r['findings']:
             self.assertLessEqual(len(finding['explanation']), 1024)
 
+    def test_partial_copy_measurement_constraint(self):
+        for strength in ('estimated', 'derived', 'observed'):
+            for source_first in (False, True):
+                with self.subTest(strength=strength, source_first=source_first):
+                    self.load('lifecycle/lifecycle-nested')
+                    record = self.events[1]
+                    record['source']['measurement'] = strength
+                    keys = ['schema_version', 'session_id', 'seq', 'ts_ns']
+                    keys += ['source', 'kind'] if source_first else ['kind', 'source']
+                    prefix = json.dumps({key: record[key] for key in keys})[:-1] + ','
+                    self.events = self.events[:1]
+                    self.write()
+                    with (self.cap / 'events.ndjson').open('a') as stream:
+                        stream.write(prefix)
+                    for partial in (False, True):
+                        cmd = [str(ROOT / 'build/memveil'), 'report', '--format', 'json']
+                        if partial:
+                            cmd.append('--allow-partial')
+                        cmd.append(str(self.cap))
+                        proc = subprocess.run(cmd, capture_output=True, text=True)
+                        want = 4 if partial and strength == 'observed' else 2
+                        self.assertEqual(proc.returncode, want, proc.stderr)
+                        if want == 2:
+                            self.assertEqual(proc.stdout, '')
+                        else:
+                            self.incomplete(json.loads(proc.stdout))
+
+    def test_partial_copy_incomplete_source_constraint(self):
+        for strength in ('estimated', 'derived', 'observed'):
+            with self.subTest(strength=strength):
+                self.load('lifecycle/lifecycle-nested')
+                record = self.events[1]
+                prefix = json.dumps({key: record[key] for key in
+                                    ('schema_version', 'session_id', 'seq', 'ts_ns', 'kind')})[:-1]
+                prefix += ', "source": {"measurement": ' + json.dumps(strength) + ','
+                self.events = self.events[:1]
+                self.write()
+                with (self.cap / 'events.ndjson').open('a') as stream:
+                    stream.write(prefix)
+                proc = subprocess.run([str(ROOT / 'build/memveil'), 'report', '--format', 'json',
+                                       '--allow-partial', str(self.cap)], capture_output=True, text=True)
+                want = 4 if strength == 'observed' else 2
+                self.assertEqual(proc.returncode, want, proc.stderr)
+                if want == 2:
+                    self.assertEqual(proc.stdout, '')
+                else:
+                    self.incomplete(json.loads(proc.stdout))
+
+    def test_partial_non_copy_estimates_remain_recoverable(self):
+        for strength in ('estimated', 'derived'):
+            with self.subTest(strength=strength):
+                self.load('attempts')
+                record = self.events[0]
+                record['source']['measurement'] = strength
+                prefix = json.dumps({key: record[key] for key in
+                                    ('schema_version', 'session_id', 'seq', 'ts_ns', 'kind', 'source')})[:-1] + ','
+                self.events = []
+                self.write()
+                (self.cap / 'events.ndjson').write_text(prefix)
+                proc = subprocess.run([str(ROOT / 'build/memveil'), 'report', '--format', 'json',
+                                       '--allow-partial', str(self.cap)], capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 4, proc.stderr)
+                self.incomplete(json.loads(proc.stdout))
+
+    def test_partial_unknown_copy_constraint_is_inconclusive(self):
+        self.load('lifecycle/lifecycle-nested')
+        record = self.events[1]
+        record['source']['measurement'] = 'estimated'
+        base = json.dumps({key: record[key] for key in
+                           ('schema_version', 'session_id', 'seq', 'ts_ns')})[:-1]
+        prefixes = [
+            base + ', "source": ' + json.dumps(record['source']) + ', "kind": "cop',
+            base + ', "kind": "copy", "source": {"measurement": "estim',
+            base + ', "source": ' + json.dumps(record['source']) + ',',
+        ]
+        self.events = self.events[:1]
+        for prefix in prefixes:
+            with self.subTest(prefix=prefix):
+                self.write()
+                with (self.cap / 'events.ndjson').open('a') as stream:
+                    stream.write(prefix)
+                proc = subprocess.run([str(ROOT / 'build/memveil'), 'report', '--format', 'json',
+                                       '--allow-partial', str(self.cap)], capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 4, proc.stderr)
+                self.incomplete(json.loads(proc.stdout))
+
     def test_real_example_terminal(self):
         path = ROOT / 'examples/real-capture'
         self.session = json.loads((path / 'session.json').read_text())
