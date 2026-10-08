@@ -155,7 +155,7 @@ def validate_attempt_exports(got, mode=None):
                 'pipe_bytes','pipe_lines','lost_markers'))
     if ledger['mode'] not in ('correctness','saturation') or mode is not None and ledger['mode'] != mode:
         raise ValueError('invalid attempt lane identity')
-    if type(ledger['fs_type']) is not str or ledger['fs_type'] not in ('ext4','btrfs','tmpfs','overlayfs','xfs','ramfs','tracefs'):
+    if type(ledger['fs_type']) is not str or ledger['fs_type'] not in ('ext2/ext3','ext4','btrfs','tmpfs','overlayfs','xfs','ramfs','tracefs'):
         raise ValueError('invalid filesystem identity')
     for k in ('hiwater_before','hiwater_after'):
         value=ledger[k]
