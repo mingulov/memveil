@@ -126,7 +126,18 @@ def main():
     # Git-free proof: build and package inside a fresh export.
     # tools/package runs tools/build first; LMB_PACKAGE points
     # at the export's own vendored tarball, never the checkout.
-    with tempfile.TemporaryDirectory(prefix="mv-export-c-") as third:
+    with tempfile.TemporaryDirectory(prefix="mv-export-c-") as parent:
+        # An ignored source export must not inherit even a clean parent's
+        # identity, nor refuse packaging because the parent later becomes dirty.
+        subprocess.run(["git", "-C", parent, "init", "-q"], check=True)
+        with open(os.path.join(parent, ".gitignore"), "w") as handle:
+            handle.write("export/\n")
+        subprocess.run(["git", "-C", parent, "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", parent, "-c", "user.name=Test", "-c",
+                        "user.email=test@example.invalid", "commit", "-qm",
+                        "unrelated"], check=True)
+        third = os.path.join(parent, "export")
+        os.mkdir(third)
         export_head(third)
         vendored = os.path.join(
             third, "third_party", "libbpf-mojo-0.1.0.tar.gz")
@@ -159,6 +170,11 @@ def main():
             third, "dist", bundles[0], "MANIFEST.json")))
         check("export-revision", manifest.get("memveil_revision")
               == "export", repr(manifest.get("memveil_revision")))
+        for rel, want in manifest["files"].items():
+            full = os.path.join(third, "dist", bundles[0], rel)
+            with open(full, "rb") as handle:
+                check("export-hash-%s" % rel,
+                      hashlib.sha256(handle.read()).hexdigest() == want)
         for name in ("troubleshooting.md", "performance.md",
                      "resource-limits.md", "permissions.md",
                      "oracles.md"):
@@ -166,6 +182,19 @@ def main():
                                 "docs", name)
             check("export-docs-%s" % name, os.path.isfile(dest),
                   dest)
+        with open(os.path.join(parent, "unrelated-dirty.txt"), "w") as handle:
+            handle.write("dirty parent\n")
+        repeated = subprocess.run(
+            [os.path.join(third, "tools", "package"),
+             "--out", os.path.join(third, "dist")],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, cwd=third, env=env, timeout=1500)
+        check("export-dirty-parent-package", repeated.returncode == 0,
+              repeated.stderr[-3000:])
+        with open(os.path.join(third, "dist", bundles[0], "MANIFEST.json")) as handle:
+            repeated_manifest = _json.load(handle)
+        check("export-dirty-parent-revision",
+              repeated_manifest.get("memveil_revision") == "export")
 
     status = subprocess.run(["git", "-C", ROOT, "status", "--short"],
                             stdout=subprocess.PIPE,
