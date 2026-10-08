@@ -1,0 +1,46 @@
+{
+  "derivation": "Module-script rules from tests/kernel/memveil_dma_oracle.c 0.3.1 (4 ops, sizes 512/1024/2048/4096, even TO / odd FROM, op1 double sync, fail op 2 in f, inner retry map+unmap without sync, phase-distinct witness seeds with pattern self-test) crossed with receipted probe semantics (map-time bounce runs to-device per scripted rule, every normal unmap emits one sync_cpu record, fail cleanup unmap emits none). Frozen before the first 0.3.1 witness boot; no value read from probe or product output.",
+  "frozen_for_module": "0.3.1",
+  "w": {
+    "inner_probe": false,
+    "ops": 4,
+    "per_op": {
+      "0": {"inner": null, "requested": 512, "success": true, "syncs": [[1, 512]], "witness": [["map", 512, 512], ["sync", 512, 512]]},
+      "1": {"inner": null, "requested": 1024, "success": true, "syncs": [[2, 1024], [2, 1024]], "witness": [["map", 1024, 1024], ["release", 1024, 1024]]},
+      "2": {"inner": null, "requested": 2048, "success": true, "syncs": [[1, 2048]], "witness": [["map", 2048, 2048], ["sync", 2048, 2048]]},
+      "3": {"inner": null, "requested": 4096, "success": true, "syncs": [[2, 4096]], "witness": [["map", 4096, 4096], ["release", 4096, 4096]]}
+    },
+    "probes": {
+      "bounces": [[0, 1024, 2], [0, 4096, 2], [1, 512, 1], [1, 512, 1], [1, 1024, 1], [1, 2048, 1], [1, 2048, 1], [1, 4096, 1]],
+      "maps": [[512, 1, 1], [1024, 2, 1], [2048, 1, 1], [4096, 2, 1]],
+      "syncs_cpu": [[512, 1], [1024, 2], [2048, 1], [4096, 2]],
+      "syncs_dev": [[512, 1], [1024, 2], [1024, 2], [2048, 1], [4096, 2]],
+      "unmaps": [[512, 1, 1], [1024, 2, 1], [2048, 1, 1], [4096, 2, 1]]
+    },
+    "unwitnessed_gap": 0,
+    "witness": true,
+    "witnessed": {"bounce_to_original": 5120, "original_to_bounce": 10240},
+    "witnessed_total": 15360
+  },
+  "f": {
+    "inner_probe": true,
+    "ops": 4,
+    "per_op": {
+      "0": {"inner": null, "requested": 512, "success": true, "syncs": [[1, 512]], "witness": [["map", 512, 512], ["sync", 512, 512]]},
+      "1": {"inner": null, "requested": 1024, "success": true, "syncs": [[2, 1024], [2, 1024]], "witness": [["map", 1024, 1024], ["release", 1024, 1024]]},
+      "2": {"inner": {"health": "healthy", "retry": "success"}, "requested": 2048, "success": false, "syncs": [], "witness": [["inner-map", 2048, 2048]]},
+      "3": {"inner": null, "requested": 4096, "success": true, "syncs": [[2, 4096]], "witness": [["map", 4096, 4096], ["release", 4096, 4096]]}
+    },
+    "probes": {
+      "bounces": [[0, 1024, 2], [0, 4096, 2], [1, 512, 1], [1, 512, 1], [1, 1024, 1], [1, 2048, 1], [1, 2048, 1], [1, 4096, 1]],
+      "maps": [[512, 1, 1], [1024, 2, 1], [2048, 1, 1], [2048, 1, 1], [4096, 2, 1]],
+      "syncs_cpu": [[512, 1], [1024, 2], [2048, 1], [4096, 2]],
+      "syncs_dev": [[512, 1], [1024, 2], [1024, 2], [4096, 2]],
+      "unmaps": [[512, 1, 1], [1024, 2, 1], [2048, 1, 1], [2048, 1, 1], [4096, 2, 1]]
+    },
+    "unwitnessed_gap": 2048,
+    "witness": true,
+    "witnessed": {"bounce_to_original": 5120, "original_to_bounce": 8192},
+    "witnessed_total": 13312
+  }
+}
