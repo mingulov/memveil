@@ -18,6 +18,10 @@ grammar bindings computed from the CURRENT fixture bytes:
   unbound.json reference-unvalidated, free-text note.
   sat.json     reference-unvalidated, object+badring ring
                (saturation mechanism stand-in).
+  valid-lc.json validated, 12-field note binding elf/lc-ok.o
+               and elf/cp-ok.o with both caps supported.
+  lc-skew.json validated, 12-field note with a skewed
+               lc_object binding (extended mismatch).
 Manifest lists valid.json only; tests address the rest by
 path. All hashes are recomputed here, so editing any input
 fixture regenerates consistent bindings.
@@ -33,6 +37,8 @@ NARROW = ROOT / "tests/fixtures/narrow/ok"
 LAYOUT = ROOT / "tests/fixtures/layout/ok.format"
 ELF_OK = ROOT / "tests/fixtures/elf/ok.o"
 ELF_BADRING = ROOT / "tests/fixtures/elf/badring.o"
+ELF_LC_OK = ROOT / "tests/fixtures/elf/lc-ok.o"
+ELF_CP_OK = ROOT / "tests/fixtures/elf/cp-ok.o"
 SCAN = ROOT / "tests/fixtures/scan"
 REL = "7.0.0-test"
 FMT_PATH = "/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format"
@@ -90,6 +96,8 @@ def profile_doc(
     attempt: str,
     format_text: str | None = None,
     hooks: list | None = None,
+    lifecycle: str = "unsupported",
+    copycap: str = "unsupported",
 ) -> dict:
     if hooks is None:
         if format_text is None:
@@ -107,13 +115,13 @@ def profile_doc(
     caps = [
         {
             "id": "mapping-lifecycle",
-            "status": "unsupported",
+            "status": lifecycle,
             "hooks": [],
             "reason": "Scan fixture.",
         },
         {
             "id": "copy-actual",
-            "status": "unsupported",
+            "status": copycap,
             "hooks": [],
             "reason": "Scan fixture.",
         },
@@ -144,7 +152,7 @@ def profile_doc(
     }
 
 
-def note_for(bind: dict) -> str:
+def note_for(bind: dict, extra: dict | None = None) -> str:
     parts = [
         f"config=sha256:{bind['config']}",
         f"config_src={bind['config_src']}",
@@ -155,8 +163,15 @@ def note_for(bind: dict) -> str:
         f"image_bid={bind['image_bid']}",
         f"ring_bytes={bind['ring']}",
     ]
+    if extra is not None:
+        parts += [
+            f"lc_object=sha256:{extra['lc_object']}",
+            f"lc_ring_bytes={extra['lc_ring']}",
+            f"cp_object=sha256:{extra['cp_object']}",
+            f"cp_ring_bytes={extra['cp_ring']}",
+        ]
     note = " ".join(parts)
-    assert len(note) <= 512, "note exceeds 512"
+    assert len(note) <= 1024, "note exceeds 1024"
     return note
 
 
@@ -184,7 +199,7 @@ def parse_bid(notes_path: Path) -> str:
 
 
 def main() -> int:
-    for need in [NARROW, LAYOUT, ELF_OK, ELF_BADRING]:
+    for need in [NARROW, LAYOUT, ELF_OK, ELF_BADRING, ELF_LC_OK, ELF_CP_OK]:
         if not need.exists():
             print(f"missing {need}", file=sys.stderr)
             return 1
@@ -284,6 +299,42 @@ def main() -> int:
                         "note": "Scan-fixture hook.",
                     }
                 ],
+            ),
+            indent=2,
+        )
+        + "\n"
+    )
+    extra = {
+        "lc_object": sha(ELF_LC_OK),
+        "lc_ring": "8388608",
+        "cp_object": sha(ELF_CP_OK),
+        "cp_ring": "8388608",
+    }
+    (prof / "valid-lc.json").write_text(
+        json.dumps(
+            profile_doc(
+                "scan-valid-lc",
+                "validated",
+                note_for(bind, extra),
+                "supported",
+                lifecycle="supported",
+                copycap="supported",
+            ),
+            indent=2,
+        )
+        + "\n"
+    )
+    skewed = dict(extra)
+    skewed["lc_object"] = sha(ELF_CP_OK)
+    (prof / "lc-skew.json").write_text(
+        json.dumps(
+            profile_doc(
+                "scan-lc-skew",
+                "validated",
+                note_for(bind, skewed),
+                "supported",
+                lifecycle="supported",
+                copycap="supported",
             ),
             indent=2,
         )

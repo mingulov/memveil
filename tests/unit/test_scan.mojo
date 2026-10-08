@@ -7,6 +7,7 @@ from std.testing import TestSuite, assert_equal, assert_true
 
 from memveil.cli.record import (
     RecordOptions,
+    ScanDecision,
     decide_record,
     render_provenance,
     run_record_with,
@@ -27,6 +28,9 @@ comptime _DIFFCONFIG = "tests/fixtures/scan/diffconfig"
 comptime _PROFILES = "tests/fixtures/scan/profiles"
 comptime _ELF_OK = "tests/fixtures/elf/ok.o"
 comptime _ELF_RING = "tests/fixtures/elf/badring.o"
+comptime _ELF_LC = "tests/fixtures/elf/lc-ok.o"
+comptime _ELF_CP = "tests/fixtures/elf/cp-ok.o"
+comptime _ELF_LC_BAD = "tests/fixtures/elf/lc-wrongsec.o"
 
 
 def _kernel() -> KernelInfo:
@@ -61,6 +65,9 @@ def test_scan_validated_wins() raises:
     var d = decide_record(
         String(_OK), _kernel(), _profiles(), String(""), False,
         String(_ELF_OK),
+        String(""),
+        String(""),
+        String(""),
     )
     assert_true(d.ok)
     assert_equal(d.kind, String("validated"))
@@ -77,6 +84,9 @@ def test_scan_bound_measurements() raises:
     var d = decide_record(
         String(_OK), _kernel(), _profiles(), String(""), False,
         String(_ELF_OK),
+        String(""),
+        String(""),
+        String(""),
     )
     assert_true(d.ok)
     assert_equal(d.measured_config.state, String("value"))
@@ -103,6 +113,9 @@ def test_scan_partial_unmeasured() raises:
         String(""),
         False,
         String(_ELF_OK),
+        String(""),
+        String(""),
+        String(""),
     )
     assert_true(d.ok)
     assert_equal(d.measured_config.state, String(""))
@@ -184,7 +197,10 @@ def test_scan_skips_mismatched() raises:
     ps.append(_doc(String("badbind.json")))
     ps.append(_doc(String("valid.json")))
     var d = decide_record(
-        String(_OK), _kernel(), ps^, String(""), False, String(_ELF_OK)
+        String(_OK), _kernel(), ps^, String(""), False, String(_ELF_OK),
+        String(""),
+        String(""),
+        String(""),
     )
     assert_true(d.ok)
     assert_equal(d.kind, String("validated"))
@@ -199,6 +215,9 @@ def test_scan_uncheckable_partial() raises:
         String(""),
         False,
         String(_ELF_OK),
+        String(""),
+        String(""),
+        String(""),
     )
     assert_true(d.ok)
     assert_equal(d.kind, String("partial"))
@@ -216,6 +235,9 @@ def test_scan_diffconfig_partial() raises:
         String(""),
         False,
         String(_ELF_OK),
+        String(""),
+        String(""),
+        String(""),
     )
     assert_true(d.ok)
     assert_equal(d.kind, String("partial"))
@@ -229,6 +251,9 @@ def test_scan_skew_partial() raises:
         String(""),
         False,
         String(_ELF_OK),
+        String(""),
+        String(""),
+        String(""),
     )
     assert_true(d.ok)
     assert_equal(d.kind, String("partial"))
@@ -242,6 +267,9 @@ def test_scan_explicit_candidate() raises:
         String(_PROFILES) + String("/ref.json"),
         True,
         String(_ELF_OK),
+        String(""),
+        String(""),
+        String(""),
     )
     assert_true(d.ok)
     assert_equal(d.kind, String("candidate"))
@@ -282,6 +310,9 @@ def test_scan_saturation_mechanism() raises:
         String(_PROFILES) + String("/sat.json"),
         True,
         String(_ELF_RING),
+        String(""),
+        String(""),
+        String(""),
     )
     assert_true(adm.ok)
     assert_equal(adm.kind, String("candidate"))
@@ -293,6 +324,9 @@ def test_scan_saturation_mechanism() raises:
         String(_PROFILES) + String("/valid.json"),
         True,
         String(_ELF_RING),
+        String(""),
+        String(""),
+        String(""),
     )
     assert_true(not rej.ok)
     assert_equal(rej.refusal, String("binding failed: mismatch object"))
@@ -306,6 +340,9 @@ def test_scan_no_coverage() raises:
         String(""),
         False,
         String(_ELF_OK),
+        String(""),
+        String(""),
+        String(""),
     )
     assert_true(not d.ok)
     assert_equal(d.refusal, String("no profile covers this kernel"))
@@ -319,6 +356,9 @@ def test_scan_explicit_unbound_reference() raises:
         String(_PROFILES) + String("/unbound.json"),
         True,
         String(_ELF_OK),
+        String(""),
+        String(""),
+        String(""),
     )
     assert_true(d.ok)
     assert_equal(d.kind, String("partial"))
@@ -335,6 +375,9 @@ def test_scan_explicit_validated_unbound() raises:
         String(_PROFILES) + String("/valid-unbound.json"),
         True,
         String(_ELF_OK),
+        String(""),
+        String(""),
+        String(""),
     )
     assert_true(d.ok)
     assert_equal(d.kind, String("partial"))
@@ -352,6 +395,9 @@ def test_scan_explicit_nohook() raises:
         String(_PROFILES) + String("/nohook.json"),
         True,
         String(_ELF_OK),
+        String(""),
+        String(""),
+        String(""),
     )
     assert_true(not d.ok)
     assert_equal(d.refusal, String("no tracepoint hook"))
@@ -365,6 +411,9 @@ def test_scan_explicit_notext() raises:
         String(_PROFILES) + String("/notext.json"),
         True,
         String(_ELF_OK),
+        String(""),
+        String(""),
+        String(""),
     )
     assert_true(not d.ok)
     assert_equal(
@@ -372,8 +421,191 @@ def test_scan_explicit_notext() raises:
     )
 
 
+comptime _CAPS3 = "attempt-trace,mapping-lifecycle,copy-actual"
+comptime _LC_SHA = "b705ba5013c3f8b1add8f4228575fd0606d566a26864dc1162d99d055e2e5ed4"
+comptime _CP_SHA = "b7853c92a677a74ac18facffac1728f71322f056f3b1a4c5c99794d52a3b1bf3"
+
+
+def _decide_lc(
+    root: String,
+    explicit: String,
+    has_explicit: Bool,
+    object_path: String,
+    lc_object: String,
+    cp_object: String,
+    caps: String,
+) raises -> ScanDecision:
+    var profiles = List[Profile]()
+    if not has_explicit:
+        profiles = _profiles()
+    return decide_record(
+        root,
+        _kernel(),
+        profiles^,
+        explicit,
+        has_explicit,
+        object_path,
+        lc_object,
+        cp_object,
+        caps,
+    )
+
+
+def test_scan_valid_lc_record() raises:
+    """Requested lifecycle/copy caps select both extra channels."""
+    var d = _decide_lc(
+        String(_OK),
+        String(_PROFILES) + String("/valid-lc.json"),
+        True,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(_ELF_CP),
+        String(_CAPS3),
+    )
+    assert_true(d.ok)
+    assert_equal(d.kind, String("validated"))
+    assert_equal(d.selected_caps, String(_CAPS3))
+    assert_true(d.has_lifecycle)
+    assert_true(d.has_copy)
+    assert_equal(d.lc_object_sha, String(_LC_SHA))
+    assert_equal(d.cp_object_sha, String(_CP_SHA))
+    assert_equal(d.lc_ring_bytes, 8388608)
+    assert_equal(d.cp_ring_bytes, 8388608)
+    assert_true(len(d.lc_elf) > 0)
+    assert_true(len(d.cp_elf) > 0)
+
+
+def test_scan_valid_lc_no_tracing() raises:
+    """A no-fentry lifecycle object cannot satisfy the request."""
+    var d = _decide_lc(
+        String(_OK),
+        String(_PROFILES) + String("/valid-lc.json"),
+        True,
+        String(_ELF_OK),
+        String(_ELF_LC_BAD),
+        String(_ELF_CP),
+        String(_CAPS3),
+    )
+    assert_true(not d.ok)
+    assert_equal(
+        d.refusal, String("lc object refused: no fentry section")
+    )
+
+
+def test_scan_skew_lc_refuses() raises:
+    """A skewed lc_object binding refuses the requested channel."""
+    var d = _decide_lc(
+        String(_OK),
+        String(_PROFILES) + String("/lc-skew.json"),
+        True,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(_ELF_CP),
+        String(_CAPS3),
+    )
+    assert_true(not d.ok)
+    assert_equal(
+        d.refusal, String("binding failed: mismatch lc_object")
+    )
+
+
+def test_scan_lc_unsupported_refuses() raises:
+    """Requesting an unsupported cap names the cap and the doc."""
+    var d = _decide_lc(
+        String(_OK),
+        String(_PROFILES) + String("/valid.json"),
+        True,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(_ELF_CP),
+        String(_CAPS3),
+    )
+    assert_true(not d.ok)
+    assert_equal(
+        d.refusal,
+        String(
+            "capability mapping-lifecycle unsupported by scan-valid"
+        ),
+    )
+
+
+def test_scan_unknown_capability_refuses() raises:
+    var d = _decide_lc(
+        String(_OK),
+        String(_PROFILES) + String("/valid-lc.json"),
+        True,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(_ELF_CP),
+        String("attempt-trace,nope"),
+    )
+    assert_true(not d.ok)
+    assert_equal(d.refusal, String("unknown capability: nope"))
+
+
+def test_scan_lc_needs_object() raises:
+    var d = _decide_lc(
+        String(_OK),
+        String(_PROFILES) + String("/valid-lc.json"),
+        True,
+        String(_ELF_OK),
+        String(""),
+        String(_ELF_CP),
+        String(_CAPS3),
+    )
+    assert_true(not d.ok)
+    assert_equal(
+        d.refusal,
+        String("capability mapping-lifecycle needs --lc-object"),
+    )
+
+
+def test_scan_convert_capability_refuses() raises:
+    var d = _decide_lc(
+        String(_OK),
+        String(_PROFILES) + String("/valid.json"),
+        True,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(_ELF_CP),
+        String("attempt-trace,conversion-observe"),
+    )
+    assert_true(not d.ok)
+    assert_equal(
+        d.refusal,
+        String("capability conversion-observe has no record channel"),
+    )
+
+
+def test_scan_mode_lc_refuses() raises:
+    """Scan mode refuses when no doc satisfies the request."""
+    var d = _decide_lc(
+        String(_OK),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(_ELF_CP),
+        String(_CAPS3),
+    )
+    assert_true(not d.ok)
+    assert_equal(
+        d.refusal,
+        String(
+            "capability mapping-lifecycle unsupported by scan-valid"
+        ),
+    )
+
 def run() raises -> Int:
     var suite = TestSuite()
+    suite.test[test_scan_valid_lc_record]()
+    suite.test[test_scan_valid_lc_no_tracing]()
+    suite.test[test_scan_skew_lc_refuses]()
+    suite.test[test_scan_lc_unsupported_refuses]()
+    suite.test[test_scan_unknown_capability_refuses]()
+    suite.test[test_scan_convert_capability_refuses]()
+    suite.test[test_scan_lc_needs_object]()
+    suite.test[test_scan_mode_lc_refuses]()
     suite.test[test_scan_validated_wins]()
     suite.test[test_scan_bound_measurements]()
     suite.test[test_scan_partial_unmeasured]()
