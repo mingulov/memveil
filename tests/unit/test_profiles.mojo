@@ -639,6 +639,27 @@ def test_parse_conversion_capability() raises:
     assert_equal(p.caps[0].id, String("conversion-observe"))
 
 
+def _note_doc(n: Int) -> String:
+    var pad = String("")
+    for i in range(n):
+        pad += String("x")
+    return minimal_doc().replace(
+        String('"revision":"r"'),
+        String('"revision":"r","note":"') + pad + String('"'),
+    )
+
+
+def test_parse_source_note_700_ok() raises:
+    # Twelve-field narrow notes need ~700 chars; the
+    # 1024 cap admits them.
+    var p = parse_profile_bytes(bytes_of(_note_doc(700)))
+    assert_equal(p.identity.source.note.byte_length(), 700)
+
+
+def test_parse_source_note_1025_rejects() raises:
+    expect_reject(_note_doc(1025))
+
+
 def test_admitted_profiles_lack_conversion() raises:
     # Guard: no shipped profile declares conversion hooks
     # until kernel-source evidence admits them (E02 blocked).
@@ -1446,6 +1467,8 @@ def run() raises -> Int:
     suite.test[test_parse_conversion_capability]()
     suite.test[test_admitted_profiles_lack_conversion]()
     suite.test[test_parse_minimal_ok]()
+    suite.test[test_parse_source_note_700_ok]()
+    suite.test[test_parse_source_note_1025_rejects]()
     suite.test[test_parse_reference_file]()
     suite.test[test_parse_validated_file]()
     suite.test[test_parse_bad_status]()
