@@ -42,7 +42,7 @@ def check_consistency(lc_events, cp_events, workload):
             maps[key] += 1
         elif event["kind"] == 2:
             unmaps[key] += 1
-        else:
+        elif event["kind"] not in (1, 2):
             bad.append("stray lc kind %d" % event["kind"])
     for key in sorted(set(maps) | set(unmaps)):
         if unmaps[key] > maps[key]:

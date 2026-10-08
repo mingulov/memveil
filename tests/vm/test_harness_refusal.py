@@ -328,10 +328,15 @@ def test_owned_guest_timeout_stops_its_child(tmp_path):
     pid=int(marker.read_text())
     # An exited zombie awaits init reaping; it is no longer a running resource.
     status=Path('/proc')/str(pid)/'stat'
-    try:
-        state=status.read_text().split()[2]
-    except FileNotFoundError:
-        state='exited'
+    deadline=time.monotonic()+1
+    while True:
+        try:
+            state=status.read_text().split()[2]
+        except FileNotFoundError:
+            state='exited'
+        if state in ('Z','exited') or time.monotonic()>=deadline:
+            break
+        time.sleep(0.01)
     assert state in ('Z','exited')
 
 
@@ -396,3 +401,26 @@ def test_authored_projection_has_exact_nonzero_metrics_and_preserves_unpaired_ca
     assert metrics['successful_allocations']=='1'
     assert metrics['copy_original_to_bounce_bytes']=='512'
     assert metrics['completed_lifetime_count']=='1' and metrics['lifetime_mean_ns']=='100'
+
+
+def test_realio_valid_failed_map_has_no_live_bytes_or_false_orphan():
+    events=[lc(ok=0,ktime=10),lc(1,size=1024,ktime=20),lc(2,kind=2,size=1024,skip=1,ktime=40)]
+    bad,live=check_consistency(events,[cp(req=1024,eff=1024)],dict(start_ns=0,end_ns=100,used_before=[1],used_after=[1]))
+    assert bad==[] and live==0
+
+
+def test_explicit_export_retention_survives_success_cleanup(tmp_path,monkeypatch):
+    from test_attempt_capture import cleanup
+    owned=tmp_path/'vmgate-test';owned.mkdir();(owned/'receipt').write_text('owned')
+    monkeypatch.setenv('MEMVEIL_VM_KEEP_EXPORTS','1')
+    cleanup(owned)
+    assert (owned/'receipt').is_file()
+
+
+def test_normal_cleanup_removes_only_its_owned_directory(tmp_path,monkeypatch):
+    from test_attempt_capture import cleanup
+    owned=tmp_path/'vmgate-test';owned.mkdir()
+    other=tmp_path/'untouched';other.mkdir()
+    monkeypatch.delenv('MEMVEIL_VM_KEEP_EXPORTS',raising=False)
+    cleanup(owned)
+    assert not owned.exists() and other.is_dir()

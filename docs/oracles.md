@@ -58,6 +58,8 @@ Scope limits:
 - VM tools must match `tests/vm/harness.lock.json` (virtme-ng 1.41,
   QEMU 10.2.1). Missing prerequisites block armed lanes; unarmed wrappers
   exit 77. Required CI lanes cannot qualify solely through skips.
+  Set `MEMVEIL_VM_KEEP_EXPORTS=1` to retain validated gate exports after
+  success for an artifact-specific receipt; raw ftrace stays guest-local.
 - The module binds no real hardware, performs no DMA to real
   devices, and refuses to load without `mv_oracle_arm=1`.
   Loading happens only inside the disposable VM gate.
