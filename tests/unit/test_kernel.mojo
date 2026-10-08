@@ -100,12 +100,115 @@ def test_poll_outcome_eintr() raises:
     )
 
 
+def _multi() -> LmbKernel:
+    var attempt = List[UInt8]()
+    attempt.append(UInt8(0x7F))
+    var lc = List[UInt8]()
+    lc.append(UInt8(0x7F))
+    var cp = List[UInt8]()
+    cp.append(UInt8(0x7F))
+    return LmbKernel.with_channels(
+        attempt^,
+        String("swiotlb"),
+        String("swiotlb_bounced"),
+        lc^,
+        True,
+        cp^,
+        True,
+        String("/nonexistent/libbpf_mojo.so.1"),
+    )
+
+
+def test_channel_counts() raises:
+    assert_equal(_kernel().channel_count(), 1)
+    assert_equal(_multi().channel_count(), 3)
+    var attempt = List[UInt8]()
+    attempt.append(UInt8(0x7F))
+    var solo = LmbKernel.with_channels(
+        attempt^,
+        String("swiotlb"),
+        String("swiotlb_bounced"),
+        List[UInt8](),
+        False,
+        List[UInt8](),
+        False,
+        String("/nonexistent/libbpf_mojo.so.1"),
+    )
+    assert_equal(solo.channel_count(), 1)
+
+
+def test_multi_not_open_taxonomy() raises:
+    var k = _multi()
+    for ch in range(3):
+        var g = k.map_info_at(ch, String("mv_counts"))
+        assert_equal(g.ok, False)
+        assert_equal(g.message, String("session not open"))
+        var snap = k.read_full_at(ch)
+        assert_equal(snap.ok, False)
+        assert_equal(snap.message, String("session not open"))
+        var st = k.stats_at(ch)
+        assert_equal(st.ok, False)
+        assert_equal(st.message, String("session not open"))
+    var bad = k.map_info_at(3, String("mv_counts"))
+    assert_equal(bad.ok, False)
+    assert_equal(bad.message, String("bad channel"))
+    var bad_snap = k.read_full_at(-1)
+    assert_equal(bad_snap.ok, False)
+    assert_equal(bad_snap.message, String("bad channel"))
+    var bad_stats = k.stats_at(9)
+    assert_equal(bad_stats.ok, False)
+    assert_equal(bad_stats.message, String("bad channel"))
+    # Single-channel shorthands address channel 0.
+    assert_equal(
+        k.map_info(String("mv_counts")).message,
+        String("session not open"),
+    )
+    assert_equal(
+        k.read_full().message, String("session not open"))
+    assert_equal(k.stats().message, String("session not open"))
+    assert_equal(k.close().ok, True)
+
+
+def test_multi_open_failure_shape() raises:
+    var k = _multi()
+    var out = k.open_session()
+    assert_equal(out.ok, False)
+    # Channel attribution plus structured op detail.
+    var msg = out.message.as_bytes()
+    assert_true(len(msg) > 0)
+    var text = out.message
+    assert_true(text.as_bytes()[0] == UInt8(0x63))  # 'c' of "ch0 "
+    var want = String("op=").as_bytes()
+    var has_op = False
+    var i = 0
+    while i + len(want) <= len(msg):
+        var j = 0
+        while j < len(want):
+            if msg[i + j] != want[j]:
+                break
+            j += 1
+        if j == len(want):
+            has_op = True
+            break
+        i += 1
+    assert_true(has_op)
+    # A failed open leaves every channel unopened.
+    for ch in range(3):
+        assert_equal(
+            k.map_info_at(ch, String("mv_counts")).message,
+            String("session not open"),
+        )
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_not_open_taxonomy]()
     suite.test[test_open_failure_shape]()
     suite.test[test_poll_outcome_passthrough]()
     suite.test[test_poll_outcome_eintr]()
+    suite.test[test_channel_counts]()
+    suite.test[test_multi_not_open_taxonomy]()
+    suite.test[test_multi_open_failure_shape]()
     suite^.run()
     return 0
 

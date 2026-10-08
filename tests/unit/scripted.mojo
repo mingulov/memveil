@@ -52,13 +52,22 @@ struct ScriptKernel(KernelSource):
     var attach_out: OpOut
     var detach_out: OpOut
     var close_out: OpOut
+    var channels: Int
     var polls: List[ScriptPollItem]
     var poll_idx: Int
     var poll_left: Int
     var stats_q: List[StatsOut]
     var stats_idx: Int
+    var stats_q1: List[StatsOut]
+    var stats_idx1: Int
+    var stats_q2: List[StatsOut]
+    var stats_idx2: Int
     var snaps: List[SnapOut]
     var snap_idx: Int
+    var snaps1: List[SnapOut]
+    var snap_idx1: Int
+    var snaps2: List[SnapOut]
+    var snap_idx2: Int
     var poll_timeouts: List[Int]
     var poll_caps: List[UInt32]
     var polls_done: Int
@@ -84,13 +93,22 @@ struct ScriptKernel(KernelSource):
         self.attach_out = ok.copy()
         self.detach_out = ok.copy()
         self.close_out = ok.copy()
+        self.channels = 1
         self.polls = List[ScriptPollItem]()
         self.poll_idx = 0
         self.poll_left = 0
         self.stats_q = List[StatsOut]()
         self.stats_idx = 0
+        self.stats_q1 = List[StatsOut]()
+        self.stats_idx1 = 0
+        self.stats_q2 = List[StatsOut]()
+        self.stats_idx2 = 0
         self.snaps = List[SnapOut]()
         self.snap_idx = 0
+        self.snaps1 = List[SnapOut]()
+        self.snap_idx1 = 0
+        self.snaps2 = List[SnapOut]()
+        self.snap_idx2 = 0
         self.poll_timeouts = List[Int]()
         self.poll_caps = List[UInt32]()
         self.polls_done = 0
@@ -112,6 +130,21 @@ struct ScriptKernel(KernelSource):
         if name == String("mv_counts"):
             return self.counts_geom.copy()
         return self.ring_geom.copy()
+
+    def map_info_at(mut self, channel: Int, name: String) -> GeomOut:
+        if channel < 0 or channel >= self.channels:
+            return GeomOut(
+                False,
+                UInt32(0),
+                UInt32(0),
+                UInt32(0),
+                UInt32(0),
+                String("bad channel"),
+            )
+        return self.map_info(name)
+
+    def channel_count(self) -> Int:
+        return self.channels
 
     def attach(mut self) -> OpOut:
         return self.attach_out.copy()
@@ -155,6 +188,14 @@ struct ScriptKernel(KernelSource):
     def add_stats(mut self, item: StatsOut):
         self.stats_q.append(item.copy())
 
+    def add_stats_at(mut self, channel: Int, item: StatsOut):
+        if channel == 1:
+            self.stats_q1.append(item.copy())
+        elif channel == 2:
+            self.stats_q2.append(item.copy())
+        else:
+            self.stats_q.append(item.copy())
+
     def stats(mut self) -> StatsOut:
         self.stats_done += 1
         if self.stats_idx >= len(self.stats_q):
@@ -171,8 +212,48 @@ struct ScriptKernel(KernelSource):
         self.stats_idx += 1
         return out^
 
+    def stats_at(mut self, channel: Int) -> StatsOut:
+        self.stats_done += 1
+        if channel == 1:
+            if self.stats_idx1 >= len(self.stats_q1):
+                return StatsOut(
+                    False,
+                    UInt64(0),
+                    UInt64(0),
+                    UInt64(0),
+                    UInt64(0),
+                    UInt64(0),
+                    String("script exhausted: stats1"),
+                )
+            var out = self.stats_q1[self.stats_idx1].copy()
+            self.stats_idx1 += 1
+            return out^
+        if channel == 2:
+            if self.stats_idx2 >= len(self.stats_q2):
+                return StatsOut(
+                    False,
+                    UInt64(0),
+                    UInt64(0),
+                    UInt64(0),
+                    UInt64(0),
+                    UInt64(0),
+                    String("script exhausted: stats2"),
+                )
+            var out = self.stats_q2[self.stats_idx2].copy()
+            self.stats_idx2 += 1
+            return out^
+        return self.stats()
+
     def add_snap(mut self, item: SnapOut):
         self.snaps.append(item.copy())
+
+    def add_snap_at(mut self, channel: Int, item: SnapOut):
+        if channel == 1:
+            self.snaps1.append(item.copy())
+        elif channel == 2:
+            self.snaps2.append(item.copy())
+        else:
+            self.snaps.append(item.copy())
 
     def read_full(mut self) -> SnapOut:
         self.snaps_done += 1
@@ -183,6 +264,28 @@ struct ScriptKernel(KernelSource):
         var out = self.snaps[self.snap_idx].copy()
         self.snap_idx += 1
         return out^
+
+    def read_full_at(mut self, channel: Int) -> SnapOut:
+        self.snaps_done += 1
+        if channel == 1:
+            if self.snap_idx1 >= len(self.snaps1):
+                return SnapOut(
+                    False, List[UInt64](),
+                    String("script exhausted: snap1"),
+                )
+            var out = self.snaps1[self.snap_idx1].copy()
+            self.snap_idx1 += 1
+            return out^
+        if channel == 2:
+            if self.snap_idx2 >= len(self.snaps2):
+                return SnapOut(
+                    False, List[UInt64](),
+                    String("script exhausted: snap2"),
+                )
+            var out = self.snaps2[self.snap_idx2].copy()
+            self.snap_idx2 += 1
+            return out^
+        return self.read_full()
 
     def detach(mut self) -> OpOut:
         return self.detach_out.copy()

@@ -177,7 +177,15 @@ struct FinalOut(Copyable, Movable):
 
 
 trait KernelSource:
-    """Libbpf-mojo session surface behind scriptable outcomes."""
+    """Libbpf-mojo session surface behind scriptable outcomes.
+
+    Channel 0 is the attempt object; channels 1 and 2 are
+    the lifecycle and copy objects when present. The
+    unindexed map_info/read_full address channel 0; stats
+    sums across present channels on the live path (scripted
+    kernels return their script) while the _at variants
+    read one channel exactly.
+    """
 
     def open_session(mut self) -> OpOut:
         ...
@@ -186,6 +194,11 @@ trait KernelSource:
         ...
 
     def map_info(mut self, name: String) -> GeomOut:
+        ...
+
+    def map_info_at(
+        mut self, channel: Int, name: String
+    ) -> GeomOut:
         ...
 
     def attach(mut self) -> OpOut:
@@ -197,7 +210,16 @@ trait KernelSource:
     def stats(mut self) -> StatsOut:
         ...
 
+    def stats_at(mut self, channel: Int) -> StatsOut:
+        ...
+
     def read_full(mut self) -> SnapOut:
+        ...
+
+    def read_full_at(mut self, channel: Int) -> SnapOut:
+        ...
+
+    def channel_count(self) -> Int:
         ...
 
     def detach(mut self) -> OpOut:
