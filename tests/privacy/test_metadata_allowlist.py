@@ -109,17 +109,20 @@ def main():
     # Frozen per-file audit: (bpf_probe_read_kernel,
     # BPF_CORE_READ) counts. Attempt reads its fixed context
     # plus the device name; lifecycle reads nothing (fentry
-    # args only); copy reads one pool slot (bulk copy over a
-    # relocated pointer) plus the device align mask through two
-    # checked relocating reads to replicate the hook's clamp.
-    # Transient kernel reads never reach a record: emitted bytes
-    # are sizes, directions, and outcome flags only. A new probe
-    # file, or a new read in an old file, fails here until
-    # reviewed. Tuples are (bpf_probe_read_kernel,
-    # BPF_CORE_READ, bpf_core_read) call sites.
+    # args only); copy reads the pool header (start, nslabs,
+    # slots) through three checked relocating reads, one pool
+    # slot (bulk copy over a relocated pointer), plus the
+    # device align mask through two checked relocating reads
+    # to replicate the hook's clamp. Any checked-read failure
+    # degrades to unknown-with-reason. Transient kernel reads
+    # never reach a record: emitted bytes are sizes,
+    # directions, and outcome flags only. A new probe file, or
+    # a new read in an old file, fails here until reviewed.
+    # Tuples are (bpf_probe_read_kernel, BPF_CORE_READ,
+    # bpf_core_read) call sites.
     read_sites = {
         "swiotlb_attempt.bpf.c": (2, 0, 0),
-        "swiotlb_copy.bpf.c": (1, 3, 2),
+        "swiotlb_copy.bpf.c": (1, 0, 5),
         "swiotlb_lifecycle.bpf.c": (0, 0, 0),
     }
     check("bpf-files-frozen",
