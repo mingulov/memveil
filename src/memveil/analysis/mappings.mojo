@@ -222,6 +222,12 @@ struct MappingTracker[
             "Detail loss reported by the producer may hide a release"
         )
 
+    def note_correlation_loss(mut self):
+        """Lost relationships may hide a mapping release."""
+        self._invalidate_live(
+            "Correlation loss may hide a release relationship"
+        )
+
     def _invalidate_live(mut self, cause: String):
         if not self._live_invalid:
             self._live_invalid = True
@@ -266,6 +272,8 @@ struct MappingTracker[
     def consume(mut self, ev: Event) raises:
         """Fold one normalized event into lifecycle state."""
         var kind = ev.kind
+        if kind == "copy" and ev.source_measurement != "observed":
+            raise Error("executed copies require observed measurement")
         var paired = ev.source_correlation != "unpaired"
         if kind == "bounce_attempt":
             if paired:
@@ -294,6 +302,9 @@ struct MappingTracker[
             self._lifecycle_events += 1
             self._saw_unmap = True
             self._apply_unmap(ev, paired)
+            return
+        if kind == "gap" and ev.gap.channel == "correlation":
+            self.note_correlation_loss()
             return
         if kind == "gap" and ev.gap.channel == "detail":
             self._invalidate_live("detail loss may hide a release")
@@ -983,8 +994,9 @@ struct MappingTracker[
                     UInt64(0),
                     scope,
                     String(
-                        "Maximum live mapped bytes reached; worst"
-                        " instantaneous exposure in this window."
+                        "Maximum live mapped bytes reached; peak"
+                        " observed allocation occupancy in this window;"
+                        " release does not prove reprivatization or erasure."
                     ),
                 )
             )
@@ -1331,8 +1343,8 @@ struct MappingTracker[
             UInt64(0),
             scope,
             String(
-                "Time integral of live mapped bytes; exposure"
-                " weighted by duration. Completed mappings use"
+                "Observed allocation byte-time, not a measured sharing"
+                " lifetime. Completed mappings use"
                 " exact durations; open mappings integrate to"
                 " the horizon."
             ),

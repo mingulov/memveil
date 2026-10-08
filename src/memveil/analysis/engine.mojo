@@ -123,8 +123,20 @@ struct Analyzer:
         # Each note is idempotent across snapshot and finish.
         if rep.q_detail.status != "complete_for_scope":
             self._mappings.note_detail_loss()
-            self._pools.note_detail_loss()
             self._regions.note_detail_loss()
+        # Located detail gaps reset streaks when consumed. Only
+        # unlocated producer loss or a dropped tail invalidates
+        # the currently proved post-gap run at report time.
+        if (
+            self._session.q_detail.status != "complete_for_scope"
+            or partial
+        ):
+            self._pools.note_detail_loss()
+        if (
+            self._mappings.sees_lifecycle()
+            and rep.q_correlation.status != "complete_for_scope"
+        ):
+            self._mappings.note_correlation_loss()
         if (
             rep.q_baseline.status != "complete_for_scope"
             and rep.q_baseline.status != "not_applicable"

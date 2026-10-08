@@ -1027,7 +1027,8 @@ suite_budgets() {
 }
 
 suite_quality() {
-    run_unit_file tests/unit/test_quality.mojo
+    run_unit_file tests/unit/test_quality.mojo || return 1
+    python3 "$ROOT/tests/cli/test_uncertainty.py"
 }
 
 suite_vm_saturation() {

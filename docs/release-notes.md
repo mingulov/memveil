@@ -13,7 +13,8 @@ re-gate evidence at this revision.
   window/deadline, debugfs pool sampling (capacity/used/high-water),
   and fail-closed admission (profile binding, bridge, privilege).
 - `report` / `top`: offline replay with exact-replay accounting:
-  current/peak/cumulative exposure, exposure byte-time, mapping
+  current/peak allocation occupancy, cumulative allocated bytes,
+  allocation byte-time, mapping
   lifetimes (mean/p50/p95), per-device and per-direction splits,
   region lineage with generations, per-metric evidence confidence
   (`high` / `medium`; `proxy` is reserved, no emitter yet).

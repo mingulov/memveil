@@ -75,6 +75,10 @@ def main():
     check("json-terminal-partial",
           doc["quality"]["terminal"]["status"] == "partial")
 
+    incomplete = [f for f in doc["findings"] if f["code"] == "CAPTURE_INCOMPLETE"]
+    check("json-incomplete-finding", len(incomplete) == 1
+          and bool(incomplete[0]["evidence_refs"]))
+
     proc = report("markdown")
     check("markdown-exit", proc.returncode == 4,
           "exit %d: %s" % (proc.returncode, proc.stderr.strip()))
