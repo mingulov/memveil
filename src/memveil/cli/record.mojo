@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""memveil record: admitted attempt capture.
+"""memveil record: admitted attempt capture, optional channels.
 
 ``run_record`` implements ``record --duration SEC --max-events-bytes
-N --output DIR --object PATH --bridge PATH [--profile ID]`` against
+N --output DIR --object PATH --bridge PATH [--profile ID]
+[--capability IDS] [--lc-object PATH] [--cp-object PATH]`` against
 the live host. ``run_record_with`` is the same flow against an
 explicit evidence root and profiles directory, so tests drive
 fixtures through the identical code path. ``decide_record`` is the
-testable admission decision (profile scan, object statics, hook
-layout, narrow binding) without clocks or BPF.
+testable admission decision (profile scan, capability selection,
+object statics, hook layout, narrow binding) without clocks or BPF.
 
 Exit codes: 4 = finalized (NORMAL including zero-event runs,
 signal stops, and known-loss runs); 3 = cannot start
@@ -39,7 +40,7 @@ from memveil.cli.report import (
 from memveil.model.session import EvidenceItem
 from memveil.model.validate import check_opaque_id
 from memveil.platform.stdout import write_stdout
-from memveil.platform.btf import read_btf_maps
+from memveil.platform.btf import read_btf_maps, read_btf_maps_ring
 from memveil.platform.clock import (
     MonoClock,
     check_timens_live,
@@ -58,12 +59,14 @@ from memveil.platform.narrow import (
     LiveValue,
     NarrowLive,
     check_narrow,
+    check_narrow_extra,
     check_trace_layout,
     parse_narrow_note,
     read_live_bid,
     read_live_bytes,
     read_live_config,
     verify_object,
+    verify_object_program,
 )
 from memveil.platform.profiles import (
     Profile,
@@ -88,6 +91,11 @@ comptime _ZLIB = "libz.so.1"
 comptime _RING_MAP = "mv_attempts"
 comptime _PROGRAM = "mv_swiotlb_attempt"
 comptime _ATTEMPT_CAP = "attempt-trace"
+comptime _LIFECYCLE_CAP = "mapping-lifecycle"
+comptime _COPY_CAP = "copy-actual"
+comptime _CONVERT_CAP = "conversion-observe"
+comptime _RING_LC_MAP = "mv_lifecycle"
+comptime _RING_CP_MAP = "mv_copies"
 
 
 struct RecordOptions:
@@ -101,6 +109,9 @@ struct RecordOptions:
     var has_bridge: Bool
     var profile: String
     var has_profile: Bool
+    var lc_object: String
+    var cp_object: String
+    var capabilities: String
 
     def __init__(out self):
         self.duration_s = DEFAULT_DURATION_S
@@ -111,6 +122,9 @@ struct RecordOptions:
         self.has_bridge = False
         self.profile = String("")
         self.has_profile = False
+        self.lc_object = String("")
+        self.cp_object = String("")
+        self.capabilities = String("")
 
 
 def record_usage() -> String:
@@ -119,6 +133,7 @@ def record_usage() -> String:
         "usage: memveil record --output DIR --object PATH\n"
         "       [--duration SEC] [--max-events-bytes N]\n"
         "       [--bridge PATH] [--profile ID|PATH]\n"
+        "       [--capability IDS] [--lc-object PATH] [--cp-object PATH]\n"
         "\n"
         "Capture swiotlb bounce attempts into DIR. SEC defaults\n"
         "to 60; N defaults to 1073741824 (1 GiB) and must lie\n"
@@ -128,6 +143,15 @@ def record_usage() -> String:
         "binding wins, else the first covering profile runs\n"
         "partial; an explicit --profile that fails binding\n"
         "refuses. Diagnostics go to stderr.\n"
+        "\n"
+        "--capability selects extra channels as a comma-separated\n"
+        "list without spaces (default: attempt-trace, which is\n"
+        "always required). mapping-lifecycle needs --lc-object\n"
+        "and copy-actual needs --cp-object; the winning profile\n"
+        "must declare each requested capability supported and\n"
+        "bind the matching object bytes, else the run refuses\n"
+        "naming the capability. Extra channels never run\n"
+        "partial: without full narrow binding the run refuses.\n"
         "\n"
         "Exit 4 for a finalized capture (including zero-event\n"
         "and signal stops), 3 when the run cannot start, 2 on\n"
@@ -208,6 +232,27 @@ def parse_record_args(args: List[String]) raises CliError -> RecordOptions:
             opts.profile = args[i + 1]
             opts.has_profile = True
             i += 2
+        elif tok == "--lc-object":
+            if i + 1 >= len(args):
+                raise CliError("--lc-object needs a value")
+            if args[i + 1] == "":
+                raise CliError("--lc-object needs a value")
+            opts.lc_object = args[i + 1]
+            i += 2
+        elif tok == "--cp-object":
+            if i + 1 >= len(args):
+                raise CliError("--cp-object needs a value")
+            if args[i + 1] == "":
+                raise CliError("--cp-object needs a value")
+            opts.cp_object = args[i + 1]
+            i += 2
+        elif tok == "--capability":
+            if i + 1 >= len(args):
+                raise CliError("--capability needs a value")
+            if args[i + 1] == "":
+                raise CliError("--capability needs a value")
+            opts.capabilities = args[i + 1]
+            i += 2
         elif _is_option(tok):
             raise CliError("unknown option: " + tok)
         else:
@@ -230,7 +275,10 @@ struct ScanDecision(Copyable):
     Bound decisions also carry the measured narrow
     identities (config/src, btf, format, image, image
     build-id); partial decisions leave them empty so the
-    capture marks each one unavailable.
+    capture marks each one unavailable. ``selected_caps``
+    names the requested capabilities in order; a selected
+    extra channel carries its verified object bytes, hash,
+    and bound ring size, and never runs partial.
     """
 
     var ok: Bool
@@ -250,6 +298,15 @@ struct ScanDecision(Copyable):
     var measured_format: LiveValue
     var measured_image: LiveValue
     var measured_image_bid: LiveValue
+    var selected_caps: String
+    var has_lifecycle: Bool
+    var has_copy: Bool
+    var lc_elf: List[UInt8]
+    var cp_elf: List[UInt8]
+    var lc_ring_bytes: Int
+    var cp_ring_bytes: Int
+    var lc_object_sha: String
+    var cp_object_sha: String
 
     def __init__(out self):
         self.ok = False
@@ -269,12 +326,221 @@ struct ScanDecision(Copyable):
         self.measured_format = LiveValue()
         self.measured_image = LiveValue()
         self.measured_image_bid = LiveValue()
+        self.selected_caps = String("")
+        self.has_lifecycle = False
+        self.has_copy = False
+        self.lc_elf = List[UInt8]()
+        self.cp_elf = List[UInt8]()
+        self.lc_ring_bytes = 0
+        self.cp_ring_bytes = 0
+        self.lc_object_sha = String("")
+        self.cp_object_sha = String("")
 
 
 def _refuse_scan(reason: String) -> ScanDecision:
     var out = ScanDecision()
     out.ok = False
     out.refusal = reason
+    return out^
+
+
+struct _CapsOut(Copyable):
+    var ok: Bool
+    var caps: List[String]
+    var err: String
+
+    def __init__(out self):
+        self.ok = False
+        self.caps = List[String]()
+        self.err = String("")
+
+
+def _split_caps(text: String) -> List[String]:
+    """Split a comma capability list (strict, no spaces)."""
+    var out = List[String]()
+    var raw = text.as_bytes()
+    var cur = List[UInt8]()
+    for i in range(len(raw)):
+        if raw[i] == UInt8(0x2C):
+            try:
+                out.append(String(from_utf8=Span(cur)))
+            except:
+                out.append(String(""))
+            cur = List[UInt8]()
+        else:
+            cur.append(raw[i])
+    try:
+        out.append(String(from_utf8=Span(cur)))
+    except:
+        out.append(String(""))
+    return out^
+
+
+def _parse_caps(want: String) -> _CapsOut:
+    """Parse requested capabilities in order, deduplicated.
+
+    Empty means attempt-trace alone. Unknown ids, empty
+    items, and requests without attempt-trace refuse: the
+    attempt channel is the mandatory base channel.
+    """
+    var out = _CapsOut()
+    var items = List[String]()
+    if want == String(""):
+        items.append(String(_ATTEMPT_CAP))
+    else:
+        items = _split_caps(want)
+    for i in range(len(items)):
+        var item = items[i].copy()
+        if item == String(""):
+            out.err = String("bad capability list")
+            return out^
+        if (
+            item != String(_ATTEMPT_CAP)
+            and item != String(_LIFECYCLE_CAP)
+            and item != String(_COPY_CAP)
+            and item != String(_CONVERT_CAP)
+        ):
+            out.err = String("unknown capability: ") + item
+            return out^
+        var seen = False
+        for j in range(len(out.caps)):
+            if out.caps[j] == item:
+                seen = True
+                break
+        if not seen:
+            out.caps.append(item.copy())
+    var has_attempt = False
+    for i in range(len(out.caps)):
+        if out.caps[i] == String(_ATTEMPT_CAP):
+            has_attempt = True
+            break
+    if not has_attempt:
+        out.err = String("attempt-trace is required")
+        return out^
+    out.ok = True
+    return out^
+
+
+def _cap_selectable(doc: Profile, cap: String) -> Bool:
+    """True when the doc admits the capability for capture.
+
+    Both supported and candidate declarations select;
+    the decision kind already tells them apart. Only
+    unsupported or missing declarations refuse.
+    """
+    for i in range(len(doc.caps)):
+        if doc.caps[i].id == cap:
+            return (
+                doc.caps[i].status == String("supported")
+                or doc.caps[i].status == String("candidate")
+            )
+    return False
+
+
+def _cap_unknown_hook(doc: Profile, cap: String) -> String:
+    """First hook a requested cap names that the doc lacks."""
+    for i in range(len(doc.caps)):
+        if doc.caps[i].id == cap:
+            for j in range(len(doc.caps[i].hooks)):
+                var want = doc.caps[i].hooks[j].copy()
+                var found = False
+                for k in range(len(doc.hooks)):
+                    if doc.hooks[k].name == want:
+                        found = True
+                        break
+                if not found:
+                    return want.copy()
+            return String("")
+    return String("")
+
+
+struct _ProgWant(Copyable):
+    var name: String
+    var section: String
+
+    def __init__(out self, name: String, section: String):
+        self.name = name
+        self.section = section
+
+
+def _lc_progs() -> List[_ProgWant]:
+    """Frozen lifecycle programs; mirrors the attach specs."""
+    var out = List[_ProgWant]()
+    out.append(_ProgWant(String("mv_map_result"), String("fexit/")))
+    out.append(_ProgWant(String("mv_unmap"), String("fentry/")))
+    return out^
+
+
+def _cp_progs() -> List[_ProgWant]:
+    """Frozen copy programs; mirrors the attach specs."""
+    var out = List[_ProgWant]()
+    out.append(_ProgWant(String("mv_sync_device"), String("fentry/")))
+    out.append(_ProgWant(String("mv_sync_cpu"), String("fentry/")))
+    out.append(_ProgWant(String("mv_bounce"), String("fentry/")))
+    return out^
+
+
+struct _ExtraOut(Copyable):
+    var ok: Bool
+    var refusal: String
+    var elf: List[UInt8]
+    var sha: String
+    var ring: Int
+
+    def __init__(out self):
+        self.ok = False
+        self.refusal = String("")
+        self.elf = List[UInt8]()
+        self.sha = String("")
+        self.ring = 0
+
+
+def _verify_extra_object(
+    path: String,
+    word: String,
+    ring_var: String,
+    ring_word: String,
+    wants: List[_ProgWant],
+) -> _ExtraOut:
+    """Static admission for one extra channel object.
+
+    Reads the object once, verifies every frozen tracing
+    program in its section kind, and reads the channel
+    ring size from BTF. Refusals name the channel word.
+    """
+    var out = _ExtraOut()
+    var elf: List[UInt8]
+    try:
+        elf = read_host_file(
+            path,
+            word + String(" object"),
+            MAX_NARROW_OBJECT_BYTES,
+        )
+    except:
+        out.refusal = word + String(" object unreadable")
+        return out^
+    for i in range(len(wants)):
+        var chk = verify_object_program(
+            Span(elf), wants[i].name, wants[i].section
+        )
+        if not chk.ok:
+            out.refusal = (
+                word + String(" object refused: ") + chk.message
+            )
+            return out^
+    var maps = read_btf_maps_ring(Span(elf), ring_var, ring_word)
+    if not maps.ok:
+        out.refusal = (
+            word + String(" object refused: ") + maps.message
+        )
+        return out^
+    if maps.ring_bytes > MAX_NARROW_RING_BYTES:
+        out.refusal = word + String(" object ring too large")
+        return out^
+    out.ok = True
+    out.elf = elf.copy()
+    out.sha = sha256_hex(Span(elf))
+    out.ring = maps.ring_bytes
     return out^
 
 
@@ -400,12 +666,20 @@ def _check_binding(
     object_sha: String,
     ring_bytes: Int,
     format_bytes: Span[UInt8, _],
+    lc_sha: String,
+    lc_ring: Int,
+    cp_sha: String,
+    cp_ring: Int,
+    want_lc: Bool,
+    want_cp: Bool,
 ) -> _BindingOut:
     """Full narrow binding of one doc against live identity.
 
     Release must equal the recorded revision, the note
-    must parse, every live source must match, and the
-    live format bytes must equal the embedded text.
+    must parse, every live source must match, requested
+    extra channels must bind their object bytes and ring
+    sizes, and the live format bytes must equal the
+    embedded text.
     """
     var out = _BindingOut()
     if release != doc.identity.source.revision:
@@ -448,6 +722,18 @@ def _check_binding(
     var verdict = check_narrow(bind, live)
     if verdict.state != String("bound"):
         out.reason = verdict.state + String(" ") + verdict.key
+        return out^
+    live.lc_object.state = String("value")
+    live.lc_object.value = lc_sha.copy()
+    live.lc_ring.state = String("value")
+    live.lc_ring.value = String(lc_ring)
+    live.cp_object.state = String("value")
+    live.cp_object.value = cp_sha.copy()
+    live.cp_ring.state = String("value")
+    live.cp_ring.value = String(cp_ring)
+    var extra = check_narrow_extra(bind, live, want_lc, want_cp)
+    if extra.state != String("bound"):
+        out.reason = extra.state + String(" ") + extra.key
         return out^
     if not hook.format_has:
         out.reason = String("uncheckable format_text")
@@ -510,6 +796,36 @@ def _admit_hook(
     return String("")
 
 
+def _selection_gap(doc: Profile, caps: List[String]) -> String:
+    """First reason a doc cannot satisfy the request, else "".
+
+    Every requested extra capability needs a supported
+    or candidate declaration whose named hooks all
+    exist in the doc; the message names the capability
+    and the document. The attempt channel keeps its
+    legacy hook selection and refusals below.
+    """
+    for i in range(len(caps)):
+        if caps[i] == String(_ATTEMPT_CAP):
+            continue
+        if not _cap_selectable(doc, caps[i]):
+            return (
+                String("capability ")
+                + caps[i]
+                + String(" unsupported by ")
+                + doc.profile_id
+            )
+        var missing = _cap_unknown_hook(doc, caps[i])
+        if missing != String(""):
+            return (
+                String("capability ")
+                + caps[i]
+                + String(" names unknown hook ")
+                + missing
+            )
+    return String("")
+
+
 def decide_record(
     root: String,
     kernel: KernelInfo,
@@ -517,6 +833,9 @@ def decide_record(
     explicit: String,
     has_explicit: Bool,
     object_path: String,
+    lc_object: String,
+    cp_object: String,
+    want_caps: String,
 ) -> ScanDecision:
     """Decide admission: scan, object statics, hook, binding.
 
@@ -525,9 +844,32 @@ def decide_record(
     mode tries each covering validated doc in order and
     falls back to the first covering doc as partial.
     Static object failures refuse everywhere; identity
-    failures fall through in scan mode only.
+    failures fall through in scan mode only. Requested
+    extra capabilities need a supported declaration, a
+    given object path, and full extended binding; they
+    never fall back to partial.
     """
     var out = ScanDecision()
+    var ask = _parse_caps(want_caps)
+    if not ask.ok:
+        return _refuse_scan(ask.err.copy())
+    var want_lc = False
+    var want_cp = False
+    for i in range(len(ask.caps)):
+        if ask.caps[i] == String(_LIFECYCLE_CAP):
+            want_lc = True
+        if ask.caps[i] == String(_COPY_CAP):
+            want_cp = True
+        if ask.caps[i] == String(_CONVERT_CAP):
+            return _refuse_scan(
+                String(
+                    "capability conversion-observe has no record channel"
+                )
+            )
+    var want_extra = want_lc or want_cp
+    var selected = ask.caps[0].copy()
+    for i in range(1, len(ask.caps)):
+        selected = selected + String(",") + ask.caps[i]
     var candidates = List[Profile]()
     var want_explicit = has_explicit
     if want_explicit:
@@ -569,6 +911,14 @@ def decide_record(
                 candidates.append(profiles[i].copy())
         if len(candidates) == 0:
             return _refuse_scan(String("no profile covers this kernel"))
+    if want_lc and lc_object == String(""):
+        return _refuse_scan(
+            String("capability mapping-lifecycle needs --lc-object")
+        )
+    if want_cp and cp_object == String(""):
+        return _refuse_scan(
+            String("capability copy-actual needs --cp-object")
+        )
     var elf: List[UInt8]
     try:
         elf = read_host_file(
@@ -588,6 +938,28 @@ def decide_record(
     var sha = sha256_hex(Span(elf))
     if ring > MAX_NARROW_RING_BYTES:
         return _refuse_scan(String("object ring too large"))
+    var lc = _ExtraOut()
+    if want_lc:
+        lc = _verify_extra_object(
+            lc_object,
+            String("lc"),
+            String(_RING_LC_MAP),
+            String("lifecycle"),
+            _lc_progs(),
+        )
+        if not lc.ok:
+            return _refuse_scan(lc.refusal.copy())
+    var cp = _ExtraOut()
+    if want_cp:
+        cp = _verify_extra_object(
+            cp_object,
+            String("cp"),
+            String(_RING_CP_MAP),
+            String("copy"),
+            _cp_progs(),
+        )
+        if not cp.ok:
+            return _refuse_scan(cp.refusal.copy())
     var order = List[Int]()
     if want_explicit:
         order.append(0)
@@ -595,8 +967,15 @@ def decide_record(
         for i in range(len(candidates)):
             if candidates[i].status == String("validated"):
                 order.append(i)
+    var skip_reason = String("")
     for oi in range(len(order)):
         var doc = candidates[order[oi]].copy()
+        var gap = _selection_gap(doc, ask.caps)
+        if gap != String(""):
+            if want_explicit:
+                return _refuse_scan(gap)
+            skip_reason = gap.copy()
+            continue
         var hook = ProfileHook()
         var raw = List[UInt8]()
         var sys = String("")
@@ -605,10 +984,15 @@ def decide_record(
         if herr != String(""):
             if want_explicit:
                 return _refuse_scan(herr)
+            skip_reason = herr.copy()
             continue
         var parsed = parse_narrow_note(doc.identity.source.note)
         if not parsed.ok:
             if want_explicit:
+                if want_extra:
+                    return _refuse_scan(
+                        String("binding failed: ") + parsed.message
+                    )
                 # Unparseable bindings are never validated,
                 # whatever the document status claims: without
                 # a parsed note no identity check ran. Both
@@ -628,7 +1012,9 @@ def decide_record(
                 out.elf = elf.copy()
                 out.tp_system = sys.copy()
                 out.tp_event = evt.copy()
+                out.selected_caps = selected.copy()
                 return out^
+            skip_reason = String("binding failed: ") + parsed.message
             continue
         var bound = _check_binding(
             root,
@@ -638,12 +1024,19 @@ def decide_record(
             sha,
             ring,
             Span(raw),
+            lc.sha,
+            lc.ring,
+            cp.sha,
+            cp.ring,
+            want_lc,
+            want_cp,
         )
         if not bound.ok:
             if want_explicit:
                 return _refuse_scan(
                     String("binding failed: ") + bound.reason
                 )
+            skip_reason = String("binding failed: ") + bound.reason
             continue
         out.ok = True
         if doc.status == String("validated"):
@@ -673,8 +1066,25 @@ def decide_record(
         out.measured_format = bound.format.copy()
         out.measured_image = bound.image.copy()
         out.measured_image_bid = bound.image_bid.copy()
+        out.selected_caps = selected.copy()
+        out.has_lifecycle = want_lc
+        out.has_copy = want_cp
+        if want_lc:
+            out.lc_elf = lc.elf.copy()
+            out.lc_object_sha = lc.sha.copy()
+            out.lc_ring_bytes = lc.ring
+        if want_cp:
+            out.cp_elf = cp.elf.copy()
+            out.cp_object_sha = cp.sha.copy()
+            out.cp_ring_bytes = cp.ring
         return out^
     # Scan mode only: explicit always returns inside the loop.
+    if want_extra:
+        if skip_reason == String(""):
+            return _refuse_scan(
+                String("no profile satisfies requested capabilities")
+            )
+        return _refuse_scan(skip_reason.copy())
     var first = candidates[0].copy()
     var phook = ProfileHook()
     var praw = List[UInt8]()
@@ -709,6 +1119,7 @@ def decide_record(
     out.elf = elf.copy()
     out.tp_system = psys.copy()
     out.tp_event = pevt.copy()
+    out.selected_caps = selected.copy()
     return out^
 
 
@@ -857,6 +1268,9 @@ def run_record_with(
         opts.profile,
         opts.has_profile,
         opts.object,
+        opts.lc_object,
+        opts.cp_object,
+        opts.capabilities,
     )
     if not decision.ok:
         return _record_failed(decision.refusal.copy())
@@ -877,6 +1291,10 @@ def run_record_with(
     cfg.pid = Int(external_call["getpid", Int32]())
     cfg.has_ring_bytes = True
     cfg.ring_bytes = UInt32(decision.ring_bytes)
+    cfg.has_lifecycle = decision.has_lifecycle
+    cfg.lifecycle_ring_bytes = UInt32(decision.lc_ring_bytes)
+    cfg.has_copy = decision.has_copy
+    cfg.copy_ring_bytes = UInt32(decision.cp_ring_bytes)
     var boot_id = String("")
     if _read_boot_id(root, boot_id):
         cfg.has_boot_id = True
@@ -893,6 +1311,38 @@ def run_record_with(
             String("ring.bytes"), String(decision.ring_bytes)
         )
     )
+    cfg.evidence.append(
+        _value_item(
+            String("capabilities.selected"),
+            decision.selected_caps.copy(),
+        )
+    )
+    if decision.has_lifecycle:
+        cfg.evidence.append(
+            _value_item(
+                String("lc.object.sha256"),
+                decision.lc_object_sha.copy(),
+            )
+        )
+        cfg.evidence.append(
+            _value_item(
+                String("lc.ring.bytes"),
+                String(decision.lc_ring_bytes),
+            )
+        )
+    if decision.has_copy:
+        cfg.evidence.append(
+            _value_item(
+                String("cp.object.sha256"),
+                decision.cp_object_sha.copy(),
+            )
+        )
+        cfg.evidence.append(
+            _value_item(
+                String("cp.ring.bytes"),
+                String(decision.cp_ring_bytes),
+            )
+        )
     if env.kernel.release == String(""):
         cfg.evidence.append(
             _value_item(
@@ -956,13 +1406,15 @@ def run_record_with(
             String("bridge.abi"), String("abi-v1 (required)")
         )
     )
-    var kernel = LmbKernel(
+    var kernel = LmbKernel.with_channels(
         decision.elf.copy(),
-        String(_RING_MAP),
-        bridge,
-        String(_PROGRAM),
         decision.tp_system.copy(),
         decision.tp_event.copy(),
+        decision.lc_elf.copy(),
+        decision.has_lifecycle,
+        decision.cp_elf.copy(),
+        decision.has_copy,
+        bridge,
     )
     var clock = MonoClock()
     var signal = LiveSignalSource()

@@ -2814,6 +2814,7 @@ suite_record() {
     run_unit_file tests/unit/test_kernel.mojo || return 1
     run_unit_file tests/unit/test_live.mojo || return 1
     run_unit_file tests/unit/test_btf.mojo || return 1
+    run_unit_file tests/unit/test_record_args.mojo || return 1
     echo "record: unit suites passed"
     BIN="$ROOT/build/memveil"
     if [ ! -x "$BIN" ]; then
@@ -2900,6 +2901,11 @@ suite_record() {
             --output "$TMP/r-miss" \
             --object "$ROOT/tests/fixtures/elf/ok.o" \
             --bridge "$TMP/nolib.so" --profile definitely-not-a-profile
+        rexpect bad-capability 3 "unknown capability: nope" \
+            "$TMP/r-badcap" -- \
+            --output "$TMP/r-badcap" \
+            --object "$ROOT/tests/fixtures/elf/ok.o" \
+            --bridge "$TMP/nolib.so" --capability attempt-trace,nope
         if [ ! -f /sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format ]; then
             rexpect no-format 3 "format unreadable" "$TMP/r-nofmt" -- \
                 --output "$TMP/r-nofmt" \
