@@ -52,12 +52,27 @@ def _terminate_owned(proc, prior_children):
     """
     snapshot = _processes()
     owned = {proc.pid: snapshot[proc.pid][2]} if proc.pid in snapshot else {}
-    # A parent can exit just as the deadline expires. As the single-threaded
-    # subreaper, this runner adopts its newly orphaned children. Exclude every
-    # child that existed before this suite started, then track only new ones.
-    owned.update({pid: birth for pid, (ppid, state, birth) in snapshot.items()
-                  if ppid == os.getpid() and (pid, birth) not in prior_children})
     errors = 0
+
+    def discover():
+        # TERM handlers may fork, and exiting parents transfer their children
+        # to this single-threaded subreaper. Refresh both ownership routes in
+        # every cleanup phase, always excluding the pre-suite child boundary.
+        snapshot = _processes()
+        added = set()
+        changed = True
+        while changed:
+            changed = False
+            for pid, (ppid, state, birth) in snapshot.items():
+                parent_owned = (ppid in owned and ppid in snapshot
+                                and snapshot[ppid][2] == owned[ppid])
+                adopted = ppid == os.getpid() and (pid, birth) not in prior_children
+                if (parent_owned or adopted) and owned.get(pid) != birth:
+                    owned[pid] = birth
+                    added.add(pid)
+                    changed = True
+        return snapshot, added
+
     def send(pid, sig):
         nonlocal errors
         if _same(pid, owned[pid]):
@@ -67,17 +82,9 @@ def _terminate_owned(proc, prior_children):
                 pass
             except PermissionError:
                 errors += 1
-    # Stop parents and every discovered descendant before the termination
-    # snapshot, so a child cannot fork unnoticed while its parent is retired.
+
     for _ in range(16):
-        snapshot = _processes()
-        added = {}
-        changed = True
-        while changed:
-            changed = False
-            for pid, (ppid, state, birth) in snapshot.items():
-                if ppid in owned and pid not in owned:
-                    owned[pid] = birth; added[pid] = birth; changed = True
+        snapshot, added = discover()
         for pid in owned:
             send(pid, signal.SIGSTOP)
         if not added:
@@ -87,28 +94,41 @@ def _terminate_owned(proc, prior_children):
         send(pid, signal.SIGCONT)
     deadline = time.monotonic() + 2
     while time.monotonic() < deadline:
-        snapshot = _processes()
-        if all(pid not in snapshot or snapshot[pid][1] == "Z" for pid in owned):
+        snapshot, added = discover()
+        for pid in added:
+            send(pid, signal.SIGSTOP)
+            send(pid, signal.SIGTERM)
+            send(pid, signal.SIGCONT)
+        if all(pid not in snapshot or snapshot[pid][2] != birth
+               or snapshot[pid][1] == "Z" for pid, birth in owned.items()):
             break
         time.sleep(0.02)
-    for pid in owned:
-        send(pid, signal.SIGKILL)
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        errors += 1
-    deadline = time.monotonic() + 2
+    # Re-discover during KILL and targeted reaping too: a handler can create
+    # its last detached child at the end of the TERM grace period.
+    deadline = time.monotonic() + 5
     reaped = 0
+    empty_checks = 0
+    remaining = len(owned)
     while time.monotonic() < deadline:
+        snapshot, _ = discover()
         for pid in owned:
+            send(pid, signal.SIGKILL)
+        # Let Popen retain the direct child's exact native exit before reaping
+        # adopted descendants. Never use waitpid(-1) for unrelated children.
+        proc.poll()
+        for pid in owned:
+            if pid == proc.pid:
+                continue
             try:
                 got, _ = os.waitpid(pid, os.WNOHANG)
                 reaped += int(got != 0)
             except ChildProcessError:
                 pass
-        snapshot = _processes()
-        remaining = sum(pid in snapshot and snapshot[pid][2] == birth for pid, birth in owned.items())
-        if not remaining:
+        snapshot, _ = discover()
+        remaining = sum(pid in snapshot and snapshot[pid][2] == birth
+                        for pid, birth in owned.items())
+        empty_checks = empty_checks + 1 if not remaining else 0
+        if empty_checks >= 2:
             break
         time.sleep(0.02)
     return dict(owned_processes=len(owned), reaped_descendants=reaped,
@@ -149,11 +169,12 @@ def run_suites(repo,out,suites,timeouts=None):
                 snapshot = _processes()
                 orphans = {pid: state for pid, (ppid, state, birth) in snapshot.items()
                            if ppid == os.getpid() and (pid, birth) not in prior_children}
-                if not timed_out and orphans:
+                if orphans:
                     leaked_processes = any(state != "Z" for state in orphans.values())
                     cleanup = _terminate_owned(proc, prior_children)
-                if cleanup and cleanup["remaining_owned"]:
-                    unresolved_cleanup = True
+                if cleanup:
+                    leaked_processes |= bool(cleanup["remaining_owned"])
+                    unresolved_cleanup = bool(cleanup["remaining_owned"] or cleanup["signal_errors"])
             status='FAIL' if timed_out or leaked_processes else 'PASS' if rc==0 else 'SKIP' if rc==77 else 'FAIL'
         except OSError:
             rc=None;status='BLOCKED'

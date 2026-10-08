@@ -37,6 +37,7 @@ sys.path.insert(0, os.path.join(REPO, "tests", "vm"))
 sys.path.insert(0, os.path.join(REPO, "tests", "perf"))
 
 from compare import assess, compare
+from export_validation import validate_perf_pairs
 from consume import check_conservation, parse_consume_file
 from vm_boot import cleanup, run_guest, verify_exports
 
@@ -118,6 +119,14 @@ def run_flow():
             names += ["p%d-lc.txt" % pair, "p%d-cp.txt" % pair]
         got = verify_exports(tmp, "perf", names)
         pairs = json.loads(got["pairs.json"].read_text())
+        validate_perf_pairs(pairs, expected_count=6)
+        windows = {"p%d-%s.txt" % (pair, ring)
+                   for pair in range(6) for ring in ("lc", "cp")}
+        exported_windows = {name for name in got if name.endswith(("-lc.txt", "-cp.txt"))}
+        if exported_windows != windows:
+            raise ValueError("missing or unexpected perf probe window")
+        if len({got[name].resolve() for name in windows}) != len(windows):
+            raise ValueError("reused perf probe window")
         ping_base, ping_obs, dd_base, dd_obs = [], [], [], []
         bad = []
         for legs in pairs:
@@ -174,9 +183,17 @@ def run_flow():
             status, note = assess(verdict)
             print("perf-workload: %s target %s: %s"
                   % (verdict["workload"], status, note))
-            if status != "PASS":
+            if status == "UNQUALIFIED":
+                bad.append("%s %s: %s" % (verdict["workload"], status, note))
+            elif status == "FAIL":
                 limits.append("%s %s: %s"
                               % (verdict["workload"], status, note))
+        if bad:
+            print("FAIL perf-workload:")
+            for line in bad:
+                print("  " + line)
+            print(f"gate artifacts kept at {tmp}")
+            return 1
         if limits:
             for line in limits:
                 print("perf-workload: LIMITATION: " + line)

@@ -65,3 +65,58 @@ def test_timeout_reaps_descendants_in_separate_sessions(tmp_path):
     receipt=json.loads((tmp_path/'out/results.json').read_text())
     assert code==1 and receipt['lanes'][0]['timed_out'] is True
     assert receipt['lanes'][0]['cleanup']['remaining_owned']==0
+
+
+def test_term_handler_child_is_retired_before_later_lane(tmp_path):
+    import os, shlex, signal, subprocess, sys
+    module = load()
+    repo = tmp_path / 'repo'
+    (repo / 'tools').mkdir(parents=True)
+    childfile = tmp_path / 'term-child.pid'
+    later = tmp_path / 'later.started'
+    tool = repo / 'tools/test'
+    tool.write_text('#!/bin/sh\n'
+        'if [ "$1" = later ]; then test ! -e /proc/$(cat ' + shlex.quote(str(childfile)) + ') && touch ' + shlex.quote(str(later)) + '; exit $?; fi\n'
+        "trap 'setsid sleep 30 </dev/null >/dev/null 2>&1 & echo $! > " + shlex.quote(str(childfile)) + "; exit 0' TERM\n"
+        'while :; do sleep 5; done\n')
+    tool.chmod(0o755)
+    unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+    try:
+        code = module.run_suites(repo, tmp_path / 'out', ['finite', 'later'], {'finite': .2, 'later': 1})
+        pid = int(childfile.read_text())
+        receipt = json.loads((tmp_path / 'out/results.json').read_text())
+        assert code == 1 and receipt['lanes'][0]['timed_out'] is True
+        assert not (Path('/proc') / str(pid)).exists()
+        assert receipt['lanes'][0]['cleanup']['remaining_owned'] == 0
+        assert receipt['lanes'][1]['status'] == 'PASS' and later.exists()
+        assert unrelated.poll() is None
+    finally:
+        if childfile.exists():
+            pid = int(childfile.read_text())
+            if pid in module._processes():
+                os.kill(pid, signal.SIGKILL)
+            try:
+                os.waitpid(pid, 0)
+            except ChildProcessError:
+                pass
+        unrelated.kill()
+        unrelated.wait()
+
+
+def test_uncertain_cleanup_blocks_later_lane(tmp_path, monkeypatch):
+    module = load()
+    repo = tmp_path / 'repo'
+    (repo / 'tools').mkdir(parents=True)
+    later = tmp_path / 'later.started'
+    tool = repo / 'tools/test'
+    tool.write_text('#!/bin/sh\nif [ "$1" = later ]; then touch ' + str(later) + '; else sleep 30; fi\n')
+    tool.chmod(0o755)
+    terminate = module._terminate_owned
+    def uncertain(proc, prior):
+        result = terminate(proc, prior)
+        result['signal_errors'] = 1
+        return result
+    monkeypatch.setattr(module, '_terminate_owned', uncertain)
+    assert module.run_suites(repo, tmp_path / 'out', ['finite', 'later'], {'finite': .2}) == 1
+    receipt = json.loads((tmp_path / 'out/results.json').read_text())
+    assert receipt['lanes'][1]['status'] == 'BLOCKED' and not later.exists()

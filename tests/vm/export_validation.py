@@ -71,6 +71,31 @@ def inventory_snapshot(doc):
         raise ValueError('invalid work inventory')
 
 
+def validate_perf_pairs(pairs, expected_count=None):
+    """Bind ordered off/observed legs to distinct producer window IDs."""
+    if type(pairs) is not list:raise ValueError('invalid pairs')
+    for index, pair in enumerate(pairs):
+        if type(pair) is not list or len(pair)!=2:raise ValueError('invalid pair cardinality')
+        if [leg.get('mode') for leg in pair if type(leg) is dict] != ['off', 'observed']:
+            raise ValueError('invalid perf interleaving')
+        if any(leg.get('pair') != index for leg in pair):
+            raise ValueError('invalid perf pair identity')
+        for leg in pair:
+            keys(leg,('pair','mode','ping','dd','end_ns'),('attach_ns','detach_ns'))
+            if leg['mode'] not in ('off','observed'):raise ValueError('invalid perf mode')
+            integer(leg['pair']);integer(leg['end_ns'])
+            for k in ('attach_ns','detach_ns'):
+                if k in leg:integer(leg[k])
+            keys(leg['ping'],('tx','rx','seconds','p99_ms','sample_tx','sample_rx','sample_count'))
+            keys(leg['dd'],('bytes','seconds'))
+            for v in leg['ping'].values():
+                if v is not None and (type(v) not in (int,float) or not math.isfinite(v) or v < 0):raise ValueError('invalid ping metric')
+            for v in leg['dd'].values():
+                if type(v) not in (int,float) or not math.isfinite(v) or v < 0:raise ValueError('invalid dd metric')
+    if expected_count is not None and len(pairs) != expected_count:
+        raise ValueError("missing or unexpected perf pair identity")
+
+
 def validate_lifecycle_exports(got,sub):
     for name,path in got.items():
         if name=='identity.json': identity(strict_json(path.read_text()))
@@ -126,21 +151,7 @@ def validate_lifecycle_exports(got,sub):
             for k in ('start_ns','end_ns','detach_ns','ping_tx','ping_rx','disk_bytes'):integer(doc[k])
         elif name=='pairs.json':
             pairs=strict_json(path.read_text())
-            if type(pairs) is not list:raise ValueError('invalid pairs')
-            for pair in pairs:
-                if type(pair) is not list or len(pair)!=2:raise ValueError('invalid pair cardinality')
-                for leg in pair:
-                    keys(leg,('pair','mode','ping','dd','end_ns'),('attach_ns','detach_ns'))
-                    if leg['mode'] not in ('off','observed'):raise ValueError('invalid perf mode')
-                    integer(leg['pair']);integer(leg['end_ns'])
-                    for k in ('attach_ns','detach_ns'):
-                        if k in leg:integer(leg[k])
-                    keys(leg['ping'],('tx','rx','seconds','p99_ms','sample_tx','sample_rx','sample_count'))
-                    keys(leg['dd'],('bytes','seconds'))
-                    for v in leg['ping'].values():
-                        if v is not None and (type(v) not in (int,float) or not math.isfinite(v) or v < 0):raise ValueError('invalid ping metric')
-                    for v in leg['dd'].values():
-                        if type(v) not in (int,float) or not math.isfinite(v) or v < 0:raise ValueError('invalid dd metric')
+            validate_perf_pairs(pairs)
         else: raise ValueError('unrecognized lifecycle export '+name)
 
 
