@@ -102,6 +102,9 @@ def run_guest(mode, profile, obj, duration):
 
 def cleanup(tmp):
     """Remove the run dir, escalating only for root-owned files."""
+    if os.environ.get("MEMVEIL_VM_KEEP_EXPORTS") == "1":
+        print(f"gate exports retained at {tmp}")
+        return
     try:
         shutil.rmtree(tmp, ignore_errors=False)
         return
