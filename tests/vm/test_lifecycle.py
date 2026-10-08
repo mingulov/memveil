@@ -3,8 +3,8 @@
 """Low-rate lifecycle matrix in the disposable VM.
 
 Loads the oracle module at stepped rates (1, 10, 100 maps/s),
-captures with the lifecycle probes, and compares every report
-against the oracle ledger with zero tolerated mismatches. Also
+captures with the laboratory lifecycle probes, and compares decoded
+wire records against scripted module facts. Also
 checks the effective-copy equality at each step.
 """
 

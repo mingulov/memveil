@@ -32,12 +32,13 @@ def check_consistency(lc_events, cp_events, workload):
     class: a gate heuristic, explicitly not product
     correlation.
     """
-    bad = []
+    from consume import validate_records
+    bad = validate_records(lc_events + cp_events, "realio")
     maps = Counter()
     unmaps = Counter()
     for event in lc_events:
         key = (event["size"], event["dir"])
-        if event["kind"] == 1:
+        if event["kind"] == 1 and event["ok"] == 1:
             maps[key] += 1
         elif event["kind"] == 2:
             unmaps[key] += 1
@@ -47,7 +48,7 @@ def check_consistency(lc_events, cp_events, workload):
         if unmaps[key] > maps[key]:
             bad.append("orphan releases %r: %d unmaps > %d maps"
                        % (key, unmaps[key], maps[key]))
-    live_bytes = (sum(e["size"] for e in lc_events if e["kind"] == 1)
+    live_bytes = (sum(e["size"] for e in lc_events if e["kind"] == 1 and e["ok"] == 1)
                   - sum(e["size"] for e in lc_events if e["kind"] == 2))
     if live_bytes < 0:
         bad.append("negative live bytes %d" % live_bytes)
@@ -59,11 +60,12 @@ def check_consistency(lc_events, cp_events, workload):
     span = workload["end_ns"] - workload["start_ns"]
     for event in sorted(lc_events, key=lambda e: e["ktime"]):
         key = (event["size"], event["dir"])
-        if event["kind"] == 1:
+        if event["kind"] == 1 and event["ok"] == 1:
             pending.setdefault(key, []).append(event["ktime"])
-        else:
+        elif event["kind"] == 2:
             queue = pending.get(key, [])
             if not queue:
+                bad.append("chronological orphan release %r" % (key,))
                 continue
             lifetime = event["ktime"] - queue.pop(0)
             if lifetime < 0:
@@ -82,7 +84,9 @@ def check_consistency(lc_events, cp_events, workload):
                 bad.append("bounce eff out of range %r" % event)
         else:
             bad.append("stray cp kind %d" % event["kind"])
-    return bad, live_bytes
+    if not any(e["kind"] == 2 and e["known"] and e["eff"] > 0 for e in cp_events):
+        bad.append("no independently decoded executed-copy record")
+    return sorted(bad), live_bytes
 
 
 def test_real_io_slice():
@@ -103,7 +107,7 @@ def test_real_io_slice():
         lc, lc_sum = parse_consume_file(str(got["io-lc.txt"]))
         cp, cp_sum = parse_consume_file(str(got["io-cp.txt"]))
         assert lc, "no lifecycle events under real I/O"
-        assert cp, "no copy events under real I/O"
+        assert any(e["kind"] == 2 for e in cp), "no executed-copy events under real I/O"
         bad = check_conservation(lc, lc_sum, "io-lc")
         bad += check_conservation(cp, cp_sum, "io-cp")
         consistent, live_bytes = check_consistency(lc, cp, workload)

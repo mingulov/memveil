@@ -36,7 +36,11 @@
     "btf_anchor": {
       "release": "7.0.0-34-generic",
       "id": 88177
-    }
+    },
+    "hook": "fentry:__swiotlb_sync_single_for_cpu",
+    "kind": "fentry",
+    "target": "__swiotlb_sync_single_for_cpu",
+    "authority": "kernel-source"
   },
   "expect_ok": true,
   "expect_reason": ""

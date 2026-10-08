@@ -12,6 +12,7 @@ claim unqualified.
 """
 
 import statistics
+import math
 
 
 def validate(runs):
@@ -28,18 +29,29 @@ def validate(runs):
 def _ratio(observer, baseline, field):
     base = baseline.get(field)
     obs = observer.get(field)
-    if base in (None, 0) or obs is None:
+    if type(base) not in (int, float) or type(obs) not in (int, float) or not math.isfinite(base) or not math.isfinite(obs) or base <= 0 or obs <= 0:
         return None
     return obs / base
 
 
 def compare(workload, baselines, observers, fields=("throughput", "p99")):
     """Compare interleaved pairs; return the verdict mapping."""
-    good_base, bad_base = validate(baselines)
-    good_obs, bad_obs = validate(observers)
-    excluded = (["baseline#%d: %s" % (i, r) for i, r in bad_base]
-                + ["observer#%d: %s" % (i, r) for i, r in bad_obs])
-    pairs = min(len(good_base), len(good_obs))
+    # Preserve original pair identities; independent filtering would re-pair
+    # a failed baseline with a different observer and fabricate valid pairs.
+    aligned = []
+    excluded = []
+    for i in range(max(len(baselines), len(observers))):
+        good = True
+        for label, runs in (("baseline", baselines), ("observer", observers)):
+            if i >= len(runs):
+                excluded.append("%s#%d: missing paired leg" % (label, i))
+                good = False
+            elif not validate([runs[i]])[0]:
+                excluded.append("%s#%d: %s" % (label, i, runs[i].get("invalid_reason", "unverified run")))
+                good = False
+        if good:
+            aligned.append((baselines[i], observers[i]))
+    pairs = len(aligned)
     verdict = {"workload": workload, "pairs": pairs,
                "excluded": excluded, "qualified": pairs >= 5,
                "fields": {}}
@@ -50,7 +62,7 @@ def compare(workload, baselines, observers, fields=("throughput", "p99")):
     for field in fields:
         ratios = []
         for i in range(pairs):
-            ratio = _ratio(good_obs[i], good_base[i], field)
+            ratio = _ratio(aligned[i][1], aligned[i][0], field)
             if ratio is not None:
                 ratios.append(ratio)
         if not ratios:
@@ -72,6 +84,8 @@ def assess(verdict, throughput_floor=0.95, p99_ceiling=1.10):
     if not verdict["qualified"]:
         return ("UNQUALIFIED",
                 verdict.get("reason", "too few valid pairs"))
+    if any(not field.get("qualified") for field in verdict["fields"].values()):
+        return ("UNQUALIFIED", "required metric lacks five valid paired samples")
     notes = []
     ok = True
     thr = verdict["fields"].get("throughput", {})

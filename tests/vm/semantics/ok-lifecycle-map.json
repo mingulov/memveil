@@ -1,7 +1,7 @@
 {
   "definition": {
-    "hook": "fentry:swiotlb_tbl_map_single",
-    "kind": "fentry",
+    "hook": "fexit:swiotlb_tbl_map_single",
+    "kind": "fexit",
     "target": "swiotlb_tbl_map_single",
     "signature": {
       "return": "phys_addr_t",
@@ -38,7 +38,11 @@
     "btf_anchor": {
       "release": "7.0.0-34-generic",
       "id": 154915
-    }
+    },
+    "hook": "fexit:swiotlb_tbl_map_single",
+    "kind": "fexit",
+    "target": "swiotlb_tbl_map_single",
+    "authority": "kernel-source"
   },
   "expect_ok": true,
   "expect_reason": ""

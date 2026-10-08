@@ -9,6 +9,9 @@ so repo paths resolve identically inside the guest.
 """
 
 import hashlib
+import json
+import fcntl
+import shutil
 import os
 import subprocess
 import sys
@@ -26,6 +29,22 @@ GUEST_FLOW = REPO / "tests" / "vm" / "guest_lifecycle.py"
 def run_guest(sub, timeout=900, network=False):
     """Boot the guest, run one lifecycle subcommand, return dir+proc."""
     prefix, env = gate_prefix()
+    from lifecycle_env import ensure_oracle_module
+    from harness_env import check_harness_versions
+    harness = check_harness_versions(prefix[-1])
+    lock_dir = REPO / "build" / "vm"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lease = (lock_dir / "suite.lock").open("a+")
+    try:
+        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lease.close()
+        raise ValueError("VM suite lease already owned")
+    try:
+        ensure_oracle_module()
+    except BaseException:
+        lease.close()
+        raise
     tmp = Path(tempfile.mkdtemp(prefix=f"vmgate-{sub}-"))
     work = "/tmp/vmgate-work"
     export = tmp / "export"
@@ -46,8 +65,16 @@ def run_guest(sub, timeout=900, network=False):
         "--exec",
         f"python3 {GUEST_FLOW} {sub} {work} /tmp/export {REPO}",
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True,
-                          timeout=timeout)
+    try:
+        from vm_process import run_owned_guest
+        proc = run_owned_guest(cmd, timeout=timeout)
+        (tmp / "harness.json").write_text(json.dumps(harness,sort_keys=True)+"\n")
+    except subprocess.TimeoutExpired as exc:
+        (tmp / "timeout.json").write_text(json.dumps(dict(timeout=timeout,status="FAIL"))+"\n")
+        print(f"timed-out gate artifacts kept at {tmp}")
+        raise
+    finally:
+        lease.close()
     return tmp, proc
 
 
@@ -75,9 +102,20 @@ def verify_exports(tmp, sub, names):
     want_files |= {f"{sub}-{n}.sha256" for n in names}
     have = {p.name for p in export.iterdir()}
     assert have == want_files, f"export inventory drift: {have ^ want_files}"
-    for name in names:
-        blob = got[name].read_bytes()
-        assert b"dev_addr" not in blob, f"raw address in {sub}-{name}"
+    from export_validation import validate_lifecycle_exports
+    validate_lifecycle_exports(got, sub)
+    if "identity.json" in got:
+        from lifecycle_env import ORACLE_KO, module_build_identity
+        expected = module_build_identity()
+        identity = json.loads(got["identity.json"].read_text())
+        for key in ("release", "config_sha", "btf_sha"):
+            assert identity[key] == expected[key], "guest kernel identity drift: " + key
+        for key, path in (("consume_sha",REPO/"build/vm/mv_consume"),
+                          ("lc_sha",REPO/"build/bpf/swiotlb_lifecycle.bpf.o"),
+                          ("cp_sha",REPO/"build/bpf/swiotlb_copy.bpf.o"),
+                          ("bridge_sha",REPO/"build/deps/lmb/lib/libbpf_mojo.so.1"),
+                          ("ko_sha",Path(ORACLE_KO))):
+            assert identity[key] == sha_file(path), "guest artifact mismatch: " + key
     return got
 
 

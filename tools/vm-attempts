@@ -3,12 +3,21 @@
 # A07 VM gate: live attempt capture with an ftrace oracle.
 #
 # Runs tests/vm/test_attempt_capture.py (correctness + saturation)
-# under the frozen harness (virtme-ng 1.40, qemu 10.2.1). Exit 77
+# under the frozen harness (virtme-ng 1.41, qemu 10.2.1). Exit 77
 # (SKIP) when vng, qemu, kvm, or the needed privilege is
 # missing; any other non-zero exit is a gate FAIL.
 set -u
 
+case "${1:-}" in
+    --help|-h) sed -n '2,/^set -u/p' "$0" | sed 's/^# //; s/^#//'; exit 0 ;;
+esac
+
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+if [ "${MEMVEIL_VM_ATTEMPTS:-0}" != "1" ]; then
+    echo "vm-attempts: SKIP: needs MEMVEIL_VM_ATTEMPTS=1" >&2
+    exit 77
+fi
+
 VNG="${VNG:-}"
 
 if [ -z "$VNG" ]; then
@@ -18,22 +27,22 @@ if [ -z "$VNG" ] && [ -x "$HOME/.venv/vng/bin/vng" ]; then
     VNG="$HOME/.venv/vng/bin/vng"
 fi
 if [ -z "$VNG" ]; then
-    echo "vm-attempts: SKIP: vng not available" >&2
-    exit 77
+    echo "vm-attempts: BLOCKED: armed but vng not available" >&2
+    exit 1
 fi
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    echo "vm-attempts: SKIP: qemu-system-x86_64 not available" >&2
-    exit 77
+    echo "vm-attempts: BLOCKED: armed but qemu-system-x86_64 not available" >&2
+    exit 1
 fi
 if [ ! -e /dev/kvm ]; then
-    echo "vm-attempts: SKIP: /dev/kvm not available" >&2
-    exit 77
+    echo "vm-attempts: BLOCKED: armed but /dev/kvm not available" >&2
+    exit 1
 fi
 REL=$(uname -r)
 if [ ! -r "/boot/vmlinuz-$REL" ] || [ ! -w /dev/kvm ]; then
     if ! sudo -n true 2>/dev/null; then
-        echo "vm-attempts: SKIP: vng needs root, no passwordless sudo" >&2
-        exit 77
+        echo "vm-attempts: BLOCKED: armed but vng needs root, no passwordless sudo" >&2
+        exit 1
     fi
     echo "vm-attempts: vng runs under sudo -n" >&2
 fi

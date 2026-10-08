@@ -36,7 +36,11 @@
     "btf_anchor": {
       "release": "7.0.0-34-generic",
       "id": 154898
-    }
+    },
+    "hook": "fentry:swiotlb_bounce",
+    "kind": "fentry",
+    "target": "swiotlb_bounce",
+    "authority": "kernel-source"
   },
   "expect_ok": true,
   "expect_reason": ""

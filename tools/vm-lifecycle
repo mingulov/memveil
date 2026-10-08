@@ -8,6 +8,10 @@
 # fails instead of skipping.
 set -u
 
+case "${1:-}" in
+    --help|-h) sed -n '2,/^set -u/p' "$0" | sed 's/^# //; s/^#//'; exit 0 ;;
+esac
+
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 
 if [ "${MEMVEIL_VM_LIFECYCLE:-0}" != "1" ]; then

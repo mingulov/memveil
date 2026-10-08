@@ -60,4 +60,37 @@ def test_invalid_runs_never_silent():
     obs = [run(99, 10.5)] * 5
     verdict = compare("w", base, obs)
     assert verdict["qualified"] is True
-    assert verdict["excluded"] == ["baseline#5: env drift"]
+    assert verdict["excluded"] == ["baseline#5: env drift", "observer#5: missing paired leg"]
+
+
+def test_invalid_pair_cannot_cross_borrow_neighbor():
+    base=[run(100+i,10) for i in range(6)]
+    obs=[run(100+i,10) for i in range(6)]
+    base[0]=run(0,0,False,'base failed')
+    obs[1]=run(0,0,False,'observer failed')
+    assert compare('w',base,obs)['pairs']==4
+    assert compare('w',base,obs)['qualified'] is False
+
+
+def test_absent_latency_cannot_earn_target_pass():
+    verdict=compare('w',[run(100,None)]*5,[run(100,None)]*5)
+    assert assess(verdict)[0]=='UNQUALIFIED'
+
+
+def test_nonfinite_ratio_cannot_qualify():
+    verdict=compare('w',[run(100,10)]*5,[run(float('nan'),10)]*5)
+    assert assess(verdict)[0]=='UNQUALIFIED'
+
+
+def test_dd_only_can_qualify_its_explicit_fields():
+    verdict=compare('dd',[run(100,None)]*5,[run(100,None)]*5,fields=('throughput',))
+    assert assess(verdict)[0]=='PASS'
+
+
+def test_workload_requires_completed_latency_sample():
+    from workloads import leg_runs
+    leg=dict(ping=dict(tx=1000,rx=1000,seconds=1,p99_ms=1,
+                       sample_tx=500,sample_rx=499,sample_count=499),
+             dd=dict(bytes=32*16*65536,seconds=1))
+    ping,dd=leg_runs(leg,0,'off')
+    assert ping['valid'] is False

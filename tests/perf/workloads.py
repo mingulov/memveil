@@ -87,6 +87,8 @@ def leg_runs(leg, pair, mode):
         reasons.append("dd bytes %r" % (dd["bytes"],))
     if dd["seconds"] is None or dd["seconds"] <= 0:
         reasons.append("dd time %r" % (dd["seconds"],))
+    if any(ping.get(k) != 500 for k in ("sample_tx", "sample_rx", "sample_count")):
+        reasons.append("incomplete independently counted latency sample")
     valid = not reasons
     reason = "; ".join(reasons) if reasons else ""
     ping_run = {"valid": valid and ping["p99_ms"] is not None,
@@ -150,7 +152,7 @@ def run_flow():
             dd_base.append(base_dd)
             dd_obs.append(obs_dd)
         ping_verdict = compare("ping", ping_base, ping_obs)
-        dd_verdict = compare("dd", dd_base, dd_obs)
+        dd_verdict = compare("dd", dd_base, dd_obs, fields=("throughput",))
         for verdict in (ping_verdict, dd_verdict):
             print("perf-workload: %s pairs=%d excluded=%d %s"
                   % (verdict["workload"], verdict["pairs"],
@@ -178,8 +180,8 @@ def run_flow():
         if limits:
             for line in limits:
                 print("perf-workload: LIMITATION: " + line)
-        print("perf-workload: PASS: qualified paired "
-              "measurement (off vs observed)")
+        print("perf-workload: PASS: paired laboratory "
+              "measurement (off vs observed); full product overhead NOT RUN")
     except Exception as exc:
         print(f"FAIL perf-workload: {exc}")
         print(f"gate artifacts kept at {tmp}")

@@ -131,6 +131,51 @@ def parse_consume_file(path):
     return events, summary
 
 
+def validate_records(events, tag):
+    """Validate the entire retained window, including loss/short windows."""
+    bad = []
+    for e in events:
+        ok = all(type(v) is int and 0 <= v < 1 << 64
+                 for k, v in e.items() if k != "ring")
+        if e.get("ring") == "lc":
+            ok = ok and e["kind"] in (1, 2) and e["dir"] in (0, 1, 2)
+            ok = ok and e["ok"] in (0, 1) and e["skip"] in (0, 1)
+            ok = ok and (e["kind"] != 1 or e["skip"] == 0)
+            ok = ok and (e["kind"] != 2 or e["ok"] == 1)
+        elif e.get("ring") == "cp":
+            ok = ok and e["kind"] in (1, 2) and e["dir"] in (0, 1, 2)
+            ok = ok and all(e[k] in (0, 1) for k in
+                            ("todev", "known", "clamp", "ezero"))
+            if e["kind"] == 1:
+                ok = ok and (e["known"], e["reason"], e["eff"],
+                             e["clamp"], e["ezero"]) == (0, 4, 0, 0, 0)
+            elif e["kind"] == 2:
+                ok = ok and e["dir"] in (1, 2)
+                ok = ok and e["todev"] == int(e["dir"] == 1)
+                if e["known"]:
+                    ok = ok and e["reason"] == 0 and e["eff"] <= e["req"]
+                    ok = ok and (not e["ezero"] or e["eff"] == 0)
+                    ok = ok and (not e["clamp"] or e["eff"] < e["req"])
+                    ok = ok and (e["clamp"] or e["ezero"] or e["eff"] == e["req"])
+                else:
+                    ok = ok and e["reason"] in (1, 2, 3) and e["eff"] == 0
+                    ok = ok and (e["clamp"], e["ezero"]) == (0, 0)
+        else:
+            ok = False
+        if not ok:
+            bad.append("%s: invalid semantic record seq=%r" % (tag, e.get("seq")))
+    return sorted(bad)
+
+
+def check_retained_script(lc, cp, ops, fail_op, tag):
+    """Retained classes must be a submultiset of independent script facts."""
+    from collections import Counter
+    want = scripted_expectation(ops, fail_op)
+    got = consumed_multisets(lc, cp)
+    return sorted("%s: retained %s outside oracle" % (tag, key)
+                  for key in want if Counter(got[key]) - Counter(want[key]))
+
+
 def check_conservation(events, summary, tag):
     """Check one window's counter conservation laws.
 
@@ -141,7 +186,9 @@ def check_conservation(events, summary, tag):
     epoch; bridge delivery is exact (received equals delivered,
     nothing malformed or dropped).
     """
-    bad = []
+    bad = validate_records(events, tag)
+    if any(type(v) is not int or v < 0 for v in summary.values()):
+        return sorted(bad + [tag + ": invalid summary counters"])
     size_key = "size" if events and events[0]["ring"] == "lc" else "req"
     if not events:
         size_key = "req"
@@ -165,17 +212,17 @@ def check_conservation(events, summary, tag):
     if delivered_bytes != summary["cnt_emitb"]:
         bad.append("%s: delivered bytes %d != emitted %d"
                    % (tag, delivered_bytes, summary["cnt_emitb"]))
+    if len(events) != summary["cnt_emit"] or len(events) != summary["dlv"]:
+        bad.append("%s: emitted/delivered cardinality differs from retained" % tag)
     seqs = [e["seq"] for e in events]
     if len(set(seqs)) != len(seqs):
         bad.append("%s: duplicate seq" % tag)
     if seqs != sorted(seqs):
         bad.append("%s: seq out of order" % tag)
-    if seqs:
-        if seqs[0] != 0:
-            bad.append("%s: first seq %d != 0" % (tag, seqs[0]))
-        if seqs[-1] + 1 != summary["cnt_obs"]:
-            bad.append("%s: max seq %d vs observed %d"
-                       % (tag, seqs[-1], summary["cnt_obs"]))
+    if any(seq >= summary["cnt_obs"] for seq in seqs):
+        bad.append("%s: sequence outside observed epoch" % tag)
+    if summary["cnt_obs"] - len(set(seqs)) != summary["cnt_fail"]:
+        bad.append("%s: ordinal holes differ from submit loss" % tag)
     if summary["rx"] != summary["dlv"]:
         bad.append("%s: bridge rx %d != dlv %d"
                    % (tag, summary["rx"], summary["dlv"]))
@@ -212,13 +259,21 @@ def parse_oracle_log(path):
             hit = ORACLE_ATTEMPT.match(body)
             if hit:
                 entry = op_entry(int(hit.group(1)))
+                if "requested" in entry:
+                    raise ValueError("duplicate oracle attempt")
                 entry["requested"] = int(hit.group(2))
                 entry["forced"] = int(hit.group(3))
                 continue
             hit = ORACLE_OUTCOME.match(body)
             if hit:
                 entry = op_entry(int(hit.group(1)))
+                if "success" in entry:
+                    raise ValueError("duplicate oracle outcome")
                 entry["success"] = hit.group(2) == "success"
+                if entry["success"] and (hit.group(3) is None or hit.group(4) is None):
+                    raise ValueError("oracle success lacks mapping/bytes")
+                if not entry["success"] and hit.group(5) is None:
+                    raise ValueError("oracle failure lacks return code")
                 if entry["success"]:
                     entry["mapping"] = int(hit.group(3))
                     entry["mapped"] = int(hit.group(4))
@@ -231,14 +286,18 @@ def parse_oracle_log(path):
             if hit:
                 entry = op_entry(int(hit.group(1)))
                 entry["syncs"].append(
-                    {"dir": int(hit.group(3)), "len": int(hit.group(4))})
+                    {"mapping": int(hit.group(2)), "dir": int(hit.group(3)), "len": int(hit.group(4))})
                 continue
             hit = ORACLE_RELEASE.match(body)
             if hit:
+                if int(hit.group(1)) in releases:
+                    raise ValueError("duplicate oracle release")
                 releases[int(hit.group(1))] = int(hit.group(2))
                 continue
             hit = ORACLE_COMPLETE.match(body)
             if hit:
+                if complete_ops is not None:
+                    raise ValueError("duplicate oracle completion")
                 complete_ops = int(hit.group(1))
                 continue
             if re.match(r"^op=\d+ mapping=\d+ (held-open|exit-release)$",
@@ -422,7 +481,7 @@ def check_oracle_script(ops_log, releases, complete_ops, ops,
             bad.append("%s: op %d %d syncs want %d"
                        % (tag, i, len(syncs), want_syncs))
         for sync in syncs:
-            if sync != {"dir": want_dir, "len": want_size}:
+            if sync != {"mapping": i, "dir": want_dir, "len": want_size}:
                 bad.append("%s: op %d sync %r" % (tag, i, sync))
     want_released = sorted(i for i in range(ops) if i != fail_op)
     if sorted(releases) != want_released:
@@ -445,12 +504,15 @@ def replay_oracle_ledger(ops_log, releases):
         entry = ops_log[i]
         ledger.record_attempt(i, "dev-1", entry["requested"],
                               entry["forced"])
+        # The fail-probe has a successful inner allocation, released
+        # internally before its deliberately failed outer result.
+        size = entry["requested"]
+        ledger.record_allocation(i, True, mapping=i, mapped_bytes=size)
+        ledger.record_copy(i, "original_to_bounce", size, mapping=i)
         if entry.get("success") is True:
             size = entry["mapped"]
             ledger.record_outcome(i, True, mapping=i,
                                   mapped_bytes=size)
-            ledger.record_copy(i, "original_to_bounce", size,
-                               mapping=i)
             direction = (entry["syncs"][0]["dir"]
                          if entry["syncs"] else None)
             for sync in entry["syncs"]:
@@ -463,6 +525,7 @@ def replay_oracle_ledger(ops_log, releases):
         else:
             ledger.record_outcome(i, False,
                                   return_code=entry.get("rc"))
+            ledger.record_release(i)
     for mapping in sorted(releases):
         ledger.record_release(mapping, releases[mapping])
     ledger.seal()
@@ -480,7 +543,7 @@ def _live_event(session_id, seq, ts_ns, kind, hook, profile_id,
         "source": {"hook": hook, "backend": "tracing",
                    "profile_id": profile_id,
                    "measurement": "observed",
-                   "correlation": "direct"},
+                   "correlation": "unpaired"},
         "data": data,
     }
 
@@ -489,10 +552,11 @@ def translate_session(lc_events, cp_events, ops_log, out_dir,
                       session_id, profile_id):
     """Translate one scripted window into a live session dir.
 
+    This is a synthetic reconstruction, not a product capture.
     Pairing is by request size, which the scripted traffic
     keeps unique per op; anything ambiguous fails loudly
     instead of guessing. The caller must verify counter
-    conservation first: the session claims complete detail.
+    conservation first: no writer-quiescence guarantee is inferred.
     Returns the (probe_lifetimes, ordinals) pairing record.
     """
     sizes = {}
@@ -557,8 +621,10 @@ def translate_session(lc_events, cp_events, ops_log, out_dir,
                  "bytes": str(event["eff"])})))
     for i, entry in sorted(ops_log.items()):
         size = entry["requested"]
-        staged.append((map_ktime[size] - 1, -1, _live_event(
-            session_id, 0, map_ktime[size] - 1, "bounce_attempt",
+        first = min(e["ktime"] for e in lc_events + cp_events
+                    if e.get("size", e.get("req")) == size)
+        staged.append((first - 1, -1, _live_event(
+            session_id, 0, first - 1, "bounce_attempt",
             "swiotlb:swiotlb_bounced", profile_id,
             {"device_id": "dev-1",
              "requested_bytes": str(size), "forced": False,
@@ -566,6 +632,8 @@ def translate_session(lc_events, cp_events, ops_log, out_dir,
     staged.sort(key=lambda item: (item[0], item[1]))
     events = []
     for seq, (_, _, event) in enumerate(staged, 1):
+        if event["kind"] == "bounce_attempt":
+            event["source"]["measurement"] = "derived"
         event["seq"] = str(seq)
         events.append(event)
     start = min(e["ktime"] for e in lc_events + cp_events) - 1
@@ -573,7 +641,7 @@ def translate_session(lc_events, cp_events, ops_log, out_dir,
     session = {
         "schema_version": "0.1.0",
         "session_id": session_id,
-        "synthetic": False,
+        "synthetic": True,
         "product": {"name": "memveil", "version": "0.1.0",
                     "build": None},
         "environment": {"mode": "unknown",
@@ -581,7 +649,7 @@ def translate_session(lc_events, cp_events, ops_log, out_dir,
                         "asserted_mode": None,
                         "attestation": "not_performed",
                         "evidence": []},
-        "capture": {"mode": "live",
+        "capture": {"mode": "synthetic",
                     "window": {"start_ns": str(start),
                                "end_ns": str(end)},
                     "filters": {"device": None},
@@ -602,7 +670,7 @@ def translate_session(lc_events, cp_events, ops_log, out_dir,
                           "loss_count": None,
                           "scope": "counter snapshots",
                           "reason": "No counter snapshots."},
-            "correlation": {"status": "complete_for_scope",
+            "correlation": {"status": "partial",
                             "loss_count": "0",
                             "scope": "size-paired live events",
                             "reason": "Unique sizes pair."},
@@ -610,10 +678,10 @@ def translate_session(lc_events, cp_events, ops_log, out_dir,
                          "loss_count": None,
                          "scope": "lifecycle metrics",
                          "reason": "No baseline needed."},
-            "terminal": {"status": "complete_for_scope",
+            "terminal": {"status": "partial",
                          "loss_count": "0",
                          "scope": "gate finalization",
-                         "reason": "Gate finalized."}},
+                         "reason": "Reconstructed fixture; writer quiescence not proved."}},
     }
     for cap, hook in (
             ("bounce_attempts", "swiotlb:swiotlb_bounced"),
@@ -624,7 +692,7 @@ def translate_session(lc_events, cp_events, ops_log, out_dir,
              "swiotlb:__swiotlb_sync_single")):
         session["capabilities"][cap] = {
             "status": "verified",
-            "reason": "Live gate observation.",
+            "reason": "Synthetic fixture reconstruction; not live product qualification.",
             "hooks": [hook], "profile_id": profile_id}
     for cap in ("conversion_results", "region_state",
                 "pool_stats", "task_context"):
@@ -651,57 +719,33 @@ def translate_session(lc_events, cp_events, ops_log, out_dir,
     return probe_lifetimes
 
 
-def compare_live(report, ledger):
-    """Compare a live report against the oracle ledger.
+def compare_live(report, ledger, probe_lifetimes=None):
+    """Exact reducer comparison to probe intervals; module bound is separate.
 
-    Allocation, copy, live/open, and completed-count rules
-    match compare() exactly. Lifetimes differ by
-    construction: the module measures map-entry to
-    unmap-exit (including its own printk latency) while the
-    probes stamp the inner call, so the probe interval sits
-    strictly inside the module interval and the two
-    observers may straddle a histogram boundary. The gate
-    asserts that ordering per mapping (exact) and lifts it
-    to the mean and p50/p99 edges (bucketing is monotone),
-    instead of exact cross-observer equality. Returns
-    mismatches.
+    This compares a synthetic translated report. A module duration alone
+    cannot establish interval containment or authorize arbitrary lower metrics.
     """
     from oracle_ledger import compare
-    bad = [m for m in compare(report, ledger)
-           if not (m.startswith("lifetime_mean_ns")
-                   or m.startswith("lifetime_p50_ns")
-                   or m.startswith("lifetime_p99_ns"))]
-    metrics = {}
-    for m in report["metrics"]:
-        dims = m["dimensions"]
-        if dims["device_id"] is None and dims["pool_id"] is None:
-            metrics[m["name"]] = m
-    want_durs = ledger.expected_lifetimes()
-    if want_durs:
-        mean = metrics.get("lifetime_mean_ns")
-        if mean is None or mean["value"] is None:
-            bad.append("missing metric lifetime_mean_ns")
-        elif int(mean["value"]) > sum(want_durs) // len(want_durs):
-            bad.append("lifetime_mean_ns %s exceeds ledger %d"
-                       % (mean["value"],
-                          sum(want_durs) // len(want_durs)))
-        for frac, name in ((50, "lifetime_p50_ns"),
-                           (99, "lifetime_p99_ns")):
-            got = metrics.get(name)
-            if got is None or got["value"] is None:
-                bad.append("missing metric " + name)
-                continue
-            rank = nearest_rank(frac, 100, len(want_durs))
-            truth = sorted(want_durs)[rank - 1]
-            edge = bucket_upper_edge(bucket_of(truth))
-            if int(got["value"]) > edge:
-                bad.append("%s %s exceeds ledger edge %d"
-                           % (name, got["value"], edge))
-    return sorted(bad)
+    if probe_lifetimes is None:
+        return ["missing independently extracted probe lifetimes"]
+    aligned = OracleLedger()
+    for e in ledger.entries:
+        e = dict(e)
+        if e["kind"] == "release" and e["duration_ns"] is not None:
+            slot = probe_lifetimes.get(e["mapping"], {})
+            if "map" not in slot or "unmap" not in slot:
+                return ["unpaired independently extracted probe lifetime"]
+            e["duration_ns"] = slot["unmap"] - slot["map"]
+            if e["duration_ns"] < 0:
+                return ["negative independently extracted probe lifetime"]
+        kind = e.pop("kind")
+        aligned._add(kind, **e)
+    aligned.seal()
+    return compare(report, aligned)
 
 
 def check_lifetime_ordering(probe_lifetimes, releases, tag):
-    """Probe intervals sit inside module intervals, per mapping."""
+    """Duration upper bound only; this does not prove interval containment."""
     bad = []
     for op, slot in sorted(probe_lifetimes.items()):
         if "map" not in slot or "unmap" not in slot:

@@ -2,7 +2,7 @@
 
 """A07 VM gate: live attempt capture with an ftrace oracle.
 
-Two boots of the frozen harness (virtme-ng 1.40, qemu 10.2.1,
+Two boots of the frozen harness (virtme-ng 1.41, qemu 10.2.1,
 host kernel 7.0.0-34-generic, 6G, pcnet32 stimulus): a
 correctness run demanding exact cross-equalities with zero
 loss, and a SIGSTOP saturation run demanding exact loss
@@ -49,19 +49,24 @@ def find_vng():
 def gate_prefix():
     """vng invocation prefix, or pytest.skip when unrunnable."""
     vng = find_vng()
+    armed = any(v == "1" for k, v in os.environ.items()
+                if k.startswith("MEMVEIL_VM_"))
+    refuse = pytest.fail if armed else pytest.skip
     if not vng:
-        pytest.skip("vng not available")
+        refuse("vng not available")
     if not shutil.which("qemu-system-x86_64"):
-        pytest.skip("qemu-system-x86_64 not available")
+        refuse("qemu-system-x86_64 not available")
     if not os.path.exists("/dev/kvm"):
-        pytest.skip("/dev/kvm not available")
+        refuse("/dev/kvm not available")
+    from harness_env import check_harness_versions
+    check_harness_versions(vng)
     rel = os.uname().release
     vmlinuz = f"/boot/vmlinuz-{rel}"
     if os.access(vmlinuz, os.R_OK) and os.access("/dev/kvm", os.W_OK):
         return [vng], dict(os.environ)
     r = subprocess.run(["sudo", "-n", "true"], capture_output=True)
     if r.returncode != 0:
-        pytest.skip("vng needs root and no passwordless sudo")
+        refuse("vng needs root and no passwordless sudo")
     env = dict(os.environ)
     env["PATH"] = (
         str(Path(vng).parent)
@@ -71,6 +76,8 @@ def gate_prefix():
 
 
 def run_guest(mode, profile, obj, duration):
+    if os.environ.get("MEMVEIL_VM_ATTEMPTS") != "1":
+        pytest.skip("attempt VM gates need MEMVEIL_VM_ATTEMPTS=1")
     prefix, env = gate_prefix()
     tmp = Path(tempfile.mkdtemp(prefix=f"vmgate-{mode}-"))
     # Guest /tmp is a private overlay: work files never reach the
@@ -88,7 +95,8 @@ def run_guest(mode, profile, obj, duration):
         f"python3 {GUEST_FLOW} {mode} {work} /tmp/export {REPO}"
         f" {profile} {obj} {BRIDGE} {duration}",
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+    from vm_process import run_owned_guest
+    proc = run_owned_guest(cmd, timeout=900)
     return tmp, proc
 
 
@@ -134,9 +142,8 @@ def verify_exports(tmp, mode):
     want_files |= {f"{mode}-{n}.sha256" for n in EXPORT_NAMES}
     have = {p.name for p in export.iterdir()}
     assert have == want_files, f"export inventory drift: {have ^ want_files}"
-    for name in EXPORT_NAMES:
-        blob = got[name].read_bytes()
-        assert b"dev_addr" not in blob, f"raw address in {mode}-{name}"
+    from export_validation import validate_attempt_exports
+    validate_attempt_exports(got)
     return got
 
 
@@ -148,12 +155,15 @@ def parse_oracle(path):
     """(events, lost_lines) from the guest oracle (strict schema)."""
     doc = json.loads(path.read_text())
     assert set(doc) == {
-        "schema", "lost_lines", "pipe_bytes", "pipe_lines", "events",
+        "schema", "lost_lines", "pipe_bytes", "pipe_lines", "header_lines", "blank_lines", "events",
     }, set(doc)
     assert doc["schema"] == "memveil-vm-oracle/1", doc["schema"]
     assert _is_int(doc["lost_lines"]), doc["lost_lines"]
     assert _is_int(doc["pipe_bytes"]), doc["pipe_bytes"]
     assert _is_int(doc["pipe_lines"]), doc["pipe_lines"]
+    for key in ("lost_lines", "pipe_bytes", "pipe_lines", "header_lines", "blank_lines"):
+        assert _is_int(doc[key]) and doc[key] >= 0, key
+    assert doc["pipe_lines"] == len(doc["events"]) + doc["lost_lines"] + doc["header_lines"] + doc["blank_lines"]
     events = []
     assert isinstance(doc["events"], list), type(doc["events"])
     for e in doc["events"]:
@@ -325,6 +335,10 @@ def check_correctness(tmp):
     loss = int(detail.get("loss_count") or 0)
     assert loss == 0, detail
     assert len(o_in) == len(p_in) + loss, (len(o_in), len(p_in), loss)
+    from collections import Counter
+    assert not (Counter((e["size"], e["forced"]) for e in p_in) - Counter((e["size"], e["forced"]) for e in o_in))
+    from collections import Counter
+    assert Counter((e["size"], e["forced"]) for e in o_in) == Counter((e["size"], e["forced"]) for e in p_in)
     o_bytes = sum(e["size"] for e in o_in)
     p_bytes = sum(a["size"] for a in p_in)
     assert o_bytes == p_bytes, (o_bytes, p_bytes)
@@ -408,6 +422,8 @@ def check_saturation(tmp):
     loss = int(detail.get("loss_count") or 0)
     assert loss > 0, detail
     assert len(o_in) == len(p_in) + loss, (len(o_in), len(p_in), loss)
+    from collections import Counter
+    assert not (Counter((e["size"], e["forced"]) for e in p_in) - Counter((e["size"], e["forced"]) for e in o_in))
     m = re.search(r"submit_fail=\((\d+)\)", detail.get("reason", ""))
     assert m and int(m.group(1)) > 0, detail.get("reason")
     cap_dir = tmp / "cap-report"
@@ -424,6 +440,11 @@ def check_saturation(tmp):
     assert bounce and counter
     assert int(bounce["value"]) + loss == int(counter["value"])
     assert int(counter["value"]) == len(o_in)
+    req = global_metric(report, "requested_bounce_bytes")
+    counter_req = global_metric(report, "counter_requested_bounce_bytes")
+    assert req and counter_req
+    assert int(req["value"]) == sum(e["size"] for e in p_in)
+    assert int(counter_req["value"]) == sum(e["size"] for e in o_in)
     print(
         f"saturation: oracle={len(o_in)} persisted={len(p_in)}"
         f" loss={loss} exact"
