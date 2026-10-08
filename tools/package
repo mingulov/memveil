@@ -127,17 +127,32 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def git_rev_or_none(path):
+def owns_git_root(path):
+    """Require the canonical source root to equal Git's top-level.
+
+    Source exports can live under unrelated repositories. Linked
+    worktrees and submodules still qualify when .git is a file.
+    """
     try:
-        proc = run(["git", "-C", path, "rev-parse", "HEAD"])
+        proc = run(["git", "-C", path, "rev-parse", "--show-toplevel"])
     except FileNotFoundError:
+        return False
+    return (proc.returncode == 0 and bool(proc.stdout.strip())
+            and os.path.realpath(proc.stdout.strip()) == os.path.realpath(path))
+
+
+def git_rev_or_none(path):
+    if not owns_git_root(path):
         return None
+    proc = run(["git", "-C", path, "rev-parse", "HEAD"])
     if proc.returncode != 0:
         return None
     return proc.stdout.strip()
 
 
 def git_clean(path):
+    if not owns_git_root(path):
+        fail("cannot inspect owning Git tree at %s" % path)
     proc = run(["git", "-C", path, "status", "--short"])
     if proc.returncode != 0:
         fail("cannot inspect %s" % path)

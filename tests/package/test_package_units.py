@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Unit tests for packaging validators and the trace audit.
+"""Unit tests for packaging validators, source identity and trace audit.
 
-No builds, no bundle, no subprocesses: tools/package validators
+No builds or bundle: tools/package validators
 are imported from the wrapper, and cleanroom helpers run over
 synthetic fixtures, including the reviewer's interleaved
 success/failure counterexamples.
@@ -10,6 +10,7 @@ success/failure counterexamples.
 
 import importlib.util
 import os
+import subprocess
 from importlib.machinery import SourceFileLoader
 
 import pytest
@@ -30,6 +31,48 @@ def load_package_tool():
 
 
 PKG = load_package_tool()
+
+
+def _git(root, *args):
+    return subprocess.check_output(["git", "-C", str(root), *args],
+                                   stderr=subprocess.DEVNULL, text=True).strip()
+
+
+def _checkout(root):
+    root.mkdir()
+    _git(root, "init", "-q")
+    (root / ".gitignore").write_text("exports/\n")
+    _git(root, "add", ".gitignore")
+    _git(root, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+         "commit", "-qm", "initial")
+
+
+def test_export_identity_ignores_unrelated_parent(tmp_path):
+    parent = tmp_path / "parent"
+    _checkout(parent)
+    export = parent / "exports" / "source"
+    export.mkdir(parents=True)
+    for dirty in (False, True):
+        if dirty:
+            (parent / "unrelated.txt").write_text("dirty\n")
+        assert PKG.git_rev_or_none(str(export)) is None
+        # An export has no owning worktree whose cleanliness can be used.
+        with pytest.raises(SystemExit):
+            PKG.git_clean(str(export))
+
+
+def test_checkout_and_git_file_worktree_keep_identity(tmp_path):
+    parent = tmp_path / "parent"
+    _checkout(parent)
+    head = _git(parent, "rev-parse", "HEAD")
+    linked = tmp_path / "linked"
+    _git(parent, "worktree", "add", "--detach", str(linked), "HEAD")
+    assert (linked / ".git").is_file()
+    for root in (parent, linked):
+        assert PKG.git_rev_or_none(str(root)) == head
+        assert PKG.git_clean(str(root))
+        (root / "new.txt").write_text("dirty\n")
+        assert not PKG.git_clean(str(root))
 
 
 def test_tag_accepts_plain_names():
