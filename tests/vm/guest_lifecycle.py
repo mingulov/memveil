@@ -766,6 +766,44 @@ def run_oracle(gate):
     print("guest_lifecycle: oracle exported")
 
 
+def run_witness(gate):
+    """Executed-copy witness plus inner/outer fail windows.
+
+    Window w runs the standard script with bounce readback
+    and device-write simulation; window f adds the fail
+    probe with an unclamped inner-health retry. Both keep
+    the standard DMA call sequence, so probe multisets stay
+    comparable to the laboratory baselines.
+    """
+    gate.write_json("identity.json", gate.identity())
+    names = ["identity.json"]
+    cases = (("w", ["mv_oracle_witness=1",
+                    "mv_oracle_delay_ms=100"]),
+             ("f", ["mv_oracle_witness=1",
+                    "mv_oracle_delay_ms=100",
+                    "mv_oracle_fail_op=2",
+                    "mv_oracle_inner_probe=1"]))
+    for tag, params in cases:
+        gate.clear_dmesg()
+        lc = os.path.join(gate.work, f"{tag}-lc.txt")
+        cp = os.path.join(gate.work, f"{tag}-cp.txt")
+        plc = gate.start_consumer(
+            gate.lc_obj, "mv_lifecycle", LC_SITES, 25, lc)
+        pcp = gate.start_consumer(
+            gate.cp_obj, "mv_copies", CP_SITES, 25, cp)
+        gate.wait_ready(("mv_map_result", "mv_bounce"))
+        gate.insmod(params)
+        time.sleep(5)
+        gate.rmmod()
+        gate.wait_consumer(plc, f"witness-{tag}-lc")
+        gate.wait_consumer(pcp, f"witness-{tag}-cp")
+        gate.oracle_log(f"{tag}-oracle.log")
+        names += [f"{tag}-lc.txt", f"{tag}-cp.txt",
+                  f"{tag}-oracle.log"]
+    gate.export(names)
+    print("guest_lifecycle: witness exported")
+
+
 SUBS = {
     "matrix": run_matrix,
     "copy": run_copy,
@@ -775,6 +813,7 @@ SUBS = {
     "cleanup": run_cleanup,
     "perf": run_perf,
     "oracle": run_oracle,
+    "witness": run_witness,
 }
 
 

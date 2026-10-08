@@ -52,6 +52,17 @@ ORACLE_OUTCOME = re.compile(
 ORACLE_SYNC = re.compile(r"^op=(\d+) mapping=(\d+) sync dir=(\d+) len=(\d+)$")
 ORACLE_RELEASE = re.compile(r"^mapping=(\d+) release lifetime_ns=(\d+)$")
 ORACLE_COMPLETE = re.compile(r"^script complete ops=(\d+)$")
+ORACLE_WITNESS = re.compile(
+    r"^op=(\d+) mapping=(\d+) witness copy=(map|sync|release|inner-map)"
+    r" copied=(\d+) verified=(\d+)$"
+)
+ORACLE_INNER_MAP = re.compile(
+    r"^op=(\d+) inner-probe map ok=(\d+) mapped=(\d+)$"
+)
+ORACLE_INNER = re.compile(
+    r"^op=(\d+) inner=(healthy|unknown)"
+    r" retry=(success|failed)(?: rc=(-EIO|-ENOMEM))?$"
+)
 
 
 def parse_consume_file(path):
@@ -300,6 +311,34 @@ def parse_oracle_log(path):
                     raise ValueError("duplicate oracle completion")
                 complete_ops = int(hit.group(1))
                 continue
+            hit = ORACLE_WITNESS.match(body)
+            if hit:
+                entry = op_entry(int(hit.group(1)))
+                entry.setdefault("witness", []).append(
+                    {"mapping": int(hit.group(2)),
+                     "copy": hit.group(3),
+                     "copied": int(hit.group(4)),
+                     "verified": int(hit.group(5))})
+                continue
+            hit = ORACLE_INNER_MAP.match(body)
+            if hit:
+                entry = op_entry(int(hit.group(1)))
+                if "inner_map" in entry:
+                    raise ValueError("duplicate inner-probe map")
+                entry["inner_map"] = {
+                    "ok": int(hit.group(2)),
+                    "mapped": int(hit.group(3))}
+                continue
+            hit = ORACLE_INNER.match(body)
+            if hit:
+                entry = op_entry(int(hit.group(1)))
+                if "inner" in entry:
+                    raise ValueError("duplicate inner verdict")
+                entry["inner"] = {
+                    "health": hit.group(2),
+                    "retry": hit.group(3),
+                    "rc": hit.group(4)}
+                continue
             if re.match(r"^op=\d+ mapping=\d+ (held-open|exit-release)$",
                         body):
                 continue
@@ -384,17 +423,13 @@ def consumed_multisets(lc_events, cp_events):
     }
 
 
-def compare_scripted(lc_events, cp_events, ops, fail_op, tag):
-    """Compare consumed records against the scripted rules.
+def compare_multisets(lc_events, cp_events, want, tag):
+    """Compare consumed records against frozen multisets.
 
-    Checks multiset equality per record class, strict flag
-    rules (maps ok, unmaps skip-sync, syncs carry no bytes,
-    every bounce known with effective equal to requested),
-    and the stray-record rule (no record outside the five
-    scripted classes). Returns a sorted mismatch list.
+    Multiset equality per record class plus the stray-class
+    rule. Returns a sorted mismatch list.
     """
     bad = []
-    want = scripted_expectation(ops, fail_op)
     got = consumed_multisets(lc_events, cp_events)
     for key in ("maps", "unmaps", "syncs_dev", "syncs_cpu",
                 "bounces"):
@@ -403,6 +438,18 @@ def compare_scripted(lc_events, cp_events, ops, fail_op, tag):
                        % (tag, key, len(got[key]), len(want[key])))
             for item in sorted(set(got[key]) ^ set(want[key])):
                 bad.append("%s: %s drift %r" % (tag, key, item))
+    return sorted(bad)
+
+
+def check_record_flags(lc_events, cp_events, tag):
+    """Strict per-record flag rules for directed scripted traffic.
+
+    Maps ok without skip, unmaps ok with skip-sync, syncs
+    carry no bytes, every bounce known with effective equal
+    to requested, bounce direction consistent with todev.
+    Returns a sorted mismatch list.
+    """
+    bad = []
     for e in lc_events:
         if e["kind"] not in (1, 2):
             bad.append("%s: stray lc kind %d" % (tag, e["kind"]))
@@ -431,6 +478,18 @@ def compare_scripted(lc_events, cp_events, ops, fail_op, tag):
                 bad.append("%s: bounce dir/todev %r" % (tag, e))
         else:
             bad.append("%s: stray cp kind %d" % (tag, e["kind"]))
+    return sorted(bad)
+
+
+def compare_scripted(lc_events, cp_events, ops, fail_op, tag):
+    """Compare consumed records against the scripted rules.
+
+    Multiset equality per record class plus the strict flag
+    rules. Returns a sorted mismatch list.
+    """
+    want = scripted_expectation(ops, fail_op)
+    bad = compare_multisets(lc_events, cp_events, want, tag)
+    bad += check_record_flags(lc_events, cp_events, tag)
     return sorted(bad)
 
 
@@ -526,6 +585,169 @@ def replay_oracle_ledger(ops_log, releases):
             ledger.record_outcome(i, False,
                                   return_code=entry.get("rc"))
             ledger.record_release(i)
+    for mapping in sorted(releases):
+        ledger.record_release(mapping, releases[mapping])
+    ledger.seal()
+    return ledger
+
+
+def check_oracle_witness(ops_log, releases, complete_ops, spec,
+                         tag):
+    """Check one witness window against its frozen spec.
+
+    The spec names every attempt, outcome, sync, release,
+    executed-copy witness and inner verdict before the run;
+    anything else (or anything missing) is a mismatch. The
+    witness multiset per op must match exactly: kind, copied
+    and verified bytes. Returns a sorted mismatch list.
+    """
+    bad = []
+    ops = spec["ops"]
+    if complete_ops != ops:
+        bad.append("%s: script complete ops=%r want %d"
+                   % (tag, complete_ops, ops))
+    if sorted(ops_log) != list(range(ops)):
+        bad.append("%s: op coverage %r" % (tag, sorted(ops_log)))
+        return sorted(bad)
+    for i in range(ops):
+        entry = ops_log[i]
+        want = spec["per_op"][str(i)]
+        if entry.get("requested") != want["requested"]:
+            bad.append("%s: op %d requested %r want %d"
+                       % (tag, i, entry.get("requested"),
+                          want["requested"]))
+        if entry.get("forced") != 0:
+            bad.append("%s: op %d forced" % (tag, i))
+        if entry.get("success") is not want["success"]:
+            bad.append("%s: op %d success %r want %r"
+                       % (tag, i, entry.get("success"),
+                          want["success"]))
+            continue
+        if want["success"]:
+            if (entry.get("mapping") != i
+                    or entry.get("mapped") != want["requested"]):
+                bad.append("%s: op %d mapping %r"
+                           % (tag, i, entry))
+        got_syncs = sorted((s["dir"], s["len"])
+                           for s in entry.get("syncs", []))
+        want_syncs = sorted(tuple(s) for s in want["syncs"])
+        if got_syncs != want_syncs:
+            bad.append("%s: op %d syncs %r want %r"
+                       % (tag, i, got_syncs, want_syncs))
+        got_wit = sorted((w["copy"], w["copied"], w["verified"])
+                         for w in entry.get("witness", []))
+        want_wit = sorted(tuple(w) for w in want["witness"])
+        if got_wit != want_wit:
+            bad.append("%s: op %d witness %r want %r"
+                       % (tag, i, got_wit, want_wit))
+        for w in entry.get("witness", []):
+            if w["mapping"] != i:
+                bad.append("%s: op %d witness mapping %r"
+                           % (tag, i, w))
+        if want["inner"] is None:
+            if "inner" in entry or "inner_map" in entry:
+                bad.append("%s: op %d unexpected inner evidence"
+                           % (tag, i))
+        else:
+            if entry.get("inner_map") != {
+                    "ok": 1, "mapped": want["requested"]}:
+                bad.append("%s: op %d inner_map %r"
+                           % (tag, i, entry.get("inner_map")))
+            if entry.get("inner") != {
+                    "health": "healthy", "retry": "success",
+                    "rc": None}:
+                bad.append("%s: op %d inner %r"
+                           % (tag, i, entry.get("inner")))
+    want_released = sorted(
+        i for i in range(ops) if spec["per_op"][str(i)]["success"])
+    if sorted(releases) != want_released:
+        bad.append("%s: released %r want %r"
+                   % (tag, sorted(releases), want_released))
+    return sorted(bad)
+
+
+def replay_oracle_witness_ledger(ops_log, releases):
+    """Replay witness-window facts into an OracleLedger.
+
+    Attempts, outcomes and releases come from the module log;
+    every copy comes from an executed-copy witness line with
+    fully verified bytes, never from a rule. Inner allocation
+    success for a success op needs its map witness; for the
+    fail op the healthy retry replays under a separate inner
+    identity while the failed op keeps its unwitnessed copy
+    unknown. Raises ValueError when any grounding is missing
+    or partial.
+    """
+    ledger = OracleLedger()
+    for i in sorted(ops_log):
+        entry = ops_log[i]
+        ledger.record_attempt(i, "dev-1", entry["requested"],
+                              entry["forced"])
+        witnessed = {}
+        for w in entry.get("witness", []):
+            if w["mapping"] != i:
+                raise ValueError(
+                    "op %d witness names mapping %d"
+                    % (i, w["mapping"]))
+            if w["verified"] != w["copied"]:
+                raise ValueError(
+                    "op %d %s witnessed %d of %d bytes"
+                    % (i, w["copy"], w["verified"],
+                       w["copied"]))
+            witnessed.setdefault(w["copy"], []).append(w["copied"])
+        if entry.get("success") is True:
+            if witnessed.get("map") != [entry["mapped"]]:
+                raise ValueError(
+                    "op %d lacks a full map witness" % i)
+            if witnessed.get("inner-map"):
+                raise ValueError(
+                    "op %d succeeded yet carries inner-map witness"
+                    % i)
+            ledger.record_allocation(i, True, mapping=i,
+                                     mapped_bytes=entry["mapped"])
+            ledger.record_outcome(i, True, mapping=i,
+                                  mapped_bytes=entry["mapped"])
+        else:
+            if entry.get("inner", {}).get("health") != "healthy":
+                raise ValueError(
+                    "op %d lacks healthy inner evidence" % i)
+            # The failed outer op keeps no allocation, release,
+            # or copy: the healthy retry is a separate mapping
+            # with its own identity, and the original copy
+            # stays unwitnessed. Attributing retry evidence to
+            # the failed op would conflate later allocator
+            # health with the original operation.
+            for kind in ("map", "sync", "release"):
+                if witnessed.get(kind):
+                    raise ValueError(
+                        "op %d failed yet carries %s witness"
+                        % (i, kind))
+            inner = "%d:inner" % i
+            ledger.record_attempt(inner, "dev-1",
+                                  entry["requested"],
+                                  entry["forced"])
+            ledger.record_allocation(inner, True, mapping=inner,
+                                     mapped_bytes=entry["requested"])
+            for copied in witnessed.get("inner-map", []):
+                ledger.record_copy(inner, "original_to_bounce",
+                                   copied, mapping=inner,
+                                   witnessed=copied)
+            ledger.record_release(inner)
+            ledger.record_outcome(i, False,
+                                  return_code=entry.get("rc"))
+            continue
+        # Direction attribution is the source-backed hook rule
+        # (map-time and sync bounces run to-device, release
+        # bounces run to-cpu); the executed bytes are witnessed.
+        for copied in witnessed.get("map", []):
+            ledger.record_copy(i, "original_to_bounce", copied,
+                               mapping=i, witnessed=copied)
+        for copied in witnessed.get("sync", []):
+            ledger.record_copy(i, "original_to_bounce", copied,
+                               mapping=i, witnessed=copied)
+        for copied in witnessed.get("release", []):
+            ledger.record_copy(i, "bounce_to_original", copied,
+                               mapping=i, witnessed=copied)
     for mapping in sorted(releases):
         ledger.record_release(mapping, releases[mapping])
     ledger.seal()
@@ -759,13 +981,16 @@ def author_reducer_fixture(reconstruction_dir, fixture_dir):
     (target / "events.ndjson").write_text("".join(json.dumps(e,sort_keys=True)+"\n" for e in events))
 
 
-def compare_live(report, ledger, probe_lifetimes=None):
+def compare_live(report, ledger, probe_lifetimes=None,
+                 witnessed=False):
     """Exact reducer comparison to probe intervals; module bound is separate.
 
     This compares a synthetic translated report. A module duration alone
     cannot establish interval containment or authorize arbitrary lower metrics.
+    With witnessed=True every copy must carry a full executed-byte
+    witness before the metric comparison runs.
     """
-    from oracle_ledger import compare
+    from oracle_ledger import compare, compare_witnessed
     if probe_lifetimes is None:
         return ["missing independently extracted probe lifetimes"]
     aligned = OracleLedger()
@@ -781,6 +1006,8 @@ def compare_live(report, ledger, probe_lifetimes=None):
         kind = e.pop("kind")
         aligned._add(kind, **e)
     aligned.seal()
+    if witnessed:
+        return compare_witnessed(report, aligned)
     return compare(report, aligned)
 
 

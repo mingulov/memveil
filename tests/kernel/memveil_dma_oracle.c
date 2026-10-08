@@ -18,7 +18,9 @@
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/init.h>
+#include <linux/io.h>
 #include <linux/ktime.h>
+#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
@@ -57,6 +59,16 @@ module_param(mv_oracle_fail_op, int, 0444);
 MODULE_PARM_DESC(mv_oracle_fail_op,
 		 "Op index to fail via a clamped bus DMA limit (-1 off)");
 
+static bool mv_oracle_witness;
+module_param(mv_oracle_witness, bool, 0444);
+MODULE_PARM_DESC(mv_oracle_witness,
+		 "Verify executed copies via bounce readback (default off)");
+
+static bool mv_oracle_inner_probe;
+module_param(mv_oracle_inner_probe, bool, 0444);
+MODULE_PARM_DESC(mv_oracle_inner_probe,
+		 "Retry the fail op unclamped as inner-health evidence (default off)");
+
 static struct platform_device *mv_pdev;
 static dma_addr_t mv_handle[MV_ORACLE_MAX_OPS];
 static void *mv_cpu[MV_ORACLE_MAX_OPS];
@@ -74,6 +86,86 @@ static void mv_log(const char *fmt, ...)
 	va_end(args);
 }
 
+/* Executed-copy witness: position-dependent pattern fill plus
+ * bounce-slot readback through the direct map. The pattern
+ * makes every byte position distinct per op and phase, so a
+ * full-buffer match proves the kernel copy executed with the
+ * logged length. Reads are guarded by pfn_valid on the first
+ * and last page; a NULL return means no witness, never a
+ * guessed byte count.
+ *
+ * Only the seed's low byte shifts the pattern, so every phase
+ * base below keeps a distinct low byte (map 0x00, sync 0x40,
+ * release 0x80, inner 0xC0): for any op index, a buffer
+ * holding one phase's bytes can never verify as another
+ * phase. Stale destination content therefore fails instead
+ * of passing, and mv_witness_selftest refuses to load when
+ * that separation breaks.
+ */
+static void mv_fill(void *buf, size_t len, unsigned int seed)
+{
+	size_t j;
+	u8 *p = buf;
+
+	for (j = 0; j < len; j++)
+		p[j] = (u8)(seed + j * 17u + (j >> 8) * 13u);
+}
+
+static void *mv_bounce_ptr(dma_addr_t handle, size_t len)
+{
+	unsigned long first = __phys_to_pfn(handle);
+	unsigned long last = __phys_to_pfn(handle + len - 1);
+
+	if (!pfn_valid(first) || !pfn_valid(last))
+		return NULL;
+	return phys_to_virt(handle);
+}
+
+static size_t mv_verified_bytes(const void *buf, size_t len,
+				unsigned int seed)
+{
+	size_t j;
+	const u8 *p = buf;
+
+	for (j = 0; j < len; j++) {
+		if (p[j] != (u8)(seed + j * 17u + (j >> 8) * 13u))
+			return 0;
+	}
+	return len;
+}
+
+static int mv_witness_selftest(void)
+{
+	static const unsigned int bases[] = {
+		0xA500, 0xB540, 0xD580, 0xE5C0
+	};
+	static const unsigned int ops[] = { 0, 1, 255, 256, 8191 };
+	static u8 probe[512];
+	unsigned int a, b, o;
+
+	/* Self-match proves the check can pass; every cross-phase
+	 * mismatch proves a skipped copy cannot pass. */
+	for (o = 0; o < ARRAY_SIZE(ops); o++) {
+		for (a = 0; a < ARRAY_SIZE(bases); a++) {
+			mv_fill(probe, sizeof(probe),
+				bases[a] + ops[o]);
+			if (mv_verified_bytes(probe, sizeof(probe),
+					       bases[a] + ops[o]) !=
+			    sizeof(probe))
+				return -EIO;
+			for (b = 0; b < ARRAY_SIZE(bases); b++) {
+				if (b == a)
+					continue;
+				if (mv_verified_bytes(probe,
+						       sizeof(probe),
+						       bases[b] + ops[o]) != 0)
+					return -EIO;
+			}
+		}
+	}
+	return 0;
+}
+
 static int mv_map_one(struct device *dev, unsigned int i,
 		      enum dma_data_direction dir)
 {
@@ -84,6 +176,8 @@ static int mv_map_one(struct device *dev, unsigned int i,
 		mv_log("op=%u outcome=failure rc=-ENOMEM", i);
 		return -ENOMEM;
 	}
+	if (mv_oracle_witness)
+		mv_fill(mv_cpu[i], mv_size[i], 0xA500 + i);
 	mv_map_ts[i] = ktime_get_ns();
 	handle = dma_map_single(dev, mv_cpu[i], mv_size[i], dir);
 	if (dma_mapping_error(dev, handle)) {
@@ -96,6 +190,15 @@ static int mv_map_one(struct device *dev, unsigned int i,
 	mv_mapped[i] = true;
 	mv_log("op=%u outcome=success mapping=%u mapped=%zu", i, i,
 	       mv_size[i]);
+	if (mv_oracle_witness) {
+		void *bounce = mv_bounce_ptr(handle, mv_size[i]);
+		size_t verified = bounce ?
+			mv_verified_bytes(bounce, mv_size[i],
+					  0xA500 + i) : 0;
+
+		mv_log("op=%u mapping=%u witness copy=map copied=%zu verified=%zu",
+		       i, i, mv_size[i], verified);
+	}
 	return 0;
 }
 
@@ -104,9 +207,21 @@ static void mv_sync_one(struct device *dev, unsigned int i,
 {
 	if (!mv_mapped[i])
 		return;
+	if (mv_oracle_witness && dir == DMA_TO_DEVICE)
+		mv_fill(mv_cpu[i], mv_size[i], 0xB540 + i);
 	dma_sync_single_for_device(dev, mv_handle[i], mv_size[i], dir);
 	mv_log("op=%u mapping=%u sync dir=%d len=%zu", i, i, (int)dir,
 	       mv_size[i]);
+	if (mv_oracle_witness && dir == DMA_TO_DEVICE) {
+		void *bounce = mv_bounce_ptr(mv_handle[i],
+					      mv_size[i]);
+		size_t verified = bounce ?
+			mv_verified_bytes(bounce, mv_size[i],
+					  0xB540 + i) : 0;
+
+		mv_log("op=%u mapping=%u witness copy=sync copied=%zu verified=%zu",
+		       i, i, mv_size[i], verified);
+	}
 }
 
 static void mv_unmap_one(struct device *dev, unsigned int i,
@@ -116,12 +231,69 @@ static void mv_unmap_one(struct device *dev, unsigned int i,
 
 	if (!mv_mapped[i])
 		return;
-	dma_unmap_single(dev, mv_handle[i], mv_size[i], dir);
+	if (mv_oracle_witness && dir == DMA_FROM_DEVICE) {
+		void *bounce = mv_bounce_ptr(mv_handle[i],
+					      mv_size[i]);
+
+		/* Device-write simulation through the exact
+		 * memory a DMA write would land in; the
+		 * kernel's own unmap path copies it back. */
+		if (bounce)
+			mv_fill(bounce, mv_size[i], 0xD580 + i);
+		dma_unmap_single(dev, mv_handle[i], mv_size[i], dir);
+		mv_log("op=%u mapping=%u witness copy=release copied=%zu verified=%zu",
+		       i, i, mv_size[i],
+		       bounce ? mv_verified_bytes(mv_cpu[i],
+						   mv_size[i],
+						   0xD580 + i) : 0);
+	} else {
+		dma_unmap_single(dev, mv_handle[i], mv_size[i], dir);
+	}
 	dur = ktime_get_ns() - mv_map_ts[i];
 	mv_log("mapping=%u release lifetime_ns=%llu", i, dur);
 	mv_mapped[i] = false;
 	kfree(mv_cpu[i]);
 	mv_cpu[i] = NULL;
+}
+
+static void mv_inner_probe(struct device *dev, unsigned int i,
+			   enum dma_data_direction dir)
+{
+	dma_addr_t handle;
+	void *cpu;
+	size_t verified = 0;
+
+	/* Unclamped retry of the fail op: success proves the
+	 * inner allocator serves this request, so the clamped
+	 * failure is outer. Dedicated log lines only; never a
+	 * second attempt/outcome pair for the op. */
+	cpu = kmalloc(mv_size[i], GFP_KERNEL);
+	if (!cpu) {
+		mv_log("op=%u inner=unknown retry=failed rc=-ENOMEM", i);
+		return;
+	}
+	mv_fill(cpu, mv_size[i], 0xE5C0 + i);
+	handle = dma_map_single(dev, cpu, mv_size[i], dir);
+	if (dma_mapping_error(dev, handle)) {
+		mv_log("op=%u inner=unknown retry=failed rc=-EIO", i);
+		kfree(cpu);
+		return;
+	}
+	mv_log("op=%u inner-probe map ok=1 mapped=%zu", i,
+	       mv_size[i]);
+	if (mv_oracle_witness) {
+		void *bounce = mv_bounce_ptr(handle, mv_size[i]);
+
+		if (bounce)
+			verified = mv_verified_bytes(bounce,
+						      mv_size[i],
+						      0xE5C0 + i);
+		mv_log("op=%u mapping=%u witness copy=inner-map copied=%zu verified=%zu",
+		       i, i, mv_size[i], verified);
+	}
+	dma_unmap_single(dev, handle, mv_size[i], dir);
+	kfree(cpu);
+	mv_log("op=%u inner=healthy retry=success", i);
 }
 
 static int __init mv_oracle_init(void)
@@ -147,6 +319,14 @@ static int __init mv_oracle_init(void)
 		pr_err("mv-oracle: bad mv_oracle_fail_op=%d\n",
 		       mv_oracle_fail_op);
 		return -EINVAL;
+	}
+	if (mv_oracle_inner_probe && mv_oracle_fail_op < 0) {
+		pr_err("mv-oracle: inner probe needs a fail op\n");
+		return -EINVAL;
+	}
+	if (mv_oracle_witness && mv_witness_selftest()) {
+		pr_err("mv-oracle: witness pattern selftest failed\n");
+		return -EIO;
 	}
 	mv_pdev = platform_device_register_simple(MV_ORACLE_DRVNAME, -1,
 						  NULL, 0);
@@ -181,6 +361,8 @@ static int __init mv_oracle_init(void)
 			rc = mv_map_one(dev, i, dir);
 			mv_log("op=%u fail-probe map rc=%d", i, rc);
 			dev->bus_dma_limit = 0;
+			if (mv_oracle_inner_probe)
+				mv_inner_probe(dev, i, dir);
 			continue;
 		}
 		if (mv_map_one(dev, i, dir))
@@ -231,4 +413,4 @@ module_exit(mv_oracle_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("MemVeil test fixtures");
 MODULE_DESCRIPTION("Test-only owned-DMA oracle traffic generator");
-MODULE_VERSION("0.2.0");
+MODULE_VERSION("0.3.1");

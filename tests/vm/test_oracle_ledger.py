@@ -18,6 +18,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from consume import replay_oracle_witness_ledger
 from oracle_ledger import OracleLedger, bucket_of, compare
 
 REPO = os.path.dirname(
@@ -142,3 +143,58 @@ def test_compare_files_roundtrip():
                 for e in ledger.entries]}, handle)
         from oracle_ledger import compare_files
         assert compare_files(report_path, ledger_path) == []
+
+
+def _failed_entry():
+    return {
+        "requested": 2048,
+        "forced": False,
+        "success": False,
+        "rc": -5,
+        "inner": {"health": "healthy", "retry": "success",
+                  "rc": None},
+        "witness": [{"mapping": 2, "copy": "inner-map",
+                     "copied": 2048, "verified": 2048}],
+    }
+
+
+def _kinds(ledger, kind, key, value):
+    return [e for e in ledger.entries
+            if e["kind"] == kind and e.get(key) == value]
+
+
+def test_failed_op_keeps_retry_identity_separate():
+    ledger = replay_oracle_witness_ledger({2: _failed_entry()},
+                                          {})
+    assert _kinds(ledger, "outcome", "op", 2)[0]["success"] is False
+    assert _kinds(ledger, "allocation", "op", 2) == []
+    assert _kinds(ledger, "release", "mapping", 2) == []
+    assert _kinds(ledger, "copy", "op", 2) == []
+    inner = _kinds(ledger, "allocation", "op", "2:inner")
+    assert len(inner) == 1 and inner[0]["mapped_bytes"] == 2048
+    copies = _kinds(ledger, "copy", "op", "2:inner")
+    assert len(copies) == 1 and copies[0]["witnessed"] == 2048
+    releases = _kinds(ledger, "release", "mapping", "2:inner")
+    assert len(releases) == 1
+    assert releases[0]["duration_ns"] is None
+    assert ledger.expected_witnessed_copies() == {
+        "original_to_bounce": 2048, "bounce_to_original": 0}
+
+
+def test_failed_op_rejects_misplaced_witness():
+    entry = _failed_entry()
+    entry["witness"] = [{"mapping": 2, "copy": "map",
+                         "copied": 2048, "verified": 2048}]
+    with pytest.raises(ValueError):
+        replay_oracle_witness_ledger({2: entry}, {})
+
+
+def test_success_op_rejects_inner_map_witness():
+    entry = {"requested": 512, "forced": False, "success": True,
+             "mapped": 512,
+             "witness": [{"mapping": 0, "copy": "map",
+                          "copied": 512, "verified": 512},
+                         {"mapping": 0, "copy": "inner-map",
+                          "copied": 512, "verified": 512}]}
+    with pytest.raises(ValueError):
+        replay_oracle_witness_ledger({0: entry}, {0: 10})

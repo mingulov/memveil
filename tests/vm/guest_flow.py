@@ -28,6 +28,7 @@ import signal
 import struct
 import subprocess
 import sys
+import threading
 import time
 
 TR = "/sys/kernel/tracing"
@@ -80,6 +81,65 @@ def fail(msg):
 
 def sh(args, **kw):
     return subprocess.run(args, capture_output=True, text=True, **kw)
+
+
+class PipeStreamer:
+    """Owned splice-free trace_pipe streamer (not GNU cat).
+
+    GNU cat's kernel-copy fast path tears concurrently
+    appended trace_pipe pages under bursty multi-CPU tracing
+    (proven by isolated A/B on block-burst traffic); a plain
+    os.read/os.write loop streams the identical workload
+    clean. Unbuffered: every chunk read is fully written
+    before the next read, so stopping loses nothing the
+    post-stop drain cannot re-read from the ring.
+    """
+
+    def __init__(self, pipe, out_path):
+        self._pipe = pipe
+        self._out_path = out_path
+        self._stop = threading.Event()
+        self._error = None
+        self._thread = threading.Thread(target=self._run,
+                                        daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self, timeout=15):
+        self._stop.set()
+        self._thread.join(timeout)
+        if self._thread.is_alive():
+            fail("pipe streamer did not stop")
+        if self._error is not None:
+            fail("pipe streamer failed: %r" % (self._error,))
+
+    def _run(self):
+        try:
+            infd = os.open(self._pipe, os.O_RDONLY)
+            try:
+                outfd = os.open(
+                    self._out_path,
+                    os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+                try:
+                    while not self._stop.is_set():
+                        ready, _, _ = select.select(
+                            [infd], [], [], 0.5)
+                        if not ready:
+                            continue
+                        chunk = os.read(infd, 65536)
+                        if not chunk:
+                            break
+                        view = memoryview(chunk)
+                        while view:
+                            done = os.write(outfd, view)
+                            view = view[done:]
+                finally:
+                    os.close(outfd)
+            finally:
+                os.close(infd)
+        except Exception as exc:
+            self._error = exc
 
 
 def sha_file(path):
@@ -295,13 +355,8 @@ def main():
     with open(EVT + "/enable", "w") as fh:
         fh.write("1")
     pipe_path = os.path.join(work, "pipe.ram")
-    pipe_fh = open(pipe_path, "wb")
-    cat = subprocess.Popen(
-        ["cat", TR + "/trace_pipe"],
-        stdout=pipe_fh,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    streamer = PipeStreamer(TR + "/trace_pipe", pipe_path)
+    streamer.start()
     cap = os.path.join(work, "cap")
     memveil = os.path.join(repo, "build", "memveil")
     rec = subprocess.Popen(
@@ -381,14 +436,7 @@ def main():
     # Oracle shutdown protocol.
     with open(TR + "/tracing_on", "w") as fh:
         fh.write("0")
-    cat.terminate()
-    try:
-        cat.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        cat.kill()
-        cat.wait()
-        fail("pipe cat did not stop")
-    pipe_fh.close()
+    streamer.stop()
     # Drain stragglers appended after the streaming reader stopped.
     drained = 0
     end_drain = time.monotonic() + 10

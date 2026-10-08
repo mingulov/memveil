@@ -998,7 +998,8 @@ suite_vm_lifecycle() {
         echo "vm-lifecycle: pytest not importable" >&2
         return 1
     fi
-    python3 -m pytest "$ROOT/tests/vm/test_lifecycle.py" -q
+    python3 -m pytest "$ROOT/tests/vm/test_lifecycle.py" \
+        "$ROOT/tests/vm/test_witness.py" -q
 }
 
 suite_vm_copy() {
