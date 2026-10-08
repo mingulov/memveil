@@ -424,3 +424,47 @@ def test_normal_cleanup_removes_only_its_owned_directory(tmp_path,monkeypatch):
     monkeypatch.delenv('MEMVEIL_VM_KEEP_EXPORTS',raising=False)
     cleanup(owned)
     assert not owned.exists() and other.is_dir()
+
+
+def test_pipe_streamer_copies_bytes_exactly(tmp_path):
+    import os,time
+    from guest_flow import PipeStreamer
+    src=tmp_path/'src.ram';blob=b'alpha\n'*1000+b'beta'*70000
+    src.write_bytes(blob)
+    out=tmp_path/'pipe.ram'
+    streamer=PipeStreamer(str(src),str(out))
+    streamer.start()
+    deadline=time.monotonic()+10
+    while (not out.is_file() or out.stat().st_size<len(blob)) \
+            and time.monotonic()<deadline:
+        time.sleep(0.05)
+    streamer.stop()
+    assert out.read_bytes()==blob
+
+
+def test_pipe_streamer_stop_during_idle_keeps_read_bytes(tmp_path):
+    import os,time
+    from guest_flow import PipeStreamer
+    src_r,src_w=os.pipe()
+    out=tmp_path/'pipe.ram'
+    streamer=PipeStreamer('/dev/fd/%d'%src_r,str(out))
+    try:
+        streamer.start()
+        os.write(src_w,b'idle-bytes\n')
+        deadline=time.monotonic()+10
+        while (not out.is_file() or out.stat().st_size==0) \
+                and time.monotonic()<deadline:
+            time.sleep(0.05)
+        streamer.stop()
+        assert out.read_bytes()==b'idle-bytes\n'
+    finally:
+        os.close(src_r);os.close(src_w)
+
+
+def test_pipe_streamer_missing_source_fails_closed(tmp_path):
+    from guest_flow import PipeStreamer
+    streamer=PipeStreamer(str(tmp_path/'absent'),
+                          str(tmp_path/'pipe.ram'))
+    streamer.start()
+    with pytest.raises(SystemExit):
+        streamer.stop()

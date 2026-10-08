@@ -79,9 +79,20 @@ class OracleLedger:
     def _allocation_kind(self):
         return "allocation" if any(e["kind"] == "allocation" for e in self._entries) else "outcome"
 
-    def record_copy(self, op, direction, nbytes, mapping=None):
+    def record_copy(self, op, direction, nbytes, mapping=None,
+                  witnessed=None):
+        """A copy with optional executed-byte witness.
+
+        witnessed=None keeps the legacy asserted-bytes shape;
+        an integer names independently verified executed bytes
+        (bounce readback or device-write simulation), which must
+        never exceed nbytes.
+        """
+        if witnessed is not None and witnessed > nbytes:
+            raise ValueError("witnessed bytes exceed asserted bytes")
         self._add("copy", op=op, mapping=mapping,
-                 direction=direction, nbytes=nbytes)
+                 direction=direction, nbytes=nbytes,
+                 witnessed=witnessed)
 
     def record_release(self, mapping, duration_ns=None):
         self._add("release", mapping=mapping,
@@ -115,6 +126,22 @@ class OracleLedger:
         for e in self._entries:
             if e["kind"] == "copy":
                 totals[e["direction"]] += e["nbytes"]
+        return totals
+
+    def expected_witnessed_copies(self):
+        """Witnessed executed bytes, or None when any copy lacks one.
+
+        A single unwitnessed copy voids the witnessed totals:
+        mixed ledgers must not present partial witness sums as
+        executed-copy ground truth.
+        """
+        totals = {"original_to_bounce": 0, "bounce_to_original": 0}
+        for e in self._entries:
+            if e["kind"] != "copy":
+                continue
+            if e.get("witnessed") is None:
+                return None
+            totals[e["direction"]] += e["witnessed"]
         return totals
 
     def expected_lifetimes(self):
@@ -303,6 +330,31 @@ def compare(report, ledger):
     if sorted(subjects) != ledger.expected_pressure():
         bad.append("POOL_PRESSURE subjects differ from ledger")
     return sorted(bad)
+
+
+def compare_witnessed(report, ledger):
+    """Match a report against witnessed executed bytes only.
+
+    Fails when any ledger copy lacks an executed-byte witness
+    or when a witness covers fewer bytes than asserted; on a
+    fully witnessed ledger this is compare() with the totals
+    additionally proven executed.
+    """
+    bad = []
+    for e in ledger.entries:
+        if e["kind"] != "copy":
+            continue
+        if e.get("witnessed") is None:
+            bad.append("unwitnessed copy op=%r" % (e.get("op"),))
+        elif e["witnessed"] != e["nbytes"]:
+            bad.append("copy op=%r witnessed %d of %d bytes"
+                       % (e.get("op"), e["witnessed"],
+                          e["nbytes"]))
+    if bad:
+        return sorted(bad)
+    if ledger.expected_witnessed_copies() is None:
+        return ["no witnessed copy totals"]
+    return compare(report, ledger)
 
 
 def compare_files(report_path, ledger_path):
