@@ -19,6 +19,11 @@ def integer(value, negative=False):
         raise ValueError('invalid export integer')
 
 
+def integer_list(value):
+    if type(value) is not list:raise ValueError('invalid integer sample list')
+    for item in value:integer(item)
+
+
 def numbers(doc):
     for value in doc.values(): integer(value)
 
@@ -49,8 +54,8 @@ def health(doc):
 def inventory_snapshot(doc):
     keys(doc,('bpf','io_tlb_used','files'))
     keys(doc['bpf'],('progs','maps')); numbers(doc['bpf'])
-    for value in doc['io_tlb_used']: integer(value)
-    if any(not re.fullmatch(r'[a-zA-Z0-9_.-]+',name) for name in doc['files']):
+    integer_list(doc['io_tlb_used'])
+    if type(doc['files']) is not list or any(type(name) is not str or not re.fullmatch(r'[a-zA-Z0-9_.-]+',name) for name in doc['files']):
         raise ValueError('invalid work inventory')
 
 
@@ -82,6 +87,8 @@ def validate_lifecycle_exports(got,sub):
                     if row['mode'] not in ('quiet','short','stop-both','stop-lc','term-cp'):
                         raise ValueError('invalid stop mode')
                     for k in ('lc_exit','cp_exit'): integer(row[k],True)
+                    if row['mode']!='term-cp':
+                        keys(row,('cycle','mode','lc_exit','cp_exit'))
                     if row['mode']=='term-cp':
                         keys(row,('cycle','mode','lc_exit','cp_exit','victim_alive','victim_signal',
                                   'victim_signal_ns','victim_rc','victim_file'))
@@ -103,8 +110,7 @@ def validate_lifecycle_exports(got,sub):
                       'ping_tx','ping_rx','disk','disk_bytes'))
             if not re.fullmatch(r'/dev/sd[a-z]',doc['disk']):raise ValueError('invalid owned disk')
             if not re.fullmatch(r'[a-zA-Z0-9_-]{1,32}',doc['iface']):raise ValueError('invalid iface')
-            for k in ('used_before','used_after'):
-                for v in doc[k]:integer(v)
+            for k in ('used_before','used_after'):integer_list(doc[k])
             for k in ('start_ns','end_ns','detach_ns','ping_tx','ping_rx','disk_bytes'):integer(doc[k])
         elif name=='pairs.json':
             pairs=json.loads(path.read_text())
@@ -115,6 +121,8 @@ def validate_lifecycle_exports(got,sub):
                     keys(leg,('pair','mode','ping','dd','end_ns'),('attach_ns','detach_ns'))
                     if leg['mode'] not in ('off','observed'):raise ValueError('invalid perf mode')
                     integer(leg['pair']);integer(leg['end_ns'])
+                    for k in ('attach_ns','detach_ns'):
+                        if k in leg:integer(leg[k])
                     keys(leg['ping'],('tx','rx','seconds','p99_ms','sample_tx','sample_rx','sample_count'))
                     keys(leg['dd'],('bytes','seconds'))
                     for v in leg['ping'].values():
