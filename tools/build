@@ -443,6 +443,10 @@ main() {
                     -I bpf/include \
                     -o build/native/test_counter_flow \
                     tests/native/test_counter_flow.c
+                log clang -std=c11 -O2 -Wall -Wextra -Werror \
+                    -I bpf/include \
+                    -o build/native/test_lifecycle_decode \
+                    tests/native/test_lifecycle_decode.c
                 mkdir -p build/native
                 clang -std=c11 -O2 -Wall -Wextra -Werror \
                     -I bpf/include \
@@ -452,6 +456,10 @@ main() {
                     -I bpf/include \
                     -o build/native/test_counter_flow \
                     tests/native/test_counter_flow.c || return 1
+                clang -std=c11 -O2 -Wall -Wextra -Werror \
+                    -I bpf/include \
+                    -o build/native/test_lifecycle_decode \
+                    tests/native/test_lifecycle_decode.c || return 1
             else
                 echo "build: no native targets registered yet" >&2
             fi

@@ -5,6 +5,7 @@
 # Usage: tools/test <suite> | tools/test --help
 #
 # Implemented suites: schemas, unit, reports, profiles, doctor, attempts,
+# native-decode,
 # writer, signals, record, vm-attempts, buildcache, package, identity,
 # correlation, mappings, lifetimes, pools, regions, diagnostics,
 # conversion-normalize, confidential-hooks, region-resolution,
@@ -1214,6 +1215,39 @@ suite_release_runtime() {
     (cd "$ROOT" && MV_BUNDLE_TARBALL="$TARBALL" MV_REPO="$ROOT" \
         MV_VALID_EMPTY="$ROOT/tests/package/valid-empty" \
         python3 -m pytest tests/package/test_release_runtime.py)
+}
+
+suite_native_decode() {
+    # Lifecycle/copy corpus is the single vector source:
+    # regeneration must be byte-identical, then the C
+    # reference and the Mojo decoder run the same corpus and
+    # their verdict dumps must match.
+    python3 "$ROOT/tests/fixtures/lifecycle-wire/gen_corpus.py" \
+        --check || return 1
+    NATIVE="$ROOT/build/native/test_lifecycle_decode"
+    if [ ! -x "$NATIVE" ]; then
+        echo "native-decode: missing $NATIVE (run tools/build first)" >&2
+        return 1
+    fi
+    TMP=$(mktemp -d)
+    trap 'rm -rf "$TMP"' EXIT
+    (cd "$ROOT" && "$NATIVE" \
+        tests/fixtures/lifecycle-wire/corpus.bin \
+        tests/fixtures/lifecycle-wire/corpus.txt \
+        "$TMP/c.dump") || return 1
+    # shellcheck disable=SC2046
+    (cd "$ROOT" && pixi run --frozen mojo run -I src \
+        $(mojo_inc_flags) \
+        tests/unit/dump_lifecycle.mojo \
+        tests/fixtures/lifecycle-wire/corpus.bin \
+        tests/fixtures/lifecycle-wire/corpus.txt \
+        "$TMP/mojo.dump") || return 1
+    if ! cmp -s "$TMP/c.dump" "$TMP/mojo.dump"; then
+        echo "native-decode: C/Mojo verdict dumps differ" >&2
+        diff "$TMP/c.dump" "$TMP/mojo.dump" | head -20 >&2
+        return 1
+    fi
+    echo "native-decode: corpus, native, mojo, and differential passed"
 }
 
 suite_attempts() {
@@ -2912,6 +2946,9 @@ case "$1" in
         ;;
     attempts)
         suite_attempts
+        ;;
+    native-decode)
+        suite_native_decode
         ;;
     writer)
         suite_writer
