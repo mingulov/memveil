@@ -1,23 +1,27 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Lifecycle/copy wire decode and the v1 laboratory ledger.
+"""Lifecycle/copy wire decode, Event mapping, and the v1 ledger.
 
 Decodes the 36-byte MVLC and 48-byte MVCP records produced by the
 swiotlb lifecycle and copy probes. Byte layout, check order, and
 reason vocabulary mirror bpf/include/memveil_events.h; any
 intentional contract change must update the header, the corpus, and
-both decoders together. Decode and ledger only: collector attach,
-multi-channel packaging, profile admission, and live qualification
-are separate pending work.
+both decoders together. Decode, Event mapping, and ledger only:
+collector attach, multi-channel packaging, profile admission, and
+live qualification are separate work.
 
 The v1 wire carries no device or mapping identity, so the ledger
 counts per-event facts only: map outcomes, unmaps, sync requests,
 and executed bytes summed over KNOWN copy records. It never pairs a
 map with an unmap, never infers a lifetime, and reports lifetimes
-as explicitly unavailable with a reason.
+as explicitly unavailable with a reason. Normalized Events carry
+record-local minted ids (never kernel identity) and always flow
+through the correlation registry, which labels them unpaired with
+an explicit cause until an identity-carrying wire exists.
 """
 
-from memveil.capture.normalize import DecodeError
+from memveil.capture.normalize import DecodeError, NormalizeError
+from memveil.model.event import Event
 from memveil.model.validate import checked_add, format_u64
 
 comptime LC_LEN = 36
@@ -335,3 +339,87 @@ struct LifecycleLedger:
             "v1 wire carries no mapping identity;"
             " map/unmap pairing unavailable"
         )
+
+
+def _record_id(seq: UInt64) -> String:
+    """Mint one record-local id; never kernel identity."""
+    return String("lc-") + format_u64(seq)
+
+
+def normalize_lifecycle_event(d: DecodedLifecycle) -> Event:
+    """Map one decoded MVLC record onto a normalized Event.
+
+    Kind, timestamp, per-probe hook name, and payload are set;
+    the collector stamps the capture-derived source block
+    (session, seq, profile, measurement) and runs the
+    correlation registry before persisting. A failed map
+    carries no mapping id and no mapped bytes; a successful
+    map mints one record-local mapping id.
+    """
+    var ev = Event()
+    ev.ts_ns = d.ktime
+    if d.kind == UInt16(_LC_KIND_MAP):
+        ev.kind = String("map_result")
+        ev.source_hook = String("fexit:swiotlb_tbl_map_single")
+        ev.source_backend = String("tracing")
+        ev.map_result.operation_id = _record_id(d.seq)
+        ev.map_result.success = d.ok
+        if d.ok:
+            ev.map_result.has_mapping_id = True
+            ev.map_result.mapping_id = _record_id(d.seq)
+            ev.map_result.has_mapped_bytes = True
+            ev.map_result.mapped_bytes = d.size
+        return ev^
+    ev.kind = String("unmap")
+    ev.source_hook = String("fentry:__swiotlb_tbl_unmap_single")
+    ev.source_backend = String("tracing")
+    ev.unmap.has_mapping_id = True
+    ev.unmap.mapping_id = _record_id(d.seq)
+    return ev^
+
+
+def normalize_copy_event(
+    d: DecodedCopy
+) raises NormalizeError -> Event:
+    """Map one decoded MVCP record onto a normalized Event.
+
+    Sync requests become sync_request events over the whole
+    mapping (offset 0: the _single_ hooks sync no interior
+    range); the emitting probe follows from the to_device
+    flag, which only the for_device probe sets. KNOWN copies
+    become copy events with executed (never requested)
+    bytes; an unknown copy raises non-fatal UNKNOWN_COPY so
+    the collector drops exactly that record instead of
+    persisting an invented length.
+    """
+    var ev = Event()
+    ev.ts_ns = d.ktime
+    if d.kind == UInt16(_CP_KIND_SYNC):
+        ev.kind = String("sync_request")
+        if d.to_device:
+            ev.source_hook = String(
+                "fentry:__swiotlb_sync_single_for_device"
+            )
+        else:
+            ev.source_hook = String(
+                "fentry:__swiotlb_sync_single_for_cpu"
+            )
+        ev.source_backend = String("tracing")
+        ev.sync.operation_id = _record_id(d.seq)
+        ev.sync.has_mapping_id = True
+        ev.sync.mapping_id = _record_id(d.seq)
+        ev.sync.offset = UInt64(0)
+        ev.sync.length = d.requested
+        return ev^
+    if not d.known:
+        raise NormalizeError("UNKNOWN_COPY", False)
+    ev.kind = String("copy")
+    ev.source_hook = String("fentry:swiotlb_bounce")
+    ev.source_backend = String("tracing")
+    ev.copy.operation_id = _record_id(d.seq)
+    if d.to_device:
+        ev.copy.direction = String("original_to_bounce")
+    else:
+        ev.copy.direction = String("bounce_to_original")
+    ev.copy.bytes = d.effective
+    return ev^
