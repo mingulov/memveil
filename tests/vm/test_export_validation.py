@@ -141,3 +141,67 @@ def test_workload_samples_require_integer_lists(tmp_path,field):
     workload[field]={}
     path.write_text(json.dumps(workload))
     with pytest.raises(ValueError):validate_lifecycle_exports({'workload.json':path},'realio')
+
+
+def rewrite_export(path,text):
+    path.write_text(text)
+    Path(str(path)+'.sha256').write_text(hashlib.sha256(path.read_bytes()).hexdigest()+'\n')
+
+
+@pytest.mark.parametrize('name,key',[
+    ('ledger.json','ready'),('session.json','product'),
+    ('oracle.json','schema'),('events.ndjson','data'),
+])
+def test_duplicate_attempt_json_cannot_hide_nonallowlisted_data(tmp_path,name,key):
+    export=attempt_export(tmp_path)
+    target=export/('export/correctness-'+name)
+    if name=='events.ndjson':
+        rewrite_export(target,(REPO/'tests/fixtures/baseline/events.ndjson').read_text())
+    assert test_attempt_capture.verify_exports(export,'correctness')
+    text=target.read_text()
+    rewrite_export(target,'{'+json.dumps(key)+':{"payload":"0xffff888012345000"},'+text[1:])
+    with pytest.raises(ValueError) as error:
+        test_attempt_capture.verify_exports(export,'correctness')
+    assert '0xffff888012345000' not in str(error.value)
+
+
+def test_escaped_equivalent_json_keys_are_duplicates(tmp_path):
+    export=attempt_export(tmp_path)
+    target=export/'export/correctness-ledger.json'
+    rewrite_export(target,r'{"\u0072eady":{"payload":"0xffff888012345000"},'+target.read_text()[1:])
+    with pytest.raises(ValueError):
+        test_attempt_capture.verify_exports(export,'correctness')
+
+
+@pytest.mark.parametrize('name,sub,doc,key',[
+    ('identity.json','oracle',dict(release='7.0.9',swiotlb_force=True,
+        **{key:'a'*64 for key in ('config_sha','btf_sha','bridge_sha','consume_sha','lc_sha','cp_sha','ko_sha')}),'release'),
+    ('ledger.json','stop',[dict(cycle=0,mode='quiet',lc_exit=0,cp_exit=0)],'cycle'),
+    ('inventory.json','cleanup',dict(
+        baseline=dict(bpf=dict(progs=0,maps=0),io_tlb_used=[],files=[]),
+        after=dict(bpf=dict(progs=0,maps=0),io_tlb_used=[],files=[]),
+        dmesg_marker_present=True,suspicious=0),'progs'),
+    ('workload.json','realio',dict(iface='eth0',used_before=[1],used_after=[1],
+        start_ns=1,end_ns=2,detach_ns=3,ping_tx=1,ping_rx=1,disk='/dev/sda',disk_bytes=512),'disk_bytes'),
+    ('pairs.json','perf',perf_pairs(),'tx'),
+])
+def test_duplicate_lifecycle_json_values_refused_recursively(tmp_path,name,sub,doc,key):
+    path=tmp_path/name
+    text=json.dumps(doc)
+    path.write_text(text)
+    export_validation.validate_lifecycle_exports({name:path},sub)
+    needle=json.dumps(key)+':'
+    path.write_text(text.replace(needle,needle+'{"payload":"0xffff888012345000"}, '+needle,1))
+    with pytest.raises(ValueError):
+        export_validation.validate_lifecycle_exports({name:path},sub)
+
+
+def test_duplicate_json_error_does_not_echo_raw_key_or_value(tmp_path):
+    path=tmp_path/'pairs.json'
+    text=json.dumps(perf_pairs())
+    path.write_text(text.replace('"tx":',
+        '"0xffff888012345000":"private-value", "0xffff888012345000":0, "tx":',1))
+    with pytest.raises(ValueError) as error:
+        export_validation.validate_lifecycle_exports({'pairs.json':path},'perf')
+    assert '0xffff888012345000' not in str(error.value)
+    assert 'private-value' not in str(error.value)

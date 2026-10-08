@@ -9,6 +9,18 @@ from pathlib import Path
 from consume import SUMMARY_LINE, parse_consume_file, parse_oracle_log
 
 
+def _unique_object(pairs):
+    doc={}
+    for key,value in pairs:
+        if key in doc:raise ValueError('duplicate export JSON key')
+        doc[key]=value
+    return doc
+
+
+def strict_json(text):
+    return json.loads(text,object_pairs_hook=_unique_object)
+
+
 def keys(doc, required, optional=()):
     if type(doc) is not dict or not set(required) <= set(doc) or set(doc)-set(required)-set(optional):
         raise ValueError('export key inventory drift')
@@ -61,7 +73,7 @@ def inventory_snapshot(doc):
 
 def validate_lifecycle_exports(got,sub):
     for name,path in got.items():
-        if name=='identity.json': identity(json.loads(path.read_text()))
+        if name=='identity.json': identity(strict_json(path.read_text()))
         elif name.endswith(('-lc.txt','-cp.txt')): parse_consume_file(path)
         elif name.endswith('-oracle.log'):
             # Only oracle bodies plus a dmesg monotonic prefix may cross.
@@ -70,7 +82,7 @@ def validate_lifecycle_exports(got,sub):
                     raise ValueError('unexpected oracle export line')
             parse_oracle_log(path)
         elif name=='ledger.json':
-            rows=json.loads(path.read_text())
+            rows=strict_json(path.read_text())
             if type(rows) is not list: raise ValueError('invalid cycle ledger')
             for row in rows:
                 if sub=='cleanup':
@@ -99,13 +111,13 @@ def validate_lifecycle_exports(got,sub):
                 else: raise ValueError('unknown cycle ledger')
                 integer(row['cycle'])
         elif name=='inventory.json':
-            doc=json.loads(path.read_text())
+            doc=strict_json(path.read_text())
             keys(doc,('baseline','after','dmesg_marker_present','suspicious'))
             inventory_snapshot(doc['baseline']); inventory_snapshot(doc['after'])
             if doc['dmesg_marker_present'] is not True:raise ValueError('missing dmesg marker')
             integer(doc['suspicious'])
         elif name=='workload.json':
-            doc=json.loads(path.read_text())
+            doc=strict_json(path.read_text())
             keys(doc,('iface','used_before','used_after','start_ns','end_ns','detach_ns',
                       'ping_tx','ping_rx','disk','disk_bytes'))
             if not re.fullmatch(r'/dev/sd[a-z]',doc['disk']):raise ValueError('invalid owned disk')
@@ -113,7 +125,7 @@ def validate_lifecycle_exports(got,sub):
             for k in ('used_before','used_after'):integer_list(doc[k])
             for k in ('start_ns','end_ns','detach_ns','ping_tx','ping_rx','disk_bytes'):integer(doc[k])
         elif name=='pairs.json':
-            pairs=json.loads(path.read_text())
+            pairs=strict_json(path.read_text())
             if type(pairs) is not list:raise ValueError('invalid pairs')
             for pair in pairs:
                 if type(pair) is not list or len(pair)!=2:raise ValueError('invalid pair cardinality')
@@ -142,10 +154,10 @@ def _schemas():
 
 def validate_attempt_exports(got, mode=None):
     validator=_schemas()
-    session=validator.check_session(json.loads(got['session.json'].read_text()))
+    session=validator.check_session(strict_json(got['session.json'].read_text()))
     for i,line in enumerate(got['events.ndjson'].read_text().splitlines(),1):
-        validator.check_event(json.loads(line),i,session)
-    doc=json.loads(got['oracle.json'].read_text())
+        validator.check_event(strict_json(line),i,session)
+    doc=strict_json(got['oracle.json'].read_text())
     keys(doc,('schema','lost_lines','pipe_bytes','pipe_lines','header_lines','blank_lines','events'))
     if doc['schema'] != 'memveil-vm-oracle/1':raise ValueError('invalid oracle schema')
     for k in ('lost_lines','pipe_bytes','pipe_lines','header_lines','blank_lines'):integer(doc[k])
@@ -156,7 +168,7 @@ def validate_attempt_exports(got, mode=None):
     for event in doc['events']:
         keys(event,('ts_ns','size','forced'));integer(event['ts_ns']);integer(event['size'])
         if type(event['forced']) is not bool:raise ValueError('invalid force flag')
-    ledger=json.loads(got['ledger.json'].read_text())
+    ledger=strict_json(got['ledger.json'].read_text())
     keys(ledger,('mode','fs_type','identity','hiwater_before','iface','dma_mask_bits','link_ok',
                 'trace_clock','ready','workload_start_ns','workload_end_ns','ping_transmitted',
                 'ping_received','record_exit','drained_bytes','percpu','hiwater_after',
