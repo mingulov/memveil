@@ -328,7 +328,11 @@ def test_owned_guest_timeout_stops_its_child(tmp_path):
     pid=int(marker.read_text())
     # An exited zombie awaits init reaping; it is no longer a running resource.
     status=Path('/proc')/str(pid)/'stat'
-    assert not status.exists() or status.read_text().split()[2]=='Z'
+    try:
+        state=status.read_text().split()[2]
+    except FileNotFoundError:
+        state='exited'
+    assert state in ('Z','exited')
 
 
 def test_missing_oracle_outcome_cannot_pass_parser(tmp_path):
@@ -358,3 +362,37 @@ def test_admission_malformed_equal_evidence_refuses(field,value):
     case=json.loads((Path(__file__).parent/'semantics/ok-copy-bounce.json').read_text())
     d=dict(case['definition'],**{field:value}); r=dict(case['recorded'],**{field:value})
     assert not admit(d,r)[0]
+
+
+def test_authored_projection_has_exact_nonzero_metrics_and_preserves_unpaired_capture(tmp_path):
+    import subprocess
+    from consume import author_reducer_fixture
+    from test_oracle_live import MEMVEIL_BIN
+    original=tmp_path/'reconstruction';fixture=tmp_path/'authored'
+    probes=translate_session([lc(ktime=100),lc(1,kind=2,skip=1,ktime=200)], [cp(ktime=90)],
+                      {0:dict(requested=512,success=True,forced=0)},original,'fixture','test-profile')
+    before=(original/'events.ndjson').read_bytes()
+    author_reducer_fixture(original,fixture)
+    original_doc=json.loads((original/'session.json').read_text())
+    doc=json.loads((fixture/'session.json').read_text())
+    events=[json.loads(s) for s in (fixture/'events.ndjson').read_text().splitlines()]
+    assert (original/'events.ndjson').read_bytes()==before
+    assert original_doc['quality']['correlation']['status']=='partial'
+    assert doc['synthetic'] is True and doc['capture']['mode']=='synthetic'
+    assert doc['quality']['terminal']['status']=='partial'
+    assert 'Authored' in doc['quality']['correlation']['reason']
+    assert all(e['source']['backend']=='synthetic-fixture' and e['source']['profile_id'].startswith('authored-') for e in events)
+    assert all(e['source']['hook'].startswith('fixture:') for e in events)
+    assert next(e for e in events if e['kind']=='bounce_attempt')['source']['measurement']=='derived'
+    proc=subprocess.run([MEMVEIL_BIN,'report','--format','json',str(fixture)],capture_output=True,text=True)
+    assert proc.returncode==4,proc.stderr
+    report=json.loads(proc.stdout)
+    ledger=OracleLedger();ledger.record_attempt(0,'dev-1',512,False)
+    ledger.record_outcome(0,True,mapping=0,mapped_bytes=512)
+    ledger.record_copy(0,'original_to_bounce',512,mapping=0)
+    ledger.record_release(0,100);ledger.seal()
+    assert compare_live(report,ledger,probes)==[]
+    metrics={m['name']:m['value'] for m in report['metrics'] if m['dimensions']['device_id'] is None and m['dimensions']['pool_id'] is None}
+    assert metrics['successful_allocations']=='1'
+    assert metrics['copy_original_to_bounce_bytes']=='512'
+    assert metrics['completed_lifetime_count']=='1' and metrics['lifetime_mean_ns']=='100'

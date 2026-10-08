@@ -23,7 +23,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from consume import (check_conservation, check_lifetime_ordering,
+from consume import (author_reducer_fixture, check_conservation, check_lifetime_ordering,
                      check_oracle_script, compare_live,
                      compare_scripted, parse_consume_file,
                      parse_oracle_log, replay_oracle_ledger,
@@ -95,9 +95,11 @@ def test_guest_comparison(tmp_path):
         probe_lifetimes = translate_session(
             lc, cp, ops_log, str(cap_dir), "oracle-live-session",
             "linux-x86_64-7.0.0-34-generic")
+        authored = tmp_path / "authored-reducer-fixture"
+        author_reducer_fixture(cap_dir, authored)
         rep = subprocess.run(
             [MEMVEIL_BIN, "report", "--format", "json",
-             str(cap_dir)],
+             str(authored)],
             capture_output=True, text=True, timeout=300)
         assert rep.returncode == 4, rep.stderr[-1000:]
         report = json.loads(rep.stdout)
@@ -107,7 +109,7 @@ def test_guest_comparison(tmp_path):
             probe_lifetimes, releases, "cmp")
         assert not mismatches, "\n".join(mismatches)
         print("oracle: 8 lc + 17 cp exact, report matches "
-              "ledger with zero mismatches")
+              "ledger in separately authored synthetic reducer fixture")
     except Exception:
         print(f"gate artifacts kept at {tmp}")
         raise

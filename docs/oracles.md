@@ -41,8 +41,10 @@ report against the sealed ledger with any mismatch failing
 its comparison. Inner allocations and outer outcomes remain distinct.
 The laboratory translator reconstructs operation identity by unique size;
 its capture is synthetic, attempts are derived, correlation is unpaired,
-and terminal quality stays partial (report exit 4). Report lifetimes are
-compared exactly to independently extracted probe intervals; the separate
+and terminal quality stays partial (report exit 4). A separate authored synthetic projection uses the synthetic backend and
+profile identity, with direct relations only within its authored model;
+that is reducer consistency evidence, not observational pairing.
+Report lifetimes in that projection are compared exactly to independently extracted probe intervals; the separate
 module-duration upper bound does not prove interval containment.
 
 Scope limits:
