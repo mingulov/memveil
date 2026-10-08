@@ -2,11 +2,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Oracle live gate: module build plus guest comparison.
 #
-# The module build runs everywhere the kernel headers exist.
-# The guest comparison runs only when armed
-# (MEMVEIL_VM_ORACLE=1) with qualified lifecycle probes;
-# unarmed runs exit 77 after the module check without
-# booting, and armed runs with missing pieces fail loudly.
+# The guest comparison and its owned module build run only
+# when armed (MEMVEIL_VM_ORACLE=1) with qualified lifecycle
+# probes. Unarmed runs exit 77 without building or booting;
+# armed runs with missing pieces fail loudly.
 set -u
 
 case "${1:-}" in
