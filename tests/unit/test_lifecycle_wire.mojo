@@ -2,9 +2,9 @@
 
 """Lifecycle/copy wire tests: MVLC/MVCP decode, effective rule, ledger.
 
-Pins the shipping decode contract against bpf/include/memveil_events.h
-(same check order, same reason vocabulary) plus the RR-01 canonical
-cases: nested 4096+1024 copies -> 5120 effective, copy before a failed
+Pins the laboratory decode contract against bpf/include/memveil_events.h
+(same check order, same reason vocabulary) plus the canonical cases:
+nested 4096+1024 copies -> 5120 effective, copy before a failed
 mapping keeps 4096 copied with no successful mapping, request-only
 sync invents nothing, clamped 4096 -> 1024, early return -> 0, and
 reused numeric addresses yield distinct mapping generations.
@@ -231,7 +231,7 @@ def test_canonical_copy_before_failed_map() raises:
     var cp = decode_copy(_cp_raw(2, 3, 1, UInt64(1), UInt64(1), UInt64(4096), UInt64(4096), 0))
     var mp = decode_lifecycle(_lc_raw(1, 0, 1, UInt64(1), UInt64(2), UInt64(4096)))
     ledger.note_copy(cp)
-    ledger.note_lifecycle(mp)
+    _ = ledger.note_lifecycle(mp)
     assert_equal(ledger.copies_known_effective_bytes, UInt64(4096))
     assert_equal(ledger.maps_ok, UInt64(0))
     assert_equal(ledger.maps_failed, UInt64(1))
@@ -283,6 +283,152 @@ def test_lifetimes_stay_unavailable() raises:
     assert_equal(ledger.unmaps, UInt64(2))
 
 
+def test_decode_precedence_multi_fault() raises:
+    var bad = _lc_raw(9, 1, 0, UInt64(1), UInt64(1), UInt64(1))
+    bad[0] = UInt8(0)
+    _expect_lc(bad^, String("PAY_MAGIC"))
+    bad = _lc_raw(9, 4, 3, UInt64(1), UInt64(1), UInt64(1))
+    _expect_lc(bad^, String("PAY_KIND"))
+    bad = _lc_raw(1, 4, 3, UInt64(1), UInt64(1), UInt64(1))
+    _expect_lc(bad^, String("PAY_FLAGS"))
+    var cpb = _cp_raw(9, 16, 3, UInt64(1), UInt64(1), UInt64(8), UInt64(8), 5)
+    _expect_cp(cpb^, String("PAY_KIND"))
+    cpb = _cp_raw(2, 16, 3, UInt64(1), UInt64(1), UInt64(8), UInt64(8), 5)
+    _expect_cp(cpb^, String("PAY_FLAGS"))
+    cpb = _cp_raw(2, 2, 3, UInt64(1), UInt64(1), UInt64(8), UInt64(8), 5)
+    _expect_cp(cpb^, String("PAY_DIR"))
+
+
+def test_decode_lifecycle_dir_zero_ok() raises:
+    var d = decode_lifecycle(_lc_raw(1, 1, 0, UInt64(1), UInt64(1), UInt64(8)))
+    assert_equal(Int(d.dir), 0)
+    assert_true(d.ok)
+
+
+def test_decode_copy_flags_combo() raises:
+    var d = decode_copy(_cp_raw(2, 14, 1, UInt64(1), UInt64(1), UInt64(8), UInt64(8), 0))
+    assert_true(d.known)
+    assert_true(d.clamped)
+    assert_true(d.early_zero)
+
+
+def test_unknown_copy_reasons_exclude_bytes() raises:
+    var ledger = LifecycleLedger()
+    for reason in range(1, 4):
+        var d = decode_copy(
+            _cp_raw(2, 0, 1, UInt64(reason), UInt64(1), UInt64(4096), UInt64(4096), reason)
+        )
+        assert_true(not d.known)
+        ledger.note_copy(d)
+    assert_equal(ledger.copies_unknown, UInt64(3))
+    assert_equal(ledger.copies_known, UInt64(0))
+    assert_equal(ledger.copies_known_effective_bytes, UInt64(0))
+
+
+def test_empty_ledger() raises:
+    var ledger = LifecycleLedger()
+    assert_equal(ledger.maps_ok, UInt64(0))
+    assert_equal(ledger.maps_ok_bytes, UInt64(0))
+    assert_equal(ledger.maps_failed, UInt64(0))
+    assert_equal(ledger.unmaps, UInt64(0))
+    assert_equal(ledger.unmaps_bytes, UInt64(0))
+    assert_equal(ledger.unmaps_skip_sync, UInt64(0))
+    assert_equal(ledger.sync_requests, UInt64(0))
+    assert_equal(ledger.copies_known, UInt64(0))
+    assert_equal(ledger.copies_known_effective_bytes, UInt64(0))
+    assert_equal(ledger.copies_unknown, UInt64(0))
+    assert_equal(ledger.open_estimate(), UInt64(0))
+    assert_true(not ledger.lifetimes_available())
+    assert_true(ledger.lifetimes_reason() != String(""))
+
+
+def test_unmap_before_map() raises:
+    var ledger = LifecycleLedger()
+    var u = decode_lifecycle(_lc_raw(2, 0, 1, UInt64(1), UInt64(1), UInt64(8)))
+    _ = ledger.note_lifecycle(u)
+    assert_equal(ledger.open_estimate(), UInt64(0))
+    var m = decode_lifecycle(_lc_raw(1, 1, 1, UInt64(2), UInt64(2), UInt64(8)))
+    _ = ledger.note_lifecycle(m)
+    assert_equal(ledger.maps_ok, UInt64(1))
+    assert_equal(ledger.unmaps, UInt64(1))
+    assert_equal(ledger.open_estimate(), UInt64(0))
+    var m2 = decode_lifecycle(_lc_raw(1, 1, 1, UInt64(3), UInt64(3), UInt64(8)))
+    _ = ledger.note_lifecycle(m2)
+    assert_equal(ledger.open_estimate(), UInt64(1))
+
+
+def test_large_values_stay_exact() raises:
+    var ledger = LifecycleLedger()
+    var big = UInt64(9007199254740993)
+    var a = decode_copy(_cp_raw(2, 2, 1, UInt64(1), UInt64(1), big, big, 0))
+    assert_equal(a.effective, big)
+    var b = decode_copy(_cp_raw(2, 2, 1, UInt64(2), UInt64(2), UInt64(1), UInt64(1), 0))
+    ledger.note_copy(a)
+    ledger.note_copy(b)
+    assert_equal(ledger.copies_known_effective_bytes, UInt64(9007199254740994))
+
+
+def test_effective_int64_min() raises:
+    var e = effective_bytes(~UInt64(0), Int64(-9223372036854775808), UInt64(0), True)
+    assert_equal(e.effective, UInt64(9223372036854775808))
+    assert_true(e.clamped)
+    assert_true(not e.early_zero)
+    e = effective_bytes(~UInt64(0), Int64(-9223372036854775808), UInt64(100), True)
+    assert_equal(e.effective, UInt64(9223372036854775908))
+    assert_true(e.clamped)
+
+
+def test_effective_negative_saturation() raises:
+    var e = effective_bytes(~UInt64(0), Int64(-1), ~UInt64(0), True)
+    assert_equal(e.effective, ~UInt64(0))
+    assert_true(not e.clamped)
+
+
+def test_copy_bytes_overflow_raises() raises:
+    var ledger = LifecycleLedger()
+    var a = decode_copy(_cp_raw(2, 2, 1, UInt64(1), UInt64(1), ~UInt64(0), ~UInt64(0), 0))
+    var b = decode_copy(_cp_raw(2, 2, 1, UInt64(2), UInt64(2), UInt64(1), UInt64(1), 0))
+    ledger.note_copy(a)
+    var raised = False
+    try:
+        ledger.note_copy(b)
+    except:
+        raised = True
+    assert_true(raised)
+    assert_equal(ledger.copies_known, UInt64(1))
+    assert_equal(ledger.copies_known_effective_bytes, ~UInt64(0))
+
+
+def test_map_bytes_overflow_raises() raises:
+    var ledger = LifecycleLedger()
+    var m = decode_lifecycle(_lc_raw(1, 1, 1, UInt64(1), UInt64(1), ~UInt64(0)))
+    _ = ledger.note_lifecycle(m)
+    var m2 = decode_lifecycle(_lc_raw(1, 1, 1, UInt64(2), UInt64(2), UInt64(1)))
+    var raised = False
+    try:
+        _ = ledger.note_lifecycle(m2)
+    except:
+        raised = True
+    assert_true(raised)
+    assert_equal(ledger.maps_ok, UInt64(1))
+    assert_equal(ledger.maps_ok_bytes, ~UInt64(0))
+
+
+def test_unmap_bytes_overflow_raises() raises:
+    var ledger = LifecycleLedger()
+    var u = decode_lifecycle(_lc_raw(2, 0, 1, UInt64(1), UInt64(1), ~UInt64(0)))
+    _ = ledger.note_lifecycle(u)
+    var u2 = decode_lifecycle(_lc_raw(2, 0, 1, UInt64(2), UInt64(2), UInt64(1)))
+    var raised = False
+    try:
+        _ = ledger.note_lifecycle(u2)
+    except:
+        raised = True
+    assert_true(raised)
+    assert_equal(ledger.unmaps, UInt64(1))
+    assert_equal(ledger.unmaps_bytes, ~UInt64(0))
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_wire_lengths]()
@@ -299,6 +445,18 @@ def run() raises -> Int:
     suite.test[test_canonical_clamp_and_early_return]()
     suite.test[test_reuse_mints_distinct_generations]()
     suite.test[test_lifetimes_stay_unavailable]()
+    suite.test[test_decode_precedence_multi_fault]()
+    suite.test[test_decode_lifecycle_dir_zero_ok]()
+    suite.test[test_decode_copy_flags_combo]()
+    suite.test[test_unknown_copy_reasons_exclude_bytes]()
+    suite.test[test_empty_ledger]()
+    suite.test[test_unmap_before_map]()
+    suite.test[test_large_values_stay_exact]()
+    suite.test[test_effective_int64_min]()
+    suite.test[test_effective_negative_saturation]()
+    suite.test[test_copy_bytes_overflow_raises]()
+    suite.test[test_map_bytes_overflow_raises]()
+    suite.test[test_unmap_bytes_overflow_raises]()
     suite^.run()
     return 0
 
