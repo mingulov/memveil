@@ -28,7 +28,12 @@ comptime MAX_NARROW_RING_BYTES = 4294967295
 
 
 struct NarrowBindings(ImplicitlyCopyable):
-    """Parsed section 5 grammar bindings (ring is canonical decimal)."""
+    """Parsed section 5 grammar bindings (rings are canonical decimal).
+
+    Extended lifecycle/copy bindings stay empty for 8-field
+    attempt-only notes; a capture requesting those channels
+    refuses unless the note binds them.
+    """
 
     var config: String
     var config_src: String
@@ -38,6 +43,10 @@ struct NarrowBindings(ImplicitlyCopyable):
     var image: String
     var image_bid: String
     var ring: String
+    var lc_object: String
+    var lc_ring: String
+    var cp_object: String
+    var cp_ring: String
 
     def __init__(out self):
         self.config = String("")
@@ -48,6 +57,10 @@ struct NarrowBindings(ImplicitlyCopyable):
         self.image = String("")
         self.image_bid = String("")
         self.ring = String("")
+        self.lc_object = String("")
+        self.lc_ring = String("")
+        self.cp_object = String("")
+        self.cp_ring = String("")
 
 
 struct NarrowParse(ImplicitlyCopyable):
@@ -88,7 +101,7 @@ struct ConfigLive(ImplicitlyCopyable):
 
 
 struct NarrowLive(ImplicitlyCopyable):
-    """Live values for every grammar key (ring set by record)."""
+    """Live values for every grammar key (rings set by record)."""
 
     var config: LiveValue
     var config_src: String
@@ -98,6 +111,10 @@ struct NarrowLive(ImplicitlyCopyable):
     var image: LiveValue
     var image_bid: LiveValue
     var ring: LiveValue
+    var lc_object: LiveValue
+    var lc_ring: LiveValue
+    var cp_object: LiveValue
+    var cp_ring: LiveValue
 
     def __init__(out self):
         self.config = LiveValue()
@@ -108,6 +125,10 @@ struct NarrowLive(ImplicitlyCopyable):
         self.image = LiveValue()
         self.image_bid = LiveValue()
         self.ring = LiveValue()
+        self.lc_object = LiveValue()
+        self.lc_ring = LiveValue()
+        self.cp_object = LiveValue()
+        self.cp_ring = LiveValue()
 
 
 struct NarrowVerdict(ImplicitlyCopyable):
@@ -248,13 +269,15 @@ def parse_narrow_note(note: String) -> NarrowParse:
     """Strict-parse the section 5 grammar note.
 
     Fixed order, exact keys, single spaces, lowercase
-    hex, exact lengths. Anything else is an unbound
+    hex, exact lengths: 8 fields for attempt-only notes,
+    12 with the appended lc_object/lc_ring_bytes/cp_object/
+    cp_ring_bytes bindings. Anything else is an unbound
     reference (ok False, key named, never an error).
     """
     var out = NarrowParse()
     var fields = _split_spaces(note)
-    if len(fields) != 8:
-        out.message = String("narrow note: want 8 fields")
+    if len(fields) != 8 and len(fields) != 12:
+        out.message = String("narrow note: want 8 or 12 fields")
         return out^
     var config = _field_value(fields[0], String("config"))
     var config_src = _field_value(fields[1], String("config_src"))
@@ -298,6 +321,33 @@ def parse_narrow_note(note: String) -> NarrowParse:
     out.bindings.image = _sha256_hex_value(image)
     out.bindings.image_bid = image_bid
     out.bindings.ring = ring_ok
+    if len(fields) == 12:
+        var lc_object = _field_value(fields[8], String("lc_object"))
+        var lc_ring = _field_value(fields[9], String("lc_ring_bytes"))
+        var cp_object = _field_value(fields[10], String("cp_object"))
+        var cp_ring = _field_value(fields[11], String("cp_ring_bytes"))
+        if lc_object == String("") or not _is_sha256_value(lc_object):
+            out.ok = False
+            out.message = String("narrow note: bad lc_object")
+            return out^
+        var lc_ring_ok = _parse_ring_value(lc_ring)
+        if lc_ring_ok == String(""):
+            out.ok = False
+            out.message = String("narrow note: bad lc_ring_bytes")
+            return out^
+        if cp_object == String("") or not _is_sha256_value(cp_object):
+            out.ok = False
+            out.message = String("narrow note: bad cp_object")
+            return out^
+        var cp_ring_ok = _parse_ring_value(cp_ring)
+        if cp_ring_ok == String(""):
+            out.ok = False
+            out.message = String("narrow note: bad cp_ring_bytes")
+            return out^
+        out.bindings.lc_object = _sha256_hex_value(lc_object)
+        out.bindings.lc_ring = lc_ring_ok
+        out.bindings.cp_object = _sha256_hex_value(cp_object)
+        out.bindings.cp_ring = cp_ring_ok
     out.message = String("")
     return out^
 
@@ -517,6 +567,65 @@ def check_narrow(
         out.state = String("mismatch")
         out.key = String("ring_bytes")
         return out^
+    out.state = String("bound")
+    out.key = String("")
+    return out^
+
+
+def check_narrow_extra(
+    bind: NarrowBindings, live: NarrowLive, want_lc: Bool,
+    want_cp: Bool,
+) -> NarrowVerdict:
+    """Compare requested extended bindings (lc before cp).
+
+    Unrequested channels bind vacuously. A requested
+    channel without a note binding mismatches on its
+    object key; otherwise object bytes then ring size
+    must match exactly, like the base grammar.
+    """
+    var out = NarrowVerdict()
+    if want_lc:
+        if bind.lc_object == String(""):
+            out.state = String("mismatch")
+            out.key = String("lc_object")
+            return out^
+        if live.lc_object.state != String("value"):
+            out.state = String("uncheckable")
+            out.key = String("lc_object")
+            return out^
+        if live.lc_object.value != bind.lc_object:
+            out.state = String("mismatch")
+            out.key = String("lc_object")
+            return out^
+        if live.lc_ring.state != String("value"):
+            out.state = String("uncheckable")
+            out.key = String("lc_ring_bytes")
+            return out^
+        if live.lc_ring.value != bind.lc_ring:
+            out.state = String("mismatch")
+            out.key = String("lc_ring_bytes")
+            return out^
+    if want_cp:
+        if bind.cp_object == String(""):
+            out.state = String("mismatch")
+            out.key = String("cp_object")
+            return out^
+        if live.cp_object.state != String("value"):
+            out.state = String("uncheckable")
+            out.key = String("cp_object")
+            return out^
+        if live.cp_object.value != bind.cp_object:
+            out.state = String("mismatch")
+            out.key = String("cp_object")
+            return out^
+        if live.cp_ring.state != String("value"):
+            out.state = String("uncheckable")
+            out.key = String("cp_ring_bytes")
+            return out^
+        if live.cp_ring.value != bind.cp_ring:
+            out.state = String("mismatch")
+            out.key = String("cp_ring_bytes")
+            return out^
     out.state = String("bound")
     out.key = String("")
     return out^
@@ -811,6 +920,32 @@ def verify_object(data: Span[UInt8, _], want_program: String) -> ObjectCheck:
     non-empty extent within its section. Any structural
     defect refuses; this never executes or loads anything.
     """
+    return _verify_object(data, want_program, String("tracepoint/"))
+
+
+def verify_object_program(
+    data: Span[UInt8, _], want_program: String, section_prefix: String
+) -> ObjectCheck:
+    """Static admission for one program in a known section kind.
+
+    Same ELF/.maps/license/symbol checks as verify_object,
+    but the program must live in a section starting with
+    section_prefix, one of tracepoint/, fentry/, or fexit/.
+    Anything else refuses without reading the object.
+    """
+    if (
+        section_prefix != String("tracepoint/")
+        and section_prefix != String("fentry/")
+        and section_prefix != String("fexit/")
+    ):
+        return _refuse(String("bad section kind"))
+    return _verify_object(data, want_program, section_prefix)
+
+
+def _verify_object(
+    data: Span[UInt8, _], want_program: String, prefix: String
+) -> ObjectCheck:
+    """Shared worker: verify_object with a section-kind prefix."""
     var total = len(data)
     if total < 64:
         return _refuse(String("object too small"))
@@ -852,7 +987,7 @@ def verify_object(data: Span[UInt8, _], want_program: String) -> ObjectCheck:
     var types = List[Int]()
     var offs = List[Int]()
     var sizes = List[Int]()
-    var has_tp = False
+    var has_want = False
     var has_maps = False
     var has_license = False
     var symtab = -1
@@ -867,16 +1002,22 @@ def verify_object(data: Span[UInt8, _], want_program: String) -> ObjectCheck:
         types.append(sh_type)
         offs.append(_le64(data, base + 24))
         sizes.append(_le64(data, base + 32))
-        if _str_starts_with(sec_name, String("tracepoint/")):
-            has_tp = True
+        if _str_starts_with(sec_name, prefix):
+            has_want = True
         if sec_name == String(".maps"):
             has_maps = True
         if sec_name == String("license"):
             has_license = True
         if sh_type == 2 and symtab < 0:
             symtab = i
-    if not has_tp:
-        return _refuse(String("no tracepoint section"))
+    if not has_want:
+        var display = String("")
+        var praw = prefix.as_bytes()
+        for i in range(len(praw)):
+            if praw[i] == UInt8(0x2F):
+                break
+            display += String(prefix[byte=i])
+        return _refuse(String("no ") + display + String(" section"))
     if not has_maps:
         return _refuse(String("no .maps section"))
     if not has_license:
@@ -886,7 +1027,7 @@ def verify_object(data: Span[UInt8, _], want_program: String) -> ObjectCheck:
     # wrong-type sections that later readers would misparse.
     for i in range(shnum):
         var required = _str_starts_with(
-            names[i], String("tracepoint/")
+            names[i], prefix
         ) or names[i] == String(".maps") or names[i] == String(
             "license"
         )
@@ -946,7 +1087,7 @@ def verify_object(data: Span[UInt8, _], want_program: String) -> ObjectCheck:
         if st_shndx == 0 or st_shndx >= shnum:
             detail = String("program undefined")
             continue
-        if not _str_starts_with(names[st_shndx], String("tracepoint/")):
+        if not _str_starts_with(names[st_shndx], prefix):
             detail = String(t"program in {names[st_shndx]}")
             continue
         var st_value = _le64(data, sb + 8)
