@@ -41,6 +41,38 @@ SIZE_RE = re.compile(r"\bsize=(\d+)")
 FLAG_RE = re.compile(r"\b(FORCE|NORMAL)\s*$")
 
 
+def parse_ftrace(blob):
+    """Every line has one category; unknown or truncated evidence refuses."""
+    if blob and not blob.endswith(b"\n"):
+        raise ValueError("truncated ftrace final line")
+    events = []
+    headers = blanks = lost = 0
+    for raw in blob.splitlines():
+        line = raw.decode("utf-8", "strict")
+        if not line.strip():
+            blanks += 1
+        elif line.lstrip().startswith("#"):
+            headers += 1
+        elif re.fullmatch(r"\s*CPU:\d+ \[LOST \d+ EVENTS\]\s*", line):
+            lost += 1
+        else:
+            m = FTRACE_RE.fullmatch(line)
+            if not m:
+                raise ValueError("malformed/unexpected ftrace line")
+            sm = SIZE_RE.search(m.group(4))
+            fm = FLAG_RE.search(m.group(4))
+            if not sm or not fm or len(re.findall(r"\bsize=", m.group(4))) != 1:
+                raise ValueError("malformed ftrace payload")
+            fraction = m.group(3)
+            if len(fraction) != 6:
+                raise ValueError("unexpected ftrace timestamp precision")
+            events.append(dict(ts_ns=int(m.group(2))*1000000000+int(fraction)*1000,
+                               size=int(sm.group(1)), forced=fm.group(1)=="FORCE"))
+    return dict(schema="memveil-vm-oracle/1", lost_lines=lost, pipe_bytes=len(blob),
+                pipe_lines=blob.count(b"\n"), header_lines=headers,
+                blank_lines=blanks, events=events)
+
+
 def fail(msg):
     print(f"guest_flow: FAIL: {msg}", file=sys.stderr)
     sys.exit(1)
@@ -217,7 +249,7 @@ def percpu_stats():
         for key in ("overrun", "commit overrun", "dropped events"):
             m = re.search(rf"^{re.escape(key)}:\s*(\d+)", raw, re.M)
             vals[key] = int(m.group(1)) if m else None
-        out[cpu] = {"values": vals, "raw": raw}
+        out[cpu] = {"values": vals}
     return out
 
 
@@ -315,6 +347,8 @@ def main():
         time.sleep(1)
     start_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
     ping = sh(["timeout", "20", "ping", "-A", "-c", pings, "-q", "10.0.3.2"])
+    if ping.returncode != 0:
+        fail(f"ping workload failed exit {ping.returncode}")
     end_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
     ledger["workload_start_ns"] = start_ns
     ledger["workload_end_ns"] = end_ns
@@ -335,6 +369,7 @@ def main():
         rc = rec.wait(timeout=120)
     except subprocess.TimeoutExpired:
         rec.kill()
+        rec.wait()
         fail("record did not exit")
     ledger["record_exit"] = rc
     try:
@@ -351,6 +386,7 @@ def main():
         cat.wait(timeout=10)
     except subprocess.TimeoutExpired:
         cat.kill()
+        cat.wait()
         fail("pipe cat did not stop")
     pipe_fh.close()
     # Drain stragglers appended after the streaming reader stopped.
@@ -385,38 +421,7 @@ def main():
     # Allowlisted oracle: keep only timestamps, sizes, force
     # flags, and loss evidence. Raw lines (dev_addr and friends)
     # stay guest-local and are never exported.
-    oracle_events = []
-    lost_lines = 0
-    for raw in blob.split(b"\n"):
-        if not raw:
-            continue
-        line = raw.decode("utf-8", "replace")
-        if "LOST" in line.upper():
-            lost_lines += 1
-            continue
-        m = FTRACE_RE.match(line)
-        if not m:
-            continue
-        tail = m.group(4)
-        sm = SIZE_RE.search(tail)
-        fm = FLAG_RE.search(tail)
-        if not sm or not fm:
-            continue
-        oracle_events.append(
-            {
-                "ts_ns": int(m.group(2)) * 1000000000
-                + int(m.group(3)) * 1000,
-                "size": int(sm.group(1)),
-                "forced": fm.group(1) == "FORCE",
-            }
-        )
-    oracle = {
-        "schema": "memveil-vm-oracle/1",
-        "lost_lines": lost_lines,
-        "pipe_bytes": len(blob),
-        "pipe_lines": blob.count(b"\n"),
-        "events": oracle_events,
-    }
+    oracle = parse_ftrace(blob)
     oracle_src = os.path.join(work, "oracle.json")
     with open(oracle_src, "w") as fh:
         json.dump(oracle, fh, indent=1, sort_keys=True)

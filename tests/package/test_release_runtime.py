@@ -74,7 +74,7 @@ def run(*argv, **kwargs):
     )
 
 
-def test_wrong_abi_bridge_refused(bundle, tmp_path):
+def test_replaced_bridge_reaches_named_refusal_boundary(bundle, tmp_path):
     # record validates in gate order (object, profile, hook
     # format, binding) before the bridge loads, so on a host
     # without readable tracefs this fails at the format gate,
@@ -97,7 +97,12 @@ def test_wrong_abi_bridge_refused(bundle, tmp_path):
                "--bridge", str(bridge),
                "--duration", "1", cwd=str(tmp_path))
     assert proc.returncode == 3, proc.stderr
-    assert proc.stderr.strip(), "refusal must explain itself"
+    # This lane names the gate it actually reached. ABI rejection itself
+    # requires a qualified live environment that passes all preceding gates.
+    boundaries = ("requires x86_64", "requires Linux", "below floor 7.0", "format unreadable",
+                  "binding failed", "setup failed", "bridge", "time namespace")
+    assert any(reason in proc.stderr for reason in boundaries), proc.stderr
+    print("replaced-bridge refusal boundary: " + proc.stderr.strip())
     assert not cap.exists(), "refused record left a capture dir"
 
 

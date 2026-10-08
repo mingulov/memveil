@@ -1,0 +1,6 @@
+{
+  "schema": "memveil-vm-harness/1",
+  "vng": "virtme-ng 1.41",
+  "qemu": "QEMU emulator version 10.2.1",
+  "note": "Exact observed generations. Version matching is a prerequisite, not semantic qualification."
+}

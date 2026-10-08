@@ -16,7 +16,7 @@ a summary line to <out>:
 Decoding mirrors bpf/include/memveil_events.h check order; any
 rejected payload counts as a bad record, never an event. Counter
 words come from the ``mv_counts`` map, transport words from bridge
-stats. Exit 0 on a complete window, 77 on privilege denial
+stats. Exit 0 on a decoded laboratory window (settlement remains unproved), 77 on privilege denial
 (EPERM anywhere, EACCES at attach; load-time EACCES fails
 closed), 2 on usage errors, 1 on anything else.
 """
@@ -120,6 +120,8 @@ def decode_lc(payload: List[UInt8]) raises Fail -> String:
         if (flags & LC_FLAG_SKIP_SYNC) != UInt32(0)
         else UInt32(0)
     )
+    if (kind == LC_KIND_MAP and skip != 0) or (kind == LC_KIND_UNMAP and ok != 1):
+        raise Fail(1, String("lc flag relation"))
     var line = String("lc kind=")
     line += u32_to_str(kind)
     line += String(" ok=")
@@ -164,6 +166,8 @@ def decode_cp(payload: List[UInt8]) raises Fail -> String:
     if reason > CP_REASON_NOT_COPY:
         raise Fail(1, String("cp reason"))
     var known = (flags & CP_FLAG_KNOWN) != UInt32(0)
+    if kind == CP_KIND_SYNC and known:
+        raise Fail(1, String("cp sync known"))
     if known:
         if reason != UInt32(0):
             raise Fail(1, String("cp reason"))
@@ -192,6 +196,23 @@ def decode_cp(payload: List[UInt8]) raises Fail -> String:
         if (flags & CP_FLAG_EARLY_ZERO) != UInt32(0)
         else UInt32(0)
     )
+    if kind == CP_KIND_SYNC:
+        if effective != 0 or clamp != 0 or ezero != 0:
+            raise Fail(1, String("cp sync bytes/flags"))
+    else:
+        if todev != (UInt32(1) if direction == 1 else UInt32(0)):
+            raise Fail(1, String("cp copy direction"))
+        if known:
+            if effective > requested:
+                raise Fail(1, String("cp effective overflow"))
+            if ezero != 0 and effective != 0:
+                raise Fail(1, String("cp early-zero bytes"))
+            if clamp != 0 and effective >= requested:
+                raise Fail(1, String("cp clamp bytes"))
+            if clamp == 0 and ezero == 0 and effective != requested:
+                raise Fail(1, String("cp effective relation"))
+        elif effective != 0 or clamp != 0 or ezero != 0:
+            raise Fail(1, String("cp unknown bytes/flags"))
     var line = String("cp kind=")
     line += u32_to_str(kind)
     line += String(" todev=")
@@ -322,7 +343,28 @@ def self_check() raises Fail -> Int:
     except e:
         if e.message != String("cp reason"):
             raise Fail(1, String("cp reason wrong reason"))
-    print("self-check: 2 decoders ok")
+    var invalid_sync = cp.copy()
+    invalid_sync[6] = UInt8(1)
+    # Known+reason NONE is invalid for a request even when bytes are zero.
+    invalid_sync[36] = UInt8(0)
+    invalid_sync[37] = UInt8(0)
+    var refused_sync = False
+    try:
+        _ = decode_cp(invalid_sync^)
+    except e:
+        refused_sync = True
+    if not refused_sync:
+        raise Fail(1, String("sync semantic corruption accepted"))
+    var invalid_copy = cp.copy()
+    invalid_copy[37] = UInt8(5)
+    var refused_copy = False
+    try:
+        _ = decode_cp(invalid_copy^)
+    except e:
+        refused_copy = True
+    if not refused_copy:
+        raise Fail(1, String("copy effective overflow accepted"))
+    print("self-check: 2 decoders and semantic refusal controls ok")
     return 0
 
 
@@ -395,18 +437,35 @@ def run(args: List[String]) raises Fail -> Int:
     var dst = List[UInt8](length=4104, fill=UInt8(0))
     var start_ns = perf_counter_ns()
     var budget_ns = seconds * 1000000000
+    var detached = False
+    var drain_start = 0
     while True:
         var elapsed_ns = perf_counter_ns() - start_ns
-        if elapsed_ns >= budget_ns:
-            break
+        if not detached and elapsed_ns >= budget_ns:
+            # Detach closes new attachments; it does not prove in-flight
+            # writers quiesced. The translated terminal remains partial.
+            try:
+                session.detach()
+            except e:
+                close_quietly(session)
+                raise Fail(1, String("detach: ") + String(e))
+            detached = True
+            drain_start = perf_counter_ns()
+        if detached and perf_counter_ns() - drain_start >= 2000000000:
+            close_quietly(session)
+            raise Fail(1, String("bounded post-detach drain timed out"))
         var remain_ms = (budget_ns - elapsed_ns) // 1000000
         var wait_ms = Int32(1000)
         if remain_ms < 1000:
             wait_ms = Int32(remain_ms)
-        if wait_ms <= 0:
-            break
+        if detached:
+            wait_ms = Int32(0)
+        elif wait_ms <= 0:
+            continue
         var result = session.poll(dst, 0, UInt32(4104), wait_ms)
         if result.is_timeout():
+            if detached:
+                break
             continue
         if result.is_error():
             if result.error.code == Int32(-4):
@@ -455,7 +514,6 @@ def run(args: List[String]) raises Fail -> Int:
             dlv = stats.delivered
             mal = stats.malformed
             drop = stats.dropped
-            session.detach()
     except e:
         close_quietly(session)
         raise Fail(1, String("settle: ") + String(e))
@@ -499,6 +557,8 @@ def run(args: List[String]) raises Fail -> Int:
         close_quietly(session)
         raise Fail(1, String("cannot write out: ") + String(e))
     close_quietly(session)
+    if badframe != 0 or badrec != 0 or counts[5] != 0 or mal != 0 or drop != 0:
+        raise Fail(1, String("unhealthy decoded window; retained summary"))
     return 0
 
 

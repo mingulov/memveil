@@ -20,7 +20,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from consume import (check_conservation, check_oracle_script,
+from consume import (check_conservation, check_retained_script, check_oracle_script,
                      parse_consume_file, parse_oracle_log,
                      scripted_expectation)
 from vm_boot import cleanup, run_guest, verify_exports
@@ -44,19 +44,6 @@ def armed_preflight():
               "saturation copy object") and ok
     ok = need(os.path.join(REPO, "build", "vm", "mv_consume"),
               "consumer") and ok
-    ko = os.path.join(REPO, "tests", "kernel",
-                      "memveil_dma_oracle.ko")
-    if not os.path.isfile(ko):
-        kdir = "/lib/modules/%s/build" % os.uname().release
-        if not os.path.isfile(os.path.join(kdir, "Makefile")):
-            print("FAIL vm-saturation: armed but no kernel tree")
-            return False
-        build = subprocess.run(
-            ["make", "-C", os.path.join(REPO, "tests", "kernel")],
-            capture_output=True, text=True)
-        if build.returncode != 0 or not os.path.isfile(ko):
-            print("FAIL vm-saturation: armed but module failed")
-            return False
     if not shutil.which("vng"):
         print("FAIL vm-saturation: armed but vng not available")
         return False
@@ -96,6 +83,7 @@ def run_flow():
             str(got["flood-oracle.log"]))
         bad += check_oracle_script(ops_log, releases, complete,
                                    FLOOD_OPS, -1, "flood")
+        bad += check_retained_script(lc, cp, FLOOD_OPS, -1, "flood")
         want = scripted_expectation(FLOOD_OPS, -1)
         want_lc = len(want["maps"]) + len(want["unmaps"])
         want_cp = (len(want["syncs_dev"]) + len(want["syncs_cpu"])

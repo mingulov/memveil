@@ -5,7 +5,8 @@
 Verifies request-vs-copy accounting on live traffic: sync
 requests alone add no copy bytes, nested copies before a map
 result stay counted, and copies under a failed mapping survive
-while the failure creates no mapping.
+while outer-operation failure stays distinct from its successful inner
+allocation. These are decoded laboratory records, not a shipping capture.
 """
 
 import os

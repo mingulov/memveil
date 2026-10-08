@@ -1,25 +1,55 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Tier 3: privileged VM integration. Manual dispatch on a
-# trusted self-hosted runner only: it boots disposable VMs
-# with owned fixtures and must never run untrusted
-# pull-request code. Unarmed lanes exit 77; an armed run
-# needs qualified probes plus its MEMVEIL_VM_* lease.
+# Manual qualification on an existing trusted disposable-VM runner.
 name: vm
-
 on:
   workflow_dispatch:
-
+    inputs:
+      armed:
+        description: 'Run all required laboratory VM lanes on an eligible trusted runner'
+        type: boolean
+        required: true
+        default: false
 jobs:
   vm:
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
-      - name: Build
-        run: ./tools/build
-      - name: VM suites
+      - name: Require explicit arming
+        run: test '${{ inputs.armed }}' = 'true'
+      - name: Install locked build environment
         run: |
-          for suite in vm-attempts vm-oracle vm-lifecycle \
-              vm-copy vm-real-io vm-stop vm-saturation \
-              vm-cleanup perf-workload soak; do
-            ./tools/test "$suite" || exit 1
-          done
+          curl -fsSL https://pixi.sh/install.sh | PIXI_VERSION=0.81.0 bash
+          echo "$HOME/.pixi/bin" >> "$GITHUB_PATH"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang bpftool cmake ninja-build make python3-pytest
+      - name: Provision exact dependency
+        run: |
+          VER="$(python3 -c "import json; print(json.load(open('toolchain.lock.json'))['dependencies']['libbpf-mojo']['version'])")"
+          TARBALL="third_party/libbpf-mojo-$VER.tar.gz"
+          WANT="$(python3 -c "import json; print(json.load(open('toolchain.lock.json'))['dependencies']['libbpf-mojo']['tarball_sha256'])")"
+          echo "$WANT  $TARBALL" | sha256sum --check -
+          echo "LMB_PACKAGE=$GITHUB_WORKSPACE/$TARBALL" >> "$GITHUB_ENV"
+      - name: Build locked sources
+        run: ./tools/build
+      - name: Required VM results
+        env:
+          MEMVEIL_VM_ATTEMPTS: '1'
+          MEMVEIL_VM_ORACLE: '1'
+          MEMVEIL_VM_LIFECYCLE: '1'
+          MEMVEIL_VM_STOP: '1'
+          MEMVEIL_VM_SATURATION: '1'
+          MEMVEIL_VM_CLEANUP: '1'
+          MEMVEIL_VM_PERF: '1'
+          MEMVEIL_VM_SOAK: '1'
+        run: |
+          ./tools/qualification-results evidence vm-attempts vm-oracle vm-lifecycle \
+            vm-copy vm-real-io vm-stop vm-saturation vm-cleanup perf-workload soak
+      - name: Upload allowlisted status receipts on every outcome
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vm-status
+          path: |
+            evidence/results.json
+            evidence/*.log
+          if-no-files-found: warn

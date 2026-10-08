@@ -9,11 +9,13 @@
 # booting, and armed runs with missing pieces fail loudly.
 set -u
 
+case "${1:-}" in
+    --help|-h) sed -n '2,/^set -u/p' "$0" | sed 's/^# //; s/^#//'; exit 0 ;;
+esac
+
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 
 cd "$ROOT" || exit 1
-python3 -m pytest tests/vm/test_oracle_live.py::test_module_builds \
-    -q "$@" || exit 1
 if [ "${MEMVEIL_VM_ORACLE:-0}" != "1" ]; then
     echo "vm-oracle: SKIP: needs MEMVEIL_VM_ORACLE=1" \
         "with qualified probes" >&2

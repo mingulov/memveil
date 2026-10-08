@@ -71,6 +71,14 @@ class OracleLedger:
                  mapping=mapping, mapped_bytes=mapped_bytes,
                  return_code=return_code)
 
+    def record_allocation(self, op, success, mapping=None, mapped_bytes=None):
+        """Explicit inner allocation; distinct from outer operation outcome."""
+        self._add("allocation", op=op, success=success,
+                  mapping=mapping, mapped_bytes=mapped_bytes)
+
+    def _allocation_kind(self):
+        return "allocation" if any(e["kind"] == "allocation" for e in self._entries) else "outcome"
+
     def record_copy(self, op, direction, nbytes, mapping=None):
         self._add("copy", op=op, mapping=mapping,
                  direction=direction, nbytes=nbytes)
@@ -92,11 +100,15 @@ class OracleLedger:
 
     def expected_allocations(self):
         return sum(1 for e in self._entries
-                   if e["kind"] == "outcome" and e["success"])
+                   if e["kind"] == self._allocation_kind() and e["success"])
 
     def expected_failures(self):
         return sum(1 for e in self._entries
-                   if e["kind"] == "outcome" and not e["success"])
+                   if e["kind"] == self._allocation_kind() and not e["success"])
+
+    def expected_mapped_bytes(self):
+        return sum(e["mapped_bytes"] for e in self._entries
+                   if e["kind"] == self._allocation_kind() and e["success"])
 
     def expected_copies(self):
         totals = {"original_to_bounce": 0, "bounce_to_original": 0}
@@ -113,13 +125,13 @@ class OracleLedger:
     def expected_live_bytes(self):
         live = {}
         for e in self._entries:
-            if e["kind"] == "outcome" and e["success"]:
+            if e["kind"] == self._allocation_kind() and e["success"]:
                 live[e["mapping"]] = e["mapped_bytes"]
             elif e["kind"] == "release":
                 live.pop(e["mapping"], None)
         return sum(live.values()), len(live)
 
-    def expected_pressure(self):
+    def pressure_streaks(self):
         """Pools with three consecutive qualifying samples."""
         streak = {}
         for e in self._entries:
@@ -130,7 +142,10 @@ class OracleLedger:
                   and e["capacity"] is not None and e["capacity"] > 0
                   and e["used"] >= e["capacity"] - e["capacity"] // 10)
             streak[pool] = streak.get(pool, 0) + 1 if ok else 0
-        return sorted(p for p, n in streak.items() if n >= 3)
+        return streak
+
+    def expected_pressure(self):
+        return sorted(p for p, n in self.pressure_streaks().items() if n >= 3)
 
 
 def _global_metrics(report):
@@ -138,6 +153,8 @@ def _global_metrics(report):
     for m in report["metrics"]:
         dims = m["dimensions"]
         if dims["device_id"] is None and dims["pool_id"] is None:
+            if m["name"] in found:
+                raise ValueError("duplicate global metric " + m["name"])
             found[m["name"]] = m
     return found
 
@@ -149,6 +166,8 @@ def _pressure_streaks(report):
             continue
         pool = m["dimensions"]["pool_id"]
         if pool is not None and m["value"] is not None:
+            if pool in streaks:
+                raise ValueError("duplicate pool pressure metric")
             streaks[pool] = int(m["value"])
     return streaks
 
@@ -188,13 +207,28 @@ def compare(report, ledger):
             bad.append("valued metric %s without ledger source" % name)
 
     kinds = set(e["kind"] for e in ledger.entries)
-    if "outcome" in kinds:
+    for name, truth in (("bounce_attempts", sum(e["kind"] == "attempt" for e in ledger.entries)),
+                        ("requested_bounce_bytes", sum(e["requested"] for e in ledger.entries if e["kind"] == "attempt"))):
+        if "attempt" in kinds:
+            got = valued(name)
+            if got is not None and got != truth:
+                bad.append("%s %d != ledger %d" % (name, got, truth))
+        else:
+            expect_null(name, must_exist=False)
+    if "outcome" in kinds or "allocation" in kinds:
+        got = valued("failed_allocations")
+        if got is not None and got != ledger.expected_failures():
+            bad.append("failed_allocations %d != ledger %d" % (got, ledger.expected_failures()))
+        mapped = valued("mapped_bytes_total")
+        if mapped is not None and mapped != ledger.expected_mapped_bytes():
+            bad.append("mapped_bytes_total %d != ledger %d" % (mapped, ledger.expected_mapped_bytes()))
         alloc = valued("successful_allocations")
         if alloc is not None and alloc != ledger.expected_allocations():
             bad.append("successful_allocations %d != ledger %d"
                        % (alloc, ledger.expected_allocations()))
     else:
         expect_null("successful_allocations")
+        expect_null("failed_allocations", must_exist=False)
     copies = ledger.expected_copies()
     if "copy" in kinds:
         o2b = valued("copy_original_to_bounce_bytes")
@@ -210,7 +244,7 @@ def compare(report, ledger):
         expect_null("copy_bounce_to_original_bytes")
 
     live_bytes, live_open = ledger.expected_live_bytes()
-    if "outcome" in kinds or "release" in kinds:
+    if "outcome" in kinds or "allocation" in kinds or "release" in kinds:
         live = valued("live_observed_allocation_bytes")
         if live is not None and live != live_bytes:
             bad.append("live_observed_allocation_bytes %d != ledger %d"
@@ -236,7 +270,11 @@ def compare(report, ledger):
         if mean is not None and mean != sum(want_durs) // len(want_durs):
             bad.append("lifetime_mean_ns %d != ledger %d"
                        % (mean, sum(want_durs) // len(want_durs)))
-        for frac, name in ((50, "lifetime_p50_ns"),
+        for name, truth in (("lifetime_min_ns", min(want_durs)), ("lifetime_max_ns", max(want_durs))):
+            got = valued(name)
+            if got is not None and got != truth:
+                bad.append("%s %d != ledger %d" % (name, got, truth))
+        for frac, name in ((50, "lifetime_p50_ns"), (95, "lifetime_p95_ns"),
                            (99, "lifetime_p99_ns")):
             got = valued(name)
             if got is None:
@@ -248,14 +286,22 @@ def compare(report, ledger):
                 bad.append("%s %d != ledger edge %d"
                            % (name, got, edge))
 
+    if not want_durs:
+        for name in ("lifetime_mean_ns", "lifetime_min_ns", "lifetime_max_ns", "lifetime_p50_ns", "lifetime_p95_ns", "lifetime_p99_ns"):
+            expect_null(name, must_exist=False)
     streaks = _pressure_streaks(report)
-    for pool in ledger.expected_pressure():
-        if streaks.get(pool, 0) < 3:
-            bad.append("pool %s pressured in ledger, streak %d"
-                       % (pool, streaks.get(pool, 0)))
-    codes = _finding_codes(report)
-    if ledger.expected_pressure() and "POOL_PRESSURE" not in codes:
-        bad.append("missing POOL_PRESSURE finding")
+    expected = ledger.pressure_streaks()
+    if streaks != expected:
+        bad.append("pool pressure streaks differ from ledger (pressured subjects included)")
+    subjects = []
+    for finding in report["findings"]:
+        if finding["code"] == "POOL_PRESSURE":
+            refs = [r[5:] for r in finding.get("evidence_refs", []) if r.startswith("pool:")]
+            if len(refs) != 1:
+                bad.append("POOL_PRESSURE finding has no unique pool subject")
+            subjects.extend(refs)
+    if sorted(subjects) != ledger.expected_pressure():
+        bad.append("POOL_PRESSURE subjects differ from ledger")
     return sorted(bad)
 
 

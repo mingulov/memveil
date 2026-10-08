@@ -38,7 +38,11 @@
     "btf_anchor": {
       "release": "7.0.0-34-generic",
       "id": 88179
-    }
+    },
+    "hook": "fentry:__swiotlb_tbl_unmap_single",
+    "kind": "fentry",
+    "target": "__swiotlb_tbl_unmap_single",
+    "authority": "kernel-source"
   },
   "expect_ok": true,
   "expect_reason": ""

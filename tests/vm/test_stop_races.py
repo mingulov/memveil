@@ -44,19 +44,6 @@ def armed_preflight():
               "copy probes") and ok
     ok = need(os.path.join(REPO, "build", "vm", "mv_consume"),
               "consumer") and ok
-    ko = os.path.join(REPO, "tests", "kernel",
-                      "memveil_dma_oracle.ko")
-    if not os.path.isfile(ko):
-        kdir = "/lib/modules/%s/build" % os.uname().release
-        if not os.path.isfile(os.path.join(kdir, "Makefile")):
-            print("FAIL vm-stop: armed but no kernel build tree")
-            return False
-        build = subprocess.run(
-            ["make", "-C", os.path.join(REPO, "tests", "kernel")],
-            capture_output=True, text=True)
-        if build.returncode != 0 or not os.path.isfile(ko):
-            print("FAIL vm-stop: armed but module build failed")
-            return False
     if not shutil.which("vng"):
         print("FAIL vm-stop: armed but vng not available")
         return False
@@ -183,8 +170,13 @@ def run_flow():
         if got_lc["unmaps"] != want["unmaps"]:
             bad.append("c1: survivor unmaps differ")
         victim = ledger[1]
-        if victim.get("victim_rc", 0) == 0:
-            bad.append("c1: victim exited 0")
+        from guest_lifecycle import validate_victim
+        try:
+            validate_victim(victim.get("victim_alive"), victim.get("victim_rc"))
+        except ValueError as exc:
+            bad.append("c1: " + str(exc))
+        if victim.get("victim_signal") != 15 or type(victim.get("victim_signal_ns")) is not int:
+            bad.append("c1: missing signal receipt")
         if "c1-cp.txt" in got:
             body = got["c1-cp.txt"].read_text()
             if body.startswith("summary ") or "\nsummary " in body:

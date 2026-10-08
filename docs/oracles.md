@@ -30,7 +30,7 @@ independently of the renderer.
 
 ## Owned-DMA ledger (`tests/vm/oracle_ledger.py`)
 
-Ground truth for live DMA traffic. The test-only kernel module
+Scripted laboratory DMA facts, separate from shipping collection. The test-only kernel module
 `tests/kernel/memveil_dma_oracle.c` drives scripted map, sync,
 and unmap calls against its own synthetic platform device and
 logs every raw call; the harness replays that log into the
@@ -38,13 +38,24 @@ ledger, which counts expectations directly from raw entries.
 Lifetime quantiles are checked as exact bucket membership of
 the true nearest rank, and `compare()` matches a finished JSON
 report against the sealed ledger with any mismatch failing
-the gate.
+its comparison. Inner allocations and outer outcomes remain distinct.
+The laboratory translator reconstructs operation identity by unique size;
+its capture is synthetic, attempts are derived, correlation is unpaired,
+and terminal quality stays partial (report exit 4). Report lifetimes are
+compared exactly to independently extracted probe intervals; the separate
+module-duration upper bound does not prove interval containment.
 
 Scope limits:
 
 - Scripted traffic only: four transfer sizes (512, 1024, 2048,
   4096 bytes), clean map/unmap cycles, one double sync, and one
   mapping held open until unload.
+- Matrix/copy lanes compare decoded records, not shipping product reports.
+  The oracle lane compares a synthetic translated report. Neither qualifies
+  packaged lifecycle/copy collection or an independent per-device witness.
+- VM tools must match `tests/vm/harness.lock.json` (virtme-ng 1.41,
+  QEMU 10.2.1). Missing prerequisites block armed lanes; unarmed wrappers
+  exit 77. Required CI lanes cannot qualify solely through skips.
 - The module binds no real hardware, performs no DMA to real
   devices, and refuses to load without `mv_oracle_arm=1`.
   Loading happens only inside the disposable VM gate.
@@ -98,7 +109,7 @@ kernel-semantic oracle.
 | Claim | Oracle |
 |---|---|
 | A capture directory is well formed and its attempts add up | `tools/validate-schemas` |
-| Live DMA counts match driver reality | owned-DMA ledger |
+| Scripted laboratory counts match independent module facts | owned-DMA ledger |
 | Observed conversions match native transitions | region oracle |
 | Replay never crashes or mis-exits on corrupt input | fuzz oracle |
 | Long replays hold counts and memory | soak gate |

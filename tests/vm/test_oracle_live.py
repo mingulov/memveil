@@ -45,18 +45,19 @@ def test_module_builds():
     make = shutil.which("make")
     if not make:
         pytest.skip("make not available")
-    build = subprocess.run(
-        [make, "-C", KERNEL_DIR], capture_output=True, text=True)
-    assert build.returncode == 0, build.stderr[-2000:]
-    ko = os.path.join(KERNEL_DIR, "memveil_dma_oracle.ko")
-    assert os.path.isfile(ko)
-    info = subprocess.run(["modinfo", ko], capture_output=True,
-                          text=True)
+    from lifecycle_env import ORACLE_KO
+    from lifecycle_env import module_build_identity
+    try:
+        module_build_identity()
+    except OSError as exc:
+        if os.environ.get("MEMVEIL_VM_ORACLE") == "1":
+            pytest.fail("armed but module identity unavailable: " + str(exc))
+        pytest.skip("unarmed module identity unavailable: " + str(exc))
+    ensure_oracle_module()
+    info = subprocess.run(["modinfo", ORACLE_KO],capture_output=True,text=True)
     assert info.returncode == 0
     assert "license:        GPL" in info.stdout
     assert "mv_oracle_arm" in info.stdout
-    subprocess.run([make, "-C", KERNEL_DIR, "clean"],
-                   capture_output=True)
 
 
 def test_guest_comparison(tmp_path):
@@ -98,10 +99,10 @@ def test_guest_comparison(tmp_path):
             [MEMVEIL_BIN, "report", "--format", "json",
              str(cap_dir)],
             capture_output=True, text=True, timeout=300)
-        assert rep.returncode == 0, rep.stderr[-1000:]
+        assert rep.returncode == 4, rep.stderr[-1000:]
         report = json.loads(rep.stdout)
         ledger = replay_oracle_ledger(ops_log, releases)
-        mismatches = compare_live(report, ledger)
+        mismatches = compare_live(report, ledger, probe_lifetimes)
         mismatches += check_lifetime_ordering(
             probe_lifetimes, releases, "cmp")
         assert not mismatches, "\n".join(mismatches)

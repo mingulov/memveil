@@ -41,19 +41,6 @@ def armed_preflight():
               "copy probes") and ok
     ok = need(os.path.join(REPO, "build", "vm", "mv_consume"),
               "consumer") and ok
-    ko = os.path.join(REPO, "tests", "kernel",
-                      "memveil_dma_oracle.ko")
-    if not os.path.isfile(ko):
-        kdir = "/lib/modules/%s/build" % os.uname().release
-        if not os.path.isfile(os.path.join(kdir, "Makefile")):
-            print("FAIL vm-cleanup: armed but no kernel tree")
-            return False
-        build = subprocess.run(
-            ["make", "-C", os.path.join(REPO, "tests", "kernel")],
-            capture_output=True, text=True)
-        if build.returncode != 0 or not os.path.isfile(ko):
-            print("FAIL vm-cleanup: armed but module failed")
-            return False
     if not shutil.which("vng"):
         print("FAIL vm-cleanup: armed but vng not available")
         return False
@@ -92,6 +79,11 @@ def run_flow():
             cycle = row["cycle"]
             if row.get("traffic") != (cycle % 5 == 0):
                 bad.append("cycle %d traffic %r" % (cycle, row))
+            from consume import check_conservation
+            for ring in ("lc", "cp"):
+                health = row.get("health", {}).get(ring)
+                if health is None or any(health[k] for k in ("badframe", "badrec", "cnt_fail", "cnt_flags", "mal", "drop")):
+                    bad.append("cycle %d missing/bad %s health" % (cycle, ring))
             error = row.get("error", {})
             want_case = {1: "insmod-unarmed", 3: "bad-object",
                          5: "bad-ring"}.get(cycle % 7, "none")
@@ -121,7 +113,7 @@ def run_flow():
                        % (baseline["files"], after["files"]))
         if inventory["suspicious"]:
             bad.append("suspicious dmesg: %r"
-                       % (inventory["suspicious"][:5],))
+                       % (inventory["suspicious"],))
         if bad:
             print("FAIL vm-cleanup:")
             for line in bad:

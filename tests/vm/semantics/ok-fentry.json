@@ -32,7 +32,11 @@
     "btf_anchor": {
       "release": "7.0.0-34-generic",
       "id": 1042
-    }
+    },
+    "hook": "fentry:swiotlb_tbl_map_single",
+    "kind": "fentry",
+    "target": "swiotlb_tbl_map_single",
+    "authority": "btf"
   },
   "expect_ok": true,
   "expect_reason": ""

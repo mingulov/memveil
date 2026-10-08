@@ -17,6 +17,8 @@ import os
 import re
 import shutil
 import signal
+import select
+import uuid
 import subprocess
 import sys
 import time
@@ -49,6 +51,19 @@ def mono_ns():
     return time.clock_gettime_ns(time.CLOCK_MONOTONIC)
 
 
+def validate_victim(alive, rc):
+    if alive is not True or rc != -signal.SIGTERM:
+        raise ValueError("victim was not alive or did not terminate by SIGTERM")
+
+
+def dmesg_after_marker(text, marker):
+    lines = text.splitlines()
+    hits = [i for i, line in enumerate(lines) if marker in line]
+    if len(hits) != 1:
+        raise ValueError("dmesg boundary missing/duplicated; wrap or corruption")
+    return lines[hits[0] + 1:]
+
+
 class Gate:
     """One subcommand run: paths, checks, consumer control."""
 
@@ -66,10 +81,12 @@ class Gate:
             repo, "build", "bpf", "swiotlb_copy.bpf.o")
         self.lc_test_obj = os.path.join(
             repo, "build", "bpf", "swiotlb_lifecycle-test.bpf.o")
+        self.consumers = []
+        self.oracle_loaded = False
         self.cp_test_obj = os.path.join(
             repo, "build", "bpf", "swiotlb_copy-test.bpf.o")
         self.ko = os.path.join(
-            repo, "tests", "kernel", "memveil_dma_oracle.ko")
+            repo, "build", "vm", "oracle", "memveil_dma_oracle.ko")
         if os.geteuid() != 0:
             fail("guest flow requires root")
         os.makedirs(work, exist_ok=True)
@@ -78,6 +95,8 @@ class Gate:
                      self.cp_obj, self.ko):
             if not os.path.isfile(path):
                 fail(f"missing {path}")
+        if os.path.exists("/sys/module/memveil_dma_oracle"):
+            fail("oracle module already exists; no ownership")
         with open("/proc/cmdline") as fh:
             if "swiotlb=force" not in fh.read():
                 fail("guest lacks swiotlb=force")
@@ -86,7 +105,11 @@ class Gate:
         release = os.uname().release
         with open("/proc/cmdline") as fh:
             cmdline = fh.read().strip()
-        return {"release": release, "cmdline": cmdline,
+        from lifecycle_env import module_build_identity
+        config_btf = module_build_identity()
+        return {"release": release, "swiotlb_force": "swiotlb=force" in cmdline,
+                "config_sha": config_btf["config_sha"], "btf_sha": config_btf["btf_sha"],
+                "bridge_sha": sha_file(self.bridge),
                 "consume_sha": sha_file(self.consume),
                 "lc_sha": sha_file(self.lc_obj),
                 "cp_sha": sha_file(self.cp_obj),
@@ -101,17 +124,29 @@ class Gate:
              sites, str(seconds), out],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1, start_new_session=True)
+        self.consumers.append(proc)
         return proc
 
     def wait_ready(self, progs, timeout=30):
-        """Wait until every program name appears in bpftool."""
+        """Consume acknowledgements emitted only after all sites attach.
+
+        Loaded program inventory alone cannot prove attachment.
+        """
         end = time.monotonic() + timeout
-        while time.monotonic() < end:
-            seen = sh(["bpftool", "prog", "show"]).stdout
-            if all(p in seen for p in progs):
+        pending = [p for p in self.consumers if not getattr(p, "gate_ready", False)]
+        while pending and time.monotonic() < end:
+            for proc in list(pending):
+                if proc.poll() is not None:
+                    fail("consumer exited before readiness")
+                ready, _, _ = select.select([proc.stdout], [], [], 0.1)
+                if ready:
+                    line = proc.stdout.readline()
+                    if line.startswith("ready ring="):
+                        proc.gate_ready = True
+                        pending.remove(proc)
+            if not pending:
                 return
-            time.sleep(0.5)
-        fail(f"probes never ready: {progs}")
+        fail(f"consumer attachment acknowledgements timed out: {progs}")
 
     def clear_dmesg(self):
         r = sh(["dmesg", "-C"])
@@ -135,12 +170,14 @@ class Gate:
         r = sh(args)
         if r.returncode != 0:
             fail(f"insmod failed: {r.stderr.strip()}")
+        self.oracle_loaded = True
         return r
 
     def rmmod(self):
         r = sh(["rmmod", "memveil_dma_oracle"])
         if r.returncode != 0:
             fail(f"rmmod failed: {r.stderr.strip()}")
+        self.oracle_loaded = False
         return r
 
     def wait_consumer(self, proc, tag, timeout=180):
@@ -149,10 +186,11 @@ class Gate:
             out, _ = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             proc.kill()
+            proc.communicate()
             fail(f"{tag}: consumer did not exit")
         if proc.returncode != 0:
             fail(f"{tag}: consumer exit {proc.returncode}: {out[-500:]}")
-        if "ready ring=" not in out:
+        if not getattr(proc, "gate_ready", False) and "ready ring=" not in out:
             fail(f"{tag}: consumer never ready")
         return out
 
@@ -192,10 +230,18 @@ class Gate:
         return out
 
     def bpf_inventory(self):
-        """Count loaded BPF programs and maps (leak check)."""
-        progs = sh(["bpftool", "prog", "show"]).stdout.count("\n")
-        maps = sh(["bpftool", "map", "show"]).stdout.count("\n")
-        return {"progs": progs, "maps": maps}
+        """Checked JSON object counts; failed queries cannot mean empty."""
+        inventory = {}
+        for kind, key in (("prog", "progs"), ("map", "maps")):
+            r = sh(["bpftool", "-j", kind, "show"])
+            if r.returncode != 0:
+                raise ValueError("bpftool inventory failed: " + kind)
+            objects = json.loads(r.stdout)
+            if not isinstance(objects, list) or any(not isinstance(o, dict) or
+                    type(o.get("id")) is not int for o in objects):
+                raise ValueError("malformed bpftool inventory: " + kind)
+            inventory[key] = len(objects)
+        return inventory
 
 
 def run_matrix(gate):
@@ -308,6 +354,8 @@ def run_realio(gate):
     rcvd = re.search(r"(\d+) received", ping.stdout)
     workload["ping_tx"] = int(sent.group(1)) if sent else None
     workload["ping_rx"] = int(rcvd.group(1)) if rcvd else None
+    if os.path.exists("/sys/module/scsi_debug"):
+        fail("scsi_debug already exists; no fixture ownership")
     r = sh(["modprobe", "scsi_debug", "dev_size_mb=64"])
     if r.returncode != 0:
         fail(f"scsi_debug failed: {r.stderr.strip()}")
@@ -417,6 +465,12 @@ def run_stop(gate):
                     os.kill(proc.pid, signal.SIGCONT)
                 row["mode"] = "stop-both" if cycle == 0 else "stop-lc"
             else:
+                alive = pcp.poll() is None
+                if not alive:
+                    fail("victim exited before SIGTERM")
+                row["victim_alive"] = alive
+                row["victim_signal"] = signal.SIGTERM
+                row["victim_signal_ns"] = mono_ns()
                 pcp.send_signal(signal.SIGTERM)
                 try:
                     victim_rc = pcp.wait(timeout=30)
@@ -426,8 +480,7 @@ def run_stop(gate):
                 row["mode"] = "term-cp"
                 row["victim_rc"] = victim_rc
                 row["victim_file"] = os.path.exists(cp)
-                if victim_rc == 0:
-                    fail("stop victim exited 0 after SIGTERM")
+                validate_victim(alive, victim_rc)
                 if os.path.exists(cp):
                     with open(cp) as fh:
                         body = fh.read()
@@ -489,7 +542,13 @@ def run_cleanup(gate):
         "io_tlb_used": gate.io_tlb_samples(),
         "files": sorted(os.listdir(gate.work)),
     }
-    dmesg_before = sh(["dmesg"]).stdout.count("\n")
+    marker = "memveil-cleanup-" + uuid.uuid4().hex
+    with open("/dev/kmsg", "w") as fh:
+        fh.write("<6>" + marker + "\n")
+    before = sh(["dmesg"])
+    if before.returncode != 0:
+        fail("dmesg unavailable before cleanup")
+    dmesg_after_marker(before.stdout, marker)
     ledger = []
     for cycle in range(100):
         row = {"cycle": cycle}
@@ -509,6 +568,16 @@ def run_cleanup(gate):
             row["traffic"] = False
         gate.wait_consumer(plc, f"cleanup-w{cycle}-lc")
         gate.wait_consumer(pcp, f"cleanup-w{cycle}-cp")
+        from consume import parse_consume_file, check_conservation
+        row["health"] = {}
+        for ring, path in (("lc", lc), ("cp", cp)):
+            events, summary = parse_consume_file(path)
+            bad = check_conservation(events, summary, f"cleanup-{cycle}-{ring}")
+            if summary["cnt_fail"]:
+                bad.append("unexpected cleanup detail loss")
+            if bad:
+                fail("; ".join(bad))
+            row["health"][ring] = summary
         os.remove(lc)
         os.remove(cp)
         error = cycle % 7
@@ -541,7 +610,10 @@ def run_cleanup(gate):
         "io_tlb_used": gate.io_tlb_samples(),
         "files": sorted(os.listdir(gate.work)),
     }
-    fresh_dmesg = sh(["dmesg"]).stdout.split("\n")[dmesg_before:]
+    after_log = sh(["dmesg"])
+    if after_log.returncode != 0:
+        fail("dmesg unavailable after cleanup")
+    fresh_dmesg = dmesg_after_marker(after_log.stdout, marker)
     suspicious = [line for line in fresh_dmesg
                   if re.search(r"warn|bug|oops|error", line,
                                re.IGNORECASE)
@@ -549,8 +621,8 @@ def run_cleanup(gate):
     gate.write_json("ledger.json", ledger)
     gate.write_json("inventory.json", {
         "baseline": baseline, "after": after,
-        "dmesg_before_lines": dmesg_before,
-        "suspicious": suspicious,
+        "dmesg_marker_present": True,
+        "suspicious": len(suspicious),
     })
     gate.export(["identity.json", "ledger.json", "inventory.json"])
     print("guest_lifecycle: cleanup exported")
@@ -577,12 +649,17 @@ def ping_leg(gateway, count):
     rtts = [float(v) for v in
             re.findall(r"time=([\d.]+) ms", samp.stdout)]
     p99 = None
+    sample_tx = re.search(r"(\d+) packets transmitted", samp.stdout)
+    sample_rx = re.search(r"(\d+) received", samp.stdout)
+    sample = dict(sample_tx=int(sample_tx.group(1)) if sample_tx else None,
+                  sample_rx=int(sample_rx.group(1)) if sample_rx else None,
+                  sample_count=len(rtts))
     if rtts:
         ordered = sorted(rtts)
         p99 = ordered[max(0, (99 * len(ordered) - 1) // 100)]
     return (int(sent.group(1)) if sent else None,
             int(rcvd.group(1)) if rcvd else None,
-            elapsed, p99)
+            elapsed, p99, sample)
 
 
 def dd_leg(dev, size_mb=32):
@@ -594,7 +671,10 @@ def dd_leg(dev, size_mb=32):
     elapsed = (mono_ns() - start) / 1e9
     if rd.returncode != 0:
         fail(f"dd leg failed: {rd.stderr.strip()[-200:]}")
-    return count * 65536, elapsed
+    copied = re.search(r"(\d+) bytes .* copied", rd.stderr)
+    if copied is None or int(copied.group(1)) != count * 65536:
+        fail("dd leg did not complete independently counted bytes")
+    return int(copied.group(1)), elapsed
 
 
 def run_perf(gate):
@@ -604,6 +684,8 @@ def run_perf(gate):
     gate.write_json("identity.json",
                     dict(gate.identity(), iface=iface))
     before_disks = scsi_disks()
+    if os.path.exists("/sys/module/scsi_debug"):
+        fail("scsi_debug already exists; no fixture ownership")
     r = sh(["modprobe", "scsi_debug", "dev_size_mb=64"])
     if r.returncode != 0:
         fail(f"scsi_debug failed: {r.stderr.strip()}")
@@ -616,6 +698,10 @@ def run_perf(gate):
         time.sleep(0.5)
     if disk is None:
         fail("scsi_debug disk never appeared")
+    short = disk.rsplit("/", 1)[1]
+    with open(os.path.join("/sys/block", short, "device", "model")) as fh:
+        if "scsi_debug" not in fh.read():
+            fail("new perf disk is not owned scsi_debug")
     names = ["identity.json"]
     pairs = []
     # Six pairs for five valid: validate-first may exclude one.
@@ -632,9 +718,9 @@ def run_perf(gate):
                     gate.cp_obj, "mv_copies", CP_SITES, 60, cp)
                 gate.wait_ready(("mv_map_result", "mv_bounce"))
                 leg["attach_ns"] = mono_ns()
-            tx, rx, secs, p99 = ping_leg("10.0.3.2", 1000)
+            tx, rx, secs, p99, sample = ping_leg("10.0.3.2", 1000)
             leg["ping"] = {"tx": tx, "rx": rx, "seconds": secs,
-                           "p99_ms": p99}
+                           "p99_ms": p99, **sample}
             nbytes, dsecs = dd_leg(disk)
             leg["dd"] = {"bytes": nbytes, "seconds": dsecs}
             leg["end_ns"] = mono_ns()
@@ -701,7 +787,16 @@ def main():
     if sub not in SUBS:
         fail(f"bad subcommand {sub}")
     gate = Gate(sub, work, export, repo)
-    SUBS[sub](gate)
+    try:
+        SUBS[sub](gate)
+    finally:
+        # Only handles launched by this guest are owned here.
+        for proc in gate.consumers:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+        if gate.oracle_loaded:
+            sh(["rmmod", "memveil_dma_oracle"])
     return 0
 
 

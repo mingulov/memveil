@@ -32,7 +32,11 @@
     "btf_anchor": {
       "release": "7.0.0-34-generic",
       "id": 382
-    }
+    },
+    "hook": "swiotlb:swiotlb_bounced",
+    "kind": "tracepoint",
+    "target": "swiotlb_bounced",
+    "authority": "kernel-source"
   },
   "expect_ok": false,
   "expect_reason": "inlined target"
