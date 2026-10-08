@@ -120,3 +120,38 @@ def test_uncertain_cleanup_blocks_later_lane(tmp_path, monkeypatch):
     assert module.run_suites(repo, tmp_path / 'out', ['finite', 'later'], {'finite': .2}) == 1
     receipt = json.loads((tmp_path / 'out/results.json').read_text())
     assert receipt['lanes'][1]['status'] == 'BLOCKED' and not later.exists()
+
+
+def _uncertain_final_lane(tmp_path, monkeypatch, suites):
+    module = load()
+    repo = tmp_path / 'repo'
+    (repo / 'tools').mkdir(parents=True)
+    tool = repo / 'tools/test'
+    # An adopted zombie needs reaping despite a successful leader exit.
+    import sys
+    tool.write_text('#!' + sys.executable + '\nimport os,sys,time\n'
+                    'if sys.argv[1] == "first": sys.exit(0)\n'
+                    'if os.fork() == 0: os._exit(0)\n'
+                    'time.sleep(.1)\n')
+    tool.chmod(0o755)
+    terminate = module._terminate_owned
+    def uncertain(proc, prior):
+        result = terminate(proc, prior)
+        result['signal_errors'] = 1
+        return result
+    monkeypatch.setattr(module, '_terminate_owned', uncertain)
+    assert module.run_suites(repo, tmp_path / 'out', suites) == 1
+    receipt = json.loads((tmp_path / 'out/results.json').read_text())
+    assert receipt['status'] == 'BLOCKED'
+    assert receipt['lanes'][-1]['status'] == 'BLOCKED'
+    assert receipt['lanes'][-1]['native_exit'] == 0
+    assert receipt['lanes'][-1]['cleanup']['remaining_owned'] == 0
+
+
+
+def test_only_lane_with_uncertain_cleanup_cannot_pass(tmp_path, monkeypatch):
+    _uncertain_final_lane(tmp_path, monkeypatch, ['only'])
+
+
+def test_last_lane_with_uncertain_cleanup_cannot_pass(tmp_path, monkeypatch):
+    _uncertain_final_lane(tmp_path, monkeypatch, ['first', 'only'])
