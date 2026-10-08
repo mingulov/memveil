@@ -205,3 +205,19 @@ def test_duplicate_json_error_does_not_echo_raw_key_or_value(tmp_path):
         export_validation.validate_lifecycle_exports({'pairs.json':path},'perf')
     assert '0xffff888012345000' not in str(error.value)
     assert 'private-value' not in str(error.value)
+
+
+@pytest.mark.parametrize('case', ['duplicate', 'mismatch', 'unexpected', 'reordered', 'wrong-mode'])
+def test_perf_pair_identity_and_interleaving_refused(tmp_path, case):
+    pairs = perf_pairs() + perf_pairs()
+    for leg in pairs[1]:
+        leg['pair'] = 1
+    if case == 'duplicate':
+        for leg in pairs[1]: leg['pair'] = 0
+    elif case == 'mismatch': pairs[1][0]['pair'] = 0
+    elif case == 'unexpected':
+        for leg in pairs[1]: leg['pair'] = 2
+    elif case == 'reordered': pairs.reverse()
+    else: pairs[0].reverse()
+    with pytest.raises(ValueError):
+        lifecycle_export(tmp_path, 'pairs.json', pairs)
