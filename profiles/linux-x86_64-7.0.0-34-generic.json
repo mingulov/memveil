@@ -10,7 +10,7 @@
       "revision": "7.0.0-34-generic",
       "note": "config=sha256:e75c0adab6020e72844d7431cf801a02b94ed32efc251c3b0fb80c021d065180 config_src=file btf=sha256:16205476ae9b6d621e056249052a5789d7f22c6a8c27bf291eb787f3bda5090e format=sha256:7e95fff18d1bd16c18342d821e78680a0126ff84054936fbc641e181810f0b62 object=sha256:65bce2eb6c0c011833abc9e70754fc6a569f3803f35dafc69b4e41f5748df912 image=sha256:7efd88a7facf80874d781ccb2c2421f0aaaa575e3b94760430619e826f490117 image_bid=165b9a4f9609ede635b85d0d1241ee95208e4548 ring_bytes=8388608"
     },
-    "note": "Narrow identity for the A07 gate kernel. The bindings name the exact config, BTF, tracepoint format, object, image, and build-id qualified by the live cross-check; any change fails admission until re-qualification."
+    "note": "Narrow identity for the qualified gate kernel. The bindings name the exact config, BTF, tracepoint format, object, image, and build-id qualified by the live cross-check; any change fails admission until re-qualification."
   },
   "hooks": [
     {
@@ -29,7 +29,7 @@
       "hooks": [
         "swiotlb:swiotlb_bounced"
       ],
-      "reason": "Supported on this exact kernel when the live cross-check in the A07 receipt holds; the narrow bindings refuse every other identity."
+      "reason": "Supported on this exact kernel when the VM-gate live cross-check holds; the narrow bindings refuse every other identity."
     },
     {
       "id": "mapping-lifecycle",

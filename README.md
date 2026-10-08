@@ -51,9 +51,9 @@ expected outputs.
 
 Pinned Mojo 1.1.0 toolchain via pixi; see `docs/build.md` and
 `toolchain.lock.json`. The native bridge comes from the pinned
-vendored `libbpf-mojo` source archive (`third_party/`), never
-a sibling checkout; `LMB_PACKAGE` overrides it with another
-hash-verified tarball.
+vendored `libbpf-mojo` library bundle (`third_party/`): bridge
+library, Mojo wrappers, and C header, never a sibling checkout;
+`LMB_PACKAGE` overrides it with another hash-verified tarball.
 
     ./tools/build                                    # build everything
     ./tools/test --help                              # list suites
@@ -66,7 +66,9 @@ only `record` loads it (lazily, at session open).
 ## Licensing
 
 MemVeil is GPL-3.0-or-later (`LICENSE`), except the eBPF
-program (`bpf/programs/swiotlb_attempt.bpf.c`, GPL-2.0-only),
+programs (`bpf/programs/swiotlb_attempt.bpf.c`,
+`bpf/programs/swiotlb_lifecycle.bpf.c`,
+`bpf/programs/swiotlb_copy.bpf.c`, GPL-2.0-only),
 the BPF/userspace shared header
 (`bpf/include/memveil_events.h`, GPL-2.0-or-later), and the
 test-only oracle kernel module

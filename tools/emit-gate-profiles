@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Author the A07 gate profile docs from dumped guest identity.
+"""Author the gate profile docs from dumped guest identity.
 
 Inputs: guest identity JSON (release, config_src, config/btf/
 format/image shas, image bid) plus the live format text, plus
@@ -61,7 +61,7 @@ def doc_for(
             "min_kernel": "7.0.0",
             "source": {"origin": "distro", "revision": rev, "note": note},
             "note": (
-                "Narrow identity for the A07 gate kernel. The "
+                "Narrow identity for the qualified gate kernel. The "
                 "bindings name the exact config, BTF, tracepoint "
                 "format, object, image, and build-id qualified by "
                 "the live cross-check; any change fails admission "
@@ -87,9 +87,9 @@ def doc_for(
                 "status": attempt,
                 "hooks": ["swiotlb:swiotlb_bounced"],
                 "reason": (
-                    "Supported on this exact kernel when the live "
-                    "cross-check in the A07 receipt holds; the "
-                    "narrow bindings refuse every other identity."
+                    "Supported on this exact kernel when the VM-gate "
+                    "live cross-check holds; the narrow bindings "
+                    "refuse every other identity."
                 ),
             },
             {
