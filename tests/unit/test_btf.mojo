@@ -5,7 +5,7 @@
 from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
 
-from memveil.platform.btf import read_btf_maps
+from memveil.platform.btf import read_btf_maps, read_btf_maps_ring
 from memveil.platform.reader import read_host_file
 
 
@@ -90,6 +90,41 @@ def test_btf_inline_edges() raises:
     assert_equal(w.message, String("no BTF section"))
 
 
+def test_btf_lifecycle_ring() raises:
+    var raw = _read_fixture(String("tests/fixtures/elf/lc-ok.o"))
+    var v = read_btf_maps_ring(
+        Span(raw), String("mv_lifecycle"), String("lifecycle"))
+    assert_true(v.ok)
+    assert_equal(v.message, String(""))
+    assert_equal(v.ring_bytes, 8388608)
+
+
+def test_btf_copy_ring() raises:
+    var raw = _read_fixture(String("tests/fixtures/elf/cp-ok.o"))
+    var v = read_btf_maps_ring(
+        Span(raw), String("mv_copies"), String("copies"))
+    assert_true(v.ok)
+    assert_equal(v.message, String(""))
+    assert_equal(v.ring_bytes, 8388608)
+
+
+def test_btf_copy_nonpow2() raises:
+    var raw = _read_fixture(String("tests/fixtures/elf/cp-nonpow2.o"))
+    var v = read_btf_maps_ring(
+        Span(raw), String("mv_copies"), String("copies"))
+    assert_true(not v.ok)
+    assert_equal(
+        v.message, String("copies ring size 1000 rejected"))
+
+
+def test_btf_missing_ring() raises:
+    var raw = _read_fixture(String("tests/fixtures/elf/lc-ok.o"))
+    var v = read_btf_maps_ring(
+        Span(raw), String("mv_copies"), String("copies"))
+    assert_true(not v.ok)
+    assert_equal(v.message, String("missing mv_copies"))
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_btf_ok]()
@@ -102,6 +137,10 @@ def run() raises -> Int:
     suite.test[test_btf_unlisted]()
     suite.test[test_btf_dupvar]()
     suite.test[test_btf_inline_edges]()
+    suite.test[test_btf_lifecycle_ring]()
+    suite.test[test_btf_copy_ring]()
+    suite.test[test_btf_copy_nonpow2]()
+    suite.test[test_btf_missing_ring]()
     suite^.run()
     return 0
 

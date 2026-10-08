@@ -8,6 +8,7 @@ from std.testing import TestSuite, assert_equal, assert_true
 from memveil.platform.narrow import (
     NarrowLive,
     check_narrow,
+    check_narrow_extra,
     check_trace_layout,
     parse_narrow_note,
     parse_notes_bid,
@@ -16,6 +17,7 @@ from memveil.platform.narrow import (
     read_live_config,
     read_live_object,
     verify_object,
+    verify_object_program,
 )
 from memveil.platform.reader import read_host_file
 
@@ -83,11 +85,11 @@ def test_grammar_field_count() raises:
         cut.append(seven[i])
     var p = parse_narrow_note(_join(cut))
     assert_true(not p.ok)
-    assert_equal(p.message, String("narrow note: want 8 fields"))
+    assert_equal(p.message, String("narrow note: want 8 or 12 fields"))
     var nine = _join(_fields(String("gz"), String("8388608")))
     var q = parse_narrow_note(nine + String(" extra=1"))
     assert_true(not q.ok)
-    assert_equal(q.message, String("narrow note: want 8 fields"))
+    assert_equal(q.message, String("narrow note: want 8 or 12 fields"))
 
 
 def test_grammar_spacing() raises:
@@ -102,7 +104,7 @@ def test_grammar_spacing() raises:
         double += fields[i]
     var p = parse_narrow_note(double)
     assert_true(not p.ok)
-    assert_equal(p.message, String("narrow note: want 8 fields"))
+    assert_equal(p.message, String("narrow note: want 8 or 12 fields"))
     var base = _join(fields)
     assert_true(not parse_narrow_note(String(" ") + base).ok)
     assert_true(not parse_narrow_note(base + String(" ")).ok)
@@ -492,6 +494,219 @@ def test_object_typemaps() raises:
     assert_equal(v.message, String(".maps section bad type"))
 
 
+comptime _LC_OBJECT = "9c8e7d6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e"
+comptime _CP_OBJECT = "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b"
+
+
+def _fields12() -> List[String]:
+    var out = _fields(String("gz"), String("8388608"))
+    out.append(String("lc_object=sha256:") + String(_LC_OBJECT))
+    out.append(String("lc_ring_bytes=8388608"))
+    out.append(String("cp_object=sha256:") + String(_CP_OBJECT))
+    out.append(String("cp_ring_bytes=8388608"))
+    return out^
+
+
+def _live_extra(
+    lc_object: String, lc_ring: String, cp_object: String, cp_ring: String
+) -> NarrowLive:
+    var live = NarrowLive()
+    live.lc_object.state = String("value")
+    live.lc_object.value = lc_object
+    live.lc_ring.state = String("value")
+    live.lc_ring.value = lc_ring
+    live.cp_object.state = String("value")
+    live.cp_object.value = cp_object
+    live.cp_ring.state = String("value")
+    live.cp_ring.value = cp_ring
+    return live^
+
+
+def test_grammar_extended_valid() raises:
+    var p = parse_narrow_note(_join(_fields12()))
+    assert_true(p.ok)
+    assert_equal(p.bindings.lc_object, String(_LC_OBJECT))
+    assert_equal(p.bindings.lc_ring, String("8388608"))
+    assert_equal(p.bindings.cp_object, String(_CP_OBJECT))
+    assert_equal(p.bindings.cp_ring, String("8388608"))
+    assert_equal(p.bindings.object, String(_OBJECT))
+
+
+def test_grammar_extended_absent() raises:
+    var p = parse_narrow_note(
+        _join(_fields(String("gz"), String("8388608"))))
+    assert_true(p.ok)
+    assert_equal(p.bindings.lc_object, String(""))
+    assert_equal(p.bindings.lc_ring, String(""))
+    assert_equal(p.bindings.cp_object, String(""))
+    assert_equal(p.bindings.cp_ring, String(""))
+
+
+def test_grammar_extended_field_count() raises:
+    var ten = _fields12()
+    var cut = List[String]()
+    for i in range(10):
+        cut.append(ten[i])
+    var p = parse_narrow_note(_join(cut))
+    assert_true(not p.ok)
+    assert_equal(p.message, String("narrow note: want 8 or 12 fields"))
+
+
+def _tail(text: String, start: Int) -> String:
+    var out = String("")
+    var raw = text.as_bytes()
+    for i in range(start, len(raw)):
+        out += String(text[byte=i])
+    return out^
+
+
+def _head(text: String, end: Int) -> String:
+    var out = String("")
+    for i in range(end):
+        out += String(text[byte=i])
+    return out^
+
+
+def test_grammar_extended_values() raises:
+    var fields = _fields12()
+    fields[8] = (
+        String("lc_object=sha256:zz")
+        + _tail(String(_LC_OBJECT), 2)
+    )
+    var p = parse_narrow_note(_join(fields))
+    assert_true(not p.ok)
+    assert_equal(p.message, String("narrow note: bad lc_object"))
+    fields = _fields12()
+    fields[9] = String("lc_ring_bytes=abc")
+    var q = parse_narrow_note(_join(fields))
+    assert_true(not q.ok)
+    assert_equal(q.message, String("narrow note: bad lc_ring_bytes"))
+    fields = _fields12()
+    fields[10] = (
+        String("cp_object=sha256:") + _head(String(_CP_OBJECT), 62)
+    )
+    var r = parse_narrow_note(_join(fields))
+    assert_true(not r.ok)
+    assert_equal(r.message, String("narrow note: bad cp_object"))
+    fields = _fields12()
+    fields[11] = String("cp_ring_bytes=0")
+    var s = parse_narrow_note(_join(fields))
+    assert_true(not s.ok)
+    assert_equal(s.message, String("narrow note: bad cp_ring_bytes"))
+
+
+def test_check_extra_unwanted() raises:
+    var parsed = parse_narrow_note(
+        _join(_fields(String("gz"), String("8388608"))))
+    assert_true(parsed.ok)
+    var v = check_narrow_extra(
+        parsed.bindings, NarrowLive(), False, False)
+    assert_equal(v.state, String("bound"))
+    assert_equal(v.key, String(""))
+
+
+def test_check_extra_absent_binding() raises:
+    var parsed = parse_narrow_note(
+        _join(_fields(String("gz"), String("8388608"))))
+    assert_true(parsed.ok)
+    var live = _live_extra(
+        String(_LC_OBJECT), String("8388608"),
+        String(_CP_OBJECT), String("8388608"))
+    var v = check_narrow_extra(parsed.bindings, live, True, False)
+    assert_equal(v.state, String("mismatch"))
+    assert_equal(v.key, String("lc_object"))
+    var w = check_narrow_extra(parsed.bindings, live, False, True)
+    assert_equal(w.state, String("mismatch"))
+    assert_equal(w.key, String("cp_object"))
+
+
+def test_check_extra_drift() raises:
+    var parsed = parse_narrow_note(_join(_fields12()))
+    assert_true(parsed.ok)
+    var live = _live_extra(
+        String("0") + _tail(String(_LC_OBJECT), 1),
+        String("8388608"),
+        String(_CP_OBJECT), String("8388608"))
+    var v = check_narrow_extra(parsed.bindings, live, True, True)
+    assert_equal(v.state, String("mismatch"))
+    assert_equal(v.key, String("lc_object"))
+    var live2 = _live_extra(
+        String(_LC_OBJECT), String("8388608"),
+        String(_CP_OBJECT), String("4096"))
+    var w = check_narrow_extra(parsed.bindings, live2, True, True)
+    assert_equal(w.state, String("mismatch"))
+    assert_equal(w.key, String("cp_ring_bytes"))
+
+
+def test_check_extra_bound() raises:
+    var parsed = parse_narrow_note(_join(_fields12()))
+    assert_true(parsed.ok)
+    var live = _live_extra(
+        String(_LC_OBJECT), String("8388608"),
+        String(_CP_OBJECT), String("8388608"))
+    var v = check_narrow_extra(parsed.bindings, live, True, True)
+    assert_equal(v.state, String("bound"))
+    assert_equal(v.key, String(""))
+
+
+def test_object_tracing_ok() raises:
+    var lc = _read_fixture(String("tests/fixtures/elf/lc-ok.o"))
+    var a = verify_object_program(
+        Span(lc), String("mv_map_result"), String("fexit/"))
+    assert_true(a.ok)
+    var b = verify_object_program(
+        Span(lc), String("mv_unmap"), String("fentry/"))
+    assert_true(b.ok)
+    var cp = _read_fixture(String("tests/fixtures/elf/cp-ok.o"))
+    for i in range(3):
+        var names = List[String]()
+        names.append(String("mv_sync_device"))
+        names.append(String("mv_sync_cpu"))
+        names.append(String("mv_bounce"))
+        var v = verify_object_program(
+            Span(cp), names[i], String("fentry/"))
+        assert_true(v.ok)
+
+
+def test_object_tracing_wrongsec() raises:
+    var lc = _read_fixture(String("tests/fixtures/elf/lc-wrongsec.o"))
+    var v = verify_object_program(
+        Span(lc), String("mv_unmap"), String("fentry/"))
+    assert_true(not v.ok)
+    assert_equal(v.message, String("no fentry section"))
+    var cp = _read_fixture(String("tests/fixtures/elf/cp-wrongsec.o"))
+    var w = verify_object_program(
+        Span(cp), String("mv_bounce"), String("fentry/"))
+    assert_true(not w.ok)
+    assert_equal(
+        w.message,
+        String(
+            "program symbol unusable: program in kprobe/swiotlb_bounce"
+        ),
+    )
+
+
+def test_object_bad_section_kind() raises:
+    var raw = _read_fixture(String("tests/fixtures/elf/ok.o"))
+    var v = verify_object_program(
+        Span(raw), String(_PROG), String("kprobe/"))
+    assert_true(not v.ok)
+    assert_equal(v.message, String("bad section kind"))
+
+
+def test_object_kind_mismatch() raises:
+    var raw = _read_fixture(String("tests/fixtures/elf/ok.o"))
+    var v = verify_object_program(
+        Span(raw), String(_PROG), String("fentry/"))
+    assert_true(not v.ok)
+    assert_equal(v.message, String("no fentry section"))
+    var lc = _read_fixture(String("tests/fixtures/elf/lc-ok.o"))
+    var w = verify_object_program(
+        Span(lc), String("mv_map_result"), String("tracepoint/"))
+    assert_true(not w.ok)
+    assert_equal(w.message, String("no tracepoint section"))
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_grammar_valid]()
@@ -525,6 +740,18 @@ def run() raises -> Int:
     suite.test[test_object_zerosym]()
     suite.test[test_object_mapsrange]()
     suite.test[test_object_typemaps]()
+    suite.test[test_grammar_extended_valid]()
+    suite.test[test_grammar_extended_absent]()
+    suite.test[test_grammar_extended_field_count]()
+    suite.test[test_grammar_extended_values]()
+    suite.test[test_check_extra_unwanted]()
+    suite.test[test_check_extra_absent_binding]()
+    suite.test[test_check_extra_drift]()
+    suite.test[test_check_extra_bound]()
+    suite.test[test_object_tracing_ok]()
+    suite.test[test_object_tracing_wrongsec]()
+    suite.test[test_object_bad_section_kind]()
+    suite.test[test_object_kind_mismatch]()
     suite^.run()
     return 0
 

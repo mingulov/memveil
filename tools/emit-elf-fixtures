@@ -7,7 +7,10 @@ object, so fixtures stay structurally realistic (real section headers,
 real symbol table). The unpatched copy is the positive fixture.
 
 Inputs : build/bpf/swiotlb_attempt.bpf.o  (built by tools/build)
-Outputs: tests/fixtures/elf/*.o (10 base + 7 admission negatives).
+         build/bpf/swiotlb_lifecycle.bpf.o and
+         build/bpf/swiotlb_copy.bpf.o (same build).
+Outputs: tests/fixtures/elf/*.o (10 base + 7 admission negatives,
+         plus 2 tracing positives + 3 tracing negatives).
 
 Patches (verified structurally after writing):
   badarch : e_machine BPF(247) -> EM_X86_64(62).
@@ -30,6 +33,16 @@ Patches (verified structurally after writing):
   unlisted: mv_counts secinfo type id -> 0 (VAR not in DATASEC).
   dupvar  : synthetic ELF whose .BTF holds two mv_counts VARs
             (duplicate map association refused).
+  lc-ok   : unpatched lifecycle object (fexit mv_map_result,
+            fentry mv_unmap, mv_lifecycle ring).
+  cp-ok   : unpatched copy object (fentry mv_sync_device,
+            mv_sync_cpu, mv_bounce, mv_copies ring).
+  lc-wrongsec: lifecycle object with its only fentry/ section
+            renamed to kprobe/ (tracing admission refused).
+  cp-wrongsec: copy object with fentry/swiotlb_bounce renamed
+            to kprobe/ (program placement refused).
+  cp-nonpow2 : mv_copies max_entries 8388608 -> 1000
+            (ring geometry refused).
 """
 import struct
 import sys
@@ -37,6 +50,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "build/bpf/swiotlb_attempt.bpf.o"
+SRC_LC = ROOT / "build/bpf/swiotlb_lifecycle.bpf.o"
+SRC_CP = ROOT / "build/bpf/swiotlb_copy.bpf.o"
 OUT = ROOT / "tests/fixtures/elf"
 WANT_SYM = b"mv_swiotlb_attempt\x00"
 SEC_NAME = b"tracepoint/swiotlb/swiotlb_bounced\x00"
@@ -461,6 +476,39 @@ def main() -> int:
 
     (OUT / "dupvar.o").write_bytes(_synthetic_dupvar())
 
+    # Tracing positives: unpatched lifecycle/copy objects.
+    if not SRC_LC.exists() or not SRC_CP.exists():
+        print("missing lifecycle/copy objects -- run tools/build first",
+              file=sys.stderr)
+        return 1
+    lc_base = read_elf(SRC_LC)
+    cp_base = read_elf(SRC_CP)
+    (OUT / "lc-ok.o").write_bytes(bytes(lc_base))
+    (OUT / "cp-ok.o").write_bytes(bytes(cp_base))
+
+    # Lifecycle object with its only fentry/ section renamed:
+    # tracing admission finds no fentry section at all.
+    lc_wrongsec = bytearray(lc_base)
+    lc_sec = find_in_shstrtab(
+        lc_wrongsec, b"fentry/__swiotlb_tbl_unmap_single\x00")
+    lc_wrongsec[lc_sec : lc_sec + 6] = b"kprobe"  # same length
+    (OUT / "lc-wrongsec.o").write_bytes(bytes(lc_wrongsec))
+
+    # Copy object with one fentry/ section renamed: the program
+    # symbol survives but sits outside any fentry section.
+    cp_wrongsec = bytearray(cp_base)
+    cp_sec = find_in_shstrtab(cp_wrongsec, b"fentry/swiotlb_bounce\x00")
+    cp_wrongsec[cp_sec : cp_sec + 6] = b"kprobe"  # same length
+    (OUT / "cp-wrongsec.o").write_bytes(bytes(cp_wrongsec))
+
+    # Copy ring with a non-power-of-two size: geometry refuses.
+    cp_nonpow2 = bytearray(cp_base)
+    cp_ring_off = _btf_array_nelems_off(
+        cp_nonpow2, b"mv_copies", b"max_entries")
+    assert struct.unpack_from("<I", cp_nonpow2, cp_ring_off)[0] == 8388608
+    struct.pack_into("<I", cp_nonpow2, cp_ring_off, 1000)
+    (OUT / "cp-nonpow2.o").write_bytes(bytes(cp_nonpow2))
+
     tiny = (OUT / "tiny.o").read_bytes()
     assert tiny == ok[:40] and len(tiny) == 40, "tiny.o"
     # wrongsec.o is synthetic: validate its section table independently.
@@ -532,7 +580,47 @@ def main() -> int:
         if kind == 14 and sname_dv(no) == b"mv_counts"
     )
     assert dupes == 2, "dupvar.o lacks duplicate VARs"
-    print(f"wrote 17 fixtures to {OUT}")
+    # Tracing fixtures: positives carry both program symbols and
+    # tracing sections; negatives keep the symbol but lose the
+    # section, or keep the shape with a bad ring size.
+    for name, syms, secs in [
+        ("lc-ok.o", (b"mv_map_result\x00", b"mv_unmap\x00"),
+         (b"fexit/swiotlb_tbl_map_single",
+          b"fentry/__swiotlb_tbl_unmap_single")),
+        ("cp-ok.o", (b"mv_sync_device\x00", b"mv_sync_cpu\x00",
+                     b"mv_bounce\x00"),
+         (b"fentry/__swiotlb_sync_single_for_device",
+          b"fentry/__swiotlb_sync_single_for_cpu",
+          b"fentry/swiotlb_bounce")),
+    ]:
+        d = (OUT / name).read_bytes()
+        assert d[0:4] == b"\x7fELF", name
+        assert struct.unpack_from("<H", d, 18)[0] == 247, name
+        for sym in syms:
+            find_in_section(d, sym, b".strtab")
+        for sec in secs:
+            _sec_index_by_name(d, sec)
+    lcw = (OUT / "lc-wrongsec.o").read_bytes()
+    find_in_section(lcw, b"mv_unmap\x00", b".strtab")
+    try:
+        _sec_index_by_name(lcw, b"fentry/__swiotlb_tbl_unmap_single")
+        raise SystemExit("lc-wrongsec.o still has the fentry section")
+    except AssertionError:
+        pass
+    cpw = (OUT / "cp-wrongsec.o").read_bytes()
+    find_in_section(cpw, b"mv_bounce\x00", b".strtab")
+    try:
+        _sec_index_by_name(cpw, b"fentry/swiotlb_bounce")
+        raise SystemExit("cp-wrongsec.o still has the fentry section")
+    except AssertionError:
+        pass
+    cpn = (OUT / "cp-nonpow2.o").read_bytes()
+    assert (
+        _btf_array_nelems_off(cpn, b"mv_copies", b"max_entries")
+        == cp_ring_off
+    )
+    assert struct.unpack_from("<I", cpn, cp_ring_off)[0] == 1000
+    print(f"wrote 22 fixtures to {OUT}")
 
     # Structural self-check of every fixture (.strtab-scoped symbol check,
     # since __btf_strings legitimately repeats the program name).

@@ -394,6 +394,27 @@ def read_btf_maps(data: Span[UInt8, _]) -> BtfMaps:
     exact expected ring size is the profile binding's job,
     never this reader's.
     """
+    return _read_btf_maps(
+        data, String("mv_attempts"), String("attempts"))
+
+
+def read_btf_maps_ring(
+    data: Span[UInt8, _], ring_var: String, ring_word: String
+) -> BtfMaps:
+    """Read mv_counts plus one named ringbuf map definition.
+
+    Same pinned mv_counts geometry as read_btf_maps; the
+    named ring variable must be RINGBUF with a sane
+    power-of-two size. Diagnostics name ring_word (short
+    channel word) and ring_var (BTF variable name).
+    """
+    return _read_btf_maps(data, ring_var, ring_word)
+
+
+def _read_btf_maps(
+    data: Span[UInt8, _], ring_var: String, ring_word: String
+) -> BtfMaps:
+    """Shared worker: read_btf_maps with a ring variable name."""
     var sec = _find_section(data, String(".BTF"))
     if not sec.found:
         return _refuse_maps(String("no BTF section"))
@@ -465,13 +486,13 @@ def read_btf_maps(data: Span[UInt8, _]) -> BtfMaps:
         return _refuse_maps(String("counts bad value"))
     if cval_v != 8:
         return _refuse_maps(String(t"counts value {cval_v}, want 8"))
-    var attempts = walk.find_var(data, String("mv_attempts"))
+    var attempts = walk.find_var(data, ring_var)
     if attempts == -1:
-        return _refuse_maps(String("missing mv_attempts"))
+        return _refuse_maps(String("missing ") + ring_var)
     if attempts == -2:
         return _refuse_maps(String("BTF strings corrupt"))
     if attempts == -3:
-        return _refuse_maps(String("duplicate mv_attempts"))
+        return _refuse_maps(String("duplicate ") + ring_var)
     var amem = walk.datasec_var(data, String(".maps"), attempts)
     if amem == 0:
         return _refuse_maps(String("no maps DATASEC"))
@@ -480,40 +501,41 @@ def read_btf_maps(data: Span[UInt8, _]) -> BtfMaps:
     if amem == -2:
         return _refuse_maps(String("duplicate maps DATASEC"))
     if amem == -4:
-        return _refuse_maps(String("attempts not in maps DATASEC"))
+        return _refuse_maps(ring_word + String(" not in maps DATASEC"))
     var attempts_struct = walk.sizes[attempts]
     if not walk.rec_valid(attempts_struct):
-        return _refuse_maps(String("attempts not a struct"))
+        return _refuse_maps(ring_word + String(" not a struct"))
     var aus = attempts_struct - 1
     if walk.kinds[aus] != 4:
-        return _refuse_maps(String("attempts not a struct"))
+        return _refuse_maps(ring_word + String(" not a struct"))
     var alink = walk.var_linkage(data, attempts)
     if alink != 0 and alink != 1:
-        return _refuse_maps(String(t"attempts linkage {alink}"))
+        return _refuse_maps(String(t"{ring_word} linkage {alink}"))
     var atype = walk.member_type(data, aus, String("type"))
     if atype == -1:
-        return _refuse_maps(String("attempts missing type"))
+        return _refuse_maps(ring_word + String(" missing type"))
     if atype == -2:
         return _refuse_maps(String("BTF strings corrupt"))
     var atype_v = walk.uint_value(data, atype)
     if atype_v < 0:
-        return _refuse_maps(String("attempts bad type"))
+        return _refuse_maps(ring_word + String(" bad type"))
     if atype_v != _MAP_RINGBUF:
-        return _refuse_maps(String(t"attempts type {atype_v}, want 27"))
+        return _refuse_maps(String(t"{ring_word} type {atype_v}, want 27"))
     var amax = walk.member_type(data, aus, String("max_entries"))
     if amax == -1:
-        return _refuse_maps(String("attempts missing max_entries"))
+        return _refuse_maps(ring_word + String(" missing max_entries"))
     if amax == -2:
         return _refuse_maps(String("BTF strings corrupt"))
     var ring = walk.uint_value(data, amax)
     if ring < 0:
-        return _refuse_maps(String("attempts bad max_entries"))
+        return _refuse_maps(ring_word + String(" bad max_entries"))
     if (
         ring < _MIN_RING_BYTES
         or ring > _MAX_RING_BYTES
         or not _is_pow2(ring)
     ):
-        return _refuse_maps(String(t"attempts ring size {ring} rejected"))
+        return _refuse_maps(
+            String(t"{ring_word} ring size {ring} rejected"))
     var out = BtfMaps()
     out.ok = True
     out.message = String("")
