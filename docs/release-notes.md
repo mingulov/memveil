@@ -1,74 +1,71 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # MemVeil 0.1.0 release notes (development bundle)
 
-Status: **pre-release development bundle**. No version tag exists;
-`0.1.0` names the bundle layout, not a supported release. The
-supported configuration is exactly `docs/support.md`; anything
-outside it is unbound or refused. Counts below are the final
-re-gate evidence at this revision.
+Status: **attempt-capture development preview**. The version names
+development bytes and schema compatibility, not a qualified full release.
+The [capability table](support.md#capabilities-by-mode) is the support
+contract for shipping collection, offline analysis, and laboratory work.
 
 ## What this bundle contains
 
-- `record`: SWIOTLB bounce-attempt capture with attach-anchored
-  window/deadline, debugfs pool sampling (capacity/used/high-water),
-  and fail-closed admission (profile binding, bridge, privilege).
-- `report` / `top`: offline replay with exact-replay accounting:
-  current/peak allocation occupancy, cumulative allocated bytes,
-  allocation byte-time, mapping
-  lifetimes (mean/p50/p95), per-device and per-direction splits,
-  region lineage with generations, per-metric evidence confidence
-  (`high` / `medium`; `proxy` is reserved, no emitter yet).
-- `doctor`: passive environment probe (no privileges needed).
-- Machine-readable outputs: text, JSON, Markdown; JSON schemas
-  `schemas/{session,event,report}-v0.1.0.schema.json` with a
-  52-case self-oracle (`tools/validate-schemas`).
-- Ubuntu 22.04+ offline floor, 24.04+ recording floor; see
-  `docs/support.md` for the full envelope.
+- `record`: SWIOTLB bounce-attempt capture, requested bytes, attach-anchored
+  window/deadline, and optional readable default-pool capacity/used/high-water
+  samples at start and close. Admission checks profile bindings, bridge,
+  and privilege. Attempts are not outer DMA successes or actual copies.
+- `report`: offline text/JSON/Markdown analysis. Lifecycle, copy, mapping,
+  region and pool reducers work only when input supplies their evidence;
+  they do not imply that the shipping collector supplies those records.
+  Allocation occupancy and byte-time are distinct from sharing lifetime.
+- `top DIR`: periodic summaries of finished-capture replay prefixes.
+  Live summary remains required work.
+- Human reports expose captured kernel/profile/scope and exact window
+  duration. Missing/conflicting provenance remains explicit; an unbound
+  capture remains unbound. Full hashes stay available in session/JSON.
+- Passive `doctor`, versioned schemas in `schemas/`, standalone build/test
+  wrappers and source/runtime tarball packaging with licenses and manifests.
 
-## Verification (final re-gate, 2026-10-07)
+## Evidence scope
 
-- Test suites: 51 PASS / 3 SKIP / 0 FAIL across 54 lanes, plus
-  the 3 commit-gated packaging lanes below. The 3 skips need
-  confidential-computing silicon (unavailable here) and are
-  reported as skipped, never as success.
-- Live VM gates (KVM/virtme-ng, kernel 7.0.0-34-generic, all
-  armed): lifecycle, copy semantics, real I/O, stop races,
-  saturation, cleanup, oracle comparison, and perf workload —
-  all PASS. Soak: 916 cycles in 30.0 min, peak 28636 KiB.
-- Coexistence: MemVeil alone, two instances, and MemVeil +
-  KryProbe qualified live (see `docs/coexistence.md`);
-  p11scope/osslscope pairings not qualified, no recipe given.
-- Sanitizers: 0 ASan/UBSan findings on the native bridge
-  (instrumented build, privileged native suite 7/7).
-- Packaging: owner bundle + clean-room replay + release-runtime
-  lanes PASS on this HEAD, including the full manuals tree in
-  the bundle.
+Earlier development receipts and CI successes apply to their recorded
+revisions, binaries, BPF objects and environments. They are historical
+evidence, not a final re-gate of every later candidate. Laboratory lifecycle,
+copy and oracle lanes compare decoded probe records or synthetic translated
+reports; see [oracles](oracles.md). Their success does not qualify shipping
+lifecycle/copy collection. Historical replay/performance and coexistence
+experiments likewise do not establish current-candidate live overhead or
+pairing support; see [performance](performance.md) and
+[coexistence](coexistence.md).
 
-## Known limitations
+For a candidate, retain exact source and dependency revisions, source/runtime
+archive hashes, manifest verification, observed toolchain, binary/BPF/profile
+identities, commands, expected/actual results and cleanup. Compiler-free
+offline replay is a packaging boundary; collection additionally needs its
+exact bound profile/environment and independent live oracle. Source-export
+builds may produce different BPF bytes and fail the existing narrow binding.
+Do not silently rewrite a profile hash to make them admitted.
 
-- One validated profile: `linux-x86_64-7.0.0-34-generic`. Other
-  kernels run partial or refuse; older kernels (< 7.0) are
-  unsupported, not degraded.
-- No confidential-computing qualification: SNP/TDX behavior is
-  unobserved (no silicon in the test environment). Captures from
-  ordinary VMs carry `proxy`-capable evidence only where an
-  emitter exists; no proxy emitter ships yet, so nothing is
-  silently upgraded.
-- Pool high-water reset epoch is declared, not proven: the sampler
-  never resets the kernel counter, so equal values across captures
-  share one allocator lifetime only when no reset happened between
-  them (see `docs/privacy.md` and the report invariant notes).
-  The pool reader covers exactly the three documented debugfs
-  files; transient/dynamic pools are out of scope.
-- `StopController` is unit-tested but not wired into the live
-  collector (drains up to 30 s); terminal quality stays partial
-  (exit 4) until the stop protocol is proven on the exact profile.
-- CI workflows are defined but have never executed (need runners).
-- Coexistence recipes: published only for qualified pairings (TBD).
+## Open release gates and limits
+
+- Shipping lifecycle/copy integration, periodic pressure sampling, live
+  summary, proven writer settlement, and their independent operational
+  qualification remain open. The original lifecycle-qualified preview
+  and full confidential first release are not complete.
+- No real SNP/TDX qualification. Offline region analysis and ordinary-Linux
+  conversion calls do not prove a confidential transition. No attestation
+  is performed, and observations are not host-access verdicts.
+- Two default-pool boundary samples cannot diagnose sustained pressure.
+  The sampler never resets high-water; equal values share an allocator
+  lifetime only if no reset occurred. Dynamic pools are outside the reader's
+  scope; see [privacy](privacy.md).
+- Live terminal quality stays partial (exit 4): a finalized capture and a
+  quiet ring do not prove writer settlement. `StopController` exists but is
+  not wired into the live collector, which drains up to 30 seconds.
+- CPU targets and ELF linkage minima are compatibility prerequisites,
+  not tests of every claimed platform. See [support](support.md).
 
 ## Compatibility
 
-Report/event/session schemas are `v0.1.0`; compatibility rules live
-in `docs/format-compatibility.md`. Capture directories are
-self-describing (session.json + events.ndjson) and replay without
-the recording host.
+Report/event/session schemas are `v0.1.0`; reader rules live in
+[format compatibility](format-compatibility.md). Captures are self-describing
+and replay without the recording host or native bridge. JSON metric meanings,
+integer values and exit policy are unchanged by the human-context correction.

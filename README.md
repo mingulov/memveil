@@ -10,12 +10,20 @@ actual copy bytes, pool pressure, and diagnostic findings
 reduce offline over captures that carry the corresponding
 events.
 
-Status: development bundle 0.1.0. One validated profile
-(`linux-x86_64-7.0.0-34-generic`). Live lifecycle probes
-are not qualified, so live captures carry attempts only;
-sharing transitions and physical unions are unavailable,
-never inferred. No release or packaging-format decision has
-been made yet.
+Status: attempt-capture development bundle 0.1.0, with runnable
+build, test, and tarball packaging wrappers. The shipping collector
+records attempts and optional readable default-pool start/end samples.
+`top` replays finished captures; a live summary is still missing.
+Laboratory lifecycle/copy probes and offline reducers do not qualify
+shipping lifecycle, successful DMA, actual copying, sustained pressure,
+or confidential-memory collection. The original lifecycle preview and
+full confidential first-release gates remain open.
+
+The [support table](docs/support.md#capabilities-by-mode) defines the
+capabilities by mode. One narrow profile,
+`linux-x86_64-7.0.0-34-generic`, has historical attempt evidence;
+admission also requires its exact config/BTF/object bindings.
+A rebuilt package or matching kernel name alone earns no qualification.
 
 ## Use (from the bundle)
 
@@ -28,7 +36,7 @@ been made yet.
     # sudo ./bin/memveil record --bridge $PWD/lib/libbpf_mojo.so.1 ...
     sudo cp -r /tmp/cap1 ~/cap1 && sudo chown -R $USER ~/cap1
     ./bin/memveil report --format text ~/cap1       # unprivileged replay
-    ./bin/memveil top --interval 1s ~/cap1          # periodic summaries
+    ./bin/memveil top --interval 1s ~/cap1          # finished-capture replay
 
 `docs/quickstart.md` walks the five-minute test;
 `docs/support.md` states the tested envelope and exit codes;

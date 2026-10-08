@@ -18,6 +18,7 @@ from memveil.model.report import Report
 from memveil.model.session import Channel
 from memveil.model.validate import format_u64
 from memveil.render.filter import resolve_device_filter
+from memveil.render.context import measured_duration, recorded_value
 from memveil.render.text import escape_text
 
 
@@ -105,7 +106,9 @@ def render_markdown(rep: Report, device_filter: String = "") raises -> String:
     out += format_u64(rep.window_start_ns)
     out += ","
     out += format_u64(rep.window_end_ns)
-    out += ")\n- environment: mode="
+    out += ")\n- duration: "
+    out += measured_duration(rep)
+    out += "\n- environment: mode="
     out += escape_text(rep.env.mode)
     out += " detection="
     out += escape_text(rep.env.detection)
@@ -116,6 +119,11 @@ def render_markdown(rep: Report, device_filter: String = "") raises -> String:
         out += escape_text(rep.env.asserted_mode)
     out += " evidence="
     out += String(len(rep.env.evidence))
+    for source in [String("kernel.release"), String("profile.decision"), String("measurement_scope")]:
+        out += "\n- recorded "
+        out += escape_markdown(source)
+        out += ": "
+        out += escape_markdown(recorded_value(rep.env.evidence, source))
     out += "\n- devices: "
     out += String(len(rep.devices))
     out += "\n\n## Devices\n\n"

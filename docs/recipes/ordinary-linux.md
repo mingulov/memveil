@@ -1,18 +1,19 @@
-# Ordinary-Linux lifecycle qualification
+# Ordinary-Linux laboratory lifecycle checks
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
-This recipe qualifies the lifecycle slice (map, copy, sync,
-release, pool pressure) on ordinary x86-64 Linux before any
-wider claim. It runs only in a disposable VM; nothing here
-touches the host kernel except through the frozen virtme-ng
-harness.
+This recipe runs laboratory lifecycle/copy comparisons in a disposable VM.
+It does not qualify shipping lifecycle, successful outer DMA, per-device
+effective copying or sustained pool pressure. Shipping collection is the
+attempt collector with optional pool boundary samples; see the
+[support table](../support.md#capabilities-by-mode) and
+[oracle boundaries](../oracles.md).
 
 ## Prerequisites
 
 - The frozen harness from `tools/vm-attempts` (virtme-ng,
   qemu, kvm, passwordless sudo where the wrapper asks).
-- Qualified lifecycle probes:
+- Laboratory lifecycle probes:
   `build/bpf/swiotlb_lifecycle.bpf.o` and
   `build/bpf/swiotlb_copy.bpf.o`, each admitted through the
   hook-definition rules in `tests/vm/semantics.py`.
@@ -27,9 +28,9 @@ and names the missing piece. A skip is never a pass.
 
 | Lane | What it proves |
 |---|---|
-| `tools/test vm-lifecycle` | Low-rate matrix (1, 10, 100 maps/s): every report matches the oracle ledger with zero mismatches, and effective-copy equality holds at each step. |
-| `tools/test vm-copy` | Request-vs-copy semantics on live traffic: syncs add no copy bytes, nested copies survive, copies under a failed mapping stay counted. |
-| `tools/test vm-real-io` | Real block and vnet guest I/O through the swiotlb path: no orphan releases, reconcilable live bytes, sane completed lifetimes. |
+| `tools/test vm-lifecycle` | Scripted low-rate matrix comparing decoded laboratory records against independent module facts; no shipping report qualification. |
+| `tools/test vm-copy` | Scripted request/copy comparisons using laboratory probe records; no per-device shipping effective-copy claim. |
+| `tools/test vm-real-io` | Laboratory real-I/O hook exercise in the guest; its decoded records do not establish shipping lifecycle report semantics. |
 
 `tools/vm-lifecycle` runs all three in one invocation.
 
@@ -44,8 +45,10 @@ relabel an older receipt as current.
 
 ## Current status
 
-The offline reducers, the oracle ledger comparator, the
-admission rules, and the gate harnesses are implemented and
-tested. The lifecycle BPF probes are not yet qualified, so
-all three gates skip. The oracle module builds against
-7.0.0-34-generic; guest comparison awaits the probes.
+The reducers, probes, independent module, admission checks and wrappers
+exist. Armed historical laboratory runs and unarmed skips are distinct;
+these wrappers do not always skip. Neither outcome qualifies the shipping
+collector's missing lifecycle source. The oracle report translator uses
+synthetic provenance and partial correlation/terminal evidence. Shipping
+integration still needs real identity-preserving normalization, outer-success
+separation, independent per-device witnesses and exact-artifact qualification.

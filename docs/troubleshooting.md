@@ -46,8 +46,8 @@ capture to clean up.
   (closed pipe, full disk). Free the sink and rerun; output
   is never silently dropped.
 - `record` cannot load the bridge on an older userland: the
-  native bridge needs glibc >= 2.38 (Ubuntu 24.04 LTS or
-  later); `report`, `top`, and `doctor` work from glibc 2.35
+  native bridge needs glibc >= 2.38; the offline closure for
+  `report`, `top`, and `doctor` has a glibc 2.35 linkage minimum
   (`support.md`).
 - `doctor` exits 3: collection is unavailable or unknown on
   this host. Read its per-hook reasons; they name the exact

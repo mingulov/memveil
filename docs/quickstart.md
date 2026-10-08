@@ -4,7 +4,9 @@
 MemVeil captures swiotlb bounce **attempts** (try-counts, not copies)
 on x86-64 Linux and replays them offline as text, JSON, or Markdown.
 This bundle runs from any directory: no compiler, Pixi, network, or
-source checkout needed.
+source checkout needed. The [capability table](support.md#capabilities-by-mode)
+distinguishes the shipping attempt collector, offline reducers and laboratory
+probes. A full lifecycle/confidential release is not yet qualified.
 
 ## 1. Extract and check the version
 
@@ -22,8 +24,10 @@ source revisions; re-hash any file to confirm it.
 
 Doctor loads no BPF and changes nothing. It reports the kernel
 floor check, guest signals, the selected semantic profile, and
-per-capability reasons. Only kernel `7.0.0-34-generic` on x86-64
-is validated; anything else runs unbound or refuses. A `denied
+per-capability reasons. The narrow `7.0.0-34-generic` x86-64 profile has
+historical attempt evidence; exact config/BTF/event-format/object bindings
+must also hold. A rebuilt object can fail the binding even on that kernel.
+Passive availability is not actual attachment or qualification. A `denied
 (privilege)` hook means: re-run under `sudo` for collection, or
 stay unprivileged for replay (step 4).
 
@@ -39,8 +43,8 @@ object, and the native bridge:
 (`sudo -E` preserves `LMB_NATIVE_LIB`; or pass
 `--bridge $PWD/lib/libbpf_mojo.so.1` instead.) Expected: `ready
 session=...`, then `end=duration outcome=finalized exit=4`.
-Exit 4 is the normal finalized code, including zero-event and
-signal stops. Exit 3 names the refusal reason (profile, bridge,
+Exit 4 indicates finalized output with incomplete terminal evidence,
+including zero-event and signal stops. Exit 3 names the refusal reason (profile, bridge,
 privilege); exit 2 is a usage error; exit 1 is an error.
 
 The capture is root-owned (mode 0700/0600), so hand it to your
@@ -81,15 +85,27 @@ drop the torn tail and report the loss instead (exit 4). See
 
 Thirty real bounce attempts, fully lossless detail, with the
 provenance and limitations each rendered beside the numbers.
+The captured kernel/profile decision and measured scope are historical
+claims about that capture, not admission of the current reader host.
+Duration uses the recorded window with exact integer arithmetic; JSON
+retains full provenance hashes. Missing or conflicting values remain explicit.
+
+    ./bin/memveil top --interval 1s examples/real-capture
+
+This replays a finished capture in periodic prefixes; it does not follow a
+new workload live. Each summary shows its own measured prefix duration.
 
 ## Limits in one paragraph
 
-Attempt counts only: lifecycle, actual copy bytes, sharing
+Attempt collection with optional default-pool start/end samples when debugfs
+is readable. Two samples cannot diagnose sustained pressure; no pressure
+finding does not mean no pressure. Lifecycle, actual copy bytes, sharing
 transitions, and physical unions are unavailable, never
-inferred. One validated kernel. Captures are written mode
+inferred. One narrow bound profile, with no broad kernel qualification.
+Captures are written mode
 0600. There is no configuration file, daemon, or network
 access. Replay needs nothing live (see `performance.md` for
-the measured envelope: 600k records in seconds). Open mappings
+targets and historical development measurements). Open mappings
 are live state, never automatic leaks (`resource-limits.md`).
 Findings are observations, not host-access or attestation
 verdicts (`support.md`). See `support.md` for the tested
