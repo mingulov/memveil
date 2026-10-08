@@ -9,6 +9,7 @@ so repo paths resolve identically inside the guest.
 """
 
 import hashlib
+import re
 import json
 import fcntl
 import shutil
@@ -95,7 +96,9 @@ def verify_exports(tmp, sub, names):
         sidecar = Path(str(target) + ".sha256")
         assert target.is_file(), f"missing export {sub}-{name}"
         assert sidecar.is_file(), f"missing sidecar {sub}-{name}.sha256"
-        want = sidecar.read_text().split()[0]
+        sidecar_text=sidecar.read_text()
+        assert re.fullmatch(r"[0-9a-f]{64}(?:  " + re.escape(target.name) + r")?\n",sidecar_text), "invalid hash sidecar"
+        want = sidecar_text.split()[0]
         assert sha_file(target) == want, f"hash mismatch {sub}-{name}"
         got[name] = target
     want_files = {f"{sub}-{n}" for n in names}
@@ -111,8 +114,8 @@ def verify_exports(tmp, sub, names):
         for key in ("release", "config_sha", "btf_sha"):
             assert identity[key] == expected[key], "guest kernel identity drift: " + key
         for key, path in (("consume_sha",REPO/"build/vm/mv_consume"),
-                          ("lc_sha",REPO/"build/bpf/swiotlb_lifecycle.bpf.o"),
-                          ("cp_sha",REPO/"build/bpf/swiotlb_copy.bpf.o"),
+                          ("lc_sha",REPO/("build/bpf/swiotlb_lifecycle-test.bpf.o" if sub=="saturation" else "build/bpf/swiotlb_lifecycle.bpf.o")),
+                          ("cp_sha",REPO/("build/bpf/swiotlb_copy-test.bpf.o" if sub=="saturation" else "build/bpf/swiotlb_copy.bpf.o")),
                           ("bridge_sha",REPO/"build/deps/lmb/lib/libbpf_mojo.so.1"),
                           ("ko_sha",Path(ORACLE_KO))):
             assert identity[key] == sha_file(path), "guest artifact mismatch: " + key

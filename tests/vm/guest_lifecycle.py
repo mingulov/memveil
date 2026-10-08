@@ -111,8 +111,8 @@ class Gate:
                 "config_sha": config_btf["config_sha"], "btf_sha": config_btf["btf_sha"],
                 "bridge_sha": sha_file(self.bridge),
                 "consume_sha": sha_file(self.consume),
-                "lc_sha": sha_file(self.lc_obj),
-                "cp_sha": sha_file(self.cp_obj),
+                "lc_sha": sha_file(self.lc_test_obj if self.sub == "saturation" else self.lc_obj),
+                "cp_sha": sha_file(self.cp_test_obj if self.sub == "saturation" else self.cp_obj),
                 "ko_sha": sha_file(self.ko)}
 
     def start_consumer(self, obj, ring, sites, seconds, out):

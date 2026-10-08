@@ -136,7 +136,9 @@ def verify_exports(tmp, mode):
         s = Path(str(f) + ".sha256")
         assert f.is_file(), f"missing export {mode}-{name}"
         assert s.is_file(), f"missing sidecar {mode}-{name}.sha256"
-        want = s.read_text().split()[0]
+        sidecar=s.read_text()
+        assert re.fullmatch(r"[0-9a-f]{64}(?:  " + re.escape(f.name) + r")?\n", sidecar), "invalid hash sidecar"
+        want = sidecar.split()[0]
         assert sha_file(f) == want, f"hash mismatch {mode}-{name}"
         got[name] = f
     # Exact inventory: no more, no fewer (the raw ftrace pipe
@@ -146,7 +148,7 @@ def verify_exports(tmp, mode):
     have = {p.name for p in export.iterdir()}
     assert have == want_files, f"export inventory drift: {have ^ want_files}"
     from export_validation import validate_attempt_exports
-    validate_attempt_exports(got)
+    validate_attempt_exports(got, mode)
     return got
 
 

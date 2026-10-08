@@ -44,3 +44,24 @@ def test_all_positive_native_results_pass(tmp_path):
 def test_skipped_required_lane_blocks_even_with_positive_sibling(tmp_path):
     rc,doc=run(tmp_path,dict(a=77,b=0))
     assert rc==1 and doc['status']=='BLOCKED'
+
+
+def test_soak_budget_includes_completion_margin(monkeypatch):
+    module=load();monkeypatch.setenv('MEMVEIL_SOAK_MINUTES','30')
+    assert module.suite_timeout('soak')>1800
+
+
+def test_timeout_reaps_descendants_in_separate_sessions(tmp_path):
+    import os,shlex,sys
+    module=load();repo=tmp_path/'repo';(repo/'tools').mkdir(parents=True)
+    childfile=tmp_path/'child.pid'
+    script="import os,time,pathlib; pathlib.Path(%r).write_text(str(os.getpid()));time.sleep(30)" % str(childfile)
+    tool=repo/'tools/test'
+    tool.write_text('#!/bin/sh\nsetsid '+shlex.quote(sys.executable)+' -c '+shlex.quote(script)+' &\nwait\n')
+    tool.chmod(0o755)
+    code=module.run_suites(repo,tmp_path/'out',['owned-timeout'],timeouts={'owned-timeout':0.3})
+    pid=int(childfile.read_text())
+    assert not (Path('/proc')/str(pid)).exists()
+    receipt=json.loads((tmp_path/'out/results.json').read_text())
+    assert code==1 and receipt['lanes'][0]['timed_out'] is True
+    assert receipt['lanes'][0]['cleanup']['remaining_owned']==0

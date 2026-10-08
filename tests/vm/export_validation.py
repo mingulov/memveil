@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import re
+import math
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from consume import SUMMARY_LINE, parse_consume_file, parse_oracle_log
@@ -14,7 +15,7 @@ def keys(doc, required, optional=()):
 
 
 def integer(value, negative=False):
-    if type(value) is not int or (not negative and value < 0):
+    if type(value) is not int or not (-(1 << 63) if negative else 0) <= value < (1 << 64):
         raise ValueError('invalid export integer')
 
 
@@ -117,9 +118,9 @@ def validate_lifecycle_exports(got,sub):
                     keys(leg['ping'],('tx','rx','seconds','p99_ms','sample_tx','sample_rx','sample_count'))
                     keys(leg['dd'],('bytes','seconds'))
                     for v in leg['ping'].values():
-                        if v is not None and type(v) not in (int,float):raise ValueError('invalid ping metric')
+                        if v is not None and (type(v) not in (int,float) or not math.isfinite(v) or v < 0):raise ValueError('invalid ping metric')
                     for v in leg['dd'].values():
-                        if type(v) not in (int,float):raise ValueError('invalid dd metric')
+                        if type(v) not in (int,float) or not math.isfinite(v) or v < 0:raise ValueError('invalid dd metric')
         else: raise ValueError('unrecognized lifecycle export '+name)
 
 
@@ -131,13 +132,19 @@ def _schemas():
     return module
 
 
-def validate_attempt_exports(got):
+def validate_attempt_exports(got, mode=None):
     validator=_schemas()
     session=validator.check_session(json.loads(got['session.json'].read_text()))
     for i,line in enumerate(got['events.ndjson'].read_text().splitlines(),1):
         validator.check_event(json.loads(line),i,session)
     doc=json.loads(got['oracle.json'].read_text())
     keys(doc,('schema','lost_lines','pipe_bytes','pipe_lines','header_lines','blank_lines','events'))
+    if doc['schema'] != 'memveil-vm-oracle/1':raise ValueError('invalid oracle schema')
+    for k in ('lost_lines','pipe_bytes','pipe_lines','header_lines','blank_lines'):integer(doc[k])
+    if type(doc['events']) is not list:raise ValueError('invalid oracle event inventory')
+    if doc['pipe_lines'] != len(doc['events'])+doc['header_lines']+doc['blank_lines']+doc['lost_lines']:
+        raise ValueError('oracle line cardinality drift')
+    if doc['pipe_bytes'] < doc['pipe_lines']:raise ValueError('oracle byte cardinality drift')
     for event in doc['events']:
         keys(event,('ts_ns','size','forced'));integer(event['ts_ns']);integer(event['size'])
         if type(event['forced']) is not bool:raise ValueError('invalid force flag')
@@ -146,13 +153,40 @@ def validate_attempt_exports(got):
                 'trace_clock','ready','workload_start_ns','workload_end_ns','ping_transmitted',
                 'ping_received','record_exit','drained_bytes','percpu','hiwater_after',
                 'pipe_bytes','pipe_lines','lost_markers'))
+    if ledger['mode'] not in ('correctness','saturation') or mode is not None and ledger['mode'] != mode:
+        raise ValueError('invalid attempt lane identity')
+    if type(ledger['fs_type']) is not str or ledger['fs_type'] not in ('ext4','btrfs','tmpfs','overlayfs','xfs','ramfs','tracefs'):
+        raise ValueError('invalid filesystem identity')
+    for k in ('hiwater_before','hiwater_after'):
+        value=ledger[k]
+        if value is not None and (type(value) is not str or not re.fullmatch(r'0|[1-9][0-9]{0,19}',value) or int(value)>=1<<64):
+            raise ValueError('invalid hiwater scalar')
+    if type(ledger['iface']) is not str or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.-]{0,31}',ledger['iface']):
+        raise ValueError('invalid interface identity')
+    if type(ledger['dma_mask_bits']) is not int or ledger['dma_mask_bits'] != 32:
+        raise ValueError('invalid DMA mask width')
+    if ledger['link_ok'] is not True:raise ValueError('invalid link flag')
+    clocks=r'(?:local|global|counter|uptime|perf|mono|mono_raw|boot|tai|x86-tsc)'
+    token=r'(?:'+clocks+r'|\['+clocks+r'\])'
+    if type(ledger['trace_clock']) is not str or not re.fullmatch(token+r'(?: '+token+r')*',ledger['trace_clock']):
+        raise ValueError('invalid trace clock inventory')
+    if '[mono]' not in ledger['trace_clock'] and ledger['trace_clock'] != 'mono':
+        raise ValueError('oracle monotonic clock not selected')
+    ready=r'ready session=(?:cap-[0-9]+-[0-9]+|[a-z][a-z0-9_.-]{0,127}) start_ns=(?:0|[1-9][0-9]{0,19})'
+    if type(ledger['ready']) is not str or not re.fullmatch(ready,ledger['ready']):
+        raise ValueError('invalid readiness acknowledgement')
+    if ledger['ready'] not in got['record.stdout'].read_text().splitlines():
+        raise ValueError('readiness acknowledgement differs from record stdout')
     ident=ledger['identity']
     keys(ident,('release','config_src','config_sha','btf_sha','format_sha','image_sha','image_bid'))
+    if type(ident['release']) is not str or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+[-A-Za-z0-9.]*',ident['release']):
+        raise ValueError('invalid kernel release')
     for key in ('config_sha','btf_sha','format_sha','image_sha'):sha(ident[key])
     if ident['config_src'] not in ('gz','file'):raise ValueError('invalid config source')
     if not re.fullmatch(r'[0-9a-f]{16,128}',ident['image_bid']):raise ValueError('invalid build id')
     for key in ('workload_start_ns','workload_end_ns','ping_transmitted','ping_received','record_exit',
                 'drained_bytes','pipe_bytes','pipe_lines','lost_markers'):integer(ledger[key])
+    if type(ledger["percpu"]) is not dict:raise ValueError("invalid CPU inventory")
     for cpu,stats in ledger['percpu'].items():
         if not re.fullmatch('cpu[0-9]+',cpu):raise ValueError('invalid cpu')
         keys(stats,('values',));keys(stats['values'],('overrun','commit overrun','dropped events'))
@@ -162,5 +196,5 @@ def validate_attempt_exports(got):
             raise ValueError('unexpected record stdout')
     if got['record.stderr'].read_text().strip():raise ValueError('record diagnostics must remain guest-local')
     for line in got['ping.txt'].read_text().splitlines():
-        if line and not re.fullmatch(r'PING 10\.0\.3\.2 .*|--- 10\.0\.3\.2 ping statistics ---|\d+ packets transmitted, \d+ received, .*|rtt min/avg/max/mdev = [0-9./]+ ms.*',line):
+        if line and not re.fullmatch(r'PING 10\.0\.3\.2 \(10\.0\.3\.2\) [0-9]+\([0-9]+\) bytes of data\.|--- 10\.0\.3\.2 ping statistics ---|[0-9]+ packets transmitted, [0-9]+ received, [0-9]+(?:\.[0-9]+)?% packet loss, time [0-9]+ms|rtt min/avg/max/mdev = [0-9]+(?:\.[0-9]+)?/[0-9]+(?:\.[0-9]+)?/[0-9]+(?:\.[0-9]+)?/[0-9]+(?:\.[0-9]+)? ms(?:, pipe [0-9]+)?(?:, ipg/ewma [0-9]+(?:\.[0-9]+)?/[0-9]+(?:\.[0-9]+)? ms)?',line):
             raise ValueError('unexpected ping export text')

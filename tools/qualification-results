@@ -7,32 +7,158 @@ Native output stays local in OUTPUT/raw; only results.json and the allowlisted
 per-lane .log receipts may be uploaded. A required skip blocks qualification.
 """
 import hashlib
+import ctypes
+import os
+import math
+import signal
+import time
 import json
 import subprocess
 import sys
 from pathlib import Path
 
 
-def run_suites(repo,out,suites):
+def suite_timeout(suite):
+    """Allow a default 30-minute soak to finish its final cycle and cleanup."""
+    if suite == "soak":
+        minutes = float(os.environ.get("MEMVEIL_SOAK_MINUTES", "30"))
+        if not math.isfinite(minutes) or minutes <= 0:
+            raise ValueError("invalid soak duration")
+        return minutes * 60 + 300
+    return 1800
+
+
+def _processes():
+    records = {}
+    for file in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            fields = file.read_text().rsplit(")", 1)[1].split()
+            records[int(file.parent.name)] = (int(fields[1]), fields[0], int(fields[19]))
+        except (OSError, ValueError, IndexError):
+            continue
+    return records
+
+
+def _same(pid, birth):
+    return _processes().get(pid, (None, None, None))[2] == birth
+
+
+def _terminate_owned(proc, prior_children):
+    """Freeze and retire exact descendants, including separate VM sessions.
+
+    The runner is a Linux subreaper. Targeted waitpid calls retire only the
+    descendants of this invocation; unrelated resources are never signalled
+    or reaped. Birth ticks guard against PID reuse during cleanup.
+    """
+    snapshot = _processes()
+    owned = {proc.pid: snapshot[proc.pid][2]} if proc.pid in snapshot else {}
+    # A parent can exit just as the deadline expires. As the single-threaded
+    # subreaper, this runner adopts its newly orphaned children. Exclude every
+    # child that existed before this suite started, then track only new ones.
+    owned.update({pid: birth for pid, (ppid, state, birth) in snapshot.items()
+                  if ppid == os.getpid() and (pid, birth) not in prior_children})
+    errors = 0
+    def send(pid, sig):
+        nonlocal errors
+        if _same(pid, owned[pid]):
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                errors += 1
+    # Stop parents and every discovered descendant before the termination
+    # snapshot, so a child cannot fork unnoticed while its parent is retired.
+    for _ in range(16):
+        snapshot = _processes()
+        added = {}
+        changed = True
+        while changed:
+            changed = False
+            for pid, (ppid, state, birth) in snapshot.items():
+                if ppid in owned and pid not in owned:
+                    owned[pid] = birth; added[pid] = birth; changed = True
+        for pid in owned:
+            send(pid, signal.SIGSTOP)
+        if not added:
+            break
+    for pid in owned:
+        send(pid, signal.SIGTERM)
+        send(pid, signal.SIGCONT)
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        snapshot = _processes()
+        if all(pid not in snapshot or snapshot[pid][1] == "Z" for pid in owned):
+            break
+        time.sleep(0.02)
+    for pid in owned:
+        send(pid, signal.SIGKILL)
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        errors += 1
+    deadline = time.monotonic() + 2
+    reaped = 0
+    while time.monotonic() < deadline:
+        for pid in owned:
+            try:
+                got, _ = os.waitpid(pid, os.WNOHANG)
+                reaped += int(got != 0)
+            except ChildProcessError:
+                pass
+        snapshot = _processes()
+        remaining = sum(pid in snapshot and snapshot[pid][2] == birth for pid, birth in owned.items())
+        if not remaining:
+            break
+        time.sleep(0.02)
+    return dict(owned_processes=len(owned), reaped_descendants=reaped,
+                remaining_owned=remaining, signal_errors=errors)
+
+
+def run_suites(repo,out,suites,timeouts=None):
     out.mkdir(parents=True,exist_ok=True)
     raw=out/'raw';raw.mkdir(exist_ok=True)
     lanes=[]
+    # Subreaper ownership belongs only to this development runner process.
+    libc=ctypes.CDLL(None,use_errno=True)
+    if libc.prctl(36,1,0,0,0) != 0:
+        raise OSError(ctypes.get_errno(),"cannot establish child reaping")
+    unresolved_cleanup = False
     for suite in suites:
         # Suite names, not arbitrary external commands, form the interface.
         if not suite or any(c not in 'abcdefghijklmnopqrstuvwxyz0123456789-' for c in suite):
             raise ValueError('invalid suite name')
         target=raw/(suite+'.log')
+        cleanup = None
+        timed_out = False
+        leaked_processes = False
+        prior_children = {(pid, birth) for pid, (ppid, state, birth) in _processes().items() if ppid == os.getpid()}
+        budget = (timeouts or {}).get(suite, suite_timeout(suite))
         try:
             with target.open('wb') as log:
-                proc=subprocess.run([str(repo/'tools/test'),suite],stdout=log,
-                                    stderr=subprocess.STDOUT,timeout=1800)
-            rc=proc.returncode
-            status='PASS' if rc==0 else 'SKIP' if rc==77 else 'FAIL'
-        except subprocess.TimeoutExpired:
-            rc=None;status='FAIL'
+                if unresolved_cleanup:
+                    raise OSError("previous owned suite cleanup is unresolved")
+                proc=subprocess.Popen([str(repo/'tools/test'),suite],stdout=log,
+                                      stderr=subprocess.STDOUT,start_new_session=True)
+                try:
+                    rc=proc.wait(timeout=budget)
+                except subprocess.TimeoutExpired:
+                    timed_out=True
+                    cleanup=_terminate_owned(proc, prior_children)
+                    rc=proc.returncode
+                snapshot = _processes()
+                orphans = {pid: state for pid, (ppid, state, birth) in snapshot.items()
+                           if ppid == os.getpid() and (pid, birth) not in prior_children}
+                if not timed_out and orphans:
+                    leaked_processes = any(state != "Z" for state in orphans.values())
+                    cleanup = _terminate_owned(proc, prior_children)
+                if cleanup and cleanup["remaining_owned"]:
+                    unresolved_cleanup = True
+            status='FAIL' if timed_out or leaked_processes else 'PASS' if rc==0 else 'SKIP' if rc==77 else 'FAIL'
         except OSError:
             rc=None;status='BLOCKED'
-        lane=dict(suite=suite,native_exit=rc,status=status,
+        lane=dict(suite=suite,native_exit=rc,status=status,timed_out=timed_out,
+                  timeout_seconds=budget,cleanup=cleanup,leaked_processes=leaked_processes,
                   raw_log_sha256=hashlib.sha256(target.read_bytes()).hexdigest())
         lanes.append(lane)
         # Exact allowlist: no raw command/kernel/event text crosses to CI artifacts.

@@ -283,7 +283,7 @@ def main():
     if mb != "32":
         fail(f"pcnet dma_mask_bits is {mb}, want 32")
     ledger["iface"] = iface
-    ledger["dma_mask_bits"] = mb
+    ledger["dma_mask_bits"] = int(mb)
     configure_net(iface)
     ledger["link_ok"] = True
     with open(TR + "/trace_clock", "w") as fh:
