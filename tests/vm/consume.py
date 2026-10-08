@@ -532,7 +532,7 @@ def replay_oracle_ledger(ops_log, releases):
     return ledger
 
 
-def _live_event(session_id, seq, ts_ns, kind, hook, profile_id,
+def _reconstructed_event(session_id, seq, ts_ns, kind, hook, profile_id,
                 data):
     return {
         "schema_version": "0.1.0",
@@ -540,7 +540,7 @@ def _live_event(session_id, seq, ts_ns, kind, hook, profile_id,
         "seq": str(seq),
         "ts_ns": str(ts_ns),
         "kind": kind,
-        "source": {"hook": hook, "backend": "tracing",
+        "source": {"hook": "reconstructed:" + hook, "backend": "laboratory-reconstruction",
                    "profile_id": profile_id,
                    "measurement": "observed",
                    "correlation": "unpaired"},
@@ -585,7 +585,7 @@ def translate_session(lc_events, cp_events, ops_log, out_dir,
             raise ValueError("unpaired lifecycle size %d"
                              % event["size"])
         if event["kind"] == 1:
-            staged.append((event["ktime"], 0, _live_event(
+            staged.append((event["ktime"], 0, _reconstructed_event(
                 session_id, 0, event["ktime"], "map_result",
                 "swiotlb:swiotlb_tbl_map_single", profile_id,
                 {"operation_id": "op-%d" % op, "success": True,
@@ -593,7 +593,7 @@ def translate_session(lc_events, cp_events, ops_log, out_dir,
                  "return_code": None,
                  "mapped_bytes": str(event["size"])})))
         else:
-            staged.append((event["ktime"], 0, _live_event(
+            staged.append((event["ktime"], 0, _reconstructed_event(
                 session_id, 0, event["ktime"], "unmap",
                 "swiotlb:__swiotlb_tbl_unmap_single", profile_id,
                 {"mapping_id": "map-%d" % op})))
@@ -603,14 +603,14 @@ def translate_session(lc_events, cp_events, ops_log, out_dir,
             raise ValueError("unpaired copy size %d"
                              % event["req"])
         if event["kind"] == 1:
-            staged.append((event["ktime"], 0, _live_event(
+            staged.append((event["ktime"], 0, _reconstructed_event(
                 session_id, 0, event["ktime"], "sync_request",
                 "swiotlb:__swiotlb_sync_single", profile_id,
                 {"operation_id": "op-%d" % op,
                  "mapping_id": "map-%d" % op, "offset": "0",
                  "length": str(event["req"])})))
         else:
-            staged.append((event["ktime"], 0, _live_event(
+            staged.append((event["ktime"], 0, _reconstructed_event(
                 session_id, 0, event["ktime"], "copy",
                 "swiotlb:swiotlb_bounce", profile_id,
                 {"operation_id": "op-%d" % op,
@@ -623,11 +623,11 @@ def translate_session(lc_events, cp_events, ops_log, out_dir,
         size = entry["requested"]
         first = min(e["ktime"] for e in lc_events + cp_events
                     if e.get("size", e.get("req")) == size)
-        staged.append((first - 1, -1, _live_event(
+        staged.append((first - 1, -1, _reconstructed_event(
             session_id, 0, first - 1, "bounce_attempt",
             "swiotlb:swiotlb_bounced", profile_id,
             {"device_id": "dev-1",
-             "requested_bytes": str(size), "forced": False,
+             "requested_bytes": str(size), "forced": bool(entry.get("forced", False)),
              "operation_id": "op-%d" % i})))
     staged.sort(key=lambda item: (item[0], item[1]))
     events = []
@@ -673,7 +673,7 @@ def translate_session(lc_events, cp_events, ops_log, out_dir,
             "correlation": {"status": "partial",
                             "loss_count": "0",
                             "scope": "size-paired live events",
-                            "reason": "Unique sizes pair."},
+                            "reason": "Request-size reconstruction does not prove observational pairing."},
             "baseline": {"status": "not_applicable",
                          "loss_count": None,
                          "scope": "lifecycle metrics",
@@ -717,6 +717,46 @@ def translate_session(lc_events, cp_events, ops_log, out_dir,
         else:
             slot["unmap"] = event["ktime"]
     return probe_lifetimes
+
+
+def author_reducer_fixture(reconstruction_dir, fixture_dir):
+    """Project a reconstruction into a separately authored synthetic model.
+
+    Direct relations are authored only inside this fixture. The original
+    unpaired capture remains untouched, and this projection is never live
+    producer, device-identity, kernel-copy or terminal-settlement evidence.
+    """
+    from pathlib import Path
+    source = Path(reconstruction_dir)
+    session = json.loads((source / "session.json").read_text())
+    if session.get("synthetic") is not True or session["capture"]["mode"] != "synthetic":
+        raise ValueError("authored projection requires a synthetic reconstruction")
+    session["session_id"] = "authored-" + session["session_id"]
+    session["quality"]["detail"]["scope"] = "authored synthetic fixture"
+    session["quality"]["detail"]["reason"] = "Authored synthetic records; original laboratory window checked separately."
+    session["quality"]["correlation"] = dict(status="complete_for_scope", loss_count="0",
+        scope="authored relations in synthetic reducer fixture",
+        reason="Authored identities from unique-size rule; observational pairing remains unproved.")
+    session["quality"]["terminal"]["status"] = "partial"
+    session["quality"]["terminal"]["reason"] = "Synthetic reconstruction; writer quiescence not proved."
+    for cap in session["capabilities"].values():
+        if cap["profile_id"] is not None:
+            cap["profile_id"] = "authored-" + cap["profile_id"]
+            cap["hooks"] = ["fixture:" + h for h in cap["hooks"]]
+            cap["reason"] = "Authored synthetic model only; no live producer qualification."
+    events = []
+    for line in (source / "events.ndjson").read_text().splitlines():
+        event = json.loads(line)
+        event["session_id"] = session["session_id"]
+        event["source"]["backend"] = "synthetic-fixture"
+        event["source"]["hook"] = "fixture:" + event["source"]["hook"]
+        event["source"]["profile_id"] = "authored-" + event["source"]["profile_id"]
+        event["source"]["correlation"] = "direct"
+        events.append(event)
+    target = Path(fixture_dir)
+    target.mkdir(parents=True, exist_ok=False)
+    (target / "session.json").write_text(json.dumps(session,indent=1,sort_keys=True)+"\n")
+    (target / "events.ndjson").write_text("".join(json.dumps(e,sort_keys=True)+"\n" for e in events))
 
 
 def compare_live(report, ledger, probe_lifetimes=None):
