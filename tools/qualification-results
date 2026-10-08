@@ -176,6 +176,8 @@ def run_suites(repo,out,suites,timeouts=None):
                     leaked_processes |= bool(cleanup["remaining_owned"])
                     unresolved_cleanup = bool(cleanup["remaining_owned"] or cleanup["signal_errors"])
             status='FAIL' if timed_out or leaked_processes else 'PASS' if rc==0 else 'SKIP' if rc==77 else 'FAIL'
+            if unresolved_cleanup and status == 'PASS':
+                status = 'BLOCKED'
         except OSError:
             rc=None;status='BLOCKED'
         lane=dict(suite=suite,native_exit=rc,status=status,timed_out=timed_out,
