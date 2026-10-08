@@ -74,3 +74,70 @@ def test_filesystem_type_rejects_free_text_or_nested_values(tmp_path,value):
     export=attempt_export(tmp_path,lambda doc:doc.update(fs_type=value))
     with pytest.raises((ValueError,AssertionError)):
         test_attempt_capture.verify_exports(export,'correctness')
+
+
+def lifecycle_export(tmp_path,name,doc):
+    export=tmp_path/'export';export.mkdir()
+    target=export/('perf-'+name);target.write_text(json.dumps(doc))
+    Path(str(target)+'.sha256').write_text(hashlib.sha256(target.read_bytes()).hexdigest()+'\n')
+    from vm_boot import verify_exports
+    return verify_exports(tmp_path,'perf',[name])
+
+
+def perf_pairs():
+    observed=dict(pair=0,mode='observed',end_ns=3,attach_ns=1,detach_ns=2,
+                  ping=dict(tx=1,rx=1,seconds=1.0,p99_ms=1.0,sample_tx=1,sample_rx=1,sample_count=1),
+                  dd=dict(bytes=512,seconds=1.0))
+    off=dict(observed,mode='off');off.pop('attach_ns');off.pop('detach_ns')
+    return [[off,observed]]
+
+
+def test_perf_observed_integer_timestamps_and_off_absence_control(tmp_path):
+    assert lifecycle_export(tmp_path,'pairs.json',perf_pairs())
+
+
+@pytest.mark.parametrize('field',['attach_ns','detach_ns'])
+@pytest.mark.parametrize('value',[{'payload':'0xffff888012345000'},'1',True,None,-1,1<<64])
+def test_perf_optional_timestamp_values_refused(tmp_path,field,value):
+    pairs=perf_pairs();pairs[0][1][field]=value
+    with pytest.raises((ValueError,AssertionError)):
+        lifecycle_export(tmp_path,'pairs.json',pairs)
+
+
+def test_inventory_files_are_typed_list_not_arbitrary_object(tmp_path):
+    from export_validation import inventory_snapshot
+    snapshot=dict(bpf=dict(progs=1,maps=1),io_tlb_used=[1],files=['cycle-lc.txt'])
+    inventory_snapshot(snapshot)
+    snapshot['files']={'cycle-lc.txt':{'payload':'0xffff888012345000'}}
+    with pytest.raises(ValueError):inventory_snapshot(snapshot)
+
+
+@pytest.mark.parametrize('field',['io_tlb_used','files'])
+def test_inventory_lists_cannot_be_empty_objects(field):
+    from export_validation import inventory_snapshot
+    snapshot=dict(bpf=dict(progs=0,maps=0),io_tlb_used=[],files=[])
+    inventory_snapshot(snapshot)
+    snapshot[field]={}
+    with pytest.raises(ValueError):inventory_snapshot(snapshot)
+
+
+def test_stop_optional_victim_values_cannot_cross_other_modes(tmp_path):
+    from export_validation import validate_lifecycle_exports
+    path=tmp_path/'ledger.json'
+    row=dict(cycle=0,mode='quiet',lc_exit=0,cp_exit=0)
+    path.write_text(json.dumps([row]));validate_lifecycle_exports({'ledger.json':path},'stop')
+    row['victim_signal_ns']={'payload':'0xffff888012345000'}
+    path.write_text(json.dumps([row]))
+    with pytest.raises(ValueError):validate_lifecycle_exports({'ledger.json':path},'stop')
+
+
+@pytest.mark.parametrize('field',['used_before','used_after'])
+def test_workload_samples_require_integer_lists(tmp_path,field):
+    from export_validation import validate_lifecycle_exports
+    path=tmp_path/'workload.json'
+    workload=dict(iface='eth0',used_before=[1],used_after=[1],start_ns=1,end_ns=2,detach_ns=3,
+                  ping_tx=1,ping_rx=1,disk='/dev/sda',disk_bytes=512)
+    path.write_text(json.dumps(workload));validate_lifecycle_exports({'workload.json':path},'realio')
+    workload[field]={}
+    path.write_text(json.dumps(workload))
+    with pytest.raises(ValueError):validate_lifecycle_exports({'workload.json':path},'realio')
