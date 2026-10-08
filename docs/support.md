@@ -64,6 +64,9 @@ details live in `permissions.md`; surprises go to
 - `--duration` 60 s; `--max-events-bytes` 1 GiB (allowed
   128 KiB..4 GiB); ring buffer 8 MiB; BPF object and bridge
   passed explicitly (`--object`, `--bridge`/`LMB_NATIVE_LIB`).
+  Extra channels are opt-in per run (`--capability` with
+  `--lc-object`/`--cp-object`); see
+  [lifecycle hooks](lifecycle-hooks.md#capability-requested-selection).
 - Report caps: 64 KiB per record, 16 MiB session file,
   256 MiB events total by default. Only the events cap is
   raisable (up to 4 GiB); the record and session caps accept

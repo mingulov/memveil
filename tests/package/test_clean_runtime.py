@@ -45,6 +45,8 @@ REQUIRED = (
     "bin/memveil",
     "lib/libbpf_mojo.so.1",
     "bpf/swiotlb_attempt.bpf.o",
+    "bpf/swiotlb_lifecycle.bpf.o",
+    "bpf/swiotlb_copy.bpf.o",
     "profiles/manifest.txt",
     "docs/quickstart.md",
     "docs/support.md",
@@ -146,6 +148,10 @@ def test_license_texts_and_first_party(bundle):
     assert first.get("license_default") == "GPL-3.0-or-later"
     assert first["licenses"]["GPL-3.0-or-later"] == "LICENSE"
     assert first["paths"]["bpf/swiotlb_attempt.bpf.o"] == \
+        "GPL-2.0-only"
+    assert first["paths"]["bpf/swiotlb_lifecycle.bpf.o"] == \
+        "GPL-2.0-only"
+    assert first["paths"]["bpf/swiotlb_copy.bpf.o"] == \
         "GPL-2.0-only"
     for rel in first["licenses"].values():
         assert (root / rel).is_file(), "staged text lacks %s" % rel

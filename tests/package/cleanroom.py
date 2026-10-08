@@ -248,6 +248,8 @@ def check_manifest(root, manifest):
         "bin/memveil",
         "lib/libbpf_mojo.so.1",
         "bpf/swiotlb_attempt.bpf.o",
+        "bpf/swiotlb_lifecycle.bpf.o",
+        "bpf/swiotlb_copy.bpf.o",
         "profiles/manifest.txt",
         "LICENSE",
         "THIRD-PARTY-NOTICES.md",
