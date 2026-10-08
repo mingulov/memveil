@@ -898,7 +898,8 @@ suite_mappings() {
 
 suite_lifetimes() {
     run_unit_file tests/unit/test_lifetimes.mojo || return 1
-    run_unit_file tests/unit/test_lifecycle_wire.mojo
+    run_unit_file tests/unit/test_lifecycle_wire.mojo || return 1
+    run_unit_file tests/unit/test_lifecycle_events.mojo
 }
 
 suite_pools() {
