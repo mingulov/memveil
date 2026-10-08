@@ -49,7 +49,7 @@ hash-verified tarball.
 
     ./tools/build                                    # build everything
     ./tools/test --help                              # list suites
-    LMB_PACKAGE=third_party/libbpf-mojo-0.2.2.tar.gz ./tools/test buildcache
+    LMB_PACKAGE=third_party/libbpf-mojo-0.1.0.tar.gz ./tools/test buildcache
     LMB_PACKAGE=... ./tools/package                  # owner bundle + MANIFEST
 
 `report`, `top`, and `doctor` work without the bridge library;

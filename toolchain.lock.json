@@ -57,12 +57,12 @@
   "dependencies": {
     "libbpf-mojo": {
       "status": "pinned",
-      "version": "0.2.2",
-      "source_commit": "18d3ecd",
-      "tarball_sha256": "b4a8213b23c9b65dedb7f7bba4729332a8ebfcf8b9743ef0c16f2de54e728c17",
+      "version": "0.1.0",
+      "source_commit": "59d5451",
+      "tarball_sha256": "2ea9e5ce2165dbfb700b4f2b573bd7b06df9e32810aa1b64d4fb8fc888785468",
       "mojo_tree": "mojo/libbpf_mojo",
       "native_lib": "lib/libbpf_mojo.so.1",
-      "note": "Pre-release bytes built from clean 18d3ecd (Apache-2.0 WITH LLVM-exception relicense; abi-v1 unchanged); 0.2.2 was never tagged or published, so re-pin from the tagged release before any distribution claim. Consumed by path (LMB_PACKAGE) plus this hash. Memveil never reads libbpf-mojo sibling sources; standalone clones supply the tarball."
+      "note": "Pre-release bytes built from clean 59d5451 (first-release version 0.1.0; abi-v1 unchanged); not yet tagged, so re-pin from the tagged release before any distribution claim. Consumed by path (LMB_PACKAGE) plus this hash. Memveil never reads libbpf-mojo sibling sources; standalone clones supply the tarball."
     }
   },
   "expected_first_lines": {
