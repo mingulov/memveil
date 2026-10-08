@@ -61,3 +61,16 @@ def test_saturation_identity_seals_selected_loaded_objects(tmp_path):
         ident=guest_lifecycle.Gate.identity(gate)
     for field,selected in [('lc_sha','lc_test_obj'),('cp_sha','cp_test_obj')]:
         assert ident[field]==hashlib.sha256(Path(paths[selected]).read_bytes()).hexdigest(), 'saturation receipt must hash the object that run_saturation actually loads'
+
+
+def test_ext_family_stat_label_healthy_control(tmp_path):
+    # stat -f renders the ext-family magic as ext2/ext3, including ext4.
+    export=attempt_export(tmp_path,lambda doc:doc.update(fs_type='ext2/ext3'))
+    assert test_attempt_capture.verify_exports(export,'correctness')
+
+
+@pytest.mark.parametrize('value',['ext2/ext3 payload','0xffff888012345000',{'type':'ext4'}])
+def test_filesystem_type_rejects_free_text_or_nested_values(tmp_path,value):
+    export=attempt_export(tmp_path,lambda doc:doc.update(fs_type=value))
+    with pytest.raises((ValueError,AssertionError)):
+        test_attempt_capture.verify_exports(export,'correctness')
