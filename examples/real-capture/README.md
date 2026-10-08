@@ -7,7 +7,10 @@ NIC with a 32-bit DMA mask, 30 adaptive pings, 20 s window,
 kernel 7.0.0-34-generic, validated profile
 `linux-x86_64-7.0.0-34-generic`). The guest ftrace oracle matched
 the persisted detail exactly (event count and byte totals), with
-zero loss on every channel.
+zero recorded detail and aggregate loss. Terminal settlement stays partial;
+not-applicable channels do not claim a zero loss count. This is a historical
+capture and profile decision, not qualification of a rebuilt package or the
+current reader host.
 
 ## Files
 
@@ -36,3 +39,9 @@ Expected: exit 4 (materially incomplete: terminal quality is
 partial by design), `bounce_attempts = 30`, detail loss 0.
 Lifecycle, copy bytes, and sharing transitions render as
 unavailable: this capture proves attempts only.
+
+Text and Markdown show captured `kernel.release`, `profile.decision`,
+`measurement_scope`, and duration `20.144865384 s (20144865384 ns)`.
+The validated decision belongs to the recorded evidence; full binding hashes
+remain in `session.json` and JSON reports. `top` replays this finished capture,
+showing a duration for each prefix; no live summary mode is supplied.

@@ -1,63 +1,39 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Running MemVeil alongside other observers
 
-MemVeil records SWIOTLB bounce activity through its own BPF
-programs and output directory; it shares nothing with other
-tracing tools except the kernel facilities they each attach to.
-Joint operation below is listed only where it was actually run
-and both tools finalized cleanly. Anything unlisted is untested
-with MemVeil, not implied-safe.
+No joint observer pairing or simultaneous MemVeil instances are qualified
+for the current candidate. The [support table](support.md#capabilities-by-mode)
+keeps these claims separate from attempt collection. Each observer uses its
+own programs and output directory, but shared kernel facilities and observer
+overhead still require a controlled joint test.
 
-## Qualified: MemVeil + KryProbe (kcrypto)
+## Historical experiments
 
-KryProbe (Linux runtime cryptographic observer,
-`github.com:mingulov/kryprobe`, qualified at `7896a5a`) was run
-concurrently with MemVeil 0.1.0 (`84339ac`) on x86-64 Linux
-7.0.0-34-generic: process isolation, independent crypto/disk
-workloads, and five interleaved 60 s performance rounds. Every
-run finalized on both sides with zero integrity-counter loss on
-KryProbe's side.
+Earlier documentation reported MemVeil `84339ac` with KryProbe `7896a5a`
+on x86-64 Linux `7.0.0-34-generic`, separate crypto/disk workloads and five
+interleaved 60-second rounds. It also reported two MemVeil instances in
+separate directories. These statements identify historical source revisions;
+they do not bind a later packaged candidate or establish present pairing
+support. KryProbe's reported partial completion verdict was not complete
+evidence simply because its integrity counters were zero.
 
-Recipe (root; separate output directories are required):
+Historical p11scope and osslscope experiments reported native PARTIAL
+verdicts, also reproduced with the other observer alone. No current pairing
+qualification or supported run recipe is earned by those experiments.
+Other revisions, kernels and observers remain untested with this candidate.
 
-```bash
-memveil record --output ./mv-capture \
-    --object ./swiotlb_attempt.bpf.o --duration 60 &
-```
+## Requirements for a supported pairing
 
-```bash
-kryprobe report --system --duration 60 --format json \
-    --out ./kry-capture/report.jsonl &
-wait
-```
+Use an isolated environment with exclusive ownership of its test resources,
+and separate capture directories. Record exact packaged artifacts and each
+observer revision, kernel/config/BTF/profile, workload and aligned measured
+windows. Run each observer alone before combined runs and check each against
+its own independent oracle; matching outputs from different event domains
+are not an oracle. Compare baseline and combined overhead, preserve every
+loss/partial channel, and verify cleanup. A missing observer is not tested,
+and a partial verdict stays partial.
 
-Run the first command, then the second, in one shell: two
-background jobs and one `wait`, so both 60 s windows align.
-
-Notes:
-
-- KryProbe exits 3 with a `partial` verdict listing exactly
-  `capture-integrity` and `completion` as missing. That is its
-  documented healthy shape for this version, not a coexistence
-  failure — provided every integrity counter in `report.jsonl`
-  is zero. Any nonzero counter or any other `missing` entry
-  fails the run; do not attribute it to MemVeil without
-  reproducing KryProbe alone first.
-- Keep the captures' windows aligned (same `--duration`,
-  started together) so per-tool timelines stay comparable.
-  Compare each tool against its own baseline only: MemVeil byte
-  counts and KryProbe operation observations share units with
-  nothing.
-- Two MemVeil instances recording concurrently to distinct
-  directories are likewise qualified.
-
-## Not qualified
-
-- MemVeil + p11scope and MemVeil + osslscope: attempted, but the
-  reference tool reported its own native PARTIAL verdict in this
-  environment (reproduced with the reference tool running
-  alone), so the pairings are not qualified and no recipe is
-  given. A missing reference tool is reported as not-tested,
-  never silently treated as passing.
-- Any other observer, any other kernel, or any other KryProbe
-  revision: untested.
+Publish a pairing recipe only after a candidate-compatible receipt proves
+the intended capability. Existing suite locks do not authorize concurrent
+privileged gates. The shipping collector's lifecycle and terminal limits
+continue to apply during any experiment.

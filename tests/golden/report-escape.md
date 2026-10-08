@@ -3,7 +3,11 @@
 - synthetic: yes
 - engine: memveil-0.1.0
 - window: [1000000000,4000000000)
+- duration: 3.000000000 s (3000000000 ns)
 - environment: mode=unknown detection=unverified attestation=not_performed evidence=0
+- recorded kernel.release: unavailable (no captured provenance)
+- recorded profile.decision: unavailable (no captured provenance)
+- recorded measurement\_scope: unavailable (no captured provenance)
 - devices: 1
 
 ## Devices

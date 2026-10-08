@@ -194,6 +194,7 @@ suite_reports() {
         echo "reports: missing $BIN (run tools/build first)" >&2
         return 1
     fi
+    python3 "$ROOT/tests/cli/test_report_context.py" || return 1
     TMP=$(mktemp -d)
     trap 'rm -rf "$TMP"' EXIT
     report_pass=0

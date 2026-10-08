@@ -5,7 +5,7 @@
 
 MemVeil is a guest-side Linux CLI for explaining covered DMA/SWIOTLB activity and, on qualified confidential guests, observed private/shared-memory operations. Use `MemVeil` for the product and `memveil` for the executable, repository, and module. The earlier SharedVeil name is historical; do not introduce compatibility aliases for it.
 
-As of 2026-10-05, this repository contains its initial README and contributor instructions only. The architecture and commands below are implementation requirements, not existing functionality. Update this status and the README as runnable pieces land.
+As of 2026-10-08, this repository implements attempt collection, optional readable default-pool boundary samples, offline analysis/reporting, replay-only `top`, passive `doctor`, and standalone build/test/package wrappers. Laboratory lifecycle/copy and conversion probes exist, but are separate from shipping collection. Live summary, qualified shipping lifecycle/copy and confidential-memory collection, and complete terminal settlement remain open. Read the capability-by-mode table in [support](docs/support.md#capabilities-by-mode); historical tests or implementation do not qualify a new artifact.
 
 This repository must be usable independently. Keep the source, tests, schemas, semantic profiles, build inputs, and usage/contributor documentation needed by a standalone clone here. All documentation, comments, generated text, and release material must be self-contained. References to other public projects, their published APIs, and documented dependencies are allowed when relevant. Describe contributor requirements and contracts directly in this repository.
 
@@ -22,7 +22,7 @@ The selected architecture is **Mojo userspace → small C/libbpf bridge → clan
 
 Mojo owns collection orchestration, normalization, correlation/accounting, CLI, trace parsing, reducers, and renderers. `libbpf-mojo` owns native resource lifetimes and bounded transport. MemVeil owns its BPF programs, event meanings, schemas, kernel profiles, and measurement claims. Keep C wrappers in the bridge and one internal Mojo FFI boundary. Python may support development validation; production collection and replay remain Mojo.
 
-Target module boundaries, to create as needed:
+Implemented module boundaries:
 
 | Path | Responsibility |
 |---|---|
@@ -73,7 +73,7 @@ Do not collect or persist payloads, keys, PINs, content hashes, raw addresses, f
 
 ## Build, test, and evidence
 
-There is no build system or test runner yet. Bootstrap work must provide exact compiler/dependency locks and documented standalone wrappers such as `tools/build`, `tools/test`, and `tools/package`. Check the actual wrapper help and selected compiler's runner; do not invent `mojo test` or report planned commands as passing. Release builds must resolve a pinned library artifact/source without an implicit sibling path.
+Use the implemented `tools/build`, `tools/test <suite>`, and `tools/package` wrappers and their actual help. Compiler/dependency pins are in `toolchain.lock.json` and `pixi.lock`; contributor prerequisites and commands are in [build](docs/build.md). Do not invent `mojo test`. Builds resolve the hash-pinned vendored library bundle, or an explicit matching `LMB_PACKAGE`, without an implicit sibling path. Full corresponding library source is a separate artifact; the consumed bundle provides its bridge binary, Mojo wrappers, and C header.
 
 Choose verification that proves the changed behavior:
 
