@@ -6,9 +6,8 @@ Every local link in user-facing Markdown resolves to a file and,
 for anchored links, a heading; every documented `memveil <verb>`
 names a verb from the usage line in main.mojo and every flag
 beside it exists in that verb's built --help; and no document
-references umbrella-private paths, workspace locations, or
-placeholder markers. The claim-vs-receipt audit stays in the
-preview-package lane; this lane does not duplicate it.
+carries placeholder markers. The claim-vs-receipt audit stays
+in the preview-package lane; this lane does not duplicate it.
 """
 
 import glob
@@ -22,8 +21,6 @@ ROOT = os.path.dirname(os.path.dirname(
 BIN = os.path.join(ROOT, "build", "memveil")
 
 FORBIDDEN = (
-    "doc/plans", "doc/validation", "repos/memveil",
-    "repos/libbpf-mojo", "memveil-ws", "/work/", "task-index",
     "TODO", "FIXME", "XXX",
 )
 

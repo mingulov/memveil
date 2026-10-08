@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-or-later
-# A07 VM gate: live attempt capture with an ftrace oracle.
+# VM gate: live attempt capture with an ftrace oracle.
 #
 # Runs tests/vm/test_attempt_capture.py (correctness + saturation)
 # under the frozen harness (virtme-ng 1.41, qemu 10.2.1). Exit 77
