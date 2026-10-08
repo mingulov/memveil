@@ -42,6 +42,6 @@ jobs:
         run: ./tools/build
       - name: Native suites
         run: |
-          for suite in attempts writer signals record buildcache; do
+          for suite in attempts native-decode writer signals record buildcache; do
             ./tools/test "$suite" || exit 1
           done
