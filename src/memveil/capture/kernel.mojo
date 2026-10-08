@@ -31,7 +31,7 @@ from memveil.capture.collector import (
 )
 
 # abi-v1 frozen values (libbpf-mojo 0.2.0, unchanged in
-# 0.2.1): tracepoint
+# 0.2.1, 0.2.2): tracepoint
 # attach kind, and the retained-record ceiling. Raw
 # attempt records are 91 bytes; 4096 accepts everything
 # the probe can emit while bounding the staging slot.

@@ -375,7 +375,7 @@ def main(argv):
     shutil.copy2(lmb_own,
                  os.path.join(staged_licenses, "libbpf-mojo-LICENSE"))
     lmb_own_dir = os.path.join(lmb_dir, "LICENSES")
-    for name in ("GPL-2.0-only.txt", "GPL-2.0-or-later.txt"):
+    for name in ("GPL-2.0-only.txt", "LLVM-exception.txt"):
         if not os.path.isfile(os.path.join(lmb_own_dir, name)):
             fail("missing pinned libbpf-mojo LICENSES/%s" % name)
     shutil.copytree(lmb_own_dir,

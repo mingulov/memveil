@@ -70,7 +70,7 @@ REQUIRED = (
     "licenses/Third-Party-Notices.mojo-compiler",
     "licenses/libbpf-mojo-LICENSE",
     "licenses/libbpf-mojo-LICENSES/GPL-2.0-only.txt",
-    "licenses/libbpf-mojo-LICENSES/GPL-2.0-or-later.txt",
+    "licenses/libbpf-mojo-LICENSES/LLVM-exception.txt",
     "MANIFEST.json",
 )
 
