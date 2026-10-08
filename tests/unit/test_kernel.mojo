@@ -18,7 +18,12 @@ from libbpf_mojo.batch import (
 )
 from libbpf_mojo.error import EINTR
 
-from memveil.capture.kernel import LmbKernel, poll_outcome
+from memveil.capture.kernel import (
+    LmbKernel,
+    join_op_message,
+    poll_advance,
+    poll_outcome,
+)
 
 
 def _kernel() -> LmbKernel:
@@ -200,6 +205,28 @@ def test_multi_open_failure_shape() raises:
         )
 
 
+def test_poll_advance_sparse_order() raises:
+    # Order [0, 2]: a batch on copy (position 1) must rotate
+    # back to attempt (position 0), not reselect copy by id.
+    assert_equal(poll_advance(2, 1, 0), 0)
+    assert_equal(poll_advance(2, 0, 0), 1)
+    assert_equal(poll_advance(2, 0, 1), 0)
+    assert_equal(poll_advance(3, 2, 0), 0)
+    assert_equal(poll_advance(3, 0, 2), 0)
+    assert_equal(poll_advance(1, 0, 0), 0)
+
+
+def test_join_op_message() raises:
+    assert_equal(
+        join_op_message(String(""), 0, String("boom")),
+        String("ch0 boom"),
+    )
+    assert_equal(
+        join_op_message(String("ch0 boom"), 2, String("bang")),
+        String("ch0 boom; ch2 bang"),
+    )
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_not_open_taxonomy]()
@@ -209,6 +236,8 @@ def run() raises -> Int:
     suite.test[test_channel_counts]()
     suite.test[test_multi_not_open_taxonomy]()
     suite.test[test_multi_open_failure_shape]()
+    suite.test[test_poll_advance_sparse_order]()
+    suite.test[test_join_op_message]()
     suite^.run()
     return 0
 

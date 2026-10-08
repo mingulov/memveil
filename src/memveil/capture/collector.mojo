@@ -1070,10 +1070,16 @@ struct Collector:
             var admitted = self._admit_channel_hooks()
             if admitted != String(""):
                 return admitted
+        # The window floor is read BEFORE activation: a firing
+        # between link activation and a post-attach timestamp
+        # would persist below the declared window and the reader
+        # would reject the capture. Nothing can fire before the
+        # links exist, so a pre-attach floor stays tight without
+        # backdating across the init gap.
+        self.attach_ns = clock.now()
         var attached = kernel.attach()
         if not attached.ok:
             return String("attach: ") + attached.message
-        self.attach_ns = clock.now()
         if self.cfg.has_pool_sample:
             # Baseline pool sample, held for the closing path:
             # pool samples are not bridge-delivered, so they
