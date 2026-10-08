@@ -263,10 +263,12 @@ static void mv_inner_probe(struct device *dev, unsigned int i,
 	void *cpu;
 	size_t verified = 0;
 
-	/* Unclamped retry of the fail op: success proves the
-	 * inner allocator serves this request, so the clamped
-	 * failure is outer. Dedicated log lines only; never a
-	 * second attempt/outcome pair for the op. */
+	/* Unclamped retry of the fail op: success shows the
+	 * inner allocator serves this request, but retry health
+	 * alone does not prove the original failure is outer;
+	 * that boundary rests on the probe observations checked
+	 * against the failed outer mapping. Dedicated log lines
+	 * only; never a second attempt/outcome pair for the op. */
 	cpu = kmalloc(mv_size[i], GFP_KERNEL);
 	if (!cpu) {
 		mv_log("op=%u inner=unknown retry=failed rc=-ENOMEM", i);

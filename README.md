@@ -69,12 +69,15 @@ MemVeil is GPL-3.0-or-later (`LICENSE`), except the eBPF
 programs (`bpf/programs/swiotlb_attempt.bpf.c`,
 `bpf/programs/swiotlb_lifecycle.bpf.c`,
 `bpf/programs/swiotlb_copy.bpf.c`, GPL-2.0-only),
-the BPF/userspace shared header
-(`bpf/include/memveil_events.h`, GPL-2.0-or-later), and the
-test-only oracle kernel module
-(`tests/kernel/memveil_dma_oracle.c` and its makefile,
-GPL-2.0-only); texts in `LICENSES/`. Every source file
-carries an SPDX header.
+the BPF/userspace shared headers
+(`bpf/include/memveil_events.h` and
+`bpf/include/mv_fentry_types.h`, GPL-2.0-or-later;
+`bpf/include/memveil_control.h`, GPL-2.0-only), and the
+test-only oracle kernel modules
+(`tests/kernel/memveil_dma_oracle.c`,
+`tests/kernel/memveil_region_oracle.c`, and
+`tests/kernel/Makefile`, GPL-2.0-only); texts in
+`LICENSES/`. Every source file carries an SPDX header.
 Redistributed third-party components, with their staged
 license texts, are listed in `THIRD-PARTY-NOTICES.md`. The
 owner bundle stages all of these plus the pinned

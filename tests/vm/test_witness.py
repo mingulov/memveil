@@ -88,12 +88,14 @@ def check_window(got, tag, spec):
 
 
 def check_inner_outer(ops_log, lc, cp, tag):
-    """The fail op proves the internal/final boundary.
+    """The fail op exercises the internal/final boundary.
 
     Module side: outer failure plus a healthy unclamped
-    retry. Probe side: inner map ok, a surviving executed
-    copy, and the cleanup unmap. The module never releases
-    the failed outer mapping.
+    retry (retry health alone does not prove the original
+    failure is outer). Probe side: inner map ok, a surviving
+    executed copy, and the cleanup unmap, checked against
+    the failed outer mapping. The module never releases the
+    failed outer mapping.
     """
     bad = []
     entry = ops_log[2]

@@ -2,7 +2,7 @@
 
 """Passive evidence reader: live host or recorded fixture.
 
-A06: the doctor never loads BPF, never writes the system, and never
+The doctor never loads BPF, never writes the system, and never
 executes helpers. All platform evidence comes through this reader, which
 either probes the live host (stdlib FFI against libc: uname, geteuid,
 access, fread) or replays a recorded fixture tree created by
