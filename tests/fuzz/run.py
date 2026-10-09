@@ -128,6 +128,10 @@ def main():
                     default=os.path.join(REPO, "tests", "fuzz", "regressions"))
     ap.add_argument("--timeout", type=int, default=10)
     args = ap.parse_args()
+    if args.seeds is None or args.seeds <= 0:
+        print("FAIL fuzz: --seeds must be positive, got %r"
+              % (args.seeds,))
+        return 1
     if not os.path.isfile(args.binary):
         print("FAIL fuzz: missing %s (run tools/build first)"
               % args.binary)

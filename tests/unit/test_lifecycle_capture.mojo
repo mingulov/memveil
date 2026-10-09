@@ -750,8 +750,12 @@ def test_stop_open_mappings_balance_limit() raises:
 
 def test_stop_open_mappings_churn() raises:
     # Sustained generation churn: 500 map/unmap cycles
-    # with distinct generations persist exactly and
-    # close with zero open mappings; nothing accumulates.
+    # with distinct generations persist exactly as
+    # 500 paired map_result/unmap records plus 4
+    # counter snapshots; every generation pairs with
+    # its own unmap, detail is lossless, correlation
+    # pairs everything, and the persisted-event
+    # balance closes at zero open mappings.
     var payloads = List[List[UInt8]]()
     for i in range(500):
         var gen = UInt64(100 + i)
@@ -769,6 +773,48 @@ def test_stop_open_mappings_churn() raises:
         UInt64(1000), _zero_cut(), UInt64(0))
     assert_equal(c.exit_code, EXIT_PARTIAL)
     assert_equal(c.outcome, String("finalized"))
+    var lines = _lines(c.events)
+    assert_equal(len(lines), 1004)
+    for i in range(500):
+        var want_id = String('"mapping_id":"gen-')
+        want_id += String(100 + i)
+        want_id += String('"')
+        assert_true(
+            _contains(lines[2 * i], String('"kind":"map_result"')))
+        assert_true(_contains(lines[2 * i], want_id))
+        assert_true(
+            _contains(lines[2 * i + 1], String('"kind":"unmap"')))
+        assert_true(_contains(lines[2 * i + 1], want_id))
+    for i in range(1000, 1004):
+        assert_true(
+            _contains(lines[i], String('"kind":"counter_snapshot"')))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"reason":"capture ok, 1000 map_result/unmap '
+                'events persisted; admitted under '
+                'test-profile-1; v2 wire reports opaque '
+                'mapping generations when observed"'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"loss_count":"0","scope":"0 bounce_attempt + '
+                '1000 map_result/unmap + 0 copy/sync_request '
+                'events"'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"reason":"all lifecycle events paired"'),
+        )
+    )
     assert_true(
         _contains(c.session, String('"open_mappings":"0"')))
 

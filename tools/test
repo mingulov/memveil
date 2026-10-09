@@ -1071,7 +1071,20 @@ suite_fuzz_smoke() {
             "(run tools/build first)" >&2
         return 1
     fi
-    python3 "$ROOT/tests/fuzz/run.py" --seeds 200
+    if ! python3 "$ROOT/tests/fuzz/run.py" --seeds 200; then
+        return 1
+    fi
+    if python3 "$ROOT/tests/fuzz/run.py" --seeds 0 \
+        >/dev/null 2>&1; then
+        echo "fuzz-smoke: --seeds 0 vacuous pass" >&2
+        return 1
+    fi
+    if python3 "$ROOT/tests/fuzz/run.py" --seeds -5 \
+        >/dev/null 2>&1; then
+        echo "fuzz-smoke: negative --seeds accepted" >&2
+        return 1
+    fi
+    return 0
 }
 
 suite_fuzz_campaign() {
