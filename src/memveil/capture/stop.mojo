@@ -15,7 +15,10 @@ claimed when the detach failed.
 
 A quiet ring proves nothing by itself: zero drained records
 with unsettled writers (or without observed quiescence) stays
-partial. Open logical DMA mappings are reported beside the
+partial. A submit landing after the drain recorded its
+boundary claim likewise stays partial: the drain cannot have
+covered that record. A later drain re-proves the boundary.
+Open logical DMA mappings are reported beside the
 verdict and never block callback quiescence: the controller
 waits for BPF callbacks, not for logical mappings to end.
 
@@ -73,6 +76,7 @@ struct StopController:
     var _quiesced: Bool
     var _drained: Int
     var _has_drained: Bool
+    var _submit_after_drain: Bool
     var _busy: Bool
     var _sampled: Bool
     var _counters_ok: Bool
@@ -88,6 +92,7 @@ struct StopController:
         self._quiesced = False
         self._drained = 0
         self._has_drained = False
+        self._submit_after_drain = False
         self._busy = False
         self._sampled = False
         self._counters_ok = False
@@ -118,6 +123,8 @@ struct StopController:
         self._reserved -= 1
         if self._closed:
             self._late_submits += 1
+        if self._has_drained:
+            self._submit_after_drain = True
 
     def writer_settle(mut self) raises:
         """Record one admitted writer exiting cleanly."""
@@ -161,6 +168,7 @@ struct StopController:
             raise StopError("drain before close_admission")
         self._drained = records
         self._has_drained = True
+        self._submit_after_drain = False
         self._busy = busy
 
     def sample_counters(mut self, ok: Bool):
@@ -194,6 +202,9 @@ struct StopController:
         elif self._busy:
             complete = False
             reason = String("transport BUSY at drain")
+        elif self._submit_after_drain:
+            complete = False
+            reason = String("late submit past drain")
         elif not self._sampled or not self._counters_ok:
             complete = False
             reason = String("final counter sample failed")
