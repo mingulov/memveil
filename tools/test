@@ -999,7 +999,9 @@ suite_vm_lifecycle() {
         return 1
     fi
     python3 -m pytest "$ROOT/tests/vm/test_lifecycle.py" \
-        "$ROOT/tests/vm/test_witness.py" -q
+        "$ROOT/tests/vm/test_witness.py" \
+        "$ROOT/tests/vm/test_canonical.py" \
+        "$ROOT/tests/vm/test_record3.py" -q
 }
 
 suite_vm_copy() {

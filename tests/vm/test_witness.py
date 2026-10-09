@@ -125,7 +125,7 @@ def test_witness_windows(tmp_path):
     ensure_oracle_module()
     with open(SPEC) as handle:
         frozen = json.load(handle)
-    assert frozen["frozen_for_module"] == "0.3.1", frozen
+    assert frozen["frozen_for_module"] == "0.4.0", frozen
     tmp, proc = run_guest("witness")
     try:
         assert proc.returncode == 0, \

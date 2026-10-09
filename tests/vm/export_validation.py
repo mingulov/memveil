@@ -152,6 +152,20 @@ def validate_lifecycle_exports(got,sub):
         elif name=='pairs.json':
             pairs=strict_json(path.read_text())
             validate_perf_pairs(pairs)
+        elif name=='cap-session.json':
+            validator=_schemas()
+            validator.check_session(strict_json(path.read_text()))
+        elif name=='cap-events.ndjson':
+            validator=_schemas()
+            session=validator.check_session(strict_json(got['cap-session.json'].read_text()))
+            for i,line in enumerate(path.read_text().splitlines(),1):
+                validator.check_event(strict_json(line),i,session)
+        elif name=='record.json':
+            doc=strict_json(path.read_text())
+            keys(doc,('exit','ready'))
+            integer(doc['exit'],True)
+            if type(doc['ready']) is not str or 'ready session=' not in doc['ready']:
+                raise ValueError('invalid record readiness')
         else: raise ValueError('unrecognized lifecycle export '+name)
 
 
