@@ -229,7 +229,7 @@ struct ScriptFileSink(RefreshSink):
     def __init__(out self, path: String):
         self._path = path.copy()
 
-    def emit(mut self, rep: Report, horizon_ns: UInt64) -> Bool:
+    def emit(mut self, var rep: Report, horizon_ns: UInt64) -> Bool:
         var record = (
             format_u64(horizon_ns)
             + String(" ")
@@ -504,6 +504,7 @@ def test_tee_interval_gates_refresh() raises:
     )
     var raw = read_host_file(obs, String("obs"), 1048576)
     assert_equal(_tee_text(raw), rec0 + rec1)
+    assert_equal(tee.emission_count(), 2)
 
 
 def test_tee_decode_failure_is_loud() raises:
@@ -768,6 +769,7 @@ def test_tee_abort_all_restarts_clean() raises:
     )
     var raw = read_host_file(obs, String("obs"), 1048576)
     assert_equal(_tee_text(raw), rec0 + rec1 + rec2)
+    assert_equal(tee.emission_count(), 3)
     var events = read_host_file(
         target + String("/events.ndjson"), String("events"), 1048576
     )

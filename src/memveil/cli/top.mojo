@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Replay top: periodic summaries over one capture directory.
+"""Top: periodic summaries over a capture directory or live.
 
 Top replays the capture's events through the shared composed
 analyzer and prints one text summary per refresh: at each
@@ -8,6 +8,14 @@ interval boundary of capture time plus a final full-window
 report. The final block renders the same rows and findings as
 ``report`` with the same policy, so replay-prefix equivalence
 holds by construction.
+
+With --output, top observes the live system instead: the
+collector retains the capture while a tee writer folds the
+same bytes into the shared analyzer and prints event-time
+refreshes under a provisional session (producer loss
+explicitly unknown until finalize). The final block replays
+the retained capture, so the final live answer equals a
+replay of that capture by construction.
 
 Refresh membership follows consumption order, not timestamp
 order: a refresh at horizon H covers the events consumed so
@@ -37,7 +45,16 @@ from memveil.capture.reader import (
     ReaderLimits,
     read_capture,
 )
+from memveil.capture.tee import RefreshSink, TeeWriter
+from memveil.cli.doctor import resolve_profiles_dir
 from memveil.cli.durations import parse_duration_ns
+from memveil.cli.record import (
+    EXIT_ERROR,
+    EXIT_REFUSAL,
+    RecordOptions,
+    parse_record_args,
+    run_collector_with,
+)
 from memveil.cli.report import (
     EXIT_INTERNAL,
     EXIT_INVALID,
@@ -50,7 +67,8 @@ from memveil.cli.report import (
     write_stderr,
 )
 from memveil.model.event import Event
-from memveil.model.report import Report
+from memveil.model.report import ENGINE_VERSION, Report
+from memveil.model.session import Session
 from memveil.model.validate import format_u64
 from memveil.platform.stdout import write_stdout
 from memveil.platform.clock import MonoClock
@@ -72,6 +90,8 @@ struct TopOptions:
     var max_line_bytes: Int
     var max_session_bytes: Int
     var max_events_bytes: Int
+    var has_output: Bool
+    var live: RecordOptions
 
     def __init__(out self):
         self.interval_ns = DEFAULT_INTERVAL_NS
@@ -83,6 +103,8 @@ struct TopOptions:
         self.max_line_bytes = DEFAULT_MAX_LINE_BYTES
         self.max_session_bytes = DEFAULT_MAX_SESSION_BYTES
         self.max_events_bytes = DEFAULT_MAX_EVENTS_BYTES
+        self.has_output = False
+        self.live = RecordOptions()
 
 
 def top_usage() -> String:
@@ -91,9 +113,17 @@ def top_usage() -> String:
         "usage: memveil top [--interval DURATION] [--device NAME]\n"
         "       [--long-lived-after DURATION] [--max-line-bytes N]\n"
         "       [--max-session-bytes N] [--max-events-bytes N] DIR\n"
+        "   or: memveil top --output DIR --object PATH\n"
+        "       [--duration SEC] [--max-events-bytes N]\n"
+        "       [--bridge PATH] [--profile ID|PATH]\n"
+        "       [--capability IDS] [--lc-object PATH] [--cp-object PATH]\n"
+        "       [--interval DURATION] [--device NAME]\n"
+        "       [--long-lived-after DURATION]\n"
         "\n"
         "Replay the capture in DIR, printing one text summary per\n"
         "interval of capture time plus a final full-window report.\n"
+        "With --output, observe the live system instead, retaining\n"
+        "the capture in DIR while printing the same summaries.\n"
         "Refreshes cover events in consumption order; a disordered\n"
         "event below a printed horizon reaches the final summary\n"
         "only, never a revised refresh.\n"
@@ -112,7 +142,8 @@ def top_usage() -> String:
         "(bare digits mean seconds); zero and overflow are refused.\n"
         "\n"
         "Exit 0 for sufficient evidence, 4 for a usable but materially\n"
-        "incomplete report, 2 for invalid input or usage.\n"
+        "incomplete report, 2 for invalid input or usage. Live mode\n"
+        "adds 3 for unavailable collection and 1 for errors.\n"
     )
 
 
@@ -174,6 +205,21 @@ def _is_option(text: String) -> Bool:
     return len(raw) > 0 and raw[0] == UInt8(0x2D)
 
 
+def _is_live_flag(tok: String) -> Bool:
+    """True for record-flow flags, parsed by the shared parser."""
+    return (
+        tok == "--output"
+        or tok == "--object"
+        or tok == "--bridge"
+        or tok == "--profile"
+        or tok == "--capability"
+        or tok == "--lc-object"
+        or tok == "--cp-object"
+        or tok == "--duration"
+        or tok == "--max-events-bytes"
+    )
+
+
 def _parse_limit(text: String, what: String, cap: Int) raises CliError -> Int:
     """Strict decimal limit: 1..cap, no leading zeros."""
     var raw = text.as_bytes()
@@ -202,6 +248,9 @@ def _parse_duration_opt(text: String, what: String) raises CliError -> UInt64:
 def parse_top_args(args: List[String]) raises CliError -> TopOptions:
     """Parse top arguments without the leading verb."""
     var opts = TopOptions()
+    var live_args = List[String]()
+    var stashed_max_events = String("")
+    var has_stash = False
     var i = 0
     while i < len(args):
         var tok = args[i]
@@ -245,10 +294,18 @@ def parse_top_args(args: List[String]) raises CliError -> TopOptions:
         elif tok == "--max-events-bytes":
             if i + 1 >= len(args):
                 raise CliError("--max-events-bytes needs a value")
-            opts.max_events_bytes = _parse_limit(
-                args[i + 1], "--max-events-bytes", 4294967296
-            )
+            stashed_max_events = args[i + 1]
+            has_stash = True
             i += 2
+        elif _is_live_flag(tok):
+            if tok == "--output":
+                opts.has_output = True
+            live_args.append(tok)
+            if i + 1 < len(args):
+                live_args.append(args[i + 1])
+                i += 2
+            else:
+                i += 1
         elif _is_option(tok):
             raise CliError("unknown option: " + tok)
         else:
@@ -256,8 +313,21 @@ def parse_top_args(args: List[String]) raises CliError -> TopOptions:
                 raise CliError("too many arguments")
             opts.dir = tok
             i += 1
-    if opts.dir == "":
+    if opts.dir != "" and opts.has_output:
+        raise CliError("cannot combine replay DIR with live --output")
+    if opts.dir == "" and not opts.has_output:
         raise CliError("missing capture directory")
+    if not opts.has_output and len(live_args) > 0:
+        raise CliError("live options need --output DIR")
+    if opts.has_output:
+        if has_stash:
+            live_args.append(String("--max-events-bytes"))
+            live_args.append(stashed_max_events)
+        opts.live = parse_record_args(live_args)
+    elif has_stash:
+        opts.max_events_bytes = _parse_limit(
+            stashed_max_events, "--max-events-bytes", 4294967296
+        )
     return opts^
 
 
@@ -289,10 +359,34 @@ def _print_block(text: String, seq: Int, horizon_ns: UInt64) raises:
         raise Error("cannot write stdout")
 
 
-def _diagnose(mut rep: Report, opts: TopOptions):
-    diagnose_report(
-        rep, opts.has_long_lived_after, opts.long_lived_after_ns
-    )
+def _diagnose(
+    mut rep: Report, has_long_lived_after: Bool, long_lived_after_ns: UInt64
+):
+    diagnose_report(rep, has_long_lived_after, long_lived_after_ns)
+
+
+def _emit_report(
+    var rep: Report,
+    filt: String,
+    has_long_lived_after: Bool,
+    long_lived_after_ns: UInt64,
+    seq: Int,
+    horizon_ns: UInt64,
+) raises -> Int:
+    """Diagnose, render, and print one refresh block.
+
+    Shared by replay refreshes and the live sink: one
+    policy for every printed block. Render and stdout
+    failures raise; an oversized block is a clean refusal.
+    """
+    _diagnose(rep, has_long_lived_after, long_lived_after_ns)
+    var text = render(rep, String("text"), filt)
+    try:
+        check_rendered_size(text, MAX_RENDERED_BYTES)
+    except e:
+        return _top_failed("memveil top: ", e.message)
+    _print_block(text, seq, horizon_ns)
+    return 0
 
 
 def _snapshot_block(
@@ -303,17 +397,191 @@ def _snapshot_block(
 ) raises -> Int:
     """Render and print one refresh."""
     var rep = analyzer.snapshot(horizon_ns, False)
-    _diagnose(rep, opts)
     var filt = String("")
     if opts.has_device:
         filt = opts.device
-    var text = render(rep, String("text"), filt)
+    return _emit_report(
+        rep^,
+        filt,
+        opts.has_long_lived_after,
+        opts.long_lived_after_ns,
+        seq,
+        horizon_ns,
+    )
+
+
+struct StdoutSink(RefreshSink):
+    """RefreshSink that prints numbered diagnosed text blocks.
+
+    Block numbering starts at one and rises per accepted
+    refresh. A refused emission still consumes its number,
+    but refusals fail the run, so the gap never prints.
+    """
+
+    var _has_device: Bool
+    var _device: String
+    var _has_long_lived_after: Bool
+    var _long_lived_after_ns: UInt64
+    var _seq: Int
+
+    def __init__(out self, opts: TopOptions):
+        self._has_device = opts.has_device
+        self._device = opts.device.copy()
+        self._has_long_lived_after = opts.has_long_lived_after
+        self._long_lived_after_ns = opts.long_lived_after_ns
+        self._seq = 0
+
+    def emit(mut self, var rep: Report, horizon_ns: UInt64) -> Bool:
+        self._seq += 1
+        var filt = String("")
+        if self._has_device:
+            filt = self._device
+        var rc: Int
+        try:
+            rc = _emit_report(
+                rep^,
+                filt,
+                self._has_long_lived_after,
+                self._long_lived_after_ns,
+                self._seq,
+                horizon_ns,
+            )
+        except:
+            return False
+        return rc == 0
+
+
+def _live_template() -> Session:
+    """Provisional live session: unclaimed values the tee stamps.
+
+    Real collection, nothing finalized, no capture filter
+    (live records every device; --device stays a display
+    filter), no baseline (the collector attests none
+    either). Producer channels are scope-complete with
+    explicitly unknown loss: correlation and baseline
+    surface verbatim when their streams show no gaps, and
+    the merge rebuilds every other scope and reason, so
+    the provisional wording below is user-visible in
+    every prefix and must stay honest. Region and
+    conversion caps stay unadmitted, matching the
+    collector, which attests no region source; revisit
+    when conversion collection lands.
+    """
+    var s = Session()
+    s.session_id = String("")
+    s.synthetic = False
+    s.product_name = String("memveil")
+    s.product_version = String(ENGINE_VERSION)
+    s.env_mode = String("unknown")
+    s.env_detection = String("unverified")
+    s.env_attestation = String("not_performed")
+    s.capture_mode = String("live")
+    s.window_start_ns = UInt64(0)
+    s.window_end_ns = ~UInt64(0)
+    s.finalized = False
+    s.q_detail.status = String("complete_for_scope")
+    s.q_detail.has_loss_count = False
+    s.q_detail.scope = String("live prefix")
+    s.q_detail.reason = String(
+        "provisional: producer loss unknown until finalize"
+    )
+    s.q_aggregate.status = String("complete_for_scope")
+    s.q_aggregate.has_loss_count = False
+    s.q_aggregate.scope = String("live prefix")
+    s.q_aggregate.reason = String(
+        "provisional: producer loss unknown until finalize"
+    )
+    s.q_correlation.status = String("complete_for_scope")
+    s.q_correlation.has_loss_count = False
+    s.q_correlation.scope = String("live prefix")
+    s.q_correlation.reason = String(
+        "provisional: producer loss unknown until finalize"
+    )
+    s.q_baseline.status = String("not_applicable")
+    s.q_baseline.scope = String("attempt metrics")
+    s.q_baseline.reason = String("Attempt metrics need no baseline.")
+    s.q_terminal.status = String("complete_for_scope")
+    s.q_terminal.has_loss_count = False
+    s.q_terminal.scope = String("live prefix")
+    s.q_terminal.reason = String(
+        "provisional: producer loss unknown until finalize"
+    )
+    return s^
+
+
+def _finish_live(
+    dir: String, opts: TopOptions, shown: Int
+) raises -> Int:
+    """Replay the retained capture as the final live block.
+
+    Prefix numbering continues: the final block is refresh
+    shown + 1 over the finalized session, so the final
+    live answer equals a replay of the retained capture
+    by construction.
+    """
+    var reader: CaptureReader
     try:
-        check_rendered_size(text, MAX_RENDERED_BYTES)
+        reader = read_capture(
+            dir,
+            False,
+            ReaderLimits(
+                opts.max_session_bytes,
+                opts.max_line_bytes,
+                opts.max_events_bytes,
+            ),
+        )
     except e:
-        return _top_failed("memveil top: ", e.message)
-    _print_block(text, seq, horizon_ns)
-    return 0
+        return _top_failed(
+            "memveil top: cannot read capture: ", e.message
+        )
+    var analyzer = Analyzer(reader.session)
+    return _finish_after_signal(reader, analyzer, opts, shown)
+
+
+def run_top_live(opts: TopOptions) raises -> Int:
+    """Observe the live system; return the process exit code.
+
+    Admission and collection reuse the record flow through
+    a tee writer that prints event-time refreshes; the
+    final block replays the retained capture, so the final
+    live answer always equals a replay of that capture.
+    Refusals name their reason on stderr and create
+    nothing; printed prefixes stand when the run fails.
+    """
+    var profiles_dir: String
+    try:
+        profiles_dir = resolve_profiles_dir()
+    except e:
+        try:
+            write_stderr(
+                "memveil top: cannot resolve profiles location: "
+                + sanitize_diagnostic(e.message)
+                + String("\n")
+            )
+        except:
+            pass
+        return EXIT_REFUSAL
+    var template = _live_template()
+    var sink = StdoutSink(opts)
+    var writer = TeeWriter[StdoutSink](
+        template, opts.interval_ns, sink^
+    )
+    var result = run_collector_with(
+        String(""), profiles_dir, opts.live, writer
+    )
+    if result.exit_code == EXIT_ERROR or result.exit_code == EXIT_REFUSAL:
+        try:
+            write_stderr(
+                String("memveil top: ")
+                + sanitize_diagnostic(result.diagnostic)
+                + String("\n")
+            )
+        except:
+            pass
+        return result.exit_code
+    return _finish_live(
+        opts.live.output, opts, writer.emission_count()
+    )
 
 
 def run_top(args: List[String]) raises -> Int:
@@ -338,6 +606,8 @@ def run_top(args: List[String]) raises -> Int:
         opts = parse_top_args(args)
     except e:
         return _top_failed("memveil top: ", e.message)
+    if opts.has_output:
+        return run_top_live(opts^)
     var reader: CaptureReader
     try:
         reader = read_capture(
@@ -521,7 +791,7 @@ def _drain(
         rep = analyzer.finish(reader.session.window_end_ns, False)
     except e:
         return _top_failed("memveil top: ", String(e))
-    _diagnose(rep, opts)
+    _diagnose(rep, opts.has_long_lived_after, opts.long_lived_after_ns)
     var filt = String("")
     if opts.has_device:
         filt = opts.device
@@ -592,7 +862,7 @@ def _finish_after_signal(
         rep = analyzer.finish(reader.session.window_end_ns, False)
     except e:
         return _top_failed("memveil top: ", String(e))
-    _diagnose(rep, opts)
+    _diagnose(rep, opts.has_long_lived_after, opts.long_lived_after_ns)
     var filt = String("")
     if opts.has_device:
         filt = opts.device

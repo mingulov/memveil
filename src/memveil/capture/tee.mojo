@@ -45,9 +45,13 @@ from memveil.platform.reader import read_host_file
 
 
 trait RefreshSink:
-    """One live refresh consumer: report plus event-time horizon."""
+    """One live refresh consumer: report plus event-time horizon.
 
-    def emit(mut self, rep: Report, horizon_ns: UInt64) -> Bool:
+    The report moves into the sink: the sink is its final
+    consumer and may diagnose it in place.
+    """
+
+    def emit(mut self, var rep: Report, horizon_ns: UInt64) -> Bool:
         ...
 
 
@@ -74,6 +78,7 @@ struct TeeWriter[S: RefreshSink & Movable & Deinitable](WriterSource):
     var _analyzer: Optional[Analyzer]
     var _horizon_ns: UInt64
     var _last_emit_ns: UInt64
+    var _emissions: Int
 
     def __init__(
         out self,
@@ -90,6 +95,7 @@ struct TeeWriter[S: RefreshSink & Movable & Deinitable](WriterSource):
         self._analyzer = None
         self._horizon_ns = UInt64(0)
         self._last_emit_ns = UInt64(0)
+        self._emissions = 0
 
     def create(mut self, path: String, budget: Int) -> CreateOut:
         var out = self._inner.create(path, budget)
@@ -131,6 +137,10 @@ struct TeeWriter[S: RefreshSink & Movable & Deinitable](WriterSource):
     def committed_len(self) -> Int:
         return self._inner.committed_len()
 
+    def emission_count(self) -> Int:
+        """Refreshes the sink accepted so far."""
+        return self._emissions
+
     def _fold(mut self, line: List[UInt8]) -> AppendOut:
         """Decode one persisted line, fold it, maybe refresh."""
         var body = _strip_newline(line)
@@ -164,11 +174,12 @@ struct TeeWriter[S: RefreshSink & Movable & Deinitable](WriterSource):
             self._analyzer = Optional(shown^)
             return AppendOut(False, String("internal"), String(e))
         self._analyzer = Optional(shown^)
-        if not self._sink.emit(snap, self._horizon_ns):
+        if not self._sink.emit(snap^, self._horizon_ns):
             return AppendOut(
                 False, String("internal"), String("refresh sink refused")
             )
         self._last_emit_ns = self._horizon_ns
+        self._emissions += 1
         return AppendOut(True, String(""), String(""))
 
     def _rebuild(mut self) -> AppendOut:

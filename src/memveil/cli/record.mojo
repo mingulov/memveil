@@ -27,6 +27,8 @@ from memveil.capture.collector import (
     EXIT_REFUSAL,
     Collector,
     CollectorConfig,
+    RunResult,
+    WriterSource,
 )
 from memveil.capture.kernel import LmbKernel
 from memveil.capture.live import LiveWriter
@@ -1400,48 +1402,59 @@ def render_provenance(source: String, v: LiveValue) -> EvidenceItem:
     return item^
 
 
-def run_record_with(
-    root: String, profiles_dir: String, opts: RecordOptions
-) raises -> Int:
-    """Run the record flow against explicit roots; return exit code.
+def run_collector_with[W: WriterSource](
+    root: String, profiles_dir: String, opts: RecordOptions,
+    mut writer: W,
+) raises -> RunResult:
+    """Run admission plus collection; return the raw outcome.
 
     ``root`` is the evidence root ("" for the live host) and
     ``profiles_dir`` holds ``manifest.txt``. The object path
     stays exactly as given (explicit user input, never
-    root-joined). Refusals print one diagnostic and exit 3
-    before any BPF or output resource exists.
+    root-joined). Pre-run refusals return exit 3 with an
+    empty end reason and the diagnostic unprefixed; the
+    caller adds its verb prefix. The collector runs only on
+    approval, so refusals create no BPF or output resource.
     """
     if opts.max_events_bytes < MIN_RECORD_BYTES:
-        return _record_failed(
-            String(t"budget {opts.max_events_bytes} below 131072")
+        return RunResult(
+            EXIT_REFUSAL, String(""), String(""),
+            String(t"budget {opts.max_events_bytes} below 131072"),
         )
     if opts.max_events_bytes > MAX_RECORD_BYTES:
-        return _record_failed(
-            String(t"budget {opts.max_events_bytes} above 4294967296")
+        return RunResult(
+            EXIT_REFUSAL, String(""), String(""),
+            String(t"budget {opts.max_events_bytes} above 4294967296"),
         )
     var bridge = _resolve_bridge(opts.bridge, opts.has_bridge)
     if bridge == String(""):
-        return _record_failed(
-            String("no bridge: pass --bridge or set LMB_NATIVE_LIB")
+        return RunResult(
+            EXIT_REFUSAL, String(""), String(""),
+            String("no bridge: pass --bridge or set LMB_NATIVE_LIB"),
         )
     var reader: EvidenceReader
     try:
         reader = open_evidence_reader(root)
     except e:
-        return _record_failed(
-            String("cannot open evidence: ") + String(e)
+        return RunResult(
+            EXIT_REFUSAL, String(""), String(""),
+            String("cannot open evidence: ") + String(e),
         )
     var env = detect_environment(reader)
     if not env.kernel.eligible_floor:
-        return _record_failed(
-            String("kernel ") + env.kernel.release + String(" below floor 7.0")
+        return RunResult(
+            EXIT_REFUSAL, String(""), String(""),
+            String("kernel ")
+            + env.kernel.release
+            + String(" below floor 7.0"),
         )
     var profiles: List[Profile]
     try:
         profiles = load_profiles(profiles_dir)
     except e:
-        return _record_failed(
-            String("cannot load profiles: ") + String(e)
+        return RunResult(
+            EXIT_REFUSAL, String(""), String(""),
+            String("cannot load profiles: ") + String(e),
         )
     var decision = decide_record(
         root,
@@ -1455,12 +1468,21 @@ def run_record_with(
         opts.capabilities,
     )
     if not decision.ok:
-        return _record_failed(decision.refusal.copy())
+        return RunResult(
+            EXIT_REFUSAL, String(""), String(""),
+            decision.refusal.copy(),
+        )
     var timens = check_timens_live()
     if not timens.ok:
-        return _record_failed(String("time namespace unverifiable"))
+        return RunResult(
+            EXIT_REFUSAL, String(""), String(""),
+            String("time namespace unverifiable"),
+        )
     if timens.offset:
-        return _record_failed(String("time namespace offset present"))
+        return RunResult(
+            EXIT_REFUSAL, String(""), String(""),
+            String("time namespace offset present"),
+        )
     var cfg = CollectorConfig()
     cfg.duration_s = opts.duration_s
     cfg.max_events_bytes = opts.max_events_bytes
@@ -1600,9 +1622,25 @@ def run_record_with(
     )
     var clock = MonoClock()
     var signal = LiveSignalSource()
-    var writer = LiveWriter()
     var collector = Collector(cfg^)
-    var result = collector.run(kernel, clock, signal, writer)
+    return collector.run(kernel, clock, signal, writer)
+
+
+def run_record_with(
+    root: String, profiles_dir: String, opts: RecordOptions
+) raises -> Int:
+    """Run the record flow against explicit roots; return exit code.
+
+    ``root`` is the evidence root ("" for the live host) and
+    ``profiles_dir`` holds ``manifest.txt``. The object path
+    stays exactly as given (explicit user input, never
+    root-joined). Refusals print one diagnostic and exit 3
+    before any BPF or output resource exists.
+    """
+    var writer = LiveWriter()
+    var result = run_collector_with(
+        root, profiles_dir, opts, writer
+    )
     if result.exit_code == EXIT_ERROR or result.exit_code == EXIT_REFUSAL:
         try:
             write_stderr(
@@ -1612,6 +1650,8 @@ def run_record_with(
             )
         except:
             pass
+    if result.end_reason == String(""):
+        return result.exit_code
     var done = String(
         t"record: end={result.end_reason} outcome={result.outcome} exit={result.exit_code}"
     )

@@ -4,14 +4,16 @@
 
 Drives the built memveil binary: usage errors, refresh blocks,
 device display filtering, the long-lived policy, replay-prefix
-equivalence with report, hostile-name escaping, and SIGINT
-handling. Exits nonzero on the first failure.
+equivalence with report, hostile-name escaping, SIGINT
+handling, and live-mode failure behavior. Exits nonzero on
+the first failure.
 """
 
 import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -147,6 +149,54 @@ def main():
     check("sigterm-long-exit", proc.returncode == 0,
           "exit %s: %s" % (proc.returncode, err))
     check("sigterm-long-final", "successful_allocations = 1" in out)
+
+    # Live-mode failures: no collection starts.
+    live_env = dict(os.environ)
+    live_env.pop("LMB_NATIVE_LIB", None)
+    live_out = os.path.join(
+        tempfile.mkdtemp(prefix="mvtoplive"), "cap")
+
+    p = run(["top", NESTED, "--output", live_out],
+            env=live_env)
+    check("live-mode-conflict", p.returncode == 2,
+          "exit %d" % p.returncode)
+    check("live-mode-conflict-msg",
+          "replay" in p.stderr and "live" in p.stderr,
+          repr(p.stderr[:160]))
+
+    dummy = os.path.join(REPO, "build", "dummy.o")
+    p = run(["top", "--output", live_out, "--object", dummy],
+            env=live_env)
+    check("live-unavailable", p.returncode == 3,
+          "exit %d" % p.returncode)
+    check("live-unavailable-msg", "memveil top:" in p.stderr,
+          repr(p.stderr[:160]))
+    check("live-unavailable-clean",
+          not os.path.exists(live_out), live_out)
+    check("live-unavailable-tty",
+          "\x1b" not in p.stdout and "\x1b" not in p.stderr)
+
+    p = run(["top", "--output", live_out, "--duration", "nope"],
+            env=live_env)
+    check("live-bad-duration", p.returncode == 2,
+          "exit %d" % p.returncode)
+    check("live-bad-duration-msg", "bad decimal: nope" in p.stderr,
+          repr(p.stderr[:160]))
+
+    # Refusal precedes any write: an occupied dir stays
+    # untouched when admission refuses first. The exact
+    # exists-refusal needs a bridge, so the VM walkthrough
+    # pins exit 3 naming the clash there.
+    busy = tempfile.mkdtemp(prefix="mvtopbusy")
+    with open(os.path.join(busy, "session.json"), "w") as fh:
+        fh.write("{}")
+    before = sorted(os.listdir(busy))
+    p = run(["top", "--output", busy, "--object", dummy],
+            env=live_env)
+    check("live-refusal-no-write", p.returncode == 3,
+          "exit %d" % p.returncode)
+    check("live-refusal-untouched",
+          sorted(os.listdir(busy)) == before, busy)
 
     print("top: CLI harness passed")
 
