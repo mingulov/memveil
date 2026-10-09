@@ -36,6 +36,11 @@ def integer_list(value):
     for item in value:integer(item)
 
 
+def settle_seconds(value):
+    if type(value) not in (int, float) or not 0 <= value <= 30:
+        raise ValueError('invalid settle seconds')
+
+
 def numbers(doc):
     for value in doc.values(): integer(value)
 
@@ -137,8 +142,9 @@ def validate_lifecycle_exports(got,sub):
                 integer(row['cycle'])
         elif name=='inventory.json':
             doc=strict_json(path.read_text())
-            keys(doc,('baseline','after','dmesg_marker_present','suspicious'))
+            keys(doc,('baseline','after','bpf_settle_s','dmesg_marker_present','suspicious'))
             inventory_snapshot(doc['baseline']); inventory_snapshot(doc['after'])
+            settle_seconds(doc['bpf_settle_s'])
             if doc['dmesg_marker_present'] is not True:raise ValueError('missing dmesg marker')
             integer(doc['suspicious'])
         elif name=='workload.json':
@@ -152,15 +158,16 @@ def validate_lifecycle_exports(got,sub):
         elif name=='pairs.json':
             pairs=strict_json(path.read_text())
             validate_perf_pairs(pairs)
-        elif name=='cap-session.json':
+        elif name.endswith('-session.json'):
             validator=_schemas()
             validator.check_session(strict_json(path.read_text()))
-        elif name=='cap-events.ndjson':
+        elif name.endswith('-events.ndjson'):
             validator=_schemas()
-            session=validator.check_session(strict_json(got['cap-session.json'].read_text()))
+            sibling=name[:-len('-events.ndjson')]+'-session.json'
+            session=validator.check_session(strict_json(got[sibling].read_text()))
             for i,line in enumerate(path.read_text().splitlines(),1):
                 validator.check_event(strict_json(line),i,session)
-        elif name=='record.json':
+        elif name=='record.json' or name.endswith('-record.json'):
             doc=strict_json(path.read_text())
             keys(doc,('exit','ready'))
             integer(doc['exit'],True)
@@ -191,15 +198,46 @@ def validate_lifecycle_exports(got,sub):
                 raise ValueError('bundle phases overlap')
             if type(doc['console_tail']) is not str or len(doc['console_tail']) > 2048:
                 raise ValueError('invalid bundle console tail')
-        elif name=='report.json':
+        elif name=='report.json' or name.endswith('-report.json'):
             doc=strict_json(path.read_text())
             for k in ('schema_version','session_id','quality','metrics'):
                 if k not in doc: raise ValueError('report lacks '+k)
-            session=strict_json(got['cap-session.json'].read_text())
+            sibling='cap-session.json' if name=='report.json' else name[:-len('-report.json')]+'-session.json'
+            session=strict_json(got[sibling].read_text())
             if doc['session_id'] != session['session_id']:
                 raise ValueError('report session mismatch')
             if type(doc['metrics']) is not list or not doc['metrics']:
                 raise ValueError('report lacks metrics')
+        elif name=='faults.json':
+            rows=strict_json(path.read_text())
+            if type(rows) is not list or not rows: raise ValueError('invalid faults ledger')
+            seen=set()
+            for row in rows:
+                keys(row,('scenario','exit','stderr','progs_before','progs_after',
+                          'maps_before','maps_after','settle_s','cap'),
+                     ('events_kept','ready','window'))
+                if row['scenario'] not in ('f1','f2','f3a','f3b','f3b-report','f4',
+                                           'f5a','f5b','f5c','f6'):
+                    raise ValueError('unknown fault scenario')
+                if row['scenario'] in seen: raise ValueError('duplicate fault scenario')
+                seen.add(row['scenario'])
+                integer(row['exit'],True)
+                if type(row['stderr']) is not str or len(row['stderr']) > 512:
+                    raise ValueError('invalid fault stderr')
+                for k in ('progs_before','progs_after','maps_before','maps_after'):
+                    integer(row[k])
+                settle_seconds(row['settle_s'])
+                if type(row['cap']) is not bool: raise ValueError('invalid fault cap flag')
+                if 'events_kept' in row and type(row['events_kept']) is not bool:
+                    raise ValueError('invalid events_kept flag')
+                if 'ready' in row and (type(row['ready']) is not str or 'ready session=' not in row['ready']):
+                    raise ValueError('invalid fault readiness')
+                if 'window' in row:
+                    window=row['window']
+                    if type(window) is not list or len(window) != 2:
+                        raise ValueError('invalid fault window')
+                    integer(window[0]);integer(window[1])
+                    if window[0] >= window[1]: raise ValueError('empty fault window')
         else: raise ValueError('unrecognized lifecycle export '+name)
 
 

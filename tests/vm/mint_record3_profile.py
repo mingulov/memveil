@@ -175,7 +175,19 @@ def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def frozen_scan_hooks():
+    """The F2-2 frozen tracing set from the scan fixture."""
+    path = (ROOT / "tests" / "fixtures" / "scan" / "profiles"
+            / "valid-lc.json")
+    doc = json.loads(path.read_text())
+    return [(h["name"], h["function"], h["attach"],
+             h["signature"]) for h in doc["hooks"]
+            if h["kind"] == "tracing"]
+
+
 def main():
+    if TRACE_HOOKS != frozen_scan_hooks():
+        fail("minter tracing set drifts from scan fixture")
     doc = json.loads(DOC.read_text())
     if doc.get("schema_version") != "0.1.1":
         fail("shipped doc is not profile 0.1.1")
@@ -214,9 +226,17 @@ def main():
             cap["hooks"] = list(CP_HOOK_NAMES)
             cap["reason"] = ("Record3 lane only: ephemeral "
                              "3-channel wiring proof.")
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(json.dumps(doc, indent=2) + "\n")
-    print("minted %s" % OUT)
+    out = OUT
+    args = sys.argv[1:]
+    if args[:1] == ["--out"]:
+        if len(args) != 2:
+            fail("--out needs a value")
+        out = Path(args[1])
+    elif args:
+        fail("usage: mint_record3_profile.py [--out PATH]")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(doc, indent=2) + "\n")
+    print("minted %s" % out)
 
 
 if __name__ == "__main__":

@@ -63,8 +63,16 @@ def _events(path):
 
 
 def check_capture_session(events, session, record, tag,
-                          span_lo, span_hi, profile_id):
-    """Session-wide record admission, quality, and ordering."""
+                          span_lo, span_hi, profile_id,
+                          paired=True, end_reason="duration",
+                          strict_loss=True):
+    """Session-wide record admission, quality, and ordering.
+
+    paired=True expects the designed v2 split (correlation
+    honestly partial); single-channel captures without
+    lifecycle refs pass paired=False (correlation not
+    applicable: attempt counting has nothing to correlate).
+    """
     bad = []
     if record["exit"] != 4:
         bad.append("%s: record exit %r != 4 (bounded)"
@@ -76,9 +84,10 @@ def check_capture_session(events, session, record, tag,
                     "bindings hold (profile unvalidated)"
                     % profile_id):
         bad.append("%s: profile decision %r" % (tag, decision))
-    if session["capture"].get("end_reason") != "duration":
-        bad.append("%s: end_reason %r"
-                   % (tag, session["capture"].get("end_reason")))
+    if session["capture"].get("end_reason") != end_reason:
+        bad.append("%s: end_reason %r want %r"
+                   % (tag, session["capture"].get("end_reason"),
+                      end_reason))
     window = session["capture"]["window"]
     span = int(window["end_ns"]) - int(window["start_ns"])
     if not span_lo <= span <= span_hi:
@@ -86,21 +95,32 @@ def check_capture_session(events, session, record, tag,
                    % (tag, span, span_lo, span_hi))
     for channel in ("detail", "aggregate"):
         quality = session["quality"][channel]
-        if quality["status"] != "complete_for_scope":
+        if strict_loss:
+            if quality["status"] != "complete_for_scope":
+                bad.append("%s: %s quality %r"
+                           % (tag, channel, quality))
+            if quality["loss_count"] != "0":
+                bad.append("%s: %s loss %r"
+                           % (tag, channel,
+                              quality["loss_count"]))
+        elif quality["status"] not in (
+                "complete_for_scope", "partial"):
             bad.append("%s: %s quality %r"
                        % (tag, channel, quality))
-        if quality["loss_count"] != "0":
-            bad.append("%s: %s loss %r"
-                       % (tag, channel,
-                          quality["loss_count"]))
     corr = session["quality"]["correlation"]
-    if corr["status"] != "partial":
-        bad.append("%s: correlation quality %r" % (tag, corr))
-    for phrase in ("copy without pending operation",
-                   "sync references unknown mapping"):
-        if phrase not in corr["reason"]:
-            bad.append("%s: correlation reason %r"
-                       % (tag, corr["reason"]))
+    if paired:
+        if corr["status"] != "partial":
+            bad.append("%s: correlation quality %r" % (tag, corr))
+        for phrase in ("copy without pending operation",
+                       "sync references unknown mapping"):
+            if phrase not in corr["reason"]:
+                bad.append("%s: correlation reason %r"
+                           % (tag, corr["reason"]))
+    elif corr["status"] != "not_applicable":
+        bad.append("%s: 1ch correlation quality %r" % (tag, corr))
+    elif "needs no cross-event correlation" not in corr["reason"]:
+        bad.append("%s: 1ch correlation reason %r"
+                   % (tag, corr["reason"]))
     if session["quality"]["terminal"]["status"] != "partial":
         bad.append("%s: terminal quality %r"
                    % (tag, session["quality"]["terminal"]))

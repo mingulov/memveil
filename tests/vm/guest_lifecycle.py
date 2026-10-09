@@ -243,6 +243,24 @@ class Gate:
             inventory[key] = len(objects)
         return inventory
 
+    def settled_inventory(self, before, timeout=30):
+        """Poll BPF counts back to baseline; return (now, waited_s).
+
+        The kernel frees map IDs deferred, so one immediate
+        sample after process exit races reclamation and
+        reports phantom residue. Poll until the counts equal
+        the baseline or the timeout expires; the caller
+        records both so a real leak still fails with
+        evidence.
+        """
+        start = time.monotonic()
+        while True:
+            now = self.bpf_inventory()
+            waited = round(time.monotonic() - start, 3)
+            if now == before or waited >= timeout:
+                return now, waited
+            time.sleep(0.5)
+
 
 def run_matrix(gate):
     """Stepped rates: 1, 10, 100 maps/s over scripted traffic."""
@@ -605,8 +623,10 @@ def run_cleanup(gate):
         else:
             row["error"] = {"case": "none", "rc": 0}
         ledger.append(row)
+    after_bpf, after_settle = gate.settled_inventory(
+        baseline["bpf"])
     after = {
-        "bpf": gate.bpf_inventory(),
+        "bpf": after_bpf,
         "io_tlb_used": gate.io_tlb_samples(),
         "files": sorted(os.listdir(gate.work)),
     }
@@ -621,6 +641,7 @@ def run_cleanup(gate):
     gate.write_json("ledger.json", ledger)
     gate.write_json("inventory.json", {
         "baseline": baseline, "after": after,
+        "bpf_settle_s": after_settle,
         "dmesg_marker_present": True,
         "suspicious": len(suspicious),
     })
@@ -963,11 +984,11 @@ def verify_extracted_bundle(root):
     return manifest
 
 
-def await_record_ready(rec, work):
+def await_record_ready(rec, work, errname="record.stderr"):
     """Wait for the record readiness line; fail with stderr tail."""
     def tail():
         try:
-            with open(os.path.join(work, "record.stderr"),
+            with open(os.path.join(work, errname),
                       "rb") as fh:
                 return fh.read()[-500:].decode("utf-8", "replace")
         except OSError:
@@ -1189,6 +1210,335 @@ def run_bundle(gate):
           f"report_exit={rep.returncode}")
 
 
+def run_faults(gate):
+    """Multi-channel faults: rollback, teardown, busy, race.
+
+    Seven scenarios in one boot: truncated lc/cp objects must
+    refuse with exit 3 and zero BPF residue; SIGTERM mid-capture
+    (1ch and 3ch) must stop bounded with a signal end reason,
+    with a cut oracle snapshot proving the flood was mid-flight;
+    a full output filesystem must fail honestly without a
+    masquerading session; paced and burst 300-op floods compare
+    1ch against 3ch capture; background flood during attach must
+    not leak pre-window records. The faults.json ledger carries
+    every scenario's exit, stderr tail, BPF inventory pair, and
+    the seconds waited for kernel-deferred map IDs to settle.
+    """
+    memveil = os.path.join(gate.repo, "build", "memveil")
+    attempt_obj = os.path.join(
+        gate.repo, "build", "bpf", "swiotlb_attempt.bpf.o")
+    profile = os.path.join(
+        gate.repo, "build", "vm", "record3-profile.json")
+    for path in (memveil, attempt_obj, profile):
+        if not os.path.isfile(path):
+            fail(f"missing {path}")
+    gate.write_json("identity.json", gate.identity())
+    ledger = []
+    names = ["identity.json"]
+
+    def trunc(src, tag):
+        with open(src, "rb") as fh:
+            head = fh.read(4096)
+        dst = os.path.join(gate.work, f"bad-{tag}.o")
+        with open(dst, "wb") as fh:
+            fh.write(head)
+        return dst
+
+    def run_refused(tag, lc_obj, cp_obj):
+        before = gate.bpf_inventory()
+        cap = os.path.join(gate.work, f"{tag}-cap")
+        try:
+            r = sh([memveil, "record",
+                    "--duration", "10",
+                    "--output", cap,
+                    "--object", attempt_obj,
+                    "--lc-object", lc_obj,
+                    "--cp-object", cp_obj,
+                    "--bridge", gate.bridge,
+                    "--profile", profile,
+                    "--capability",
+                    "attempt-trace,mapping-lifecycle,copy-actual"],
+                   timeout=60)
+        except subprocess.TimeoutExpired:
+            fail(f"{tag}: refused run hung")
+        after, settle = gate.settled_inventory(before)
+        ledger.append({
+            "scenario": tag, "exit": r.returncode,
+            "stderr": r.stderr.strip()[-512:],
+            "progs_before": before["progs"],
+            "progs_after": after["progs"],
+            "maps_before": before["maps"],
+            "maps_after": after["maps"],
+            "settle_s": settle,
+            "cap": os.path.isfile(
+                os.path.join(cap, "session.json")),
+        })
+
+    run_refused("f1", trunc(gate.lc_obj, "lc"), gate.cp_obj)
+    run_refused("f2", gate.lc_obj, trunc(gate.cp_obj, "cp"))
+
+    def start_record(tag, duration, caps, output=None):
+        cap = output or os.path.join(gate.work, f"{tag}-cap")
+        args = [memveil, "record",
+                "--duration", str(duration),
+                "--output", cap,
+                "--object", attempt_obj,
+                "--bridge", gate.bridge,
+                "--profile", profile]
+        if caps != ("attempt-trace",):
+            args += ["--lc-object", gate.lc_obj,
+                     "--cp-object", gate.cp_obj,
+                     "--capability", ",".join(caps)]
+        rec = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=open(os.path.join(
+                gate.work, f"{tag}-record.stderr"), "wb"),
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+        )
+        ready, _ = await_record_ready(
+            rec, gate.work, f"{tag}-record.stderr")
+        return rec, cap, ready
+
+    def finish_capture(tag, rec, cap, ready):
+        try:
+            rc = rec.wait(timeout=240)
+        except subprocess.TimeoutExpired:
+            rec.kill()
+            rec.wait()
+            fail(f"{tag}: record did not exit")
+        gate.write_json(f"{tag}-record.json",
+                        {"exit": rc, "ready": ready})
+        for name in ("session.json", "events.ndjson"):
+            src = os.path.join(cap, name)
+            if not os.path.isfile(src):
+                fail(f"{tag}: capture lacks {name}")
+            shutil.copyfile(
+                src, os.path.join(gate.work, f"{tag}-{name}"))
+
+    def record_ledger(tag, rec, before, extra=None):
+        after, settle = gate.settled_inventory(before)
+        row = {
+            "scenario": tag, "exit": rec.returncode,
+            "stderr": "",
+            "progs_before": before["progs"],
+            "progs_after": after["progs"],
+            "maps_before": before["maps"],
+            "maps_after": after["maps"],
+            "settle_s": settle,
+            "cap": True,
+        }
+        if extra:
+            row.update(extra)
+        ledger.append(row)
+
+    for tag, caps in (("f3a", ("attempt-trace",)),
+                      ("f3b", ("attempt-trace", "mapping-lifecycle",
+                              "copy-actual"))):
+        before = gate.bpf_inventory()
+        gate.clear_dmesg()
+        rec, cap, ready = start_record(tag, 90, caps)
+        window = [mono_ns()]
+        # insmod runs the 300-op flood synchronously (~30s),
+        # so background it: SIGTERM must land mid-flood, and
+        # the cut snapshot below must precede flood completion.
+        flood = subprocess.Popen(
+            ["insmod", gate.ko, "mv_oracle_arm=1",
+             "mv_oracle_ops=300", "mv_oracle_delay_ms=100"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True)
+        gate.consumers.append(flood)
+        time.sleep(10)
+        window.append(mono_ns())
+        rec.terminate()
+        try:
+            rc = rec.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            rec.kill()
+            rec.wait()
+            fail(f"{tag}: SIGTERM did not stop record")
+        gate.oracle_log(f"{tag}-cut-oracle.log")
+        try:
+            _, err = flood.communicate(timeout=120)
+        except subprocess.TimeoutExpired:
+            flood.kill()
+            flood.communicate()
+            fail(f"{tag}: oracle flood hung")
+        gate.consumers.remove(flood)
+        if flood.returncode != 0:
+            fail(f"{tag}: insmod failed: {err.strip()[-300:]}")
+        gate.oracle_loaded = True
+        gate.rmmod()
+        gate.oracle_log(f"{tag}-oracle.log")
+        gate.write_json(f"{tag}-record.json",
+                        {"exit": rc, "ready": ready})
+        for name in ("session.json", "events.ndjson"):
+            src = os.path.join(cap, name)
+            if not os.path.isfile(src):
+                fail(f"{tag}: capture lacks {name}")
+            shutil.copyfile(
+                src, os.path.join(gate.work, f"{tag}-{name}"))
+        record_ledger(tag, rec, before, {"window": window})
+        names += [f"{tag}-record.json", f"{tag}-session.json",
+                  f"{tag}-events.ndjson", f"{tag}-oracle.log",
+                  f"{tag}-cut-oracle.log"]
+
+    rep = sh([memveil, "report", "--format", "json",
+              os.path.join(gate.work, "f3b-cap")])
+    with open(os.path.join(gate.work, "f3b-report.json"),
+              "w") as fh:
+        fh.write(rep.stdout)
+    try:
+        with open(os.path.join(gate.work, "f3b-report.json")) as fh:
+            json.load(fh)
+    except ValueError:
+        fail("signal-cut report emitted invalid JSON")
+    ledger.append({
+        "scenario": "f3b-report", "exit": rep.returncode,
+        "stderr": rep.stderr.strip()[-512:],
+        "progs_before": 0, "progs_after": 0,
+        "maps_before": 0, "maps_after": 0,
+        "settle_s": 0,
+        "cap": True,
+    })
+    names.append("f3b-report.json")
+
+    mnt = os.path.join(gate.work, "full")
+    os.makedirs(mnt)
+    r = sh(["mount", "-t", "tmpfs", "-o", "size=64k",
+            "memveil-full", mnt])
+    if r.returncode != 0:
+        fail(f"tmpfs mount failed: {r.stderr.strip()}")
+    try:
+        with open(os.path.join(mnt, "filler"), "wb") as fh:
+            fh.write(b"x" * 57344)
+        before = gate.bpf_inventory()
+        gate.clear_dmesg()
+        cap = os.path.join(mnt, "cap")
+        rec = subprocess.Popen(
+            [memveil, "record",
+             "--duration", "30",
+             "--output", cap,
+             "--object", attempt_obj,
+             "--lc-object", gate.lc_obj,
+             "--cp-object", gate.cp_obj,
+             "--bridge", gate.bridge,
+             "--profile", profile,
+             "--capability",
+             "attempt-trace,mapping-lifecycle,copy-actual"],
+            stdout=subprocess.PIPE,
+            stderr=open(os.path.join(gate.work,
+                                     "f4-record.stderr"), "wb"),
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+        )
+        ready, _ = await_record_ready(
+            rec, gate.work, "f4-record.stderr")
+        gate.insmod(["mv_oracle_witness=1",
+                     "mv_oracle_delay_ms=100",
+                     "mv_oracle_scenario=1"])
+        time.sleep(8)
+        gate.rmmod()
+        try:
+            rc = rec.wait(timeout=120)
+        except subprocess.TimeoutExpired:
+            rec.kill()
+            rec.wait()
+            fail("f4: record did not exit")
+        gate.oracle_log("f4-oracle.log")
+        with open(os.path.join(gate.work, "f4-record.stderr"),
+                  "rb") as fh:
+            err = fh.read()[-512:].decode("utf-8", "replace")
+        after, settle = gate.settled_inventory(before)
+        ledger.append({
+            "scenario": "f4", "exit": rc, "stderr": err,
+            "progs_before": before["progs"],
+            "progs_after": after["progs"],
+            "maps_before": before["maps"],
+            "maps_after": after["maps"],
+            "settle_s": settle,
+            "cap": os.path.isfile(
+                os.path.join(cap, "session.json")),
+            "events_kept": os.path.isfile(
+                os.path.join(cap, "events.ndjson")),
+            "ready": ready,
+        })
+        names.append("f4-oracle.log")
+    finally:
+        r = sh(["umount", mnt])
+        if r.returncode != 0:
+            fail(f"tmpfs umount failed: {r.stderr.strip()}")
+
+    floods = (("f5a", ("attempt-trace",),
+               ["mv_oracle_ops=300", "mv_oracle_delay_ms=100"],
+               45),
+              ("f5b", ("attempt-trace", "mapping-lifecycle",
+                      "copy-actual"),
+               ["mv_oracle_ops=300", "mv_oracle_delay_ms=100"],
+               45),
+              ("f5c", ("attempt-trace", "mapping-lifecycle",
+                      "copy-actual"),
+               ["mv_oracle_ops=300"], 10))
+    for tag, caps, params, wait_s in floods:
+        before = gate.bpf_inventory()
+        gate.clear_dmesg()
+        rec, cap, ready = start_record(tag, 120, caps)
+        window = [mono_ns()]
+        gate.insmod(params)
+        time.sleep(wait_s)
+        gate.rmmod()
+        window.append(mono_ns())
+        gate.oracle_log(f"{tag}-oracle.log")
+        finish_capture(tag, rec, cap, ready)
+        record_ledger(tag, rec, before, {"window": window})
+        names += [f"{tag}-record.json", f"{tag}-session.json",
+                  f"{tag}-events.ndjson", f"{tag}-oracle.log"]
+
+    iface = find_pcnet()
+    configure_net(iface)
+    before = gate.bpf_inventory()
+    gate.clear_dmesg()
+    flood = subprocess.Popen(
+        ["ping", "-f", "-c", "5000", "-q", "10.0.3.2"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        rec, cap, ready = start_record(
+            "f6", 60,
+            ("attempt-trace", "mapping-lifecycle",
+             "copy-actual"))
+    finally:
+        flood.terminate()
+        try:
+            flood.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            flood.kill()
+            flood.wait()
+    time.sleep(2)
+    window = [mono_ns()]
+    gate.insmod(["mv_oracle_witness=1",
+                 "mv_oracle_delay_ms=100",
+                 "mv_oracle_scenario=1"])
+    time.sleep(8)
+    gate.rmmod()
+    window.append(mono_ns())
+    gate.oracle_log("f6-oracle.log")
+    finish_capture("f6", rec, cap, ready)
+    record_ledger("f6", rec, before, {"window": window})
+    names += ["f6-record.json", "f6-session.json",
+              "f6-events.ndjson", "f6-oracle.log"]
+
+    gate.write_json("faults.json", ledger)
+    names.append("faults.json")
+    gate.export(names)
+    print("guest_lifecycle: faults exported")
+
+
 SUBS = {
     "matrix": run_matrix,
     "copy": run_copy,
@@ -1202,6 +1552,7 @@ SUBS = {
     "canonical": run_canonical,
     "record3": run_record3,
     "bundle": run_bundle,
+    "faults": run_faults,
 }
 
 

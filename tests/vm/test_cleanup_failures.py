@@ -102,6 +102,9 @@ def run_flow():
         if after["bpf"] != baseline["bpf"]:
             bad.append("BPF inventory moved: %r -> %r"
                        % (baseline["bpf"], after["bpf"]))
+        if not 0 <= inventory["bpf_settle_s"] < 30:
+            bad.append("BPF settle unbounded: %r"
+                       % (inventory["bpf_settle_s"],))
         if min(after["io_tlb_used"]) != min(baseline["io_tlb_used"]):
             bad.append("io_tlb floor moved: %r -> %r"
                        % (baseline["io_tlb_used"],

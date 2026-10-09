@@ -158,8 +158,13 @@ def _metric_all(report, name):
     return _metric(report, name, "all devices")
 
 
-def check_report(report, events, bundle, tag):
-    """Extracted report consistency against the capture."""
+def check_report(report, events, bundle, tag, drained=True):
+    """Extracted report consistency against the capture.
+
+    drained=True demands the pool return to its own baseline
+    (idle tail); signal-cut captures pass drained=False and
+    only require the report to match the latest sample.
+    """
     bad = []
     if bundle["report_exit"] != 4:
         bad.append("%s: report exit %r != 4 (partial)" % (
@@ -216,10 +221,14 @@ def check_report(report, events, bundle, tag):
     samples = kinds.get("pool_sample", [])
     if not samples:
         bad.append("%s: report lacks pool samples" % tag)
-    elif _metric(report, "pool_used_bytes")["value"] != samples[
-            0]["data"]["used_bytes"]:
-        bad.append("%s: report pool not drained to baseline"
-                   % tag)
+    else:
+        want = samples[0 if drained else -1]["data"][
+            "used_bytes"]
+        if _metric(report, "pool_used_bytes")["value"] != want:
+            bad.append("%s: report pool %r != sample %r"
+                       % (tag, _metric(
+                           report, "pool_used_bytes")["value"],
+                           want))
     codes = [f["code"] for f in report["findings"]]
     if "UNPAIRED_LIFECYCLE" not in codes:
         bad.append("%s: report lacks unpaired finding" % tag)
