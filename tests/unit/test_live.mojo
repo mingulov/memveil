@@ -7,6 +7,11 @@ from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
 
 from memveil.analysis.engine import Analyzer
+from memveil.capture.collector import (
+    Collector,
+    CollectorConfig,
+    PollOut,
+)
 from memveil.capture.live import (
     LiveWriter,
     _residual_tail,
@@ -19,6 +24,13 @@ from memveil.model.report import Report
 from memveil.model.session import Session
 from memveil.model.validate import format_u64
 from memveil.platform.reader import read_host_file
+from scripted import (
+    ScriptClock,
+    ScriptKernel,
+    ScriptSignal,
+    snap_ok,
+    stats_ok,
+)
 
 
 def _mkdtemp() raises -> String:
@@ -290,6 +302,28 @@ def _tee_unmap(mapping: String, ts: UInt64, seq: UInt64) -> Event:
     var ev = _tee_base(String("unmap"), seq, ts)
     ev.unmap.has_mapping_id = True
     ev.unmap.mapping_id = mapping
+    return ev^
+
+
+def _tee_pool_unavailable(
+    pool: String, ts: UInt64, seq: UInt64, reason: String
+) -> Event:
+    var ev = _tee_base(String("pool_sample"), seq, ts)
+    ev.pool.pool_id = pool
+    ev.pool.unit = String("bytes")
+    ev.pool.allocator = String("swiotlb")
+    ev.pool.reason = reason
+    return ev^
+
+
+def _tee_gap(ts: UInt64, seq: UInt64) -> Event:
+    var ev = _tee_base(String("gap"), seq, ts)
+    ev.gap.channel = String("detail")
+    ev.gap.has_lost_count = True
+    ev.gap.lost_count = UInt64(3)
+    ev.gap.reason = String("scripted cut")
+    ev.gap.window_start_ns = UInt64(100)
+    ev.gap.window_end_ns = ts
     return ev^
 
 
@@ -776,6 +810,278 @@ def test_tee_abort_all_restarts_clean() raises:
     assert_equal(len(events), tee.committed_len())
 
 
+def test_tee_empty_emits_nothing() raises:
+    var scratch = _mkdtemp()
+    var obs = scratch + String("/obs.ndjson")
+    var tmpl = _tee_template()
+    var tee = TeeWriter[ScriptFileSink](
+        tmpl, UInt64(50), ScriptFileSink(obs)
+    )
+    assert_true(tee.create(scratch + String("/cap"), 131072).ok)
+    tee.discard()
+    assert_equal(tee.emission_count(), 0)
+    var missing = False
+    try:
+        _ = read_host_file(obs, String("obs"), 1048576)
+    except:
+        missing = True
+    assert_true(missing)
+
+
+def test_tee_unavailable_pool_matches_offline() raises:
+    var scratch = _mkdtemp()
+    var obs = scratch + String("/obs.ndjson")
+    var tmpl = _tee_template()
+    var tee = TeeWriter[ScriptFileSink](
+        tmpl, UInt64(50), ScriptFileSink(obs)
+    )
+    assert_true(tee.create(scratch + String("/cap"), 131072).ok)
+    var l0 = _tee_line(_tee_attempt("op1", UInt64(0), UInt64(100)))
+    var l1 = _tee_line(
+        _tee_pool_unavailable(
+            String("p"), UInt64(200), UInt64(1), String("denied")
+        )
+    )
+    assert_true(tee.append(l0).ok)
+    assert_true(tee.append(l1).ok)
+    var first = List[List[UInt8]]()
+    first.append(l0.copy())
+    var rec0 = (
+        format_u64(UInt64(100))
+        + String(" ")
+        + _tee_direct(tmpl, UInt64(100), first, UInt64(100))
+        + String("\n")
+    )
+    var both = List[List[UInt8]]()
+    both.append(l0^)
+    both.append(l1^)
+    var rec1 = (
+        format_u64(UInt64(200))
+        + String(" ")
+        + _tee_direct(tmpl, UInt64(100), both, UInt64(200))
+        + String("\n")
+    )
+    var raw = read_host_file(obs, String("obs"), 1048576)
+    assert_equal(_tee_text(raw), rec0 + rec1)
+
+
+def test_tee_loss_matches_offline() raises:
+    var scratch = _mkdtemp()
+    var obs = scratch + String("/obs.ndjson")
+    var tmpl = _tee_template()
+    var tee = TeeWriter[ScriptFileSink](
+        tmpl, UInt64(50), ScriptFileSink(obs)
+    )
+    assert_true(tee.create(scratch + String("/cap"), 131072).ok)
+    var l0 = _tee_line(_tee_attempt("op1", UInt64(0), UInt64(100)))
+    var l1 = _tee_line(_tee_gap(UInt64(200), UInt64(1)))
+    assert_true(tee.append(l0).ok)
+    assert_true(tee.append(l1).ok)
+    var first = List[List[UInt8]]()
+    first.append(l0.copy())
+    var rec0 = (
+        format_u64(UInt64(100))
+        + String(" ")
+        + _tee_direct(tmpl, UInt64(100), first, UInt64(100))
+        + String("\n")
+    )
+    var both = List[List[UInt8]]()
+    both.append(l0^)
+    both.append(l1^)
+    var rec1 = (
+        format_u64(UInt64(200))
+        + String(" ")
+        + _tee_direct(tmpl, UInt64(100), both, UInt64(200))
+        + String("\n")
+    )
+    var raw = read_host_file(obs, String("obs"), 1048576)
+    assert_equal(_tee_text(raw), rec0 + rec1)
+
+
+def _prefix_timeout() -> PollOut:
+    return PollOut(String("timeout"), List[UInt8](), UInt32(0), String(""))
+
+
+def _prefix_zeros(mut kernel: ScriptKernel):
+    var zstats = stats_ok(
+        UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0)
+    )
+    for _ in range(5):
+        kernel.add_stats(zstats.copy())
+    var zsnap = snap_ok(
+        UInt64(0),
+        UInt64(0),
+        UInt64(0),
+        UInt64(0),
+        UInt64(0),
+        UInt64(0),
+    )
+    for _ in range(4):
+        kernel.add_snap(zsnap.copy())
+
+
+def _prefix_clock_vals() -> List[UInt64]:
+    """Four queued startup values plus the pool baseline read
+    (startup consumes five with pool sampling: the baseline
+    sample timestamp eats the first dwell value), three
+    firing iterations, four quiet iterations, then the latch
+    and tail (never reached: the scripted stop latches
+    first). The next-fire deadline keys off the iteration
+    timestamp, so every iteration at least one second past
+    the last fire emits a sample."""
+    var base = UInt64(1000000000)
+    var out = List[UInt64]()
+    out.append(base)
+    out.append(base + UInt64(1))
+    out.append(base + UInt64(2))
+    out.append(base + UInt64(3))
+    out.append(base + UInt64(1500000000))
+    out.append(base + UInt64(1500000000))
+    out.append(base + UInt64(2500000000))
+    out.append(base + UInt64(2500000000))
+    out.append(base + UInt64(3500000000))
+    out.append(base + UInt64(3500000000))
+    for i in range(5):
+        out.append(base + UInt64(3500000001) + UInt64(i))
+    var latch = base + UInt64(61000000001)
+    out.append(latch)
+    for i in range(7):
+        out.append(latch + UInt64(1 + i))
+    return out^
+
+
+def _prefix_split_record(rec: String) raises -> Tuple[UInt64, String]:
+    """Split one obs record into horizon plus row digest."""
+    var raw = rec.as_bytes()
+    var i = 0
+    while i < len(raw) and raw[i] != UInt8(32):
+        i += 1
+    if i >= len(raw):
+        raise Error("obs record has no digest")
+    var horizon = UInt64(0)
+    for j in range(i):
+        var b = raw[j]
+        if b < UInt8(48) or b > UInt8(57):
+            raise Error("obs horizon not digits")
+        horizon = horizon * UInt64(10) + UInt64(b - UInt8(48))
+    var rest = List[UInt8]()
+    for j in range(i + 1, len(raw)):
+        rest.append(raw[j])
+    try:
+        return (horizon, String(from_utf8=Span(rest)))
+    except:
+        raise Error("obs digest not UTF-8")
+
+
+def _prefix_retained_lines(path: String) raises -> List[List[UInt8]]:
+    """Retained event lines in fold order, newlines kept."""
+    var raw = read_host_file(path, String("events"), 8388608)
+    var out = List[List[UInt8]]()
+    var start = 0
+    var i = 0
+    while True:
+        if i >= len(raw) or raw[i] == UInt8(0x0A):
+            if i > start:
+                var line = List[UInt8]()
+                for j in range(start, i):
+                    line.append(raw[j])
+                line.append(UInt8(0x0A))
+                out.append(line^)
+            if i >= len(raw):
+                break
+            start = i + 1
+        i += 1
+    return out^
+
+
+def _prefix_line_ts(line: List[UInt8]) raises -> UInt64:
+    """Event timestamp of one retained line."""
+    var body = _tee_stripped(line)
+    var ev = parse_event(body)
+    return ev.ts_ns
+
+
+def test_tee_signal_stop_prefixes_match_offline() raises:
+    # A scripted stop ends the run after three periodic pool
+    # fires; every refresh equals the offline digest over the
+    # retained arrival prefix at its horizon. Closing lines
+    # fold too, so the two horizon-advancing closing lines
+    # emit as well; each emission horizon is a running
+    # maximum, so its prefix ends at the first retained line
+    # carrying that timestamp.
+    var scratch = _mkdtemp()
+    var target = scratch + String("/cap")
+    var obs = scratch + String("/obs.ndjson")
+    var tmpl = _tee_template()
+    var tee = TeeWriter[ScriptFileSink](
+        tmpl, UInt64(1), ScriptFileSink(obs)
+    )
+    var cfg = CollectorConfig()
+    cfg.duration_s = UInt64(60)
+    cfg.max_events_bytes = 134217728
+    cfg.output = target
+    cfg.profile_id = String("prefix-probe")
+    cfg.pid = 4242
+    cfg.has_pool_sample = True
+    cfg.pool_root = String("tests/fixtures/pools/debugfs-ok")
+    var kernel = ScriptKernel()
+    kernel.add_poll(_prefix_timeout(), 120)
+    _prefix_zeros(kernel)
+    var clock = ScriptClock()
+    clock.step = UInt64(1000000)
+    var vals = _prefix_clock_vals()
+    for i in range(len(vals)):
+        clock.add(vals[i])
+    var signal = ScriptSignal()
+    for _ in range(7):
+        signal.add(String("none"))
+    signal.add(String("pending"))
+    var coll = Collector(cfg^)
+    var res = coll.run(kernel, clock, signal, tee)
+    assert_equal(res.exit_code, 4)
+    assert_equal(res.end_reason, String("signal"))
+    assert_equal(tee.emission_count(), 5)
+    # The pool baseline read shifts the dwell pairs by one,
+    # so the periodic timestamps trail the dwell values.
+    var want_horizons = List[UInt64]()
+    want_horizons.append(UInt64(3500000000))
+    want_horizons.append(UInt64(4500000000))
+    want_horizons.append(UInt64(4500000001))
+    var lines = _prefix_retained_lines(
+        target + String("/events.ndjson")
+    )
+    assert_equal(len(lines), 9)
+    var text = _tee_text(read_host_file(obs, String("obs"), 1048576))
+    var records = text.split(String("\n"))
+    var seen = 0
+    var prev_horizon = UInt64(0)
+    for i in range(len(records)):
+        var rec = String(records[i])
+        if rec.byte_length() == 0:
+            continue
+        var split = _prefix_split_record(rec)
+        if seen < 3:
+            assert_equal(split[0], want_horizons[seen])
+        else:
+            assert_true(split[0] > prev_horizon)
+        prev_horizon = split[0]
+        var end = 0
+        while end < len(lines):
+            if _prefix_line_ts(lines[end]) == split[0]:
+                break
+            end += 1
+        assert_true(end < len(lines))
+        var prefix = List[List[UInt8]]()
+        for j in range(end + 1):
+            prefix.append(lines[j].copy())
+        var want = _tee_direct(
+            tmpl, UInt64(3500000000), prefix, split[0]
+        )
+        assert_equal(split[1], want)
+        seen += 1
+    assert_equal(seen, 5)
+
+
 def _contains_text(hay: String, needle: String) -> Bool:
     if len(needle.as_bytes()) == 0:
         return True
@@ -814,6 +1120,10 @@ def run() raises -> Int:
     suite.test[test_tee_closing_lines_fold]()
     suite.test[test_tee_group_abort_rebuilds_prefix]()
     suite.test[test_tee_abort_all_restarts_clean]()
+    suite.test[test_tee_empty_emits_nothing]()
+    suite.test[test_tee_unavailable_pool_matches_offline]()
+    suite.test[test_tee_loss_matches_offline]()
+    suite.test[test_tee_signal_stop_prefixes_match_offline]()
     suite^.run()
     return 0
 
