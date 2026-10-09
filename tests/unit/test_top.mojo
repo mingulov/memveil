@@ -24,6 +24,7 @@ from memveil.cli.top import (
     WaitSlices,
     _diagnose,
     _live_template,
+    _snapshot_block,
     _wait_interval,
     parse_top_args,
 )
@@ -328,6 +329,21 @@ def _sink_report(horizon: UInt64) raises -> Report:
     return rep^
 
 
+def _sink_report_dev(horizon: UInt64) raises -> Report:
+    """Fold attempts on two devices; snapshot at horizon."""
+    var s = _live_template()
+    s.window_start_ns = UInt64(100)
+    s.window_end_ns = ~UInt64(0)
+    var a = Analyzer(s)
+    var e0 = _sink_attempt("op1", UInt64(0), UInt64(100))
+    var e1 = _sink_attempt("op2", UInt64(1), UInt64(200))
+    e1.bounce.device_id = String("d2")
+    a.consume(e0)
+    a.consume(e1)
+    var rep = a.snapshot(horizon, False)
+    return rep^
+
+
 def _sink_text(data: List[UInt8]) raises -> String:
     try:
         return String(from_utf8=Span(data))
@@ -403,6 +419,42 @@ def test_sink_seq_increments() raises:
     assert_true(ok1)
     var raw = read_host_file(out, String("out"), 1048576)
     assert_equal(_sink_text(raw), want)
+
+
+def test_sink_filter_matches_replay_render() raises:
+    # The live sink and the replay block printer share the
+    # diagnose-plus-render path: the same analyzer state
+    # with --device renders byte-identical blocks.
+    var scratch = _mkdtemp()
+    var live_out = scratch + String("/live.txt")
+    var replay_out = scratch + String("/replay.txt")
+    var opts = TopOptions()
+    opts.has_device = True
+    opts.device = String("d1")
+    var sink = StdoutSink(opts)
+    var rep = _sink_report_dev(UInt64(200))
+    var saved = _redirect_stdout(live_out)
+    var ok = sink.emit(rep^, UInt64(200))
+    _restore_stdout(saved)
+    assert_true(ok)
+    var s = _live_template()
+    s.window_start_ns = UInt64(100)
+    s.window_end_ns = ~UInt64(0)
+    var a = Analyzer(s)
+    var e0 = _sink_attempt("op1", UInt64(0), UInt64(100))
+    var e1 = _sink_attempt("op2", UInt64(1), UInt64(200))
+    e1.bounce.device_id = String("d2")
+    a.consume(e0)
+    a.consume(e1)
+    var saved2 = _redirect_stdout(replay_out)
+    var rc = _snapshot_block(a, opts, UInt64(200), 1)
+    _restore_stdout(saved2)
+    assert_equal(rc, 0)
+    var live_raw = read_host_file(live_out, String("live"), 1048576)
+    var replay_raw = read_host_file(
+        replay_out, String("replay"), 1048576
+    )
+    assert_equal(_sink_text(live_raw), _sink_text(replay_raw))
 
 
 def test_sink_full_stdout_refuses() raises:
@@ -496,6 +548,7 @@ def run() raises -> Int:
     suite.test[test_sink_emits_numbered_block]()
     suite.test[test_sink_device_filter_displays]()
     suite.test[test_sink_seq_increments]()
+    suite.test[test_sink_filter_matches_replay_render]()
     suite.test[test_sink_full_stdout_refuses]()
     suite.test[test_live_template_provisional]()
     suite^.run()
