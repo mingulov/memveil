@@ -461,6 +461,23 @@ def test_barrier_redrain_covers_late_submit() raises:
     assert_equal(ev.drained_records, 1)
 
 
+def test_stop_complete_gate() raises:
+    # The complete gate opens only on present complete
+    # evidence: missing evidence or a partial outcome keep
+    # exit 4 and the partial terminal channel.
+    var tmp = _stop_mkdtemp()
+    var cfg = CollectorConfig()
+    cfg.output = tmp + String("/cap")
+    var collector = Collector(cfg^)
+    collector.stop_evidence.outcome = String("complete")
+    assert_true(not collector._stop_complete())
+    collector.has_stop_evidence = True
+    collector.stop_evidence.outcome = String("partial")
+    assert_true(not collector._stop_complete())
+    collector.stop_evidence.outcome = String("complete")
+    assert_true(collector._stop_complete())
+
+
 def test_close_requires_ready() raises:
     var ctl = StopController()
     var raised = False
@@ -490,6 +507,7 @@ def run() raises -> Int:
     suite.test[test_barrier_two_writers_staggered_complete]()
     suite.test[test_barrier_begin_races_close]()
     suite.test[test_barrier_redrain_covers_late_submit]()
+    suite.test[test_stop_complete_gate]()
     suite.test[test_failed_admission_close_partial]()
     suite.test[test_closeout_records_stop_evidence]()
     suite.test[test_closeout_detach_failure_partial]()
