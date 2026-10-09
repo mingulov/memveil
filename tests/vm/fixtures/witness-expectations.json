@@ -1,6 +1,6 @@
 {
   "derivation": "Module-script rules from tests/kernel/memveil_dma_oracle.c 0.3.1 (4 ops, sizes 512/1024/2048/4096, even TO / odd FROM, op1 double sync, fail op 2 in f, inner retry map+unmap without sync, phase-distinct witness seeds with pattern self-test) crossed with receipted probe semantics (map-time bounce runs to-device per scripted rule, every normal unmap emits one sync_cpu record, fail cleanup unmap emits none). Frozen before the first 0.3.1 witness boot; no value read from probe or product output.",
-  "frozen_for_module": "0.3.1",
+  "frozen_for_module": "0.4.0",
   "w": {
     "inner_probe": false,
     "ops": 4,

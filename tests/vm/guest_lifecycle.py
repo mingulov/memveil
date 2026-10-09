@@ -804,6 +804,140 @@ def run_witness(gate):
     print("guest_lifecycle: witness exported")
 
 
+def run_canonical(gate):
+    """Fixed canonical lifecycle/copy windows (oracle 0.4.0).
+
+    One window per scenario: nested overlapping mappings,
+    request-only sync, clamped over-sync, early-return sync
+    after unmap, and sequential reuse. Every window runs
+    with bounce readback; the host test compares against
+    the frozen canonical spec.
+    """
+    gate.write_json("identity.json", gate.identity())
+    names = ["identity.json"]
+    cases = (
+        ("n", ["mv_oracle_witness=1", "mv_oracle_delay_ms=100",
+              "mv_oracle_scenario=1"]),
+        ("s", ["mv_oracle_witness=1", "mv_oracle_delay_ms=100",
+              "mv_oracle_scenario=2"]),
+        ("c", ["mv_oracle_witness=1", "mv_oracle_delay_ms=100",
+              "mv_oracle_scenario=3"]),
+        ("e", ["mv_oracle_witness=1", "mv_oracle_delay_ms=100",
+              "mv_oracle_scenario=4"]),
+        ("r", ["mv_oracle_witness=1", "mv_oracle_delay_ms=100",
+              "mv_oracle_scenario=5"]),
+    )
+    for tag, params in cases:
+        gate.clear_dmesg()
+        lc = os.path.join(gate.work, f"{tag}-lc.txt")
+        cp = os.path.join(gate.work, f"{tag}-cp.txt")
+        plc = gate.start_consumer(
+            gate.lc_obj, "mv_lifecycle", LC_SITES, 25, lc)
+        pcp = gate.start_consumer(
+            gate.cp_obj, "mv_copies", CP_SITES, 25, cp)
+        gate.wait_ready(("mv_map_result", "mv_bounce"))
+        gate.insmod(params)
+        time.sleep(5)
+        gate.rmmod()
+        gate.wait_consumer(plc, f"canonical-{tag}-lc")
+        gate.wait_consumer(pcp, f"canonical-{tag}-cp")
+        gate.oracle_log(f"{tag}-oracle.log")
+        names += [f"{tag}-lc.txt", f"{tag}-cp.txt",
+                  f"{tag}-oracle.log"]
+    gate.export(names)
+    print("guest_lifecycle: canonical exported")
+
+
+def run_record3(gate):
+    """Three-channel product record over nested oracle traffic.
+
+    Runs the real `memveil record` with attempt, lifecycle,
+    and copy channels against scenario 1 (nested 4096+1024)
+    using the host-minted ephemeral test profile, then
+    exports the capture plus the oracle log for host-side
+    comparison.
+    """
+    memveil = os.path.join(gate.repo, "build", "memveil")
+    attempt_obj = os.path.join(
+        gate.repo, "build", "bpf", "swiotlb_attempt.bpf.o")
+    profile = os.path.join(
+        gate.repo, "build", "vm", "record3-profile.json")
+    for path in (memveil, attempt_obj, profile):
+        if not os.path.isfile(path):
+            fail(f"missing {path}")
+    gate.write_json("identity.json", gate.identity())
+    gate.clear_dmesg()
+    cap = os.path.join(gate.work, "cap")
+    rec = subprocess.Popen(
+        [memveil, "record",
+         "--duration", "30",
+         "--output", cap,
+         "--object", attempt_obj,
+         "--lc-object", gate.lc_obj,
+         "--cp-object", gate.cp_obj,
+         "--bridge", gate.bridge,
+         "--profile", profile,
+         "--capability",
+         "attempt-trace,mapping-lifecycle,copy-actual"],
+        stdout=subprocess.PIPE,
+        stderr=open(os.path.join(gate.work, "record.stderr"),
+                    "wb"),
+        text=True,
+        bufsize=1,
+        start_new_session=True,
+    )
+    ready = None
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        r, _, _ = select.select([rec.stdout], [], [], 1.0)
+        if r:
+            line = rec.stdout.readline()
+            if line and "ready session=" in line:
+                ready = line.strip()
+                break
+        if rec.poll() is not None:
+            break
+    def record_tail():
+        try:
+            with open(os.path.join(gate.work, "record.stderr"),
+                      "rb") as fh:
+                return fh.read()[-500:].decode(
+                    "utf-8", "replace")
+        except OSError:
+            return ""
+    if ready is None:
+        try:
+            rec.kill()
+        except OSError:
+            pass
+        fail("record never reached readiness: "
+             + record_tail())
+    gate.insmod(["mv_oracle_witness=1",
+                 "mv_oracle_delay_ms=100",
+                 "mv_oracle_scenario=1"])
+    time.sleep(8)
+    gate.rmmod()
+    try:
+        rc = rec.wait(timeout=120)
+    except subprocess.TimeoutExpired:
+        rec.kill()
+        rec.wait()
+        fail("record did not exit: " + record_tail())
+    gate.write_json("record.json", {"exit": rc, "ready": ready})
+    gate.oracle_log("r3-oracle.log")
+    for name in ("session.json", "events.ndjson"):
+        src = os.path.join(cap, name)
+        if not os.path.isfile(src):
+            fail(f"capture lacks {name}")
+        shutil.copyfile(
+            src, os.path.join(gate.work, "cap-" + name))
+    gate.export(["identity.json", "record.json",
+                 "cap-session.json", "cap-events.ndjson",
+                 "r3-oracle.log"])
+    print(f"guest_lifecycle: record3 exported record_exit={rc} "
+          f"stderr_tail={record_tail()!r}")
+
+
 SUBS = {
     "matrix": run_matrix,
     "copy": run_copy,
@@ -814,6 +948,8 @@ SUBS = {
     "perf": run_perf,
     "oracle": run_oracle,
     "witness": run_witness,
+    "canonical": run_canonical,
+    "record3": run_record3,
 }
 
 

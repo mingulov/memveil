@@ -9,7 +9,7 @@ Attaches tracing programs (``prog:symbol`` pairs in <sites>) from
 ``mv_copies``) for <seconds>, and writes decoded event lines plus
 a summary line to <out>:
 
-  lc kind=1 ok=1 skip=0 dir=1 seq=0 ktime=... size=512
+  lc kind=1 ok=1 skip=0 dir=1 seq=0 ktime=... size=512 gen=7
   cp kind=2 todev=1 known=1 clamp=0 ezero=0 dir=1 reason=0 ...
   summary observed=.. badframe=.. badrec=.. cnt_obs=.. ...
 
@@ -39,7 +39,7 @@ from libbpf_mojo.session import AttachSpec, Session
 
 comptime EACCES = Int32(-13)
 
-comptime LC_LEN = 36
+comptime LC_LEN = 44
 comptime LC_MAGIC = UInt32(0x434C564D)
 comptime CP_LEN = 48
 comptime CP_MAGIC = UInt32(0x5043564D)
@@ -48,6 +48,9 @@ comptime LC_KIND_MAP = UInt32(1)
 comptime LC_KIND_UNMAP = UInt32(2)
 comptime LC_FLAG_OK = UInt32(1)
 comptime LC_FLAG_SKIP_SYNC = UInt32(2)
+comptime LC_FLAG_GEN_MISS = UInt32(4)
+comptime LC_FLAG_GEN_UNASSIGNED = UInt32(8)
+comptime LC_GEN_MAX = UInt64(0xFFFFFFFFFFFFFFFE)
 
 comptime CP_KIND_SYNC = UInt32(1)
 comptime CP_KIND_COPY = UInt32(2)
@@ -92,7 +95,7 @@ def le_bytes(value: UInt64, count: Int) -> List[UInt8]:
 
 
 def decode_lc(payload: List[UInt8]) raises Fail -> String:
-    """Decode one 36-byte lifecycle record (header check order)."""
+    """Decode one 44-byte v2 lifecycle record (header check order)."""
     if len(payload) < LC_LEN:
         raise Fail(1, String("lc short"))
     if len(payload) > LC_LEN:
@@ -100,13 +103,22 @@ def decode_lc(payload: List[UInt8]) raises Fail -> String:
     var base = Span(payload).unsafe_ptr()
     if read_u32_le(base, 0) != LC_MAGIC:
         raise Fail(1, String("lc magic"))
-    if read_u16_le(base, 4) != UInt32(1):
+    if read_u16_le(base, 4) != UInt32(2):
         raise Fail(1, String("lc version"))
     var kind = read_u16_le(base, 6)
     if kind != LC_KIND_MAP and kind != LC_KIND_UNMAP:
         raise Fail(1, String("lc kind"))
     var flags = read_u16_le(base, 8)
-    if flags & ~(LC_FLAG_OK | LC_FLAG_SKIP_SYNC) != UInt32(0):
+    if (
+        flags
+        & ~(
+            LC_FLAG_OK
+            | LC_FLAG_SKIP_SYNC
+            | LC_FLAG_GEN_MISS
+            | LC_FLAG_GEN_UNASSIGNED
+        )
+        != UInt32(0)
+    ):
         raise Fail(1, String("lc flags"))
     var direction = read_u16_le(base, 10)
     if direction > UInt32(2):
@@ -114,14 +126,38 @@ def decode_lc(payload: List[UInt8]) raises Fail -> String:
     var seq = read_u64_le(base, 12)
     var ktime = read_u64_le(base, 20)
     var size = read_u64_le(base, 28)
+    var gen = read_u64_le(base, 36)
+    if gen > LC_GEN_MAX:
+        raise Fail(1, String("lc gen range"))
     var ok = UInt32(1) if (flags & LC_FLAG_OK) != UInt32(0) else UInt32(0)
     var skip = (
         UInt32(1)
         if (flags & LC_FLAG_SKIP_SYNC) != UInt32(0)
         else UInt32(0)
     )
+    var miss = (
+        UInt32(1) if (flags & LC_FLAG_GEN_MISS) != UInt32(0) else UInt32(0)
+    )
+    var unassigned = (
+        UInt32(1)
+        if (flags & LC_FLAG_GEN_UNASSIGNED) != UInt32(0)
+        else UInt32(0)
+    )
     if (kind == LC_KIND_MAP and skip != 0) or (kind == LC_KIND_UNMAP and ok != 1):
         raise Fail(1, String("lc flag relation"))
+    if kind == LC_KIND_MAP and ok == 1:
+        if miss != 0:
+            raise Fail(1, String("lc map miss"))
+        if (unassigned != 0) != (gen == 0):
+            raise Fail(1, String("lc map gen flag"))
+    if kind == LC_KIND_MAP and ok == 0:
+        if flags != UInt32(0) or gen != 0:
+            raise Fail(1, String("lc failed map shape"))
+    if kind == LC_KIND_UNMAP:
+        if unassigned != 0:
+            raise Fail(1, String("lc unmap unassigned"))
+        if (miss != 0) != (gen == 0):
+            raise Fail(1, String("lc unmap gen flag"))
     var line = String("lc kind=")
     line += u32_to_str(kind)
     line += String(" ok=")
@@ -136,6 +172,8 @@ def decode_lc(payload: List[UInt8]) raises Fail -> String:
     line += u64_to_str(ktime)
     line += String(" size=")
     line += u64_to_str(size)
+    line += String(" gen=")
+    line += u64_to_str(gen)
     return line^
 
 

@@ -29,7 +29,7 @@ LC_SIZES = (512, 1024, 2048, 4096)
 
 LC_LINE = re.compile(
     r"^lc kind=(\d+) ok=(\d+) skip=(\d+) dir=(\d+)"
-    r" seq=(\d+) ktime=(\d+) size=(\d+)$"
+    r" seq=(\d+) ktime=(\d+) size=(\d+) gen=(\d+)$"
 )
 CP_LINE = re.compile(
     r"^cp kind=(\d+) todev=(\d+) known=(\d+) clamp=(\d+)"
@@ -49,12 +49,17 @@ ORACLE_OUTCOME = re.compile(
     r"^op=(\d+) outcome=(success|failure)"
     r"(?: mapping=(\d+) mapped=(\d+)| rc=(-\d+|-EIO))?$"
 )
-ORACLE_SYNC = re.compile(r"^op=(\d+) mapping=(\d+) sync dir=(\d+) len=(\d+)$")
+ORACLE_SYNC = re.compile(
+    r"^op=(\d+) mapping=(\d+) sync dir=(\d+) len=(\d+)"
+    r"(?: for=(device|cpu))?(?: stale=1)?$"
+)
 ORACLE_RELEASE = re.compile(r"^mapping=(\d+) release lifetime_ns=(\d+)$")
 ORACLE_COMPLETE = re.compile(r"^script complete ops=(\d+)$")
 ORACLE_WITNESS = re.compile(
-    r"^op=(\d+) mapping=(\d+) witness copy=(map|sync|release|inner-map)"
-    r" copied=(\d+) verified=(\d+)$"
+    r"^op=(\d+) mapping=(\d+)"
+    r" witness copy=(map|sync|release|inner-map|clamped|early)"
+    r" copied=(\d+) verified=(\d+)"
+    r"(?: pre=(\d+) post=(\d+))?(?: stale=(\d+))?$"
 )
 ORACLE_INNER_MAP = re.compile(
     r"^op=(\d+) inner-probe map ok=(\d+) mapped=(\d+)$"
@@ -116,6 +121,7 @@ def parse_consume_file(path):
                 "seq": int(match.group(5)),
                 "ktime": int(match.group(6)),
                 "size": int(match.group(7)),
+                "gen": int(match.group(8)),
             })
             continue
         match = CP_LINE.match(line)
@@ -297,7 +303,11 @@ def parse_oracle_log(path):
             if hit:
                 entry = op_entry(int(hit.group(1)))
                 entry["syncs"].append(
-                    {"mapping": int(hit.group(2)), "dir": int(hit.group(3)), "len": int(hit.group(4))})
+                    {"mapping": int(hit.group(2)),
+                     "dir": int(hit.group(3)),
+                     "len": int(hit.group(4)),
+                     "for": hit.group(5) or "device",
+                     "stale": hit.group(0).endswith("stale=1")})
                 continue
             hit = ORACLE_RELEASE.match(body)
             if hit:
@@ -314,11 +324,16 @@ def parse_oracle_log(path):
             hit = ORACLE_WITNESS.match(body)
             if hit:
                 entry = op_entry(int(hit.group(1)))
-                entry.setdefault("witness", []).append(
-                    {"mapping": int(hit.group(2)),
-                     "copy": hit.group(3),
-                     "copied": int(hit.group(4)),
-                     "verified": int(hit.group(5))})
+                wit = {"mapping": int(hit.group(2)),
+                       "copy": hit.group(3),
+                       "copied": int(hit.group(4)),
+                       "verified": int(hit.group(5))}
+                if hit.group(6) is not None:
+                    wit["pre"] = int(hit.group(6))
+                    wit["post"] = int(hit.group(7))
+                if hit.group(8) is not None:
+                    wit["stale"] = int(hit.group(8))
+                entry.setdefault("witness", []).append(wit)
                 continue
             hit = ORACLE_INNER_MAP.match(body)
             if hit:
@@ -540,8 +555,14 @@ def check_oracle_script(ops_log, releases, complete_ops, ops,
             bad.append("%s: op %d %d syncs want %d"
                        % (tag, i, len(syncs), want_syncs))
         for sync in syncs:
-            if sync != {"mapping": i, "dir": want_dir, "len": want_size}:
+            core = {k: sync[k] for k in ("mapping", "dir", "len")}
+            if core != {"mapping": i, "dir": want_dir,
+                        "len": want_size}:
                 bad.append("%s: op %d sync %r" % (tag, i, sync))
+            if sync.get("for", "device") != "device" or sync.get(
+                    "stale", False):
+                bad.append("%s: op %d nonstandard sync %r"
+                           % (tag, i, sync))
     want_released = sorted(i for i in range(ops) if i != fail_op)
     if sorted(releases) != want_released:
         bad.append("%s: released %r want %r"
@@ -689,6 +710,19 @@ def replay_oracle_witness_ledger(ops_log, releases):
                 raise ValueError(
                     "op %d witness names mapping %d"
                     % (i, w["mapping"]))
+            if w["copy"] == "clamped":
+                if w.get("pre") != w["verified"] or "post" not in w:
+                    raise ValueError(
+                        "op %d clamped witness lacks pre/post proof"
+                        % i)
+                witnessed.setdefault("clamped", []).append(
+                    w["verified"])
+                continue
+            if w["copy"] == "early":
+                if w["verified"] != 0 or w.get("stale") != w["copied"]:
+                    raise ValueError(
+                        "op %d early witness lacks stale proof" % i)
+                continue
             if w["verified"] != w["copied"]:
                 raise ValueError(
                     "op %d %s witnessed %d of %d bytes"
@@ -743,6 +777,9 @@ def replay_oracle_witness_ledger(ops_log, releases):
             ledger.record_copy(i, "original_to_bounce", copied,
                                mapping=i, witnessed=copied)
         for copied in witnessed.get("sync", []):
+            ledger.record_copy(i, "original_to_bounce", copied,
+                               mapping=i, witnessed=copied)
+        for copied in witnessed.get("clamped", []):
             ledger.record_copy(i, "original_to_bounce", copied,
                                mapping=i, witnessed=copied)
         for copied in witnessed.get("release", []):
