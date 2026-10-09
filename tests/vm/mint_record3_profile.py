@@ -205,8 +205,9 @@ def apply_tracing(doc, lc_obj, cp_obj, lc_reason,
     from the current builds, and both extra caps flipped to
     supported. Accepts a pre-flip 8-field base note or a
     post-flip 12-field note (base verified, tracing fields
-    rebuilt); hooks append idempotently. Warns when shipped
-    tracing pins differ from the current builds.
+    rebuilt); kept hooks verify their frozen tuple before the
+    idempotent skip. Warns when shipped tracing pins differ
+    from the current builds.
     """
     if TRACE_HOOKS != frozen_scan_hooks():
         fail("minter tracing set drifts from scan fixture")
@@ -237,9 +238,17 @@ def apply_tracing(doc, lc_obj, cp_obj, lc_reason,
               "current builds; ephemeral doc rebuilt",
               file=sys.stderr)
     doc["identity"]["source"]["note"] = note
-    have = {h["name"] for h in doc["hooks"]}
+    have = {h["name"]: h for h in doc["hooks"]}
     for name, function, attach, signature in TRACE_HOOKS:
         if name in have:
+            kept = have[name]
+            if (kept.get("kind"), kept.get("function"),
+                    kept.get("attach"),
+                    kept.get("signature")) != (
+                        "tracing", function, attach,
+                        signature):
+                fail("shipped hook drifts from frozen set: "
+                     + name)
             continue
         doc["hooks"].append({"name": name, "kind": "tracing",
                              "function": function,
