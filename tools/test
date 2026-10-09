@@ -904,7 +904,8 @@ suite_lifetimes() {
 }
 
 suite_pools() {
-    run_unit_file tests/unit/test_pools.mojo
+    run_unit_file tests/unit/test_pools.mojo || return 1
+    run_unit_file tests/unit/test_pool_timer.mojo
 }
 
 suite_regions() {
@@ -1815,6 +1816,18 @@ suite_attempts() {
         4 data.allocator swiotlb || afailed=1
     python3 "$JASSERT" eventfield "$TMP/pool/events.ndjson" \
         4 data.unit_bytes 2048 || afailed=1
+    # Periodic pool sampling stops at 4096 with a session
+    # note: every iteration fires (deadline read plus
+    # sample-timestamp read: two scripted seconds per fire)
+    # until the cap latches, then the remaining iterations
+    # drain the clock to the deadline without sampling.
+    poolcap_kinds=$(python3 -c "print(','.join(['pool_sample'] * 4096 + ['counter_snapshot'] * 4 + ['pool_sample'] * 2))")
+    mcase poolcap 4 5004 5 4 9012 1692322 "$poolcap_kinds"
+    mqual poolcap complete_for_scope 0 complete_for_scope 0 proven
+    mreplay4 poolcap 0 0 0 0
+    python3 "$JASSERT" field "$TMP/poolcap/session.json" \
+        capabilities.pool_stats.reason "default-pool debugfs samples at capture start and close plus 4096 periodic samples (1s cadence); periodic sampling stopped at 4096 (count cap)" \
+        || afailed=1
     # Live-adapter refusal contract: the real kernel (bad
     # bridge) plus a real fresh writer must end refused
     # (exit 3) with no residuals and no output dir.
@@ -1857,7 +1870,7 @@ suite_attempts() {
         echo "attempts: close-out matrix FAILED" >&2
         return 1
     fi
-    echo "attempts: close-out matrix passed (45 cases)"
+    echo "attempts: close-out matrix passed (46 cases)"
     return 0
 }
 
