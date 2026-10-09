@@ -43,6 +43,10 @@ def load(path):
 def want(text, value):
     if text == "null":
         return value is None
+    if text == "true":
+        return value is True
+    if text == "false":
+        return value is False
     return value == text
 
 

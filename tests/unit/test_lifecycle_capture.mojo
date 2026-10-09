@@ -726,5 +726,27 @@ def test_stop_open_mappings_saturate() raises:
         _contains(c.session, String('"open_mappings":"0"')))
 
 
+def test_stop_open_mappings_balance_limit() raises:
+    # The wire count is a persisted-event balance, not an
+    # inventory: an unpaired unmap masks a still-open map
+    # made after it. Pin the specified arithmetic so the
+    # limit stays explicit.
+    var payloads = List[List[UInt8]]()
+    payloads.append(
+        _lc_raw(2, 3, 2, UInt64(141), UInt64(1041),
+                UInt64(4096), UInt64(9)))
+    payloads.append(
+        _lc_raw(1, 1, 1, UInt64(142), UInt64(1042),
+                UInt64(4096), UInt64(41)))
+    var c = _run(
+        payloads^, _zero_cut(),
+        _cut(UInt64(2), UInt64(8192), UInt64(2), UInt64(8192)),
+        UInt64(2), _zero_cut(), UInt64(0))
+    assert_equal(c.exit_code, EXIT_PARTIAL)
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(c.session, String('"open_mappings":"0"')))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

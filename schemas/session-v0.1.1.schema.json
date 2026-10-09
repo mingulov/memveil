@@ -279,6 +279,10 @@
       "required": ["outcome", "reason", "budget_ms", "elapsed_ms", "admission_closed", "quiescence_observed", "writers_settled", "in_flight_at_close", "late_submits_drained", "drained_records", "busy_at_drain", "counters_valid", "open_mappings"],
       "additionalProperties": false,
       "description": "Terminal stop evidence: which of the six stop stages proved what. outcome complete carries an empty reason; outcome partial carries the first unproven stage. drained_records counts consumed close-out batches; payloads stay undecoded by design.",
+      "allOf": [
+        {"if": {"properties": {"outcome": {"const": "complete"}}}, "then": {"properties": {"reason": {"const": ""}}}},
+        {"if": {"properties": {"outcome": {"const": "partial"}}}, "then": {"properties": {"reason": {"minLength": 1}}}}
+      ],
       "properties": {
         "outcome": {"enum": ["complete", "partial"]},
         "reason": {"type": "string", "maxLength": 512},

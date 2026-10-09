@@ -1292,6 +1292,51 @@ def run_selftest():
 
     check("schema-files", schema_files)
 
+    def schema_stop_outcome_reason():
+        path = repo_path("schemas", "session-v0.1.1.schema.json")
+        with open(path, "r", encoding="utf-8") as handle:
+            obj = json.load(handle, object_pairs_hook=_no_dupes)
+        rules = obj["$defs"]["stop_state"].get("allOf")
+        want = [
+            ({"outcome": {"const": "complete"}},
+             {"reason": {"const": ""}}),
+            ({"outcome": {"const": "partial"}},
+             {"reason": {"minLength": 1}}),
+        ]
+        if not isinstance(rules, list) or len(rules) != 2:
+            fail("bad-schema", "stop_state allOf")
+        for rule, (cond, then) in zip(rules, want):
+            if (rule.get("if", {}).get("properties") != cond
+                    or rule.get("then", {}).get("properties") != then):
+                fail("bad-schema", "stop_state outcome/reason rule")
+        return "stop_state pins outcome/reason"
+
+    check("schema-stop-outcome-reason", schema_stop_outcome_reason)
+
+    def stop_obj(outcome, reason):
+        obj = {"outcome": outcome, "reason": reason}
+        for key in ("budget_ms", "elapsed_ms", "writers_settled",
+                    "in_flight_at_close", "late_submits_drained",
+                    "drained_records", "open_mappings"):
+            obj[key] = "0"
+        for key in ("admission_closed", "quiescence_observed",
+                    "busy_at_drain", "counters_valid"):
+            obj[key] = False
+        return obj
+
+    def stop_complete_with_reason():
+        check_stop(stop_obj("complete", "x"))
+
+    def stop_partial_without_reason():
+        check_stop(stop_obj("partial", ""))
+
+    results.append(expect_reject("stop-complete-with-reason",
+                                 stop_complete_with_reason,
+                                 "bad-stop"))
+    results.append(expect_reject("stop-partial-without-reason",
+                                 stop_partial_without_reason,
+                                 "bad-stop"))
+
     def profile_reference():
         obj = read_json_file(
             repo_path("profiles", "linux-x86_64-7.0-reference.json"),

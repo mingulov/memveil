@@ -74,7 +74,12 @@ Two separations are load-bearing:
   events minus persisted `unmap` events, saturating at
   zero: failed maps never count as opened, and an unmap
   surplus (unpaired unmaps persist) reports zero, never a
-  wrapped value.
+  wrapped value. It is a persisted-event balance, not a
+  mapping inventory: an unpaired unmap can mask a
+  still-open mapping (unmap for B, then a successful map
+  for A, reports zero while A is open), and duplicate
+  records can skew either side. Consumers must not treat
+  it as an exact per-mapping census.
 
 The `drain_closure` provenance item has a precisely narrow
 meaning: `proven` means only that close-out noted no

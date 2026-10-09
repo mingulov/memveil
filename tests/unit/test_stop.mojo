@@ -23,6 +23,10 @@ from scripted import (
     stats_ok,
 )
 from memveil.capture.collector import (
+    CNT_FLAGS,
+    EXIT_OK,
+    EXIT_PARTIAL,
+    FLAG_OBSERVED_WRAP,
     Collector,
     CollectorConfig,
     PollOut,
@@ -366,7 +370,8 @@ def test_barrier_submit_after_drain_partial() raises:
     # reservation is still held; A submits late. The drain's
     # boundary claim is stale, so the stop stays partial even
     # though every writer settles and the transport never
-    # reported BUSY.
+    # reported BUSY. The late submit is observed but covered
+    # by no drain.
     var ctl = StopController()
     ctl.mark_ready()
     var w = ctl.writer_begin()
@@ -381,7 +386,7 @@ def test_barrier_submit_after_drain_partial() raises:
     var ev = ctl.finalize(0)
     assert_equal(ev.outcome, String("partial"))
     assert_equal(ev.reason, String("late submit past drain"))
-    assert_equal(ev.late_submits_drained, 1)
+    assert_equal(ev.late_submits_drained, 0)
     assert_equal(ev.drained_records, 0)
 
 
@@ -478,6 +483,149 @@ def test_stop_complete_gate() raises:
     assert_true(collector._stop_complete())
 
 
+def test_barrier_redrain_invalidates_sample() raises:
+    # Stage order is drain, then sample: a counter sample
+    # taken before the last drain cannot cover later
+    # activity, so finalizing without re-sampling stays
+    # partial even though every writer settles.
+    var ctl = StopController()
+    ctl.mark_ready()
+    var w = ctl.writer_begin()
+    assert_true(w)
+    ctl.writer_reserve()
+    ctl.close_admission()
+    ctl.drain(0, False)
+    ctl.sample_counters(True)
+    ctl.writer_submit()
+    ctl.writer_settle()
+    ctl.observe_quiescence()
+    ctl.drain(1, False)
+    var ev = ctl.finalize(0)
+    assert_equal(ev.outcome, String("partial"))
+    assert_equal(ev.reason, String("final counter sample failed"))
+    assert_true(not ev.counters_valid)
+
+
+def test_finalize_seals_evidence() raises:
+    # Finalization is terminal: a second finalize raises
+    # instead of erasing an established failure. A budget
+    # failure proved once cannot become complete.
+    var ctl = StopController()
+    ctl.mark_ready()
+    ctl.close_admission()
+    ctl.observe_quiescence()
+    ctl.drain(0, False)
+    ctl.sample_counters(True)
+    var ev = ctl.finalize_over_budget(STOP_BUDGET_MS + 1, 0)
+    assert_equal(ev.outcome, String("partial"))
+    assert_equal(ev.reason, String("stop budget exhausted"))
+    var raised = False
+    try:
+        _ = ctl.finalize(0)
+    except:
+        raised = True
+    assert_true(raised)
+
+
+def test_barrier_in_flight_snapshot_at_close() raises:
+    # in_flight_at_close snapshots writers live at the
+    # close: a writer that settles before the close is
+    # settled, not in flight.
+    var ctl = StopController()
+    ctl.mark_ready()
+    var a = ctl.writer_begin()
+    assert_true(a)
+    ctl.writer_settle()
+    var b = ctl.writer_begin()
+    assert_true(b)
+    ctl.close_admission()
+    ctl.writer_settle()
+    ctl.observe_quiescence()
+    ctl.drain(0, False)
+    ctl.sample_counters(True)
+    var ev = ctl.finalize(0)
+    assert_equal(ev.outcome, String("complete"))
+    assert_equal(ev.writers_settled, 2)
+    assert_equal(ev.in_flight_at_close, 1)
+
+
+def test_final_exit_requires_detail_sufficiency() raises:
+    # Exit 0 needs both settled termination and
+    # sufficient requested detail: complete stop evidence
+    # with a partial or unavailable detail channel stays
+    # exit 4, judged on the assembled session.
+    var tmp = _stop_mkdtemp()
+    var cfg = CollectorConfig()
+    cfg.output = tmp + String("/cap")
+    var collector = Collector(cfg^)
+    collector.has_stop_evidence = True
+    collector.stop_evidence.outcome = String("complete")
+    var s = Session()
+    s.q_detail.status = String("partial")
+    assert_equal(collector._final_exit_code(s), EXIT_PARTIAL)
+    s.q_detail.status = String("unavailable")
+    assert_equal(collector._final_exit_code(s), EXIT_PARTIAL)
+    s.q_detail.status = String("complete_for_scope")
+    assert_equal(collector._final_exit_code(s), EXIT_OK)
+    collector.stop_evidence.outcome = String("partial")
+    assert_equal(collector._final_exit_code(s), EXIT_PARTIAL)
+
+
+def test_stop_counters_require_usable_cuts() raises:
+    # counters_valid mirrors the run's own epoch verdict:
+    # a stable cut with wrap flags (evaluate's invalid
+    # epoch) or a broken count identity is not valid.
+    var tmp = _stop_mkdtemp()
+    var cfg = CollectorConfig()
+    cfg.output = tmp + String("/cap")
+    var collector = Collector(cfg^)
+    assert_true(not collector._stop_counters_valid())
+    var clean = List[UInt64]()
+    for _ in range(6):
+        clean.append(UInt64(0))
+    collector.end_vals = clean.copy()
+    collector.has_end_cut = True
+    assert_true(collector._stop_counters_valid())
+    collector.end_vals[CNT_FLAGS] = FLAG_OBSERVED_WRAP
+    assert_true(not collector._stop_counters_valid())
+
+
+def test_stop_finalize_elapsed_honest() raises:
+    # Elapsed milliseconds round up: 5000.9 ms of
+    # close-out exceeds the 5000 ms budget instead of
+    # truncating into it. A regressing finalize stamp
+    # notes a clock failure instead of silently
+    # serializing zero.
+    var tmp = _stop_mkdtemp()
+    var cfg = CollectorConfig()
+    cfg.output = tmp + String("/cap")
+    var collector = Collector(cfg^)
+    collector.stop_ctl.mark_ready()
+    collector.stop_ctl.close_admission()
+    collector.stop_ctl.observe_quiescence()
+    collector.stop_ctl.drain(0, False)
+    collector.stop_ctl.sample_counters(True)
+    collector.detach_ns = UInt64(1000000000)
+    collector._stop_finalize(UInt64(6000900000))
+    assert_equal(collector.stop_evidence.elapsed_ms, 5001)
+    assert_equal(
+        collector.stop_evidence.reason,
+        String("stop budget exhausted"),
+    )
+    var cfg2 = CollectorConfig()
+    cfg2.output = tmp + String("/cap2")
+    var reg = Collector(cfg2^)
+    reg.stop_ctl.mark_ready()
+    reg.stop_ctl.close_admission()
+    reg.stop_ctl.observe_quiescence()
+    reg.stop_ctl.drain(0, False)
+    reg.stop_ctl.sample_counters(True)
+    reg.detach_ns = UInt64(1000000000)
+    reg._stop_finalize(UInt64(7))
+    assert_equal(reg.stop_evidence.elapsed_ms, 0)
+    assert_equal(reg.unknown_cause, String("stop clock regressed"))
+
+
 def test_close_requires_ready() raises:
     var ctl = StopController()
     var raised = False
@@ -502,12 +650,18 @@ def run() raises -> Int:
     suite.test[test_open_mappings_do_not_block_quiescence]()
     suite.test[test_budget_exhaustion_partial]()
     suite.test[test_finalize_requires_close]()
+    suite.test[test_finalize_seals_evidence]()
     suite.test[test_close_requires_ready]()
     suite.test[test_barrier_submit_after_drain_partial]()
     suite.test[test_barrier_two_writers_staggered_complete]()
     suite.test[test_barrier_begin_races_close]()
     suite.test[test_barrier_redrain_covers_late_submit]()
+    suite.test[test_barrier_redrain_invalidates_sample]()
+    suite.test[test_barrier_in_flight_snapshot_at_close]()
     suite.test[test_stop_complete_gate]()
+    suite.test[test_final_exit_requires_detail_sufficiency]()
+    suite.test[test_stop_counters_require_usable_cuts]()
+    suite.test[test_stop_finalize_elapsed_honest]()
     suite.test[test_failed_admission_close_partial]()
     suite.test[test_closeout_records_stop_evidence]()
     suite.test[test_closeout_detach_failure_partial]()

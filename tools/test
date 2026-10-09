@@ -1368,6 +1368,8 @@ suite_attempts() {
         stop.outcome partial || afailed=1
     python3 "$JASSERT" field "$TMP/zero/session.json" \
         stop.reason "quiescence unproven" || afailed=1
+    python3 "$JASSERT" field "$TMP/zero/session.json" \
+        stop.counters_valid true || afailed=1
     python3 "$JASSERT" evidence "$TMP/zero/session.json" \
         drain_closure proven || afailed=1
     python3 "$JASSERT" events "$TMP/zero/events.ndjson" \
@@ -1578,14 +1580,20 @@ suite_attempts() {
     mreplay4 lateemit 2 128 absent absent
     mcase wrapobs 4 104 5 4 15 400 "gap"
     mqual wrapobs partial null unavailable null "unknown: invalid epoch"
+    python3 "$JASSERT" field "$TMP/wrapobs/session.json" \
+        stop.counters_valid false || afailed=1
     mgap wrapobs 0 "detail closure unproven: invalid epoch"
     mreplay4 wrapobs 0 0 absent absent
     mcase wrapemit 4 104 5 4 15 400 "gap"
     mqual wrapemit partial null unavailable null "unknown: invalid epoch"
+    python3 "$JASSERT" field "$TMP/wrapemit/session.json" \
+        stop.counters_valid false || afailed=1
     mgap wrapemit 0 "detail closure unproven: invalid epoch"
     mreplay4 wrapemit 0 0 absent absent
     mcase wrapsubmit 4 104 5 4 15 400 "gap"
     mqual wrapsubmit partial null unavailable null "unknown: invalid epoch"
+    python3 "$JASSERT" field "$TMP/wrapsubmit/session.json" \
+        stop.counters_valid false || afailed=1
     mgap wrapsubmit 0 "detail closure unproven: invalid epoch"
     mreason wrapsubmit "detail loss unknown (invalid epoch; known: submit_fail=(unavailable) malformed=(0) dropped=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
     mreplay4 wrapsubmit 0 0 absent absent
