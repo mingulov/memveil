@@ -166,6 +166,40 @@ def validate_lifecycle_exports(got,sub):
             integer(doc['exit'],True)
             if type(doc['ready']) is not str or 'ready session=' not in doc['ready']:
                 raise ValueError('invalid record readiness')
+        elif name=='bundle.json':
+            doc=strict_json(path.read_text())
+            keys(doc,('tarball','tarball_sha','manifest_sha','files_verified','verified',
+                      'bin_sha','attempt_sha','lc_sha','cp_sha','bridge_sha',
+                      'report_exit','phases','console_tail'))
+            if type(doc['tarball']) is not str or not doc['tarball'].endswith('.tar.gz'):
+                raise ValueError('invalid bundle tarball name')
+            for k in ('tarball_sha','manifest_sha','bin_sha','attempt_sha','lc_sha','cp_sha','bridge_sha'):
+                sha(doc[k])
+            integer(doc['files_verified'])
+            if doc['verified'] is not True: raise ValueError('bundle verification failed')
+            integer(doc['report_exit'],True)
+            phases=doc['phases']
+            keys(phases,('oracle','fail','io'))
+            order=[]
+            for tag in ('oracle','fail','io'):
+                window=phases[tag]
+                if type(window) is not list or len(window) != 2: raise ValueError('invalid bundle phase')
+                integer(window[0]);integer(window[1])
+                if window[0] >= window[1]: raise ValueError('empty bundle phase')
+                order.append(window)
+            if not order[0][1] <= order[1][0] <= order[1][1] <= order[2][0]:
+                raise ValueError('bundle phases overlap')
+            if type(doc['console_tail']) is not str or len(doc['console_tail']) > 2048:
+                raise ValueError('invalid bundle console tail')
+        elif name=='report.json':
+            doc=strict_json(path.read_text())
+            for k in ('schema_version','session_id','quality','metrics'):
+                if k not in doc: raise ValueError('report lacks '+k)
+            session=strict_json(got['cap-session.json'].read_text())
+            if doc['session_id'] != session['session_id']:
+                raise ValueError('report session mismatch')
+            if type(doc['metrics']) is not list or not doc['metrics']:
+                raise ValueError('report lacks metrics')
         else: raise ValueError('unrecognized lifecycle export '+name)
 
 

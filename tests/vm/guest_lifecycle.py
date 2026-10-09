@@ -938,6 +938,257 @@ def run_record3(gate):
           f"stderr_tail={record_tail()!r}")
 
 
+def verify_extracted_bundle(root):
+    """Check the extracted tree against its own MANIFEST.json."""
+    manifest_path = os.path.join(root, "MANIFEST.json")
+    with open(manifest_path) as fh:
+        manifest = json.load(fh)
+    files = manifest["files"]
+    seen = set()
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            full = os.path.join(dirpath, name)
+            if os.path.islink(full):
+                fail(f"bundle symlink not allowed: {full}")
+            rel = os.path.relpath(full, root)
+            if rel == "MANIFEST.json":
+                continue
+            seen.add(rel)
+    if seen != set(files):
+        fail(f"bundle file set drift: "
+             f"{sorted(seen ^ set(files))[:8]}")
+    for rel, want in files.items():
+        if sha_file(os.path.join(root, rel)) != want:
+            fail(f"bundle hash mismatch: {rel}")
+    return manifest
+
+
+def await_record_ready(rec, work):
+    """Wait for the record readiness line; fail with stderr tail."""
+    def tail():
+        try:
+            with open(os.path.join(work, "record.stderr"),
+                      "rb") as fh:
+                return fh.read()[-500:].decode("utf-8", "replace")
+        except OSError:
+            return ""
+    ready = None
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        r, _, _ = select.select([rec.stdout], [], [], 1.0)
+        if r:
+            line = rec.stdout.readline()
+            if line and "ready session=" in line:
+                ready = line.strip()
+                break
+        if rec.poll() is not None:
+            break
+    if ready is None:
+        try:
+            rec.kill()
+        except OSError:
+            pass
+        fail("record never reached readiness: " + tail())
+    return ready, tail
+
+
+def run_bundle(gate):
+    """Shipped bundle, three phases, extracted-binary report.
+
+    Extracts dist/memveil-0.1.0.tar.gz, verifies every file
+    against MANIFEST.json (no symlinks, exact set, exact
+    hashes), and runs the extracted record with all three
+    channels through oracle-exact, outer-failure, and
+    block+vnet phases in one capture. The extracted report
+    renders the capture; bundle.json retains phases, hashes,
+    and the console tail.
+    """
+    tarball = os.path.join(gate.repo, "dist",
+                           "memveil-0.1.0.tar.gz")
+    profile = os.path.join(
+        gate.repo, "build", "vm", "record3-profile.json")
+    for path in (tarball, profile):
+        if not os.path.isfile(path):
+            fail(f"missing {path}")
+    gate.write_json("identity.json", gate.identity())
+    extract = os.path.join(gate.work, "extract")
+    os.makedirs(extract)
+    r = sh(["tar", "xzf", tarball, "-C", extract])
+    if r.returncode != 0:
+        fail(f"bundle extract failed: {r.stderr.strip()[-200:]}")
+    root = os.path.join(extract, "memveil-0.1.0")
+    manifest = verify_extracted_bundle(root)
+    bundle_bin = os.path.join(root, "bin", "memveil")
+    bundle_bridge = os.path.join(root, "lib", "libbpf_mojo.so.1")
+    bundle_objs = {
+        "attempt": os.path.join(root, "bpf",
+                                "swiotlb_attempt.bpf.o"),
+        "lc": os.path.join(root, "bpf",
+                           "swiotlb_lifecycle.bpf.o"),
+        "cp": os.path.join(root, "bpf", "swiotlb_copy.bpf.o"),
+    }
+    build_objs = {
+        "attempt": os.path.join(
+            gate.repo, "build", "bpf", "swiotlb_attempt.bpf.o"),
+        "lc": gate.lc_obj,
+        "cp": gate.cp_obj,
+    }
+    for key in ("attempt", "lc", "cp"):
+        if sha_file(bundle_objs[key]) != sha_file(
+                build_objs[key]):
+            fail(f"bundle {key} object differs from build")
+    iface = find_pcnet()
+    configure_net(iface)
+    gate.write_json("identity.json",
+                    dict(gate.identity(), iface=iface))
+    before_disks = scsi_disks()
+    used_before = gate.io_tlb_samples()
+    cap = os.path.join(gate.work, "cap")
+    rec = subprocess.Popen(
+        [bundle_bin, "record",
+         "--duration", "150",
+         "--output", cap,
+         "--object", bundle_objs["attempt"],
+         "--lc-object", bundle_objs["lc"],
+         "--cp-object", bundle_objs["cp"],
+         "--bridge", bundle_bridge,
+         "--profile", profile,
+         "--capability",
+         "attempt-trace,mapping-lifecycle,copy-actual"],
+        stdout=subprocess.PIPE,
+        stderr=open(os.path.join(gate.work, "record.stderr"),
+                    "wb"),
+        text=True,
+        bufsize=1,
+        start_new_session=True,
+    )
+    ready, tail = await_record_ready(rec, gate.work)
+    phases = {}
+    gate.clear_dmesg()
+    phases["oracle"] = [mono_ns()]
+    gate.insmod(["mv_oracle_witness=1",
+                 "mv_oracle_delay_ms=100",
+                 "mv_oracle_scenario=1"])
+    time.sleep(8)
+    gate.rmmod()
+    time.sleep(2)
+    phases["oracle"].append(mono_ns())
+    gate.oracle_log("o-oracle.log")
+    gate.clear_dmesg()
+    phases["fail"] = [mono_ns()]
+    gate.insmod(["mv_oracle_witness=1",
+                 "mv_oracle_delay_ms=100",
+                 "mv_oracle_fail_op=2",
+                 "mv_oracle_inner_probe=1"])
+    time.sleep(10)
+    gate.rmmod()
+    time.sleep(2)
+    phases["fail"].append(mono_ns())
+    gate.oracle_log("f-oracle.log")
+    workload = {"iface": iface, "used_before": used_before}
+    phases["io"] = [mono_ns()]
+    workload["start_ns"] = phases["io"][0]
+    # Low-rate I/O: the F2-6 bar is exact low-rate comparison,
+    # not flood absorption (burst overrun under the rotating
+    # poll quantum is F2-7's sparse-channel-busy subject).
+    ping = sh(["timeout", "60", "ping", "-A", "-c", "200",
+               "-q", "10.0.3.2"])
+    if ping.returncode != 0:
+        fail(f"ping workload failed: {ping.stderr.strip()[-300:]}")
+    sent = re.search(r"(\d+) packets transmitted", ping.stdout)
+    rcvd = re.search(r"(\d+) received", ping.stdout)
+    workload["ping_tx"] = int(sent.group(1)) if sent else None
+    workload["ping_rx"] = int(rcvd.group(1)) if rcvd else None
+    if os.path.exists("/sys/module/scsi_debug"):
+        fail("scsi_debug already exists; no fixture ownership")
+    r = sh(["modprobe", "scsi_debug", "dev_size_mb=64"])
+    if r.returncode != 0:
+        fail(f"scsi_debug failed: {r.stderr.strip()}")
+    new = None
+    for _ in range(30):
+        extra = scsi_disks() - before_disks
+        if extra:
+            new = sorted(extra)[0]
+            break
+        time.sleep(0.5)
+    if new is None:
+        fail("scsi_debug disk never appeared")
+    dev = f"/dev/{new}"
+    model = os.path.join("/sys/block", new, "device", "model")
+    try:
+        with open(model) as fh:
+            if "scsi_debug" not in fh.read():
+                fail(f"{dev} is not the scsi_debug disk")
+    except OSError:
+        fail(f"{dev} has no model file")
+    workload["disk"] = dev
+    rd = sh(["dd", f"if={dev}", "of=/dev/null", "bs=64k",
+             "count=8", "iflag=direct"])
+    if rd.returncode != 0:
+        fail(f"disk read failed: {rd.stderr.strip()[-200:]}")
+    wr = sh(["dd", "if=/dev/zero", f"of={dev}", "bs=64k",
+             "count=8", "oflag=direct"])
+    if wr.returncode != 0:
+        fail(f"disk write failed: {wr.stderr.strip()[-200:]}")
+    workload["disk_bytes"] = 2 * 8 * 65536
+    with open(os.path.join("/sys/block", new, "device",
+                           "delete"), "w") as fh:
+        fh.write("1")
+    r = sh(["rmmod", "scsi_debug"])
+    if r.returncode != 0:
+        fail(f"scsi_debug rmmod failed: {r.stderr.strip()}")
+    workload["end_ns"] = mono_ns()
+    phases["io"].append(workload["end_ns"])
+    try:
+        rc = rec.wait(timeout=180)
+    except subprocess.TimeoutExpired:
+        rec.kill()
+        rec.wait()
+        fail("record did not exit: " + tail())
+    workload["detach_ns"] = mono_ns()
+    time.sleep(2)
+    workload["used_after"] = gate.io_tlb_samples()
+    gate.write_json("record.json", {"exit": rc, "ready": ready})
+    gate.write_json("workload.json", workload)
+    rep = sh([bundle_bin, "report", "--format", "json", cap])
+    report_path = os.path.join(gate.work, "report.json")
+    with open(report_path, "w") as fh:
+        fh.write(rep.stdout)
+    try:
+        with open(report_path) as fh:
+            json.load(fh)
+    except ValueError:
+        fail("extracted report emitted invalid JSON")
+    for name in ("session.json", "events.ndjson"):
+        src = os.path.join(cap, name)
+        if not os.path.isfile(src):
+            fail(f"capture lacks {name}")
+        shutil.copyfile(
+            src, os.path.join(gate.work, "cap-" + name))
+    gate.write_json("bundle.json", {
+        "tarball": "memveil-0.1.0.tar.gz",
+        "tarball_sha": sha_file(tarball),
+        "manifest_sha": sha_file(
+            os.path.join(root, "MANIFEST.json")),
+        "files_verified": len(manifest["files"]),
+        "verified": True,
+        "bin_sha": sha_file(bundle_bin),
+        "attempt_sha": sha_file(bundle_objs["attempt"]),
+        "lc_sha": sha_file(bundle_objs["lc"]),
+        "cp_sha": sha_file(bundle_objs["cp"]),
+        "bridge_sha": sha_file(bundle_bridge),
+        "report_exit": rep.returncode,
+        "phases": phases,
+        "console_tail": (ready + "\n" + tail())[-2048:],
+    })
+    gate.export(["identity.json", "record.json",
+                 "cap-session.json", "cap-events.ndjson",
+                 "o-oracle.log", "f-oracle.log",
+                 "workload.json", "bundle.json", "report.json"])
+    print(f"guest_lifecycle: bundle exported record_exit={rc} "
+          f"report_exit={rep.returncode}")
+
+
 SUBS = {
     "matrix": run_matrix,
     "copy": run_copy,
@@ -950,6 +1201,7 @@ SUBS = {
     "witness": run_witness,
     "canonical": run_canonical,
     "record3": run_record3,
+    "bundle": run_bundle,
 }
 
 

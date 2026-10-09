@@ -1001,7 +1001,8 @@ suite_vm_lifecycle() {
     python3 -m pytest "$ROOT/tests/vm/test_lifecycle.py" \
         "$ROOT/tests/vm/test_witness.py" \
         "$ROOT/tests/vm/test_canonical.py" \
-        "$ROOT/tests/vm/test_record3.py" -q
+        "$ROOT/tests/vm/test_record3.py" \
+        "$ROOT/tests/vm/test_bundle.py" -q
 }
 
 suite_vm_copy() {

@@ -62,8 +62,9 @@ def _events(path):
                 if line.strip()]
 
 
-def check_record3_capture(events, session, record, tag):
-    """Exact scenario-1 multisets plus generation pairing."""
+def check_capture_session(events, session, record, tag,
+                          span_lo, span_hi, profile_id):
+    """Session-wide record admission, quality, and ordering."""
     bad = []
     if record["exit"] != 4:
         bad.append("%s: record exit %r != 4 (bounded)"
@@ -71,17 +72,18 @@ def check_record3_capture(events, session, record, tag):
     if session["capture"]["finalized"] is not True:
         bad.append("%s: capture not finalized" % tag)
     decision = evidence(session, "profile.decision")
-    if decision != ("candidate record3-ephemeral: "
-                    "bindings hold (profile unvalidated)"):
+    if decision != ("candidate %s: "
+                    "bindings hold (profile unvalidated)"
+                    % profile_id):
         bad.append("%s: profile decision %r" % (tag, decision))
     if session["capture"].get("end_reason") != "duration":
         bad.append("%s: end_reason %r"
                    % (tag, session["capture"].get("end_reason")))
     window = session["capture"]["window"]
     span = int(window["end_ns"]) - int(window["start_ns"])
-    if not 20_000_000_000 <= span <= 45_000_000_000:
-        bad.append("%s: window span %d ns != ~30 s"
-                   % (tag, span))
+    if not span_lo <= span <= span_hi:
+        bad.append("%s: window span %d ns outside [%d, %d]"
+                   % (tag, span, span_lo, span_hi))
     for channel in ("detail", "aggregate"):
         quality = session["quality"][channel]
         if quality["status"] != "complete_for_scope":
@@ -102,6 +104,41 @@ def check_record3_capture(events, session, record, tag):
     if session["quality"]["terminal"]["status"] != "partial":
         bad.append("%s: terminal quality %r"
                    % (tag, session["quality"]["terminal"]))
+    seqs = [int(e["seq"]) for e in events]
+    if seqs != sorted(seqs) or len(set(seqs)) != len(seqs):
+        bad.append("%s: event seq not ordered unique" % tag)
+    sids = {e["session_id"] for e in events}
+    if sids != {session["session_id"]}:
+        bad.append("%s: session ids %r" % (tag, sids))
+    return bad
+
+
+def check_lifetimes(maps, unmaps, tag, exact):
+    """Generation-paired release order; lifetimes never negative."""
+    bad = []
+    born = {}
+    for event in maps:
+        gen = event["data"]["wire_generation"]
+        if gen is None:
+            continue
+        born.setdefault(gen, int(event["ts_ns"]))
+    for event in unmaps:
+        gen = event["data"]["wire_generation"]
+        if gen not in born:
+            bad.append("%s: unmap without map gen %r"
+                       % (tag, gen))
+        elif int(event["ts_ns"]) < born[gen]:
+            bad.append("%s: negative lifetime gen %r" % (tag, gen))
+    if exact and sorted(
+            e["data"]["wire_generation"] for e in unmaps
+            ) != sorted(born):
+        bad.append("%s: unmap gens differ from map gens" % tag)
+    return bad
+
+
+def check_oracle_slice(events, tag):
+    """Exact scenario-1 multisets plus generation pairing."""
+    bad = []
     kinds = {}
     for event in events:
         kinds.setdefault(event["kind"], []).append(event)
@@ -122,26 +159,9 @@ def check_record3_capture(events, session, record, tag):
     if len(copies) != 2:
         bad.append("%s: want 2 copy, got %d"
                    % (tag, len(copies)))
-    if len(attempts) < 2:
-        bad.append("%s: want >=2 bounce_attempt, got %d"
+    if len(attempts) != 2:
+        bad.append("%s: want 2 bounce_attempt, got %d"
                    % (tag, len(attempts)))
-    snaps = kinds.get("counter_snapshot", [])
-    ends = {}
-    for snap in snaps:
-        ends.setdefault(snap["data"]["counter_id"], []).append(
-            snap["data"]["value"])
-    if sorted(ends.get("swiotlb.bounce_attempts", [])) != [
-            "0", "2"]:
-        bad.append("%s: attempt counter %r" % (tag, ends))
-    if sorted(ends.get("swiotlb.requested_bytes", [])) != [
-            "0", "5120"]:
-        bad.append("%s: bytes counter %r" % (tag, ends))
-    pools = kinds.get("pool_sample", [])
-    if len(pools) != 2:
-        bad.append("%s: want 2 pool_sample, got %d"
-                   % (tag, len(pools)))
-    elif pools[-1]["data"]["used_bytes"] != "0":
-        bad.append("%s: pool not drained %r" % (tag, pools))
     if sorted(e["data"]["mapped_bytes"] for e in maps
               ) != ["1024", "4096"]:
         bad.append("%s: map sizes %r"
@@ -154,11 +174,7 @@ def check_record3_capture(events, session, record, tag):
         bad.append("%s: map gen unassigned %r" % (tag, gens))
     if len(set(gens)) != 2:
         bad.append("%s: maps share gen %r" % (tag, gens))
-    if sorted(e["data"]["wire_generation"] for e in unmaps
-              ) != sorted(gens):
-        bad.append("%s: unmap gens %r != map gens %r"
-                   % (tag, [e["data"].get("wire_generation")
-                            for e in unmaps], gens))
+    bad += check_lifetimes(maps, unmaps, tag, True)
     if sorted(e["data"]["length"] for e in syncs
               ) != ["1024", "4096"]:
         bad.append("%s: sync lengths %r" % (tag, syncs))
@@ -172,12 +188,36 @@ def check_record3_capture(events, session, record, tag):
     for e in copies:
         if e["data"]["direction"] != "original_to_bounce":
             bad.append("%s: copy dir %r" % (tag, e))
-    seqs = [int(e["seq"]) for e in events]
-    if seqs != sorted(seqs) or len(set(seqs)) != len(seqs):
-        bad.append("%s: event seq not ordered unique" % tag)
-    sids = {e["session_id"] for e in events}
-    if sids != {session["session_id"]}:
-        bad.append("%s: session ids %r" % (tag, sids))
+    return bad
+
+
+def check_record3_capture(events, session, record, tag):
+    """Session checks plus whole-capture scenario-1 multisets."""
+    bad = check_capture_session(
+        events, session, record, tag,
+        20_000_000_000, 45_000_000_000, "record3-ephemeral")
+    bad += check_oracle_slice(events, tag)
+    kinds = {}
+    for event in events:
+        kinds.setdefault(event["kind"], []).append(event)
+    ends = {}
+    for snap in kinds.get("counter_snapshot", []):
+        ends.setdefault(snap["data"]["counter_id"], []).append(
+            snap["data"]["value"])
+    if sorted(ends.get("swiotlb.bounce_attempts", [])) != [
+            "0", "2"]:
+        bad.append("%s: attempt counter %r" % (tag, ends))
+    if sorted(ends.get("swiotlb.requested_bytes", [])) != [
+            "0", "5120"]:
+        bad.append("%s: bytes counter %r" % (tag, ends))
+    pools = kinds.get("pool_sample", [])
+    if len(pools) != 2:
+        bad.append("%s: want 2 pool_sample, got %d"
+                   % (tag, len(pools)))
+    elif pools[-1]["data"]["used_bytes"] != pools[0][
+            "data"]["used_bytes"]:
+        bad.append("%s: pool not drained to baseline %r"
+                   % (tag, pools))
     return sorted(bad)
 
 
