@@ -903,7 +903,7 @@ def translate_session(lc_events, cp_events, ops_log, out_dir,
     start = min(e["ktime"] for e in lc_events + cp_events) - 1
     end = max(e["ktime"] for e in lc_events + cp_events) + 1
     session = {
-        "schema_version": "0.1.0",
+        "schema_version": "0.1.1",
         "session_id": session_id,
         "synthetic": True,
         "product": {"name": "memveil", "version": "0.1.0",
@@ -946,6 +946,19 @@ def translate_session(lc_events, cp_events, ops_log, out_dir,
                          "loss_count": "0",
                          "scope": "gate finalization",
                          "reason": "Reconstructed fixture; writer quiescence not proved."}},
+        "stop": {"outcome": "partial",
+                 "reason": "Reconstructed fixture; writer quiescence not proved.",
+                 "budget_ms": "5000",
+                 "elapsed_ms": "0",
+                 "admission_closed": False,
+                 "quiescence_observed": False,
+                 "writers_settled": "0",
+                 "in_flight_at_close": "0",
+                 "late_submits_drained": "0",
+                 "drained_records": "0",
+                 "busy_at_drain": False,
+                 "counters_valid": False,
+                 "open_mappings": "0"},
     }
     for cap, hook in (
             ("bounce_attempts", "swiotlb:swiotlb_bounced"),

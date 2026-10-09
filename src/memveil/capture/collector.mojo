@@ -47,6 +47,11 @@ from memveil.capture.pools import (
     NormalizedPoolSample,
     sample_default_pool,
 )
+from memveil.capture.stop import (
+    STOP_BUDGET_MS,
+    StopController,
+    StopEvidence,
+)
 from memveil.model.encode import (
     EncodeError,
     encode_event_line,
@@ -77,6 +82,7 @@ from memveil.platform.reader import (
 )
 from memveil.platform.signal import SignalOut, SignalSource
 
+comptime EXIT_OK = 0
 comptime EXIT_ERROR = 1
 comptime EXIT_INVALID = 2
 comptime EXIT_REFUSAL = 3
@@ -586,6 +592,7 @@ struct Collector:
     var persisted: UInt64
     var persisted_attempt: UInt64
     var persisted_map: UInt64
+    var persisted_map_ok: UInt64
     var persisted_unmap: UInt64
     var persisted_copy: UInt64
     var persisted_sync: UInt64
@@ -640,6 +647,12 @@ struct Collector:
     var pool_next_ts: UInt64
     var pool_periodic: Int
     var pool_periodic_capped: Bool
+    var stop_ctl: StopController
+    var stop_drained: Int
+    var stop_drain_busy: Bool
+    var stop_misuse: Bool
+    var stop_evidence: StopEvidence
+    var has_stop_evidence: Bool
 
     def __init__(out self, cfg: CollectorConfig):
         self.cfg = cfg.copy()
@@ -649,6 +662,7 @@ struct Collector:
         self.persisted = UInt64(0)
         self.persisted_attempt = UInt64(0)
         self.persisted_map = UInt64(0)
+        self.persisted_map_ok = UInt64(0)
         self.persisted_unmap = UInt64(0)
         self.persisted_copy = UInt64(0)
         self.persisted_sync = UInt64(0)
@@ -775,6 +789,26 @@ struct Collector:
         self.pool_next_ts = UInt64(0)
         self.pool_periodic = 0
         self.pool_periodic_capped = False
+        self.stop_ctl = StopController()
+        self.stop_drained = 0
+        self.stop_drain_busy = False
+        self.stop_misuse = False
+        self.stop_evidence = StopEvidence(
+            String("partial"),
+            String("stop evidence missing"),
+            STOP_BUDGET_MS,
+            0,
+            False,
+            False,
+            0,
+            0,
+            0,
+            0,
+            False,
+            False,
+            0,
+        )
+        self.has_stop_evidence = False
 
     def note_unknown(mut self, cause: String):
         """First deviation wins; later ones are retained."""
@@ -797,6 +831,107 @@ struct Collector:
         """Error trigger: immutable latch + monotonic error."""
         self.latch(reason)
         self.result_state = String("error")
+
+    def _stop_close(mut self, detached_ok: Bool):
+        """Record the detach outcome as admission close/fail.
+
+        Misuse is impossible by construction (ready runs
+        close exactly once); the fallback keeps evidence
+        total and loud if it ever happens.
+        """
+        try:
+            if detached_ok:
+                self.stop_ctl.close_admission()
+            else:
+                self.stop_ctl.fail_close()
+        except:
+            self.stop_misuse = True
+            self.result_state = String("error")
+            self.note_unknown(String("stop protocol misuse"))
+
+    def _stop_record_drain(mut self, records: Int, busy: Bool):
+        try:
+            self.stop_ctl.drain(records, busy)
+        except:
+            self.stop_misuse = True
+            self.result_state = String("error")
+            self.note_unknown(String("stop protocol misuse"))
+
+    def _stop_counters_valid(self) -> Bool:
+        if not self.has_end_cut:
+            return False
+        if self.cfg.has_lifecycle and not self.has_end_cut_lc:
+            return False
+        if self.cfg.has_copy and not self.has_end_cut_cp:
+            return False
+        return True
+
+    def _stop_open_mappings(self) -> Int:
+        var open = UInt64(0)
+        if self.persisted_map_ok > self.persisted_unmap:
+            open = self.persisted_map_ok - self.persisted_unmap
+        if open > UInt64(9223372036854775807):
+            return 9223372036854775807
+        return Int(open)
+
+    def _stop_finalize(mut self, t1_ns: UInt64):
+        """Finalize stop evidence over the close-out window.
+
+        Elapsed runs detach to finalize (one clock read per
+        run). Quiescence is never observed here: without the
+        kernel-side protocol no consumer signal proves
+        admitted writers settled, so live evidence always
+        carries quiescence unproven.
+        """
+        var elapsed = UInt64(0)
+        if t1_ns >= self.detach_ns:
+            elapsed = (t1_ns - self.detach_ns) // UInt64(1000000)
+        if elapsed > UInt64(9223372036854775807):
+            elapsed = UInt64(9223372036854775807)
+        var ms = Int(elapsed)
+        if self.stop_misuse:
+            self.stop_evidence = StopEvidence(
+                String("partial"),
+                String("stop protocol misuse"),
+                STOP_BUDGET_MS,
+                ms,
+                False,
+                False,
+                0,
+                0,
+                0,
+                0,
+                False,
+                False,
+                0,
+            )
+        else:
+            try:
+                self.stop_evidence = (
+                    self.stop_ctl.finalize_over_budget(
+                        ms, self._stop_open_mappings()
+                    )
+                )
+            except:
+                self.stop_misuse = True
+                self.result_state = String("error")
+                self.note_unknown(String("stop protocol misuse"))
+                self.stop_evidence = StopEvidence(
+                    String("partial"),
+                    String("stop protocol misuse"),
+                    STOP_BUDGET_MS,
+                    ms,
+                    False,
+                    False,
+                    0,
+                    0,
+                    0,
+                    0,
+                    False,
+                    False,
+                    0,
+                )
+        self.has_stop_evidence = True
 
     def omit_for_latch(mut self):
         """Count one crossed/drained record to the latch."""
@@ -1120,6 +1255,7 @@ struct Collector:
             + String(" start_ns=")
             + format_u64(self.start_ns)
         )
+        self.stop_ctl.mark_ready()
         return String("")
 
     def poll_one[K: KernelSource](
@@ -1370,9 +1506,15 @@ struct Collector:
         except:
             self.result_state = String("unfinalizable")
             return String("unfinalizable")
-        return self._persist_line(
+        var ok_map = (
+            ev.kind == String("map_result") and ev.map_result.success
+        )
+        var res = self._persist_line(
             writer, line^, decoded.size, decoded.ktime, ev.kind
         )
+        if res == String("") and ok_map:
+            self.persisted_map_ok += UInt64(1)
+        return res
 
     def _admit_copy[
         C: ClockSource, G: SignalSource, W: WriterSource
@@ -1430,6 +1572,7 @@ struct Collector:
         """DETACHING -> SETTLE -> DRAINING -> STATS -> CONFIRM."""
         var detached = kernel.detach()
         self.detach_ns = clock.now()
+        self._stop_close(detached.ok)
         if not detached.ok:
             self.note_unknown(String("detach failed; shutdown evidence unresolved"))
         clock.sleep_ms(SETTLE_MS)
@@ -1457,6 +1600,14 @@ struct Collector:
         else:
             self.note_unknown(String("error shutdown"))
         self.confirm(kernel)
+        self.stop_ctl.sample_counters(self._stop_counters_valid())
+        var drain_busy = (
+            self.stop_drain_busy
+            or not drain_stats.ok
+            or drain_stats.staged != UInt64(0)
+        )
+        self._stop_record_drain(self.stop_drained, drain_busy)
+        self._stop_finalize(clock.now())
         if self.cfg.has_pool_sample:
             # Final pool sample, held for the closing path with
             # its true timestamp (always before t_close, so the
@@ -1469,7 +1620,14 @@ struct Collector:
     def drain[K: KernelSource, C: ClockSource](
         mut self, mut kernel: K, mut clock: C
     ):
-        """Bounded consume-and-count; every record omitted."""
+        """Bounded consume-and-count; every record omitted.
+
+        Consumed batches feed the stop drain count; any
+        unsettled exit (budget, error, unreadable stats)
+        marks the drain busy. Confirm-phase batches stay
+        out: they arrive after the end cut and note their
+        own deviation.
+        """
         var start = clock.now()
         var budget_s = checked_add(start, UInt64(DRAIN_MAX_S) * UInt64(1000000000))
         var prev_received = u64_max()
@@ -1479,18 +1637,22 @@ struct Collector:
             var now = clock.now()
             if now >= budget_s:
                 self.note_unknown(String("drain budget exhausted"))
+                self.stop_drain_busy = True
                 return
             var out = self.poll_one(kernel, 0)
             if out.kind == String("batch"):
+                self.stop_drained += 1
                 self.omit_for_latch()
                 continue
             if out.kind != String("timeout"):
                 self.note_unknown(String("error shutdown"))
                 self.result_state = String("error")
+                self.stop_drain_busy = True
                 return
             var stats = kernel.stats()
             if not stats.ok:
                 self.note_unknown(String("error shutdown"))
+                self.stop_drain_busy = True
                 return
             if have_prev and stats.staged == UInt64(0):
                 if (
@@ -1502,6 +1664,7 @@ struct Collector:
             prev_malformed = stats.malformed
             have_prev = True
         self.note_unknown(String("drain budget exhausted"))
+        self.stop_drain_busy = True
 
     def confirm[K: KernelSource](mut self, mut kernel: K):
         """Bounded confirmation drain after the end snapshot."""
@@ -1555,6 +1718,7 @@ struct Collector:
         """ERROR_DETACH -> ERROR_STATS -> FINALIZING; no drain."""
         var detached = kernel.detach()
         self.detach_ns = clock.now()
+        self._stop_close(detached.ok)
         if not detached.ok:
             self.note_unknown(String("detach failed; shutdown evidence unresolved"))
         var final = kernel.stats()
@@ -1580,6 +1744,8 @@ struct Collector:
             self.pool_final = fin[0]
             self.pool_final_ts = fin[1]
             self.pool_has_final = True
+        self.stop_ctl.sample_counters(self._stop_counters_valid())
+        self._stop_finalize(clock.now())
         if self.unknown_cause == String(""):
             self.note_unknown(String("error shutdown"))
         return self.finish(clock, writer)
@@ -2098,8 +2264,14 @@ struct Collector:
                     EXIT_ERROR, reason, String("error"),
                     self.diagnostic(done.note),
                 )
+            var code = EXIT_PARTIAL
+            if (
+                self.has_stop_evidence
+                and self.stop_evidence.outcome == String("complete")
+            ):
+                code = EXIT_OK
             return RunResult(
-                EXIT_PARTIAL, reason, String("finalized"),
+                code, reason, String("finalized"),
                 self.diagnostic(String("")),
             )
         if done.status == String("present_unsynced"):
@@ -2480,12 +2652,40 @@ struct Collector:
         out.q_baseline.has_loss_count = False
         out.q_baseline.scope = String("attempt metrics")
         out.q_baseline.reason = String("Attempt metrics need no baseline.")
-        out.q_terminal.status = String("partial")
-        out.q_terminal.has_loss_count = False
-        out.q_terminal.scope = String("capture finalization")
-        out.q_terminal.reason = String(
-            "terminal settlement unproven; stop protocol not yet proven"
-        )
+        var stop = self.stop_evidence
+        out.stop.outcome = stop.outcome
+        out.stop.reason = stop.reason
+        out.stop.budget_ms = UInt64(stop.stop_budget_ms)
+        out.stop.elapsed_ms = UInt64(stop.elapsed_ms)
+        out.stop.admission_closed = stop.admission_closed
+        out.stop.quiescence_observed = stop.quiescence_observed
+        out.stop.writers_settled = UInt64(stop.writers_settled)
+        out.stop.in_flight_at_close = UInt64(stop.in_flight_at_close)
+        out.stop.late_submits_drained = UInt64(stop.late_submits_drained)
+        out.stop.drained_records = UInt64(stop.drained_records)
+        out.stop.busy_at_drain = stop.busy_at_drain
+        out.stop.counters_valid = stop.counters_valid
+        out.stop.open_mappings = UInt64(stop.open_mappings)
+        if (
+            self.has_stop_evidence
+            and stop.outcome == String("complete")
+        ):
+            out.q_terminal.status = String("complete_for_scope")
+            out.q_terminal.has_loss_count = False
+            out.q_terminal.scope = String("capture finalization")
+            out.q_terminal.reason = String(
+                "stop complete: all stages proved"
+            )
+        else:
+            out.q_terminal.status = String("partial")
+            out.q_terminal.has_loss_count = False
+            out.q_terminal.scope = String("capture finalization")
+            out.q_terminal.reason = (
+                String("stop ")
+                + stop.outcome
+                + String(": ")
+                + stop.reason
+            )
         for i in range(len(self.cfg.evidence)):
             var item = self.cfg.evidence[i]
             var kept = EvidenceItem()

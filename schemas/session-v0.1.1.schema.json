@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "session-v0.1.0.schema.json",
+  "$id": "session-v0.1.1.schema.json",
   "title": "MemVeil capture session",
-  "description": "Immutable session identity plus finalized status and health. Reconstructed producer contract, format version 0.1.0, independent of product version.",
+  "description": "Immutable session identity plus finalized status and health. Reconstructed producer contract, format version 0.1.1, independent of product version.",
   "type": "object",
   "required": [
     "schema_version",
@@ -14,13 +14,14 @@
     "device_catalog",
     "baseline",
     "capabilities",
-    "quality"
+    "quality",
+    "stop"
   ],
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": "0.1.0",
-      "description": "External format version. Unknown major versions fail; this schema accepts 0.1.0 only."
+      "const": "0.1.1",
+      "description": "External format version. Unknown versions fail; this schema accepts 0.1.1 only."
     },
     "session_id": {
       "$ref": "#/$defs/opaque_id"
@@ -184,6 +185,9 @@
         "terminal": {"$ref": "#/$defs/channel"}
       },
       "description": "Independent quality channels. Detail loss never implies aggregate loss and conversely."
+    },
+    "stop": {
+      "$ref": "#/$defs/stop_state"
     }
   },
   "$defs": {
@@ -268,6 +272,27 @@
           "maxItems": 32,
           "items": {"type": "string", "minLength": 1, "maxLength": 256}
         }
+      }
+    },
+    "stop_state": {
+      "type": "object",
+      "required": ["outcome", "reason", "budget_ms", "elapsed_ms", "admission_closed", "quiescence_observed", "writers_settled", "in_flight_at_close", "late_submits_drained", "drained_records", "busy_at_drain", "counters_valid", "open_mappings"],
+      "additionalProperties": false,
+      "description": "Terminal stop evidence: which of the six stop stages proved what. outcome complete carries an empty reason; outcome partial carries the first unproven stage. drained_records counts consumed close-out batches; payloads stay undecoded by design.",
+      "properties": {
+        "outcome": {"enum": ["complete", "partial"]},
+        "reason": {"type": "string", "maxLength": 512},
+        "budget_ms": {"$ref": "#/$defs/u64"},
+        "elapsed_ms": {"$ref": "#/$defs/u64"},
+        "admission_closed": {"type": "boolean"},
+        "quiescence_observed": {"type": "boolean"},
+        "writers_settled": {"$ref": "#/$defs/u64"},
+        "in_flight_at_close": {"$ref": "#/$defs/u64"},
+        "late_submits_drained": {"$ref": "#/$defs/u64"},
+        "drained_records": {"$ref": "#/$defs/u64"},
+        "busy_at_drain": {"type": "boolean"},
+        "counters_valid": {"type": "boolean"},
+        "open_mappings": {"$ref": "#/$defs/u64"}
       }
     }
   }

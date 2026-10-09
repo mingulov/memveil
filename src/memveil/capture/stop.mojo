@@ -9,7 +9,9 @@ stage records what it proved; finalization reports `complete`
 only when admission closed, every admitted writer settled, the
 drain reached its boundary, and the final counter sample
 succeeded. Anything less yields `partial` with a named reason,
-never a silent complete.
+never a silent complete. A failed admission close finalizes
+through `fail_close` with its own reason; the close is never
+claimed when the detach failed.
 
 A quiet ring proves nothing by itself: zero drained records
 with unsettled writers (or without observed quiescence) stays
@@ -63,6 +65,7 @@ struct StopController:
 
     var _ready: Bool
     var _closed: Bool
+    var _close_ok: Bool
     var _in_flight: Int
     var _reserved: Int
     var _settled: Int
@@ -77,6 +80,7 @@ struct StopController:
     def __init__(out self):
         self._ready = False
         self._closed = False
+        self._close_ok = False
         self._in_flight = 0
         self._reserved = 0
         self._settled = 0
@@ -129,6 +133,15 @@ struct StopController:
         if self._closed:
             raise StopError("close_admission twice")
         self._closed = True
+        self._close_ok = True
+
+    def fail_close(mut self) raises:
+        """Record a failed admission close; finalizes partial."""
+        if not self._ready:
+            raise StopError("fail_close before mark_ready")
+        if self._closed:
+            raise StopError("fail_close twice")
+        self._closed = True
 
     def try_quiescence(mut self) -> Bool:
         """True once every admitted writer settled."""
@@ -169,7 +182,10 @@ struct StopController:
             raise StopError("finalize before close_admission")
         var reason = String("")
         var complete = True
-        if not self._quiesced:
+        if not self._close_ok:
+            complete = False
+            reason = String("admission close failed")
+        elif not self._quiesced:
             complete = False
             reason = String("quiescence unproven")
         elif not self._has_drained:
@@ -192,7 +208,7 @@ struct StopController:
             reason,
             STOP_BUDGET_MS,
             elapsed_ms,
-            True,
+            self._close_ok,
             self._quiesced,
             self._settled,
             self._settled + self._in_flight,

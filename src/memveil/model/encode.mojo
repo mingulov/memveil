@@ -27,6 +27,7 @@ from memveil.model.session import (
     DeviceEntry,
     EvidenceItem,
     Session,
+    StopState,
 )
 from memveil.model.validate import format_u64
 
@@ -729,4 +730,45 @@ def encode_session(s: Session) raises EncodeError -> String:
         _member(String("terminal"), _encode_channel(s.q_terminal))
     )
     parts.append(_member(String("quality"), _jobj(quality^)))
+    parts.append(_member(String("stop"), _encode_stop(s.stop)))
+    return _jobj(parts^)
+
+
+def _encode_stop(st: StopState) raises EncodeError -> String:
+    var parts = List[String]()
+    parts.append(_member(String("outcome"), _jstr(st.outcome)))
+    parts.append(_member(String("reason"), _jstr(st.reason)))
+    parts.append(_member(String("budget_ms"), _ju64(st.budget_ms)))
+    parts.append(_member(String("elapsed_ms"), _ju64(st.elapsed_ms)))
+    parts.append(
+        _member(String("admission_closed"), _jbool(st.admission_closed))
+    )
+    parts.append(
+        _member(
+            String("quiescence_observed"), _jbool(st.quiescence_observed)
+        )
+    )
+    parts.append(
+        _member(String("writers_settled"), _ju64(st.writers_settled))
+    )
+    parts.append(
+        _member(String("in_flight_at_close"), _ju64(st.in_flight_at_close))
+    )
+    parts.append(
+        _member(
+            String("late_submits_drained"), _ju64(st.late_submits_drained)
+        )
+    )
+    parts.append(
+        _member(String("drained_records"), _ju64(st.drained_records))
+    )
+    parts.append(
+        _member(String("busy_at_drain"), _jbool(st.busy_at_drain))
+    )
+    parts.append(
+        _member(String("counters_valid"), _jbool(st.counters_valid))
+    )
+    parts.append(
+        _member(String("open_mappings"), _ju64(st.open_mappings))
+    )
     return _jobj(parts^)

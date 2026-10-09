@@ -676,5 +676,55 @@ def test_lifecycle_geometry_refuses() raises:
     assert_true(missing)
 
 
+def test_stop_open_mappings_exact() raises:
+    # Two successful maps, one unmap, one failed map:
+    # the stop wire reports exactly one open mapping
+    # (failed maps never count as opened).
+    var payloads = List[List[UInt8]]()
+    payloads.append(
+        _lc_raw(1, 1, 1, UInt64(121), UInt64(1021),
+                UInt64(4096), UInt64(41)))
+    payloads.append(
+        _lc_raw(1, 1, 1, UInt64(122), UInt64(1022),
+                UInt64(4096), UInt64(42)))
+    payloads.append(
+        _lc_raw(2, 3, 2, UInt64(123), UInt64(1023),
+                UInt64(4096), UInt64(41)))
+    payloads.append(
+        _lc_raw(1, 0, 1, UInt64(124), UInt64(1024),
+                UInt64(4096), UInt64(0)))
+    var c = _run(
+        payloads^, _zero_cut(),
+        _cut(UInt64(4), UInt64(16384), UInt64(4), UInt64(16384)),
+        UInt64(4), _zero_cut(), UInt64(0))
+    assert_equal(c.exit_code, EXIT_PARTIAL)
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(c.session, String('"open_mappings":"1"')))
+    assert_true(
+        _contains(c.session, String('"outcome":"partial"')))
+
+
+def test_stop_open_mappings_saturate() raises:
+    # A failed map plus an unpaired unmap: unmaps outrun
+    # successful maps, so open mappings saturate at zero
+    # instead of wrapping.
+    var payloads = List[List[UInt8]]()
+    payloads.append(
+        _lc_raw(1, 0, 1, UInt64(131), UInt64(1031),
+                UInt64(4096), UInt64(0)))
+    payloads.append(
+        _lc_raw(2, 3, 2, UInt64(132), UInt64(1032),
+                UInt64(4096), UInt64(9)))
+    var c = _run(
+        payloads^, _zero_cut(),
+        _cut(UInt64(2), UInt64(8192), UInt64(2), UInt64(8192)),
+        UInt64(2), _zero_cut(), UInt64(0))
+    assert_equal(c.exit_code, EXIT_PARTIAL)
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(c.session, String('"open_mappings":"0"')))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

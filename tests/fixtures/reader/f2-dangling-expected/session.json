@@ -1,5 +1,5 @@
 {
-  "schema_version": "0.1.0",
+  "schema_version": "0.1.1",
   "session_id": "lifecycle-dangling-session",
   "synthetic": true,
   "product": {
@@ -128,5 +128,21 @@
       "scope": "authored fixture finalization",
       "reason": "Authored fixture: finalized."
     }
+  }
+
+,  "stop": {
+    "outcome": "partial",
+    "reason": "fixture predates stop evidence",
+    "budget_ms": "5000",
+    "elapsed_ms": "0",
+    "admission_closed": false,
+    "quiescence_observed": false,
+    "writers_settled": "0",
+    "in_flight_at_close": "0",
+    "late_submits_drained": "0",
+    "drained_records": "0",
+    "busy_at_drain": false,
+    "counters_valid": false,
+    "open_mappings": "0"
   }
 }

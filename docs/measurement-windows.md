@@ -33,13 +33,16 @@ The scripted stop budget is 5000 ms of monotonic time,
 recorded in the evidence beside the elapsed time. The budget
 bounds waiting; a deadline never establishes quiescence.
 
-The live collector close-out does not run this controller
-yet. It detaches, sleeps 100 ms, then drains with a 30 s /
-100,000-poll budget, declaring quiet when the staged count
-is zero and received/malformed hold still across two reads.
-There is no wired admission-epoch or active-writer protocol
-(the kernel control map is staged, not wired), so the live
-drain cannot observe admission-close or callback quiescence.
+The live collector close-out runs this controller:
+it detaches, records the admission close (or the failed
+close), sleeps 100 ms, then drains with a 30 s /
+100,000-poll budget. Drained batches feed the stop drain
+count; any unsettled exit (exhausted budget, drain error,
+unreadable stats) marks the drain busy. There is still no
+wired admission-epoch or active-writer protocol (the kernel
+control map is staged, not wired), so the live run cannot
+observe callback quiescence: live terminal evidence always
+carries quiescence unproven.
 
 ## Complete versus partial
 
@@ -57,12 +60,18 @@ Two separations are load-bearing:
   with unsettled writers (or without observed quiescence) is
   partial, not complete. The live collector's drain uses
   exactly this quiet-ring signal, which is why live terminal
-  quality stays `partial` ("terminal settlement unproven")
-  and live captures exit 4.
+  quality stays `partial` ("stop partial: quiescence
+  unproven", wire reason "quiescence unproven") and live
+  captures exit 4.
 - Open logical DMA mappings never block quiescence. The
   controller waits for callbacks, not for logical mappings to
   end; the count of mappings still open travels beside the
   verdict so lifetimes stay censored instead of invented.
+  The wire count is persisted successful `map_result`
+  events minus persisted `unmap` events, saturating at
+  zero: failed maps never count as opened, and an unmap
+  surplus (unpaired unmaps persist) reports zero, never a
+  wrapped value.
 
 The `drain_closure` provenance item has a precisely narrow
 meaning: `proven` means only that close-out noted no

@@ -470,8 +470,16 @@ def test_session_rejects_shape() raises:
     cases.append(base + "]")
     cases.append(
         base.replace(
-            String('"schema_version": "0.1.0"'),
+            String('"schema_version": "0.1.1"'),
             String('"schema_version": "0.2.0"'),
+        )
+    )
+    # Strict minor bump: the previous session version is
+    # refused (bad const), never silently tolerated.
+    cases.append(
+        base.replace(
+            String('"schema_version": "0.1.1"'),
+            String('"schema_version": "0.1.0"'),
         )
     )
     cases.append(
@@ -495,6 +503,28 @@ def test_session_rejects_shape() raises:
         except:
             raised = True
         assert_true(raised)
+
+
+def test_session_stop_evidence() raises:
+    # Session 0.1.1 carries the terminal stop object;
+    # every field parses exactly.
+    var raw = fixture_bytes(
+        String("tests/fixtures/reader/stop-evidence/session.json")
+    )
+    var s = parse_session(raw^)
+    assert_equal(s.stop.outcome, String("partial"))
+    assert_equal(s.stop.reason, String("quiescence unproven"))
+    assert_equal(s.stop.budget_ms, UInt64(5000))
+    assert_equal(s.stop.elapsed_ms, UInt64(120))
+    assert_true(s.stop.admission_closed)
+    assert_true(not s.stop.quiescence_observed)
+    assert_equal(s.stop.writers_settled, UInt64(0))
+    assert_equal(s.stop.in_flight_at_close, UInt64(0))
+    assert_equal(s.stop.late_submits_drained, UInt64(0))
+    assert_equal(s.stop.drained_records, UInt64(7))
+    assert_true(not s.stop.busy_at_drain)
+    assert_true(s.stop.counters_valid)
+    assert_equal(s.stop.open_mappings, UInt64(0))
 
 
 def test_session_window_bounds() raises:
@@ -1915,6 +1945,7 @@ def run() raises -> Int:
     suite.test[test_parse_session_attempts]()
     suite.test[test_session_missing_synthetic]()
     suite.test[test_session_rejects_shape]()
+    suite.test[test_session_stop_evidence]()
     suite.test[test_session_window_bounds]()
     suite.test[test_session_rejects_dup_device]()
     suite.test[test_session_evidence_bound]()

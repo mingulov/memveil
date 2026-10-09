@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Typed capture session: session.json, format 0.1.0.
+"""Typed capture session: session.json, format 0.1.1.
 
 The parser validates the whole document against the frozen session
 schema: required fields, const values, enum membership, string
@@ -38,7 +38,7 @@ comptime MAX_DEVICES = 4096
 comptime MAX_REGION_OBSERVATIONS = 4096
 comptime MAX_HOOKS = 32
 comptime MAX_EVIDENCE_REFS = 32
-comptime SESSION_SCHEMA_VERSION = "0.1.0"
+comptime SESSION_SCHEMA_VERSION = "0.1.1"
 comptime PRODUCT_NAME = "memveil"
 
 
@@ -123,6 +123,40 @@ struct Channel(Copyable):
         self.scope = existing.scope
         self.reason = existing.reason
         self.evidence_refs = existing.evidence_refs.copy()
+
+
+@fieldwise_init
+struct StopState(Copyable):
+    """Terminal stop evidence: the six stages, proved or not."""
+
+    var outcome: String
+    var reason: String
+    var budget_ms: UInt64
+    var elapsed_ms: UInt64
+    var admission_closed: Bool
+    var quiescence_observed: Bool
+    var writers_settled: UInt64
+    var in_flight_at_close: UInt64
+    var late_submits_drained: UInt64
+    var drained_records: UInt64
+    var busy_at_drain: Bool
+    var counters_valid: Bool
+    var open_mappings: UInt64
+
+    def __init__(out self):
+        self.outcome = String("")
+        self.reason = String("")
+        self.budget_ms = UInt64(0)
+        self.elapsed_ms = UInt64(0)
+        self.admission_closed = False
+        self.quiescence_observed = False
+        self.writers_settled = UInt64(0)
+        self.in_flight_at_close = UInt64(0)
+        self.late_submits_drained = UInt64(0)
+        self.drained_records = UInt64(0)
+        self.busy_at_drain = False
+        self.counters_valid = False
+        self.open_mappings = UInt64(0)
 
 
 def _check_env_mode(v: String) raises:
@@ -921,6 +955,7 @@ struct Session(Copyable):
     var q_correlation: Channel
     var q_baseline: Channel
     var q_terminal: Channel
+    var stop: StopState
 
     def __init__(out self):
         self.session_id = String("")
@@ -965,6 +1000,7 @@ struct Session(Copyable):
         self.q_correlation = Channel()
         self.q_baseline = Channel()
         self.q_terminal = Channel()
+        self.stop = StopState()
 
     def __copyinit__(mut self, existing: Self):
         self.session_id = existing.session_id
@@ -1009,6 +1045,7 @@ struct Session(Copyable):
         self.q_correlation = existing.q_correlation.copy()
         self.q_baseline = existing.q_baseline.copy()
         self.q_terminal = existing.q_terminal.copy()
+        self.stop = existing.stop.copy()
 
 
 def _parse_product(mut scan: Scanner, mut out: Session) raises:
@@ -1138,6 +1175,158 @@ def _parse_quality(mut scan: Scanner, mut out: Session) raises:
         raise ValidationError("quality", "missing field")
 
 
+def _check_stop_outcome(v: String) raises:
+    if v == "complete" or v == "partial":
+        return
+    raise ValidationError("stop.outcome", "bad enum")
+
+
+def _parse_stop(mut scan: Scanner) raises -> StopState:
+    scan.begin_object()
+    var out = StopState()
+    var has_outcome = False
+    var has_reason = False
+    var has_budget = False
+    var has_elapsed = False
+    var has_closed = False
+    var has_quiesced = False
+    var has_settled = False
+    var has_in_flight = False
+    var has_late = False
+    var has_drained = False
+    var has_busy = False
+    var has_counters = False
+    var has_open = False
+    if not object_is_empty(scan):
+        while True:
+            scan.skip_ws()
+            var key = scan.parse_string()
+            expect_colon(scan, "stop")
+            if key == "outcome":
+                if has_outcome:
+                    raise ValidationError("stop.outcome", "duplicate")
+                var v = scan.parse_string()
+                _check_stop_outcome(v)
+                out.outcome = v
+                has_outcome = True
+            elif key == "reason":
+                if has_reason:
+                    raise ValidationError("stop.reason", "duplicate")
+                var v = scan.parse_string()
+                check_bounded_text(v, 0, 512, "stop.reason")
+                out.reason = v
+                has_reason = True
+            elif key == "budget_ms":
+                if has_budget:
+                    raise ValidationError("stop.budget_ms", "duplicate")
+                out.budget_ms = parse_u64_field(scan, "stop.budget_ms")
+                has_budget = True
+            elif key == "elapsed_ms":
+                if has_elapsed:
+                    raise ValidationError("stop.elapsed_ms", "duplicate")
+                out.elapsed_ms = parse_u64_field(scan, "stop.elapsed_ms")
+                has_elapsed = True
+            elif key == "admission_closed":
+                if has_closed:
+                    raise ValidationError(
+                        "stop.admission_closed", "duplicate"
+                    )
+                scan.skip_ws()
+                out.admission_closed = scan.parse_bool()
+                has_closed = True
+            elif key == "quiescence_observed":
+                if has_quiesced:
+                    raise ValidationError(
+                        "stop.quiescence_observed", "duplicate"
+                    )
+                scan.skip_ws()
+                out.quiescence_observed = scan.parse_bool()
+                has_quiesced = True
+            elif key == "writers_settled":
+                if has_settled:
+                    raise ValidationError(
+                        "stop.writers_settled", "duplicate"
+                    )
+                out.writers_settled = parse_u64_field(
+                    scan, "stop.writers_settled"
+                )
+                has_settled = True
+            elif key == "in_flight_at_close":
+                if has_in_flight:
+                    raise ValidationError(
+                        "stop.in_flight_at_close", "duplicate"
+                    )
+                out.in_flight_at_close = parse_u64_field(
+                    scan, "stop.in_flight_at_close"
+                )
+                has_in_flight = True
+            elif key == "late_submits_drained":
+                if has_late:
+                    raise ValidationError(
+                        "stop.late_submits_drained", "duplicate"
+                    )
+                out.late_submits_drained = parse_u64_field(
+                    scan, "stop.late_submits_drained"
+                )
+                has_late = True
+            elif key == "drained_records":
+                if has_drained:
+                    raise ValidationError(
+                        "stop.drained_records", "duplicate"
+                    )
+                out.drained_records = parse_u64_field(
+                    scan, "stop.drained_records"
+                )
+                has_drained = True
+            elif key == "busy_at_drain":
+                if has_busy:
+                    raise ValidationError("stop.busy_at_drain", "duplicate")
+                scan.skip_ws()
+                out.busy_at_drain = scan.parse_bool()
+                has_busy = True
+            elif key == "counters_valid":
+                if has_counters:
+                    raise ValidationError(
+                        "stop.counters_valid", "duplicate"
+                    )
+                scan.skip_ws()
+                out.counters_valid = scan.parse_bool()
+                has_counters = True
+            elif key == "open_mappings":
+                if has_open:
+                    raise ValidationError("stop.open_mappings", "duplicate")
+                out.open_mappings = parse_u64_field(
+                    scan, "stop.open_mappings"
+                )
+                has_open = True
+            else:
+                raise ValidationError("stop", "unknown stop field")
+            if not object_next(scan, "stop"):
+                break
+    scan.end_object()
+    if (
+        not has_outcome
+        or not has_reason
+        or not has_budget
+        or not has_elapsed
+        or not has_closed
+        or not has_quiesced
+        or not has_settled
+        or not has_in_flight
+        or not has_late
+        or not has_drained
+        or not has_busy
+        or not has_counters
+        or not has_open
+    ):
+        raise ValidationError("stop", "missing field")
+    if out.outcome == "complete" and out.reason != "":
+        raise ValidationError("stop.reason", "complete carries no reason")
+    if out.outcome == "partial" and out.reason == "":
+        raise ValidationError("stop.reason", "partial needs a reason")
+    return out^
+
+
 def parse_session(data: List[UInt8]) raises -> Session:
     """Parse and validate one session.json document."""
     var scan = Scanner(data)
@@ -1155,6 +1344,7 @@ def parse_session(data: List[UInt8]) raises -> Session:
     var has_baseline = False
     var has_caps = False
     var has_quality = False
+    var has_stop = False
     if not object_is_empty(scan):
         while True:
             scan.skip_ws()
@@ -1242,6 +1432,11 @@ def parse_session(data: List[UInt8]) raises -> Session:
                     raise ValidationError("quality", "duplicate")
                 _parse_quality(scan, out)
                 has_quality = True
+            elif key == "stop":
+                if has_stop:
+                    raise ValidationError("stop", "duplicate")
+                out.stop = _parse_stop(scan)
+                has_stop = True
             else:
                 raise ValidationError("session", "unknown session field")
             if not object_next(scan, "session"):
@@ -1258,6 +1453,7 @@ def parse_session(data: List[UInt8]) raises -> Session:
         or not has_baseline
         or not has_caps
         or not has_quality
+        or not has_stop
     ):
         raise ValidationError("session", "missing field")
     if out.synthetic != (out.capture_mode == "synthetic"):

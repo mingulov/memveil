@@ -287,6 +287,19 @@ def _base_session() -> Session:
     s.q_terminal.status = String("partial")
     s.q_terminal.scope = String("sc")
     s.q_terminal.reason = String("rs")
+    s.stop.outcome = String("partial")
+    s.stop.reason = String("quiescence unproven")
+    s.stop.budget_ms = UInt64(5000)
+    s.stop.elapsed_ms = UInt64(120)
+    s.stop.admission_closed = True
+    s.stop.quiescence_observed = False
+    s.stop.writers_settled = UInt64(0)
+    s.stop.in_flight_at_close = UInt64(0)
+    s.stop.late_submits_drained = UInt64(0)
+    s.stop.drained_records = UInt64(7)
+    s.stop.busy_at_drain = False
+    s.stop.counters_valid = True
+    s.stop.open_mappings = UInt64(0)
     return s^
 
 
@@ -301,6 +314,14 @@ def test_session_roundtrip() raises:
     assert_equal(back.session_id, String("s1"))
     assert_true(back.q_detail.has_loss_count)
     assert_true(not back.has_boot_id)
+    assert_equal(back.stop.outcome, String("partial"))
+    assert_equal(back.stop.reason, String("quiescence unproven"))
+    assert_equal(back.stop.budget_ms, UInt64(5000))
+    assert_equal(back.stop.elapsed_ms, UInt64(120))
+    assert_true(back.stop.admission_closed)
+    assert_true(not back.stop.quiescence_observed)
+    assert_equal(back.stop.drained_records, UInt64(7))
+    assert_true(back.stop.counters_valid)
     assert_equal(encode_session(back), text)
 
 

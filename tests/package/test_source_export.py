@@ -34,7 +34,7 @@ REQUIRED = (
     "bpf/programs/swiotlb_attempt.bpf.c",
     "bpf/include/memveil_events.h",
     "profiles/manifest.txt",
-    "schemas/session-v0.1.0.schema.json",
+    "schemas/session-v0.1.1.schema.json",
     "README.md",
     "LICENSE",
 )
