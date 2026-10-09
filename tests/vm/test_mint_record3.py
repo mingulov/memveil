@@ -124,7 +124,18 @@ def test_drift_warns_and_rebuilds(capsys):
 
 @NEED_BUILDS
 def test_steady_state_silent(capsys):
-    m.apply_tracing(shipped(), m.LC_OBJ, m.CP_OBJ,
+    # Converge first: rebuilt trees (like CI) legitimately
+    # differ from shipped pins, so silence holds only after
+    # the transform rebuilds to the current builds.
+    doc = shipped()
+    fields = doc["identity"]["source"]["note"].split()
+    assert len(fields) == 12
+    fields[9] = "lc_ring_bytes=4096"
+    doc["identity"]["source"]["note"] = " ".join(fields)
+    converged = m.apply_tracing(doc, m.LC_OBJ, m.CP_OBJ,
+                                "lr", "cr", "n")
+    assert "differ from current builds" in capsys.readouterr().err
+    m.apply_tracing(converged, m.LC_OBJ, m.CP_OBJ,
                     "lr", "cr", "n")
     assert capsys.readouterr().err == ""
 
