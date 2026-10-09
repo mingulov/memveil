@@ -10,7 +10,9 @@ tracing hook sets, and flips both extra caps to supported.
 Ring sizes are parsed from object BTF (VAR -> STRUCT member
 max_entries -> PTR -> ARRAY nr_elems), never hardcoded.
 Output is ignored scratch (build/vm/), never shipped; the
-admission flip owns the shipped profile.
+admission flip owns the shipped profile. `apply_tracing` is
+the shared transform the gate emitter reuses, so the flip
+cannot drift from this mint.
 """
 
 import hashlib
@@ -185,9 +187,78 @@ def frozen_scan_hooks():
             if h["kind"] == "tracing"]
 
 
-def main():
+BASE_FIELDS = ("config=", "config_src=", "btf=", "format=",
+               "object=", "image=", "image_bid=",
+               "ring_bytes=")
+TRACE_FIELDS = ("lc_object=", "lc_ring_bytes=", "cp_object=",
+                "cp_ring_bytes=")
+
+
+def apply_tracing(doc, lc_obj, cp_obj, lc_reason,
+                  cp_reason, hook_note):
+    """Bind tracing caps onto a profile doc, in place.
+
+    The single implementation of the tracing transform,
+    shared by the record3 minter and the gate emitter: the
+    frozen hook set (cross-checked against the scan
+    fixture), fresh lc/cp object and ring bindings parsed
+    from the current builds, and both extra caps flipped to
+    supported. Accepts a pre-flip 8-field base note or a
+    post-flip 12-field note (base verified, tracing fields
+    rebuilt); hooks append idempotently. Warns when shipped
+    tracing pins differ from the current builds.
+    """
     if TRACE_HOOKS != frozen_scan_hooks():
         fail("minter tracing set drifts from scan fixture")
+    shipped_note = doc["identity"]["source"]["note"]
+    fields = shipped_note.split()
+    had_tracing = (len(fields) == 12
+                   and all(f.startswith(p) for f, p in
+                           zip(fields[8:], TRACE_FIELDS)))
+    if had_tracing:
+        fields = fields[:8]
+    if (len(fields) != 8
+            or not all(f.startswith(p) for f, p in
+                       zip(fields, BASE_FIELDS))):
+        fail("shipped note is not the 8-field base")
+    base = " ".join(fields)
+    lc_obj = str(lc_obj)
+    cp_obj = str(cp_obj)
+    lc_ring = btf_ring_bytes(lc_obj, "mv_lifecycle")
+    cp_ring = btf_ring_bytes(cp_obj, "mv_copies")
+    note = base + (" lc_object=sha256:%s lc_ring_bytes=%d"
+                   " cp_object=sha256:%s cp_ring_bytes=%d"
+                   % (sha(lc_obj), lc_ring, sha(cp_obj),
+                      cp_ring))
+    if len(note) > 700:
+        fail("note exceeds 700")
+    if had_tracing and note != shipped_note:
+        print("mint: shipped tracing pins differ from "
+              "current builds; ephemeral doc rebuilt",
+              file=sys.stderr)
+    doc["identity"]["source"]["note"] = note
+    have = {h["name"] for h in doc["hooks"]}
+    for name, function, attach, signature in TRACE_HOOKS:
+        if name in have:
+            continue
+        doc["hooks"].append({"name": name, "kind": "tracing",
+                             "function": function,
+                             "attach": attach,
+                             "signature": signature,
+                             "note": hook_note})
+    for cap in doc["capabilities"]:
+        if cap["id"] == "mapping-lifecycle":
+            cap["status"] = "supported"
+            cap["hooks"] = list(LC_HOOK_NAMES)
+            cap["reason"] = lc_reason
+        if cap["id"] == "copy-actual":
+            cap["status"] = "supported"
+            cap["hooks"] = list(CP_HOOK_NAMES)
+            cap["reason"] = cp_reason
+    return doc
+
+
+def main():
     doc = json.loads(DOC.read_text())
     if doc.get("schema_version") != "0.1.1":
         fail("shipped doc is not profile 0.1.1")
@@ -195,37 +266,13 @@ def main():
                if c["id"] == "attempt-trace"]
     if len(attempt) != 1 or attempt[0]["status"] != "supported":
         fail("shipped doc lacks supported attempt-trace")
-    base = doc["identity"]["source"]["note"]
-    if len(base.split()) != 8:
-        fail("shipped note is not the 8-field base")
-    lc_ring = btf_ring_bytes(LC_OBJ, "mv_lifecycle")
-    cp_ring = btf_ring_bytes(CP_OBJ, "mv_copies")
-    note = base + (" lc_object=sha256:%s lc_ring_bytes=%d"
-                   " cp_object=sha256:%s cp_ring_bytes=%d"
-                   % (sha(LC_OBJ), lc_ring, sha(CP_OBJ),
-                      cp_ring))
-    if len(note) > 700:
-        fail("note exceeds 700")
+    apply_tracing(
+        doc, LC_OBJ, CP_OBJ,
+        "Record3 lane only: ephemeral 3-channel wiring proof.",
+        "Record3 lane only: ephemeral 3-channel wiring proof.",
+        "Record3 test hook.")
     doc["profile_id"] = "record3-ephemeral"
     doc["status"] = "reference-unvalidated"
-    doc["identity"]["source"]["note"] = note
-    for name, function, attach, signature in TRACE_HOOKS:
-        doc["hooks"].append({"name": name, "kind": "tracing",
-                             "function": function,
-                             "attach": attach,
-                             "signature": signature,
-                             "note": "Record3 test hook."})
-    for cap in doc["capabilities"]:
-        if cap["id"] == "mapping-lifecycle":
-            cap["status"] = "supported"
-            cap["hooks"] = list(LC_HOOK_NAMES)
-            cap["reason"] = ("Record3 lane only: ephemeral "
-                             "3-channel wiring proof.")
-        if cap["id"] == "copy-actual":
-            cap["status"] = "supported"
-            cap["hooks"] = list(CP_HOOK_NAMES)
-            cap["reason"] = ("Record3 lane only: ephemeral "
-                             "3-channel wiring proof.")
     out = OUT
     args = sys.argv[1:]
     if args[:1] == ["--out"]:

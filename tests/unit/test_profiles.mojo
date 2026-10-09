@@ -697,8 +697,47 @@ def test_parse_reference_file() raises:
     assert_equal(
         ps[1].profile_id, String("linux-x86_64-7.0.0-34-generic")
     )
-    assert_equal(len(ps[1].hooks), 1)
+    assert_equal(len(ps[1].hooks), 6)
     assert_true(ps[1].hooks[0].format_has)
+    assert_equal(len(ps[1].caps), 3)
+
+
+def test_gate_doc_tracing_caps_supported() raises:
+    # The admission flip: the gate doc carries the frozen
+    # tracing set with both extra caps supported. Names and
+    # membership are pinned; the freeze moves only by
+    # re-qualification of every lane together.
+    var ps = load_profiles(String("profiles"))
+    assert_equal(
+        ps[1].profile_id, String("linux-x86_64-7.0.0-34-generic")
+    )
+    var want = List[String]()
+    want.append(String("fexit:swiotlb_tbl_map_single"))
+    want.append(String("fentry:__swiotlb_tbl_unmap_single"))
+    want.append(String("fentry:__swiotlb_sync_single_for_device"))
+    want.append(String("fentry:__swiotlb_sync_single_for_cpu"))
+    want.append(String("fentry:swiotlb_bounce"))
+    for i in range(len(want)):
+        assert_equal(ps[1].hooks[i + 1].name, want[i])
+        assert_equal(ps[1].hooks[i + 1].kind, String("tracing"))
+        assert_true(ps[1].hooks[i + 1].signature.byte_length() > 0)
+    for i in range(len(ps[1].caps)):
+        if ps[1].caps[i].id == String("attempt-trace"):
+            assert_equal(ps[1].caps[i].status, String("supported"))
+            assert_equal(len(ps[1].caps[i].hooks), 1)
+        elif ps[1].caps[i].id == String("mapping-lifecycle"):
+            assert_equal(ps[1].caps[i].status, String("supported"))
+            assert_equal(len(ps[1].caps[i].hooks), 2)
+            assert_equal(ps[1].caps[i].hooks[0], want[0])
+            assert_equal(ps[1].caps[i].hooks[1], want[1])
+        elif ps[1].caps[i].id == String("copy-actual"):
+            assert_equal(ps[1].caps[i].status, String("supported"))
+            assert_equal(len(ps[1].caps[i].hooks), 3)
+            assert_equal(ps[1].caps[i].hooks[0], want[2])
+            assert_equal(ps[1].caps[i].hooks[1], want[3])
+            assert_equal(ps[1].caps[i].hooks[2], want[4])
+        else:
+            assert_true(False)
 
 
 def test_parse_validated_file() raises:
@@ -1530,6 +1569,7 @@ def run() raises -> Int:
     suite.test[test_parse_source_note_700_ok]()
     suite.test[test_parse_source_note_1025_rejects]()
     suite.test[test_parse_reference_file]()
+    suite.test[test_gate_doc_tracing_caps_supported]()
     suite.test[test_parse_validated_file]()
     suite.test[test_parse_bad_status]()
     suite.test[test_parse_bad_version]()

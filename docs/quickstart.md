@@ -1,12 +1,15 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # MemVeil quickstart (development bundle 0.1.0)
 
-MemVeil captures swiotlb bounce **attempts** (try-counts, not copies)
-on x86-64 Linux and replays them offline as text, JSON, or Markdown.
-This bundle runs from any directory: no compiler, Pixi, network, or
-source checkout needed. The [capability table](support.md#capabilities-by-mode)
-distinguishes the shipping attempt collector, offline reducers and laboratory
-probes. A full lifecycle/confidential release is not yet qualified.
+MemVeil captures swiotlb bounce **attempts**, mapping **lifetimes**,
+and executed **copies** on x86-64 Linux and replays them offline as
+text, JSON, or Markdown. Attempts are try-counts; actual copies come
+from the copy channel. This bundle runs from any directory: no
+compiler, Pixi, network, or source checkout needed. The
+[capability table](support.md#capabilities-by-mode) distinguishes the
+shipping collector, offline reducers and laboratory probes.
+Lifecycle/copy collection is qualified on one narrow profile; a full
+confidential release is not yet qualified.
 
 ## 1. Extract and check the version
 
@@ -25,8 +28,9 @@ source revisions; re-hash any file to confirm it.
 Doctor loads no BPF and changes nothing. It reports the kernel
 floor check, guest signals, the selected semantic profile, and
 per-capability reasons. The narrow `7.0.0-34-generic` x86-64 profile has
-historical attempt evidence; exact config/BTF/event-format/object bindings
-must also hold. A rebuilt object can fail the binding even on that kernel.
+VM-gate attempt, lifecycle, and copy evidence; exact
+config/BTF/event-format/object bindings must also hold. A rebuilt
+object can fail the binding even on that kernel.
 Passive availability is not actual attachment or qualification. A `denied
 (privilege)` hook means: re-run under `sudo` for collection, or
 stay unprivileged for replay (step 4).
@@ -46,6 +50,18 @@ session=...`, then `end=duration outcome=finalized exit=4`.
 Exit 4 indicates finalized output with incomplete terminal evidence,
 including zero-event and signal stops. Exit 3 names the refusal reason (profile, bridge,
 privilege); exit 2 is a usage error; exit 1 is an error.
+
+On the admitted profile, the lifecycle and copy channels are
+opt-in per run:
+
+    sudo -E ./bin/memveil record --output /tmp/cap3 \
+        --object $PWD/bpf/swiotlb_attempt.bpf.o \
+        --capability attempt-trace,mapping-lifecycle,copy-actual \
+        --lc-object $PWD/bpf/swiotlb_lifecycle.bpf.o \
+        --cp-object $PWD/bpf/swiotlb_copy.bpf.o --duration 10
+
+Anything but the exact bound kernel and objects refuses with
+exit 3 instead of recording an unverified channel.
 
 The capture is root-owned (mode 0700/0600), so hand it to your
 user before the unprivileged replay below:
@@ -99,9 +115,10 @@ new workload live. Each summary shows its own measured prefix duration.
 
 Attempt collection with optional default-pool start/end samples when debugfs
 is readable. Two samples cannot diagnose sustained pressure; no pressure
-finding does not mean no pressure. Lifecycle, actual copy bytes, sharing
-transitions, and physical unions are unavailable, never
-inferred. One narrow bound profile, with no broad kernel qualification.
+finding does not mean no pressure. Lifecycle and executed copies are
+qualified on the one admitted profile only; sharing transitions and
+physical unions are unavailable, never inferred. One narrow bound
+profile, with no broad kernel qualification.
 Captures are written mode
 0600. There is no configuration file, daemon, or network
 access. Replay needs nothing live (see `performance.md` for

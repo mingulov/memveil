@@ -1,28 +1,30 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # memveil
 
-Attempt capture for swiotlb bounce analysis on x86-64 Linux:
-record real `swiotlb_bounced` tracepoint activity into a
+Attempt, lifecycle, and copy capture for swiotlb bounce analysis
+on x86-64 Linux: record real `swiotlb_bounced` tracepoint
+activity, mapping lifetimes, and executed copies into a
 self-describing capture directory, then replay it offline as
-text, JSON, or Markdown. Counts are attempts (try-counts with
-requested bytes), never inferred copies. Mapping lifecycle,
-actual copy bytes, pool pressure, and diagnostic findings
-reduce offline over captures that carry the corresponding
-events.
+text, JSON, or Markdown. Attempt counts are try-counts with
+requested bytes; actual copies come from the copy channel.
+Pool pressure and diagnostic findings reduce offline over
+captures that carry the corresponding events.
 
-Status: attempt-capture development bundle 0.1.0, with runnable
+Status: attempt/lifecycle/copy development bundle 0.1.0, with runnable
 build, test, and tarball packaging wrappers. The shipping collector
-records attempts and optional readable default-pool start/end samples.
+records attempts, mapping lifetimes, and executed copies on the
+admitted profile, plus optional readable default-pool start/end samples.
 `top` replays finished captures; a live summary is still missing.
-Laboratory lifecycle/copy probes and offline reducers do not qualify
-shipping lifecycle, successful DMA, actual copying, sustained pressure,
-or confidential-memory collection. The original lifecycle preview and
+Laboratory probes and offline reducers do not qualify shipping
+collection, successful DMA, sustained pressure, or
+confidential-memory collection. The original lifecycle preview and
 full confidential first-release gates remain open.
 
 The [support table](docs/support.md#capabilities-by-mode) defines the
 capabilities by mode. One narrow profile,
-`linux-x86_64-7.0.0-34-generic`, has historical attempt evidence;
-admission also requires its exact config/BTF/object bindings.
+`linux-x86_64-7.0.0-34-generic`, has VM-gate attempt, lifecycle,
+and copy evidence; admission also requires its exact
+config/BTF/object bindings.
 A rebuilt package or matching kernel name alone earns no qualification.
 
 ## Use (from the bundle)

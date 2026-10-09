@@ -4,20 +4,27 @@
 
 Inputs: guest identity JSON (release, config_src, config/btf/
 format/image shas, image bid) plus the live format text, plus
-the current production and saturation object builds.
+the current production, saturation, lifecycle, and copy
+object builds.
 Outputs:
   profiles/linux-x86_64-7.0.0-34-generic.json (reference-
     unvalidated until the promotion commit flips ONLY the
-    status line)
+    status line; tracing caps supported with frozen hooks
+    and current lc/cp bindings)
   tests/fixtures/profiles/saturation-candidate.json (test
     expectation, explicit path only, never scanned)
 
-Re-running after a kernel/producer change re-qualifies the
-bindings; the gate itself enforces the checked-in values.
+The tracing transform is the record3 minter's shared
+implementation, so re-mints cannot drift from the qualified
+lanes. Re-running after a kernel/producer change
+re-qualifies the bindings; the gate itself enforces the
+checked-in values.
 """
 import hashlib
+import importlib.util
 import json
 import sys
+from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -25,7 +32,29 @@ DOC = ROOT / "profiles/linux-x86_64-7.0.0-34-generic.json"
 SAT = ROOT / "tests/fixtures/profiles/saturation-candidate.json"
 PROD_OBJ = ROOT / "build/bpf/swiotlb_attempt.bpf.o"
 SAT_OBJ = ROOT / "build/bpf/swiotlb_attempt-test.bpf.o"
+LC_OBJ = ROOT / "build/bpf/swiotlb_lifecycle.bpf.o"
+CP_OBJ = ROOT / "build/bpf/swiotlb_copy.bpf.o"
+MINTER = ROOT / "tests/vm/mint_record3_profile.py"
 FMT_PATH = "/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format"
+LC_REASON = (
+    "Supported on this exact kernel: lifecycle collection "
+    "qualified by VM-gate lanes; narrow bindings refuse every "
+    "other identity."
+)
+CP_REASON = (
+    "Supported on this exact kernel: executed-copy collection "
+    "qualified by VM-gate lanes; narrow bindings refuse every "
+    "other identity."
+)
+HOOK_NOTE = "Frozen tracing hook; admission requires the exact signature."
+
+
+def minter():
+    loader = SourceFileLoader("gate_profile_minter", str(MINTER))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
 
 
 def sha(path: Path) -> str:
@@ -146,20 +175,18 @@ def main() -> int:
         "image_bid": ident["image_bid"],
         "ring": "8388608",
     }
-    DOC.write_text(
-        json.dumps(
-            doc_for(
-                "linux-x86_64-7.0.0-34-generic",
-                "reference-unvalidated",
-                ident["release"],
-                note_for(bind),
-                fmt_text,
-                "supported",
-            ),
-            indent=2,
-        )
-        + "\n"
+    gate = doc_for(
+        "linux-x86_64-7.0.0-34-generic",
+        "reference-unvalidated",
+        ident["release"],
+        note_for(bind),
+        fmt_text,
+        "supported",
     )
+    minter().apply_tracing(
+        gate, LC_OBJ, CP_OBJ, LC_REASON, CP_REASON, HOOK_NOTE
+    )
+    DOC.write_text(json.dumps(gate, indent=2) + "\n")
     SAT.parent.mkdir(parents=True, exist_ok=True)
     SAT.write_text(
         json.dumps(
