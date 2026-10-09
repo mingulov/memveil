@@ -394,6 +394,53 @@ def test_unrelated_gap_keeps_gauges_complete() raises:
     )
 
 
+def test_detail_gap_resets_streak() raises:
+    # Streaks never cross a detail gap: a hidden sample may
+    # sit below the threshold.
+    var t = PoolTracker()
+    t.consume(_sample("p1", True, UInt64(900), True, UInt64(1000), String("bytes"), UInt64(1)))
+    t.consume(_sample("p1", True, UInt64(900), True, UInt64(1000), String("bytes"), UInt64(2)))
+    assert_equal(t.streak_of("p1"), 2)
+    t.consume(_gap("detail", UInt64(3)))
+    assert_equal(t.streak_of("p1"), 0)
+    t.consume(_sample("p1", True, UInt64(900), True, UInt64(1000), String("bytes"), UInt64(4)))
+    assert_equal(t.streak_of("p1"), 1)
+    assert_equal(len(t.pressured_pools()), 0)
+
+
+def test_threshold_floor_division() raises:
+    # 90% of 1001 is 900.9: the floor-division threshold is
+    # 901, so 900 does not qualify but 901 does.
+    var t = PoolTracker()
+    t.consume(_sample("p1", True, UInt64(900), True, UInt64(1001), String("bytes"), UInt64(1)))
+    assert_equal(t.streak_of("p1"), 0)
+    t.consume(_sample("p1", True, UInt64(901), True, UInt64(1001), String("bytes"), UInt64(2)))
+    assert_equal(t.streak_of("p1"), 1)
+
+
+def test_over_capacity_counts() raises:
+    # Usage at or above the threshold qualifies, even past
+    # nominal capacity: over-capacity is pressure, not a
+    # reset.
+    var t = PoolTracker()
+    t.consume(_sample("p1", True, UInt64(1100), True, UInt64(1000), String("bytes"), UInt64(1)))
+    t.consume(_sample("p1", True, UInt64(1100), True, UInt64(1000), String("bytes"), UInt64(2)))
+    t.consume(_sample("p1", True, UInt64(1100), True, UInt64(1000), String("bytes"), UInt64(3)))
+    assert_equal(len(t.pressured_pools()), 1)
+
+
+def test_aggregate_gap_keeps_streak() raises:
+    # Only the sample stream's own channel breaks streaks:
+    # an aggregate gap leaves the streak and gauges alone.
+    var t = PoolTracker()
+    t.consume(_sample("p1", True, UInt64(900), True, UInt64(1000), String("bytes"), UInt64(1)))
+    t.consume(_sample("p1", True, UInt64(900), True, UInt64(1000), String("bytes"), UInt64(2)))
+    t.consume(_gap("aggregate", UInt64(3)))
+    assert_equal(t.streak_of("p1"), 2)
+    t.consume(_sample("p1", True, UInt64(900), True, UInt64(1000), String("bytes"), UInt64(4)))
+    assert_equal(len(t.pressured_pools()), 1)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_field_allowlist]()
@@ -417,6 +464,10 @@ def run() raises -> Int:
     suite.test[test_unrelated_gap_keeps_gauges_complete]()
     suite.test[test_partial_sample_keeps_known_half]()
     suite.test[test_partial_sample_resets_streak]()
+    suite.test[test_detail_gap_resets_streak]()
+    suite.test[test_threshold_floor_division]()
+    suite.test[test_over_capacity_counts]()
+    suite.test[test_aggregate_gap_keeps_streak]()
     suite^.run()
     return 0
 
