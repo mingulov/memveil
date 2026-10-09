@@ -1025,6 +1025,15 @@ suite_vm_real_io() {
     python3 -m pytest "$ROOT/tests/vm/test_real_io.py" -q
 }
 
+suite_vm_topwalk() {
+    vm_lifecycle_preflight "vm-topwalk" || return $?
+    if ! python3 -m pytest --version >/dev/null 2>&1; then
+        echo "vm-topwalk: pytest not importable" >&2
+        return 1
+    fi
+    python3 -m pytest "$ROOT/tests/vm/test_topwalk.py" -q
+}
+
 suite_stop() {
     run_unit_file tests/unit/test_stop.mojo
 }
@@ -3060,6 +3069,9 @@ case "$1" in
         ;;
     vm-real-io)
         suite_vm_real_io
+        ;;
+    vm-topwalk)
+        suite_vm_topwalk
         ;;
     stop)
         suite_stop

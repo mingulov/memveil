@@ -231,13 +231,17 @@ def check_record3_capture(events, session, record, tag):
             "0", "5120"]:
         bad.append("%s: bytes counter %r" % (tag, ends))
     pools = kinds.get("pool_sample", [])
-    if len(pools) != 2:
-        bad.append("%s: want 2 pool_sample, got %d"
-                   % (tag, len(pools)))
-    elif pools[-1]["data"]["used_bytes"] != pools[0][
+    # Closing pair (baseline-held, final) trails the periodic
+    # samples; the 30 s window fires about once a second,
+    # fewer under load (skipped ticks never backfill).
+    periodic = len(pools) - 2
+    if not 10 <= periodic <= 40:
+        bad.append("%s: want 10..40 periodic pool_sample, got %d"
+                   % (tag, periodic))
+    elif pools[-1]["data"]["used_bytes"] != pools[-2][
             "data"]["used_bytes"]:
         bad.append("%s: pool not drained to baseline %r"
-                   % (tag, pools))
+                   % (tag, pools[-2:]))
     return sorted(bad)
 
 
