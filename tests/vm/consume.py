@@ -757,7 +757,7 @@ def replay_oracle_witness_ledger(ops_log, releases):
 def _reconstructed_event(session_id, seq, ts_ns, kind, hook, profile_id,
                 data):
     return {
-        "schema_version": "0.1.0",
+        "schema_version": "0.1.1",
         "session_id": session_id,
         "seq": str(seq),
         "ts_ns": str(ts_ns),
@@ -813,12 +813,16 @@ def translate_session(lc_events, cp_events, ops_log, out_dir,
                 {"operation_id": "op-%d" % op, "success": True,
                  "mapping_id": "map-%d" % op,
                  "return_code": None,
-                 "mapped_bytes": str(event["size"])})))
+                 "mapped_bytes": str(event["size"]),
+                 "wire_generation": None,
+                 "wire_identity": None})))
         else:
             staged.append((event["ktime"], 0, _reconstructed_event(
                 session_id, 0, event["ktime"], "unmap",
                 "swiotlb:__swiotlb_tbl_unmap_single", profile_id,
-                {"mapping_id": "map-%d" % op})))
+                {"mapping_id": "map-%d" % op,
+                 "wire_generation": None,
+                 "wire_identity": None})))
     for event in cp_events:
         op = op_of.get(event["req"])
         if op is None:
@@ -829,7 +833,8 @@ def translate_session(lc_events, cp_events, ops_log, out_dir,
                 session_id, 0, event["ktime"], "sync_request",
                 "swiotlb:__swiotlb_sync_single", profile_id,
                 {"operation_id": "op-%d" % op,
-                 "mapping_id": "map-%d" % op, "offset": "0",
+                 "mapping_id": "map-%d" % op, "offset_known": True,
+                 "offset": "0",
                  "length": str(event["req"])})))
         else:
             staged.append((event["ktime"], 0, _reconstructed_event(

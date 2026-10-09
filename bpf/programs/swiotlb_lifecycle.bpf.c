@@ -43,6 +43,93 @@ struct {
     __uint(max_entries, MV_RING_BYTES);
 } mv_lifecycle SEC(".maps");
 
+/* Mapping identity: (device, tlb address) -> opaque generation.
+ * Keys stay in the kernel; only the generation crosses the
+ * ring. 0 is never assigned (unknown); tombstones (value 0)
+ * read as misses. */
+struct mv_gen_key {
+    __u64 dev;
+    __u64 tlb;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct mv_gen_key);
+    __type(value, __u64);
+    __uint(max_entries, 32768);
+} mv_gen_table SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __type(key, __u32);
+    __type(value, __u64);
+    __uint(max_entries, 1);
+} mv_gen_next SEC(".maps");
+
+/* Append-only quarantine: keys whose cleanup failed. Entries
+ * are never removed; quarantined keys emit unknown identity
+ * until capture end. */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct mv_gen_key);
+    __type(value, __u8);
+    __uint(max_entries, 1024);
+} mv_gen_quarantine SEC(".maps");
+
+/* Global quarantine: set by direct store (no helper, so the
+ * escalation step cannot fail) when even quarantine insert
+ * fails. While set, every map diverts and every unmap misses. */
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __type(key, __u32);
+    __type(value, __u8);
+    __uint(max_entries, 1);
+} mv_gen_dark SEC(".maps");
+
+#define MV_CAS_RETRIES 8
+
+static __always_inline int mv_dark(void)
+{
+    __u32 zero = 0;
+    __u8 *slot = bpf_map_lookup_elem(&mv_gen_dark, &zero);
+
+    return slot && *slot;
+}
+
+static __always_inline int mv_quarantined(const struct mv_gen_key *key)
+{
+    return bpf_map_lookup_elem(&mv_gen_quarantine, key) != NULL;
+}
+
+/* Allocate one generation without wrapping: returns 1 with
+ * *gen set, or 0 to divert (terminal, contention, or missing
+ * counter). The counter never advances past GEN_MAX, so no
+ * value is ever assigned twice. */
+static __always_inline int mv_alloc_gen(__u64 *gen)
+{
+    __u32 zero = 0;
+    __u64 *counter = bpf_map_lookup_elem(&mv_gen_next, &zero);
+    __u64 v;
+    int i;
+
+    if (!counter)
+        return 0;
+    v = *counter;
+    for (i = 0; i < MV_CAS_RETRIES; i++) {
+        __u64 old;
+
+        if (v >= MV_LC_GEN_MAX)
+            return 0;
+        old = __sync_val_compare_and_swap(counter, v, v + 1);
+        if (old == v) {
+            *gen = v + 1;
+            return 1;
+        }
+        v = old;
+    }
+    return 0;
+}
+
 /* Atomically OR one sticky flag bit. */
 static __always_inline void mv_raise(__u64 bit)
 {
@@ -69,7 +156,7 @@ static __always_inline void mv_submit_fail(void)
 
 /* Shared emit path: counts the firing, validates, submits. */
 static __always_inline int mv_emit_lc(__u16 kind, __u16 flags, __u64 dir,
-                                     __u64 size)
+                                     __u64 size, __u64 gen)
 {
     __u32 key0 = MV_CNT_OBSERVED;
     __u32 key1 = MV_CNT_OBSERVED_BYTES;
@@ -140,6 +227,7 @@ static __always_inline int mv_emit_lc(__u16 kind, __u16 flags, __u64 dir,
             payload[12 + i] = (o >> (8 * i)) & 0xFFu;
             payload[20 + i] = (ktime >> (8 * i)) & 0xFFu;
             payload[28 + i] = (size >> (8 * i)) & 0xFFu;
+            payload[36 + i] = (gen >> (8 * i)) & 0xFFu;
         }
     }
     if (bpf_ringbuf_output(&mv_lifecycle, payload, sizeof(payload),
@@ -167,18 +255,35 @@ int BPF_PROG(mv_map_result, struct device *dev, mv_phys_addr_t orig_addr,
              enum mv_dma_data_direction dir, unsigned long attrs,
              mv_phys_addr_t ret)
 {
+    struct mv_gen_key key;
     __u16 flags = 0;
+    __u64 gen = 0;
+    __u64 assigned = 0;
 
     (void)ctx;
 
-    (void)dev;
     (void)orig_addr;
     (void)alloc_align_mask;
     (void)attrs;
-    if (ret != MV_INVALID_PHYS)
+    if (ret == MV_INVALID_PHYS)
+        return mv_emit_lc(MV_LC_KIND_MAP, 0, (__u64)dir,
+                          (mv_size_t)mapping_size, 0);
+    key.dev = (__u64)dev;
+    key.tlb = (__u64)ret;
+    /* Dark or quarantined keys divert without burning a
+     * generation; a failed insert diverts too. The emission
+     * never claims an identity the table may not hold. */
+    if (!mv_dark() && !mv_quarantined(&key) &&
+        mv_alloc_gen(&assigned) &&
+        bpf_map_update_elem(&mv_gen_table, &key, &assigned,
+                            BPF_ANY) == 0) {
+        gen = assigned;
         flags |= MV_LC_FLAG_OK;
+    } else {
+        flags |= MV_LC_FLAG_OK | MV_LC_FLAG_GEN_UNASSIGNED;
+    }
     return mv_emit_lc(MV_LC_KIND_MAP, flags, (__u64)dir,
-                      (mv_size_t)mapping_size);
+                      (mv_size_t)mapping_size, gen);
 }
 
 SEC("fentry/__swiotlb_tbl_unmap_single")
@@ -186,18 +291,55 @@ int BPF_PROG(mv_unmap, struct device *dev, mv_phys_addr_t tlb_addr,
              mv_size_t mapping_size, enum mv_dma_data_direction dir,
              unsigned long attrs, struct io_tlb_pool *pool)
 {
+    struct mv_gen_key key;
     __u16 flags = MV_LC_FLAG_OK;
+    __u64 gen = 0;
+    __u64 *slot;
 
     (void)ctx;
 
-    (void)dev;
-    (void)tlb_addr;
     (void)pool;
     /* DMA_ATTR_SKIP_CPU_SYNC is bit 5 (dma-mapping.h). */
     if (attrs & (1UL << 5))
         flags |= MV_LC_FLAG_SKIP_SYNC;
+    key.dev = (__u64)dev;
+    key.tlb = (__u64)tlb_addr;
+    if (!mv_dark() && !mv_quarantined(&key)) {
+        slot = bpf_map_lookup_elem(&mv_gen_table, &key);
+        if (slot && *slot != 0) {
+            gen = *slot;
+            if (bpf_map_delete_elem(&mv_gen_table, &key) != 0) {
+                /* Delete failed: tombstone, then quarantine,
+                 * then global dark. Every tier emits miss so
+                 * a stale value can never reach a future
+                 * unmap emission. */
+                __u64 zero = 0;
+
+                if (bpf_map_update_elem(&mv_gen_table, &key, &zero,
+                                        BPF_EXIST) != 0) {
+                    __u8 one = 1;
+
+                    if (bpf_map_update_elem(&mv_gen_quarantine, &key,
+                                            &one, BPF_ANY) != 0) {
+                        __u32 z = 0;
+                        __u8 *dark;
+
+                        dark = bpf_map_lookup_elem(&mv_gen_dark, &z);
+                        if (dark)
+                            *dark = 1;
+                    }
+                }
+                gen = 0;
+                flags |= MV_LC_FLAG_GEN_MISS;
+            }
+        } else {
+            flags |= MV_LC_FLAG_GEN_MISS;
+        }
+    } else {
+        flags |= MV_LC_FLAG_GEN_MISS;
+    }
     return mv_emit_lc(MV_LC_KIND_UNMAP, flags, (__u64)dir,
-                      (mv_size_t)mapping_size);
+                      (mv_size_t)mapping_size, gen);
 }
 
 char MV_LICENSE[] SEC("license") = "GPL";

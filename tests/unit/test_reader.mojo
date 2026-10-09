@@ -63,7 +63,7 @@ def expect_read_error(
 
 def event_doc(kind: String, data: String) raises -> String:
     return String(
-        '{"schema_version": "0.1.0", "session_id": "s1", "seq": "7",'
+        '{"schema_version": "0.1.1", "session_id": "s1", "seq": "7",'
         ' "ts_ns": "50", "kind": "'
     ) + kind + String(
         '", "source": {"hook": "h", "backend": "b",'
@@ -701,7 +701,8 @@ def test_parse_event_kinds() raises:
                 String(
                     '{"operation_id": "op-1", "success": true,'
                     ' "mapping_id": "m-9", "return_code": 0,'
-                    ' "mapped_bytes": "8192"}'
+                    ' "mapped_bytes": "8192",'
+                    ' "wire_generation": null, "wire_identity": null}'
                 ),
             )
         )
@@ -713,11 +714,39 @@ def test_parse_event_kinds() raises:
     assert_true(m.map_result.has_return_code)
     assert_equal(m.map_result.return_code, Int64(0))
     assert_equal(m.map_result.mapped_bytes, UInt64(8192))
+    assert_true(not m.map_result.has_wire_generation)
+    assert_true(not m.map_result.has_wire_identity)
     var u = parse_event(
-        utf8_bytes(event_doc(String("unmap"), String('{"mapping_id": null}')))
+        utf8_bytes(
+            event_doc(
+                String("unmap"),
+                String(
+                    '{"mapping_id": "m-9", "wire_generation": "41",'
+                    ' "wire_identity": "known"}'
+                ),
+            )
+        )
     )
     assert_equal(u.kind, "unmap")
-    assert_true(not u.unmap.has_mapping_id)
+    assert_true(u.unmap.has_mapping_id)
+    assert_equal(u.unmap.mapping_id, "m-9")
+    assert_true(u.unmap.has_wire_generation)
+    assert_equal(u.unmap.wire_generation, UInt64(41))
+    assert_true(u.unmap.has_wire_identity)
+    assert_equal(u.unmap.wire_identity, "known")
+    var miss = parse_event(
+        utf8_bytes(
+            event_doc(
+                String("unmap"),
+                String(
+                    '{"mapping_id": null, "wire_generation": "0",'
+                    ' "wire_identity": "miss"}'
+                ),
+            )
+        )
+    )
+    assert_true(not miss.unmap.has_mapping_id)
+    assert_equal(miss.unmap.wire_identity, "miss")
     var c = parse_event(
         utf8_bytes(
             event_doc(
@@ -737,12 +766,27 @@ def test_parse_event_kinds() raises:
                 String("sync_request"),
                 String(
                     '{"operation_id": "op-3", "mapping_id": null,'
-                    ' "offset": "0", "length": "64"}'
+                    ' "offset_known": true, "offset": "0",'
+                    ' "length": "64"}'
                 ),
             )
         )
     )
     assert_equal(s.sync.length, UInt64(64))
+    assert_true(s.sync.has_offset)
+    var su = parse_event(
+        utf8_bytes(
+            event_doc(
+                String("sync_request"),
+                String(
+                    '{"operation_id": "op-4", "mapping_id": null,'
+                    ' "offset_known": false, "offset": null,'
+                    ' "length": "64"}'
+                ),
+            )
+        )
+    )
+    assert_true(not su.sync.has_offset)
     var t = parse_event(
         utf8_bytes(
             event_doc(
@@ -881,7 +925,7 @@ def test_partial_record_definitive() raises:
     assert_true(
         not partial_record_definitive(utf8_bytes(String("{")), sid)
     )
-    var bad_version = line.replace(String('"0.1.0"'), String('"9.0.0"'))
+    var bad_version = line.replace(String('"0.1.1"'), String('"9.0.0"'))
     assert_true(partial_record_definitive(cut_last(bad_version), sid))
     assert_true(
         partial_record_definitive(
@@ -956,7 +1000,7 @@ def test_partial_record_definitive() raises:
     assert_true(
         partial_record_definitive(
             utf8_bytes(
-                String('{"schema_version": "0.1.0", "schema_version"')
+                String('{"schema_version": "0.1.1", "schema_version"')
             ),
             sid,
         )

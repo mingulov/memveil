@@ -84,7 +84,7 @@ struct _ActiveMapping(ImplicitlyCopyable):
     var op: String
     var device: String
     var namespace: String
-    var generation: Int
+    var generation: UInt64
     var map_ts: UInt64
     var mapped_bytes: UInt64
 
@@ -92,7 +92,7 @@ struct _ActiveMapping(ImplicitlyCopyable):
         self.op = String("")
         self.device = String("")
         self.namespace = String("")
-        self.generation = 0
+        self.generation = UInt64(0)
         self.map_ts = UInt64(0)
         self.mapped_bytes = UInt64(0)
 
@@ -119,7 +119,7 @@ struct CorrelationRegistry[
     var _hooks: Dict[String, String]
     var _pending: Dict[String, _PendingOp]
     var _active: Dict[String, _ActiveMapping]
-    var _retired: Dict[String, Int]
+    var _retired: Dict[String, UInt64]
     var _retired_order: List[String]
     var _retired_next: Int
     var _lineage_next: Dict[String, Int]
@@ -133,7 +133,7 @@ struct CorrelationRegistry[
         self._hooks = Dict[String, String]()
         self._pending = Dict[String, _PendingOp]()
         self._active = Dict[String, _ActiveMapping]()
-        self._retired = Dict[String, Int]()
+        self._retired = Dict[String, UInt64]()
         self._retired_order = List[String]()
         self._retired_next = 0
         self._lineage_next = Dict[String, Int]()
@@ -155,7 +155,7 @@ struct CorrelationRegistry[
 
     def generation_of(
         self, device: String, namespace: String, mapping: String
-    ) raises -> Int:
+    ) raises -> UInt64:
         """Generation of one mapping token, live or retired."""
         var key = namespace + "|" + mapping
         if key in self._active:
@@ -270,12 +270,76 @@ struct CorrelationRegistry[
         ev.source_correlation = String("direct")
         return ev^
 
+    def _wire_gen_token(self, gen: UInt64) -> String:
+        return String("gen-") + format_u64(gen)
+
+    def _apply_wire_map(
+        mut self, var ev: Event, ns: String, source: String
+    ) raises -> Event:
+        """Pair one MVLC v2 map without requiring an attempt.
+
+        Precedence: wire-identity validation, then duplicate
+        and bound checks, then active-state insert. Unknown
+        identities land unpaired with explicit causes and
+        never mint.
+        """
+        var op = ev.map_result.operation_id
+        var gen = ev.map_result.wire_generation
+        if not ev.map_result.success:
+            if ev.map_result.has_wire_identity:
+                raise CorrelationError("failure carries wire_identity")
+            if gen != UInt64(0):
+                raise CorrelationError("failure carries generation")
+            return self._unpaired_event(
+                ev^, "failure carries no mapping", source
+            )
+        if not ev.map_result.has_wire_identity:
+            raise CorrelationError("success lacks wire_identity")
+        var ident = ev.map_result.wire_identity
+        if ident != "known" and ident != "unassigned":
+            raise CorrelationError("bad wire_identity")
+        if ident == "unassigned":
+            if ev.map_result.has_mapping_id:
+                raise CorrelationError("unassigned carries mapping")
+            return self._unpaired_event(
+                ev^, "unassigned mapping identity", source
+            )
+        if not ev.map_result.has_mapping_id:
+            raise CorrelationError("known identity lacks mapping")
+        if ev.map_result.mapping_id != self._wire_gen_token(gen):
+            raise CorrelationError("wire mapping/generation mismatch")
+        if not ev.map_result.has_mapped_bytes:
+            raise CorrelationError("success lacks mapped_bytes")
+        var key = ns + "|" + ev.map_result.mapping_id
+        if key in self._active:
+            return self._unpaired_event(
+                ev^,
+                "mapping already live: " + ev.map_result.mapping_id,
+                source,
+            )
+        if len(self._active) >= Self.ACTIVE_N:
+            return self._unpaired_event(
+                ev^, "active table exhausted", source
+            )
+        var m = _ActiveMapping()
+        m.op = op
+        m.device = String("unattributed")
+        m.namespace = ns
+        m.generation = gen
+        m.map_ts = ev.ts_ns
+        m.mapped_bytes = ev.map_result.mapped_bytes
+        self._active[key] = m
+        ev.source_correlation = String("direct")
+        return ev^
+
     def _apply_map_result(
         mut self, var ev: Event, ns: String, source: String
     ) raises -> Event:
         var op = ev.map_result.operation_id
         if op == "":
             raise CorrelationError("malformed map_result")
+        if ev.map_result.has_wire_generation:
+            return self._apply_wire_map(ev^, ns, source)
         if op not in self._pending:
             return self._unpaired_event(
                 ev^, "map_result without pending operation", source
@@ -316,7 +380,7 @@ struct CorrelationRegistry[
         m.op = op
         m.device = p.device
         m.namespace = ns
-        m.generation = gen
+        m.generation = UInt64(gen)
         m.map_ts = ev.ts_ns
         m.mapped_bytes = ev.map_result.mapped_bytes
         self._active[key] = m
@@ -384,6 +448,24 @@ struct CorrelationRegistry[
     def _apply_unmap(
         mut self, var ev: Event, ns: String, source: String
     ) raises -> Event:
+        if ev.unmap.has_wire_generation:
+            if not ev.unmap.has_wire_identity:
+                raise CorrelationError("unmap lacks wire_identity")
+            var ident = ev.unmap.wire_identity
+            if ident != "known" and ident != "miss":
+                raise CorrelationError("bad wire_identity")
+            if ident == "miss":
+                if ev.unmap.has_mapping_id:
+                    raise CorrelationError("miss carries mapping")
+                return self._unpaired_event(
+                    ev^, "release of unknown mapping", source
+                )
+            if not ev.unmap.has_mapping_id:
+                raise CorrelationError("known identity lacks mapping")
+            if ev.unmap.mapping_id != self._wire_gen_token(
+                ev.unmap.wire_generation
+            ):
+                raise CorrelationError("wire mapping/generation mismatch")
         if not ev.unmap.has_mapping_id:
             raise CorrelationError("malformed unmap")
         var key = ns + "|" + ev.unmap.mapping_id
@@ -401,7 +483,7 @@ struct CorrelationRegistry[
             ev^, "release of unknown mapping", source
         )
 
-    def _retire(mut self, key: String, gen: Int) raises:
+    def _retire(mut self, key: String, gen: UInt64) raises:
         """Record one tombstone in the bounded ring."""
         if key in self._retired:
             self._retired[key] = gen

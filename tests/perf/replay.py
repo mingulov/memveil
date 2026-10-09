@@ -50,7 +50,7 @@ def session_doc(sid):
 
 def event_line(sid, seq, ts, size, forced, op):
     return json.dumps({
-        "schema_version": "0.1.0", "session_id": sid,
+        "schema_version": "0.1.1", "session_id": sid,
         "source": {"hook": "swiotlb:swiotlb_bounced",
                    "backend": "synthetic",
                    "profile_id": "synthetic-attempts-1",

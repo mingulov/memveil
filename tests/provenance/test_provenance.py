@@ -142,11 +142,17 @@ def main():
     check("pixi-license-declared", 'license = "GPL-3.0-or-later"' in pixi)
 
     schema_version = lock["product_contracts"]["schema_version"]
+    event_version = lock["product_contracts"].get(
+        "event_schema_version", schema_version)
     import glob
     schemas = sorted(glob.glob(os.path.join(ROOT, "schemas", "*.json")))
     check("schemas-present", len(schemas) >= 4, str(len(schemas)))
-    bad = [os.path.basename(p) for p in schemas
-           if "-v%s.schema.json" % schema_version not in p]
+    bad = []
+    for p in schemas:
+        base = os.path.basename(p)
+        want = event_version if base.startswith("event-v") else schema_version
+        if "-v%s.schema.json" % want not in p:
+            bad.append(base)
     check("schemas-versioned", not bad, "; ".join(bad[:5]))
     check("versions-distinct-note",
           any("independent" in d

@@ -30,6 +30,7 @@ import re
 import sys
 
 VERSION = "0.1.0"
+EVENT_VERSION = "0.1.1"
 U64MAX = 18446744073709551615
 U64RE = re.compile(r"(0|[1-9][0-9]{0,19})")
 IDRE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
@@ -468,17 +469,32 @@ def check_data(kind, data, where, devices):
         summary["device"] = device
     elif kind == "map_result":
         check_keys(data, ("operation_id", "success", "mapping_id",
-                          "return_code", "mapped_bytes"), (), where)
+                          "return_code", "mapped_bytes",
+                          "wire_generation", "wire_identity"), (), where)
         summary["op"] = check_id(data["operation_id"],
                                  "%s.operation_id" % where)
         if not isinstance(data["success"], bool):
             fail("bad-type", "%s.success must be a boolean" % where)
+        wgen = data["wire_generation"]
+        wident = data["wire_identity"]
+        if wgen is not None:
+            check_u64(wgen, "%s.wire_generation" % where)
+        if wident is not None:
+            check_enum(wident, ("known", "unassigned"),
+                       "%s.wire_identity" % where)
+        if (wgen is None) != (wident is None):
+            if not (not data["success"] and wident is None and
+                    wgen == "0"):
+                fail("wire-mismatch",
+                     "%s: wire generation/identity mismatch" % where)
         if data["success"]:
             if data["mapping_id"] is None:
-                fail("missing-mapping",
-                     "%s needs a mapping_id on success" % where)
-            summary["mapping"] = check_id(data["mapping_id"],
-                                          "%s.mapping_id" % where)
+                if wident != "unassigned":
+                    fail("missing-mapping",
+                         "%s needs a mapping_id on success" % where)
+            else:
+                summary["mapping"] = check_id(
+                    data["mapping_id"], "%s.mapping_id" % where)
             if data["mapped_bytes"] is None:
                 fail("missing-required",
                      "%s needs mapped_bytes on success" % where)
@@ -492,12 +508,30 @@ def check_data(kind, data, where, devices):
             if data["mapped_bytes"] is not None:
                 fail("failed-with-mapping",
                      "%s: failed allocation has no mapped bytes" % where)
+            if wident is not None:
+                fail("failed-with-mapping",
+                     "%s: failed allocation has no wire identity"
+                     % where)
         check_return_code(data["return_code"], "%s.return_code" % where)
     elif kind == "unmap":
-        check_keys(data, ("mapping_id",), (), where)
+        check_keys(data, ("mapping_id", "wire_generation",
+                          "wire_identity"), (), where)
+        wgen = data["wire_generation"]
+        wident = data["wire_identity"]
+        if wgen is not None:
+            check_u64(wgen, "%s.wire_generation" % where)
+        if wident is not None:
+            check_enum(wident, ("known", "miss"),
+                       "%s.wire_identity" % where)
+        if (wgen is None) != (wident is None):
+            fail("wire-mismatch",
+                 "%s: wire generation/identity mismatch" % where)
         if data["mapping_id"] is not None:
             summary["mapping_ref"] = check_id(data["mapping_id"],
                                               "%s.mapping_id" % where)
+        elif wident != "miss":
+            fail("missing-mapping",
+                 "%s: null mapping needs missed identity" % where)
     elif kind == "copy":
         check_keys(data, ("operation_id", "mapping_id", "direction",
                           "bytes"), (), where)
@@ -513,14 +547,25 @@ def check_data(kind, data, where, devices):
                                           "%s.bytes" % where)
         summary["direction"] = data["direction"]
     elif kind == "sync_request":
-        check_keys(data, ("operation_id", "mapping_id", "offset",
-                          "length"), (), where)
+        check_keys(data, ("operation_id", "mapping_id", "offset_known",
+                          "offset", "length"), (), where)
         summary["op"] = check_id(data["operation_id"],
                                  "%s.operation_id" % where)
         if data["mapping_id"] is not None:
             summary["mapping_ref"] = check_id(data["mapping_id"],
                                               "%s.mapping_id" % where)
-        check_span(data, where)
+        if not isinstance(data["offset_known"], bool):
+            fail("bad-type", "%s.offset_known must be a boolean" % where)
+        if data["offset_known"]:
+            if data["offset"] is None:
+                fail("missing-required",
+                     "%s needs offset when known" % where)
+            check_span(data, where)
+        elif data["offset"] is not None:
+            fail("offset-mismatch",
+                 "%s: unknown offset must be null" % where)
+        else:
+            check_u64(data["length"], "%s.length" % where)
     elif kind == "transition_result":
         check_keys(data, ("region_id", "requested_state", "success",
                           "return_code", "offset", "length"),
@@ -609,7 +654,7 @@ def check_event(obj, lineno, session):
                ("schema_version", "session_id", "seq", "ts_ns", "kind",
                 "source", "data"),
                ("observer_context",), where)
-    if obj["schema_version"] != VERSION:
+    if obj["schema_version"] != EVENT_VERSION:
         fail("bad-version", "%s schema_version %r"
              % (where, obj["schema_version"]))
     if obj["session_id"] != session["id"]:
@@ -1492,7 +1537,7 @@ def run_selftest():
         obj["capture"]["window"]["baseline_start_ns"] = "999999900"
         session = check_session(obj)
         check_event({
-            "schema_version": "0.1.0", "session_id": session["id"],
+            "schema_version": "0.1.1", "session_id": session["id"],
             "seq": "1", "ts_ns": ts, "kind": kind,
             "source": {"hook": "h", "backend": "b",
                        "profile_id": "p", "measurement": "observed",

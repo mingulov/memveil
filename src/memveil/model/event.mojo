@@ -43,7 +43,7 @@ from memveil.model.validate import (
     checked_add,
 )
 
-comptime EVENT_SCHEMA_VERSION = "0.1.0"
+comptime EVENT_SCHEMA_VERSION = "0.1.1"
 comptime MAX_CPU = Int64(1048575)
 comptime MAX_PID = Int64(4194304)
 
@@ -70,6 +70,10 @@ struct MapResult(ImplicitlyCopyable):
     var return_code: Int64
     var has_mapped_bytes: Bool
     var mapped_bytes: UInt64
+    var has_wire_generation: Bool
+    var wire_generation: UInt64
+    var has_wire_identity: Bool
+    var wire_identity: String
 
     def __init__(out self):
         self.operation_id = String("")
@@ -80,15 +84,27 @@ struct MapResult(ImplicitlyCopyable):
         self.return_code = Int64(0)
         self.has_mapped_bytes = False
         self.mapped_bytes = UInt64(0)
+        self.has_wire_generation = False
+        self.wire_generation = UInt64(0)
+        self.has_wire_identity = False
+        self.wire_identity = String("")
 
 
 struct Unmap(ImplicitlyCopyable):
     var has_mapping_id: Bool
     var mapping_id: String
+    var has_wire_generation: Bool
+    var wire_generation: UInt64
+    var has_wire_identity: Bool
+    var wire_identity: String
 
     def __init__(out self):
         self.has_mapping_id = False
         self.mapping_id = String("")
+        self.has_wire_generation = False
+        self.wire_generation = UInt64(0)
+        self.has_wire_identity = False
+        self.wire_identity = String("")
 
 
 struct CopyPayload(ImplicitlyCopyable):
@@ -110,6 +126,7 @@ struct SyncRequest(ImplicitlyCopyable):
     var operation_id: String
     var has_mapping_id: Bool
     var mapping_id: String
+    var has_offset: Bool
     var offset: UInt64
     var length: UInt64
 
@@ -117,6 +134,7 @@ struct SyncRequest(ImplicitlyCopyable):
         self.operation_id = String("")
         self.has_mapping_id = False
         self.mapping_id = String("")
+        self.has_offset = False
         self.offset = UInt64(0)
         self.length = UInt64(0)
 
@@ -381,6 +399,18 @@ def _parse_bounce(mut scan: Scanner, mut out: Event) raises:
         raise ValidationError("bounce_attempt", "missing field")
 
 
+def _check_wire_identity_map(v: String) raises:
+    if v == "known" or v == "unassigned":
+        return
+    raise ValidationError("map_result.wire_identity", "bad enum")
+
+
+def _check_wire_identity_unmap(v: String) raises:
+    if v == "known" or v == "miss":
+        return
+    raise ValidationError("unmap.wire_identity", "bad enum")
+
+
 def _parse_map_result(mut scan: Scanner, mut out: Event) raises:
     scan.begin_object()
     var has_op = False
@@ -388,6 +418,8 @@ def _parse_map_result(mut scan: Scanner, mut out: Event) raises:
     var has_mapping = False
     var has_code = False
     var has_bytes = False
+    var has_wgen = False
+    var has_wid = False
     if not object_is_empty(scan):
         while True:
             scan.skip_ws()
@@ -430,6 +462,23 @@ def _parse_map_result(mut scan: Scanner, mut out: Event) raises:
                     out.map_result.mapped_bytes = m.value
                     out.map_result.has_mapped_bytes = True
                 has_bytes = True
+            elif key == "wire_generation":
+                if has_wgen:
+                    raise ValidationError("wire_generation", "duplicate")
+                var m = parse_maybe_u64(scan)
+                if m.has:
+                    out.map_result.wire_generation = m.value
+                    out.map_result.has_wire_generation = True
+                has_wgen = True
+            elif key == "wire_identity":
+                if has_wid:
+                    raise ValidationError("wire_identity", "duplicate")
+                var m = _parse_maybe_id(scan, "map_result.wire_identity")
+                if m.has:
+                    _check_wire_identity_map(m.value)
+                    out.map_result.wire_identity = m.value
+                    out.map_result.has_wire_identity = True
+                has_wid = True
             else:
                 raise ValidationError("map_result", "unknown map_result field")
             if not object_next(scan, "map_result"):
@@ -441,11 +490,20 @@ def _parse_map_result(mut scan: Scanner, mut out: Event) raises:
         or not has_mapping
         or not has_code
         or not has_bytes
+        or not has_wgen
+        or not has_wid
     ):
         raise ValidationError("map_result", "missing field")
+    var wg = out.map_result.has_wire_generation
+    var wi = out.map_result.has_wire_identity
+    if wg != wi and (
+        out.map_result.success or wi or out.map_result.wire_generation != UInt64(0)
+    ):
+        raise ValidationError("map_result", "wire generation/identity mismatch")
     if out.map_result.success:
         if not out.map_result.has_mapping_id:
-            raise ValidationError("map_result", "success lacks mapping_id")
+            if not (wg and wi and out.map_result.wire_identity == "unassigned"):
+                raise ValidationError("map_result", "success lacks mapping_id")
         if not out.map_result.has_mapped_bytes:
             raise ValidationError("map_result", "success lacks mapped_bytes")
     else:
@@ -453,11 +511,15 @@ def _parse_map_result(mut scan: Scanner, mut out: Event) raises:
             raise ValidationError("map_result", "failure carries mapping_id")
         if out.map_result.has_mapped_bytes:
             raise ValidationError("map_result", "failure carries mapped_bytes")
+        if wi:
+            raise ValidationError("map_result", "failure carries wire_identity")
 
 
 def _parse_unmap(mut scan: Scanner, mut out: Event) raises:
     scan.begin_object()
     var has_mapping = False
+    var has_wgen = False
+    var has_wid = False
     if not object_is_empty(scan):
         while True:
             scan.skip_ws()
@@ -471,13 +533,38 @@ def _parse_unmap(mut scan: Scanner, mut out: Event) raises:
                     out.unmap.mapping_id = m.value
                     out.unmap.has_mapping_id = True
                 has_mapping = True
+            elif key == "wire_generation":
+                if has_wgen:
+                    raise ValidationError("wire_generation", "duplicate")
+                var m = parse_maybe_u64(scan)
+                if m.has:
+                    out.unmap.wire_generation = m.value
+                    out.unmap.has_wire_generation = True
+                has_wgen = True
+            elif key == "wire_identity":
+                if has_wid:
+                    raise ValidationError("wire_identity", "duplicate")
+                var m = _parse_maybe_id(scan, "unmap.wire_identity")
+                if m.has:
+                    _check_wire_identity_unmap(m.value)
+                    out.unmap.wire_identity = m.value
+                    out.unmap.has_wire_identity = True
+                has_wid = True
             else:
                 raise ValidationError("unmap", "unknown unmap field")
             if not object_next(scan, "unmap"):
                 break
     scan.end_object()
-    if not has_mapping:
+    if not has_mapping or not has_wgen or not has_wid:
         raise ValidationError("unmap", "missing field")
+    var wg = out.unmap.has_wire_generation
+    var wi = out.unmap.has_wire_identity
+    if wg != wi:
+        raise ValidationError("unmap", "wire generation/identity mismatch")
+    if not out.unmap.has_mapping_id and not (
+        wg and wi and out.unmap.wire_identity == "miss"
+    ):
+        raise ValidationError("unmap", "unmap lacks mapping_id")
 
 
 def _parse_copy(mut scan: Scanner, mut out: Event) raises:
@@ -530,8 +617,10 @@ def _parse_sync(mut scan: Scanner, mut out: Event) raises:
     scan.begin_object()
     var has_op = False
     var has_mapping = False
-    var has_offset = False
+    var has_known_key = False
+    var has_offset_key = False
     var has_length = False
+    var offset_saw_value = False
     if not object_is_empty(scan):
         while True:
             scan.skip_ws()
@@ -550,11 +639,20 @@ def _parse_sync(mut scan: Scanner, mut out: Event) raises:
                     out.sync.mapping_id = m.value
                     out.sync.has_mapping_id = True
                 has_mapping = True
+            elif key == "offset_known":
+                if has_known_key:
+                    raise ValidationError("offset_known", "duplicate")
+                scan.skip_ws()
+                out.sync.has_offset = scan.parse_bool()
+                has_known_key = True
             elif key == "offset":
-                if has_offset:
+                if has_offset_key:
                     raise ValidationError("offset", "duplicate")
-                out.sync.offset = parse_u64_field(scan, "sync.offset")
-                has_offset = True
+                var m = parse_maybe_u64(scan)
+                if m.has:
+                    out.sync.offset = m.value
+                    offset_saw_value = True
+                has_offset_key = True
             elif key == "length":
                 if has_length:
                     raise ValidationError("length", "duplicate")
@@ -565,10 +663,21 @@ def _parse_sync(mut scan: Scanner, mut out: Event) raises:
             if not object_next(scan, "sync_request"):
                 break
     scan.end_object()
-    if not has_op or not has_mapping or not has_offset or not has_length:
+    if (
+        not has_op
+        or not has_mapping
+        or not has_known_key
+        or not has_offset_key
+        or not has_length
+    ):
         raise ValidationError("sync_request", "missing field")
+    if out.sync.has_offset != offset_saw_value:
+        raise ValidationError("sync_request", "offset/known mismatch")
+    if not out.sync.has_offset:
+        out.sync.offset = UInt64(0)
     try:
-        _ = checked_add(out.sync.offset, out.sync.length)
+        if out.sync.has_offset:
+            _ = checked_add(out.sync.offset, out.sync.length)
     except:
         raise ValidationError("sync_request", "span overflows")
 
@@ -1289,9 +1398,15 @@ def _data_field_known(kind: String, key: String) -> Bool:
             or key == "mapping_id"
             or key == "return_code"
             or key == "mapped_bytes"
+            or key == "wire_generation"
+            or key == "wire_identity"
         )
     if kind == "unmap":
-        return key == "mapping_id"
+        return (
+            key == "mapping_id"
+            or key == "wire_generation"
+            or key == "wire_identity"
+        )
     if kind == "copy":
         return (
             key == "operation_id"
@@ -1303,6 +1418,7 @@ def _data_field_known(kind: String, key: String) -> Bool:
         return (
             key == "operation_id"
             or key == "mapping_id"
+            or key == "offset_known"
             or key == "offset"
             or key == "length"
         )
@@ -1391,14 +1507,19 @@ def _type_rows() -> List[String]:
     out.append(String("data,map_result,mapping_id,S"))
     out.append(String("data,map_result,return_code,N"))
     out.append(String("data,map_result,mapped_bytes,S"))
+    out.append(String("data,map_result,wire_generation,S"))
+    out.append(String("data,map_result,wire_identity,S"))
     out.append(String("data,unmap,mapping_id,S"))
+    out.append(String("data,unmap,wire_generation,S"))
+    out.append(String("data,unmap,wire_identity,S"))
     out.append(String("data,copy,operation_id,s"))
     out.append(String("data,copy,mapping_id,S"))
     out.append(String("data,copy,direction,s"))
     out.append(String("data,copy,bytes,s"))
     out.append(String("data,sync_request,operation_id,s"))
     out.append(String("data,sync_request,mapping_id,S"))
-    out.append(String("data,sync_request,offset,s"))
+    out.append(String("data,sync_request,offset_known,b"))
+    out.append(String("data,sync_request,offset,S"))
     out.append(String("data,sync_request,length,s"))
     out.append(String("data,transition_result,region_id,s"))
     out.append(String("data,transition_result,requested_state,s"))

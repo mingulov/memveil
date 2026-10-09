@@ -229,6 +229,24 @@ def _encode_data(ev: Event) raises EncodeError -> String:
             )
         else:
             parts.append(_member(String("mapped_bytes"), _jnull()))
+        if ev.map_result.has_wire_generation:
+            parts.append(
+                _member(
+                    String("wire_generation"),
+                    _ju64(ev.map_result.wire_generation),
+                )
+            )
+        else:
+            parts.append(_member(String("wire_generation"), _jnull()))
+        if ev.map_result.has_wire_identity:
+            parts.append(
+                _member(
+                    String("wire_identity"),
+                    _jstr(ev.map_result.wire_identity),
+                )
+            )
+        else:
+            parts.append(_member(String("wire_identity"), _jnull()))
     elif kind == "unmap":
         if ev.unmap.has_mapping_id:
             parts.append(
@@ -238,6 +256,24 @@ def _encode_data(ev: Event) raises EncodeError -> String:
             )
         else:
             parts.append(_member(String("mapping_id"), _jnull()))
+        if ev.unmap.has_wire_generation:
+            parts.append(
+                _member(
+                    String("wire_generation"),
+                    _ju64(ev.unmap.wire_generation),
+                )
+            )
+        else:
+            parts.append(_member(String("wire_generation"), _jnull()))
+        if ev.unmap.has_wire_identity:
+            parts.append(
+                _member(
+                    String("wire_identity"),
+                    _jstr(ev.unmap.wire_identity),
+                )
+            )
+        else:
+            parts.append(_member(String("wire_identity"), _jnull()))
     elif kind == "copy":
         parts.append(
             _member(
@@ -270,7 +306,15 @@ def _encode_data(ev: Event) raises EncodeError -> String:
             )
         else:
             parts.append(_member(String("mapping_id"), _jnull()))
-        parts.append(_member(String("offset"), _ju64(ev.sync.offset)))
+        parts.append(
+            _member(String("offset_known"), _jbool(ev.sync.has_offset))
+        )
+        if ev.sync.has_offset:
+            parts.append(
+                _member(String("offset"), _ju64(ev.sync.offset))
+            )
+        else:
+            parts.append(_member(String("offset"), _jnull()))
         parts.append(_member(String("length"), _ju64(ev.sync.length)))
     elif kind == "transition_result":
         parts.append(

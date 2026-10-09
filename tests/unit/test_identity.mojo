@@ -77,6 +77,7 @@ def test_address_space() raises:
     check_address_space("kvirt")
     check_address_space("gphys")
     check_address_space("iova")
+    check_address_space("tlb-phys")
     var raised = False
     try:
         check_address_space("phys")

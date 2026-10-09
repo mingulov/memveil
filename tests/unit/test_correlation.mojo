@@ -14,6 +14,7 @@ from std.testing import TestSuite, assert_equal, assert_true
 
 from memveil.capture.correlation import CorrelationRegistry, budgets
 from memveil.model.event import Event
+from memveil.model.validate import format_u64
 from memveil.model.identity import (
     ACTIVE_MAX,
     DEVICE_MAX_ID,
@@ -83,6 +84,7 @@ def _sync(op: String, mapping: String, hook: String, seq: UInt64) -> Event:
     if mapping != "":
         ev.sync.has_mapping_id = True
         ev.sync.mapping_id = mapping
+    ev.sync.has_offset = True
     ev.sync.offset = UInt64(0)
     ev.sync.length = UInt64(1024)
     return ev^
@@ -126,7 +128,7 @@ def test_map_success_creates_mapping() raises:
         _map("op1", True, "m1", "h", UInt64(2)), "ring"
     )
     assert_true(_paired(out))
-    assert_equal(reg.generation_of("d1", "iova", "m1"), 1)
+    assert_equal(reg.generation_of("d1", "iova", "m1"), UInt64(1))
     assert_equal(reg.active_count(), 1)
 
 
@@ -145,7 +147,7 @@ def test_same_address_new_generation() raises:
     var g1 = reg.generation_of("d1", "iova", "m1")
     var g2 = reg.generation_of("d1", "iova", "m2")
     assert_true(g1 != g2)
-    assert_equal(g2, 2)
+    assert_equal(g2, UInt64(2))
 
 
 def test_cross_namespace_no_merge() raises:
@@ -373,6 +375,175 @@ def test_non_lifecycle_passthrough() raises:
     assert_equal(reg.health().status, String("complete_for_scope"))
 
 
+def _wire_map(
+    op: String, gen: UInt64, hook: String, seq: UInt64
+) -> Event:
+    var ev = _base("map_result", hook, seq)
+    ev.map_result.operation_id = op
+    ev.map_result.success = True
+    ev.map_result.has_mapping_id = True
+    ev.map_result.mapping_id = String("gen-") + format_u64(gen)
+    ev.map_result.has_mapped_bytes = True
+    ev.map_result.mapped_bytes = UInt64(4096)
+    ev.map_result.has_wire_generation = True
+    ev.map_result.wire_generation = gen
+    ev.map_result.has_wire_identity = True
+    ev.map_result.wire_identity = String("known")
+    return ev^
+
+
+def _wire_unmap(gen: UInt64, hook: String, seq: UInt64) -> Event:
+    var ev = _base("unmap", hook, seq)
+    ev.unmap.has_mapping_id = True
+    ev.unmap.mapping_id = String("gen-") + format_u64(gen)
+    ev.unmap.has_wire_generation = True
+    ev.unmap.wire_generation = gen
+    ev.unmap.has_wire_identity = True
+    ev.unmap.wire_identity = String("known")
+    return ev^
+
+
+def test_wire_map_pairs_without_pending() raises:
+    var reg = CorrelationRegistry()
+    reg.admit_hook("hm", "tlb-phys")
+    reg.admit_hook("hu", "tlb-phys")
+    var out = reg.normalize(
+        _wire_map("lc-1", UInt64(41), "hm", UInt64(1)), "ring"
+    )
+    assert_true(_paired(out))
+    assert_equal(
+        reg.generation_of("unattributed", "tlb-phys", "gen-41"),
+        UInt64(41),
+    )
+    var rel = reg.normalize(
+        _wire_unmap(UInt64(41), "hu", UInt64(2)), "ring"
+    )
+    assert_true(_paired(rel))
+    assert_equal(reg.active_count(), 0)
+    assert_equal(reg.health().status, String("complete_for_scope"))
+
+
+def test_wire_reuse_pairs_independently() raises:
+    var reg = CorrelationRegistry()
+    reg.admit_hook("hm", "tlb-phys")
+    reg.admit_hook("hu", "tlb-phys")
+    _ = reg.normalize(
+        _wire_map("lc-1", UInt64(41), "hm", UInt64(1)), "ring"
+    )
+    _ = reg.normalize(
+        _wire_unmap(UInt64(41), "hu", UInt64(2)), "ring"
+    )
+    _ = reg.normalize(
+        _wire_map("lc-3", UInt64(42), "hm", UInt64(3)), "ring"
+    )
+    var rel = reg.normalize(
+        _wire_unmap(UInt64(42), "hu", UInt64(4)), "ring"
+    )
+    assert_true(_paired(rel))
+    assert_equal(reg.health().status, String("complete_for_scope"))
+
+
+def test_wire_double_map_unpaired() raises:
+    var reg = CorrelationRegistry()
+    reg.admit_hook("hm", "tlb-phys")
+    _ = reg.normalize(
+        _wire_map("lc-1", UInt64(7), "hm", UInt64(1)), "ring"
+    )
+    var out = reg.normalize(
+        _wire_map("lc-2", UInt64(7), "hm", UInt64(2)), "ring"
+    )
+    assert_true(not _paired(out))
+    assert_true(
+        reg.health().reason.find(String("mapping already live")) != -1
+    )
+
+
+def test_wire_double_unmap_retired() raises:
+    var reg = CorrelationRegistry()
+    reg.admit_hook("hm", "tlb-phys")
+    reg.admit_hook("hu", "tlb-phys")
+    _ = reg.normalize(
+        _wire_map("lc-1", UInt64(7), "hm", UInt64(1)), "ring"
+    )
+    _ = reg.normalize(
+        _wire_unmap(UInt64(7), "hu", UInt64(2)), "ring"
+    )
+    var out = reg.normalize(
+        _wire_unmap(UInt64(7), "hu", UInt64(3)), "ring"
+    )
+    assert_true(not _paired(out))
+    assert_true(
+        reg.health().reason.find(String("release of retired mapping"))
+        != -1
+    )
+
+
+def test_wire_unassigned_never_pairs() raises:
+    var reg = CorrelationRegistry()
+    reg.admit_hook("hm", "tlb-phys")
+    var ev = _base("map_result", "hm", UInt64(1))
+    ev.map_result.operation_id = String("lc-1")
+    ev.map_result.success = True
+    ev.map_result.has_mapped_bytes = True
+    ev.map_result.mapped_bytes = UInt64(4096)
+    ev.map_result.has_wire_generation = True
+    ev.map_result.wire_generation = UInt64(0)
+    ev.map_result.has_wire_identity = True
+    ev.map_result.wire_identity = String("unassigned")
+    var out = reg.normalize(ev^, "ring")
+    assert_true(not _paired(out))
+    assert_true(
+        reg.health().reason.find(String("unassigned mapping identity"))
+        != -1
+    )
+    assert_equal(reg.active_count(), 0)
+
+
+def test_wire_miss_never_pairs() raises:
+    var reg = CorrelationRegistry()
+    reg.admit_hook("hu", "tlb-phys")
+    var ev = _base("unmap", "hu", UInt64(1))
+    ev.unmap.has_wire_generation = True
+    ev.unmap.wire_generation = UInt64(0)
+    ev.unmap.has_wire_identity = True
+    ev.unmap.wire_identity = String("miss")
+    var out = reg.normalize(ev^, "ring")
+    assert_true(not _paired(out))
+    assert_true(
+        reg.health().reason.find(String("release of unknown mapping"))
+        != -1
+    )
+
+
+def test_wire_failed_map_unpaired() raises:
+    var reg = CorrelationRegistry()
+    reg.admit_hook("hm", "tlb-phys")
+    var ev = _base("map_result", "hm", UInt64(1))
+    ev.map_result.operation_id = String("lc-1")
+    ev.map_result.success = False
+    ev.map_result.has_wire_generation = True
+    ev.map_result.wire_generation = UInt64(0)
+    var out = reg.normalize(ev^, "ring")
+    assert_true(not _paired(out))
+    assert_true(
+        reg.health().reason.find(String("failure carries no mapping"))
+        != -1
+    )
+
+
+def test_wire_token_mismatch_raises() raises:
+    var reg = CorrelationRegistry()
+    reg.admit_hook("hm", "tlb-phys")
+    var ev = _wire_map("lc-1", UInt64(7), "hm", UInt64(1))
+    ev.map_result.mapping_id = String("gen-9")
+    var raised = False
+    try:
+        _ = reg.normalize(ev^, "ring")
+    except:
+        raised = True
+    assert_true(raised)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_attempt_opens_pending]()
@@ -396,6 +567,14 @@ def run() raises -> Int:
     suite.test[test_default_budgets]()
     suite.test[test_malformed_raises]()
     suite.test[test_non_lifecycle_passthrough]()
+    suite.test[test_wire_map_pairs_without_pending]()
+    suite.test[test_wire_reuse_pairs_independently]()
+    suite.test[test_wire_double_map_unpaired]()
+    suite.test[test_wire_double_unmap_retired]()
+    suite.test[test_wire_unassigned_never_pairs]()
+    suite.test[test_wire_miss_never_pairs]()
+    suite.test[test_wire_failed_map_unpaired]()
+    suite.test[test_wire_token_mismatch_raises]()
     suite^.run()
     return 0
 

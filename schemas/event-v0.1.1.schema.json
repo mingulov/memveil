@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "event-v0.1.0.schema.json",
+  "$id": "event-v0.1.1.schema.json",
   "title": "MemVeil normalized event",
-  "description": "One normalized event line in events.ndjson. Reconstructed producer contract, format version 0.1.0.",
+  "description": "One normalized event line in events.ndjson. Reconstructed producer contract, format version 0.1.1. Adds wire_generation/wire_identity to map_result and unmap, and offset_known to sync_request.",
   "type": "object",
   "required": [
     "schema_version",
@@ -16,7 +16,7 @@
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": "0.1.0"
+      "const": "0.1.1"
     },
     "session_id": {
       "$ref": "#/$defs/opaque_id",
@@ -122,14 +122,14 @@
         "properties": {
           "data": {
             "type": "object",
-            "required": ["operation_id", "success", "mapping_id", "return_code", "mapped_bytes"],
+            "required": ["operation_id", "success", "mapping_id", "return_code", "mapped_bytes", "wire_generation", "wire_identity"],
             "additionalProperties": false,
             "properties": {
               "operation_id": {"$ref": "#/$defs/opaque_id"},
               "success": {"type": "boolean"},
               "mapping_id": {
                 "anyOf": [{"$ref": "#/$defs/opaque_id"}, {"type": "null"}],
-                "description": "Generation-specific mapping ID on success; null on failure. A failed allocation never acquires one."
+                "description": "Generation-specific mapping ID on success; null on failure and on explicit unassigned identity."
               },
               "return_code": {
                 "type": ["integer", "null"],
@@ -138,13 +138,22 @@
               "mapped_bytes": {
                 "anyOf": [{"$ref": "#/$defs/u64"}, {"type": "null"}],
                 "description": "Mapped length on success; null on failure."
+              },
+              "wire_generation": {
+                "anyOf": [{"$ref": "#/$defs/u64"}, {"type": "null"}],
+                "description": "Opaque MVLC v2 mapping generation; null for non-wire records."
+              },
+              "wire_identity": {
+                "anyOf": [{"enum": ["known", "unassigned"]}, {"type": "null"}],
+                "description": "Wire identity status; null for non-wire records and failed maps."
               }
             },
             "allOf": [
               {
                 "if": {
                   "properties": {"success": {"const": true}},
-                  "required": ["success"]
+                  "required": ["success"],
+                  "not": {"properties": {"wire_identity": {"const": "unassigned"}}}
                 },
                 "then": {
                   "required": ["mapping_id", "mapped_bytes"],
@@ -153,7 +162,20 @@
                     "mapped_bytes": {"$ref": "#/$defs/u64"}
                   }
                 },
-                "description": "Success carries a generation-specific mapping ID and length."
+                "description": "Success carries a generation-specific mapping ID and length, unless identity is explicitly unassigned."
+              },
+              {
+                "if": {
+                  "properties": {"success": {"const": true}, "wire_identity": {"const": "unassigned"}},
+                  "required": ["success", "wire_identity"]
+                },
+                "then": {
+                  "properties": {
+                    "mapping_id": {"type": "null"},
+                    "mapped_bytes": {"$ref": "#/$defs/u64"}
+                  }
+                },
+                "description": "Unassigned success carries no mapping ID but keeps its observed length."
               },
               {
                 "if": {
@@ -163,10 +185,26 @@
                 "then": {
                   "properties": {
                     "mapping_id": {"type": "null"},
-                    "mapped_bytes": {"type": "null"}
+                    "mapped_bytes": {"type": "null"},
+                    "wire_identity": {"type": "null"}
                   }
                 },
                 "description": "A failed allocation never acquires a mapping."
+              },
+              {
+                "if": {"properties": {"wire_generation": {"type": "null"}}},
+                "then": {"properties": {"wire_identity": {"type": "null"}}},
+                "description": "A null generation implies null identity."
+              },
+              {
+                "if": {"properties": {"wire_identity": {"type": "null"}}},
+                "then": {
+                  "anyOf": [
+                    {"properties": {"wire_generation": {"type": "null"}}},
+                    {"properties": {"success": {"const": false}, "wire_generation": {"const": "0"}}}
+                  ]
+                },
+                "description": "Null identity means a non-wire record or a failed wire map with generation zero."
               }
             ],
             "description": "An internal bounce-allocation result."
@@ -180,14 +218,39 @@
         "properties": {
           "data": {
             "type": "object",
-            "required": ["mapping_id"],
+            "required": ["mapping_id", "wire_generation", "wire_identity"],
             "additionalProperties": false,
             "properties": {
               "mapping_id": {
                 "anyOf": [{"$ref": "#/$defs/opaque_id"}, {"type": "null"}],
-                "description": "Released mapping; null when the identity is unmatched."
+                "description": "Released mapping; null on explicit missed identity."
+              },
+              "wire_generation": {
+                "anyOf": [{"$ref": "#/$defs/u64"}, {"type": "null"}],
+                "description": "Opaque MVLC v2 mapping generation; null for non-wire records."
+              },
+              "wire_identity": {
+                "anyOf": [{"enum": ["known", "miss"]}, {"type": "null"}],
+                "description": "Wire identity status; null for non-wire records."
               }
             },
+            "allOf": [
+              {
+                "if": {"properties": {"wire_generation": {"type": "null"}}},
+                "then": {"properties": {"wire_identity": {"type": "null"}}},
+                "description": "A null generation implies null identity."
+              },
+              {
+                "if": {"properties": {"wire_identity": {"type": "null"}}},
+                "then": {"properties": {"wire_generation": {"type": "null"}}},
+                "description": "Null identity on unmap means a non-wire record."
+              },
+              {
+                "if": {"properties": {"mapping_id": {"type": "null"}}},
+                "then": {"properties": {"wire_identity": {"const": "miss"}}},
+                "description": "A null mapping on unmap requires explicit missed identity."
+              }
+            ],
             "description": "A covered release boundary. Not erasure or reprivatization."
           }
         }
@@ -228,16 +291,35 @@
         "properties": {
           "data": {
             "type": "object",
-            "required": ["operation_id", "mapping_id", "offset", "length"],
+            "required": ["operation_id", "mapping_id", "offset_known", "offset", "length"],
             "additionalProperties": false,
             "properties": {
               "operation_id": {"$ref": "#/$defs/opaque_id"},
               "mapping_id": {
                 "anyOf": [{"$ref": "#/$defs/opaque_id"}, {"type": "null"}]
               },
-              "offset": {"$ref": "#/$defs/u64"},
+              "offset_known": {
+                "type": "boolean",
+                "description": "False when the sync offset was not observed; the wire never observes it."
+              },
+              "offset": {
+                "anyOf": [{"$ref": "#/$defs/u64"}, {"type": "null"}],
+                "description": "Sync offset when observed; null exactly when offset_known is false."
+              },
               "length": {"$ref": "#/$defs/u64"}
             },
+            "allOf": [
+              {
+                "if": {"properties": {"offset_known": {"const": true}}},
+                "then": {"properties": {"offset": {"$ref": "#/$defs/u64"}}},
+                "description": "A known offset carries a value."
+              },
+              {
+                "if": {"properties": {"offset_known": {"const": false}}},
+                "then": {"properties": {"offset": {"type": "null"}}},
+                "description": "An unknown offset carries null, never a placeholder."
+              }
+            ],
             "description": "A synchronization request. Not a substitute for the copy that might follow."
           }
         }

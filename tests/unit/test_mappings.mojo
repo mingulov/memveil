@@ -84,6 +84,7 @@ def _sync(
     ev.sync.operation_id = op
     ev.sync.has_mapping_id = True
     ev.sync.mapping_id = mapping
+    ev.sync.has_offset = True
     ev.sync.offset = UInt64(0)
     ev.sync.length = length
     return ev^

@@ -940,28 +940,28 @@ struct Collector:
 
         Admission (which hooks) follows record's
         capability selection; the namespace is a frozen
-        semantic property (swiotlb hooks observe the IOVA
-        space). Events from unadmitted hooks stay
-        unpaired; a registry rejection here refuses before
-        any probe attaches.
+        semantic property (swiotlb hooks observe physical
+        tlb-pool addresses, not IOVAs). Events from
+        unadmitted hooks stay unpaired; a registry
+        rejection here refuses before any probe attaches.
         """
         try:
             if self.cfg.has_lifecycle:
                 self.registry.admit_hook(
-                    String(HOOK_MAP_RESULT), String("iova")
+                    String(HOOK_MAP_RESULT), String("tlb-phys")
                 )
                 self.registry.admit_hook(
-                    String(HOOK_UNMAP), String("iova")
+                    String(HOOK_UNMAP), String("tlb-phys")
                 )
             if self.cfg.has_copy:
                 self.registry.admit_hook(
-                    String(HOOK_SYNC_DEVICE), String("iova")
+                    String(HOOK_SYNC_DEVICE), String("tlb-phys")
                 )
                 self.registry.admit_hook(
-                    String(HOOK_SYNC_CPU), String("iova")
+                    String(HOOK_SYNC_CPU), String("tlb-phys")
                 )
                 self.registry.admit_hook(
-                    String(HOOK_BOUNCE), String("iova")
+                    String(HOOK_BOUNCE), String("tlb-phys")
                 )
         except:
             return String("hook admission failed")
@@ -2170,7 +2170,10 @@ struct Collector:
                     " under "
                 )
                 + self.cfg.profile_id
-                + String("; v1 wire carries no mapping identity")
+                + String(
+                    "; v2 wire reports opaque mapping generations"
+                    " when observed"
+                )
             )
             lc_cap.hooks.append(String(HOOK_MAP_RESULT))
             lc_cap.hooks.append(String(HOOK_UNMAP))
@@ -2192,7 +2195,7 @@ struct Collector:
                 + format_u64(self.persisted_copy)
                 + String(" copy events persisted; admitted under ")
                 + self.cfg.profile_id
-                + String("; v1 wire carries no mapping identity")
+                + String("; v1 copy wire carries no mapping identity")
             )
             cp_cap.hooks.append(String(HOOK_BOUNCE))
             cp_cap.has_profile_id = True
@@ -2210,7 +2213,7 @@ struct Collector:
                     " under "
                 )
                 + self.cfg.profile_id
-                + String("; v1 wire carries no mapping identity")
+                + String("; v1 copy wire carries no mapping identity")
             )
             sy_cap.hooks.append(String(HOOK_SYNC_DEVICE))
             sy_cap.hooks.append(String(HOOK_SYNC_CPU))

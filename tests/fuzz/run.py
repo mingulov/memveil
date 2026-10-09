@@ -65,7 +65,7 @@ def mutate(rng, data):
         return data.replace(b'"data": {', b'"data": {"n": ' * 70, 1)
     if op == "dupkey_top":
         return data.replace(b'{"schema_version"',
-                            b'{"schema_version": "0.1.0", "schema_version"', 1)
+                            b'{"schema_version": "0.1.1", "schema_version"', 1)
     if op == "cutline":
         lines = data.split(b"\n")
         if len(lines) > 2:
