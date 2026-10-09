@@ -2,13 +2,13 @@
 # Format compatibility
 
 Capture, event, session, and report schemas are versioned
-independently; the frozen set (events 0.1.1; session,
-report, profile, doctor 0.1.0) is the only supported input.
+independently; the frozen set (events 0.1.1, profiles 0.1.1;
+session, report, doctor 0.1.0) is the only supported input.
 The replay path treats every capture as untrusted and stays
 offline: it never loads BPF objects, touches tracefs or
 BTF, opens the network, or requires privileges.
 
-## Reader policy (events 0.1.1, others 0.1.0)
+## Reader policy (events 0.1.1, profiles 0.1.1, rest 0.1.0)
 
 - Unknown schema major, unknown event kind, unknown field, or
   duplicated key: refused, exit 2. There is no last-wins, no

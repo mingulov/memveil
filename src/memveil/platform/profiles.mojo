@@ -3,7 +3,7 @@
 """Semantic profiles: exact-identity collection manifests.
 
 ``parse_profile_bytes`` validates one profile JSON document against
-the profile-v0.1.0 rules. Parsing is strict: unknown keys,
+the profile-v0.1.1 rules. Parsing is strict: unknown keys,
 duplicates, overlong text, bad enums, and capability hook names
 that resolve to nothing are all rejected.
 
@@ -34,7 +34,7 @@ from memveil.platform.evidence import KernelInfo, parse_kernel_triple
 from memveil.platform.reader import bytes_to_text, read_host_file
 
 
-comptime PROFILE_SCHEMA_VERSION = "0.1.0"
+comptime PROFILE_SCHEMA_VERSION = "0.1.1"
 comptime MAX_PROFILE_HOOKS = 32
 comptime MAX_PROFILE_CAPS = 16
 comptime MAX_PROFILE_NOTES = 32
@@ -44,7 +44,13 @@ comptime _PROFILE_CAP = 1048576
 
 
 struct ProfileHook(Copyable):
-    """One hook named by a profile: paths plus optional layout."""
+    """One hook named by a profile: tracepoint paths or tracing binding.
+
+    Tracepoint hooks carry id/format paths plus optional layout
+    text; tracing hooks carry the frozen function identity
+    (function, attach, signature) instead. Each kind forbids
+    the other's fields.
+    """
 
     var name: String
     var kind: String
@@ -52,6 +58,9 @@ struct ProfileHook(Copyable):
     var format_path: String
     var format_has: Bool
     var format_text: String
+    var function: String
+    var attach: String
+    var signature: String
     var has_note: Bool
     var note: String
 
@@ -62,6 +71,9 @@ struct ProfileHook(Copyable):
         self.format_path = String("")
         self.format_has = False
         self.format_text = String("")
+        self.function = String("")
+        self.attach = String("")
+        self.signature = String("")
         self.has_note = False
         self.note = String("")
 
@@ -236,6 +248,25 @@ def _check_hook_path(v: String, what: String) raises:
             raise ValidationError(what, "dot segment")
 
 
+def _check_function(v: String) raises:
+    """Check a tracing function name: C identifier, 1..128 chars."""
+    try:
+        check_bounded_text(v, 1, 128, "hook.function")
+    except e:
+        raise ValidationError("hook.function", String(e))
+    var first = True
+    for b in v.as_bytes():
+        var ok = (
+            (b >= UInt8(0x41) and b <= UInt8(0x5A))
+            or (b >= UInt8(0x61) and b <= UInt8(0x7A))
+            or b == UInt8(0x5F)
+            or (not first and b >= UInt8(0x30) and b <= UInt8(0x39))
+        )
+        if not ok:
+            raise ValidationError("hook.function", "bad charset")
+        first = False
+
+
 def _parse_source(mut scan: Scanner) raises -> ProfileSource:
     """Parse the identity.source object: origin, revision, note?."""
     scan.begin_object()
@@ -351,7 +382,13 @@ def _parse_identity(mut scan: Scanner) raises -> ProfileIdentity:
 
 
 def _parse_hook(mut scan: Scanner) raises -> ProfileHook:
-    """Parse one hooks[] item: name, kind, paths, format?, note?."""
+    """Parse one hooks[] item: name, kind, kind-shaped fields, note?.
+
+    Tracepoint hooks need id/format paths with optional
+    layout text; tracing hooks need the frozen function
+    identity (function, attach, signature). Each kind
+    forbids the other's fields.
+    """
     scan.begin_object()
     var out = ProfileHook()
     var has_name = False
@@ -359,6 +396,9 @@ def _parse_hook(mut scan: Scanner) raises -> ProfileHook:
     var has_id = False
     var has_format = False
     var has_text = False
+    var has_function = False
+    var has_attach = False
+    var has_signature = False
     var has_note = False
     if not object_is_empty(scan):
         while True:
@@ -379,7 +419,7 @@ def _parse_hook(mut scan: Scanner) raises -> ProfileHook:
                 if has_kind:
                     raise ValidationError("hook.kind", "duplicate")
                 var v = scan.parse_string()
-                if v != "tracepoint":
+                if v != "tracepoint" and v != "tracing":
                     raise ValidationError("hook.kind", "bad const")
                 out.kind = v
                 has_kind = True
@@ -421,6 +461,31 @@ def _parse_hook(mut scan: Scanner) raises -> ProfileHook:
                     out.format_text = m.value
                     out.format_has = True
                 has_text = True
+            elif key == "function":
+                if has_function:
+                    raise ValidationError("hook.function", "duplicate")
+                var v = scan.parse_string()
+                _check_function(v)
+                out.function = v
+                has_function = True
+            elif key == "attach":
+                if has_attach:
+                    raise ValidationError("hook.attach", "duplicate")
+                var v = scan.parse_string()
+                if v != "fentry" and v != "fexit":
+                    raise ValidationError("hook.attach", "bad const")
+                out.attach = v
+                has_attach = True
+            elif key == "signature":
+                if has_signature:
+                    raise ValidationError("hook.signature", "duplicate")
+                var v = scan.parse_string()
+                try:
+                    check_bounded_text(v, 1, 1024, "hook.signature")
+                except e:
+                    raise ValidationError("hook.signature", String(e))
+                out.signature = v
+                has_signature = True
             elif key == "note":
                 if has_note:
                     raise ValidationError("hook.note", "duplicate")
@@ -437,8 +502,18 @@ def _parse_hook(mut scan: Scanner) raises -> ProfileHook:
             if not object_next(scan, "hook"):
                 break
     scan.end_object()
-    if not has_name or not has_kind or not has_id or not has_format:
+    if not has_name or not has_kind:
         raise ValidationError("hook", "missing field")
+    if out.kind == String("tracing"):
+        if has_id or has_format or has_text:
+            raise ValidationError("hook", "tracepoint field on tracing")
+        if not has_function or not has_attach or not has_signature:
+            raise ValidationError("hook", "missing field")
+    else:
+        if has_function or has_attach or has_signature:
+            raise ValidationError("hook", "tracing field on tracepoint")
+        if not has_id or not has_format:
+            raise ValidationError("hook", "missing field")
     return out^
 
 

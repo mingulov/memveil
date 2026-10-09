@@ -609,7 +609,7 @@ def test_hostile_release() raises:
 def minimal_doc() -> String:
     """One minimal valid profile document."""
     return String(
-        '{"schema_version":"0.1.0","profile_id":"t",'
+        '{"schema_version":"0.1.1","profile_id":"t",'
         '"status":"reference-unvalidated","identity":{"arch":"x86_64",'
         '"min_kernel":"7.0","source":{"origin":"o","revision":"r"}},'
         '"hooks":[{"name":"h","kind":"tracepoint","id_path":"/i",'
@@ -712,7 +712,7 @@ def test_parse_validated_file() raises:
 def test_parse_bad_status() raises:
     expect_reject(
         String(
-            '{"schema_version":"0.1.0","profile_id":"t","status":"draft",'
+            '{"schema_version":"0.1.1","profile_id":"t","status":"draft",'
             '"identity":{"arch":"x86_64","min_kernel":"7.0",'
             '"source":{"origin":"o","revision":"r"}},"hooks":[],'
             '"capabilities":[]}'
@@ -741,7 +741,7 @@ def test_parse_unknown_key() raises:
 def test_parse_dup_key() raises:
     expect_reject(
         String(
-            '{"schema_version":"0.1.0","profile_id":"t","profile_id":"u",'
+            '{"schema_version":"0.1.1","profile_id":"t","profile_id":"u",'
             '"status":"reference-unvalidated",'
             '"identity":{"arch":"x86_64","min_kernel":"7.0",'
             '"source":{"origin":"o","revision":"r"}},"hooks":[],'
@@ -753,7 +753,7 @@ def test_parse_dup_key() raises:
 def test_parse_bad_profile_id() raises:
     expect_reject(
         String(
-            '{"schema_version":"0.1.0","profile_id":"-lead",'
+            '{"schema_version":"0.1.1","profile_id":"-lead",'
             '"status":"reference-unvalidated",'
             '"identity":{"arch":"x86_64","min_kernel":"7.0",'
             '"source":{"origin":"o","revision":"r"}},"hooks":[],'
@@ -765,7 +765,7 @@ def test_parse_bad_profile_id() raises:
 def test_parse_bad_min_kernel() raises:
     expect_reject(
         String(
-            '{"schema_version":"0.1.0","profile_id":"t",'
+            '{"schema_version":"0.1.1","profile_id":"t",'
             '"status":"reference-unvalidated",'
             '"identity":{"arch":"x86_64","min_kernel":"7.x",'
             '"source":{"origin":"o","revision":"r"}},"hooks":[],'
@@ -777,7 +777,7 @@ def test_parse_bad_min_kernel() raises:
 def test_parse_short_min_kernel() raises:
     expect_reject(
         String(
-            '{"schema_version":"0.1.0","profile_id":"t",'
+            '{"schema_version":"0.1.1","profile_id":"t",'
             '"status":"reference-unvalidated",'
             '"identity":{"arch":"x86_64","min_kernel":"7",'
             '"source":{"origin":"o","revision":"r"}},"hooks":[],'
@@ -789,7 +789,7 @@ def test_parse_short_min_kernel() raises:
 def test_parse_bad_kind() raises:
     expect_reject(
         String(
-            '{"schema_version":"0.1.0","profile_id":"t",'
+            '{"schema_version":"0.1.1","profile_id":"t",'
             '"status":"reference-unvalidated",'
             '"identity":{"arch":"x86_64","min_kernel":"7.0",'
             '"source":{"origin":"o","revision":"r"}},'
@@ -799,10 +799,70 @@ def test_parse_bad_kind() raises:
     )
 
 
+def tracing_doc() -> String:
+    """One minimal 0.1.1 document with a tracing hook."""
+    return String(
+        '{"schema_version":"0.1.1","profile_id":"t",'
+        '"status":"reference-unvalidated","identity":{"arch":"x86_64",'
+        '"min_kernel":"7.0","source":{"origin":"o","revision":"r"}},'
+        '"hooks":[{"name":"fexit:swiotlb_tbl_map_single",'
+        '"kind":"tracing","function":"swiotlb_tbl_map_single",'
+        '"attach":"fexit","signature":"phys_addr_t swiotlb_tbl_map_single'
+        '(struct device *dev)"}],'
+        '"capabilities":[{"id":"mapping-lifecycle",'
+        '"status":"candidate","hooks":["fexit:swiotlb_tbl_map_single"],'
+        '"reason":"r"}]}'
+    )
+
+
+def test_parse_tracing_hook_ok() raises:
+    var p = parse_profile_bytes(bytes_of(tracing_doc()))
+    assert_equal(len(p.hooks), 1)
+    assert_equal(p.hooks[0].kind, String("tracing"))
+    assert_equal(
+        p.hooks[0].function, String("swiotlb_tbl_map_single")
+    )
+    assert_equal(p.hooks[0].attach, String("fexit"))
+    assert_true(p.hooks[0].signature.byte_length() > 0)
+    assert_true(not p.hooks[0].format_has)
+
+
+def test_parse_tracing_missing_signature_rejects() raises:
+    var doc = tracing_doc().replace(
+        String(',"signature":"phys_addr_t swiotlb_tbl_map_single'
+               '(struct device *dev)"'),
+        String(""),
+    )
+    expect_reject(doc)
+
+
+def test_parse_tracing_bad_attach_rejects() raises:
+    var doc = tracing_doc().replace(
+        String('"attach":"fexit"'), String('"attach":"kprobe"')
+    )
+    expect_reject(doc)
+
+
+def test_parse_tracing_with_format_path_rejects() raises:
+    var doc = tracing_doc().replace(
+        String('"attach":"fexit"'),
+        String('"attach":"fexit","format_path":"/f"'),
+    )
+    expect_reject(doc)
+
+
+def test_parse_tracepoint_with_function_rejects() raises:
+    var doc = minimal_doc().replace(
+        String('"format_path":"/f"'),
+        String('"format_path":"/f","function":"swiotlb_bounce"'),
+    )
+    expect_reject(doc)
+
+
 def test_parse_dup_hook() raises:
     expect_reject(
         String(
-            '{"schema_version":"0.1.0","profile_id":"t",'
+            '{"schema_version":"0.1.1","profile_id":"t",'
             '"status":"reference-unvalidated",'
             '"identity":{"arch":"x86_64","min_kernel":"7.0",'
             '"source":{"origin":"o","revision":"r"}},'
@@ -816,7 +876,7 @@ def test_parse_dup_hook() raises:
 def test_parse_dangling_ref() raises:
     expect_reject(
         String(
-            '{"schema_version":"0.1.0","profile_id":"t",'
+            '{"schema_version":"0.1.1","profile_id":"t",'
             '"status":"reference-unvalidated",'
             '"identity":{"arch":"x86_64","min_kernel":"7.0",'
             '"source":{"origin":"o","revision":"r"}},"hooks":[],'
@@ -829,7 +889,7 @@ def test_parse_dangling_ref() raises:
 def test_parse_dup_cap() raises:
     expect_reject(
         String(
-            '{"schema_version":"0.1.0","profile_id":"t",'
+            '{"schema_version":"0.1.1","profile_id":"t",'
             '"status":"reference-unvalidated",'
             '"identity":{"arch":"x86_64","min_kernel":"7.0",'
             '"source":{"origin":"o","revision":"r"}},"hooks":[],'
@@ -843,7 +903,7 @@ def test_parse_dup_cap() raises:
 def test_parse_bad_cap_id() raises:
     expect_reject(
         String(
-            '{"schema_version":"0.1.0","profile_id":"t",'
+            '{"schema_version":"0.1.1","profile_id":"t",'
             '"status":"reference-unvalidated",'
             '"identity":{"arch":"x86_64","min_kernel":"7.0",'
             '"source":{"origin":"o","revision":"r"}},"hooks":[],'
@@ -856,7 +916,7 @@ def test_parse_bad_cap_id() raises:
 def test_parse_bad_cap_status() raises:
     expect_reject(
         String(
-            '{"schema_version":"0.1.0","profile_id":"t",'
+            '{"schema_version":"0.1.1","profile_id":"t",'
             '"status":"reference-unvalidated",'
             '"identity":{"arch":"x86_64","min_kernel":"7.0",'
             '"source":{"origin":"o","revision":"r"}},"hooks":[],'
@@ -869,7 +929,7 @@ def test_parse_bad_cap_status() raises:
 def test_parse_missing_field() raises:
     expect_reject(
         String(
-            '{"schema_version":"0.1.0","profile_id":"t",'
+            '{"schema_version":"0.1.1","profile_id":"t",'
             '"status":"reference-unvalidated",'
             '"identity":{"arch":"x86_64","min_kernel":"7.0",'
             '"source":{"origin":"o","revision":"r"}},"hooks":[],'
@@ -886,7 +946,7 @@ def test_parse_trailing_data() raises:
 def test_parse_format_type() raises:
     expect_reject(
         String(
-            '{"schema_version":"0.1.0","profile_id":"t",'
+            '{"schema_version":"0.1.1","profile_id":"t",'
             '"status":"reference-unvalidated",'
             '"identity":{"arch":"x86_64","min_kernel":"7.0",'
             '"source":{"origin":"o","revision":"r"}},'
@@ -902,7 +962,7 @@ def test_parse_overlong_name() raises:
         name += "n"
     expect_reject(
         String(
-            '{"schema_version":"0.1.0","profile_id":"t",'
+            '{"schema_version":"0.1.1","profile_id":"t",'
             '"status":"reference-unvalidated",'
             '"identity":{"arch":"x86_64","min_kernel":"7.0",'
             '"source":{"origin":"o","revision":"r"}},'
@@ -919,7 +979,7 @@ def test_parse_overlong_name() raises:
 def test_parse_hook_path_traversal() raises:
     expect_reject(
         String(
-            '{"schema_version":"0.1.0","profile_id":"t",'
+            '{"schema_version":"0.1.1","profile_id":"t",'
             '"status":"reference-unvalidated",'
             '"identity":{"arch":"x86_64","min_kernel":"7.0",'
             '"source":{"origin":"o","revision":"r"}},'
@@ -933,7 +993,7 @@ def test_parse_hook_path_traversal() raises:
 def test_parse_hook_path_dot() raises:
     expect_reject(
         String(
-            '{"schema_version":"0.1.0","profile_id":"t",'
+            '{"schema_version":"0.1.1","profile_id":"t",'
             '"status":"reference-unvalidated",'
             '"identity":{"arch":"x86_64","min_kernel":"7.0",'
             '"source":{"origin":"o","revision":"r"}},'
@@ -946,7 +1006,7 @@ def test_parse_hook_path_dot() raises:
 def test_parse_hook_path_relative() raises:
     expect_reject(
         String(
-            '{"schema_version":"0.1.0","profile_id":"t",'
+            '{"schema_version":"0.1.1","profile_id":"t",'
             '"status":"reference-unvalidated",'
             '"identity":{"arch":"x86_64","min_kernel":"7.0",'
             '"source":{"origin":"o","revision":"r"}},'
@@ -960,7 +1020,7 @@ def test_parse_hook_path_relative() raises:
 def test_parse_hook_path_nul() raises:
     expect_reject(
         String(
-            '{"schema_version":"0.1.0","profile_id":"t",'
+            '{"schema_version":"0.1.1","profile_id":"t",'
             '"status":"reference-unvalidated",'
             '"identity":{"arch":"x86_64","min_kernel":"7.0",'
             '"source":{"origin":"o","revision":"r"}},'
@@ -982,7 +1042,7 @@ def test_parse_empty_note_ok() raises:
 
 def test_parse_too_many_hooks() raises:
     var doc = String(
-        '{"schema_version":"0.1.0","profile_id":"t",'
+        '{"schema_version":"0.1.1","profile_id":"t",'
         '"status":"reference-unvalidated",'
         '"identity":{"arch":"x86_64","min_kernel":"7.0",'
         '"source":{"origin":"o","revision":"r"}},"hooks":['
@@ -1131,7 +1191,7 @@ def validated_doc(cap_status: String) -> String:
     """One validated doc declaring attempt-trace with no hooks."""
     return (
         String(
-            '{"schema_version":"0.1.0","profile_id":"t2",'
+            '{"schema_version":"0.1.1","profile_id":"t2",'
             '"status":"validated",'
             '"identity":{"arch":"x86_64","min_kernel":"7.0",'
             '"source":{"origin":"o","revision":"r"}},"hooks":[],'
@@ -1313,7 +1373,7 @@ def low_floor_doc() -> String:
     and available demotions plus the unsupported terminal apply.
     """
     return String(
-        '{"schema_version":"0.1.0","profile_id":"t-low",'
+        '{"schema_version":"0.1.1","profile_id":"t-low",'
         '"status":"validated",'
         '"identity":{"arch":"x86_64","min_kernel":"6.0",'
         '"source":{"origin":"o","revision":"r"}},"hooks":[],'
@@ -1354,7 +1414,7 @@ def test_discover_unsupported_terminal() raises:
 def reference_recorded_doc() -> String:
     """One reference doc recording the ready-validated format bytes."""
     return String(
-        '{"schema_version":"0.1.0","profile_id":"t3",'
+        '{"schema_version":"0.1.1","profile_id":"t3",'
         '"status":"reference-unvalidated",'
         '"identity":{"arch":"x86_64","min_kernel":"7.0",'
         '"source":{"origin":"o","revision":"r"}},'
@@ -1479,6 +1539,11 @@ def run() raises -> Int:
     suite.test[test_parse_bad_min_kernel]()
     suite.test[test_parse_short_min_kernel]()
     suite.test[test_parse_bad_kind]()
+    suite.test[test_parse_tracing_hook_ok]()
+    suite.test[test_parse_tracing_missing_signature_rejects]()
+    suite.test[test_parse_tracing_bad_attach_rejects]()
+    suite.test[test_parse_tracing_with_format_path_rejects]()
+    suite.test[test_parse_tracepoint_with_function_rejects]()
     suite.test[test_parse_dup_hook]()
     suite.test[test_parse_dangling_ref]()
     suite.test[test_parse_dup_cap]()

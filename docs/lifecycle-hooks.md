@@ -54,6 +54,20 @@ exit 3 naming the capability, for example
 partial: without full narrow binding the run refuses instead of
 recording an unverified channel.
 
+Each requested extra capability also binds its hooks
+one by one: every named hook must be a `tracing` hook whose
+(function, attach) pair is a frozen member of that
+capability (`mapping-lifecycle` needs exactly the map fexit
+plus the unmap fentry; `copy-actual` needs exactly the two
+sync fentries plus the bounce fentry) with the exact frozen
+signature text, and every frozen member must be named. A
+wrong function, a wrong attach point, a missing or extra
+hook, or a corrupted signature refuses admission before any
+probe attaches. Live signature identity rides the
+whole-BTF narrow binding plus CO-RE at load; the profile
+text is the auditable document side of that chain, pinned
+by profile schema 0.1.1.
+
 ## Signatures
 
 Signatures below are frozen against the 7.0.0-34-generic BTF

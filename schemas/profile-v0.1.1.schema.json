@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "profile-v0.1.0.schema.json",
+  "$id": "profile-v0.1.1.schema.json",
   "title": "MemVeil semantic profile manifest",
   "description": "Exact-identity collection profile: kernel/source identity, hook locations and expected layouts, and per-capability support declarations. Only a profile whose status is validated, backed by test evidence, can support a validated live measurement; reference-unvalidated profiles describe candidates.",
   "type": "object",
@@ -15,7 +15,7 @@
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": "0.1.0"
+      "const": "0.1.1"
     },
     "profile_id": {
       "type": "string",
@@ -80,46 +80,91 @@
       "maxItems": 32,
       "items": {
         "type": "object",
-        "required": [
-          "name",
-          "kind",
-          "id_path",
-          "format_path"
-        ],
-        "additionalProperties": false,
-        "properties": {
-          "name": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128
-          },
-          "kind": {
-            "const": "tracepoint"
-          },
-          "id_path": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 256,
-            "pattern": "^/([^\\x00/.][^\\x00/]*|\\.[^\\x00/.][^\\x00/]*|\\.\\.[^\\x00/]+)(/([^\\x00/.][^\\x00/]*|\\.[^\\x00/.][^\\x00/]*|\\.\\.[^\\x00/]+))*$"
-          },
-          "format_path": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 256,
-            "pattern": "^/([^\\x00/.][^\\x00/]*|\\.[^\\x00/.][^\\x00/]*|\\.\\.[^\\x00/]+)(/([^\\x00/.][^\\x00/]*|\\.[^\\x00/.][^\\x00/]*|\\.\\.[^\\x00/]+))*$"
-          },
-          "format_text": {
-            "type": [
-              "string",
-              "null"
+        "anyOf": [
+          {
+            "required": [
+              "name",
+              "kind",
+              "id_path",
+              "format_path"
             ],
-            "maxLength": 65536
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "kind": {
+                "const": "tracepoint"
+              },
+              "id_path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^/([^\\x00/.][^\\x00/]*|\\.[^\\x00/.][^\\x00/]*|\\.\\.[^\\x00/]+)(/([^\\x00/.][^\\x00/]*|\\.[^\\x00/.][^\\x00/]*|\\.\\.[^\\x00/]+))*$"
+              },
+              "format_path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^/([^\\x00/.][^\\x00/]*|\\.[^\\x00/.][^\\x00/]*|\\.\\.[^\\x00/]+)(/([^\\x00/.][^\\x00/]*|\\.[^\\x00/.][^\\x00/]*|\\.\\.[^\\x00/]+))*$"
+              },
+              "format_text": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 65536
+              },
+              "note": {
+                "type": "string",
+                "maxLength": 512
+              }
+            }
           },
-          "note": {
-            "type": "string",
-            "maxLength": 512
+          {
+            "required": [
+              "name",
+              "kind",
+              "function",
+              "attach",
+              "signature"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "kind": {
+                "const": "tracing"
+              },
+              "function": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+              },
+              "attach": {
+                "enum": [
+                  "fentry",
+                  "fexit"
+                ]
+              },
+              "signature": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "note": {
+                "type": "string",
+                "maxLength": 512
+              }
+            }
           }
-        }
+        ]
       }
     },
     "capabilities": {

@@ -19,9 +19,13 @@ grammar bindings computed from the CURRENT fixture bytes:
   sat.json     reference-unvalidated, object+badring ring
                (saturation mechanism stand-in).
   valid-lc.json validated, 12-field note binding elf/lc-ok.o
-               and elf/cp-ok.o with both caps supported.
+               and elf/cp-ok.o with both caps supported and the
+               frozen tracing hook sets.
   lc-skew.json validated, 12-field note with a skewed
                lc_object binding (extended mismatch).
+  lc-wrongfunc.json, lc-wrongattach.json, lc-missing.json,
+               lc-extra.json, lc-badsig.json: single-deviation
+               tracing-binding variants of valid-lc.json.
 Manifest lists valid.json only; tests address the rest by
 path. All hashes are recomputed here, so editing any input
 fixture regenerates consistent bindings.
@@ -89,6 +93,82 @@ def write_tree(dst: Path, config: bytes | None, image: bytes | None) -> None:
     (dst / "proc/sys/kernel/random/boot_id").write_text(BOOT_ID)
 
 
+TRACE_HOOKS = [
+    (
+        "fexit:swiotlb_tbl_map_single",
+        "swiotlb_tbl_map_single",
+        "fexit",
+        "phys_addr_t swiotlb_tbl_map_single(struct device *dev,"
+        " phys_addr_t orig_addr, size_t mapping_size,"
+        " unsigned int alloc_align_mask, enum dma_data_direction dir,"
+        " unsigned long attrs)",
+    ),
+    (
+        "fentry:__swiotlb_tbl_unmap_single",
+        "__swiotlb_tbl_unmap_single",
+        "fentry",
+        "void __swiotlb_tbl_unmap_single(struct device *dev,"
+        " phys_addr_t tlb_addr, size_t mapping_size,"
+        " enum dma_data_direction dir, unsigned long attrs,"
+        " struct io_tlb_pool *pool)",
+    ),
+    (
+        "fentry:__swiotlb_sync_single_for_device",
+        "__swiotlb_sync_single_for_device",
+        "fentry",
+        "void __swiotlb_sync_single_for_device(struct device *dev,"
+        " phys_addr_t tlb_addr, size_t size,"
+        " enum dma_data_direction dir, struct io_tlb_pool *pool)",
+    ),
+    (
+        "fentry:__swiotlb_sync_single_for_cpu",
+        "__swiotlb_sync_single_for_cpu",
+        "fentry",
+        "void __swiotlb_sync_single_for_cpu(struct device *dev,"
+        " phys_addr_t tlb_addr, size_t size,"
+        " enum dma_data_direction dir, struct io_tlb_pool *pool)",
+    ),
+    (
+        "fentry:swiotlb_bounce",
+        "swiotlb_bounce",
+        "fentry",
+        "void swiotlb_bounce(struct device *dev, phys_addr_t tlb_addr,"
+        " size_t size, enum dma_data_direction dir,"
+        " struct io_tlb_pool *mem)",
+    ),
+]
+
+LC_HOOK_NAMES = [TRACE_HOOKS[0][0], TRACE_HOOKS[1][0]]
+CP_HOOK_NAMES = [TRACE_HOOKS[2][0], TRACE_HOOKS[3][0], TRACE_HOOKS[4][0]]
+
+
+def tracing_hook(name: str, function: str, attach: str, signature: str) -> dict:
+    return {
+        "name": name,
+        "kind": "tracing",
+        "function": function,
+        "attach": attach,
+        "signature": signature,
+        "note": "Scan-fixture hook.",
+    }
+
+
+def all_hooks() -> list:
+    hooks = [
+        {
+            "name": "swiotlb:swiotlb_bounced",
+            "kind": "tracepoint",
+            "id_path": "/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/id",
+            "format_path": FMT_PATH,
+            "format_text": LAYOUT.read_text(),
+            "note": "Scan-fixture hook.",
+        }
+    ]
+    for name, function, attach, signature in TRACE_HOOKS:
+        hooks.append(tracing_hook(name, function, attach, signature))
+    return hooks
+
+
 def profile_doc(
     pid: str,
     status: str,
@@ -98,6 +178,8 @@ def profile_doc(
     hooks: list | None = None,
     lifecycle: str = "unsupported",
     copycap: str = "unsupported",
+    lc_hooks: list | None = None,
+    cp_hooks: list | None = None,
 ) -> dict:
     if hooks is None:
         if format_text is None:
@@ -116,13 +198,13 @@ def profile_doc(
         {
             "id": "mapping-lifecycle",
             "status": lifecycle,
-            "hooks": [],
+            "hooks": lc_hooks if lc_hooks is not None else [],
             "reason": "Scan fixture.",
         },
         {
             "id": "copy-actual",
             "status": copycap,
-            "hooks": [],
+            "hooks": cp_hooks if cp_hooks is not None else [],
             "reason": "Scan fixture.",
         },
     ]
@@ -137,7 +219,7 @@ def profile_doc(
             },
         )
     return {
-        "schema_version": "0.1.0",
+        "schema_version": "0.1.1",
         "profile_id": pid,
         "status": status,
         "identity": {
@@ -310,20 +392,18 @@ def main() -> int:
         "cp_object": sha(ELF_CP_OK),
         "cp_ring": "8388608",
     }
-    (prof / "valid-lc.json").write_text(
-        json.dumps(
-            profile_doc(
-                "scan-valid-lc",
-                "validated",
-                note_for(bind, extra),
-                "supported",
-                lifecycle="supported",
-                copycap="supported",
-            ),
-            indent=2,
-        )
-        + "\n"
+    lc_doc = profile_doc(
+        "scan-valid-lc",
+        "validated",
+        note_for(bind, extra),
+        "supported",
+        hooks=all_hooks(),
+        lifecycle="supported",
+        copycap="supported",
+        lc_hooks=list(LC_HOOK_NAMES),
+        cp_hooks=list(CP_HOOK_NAMES),
     )
+    (prof / "valid-lc.json").write_text(json.dumps(lc_doc, indent=2) + "\n")
     skewed = dict(extra)
     skewed["lc_object"] = sha(ELF_CP_OK)
     (prof / "lc-skew.json").write_text(
@@ -333,13 +413,84 @@ def main() -> int:
                 "validated",
                 note_for(bind, skewed),
                 "supported",
+                hooks=all_hooks(),
                 lifecycle="supported",
                 copycap="supported",
+                lc_hooks=list(LC_HOOK_NAMES),
+                cp_hooks=list(CP_HOOK_NAMES),
             ),
             indent=2,
         )
         + "\n"
     )
+
+    def mutate(pid: str, fn) -> dict:
+        import copy
+
+        doc = copy.deepcopy(lc_doc)
+        doc["profile_id"] = pid
+        fn(doc)
+        return doc
+
+    def hook_by_name(doc: dict, name: str) -> dict:
+        for hook in doc["hooks"]:
+            if hook["name"] == name:
+                return hook
+        raise AssertionError(f"missing hook {name}")
+
+    def cap_by_id(doc: dict, cid: str) -> dict:
+        for cap in doc["capabilities"]:
+            if cap["id"] == cid:
+                return cap
+        raise AssertionError(f"missing cap {cid}")
+
+    variants = {
+        # One wrong function field; name join key unchanged.
+        "lc-wrongfunc.json": (
+            "scan-lc-wrongfunc",
+            lambda d: hook_by_name(
+                d, "fentry:__swiotlb_tbl_unmap_single"
+            ).update({"function": "__swiotlb_tbl_unmap_sg"}),
+        ),
+        # Map hook attached at entry instead of exit.
+        "lc-wrongattach.json": (
+            "scan-lc-wrongattach",
+            lambda d: hook_by_name(
+                d, "fexit:swiotlb_tbl_map_single"
+            ).update({"attach": "fentry"}),
+        ),
+        # Lifecycle cap names only the map hook.
+        "lc-missing.json": (
+            "scan-lc-missing",
+            lambda d: cap_by_id(d, "mapping-lifecycle").update(
+                {"hooks": ["fexit:swiotlb_tbl_map_single"]}
+            ),
+        ),
+        # Lifecycle cap adds the tracepoint hook.
+        "lc-extra.json": (
+            "scan-lc-extra",
+            lambda d: cap_by_id(d, "mapping-lifecycle").update(
+                {"hooks": LC_HOOK_NAMES + ["swiotlb:swiotlb_bounced"]}
+            ),
+        ),
+        # Map signature text corrupted by one byte.
+        "lc-badsig.json": (
+            "scan-lc-badsig",
+            lambda d: hook_by_name(
+                d, "fexit:swiotlb_tbl_map_single"
+            ).update(
+                {
+                    "signature": hook_by_name(
+                        d, "fexit:swiotlb_tbl_map_single"
+                    )["signature"].replace("attrs)", "attrs!)", 1)
+                }
+            ),
+        ),
+    }
+    for name, (pid, fn) in variants.items():
+        (prof / name).write_text(
+            json.dumps(mutate(pid, fn), indent=2) + "\n"
+        )
     (prof / "manifest.txt").write_text("valid.json\n")
     print(f"wrote scan fixtures to {SCAN}")
     return 0

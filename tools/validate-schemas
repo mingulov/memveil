@@ -31,6 +31,7 @@ import sys
 
 VERSION = "0.1.0"
 EVENT_VERSION = "0.1.1"
+PROFILE_VERSION = "0.1.1"
 U64MAX = 18446744073709551615
 U64RE = re.compile(r"(0|[1-9][0-9]{0,19})")
 IDRE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
@@ -1030,10 +1031,13 @@ _HOOK_SEG = r"([^\x00/.][^\x00/]*|\.[^\x00/.][^\x00/]*|\.\.[^\x00/]+)"
 HOOK_PATH_RE = re.compile(r"/" + _HOOK_SEG + r"(/" + _HOOK_SEG + r")*")
 
 
+FUNC_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
 def check_profile(obj):
     check_keys(obj, ("schema_version", "profile_id", "status", "identity",
                      "hooks", "capabilities"), ("notes",), "profile")
-    if obj["schema_version"] != VERSION:
+    if obj["schema_version"] != PROFILE_VERSION:
         fail("bad-version", "profile.schema_version")
     check_id(obj["profile_id"], "profile.profile_id")
     check_enum(obj["status"], ("validated", "reference-unvalidated"),
@@ -1061,23 +1065,43 @@ def check_profile(obj):
         fail("bad-type", "profile.hooks")
     names = set()
     for hook in hooks:
-        check_keys(hook, ("name", "kind", "id_path", "format_path"),
-                   ("format_text", "note"), "profile.hooks[]")
+        if not isinstance(hook, dict):
+            fail("bad-type", "profile.hooks[] must be an object")
+        if "name" not in hook:
+            fail("missing-required", "profile.hooks[] lacks ['name']")
         check_text(hook["name"], 128, "profile.hooks[].name")
         if hook["name"] in names:
             fail("duplicate-key", "profile hook %r" % hook["name"])
         names.add(hook["name"])
-        if hook["kind"] != "tracepoint":
+        if "kind" not in hook:
+            fail("missing-required", "profile.hooks[] lacks ['kind']")
+        kind = hook["kind"]
+        if kind == "tracepoint":
+            check_keys(hook, ("name", "kind", "id_path", "format_path"),
+                       ("format_text", "note"), "profile.hooks[]")
+            check_text(hook["id_path"], 256, "profile.hooks[].id_path")
+            if not HOOK_PATH_RE.fullmatch(hook["id_path"]):
+                fail("bad-path", "profile.hooks[].id_path not canonical")
+            check_text(hook["format_path"], 256,
+                       "profile.hooks[].format_path")
+            if not HOOK_PATH_RE.fullmatch(hook["format_path"]):
+                fail("bad-path",
+                     "profile.hooks[].format_path not canonical")
+            if "format_text" in hook and hook["format_text"] is not None:
+                check_text(hook["format_text"], 65536,
+                           "profile.hooks[].format_text", allow_empty=True)
+        elif kind == "tracing":
+            check_keys(hook, ("name", "kind", "function", "attach",
+                              "signature"), ("note",), "profile.hooks[]")
+            check_text(hook["function"], 128, "profile.hooks[].function")
+            if not FUNC_RE.fullmatch(hook["function"]):
+                fail("bad-charset", "profile.hooks[].function")
+            check_enum(hook["attach"], ("fentry", "fexit"),
+                       "profile.hooks[].attach")
+            check_text(hook["signature"], 1024,
+                       "profile.hooks[].signature")
+        else:
             fail("bad-enum", "profile.hooks[].kind")
-        check_text(hook["id_path"], 256, "profile.hooks[].id_path")
-        if not HOOK_PATH_RE.fullmatch(hook["id_path"]):
-            fail("bad-path", "profile.hooks[].id_path not canonical")
-        check_text(hook["format_path"], 256, "profile.hooks[].format_path")
-        if not HOOK_PATH_RE.fullmatch(hook["format_path"]):
-            fail("bad-path", "profile.hooks[].format_path not canonical")
-        if "format_text" in hook and hook["format_text"] is not None:
-            check_text(hook["format_text"], 65536,
-                       "profile.hooks[].format_text", allow_empty=True)
         if "note" in hook:
             check_text(hook["note"], 512, "profile.hooks[].note",
                        allow_empty=True)
@@ -1217,7 +1241,7 @@ def run_selftest():
             results.append((True, "%s: %s" % (label, detail or "ok")))
 
     schemas = ("session-v0.1.0.schema.json", "event-v0.1.1.schema.json",
-               "report-v0.1.0.schema.json", "profile-v0.1.0.schema.json",
+               "report-v0.1.0.schema.json", "profile-v0.1.1.schema.json",
                "doctor-v0.1.0.schema.json")
 
     def schema_files():
@@ -1287,6 +1311,43 @@ def run_selftest():
     results.append(expect_reject("profile-bad-hook-nul",
                                  profile_reject_hook_nul,
                                  "bad-path"))
+
+    def _tracing_profile():
+        obj = read_json_file(
+            repo_path("profiles", "linux-x86_64-7.0-reference.json"),
+            "reference profile")
+        obj["hooks"].append({
+            "name": "fexit:swiotlb_tbl_map_single",
+            "kind": "tracing",
+            "function": "swiotlb_tbl_map_single",
+            "attach": "fexit",
+            "signature": "phys_addr_t swiotlb_tbl_map_single()",
+        })
+        return obj
+
+    def profile_tracing_hook():
+        check_profile(_tracing_profile())
+        return "tracing hook accepted"
+
+    check("profile-tracing-hook", profile_tracing_hook)
+
+    def profile_reject_tracing_attach():
+        obj = _tracing_profile()
+        obj["hooks"][1]["attach"] = "kprobe"
+        check_profile(obj)
+
+    results.append(expect_reject("profile-bad-tracing-attach",
+                                 profile_reject_tracing_attach,
+                                 "bad-enum"))
+
+    def profile_reject_tracing_cross():
+        obj = _tracing_profile()
+        obj["hooks"][1]["format_path"] = "/f"
+        check_profile(obj)
+
+    results.append(expect_reject("profile-bad-tracing-cross",
+                                 profile_reject_tracing_cross,
+                                 "unknown-field"))
 
     def doctor_positive():
         obj = {
