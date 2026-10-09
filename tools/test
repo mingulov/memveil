@@ -12,7 +12,7 @@
 # baseline, confidential-ranges, confidential-inventory,
 # confidential-real, confidential-late-attach, top,
 # oracle-ledger, vm-oracle, profile-semantics, vm-lifecycle,
-# vm-copy, vm-real-io, stop, vm-stop, budgets, quality,
+# vm-copy, vm-real-io, vm-topwalk, stop, vm-stop, budgets, quality,
 # vm-saturation, reader-adversarial, fuzz-smoke, fuzz-campaign,
 # record-failures, output-paths, vm-cleanup, privacy,
 # render-escaping, offline-environment, perf-replay,
