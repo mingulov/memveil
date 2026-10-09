@@ -457,6 +457,88 @@ def test_sink_filter_matches_replay_render() raises:
     assert_equal(_sink_text(live_raw), _sink_text(replay_raw))
 
 
+def _live_prefix_report() raises -> Report:
+    """One attempt folded under the stamped live template."""
+    var s = _live_template()
+    s.window_start_ns = UInt64(100)
+    s.window_end_ns = ~UInt64(0)
+    var a = Analyzer(s)
+    var e0 = _sink_attempt("op1", UInt64(0), UInt64(100))
+    a.consume(e0)
+    var rep = a.snapshot(UInt64(200), False)
+    return rep^
+
+
+def test_live_refresh_header_lines() raises:
+    # A live prefix block names its honest bounds: live
+    # marker, window, exact duration, unknown mode, and
+    # unavailable kernel/profile/scope provenance.
+    var text = render(_live_prefix_report(), String("text"), String(""))
+    var want_text = List[String]()
+    want_text.append(String("(live, engine "))
+    want_text.append(String("window: [100,200)"))
+    want_text.append(String("duration: 0.000000100 s (100 ns)"))
+    want_text.append(
+        String(
+            "environment: mode=unknown detection=unverified"
+            " attestation=not_performed evidence=0"
+        )
+    )
+    want_text.append(
+        String(
+            "recorded kernel.release:"
+            " unavailable (no captured provenance)"
+        )
+    )
+    want_text.append(
+        String(
+            "recorded profile.decision:"
+            " unavailable (no captured provenance)"
+        )
+    )
+    want_text.append(
+        String(
+            "recorded measurement_scope:"
+            " unavailable (no captured provenance)"
+        )
+    )
+    for i in range(len(want_text)):
+        assert_true(text.find(want_text[i]) != -1)
+    var md = render(
+        _live_prefix_report(), String("markdown"), String("")
+    )
+    var want_md = List[String]()
+    want_md.append(String("- synthetic: no"))
+    want_md.append(String("- window: [100,200)"))
+    want_md.append(String("- duration: 0.000000100 s (100 ns)"))
+    want_md.append(
+        String(
+            "- environment: mode=unknown detection=unverified"
+            " attestation=not_performed evidence=0"
+        )
+    )
+    want_md.append(
+        String(
+            "- recorded kernel.release:"
+            " unavailable (no captured provenance)"
+        )
+    )
+    want_md.append(
+        String(
+            "- recorded profile.decision:"
+            " unavailable (no captured provenance)"
+        )
+    )
+    want_md.append(
+        String(
+            "- recorded measurement\\_scope:"
+            " unavailable (no captured provenance)"
+        )
+    )
+    for i in range(len(want_md)):
+        assert_true(md.find(want_md[i]) != -1)
+
+
 def test_sink_full_stdout_refuses() raises:
     var opts = TopOptions()
     var sink = StdoutSink(opts)
@@ -549,6 +631,7 @@ def run() raises -> Int:
     suite.test[test_sink_device_filter_displays]()
     suite.test[test_sink_seq_increments]()
     suite.test[test_sink_filter_matches_replay_render]()
+    suite.test[test_live_refresh_header_lines]()
     suite.test[test_sink_full_stdout_refuses]()
     suite.test[test_live_template_provisional]()
     suite^.run()
