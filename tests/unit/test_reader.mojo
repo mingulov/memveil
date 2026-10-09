@@ -20,7 +20,11 @@ from memveil.model.validate import (
     check_opaque_id,
     parse_u64,
 )
-from memveil.model.session import Session, parse_session
+from memveil.model.session import (
+    MAX_EVIDENCE_ITEMS,
+    Session,
+    parse_session,
+)
 from memveil.model.event import Event, parse_event, partial_record_definitive
 from memveil.capture.reader import (
     CaptureReader,
@@ -1923,6 +1927,46 @@ def test_skip_value_depth_fixtures() raises:
     assert_true(raised)
 
 
+def _evidence_array(n: Int) -> String:
+    var item = String(
+        '{"type": "provenance", "source": "s",'
+        ' "interpretation": "i"}'
+    )
+    var out = String('"evidence": [')
+    for i in range(n):
+        if i > 0:
+            out += String(", ")
+        out += item
+    out += String("]")
+    return out^
+
+
+def test_evidence_items_ceiling() raises:
+    var base = fixture_text(ATTEMPTS_SESSION)
+    var s = parse_session(
+        utf8_bytes(
+            base.replace(
+                String('"evidence": []'),
+                _evidence_array(MAX_EVIDENCE_ITEMS),
+            )
+        )
+    )
+    assert_equal(len(s.evidence), MAX_EVIDENCE_ITEMS)
+    var raised = False
+    try:
+        _ = parse_session(
+            utf8_bytes(
+                base.replace(
+                    String('"evidence": []'),
+                    _evidence_array(MAX_EVIDENCE_ITEMS + 1),
+                )
+            )
+        )
+    except:
+        raised = True
+    assert_true(raised)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_scan_string_basic]()
@@ -1984,6 +2028,7 @@ def run() raises -> Int:
     suite.test[test_reader_missing]()
     suite.test[test_reader_empty_and_crlf]()
     suite.test[test_skip_value_depth_fixtures]()
+    suite.test[test_evidence_items_ceiling]()
     suite.test[test_classify_tail]()
     suite.test[test_negative_fixtures_present]()
     suite^.run()
