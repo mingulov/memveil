@@ -399,6 +399,20 @@ def stable_cut(
     return True
 
 
+def epoch_flags_clear(vals: List[UInt64]) -> Bool:
+    """No count-channel wrap flags (byte coverage is separate)."""
+    if len(vals) != 6:
+        return False
+    var flags = vals[CNT_FLAGS]
+    if flags & FLAG_OBSERVED_WRAP != UInt64(0):
+        return False
+    if flags & FLAG_EMITTED_WRAP != UInt64(0):
+        return False
+    if flags & FLAG_SUBMIT_WRAP != UInt64(0):
+        return False
+    return True
+
+
 def count_identity(vals: List[UInt64]) -> Bool:
     """observed == emitted + submit_fail without wraparound."""
     if len(vals) != 6:
@@ -858,12 +872,27 @@ struct Collector:
             self.note_unknown(String("stop protocol misuse"))
 
     def _stop_counters_valid(self) -> Bool:
+        """End cuts present and usable, mirroring evaluate."""
         if not self.has_end_cut:
             return False
-        if self.cfg.has_lifecycle and not self.has_end_cut_lc:
+        if not epoch_flags_clear(self.end_vals):
             return False
-        if self.cfg.has_copy and not self.has_end_cut_cp:
+        if not count_identity(self.end_vals):
             return False
+        if self.cfg.has_lifecycle:
+            if not self.has_end_cut_lc:
+                return False
+            if not epoch_flags_clear(self.end_vals_lc):
+                return False
+            if not count_identity(self.end_vals_lc):
+                return False
+        if self.cfg.has_copy:
+            if not self.has_end_cut_cp:
+                return False
+            if not epoch_flags_clear(self.end_vals_cp):
+                return False
+            if not count_identity(self.end_vals_cp):
+                return False
         return True
 
     def _stop_complete(self) -> Bool:
@@ -872,6 +901,20 @@ struct Collector:
             self.has_stop_evidence
             and self.stop_evidence.outcome == String("complete")
         )
+
+    def _final_exit_code(self, session: Session) -> Int:
+        """Exit 0 needs settled termination and sufficient detail.
+
+        Complete stop evidence alone is not enough: a
+        partial or unavailable detail channel keeps exit 4.
+        Aggregate-only gaps keep the sufficient exit, as in
+        replay.
+        """
+        if self._stop_complete() and (
+            session.q_detail.status == String("complete_for_scope")
+        ):
+            return EXIT_OK
+        return EXIT_PARTIAL
 
     def _stop_open_mappings(self) -> Int:
         var open = UInt64(0)
@@ -884,15 +927,26 @@ struct Collector:
     def _stop_finalize(mut self, t1_ns: UInt64):
         """Finalize stop evidence over the close-out window.
 
-        Elapsed runs detach to finalize (one clock read per
-        run). Quiescence is never observed here: without the
-        kernel-side protocol no consumer signal proves
-        admitted writers settled, so live evidence always
-        carries quiescence unproven.
+        Elapsed runs detach to the finalize stamp (one
+        clock read per run), which precedes the normal
+        path's final pool sample and session publication.
+        Milliseconds round up so a budget overrun can
+        never truncate into the budget. A regressing
+        stamp notes a clock failure; elapsed then stays
+        zero beside that cause. Quiescence is never
+        observed here: without the kernel-side protocol no
+        consumer signal proves admitted writers settled,
+        so live evidence always carries quiescence
+        unproven.
         """
         var elapsed = UInt64(0)
         if t1_ns >= self.detach_ns:
-            elapsed = (t1_ns - self.detach_ns) // UInt64(1000000)
+            var delta = t1_ns - self.detach_ns
+            elapsed = delta // UInt64(1000000)
+            if delta % UInt64(1000000) != UInt64(0):
+                elapsed += UInt64(1)
+        else:
+            self.note_unknown(String("stop clock regressed"))
         if elapsed > UInt64(9223372036854775807):
             elapsed = UInt64(9223372036854775807)
         var ms = Int(elapsed)
@@ -1607,13 +1661,15 @@ struct Collector:
         else:
             self.note_unknown(String("error shutdown"))
         self.confirm(kernel)
-        self.stop_ctl.sample_counters(self._stop_counters_valid())
         var drain_busy = (
             self.stop_drain_busy
             or not drain_stats.ok
             or drain_stats.staged != UInt64(0)
         )
         self._stop_record_drain(self.stop_drained, drain_busy)
+        # The sample must follow the last drain: a new
+        # boundary claim invalidates any earlier sample.
+        self.stop_ctl.sample_counters(self._stop_counters_valid())
         self._stop_finalize(clock.now())
         if self.cfg.has_pool_sample:
             # Final pool sample, held for the closing path with
@@ -2131,12 +2187,7 @@ struct Collector:
                 self.note_unknown(String("error shutdown"))
         if self.has_end_cut:
             var vals = self.end_vals.copy()
-            var epoch_ok = (
-                vals[CNT_FLAGS] & FLAG_OBSERVED_WRAP == UInt64(0)
-                and vals[CNT_FLAGS] & FLAG_EMITTED_WRAP == UInt64(0)
-                and vals[CNT_FLAGS] & FLAG_SUBMIT_WRAP == UInt64(0)
-            )
-            if not epoch_ok:
+            if not epoch_flags_clear(vals):
                 self.note_unknown(String("invalid epoch"))
             elif not count_identity(vals):
                 self.note_unknown(String("kernel identity unproven"))
@@ -2186,12 +2237,7 @@ struct Collector:
         if not has_cut:
             return String("")
         var vals = vals_in.copy()
-        var epoch_ok = (
-            vals[CNT_FLAGS] & FLAG_OBSERVED_WRAP == UInt64(0)
-            and vals[CNT_FLAGS] & FLAG_EMITTED_WRAP == UInt64(0)
-            and vals[CNT_FLAGS] & FLAG_SUBMIT_WRAP == UInt64(0)
-        )
-        if not epoch_ok:
+        if not epoch_flags_clear(vals):
             self.note_unknown(tag + String(" invalid epoch"))
             return String("")
         if not count_identity(vals):
@@ -2253,9 +2299,10 @@ struct Collector:
         if not self.contained():
             return self.drop_unfinalizable(writer)
         var session_text: String
+        var assembled = Session()
         try:
-            var session = self.assemble()
-            session_text = encode_session(session)
+            assembled = self.assemble()
+            session_text = encode_session(assembled)
         except:
             return self.drop_unfinalizable(writer)
         var raw = List[UInt8]()
@@ -2271,9 +2318,7 @@ struct Collector:
                     EXIT_ERROR, reason, String("error"),
                     self.diagnostic(done.note),
                 )
-            var code = EXIT_PARTIAL
-            if self._stop_complete():
-                code = EXIT_OK
+            var code = self._final_exit_code(assembled)
             return RunResult(
                 code, reason, String("finalized"),
                 self.diagnostic(String("")),

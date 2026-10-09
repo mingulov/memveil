@@ -18,6 +18,10 @@ with unsettled writers (or without observed quiescence) stays
 partial. A submit landing after the drain recorded its
 boundary claim likewise stays partial: the drain cannot have
 covered that record. A later drain re-proves the boundary.
+A new boundary claim also invalidates any earlier counter
+sample, which must follow the last drain. Finalization is
+terminal: a second finalize raises instead of replacing
+the evidence.
 Open logical DMA mappings are reported beside the
 verdict and never block callback quiescence: the controller
 waits for BPF callbacks, not for logical mappings to end.
@@ -70,9 +74,11 @@ struct StopController:
     var _closed: Bool
     var _close_ok: Bool
     var _in_flight: Int
+    var _in_flight_at_close: Int
     var _reserved: Int
     var _settled: Int
     var _late_submits: Int
+    var _late_covered: Int
     var _quiesced: Bool
     var _drained: Int
     var _has_drained: Bool
@@ -80,15 +86,18 @@ struct StopController:
     var _busy: Bool
     var _sampled: Bool
     var _counters_ok: Bool
+    var _finalized: Bool
 
     def __init__(out self):
         self._ready = False
         self._closed = False
         self._close_ok = False
         self._in_flight = 0
+        self._in_flight_at_close = 0
         self._reserved = 0
         self._settled = 0
         self._late_submits = 0
+        self._late_covered = 0
         self._quiesced = False
         self._drained = 0
         self._has_drained = False
@@ -96,6 +105,7 @@ struct StopController:
         self._busy = False
         self._sampled = False
         self._counters_ok = False
+        self._finalized = False
 
     def mark_ready(mut self):
         """Record startup readiness; measurement may begin."""
@@ -141,6 +151,7 @@ struct StopController:
             raise StopError("close_admission twice")
         self._closed = True
         self._close_ok = True
+        self._in_flight_at_close = self._in_flight
 
     def fail_close(mut self) raises:
         """Record a failed admission close; finalizes partial."""
@@ -149,6 +160,7 @@ struct StopController:
         if self._closed:
             raise StopError("fail_close twice")
         self._closed = True
+        self._in_flight_at_close = self._in_flight
 
     def try_quiescence(mut self) -> Bool:
         """True once every admitted writer settled."""
@@ -163,12 +175,20 @@ struct StopController:
             raise StopError("writers still in flight")
 
     def drain(mut self, records: Int, busy: Bool) raises:
-        """Record one bounded drain: records read, BUSY seen or not."""
+        """Record one bounded drain: records read, BUSY seen or not.
+
+        A new boundary claim invalidates any earlier
+        counter sample: the sample must follow the last
+        drain.
+        """
         if not self._closed:
             raise StopError("drain before close_admission")
         self._drained = records
         self._has_drained = True
         self._submit_after_drain = False
+        self._late_covered = self._late_submits
+        self._sampled = False
+        self._counters_ok = False
         self._busy = busy
 
     def sample_counters(mut self, ok: Bool):
@@ -188,6 +208,9 @@ struct StopController:
         """Build terminal evidence; partial unless all stages proved."""
         if not self._closed:
             raise StopError("finalize before close_admission")
+        if self._finalized:
+            raise StopError("finalize twice")
+        self._finalized = True
         var reason = String("")
         var complete = True
         if not self._close_ok:
@@ -222,8 +245,8 @@ struct StopController:
             self._close_ok,
             self._quiesced,
             self._settled,
-            self._settled + self._in_flight,
-            self._late_submits,
+            self._in_flight_at_close,
+            self._late_covered,
             self._drained,
             self._busy,
             self._sampled and self._counters_ok,
