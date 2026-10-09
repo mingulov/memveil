@@ -23,6 +23,7 @@ from memveil.cli.top import (
     TopOptions,
     WaitSlices,
     _diagnose,
+    _finish_live,
     _live_template,
     _snapshot_block,
     _wait_interval,
@@ -30,11 +31,12 @@ from memveil.cli.top import (
 )
 from memveil.model.event import Event
 from memveil.model.report import Report
-from memveil.model.session import Session
+from memveil.model.session import DeviceEntry, Session
 from memveil.model.validate import format_u64
 from memveil.platform.clock import MonoClock
 from memveil.platform.reader import read_host_file
 from memveil.platform.signal import LiveSignalSource
+from memveil.render.filter import device_filter_resolves
 from memveil.render.render import render
 
 
@@ -268,33 +270,51 @@ def _mkdtemp() raises -> String:
         raise Error("mkdtemp gave non-UTF8")
 
 
-def _redirect_stdout(path: String) raises -> Int32:
-    """Redirect fd 1 to path; return the saved descriptor."""
-    var saved = external_call["dup", Int32](Int32(1))
+def _redirect_fd(fd: Int32, path: String) raises -> Int32:
+    """Redirect fd to path; return the saved descriptor."""
+    var saved = external_call["dup", Int32](fd)
     if saved < Int32(0):
         raise Error("dup failed")
     var pname = _cstr(path)
-    var fd = external_call["openat", Int32](
+    var opened = external_call["openat", Int32](
         Int32(_AT_FDCWD),
         Span(pname).unsafe_ptr(),
         Int32(_O_WRONLY | _O_CREAT | _O_TRUNC),
         UInt32(420),
     )
-    if fd < Int32(0):
+    if opened < Int32(0):
         _ = external_call["close", Int32](saved)
         raise Error("openat failed")
-    var moved = external_call["dup2", Int32](fd, Int32(1))
-    _ = external_call["close", Int32](fd)
+    var moved = external_call["dup2", Int32](opened, fd)
+    _ = external_call["close", Int32](opened)
     if moved < Int32(0):
-        _ = external_call["dup2", Int32](saved, Int32(1))
+        _ = external_call["dup2", Int32](saved, fd)
         _ = external_call["close", Int32](saved)
         raise Error("dup2 failed")
     return saved
 
 
-def _restore_stdout(saved: Int32):
-    _ = external_call["dup2", Int32](saved, Int32(1))
+def _restore_fd(fd: Int32, saved: Int32):
+    _ = external_call["dup2", Int32](saved, fd)
     _ = external_call["close", Int32](saved)
+
+
+def _redirect_stdout(path: String) raises -> Int32:
+    """Redirect fd 1 to path; return the saved descriptor."""
+    return _redirect_fd(Int32(1), path)
+
+
+def _restore_stdout(saved: Int32):
+    _restore_fd(Int32(1), saved)
+
+
+def _redirect_stderr(path: String) raises -> Int32:
+    """Redirect fd 2 to path; return the saved descriptor."""
+    return _redirect_fd(Int32(2), path)
+
+
+def _restore_stderr(saved: Int32):
+    _restore_fd(Int32(2), saved)
 
 
 def _sink_attempt(op: String, seq: UInt64, ts: UInt64) -> Event:
@@ -614,6 +634,104 @@ def test_live_template_provisional() raises:
     assert_true(len(s.product_version.as_bytes()) > 0)
 
 
+def test_sink_warns_once_for_unknown_device() raises:
+    # A filter matching no catalog device warns on
+    # stderr exactly once; both blocks still print.
+    var scratch = _mkdtemp()
+    var out = scratch + String("/out.txt")
+    var err = scratch + String("/err.txt")
+    var opts = TopOptions()
+    opts.has_device = True
+    opts.device = String("nope")
+    var sink = StdoutSink(opts)
+    var rep0 = _sink_report_dev(UInt64(300))
+    var rep1 = _sink_report_dev(UInt64(400))
+    var saved_out = _redirect_stdout(out)
+    var saved_err = _redirect_stderr(err)
+    var r0 = sink.emit(rep0^, UInt64(300))
+    var r1 = sink.emit(rep1^, UInt64(400))
+    _restore_stdout(saved_out)
+    _restore_stderr(saved_err)
+    assert_true(r0)
+    assert_true(r1)
+    var text = _sink_text(read_host_file(out, String("out"), 1048576))
+    assert_true(text.startswith(String("--- refresh 1 @ ")))
+    var diag = _sink_text(read_host_file(err, String("err"), 1048576))
+    assert_equal(
+        diag,
+        String(
+            "memveil top: --device 'nope' matches no known device\n"
+        ),
+    )
+
+
+def test_sink_known_device_filter_is_quiet() raises:
+    # A resolving filter never warns.
+    var scratch = _mkdtemp()
+    var out = scratch + String("/out.txt")
+    var err = scratch + String("/err.txt")
+    var opts = TopOptions()
+    opts.has_device = True
+    opts.device = String("d2")
+    var sink = StdoutSink(opts)
+    var rep = _sink_report_dev(UInt64(300))
+    var saved_out = _redirect_stdout(out)
+    var saved_err = _redirect_stderr(err)
+    var ok = sink.emit(rep^, UInt64(300))
+    _restore_stdout(saved_out)
+    _restore_stderr(saved_err)
+    assert_true(ok)
+    var diag = _sink_text(read_host_file(err, String("err"), 1048576))
+    assert_equal(diag, String(""))
+
+
+def test_filter_resolves_catalog_id_and_name() raises:
+    # Catalog ids and names resolve even with no rows;
+    # unknown filters do not.
+    var rep = Report()
+    var dev = DeviceEntry()
+    dev.device_id = String("d9")
+    dev.name = String("disk9")
+    rep.devices.append(dev)
+    assert_true(device_filter_resolves(rep, String("")))
+    assert_true(device_filter_resolves(rep, String("d9")))
+    assert_true(device_filter_resolves(rep, String("disk9")))
+    assert_true(not device_filter_resolves(rep, String("nope")))
+
+
+def test_filter_resolves_observed_metric_id() raises:
+    # A metric device id resolves without a catalog
+    # entry; other ids do not.
+    var rep = _sink_report_dev(UInt64(300))
+    assert_true(device_filter_resolves(rep, String("d1")))
+    assert_true(device_filter_resolves(rep, String("d2")))
+    assert_true(not device_filter_resolves(rep, String("nope")))
+
+
+def test_finish_live_forwards_byte_budget() raises:
+    # The final live replay covers the collection budget,
+    # not just the replay cap: a capture inside the live
+    # budget but past a smaller replay cap still finishes
+    # with a final block.
+    var dir = String("tests/fixtures/attempts")
+    var events = read_host_file(
+        dir + String("/events.ndjson"), String("events"), 1048576
+    )
+    var size = len(events)
+    assert_true(size > 64)
+    var opts = TopOptions()
+    opts.max_events_bytes = size // 2
+    opts.live.max_events_bytes = size * 2
+    var scratch = _mkdtemp()
+    var out = scratch + String("/out.txt")
+    var saved = _redirect_stdout(out)
+    var rc = _finish_live(dir, opts, 0)
+    _restore_stdout(saved)
+    assert_equal(rc, 0)
+    var text = _sink_text(read_host_file(out, String("out"), 1048576))
+    assert_true(text.startswith(String("--- refresh 1 @ ")))
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_duration_units]()
@@ -634,6 +752,11 @@ def run() raises -> Int:
     suite.test[test_live_refresh_header_lines]()
     suite.test[test_sink_full_stdout_refuses]()
     suite.test[test_live_template_provisional]()
+    suite.test[test_finish_live_forwards_byte_budget]()
+    suite.test[test_sink_warns_once_for_unknown_device]()
+    suite.test[test_sink_known_device_filter_is_quiet]()
+    suite.test[test_filter_resolves_catalog_id_and_name]()
+    suite.test[test_filter_resolves_observed_metric_id]()
     suite^.run()
     return 0
 

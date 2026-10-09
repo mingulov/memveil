@@ -251,6 +251,30 @@ struct ScriptFileSink(RefreshSink):
         return _append_text(self._path, record)
 
 
+struct RefuseOnceSink(RefreshSink):
+    """Records refreshes but refuses the first emission."""
+
+    var _path: String
+    var _refused: Bool
+
+    def __init__(out self, path: String):
+        self._path = path.copy()
+        self._refused = False
+
+    def emit(mut self, var rep: Report, horizon_ns: UInt64) -> Bool:
+        if not self._refused:
+            self._refused = True
+            _ = rep^
+            return False
+        var record = (
+            format_u64(horizon_ns)
+            + String(" ")
+            + _tee_digest(rep)
+            + String("\n")
+        )
+        return _append_text(self._path, record)
+
+
 def _tee_base(kind: String, seq: UInt64, ts: UInt64) -> Event:
     var ev = Event()
     ev.session_id = String("teeprobe")
@@ -482,7 +506,9 @@ def test_tee_misuse_before_create() raises:
     assert_equal(tee.committed_len(), 0)
 
 
-def test_tee_first_data_emits_refresh() raises:
+def test_tee_first_data_establishes_silently() raises:
+    # The first event only establishes the window: no empty
+    # [T, T) refresh is ever printed.
     var scratch = _mkdtemp()
     var obs = scratch + String("/obs.ndjson")
     var tmpl = _tee_template()
@@ -492,16 +518,13 @@ def test_tee_first_data_emits_refresh() raises:
     assert_true(tee.create(scratch + String("/cap"), 131072).ok)
     var line = _tee_line(_tee_attempt("op1", UInt64(0), UInt64(100)))
     assert_true(tee.append(line).ok)
-    var lines = List[List[UInt8]]()
-    lines.append(line^)
-    var want = (
-        format_u64(UInt64(100))
-        + String(" ")
-        + _tee_direct(tmpl, UInt64(100), lines, UInt64(100))
-        + String("\n")
-    )
-    var raw = read_host_file(obs, String("obs"), 1048576)
-    assert_equal(_tee_text(raw), want)
+    assert_equal(tee.emission_count(), 0)
+    var missing = False
+    try:
+        _ = read_host_file(obs, String("obs"), 1048576)
+    except:
+        missing = True
+    assert_true(missing)
 
 
 def test_tee_interval_gates_refresh() raises:
@@ -516,29 +539,24 @@ def test_tee_interval_gates_refresh() raises:
     var l1 = _tee_line(_tee_attempt("op2", UInt64(1), UInt64(120)))
     var l2 = _tee_line(_tee_attempt("op3", UInt64(2), UInt64(200)))
     assert_true(tee.append(l0).ok)
+    assert_equal(tee.emission_count(), 0)
     assert_true(tee.append(l1).ok)
+    assert_equal(tee.emission_count(), 0)
     assert_true(tee.append(l2).ok)
-    var first = List[List[UInt8]]()
-    first.append(l0.copy())
-    var rec0 = (
-        format_u64(UInt64(100))
-        + String(" ")
-        + _tee_direct(tmpl, UInt64(100), first, UInt64(100))
-        + String("\n")
-    )
-    var all_lines = List[List[UInt8]]()
-    all_lines.append(l0^)
-    all_lines.append(l1^)
-    all_lines.append(l2^)
-    var rec1 = (
+    assert_equal(tee.emission_count(), 1)
+    # The refresh at 200 covers [100, 200): the boundary
+    # event folds after the snapshot.
+    var covered = List[List[UInt8]]()
+    covered.append(l0.copy())
+    covered.append(l1.copy())
+    var want = (
         format_u64(UInt64(200))
         + String(" ")
-        + _tee_direct(tmpl, UInt64(100), all_lines, UInt64(200))
+        + _tee_direct(tmpl, UInt64(100), covered, UInt64(200))
         + String("\n")
     )
     var raw = read_host_file(obs, String("obs"), 1048576)
-    assert_equal(_tee_text(raw), rec0 + rec1)
-    assert_equal(tee.emission_count(), 2)
+    assert_equal(_tee_text(raw), want)
 
 
 def test_tee_decode_failure_is_loud() raises:
@@ -551,12 +569,14 @@ def test_tee_decode_failure_is_loud() raises:
     var out = tee.append(bad)
     assert_true(not out.ok)
     assert_equal(out.kind, String("internal"))
-    # Persisted before the fold was attempted: live input is
-    # byte-identical to what replay will read, even in failure.
+    # Atomic: the unfolded line is rolled back, so the
+    # retained file stays replayable (replay raises on a
+    # corrupt line; keeping it would poison the final).
+    assert_equal(tee.committed_len(), 0)
     var events = read_host_file(
         target + String("/events.ndjson"), String("events"), 1048576
     )
-    assert_equal(_tee_text(events), _tee_text(bad))
+    assert_equal(_tee_text(events), String(""))
     var missing = False
     try:
         _ = read_host_file(obs, String("obs"), 1048576)
@@ -566,18 +586,24 @@ def test_tee_decode_failure_is_loud() raises:
 
 
 def test_tee_sink_failure_is_loud() raises:
+    # The establishing event never touches the sink; the
+    # first due refresh surfaces the refusal loudly.
     var scratch = _mkdtemp()
     var target = scratch + String("/cap")
     var tee = _tee_new(scratch + String("/no-such-dir/obs.ndjson"))
     assert_true(tee.create(target, 131072).ok)
-    var line = _tee_line(_tee_attempt("op1", UInt64(0), UInt64(100)))
-    var out = tee.append(line)
+    var l0 = _tee_line(_tee_attempt("op1", UInt64(0), UInt64(100)))
+    assert_true(tee.append(l0).ok)
+    var l1 = _tee_line(_tee_attempt("op2", UInt64(1), UInt64(200)))
+    var out = tee.append(l1)
     assert_true(not out.ok)
     assert_equal(out.kind, String("internal"))
+    # Atomic: the unfolded line is rolled back, so later
+    # refreshes still match a replay of the retained file.
     var events = read_host_file(
         target + String("/events.ndjson"), String("events"), 1048576
     )
-    assert_equal(_tee_text(events), _tee_text(line))
+    assert_equal(_tee_text(events), _tee_text(l0))
 
 
 def test_tee_disorder_folds_forward_only() raises:
@@ -592,28 +618,24 @@ def test_tee_disorder_folds_forward_only() raises:
     var l1 = _tee_line(_tee_attempt("op2", UInt64(1), UInt64(60)))
     var l2 = _tee_line(_tee_attempt("op3", UInt64(2), UInt64(160)))
     assert_true(tee.append(l0).ok)
+    assert_equal(tee.emission_count(), 0)
+    # Below the stamped floor: refolded with the floor
+    # lowered, never counted below the window.
     assert_true(tee.append(l1).ok)
+    assert_equal(tee.emission_count(), 0)
     assert_true(tee.append(l2).ok)
-    var first = List[List[UInt8]]()
-    first.append(l0.copy())
-    var rec0 = (
-        format_u64(UInt64(100))
-        + String(" ")
-        + _tee_direct(tmpl, UInt64(100), first, UInt64(100))
-        + String("\n")
-    )
-    var all_lines = List[List[UInt8]]()
-    all_lines.append(l0^)
-    all_lines.append(l1^)
-    all_lines.append(l2^)
-    var rec1 = (
+    assert_equal(tee.emission_count(), 1)
+    var covered = List[List[UInt8]]()
+    covered.append(l0.copy())
+    covered.append(l1.copy())
+    var want = (
         format_u64(UInt64(160))
         + String(" ")
-        + _tee_direct(tmpl, UInt64(100), all_lines, UInt64(160))
+        + _tee_direct(tmpl, UInt64(60), covered, UInt64(160))
         + String("\n")
     )
     var raw = read_host_file(obs, String("obs"), 1048576)
-    assert_equal(_tee_text(raw), rec0 + rec1)
+    assert_equal(_tee_text(raw), want)
 
 
 def test_tee_same_reducer_mixed_kinds() raises:
@@ -637,30 +659,23 @@ def test_tee_same_reducer_mixed_kinds() raises:
     assert_true(tee.append(l2).ok)
     assert_true(tee.append(l3).ok)
     assert_true(tee.append(l4).ok)
+    assert_equal(tee.emission_count(), 0)
     assert_true(tee.append(l5).ok)
-    var first = List[List[UInt8]]()
-    first.append(l0.copy())
-    var rec0 = (
-        format_u64(UInt64(100))
-        + String(" ")
-        + _tee_direct(tmpl, UInt64(100), first, UInt64(100))
-        + String("\n")
-    )
-    var all_lines = List[List[UInt8]]()
-    all_lines.append(l0^)
-    all_lines.append(l1^)
-    all_lines.append(l2^)
-    all_lines.append(l3^)
-    all_lines.append(l4^)
-    all_lines.append(l5^)
-    var rec1 = (
+    assert_equal(tee.emission_count(), 1)
+    var covered = List[List[UInt8]]()
+    covered.append(l0.copy())
+    covered.append(l1.copy())
+    covered.append(l2.copy())
+    covered.append(l3.copy())
+    covered.append(l4.copy())
+    var want = (
         format_u64(UInt64(200))
         + String(" ")
-        + _tee_direct(tmpl, UInt64(100), all_lines, UInt64(200))
+        + _tee_direct(tmpl, UInt64(100), covered, UInt64(200))
         + String("\n")
     )
     var raw = read_host_file(obs, String("obs"), 1048576)
-    assert_equal(_tee_text(raw), rec0 + rec1)
+    assert_equal(_tee_text(raw), want)
 
 
 def test_tee_closing_lines_fold() raises:
@@ -674,26 +689,19 @@ def test_tee_closing_lines_fold() raises:
     var l0 = _tee_line(_tee_attempt("op1", UInt64(0), UInt64(100)))
     var l1 = _tee_line(_tee_attempt("op2", UInt64(1), UInt64(200)))
     assert_true(tee.append(l0).ok)
+    assert_equal(tee.emission_count(), 0)
     assert_true(tee.append_closing(l1).ok)
+    assert_equal(tee.emission_count(), 1)
     var first = List[List[UInt8]]()
     first.append(l0.copy())
-    var rec0 = (
-        format_u64(UInt64(100))
-        + String(" ")
-        + _tee_direct(tmpl, UInt64(100), first, UInt64(100))
-        + String("\n")
-    )
-    var both = List[List[UInt8]]()
-    both.append(l0^)
-    both.append(l1^)
-    var rec1 = (
+    var want = (
         format_u64(UInt64(200))
         + String(" ")
-        + _tee_direct(tmpl, UInt64(100), both, UInt64(200))
+        + _tee_direct(tmpl, UInt64(100), first, UInt64(200))
         + String("\n")
     )
     var raw = read_host_file(obs, String("obs"), 1048576)
-    assert_equal(_tee_text(raw), rec0 + rec1)
+    assert_equal(_tee_text(raw), want)
 
 
 def test_tee_group_abort_rebuilds_prefix() raises:
@@ -716,36 +724,29 @@ def test_tee_group_abort_rebuilds_prefix() raises:
     assert_true(tee.append(l2).ok)
     assert_true(tee.group_abort(begun.mark).ok)
     assert_true(tee.append(l3).ok)
-    var first = List[List[UInt8]]()
-    first.append(l0.copy())
-    var rec0 = (
-        format_u64(UInt64(100))
-        + String(" ")
-        + _tee_direct(tmpl, UInt64(100), first, UInt64(100))
-        + String("\n")
-    )
+    assert_equal(tee.emission_count(), 2)
+    # The aborted refresh stands as printed; both refreshes
+    # exclude their boundary event.
     var pre_abort = List[List[UInt8]]()
     pre_abort.append(l0.copy())
     pre_abort.append(l1.copy())
-    pre_abort.append(l2.copy())
-    var rec1 = (
+    var rec0 = (
         format_u64(UInt64(200))
         + String(" ")
         + _tee_direct(tmpl, UInt64(100), pre_abort, UInt64(200))
         + String("\n")
     )
     var kept = List[List[UInt8]]()
-    kept.append(l0^)
-    kept.append(l1^)
-    kept.append(l3^)
-    var rec2 = (
+    kept.append(l0.copy())
+    kept.append(l1.copy())
+    var rec1 = (
         format_u64(UInt64(260))
         + String(" ")
         + _tee_direct(tmpl, UInt64(100), kept, UInt64(260))
         + String("\n")
     )
     var raw = read_host_file(obs, String("obs"), 1048576)
-    assert_equal(_tee_text(raw), rec0 + rec1 + rec2)
+    assert_equal(_tee_text(raw), rec0 + rec1)
     var events = read_host_file(
         target + String("/events.ndjson"), String("events"), 1048576
     )
@@ -773,41 +774,278 @@ def test_tee_abort_all_restarts_clean() raises:
     assert_true(tee.append(l1).ok)
     assert_true(tee.group_abort(begun.mark).ok)
     assert_equal(tee.committed_len(), 0)
+    # The aborted refresh stands; the restart re-establishes
+    # silently with a fresh floor.
     assert_true(tee.append(l2).ok)
-    var first = List[List[UInt8]]()
-    first.append(l0.copy())
-    var rec0 = (
-        format_u64(UInt64(100))
-        + String(" ")
-        + _tee_direct(tmpl, UInt64(100), first, UInt64(100))
-        + String("\n")
-    )
+    assert_equal(tee.emission_count(), 1)
     var pre_abort = List[List[UInt8]]()
-    pre_abort.append(l0^)
-    pre_abort.append(l1.copy())
-    var rec1 = (
+    pre_abort.append(l0.copy())
+    var rec0 = (
         format_u64(UInt64(200))
         + String(" ")
         + _tee_direct(tmpl, UInt64(100), pre_abort, UInt64(200))
         + String("\n")
     )
-    var rest = List[List[UInt8]]()
-    rest.append(l2^)
-    # The window re-stamps at the first retained event: the
-    # scope labels prove the aborted prefix is truly gone.
-    var rec2 = (
-        format_u64(UInt64(300))
-        + String(" ")
-        + _tee_direct(tmpl, UInt64(300), rest, UInt64(300))
-        + String("\n")
-    )
     var raw = read_host_file(obs, String("obs"), 1048576)
-    assert_equal(_tee_text(raw), rec0 + rec1 + rec2)
-    assert_equal(tee.emission_count(), 3)
+    assert_equal(_tee_text(raw), rec0)
     var events = read_host_file(
         target + String("/events.ndjson"), String("events"), 1048576
     )
     assert_equal(len(events), tee.committed_len())
+
+
+def test_tee_refresh_excludes_boundary_event() raises:
+    # A refresh at horizon H covers [start, H): the event at
+    # H folds after the snapshot, matching replay. The first
+    # event only establishes the window; it never emits an
+    # empty [T, T) refresh.
+    var scratch = _mkdtemp()
+    var obs = scratch + String("/obs.ndjson")
+    var tmpl = _tee_template()
+    var tee = TeeWriter[ScriptFileSink](
+        tmpl, UInt64(50), ScriptFileSink(obs)
+    )
+    assert_true(tee.create(scratch + String("/cap"), 131072).ok)
+    var l0 = _tee_line(_tee_attempt("op1", UInt64(0), UInt64(100)))
+    var l1 = _tee_line(_tee_attempt("op2", UInt64(1), UInt64(200)))
+    assert_true(tee.append(l0).ok)
+    assert_equal(tee.emission_count(), 0)
+    assert_true(tee.append(l1).ok)
+    assert_equal(tee.emission_count(), 1)
+    var first = List[List[UInt8]]()
+    first.append(l0.copy())
+    var want = (
+        format_u64(UInt64(200))
+        + String(" ")
+        + _tee_direct(tmpl, UInt64(100), first, UInt64(200))
+        + String("\n")
+    )
+    var raw = read_host_file(obs, String("obs"), 1048576)
+    assert_equal(_tee_text(raw), want)
+
+
+def test_tee_rewound_horizon_never_reemits() raises:
+    # After an abort rewinds the retained horizon below an
+    # already-shown horizon, older horizons never re-emit:
+    # the gap is guarded, never wrapped unsigned.
+    var scratch = _mkdtemp()
+    var obs = scratch + String("/obs.ndjson")
+    var tmpl = _tee_template()
+    var tee = TeeWriter[ScriptFileSink](
+        tmpl, UInt64(50), ScriptFileSink(obs)
+    )
+    assert_true(tee.create(scratch + String("/cap"), 131072).ok)
+    var l0 = _tee_line(_tee_attempt("op1", UInt64(0), UInt64(100)))
+    var l1 = _tee_line(_tee_attempt("op2", UInt64(1), UInt64(200)))
+    var l2 = _tee_line(_tee_attempt("op3", UInt64(1), UInt64(150)))
+    var l3 = _tee_line(_tee_attempt("op4", UInt64(2), UInt64(300)))
+    assert_true(tee.append(l0).ok)
+    var begun = tee.group_begin()
+    assert_true(begun.ok)
+    assert_true(tee.append(l1).ok)
+    assert_true(tee.group_abort(begun.mark).ok)
+    assert_true(tee.append(l2).ok)
+    assert_equal(tee.emission_count(), 1)
+    assert_true(tee.append(l3).ok)
+    assert_equal(tee.emission_count(), 2)
+    var first = List[List[UInt8]]()
+    first.append(l0.copy())
+    var rec0 = (
+        format_u64(UInt64(200))
+        + String(" ")
+        + _tee_direct(tmpl, UInt64(100), first, UInt64(200))
+        + String("\n")
+    )
+    var kept = List[List[UInt8]]()
+    kept.append(l0.copy())
+    kept.append(l2.copy())
+    var rec1 = (
+        format_u64(UInt64(300))
+        + String(" ")
+        + _tee_direct(tmpl, UInt64(100), kept, UInt64(300))
+        + String("\n")
+    )
+    var raw = read_host_file(obs, String("obs"), 1048576)
+    assert_equal(_tee_text(raw), rec0 + rec1)
+
+
+def test_tee_below_floor_restamps_window() raises:
+    # A reordered event below the stamped start lowers the
+    # window floor to the retained minimum: nothing counts
+    # below the declared window.
+    var scratch = _mkdtemp()
+    var obs = scratch + String("/obs.ndjson")
+    var tmpl = _tee_template()
+    var tee = TeeWriter[ScriptFileSink](
+        tmpl, UInt64(50), ScriptFileSink(obs)
+    )
+    assert_true(tee.create(scratch + String("/cap"), 131072).ok)
+    var l0 = _tee_line(_tee_attempt("op1", UInt64(0), UInt64(100)))
+    var l1 = _tee_line(_tee_attempt("op2", UInt64(1), UInt64(60)))
+    var l2 = _tee_line(_tee_attempt("op3", UInt64(2), UInt64(200)))
+    assert_true(tee.append(l0).ok)
+    assert_true(tee.append(l1).ok)
+    assert_equal(tee.emission_count(), 0)
+    assert_true(tee.append(l2).ok)
+    assert_equal(tee.emission_count(), 1)
+    var both = List[List[UInt8]]()
+    both.append(l0.copy())
+    both.append(l1.copy())
+    var want = (
+        format_u64(UInt64(200))
+        + String(" ")
+        + _tee_direct(tmpl, UInt64(60), both, UInt64(200))
+        + String("\n")
+    )
+    var raw = read_host_file(obs, String("obs"), 1048576)
+    assert_equal(_tee_text(raw), want)
+
+
+def test_tee_rebuild_streams_large_prefix() raises:
+    # Rollback refolds the retained prefix without holding
+    # the whole file: two thousand lines (several 64 KiB
+    # chunks) rebuild to the exact oracle digest.
+    var scratch = _mkdtemp()
+    var obs = scratch + String("/obs.ndjson")
+    var tmpl = _tee_template()
+    var tee = TeeWriter[ScriptFileSink](
+        tmpl, UInt64(1000000000000), ScriptFileSink(obs)
+    )
+    assert_true(tee.create(scratch + String("/cap"), 134217728).ok)
+    var kept = List[List[UInt8]]()
+    for i in range(2000):
+        var line = _tee_line(
+            _tee_attempt(
+                String("op") + format_u64(UInt64(i)),
+                UInt64(i),
+                UInt64(1000) + UInt64(i),
+            )
+        )
+        kept.append(line.copy())
+        assert_true(tee.append(line).ok)
+    var begun = tee.group_begin()
+    assert_true(begun.ok)
+    var dropped = _tee_line(
+        _tee_attempt(String("opx"), UInt64(2000), UInt64(5000))
+    )
+    assert_true(tee.append(dropped).ok)
+    assert_true(tee.group_abort(begun.mark).ok)
+    var probe = _tee_line(
+        _tee_attempt(
+            String("probe"), UInt64(2001), UInt64(2000000000000)
+        )
+    )
+    assert_true(tee.append(probe).ok)
+    assert_equal(tee.emission_count(), 1)
+    var want = (
+        format_u64(UInt64(2000000000000))
+        + String(" ")
+        + _tee_direct(
+            tmpl, UInt64(1000), kept, UInt64(2000000000000)
+        )
+        + String("\n")
+    )
+    var raw = read_host_file(obs, String("obs"), 1048576)
+    assert_equal(_tee_text(raw), want)
+
+
+def test_tee_failed_fold_rolls_back_bytes() raises:
+    # A line that persists but fails the fold is rolled
+    # back: the retained bytes and the live analyzer agree,
+    # and later refreshes match a replay of the file.
+    var scratch = _mkdtemp()
+    var obs = scratch + String("/obs.ndjson")
+    var tmpl = _tee_template()
+    var tee = TeeWriter[ScriptFileSink](
+        tmpl, UInt64(50), ScriptFileSink(obs)
+    )
+    assert_true(tee.create(scratch + String("/cap"), 134217728).ok)
+    var l0 = _tee_line(
+        _tee_attempt(String("op0"), UInt64(0), UInt64(1000))
+    )
+    var l1 = _tee_line(
+        _tee_attempt(String("op1"), UInt64(1), UInt64(1010))
+    )
+    assert_true(tee.append(l0).ok)
+    assert_true(tee.append(l1).ok)
+    var before = tee.committed_len()
+    var bad_text = String("{oops}\n")
+    var bad = List[UInt8]()
+    for b in bad_text.as_bytes():
+        bad.append(b)
+    var failed = tee.append(bad)
+    assert_true(not failed.ok)
+    assert_equal(failed.kind, String("internal"))
+    assert_equal(tee.committed_len(), before)
+    var events = read_host_file(
+        scratch + String("/cap/events.ndjson"),
+        String("events"),
+        8388608,
+    )
+    var want_bytes = l0.copy()
+    for i in range(len(l1)):
+        want_bytes.append(l1[i])
+    assert_equal(_tee_text(events), _tee_text(want_bytes))
+    var probe = _tee_line(
+        _tee_attempt(String("op2"), UInt64(2), UInt64(2000))
+    )
+    assert_true(tee.append(probe).ok)
+    assert_equal(tee.emission_count(), 1)
+    var kept = List[List[UInt8]]()
+    kept.append(l0.copy())
+    kept.append(l1.copy())
+    var want = (
+        format_u64(UInt64(2000))
+        + String(" ")
+        + _tee_direct(tmpl, UInt64(1000), kept, UInt64(2000))
+        + String("\n")
+    )
+    var raw = read_host_file(obs, String("obs"), 1048576)
+    assert_equal(_tee_text(raw), want)
+
+
+def test_tee_refused_refresh_rolls_back_line() raises:
+    # A refused emission rolls the line back: the file
+    # holds the prefix and the analyzer matches it, so a
+    # re-append emits the prefix digest.
+    var scratch = _mkdtemp()
+    var obs = scratch + String("/obs.ndjson")
+    var tmpl = _tee_template()
+    var tee = TeeWriter[RefuseOnceSink](
+        tmpl, UInt64(50), RefuseOnceSink(obs)
+    )
+    assert_true(tee.create(scratch + String("/cap"), 134217728).ok)
+    var l0 = _tee_line(
+        _tee_attempt(String("op0"), UInt64(0), UInt64(1000))
+    )
+    var l1 = _tee_line(
+        _tee_attempt(String("op1"), UInt64(1), UInt64(1200))
+    )
+    assert_true(tee.append(l0).ok)
+    var before = tee.committed_len()
+    var refused = tee.append(l1)
+    assert_true(not refused.ok)
+    assert_equal(refused.kind, String("internal"))
+    assert_equal(tee.committed_len(), before)
+    var events = read_host_file(
+        scratch + String("/cap/events.ndjson"),
+        String("events"),
+        8388608,
+    )
+    assert_equal(_tee_text(events), _tee_text(l0))
+    assert_equal(tee.emission_count(), 0)
+    assert_true(tee.append(l1).ok)
+    assert_equal(tee.emission_count(), 1)
+    var kept = List[List[UInt8]]()
+    kept.append(l0.copy())
+    var want = (
+        format_u64(UInt64(1200))
+        + String(" ")
+        + _tee_direct(tmpl, UInt64(1000), kept, UInt64(1200))
+        + String("\n")
+    )
+    var raw = read_host_file(obs, String("obs"), 1048576)
+    assert_equal(_tee_text(raw), want)
 
 
 def test_tee_empty_emits_nothing() raises:
@@ -842,23 +1080,30 @@ def test_tee_unavailable_pool_matches_offline() raises:
             String("p"), UInt64(200), UInt64(1), String("denied")
         )
     )
+    var l2 = _tee_line(_tee_attempt("op2", UInt64(2), UInt64(300)))
     assert_true(tee.append(l0).ok)
+    assert_equal(tee.emission_count(), 0)
     assert_true(tee.append(l1).ok)
+    assert_equal(tee.emission_count(), 1)
+    assert_true(tee.append(l2).ok)
+    assert_equal(tee.emission_count(), 2)
+    # The unavailable halves land in the refresh after the
+    # snapshot they trigger.
     var first = List[List[UInt8]]()
     first.append(l0.copy())
     var rec0 = (
-        format_u64(UInt64(100))
+        format_u64(UInt64(200))
         + String(" ")
-        + _tee_direct(tmpl, UInt64(100), first, UInt64(100))
+        + _tee_direct(tmpl, UInt64(100), first, UInt64(200))
         + String("\n")
     )
     var both = List[List[UInt8]]()
-    both.append(l0^)
-    both.append(l1^)
+    both.append(l0.copy())
+    both.append(l1.copy())
     var rec1 = (
-        format_u64(UInt64(200))
+        format_u64(UInt64(300))
         + String(" ")
-        + _tee_direct(tmpl, UInt64(100), both, UInt64(200))
+        + _tee_direct(tmpl, UInt64(100), both, UInt64(300))
         + String("\n")
     )
     var raw = read_host_file(obs, String("obs"), 1048576)
@@ -875,23 +1120,31 @@ def test_tee_loss_matches_offline() raises:
     assert_true(tee.create(scratch + String("/cap"), 131072).ok)
     var l0 = _tee_line(_tee_attempt("op1", UInt64(0), UInt64(100)))
     var l1 = _tee_line(_tee_gap(UInt64(200), UInt64(1)))
+    var l2 = _tee_line(_tee_attempt("op2", UInt64(2), UInt64(300)))
     assert_true(tee.append(l0).ok)
+    assert_equal(tee.emission_count(), 0)
     assert_true(tee.append(l1).ok)
+    assert_equal(tee.emission_count(), 1)
+    assert_true(tee.append(l2).ok)
+    assert_equal(tee.emission_count(), 2)
+    # Each refresh excludes its boundary event: the gap
+    # folds after the snapshot it triggers and lands in the
+    # next refresh.
     var first = List[List[UInt8]]()
     first.append(l0.copy())
     var rec0 = (
-        format_u64(UInt64(100))
+        format_u64(UInt64(200))
         + String(" ")
-        + _tee_direct(tmpl, UInt64(100), first, UInt64(100))
+        + _tee_direct(tmpl, UInt64(100), first, UInt64(200))
         + String("\n")
     )
     var both = List[List[UInt8]]()
-    both.append(l0^)
-    both.append(l1^)
+    both.append(l0.copy())
+    both.append(l1.copy())
     var rec1 = (
-        format_u64(UInt64(200))
+        format_u64(UInt64(300))
         + String(" ")
-        + _tee_direct(tmpl, UInt64(100), both, UInt64(200))
+        + _tee_direct(tmpl, UInt64(100), both, UInt64(300))
         + String("\n")
     )
     var raw = read_host_file(obs, String("obs"), 1048576)
@@ -1004,11 +1257,12 @@ def _prefix_line_ts(line: List[UInt8]) raises -> UInt64:
 def test_tee_signal_stop_prefixes_match_offline() raises:
     # A scripted stop ends the run after three periodic pool
     # fires; every refresh equals the offline digest over the
-    # retained arrival prefix at its horizon. Closing lines
-    # fold too, so the two horizon-advancing closing lines
-    # emit as well; each emission horizon is a running
-    # maximum, so its prefix ends at the first retained line
-    # carrying that timestamp.
+    # retained arrival prefix strictly below its horizon (the
+    # boundary event folds after the snapshot). Closing
+    # lines fold too, so the two horizon-advancing closing
+    # lines emit as well; each emission horizon is a running
+    # maximum, so its prefix ends before the first retained
+    # line carrying that timestamp.
     var scratch = _mkdtemp()
     var target = scratch + String("/cap")
     var obs = scratch + String("/obs.ndjson")
@@ -1042,7 +1296,8 @@ def test_tee_signal_stop_prefixes_match_offline() raises:
     assert_equal(res.end_reason, String("signal"))
     assert_equal(tee.emission_count(), 5)
     # The pool baseline read shifts the dwell pairs by one,
-    # so the periodic timestamps trail the dwell values.
+    # so the periodic timestamps trail the dwell values; the
+    # baseline establishes the window silently.
     var want_horizons = List[UInt64]()
     want_horizons.append(UInt64(3500000000))
     want_horizons.append(UInt64(4500000000))
@@ -1072,11 +1327,14 @@ def test_tee_signal_stop_prefixes_match_offline() raises:
             end += 1
         assert_true(end < len(lines))
         var prefix = List[List[UInt8]]()
-        for j in range(end + 1):
+        var floor = ~UInt64(0)
+        for j in range(end):
             prefix.append(lines[j].copy())
-        var want = _tee_direct(
-            tmpl, UInt64(3500000000), prefix, split[0]
-        )
+            var ts = _prefix_line_ts(lines[j])
+            if ts < floor:
+                floor = ts
+        assert_true(len(prefix) > 0)
+        var want = _tee_direct(tmpl, floor, prefix, split[0])
         assert_equal(split[1], want)
         seen += 1
     assert_equal(seen, 5)
@@ -1111,7 +1369,7 @@ def run() raises -> Int:
     suite.test[test_abandon_and_discard]()
     suite.test[test_tee_forwards_bytes_identical]()
     suite.test[test_tee_misuse_before_create]()
-    suite.test[test_tee_first_data_emits_refresh]()
+    suite.test[test_tee_first_data_establishes_silently]()
     suite.test[test_tee_interval_gates_refresh]()
     suite.test[test_tee_decode_failure_is_loud]()
     suite.test[test_tee_sink_failure_is_loud]()
@@ -1120,6 +1378,12 @@ def run() raises -> Int:
     suite.test[test_tee_closing_lines_fold]()
     suite.test[test_tee_group_abort_rebuilds_prefix]()
     suite.test[test_tee_abort_all_restarts_clean]()
+    suite.test[test_tee_refresh_excludes_boundary_event]()
+    suite.test[test_tee_rewound_horizon_never_reemits]()
+    suite.test[test_tee_below_floor_restamps_window]()
+    suite.test[test_tee_rebuild_streams_large_prefix]()
+    suite.test[test_tee_failed_fold_rolls_back_bytes]()
+    suite.test[test_tee_refused_refresh_rolls_back_line]()
     suite.test[test_tee_empty_emits_nothing]()
     suite.test[test_tee_unavailable_pool_matches_offline]()
     suite.test[test_tee_loss_matches_offline]()

@@ -397,6 +397,79 @@ def _read_bounded_local(path: String, what: String, cap: Int) raises EvidenceErr
             out.append(chunk[i])
 
 
+trait LineSink:
+    """One streamed line consumer: fixed-chunk file reuse.
+
+    ``feed`` takes one nonempty LF-delimited span (the newline
+    itself is not included) and returns ``""`` on success. A
+    nonempty return is failure detail: the stream closes the
+    file and stops at once, so the first bad line is the one
+    reported. The sink records whatever it needs: the stream
+    holds only its 64 KiB chunk plus the current span.
+    """
+
+    def feed(mut self, line: List[UInt8]) -> String:
+        ...
+
+
+def stream_host_lines[
+    Sink: LineSink
+](path: String, what: String, cap: Int, mut sink: Sink) raises EvidenceError:
+    """Stream one host file to a line sink, capped at cap bytes.
+
+    Same open/read/cap semantics as ``_read_bounded_local``:
+    E_IO on open/read failure, E_TOO_BIG past the cap. Lines
+    are nonempty spans split on LF; a trailing span without a
+    newline is still delivered, and empty spans are skipped.
+    Stops after the first feed failure; the sink owns the
+    detail. Unlike ``read_evidence`` this never maps a fixture
+    root: the path is taken literally.
+    """
+    var cpath = _to_cstr_local(path)
+    var mode = _to_cstr_local("rb")
+    var fp = external_call["fopen", UInt64](
+        Span(cpath).unsafe_ptr(), Span(mode).unsafe_ptr()
+    )
+    if fp == 0:
+        raise EvidenceError(E_IO, what + ": cannot open")
+    var chunk = List[UInt8]()
+    for _ in range(_CHUNK_BYTES):
+        chunk.append(UInt8(0))
+    var acc = List[UInt8]()
+    var total = 0
+    while True:
+        var got = external_call["fread", Int64](
+            Span(chunk).unsafe_ptr(), 1, _CHUNK_BYTES, fp
+        )
+        if got == 0:
+            var ferr = external_call["ferror", Int32](fp)
+            _ = external_call["fclose", Int32](fp)
+            if ferr != 0:
+                raise EvidenceError(E_IO, what + ": cannot read")
+            if len(acc) > 0:
+                var tail = acc^
+                acc = List[UInt8]()
+                _ = sink.feed(tail^)
+            return
+        var n = Int(got)
+        if total + n > cap:
+            _ = external_call["fclose", Int32](fp)
+            raise EvidenceError(E_TOO_BIG, what + " too large")
+        total += n
+        for i in range(n):
+            var b = chunk[i]
+            if b != UInt8(0x0A):
+                acc.append(b)
+                continue
+            if len(acc) == 0:
+                continue
+            var span = acc^
+            acc = List[UInt8]()
+            if sink.feed(span^) != "":
+                _ = external_call["fclose", Int32](fp)
+                return
+
+
 def open_evidence_reader(root: String) raises EvidenceError -> EvidenceReader:
     """Open the live host (root == "") or one fixture directory.
 
