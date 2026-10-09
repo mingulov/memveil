@@ -236,8 +236,10 @@ def _assert_kinds(got: List[String], want: List[String]) raises:
 
 
 def test_periodic_cadence() raises:
-    # Three dwell iterations past the 1s cadence persist
-    # three mid-stream samples ahead of the closing set.
+    # The baseline persists at startup, then three dwell
+    # iterations past the 1s cadence persist three
+    # mid-stream samples ahead of the closing set: the file
+    # stays chronological (baseline, periodic, final).
     var base = UInt64(1000000000)
     var dwells = List[UInt64]()
     dwells.append(base + UInt64(1500000000))
@@ -257,14 +259,14 @@ def test_periodic_cadence() raises:
     want.append(String("pool_sample"))
     want.append(String("pool_sample"))
     want.append(String("pool_sample"))
-    want.append(String("counter_snapshot"))
-    want.append(String("counter_snapshot"))
-    want.append(String("counter_snapshot"))
-    want.append(String("counter_snapshot"))
     want.append(String("pool_sample"))
+    want.append(String("counter_snapshot"))
+    want.append(String("counter_snapshot"))
+    want.append(String("counter_snapshot"))
+    want.append(String("counter_snapshot"))
     want.append(String("pool_sample"))
     _assert_kinds(_kinds(c.events), want)
-    # Fixture halves land on every sample, periodic first.
+    # Fixture halves land on every sample, baseline first.
     assert_equal(
         _count(c.events, String("\"used_bytes\":\"24576\"")), 5
     )
@@ -282,8 +284,9 @@ def test_periodic_cadence() raises:
 
 
 def test_no_dwell_no_periodic() raises:
-    # Without dwell the cadence never fires: the closing
-    # set stands alone and the session says zero.
+    # Without dwell the cadence never fires: the startup
+    # baseline plus the closing final stand alone and the
+    # session says zero.
     var dwells = List[UInt64]()
     var c = _run_case(
         String("tests/fixtures/pools/debugfs-ok"),
@@ -296,11 +299,11 @@ def test_no_dwell_no_periodic() raises:
     assert_equal(c.exit_code, 4)
     assert_equal(c.end_reason, String("duration"))
     var want = List[String]()
-    want.append(String("counter_snapshot"))
-    want.append(String("counter_snapshot"))
-    want.append(String("counter_snapshot"))
-    want.append(String("counter_snapshot"))
     want.append(String("pool_sample"))
+    want.append(String("counter_snapshot"))
+    want.append(String("counter_snapshot"))
+    want.append(String("counter_snapshot"))
+    want.append(String("counter_snapshot"))
     want.append(String("pool_sample"))
     _assert_kinds(_kinds(c.events), want)
     assert_true(_count(c.session, String("0 periodic samples")) > 0)

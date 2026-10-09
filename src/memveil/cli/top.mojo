@@ -73,6 +73,7 @@ from memveil.model.validate import format_u64
 from memveil.platform.stdout import write_stdout
 from memveil.platform.clock import MonoClock
 from memveil.platform.signal import LiveSignalSource, SignalOut
+from memveil.render.filter import device_filter_resolves
 from memveil.render.render import render
 
 comptime DEFAULT_INTERVAL_NS = UInt64(1000000000)
@@ -416,6 +417,9 @@ struct StdoutSink(RefreshSink):
     Block numbering starts at one and rises per accepted
     refresh. A refused emission still consumes its number,
     but refusals fail the run, so the gap never prints.
+    A device filter that matches no known device warns on
+    stderr once: every refresh would otherwise print
+    global-only blocks with no hint the filter is dead.
     """
 
     var _has_device: Bool
@@ -423,6 +427,7 @@ struct StdoutSink(RefreshSink):
     var _has_long_lived_after: Bool
     var _long_lived_after_ns: UInt64
     var _seq: Int
+    var _warned_filter: Bool
 
     def __init__(out self, opts: TopOptions):
         self._has_device = opts.has_device
@@ -430,12 +435,27 @@ struct StdoutSink(RefreshSink):
         self._has_long_lived_after = opts.has_long_lived_after
         self._long_lived_after_ns = opts.long_lived_after_ns
         self._seq = 0
+        self._warned_filter = False
 
     def emit(mut self, var rep: Report, horizon_ns: UInt64) -> Bool:
         self._seq += 1
         var filt = String("")
         if self._has_device:
             filt = self._device
+        if (
+            self._has_device
+            and not self._warned_filter
+            and not device_filter_resolves(rep, filt)
+        ):
+            self._warned_filter = True
+            try:
+                write_stderr(
+                    String("memveil top: --device '")
+                    + sanitize_diagnostic(filt)
+                    + String("' matches no known device\n")
+                )
+            except:
+                pass
         var rc: Int
         try:
             rc = _emit_report(
@@ -517,8 +537,14 @@ def _finish_live(
     Prefix numbering continues: the final block is refresh
     shown + 1 over the finalized session, so the final
     live answer equals a replay of the retained capture
-    by construction.
+    by construction. The replay covers the collection
+    budget: live mode routes --max-events-bytes to the
+    writer, so replaying with the smaller replay cap
+    alone would refuse a capture the run just admitted.
     """
+    var events_cap = opts.max_events_bytes
+    if opts.live.max_events_bytes > events_cap:
+        events_cap = opts.live.max_events_bytes
     var reader: CaptureReader
     try:
         reader = read_capture(
@@ -527,7 +553,7 @@ def _finish_live(
             ReaderLimits(
                 opts.max_session_bytes,
                 opts.max_line_bytes,
-                opts.max_events_bytes,
+                events_cap,
             ),
         )
     except e:

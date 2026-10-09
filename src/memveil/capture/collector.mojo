@@ -632,9 +632,6 @@ struct Collector:
     var secondary_causes: List[String]
     var signal_error: String
     var output_fs: String
-    var pool_baseline: NormalizedPoolSample
-    var pool_baseline_ts: UInt64
-    var pool_has_baseline: Bool
     var pool_final: NormalizedPoolSample
     var pool_final_ts: UInt64
     var pool_has_final: Bool
@@ -770,9 +767,6 @@ struct Collector:
         self.secondary_causes = List[String]()
         self.signal_error = String("")
         self.output_fs = String("")
-        self.pool_baseline = NormalizedPoolSample()
-        self.pool_baseline_ts = UInt64(0)
-        self.pool_has_baseline = False
         self.pool_final = NormalizedPoolSample()
         self.pool_final_ts = UInt64(0)
         self.pool_has_final = False
@@ -1089,14 +1083,34 @@ struct Collector:
         if not attached.ok:
             return String("attach: ") + attached.message
         if self.cfg.has_pool_sample:
-            # Baseline pool sample, held for the closing path:
-            # pool samples are not bridge-delivered, so the
-            # baseline and final persist as closing records
-            # while periodic samples persist mid-stream.
+            # Baseline pool sample, persisted first: the file
+            # stays chronological (baseline, periodic, final)
+            # so order-based reducers cannot misread a held
+            # baseline as a late sample. Pool samples are not
+            # bridge-delivered, so only the persisted-ts
+            # maximum moves.
             var base = self._sample_pool_now(clock)
-            self.pool_baseline = base[0]
-            self.pool_baseline_ts = base[1]
-            self.pool_has_baseline = True
+            var line: List[UInt8]
+            try:
+                line = self.pool_sample_event(base[0], base[1])
+            except:
+                self.next_seq -= UInt64(1)
+                return String("output pool baseline unencodable")
+            var wrote = writer.append(line)
+            if not wrote.ok:
+                self.next_seq -= UInt64(1)
+                return (
+                    String("output pool baseline ")
+                    + wrote.kind
+                    + String(": ")
+                    + wrote.message
+                )
+            if base[0].has_used_bytes or base[0].has_capacity_bytes:
+                self.pool_ok = True
+            if base[1] > self.max_persisted_ts:
+                self.max_persisted_ts = base[1]
+            if base[0].reason != String(""):
+                self.pool_reason = base[0].reason
         self.pool_next_ts = checked_add(
             self.attach_ns, POOL_SAMPLE_INTERVAL_NS
         )
@@ -1883,10 +1897,6 @@ struct Collector:
                 self.result_state = String("error")
             else:
                 self.snapshots_present = True
-        if self.pool_has_baseline:
-            var base = self.pool_baseline
-            var base_ts = self.pool_baseline_ts
-            self.persist_pool_sample(writer, base, base_ts)
         if self.pool_has_final:
             var fin = self.pool_final
             var fin_ts = self.pool_final_ts

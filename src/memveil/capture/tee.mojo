@@ -4,9 +4,11 @@
 
 A WriterSource that forwards every call to an owned LiveWriter
 and, on success only, decodes the same bytes and feeds the
-shared composed analyzer. Live input is byte-identical to what
-replay will read: a decode failure is an internal error, never
-a silent skip.
+shared composed analyzer. Persist and fold are atomic: when
+the fold fails, the line is rolled back and the analyzer is
+rewound to the retained prefix, so live input stays
+byte-identical to what replay will read. A decode failure is
+an internal error, never a silent skip.
 
 The analyzer runs under a provisional session stamped from the
 template: the window starts at the first folded event, ends at
@@ -17,12 +19,12 @@ last emission, so quiet periods structurally print nothing and
 disordered events fold forward without moving the horizon.
 
 Printed refreshes are never revised. A group abort rewinds the
-retained prefix, so the tee rebuilds the analyzer from the
-retained event bytes (aborts only happen on the failing
-closing path, so the rebuild cost never touches clean runs)
-while the already printed prefix refreshes stand. Emission
-cadence continues past the abort: horizons already shown are
-not shown again.
+retained prefix, so the tee rebuilds the analyzer by
+streaming the retained event bytes in fixed chunks (aborts
+only happen on the failing closing path, so the rebuild cost
+never touches clean runs) while the already printed prefix
+refreshes stand. Emission cadence continues past the abort:
+horizons already shown are not shown again.
 
 The tee never emits a final block: the caller replays the
 retained capture for the final answer, which keeps the final
@@ -41,7 +43,7 @@ from memveil.capture.live import LiveWriter
 from memveil.model.event import Event, parse_event
 from memveil.model.report import Report
 from memveil.model.session import Session
-from memveil.platform.reader import read_host_file
+from memveil.platform.reader import LineSink, stream_host_lines
 
 
 trait RefreshSink:
@@ -66,6 +68,76 @@ def _strip_newline(line: List[UInt8]) -> List[UInt8]:
     return out^
 
 
+struct _FloorScan(LineSink):
+    """First rebuild pass: retained minimum, maximum, line count."""
+
+    var floor_ns: UInt64
+    var horizon_ns: UInt64
+    var lines: Int
+    var failure: String
+
+    def __init__(out self):
+        self.floor_ns = ~UInt64(0)
+        self.horizon_ns = UInt64(0)
+        self.lines = 0
+        self.failure = String("")
+
+    def feed(mut self, line: List[UInt8]) -> String:
+        var ev: Event
+        try:
+            ev = parse_event(line)
+        except e:
+            self.failure = String(e)
+            return self.failure
+        if ev.ts_ns < self.floor_ns:
+            self.floor_ns = ev.ts_ns
+        if ev.ts_ns > self.horizon_ns:
+            self.horizon_ns = ev.ts_ns
+        self.lines += 1
+        return String("")
+
+
+struct _Refold(LineSink):
+    """Second rebuild pass: fold the prefix into a fresh analyzer."""
+
+    var _template: Session
+    var _floor_ns: UInt64
+    var _analyzer: Optional[Analyzer]
+    var failure: String
+
+    def __init__(out self, template: Session, floor_ns: UInt64):
+        self._template = template.copy()
+        self._floor_ns = floor_ns
+        self._analyzer = None
+        self.failure = String("")
+
+    def feed(mut self, line: List[UInt8]) -> String:
+        var ev: Event
+        try:
+            ev = parse_event(line)
+        except e:
+            self.failure = String(e)
+            return self.failure
+        if not self._analyzer:
+            var stamped = self._template.copy()
+            stamped.window_start_ns = self._floor_ns
+            stamped.window_end_ns = ~UInt64(0)
+            var first = Analyzer(stamped)
+            self._analyzer = Optional(first^)
+        var work = self._analyzer.take()
+        try:
+            work.consume(ev)
+        except e:
+            self._analyzer = Optional(work^)
+            self.failure = String(e)
+            return self.failure
+        self._analyzer = Optional(work^)
+        return String("")
+
+    def drain(mut self) -> Analyzer:
+        return self._analyzer.take()
+
+
 struct TeeWriter[S: RefreshSink & Movable & Deinitable](WriterSource):
     """WriterSource that persists lines and folds live refreshes."""
 
@@ -77,6 +149,7 @@ struct TeeWriter[S: RefreshSink & Movable & Deinitable](WriterSource):
     var _created: Bool
     var _analyzer: Optional[Analyzer]
     var _horizon_ns: UInt64
+    var _floor_ns: UInt64
     var _last_emit_ns: UInt64
     var _emissions: Int
 
@@ -94,6 +167,7 @@ struct TeeWriter[S: RefreshSink & Movable & Deinitable](WriterSource):
         self._created = False
         self._analyzer = None
         self._horizon_ns = UInt64(0)
+        self._floor_ns = UInt64(0)
         self._last_emit_ns = UInt64(0)
         self._emissions = 0
 
@@ -105,16 +179,45 @@ struct TeeWriter[S: RefreshSink & Movable & Deinitable](WriterSource):
         return out^
 
     def append(mut self, line: List[UInt8]) -> AppendOut:
+        var mark = self._inner.committed_len()
         var out = self._inner.append(line)
         if not out.ok:
             return out^
-        return self._fold(line)
+        var folded = self._fold(line)
+        if folded.ok:
+            return folded^
+        return self._undo_append(mark, folded^)
 
     def append_closing(mut self, line: List[UInt8]) -> AppendOut:
+        var mark = self._inner.committed_len()
         var out = self._inner.append_closing(line)
         if not out.ok:
             return out^
-        return self._fold(line)
+        var folded = self._fold(line)
+        if folded.ok:
+            return folded^
+        return self._undo_append(mark, folded^)
+
+    def _undo_append(
+        mut self, mark: Int, var err: AppendOut
+    ) -> AppendOut:
+        """Roll back one persisted line, rewind the analyzer.
+
+        A failed fold must not leave persisted-but-unfolded
+        bytes: the collector keeps appending closing records
+        after a failure, and every later refresh must match
+        a replay of the retained file. The inner mark is a
+        plain offset, so this nests safely inside a caller
+        group. The original fold error is preserved; only a
+        dead writer or a failed rewind supersedes it.
+        """
+        var rolled = self._inner.group_abort(mark)
+        if not rolled.ok:
+            return rolled^
+        var rewound = self._rebuild()
+        if not rewound.ok:
+            return rewound^
+        return err^
 
     def group_begin(mut self) -> GroupOut:
         return self._inner.group_begin()
@@ -142,7 +245,14 @@ struct TeeWriter[S: RefreshSink & Movable & Deinitable](WriterSource):
         return self._emissions
 
     def _fold(mut self, line: List[UInt8]) -> AppendOut:
-        """Decode one persisted line, fold it, maybe refresh."""
+        """Decode one persisted line, fold it, maybe refresh.
+
+        A refresh at horizon H covers [floor, H): the event
+        at H folds after the snapshot, matching replay. The
+        first event only establishes the window; horizons at
+        or below the last emission never re-emit, so a
+        rewound horizon cannot wrap the unsigned gap.
+        """
         var body = _strip_newline(line)
         var ev: Event
         try:
@@ -155,6 +265,46 @@ struct TeeWriter[S: RefreshSink & Movable & Deinitable](WriterSource):
             stamped.window_end_ns = ~UInt64(0)
             var fresh = Analyzer(stamped)
             self._analyzer = Optional(fresh^)
+            self._floor_ns = ev.ts_ns
+            self._horizon_ns = ev.ts_ns
+            self._last_emit_ns = ev.ts_ns
+            var work = self._analyzer.take()
+            try:
+                work.consume(ev)
+            except e:
+                self._analyzer = Optional(work^)
+                return AppendOut(False, String("internal"), String(e))
+            self._analyzer = Optional(work^)
+            return AppendOut(True, String(""), String(""))
+        var horizon = self._horizon_ns
+        if ev.ts_ns > horizon:
+            horizon = ev.ts_ns
+        if (
+            horizon > self._last_emit_ns
+            and horizon - self._last_emit_ns >= self._interval_ns
+        ):
+            var shown = self._analyzer.take()
+            var snap: Report
+            try:
+                snap = shown.snapshot(horizon, False)
+            except e:
+                self._analyzer = Optional(shown^)
+                return AppendOut(False, String("internal"), String(e))
+            self._analyzer = Optional(shown^)
+            if not self._sink.emit(snap^, horizon):
+                return AppendOut(
+                    False,
+                    String("internal"),
+                    String("refresh sink refused"),
+                )
+            self._last_emit_ns = horizon
+            self._emissions += 1
+        self._horizon_ns = horizon
+        if ev.ts_ns < self._floor_ns:
+            # Below the stamped floor: refold the retained
+            # prefix with the floor lowered to the retained
+            # minimum, so nothing counts below the window.
+            return self._rebuild()
         var work = self._analyzer.take()
         try:
             work.consume(ev)
@@ -162,83 +312,56 @@ struct TeeWriter[S: RefreshSink & Movable & Deinitable](WriterSource):
             self._analyzer = Optional(work^)
             return AppendOut(False, String("internal"), String(e))
         self._analyzer = Optional(work^)
-        if ev.ts_ns > self._horizon_ns:
-            self._horizon_ns = ev.ts_ns
-        if self._horizon_ns - self._last_emit_ns < self._interval_ns:
-            return AppendOut(True, String(""), String(""))
-        var shown = self._analyzer.take()
-        var snap: Report
-        try:
-            snap = shown.snapshot(self._horizon_ns, False)
-        except e:
-            self._analyzer = Optional(shown^)
-            return AppendOut(False, String("internal"), String(e))
-        self._analyzer = Optional(shown^)
-        if not self._sink.emit(snap^, self._horizon_ns):
-            return AppendOut(
-                False, String("internal"), String("refresh sink refused")
-            )
-        self._last_emit_ns = self._horizon_ns
-        self._emissions += 1
         return AppendOut(True, String(""), String(""))
 
     def _rebuild(mut self) -> AppendOut:
         """Refold the retained prefix after a group abort.
 
-        Reads back the event file the inner writer owns, so the
-        analyzer again matches exactly the persisted bytes. The
-        emission cadence keeps its place: shown horizons stand.
+        Streams the event file the inner writer owns in fixed
+        64 KiB chunks, twice: once for the retained minimum
+        and maximum, once to fold the prefix into a fresh
+        analyzer. The file is never held whole, so a large
+        retained capture cannot exhaust memory on the abort
+        path. The window floor is the retained minimum, never
+        the first arrival. The emission cadence keeps its
+        place: shown horizons stand.
         """
         if not self._created or self._inner.committed_len() == 0:
             self._analyzer = None
             self._horizon_ns = UInt64(0)
+            self._floor_ns = UInt64(0)
             return AppendOut(True, String(""), String(""))
-        var raw: List[UInt8]
+        var events_path = self._path + String("/events.ndjson")
+        var bound = self._inner.committed_len()
+        var scan = _FloorScan()
         try:
-            raw = read_host_file(
-                self._path + String("/events.ndjson"),
-                String("events"),
-                self._inner.committed_len(),
+            stream_host_lines(
+                events_path, String("events"), bound, scan
             )
         except e:
             return AppendOut(False, String("internal"), String(e))
-        var fresh: Optional[Analyzer] = None
-        var horizon = UInt64(0)
-        var start = 0
-        var i = 0
-        while True:
-            if i >= len(raw) or raw[i] == UInt8(0x0A):
-                if i > start:
-                    var body = List[UInt8]()
-                    for j in range(start, i):
-                        body.append(raw[j])
-                    var ev: Event
-                    try:
-                        ev = parse_event(body)
-                    except e:
-                        return AppendOut(
-                            False, String("internal"), String(e)
-                        )
-                    if not fresh:
-                        var stamped = self._template.copy()
-                        stamped.window_start_ns = ev.ts_ns
-                        stamped.window_end_ns = ~UInt64(0)
-                        var first = Analyzer(stamped)
-                        fresh = Optional(first^)
-                    var work = fresh.take()
-                    try:
-                        work.consume(ev)
-                    except e:
-                        return AppendOut(
-                            False, String("internal"), String(e)
-                        )
-                    fresh = Optional(work^)
-                    if ev.ts_ns > horizon:
-                        horizon = ev.ts_ns
-                if i >= len(raw):
-                    break
-                start = i + 1
-            i += 1
-        self._analyzer = fresh^
-        self._horizon_ns = horizon
+        if scan.failure != "":
+            return AppendOut(
+                False, String("internal"), scan.failure
+            )
+        if scan.lines == 0:
+            self._analyzer = None
+            self._horizon_ns = UInt64(0)
+            self._floor_ns = UInt64(0)
+            return AppendOut(True, String(""), String(""))
+        var refold = _Refold(self._template.copy(), scan.floor_ns)
+        try:
+            stream_host_lines(
+                events_path, String("events"), bound, refold
+            )
+        except e:
+            return AppendOut(False, String("internal"), String(e))
+        if refold.failure != "":
+            return AppendOut(
+                False, String("internal"), refold.failure
+            )
+        var rebuilt = refold.drain()
+        self._analyzer = Optional(rebuilt^)
+        self._horizon_ns = scan.horizon_ns
+        self._floor_ns = scan.floor_ns
         return AppendOut(True, String(""), String(""))

@@ -1810,7 +1810,7 @@ suite_attempts() {
     mqual unsynced complete_for_scope 0 complete_for_scope 0 proven
     mreplay4 unsynced 0 0 0 0
     mcase pool 4 103 5 4 15 2309 \
-        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,pool_sample,pool_sample"
+        "pool_sample,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,pool_sample"
     mqual pool complete_for_scope 0 complete_for_scope 0 proven
     mreplay4 pool 0 0 0 0
     python3 "$JASSERT" field "$TMP/pool/session.json" \
@@ -1822,15 +1822,15 @@ suite_attempts() {
     python3 "$JASSERT" metric "$TMP/pool.report.json" \
         pool_hiwater_bytes 131072 || afailed=1
     python3 "$JASSERT" eventfield "$TMP/pool/events.ndjson" \
-        4 data.allocator swiotlb || afailed=1
+        0 data.allocator swiotlb || afailed=1
     python3 "$JASSERT" eventfield "$TMP/pool/events.ndjson" \
-        4 data.unit_bytes 2048 || afailed=1
+        0 data.unit_bytes 2048 || afailed=1
     # Periodic pool sampling stops at 4096 with a session
     # note: every iteration fires (deadline read plus
     # sample-timestamp read: two scripted seconds per fire)
     # until the cap latches, then the remaining iterations
     # drain the clock to the deadline without sampling.
-    poolcap_kinds=$(python3 -c "print(','.join(['pool_sample'] * 4096 + ['counter_snapshot'] * 4 + ['pool_sample'] * 2))")
+    poolcap_kinds=$(python3 -c "print(','.join(['pool_sample'] + ['pool_sample'] * 4096 + ['counter_snapshot'] * 4 + ['pool_sample']))")
     mcase poolcap 4 5004 5 4 9012 1692322 "$poolcap_kinds"
     mqual poolcap complete_for_scope 0 complete_for_scope 0 proven
     mreplay4 poolcap 0 0 0 0
