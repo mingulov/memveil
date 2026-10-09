@@ -52,7 +52,10 @@ record outstanding, and the final counter sample valid. Any
 gap — unsettled writers, a missing drain, BUSY at the
 boundary, a failed sample, or budget exhaustion — yields
 `partial` with a named reason and exit 4, never a silent
-complete.
+complete. A submit landing after the drain recorded its
+boundary claim is one such gap ("late submit past drain"):
+the drain cannot have covered that record, so only a later
+drain re-proves the boundary.
 
 Two separations are load-bearing:
 

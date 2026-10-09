@@ -360,6 +360,107 @@ def test_closeout_detach_failure_partial() raises:
     assert_true(not s.stop.admission_closed)
 
 
+def test_barrier_submit_after_drain_partial() raises:
+    # Barrier interleaving: writer A reserves before the
+    # close; the drain claims an empty boundary while the
+    # reservation is still held; A submits late. The drain's
+    # boundary claim is stale, so the stop stays partial even
+    # though every writer settles and the transport never
+    # reported BUSY.
+    var ctl = StopController()
+    ctl.mark_ready()
+    var w = ctl.writer_begin()
+    assert_true(w)
+    ctl.writer_reserve()
+    ctl.close_admission()
+    ctl.drain(0, False)
+    ctl.writer_submit()
+    ctl.writer_settle()
+    ctl.observe_quiescence()
+    ctl.sample_counters(True)
+    var ev = ctl.finalize(0)
+    assert_equal(ev.outcome, String("partial"))
+    assert_equal(ev.reason, String("late submit past drain"))
+    assert_equal(ev.late_submits_drained, 1)
+    assert_equal(ev.drained_records, 0)
+
+
+def test_barrier_two_writers_staggered_complete() raises:
+    # Two writers advance on independent barriers: A
+    # reserves before the close while B only begins; both
+    # submit and settle after the close. Quiescence polls
+    # between barriers stay false until the last settle.
+    var ctl = StopController()
+    ctl.mark_ready()
+    var a = ctl.writer_begin()
+    assert_true(a)
+    ctl.writer_reserve()
+    var b = ctl.writer_begin()
+    assert_true(b)
+    ctl.close_admission()
+    assert_true(not ctl.try_quiescence())
+    ctl.writer_submit()
+    ctl.writer_settle()
+    assert_true(not ctl.try_quiescence())
+    ctl.writer_reserve()
+    ctl.writer_submit()
+    assert_true(not ctl.try_quiescence())
+    ctl.writer_settle()
+    ctl.observe_quiescence()
+    ctl.drain(2, False)
+    ctl.sample_counters(True)
+    var ev = ctl.finalize(0)
+    assert_equal(ev.outcome, String("complete"))
+    assert_equal(ev.writers_settled, 2)
+    assert_equal(ev.in_flight_at_close, 2)
+    assert_equal(ev.late_submits_drained, 2)
+    assert_equal(ev.drained_records, 2)
+
+
+def test_barrier_begin_races_close() raises:
+    # A begin racing the close is refused while an
+    # admitted writer is still mid-callback; the admitted
+    # writer settles and the stop completes with exact
+    # in-flight accounting.
+    var ctl = StopController()
+    ctl.mark_ready()
+    var a = ctl.writer_begin()
+    assert_true(a)
+    ctl.close_admission()
+    var late = ctl.writer_begin()
+    assert_true(not late)
+    assert_true(not ctl.try_quiescence())
+    ctl.writer_settle()
+    ctl.observe_quiescence()
+    ctl.drain(0, False)
+    ctl.sample_counters(True)
+    var ev = ctl.finalize(0)
+    assert_equal(ev.outcome, String("complete"))
+    assert_equal(ev.writers_settled, 1)
+    assert_equal(ev.in_flight_at_close, 1)
+
+
+def test_barrier_redrain_covers_late_submit() raises:
+    # A drain re-run after a late submit re-proves the
+    # boundary: the stale claim is replaced, not sticky.
+    var ctl = StopController()
+    ctl.mark_ready()
+    var w = ctl.writer_begin()
+    assert_true(w)
+    ctl.writer_reserve()
+    ctl.close_admission()
+    ctl.drain(0, False)
+    ctl.writer_submit()
+    ctl.writer_settle()
+    ctl.observe_quiescence()
+    ctl.drain(1, False)
+    ctl.sample_counters(True)
+    var ev = ctl.finalize(0)
+    assert_equal(ev.outcome, String("complete"))
+    assert_equal(ev.late_submits_drained, 1)
+    assert_equal(ev.drained_records, 1)
+
+
 def test_close_requires_ready() raises:
     var ctl = StopController()
     var raised = False
@@ -385,6 +486,10 @@ def run() raises -> Int:
     suite.test[test_budget_exhaustion_partial]()
     suite.test[test_finalize_requires_close]()
     suite.test[test_close_requires_ready]()
+    suite.test[test_barrier_submit_after_drain_partial]()
+    suite.test[test_barrier_two_writers_staggered_complete]()
+    suite.test[test_barrier_begin_races_close]()
+    suite.test[test_barrier_redrain_covers_late_submit]()
     suite.test[test_failed_admission_close_partial]()
     suite.test[test_closeout_records_stop_evidence]()
     suite.test[test_closeout_detach_failure_partial]()
