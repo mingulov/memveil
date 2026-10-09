@@ -222,13 +222,20 @@ def check_report(report, events, bundle, tag, drained=True):
     if not samples:
         bad.append("%s: report lacks pool samples" % tag)
     else:
-        want = samples[0 if drained else -1]["data"][
-            "used_bytes"]
+        # The report always shows the latest sample; drained
+        # additionally demands the final match the
+        # baseline-held closing sample (periodic samples lead
+        # the closing baseline/final pair).
+        want = samples[-1]["data"]["used_bytes"]
         if _metric(report, "pool_used_bytes")["value"] != want:
             bad.append("%s: report pool %r != sample %r"
                        % (tag, _metric(
                            report, "pool_used_bytes")["value"],
                            want))
+        if drained and (len(samples) < 2 or samples[-1][
+                "data"]["used_bytes"] != samples[-2][
+                "data"]["used_bytes"]):
+            bad.append("%s: pool not drained to baseline" % tag)
     codes = [f["code"] for f in report["findings"]]
     if "UNPAIRED_LIFECYCLE" not in codes:
         bad.append("%s: report lacks unpaired finding" % tag)

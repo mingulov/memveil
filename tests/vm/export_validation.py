@@ -208,6 +208,41 @@ def validate_lifecycle_exports(got,sub):
                 raise ValueError('report session mismatch')
             if type(doc['metrics']) is not list or not doc['metrics']:
                 raise ValueError('report lacks metrics')
+        elif name=='walk.json':
+            doc=strict_json(path.read_text())
+            keys(doc,('memveil_rc','memveil_sha','attempt_sha','profile_sha','profile_ids','end_reason',
+                      'bpf_before','bpf_after','settled_waited_s','witness','workload',
+                      'live_stdout_sha','live_stderr_sha'))
+            integer(doc['memveil_rc'],True)
+            sha(doc['memveil_sha']); sha(doc['attempt_sha']); sha(doc['profile_sha'])
+            keys(doc['profile_ids'],('bounce_attempts','mapping_lifecycle','copy_bytes','pool_stats'))
+            for k in doc['profile_ids']:
+                if type(doc['profile_ids'][k]) is not str:
+                    raise ValueError('invalid walk profile id')
+            if type(doc['end_reason']) is not str:
+                raise ValueError('invalid walk end reason')
+            for k in ('bpf_before','bpf_after'):
+                keys(doc[k],('progs','maps'))
+                integer(doc[k]['progs']); integer(doc[k]['maps'])
+            settle_seconds(doc['settled_waited_s'])
+            witness=doc['witness']
+            keys(witness,('nslabs','used_before','used_after','nslabs_after'))
+            integer(witness['nslabs']); integer(witness['nslabs_after'])
+            integer_list(witness['used_before']); integer_list(witness['used_after'])
+            workload=doc['workload']
+            keys(workload,('disk','start_ns','end_ns','writer_alive','stat_before','stat_after'))
+            if not re.fullmatch(r'/dev/sd[a-z]',workload['disk']):
+                raise ValueError('invalid owned disk')
+            integer(workload['start_ns']); integer(workload['end_ns'])
+            if type(workload['writer_alive']) is not bool:
+                raise ValueError('invalid walk writer flag')
+            for k in ('stat_before','stat_after'):
+                if type(workload[k]) is not list or len(workload[k]) < 5:
+                    raise ValueError('invalid walk block stat')
+                for v in workload[k]:
+                    if type(v) is not str or not re.fullmatch(r'[0-9]+',v):
+                        raise ValueError('invalid walk block stat')
+            sha(doc['live_stdout_sha']); sha(doc['live_stderr_sha'])
         elif name=='faults.json':
             rows=strict_json(path.read_text())
             if type(rows) is not list or not rows: raise ValueError('invalid faults ledger')
@@ -238,6 +273,18 @@ def validate_lifecycle_exports(got,sub):
                         raise ValueError('invalid fault window')
                     integer(window[0]);integer(window[1])
                     if window[0] >= window[1]: raise ValueError('empty fault window')
+        elif name=='live.txt':
+            body=path.read_text()
+            if 'ready session=' not in body.splitlines()[0]:
+                raise ValueError('live blocks lack readiness preamble')
+            if '--- refresh ' not in body:
+                raise ValueError('live blocks lack refreshes')
+            if len(body) > 1048576:
+                raise ValueError('live blocks exceed 1 MiB cap')
+        elif name=='live.err':
+            body=path.read_text()
+            if len(body) > 65536:
+                raise ValueError('live diagnostics exceed 64 KiB cap')
         else: raise ValueError('unrecognized lifecycle export '+name)
 
 

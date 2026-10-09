@@ -1013,6 +1013,155 @@ def await_record_ready(rec, work, errname="record.stderr"):
     return ready, tail
 
 
+def _read_int_file(path):
+    with open(path) as fh:
+        return int(fh.read().strip())
+
+
+def run_topwalk(gate):
+    """Live top walkthrough: ordinary disk I/O under live capture.
+
+    Runs the real `memveil top --output` with attempt,
+    lifecycle, and copy channels against the shipped narrow
+    profile while ordinary direct-I/O disk traffic flows
+    through the swiotlb path, then exports the live blocks
+    plus the retained capture for host-side replay
+    comparison. An independent debugfs witness brackets the
+    run; BPF inventory must settle back to baseline.
+    """
+    memveil = os.path.join(gate.repo, "build", "memveil")
+    attempt_obj = os.path.join(
+        gate.repo, "build", "bpf", "swiotlb_attempt.bpf.o")
+    profile = os.path.join(
+        gate.repo, "profiles", "linux-x86_64-7.0.0-34-generic.json")
+    for path in (memveil, attempt_obj, profile):
+        if not os.path.isfile(path):
+            fail(f"missing {path}")
+    gate.write_json("identity.json", gate.identity())
+    before = gate.bpf_inventory()
+    witness = {"nslabs": _read_int_file(
+        "/sys/kernel/debug/swiotlb/io_tlb_nslabs")}
+    witness["used_before"] = gate.io_tlb_samples(count=3, gap=1.0)
+    before_disks = scsi_disks()
+    if os.path.exists("/sys/module/scsi_debug"):
+        fail("scsi_debug already exists; no fixture ownership")
+    r = sh(["modprobe", "scsi_debug", "dev_size_mb=64"])
+    if r.returncode != 0:
+        fail(f"scsi_debug failed: {r.stderr.strip()}")
+    new = None
+    for _ in range(30):
+        extra = scsi_disks() - before_disks
+        if extra:
+            new = sorted(extra)[0]
+            break
+        time.sleep(0.5)
+    if new is None:
+        fail("scsi_debug disk never appeared")
+    dev = f"/dev/{new}"
+    model = os.path.join("/sys/block", new, "device", "model")
+    try:
+        with open(model) as fh:
+            if "scsi_debug" not in fh.read():
+                fail(f"{dev} is not the scsi_debug disk")
+    except OSError:
+        fail(f"{dev} has no model file")
+    stat_path = os.path.join("/sys/block", new, "stat")
+    with open(stat_path) as fh:
+        stat_before = fh.read().split()
+    workload = {"disk": dev}
+    cap = os.path.join(gate.work, "cap")
+    live_txt = os.path.join(gate.work, "live.txt")
+    live_err = os.path.join(gate.work, "live.err")
+    env = dict(os.environ, LMB_NATIVE_LIB=gate.bridge)
+    writer = subprocess.Popen(
+        ["timeout", "60", "bash", "-c",
+         f"while true; do dd if=/dev/zero of={dev} bs=64k "
+         f"count=256 oflag=direct 2>/dev/null; done"],
+        start_new_session=True)
+    workload["start_ns"] = mono_ns()
+    proc = subprocess.Popen(
+        [memveil, "top",
+         "--output", cap,
+         "--object", attempt_obj,
+         "--lc-object", gate.lc_obj,
+         "--cp-object", gate.cp_obj,
+         "--bridge", gate.bridge,
+         "--profile", profile,
+         "--capability",
+         "attempt-trace,mapping-lifecycle,copy-actual",
+         "--duration", "15",
+         "--interval", "1s"],
+        stdout=open(live_txt, "w"),
+        stderr=open(live_err, "w"),
+        env=env,
+        start_new_session=True)
+    try:
+        rc = proc.wait(timeout=180)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        fail("live top did not exit")
+    workload["end_ns"] = mono_ns()
+    workload["writer_alive"] = writer.poll() is None
+    with open(stat_path) as fh:
+        stat_after = fh.read().split()
+    workload["stat_before"] = stat_before
+    workload["stat_after"] = stat_after
+    try:
+        writer.terminate()
+        writer.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        writer.kill()
+        writer.wait()
+        fail("workload writer ignored SIGTERM")
+    with open(os.path.join("/sys/block", new, "device",
+                           "delete"), "w") as fh:
+        fh.write("1")
+    r = sh(["rmmod", "scsi_debug"])
+    if r.returncode != 0:
+        fail(f"scsi_debug rmmod failed: {r.stderr.strip()}")
+    witness["used_after"] = gate.io_tlb_samples(count=3, gap=1.0)
+    witness["nslabs_after"] = _read_int_file(
+        "/sys/kernel/debug/swiotlb/io_tlb_nslabs")
+    after, waited = gate.settled_inventory(before)
+    session_path = os.path.join(cap, "session.json")
+    events_path = os.path.join(cap, "events.ndjson")
+    for path in (session_path, events_path):
+        if not os.path.isfile(path):
+            fail(f"capture lacks {os.path.basename(path)}")
+    with open(session_path) as fh:
+        session = json.load(fh)
+    caps = session.get("capabilities", {})
+    gate.write_json("walk.json", {
+        "memveil_rc": rc,
+        "memveil_sha": sha_file(memveil),
+        "attempt_sha": sha_file(attempt_obj),
+        "profile_sha": sha_file(profile),
+        "profile_ids": {
+            key: caps.get(key, {}).get("profile_id", "")
+            for key in ("bounce_attempts", "mapping_lifecycle",
+                        "copy_bytes", "pool_stats")
+        },
+        "end_reason": session.get("capture", {}).get(
+            "end_reason", ""),
+        "bpf_before": before,
+        "bpf_after": after,
+        "settled_waited_s": waited,
+        "witness": witness,
+        "workload": workload,
+        "live_stdout_sha": sha_file(live_txt),
+        "live_stderr_sha": sha_file(live_err),
+    })
+    shutil.copyfile(
+        session_path, os.path.join(gate.work, "cap-session.json"))
+    shutil.copyfile(
+        events_path, os.path.join(gate.work, "cap-events.ndjson"))
+    gate.export(["identity.json", "walk.json", "live.txt",
+                 "live.err", "cap-session.json",
+                 "cap-events.ndjson"])
+    print(f"guest_lifecycle: topwalk exported top_exit={rc}")
+
+
 def run_bundle(gate):
     """Shipped bundle, three phases, extracted-binary report.
 
@@ -1551,6 +1700,7 @@ SUBS = {
     "witness": run_witness,
     "canonical": run_canonical,
     "record3": run_record3,
+    "topwalk": run_topwalk,
     "bundle": run_bundle,
     "faults": run_faults,
 }
