@@ -178,6 +178,14 @@ def _report(res: RunResult):
         print(String("diag=") + res.diagnostic)
 
 
+def _report_stop(coll: Collector):
+    if coll.has_stop_evidence:
+        print(
+            String("stop_outcome=") + coll.stop_evidence.outcome
+        )
+        print(String("stop_reason=") + coll.stop_evidence.reason)
+
+
 def _lclock(iters: Int) -> ScriptClock:
     var clock = ScriptClock()
     var base = UInt64(1000000000)
@@ -207,6 +215,7 @@ def _mode_latch(signo: Int, dir: String):
     var res = coll.run(kernel, clock, signal, writer)
     signal.teardown()
     _report(res)
+    _report_stop(coll)
     print(String("polls=") + String(kernel.polls_done))
     print(String("stats=") + String(kernel.stats_done))
     print(String("snaps=") + String(kernel.snaps_done))
@@ -246,6 +255,7 @@ def _mode_inhand(signo: Int, dir: String):
     var res = coll.run(kernel, clock, signal, writer)
     signal.teardown()
     _report(res)
+    _report_stop(coll)
     print(String("polls=") + String(kernel.polls_done))
     print(String("stats=") + String(kernel.stats_done))
     print(String("snaps=") + String(kernel.snaps_done))
@@ -264,6 +274,7 @@ def _mode_setup_fail(which: String, dir: String) raises:
     var res = coll.run(kernel, clock, signal, writer)
     signal.teardown()
     _report(res)
+    _report_stop(coll)
     print(String("polls=") + String(kernel.polls_done))
     print(String("stats=") + String(kernel.stats_done))
     print(String("snaps=") + String(kernel.snaps_done))
@@ -303,6 +314,7 @@ def _mode_sigterm_run(dir: String):
     var res = coll.run(kernel, clock, signal, writer)
     signal.teardown()
     _report(res)
+    _report_stop(coll)
     print(String("polls=") + String(kernel.polls_done))
     print(String("stats=") + String(kernel.stats_done))
     print(String("snaps=") + String(kernel.snaps_done))

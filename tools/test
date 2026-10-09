@@ -2733,6 +2733,8 @@ PYEOF
         expect_line "$STMP/$1.log" "exit=4"
         expect_line "$STMP/$1.log" "end=signal"
         expect_line "$STMP/$1.log" "outcome=finalized"
+        expect_line "$STMP/$1.log" "stop_outcome=partial"
+        expect_line "$STMP/$1.log" "stop_reason=quiescence unproven"
     }
     run_collector_case latch15 latch 15
     run_collector_case latch2 latch 2
@@ -2804,6 +2806,8 @@ PYEOF
         fi
         expect_line "$STMP/$1.log" "end=signal"
         expect_line "$STMP/$1.log" "outcome=finalized"
+        expect_line "$STMP/$1.log" "stop_outcome=partial"
+        expect_line "$STMP/$1.log" "stop_reason=quiescence unproven"
     }
     run_kill_case killterm TERM
     run_kill_case killint INT
