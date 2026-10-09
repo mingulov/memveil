@@ -13,6 +13,8 @@ disagreement), and 2 means invalid input or usage. A rendering
 failure on an accepted report is an internal error and exits 1.
 """
 
+from std.ffi import external_call
+
 from memveil.analysis.diagnostics import diagnose_report
 from memveil.analysis.engine import Analyzer
 from memveil.capture.reader import (
@@ -33,6 +35,7 @@ from memveil.render.text import escape_text
 comptime EXIT_OK = 0
 comptime EXIT_INTERNAL = 1
 comptime EXIT_INVALID = 2
+comptime _STDERR_EINTR = 4
 comptime EXIT_INCOMPLETE = 4
 comptime MAX_RENDERED_BYTES = 16777216
 
@@ -185,17 +188,34 @@ def scrub_paths(text: String) raises -> String:
 
 
 def write_stderr(text: String) raises:
-    """Append text to standard error.
+    """Write text to standard error.
 
-    Append mode preserves prior diagnostics when stderr is
-    redirected to a file; write mode would truncate them. Control
-    bytes are neutralized and directory components scrubbed at
-    this boundary so no present or future diagnostic can emit raw
+    Raw write(2) on fd 2 with an EINTR retry loop: the
+    diagnostic follows the inherited descriptor, never the
+    /dev/stderr path, so environments that rebind that path
+    away from fd 2 cannot swallow it. Control bytes are
+    neutralized and directory components scrubbed at this
+    boundary so no present or future diagnostic can emit raw
     terminal sequences or filesystem layout.
     """
-    var err = open("/dev/stderr", "a")
-    err.write(neutralize_controls(scrub_paths(text)))
-    err.close()
+    var raw = neutralize_controls(scrub_paths(text)).as_bytes()
+    var total = len(raw)
+    var off = 0
+    while off < total:
+        var n = external_call["write", Int](
+            2, Span(raw).unsafe_ptr().unsafe_offset(off), total - off
+        )
+        if n < 0:
+            var p = external_call[
+                "__errno_location", Pointer[Int32, MutAnyOrigin]
+            ]()
+            var no = Int(p.unsafe_load())
+            if no == _STDERR_EINTR:
+                continue
+            raise Error("stderr write failed: errno " + String(no))
+        if n == 0:
+            raise Error("stderr write returned 0")
+        off += n
 
 
 def _is_option(text: String) -> Bool:
