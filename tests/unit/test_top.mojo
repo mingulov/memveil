@@ -1,27 +1,40 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Top unit tests: durations, arguments, refresh boundaries.
+"""Top unit tests: durations, arguments, refresh boundaries, live sink.
 
 Durations share the capture options' checked rules (strict
 decimal, refused overflow) with s/m/h units. Refresh
 boundaries split the capture window into interval horizons;
-the final snapshot always covers the whole window.
+the final snapshot always covers the whole window. The live
+refresh sink prints numbered diagnosed blocks and refuses
+loudly when stdout is broken; the live session template
+carries provisional unclaimed values the tee stamps.
 """
 
 from std.ffi import external_call
 from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
 
+from memveil.analysis.engine import Analyzer
 from memveil.cli.durations import parse_duration_ns
 from memveil.cli.top import (
     BoundaryCursor,
+    StdoutSink,
     TopOptions,
     WaitSlices,
+    _diagnose,
+    _live_template,
     _wait_interval,
     parse_top_args,
 )
+from memveil.model.event import Event
+from memveil.model.report import Report
+from memveil.model.session import Session
+from memveil.model.validate import format_u64
 from memveil.platform.clock import MonoClock
+from memveil.platform.reader import read_host_file
 from memveil.platform.signal import LiveSignalSource
+from memveil.render.render import render
 
 
 def test_duration_units() raises:
@@ -219,6 +232,254 @@ def test_cursor_streams_long_window() raises:
     assert_true(cur.has_due(UInt64(4)))
 
 
+comptime _O_WRONLY = 1
+comptime _O_CREAT = 64
+comptime _O_TRUNC = 512
+comptime _AT_FDCWD = -100
+
+
+def _cstr(text: String) -> List[UInt8]:
+    var out = List[UInt8]()
+    var raw = text.as_bytes()
+    for i in range(len(raw)):
+        out.append(raw[i])
+    out.append(UInt8(0))
+    return out^
+
+
+def _mkdtemp() raises -> String:
+    var template = String("/tmp/memveil-top-XXXXXX")
+    var buf = List[UInt8]()
+    for b in template.as_bytes():
+        buf.append(b)
+    buf.append(UInt8(0))
+    var p = external_call["mkdtemp", UInt64](Span(buf).unsafe_ptr())
+    if p == UInt64(0):
+        raise Error("mkdtemp failed")
+    var raw = List[UInt8]()
+    for i in range(len(buf)):
+        if buf[i] == UInt8(0):
+            break
+        raw.append(buf[i])
+    try:
+        return String(from_utf8=Span(raw))
+    except:
+        raise Error("mkdtemp gave non-UTF8")
+
+
+def _redirect_stdout(path: String) raises -> Int32:
+    """Redirect fd 1 to path; return the saved descriptor."""
+    var saved = external_call["dup", Int32](Int32(1))
+    if saved < Int32(0):
+        raise Error("dup failed")
+    var pname = _cstr(path)
+    var fd = external_call["openat", Int32](
+        Int32(_AT_FDCWD),
+        Span(pname).unsafe_ptr(),
+        Int32(_O_WRONLY | _O_CREAT | _O_TRUNC),
+        UInt32(420),
+    )
+    if fd < Int32(0):
+        _ = external_call["close", Int32](saved)
+        raise Error("openat failed")
+    var moved = external_call["dup2", Int32](fd, Int32(1))
+    _ = external_call["close", Int32](fd)
+    if moved < Int32(0):
+        _ = external_call["dup2", Int32](saved, Int32(1))
+        _ = external_call["close", Int32](saved)
+        raise Error("dup2 failed")
+    return saved
+
+
+def _restore_stdout(saved: Int32):
+    _ = external_call["dup2", Int32](saved, Int32(1))
+    _ = external_call["close", Int32](saved)
+
+
+def _sink_attempt(op: String, seq: UInt64, ts: UInt64) -> Event:
+    var ev = Event()
+    ev.session_id = String("sinkprobe")
+    ev.seq = seq
+    ev.ts_ns = ts
+    ev.kind = String("bounce_attempt")
+    ev.source_hook = String("h")
+    ev.source_backend = String("test")
+    ev.source_profile_id = String("p1")
+    ev.source_measurement = String("observed")
+    ev.source_correlation = String("direct")
+    ev.bounce.device_id = String("d1")
+    ev.bounce.requested_bytes = UInt64(4096)
+    ev.bounce.forced = False
+    ev.bounce.operation_id = op
+    return ev^
+
+
+def _sink_report(horizon: UInt64) raises -> Report:
+    """Fold the two-attempt probe stream; snapshot at horizon."""
+    var s = _live_template()
+    s.window_start_ns = UInt64(100)
+    s.window_end_ns = ~UInt64(0)
+    var a = Analyzer(s)
+    var e0 = _sink_attempt("op1", UInt64(0), UInt64(100))
+    var e1 = _sink_attempt("op2", UInt64(1), UInt64(200))
+    a.consume(e0)
+    a.consume(e1)
+    var rep = a.snapshot(horizon, False)
+    return rep^
+
+
+def _sink_text(data: List[UInt8]) raises -> String:
+    try:
+        return String(from_utf8=Span(data))
+    except:
+        raise Error("sink bytes not UTF-8")
+
+
+def _block_want(seq: Int, horizon: UInt64, filt: String) raises -> String:
+    """Oracle block: diagnosed render plus the numbered header."""
+    var oracle = _sink_report(horizon)
+    _diagnose(oracle, False, UInt64(0))
+    var text = render(oracle, String("text"), filt)
+    var want = (
+        String("--- refresh ")
+        + String(seq)
+        + String(" @ ")
+        + format_u64(horizon)
+        + String(" ns ---\n")
+        + text
+    )
+    var raw = text.as_bytes()
+    if len(raw) == 0 or raw[len(raw) - 1] != UInt8(0x0A):
+        want += String("\n")
+    return want^
+
+
+def test_sink_emits_numbered_block() raises:
+    var scratch = _mkdtemp()
+    var out = scratch + String("/out.txt")
+    var opts = TopOptions()
+    var sink = StdoutSink(opts)
+    var rep = _sink_report(UInt64(200))
+    var want = _block_want(1, UInt64(200), String(""))
+    var saved = _redirect_stdout(out)
+    var ok = sink.emit(rep^, UInt64(200))
+    _restore_stdout(saved)
+    assert_true(ok)
+    var raw = read_host_file(out, String("out"), 1048576)
+    assert_equal(_sink_text(raw), want)
+
+
+def test_sink_device_filter_displays() raises:
+    var scratch = _mkdtemp()
+    var out = scratch + String("/out.txt")
+    var opts = TopOptions()
+    opts.has_device = True
+    opts.device = String("d1")
+    var sink = StdoutSink(opts)
+    var rep = _sink_report(UInt64(200))
+    var want = _block_want(1, UInt64(200), String("d1"))
+    var saved = _redirect_stdout(out)
+    var ok = sink.emit(rep^, UInt64(200))
+    _restore_stdout(saved)
+    assert_true(ok)
+    var raw = read_host_file(out, String("out"), 1048576)
+    assert_equal(_sink_text(raw), want)
+
+
+def test_sink_seq_increments() raises:
+    var scratch = _mkdtemp()
+    var out = scratch + String("/out.txt")
+    var opts = TopOptions()
+    var sink = StdoutSink(opts)
+    var first = _sink_report(UInt64(100))
+    var second = _sink_report(UInt64(200))
+    var want = _block_want(1, UInt64(100), String(""))
+    want += _block_want(2, UInt64(200), String(""))
+    var saved = _redirect_stdout(out)
+    var ok0 = sink.emit(first^, UInt64(100))
+    var ok1 = sink.emit(second^, UInt64(200))
+    _restore_stdout(saved)
+    assert_true(ok0)
+    assert_true(ok1)
+    var raw = read_host_file(out, String("out"), 1048576)
+    assert_equal(_sink_text(raw), want)
+
+
+def test_sink_full_stdout_refuses() raises:
+    var opts = TopOptions()
+    var sink = StdoutSink(opts)
+    var rep = _sink_report(UInt64(200))
+    var saved = external_call["dup", Int32](Int32(1))
+    assert_true(saved >= Int32(0))
+    var pname = _cstr(String("/dev/full"))
+    var full = external_call["openat", Int32](
+        Int32(_AT_FDCWD),
+        Span(pname).unsafe_ptr(),
+        Int32(_O_WRONLY),
+        UInt32(0),
+    )
+    assert_true(full >= Int32(0))
+    var moved = external_call["dup2", Int32](full, Int32(1))
+    assert_true(moved >= Int32(0))
+    _ = external_call["close", Int32](full)
+    var ok = sink.emit(rep^, UInt64(200))
+    _restore_stdout(saved)
+    assert_true(not ok)
+
+
+def test_live_template_provisional() raises:
+    var s = _live_template()
+    assert_equal(s.capture_mode, String("live"))
+    assert_true(not s.synthetic)
+    assert_true(not s.finalized)
+    assert_true(not s.has_filter_device)
+    assert_true(not s.baseline_complete)
+    assert_equal(s.baseline_region_count, 0)
+    assert_equal(len(s.baseline_regions), 0)
+    assert_equal(s.window_start_ns, UInt64(0))
+    assert_equal(s.window_end_ns, ~UInt64(0))
+    # Provisional producer shape: scope-complete with
+    # explicitly unknown loss. Correlation and baseline
+    # surface verbatim when their streams show no gaps, so
+    # their wording is user-visible in every prefix.
+    assert_equal(s.q_detail.status, String("complete_for_scope"))
+    assert_true(not s.q_detail.has_loss_count)
+    assert_equal(s.q_detail.scope, String("live prefix"))
+    assert_equal(
+        s.q_detail.reason,
+        String("provisional: producer loss unknown until finalize"),
+    )
+    assert_equal(s.q_aggregate.status, String("complete_for_scope"))
+    assert_true(not s.q_aggregate.has_loss_count)
+    assert_equal(s.q_aggregate.scope, String("live prefix"))
+    assert_equal(
+        s.q_aggregate.reason,
+        String("provisional: producer loss unknown until finalize"),
+    )
+    assert_equal(s.q_correlation.status, String("complete_for_scope"))
+    assert_true(not s.q_correlation.has_loss_count)
+    assert_equal(s.q_correlation.scope, String("live prefix"))
+    assert_equal(
+        s.q_correlation.reason,
+        String("provisional: producer loss unknown until finalize"),
+    )
+    assert_equal(s.q_baseline.status, String("not_applicable"))
+    assert_equal(s.q_baseline.scope, String("attempt metrics"))
+    assert_equal(
+        s.q_baseline.reason,
+        String("Attempt metrics need no baseline."),
+    )
+    assert_equal(s.q_terminal.status, String("complete_for_scope"))
+    assert_true(not s.q_terminal.has_loss_count)
+    assert_equal(s.q_terminal.scope, String("live prefix"))
+    assert_equal(
+        s.q_terminal.reason,
+        String("provisional: producer loss unknown until finalize"),
+    )
+    assert_equal(s.product_name, String("memveil"))
+    assert_true(len(s.product_version.as_bytes()) > 0)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_duration_units]()
@@ -232,6 +493,11 @@ def run() raises -> Int:
     suite.test[test_wait_slices_stream_huge]()
     suite.test[test_wait_interval_polls_before_sleep]()
     suite.test[test_wait_interval_quiet_waits_full]()
+    suite.test[test_sink_emits_numbered_block]()
+    suite.test[test_sink_device_filter_displays]()
+    suite.test[test_sink_seq_increments]()
+    suite.test[test_sink_full_stdout_refuses]()
+    suite.test[test_live_template_provisional]()
     suite^.run()
     return 0
 
