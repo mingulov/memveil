@@ -5,9 +5,10 @@
 Drives the built binary: an abruptly-ended capture (events
 without a session) exits 2 without forging metadata; replay
 never mutates the capture tree; 100 denied-record plus replay
-cycles leave no residue with stable exits; and SIGINT/SIGTERM
-mid-spawn never hang or litter. Exits nonzero on the first
-failure.
+cycles leave no residue with stable exits; SIGINT/SIGTERM
+mid-spawn never hang or litter; and a refusal explains
+itself on fd 2 even when /dev/stderr is rebound elsewhere.
+Exits nonzero on the first failure.
 """
 
 import hashlib
@@ -23,6 +24,7 @@ import time
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
 BIN = os.path.join(REPO, "build", "memveil")
+SHIM = os.path.join(REPO, "build", "shim", "mvshim.so")
 ATTEMPTS = os.path.join(REPO, "tests", "fixtures", "attempts")
 ELF = os.path.join(REPO, "tests", "fixtures", "elf", "ok.o")
 
@@ -114,6 +116,30 @@ def main():
         if os.path.exists(out):
             check("signal-residue-%d" % i, False, out)
     check("signals", True)
+
+    # Stderr follows fd 2, not the /dev/stderr path: with the
+    # path rebound to a decoy (as virtme guests do), a refusal
+    # must still explain itself on the captured fd.
+    if not os.path.isfile(SHIM):
+        print("FAIL record-failures: missing %s (run tools/build first)"
+              % SHIM)
+        sys.exit(1)
+    fd = tempfile.mkdtemp(prefix="mvstderr")
+    decoy = os.path.join(fd, "decoy.log")
+    env = dict(os.environ)
+    env.pop("LMB_NATIVE_LIB", None)
+    env["LD_PRELOAD"] = SHIM
+    env["MVSHIM"] = "stderr_decoy:%s" % decoy
+    p = subprocess.run(
+        [BIN, "record", "--output", os.path.join(fd, "cap"),
+         "--object", ELF],
+        capture_output=True, text=True, env=env)
+    check("stderr-fd-exit", p.returncode == 3,
+          "exit %d" % p.returncode)
+    check("stderr-fd-pipe", "memveil record:" in p.stderr,
+          "stderr %r" % p.stderr[:120])
+    leaked = os.path.isfile(decoy) and os.path.getsize(decoy) > 0
+    check("stderr-fd-decoy", not leaked, decoy)
 
 
 if __name__ == "__main__":

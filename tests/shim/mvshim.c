@@ -19,6 +19,9 @@
  *   fail_unlink_events
  *                    unlinkat of the events.ndjson name (file, not
  *                    dir) fails EACCES, sticking construction unwind.
+ *   stderr_decoy:P  open of /dev/stderr opens P instead: simulates
+ *                    guests that rebind /dev/stderr away from fd 2
+ *                    (diagnostics must follow the fd, not the path).
  *
  * Torn records arise from composition: short:N with
  * enospc_after:N+1 makes loop iteration N short and the
@@ -39,6 +42,8 @@
 
 static ssize_t (*real_pwrite)(int, const void *, size_t, off_t);
 static int (*real_openat)(int, const char *, int, ...);
+static int (*real_open)(const char *, int, ...);
+static int (*real_open64)(const char *, int, ...);
 static int (*real_fsync)(int);
 static int (*real_ftruncate)(int, off_t);
 static int (*real_renameat2)(int, const char *, int, const char *, unsigned);
@@ -59,6 +64,7 @@ static int opt_fail_truncate = 0;
 static int opt_fstat_fail_events = 0;
 static char opt_fstat_fail_dir[1024];
 static int opt_fail_unlink_events = 0;
+static char opt_stderr_decoy[1024];
 static long pwrite_count = 0;
 static int inited = 0;
 
@@ -114,6 +120,13 @@ static void parse_opts(void) {
             memcpy(opt_fstat_fail_dir, tok + 15, pl);
             opt_fstat_fail_dir[pl] = '\0';
         }
+        else if (strncmp(tok, "stderr_decoy:", 13) == 0) {
+            size_t pl = strlen(tok + 13);
+            if (pl >= sizeof(opt_stderr_decoy))
+                pl = sizeof(opt_stderr_decoy) - 1;
+            memcpy(opt_stderr_decoy, tok + 13, pl);
+            opt_stderr_decoy[pl] = '\0';
+        }
     }
 }
 
@@ -123,6 +136,8 @@ static void ensure_init(void) {
     inited = 1;
     real_pwrite = dlsym(RTLD_NEXT, "pwrite");
     real_openat = dlsym(RTLD_NEXT, "openat");
+    real_open = dlsym(RTLD_NEXT, "open");
+    real_open64 = dlsym(RTLD_NEXT, "open64");
     real_fsync = dlsym(RTLD_NEXT, "fsync");
     real_ftruncate = dlsym(RTLD_NEXT, "ftruncate");
     real_renameat2 = dlsym(RTLD_NEXT, "renameat2");
@@ -180,6 +195,38 @@ int openat(int dirfd, const char *path, int flags, ...) {
         va_end(ap);
     }
     return real_openat(dirfd, path, flags, mode);
+}
+
+static int open_redirect(const char *path, int flags, mode_t mode,
+                         int (*real)(const char *, int, ...)) {
+    if (opt_stderr_decoy[0] && strcmp(path, "/dev/stderr") == 0)
+        return real(opt_stderr_decoy, O_WRONLY | O_CREAT | O_APPEND,
+                    0600);
+    return real(path, flags, mode);
+}
+
+int open(const char *path, int flags, ...) {
+    ensure_init();
+    mode_t mode = 0;
+    if (flags & O_CREAT) {
+        va_list ap;
+        va_start(ap, flags);
+        mode = (mode_t)va_arg(ap, int);
+        va_end(ap);
+    }
+    return open_redirect(path, flags, mode, real_open);
+}
+
+int open64(const char *path, int flags, ...) {
+    ensure_init();
+    mode_t mode = 0;
+    if (flags & O_CREAT) {
+        va_list ap;
+        va_start(ap, flags);
+        mode = (mode_t)va_arg(ap, int);
+        va_end(ap);
+    }
+    return open_redirect(path, flags, mode, real_open64);
 }
 
 static int fd_path_is(int fd, const char *want) {
