@@ -596,7 +596,7 @@ def _d_errno() -> Int:
 
 def _d_line_ok(line: List[UInt8]) -> Bool:
     """Cheap shape gate: schema head + newline tail."""
-    var head = String("{\"schema_version\":\"0.1.0\"")
+    var head = String("{\"schema_version\":\"0.1.1\"")
     var raw = head.as_bytes()
     if len(line) < len(raw) + 1:
         return False
