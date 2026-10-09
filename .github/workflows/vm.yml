@@ -43,7 +43,7 @@ jobs:
           MEMVEIL_VM_SOAK: '1'
         run: |
           sudo -n --preserve-env=PATH,VNG,MEMVEIL_VM_ATTEMPTS,MEMVEIL_VM_ORACLE,MEMVEIL_VM_LIFECYCLE,MEMVEIL_VM_STOP,MEMVEIL_VM_SATURATION,MEMVEIL_VM_CLEANUP,MEMVEIL_VM_PERF,MEMVEIL_VM_SOAK python3 ./tools/qualification-results evidence vm-attempts vm-oracle vm-lifecycle \
-            vm-copy vm-real-io vm-stop vm-saturation vm-cleanup perf-workload soak
+            vm-copy vm-real-io vm-topwalk vm-stop vm-saturation vm-cleanup perf-workload soak
       - name: Upload allowlisted status receipts on every outcome
         if: always()
         uses: actions/upload-artifact@v4
