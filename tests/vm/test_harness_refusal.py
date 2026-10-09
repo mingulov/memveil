@@ -332,7 +332,9 @@ def test_owned_guest_timeout_stops_its_child(tmp_path):
     while True:
         try:
             state=status.read_text().split()[2]
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
+            # Vanished entry or mid-read reaping: the child
+            # is gone either way.
             state='exited'
         if state in ('Z','exited') or time.monotonic()>=deadline:
             break
