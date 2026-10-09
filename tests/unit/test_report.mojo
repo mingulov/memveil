@@ -21,7 +21,9 @@ from memveil.cli.report import (
     scrub_paths,
 )
 from memveil.jsonscan import Scanner
+from memveil.model.metric import Metric
 from memveil.model.report import Report
+from memveil.model.session import DeviceEntry
 from memveil.render.render import RenderError, render
 from memveil.render.text import escape_text, render_text
 from memveil.render.json import escape_json, render_json
@@ -217,6 +219,69 @@ def test_render_json_escapes() raises:
     assert_equal(len(drv), 2)
 
 
+def _identity_probe() -> Report:
+    """Bare report with one driverless unresolved device."""
+    var rep = Report()
+    rep.session_id = String("idprobe")
+    rep.synthetic = True
+    rep.engine_version = String("memveil-0.1.0")
+    rep.window_start_ns = UInt64(100)
+    rep.window_end_ns = UInt64(200)
+    rep.env.mode = String("unknown")
+    rep.env.detection = String("unverified")
+    rep.env.attestation = String("not_performed")
+    var d = DeviceEntry()
+    d.device_id = String("d9")
+    d.name = String("eth9")
+    d.identity_status = String("unresolved")
+    rep.devices.append(d^)
+    return rep^
+
+
+def test_render_missing_identity() raises:
+    var text = render_text(_identity_probe())
+    assert_true(
+        text.find(String("identity=unresolved")) != -1
+    )
+    assert_true(text.find(String("driver=none")) != -1)
+    var md = render_markdown(_identity_probe())
+    assert_true(md.find(String("| unresolved |")) != -1)
+    assert_true(md.find(String("| none |")) != -1)
+    var doc = render_json(_identity_probe())
+    assert_true(
+        doc.find(String('"identity_status": "unresolved"')) != -1
+    )
+
+
+def _u64max_probe() -> Report:
+    """Bare report with one u64-max metric row."""
+    var rep = Report()
+    rep.session_id = String("u64probe")
+    rep.synthetic = True
+    rep.engine_version = String("memveil-0.1.0")
+    rep.window_start_ns = UInt64(100)
+    rep.window_end_ns = UInt64(200)
+    rep.env.mode = String("unknown")
+    rep.env.detection = String("unverified")
+    rep.env.attestation = String("not_performed")
+    var m = Metric()
+    m.name = String("big")
+    m.has_value = True
+    m.value = ~UInt64(0)
+    m.unit = String("bytes")
+    rep.metrics.append(m^)
+    return rep^
+
+
+def test_render_json_exact_u64() raises:
+    # Machine-readable values stay quoted exact: no float
+    # narrowing past 2**53.
+    var doc = render_json(_u64max_probe())
+    assert_true(
+        doc.find(String('"value": "18446744073709551615"')) != -1
+    )
+
+
 def test_f12_sanitize_diagnostic() raises:
     var esc = parsed(String('"\\u001b[2J"'))
     var nl = parsed(String('"\\n"'))
@@ -323,6 +388,8 @@ def run() raises -> Int:
     suite.test[test_render_markdown_escape]()
     suite.test[test_render_json_wellformed]()
     suite.test[test_render_json_escapes]()
+    suite.test[test_render_missing_identity]()
+    suite.test[test_render_json_exact_u64]()
     suite.test[test_render_json_tristate_echo]()
     suite.test[test_rendered_size_limit]()
     suite.test[test_device_name_filter_resolves]()
