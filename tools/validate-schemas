@@ -1216,7 +1216,7 @@ def run_selftest():
         else:
             results.append((True, "%s: %s" % (label, detail or "ok")))
 
-    schemas = ("session-v0.1.0.schema.json", "event-v0.1.0.schema.json",
+    schemas = ("session-v0.1.0.schema.json", "event-v0.1.1.schema.json",
                "report-v0.1.0.schema.json", "profile-v0.1.0.schema.json",
                "doctor-v0.1.0.schema.json")
 
