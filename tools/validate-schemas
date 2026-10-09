@@ -30,6 +30,7 @@ import re
 import sys
 
 VERSION = "0.1.0"
+SESSION_VERSION = "0.1.1"
 EVENT_VERSION = "0.1.1"
 PROFILE_VERSION = "0.1.1"
 U64MAX = 18446744073709551615
@@ -290,13 +291,37 @@ def check_environment(environment, where):
                    allow_empty=True)
 
 
+def check_stop(stop):
+    check_keys(stop,
+               ("outcome", "reason", "budget_ms", "elapsed_ms",
+                "admission_closed", "quiescence_observed",
+                "writers_settled", "in_flight_at_close",
+                "late_submits_drained", "drained_records",
+                "busy_at_drain", "counters_valid", "open_mappings"),
+               (), "stop")
+    check_enum(stop["outcome"], ("complete", "partial"), "stop.outcome")
+    check_text(stop["reason"], 512, "stop.reason", allow_empty=True)
+    if stop["outcome"] == "complete" and stop["reason"] != "":
+        fail("bad-stop", "complete stop carries a reason")
+    if stop["outcome"] == "partial" and stop["reason"] == "":
+        fail("bad-stop", "partial stop needs a reason")
+    for key in ("budget_ms", "elapsed_ms", "writers_settled",
+                "in_flight_at_close", "late_submits_drained",
+                "drained_records", "open_mappings"):
+        check_u64(stop[key], "stop." + key)
+    for key in ("admission_closed", "quiescence_observed",
+                "busy_at_drain", "counters_valid"):
+        if not isinstance(stop[key], bool):
+            fail("bad-type", "stop.%s must be a boolean" % key)
+
+
 def check_session(obj):
     check_keys(obj,
                ("schema_version", "session_id", "synthetic", "product",
                 "environment", "capture", "device_catalog", "baseline",
-                "capabilities", "quality"),
+                "capabilities", "quality", "stop"),
                ("boot_id",), "session")
-    if obj["schema_version"] != VERSION:
+    if obj["schema_version"] != SESSION_VERSION:
         fail("bad-version", "session schema_version %r"
              % (obj["schema_version"],))
     session_id = check_id(obj["session_id"], "session_id")
@@ -386,6 +411,7 @@ def check_session(obj):
         if capability.get("profile_id") is not None:
             check_text(capability["profile_id"], 128, "profile_id")
     check_quality(obj["quality"], "quality")
+    check_stop(obj["stop"])
     return {"id": session_id, "synthetic": obj["synthetic"],
             "start": start, "end": end,
             "window_baseline": window_baseline,
@@ -1248,7 +1274,7 @@ def run_selftest():
         else:
             results.append((True, "%s: %s" % (label, detail or "ok")))
 
-    schemas = ("session-v0.1.0.schema.json", "event-v0.1.1.schema.json",
+    schemas = ("session-v0.1.1.schema.json", "event-v0.1.1.schema.json",
                "report-v0.1.0.schema.json", "profile-v0.1.1.schema.json",
                "doctor-v0.1.0.schema.json")
 

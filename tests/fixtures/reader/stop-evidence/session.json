@@ -94,10 +94,10 @@
   },
   "quality": {
     "detail": {
-      "status": "partial",
-      "loss_count": null,
-      "scope": "bounce_attempt events",
-      "reason": "Authored: partial."
+      "status": "complete_for_scope",
+      "loss_count": "0",
+      "scope": "3 bounce_attempt events",
+      "reason": "Authored fixture: no loss."
     },
     "aggregate": {
       "status": "unavailable",
@@ -123,21 +123,20 @@
       "scope": "authored fixture finalization",
       "reason": "Authored fixture: finalized."
     }
-  }
-
-,  "stop": {
+  },
+  "stop": {
     "outcome": "partial",
-    "reason": "fixture predates stop evidence",
+    "reason": "quiescence unproven",
     "budget_ms": "5000",
-    "elapsed_ms": "0",
-    "admission_closed": false,
+    "elapsed_ms": "120",
+    "admission_closed": true,
     "quiescence_observed": false,
     "writers_settled": "0",
     "in_flight_at_close": "0",
     "late_submits_drained": "0",
-    "drained_records": "0",
+    "drained_records": "7",
     "busy_at_drain": false,
-    "counters_valid": false,
+    "counters_valid": true,
     "open_mappings": "0"
   }
 }

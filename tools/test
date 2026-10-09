@@ -1349,7 +1349,7 @@ suite_attempts() {
     awant zero "polls=104"
     awant zero "stats=5"
     awant zero "snaps=4"
-    awant zero "reads=14"
+    awant zero "reads=15"
     python3 "$JASSERT" field "$TMP/zero/session.json" \
         capture.end_reason duration || afailed=1
     python3 "$JASSERT" field "$TMP/zero/session.json" \
@@ -1362,8 +1362,12 @@ suite_attempts() {
         quality.aggregate.loss_count 0 || afailed=1
     python3 "$JASSERT" field "$TMP/zero/session.json" \
         quality.terminal.reason \
-        "terminal settlement unproven; stop protocol not yet proven" \
+        "stop partial: quiescence unproven" \
         || afailed=1
+    python3 "$JASSERT" field "$TMP/zero/session.json" \
+        stop.outcome partial || afailed=1
+    python3 "$JASSERT" field "$TMP/zero/session.json" \
+        stop.reason "quiescence unproven" || afailed=1
     python3 "$JASSERT" evidence "$TMP/zero/session.json" \
         drain_closure proven || afailed=1
     python3 "$JASSERT" events "$TMP/zero/events.ndjson" \
@@ -1396,7 +1400,7 @@ suite_attempts() {
     awant attachwin "polls=104"
     awant attachwin "stats=5"
     awant attachwin "snaps=4"
-    awant attachwin "reads=14"
+    awant attachwin "reads=15"
     python3 "$JASSERT" field "$TMP/attachwin/session.json" \
         capture.end_reason duration || afailed=1
     python3 "$JASSERT" field "$TMP/attachwin/session.json" \
@@ -1420,7 +1424,7 @@ suite_attempts() {
         awant "$1" "committed=$7"
         python3 "$JASSERT" events "$TMP/$1/events.ndjson" "$8" || afailed=1
     }
-    mqual() { # <case> <dstatus> <dloss> <astatus> <aloss> <drain>
+    mqual() { # <case> <dstatus> <dloss> <astatus> <aloss> <drain> [treason]
         python3 "$JASSERT" field "$TMP/$1/session.json" \
             capture.end_reason duration || afailed=1
         python3 "$JASSERT" field "$TMP/$1/session.json" \
@@ -1431,9 +1435,15 @@ suite_attempts() {
             quality.aggregate.status "$4" || afailed=1
         python3 "$JASSERT" field "$TMP/$1/session.json" \
             quality.aggregate.loss_count "$5" || afailed=1
+        _treason="${7:-quiescence unproven}"
         python3 "$JASSERT" field "$TMP/$1/session.json" \
             quality.terminal.reason \
-            "terminal settlement unproven; stop protocol not yet proven" \
+            "stop partial: $_treason" \
+            || afailed=1
+        python3 "$JASSERT" field "$TMP/$1/session.json" \
+            stop.outcome partial || afailed=1
+        python3 "$JASSERT" field "$TMP/$1/session.json" \
+            stop.reason "$_treason" \
             || afailed=1
         python3 "$JASSERT" evidence "$TMP/$1/session.json" \
             drain_closure "$6" || afailed=1
@@ -1470,7 +1480,7 @@ suite_attempts() {
         python3 "$JASSERT" eventfield "$TMP/$1/events.ndjson" "$2" \
             data.lost_count null || afailed=1
     }
-    mcase canary 4 109 5 4 24 3211 \
+    mcase canary 4 109 5 4 25 3211 \
         "bounce_attempt,bounce_attempt,bounce_attempt,bounce_attempt,bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     mqual canary complete_for_scope 0 complete_for_scope 0 proven
     python3 "$JASSERT" devices "$TMP/canary/session.json" \
@@ -1498,38 +1508,39 @@ suite_attempts() {
             fi
         done
     done
-    mcase detfail 4 104 5 4 14 1924 \
+    mcase detfail 4 104 5 4 15 1924 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
     mqual detfail partial null complete_for_scope 0 \
-        "unknown: detach failed; shutdown evidence unresolved"
+        "unknown: detach failed; shutdown evidence unresolved" \
+        "admission close failed"
     mgap detfail 4 "detail closure unproven: detach failed; shutdown evidence unresolved"
     mreplay4 detfail 0 0 0 0
-    mcase stablen 4 103 5 6 16 1838 \
+    mcase stablen 4 103 5 6 17 1838 \
         "bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     mqual stablen complete_for_scope 0 complete_for_scope 0 proven
     mreplay4 stablen 1 64 1 64
-    mcase neverstable 4 104 5 22 32 406 "gap"
+    mcase neverstable 4 104 5 22 33 406 "gap"
     mqual neverstable partial null unavailable null \
         "unknown: snapshot unresolved"
     mgap neverstable 0 "detail closure unproven: snapshot unresolved"
     mreplay4 neverstable 0 0 absent absent
-    mcase tornretry 4 103 5 5 14 1838 \
+    mcase tornretry 4 103 5 5 15 1838 \
         "bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     mqual tornretry complete_for_scope 0 complete_for_scope 0 proven
     mreplay4 tornretry 1 64 1 64
-    mcase recvgt 4 104 5 4 16 2588 \
+    mcase recvgt 4 104 5 4 17 2588 \
         "bounce_attempt,bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
     mqual recvgt partial null complete_for_scope 0 \
         "unknown: ring count unproven"
     mgap recvgt 6 "detail closure unproven: ring count unproven"
     mreplay4 recvgt 2 128 2 128
-    mcase confirmact 4 104 5 4 14 1903 \
+    mcase confirmact 4 104 5 4 15 1903 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
     mqual confirmact partial null complete_for_scope 0 \
         "unknown: post-snapshot activity"
     mgap confirmact 4 "detail closure unproven: post-snapshot activity"
     mreplay4 confirmact 0 0 1 0
-    mcase drainbudget 4 101 3 4 12 1903 \
+    mcase drainbudget 4 101 3 4 13 1903 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
     mqual drainbudget partial null complete_for_scope 0 \
         "unknown: drain budget exhausted"
@@ -1548,46 +1559,46 @@ suite_attempts() {
             data.operation_id "$5" || afailed=1
     }
     mattempt stablen 0 d000001 64 op0
-    mcase delaysubmit 4 104 5 6 16 1495 \
+    mcase delaysubmit 4 104 5 6 17 1495 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     mqual delaysubmit partial 1 complete_for_scope 0 proven
     mreason delaysubmit "detail loss 1 (submit_fail=(1) malformed=(0) dropped=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
     mreplay4 delaysubmit 0 0 1 64
-    mcase latesubmit 4 103 5 4 14 754 "bounce_attempt,gap"
+    mcase latesubmit 4 103 5 4 15 754 "bounce_attempt,gap"
     mqual latesubmit partial null unavailable null \
         "unknown: kernel identity unproven"
     mgap latesubmit 1 "detail closure unproven: kernel identity unproven"
     mattempt latesubmit 0 d000001 64 op0
     mreplay4 latesubmit 1 64 absent absent
-    mcase lateemit 4 104 5 4 16 1097 "bounce_attempt,bounce_attempt,gap"
+    mcase lateemit 4 104 5 4 17 1097 "bounce_attempt,bounce_attempt,gap"
     mqual lateemit partial null unavailable null \
         "unknown: kernel identity unproven"
     mgap lateemit 2 "detail closure unproven: kernel identity unproven"
     mattempt lateemit 1 d000001 64 op1
     mreplay4 lateemit 2 128 absent absent
-    mcase wrapobs 4 104 5 4 14 400 "gap"
+    mcase wrapobs 4 104 5 4 15 400 "gap"
     mqual wrapobs partial null unavailable null "unknown: invalid epoch"
     mgap wrapobs 0 "detail closure unproven: invalid epoch"
     mreplay4 wrapobs 0 0 absent absent
-    mcase wrapemit 4 104 5 4 14 400 "gap"
+    mcase wrapemit 4 104 5 4 15 400 "gap"
     mqual wrapemit partial null unavailable null "unknown: invalid epoch"
     mgap wrapemit 0 "detail closure unproven: invalid epoch"
     mreplay4 wrapemit 0 0 absent absent
-    mcase wrapsubmit 4 104 5 4 14 400 "gap"
+    mcase wrapsubmit 4 104 5 4 15 400 "gap"
     mqual wrapsubmit partial null unavailable null "unknown: invalid epoch"
     mgap wrapsubmit 0 "detail closure unproven: invalid epoch"
     mreason wrapsubmit "detail loss unknown (invalid epoch; known: submit_fail=(unavailable) malformed=(0) dropped=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
     mreplay4 wrapsubmit 0 0 absent absent
-    mcase wrapobsbytes 4 104 5 4 14 0 ""
+    mcase wrapobsbytes 4 104 5 4 15 0 ""
     mqual wrapobsbytes partial 1 unavailable null proven
     mreplay4 wrapobsbytes 0 0 absent absent
-    mcase wrapemitbytes 4 104 5 4 14 0 ""
+    mcase wrapemitbytes 4 104 5 4 15 0 ""
     mqual wrapemitbytes partial 1 unavailable null proven
     mreplay4 wrapemitbytes 0 0 absent absent
-    mcase bytecov 4 104 5 4 14 0 ""
+    mcase bytecov 4 104 5 4 15 0 ""
     mqual bytecov partial 1 unavailable null proven
     mreplay4 bytecov 0 0 absent absent
-    mcase recoverable 4 106 5 4 18 1839 \
+    mcase recoverable 4 106 5 4 19 1839 \
         "bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     mqual recoverable partial 4 complete_for_scope 0 proven
     mreason recoverable "detail loss 4 (submit_fail=(0) malformed=(1) dropped=(1) size_omitted=(0) duration_omitted=(1) signal_omitted=(0) rejected=(1) write_failed=(0))"
@@ -1606,7 +1617,7 @@ suite_attempts() {
         awant "$1" "committed=$6"
         python3 "$JASSERT" events "$TMP/$1/events.ndjson" "$7" || afailed=1
     }
-    mquale() { # <case> <dstatus> <dloss> <astatus> <aloss> <drain>
+    mquale() { # <case> <dstatus> <dloss> <astatus> <aloss> <drain> [treason]
         python3 "$JASSERT" field "$TMP/$1/session.json" \
             capture.end_reason error || afailed=1
         python3 "$JASSERT" field "$TMP/$1/session.json" \
@@ -1617,20 +1628,26 @@ suite_attempts() {
             quality.aggregate.status "$4" || afailed=1
         python3 "$JASSERT" field "$TMP/$1/session.json" \
             quality.aggregate.loss_count "$5" || afailed=1
+        _treason="${7:-quiescence unproven}"
         python3 "$JASSERT" field "$TMP/$1/session.json" \
             quality.terminal.reason \
-            "terminal settlement unproven; stop protocol not yet proven" \
+            "stop partial: $_treason" \
+            || afailed=1
+        python3 "$JASSERT" field "$TMP/$1/session.json" \
+            stop.outcome partial || afailed=1
+        python3 "$JASSERT" field "$TMP/$1/session.json" \
+            stop.reason "$_treason" \
             || afailed=1
         python3 "$JASSERT" evidence "$TMP/$1/session.json" \
             drain_closure "$6" || afailed=1
     }
-    merrcase appendfail0 1 2 4 10 1896 \
+    merrcase appendfail0 1 2 4 11 1896 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
     mquale appendfail0 partial null complete_for_scope 0 \
         "unknown: error shutdown"
     mgap appendfail0 4 "detail closure unproven: error shutdown"
     mreplay4 appendfail0 0 0 1 64
-    merrcase appendtorn 2 2 4 12 2240 \
+    merrcase appendtorn 2 2 4 13 2240 \
         "bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
     mquale appendtorn partial null complete_for_scope 0 \
         "unknown: error shutdown"
@@ -1638,51 +1655,53 @@ suite_attempts() {
     mattempt appendtorn 0 d000001 64 op0
     mreplay4 appendtorn 1 64 2 128
     CATALOG_EVENTS=$(python3 -c "print(','.join(['bounce_attempt']*4096 + ['counter_snapshot']*4 + ['gap']))")
-    merrcase catalogfull 4097 2 4 8202 1429202 "$CATALOG_EVENTS"
+    merrcase catalogfull 4097 2 4 8203 1429202 "$CATALOG_EVENTS"
     mquale catalogfull partial null complete_for_scope 0 \
         "unknown: error shutdown"
     mgap catalogfull 4100 "detail closure unproven: error shutdown"
     mattempt catalogfull 4095 d004096 64 op4095
     mreplay4 catalogfull 4096 262144 4097 262208
-    merrcase hardpoll 2 2 4 11 2240 \
+    merrcase hardpoll 2 2 4 12 2240 \
         "bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
     mquale hardpoll partial null complete_for_scope 0 \
         "unknown: error shutdown"
     mgap hardpoll 5 "detail closure unproven: error shutdown"
     mreplay4 hardpoll 1 64 2 128
-    merrcase structfault 1 2 4 9 1896 \
+    merrcase structfault 1 2 4 10 1896 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
     mquale structfault partial null complete_for_scope 0 \
         "unknown: error shutdown"
     mgap structfault 4 "detail closure unproven: error shutdown"
     mreplay4 structfault 0 0 1 64
-    merrcase structfaultq 1 2 4 9 1896 \
+    merrcase structfaultq 1 2 4 10 1896 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
     mquale structfaultq partial null complete_for_scope 0 \
         "unknown: error shutdown"
     mgap structfaultq 4 "detail closure unproven: error shutdown"
     mreplay4 structfaultq 0 0 1 64
-    merrcase durhard 104 3 4 14 1895 \
+    merrcase durhard 104 3 4 15 1895 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
     mquale durhard partial null complete_for_scope 0 \
         "unknown: error shutdown"
     mgap durhard 4 "detail closure unproven: error shutdown"
     mreplay4 durhard 0 0 1 0
-    merrcase sigclose 102 3 4 11 1895 \
+    merrcase sigclose 102 3 4 12 1895 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
     mquale sigclose partial null complete_for_scope 0 \
         "unknown: error shutdown"
     mgap sigclose 4 "detail closure unproven: error shutdown"
     mreplay4 sigclose 0 0 1 0
-    merrcase errdetfail 1 2 4 9 1925 \
+    merrcase errdetfail 1 2 4 10 1925 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
     mquale errdetfail partial null complete_for_scope 0 \
-        "unknown: detach failed; shutdown evidence unresolved"
+        "unknown: detach failed; shutdown evidence unresolved" \
+        "admission close failed"
     mgap errdetfail 4 "detail closure unproven: detach failed; shutdown evidence unresolved"
     mreplay4 errdetfail 0 0 1 64
-    merrcase combinederr 1 2 22 27 430 "gap"
+    merrcase combinederr 1 2 22 28 430 "gap"
     mquale combinederr partial null unavailable null \
-        "unknown: detach failed; shutdown evidence unresolved"
+        "unknown: detach failed; shutdown evidence unresolved" \
+        "admission close failed"
     mgap combinederr 0 "detail closure unproven: detach failed; shutdown evidence unresolved"
     python3 "$JASSERT" evidence "$TMP/combinederr/session.json" \
         shutdown.secondary_causes "snapshot unresolved" || afailed=1
@@ -1699,7 +1718,7 @@ suite_attempts() {
         awant "$1" "committed=$9"
         python3 "$JASSERT" events "$TMP/$1/events.ndjson" "${10}" || afailed=1
     }
-    mqualE() { # <case> <end> <dstatus> <dloss> <astatus> <aloss> <drain>
+    mqualE() { # <case> <end> <dstatus> <dloss> <astatus> <aloss> <drain> [treason]
         python3 "$JASSERT" field "$TMP/$1/session.json" \
             capture.end_reason "$2" || afailed=1
         python3 "$JASSERT" field "$TMP/$1/session.json" \
@@ -1710,9 +1729,15 @@ suite_attempts() {
             quality.aggregate.status "$5" || afailed=1
         python3 "$JASSERT" field "$TMP/$1/session.json" \
             quality.aggregate.loss_count "$6" || afailed=1
+        _treason="${8:-quiescence unproven}"
         python3 "$JASSERT" field "$TMP/$1/session.json" \
             quality.terminal.reason \
-            "terminal settlement unproven; stop protocol not yet proven" \
+            "stop partial: $_treason" \
+            || afailed=1
+        python3 "$JASSERT" field "$TMP/$1/session.json" \
+            stop.outcome partial || afailed=1
+        python3 "$JASSERT" field "$TMP/$1/session.json" \
+            stop.reason "$_treason" \
             || afailed=1
         python3 "$JASSERT" evidence "$TMP/$1/session.json" \
             drain_closure "$7" || afailed=1
@@ -1729,17 +1754,17 @@ suite_attempts() {
         awant "$1" "reads=$8"
         python3 "$JASSERT" nofile "$TMP/$1" || afailed=1
     }
-    mecase siginhand 4 signal finalized 103 5 4 12 1495 \
+    mecase siginhand 4 signal finalized 103 5 4 13 1495 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     mqualE siginhand signal partial 1 complete_for_scope 0 proven
     mreason siginhand "detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(1) rejected=(0) write_failed=(0))"
     mreplay4 siginhand 0 0 1 64
-    mecase sigreaderr 1 error error 103 5 4 12 1495 \
+    mecase sigreaderr 1 error error 103 5 4 13 1495 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     awant sigreaderr "diag=signal: scripted EIO"
     mqualE sigreaderr error partial 1 complete_for_scope 0 proven
     mreplay4 sigreaderr 0 0 1 64
-    mecase sigreaderr0 1 error error 102 5 4 11 1494 \
+    mecase sigreaderr0 1 error error 102 5 4 12 1494 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     awant sigreaderr0 "diag=signal: scripted EIO"
     mqualE sigreaderr0 error complete_for_scope 0 complete_for_scope 0 proven
@@ -1750,7 +1775,7 @@ suite_attempts() {
     mrefuse attachfail 3 refused "attach: scripted attach failure" 0 1 2 4
     mrefuse rollbackfail 1 refusal-rollback-failed "attach: scripted attach failure; close: scripted close failure" 0 1 2 4
     mrefuse nonzerostart 3 refused "start snapshot nonzero" 0 0 2 3
-    mcase clockseam 4 104 5 4 14 1494 \
+    mcase clockseam 4 104 5 4 15 1494 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     mqual clockseam complete_for_scope 0 complete_for_scope 0 proven
     python3 "$JASSERT" field "$TMP/clockseam/session.json" \
@@ -1760,18 +1785,18 @@ suite_attempts() {
     python3 "$JASSERT" eventfield "$TMP/clockseam/events.ndjson" 3 \
         ts_ns 67100000001 || afailed=1
     mreplay4 clockseam 0 0 0 0
-    mcase ooo100 4 104 5 4 18 2184 \
+    mcase ooo100 4 104 5 4 19 2184 \
         "bounce_attempt,bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     mqual ooo100 complete_for_scope 0 complete_for_scope 0 proven
     python3 "$JASSERT" field "$TMP/ooo100/session.json" \
-        capture.window.end_ns 62100000068 || afailed=1
+        capture.window.end_ns 62101000068 || afailed=1
     python3 "$JASSERT" eventfield "$TMP/ooo100/events.ndjson" 0 \
         ts_ns 62100000057 || afailed=1
     python3 "$JASSERT" eventfield "$TMP/ooo100/events.ndjson" 1 \
         ts_ns 62100000017 || afailed=1
     mreplay4 ooo100 2 128 2 128
     SIZEREF_EVENTS=$(python3 -c "print(','.join(['bounce_attempt']*189 + ['counter_snapshot']*4))")
-    mecase sizerefused 4 size_limit finalized 292 5 4 391 66871 "$SIZEREF_EVENTS"
+    mecase sizerefused 4 size_limit finalized 292 5 4 392 66871 "$SIZEREF_EVENTS"
     mqualE sizerefused size_limit partial 1 complete_for_scope 0 proven
     mreason sizerefused "detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) size_omitted=(1) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
     mreplay4 sizerefused 189 12096 190 12160
@@ -1783,33 +1808,33 @@ suite_attempts() {
     awant opcount "polls=4194407"
     awant opcount "stats=5"
     awant opcount "snaps=4"
-    awant opcount "reads=8388621"
+    awant opcount "reads=8388622"
     awant opcount "appends=4194308"
     awant opcount "committed=1462702516"
     mqualE opcount size_limit partial 1 complete_for_scope 0 proven
     mreason opcount "detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) size_omitted=(1) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
     python3 "$JASSERT" nofile "$TMP/opcount/events.ndjson" || afailed=1
-    mcase pausedbytes 4 103 5 4 14 753 "bounce_attempt,gap"
+    mcase pausedbytes 4 103 5 4 15 753 "bounce_attempt,gap"
     mqual pausedbytes partial null unavailable null \
         "unknown: kernel identity unproven"
     mgap pausedbytes 1 "detail closure unproven: kernel identity unproven"
     mattempt pausedbytes 0 d000001 6 op0
     mreplay4 pausedbytes 1 6 absent absent
-    mecase u64sum 4 size_limit finalized 104 5 4 15 1874 \
+    mecase u64sum 4 size_limit finalized 104 5 4 16 1874 \
         "bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     mqualE u64sum size_limit partial 1 complete_for_scope 0 proven
     mreason u64sum "detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) size_omitted=(1) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
     mattempt u64sum 0 d000001 18446744073709551615 op0
     mreplay4 u64sum 1 18446744073709551615 2 18446744073709551615
-    mcase flowinject 4 104 5 4 14 0 ""
+    mcase flowinject 4 104 5 4 15 0 ""
     mqual flowinject partial 2 unavailable null proven
     mreason flowinject "detail loss 2 (submit_fail=(2) malformed=(0) dropped=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
     mreplay4 flowinject 0 0 absent absent
-    mecase unsynced 1 duration present_unsynced 104 5 4 14 1494 \
+    mecase unsynced 1 duration present_unsynced 104 5 4 15 1494 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     mqual unsynced complete_for_scope 0 complete_for_scope 0 proven
     mreplay4 unsynced 0 0 0 0
-    mcase pool 4 103 5 4 15 2309 \
+    mcase pool 4 103 5 4 16 2309 \
         "pool_sample,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,pool_sample"
     mqual pool complete_for_scope 0 complete_for_scope 0 proven
     mreplay4 pool 0 0 0 0
@@ -1831,7 +1856,7 @@ suite_attempts() {
     # until the cap latches, then the remaining iterations
     # drain the clock to the deadline without sampling.
     poolcap_kinds=$(python3 -c "print(','.join(['pool_sample'] + ['pool_sample'] * 4096 + ['counter_snapshot'] * 4 + ['pool_sample']))")
-    mcase poolcap 4 5004 5 4 9012 1692322 "$poolcap_kinds"
+    mcase poolcap 4 5004 5 4 9013 1692322 "$poolcap_kinds"
     mqual poolcap complete_for_scope 0 complete_for_scope 0 proven
     mreplay4 poolcap 0 0 0 0
     python3 "$JASSERT" field "$TMP/poolcap/session.json" \
@@ -2714,13 +2739,13 @@ PYEOF
     expect_line "$STMP/latch15.log" "polls=105"
     expect_line "$STMP/latch15.log" "stats=5"
     expect_line "$STMP/latch15.log" "snaps=4"
-    expect_line "$STMP/latch15.log" "reads=14"
+    expect_line "$STMP/latch15.log" "reads=15"
     expect_line "$STMP/latch15.log" "committed=1494"
     run_collector_case inhand15 inhand 15
     expect_line "$STMP/inhand15.log" "polls=103"
     expect_line "$STMP/inhand15.log" "stats=5"
     expect_line "$STMP/inhand15.log" "snaps=4"
-    expect_line "$STMP/inhand15.log" "reads=12"
+    expect_line "$STMP/inhand15.log" "reads=13"
     expect_line "$STMP/inhand15.log" "committed=1495"
     for which in mask signalfd; do
         dir="$STMP/fail-$which"
