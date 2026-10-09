@@ -59,9 +59,12 @@ Do not silently rewrite a profile hash to make them admitted.
   The sampler never resets high-water; equal values share an allocator
   lifetime only if no reset occurred. Dynamic pools are outside the reader's
   scope; see [privacy](privacy.md).
-- Live terminal quality stays partial (exit 4): a finalized capture and a
-  quiet ring do not prove writer settlement. `StopController` exists but is
-  not wired into the live collector, which drains up to 30 seconds.
+- Live terminal quality stays partial: a finalized capture and a
+  quiet ring do not prove writer settlement. The wired close-out
+  (5,000 ms budget, bounded drain, counter sample, finalize)
+  stamps `stop` evidence; live runs stay partial with
+  `quiescence unproven` until the kernel protocol proves
+  settlement. `record` exits 4 for a finalized capture.
 - CPU targets and ELF linkage minima are compatibility prerequisites,
   not tests of every claimed platform. See [support](support.md).
 

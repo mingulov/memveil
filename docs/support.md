@@ -75,11 +75,16 @@ details live in `permissions.md`; surprises go to
   their default or lower (a higher value is refused with
   exit 2). `--allow-partial` drops a truncated final record
   and reports the loss instead of failing.
-- Staged stop-protocol budget 5,000 ms (`StopController` is
-  unit-tested but not yet wired into the live collector, which
-  drains up to 30 s instead); terminal quality stays partial
-  (exit 4) until the stop protocol is proven on the exact
-  profile. A blocked stdout fails loudly (exit 1), never as
+- Wired stop-protocol budget 5,000 ms: the live collector
+  closes admission, polls quiescence, drains bounded (30 s /
+  100,000 polls, unsettled exits marked busy), samples
+  counters, and finalizes, stamping session 0.1.1 `stop`
+  evidence. Terminal quality stays partial with the
+  stop-linked reason until every proof obligation holds
+  (live runs: quiescence unproven without the kernel
+  protocol); the report exit judges detail sufficiency
+  separately (0 sufficient, 4 materially incomplete).
+  A blocked stdout fails loudly (exit 1), never as
   silent success.
 
 ## Exit codes
