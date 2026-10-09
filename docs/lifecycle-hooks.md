@@ -57,19 +57,26 @@ recording an unverified channel.
 ## Signatures
 
 Argument lists are the kernel function signatures as the probes
-read them. Map, unmap, and sync probes ignore address arguments;
-only `mv_bounce` reads address metadata (pool slot fields and
-`tlb_addr`) internally to replicate the copied length. No addresses
-or device names are emitted: MVLC/MVCP records carry sizes,
+read them. Map and unmap probes use the (device, tlb address)
+pair only as a kernel-private table key; sync probes ignore
+address arguments; `mv_bounce` reads address metadata (pool
+slot fields and `tlb_addr`) internally to replicate the
+copied length. No addresses or device names are emitted:
+MVLC v2 records carry sizes, directions, flags, and an
+opaque mapping generation; MVCP v1 records carry sizes,
 directions, flags, and reasons only.
 
 - `swiotlb_tbl_map_single(dev, orig_addr, mapping_size,
   alloc_align_mask, dir, attrs)` returns the bounce address or the
   all-ones mapping-error sentinel. The fexit probe reports
-  `mapping_size`, `dir`, and ok = (return != sentinel).
+  `mapping_size`, `dir`, ok = (return != sentinel), and the
+  mapping generation (freshly assigned on success, 0 with an
+  explicit flag when assignment is impossible, 0 on failure).
 - `__swiotlb_tbl_unmap_single(dev, tlb_addr, mapping_size, dir,
-  attrs, pool)` reports `mapping_size`, `dir`, and the skip-sync
-  bit read from attrs bit 5 (`DMA_ATTR_SKIP_CPU_SYNC`).
+  attrs, pool)` reports `mapping_size`, `dir`, the skip-sync
+  bit read from attrs bit 5 (`DMA_ATTR_SKIP_CPU_SYNC`), and
+  the looked-up generation (0 with an explicit miss flag when
+  the mapping was never tracked).
 - `__swiotlb_sync_single_for_device(dev, tlb_addr, size, dir,
   pool)` and `__swiotlb_sync_single_for_cpu(...)` report `size`
   and `dir` as sync requests. A sync request is never an executed
@@ -102,10 +109,16 @@ the request fact (size, direction) is still emitted.
 - Interrupt context: firings in any context count and emit like
   any other firing; ordering across CPUs is ring order, not
   causal order.
-- Reuse: the v1 wire carries no addresses, so each successful map
-  mints a fresh opaque generation and no unmap ever pairs to a
-  specific map. Same numeric address reuse is therefore always
-  distinct generations, and lifetimes stay unavailable.
+- Identity: each successful map is assigned a fresh opaque
+  generation, so same numeric address reuse yields distinct
+  generations. An unmap pairs to its map only on a nonzero
+  generation; missed or unassigned identities never pair and
+  are counted explicitly. Map-time bounces precede the
+  assignment and unmap-time copy-backs follow the release
+  lookup, so copy records carry no generation by design.
+- Lifetimes: pairing is eligible once wire generations are
+  observed; misses, ring loss, and invalid epochs still
+  caveat completeness.
 - Outer failure: fexit ok means the inner allocator found slots;
   the outer DMA call may still fail afterwards, and its cleanup
   unmap arrives as its own event. Inner success is never a claim
@@ -119,8 +132,10 @@ the request fact (size, direction) is still emitted.
   segment reconstruction stay unavailable.
 - Coherent, direct, and non-swiotlb DMA paths: unobserved and
   unclaimed.
-- Map/unmap pairing, lifetimes, and per-mapping bytes: no v1
-  wire identity exists, so these stay unavailable with reasons.
+- Copy-to-mapping attribution and per-mapping byte totals: no
+  copy identity exists, so copies aggregate as byte facts only.
+- Sync ranges: the wire observes no sync offset, so coverage is
+  unknown, never assumed whole-mapping.
 - Kernels, configs, BTF builds, or object bytes outside the
   admitting profile's narrow bindings: refused, never degraded.
 - Other architectures and kernels below the 7.0 floor: no hooks

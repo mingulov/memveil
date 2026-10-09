@@ -43,12 +43,12 @@ def _le64(v: UInt64) -> List[UInt8]:
 
 
 def _lc_raw(kind: Int, flags: Int, dir: Int, seq: UInt64,
-            ktime: UInt64, size: UInt64) -> List[UInt8]:
+            ktime: UInt64, size: UInt64, gen: UInt64) -> List[UInt8]:
     var out = _le32(0x434C564D)
-    var tail = _le16(1) + _le16(kind) + _le16(flags) + _le16(dir)
+    var tail = _le16(2) + _le16(kind) + _le16(flags) + _le16(dir)
     for b in tail:
         out.append(b)
-    for b in _le64(seq) + _le64(ktime) + _le64(size):
+    for b in _le64(seq) + _le64(ktime) + _le64(size) + _le64(gen):
         out.append(b)
     return out^
 
@@ -71,7 +71,7 @@ def _cp_raw(kind: Int, flags: Int, dir: Int, seq: UInt64,
 
 def test_map_ok_event() raises:
     var d = decode_lifecycle(
-        _lc_raw(1, 1, 1, UInt64(7), UInt64(9), UInt64(4096)))
+        _lc_raw(1, 1, 1, UInt64(7), UInt64(9), UInt64(4096), UInt64(7)))
     var ev = normalize_lifecycle_event(d)
     assert_equal(ev.kind, String("map_result"))
     assert_equal(ev.ts_ns, UInt64(9))
@@ -81,26 +81,32 @@ def test_map_ok_event() raises:
     assert_equal(ev.map_result.operation_id, String("lc-7"))
     assert_true(ev.map_result.success)
     assert_true(ev.map_result.has_mapping_id)
-    assert_equal(ev.map_result.mapping_id, String("lc-7"))
+    assert_equal(ev.map_result.mapping_id, String("gen-7"))
     assert_true(not ev.map_result.has_return_code)
     assert_true(ev.map_result.has_mapped_bytes)
     assert_equal(ev.map_result.mapped_bytes, UInt64(4096))
+    assert_true(ev.map_result.has_wire_generation)
+    assert_equal(ev.map_result.wire_generation, UInt64(7))
+    assert_true(ev.map_result.has_wire_identity)
+    assert_equal(ev.map_result.wire_identity, String("known"))
 
 
 def test_map_failed_event_carries_no_mapping() raises:
     var d = decode_lifecycle(
-        _lc_raw(1, 0, 1, UInt64(11), UInt64(12), UInt64(4096)))
+        _lc_raw(1, 0, 1, UInt64(11), UInt64(12), UInt64(4096), UInt64(0)))
     var ev = normalize_lifecycle_event(d)
     assert_equal(ev.kind, String("map_result"))
     assert_equal(ev.map_result.operation_id, String("lc-11"))
     assert_true(not ev.map_result.success)
     assert_true(not ev.map_result.has_mapping_id)
     assert_true(not ev.map_result.has_mapped_bytes)
+    assert_true(ev.map_result.has_wire_generation)
+    assert_true(not ev.map_result.has_wire_identity)
 
 
 def test_unmap_event() raises:
     var d = decode_lifecycle(
-        _lc_raw(2, 3, 2, UInt64(8), UInt64(10), UInt64(1024)))
+        _lc_raw(2, 3, 2, UInt64(8), UInt64(10), UInt64(1024), UInt64(8)))
     var ev = normalize_lifecycle_event(d)
     assert_equal(ev.kind, String("unmap"))
     assert_equal(ev.ts_ns, UInt64(10))
@@ -109,7 +115,35 @@ def test_unmap_event() raises:
         String("fentry:__swiotlb_tbl_unmap_single"))
     assert_equal(ev.source_backend, String("tracing"))
     assert_true(ev.unmap.has_mapping_id)
-    assert_equal(ev.unmap.mapping_id, String("lc-8"))
+    assert_equal(ev.unmap.mapping_id, String("gen-8"))
+    assert_true(ev.unmap.has_wire_generation)
+    assert_equal(ev.unmap.wire_generation, UInt64(8))
+    assert_true(ev.unmap.has_wire_identity)
+    assert_equal(ev.unmap.wire_identity, String("known"))
+
+
+def test_unassigned_map_event_carries_no_mapping() raises:
+    var d = decode_lifecycle(
+        _lc_raw(1, 9, 1, UInt64(13), UInt64(14), UInt64(4096), UInt64(0)))
+    var ev = normalize_lifecycle_event(d)
+    assert_equal(ev.kind, String("map_result"))
+    assert_true(ev.map_result.success)
+    assert_true(not ev.map_result.has_mapping_id)
+    assert_true(ev.map_result.has_mapped_bytes)
+    assert_true(ev.map_result.has_wire_generation)
+    assert_true(ev.map_result.has_wire_identity)
+    assert_equal(ev.map_result.wire_identity, String("unassigned"))
+
+
+def test_missed_unmap_event_carries_no_mapping() raises:
+    var d = decode_lifecycle(
+        _lc_raw(2, 5, 1, UInt64(15), UInt64(16), UInt64(4096), UInt64(0)))
+    var ev = normalize_lifecycle_event(d)
+    assert_equal(ev.kind, String("unmap"))
+    assert_true(not ev.unmap.has_mapping_id)
+    assert_true(ev.unmap.has_wire_generation)
+    assert_true(ev.unmap.has_wire_identity)
+    assert_equal(ev.unmap.wire_identity, String("miss"))
 
 
 def test_known_copy_event() raises:
@@ -182,7 +216,7 @@ def test_sync_for_device_event() raises:
     assert_equal(ev.sync.operation_id, String("lc-5"))
     assert_true(ev.sync.has_mapping_id)
     assert_equal(ev.sync.mapping_id, String("lc-5"))
-    assert_equal(ev.sync.offset, UInt64(0))
+    assert_true(not ev.sync.has_offset)
     assert_equal(ev.sync.length, UInt64(512))
 
 
@@ -198,13 +232,15 @@ def test_sync_for_cpu_event() raises:
     assert_equal(ev.sync.length, UInt64(256))
 
 
-def test_reuse_mints_distinct_event_ids() raises:
+def test_reuse_reports_distinct_event_ids() raises:
     var a = decode_lifecycle(
-        _lc_raw(1, 1, 1, UInt64(121), UInt64(1), UInt64(4096)))
+        _lc_raw(1, 1, 1, UInt64(121), UInt64(1), UInt64(4096), UInt64(41)))
     var b = decode_lifecycle(
-        _lc_raw(1, 1, 1, UInt64(122), UInt64(2), UInt64(4096)))
+        _lc_raw(1, 1, 1, UInt64(122), UInt64(2), UInt64(4096), UInt64(42)))
     var eva = normalize_lifecycle_event(a)
     var evb = normalize_lifecycle_event(b)
+    assert_equal(eva.map_result.mapping_id, String("gen-41"))
+    assert_equal(evb.map_result.mapping_id, String("gen-42"))
     assert_true(
         eva.map_result.mapping_id != evb.map_result.mapping_id)
 

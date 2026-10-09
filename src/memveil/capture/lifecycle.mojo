@@ -1,30 +1,30 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Lifecycle/copy wire decode, Event mapping, and the v1 ledger.
+"""Lifecycle/copy wire decode, Event mapping, and the ledger.
 
-Decodes the 36-byte MVLC and 48-byte MVCP records produced by the
-swiotlb lifecycle and copy probes. Byte layout, check order, and
-reason vocabulary mirror bpf/include/memveil_events.h; any
-intentional contract change must update the header, the corpus, and
-both decoders together. Decode, Event mapping, and ledger only:
-collector attach, multi-channel packaging, profile admission, and
-live qualification are separate work.
+Decodes the 44-byte MVLC v2 and 48-byte MVCP v1 records produced
+by the swiotlb lifecycle and copy probes. Byte layout, check
+order, and reason vocabulary mirror
+bpf/include/memveil_events.h; any intentional contract change
+must update the header, the corpus, and both decoders together.
+Decode, Event mapping, and ledger only: collector attach,
+multi-channel packaging, profile admission, and live
+qualification are separate work.
 
-The v1 wire carries no device or mapping identity, so the ledger
-counts per-event facts only: map outcomes, unmaps, sync requests,
-and executed bytes summed over KNOWN copy records. It never pairs a
-map with an unmap, never infers a lifetime, and reports lifetimes
-as explicitly unavailable with a reason. Normalized Events carry
-record-local minted ids (never kernel identity) and always flow
-through the correlation registry, which labels them unpaired with
-an explicit cause until an identity-carrying wire exists.
+MVLC v2 carries an opaque mapping generation (0 = unknown);
+the ledger pairs map/unmap only on nonzero generations and
+reports lifetimes as eligible-but-incomplete after misses,
+loss, or an invalid epoch. MVCP carries no identity: copy
+and sync records never pair. Normalized unknown-identity
+Events flow through the correlation registry, which labels
+them unpaired with an explicit cause.
 """
 
 from memveil.capture.normalize import DecodeError, NormalizeError
 from memveil.model.event import Event
 from memveil.model.validate import checked_add, format_u64
 
-comptime LC_LEN = 36
+comptime LC_LEN = 44
 comptime CP_LEN = 48
 
 # Frozen probe hook identities shared by normalization,
@@ -38,12 +38,16 @@ comptime HOOK_BOUNCE = "fentry:swiotlb_bounce"
 
 comptime _LC_MAGIC = 0x434C564D
 comptime _CP_MAGIC = 0x5043564D
-comptime _VERSION = 1
+comptime _LC_VERSION = 2
+comptime _CP_VERSION = 1
 
 comptime _LC_KIND_MAP = 1
 comptime _LC_KIND_UNMAP = 2
 comptime _LC_FLAG_OK = 1
 comptime _LC_FLAG_SKIP_SYNC = 2
+comptime _LC_FLAG_GEN_MISS = 4
+comptime _LC_FLAG_GEN_UNASSIGNED = 8
+comptime _LC_GEN_MAX = UInt64(0xFFFFFFFFFFFFFFFE)
 
 comptime _CP_KIND_SYNC = 1
 comptime _CP_KIND_COPY = 2
@@ -62,6 +66,7 @@ comptime _OFF_DIR = 10
 comptime _OFF_SEQ = 12
 comptime _OFF_KTIME = 20
 comptime _OFF_SIZE = 28
+comptime _LC_OFF_GEN = 36
 comptime _CP_OFF_REQUESTED = 28
 comptime _CP_OFF_EFFECTIVE = 36
 comptime _CP_OFF_REASON = 44
@@ -69,7 +74,7 @@ comptime _CP_OFF_REASON = 44
 
 @fieldwise_init
 struct DecodedLifecycle(Copyable, Movable):
-    """One decoded MVLC record: map result or unmap fact."""
+    """One decoded MVLC v2 record: map result or unmap fact."""
 
     var kind: UInt16
     var ok: Bool
@@ -78,6 +83,7 @@ struct DecodedLifecycle(Copyable, Movable):
     var seq: UInt64
     var ktime: UInt64
     var size: UInt64
+    var gen: UInt64
 
 
 @fieldwise_init
@@ -126,29 +132,56 @@ def _lc_le64(raw: List[UInt8], off: Int) -> UInt64:
 
 
 def decode_lifecycle(raw: List[UInt8]) raises DecodeError -> DecodedLifecycle:
-    """Decode and strictly validate one MVLC record.
+    """Decode and strictly validate one MVLC v2 record.
 
-    Check order matches mv_decode_lifecycle: length, magic,
-    version, kind, flags, direction. Raises DecodeError with
+    Check order matches mv_decode_lifecycle: header guard,
+    magic, version (v1 bytes fail here, not on length),
+    length, kind, flags, direction, flag/generation
+    coupling, generation range. Raises DecodeError with
     the shared reason vocabulary on any rejection.
     """
+    if len(raw) < _OFF_VERSION + 2:
+        raise DecodeError("PAY_SHORT", True)
+    if _lc_le32(raw, _OFF_MAGIC) != UInt32(_LC_MAGIC):
+        raise DecodeError("PAY_MAGIC", True)
+    if _lc_le16(raw, _OFF_VERSION) != UInt16(_LC_VERSION):
+        raise DecodeError("PAY_VERSION", True)
     if len(raw) < LC_LEN:
         raise DecodeError("PAY_SHORT", True)
     if len(raw) > LC_LEN:
         raise DecodeError("PAY_LONG", True)
-    if _lc_le32(raw, _OFF_MAGIC) != UInt32(_LC_MAGIC):
-        raise DecodeError("PAY_MAGIC", True)
-    if _lc_le16(raw, _OFF_VERSION) != UInt16(_VERSION):
-        raise DecodeError("PAY_VERSION", True)
     var kind = _lc_le16(raw, _OFF_KIND)
     if kind != UInt16(_LC_KIND_MAP) and kind != UInt16(_LC_KIND_UNMAP):
         raise DecodeError("PAY_KIND", True)
     var flags = _lc_le16(raw, _OFF_FLAGS)
-    if flags & ~UInt16(_LC_FLAG_OK | _LC_FLAG_SKIP_SYNC) != UInt16(0):
+    if flags & ~UInt16(
+        _LC_FLAG_OK | _LC_FLAG_SKIP_SYNC | _LC_FLAG_GEN_MISS | _LC_FLAG_GEN_UNASSIGNED
+    ) != UInt16(0):
         raise DecodeError("PAY_FLAGS", True)
     var dir = _lc_le16(raw, _OFF_DIR)
     if dir > UInt16(2):
         raise DecodeError("PAY_DIR", True)
+    var gen = _lc_le64(raw, _LC_OFF_GEN)
+    var miss = flags & UInt16(_LC_FLAG_GEN_MISS) != UInt16(0)
+    var unassigned = flags & UInt16(_LC_FLAG_GEN_UNASSIGNED) != UInt16(0)
+    if kind == UInt16(_LC_KIND_MAP):
+        if flags & ~UInt16(_LC_FLAG_OK | _LC_FLAG_GEN_UNASSIGNED) != UInt16(0):
+            raise DecodeError("PAY_FLAGS", True)
+        var ok = flags & UInt16(_LC_FLAG_OK) != UInt16(0)
+        if ok:
+            if unassigned != (gen == UInt64(0)):
+                raise DecodeError("PAY_FLAGS", True)
+        elif flags != UInt16(0) or gen != UInt64(0):
+            raise DecodeError("PAY_FLAGS", True)
+    else:
+        if flags & ~UInt16(
+            _LC_FLAG_OK | _LC_FLAG_SKIP_SYNC | _LC_FLAG_GEN_MISS
+        ) != UInt16(0):
+            raise DecodeError("PAY_FLAGS", True)
+        if miss != (gen == UInt64(0)):
+            raise DecodeError("PAY_FLAGS", True)
+    if gen != UInt64(0) and gen > _LC_GEN_MAX:
+        raise DecodeError("PAY_RANGE", True)
     var out = DecodedLifecycle(
         kind,
         flags & UInt16(_LC_FLAG_OK) != UInt16(0),
@@ -157,6 +190,7 @@ def decode_lifecycle(raw: List[UInt8]) raises DecodeError -> DecodedLifecycle:
         _lc_le64(raw, _OFF_SEQ),
         _lc_le64(raw, _OFF_KTIME),
         _lc_le64(raw, _OFF_SIZE),
+        gen,
     )
     return out^
 
@@ -176,7 +210,7 @@ def decode_copy(raw: List[UInt8]) raises DecodeError -> DecodedCopy:
         raise DecodeError("PAY_LONG", True)
     if _lc_le32(raw, _OFF_MAGIC) != UInt32(_CP_MAGIC):
         raise DecodeError("PAY_MAGIC", True)
-    if _lc_le16(raw, _OFF_VERSION) != UInt16(_VERSION):
+    if _lc_le16(raw, _OFF_VERSION) != UInt16(_CP_VERSION):
         raise DecodeError("PAY_VERSION", True)
     var kind = _lc_le16(raw, _OFF_KIND)
     if kind != UInt16(_CP_KIND_SYNC) and kind != UInt16(_CP_KIND_COPY):
@@ -250,55 +284,73 @@ def effective_bytes(
 
 
 struct LifecycleLedger:
-    """Per-event lifecycle/copy facts without map/unmap pairing.
+    """Per-event lifecycle/copy facts plus wire-gen pairing scope.
 
-    Every successful map mints one opaque generation id; an
-    unmap never claims to close a specific map. The open
-    estimate is maps minus unmaps saturated at zero, and
-    lifetimes stay explicitly unavailable until a wire with
-    mapping identity exists. Totals use checked u64
-    arithmetic: a note that would overflow raises and changes
-    nothing.
+    Wire generations render as gen-N tokens; the ledger
+    counts unknown identities (unassigned maps, missed
+    unmaps) separately so they can never hide inside a
+    paired total. The open estimate stays maps minus unmaps
+    saturated at zero and is never a pairing claim; pairing
+    itself lives in the correlation registry. Totals use
+    checked u64 arithmetic: a note that would overflow
+    raises and changes nothing.
     """
 
     var maps_ok: UInt64
     var maps_ok_bytes: UInt64
     var maps_failed: UInt64
+    var maps_unassigned: UInt64
     var unmaps: UInt64
     var unmaps_bytes: UInt64
     var unmaps_skip_sync: UInt64
+    var unmaps_gen_miss: UInt64
     var sync_requests: UInt64
     var copies_known: UInt64
     var copies_known_effective_bytes: UInt64
     var copies_unknown: UInt64
+    var saw_wire_gen: Bool
 
     def __init__(out self):
         self.maps_ok = UInt64(0)
         self.maps_ok_bytes = UInt64(0)
         self.maps_failed = UInt64(0)
+        self.maps_unassigned = UInt64(0)
         self.unmaps = UInt64(0)
         self.unmaps_bytes = UInt64(0)
         self.unmaps_skip_sync = UInt64(0)
+        self.unmaps_gen_miss = UInt64(0)
         self.sync_requests = UInt64(0)
         self.copies_known = UInt64(0)
         self.copies_known_effective_bytes = UInt64(0)
         self.copies_unknown = UInt64(0)
+        self.saw_wire_gen = False
 
     def note_lifecycle(mut self, d: DecodedLifecycle) raises -> String:
-        """Count one lifecycle record; mint a generation per map.
+        """Count one lifecycle record; report its wire token.
 
-        Returns the new opaque generation id for a successful
-        map, or the empty string for failed maps and unmaps
-        (which never pair and never mint). Raises without
-        changing the ledger if any total would exceed u64.
+        Returns the gen-N token for a known-generation map,
+        or the empty string for failed maps, unassigned maps,
+        and all unmaps (unknown identities never mint and
+        never pair here). Raises without changing the ledger
+        if any total would exceed u64.
         """
         if d.kind == UInt16(_LC_KIND_MAP):
             if d.ok:
                 var count = checked_add(self.maps_ok, UInt64(1))
                 var total = checked_add(self.maps_ok_bytes, d.size)
+                var unassigned = self.maps_unassigned
+                if d.gen == UInt64(0):
+                    unassigned = checked_add(
+                        self.maps_unassigned, UInt64(1)
+                    )
+                else:
+                    self.saw_wire_gen = True
                 self.maps_ok = count
                 self.maps_ok_bytes = total
-                return String("lc-") + format_u64(d.seq)
+                self.maps_unassigned = unassigned
+                if d.gen == UInt64(0):
+                    return String("")
+                return _wire_gen_token(d.gen)
             self.maps_failed = checked_add(self.maps_failed, UInt64(1))
             return String("")
         var ucount = checked_add(self.unmaps, UInt64(1))
@@ -306,9 +358,15 @@ struct LifecycleLedger:
         var scount = self.unmaps_skip_sync
         if d.skip_sync:
             scount = checked_add(self.unmaps_skip_sync, UInt64(1))
+        var miss = self.unmaps_gen_miss
+        if d.gen == UInt64(0):
+            miss = checked_add(self.unmaps_gen_miss, UInt64(1))
+        else:
+            self.saw_wire_gen = True
         self.unmaps = ucount
         self.unmaps_bytes = utotal
         self.unmaps_skip_sync = scount
+        self.unmaps_gen_miss = miss
         return String("")
 
     def note_copy(mut self, d: DecodedCopy) raises:
@@ -340,13 +398,19 @@ struct LifecycleLedger:
         return UInt64(0)
 
     def lifetimes_available(self) -> Bool:
-        """v1 has no mapping identity, so never."""
-        return False
+        """Eligible once any wire generation is observed."""
+        return self.saw_wire_gen
 
     def lifetimes_reason(self) -> String:
+        if self.saw_wire_gen:
+            return String(
+                "wire generations present; map/unmap pairing"
+                " eligible (misses and loss still caveat"
+                " completeness)"
+            )
         return String(
-            "v1 wire carries no mapping identity;"
-            " map/unmap pairing unavailable"
+            "no wire mapping identity observed;"
+            " pairing unavailable"
         )
 
 
@@ -355,15 +419,23 @@ def _record_id(seq: UInt64) -> String:
     return String("lc-") + format_u64(seq)
 
 
+def _wire_gen_token(gen: UInt64) -> String:
+    """Render one wire generation as an opaque mapping token."""
+    return String("gen-") + format_u64(gen)
+
+
 def normalize_lifecycle_event(d: DecodedLifecycle) -> Event:
-    """Map one decoded MVLC record onto a normalized Event.
+    """Map one decoded MVLC v2 record onto a normalized Event.
 
     Kind, timestamp, per-probe hook name, and payload are set;
     the collector stamps the capture-derived source block
     (session, seq, profile, measurement) and runs the
-    correlation registry before persisting. A failed map
-    carries no mapping id and no mapped bytes; a successful
-    map mints one record-local mapping id.
+    correlation registry before persisting. Every v2 record
+    carries the wire discriminator (has_wire_generation is
+    always True); known generations render as gen-N mapping
+    tokens, while unassigned maps and missed unmaps carry no
+    mapping id with an explicit wire_identity status. A
+    failed map carries no identity at all.
     """
     var ev = Event()
     ev.ts_ns = d.ktime
@@ -373,17 +445,33 @@ def normalize_lifecycle_event(d: DecodedLifecycle) -> Event:
         ev.source_backend = String("tracing")
         ev.map_result.operation_id = _record_id(d.seq)
         ev.map_result.success = d.ok
+        ev.map_result.has_wire_generation = True
+        ev.map_result.wire_generation = d.gen
         if d.ok:
-            ev.map_result.has_mapping_id = True
-            ev.map_result.mapping_id = _record_id(d.seq)
             ev.map_result.has_mapped_bytes = True
             ev.map_result.mapped_bytes = d.size
+            if d.gen != UInt64(0):
+                ev.map_result.has_mapping_id = True
+                ev.map_result.mapping_id = _wire_gen_token(d.gen)
+                ev.map_result.has_wire_identity = True
+                ev.map_result.wire_identity = String("known")
+            else:
+                ev.map_result.has_wire_identity = True
+                ev.map_result.wire_identity = String("unassigned")
         return ev^
     ev.kind = String("unmap")
     ev.source_hook = String(HOOK_UNMAP)
     ev.source_backend = String("tracing")
-    ev.unmap.has_mapping_id = True
-    ev.unmap.mapping_id = _record_id(d.seq)
+    ev.unmap.has_wire_generation = True
+    ev.unmap.wire_generation = d.gen
+    if d.gen != UInt64(0):
+        ev.unmap.has_mapping_id = True
+        ev.unmap.mapping_id = _wire_gen_token(d.gen)
+        ev.unmap.has_wire_identity = True
+        ev.unmap.wire_identity = String("known")
+    else:
+        ev.unmap.has_wire_identity = True
+        ev.unmap.wire_identity = String("miss")
     return ev^
 
 
@@ -392,10 +480,11 @@ def normalize_copy_event(
 ) raises NormalizeError -> Event:
     """Map one decoded MVCP record onto a normalized Event.
 
-    Sync requests become sync_request events over the whole
-    mapping (offset 0: the _single_ hooks sync no interior
-    range); the emitting probe follows from the to_device
-    flag, which only the for_device probe sets. KNOWN copies
+    Sync requests become sync_request events with unobserved
+    offset (the _single_ API admits sub-range syncs and the
+    record observes no offset, so has_offset stays False);
+    the emitting probe follows from the to_device flag,
+    which only the for_device probe sets. KNOWN copies
     become copy events with executed (never requested)
     bytes; an unknown copy raises non-fatal UNKNOWN_COPY so
     the collector drops exactly that record instead of
@@ -413,7 +502,7 @@ def normalize_copy_event(
         ev.sync.operation_id = _record_id(d.seq)
         ev.sync.has_mapping_id = True
         ev.sync.mapping_id = _record_id(d.seq)
-        ev.sync.offset = UInt64(0)
+        ev.sync.has_offset = False
         ev.sync.length = d.requested
         return ev^
     if not d.known:

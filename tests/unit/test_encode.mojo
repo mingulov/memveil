@@ -119,7 +119,7 @@ def test_bounce_exact() raises:
     assert_equal(
         encode_event(ev),
         String(
-            "{\"schema_version\":\"0.1.0\",\"session_id\":\"s1\","
+            "{\"schema_version\":\"0.1.1\",\"session_id\":\"s1\","
             "\"seq\":\"7\",\"ts_ns\":\"123\",\"kind\":\"bounce_attempt\","
             "\"source\":{\"hook\":\"h\",\"backend\":\"tracepoint\","
             "\"profile_id\":\"p\",\"measurement\":\"observed\","
@@ -145,7 +145,7 @@ def test_gap_null() raises:
     assert_equal(
         encode_event(ev),
         String(
-            "{\"schema_version\":\"0.1.0\",\"session_id\":\"s1\","
+            "{\"schema_version\":\"0.1.1\",\"session_id\":\"s1\","
             "\"seq\":\"7\",\"ts_ns\":\"123\",\"kind\":\"gap\","
             "\"source\":{\"hook\":\"h\",\"backend\":\"tracepoint\","
             "\"profile_id\":\"p\",\"measurement\":\"observed\","
@@ -357,7 +357,7 @@ def test_transition_exact() raises:
     assert_equal(
         encode_event(ev),
         String(
-            "{\"schema_version\":\"0.1.0\",\"session_id\":\"s1\","
+            "{\"schema_version\":\"0.1.1\",\"session_id\":\"s1\","
             "\"seq\":\"7\",\"ts_ns\":\"123\",\"kind\":\"transition_result\","
             "\"source\":{\"hook\":\"h\",\"backend\":\"tracepoint\","
             "\"profile_id\":\"p\",\"measurement\":\"observed\","

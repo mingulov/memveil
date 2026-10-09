@@ -68,6 +68,8 @@ static const char *reason_name(enum mv_reason reason)
         return "PAY_DIR";
     case MV_PAY_REASON:
         return "PAY_REASON";
+    case MV_PAY_RANGE:
+        return "PAY_RANGE";
     }
     return "?";
 }
@@ -89,6 +91,7 @@ struct lc_expectation {
     unsigned long long seq;
     unsigned long long ktime;
     unsigned long long size;
+    unsigned long long gen;
 };
 
 struct cp_expectation {
@@ -185,7 +188,7 @@ static int parse_lc_line(char *line, struct lc_expectation *exp)
         return 0;
     }
     exp->has_fields = 1;
-    /* kind= ok= skip= dir= seq= ktime= size= in fixed order */
+    /* kind= ok= skip= dir= seq= ktime= size= gen= in fixed order */
     if (parse_u_tok(strtok_r(NULL, " \t\r\n", &save), "kind=",
                     &exp->kind) != 0)
         return -1;
@@ -208,6 +211,9 @@ static int parse_lc_line(char *line, struct lc_expectation *exp)
         return -1;
     if (parse_u64_tok(strtok_r(NULL, " \t\r\n", &save), "size=",
                       &exp->size) != 0)
+        return -1;
+    if (parse_u64_tok(strtok_r(NULL, " \t\r\n", &save), "gen=",
+                      &exp->gen) != 0)
         return -1;
     if (strtok_r(NULL, " \t\r\n", &save) != NULL)
         return -1;
@@ -332,11 +338,12 @@ static void dump_lc_ok(FILE *dump, unsigned idx,
 {
     fprintf(dump,
             "%u lifecycle OK kind=%u ok=%u skip=%u dir=%u "
-            "seq=%llu ktime=%llu size=%llu\n",
+            "seq=%llu ktime=%llu size=%llu gen=%llu\n",
             idx, got->kind, got->ok, got->skip_sync, got->dir,
             (unsigned long long)got->seq,
             (unsigned long long)got->ktime,
-            (unsigned long long)got->size);
+            (unsigned long long)got->size,
+            (unsigned long long)got->gen);
 }
 
 static void dump_cp_ok(FILE *dump, unsigned idx,
@@ -382,7 +389,8 @@ static int check_lc_vector(uint32_t idx, const uint8_t *input,
         got.skip_sync != exp.skip || got.dir != exp.dir ||
         (unsigned long long)got.seq != exp.seq ||
         (unsigned long long)got.ktime != exp.ktime ||
-        (unsigned long long)got.size != exp.size) {
+        (unsigned long long)got.size != exp.size ||
+        (unsigned long long)got.gen != exp.gen) {
         fprintf(stderr, "lifecycle-decode: lifecycle %u field mismatch\n",
                 idx);
         return 1;
@@ -476,8 +484,10 @@ static int check_eff_vector(uint32_t idx, const uint8_t *input,
  * failure sentinel. */
 static int check_wire_vocab(void)
 {
-    if (MV_LC_LEN != 36 || MV_CP_LEN != 48)
+    if (MV_LC_LEN != 44 || MV_CP_LEN != 48)
         return fail("record length drift");
+    if (MV_LC_VERSION != 2 || MV_CP_VERSION != 1)
+        return fail("version drift");
     if (MV_LC_MAGIC != 0x434C564Du || MV_CP_MAGIC != 0x5043564Du)
         return fail("magic drift");
     if (MV_LC_KIND_MAP != 1 || MV_LC_KIND_UNMAP != 2 ||

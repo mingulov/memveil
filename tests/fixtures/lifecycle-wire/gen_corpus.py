@@ -8,8 +8,10 @@ and corpus.txt (one expectation line per record):
     <idx> <lifecycle|copy|effective> <verdict> [fields...]
 
 lifecycle OK fields: kind=N ok=N skip=N dir=N seq=N ktime=N size=N
+    gen=N (MVLC v2, 44 bytes; experimental v1 wire discontinued)
 copy OK fields: kind=N todevice=N known=N clamped=N earlyzero=N
     dir=N reason=N seq=N ktime=N requested=N effective=N
+    (MVCP stays v1, 48 bytes)
 effective vectors always carry verdict OK with fields:
     effective=N clamped=N earlyzero=N
 
@@ -29,6 +31,7 @@ BIN_PATH = os.path.join(HERE, "corpus.bin")
 TXT_PATH = os.path.join(HERE, "corpus.txt")
 
 U64MAX = (1 << 64) - 1
+GEN_MAX = (1 << 64) - 2
 I64MIN = -(1 << 63)
 KIND_LIFECYCLE = 1
 KIND_COPY = 2
@@ -39,9 +42,17 @@ CP_MAGIC = 0x5043564D  # "MVCP" little-endian
 
 
 def lc_raw(kind=1, flags=1, dir=1, seq=7, ktime=9, size=4096,
-           magic=LC_MAGIC, version=1):
-    """36-byte MVLC record."""
-    raw = struct.pack("<IHHHHQQQ", magic, version, kind, flags,
+           gen=1, magic=LC_MAGIC, version=2):
+    """44-byte MVLC v2 record (v1 prefix plus u64 generation)."""
+    raw = struct.pack("<IHHHHQQQQ", magic, version, kind, flags,
+                      dir, seq, ktime, size, gen)
+    assert len(raw) == 44, len(raw)
+    return raw
+
+
+def lc_raw_v1(kind=1, flags=1, dir=1, seq=7, ktime=9, size=4096):
+    """36-byte MVLC v1 record (retired; must fail PAY_VERSION)."""
+    raw = struct.pack("<IHHHHQQQ", LC_MAGIC, 1, kind, flags,
                       dir, seq, ktime, size)
     assert len(raw) == 36, len(raw)
     return raw
@@ -77,37 +88,68 @@ def build_vectors():
     def eff_vec(buf, **fields):
         vecs.append((KIND_EFFECTIVE, buf, "OK", fields))
 
-    # --- lifecycle valid vectors ---
-    lc_vec(lc_raw(1, 1, 1, 7, 9, 4096), "OK",
-           kind=1, ok=1, skip=0, dir=1, seq=7, ktime=9, size=4096)
-    lc_vec(lc_raw(2, 3, 2, 8, 10, 1024), "OK",
-           kind=2, ok=1, skip=1, dir=2, seq=8, ktime=10, size=1024)
-    lc_vec(lc_raw(1, 0, 1, 11, 12, 4096), "OK",
-           kind=1, ok=0, skip=0, dir=1, seq=11, ktime=12, size=4096)
-    lc_vec(lc_raw(1, 1, 0, 13, 14, 512), "OK",
-           kind=1, ok=1, skip=0, dir=0, seq=13, ktime=14, size=512)
-    lc_vec(lc_raw(2, 1, 0, U64MAX, U64MAX, U64MAX), "OK",
+    # --- lifecycle valid vectors (MVLC v2) ---
+    lc_vec(lc_raw(1, 1, 1, 7, 9, 4096, 1), "OK",
+           kind=1, ok=1, skip=0, dir=1, seq=7, ktime=9, size=4096,
+           gen=1)
+    lc_vec(lc_raw(2, 3, 2, 8, 10, 1024, 1), "OK",
+           kind=2, ok=1, skip=1, dir=2, seq=8, ktime=10, size=1024,
+           gen=1)
+    lc_vec(lc_raw(1, 0, 1, 11, 12, 4096, 0), "OK",
+           kind=1, ok=0, skip=0, dir=1, seq=11, ktime=12, size=4096,
+           gen=0)
+    lc_vec(lc_raw(1, 1, 0, 13, 14, 512, 2), "OK",
+           kind=1, ok=1, skip=0, dir=0, seq=13, ktime=14, size=512,
+           gen=2)
+    lc_vec(lc_raw(2, 1, 0, U64MAX, U64MAX, U64MAX, 3), "OK",
            kind=2, ok=1, skip=0, dir=0, seq=U64MAX, ktime=U64MAX,
-           size=U64MAX)
+           size=U64MAX, gen=3)
+    lc_vec(lc_raw(1, 9, 1, 15, 16, 4096, 0), "OK",
+           kind=1, ok=1, skip=0, dir=1, seq=15, ktime=16, size=4096,
+           gen=0)
+    lc_vec(lc_raw(2, 5, 1, 17, 18, 4096, 0), "OK",
+           kind=2, ok=1, skip=0, dir=1, seq=17, ktime=18, size=4096,
+           gen=0)
+    lc_vec(lc_raw(2, 7, 2, 19, 20, 1024, 0), "OK",
+           kind=2, ok=1, skip=1, dir=2, seq=19, ktime=20, size=1024,
+           gen=0)
+    lc_vec(lc_raw(1, 1, 1, 21, 22, 4096, GEN_MAX), "OK",
+           kind=1, ok=1, skip=0, dir=1, seq=21, ktime=22, size=4096,
+           gen=GEN_MAX)
     # --- lifecycle rejections ---
     good = lc_raw()
+    lc_vec(good[:5], "PAY_SHORT")
     lc_vec(good[:35], "PAY_SHORT")
     lc_vec(good + b"\0", "PAY_LONG")
     bad = bytearray(lc_raw())
     bad[0] = 0
     lc_vec(bytes(bad), "PAY_MAGIC")
+    lc_vec(lc_raw_v1(), "PAY_VERSION")
     bad = bytearray(lc_raw())
-    bad[4] = 2
+    bad[4] = 3
     lc_vec(bytes(bad), "PAY_VERSION")
     lc_vec(lc_raw(kind=3), "PAY_KIND")
-    lc_vec(lc_raw(flags=4), "PAY_FLAGS")
+    lc_vec(lc_raw(flags=16), "PAY_FLAGS")
+    lc_vec(lc_raw(1, 5, 1, 7, 9, 4096, 4), "PAY_FLAGS")
+    lc_vec(lc_raw(1, 9, 1, 7, 9, 4096, 4), "PAY_FLAGS")
+    lc_vec(lc_raw(1, 1, 1, 7, 9, 4096, 0), "PAY_FLAGS")
+    lc_vec(lc_raw(1, 2, 1, 7, 9, 4096, 0), "PAY_FLAGS")
+    lc_vec(lc_raw(1, 8, 1, 7, 9, 4096, 0), "PAY_FLAGS")
+    lc_vec(lc_raw(2, 9, 1, 7, 9, 4096, 0), "PAY_FLAGS")
+    lc_vec(lc_raw(2, 1, 1, 7, 9, 4096, 0), "PAY_FLAGS")
+    lc_vec(lc_raw(2, 5, 1, 7, 9, 4096, 4), "PAY_FLAGS")
     lc_vec(lc_raw(dir=3), "PAY_DIR")
-    # precedence: magic beats kind; kind beats flags; flags beat dir.
-    bad = bytearray(lc_raw(kind=9))
+    lc_vec(lc_raw(1, 1, 1, 7, 9, 4096, U64MAX), "PAY_RANGE")
+    lc_vec(lc_raw(2, 1, 1, 7, 9, 4096, U64MAX), "PAY_RANGE")
+    # precedence: magic beats version; version beats kind; kind
+    # beats flags; flags beat dir; dir beats range.
+    bad = bytearray(lc_raw(kind=9, version=9))
     bad[0] = 0
     lc_vec(bytes(bad), "PAY_MAGIC")
-    lc_vec(lc_raw(kind=9, flags=4, dir=3), "PAY_KIND")
-    lc_vec(lc_raw(kind=1, flags=4, dir=3), "PAY_FLAGS")
+    lc_vec(lc_raw(kind=9, version=9), "PAY_VERSION")
+    lc_vec(lc_raw(kind=9, flags=16, dir=3, gen=U64MAX), "PAY_KIND")
+    lc_vec(lc_raw(kind=1, flags=16, dir=3, gen=U64MAX), "PAY_FLAGS")
+    lc_vec(lc_raw(kind=1, flags=1, dir=3, gen=U64MAX), "PAY_DIR")
 
     # --- copy valid vectors ---
     cp_vec(cp_raw(2, 3, 1, 3, 4, 4096, 1024, 0), "OK",
@@ -181,16 +223,22 @@ def build_vectors():
            kind=2, todevice=1, known=1, clamped=0, earlyzero=0,
            dir=1, reason=0, seq=111, ktime=1011, requested=4096,
            effective=4096)
-    lc_vec(lc_raw(1, 0, 1, 112, 1012, 4096), "OK",
+    lc_vec(lc_raw(1, 0, 1, 112, 1012, 4096, 0), "OK",
            kind=1, ok=0, skip=0, dir=1, seq=112, ktime=1012,
-           size=4096)
-    # same numeric request reused with distinct seqs.
-    lc_vec(lc_raw(1, 1, 1, 121, 1021, 4096), "OK",
+           size=4096, gen=0)
+    # same numeric request reused with distinct generations.
+    lc_vec(lc_raw(1, 1, 1, 121, 1021, 4096, 41), "OK",
            kind=1, ok=1, skip=0, dir=1, seq=121, ktime=1021,
-           size=4096)
-    lc_vec(lc_raw(1, 1, 1, 122, 1022, 4096), "OK",
-           kind=1, ok=1, skip=0, dir=1, seq=122, ktime=1022,
-           size=4096)
+           size=4096, gen=41)
+    lc_vec(lc_raw(2, 1, 1, 122, 1022, 4096, 41), "OK",
+           kind=2, ok=1, skip=0, dir=1, seq=122, ktime=1022,
+           size=4096, gen=41)
+    lc_vec(lc_raw(1, 1, 1, 123, 1023, 4096, 42), "OK",
+           kind=1, ok=1, skip=0, dir=1, seq=123, ktime=1023,
+           size=4096, gen=42)
+    lc_vec(lc_raw(2, 1, 1, 124, 1024, 4096, 42), "OK",
+           kind=2, ok=1, skip=0, dir=1, seq=124, ktime=1024,
+           size=4096, gen=42)
 
     # --- effective-rule vectors: (size, off, alloc, valid) -> out ---
     eff_vec(eff_raw(4096, 0, 4096, 0),
@@ -216,7 +264,8 @@ def build_vectors():
     return vecs
 
 
-LC_FIELDS = ("kind", "ok", "skip", "dir", "seq", "ktime", "size")
+LC_FIELDS = ("kind", "ok", "skip", "dir", "seq", "ktime", "size",
+             "gen")
 CP_FIELDS = ("kind", "todevice", "known", "clamped", "earlyzero",
              "dir", "reason", "seq", "ktime", "requested",
              "effective")

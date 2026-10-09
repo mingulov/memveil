@@ -29,8 +29,8 @@ comptime DIAG_MAX = 2048
 
 
 def check_address_space(v: String) raises:
-    """Accept exactly kvirt, gphys, or iova."""
-    if v == "kvirt" or v == "gphys" or v == "iova":
+    """Accept exactly kvirt, gphys, iova, or tlb-phys."""
+    if v == "kvirt" or v == "gphys" or v == "iova" or v == "tlb-phys":
         return
     raise ValidationError("address_space", "unknown namespace")
 

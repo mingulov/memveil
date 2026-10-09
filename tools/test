@@ -449,7 +449,7 @@ PYEOF
     # the _parse_* accept lists and the frozen event schema, in both
     # directions, or the scan drifts from the parser.
     if python3 - "$ROOT/src/memveil/model/event.mojo" \
-        "$ROOT/schemas/event-v0.1.0.schema.json" <<'PYEOF'; then
+        "$ROOT/schemas/event-v0.1.1.schema.json" <<'PYEOF'; then
 import json, re, sys
 src = open(sys.argv[1]).read()
 schema = json.load(open(sys.argv[2]))
@@ -713,7 +713,7 @@ os.makedirs(tmp + '/flood-cap', exist_ok=True)
 open(tmp + '/flood-cap/session.json', 'w').write(json.dumps(base))
 with open(tmp + '/flood-cap/events.ndjson', 'wb') as f:
     for i in range(300):
-        d = {'schema_version': '0.1.0',
+        d = {'schema_version': '0.1.1',
              'session_id': base['session_id'],
              'seq': str(i + 1),
              'ts_ns': str(1000000000 + i * 1000),

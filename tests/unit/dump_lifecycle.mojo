@@ -143,7 +143,7 @@ def decode_lc_for_dump(inp: List[UInt8]) -> LcOut:
     except e:
         var empty = DecodedLifecycle(
             UInt16(0), False, False, UInt16(0), UInt64(0),
-            UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(0),
         )
         return LcOut(e.reason, empty^)
 
@@ -199,6 +199,8 @@ def _ok_lc_line(idx: Int, d: DecodedLifecycle) -> String:
         + format_u64(d.ktime)
         + " size="
         + format_u64(d.size)
+        + " gen="
+        + format_u64(d.gen)
         + "\n"
     )
 
@@ -250,8 +252,8 @@ def _check_lc_ok_fields(
 ) raises DumpError:
     """Compare one lifecycle OK line against decoded fields."""
     var where = String(idx)
-    if len(toks) != 10:
-        raise DumpError("vector " + where + ": want 7 lc fields")
+    if len(toks) != 11:
+        raise DumpError("vector " + where + ": want 8 lc fields")
     var keys = List[String]()
     keys.append(String("kind="))
     keys.append(String("ok="))
@@ -260,7 +262,8 @@ def _check_lc_ok_fields(
     keys.append(String("seq="))
     keys.append(String("ktime="))
     keys.append(String("size="))
-    for k in range(7):
+    keys.append(String("gen="))
+    for k in range(8):
         if not has_prefix(toks[3 + k], keys[k]):
             raise DumpError(
                 "vector " + where + ": want " + keys[k]
@@ -293,6 +296,10 @@ def _check_lc_ok_fields(
         strip_prefix(toks[9], String("size=")), "size"
     ) != d.size:
         raise DumpError("vector " + where + ": size mismatch")
+    if _parse_u64_here(
+        strip_prefix(toks[10], String("gen=")), "gen"
+    ) != d.gen:
+        raise DumpError("vector " + where + ": gen mismatch")
 
 
 def _check_cp_ok_fields(

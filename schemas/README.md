@@ -3,9 +3,11 @@
 
 These are **producer contracts**, not a generated description of existing
 software. The schemas are self-contained JSON Schema Draft 2020-12 files;
-validation never fetches references from the network. Format version `0.1.0`
-is independent of the product version, the native bridge ABI, and the BPF
-wire version.
+validation never fetches references from the network. Each family is
+versioned independently of the product version, the native bridge
+ABI, and the BPF wire version: events are at `0.1.1` (wire
+generations and unknown sync offsets); session, report, profile,
+and doctor stay at `0.1.0`.
 
 ## Files and integer representation
 

@@ -14,12 +14,13 @@
  *   CTX_NUL_MISSING, CTX_NUL_EARLY, CTX_FORCE_BAD,
  *   PAY_SHORT, PAY_LONG, PAY_MAGIC, PAY_VERSION, PAY_FLAGS,
  *   PAY_NAMELEN, PAY_NUL, PAY_PAD,
- *   PAY_KIND, PAY_DIR, PAY_REASON.
+ *   PAY_KIND, PAY_DIR, PAY_REASON, PAY_RANGE.
  *
- * Lifecycle (MVLC) and copy (MVCP) v1 records carry no device
- * identity yet: pairing map/unmap across events is later
- * product work and will extend the versioned wire. v1 proves
- * attachment, per-event facts, and executed-byte exactness.
+ * Lifecycle v2 (MVLC) records carry an opaque u64 mapping
+ * generation assigned by the lifecycle BPF object; 0 means
+ * unknown and 1..GEN_MAX are assignable. Copy (MVCP) v1
+ * records carry no identity: pairing map/unmap across
+ * events uses lifecycle generations only.
  */
 #ifndef MEMVEIL_EVENTS_H
 #define MEMVEIL_EVENTS_H
@@ -95,7 +96,8 @@ enum mv_reason {
     MV_PAY_PAD,
     MV_PAY_KIND,
     MV_PAY_DIR,
-    MV_PAY_REASON
+    MV_PAY_REASON,
+    MV_PAY_RANGE
 };
 
 /* Decoded attempt fields (host struct, not wire layout). */
@@ -212,18 +214,26 @@ _Static_assert(MV_CTX_FIXED == 41, "dynamic-data floor");
 _Static_assert(MV_CTX_READ_CAP == 512, "context read cap");
 _Static_assert(MV_CNT_LEN == 6, "counter map length");
 
-/* Lifecycle v1 record: exactly 36 bytes, little-endian, packed.
+/* Lifecycle v2 record: exactly 44 bytes, little-endian, packed.
  * kind 1 = fexit swiotlb_tbl_map_single (ok = slots found),
  * kind 2 = fentry __swiotlb_tbl_unmap_single (skip_sync from
  * attrs bit 5). dir is the raw enum dma_data_direction value
- * (0..2); 3+ never emits. No addresses, no names. */
-#define MV_LC_LEN 36
+ * (0..2); 3+ never emits. gen is the opaque mapping
+ * generation (0 = unknown, 1..GEN_MAX assignable). MAP + ok
+ * requires GEN_UNASSIGNED exactly when gen is 0 and forbids
+ * GEN_MISS; failed maps carry flags 0 and gen 0; UNMAP
+ * requires GEN_MISS exactly when gen is 0 and forbids
+ * GEN_UNASSIGNED. No addresses, no names. */
+#define MV_LC_LEN 44
 #define MV_LC_MAGIC 0x434C564Du /* "MVLC" */
-#define MV_LC_VERSION 1u
+#define MV_LC_VERSION 2u
 #define MV_LC_KIND_MAP 1u
 #define MV_LC_KIND_UNMAP 2u
 #define MV_LC_FLAG_OK 0x1u
 #define MV_LC_FLAG_SKIP_SYNC 0x2u
+#define MV_LC_FLAG_GEN_MISS 0x4u
+#define MV_LC_FLAG_GEN_UNASSIGNED 0x8u
+#define MV_LC_GEN_MAX 0xFFFFFFFFFFFFFFFEULL
 
 #define MV_LC_OFF_MAGIC 0u
 #define MV_LC_OFF_VERSION 4u
@@ -233,6 +243,7 @@ _Static_assert(MV_CNT_LEN == 6, "counter map length");
 #define MV_LC_OFF_SEQ 12u
 #define MV_LC_OFF_KTIME 20u
 #define MV_LC_OFF_SIZE 28u
+#define MV_LC_OFF_GEN 36u
 
 /* Copy v1 record: exactly 48 bytes, little-endian, packed.
  * kind 1 = sync request (carries no executed bytes by
@@ -281,6 +292,7 @@ struct mv_lifecycle {
     __u64 seq;
     __u64 ktime;
     __u64 size;
+    __u64 gen;
 };
 
 struct mv_copy {
@@ -344,30 +356,61 @@ static __inline struct mv_effective mv_effective_bytes(__u64 size,
     return out;
 }
 
-/* Decode and strictly validate one lifecycle record. */
+/* Decode and strictly validate one lifecycle v2 record.
+ * Precedence is header-first: a short buffer that cannot
+ * hold magic+version fails SHORT; then magic, version (v1
+ * bytes fail here, not on length), length, kind, flags,
+ * dir, flag/generation coupling, and generation range. */
 static __inline enum mv_reason mv_decode_lifecycle(const __u8 *buf,
                                                   __u32 len,
                                                   struct mv_lifecycle *out)
 {
     __u16 kind, flags, dir;
+    __u64 gen;
 
-    if (len < MV_LC_LEN)
+    if (len < MV_LC_OFF_VERSION + 2)
         return MV_PAY_SHORT;
-    if (len > MV_LC_LEN)
-        return MV_PAY_LONG;
     if (mv_read_le32(buf + MV_LC_OFF_MAGIC) != MV_LC_MAGIC)
         return MV_PAY_MAGIC;
     if (mv_read_le16(buf + MV_LC_OFF_VERSION) != MV_LC_VERSION)
         return MV_PAY_VERSION;
+    if (len < MV_LC_LEN)
+        return MV_PAY_SHORT;
+    if (len > MV_LC_LEN)
+        return MV_PAY_LONG;
     kind = mv_read_le16(buf + MV_LC_OFF_KIND);
     if (kind != MV_LC_KIND_MAP && kind != MV_LC_KIND_UNMAP)
         return MV_PAY_KIND;
     flags = mv_read_le16(buf + MV_LC_OFF_FLAGS);
-    if (flags & ~(__u16)(MV_LC_FLAG_OK | MV_LC_FLAG_SKIP_SYNC))
+    if (flags & ~(__u16)(MV_LC_FLAG_OK | MV_LC_FLAG_SKIP_SYNC |
+                         MV_LC_FLAG_GEN_MISS |
+                         MV_LC_FLAG_GEN_UNASSIGNED))
         return MV_PAY_FLAGS;
     dir = mv_read_le16(buf + MV_LC_OFF_DIR);
     if (dir > 2)
         return MV_PAY_DIR;
+    gen = mv_read_le64(buf + MV_LC_OFF_GEN);
+    if (kind == MV_LC_KIND_MAP) {
+        if (flags & ~(__u16)(MV_LC_FLAG_OK |
+                             MV_LC_FLAG_GEN_UNASSIGNED))
+            return MV_PAY_FLAGS;
+        if (flags & MV_LC_FLAG_OK) {
+            if (((flags & MV_LC_FLAG_GEN_UNASSIGNED) != 0) !=
+                (gen == 0))
+                return MV_PAY_FLAGS;
+        } else {
+            if (flags != 0 || gen != 0)
+                return MV_PAY_FLAGS;
+        }
+    } else {
+        if (flags & ~(__u16)(MV_LC_FLAG_OK | MV_LC_FLAG_SKIP_SYNC |
+                             MV_LC_FLAG_GEN_MISS))
+            return MV_PAY_FLAGS;
+        if (((flags & MV_LC_FLAG_GEN_MISS) != 0) != (gen == 0))
+            return MV_PAY_FLAGS;
+    }
+    if (gen != 0 && gen > MV_LC_GEN_MAX)
+        return MV_PAY_RANGE;
     out->kind = kind;
     out->ok = (__u8)((flags & MV_LC_FLAG_OK) != 0);
     out->skip_sync = (__u8)((flags & MV_LC_FLAG_SKIP_SYNC) != 0);
@@ -375,6 +418,7 @@ static __inline enum mv_reason mv_decode_lifecycle(const __u8 *buf,
     out->seq = mv_read_le64(buf + MV_LC_OFF_SEQ);
     out->ktime = mv_read_le64(buf + MV_LC_OFF_KTIME);
     out->size = mv_read_le64(buf + MV_LC_OFF_SIZE);
+    out->gen = gen;
     return MV_OK;
 }
 
@@ -430,7 +474,7 @@ static __inline enum mv_reason mv_decode_copy(const __u8 *buf,
     return MV_OK;
 }
 
-_Static_assert(MV_LC_LEN == 36, "lifecycle record length");
+_Static_assert(MV_LC_LEN == 44, "lifecycle record length");
 _Static_assert(MV_LC_MAGIC == 0x434C564D, "lifecycle magic");
 _Static_assert(MV_LC_OFF_MAGIC == 0, "lifecycle magic offset");
 _Static_assert(MV_LC_OFF_VERSION == 4, "lifecycle version offset");
@@ -440,7 +484,10 @@ _Static_assert(MV_LC_OFF_DIR == 10, "lifecycle dir offset");
 _Static_assert(MV_LC_OFF_SEQ == 12, "lifecycle seq offset");
 _Static_assert(MV_LC_OFF_KTIME == 20, "lifecycle ktime offset");
 _Static_assert(MV_LC_OFF_SIZE == 28, "lifecycle size offset");
-_Static_assert(MV_LC_OFF_SIZE + 8 == MV_LC_LEN, "lifecycle ends at size");
+_Static_assert(MV_LC_OFF_GEN == 36, "lifecycle gen offset");
+_Static_assert(MV_LC_OFF_GEN + 8 == MV_LC_LEN, "lifecycle ends at gen");
+_Static_assert(MV_LC_GEN_MAX == 0xFFFFFFFFFFFFFFFEULL,
+              "lifecycle gen max");
 _Static_assert(MV_CP_LEN == 48, "copy record length");
 _Static_assert(MV_CP_MAGIC == 0x5043564D, "copy magic");
 _Static_assert(MV_CP_OFF_MAGIC == 0, "copy magic offset");

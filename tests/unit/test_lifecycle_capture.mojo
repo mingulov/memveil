@@ -86,12 +86,12 @@ def _le64(v: UInt64) -> List[UInt8]:
 
 
 def _lc_raw(kind: Int, flags: Int, dir: Int, seq: UInt64,
-            ktime: UInt64, size: UInt64) -> List[UInt8]:
+            ktime: UInt64, size: UInt64, gen: UInt64) -> List[UInt8]:
     var out = _le32(0x434C564D)
-    var tail = _le16(1) + _le16(kind) + _le16(flags) + _le16(dir)
+    var tail = _le16(2) + _le16(kind) + _le16(flags) + _le16(dir)
     for b in tail:
         out.append(b)
-    for b in _le64(seq) + _le64(ktime) + _le64(size):
+    for b in _le64(seq) + _le64(ktime) + _le64(size) + _le64(gen):
         out.append(b)
     return out^
 
@@ -351,7 +351,7 @@ def test_nested_copies() raises:
     assert_equal(
         lines[0],
         String(
-            '{"schema_version":"0.1.0","session_id":"cap-0-7",'
+            '{"schema_version":"0.1.1","session_id":"cap-0-7",'
             '"seq":"0","ts_ns":"1001","kind":"copy","source":'
             '{"hook":"fentry:swiotlb_bounce","backend":"tracing",'
             '"profile_id":"test-profile-1","measurement":'
@@ -363,7 +363,7 @@ def test_nested_copies() raises:
     assert_equal(
         lines[1],
         String(
-            '{"schema_version":"0.1.0","session_id":"cap-0-7",'
+            '{"schema_version":"0.1.1","session_id":"cap-0-7",'
             '"seq":"1","ts_ns":"1002","kind":"copy","source":'
             '{"hook":"fentry:swiotlb_bounce","backend":"tracing",'
             '"profile_id":"test-profile-1","measurement":'
@@ -399,7 +399,7 @@ def test_nested_copies() raises:
             String(
                 '"copy_bytes":{"status":"partial","reason":'
                 '"capture ok, 2 copy events persisted; admitted'
-                ' under test-profile-1; v1 wire carries no '
+                ' under test-profile-1; v1 copy wire carries no '
                 'mapping identity","hooks":'
                 '["fentry:swiotlb_bounce"],"profile_id":'
                 '"test-profile-1"}'
@@ -415,7 +415,7 @@ def test_copy_before_failed_map() raises:
                 UInt64(4096), 0))
     payloads.append(
         _lc_raw(1, 0, 1, UInt64(112), UInt64(1012),
-                UInt64(4096)))
+                UInt64(4096), UInt64(0)))
     var c = _run(
         payloads^, _zero_cut(),
         _cut(UInt64(1), UInt64(4096), UInt64(1), UInt64(4096)),
@@ -430,14 +430,15 @@ def test_copy_before_failed_map() raises:
     assert_equal(
         lines[1],
         String(
-            '{"schema_version":"0.1.0","session_id":"cap-0-7",'
+            '{"schema_version":"0.1.1","session_id":"cap-0-7",'
             '"seq":"1","ts_ns":"1012","kind":"map_result",'
             '"source":{"hook":"fexit:swiotlb_tbl_map_single",'
             '"backend":"tracing","profile_id":"test-profile-1",'
             '"measurement":"observed","correlation":"unpaired"},'
             '"data":{"operation_id":"lc-112","success":false,'
             '"mapping_id":null,"return_code":null,'
-            '"mapped_bytes":null}}'
+            '"mapped_bytes":null,"wire_generation":"0",'
+            '"wire_identity":null}}'
         ),
     )
     assert_true(
@@ -454,7 +455,7 @@ def test_copy_before_failed_map() raises:
             c.session,
             String(
                 '"reason":"copy without pending operation; '
-                'map_result without pending operation"'
+                'failure carries no mapping"'
             ),
         )
     )
@@ -475,14 +476,14 @@ def test_sync_invents_nothing() raises:
     assert_equal(
         lines[0],
         String(
-            '{"schema_version":"0.1.0","session_id":"cap-0-7",'
+            '{"schema_version":"0.1.1","session_id":"cap-0-7",'
             '"seq":"0","ts_ns":"2001","kind":"sync_request",'
             '"source":{"hook":"fentry:__swiotlb_sync_single_'
             'for_device","backend":"tracing","profile_id":'
             '"test-profile-1","measurement":"observed",'
             '"correlation":"unpaired"},"data":{"operation_id":'
-            '"lc-201","mapping_id":"lc-201","offset":"0",'
-            '"length":"4096"}}'
+            '"lc-201","mapping_id":"lc-201","offset_known":false,'
+            '"offset":null,"length":"4096"}}'
         ),
     )
     assert_true(not _contains(c.events, String('"kind":"copy"')))
@@ -498,7 +499,7 @@ def test_sync_invents_nothing() raises:
             String(
                 '"sync_requests":{"status":"partial","reason":'
                 '"capture ok, 1 sync_request events persisted; '
-                'admitted under test-profile-1; v1 wire '
+                'admitted under test-profile-1; v1 copy wire '
                 'carries no mapping identity"'
             ),
         )
@@ -542,14 +543,14 @@ def test_early_zero_persists_proved_zero() raises:
     )
 
 
-def test_reuse_mints_distinct_ids() raises:
+def test_reuse_reports_distinct_ids() raises:
     var payloads = List[List[UInt8]]()
     payloads.append(
         _lc_raw(1, 1, 1, UInt64(121), UInt64(1021),
-                UInt64(4096)))
+                UInt64(4096), UInt64(41)))
     payloads.append(
         _lc_raw(1, 1, 1, UInt64(122), UInt64(1022),
-                UInt64(4096)))
+                UInt64(4096), UInt64(42)))
     var c = _run(
         payloads^, _zero_cut(),
         _cut(UInt64(2), UInt64(8192), UInt64(2), UInt64(8192)),
@@ -558,13 +559,13 @@ def test_reuse_mints_distinct_ids() raises:
     var lines = _lines(c.events)
     assert_equal(len(lines), 6)
     assert_true(
-        _contains(lines[0], String('"mapping_id":"lc-121"')))
+        _contains(lines[0], String('"mapping_id":"gen-41"')))
     assert_true(
-        _contains(lines[1], String('"mapping_id":"lc-122"')))
+        _contains(lines[1], String('"mapping_id":"gen-42"')))
     assert_true(
-        _contains(lines[0], String('"correlation":"unpaired"')))
+        _contains(lines[0], String('"correlation":"direct"')))
     assert_true(
-        _contains(lines[1], String('"correlation":"unpaired"')))
+        _contains(lines[1], String('"correlation":"direct"')))
     assert_true(
         _contains(
             c.session,
@@ -572,8 +573,8 @@ def test_reuse_mints_distinct_ids() raises:
                 '"mapping_lifecycle":{"status":"partial",'
                 '"reason":"capture ok, 2 map_result/unmap '
                 'events persisted; admitted under '
-                'test-profile-1; v1 wire carries no mapping '
-                'identity","hooks":['
+                'test-profile-1; v2 wire reports opaque mapping '
+                'generations when observed","hooks":['
                 '"fexit:swiotlb_tbl_map_single",'
                 '"fentry:__swiotlb_tbl_unmap_single"],'
                 '"profile_id":"test-profile-1"}'

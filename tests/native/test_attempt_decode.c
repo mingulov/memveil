@@ -72,6 +72,8 @@ static const char *reason_name(enum mv_reason reason)
         return "PAY_DIR";
     case MV_PAY_REASON:
         return "PAY_REASON";
+    case MV_PAY_RANGE:
+        return "PAY_RANGE";
     }
     return "?";
 }
