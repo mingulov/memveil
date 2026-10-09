@@ -866,6 +866,13 @@ struct Collector:
             return False
         return True
 
+    def _stop_complete(self) -> Bool:
+        """True only on present complete stop evidence."""
+        return (
+            self.has_stop_evidence
+            and self.stop_evidence.outcome == String("complete")
+        )
+
     def _stop_open_mappings(self) -> Int:
         var open = UInt64(0)
         if self.persisted_map_ok > self.persisted_unmap:
@@ -2265,10 +2272,7 @@ struct Collector:
                     self.diagnostic(done.note),
                 )
             var code = EXIT_PARTIAL
-            if (
-                self.has_stop_evidence
-                and self.stop_evidence.outcome == String("complete")
-            ):
+            if self._stop_complete():
                 code = EXIT_OK
             return RunResult(
                 code, reason, String("finalized"),
@@ -2666,10 +2670,7 @@ struct Collector:
         out.stop.busy_at_drain = stop.busy_at_drain
         out.stop.counters_valid = stop.counters_valid
         out.stop.open_mappings = UInt64(stop.open_mappings)
-        if (
-            self.has_stop_evidence
-            and stop.outcome == String("complete")
-        ):
+        if self._stop_complete():
             out.q_terminal.status = String("complete_for_scope")
             out.q_terminal.has_loss_count = False
             out.q_terminal.scope = String("capture finalization")
