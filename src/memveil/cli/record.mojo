@@ -1489,8 +1489,8 @@ def run_collector_with[W: WriterSource](
     cfg.output = opts.output
     cfg.profile_id = decision.profile.profile_id.copy()
     # Live captures sample the default SWIOTLB pool counters at
-    # start and close; unreadable counters stay in the samples
-    # as unavailable halves, never as failed runs.
+    # start, periodically, and close; unreadable counters stay
+    # in the samples as unavailable halves, never as failed runs.
     cfg.has_pool_sample = True
     cfg.pid = Int(external_call["getpid", Int32]())
     cfg.has_ring_bytes = True

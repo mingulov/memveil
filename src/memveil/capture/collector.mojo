@@ -90,6 +90,8 @@ comptime STABLE_PAIRS = 10
 comptime ADVANCE_MAX = 1000
 comptime POLL_QUANTUM_MS = 100
 comptime SETTLE_MS = 100
+comptime POOL_SAMPLE_INTERVAL_NS = UInt64(1000000000)
+comptime POOL_PERIODIC_MAX = 4096
 
 comptime CNT_OBSERVED = 0
 comptime CNT_OBSERVED_BYTES = 1
@@ -638,6 +640,9 @@ struct Collector:
     var pool_has_final: Bool
     var pool_ok: Bool
     var pool_reason: String
+    var pool_next_ts: UInt64
+    var pool_periodic: Int
+    var pool_periodic_capped: Bool
 
     def __init__(out self, cfg: CollectorConfig):
         self.cfg = cfg.copy()
@@ -773,6 +778,9 @@ struct Collector:
         self.pool_has_final = False
         self.pool_ok = False
         self.pool_reason = String("")
+        self.pool_next_ts = UInt64(0)
+        self.pool_periodic = 0
+        self.pool_periodic_capped = False
 
     def note_unknown(mut self, cause: String):
         """First deviation wins; later ones are retained."""
@@ -1082,12 +1090,16 @@ struct Collector:
             return String("attach: ") + attached.message
         if self.cfg.has_pool_sample:
             # Baseline pool sample, held for the closing path:
-            # pool samples are not bridge-delivered, so they
-            # persist as closing records, never as poll output.
+            # pool samples are not bridge-delivered, so the
+            # baseline and final persist as closing records
+            # while periodic samples persist mid-stream.
             var base = self._sample_pool_now(clock)
             self.pool_baseline = base[0]
             self.pool_baseline_ts = base[1]
             self.pool_has_baseline = True
+        self.pool_next_ts = checked_add(
+            self.attach_ns, POOL_SAMPLE_INTERVAL_NS
+        )
         print(
             String("ready session=")
             + self.session_id
@@ -1155,6 +1167,9 @@ struct Collector:
             if now >= deadline:
                 self.latch(String("duration"))
                 return String("closed")
+            var ptick = self.maybe_sample_pool(clock, writer, now)
+            if ptick != String(""):
+                return ptick
             var remaining_ms = (deadline - now) // UInt64(1000000)
             var wait = POLL_QUANTUM_MS
             if remaining_ms < UInt64(wait):
@@ -1703,6 +1718,75 @@ struct Collector:
             return String("count identity unproven")
         return String("byte coverage invalid")
 
+    def maybe_sample_pool[C: ClockSource, W: WriterSource](
+        mut self, mut clock: C, mut writer: W, now: UInt64
+    ) -> String:
+        """Persist one periodic pool sample when due; "" otherwise.
+
+        Fires at most once per loop iteration on the 1s
+        cadence and stops at 4096 samples with a session
+        note; the resync skips missed ticks without
+        backfill bursts. Unavailable reads persist as
+        unavailable samples, never as failed runs.
+        """
+        if not self.cfg.has_pool_sample:
+            return String("")
+        if self.pool_periodic_capped:
+            return String("")
+        if now < self.pool_next_ts:
+            return String("")
+        self.pool_next_ts = checked_add(now, POOL_SAMPLE_INTERVAL_NS)
+        if self.pool_periodic >= POOL_PERIODIC_MAX:
+            self.pool_periodic_capped = True
+            return String("")
+        var fired = self._sample_pool_now(clock)
+        var line: List[UInt8]
+        try:
+            line = self.pool_sample_event(fired[0], fired[1])
+        except:
+            self.next_seq -= UInt64(1)
+            self.fail(String("error"))
+            return String("error-path")
+        var verdict = self._persist_pool_mid(writer, line, fired[1])
+        if verdict != String(""):
+            return verdict
+        var sample = fired[0]
+        if sample.has_used_bytes or sample.has_capacity_bytes:
+            self.pool_ok = True
+        if self.pool_reason == String(""):
+            if sample.reason != String(""):
+                self.pool_reason = sample.reason
+        self.pool_periodic += 1
+        return String("")
+
+    def _persist_pool_mid[W: WriterSource](
+        mut self, mut writer: W, line: List[UInt8], ts_ns: UInt64
+    ) -> String:
+        """Append one periodic pool sample; "" persisted, else verdict.
+
+        Pool samples are not bridge-delivered, so they stay
+        out of the delivery identity: no persisted, omitted,
+        or write-failed counting, only the persisted-ts
+        maximum moves, honestly covering them. The attempt
+        gate still bounds their bytes, and the failure
+        mapping mirrors the attempt path.
+        """
+        var wrote = writer.append(line)
+        if wrote.ok:
+            if ts_ns > self.max_persisted_ts:
+                self.max_persisted_ts = ts_ns
+            return String("")
+        if wrote.kind == String("refused"):
+            self.next_seq -= UInt64(1)
+            self.latch(String("size_limit"))
+            return String("closed")
+        self.next_seq -= UInt64(1)
+        if wrote.kind == String("fatal") or wrote.kind == String("misuse"):
+            self.result_state = String("unfinalizable")
+            return String("unfinalizable")
+        self.fail(String("error"))
+        return String("error-path")
+
     def persist_pool_sample[W: WriterSource](
         mut self, mut writer: W, sample: NormalizedPoolSample,
         ts_ns: UInt64,
@@ -2240,10 +2324,27 @@ struct Collector:
         if self.pool_ok:
             var pcap = Capability()
             pcap.status = String("partial")
-            pcap.reason = String(
-                "default-pool debugfs samples at capture start"
-                " and close; no continuous occupancy"
+            var cadence = (
+                String("default-pool debugfs samples at capture")
+                + String(" start and close plus ")
+                + format_u64(UInt64(self.pool_periodic))
+                + String(" periodic samples (")
+                + format_u64(
+                    POOL_SAMPLE_INTERVAL_NS // UInt64(1000000000)
+                )
+                + String("s cadence)")
             )
+            if self.pool_periodic_capped:
+                cadence += (
+                    String("; periodic sampling stopped at ")
+                    + format_u64(UInt64(POOL_PERIODIC_MAX))
+                    + String(" (count cap)")
+                )
+            if self.pool_reason != String(""):
+                cadence += (
+                    String("; first read failure: ") + self.pool_reason
+                )
+            pcap.reason = cadence
             pcap.hooks.append(String("swiotlb:debugfs"))
             pcap.has_profile_id = True
             pcap.profile_id = self.cfg.profile_id
