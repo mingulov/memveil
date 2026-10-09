@@ -748,5 +748,30 @@ def test_stop_open_mappings_balance_limit() raises:
         _contains(c.session, String('"open_mappings":"0"')))
 
 
+def test_stop_open_mappings_churn() raises:
+    # Sustained generation churn: 500 map/unmap cycles
+    # with distinct generations persist exactly and
+    # close with zero open mappings; nothing accumulates.
+    var payloads = List[List[UInt8]]()
+    for i in range(500):
+        var gen = UInt64(100 + i)
+        var seq = UInt64(1000 + 2 * i)
+        var ktime = UInt64(5000 + 2 * i)
+        payloads.append(
+            _lc_raw(1, 1, 1, seq, ktime, UInt64(4096), gen))
+        payloads.append(
+            _lc_raw(2, 3, 2, seq + UInt64(1), ktime + UInt64(1),
+                    UInt64(4096), gen))
+    var c = _run(
+        payloads^, _zero_cut(),
+        _cut(UInt64(1000), UInt64(4096000),
+             UInt64(1000), UInt64(4096000)),
+        UInt64(1000), _zero_cut(), UInt64(0))
+    assert_equal(c.exit_code, EXIT_PARTIAL)
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(c.session, String('"open_mappings":"0"')))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

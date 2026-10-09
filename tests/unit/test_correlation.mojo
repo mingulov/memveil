@@ -220,6 +220,22 @@ def test_nesting_budget() raises:
     assert_equal(reg.health().status, String("partial"))
 
 
+def test_nesting_budget_production_bound() raises:
+    var reg = CorrelationRegistry()
+    reg.admit_hook("h", "iova")
+    _ = reg.normalize(_attempt("op1", "d1", "h", UInt64(1)), "ring")
+    for i in range(NESTED_MAX):
+        var cp = reg.normalize(
+            _copy("op1", "", "h", UInt64(2 + i)), "ring"
+        )
+        assert_true(_paired(cp))
+    var over = reg.normalize(
+        _copy("op1", "", "h", UInt64(2 + NESTED_MAX)), "ring"
+    )
+    assert_true(not _paired(over))
+    assert_equal(reg.health().status, String("partial"))
+
+
 def test_copy_preserved_when_map_fails() raises:
     var reg = CorrelationRegistry()
     reg.admit_hook("h", "iova")
@@ -554,6 +570,7 @@ def run() raises -> Int:
     suite.test[test_interior_sync_matches_live_generation]()
     suite.test[test_nested_copy_before_result]()
     suite.test[test_nesting_budget]()
+    suite.test[test_nesting_budget_production_bound]()
     suite.test[test_copy_preserved_when_map_fails]()
     suite.test[test_copy_after_failure_unpaired]()
     suite.test[test_interrupt_context_not_origin]()
