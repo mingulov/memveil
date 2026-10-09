@@ -56,6 +56,41 @@ recording an unverified channel.
 
 ## Signatures
 
+Signatures below are frozen against the 7.0.0-34-generic BTF
+(`phys_addr_t` is 64-bit, `size_t` is 64-bit,
+`dma_data_direction` is 0 BIDIRECTIONAL, 1 TO_DEVICE,
+2 FROM_DEVICE, 3 NONE). A profile binds these exact
+signatures before it admits the hooks; any mismatch refuses.
+
+```c
+phys_addr_t swiotlb_tbl_map_single(struct device *dev,
+    phys_addr_t orig_addr, size_t mapping_size,
+    unsigned int alloc_align_mask, enum dma_data_direction dir,
+    unsigned long attrs);
+void __swiotlb_tbl_unmap_single(struct device *dev,
+    phys_addr_t tlb_addr, size_t mapping_size,
+    enum dma_data_direction dir, unsigned long attrs,
+    struct io_tlb_pool *pool);
+void __swiotlb_sync_single_for_device(struct device *dev,
+    phys_addr_t tlb_addr, size_t size,
+    enum dma_data_direction dir, struct io_tlb_pool *pool);
+void __swiotlb_sync_single_for_cpu(struct device *dev,
+    phys_addr_t tlb_addr, size_t size,
+    enum dma_data_direction dir, struct io_tlb_pool *pool);
+void swiotlb_bounce(struct device *dev, phys_addr_t tlb_addr,
+    size_t size, enum dma_data_direction dir,
+    struct io_tlb_pool *mem);
+```
+
+Pinned layouts on the same kernel: `io_tlb_pool` size 104
+with `slots` at byte 56; `io_tlb_slot` size 24
+(`orig_addr`@0, `alloc_size`@8, `list`@16,
+`pad_slots`@18); `device_dma_parameters` size 16
+(`max_segment_size`@0, `min_align_mask`@4);
+`device.dma_parms` at byte 632. The probes declare partial
+views of these structs; CO-RE relocates the offsets at load
+and load fails closed on mismatch.
+
 Argument lists are the kernel function signatures as the probes
 read them. Map and unmap probes use the (device, tlb address)
 pair only as a kernel-private table key; sync probes ignore
