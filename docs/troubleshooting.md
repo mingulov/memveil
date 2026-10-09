@@ -24,15 +24,18 @@ capture to clean up.
 ## Reports look wrong
 
 - Exit 4 on a healthy capture is normal: terminal quality is
-  partial by design until the stop protocol is proven on the
-  exact profile (`measurement-windows.md`). Exit 0 means
-  sufficient evidence, exit 2 means invalid input.
+  partial by design while quiescence stays unproven (no kernel
+  protocol; `measurement-windows.md`). Exit 0 means sufficient
+  evidence including complete terminal evidence, exit 2 means
+  invalid input.
 - Zeros versus unavailable: a valid empty capture replays
-  `bounce_attempts = 0`; rows without their event source
+  `bounce_attempts = 0`; rows without usable evidence
   render `unavailable` with a reason, never zero. If a row
-  you expect is unavailable, the capture carries no such
-  source. Shipping captures provide attempts and optional readable
-  default-pool start/end samples; no lifecycle/copy/conversion source.
+  you expect is unavailable, read its reason: the capture may
+  carry no such source (default captures hold attempts plus
+  pool samples; lifecycle/copy/conversion need their opt-in
+  channels), or a recorded loss may have invalidated the
+  accounting.
 - Truncated input: `report` exits 2 on a torn final record;
   rerun with `--allow-partial` to drop the torn tail and
   report the loss instead (`format-compatibility.md`).

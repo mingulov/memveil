@@ -9,21 +9,26 @@ contract for shipping collection, offline analysis, and laboratory work.
 ## What this bundle contains
 
 - `record`: SWIOTLB bounce-attempt capture, requested bytes, attach-anchored
-  window/deadline, and optional readable default-pool capacity/used/high-water
-  samples at start and close, plus opt-in mapping-lifecycle and copy-actual
-  channels on the admitted profile. Admission checks profile bindings, bridge,
-  and privilege. Attempts are not outer DMA successes or actual copies.
+  window/deadline, and readable default-pool capacity/used/high-water
+  samples at start, on a best-effort 1 s cadence (cap 4,096), and close,
+  plus opt-in mapping-lifecycle and copy-actual channels on the admitted
+  profile. Admission checks profile bindings, bridge, and privilege.
+  Attempts are not outer DMA successes or actual copies.
 - `report`: offline text/JSON/Markdown analysis. Lifecycle, copy, and mapping
   reducers consume the shipped channels on the admitted profile; region and
   pool reducers work only when input supplies their evidence. Allocation
   occupancy and byte-time are distinct from sharing lifetime.
 - `top DIR`: periodic summaries of finished-capture replay prefixes.
-  Live summary remains required work.
+  `top --output` observes live with provisional prefixes; the final
+  answer always equals a replay of the retained capture.
 - Human reports expose captured kernel/profile/scope and exact window
   duration. Missing/conflicting provenance remains explicit; an unbound
   capture remains unbound. Full hashes stay available in session/JSON.
-- Passive `doctor`, versioned schemas in `schemas/`, standalone build/test
-  wrappers and source/runtime tarball packaging with licenses and manifests.
+- Passive `doctor`, and source/runtime tarball packaging with licenses
+  and manifests. The runtime tarball ships the binary, runtime closure,
+  BPF objects, profiles, docs, and example; versioned schemas in
+  `schemas/` and the standalone build/test wrappers stay in the
+  source tree.
 
 ## Evidence scope
 
@@ -55,16 +60,19 @@ Do not silently rewrite a profile hash to make them admitted.
 - No real SNP/TDX qualification. Offline region analysis and ordinary-Linux
   conversion calls do not prove a confidential transition. No attestation
   is performed, and observations are not host-access verdicts.
-- Two default-pool boundary samples cannot diagnose sustained pressure.
-  The sampler never resets high-water; equal values share an allocator
-  lifetime only if no reset occurred. Dynamic pools are outside the reader's
-  scope; see [privacy](privacy.md).
+- Pool samples are best-effort reads (start, 1 s cadence capped at
+  4,096 with missed ticks skipped, close) and cannot alone diagnose
+  sustained pressure. The sampler never resets high-water; equal values
+  share an allocator lifetime only if no reset occurred. Dynamic pools
+  are outside the reader's scope; see [privacy](privacy.md).
 - Live terminal quality stays partial: a finalized capture and a
   quiet ring do not prove writer settlement. The wired close-out
-  (5,000 ms budget, bounded drain, counter sample, finalize)
-  stamps `stop` evidence; live runs stay partial with
-  `quiescence unproven` until the kernel protocol proves
-  settlement. `record` exits 4 for a finalized capture.
+  (detach, 100 ms settle, bounded drain, 100 confirmation polls,
+  counter sample, finalize) stamps `stop` evidence with the 5,000 ms
+  budget as a completeness threshold; live runs stay partial with
+  `quiescence unproven` because no kernel protocol proves settlement.
+  `record` exits 4 for a finalized capture, and `report`/`top` exit 0
+  only with complete terminal evidence.
 - CPU targets and ELF linkage minima are compatibility prerequisites,
   not tests of every claimed platform. See [support](support.md).
 

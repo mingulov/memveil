@@ -9,7 +9,10 @@ compiler, Pixi, network, or source checkout needed. The
 [capability table](support.md#capabilities-by-mode) distinguishes the
 shipping collector, offline reducers and laboratory probes.
 Lifecycle/copy collection is qualified on one narrow profile; a full
-confidential release is not yet qualified.
+confidential release is not yet qualified. The host supplies libc,
+libm, libdl, and the dynamic loader for offline use, plus libelf
+and libz for recording; see the support envelope for the exact
+floor and tested OS.
 
 ## 1. Extract and check the version
 
@@ -33,19 +36,20 @@ config/BTF/event-format/object bindings must also hold. A rebuilt
 object can fail the binding even on that kernel.
 Passive availability is not actual attachment or qualification. A `denied
 (privilege)` hook means: re-run under `sudo` for collection, or
-stay unprivileged for replay (step 4).
+stay unprivileged and replay the shipped example (step 5); step 4
+needs a capture of your own.
 
 ## 3. Record one capture (privileged)
 
 Recording needs root (BPF load plus tracefs), the bundled BPF
 object, and the native bridge:
 
-    export LMB_NATIVE_LIB=$PWD/lib/libbpf_mojo.so.1
+    export LMB_NATIVE_LIB="$PWD/lib/libbpf_mojo.so.1"
     sudo -E ./bin/memveil record --output /tmp/cap1 \
-        --object $PWD/bpf/swiotlb_attempt.bpf.o --duration 10
+        --object "$PWD/bpf/swiotlb_attempt.bpf.o" --duration 10
 
 (`sudo -E` preserves `LMB_NATIVE_LIB`; or pass
-`--bridge $PWD/lib/libbpf_mojo.so.1` instead.) Expected: `ready
+`--bridge "$PWD/lib/libbpf_mojo.so.1"` instead.) Expected: `ready
 session=...`, then `end=duration outcome=finalized exit=4`.
 Exit 4 indicates finalized output with incomplete terminal evidence,
 including zero-event and signal stops. Exit 3 names the refusal reason (profile, bridge,
@@ -55,19 +59,25 @@ On the admitted profile, the lifecycle and copy channels are
 opt-in per run:
 
     sudo -E ./bin/memveil record --output /tmp/cap3 \
-        --object $PWD/bpf/swiotlb_attempt.bpf.o \
+        --object "$PWD/bpf/swiotlb_attempt.bpf.o" \
         --capability attempt-trace,mapping-lifecycle,copy-actual \
-        --lc-object $PWD/bpf/swiotlb_lifecycle.bpf.o \
-        --cp-object $PWD/bpf/swiotlb_copy.bpf.o --duration 10
+        --lc-object "$PWD/bpf/swiotlb_lifecycle.bpf.o" \
+        --cp-object "$PWD/bpf/swiotlb_copy.bpf.o" --duration 10
 
 Anything but the exact bound kernel and objects refuses with
 exit 3 instead of recording an unverified channel.
 
-The capture is root-owned (mode 0700/0600), so hand it to your
+Captures are root-owned (mode 0700/0600), so hand yours to your
 user before the unprivileged replay below:
 
     sudo cp -r /tmp/cap1 ~/cap1 && sudo chown -R $USER ~/cap1
     chmod 700 ~/cap1 && chmod 600 ~/cap1/*
+
+For the opt-in capture, hand off `/tmp/cap3` the same way and
+replay `~/cap3` with the step 4 commands:
+
+    sudo cp -r /tmp/cap3 ~/cap3 && sudo chown -R $USER ~/cap3
+    chmod 700 ~/cap3 && chmod 600 ~/cap3/*
 
 An idle machine usually records zero attempts with complete
 counter snapshots: a valid-empty capture, visibly different
@@ -113,9 +123,11 @@ new workload live. Each summary shows its own measured prefix duration.
 
 ## Limits in one paragraph
 
-Attempt collection with optional default-pool start/end samples when debugfs
-is readable. Two samples cannot diagnose sustained pressure; no pressure
-finding does not mean no pressure. Lifecycle and executed copies are
+Attempt collection with default-pool samples at start, on a
+best-effort 1 s cadence (cap 4,096), and close when debugfs
+is readable. Opportunistic samples with possible gaps cannot
+diagnose sustained pressure alone; no pressure finding does
+not mean no pressure. Lifecycle and executed copies are
 qualified on the one admitted profile only; sharing transitions and
 physical unions are unavailable, never inferred. One narrow bound
 profile, with no broad kernel qualification.
