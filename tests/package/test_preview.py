@@ -28,6 +28,8 @@ FORBIDDEN_CLAIMS = (
     "always-on", "complete terminal coverage",
     "fully qualified", "proves confidentiality",
     "attestation", "tamper-proof", "bank-grade",
+    "no live `top`", "live summary remains required work",
+    "not yet wired", "not wired into the live collector",
 )
 # "attestation" needs a scoped exception: docs may only say it
 # is NOT performed.
@@ -130,7 +132,8 @@ def main():
                 check("claim-%s-%s" % (rel, claim[:12]),
                       claim not in text.lower())
     support = open(os.path.join(REPO, "docs", "support.md")).read()
-    for phrase in ("partial", "out of scope"):
+    for phrase in ("partial", "out of scope", "missed ticks",
+                   "complete terminal evidence"):
         check("support-%s" % phrase.replace(" ", "-"),
               phrase in support.lower())
 
