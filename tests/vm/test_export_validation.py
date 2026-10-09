@@ -121,6 +121,28 @@ def test_inventory_lists_cannot_be_empty_objects(field):
     with pytest.raises(ValueError):inventory_snapshot(snapshot)
 
 
+def inventory_doc(settle=0.5):
+    snap=dict(bpf=dict(progs=0,maps=0),io_tlb_used=[],files=[])
+    return dict(baseline=snap,after=dict(snap),bpf_settle_s=settle,
+                dmesg_marker_present=True,suspicious=0)
+
+
+def test_inventory_settle_seconds_valid(tmp_path):
+    path=tmp_path/'inventory.json'
+    path.write_text(json.dumps(inventory_doc()))
+    export_validation.validate_lifecycle_exports(
+        {'inventory.json':path},'cleanup')
+
+
+@pytest.mark.parametrize('settle',['fast',-1,31,None,True])
+def test_inventory_settle_seconds_refused(tmp_path,settle):
+    path=tmp_path/'inventory.json'
+    path.write_text(json.dumps(inventory_doc(settle)))
+    with pytest.raises(ValueError):
+        export_validation.validate_lifecycle_exports(
+            {'inventory.json':path},'cleanup')
+
+
 def test_stop_optional_victim_values_cannot_cross_other_modes(tmp_path):
     from export_validation import validate_lifecycle_exports
     path=tmp_path/'ledger.json'
@@ -180,6 +202,7 @@ def test_escaped_equivalent_json_keys_are_duplicates(tmp_path):
     ('inventory.json','cleanup',dict(
         baseline=dict(bpf=dict(progs=0,maps=0),io_tlb_used=[],files=[]),
         after=dict(bpf=dict(progs=0,maps=0),io_tlb_used=[],files=[]),
+        bpf_settle_s=0.5,
         dmesg_marker_present=True,suspicious=0),'progs'),
     ('workload.json','realio',dict(iface='eth0',used_before=[1],used_after=[1],
         start_ns=1,end_ns=2,detach_ns=3,ping_tx=1,ping_rx=1,disk='/dev/sda',disk_bytes=512),'disk_bytes'),
@@ -221,3 +244,82 @@ def test_perf_pair_identity_and_interleaving_refused(tmp_path, case):
     else: pairs[0].reverse()
     with pytest.raises(ValueError):
         lifecycle_export(tmp_path, 'pairs.json', pairs)
+
+
+def faults_export(tmp_path, files):
+    export = tmp_path / 'export'
+    export.mkdir()
+    for name, text in files.items():
+        target = export / ('faults-' + name)
+        target.write_text(text)
+        Path(str(target) + '.sha256').write_text(
+            hashlib.sha256(target.read_bytes()).hexdigest() + '\n')
+    from vm_boot import verify_exports
+    return verify_exports(tmp_path, 'faults', list(files))
+
+
+def faults_row(scenario='f1', exit=3, cap=False, **extra):
+    row = dict(scenario=scenario, exit=exit, stderr='refused',
+               progs_before=1, progs_after=1,
+               maps_before=2, maps_after=2, settle_s=0,
+               cap=cap)
+    row.update(extra)
+    return row
+
+
+def test_faults_ledger_valid(tmp_path):
+    rows = [faults_row(),
+            faults_row('f5b', 4, True, window=[1, 2]),
+            faults_row('f4', 1, False, events_kept=True,
+                       ready='ready session=x')]
+    faults_export(tmp_path, {'faults.json': json.dumps(rows)})
+
+
+@pytest.mark.parametrize('change', [
+    lambda rows: rows.append(faults_row('f9')),
+    lambda rows: rows.append(faults_row()),
+    lambda rows: rows[0].update(exit='3'),
+    lambda rows: rows[0].update(cap='no'),
+    lambda rows: rows[0].update(window=[2, 1]),
+    lambda rows: rows[0].update(stderr='x' * 513),
+    lambda rows: rows[0].update(events_kept='yes'),
+    lambda rows: rows[0].update(settle_s='fast'),
+    lambda rows: rows[0].update(settle_s=-1),
+    lambda rows: rows[0].update(settle_s=31),
+    lambda rows: rows[0].pop('settle_s'),
+])
+def test_faults_ledger_refused(tmp_path, change):
+    rows = [faults_row()]
+    change(rows)
+    with pytest.raises(ValueError):
+        faults_export(tmp_path, {'faults.json': json.dumps(rows)})
+
+
+def test_suffixed_capture_names_valid(tmp_path):
+    session = (REPO / 'tests/fixtures/baseline/session.json'
+               ).read_text()
+    files = {
+        'q-session.json': session,
+        'q-events.ndjson': '',
+        'q-record.json': json.dumps(
+            {'exit': 4, 'ready': 'ready session=q'}),
+        'q-report.json': json.dumps(
+            {'schema_version': '0.1.0',
+             'session_id': 'baseline-session',
+             'quality': {}, 'metrics': [{}]}),
+    }
+    faults_export(tmp_path, files)
+
+
+def test_suffixed_report_session_mismatch_refused(tmp_path):
+    session = (REPO / 'tests/fixtures/baseline/session.json'
+               ).read_text()
+    files = {
+        'q-session.json': session,
+        'q-report.json': json.dumps(
+            {'schema_version': '0.1.0',
+             'session_id': 'foreign-session',
+             'quality': {}, 'metrics': [{}]}),
+    }
+    with pytest.raises(ValueError):
+        faults_export(tmp_path, files)
