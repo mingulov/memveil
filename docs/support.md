@@ -3,15 +3,16 @@
 
 ## Capabilities by mode
 
-This is an attempt-capture development preview. `0.1.0` is a
-development version; it does not mean the original lifecycle-qualified
-preview or full confidential first release has passed its gates.
+This is an attempt/lifecycle/copy development preview. `0.1.0`
+is a development version; it does not mean the original
+lifecycle-qualified preview or full confidential first release
+has passed its gates.
 
 | Capability | Shipping collection | Offline/laboratory boundary |
 | --- | --- | --- |
 | Bounce attempts/requested bytes | `swiotlb_bounced` attempts on an admitted profile; attempts are not successful DMA or actual copies | Report and replay `top` reduce captured attempts/counters without adding alternative measurements |
 | Default-pool capacity/used/high-water | Optional readable debugfs samples at start and close only | Pool reducers require matching generation/scope; two boundary samples cannot establish sustained pressure |
-| Allocation occupancy, copy, sync, lifetimes | No qualified shipping source | Offline reducers accept corresponding records; laboratory probes and scripted DMA comparisons do not qualify packaged lifecycle collection |
+| Allocation occupancy, copy, sync, lifetimes | Qualified on `linux-x86_64-7.0.0-34-generic` via `--capability` with `--lc-object`/`--cp-object`; exact bindings refuse anything else | Offline reducers accept corresponding records; laboratory probes and scripted DMA comparisons do not qualify packaged lifecycle collection |
 | Private/shared state and physical unions | No qualified shipping source | Offline region/baseline reducers and laboratory conversion probes; ordinary-Linux APIs do not prove confidential transitions |
 | Summary | No live `top` | `top DIR` replays prefixes of a finished capture |
 | Joint observers/two instances | No current-candidate qualification | Historical experiments only; see [coexistence](coexistence.md) |
@@ -24,8 +25,9 @@ pressure finding is not evidence of absent pressure.
 
 ## Configuration and artifact admission
 
-- One narrow profile with historical attempt evidence:
-  `linux-x86_64-7.0.0-34-generic` (x86-64, kernel floor 7.0).
+- One narrow profile with VM-gate attempt, lifecycle, and
+  copy evidence: `linux-x86_64-7.0.0-34-generic` (x86-64,
+  kernel floor 7.0).
   Recording admission checks exact config/BTF/event-format/object
   bindings, not just the release string. A rebuilt BPF object can
   fail the shipped binding; building/packaging/offline replay does
@@ -97,20 +99,21 @@ to carry a diagnostic the run exits 1 without one.
 
 ## Unsupported (explicitly out of scope)
 
-Older kernels (< 7.0); shipping lifecycle, copy, sync, region,
-periodic pool sampling and live summary (laboratory probes and
-offline reducers do not supply these shipping capabilities);
-sharing transitions and
+Older kernels (< 7.0); shipping region, periodic pool
+sampling and live summary (laboratory probes and offline
+reducers do not supply these shipping capabilities); sharing
+transitions and
 physical unions (rendered unavailable, never inferred);
 SNP/TDX or any attestation verdict; joint runs with other
 observers; multi-profile fleets. Doctor verdicts are passive
 observations, not host-access decisions.
 
-Mapping lifecycle, actual copy bytes, pool pressure,
-conversion requests, region state, and diagnostic findings
-reduce offline over captures that carry the corresponding
-events or baseline observations; rows without their source
-stay null with reasons, never zero.
+On the admitted profile, mapping lifecycle and actual copy
+bytes ship from the collector; pool pressure, conversion
+requests, region state, and diagnostic findings still reduce
+offline over captures that carry the corresponding events or
+baseline observations. Rows without their source stay null
+with reasons, never zero.
 
 Human reports show recorded `kernel.release`, `profile.decision`,
 `measurement_scope`, and exact duration from the report window.

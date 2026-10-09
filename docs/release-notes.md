@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # MemVeil 0.1.0 release notes (development bundle)
 
-Status: **attempt-capture development preview**. The version names
+Status: **attempt/lifecycle/copy development preview**. The version names
 development bytes and schema compatibility, not a qualified full release.
 The [capability table](support.md#capabilities-by-mode) is the support
 contract for shipping collection, offline analysis, and laboratory work.
@@ -10,12 +10,13 @@ contract for shipping collection, offline analysis, and laboratory work.
 
 - `record`: SWIOTLB bounce-attempt capture, requested bytes, attach-anchored
   window/deadline, and optional readable default-pool capacity/used/high-water
-  samples at start and close. Admission checks profile bindings, bridge,
+  samples at start and close, plus opt-in mapping-lifecycle and copy-actual
+  channels on the admitted profile. Admission checks profile bindings, bridge,
   and privilege. Attempts are not outer DMA successes or actual copies.
-- `report`: offline text/JSON/Markdown analysis. Lifecycle, copy, mapping,
-  region and pool reducers work only when input supplies their evidence;
-  they do not imply that the shipping collector supplies those records.
-  Allocation occupancy and byte-time are distinct from sharing lifetime.
+- `report`: offline text/JSON/Markdown analysis. Lifecycle, copy, and mapping
+  reducers consume the shipped channels on the admitted profile; region and
+  pool reducers work only when input supplies their evidence. Allocation
+  occupancy and byte-time are distinct from sharing lifetime.
 - `top DIR`: periodic summaries of finished-capture replay prefixes.
   Live summary remains required work.
 - Human reports expose captured kernel/profile/scope and exact window
@@ -30,8 +31,9 @@ Earlier development receipts and CI successes apply to their recorded
 revisions, binaries, BPF objects and environments. They are historical
 evidence, not a final re-gate of every later candidate. Laboratory lifecycle,
 copy and oracle lanes compare decoded probe records or synthetic translated
-reports; see [oracles](oracles.md). Their success does not qualify shipping
-lifecycle/copy collection. Historical replay/performance and coexistence
+reports; see [oracles](oracles.md). Shipping lifecycle/copy qualification
+comes from the shipped-record VM gates on the admitted profile, not from
+these laboratory comparisons. Historical replay/performance and coexistence
 experiments likewise do not establish current-candidate live overhead or
 pairing support; see [performance](performance.md) and
 [coexistence](coexistence.md).
@@ -46,10 +48,10 @@ Do not silently rewrite a profile hash to make them admitted.
 
 ## Open release gates and limits
 
-- Shipping lifecycle/copy integration, periodic pressure sampling, live
-  summary, proven writer settlement, and their independent operational
-  qualification remain open. The original lifecycle-qualified preview
-  and full confidential first release are not complete.
+- Periodic pressure sampling, live summary, proven writer settlement,
+  and their independent operational qualification remain open. The
+  original lifecycle-qualified preview and full confidential first
+  release are not complete.
 - No real SNP/TDX qualification. Offline region analysis and ordinary-Linux
   conversion calls do not prove a confidential transition. No attestation
   is performed, and observations are not host-access verdicts.

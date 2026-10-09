@@ -13,10 +13,10 @@ All five have a frozen contract: they compile to
 and the owner bundle ships all three BPF objects (attempt,
 lifecycle, copy). The tracing attaches resolve by function
 name through the bridge. Collector integration, multi-channel
-packaging, and capability-requested profile selection are
-implemented; live VM qualification of lifecycle/copy
-collection remains pending work, and no shipped profile
-declares these capabilities supported yet.
+packaging, capability-requested profile selection, and live VM
+qualification of lifecycle/copy collection are complete; the
+`linux-x86_64-7.0.0-34-generic` profile declares both
+capabilities supported with the frozen hook sets below.
 
 | Probe program | Attach | Kernel function |
 | --- | --- | --- |

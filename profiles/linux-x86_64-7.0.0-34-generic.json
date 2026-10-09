@@ -8,7 +8,7 @@
     "source": {
       "origin": "distro",
       "revision": "7.0.0-34-generic",
-      "note": "config=sha256:e75c0adab6020e72844d7431cf801a02b94ed32efc251c3b0fb80c021d065180 config_src=file btf=sha256:16205476ae9b6d621e056249052a5789d7f22c6a8c27bf291eb787f3bda5090e format=sha256:7e95fff18d1bd16c18342d821e78680a0126ff84054936fbc641e181810f0b62 object=sha256:e56081a31f80a81f8df936f3732f3a332b70788ab6eccbb68b9347f9c97cd90e image=sha256:7efd88a7facf80874d781ccb2c2421f0aaaa575e3b94760430619e826f490117 image_bid=165b9a4f9609ede635b85d0d1241ee95208e4548 ring_bytes=8388608"
+      "note": "config=sha256:e75c0adab6020e72844d7431cf801a02b94ed32efc251c3b0fb80c021d065180 config_src=file btf=sha256:16205476ae9b6d621e056249052a5789d7f22c6a8c27bf291eb787f3bda5090e format=sha256:7e95fff18d1bd16c18342d821e78680a0126ff84054936fbc641e181810f0b62 object=sha256:e56081a31f80a81f8df936f3732f3a332b70788ab6eccbb68b9347f9c97cd90e image=sha256:7efd88a7facf80874d781ccb2c2421f0aaaa575e3b94760430619e826f490117 image_bid=165b9a4f9609ede635b85d0d1241ee95208e4548 ring_bytes=8388608 lc_object=sha256:769bb7fd59e38a04555c4f80624769ca03dddb5d8d866b2b456b23d6c2b7033a lc_ring_bytes=8388608 cp_object=sha256:b2dc06309776250b90284d0f1b9757d84c5c30c6d5d2d30b349c3284a9696b1a cp_ring_bytes=8388608"
     },
     "note": "Narrow identity for the qualified gate kernel. The bindings name the exact config, BTF, tracepoint format, object, image, and build-id qualified by the live cross-check; any change fails admission until re-qualification."
   },
@@ -20,6 +20,46 @@
       "format_path": "/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format",
       "format_text": "name: swiotlb_bounced\nID: 382\nformat:\n\tfield:unsigned short common_type;\toffset:0;\tsize:2;\tsigned:0;\n\tfield:unsigned char common_flags;\toffset:2;\tsize:1;\tsigned:0;\n\tfield:unsigned char common_preempt_count;\toffset:3;\tsize:1;\tsigned:0;\n\tfield:int common_pid;\toffset:4;\tsize:4;\tsigned:1;\n\n\tfield:__data_loc char[] dev_name;\toffset:8;\tsize:4;\tsigned:0;\n\tfield:u64 dma_mask;\toffset:16;\tsize:8;\tsigned:0;\n\tfield:dma_addr_t dev_addr;\toffset:24;\tsize:8;\tsigned:0;\n\tfield:size_t size;\toffset:32;\tsize:8;\tsigned:0;\n\tfield:bool force;\toffset:40;\tsize:1;\tsigned:0;\n\nprint fmt: \"dev_name: %s dma_mask=%llx dev_addr=%llx size=%zu %s\", __get_str(dev_name), REC->dma_mask, (unsigned long long)REC->dev_addr, REC->size, REC->force ? \"FORCE\" : \"NORMAL\"\n",
       "note": "Exact tracepoint format bytes recorded during qualification; admission requires byte-equality."
+    },
+    {
+      "name": "fexit:swiotlb_tbl_map_single",
+      "kind": "tracing",
+      "function": "swiotlb_tbl_map_single",
+      "attach": "fexit",
+      "signature": "phys_addr_t swiotlb_tbl_map_single(struct device *dev, phys_addr_t orig_addr, size_t mapping_size, unsigned int alloc_align_mask, enum dma_data_direction dir, unsigned long attrs)",
+      "note": "Frozen tracing hook; admission requires the exact signature."
+    },
+    {
+      "name": "fentry:__swiotlb_tbl_unmap_single",
+      "kind": "tracing",
+      "function": "__swiotlb_tbl_unmap_single",
+      "attach": "fentry",
+      "signature": "void __swiotlb_tbl_unmap_single(struct device *dev, phys_addr_t tlb_addr, size_t mapping_size, enum dma_data_direction dir, unsigned long attrs, struct io_tlb_pool *pool)",
+      "note": "Frozen tracing hook; admission requires the exact signature."
+    },
+    {
+      "name": "fentry:__swiotlb_sync_single_for_device",
+      "kind": "tracing",
+      "function": "__swiotlb_sync_single_for_device",
+      "attach": "fentry",
+      "signature": "void __swiotlb_sync_single_for_device(struct device *dev, phys_addr_t tlb_addr, size_t size, enum dma_data_direction dir, struct io_tlb_pool *pool)",
+      "note": "Frozen tracing hook; admission requires the exact signature."
+    },
+    {
+      "name": "fentry:__swiotlb_sync_single_for_cpu",
+      "kind": "tracing",
+      "function": "__swiotlb_sync_single_for_cpu",
+      "attach": "fentry",
+      "signature": "void __swiotlb_sync_single_for_cpu(struct device *dev, phys_addr_t tlb_addr, size_t size, enum dma_data_direction dir, struct io_tlb_pool *pool)",
+      "note": "Frozen tracing hook; admission requires the exact signature."
+    },
+    {
+      "name": "fentry:swiotlb_bounce",
+      "kind": "tracing",
+      "function": "swiotlb_bounce",
+      "attach": "fentry",
+      "signature": "void swiotlb_bounce(struct device *dev, phys_addr_t tlb_addr, size_t size, enum dma_data_direction dir, struct io_tlb_pool *mem)",
+      "note": "Frozen tracing hook; admission requires the exact signature."
     }
   ],
   "capabilities": [
@@ -33,15 +73,22 @@
     },
     {
       "id": "mapping-lifecycle",
-      "status": "unsupported",
-      "hooks": [],
-      "reason": "No validated lifecycle mechanism exists."
+      "status": "supported",
+      "hooks": [
+        "fexit:swiotlb_tbl_map_single",
+        "fentry:__swiotlb_tbl_unmap_single"
+      ],
+      "reason": "Supported on this exact kernel: lifecycle collection qualified by VM-gate lanes; narrow bindings refuse every other identity."
     },
     {
       "id": "copy-actual",
-      "status": "unsupported",
-      "hooks": [],
-      "reason": "No validated executed-length source exists."
+      "status": "supported",
+      "hooks": [
+        "fentry:__swiotlb_sync_single_for_device",
+        "fentry:__swiotlb_sync_single_for_cpu",
+        "fentry:swiotlb_bounce"
+      ],
+      "reason": "Supported on this exact kernel: executed-copy collection qualified by VM-gate lanes; narrow bindings refuse every other identity."
     }
   ],
   "notes": [

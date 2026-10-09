@@ -4,8 +4,8 @@
 
 This recipe runs laboratory lifecycle/copy comparisons in a disposable VM.
 It does not qualify shipping lifecycle, successful outer DMA, per-device
-effective copying or sustained pool pressure. Shipping collection is the
-attempt collector with optional pool boundary samples; see the
+effective copying or sustained pool pressure; shipping lifecycle/copy
+qualification comes from the shipped-record VM gates instead. See the
 [support table](../support.md#capabilities-by-mode) and
 [oracle boundaries](../oracles.md).
 
@@ -47,8 +47,7 @@ relabel an older receipt as current.
 
 The reducers, probes, independent module, admission checks and wrappers
 exist. Armed historical laboratory runs and unarmed skips are distinct;
-these wrappers do not always skip. Neither outcome qualifies the shipping
-collector's missing lifecycle source. The oracle report translator uses
-synthetic provenance and partial correlation/terminal evidence. Shipping
-integration still needs real identity-preserving normalization, outer-success
-separation, independent per-device witnesses and exact-artifact qualification.
+these wrappers do not always skip. Neither outcome qualifies shipping
+collection; that qualification lives in the shipped-record VM gates on
+the admitted profile. The oracle report translator uses synthetic
+provenance and partial correlation/terminal evidence.
