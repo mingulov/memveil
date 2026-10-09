@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Host-side tests for the record3 minter transform.
 
 apply_tracing is shared by the record3 lane and the gate
