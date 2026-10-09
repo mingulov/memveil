@@ -17,7 +17,7 @@
 # record-failures, output-paths, vm-cleanup, privacy,
 # render-escaping, offline-environment, perf-replay,
 # perf-workload, soak, preview-package, provenance, source-export,
-# release-runtime, docs, examples.
+# release-runtime, docs, examples, extracted-robustness.
 #
 # A skipped suite is reported as skipped, never as success.
 # Exit 0 only when the suite passes; 1 on test failure; 2 on
@@ -1164,6 +1164,58 @@ suite_soak() {
         return 1
     fi
     python3 "$ROOT/tests/perf/soak.py"
+}
+
+suite_extracted_robustness() {
+    if [ -z "${LMB_PACKAGE:-}" ]; then
+        echo "extracted-robustness: LMB_PACKAGE is not set" >&2
+        return 1
+    fi
+    XTMP=$(mktemp -d)
+    trap 'rm -rf "$XTMP"' EXIT
+    if ! LMB_PACKAGE="$LMB_PACKAGE" "$ROOT/tools/package" \
+        >"$XTMP/package.log" 2>&1; then
+        echo "extracted-robustness: tools/package failed" >&2
+        cat "$XTMP/package.log" >&2
+        return 1
+    fi
+    TARBALL=$(sed -n 's/^package: \(.*\.tar\.gz\)$/\1/p' \
+        "$XTMP/package.log" | tail -1)
+    if [ -z "$TARBALL" ] || [ ! -f "$TARBALL" ]; then
+        echo "extracted-robustness: no tarball in package log" >&2
+        cat "$XTMP/package.log" >&2
+        return 1
+    fi
+    mkdir -p "$XTMP/tree"
+    if ! tar -xzf "$TARBALL" -C "$XTMP/tree" >"$XTMP/untar.log" 2>&1; then
+        echo "extracted-robustness: untar failed" >&2
+        cat "$XTMP/untar.log" >&2
+        return 1
+    fi
+    TOP=$(ls "$XTMP/tree")
+    XBIN="$XTMP/tree/$TOP/bin/memveil"
+    if [ ! -x "$XBIN" ]; then
+        echo "extracted-robustness: no bin/memveil in bundle" >&2
+        return 1
+    fi
+    seeds=${MEMVEIL_FUZZ_SEEDS:-10000}
+    if ! python3 "$ROOT/tests/fuzz/run.py" --seeds "$seeds" \
+        --binary "$XBIN" >"$XTMP/fuzz.log" 2>&1; then
+        echo "extracted-robustness: fuzz failed" >&2
+        tail -20 "$XTMP/fuzz.log" >&2
+        return 1
+    fi
+    tail -1 "$XTMP/fuzz.log"
+    if ! MEMVEIL_BIN="$XBIN" \
+        python3 "$ROOT/tests/privacy/test_canaries.py" \
+        >"$XTMP/canaries.log" 2>&1; then
+        echo "extracted-robustness: canaries failed" >&2
+        tail -20 "$XTMP/canaries.log" >&2
+        return 1
+    fi
+    tail -1 "$XTMP/canaries.log"
+    echo "extracted-robustness: fuzz and canaries passed on bundle binary"
+    return 0
 }
 
 suite_preview_package() {
@@ -3163,6 +3215,9 @@ case "$1" in
         ;;
     preview-package)
         suite_preview_package
+        ;;
+    extracted-robustness)
+        suite_extracted_robustness
         ;;
     provenance)
         suite_provenance
