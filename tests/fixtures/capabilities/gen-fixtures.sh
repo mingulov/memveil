@@ -224,7 +224,7 @@ printf '../profiles-test/test-validated.json\n' > "$ROOT/profiles-bad-manifest-e
 # Bad profile document.
 mkdir -p "$ROOT/profiles-bad-doc"
 printf 'bad.json\n' > "$ROOT/profiles-bad-doc/manifest.txt"
-printf '{"schema_version": "0.1.0", "profile_id": ' > "$ROOT/profiles-bad-doc/bad.json"
+printf '{"schema_version": "0.1.1", "profile_id": ' > "$ROOT/profiles-bad-doc/bad.json"
 
 # Bad meta headers (meta.txt only; the reader fails before anything else).
 mkdir -p "$ROOT/meta-bad-dup"

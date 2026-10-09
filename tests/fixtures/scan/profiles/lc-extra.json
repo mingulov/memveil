@@ -1,6 +1,6 @@
 {
   "schema_version": "0.1.1",
-  "profile_id": "scan-valid-lc",
+  "profile_id": "scan-lc-extra",
   "status": "validated",
   "identity": {
     "arch": "x86_64",
@@ -76,7 +76,8 @@
       "status": "supported",
       "hooks": [
         "fexit:swiotlb_tbl_map_single",
-        "fentry:__swiotlb_tbl_unmap_single"
+        "fentry:__swiotlb_tbl_unmap_single",
+        "swiotlb:swiotlb_bounced"
       ],
       "reason": "Scan fixture."
     },

@@ -596,6 +596,126 @@ def test_scan_mode_lc_refuses() raises:
         ),
     )
 
+
+def _decide_variant(name: String) raises -> ScanDecision:
+    """Decide the full request against one lc-variant doc."""
+    return _decide_lc(
+        String(_OK),
+        String(_PROFILES) + String("/") + name,
+        True,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(_ELF_CP),
+        String(_CAPS3),
+    )
+
+
+def test_scan_lc_wrongfunc_refuses() raises:
+    """A hook binding an unknown function refuses admission."""
+    var d = _decide_variant(String("lc-wrongfunc.json"))
+    assert_true(not d.ok)
+    assert_equal(
+        d.refusal,
+        String(
+            "capability mapping-lifecycle hook "
+            "fentry:__swiotlb_tbl_unmap_single "
+            "binds no frozen mapping-lifecycle hook"
+        ),
+    )
+
+
+def test_scan_lc_wrongattach_refuses() raises:
+    """A hook bound at the wrong attach point refuses."""
+    var d = _decide_variant(String("lc-wrongattach.json"))
+    assert_true(not d.ok)
+    assert_equal(
+        d.refusal,
+        String(
+            "capability mapping-lifecycle hook "
+            "fexit:swiotlb_tbl_map_single "
+            "binds no frozen mapping-lifecycle hook"
+        ),
+    )
+
+
+def test_scan_lc_missing_refuses() raises:
+    """A cap missing one frozen hook refuses (no vacuous bind)."""
+    var d = _decide_variant(String("lc-missing.json"))
+    assert_true(not d.ok)
+    assert_equal(
+        d.refusal,
+        String(
+            "capability mapping-lifecycle missing frozen hook "
+            "fentry:__swiotlb_tbl_unmap_single"
+        ),
+    )
+
+
+def test_scan_lc_extra_refuses() raises:
+    """A non-tracing hook named by the cap refuses."""
+    var d = _decide_variant(String("lc-extra.json"))
+    assert_true(not d.ok)
+    assert_equal(
+        d.refusal,
+        String(
+            "capability mapping-lifecycle hook "
+            "swiotlb:swiotlb_bounced is not a tracing hook"
+        ),
+    )
+
+
+def test_scan_lc_badsig_refuses() raises:
+    """A corrupted signature text refuses admission."""
+    var d = _decide_variant(String("lc-badsig.json"))
+    assert_true(not d.ok)
+    assert_equal(
+        d.refusal,
+        String(
+            "capability mapping-lifecycle hook "
+            "fexit:swiotlb_tbl_map_single signature mismatch"
+        ),
+    )
+
+
+def test_scan_lc_unknown_kernel_refuses() raises:
+    """An unparseable release covers nothing, even bound docs."""
+    var kernel = KernelInfo(
+        String("bogus"), String("x86_64"), True, String("")
+    )
+    var profiles = List[Profile]()
+    var d = decide_record(
+        String(_OK),
+        kernel,
+        profiles^,
+        String(_PROFILES) + String("/valid-lc.json"),
+        True,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(_ELF_CP),
+        String(_CAPS3),
+    )
+    assert_true(not d.ok)
+    assert_equal(
+        d.refusal, String("profile does not cover this kernel")
+    )
+
+
+def test_scan_lc_skew_root_refuses() raises:
+    """Tracing caps still need the whole-identity binding."""
+    var d = _decide_lc(
+        String(_SKEW),
+        String(_PROFILES) + String("/valid-lc.json"),
+        True,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(_ELF_CP),
+        String(_CAPS3),
+    )
+    assert_true(not d.ok)
+    assert_equal(
+        d.refusal, String("binding failed: mismatch image")
+    )
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_scan_valid_lc_record]()
@@ -606,6 +726,13 @@ def run() raises -> Int:
     suite.test[test_scan_convert_capability_refuses]()
     suite.test[test_scan_lc_needs_object]()
     suite.test[test_scan_mode_lc_refuses]()
+    suite.test[test_scan_lc_wrongfunc_refuses]()
+    suite.test[test_scan_lc_wrongattach_refuses]()
+    suite.test[test_scan_lc_missing_refuses]()
+    suite.test[test_scan_lc_extra_refuses]()
+    suite.test[test_scan_lc_badsig_refuses]()
+    suite.test[test_scan_lc_unknown_kernel_refuses]()
+    suite.test[test_scan_lc_skew_root_refuses]()
     suite.test[test_scan_validated_wins]()
     suite.test[test_scan_bound_measurements]()
     suite.test[test_scan_partial_unmeasured]()

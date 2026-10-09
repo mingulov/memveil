@@ -1,6 +1,6 @@
 {
   "schema_version": "0.1.1",
-  "profile_id": "scan-valid-lc",
+  "profile_id": "scan-lc-wrongfunc",
   "status": "validated",
   "identity": {
     "arch": "x86_64",
@@ -32,7 +32,7 @@
     {
       "name": "fentry:__swiotlb_tbl_unmap_single",
       "kind": "tracing",
-      "function": "__swiotlb_tbl_unmap_single",
+      "function": "__swiotlb_tbl_unmap_sg",
       "attach": "fentry",
       "signature": "void __swiotlb_tbl_unmap_single(struct device *dev, phys_addr_t tlb_addr, size_t mapping_size, enum dma_data_direction dir, unsigned long attrs, struct io_tlb_pool *pool)",
       "note": "Scan-fixture hook."

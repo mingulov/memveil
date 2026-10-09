@@ -480,6 +480,96 @@ def _cp_progs() -> List[_ProgWant]:
     return out^
 
 
+struct _TraceWant(Copyable):
+    var name: String
+    var function: String
+    var attach: String
+    var signature: String
+
+    def __init__(
+        out self, name: String, function: String, attach: String,
+        signature: String,
+    ):
+        self.name = name
+        self.function = function
+        self.attach = attach
+        self.signature = signature
+
+
+def _lc_trace() -> List[_TraceWant]:
+    """Frozen lifecycle tracing hooks; mirrors the hook freeze."""
+    var out = List[_TraceWant]()
+    out.append(
+        _TraceWant(
+            String("fexit:swiotlb_tbl_map_single"),
+            String("swiotlb_tbl_map_single"),
+            String("fexit"),
+            String(
+                "phys_addr_t swiotlb_tbl_map_single(struct device *dev,"
+                " phys_addr_t orig_addr, size_t mapping_size,"
+                " unsigned int alloc_align_mask,"
+                " enum dma_data_direction dir, unsigned long attrs)"
+            ),
+        )
+    )
+    out.append(
+        _TraceWant(
+            String("fentry:__swiotlb_tbl_unmap_single"),
+            String("__swiotlb_tbl_unmap_single"),
+            String("fentry"),
+            String(
+                "void __swiotlb_tbl_unmap_single(struct device *dev,"
+                " phys_addr_t tlb_addr, size_t mapping_size,"
+                " enum dma_data_direction dir, unsigned long attrs,"
+                " struct io_tlb_pool *pool)"
+            ),
+        )
+    )
+    return out^
+
+
+def _cp_trace() -> List[_TraceWant]:
+    """Frozen copy tracing hooks; mirrors the hook freeze."""
+    var out = List[_TraceWant]()
+    out.append(
+        _TraceWant(
+            String("fentry:__swiotlb_sync_single_for_device"),
+            String("__swiotlb_sync_single_for_device"),
+            String("fentry"),
+            String(
+                "void __swiotlb_sync_single_for_device(struct device *dev,"
+                " phys_addr_t tlb_addr, size_t size,"
+                " enum dma_data_direction dir, struct io_tlb_pool *pool)"
+            ),
+        )
+    )
+    out.append(
+        _TraceWant(
+            String("fentry:__swiotlb_sync_single_for_cpu"),
+            String("__swiotlb_sync_single_for_cpu"),
+            String("fentry"),
+            String(
+                "void __swiotlb_sync_single_for_cpu(struct device *dev,"
+                " phys_addr_t tlb_addr, size_t size,"
+                " enum dma_data_direction dir, struct io_tlb_pool *pool)"
+            ),
+        )
+    )
+    out.append(
+        _TraceWant(
+            String("fentry:swiotlb_bounce"),
+            String("swiotlb_bounce"),
+            String("fentry"),
+            String(
+                "void swiotlb_bounce(struct device *dev,"
+                " phys_addr_t tlb_addr, size_t size,"
+                " enum dma_data_direction dir, struct io_tlb_pool *mem)"
+            ),
+        )
+    )
+    return out^
+
+
 struct _ExtraOut(Copyable):
     var ok: Bool
     var refusal: String
@@ -826,6 +916,92 @@ def _selection_gap(doc: Profile, caps: List[String]) -> String:
     return String("")
 
 
+def _tracing_gap(doc: Profile, caps: List[String]) -> String:
+    """First reason the doc's tracing bindings fail, else "".
+
+    Every hook named by a requested extra capability must
+    be a tracing hook whose (function, attach) pair is a
+    frozen member of that capability with the exact frozen
+    signature text, and every frozen member must be named:
+    no vacuous, partial, or substituted bindings. Live
+    signature identity rides the whole-BTF binding checked
+    later; this gate pins the document side exactly.
+    """
+    for i in range(len(caps)):
+        if caps[i] == String(_ATTEMPT_CAP):
+            continue
+        var wants = _cp_trace()
+        if caps[i] == String(_LIFECYCLE_CAP):
+            wants = _lc_trace()
+        var named = List[String]()
+        for j in range(len(doc.caps)):
+            if doc.caps[j].id == caps[i]:
+                named = doc.caps[j].hooks.copy()
+                break
+        var seen = List[Bool]()
+        for j in range(len(wants)):
+            seen.append(False)
+        for j in range(len(named)):
+            var hook = ProfileHook()
+            var found = False
+            for k in range(len(doc.hooks)):
+                if doc.hooks[k].name == named[j]:
+                    hook = doc.hooks[k].copy()
+                    found = True
+                    break
+            if not found:
+                return (
+                    String("capability ")
+                    + caps[i]
+                    + String(" names unknown hook ")
+                    + named[j]
+                )
+            if hook.kind != String("tracing"):
+                return (
+                    String("capability ")
+                    + caps[i]
+                    + String(" hook ")
+                    + named[j]
+                    + String(" is not a tracing hook")
+                )
+            var member = -1
+            for k in range(len(wants)):
+                if (
+                    wants[k].function == hook.function
+                    and wants[k].attach == hook.attach
+                ):
+                    member = k
+                    break
+            if member < 0:
+                return (
+                    String("capability ")
+                    + caps[i]
+                    + String(" hook ")
+                    + named[j]
+                    + String(" binds no frozen ")
+                    + caps[i]
+                    + String(" hook")
+                )
+            if hook.signature != wants[member].signature:
+                return (
+                    String("capability ")
+                    + caps[i]
+                    + String(" hook ")
+                    + named[j]
+                    + String(" signature mismatch")
+                )
+            seen[member] = True
+        for j in range(len(wants)):
+            if not seen[j]:
+                return (
+                    String("capability ")
+                    + caps[i]
+                    + String(" missing frozen hook ")
+                    + wants[j].name
+                )
+    return String("")
+
+
 def decide_record(
     root: String,
     kernel: KernelInfo,
@@ -975,6 +1151,12 @@ def decide_record(
             if want_explicit:
                 return _refuse_scan(gap)
             skip_reason = gap.copy()
+            continue
+        var tgap = _tracing_gap(doc, ask.caps)
+        if tgap != String(""):
+            if want_explicit:
+                return _refuse_scan(tgap)
+            skip_reason = tgap.copy()
             continue
         var hook = ProfileHook()
         var raw = List[UInt8]()
