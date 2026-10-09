@@ -976,7 +976,7 @@ suite_profile_semantics() {
         echo "profile-semantics: pytest not importable" >&2
         return 1
     fi
-    python3 -m pytest "$ROOT/tests/vm/test_profile_semantics.py" "$ROOT/tests/vm/test_harness_refusal.py" "$ROOT/tests/vm/test_workflow_results.py" "$ROOT/tests/vm/test_export_validation.py" -q
+    python3 -m pytest "$ROOT/tests/vm/test_profile_semantics.py" "$ROOT/tests/vm/test_harness_refusal.py" "$ROOT/tests/vm/test_workflow_results.py" "$ROOT/tests/vm/test_export_validation.py" "$ROOT/tests/vm/test_mint_record3.py" -q
 }
 
 vm_lifecycle_preflight() {
