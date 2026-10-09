@@ -1691,6 +1691,38 @@ def test_reader_f2_lifecycle_ok() raises:
     assert_true(not g.partial)
 
 
+def test_reader_expected_dangling_ok() raises:
+    # A dangling copy/sync reference the session's correlation
+    # channel declares unpairable reads clean; the analyzer
+    # counts it as unpaired instead of the reader refusing.
+    var r = read_capture(
+        String("tests/fixtures/reader/f2-dangling-expected"),
+        False,
+        default_limits(),
+    )
+    assert_equal(len(drain_events(r)), 8)
+    assert_true(not r.partial)
+
+
+def test_reader_denied_dangling_refused() raises:
+    # The same dangling reference contradicts a session that
+    # claims complete correlation and still refuses.
+    expect_read_error(
+        String("tests/fixtures/reader/f2-dangling-denied"),
+        False,
+        default_limits(),
+        READ_INVALID,
+        3,
+    )
+
+
+def test_reader_unavailable_dangling_ok() raises:
+    var r = CaptureReader()
+    r.session.q_correlation.status = String("unavailable")
+    r._note_ref(String("lc-9"), 8)
+    r._finish_checks()
+
+
 def test_reader_ref_dedup() raises:
     # White-box bound check: repeated copy/sync references to
     # one mapping record once (first line kept), so N repeats
@@ -1912,6 +1944,9 @@ def run() raises -> Int:
     suite.test[test_reader_tail_foreign_rejected]()
     suite.test[test_reader_f2_identities]()
     suite.test[test_reader_f2_lifecycle_ok]()
+    suite.test[test_reader_expected_dangling_ok]()
+    suite.test[test_reader_denied_dangling_refused]()
+    suite.test[test_reader_unavailable_dangling_ok]()
     suite.test[test_reader_ref_dedup]()
     suite.test[test_reader_f3_overflow]()
     suite.test[test_reader_multi_chunk]()

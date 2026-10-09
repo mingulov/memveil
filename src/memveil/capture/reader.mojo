@@ -468,9 +468,24 @@ struct CaptureReader:
         self._ref_lines.append(lineno)
 
     def _finish_checks(self) raises ReadError:
-        """Resolve deferred copy/sync mapping references at end."""
+        """Resolve deferred copy/sync mapping references at end.
+
+        References the session's correlation channel declares
+        unpairable (partial or unavailable) are expected: v2
+        syncs keep record-local ids that never match gen-N keys
+        and copies keep operation id only. The analyzer counts
+        them as unpaired lifecycle events. A dangling reference
+        while the session claims complete correlation
+        contradicts the capture and refuses.
+        """
+        var corr = self.session.q_correlation.status
+        var expected = corr == String("partial") or corr == String(
+            "unavailable"
+        )
         for i in range(len(self._ref_ids)):
             if self._ref_ids[i] not in self._maps:
+                if expected:
+                    continue
                 var lineno = self._ref_lines[i]
                 raise ReadError(
                     READ_INVALID,

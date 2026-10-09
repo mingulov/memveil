@@ -771,8 +771,16 @@ def validate_stream(session, events_path):
         if event["kind"] == "pool_sample":
             pools.add(event["pool"])
         count += 1
+    # Copy/sync references the session's correlation channel
+    # declares unpairable (partial or unavailable) are expected:
+    # v2 syncs keep record-local ids that never match gen-N keys
+    # and copies keep operation id only. A dangling reference
+    # while the session claims complete correlation contradicts
+    # the capture and refuses. Unmap releases stay strict above.
+    corr = session.get("quality", {}).get("correlation", {})
+    expected = corr.get("status") in ("partial", "unavailable")
     for seq, ref in pending_refs:
-        if ref not in mappings:
+        if ref not in mappings and not expected:
             fail("unknown-mapping",
                  "seq %d references unknown mapping %s" % (seq, ref))
     return {"count": count, "attempts": attempts, "requested": requested,
@@ -1527,6 +1535,29 @@ def run_selftest():
 
     results.append(expect_reject("events-early-unmap.ndjson",
                                  early_unmap, "unknown-mapping"))
+
+    def dangling_ref_denied():
+        validate_stream(
+            life_session,
+            os.path.join(life, "events-dangling-ref.ndjson"))
+
+    results.append(expect_reject("events-dangling-ref.ndjson",
+                                 dangling_ref_denied,
+                                 "unknown-mapping"))
+
+    def dangling_ref_expected():
+        partial = copy.deepcopy(life_session)
+        partial["quality"]["correlation"]["status"] = "partial"
+        partial["quality"]["correlation"]["loss_count"] = None
+        summary = validate_stream(
+            partial,
+            os.path.join(life, "events-dangling-ref.ndjson"))
+        if summary["count"] != 8:
+            fail("wrong-metric",
+                 "dangling summary %r" % (summary,))
+        return "session-declared unpairable refs tolerated"
+
+    check("dangling-ref-expected", dangling_ref_expected)
 
     poolx = repo_path("tests", "fixtures", "pools", "extended")
     try:
