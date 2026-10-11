@@ -3,7 +3,7 @@
 """memveil record: admitted attempt capture, optional channels.
 
 ``run_record`` implements ``record --duration SEC --max-events-bytes
-N --output DIR --object PATH --bridge PATH [--profile ID]
+N --output DIR [--object PATH] [--bridge PATH] [--profile ID]
 [--capability IDS] [--lc-object PATH] [--cp-object PATH]`` against
 the live host. ``run_record_with`` is the same flow against an
 explicit evidence root and profiles directory, so tests drive
@@ -84,6 +84,12 @@ from memveil.platform.reader import (
     EvidenceReader,
     open_evidence_reader,
     read_host_file,
+    readlink_self,
+)
+from memveil.platform.runtime import (
+    discover_bridge,
+    discover_object,
+    live_uids,
 )
 from memveil.platform.signal import LiveSignalSource
 
@@ -139,7 +145,7 @@ struct RecordOptions:
 def record_usage() -> String:
     """Usage text for the record verb."""
     return (
-        "usage: memveil record --output DIR --object PATH\n"
+        "usage: memveil record --output DIR [--object PATH]\n"
         "       [--duration SEC] [--max-events-bytes N]\n"
         "       [--bridge PATH] [--profile ID|PATH]\n"
         "       [--profiles-dir DIR] [--capability IDS]\n"
@@ -147,17 +153,23 @@ def record_usage() -> String:
         "\n"
         "Capture swiotlb bounce attempts into DIR. SEC defaults\n"
         "to 60; N defaults to 1073741824 (1 GiB) and must lie\n"
-        "in 131072..4294967296. --bridge defaults to the\n"
-        "LMB_NATIVE_LIB environment path. Without --profile,\n"
-        "the first validated profile passing full identity\n"
-        "binding wins, else the first covering profile runs\n"
+        "in 131072..4294967296. Without --bridge, the native\n"
+        "bridge is discovered: LMB_NATIVE_LIB when unprivileged,\n"
+        "then beside the executable, then the system path.\n"
+        "Without --object, --lc-object, or --cp-object, each\n"
+        "BPF object is discovered beside the executable or\n"
+        "under the system directory, else the run refuses.\n"
+        "Without --profile, the first validated profile passing\n"
+        "full identity binding wins, else the first covering\n"
+        "profile runs\n"
         "partial; an explicit --profile that fails binding\n"
         "refuses. Diagnostics go to stderr.\n"
         "\n"
         "--capability selects extra channels as a comma-separated\n"
         "list without spaces (default: attempt-trace, which is\n"
-        "always required). mapping-lifecycle needs --lc-object\n"
-        "and copy-actual needs --cp-object; the winning profile\n"
+        "always required). mapping-lifecycle uses --lc-object\n"
+        "and copy-actual uses --cp-object when given, else the\n"
+        "discovered object for that channel; the winning profile\n"
         "must declare each requested capability supported and\n"
         "bind the matching object bytes, else the run refuses\n"
         "naming the capability. Extra channels never run\n"
@@ -277,8 +289,6 @@ def parse_record_args(args: List[String]) raises CliError -> RecordOptions:
             raise CliError("unexpected argument: " + tok)
     if opts.output == "":
         raise CliError("missing --output")
-    if opts.object == "":
-        raise CliError("missing --object")
     return opts^
 
 
@@ -866,8 +876,8 @@ def decide_record(
     Static object failures refuse everywhere; identity
     failures fall through in scan mode only. Requested
     extra capabilities need a supported declaration, a
-    given object path, and full extended binding; they
-    never fall back to partial.
+    resolvable object path, and full extended binding;
+    they never fall back to partial.
     """
     var out = ScanDecision()
     var ask = parse_requested_caps(want_caps)
@@ -933,11 +943,11 @@ def decide_record(
             return _refuse_scan(String("no profile covers this kernel"))
     if want_lc and lc_object == String(""):
         return _refuse_scan(
-            String("capability mapping-lifecycle needs --lc-object")
+            String("no object: pass --lc-object PATH")
         )
     if want_cp and cp_object == String(""):
         return _refuse_scan(
-            String("capability copy-actual needs --cp-object")
+            String("no object: pass --cp-object PATH")
         )
     var elf: List[UInt8]
     try:
@@ -1180,13 +1190,42 @@ def _record_misused(detail: String) raises -> Int:
 
 
 def resolve_bridge(bridge: String, has_bridge: Bool) -> String:
-    """Explicit --bridge, else LMB_NATIVE_LIB, else ""."""
-    if has_bridge:
-        return bridge
-    var path = getenv("LMB_NATIVE_LIB")
-    if path == "":
-        return String("")
-    return path
+    """Explicit --bridge verbatim, else zero-config discovery.
+
+    Thin delegate over discover_bridge: the ambient env
+    value, live uids, and kernel-resolved executable path
+    feed the pure order (env when unprivileged, bundle,
+    system). Never argv[0], PATH, or the working directory.
+    """
+    var exe_path = String("")
+    try:
+        exe_path = readlink_self()
+    except:
+        exe_path = String("")
+    return discover_bridge(
+        bridge,
+        has_bridge,
+        getenv("LMB_NATIVE_LIB"),
+        live_uids(),
+        exe_path,
+    )
+
+
+def resolve_object(
+    kind: String, explicit: String, exe_path: String
+) -> String:
+    """Explicit object path verbatim, else discovery.
+
+    ``kind`` is attempt, lifecycle, or copy. An explicit
+    path wins unprobed; otherwise the executable-relative
+    bundle path and the system path are probed in order.
+    Callers pass the kernel-resolved executable path
+    (readlink_self), never argv[0] or the working
+    directory, so tests pin discovery with fixture trees.
+    "" when nothing applies.
+    """
+    var has_explicit = explicit != String("")
+    return discover_object(kind, explicit, has_explicit, exe_path)
 
 
 def _read_boot_id(root: String, mut boot_id: String) -> Bool:
@@ -1269,12 +1308,13 @@ def run_collector_with[W: WriterSource](
     """Run admission plus collection; return the raw outcome.
 
     ``root`` is the evidence root ("" for the live host) and
-    ``profiles_dir`` holds ``manifest.txt``. The object path
-    stays exactly as given (explicit user input, never
-    root-joined). Pre-run refusals return exit 3 with an
-    empty end reason and the diagnostic unprefixed; the
-    caller adds its verb prefix. The collector runs only on
-    approval, so refusals create no BPF or output resource.
+    ``profiles_dir`` holds ``manifest.txt``. Absent bridge
+    and object paths are discovered (explicit user input
+    wins verbatim and is never root-joined). Pre-run
+    refusals return exit 3 with an empty end reason and
+    the diagnostic unprefixed; the caller adds its verb
+    prefix. The collector runs only on approval, so
+    refusals create no BPF or output resource.
     """
     if opts.max_events_bytes < MIN_RECORD_BYTES:
         return RunResult(
@@ -1292,6 +1332,25 @@ def run_collector_with[W: WriterSource](
             EXIT_REFUSAL, String(""), String(""),
             String("no bridge: pass --bridge or set LMB_NATIVE_LIB"),
         )
+    var exe_path = String("")
+    try:
+        exe_path = readlink_self()
+    except:
+        exe_path = String("")
+    var object_path = resolve_object(
+        String("attempt"), opts.object, exe_path
+    )
+    if object_path == String(""):
+        return RunResult(
+            EXIT_REFUSAL, String(""), String(""),
+            String("no object: pass --object PATH"),
+        )
+    var lc_object = resolve_object(
+        String("lifecycle"), opts.lc_object, exe_path
+    )
+    var cp_object = resolve_object(
+        String("copy"), opts.cp_object, exe_path
+    )
     var reader: EvidenceReader
     try:
         reader = open_evidence_reader(root)
@@ -1322,9 +1381,9 @@ def run_collector_with[W: WriterSource](
         profiles^,
         opts.profile,
         opts.has_profile,
-        opts.object,
-        opts.lc_object,
-        opts.cp_object,
+        object_path,
+        lc_object,
+        cp_object,
         opts.capabilities,
         profiles_dir,
     )
@@ -1494,10 +1553,11 @@ def run_record_with(
     """Run the record flow against explicit roots; return exit code.
 
     ``root`` is the evidence root ("" for the live host) and
-    ``profiles_dir`` holds ``manifest.txt``. The object path
-    stays exactly as given (explicit user input, never
-    root-joined). Refusals print one diagnostic and exit 3
-    before any BPF or output resource exists.
+    ``profiles_dir`` holds ``manifest.txt``. Absent bridge
+    and object paths are discovered (explicit user input
+    wins verbatim and is never root-joined). Refusals print
+    one diagnostic and exit 3 before any BPF or output
+    resource exists.
     """
     var writer = LiveWriter()
     var result = run_collector_with(

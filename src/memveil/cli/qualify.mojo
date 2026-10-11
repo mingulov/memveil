@@ -23,6 +23,7 @@ from memveil.cli.record import (
     RecordOptions,
     parse_requested_caps,
     resolve_bridge,
+    resolve_object,
     run_collector_with,
 )
 from memveil.cli.report import (
@@ -61,6 +62,7 @@ from memveil.platform.reader import (
     EvidenceReader,
     open_evidence_reader,
     read_host_file,
+    readlink_self,
 )
 from memveil.platform.stdout import write_stdout
 
@@ -70,6 +72,8 @@ comptime _SMOKE_DURATION_S = UInt64(3)
 comptime _SMOKE_NOTE = "smoke: attach/poll/detach, no traffic required"
 comptime _ATTEMPT = "attempt-trace"
 comptime _CONVERT = "conversion-observe"
+comptime _LIFECYCLE = "mapping-lifecycle"
+comptime _COPY = "copy-actual"
 
 comptime _O_WRONLY = 1
 comptime _O_CREAT = 64
@@ -186,15 +190,13 @@ def parse_qualify_args(args: List[String]) raises CliError -> QualifyOptions:
             raise CliError("unexpected argument: " + tok)
     if opts.output == "":
         raise CliError("missing --output")
-    if opts.object == "":
-        raise CliError("missing --object")
     return opts^
 
 
 def qualify_usage() -> String:
     """Usage text for the qualify verb."""
     return (
-        "usage: memveil qualify --output DIR --object PATH\n"
+        "usage: memveil qualify --output DIR [--object PATH]\n"
         "       [--bridge PATH] [--profile ID|PATH]\n"
         "       [--profiles-dir DIR] [--capability IDS]\n"
         "       [--lc-object PATH] [--cp-object PATH]\n"
@@ -202,15 +204,22 @@ def qualify_usage() -> String:
         "Run a short smoke capture into DIR and, when it\n"
         "proves the requested channels, publish a\n"
         "machine-local local-auto receipt under\n"
-        "<profiles-dir>/receipts. The smoke attaches,\n"
-        "polls, and detaches once; an idle ring is honest\n"
-        "success and still qualifies. Receipts never claim\n"
+        "<profiles-dir>/receipts. Without --bridge, the native\n"
+        "bridge is discovered: LMB_NATIVE_LIB when unprivileged,\n"
+        "then beside the executable, then the system path.\n"
+        "Without --object, --lc-object, or --cp-object, each\n"
+        "BPF object is discovered beside the executable or\n"
+        "under the system directory, else the run refuses.\n"
+        "The smoke attaches, polls, and detaches once; an\n"
+        "idle ring is honest success and still qualifies.\n"
+        "Receipts never claim\n"
         "validated. Diagnostics go to stderr.\n"
         "\n"
         "--capability selects channels as a comma-separated\n"
         "list without spaces (default: attempt-trace, which\n"
-        "is always required). mapping-lifecycle needs\n"
-        "--lc-object and copy-actual needs --cp-object.\n"
+        "is always required). mapping-lifecycle uses\n"
+        "--lc-object and copy-actual uses --cp-object when\n"
+        "given, else the discovered object for that channel.\n"
     )
 
 
@@ -671,14 +680,40 @@ def run_qualify_with(
     exists.
     """
     var output = opts.output.copy()
-    var object_path = opts.object.copy()
     var bridge = resolve_bridge(opts.bridge, opts.has_bridge)
+    var exe_path = String("")
+    try:
+        exe_path = readlink_self()
+    except:
+        exe_path = String("")
+    var object_path = resolve_object(
+        String("attempt"), opts.object, exe_path
+    )
+    if object_path == String(""):
+        return _qualify_failed(
+            String("no object: pass --object PATH")
+        )
     var lc_object = opts.lc_object.copy()
     var cp_object = opts.cp_object.copy()
     var want_caps = opts.capabilities.copy()
     var plan = plan_qualification(root, profiles_dir, opts)
     if not plan.ok:
         return _qualify_failed(plan.refusal.copy())
+    var want_lc = False
+    var want_cp = False
+    for i in range(len(plan.caps)):
+        if plan.caps[i] == String(_LIFECYCLE):
+            want_lc = True
+        if plan.caps[i] == String(_COPY):
+            want_cp = True
+    if lc_object == String("") and want_lc:
+        lc_object = resolve_object(
+            String("lifecycle"), String(""), exe_path
+        )
+    if cp_object == String("") and want_cp:
+        cp_object = resolve_object(
+            String("copy"), String(""), exe_path
+        )
     var ropts = RecordOptions()
     ropts.output = output.copy()
     ropts.object = object_path.copy()

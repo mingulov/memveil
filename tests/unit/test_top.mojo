@@ -28,7 +28,13 @@ from memveil.cli.top import (
     _snapshot_block,
     _wait_interval,
     parse_top_args,
+    top_usage,
 )
+
+
+def _contains(hay: String, needle: String) -> Bool:
+    """True when needle occurs in hay at least once."""
+    return len(hay.split(String(needle))) > 1
 from memveil.model.event import Event
 from memveil.model.report import Report
 from memveil.model.session import DeviceEntry, Session
@@ -130,6 +136,24 @@ def test_top_arg_errors() raises:
     except:
         raised = True
     assert_true(raised)
+
+
+def test_top_live_object_optional() raises:
+    # Live mode shares record's parser, so an absent
+    # --object parses and leaves the path for discovery.
+    var args = List[String]()
+    args.append(String("--output"))
+    args.append(String("out"))
+    var opts = parse_top_args(args^)
+    assert_true(opts.has_output)
+    assert_equal(opts.live.output, String("out"))
+    assert_equal(opts.live.object, String(""))
+
+
+def test_top_usage_discovery() raises:
+    var text = top_usage()
+    assert_true(_contains(text, String("[--object PATH]")))
+    assert_true(_contains(text, String("discover")))
 
 
 def test_boundaries() raises:
@@ -739,6 +763,8 @@ def run() raises -> Int:
     suite.test[test_top_defaults]()
     suite.test[test_top_flags]()
     suite.test[test_top_arg_errors]()
+    suite.test[test_top_live_object_optional]()
+    suite.test[test_top_usage_discovery]()
     suite.test[test_boundaries]()
     suite.test[test_cursor_streams_long_window]()
     suite.test[test_wait_slices_bounded]()

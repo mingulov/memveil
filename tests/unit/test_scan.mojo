@@ -5,11 +5,14 @@
 from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
 
+from scripted import ScriptWriter
+
 from memveil.cli.record import (
     RecordOptions,
     ScanDecision,
     decide_record,
     render_provenance,
+    run_collector_with,
     run_record_with,
 )
 from memveil.platform.evidence import KernelInfo
@@ -285,6 +288,24 @@ def test_scan_explicit_candidate() raises:
     assert_equal(
         d.reason,
         String("candidate scan-ref: bindings hold (profile unvalidated)"),
+    )
+
+
+def test_scan_no_object_refuses() raises:
+    # An absent --object with nothing discoverable
+    # refuses exit 3 before any evidence opens.
+    # Precondition: no bundle or system BPF objects are
+    # installed (else discovery resolves and the refusal
+    # moves further down the pipeline).
+    var opts = _opts(String("build/scan-noobj"))
+    opts.object = String("")
+    var writer = ScriptWriter()
+    var result = run_collector_with(
+        String(_OK), String(_PROFILES), opts^, writer
+    )
+    assert_equal(result.exit_code, 3)
+    assert_equal(
+        result.diagnostic, String("no object: pass --object PATH")
     )
 
 
@@ -572,8 +593,23 @@ def test_scan_lc_needs_object() raises:
     )
     assert_true(not d.ok)
     assert_equal(
-        d.refusal,
-        String("capability mapping-lifecycle needs --lc-object"),
+        d.refusal, String("no object: pass --lc-object PATH")
+    )
+
+
+def test_scan_cp_needs_object() raises:
+    var d = _decide_lc(
+        String(_OK),
+        String(_PROFILES) + String("/valid-lc.json"),
+        True,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(""),
+        String(_CAPS3),
+    )
+    assert_true(not d.ok)
+    assert_equal(
+        d.refusal, String("no object: pass --cp-object PATH")
     )
 
 
@@ -918,6 +954,7 @@ def run() raises -> Int:
     suite.test[test_scan_unknown_capability_refuses]()
     suite.test[test_scan_convert_capability_refuses]()
     suite.test[test_scan_lc_needs_object]()
+    suite.test[test_scan_cp_needs_object]()
     suite.test[test_scan_mode_lc_refuses]()
     suite.test[test_scan_lc_wrongfunc_refuses]()
     suite.test[test_scan_lc_wrongattach_refuses]()
@@ -937,6 +974,7 @@ def run() raises -> Int:
     suite.test[test_scan_diffconfig_partial]()
     suite.test[test_scan_skew_partial]()
     suite.test[test_scan_explicit_candidate]()
+    suite.test[test_scan_no_object_refuses]()
     suite.test[test_scan_explicit_mismatch_refuses]()
     suite.test[test_scan_saturation_mechanism]()
     suite.test[test_scan_no_coverage]()
