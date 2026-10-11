@@ -2446,6 +2446,110 @@ EOF
         ls -la "$WTMP/fstatdir" >&2
         wfailed=1
     fi
+    # Creation-time directory replacement: a foreign dir
+    # swapped in between mkdirat and the first openat must
+    # be refused before any capture file is created inside
+    # it, and its pre-existing contents must survive.
+    printf 'LOOT\n' >"$WTMP/lootref"
+    mkdir -p "$WTMP/foreign-full/sub"
+    cp "$WTMP/lootref" "$WTMP/foreign-full/loot.txt"
+    printf 'x\n' >"$WTMP/foreign-full/sub/nested.txt"
+    chmod 0700 "$WTMP/foreign-full"
+    run_createonly swapfull "swapdir:$WTMP/foreign-full:swapfull"
+    want swapfull "createonly error kind=exists"
+    if [ -e "$WTMP/swapfull/events.ndjson" ] || \
+        [ -e "$WTMP/swapfull/session.json" ]; then
+        echo "writer: swapfull wrote capture files into foreign dir" >&2
+        ls -la "$WTMP/swapfull" >&2
+        wfailed=1
+    fi
+    cmp -s "$WTMP/swapfull/loot.txt" "$WTMP/lootref" || {
+        echo "writer: swapfull damaged foreign contents" >&2
+        ls -la "$WTMP/swapfull" >&2
+        wfailed=1
+    }
+    if [ ! -d "$WTMP/swapfull.displaced" ]; then
+        echo "writer: swapfull did not displace the fresh dir" >&2
+        wfailed=1
+    fi
+    # A group/other-accessible empty dir is likewise
+    # foreign: our mkdir mode can never carry those bits.
+    mkdir -p "$WTMP/foreign-mode"
+    chmod 0755 "$WTMP/foreign-mode"
+    run_createonly swapmode "swapdir:$WTMP/foreign-mode:swapmode"
+    want swapmode "createonly error kind=exists"
+    if [ -e "$WTMP/swapmode/events.ndjson" ]; then
+        echo "writer: swapmode wrote into foreign dir" >&2
+        wfailed=1
+    fi
+    # Positive control: the same op sequence without a
+    # swap finalizes.
+    run_createonly swapclean ""
+    want swapclean "createonly ok status=finalized committed=2"
+    run_pincheck() { # <case> <modes>
+        MVSHIM="$2" MVSHIM_COUNT="$WTMP/$1.count" \
+            LD_PRELOAD="$SHIM" \
+            "$PROBE" pincheck "$WTMP/$1" >"$WTMP/$1.log" 2>&1
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            echo "writer: case $1 exits $rc" >&2
+            cat "$WTMP/$1.log" >&2
+            wfailed=1
+        fi
+    }
+    # Session-origin verification must not fail open: a
+    # planted session.json swapped in after rename is
+    # refused against the tmp identity even when the
+    # later tmp re-pin fails.
+    printf 'PLANTED\n' >"$WTMP/plant-s1control"
+    printf 'PLANTED\n' >"$WTMP/plant-s1failopen"
+    printf 'PLANTED\n' >"$WTMP/plantref"
+    bytes_of '{' 9 "$WTMP/sess10"
+    printf '\n' >>"$WTMP/sess10"
+    run_pincheck s1control "swap_session:$WTMP/plant-s1control"
+    want s1control "pincheck status=unfinalized note=session replaced after rename pin=0"
+    want_file s1control session.json "$WTMP/plantref"
+    want_file s1control session.json.displaced "$WTMP/sess10"
+    run_pincheck s1failopen "fstat_fail_tmp_written,swap_session:$WTMP/plant-s1failopen"
+    want s1failopen "pincheck status=unfinalized note=session replaced after rename pin=0"
+    want_file s1failopen session.json "$WTMP/plantref"
+    want_file s1failopen session.json.displaced "$WTMP/sess10"
+    # A tmp pin failure at creation refuses finalization
+    # outright: unfinalized, never finalized.
+    run_pincheck s1unavail "fstat_fail_tmp"
+    want s1unavail "pincheck status=unfinalized note=tmp pin failed; tmp left in place pin=0"
+    run_fdleak() { # <case> <modes>
+        MVSHIM="$2" MVSHIM_COUNT="$WTMP/$1.count" \
+            LD_PRELOAD="$SHIM" \
+            "$PROBE" fdleak "$WTMP/$1" >"$WTMP/$1.log" 2>&1
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            echo "writer: case $1 exits $rc" >&2
+            cat "$WTMP/$1.log" >&2
+            wfailed=1
+        fi
+    }
+    check_fd_delta() { # <case> <want-delta>
+        line=$(grep -F "fdleak status=" "$WTMP/$1.log" | head -1)
+        before_n=$(printf '%s' "$line" | sed 's/.* before=\([0-9]*\) after=.*/\1/')
+        after_n=$(printf '%s' "$line" | sed 's/.* after=\([0-9]*\)$/\1/')
+        if [ "$((before_n - after_n))" != "$2" ]; then
+            echo "writer: case $1 fd delta $((before_n - after_n)), want $2" >&2
+            cat "$WTMP/$1.log" >&2
+            wfailed=1
+        fi
+    }
+    # Finalize releases exactly the three held descriptors
+    # (events, dir, parent); tmp and session pins close on
+    # every path.
+    run_fdleak fdclean ""
+    want fdclean "fdleak status=finalized"
+    check_fd_delta fdclean 3
+    # A session fstat failure still refuses publication and
+    # recovers every descriptor (no sess_fd leak).
+    run_fdleak sessleak "fstat_fail_session"
+    want sessleak "fdleak status=unfinalized note=session pin failed"
+    check_fd_delta sessleak 3
     run_livecreate() { # <case> <modes>
         MVSHIM="$2" MVSHIM_COUNT="$WTMP/$1.count" \
             LD_PRELOAD="$SHIM" \
@@ -2607,7 +2711,7 @@ EOF
         echo "writer: EventWriter FAILED" >&2
         return 1
     fi
-    echo "writer: EventWriter primitive passed (unit + 17 shim cases + race)"
+    echo "writer: EventWriter primitive passed (unit + 25 shim cases + race)"
     return 0
 }
 

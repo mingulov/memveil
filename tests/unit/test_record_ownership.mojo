@@ -357,6 +357,36 @@ def test_restore_rejects_dir_replacement() raises:
     assert_equal(_t_lstat_uid(cap2 + String("/session.json")), uid)
 
 
+def test_restore_refuses_foreign_entries() raises:
+    # Root-only foreign-entry probe: a capture dir
+    # holding an extra planted file must not transfer at
+    # all (neither children nor the dir itself), while a
+    # clean capture repairs. Without the entry check the
+    # dir hands back out from under the foreign file.
+    if _geteuid_live() != 0:
+        return
+    var uid = _parse_sudo_id(getenv("SUDO_UID"))
+    var gid = _parse_sudo_id(getenv("SUDO_GID"))
+    if uid <= 0 or gid < 0:
+        return
+    var base = _stop_mkdtemp()
+    var cap1 = base + String("/cap1")
+    var cap2 = base + String("/cap2")
+    var want1 = _t_finalize_cap(cap1)
+    var want2 = _t_finalize_cap(cap2)
+    _t_write(cap1 + String("/stowaway.txt"), String("FOREIGN\n"))
+    _restore_sudo_ownership(cap1, want1)
+    assert_equal(_t_lstat_uid(cap1), 0)
+    assert_equal(_t_lstat_uid(cap1 + String("/events.ndjson")), 0)
+    assert_equal(_t_lstat_uid(cap1 + String("/session.json")), 0)
+    assert_equal(_t_lstat_uid(cap1 + String("/stowaway.txt")), 0)
+    # Positive control: the clean dir repairs.
+    _restore_sudo_ownership(cap2, want2)
+    assert_equal(_t_lstat_uid(cap2), uid)
+    assert_equal(_t_lstat_uid(cap2 + String("/events.ndjson")), uid)
+    assert_equal(_t_lstat_uid(cap2 + String("/session.json")), uid)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_restore_rejects_symlink_swap]()
@@ -366,6 +396,7 @@ def run() raises -> Int:
     suite.test[test_child_ok_rejects_hardlink]()
     suite.test[test_repair_child_owner_arms_need_root]()
     suite.test[test_restore_rejects_dir_replacement]()
+    suite.test[test_restore_refuses_foreign_entries]()
     suite^.run()
     return 0
 
