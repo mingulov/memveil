@@ -373,3 +373,77 @@ def test_rpm_fedora_journey():
         proc.stdout or "journey qualify refusal: " in proc.stdout, \
         "journey never qualified"
     assert "journey: all steps passed" in proc.stdout
+
+
+def _write_executable(path, body):
+    path.write_text(body)
+    path.chmod(0o755)
+
+
+def test_rpm_journey_refuses_retained_receipts(tmp_path):
+    # Retained receipts must block the rpm journey before
+    # installation: no dnf install attempt, no deletion,
+    # and the survivor stays byte-identical (the .deb
+    # `_preflight_fresh_state` semantics). Needs no
+    # .rpm/docker: the journey script runs against a staged
+    # receipts dir (MV_RECEIPTS_DIR) with dnf stubbed to
+    # log every call and rpm stubbed to fail. Pre-gate the
+    # script installs first, so the no-install assertion
+    # fails there (RED).
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    sentinel = receipts / "pre-existing-receipt.json"
+    sentinel.write_bytes(
+        b'{"profile_id": "linux-x86_64-7.0.0-99-test"}\n')
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    calls = tmp_path / "dnf-calls.log"
+    _write_executable(
+        bindir / "dnf",
+        "#!/bin/sh\necho \"$@\" >>\"%s\"\nexit 0\n" % calls)
+    _write_executable(bindir / "rpm", "#!/bin/sh\nexit 1\n")
+    env = dict(os.environ)
+    env["PATH"] = "%s:%s" % (bindir, env.get("PATH", ""))
+    env["MV_RECEIPTS_DIR"] = str(receipts)
+    script = os.path.join(REPO, "tests", "package",
+                           "rpm_journey.sh")
+    proc = run("bash", script, str(tmp_path / "dummy.rpm"),
+               env=env, timeout=120)
+    assert proc.returncode != 0, proc.stdout
+    assert not calls.exists(), \
+        "install attempted despite retained receipts"
+    assert "refusing install" in proc.stderr, proc.stderr
+    assert "pre-existing-receipt.json" in proc.stderr, \
+        proc.stderr
+    assert sentinel.read_bytes() == \
+        b'{"profile_id": "linux-x86_64-7.0.0-99-test"}\n'
+
+
+def test_rpm_journey_preflight_fresh_proceeds_to_install(tmp_path):
+    # Positive control for the gate above: with a fresh
+    # (empty) staged receipts dir the journey must reach
+    # dnf install. The stubbed install succeeds and the run
+    # then dies at the stubbed `rpm -V`; the dnf call log
+    # proves the gate passed and the harness detects
+    # install attempts.
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    calls = tmp_path / "dnf-calls.log"
+    _write_executable(
+        bindir / "dnf",
+        "#!/bin/sh\necho \"$@\" >>\"%s\"\nexit 0\n" % calls)
+    _write_executable(bindir / "rpm", "#!/bin/sh\nexit 1\n")
+    env = dict(os.environ)
+    env["PATH"] = "%s:%s" % (bindir, env.get("PATH", ""))
+    env["MV_RECEIPTS_DIR"] = str(receipts)
+    script = os.path.join(REPO, "tests", "package",
+                           "rpm_journey.sh")
+    proc = run("bash", script, str(tmp_path / "dummy.rpm"),
+               env=env, timeout=120)
+    assert proc.returncode != 0, proc.stdout
+    assert "retained receipts" not in proc.stderr, proc.stderr
+    assert calls.exists(), "fresh run never reached dnf"
+    assert "dummy.rpm" in calls.read_text(), \
+        calls.read_text()
