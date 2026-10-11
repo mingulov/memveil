@@ -240,6 +240,9 @@ struct TeeWriter[S: RefreshSink & Movable & Deinitable](WriterSource):
     def committed_len(self) -> Int:
         return self._inner.committed_len()
 
+    def finalized_identity(self) -> List[UInt64]:
+        return self._inner.finalized_identity()
+
     def emission_count(self) -> Int:
         """Refreshes the sink accepted so far."""
         return self._emissions

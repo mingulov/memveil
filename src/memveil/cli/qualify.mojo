@@ -716,7 +716,9 @@ def run_qualify_with(
     # through the snapshot's fd alias and the receipt
     # binds the snapshot hash, so a pathname swap on
     # either side of the smoke binds nothing new. The
-    # snapshot lives in this scope, covering the smoke.
+    # keep-alive touch after the smoke holds the fd
+    # through every open inside it; scope alone does
+    # not (Mojo destroys after its last use).
     var snap = open_bridge_snapshot(bridge)
     var exe_path = String("")
     try:
@@ -734,8 +736,9 @@ def run_qualify_with(
     # bridge: the smoke reads through the snapshot
     # aliases and the receipt binds the snapshot
     # hashes, so a pathname swap on either side of
-    # the smoke binds nothing new. The snapshots
-    # live in this scope, covering the smoke.
+    # the smoke binds nothing new. The keep-alive
+    # touches after the smoke hold the fds through
+    # every read inside it; scope alone does not.
     var obj_snap = open_object_snapshot(object_path)
     var lc_object = opts.lc_object.copy()
     var cp_object = opts.cp_object.copy()
@@ -780,6 +783,13 @@ def run_qualify_with(
     var result = run_collector_with(
         root, profiles_dir, ropts^, writer
     )
+    # Retain the smoke pins through every open inside
+    # the smoke above: explicit last uses covering all
+    # return paths (mint uses below cover success only).
+    _ = snap.fd
+    _ = obj_snap.fd
+    _ = lc_snap.fd
+    _ = cp_snap.fd
     if (
         result.outcome != String("finalized")
         or result.end_reason != String("duration")

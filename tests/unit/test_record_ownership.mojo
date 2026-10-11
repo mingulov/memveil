@@ -20,10 +20,12 @@ from std.testing import TestSuite, assert_equal, assert_true
 
 from scripted import _stop_mkdtemp
 
+from memveil.capture.writer import EventWriter
 from memveil.cli.record import (
     _own_child_ok,
     _own_close_quiet,
     _own_fd_uid,
+    _own_fstat_devino,
     _own_open_child,
     _own_open_dir,
     _own_repair_child,
@@ -117,6 +119,50 @@ def _t_symlink(target: String, link: String) raises:
         raise Error("symlink failed for " + link)
 
 
+def _t_pin_one(fd: Int32) raises -> List[UInt64]:
+    return _own_fstat_devino(fd)
+
+
+def _t_want_for(
+    dir_path: String, ev_name: String, sess_dummy: Bool
+) raises -> List[UInt64]:
+    """Record [dir, ev, sess] dev/inode for a manual capture dir.
+
+    Session is dummy zeros when it cannot open (symlink
+    probe); the repair fails that child at open before
+    any identity compare, as before.
+    """
+    var want = List[UInt64]()
+    var dir_fd = _own_open_dir(dir_path)
+    if dir_fd < Int32(0):
+        raise Error("want: cannot open dir " + dir_path)
+    var dids = _t_pin_one(dir_fd)
+    want.append(dids[0])
+    want.append(dids[1])
+    var ev_fd = _own_open_child(dir_fd, ev_name)
+    if ev_fd < Int32(0):
+        _own_close_quiet(dir_fd)
+        raise Error("want: cannot open " + ev_name)
+    var eids = _t_pin_one(ev_fd)
+    _own_close_quiet(ev_fd)
+    want.append(eids[0])
+    want.append(eids[1])
+    if sess_dummy:
+        want.append(UInt64(0))
+        want.append(UInt64(0))
+    else:
+        var s_fd = _own_open_child(dir_fd, String("session.json"))
+        if s_fd < Int32(0):
+            _own_close_quiet(dir_fd)
+            raise Error("want: cannot open session.json")
+        var sids = _t_pin_one(s_fd)
+        _own_close_quiet(s_fd)
+        want.append(sids[0])
+        want.append(sids[1])
+    _own_close_quiet(dir_fd)
+    return want^
+
+
 def test_restore_rejects_symlink_swap() raises:
     # Root-only adversarial probe: a capture dir whose
     # session.json is a symlink to an outside victim must be
@@ -135,7 +181,8 @@ def test_restore_rejects_symlink_swap() raises:
     _t_write(cap + String("/events.ndjson"), String("EVENTS\n"))
     _t_write(victim, String("VICTIM\n"))
     _t_symlink(victim, cap + String("/session.json"))
-    _restore_sudo_ownership(cap)
+    var want = _t_want_for(cap, String("events.ndjson"), True)
+    _restore_sudo_ownership(cap, want^)
     assert_equal(_t_lstat_uid(victim), 0)
     assert_equal(_t_lstat_uid(cap + String("/events.ndjson")), uid)
     assert_equal(_t_lstat_uid(cap), uid)
@@ -223,20 +270,91 @@ def test_repair_child_owner_arms_need_root() raises:
     assert_equal(Int(r), 0)
     var dir_fd = _own_open_dir(base)
     assert_true(dir_fd >= Int32(0))
+    var mine_fd = _own_open_child(dir_fd, String("events.ndjson"))
+    assert_true(mine_fd >= Int32(0))
+    var mine_ids = _own_fstat_devino(mine_fd)
+    _own_close_quiet(mine_fd)
+    var planted_fd = _own_open_child(dir_fd, String("session.json"))
+    assert_true(planted_fd >= Int32(0))
+    var planted_ids = _own_fstat_devino(planted_fd)
+    _own_close_quiet(planted_fd)
     assert_true(
         _own_repair_child(
-            dir_fd, String("events.ndjson"), UInt32(uid), UInt32(gid)
+            dir_fd, String("events.ndjson"), UInt32(uid), UInt32(gid),
+            mine_ids[0], mine_ids[1],
         )
     )
     assert_true(
         not _own_repair_child(
-            dir_fd, String("session.json"), UInt32(uid), UInt32(gid)
+            dir_fd, String("session.json"), UInt32(uid), UInt32(gid),
+            planted_ids[0], planted_ids[1],
         )
     )
     _own_close_quiet(dir_fd)
     assert_equal(_t_lstat_uid(mine), uid)
     assert_equal(_t_lstat_uid(planted), uid)
     assert_equal(_t_lstat_gid(planted), 0)
+
+
+def _t_rename(old: String, new: String) raises:
+    var co = _t_cstr(old)
+    var cn = _t_cstr(new)
+    var r = external_call["rename", Int32](
+        Span(co).unsafe_ptr(), Span(cn).unsafe_ptr()
+    )
+    if Int(r) != 0:
+        raise Error("rename failed: " + old + " -> " + new)
+
+
+def _t_finalize_cap(path: String) raises -> List[UInt64]:
+    """Create + finalize one capture; return its recorded identity.
+
+    Uses the production EventWriter so the identity pins
+    the same dev/inode the repair must compare against.
+    """
+    var w = EventWriter(path, 131072)
+    var sess = List[UInt8]()
+    for b in String('{"dummy":1}\n').as_bytes():
+        sess.append(b)
+    var out = w.finalize(sess^)
+    assert_equal(out.status, String("finalized"))
+    return w.finalized_identity()
+
+
+def test_restore_rejects_dir_replacement() raises:
+    # Root-only directory-replacement probe: a substituted
+    # root-owned dir with root-owned single-link children
+    # must be rejected (no transfer), while the original
+    # dir repairs. Without dev/inode continuity the
+    # substitute passes mode/uid/nlink and transfers.
+    if _geteuid_live() != 0:
+        return
+    var uid = _parse_sudo_id(getenv("SUDO_UID"))
+    var gid = _parse_sudo_id(getenv("SUDO_GID"))
+    if uid <= 0 or gid < 0:
+        return
+    var base = _stop_mkdtemp()
+    var cap1 = base + String("/cap1")
+    var cap2 = base + String("/cap2")
+    var sub = base + String("/sub")
+    var want1 = _t_finalize_cap(cap1)
+    var want2 = _t_finalize_cap(cap2)
+    _t_mkdir(sub)
+    _t_write(sub + String("/events.ndjson"), String("FOREIGN-EVENTS\n"))
+    _t_write(sub + String("/session.json"), String("FOREIGN-SESSION\n"))
+    # Replace cap1 with the substitute (parent-rename,
+    # as in a user-writable parent).
+    _t_rename(cap1, base + String("/cap1.orig"))
+    _t_rename(sub, cap1)
+    _restore_sudo_ownership(cap1, want1)
+    assert_equal(_t_lstat_uid(cap1), 0)
+    assert_equal(_t_lstat_uid(cap1 + String("/events.ndjson")), 0)
+    assert_equal(_t_lstat_uid(cap1 + String("/session.json")), 0)
+    # Positive control: the original dir repairs.
+    _restore_sudo_ownership(cap2, want2)
+    assert_equal(_t_lstat_uid(cap2), uid)
+    assert_equal(_t_lstat_uid(cap2 + String("/events.ndjson")), uid)
+    assert_equal(_t_lstat_uid(cap2 + String("/session.json")), uid)
 
 
 def run() raises -> Int:
@@ -247,6 +365,7 @@ def run() raises -> Int:
     suite.test[test_child_ok_rejects_dir]()
     suite.test[test_child_ok_rejects_hardlink]()
     suite.test[test_repair_child_owner_arms_need_root]()
+    suite.test[test_restore_rejects_dir_replacement]()
     suite^.run()
     return 0
 

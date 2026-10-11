@@ -513,6 +513,11 @@ struct ScriptWriter(WriterSource):
             return 0
         return self.slots[0].committed_len()
 
+    def finalized_identity(self) -> List[UInt64]:
+        if len(self.slots) == 0:
+            return List[UInt64]()
+        return self.slots[0].finalized_identity()
+
 
 struct NullWriter(WriterSource):
     """In-memory recording writer for the op-count case."""
@@ -577,6 +582,9 @@ struct NullWriter(WriterSource):
 
     def committed_len(self) -> Int:
         return self.committed
+
+    def finalized_identity(self) -> List[UInt64]:
+        return List[UInt64]()
 
 
 def _d_cstr(text: String) -> List[UInt8]:
@@ -723,6 +731,9 @@ struct DropWriter(WriterSource):
 
     def committed_len(self) -> Int:
         return self.bytes
+
+    def finalized_identity(self) -> List[UInt64]:
+        return List[UInt64]()
 
 
 def stats_ok(

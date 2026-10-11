@@ -81,10 +81,15 @@ receipt=...`, exit 0. The receipt lands under
 `doctor` must then use the same `--profiles-dir`. A
 receipt never claims `validated`: it binds one kernel,
 one profile document, and the exact artifacts and
-workload that produced it. Re-run `doctor`: ready,
-exit 0. Exit 3 names the exact cause (planning or smoke
-refusal); exit 2 is a usage error; exit 1 is an internal
-failure (unreadable objects, mint/publish failure).
+workload that produced it. Re-running `doctor` still
+reports the receipt as explicitly bridge-unchecked
+with exit 3: the passive path performs no bridge
+binding, so only `record` — which verifies bridge
+admission at every start — admits the receipt as
+`local-auto`. Exit 3 names the exact cause (planning
+or smoke refusal, or the unchecked receipt); exit 2
+is a usage error; exit 1 is an internal failure
+(unreadable objects, mint/publish failure).
 `--object` and `--bridge` are optional overrides for
 non-bundled artifacts; without them each object is
 discovered beside the executable or under the system
@@ -106,11 +111,13 @@ for non-bundled objects.)
 
 After any kernel, object, bridge, or profile change the receipt
 goes stale: refresh the profile's recorded bindings from
-the new host first, then re-run `qualify` (`doctor` says
-exactly which binding drifted). `record` re-verifies the
-receipt at every start; a stale receipt loses `local-auto`
-admission, with attempt-only recording falling back to
-partial diagnostics.
+the new host first, then re-run `qualify`. `doctor` keeps
+reporting the receipt as bridge-unchecked (it performs
+no binding, so it cannot name drift); `record`
+re-verifies the receipt — including bridge admission —
+at every start and names the drift there, with a stale
+receipt losing `local-auto` admission and attempt-only
+recording falling back to partial diagnostics.
 
 ## 4. Record one capture (privileged)
 

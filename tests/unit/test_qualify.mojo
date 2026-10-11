@@ -771,6 +771,57 @@ def test_smoke_object_unbound_refuses() raises:
     assert_true(raised)
 
 
+def test_smoke_pins_survive_through_inner_opens() raises:
+    # Qualify outer pins must stay alive through the
+    # smoke's inner opens/reads on every return path:
+    # the smoke re-snapshots the bridge alias and reads
+    # the object aliases, so dangling outer fds would
+    # degrade the inner snapshot and refuse admission.
+    # The keep-alive touches below mirror
+    # run_qualify_with's identical fix.
+    var exercised = read_host_file(
+        String(_ELF_OK), String("object"), 1048576
+    )
+    var base = _stop_mkdtemp()
+    var opath = base + String("/obj.o")
+    var bpath = base + String("/bridge.so")
+    _q_write_bytes(opath, exercised.copy())
+    _q_write(bpath, String("OUTER-BRIDGE-BYTES\n"))
+    var snap = open_bridge_snapshot(bpath)
+    var obj_snap = open_object_snapshot(opath)
+    assert_true(snap.sha != String(""))
+    assert_true(obj_snap.sha != String(""))
+    var want_bridge = snap.sha.copy()
+    var want_object = obj_snap.sha.copy()
+    var bridge_alias = snap.load_path.copy()
+    var object_alias = obj_snap.load_path.copy()
+    # Smoke's inner opens, through production calls.
+    var inner = open_bridge_snapshot(bridge_alias)
+    var profiles = load_profiles(String(_SCAN_PROFILES))
+    var smoked = decide_record(
+        String(_SCAN_OK),
+        _q_scan_kernel(),
+        profiles^,
+        String(""),
+        False,
+        object_alias,
+        String(""),
+        String(""),
+        String(""),
+        String(""),
+        String(""),
+    )
+    # Keep-alive: outer pins through inner opens above;
+    # the asserts below use only the pre-copied wants,
+    # so these touches are the sole post-open uses.
+    _ = snap.fd
+    _ = obj_snap.fd
+    assert_true(inner.sha != String(""))
+    assert_equal(inner.sha, want_bridge)
+    assert_true(smoked.ok)
+    assert_equal(smoked.object_sha, want_object)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_qualify_args_defaults]()
@@ -813,6 +864,7 @@ def run() raises -> Int:
     suite.test[test_smoke_bridge_unbound_refuses]()
     suite.test[test_smoke_object_binds_exercised_bytes]()
     suite.test[test_smoke_object_unbound_refuses]()
+    suite.test[test_smoke_pins_survive_through_inner_opens]()
     suite^.run()
     return 0
 
