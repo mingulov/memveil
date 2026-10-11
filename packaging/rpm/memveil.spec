@@ -80,14 +80,14 @@ install -D -m0755 "$B/bin/memveil" "%{buildroot}/usr/bin/memveil"
 patchelf --set-rpath '$ORIGIN/../lib/memveil' \
     "%{buildroot}/usr/bin/memveil"
 mkdir -p "%{buildroot}/usr/lib/memveil"
-cp -p "$B"/lib/*.so* "%{buildroot}/usr/lib/memveil/"
+cp -rp "$B"/lib/*.so* "%{buildroot}/usr/lib/memveil/"
 for obj in swiotlb_attempt.bpf.o swiotlb_lifecycle.bpf.o \
     swiotlb_copy.bpf.o; do
   test -f "$B/bpf/$obj" || exit 1
   install -m0644 "$B/bpf/$obj" "%{buildroot}/usr/lib/memveil/$obj"
 done
 mkdir -p "%{buildroot}/usr/share/memveil/profiles"
-cp -p "$B"/profiles/* "%{buildroot}/usr/share/memveil/profiles/"
+cp -rp "$B"/profiles/* "%{buildroot}/usr/share/memveil/profiles/"
 mkdir -p "%{buildroot}/usr/share/memveil/docs"
 cp -rp "$B"/docs/. "%{buildroot}/usr/share/memveil/docs/"
 mkdir -p "%{buildroot}/usr/share/memveil/docs/examples"
@@ -152,6 +152,7 @@ chmod 0755 "%{buildroot}/usr/bin/memveil"
 /usr/share/doc/memveil/licenses/Third-Party-Notices.mojo-compiler
 /usr/share/doc/memveil/licenses/libbpf-mojo-LICENSE
 /usr/share/doc/memveil/licenses/libbpf-mojo-LICENSES/GPL-2.0-only.txt
+/usr/share/doc/memveil/licenses/libbpf-mojo-LICENSES/LLVM-exception.txt
 /usr/share/man/man1/memveil.1
 /usr/share/man/man1/memveil-record.1
 /usr/share/man/man1/memveil-report.1
