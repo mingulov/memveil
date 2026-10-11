@@ -18,6 +18,12 @@ with zero flags or environment::
                                     example (docs/examples/real-capture)
     usr/share/doc/memveil/          copyright stub plus every license and
                                     notice text the bundle redistributes
+    usr/share/man/man1/             memveil.1 plus one memveil-<verb>.1
+                                    per verb, generated at build time
+                                    from the --help texts
+    usr/share/bash-completion/      static memveil completions from the
+    completions/ + zsh              frozen verb/flag sets (bash plus
+    vendor-completions/             zsh vendor dir)
     var/lib/memveil/receipts/       empty state dir (0755 root:root)
 
 Control notes: manual ``Depends: libelf1t64 | libelf1, zlib1g``
@@ -35,8 +41,10 @@ third-party repo. Installed verbs that need profiles take
 ``--profiles-dir /usr/share/memveil/profiles`` (the default
 exe-relative resolution does not honor the FHS layout, and
 qualify receipts always land under the profiles dir, not under
-/var/lib). Man pages and shell completions are a later task's
-(not shipped here).
+/var/lib). Man pages are generated at build time from the
+--help texts (tools/gen-man) and completions from the frozen
+verb/flag sets (tools/gen-completions); the same generators
+feed the .rpm, so both formats ship identical pages.
 
 Usage: tools/package-deb [--out DIR] [--tag STEM]
   --out DIR   output directory (default: dist/)
@@ -356,6 +364,34 @@ def main(argv):
         for name in ("LICENSES", "licenses"):
             shutil.copytree(os.path.join(bundle, name),
                             os.path.join(licdir, name))
+
+        mandir = os.path.join(root, "usr", "share", "man", "man1")
+        os.makedirs(mandir)
+        gen_man = run([os.path.join(ROOT, "tools", "gen-man"),
+                       "--binary", binary, "--out", mandir])
+        if gen_man.returncode != 0:
+            print(gen_man.stdout)
+            print(gen_man.stderr, file=sys.stderr)
+            fail("tools/gen-man failed")
+        comp_parent = os.path.join(work, "completions")
+        os.makedirs(comp_parent)
+        gen_comp = run([os.path.join(ROOT, "tools",
+                                     "gen-completions"),
+                        "--out", comp_parent])
+        if gen_comp.returncode != 0:
+            print(gen_comp.stdout)
+            print(gen_comp.stderr, file=sys.stderr)
+            fail("tools/gen-completions failed")
+        bashcomp = os.path.join(root, "usr", "share",
+                                "bash-completion", "completions")
+        zshcomp = os.path.join(root, "usr", "share", "zsh",
+                               "vendor-completions")
+        os.makedirs(bashcomp)
+        os.makedirs(zshcomp)
+        shutil.copy2(os.path.join(comp_parent, "memveil"),
+                     os.path.join(bashcomp, "memveil"))
+        shutil.copy2(os.path.join(comp_parent, "_memveil"),
+                     os.path.join(zshcomp, "_memveil"))
         with open(os.path.join(debdir, "control"), "w") as handle:
             handle.write(control_text(upstream, memveil_rev,
                                       lmb_sha))
