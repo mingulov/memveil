@@ -137,7 +137,10 @@ def test_qualify_args_unknown_option() raises:
 
 
 def test_qualify_usage() raises:
-    assert_true(contains(qualify_usage(), String("qualify --output")))
+    var text = qualify_usage()
+    assert_true(contains(text, String("qualify --output")))
+    assert_true(contains(text, String("[--object PATH]")))
+    assert_true(contains(text, String("discover")))
 
 
 def test_plan_ok() raises:
@@ -193,17 +196,15 @@ def test_qualify_args_missing_output() raises:
     assert_true(raised)
 
 
-def test_qualify_args_missing_object() raises:
-    var raised = False
-    try:
-        var args = List[String]()
-        args.append(String("--output"))
-        args.append(String("out"))
-        _ = parse_qualify_args(args^)
-    except e:
-        raised = True
-        assert_equal(e.message, String("missing --object"))
-    assert_true(raised)
+def test_qualify_args_object_optional() raises:
+    # --object is discovered when absent, so parsing
+    # without it succeeds and leaves the path empty.
+    var args = List[String]()
+    args.append(String("--output"))
+    args.append(String("out"))
+    var opts = parse_qualify_args(args^)
+    assert_equal(opts.output, String("out"))
+    assert_equal(opts.object, String(""))
 
 
 def test_plan_convert_refuses() raises:
@@ -621,7 +622,7 @@ def run() raises -> Int:
     suite.test[test_qualify_args_object_needs_value]()
     suite.test[test_qualify_args_unknown_option]()
     suite.test[test_qualify_args_missing_output]()
-    suite.test[test_qualify_args_missing_object]()
+    suite.test[test_qualify_args_object_optional]()
     suite.test[test_qualify_usage]()
     suite.test[test_plan_ok]()
     suite.test[test_plan_caps]()

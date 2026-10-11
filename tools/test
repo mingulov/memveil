@@ -74,7 +74,8 @@ suite_unit() {
     failed=0
     for t in tests/unit/test_reader.mojo \
              tests/unit/test_attempts.mojo \
-             tests/unit/test_report.mojo; do
+             tests/unit/test_report.mojo \
+             tests/unit/test_runtime.mojo; do
         run_unit_file "$t" || failed=1
     done
     if [ "$failed" -ne 0 ]; then
@@ -3024,6 +3025,8 @@ suite_record() {
     rexpect budget-high 3 "above 4294967296" "$TMP/r-high" -- \
         --output "$TMP/r-high" --object "$ROOT/tests/fixtures/elf/ok.o" \
         --bridge "$TMP/nolib.so" --max-events-bytes 4294967297
+    rexpect no-object 3 "no object: pass --object PATH" "$TMP/r-noobj" -- \
+        --output "$TMP/r-noobj" --bridge "$TMP/nolib.so"
     env -u LMB_NATIVE_LIB "$BIN" record --output "$TMP/r-nobridge" \
         --object "$ROOT/tests/fixtures/elf/ok.o" \
         >"$TMP/nobridge.out" 2>"$TMP/nobridge.err"
@@ -3129,8 +3132,8 @@ suite_qualify() {
     # with no BPF and no privileged smoke.
     qexpect missing-output 2 "missing --output" -- \
         --object "$ROOT/tests/fixtures/elf/ok.o"
-    qexpect missing-object 2 "missing --object" -- \
-        --output "$TMP/q-noobj"
+    qexpect no-object 3 "no object: pass --object PATH" -- \
+        --output "$TMP/q-noobj" --bridge "$TMP/nolib.so"
     qexpect bad-capability 3 "bad capability list" -- \
         --output "$TMP/q-badcap" \
         --object "$ROOT/tests/fixtures/elf/ok.o" \
