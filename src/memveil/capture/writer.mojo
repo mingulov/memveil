@@ -145,14 +145,17 @@ def _require_private_empty_dir(dir_fd: Int32) raises WriteError:
     fd. Refuse it ("exists": the name holds something we
     did not create) before any capture file is created
     inside: a privately-created dir (mkdir 0700)
-    normally carries no group/other bits, is owned
-    by this user, and starts empty. Under a
-    default-ACL parent the ACL mask can add
-    effective group bits; such a dir is
-    conservatively refused (fail-closed). Raises
-    "io" when the checks themselves fail. Reads
-    entries through a dup'd stream so the held
-    descriptor's offset is untouched.
+    carries no group/other bits, is owned by this
+    user, and starts empty. Inherited POSIX ACLs
+    stay bounded by the requested mode, so any
+    observed group/other bits prove a foreign dir
+    and are refused (fail-closed). Raises "io"
+    when the checks themselves fail. Lists entries
+    through a dup'd stream: dup shares the open
+    file description and its offset, so the caller
+    must pass a fresh descriptor (as the capture
+    open path does); the dup exists only so that
+    closedir cannot close the held fd.
     """
     var mu = _fstat_mode_uid(dir_fd)
     if mu[0] & UInt64(0o077) != UInt64(0):
