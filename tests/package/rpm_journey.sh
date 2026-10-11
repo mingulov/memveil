@@ -4,8 +4,10 @@
 #
 # Usage: rpm_journey.sh /mnt/memveil.rpm
 #
-# Installs the given .rpm with dnf (proving its Requires resolve
-# on Fedora), then drives the installed tree exactly like the
+# Refuses retained receipts before installing (naming them;
+# nothing installed, nothing deleted), installs the given
+# .rpm with dnf (proving its Requires resolve on Fedora),
+# then drives the installed tree exactly like the
 # .deb journey: rpm verify, version, receipts-dir state, bridge
 # LOAD proof (ldd plus a real dlopen), generalized RUNPATH
 # check, BPF placement, zero-flag doctor, zero-env record
@@ -26,6 +28,18 @@ die() {
     echo "journey-FAIL: $1" >&2
     exit 1
 }
+
+# Pre-install fresh-state gate (the .deb journey refuses
+# retained receipts before dpkg -i; this is the rpm twin):
+# a receipts dir that already holds files refuses the run
+# BEFORE anything is installed or deleted, naming the
+# survivors. MV_RECEIPTS_DIR restages the state dir for
+# staged tests; the container journey leaves it unset.
+RECEIPTS_DIR=${MV_RECEIPTS_DIR:-/var/lib/memveil/receipts}
+if [ -d "$RECEIPTS_DIR" ]; then
+    kept=$(ls -A "$RECEIPTS_DIR" | paste -sd, - | sed 's/,/, /g')
+    [ -z "$kept" ] || die "refusing install: $RECEIPTS_DIR holds retained receipts ($kept); back them up or remove them, then rerun"
+fi
 
 # Fedora container images set tsflags=nodocs, which would
 # skip the man pages and license texts; real Fedora
