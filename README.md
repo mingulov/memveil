@@ -31,11 +31,10 @@ A rebuilt package or matching kernel name alone earns no qualification.
 
     tar -xzf memveil-0.1.0.tar.gz && cd memveil-0.1.0
     ./bin/memveil doctor                            # passive host check
-    export LMB_NATIVE_LIB=$PWD/lib/libbpf_mojo.so.1
-    sudo -E ./bin/memveil record --output /tmp/cap1 \
-        --object $PWD/bpf/swiotlb_attempt.bpf.o --duration 10
-    # If sudo drops the environment, pass the bridge directly:
-    # sudo ./bin/memveil record --bridge $PWD/lib/libbpf_mojo.so.1 ...
+    sudo ./bin/memveil record --output /tmp/cap1 --duration 10
+    # The bridge and BPF object are discovered from the bundle
+    # beside the executable, so plain sudo works; --bridge and
+    # --object are optional overrides for non-bundled artifacts.
     sudo cp -r /tmp/cap1 ~/cap1 && sudo chown -R $USER ~/cap1
     ./bin/memveil report --format text ~/cap1       # unprivileged replay
     ./bin/memveil top --interval 1s ~/cap1          # finished-capture replay

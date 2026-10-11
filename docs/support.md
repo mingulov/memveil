@@ -12,7 +12,7 @@ has passed its gates.
 | --- | --- | --- |
 | Bounce attempts/requested bytes | `swiotlb_bounced` attempts on an admitted profile; attempts are not successful DMA or actual copies | Report and replay `top` reduce captured attempts/counters without adding alternative measurements |
 | Default-pool capacity/used/high-water | Readable debugfs samples at start, on a best-effort 1 s cadence (cap 4,096; missed ticks skipped), and close; unreadable reads persist as unavailable, never failed runs | Pool reducers require matching generation/scope; samples are opportunistic reads with possible gaps, so they cannot establish sustained pressure alone |
-| Allocation occupancy, copy, sync, lifetimes | Qualified on `linux-x86_64-7.0.0-34-generic` via `--capability` with `--lc-object`/`--cp-object`, or per host by a machine-local `local-auto` receipt from `memveil qualify`; exact bindings refuse anything else | Offline reducers accept corresponding records; laboratory probes and scripted DMA comparisons do not qualify packaged lifecycle collection |
+| Allocation occupancy, copy, sync, lifetimes | Qualified on `linux-x86_64-7.0.0-34-generic` via `--capability` (with `--lc-object`/`--cp-object` as optional overrides), or per host by a machine-local `local-auto` receipt from `memveil qualify`; exact bindings refuse anything else | Offline reducers accept corresponding records; laboratory probes and scripted DMA comparisons do not qualify packaged lifecycle collection |
 | Private/shared state and physical unions | No qualified shipping source | Offline region/baseline reducers and laboratory conversion probes; ordinary-Linux APIs do not prove confidential transitions |
 | Summary | `top --output DIR [--object PATH]` observes live under the same admission as `record`, retaining the capture while printing prefix summaries (provisional; the final answer always equals a replay of the retained capture); startup/collection refusals exit 3 | `top DIR` replays prefixes of a finished capture |
 | Joint observers/two instances | No current-candidate qualification | Historical experiments only; see [coexistence](coexistence.md) |
@@ -109,7 +109,9 @@ details live in `permissions.md`; surprises go to
   then the executable-relative bundle path, then the
   system path; objects have no environment step). A
   missing-everywhere object refuses with exit 3 `no
-  object: pass --object PATH`.
+  object: pass --object PATH`; requested extra channels
+  refuse with `no object: pass --lc-object PATH` and
+  `no object: pass --cp-object PATH`.
   Extra channels are opt-in per run (`--capability`,
   with `--lc-object`/`--cp-object` as optional
   overrides); see
