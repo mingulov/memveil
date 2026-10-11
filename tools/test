@@ -2200,6 +2200,8 @@ suite_writer() {
         rc=$?
         checked=$((checked + 1))
         case "$rel" in
+            tests/fixtures/ownership/swap/events.ndjson|\
+            tests/fixtures/ownership/swap/session.json|\
             tests/fixtures/reader/adv-bad-seq-int/events.ndjson|\
             tests/fixtures/reader/adv-bad-utf8/events.ndjson|\
             tests/fixtures/reader/adv-depth-64/events.ndjson|\
@@ -2510,6 +2512,11 @@ EOF
     want s1control "pincheck status=unfinalized note=session replaced after rename pin=0"
     want_file s1control session.json "$WTMP/plantref"
     want_file s1control session.json.displaced "$WTMP/sess10"
+    # s1failopen now duplicates s1control: after the
+    # pwrite fix no tmp fstat follows the write, so
+    # the fault is inert; s1unavail carries the live
+    # tmp-pin regression. Kept for its RED-anchored
+    # fail-open history.
     run_pincheck s1failopen "fstat_fail_tmp_written,swap_session:$WTMP/plant-s1failopen"
     want s1failopen "pincheck status=unfinalized note=session replaced after rename pin=0"
     want_file s1failopen session.json "$WTMP/plantref"
