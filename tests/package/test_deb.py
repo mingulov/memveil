@@ -578,6 +578,70 @@ def _installed_validated_profile():
     return None
 
 
+def _uninstall_after_failure(receipts, qcap, runner=run):
+    """Failure-path teardown: retry residue, then uninstall.
+
+    Mirrors the journey's inner-finally cleanup (each
+    published receipt file, then the qcap capture dir)
+    but ignores every error — the original exception is
+    already in flight — so a failed `sudo rm` cannot
+    strand root-owned residue or skip `dpkg -r`.
+    """
+    try:
+        if os.path.isdir(receipts):
+            for name in os.listdir(receipts):
+                try:
+                    runner("sudo", "-n", "rm", "-f",
+                           os.path.join(receipts, name))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    try:
+        if qcap.exists():
+            try:
+                runner("sudo", "-n", "rm", "-rf", str(qcap))
+            except OSError:
+                pass
+    except OSError:
+        pass
+    runner("sudo", "-n", "dpkg", "-r", "memveil")
+
+
+def test_failure_path_retries_residue_then_uninstalls(tmp_path):
+    # The journey except-path must retry residue removal
+    # before uninstalling: when the inner finally itself
+    # raises (a sudo rm failed), receipts and qcap would
+    # otherwise survive as root-owned residue. rm failures
+    # here must never block dpkg -r. Needs no .deb/sudo:
+    # the runner is faked and every rm is forced to fail.
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    (receipts / "prof.json").write_text("{}")
+    qcap = tmp_path / "qcap"
+    qcap.mkdir()
+    calls = []
+
+    class FakeProc:
+        returncode = 0
+
+    def fake_runner(*argv, **kwargs):
+        calls.append(argv)
+        proc = FakeProc()
+        if argv[:3] == ("sudo", "-n", "rm"):
+            proc.returncode = 1
+        return proc
+
+    _uninstall_after_failure(str(receipts), qcap,
+                             runner=fake_runner)
+    assert calls, "failure path ran nothing"
+    assert calls[-1][:4] == ("sudo", "-n", "dpkg", "-r"), \
+        calls
+    kinds = [c[:4] for c in calls[:-1]]
+    assert ("sudo", "-n", "rm", "-f") in kinds, calls
+    assert ("sudo", "-n", "rm", "-rf") in kinds, calls
+
+
 @needs_deb
 def test_install_doctor_uninstall_smoke(engine_version, tmp_path):
     # Install journey: install -> doctor -> record probe ->
@@ -717,7 +781,7 @@ def test_install_doctor_uninstall_smoke(engine_version, tmp_path):
             uninst = run("sudo", "-n", "dpkg", "-r", "memveil")
             assert uninst.returncode == 0, uninst.stderr
     except BaseException:
-        run("sudo", "-n", "dpkg", "-r", "memveil")
+        _uninstall_after_failure(receipts, qcap)
         raise
     assert run("dpkg", "-s", "memveil").returncode != 0
     for path in ("/usr/lib/memveil", "/usr/share/memveil",

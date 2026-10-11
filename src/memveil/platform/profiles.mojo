@@ -1309,6 +1309,38 @@ struct _ReceiptHit(Copyable, Movable):
         self.caps = List[String]()
 
 
+def _installed_profiles_key(profiles_dir: String) -> String:
+    """Comparison key for a profiles dir, or "" when unusable.
+
+    Strips trailing slashes and resolves trailing ``/.``
+    segments (repeatedly, so ``profiles/./`` also maps),
+    matching how the kernel normalizes the path. Used
+    only to recognize spellings of the installed
+    profiles dir; anything else keeps its byte-identical
+    ``<profiles-dir>/receipts`` fallback. Never resolves
+    ``..``: ``profiles/..`` names the parent of the
+    installed dir, not the dir itself.
+    """
+    var raw = List[UInt8]()
+    for b in profiles_dir.as_bytes():
+        raw.append(b)
+    while True:
+        while len(raw) > 0 and raw[len(raw) - 1] == UInt8(0x2F):
+            _ = raw.pop()
+        if (
+            len(raw) >= 2
+            and raw[len(raw) - 2] == UInt8(0x2F)
+            and raw[len(raw) - 1] == UInt8(0x2E)
+        ):
+            _ = raw.pop()
+            continue
+        break
+    try:
+        return String(from_utf8=Span(raw))
+    except:
+        return String("")
+
+
 def default_receipts_dir(profiles_dir: String) -> String:
     """Receipts dir for a profiles dir.
 
@@ -1317,14 +1349,13 @@ def default_receipts_dir(profiles_dir: String) -> String:
     read-only profiles; every other layout (bundle,
     checkout, explicit override) keeps receipts under
     ``<profiles-dir>/receipts`` exactly as before. The
-    trailing-slash spelling maps the same way, so
-    shell-completed paths cannot misplace a receipt.
+    comparison normalizes trailing slashes and ``/.``
+    segments, so shell-completed or dotted spellings of
+    the installed dir cannot misplace a receipt.
     """
-    var plain = profiles_dir == String(_INSTALLED_PROFILES_DIR)
-    var slashed = profiles_dir == String(_INSTALLED_PROFILES_DIR) + String(
-        "/"
-    )
-    if plain or slashed:
+    if _installed_profiles_key(profiles_dir) == String(
+        _INSTALLED_PROFILES_DIR
+    ):
         return String(_INSTALLED_RECEIPTS_DIR)
     return profiles_dir + String("/receipts")
 

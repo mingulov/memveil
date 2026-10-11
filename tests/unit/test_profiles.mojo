@@ -2303,6 +2303,24 @@ def test_default_receipts_dir() raises:
         String("/var/lib/memveil/receipts"),
     )
     assert_equal(
+        default_receipts_dir(
+            String("/usr/share/memveil/profiles//")
+        ),
+        String("/var/lib/memveil/receipts"),
+    )
+    assert_equal(
+        default_receipts_dir(
+            String("/usr/share/memveil/profiles/.")
+        ),
+        String("/var/lib/memveil/receipts"),
+    )
+    assert_equal(
+        default_receipts_dir(
+            String("/usr/share/memveil/profiles/./")
+        ),
+        String("/var/lib/memveil/receipts"),
+    )
+    assert_equal(
         default_receipts_dir(String("build/../profiles")),
         String("build/../profiles/receipts"),
     )
