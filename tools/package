@@ -35,6 +35,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -133,6 +134,26 @@ def needed(path):
         if "(NEEDED)" in line and "[" in line:
             names.append(line.split("[")[1].split("]")[0])
     return names
+
+
+def runpath_abspaths(dyn):
+    """Non-$ORIGIN RUNPATH/RPATH entries in a dynamic section.
+
+    Parses the bracketed `Library runpath:`/`Library rpath:`
+    values and returns every colon-separated entry that is
+    not $ORIGIN-relative: any absolute build-host path, not
+    just known prefixes. [] means fully relocatable.
+    """
+    found = []
+    for line in dyn.splitlines():
+        match = re.search(r"Library (?:runpath|rpath): \[(.*)\]",
+                          line)
+        if not match:
+            continue
+        for entry in match.group(1).split(":"):
+            if entry and not entry.startswith("$ORIGIN"):
+                found.append(entry)
+    return found
 
 
 def sha256_file(path):
@@ -332,9 +353,10 @@ def main(argv):
     dyn = run(["readelf", "-d", binary])
     if dyn.returncode != 0:
         fail("readelf failed on staged binary:\n%s" % dyn.stderr)
-    if "/home/" in dyn.stdout or "/work/" in dyn.stdout:
-        fail("staged binary keeps absolute RUNPATH entries:\n%s"
-             % dyn.stdout)
+    abspaths = runpath_abspaths(dyn.stdout)
+    if abspaths:
+        fail("staged binary keeps absolute RUNPATH entries %s:\n%s"
+             % (", ".join(abspaths), dyn.stdout))
     rerun = run([binary, "version"])
     if rerun.returncode != 0 \
             or rerun.stdout.strip() != "memveil-" + version:
