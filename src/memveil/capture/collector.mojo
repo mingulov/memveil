@@ -303,6 +303,7 @@ struct CollectorConfig(Copyable, Movable):
     var max_events_bytes: Int
     var output: String
     var profile_id: String
+    var grade: String
     var pid: Int
     var has_ring_bytes: Bool
     var ring_bytes: UInt32
@@ -322,6 +323,7 @@ struct CollectorConfig(Copyable, Movable):
         self.max_events_bytes = 1073741824
         self.output = String("")
         self.profile_id = String("")
+        self.grade = String("")
         self.pid = 0
         self.has_ring_bytes = False
         self.ring_bytes = UInt32(0)
@@ -2469,6 +2471,9 @@ struct Collector:
         cap.hooks.append(String("swiotlb:swiotlb_bounced"))
         cap.has_profile_id = True
         cap.profile_id = self.cfg.profile_id
+        if self.cfg.grade != String(""):
+            cap.has_grade = True
+            cap.grade = self.cfg.grade
         out.cap_bounce_attempts = cap^
         if self.cfg.has_lifecycle:
             var lc_cap = Capability()
@@ -2494,6 +2499,9 @@ struct Collector:
             lc_cap.hooks.append(String(HOOK_UNMAP))
             lc_cap.has_profile_id = True
             lc_cap.profile_id = self.cfg.profile_id
+            if self.cfg.grade != String(""):
+                lc_cap.has_grade = True
+                lc_cap.grade = self.cfg.grade
             out.cap_mapping_lifecycle = lc_cap^
         else:
             self.unavailable_cap(
@@ -2515,6 +2523,9 @@ struct Collector:
             cp_cap.hooks.append(String(HOOK_BOUNCE))
             cp_cap.has_profile_id = True
             cp_cap.profile_id = self.cfg.profile_id
+            if self.cfg.grade != String(""):
+                cp_cap.has_grade = True
+                cp_cap.grade = self.cfg.grade
             out.cap_copy_bytes = cp_cap^
             var sy_cap = Capability()
             sy_cap.status = String("partial")
@@ -2534,6 +2545,9 @@ struct Collector:
             sy_cap.hooks.append(String(HOOK_SYNC_CPU))
             sy_cap.has_profile_id = True
             sy_cap.profile_id = self.cfg.profile_id
+            if self.cfg.grade != String(""):
+                sy_cap.has_grade = True
+                sy_cap.grade = self.cfg.grade
             out.cap_sync_requests = sy_cap^
         else:
             self.unavailable_cap(

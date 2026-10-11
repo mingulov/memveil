@@ -1,0 +1,38 @@
+{
+  "schema_version": "0.1.0",
+  "kind": "memveil-qualification-receipt",
+  "profile_id": "scan-ref-stale",
+  "grade": "local-auto",
+  "created_ns": "123456789",
+  "kernel": {
+    "arch": "x86_64",
+    "release": "7.0.0-test"
+  },
+  "bindings": {
+    "config": "sha256:a5af36b05630b51bb596bc68f955ab97bb8802e857cd2fc1de05c0628e398fbb",
+    "config_src": "gz",
+    "btf": "sha256:785b0751fc2c53dc14a4ce3d800e69ef9ce1009eb327ccf458afe09c242c26c9",
+    "format": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "image": "sha256:11a663ae36f0cdbecf94b8b7319503bbd0fffc2c3ba02c01cf81600d423dd251",
+    "image_bid": "0102030405060708090a0b0c0d0e0f1011121314"
+  },
+  "capabilities": {
+    "attempt-trace": {
+      "status": "qualified",
+      "detail": "smoke attached, layout holds"
+    }
+  },
+  "artifacts": {
+    "memveil": "0.1.0",
+    "bridge": "sha256:de95690aba8f0462aa24599fa7949dbe81f4cafb2720641645951bbe304ccb8d",
+    "objects": {
+      "attempt": "sha256:de95690aba8f0462aa24599fa7949dbe81f4cafb2720641645951bbe304ccb8d"
+    }
+  },
+  "workload": {
+    "kind": "smoke",
+    "duration_s": "3",
+    "traffic_required": false,
+    "note": "scan fixture receipt"
+  }
+}

@@ -9,7 +9,7 @@ CO-RE field reads) with no user-memory, skb, debug, or
 perf-output helper; Mojo reads only two
 allowlisted environment names and no /proc cmdline or
 environ file; and the CLI flag set is exactly the frozen
-eighteen (any new flag fails here until reviewed). Exits
+nineteen (any new flag fails here until reviewed). Exits
 nonzero on the first violation.
 """
 
@@ -30,12 +30,18 @@ FORBIDDEN_PROPS = {
     "username", "ip_address", "mac_address",
 }
 
+# --profiles-dir reviewed 2026-10-11: a profile/receipt
+# directory selector (read by doctor/record, read and
+# written by qualify). It adds no data source, no
+# payload/cmdline/environ access, and no exfiltration
+# channel; the invoking operator chooses which profile
+# set to trust, exactly like --profile/--object.
 ALLOWED_FLAGS = {
     "--allow-partial", "--bridge", "--capability", "--cp-object",
     "--device", "--duration", "--format", "--help", "--interval",
     "--json", "--lc-object", "--long-lived-after",
     "--max-events-bytes", "--max-line-bytes", "--max-session-bytes",
-    "--object", "--output", "--profile",
+    "--object", "--output", "--profile", "--profiles-dir",
 }
 
 ALLOWED_ENV = {"LMB_NATIVE_LIB", "MEMVEIL_SIGBLK"}

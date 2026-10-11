@@ -210,7 +210,8 @@ def _field_value(field: String, key: String) -> String:
         return String("")
 
 
-def _is_sha256_value(text: String) -> Bool:
+def is_sha256_value(text: String) -> Bool:
+    """True for exactly "sha256:" plus 64 lowercase hex digits."""
     var pre = String("sha256:")
     var tb = text.as_bytes()
     var pb = pre.as_bytes()
@@ -287,22 +288,22 @@ def parse_narrow_note(note: String) -> NarrowParse:
     var image = _field_value(fields[5], String("image"))
     var image_bid = _field_value(fields[6], String("image_bid"))
     var ring = _field_value(fields[7], String("ring_bytes"))
-    if config == String("") or not _is_sha256_value(config):
+    if config == String("") or not is_sha256_value(config):
         out.message = String("narrow note: bad config")
         return out^
     if config_src != String("gz") and config_src != String("file"):
         out.message = String("narrow note: bad config_src")
         return out^
-    if btf == String("") or not _is_sha256_value(btf):
+    if btf == String("") or not is_sha256_value(btf):
         out.message = String("narrow note: bad btf")
         return out^
-    if format == String("") or not _is_sha256_value(format):
+    if format == String("") or not is_sha256_value(format):
         out.message = String("narrow note: bad format")
         return out^
-    if object == String("") or not _is_sha256_value(object):
+    if object == String("") or not is_sha256_value(object):
         out.message = String("narrow note: bad object")
         return out^
-    if image == String("") or not _is_sha256_value(image):
+    if image == String("") or not is_sha256_value(image):
         out.message = String("narrow note: bad image")
         return out^
     if image_bid == String("") or not _is_bid_value(image_bid):
@@ -326,7 +327,7 @@ def parse_narrow_note(note: String) -> NarrowParse:
         var lc_ring = _field_value(fields[9], String("lc_ring_bytes"))
         var cp_object = _field_value(fields[10], String("cp_object"))
         var cp_ring = _field_value(fields[11], String("cp_ring_bytes"))
-        if lc_object == String("") or not _is_sha256_value(lc_object):
+        if lc_object == String("") or not is_sha256_value(lc_object):
             out.ok = False
             out.message = String("narrow note: bad lc_object")
             return out^
@@ -335,7 +336,7 @@ def parse_narrow_note(note: String) -> NarrowParse:
             out.ok = False
             out.message = String("narrow note: bad lc_ring_bytes")
             return out^
-        if cp_object == String("") or not _is_sha256_value(cp_object):
+        if cp_object == String("") or not is_sha256_value(cp_object):
             out.ok = False
             out.message = String("narrow note: bad cp_object")
             return out^
@@ -572,6 +573,97 @@ def check_narrow(
     return out^
 
 
+def check_identity_bindings(
+    root: String,
+    release: String,
+    note: String,
+    zlib: String,
+    format_path: String,
+) -> NarrowVerdict:
+    """Check identity bindings against live reads (no object/ring).
+
+    Compares config_src, config, btf, format, image, and
+    image_bid from the note against the evidence tree under
+    root, in grammar order with first failure winning. The
+    object and ring bindings stay record-time checks: object
+    bytes come from an explicit path and ring sizes from the
+    loaded object, neither of which passive selection owns.
+    """
+    var out = NarrowVerdict()
+    var parsed = parse_narrow_note(note)
+    if not parsed.ok:
+        out.state = String("uncheckable")
+        out.key = String("note")
+        return out^
+    var bind = parsed.bindings
+    var cfg = read_live_config(root, release, zlib)
+    if cfg.src == String(""):
+        out.state = String("uncheckable")
+        out.key = String("config")
+        return out^
+    if cfg.src != bind.config_src:
+        out.state = String("mismatch")
+        out.key = String("config_src")
+        return out^
+    if cfg.value.state != String("value"):
+        out.state = String("uncheckable")
+        out.key = String("config")
+        return out^
+    if cfg.value.value != bind.config:
+        out.state = String("mismatch")
+        out.key = String("config")
+        return out^
+    var btf = read_live_bytes(
+        root, String("/sys/kernel/btf/vmlinux"), String("btf"),
+        MAX_NARROW_BTF_BYTES,
+    )
+    if btf.state != String("value"):
+        out.state = String("uncheckable")
+        out.key = String("btf")
+        return out^
+    if btf.value != bind.btf:
+        out.state = String("mismatch")
+        out.key = String("btf")
+        return out^
+    var form = read_live_bytes(
+        root, format_path, String("format"), MAX_NARROW_FORMAT_BYTES
+    )
+    if form.state != String("value"):
+        out.state = String("uncheckable")
+        out.key = String("format")
+        return out^
+    if form.value != bind.format:
+        out.state = String("mismatch")
+        out.key = String("format")
+        return out^
+    var image = read_live_bytes(
+        root,
+        String("/boot/vmlinuz-") + release,
+        String("image"),
+        MAX_NARROW_IMAGE_BYTES,
+    )
+    if image.state != String("value"):
+        out.state = String("uncheckable")
+        out.key = String("image")
+        return out^
+    if image.value != bind.image:
+        out.state = String("mismatch")
+        out.key = String("image")
+        return out^
+    var bid = read_live_bid(root)
+    if bid.state != String("value"):
+        out.state = String("uncheckable")
+        out.key = String("image_bid")
+        return out^
+    if bid.value != bind.image_bid:
+        out.state = String("mismatch")
+        out.key = String("image_bid")
+        return out^
+    out.state = String("bound")
+    out.key = String("")
+    return out^
+
+
 def check_narrow_extra(
     bind: NarrowBindings, live: NarrowLive, want_lc: Bool,
     want_cp: Bool,
@@ -741,6 +833,15 @@ struct _FormatField(ImplicitlyCopyable):
         self.size = -1
 
 
+def _has_nul(text: String) -> Bool:
+    """True when the text holds an embedded NUL byte."""
+    var raw = text.as_bytes()
+    for i in range(len(raw)):
+        if raw[i] == UInt8(0):
+            return True
+    return False
+
+
 def _parse_format_field(line: Span[UInt8, _]) -> _FormatField:
     """Strict-parse one `field:TYPE NAME;\\toffset:O;\\tsize:S;` line."""
     var out = _FormatField()
@@ -845,6 +946,130 @@ def check_trace_layout(data: Span[UInt8, _]) -> LayoutCheck:
     out.ok = True
     out.message = String("")
     return out^
+
+
+struct TraceField(ImplicitlyCopyable):
+    """One discovered tracefs format field."""
+
+    var name: String
+    var ftype: String
+    var offset: Int
+    var size: Int
+
+    def __init__(out self):
+        self.name = String("")
+        self.ftype = String("")
+        self.offset = -1
+        self.size = -1
+
+    def __init__(out self, name: String, ftype: String, offset: Int, size: Int):
+        self.name = name
+        self.ftype = ftype
+        self.offset = offset
+        self.size = size
+
+
+struct TraceFormat(Copyable, Movable):
+    """Discovered layout of one tracefs event format (fields valid iff ok)."""
+
+    var ok: Bool
+    var message: String
+    var fields: List[TraceField]
+
+    def __init__(out self):
+        self.ok = False
+        self.message = String("")
+        self.fields = List[TraceField]()
+
+
+def parse_trace_format(data: Span[UInt8, _]) -> TraceFormat:
+    """Strict-parse a tracefs event format into its field layout.
+
+    Non-field lines are skipped and leading blanks are
+    tolerated (tracefs indents field lines). Any unparseable
+    field line, NUL byte in a field name or type, or
+    duplicate field name refuses: offsets derived from a
+    misread layout would read wrong bytes. Bytes in skipped
+    lines and ignored trailing columns are never inspected.
+    """
+    var out = TraceFormat()
+    for line in _split_lines(data):
+        var lb = Span(line)
+        var s = 0
+        while s < len(lb) and (lb[s] == UInt8(9) or lb[s] == UInt8(0x20)):
+            s += 1
+        if s >= len(lb):
+            continue
+        var body = lb[s : len(lb)]
+        if not _starts_with(body, String("field:")):
+            continue
+        var f = _parse_format_field(body)
+        if not f.ok:
+            out.message = String("format line unparseable")
+            return out^
+        if _has_nul(f.name) or _has_nul(f.ftype):
+            out.message = String("format line unparseable")
+            return out^
+        for i in range(len(out.fields)):
+            if out.fields[i].name == f.name:
+                out.message = String(t"duplicate field {f.name}")
+                return out^
+        out.fields.append(
+            TraceField(f.name.copy(), f.ftype.copy(), f.offset, f.size)
+        )
+    out.ok = True
+    out.message = String("")
+    return out^
+
+
+def known_trace_format() -> TraceFormat:
+    """Known-good attempt layout, as the program pins it."""
+    var out = TraceFormat()
+    var pins = _layout_pins()
+    for i in range(len(pins)):
+        out.fields.append(
+            TraceField(
+                pins[i].name.copy(),
+                pins[i].ftype.copy(),
+                pins[i].offset,
+                pins[i].size,
+            )
+        )
+    out.ok = True
+    out.message = String("")
+    return out^
+
+
+def diff_trace_format(want: TraceFormat, live: TraceFormat) -> String:
+    """First structural difference of live against want, else "".
+
+    Every wanted field must exist in live with the same type,
+    offset, and size; extra live fields are tolerated because
+    kernels may extend the record. The message names exact
+    wanted and live values so diagnostics can quote it.
+    """
+    if not want.ok:
+        return String("want layout invalid")
+    if not live.ok:
+        return String("live layout invalid: ") + live.message
+    for i in range(len(want.fields)):
+        var w = want.fields[i]
+        var found = -1
+        for j in range(len(live.fields)):
+            if live.fields[j].name == w.name:
+                found = j
+                break
+        if found < 0:
+            return String(t"missing field {w.name}")
+        var got = live.fields[found]
+        if got.ftype != w.ftype:
+            return String(
+                t"field {w.name}: want type {w.ftype}, live {got.ftype}"
+            )
+        if got.offset != w.offset or got.size != w.size:
+            var msg = t"field {w.name}: want @{w.offset}:{w.size}, live @{got.offset}:{got.size}"
+            return String(msg)
+    return String("")
 
 
 def _le16(data: Span[UInt8, _], at: Int) -> Int:

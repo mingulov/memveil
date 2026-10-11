@@ -82,6 +82,8 @@ struct Capability(Copyable):
     var hooks: List[String]
     var has_profile_id: Bool
     var profile_id: String
+    var has_grade: Bool
+    var grade: String
 
     def __init__(out self):
         self.status = String("")
@@ -89,6 +91,8 @@ struct Capability(Copyable):
         self.hooks = List[String]()
         self.has_profile_id = False
         self.profile_id = String("")
+        self.has_grade = False
+        self.grade = String("")
 
     def __copyinit__(mut self, existing: Self):
         self.status = existing.status
@@ -96,6 +100,8 @@ struct Capability(Copyable):
         self.hooks = existing.hooks.copy()
         self.has_profile_id = existing.has_profile_id
         self.profile_id = existing.profile_id
+        self.has_grade = existing.has_grade
+        self.grade = existing.grade
 
 
 struct Channel(Copyable):
@@ -230,6 +236,17 @@ def _check_capability_status(v: String) raises:
     ):
         return
     raise ValidationError("capability.status", "bad enum")
+
+
+def _check_capability_grade(v: String) raises:
+    if (
+        v == "validated"
+        or v == "local-auto"
+        or v == "candidate"
+        or v == "partial"
+    ):
+        return
+    raise ValidationError("capability.grade", "bad enum")
 
 
 def _check_channel_status(v: String) raises:
@@ -367,6 +384,7 @@ def _parse_capability(mut scan: Scanner, what: String) raises -> Capability:
     var has_reason = False
     var has_hooks = False
     var has_profile = False
+    var has_grade = False
     if not object_is_empty(scan):
         while True:
             scan.skip_ws()
@@ -400,6 +418,15 @@ def _parse_capability(mut scan: Scanner, what: String) raises -> Capability:
                     out.profile_id = m.value
                     out.has_profile_id = True
                 has_profile = True
+            elif key == "grade":
+                if has_grade:
+                    raise ValidationError(what + ".grade", "duplicate")
+                var g = parse_maybe_string(scan)
+                if g.has:
+                    _check_capability_grade(g.value)
+                    out.grade = g.value
+                    out.has_grade = True
+                has_grade = True
             else:
                 raise ValidationError(what, "unknown capability field")
             if not object_next(scan, what):

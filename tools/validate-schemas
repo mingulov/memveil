@@ -9,6 +9,8 @@ Modes:
                                   validate one semantic profile document
   tools/validate-schemas --check-doctor FILE
                                   validate one doctor JSON report
+  tools/validate-schemas --check-receipt FILE
+                                  validate one qualification receipt
 
 Strict producer validation: canonical integers with range checks, required
 fields, size/depth bounds enforced before unbounded parsing, and
@@ -36,6 +38,9 @@ PROFILE_VERSION = "0.1.1"
 U64MAX = 18446744073709551615
 U64RE = re.compile(r"(0|[1-9][0-9]{0,19})")
 IDRE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
+SHA256RE = re.compile(r"sha256:[0-9a-f]{64}")
+BIDRE = re.compile(r"[0-9a-f]{32,64}")
+RECEIPT_IDRE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.\-]{0,127}")
 MAX_LINE = 65536
 MAX_FILE = 16777216
 MAX_DEPTH = 64
@@ -83,6 +88,23 @@ def check_id(value, where):
     if not isinstance(value, str) or not IDRE.fullmatch(value):
         fail("bad-id", "%s is not an opaque id: %r" % (where, value))
     return value
+
+
+def check_decimal(value, where):
+    # Canonical decimal shape only, mirroring the Mojo
+    # producer's _check_u64_dec: neither the schema nor
+    # the parser range-gates u64, so the validator must
+    # not reject a 20-digit value the producer accepts.
+    if not isinstance(value, str):
+        fail("u64-type", "%s must be a decimal string, got %s"
+             % (where, type(value).__name__))
+    if not U64RE.fullmatch(value):
+        fail("u64-canonical", "%s is not canonical: %r" % (where, value))
+
+
+def check_sha256(value, where):
+    if not isinstance(value, str) or not SHA256RE.fullmatch(value):
+        fail("bad-hash", "%s is not sha256 hex: %r" % (where, value))
 
 
 def check_enum(value, allowed, where):
@@ -398,7 +420,7 @@ def check_session(obj):
     for name in CAPABILITIES:
         capability = capabilities[name]
         check_keys(capability, ("status", "reason", "hooks"),
-                   ("profile_id",), "capability.%s" % name)
+                   ("profile_id", "grade"), "capability.%s" % name)
         check_enum(capability["status"],
                    ("verified", "partial", "unavailable", "disabled"),
                    "capability.%s.status" % name)
@@ -410,6 +432,10 @@ def check_session(obj):
             check_text(hook, 256, "capability hook")
         if capability.get("profile_id") is not None:
             check_text(capability["profile_id"], 128, "profile_id")
+        if capability.get("grade") is not None:
+            check_enum(capability["grade"],
+                       ("validated", "local-auto", "candidate", "partial"),
+                       "capability.%s.grade" % name)
     check_quality(obj["quality"], "quality")
     check_stop(obj["stop"])
     return {"id": session_id, "synthetic": obj["synthetic"],
@@ -419,7 +445,35 @@ def check_session(obj):
             "quality": obj["quality"],
             "environment": obj["environment"],
             "catalog": obj["device_catalog"],
+            "capabilities": obj["capabilities"],
             "baseline_observations": len(observations)}
+
+
+def check_report_capabilities(caps, session):
+    check_keys(caps, CAPABILITIES, (), "report.capabilities")
+    for name in CAPABILITIES:
+        entry = caps[name]
+        check_keys(entry, ("status", "grade", "reason"), (),
+                   "report.capabilities.%s" % name)
+        check_enum(entry["status"],
+                   ("verified", "partial", "unavailable", "disabled"),
+                   "report.capabilities.%s.status" % name)
+        if entry["grade"] is not None:
+            check_enum(entry["grade"],
+                       ("validated", "local-auto", "candidate", "partial"),
+                       "report.capabilities.%s.grade" % name)
+        check_text(entry["reason"], 512, "report capability reason")
+        echoed = session["capabilities"][name]
+        if entry["status"] != echoed["status"]:
+            fail("capability-mismatch",
+                 "report capability %s status differs from session" % name)
+        if entry["reason"] != echoed["reason"]:
+            fail("capability-mismatch",
+                 "report capability %s reason differs from session" % name)
+        want = echoed.get("grade")
+        if entry["grade"] != want:
+            fail("capability-mismatch",
+                 "report capability %s grade differs from session" % name)
 
 
 def check_source(source, where):
@@ -876,7 +930,8 @@ def compare_report_obj(obj, session, summary):
     check_keys(obj,
                ("schema_version", "session_id", "synthetic",
                 "engine_version", "environment", "device_catalog",
-                "quality", "metrics", "findings", "limitations"), (),
+                "quality", "metrics", "findings", "limitations"),
+               ("capabilities",),
                "report")
     if obj["schema_version"] != VERSION:
         fail("bad-version", "report schema_version")
@@ -895,6 +950,8 @@ def compare_report_obj(obj, session, summary):
     if obj["device_catalog"] != session["catalog"]:
         fail("catalog-mismatch",
              "report device catalog differs from session")
+    if "capabilities" in obj:
+        check_report_capabilities(obj["capabilities"], session)
     check_quality(obj["quality"], "report.quality")
     metrics = obj["metrics"]
     if not isinstance(metrics, list) or len(metrics) > 4096:
@@ -1220,7 +1277,7 @@ def check_doctor(obj):
         fail("bad-type", "doctor.capabilities")
     seen = set()
     for cap in caps:
-        check_keys(cap, ("id", "status", "reason"), (), "doctor.cap[]")
+        check_keys(cap, ("id", "status", "reason"), ("remedy",), "doctor.cap[]")
         check_text(cap["id"], 64, "doctor.cap[].id")
         if cap["id"] in seen:
             fail("duplicate-key", "doctor capability %r" % cap["id"])
@@ -1228,6 +1285,9 @@ def check_doctor(obj):
         check_enum(cap["status"], DOCTOR_STATUSES, "doctor.cap[].status")
         check_text(cap["reason"], 512, "doctor.cap[].reason",
                    allow_empty=True)
+        if "remedy" in cap:
+            check_text(cap["remedy"], 512, "doctor.cap[].remedy",
+                       allow_empty=True)
     priv = obj["privilege"]
     check_keys(priv, ("euid", "denied_paths"), (), "doctor.privilege")
     if (not isinstance(priv["euid"], int)
@@ -1240,6 +1300,76 @@ def check_doctor(obj):
         check_text(path, 256, "doctor.privilege.denied_paths[]")
     check_enum(obj["verdict"], ("ready", "unavailable"), "doctor.verdict")
     check_text(obj["summary"], 1024, "doctor.summary", allow_empty=True)
+
+
+def check_receipt(obj):
+    check_keys(obj, ("schema_version", "kind", "profile_id", "grade",
+                     "created_ns", "kernel", "bindings", "capabilities",
+                     "artifacts", "workload"), (), "receipt")
+    if obj["schema_version"] != "0.1.0":
+        fail("bad-version", "receipt.schema_version")
+    if obj["kind"] != "memveil-qualification-receipt":
+        fail("bad-enum", "receipt.kind")
+    if (not isinstance(obj["profile_id"], str)
+            or not RECEIPT_IDRE.fullmatch(obj["profile_id"])):
+        fail("bad-id", "receipt.profile_id is not an id: %r"
+             % (obj["profile_id"],))
+    if obj["grade"] != "local-auto":
+        fail("bad-enum", "receipt.grade")
+    check_decimal(obj["created_ns"], "receipt.created_ns")
+    kernel = obj["kernel"]
+    check_keys(kernel, ("arch", "release"), (), "receipt.kernel")
+    check_text(kernel["arch"], 32, "receipt.kernel.arch")
+    check_text(kernel["release"], 128, "receipt.kernel.release")
+    bindings = obj["bindings"]
+    check_keys(bindings, ("config", "config_src", "btf", "format",
+                          "image", "image_bid"), (), "receipt.bindings")
+    check_sha256(bindings["config"], "receipt.bindings.config")
+    check_enum(bindings["config_src"], ("gz", "file"),
+               "receipt.bindings.config_src")
+    check_sha256(bindings["btf"], "receipt.bindings.btf")
+    check_sha256(bindings["format"], "receipt.bindings.format")
+    check_sha256(bindings["image"], "receipt.bindings.image")
+    if (not isinstance(bindings["image_bid"], str)
+            or not BIDRE.fullmatch(bindings["image_bid"])):
+        fail("bad-hash", "receipt.bindings.image_bid is not hex: %r"
+             % (bindings["image_bid"],))
+    caps = obj["capabilities"]
+    if not isinstance(caps, dict):
+        fail("bad-type", "receipt.capabilities")
+    if not caps:
+        fail("empty", "receipt.capabilities needs one entry")
+    for cid, cap in caps.items():
+        check_keys(cap, ("status", "detail"), (),
+                   "receipt.capabilities[]")
+        if cap["status"] != "qualified":
+            fail("bad-enum", "receipt.capabilities[].status")
+        check_text(cap["detail"], 1024, "receipt.capabilities[].detail")
+    artifacts = obj["artifacts"]
+    check_keys(artifacts, ("memveil", "bridge", "objects"), (),
+               "receipt.artifacts")
+    check_text(artifacts["memveil"], 64, "receipt.artifacts.memveil")
+    check_sha256(artifacts["bridge"], "receipt.artifacts.bridge")
+    objects = artifacts["objects"]
+    check_keys(objects, ("attempt",), ("lifecycle", "copy"),
+               "receipt.artifacts.objects")
+    check_sha256(objects["attempt"],
+                 "receipt.artifacts.objects.attempt")
+    if "lifecycle" in objects:
+        check_sha256(objects["lifecycle"],
+                     "receipt.artifacts.objects.lifecycle")
+    if "copy" in objects:
+        check_sha256(objects["copy"],
+                     "receipt.artifacts.objects.copy")
+    workload = obj["workload"]
+    check_keys(workload, ("kind", "duration_s", "traffic_required",
+                          "note"), (), "receipt.workload")
+    if workload["kind"] != "smoke":
+        fail("bad-enum", "receipt.workload.kind")
+    check_decimal(workload["duration_s"], "receipt.workload.duration_s")
+    if workload["traffic_required"] is not False:
+        fail("bad-enum", "receipt.workload.traffic_required")
+    check_text(workload["note"], 512, "receipt.workload.note")
     return obj
 
 
@@ -1276,7 +1406,7 @@ def run_selftest():
 
     schemas = ("session-v0.1.1.schema.json", "event-v0.1.1.schema.json",
                "report-v0.1.0.schema.json", "profile-v0.1.1.schema.json",
-               "doctor-v0.1.0.schema.json")
+               "doctor-v0.1.0.schema.json", "receipt-v0.1.0.schema.json")
 
     def schema_files():
         for name in schemas:
@@ -1474,6 +1604,93 @@ def run_selftest():
 
     results.append(expect_reject("doctor-bad-status", doctor_reject_status,
                                  "bad-enum"))
+
+    def _receipt_ok():
+        digest = "sha256:" + "ab" * 32
+        return {
+            "schema_version": "0.1.0",
+            "kind": "memveil-qualification-receipt",
+            "profile_id": "scan-ref",
+            "grade": "local-auto",
+            "created_ns": "123456789",
+            "kernel": {"arch": "x86_64", "release": "7.0.0-test"},
+            "bindings": {
+                "config": digest, "config_src": "gz", "btf": digest,
+                "format": digest, "image": digest,
+                "image_bid": "ab" * 20,
+            },
+            "capabilities": {
+                "attempt-trace": {
+                    "status": "qualified", "detail": "smoke ok",
+                },
+            },
+            "artifacts": {
+                "memveil": "0.1.0", "bridge": digest,
+                "objects": {"attempt": digest},
+            },
+            "workload": {
+                "kind": "smoke", "duration_s": "3",
+                "traffic_required": False, "note": "selftest",
+            },
+        }
+
+    def receipt_positive():
+        check_receipt(_receipt_ok())
+        return "receipt shape accepted"
+
+    check("receipt-positive", receipt_positive)
+
+    def receipt_reject_grade():
+        obj = _receipt_ok()
+        obj["grade"] = "validated"
+        check_receipt(obj)
+
+    results.append(expect_reject("receipt-bad-grade", receipt_reject_grade,
+                                 "bad-enum"))
+
+    def receipt_reject_binding():
+        obj = _receipt_ok()
+        obj["bindings"]["format"] = "sha256:ZZ"
+        check_receipt(obj)
+
+    results.append(expect_reject("receipt-bad-format-hash",
+                                 receipt_reject_binding, "bad-hash"))
+
+    def receipt_reject_caps():
+        obj = _receipt_ok()
+        obj["capabilities"] = {}
+        check_receipt(obj)
+
+    results.append(expect_reject("receipt-empty-caps", receipt_reject_caps,
+                                 "empty"))
+
+    def receipt_reject_traffic():
+        obj = _receipt_ok()
+        obj["workload"]["traffic_required"] = True
+        check_receipt(obj)
+
+    results.append(expect_reject("receipt-traffic-true",
+                                 receipt_reject_traffic, "bad-enum"))
+
+    def receipt_reject_extra_object():
+        obj = _receipt_ok()
+        obj["artifacts"]["objects"]["trace"] = "sha256:" + "ab" * 32
+        check_receipt(obj)
+
+    results.append(expect_reject("receipt-extra-object",
+                                 receipt_reject_extra_object,
+                                 "unknown-field"))
+
+    def receipt_fixtures():
+        names = ("scan-ref.json", "scan-ref-lc.json",
+                 "scan-ref-stale.json")
+        for name in names:
+            path = repo_path("tests", "fixtures", "scan", "profiles",
+                             "receipts", name)
+            check_receipt(read_json_file(path, path))
+        return "%d emitter receipts shape-valid" % len(names)
+
+    check("receipt-fixtures", receipt_fixtures)
 
     fixture = repo_path("tests", "fixtures", "attempts")
 
@@ -1878,6 +2095,14 @@ def main(argv):
             print("invalid: %s" % exc)
             return 1
         print("doctor report OK: %s" % argv[2])
+        return 0
+    if len(argv) == 3 and argv[1] == "--check-receipt":
+        try:
+            check_receipt(read_json_file(argv[2], argv[2]))
+        except Error as exc:
+            print("invalid: %s" % exc)
+            return 1
+        print("receipt OK: %s" % argv[2])
         return 0
     if len(argv) == 1:
         results = run_selftest()

@@ -9,6 +9,7 @@ from memveil.platform.clock import (
     MonoClock,
     check_timens_live,
     timens_has_offset,
+    wall_ns,
 )
 
 
@@ -56,12 +57,24 @@ def test_timens_live_readable() raises:
     assert_true(out.ok)
 
 
+def test_wall_ns_live() raises:
+    # CLOCK_REALTIME can step backwards (NTP/VM), so this
+    # asserts sample validity, never ordering.
+    var t0 = wall_ns()
+    assert_true(t0 > UInt64(1600000000000000000))
+    var clock = MonoClock()
+    clock.sleep_ms(5)
+    var t1 = wall_ns()
+    assert_true(t1 > UInt64(1600000000000000000))
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_clean_offsets]()
     suite.test[test_offset_vectors]()
     suite.test[test_clock_live]()
     suite.test[test_timens_live_readable]()
+    suite.test[test_wall_ns_live]()
     suite^.run()
     return 0
 

@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Generate minimal raw-BTF fixtures for function-prototype reads.
+
+Hand-encoded blobs (not derived from a build artifact): each holds a
+few BTF types exercising one prototype-reader path. The reader tests
+consume them as raw vmlinux-style blobs (header at offset 0).
+
+Outputs: tests/fixtures/btf/*.bin (funcproto, dupfunc, cycle, anon,
+  unnamed, voidptr, array, badref, fnptr, chain31, chain32).
+
+  funcproto : FUNC test_fn -> PROTO (int, [dev: PTR STRUCT device,
+                size: TYPEDEF size_t]); canonical
+                "int (struct device *dev, size_t size)". Also FUNC
+                vret -> PROTO (void, []); canonical "void (void)";
+                and FUNC lint -> PROTO ("long unsigned int", [])
+                proving the BTF-to-C integer alias.
+  dupfunc   : funcproto plus a second FUNC test_fn (refused).
+  cycle     : FUNC cyc whose param type is a CONST/VOLATILE cycle
+                (hop exhaustion refused). Named TYPEDEFs stop
+                resolution with their own name, so only anonymous
+                modifier chains can exhaust the hop budget.
+  anon      : FUNC anon with PTR to an anonymous STRUCT (refused).
+  unnamed   : FUNC unm with an unnamed parameter (refused).
+  voidptr   : FUNC vptr with PTR -> CONST -> void parameter;
+                canonical "void (void *p)".
+  array     : FUNC arr with INT[4] parameter; canonical
+                "void (int[4] a)".
+  badref    : FUNC bad whose parameter cites type id 99, which
+                does not exist (refused).
+  fnptr     : FUNC cb with PTR -> FUNC_PROTO parameter, the
+                realistic function-pointer shape (refused: the
+                reader spells data types only).
+  chain31   : 31 nested PTRs to INT (resolves; exercises deep
+                but finite chains).
+  chain32   : 32 nested PTRs to INT (hop budget exhausted).
+"""
+import struct
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+OUT = ROOT / "tests" / "fixtures" / "btf"
+
+K_INT, K_PTR, K_ARRAY, K_STRUCT = 1, 2, 3, 4
+K_TYPEDEF, K_VOLATILE, K_CONST = 8, 9, 10
+K_FUNC, K_PROTO = 12, 13
+
+
+class Blob:
+    def __init__(self):
+        self.strs = [b""]
+        self.types = []
+
+    def s(self, text):
+        if text == "":
+            return 0
+        for i, s in enumerate(self.strs):
+            if s == text.encode():
+                return sum(len(x) + 1 for x in self.strs[:i])
+        off = sum(len(x) + 1 for x in self.strs)
+        self.strs.append(text.encode())
+        return off
+
+    def t(self, name_off, kind, vlen, size_or_type, extra=b""):
+        self.types.append(
+            struct.pack("<III", name_off, (kind << 24) | vlen,
+                        size_or_type) + extra
+        )
+        return len(self.types)
+
+    def build(self):
+        tsec = b"".join(self.types)
+        ssec = b"\x00".join(self.strs) + b"\x00"
+        hdr = struct.pack("<HBBIIIII", 0xEB9F, 1, 0, 24, 0, len(tsec),
+                          len(tsec), len(ssec))
+        return hdr + tsec + ssec
+
+
+def int_data(bits, encoding):
+    return struct.pack("<I", (encoding << 24) | bits)
+
+
+def _funcproto_body(b):
+    t_int = b.t(b.s("int"), K_INT, 0, 4, int_data(32, 1))
+    t_dev = b.t(b.s("device"), K_STRUCT, 0, 64)
+    t_ptr = b.t(0, K_PTR, 0, t_dev)
+    t_ulong = b.t(b.s("unsigned long"), K_INT, 0, 8, int_data(64, 0))
+    t_size = b.t(b.s("size_t"), K_TYPEDEF, 0, t_ulong)
+    params = struct.pack("<II", b.s("dev"), t_ptr)
+    params += struct.pack("<II", b.s("size"), t_size)
+    t_proto = b.t(0, K_PROTO, 2, t_int, params)
+    b.t(b.s("test_fn"), K_FUNC, 0, t_proto)
+    t_void = b.t(0, K_PROTO, 0, 0)
+    b.t(b.s("vret"), K_FUNC, 0, t_void)
+    t_lui = b.t(b.s("long unsigned int"), K_INT, 0, 8,
+                int_data(64, 0))
+    t_lproto = b.t(0, K_PROTO, 0, t_lui)
+    b.t(b.s("lint"), K_FUNC, 0, t_lproto)
+
+
+def funcproto():
+    b = Blob()
+    _funcproto_body(b)
+    return b.build()
+
+
+def dupfunc():
+    b = Blob()
+    _funcproto_body(b)
+    # Second FUNC test_fn pointing at the first prototype (id 6).
+    b.t(b.s("test_fn"), K_FUNC, 0, 6)
+    return b.build()
+
+
+def cycle():
+    b = Blob()
+    t_int = b.t(b.s("int"), K_INT, 0, 4, int_data(32, 1))
+    t_a = b.t(0, K_CONST, 0, 0)
+    t_b = b.t(0, K_VOLATILE, 0, t_a)
+    # Patch a -> b to close the cycle. Record 1 (INT) is 16
+    # bytes, so a starts at 16 and its type field at 24.
+    raw = bytearray(b"".join(b.types))
+    struct.pack_into("<I", raw, 24, t_b)
+    offs = [0, 16, 28]
+    ends = offs[1:] + [len(raw)]
+    b.types = [bytes(raw[s:e]) for s, e in zip(offs, ends)]
+    params = struct.pack("<II", b.s("x"), t_a)
+    t_proto = b.t(0, K_PROTO, 1, t_int, params)
+    b.t(b.s("cyc"), K_FUNC, 0, t_proto)
+    return b.build()
+
+
+def anon():
+    b = Blob()
+    t_int = b.t(b.s("int"), K_INT, 0, 4, int_data(32, 1))
+    t_anon = b.t(0, K_STRUCT, 0, 8)
+    t_ptr = b.t(0, K_PTR, 0, t_anon)
+    params = struct.pack("<II", b.s("p"), t_ptr)
+    t_proto = b.t(0, K_PROTO, 1, t_int, params)
+    b.t(b.s("anon"), K_FUNC, 0, t_proto)
+    return b.build()
+
+
+def unnamed():
+    b = Blob()
+    t_int = b.t(b.s("int"), K_INT, 0, 4, int_data(32, 1))
+    params = struct.pack("<II", 0, t_int)
+    t_proto = b.t(0, K_PROTO, 1, t_int, params)
+    b.t(b.s("unm"), K_FUNC, 0, t_proto)
+    return b.build()
+
+
+def voidptr():
+    b = Blob()
+    t_int = b.t(b.s("int"), K_INT, 0, 4, int_data(32, 1))
+    t_const = b.t(0, K_CONST, 0, 0)
+    t_ptr = b.t(0, K_PTR, 0, t_const)
+    params = struct.pack("<II", b.s("p"), t_ptr)
+    t_proto = b.t(0, K_PROTO, 1, 0, params)
+    b.t(b.s("vptr"), K_FUNC, 0, t_proto)
+    return b.build()
+
+
+def array():
+    b = Blob()
+    t_int = b.t(b.s("int"), K_INT, 0, 4, int_data(32, 1))
+    extra = struct.pack("<III", t_int, t_int, 4)
+    t_arr = b.t(0, K_ARRAY, 0, 0, extra)
+    params = struct.pack("<II", b.s("a"), t_arr)
+    t_proto = b.t(0, K_PROTO, 1, 0, params)
+    b.t(b.s("arr"), K_FUNC, 0, t_proto)
+    return b.build()
+
+
+def badref():
+    b = Blob()
+    t_int = b.t(b.s("int"), K_INT, 0, 4, int_data(32, 1))
+    params = struct.pack("<II", b.s("x"), 99)
+    t_proto = b.t(0, K_PROTO, 1, t_int, params)
+    b.t(b.s("bad"), K_FUNC, 0, t_proto)
+    return b.build()
+
+
+def fnptr():
+    b = Blob()
+    t_int = b.t(b.s("int"), K_INT, 0, 4, int_data(32, 1))
+    t_inner = b.t(0, K_PROTO, 0, t_int)
+    t_ptr = b.t(0, K_PTR, 0, t_inner)
+    params = struct.pack("<II", b.s("cb"), t_ptr)
+    t_proto = b.t(0, K_PROTO, 1, 0, params)
+    b.t(b.s("cb"), K_FUNC, 0, t_proto)
+    return b.build()
+
+
+def chain(nptrs, fname):
+    b = Blob()
+    t_int = b.t(b.s("int"), K_INT, 0, 4, int_data(32, 1))
+    cur = t_int
+    for _ in range(nptrs):
+        cur = b.t(0, K_PTR, 0, cur)
+    params = struct.pack("<II", b.s("p"), cur)
+    t_proto = b.t(0, K_PROTO, 1, 0, params)
+    b.t(b.s(fname), K_FUNC, 0, t_proto)
+    return b.build()
+
+
+def main():
+    OUT.mkdir(parents=True, exist_ok=True)
+    blobs = {"funcproto": funcproto(), "dupfunc": dupfunc(),
+             "cycle": cycle(), "anon": anon(), "unnamed": unnamed(),
+             "voidptr": voidptr(), "array": array(),
+             "badref": badref(), "fnptr": fnptr(),
+             "chain31": chain(31, "deep31"),
+             "chain32": chain(32, "deep32")}
+    for name, data in blobs.items():
+        (OUT / (name + ".bin")).write_bytes(data)
+    print("wrote %d BTF fixtures to %s" % (len(blobs), OUT))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

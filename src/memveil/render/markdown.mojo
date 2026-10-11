@@ -143,6 +143,23 @@ def render_markdown(rep: Report, device_filter: String = "") raises -> String:
         out += " | "
         out += escape_text(d.identity_status)
         out += " |\n"
+    out += "\n## Capabilities\n\n"
+    out += "| capability | status | grade | reason |\n"
+    out += "| --- | --- | --- | --- |\n"
+    for i in range(len(rep.caps)):
+        var c = rep.caps[i].copy()
+        out += "| "
+        out += escape_markdown(c.name)
+        out += " | "
+        out += escape_markdown(c.status)
+        out += " | "
+        if c.has_grade:
+            out += escape_markdown(c.grade)
+        else:
+            out += "none"
+        out += " | "
+        out += escape_markdown(c.reason)
+        out += " |\n"
     out += "\n## Quality\n\n"
     out += "| channel | status | loss | scope | reason |\n"
     out += "| --- | --- | --- | --- | --- |\n"

@@ -7,6 +7,15 @@ recorded profile.decision: unavailable (no captured provenance)
 recorded measurement_scope: unavailable (no captured provenance)
 devices (1):
   dev-1 testdev0 driver=synthetic-test identity=resolved
+capabilities:
+  bounce_attempts: verified - Fictional successful state for analyzer tests; this session is synthetic.
+  mapping_lifecycle: verified - Fictional successful state for analyzer tests; this session is synthetic.
+  copy_bytes: verified - Fictional successful state for analyzer tests; this session is synthetic.
+  sync_requests: verified - Fictional successful state for analyzer tests; this session is synthetic.
+  conversion_results: unavailable - No conversion source in this fixture.
+  region_state: unavailable - No region source in this fixture.
+  pool_stats: unavailable - No pool source in this fixture.
+  task_context: unavailable - No observer context in this fixture.
 quality:
   detail: complete_for_scope loss=0
     scope: 1 bounce_attempt event

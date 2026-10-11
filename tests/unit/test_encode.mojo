@@ -325,6 +325,35 @@ def test_session_roundtrip() raises:
     assert_equal(encode_session(back), text)
 
 
+def test_session_capability_grade_roundtrip() raises:
+    # Admission grade rides each qualified session
+    # capability; ungraded caps omit the key.
+    var s = _base_session()
+    s.cap_bounce_attempts.has_grade = True
+    s.cap_bounce_attempts.grade = String("local-auto")
+    var text = encode_session(s)
+    assert_true(text.find(String('"grade":"local-auto"')) != -1)
+    var back = parse_session(_bytes(text))
+    assert_true(back.cap_bounce_attempts.has_grade)
+    assert_equal(back.cap_bounce_attempts.grade, String("local-auto"))
+    assert_true(not back.cap_mapping_lifecycle.has_grade)
+    assert_equal(encode_session(back), text)
+
+
+def test_session_capability_grade_bad_enum() raises:
+    var s = _base_session()
+    s.cap_bounce_attempts.has_grade = True
+    s.cap_bounce_attempts.grade = String("attested")
+    var text = encode_session(s)
+    var raised = False
+    try:
+        _ = parse_session(_bytes(text))
+    except e:
+        raised = True
+        assert_true(String(e).find(String("grade")) != -1)
+    assert_true(raised)
+
+
 def test_session_regions_roundtrip() raises:
     var s = _base_session()
     s.baseline_complete = True
@@ -459,6 +488,8 @@ def run() raises -> Int:
     suite.test[test_generation_sweep]()
     suite.test[test_unknown_kind]()
     suite.test[test_session_roundtrip]()
+    suite.test[test_session_capability_grade_roundtrip]()
+    suite.test[test_session_capability_grade_bad_enum]()
     suite.test[test_session_regions_roundtrip]()
     suite^.run()
     return 0

@@ -151,6 +151,20 @@ def render_json(rep: Report, device_filter: String = "") raises -> String:
             out += "\n"
         out += "    ]\n"
     out += "  },\n"
+    out += '  "capabilities": {\n'
+    for i in range(len(rep.caps)):
+        var c = rep.caps[i].copy()
+        out += "    " + escape_json(c.name) + ': {"status": '
+        out += escape_json(c.status) + ', "grade": '
+        if c.has_grade:
+            out += escape_json(c.grade)
+        else:
+            out += "null"
+        out += ', "reason": ' + escape_json(c.reason) + "}"
+        if i + 1 < len(rep.caps):
+            out += ","
+        out += "\n"
+    out += "  },\n"
     out += '  "quality": {\n'
     out += _channel_json(String("detail"), rep.q_detail, 2) + ",\n"
     out += _channel_json(String("aggregate"), rep.q_aggregate, 2) + ",\n"

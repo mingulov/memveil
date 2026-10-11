@@ -6,7 +6,9 @@ MonoClock implements ClockSource over clock_gettime
 (CLOCK_MONOTONIC) and nanosleep. Signals stay blocked
 during record, so the sleep never EINTRs. The timens
 check refuses virtualized clocks: any nonzero integer
-token in timens_offsets is an offset.
+token in timens_offsets is an offset. wall_ns reads
+CLOCK_REALTIME for receipt timestamps; it is wall
+time, never capture time.
 """
 
 from std.ffi import external_call
@@ -15,6 +17,25 @@ from memveil.capture.collector import ClockSource
 from memveil.platform.reader import read_host_file
 
 comptime _CLOCK_MONOTONIC = 1
+comptime _CLOCK_REALTIME = 0
+
+
+def wall_ns() -> UInt64:
+    """CLOCK_REALTIME nanoseconds since the epoch, 0 on failure."""
+    var ts = List[UInt8]()
+    for _ in range(16):
+        ts.append(UInt8(0))
+    var rc = external_call["clock_gettime", Int32](
+        Int32(_CLOCK_REALTIME), Span(ts).unsafe_ptr()
+    )
+    if Int(rc) != 0:
+        return UInt64(0)
+    var sec = UInt64(0)
+    var nsec = UInt64(0)
+    for i in range(8):
+        sec |= UInt64(ts[i]) << UInt64(8 * i)
+        nsec |= UInt64(ts[8 + i]) << UInt64(8 * i)
+    return sec * UInt64(1000000000) + nsec
 
 
 struct MonoClock(ClockSource):

@@ -541,3 +541,216 @@ def _read_btf_maps(
     out.message = String("")
     out.ring_bytes = ring
     return out^
+
+
+struct BtfFuncProto(Copyable, Movable):
+    """One BTF function prototype read (canonical iff ok)."""
+
+    var ok: Bool
+    var message: String
+    var canonical: String
+
+    def __init__(out self):
+        self.ok = False
+        self.message = String("")
+        self.canonical = String("")
+
+
+struct _TypeSpell(ImplicitlyCopyable):
+    """One canonical type spelling plus its pointer depth."""
+
+    var ok: Bool
+    var message: String
+    var text: String
+    var stars: Int
+
+    def __init__(out self):
+        self.ok = False
+        self.message = String("")
+        self.text = String("")
+        self.stars = 0
+
+
+def _normalize_int_name(name: String) -> String:
+    """One C spelling for equivalent BTF integer names.
+
+    Kernel BTF spells some integers ("long unsigned int")
+    differently from C sources ("unsigned long"). Pairs
+    below name the same LP64 x86-64 type; anything unlisted
+    passes through verbatim so unknown spellings mismatch
+    loudly at comparison instead of equating silently.
+    """
+    if name == String("long unsigned int"):
+        return String("unsigned long")
+    if name == String("long long unsigned int"):
+        return String("unsigned long long")
+    if name == String("short unsigned int"):
+        return String("unsigned short")
+    if name == String("short int"):
+        return String("short")
+    if name == String("long int"):
+        return String("long")
+    if name == String("long long int"):
+        return String("long long")
+    return name
+
+
+def _spell_btf_type(
+    walk: _BtfWalk, data: Span[UInt8, _], tid: Int, budget: Int
+) -> _TypeSpell:
+    """Canonical structural spelling of one BTF type id.
+
+    Modifiers and tags resolve silently, pointers add one
+    star each, and the first named type stops the walk with
+    its own name (typedef names are kept, never expanded).
+    Arrays spell as element plus [n]. Anything anonymous,
+    cyclic, nested-functional, or otherwise unnameable
+    refuses: discovery must not guess at kernel types.
+    """
+    var out = _TypeSpell()
+    var stars = 0
+    var cur = tid
+    var left = budget
+    while True:
+        if left <= 0:
+            out.message = String("type graph too deep")
+            return out^
+        left -= 1
+        if cur == 0:
+            # Void spells alone or terminates pointer
+            # chains (const void *, the kfree shape).
+            out.ok = True
+            out.text = String("void")
+            out.stars = stars
+            for _ in range(stars):
+                out.text += String(" *")
+            return out^
+        if not walk.rec_valid(cur):
+            out.message = String("type id out of range")
+            return out^
+        var kind = walk.kinds[cur - 1]
+        if kind == 2:
+            stars += 1
+            cur = walk.sizes[cur - 1]
+            continue
+        if kind == 9 or kind == 10 or kind == 11 or kind == 18:
+            cur = walk.sizes[cur - 1]
+            continue
+        if kind == 3:
+            var base = walk.offsets[cur - 1]
+            var elem = _u32(data, base + 12)
+            var count = _u32(data, base + 20)
+            var sub = _spell_btf_type(walk, data, elem, left)
+            if not sub.ok:
+                return sub^
+            out.ok = True
+            out.text = sub.text + String("[") + String(count) + String("]")
+            out.stars = stars
+            for _ in range(stars):
+                out.text += String(" *")
+            return out^
+        var name = String("")
+        if not walk.type_name(data, cur - 1, name):
+            out.message = String("BTF strings corrupt")
+            return out^
+        var base: String
+        if kind == 1 or kind == 16:
+            base = _normalize_int_name(name)
+        elif kind == 4:
+            base = String("struct ") + name
+        elif kind == 5:
+            base = String("union ") + name
+        elif kind == 6 or kind == 19:
+            base = String("enum ") + name
+        elif kind == 8:
+            base = name
+        elif kind == 13:
+            out.message = String("function pointer in prototype")
+            return out^
+        else:
+            out.message = String(t"unsupported type kind {kind}")
+            return out^
+        if name == String(""):
+            out.message = String("anonymous type in prototype")
+            return out^
+        out.ok = True
+        out.text = base
+        out.stars = stars
+        for _ in range(stars):
+            out.text += String(" *")
+        return out^
+
+
+def read_btf_func_proto(data: Span[UInt8, _], name: String) -> BtfFuncProto:
+    """Find FUNC name in a raw BTF blob; spell its prototype.
+
+    The blob is a header-at-zero BTF image such as
+    /sys/kernel/btf/vmlinux. The canonical form is
+    "<ret> (<t0> <n0>, ...)" with typedef names kept and
+    one " *" per pointer level; empty parameter lists
+    spell "(void)". A missing, duplicated, or unspellable
+    function refuses with the exact cause.
+    """
+    var out = BtfFuncProto()
+    var walk = _walk_btf(data, 0, len(data))
+    if not walk.ok:
+        out.message = walk.message.copy()
+        return out^
+    var found = -1
+    for i in range(len(walk.offsets)):
+        if walk.kinds[i] != 12:
+            continue
+        var text = String("")
+        if not walk.type_name(data, i, text):
+            out.message = String("BTF strings corrupt")
+            return out^
+        if text == name:
+            if found >= 0:
+                out.message = String(t"duplicate function {name}")
+                return out^
+            found = i
+    if found < 0:
+        out.message = String(t"function {name} not found")
+        return out^
+    var proto = walk.sizes[found]
+    if not walk.rec_valid(proto) or walk.kinds[proto - 1] != 13:
+        out.message = String("function has no prototype")
+        return out^
+    var ret = _spell_btf_type(
+        walk, data, walk.sizes[proto - 1], _MAX_MODIFIER_HOPS
+    )
+    if not ret.ok:
+        out.message = ret.message.copy()
+        return out^
+    var canon = ret.text + String(" (")
+    var pbase = walk.offsets[proto - 1]
+    var pcount = walk.vlens[proto - 1]
+    if pcount == 0:
+        canon += String("void")
+    for m in range(pcount):
+        var pname_off = _u32(data, pbase + 12 + m * 8)
+        var ptype = _u32(data, pbase + 12 + m * 8 + 4)
+        var pname = String("")
+        if not _table_text(
+            data, walk.str_base, walk.str_end, pname_off, pname
+        ):
+            out.message = String("BTF strings corrupt")
+            return out^
+        if pname == String(""):
+            out.message = String("unnamed parameter in prototype")
+            return out^
+        var ps = _spell_btf_type(walk, data, ptype, _MAX_MODIFIER_HOPS)
+        if not ps.ok:
+            out.message = ps.message.copy()
+            return out^
+        if m > 0:
+            canon += String(", ")
+        canon += ps.text
+        if ps.stars == 0:
+            canon += String(" ")
+        canon += pname
+    canon += String(")")
+    out.ok = True
+    out.message = String("")
+    out.canonical = canon
+    return out^

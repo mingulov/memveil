@@ -7,6 +7,7 @@ from std.testing import TestSuite, assert_equal, assert_true
 
 from memveil.platform.narrow import (
     NarrowLive,
+    check_identity_bindings,
     check_narrow,
     check_narrow_extra,
     check_trace_layout,
@@ -292,6 +293,57 @@ def test_check_uncheckable_precedence() raises:
     assert_equal(w.key, String("ring_bytes"))
 
 
+def test_identity_bindings_hold() raises:
+    var note = _join(_fields(String("gz"), String("8388608")))
+    var v = check_identity_bindings(
+        String("tests/fixtures/narrow/ok"),
+        String(_REL),
+        note,
+        String(_ZLIB),
+        String(_FMT_PATH),
+    )
+    assert_equal(v.state, String("bound"))
+    assert_equal(v.key, String(""))
+
+
+def test_identity_bindings_mismatch() raises:
+    var note = _join(_fields(String("gz"), String("8388608")))
+    var v = check_identity_bindings(
+        String("tests/fixtures/narrow/skew"),
+        String(_REL),
+        note,
+        String(_ZLIB),
+        String(_FMT_PATH),
+    )
+    assert_equal(v.state, String("mismatch"))
+    assert_equal(v.key, String("image"))
+
+
+def test_identity_bindings_uncheckable() raises:
+    var note = _join(_fields(String("gz"), String("8388608")))
+    var v = check_identity_bindings(
+        String("tests/fixtures/narrow/missing-root"),
+        String(_REL),
+        note,
+        String(_ZLIB),
+        String(_FMT_PATH),
+    )
+    assert_equal(v.state, String("uncheckable"))
+    assert_equal(v.key, String("config"))
+
+
+def test_identity_bindings_bad_note() raises:
+    var v = check_identity_bindings(
+        String("tests/fixtures/narrow/ok"),
+        String(_REL),
+        String("not a note"),
+        String(_ZLIB),
+        String(_FMT_PATH),
+    )
+    assert_equal(v.state, String("uncheckable"))
+    assert_equal(v.key, String("note"))
+
+
 def _append_u32(mut blob: List[UInt8], v: Int):
     blob.append(UInt8(v & 0xFF))
     blob.append(UInt8((v >> 8) & 0xFF))
@@ -408,6 +460,34 @@ def test_layout_inline_edges() raises:
     var w = check_trace_layout(dup.as_bytes())
     assert_true(not w.ok)
     assert_equal(w.message, String("duplicate field size"))
+
+
+def test_layout_legacy_geometry_before_duplicate() raises:
+    # Characterization: the legacy checker validates each
+    # pinned field at first sighting in file order, so a
+    # drifted geometry reports before the duplicate is seen.
+    var line = String(
+        "field:size_t size;\toffset:40;\tsize:8;\tsigned:0;\n"
+    )
+    var dup = line + line.copy()
+    var v = check_trace_layout(dup.as_bytes())
+    assert_true(not v.ok)
+    assert_equal(v.message, String("field size: want @32:8"))
+
+
+def test_layout_legacy_duplicate_unpinned_passes() raises:
+    # Characterization: the legacy checker tracks duplicates
+    # for pinned fields only; a repeated unpinned field is
+    # ignored. The strict discovery parser refuses this input.
+    var raw = _read_fixture(String("tests/fixtures/layout/ok.format"))
+    var line = String(
+        "\tfield:unsigned char common_flags;\toffset:2;\tsize:1;\tsigned:0;\n"
+    )
+    for b in line.as_bytes():
+        raw.append(b)
+    var v = check_trace_layout(Span(raw))
+    assert_true(v.ok)
+    assert_equal(v.message, String(""))
 
 
 def test_object_ok() raises:
@@ -722,6 +802,10 @@ def run() raises -> Int:
     suite.test[test_check_bound]()
     suite.test[test_check_mismatch_keys]()
     suite.test[test_check_uncheckable_precedence]()
+    suite.test[test_identity_bindings_hold]()
+    suite.test[test_identity_bindings_mismatch]()
+    suite.test[test_identity_bindings_uncheckable]()
+    suite.test[test_identity_bindings_bad_note]()
     suite.test[test_notes_vectors]()
     suite.test[test_notes_decoy_and_malformed]()
     suite.test[test_layout_ok]()
@@ -730,6 +814,8 @@ def run() raises -> Int:
     suite.test[test_layout_badtype]()
     suite.test[test_layout_garbage]()
     suite.test[test_layout_inline_edges]()
+    suite.test[test_layout_legacy_geometry_before_duplicate]()
+    suite.test[test_layout_legacy_duplicate_unpinned_passes]()
     suite.test[test_object_ok]()
     suite.test[test_object_badarch]()
     suite.test[test_object_nosym]()

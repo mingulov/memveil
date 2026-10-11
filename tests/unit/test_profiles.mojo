@@ -19,11 +19,21 @@ from memveil.platform.capabilities import (
     discover_capabilities,
 )
 from memveil.platform.evidence import detect_environment, parse_kernel_triple
+from memveil.platform.narrow import parse_narrow_note
 from memveil.platform.profiles import (
+    CapQualification,
     Profile,
+    ProfileDecision,
+    TraceWant,
+    cp_trace,
+    lc_trace,
     load_profiles,
+    mint_qualification_receipt,
     parse_profile_bytes,
     select_profile,
+    select_profile_bound,
+    verify_hook_signatures,
+    verify_qualification_receipt,
 )
 from memveil.platform.reader import (
     EVIDENCE_ABSENT,
@@ -39,6 +49,7 @@ from memveil.platform.reader import (
     is_valid_utf8,
     open_evidence_reader,
     read_evidence,
+    read_host_file,
 )
 
 
@@ -1172,6 +1183,585 @@ def test_select_validated_match() raises:
     )
 
 
+def test_select_bound_prefers_validated() raises:
+    # Reference is listed first in profiles-bound, but the
+    # validated doc's identity bindings hold, so it wins.
+    var r = open_evidence_reader(fx("bound-host"))
+    var env = detect_environment(r)
+    var ps = load_profiles(fx("profiles-bound"))
+    var d = select_profile_bound(
+        env.kernel, ps^, fx("bound-host"), String("libz.so.1"),
+        fx("profiles-bound")
+    )
+    assert_true(d.matched)
+    assert_true(d.has_profile)
+    assert_equal(d.profile.profile_id, String("test-bound-validated"))
+    assert_equal(
+        d.reason,
+        String("profile test-bound-validated matched (validated)"),
+    )
+
+
+def test_select_bound_multi_hook() raises:
+    # A decoy tracepoint precedes the attempt hook; the
+    # capability-named hook (whose format binds) must win,
+    # mirroring record's hook selection exactly.
+    var r = open_evidence_reader(fx("bound-host"))
+    var env = detect_environment(r)
+    var ps = load_profiles(fx("profiles-bound-multi"))
+    var d = select_profile_bound(
+        env.kernel, ps^, fx("bound-host"), String("libz.so.1"),
+        fx("profiles-bound")
+    )
+    assert_true(d.matched)
+    assert_true(d.has_profile)
+    assert_equal(d.profile.profile_id, String("test-bound-multi"))
+    assert_equal(
+        d.reason,
+        String("profile test-bound-multi matched (validated)"),
+    )
+
+
+def _receipt_doc() raises -> Profile:
+    var ps = load_profiles(fx("profiles-bound"))
+    return ps[1].copy()
+
+
+def _receipt_caps() raises -> List[CapQualification]:
+    var caps = List[CapQualification]()
+    caps.append(
+        CapQualification(
+            String("attempt-trace"),
+            String("layout match; smoke attached, conservation holds"),
+        )
+    )
+    return caps^
+
+
+def test_receipt_roundtrip() raises:
+    var r = open_evidence_reader(fx("bound-host"))
+    var env = detect_environment(r)
+    var doc = _receipt_doc()
+    var parsed = parse_narrow_note(doc.identity.source.note)
+    assert_true(parsed.ok)
+    var js = mint_qualification_receipt(
+        doc.profile_id,
+        env.kernel,
+        parsed.bindings,
+        UInt64(123456789),
+        _receipt_caps(),
+        String("0.1.0"),
+        String(
+            "sha256:5e2e29c1dbc50b9041b2c1ad803fe2e71f1231c1f9a179aa29e72ebcb0b8d270"
+        ),
+        String("sha256:") + parsed.bindings.object,
+        String(""),
+        String(""),
+        UInt64(3),
+        String("smoke: attach/poll/detach, no traffic required"),
+    )
+    var v = verify_qualification_receipt(js.as_bytes(), doc, env.kernel)
+    assert_true(v.ok)
+    assert_equal(v.message, String(""))
+
+
+def test_receipt_verdict_caps() raises:
+    var r = open_evidence_reader(fx("bound-host"))
+    var env = detect_environment(r)
+    var doc = _receipt_doc()
+    var js = _mint_good()
+    var v = verify_qualification_receipt(js.as_bytes(), doc, env.kernel)
+    assert_true(v.ok)
+    assert_equal(len(v.caps), 1)
+    assert_equal(v.caps[0], String("attempt-trace"))
+
+
+def test_receipt_verdict_caps_multi() raises:
+    var r = open_evidence_reader(fx("bound-host"))
+    var env = detect_environment(r)
+    var doc = _receipt_doc()
+    # The fixture note carries attempt bindings only; extend
+    # it with lifecycle/copy bindings so the multi-cap
+    # receipt has hashes to match per qualified channel.
+    doc.identity.source.note += String(
+        " lc_object=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        " lc_ring_bytes=8388608"
+        " cp_object=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        " cp_ring_bytes=8388608"
+    )
+    var parsed = parse_narrow_note(doc.identity.source.note)
+    assert_true(parsed.ok)
+    var caps = _receipt_caps()
+    caps.append(
+        CapQualification(
+            String("mapping-lifecycle"),
+            String("fentry attach/poll/detach ok"),
+        )
+    )
+    caps.append(
+        CapQualification(
+            String("copy-actual"),
+            String("fentry attach/poll/detach ok"),
+        )
+    )
+    var js = mint_qualification_receipt(
+        doc.profile_id,
+        env.kernel,
+        parsed.bindings,
+        UInt64(123456789),
+        caps^,
+        String("0.1.0"),
+        String(
+            "sha256:5e2e29c1dbc50b9041b2c1ad803fe2e71f1231c1f9a179aa29e72ebcb0b8d270"
+        ),
+        String("sha256:") + parsed.bindings.object,
+        String("sha256:") + parsed.bindings.lc_object,
+        String("sha256:") + parsed.bindings.cp_object,
+        UInt64(3),
+        String("smoke: attach/poll/detach, no traffic required"),
+    )
+    var v = verify_qualification_receipt(js.as_bytes(), doc, env.kernel)
+    assert_true(v.ok)
+    assert_equal(len(v.caps), 3)
+    assert_equal(v.caps[0], String("attempt-trace"))
+    assert_equal(v.caps[1], String("mapping-lifecycle"))
+    assert_equal(v.caps[2], String("copy-actual"))
+
+
+def test_receipt_lifecycle_missing_hash_refuses() raises:
+    # A receipt qualifying mapping-lifecycle without a
+    # lifecycle object hash must refuse: otherwise a
+    # changed lifecycle object inherits qualification.
+    var r = open_evidence_reader(fx("bound-host"))
+    var env = detect_environment(r)
+    var doc = _receipt_doc()
+    var parsed = parse_narrow_note(doc.identity.source.note)
+    assert_true(parsed.ok)
+    var caps = _receipt_caps()
+    caps.append(
+        CapQualification(
+            String("mapping-lifecycle"),
+            String("fentry attach/poll/detach ok"),
+        )
+    )
+    var js = mint_qualification_receipt(
+        doc.profile_id,
+        env.kernel,
+        parsed.bindings,
+        UInt64(123456789),
+        caps^,
+        String("0.1.0"),
+        String(
+            "sha256:5e2e29c1dbc50b9041b2c1ad803fe2e71f1231c1f9a179aa29e72ebcb0b8d270"
+        ),
+        String("sha256:") + parsed.bindings.object,
+        String(""),
+        String(""),
+        UInt64(3),
+        String("smoke: attach/poll/detach, no traffic required"),
+    )
+    var v = verify_qualification_receipt(js.as_bytes(), doc, env.kernel)
+    assert_true(not v.ok)
+    assert_equal(
+        v.message,
+        String(
+            "receipt lacks lifecycle hash for qualified"
+            " mapping-lifecycle"
+        ),
+    )
+
+
+def test_receipt_verdict_caps_empty_on_refusal() raises:
+    var r = open_evidence_reader(fx("bound-host"))
+    var env = detect_environment(r)
+    var doc = _receipt_doc()
+    var js = _mint_good()
+    var bad_kernel = env.kernel.copy()
+    bad_kernel.release = String("9.9.9-fake")
+    var v = verify_qualification_receipt(js.as_bytes(), doc, bad_kernel)
+    assert_true(not v.ok)
+    assert_equal(len(v.caps), 0)
+
+
+def _swap_segment(
+    js: String, start_key: String, end_key: String, replacement: String
+) -> String:
+    """Replace from "start_key" up to (not incl.) "end_key"."""
+    var a = js.split(String('"' + start_key + '"'))
+    var b = String(a[1]).split(String('"' + end_key + '"'))
+    return (
+        String(a[0]) + replacement + String('"' + end_key + '"')
+        + String(b[1])
+    )
+
+
+def _swap_tail(js: String, key: String, replacement: String) -> String:
+    """Replace from "key" to the end of the document."""
+    var a = js.split(String('"' + key + '"'))
+    return String(a[0]) + replacement
+
+
+def test_receipt_artifacts_null() raises:
+    var js = _mint_good()
+    var bad = _swap_segment(
+        js, String("artifacts"), String("workload"),
+        String('"artifacts": null, '),
+    )
+    var msg = _verify_text(bad)
+    assert_true(contains(msg, String("receipt unparseable")))
+
+
+def test_receipt_workload_false() raises:
+    var js = _mint_good()
+    var bad = _swap_tail(
+        js, String("workload"), String('"workload": false}\n')
+    )
+    var msg = _verify_text(bad)
+    assert_true(contains(msg, String("receipt unparseable")))
+
+
+def test_receipt_trailing_data() raises:
+    var js = _mint_good() + String("{}\n")
+    var msg = _verify_text(js)
+    assert_true(contains(msg, String("trailing data")))
+
+
+def test_receipt_bridge_shape() raises:
+    var js = _mint_good()
+    var bad = js.replace(
+        String('"bridge": "sha256:5e2e29c1'),
+        String('"bridge": "sha256:ZZZZZZZZ'),
+    )
+    var msg = _verify_text(bad)
+    assert_true(contains(msg, String("receipt.artifacts")))
+
+
+def test_receipt_workload_kind() raises:
+    var js = _mint_good()
+    var bad = js.replace(
+        String('"kind": "smoke"'), String('"kind": "fuzz')
+    )
+    var msg = _verify_text(bad)
+    assert_true(contains(msg, String("receipt.workload")))
+
+
+def test_receipt_traffic_true() raises:
+    var js = _mint_good()
+    var bad = js.replace(
+        String('"traffic_required": false'),
+        String('"traffic_required": true'),
+    )
+    var msg = _verify_text(bad)
+    assert_true(contains(msg, String("receipt.workload")))
+
+
+def test_receipt_duration_shape() raises:
+    var js = _mint_good()
+    var bad = js.replace(
+        String('"duration_s": "3"'), String('"duration_s": "03"')
+    )
+    var msg = _verify_text(bad)
+    assert_true(contains(msg, String("receipt.workload")))
+
+
+def test_receipt_note_empty() raises:
+    var js = _mint_good()
+    var bad = js.replace(
+        String('"note": "smoke: attach/poll/detach, no traffic required"'),
+        String('"note": ""'),
+    )
+    var msg = _verify_text(bad)
+    assert_true(contains(msg, String("receipt.workload")))
+
+
+def test_receipt_memveil_empty() raises:
+    var js = _mint_good()
+    var bad = js.replace(
+        String('"memveil": "0.1.0"'), String('"memveil": ""')
+    )
+    var msg = _verify_text(bad)
+    assert_true(contains(msg, String("receipt.artifacts")))
+
+
+def test_receipt_objects_unknown_field() raises:
+    var js = _mint_good()
+    var bad = js.replace(
+        String('"objects": {"attempt"'),
+        String('"objects": {"evil": "x", "attempt"'),
+    )
+    var msg = _verify_text(bad)
+    assert_true(contains(msg, String("receipt.artifacts")))
+
+
+def test_receipt_objects_empty() raises:
+    var js = _mint_good()
+    var bad = _swap_segment(
+        js, String("objects"), String("workload"),
+        String('"objects": {}, '),
+    )
+    var msg = _verify_text(bad)
+    assert_true(contains(msg, String("receipt.artifacts")))
+
+
+def test_receipt_artifacts_unknown_field() raises:
+    var js = _mint_good()
+    var bad = js.replace(
+        String('"artifacts": {"memveil"'),
+        String('"artifacts": {"evil": "x", "memveil"'),
+    )
+    var msg = _verify_text(bad)
+    assert_true(contains(msg, String("receipt.artifacts")))
+
+
+def test_receipt_artifact_mismatch() raises:
+    var r = open_evidence_reader(fx("bound-host"))
+    var env = detect_environment(r)
+    var doc = _receipt_doc()
+    var parsed = parse_narrow_note(doc.identity.source.note)
+    assert_true(parsed.ok)
+    var js = _mint_good()
+    var bad = js.replace(
+        String('"attempt": "sha256:') + parsed.bindings.object + String('"'),
+        String('"attempt": "sha256:0000000000000000000000000000000000000000000000000000000000000000"'),
+    )
+    assert_true(bad != js)
+    var v = verify_qualification_receipt(bad.as_bytes(), doc, env.kernel)
+    assert_true(not v.ok)
+    assert_equal(v.message, String("receipt artifacts differ from note"))
+
+
+def test_receipt_revision_mismatch() raises:
+    var r = open_evidence_reader(fx("bound-host"))
+    var env = detect_environment(r)
+    var doc = _receipt_doc()
+    var parsed = parse_narrow_note(doc.identity.source.note)
+    assert_true(parsed.ok)
+    var fake = env.kernel.copy()
+    fake.release = String("9.9.9-fake")
+    var js = mint_qualification_receipt(
+        doc.profile_id,
+        fake,
+        parsed.bindings,
+        UInt64(123456789),
+        _receipt_caps(),
+        String("0.1.0"),
+        String(
+            "sha256:5e2e29c1dbc50b9041b2c1ad803fe2e71f1231c1f9a179aa29e72ebcb0b8d270"
+        ),
+        String("sha256:") + parsed.bindings.object,
+        String(""),
+        String(""),
+        UInt64(3),
+        String("smoke: attach/poll/detach, no traffic required"),
+    )
+    var v = verify_qualification_receipt(js.as_bytes(), doc, fake)
+    assert_true(not v.ok)
+    assert_equal(
+        v.message, String("receipt kernel differs from profile revision")
+    )
+
+
+def _mint_good() raises -> String:
+    var r = open_evidence_reader(fx("bound-host"))
+    var env = detect_environment(r)
+    var doc = _receipt_doc()
+    var parsed = parse_narrow_note(doc.identity.source.note)
+    return mint_qualification_receipt(
+        doc.profile_id,
+        env.kernel,
+        parsed.bindings,
+        UInt64(123456789),
+        _receipt_caps(),
+        String("0.1.0"),
+        String(
+            "sha256:5e2e29c1dbc50b9041b2c1ad803fe2e71f1231c1f9a179aa29e72ebcb0b8d270"
+        ),
+        String("sha256:") + parsed.bindings.object,
+        String(""),
+        String(""),
+        UInt64(3),
+        String("smoke: attach/poll/detach, no traffic required"),
+    )
+
+
+def _verify_text(js: String) raises -> String:
+    var r = open_evidence_reader(fx("bound-host"))
+    var env = detect_environment(r)
+    var doc = _receipt_doc()
+    var v = verify_qualification_receipt(js.as_bytes(), doc, env.kernel)
+    assert_true(not v.ok)
+    return v.message
+
+
+def test_receipt_wrong_kernel() raises:
+    var js = _mint_good()
+    var bad = js.replace(
+        String('"release": "7.0.0-test"'), String('"release": "9.9.9-x"')
+    )
+    assert_equal(_verify_text(bad), String("receipt names another kernel"))
+
+
+def test_receipt_wrong_binding() raises:
+    var js = _mint_good()
+    var bad = js.replace(
+        String('"config": "sha256:a5af'),
+        String('"config": "sha256:b5af'),
+    )
+    assert_equal(
+        _verify_text(bad), String("receipt bindings differ from note")
+    )
+
+
+def test_receipt_wrong_profile() raises:
+    var js = _mint_good()
+    var bad = js.replace(
+        String('"profile_id": "test-bound-validated"'),
+        String('"profile_id": "other-profile"'),
+    )
+    assert_equal(
+        _verify_text(bad), String("receipt names another profile")
+    )
+
+
+def test_receipt_bad_json() raises:
+    var js = _mint_good()
+    var cut = js.as_bytes()[0 : js.byte_length() - 20]
+    var r = open_evidence_reader(fx("bound-host"))
+    var env = detect_environment(r)
+    var doc = _receipt_doc()
+    var v = verify_qualification_receipt(cut, doc, env.kernel)
+    assert_true(not v.ok)
+    assert_true(v.message.startswith(String("receipt unparseable: ")))
+
+
+def test_receipt_empty_capabilities() raises:
+    var r = open_evidence_reader(fx("bound-host"))
+    var env = detect_environment(r)
+    var doc = _receipt_doc()
+    var parsed = parse_narrow_note(doc.identity.source.note)
+    var js = mint_qualification_receipt(
+        doc.profile_id,
+        env.kernel,
+        parsed.bindings,
+        UInt64(1),
+        List[CapQualification](),
+        String("0.1.0"),
+        String("sha256:00"),
+        String("sha256:00"),
+        String(""),
+        String(""),
+        UInt64(3),
+        String("empty"),
+    )
+    assert_true(
+        _verify_text(js).startswith(String("receipt unparseable: "))
+    )
+
+
+def test_receipt_wrong_grade() raises:
+    var js = _mint_good()
+    var bad = js.replace(
+        String('"grade": "local-auto"'), String('"grade": "validated"')
+    )
+    assert_true(
+        _verify_text(bad).startswith(String("receipt unparseable: "))
+    )
+
+
+def test_select_bound_receipt_beats_first_covering() raises:
+    var r = open_evidence_reader(fx("bound-host"))
+    var env = detect_environment(r)
+    var scan_raw = read_host_file(
+        String("tests/fixtures/scan/profiles/ref.json"),
+        String("profile"),
+        1048576,
+    )
+    var ps = List[Profile]()
+    ps.append(parse_profile_bytes(scan_raw))
+    var refs = load_profiles(fx("profiles-bound-ref"))
+    ps.append(refs[0].copy())
+    var d = select_profile_bound(
+        env.kernel,
+        ps^,
+        fx("bound-host"),
+        String("libz.so.1"),
+        fx("profiles-bound-ref"),
+    )
+    assert_true(d.matched)
+    assert_true(d.has_profile)
+    assert_equal(d.profile.profile_id, String("ref-bindable"))
+    assert_equal(
+        d.reason, String("profile ref-bindable matched (local-auto)")
+    )
+
+
+def test_select_bound_receipt_match() raises:
+    var r = open_evidence_reader(fx("bound-host"))
+    var env = detect_environment(r)
+    var ps = load_profiles(fx("profiles-bound-ref"))
+    var d = select_profile_bound(
+        env.kernel,
+        ps^,
+        fx("bound-host"),
+        String("libz.so.1"),
+        fx("profiles-bound-ref"),
+    )
+    assert_true(d.matched)
+    assert_true(d.has_profile)
+    assert_equal(d.profile.profile_id, String("ref-bindable"))
+    assert_equal(
+        d.reason, String("profile ref-bindable matched (local-auto)")
+    )
+
+
+def test_select_bound_receipt_stale() raises:
+    var r = open_evidence_reader(fx("ordinary-7.0"))
+    var env = detect_environment(r)
+    var ps = load_profiles(fx("profiles-bound-ref"))
+    var d = select_profile_bound(
+        env.kernel,
+        ps^,
+        fx("ordinary-7.0"),
+        String("libz.so.1"),
+        fx("profiles-bound-ref"),
+    )
+    assert_true(not d.matched)
+    assert_true(d.has_profile)
+    assert_equal(d.profile.profile_id, String("ref-bindable"))
+    assert_equal(
+        d.reason,
+        String(
+            "profile ref-bindable covers this identity"
+            " but is reference-unvalidated; ref-bindable"
+            " receipt names another kernel"
+        ),
+    )
+
+
+def test_select_bound_falls_back_with_reason() raises:
+    # ordinary-7.0 runs 7.0.0-34-generic while the validated
+    # doc records revision 7.0.0-test, so it cannot bind;
+    # reference covers with the near-miss named in the reason.
+    var r = open_evidence_reader(fx("ordinary-7.0"))
+    var env = detect_environment(r)
+    var ps = load_profiles(fx("profiles-bound"))
+    var d = select_profile_bound(
+        env.kernel, ps^, fx("ordinary-7.0"), String("libz.so.1"),
+        fx("profiles-bound")
+    )
+    assert_true(not d.matched)
+    assert_true(d.has_profile)
+    assert_equal(d.profile.profile_id, String("linux-x86_64-7.0-reference"))
+    assert_equal(
+        d.reason,
+        String(
+            "profile linux-x86_64-7.0-reference covers this identity"
+            " but is reference-unvalidated; test-bound-validated"
+            " identity mismatch: revision"
+        ),
+    )
+
+
 def test_select_arch_mismatch() raises:
     var r = open_evidence_reader(fx("arch-mismatch"))
     var env = detect_environment(r)
@@ -1223,7 +1813,7 @@ def find_entry(rep: CapabilityReport, cap_id: String) -> CapEntry:
     for i in range(len(rep.entries)):
         if rep.entries[i].id == cap_id:
             return rep.entries[i].copy()
-    return CapEntry(String(""), String(""), String(""))
+    return CapEntry(String(""), String(""), String(""), String(""))
 
 
 def validated_doc(cap_status: String) -> String:
@@ -1274,6 +1864,38 @@ def test_discover_hook_absent() raises:
             " absent"
         ),
     )
+    # ENOENT proves only the configured path is unseen: order
+    # path/mount visibility before any kernel-absence verdict.
+    assert_equal(
+        a.remedy,
+        String(
+            "verify the profile path and tracefs mount; when both"
+            " are correct, this kernel lacks the hook and"
+            " no command provides it"
+        ),
+    )
+
+
+def test_discover_remedy_qualify() raises:
+    # An unqualified capability names its fix; an available
+    # one carries no remedy.
+    var r = open_evidence_reader(fx("ordinary-7.0"))
+    var caps = List[String]()
+    caps.append(String("attempt-trace"))
+    var d = _local_auto_decision(caps^)
+    var rep = discover_capabilities(r, d^)
+    var l = find_entry(rep, String("mapping-lifecycle"))
+    assert_equal(l.status, String("unknown"))
+    assert_equal(
+        l.remedy,
+        String(
+            "run memveil qualify including mapping-lifecycle"
+            " (see memveil qualify --help)"
+        ),
+    )
+    var a = find_entry(rep, String("attempt-trace"))
+    assert_equal(a.status, String("available"))
+    assert_equal(a.remedy, String(""))
 
 
 def test_discover_hook_denied() raises:
@@ -1287,6 +1909,9 @@ def test_discover_hook_denied() raises:
             " /sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format"
             " denied (privilege)"
         ),
+    )
+    assert_equal(
+        a.remedy, String("re-run with elevated privileges (root)")
     )
     assert_equal(len(rep.denied), 1)
     assert_equal(
@@ -1343,6 +1968,16 @@ def test_discover_changed() raises:
         String(
             "hook swiotlb:swiotlb_bounced format differs from profile"
             " test-validated signature"
+        ),
+    )
+    # Qualify cannot repair a stale recording (planning and the
+    # smoke both refuse it): the profile must be refreshed first.
+    assert_equal(
+        a.remedy,
+        String(
+            "refresh the profile's recorded format from this kernel,"
+            " then re-prove with memveil qualify"
+            " (see memveil qualify --help)"
         ),
     )
 
@@ -1410,18 +2045,30 @@ def low_floor_doc() -> String:
 
     Covers a 6.8 kernel while the 7.0 floor fails, so the attempt
     and available demotions plus the unsupported terminal apply.
+    The lifecycle hooks match the frozen bindings exactly so the
+    cap judges available pre-demotion, not tracing-refused.
     """
-    return String(
-        '{"schema_version":"0.1.1","profile_id":"t-low",'
-        '"status":"validated",'
-        '"identity":{"arch":"x86_64","min_kernel":"6.0",'
-        '"source":{"origin":"o","revision":"r"}},"hooks":[],'
-        '"capabilities":[{"id":"attempt-trace","status":"supported",'
-        '"hooks":[],"reason":"r"},'
-        '{"id":"mapping-lifecycle","status":"supported",'
-        '"hooks":[],"reason":"r"},'
-        '{"id":"copy-actual","status":"unsupported",'
-        '"hooks":[],"reason":"never"}]}'
+    return (
+        String(
+            '{"schema_version":"0.1.1","profile_id":"t-low",'
+            '"status":"validated",'
+            '"identity":{"arch":"x86_64","min_kernel":"6.0",'
+            '"source":{"origin":"o","revision":"r"}},'
+            '"hooks":['
+        )
+        + _frozen_hooks_json(lc_trace())
+        + String(
+            '],"capabilities":[{"id":"attempt-trace",'
+            '"status":"supported","hooks":[],"reason":"r"},'
+            '{"id":"mapping-lifecycle","status":"supported",'
+            '"hooks":['
+        )
+        + _frozen_hook_names_json(lc_trace())
+        + String(
+            '],"reason":"r"},'
+            '{"id":"copy-actual","status":"unsupported",'
+            '"hooks":[],"reason":"never"}]}'
+        )
     )
 
 
@@ -1519,6 +2166,367 @@ def test_discover_vacuous_available() raises:
     assert_equal(a.status, String("available"))
 
 
+def test_select_bound_receipt_grade_caps() raises:
+    var r = open_evidence_reader(fx("bound-host"))
+    var env = detect_environment(r)
+    var ps = load_profiles(fx("profiles-bound-ref"))
+    var d = select_profile_bound(
+        env.kernel,
+        ps^,
+        fx("bound-host"),
+        String("libz.so.1"),
+        fx("profiles-bound-ref"),
+    )
+    assert_true(d.matched)
+    assert_equal(d.grade, String("local-auto"))
+    assert_equal(len(d.receipt_caps), 1)
+    assert_equal(d.receipt_caps[0], String("attempt-trace"))
+
+
+def test_select_bound_validated_grade_caps() raises:
+    var r = open_evidence_reader(fx("bound-host"))
+    var env = detect_environment(r)
+    var ps = load_profiles(fx("profiles-bound"))
+    var d = select_profile_bound(
+        env.kernel, ps^, fx("bound-host"), String("libz.so.1"),
+        fx("profiles-bound")
+    )
+    assert_true(d.matched)
+    assert_equal(d.grade, String("validated"))
+    assert_equal(len(d.receipt_caps), 0)
+
+
+def _local_auto_doc(lc_status: String) -> String:
+    """Reference doc: supported attempt + lc_status lifecycle.
+
+    The lifecycle hooks match the frozen bindings exactly
+    so receipt-scope judgments, not tracing gaps, decide.
+    """
+    return (
+        String(
+            '{"schema_version":"0.1.1","profile_id":"la",'
+            '"status":"reference-unvalidated",'
+            '"identity":{"arch":"x86_64","min_kernel":"7.0",'
+            '"source":{"origin":"o","revision":"r"}},'
+            '"hooks":['
+        )
+        + _frozen_hooks_json(lc_trace())
+        + String(
+            '],"capabilities":[{"id":"attempt-trace",'
+            '"status":"supported","hooks":[],"reason":"r"},'
+            '{"id":"mapping-lifecycle","status":"'
+        )
+        + lc_status
+        + String('","hooks":[')
+        + _frozen_hook_names_json(lc_trace())
+        + String('],"reason":"r"}]}')
+    )
+
+
+def _local_auto_decision(caps: List[String]) raises -> ProfileDecision:
+    var p = parse_profile_bytes(bytes_of(_local_auto_doc(String("candidate"))))
+    return ProfileDecision(
+        True,
+        True,
+        p^,
+        String("profile la matched (local-auto)"),
+        String("local-auto"),
+        caps,
+    )
+
+
+def test_discover_local_auto_qualified() raises:
+    var r = open_evidence_reader(fx("ordinary-7.0"))
+    var caps = List[String]()
+    caps.append(String("attempt-trace"))
+    var d = _local_auto_decision(caps^)
+    var rep = discover_capabilities(r, d^)
+    var a = find_entry(rep, String("attempt-trace"))
+    assert_equal(a.status, String("available"))
+    assert_equal(
+        a.reason, String("verified under local-auto receipt la")
+    )
+    var l = find_entry(rep, String("mapping-lifecycle"))
+    assert_equal(l.status, String("unknown"))
+    assert_equal(
+        l.reason,
+        String(
+            "candidate under local-auto profile la"
+            ": not qualified by this receipt"
+        ),
+    )
+
+
+def test_discover_local_auto_qualified_candidate() raises:
+    var r = open_evidence_reader(fx("ordinary-7.0"))
+    var caps = List[String]()
+    caps.append(String("attempt-trace"))
+    caps.append(String("mapping-lifecycle"))
+    var d = _local_auto_decision(caps^)
+    var rep = discover_capabilities(r, d^)
+    var l = find_entry(rep, String("mapping-lifecycle"))
+    assert_equal(l.status, String("available"))
+    assert_equal(
+        l.reason, String("verified under local-auto receipt la")
+    )
+
+
+def test_discover_local_auto_unqualified_supported() raises:
+    var r = open_evidence_reader(fx("ordinary-7.0"))
+    var p = parse_profile_bytes(
+        bytes_of(_local_auto_doc(String("supported")))
+    )
+    var caps = List[String]()
+    caps.append(String("attempt-trace"))
+    var d = ProfileDecision(
+        True,
+        True,
+        p^,
+        String("profile la matched (local-auto)"),
+        String("local-auto"),
+        caps^,
+    )
+    var rep = discover_capabilities(r, d^)
+    var l = find_entry(rep, String("mapping-lifecycle"))
+    assert_equal(l.status, String("unknown"))
+    assert_equal(
+        l.reason,
+        String(
+            "supported by profile la but not qualified by this receipt"
+        ),
+    )
+
+
+def _frozen_hooks_json(wants: List[TraceWant]) -> String:
+    """Hook array JSON rendered from frozen wants, in order."""
+    var out = String("")
+    for i in range(len(wants)):
+        if i > 0:
+            out += String(",")
+        var w = wants[i].copy()
+        out += String('{"name":"') + w.name.copy()
+        out += String('","kind":"tracing","function":"') + w.function.copy()
+        out += String('","attach":"') + w.attach.copy()
+        out += String('","signature":"') + w.signature.copy()
+        out += String('"}')
+    return out^
+
+
+def _frozen_hook_names_json(wants: List[TraceWant]) -> String:
+    """Quoted hook-name list JSON from frozen wants, in order."""
+    var out = String("")
+    for i in range(len(wants)):
+        if i > 0:
+            out += String(",")
+        out += String('"') + wants[i].name + String('"')
+    return out^
+
+
+def test_discover_local_auto_pathless_hook() raises:
+    # A hook with no probe paths configured (fentry/fexit
+    # have no tracefs id/format files) abstains from the
+    # file probes instead of failing them: empty paths
+    # are "never looked", not "looked and not found". The
+    # hooks still match the frozen bindings exactly.
+    var r = open_evidence_reader(fx("ordinary-7.0"))
+    var doc = (
+        '{"schema_version":"0.1.1","profile_id":"la",'
+        '"status":"reference-unvalidated",'
+        '"identity":{"arch":"x86_64","min_kernel":"7.0",'
+        '"source":{"origin":"o","revision":"r"}},'
+        '"hooks":[' + _frozen_hooks_json(lc_trace()) + '],'
+        '"capabilities":[{"id":"mapping-lifecycle",'
+        '"status":"candidate","hooks":['
+        + _frozen_hook_names_json(lc_trace())
+        + '],"reason":"r"}]}'
+    )
+    var p = parse_profile_bytes(bytes_of(doc))
+    var caps = List[String]()
+    caps.append(String("mapping-lifecycle"))
+    var d = ProfileDecision(
+        True,
+        True,
+        p^,
+        String("profile la matched (local-auto)"),
+        String("local-auto"),
+        caps^,
+    )
+    var rep = discover_capabilities(r, d^)
+    var l = find_entry(rep, String("mapping-lifecycle"))
+    assert_equal(l.status, String("available"))
+    assert_equal(
+        l.reason, String("verified under local-auto receipt la")
+    )
+
+
+def test_discover_tracing_gap_signature() raises:
+    # A post-mint signature edit refuses in doctor with
+    # record's exact reason instead of riding the receipt
+    # to available.
+    var r = open_evidence_reader(fx("ordinary-7.0"))
+    var hooks = _frozen_hooks_json(lc_trace())
+    var bad = hooks.replace(String("attrs)"), String("attrs!)"))
+    assert_true(bad != hooks)
+    var doc = (
+        '{"schema_version":"0.1.1","profile_id":"la",'
+        '"status":"reference-unvalidated",'
+        '"identity":{"arch":"x86_64","min_kernel":"7.0",'
+        '"source":{"origin":"o","revision":"r"}},'
+        '"hooks":[' + bad + '],'
+        '"capabilities":[{"id":"mapping-lifecycle",'
+        '"status":"candidate","hooks":['
+        + _frozen_hook_names_json(lc_trace())
+        + '],"reason":"r"}]}'
+    )
+    var p = parse_profile_bytes(bytes_of(doc))
+    var caps = List[String]()
+    caps.append(String("mapping-lifecycle"))
+    var d = ProfileDecision(
+        True,
+        True,
+        p^,
+        String("profile la matched (local-auto)"),
+        String("local-auto"),
+        caps^,
+    )
+    var rep = discover_capabilities(r, d^)
+    var l = find_entry(rep, String("mapping-lifecycle"))
+    assert_equal(l.status, String("unavailable"))
+    assert_equal(
+        l.reason,
+        String(
+            "capability mapping-lifecycle hook "
+            "fexit:swiotlb_tbl_map_single signature mismatch"
+        ),
+    )
+    assert_equal(
+        l.remedy,
+        String(
+            "align the profile's mapping-lifecycle hooks with"
+            " this build's frozen bindings, then re-qualify"
+        ),
+    )
+
+
+def _sig_doc(hooks_json: String, cap_hooks_json: String) -> String:
+    """One minimal 0.1.1 document with caller-supplied hooks."""
+    return (
+        '{"schema_version":"0.1.1","profile_id":"s",'
+        '"status":"reference-unvalidated","identity":{"arch":"x86_64",'
+        '"min_kernel":"7.0","source":{"origin":"o","revision":"r"}},'
+        '"hooks":[' + hooks_json + '],'
+        '"capabilities":[{"id":"mapping-lifecycle",'
+        '"status":"candidate","hooks":[' + cap_hooks_json + '],'
+        '"reason":"r"}]}'
+    )
+
+
+def _tracing_hook(function: String, signature: String) -> String:
+    """One tracing hook JSON fragment for function/signature."""
+    return (
+        '{"name":"fentry:' + function + '","kind":"tracing",'
+        '"function":"' + function + '","attach":"fentry",'
+        '"signature":"' + signature + '"}'
+    )
+
+
+def _sig_btf() raises -> List[UInt8]:
+    """Raw BTF bytes holding FUNC test_fn from funcproto.bin."""
+    return read_host_file(
+        String("tests/fixtures/btf/funcproto.bin"),
+        String("fixture"),
+        67108864,
+    )
+
+
+def test_sig_match() raises:
+    var doc = _sig_doc(
+        _tracing_hook(
+            String("test_fn"),
+            String("int test_fn(struct device *dev, size_t size)"),
+        ),
+        String('"fentry:test_fn"'),
+    )
+    var p = parse_profile_bytes(bytes_of(doc))
+    var raw = _sig_btf()
+    var vs = verify_hook_signatures(p, Span(raw))
+    assert_equal(len(vs), 1)
+    assert_equal(vs[0].hook, String("fentry:test_fn"))
+    assert_true(vs[0].ok)
+    assert_equal(vs[0].reason, String(""))
+    assert_equal(
+        vs[0].live, String("int (struct device *dev, size_t size)")
+    )
+
+
+def test_sig_mismatch() raises:
+    var doc = _sig_doc(
+        _tracing_hook(
+            String("test_fn"),
+            String("int test_fn(struct device *dev, size_t length)"),
+        ),
+        String('"fentry:test_fn"'),
+    )
+    var p = parse_profile_bytes(bytes_of(doc))
+    var raw = _sig_btf()
+    var vs = verify_hook_signatures(p, Span(raw))
+    assert_equal(len(vs), 1)
+    assert_true(not vs[0].ok)
+    assert_true(contains(vs[0].reason, String("signature mismatch")))
+    assert_equal(
+        vs[0].live, String("int (struct device *dev, size_t size)")
+    )
+
+
+def test_sig_missing_function() raises:
+    var doc = _sig_doc(
+        _tracing_hook(String("nope"), String("int nope(int x)")),
+        String('"fentry:nope"'),
+    )
+    var p = parse_profile_bytes(bytes_of(doc))
+    var raw = _sig_btf()
+    var vs = verify_hook_signatures(p, Span(raw))
+    assert_equal(len(vs), 1)
+    assert_true(not vs[0].ok)
+    assert_true(
+        contains(vs[0].reason, String("function nope not found"))
+    )
+    assert_equal(vs[0].live, String(""))
+
+
+def test_sig_malformed_frozen() raises:
+    var doc = _sig_doc(
+        _tracing_hook(String("test_fn"), String("int test_fn")),
+        String('"fentry:test_fn"'),
+    )
+    var p = parse_profile_bytes(bytes_of(doc))
+    var raw = _sig_btf()
+    var vs = verify_hook_signatures(p, Span(raw))
+    assert_equal(len(vs), 1)
+    assert_true(not vs[0].ok)
+    assert_true(
+        contains(vs[0].reason, String("frozen signature malformed"))
+    )
+
+
+def test_sig_skips_tracepoint() raises:
+    var doc = _sig_doc(
+        '{"name":"swiotlb:x","kind":"tracepoint",'
+        '"id_path":"/i","format_path":"/f"},'
+        + _tracing_hook(
+            String("test_fn"),
+            String("int test_fn(struct device *dev, size_t size)"),
+        ),
+        String('"swiotlb:x","fentry:test_fn"'),
+    )
+    var p = parse_profile_bytes(bytes_of(doc))
+    var raw = _sig_btf()
+    var vs = verify_hook_signatures(p, Span(raw))
+    assert_equal(len(vs), 1)
+    assert_equal(vs[0].hook, String("fentry:test_fn"))
+    assert_true(vs[0].ok)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_meta_ok]()
@@ -1607,12 +2615,44 @@ def run() raises -> Int:
     suite.test[test_manifest_missing]()
     suite.test[test_select_reference_cover]()
     suite.test[test_select_validated_match]()
+    suite.test[test_select_bound_prefers_validated]()
+    suite.test[test_select_bound_multi_hook]()
+    suite.test[test_select_bound_receipt_beats_first_covering]()
+    suite.test[test_select_bound_receipt_match]()
+    suite.test[test_select_bound_receipt_stale]()
+    suite.test[test_select_bound_falls_back_with_reason]()
+    suite.test[test_receipt_roundtrip]()
+    suite.test[test_receipt_verdict_caps]()
+    suite.test[test_receipt_verdict_caps_multi]()
+    suite.test[test_receipt_lifecycle_missing_hash_refuses]()
+    suite.test[test_receipt_verdict_caps_empty_on_refusal]()
+    suite.test[test_receipt_artifacts_null]()
+    suite.test[test_receipt_workload_false]()
+    suite.test[test_receipt_trailing_data]()
+    suite.test[test_receipt_bridge_shape]()
+    suite.test[test_receipt_workload_kind]()
+    suite.test[test_receipt_traffic_true]()
+    suite.test[test_receipt_duration_shape]()
+    suite.test[test_receipt_note_empty]()
+    suite.test[test_receipt_memveil_empty]()
+    suite.test[test_receipt_objects_unknown_field]()
+    suite.test[test_receipt_objects_empty]()
+    suite.test[test_receipt_artifacts_unknown_field]()
+    suite.test[test_receipt_artifact_mismatch]()
+    suite.test[test_receipt_revision_mismatch]()
+    suite.test[test_receipt_wrong_kernel]()
+    suite.test[test_receipt_wrong_binding]()
+    suite.test[test_receipt_wrong_profile]()
+    suite.test[test_receipt_bad_json]()
+    suite.test[test_receipt_empty_capabilities]()
+    suite.test[test_receipt_wrong_grade]()
     suite.test[test_select_arch_mismatch]()
     suite.test[test_select_release_below_min]()
     suite.test[test_select_empty]()
     suite.test[test_select_unparseable]()
     suite.test[test_discover_candidate_unknown]()
     suite.test[test_discover_hook_absent]()
+    suite.test[test_discover_remedy_qualify]()
     suite.test[test_discover_hook_denied]()
     suite.test[test_discover_floor]()
     suite.test[test_discover_no_cover]()
@@ -1627,6 +2667,18 @@ def run() raises -> Int:
     suite.test[test_discover_candidate_reference_verified]()
     suite.test[test_discover_candidate_validated]()
     suite.test[test_discover_vacuous_available]()
+    suite.test[test_select_bound_receipt_grade_caps]()
+    suite.test[test_select_bound_validated_grade_caps]()
+    suite.test[test_discover_local_auto_qualified]()
+    suite.test[test_discover_local_auto_qualified_candidate]()
+    suite.test[test_discover_local_auto_unqualified_supported]()
+    suite.test[test_discover_local_auto_pathless_hook]()
+    suite.test[test_discover_tracing_gap_signature]()
+    suite.test[test_sig_match]()
+    suite.test[test_sig_mismatch]()
+    suite.test[test_sig_missing_function]()
+    suite.test[test_sig_malformed_frozen]()
+    suite.test[test_sig_skips_tracepoint]()
     suite^.run()
     return 0
 

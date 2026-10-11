@@ -20,6 +20,16 @@
       }
     ]
   },
+  "capabilities": {
+    "bounce_attempts": {"status": "verified", "grade": null, "reason": "Fictional successful state for analyzer tests; this session is synthetic."},
+    "mapping_lifecycle": {"status": "unavailable", "grade": null, "reason": "No map_result source in this fixture."},
+    "copy_bytes": {"status": "unavailable", "grade": null, "reason": "No copy source in this fixture."},
+    "sync_requests": {"status": "unavailable", "grade": null, "reason": "No sync source in this fixture."},
+    "conversion_results": {"status": "unavailable", "grade": null, "reason": "No conversion source in this fixture."},
+    "region_state": {"status": "unavailable", "grade": null, "reason": "No region source in this fixture."},
+    "pool_stats": {"status": "unavailable", "grade": null, "reason": "No pool source in this fixture."},
+    "task_context": {"status": "unavailable", "grade": null, "reason": "No observer context in this fixture."}
+  },
   "quality": {
     "detail": {
       "status": "complete_for_scope",

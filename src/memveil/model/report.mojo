@@ -34,6 +34,23 @@ struct ReportEnv:
         self.evidence = List[EvidenceItem]()
 
 
+struct ReportCap(Copyable):
+    """One echoed session capability claim: name plus grade."""
+
+    var name: String
+    var status: String
+    var has_grade: Bool
+    var grade: String
+    var reason: String
+
+    def __init__(out self):
+        self.name = String("")
+        self.status = String("")
+        self.has_grade = False
+        self.grade = String("")
+        self.reason = String("")
+
+
 struct Report:
     """One deterministic offline analysis result."""
 
@@ -44,6 +61,7 @@ struct Report:
     var window_end_ns: UInt64
     var env: ReportEnv
     var devices: List[DeviceEntry]
+    var caps: List[ReportCap]
     var q_detail: Channel
     var q_aggregate: Channel
     var q_correlation: Channel
@@ -62,6 +80,7 @@ struct Report:
         self.window_end_ns = UInt64(0)
         self.env = ReportEnv()
         self.devices = List[DeviceEntry]()
+        self.caps = List[ReportCap]()
         self.q_detail = Channel()
         self.q_aggregate = Channel()
         self.q_correlation = Channel()

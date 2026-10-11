@@ -30,6 +30,7 @@ from memveil.capture.collector import (
     SnapOut,
     StatsOut,
 )
+from memveil.model.session import parse_session
 from memveil.platform.reader import (
     bytes_to_text,
     is_valid_utf8,
@@ -235,6 +236,7 @@ def _run(
     rx1: UInt64,
     end2: List[UInt64],
     rx2: UInt64,
+    grade: String = String(""),
 ) raises -> CaseOut:
     """Run one scripted multi-channel capture; return its outputs.
 
@@ -250,6 +252,7 @@ def _run(
     cfg.max_events_bytes = 1073741824
     cfg.output = tmp + String("/cap")
     cfg.profile_id = String("test-profile-1")
+    cfg.grade = grade.copy()
     cfg.pid = 7
     cfg.has_ring_bytes = True
     cfg.ring_bytes = UInt32(8388608)
@@ -504,6 +507,41 @@ def test_sync_invents_nothing() raises:
             ),
         )
     )
+
+
+def _session_bytes(text: String) -> List[UInt8]:
+    var out = List[UInt8]()
+    var raw = text.as_bytes()
+    for i in range(len(raw)):
+        out.append(raw[i])
+    return out^
+
+
+def test_admitted_caps_carry_grade() raises:
+    # The admission grade lands on every qualified
+    # channel (bounce, lifecycle, copy, sync) and on no
+    # auxiliary one (pool, conversion, region, task).
+    var payloads = List[List[UInt8]]()
+    payloads.append(
+        _cp_raw(1, 1, 1, UInt64(201), UInt64(2001), UInt64(4096),
+                UInt64(0), 4))
+    var c = _run(
+        payloads^, _zero_cut(), _zero_cut(), UInt64(0),
+        _cut(UInt64(1), UInt64(4096), UInt64(1), UInt64(4096)),
+        UInt64(1), String("local-auto"))
+    var s = parse_session(_session_bytes(c.session))
+    assert_true(s.cap_bounce_attempts.has_grade)
+    assert_equal(s.cap_bounce_attempts.grade, String("local-auto"))
+    assert_true(s.cap_mapping_lifecycle.has_grade)
+    assert_equal(s.cap_mapping_lifecycle.grade, String("local-auto"))
+    assert_true(s.cap_copy_bytes.has_grade)
+    assert_equal(s.cap_copy_bytes.grade, String("local-auto"))
+    assert_true(s.cap_sync_requests.has_grade)
+    assert_equal(s.cap_sync_requests.grade, String("local-auto"))
+    assert_true(not s.cap_pool_stats.has_grade)
+    assert_true(not s.cap_conversion_results.has_grade)
+    assert_true(not s.cap_region_state.has_grade)
+    assert_true(not s.cap_task_context.has_grade)
 
 
 def test_clamped_copy_keeps_effective() raises:

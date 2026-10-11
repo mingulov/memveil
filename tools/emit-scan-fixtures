@@ -2,13 +2,16 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Generate admission-scan fixtures (roots + bound profile docs).
 
-Roots under tests/fixtures/scan/<ok,skew,noconfig,diffconfig>/
-mirror the narrow/ok identity tree with the layout/ok.format
-tracepoint format, plus a boot_id file:
+Roots under tests/fixtures/scan/<ok,skew,noconfig,diffconfig,moved>/
+mirror the narrow/ok identity tree with a tracepoint format,
+plus a boot_id file:
   ok         references every source for a bound decision.
   skew       replaces the disk image (bid still matches).
   noconfig   drops both config sources (config uncheckable).
   diffconfig swaps config.gz bytes (config mismatch).
+  moved      swaps the format for layout/moved.format (the
+             size field drifted; admission must refuse with
+             the named field diff).
 
 Profiles under tests/fixtures/scan/profiles/ carry section 5
 grammar bindings computed from the CURRENT fixture bytes:
@@ -18,6 +21,9 @@ grammar bindings computed from the CURRENT fixture bytes:
   unbound.json reference-unvalidated, free-text note.
   sat.json     reference-unvalidated, object+badring ring
                (saturation mechanism stand-in).
+  ref-stale.json reference-unvalidated, current bindings;
+               its receipt still names the previous format
+               hash (stale-receipt stand-in).
   valid-lc.json validated, 12-field note binding elf/lc-ok.o
                and elf/cp-ok.o with both caps supported and the
                frozen tracing hook sets.
@@ -29,6 +35,13 @@ grammar bindings computed from the CURRENT fixture bytes:
 Manifest lists valid.json only; tests address the rest by
 path. All hashes are recomputed here, so editing any input
 fixture regenerates consistent bindings.
+
+Receipts under profiles/receipts/ back the reference docs
+for local-auto admission tests:
+  scan-ref.json       attempt-trace receipt for scan-ref.
+  scan-ref-lc.json    three-capability receipt for scan-ref-lc.
+  scan-ref-stale.json attempt-trace receipt for scan-ref-stale
+                      with a superseded format binding.
 """
 import hashlib
 import json
@@ -39,6 +52,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 NARROW = ROOT / "tests/fixtures/narrow/ok"
 LAYOUT = ROOT / "tests/fixtures/layout/ok.format"
+LAYOUT_MOVED = ROOT / "tests/fixtures/layout/moved.format"
 ELF_OK = ROOT / "tests/fixtures/elf/ok.o"
 ELF_BADRING = ROOT / "tests/fixtures/elf/badring.o"
 ELF_LC_OK = ROOT / "tests/fixtures/elf/lc-ok.o"
@@ -63,7 +77,12 @@ def gunzip_first(path: Path) -> bytes:
     return raw
 
 
-def write_tree(dst: Path, config: bytes | None, image: bytes | None) -> None:
+def write_tree(
+    dst: Path,
+    config: bytes | None,
+    image: bytes | None,
+    fmt: Path | None = None,
+) -> None:
     if dst.exists():
         shutil.rmtree(dst)
     dst.mkdir(parents=True)
@@ -81,7 +100,10 @@ def write_tree(dst: Path, config: bytes | None, image: bytes | None) -> None:
     if config is not None:
         (dst / "proc/config.gz").write_bytes(config)
     shutil.copy(NARROW / "sys/kernel/btf/vmlinux", dst / "sys/kernel/btf/vmlinux")
-    shutil.copy(LAYOUT, dst / ("sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format"))
+    shutil.copy(
+        LAYOUT if fmt is None else fmt,
+        dst / ("sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format"),
+    )
     shutil.copy(NARROW / "sys/kernel/notes", dst / "sys/kernel/notes")
     if config is not None:
         shutil.copy(
@@ -280,8 +302,53 @@ def parse_bid(notes_path: Path) -> str:
     raise AssertionError("no build-id note")
 
 
+def receipt_doc(
+    pid: str, bind: dict, caps: dict, objects: dict | None = None
+) -> dict:
+    return {
+        "schema_version": "0.1.0",
+        "kind": "memveil-qualification-receipt",
+        "profile_id": pid,
+        "grade": "local-auto",
+        "created_ns": "123456789",
+        "kernel": {"arch": "x86_64", "release": REL},
+        "bindings": {
+            "config": f"sha256:{bind['config']}",
+            "config_src": bind["config_src"],
+            "btf": f"sha256:{bind['btf']}",
+            "format": f"sha256:{bind['format']}",
+            "image": f"sha256:{bind['image']}",
+            "image_bid": bind["image_bid"],
+        },
+        "capabilities": {
+            cid: {"status": "qualified", "detail": detail}
+            for cid, detail in caps.items()
+        },
+        "artifacts": {
+            "memveil": "0.1.0",
+            "bridge": "sha256:" + sha(ELF_OK),
+            "objects": {"attempt": "sha256:" + sha(ELF_OK)}
+            | (objects or {}),
+        },
+        "workload": {
+            "kind": "smoke",
+            "duration_s": "3",
+            "traffic_required": False,
+            "note": "scan fixture receipt",
+        },
+    }
+
+
 def main() -> int:
-    for need in [NARROW, LAYOUT, ELF_OK, ELF_BADRING, ELF_LC_OK, ELF_CP_OK]:
+    for need in [
+        NARROW,
+        LAYOUT,
+        LAYOUT_MOVED,
+        ELF_OK,
+        ELF_BADRING,
+        ELF_LC_OK,
+        ELF_CP_OK,
+    ]:
         if not need.exists():
             print(f"missing {need}", file=sys.stderr)
             return 1
@@ -290,6 +357,7 @@ def main() -> int:
     write_tree(SCAN / "skew", config_gz, b"skewed-image-bytes")
     write_tree(SCAN / "noconfig", None, None)
     write_tree(SCAN / "diffconfig", b"different-config-bytes", None)
+    write_tree(SCAN / "moved", config_gz, None, LAYOUT_MOVED)
 
     ok = SCAN / "ok"
     bind = {
@@ -308,6 +376,12 @@ def main() -> int:
         "valid.json": ("scan-valid", "validated", note_for(bind), "supported"),
         "ref.json": (
             "scan-ref",
+            "reference-unvalidated",
+            note_for(bind),
+            "candidate",
+        ),
+        "ref-stale.json": (
+            "scan-ref-stale",
             "reference-unvalidated",
             note_for(bind),
             "candidate",
@@ -491,6 +565,59 @@ def main() -> int:
         (prof / name).write_text(
             json.dumps(mutate(pid, fn), indent=2) + "\n"
         )
+    import copy
+
+    ref_lc = copy.deepcopy(lc_doc)
+    ref_lc["profile_id"] = "scan-ref-lc"
+    ref_lc["status"] = "reference-unvalidated"
+    (prof / "ref-lc.json").write_text(
+        json.dumps(ref_lc, indent=2) + "\n"
+    )
+    receipts = prof / "receipts"
+    receipts.mkdir(exist_ok=True)
+    (receipts / "scan-ref.json").write_text(
+        json.dumps(
+            receipt_doc(
+                "scan-ref",
+                bind,
+                {"attempt-trace": "smoke attached, layout holds"},
+            ),
+            indent=2,
+        )
+        + "\n"
+    )
+    stale_bind = dict(bind)
+    stale_bind["format"] = "0" * 64
+    (receipts / "scan-ref-stale.json").write_text(
+        json.dumps(
+            receipt_doc(
+                "scan-ref-stale",
+                stale_bind,
+                {"attempt-trace": "smoke attached, layout holds"},
+            ),
+            indent=2,
+        )
+        + "\n"
+    )
+    (receipts / "scan-ref-lc.json").write_text(
+        json.dumps(
+            receipt_doc(
+                "scan-ref-lc",
+                bind,
+                {
+                    "attempt-trace": "smoke attached, layout holds",
+                    "mapping-lifecycle": "fentry/fexit smoke ok",
+                    "copy-actual": "fentry smoke ok",
+                },
+                {
+                    "lifecycle": "sha256:" + sha(ELF_LC_OK),
+                    "copy": "sha256:" + sha(ELF_CP_OK),
+                },
+            ),
+            indent=2,
+        )
+        + "\n"
+    )
     (prof / "manifest.txt").write_text("valid.json\n")
     print(f"wrote scan fixtures to {SCAN}")
     return 0

@@ -5,7 +5,11 @@
 from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
 
-from memveil.platform.btf import read_btf_maps, read_btf_maps_ring
+from memveil.platform.btf import (
+    read_btf_func_proto,
+    read_btf_maps,
+    read_btf_maps_ring,
+)
 from memveil.platform.reader import read_host_file
 
 
@@ -125,6 +129,119 @@ def test_btf_missing_ring() raises:
     assert_equal(v.message, String("missing mv_copies"))
 
 
+def test_func_proto_ok() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/funcproto.bin"))
+    var v = read_btf_func_proto(Span(raw), String("test_fn"))
+    assert_true(v.ok)
+    assert_equal(v.message, String(""))
+    assert_equal(
+        v.canonical, String("int (struct device *dev, size_t size)")
+    )
+
+
+def test_func_proto_missing() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/funcproto.bin"))
+    var v = read_btf_func_proto(Span(raw), String("nope"))
+    assert_true(not v.ok)
+    assert_equal(v.message, String("function nope not found"))
+
+
+def test_func_proto_duplicate() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/dupfunc.bin"))
+    var v = read_btf_func_proto(Span(raw), String("test_fn"))
+    assert_true(not v.ok)
+    assert_equal(v.message, String("duplicate function test_fn"))
+
+
+def test_func_proto_cycle() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/cycle.bin"))
+    var v = read_btf_func_proto(Span(raw), String("cyc"))
+    assert_true(not v.ok)
+    assert_equal(v.message, String("type graph too deep"))
+
+
+def test_func_proto_anon() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/anon.bin"))
+    var v = read_btf_func_proto(Span(raw), String("anon"))
+    assert_true(not v.ok)
+    assert_equal(v.message, String("anonymous type in prototype"))
+
+
+def test_func_proto_void() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/funcproto.bin"))
+    var v = read_btf_func_proto(Span(raw), String("vret"))
+    assert_true(v.ok)
+    assert_equal(v.canonical, String("void (void)"))
+
+
+def test_func_proto_int_alias() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/funcproto.bin"))
+    var v = read_btf_func_proto(Span(raw), String("lint"))
+    assert_true(v.ok)
+    assert_equal(v.canonical, String("unsigned long (void)"))
+
+
+def test_func_proto_voidptr() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/voidptr.bin"))
+    var v = read_btf_func_proto(Span(raw), String("vptr"))
+    assert_true(v.ok)
+    assert_equal(v.canonical, String("void (void *p)"))
+
+
+def test_func_proto_unnamed_param() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/unnamed.bin"))
+    var v = read_btf_func_proto(Span(raw), String("unm"))
+    assert_true(not v.ok)
+    assert_equal(v.message, String("unnamed parameter in prototype"))
+
+
+def test_func_proto_array() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/array.bin"))
+    var v = read_btf_func_proto(Span(raw), String("arr"))
+    assert_true(v.ok)
+    assert_equal(v.canonical, String("void (int[4] a)"))
+
+
+def test_func_proto_badref() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/badref.bin"))
+    var v = read_btf_func_proto(Span(raw), String("bad"))
+    assert_true(not v.ok)
+    assert_equal(v.message, String("type id out of range"))
+
+
+def test_func_proto_fnptr() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/fnptr.bin"))
+    var v = read_btf_func_proto(Span(raw), String("cb"))
+    assert_true(not v.ok)
+    assert_equal(v.message, String("function pointer in prototype"))
+
+
+def test_func_proto_chain31() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/chain31.bin"))
+    var v = read_btf_func_proto(Span(raw), String("deep31"))
+    assert_true(v.ok)
+    var want = String("void (int")
+    for _ in range(31):
+        want += String(" *")
+    want += String("p)")
+    assert_equal(v.canonical, want)
+
+
+def test_func_proto_chain32() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/chain32.bin"))
+    var v = read_btf_func_proto(Span(raw), String("deep32"))
+    assert_true(not v.ok)
+    assert_equal(v.message, String("type graph too deep"))
+
+
+def test_func_proto_truncated() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/funcproto.bin"))
+    var cut = Span(raw)[0 : len(raw) - 10]
+    var v = read_btf_func_proto(cut, String("test_fn"))
+    assert_true(not v.ok)
+    assert_equal(v.message, String("BTF sections out of range"))
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_btf_ok]()
@@ -141,6 +258,21 @@ def run() raises -> Int:
     suite.test[test_btf_copy_ring]()
     suite.test[test_btf_copy_nonpow2]()
     suite.test[test_btf_missing_ring]()
+    suite.test[test_func_proto_ok]()
+    suite.test[test_func_proto_missing]()
+    suite.test[test_func_proto_duplicate]()
+    suite.test[test_func_proto_cycle]()
+    suite.test[test_func_proto_anon]()
+    suite.test[test_func_proto_void]()
+    suite.test[test_func_proto_int_alias]()
+    suite.test[test_func_proto_voidptr]()
+    suite.test[test_func_proto_unnamed_param]()
+    suite.test[test_func_proto_array]()
+    suite.test[test_func_proto_badref]()
+    suite.test[test_func_proto_fnptr]()
+    suite.test[test_func_proto_chain31]()
+    suite.test[test_func_proto_chain32]()
+    suite.test[test_func_proto_truncated]()
     suite^.run()
     return 0
 

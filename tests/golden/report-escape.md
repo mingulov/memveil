@@ -16,6 +16,19 @@
 | --- | --- | --- | --- |
 | dev-1 | a"b\\c\|d\_e\*f\[g\]h\`i&amp;&lt;j&gt;k | dr\\nv�e | resolved |
 
+## Capabilities
+
+| capability | status | grade | reason |
+| --- | --- | --- | --- |
+| bounce\_attempts | verified | none | Fictional successful state for analyzer tests; this session is synthetic. |
+| mapping\_lifecycle | unavailable | none | No map\_result source in this fixture. |
+| copy\_bytes | unavailable | none | No copy source in this fixture. |
+| sync\_requests | unavailable | none | No sync source in this fixture. |
+| conversion\_results | unavailable | none | No conversion source in this fixture. |
+| region\_state | unavailable | none | No region source in this fixture. |
+| pool\_stats | unavailable | none | No pool source in this fixture. |
+| task\_context | unavailable | none | No observer context in this fixture. |
+
 ## Quality
 
 | channel | status | loss | scope | reason |

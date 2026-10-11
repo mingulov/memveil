@@ -23,8 +23,8 @@ rules:
 
 from memveil.model.event import Event
 from memveil.model.metric import Finding, Metric
-from memveil.model.report import ENGINE_VERSION, Report
-from memveil.model.session import Channel, Session
+from memveil.model.report import ENGINE_VERSION, Report, ReportCap
+from memveil.model.session import Capability, Channel, Session
 from memveil.model.validate import checked_add, format_u64
 
 comptime MAX_SUMMANDS = 8
@@ -413,6 +413,17 @@ def _unavailable_metric(name: String, unit: String, scope: String, notes: String
     m.notes = notes
     m.confidence = String("high")
     return m^
+
+
+def _echo_cap(mut out: Report, name: String, cap: Capability):
+    """Append one session capability claim to the report matrix."""
+    var one = ReportCap()
+    one.name = name.copy()
+    one.status = cap.status.copy()
+    one.has_grade = cap.has_grade
+    one.grade = cap.grade.copy()
+    one.reason = cap.reason.copy()
+    out.caps.append(one^)
 
 
 struct AttemptAnalyzer:
@@ -1627,6 +1638,14 @@ struct AttemptAnalyzer:
             out.env.evidence.append(self._session.evidence[i])
         for i in range(len(self._session.devices)):
             out.devices.append(self._session.devices[i])
+        _echo_cap(out, String("bounce_attempts"), self._session.cap_bounce_attempts)
+        _echo_cap(out, String("mapping_lifecycle"), self._session.cap_mapping_lifecycle)
+        _echo_cap(out, String("copy_bytes"), self._session.cap_copy_bytes)
+        _echo_cap(out, String("sync_requests"), self._session.cap_sync_requests)
+        _echo_cap(out, String("conversion_results"), self._session.cap_conversion_results)
+        _echo_cap(out, String("region_state"), self._session.cap_region_state)
+        _echo_cap(out, String("pool_stats"), self._session.cap_pool_stats)
+        _echo_cap(out, String("task_context"), self._session.cap_task_context)
         var window = window_label(self._session.window_start_ns, end_ns)
         var noun = String("capture")
         if self._session.synthetic:

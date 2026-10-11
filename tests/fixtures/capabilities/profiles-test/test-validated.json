@@ -7,8 +7,8 @@
     "min_kernel": "7.0",
     "source": {
       "origin": "test",
-      "revision": "test-1",
-      "note": "Synthetic test profile. Its validated status is a test-device label, not a support claim."
+      "revision": "7.0.0-34-generic",
+      "note": "config=sha256:a5af36b05630b51bb596bc68f955ab97bb8802e857cd2fc1de05c0628e398fbb config_src=file btf=sha256:cdf977541b65207b9a19ebcdac8cc70f2a246aaae23b4253d04e0514ab1d0e68 format=sha256:17eb9bf8e3e65489f32ae871bd5d84679800df6b971dd711f98ff7d2296af2f8 object=sha256:7549adfdf9837cefd566373a0efeee8550abdb4cd678b6fa15fe11f3f4785a37 image=sha256:11a663ae36f0cdbecf94b8b7319503bbd0fffc2c3ba02c01cf81600d423dd251 image_bid=0102030405060708090a0b0c0d0e0f1011121314 ring_bytes=8388608"
     },
     "note": "Test-only profile for signature-match coverage. Never ship in profiles/."
   },
@@ -26,7 +26,9 @@
     {
       "id": "attempt-trace",
       "status": "supported",
-      "hooks": ["swiotlb:swiotlb_bounced"],
+      "hooks": [
+        "swiotlb:swiotlb_bounced"
+      ],
       "reason": "Test support declaration for the ready path."
     },
     {

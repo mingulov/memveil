@@ -751,3 +751,54 @@ def snap_ok(
 
 def snap_err() -> SnapOut:
     return SnapOut(False, List[UInt64](), String("scripted read error"))
+
+
+def _stop_mkdtemp() raises -> String:
+    var template = String("/tmp/memveil-stop-XXXXXX")
+    var buf = List[UInt8]()
+    for b in template.as_bytes():
+        buf.append(b)
+    buf.append(UInt8(0))
+    var p = external_call["mkdtemp", UInt64](Span(buf).unsafe_ptr())
+    if p == UInt64(0):
+        raise Error("mkdtemp failed")
+    var raw = List[UInt8]()
+    for i in range(len(buf)):
+        if buf[i] == UInt8(0):
+            break
+        raw.append(buf[i])
+    try:
+        return String(from_utf8=Span(raw))
+    except:
+        raise Error("mkdtemp gave non-UTF8")
+
+
+def _stop_timeout() -> PollOut:
+    return PollOut(String("timeout"), List[UInt8](), UInt32(0), String(""))
+
+
+def _stop_batch() -> PollOut:
+    # The close-out drain discards payloads without
+    # decoding, so any frame bytes drain-count.
+    var frame = List[UInt8]()
+    for _ in range(64):
+        frame.append(UInt8(0))
+    return PollOut(String("batch"), frame^, UInt32(0), String(""))
+
+
+def _stop_zeros(mut kernel: ScriptKernel, nstats: Int, nsnaps: Int):
+    var zstats = stats_ok(
+        UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0)
+    )
+    for _ in range(nstats):
+        kernel.add_stats(zstats.copy())
+    var zsnap = snap_ok(
+        UInt64(0),
+        UInt64(0),
+        UInt64(0),
+        UInt64(0),
+        UInt64(0),
+        UInt64(0),
+    )
+    for _ in range(nsnaps):
+        kernel.add_snap(zsnap.copy())

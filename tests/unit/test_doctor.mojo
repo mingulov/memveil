@@ -139,13 +139,16 @@ def test_json_ordinary_exact() raises:
         "  },\n"
         '  "capabilities": [{"id": "attempt-trace", "status": "unknown",'
         ' "reason": "hook swiotlb:swiotlb_bounced has no recorded format'
-        ' in profile linux-x86_64-7.0-reference"},'
+        ' in profile linux-x86_64-7.0-reference",'
+        ' "remedy": "record the hook format in the profile"},'
         ' {"id": "mapping-lifecycle", "status": "unsupported",'
         ' "reason": "No validated lifecycle mechanism exists'
-        ' in this profile."},'
+        ' in this profile.",'
+        ' "remedy": "use a profile declaring mapping-lifecycle support"},'
         ' {"id": "copy-actual", "status": "unsupported",'
         ' "reason": "No validated executed-length source exists'
-        ' in this profile."}],\n'
+        ' in this profile.",'
+        ' "remedy": "use a profile declaring copy-actual support"}],\n'
         '  "privilege": {\n'
         '    "euid": 1001,\n'
         '    "denied_paths": []\n'
@@ -157,6 +160,26 @@ def test_json_ordinary_exact() raises:
         "}\n"
     )
     assert_equal(js, want)
+
+
+def test_text_fix_lines() raises:
+    var drep = drep_for(String("ordinary-7.0"), String("profiles"))
+    var text = render_doctor_text(drep)
+    assert_true(
+        text.find(
+            String("    fix: record the hook format in the profile\n")
+        )
+        != -1
+    )
+    assert_true(
+        text.find(
+            String(
+                "    fix: use a profile declaring"
+                " mapping-lifecycle support\n"
+            )
+        )
+        != -1
+    )
 
 
 def test_json_ready_verdict() raises:
@@ -284,6 +307,29 @@ def test_exit_unknown_option() raises:
     assert_equal(code, EXIT_INVALID)
 
 
+def test_exit_profiles_dir_missing_value() raises:
+    var args = List[String]()
+    args.append(String("--profiles-dir"))
+    var code = run_doctor(args^)
+    assert_equal(code, EXIT_INVALID)
+
+
+def test_exit_profiles_dir_bad_path() raises:
+    var args = List[String]()
+    args.append(String("--profiles-dir"))
+    args.append(String("tests/fixtures/capabilities/nonexistent-xyz"))
+    var code = run_doctor(args^)
+    assert_equal(code, EXIT_INVALID)
+
+
+def test_exit_profiles_dir_valid_dir() raises:
+    var args = List[String]()
+    args.append(String("--profiles-dir"))
+    args.append(fx(String("profiles-test")))
+    var code = run_doctor(args^)
+    assert_true(code != EXIT_INVALID)
+
+
 def test_resolve_shape() raises:
     var got = resolve_profiles_dir()
     var tail = got.split(String("/../profiles"))
@@ -322,6 +368,7 @@ def run() raises -> Int:
     suite.test[test_build_denied_merge]()
     suite.test[test_build_env_denied]()
     suite.test[test_json_ordinary_exact]()
+    suite.test[test_text_fix_lines]()
     suite.test[test_json_ready_verdict]()
     suite.test[test_json_null_profile]()
     suite.test[test_json_escapes_hostile]()
@@ -335,6 +382,9 @@ def run() raises -> Int:
     suite.test[test_exit_bad_root]()
     suite.test[test_exit_bad_profiles]()
     suite.test[test_exit_unknown_option]()
+    suite.test[test_exit_profiles_dir_missing_value]()
+    suite.test[test_exit_profiles_dir_bad_path]()
+    suite.test[test_exit_profiles_dir_valid_dir]()
     suite.test[test_profiles_dir]()
     suite.test[test_resolve_shape]()
     suite.test[test_usage]()

@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Generate the evidence and manifest files under
 # tests/fixtures/capabilities/. Deterministic; rerunning reproduces
-# those files byte for byte. The test profile JSON, this script, and
-# the README are hand-maintained and preserved across runs. Tabs in
-# cpuinfo/format files are real 0x09 bytes via printf.
+# those files byte for byte. Binding-selection trees replay
+# tests/fixtures/narrow/ok. Profile JSON documents, this script,
+# and the README are hand-maintained and preserved across runs.
+# Tabs in cpuinfo/format files are real 0x09 bytes via printf.
 set -euo pipefail
 ROOT="${1:?usage: $0 <capabilities-dir>}"
 mkdir -p "$ROOT"
@@ -208,6 +209,33 @@ write_meta "$ROOT/malformed-release/meta.txt" "x86_64" "not-a-kernel-release" \
 # Shared validated profiles dir for signature/ready tests.
 mkdir -p "$ROOT/profiles-test"
 printf 'test-validated.json\n' > "$ROOT/profiles-test/manifest.txt"
+
+# Binding-selection fixtures. bound-host replays the narrow/ok
+# identity tree (single source of truth) under release 7.0.0-test;
+# ready-validated gains boot and notes files so the
+# hand-maintained test-validated.json note binds. The
+# *-bound-validated.json notes are hand-maintained like
+# test-validated.json; the profiles suites verify their hashes.
+NARROW_OK="$ROOT/../narrow/ok"
+rm -rf "$ROOT/bound-host"
+mkdir -p "$ROOT/bound-host"
+cp -r "$NARROW_OK/." "$ROOT/bound-host/"
+write_meta "$ROOT/bound-host/meta.txt" "x86_64" "7.0.0-test" "0"
+mkdir -p "$ROOT/ready-validated/boot" "$ROOT/ready-validated/sys/kernel"
+cp "$NARROW_OK/boot/config-7.0.0-test" \
+  "$ROOT/ready-validated/boot/config-7.0.0-34-generic"
+cp "$NARROW_OK/boot/vmlinuz-7.0.0-test" \
+  "$ROOT/ready-validated/boot/vmlinuz-7.0.0-34-generic"
+cp "$NARROW_OK/sys/kernel/notes" "$ROOT/ready-validated/sys/kernel/notes"
+mkdir -p "$ROOT/profiles-bound" "$ROOT/profiles-bound-multi"
+cp "$ROOT/../../../profiles/linux-x86_64-7.0-reference.json" \
+  "$ROOT/profiles-bound/linux-x86_64-7.0-reference.json"
+cp "$ROOT/../../../profiles/linux-x86_64-7.0-reference.json" \
+  "$ROOT/profiles-bound-multi/linux-x86_64-7.0-reference.json"
+printf 'linux-x86_64-7.0-reference.json\ntest-bound-validated.json\n' \
+  > "$ROOT/profiles-bound/manifest.txt"
+printf 'linux-x86_64-7.0-reference.json\ntest-bound-multi.json\n' \
+  > "$ROOT/profiles-bound-multi/manifest.txt"
 
 # Empty manifest dir.
 mkdir -p "$ROOT/profiles-empty"

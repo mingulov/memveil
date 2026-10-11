@@ -62,6 +62,21 @@
     "device_catalog": {
       "$ref": "#/$defs/device_catalog"
     },
+    "capabilities": {
+      "type": "object",
+      "required": ["bounce_attempts", "mapping_lifecycle", "copy_bytes", "sync_requests", "conversion_results", "region_state", "pool_stats", "task_context"],
+      "additionalProperties": false,
+      "properties": {
+        "bounce_attempts": {"$ref": "#/$defs/capability"},
+        "mapping_lifecycle": {"$ref": "#/$defs/capability"},
+        "copy_bytes": {"$ref": "#/$defs/capability"},
+        "sync_requests": {"$ref": "#/$defs/capability"},
+        "conversion_results": {"$ref": "#/$defs/capability"},
+        "region_state": {"$ref": "#/$defs/capability"},
+        "pool_stats": {"$ref": "#/$defs/capability"},
+        "task_context": {"$ref": "#/$defs/capability"}
+      }
+    },
     "quality": {
       "type": "object",
       "required": ["detail", "aggregate", "correlation", "baseline", "terminal"],
@@ -251,6 +266,17 @@
             }
           }
         }
+      }
+    },
+    "capability": {
+      "type": "object",
+      "required": ["status", "grade", "reason"],
+      "additionalProperties": false,
+      "description": "Echoed session capability claim. grade is null when the capture recorded none; it names the admission grade otherwise.",
+      "properties": {
+        "status": {"enum": ["verified", "partial", "unavailable", "disabled"]},
+        "grade": {"enum": ["validated", "local-auto", "candidate", "partial", null]},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 512}
       }
     },
     "channel": {
