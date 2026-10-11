@@ -19,7 +19,7 @@ error raises.
 """
 
 from std.ffi import external_call
-from std.os import getenv, listdir
+from std.os import getenv
 
 from memveil.capture.collector import (
     EXIT_ERROR,
@@ -90,6 +90,7 @@ from memveil.platform.reader import (
 from memveil.platform.runtime import (
     discover_bridge,
     discover_object,
+    is_privileged,
     live_uids,
 )
 from memveil.platform.signal import LiveSignalSource
@@ -1260,6 +1261,78 @@ def resolve_object(
     return discover_object(kind, explicit, has_explicit, exe_path)
 
 
+comptime _SNAP_AT_FDCWD = -100
+comptime _SNAP_O_RDONLY = 0
+
+
+struct BridgeSnapshot(Movable):
+    """One pinned bridge file: the hashed bytes are the loaded bytes.
+
+    The resolved pathname opens once with O_RDONLY and
+    stays open; the loader and the admission hash both
+    name that same open file description through
+    /proc/self/fd/N, so a pathname swap after
+    resolution changes neither. ``sha`` is the bare
+    hex sha256 of the pinned bytes, "" when the bridge
+    is uncheckable; ``load_path`` is the fd alias when
+    pinned, else the plain pathname for the loader's
+    own failure. Hold the snapshot until the load it
+    guards completes; dropping it closes the fd.
+    """
+
+    var fd: Int32
+    var load_path: String
+    var sha: String
+
+    def __init__(out self):
+        self.fd = Int32(-1)
+        self.load_path = String("")
+        self.sha = String("")
+
+    def __deinit__(deinit self):
+        if self.fd >= Int32(0):
+            _ = external_call["close", Int32](self.fd)
+
+
+def open_bridge_snapshot(path: String) -> BridgeSnapshot:
+    """Pin one bridge file for hashing and loading.
+
+    Opens path O_RDONLY (following a final symlink
+    once, at open) and hashes the open description
+    through its /proc/self/fd/N alias; the loader
+    receives the same alias. When the open or the
+    alias read fails, the snapshot degrades to the
+    plain pathname with an empty hash: admission
+    cannot bind and the loader reports its own
+    failure, exactly as before. Never raises.
+    """
+    var snap = BridgeSnapshot()
+    if path == String(""):
+        return snap^
+    var cpath = _to_cstr(path)
+    var fd = external_call["openat", Int32](
+        Int32(_SNAP_AT_FDCWD),
+        Span(cpath).unsafe_ptr(),
+        Int32(_SNAP_O_RDONLY),
+        UInt32(0),
+    )
+    if fd < Int32(0):
+        snap.load_path = path.copy()
+        return snap^
+    var alias = String("/proc/self/fd/") + String(Int(fd))
+    try:
+        var raw = read_host_file(
+            alias, String("bridge"), MAX_NARROW_OBJECT_BYTES
+        )
+        snap.sha = sha256_hex(Span(raw))
+        snap.fd = fd
+        snap.load_path = alias.copy()
+    except:
+        _ = external_call["close", Int32](fd)
+        snap.load_path = path.copy()
+    return snap^
+
+
 def _parse_sudo_id(text: String) -> Int:
     """Parse a SUDO_UID/SUDO_GID value, or -1 when insane.
 
@@ -1292,13 +1365,134 @@ def _to_cstr(text: String) -> List[UInt8]:
     return out^
 
 
-def _chown_one(path: String, uid: UInt32, gid: UInt32) -> Bool:
-    """True when one chown call reports success."""
-    var cpath = _to_cstr(path)
-    var r = external_call["chown", Int32](
-        Span(cpath).unsafe_ptr(), uid, gid
+comptime _OWN_AT_FDCWD = -100
+comptime _OWN_O_RDONLY = 0
+comptime _OWN_O_DIRECTORY = 65536
+comptime _OWN_O_NOFOLLOW = 131072
+comptime _OWN_STAT_SIZE = 144
+comptime _OWN_S_IFMT = 0o170000
+comptime _OWN_S_IFREG = 0o100000
+comptime _OWN_S_IFDIR = 0o040000
+
+
+def _own_le32(buf: List[UInt8], off: Int) -> UInt32:
+    var v = UInt32(0)
+    for i in range(4):
+        v |= UInt32(buf[off + i]) << UInt32(8 * i)
+    return v
+
+
+def _own_le64(buf: List[UInt8], off: Int) -> UInt64:
+    var v = UInt64(0)
+    for i in range(8):
+        v |= UInt64(buf[off + i]) << UInt64(8 * i)
+    return v
+
+
+def _own_fstat_ids(fd: Int32) raises -> List[UInt64]:
+    """[mode, uid, nlink] for an open fd (x86-64 stat layout)."""
+    var buf = List[UInt8]()
+    for _ in range(_OWN_STAT_SIZE):
+        buf.append(UInt8(0))
+    var r = external_call["fstat", Int32](
+        fd, Span(buf).unsafe_ptr()
     )
+    if Int(r) != 0:
+        raise Error("ownership fstat failed")
+    var out = List[UInt64]()
+    out.append(UInt64(_own_le32(buf, 24)))
+    out.append(UInt64(_own_le32(buf, 28)))
+    out.append(_own_le64(buf, 16))
+    return out^
+
+
+def _own_close_quiet(fd: Int32):
+    if fd >= Int32(0):
+        _ = external_call["close", Int32](fd)
+
+
+def _own_open_dir(path: String) -> Int32:
+    """Open the directory itself, never a symlink; -1 on failure."""
+    var cpath = _to_cstr(path)
+    return external_call["openat", Int32](
+        Int32(_OWN_AT_FDCWD),
+        Span(cpath).unsafe_ptr(),
+        Int32(_OWN_O_RDONLY | _OWN_O_DIRECTORY | _OWN_O_NOFOLLOW),
+        UInt32(0),
+    )
+
+
+def _own_open_child(dir_fd: Int32, name: String) -> Int32:
+    """Open one child by name, never a symlink; -1 on failure."""
+    var cname = _to_cstr(name)
+    return external_call["openat", Int32](
+        dir_fd,
+        Span(cname).unsafe_ptr(),
+        Int32(_OWN_O_RDONLY | _OWN_O_NOFOLLOW),
+        UInt32(0),
+    )
+
+
+def _own_child_ok(fd: Int32) -> Bool:
+    """True when an open child is a single-link regular file.
+
+    Symlinks never reach here (O_NOFOLLOW refuses them
+    at open). This rejects directories, fifos, sockets,
+    and files with extra hard links. Ownership is
+    checked separately by the caller. Never raises.
+    """
+    try:
+        var ids = _own_fstat_ids(fd)
+        return (
+            ids[0] & UInt64(_OWN_S_IFMT) == UInt64(_OWN_S_IFREG)
+            and ids[2] == UInt64(1)
+        )
+    except:
+        return False
+
+
+def _own_fd_uid(fd: Int32) -> Int:
+    """Owner uid of an open fd, or -1 on failure.
+
+    Under sudo every true capture file is
+    root-created, so any other owner proves a planted
+    replacement. Never raises.
+    """
+    try:
+        var ids = _own_fstat_ids(fd)
+        return Int(ids[1])
+    except:
+        return -1
+
+
+def _own_fchown(fd: Int32, uid: UInt32, gid: UInt32) -> Bool:
+    """True when one fchown call reports success."""
+    var r = external_call["fchown", Int32](fd, uid, gid)
     return Int(r) == 0
+
+
+def _own_repair_child(
+    dir_fd: Int32, name: String, uid: UInt32, gid: UInt32
+) -> Bool:
+    """Hand one expected child to the invoking user.
+
+    The child opens through the retained directory
+    descriptor and every later step (identity check,
+    ownership transfer) acts on that same open file
+    description, so a mid-repair replacement cannot
+    redirect the chown. Only a root-owned single-link
+    regular file transfers; anything else is rejected
+    untouched. False when the child is missing,
+    rejected, or unchownable. Never raises.
+    """
+    var fd = _own_open_child(dir_fd, name)
+    if fd < Int32(0):
+        return False
+    var ok = _own_child_ok(fd) and _own_fd_uid(fd) == 0
+    if ok:
+        ok = _own_fchown(fd, uid, gid)
+    _own_close_quiet(fd)
+    return ok
 
 
 def _restore_sudo_ownership(output: String):
@@ -1309,10 +1503,21 @@ def _restore_sudo_ownership(output: String):
     When both SUDO_UID and SUDO_GID parse as uid_t
     values and this process runs as root (a non-root
     run already owns its files, so there is nothing
-    to restore), chown the capture dir and its flat
-    children (events.ndjson, session.json) to the
-    invoking user. Any failure warns once on stderr;
-    the capture itself stands.
+    to restore), hand the capture to the invoking
+    user through retained descriptors: the directory
+    opens with O_DIRECTORY|O_NOFOLLOW and must itself
+    be the root-created capture dir (a swapped-in
+    user-owned dir aborts the repair before anything
+    is touched); each expected flat file
+    (events.ndjson, session.json) opens through that
+    descriptor, proves a root-owned single-link
+    regular file, and transfers via fchown; anything
+    else in the directory is foreign and stays
+    root-owned. The directory transfers LAST, so the
+    invoking user gains no write access until every
+    child is already handed back and nothing can be
+    planted mid-repair. Any failure warns once on
+    stderr; the capture itself stands.
     """
     var uid = _parse_sudo_id(getenv("SUDO_UID"))
     var gid = _parse_sudo_id(getenv("SUDO_GID"))
@@ -1320,18 +1525,41 @@ def _restore_sudo_ownership(output: String):
         return
     if _geteuid_live() != 0:
         return
-    var ok = _chown_one(output, UInt32(uid), UInt32(gid))
-    var names = List[String]()
-    try:
-        names = listdir(output)
-    except:
+    var ok = True
+    var dir_fd = _own_open_dir(output)
+    if dir_fd < Int32(0):
         ok = False
-    for i in range(len(names)):
-        if names[i] == String(".") or names[i] == String(".."):
-            continue
-        var child = output + String("/") + names[i].copy()
-        if not _chown_one(child, UInt32(uid), UInt32(gid)):
+    else:
+        var dir_ok = False
+        try:
+            var ids = _own_fstat_ids(dir_fd)
+            dir_ok = (
+                ids[0] & UInt64(_OWN_S_IFMT)
+                == UInt64(_OWN_S_IFDIR)
+                and ids[1] == UInt64(0)
+            )
+        except:
+            dir_ok = False
+        if dir_ok:
+            if not _own_repair_child(
+                dir_fd,
+                String("events.ndjson"),
+                UInt32(uid),
+                UInt32(gid),
+            ):
+                ok = False
+            if not _own_repair_child(
+                dir_fd,
+                String("session.json"),
+                UInt32(uid),
+                UInt32(gid),
+            ):
+                ok = False
+            if not _own_fchown(dir_fd, UInt32(uid), UInt32(gid)):
+                ok = False
+        else:
             ok = False
+        _own_close_quiet(dir_fd)
     if not ok:
         try:
             write_stderr(
@@ -1446,26 +1674,37 @@ def run_collector_with[W: WriterSource](
         )
     var bridge = resolve_bridge(opts.bridge, opts.has_bridge)
     if bridge == String(""):
+        # Privileged runs ignore LMB_NATIVE_LIB, so the
+        # refusal must not recommend it: only an
+        # unprivileged caller can use the env step.
+        var hint = String(
+            "no bridge: pass --bridge or set LMB_NATIVE_LIB"
+        )
+        if is_privileged(live_uids()):
+            hint = String(
+                "no bridge: restore the bundled bridge"
+                " or pass --bridge PATH"
+            )
         return RunResult(
             EXIT_REFUSAL, String(""), String(""),
-            String("no bridge: pass --bridge or set LMB_NATIVE_LIB"),
+            hint,
         )
-    # One resolution, hashed once: admission, provenance,
-    # and the loader below all share this value, so no
-    # re-resolve can slip a different bridge between the
+    # One resolution, pinned once: the snapshot's open
+    # file description feeds the admission hash, the
+    # provenance below, and the loader, so no pathname
+    # swap can slip a different bridge between the
     # receipt check and the load. An unreadable bridge
     # hashes to "": receipts cannot admit local-auto, and
-    # provenance marks the identity uncheckable.
-    var bridge_sha = String("")
+    # provenance marks the identity uncheckable. The
+    # snapshot lives in this scope, so its fd covers the
+    # load inside the collector run below.
+    var snap = open_bridge_snapshot(bridge)
+    var bridge_sha = snap.sha.copy()
     var bridge_v = LiveValue()
-    try:
-        var braw = read_host_file(
-            bridge, String("bridge"), MAX_NARROW_OBJECT_BYTES
-        )
-        bridge_sha = sha256_hex(Span(braw))
+    if bridge_sha != String(""):
         bridge_v.state = String("value")
         bridge_v.value = bridge_sha.copy()
-    except:
+    else:
         bridge_v.state = String("uncheckable")
         bridge_v.detail = String("bridge unreadable")
     var exe_path = String("")
@@ -1666,7 +1905,7 @@ def run_collector_with[W: WriterSource](
         decision.has_lifecycle,
         decision.cp_elf.copy(),
         decision.has_copy,
-        bridge,
+        snap.load_path,
     )
     var clock = MonoClock()
     var signal = LiveSignalSource()

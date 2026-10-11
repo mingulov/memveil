@@ -70,11 +70,13 @@ earlier refusal:
 
 1. Usage and `--max-events-bytes` budget (exit 2 for usage,
    exit 3 for an out-of-range budget).
-2. Bridge presence: `no bridge: pass --bridge or set
-   LMB_NATIVE_LIB` when discovery finds no bridge (no
-   `--bridge`, no usable `LMB_NATIVE_LIB` when
-   unprivileged, nothing beside the executable or under
-   the system path).
+2. Bridge presence: `no bridge: ...` when discovery
+   finds no bridge (no `--bridge`, nothing beside the
+   executable or under the system path, and no usable
+   `LMB_NATIVE_LIB`). Unprivileged runs read `no bridge:
+   pass --bridge or set LMB_NATIVE_LIB`; privileged
+   runs ignore the env step and read `no bridge:
+   restore the bundled bridge or pass --bridge PATH`.
 3. Profiles load: `cannot load profiles: ...` when the
    shipped `profiles/` cannot be read.
 4. Explicit `--profile`: `unknown --profile: <id>`, or

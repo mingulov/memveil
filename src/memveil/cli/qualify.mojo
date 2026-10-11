@@ -19,8 +19,10 @@ from memveil.capture.collector import EXIT_REFUSAL
 from memveil.capture.live import LiveWriter
 from memveil.cli.doctor import resolve_profiles_dir
 from memveil.cli.record import (
+    BridgeSnapshot,
     MAX_PROFILE_DOC_BYTES,
     RecordOptions,
+    open_bridge_snapshot,
     parse_requested_caps,
     resolve_bridge,
     resolve_object,
@@ -664,6 +666,20 @@ def _hash_object(path: String) raises -> String:
     return String("sha256:") + sha256_hex(Span(elf))
 
 
+def _smoke_bridge_hash(snap: BridgeSnapshot) raises -> String:
+    """sha256: hash of the smoke's exercised bridge bytes, or raise.
+
+    The receipt binds the snapshot taken before the
+    smoke, never a post-smoke pathname re-read: a swap
+    after the smoke cannot mint a receipt for bytes the
+    smoke never exercised. An unbound snapshot (empty
+    hash) refuses instead of hashing a pathname.
+    """
+    if snap.sha == String(""):
+        raise Error("bridge identity unbound for this smoke")
+    return String("sha256:") + snap.sha
+
+
 def run_qualify_with(
     root: String, profiles_dir: String, opts: QualifyOptions
 ) raises -> Int:
@@ -681,6 +697,12 @@ def run_qualify_with(
     """
     var output = opts.output.copy()
     var bridge = resolve_bridge(opts.bridge, opts.has_bridge)
+    # Pin the bridge before the smoke: the smoke loads
+    # through the snapshot's fd alias and the receipt
+    # binds the snapshot hash, so a pathname swap on
+    # either side of the smoke binds nothing new. The
+    # snapshot lives in this scope, covering the smoke.
+    var snap = open_bridge_snapshot(bridge)
     var exe_path = String("")
     try:
         exe_path = readlink_self()
@@ -717,8 +739,8 @@ def run_qualify_with(
     var ropts = RecordOptions()
     ropts.output = output.copy()
     ropts.object = object_path.copy()
-    ropts.bridge = bridge.copy()
-    ropts.has_bridge = bridge != String("")
+    ropts.bridge = snap.load_path.copy()
+    ropts.has_bridge = snap.load_path != String("")
     # The smoke resolves the planned source path, never a
     # bare id: plan.doc_source is the explicit file verbatim
     # or the planned manifest entry, so a same-named file in
@@ -787,10 +809,15 @@ def run_qualify_with(
             obj_lc = _hash_object(lc_object)
         if cp_object != String(""):
             obj_cp = _hash_object(cp_object)
-        bridge = _hash_object(bridge)
     except e:
         return _qualify_broken(
             String("smoke objects unreadable: ") + String(e)
+        )
+    try:
+        bridge = _smoke_bridge_hash(snap)
+    except e:
+        return _qualify_broken(
+            String("smoke bridge unbound: ") + String(e)
         )
     var receipt = String("")
     try:

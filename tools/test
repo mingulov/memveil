@@ -2693,6 +2693,36 @@ PYEOF
         failed=1
     fi
 
+    # Passive doctor is bridge-independent: with
+    # LMB_NATIVE_LIB aimed at a blocking stdin pipe,
+    # doctor still completes promptly (regression pin
+    # for the /dev/stdin hang) and its trace shows no
+    # probe or open of the env-selected path or any
+    # bridge candidate.
+    mkfifo "$TMP/dstdin"
+    exec 9<>"$TMP/dstdin"
+    (cd "$ROOT" && timeout 20 strace -f -o "$TMP/dstdin.trace" \
+        -e trace=openat,open,openat2,access,faccessat \
+        env LMB_NATIVE_LIB=/dev/stdin "$BIN" doctor \
+        <"$TMP/dstdin" >"$TMP/dstdin.out" 2>"$TMP/dstdin.err")
+    rc=$?
+    exec 9>&-
+    if [ "$rc" -ne 3 ]; then
+        echo "doctor: hostile LMB_NATIVE_LIB exit $rc, want 3" >&2
+        failed=1
+    elif [ ! -s "$TMP/dstdin.out" ]; then
+        echo "doctor: hostile LMB_NATIVE_LIB left stdout empty" >&2
+        failed=1
+    elif grep -qE '"/dev/stdin"' "$TMP/dstdin.trace"; then
+        echo "doctor: trace shows env-selected stream touched" >&2
+        failed=1
+    elif grep -q "libbpf_mojo" "$TMP/dstdin.trace"; then
+        echo "doctor: trace shows bridge candidate touched" >&2
+        failed=1
+    else
+        echo "ok doctor hostile-env (exit 3, no bridge touch)"
+    fi
+
     if [ "$failed" -ne 0 ]; then
         echo "doctor: FAILED" >&2
         return 1
@@ -2968,6 +2998,8 @@ suite_record() {
     run_unit_file tests/unit/test_live.mojo || return 1
     run_unit_file tests/unit/test_btf.mojo || return 1
     run_unit_file tests/unit/test_record_args.mojo || return 1
+    run_unit_file tests/unit/test_bridge_snapshot.mojo || return 1
+    run_unit_file tests/unit/test_record_ownership.mojo || return 1
     run_unit_file tests/unit/test_qualify.mojo || return 1
     echo "record: unit suites passed"
     BIN="$ROOT/build/memveil"
@@ -3033,17 +3065,23 @@ suite_record() {
         rexpect no-object 3 "no object: pass --object PATH" "$TMP/r-noobj" -- \
             --output "$TMP/r-noobj" --bridge "$TMP/nolib.so"
     fi
-    env -u LMB_NATIVE_LIB "$BIN" record --output "$TMP/r-nobridge" \
-        --object "$ROOT/tests/fixtures/elf/ok.o" \
-        >"$TMP/nobridge.out" 2>"$TMP/nobridge.err"
-    rc=$?
-    if [ "$rc" -ne 3 ] || ! grep -qF "no bridge" "$TMP/nobridge.err" \
-        || [ -e "$TMP/r-nobridge" ]; then
-        echo "record: case no-bridge failed (exit $rc)" >&2
-        cat "$TMP/nobridge.err" >&2
-        rfailed=1
+    nobridge_bundle="$(dirname "$(dirname "$BIN")")/lib/libbpf_mojo.so.1"
+    if [ -r "$nobridge_bundle" ] \
+        || [ -r /usr/lib/memveil/libbpf_mojo.so.1 ]; then
+        echo "record-cli: no-bridge skipped (bridge discoverable on this host)"
     else
-        echo "ok record-cli no-bridge (exit 3)"
+        env -u LMB_NATIVE_LIB "$BIN" record --output "$TMP/r-nobridge" \
+            --object "$ROOT/tests/fixtures/elf/ok.o" \
+            >"$TMP/nobridge.out" 2>"$TMP/nobridge.err"
+        rc=$?
+        if [ "$rc" -ne 3 ] || ! grep -qF "no bridge" "$TMP/nobridge.err" \
+            || [ -e "$TMP/r-nobridge" ]; then
+            echo "record: case no-bridge failed (exit $rc)" >&2
+            cat "$TMP/nobridge.err" >&2
+            rfailed=1
+        else
+            echo "ok record-cli no-bridge (exit 3)"
+        fi
     fi
     host_ok=0
     if [ "$(uname -m)" = "x86_64" ]; then

@@ -6,8 +6,11 @@ Statically audits the product tree: schemas expose no
 payload/key/address/cmdline/environment property; BPF reads
 only its frozen per-file kernel sites (probe-read plus
 CO-RE field reads) with no user-memory, skb, debug, or
-perf-output helper; Mojo reads only two
-allowlisted environment names and no /proc cmdline or
+perf-output helper; Mojo reads only four
+allowlisted environment names (LMB_NATIVE_LIB and
+MEMVEIL_SIGBLK for artifact selection, SUDO_UID and
+SUDO_GID ownership-only for sudo capture hand-back, never
+persisted or attested) and no /proc cmdline or
 environ file; and the CLI flag set is exactly the frozen
 nineteen (any new flag fails here until reviewed). Exits
 nonzero on the first violation.
@@ -44,7 +47,12 @@ ALLOWED_FLAGS = {
     "--object", "--output", "--profile", "--profiles-dir",
 }
 
-ALLOWED_ENV = {"LMB_NATIVE_LIB", "MEMVEIL_SIGBLK"}
+# SUDO_UID/SUDO_GID reviewed 2026-10-11: read once by
+# record's sudo ownership hand-back to learn the invoking
+# user's ids. They select no artifact, enter no capture,
+# report, provenance, or receipt, and are never
+# attested; any other use fails review here.
+ALLOWED_ENV = {"LMB_NATIVE_LIB", "MEMVEIL_SIGBLK", "SUDO_UID", "SUDO_GID"}
 
 FORBIDDEN_BPF = (
     "bpf_probe_read_user", "bpf_probe_read_compat",

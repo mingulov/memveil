@@ -42,8 +42,10 @@ memveil record --output DIR --object attempt.bpf.o \
 
 `--capability` takes a comma-separated list without spaces
 (default: `attempt-trace`, which is always required).
-`mapping-lifecycle` needs `--lc-object` and `copy-actual` needs
-`--cp-object`. The winning profile must declare each requested
+Each channel's BPF object is discovered beside the
+executable or under the system directory; `--lc-object`
+and `--cp-object` are optional overrides for non-bundled
+objects. The winning profile must declare each requested
 capability `supported` (or `candidate`) with all named hooks
 present, and its narrow note must bind the exact extra object
 hashes and ring sizes (`lc_object`, `lc_ring_bytes`,
