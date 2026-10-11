@@ -22,6 +22,30 @@
  *   stderr_decoy:P  open of /dev/stderr opens P instead: simulates
  *                    guests that rebind /dev/stderr away from fd 2
  *                    (diagnostics must follow the fd, not the path).
+ *   swapdir:PLANTED:BASE
+ *                    one-shot mkdirat interposition: after the first
+ *                    successful mkdirat whose created path has
+ *                    basename BASE, move the fresh dir aside to
+ *                    <path>.displaced and move PLANTED into its
+ *                    place. Exercises the mkdir->openat window
+ *                    deterministically.
+ *   fstat_fail_tmp
+ *                    fstat on fds resolving to *.tmp fails EIO.
+ *   fstat_fail_tmp_written
+ *                    fstat on *.tmp fds fails EIO, but only after
+ *                    a pwrite to a *.tmp fd was observed: the
+ *                    creation-time pin succeeds while a later
+ *                    re-pin of the same file fails.
+ *   swap_session:PLANTED
+ *                    one-shot openat interposition: before the first
+ *                    open of the "session.json" basename without
+ *                    O_CREAT, move the published file aside to
+ *                    session.json.displaced and move PLANTED into
+ *                    its place. Shows whether the session-origin
+ *                    comparison ran.
+ *   fstat_fail_session
+ *                    fstat on fds resolving to a session.json path
+ *                    fails EIO (the published session, not the tmp).
  *
  * Torn records arise from composition: short:N with
  * enospc_after:N+1 makes loop iteration N short and the
@@ -50,6 +74,7 @@ static int (*real_renameat2)(int, const char *, int, const char *, unsigned);
 static ssize_t (*real_read)(int, void *, size_t);
 static int (*real_fstat)(int, struct stat *);
 static int (*real_unlinkat)(int, const char *, int);
+static int (*real_mkdirat)(int, const char *, mode_t);
 static int read_eintr_fired = 0;
 
 static long opt_short_at = 0;
@@ -65,6 +90,15 @@ static int opt_fstat_fail_events = 0;
 static char opt_fstat_fail_dir[1024];
 static int opt_fail_unlink_events = 0;
 static char opt_stderr_decoy[1024];
+static char opt_swapdir_planted[1024];
+static char opt_swapdir_base[256];
+static int swapdir_fired = 0;
+static int opt_fstat_fail_tmp = 0;
+static int opt_fstat_fail_tmp_written = 0;
+static int tmp_written_seen = 0;
+static char opt_swap_session[1024];
+static int swap_session_fired = 0;
+static int opt_fstat_fail_session = 0;
 static long pwrite_count = 0;
 static int inited = 0;
 
@@ -127,6 +161,34 @@ static void parse_opts(void) {
             memcpy(opt_stderr_decoy, tok + 13, pl);
             opt_stderr_decoy[pl] = '\0';
         }
+        else if (strncmp(tok, "swapdir:", 8) == 0) {
+            char *sep = strchr(tok + 8, ':');
+            if (sep && sep[1]) {
+                size_t pl = (size_t)(sep - (tok + 8));
+                if (pl >= sizeof(opt_swapdir_planted))
+                    pl = sizeof(opt_swapdir_planted) - 1;
+                memcpy(opt_swapdir_planted, tok + 8, pl);
+                opt_swapdir_planted[pl] = '\0';
+                size_t bl = strlen(sep + 1);
+                if (bl >= sizeof(opt_swapdir_base))
+                    bl = sizeof(opt_swapdir_base) - 1;
+                memcpy(opt_swapdir_base, sep + 1, bl);
+                opt_swapdir_base[bl] = '\0';
+            }
+        }
+        else if (strcmp(tok, "fstat_fail_tmp") == 0)
+            opt_fstat_fail_tmp = 1;
+        else if (strcmp(tok, "fstat_fail_tmp_written") == 0)
+            opt_fstat_fail_tmp_written = 1;
+        else if (strncmp(tok, "swap_session:", 13) == 0) {
+            size_t pl = strlen(tok + 13);
+            if (pl >= sizeof(opt_swap_session))
+                pl = sizeof(opt_swap_session) - 1;
+            memcpy(opt_swap_session, tok + 13, pl);
+            opt_swap_session[pl] = '\0';
+        }
+        else if (strcmp(tok, "fstat_fail_session") == 0)
+            opt_fstat_fail_session = 1;
     }
 }
 
@@ -144,6 +206,7 @@ static void ensure_init(void) {
     real_read = dlsym(RTLD_NEXT, "read");
     real_fstat = dlsym(RTLD_NEXT, "fstat");
     real_unlinkat = dlsym(RTLD_NEXT, "unlinkat");
+    real_mkdirat = dlsym(RTLD_NEXT, "mkdirat");
     parse_opts();
 }
 
@@ -157,9 +220,34 @@ static int fd_path_ends(int fd, const char *suffix) {
     return ends_with(target, suffix);
 }
 
+static int resolve_at(int dirfd, const char *path, char *out,
+                      size_t outlen) {
+    if (path[0] == '/') {
+        snprintf(out, outlen, "%s", path);
+        return 1;
+    }
+    if (dirfd == AT_FDCWD) {
+        if (outlen < 256 || !getcwd(out, outlen - 256))
+            return 0;
+        size_t l = strlen(out);
+        snprintf(out + l, outlen - l, "/%s", path);
+        return 1;
+    }
+    char proc[64], parent[1024];
+    snprintf(proc, sizeof(proc), "/proc/self/fd/%d", dirfd);
+    ssize_t n = readlink(proc, parent, sizeof(parent) - 1);
+    if (n < 0)
+        return 0;
+    parent[n] = '\0';
+    snprintf(out, outlen, "%s/%s", parent, path);
+    return 1;
+}
+
 ssize_t pwrite(int fd, const void *buf, size_t count, off_t off) {
     ensure_init();
     pwrite_count++;
+    if (opt_fstat_fail_tmp_written && fd_path_ends(fd, ".tmp"))
+        tmp_written_seen = 1;
     if (opt_enospc_events && fd_path_ends(fd, "events.ndjson")) {
         errno = ENOSPC;
         return -1;
@@ -186,6 +274,16 @@ int openat(int dirfd, const char *path, int flags, ...) {
     if (opt_enospc_tmp && ends_with(path, ".tmp")) {
         errno = ENOSPC;
         return -1;
+    }
+    if (opt_swap_session[0] && !swap_session_fired &&
+        strcmp(path, "session.json") == 0 && !(flags & O_CREAT)) {
+        char target[2048], aside[2160];
+        if (resolve_at(dirfd, path, target, sizeof(target))) {
+            swap_session_fired = 1;
+            snprintf(aside, sizeof(aside), "%s.displaced", target);
+            if (rename(target, aside) == 0)
+                rename(opt_swap_session, target);
+        }
     }
     mode_t mode = 0;
     if (flags & O_CREAT) {
@@ -276,6 +374,19 @@ int fstat(int fd, struct stat *st) {
         errno = EIO;
         return -1;
     }
+    if (opt_fstat_fail_tmp && fd_path_ends(fd, ".tmp")) {
+        errno = EIO;
+        return -1;
+    }
+    if (opt_fstat_fail_tmp_written && tmp_written_seen &&
+        fd_path_ends(fd, ".tmp")) {
+        errno = EIO;
+        return -1;
+    }
+    if (opt_fstat_fail_session && fd_path_ends(fd, "/session.json")) {
+        errno = EIO;
+        return -1;
+    }
     return real_fstat(fd, st);
 }
 
@@ -305,6 +416,30 @@ int renameat2(int a, const char *b, int c, const char *d, unsigned e) {
         return -1;
     }
     return real_renameat2(a, b, c, d, e);
+}
+
+int mkdirat(int dirfd, const char *path, mode_t mode) {
+    ensure_init();
+    int r = real_mkdirat(dirfd, path, mode);
+    if (r != 0 || !opt_swapdir_planted[0] || swapdir_fired)
+        return r;
+    char created[2048];
+    if (!resolve_at(dirfd, path, created, sizeof(created)))
+        return r;
+    const char *slash = strrchr(created, '/');
+    const char *base = slash ? slash + 1 : created;
+    if (strcmp(base, opt_swapdir_base) != 0)
+        return r;
+    swapdir_fired = 1;
+    char aside[2160];
+    snprintf(aside, sizeof(aside), "%s.displaced", created);
+    if (rename(created, aside) != 0)
+        return r;
+    if (rename(opt_swapdir_planted, created) != 0) {
+        rename(aside, created);
+        return r;
+    }
+    return r;
 }
 
 /* MVSHIM_COUNT=path: write the total pwrite call count at

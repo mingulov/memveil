@@ -30,6 +30,7 @@ comptime _AT_FDCWD = -100
 comptime _AT_REMOVEDIR = 512
 comptime _RENAME_NOREPLACE = 1
 comptime _STAT_SIZE = 144
+comptime _DIRENT_NAME_OFF = 19
 
 comptime _EINTR = 4
 comptime _ENOENT = 2
@@ -87,6 +88,13 @@ def _le64(buf: List[UInt8], off: Int) -> UInt64:
     return v
 
 
+def _le32(buf: List[UInt8], off: Int) -> UInt64:
+    var v = UInt64(0)
+    for i in range(4):
+        v |= UInt64(buf[off + i]) << UInt64(8 * i)
+    return v
+
+
 def _fstat_ids(fd: Int32) raises WriteError -> List[UInt64]:
     """Return [st_dev, st_ino, st_nlink] for an open fd (x86-64)."""
     var buf = List[UInt8]()
@@ -109,6 +117,96 @@ def _fstat_ids(fd: Int32) raises WriteError -> List[UInt64]:
 def _close_quiet(fd: Int32):
     if fd >= Int32(0):
         _ = external_call["close", Int32](fd)
+
+
+def _fstat_mode_uid(fd: Int32) raises WriteError -> List[UInt64]:
+    """Return [st_mode, st_uid] for an open fd (x86-64)."""
+    var buf = List[UInt8]()
+    for _ in range(_STAT_SIZE):
+        buf.append(UInt8(0))
+    var r = external_call["fstat", Int32](
+        fd, Span(buf).unsafe_ptr()
+    )
+    if Int(r) != 0:
+        raise WriteError(
+            "io", "fstat failed: errno " + String(_errno_now())
+        )
+    var out = List[UInt64]()
+    out.append(_le32(buf, 24))
+    out.append(_le32(buf, 28))
+    return out^
+
+
+def _require_private_empty_dir(dir_fd: Int32) raises WriteError:
+    """Refuse a just-opened capture dir that is not ours.
+
+    mkdirat and the first openat are separate calls, so
+    a foreign dir swapped in between becomes the opened
+    fd. Refuse it ("exists": the name holds something we
+    did not create) before any capture file is created
+    inside: our mkdir 0700 can never carry group/other
+    bits (umask only clears), is owned by this user, and
+    starts empty. Raises "io" when the checks themselves
+    fail. Reads entries through a dup'd stream so the
+    held descriptor's offset is untouched.
+    """
+    var mu = _fstat_mode_uid(dir_fd)
+    if mu[0] & UInt64(0o077) != UInt64(0):
+        raise WriteError(
+            "exists", "output dir group/other accessible"
+        )
+    var me = external_call["geteuid", UInt32]()
+    if UInt64(me) != mu[1]:
+        raise WriteError(
+            "exists", "output dir owned by another user"
+        )
+    var dup_fd = external_call["dup", Int32](dir_fd)
+    if dup_fd < Int32(0):
+        raise WriteError(
+            "io", "dir dup failed: errno " + String(_errno_now())
+        )
+    var dirp = external_call["fdopendir", UInt64](dup_fd)
+    if dirp == UInt64(0):
+        var no = _errno_now()
+        _close_quiet(dup_fd)
+        raise WriteError(
+            "io", "dir stream failed: errno " + String(no)
+        )
+    var dot = _cstr(".")
+    var dotdot = _cstr("..")
+    var eptr = external_call[
+        "__errno_location", Pointer[Int32, MutAnyOrigin]
+    ]()
+    var dirty = False
+    var bad = False
+    var bad_no = 0
+    while True:
+        eptr.unsafe_store(Int32(0))
+        var ent = external_call["readdir", UInt64](dirp)
+        if ent == UInt64(0):
+            bad_no = _errno_now()
+            if bad_no != 0:
+                bad = True
+            break
+        # d_name sits at byte 19 of the x86-64 Linux
+        # dirent (ino 8, off 8, reclen 2, type 1).
+        var name = ent + UInt64(_DIRENT_NAME_OFF)
+        var is_dot = external_call["strcmp", Int32](
+            name, Span(dot).unsafe_ptr()
+        )
+        var is_dotdot = external_call["strcmp", Int32](
+            name, Span(dotdot).unsafe_ptr()
+        )
+        if Int(is_dot) != 0 and Int(is_dotdot) != 0:
+            dirty = True
+            break
+    _ = external_call["closedir", Int32](dirp)
+    if bad:
+        raise WriteError(
+            "io", "dir read failed: errno " + String(bad_no)
+        )
+    if dirty:
+        raise WriteError("exists", "output dir not empty")
 
 
 def _name_matches(
@@ -274,6 +372,25 @@ struct EventWriter(Movable):
             )
             _close_quiet(parent_fd)
             raise WriteError("io", "dir open failed: errno " + String(no))
+        try:
+            _require_private_empty_dir(dir_fd)
+        except e:
+            # A refusal ("exists") proves the name holds a
+            # foreign dir swapped in after our mkdir: leave
+            # it untouched (never unlink what we did not
+            # create) and close up. A check failure ("io")
+            # leaves an unprovable dir behind: attempt the
+            # same by-name rmdir unwind as a failed open so
+            # no residual stands behind the error.
+            if e.kind != String("exists"):
+                _ = external_call["unlinkat", Int32](
+                    parent_fd,
+                    Span(base_cstr).unsafe_ptr(),
+                    Int32(_AT_REMOVEDIR),
+                )
+            _close_quiet(dir_fd)
+            _close_quiet(parent_fd)
+            raise e^
         var ev_name = _cstr("events.ndjson")
         var ev_fd = external_call["openat", Int32](
             dir_fd,
@@ -596,7 +713,7 @@ struct EventWriter(Movable):
             return False
 
     def _write_tmp(
-        mut self, name: String, data: List[UInt8]
+        mut self, name: String, data: List[UInt8], mut pin: List[UInt64]
     ) raises WriteError -> Int32:
         """Create + fill + fsync a tmp file; errno read before cleanup.
 
@@ -604,7 +721,10 @@ struct EventWriter(Movable):
         just-created tmp only when the name still resolves
         to it (dev/ino); replacements are preserved and
         reported in the raised error. Create failures never
-        unlink: a pre-existing name is foreign.
+        unlink: a pre-existing name is foreign. On success,
+        pin holds the creation-time [st_dev, st_ino,
+        st_nlink] identity: finalize compares the published
+        file against it, so no later re-pin can fail open.
         """
         var cname = _cstr(name)
         var fd = external_call["openat", Int32](
@@ -670,6 +790,7 @@ struct EventWriter(Movable):
             if not gone:
                 msg = msg + String("; tmp replacement left in place")
             raise WriteError("io", msg)
+        pin = ids^
         return fd
 
     def finalize(mut self, session: List[UInt8]) raises WriteError -> FinalOutcome:
@@ -692,20 +813,20 @@ struct EventWriter(Movable):
                 "unfinalized", "events fsync: errno " + String(no)
             )
         var tmp: Int32
+        var tmp_ids = List[UInt64]()
         try:
-            tmp = self._write_tmp("session.json.tmp", session)
+            tmp = self._write_tmp(
+                "session.json.tmp", session, tmp_ids
+            )
         except e:
             # _write_tmp cleans its own tmp on write/sync
             # failures and never unlinks on create failure
-            # (a pre-existing name is foreign).
+            # (a pre-existing name is foreign). A pin
+            # failure there also refuses finalization here:
+            # the published session is always compared
+            # against the creation-time identity.
             self._close_all()
             return FinalOutcome("unfinalized", e.message)
-        var tmp_ids = List[UInt64]()
-        var have_pin = True
-        try:
-            tmp_ids = _fstat_ids(tmp)
-        except:
-            have_pin = False
         _close_quiet(tmp)
         var old_name = _cstr("session.json.tmp")
         var new_name = _cstr("session.json")
@@ -721,16 +842,12 @@ struct EventWriter(Movable):
             var msg = (
                 String("rename failed: errno ") + String(no)
             )
-            if have_pin:
-                if not self._remove_tmp_if_owned(
-                    String("session.json.tmp"), tmp_ids
-                ):
-                    msg = (
-                        msg
-                        + String("; tmp replacement left in place")
-                    )
-            else:
-                msg = msg + String("; tmp left in place (unpinned)")
+            if not self._remove_tmp_if_owned(
+                String("session.json.tmp"), tmp_ids
+            ):
+                msg = (
+                    msg + String("; tmp replacement left in place")
+                )
             self._close_all()
             return FinalOutcome("unfinalized", msg)
         # Pin the published session file for ownership
@@ -750,9 +867,20 @@ struct EventWriter(Movable):
                 return FinalOutcome(
                     "unfinalized", "session pin failed"
                 )
-            var sess_ids = _fstat_ids(sess_fd)
+            # The session pin descriptor is owned here, not
+            # by _close_all: close it on the fstat failure
+            # path too, or it leaks.
+            var sess_ids: List[UInt64]
+            try:
+                sess_ids = _fstat_ids(sess_fd)
+            except:
+                _close_quiet(sess_fd)
+                self._close_all()
+                return FinalOutcome(
+                    "unfinalized", "session pin failed"
+                )
             _close_quiet(sess_fd)
-            if have_pin and (
+            if (
                 sess_ids[0] != tmp_ids[0]
                 or sess_ids[1] != tmp_ids[1]
             ):

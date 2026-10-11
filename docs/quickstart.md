@@ -111,13 +111,16 @@ for non-bundled objects.)
 
 After any kernel, object, bridge, or profile change the receipt
 goes stale: refresh the profile's recorded bindings from
-the new host first, then re-run `qualify`. `doctor` keeps
-reporting the receipt as bridge-unchecked (it performs
-no binding, so it cannot name drift); `record`
-re-verifies the receipt — including bridge admission —
-at every start and names the drift there, with a stale
-receipt losing `local-auto` admission and attempt-only
-recording falling back to partial diagnostics.
+the new host first, then re-run `qualify`. `doctor` still
+names receipt mismatches its passive checks can see
+(another kernel, profile, note, or artifact binding);
+only when those preceding checks pass does the receipt
+stay bridge-unchecked (doctor performs no bridge
+binding, so it cannot confirm or deny bridge drift).
+`record` re-verifies the receipt — including bridge
+admission — at every start and names the drift there,
+with a stale receipt losing `local-auto` admission and
+attempt-only recording falling back to partial diagnostics.
 
 ## 4. Record one capture (privileged)
 

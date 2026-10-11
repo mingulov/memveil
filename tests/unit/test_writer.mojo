@@ -17,8 +17,12 @@ from memveil.capture.writer import (
     MAX_EVENTS_BUDGET,
     MIN_EVENTS_BUDGET,
     EventWriter,
+    _require_private_empty_dir,
 )
-from memveil.platform.reader import read_host_file
+from memveil.platform.reader import (
+    _geteuid_live,
+    read_host_file,
+)
 
 
 def _mkdtemp() raises -> String:
@@ -309,6 +313,58 @@ def _contains(hay: String, needle: String) -> Bool:
     return len(hay.split(needle)) > 1
 
 
+def _cstr_buf(path: String) -> List[UInt8]:
+    var buf = List[UInt8]()
+    for b in path.as_bytes():
+        buf.append(b)
+    buf.append(UInt8(0))
+    return buf^
+
+
+def _mkdir_path(path: String, mode: Int) raises:
+    var buf = _cstr_buf(path)
+    var rc = external_call["mkdir", Int32](
+        Span(buf).unsafe_ptr(), mode
+    )
+    if Int(rc) != 0:
+        raise Error("mkdir failed in test: " + path)
+
+
+def _chmod_path(path: String, mode: Int) raises:
+    var buf = _cstr_buf(path)
+    var rc = external_call["chmod", Int32](
+        Span(buf).unsafe_ptr(), mode
+    )
+    if Int(rc) != 0:
+        raise Error("chmod failed in test: " + path)
+
+
+def _chown_path(path: String, uid: UInt32, gid: UInt32) raises:
+    var buf = _cstr_buf(path)
+    var rc = external_call["chown", Int32](
+        Span(buf).unsafe_ptr(), uid, gid
+    )
+    if Int(rc) != 0:
+        raise Error("chown failed in test: " + path)
+
+
+def _open_dir_fd(path: String) raises -> Int32:
+    var buf = _cstr_buf(path)
+    var fd = external_call["openat", Int32](
+        Int32(-100),
+        Span(buf).unsafe_ptr(),
+        Int32(65536),
+        UInt32(0),
+    )
+    if fd < Int32(0):
+        raise Error("test dir open failed: " + path)
+    return fd
+
+
+def _close_fd(fd: Int32):
+    _ = external_call["close", Int32](fd)
+
+
 def test_abandon_preserves_replaced_events() raises:
     var scratch = _mkdtemp()
     var target = scratch + String("/cap")
@@ -464,6 +520,79 @@ def test_trailing_slash_ok() raises:
     assert_equal(len(ev), 100)
 
 
+def test_create_accepts_private_empty_dir() raises:
+    # A freshly created private empty dir passes the
+    # creation-time check (positive control for the
+    # refusal tests below).
+    var scratch = _mkdtemp()
+    var target = scratch + String("/cap")
+    _mkdir_path(target, 0o700)
+    var fd = _open_dir_fd(target)
+    _require_private_empty_dir(fd)
+    _close_fd(fd)
+
+
+def test_create_refuses_foreign_entries() raises:
+    # A swapped-in dir holding foreign files is refused
+    # before any capture file is created inside it.
+    var scratch = _mkdtemp()
+    var target = scratch + String("/cap")
+    _mkdir_path(target, 0o700)
+    var loot = open(target + String("/loot.txt"), "w")
+    loot.write(String("LOOT\n"))
+    loot.close()
+    _mkdir_path(target + String("/sub"), 0o700)
+    var fd = _open_dir_fd(target)
+    var raised = False
+    try:
+        _require_private_empty_dir(fd)
+    except e:
+        raised = True
+        assert_equal(e.kind, String("exists"))
+    _close_fd(fd)
+    assert_true(raised)
+
+
+def test_create_refuses_group_accessible_dir() raises:
+    # Group/other bits can never come from our mkdir
+    # 0700 (umask only clears), so they prove a foreign
+    # dir. chmod pins the mode exactly (mkdir honors
+    # umask, chmod does not).
+    var scratch = _mkdtemp()
+    var target = scratch + String("/cap")
+    _mkdir_path(target, 0o700)
+    _chmod_path(target, 0o755)
+    var fd = _open_dir_fd(target)
+    var raised = False
+    try:
+        _require_private_empty_dir(fd)
+    except e:
+        raised = True
+        assert_equal(e.kind, String("exists"))
+    _close_fd(fd)
+    assert_true(raised)
+
+
+def test_create_refuses_other_owned_dir() raises:
+    # Root-only: a private empty dir owned by another
+    # uid is foreign to this capture.
+    if _geteuid_live() != 0:
+        return
+    var scratch = _mkdtemp()
+    var target = scratch + String("/cap")
+    _mkdir_path(target, 0o700)
+    _chown_path(target, UInt32(65534), UInt32(65534))
+    var fd = _open_dir_fd(target)
+    var raised = False
+    try:
+        _require_private_empty_dir(fd)
+    except e:
+        raised = True
+        assert_equal(e.kind, String("exists"))
+    _close_fd(fd)
+    assert_true(raised)
+
+
 def test_append_closing_uses_reserve() raises:
     var scratch = _mkdtemp()
     var target = scratch + String("/cap")
@@ -505,6 +634,10 @@ def run() raises -> Int:
     suite.test[test_parent_is_file]()
     suite.test[test_trailing_slash_ok]()
     suite.test[test_append_closing_uses_reserve]()
+    suite.test[test_create_accepts_private_empty_dir]()
+    suite.test[test_create_refuses_foreign_entries]()
+    suite.test[test_create_refuses_group_accessible_dir]()
+    suite.test[test_create_refuses_other_owned_dir]()
     suite^.run()
     return 0
 

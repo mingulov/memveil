@@ -1392,6 +1392,7 @@ comptime _OWN_STAT_SIZE = 144
 comptime _OWN_S_IFMT = 0o170000
 comptime _OWN_S_IFREG = 0o100000
 comptime _OWN_S_IFDIR = 0o040000
+comptime _OWN_DIRENT_NAME_OFF = 19
 
 
 def _own_le32(buf: List[UInt8], off: Int) -> UInt32:
@@ -1444,6 +1445,76 @@ def _own_fstat_devino(fd: Int32) raises -> List[UInt64]:
 def _own_close_quiet(fd: Int32):
     if fd >= Int32(0):
         _ = external_call["close", Int32](fd)
+
+
+def _own_errno_now() -> Int:
+    var p = external_call[
+        "__errno_location", Pointer[Int32, MutAnyOrigin]
+    ]()
+    return Int(p.unsafe_load())
+
+
+def _own_dir_has_foreign(dir_fd: Int32) -> Bool:
+    """True when dir holds entries besides the capture files.
+
+    A finalized capture holds exactly events.ndjson and
+    session.json; any other entry proves a planted or
+    swapped-in foreign file, and the repair must not
+    transfer the directory out from under it. Listing
+    failures also refuse (fail closed). Reads through a
+    dup'd stream so the held descriptor is untouched.
+    Never raises.
+    """
+    var dup_fd = external_call["dup", Int32](dir_fd)
+    if dup_fd < Int32(0):
+        return True
+    var dirp = external_call["fdopendir", UInt64](dup_fd)
+    if dirp == UInt64(0):
+        _own_close_quiet(dup_fd)
+        return True
+    var dot = _to_cstr(String("."))
+    var dotdot = _to_cstr(String(".."))
+    var ev = _to_cstr(String("events.ndjson"))
+    var se = _to_cstr(String("session.json"))
+    var eptr = external_call[
+        "__errno_location", Pointer[Int32, MutAnyOrigin]
+    ]()
+    var foreign = False
+    var failed = False
+    while True:
+        eptr.unsafe_store(Int32(0))
+        var ent = external_call["readdir", UInt64](dirp)
+        if ent == UInt64(0):
+            if _own_errno_now() != 0:
+                failed = True
+            break
+        # d_name sits at byte 19 of the x86-64 Linux
+        # dirent (ino 8, off 8, reclen 2, type 1).
+        var name = ent + UInt64(_OWN_DIRENT_NAME_OFF)
+        var skip = external_call["strcmp", Int32](
+            name, Span(dot).unsafe_ptr()
+        )
+        if Int(skip) == 0:
+            continue
+        skip = external_call["strcmp", Int32](
+            name, Span(dotdot).unsafe_ptr()
+        )
+        if Int(skip) == 0:
+            continue
+        skip = external_call["strcmp", Int32](
+            name, Span(ev).unsafe_ptr()
+        )
+        if Int(skip) == 0:
+            continue
+        skip = external_call["strcmp", Int32](
+            name, Span(se).unsafe_ptr()
+        )
+        if Int(skip) == 0:
+            continue
+        foreign = True
+        break
+    _ = external_call["closedir", Int32](dirp)
+    return foreign or failed
 
 
 def _own_open_dir(path: String) -> Int32:
@@ -1571,8 +1642,9 @@ def _restore_sudo_ownership(output: String, want: List[UInt64]):
     (events.ndjson, session.json) opens through that
     descriptor, proves the recorded root-owned
     single-link regular file, and transfers via
-    fchown; anything else in the directory is foreign
-    and stays root-owned. ``want`` is the writer's
+    fchown, and only when the directory holds exactly
+    those two files; any foreign entry aborts the repair
+    before anything is touched. ``want`` is the writer's
     [dir_dev, dir_ino, ev_dev, ev_ino, sess_dev,
     sess_ino] pin; any other shape aborts touching
     nothing. The directory transfers LAST, so the
@@ -1616,6 +1688,8 @@ def _restore_sudo_ownership(output: String, want: List[UInt64]):
                 and _own_fd_matches(dir_fd, want[0], want[1])
             )
         except:
+            dir_ok = False
+        if dir_ok and _own_dir_has_foreign(dir_fd):
             dir_ok = False
         if dir_ok:
             if not _own_repair_child(

@@ -8,6 +8,10 @@ Usage:
   shim_probe rename_events <dir> rename events away + fresh file, finalize
   shim_probe rename_dir <dir>    rename the output dir away, finalize
   shim_probe live-create <dir>   LiveWriter create + abandon, two lines
+  shim_probe pincheck <path>     create + one append + finalize, one line
+                                 with the session-pin width
+  shim_probe fdleak <path>       create + one append + finalize, one line
+                                 with fd counts around finalize
 
 Every op catches WriteError, prints a machine-readable line,
 and continues the script, so the lane can assert exact
@@ -234,6 +238,57 @@ def _rename_events(dir: String) raises:
         print(String("setup error kind=") + e.kind)
 
 
+def _pincheck(path: String) raises:
+    """Create + finalize, printing the outcome and pin width."""
+    try:
+        var w = EventWriter(path, MIN_EVENTS_BUDGET)
+        w.append(_line(UInt8(0x78), 2))
+        var outcome = w.finalize(_line(UInt8(0x7B), 10))
+        var pin = w.finalized_identity()
+        print(
+            String("pincheck status=")
+            + outcome.status
+            + String(" note=")
+            + outcome.message
+            + String(" pin=")
+            + String(len(pin))
+        )
+    except e:
+        print(String("pincheck error kind=") + e.kind)
+
+
+def _count_open_fds() -> Int:
+    """Count open fds via fcntl F_GETFD (immune to fstat shims)."""
+    var n = 0
+    for fd in range(1024):
+        var r = external_call["fcntl", Int32](Int32(fd), Int32(1))
+        if Int(r) >= 0:
+            n += 1
+    return n
+
+
+def _fdleak(path: String) raises:
+    """Finalize, printing fd counts around it."""
+    try:
+        var w = EventWriter(path, MIN_EVENTS_BUDGET)
+        w.append(_line(UInt8(0x78), 2))
+        var before = _count_open_fds()
+        var outcome = w.finalize(_line(UInt8(0x7B), 10))
+        var after = _count_open_fds()
+        print(
+            String("fdleak status=")
+            + outcome.status
+            + String(" note=")
+            + outcome.message
+            + String(" before=")
+            + String(before)
+            + String(" after=")
+            + String(after)
+        )
+    except e:
+        print(String("fdleak error kind=") + e.kind)
+
+
 def _live_create(dir: String):
     """LiveWriter create, then abandon; print both outcomes."""
     var w = LiveWriter()
@@ -298,6 +353,10 @@ def main() raises:
         _rename_dir(args[2])
     elif args[1] == String("live-create"):
         _live_create(args[2])
+    elif args[1] == String("pincheck"):
+        _pincheck(args[2])
+    elif args[1] == String("fdleak"):
+        _fdleak(args[2])
     else:
         print(String("usage: shim_probe {script|createonly} <path>"))
         exit(2)
