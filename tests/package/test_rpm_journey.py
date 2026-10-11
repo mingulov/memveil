@@ -9,9 +9,10 @@ the bridge plus the BPF objects under /usr/lib/memveil,
 profiles and manuals under /usr/share/memveil, generated man
 pages, static completions, license texts, and the empty
 state dir /var/lib/memveil/receipts. Its dependency set must
-stay manual (libelf, zlib): the private bundled libs must
-neither leak into Requires nor satisfy other packages via
-Provides.
+stay manual (libelf, zlib, plus the versioned glibc floor
+the staged ELF files require): the private bundled libs
+must neither leak into Requires nor satisfy other packages
+via Provides.
 
 The Fedora journey then installs the .rpm with dnf inside a
 Fedora container (proving Requires resolve on the target
@@ -83,11 +84,16 @@ FIXED_FILES = {
 }
 
 # The only %dir-owned directories: every other parent
-# belongs to the base system (filesystem, man-db).
+# belongs to the base system (filesystem, man-db). The
+# license subdirs are %dir-owned too, so removal leaves no
+# directory residue behind.
 OWNED_DIRS = {
     "/usr/lib/memveil",
     "/usr/share/memveil",
     "/usr/share/doc/memveil",
+    "/usr/share/doc/memveil/LICENSES",
+    "/usr/share/doc/memveil/licenses",
+    "/usr/share/doc/memveil/licenses/libbpf-mojo-LICENSES",
     "/var/lib/memveil",
     "/var/lib/memveil/receipts",
 }
@@ -200,13 +206,15 @@ def test_rpm_manual_deps_only(dbpath):
                 if line.strip()]
     assert "libelf.so.1()(64bit)" in requires, requires
     assert "libz.so.1()(64bit)" in requires, requires
+    assert "glibc >= 2.38" in requires, requires
     for token in ("libbpf_mojo", "libAsync", "libKGEN",
                   "libMSupport", "libstdc++", "libgcc_s",
                   "libc.so", "libm.so", "ld-linux"):
         assert not [line for line in requires if token in line], \
             "auto-Requires leaked %s: %s" % (token, requires)
     assert all(line.startswith("rpmlib(") or line in (
-        "libelf.so.1()(64bit)", "libz.so.1()(64bit)")
+        "libelf.so.1()(64bit)", "libz.so.1()(64bit)",
+        "glibc >= 2.38")
         for line in requires), requires
     proc = rpm_query("-qp", "--provides", RPM, dbpath=dbpath)
     assert proc.returncode == 0, proc.stderr

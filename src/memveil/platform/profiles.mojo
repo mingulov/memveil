@@ -1312,8 +1312,9 @@ struct _ReceiptHit(Copyable, Movable):
 def _installed_profiles_key(profiles_dir: String) -> String:
     """Comparison key for a profiles dir, or "" when unusable.
 
-    Strips trailing slashes and resolves trailing ``/.``
-    segments (repeatedly, so ``profiles/./`` also maps),
+    Collapses redundant separators and drops ``.``
+    components throughout (interior, trailing, and
+    combined, so ``share//memveil/./profiles/`` maps),
     matching how the kernel normalizes the path. Used
     only to recognize spellings of the installed
     profiles dir; anything else keeps its byte-identical
@@ -1324,19 +1325,35 @@ def _installed_profiles_key(profiles_dir: String) -> String:
     var raw = List[UInt8]()
     for b in profiles_dir.as_bytes():
         raw.append(b)
-    while True:
-        while len(raw) > 0 and raw[len(raw) - 1] == UInt8(0x2F):
-            _ = raw.pop()
-        if (
-            len(raw) >= 2
-            and raw[len(raw) - 2] == UInt8(0x2F)
-            and raw[len(raw) - 1] == UInt8(0x2E)
-        ):
-            _ = raw.pop()
+    var absolute = len(raw) > 0 and raw[0] == UInt8(0x2F)
+    var flat = List[UInt8]()
+    var first = True
+    var idx = 0
+    while idx < len(raw):
+        while idx < len(raw) and raw[idx] == UInt8(0x2F):
+            idx += 1
+        var start = idx
+        while idx < len(raw) and raw[idx] != UInt8(0x2F):
+            idx += 1
+        if idx == start:
+            break
+        var is_dot = (idx - start == 1) and raw[start] == UInt8(
+            0x2E
+        )
+        if is_dot:
             continue
-        break
+        if first:
+            first = False
+            if absolute:
+                flat.append(UInt8(0x2F))
+        else:
+            flat.append(UInt8(0x2F))
+        var j = start
+        while j < idx:
+            flat.append(raw[j])
+            j += 1
     try:
-        return String(from_utf8=Span(raw))
+        return String(from_utf8=Span(flat))
     except:
         return String("")
 
@@ -1349,9 +1366,10 @@ def default_receipts_dir(profiles_dir: String) -> String:
     read-only profiles; every other layout (bundle,
     checkout, explicit override) keeps receipts under
     ``<profiles-dir>/receipts`` exactly as before. The
-    comparison normalizes trailing slashes and ``/.``
-    segments, so shell-completed or dotted spellings of
-    the installed dir cannot misplace a receipt.
+    comparison normalizes redundant separators and ``.``
+    components throughout, so shell-completed or dotted
+    spellings of the installed dir cannot misplace a
+    receipt.
     """
     if _installed_profiles_key(profiles_dir) == String(
         _INSTALLED_PROFILES_DIR

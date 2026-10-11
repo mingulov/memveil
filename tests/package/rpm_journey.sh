@@ -225,7 +225,8 @@ rm -rf /tmp/journey-qcap /tmp/journey-cap
 dnf remove -y -q memveil >/tmp/journey-remove.log 2>&1 \
     || die "dnf remove failed: $(tail -n 5 /tmp/journey-remove.log)"
 rpm -q memveil >/dev/null 2>&1 && die "package still installed"
-for path in /usr/lib/memveil /usr/share/memveil /var/lib/memveil; do
+for path in /usr/lib/memveil /usr/share/memveil /usr/share/doc/memveil \
+    /var/lib/memveil; do
     [ -e "$path" ] && die "residue: $path"
 done
 ok "uninstall-clean"

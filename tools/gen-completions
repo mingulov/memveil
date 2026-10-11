@@ -135,7 +135,11 @@ def render_bash():
 def _zsh_opt(verb, flag):
     desc = _ZSH_DESC[flag]
     if flag == "--format":
-        return "'--format[%s]:(%s)'" % (
+        # Two colons: _arguments reads `opt[descr]:name:action`,
+        # so the enum must sit in the action slot. A single
+        # colon parks the values in the message and completes
+        # nothing.
+        return "'--format[%s]:format:(%s)'" % (
             desc, " ".join(FROZEN_FORMAT_VALUES))
     if flag in FROZEN_NOVALUE_FLAGS:
         return "'%s[%s]'" % (flag, desc)
