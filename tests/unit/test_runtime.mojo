@@ -21,7 +21,7 @@ comptime _BUNDLED_BRIDGE = "tests/fixtures/runtime/lib/libbpf_mojo.so.1"
 comptime _ENV_BRIDGE = "tests/fixtures/runtime/env-bridge.so"
 comptime _ABSENT = "tests/fixtures/runtime/lib/absent.so"
 comptime _SYSTEM_BRIDGE = "/usr/lib/memveil/libbpf_mojo.so.1"
-comptime _SYSTEM_BPF = "/usr/share/memveil/bpf"
+comptime _SYSTEM_BPF = "/usr/lib/memveil"
 
 
 def _system_bridge_expected() -> String:

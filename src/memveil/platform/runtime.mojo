@@ -24,7 +24,10 @@ from memveil.platform.reader import _geteuid_live, _getuid_live
 
 
 comptime _SYSTEM_BRIDGE = "/usr/lib/memveil/libbpf_mojo.so.1"
-comptime _SYSTEM_BPF_DIR = "/usr/share/memveil/bpf"
+# BPF objects ship beside the bridge under /usr/lib: arch-dependent
+# ELF under /usr/share is a packaging error, so the installed
+# objects live here and discovery probes this directory.
+comptime _SYSTEM_BPF_DIR = "/usr/lib/memveil"
 comptime _MODE_R_OK = 4
 
 

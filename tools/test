@@ -18,7 +18,7 @@
 # record-failures, output-paths, vm-cleanup, privacy,
 # render-escaping, offline-environment, perf-replay,
 # perf-workload, soak, preview-package, provenance, source-export,
-# release-runtime, docs, examples, extracted-robustness.
+# release-runtime, docs, examples, extracted-robustness, deb.
 #
 # A skipped suite is reported as skipped, never as success.
 # Exit 0 only when the suite passes; 1 on test failure; 2 on
@@ -1303,6 +1303,51 @@ suite_release_runtime() {
     (cd "$ROOT" && MV_BUNDLE_TARBALL="$TARBALL" MV_REPO="$ROOT" \
         MV_VALID_EMPTY="$ROOT/tests/package/valid-empty" \
         python3 -m pytest tests/package/test_release_runtime.py)
+}
+
+suite_deb() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "deb: python3 not found" >&2
+        return 1
+    fi
+    if ! python3 -m pytest --version >/dev/null 2>&1; then
+        echo "deb: pytest not importable" >&2
+        return 1
+    fi
+    if ! command -v dpkg-deb >/dev/null 2>&1; then
+        echo "deb: dpkg-deb not found" >&2
+        return 1
+    fi
+    DEB="${MV_DEB:-}"
+    if [ -z "$DEB" ]; then
+        if [ -z "${LMB_PACKAGE:-}" ]; then
+            echo "deb: BLOCKED: MV_DEB is not set and LMB_PACKAGE" \
+                "is not set (build the candidate with" \
+                "tools/package-deb from a clean tree first)" >&2
+            return 1
+        fi
+        DTMP=$(mktemp -d)
+        trap 'rm -rf "$DTMP"' EXIT
+        if ! LMB_PACKAGE="$LMB_PACKAGE" "$ROOT/tools/package-deb" \
+            --out "$DTMP" >"$DTMP/package-deb.log" 2>&1; then
+            echo "deb: BLOCKED: tools/package-deb failed" >&2
+            cat "$DTMP/package-deb.log" >&2
+            return 1
+        fi
+        DEB=$(sed -n 's/^package-deb: \(.*\.deb\)$/\1/p' \
+            "$DTMP/package-deb.log" | tail -1)
+        if [ -z "$DEB" ] || [ ! -f "$DEB" ]; then
+            echo "deb: no .deb in package-deb log" >&2
+            cat "$DTMP/package-deb.log" >&2
+            return 1
+        fi
+    fi
+    if [ ! -f "$DEB" ]; then
+        echo "deb: MV_DEB is not a file: $DEB" >&2
+        return 1
+    fi
+    (cd "$ROOT" && MV_DEB="$DEB" MV_REPO="$ROOT" \
+        python3 -m pytest -ra tests/package/test_deb.py)
 }
 
 suite_native_decode() {
@@ -3170,7 +3215,7 @@ suite_record() {
         --bridge "$TMP/nolib.so" --max-events-bytes 4294967297
     noobj_bundle="$(dirname "$(dirname "$BIN")")/bpf/swiotlb_attempt.bpf.o"
     if [ -r "$noobj_bundle" ] \
-        || [ -r /usr/share/memveil/bpf/swiotlb_attempt.bpf.o ]; then
+        || [ -r /usr/lib/memveil/swiotlb_attempt.bpf.o ]; then
         echo "record-cli: no-object skipped (object discoverable on this host)"
     else
         rexpect no-object 3 "no object: pass --object PATH" "$TMP/r-noobj" -- \
@@ -3289,7 +3334,7 @@ suite_qualify() {
         --object "$ROOT/tests/fixtures/elf/ok.o"
     noobj_bundle="$(dirname "$(dirname "$BIN")")/bpf/swiotlb_attempt.bpf.o"
     if [ -r "$noobj_bundle" ] \
-        || [ -r /usr/share/memveil/bpf/swiotlb_attempt.bpf.o ]; then
+        || [ -r /usr/lib/memveil/swiotlb_attempt.bpf.o ]; then
         echo "qualify-cli: no-object skipped (object discoverable on this host)"
     else
         qexpect no-object 3 "no object: pass --object PATH" -- \
@@ -3552,6 +3597,9 @@ case "$1" in
         ;;
     release-runtime)
         suite_release_runtime
+        ;;
+    deb)
+        suite_deb
         ;;
     docs)
         suite_docs
