@@ -22,7 +22,12 @@ from memveil.platform.profiles import (
     load_profiles,
     parse_profile_bytes,
 )
-from memveil.platform.reader import fs_type_name, read_host_file
+from memveil.platform.reader import (
+    fs_type_name,
+    read_host_file,
+    readlink_self,
+)
+from memveil.platform.runtime import exe_root
 
 comptime _OK = "tests/fixtures/scan/ok"
 comptime _MOVED = "tests/fixtures/scan/moved"
@@ -35,6 +40,8 @@ comptime _ELF_RING = "tests/fixtures/elf/badring.o"
 comptime _ELF_LC = "tests/fixtures/elf/lc-ok.o"
 comptime _ELF_CP = "tests/fixtures/elf/cp-ok.o"
 comptime _ELF_LC_BAD = "tests/fixtures/elf/lc-wrongsec.o"
+comptime _SYSTEM_BPF = "/usr/share/memveil/bpf"
+comptime _ATTEMPT_OBJECT = "swiotlb_attempt.bpf.o"
 
 
 def _kernel() -> KernelInfo:
@@ -291,12 +298,56 @@ def test_scan_explicit_candidate() raises:
     )
 
 
+def _path_readable(path: String) -> Bool:
+    """Independent fopen-based readability oracle.
+
+    Discovery probes with access(R_OK), so a readable-here
+    file must resolve and an unreadable one falls through.
+    """
+    try:
+        _ = read_host_file(
+            path, String("object probe"), 67108864
+        )
+    except:
+        return False
+    return True
+
+
+def _attempt_object_discoverable() -> Bool:
+    """True when a bundle or system attempt object resolves.
+
+    Mirrors the discover_object order (executable-relative
+    bundle path, then the system path) with the independent
+    oracle above. The refusal test below must skip when this
+    is true: discovery succeeds and the exit-3 refusal moves
+    further down the pipeline.
+    """
+    var exe = String("")
+    try:
+        exe = readlink_self()
+    except:
+        exe = String("")
+    var root = exe_root(exe)
+    if root != String(""):
+        var bundled = root + String("/bpf/") + String(_ATTEMPT_OBJECT)
+        if root == String("/"):
+            bundled = String("/bpf/") + String(_ATTEMPT_OBJECT)
+        if _path_readable(bundled):
+            return True
+    return _path_readable(
+        String(_SYSTEM_BPF) + String("/") + String(_ATTEMPT_OBJECT)
+    )
+
+
 def test_scan_no_object_refuses() raises:
     # An absent --object with nothing discoverable
     # refuses exit 3 before any evidence opens.
-    # Precondition: no bundle or system BPF objects are
-    # installed (else discovery resolves and the refusal
-    # moves further down the pipeline).
+    if _attempt_object_discoverable():
+        print(
+            String("SKIP test_scan_no_object_refuses: ")
+            + String("attempt object discoverable on this host")
+        )
+        return
     var opts = _opts(String("build/scan-noobj"))
     opts.object = String("")
     var writer = ScriptWriter()
