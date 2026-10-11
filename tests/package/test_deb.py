@@ -437,6 +437,26 @@ def needed(path):
             if "(NEEDED)" in line and "[" in line]
 
 
+def runpath_abspaths(dyn):
+    """Non-$ORIGIN RUNPATH/RPATH entries in a dynamic section.
+
+    Parses the bracketed `Library runpath:`/`Library rpath:`
+    values and returns every colon-separated entry that is
+    not $ORIGIN-relative: any absolute build-host path, not
+    just known prefixes. [] means fully relocatable.
+    """
+    found = []
+    for line in dyn.splitlines():
+        match = re.search(r"Library (?:runpath|rpath): \[(.*)\]",
+                          line)
+        if not match:
+            continue
+        for entry in match.group(1).split(":"):
+            if entry and not entry.startswith("$ORIGIN"):
+                found.append(entry)
+    return found
+
+
 @needs_deb
 def test_loader_closure(extracted):
     import importlib.util
@@ -446,8 +466,7 @@ def test_loader_closure(extracted):
     proc = run("readelf", "-d", str(binary))
     assert proc.returncode == 0, proc.stderr
     assert "$ORIGIN/../lib/memveil" in proc.stdout, proc.stdout
-    assert "/home/" not in proc.stdout \
-        and "/work/" not in proc.stdout, proc.stdout
+    assert runpath_abspaths(proc.stdout) == [], proc.stdout
     proc = run("readelf", "-h", str(binary))
     assert proc.returncode == 0
     assert "X86-64" in proc.stdout, proc.stdout
@@ -532,8 +551,40 @@ def have_passwordless_sudo():
     return proc.returncode == 0
 
 
+def _installed_validated_profile():
+    """Installed validated profile id for this kernel, else None.
+
+    The journey qualifies the validated doc whose recorded
+    revision equals the running release (the semantic choice
+    a user makes); path flags stay zero in every branch.
+    """
+    profdir = "/usr/share/memveil/profiles"
+    try:
+        names = sorted(os.listdir(profdir))
+    except OSError:
+        return None
+    release = os.uname().release
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            doc = json.load(open(os.path.join(profdir, name)))
+        except (OSError, ValueError):
+            continue
+        source = doc.get("identity", {}).get("source", {})
+        if doc.get("status") == "validated" \
+                and source.get("revision") == release:
+            return doc.get("profile_id")
+    return None
+
+
 @needs_deb
 def test_install_doctor_uninstall_smoke(engine_version, tmp_path):
+    # Install journey: install -> doctor -> record probe ->
+    # privileged qualify -> uninstall, with receipts landing
+    # in /var/lib/memveil/receipts. Every installed run uses
+    # zero path flags and zero environment; only --profile
+    # (a semantic choice, not a path) may be set.
     if shutil.which("dpkg") is None or not have_passwordless_sudo():
         pytest.skip("install smoke needs dpkg plus passwordless "
                     "sudo; this host lacks one of them")
@@ -543,6 +594,8 @@ def test_install_doctor_uninstall_smoke(engine_version, tmp_path):
         "remove it with `sudo dpkg -r memveil` and rerun"
     proc = run("sudo", "-n", "dpkg", "-i", DEB)
     assert proc.returncode == 0, proc.stderr
+    receipts = "/var/lib/memveil/receipts"
+    qcap = tmp_path / "qcap"
     try:
         try:
             status = run("dpkg", "-s", "memveil")
@@ -551,15 +604,36 @@ def test_install_doctor_uninstall_smoke(engine_version, tmp_path):
             verify = run("dpkg", "--verify", "memveil")
             assert verify.returncode == 0, verify.stderr
             assert verify.stdout == "", verify.stdout
-            receipts = "/var/lib/memveil/receipts"
             assert os.path.isdir(receipts), "receipts dir missing"
             info = os.stat(receipts)
             assert stat.S_IMODE(info.st_mode) == 0o755, \
                 oct(stat.S_IMODE(info.st_mode))
             assert info.st_uid == 0 and info.st_gid == 0
-            doctor = run("/usr/bin/memveil", "doctor",
-                         "--profiles-dir",
-                         "/usr/share/memveil/profiles")
+            assert os.listdir(receipts) == [], \
+                "fresh install ships receipts: %s" % \
+                os.listdir(receipts)
+            # The installed bridge must LOAD, not merely be
+            # discoverable: ldd resolves its closure and a
+            # real dlopen binds a shipped symbol.
+            bridge = "/usr/lib/memveil/libbpf_mojo.so.1"
+            ldd_bridge = run("ldd", bridge)
+            assert ldd_bridge.returncode == 0, ldd_bridge.stderr
+            assert "not found" not in ldd_bridge.stdout, \
+                ldd_bridge.stdout
+            load = run("python3", "-c",
+                       "import ctypes; lib = ctypes.CDLL(%r); "
+                       "lib.lmb_last_error; "
+                       "print('bridge-load-ok')" % bridge)
+            assert load.returncode == 0, load.stderr
+            assert load.stdout.strip() == "bridge-load-ok", \
+                load.stdout
+            ldd_bin = run("ldd", "/usr/bin/memveil")
+            assert ldd_bin.returncode == 0, ldd_bin.stderr
+            assert "not found" not in ldd_bin.stdout, \
+                ldd_bin.stdout
+            # Zero-flag doctor: the installed profiles
+            # default resolves without --profiles-dir.
+            doctor = run("/usr/bin/memveil", "doctor")
             assert doctor.returncode in (0, 3), doctor.stderr
             assert doctor.stdout.strip(), "doctor printed nothing"
             version = run("/usr/bin/memveil", "version")
@@ -576,7 +650,9 @@ def test_install_doctor_uninstall_smoke(engine_version, tmp_path):
                          "--duration", "1",
                          cwd=str(tmp_path), env={})
             for missing in ("no bridge", "no object",
-                            "missing --object"):
+                            "missing --object",
+                            "cannot load profiles",
+                            "cannot resolve profiles"):
                 assert missing not in record.stderr, record.stderr
             assert record.returncode in (0, 3, 4), record.stderr
             if record.returncode == 3:
@@ -587,7 +663,57 @@ def test_install_doctor_uninstall_smoke(engine_version, tmp_path):
                 assert cap.exists(), \
                     "exit %d left no capture dir" \
                     % record.returncode
+            # Privileged smoke: qualify with zero path flags
+            # publishes into /var/lib/memveil/receipts on a
+            # qualifying host, else refuses past resolution.
+            prof_id = _installed_validated_profile()
+            qargv = ["sudo", "-n", "/usr/bin/memveil", "qualify",
+                     "--output", str(qcap)]
+            if prof_id is not None:
+                qargv += ["--profile", prof_id]
+            qualify = run(*qargv, cwd=str(tmp_path))
+            print("journey qualify profile: %s" % prof_id)
+            if qualify.returncode == 0:
+                assert "receipt=/var/lib/memveil/receipts/" in \
+                    qualify.stdout, qualify.stdout
+                published = sorted(os.listdir(receipts))
+                assert published, \
+                    "exit 0 published no receipt"
+                for name in published:
+                    assert name.endswith(".json"), name
+                    doc = json.load(open(
+                        os.path.join(receipts, name)))
+                    assert doc.get("profile_id"), name
+                print("journey qualify receipt: %s"
+                      % qualify.stdout.strip().splitlines()[-1])
+            elif qualify.returncode == 3:
+                print("journey qualify refusal: "
+                      + qualify.stderr.strip())
+                for missing in ("no bridge", "no object",
+                                "cannot load profiles",
+                                "cannot resolve profiles"):
+                    assert missing not in qualify.stderr, \
+                        qualify.stderr
+                assert qualify.stderr.strip(), \
+                    "refusal needs a diagnostic"
+                assert os.listdir(receipts) == [], \
+                    "refused qualify left receipts"
+            else:
+                pytest.fail("qualify exit %d: %s"
+                            % (qualify.returncode,
+                               qualify.stderr))
         finally:
+            # Runtime state is not dpkg-owned: remove what the
+            # smoke published before uninstalling, so the
+            # residue check below binds the uninstall itself.
+            if os.path.isdir(receipts):
+                for name in os.listdir(receipts):
+                    gone = run("sudo", "-n", "rm", "-f",
+                               os.path.join(receipts, name))
+                    assert gone.returncode == 0, gone.stderr
+            if qcap.exists():
+                gone = run("sudo", "-n", "rm", "-rf", str(qcap))
+                assert gone.returncode == 0, gone.stderr
             uninst = run("sudo", "-n", "dpkg", "-r", "memveil")
             assert uninst.returncode == 0, uninst.stderr
     except BaseException:
@@ -949,6 +1075,10 @@ def test_spec_private_lib_pinning():
     text = _spec_text()
     assert "bundled" in text.lower(), \
         "private-lib note must name the bundled() convention"
+    assert re.search(r"^AutoProv:\s*no\s*$", text, re.M), \
+        "AutoProv must be off (the effective switch on rpm>=4.9)"
+    assert re.search(r"^AutoReq:\s*no\s*$", text, re.M), \
+        "AutoReq must be off (the effective switch on rpm>=4.9)"
     assert re.search(r"^%global\s+__find_provides\s+%\{nil\}",
                      text, re.M), "__find_provides must be off"
     assert re.search(r"^%global\s+__find_requires\s+%\{nil\}",

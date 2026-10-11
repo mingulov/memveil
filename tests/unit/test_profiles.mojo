@@ -26,6 +26,7 @@ from memveil.platform.profiles import (
     ProfileDecision,
     TraceWant,
     cp_trace,
+    default_receipts_dir,
     lc_trace,
     load_profiles,
     mint_qualification_receipt,
@@ -2288,6 +2289,29 @@ def test_select_bound_receipt_grade_caps() raises:
     assert_equal(d.receipt_caps[0], String("attempt-trace"))
 
 
+def test_default_receipts_dir() raises:
+    assert_equal(
+        default_receipts_dir(
+            String("/usr/share/memveil/profiles")
+        ),
+        String("/var/lib/memveil/receipts"),
+    )
+    assert_equal(
+        default_receipts_dir(
+            String("/usr/share/memveil/profiles/")
+        ),
+        String("/var/lib/memveil/receipts"),
+    )
+    assert_equal(
+        default_receipts_dir(String("build/../profiles")),
+        String("build/../profiles/receipts"),
+    )
+    assert_equal(
+        default_receipts_dir(String("/opt/mv/profiles")),
+        String("/opt/mv/profiles/receipts"),
+    )
+
+
 def test_select_bound_validated_grade_caps() raises:
     var r = open_evidence_reader(fx("bound-host"))
     var env = detect_environment(r)
@@ -2789,6 +2813,7 @@ def run() raises -> Int:
     suite.test[test_sig_missing_function]()
     suite.test[test_sig_malformed_frozen]()
     suite.test[test_sig_skips_tracepoint]()
+    suite.test[test_default_receipts_dir]()
     suite^.run()
     return 0
 

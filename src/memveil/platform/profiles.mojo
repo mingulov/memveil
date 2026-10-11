@@ -49,6 +49,8 @@ comptime MAX_PROFILE_NOTES = 32
 comptime MAX_CAP_HOOKS = 32
 comptime _MANIFEST_CAP = 65536
 comptime _PROFILE_CAP = 1048576
+comptime _INSTALLED_PROFILES_DIR = "/usr/share/memveil/profiles"
+comptime _INSTALLED_RECEIPTS_DIR = "/var/lib/memveil/receipts"
 
 
 struct ProfileHook(Copyable):
@@ -1307,6 +1309,26 @@ struct _ReceiptHit(Copyable, Movable):
         self.caps = List[String]()
 
 
+def default_receipts_dir(profiles_dir: String) -> String:
+    """Receipts dir for a profiles dir.
+
+    The installed profiles dir keeps its receipts in
+    the writable state dir instead of beside the
+    read-only profiles; every other layout (bundle,
+    checkout, explicit override) keeps receipts under
+    ``<profiles-dir>/receipts`` exactly as before. The
+    trailing-slash spelling maps the same way, so
+    shell-completed paths cannot misplace a receipt.
+    """
+    var plain = profiles_dir == String(_INSTALLED_PROFILES_DIR)
+    var slashed = profiles_dir == String(_INSTALLED_PROFILES_DIR) + String(
+        "/"
+    )
+    if plain or slashed:
+        return String(_INSTALLED_RECEIPTS_DIR)
+    return profiles_dir + String("/receipts")
+
+
 def _check_receipt(
     doc: Profile,
     kernel: KernelInfo,
@@ -1317,26 +1339,30 @@ def _check_receipt(
 ) -> _ReceiptHit:
     """Receipt verdict for one covering reference doc.
 
-    A hit (empty note) means the receipt under
-    <pdir>/receipts/ verifies against the doc, the live
-    kernel, and the resolved bridge hash, and the doc's
-    identity bindings hold; the caller matches local-auto
-    and keeps the qualified caps for per-capability
-    judging. An empty ``bridge_sha`` means no bridge
-    binding was performed (the passive path never
-    touches the bridge): receipts then report an
-    explicit unchecked note instead of a mismatch, so
-    the caller never implies a binding that did not
+    A hit (empty note) means the receipt under the
+    receipts dir for pdir verifies against the doc,
+    the live kernel, and the resolved bridge hash, and
+    the doc's identity bindings hold; the caller
+    matches local-auto and keeps the qualified caps
+    for per-capability judging. An empty
+    ``bridge_sha`` means no bridge binding was
+    performed (the passive path never touches the
+    bridge): receipts then report an explicit
+    unchecked note instead of a mismatch, so the
+    caller never implies a binding that did not
     happen. Never raises: unreadable files read as
     absent, and the profile_id grammar admits no path
-    separators so the join cannot escape receipts/.
+    separators so the join cannot escape the dir.
     """
     var out = _ReceiptHit()
     if pdir == String(""):
         out.note = String("absent")
         return out^
     var path = (
-        pdir + String("/receipts/") + doc.profile_id + String(".json")
+        default_receipts_dir(pdir)
+        + String("/")
+        + doc.profile_id
+        + String(".json")
     )
     var raw = List[UInt8]()
     try:
@@ -1398,9 +1424,10 @@ def select_profile_bound(
     and whose identity bindings hold against the evidence tree
     under root. Object and ring bindings stay record-time
     checks. Otherwise every covering reference doc is tried
-    for a receipt under <pdir>/receipts/ verifying against
-    the resolved bridge hash whose identity bindings hold,
-    first hit matching with grade local-auto. An empty
+    for a receipt under the receipts dir for pdir
+    verifying against the resolved bridge hash whose
+    identity bindings hold, first hit matching with
+    grade local-auto. An empty
     bridge hash performs no binding: receipts then carry
     an explicit unchecked note. With no
     receipt hit it falls back to the

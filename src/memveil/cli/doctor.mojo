@@ -121,8 +121,9 @@ def default_profiles_dir(prog: String) -> String:
     Layout contract: the executable lives one directory below
     the tree root (``<root>/build/memveil`` in a checkout,
     ``<root>/bin/memveil`` packaged), with profiles at
-    ``<root>/profiles``. A bare program name (PATH lookup) falls
-    back to ``./profiles``.
+    ``<root>/profiles``. An executable installed at
+    ``/usr/bin`` instead reads the FHS profiles dir. A bare
+    program name (PATH lookup) falls back to ``./profiles``.
     """
     var parts = prog.split(String("/"))
     if len(parts) < 2:
@@ -136,6 +137,8 @@ def default_profiles_dir(prog: String) -> String:
         out = String("/")
     if out == "/":
         return String("/../profiles")
+    if out == String("/usr/bin"):
+        return String("/usr/share/memveil/profiles")
     return out + String("/../profiles")
 
 

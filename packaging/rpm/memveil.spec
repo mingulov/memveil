@@ -26,11 +26,17 @@
 # are off so the private SONAMEs never leak into the
 # dependency set, and system deps stay manual exactly like the
 # .deb (libelf, zlib; libc/libm come with glibc, always
-# present). No maintainer scriptlets: the private lib needs
-# no ldconfig and no collection runs at install. No file
+# present). The AutoReq/AutoProv tags are the effective
+# switch on rpm >= 4.9 (the __find_* nil globals predate the
+# fileattrs generators and no longer suppress anything on
+# their own); the nils stay as belt and braces for old rpm.
+# No maintainer scriptlets: the private lib needs no
+# ldconfig and no collection runs at install. No file
 # capabilities and no set-uid bits anywhere.
 %global __find_provides %{nil}
 %global __find_requires %{nil}
+AutoProv: no
+AutoReq: no
 # brp-strip would strip the BPF objects' symbol tables (the
 # .deb gate pins them unstripped) and there is no debuginfo
 # to split from this manual staging, so post-processing is
@@ -61,8 +67,9 @@ requested bytes; actual copies come from the copy channel.
 
 Third-party binary package: the conda/pixi Mojo toolchain cannot
 enter Fedora, so this .rpm is built outside the archive. Installed
-collection needs no flags or environment; verbs that need profiles
-take --profiles-dir /usr/share/memveil/profiles.
+runs need no flags or environment: profiles resolve from the
+installed share dir and qualify receipts land under
+/var/lib/memveil/receipts.
 
 %prep
 %setup -q

@@ -37,14 +37,13 @@ X-LMB-Tarball-SHA256 record the exact source and bridge bytes.
 
 Third-party origin: the conda/pixi Mojo toolchain cannot enter
 Debian, so this package is built outside the archive for a
-third-party repo. Installed verbs that need profiles take
-``--profiles-dir /usr/share/memveil/profiles`` (the default
-exe-relative resolution does not honor the FHS layout, and
-qualify receipts always land under the profiles dir, not under
-/var/lib). Man pages are generated at build time from the
---help texts (tools/gen-man) and completions from the frozen
-verb/flag sets (tools/gen-completions); the same generators
-feed the .rpm, so both formats ship identical pages.
+third-party repo. Installed runs need no flags or
+environment: profiles resolve from the installed share dir
+and qualify receipts land under /var/lib/memveil/receipts.
+Man pages are generated at build time from the --help texts
+(tools/gen-man) and completions from the frozen verb/flag
+sets (tools/gen-completions); the same generators feed the
+.rpm, so both formats ship identical pages.
 
 Usage: tools/package-deb [--out DIR] [--tag STEM]
   --out DIR   output directory (default: dist/)
@@ -81,8 +80,9 @@ LONG_DESC = (
     " .\n"
     " Third-party binary package: the conda/pixi Mojo toolchain cannot\n"
     " enter Debian, so this .deb is built outside the archive. Installed\n"
-    " collection needs no flags or environment; verbs that need profiles\n"
-    " take --profiles-dir /usr/share/memveil/profiles."
+    " runs need no flags or environment: profiles resolve from\n"
+    " the installed share dir and qualify receipts land under\n"
+    " /var/lib/memveil/receipts."
 )
 COPYRIGHT = """\
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
@@ -321,9 +321,15 @@ def main(argv):
         if BIN_RUNPATH not in dyn.stdout:
             fail("FHS binary lacks RUNPATH %s:\n%s"
                  % (BIN_RUNPATH, dyn.stdout))
-        if "/home/" in dyn.stdout or "/work/" in dyn.stdout:
-            fail("FHS binary keeps absolute RUNPATH entries:\n%s"
-                 % dyn.stdout)
+        for line in dyn.stdout.splitlines():
+            match = re.search(
+                r"Library (?:runpath|rpath): \[(.*)\]", line)
+            if not match:
+                continue
+            for entry in match.group(1).split(":"):
+                if entry and not entry.startswith("$ORIGIN"):
+                    fail("FHS binary keeps absolute RUNPATH entry "
+                         "%r:\n%s" % (entry, dyn.stdout))
         rerun = run([binary, "version"])
         if rerun.returncode != 0 \
                 or rerun.stdout.strip() != "memveil-" + upstream:

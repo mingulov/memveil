@@ -73,6 +73,7 @@ from memveil.platform.narrow import (
 from memveil.platform.profiles import (
     Profile,
     ProfileHook,
+    default_receipts_dir,
     load_profiles,
     parse_profile_bytes,
     select_attempt_hook,
@@ -752,7 +753,7 @@ def _receipt_covers(
 ) -> Bool:
     """True when a verifying receipt covers every wanted cap.
 
-    The receipt at <pdir>/receipts/<id>.json must verify
+    The receipt at <receipts-dir>/<id>.json must verify
     against the doc, the live kernel, and the resolved
     bridge hash, and qualify each requested capability.
     An empty pdir, a missing file, or any verify failure
@@ -766,8 +767,8 @@ def _receipt_covers(
     if pdir == String(""):
         return False
     var path = (
-        pdir
-        + String("/receipts/")
+        default_receipts_dir(pdir)
+        + String("/")
         + doc.profile_id
         + String(".json")
     )
@@ -883,9 +884,10 @@ def decide_record(
     and enforces full binding when bindings exist. Scan
     mode tries each covering validated doc in order, then
     each covering reference doc whose receipt under
-    <profiles_dir>/receipts/ verifies (against the doc,
-    the live kernel, and ``bridge_sha``, the bare hex
-    sha256 of the resolved bridge) and covers the
+    the receipts dir for the profiles dir verifies
+    (against the doc, the live kernel, and
+    ``bridge_sha``, the bare hex sha256 of the
+    resolved bridge) and covers the
     requested capabilities ("\" disables receipts), and
     falls back to the first covering doc as partial. A
     receipt blocked only by the bridge falls through to
