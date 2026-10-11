@@ -337,13 +337,25 @@ def test_denied_bad_object(bundle, tmp_path):
 
 
 def test_denied_missing_bridge(bundle, tmp_path):
+    # Exe-relative discovery resolves the bundled bridge, so this
+    # case runs against a trial bundle copy with
+    # lib/libbpf_mojo.so.1 removed: lookup then finds nothing and
+    # record refuses with NO_BRIDGE_DIAG before any gate that
+    # needs the bridge. A system-installed bridge would still
+    # resolve through the discover_bridge system fallback, making
+    # the denial unprovable on such a host.
+    if os.access("/usr/lib/memveil/libbpf_mojo.so.1", os.R_OK):
+        pytest.skip("system bridge installed: fallback would resolve")
     root, _ = bundle
-    binary = str(root / "bin" / "memveil")
+    trial = tmp_path / "nobridge"
+    shutil.copytree(root, trial)
+    (trial / "lib" / "libbpf_mojo.so.1").unlink()
+    binary = str(trial / "bin" / "memveil")
     out = tmp_path / "cap-nobridge"
     env = {"PATH": "/usr/bin:/bin"}
     proc = run(binary, "record", "--output", str(out),
                "--object",
-               str(root / "bpf" / "swiotlb_attempt.bpf.o"),
+               str(trial / "bpf" / "swiotlb_attempt.bpf.o"),
                "--duration", "2", env=env)
     assert proc.returncode == 3, (proc.returncode, proc.stderr)
     assert proc.stderr == NO_BRIDGE_DIAG, proc.stderr
