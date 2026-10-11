@@ -49,7 +49,7 @@ jobs:
         run: ./tools/build
       - name: Offline suites
         run: |
-          for suite in schemas unit reports profiles doctor \
+          for suite in schemas unit reports profiles doctor qualify \
               identity correlation mappings lifetimes pools \
               regions conversion-normalize confidential-hooks \
               region-resolution baseline confidential-inventory \
