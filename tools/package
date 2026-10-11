@@ -96,6 +96,21 @@ def contained(path, directory):
     return full == base or full.startswith(base + os.sep)
 
 
+def tar_member_mode(full, is_dir):
+    """Portable tar member mode: dirs 0755, files 0644, +x kept.
+
+    full is the staged path; is_dir selects the directory
+    branch. A file keeping any execute bit ships 0755
+    (bin/memveil), everything else 0644, so the archive
+    never leaks build-tree umask or group bits.
+    """
+    if is_dir:
+        return 0o755
+    if os.stat(full).st_mode & 0o111:
+        return 0o755
+    return 0o644
+
+
 def fail(message):
     print("package: %s" % message, file=sys.stderr)
     sys.exit(1)
@@ -478,6 +493,9 @@ def main(argv):
                          "--format=%ct"]).stdout.strip())
     # Zero-mtime gzip header: "w:gz" stamps the current time,
     # which would make identical revisions hash differently.
+    # Explicit directory members plus normalized modes keep
+    # extraction identical on any umask (dirs 0755, files
+    # 0644, executable bit kept).
     with open(tarball, "wb") as raw:
         gz = gzip.GzipFile(filename="", mode="wb", fileobj=raw,
                            compresslevel=9, mtime=0)
@@ -485,6 +503,13 @@ def main(argv):
             with tarfile.open(fileobj=gz, mode="w") as tar:
                 for base, dirs, files in os.walk(final):
                     dirs.sort()
+                    info = tar.gettarinfo(
+                        base, os.path.relpath(base, out_dir))
+                    info.mtime = mtime
+                    info.uid = info.gid = 0
+                    info.uname = info.gname = ""
+                    info.mode = tar_member_mode(base, True)
+                    tar.addfile(info)
                     for name in sorted(files):
                         full = os.path.join(base, name)
                         info = tar.gettarinfo(
@@ -492,6 +517,7 @@ def main(argv):
                         info.mtime = mtime
                         info.uid = info.gid = 0
                         info.uname = info.gname = ""
+                        info.mode = tar_member_mode(full, False)
                         with open(full, "rb") as handle:
                             tar.addfile(info, handle)
         finally:
