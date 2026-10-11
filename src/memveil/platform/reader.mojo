@@ -225,6 +225,11 @@ def _geteuid_live() -> Int:
     return Int(external_call["geteuid", UInt32]())
 
 
+def _getuid_live() -> Int:
+    """Return the live real uid."""
+    return Int(external_call["getuid", UInt32]())
+
+
 def _parse_euid(text: String) raises EvidenceError -> Int:
     """Parse a meta.txt euid: decimal digits, 0..2**31-1."""
     if text.byte_length() == 0:
