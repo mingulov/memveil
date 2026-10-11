@@ -23,6 +23,7 @@ from memveil.cli.record import (
     MAX_PROFILE_DOC_BYTES,
     RecordOptions,
     open_bridge_snapshot,
+    open_object_snapshot,
     parse_requested_caps,
     resolve_bridge,
     resolve_object,
@@ -680,6 +681,20 @@ def _smoke_bridge_hash(snap: BridgeSnapshot) raises -> String:
     return String("sha256:") + snap.sha
 
 
+def _smoke_object_hash(snap: BridgeSnapshot) raises -> String:
+    """sha256: hash of the smoke's exercised object bytes, or raise.
+
+    The receipt binds the snapshot taken before the
+    smoke, never a post-smoke pathname re-read: a swap
+    after the smoke cannot mint a receipt for bytes the
+    smoke never exercised. An unbound snapshot (empty
+    hash) refuses instead of hashing a pathname.
+    """
+    if snap.sha == String(""):
+        raise Error("object identity unbound for this smoke")
+    return String("sha256:") + snap.sha
+
+
 def run_qualify_with(
     root: String, profiles_dir: String, opts: QualifyOptions
 ) raises -> Int:
@@ -715,6 +730,13 @@ def run_qualify_with(
         return _qualify_failed(
             String("no object: pass --object PATH")
         )
+    # Pin the objects before the smoke, like the
+    # bridge: the smoke reads through the snapshot
+    # aliases and the receipt binds the snapshot
+    # hashes, so a pathname swap on either side of
+    # the smoke binds nothing new. The snapshots
+    # live in this scope, covering the smoke.
+    var obj_snap = open_object_snapshot(object_path)
     var lc_object = opts.lc_object.copy()
     var cp_object = opts.cp_object.copy()
     var want_caps = opts.capabilities.copy()
@@ -736,9 +758,11 @@ def run_qualify_with(
         cp_object = resolve_object(
             String("copy"), String(""), exe_path
         )
+    var lc_snap = open_object_snapshot(lc_object)
+    var cp_snap = open_object_snapshot(cp_object)
     var ropts = RecordOptions()
     ropts.output = output.copy()
-    ropts.object = object_path.copy()
+    ropts.object = obj_snap.load_path.copy()
     ropts.bridge = snap.load_path.copy()
     ropts.has_bridge = snap.load_path != String("")
     # The smoke resolves the planned source path, never a
@@ -748,8 +772,8 @@ def run_qualify_with(
     # through record's file-first resolver.
     ropts.profile = plan.doc_source.copy()
     ropts.has_profile = True
-    ropts.lc_object = lc_object.copy()
-    ropts.cp_object = cp_object.copy()
+    ropts.lc_object = lc_snap.load_path.copy()
+    ropts.cp_object = cp_snap.load_path.copy()
     ropts.capabilities = want_caps.copy()
     ropts.duration_s = _SMOKE_DURATION_S
     var writer = LiveWriter()
@@ -804,14 +828,14 @@ def run_qualify_with(
     var obj_lc = String("")
     var obj_cp = String("")
     try:
-        obj_attempt = _hash_object(object_path)
+        obj_attempt = _smoke_object_hash(obj_snap)
         if lc_object != String(""):
-            obj_lc = _hash_object(lc_object)
+            obj_lc = _smoke_object_hash(lc_snap)
         if cp_object != String(""):
-            obj_cp = _hash_object(cp_object)
+            obj_cp = _smoke_object_hash(cp_snap)
     except e:
         return _qualify_broken(
-            String("smoke objects unreadable: ") + String(e)
+            String("smoke objects unbound: ") + String(e)
         )
     try:
         bridge = _smoke_bridge_hash(snap)

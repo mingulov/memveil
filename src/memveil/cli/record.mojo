@@ -1272,12 +1272,15 @@ struct BridgeSnapshot(Movable):
     stays open; the loader and the admission hash both
     name that same open file description through
     /proc/self/fd/N, so a pathname swap after
-    resolution changes neither. ``sha`` is the bare
-    hex sha256 of the pinned bytes, "" when the bridge
-    is uncheckable; ``load_path`` is the fd alias when
-    pinned, else the plain pathname for the loader's
-    own failure. Hold the snapshot until the load it
-    guards completes; dropping it closes the fd.
+    resolution changes neither. The pin defeats
+    rename and symlink swaps, not in-place writes to
+    the pinned inode itself; the threat assumption is
+    unchanged. ``sha`` is the bare hex sha256 of the
+    pinned bytes, "" when the bridge is uncheckable;
+    ``load_path`` is the fd alias when pinned, else
+    the plain pathname for the loader's own failure.
+    Hold the snapshot until the load it guards
+    completes; dropping it closes the fd.
     """
 
     var fd: Int32
@@ -1330,6 +1333,22 @@ def open_bridge_snapshot(path: String) -> BridgeSnapshot:
     except:
         _ = external_call["close", Int32](fd)
         snap.load_path = path.copy()
+    return snap^
+
+
+def open_object_snapshot(path: String) -> BridgeSnapshot:
+    """Pin one BPF object file for smoke input and minting.
+
+    The same mechanism as open_bridge_snapshot: one
+    O_RDONLY open, hashed and read through its
+    /proc/self/fd/N alias, degrading to the plain
+    pathname with an empty hash when uncheckable.
+    Qualify snapshots each object before the smoke,
+    feeds the alias to the smoke as its load input,
+    and mints from the snapshot hash, so the receipt
+    binds the exercised bytes. Never raises.
+    """
+    var snap = open_bridge_snapshot(path)
     return snap^
 
 
