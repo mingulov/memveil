@@ -90,10 +90,12 @@ struct LiveWriter(WriterSource):
 
     var _writer: Optional[EventWriter]
     var _construction_residual: String
+    var _final_ids: List[UInt64]
 
     def __init__(out self):
         self._writer = None
         self._construction_residual = String("")
+        self._final_ids = List[UInt64]()
 
     def create(mut self, path: String, budget: Int) -> CreateOut:
         if self._writer:
@@ -175,6 +177,8 @@ struct LiveWriter(WriterSource):
         var w = self._writer.take()
         try:
             var outcome = w.finalize(session.copy())
+            if outcome.status == String("finalized"):
+                self._final_ids = w.finalized_identity()
             return FinalOut(outcome.status.copy(), outcome.message.copy())
         except e:
             self._writer = Optional(w^)
@@ -207,3 +211,6 @@ struct LiveWriter(WriterSource):
         if not self._writer:
             return 0
         return self._writer.value().committed_len()
+
+    def finalized_identity(self) -> List[UInt64]:
+        return self._final_ids.copy()

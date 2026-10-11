@@ -15,11 +15,25 @@ from std.ffi import external_call
 from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
 
-from scripted import _stop_mkdtemp
+from scripted import ScriptWriter, _stop_mkdtemp
 
-from memveil.cli.record import open_bridge_snapshot
+from memveil.cli.record import (
+    RecordOptions,
+    open_bridge_snapshot,
+    run_collector_with,
+)
 from memveil.platform.hash import sha256_hex
 from memveil.platform.reader import read_host_file
+
+
+comptime _SNAP_OK = "tests/fixtures/scan/ok"
+comptime _SNAP_PROFILES = "tests/fixtures/scan/profiles"
+comptime _SNAP_ELF = "tests/fixtures/elf/ok.o"
+comptime _SNAP_LIBZ = "/lib/x86_64-linux-gnu/libz.so.1"
+
+
+def _snap_contains(hay: String, needle: String) -> Bool:
+    return len(hay.split(String(needle))) > 1
 
 
 def _s_cstr(text: String) -> List[UInt8]:
@@ -86,10 +100,47 @@ def test_snapshot_missing_path_degrades() raises:
     )
 
 
+def test_production_load_sees_pinned_bridge() raises:
+    # Production constructor/load must see the pinned
+    # bytes when dlopen runs: libz is a valid .so
+    # missing the lmb_* symbols, so a retained alias
+    # dlopens libz, then fails the symbol check
+    # ("incomplete native library"); a dangling alias
+    # fails dlopen itself. Helper-level swap tests hold
+    # the snapshot, so they miss the lifetime.
+    try:
+        _ = read_host_file(
+            String(_SNAP_LIBZ), String("probe"), 1048576
+        )
+    except:
+        print(
+            String("SKIP test_production_load_sees_pinned_bridge: ")
+            + String("libz absent on this host")
+        )
+        return
+    var base = _stop_mkdtemp()
+    var opts = RecordOptions()
+    opts.output = base + String("/cap")
+    opts.object = String(_SNAP_ELF)
+    opts.bridge = String(_SNAP_LIBZ)
+    opts.has_bridge = True
+    var writer = ScriptWriter()
+    var result = run_collector_with(
+        String(_SNAP_OK), String(_SNAP_PROFILES), opts^, writer
+    )
+    assert_true(
+        _snap_contains(
+            result.diagnostic,
+            String("incomplete native library"),
+        )
+    )
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_snapshot_survives_pathname_swap]()
     suite.test[test_snapshot_missing_path_degrades]()
+    suite.test[test_production_load_sees_pinned_bridge]()
     suite^.run()
     return 0
 

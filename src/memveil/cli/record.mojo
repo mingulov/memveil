@@ -1425,6 +1425,22 @@ def _own_fstat_ids(fd: Int32) raises -> List[UInt64]:
     return out^
 
 
+def _own_fstat_devino(fd: Int32) raises -> List[UInt64]:
+    """[st_dev, st_ino] for an open fd (x86-64 stat layout)."""
+    var buf = List[UInt8]()
+    for _ in range(_OWN_STAT_SIZE):
+        buf.append(UInt8(0))
+    var r = external_call["fstat", Int32](
+        fd, Span(buf).unsafe_ptr()
+    )
+    if Int(r) != 0:
+        raise Error("ownership fstat failed")
+    var out = List[UInt64]()
+    out.append(_own_le64(buf, 0))
+    out.append(_own_le64(buf, 8))
+    return out^
+
+
 def _own_close_quiet(fd: Int32):
     if fd >= Int32(0):
         _ = external_call["close", Int32](fd)
@@ -1484,6 +1500,22 @@ def _own_fd_uid(fd: Int32) -> Int:
         return -1
 
 
+def _own_fd_matches(
+    fd: Int32, want_dev: UInt64, want_ino: UInt64
+) -> Bool:
+    """True when an open fd names the recorded identity.
+
+    Mode/uid/nlink alone cannot tell a substituted
+    root-owned file from the capture's own; dev/inode
+    continuity can. Never raises.
+    """
+    try:
+        var ids = _own_fstat_devino(fd)
+        return ids[0] == want_dev and ids[1] == want_ino
+    except:
+        return False
+
+
 def _own_fchown(fd: Int32, uid: UInt32, gid: UInt32) -> Bool:
     """True when one fchown call reports success."""
     var r = external_call["fchown", Int32](fd, uid, gid)
@@ -1491,7 +1523,8 @@ def _own_fchown(fd: Int32, uid: UInt32, gid: UInt32) -> Bool:
 
 
 def _own_repair_child(
-    dir_fd: Int32, name: String, uid: UInt32, gid: UInt32
+    dir_fd: Int32, name: String, uid: UInt32, gid: UInt32,
+    want_dev: UInt64, want_ino: UInt64,
 ) -> Bool:
     """Hand one expected child to the invoking user.
 
@@ -1499,22 +1532,28 @@ def _own_repair_child(
     descriptor and every later step (identity check,
     ownership transfer) acts on that same open file
     description, so a mid-repair replacement cannot
-    redirect the chown. Only a root-owned single-link
-    regular file transfers; anything else is rejected
+    redirect the chown. Only the recorded capture file
+    transfers: a root-owned single-link regular file
+    whose dev/inode matches the finalize pin, compared
+    before any fchown. Anything else is rejected
     untouched. False when the child is missing,
     rejected, or unchownable. Never raises.
     """
     var fd = _own_open_child(dir_fd, name)
     if fd < Int32(0):
         return False
-    var ok = _own_child_ok(fd) and _own_fd_uid(fd) == 0
+    var ok = (
+        _own_child_ok(fd)
+        and _own_fd_uid(fd) == 0
+        and _own_fd_matches(fd, want_dev, want_ino)
+    )
     if ok:
         ok = _own_fchown(fd, uid, gid)
     _own_close_quiet(fd)
     return ok
 
 
-def _restore_sudo_ownership(output: String):
+def _restore_sudo_ownership(output: String, want: List[UInt64]):
     """Best-effort capture ownership repair; never raises.
 
     Under sudo the capture lands root-owned (mkdir
@@ -1525,14 +1564,18 @@ def _restore_sudo_ownership(output: String):
     to restore), hand the capture to the invoking
     user through retained descriptors: the directory
     opens with O_DIRECTORY|O_NOFOLLOW and must itself
-    be the root-created capture dir (a swapped-in
-    user-owned dir aborts the repair before anything
-    is touched); each expected flat file
+    be the recorded capture dir (dev/inode continuity
+    against the finalize pin, compared before any
+    fchown; a substituted dir aborts the repair before
+    anything is touched); each expected flat file
     (events.ndjson, session.json) opens through that
-    descriptor, proves a root-owned single-link
-    regular file, and transfers via fchown; anything
-    else in the directory is foreign and stays
-    root-owned. The directory transfers LAST, so the
+    descriptor, proves the recorded root-owned
+    single-link regular file, and transfers via
+    fchown; anything else in the directory is foreign
+    and stays root-owned. ``want`` is the writer's
+    [dir_dev, dir_ino, ev_dev, ev_ino, sess_dev,
+    sess_ino] pin; any other shape aborts touching
+    nothing. The directory transfers LAST, so the
     invoking user gains no write access until every
     child is already handed back and nothing can be
     planted mid-repair. Any failure warns once on
@@ -1545,6 +1588,20 @@ def _restore_sudo_ownership(output: String):
     if _geteuid_live() != 0:
         return
     var ok = True
+    if len(want) != 6:
+        ok = False
+        try:
+            write_stderr(
+                String("memveil record: warning: cannot restore ")
+                + String("capture ownership to ")
+                + String(uid)
+                + String(":")
+                + String(gid)
+                + String("\n")
+            )
+        except:
+            pass
+        return
     var dir_fd = _own_open_dir(output)
     if dir_fd < Int32(0):
         ok = False
@@ -1556,6 +1613,7 @@ def _restore_sudo_ownership(output: String):
                 ids[0] & UInt64(_OWN_S_IFMT)
                 == UInt64(_OWN_S_IFDIR)
                 and ids[1] == UInt64(0)
+                and _own_fd_matches(dir_fd, want[0], want[1])
             )
         except:
             dir_ok = False
@@ -1565,6 +1623,8 @@ def _restore_sudo_ownership(output: String):
                 String("events.ndjson"),
                 UInt32(uid),
                 UInt32(gid),
+                want[2],
+                want[3],
             ):
                 ok = False
             if not _own_repair_child(
@@ -1572,6 +1632,8 @@ def _restore_sudo_ownership(output: String):
                 String("session.json"),
                 UInt32(uid),
                 UInt32(gid),
+                want[4],
+                want[5],
             ):
                 ok = False
             if not _own_fchown(dir_fd, UInt32(uid), UInt32(gid)):
@@ -1715,8 +1777,9 @@ def run_collector_with[W: WriterSource](
     # receipt check and the load. An unreadable bridge
     # hashes to "": receipts cannot admit local-auto, and
     # provenance marks the identity uncheckable. The
-    # snapshot lives in this scope, so its fd covers the
-    # load inside the collector run below.
+    # keep-alive touch after the collector run below
+    # holds the fd through every open_session; scope
+    # alone does not (Mojo destroys after its last use).
     var snap = open_bridge_snapshot(bridge)
     var bridge_sha = snap.sha.copy()
     var bridge_v = LiveValue()
@@ -1930,11 +1993,19 @@ def run_collector_with[W: WriterSource](
     var signal = LiveSignalSource()
     var collector = Collector(cfg^)
     var out = collector.run(kernel, clock, signal, writer)
+    # Retain the bridge pin through every open_session
+    # inside the run above: this explicit last use keeps
+    # the fd open while the loader dlopens the alias.
+    _ = snap.fd
     if out.outcome == String("finalized"):
         # A published capture lands root-owned under sudo;
         # hand it to the invoking user. Warn-only: the
         # capture stands whatever ownership repair does.
-        _restore_sudo_ownership(opts.output)
+        # The writer's finalize pin proves continuity:
+        # only the recorded dir and files transfer.
+        _restore_sudo_ownership(
+            opts.output, writer.finalized_identity()
+        )
     return out^
 
 

@@ -209,6 +209,7 @@ struct EventWriter(Movable):
     var _ev_fd: Int32
     var _dir_ids: List[UInt64]
     var _ev_ids: List[UInt64]
+    var _sess_ids: List[UInt64]
     var _committed: Int
     var _max: Int
     var _finalized: Bool
@@ -350,6 +351,7 @@ struct EventWriter(Movable):
         self._ev_fd = ev_fd
         self._dir_ids = dir_ids^
         self._ev_ids = ev_ids^
+        self._sess_ids = List[UInt64]()
         self._committed = 0
         self._max = max_events_bytes
         self._finalized = False
@@ -362,6 +364,30 @@ struct EventWriter(Movable):
 
     def committed_len(self) -> Int:
         return self._committed
+
+    def finalized_identity(self) -> List[UInt64]:
+        """Dev/inode continuity for ownership repair, or empty.
+
+        Returns [dir_dev, dir_ino, ev_dev, ev_ino,
+        sess_dev, sess_ino] pinned at finalize, or an empty
+        list when never finalized (or the session pin is
+        missing). The repair compares every reopened
+        descriptor against these before any fchown.
+        """
+        var out = List[UInt64]()
+        if not self._finalized:
+            return out^
+        if len(self._dir_ids) != 3 or len(self._ev_ids) != 3:
+            return out^
+        if len(self._sess_ids) != 3:
+            return out^
+        out.append(self._dir_ids[0])
+        out.append(self._dir_ids[1])
+        out.append(self._ev_ids[0])
+        out.append(self._ev_ids[1])
+        out.append(self._sess_ids[0])
+        out.append(self._sess_ids[1])
+        return out^
 
     def _check_open(self) raises WriteError:
         if self._closed or self._finalized:
@@ -707,6 +733,39 @@ struct EventWriter(Movable):
                 msg = msg + String("; tmp left in place (unpinned)")
             self._close_all()
             return FinalOutcome("unfinalized", msg)
+        # Pin the published session file for ownership
+        # continuity: the repair must compare reopened
+        # descriptors against these identities before any
+        # fchown, so a substituted dir cannot transfer.
+        try:
+            var sess_name = _cstr("session.json")
+            var sess_fd = external_call["openat", Int32](
+                self._dir_fd,
+                Span(sess_name).unsafe_ptr(),
+                Int32(_O_NOFOLLOW),
+                UInt32(0),
+            )
+            if sess_fd < Int32(0):
+                self._close_all()
+                return FinalOutcome(
+                    "unfinalized", "session pin failed"
+                )
+            var sess_ids = _fstat_ids(sess_fd)
+            _close_quiet(sess_fd)
+            if have_pin and (
+                sess_ids[0] != tmp_ids[0]
+                or sess_ids[1] != tmp_ids[1]
+            ):
+                self._close_all()
+                return FinalOutcome(
+                    "unfinalized", "session replaced after rename"
+                )
+            self._sess_ids = sess_ids^
+        except:
+            self._close_all()
+            return FinalOutcome(
+                "unfinalized", "session pin failed"
+            )
         if Int(external_call["fsync", Int32](self._dir_fd)) != 0:
             var no = _errno_now()
             self._close_all()

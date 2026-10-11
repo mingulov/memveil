@@ -295,6 +295,15 @@ trait WriterSource:
     def committed_len(self) -> Int:
         ...
 
+    def finalized_identity(self) -> List[UInt64]:
+        """Dev/inode continuity pinned at finalize, or empty.
+
+        [dir_dev, dir_ino, ev_dev, ev_ino, sess_dev,
+        sess_ino] when a real capture finalized, else empty
+        (scripted writers carry no filesystem identity).
+        """
+        ...
+
 
 struct CollectorConfig(Copyable, Movable):
     """Everything run() needs beyond the sources."""
