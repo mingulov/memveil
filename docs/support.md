@@ -12,7 +12,7 @@ has passed its gates.
 | --- | --- | --- |
 | Bounce attempts/requested bytes | `swiotlb_bounced` attempts on an admitted profile; attempts are not successful DMA or actual copies | Report and replay `top` reduce captured attempts/counters without adding alternative measurements |
 | Default-pool capacity/used/high-water | Readable debugfs samples at start, on a best-effort 1 s cadence (cap 4,096; missed ticks skipped), and close; unreadable reads persist as unavailable, never failed runs | Pool reducers require matching generation/scope; samples are opportunistic reads with possible gaps, so they cannot establish sustained pressure alone |
-| Allocation occupancy, copy, sync, lifetimes | Qualified on `linux-x86_64-7.0.0-34-generic` via `--capability` with `--lc-object`/`--cp-object`; exact bindings refuse anything else | Offline reducers accept corresponding records; laboratory probes and scripted DMA comparisons do not qualify packaged lifecycle collection |
+| Allocation occupancy, copy, sync, lifetimes | Qualified on `linux-x86_64-7.0.0-34-generic` via `--capability` with `--lc-object`/`--cp-object`, or per host by a machine-local `local-auto` receipt from `memveil qualify`; exact bindings refuse anything else | Offline reducers accept corresponding records; laboratory probes and scripted DMA comparisons do not qualify packaged lifecycle collection |
 | Private/shared state and physical unions | No qualified shipping source | Offline region/baseline reducers and laboratory conversion probes; ordinary-Linux APIs do not prove confidential transitions |
 | Summary | `top --output DIR --object PATH` observes live under the same admission as `record`, retaining the capture while printing prefix summaries (provisional; the final answer always equals a replay of the retained capture); startup/collection refusals exit 3 | `top DIR` replays prefixes of a finished capture |
 | Joint observers/two instances | No current-candidate qualification | Historical experiments only; see [coexistence](coexistence.md) |
@@ -33,11 +33,28 @@ pressure finding is not evidence of absent pressure.
   bindings, not just the release string, and refuses when a
   time-namespace offset is present. A rebuilt BPF object can
   fail the shipped binding; building/packaging/offline replay does
-  not earn collection qualification. Without `--profile`, the
-  first profile passing full binding wins, else the first
-  covering profile records with partial diagnostics; an
-  explicit `--profile` that fails binding refuses, as do
-  requested extra channels without full narrow binding.
+  not earn collection qualification. A machine-local receipt
+  from `memveil qualify` admits a bound reference profile as
+  `local-auto`: the document needs covering identity,
+  grammar bindings matching the live host, and recorded
+  format text; the shipped reference is an unbound
+  inspection record and planning refuses it. A receipt
+  binds one kernel, one profile document, and the exact
+  artifacts and workload that produced it, and never
+  claims `validated`. Only manifest-listed documents are
+  visible: register a new reference file in the active
+  profiles directory's `manifest.txt` first. Without
+  `--profile`, the first validated profile passing full
+  binding wins, then the first reference profile whose
+  receipt verifies, else the first covering profile
+  records with partial diagnostics; an explicit `--profile` that fails binding
+  refuses, as do requested extra channels without full
+  narrow binding. `record` re-verifies the receipt at
+  every start; a kernel, object, or profile change loses
+  `local-auto` admission until the profile's recorded
+  bindings are refreshed and `qualify` re-proves the
+  host, with attempt-only recording falling back to
+  partial diagnostics.
 - x86-64-v2 baseline. The binary carries its runtime closure
   plus the native bridge in `lib/`. Offline verbs (help,
   version, doctor, report, replay `top`) need libc, libm,
@@ -65,6 +82,7 @@ pressure finding is not evidence of absent pressure.
 | report | read access to the capture directory       | exit 2 on invalid input               |
 | top    | replay: read access to the capture directory; live: root like `record` | replay: exit 2 on invalid input; live: exit 3 on refusal |
 | record | root: BPF load plus tracefs                | exit 3 naming profile/bridge/privilege|
+| qualify | root: smoke capture plus receipt write under the profiles dir | exit 3 with the exact cause |
 
 Captures are created mode 0600 (session, events) inside a mode
 0700 directory. Recording as root leaves a root-owned capture;
@@ -122,6 +140,9 @@ details live in `permissions.md`; surprises go to
   the run fails.
 - `doctor`: 0 attempt-trace available, 3 unavailable/unknown,
   2 usage/internal error, 1 stdout write failed.
+- `qualify`: 0 minted, 3 cannot-qualify (planning or smoke
+  refusal), 2 usage error, 1 internal failure (unreadable
+  objects, mint/publish failure).
 
 Exit codes never stand alone: every non-zero outcome carries a
 structured reason (stderr diagnostic, JSON field, or both).

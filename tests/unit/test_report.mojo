@@ -22,7 +22,7 @@ from memveil.cli.report import (
 )
 from memveil.jsonscan import Scanner
 from memveil.model.metric import Metric
-from memveil.model.report import Report
+from memveil.model.report import Report, ReportCap
 from memveil.model.session import DeviceEntry
 from memveil.render.render import RenderError, render
 from memveil.render.text import escape_text, render_text
@@ -181,6 +181,64 @@ def test_render_text_attempts() raises:
     var rep = analyze(String("tests/fixtures/attempts"))
     var want = Path("tests/golden/report-attempts.txt").read_text()
     assert_equal(render_text(rep), want)
+
+
+def test_render_capabilities_matrix() raises:
+    var rep = Report()
+    var graded = ReportCap()
+    graded.name = String("bounce_attempts")
+    graded.status = String("partial")
+    graded.has_grade = True
+    graded.grade = String("local-auto")
+    graded.reason = String("capture ok")
+    rep.caps.append(graded^)
+    var bare = ReportCap()
+    bare.name = String("mapping_lifecycle")
+    bare.status = String("unavailable")
+    bare.reason = String("no source")
+    rep.caps.append(bare^)
+    var text = render_text(rep)
+    assert_true(
+        text.find(
+            String(
+                "capabilities:\n"
+                "  bounce_attempts: partial [local-auto] - capture ok\n"
+                "  mapping_lifecycle: unavailable - no source\n"
+            )
+        )
+        != -1
+    )
+    var md = render_markdown(rep)
+    assert_true(
+        md.find(
+            String(
+                "| bounce\\_attempts | partial | local-auto"
+                " | capture ok |\n"
+                "| mapping\\_lifecycle | unavailable | none"
+                " | no source |\n"
+            )
+        )
+        != -1
+    )
+    var js = render_json(rep)
+    assert_true(
+        js.find(
+            String(
+                '"bounce_attempts": {"status": "partial",'
+                ' "grade": "local-auto", "reason": "capture ok"}'
+            )
+        )
+        != -1
+    )
+    assert_true(
+        js.find(
+            String(
+                '"mapping_lifecycle": {"status": "unavailable",'
+                ' "grade": null, "reason": "no source"}'
+            )
+        )
+        != -1
+    )
 
 
 def test_render_text_escape() raises:
@@ -383,6 +441,7 @@ def run() raises -> Int:
     suite.test[test_escape_json_roundtrip]()
     suite.test[test_escape_markdown]()
     suite.test[test_render_text_attempts]()
+    suite.test[test_render_capabilities_matrix]()
     suite.test[test_render_text_escape]()
     suite.test[test_render_markdown_attempts]()
     suite.test[test_render_markdown_escape]()

@@ -1,0 +1,38 @@
+{
+  "schema_version": "0.1.0",
+  "kind": "memveil-qualification-receipt",
+  "profile_id": "ref-bindable",
+  "grade": "local-auto",
+  "created_ns": "123456789",
+  "kernel": {
+    "arch": "x86_64",
+    "release": "7.0.0-test"
+  },
+  "bindings": {
+    "config": "sha256:a5af36b05630b51bb596bc68f955ab97bb8802e857cd2fc1de05c0628e398fbb",
+    "config_src": "gz",
+    "btf": "sha256:785b0751fc2c53dc14a4ce3d800e69ef9ce1009eb327ccf458afe09c242c26c9",
+    "format": "sha256:039a1a6bc665b91c4f846f735f9b2f9ec89d106d7d63a5e9d0b35e20213e80fb",
+    "image": "sha256:11a663ae36f0cdbecf94b8b7319503bbd0fffc2c3ba02c01cf81600d423dd251",
+    "image_bid": "0102030405060708090a0b0c0d0e0f1011121314"
+  },
+  "capabilities": {
+    "attempt-trace": {
+      "status": "qualified",
+      "detail": "layout match; smoke ok"
+    }
+  },
+  "artifacts": {
+    "memveil": "0.1.0",
+    "bridge": "sha256:5e2e29c1dbc50b9041b2c1ad803fe2e71f1231c1f9a179aa29e72ebcb0b8d270",
+    "objects": {
+      "attempt": "sha256:7549adfdf9837cefd566373a0efeee8550abdb4cd678b6fa15fe11f3f4785a37"
+    }
+  },
+  "workload": {
+    "kind": "smoke",
+    "duration_s": "3",
+    "traffic_required": false,
+    "note": "smoke"
+  }
+}

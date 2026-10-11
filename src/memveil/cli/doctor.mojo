@@ -41,7 +41,7 @@ from memveil.platform.profiles import (
     Profile,
     ProfileDecision,
     load_profiles,
-    select_profile,
+    select_profile_bound,
 )
 from memveil.platform.reader import (
     EvidenceError,
@@ -54,6 +54,7 @@ from memveil.render.json import escape_json
 
 comptime EXIT_UNAVAILABLE = 3
 comptime DOCTOR_SCHEMA_VERSION = "0.1.0"
+comptime _ZLIB = "libz.so.1"
 
 
 struct DoctorReport(Copyable):
@@ -100,7 +101,7 @@ struct DoctorReport(Copyable):
 def doctor_usage() -> String:
     """Usage text for the doctor verb."""
     return (
-        "usage: memveil doctor [--json]\n"
+        "usage: memveil doctor [--json] [--profiles-dir DIR]\n"
         "\n"
         "Inspect the host passively (no BPF load, no system change)\n"
         "and print one environment and capability report on stdout.\n"
@@ -262,7 +263,8 @@ def render_doctor_json(rep: DoctorReport) raises -> String:
             out += ", "
         out += '{"id": ' + escape_json(rep.caps[i].id)
         out += ', "status": ' + escape_json(rep.caps[i].status)
-        out += ', "reason": ' + escape_json(rep.caps[i].reason) + "}"
+        out += ', "reason": ' + escape_json(rep.caps[i].reason)
+        out += ', "remedy": ' + escape_json(rep.caps[i].remedy) + "}"
     out += "],\n"
     out += '  "privilege": {\n'
     out += '    "euid": ' + String(rep.euid) + ",\n"
@@ -336,6 +338,12 @@ def render_doctor_text(rep: DoctorReport) raises -> String:
             + sanitize_diagnostic(rep.caps[i].reason)
             + "\n"
         )
+        if rep.caps[i].remedy != String(""):
+            out += (
+                "    fix: "
+                + sanitize_diagnostic(rep.caps[i].remedy)
+                + "\n"
+            )
     out += "privilege: euid " + String(rep.euid)
     if len(rep.denied) != 0:
         out += ", denied:"
@@ -367,7 +375,9 @@ def run_doctor_with(
         profiles = load_profiles(profiles_dir)
     except e:
         return _doctor_failed("cannot load profiles: " + String(e))
-    var decision = select_profile(env.kernel, profiles^)
+    var decision = select_profile_bound(
+        env.kernel, profiles^, root, String(_ZLIB), profiles_dir
+    )
     var report = discover_capabilities(reader, decision)
     var drep = build_doctor_report(reader, env, decision^, report^)
     var ready = drep.verdict == "ready"
@@ -388,8 +398,9 @@ def run_doctor(args: List[String]) raises -> Int:
     """Run the doctor verb; return the process exit code.
 
     args excludes the program name and the doctor word. Only
-    ``--json`` is accepted; anything else is a usage error.
-    Profiles resolve from the kernel-resolved binary path,
+    ``--json`` and ``--profiles-dir DIR`` are accepted;
+    anything else is a usage error. Without the flag,
+    profiles resolve from the kernel-resolved binary path,
     never from argv[0] or the working directory.
     """
     var i = 0
@@ -403,19 +414,27 @@ def run_doctor(args: List[String]) raises -> Int:
             return EXIT_OK
         i += 1
     var as_json = False
+    var profiles_dir = String("")
+    var has_profiles_dir = False
     i = 0
     while i < len(args):
         var tok = args[i]
         if tok == "--json":
             as_json = True
             i += 1
+        elif tok == "--profiles-dir":
+            if i + 1 >= len(args) or args[i + 1] == "":
+                return _doctor_failed("--profiles-dir needs a value")
+            profiles_dir = args[i + 1]
+            has_profiles_dir = True
+            i += 2
         else:
             return _doctor_failed("unknown option: " + tok)
-    var profiles_dir: String
-    try:
-        profiles_dir = resolve_profiles_dir()
-    except e:
-        return _doctor_failed(
-            "cannot resolve profiles location: " + e.message
-        )
+    if not has_profiles_dir:
+        try:
+            profiles_dir = resolve_profiles_dir()
+        except e:
+            return _doctor_failed(
+                "cannot resolve profiles location: " + e.message
+            )
     return run_doctor_with(String(""), profiles_dir, as_json)

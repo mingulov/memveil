@@ -8,7 +8,8 @@ from the copy channel. This bundle runs from any directory: no
 compiler, Pixi, network, or source checkout needed. The
 [capability table](support.md#capabilities-by-mode) distinguishes the
 shipping collector, offline reducers and laboratory probes.
-Lifecycle/copy collection is qualified on one narrow profile; a full
+Lifecycle/copy collection is qualified on one narrow profile or a
+machine-local receipt from step 3; a full
 confidential release is not yet qualified. The host supplies libc,
 libm, libdl, and the dynamic loader for offline use, plus libelf
 and libz for recording; see the support envelope for the exact
@@ -34,12 +35,75 @@ per-capability reasons. The narrow `7.0.0-34-generic` x86-64 profile has
 VM-gate attempt, lifecycle, and copy evidence; exact
 config/BTF/event-format/object bindings must also hold. A rebuilt
 object can fail the binding even on that kernel.
+Each unavailable capability carries a `fix:` line naming the
+next action (`--json` renders the same report as JSON).
 Passive availability is not actual attachment or qualification. A `denied
 (privilege)` hook means: re-run under `sudo` for collection, or
-stay unprivileged and replay the shipped example (step 5); step 4
+stay unprivileged and replay the shipped example (step 6); step 5
 needs a capture of your own.
 
-## 3. Record one capture (privileged)
+## 3. Qualify this machine (privileged, once per kernel and objects)
+
+When `doctor` selects the reference profile with `unknown` or
+`unavailable` capabilities, prove this host directly.
+Qualification needs a reference profile *bound* to this
+host: covering identity, an identity note whose
+config/BTF/format/image bindings match the live machine,
+and the recorded hook format text. The shipped reference
+document is an unbound inspection record, so automatic
+selection refuses it with the exact cause:
+
+    memveil qualify: profile linux-x86_64-7.0-reference bindings unparseable: narrow note: want 8 or 12 fields
+
+Preparing the bound document is a one-per-kernel task
+done from a source checkout; everything below runs from
+the bundle and selects that document explicitly.
+Register it once in the active profiles directory's
+`manifest.txt` (one file name per line, no blank lines
+or duplicates), including under a `--profiles-dir`
+override: only manifest-listed documents are visible to
+`doctor` and automatic `record`, so an unlisted receipt
+stays invisible:
+
+    echo my-host.json >> "$PWD/profiles/manifest.txt"
+    export LMB_NATIVE_LIB="$PWD/lib/libbpf_mojo.so.1"
+    sudo -E ./bin/memveil qualify --output /tmp/q1 \
+        --object "$PWD/bpf/swiotlb_attempt.bpf.o" \
+        --profile "$PWD/profiles/my-host.json"
+
+Qualification runs a 3-second smoke capture (attach, poll,
+detach; no traffic required) and, when the channels prove
+out, publishes a machine-local `local-auto` receipt.
+Expected: `qualify: local-auto <profile> caps=attempt-trace
+receipt=...`, exit 0. The receipt lands under
+`profiles/receipts/` beside the binary, or under
+`--profiles-dir DIR/receipts/` when given; `record` and
+`doctor` must then use the same `--profiles-dir`. A
+receipt never claims `validated`: it binds one kernel,
+one profile document, and the exact artifacts and
+workload that produced it. Re-run `doctor`: ready,
+exit 0. Exit 3 names the exact cause (planning or smoke
+refusal); exit 2 is a usage error; exit 1 is an internal
+failure (unreadable objects, mint/publish failure).
+
+Extra channels qualify the same way, naming their objects:
+
+    sudo -E ./bin/memveil qualify --output /tmp/q3 \
+        --object "$PWD/bpf/swiotlb_attempt.bpf.o" \
+        --capability attempt-trace,mapping-lifecycle,copy-actual \
+        --lc-object "$PWD/bpf/swiotlb_lifecycle.bpf.o" \
+        --cp-object "$PWD/bpf/swiotlb_copy.bpf.o" \
+        --profile "$PWD/profiles/my-host.json"
+
+After any kernel, object, or profile change the receipt
+goes stale: refresh the profile's recorded bindings from
+the new host first, then re-run `qualify` (`doctor` says
+exactly which binding drifted). `record` re-verifies the
+receipt at every start; a stale receipt loses `local-auto`
+admission, with attempt-only recording falling back to
+partial diagnostics.
+
+## 4. Record one capture (privileged)
 
 Recording needs root (BPF load plus tracefs), the bundled BPF
 object, and the native bridge:
@@ -65,7 +129,10 @@ opt-in per run:
         --cp-object "$PWD/bpf/swiotlb_copy.bpf.o" --duration 10
 
 Anything but the exact bound kernel and objects refuses with
-exit 3 instead of recording an unverified channel.
+exit 3 instead of recording an unverified channel. On a
+qualified host the receipt admits the channel as `local-auto`;
+a stale receipt loses that admission until step 3 is re-run,
+with attempt-only recording falling back to partial.
 
 Captures are root-owned (mode 0700/0600), so hand yours to your
 user before the unprivileged replay below:
@@ -74,7 +141,7 @@ user before the unprivileged replay below:
     chmod 700 ~/cap1 && chmod 600 ~/cap1/*
 
 For the opt-in capture, hand off `/tmp/cap3` the same way and
-replay `~/cap3` with the step 4 commands:
+replay `~/cap3` with the step 5 commands:
 
     sudo cp -r /tmp/cap3 ~/cap3 && sudo chown -R $USER ~/cap3
     chmod 700 ~/cap3 && chmod 600 ~/cap3/*
@@ -84,7 +151,7 @@ counter snapshots: a valid-empty capture, visibly different
 from an unavailable one. See `examples/real-capture/README.md`
 for a capture with 30 real events.
 
-## 4. Replay offline (unprivileged)
+## 5. Replay offline (unprivileged)
 
     ./bin/memveil report --format text ~/cap1
     ./bin/memveil report --format json ~/cap1
@@ -105,7 +172,7 @@ A torn final record exits 2; rerun with `--allow-partial` to
 drop the torn tail and report the loss instead (exit 4). See
 `troubleshooting.md` for both recoveries.
 
-## 5. Worked example
+## 6. Worked example
 
     ./bin/memveil report --format text examples/real-capture
 
@@ -128,9 +195,10 @@ best-effort 1 s cadence (cap 4,096), and close when debugfs
 is readable. Opportunistic samples with possible gaps cannot
 diagnose sustained pressure alone; no pressure finding does
 not mean no pressure. Lifecycle and executed copies are
-qualified on the one admitted profile only; sharing transitions and
+qualified on the one admitted profile or a machine-local
+receipt only; sharing transitions and
 physical unions are unavailable, never inferred. One narrow bound
-profile, with no broad kernel qualification.
+profile plus per-host receipts, with no broad kernel qualification.
 Captures are written mode
 0600. There is no configuration file, daemon, or network
 access. Replay needs nothing live (see `performance.md` for

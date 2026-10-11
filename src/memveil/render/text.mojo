@@ -138,6 +138,20 @@ def render_text(rep: Report, device_filter: String = "") raises -> String:
         out += " identity="
         out += escape_text(d.identity_status)
         out += "\n"
+    out += "capabilities:\n"
+    for i in range(len(rep.caps)):
+        var c = rep.caps[i].copy()
+        out += "  "
+        out += escape_text(c.name)
+        out += ": "
+        out += escape_text(c.status)
+        if c.has_grade:
+            out += " ["
+            out += escape_text(c.grade)
+            out += "]"
+        out += " - "
+        out += escape_text(c.reason)
+        out += "\n"
     out += "quality:\n"
     out += _channel_block(String("detail"), rep.q_detail)
     out += _channel_block(String("aggregate"), rep.q_aggregate)

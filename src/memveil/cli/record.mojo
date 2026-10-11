@@ -75,7 +75,10 @@ from memveil.platform.profiles import (
     ProfileHook,
     load_profiles,
     parse_profile_bytes,
+    select_attempt_hook,
     select_profile,
+    tracing_gap,
+    verify_qualification_receipt,
 )
 from memveil.platform.reader import (
     EvidenceReader,
@@ -111,6 +114,8 @@ struct RecordOptions:
     var has_bridge: Bool
     var profile: String
     var has_profile: Bool
+    var profiles_dir: String
+    var has_profiles_dir: Bool
     var lc_object: String
     var cp_object: String
     var capabilities: String
@@ -124,6 +129,8 @@ struct RecordOptions:
         self.has_bridge = False
         self.profile = String("")
         self.has_profile = False
+        self.profiles_dir = String("")
+        self.has_profiles_dir = False
         self.lc_object = String("")
         self.cp_object = String("")
         self.capabilities = String("")
@@ -135,7 +142,8 @@ def record_usage() -> String:
         "usage: memveil record --output DIR --object PATH\n"
         "       [--duration SEC] [--max-events-bytes N]\n"
         "       [--bridge PATH] [--profile ID|PATH]\n"
-        "       [--capability IDS] [--lc-object PATH] [--cp-object PATH]\n"
+        "       [--profiles-dir DIR] [--capability IDS]\n"
+        "       [--lc-object PATH] [--cp-object PATH]\n"
         "\n"
         "Capture swiotlb bounce attempts into DIR. SEC defaults\n"
         "to 60; N defaults to 1073741824 (1 GiB) and must lie\n"
@@ -234,6 +242,14 @@ def parse_record_args(args: List[String]) raises CliError -> RecordOptions:
             opts.profile = args[i + 1]
             opts.has_profile = True
             i += 2
+        elif tok == "--profiles-dir":
+            if i + 1 >= len(args):
+                raise CliError("--profiles-dir needs a value")
+            if args[i + 1] == "":
+                raise CliError("--profiles-dir needs a value")
+            opts.profiles_dir = args[i + 1]
+            opts.has_profiles_dir = True
+            i += 2
         elif tok == "--lc-object":
             if i + 1 >= len(args):
                 raise CliError("--lc-object needs a value")
@@ -270,7 +286,7 @@ struct ScanDecision(Copyable):
     """One admission decision: mode, hook, identity, bytes.
 
     ``ok`` False carries an exit-3 ``refusal``; otherwise
-    ``kind`` is validated, candidate, or partial, ``hook``
+    ``kind`` is validated, local-auto, candidate, or partial, ``hook``
     is the selected tracepoint hook with a verified live
     layout, and ``elf`` is the verified object bytes (read
     once, hashed and handed to the session unchanged).
@@ -346,7 +362,9 @@ def _refuse_scan(reason: String) -> ScanDecision:
     return out^
 
 
-struct _CapsOut(Copyable):
+struct CapsOut(Copyable):
+    """Parsed capability request: caps in order, or err."""
+
     var ok: Bool
     var caps: List[String]
     var err: String
@@ -378,14 +396,14 @@ def _split_caps(text: String) -> List[String]:
     return out^
 
 
-def _parse_caps(want: String) -> _CapsOut:
+def parse_requested_caps(want: String) -> CapsOut:
     """Parse requested capabilities in order, deduplicated.
 
     Empty means attempt-trace alone. Unknown ids, empty
     items, and requests without attempt-trace refuse: the
     attempt channel is the mandatory base channel.
     """
-    var out = _CapsOut()
+    var out = CapsOut()
     var items = List[String]()
     if want == String(""):
         items.append(String(_ATTEMPT_CAP))
@@ -482,96 +500,6 @@ def _cp_progs() -> List[_ProgWant]:
     return out^
 
 
-struct _TraceWant(Copyable):
-    var name: String
-    var function: String
-    var attach: String
-    var signature: String
-
-    def __init__(
-        out self, name: String, function: String, attach: String,
-        signature: String,
-    ):
-        self.name = name
-        self.function = function
-        self.attach = attach
-        self.signature = signature
-
-
-def _lc_trace() -> List[_TraceWant]:
-    """Frozen lifecycle tracing hooks; mirrors the hook freeze."""
-    var out = List[_TraceWant]()
-    out.append(
-        _TraceWant(
-            String("fexit:swiotlb_tbl_map_single"),
-            String("swiotlb_tbl_map_single"),
-            String("fexit"),
-            String(
-                "phys_addr_t swiotlb_tbl_map_single(struct device *dev,"
-                " phys_addr_t orig_addr, size_t mapping_size,"
-                " unsigned int alloc_align_mask,"
-                " enum dma_data_direction dir, unsigned long attrs)"
-            ),
-        )
-    )
-    out.append(
-        _TraceWant(
-            String("fentry:__swiotlb_tbl_unmap_single"),
-            String("__swiotlb_tbl_unmap_single"),
-            String("fentry"),
-            String(
-                "void __swiotlb_tbl_unmap_single(struct device *dev,"
-                " phys_addr_t tlb_addr, size_t mapping_size,"
-                " enum dma_data_direction dir, unsigned long attrs,"
-                " struct io_tlb_pool *pool)"
-            ),
-        )
-    )
-    return out^
-
-
-def _cp_trace() -> List[_TraceWant]:
-    """Frozen copy tracing hooks; mirrors the hook freeze."""
-    var out = List[_TraceWant]()
-    out.append(
-        _TraceWant(
-            String("fentry:__swiotlb_sync_single_for_device"),
-            String("__swiotlb_sync_single_for_device"),
-            String("fentry"),
-            String(
-                "void __swiotlb_sync_single_for_device(struct device *dev,"
-                " phys_addr_t tlb_addr, size_t size,"
-                " enum dma_data_direction dir, struct io_tlb_pool *pool)"
-            ),
-        )
-    )
-    out.append(
-        _TraceWant(
-            String("fentry:__swiotlb_sync_single_for_cpu"),
-            String("__swiotlb_sync_single_for_cpu"),
-            String("fentry"),
-            String(
-                "void __swiotlb_sync_single_for_cpu(struct device *dev,"
-                " phys_addr_t tlb_addr, size_t size,"
-                " enum dma_data_direction dir, struct io_tlb_pool *pool)"
-            ),
-        )
-    )
-    out.append(
-        _TraceWant(
-            String("fentry:swiotlb_bounce"),
-            String("swiotlb_bounce"),
-            String("fentry"),
-            String(
-                "void swiotlb_bounce(struct device *dev,"
-                " phys_addr_t tlb_addr, size_t size,"
-                " enum dma_data_direction dir, struct io_tlb_pool *mem)"
-            ),
-        )
-    )
-    return out^
-
-
 struct _ExtraOut(Copyable):
     var ok: Bool
     var refusal: String
@@ -633,53 +561,6 @@ def _verify_extra_object(
     out.elf = elf.copy()
     out.sha = sha256_hex(Span(elf))
     out.ring = maps.ring_bytes
-    return out^
-
-
-struct _HookOut(Copyable):
-    var ok: Bool
-    var refusal: String
-    var hook: ProfileHook
-
-    def __init__(out self):
-        self.ok = False
-        self.refusal = String("")
-        self.hook = ProfileHook()
-
-
-def _select_hook(profile: Profile) -> _HookOut:
-    """Select the attempt-trace hook of one profile.
-
-    The hook named by the attempt-trace capability wins;
-    otherwise the first tracepoint hook. Anything else
-    refuses: capture needs exactly one tracepoint site.
-    """
-    var out = _HookOut()
-    var want = String("")
-    for i in range(len(profile.caps)):
-        if profile.caps[i].id == _ATTEMPT_CAP:
-            if len(profile.caps[i].hooks) > 0:
-                want = profile.caps[i].hooks[0]
-            break
-    if want != String(""):
-        for i in range(len(profile.hooks)):
-            if profile.hooks[i].name == want:
-                if profile.hooks[i].kind != String("tracepoint"):
-                    out.refusal = String(
-                        "attempt-trace hook is not a tracepoint"
-                    )
-                    return out^
-                out.ok = True
-                out.hook = profile.hooks[i].copy()
-                return out^
-        out.refusal = String("attempt-trace hook missing")
-        return out^
-    for i in range(len(profile.hooks)):
-        if profile.hooks[i].kind == String("tracepoint"):
-            out.ok = True
-            out.hook = profile.hooks[i].copy()
-            return out^
-    out.refusal = String("no tracepoint hook")
     return out^
 
 
@@ -849,6 +730,49 @@ def _covers(kernel: KernelInfo, doc: Profile) -> Bool:
     return select_profile(kernel, one^).has_profile
 
 
+def _receipt_covers(
+    doc: Profile,
+    kernel: KernelInfo,
+    want: List[String],
+    pdir: String,
+) -> Bool:
+    """True when a verifying receipt covers every wanted cap.
+
+    The receipt at <pdir>/receipts/<id>.json must verify
+    against the doc and the live kernel and qualify each
+    requested capability. An empty pdir, a missing file,
+    or any verify failure yields False: scan falls
+    through to the next candidate. Never raises.
+    """
+    if pdir == String(""):
+        return False
+    var path = (
+        pdir
+        + String("/receipts/")
+        + doc.profile_id
+        + String(".json")
+    )
+    var raw = List[UInt8]()
+    try:
+        raw = read_host_file(
+            path, String("receipt"), MAX_PROFILE_DOC_BYTES
+        )
+    except:
+        return False
+    var v = verify_qualification_receipt(Span(raw), doc, kernel)
+    if not v.ok:
+        return False
+    for i in range(len(want)):
+        var found = False
+        for j in range(len(v.caps)):
+            if v.caps[j] == want[i]:
+                found = True
+                break
+        if not found:
+            return False
+    return True
+
+
 def _read_format(
     root: String, hook: ProfileHook, mut raw: List[UInt8]
 ) -> String:
@@ -873,7 +797,7 @@ def _admit_hook(
     mut evt: String,
 ) -> String:
     """Select, read, and verify one doc's hook; "" when admitted."""
-    var sel = _select_hook(doc)
+    var sel = select_attempt_hook(doc)
     if not sel.ok:
         return sel.refusal.copy()
     hook = sel.hook.copy()
@@ -918,92 +842,6 @@ def _selection_gap(doc: Profile, caps: List[String]) -> String:
     return String("")
 
 
-def _tracing_gap(doc: Profile, caps: List[String]) -> String:
-    """First reason the doc's tracing bindings fail, else "".
-
-    Every hook named by a requested extra capability must
-    be a tracing hook whose (function, attach) pair is a
-    frozen member of that capability with the exact frozen
-    signature text, and every frozen member must be named:
-    no vacuous, partial, or substituted bindings. Live
-    signature identity rides the whole-BTF binding checked
-    later; this gate pins the document side exactly.
-    """
-    for i in range(len(caps)):
-        if caps[i] == String(_ATTEMPT_CAP):
-            continue
-        var wants = _cp_trace()
-        if caps[i] == String(_LIFECYCLE_CAP):
-            wants = _lc_trace()
-        var named = List[String]()
-        for j in range(len(doc.caps)):
-            if doc.caps[j].id == caps[i]:
-                named = doc.caps[j].hooks.copy()
-                break
-        var seen = List[Bool]()
-        for j in range(len(wants)):
-            seen.append(False)
-        for j in range(len(named)):
-            var hook = ProfileHook()
-            var found = False
-            for k in range(len(doc.hooks)):
-                if doc.hooks[k].name == named[j]:
-                    hook = doc.hooks[k].copy()
-                    found = True
-                    break
-            if not found:
-                return (
-                    String("capability ")
-                    + caps[i]
-                    + String(" names unknown hook ")
-                    + named[j]
-                )
-            if hook.kind != String("tracing"):
-                return (
-                    String("capability ")
-                    + caps[i]
-                    + String(" hook ")
-                    + named[j]
-                    + String(" is not a tracing hook")
-                )
-            var member = -1
-            for k in range(len(wants)):
-                if (
-                    wants[k].function == hook.function
-                    and wants[k].attach == hook.attach
-                ):
-                    member = k
-                    break
-            if member < 0:
-                return (
-                    String("capability ")
-                    + caps[i]
-                    + String(" hook ")
-                    + named[j]
-                    + String(" binds no frozen ")
-                    + caps[i]
-                    + String(" hook")
-                )
-            if hook.signature != wants[member].signature:
-                return (
-                    String("capability ")
-                    + caps[i]
-                    + String(" hook ")
-                    + named[j]
-                    + String(" signature mismatch")
-                )
-            seen[member] = True
-        for j in range(len(wants)):
-            if not seen[j]:
-                return (
-                    String("capability ")
-                    + caps[i]
-                    + String(" missing frozen hook ")
-                    + wants[j].name
-                )
-    return String("")
-
-
 def decide_record(
     root: String,
     kernel: KernelInfo,
@@ -1014,12 +852,16 @@ def decide_record(
     lc_object: String,
     cp_object: String,
     want_caps: String,
+    profiles_dir: String,
 ) -> ScanDecision:
     """Decide admission: scan, object statics, hook, binding.
 
     Explicit mode resolves one doc (file first, then id)
     and enforces full binding when bindings exist. Scan
-    mode tries each covering validated doc in order and
+    mode tries each covering validated doc in order, then
+    each covering reference doc whose receipt under
+    <profiles_dir>/receipts/ verifies and covers the
+    requested capabilities ("\" disables receipts), and
     falls back to the first covering doc as partial.
     Static object failures refuse everywhere; identity
     failures fall through in scan mode only. Requested
@@ -1028,7 +870,7 @@ def decide_record(
     never fall back to partial.
     """
     var out = ScanDecision()
-    var ask = _parse_caps(want_caps)
+    var ask = parse_requested_caps(want_caps)
     if not ask.ok:
         return _refuse_scan(ask.err.copy())
     var want_lc = False
@@ -1139,12 +981,23 @@ def decide_record(
         if not cp.ok:
             return _refuse_scan(cp.refusal.copy())
     var order = List[Int]()
+    var order_receipt = List[Bool]()
     if want_explicit:
         order.append(0)
+        order_receipt.append(False)
     else:
         for i in range(len(candidates)):
             if candidates[i].status == String("validated"):
                 order.append(i)
+                order_receipt.append(False)
+        for i in range(len(candidates)):
+            if candidates[i].status == String("validated"):
+                continue
+            if _receipt_covers(
+                candidates[i], kernel, ask.caps, profiles_dir
+            ):
+                order.append(i)
+                order_receipt.append(True)
     var skip_reason = String("")
     for oi in range(len(order)):
         var doc = candidates[order[oi]].copy()
@@ -1154,7 +1007,7 @@ def decide_record(
                 return _refuse_scan(gap)
             skip_reason = gap.copy()
             continue
-        var tgap = _tracing_gap(doc, ask.caps)
+        var tgap = tracing_gap(doc, ask.caps)
         if tgap != String(""):
             if want_explicit:
                 return _refuse_scan(tgap)
@@ -1229,6 +1082,13 @@ def decide_record(
                 String("validated ")
                 + doc.profile_id.copy()
                 + String(": bindings hold")
+            )
+        elif order_receipt[oi]:
+            out.kind = String("local-auto")
+            out.reason = (
+                String("local-auto ")
+                + doc.profile_id.copy()
+                + String(": receipt verified, bindings hold")
             )
         else:
             out.kind = String("candidate")
@@ -1319,7 +1179,7 @@ def _record_misused(detail: String) raises -> Int:
     return EXIT_INVALID
 
 
-def _resolve_bridge(bridge: String, has_bridge: Bool) -> String:
+def resolve_bridge(bridge: String, has_bridge: Bool) -> String:
     """Explicit --bridge, else LMB_NATIVE_LIB, else ""."""
     if has_bridge:
         return bridge
@@ -1426,7 +1286,7 @@ def run_collector_with[W: WriterSource](
             EXIT_REFUSAL, String(""), String(""),
             String(t"budget {opts.max_events_bytes} above 4294967296"),
         )
-    var bridge = _resolve_bridge(opts.bridge, opts.has_bridge)
+    var bridge = resolve_bridge(opts.bridge, opts.has_bridge)
     if bridge == String(""):
         return RunResult(
             EXIT_REFUSAL, String(""), String(""),
@@ -1466,6 +1326,7 @@ def run_collector_with[W: WriterSource](
         opts.lc_object,
         opts.cp_object,
         opts.capabilities,
+        profiles_dir,
     )
     if not decision.ok:
         return RunResult(
@@ -1488,6 +1349,7 @@ def run_collector_with[W: WriterSource](
     cfg.max_events_bytes = opts.max_events_bytes
     cfg.output = opts.output
     cfg.profile_id = decision.profile.profile_id.copy()
+    cfg.grade = decision.kind.copy()
     # Live captures sample the default SWIOTLB pool counters at
     # start, periodically, and close; unreadable counters stay
     # in the samples as unavailable halves, never as failed runs.
@@ -1691,11 +1553,12 @@ def run_record(args: List[String]) raises -> Int:
         opts = parse_record_args(args)
     except e:
         return _record_misused(e.message)
-    var profiles_dir: String
-    try:
-        profiles_dir = resolve_profiles_dir()
-    except e:
-        return _record_failed(
-            String("cannot resolve profiles location: ") + e.message
-        )
+    var profiles_dir = opts.profiles_dir
+    if not opts.has_profiles_dir:
+        try:
+            profiles_dir = resolve_profiles_dir()
+        except e:
+            return _record_failed(
+                String("cannot resolve profiles location: ") + e.message
+            )
     return run_record_with(String(""), profiles_dir, opts^)

@@ -509,6 +509,8 @@ def _encode_capability(cap: Capability) raises EncodeError -> String:
         parts.append(
             _member(String("profile_id"), _jstr(cap.profile_id))
         )
+    if cap.has_grade:
+        parts.append(_member(String("grade"), _jstr(cap.grade)))
     return _jobj(parts^)
 
 

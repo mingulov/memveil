@@ -22,6 +22,7 @@ from memveil.platform.profiles import (
 from memveil.platform.reader import fs_type_name, read_host_file
 
 comptime _OK = "tests/fixtures/scan/ok"
+comptime _MOVED = "tests/fixtures/scan/moved"
 comptime _SKEW = "tests/fixtures/scan/skew"
 comptime _NOCONFIG = "tests/fixtures/scan/noconfig"
 comptime _DIFFCONFIG = "tests/fixtures/scan/diffconfig"
@@ -68,6 +69,7 @@ def test_scan_validated_wins() raises:
         String(""),
         String(""),
         String(""),
+        String(""),
     )
     assert_true(d.ok)
     assert_equal(d.kind, String("validated"))
@@ -84,6 +86,7 @@ def test_scan_bound_measurements() raises:
     var d = decide_record(
         String(_OK), _kernel(), _profiles(), String(""), False,
         String(_ELF_OK),
+        String(""),
         String(""),
         String(""),
         String(""),
@@ -113,6 +116,7 @@ def test_scan_partial_unmeasured() raises:
         String(""),
         False,
         String(_ELF_OK),
+        String(""),
         String(""),
         String(""),
         String(""),
@@ -201,6 +205,7 @@ def test_scan_skips_mismatched() raises:
         String(""),
         String(""),
         String(""),
+        String(""),
     )
     assert_true(d.ok)
     assert_equal(d.kind, String("validated"))
@@ -215,6 +220,7 @@ def test_scan_uncheckable_partial() raises:
         String(""),
         False,
         String(_ELF_OK),
+        String(""),
         String(""),
         String(""),
         String(""),
@@ -238,6 +244,7 @@ def test_scan_diffconfig_partial() raises:
         String(""),
         String(""),
         String(""),
+        String(""),
     )
     assert_true(d.ok)
     assert_equal(d.kind, String("partial"))
@@ -254,6 +261,7 @@ def test_scan_skew_partial() raises:
         String(""),
         String(""),
         String(""),
+        String(""),
     )
     assert_true(d.ok)
     assert_equal(d.kind, String("partial"))
@@ -267,6 +275,7 @@ def test_scan_explicit_candidate() raises:
         String(_PROFILES) + String("/ref.json"),
         True,
         String(_ELF_OK),
+        String(""),
         String(""),
         String(""),
         String(""),
@@ -313,6 +322,7 @@ def test_scan_saturation_mechanism() raises:
         String(""),
         String(""),
         String(""),
+        String(""),
     )
     assert_true(adm.ok)
     assert_equal(adm.kind, String("candidate"))
@@ -324,6 +334,7 @@ def test_scan_saturation_mechanism() raises:
         String(_PROFILES) + String("/valid.json"),
         True,
         String(_ELF_RING),
+        String(""),
         String(""),
         String(""),
         String(""),
@@ -343,6 +354,7 @@ def test_scan_no_coverage() raises:
         String(""),
         String(""),
         String(""),
+        String(""),
     )
     assert_true(not d.ok)
     assert_equal(d.refusal, String("no profile covers this kernel"))
@@ -356,6 +368,7 @@ def test_scan_explicit_unbound_reference() raises:
         String(_PROFILES) + String("/unbound.json"),
         True,
         String(_ELF_OK),
+        String(""),
         String(""),
         String(""),
         String(""),
@@ -375,6 +388,7 @@ def test_scan_explicit_validated_unbound() raises:
         String(_PROFILES) + String("/valid-unbound.json"),
         True,
         String(_ELF_OK),
+        String(""),
         String(""),
         String(""),
         String(""),
@@ -398,6 +412,7 @@ def test_scan_explicit_nohook() raises:
         String(""),
         String(""),
         String(""),
+        String(""),
     )
     assert_true(not d.ok)
     assert_equal(d.refusal, String("no tracepoint hook"))
@@ -411,6 +426,7 @@ def test_scan_explicit_notext() raises:
         String(_PROFILES) + String("/notext.json"),
         True,
         String(_ELF_OK),
+        String(""),
         String(""),
         String(""),
         String(""),
@@ -448,6 +464,7 @@ def _decide_lc(
         lc_object,
         cp_object,
         caps,
+        String(""),
     )
 
 
@@ -693,6 +710,7 @@ def test_scan_lc_unknown_kernel_refuses() raises:
         String(_ELF_LC),
         String(_ELF_CP),
         String(_CAPS3),
+        String(""),
     )
     assert_true(not d.ok)
     assert_equal(
@@ -715,6 +733,181 @@ def test_scan_lc_skew_root_refuses() raises:
     assert_equal(
         d.refusal, String("binding failed: mismatch image")
     )
+
+def _ref_profiles(name: String) raises -> List[Profile]:
+    var ps = List[Profile]()
+    ps.append(_doc(name))
+    return ps^
+
+
+def test_scan_receipt_local_auto() raises:
+    var d = decide_record(
+        String(_OK),
+        _kernel(),
+        _ref_profiles(String("ref.json")),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(""),
+        String(""),
+        String(""),
+        String(_PROFILES),
+    )
+    assert_true(d.ok)
+    assert_equal(d.kind, String("local-auto"))
+    assert_equal(d.profile.profile_id, String("scan-ref"))
+    assert_equal(
+        d.reason,
+        String("local-auto scan-ref: receipt verified, bindings hold"),
+    )
+    assert_equal(d.measured_format.state, String("value"))
+
+
+def test_scan_receipt_extras() raises:
+    var d = decide_record(
+        String(_OK),
+        _kernel(),
+        _ref_profiles(String("ref-lc.json")),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(_ELF_CP),
+        String(_CAPS3),
+        String(_PROFILES),
+    )
+    assert_true(d.ok)
+    assert_equal(d.kind, String("local-auto"))
+    assert_equal(d.profile.profile_id, String("scan-ref-lc"))
+    assert_true(d.has_lifecycle)
+    assert_true(d.has_copy)
+    assert_equal(d.selected_caps, String(_CAPS3))
+
+
+def test_scan_receipt_missing_caps_refuses_extras() raises:
+    var d = decide_record(
+        String(_OK),
+        _kernel(),
+        _ref_profiles(String("ref.json")),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(_ELF_CP),
+        String(_CAPS3),
+        String(_PROFILES),
+    )
+    assert_true(not d.ok)
+    assert_equal(
+        d.refusal,
+        String("no profile satisfies requested capabilities"),
+    )
+
+
+def test_scan_receipt_stale_kernel_partial() raises:
+    var kernel = KernelInfo(
+        String("7.0.1-test"), String("x86_64"), True, String("")
+    )
+    var d = decide_record(
+        String(_OK),
+        kernel,
+        _ref_profiles(String("ref.json")),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(""),
+        String(""),
+        String(""),
+        String(_PROFILES),
+    )
+    assert_true(d.ok)
+    assert_equal(d.kind, String("partial"))
+
+
+def test_scan_receipt_disabled_partial() raises:
+    var d = decide_record(
+        String(_OK),
+        _kernel(),
+        _ref_profiles(String("ref.json")),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(""),
+        String(""),
+        String(""),
+        String(""),
+    )
+    assert_true(d.ok)
+    assert_equal(d.kind, String("partial"))
+    assert_equal(
+        d.reason, String("partial scan-ref: no validated profile")
+    )
+
+
+def test_scan_receipt_stale_bindings_partial() raises:
+    # The receipt was minted for a previous note: its
+    # bindings name a format hash the document no longer
+    # carries. The live kernel matches, so only the
+    # receipt is stale; scan must fall through to
+    # partial, never local-auto.
+    var d = decide_record(
+        String(_OK),
+        _kernel(),
+        _ref_profiles(String("ref-stale.json")),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(""),
+        String(""),
+        String(""),
+        String(_PROFILES),
+    )
+    assert_true(d.ok)
+    assert_equal(d.kind, String("partial"))
+    assert_equal(
+        d.reason,
+        String("partial scan-ref-stale: no validated profile"),
+    )
+
+
+def test_scan_moved_layout_refuses_named_diff() raises:
+    # The moved/ root carries a format whose size field
+    # drifted. Explicit and scan admission alike must
+    # refuse with the named field diff, never parse as
+    # good or fall back to partial.
+    var d = decide_record(
+        String(_MOVED),
+        _kernel(),
+        List[Profile](),
+        String(_PROFILES) + String("/valid.json"),
+        True,
+        String(_ELF_OK),
+        String(""),
+        String(""),
+        String(""),
+        String(""),
+    )
+    assert_true(not d.ok)
+    assert_equal(
+        d.refusal, String("layout: field size: want @32:8")
+    )
+    var s = decide_record(
+        String(_MOVED),
+        _kernel(),
+        _ref_profiles(String("valid.json")),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(""),
+        String(""),
+        String(""),
+        String(""),
+    )
+    assert_true(not s.ok)
+    assert_equal(
+        s.refusal, String("layout: field size: want @32:8")
+    )
+
 
 def run() raises -> Int:
     var suite = TestSuite()
@@ -751,6 +944,13 @@ def run() raises -> Int:
     suite.test[test_scan_explicit_validated_unbound]()
     suite.test[test_scan_explicit_nohook]()
     suite.test[test_scan_explicit_notext]()
+    suite.test[test_scan_receipt_local_auto]()
+    suite.test[test_scan_receipt_extras]()
+    suite.test[test_scan_receipt_missing_caps_refuses_extras]()
+    suite.test[test_scan_receipt_stale_kernel_partial]()
+    suite.test[test_scan_receipt_disabled_partial]()
+    suite.test[test_scan_receipt_stale_bindings_partial]()
+    suite.test[test_scan_moved_layout_refuses_named_diff]()
     suite^.run()
     return 0
 

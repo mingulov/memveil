@@ -27,6 +27,24 @@ def test_record_args_defaults() raises:
     assert_equal(opts.lc_object, String(""))
     assert_equal(opts.cp_object, String(""))
     assert_equal(opts.capabilities, String(""))
+    assert_equal(opts.profiles_dir, String(""))
+    assert_true(not opts.has_profiles_dir)
+
+
+def test_record_args_profiles_dir() raises:
+    var opts = parse_record_args(_args(String("--profiles-dir"), String("qd")))
+    assert_equal(opts.profiles_dir, String("qd"))
+    assert_true(opts.has_profiles_dir)
+
+
+def test_record_args_profiles_dir_needs_value() raises:
+    var raised = False
+    try:
+        _ = parse_record_args(_args(String("--profiles-dir"), String("")))
+    except e:
+        raised = True
+        assert_equal(e.message, String("--profiles-dir needs a value"))
+    assert_true(raised)
 
 
 def test_record_args_channels() raises:
@@ -80,6 +98,8 @@ def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_record_args_defaults]()
     suite.test[test_record_args_channels]()
+    suite.test[test_record_args_profiles_dir]()
+    suite.test[test_record_args_profiles_dir_needs_value]()
     suite.test[test_record_args_lc_needs_value]()
     suite.test[test_record_args_cp_needs_value]()
     suite.test[test_record_args_capability_needs_value]()

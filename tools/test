@@ -6,7 +6,8 @@
 #
 # Implemented suites: schemas, unit, reports, profiles, doctor, attempts,
 # native-decode,
-# writer, signals, record, vm-attempts, buildcache, package, identity,
+# writer, signals, record, qualify, vm-attempts, buildcache, package,
+# identity,
 # correlation, mappings, lifetimes, pools, regions, diagnostics,
 # conversion-normalize, confidential-hooks, region-resolution,
 # baseline, confidential-ranges, confidential-inventory,
@@ -33,6 +34,9 @@
 # tests. The doctor suite runs the doctor unit tests, then the built
 # doctor verb live: oracle-checked JSON, identity cross-checks against
 # uname/id, exit/verdict consistency, and usage errors.
+# The qualify suite runs the qualify unit tests, then the built
+# qualify verb: usage, host-independent arg/capability refusals,
+# and floor-gated (x86_64 kernel >= 7) profile refusals.
 
 set -u
 
@@ -879,6 +883,7 @@ PYEOF
 suite_profiles() {
     run_unit_file tests/unit/test_profiles.mojo || return 1
     run_unit_file tests/unit/test_narrow.mojo || return 1
+    run_unit_file tests/unit/test_trace_format.mojo || return 1
     run_unit_file tests/unit/test_scan.mojo
 }
 
@@ -2670,6 +2675,23 @@ PYEOF
         failed=1
     fi
 
+    # An explicit null remedy violates the schema's string-only
+    # constraint; the validator must reject it, not skip it.
+    if ! python3 - "$TMP/live.json" "$TMP/nullrem.json" <<'PYEOF'; then
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert doc["capabilities"], "no caps"
+doc["capabilities"][0]["remedy"] = None
+json.dump(doc, open(sys.argv[2], "w"))
+PYEOF
+        echo "doctor: null-remedy fixture build failed" >&2
+        failed=1
+    elif "$ROOT/tools/validate-schemas" --check-doctor \
+        "$TMP/nullrem.json" >/dev/null 2>&1; then
+        echo "doctor: validator accepted null remedy" >&2
+        failed=1
+    fi
+
     if [ "$failed" -ne 0 ]; then
         echo "doctor: FAILED" >&2
         return 1
@@ -2945,6 +2967,7 @@ suite_record() {
     run_unit_file tests/unit/test_live.mojo || return 1
     run_unit_file tests/unit/test_btf.mojo || return 1
     run_unit_file tests/unit/test_record_args.mojo || return 1
+    run_unit_file tests/unit/test_qualify.mojo || return 1
     echo "record: unit suites passed"
     BIN="$ROOT/build/memveil"
     if [ ! -x "$BIN" ]; then
@@ -3054,6 +3077,128 @@ suite_record() {
     return 0
 }
 
+suite_qualify() {
+    run_unit_file tests/unit/test_qualify.mojo || return 1
+    BIN="$ROOT/build/memveil"
+    if [ ! -x "$BIN" ]; then
+        echo "qualify: missing $BIN (run tools/build first)" >&2
+        return 1
+    fi
+    TMP=$(mktemp -d)
+    trap 'rm -rf "$TMP"' EXIT
+    qfailed=0
+    qexpect() { # <case> <want-exit> <want-err> -- <args...>
+        cname=$1; want_exit=$2; want_err=$3
+        shift 3
+        if [ "$1" = "--" ]; then shift; fi
+        (cd "$ROOT" && "$BIN" qualify "$@" >"$TMP/$cname.out" 2>"$TMP/$cname.err")
+        rc=$?
+        if [ "$rc" -ne "$want_exit" ]; then
+            echo "qualify: case $cname exit $rc, want $want_exit" >&2
+            cat "$TMP/$cname.err" >&2
+            qfailed=1
+            return 0
+        fi
+        if ! grep -qF "$want_err" "$TMP/$cname.err"; then
+            echo "qualify: case $cname missing [$want_err]" >&2
+            cat "$TMP/$cname.err" >&2
+            qfailed=1
+            return 0
+        fi
+        echo "ok qualify-cli $cname (exit $rc)"
+    }
+    (cd "$ROOT" && "$BIN" qualify --help >"$TMP/help.out" 2>"$TMP/help.err")
+    rc=$?
+    if [ "$rc" -ne 0 ] || ! grep -qF "usage: memveil qualify" "$TMP/help.out"; then
+        echo "qualify: --help must exit 0 with usage" >&2
+        qfailed=1
+    fi
+    (cd "$ROOT" && "$BIN" qualify --bogus >"$TMP/bogus.out" 2>"$TMP/bogus.err")
+    if [ "$?" -ne 2 ]; then
+        echo "qualify: --bogus must exit 2" >&2
+        qfailed=1
+    elif [ -s "$TMP/bogus.out" ]; then
+        echo "qualify: --bogus must keep stdout empty" >&2
+        qfailed=1
+    elif [ ! -s "$TMP/bogus.err" ]; then
+        echo "qualify: --bogus must explain on stderr" >&2
+        qfailed=1
+    fi
+    # Argument parsing and capability parsing precede
+    # evidence handling, so these refusals run on any host
+    # with no BPF and no privileged smoke.
+    qexpect missing-output 2 "missing --output" -- \
+        --object "$ROOT/tests/fixtures/elf/ok.o"
+    qexpect missing-object 2 "missing --object" -- \
+        --output "$TMP/q-noobj"
+    qexpect bad-capability 3 "bad capability list" -- \
+        --output "$TMP/q-badcap" \
+        --object "$ROOT/tests/fixtures/elf/ok.o" \
+        --capability 'attempt-trace,'
+    qexpect convert-channel 3 "conversion-observe has no record channel" -- \
+        --output "$TMP/q-conv" \
+        --object "$ROOT/tests/fixtures/elf/ok.o" \
+        --capability attempt-trace,conversion-observe
+    # Profile resolution runs past the kernel-floor gate,
+    # so these cases need x86_64 kernel >= 7; the floor
+    # refusal itself is pinned fixture-backed in
+    # test_qualify.mojo (test_plan_below_floor_refuses).
+    host_ok=0
+    if [ "$(uname -m)" = "x86_64" ]; then
+        kmaj=$(uname -r | cut -d. -f1)
+        case $kmaj in
+            '' | *[!0-9]*) ;;
+            *) if [ "$kmaj" -ge 7 ]; then host_ok=1; fi ;;
+        esac
+    fi
+    if [ "$host_ok" -eq 1 ]; then
+        qexpect profiles-dir-missing 3 "cannot load profiles: " -- \
+            --output "$TMP/q-noprof" \
+            --object "$ROOT/tests/fixtures/elf/ok.o" \
+            --profiles-dir "$TMP/does-not-exist"
+        qexpect profile-unknown 3 "unknown --profile: " -- \
+            --output "$TMP/q-unk" \
+            --object "$ROOT/tests/fixtures/elf/ok.o" \
+            --profiles-dir "$ROOT/tests/fixtures/qualify/profiles" \
+            --profile definitely-not-a-profile
+        qexpect profile-unparsable 3 "cannot parse --profile: " -- \
+            --output "$TMP/q-badprof" \
+            --object "$ROOT/tests/fixtures/elf/ok.o" \
+            --profile "$ROOT/tests/fixtures/layout/garbage.format"
+    else
+        echo "qualify-cli: profile cases skipped (needs x86_64 kernel >= 7)"
+    fi
+    for receipt in "$ROOT"/tests/fixtures/scan/profiles/receipts/*.json; do
+        if ! "$ROOT/tools/validate-schemas" --check-receipt \
+            "$receipt" >/dev/null 2>&1; then
+            echo "qualify: oracle rejected $receipt" >&2
+            qfailed=1
+        fi
+    done
+    # A promoted grade is schema-invalid even when every
+    # other field is well-formed; the oracle must refuse.
+    if ! python3 - "$ROOT/tests/fixtures/scan/profiles/receipts/scan-ref.json" \
+        "$TMP/promoted.json" <<'PYEOF'; then
+import json, sys
+doc = json.load(open(sys.argv[1]))
+doc["grade"] = "validated"
+json.dump(doc, open(sys.argv[2], "w"))
+PYEOF
+        echo "qualify: promoted-grade fixture build failed" >&2
+        qfailed=1
+    elif "$ROOT/tools/validate-schemas" --check-receipt \
+        "$TMP/promoted.json" >/dev/null 2>&1; then
+        echo "qualify: oracle accepted promoted grade" >&2
+        qfailed=1
+    fi
+    if [ "$qfailed" -ne 0 ]; then
+        echo "qualify: FAILED" >&2
+        return 1
+    fi
+    echo "qualify: unit suite plus CLI refusal cases passed"
+    return 0
+}
+
 if [ $# -eq 0 ]; then
     usage >&2
     exit 2
@@ -3096,6 +3241,9 @@ case "$1" in
         ;;
     record)
         suite_record
+        ;;
+    qualify)
+        suite_qualify
         ;;
     vm-attempts)
         exec "$ROOT/tools/vm-attempts"

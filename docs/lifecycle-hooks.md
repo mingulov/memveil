@@ -102,8 +102,15 @@ with `slots` at byte 56; `io_tlb_slot` size 24
 `pad_slots`@18); `device_dma_parameters` size 16
 (`max_segment_size`@0, `min_align_mask`@4);
 `device.dma_parms` at byte 632. The probes declare partial
-views of these structs; CO-RE relocates the offsets at load
-and load fails closed on mismatch.
+views of these structs. CO-RE relocates only the member
+accesses spelled with bpf_core_read (pool start, nslabs,
+slots, dev->dma_parms, min_align_mask); the bulk
+io_tlb_slot read keeps its compile-time stride and member
+offsets, and enum values, shift/mask constants, and hook
+signatures stay frozen. Layout identity therefore rides
+the whole-BTF narrow binding, which refuses admission on
+any BTF change before load; CO-RE success alone never
+establishes it.
 
 Argument lists are the kernel function signatures as the probes
 read them. Map and unmap probes use the (device, tlb address)

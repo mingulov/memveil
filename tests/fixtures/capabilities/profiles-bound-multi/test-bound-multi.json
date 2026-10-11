@@ -1,0 +1,105 @@
+{
+  "schema_version": "0.1.1",
+  "profile_id": "test-bound-multi",
+  "status": "validated",
+  "identity": {
+    "arch": "x86_64",
+    "min_kernel": "7.0.0",
+    "source": {
+      "origin": "distro",
+      "revision": "7.0.0-test",
+      "note": "config=sha256:a5af36b05630b51bb596bc68f955ab97bb8802e857cd2fc1de05c0628e398fbb config_src=gz btf=sha256:785b0751fc2c53dc14a4ce3d800e69ef9ce1009eb327ccf458afe09c242c26c9 format=sha256:039a1a6bc665b91c4f846f735f9b2f9ec89d106d7d63a5e9d0b35e20213e80fb object=sha256:7549adfdf9837cefd566373a0efeee8550abdb4cd678b6fa15fe11f3f4785a37 image=sha256:11a663ae36f0cdbecf94b8b7319503bbd0fffc2c3ba02c01cf81600d423dd251 image_bid=0102030405060708090a0b0c0d0e0f1011121314 ring_bytes=8388608"
+    },
+    "note": "Synthetic test identity binding the bound-host fixture tree. Not a support claim."
+  },
+  "hooks": [
+    {
+      "name": "sched:sched_switch",
+      "kind": "tracepoint",
+      "id_path": "/sys/kernel/tracing/events/sched/sched_switch/id",
+      "format_path": "/sys/kernel/tracing/events/sched/sched_switch/format",
+      "format_text": null,
+      "note": "Synthetic test hook. Not qualification evidence."
+    },
+    {
+      "name": "swiotlb:swiotlb_bounced",
+      "kind": "tracepoint",
+      "id_path": "/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/id",
+      "format_path": "/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format",
+      "format_text": "name: swiotlb_bounced\nID: 382\nformat:\n\tfield:unsigned short common_type;\toffset:0;\tsize:2;\tsigned:0;\n\tfield:unsigned char common_flags;\toffset:2;\tsize:1;\tsigned:0;\n\tfield:unsigned char common_preempt_count;\toffset:3;\tsize:1;\tsigned:0;\n\tfield:int common_pid;\toffset:4;\tsize:4;\tsigned:1;\n\n\tfield:__data_loc char[] dev_name;\toffset:8;\tsize:4;\tsigned:0;\n\tfield:u64 dma_mask;\toffset:16;\tsize:8;\tsigned:0;\n\tfield:dma_addr_t dev_addr;\toffset:24;\tsize:8;\tsigned:0;\n\tfield:size_t size;\toffset:32;\tsize:8;\tsigned:0;\n\tfield:bool force;\toffset:40;\tsize:1;\tsigned:0;\n\nprint fmt: \"dev_name: %s dma_mask=%llx dev_addr=%llx size=%zu %s\", __get_str(dev_name), REC->dma_mask, (unsigned long long)REC->dev_addr, REC->size, REC->force ? \"FORCE\" : \"NORMAL\"\n",
+      "note": "Synthetic test hook. Not qualification evidence."
+    },
+    {
+      "name": "fexit:swiotlb_tbl_map_single",
+      "kind": "tracing",
+      "function": "swiotlb_tbl_map_single",
+      "attach": "fexit",
+      "signature": "phys_addr_t swiotlb_tbl_map_single(struct device *dev, phys_addr_t orig_addr, size_t mapping_size, unsigned int alloc_align_mask, enum dma_data_direction dir, unsigned long attrs)",
+      "note": "Synthetic test hook. Not qualification evidence."
+    },
+    {
+      "name": "fentry:__swiotlb_tbl_unmap_single",
+      "kind": "tracing",
+      "function": "__swiotlb_tbl_unmap_single",
+      "attach": "fentry",
+      "signature": "void __swiotlb_tbl_unmap_single(struct device *dev, phys_addr_t tlb_addr, size_t mapping_size, enum dma_data_direction dir, unsigned long attrs, struct io_tlb_pool *pool)",
+      "note": "Synthetic test hook. Not qualification evidence."
+    },
+    {
+      "name": "fentry:__swiotlb_sync_single_for_device",
+      "kind": "tracing",
+      "function": "__swiotlb_sync_single_for_device",
+      "attach": "fentry",
+      "signature": "void __swiotlb_sync_single_for_device(struct device *dev, phys_addr_t tlb_addr, size_t size, enum dma_data_direction dir, struct io_tlb_pool *pool)",
+      "note": "Synthetic test hook. Not qualification evidence."
+    },
+    {
+      "name": "fentry:__swiotlb_sync_single_for_cpu",
+      "kind": "tracing",
+      "function": "__swiotlb_sync_single_for_cpu",
+      "attach": "fentry",
+      "signature": "void __swiotlb_sync_single_for_cpu(struct device *dev, phys_addr_t tlb_addr, size_t size, enum dma_data_direction dir, struct io_tlb_pool *pool)",
+      "note": "Synthetic test hook. Not qualification evidence."
+    },
+    {
+      "name": "fentry:swiotlb_bounce",
+      "kind": "tracing",
+      "function": "swiotlb_bounce",
+      "attach": "fentry",
+      "signature": "void swiotlb_bounce(struct device *dev, phys_addr_t tlb_addr, size_t size, enum dma_data_direction dir, struct io_tlb_pool *mem)",
+      "note": "Synthetic test hook. Not qualification evidence."
+    }
+  ],
+  "capabilities": [
+    {
+      "id": "attempt-trace",
+      "status": "supported",
+      "hooks": [
+        "swiotlb:swiotlb_bounced"
+      ],
+      "reason": "Synthetic test declaration. Not a support claim."
+    },
+    {
+      "id": "mapping-lifecycle",
+      "status": "supported",
+      "hooks": [
+        "fexit:swiotlb_tbl_map_single",
+        "fentry:__swiotlb_tbl_unmap_single"
+      ],
+      "reason": "Synthetic test declaration. Not a support claim."
+    },
+    {
+      "id": "copy-actual",
+      "status": "supported",
+      "hooks": [
+        "fentry:__swiotlb_sync_single_for_device",
+        "fentry:__swiotlb_sync_single_for_cpu",
+        "fentry:swiotlb_bounce"
+      ],
+      "reason": "Synthetic test declaration. Not a support claim."
+    }
+  ],
+  "notes": [
+    "Synthetic selector-only fixture: identity hashes bind the bound-host tree, but hook IDs, VM-gate evidence, and lifecycle/copy qualification are absent. Never ship in profiles/; never treat as a support claim."
+  ]
+}

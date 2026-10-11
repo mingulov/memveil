@@ -1,0 +1,189 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "receipt-v0.1.0.schema.json",
+  "title": "MemVeil machine-local qualification receipt",
+  "description": "Evidence that `memveil qualify` verified a reference profile's identity bindings, hook layouts, and collection pipeline on this exact machine. A receipt never promotes its profile to validated: it records a local-auto grade bound to one kernel identity, one profile document, and the exact artifacts and workload that produced it. Selection matches a reference profile only with a valid receipt whose bindings equal the document note and whose kernel equals the live host.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "kind",
+    "profile_id",
+    "grade",
+    "created_ns",
+    "kernel",
+    "bindings",
+    "capabilities",
+    "artifacts",
+    "workload"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1.0"
+    },
+    "kind": {
+      "const": "memveil-qualification-receipt"
+    },
+    "profile_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.\\-]{0,127}$"
+    },
+    "grade": {
+      "const": "local-auto"
+    },
+    "created_ns": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})$"
+    },
+    "kernel": {
+      "type": "object",
+      "required": [
+        "arch",
+        "release"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "arch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "release": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    },
+    "bindings": {
+      "type": "object",
+      "required": [
+        "config",
+        "config_src",
+        "btf",
+        "format",
+        "image",
+        "image_bid"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "config": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "config_src": {
+          "enum": [
+            "gz",
+            "file"
+          ]
+        },
+        "btf": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "format": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "image": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "image_bid": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32,64}$"
+        }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "status",
+          "detail"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "const": "qualified"
+          },
+          "detail": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "required": [
+        "memveil",
+        "bridge",
+        "objects"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "memveil": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "bridge": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "objects": {
+          "type": "object",
+          "required": [
+            "attempt"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "attempt": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "lifecycle": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "copy": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          }
+        }
+      }
+    },
+    "workload": {
+      "type": "object",
+      "required": [
+        "kind",
+        "duration_s",
+        "traffic_required",
+        "note"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "smoke"
+        },
+        "duration_s": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]{0,19})$"
+        },
+        "traffic_required": {
+          "const": false
+        },
+        "note": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    }
+  }
+}

@@ -6,6 +6,7 @@ from std.sys import argv, exit
 
 from memveil.capture.collector import EXIT_REFUSAL
 from memveil.cli.doctor import run_doctor
+from memveil.cli.qualify import run_qualify
 from memveil.cli.record import run_record
 from memveil.platform.signal import ensure_inherited_signal_block
 from memveil.cli.report import (
@@ -23,13 +24,15 @@ from memveil.platform.stdout import write_stdout
 def top_usage() -> String:
     """Usage text for the memveil program."""
     return (
-        "usage: memveil <record|report|top|doctor|help|version> [args]\n"
+        "usage: memveil <record|report|top|doctor|qualify|help|version>"
+        " [args]\n"
         "\n"
         "Attempt capture, offline inspection, passive host check. Verbs:\n"
         "  record    capture swiotlb bounce attempts into a directory.\n"
         "  report    read one capture and print attempt metrics.\n"
         "  top       replay one capture with periodic summaries.\n"
         "  doctor    inspect the host passively and print capability.\n"
+        "  qualify   prove this host and mint a local-auto receipt.\n"
         "  help      print this text.\n"
         "  version   print the engine version.\n"
         "\n"
@@ -37,6 +40,7 @@ def top_usage() -> String:
         "Run 'memveil report --help' for report options.\n"
         "Run 'memveil top --help' for top options.\n"
         "Run 'memveil doctor --help' for doctor options.\n"
+        "Run 'memveil qualify --help' for qualify options.\n"
     )
 
 
@@ -72,6 +76,7 @@ def main() raises:
         and verb != "doctor"
         and verb != "record"
         and verb != "top"
+        and verb != "qualify"
     ):
         write_stderr(top_usage())
         exit(EXIT_INVALID)
@@ -80,10 +85,10 @@ def main() raises:
     while i < len(args):
         rest.append(args[i])
         i += 1
-    if verb == "record" or verb == "top":
-        # Both signal-driven verbs need every runtime thread to
-        # inherit blocked stop signals; otherwise a SIGINT lands
-        # in a worker and never reaches signalfd.
+    if verb == "record" or verb == "top" or verb == "qualify":
+        # Every collector-driving verb needs all runtime threads
+        # to inherit blocked stop signals; otherwise a SIGINT
+        # lands in a worker and never reaches signalfd.
         var full = List[String]()
         var k = 0
         while k < len(args):
@@ -103,6 +108,8 @@ def main() raises:
             code = run_record(rest^)
         elif verb == "top":
             code = run_top(rest^)
+        elif verb == "qualify":
+            code = run_qualify(rest^)
         else:
             code = run_report(rest^)
     except:
