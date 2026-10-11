@@ -245,7 +245,14 @@ def test_bare_env_record_fails_past_discovery(bundle, tmp_path):
                "--duration", "1", cwd=str(tmp_path), env={})
     for missing in ("no bridge", "no object", "missing --object"):
         assert missing not in proc.stderr, proc.stderr
-    assert proc.returncode in (3, 4), proc.stderr
+    assert proc.returncode in (0, 3, 4), proc.stderr
     if proc.returncode == 3:
         assert proc.stderr.strip(), "refusal needs a diagnostic"
         assert not cap.exists(), "refused record left a capture dir"
+    else:
+        # A produced capture proves discovery resolved the bundled
+        # bridge and objects: exit 0 is a sufficient qualified-host
+        # capture (complete stop with complete_for_scope detail),
+        # exit 4 a materially incomplete one.
+        assert cap.exists(), \
+            "exit %d left no capture dir" % proc.returncode
