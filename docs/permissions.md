@@ -14,9 +14,12 @@ Summary table in `support.md`; this page gives the details.
 | `top` | read access to the capture directory | same as `report`, repeatedly |
 | `record` | root: BPF load, tracefs, BTF read | creates the capture directory, attaches probes |
 
-`record` resolves its inputs explicitly: `--object` names the BPF
-object, `--bridge` (or `LMB_NATIVE_LIB`) names the native bridge
-library, and `--profile` optionally pins one semantic profile.
+`record` discovers its bridge and BPF object: explicit
+`--bridge`/`--object` win verbatim, then `LMB_NATIVE_LIB`
+for the bridge when unprivileged (ignored under `sudo`),
+then the executable-relative bundle path (`<root>/lib`,
+`<root>/bpf`), then the system path. `--profile`
+optionally pins one semantic profile.
 Profiles resolve from the executable location
 (`<root>/bin/memveil` reads `<root>/profiles`), never from the
 working directory. Without `--profile`, the first validated
@@ -32,8 +35,11 @@ with "validated" reserved for successful binding checks.
 ## Capture ownership and file modes
 
 Captures are created mode `0700` (directory) with mode `0600`
-files (`session.json`, `events.ndjson`). Recording as root
-leaves a root-owned capture; hand it to your user before
+files (`session.json`, `events.ndjson`). A capture recorded
+under `sudo` is handed back to the invoking user
+automatically (a `cannot restore capture ownership`
+warning means the restore failed); only a root run outside
+`sudo` stays root-owned and needs a manual handoff before
 unprivileged replay:
 
     sudo cp -r /tmp/cap1 ~/cap1 && sudo chown -R $USER ~/cap1
@@ -44,11 +50,16 @@ directory must not exist, and a refused run creates nothing.
 
 ## Running under sudo
 
-`sudo` may drop the environment carrying `LMB_NATIVE_LIB`.
-Either preserve it (`sudo -E`) or pass the bridge directly:
+No environment setup is needed: the bridge and BPF object
+are discovered beside the executable
+(`<root>/lib/libbpf_mojo.so.1`, `<root>/bpf`), so plain
+`sudo` works. `LMB_NATIVE_LIB` is honored only for
+unprivileged runs (ignored under `sudo`); `--bridge` and
+`--object` are optional overrides for non-bundled
+artifacts:
 
-    sudo ./bin/memveil record --bridge $PWD/lib/libbpf_mojo.so.1 \
-        --object $PWD/bpf/swiotlb_attempt.bpf.o --output /tmp/cap1
+    sudo ./bin/memveil record --bridge /path/to/libbpf_mojo.so.1 \
+        --object /path/to/swiotlb_attempt.bpf.o --output /tmp/cap1
 
 ## Refusal catalog
 
@@ -59,17 +70,23 @@ earlier refusal:
 
 1. Usage and `--max-events-bytes` budget (exit 2 for usage,
    exit 3 for an out-of-range budget).
-2. Bridge presence: `no bridge` when neither `--bridge` nor
-   `LMB_NATIVE_LIB` names one.
+2. Bridge presence: `no bridge: pass --bridge or set
+   LMB_NATIVE_LIB` when discovery finds no bridge (no
+   `--bridge`, no usable `LMB_NATIVE_LIB` when
+   unprivileged, nothing beside the executable or under
+   the system path).
 3. Profiles load: `cannot load profiles: ...` when the
    shipped `profiles/` cannot be read.
 4. Explicit `--profile`: `unknown --profile: <id>`, or
    `profile does not cover this kernel`.
 5. Coverage: `no profile covers this kernel` without
    `--profile`.
-6. Object: `object unreadable` (missing path),
+6. Object: `no object: pass --object PATH` (nothing
+   discovered), `object unreadable` (missing path),
    `object refused: ...` (not a BPF object),
-   `object ring too large`.
+   `object ring too large`. Requested extra channels
+   refuse the same way with `no object: pass --lc-object
+   PATH` and `no object: pass --cp-object PATH`.
 7. Hook admission: `format unreadable` (tracefs not
    readable, the usual unprivileged refusal),
    `layout: ...`, `bad hook site`.
