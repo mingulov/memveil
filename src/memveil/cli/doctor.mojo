@@ -18,6 +18,8 @@ the doctor-v0.1.0 schema exactly. Every interpolated evidence
 fragment is sanitized for its sink.
 """
 
+from std.os import getenv
+
 from memveil.cli.report import (
     EXIT_INTERNAL,
     EXIT_INVALID,
@@ -37,6 +39,8 @@ from memveil.platform.evidence import (
     KernelInfo,
     detect_environment,
 )
+from memveil.platform.hash import sha256_hex
+from memveil.platform.narrow import MAX_NARROW_OBJECT_BYTES
 from memveil.platform.profiles import (
     Profile,
     ProfileDecision,
@@ -47,8 +51,10 @@ from memveil.platform.reader import (
     EvidenceError,
     EvidenceReader,
     open_evidence_reader,
+    read_host_file,
     readlink_self,
 )
+from memveil.platform.runtime import discover_bridge, live_uids
 from memveil.render.json import escape_json
 
 
@@ -355,14 +361,47 @@ def render_doctor_text(rep: DoctorReport) raises -> String:
     return out
 
 
+def _resolved_bridge_sha() -> String:
+    """Bare hex sha256 of the resolved bridge, "" when unknown.
+
+    Doctor stays passive: it resolves (never loads) the
+    bridge the collector would load and hashes it for
+    receipt checks. An unresolvable or unreadable bridge
+    yields "", which matches no receipt.
+    """
+    var exe_path = String("")
+    try:
+        exe_path = readlink_self()
+    except:
+        exe_path = String("")
+    var bridge = discover_bridge(
+        String(""),
+        False,
+        getenv("LMB_NATIVE_LIB"),
+        live_uids(),
+        exe_path,
+    )
+    if bridge == String(""):
+        return String("")
+    try:
+        var raw = read_host_file(
+            bridge, String("bridge"), MAX_NARROW_OBJECT_BYTES
+        )
+        return sha256_hex(Span(raw))
+    except:
+        return String("")
+
+
 def run_doctor_with(
     root: String, profiles_dir: String, as_json: Bool
 ) raises -> Int:
     """Run the doctor flow against explicit roots; return exit code.
 
     ``root`` is the evidence root ("" for the live host) and
-    ``profiles_dir`` holds ``manifest.txt``. The report goes to
-    stdout; failures go to stderr with exit 2.
+    ``profiles_dir`` holds ``manifest.txt``. Receipt checks
+    bind the passively resolved bridge identity. The
+    report goes to stdout; failures go to stderr with
+    exit 2.
     """
     var reader: EvidenceReader
     try:
@@ -376,7 +415,12 @@ def run_doctor_with(
     except e:
         return _doctor_failed("cannot load profiles: " + String(e))
     var decision = select_profile_bound(
-        env.kernel, profiles^, root, String(_ZLIB), profiles_dir
+        env.kernel,
+        profiles^,
+        root,
+        String(_ZLIB),
+        profiles_dir,
+        _resolved_bridge_sha(),
     )
     var report = discover_capabilities(reader, decision)
     var drep = build_doctor_report(reader, env, decision^, report^)

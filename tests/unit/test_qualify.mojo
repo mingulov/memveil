@@ -408,6 +408,7 @@ def _shadow_body() raises:
         String(""),
         String(""),
         String(""),
+        String(""),
     )
     assert_true(not shadowed.ok)
     assert_true(
@@ -421,6 +422,7 @@ def _shadow_body() raises:
         plan.doc_source,
         True,
         String("nonexistent.o"),
+        String(""),
         String(""),
         String(""),
         String(""),

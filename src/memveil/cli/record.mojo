@@ -745,15 +745,22 @@ def _receipt_covers(
     kernel: KernelInfo,
     want: List[String],
     pdir: String,
+    bridge_sha: String,
+    mut bridge_mismatch: Bool,
 ) -> Bool:
     """True when a verifying receipt covers every wanted cap.
 
     The receipt at <pdir>/receipts/<id>.json must verify
-    against the doc and the live kernel and qualify each
-    requested capability. An empty pdir, a missing file,
-    or any verify failure yields False: scan falls
-    through to the next candidate. Never raises.
+    against the doc, the live kernel, and the resolved
+    bridge hash, and qualify each requested capability.
+    An empty pdir, a missing file, or any verify failure
+    yields False: scan falls through to the next
+    candidate. ``bridge_mismatch`` reports True when the
+    receipt was otherwise valid but named another
+    bridge, so the fallback reason can name it. Never
+    raises.
     """
+    bridge_mismatch = False
     if pdir == String(""):
         return False
     var path = (
@@ -769,8 +776,11 @@ def _receipt_covers(
         )
     except:
         return False
-    var v = verify_qualification_receipt(Span(raw), doc, kernel)
+    var v = verify_qualification_receipt(
+        Span(raw), doc, kernel, bridge_sha
+    )
     if not v.ok:
+        bridge_mismatch = v.bridge_mismatch
         return False
     for i in range(len(want)):
         var found = False
@@ -863,6 +873,7 @@ def decide_record(
     cp_object: String,
     want_caps: String,
     profiles_dir: String,
+    bridge_sha: String,
 ) -> ScanDecision:
     """Decide admission: scan, object statics, hook, binding.
 
@@ -870,14 +881,19 @@ def decide_record(
     and enforces full binding when bindings exist. Scan
     mode tries each covering validated doc in order, then
     each covering reference doc whose receipt under
-    <profiles_dir>/receipts/ verifies and covers the
+    <profiles_dir>/receipts/ verifies (against the doc,
+    the live kernel, and ``bridge_sha``, the bare hex
+    sha256 of the resolved bridge) and covers the
     requested capabilities ("\" disables receipts), and
-    falls back to the first covering doc as partial.
-    Static object failures refuse everywhere; identity
-    failures fall through in scan mode only. Requested
-    extra capabilities need a supported declaration, a
-    resolvable object path, and full extended binding;
-    they never fall back to partial.
+    falls back to the first covering doc as partial. A
+    receipt blocked only by the bridge falls through to
+    partial with a reason naming the bridge mismatch,
+    never local-auto. Static object failures refuse
+    everywhere; identity failures fall through in scan
+    mode only. Requested extra capabilities need a
+    supported declaration, a resolvable object path, and
+    full extended binding; they never fall back to
+    partial.
     """
     var out = ScanDecision()
     var ask = parse_requested_caps(want_caps)
@@ -992,6 +1008,7 @@ def decide_record(
             return _refuse_scan(cp.refusal.copy())
     var order = List[Int]()
     var order_receipt = List[Bool]()
+    var saw_bridge_mismatch = False
     if want_explicit:
         order.append(0)
         order_receipt.append(False)
@@ -1003,11 +1020,19 @@ def decide_record(
         for i in range(len(candidates)):
             if candidates[i].status == String("validated"):
                 continue
+            var mism = False
             if _receipt_covers(
-                candidates[i], kernel, ask.caps, profiles_dir
+                candidates[i],
+                kernel,
+                ask.caps,
+                profiles_dir,
+                bridge_sha,
+                mism,
             ):
                 order.append(i)
                 order_receipt.append(True)
+            elif mism:
+                saw_bridge_mismatch = True
     var skip_reason = String("")
     for oi in range(len(order)):
         var doc = candidates[order[oi]].copy()
@@ -1154,7 +1179,13 @@ def decide_record(
         if candidates[i].status == String("validated"):
             had_validated = True
             break
-    if had_validated:
+    if saw_bridge_mismatch:
+        out.reason = (
+            String("partial ")
+            + first.profile_id.copy()
+            + String(": receipt bridge mismatch")
+        )
+    elif had_validated:
         out.reason = (
             String("partial ")
             + first.profile_id.copy()
@@ -1332,6 +1363,24 @@ def run_collector_with[W: WriterSource](
             EXIT_REFUSAL, String(""), String(""),
             String("no bridge: pass --bridge or set LMB_NATIVE_LIB"),
         )
+    # One resolution, hashed once: admission, provenance,
+    # and the loader below all share this value, so no
+    # re-resolve can slip a different bridge between the
+    # receipt check and the load. An unreadable bridge
+    # hashes to "": receipts cannot admit local-auto, and
+    # provenance marks the identity uncheckable.
+    var bridge_sha = String("")
+    var bridge_v = LiveValue()
+    try:
+        var braw = read_host_file(
+            bridge, String("bridge"), MAX_NARROW_OBJECT_BYTES
+        )
+        bridge_sha = sha256_hex(Span(braw))
+        bridge_v.state = String("value")
+        bridge_v.value = bridge_sha.copy()
+    except:
+        bridge_v.state = String("uncheckable")
+        bridge_v.detail = String("bridge unreadable")
     var exe_path = String("")
     try:
         exe_path = readlink_self()
@@ -1386,6 +1435,7 @@ def run_collector_with[W: WriterSource](
         cp_object,
         opts.capabilities,
         profiles_dir,
+        bridge_sha,
     )
     if not decision.ok:
         return RunResult(
@@ -1513,16 +1563,6 @@ def run_collector_with[W: WriterSource](
             String("image.sha256"), decision.measured_image
         )
     )
-    var bridge_v = LiveValue()
-    try:
-        var braw = read_host_file(
-            bridge, String("bridge"), MAX_NARROW_OBJECT_BYTES
-        )
-        bridge_v.state = String("value")
-        bridge_v.value = sha256_hex(Span(braw))
-    except:
-        bridge_v.state = String("uncheckable")
-        bridge_v.detail = String("bridge unreadable")
     cfg.evidence.append(
         render_provenance(String("bridge.sha256"), bridge_v)
     )

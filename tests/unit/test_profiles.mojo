@@ -53,6 +53,10 @@ from memveil.platform.reader import (
 )
 
 
+comptime _MINT_BRIDGE = "5e2e29c1dbc50b9041b2c1ad803fe2e71f1231c1f9a179aa29e72ebcb0b8d270"
+comptime _FOREIGN_BRIDGE = "0000000000000000000000000000000000000000000000000000000000000000"
+
+
 def fx(name: String) -> String:
     """Fixture directory path for one capabilities fixture name."""
     return "tests/fixtures/capabilities/" + name
@@ -1191,7 +1195,8 @@ def test_select_bound_prefers_validated() raises:
     var ps = load_profiles(fx("profiles-bound"))
     var d = select_profile_bound(
         env.kernel, ps^, fx("bound-host"), String("libz.so.1"),
-        fx("profiles-bound")
+        fx("profiles-bound"),
+        String(""),
     )
     assert_true(d.matched)
     assert_true(d.has_profile)
@@ -1211,7 +1216,8 @@ def test_select_bound_multi_hook() raises:
     var ps = load_profiles(fx("profiles-bound-multi"))
     var d = select_profile_bound(
         env.kernel, ps^, fx("bound-host"), String("libz.so.1"),
-        fx("profiles-bound")
+        fx("profiles-bound"),
+        String(""),
     )
     assert_true(d.matched)
     assert_true(d.has_profile)
@@ -1260,7 +1266,7 @@ def test_receipt_roundtrip() raises:
         UInt64(3),
         String("smoke: attach/poll/detach, no traffic required"),
     )
-    var v = verify_qualification_receipt(js.as_bytes(), doc, env.kernel)
+    var v = verify_qualification_receipt(js.as_bytes(), doc, env.kernel, String(_MINT_BRIDGE))
     assert_true(v.ok)
     assert_equal(v.message, String(""))
 
@@ -1270,7 +1276,7 @@ def test_receipt_verdict_caps() raises:
     var env = detect_environment(r)
     var doc = _receipt_doc()
     var js = _mint_good()
-    var v = verify_qualification_receipt(js.as_bytes(), doc, env.kernel)
+    var v = verify_qualification_receipt(js.as_bytes(), doc, env.kernel, String(_MINT_BRIDGE))
     assert_true(v.ok)
     assert_equal(len(v.caps), 1)
     assert_equal(v.caps[0], String("attempt-trace"))
@@ -1320,7 +1326,7 @@ def test_receipt_verdict_caps_multi() raises:
         UInt64(3),
         String("smoke: attach/poll/detach, no traffic required"),
     )
-    var v = verify_qualification_receipt(js.as_bytes(), doc, env.kernel)
+    var v = verify_qualification_receipt(js.as_bytes(), doc, env.kernel, String(_MINT_BRIDGE))
     assert_true(v.ok)
     assert_equal(len(v.caps), 3)
     assert_equal(v.caps[0], String("attempt-trace"))
@@ -1360,7 +1366,7 @@ def test_receipt_lifecycle_missing_hash_refuses() raises:
         UInt64(3),
         String("smoke: attach/poll/detach, no traffic required"),
     )
-    var v = verify_qualification_receipt(js.as_bytes(), doc, env.kernel)
+    var v = verify_qualification_receipt(js.as_bytes(), doc, env.kernel, String(_MINT_BRIDGE))
     assert_true(not v.ok)
     assert_equal(
         v.message,
@@ -1378,7 +1384,7 @@ def test_receipt_verdict_caps_empty_on_refusal() raises:
     var js = _mint_good()
     var bad_kernel = env.kernel.copy()
     bad_kernel.release = String("9.9.9-fake")
-    var v = verify_qualification_receipt(js.as_bytes(), doc, bad_kernel)
+    var v = verify_qualification_receipt(js.as_bytes(), doc, bad_kernel, String(_MINT_BRIDGE))
     assert_true(not v.ok)
     assert_equal(len(v.caps), 0)
 
@@ -1434,6 +1440,25 @@ def test_receipt_bridge_shape() raises:
     )
     var msg = _verify_text(bad)
     assert_true(contains(msg, String("receipt.artifacts")))
+
+
+def test_receipt_bridge_mismatch_refuses() raises:
+    # The receipt is otherwise valid, but it was minted
+    # for another bridge: verification must refuse with
+    # the bridge named, so a swapped bridge cannot
+    # inherit qualification.
+    var r = open_evidence_reader(fx("bound-host"))
+    var env = detect_environment(r)
+    var doc = _receipt_doc()
+    var js = _mint_good()
+    var v = verify_qualification_receipt(
+        js.as_bytes(), doc, env.kernel, String(_FOREIGN_BRIDGE)
+    )
+    assert_true(not v.ok)
+    assert_equal(
+        v.message, String("receipt bridge differs from resolved bridge")
+    )
+    assert_true(v.bridge_mismatch)
 
 
 def test_receipt_workload_kind() raises:
@@ -1525,7 +1550,7 @@ def test_receipt_artifact_mismatch() raises:
         String('"attempt": "sha256:0000000000000000000000000000000000000000000000000000000000000000"'),
     )
     assert_true(bad != js)
-    var v = verify_qualification_receipt(bad.as_bytes(), doc, env.kernel)
+    var v = verify_qualification_receipt(bad.as_bytes(), doc, env.kernel, String(_MINT_BRIDGE))
     assert_true(not v.ok)
     assert_equal(v.message, String("receipt artifacts differ from note"))
 
@@ -1554,7 +1579,7 @@ def test_receipt_revision_mismatch() raises:
         UInt64(3),
         String("smoke: attach/poll/detach, no traffic required"),
     )
-    var v = verify_qualification_receipt(js.as_bytes(), doc, fake)
+    var v = verify_qualification_receipt(js.as_bytes(), doc, fake, String(_MINT_BRIDGE))
     assert_true(not v.ok)
     assert_equal(
         v.message, String("receipt kernel differs from profile revision")
@@ -1588,7 +1613,7 @@ def _verify_text(js: String) raises -> String:
     var r = open_evidence_reader(fx("bound-host"))
     var env = detect_environment(r)
     var doc = _receipt_doc()
-    var v = verify_qualification_receipt(js.as_bytes(), doc, env.kernel)
+    var v = verify_qualification_receipt(js.as_bytes(), doc, env.kernel, String(_MINT_BRIDGE))
     assert_true(not v.ok)
     return v.message
 
@@ -1629,7 +1654,7 @@ def test_receipt_bad_json() raises:
     var r = open_evidence_reader(fx("bound-host"))
     var env = detect_environment(r)
     var doc = _receipt_doc()
-    var v = verify_qualification_receipt(cut, doc, env.kernel)
+    var v = verify_qualification_receipt(cut, doc, env.kernel, String(_MINT_BRIDGE))
     assert_true(not v.ok)
     assert_true(v.message.startswith(String("receipt unparseable: ")))
 
@@ -1686,6 +1711,7 @@ def test_select_bound_receipt_beats_first_covering() raises:
         fx("bound-host"),
         String("libz.so.1"),
         fx("profiles-bound-ref"),
+        String(_MINT_BRIDGE),
     )
     assert_true(d.matched)
     assert_true(d.has_profile)
@@ -1705,6 +1731,7 @@ def test_select_bound_receipt_match() raises:
         fx("bound-host"),
         String("libz.so.1"),
         fx("profiles-bound-ref"),
+        String(_MINT_BRIDGE),
     )
     assert_true(d.matched)
     assert_true(d.has_profile)
@@ -1724,6 +1751,7 @@ def test_select_bound_receipt_stale() raises:
         fx("ordinary-7.0"),
         String("libz.so.1"),
         fx("profiles-bound-ref"),
+        String(_MINT_BRIDGE),
     )
     assert_true(not d.matched)
     assert_true(d.has_profile)
@@ -1738,6 +1766,34 @@ def test_select_bound_receipt_stale() raises:
     )
 
 
+def test_select_bound_receipt_bridge_mismatch() raises:
+    # The bound-host receipt verifies everywhere except
+    # the bridge: no local-auto match, and the fallback
+    # reason names the bridge mismatch.
+    var r = open_evidence_reader(fx("bound-host"))
+    var env = detect_environment(r)
+    var ps = load_profiles(fx("profiles-bound-ref"))
+    var d = select_profile_bound(
+        env.kernel,
+        ps^,
+        fx("bound-host"),
+        String("libz.so.1"),
+        fx("profiles-bound-ref"),
+        String(_FOREIGN_BRIDGE),
+    )
+    assert_true(not d.matched)
+    assert_true(d.has_profile)
+    assert_equal(d.profile.profile_id, String("ref-bindable"))
+    assert_equal(
+        d.reason,
+        String(
+            "profile ref-bindable covers this identity"
+            " but is reference-unvalidated; ref-bindable"
+            " receipt bridge differs from resolved bridge"
+        ),
+    )
+
+
 def test_select_bound_falls_back_with_reason() raises:
     # ordinary-7.0 runs 7.0.0-34-generic while the validated
     # doc records revision 7.0.0-test, so it cannot bind;
@@ -1747,7 +1803,8 @@ def test_select_bound_falls_back_with_reason() raises:
     var ps = load_profiles(fx("profiles-bound"))
     var d = select_profile_bound(
         env.kernel, ps^, fx("ordinary-7.0"), String("libz.so.1"),
-        fx("profiles-bound")
+        fx("profiles-bound"),
+        String(""),
     )
     assert_true(not d.matched)
     assert_true(d.has_profile)
@@ -2176,6 +2233,7 @@ def test_select_bound_receipt_grade_caps() raises:
         fx("bound-host"),
         String("libz.so.1"),
         fx("profiles-bound-ref"),
+        String(_MINT_BRIDGE),
     )
     assert_true(d.matched)
     assert_equal(d.grade, String("local-auto"))
@@ -2189,7 +2247,8 @@ def test_select_bound_validated_grade_caps() raises:
     var ps = load_profiles(fx("profiles-bound"))
     var d = select_profile_bound(
         env.kernel, ps^, fx("bound-host"), String("libz.so.1"),
-        fx("profiles-bound")
+        fx("profiles-bound"),
+        String(""),
     )
     assert_true(d.matched)
     assert_equal(d.grade, String("validated"))
@@ -2620,6 +2679,7 @@ def run() raises -> Int:
     suite.test[test_select_bound_receipt_beats_first_covering]()
     suite.test[test_select_bound_receipt_match]()
     suite.test[test_select_bound_receipt_stale]()
+    suite.test[test_select_bound_receipt_bridge_mismatch]()
     suite.test[test_select_bound_falls_back_with_reason]()
     suite.test[test_receipt_roundtrip]()
     suite.test[test_receipt_verdict_caps]()
@@ -2630,6 +2690,7 @@ def run() raises -> Int:
     suite.test[test_receipt_workload_false]()
     suite.test[test_receipt_trailing_data]()
     suite.test[test_receipt_bridge_shape]()
+    suite.test[test_receipt_bridge_mismatch_refuses]()
     suite.test[test_receipt_workload_kind]()
     suite.test[test_receipt_traffic_true]()
     suite.test[test_receipt_duration_shape]()
