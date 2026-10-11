@@ -145,7 +145,11 @@ SHORT_DESC = "swiotlb bounce-attempt capture and offline replay on x86-64 Linux"
 # no install candidate). The alternation keeps the package
 # installable on pre-t64 (libelf1) and current (libelf1t64)
 # systems while staying a manual Depends (no dh_shlibs).
-EXPECTED_DEPENDS = "libelf1t64 | libelf1, zlib1g"
+# The versioned libc6 floor is derived from the staged ELF
+# files at build time (bridge plus binary plus closure, max
+# GLIBC_x.y need); test_depends_enforces_glibc_floor
+# recomputes it from the payload independently.
+EXPECTED_DEPENDS = "libelf1t64 | libelf1, zlib1g, libc6 (>= 2.38)"
 
 
 def run(*argv, **kwargs):
@@ -284,6 +288,51 @@ def test_modes_owners_no_privilege_bits(listing):
             assert mode == "-rwxr-xr-x", (path, mode)
         else:
             assert mode == "-rw-r--r--", (path, mode)
+
+
+def _payload_glibc_floor(extracted):
+    """Max GLIBC_x.y need across the shipped ELF, as (x, y).
+
+    Reads the extracted payload (the installed binary plus
+    every lib/*.so*), independently of the builder's own
+    floor derivation: the dependency pins below fail when a
+    staged ELF needs a newer libc than declared.
+    """
+    libdir = extracted / "usr" / "lib" / "memveil"
+    elfs = [extracted / "usr" / "bin" / "memveil"] + sorted(
+        libdir.glob("*.so*"))
+    assert len(elfs) > 1, "no shipped ELF to derive a floor from"
+    floor = (0, 0)
+    for path in elfs:
+        proc = run("readelf", "-V", str(path))
+        assert proc.returncode == 0, (str(path), proc.stderr)
+        for major, minor in re.findall(r"GLIBC_(\d+)\.(\d+)",
+                                       proc.stdout):
+            floor = max(floor, (int(major), int(minor)))
+    assert floor != (0, 0), \
+        "no GLIBC version need in %s" % [str(p) for p in elfs]
+    return floor
+
+
+@needs_deb
+def test_depends_enforces_glibc_floor(extracted):
+    major, minor = _payload_glibc_floor(extracted)
+    assert deb_field("Depends").strip() == \
+        "libelf1t64 | libelf1, zlib1g, libc6 (>= %d.%d)" % (
+            major, minor)
+
+
+@needs_deb
+def test_spec_glibc_floor_matches_payload(extracted):
+    # The spec's versioned glibc requirement is a static
+    # literal, while both formats stage the same bridge and
+    # closure bytes: derive the floor from the extracted
+    # .deb payload and require the spec to name exactly it.
+    major, minor = _payload_glibc_floor(extracted)
+    match = re.search(r"^Requires:\s*(.+)$", _spec_text(), re.M)
+    assert match, "manual Requires missing (no auto-deps)"
+    assert "glibc >= %d.%d" % (major, minor) in \
+        match.group(1), match.group(1)
 
 
 @needs_deb
@@ -578,27 +627,88 @@ def _installed_validated_profile():
     return None
 
 
-def _uninstall_after_failure(receipts, qcap, runner=run):
+class RetainedReceiptsError(AssertionError):
+    """Retained receipts block a fresh install journey.
+
+    An AssertionError subclass so a refusal inside the
+    journey reads as a test failure naming the retained
+    files, like the assertion it replaces.
+    """
+
+
+def _preflight_receipts_state(receipts):
+    """Pre-install receipts-state gate: refuse retained receipts.
+
+    Returns the pre-run listing (a set of names; empty on
+    a fresh host) for run-scoped cleanup. Raises
+    RetainedReceiptsError naming every retained file when
+    the state dir already holds receipts: the journey
+    calls this before dpkg -i, so a refusal installs
+    nothing and deletes nothing.
+    """
+    try:
+        names = sorted(os.listdir(receipts))
+    except FileNotFoundError:
+        return set()
+    if names:
+        raise RetainedReceiptsError(
+            "refusing install: %s holds retained receipts (%s); "
+            "back them up or remove them, then rerun"
+            % (receipts, ", ".join(names)))
+    return set(names)
+
+
+def _preflight_fresh_state(receipts, runner=run):
+    """Journey prelude before dpkg -i: package absent, state fresh.
+
+    Returns the pre-run receipts listing for run-scoped
+    cleanup. Raises (package installed or retained
+    receipts) before anything is installed or deleted.
+    """
+    probe = runner("dpkg", "-s", "memveil")
+    assert probe.returncode != 0, \
+        "memveil is already installed (stale residue?): " \
+        "remove it with `sudo dpkg -r memveil` and rerun"
+    return _preflight_receipts_state(receipts)
+
+
+def _run_receipts(receipts, preexisting):
+    """Receipt names created by this run: listed minus pre-run set.
+
+    Every name in the pre-run listing is left untouched, so
+    retained client state can never be deleted by journey
+    cleanup. A missing state dir holds no run receipts.
+    """
+    if not os.path.isdir(receipts):
+        return []
+    return sorted(name for name in os.listdir(receipts)
+                  if name not in preexisting)
+
+
+def _uninstall_after_failure(receipts, qcap, preexisting=frozenset(),
+                             qcap_existed=False, runner=run):
     """Failure-path teardown: retry residue, then uninstall.
 
     Mirrors the journey's inner-finally cleanup (each
-    published receipt file, then the qcap capture dir)
-    but ignores every error — the original exception is
-    already in flight — so a failed `sudo rm` cannot
-    strand root-owned residue or skip `dpkg -r`.
+    receipt published by this run, then the qcap capture
+    dir when this run created it) but ignores every error
+    — the original exception is already in flight — so a
+    failed `sudo rm` cannot strand root-owned residue or
+    skip `dpkg -r`. Preexisting receipts are never
+    removed: install.md documents them as surviving
+    uninstall.
     """
     try:
-        if os.path.isdir(receipts):
-            for name in os.listdir(receipts):
-                try:
-                    runner("sudo", "-n", "rm", "-f",
-                           os.path.join(receipts, name))
-                except OSError:
-                    pass
+        for name in _run_receipts(receipts, preexisting):
+            try:
+                runner("sudo", "-n", "rm", "-f",
+                       os.path.join(receipts, name))
+            except OSError:
+                pass
     except OSError:
         pass
     try:
-        if qcap.exists():
+        if not qcap_existed and qcap.exists():
             try:
                 runner("sudo", "-n", "rm", "-rf", str(qcap))
             except OSError:
@@ -642,6 +752,133 @@ def test_failure_path_retries_residue_then_uninstalls(tmp_path):
     assert ("sudo", "-n", "rm", "-rf") in kinds, calls
 
 
+def test_journey_refuses_retained_receipts(tmp_path):
+    # Retained receipts (which install.md documents as
+    # surviving uninstall) must block the journey before
+    # installation: no dpkg -i, no deletion, and the
+    # survivor stays byte-identical. Needs no .deb/sudo:
+    # the prelude runs against a staged receipts dir with
+    # a faked runner.
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    sentinel = receipts / "pre-existing-receipt.json"
+    sentinel.write_bytes(
+        b'{"profile_id": "linux-x86_64-7.0.0-99-test"}\n')
+    calls = []
+
+    class FakeProc:
+        returncode = 1  # dpkg -s: package absent
+
+    def fake_runner(*argv, **kwargs):
+        calls.append(argv)
+        return FakeProc()
+
+    with pytest.raises(RetainedReceiptsError,
+                       match="pre-existing-receipt.json"):
+        _preflight_fresh_state(str(receipts), runner=fake_runner)
+    assert [c for c in calls
+            if c[:4] == ("sudo", "-n", "dpkg", "-i")] == [], calls
+    assert [c for c in calls if "rm" in c] == [], calls
+    assert sentinel.read_bytes() == \
+        b'{"profile_id": "linux-x86_64-7.0.0-99-test"}\n'
+
+
+def test_preflight_receipts_state_empty_and_missing(tmp_path):
+    assert _preflight_receipts_state(
+        str(tmp_path / "missing")) == set()
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert _preflight_receipts_state(str(empty)) == set()
+
+
+def test_run_receipts_spares_preexisting(tmp_path):
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    (receipts / "kept.json").write_text("{}")
+    (receipts / "run.json").write_text("{}")
+    assert _run_receipts(str(receipts), {"kept.json"}) == \
+        ["run.json"]
+    assert _run_receipts(str(receipts), set()) == \
+        ["kept.json", "run.json"]
+    assert _run_receipts(str(tmp_path / "missing"), set()) == []
+
+
+def test_failed_install_reaches_teardown(tmp_path, monkeypatch):
+    # A failed dpkg -i must still reach teardown: the
+    # install attempt sits inside the teardown guard, so an
+    # exit-1 install ends with dpkg -r attempted instead of
+    # stranding a partial package. Needs no .deb/sudo:
+    # drives the real journey with a faked runner (install
+    # exits 1) and a stubbed prelude.
+    import sys
+
+    module = sys.modules[__name__]
+    calls = []
+
+    class FakeProc:
+        def __init__(self, returncode, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def fake_runner(*argv, **kwargs):
+        calls.append(argv)
+        if argv[:4] == ("sudo", "-n", "dpkg", "-i"):
+            return FakeProc(1, "", "dpkg: error")
+        return FakeProc(0)
+
+    monkeypatch.setattr(module, "run", fake_runner)
+    monkeypatch.setattr(module, "_preflight_fresh_state",
+                        lambda receipts, runner=None: set())
+    monkeypatch.setattr(module, "have_passwordless_sudo",
+                        lambda: True)
+    monkeypatch.setattr(shutil, "which",
+                        lambda name: "/usr/bin/" + name)
+    with pytest.raises(AssertionError):
+        test_install_doctor_uninstall_smoke("0.1.0", tmp_path)
+    assert ("sudo", "-n", "dpkg", "-i", DEB) in calls, calls
+    assert calls[-1][:4] == ("sudo", "-n", "dpkg", "-r"), calls
+
+
+def test_failed_install_teardown_keeps_retained(tmp_path):
+    # The failure path after a failed install retries run
+    # residue and uninstalls, but never touches preexisting
+    # receipts. Needs no .deb/sudo: staged state with a
+    # faked runner that really deletes what rm names.
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    retained = receipts / "retained.json"
+    retained.write_bytes(b'{"profile_id": "kept"}\n')
+    runmade = receipts / "run.json"
+    runmade.write_text("{}")
+    qcap = tmp_path / "qcap"
+    qcap.mkdir()
+    (qcap / "outcome.json").write_text("{}")
+    calls = []
+
+    class FakeProc:
+        returncode = 0
+
+    def fake_runner(*argv, **kwargs):
+        calls.append(argv)
+        if argv[2:4] == ("rm", "-f"):
+            os.unlink(argv[4])
+        elif argv[2:4] == ("rm", "-rf"):
+            shutil.rmtree(argv[4])
+        return FakeProc()
+
+    _uninstall_after_failure(str(receipts), qcap,
+                             preexisting={"retained.json"},
+                             qcap_existed=False,
+                             runner=fake_runner)
+    assert calls, "failure path ran nothing"
+    assert calls[-1][:4] == ("sudo", "-n", "dpkg", "-r"), calls
+    assert [c for c in calls if str(retained) in c] == [], calls
+    assert retained.read_bytes() == b'{"profile_id": "kept"}\n'
+    assert not runmade.exists()
+    assert not qcap.exists()
+
+
 @needs_deb
 def test_install_doctor_uninstall_smoke(engine_version, tmp_path):
     # Install journey: install -> doctor -> record probe ->
@@ -652,15 +889,17 @@ def test_install_doctor_uninstall_smoke(engine_version, tmp_path):
     if shutil.which("dpkg") is None or not have_passwordless_sudo():
         pytest.skip("install smoke needs dpkg plus passwordless "
                     "sudo; this host lacks one of them")
-    probe = run("dpkg", "-s", "memveil")
-    assert probe.returncode != 0, \
-        "memveil is already installed (stale residue?): " \
-        "remove it with `sudo dpkg -r memveil` and rerun"
-    proc = run("sudo", "-n", "dpkg", "-i", DEB)
-    assert proc.returncode == 0, proc.stderr
     receipts = "/var/lib/memveil/receipts"
     qcap = tmp_path / "qcap"
+    # Fresh-state prelude runs before installation: a host
+    # with retained receipts fails here naming them, with
+    # nothing installed and nothing deleted. Cleanup state
+    # is initialized here too, before the guarded install.
+    preexisting = _preflight_fresh_state(receipts, runner=run)
+    qcap_existed = qcap.exists()
     try:
+        proc = run("sudo", "-n", "dpkg", "-i", DEB)
+        assert proc.returncode == 0, proc.stderr
         try:
             status = run("dpkg", "-s", "memveil")
             assert status.returncode == 0, status.stderr
@@ -770,22 +1009,24 @@ def test_install_doctor_uninstall_smoke(engine_version, tmp_path):
             # Runtime state is not dpkg-owned: remove what the
             # smoke published before uninstalling, so the
             # residue check below binds the uninstall itself.
-            if os.path.isdir(receipts):
-                for name in os.listdir(receipts):
-                    gone = run("sudo", "-n", "rm", "-f",
-                               os.path.join(receipts, name))
-                    assert gone.returncode == 0, gone.stderr
-            if qcap.exists():
+            # Only this run's receipts go: preexisting names
+            # stay untouched.
+            for name in _run_receipts(receipts, preexisting):
+                gone = run("sudo", "-n", "rm", "-f",
+                           os.path.join(receipts, name))
+                assert gone.returncode == 0, gone.stderr
+            if not qcap_existed and qcap.exists():
                 gone = run("sudo", "-n", "rm", "-rf", str(qcap))
                 assert gone.returncode == 0, gone.stderr
             uninst = run("sudo", "-n", "dpkg", "-r", "memveil")
             assert uninst.returncode == 0, uninst.stderr
     except BaseException:
-        _uninstall_after_failure(receipts, qcap)
+        _uninstall_after_failure(receipts, qcap, preexisting,
+                                 qcap_existed, runner=run)
         raise
     assert run("dpkg", "-s", "memveil").returncode != 0
     for path in ("/usr/lib/memveil", "/usr/share/memveil",
-                 "/var/lib/memveil"):
+                 "/usr/share/doc/memveil", "/var/lib/memveil"):
         assert not os.path.exists(path), "residue: %s" % path
 
 
@@ -880,12 +1121,51 @@ def test_frozen_value_arity_matches_synopsis():
                         verb, flag)
 
 
+def _format_values_from_synopsis(text):
+    """Complete --format alternatives from a report synopsis.
+
+    Parses the `[--format a|b|c]` bracket of the usage
+    synopsis and returns every alternative as a set. The
+    synopsis is the normative enum: prose may reword, but
+    the bracket lists exactly what the parser accepts.
+    """
+    para = text.split("\n\n")[0].replace("\n", " ")
+    match = re.search(r"\[--format ([^\]]+)\]", para)
+    assert match, "no [--format ...] bracket in synopsis: %r" % para
+    return set(match.group(1).split("|"))
+
+
+def _check_format_values(verb, live):
+    """--format guard: live synopsis alternatives vs frozen pins.
+
+    Exact-set comparison: the enum is closed in the
+    parser, so a new CLI value must fail naming the verb,
+    the flag, and the value.
+    """
+    assert live == set(FROZEN_FORMAT_VALUES), \
+        "memveil %s: --format offers %s vs frozen %s" % (
+            verb, sorted(live), sorted(FROZEN_FORMAT_VALUES))
+
+
 @needs_bin
-def test_frozen_format_values_named_in_help():
-    text = _help("report")
-    for value in FROZEN_FORMAT_VALUES:
-        assert value in text, \
-            "--format value %r vanished from report --help" % value
+def test_frozen_format_values_match_synopsis():
+    live = _format_values_from_synopsis(_help("report"))
+    _check_format_values("report", live)
+
+
+def test_format_guard_catches_extra_value():
+    # Negative control for the closed --format enum: an
+    # in-memory synopsis offering xml must fail the guard,
+    # naming the verb, the flag, and the extra value.
+    live = _format_values_from_synopsis(
+        "usage: memveil report [--format text|json|markdown|xml] "
+        "DIR")
+    assert live == {"text", "json", "markdown", "xml"}
+    with pytest.raises(AssertionError) as excinfo:
+        _check_format_values("report", live)
+    message = str(excinfo.value)
+    for token in ("report", "--format", "xml"):
+        assert token in message, message
 
 
 def test_generator_frozen_matches_pins():
@@ -983,6 +1263,21 @@ def test_gen_completions_covers_frozen(tmp_path):
         pytest.skip("bash absent: cannot syntax-check completions")
     proc = run("bash", "-n", str(out / "memveil"))
     assert proc.returncode == 0, proc.stderr
+
+
+def test_gen_completions_zsh_format_action(tmp_path):
+    # The zsh _arguments spec for --format must carry the
+    # enum as its action (`:name:(values)`): with a single
+    # colon zsh parses the values as the message and offers
+    # no completion. Exact-form pin; runs without zsh.
+    assert os.path.isfile(GEN_COMPLETIONS), \
+        "missing tools/gen-completions"
+    out = tmp_path / "comp"
+    proc = run(GEN_COMPLETIONS, "--out", str(out))
+    assert proc.returncode == 0, proc.stderr
+    zsh = (out / "_memveil").read_text()
+    assert "'--format[output format]:format:" \
+        "(text json markdown)'" in zsh, zsh
 
 
 def test_gen_completions_bash_functional(tmp_path):
@@ -1103,6 +1398,9 @@ def test_spec_files_cover_fhs():
         "/usr/share/memveil/profiles/",
         "/usr/share/memveil/docs/",
         "%dir /usr/share/doc/memveil",
+        "%dir /usr/share/doc/memveil/LICENSES",
+        "%dir /usr/share/doc/memveil/licenses",
+        "%dir /usr/share/doc/memveil/licenses/libbpf-mojo-LICENSES",
         "/usr/share/bash-completion/completions/memveil",
         "/usr/share/zsh/vendor-completions/_memveil",
         "%dir /var/lib/memveil",
@@ -1127,9 +1425,9 @@ def test_spec_no_scriptlets_or_privilege():
         "collection targets x86-64 only"
     match = re.search(r"^Requires:\s*(.+)$", text, re.M)
     assert match, "manual Requires missing (no auto-deps)"
-    for soname in ("libelf.so.1()(64bit)", "libz.so.1()(64bit)"):
-        assert soname in match.group(1), \
-            "Requires lacks %s" % soname
+    assert match.group(1).strip() == \
+        "libelf.so.1()(64bit), libz.so.1()(64bit), " \
+        "glibc >= 2.38", match.group(1)
 
 
 def test_spec_private_lib_pinning():

@@ -26,11 +26,13 @@ with zero flags or environment::
     vendor-completions/             zsh vendor dir)
     var/lib/memveil/receipts/       empty state dir (0755 root:root)
 
-Control notes: manual ``Depends: libelf1t64 | libelf1, zlib1g``
-(dpkg's t64 transition left no libelf1 candidate on current
-systems; the alternation installs on pre-t64 and current ones
-while staying dh_shlibs-free); no maintainer scripts (the
-private lib needs no ldconfig, no collection runs at install);
+Control notes: manual ``Depends: libelf1t64 | libelf1, zlib1g,
+libc6 (>= X.Y)`` (dpkg's t64 transition left no libelf1
+candidate on current systems; the alternation installs on
+pre-t64 and current ones while staying dh_shlibs-free; the
+libc6 floor is derived at build time from the staged ELF
+files, never hardcoded); no maintainer scripts (the private
+lib needs no ldconfig, no collection runs at install);
 DEBIAN/md5sums is generated over the payload for dpkg --verify;
 no setuid bits or file capabilities. X-Memveil-Revision and
 X-LMB-Tarball-SHA256 record the exact source and bridge bytes.
@@ -68,7 +70,7 @@ PACKAGE = "memveil"
 SECTION = "utils"
 PRIORITY = "optional"
 ARCH = "amd64"
-DEB_DEPENDS = "libelf1t64 | libelf1, zlib1g"
+DEB_DEPENDS_BASE = "libelf1t64 | libelf1, zlib1g"
 MAINTAINER = "MemVeil Project <memveil-maintainers@example.invalid>"
 SHORT_DESC = ("swiotlb bounce-attempt capture and offline replay "
               "on x86-64 Linux")
@@ -127,6 +129,47 @@ def needed(path):
     return [line.split("[")[1].split("]")[0]
             for line in proc.stdout.splitlines()
             if "(NEEDED)" in line and "[" in line]
+
+
+def parse_glibc_floor(version_info):
+    """Max GLIBC_x.y need in readelf -V output, as (x, y) or None.
+
+    Pure parser over the `.gnu.version_r` listing: every
+    `GLIBC_<major>.<minor>` token is a minimum libc the
+    file must load against, so the max wins. Non-glibc
+    tokens (ELFUTILS_, GCC_, GLIBC_PRIVATE) never match.
+    """
+    floor = None
+    for major, minor in re.findall(r"GLIBC_(\d+)\.(\d+)",
+                                   version_info):
+        need = (int(major), int(minor))
+        if floor is None or need > floor:
+            floor = need
+    return floor
+
+
+def glibc_floor(paths):
+    """Max GLIBC_x.y need across staged ELF files, as "X.Y".
+
+    Runs readelf -V over the staged binary plus every
+    shipped .so and takes the max, so the Depends libc6
+    floor always matches the bytes being shipped, never a
+    stale literal. Fails closed when readelf fails or no
+    GLIBC need is found.
+    """
+    floor = None
+    for path in sorted(paths):
+        proc = run(["readelf", "-V", path])
+        if proc.returncode != 0:
+            fail("readelf -V failed on %s:\n%s"
+                 % (path, proc.stderr))
+        need = parse_glibc_floor(proc.stdout)
+        if need is not None and (floor is None or need > floor):
+            floor = need
+    if floor is None:
+        fail("no GLIBC version need in staged ELF: %s"
+             % sorted(paths))
+    return "%d.%d" % floor
 
 
 def sha256_file(path):
@@ -210,14 +253,14 @@ def write_md5sums(root):
         handle.writelines(entries)
 
 
-def control_text(upstream, memveil_rev, lmb_sha):
+def control_text(upstream, memveil_rev, lmb_sha, depends):
     lines = [
         "Package: %s" % PACKAGE,
         "Version: %s-1" % upstream,
         "Section: %s" % SECTION,
         "Priority: %s" % PRIORITY,
         "Architecture: %s" % ARCH,
-        "Depends: %s" % DEB_DEPENDS,
+        "Depends: %s" % depends,
         "Maintainer: %s" % MAINTAINER,
         "Description: %s" % SHORT_DESC,
         LONG_DESC,
@@ -398,9 +441,17 @@ def main(argv):
                      os.path.join(bashcomp, "memveil"))
         shutil.copy2(os.path.join(comp_parent, "_memveil"),
                      os.path.join(zshcomp, "_memveil"))
+        staged_elf = [binary]
+        for name in sorted(os.listdir(libdir)):
+            if re.fullmatch(r"[^/]+\.so(\..*)?", name) \
+                    and os.path.isfile(
+                        os.path.join(libdir, name)):
+                staged_elf.append(os.path.join(libdir, name))
+        depends = "%s, libc6 (>= %s)" % (
+            DEB_DEPENDS_BASE, glibc_floor(staged_elf))
         with open(os.path.join(debdir, "control"), "w") as handle:
             handle.write(control_text(upstream, memveil_rev,
-                                      lmb_sha))
+                                      lmb_sha, depends))
 
         write_md5sums(root)
         fix_modes(root)

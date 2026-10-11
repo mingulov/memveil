@@ -25,11 +25,19 @@
 # are off so they never satisfy other packages, auto-requires
 # are off so the private SONAMEs never leak into the
 # dependency set, and system deps stay manual exactly like the
-# .deb (libelf, zlib; libc/libm come with glibc, always
-# present). The AutoReq/AutoProv tags are the effective
-# switch on rpm >= 4.9 (the __find_* nil globals predate the
-# fileattrs generators and no longer suppress anything on
-# their own); the nils stay as belt and braces for old rpm.
+# .deb (libelf, zlib, plus the versioned glibc floor the
+# staged ELF files require). The floor uses the portable
+# package-name form `glibc >= X.Y` (Fedora and SUSE share
+# the glibc name with a comparable EVR) rather than the
+# generator-spelled virtual `libc.so.6(GLIBC_X.Y)(64bit)`
+# provide; its value is the max GLIBC_x.y need across the
+# staged binary, bridge, and closure (see the .deb
+# derivation and test_spec_glibc_floor_matches_payload),
+# kept in sync by hand because the spec is static text.
+# The AutoReq/AutoProv tags are the effective switch on rpm
+# >= 4.9 (the __find_* nil globals predate the fileattrs
+# generators and no longer suppress anything on their own);
+# the nils stay as belt and braces for old rpm.
 # No maintainer scriptlets: the private lib needs no
 # ldconfig and no collection runs at install. No file
 # capabilities and no set-uid bits anywhere.
@@ -57,7 +65,7 @@ Source1: libbpf-mojo-0.1.0.tar.gz
 BuildRequires: binutils
 BuildRequires: patchelf
 BuildRequires: python3
-Requires: libelf.so.1()(64bit), libz.so.1()(64bit)
+Requires: libelf.so.1()(64bit), libz.so.1()(64bit), glibc >= 2.38
 
 %description
 Record swiotlb bounce activity, mapping lifetimes, and executed
@@ -144,6 +152,9 @@ chmod 0755 "%{buildroot}/usr/bin/memveil"
 /usr/share/memveil/profiles/
 /usr/share/memveil/docs/
 %dir /usr/share/doc/memveil
+%dir /usr/share/doc/memveil/LICENSES
+%dir /usr/share/doc/memveil/licenses
+%dir /usr/share/doc/memveil/licenses/libbpf-mojo-LICENSES
 /usr/share/doc/memveil/copyright
 /usr/share/doc/memveil/LICENSE
 /usr/share/doc/memveil/THIRD-PARTY-NOTICES.md

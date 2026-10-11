@@ -110,6 +110,39 @@ def test_contained(tmp_path):
         str(base / ".." / "escape.so"), str(base))
 
 
+def load_deb_tool():
+    path = os.path.join(REPO, "tools", "package-deb")
+    loader = SourceFileLoader("mvpackagedeb", path)
+    spec = importlib.util.spec_from_loader("mvpackagedeb", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+DEB_PKG = load_deb_tool()
+
+READELF_VERSION_NEEDS = """\
+Version needs section '.gnu.version_r' contains 2 entries:
+  000000: Version: 1  File: libc.so.6  Cnt: 3
+  0x0010:   Name: GLIBC_2.17  Flags: none  Version: 4
+  0x0020:   Name: GLIBC_2.34  Flags: none  Version: 5
+  0x0030:   Name: GLIBC_2.38  Flags: none  Version: 7
+  0x0040: Version: 1  File: libelf.so.1  Cnt: 1
+  0x0050:   Name: ELFUTILS_1.0  Flags: none  Version: 3
+"""
+
+
+def test_glibc_floor_parses_max_need():
+    assert DEB_PKG.parse_glibc_floor(
+        READELF_VERSION_NEEDS) == (2, 38)
+
+
+def test_glibc_floor_ignores_non_glibc():
+    assert DEB_PKG.parse_glibc_floor(
+        "Name: ELFUTILS_1.0\nName: GCC_3.0\n") is None
+    assert DEB_PKG.parse_glibc_floor("") is None
+
+
 CLEAN_TRACE = """\
 100 execve("/b/bin/memveil", ["report"], 0x7f) = 0
 100 openat(AT_FDCWD, "/b/lib/libK.so", O_RDONLY) = -1 ENOENT (No such file)
