@@ -1461,9 +1461,12 @@ def _own_dir_has_foreign(dir_fd: Int32) -> Bool:
     session.json; any other entry proves a planted or
     swapped-in foreign file, and the repair must not
     transfer the directory out from under it. Listing
-    failures also refuse (fail closed). Reads through a
-    dup'd stream so the held descriptor is untouched.
-    Never raises.
+    failures also refuse (fail closed). Reads through
+    a dup'd stream: dup shares the open file
+    description and its offset, so the caller must
+    pass a fresh descriptor (as the repair path
+    does); the dup exists only so that closedir
+    cannot close the held fd. Never raises.
     """
     var dup_fd = external_call["dup", Int32](dir_fd)
     if dup_fd < Int32(0):
