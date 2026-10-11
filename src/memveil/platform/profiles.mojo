@@ -1313,16 +1313,18 @@ def _check_receipt(
     root: String,
     zlib: String,
     pdir: String,
+    bridge_sha: String,
 ) -> _ReceiptHit:
     """Receipt verdict for one covering reference doc.
 
     A hit (empty note) means the receipt under
-    <pdir>/receipts/ verifies and the doc's identity
-    bindings hold; the caller matches local-auto and
-    keeps the qualified caps for per-capability judging.
-    Never raises: unreadable files read as absent, and
-    the profile_id grammar admits no path separators so
-    the join cannot escape receipts/.
+    <pdir>/receipts/ verifies against the doc, the live
+    kernel, and the resolved bridge hash, and the doc's
+    identity bindings hold; the caller matches local-auto
+    and keeps the qualified caps for per-capability
+    judging. Never raises: unreadable files read as
+    absent, and the profile_id grammar admits no path
+    separators so the join cannot escape receipts/.
     """
     var out = _ReceiptHit()
     if pdir == String(""):
@@ -1337,7 +1339,9 @@ def _check_receipt(
     except:
         out.note = String("absent")
         return out^
-    var v = verify_qualification_receipt(Span(raw), doc, kernel)
+    var v = verify_qualification_receipt(
+        Span(raw), doc, kernel, bridge_sha
+    )
     if not v.ok:
         out.note = doc.profile_id + String(" ") + v.message
         return out^
@@ -1371,6 +1375,7 @@ def select_profile_bound(
     root: String,
     zlib: String,
     pdir: String,
+    bridge_sha: String,
 ) -> ProfileDecision:
     """Match kernel identity, preferring a doc that binds.
 
@@ -1379,9 +1384,10 @@ def select_profile_bound(
     and whose identity bindings hold against the evidence tree
     under root. Object and ring bindings stay record-time
     checks. Otherwise every covering reference doc is tried
-    for a valid receipt under <pdir>/receipts/ whose
-    identity bindings hold, first hit matching with grade
-    local-auto. With no receipt hit it falls back to the
+    for a receipt under <pdir>/receipts/ verifying against
+    the resolved bridge hash whose identity bindings hold,
+    first hit matching with grade local-auto. With no
+    receipt hit it falls back to the
     first covering doc of any status: a non-binding
     validated doc reports its own failing key; other
     reference cover names its receipt state plus the first
@@ -1480,7 +1486,7 @@ def select_profile_bound(
         if profiles[i].status == String("validated"):
             continue
         var hit = _check_receipt(
-            profiles[i], kernel, root, zlib, pdir
+            profiles[i], kernel, root, zlib, pdir, bridge_sha
         )
         if hit.note == String(""):
             return ProfileDecision(
@@ -1521,7 +1527,7 @@ def select_profile_bound(
             List[String](),
         )
     var receipt_hit = _check_receipt(
-        first, kernel, root, zlib, pdir
+        first, kernel, root, zlib, pdir, bridge_sha
     )
     var receipt_note = receipt_hit.note
     var reason = (
@@ -1565,16 +1571,22 @@ struct ReceiptVerdict(Copyable, Movable):
 
     ``caps`` lists the qualified capability ids in receipt
     order on success and stays empty on any refusal.
+    ``bridge_mismatch`` is True only when every other check
+    passed and the receipt's bridge hash differs from the
+    resolved bridge, so callers can name the stale bridge
+    in their fallback reason.
     """
 
     var ok: Bool
     var message: String
     var caps: List[String]
+    var bridge_mismatch: Bool
 
     def __init__(out self):
         self.ok = False
         self.message = String("")
         self.caps = List[String]()
+        self.bridge_mismatch = False
 
 
 def mint_qualification_receipt(
@@ -1655,6 +1667,7 @@ struct _ReceiptData(Copyable, Movable):
     var image_bid: String
     var cap_count: Int
     var cap_ids: List[String]
+    var bridge: String
     var obj_attempt: String
     var obj_lc: String
     var obj_cp: String
@@ -1671,6 +1684,7 @@ struct _ReceiptData(Copyable, Movable):
         self.image_bid = String("")
         self.cap_count = 0
         self.cap_ids = List[String]()
+        self.bridge = String("")
         self.obj_attempt = String("")
         self.obj_lc = String("")
         self.obj_cp = String("")
@@ -1995,6 +2009,9 @@ def _parse_receipt_artifacts(
                     raise ValidationError(
                         "receipt.artifacts", "bad sha256 value"
                     )
+                rec.bridge = _strip_sha256(
+                    v, String("receipt.artifacts")
+                )
                 has_bridge = True
             elif key == "objects":
                 if has_objects:
@@ -2076,7 +2093,10 @@ def _parse_receipt_workload(mut scan: Scanner) raises:
 
 
 def verify_qualification_receipt(
-    data: Span[UInt8, _], doc: Profile, kernel: KernelInfo
+    data: Span[UInt8, _],
+    doc: Profile,
+    kernel: KernelInfo,
+    bridge_sha: String,
 ) -> ReceiptVerdict:
     """Verify a receipt against its document and the live kernel.
 
@@ -2087,9 +2107,14 @@ def verify_qualification_receipt(
     the document revision, and every object hash the
     receipt claims must equal the note's binding, so an
     updated document or object cannot inherit an old
-    receipt. At least one capability must qualify; the
-    bridge and workload are shape-checked audit context.
-    Never raises.
+    receipt. ``bridge_sha`` is the bare hex sha256 of the
+    currently-resolved bridge ("" when unresolvable);
+    the receipt's bridge hash must equal it, so a receipt
+    minted for one bridge cannot admit another. The
+    bridge compares last, after document and object
+    drift, so a pure bridge rotation names the bridge.
+    At least one capability must qualify; the workload
+    is shape-checked audit context. Never raises.
     """
     var out = ReceiptVerdict()
     var text = String("")
@@ -2241,6 +2266,12 @@ def verify_qualification_receipt(
             or (rec.obj_cp != String("") and rec.obj_cp != bind.cp_object)
         ):
             out.message = String("receipt artifacts differ from note")
+            return out^
+        if rec.bridge != bridge_sha:
+            out.message = String(
+                "receipt bridge differs from resolved bridge"
+            )
+            out.bridge_mismatch = True
             return out^
         scan.skip_ws()
         if not scan.at_end():

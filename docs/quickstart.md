@@ -95,7 +95,7 @@ Extra channels qualify the same way, naming their objects:
         --cp-object "$PWD/bpf/swiotlb_copy.bpf.o" \
         --profile "$PWD/profiles/my-host.json"
 
-After any kernel, object, or profile change the receipt
+After any kernel, object, bridge, or profile change the receipt
 goes stale: refresh the profile's recorded bindings from
 the new host first, then re-run `qualify` (`doctor` says
 exactly which binding drifted). `record` re-verifies the

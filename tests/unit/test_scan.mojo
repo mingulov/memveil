@@ -42,6 +42,8 @@ comptime _ELF_CP = "tests/fixtures/elf/cp-ok.o"
 comptime _ELF_LC_BAD = "tests/fixtures/elf/lc-wrongsec.o"
 comptime _SYSTEM_BPF = "/usr/share/memveil/bpf"
 comptime _ATTEMPT_OBJECT = "swiotlb_attempt.bpf.o"
+comptime _SCAN_BRIDGE = "de95690aba8f0462aa24599fa7949dbe81f4cafb2720641645951bbe304ccb8d"
+comptime _FOREIGN_BRIDGE = "0000000000000000000000000000000000000000000000000000000000000000"
 
 
 def _kernel() -> KernelInfo:
@@ -80,6 +82,7 @@ def test_scan_validated_wins() raises:
         String(""),
         String(""),
         String(""),
+        String(""),
     )
     assert_true(d.ok)
     assert_equal(d.kind, String("validated"))
@@ -96,6 +99,7 @@ def test_scan_bound_measurements() raises:
     var d = decide_record(
         String(_OK), _kernel(), _profiles(), String(""), False,
         String(_ELF_OK),
+        String(""),
         String(""),
         String(""),
         String(""),
@@ -126,6 +130,7 @@ def test_scan_partial_unmeasured() raises:
         String(""),
         False,
         String(_ELF_OK),
+        String(""),
         String(""),
         String(""),
         String(""),
@@ -216,6 +221,7 @@ def test_scan_skips_mismatched() raises:
         String(""),
         String(""),
         String(""),
+        String(""),
     )
     assert_true(d.ok)
     assert_equal(d.kind, String("validated"))
@@ -230,6 +236,7 @@ def test_scan_uncheckable_partial() raises:
         String(""),
         False,
         String(_ELF_OK),
+        String(""),
         String(""),
         String(""),
         String(""),
@@ -255,6 +262,7 @@ def test_scan_diffconfig_partial() raises:
         String(""),
         String(""),
         String(""),
+        String(""),
     )
     assert_true(d.ok)
     assert_equal(d.kind, String("partial"))
@@ -272,6 +280,7 @@ def test_scan_skew_partial() raises:
         String(""),
         String(""),
         String(""),
+        String(""),
     )
     assert_true(d.ok)
     assert_equal(d.kind, String("partial"))
@@ -285,6 +294,7 @@ def test_scan_explicit_candidate() raises:
         String(_PROFILES) + String("/ref.json"),
         True,
         String(_ELF_OK),
+        String(""),
         String(""),
         String(""),
         String(""),
@@ -395,6 +405,7 @@ def test_scan_saturation_mechanism() raises:
         String(""),
         String(""),
         String(""),
+        String(""),
     )
     assert_true(adm.ok)
     assert_equal(adm.kind, String("candidate"))
@@ -406,6 +417,7 @@ def test_scan_saturation_mechanism() raises:
         String(_PROFILES) + String("/valid.json"),
         True,
         String(_ELF_RING),
+        String(""),
         String(""),
         String(""),
         String(""),
@@ -427,6 +439,7 @@ def test_scan_no_coverage() raises:
         String(""),
         String(""),
         String(""),
+        String(""),
     )
     assert_true(not d.ok)
     assert_equal(d.refusal, String("no profile covers this kernel"))
@@ -440,6 +453,7 @@ def test_scan_explicit_unbound_reference() raises:
         String(_PROFILES) + String("/unbound.json"),
         True,
         String(_ELF_OK),
+        String(""),
         String(""),
         String(""),
         String(""),
@@ -460,6 +474,7 @@ def test_scan_explicit_validated_unbound() raises:
         String(_PROFILES) + String("/valid-unbound.json"),
         True,
         String(_ELF_OK),
+        String(""),
         String(""),
         String(""),
         String(""),
@@ -485,6 +500,7 @@ def test_scan_explicit_nohook() raises:
         String(""),
         String(""),
         String(""),
+        String(""),
     )
     assert_true(not d.ok)
     assert_equal(d.refusal, String("no tracepoint hook"))
@@ -498,6 +514,7 @@ def test_scan_explicit_notext() raises:
         String(_PROFILES) + String("/notext.json"),
         True,
         String(_ELF_OK),
+        String(""),
         String(""),
         String(""),
         String(""),
@@ -536,6 +553,7 @@ def _decide_lc(
         lc_object,
         cp_object,
         caps,
+        String(""),
         String(""),
     )
 
@@ -798,6 +816,7 @@ def test_scan_lc_unknown_kernel_refuses() raises:
         String(_ELF_CP),
         String(_CAPS3),
         String(""),
+        String(""),
     )
     assert_true(not d.ok)
     assert_equal(
@@ -839,6 +858,7 @@ def test_scan_receipt_local_auto() raises:
         String(""),
         String(""),
         String(_PROFILES),
+        String(_SCAN_BRIDGE),
     )
     assert_true(d.ok)
     assert_equal(d.kind, String("local-auto"))
@@ -862,6 +882,7 @@ def test_scan_receipt_extras() raises:
         String(_ELF_CP),
         String(_CAPS3),
         String(_PROFILES),
+        String(_SCAN_BRIDGE),
     )
     assert_true(d.ok)
     assert_equal(d.kind, String("local-auto"))
@@ -883,6 +904,7 @@ def test_scan_receipt_missing_caps_refuses_extras() raises:
         String(_ELF_CP),
         String(_CAPS3),
         String(_PROFILES),
+        String(_SCAN_BRIDGE),
     )
     assert_true(not d.ok)
     assert_equal(
@@ -906,6 +928,7 @@ def test_scan_receipt_stale_kernel_partial() raises:
         String(""),
         String(""),
         String(_PROFILES),
+        String(_SCAN_BRIDGE),
     )
     assert_true(d.ok)
     assert_equal(d.kind, String("partial"))
@@ -919,6 +942,7 @@ def test_scan_receipt_disabled_partial() raises:
         String(""),
         False,
         String(_ELF_OK),
+        String(""),
         String(""),
         String(""),
         String(""),
@@ -948,12 +972,63 @@ def test_scan_receipt_stale_bindings_partial() raises:
         String(""),
         String(""),
         String(_PROFILES),
+        String(_SCAN_BRIDGE),
     )
     assert_true(d.ok)
     assert_equal(d.kind, String("partial"))
     assert_equal(
         d.reason,
         String("partial scan-ref-stale: no validated profile"),
+    )
+
+
+def test_scan_receipt_bridge_mismatch_partial() raises:
+    # The receipt is otherwise valid for this host, but it
+    # was minted for another bridge: admission must fall
+    # through to partial with a reason naming the bridge
+    # mismatch, never local-auto.
+    var d = decide_record(
+        String(_OK),
+        _kernel(),
+        _ref_profiles(String("ref.json")),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(""),
+        String(""),
+        String(""),
+        String(_PROFILES),
+        String(_FOREIGN_BRIDGE),
+    )
+    assert_true(d.ok)
+    assert_equal(d.kind, String("partial"))
+    assert_equal(
+        d.reason,
+        String("partial scan-ref: receipt bridge mismatch"),
+    )
+
+
+def test_scan_receipt_bridge_unknown_partial() raises:
+    # An unresolvable bridge ("") is missing identity, not
+    # a match: the same fall-through as a foreign bridge.
+    var d = decide_record(
+        String(_OK),
+        _kernel(),
+        _ref_profiles(String("ref.json")),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(""),
+        String(""),
+        String(""),
+        String(_PROFILES),
+        String(""),
+    )
+    assert_true(d.ok)
+    assert_equal(d.kind, String("partial"))
+    assert_equal(
+        d.reason,
+        String("partial scan-ref: receipt bridge mismatch"),
     )
 
 
@@ -973,6 +1048,7 @@ def test_scan_moved_layout_refuses_named_diff() raises:
         String(""),
         String(""),
         String(""),
+        String(""),
     )
     assert_true(not d.ok)
     assert_equal(
@@ -985,6 +1061,7 @@ def test_scan_moved_layout_refuses_named_diff() raises:
         String(""),
         False,
         String(_ELF_OK),
+        String(""),
         String(""),
         String(""),
         String(""),
@@ -1039,6 +1116,8 @@ def run() raises -> Int:
     suite.test[test_scan_receipt_stale_kernel_partial]()
     suite.test[test_scan_receipt_disabled_partial]()
     suite.test[test_scan_receipt_stale_bindings_partial]()
+    suite.test[test_scan_receipt_bridge_mismatch_partial]()
+    suite.test[test_scan_receipt_bridge_unknown_partial]()
     suite.test[test_scan_moved_layout_refuses_named_diff]()
     suite^.run()
     return 0

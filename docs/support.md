@@ -50,7 +50,7 @@ pressure finding is not evidence of absent pressure.
   records with partial diagnostics; an explicit `--profile` that fails binding
   refuses, as do requested extra channels without full
   narrow binding. `record` re-verifies the receipt at
-  every start; a kernel, object, or profile change loses
+  every start; a kernel, object, bridge, or profile change loses
   `local-auto` admission until the profile's recorded
   bindings are refreshed and `qualify` re-proves the
   host, with attempt-only recording falling back to
