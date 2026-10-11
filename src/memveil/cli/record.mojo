@@ -19,7 +19,7 @@ error raises.
 """
 
 from std.ffi import external_call
-from std.os import getenv
+from std.os import getenv, listdir
 
 from memveil.capture.collector import (
     EXIT_ERROR,
@@ -82,6 +82,7 @@ from memveil.platform.profiles import (
 )
 from memveil.platform.reader import (
     EvidenceReader,
+    _geteuid_live,
     open_evidence_reader,
     read_host_file,
     readlink_self,
@@ -1259,6 +1260,92 @@ def resolve_object(
     return discover_object(kind, explicit, has_explicit, exe_path)
 
 
+def _parse_sudo_id(text: String) -> Int:
+    """Parse a SUDO_UID/SUDO_GID value, or -1 when insane.
+
+    Strict ASCII decimal fitting uid_t
+    (0..4294967295); empty, non-digit, and
+    overflowing values refuse. -1 never collides:
+    it lies outside the uid_t range.
+    """
+    var raw = text.as_bytes()
+    if len(raw) == 0 or len(raw) > 10:
+        return -1
+    var v = UInt64(0)
+    for i in range(len(raw)):
+        var b = raw[i]
+        if b < UInt8(0x30) or b > UInt8(0x39):
+            return -1
+        var d = UInt64(Int(b) - 0x30)
+        if v > (UInt64(0xFFFFFFFF) - d) // UInt64(10):
+            return -1
+        v = v * UInt64(10) + d
+    return Int(v)
+
+
+def _to_cstr(text: String) -> List[UInt8]:
+    """Copy text into a fresh NUL-terminated byte buffer."""
+    var out = List[UInt8]()
+    for b in text.as_bytes():
+        out.append(b)
+    out.append(UInt8(0))
+    return out^
+
+
+def _chown_one(path: String, uid: UInt32, gid: UInt32) -> Bool:
+    """True when one chown call reports success."""
+    var cpath = _to_cstr(path)
+    var r = external_call["chown", Int32](
+        Span(cpath).unsafe_ptr(), uid, gid
+    )
+    return Int(r) == 0
+
+
+def _restore_sudo_ownership(output: String):
+    """Best-effort capture ownership repair; never raises.
+
+    Under sudo the capture lands root-owned (mkdir
+    0700), locking out the invoking user's replay.
+    When both SUDO_UID and SUDO_GID parse as uid_t
+    values and this process runs as root (a non-root
+    run already owns its files, so there is nothing
+    to restore), chown the capture dir and its flat
+    children (events.ndjson, session.json) to the
+    invoking user. Any failure warns once on stderr;
+    the capture itself stands.
+    """
+    var uid = _parse_sudo_id(getenv("SUDO_UID"))
+    var gid = _parse_sudo_id(getenv("SUDO_GID"))
+    if uid < 0 or gid < 0:
+        return
+    if _geteuid_live() != 0:
+        return
+    var ok = _chown_one(output, UInt32(uid), UInt32(gid))
+    var names = List[String]()
+    try:
+        names = listdir(output)
+    except:
+        ok = False
+    for i in range(len(names)):
+        if names[i] == String(".") or names[i] == String(".."):
+            continue
+        var child = output + String("/") + names[i].copy()
+        if not _chown_one(child, UInt32(uid), UInt32(gid)):
+            ok = False
+    if not ok:
+        try:
+            write_stderr(
+                String("memveil record: warning: cannot restore ")
+                + String("capture ownership to ")
+                + String(uid)
+                + String(":")
+                + String(gid)
+                + String("\n")
+            )
+        except:
+            pass
+
+
 def _read_boot_id(root: String, mut boot_id: String) -> Bool:
     """Live boot id when present and well-formed, else False."""
     var raw: List[UInt8]
@@ -1584,7 +1671,13 @@ def run_collector_with[W: WriterSource](
     var clock = MonoClock()
     var signal = LiveSignalSource()
     var collector = Collector(cfg^)
-    return collector.run(kernel, clock, signal, writer)
+    var out = collector.run(kernel, clock, signal, writer)
+    if out.outcome == String("finalized"):
+        # A published capture lands root-owned under sudo;
+        # hand it to the invoking user. Warn-only: the
+        # capture stands whatever ownership repair does.
+        _restore_sudo_ownership(opts.output)
+    return out^
 
 
 def run_record_with(

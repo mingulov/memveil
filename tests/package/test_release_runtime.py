@@ -196,3 +196,56 @@ def test_permissions(bundle):
                     stat.S_ISUID | stat.S_ISGID):
                 bad.append(os.path.relpath(full, root))
     assert not bad, "; ".join(bad[:5])
+
+
+def test_tar_members_normalized_modes():
+    # The tarball carries explicit directory members (0755) and
+    # normalized file modes (0644, executable bit kept), never
+    # raw build-tree modes. Read the members themselves: the
+    # extracted tree may mask modes through the umask.
+    assert TARBALL and os.path.isfile(TARBALL), \
+        "MV_BUNDLE_TARBALL must name the built tarball"
+    with tarfile.open(TARBALL, "r:gz") as tar:
+        members = tar.getmembers()
+    assert members, "tarball has no members"
+    top = members[0].name.split("/")[0]
+    dirs = [m for m in members if m.isdir()]
+    assert dirs, "tarball must carry explicit directory members"
+    assert any(m.name == top for m in dirs), \
+        "tarball lacks top dir member %s" % top
+    for member in dirs:
+        assert stat.S_IMODE(member.mode) == 0o755, \
+            "%s mode %o, want 755" % (member.name, member.mode)
+    files = [m for m in members if m.isfile()]
+    assert files, "tarball has no file members"
+    binary = top + "/bin/memveil"
+    assert any(m.name == binary for m in files), \
+        "tarball lacks %s" % binary
+    for member in files:
+        mode = stat.S_IMODE(member.mode)
+        if member.name == binary:
+            assert mode == 0o755, \
+                "%s mode %o, want 755" % (member.name, mode)
+        else:
+            assert mode in (0o644, 0o755), \
+                "%s mode %o, want 644 or 755" % (
+                    member.name, mode)
+
+
+def test_bare_env_record_fails_past_discovery(bundle, tmp_path):
+    # Zero-config: bundled record with an empty environment and
+    # no --bridge/--object must resolve the bundled bridge and
+    # objects. It then refuses at a later gate (this host lacks
+    # readable tracefs) or, on a qualified host, captures; it
+    # must never fail discovery itself.
+    root, _ = bundle
+    cap = tmp_path / "cap"
+    proc = run(str(root / "bin" / "memveil"), "record",
+               "--output", str(cap),
+               "--duration", "1", cwd=str(tmp_path), env={})
+    for missing in ("no bridge", "no object", "missing --object"):
+        assert missing not in proc.stderr, proc.stderr
+    assert proc.returncode in (3, 4), proc.stderr
+    if proc.returncode == 3:
+        assert proc.stderr.strip(), "refusal needs a diagnostic"
+        assert not cap.exists(), "refused record left a capture dir"
