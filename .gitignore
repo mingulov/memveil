@@ -14,3 +14,5 @@ modules.order
 # after rebuilding the BPF object; narrow object.o files are static stubs).
 !tests/fixtures/elf/*.o
 !tests/fixtures/narrow/*/*.o
+# Runtime discovery markers are static readability stubs, never loaded.
+!tests/fixtures/runtime/bpf/*.bpf.o
