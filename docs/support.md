@@ -14,7 +14,7 @@ has passed its gates.
 | Default-pool capacity/used/high-water | Readable debugfs samples at start, on a best-effort 1 s cadence (cap 4,096; missed ticks skipped), and close; unreadable reads persist as unavailable, never failed runs | Pool reducers require matching generation/scope; samples are opportunistic reads with possible gaps, so they cannot establish sustained pressure alone |
 | Allocation occupancy, copy, sync, lifetimes | Qualified on `linux-x86_64-7.0.0-34-generic` via `--capability` with `--lc-object`/`--cp-object`, or per host by a machine-local `local-auto` receipt from `memveil qualify`; exact bindings refuse anything else | Offline reducers accept corresponding records; laboratory probes and scripted DMA comparisons do not qualify packaged lifecycle collection |
 | Private/shared state and physical unions | No qualified shipping source | Offline region/baseline reducers and laboratory conversion probes; ordinary-Linux APIs do not prove confidential transitions |
-| Summary | `top --output DIR --object PATH` observes live under the same admission as `record`, retaining the capture while printing prefix summaries (provisional; the final answer always equals a replay of the retained capture); startup/collection refusals exit 3 | `top DIR` replays prefixes of a finished capture |
+| Summary | `top --output DIR [--object PATH]` observes live under the same admission as `record`, retaining the capture while printing prefix summaries (provisional; the final answer always equals a replay of the retained capture); startup/collection refusals exit 3 | `top DIR` replays prefixes of a finished capture |
 | Joint observers/two instances | No current-candidate qualification | Historical experiments only; see [coexistence](coexistence.md) |
 | SNP/TDX | No real confidential-guest qualification | Missing hardware evidence stays open; synthetic/offline tests are separate |
 
@@ -72,7 +72,10 @@ pressure finding is not evidence of absent pressure.
   x86-64-v2 CPU; each advertised environment needs an exact-artifact test.
 - Profiles resolve from the executable location
   (`<root>/bin/memveil` reads `<root>/profiles`), never from
-  the caller's working directory.
+  the caller's working directory. The bridge and BPF
+  objects resolve the same way (`<root>/lib`,
+  `<root>/bpf`) before the system paths, so no
+  environment setup is needed and plain `sudo` works.
 
 ## Permissions
 
@@ -85,8 +88,12 @@ pressure finding is not evidence of absent pressure.
 | qualify | root: smoke capture plus receipt write under the profiles dir | exit 3 with the exact cause |
 
 Captures are created mode 0600 (session, events) inside a mode
-0700 directory. Recording as root leaves a root-owned capture;
-copy it elsewhere before unprivileged replay. Full privilege
+0700 directory. A capture recorded under `sudo` is handed
+back to the invoking user automatically (failures warn
+once with `cannot restore capture ownership` and the
+capture stands); a root run outside `sudo` stays
+root-owned and still needs a manual handoff before
+unprivileged replay. Full privilege
 details live in `permissions.md`; surprises go to
 `troubleshooting.md`.
 
@@ -96,10 +103,16 @@ details live in `permissions.md`; surprises go to
   128 KiB..4 GiB, minus a 64 KiB closing reserve); at most
   4,194,304 attempt records; ring buffer 8 MiB per enabled
   channel (24 MiB with attempt, lifecycle, and copy
-  channels); BPF object and bridge passed explicitly
-  (`--object`, `--bridge`/`LMB_NATIVE_LIB`).
-  Extra channels are opt-in per run (`--capability` with
-  `--lc-object`/`--cp-object`); see
+  channels); the bridge and BPF objects are discovered
+  (explicit `--bridge`/`--object` win verbatim;
+  `LMB_NATIVE_LIB` is honored only when unprivileged;
+  then the executable-relative bundle path, then the
+  system path; objects have no environment step). A
+  missing-everywhere object refuses with exit 3 `no
+  object: pass --object PATH`.
+  Extra channels are opt-in per run (`--capability`,
+  with `--lc-object`/`--cp-object` as optional
+  overrides); see
   [lifecycle hooks](lifecycle-hooks.md#capability-requested-selection).
 - Report caps: 64 KiB per record, 16 MiB session file,
   256 MiB events total by default, 16 MiB rendered output,

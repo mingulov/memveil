@@ -63,12 +63,12 @@ Register it once in the active profiles directory's
 or duplicates), including under a `--profiles-dir`
 override: only manifest-listed documents are visible to
 `doctor` and automatic `record`, so an unlisted receipt
-stays invisible:
+stays invisible. No environment setup is needed: the
+bridge and BPF objects are discovered from the bundle
+beside the executable, so plain `sudo` works:
 
     echo my-host.json >> "$PWD/profiles/manifest.txt"
-    export LMB_NATIVE_LIB="$PWD/lib/libbpf_mojo.so.1"
-    sudo -E ./bin/memveil qualify --output /tmp/q1 \
-        --object "$PWD/bpf/swiotlb_attempt.bpf.o" \
+    sudo ./bin/memveil qualify --output /tmp/q1 \
         --profile "$PWD/profiles/my-host.json"
 
 Qualification runs a 3-second smoke capture (attach, poll,
@@ -85,15 +85,24 @@ workload that produced it. Re-run `doctor`: ready,
 exit 0. Exit 3 names the exact cause (planning or smoke
 refusal); exit 2 is a usage error; exit 1 is an internal
 failure (unreadable objects, mint/publish failure).
+`--object` and `--bridge` are optional overrides for
+non-bundled artifacts; without them each object is
+discovered beside the executable or under the system
+directory, and the bridge additionally honors
+`LMB_NATIVE_LIB` when unprivileged (under `sudo` the
+environment is ignored). When no object is found
+anywhere, qualify refuses with exit 3 `no object: pass
+--object PATH`.
 
-Extra channels qualify the same way, naming their objects:
+Extra channels qualify the same way, with their objects
+discovered from the bundle:
 
-    sudo -E ./bin/memveil qualify --output /tmp/q3 \
-        --object "$PWD/bpf/swiotlb_attempt.bpf.o" \
+    sudo ./bin/memveil qualify --output /tmp/q3 \
         --capability attempt-trace,mapping-lifecycle,copy-actual \
-        --lc-object "$PWD/bpf/swiotlb_lifecycle.bpf.o" \
-        --cp-object "$PWD/bpf/swiotlb_copy.bpf.o" \
         --profile "$PWD/profiles/my-host.json"
+
+(`--lc-object` and `--cp-object` override discovery
+for non-bundled objects.)
 
 After any kernel, object, bridge, or profile change the receipt
 goes stale: refresh the profile's recorded bindings from
@@ -105,28 +114,37 @@ partial diagnostics.
 
 ## 4. Record one capture (privileged)
 
-Recording needs root (BPF load plus tracefs), the bundled BPF
-object, and the native bridge:
+Recording needs root (BPF load plus tracefs). The bridge
+and BPF object are discovered from the bundle beside the
+executable, so no flags or environment setup are needed
+and plain `sudo` works:
 
-    export LMB_NATIVE_LIB="$PWD/lib/libbpf_mojo.so.1"
-    sudo -E ./bin/memveil record --output /tmp/cap1 \
-        --object "$PWD/bpf/swiotlb_attempt.bpf.o" --duration 10
+    sudo ./bin/memveil record --output /tmp/cap1 --duration 10
 
-(`sudo -E` preserves `LMB_NATIVE_LIB`; or pass
-`--bridge "$PWD/lib/libbpf_mojo.so.1"` instead.) Expected: `ready
-session=...`, then `end=duration outcome=finalized exit=4`.
+Expected: `ready session=...`, then `end=duration
+outcome=finalized exit=4`.
 Exit 4 indicates finalized output with incomplete terminal evidence,
 including zero-event and signal stops. Exit 3 names the refusal reason (profile, bridge,
 privilege); exit 2 is a usage error; exit 1 is an error.
+When no object is found anywhere, the refusal is `no
+object: pass --object PATH`. `--object` and `--bridge`
+are optional overrides for non-bundled artifacts;
+without them the bridge resolves from `LMB_NATIVE_LIB`
+when unprivileged (ignored under `sudo`), then beside
+the executable, then the system path, and each BPF
+object resolves beside the executable or under the
+system directory.
 
 On the admitted profile, the lifecycle and copy channels are
-opt-in per run:
+opt-in per run, with their objects discovered from the
+bundle:
 
-    sudo -E ./bin/memveil record --output /tmp/cap3 \
-        --object "$PWD/bpf/swiotlb_attempt.bpf.o" \
+    sudo ./bin/memveil record --output /tmp/cap3 \
         --capability attempt-trace,mapping-lifecycle,copy-actual \
-        --lc-object "$PWD/bpf/swiotlb_lifecycle.bpf.o" \
-        --cp-object "$PWD/bpf/swiotlb_copy.bpf.o" --duration 10
+        --duration 10
+
+(`--lc-object` and `--cp-object` override discovery
+for non-bundled objects.)
 
 Anything but the exact bound kernel and objects refuses with
 exit 3 instead of recording an unverified channel. On a
@@ -134,17 +152,20 @@ qualified host the receipt admits the channel as `local-auto`;
 a stale receipt loses that admission until step 3 is re-run,
 with attempt-only recording falling back to partial.
 
-Captures are root-owned (mode 0700/0600), so hand yours to your
+Captures are written mode 0700/0600. A capture recorded
+under `sudo` is handed back to the invoking user
+automatically, so replay it in place. Only when the
+restore cannot run (a root shell without sudo's
+identity variables, or a `cannot restore capture
+ownership` warning on stderr), hand the capture to your
 user before the unprivileged replay below:
 
     sudo cp -r /tmp/cap1 ~/cap1 && sudo chown -R $USER ~/cap1
     chmod 700 ~/cap1 && chmod 600 ~/cap1/*
 
-For the opt-in capture, hand off `/tmp/cap3` the same way and
-replay `~/cap3` with the step 5 commands:
-
-    sudo cp -r /tmp/cap3 ~/cap3 && sudo chown -R $USER ~/cap3
-    chmod 700 ~/cap3 && chmod 600 ~/cap3/*
+For the opt-in capture, replay `/tmp/cap3` in place, or
+hand off `~/cap3` the same way and replay that with the
+step 5 commands.
 
 An idle machine usually records zero attempts with complete
 counter snapshots: a valid-empty capture, visibly different
