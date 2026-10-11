@@ -349,6 +349,10 @@ def test_profiles_dir() raises:
         String("/opt/mv/bin/../profiles"),
     )
     assert_equal(
+        default_profiles_dir(String("/usr/bin/memveil")),
+        String("/usr/share/memveil/profiles"),
+    )
+    assert_equal(
         default_profiles_dir(String("memveil")), String("profiles")
     )
     assert_equal(

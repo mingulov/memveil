@@ -151,6 +151,9 @@ def test_qualify_usage() raises:
     assert_true(contains(text, String("qualify --output")))
     assert_true(contains(text, String("[--object PATH]")))
     assert_true(contains(text, String("discover")))
+    assert_true(
+        contains(text, String("/var/lib/memveil/receipts"))
+    )
 
 
 def test_plan_ok() raises:

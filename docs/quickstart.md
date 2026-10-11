@@ -15,6 +15,10 @@ libm, libdl, and the dynamic loader for offline use, plus libelf
 and libz for recording; see the support envelope for the exact
 floor and tested OS.
 
+System packages install the same layout instead: see
+[installed packages](install.md) for the `.deb`/`.rpm`
+install, use, and uninstall flow.
+
 ## 1. Extract and check the version
 
     tar -xzf memveil-0.1.0.tar.gz

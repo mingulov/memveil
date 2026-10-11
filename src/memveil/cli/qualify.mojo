@@ -6,7 +6,9 @@
 detach; an idle ring is honest success) against one
 covering profile and, when the smoke proves the requested
 channels, publishes a machine-local receipt under
-<profiles-dir>/receipts/. Later `record` runs re-verify
+the receipts dir (``<profiles-dir>/receipts``, or
+``/var/lib/memveil/receipts`` for an installed
+package). Later `record` runs re-verify
 the receipt at collection start and admit grade local-auto.
 Qualify never mints grade validated and never rewrites the
 shipped profiles: selection, binding, signature, smoke,
@@ -54,6 +56,7 @@ from memveil.platform.profiles import (
     NamedProfiles,
     Profile,
     SigVerdict,
+    default_receipts_dir,
     load_profiles_named,
     mint_qualification_receipt,
     parse_profile_bytes,
@@ -207,7 +210,8 @@ def qualify_usage() -> String:
         "Run a short smoke capture into DIR and, when it\n"
         "proves the requested channels, publish a\n"
         "machine-local local-auto receipt under\n"
-        "<profiles-dir>/receipts. Without --bridge, the native\n"
+        "<profiles-dir>/receipts (/var/lib/memveil/receipts\n"
+        "for an installed package). Without --bridge, the native\n"
         "bridge is discovered: LMB_NATIVE_LIB when unprivileged,\n"
         "then beside the executable, then the system path.\n"
         "Without --object, --lc-object, or --cp-object, each\n"
@@ -701,8 +705,9 @@ def run_qualify_with(
     """Run the qualify flow against explicit roots; exit code.
 
     ``root`` is the evidence root ("" for the live host)
-    and ``profiles_dir`` holds ``manifest.txt`` plus the
-    ``receipts/`` cache. The smoke runs the collector in
+    and ``profiles_dir`` holds ``manifest.txt``; receipts
+    publish under its receipts dir. The smoke runs the
+    collector in
     explicit mode against the planned doc; only a
     finalized duration-ended smoke whose session file
     proves stop.admission_closed mints, and minting
@@ -874,7 +879,12 @@ def run_qualify_with(
             String("cannot mint receipt: ") + String(e)
         )
     var pid = plan.doc.profile_id.copy()
-    var path = profiles_dir + String("/receipts/") + pid + String(".json")
+    var path = (
+        default_receipts_dir(profiles_dir)
+        + String("/")
+        + pid
+        + String(".json")
+    )
     try:
         publish_receipt(path, receipt)
     except e:

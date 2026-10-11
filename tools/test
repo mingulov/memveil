@@ -18,7 +18,8 @@
 # record-failures, output-paths, vm-cleanup, privacy,
 # render-escaping, offline-environment, perf-replay,
 # perf-workload, soak, preview-package, provenance, source-export,
-# release-runtime, docs, examples, extracted-robustness, deb.
+# release-runtime, docs, examples, extracted-robustness, deb,
+# rpm-journey.
 #
 # A skipped suite is reported as skipped, never as success.
 # Exit 0 only when the suite passes; 1 on test failure; 2 on
@@ -1348,6 +1349,107 @@ suite_deb() {
     fi
     (cd "$ROOT" && MV_DEB="$DEB" MV_REPO="$ROOT" \
         python3 -m pytest -ra tests/package/test_deb.py)
+}
+
+suite_rpm_journey() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "rpm-journey: python3 not found" >&2
+        return 1
+    fi
+    if ! python3 -m pytest --version >/dev/null 2>&1; then
+        echo "rpm-journey: pytest not importable" >&2
+        return 1
+    fi
+    RPM="${MV_RPM:-}"
+    if [ -z "$RPM" ]; then
+        if ! command -v rpmbuild >/dev/null 2>&1; then
+            echo "rpm-journey: BLOCKED: MV_RPM is not set and" \
+                "rpmbuild is not installed (apt install rpm on" \
+                "this host, or preset MV_RPM at a built .rpm)" >&2
+            return 1
+        fi
+        if [ -z "${LMB_PACKAGE:-}" ]; then
+            echo "rpm-journey: BLOCKED: MV_RPM is not set and" \
+                "LMB_PACKAGE is not set (the spec build needs" \
+                "the pinned bridge tarball)" >&2
+            return 1
+        fi
+        if [ ! -f "${LMB_PACKAGE:-}" ]; then
+            echo "rpm-journey: LMB_PACKAGE is not a file:" \
+                "$LMB_PACKAGE" >&2
+            return 1
+        fi
+        SPEC="$ROOT/packaging/rpm/memveil.spec"
+        SPEC_VER=$(sed -n 's/^Version: *//p' "$SPEC")
+        SRC1=$(sed -n 's/^Source1: *//p' "$SPEC")
+        if [ -z "$SPEC_VER" ] || [ -z "$SRC1" ]; then
+            echo "rpm-journey: spec has no Version/Source1" >&2
+            return 1
+        fi
+        RTMP=$(mktemp -d)
+        trap 'rm -rf "$RTMP"' EXIT
+        mkdir -p "$RTMP/SOURCES" "$RTMP/BUILD" "$RTMP/RPMS" \
+            "$RTMP/SRPMS" "$RTMP/BUILDROOT"
+        # Source0 is the exact tracked plus unignored-untracked
+        # set, so the .rpm tests the tree as-is (on a clean
+        # tree this equals git archive HEAD; ignored build
+        # residue never enters). Outside a checkout, tar the
+        # source-export tree minus generated directories.
+        if git -C "$ROOT" rev-parse --is-inside-work-tree \
+            >/dev/null 2>&1; then
+            (cd "$ROOT" && { git ls-files -z; git ls-files \
+                --others --exclude-standard -z; } | tar --null \
+                --no-recursion -czf \
+                "$RTMP/SOURCES/memveil-$SPEC_VER.tar.gz" \
+                --transform "s,^,memveil-$SPEC_VER/," -T -) \
+                || {
+                echo "rpm-journey: Source0 tar failed" >&2
+                return 1
+            }
+        else
+            (cd "$ROOT" && tar -czf \
+                "$RTMP/SOURCES/memveil-$SPEC_VER.tar.gz" \
+                --transform "s,^./,memveil-$SPEC_VER/," \
+                --exclude='./build' --exclude='./dist' \
+                --exclude='./.pixi' --exclude='./.git' \
+                --exclude='*__pycache__*' \
+                --exclude='./.pytest_cache' .) || {
+                echo "rpm-journey: Source0 tar failed" >&2
+                return 1
+            }
+        fi
+        cp "$LMB_PACKAGE" "$RTMP/SOURCES/$SRC1" || {
+            echo "rpm-journey: Source1 copy failed" >&2
+            return 1
+        }
+        cp "$SPEC" "$RTMP/" || {
+            echo "rpm-journey: spec copy failed" >&2
+            return 1
+        }
+        # debug_package nil works around Ubuntu rpm, which
+        # runs find-debuginfo despite the spec's
+        # __os_install_post nil; it only gates the -debuginfo
+        # subpackage, never the main payload.
+        if ! rpmbuild -bb --define "_topdir $RTMP" \
+            --define "debug_package %{nil}" "$RTMP/memveil.spec" \
+            >"$RTMP/rpmbuild.log" 2>&1; then
+            echo "rpm-journey: BLOCKED: rpmbuild failed" >&2
+            cat "$RTMP/rpmbuild.log" >&2
+            return 1
+        fi
+        RPM=$(find "$RTMP/RPMS" -name '*.rpm' | head -1)
+        if [ -z "$RPM" ] || [ ! -f "$RPM" ]; then
+            echo "rpm-journey: no .rpm built" >&2
+            cat "$RTMP/rpmbuild.log" >&2
+            return 1
+        fi
+    fi
+    if [ ! -f "$RPM" ]; then
+        echo "rpm-journey: MV_RPM is not a file: $RPM" >&2
+        return 1
+    fi
+    (cd "$ROOT" && MV_RPM="$RPM" MV_REPO="$ROOT" \
+        python3 -m pytest -ra tests/package/test_rpm_journey.py)
 }
 
 suite_native_decode() {
@@ -3600,6 +3702,9 @@ case "$1" in
         ;;
     deb)
         suite_deb
+        ;;
+    rpm-journey)
+        suite_rpm_journey
         ;;
     docs)
         suite_docs
