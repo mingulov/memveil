@@ -174,9 +174,12 @@ for a capture with 30 real events.
 
 ## 5. Replay offline (unprivileged)
 
-    ./bin/memveil report --format text ~/cap1
-    ./bin/memveil report --format json ~/cap1
-    ./bin/memveil report --format markdown ~/cap1
+    ./bin/memveil report --format text /tmp/cap1
+    ./bin/memveil report --format json /tmp/cap1
+    ./bin/memveil report --format markdown /tmp/cap1
+
+(If step 4 handed the capture off to `~/cap1`, replay that
+path instead.)
 
 Report reads local files only: no BPF, no BTF, no libbpf, no
 network. Copy the capture directory to another machine (or

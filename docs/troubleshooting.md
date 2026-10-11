@@ -10,7 +10,7 @@ the first failing gate in validation order (see
 
 | stderr | Meaning | Fix |
 |---|---|---|
-| `no bridge: pass --bridge or set LMB_NATIVE_LIB` | bridge discovered nowhere | pass `--bridge PATH`, or keep the bundled `lib/libbpf_mojo.so.1` beside `bin/` |
+| `no bridge: ...` | bridge discovered nowhere | pass `--bridge PATH`, or keep the bundled `lib/libbpf_mojo.so.1` beside `bin/` (unprivileged runs may also set `LMB_NATIVE_LIB`; privileged runs ignore it) |
 | `unknown --profile: ...` | typo or unshipped id | drop `--profile` for auto-select, or check `profiles/manifest.txt` |
 | `object unreadable` | `--object` path missing | point at the shipped `bpf/swiotlb_attempt.bpf.o` |
 | `object refused: ...` | file is not a usable BPF object | use the shipped object; ELFs from other tools are refused |

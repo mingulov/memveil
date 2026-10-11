@@ -1442,6 +1442,23 @@ def test_receipt_bridge_shape() raises:
     assert_true(contains(msg, String("receipt.artifacts")))
 
 
+def test_receipt_trailing_data_beats_bridge_mismatch() raises:
+    # A foreign bridge hash plus appended garbage must
+    # report trailing data (with no bridge verdict), not
+    # a bridge-only mismatch: JSON consumption
+    # validation finishes before the bridge compares.
+    var js = _mint_good() + String("{}\n")
+    var r = open_evidence_reader(fx("bound-host"))
+    var env = detect_environment(r)
+    var doc = _receipt_doc()
+    var v = verify_qualification_receipt(
+        js.as_bytes(), doc, env.kernel, String(_FOREIGN_BRIDGE)
+    )
+    assert_true(not v.ok)
+    assert_true(contains(v.message, String("trailing data")))
+    assert_true(not v.bridge_mismatch)
+
+
 def test_receipt_bridge_mismatch_refuses() raises:
     # The receipt is otherwise valid, but it was minted
     # for another bridge: verification must refuse with
@@ -1790,6 +1807,36 @@ def test_select_bound_receipt_bridge_mismatch() raises:
             "profile ref-bindable covers this identity"
             " but is reference-unvalidated; ref-bindable"
             " receipt bridge differs from resolved bridge"
+        ),
+    )
+
+
+def test_select_bound_receipt_bridge_unchecked() raises:
+    # The passive path performs no bridge binding
+    # (empty hash): the otherwise-verifying receipt must
+    # report unchecked explicitly instead of implying a
+    # mismatch against a resolution that never ran.
+    var r = open_evidence_reader(fx("bound-host"))
+    var env = detect_environment(r)
+    var ps = load_profiles(fx("profiles-bound-ref"))
+    var d = select_profile_bound(
+        env.kernel,
+        ps^,
+        fx("bound-host"),
+        String("libz.so.1"),
+        fx("profiles-bound-ref"),
+        String(""),
+    )
+    assert_true(not d.matched)
+    assert_true(d.has_profile)
+    assert_equal(d.profile.profile_id, String("ref-bindable"))
+    assert_equal(
+        d.reason,
+        String(
+            "profile ref-bindable covers this identity"
+            " but is reference-unvalidated; ref-bindable"
+            " receipt bridge unchecked:"
+            " no binding performed on this path"
         ),
     )
 
@@ -2680,6 +2727,7 @@ def run() raises -> Int:
     suite.test[test_select_bound_receipt_match]()
     suite.test[test_select_bound_receipt_stale]()
     suite.test[test_select_bound_receipt_bridge_mismatch]()
+    suite.test[test_select_bound_receipt_bridge_unchecked]()
     suite.test[test_select_bound_falls_back_with_reason]()
     suite.test[test_receipt_roundtrip]()
     suite.test[test_receipt_verdict_caps]()
@@ -2689,6 +2737,7 @@ def run() raises -> Int:
     suite.test[test_receipt_artifacts_null]()
     suite.test[test_receipt_workload_false]()
     suite.test[test_receipt_trailing_data]()
+    suite.test[test_receipt_trailing_data_beats_bridge_mismatch]()
     suite.test[test_receipt_bridge_shape]()
     suite.test[test_receipt_bridge_mismatch_refuses]()
     suite.test[test_receipt_workload_kind]()

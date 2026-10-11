@@ -1322,7 +1322,12 @@ def _check_receipt(
     kernel, and the resolved bridge hash, and the doc's
     identity bindings hold; the caller matches local-auto
     and keeps the qualified caps for per-capability
-    judging. Never raises: unreadable files read as
+    judging. An empty ``bridge_sha`` means no bridge
+    binding was performed (the passive path never
+    touches the bridge): receipts then report an
+    explicit unchecked note instead of a mismatch, so
+    the caller never implies a binding that did not
+    happen. Never raises: unreadable files read as
     absent, and the profile_id grammar admits no path
     separators so the join cannot escape receipts/.
     """
@@ -1343,6 +1348,15 @@ def _check_receipt(
         Span(raw), doc, kernel, bridge_sha
     )
     if not v.ok:
+        if v.bridge_mismatch and bridge_sha == String(""):
+            out.note = (
+                doc.profile_id
+                + String(
+                    " receipt bridge unchecked:"
+                    " no binding performed on this path"
+                )
+            )
+            return out^
         out.note = doc.profile_id + String(" ") + v.message
         return out^
     var sel = select_attempt_hook(doc)
@@ -1386,7 +1400,9 @@ def select_profile_bound(
     checks. Otherwise every covering reference doc is tried
     for a receipt under <pdir>/receipts/ verifying against
     the resolved bridge hash whose identity bindings hold,
-    first hit matching with grade local-auto. With no
+    first hit matching with grade local-auto. An empty
+    bridge hash performs no binding: receipts then carry
+    an explicit unchecked note. With no
     receipt hit it falls back to the
     first covering doc of any status: a non-binding
     validated doc reports its own failing key; other
@@ -2267,15 +2283,15 @@ def verify_qualification_receipt(
         ):
             out.message = String("receipt artifacts differ from note")
             return out^
+        scan.skip_ws()
+        if not scan.at_end():
+            raise ValidationError("receipt", "trailing data")
         if rec.bridge != bridge_sha:
             out.message = String(
                 "receipt bridge differs from resolved bridge"
             )
             out.bridge_mismatch = True
             return out^
-        scan.skip_ws()
-        if not scan.at_end():
-            raise ValidationError("receipt", "trailing data")
         out.caps = rec.cap_ids.copy()
     except e:
         out.message = String("receipt unparseable: ") + String(e)

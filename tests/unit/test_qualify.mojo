@@ -18,13 +18,15 @@ from scripted import (
 from memveil.capture.collector import Collector, CollectorConfig
 from memveil.cli.qualify import (
     QualifyOptions,
+    _smoke_bridge_hash,
     parse_qualify_args,
     plan_qualification,
     publish_receipt,
     qualify_usage,
     smoke_shutdown_ok,
 )
-from memveil.cli.record import decide_record
+from memveil.cli.record import decide_record, open_bridge_snapshot
+from memveil.platform.hash import sha256_hex
 from memveil.platform.profiles import Profile
 from memveil.platform.outcome import OpOut
 from memveil.platform.reader import bytes_to_text, read_host_file
@@ -616,6 +618,68 @@ def test_publish_trailing_slash_refuses() raises:
     assert_true(raised)
 
 
+def _q_cstr(text: String) -> List[UInt8]:
+    var out = List[UInt8]()
+    for b in text.as_bytes():
+        out.append(b)
+    out.append(UInt8(0))
+    return out^
+
+
+def _q_write(path: String, text: String) raises:
+    var cpath = _q_cstr(path)
+    var mode = _q_cstr("w")
+    var fp = external_call["fopen", UInt64](
+        Span(cpath).unsafe_ptr(), Span(mode).unsafe_ptr()
+    )
+    if fp == UInt64(0):
+        raise Error("fopen failed for " + path)
+    var raw = text.as_bytes()
+    var n = external_call["fwrite", Int64](
+        Span(raw).unsafe_ptr(), Int64(1), Int64(len(raw)), fp
+    )
+    _ = external_call["fclose", Int32](fp)
+    if Int(n) != len(raw):
+        raise Error("short write for " + path)
+
+
+def test_smoke_bridge_binds_exercised_bytes() raises:
+    # Snapshot the bridge, then swap the pathname: the
+    # receipt input must name the exercised bytes, never
+    # the swapped pathname bytes.
+    var exercised = String("EXERCISED-BRIDGE-BYTES\n")
+    var base = _stop_mkdtemp()
+    var path = base + String("/bridge.so")
+    var repl = base + String("/replacement.so")
+    _q_write(path, exercised)
+    _q_write(repl, String("SWAPPED-BRIDGE-BYTES\n"))
+    var snap = open_bridge_snapshot(path)
+    var cr = _q_cstr(repl)
+    var cp = _q_cstr(path)
+    var r = external_call["rename", Int32](
+        Span(cr).unsafe_ptr(), Span(cp).unsafe_ptr()
+    )
+    assert_equal(Int(r), 0)
+    assert_equal(
+        _smoke_bridge_hash(snap),
+        String("sha256:") + sha256_hex(exercised.as_bytes()),
+    )
+
+
+def test_smoke_bridge_unbound_refuses() raises:
+    # No bound bridge bytes, no receipt: minting must
+    # fail closed instead of hashing a pathname.
+    var snap = open_bridge_snapshot(
+        String("/nonexistent/memveil-bridge.so.1")
+    )
+    var raised = False
+    try:
+        _ = _smoke_bridge_hash(snap)
+    except:
+        raised = True
+    assert_true(raised)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_qualify_args_defaults]()
@@ -654,6 +718,8 @@ def run() raises -> Int:
     suite.test[test_publish_final_symlink_replaced]()
     suite.test[test_publish_trailing_slash_refuses]()
     suite.test[test_plan_below_floor_refuses]()
+    suite.test[test_smoke_bridge_binds_exercised_bytes]()
+    suite.test[test_smoke_bridge_unbound_refuses]()
     suite^.run()
     return 0
 

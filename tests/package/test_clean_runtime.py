@@ -314,10 +314,20 @@ class TestCleanRoom:
 
 # Exact refusal diagnostics for the deterministic denials (any
 # user, any host): the object bytes and the bridge lookup do not
-# depend on privilege or kernel identity.
+# depend on privilege or kernel identity, but the missing-bridge
+# hint does (privileged runs ignore LMB_NATIVE_LIB, so theirs
+# names the bundled bridge instead). Both arms pin exactly.
 BAD_OBJECT_DIAG = "memveil record: object refused: object too small\n"
 NO_BRIDGE_DIAG = \
     "memveil record: no bridge: pass --bridge or set LMB_NATIVE_LIB\n"
+NO_BRIDGE_DIAG_PRIV = ("memveil record: no bridge: restore the bundled bridge"
+                       " or pass --bridge PATH\n")
+
+
+def _no_bridge_diag():
+    if os.geteuid() == 0 or os.geteuid() != os.getuid():
+        return NO_BRIDGE_DIAG_PRIV
+    return NO_BRIDGE_DIAG
 
 
 def test_denied_bad_object(bundle, tmp_path):
@@ -358,7 +368,7 @@ def test_denied_missing_bridge(bundle, tmp_path):
                str(trial / "bpf" / "swiotlb_attempt.bpf.o"),
                "--duration", "2", env=env)
     assert proc.returncode == 3, (proc.returncode, proc.stderr)
-    assert proc.stderr == NO_BRIDGE_DIAG, proc.stderr
+    assert proc.stderr == _no_bridge_diag(), proc.stderr
     assert not out.exists(), "denied run must create no capture"
 
 
