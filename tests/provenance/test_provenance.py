@@ -150,6 +150,8 @@ def main():
         "doctor_schema_version", schema_version)
     report_version = lock["product_contracts"].get(
         "report_schema_version", schema_version)
+    receipt_version = lock["product_contracts"].get(
+        "receipt_schema_version", schema_version)
     import glob
     schemas = sorted(glob.glob(os.path.join(ROOT, "schemas", "*.json")))
     check("schemas-present", len(schemas) >= 4, str(len(schemas)))
@@ -164,6 +166,8 @@ def main():
             want = doctor_version
         elif base.startswith("report-v"):
             want = report_version
+        elif base.startswith("receipt-v"):
+            want = receipt_version
         else:
             want = schema_version
         if "-v%s.schema.json" % want not in p:
