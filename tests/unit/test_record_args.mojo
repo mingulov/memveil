@@ -14,7 +14,7 @@ from memveil.cli.record import (
 from memveil.platform.reader import read_host_file
 
 comptime _EXE = "tests/fixtures/runtime/bin/memveil"
-comptime _SYSTEM_BPF = "/usr/share/memveil/bpf"
+comptime _SYSTEM_BPF = "/usr/lib/memveil"
 
 
 def contains(hay: String, needle: String) -> Bool:

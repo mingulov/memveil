@@ -1,0 +1,385 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Build the third-party memveil .deb from the tested owner bundle.
+
+Runs tools/package (exact pinned bridge, closure-checked lib set,
+license texts, MANIFEST.json) and rearranges the staged tree into
+the installed FHS layout the Phase A discovery constants resolve
+with zero flags or environment::
+
+    usr/bin/memveil                 binary (RUNPATH $ORIGIN/../lib/memveil)
+    usr/lib/memveil/*.so*           Mojo runtime closure + libbpf_mojo.so.1
+    usr/lib/memveil/*.bpf.o         production BPF objects (attempt,
+                                    lifecycle, copy) beside the bridge:
+                                    arch-dependent ELF under /usr/share
+                                    is a packaging error
+    usr/share/memveil/profiles/     manifest plus shipped profiles
+    usr/share/memveil/docs/         the full manuals tree plus the worked
+                                    example (docs/examples/real-capture)
+    usr/share/doc/memveil/          copyright stub plus every license and
+                                    notice text the bundle redistributes
+    var/lib/memveil/receipts/       empty state dir (0755 root:root)
+
+Control notes: manual ``Depends: libelf1t64 | libelf1, zlib1g``
+(dpkg's t64 transition left no libelf1 candidate on current
+systems; the alternation installs on pre-t64 and current ones
+while staying dh_shlibs-free); no maintainer scripts (the
+private lib needs no ldconfig, no collection runs at install);
+DEBIAN/md5sums is generated over the payload for dpkg --verify;
+no setuid bits or file capabilities. X-Memveil-Revision and
+X-LMB-Tarball-SHA256 record the exact source and bridge bytes.
+
+Third-party origin: the conda/pixi Mojo toolchain cannot enter
+Debian, so this package is built outside the archive for a
+third-party repo. Installed verbs that need profiles take
+``--profiles-dir /usr/share/memveil/profiles`` (the default
+exe-relative resolution does not honor the FHS layout, and
+qualify receipts always land under the profiles dir, not under
+/var/lib). Man pages and shell completions are a later task's
+(not shipped here).
+
+Usage: tools/package-deb [--out DIR] [--tag STEM]
+  --out DIR   output directory (default: dist/)
+  --tag STEM  .deb file stem (default: memveil_<version>-1_amd64)
+
+Requires LMB_PACKAGE (pinned libbpf-mojo tarball, checked by
+tools/package against the lock), a clean tree (enforced by
+tools/package), patchelf, and dpkg-deb.
+"""
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+PACKAGE = "memveil"
+SECTION = "utils"
+PRIORITY = "optional"
+ARCH = "amd64"
+DEB_DEPENDS = "libelf1t64 | libelf1, zlib1g"
+MAINTAINER = "MemVeil Project <memveil-maintainers@example.invalid>"
+SHORT_DESC = ("swiotlb bounce-attempt capture and offline replay "
+              "on x86-64 Linux")
+LONG_DESC = (
+    " Record swiotlb bounce activity, mapping lifetimes, and executed\n"
+    " copies into a self-describing capture directory, then replay it\n"
+    " offline as text, JSON, or Markdown. Counts are try-counts with\n"
+    " requested bytes; actual copies come from the copy channel.\n"
+    " .\n"
+    " Third-party binary package: the conda/pixi Mojo toolchain cannot\n"
+    " enter Debian, so this .deb is built outside the archive. Installed\n"
+    " collection needs no flags or environment; verbs that need profiles\n"
+    " take --profiles-dir /usr/share/memveil/profiles."
+)
+COPYRIGHT = """\
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Source: third-party binary build; see X-Memveil-Revision in DEBIAN/control
+
+Files: *
+Copyright: See LICENSE and THIRD-PARTY-NOTICES.md in this directory.
+License: GPL-3.0-or-later
+ The MemVeil sources are available under GPL-3.0-or-later; the full
+ license text is in LICENSE. BPF objects are GPL-2.0-only (LICENSES/).
+ Redistributed third-party texts, including the libbpf-mojo bridge
+ license, live in licenses/, with notices in THIRD-PARTY-NOTICES.md
+ and THIRD-PARTY-NOTICES.libbpf-mojo.md.
+"""
+
+BPF_OBJECTS = (
+    "swiotlb_attempt.bpf.o",
+    "swiotlb_lifecycle.bpf.o",
+    "swiotlb_copy.bpf.o",
+)
+
+BIN_RUNPATH = "$ORIGIN/../lib/memveil"
+
+
+def fail(message):
+    print("package-deb: %s" % message, file=sys.stderr)
+    sys.exit(1)
+
+
+def run(argv, **kwargs):
+    proc = subprocess.run(
+        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, cwd=ROOT, **kwargs,
+    )
+    return proc
+
+
+def needed(path):
+    proc = run(["readelf", "-d", path])
+    if proc.returncode != 0:
+        fail("readelf failed on %s:\n%s" % (path, proc.stderr))
+    return [line.split("[")[1].split("]")[0]
+            for line in proc.stdout.splitlines()
+            if "(NEEDED)" in line and "[" in line]
+
+
+def sha256_file(path):
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def validate_stem(stem):
+    """.deb file stem: a single safe path segment."""
+    if not stem or stem in (".", ".."):
+        raise ValueError("bad .deb stem %r" % stem)
+    if "/" in stem or "\\" in stem or "\x00" in stem:
+        raise ValueError("bad .deb stem %r" % stem)
+    if stem.startswith("-"):
+        raise ValueError("bad .deb stem %r" % stem)
+    return stem
+
+
+def validate_upstream(version):
+    """Upstream version: Debian-safe dotted identifier."""
+    if not re.fullmatch(r"[0-9][A-Za-z0-9.+~]*", version):
+        raise ValueError("bad upstream version %r" % version)
+    return version
+
+
+def contained(path, directory):
+    """True when path stays inside directory after normalization."""
+    base = os.path.realpath(directory)
+    full = os.path.realpath(path)
+    return full == base or full.startswith(base + os.sep)
+
+
+def fix_modes(root):
+    """Staging modes: dirs 0755, files 0644, binary 0755.
+
+    Ownership is forced to root:root by dpkg-deb
+    --root-owner-group at build time, so no chown (and no
+    privilege) is needed here.
+    """
+    binary = os.path.join(root, "usr", "bin", "memveil")
+    for base, dirs, files in os.walk(root):
+        for name in dirs:
+            os.chmod(os.path.join(base, name), 0o755)
+        for name in files:
+            full = os.path.join(base, name)
+            if os.path.realpath(full) == os.path.realpath(binary):
+                os.chmod(full, 0o755)
+            else:
+                os.chmod(full, 0o644)
+    os.chmod(root, 0o755)
+
+
+def write_md5sums(root):
+    """DEBIAN/md5sums over every payload file (dpkg --verify).
+
+    debhelper's dh_md5sums normally writes this; raw staging
+    generates the same "<md5>  <path>" lines with root-relative
+    paths, sorted, covering payload files only (never DEBIAN/).
+    """
+    import hashlib
+
+    entries = []
+    for base, _, files in os.walk(root):
+        for name in sorted(files):
+            full = os.path.join(base, name)
+            rel = os.path.relpath(full, root)
+            if rel == "DEBIAN" or rel.startswith("DEBIAN/"):
+                continue
+            digest = hashlib.md5()
+            with open(full, "rb") as handle:
+                for chunk in iter(lambda: handle.read(65536), b""):
+                    digest.update(chunk)
+            entries.append("%s  %s\n" % (digest.hexdigest(), rel))
+    entries.sort(key=lambda line: line.split("  ", 1)[1])
+    with open(os.path.join(root, "DEBIAN", "md5sums"), "w") as handle:
+        handle.writelines(entries)
+
+
+def control_text(upstream, memveil_rev, lmb_sha):
+    lines = [
+        "Package: %s" % PACKAGE,
+        "Version: %s-1" % upstream,
+        "Section: %s" % SECTION,
+        "Priority: %s" % PRIORITY,
+        "Architecture: %s" % ARCH,
+        "Depends: %s" % DEB_DEPENDS,
+        "Maintainer: %s" % MAINTAINER,
+        "Description: %s" % SHORT_DESC,
+        LONG_DESC,
+        "X-Memveil-Revision: %s" % memveil_rev,
+        "X-LMB-Tarball-SHA256: %s" % lmb_sha,
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def main(argv):
+    out_dir = os.path.join(ROOT, "dist")
+    stem = None
+    args = list(argv)
+    while args:
+        opt = args.pop(0)
+        if opt in ("--help", "-h"):
+            print(__doc__)
+            return 0
+        if opt == "--out" and args:
+            out_dir = args.pop(0)
+            continue
+        if opt == "--tag" and args:
+            stem = args.pop(0)
+            continue
+        fail("unknown option: %s" % opt)
+    if not os.environ.get("LMB_PACKAGE"):
+        fail("LMB_PACKAGE is not set; refusing an unpinned bridge")
+    if not os.path.isfile(os.environ["LMB_PACKAGE"]):
+        fail("LMB_PACKAGE is not a file: %s" % os.environ["LMB_PACKAGE"])
+    if shutil.which("dpkg-deb") is None:
+        fail("dpkg-deb is required to assemble the .deb")
+    if shutil.which("patchelf") is None:
+        fail("patchelf is required to retarget the FHS RUNPATH "
+             "(apt install patchelf)")
+    if shutil.which("readelf") is None:
+        fail("readelf is required to verify the FHS binary")
+
+    work = tempfile.mkdtemp(prefix="memveil-deb-")
+    try:
+        bundle_parent = os.path.join(work, "bundle-build")
+        os.makedirs(bundle_parent)
+        build = run([os.path.join(ROOT, "tools", "package"),
+                     "--out", bundle_parent, "--tag", "bundle"])
+        if build.returncode != 0:
+            print(build.stdout)
+            print(build.stderr, file=sys.stderr)
+            fail("tools/package failed")
+        bundle = os.path.join(bundle_parent, "bundle")
+        manifest = json.load(open(
+            os.path.join(bundle, "MANIFEST.json")))
+        try:
+            upstream = validate_upstream(
+                manifest["engine_version"])
+        except ValueError as err:
+            fail(str(err))
+        memveil_rev = manifest["memveil_revision"]
+        lmb_sha = manifest["libbpf_mojo"]["tarball_used_sha256"]
+        if stem is None:
+            stem = "%s_%s-1_%s" % (PACKAGE, upstream, ARCH)
+        try:
+            validate_stem(stem)
+        except ValueError as err:
+            fail(str(err))
+
+        root = os.path.join(work, "root")
+        bindir = os.path.join(root, "usr", "bin")
+        libdir = os.path.join(root, "usr", "lib", "memveil")
+        profdir = os.path.join(root, "usr", "share", "memveil",
+                               "profiles")
+        docdir = os.path.join(root, "usr", "share", "memveil", "docs")
+        licdir = os.path.join(root, "usr", "share", "doc", "memveil")
+        receipts = os.path.join(root, "var", "lib", "memveil",
+                                "receipts")
+        debdir = os.path.join(root, "DEBIAN")
+        for path in (bindir, libdir, profdir, docdir, licdir,
+                     receipts, debdir):
+            os.makedirs(path)
+
+        for name in sorted(os.listdir(os.path.join(bundle, "lib"))):
+            shutil.copy2(os.path.join(bundle, "lib", name),
+                         os.path.join(libdir, name))
+        if not os.path.isfile(os.path.join(
+                libdir, "libbpf_mojo.so.1")):
+            fail("staged lib/ lacks the native bridge")
+
+        binary = os.path.join(bindir, "memveil")
+        shutil.copy2(os.path.join(bundle, "bin", "memveil"), binary)
+        before = needed(binary)
+        rewrite = run(["patchelf", "--set-rpath", BIN_RUNPATH,
+                       binary])
+        if rewrite.returncode != 0:
+            fail("patchelf RUNPATH rewrite failed:\n%s"
+                 % rewrite.stderr)
+        if needed(binary) != before:
+            fail("RUNPATH rewrite changed NEEDED: %r -> %r"
+                 % (before, needed(binary)))
+        dyn = run(["readelf", "-d", binary])
+        if dyn.returncode != 0:
+            fail("readelf failed on FHS binary:\n%s" % dyn.stderr)
+        if BIN_RUNPATH not in dyn.stdout:
+            fail("FHS binary lacks RUNPATH %s:\n%s"
+                 % (BIN_RUNPATH, dyn.stdout))
+        if "/home/" in dyn.stdout or "/work/" in dyn.stdout:
+            fail("FHS binary keeps absolute RUNPATH entries:\n%s"
+                 % dyn.stdout)
+        rerun = run([binary, "version"])
+        if rerun.returncode != 0 \
+                or rerun.stdout.strip() != "memveil-" + upstream:
+            fail("FHS binary fails to start after RUNPATH "
+                 "rewrite: %r" % rerun.stdout)
+
+        for name in BPF_OBJECTS:
+            src = os.path.join(bundle, "bpf", name)
+            if not os.path.isfile(src):
+                fail("bundle lacks BPF object %s" % name)
+            shutil.copy2(src, os.path.join(libdir, name))
+        for name in sorted(os.listdir(
+                os.path.join(bundle, "profiles"))):
+            shutil.copy2(os.path.join(bundle, "profiles", name),
+                         os.path.join(profdir, name))
+        if not os.path.isfile(os.path.join(profdir, "manifest.txt")):
+            fail("staged profiles/ lacks manifest.txt")
+        for base, dirs, files in os.walk(
+                os.path.join(bundle, "docs")):
+            dirs.sort()
+            for name in sorted(files):
+                src = os.path.join(base, name)
+                rel = os.path.relpath(
+                    src, os.path.join(bundle, "docs"))
+                dest = os.path.join(docdir, rel)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                shutil.copy2(src, dest)
+        shutil.copytree(os.path.join(bundle, "examples",
+                                     "real-capture"),
+                        os.path.join(docdir, "examples",
+                                     "real-capture"))
+        with open(os.path.join(licdir, "copyright"), "w") as handle:
+            handle.write(COPYRIGHT)
+        for name in ("LICENSE", "THIRD-PARTY-NOTICES.md",
+                     "THIRD-PARTY-NOTICES.libbpf-mojo.md"):
+            shutil.copy2(os.path.join(bundle, name),
+                         os.path.join(licdir, name))
+        for name in ("LICENSES", "licenses"):
+            shutil.copytree(os.path.join(bundle, name),
+                            os.path.join(licdir, name))
+        with open(os.path.join(debdir, "control"), "w") as handle:
+            handle.write(control_text(upstream, memveil_rev,
+                                      lmb_sha))
+
+        write_md5sums(root)
+        fix_modes(root)
+        out = os.path.join(out_dir, stem + ".deb")
+        if not contained(out, out_dir):
+            fail(".deb target escapes output dir: %s" % stem)
+        os.makedirs(out_dir, exist_ok=True)
+        if os.path.exists(out):
+            os.remove(out)
+        deb = run(["dpkg-deb", "--root-owner-group", "--build",
+                   root, out])
+        if deb.returncode != 0:
+            print(deb.stdout)
+            print(deb.stderr, file=sys.stderr)
+            fail("dpkg-deb --build failed")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    print("package-deb: %s" % out)
+    print("package-deb: sha256 %s" % sha256_file(out))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
