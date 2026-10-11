@@ -19,21 +19,29 @@ from memveil.capture.collector import Collector, CollectorConfig
 from memveil.cli.qualify import (
     QualifyOptions,
     _smoke_bridge_hash,
+    _smoke_object_hash,
     parse_qualify_args,
     plan_qualification,
     publish_receipt,
     qualify_usage,
     smoke_shutdown_ok,
 )
-from memveil.cli.record import decide_record, open_bridge_snapshot
+from memveil.cli.record import (
+    decide_record,
+    open_bridge_snapshot,
+    open_object_snapshot,
+)
+from memveil.platform.evidence import KernelInfo
 from memveil.platform.hash import sha256_hex
-from memveil.platform.profiles import Profile
+from memveil.platform.profiles import Profile, load_profiles
 from memveil.platform.outcome import OpOut
 from memveil.platform.reader import bytes_to_text, read_host_file
 
 comptime _HOST = "tests/fixtures/qualify/host"
 comptime _PDIR = "tests/fixtures/qualify/profiles"
 comptime _SCAN_OK = "tests/fixtures/scan/ok"
+comptime _SCAN_PROFILES = "tests/fixtures/scan/profiles"
+comptime _ELF_OK = "tests/fixtures/elf/ok.o"
 
 
 def contains(hay: String, needle: String) -> Bool:
@@ -680,6 +688,89 @@ def test_smoke_bridge_unbound_refuses() raises:
     assert_true(raised)
 
 
+def _q_write_bytes(path: String, var data: List[UInt8]) raises:
+    var cpath = _q_cstr(path)
+    var mode = _q_cstr("wb")
+    var fp = external_call["fopen", UInt64](
+        Span(cpath).unsafe_ptr(), Span(mode).unsafe_ptr()
+    )
+    if fp == UInt64(0):
+        raise Error("fopen failed for " + path)
+    var n = external_call["fwrite", Int64](
+        Span(data).unsafe_ptr(), Int64(1), Int64(len(data)), fp
+    )
+    _ = external_call["fclose", Int32](fp)
+    if Int(n) != len(data):
+        raise Error("short write for " + path)
+
+
+def _q_scan_kernel() -> KernelInfo:
+    return KernelInfo(
+        String("7.0.0-test"), String("x86_64"), True, String("")
+    )
+
+
+def test_smoke_object_binds_exercised_bytes() raises:
+    # Swap the object pathname between the smoke's read
+    # and receipt minting: the minted identity must name
+    # the exercised bytes, never the swapped bytes.
+    var exercised = read_host_file(
+        String(_ELF_OK), String("object"), 1048576
+    )
+    var base = _stop_mkdtemp()
+    var path = base + String("/obj.o")
+    var evil = base + String("/evil.o")
+    _q_write_bytes(path, exercised.copy())
+    _q_write(evil, String("SWAPPED-OBJECT-BYTES\n"))
+    var snap = open_object_snapshot(path)
+    var profiles = load_profiles(String(_SCAN_PROFILES))
+    var smoked = decide_record(
+        String(_SCAN_OK),
+        _q_scan_kernel(),
+        profiles^,
+        String(""),
+        False,
+        snap.load_path,
+        String(""),
+        String(""),
+        String(""),
+        String(""),
+        String(""),
+    )
+    assert_true(smoked.ok)
+    assert_equal(smoked.object_sha, snap.sha)
+    var ce = _q_cstr(evil)
+    var cp = _q_cstr(path)
+    var r = external_call["rename", Int32](
+        Span(ce).unsafe_ptr(), Span(cp).unsafe_ptr()
+    )
+    assert_equal(Int(r), 0)
+    var swapped = read_host_file(path, String("object"), 1048576)
+    assert_equal(
+        String(from_utf8=Span(swapped)),
+        String("SWAPPED-OBJECT-BYTES\n"),
+    )
+    var minted = _smoke_object_hash(snap)
+    assert_equal(minted, String("sha256:") + smoked.object_sha)
+    assert_equal(
+        minted, String("sha256:") + sha256_hex(Span(exercised))
+    )
+
+
+def test_smoke_object_unbound_refuses() raises:
+    # No bound object bytes, no receipt: minting must
+    # fail closed instead of hashing a pathname.
+    var snap = open_object_snapshot(
+        String("/nonexistent/memveil-obj.o")
+    )
+    var raised = False
+    try:
+        _ = _smoke_object_hash(snap)
+    except:
+        raised = True
+    assert_true(raised)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_qualify_args_defaults]()
@@ -720,6 +811,8 @@ def run() raises -> Int:
     suite.test[test_plan_below_floor_refuses]()
     suite.test[test_smoke_bridge_binds_exercised_bytes]()
     suite.test[test_smoke_bridge_unbound_refuses]()
+    suite.test[test_smoke_object_binds_exercised_bytes]()
+    suite.test[test_smoke_object_unbound_refuses]()
     suite^.run()
     return 0
 
