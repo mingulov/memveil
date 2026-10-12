@@ -140,7 +140,7 @@ def main():
         os.mkdir(third)
         export_head(third)
         vendored = os.path.join(
-            third, "third_party", "libbpf-mojo-0.1.0.tar.gz")
+            third, "third_party", "libbpf-mojo-0.2.0.tar.gz")
         check("export-vendored-bridge", os.path.isfile(vendored),
               vendored)
         env = dict(os.environ)

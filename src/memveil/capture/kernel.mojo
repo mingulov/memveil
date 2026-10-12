@@ -49,7 +49,7 @@ from memveil.platform.narrow import (
     MV_OFF_TABLE_MAGIC,
 )
 
-# abi-v1 frozen values (libbpf-mojo 0.1.0): tracepoint
+# abi-v1 frozen values (libbpf-mojo 0.2.0): tracepoint
 # and tracing attach kinds, and the retained-record
 # ceiling. Raw records are at most 98 bytes; 4096
 # accepts everything any probe can emit while bounding

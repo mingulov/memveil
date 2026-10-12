@@ -14,8 +14,8 @@ remaining `lib/*.so*`, resolved by the NEEDED closure walk
 in `tools/package`). The two origins are told apart in each
 entry.
 
-- `lib/libbpf_mojo.so.1` from libbpf-mojo 0.1.0 (source
-  commit `e50a4b6e6ab80aad71b24c6b96e9f55f9eb0506f`, an independent project; the exact
+- `lib/libbpf_mojo.so.1` from libbpf-mojo 0.2.0 (release v0.2.0,
+  source commit `681096cb588379307d0c8e94e1d77e53de4be22f`, an independent project; the exact
   tarball is named by sha256 in `MANIFEST.json` under
   `libbpf_mojo`).
   The bridge is Apache-2.0 WITH LLVM-exception; its first-party
