@@ -7,9 +7,9 @@ pinned a second time, as independent literals, in
 tests/package/test_deb.py, which also proves them against the
 live --help texts: a new verb, flag, or --format value fails
 naming the exact token until the generator AND the test pins
-are updated together. Long flags only: the -h alias works on
-every verb but appears in no --help text, so no drift guard
-can bind it, and it stays out of completions.
+are updated together. The -h alias is completed everywhere
+--help is; it appears in no --help text, so a live -h guard
+in the test pins (not the text comparisons) binds it.
 
 Usage: tools/gen-completions --out DIR
   --out DIR   directory receiving `memveil` (bash) and
@@ -24,32 +24,33 @@ import sys
 
 FROZEN_VERBS = ("record", "report", "top", "doctor", "qualify",
                 "help", "version")
-FROZEN_TOP_FLAGS = ("--help", "--version")
+FROZEN_TOP_FLAGS = ("--help", "--version", "-h")
 FROZEN_FLAGS = {
     "record": ("--bridge", "--capability", "--cp-object",
                "--duration", "--help", "--lc-object",
                "--max-events-bytes", "--object", "--output",
-               "--profile", "--profiles-dir"),
+               "--profile", "--profiles-dir", "-h"),
     "report": ("--allow-partial", "--format", "--help",
                "--long-lived-after", "--max-events-bytes",
-               "--max-line-bytes", "--max-session-bytes"),
+               "--max-line-bytes", "--max-session-bytes", "-h"),
     "top": ("--bridge", "--capability", "--cp-object",
             "--device", "--duration", "--help", "--interval",
             "--lc-object", "--long-lived-after",
             "--max-events-bytes", "--max-line-bytes",
             "--max-session-bytes", "--object", "--output",
-            "--profile"),
-    "doctor": ("--help", "--json", "--profiles-dir"),
+            "--profile", "-h"),
+    "doctor": ("--help", "--json", "--profiles-dir", "-h"),
     "qualify": ("--bridge", "--capability", "--cp-object",
                 "--help", "--lc-object", "--object",
-                "--output", "--profile", "--profiles-dir"),
+                "--output", "--profile", "--profiles-dir", "-h"),
 }
 FROZEN_FORMAT_VALUES = ("text", "json", "markdown")
-FROZEN_NOVALUE_FLAGS = ("--help", "--allow-partial", "--json")
+FROZEN_NOVALUE_FLAGS = ("--help", "--allow-partial", "--json", "-h")
 
 # One-line zsh descriptions; flag presence (not these words)
 # is what the drift guard pins.
 _ZSH_DESC = {
+    "-h": "show help",
     "--allow-partial": "drop a truncated final record",
     "--bridge": "explicit bridge path",
     "--capability": "extra channel ids",
@@ -156,8 +157,8 @@ def render_zsh():
         "    verbs=(%s)" % " ".join(FROZEN_VERBS),
         "    if (( CURRENT == 2 )); then",
         "        _describe -t verbs 'memveil verb' verbs",
-        "        _arguments -s -S "
-        "'--help[top-level help]' '--version[engine version]'",
+        "        _arguments -s -S '--help[top-level help]' "
+        "'--version[engine version]' '-h[top-level help]'",
         "        return",
         "    fi",
         '    case "$words[2]" in',
