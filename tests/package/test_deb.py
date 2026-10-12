@@ -117,23 +117,23 @@ DEB_ONLY_FILES = {
 # so this set pins the override lines exactly.
 EXPECTED_OVERRIDE_LINES = {
     "memveil: binary-from-other-architecture "
-    "usr/lib/memveil/swiotlb_attempt.bpf.o",
+    "[usr/lib/memveil/swiotlb_attempt.bpf.o]",
     "memveil: binary-from-other-architecture "
-    "usr/lib/memveil/swiotlb_copy.bpf.o",
+    "[usr/lib/memveil/swiotlb_copy.bpf.o]",
     "memveil: binary-from-other-architecture "
-    "usr/lib/memveil/swiotlb_lifecycle.bpf.o",
+    "[usr/lib/memveil/swiotlb_lifecycle.bpf.o]",
     "memveil: uncompressed-manual-page "
-    "usr/share/man/man1/memveil.1",
+    "[usr/share/man/man1/memveil.1]",
     "memveil: uncompressed-manual-page "
-    "usr/share/man/man1/memveil-record.1",
+    "[usr/share/man/man1/memveil-record.1]",
     "memveil: uncompressed-manual-page "
-    "usr/share/man/man1/memveil-report.1",
+    "[usr/share/man/man1/memveil-report.1]",
     "memveil: uncompressed-manual-page "
-    "usr/share/man/man1/memveil-top.1",
+    "[usr/share/man/man1/memveil-top.1]",
     "memveil: uncompressed-manual-page "
-    "usr/share/man/man1/memveil-doctor.1",
+    "[usr/share/man/man1/memveil-doctor.1]",
     "memveil: uncompressed-manual-page "
-    "usr/share/man/man1/memveil-qualify.1",
+    "[usr/share/man/man1/memveil-qualify.1]",
 }
 
 BPF_OBJECTS = (
