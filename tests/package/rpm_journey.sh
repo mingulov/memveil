@@ -31,9 +31,10 @@ die() {
 
 # Pre-install fresh-state gate (the .deb journey refuses
 # retained receipts before dpkg -i; this is the rpm twin):
-# a receipts dir that already holds files refuses the run
+# a receipts dir that already holds files, or an already
+# installed memveil package (rpm -q), refuses the run
 # BEFORE anything is installed or deleted, naming the
-# survivors. MV_RECEIPTS_DIR restages the state dir for
+# cause. MV_RECEIPTS_DIR restages the state dir for
 # staged tests; the container journey leaves it unset.
 RECEIPTS_DIR=${MV_RECEIPTS_DIR:-/var/lib/memveil/receipts}
 if [ -d "$RECEIPTS_DIR" ]; then
@@ -46,6 +47,9 @@ if [ -d "$RECEIPTS_DIR" ]; then
         || die "refusing install: cannot list $RECEIPTS_DIR (ls exit $rc); resolve the error, then rerun"
     kept=$(printf '%s\n' "$listed" | paste -sd, - | sed 's/,/, /g')
     [ -z "$kept" ] || die "refusing install: $RECEIPTS_DIR holds retained receipts ($kept); back them up or remove them, then rerun"
+fi
+if rpm -q memveil >/dev/null 2>&1; then
+    die "refusing install: memveil package already installed (rpm -q memveil); remove it, then rerun"
 fi
 
 # Fedora container images set tsflags=nodocs, which would

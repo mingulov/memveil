@@ -481,3 +481,35 @@ def test_rpm_journey_preflight_fresh_proceeds_to_install(tmp_path):
     assert calls.exists(), "fresh run never reached dnf"
     assert "dummy.rpm" in calls.read_text(), \
         calls.read_text()
+
+
+def test_rpm_journey_refuses_when_installed(tmp_path):
+    # A leftover installed package must block the rpm
+    # journey before installation, the same fail-closed
+    # shape as the retained-receipts gate: no dnf
+    # install attempt, and the refusal names the cause.
+    # Needs no .rpm/docker: the journey script runs with
+    # a fresh staged receipts dir (MV_RECEIPTS_DIR),
+    # `rpm` stubbed to report the package installed
+    # (exit 0), and dnf stubbed to log every call.
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    calls = tmp_path / "dnf-calls.log"
+    _write_executable(
+        bindir / "dnf",
+        "#!/bin/sh\necho \"$@\" >>\"%s\"\nexit 0\n" % calls)
+    _write_executable(bindir / "rpm", "#!/bin/sh\nexit 0\n")
+    env = dict(os.environ)
+    env["PATH"] = "%s:%s" % (bindir, env.get("PATH", ""))
+    env["MV_RECEIPTS_DIR"] = str(receipts)
+    script = os.path.join(REPO, "tests", "package",
+                           "rpm_journey.sh")
+    proc = run("bash", script, str(tmp_path / "dummy.rpm"),
+               env=env, timeout=120)
+    assert proc.returncode != 0, proc.stdout
+    assert not calls.exists(), \
+        "install attempted despite installed package"
+    assert "refusing install" in proc.stderr, proc.stderr
+    assert "already installed" in proc.stderr, proc.stderr
