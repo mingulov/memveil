@@ -9,7 +9,7 @@ real symbol table). The unpatched copy is the positive fixture.
 Inputs : build/bpf/swiotlb_attempt.bpf.o  (built by tools/build)
          build/bpf/swiotlb_lifecycle.bpf.o and
          build/bpf/swiotlb_copy.bpf.o (same build).
-Outputs: tests/fixtures/elf/*.o (10 base + 7 admission negatives,
+Outputs: tests/fixtures/elf/*.o (10 base + 9 admission negatives,
          plus 2 tracing positives + 3 tracing negatives).
 
 Patches (verified structurally after writing):
