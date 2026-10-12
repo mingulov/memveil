@@ -6,7 +6,7 @@
  * the same checked-wrap semantics as the BPF program
  * (single-threaded here; the BPF uses atomics).
  *
- * Required schedule: [injected fixed-read failure, normal
+ * Required schedule: [injected size-read failure, normal
  * firing] -> O=2 S=2 E=0 bytes=0 flags=BYTE_COVERAGE with
  * the epoch halted. The close-out matrix injects this
  * exact cut (flowinject); the lane pins the printed cut.
@@ -28,6 +28,7 @@ struct mv_counters {
 };
 
 struct mv_firing {
+    int table_fail;
     int fixed_fail;
     uint16_t off;
     uint16_t dlen;
@@ -60,7 +61,17 @@ static int64_t mv_fire(struct mv_counters *c, const struct mv_firing *f) {
         submit_checked(c);
         return -1;
     }
-    /* Step 3: fixed 41-byte read, then byte fetch. */
+    /* Step 2b: offset-table validation. A missing or
+     * invalid table rejects before the size read:
+     * the firing's size is unknowable, so the byte
+     * aggregate loses coverage (sticky bit) on top
+     * of the counted reject. */
+    if (f->table_fail) {
+        c->v[MV_CNT_FLAGS] |= MV_FLAG_BYTE_COVERAGE;
+        submit_checked(c);
+        return -1;
+    }
+    /* Step 2c: size-slot read, then byte fetch. */
     if (f->fixed_fail) {
         c->v[MV_CNT_FLAGS] |= MV_FLAG_BYTE_COVERAGE;
         submit_checked(c);
@@ -175,6 +186,17 @@ int main(void) {
            c.v[MV_CNT_EMITTED], c.v[MV_CNT_EMITTED_BYTES],
            c.v[MV_CNT_SUBMIT_FAIL], c.v[MV_CNT_FLAGS]);
 
+    /* Table-bad firing: the size is unknowable, so
+     * the byte aggregate loses coverage on top of
+     * the counted reject. */
+    memset(&c, 0, sizeof(c));
+    normal_firing(&f, 64);
+    f.table_fail = 1;
+    seq = mv_fire(&c, &f);
+    WANT_EQ(seq, (uint64_t)-1, "table-bad/seq");
+    check_cut("table-bad", &c, 1, 0, 0, 0, 1,
+              MV_FLAG_BYTE_COVERAGE);
+
     /* Clean emit: seq 0, all counts advance. */
     memset(&c, 0, sizeof(c));
     normal_firing(&f, 64);
@@ -238,6 +260,6 @@ int main(void) {
         printf("flow: %d check(s) FAILED\n", fails);
         return 1;
     }
-    printf("flow: 8 schedules passed\n");
+    printf("flow: 9 schedules passed\n");
     return 0;
 }

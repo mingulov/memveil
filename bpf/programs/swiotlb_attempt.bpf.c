@@ -115,13 +115,17 @@ int mv_swiotlb_attempt(void *ctx)
     }
     /* Step 2b: load and validate the offset table. A
      * missing, zero, or inconsistent table fails closed:
-     * the firing counts as rejected, never misread. */
+     * the firing counts as rejected, never misread.
+     * Size is unread without a table, so the byte
+     * aggregate loses coverage (sticky bit) on top of
+     * the counted reject. */
     {
         __u32 tab_key = 0;
         struct mv_offsets *tab =
             bpf_map_lookup_elem(&mv_offsets, &tab_key);
 
         if (!tab || mv_validate_offsets(tab) != MV_OK) {
+            mv_raise(MV_FLAG_BYTE_COVERAGE);
             mv_submit_fail();
             return 0;
         }

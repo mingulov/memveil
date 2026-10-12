@@ -257,6 +257,54 @@ def test_probe_fixed_end_covers_unpinned() raises:
     assert_equal(p.fixed_end, 72)
 
 
+def test_probe_late_data_loc_sets_floor() raises:
+    # A __data_loc descriptor past every other field
+    # still sets the dynamic floor: the descriptor is
+    # a fixed u32 slot, not dynamic data.
+    var body = _full_pins(120, 32, 40)
+    var p = probe_trace_offsets(body.as_bytes())
+    assert_true(p.ok)
+    assert_true(p.moved)
+    assert_equal(p.loc_off, 120)
+    assert_equal(p.fixed_end, 124)
+
+
+def test_probe_extra_descriptor_counts_toward_cap() raises:
+    # An unpinned __data_loc descriptor is still a
+    # fixed slot: past the cap it refuses.
+    var body = _full_pins(8, 32, 40)
+    body += _pin_line(
+        String("__data_loc char[]"), String("extra_blob"), 200, 4
+    )
+    var p = probe_trace_offsets(body.as_bytes())
+    assert_true(not p.ok)
+    assert_equal(
+        p.message,
+        String("fixed region end 204 exceeds cap 128"),
+    )
+
+
+def test_validate_table_floor_covers_extents() raises:
+    # A floor below any tabled extent refuses:
+    # dynamic data would otherwise start inside a
+    # fixed slot.
+    assert_equal(
+        validate_table_extents(8, 32, 40, 0),
+        String("fixed region end 0 below dev_name extent @8:4"),
+    )
+    assert_equal(
+        validate_table_extents(8, 32, 40, 12),
+        String("fixed region end 12 below size extent @32:8"),
+    )
+    assert_equal(
+        validate_table_extents(8, 32, 40, 40),
+        String("fixed region end 40 below force extent @40:1"),
+    )
+    assert_equal(
+        validate_table_extents(120, 32, 40, 124), String("")
+    )
+
+
 def test_probe_garbage_refuses() raises:
     var raw = _read_fixture(String("tests/fixtures/layout/garbage.format"))
     var p = probe_trace_offsets(Span(raw))
@@ -462,6 +510,9 @@ def run() raises -> Int:
     suite.test[test_probe_over_cap_refuses]()
     suite.test[test_probe_extra_fields_admit]()
     suite.test[test_probe_fixed_end_covers_unpinned]()
+    suite.test[test_probe_late_data_loc_sets_floor]()
+    suite.test[test_probe_extra_descriptor_counts_toward_cap]()
+    suite.test[test_validate_table_floor_covers_extents]()
     suite.test[test_probe_garbage_refuses]()
     suite.test[test_validate_table_extents]()
     suite.test[test_encode_offsets_table_layout]()
