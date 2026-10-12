@@ -1072,6 +1072,226 @@ def diff_trace_format(want: TraceFormat, live: TraceFormat) -> String:
     return String("")
 
 
+comptime MV_OFF_TABLE_MAGIC = 0x35464D4D
+comptime MV_OFF_TABLE_VERSION = 1
+comptime MV_FIXED_MAX = 128
+comptime MV_OFFSETS_TABLE_LEN = 24
+
+
+struct OffsetProbe(ImplicitlyCopyable):
+    """One live-layout probe: table offsets, or a named refusal.
+
+    ``ok`` True carries the probed ``__data_loc`` slot,
+    size, and force offsets plus the dynamic-data floor
+    (``fixed_end``) for the load-time offset table;
+    ``moved`` tells a drifted-but-readable layout from
+    the pinned one. ``ok`` False carries the refusing
+    drift class in ``message``.
+    """
+
+    var ok: Bool
+    var message: String
+    var moved: Bool
+    var loc_off: Int
+    var size_off: Int
+    var force_off: Int
+    var fixed_end: Int
+
+    def __init__(out self):
+        self.ok = False
+        self.message = String("")
+        self.moved = False
+        self.loc_off = -1
+        self.size_off = -1
+        self.force_off = -1
+        self.fixed_end = -1
+
+
+def _refuse_probe(message: String) -> OffsetProbe:
+    var out = OffsetProbe()
+    out.ok = False
+    out.message = message
+    return out^
+
+
+def _extents_overlap(a_off: Int, a_w: Int, b_off: Int, b_w: Int) -> Bool:
+    return a_off < b_off + b_w and b_off < a_off + a_w
+
+
+def _find_live_field(
+    fields: List[TraceField], want: String
+) -> Int:
+    """Index of the live field named want, or -1."""
+    for i in range(len(fields)):
+        if fields[i].name == want:
+            return i
+    return -1
+
+
+def validate_table_extents(
+    loc_off: Int, size_off: Int, force_off: Int, fixed_end: Int
+) -> String:
+    """Bounds/overlap verdict for one offset table, else "".
+
+    Every tabled extent must sit inside the fixed-region
+    cap, no two pinned extents (including the
+    common_type anchor) may overlap, and the dynamic
+    floor must stay within the cap with margin under the
+    context read cap. The collector re-runs this on its
+    configured values before install; the BPF program
+    re-checks the same properties at runtime.
+    """
+    if loc_off < 0 or size_off < 0 or force_off < 0 or fixed_end < 0:
+        return String("negative table extent")
+    if loc_off + 4 > MV_FIXED_MAX:
+        return String(
+            t"field dev_name extent @{loc_off}:4 exceeds fixed cap {MV_FIXED_MAX}"
+        )
+    if size_off + 8 > MV_FIXED_MAX:
+        return String(
+            t"field size extent @{size_off}:8 exceeds fixed cap {MV_FIXED_MAX}"
+        )
+    if force_off + 1 > MV_FIXED_MAX:
+        return String(
+            t"field force extent @{force_off}:1 exceeds fixed cap {MV_FIXED_MAX}"
+        )
+    if _extents_overlap(0, 2, loc_off, 4):
+        return String("overlapping extents common_type and dev_name")
+    if _extents_overlap(0, 2, size_off, 8):
+        return String("overlapping extents common_type and size")
+    if _extents_overlap(0, 2, force_off, 1):
+        return String("overlapping extents common_type and force")
+    if _extents_overlap(loc_off, 4, size_off, 8):
+        return String("overlapping extents dev_name and size")
+    if _extents_overlap(loc_off, 4, force_off, 1):
+        return String("overlapping extents dev_name and force")
+    if _extents_overlap(size_off, 8, force_off, 1):
+        return String("overlapping extents size and force")
+    if fixed_end > MV_FIXED_MAX:
+        return String(
+            t"fixed region end {fixed_end} exceeds cap {MV_FIXED_MAX}"
+        )
+    return String("")
+
+
+def probe_trace_offsets(data: Span[UInt8, _]) -> OffsetProbe:
+    """Probe the live format into load-time table offsets.
+
+    Pure classifier over already-read bytes: callers pass
+    the same buffer the format binding hashes, so probed
+    offsets inherit that binding (same-buffer derivation,
+    no re-read). The common_type anchor must match the
+    pins exactly; dev_name, size, and force keep their
+    pinned type spellings and widths but may sit at
+    probed offsets; extra live fields are tolerated and
+    the dynamic floor is the max end over every parsed
+    fixed field. Any retype, resize, missing or
+    duplicate field, unparseable line, anchor drift,
+    overlap, or cap breach refuses naming its class.
+    """
+    var fmt = parse_trace_format(data)
+    if not fmt.ok:
+        return _refuse_probe(fmt.message.copy())
+    var anchor = _find_live_field(fmt.fields, String("common_type"))
+    if anchor < 0:
+        return _refuse_probe(String("missing field common_type"))
+    var got_anchor = fmt.fields[anchor]
+    if got_anchor.ftype != String("unsigned short"):
+        return _refuse_probe(
+            String(
+                t"field common_type: want type unsigned short, live {got_anchor.ftype}"
+            )
+        )
+    if got_anchor.offset != 0 or got_anchor.size != 2:
+        return _refuse_probe(
+            String(
+                t"field common_type: want @0:2, live @{got_anchor.offset}:{got_anchor.size}"
+            )
+        )
+    var pins = _layout_pins()
+    var offs = List[Int]()
+    for _ in range(4):
+        offs.append(-1)
+    for i in range(1, 4):
+        var at = _find_live_field(fmt.fields, pins[i].name)
+        if at < 0:
+            return _refuse_probe(
+                String(t"missing field {pins[i].name}")
+            )
+        var got = fmt.fields[at]
+        if got.ftype != pins[i].ftype:
+            return _refuse_probe(
+                String(
+                    t"field {pins[i].name}: want type {pins[i].ftype}, live {got.ftype}"
+                )
+            )
+        if got.size != pins[i].size:
+            return _refuse_probe(
+                String(
+                    t"field {pins[i].name}: want size {pins[i].size}, live size {got.size}"
+                )
+            )
+        offs[i] = got.offset
+    var moved = (
+        offs[1] != pins[1].offset
+        or offs[2] != pins[2].offset
+        or offs[3] != pins[3].offset
+    )
+    var fixed_end = 0
+    for i in range(len(fmt.fields)):
+        var field = fmt.fields[i]
+        if _starts_with(field.ftype.as_bytes(), String("__data_loc")):
+            continue
+        var end = field.offset + field.size
+        if end > fixed_end:
+            fixed_end = end
+    var bad = validate_table_extents(
+        offs[1], offs[2], offs[3], fixed_end
+    )
+    if bad != String(""):
+        return _refuse_probe(bad.copy())
+    var out = OffsetProbe()
+    out.ok = True
+    out.message = String("")
+    out.moved = moved
+    out.loc_off = offs[1]
+    out.size_off = offs[2]
+    out.force_off = offs[3]
+    out.fixed_end = fixed_end
+    return out^
+
+
+def _append_le32(mut buf: List[UInt8], v: Int):
+    for i in range(4):
+        buf.append(UInt8((v >> (8 * i)) & 0xFF))
+
+
+def encode_offsets_table(
+    loc_off: Int, size_off: Int, force_off: Int, fixed_end: Int
+) -> List[UInt8]:
+    """Encode one offset table: 24 bytes, little-endian.
+
+    Layout mirrors ``struct mv_offsets`` (magic, version,
+    reserved, loc/size/force offsets, fixed end). A
+    negative input encodes to empty, which install
+    refuses; callers pass probe-admitted or
+    validator-checked values.
+    """
+    var out = List[UInt8]()
+    if loc_off < 0 or size_off < 0 or force_off < 0 or fixed_end < 0:
+        return out^
+    _append_le32(out, MV_OFF_TABLE_MAGIC)
+    out.append(UInt8(MV_OFF_TABLE_VERSION & 0xFF))
+    out.append(UInt8((MV_OFF_TABLE_VERSION >> 8) & 0xFF))
+    out.append(UInt8(0))
+    out.append(UInt8(0))
+    _append_le32(out, loc_off)
+    _append_le32(out, size_off)
+    _append_le32(out, force_off)
+    _append_le32(out, fixed_end)
+    return out^
+
+
 def _le16(data: Span[UInt8, _], at: Int) -> Int:
     return Int(data[at]) | (Int(data[at + 1]) << 8)
 
