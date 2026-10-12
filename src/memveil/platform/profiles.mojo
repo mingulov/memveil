@@ -1320,7 +1320,15 @@ def _installed_profiles_key(profiles_dir: String) -> String:
     profiles dir; anything else keeps its byte-identical
     ``<profiles-dir>/receipts`` fallback. Never resolves
     ``..``: ``profiles/..`` names the parent of the
-    installed dir, not the dir itself.
+    installed dir, not the dir itself, and interior
+    ``..`` (``profiles/../profiles``) is deliberately
+    left unresolved too: lexical ``..`` resolution is
+    symlink-unsafe, so recognizing such spellings could
+    redirect a non-installed dir into the installed
+    state dir. Those spellings keep the byte-identical
+    fallback, which stays consistent between the
+    receipt write and the later read of the same
+    spelling.
     """
     var raw = List[UInt8]()
     for b in profiles_dir.as_bytes():
