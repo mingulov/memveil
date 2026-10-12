@@ -24,7 +24,13 @@ comptime _MAP_ARRAY = 2
 comptime _MAP_RINGBUF = 27
 comptime _MIN_RING_BYTES = 4096
 comptime _MAX_RING_BYTES = 2147483648
-comptime _MAX_MODIFIER_HOPS = 32
+# Total spell-depth budget: each pointer, modifier,
+# or array level consumes one step of _spell_btf_type,
+# and each modifier hop consumes one step of
+# int_size. Hook prototypes nest a few levels deep;
+# 32 is generous and cycle-safe (cycles refuse via
+# this budget). Pinned by the chain31/chain32 tests.
+comptime _MAX_SPELL_DEPTH = 32
 
 
 struct BtfMaps(ImplicitlyCopyable):
@@ -163,6 +169,7 @@ struct _BtfWalk(Copyable):
     var message: String
     var offsets: List[Int]
     var kinds: List[Int]
+    var kflags: List[Int]
     var vlens: List[Int]
     var sizes: List[Int]
     var str_base: Int
@@ -173,6 +180,7 @@ struct _BtfWalk(Copyable):
         self.message = String("")
         self.offsets = List[Int]()
         self.kinds = List[Int]()
+        self.kflags = List[Int]()
         self.vlens = List[Int]()
         self.sizes = List[Int]()
         self.str_base = 0
@@ -269,7 +277,7 @@ struct _BtfWalk(Copyable):
         if not self.rec_valid(tid) or self.kinds[tid - 1] != 2:
             return -1
         var cur = self.sizes[tid - 1]
-        for _ in range(_MAX_MODIFIER_HOPS):
+        for _ in range(_MAX_SPELL_DEPTH):
             if not self.rec_valid(cur):
                 return -1
             var kind = self.kinds[cur - 1]
@@ -332,6 +340,15 @@ def _walk_btf(data: Span[UInt8, _], base: Int, size: Int) -> _BtfWalk:
             return _refuse_walk(String("BTF types corrupt"))
         var info = _u32(data, p + 4)
         var kind = (info >> 24) & 31
+        var kflag = (info >> 31) & 1
+        # kind_flag (bit 31) changes interpretation, not
+        # record layout: STRUCT/UNION members stay 12
+        # bytes (bitfield offsets pack into the offset
+        # word) and ENUM/ENUM64 entries stay 8/12 bytes.
+        # The walk below consumes only name/type/size
+        # fields the flag never relocates, so flagged
+        # records stay aligned and accepted; the flag is
+        # recorded per type for future consumers.
         var vlen = info & 65535
         var extra = -1
         if kind == 1 or kind == 14 or kind == 17:
@@ -363,6 +380,7 @@ def _walk_btf(data: Span[UInt8, _], base: Int, size: Int) -> _BtfWalk:
             return _refuse_walk(String("BTF types corrupt"))
         out.offsets.append(p)
         out.kinds.append(kind)
+        out.kflags.append(kflag)
         out.vlens.append(vlen)
         out.sizes.append(_u32(data, p + 8))
         p += 12 + extra
@@ -595,6 +613,43 @@ def _normalize_int_name(name: String) -> String:
     return name
 
 
+def _lp64_int_size(name: String) -> Int:
+    """Expected BTF size of one normalized integer name.
+
+    LP64 x86-64 only, the product's single supported
+    shape. -1 for unknown spellings: those pass through
+    unchecked (as today) and mismatch loudly at
+    comparison instead of equating silently.
+    """
+    if name == String("char"):
+        return 1
+    if name == String("signed char"):
+        return 1
+    if name == String("unsigned char"):
+        return 1
+    if name == String("bool"):
+        return 1
+    if name == String("short"):
+        return 2
+    if name == String("unsigned short"):
+        return 2
+    if name == String("int"):
+        return 4
+    if name == String("unsigned int"):
+        return 4
+    if name == String("long"):
+        return 8
+    if name == String("unsigned long"):
+        return 8
+    if name == String("long long"):
+        return 8
+    if name == String("unsigned long long"):
+        return 8
+    if name == String("size_t"):
+        return 8
+    return -1
+
+
 def _spell_btf_type(
     walk: _BtfWalk, data: Span[UInt8, _], tid: Int, budget: Int
 ) -> _TypeSpell:
@@ -656,6 +711,11 @@ def _spell_btf_type(
         var base: String
         if kind == 1 or kind == 16:
             base = _normalize_int_name(name)
+            var want = _lp64_int_size(base)
+            if want >= 0 and walk.sizes[cur - 1] != want:
+                var have = walk.sizes[cur - 1]
+                out.message = String(t"BTF int size {have} mismatch for {base}, want {want}")
+                return out^
         elif kind == 4:
             base = String("struct ") + name
         elif kind == 5:
@@ -717,7 +777,7 @@ def read_btf_func_proto(data: Span[UInt8, _], name: String) -> BtfFuncProto:
         out.message = String("function has no prototype")
         return out^
     var ret = _spell_btf_type(
-        walk, data, walk.sizes[proto - 1], _MAX_MODIFIER_HOPS
+        walk, data, walk.sizes[proto - 1], _MAX_SPELL_DEPTH
     )
     if not ret.ok:
         out.message = ret.message.copy()
@@ -739,7 +799,7 @@ def read_btf_func_proto(data: Span[UInt8, _], name: String) -> BtfFuncProto:
         if pname == String(""):
             out.message = String("unnamed parameter in prototype")
             return out^
-        var ps = _spell_btf_type(walk, data, ptype, _MAX_MODIFIER_HOPS)
+        var ps = _spell_btf_type(walk, data, ptype, _MAX_SPELL_DEPTH)
         if not ps.ok:
             out.message = ps.message.copy()
             return out^

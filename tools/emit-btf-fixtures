@@ -7,7 +7,8 @@ few BTF types exercising one prototype-reader path. The reader tests
 consume them as raw vmlinux-style blobs (header at offset 0).
 
 Outputs: tests/fixtures/btf/*.bin (funcproto, dupfunc, cycle, anon,
-  unnamed, voidptr, array, badref, fnptr, chain31, chain32).
+  unnamed, voidptr, array, badref, fnptr, chain31, chain32, kflag,
+  intsizes, intsize-bad).
 
   funcproto : FUNC test_fn -> PROTO (int, [dev: PTR STRUCT device,
                 size: TYPEDEF size_t]); canonical
@@ -34,6 +35,19 @@ Outputs: tests/fixtures/btf/*.bin (funcproto, dupfunc, cycle, anon,
   chain31   : 31 nested PTRs to INT (resolves; exercises deep
                 but finite chains).
   chain32   : 32 nested PTRs to INT (hop budget exhausted).
+  kflag     : FUNC kfs returning STRUCT "device" with kind_flag=1
+                (one member, proving member alignment is kept)
+                plus trailing types; FUNC kfe taking ENUM64
+                "color" with kind_flag=1. kind_flag changes
+                interpretation, not record layout, so both
+                spell normally.
+  intsizes  : FUNC isz taking one parameter of every LP64
+                integer spelling (plus kernel/BTF aliases and a
+                size_t typedef); proves the LP64 size check
+                accepts the full table.
+  intsize-bad: FUNC badret returning "long" with size 4 and
+                FUNC badpar taking "long" with size 4; both
+                refused by the LP64 size check.
 """
 import struct
 import sys
@@ -45,6 +59,7 @@ OUT = ROOT / "tests" / "fixtures" / "btf"
 K_INT, K_PTR, K_ARRAY, K_STRUCT = 1, 2, 3, 4
 K_TYPEDEF, K_VOLATILE, K_CONST = 8, 9, 10
 K_FUNC, K_PROTO = 12, 13
+K_ENUM64 = 19
 
 
 class Blob:
@@ -62,9 +77,11 @@ class Blob:
         self.strs.append(text.encode())
         return off
 
-    def t(self, name_off, kind, vlen, size_or_type, extra=b""):
+    def t(self, name_off, kind, vlen, size_or_type, extra=b"",
+            kflag=0):
         self.types.append(
-            struct.pack("<III", name_off, (kind << 24) | vlen,
+            struct.pack("<III", name_off,
+                        (kflag << 31) | (kind << 24) | vlen,
                         size_or_type) + extra
         )
         return len(self.types)
@@ -205,6 +222,69 @@ def chain(nptrs, fname):
     return b.build()
 
 
+def kflag():
+    b = Blob()
+    t_int = b.t(b.s("int"), K_INT, 0, 4, int_data(32, 1))
+    # STRUCT "device" with kind_flag=1 and one member: the
+    # walker must keep 12-byte member alignment and read
+    # the trailing types exactly.
+    mem = struct.pack("<III", b.s("m"), t_int, 0)
+    t_dev = b.t(b.s("device"), K_STRUCT, 1, 64, mem, kflag=1)
+    t_sproto = b.t(0, K_PROTO, 0, t_dev)
+    b.t(b.s("kfs"), K_FUNC, 0, t_sproto)
+    # ENUM64 "color" with kind_flag=1 and one enumerator.
+    ent = struct.pack("<III", b.s("RED"), 1, 0)
+    t_col = b.t(b.s("color"), K_ENUM64, 1, 8, ent, kflag=1)
+    params = struct.pack("<II", b.s("c"), t_col)
+    t_eproto = b.t(0, K_PROTO, 1, 0, params)
+    b.t(b.s("kfe"), K_FUNC, 0, t_eproto)
+    return b.build()
+
+
+# (BTF spelling, size, bits) covering every normalized LP64
+# integer name plus the kernel/BTF alias spellings.
+_LP64_INTS = [
+    ("char", 1, 8), ("signed char", 1, 8), ("unsigned char", 1, 8),
+    ("short", 2, 16), ("unsigned short", 2, 16),
+    ("int", 4, 32), ("unsigned int", 4, 32),
+    ("long", 8, 64), ("unsigned long", 8, 64),
+    ("long long", 8, 64), ("unsigned long long", 8, 64),
+    ("bool", 1, 8),
+    ("short int", 2, 16), ("long int", 8, 64),
+    ("long long int", 8, 64),
+    ("short unsigned int", 2, 16),
+    ("long unsigned int", 8, 64),
+    ("long long unsigned int", 8, 64),
+]
+
+
+def intsizes():
+    b = Blob()
+    params = b""
+    names = "abcdefghijklmnopqr"
+    for i, (spell, size, bits) in enumerate(_LP64_INTS):
+        t = b.t(b.s(spell), K_INT, 0, size, int_data(bits, 0))
+        params += struct.pack("<II", b.s("p" + names[i]), t)
+    t_ulong = b.t(b.s("sizet-ulong"), K_INT, 0, 8,
+                  int_data(64, 0))
+    t_size = b.t(b.s("size_t"), K_TYPEDEF, 0, t_ulong)
+    params += struct.pack("<II", b.s("psz"), t_size)
+    t_proto = b.t(0, K_PROTO, len(_LP64_INTS) + 1, 0, params)
+    b.t(b.s("isz"), K_FUNC, 0, t_proto)
+    return b.build()
+
+
+def intsize_bad():
+    b = Blob()
+    t_long4 = b.t(b.s("long"), K_INT, 0, 4, int_data(32, 0))
+    t_rproto = b.t(0, K_PROTO, 0, t_long4)
+    b.t(b.s("badret"), K_FUNC, 0, t_rproto)
+    params = struct.pack("<II", b.s("x"), t_long4)
+    t_pproto = b.t(0, K_PROTO, 1, 0, params)
+    b.t(b.s("badpar"), K_FUNC, 0, t_pproto)
+    return b.build()
+
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     blobs = {"funcproto": funcproto(), "dupfunc": dupfunc(),
@@ -212,7 +292,9 @@ def main():
              "voidptr": voidptr(), "array": array(),
              "badref": badref(), "fnptr": fnptr(),
              "chain31": chain(31, "deep31"),
-             "chain32": chain(32, "deep32")}
+             "chain32": chain(32, "deep32"),
+             "kflag": kflag(), "intsizes": intsizes(),
+             "intsize-bad": intsize_bad()}
     for name, data in blobs.items():
         (OUT / (name + ".bin")).write_bytes(data)
     print("wrote %d BTF fixtures to %s" % (len(blobs), OUT))
