@@ -2344,6 +2344,26 @@ def test_default_receipts_dir() raises:
         ),
         String("/usr/share/memveil/profiles/../receipts"),
     )
+    # Interior-.. spellings that the kernel would fold
+    # to the installed dir keep the byte-identical
+    # fallback (rationale in _installed_profiles_key):
+    # lexical .. resolution is symlink-unsafe.
+    assert_equal(
+        default_receipts_dir(
+            String("/usr/share/memveil/profiles/../profiles")
+        ),
+        String(
+            "/usr/share/memveil/profiles/../profiles/receipts"
+        ),
+    )
+    assert_equal(
+        default_receipts_dir(
+            String("/usr/share/memveil/other/../profiles")
+        ),
+        String(
+            "/usr/share/memveil/other/../profiles/receipts"
+        ),
+    )
     assert_equal(
         default_receipts_dir(String("build/../profiles")),
         String("build/../profiles/receipts"),
