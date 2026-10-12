@@ -242,6 +242,69 @@ def test_func_proto_truncated() raises:
     assert_equal(v.message, String("BTF sections out of range"))
 
 
+def test_btf_kind_flag_struct_ok() raises:
+    # kind_flag on STRUCT changes interpretation, not
+    # member layout: the walker keeps 12-byte member
+    # alignment and spells the return normally.
+    var raw = _read_fixture(String("tests/fixtures/btf/kflag.bin"))
+    var v = read_btf_func_proto(Span(raw), String("kfs"))
+    assert_true(v.ok)
+    assert_equal(v.message, String(""))
+    assert_equal(v.canonical, String("struct device (void)"))
+
+
+def test_btf_kind_flag_enum64_ok() raises:
+    # kind_flag on ENUM64 likewise leaves the 12-byte
+    # enumerator entries aligned; the parameter spells.
+    var raw = _read_fixture(String("tests/fixtures/btf/kflag.bin"))
+    var v = read_btf_func_proto(Span(raw), String("kfe"))
+    assert_true(v.ok)
+    assert_equal(v.message, String(""))
+    assert_equal(v.canonical, String("void (enum color c)"))
+
+
+def test_func_proto_int_size_mismatch() raises:
+    # A 4-byte "long" is not an LP64 long: both the
+    # return and the parameter position refuse with
+    # the exact size diagnostic.
+    var raw = _read_fixture(
+        String("tests/fixtures/btf/intsize-bad.bin")
+    )
+    var r = read_btf_func_proto(Span(raw), String("badret"))
+    assert_true(not r.ok)
+    assert_equal(
+        r.message,
+        String("BTF int size 4 mismatch for long, want 8"),
+    )
+    var p = read_btf_func_proto(Span(raw), String("badpar"))
+    assert_true(not p.ok)
+    assert_equal(
+        p.message,
+        String("BTF int size 4 mismatch for long, want 8"),
+    )
+
+
+def test_func_proto_int_size_lp64_ok() raises:
+    # Every LP64 integer spelling (plus kernel/BTF
+    # aliases and a size_t typedef) spells exactly as
+    # before once its BTF size matches the table.
+    var raw = _read_fixture(
+        String("tests/fixtures/btf/intsizes.bin")
+    )
+    var v = read_btf_func_proto(Span(raw), String("isz"))
+    assert_true(v.ok)
+    assert_equal(v.message, String(""))
+    var want = String("void (char pa, signed char pb,")
+    want += String(" unsigned char pc, short pd,")
+    want += String(" unsigned short pe, int pf, unsigned int pg,")
+    want += String(" long ph, unsigned long pi, long long pj,")
+    want += String(" unsigned long long pk, bool pl, short pm,")
+    want += String(" long pn, long long po, unsigned short pp,")
+    want += String(" unsigned long pq, unsigned long long pr,")
+    want += String(" size_t psz)")
+    assert_equal(v.canonical, want)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_btf_ok]()
@@ -273,6 +336,10 @@ def run() raises -> Int:
     suite.test[test_func_proto_chain31]()
     suite.test[test_func_proto_chain32]()
     suite.test[test_func_proto_truncated]()
+    suite.test[test_btf_kind_flag_struct_ok]()
+    suite.test[test_btf_kind_flag_enum64_ok]()
+    suite.test[test_func_proto_int_size_mismatch]()
+    suite.test[test_func_proto_int_size_lp64_ok]()
     suite^.run()
     return 0
 
