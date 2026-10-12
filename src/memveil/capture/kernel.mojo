@@ -44,6 +44,10 @@ from memveil.capture.collector import (
     SnapOut,
     StatsOut,
 )
+from memveil.platform.narrow import (
+    MV_OFFSETS_TABLE_LEN,
+    MV_OFF_TABLE_MAGIC,
+)
 
 # abi-v1 frozen values (libbpf-mojo 0.1.0): tracepoint
 # and tracing attach kinds, and the retained-record
@@ -54,6 +58,7 @@ comptime _ATTACH_TRACEPOINT = UInt32(1)
 comptime _ATTACH_TRACING = UInt32(2)
 comptime _MAX_RAW_BYTES = UInt32(4096)
 comptime _COUNTS_MAP = "mv_counts"
+comptime _OFFSETS_MAP = "mv_offsets"
 comptime _COUNT_KEYS = 6
 comptime _RING_ATTEMPT = "mv_attempts"
 comptime _RING_LIFECYCLE = "mv_lifecycle"
@@ -273,6 +278,52 @@ struct _Channel(Movable):
                 UInt32(0),
                 _lmb_message(e.copy()),
             )
+
+    def install_offsets(mut self, table: List[UInt8]) -> OpOut:
+        """Write the offset table, then read it back and compare.
+
+        A short write, a short read-back, or any byte
+        difference refuses: the program must never run on
+        a mis-installed table.
+        """
+        if not self.is_open():
+            return OpOut(False, String("session not open"))
+        if len(table) != MV_OFFSETS_TABLE_LEN:
+            return OpOut(False, String("bad offsets table"))
+        var magic = Int(0)
+        for i in range(4):
+            magic |= Int(table[i]) << (8 * i)
+        if magic != MV_OFF_TABLE_MAGIC:
+            return OpOut(False, String("bad offsets table"))
+        var key_bytes = List[UInt8]()
+        for _ in range(4):
+            key_bytes.append(UInt8(0))
+        var s = self.sess.take()
+        try:
+            s.map_write(
+                String(_OFFSETS_MAP), Span(key_bytes), Span(table)
+            )
+        except e:
+            self.sess = Optional(s^)
+            return OpOut(False, _lmb_message(e.copy()))
+        try:
+            var got = s.map_read(
+                String(_OFFSETS_MAP),
+                Span(key_bytes),
+                UInt32(MV_OFFSETS_TABLE_LEN),
+            )
+            self.sess = Optional(s^)
+            if got.is_short() or len(got.data) != MV_OFFSETS_TABLE_LEN:
+                return OpOut(False, String("offsets verify short"))
+            for i in range(MV_OFFSETS_TABLE_LEN):
+                if got.data[i] != table[i]:
+                    return OpOut(
+                        False, String("offsets verify mismatch")
+                    )
+        except e:
+            self.sess = Optional(s^)
+            return OpOut(False, _lmb_message(e.copy()))
+        return OpOut(True, String(""))
 
     def attach(mut self) -> OpOut:
         if not self.is_open():
@@ -586,6 +637,11 @@ struct LmbKernel(KernelSource):
         if channel == 2:
             return self._ch2.map_info(name)
         return self._ch0.map_info(name)
+
+    def install_offsets(mut self, table: List[UInt8]) -> OpOut:
+        if not self._any_open():
+            return OpOut(False, String("session not open"))
+        return self._ch0.install_offsets(table.copy())
 
     def attach(mut self) -> OpOut:
         if not self._any_open():

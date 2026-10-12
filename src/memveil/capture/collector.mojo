@@ -74,6 +74,11 @@ from memveil.model.session import (
 )
 from memveil.model.validate import format_u64
 from memveil.platform.evidence import GuestInfo
+from memveil.platform.narrow import (
+    MV_OFFSETS_TABLE_LEN,
+    encode_offsets_table,
+    validate_table_extents,
+)
 from memveil.platform.outcome import OpOut
 from memveil.platform.reader import (
     EvidenceReader,
@@ -224,6 +229,10 @@ trait KernelSource:
     def map_info_at(
         mut self, channel: Int, name: String
     ) -> GeomOut:
+        ...
+
+    def install_offsets(mut self, table: List[UInt8]) -> OpOut:
+        """Write the channel-0 offset table with read-back verify."""
         ...
 
     def attach(mut self) -> OpOut:
@@ -1225,6 +1234,33 @@ struct Collector:
             return String("map mv_attempts geometry")
         if self.cfg.has_ring_bytes and ring.max_entries != self.cfg.ring_bytes:
             return String("map mv_attempts ring size")
+        # The load-time offset table installs between load
+        # and attach: the program reads every attempt field
+        # through it, so a bad install refuses here, before
+        # any firing can misread.
+        var offgeom = kernel.map_info(String("mv_offsets"))
+        if not offgeom.ok:
+            return String("map mv_offsets: ") + offgeom.message
+        if (
+            offgeom.map_type != UInt32(MAP_TYPE_ARRAY)
+            or offgeom.key_size != UInt32(4)
+            or offgeom.value_size != UInt32(MV_OFFSETS_TABLE_LEN)
+            or offgeom.max_entries != UInt32(1)
+        ):
+            return String("map mv_offsets geometry")
+        var bad = validate_table_extents(
+            self.cfg.off_loc, self.cfg.off_size,
+            self.cfg.off_force, self.cfg.off_fixed_end,
+        )
+        if bad != String(""):
+            return String("install offsets: ") + bad
+        var table = encode_offsets_table(
+            self.cfg.off_loc, self.cfg.off_size,
+            self.cfg.off_force, self.cfg.off_fixed_end,
+        )
+        var installed = kernel.install_offsets(table^)
+        if not installed.ok:
+            return String("install offsets: ") + installed.message
         if self.cfg.has_lifecycle:
             var lc_maps = self._check_channel_maps(
                 kernel, 1, String("lc"), String("mv_lifecycle"),

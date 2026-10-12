@@ -51,7 +51,12 @@ struct ScriptKernel(KernelSource):
     var ring_geom: GeomOut
     var ring_geom1: GeomOut
     var ring_geom2: GeomOut
+    var offsets_geom: GeomOut
+    var install_out: OpOut
+    var installed: List[UInt8]
+    var install_calls: Int
     var attach_out: OpOut
+    var attach_calls: Int
     var detach_out: OpOut
     var close_out: OpOut
     var channels: Int
@@ -100,7 +105,15 @@ struct ScriptKernel(KernelSource):
             True, UInt32(27), UInt32(0), UInt32(0), UInt32(8388608),
             String(""),
         )
+        self.offsets_geom = GeomOut(
+            True, UInt32(2), UInt32(4), UInt32(24), UInt32(1),
+            String(""),
+        )
+        self.install_out = ok.copy()
+        self.installed = List[UInt8]()
+        self.install_calls = 0
         self.attach_out = ok.copy()
+        self.attach_calls = 0
         self.detach_out = ok.copy()
         self.close_out = ok.copy()
         self.channels = 1
@@ -139,6 +152,8 @@ struct ScriptKernel(KernelSource):
     def map_info(mut self, name: String) -> GeomOut:
         if name == String("mv_counts"):
             return self.counts_geom.copy()
+        if name == String("mv_offsets"):
+            return self.offsets_geom.copy()
         return self.ring_geom.copy()
 
     def map_info_at(mut self, channel: Int, name: String) -> GeomOut:
@@ -162,7 +177,13 @@ struct ScriptKernel(KernelSource):
     def channel_count(self) -> Int:
         return self.channels
 
+    def install_offsets(mut self, table: List[UInt8]) -> OpOut:
+        self.install_calls += 1
+        self.installed = table.copy()
+        return self.install_out.copy()
+
     def attach(mut self) -> OpOut:
+        self.attach_calls += 1
         return self.attach_out.copy()
 
     def add_poll(mut self, item: PollOut, repeat: Int):
