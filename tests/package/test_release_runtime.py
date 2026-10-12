@@ -18,7 +18,6 @@ defaults to this checkout, to import tools/package).
 import importlib.util
 import json
 import os
-import re
 import shutil
 import stat
 import subprocess
@@ -163,26 +162,6 @@ def dynamic_strings(path):
     return proc.stdout
 
 
-def runpath_abspaths(dyn):
-    """Non-$ORIGIN RUNPATH/RPATH entries in a dynamic section.
-
-    Parses the bracketed `Library runpath:`/`Library rpath:`
-    values and returns every colon-separated entry that is
-    not $ORIGIN-relative: any absolute build-host path, not
-    just known prefixes. [] means fully relocatable.
-    """
-    found = []
-    for line in dyn.splitlines():
-        match = re.search(r"Library (?:runpath|rpath): \[(.*)\]",
-                          line)
-        if not match:
-            continue
-        for entry in match.group(1).split(":"):
-            if entry and not entry.startswith("$ORIGIN"):
-                found.append(entry)
-    return found
-
-
 def test_runpath_abspaths_flags_hidden_absolute():
     # The RUNPATH guard must parse the bracketed runpath,
     # not match known prefixes: a /tmp RPATH passes the old
@@ -190,12 +169,12 @@ def test_runpath_abspaths_flags_hidden_absolute():
     # still an absolute build-host path. Needs no bundle.
     clean = (" 0x000000000000001d (RUNPATH)"
              " Library runpath: [$ORIGIN/../lib]")
-    assert runpath_abspaths(clean) == []
+    assert PKG.runpath_abspaths(clean) == []
     hidden = (" 0x000000000000001d (RUNPATH)"
               " Library runpath: [/tmp/stage/lib]")
     assert "/home/" not in hidden and "/work/" not in hidden
     assert " /" not in hidden.replace("$ORIGIN", "")
-    assert runpath_abspaths(hidden) == ["/tmp/stage/lib"]
+    assert PKG.runpath_abspaths(hidden) == ["/tmp/stage/lib"]
 
 
 def test_loader_layout(bundle):
@@ -203,7 +182,7 @@ def test_loader_layout(bundle):
     binary = root / "bin" / "memveil"
     dyn = dynamic_strings(binary)
     assert "$ORIGIN/../lib" in dyn, dyn
-    assert runpath_abspaths(dyn) == [], dyn
+    assert PKG.runpath_abspaths(dyn) == [], dyn
     proc = run("readelf", "-h", str(binary))
     assert proc.returncode == 0
     assert "X86-64" in proc.stdout, proc.stdout

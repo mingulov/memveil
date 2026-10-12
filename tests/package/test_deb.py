@@ -565,44 +565,19 @@ def needed(path):
             if "(NEEDED)" in line and "[" in line]
 
 
-def runpath_abspaths(dyn):
-    """Non-$ORIGIN RUNPATH/RPATH entries in a dynamic section.
-
-    Parses the bracketed `Library runpath:`/`Library rpath:`
-    values and returns every colon-separated entry that is
-    not $ORIGIN-relative: any absolute build-host path, not
-    just known prefixes. [] means fully relocatable.
-    """
-    found = []
-    for line in dyn.splitlines():
-        match = re.search(r"Library (?:runpath|rpath): \[(.*)\]",
-                          line)
-        if not match:
-            continue
-        for entry in match.group(1).split(":"):
-            if entry and not entry.startswith("$ORIGIN"):
-                found.append(entry)
-    return found
-
-
 @needs_deb
 def test_loader_closure(extracted):
-    import importlib.util
-    from importlib.machinery import SourceFileLoader
+    module = _load_tool(
+        "mvpackage", os.path.join(REPO, "tools", "package"))
 
     binary = extracted / "usr" / "bin" / "memveil"
     proc = run("readelf", "-d", str(binary))
     assert proc.returncode == 0, proc.stderr
     assert "$ORIGIN/../lib/memveil" in proc.stdout, proc.stdout
-    assert runpath_abspaths(proc.stdout) == [], proc.stdout
+    assert module.runpath_abspaths(proc.stdout) == [], proc.stdout
     proc = run("readelf", "-h", str(binary))
     assert proc.returncode == 0
     assert "X86-64" in proc.stdout, proc.stdout
-    loader = SourceFileLoader(
-        "mvpackage", os.path.join(REPO, "tools", "package"))
-    spec = importlib.util.spec_from_loader("mvpackage", loader)
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
     allow = set(module.SYSTEM_ALLOW)
     libs = sorted((extracted / "usr" / "lib" / "memveil").glob("*.so*"))
     assert libs, "no shared libraries extracted"
