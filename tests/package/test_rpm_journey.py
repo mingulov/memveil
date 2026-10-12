@@ -419,6 +419,40 @@ def test_rpm_journey_refuses_retained_receipts(tmp_path):
         b'{"profile_id": "linux-x86_64-7.0.0-99-test"}\n'
 
 
+def test_rpm_journey_refuses_when_listing_fails(tmp_path):
+    # Enumeration failure must fail closed: when `ls`
+    # cannot list the receipts dir (exit 2, no output),
+    # the journey must refuse before installation rather
+    # than read the empty output as fresh state and
+    # proceed to dnf install. Needs no .rpm/docker: the
+    # journey script runs with MV_RECEIPTS_DIR staged,
+    # `ls` stubbed to exit 2 with no output, and dnf
+    # stubbed to log every call. Pre-gate the script
+    # installs first, so the no-install assertion fails
+    # there (RED).
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    calls = tmp_path / "dnf-calls.log"
+    _write_executable(
+        bindir / "dnf",
+        "#!/bin/sh\necho \"$@\" >>\"%s\"\nexit 0\n" % calls)
+    _write_executable(bindir / "rpm", "#!/bin/sh\nexit 1\n")
+    _write_executable(bindir / "ls", "#!/bin/sh\nexit 2\n")
+    env = dict(os.environ)
+    env["PATH"] = "%s:%s" % (bindir, env.get("PATH", ""))
+    env["MV_RECEIPTS_DIR"] = str(receipts)
+    script = os.path.join(REPO, "tests", "package",
+                           "rpm_journey.sh")
+    proc = run("bash", script, str(tmp_path / "dummy.rpm"),
+               env=env, timeout=120)
+    assert proc.returncode != 0, proc.stdout
+    assert not calls.exists(), \
+        "install attempted despite listing failure"
+    assert "refusing install" in proc.stderr, proc.stderr
+
+
 def test_rpm_journey_preflight_fresh_proceeds_to_install(tmp_path):
     # Positive control for the gate above: with a fresh
     # (empty) staged receipts dir the journey must reach

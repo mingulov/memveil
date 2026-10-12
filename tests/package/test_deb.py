@@ -696,26 +696,33 @@ def _uninstall_after_failure(receipts, qcap, preexisting=frozenset(),
     failed `sudo rm` cannot strand root-owned residue or
     skip `dpkg -r`. Preexisting receipts are never
     removed: install.md documents them as surviving
-    uninstall.
+    uninstall. Removal timeouts are ignored like removal
+    errors (TimeoutExpired is not an OSError, so it is
+    caught alongside it), and the uninstall attempt sits
+    in a finally block: even an unexpected residue error
+    cannot skip `dpkg -r`, and the original failure still
+    propagates.
     """
     try:
-        for name in _run_receipts(receipts, preexisting):
-            try:
-                runner("sudo", "-n", "rm", "-f",
-                       os.path.join(receipts, name))
-            except OSError:
-                pass
-    except OSError:
-        pass
-    try:
-        if not qcap_existed and qcap.exists():
-            try:
-                runner("sudo", "-n", "rm", "-rf", str(qcap))
-            except OSError:
-                pass
-    except OSError:
-        pass
-    runner("sudo", "-n", "dpkg", "-r", "memveil")
+        try:
+            for name in _run_receipts(receipts, preexisting):
+                try:
+                    runner("sudo", "-n", "rm", "-f",
+                           os.path.join(receipts, name))
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        try:
+            if not qcap_existed and qcap.exists():
+                try:
+                    runner("sudo", "-n", "rm", "-rf", str(qcap))
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    finally:
+        runner("sudo", "-n", "dpkg", "-r", "memveil")
 
 
 def test_failure_path_retries_residue_then_uninstalls(tmp_path):
@@ -741,6 +748,41 @@ def test_failure_path_retries_residue_then_uninstalls(tmp_path):
         if argv[:3] == ("sudo", "-n", "rm"):
             proc.returncode = 1
         return proc
+
+    _uninstall_after_failure(str(receipts), qcap,
+                             runner=fake_runner)
+    assert calls, "failure path ran nothing"
+    assert calls[-1][:4] == ("sudo", "-n", "dpkg", "-r"), \
+        calls
+    kinds = [c[:4] for c in calls[:-1]]
+    assert ("sudo", "-n", "rm", "-f") in kinds, calls
+    assert ("sudo", "-n", "rm", "-rf") in kinds, calls
+
+
+def test_failure_path_timeout_still_uninstalls(tmp_path):
+    # A removal timeout during failure-path teardown must
+    # not skip `dpkg -r`: the cleanup helper's runner
+    # applies timeout=300, but TimeoutExpired is not an
+    # OSError, so it must be caught alongside OSError in
+    # the residue-removal paths with the uninstall attempt
+    # in a finally block. Needs no .deb/sudo: the runner
+    # is faked and every rm raises TimeoutExpired.
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    (receipts / "prof.json").write_text("{}")
+    qcap = tmp_path / "qcap"
+    qcap.mkdir()
+    calls = []
+
+    class FakeProc:
+        returncode = 0
+
+    def fake_runner(*argv, **kwargs):
+        calls.append(argv)
+        if argv[:3] == ("sudo", "-n", "rm"):
+            raise subprocess.TimeoutExpired(cmd=argv,
+                                            timeout=300)
+        return FakeProc()
 
     _uninstall_after_failure(str(receipts), qcap,
                              runner=fake_runner)
