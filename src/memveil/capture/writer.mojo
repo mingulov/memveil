@@ -31,6 +31,7 @@ comptime _AT_REMOVEDIR = 512
 comptime _RENAME_NOREPLACE = 1
 comptime _STAT_SIZE = 144
 comptime _DIRENT_NAME_OFF = 19
+comptime _DIRENT_BUF_SIZE = 8192
 
 comptime _EINTR = 4
 comptime _ENOENT = 2
@@ -151,11 +152,12 @@ def _require_private_empty_dir(dir_fd: Int32) raises WriteError:
     observed group/other bits prove a foreign dir
     and are refused (fail-closed). Raises "io"
     when the checks themselves fail. Lists entries
-    through a dup'd stream: dup shares the open
-    file description and its offset, so the caller
-    must pass a fresh descriptor (as the capture
-    open path does); the dup exists only so that
-    closedir cannot close the held fd.
+    with getdents64 straight off the held fd (no
+    DIR stream, so no libc symbols the stdlib also
+    declares): getdents64 advances the directory
+    offset, so the caller must pass a fresh
+    descriptor it never lists twice (as the capture
+    open path does).
     """
     var mu = _fstat_mode_uid(dir_fd)
     if mu[0] & UInt64(0o077) != UInt64(0):
@@ -167,47 +169,56 @@ def _require_private_empty_dir(dir_fd: Int32) raises WriteError:
         raise WriteError(
             "exists", "output dir owned by another user"
         )
-    var dup_fd = external_call["dup", Int32](dir_fd)
-    if dup_fd < Int32(0):
-        raise WriteError(
-            "io", "dir dup failed: errno " + String(_errno_now())
-        )
-    var dirp = external_call["fdopendir", UInt64](dup_fd)
-    if dirp == UInt64(0):
-        var no = _errno_now()
-        _close_quiet(dup_fd)
-        raise WriteError(
-            "io", "dir stream failed: errno " + String(no)
-        )
-    var dot = _cstr(".")
-    var dotdot = _cstr("..")
-    var eptr = external_call[
-        "__errno_location", Pointer[Int32, MutAnyOrigin]
-    ]()
+    var buf = List[UInt8]()
+    for _ in range(_DIRENT_BUF_SIZE):
+        buf.append(UInt8(0))
     var dirty = False
     var bad = False
     var bad_no = 0
     while True:
-        eptr.unsafe_store(Int32(0))
-        var ent = external_call["readdir", UInt64](dirp)
-        if ent == UInt64(0):
+        var n = external_call["getdents64", Int64](
+            dir_fd, Span(buf).unsafe_ptr(), UInt64(len(buf))
+        )
+        if n < Int64(0):
             bad_no = _errno_now()
-            if bad_no != 0:
+            bad = True
+            break
+        if n == Int64(0):
+            break
+        var total = Int(n)
+        var off = 0
+        while off < total:
+            var nbase = off + _DIRENT_NAME_OFF
+            if nbase > total:
                 bad = True
+                break
+            var reclen = Int(buf[off + 16]) | (
+                Int(buf[off + 17]) << 8
+            )
+            if reclen < 20 or off + reclen > total:
+                bad = True
+                break
+            # d_name sits at byte 19 of the x86-64
+            # Linux dirent (ino 8, off 8, reclen 2,
+            # type 1); compare "." / ".." byte-wise.
+            var nlen = 0
+            while _DIRENT_NAME_OFF + nlen < reclen:
+                if buf[nbase + nlen] == UInt8(0):
+                    break
+                nlen += 1
+            var b0 = buf[nbase]
+            var is_dot = nlen == 1 and b0 == UInt8(0x2E)
+            var is_dotdot = (
+                nlen == 2
+                and b0 == UInt8(0x2E)
+                and buf[nbase + 1] == UInt8(0x2E)
+            )
+            if not is_dot and not is_dotdot:
+                dirty = True
+                break
+            off += reclen
+        if dirty or bad:
             break
-        # d_name sits at byte 19 of the x86-64 Linux
-        # dirent (ino 8, off 8, reclen 2, type 1).
-        var name = ent + UInt64(_DIRENT_NAME_OFF)
-        var is_dot = external_call["strcmp", Int32](
-            name, Span(dot).unsafe_ptr()
-        )
-        var is_dotdot = external_call["strcmp", Int32](
-            name, Span(dotdot).unsafe_ptr()
-        )
-        if Int(is_dot) != 0 and Int(is_dotdot) != 0:
-            dirty = True
-            break
-    _ = external_call["closedir", Int32](dirp)
     if bad:
         raise WriteError(
             "io", "dir read failed: errno " + String(bad_no)
