@@ -8,7 +8,7 @@
     "source": {
       "origin": "distro",
       "revision": "7.0.0-34-generic",
-      "note": "config=sha256:e75c0adab6020e72844d7431cf801a02b94ed32efc251c3b0fb80c021d065180 config_src=file btf=sha256:16205476ae9b6d621e056249052a5789d7f22c6a8c27bf291eb787f3bda5090e format=sha256:7e95fff18d1bd16c18342d821e78680a0126ff84054936fbc641e181810f0b62 object=sha256:dbf15c855039a80fb1b4a3f015249c456bebeba4ec889db0ed0fe1f53d8aa3ce image=sha256:7efd88a7facf80874d781ccb2c2421f0aaaa575e3b94760430619e826f490117 image_bid=165b9a4f9609ede635b85d0d1241ee95208e4548 ring_bytes=8388608 lc_object=sha256:769bb7fd59e38a04555c4f80624769ca03dddb5d8d866b2b456b23d6c2b7033a lc_ring_bytes=8388608 cp_object=sha256:ffce58f0318dcaea4b756ca0865d04a235e7e851fb260435f9b7d219101909da cp_ring_bytes=8388608"
+      "note": "config=sha256:e75c0adab6020e72844d7431cf801a02b94ed32efc251c3b0fb80c021d065180 config_src=file btf=sha256:16205476ae9b6d621e056249052a5789d7f22c6a8c27bf291eb787f3bda5090e format=sha256:7e95fff18d1bd16c18342d821e78680a0126ff84054936fbc641e181810f0b62 object=sha256:f7e94e6379e43373ca0cd76b641307df0d7e801df60dd5dd4306e86400d00a8a image=sha256:7efd88a7facf80874d781ccb2c2421f0aaaa575e3b94760430619e826f490117 image_bid=165b9a4f9609ede635b85d0d1241ee95208e4548 ring_bytes=8388608 lc_object=sha256:769bb7fd59e38a04555c4f80624769ca03dddb5d8d866b2b456b23d6c2b7033a lc_ring_bytes=8388608 cp_object=sha256:5322bcf9fb243eb023c2b4fee8d89b523be818c4f757c4984a1410bfe118fcde cp_ring_bytes=8388608"
     },
     "note": "Narrow identity for the qualified gate kernel. The bindings name the exact config, BTF, tracepoint format, object, image, and build-id qualified by the live cross-check; any change fails admission until re-qualification."
   },

@@ -24,9 +24,9 @@
   },
   "artifacts": {
     "memveil": "0.1.0",
-    "bridge": "sha256:dbf15c855039a80fb1b4a3f015249c456bebeba4ec889db0ed0fe1f53d8aa3ce",
+    "bridge": "sha256:f7e94e6379e43373ca0cd76b641307df0d7e801df60dd5dd4306e86400d00a8a",
     "objects": {
-      "attempt": "sha256:dbf15c855039a80fb1b4a3f015249c456bebeba4ec889db0ed0fe1f53d8aa3ce"
+      "attempt": "sha256:f7e94e6379e43373ca0cd76b641307df0d7e801df60dd5dd4306e86400d00a8a"
     }
   },
   "workload": {
