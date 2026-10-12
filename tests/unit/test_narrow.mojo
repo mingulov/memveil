@@ -490,6 +490,61 @@ def test_layout_legacy_duplicate_unpinned_passes() raises:
     assert_equal(v.message, String(""))
 
 
+def _pin_line(ftype: String, name: String, off: Int, size: Int) -> String:
+    return (
+        String("field:")
+        + ftype
+        + String(" ")
+        + name
+        + String(";\toffset:")
+        + String(off)
+        + String(";\tsize:")
+        + String(size)
+        + String(";\tsigned:0;\n")
+    )
+
+
+def _pin_format(moved: Int) -> String:
+    # The four pinned fields, intact except pin `moved`
+    # (0 common_type, 1 dev_name, 2 size, 3 force), whose
+    # offset shifts by 8: the offset-move drift class an
+    # offset table would target. Admission must refuse
+    # every such move by name; drifted kernels stay
+    # unusable until the owner decides otherwise.
+    var offs = List[Int]()
+    offs.append(0)
+    offs.append(8)
+    offs.append(32)
+    offs.append(40)
+    offs[moved] += 8
+    var out = _pin_line(
+        String("unsigned short"), String("common_type"), offs[0], 2
+    )
+    out += _pin_line(
+        String("__data_loc char[]"), String("dev_name"), offs[1], 4
+    )
+    out += _pin_line(
+        String("size_t"), String("size"), offs[2], 8
+    )
+    out += _pin_line(
+        String("bool"), String("force"), offs[3], 1
+    )
+    return out^
+
+
+def test_layout_each_pin_drift_refuses_named() raises:
+    var wants = List[String]()
+    wants.append(String("field common_type: want @0:2"))
+    wants.append(String("field dev_name: want @8:4"))
+    wants.append(String("field size: want @32:8"))
+    wants.append(String("field force: want @40:1"))
+    for i in range(4):
+        var body = _pin_format(i)
+        var v = check_trace_layout(body.as_bytes())
+        assert_true(not v.ok)
+        assert_equal(v.message, wants[i])
+
+
 def test_object_ok() raises:
     var raw = _read_fixture(String("tests/fixtures/elf/ok.o"))
     var v = verify_object(Span(raw), String(_PROG))
@@ -816,6 +871,7 @@ def run() raises -> Int:
     suite.test[test_layout_inline_edges]()
     suite.test[test_layout_legacy_geometry_before_duplicate]()
     suite.test[test_layout_legacy_duplicate_unpinned_passes]()
+    suite.test[test_layout_each_pin_drift_refuses_named]()
     suite.test[test_object_ok]()
     suite.test[test_object_badarch]()
     suite.test[test_object_nosym]()
