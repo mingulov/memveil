@@ -398,6 +398,24 @@ def test_bpf_objects_unstripped(extracted):
 
 
 @needs_deb
+def test_shipped_elf_stripped(extracted):
+    # Release ELF ships stripped (lintian
+    # unstripped-binary-or-object): no symbol table and no
+    # debug sections in the binary or the shipped shared
+    # objects. The BPF objects keep their symtabs
+    # (test_bpf_objects_unstripped) and are excluded here.
+    libdir = extracted / "usr" / "lib" / "memveil"
+    elfs = [extracted / "usr" / "bin" / "memveil"] + sorted(
+        libdir.glob("*.so*"))
+    assert len(elfs) > 1, "no shipped ELF to inspect"
+    for path in elfs:
+        proc = run("readelf", "-S", str(path))
+        assert proc.returncode == 0, (str(path), proc.stderr)
+        assert "] .symtab" not in proc.stdout, str(path)
+        assert ".debug_" not in proc.stdout, str(path)
+
+
+@needs_deb
 def test_bpf_objects_match_build(extracted):
     import hashlib
 
