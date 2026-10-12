@@ -663,14 +663,6 @@ def smoke_shutdown_ok(output: String) -> Bool:
         return False
 
 
-def _hash_object(path: String) raises -> String:
-    """sha256: hex of one object file, or raise."""
-    var elf = read_host_file(
-        path, String("object"), MAX_NARROW_OBJECT_BYTES
-    )
-    return String("sha256:") + sha256_hex(Span(elf))
-
-
 def _smoke_bridge_hash(snap: BridgeSnapshot) raises -> String:
     """sha256: hash of the smoke's exercised bridge bytes, or raise.
 
