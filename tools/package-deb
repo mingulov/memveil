@@ -7,8 +7,10 @@ license texts, MANIFEST.json) and rearranges the staged tree into
 the installed FHS layout the Phase A discovery constants resolve
 with zero flags or environment::
 
-    usr/bin/memveil                 binary (RUNPATH $ORIGIN/../lib/memveil)
-    usr/lib/memveil/*.so*           Mojo runtime closure + libbpf_mojo.so.1
+    usr/bin/memveil                 binary (RUNPATH $ORIGIN/../lib/memveil),
+                                    stripped
+    usr/lib/memveil/*.so*           Mojo runtime closure + libbpf_mojo.so.1,
+                                    stripped (--strip-unneeded)
     usr/lib/memveil/*.bpf.o         production BPF objects (attempt,
                                     lifecycle, copy) beside the bridge:
                                     arch-dependent ELF under /usr/share
@@ -174,6 +176,31 @@ def glibc_floor(paths):
         fail("no GLIBC version need in staged ELF: %s"
              % sorted(paths))
     return "%d.%d" % floor
+
+
+def strip_staged(binary, libdir):
+    """Strip the staged release ELF, never the BPF objects.
+
+    The binary is stripped fully and each staged .so with
+    --strip-unneeded (lintian
+    unstripped-binary-or-object); the dynamic section
+    (NEEDED, RUNPATH, version needs) is untouched, so the
+    Depends floor derivation still reads the staged bytes.
+    Runs before the BPF objects are staged, so their
+    symtabs cannot pass through here.
+    """
+    proc = run(["strip", binary])
+    if proc.returncode != 0:
+        fail("strip failed on %s:\n%s" % (binary, proc.stderr))
+    for name in sorted(os.listdir(libdir)):
+        if not re.fullmatch(r"[^/]+\.so(\..*)?", name):
+            continue
+        path = os.path.join(libdir, name)
+        if not os.path.isfile(path):
+            continue
+        proc = run(["strip", "--strip-unneeded", path])
+        if proc.returncode != 0:
+            fail("strip failed on %s:\n%s" % (path, proc.stderr))
 
 
 def sha256_file(path):
@@ -365,6 +392,9 @@ def main(argv):
              "(apt install patchelf)")
     if shutil.which("readelf") is None:
         fail("readelf is required to verify the FHS binary")
+    if shutil.which("strip") is None:
+        fail("strip is required to strip the staged release ELF "
+             "(apt install binutils)")
 
     work = tempfile.mkdtemp(prefix="memveil-deb-")
     try:
@@ -440,6 +470,7 @@ def main(argv):
                 if entry and not entry.startswith("$ORIGIN"):
                     fail("FHS binary keeps absolute RUNPATH entry "
                          "%r:\n%s" % (entry, dyn.stdout))
+        strip_staged(binary, libdir)
         rerun = run([binary, "version"])
         if rerun.returncode != 0 \
                 or rerun.stdout.strip() != "memveil-" + upstream:
