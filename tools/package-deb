@@ -28,6 +28,8 @@ with zero flags or environment::
     usr/share/bash-completion/      static memveil completions from the
     completions/ + zsh              frozen verb/flag sets (bash plus
     vendor-completions/             zsh vendor dir)
+    usr/share/lintian/overrides/    justified lintian overrides (BPF arch
+    memveil                         false positive, uncompressed man)
     var/lib/memveil/receipts/       empty state dir (0755 root:root)
 
 Control notes: manual ``Depends: libelf1t64 | libelf1, zlib1g,
@@ -111,6 +113,30 @@ BPF_OBJECTS = (
     "swiotlb_lifecycle.bpf.o",
     "swiotlb_copy.bpf.o",
 )
+
+# /usr/share/lintian/overrides/memveil: exactly two
+# justified tags, pinned line by line by
+# test_lintian_overrides_exact. The BPF objects are eBPF
+# bytecode (EM_BPF), cross-architecture by nature, so
+# binary-from-other-architecture is a false positive on
+# them. The man pages stay uncompressed on purpose: the
+# same generators feed the .rpm, whose post-processing is
+# off, so both formats ship identical pages.
+OVERRIDES = """\
+# eBPF bytecode is cross-architecture by nature; these objects
+# are intentionally shipped beside the bridge under /usr/lib.
+memveil binary-from-other-architecture usr/lib/memveil/swiotlb_attempt.bpf.o
+memveil binary-from-other-architecture usr/lib/memveil/swiotlb_copy.bpf.o
+memveil binary-from-other-architecture usr/lib/memveil/swiotlb_lifecycle.bpf.o
+# Both formats ship identical pages from the same generators;
+# compressing only the .deb side would break that identity.
+memveil uncompressed-manual-page usr/share/man/man1/memveil.1
+memveil uncompressed-manual-page usr/share/man/man1/memveil-record.1
+memveil uncompressed-manual-page usr/share/man/man1/memveil-report.1
+memveil uncompressed-manual-page usr/share/man/man1/memveil-top.1
+memveil uncompressed-manual-page usr/share/man/man1/memveil-doctor.1
+memveil uncompressed-manual-page usr/share/man/man1/memveil-qualify.1
+"""
 
 BIN_RUNPATH = "$ORIGIN/../lib/memveil"
 
@@ -540,6 +566,11 @@ def main(argv):
                      os.path.join(bashcomp, "memveil"))
         shutil.copy2(os.path.join(comp_parent, "_memveil"),
                      os.path.join(zshcomp, "_memveil"))
+        overdir = os.path.join(root, "usr", "share", "lintian",
+                               "overrides")
+        os.makedirs(overdir)
+        with open(os.path.join(overdir, "memveil"), "w") as handle:
+            handle.write(OVERRIDES)
         staged_elf = [binary]
         for name in sorted(os.listdir(libdir)):
             if re.fullmatch(r"[^/]+\.so(\..*)?", name) \

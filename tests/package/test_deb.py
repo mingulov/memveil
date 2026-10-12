@@ -106,6 +106,34 @@ FIXED_FILES |= MAN_FILES | COMPLETION_FILES
 # purpose even though the changelog lives under the doc dir.
 DEB_ONLY_FILES = {
     "usr/share/doc/memveil/changelog.Debian.gz",
+    "usr/share/lintian/overrides/memveil",
+}
+
+# The exact lintian overrides the package ships: eBPF
+# objects are cross-architecture by nature (the tag is a
+# false positive on EM_BPF bytecode), and man pages stay
+# uncompressed so both formats ship identical pages from
+# the same generators. Anything else must fail the gate,
+# so this set pins the override lines exactly.
+EXPECTED_OVERRIDE_LINES = {
+    "memveil binary-from-other-architecture "
+    "usr/lib/memveil/swiotlb_attempt.bpf.o",
+    "memveil binary-from-other-architecture "
+    "usr/lib/memveil/swiotlb_copy.bpf.o",
+    "memveil binary-from-other-architecture "
+    "usr/lib/memveil/swiotlb_lifecycle.bpf.o",
+    "memveil uncompressed-manual-page "
+    "usr/share/man/man1/memveil.1",
+    "memveil uncompressed-manual-page "
+    "usr/share/man/man1/memveil-record.1",
+    "memveil uncompressed-manual-page "
+    "usr/share/man/man1/memveil-report.1",
+    "memveil uncompressed-manual-page "
+    "usr/share/man/man1/memveil-top.1",
+    "memveil uncompressed-manual-page "
+    "usr/share/man/man1/memveil-doctor.1",
+    "memveil uncompressed-manual-page "
+    "usr/share/man/man1/memveil-qualify.1",
 }
 
 BPF_OBJECTS = (
@@ -642,6 +670,22 @@ def test_lintian_gate():
               (proc.stdout + proc.stderr).splitlines()
               if line.startswith("E:")]
     assert not errors, errors
+
+
+@needs_deb
+def test_lintian_overrides_exact(extracted):
+    # The shipped overrides file must carry exactly the
+    # known-justified lines: a blanket override would
+    # silence future gate failures instead of fixing them.
+    text = (extracted / "usr" / "share" / "lintian"
+            / "overrides" / "memveil").read_text()
+    lines = {line for line in
+             (entry.strip() for entry in text.splitlines())
+             if line and not line.startswith("#")}
+    assert lines == EXPECTED_OVERRIDE_LINES, \
+        "extra: %s; missing: %s" % (
+            sorted(lines - EXPECTED_OVERRIDE_LINES),
+            sorted(EXPECTED_OVERRIDE_LINES - lines))
 
 
 def have_passwordless_sudo():
