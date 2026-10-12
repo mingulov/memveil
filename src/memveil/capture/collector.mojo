@@ -314,6 +314,10 @@ struct CollectorConfig(Copyable, Movable):
     var profile_id: String
     var grade: String
     var pid: Int
+    var off_loc: Int
+    var off_size: Int
+    var off_force: Int
+    var off_fixed_end: Int
     var has_ring_bytes: Bool
     var ring_bytes: UInt32
     var has_boot_id: Bool
@@ -334,6 +338,10 @@ struct CollectorConfig(Copyable, Movable):
         self.profile_id = String("")
         self.grade = String("")
         self.pid = 0
+        self.off_loc = 8
+        self.off_size = 32
+        self.off_force = 40
+        self.off_fixed_end = 41
         self.has_ring_bytes = False
         self.ring_bytes = UInt32(0)
         self.has_boot_id = False

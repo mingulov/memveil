@@ -60,10 +60,11 @@ from memveil.platform.narrow import (
     MAX_NARROW_RING_BYTES,
     LiveValue,
     NarrowLive,
+    OffsetProbe,
     check_narrow,
     check_narrow_extra,
-    check_trace_layout,
     parse_narrow_note,
+    probe_trace_offsets,
     read_live_bid,
     read_live_bytes,
     read_live_config,
@@ -310,6 +311,8 @@ struct ScanDecision(Copyable):
     names the requested capabilities in order; a selected
     extra channel carries its verified object bytes, hash,
     and bound ring size, and never runs partial.
+    Admitted decisions carry the probed load-time table
+    offsets (``off_*``, -1 when never probed).
     """
 
     var ok: Bool
@@ -320,6 +323,10 @@ struct ScanDecision(Copyable):
     var reason: String
     var object_sha: String
     var ring_bytes: Int
+    var off_loc: Int
+    var off_size: Int
+    var off_force: Int
+    var off_fixed_end: Int
     var elf: List[UInt8]
     var tp_system: String
     var tp_event: String
@@ -348,6 +355,10 @@ struct ScanDecision(Copyable):
         self.reason = String("")
         self.object_sha = String("")
         self.ring_bytes = 0
+        self.off_loc = -1
+        self.off_size = -1
+        self.off_force = -1
+        self.off_fixed_end = -1
         self.elf = List[UInt8]()
         self.tp_system = String("")
         self.tp_event = String("")
@@ -818,8 +829,14 @@ def _admit_hook(
     mut raw: List[UInt8],
     mut sys: String,
     mut evt: String,
+    mut probe: OffsetProbe,
 ) -> String:
-    """Select, read, and verify one doc's hook; "" when admitted."""
+    """Select, read, verify, and probe one doc's hook.
+
+    "" when admitted, with the table offsets probed from
+    the same raw buffer the format binding hashes, so the
+    offsets inherit that binding.
+    """
     var sel = select_attempt_hook(doc)
     if not sel.ok:
         return sel.refusal.copy()
@@ -827,9 +844,9 @@ def _admit_hook(
     var err = _read_format(root, hook.copy(), raw)
     if err != String(""):
         return err
-    var layout = check_trace_layout(Span(raw))
-    if not layout.ok:
-        return String("layout: ") + layout.message
+    probe = probe_trace_offsets(Span(raw))
+    if not probe.ok:
+        return String("layout: ") + probe.message.copy()
     if not _split_site(hook.name, sys, evt):
         return String("bad hook site")
     return String("")
@@ -1056,7 +1073,10 @@ def decide_record(
         var raw = List[UInt8]()
         var sys = String("")
         var evt = String("")
-        var herr = _admit_hook(root, doc.copy(), hook, raw, sys, evt)
+        var probe = OffsetProbe()
+        var herr = _admit_hook(
+            root, doc.copy(), hook, raw, sys, evt, probe
+        )
         if herr != String(""):
             if want_explicit:
                 return _refuse_scan(herr)
@@ -1085,6 +1105,10 @@ def decide_record(
                 out.hook = hook.copy()
                 out.object_sha = sha.copy()
                 out.ring_bytes = ring
+                out.off_loc = probe.loc_off
+                out.off_size = probe.size_off
+                out.off_force = probe.force_off
+                out.off_fixed_end = probe.fixed_end
                 out.elf = elf.copy()
                 out.tp_system = sys.copy()
                 out.tp_event = evt.copy()
@@ -1140,6 +1164,10 @@ def decide_record(
         out.hook = hook.copy()
         out.object_sha = sha.copy()
         out.ring_bytes = ring
+        out.off_loc = probe.loc_off
+        out.off_size = probe.size_off
+        out.off_force = probe.force_off
+        out.off_fixed_end = probe.fixed_end
         out.elf = elf.copy()
         out.tp_system = sys.copy()
         out.tp_event = evt.copy()
@@ -1173,7 +1201,10 @@ def decide_record(
     var praw = List[UInt8]()
     var psys = String("")
     var pevt = String("")
-    var perr = _admit_hook(root, first.copy(), phook, praw, psys, pevt)
+    var pprobe = OffsetProbe()
+    var perr = _admit_hook(
+        root, first.copy(), phook, praw, psys, pevt, pprobe
+    )
     if perr != String(""):
         return _refuse_scan(perr)
     out.ok = True
@@ -1205,6 +1236,10 @@ def decide_record(
     out.hook = phook.copy()
     out.object_sha = sha.copy()
     out.ring_bytes = ring
+    out.off_loc = pprobe.loc_off
+    out.off_size = pprobe.size_off
+    out.off_force = pprobe.force_off
+    out.off_fixed_end = pprobe.fixed_end
     out.elf = elf.copy()
     out.tp_system = psys.copy()
     out.tp_event = pevt.copy()
@@ -1961,12 +1996,26 @@ def run_collector_with[W: WriterSource](
             EXIT_REFUSAL, String(""), String(""),
             String("time namespace offset present"),
         )
+    if (
+        decision.off_loc < 0
+        or decision.off_size < 0
+        or decision.off_force < 0
+        or decision.off_fixed_end < 0
+    ):
+        return RunResult(
+            EXIT_REFUSAL, String(""), String(""),
+            String("admission did not probe offsets"),
+        )
     var cfg = CollectorConfig()
     cfg.duration_s = opts.duration_s
     cfg.max_events_bytes = opts.max_events_bytes
     cfg.output = opts.output
     cfg.profile_id = decision.profile.profile_id.copy()
     cfg.grade = decision.kind.copy()
+    cfg.off_loc = decision.off_loc
+    cfg.off_size = decision.off_size
+    cfg.off_force = decision.off_force
+    cfg.off_fixed_end = decision.off_fixed_end
     # Live captures sample the default SWIOTLB pool counters at
     # start, periodically, and close; unreadable counters stay
     # in the samples as unavailable halves, never as failed runs.
