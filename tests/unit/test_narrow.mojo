@@ -507,10 +507,12 @@ def _pin_line(ftype: String, name: String, off: Int, size: Int) -> String:
 def _pin_format(moved: Int) -> String:
     # The four pinned fields, intact except pin `moved`
     # (0 common_type, 1 dev_name, 2 size, 3 force), whose
-    # offset shifts by 8: the offset-move drift class an
-    # offset table would target. Admission must refuse
-    # every such move by name; drifted kernels stay
-    # unusable until the owner decides otherwise.
+    # offset shifts by 8. The strict checker names every
+    # such move; admission instead probes offsets and
+    # admits tabled-pin moves (see test_offsets.mojo).
+    # NOTE: pin 2 (+8) lands size@40, colliding with
+    # force@40; the strict checker reports the size diff
+    # before any overlap notion applies.
     var offs = List[Int]()
     offs.append(0)
     offs.append(8)
@@ -532,7 +534,11 @@ def _pin_format(moved: Int) -> String:
     return out^
 
 
-def test_layout_each_pin_drift_refuses_named() raises:
+def test_layout_strict_each_pin_drift_names_diff() raises:
+    # Characterization: the strict pinned-layout checker
+    # names every pin offset move. This pins the strict
+    # primitive only; admission behavior for drifted
+    # layouts lives in test_offsets.mojo.
     var wants = List[String]()
     wants.append(String("field common_type: want @0:2"))
     wants.append(String("field dev_name: want @8:4"))
@@ -871,7 +877,7 @@ def run() raises -> Int:
     suite.test[test_layout_inline_edges]()
     suite.test[test_layout_legacy_geometry_before_duplicate]()
     suite.test[test_layout_legacy_duplicate_unpinned_passes]()
-    suite.test[test_layout_each_pin_drift_refuses_named]()
+    suite.test[test_layout_strict_each_pin_drift_names_diff]()
     suite.test[test_object_ok]()
     suite.test[test_object_badarch]()
     suite.test[test_object_nosym]()
