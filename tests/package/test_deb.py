@@ -865,6 +865,106 @@ def test_failure_path_timeout_still_uninstalls(tmp_path):
     assert ("sudo", "-n", "rm", "-rf") in kinds, calls
 
 
+def test_failure_path_rm_oserror_still_uninstalls(tmp_path):
+    # An OSError from the removal runner (sudo missing,
+    # exec denied) must not skip `dpkg -r`: both inner
+    # residue-removal excepts catch OSError alongside
+    # TimeoutExpired. Needs no .deb/sudo: the runner is
+    # faked and every rm raises OSError.
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    (receipts / "prof.json").write_text("{}")
+    qcap = tmp_path / "qcap"
+    qcap.mkdir()
+    calls = []
+
+    class FakeProc:
+        returncode = 0
+
+    def fake_runner(*argv, **kwargs):
+        calls.append(argv)
+        if argv[:3] == ("sudo", "-n", "rm"):
+            raise OSError("sudo missing")
+        return FakeProc()
+
+    _uninstall_after_failure(str(receipts), qcap,
+                             runner=fake_runner)
+    assert calls, "failure path ran nothing"
+    assert calls[-1][:4] == ("sudo", "-n", "dpkg", "-r"), \
+        calls
+    kinds = [c[:4] for c in calls[:-1]]
+    assert ("sudo", "-n", "rm", "-f") in kinds, calls
+    assert ("sudo", "-n", "rm", "-rf") in kinds, calls
+
+
+def test_failure_path_listing_failure_still_uninstalls(
+        tmp_path, monkeypatch):
+    # A receipts listing failure (state dir removed or
+    # unreadable between the isdir probe and listdir)
+    # must not skip the qcap retry or `dpkg -r`: the
+    # outer receipts except catches it. Needs no
+    # .deb/sudo: os.listdir is faked to raise OSError.
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    (receipts / "prof.json").write_text("{}")
+    qcap = tmp_path / "qcap"
+    qcap.mkdir()
+    calls = []
+
+    class FakeProc:
+        returncode = 0
+
+    def fake_runner(*argv, **kwargs):
+        calls.append(argv)
+        return FakeProc()
+
+    def boom(path):
+        raise OSError("listing lost")
+
+    monkeypatch.setattr(os, "listdir", boom)
+    _uninstall_after_failure(str(receipts), qcap,
+                             runner=fake_runner)
+    assert calls, "failure path ran nothing"
+    assert calls[-1][:4] == ("sudo", "-n", "dpkg", "-r"), \
+        calls
+    kinds = [c[:4] for c in calls[:-1]]
+    assert ("sudo", "-n", "rm", "-f") not in kinds, calls
+    assert ("sudo", "-n", "rm", "-rf") in kinds, calls
+
+
+def test_failure_path_qcap_probe_failure_still_uninstalls(
+        tmp_path):
+    # A qcap probe failure must not skip `dpkg -r`: the
+    # outer qcap except catches it. Real pathlib probes
+    # swallow OSError, so the probe here is a stub that
+    # raises, proving the defensive branch executes.
+    # Needs no .deb/sudo: the runner is faked.
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    (receipts / "prof.json").write_text("{}")
+    calls = []
+
+    class FakeProc:
+        returncode = 0
+
+    def fake_runner(*argv, **kwargs):
+        calls.append(argv)
+        return FakeProc()
+
+    class BoomProbe:
+        def exists(self):
+            raise OSError("probe lost")
+
+        def __str__(self):
+            return str(tmp_path / "qcap")
+
+    _uninstall_after_failure(str(receipts), BoomProbe(),
+                             runner=fake_runner)
+    assert calls, "failure path ran nothing"
+    assert calls[-1][:4] == ("sudo", "-n", "dpkg", "-r"), \
+        calls
+
+
 def test_journey_refuses_retained_receipts(tmp_path):
     # Retained receipts (which install.md documents as
     # surviving uninstall) must block the journey before
