@@ -50,6 +50,8 @@ static const char *reason_name(enum mv_reason reason)
         return "CTX_NUL_EARLY";
     case MV_CTX_FORCE_BAD:
         return "CTX_FORCE_BAD";
+    case MV_CTX_TABLE_BAD:
+        return "CTX_TABLE_BAD";
     case MV_PAY_SHORT:
         return "PAY_SHORT";
     case MV_PAY_LONG:
@@ -84,24 +86,38 @@ static int fail(const char *message)
     return 1;
 }
 
-/* Reference extractor: mirrors the BPF program's context walk over a
- * byte buffer (memcpy in place of bpf_probe_read_kernel). Shared
- * validation and packing logic is identical by construction. */
-static enum mv_reason ref_extract(const uint8_t *ctx, uint32_t ctx_len,
+/* Reference extractor: mirrors the BPF program's tabled context
+ * walk over a byte buffer (plain loads in place of
+ * bpf_probe_read_kernel, extent checks in place of probe
+ * failures). Table validation, loc validation, and packing
+ * are the shared header logic, identical by construction. */
+static enum mv_reason ref_extract(const struct mv_offsets *tab,
+                                  const uint8_t *ctx, uint32_t ctx_len,
                                   uint64_t seq, uint64_t ktime,
                                   uint8_t out[MV_PAYLOAD_LEN])
 {
     uint32_t loc, off, dlen, i;
+    uint32_t loc_off, size_off, force_off, fixed_end;
     uint64_t size;
     uint8_t force;
 
-    if (ctx_len < MV_CTX_FIXED)
+    if (mv_validate_offsets(tab) != MV_OK)
+        return MV_CTX_TABLE_BAD;
+    loc_off = tab->loc_off;
+    size_off = tab->size_off;
+    force_off = tab->force_off;
+    fixed_end = tab->fixed_end;
+    if (size_off + 8 > ctx_len)
         return MV_CTX_SHORT;
-    loc = mv_read_le32(ctx + 8);
+    size = mv_read_le64(ctx + size_off);
+    if (loc_off + 4 > ctx_len)
+        return MV_CTX_SHORT;
+    loc = mv_read_le32(ctx + loc_off);
     off = loc & 0xFFFFu;
     dlen = (loc >> 16) & 0xFFFFu;
     {
-        enum mv_reason loc_reason = mv_validate_loc(off, dlen, ctx_len);
+        enum mv_reason loc_reason =
+            mv_validate_loc_floor(off, dlen, ctx_len, fixed_end);
         if (loc_reason != MV_OK)
             return loc_reason;
     }
@@ -114,10 +130,11 @@ static enum mv_reason ref_extract(const uint8_t *ctx, uint32_t ctx_len,
             return MV_CTX_NUL_EARLY;
         }
     }
-    if (ctx[40] != 0 && ctx[40] != 1)
+    if (force_off + 1 > ctx_len)
+        return MV_CTX_SHORT;
+    if (ctx[force_off] != 0 && ctx[force_off] != 1)
         return MV_CTX_FORCE_BAD;
-    force = ctx[40];
-    size = mv_read_le64(ctx + 32);
+    force = ctx[force_off];
     out[0] = (uint8_t)(MV_MAGIC & 0xFFu);
     out[1] = (uint8_t)((MV_MAGIC >> 8) & 0xFFu);
     out[2] = (uint8_t)((MV_MAGIC >> 16) & 0xFFu);
@@ -186,6 +203,8 @@ static int parse_line(char *line, struct expectation *exp)
         exp->kind = 1;
     else if (strcmp(kind, "payload") == 0)
         exp->kind = 2;
+    else if (strcmp(kind, "tctx") == 0)
+        exp->kind = 3;
     else
         return -1;
     /* verdict */
@@ -247,13 +266,23 @@ static int parse_line(char *line, struct expectation *exp)
     return 0;
 }
 
+static const struct mv_offsets PIN_TABLE = {
+    MV_OFF_TABLE_MAGIC, MV_OFF_TABLE_VERSION, 0, 8, 32, 40, 41
+};
+
 static void dump_ok(FILE *dump, unsigned idx, unsigned kind,
                     const struct mv_attempt *got)
 {
     unsigned i;
+    const char *tag = "payload";
+
+    if (kind == 1)
+        tag = "ctx";
+    else if (kind == 3)
+        tag = "tctx";
     fprintf(dump, "%u %s OK size=%llu force=%u seq=%llu ktime=%llu "
             "namelen=%u name=",
-            idx, kind == 1 ? "ctx" : "payload",
+            idx, tag,
             (unsigned long long)got->size, got->force,
             (unsigned long long)got->seq,
             (unsigned long long)got->ktime, got->name_len);
@@ -325,7 +354,7 @@ int main(int argc, char **argv)
         uint32_t kind, len;
         kind = read_le32_file(bin, &ok);
         len = read_le32_file(bin, &ok);
-        if (!ok || (kind != 1 && kind != 2) || len > MAX_INPUT)
+        if (!ok || (kind != 1 && kind != 2 && kind != 3) || len > MAX_INPUT)
             return fail("bad corpus record");
         if (fread(input, 1, len, bin) != len)
             return fail("truncated corpus record");
@@ -339,18 +368,31 @@ int main(int argc, char **argv)
             fprintf(stderr, "decode: corpus desync at %u\n", i);
             return 1;
         }
-        if (kind == 1) {
+        if (kind == 1 || kind == 3) {
             enum mv_reason reason;
             uint8_t produced[MV_PAYLOAD_LEN];
-            reason = ref_extract(input, len, (uint64_t)i,
-                                 KTIME_CTX_BASE + (uint64_t)i, produced);
+            const struct mv_offsets *tab = &PIN_TABLE;
+            const uint8_t *ctx = input;
+            uint32_t ctx_len = len;
+            const char *tag = "ctx";
+            if (kind == 3) {
+                if (len < MV_OFFSETS_TABLE_LEN)
+                    return fail("short table record");
+                tab = (const struct mv_offsets *)input;
+                ctx = input + MV_OFFSETS_TABLE_LEN;
+                ctx_len = len - MV_OFFSETS_TABLE_LEN;
+                tag = "tctx";
+            }
+            reason = ref_extract(tab, ctx, ctx_len, (uint64_t)i,
+                                 KTIME_CTX_BASE + (uint64_t)i,
+                                 produced);
             if (strcmp(reason_name(reason), exp.verdict) != 0) {
-                fprintf(stderr, "decode: ctx %u: got %s want %s\n",
-                        i, reason_name(reason), exp.verdict);
+                fprintf(stderr, "decode: %s %u: got %s want %s\n",
+                        tag, i, reason_name(reason), exp.verdict);
                 return 1;
             }
             if (reason != MV_OK) {
-                fprintf(dump, "%u ctx %s\n", i, exp.verdict);
+                fprintf(dump, "%u %s %s\n", i, tag, exp.verdict);
                 continue;
             }
             /* Pipeline check: extractor output must decode. */
@@ -359,8 +401,8 @@ int main(int argc, char **argv)
                 reason = mv_decode_payload(produced, MV_PAYLOAD_LEN,
                                            &got);
                 if (reason != MV_OK) {
-                    fprintf(stderr, "decode: ctx %u pipeline: %s\n",
-                            i, reason_name(reason));
+                    fprintf(stderr, "decode: %s %u pipeline: %s\n",
+                            tag, i, reason_name(reason));
                     return 1;
                 }
                 if ((unsigned long long)got.size != exp.size ||
@@ -368,7 +410,8 @@ int main(int argc, char **argv)
                     (unsigned long long)got.seq != (unsigned long long)i ||
                     (unsigned long long)got.ktime != KTIME_CTX_BASE + (unsigned long long)i ||
                     got.name_len != exp.namelen) {
-                    fprintf(stderr, "decode: ctx %u field mismatch\n", i);
+                    fprintf(stderr, "decode: %s %u field mismatch\n",
+                            tag, i);
                     return 1;
                 }
                 {
@@ -378,7 +421,8 @@ int main(int argc, char **argv)
                         sprintf(hex + 2 * j, "%02x", got.name[j]);
                     hex[2 * got.name_len] = '\0';
                     if (strcmp(hex, exp.name) != 0) {
-                        fprintf(stderr, "decode: ctx %u name mismatch\n", i);
+                        fprintf(stderr, "decode: %s %u name mismatch\n",
+                                tag, i);
                         return 1;
                     }
                 }
