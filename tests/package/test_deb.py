@@ -100,6 +100,14 @@ COMPLETION_FILES = {
 
 FIXED_FILES |= MAN_FILES | COMPLETION_FILES
 
+# Debian-tooling files with no rpm counterpart (like
+# DEBIAN/control itself): the spec %files derivation reads
+# FIXED_FILES only, so these stay out of that set on
+# purpose even though the changelog lives under the doc dir.
+DEB_ONLY_FILES = {
+    "usr/share/doc/memveil/changelog.Debian.gz",
+}
+
 BPF_OBJECTS = (
     "swiotlb_attempt.bpf.o",
     "swiotlb_lifecycle.bpf.o",
@@ -268,7 +276,7 @@ def test_file_list_exact(listing):
                             p) for p in rest), rest - FIXED_FILES
     for path in rest:
         assert "%" not in path and " " not in path, path
-    want = set(FIXED_FILES) | profiles | docs | libs
+    want = set(FIXED_FILES) | set(DEB_ONLY_FILES) | profiles | docs | libs
     assert set(files) == want, \
         "extra: %s; missing: %s" % (
             sorted(set(files) - want), sorted(want - set(files)))
@@ -433,6 +441,24 @@ def test_copyright_points_at_texts(extracted):
     # copyright-not-using-common-license-for-gpl fires when
     # no /usr/share/common-licenses pointer is present.
     assert "/usr/share/common-licenses/GPL-3" in text, text
+
+
+@needs_deb
+def test_changelog_debian(extracted, engine_version):
+    # Non-native packages must ship changelog.Debian.gz
+    # (lintian no-changelog); the entry tracks the engine
+    # version and the control Maintainer.
+    import gzip
+
+    changelog = (extracted / "usr" / "share" / "doc" / "memveil"
+                 / "changelog.Debian.gz")
+    raw = gzip.decompress(
+        changelog.read_bytes()).decode("utf-8")
+    first = raw.splitlines()[0]
+    assert re.match(r"memveil \(%s-1\) \S+; urgency=\S+$"
+                    % re.escape(engine_version), first), first
+    assert deb_field("Maintainer").strip() in raw, raw
+    assert "unstable" in first, first
 
 
 @needs_deb

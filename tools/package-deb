@@ -17,7 +17,9 @@ with zero flags or environment::
     usr/share/memveil/docs/         the full manuals tree plus the worked
                                     example (docs/examples/real-capture)
     usr/share/doc/memveil/          copyright stub plus every license and
-                                    notice text the bundle redistributes
+                                    notice text the bundle redistributes,
+                                    plus the generated changelog.Debian.gz
+                                    non-native packages must ship
     usr/share/man/man1/             memveil.1 plus one memveil-<verb>.1
                                     per verb, generated at build time
                                     from the --help texts
@@ -255,6 +257,69 @@ def write_md5sums(root):
         handle.writelines(entries)
 
 
+def changelog_epoch():
+    """Changelog clock: SOURCE_DATE_EPOCH or the current time.
+
+    Honors the reproducible-builds epoch when set and
+    falls back to now, so a pinned environment regenerates
+    the same entry while ordinary builds stamp build time.
+    """
+    import time
+
+    try:
+        return int(os.environ.get("SOURCE_DATE_EPOCH") or time.time())
+    except ValueError:
+        return int(time.time())
+
+
+def changelog_text(upstream, memveil_rev, epoch):
+    """The Debian changelog entry for this third-party build.
+
+    Non-native packages must ship changelog.Debian.gz
+    (lintian no-changelog); the single entry names the
+    engine version, the memveil revision the bundle
+    recorded, and the control maintainer.
+    """
+    import datetime
+    import email.utils
+
+    stamp = email.utils.format_datetime(
+        datetime.datetime.fromtimestamp(
+            epoch, tz=datetime.timezone.utc))
+    lines = [
+        "memveil (%s-1) unstable; urgency=medium" % upstream,
+        "",
+        "  * Third-party binary build from memveil revision %s."
+        % memveil_rev,
+        "    The conda/pixi Mojo toolchain cannot enter Debian, so",
+        "    this package is built outside the archive.",
+        "",
+        " -- %s  %s" % (MAINTAINER, stamp),
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def write_changelog(licdir, upstream, memveil_rev):
+    """Gzip the Debian changelog into the doc dir (mtime pinned).
+
+    Policy wants changelog.Debian.gz; the gzip mtime is the
+    changelog clock so SOURCE_DATE_EPOCH pins the bytes.
+    """
+    import gzip
+    import io
+
+    epoch = changelog_epoch()
+    text = changelog_text(upstream, memveil_rev, epoch)
+    buffer = io.BytesIO()
+    with gzip.GzipFile(filename="", mode="wb", compresslevel=9,
+                       mtime=epoch, fileobj=buffer) as handle:
+        handle.write(text.encode("utf-8"))
+    with open(os.path.join(licdir, "changelog.Debian.gz"),
+              "wb") as handle:
+        handle.write(buffer.getvalue())
+
+
 def control_text(upstream, memveil_rev, lmb_sha, depends):
     lines = [
         "Package: %s" % PACKAGE,
@@ -415,6 +480,7 @@ def main(argv):
         for name in ("LICENSES", "licenses"):
             shutil.copytree(os.path.join(bundle, name),
                             os.path.join(licdir, name))
+        write_changelog(licdir, upstream, memveil_rev)
 
         mandir = os.path.join(root, "usr", "share", "man", "man1")
         os.makedirs(mandir)
