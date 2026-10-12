@@ -746,6 +746,26 @@ def test_publish_reader_sees_whole_files() raises:
                 code = 1
                 break
         _child_exit(code)
+    # Gate the burst on the first publication:
+    # without this the reads below can all finish
+    # before the first rename, leaving every
+    # whole-file assertion unfired.
+    var ready = False
+    for _ in range(100000):
+        var probe_ok = False
+        try:
+            var probe = read_host_file(
+                path, String("receipt"), 1048576
+            )
+            _ = bytes_to_text(probe^)
+            probe_ok = True
+        except:
+            probe_ok = False
+        if probe_ok:
+            ready = True
+            break
+    assert_true(ready)
+    var observed = 0
     for _ in range(1000):
         var seen = String("")
         var have = False
@@ -759,7 +779,12 @@ def test_publish_reader_sees_whole_files() raises:
             have = False
         if have:
             assert_true(seen == body_a or seen == body_b)
+            observed += 1
     assert_equal(_wait_child(pid), 0)
+    # Non-vacuity: at least one read must observe a
+    # published body, else the whole-file assertions
+    # above never fired and the test proves nothing.
+    assert_true(observed > 0)
     var pids = List[Int32]()
     pids.append(pid)
     pids.append(Int32(Int(external_call["getpid", Int32]())))
