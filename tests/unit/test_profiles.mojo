@@ -2073,6 +2073,7 @@ def test_discover_changed() raises:
         String(
             "hook swiotlb:swiotlb_bounced format differs from profile"
             " test-validated signature"
+            "; drift: missing field common_type"
         ),
     )
     # Qualify cannot repair a stale recording (planning and the
@@ -2109,6 +2110,7 @@ def test_discover_denied_id_changed() raises:
         String(
             "hook swiotlb:swiotlb_bounced format differs from profile"
             " test-validated signature"
+            "; drift: missing field common_type"
         ),
     )
     assert_equal(len(rep.denied), 1)

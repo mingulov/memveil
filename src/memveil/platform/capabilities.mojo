@@ -39,6 +39,7 @@ unknown reasons, never to an exception.
 """
 
 from memveil.platform.evidence import parse_kernel_triple
+from memveil.platform.narrow import probe_trace_offsets
 from memveil.platform.profiles import ProfileDecision, tracing_gap
 from memveil.platform.reader import (
     EVIDENCE_ABSENT,
@@ -92,6 +93,7 @@ struct _HookMarks(ImplicitlyCopyable):
     var has_denied: Bool
     var changed_hook: String
     var has_changed: Bool
+    var changed_drift: String
     var unread_hook: String
     var has_unread: Bool
     var bare_hook: String
@@ -109,6 +111,23 @@ def _bytes_equal_text(data: List[UInt8], text: String) -> Bool:
     return True
 
 
+def _drift_note(live: Span[UInt8, _]) -> String:
+    """One drift-class note for changed format bytes.
+
+    Offset-only drift may admit after re-qualifying; a
+    pinned layout that merely differs outside its fields
+    says so; anything the probe refuses names its class.
+    Advisory only: the verdict stays unavailable either
+    way until a re-qualified profile binds.
+    """
+    var probe = probe_trace_offsets(live)
+    if probe.ok:
+        if probe.moved:
+            return String("offset-only (re-qualify may admit)")
+        return String("none (layout pinned)")
+    return probe.message.copy()
+
+
 def _probe_hooks(
     reader: EvidenceReader,
     decision: ProfileDecision,
@@ -123,7 +142,7 @@ def _probe_hooks(
     var marks = _HookMarks(
         String(""), String(""), String(""), False,
         String(""), String(""), String(""), False,
-        String(""), False, String(""), False,
+        String(""), False, String(""), String(""), False,
         String(""), False,
     )
     var n = len(decision.profile.caps[cap_index].hooks)
@@ -198,10 +217,11 @@ def _probe_hooks(
         try:
             var got = read_evidence(reader, fmt_path, _FORMAT_CAP)
             var want_text = decision.profile.hooks[found].format_text
-            if not _bytes_equal_text(got^, want_text):
+            if not _bytes_equal_text(got, want_text):
                 if not marks.has_changed:
                     marks.has_changed = True
                     marks.changed_hook = hname
+                    marks.changed_drift = _drift_note(Span(got))
         except:
             if not marks.has_unread:
                 marks.has_unread = True
@@ -281,7 +301,8 @@ def _judge_declared(
             + marks.changed_hook
             + " format differs from profile "
             + profile_id
-            + " signature",
+            + " signature; drift: "
+            + marks.changed_drift,
             String(
                 "refresh the profile's recorded format from this kernel,"
                 " then re-prove with memveil qualify"

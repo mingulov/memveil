@@ -91,13 +91,15 @@ earlier refusal:
    PATH` and `no object: pass --cp-object PATH`.
 7. Hook admission: `format unreadable` (tracefs not
    readable, the usual unprivileged refusal),
-   `layout: ...`, `bad hook site`.
+   `layout: ...` (unreadable layout; offset-only drift
+   instead probes table offsets and binds against a
+   re-authored profile), `bad hook site`.
 8. Binding: `binding failed: ...` (an unparseable bindings
    note is not a refusal: it proceeds as an unbound
    partial, since no identity check could have run).
-9. Live collection: bridge load, attach, and privilege
-   failures surface as sanitized diagnostics once every
-   gate above passes.
+9. Live collection: bridge load, offset-table install,
+   attach, and privilege failures surface as sanitized
+   diagnostics once every gate above passes.
 
 `doctor` reports the same availability passively (exit 3 with
 per-hook reasons) without attaching anything. See

@@ -90,6 +90,47 @@ def test_build_ready() raises:
     assert_true(drep.matched)
 
 
+def _attempt_reason(drep: DoctorReport) -> String:
+    for i in range(len(drep.caps)):
+        if drep.caps[i].id == String("attempt-trace"):
+            return drep.caps[i].reason.copy()
+    return String("")
+
+
+def test_doctor_changed_names_drift_class() raises:
+    # A changed format stays unavailable, but the reason
+    # names the drift class: offset-only drift may admit
+    # after re-qualifying, anything else cannot.
+    var moved = drep_for(String("changed-moved"), fx("profiles-moved"))
+    assert_equal(moved.verdict, String("unavailable"))
+    assert_true(
+        contains(
+            _attempt_reason(moved),
+            String("; drift: offset-only (re-qualify may admit)"),
+        )
+    )
+    var trivial = drep_for(
+        String("changed-trivial"), fx("profiles-moved")
+    )
+    assert_equal(trivial.verdict, String("unavailable"))
+    assert_true(
+        contains(
+            _attempt_reason(trivial),
+            String("; drift: none (layout pinned)"),
+        )
+    )
+    var sig = drep_for(
+        String("changed-signature"), fx("profiles-test")
+    )
+    assert_equal(sig.verdict, String("unavailable"))
+    assert_true(
+        contains(
+            _attempt_reason(sig),
+            String("; drift: missing field common_type"),
+        )
+    )
+
+
 def test_build_denied_merge() raises:
     var drep = drep_for(String("denied-tracepoint"), String("profiles"))
     assert_equal(drep.verdict, String("unavailable"))
@@ -368,6 +409,7 @@ def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_build_ordinary]()
     suite.test[test_build_ready]()
+    suite.test[test_doctor_changed_names_drift_class]()
     suite.test[test_build_live_origin]()
     suite.test[test_build_denied_merge]()
     suite.test[test_build_env_denied]()
