@@ -121,10 +121,13 @@ def main():
     progs = sorted(glob.glob(os.path.join(REPO, "bpf", "programs", "*.c")))
     check("bpf-present", len(progs) >= 1)
     # Frozen per-file audit: (bpf_probe_read_kernel,
-    # BPF_CORE_READ) counts. Attempt reads its fixed context
-    # plus the device name; lifecycle reads nothing (fentry
-    # args only); copy reads the pool header (start, nslabs,
-    # slots) through three checked relocating reads, one pool
+    # BPF_CORE_READ) counts. Attempt reads its size slot,
+    # __data_loc slot, and force byte at probed offsets
+    # plus the device name (same allowlisted fields the
+    # old single fixed read covered, no new kernel data);
+    # lifecycle reads nothing (fentry args only); copy
+    # reads the pool header (start, nslabs, slots)
+    # through three checked relocating reads, one pool
     # slot (bulk copy over a relocated pointer), plus the
     # device align mask through two checked relocating reads
     # to replicate the hook's clamp. Any checked-read failure
@@ -135,7 +138,7 @@ def main():
     # Tuples are (bpf_probe_read_kernel, BPF_CORE_READ,
     # bpf_core_read) call sites.
     read_sites = {
-        "swiotlb_attempt.bpf.c": (2, 0, 0),
+        "swiotlb_attempt.bpf.c": (4, 0, 0),
         "swiotlb_copy.bpf.c": (1, 0, 5),
         "swiotlb_lifecycle.bpf.c": (0, 0, 0),
     }
