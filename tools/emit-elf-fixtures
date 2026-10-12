@@ -23,6 +23,8 @@ Patches (verified structurally after writing):
   badring : mv_attempts max_entries 8388608 -> 4194304 (sane size,
             refused only by the identity binding, never statically).
   badmap  : mv_counts max_entries 6 -> 7 (geometry refused).
+  badoff  : mv_offsets max_entries 1 -> 2 (geometry refused).
+  nooff   : BTF "mv_offsets" name -> "mv_Xffsets" (map missing).
   nobtf   : .BTF section renamed to .XTF (no map geometry knowable).
   extern  : mv_counts linkage 1 -> 2 (declared, not defined here).
   emptysec: tracepoint section sh_size -> 0 (program extent refused).
@@ -415,6 +417,22 @@ def main() -> int:
     assert struct.unpack_from("<I", badmap, cnt_off)[0] == 6
     struct.pack_into("<I", badmap, cnt_off, 7)
     (OUT / "badmap.o").write_bytes(bytes(badmap))
+
+    # Corrupt offsets geometry: the static map check refuses.
+    badoff = bytearray(base)
+    off_off = _btf_array_nelems_off(
+        badoff, b"mv_offsets", b"max_entries"
+    )
+    assert struct.unpack_from("<I", badoff, off_off)[0] == 1
+    struct.pack_into("<I", badoff, off_off, 2)
+    (OUT / "badoff.o").write_bytes(bytes(badoff))
+
+    # Missing offsets map: rename the BTF string so no
+    # mv_offsets definition is found (same length).
+    nooff = bytearray(base)
+    off_str = _btf_str_off(nooff, b"mv_offsets\x00")
+    nooff[off_str : off_str + 10] = b"mv_Xffsets"
+    (OUT / "nooff.o").write_bytes(bytes(nooff))
 
     # Missing BTF section: no map geometry is knowable.
     nobtf = bytearray(base)

@@ -32,11 +32,11 @@
   },
   "artifacts": {
     "memveil": "0.1.0",
-    "bridge": "sha256:de95690aba8f0462aa24599fa7949dbe81f4cafb2720641645951bbe304ccb8d",
+    "bridge": "sha256:dbf15c855039a80fb1b4a3f015249c456bebeba4ec889db0ed0fe1f53d8aa3ce",
     "objects": {
-      "attempt": "sha256:de95690aba8f0462aa24599fa7949dbe81f4cafb2720641645951bbe304ccb8d",
-      "lifecycle": "sha256:b705ba5013c3f8b1add8f4228575fd0606d566a26864dc1162d99d055e2e5ed4",
-      "copy": "sha256:b7853c92a677a74ac18facffac1728f71322f056f3b1a4c5c99794d52a3b1bf3"
+      "attempt": "sha256:dbf15c855039a80fb1b4a3f015249c456bebeba4ec889db0ed0fe1f53d8aa3ce",
+      "lifecycle": "sha256:769bb7fd59e38a04555c4f80624769ca03dddb5d8d866b2b456b23d6c2b7033a",
+      "copy": "sha256:ffce58f0318dcaea4b756ca0865d04a235e7e851fb260435f9b7d219101909da"
     }
   },
   "workload": {
