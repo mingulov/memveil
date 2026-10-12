@@ -125,17 +125,17 @@ BPF_OBJECTS = (
 OVERRIDES = """\
 # eBPF bytecode is cross-architecture by nature; these objects
 # are intentionally shipped beside the bridge under /usr/lib.
-memveil binary-from-other-architecture usr/lib/memveil/swiotlb_attempt.bpf.o
-memveil binary-from-other-architecture usr/lib/memveil/swiotlb_copy.bpf.o
-memveil binary-from-other-architecture usr/lib/memveil/swiotlb_lifecycle.bpf.o
+memveil: binary-from-other-architecture usr/lib/memveil/swiotlb_attempt.bpf.o
+memveil: binary-from-other-architecture usr/lib/memveil/swiotlb_copy.bpf.o
+memveil: binary-from-other-architecture usr/lib/memveil/swiotlb_lifecycle.bpf.o
 # Both formats ship identical pages from the same generators;
 # compressing only the .deb side would break that identity.
-memveil uncompressed-manual-page usr/share/man/man1/memveil.1
-memveil uncompressed-manual-page usr/share/man/man1/memveil-record.1
-memveil uncompressed-manual-page usr/share/man/man1/memveil-report.1
-memveil uncompressed-manual-page usr/share/man/man1/memveil-top.1
-memveil uncompressed-manual-page usr/share/man/man1/memveil-doctor.1
-memveil uncompressed-manual-page usr/share/man/man1/memveil-qualify.1
+memveil: uncompressed-manual-page usr/share/man/man1/memveil.1
+memveil: uncompressed-manual-page usr/share/man/man1/memveil-record.1
+memveil: uncompressed-manual-page usr/share/man/man1/memveil-report.1
+memveil: uncompressed-manual-page usr/share/man/man1/memveil-top.1
+memveil: uncompressed-manual-page usr/share/man/man1/memveil-doctor.1
+memveil: uncompressed-manual-page usr/share/man/man1/memveil-qualify.1
 """
 
 BIN_RUNPATH = "$ORIGIN/../lib/memveil"
@@ -342,10 +342,10 @@ def changelog_text(upstream, memveil_rev, epoch):
     lines = [
         "memveil (%s-1) unstable; urgency=medium" % upstream,
         "",
-        "  * Third-party binary build from memveil revision %s."
-        % memveil_rev,
-        "    The conda/pixi Mojo toolchain cannot enter Debian, so",
-        "    this package is built outside the archive.",
+        "  * Third-party binary build from memveil revision:",
+        "    %s" % memveil_rev,
+        "    The conda/pixi Mojo toolchain cannot enter Debian,",
+        "    so this package is built outside the archive.",
         "",
         " -- %s  %s" % (MAINTAINER, stamp),
         "",
