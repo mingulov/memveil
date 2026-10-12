@@ -5,6 +5,12 @@
 from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
 
+from memveil.capture.collector import (
+    Collector,
+    CollectorConfig,
+    GeomOut,
+    OpOut,
+)
 from memveil.platform.narrow import (
     MV_FIXED_MAX,
     MV_OFFSETS_TABLE_LEN,
@@ -15,6 +21,15 @@ from memveil.platform.narrow import (
     validate_table_extents,
 )
 from memveil.platform.reader import read_host_file
+
+from scripted import (
+    NullWriter,
+    ScriptClock,
+    ScriptKernel,
+    ScriptSignal,
+    snap_ok,
+    stats_ok,
+)
 
 
 def _read_fixture(path: String) raises -> List[UInt8]:
@@ -317,6 +332,124 @@ def test_encode_offsets_negative_refuses() raises:
     assert_equal(len(table), 0)
 
 
+def _arm_kernel(mut kernel: ScriptKernel):
+    var zsnap = snap_ok(
+        UInt64(0),
+        UInt64(0),
+        UInt64(0),
+        UInt64(0),
+        UInt64(0),
+        UInt64(0),
+    )
+    kernel.add_snap(zsnap.copy())
+    kernel.add_snap(zsnap.copy())
+    kernel.add_stats(
+        stats_ok(UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0))
+    )
+
+
+def _startup_config() -> CollectorConfig:
+    var cfg = CollectorConfig()
+    cfg.duration_s = UInt64(60)
+    cfg.max_events_bytes = 134217728
+    cfg.output = String("/tmp/memveil-offsets-probe")
+    cfg.profile_id = String("offsets-probe")
+    cfg.pid = 4242
+    return cfg^
+
+
+def test_install_success_carries_table_bytes() raises:
+    var cfg = _startup_config()
+    cfg.off_loc = 8
+    cfg.off_size = 40
+    cfg.off_force = 48
+    cfg.off_fixed_end = 49
+    var kernel = ScriptKernel()
+    _arm_kernel(kernel)
+    var clock = ScriptClock()
+    var signal = ScriptSignal()
+    var writer = NullWriter()
+    var coll = Collector(cfg^)
+    var reason = coll.startup(kernel, clock, signal, writer)
+    assert_equal(reason, String(""))
+    assert_equal(kernel.install_calls, 1)
+    assert_equal(kernel.attach_calls, 1)
+    var want = encode_offsets_table(8, 40, 48, 49)
+    assert_equal(len(kernel.installed), len(want))
+    for i in range(len(want)):
+        assert_equal(kernel.installed[i], want[i])
+
+
+def test_install_verify_mismatch_refuses() raises:
+    var cfg = _startup_config()
+    var kernel = ScriptKernel()
+    _arm_kernel(kernel)
+    kernel.install_out = OpOut(
+        False, String("offsets verify mismatch")
+    )
+    var clock = ScriptClock()
+    var signal = ScriptSignal()
+    var writer = NullWriter()
+    var coll = Collector(cfg^)
+    var reason = coll.startup(kernel, clock, signal, writer)
+    assert_equal(
+        reason, String("install offsets: offsets verify mismatch")
+    )
+    assert_equal(kernel.install_calls, 1)
+    assert_equal(kernel.attach_calls, 0)
+
+
+def test_install_failure_before_attach() raises:
+    var cfg = _startup_config()
+    var kernel = ScriptKernel()
+    _arm_kernel(kernel)
+    kernel.install_out = OpOut(False, String("bridge lost"))
+    var clock = ScriptClock()
+    var signal = ScriptSignal()
+    var writer = NullWriter()
+    var coll = Collector(cfg^)
+    var reason = coll.startup(kernel, clock, signal, writer)
+    assert_equal(reason, String("install offsets: bridge lost"))
+    assert_equal(kernel.install_calls, 1)
+    assert_equal(kernel.attach_calls, 0)
+
+
+def test_offsets_geometry_refused() raises:
+    var cfg = _startup_config()
+    var kernel = ScriptKernel()
+    _arm_kernel(kernel)
+    kernel.offsets_geom = GeomOut(
+        True, UInt32(2), UInt32(4), UInt32(8), UInt32(1),
+        String(""),
+    )
+    var clock = ScriptClock()
+    var signal = ScriptSignal()
+    var writer = NullWriter()
+    var coll = Collector(cfg^)
+    var reason = coll.startup(kernel, clock, signal, writer)
+    assert_equal(reason, String("map mv_offsets geometry"))
+    assert_equal(kernel.install_calls, 0)
+    assert_equal(kernel.attach_calls, 0)
+
+
+def test_bad_config_offsets_refused() raises:
+    var cfg = _startup_config()
+    cfg.off_size = 40
+    var kernel = ScriptKernel()
+    _arm_kernel(kernel)
+    var clock = ScriptClock()
+    var signal = ScriptSignal()
+    var writer = NullWriter()
+    var coll = Collector(cfg^)
+    var reason = coll.startup(kernel, clock, signal, writer)
+    assert_equal(
+        reason,
+        String("install offsets: overlapping extents size and force"),
+    )
+    assert_equal(kernel.install_calls, 0)
+    assert_equal(kernel.attach_calls, 0)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_probe_pinned_layout_returns_pins]()
@@ -333,6 +466,11 @@ def run() raises -> Int:
     suite.test[test_validate_table_extents]()
     suite.test[test_encode_offsets_table_layout]()
     suite.test[test_encode_offsets_negative_refuses]()
+    suite.test[test_install_success_carries_table_bytes]()
+    suite.test[test_install_verify_mismatch_refuses]()
+    suite.test[test_install_failure_before_attach]()
+    suite.test[test_offsets_geometry_refused]()
+    suite.test[test_bad_config_offsets_refused]()
     suite^.run()
     return 0
 
