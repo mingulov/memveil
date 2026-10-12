@@ -71,7 +71,7 @@ SECTION = "utils"
 PRIORITY = "optional"
 ARCH = "amd64"
 DEB_DEPENDS_BASE = "libelf1t64 | libelf1, zlib1g"
-MAINTAINER = "MemVeil Project <memveil-maintainers@example.invalid>"
+MAINTAINER = "Denis Mingulov <denis@mingulov.com>"
 SHORT_DESC = ("swiotlb bounce-attempt capture and offline replay "
               "on x86-64 Linux")
 LONG_DESC = (

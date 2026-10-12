@@ -183,6 +183,6 @@ chmod 0755 "%{buildroot}/usr/bin/memveil"
 %dir /var/lib/memveil/receipts
 
 %changelog
-* Sun Oct 11 2026 MemVeil Project <memveil-maintainers@example.invalid> - 0.1.0-1
+* Sun Oct 11 2026 Denis Mingulov <denis@mingulov.com> - 0.1.0-1
 - Third-party build: FHS layout matching the .deb, generated man pages and
   static shell completions.

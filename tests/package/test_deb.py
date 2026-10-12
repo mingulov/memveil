@@ -233,6 +233,7 @@ def test_control_fields(engine_version):
     assert deb_field("Section").strip() == "utils"
     assert deb_field("Priority").strip() == "optional"
     assert deb_field("Maintainer").strip() != ""
+    assert "example.invalid" not in deb_field("Maintainer")
     desc = deb_field("Description")
     assert desc.splitlines()[0].strip() == SHORT_DESC, desc
     assert len(desc.splitlines()) > 1, "long description missing"
