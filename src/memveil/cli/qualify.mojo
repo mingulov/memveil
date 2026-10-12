@@ -516,6 +516,12 @@ def publish_receipt(path: String, text: String) raises:
     and renamed over the final name, and the pinned
     directory is synced last. A crash leaves the old
     receipt or nothing, never a half-written file.
+    Concurrent same-operator publishes from separate
+    processes resolve atomic last-writer-wins with
+    whole files: each publisher owns a distinct
+    pid-suffixed tmp name, and readers of the final
+    path observe the old or the new whole receipt,
+    never a mix.
     Raises PublishError with the errno on any failure.
     """
     var raw = path.as_bytes()

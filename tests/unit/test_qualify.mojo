@@ -629,6 +629,160 @@ def test_publish_trailing_slash_refuses() raises:
     assert_true(raised)
 
 
+def _wait_child(pid: Int32) raises -> Int:
+    """Reap one forked test child; return its exit code."""
+    var status = List[Int32]()
+    status.append(Int32(0))
+    var got = external_call["waitpid", Int32](
+        pid, Span(status).unsafe_ptr(), Int32(0)
+    )
+    if Int(got) < 0:
+        raise Error("waitpid failed")
+    var st = Int(status[0])
+    if (st & Int(0x7F)) != 0:
+        raise Error("test child did not exit")
+    return (st >> 8) & Int(0xFF)
+
+
+def _child_exit(code: Int):
+    external_call["_exit", NoneType](Int32(code))
+
+
+def _assert_tmp_absent(cand: String) raises:
+    # Exclusive-create probe: success means no
+    # publisher left this tmp name behind (the probe
+    # file is removed again); any failure fails
+    # the test with the offending name.
+    var c = _cstr_local(cand)
+    var fd = external_call["open", Int32](
+        Span(c).unsafe_ptr(), Int32(0o301), UInt32(0o644)
+    )
+    if Int(fd) < 0:
+        raise Error(String("stale tmp left: ") + cand)
+    _ = external_call["close", Int32](fd)
+    _unlink_local(cand)
+
+
+def _assert_no_tmp_left(
+    dir: String, final: String, pids: List[Int32]
+) raises:
+    for i in range(len(pids)):
+        var cand = (
+            dir
+            + String("/")
+            + final
+            + String(".tmp.")
+            + String(Int(pids[i]))
+        )
+        _assert_tmp_absent(cand)
+
+
+def test_publish_concurrent_last_writer_wins() raises:
+    # Eight processes publish distinct bodies at one
+    # path: every publish succeeds and the final file
+    # byte-equals exactly one whole body (atomic
+    # last-writer-wins), with no tmp names left.
+    var dir = _stop_mkdtemp()
+    var path = dir + String("/r.json")
+    var want = List[String]()
+    for i in range(8):
+        want.append(
+            String("publisher-") + String(i) + String("\n")
+        )
+    var pids = List[Int32]()
+    for i in range(8):
+        var pid = external_call["fork", Int32]()
+        if Int(pid) < 0:
+            raise Error("fork failed")
+        if pid == Int32(0):
+            try:
+                publish_receipt(path, want[i])
+            except:
+                _child_exit(1)
+            _child_exit(0)
+        pids.append(pid)
+    for i in range(len(pids)):
+        assert_equal(_wait_child(pids[i]), 0)
+    var back = read_host_file(path, String("receipt"), 1048576)
+    var text = bytes_to_text(back^)
+    var found = False
+    for i in range(8):
+        if text == want[i]:
+            found = True
+    assert_true(found)
+    pids.append(Int32(Int(external_call["getpid", Int32]())))
+    _assert_no_tmp_left(dir, String("r.json"), pids^)
+
+
+def test_publish_reader_sees_whole_files() raises:
+    # One publisher alternates two large bodies while
+    # the parent reads the final path: every read sees
+    # A whole, B whole, or nothing (absent before the
+    # first rename) -- never a torn mix.
+    var dir = _stop_mkdtemp()
+    var path = dir + String("/live.json")
+    var chunk_a = String("")
+    var chunk_b = String("")
+    for _ in range(1000):
+        chunk_a += String("A")
+        chunk_b += String("B")
+    var body_a = String("")
+    var body_b = String("")
+    for _ in range(64):
+        body_a += chunk_a
+        body_b += chunk_b
+    var pid = external_call["fork", Int32]()
+    if Int(pid) < 0:
+        raise Error("fork failed")
+    if pid == Int32(0):
+        var code = 0
+        for i in range(1000):
+            try:
+                if i % 2 == 0:
+                    publish_receipt(path, body_a)
+                else:
+                    publish_receipt(path, body_b)
+            except:
+                code = 1
+                break
+        _child_exit(code)
+    for _ in range(1000):
+        var seen = String("")
+        var have = False
+        try:
+            var back = read_host_file(
+                path, String("receipt"), 1048576
+            )
+            seen = bytes_to_text(back^)
+            have = True
+        except:
+            have = False
+        if have:
+            assert_true(seen == body_a or seen == body_b)
+    assert_equal(_wait_child(pid), 0)
+    var pids = List[Int32]()
+    pids.append(pid)
+    pids.append(Int32(Int(external_call["getpid", Int32]())))
+    _assert_no_tmp_left(dir, String("live.json"), pids^)
+
+
+def test_publish_stale_tmp_recycled() raises:
+    # A stale tmp file squatting on this process's own
+    # tmp name is unlinked once and the publish still
+    # succeeds, leaving no tmp names behind.
+    var dir = _stop_mkdtemp()
+    var path = dir + String("/r.json")
+    var self_pid = Int(external_call["getpid", Int32]())
+    var stale = path + String(".tmp.") + String(self_pid)
+    _q_write(stale, String("stale-junk\n"))
+    publish_receipt(path, String("fresh\n"))
+    var back = read_host_file(path, String("receipt"), 1048576)
+    assert_equal(bytes_to_text(back^), String("fresh\n"))
+    var pids = List[Int32]()
+    pids.append(Int32(self_pid))
+    _assert_no_tmp_left(dir, String("r.json"), pids^)
+
+
 def _q_cstr(text: String) -> List[UInt8]:
     var out = List[UInt8]()
     for b in text.as_bytes():
@@ -862,6 +1016,9 @@ def run() raises -> Int:
     suite.test[test_publish_tmp_symlink_never_truncates]()
     suite.test[test_publish_final_symlink_replaced]()
     suite.test[test_publish_trailing_slash_refuses]()
+    suite.test[test_publish_concurrent_last_writer_wins]()
+    suite.test[test_publish_reader_sees_whole_files]()
+    suite.test[test_publish_stale_tmp_recycled]()
     suite.test[test_plan_below_floor_refuses]()
     suite.test[test_smoke_bridge_binds_exercised_bytes]()
     suite.test[test_smoke_bridge_unbound_refuses]()
