@@ -1137,7 +1137,8 @@ def validate_table_extents(
     cap, no two pinned extents (including the
     common_type anchor) may overlap, and the dynamic
     floor must stay within the cap with margin under the
-    context read cap. The collector re-runs this on its
+    context read cap while covering every tabled
+    extent. The collector re-runs this on its
     configured values before install; the BPF program
     re-checks the same properties at runtime.
     """
@@ -1171,6 +1172,18 @@ def validate_table_extents(
         return String(
             t"fixed region end {fixed_end} exceeds cap {MV_FIXED_MAX}"
         )
+    if fixed_end < loc_off + 4:
+        return String(
+            t"fixed region end {fixed_end} below dev_name extent @{loc_off}:4"
+        )
+    if fixed_end < size_off + 8:
+        return String(
+            t"fixed region end {fixed_end} below size extent @{size_off}:8"
+        )
+    if fixed_end < force_off + 1:
+        return String(
+            t"fixed region end {fixed_end} below force extent @{force_off}:1"
+        )
     return String("")
 
 
@@ -1185,7 +1198,8 @@ def probe_trace_offsets(data: Span[UInt8, _]) -> OffsetProbe:
     pinned type spellings and widths but may sit at
     probed offsets; extra live fields are tolerated and
     the dynamic floor is the max end over every parsed
-    fixed field. Any retype, resize, missing or
+    field, __data_loc descriptors included. Any retype,
+    resize, missing or
     duplicate field, unparseable line, anchor drift,
     overlap, or cap breach refuses naming its class.
     """
@@ -1240,8 +1254,10 @@ def probe_trace_offsets(data: Span[UInt8, _]) -> OffsetProbe:
     var fixed_end = 0
     for i in range(len(fmt.fields)):
         var field = fmt.fields[i]
-        if _starts_with(field.ftype.as_bytes(), String("__data_loc")):
-            continue
+        # Every declared field occupies its fixed slot,
+        # including __data_loc descriptors: each is a
+        # fixed u32 holding an offset/length pair, not
+        # dynamic data itself.
         var end = field.offset + field.size
         if end > fixed_end:
             fixed_end = end

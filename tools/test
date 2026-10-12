@@ -1530,7 +1530,7 @@ suite_attempts() {
         cat "$TMP/flow.log" >&2
         return 1
     }
-    grep -qF "flow: 8 schedules passed" "$TMP/flow.log" || return 1
+    grep -qF "flow: 9 schedules passed" "$TMP/flow.log" || return 1
     echo "attempts: corpus, native, mojo, and differential passed"
     # Scripted close-out matrix: the REAL collector with
     # scripted sources and a real writer per case. The

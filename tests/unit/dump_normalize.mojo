@@ -190,11 +190,27 @@ def _table_ok(
     var loc_end = loc_off + 4
     var size_end = size_off + 8
     var force_end = force_off + 1
+    # Anchor overlap and floor coverage mirror
+    # mv_validate_offsets exactly: header bytes never
+    # read as consumed fields, and dynamic data never
+    # starts inside a fixed slot.
+    if loc_off < 2:
+        return False
+    if size_off < 2:
+        return False
+    if force_off < 2:
+        return False
     if loc_off < size_end and size_off < loc_end:
         return False
     if loc_off < force_end and force_off < loc_end:
         return False
     if size_off < force_end and force_off < size_end:
+        return False
+    if (
+        fixed_end < loc_end
+        or fixed_end < size_end
+        or fixed_end < force_end
+    ):
         return False
     return True
 

@@ -170,6 +170,23 @@ def test_cut_and_identities() raises:
     assert_false(byte_coverage_valid(incoherent))
 
 
+def test_table_bad_cut_has_no_byte_coverage() raises:
+    # One table-bad firing (unknown size): counts stay
+    # coherent, but no requested-byte snapshot is
+    # covered.
+    var cut = List[UInt64]()
+    cut.append(UInt64(1))
+    cut.append(UInt64(0))
+    cut.append(UInt64(0))
+    cut.append(UInt64(0))
+    cut.append(UInt64(1))
+    cut.append(UInt64(32))
+    assert_true(count_identity(cut))
+    assert_true(counters_valid(cut))
+    assert_false(byte_coverage_valid(cut))
+    assert_true(submit_valid(cut))
+
+
 def test_checked_add() raises:
     var top = u64_max()
     assert_equal(checked_add(UInt64(2), UInt64(3)), UInt64(5))
@@ -208,6 +225,7 @@ def run() raises -> Int:
     suite.test[test_detail_unknown_grammar]()
     suite.test[test_aggregate_grammar]()
     suite.test[test_cut_and_identities]()
+    suite.test[test_table_bad_cut_has_no_byte_coverage]()
     suite.test[test_checked_add]()
     suite.test[test_env_mapping]()
     suite^.run()

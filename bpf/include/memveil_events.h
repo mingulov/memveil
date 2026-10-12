@@ -86,7 +86,8 @@ struct mv_offsets {
 #define MV_CNT_LEN 6u
 
 /* Flag word bits (sticky; any set bit invalidates the epoch).
- * BYTE_COVERAGE is not a wrap: the fixed 41-byte read failed,
+ * BYTE_COVERAGE is not a wrap: the tabled size read failed
+ * (missing/invalid offset table or a short size slot),
  * so one firing's size is unknowable and the byte aggregate
  * can never cover it. */
 #define MV_FLAG_OBSERVED_WRAP (1ULL << 0)
@@ -180,8 +181,10 @@ static __inline enum mv_reason mv_validate_loc(__u32 off, __u32 dlen,
 
 /* Validate one installed offset table the way the program
  * does: magic, version, per-extent caps, dynamic-floor
- * cap, and pairwise overlap among the tabled extents.
- * Shared so the host reference mirrors the program. */
+ * cap, pairwise overlap among the tabled extents and
+ * the common_type anchor, and floor coverage over
+ * every tabled extent. Shared so the host reference
+ * mirrors the program. */
 static __inline enum mv_reason
 mv_validate_offsets(const struct mv_offsets *tab)
 {
@@ -207,11 +210,28 @@ mv_validate_offsets(const struct mv_offsets *tab)
     loc_end = loc_off + 4;
     size_end = size_off + 8;
     force_end = force_off + 1;
+    /* The common_type anchor pins the trace-entry header
+     * at ctx+0: no tabled extent may read header bytes
+     * as a consumed field. Each tabled width is
+     * positive, so off < 2 is exactly overlap with
+     * the @0:2 anchor. */
+    if (loc_off < 2)
+        return MV_CTX_TABLE_BAD;
+    if (size_off < 2)
+        return MV_CTX_TABLE_BAD;
+    if (force_off < 2)
+        return MV_CTX_TABLE_BAD;
     if (loc_off < size_end && size_off < loc_end)
         return MV_CTX_TABLE_BAD;
     if (loc_off < force_end && force_off < loc_end)
         return MV_CTX_TABLE_BAD;
     if (size_off < force_end && force_off < size_end)
+        return MV_CTX_TABLE_BAD;
+    /* The dynamic floor must cover every tabled
+     * extent: dynamic data must never start inside
+     * a fixed slot. */
+    if (fixed_end < loc_end || fixed_end < size_end ||
+        fixed_end < force_end)
         return MV_CTX_TABLE_BAD;
     return MV_OK;
 }

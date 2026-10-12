@@ -205,6 +205,28 @@ def build_vectors():
              ctx_fixed(41, 13) + name12 + b"\0", "CTX_TABLE_BAD")
     tctx_vec(off_table(8, 32, 40, 129),
              ctx_fixed(41, 13) + name12 + b"\0", "CTX_TABLE_BAD")
+    # 39-41: each tabled extent overlapping the
+    # common_type anchor refuses: header bytes must
+    # never read as consumed fields.
+    tctx_vec(off_table(0, 32, 40, 41),
+             ctx_fixed(41, 13) + name12 + b"\0", "CTX_TABLE_BAD")
+    tctx_vec(off_table(8, 0, 40, 41),
+             ctx_fixed(41, 13) + name12 + b"\0", "CTX_TABLE_BAD")
+    tctx_vec(off_table(8, 32, 1, 41),
+             ctx_fixed(41, 13) + name12 + b"\0", "CTX_TABLE_BAD")
+    # 42-43: a floor below any tabled extent
+    # refuses: dynamic data would otherwise start
+    # inside a fixed slot.
+    tctx_vec(off_table(8, 32, 40, 0),
+             ctx_fixed(41, 13) + name12 + b"\0", "CTX_TABLE_BAD")
+    tctx_vec(off_table(8, 32, 40, 12),
+             ctx_fixed(41, 13) + name12 + b"\0", "CTX_TABLE_BAD")
+    # 44: a late dev_name slot admits with its
+    # descriptor-covered floor.
+    tctx_vec(off_table(120, 32, 40, 124),
+             ctx_moved(120, 32, 40, 124, 124, 13) + name12 + b"\0",
+             "OK", size=98, force=0, seq="-", ktime="-",
+             namelen=12, name=hexed(name12))
     return vecs
 
 
