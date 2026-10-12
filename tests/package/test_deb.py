@@ -143,36 +143,37 @@ BPF_OBJECTS = (
 )
 
 # Frozen completion source, pinned independently of the
-# generator. Long flags only: the -h alias works on every
-# verb but is intentionally omitted from completions (it
-# appears in no --help text, so no drift guard can bind it).
+# generator. The -h alias is completed everywhere --help
+# is (top level plus every tabled verb); it appears in no
+# --help text, so the live -h guard below (not the text
+# drift guards) binds it.
 FROZEN_VERBS = ("record", "report", "top", "doctor", "qualify",
                 "help", "version")
-FROZEN_TOP_FLAGS = ("--help", "--version")
+FROZEN_TOP_FLAGS = ("--help", "--version", "-h")
 FROZEN_FLAGS = {
     "record": ("--bridge", "--capability", "--cp-object",
                "--duration", "--help", "--lc-object",
                "--max-events-bytes", "--object", "--output",
-               "--profile", "--profiles-dir"),
+               "--profile", "--profiles-dir", "-h"),
     "report": ("--allow-partial", "--format", "--help",
                "--long-lived-after", "--max-events-bytes",
-               "--max-line-bytes", "--max-session-bytes"),
+               "--max-line-bytes", "--max-session-bytes", "-h"),
     "top": ("--bridge", "--capability", "--cp-object",
             "--device", "--duration", "--help", "--interval",
             "--lc-object", "--long-lived-after",
             "--max-events-bytes", "--max-line-bytes",
             "--max-session-bytes", "--object", "--output",
-            "--profile"),
-    "doctor": ("--help", "--json", "--profiles-dir"),
+            "--profile", "-h"),
+    "doctor": ("--help", "--json", "--profiles-dir", "-h"),
     "qualify": ("--bridge", "--capability", "--cp-object",
                 "--help", "--lc-object", "--object",
-                "--output", "--profile", "--profiles-dir"),
+                "--output", "--profile", "--profiles-dir", "-h"),
 }
 # --format's enum is closed in the parser (report.mojo);
 # capabilities stay free text because the accepted set is
 # profile-dependent, not statically closed.
 FROZEN_FORMAT_VALUES = ("text", "json", "markdown")
-FROZEN_NOVALUE_FLAGS = ("--help", "--allow-partial", "--json")
+FROZEN_NOVALUE_FLAGS = ("--help", "--allow-partial", "--json", "-h")
 
 SHORT_DESC = "swiotlb bounce-attempt capture and offline replay on x86-64 Linux"
 
@@ -1194,13 +1195,30 @@ def test_frozen_verbs_match_top_help():
 
 @needs_bin
 def test_frozen_flags_match_verb_help():
+    # -h is bound by the live guard below, not by --help
+    # text: it appears in neither the help body nor the
+    # synopsis, so both text comparisons exclude it.
     for verb in sorted(FROZEN_FLAGS):
         text = _help(verb)
         live = set(re.findall(r"--[a-z][a-z-]*", text))
-        want = set(FROZEN_FLAGS[verb]) - {"--help"}
+        want = set(FROZEN_FLAGS[verb]) - {"--help", "-h"}
         assert live == want, \
             "memveil %s: --help names %s vs frozen %s" % (
                 verb, sorted(live), sorted(want))
+
+
+@needs_bin
+def test_short_help_flag_works_live():
+    # The -h alias is completed everywhere --help is, so
+    # it must work everywhere it is offered: top level
+    # plus every tabled verb. This live guard (exit 0 on
+    # the built binary) is what binds -h; the --help
+    # text comparisons above cannot see it.
+    proc = run(BIN, "-h")
+    assert proc.returncode == 0, proc.stderr
+    for verb in sorted(FROZEN_FLAGS):
+        proc = run(BIN, verb, "-h")
+        assert proc.returncode == 0, (verb, proc.stderr)
 
 
 @needs_bin
@@ -1222,7 +1240,8 @@ def test_frozen_value_arity_matches_synopsis():
                 takes_value.add(match.group(0))
             else:
                 bare.add(match.group(0))
-        for flag in sorted(set(FROZEN_FLAGS[verb]) - {"--help"}):
+        for flag in sorted(
+                set(FROZEN_FLAGS[verb]) - {"--help", "-h"}):
             if flag in FROZEN_NOVALUE_FLAGS:
                 assert flag in bare, \
                     "memveil %s: frozen-novalue %s shows a value" % (
@@ -1426,8 +1445,8 @@ def test_gen_completions_bash_functional(tmp_path):
                       proc.stdout.splitlines() if line)
 
     assert complete(["memveil", ""], 1) == sorted(FROZEN_VERBS)
-    assert complete(["memveil", "--"], 1) == sorted(FROZEN_TOP_FLAGS)
-    assert complete(["memveil", "record", "--"], 2) == \
+    assert complete(["memveil", "-"], 1) == sorted(FROZEN_TOP_FLAGS)
+    assert complete(["memveil", "record", "-"], 2) == \
         sorted(FROZEN_FLAGS["record"])
     assert complete(["memveil", "report", "--for"], 2) == ["--format"]
     assert complete(["memveil", "report", "--format", ""], 3) == \
