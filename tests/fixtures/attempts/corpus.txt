@@ -29,3 +29,12 @@
 27 payload PAY_PAD
 28 payload OK size=98 force=0 seq=7 ktime=123456789 namelen=0 name=
 29 payload OK size=98 force=0 seq=7 ktime=123456789 namelen=3 name=fffe41
+30 tctx OK size=98 force=0 seq=- ktime=- namelen=12 name=303030303a30303a30322e30
+31 tctx OK size=98 force=0 seq=- ktime=- namelen=12 name=303030303a30303a30322e30
+32 tctx OK size=18446744073709551615 force=1 seq=- ktime=- namelen=12 name=303030303a30303a30322e30
+33 tctx CTX_TABLE_BAD
+34 tctx CTX_TABLE_BAD
+35 tctx CTX_TABLE_BAD
+36 tctx CTX_TABLE_BAD
+37 tctx CTX_TABLE_BAD
+38 tctx CTX_TABLE_BAD

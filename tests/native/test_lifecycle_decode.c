@@ -46,6 +46,8 @@ static const char *reason_name(enum mv_reason reason)
         return "CTX_NUL_EARLY";
     case MV_CTX_FORCE_BAD:
         return "CTX_FORCE_BAD";
+    case MV_CTX_TABLE_BAD:
+        return "CTX_TABLE_BAD";
     case MV_PAY_SHORT:
         return "PAY_SHORT";
     case MV_PAY_LONG:

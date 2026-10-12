@@ -87,6 +87,10 @@ comptime _KTIME_BASE = UInt64(1000000000)
 comptime _MAX_VECTORS = 4096
 comptime _MAX_INPUT = 65536
 comptime _FILE_CAP = 1048576
+comptime _OFF_MAGIC = 0x35464D4D
+comptime _OFF_VERSION = 1
+comptime _FIXED_MAX = 128
+comptime _TABLE_LEN = 24
 
 
 def _ru32(blob: List[UInt8], pos: Int) raises DumpError -> UInt32:
@@ -164,21 +168,59 @@ def strip_prefix(text: String, pre: String) -> String:
     return out^
 
 
-def extract_ctx(ctx: List[UInt8]) -> CtxOut:
-    """Mirror the BPF context walk over a byte buffer.
+def _le32_at(buf: List[UInt8], off: Int) -> Int:
+    var v = Int(0)
+    for i in range(4):
+        v |= Int(buf[off + i]) << (8 * i)
+    return v
 
-    Same predicate order as the C ref_extract: short context,
-    dynamic-length faults, extent faults, NUL placement, then
-    the force byte. Any skew fails the lane diff.
+
+def _table_ok(
+    loc_off: Int, size_off: Int, force_off: Int, fixed_end: Int
+) -> Bool:
+    """Mirror mv_validate_offsets (magic/version checked by caller)."""
+    if loc_off > _FIXED_MAX - 4:
+        return False
+    if size_off > _FIXED_MAX - 8:
+        return False
+    if force_off > _FIXED_MAX - 1:
+        return False
+    if fixed_end > _FIXED_MAX:
+        return False
+    var loc_end = loc_off + 4
+    var size_end = size_off + 8
+    var force_end = force_off + 1
+    if loc_off < size_end and size_off < loc_end:
+        return False
+    if loc_off < force_end and force_off < loc_end:
+        return False
+    if size_off < force_end and force_off < size_end:
+        return False
+    return True
+
+
+def extract_ctx(
+    ctx: List[UInt8], loc_off: Int, size_off: Int, force_off: Int,
+    fixed_end: Int,
+) -> CtxOut:
+    """Mirror the BPF tabled context walk over a byte buffer.
+
+    Same predicate order as the C ref_extract: size slot,
+    loc slot, dynamic-length faults, extent faults, NUL
+    placement, then the force byte. Any skew fails the
+    lane diff.
     """
     var empty = List[UInt8]()
-    if len(ctx) < _CTX_FIXED:
+    if size_off + 8 > len(ctx):
+        return CtxOut("CTX_SHORT", UInt64(0), False, empty^)
+    var size = _le64_at(ctx, size_off)
+    if loc_off + 4 > len(ctx):
         return CtxOut("CTX_SHORT", UInt64(0), False, empty^)
     var loc = (
-        UInt32(ctx[8])
-        | (UInt32(ctx[9]) << 8)
-        | (UInt32(ctx[10]) << 16)
-        | (UInt32(ctx[11]) << 24)
+        UInt32(ctx[loc_off])
+        | (UInt32(ctx[loc_off + 1]) << 8)
+        | (UInt32(ctx[loc_off + 2]) << 16)
+        | (UInt32(ctx[loc_off + 3]) << 24)
     )
     var off = Int(loc & UInt32(0xFFFF))
     var dlen = Int((loc >> UInt32(16)) & UInt32(0xFFFF))
@@ -186,7 +228,7 @@ def extract_ctx(ctx: List[UInt8]) -> CtxOut:
         return CtxOut("CTX_DLEN_ZERO", UInt64(0), False, empty^)
     if dlen > NAME_MAX + 1:
         return CtxOut("CTX_DLEN_BIG", UInt64(0), False, empty^)
-    if off < _CTX_FIXED:
+    if off < fixed_end:
         return CtxOut("CTX_LOC_OOB", UInt64(0), False, empty^)
     if off + dlen > _READ_CAP:
         return CtxOut("CTX_LOC_OOB", UInt64(0), False, empty^)
@@ -201,14 +243,37 @@ def extract_ctx(ctx: List[UInt8]) -> CtxOut:
                 )
         elif byte == UInt8(0):
             return CtxOut("CTX_NUL_EARLY", UInt64(0), False, empty^)
-    if ctx[40] != UInt8(0) and ctx[40] != UInt8(1):
+    if force_off + 1 > len(ctx):
+        return CtxOut("CTX_SHORT", UInt64(0), False, empty^)
+    if ctx[force_off] != UInt8(0) and ctx[force_off] != UInt8(1):
         return CtxOut("CTX_FORCE_BAD", UInt64(0), False, empty^)
     var name = List[UInt8]()
     for i in range(dlen - 1):
         name.append(ctx[off + i])
     return CtxOut(
-        "OK", _le64_at(ctx, 32), ctx[40] == UInt8(1), name^
+        "OK", size, ctx[force_off] == UInt8(1), name^
     )
+
+
+def extract_tctx(inp: List[UInt8]) -> CtxOut:
+    """Extract one tabled vector: 24-byte table plus context."""
+    var empty = List[UInt8]()
+    if len(inp) < _TABLE_LEN:
+        return CtxOut("CTX_TABLE_BAD", UInt64(0), False, empty^)
+    var magic = _le32_at(inp, 0)
+    var version = Int(inp[4]) | (Int(inp[5]) << 8)
+    var loc_off = _le32_at(inp, 8)
+    var size_off = _le32_at(inp, 12)
+    var force_off = _le32_at(inp, 16)
+    var fixed_end = _le32_at(inp, 20)
+    if magic != _OFF_MAGIC or version != _OFF_VERSION:
+        return CtxOut("CTX_TABLE_BAD", UInt64(0), False, empty^)
+    if not _table_ok(loc_off, size_off, force_off, fixed_end):
+        return CtxOut("CTX_TABLE_BAD", UInt64(0), False, empty^)
+    var ctx = List[UInt8]()
+    for i in range(_TABLE_LEN, len(inp)):
+        ctx.append(inp[i])
+    return extract_ctx(ctx^, loc_off, size_off, force_off, fixed_end)
 
 
 def pack_attempt(
@@ -313,7 +378,7 @@ def run(bin_path: String, txt_path: String, out_path: String) raises DumpError -
         pos += 4
         var rlen = Int(_ru32(blob, pos))
         pos += 4
-        if kind != 1 and kind != 2:
+        if kind != 1 and kind != 2 and kind != 3:
             raise DumpError("bad corpus record kind")
         if rlen > _MAX_INPUT or pos + rlen > len(blob):
             raise DumpError("bad corpus record length")
@@ -324,6 +389,8 @@ def run(bin_path: String, txt_path: String, out_path: String) raises DumpError -
         var tag = String("ctx")
         if kind == 2:
             tag = String("payload")
+        elif kind == 3:
+            tag = String("tctx")
         var toks = tokenize(data[i])
         if len(toks) < 3:
             raise DumpError("unparseable corpus line")
@@ -331,11 +398,14 @@ def run(bin_path: String, txt_path: String, out_path: String) raises DumpError -
         if exp_idx != UInt64(i) or toks[1] != tag:
             raise DumpError("corpus desync at " + String(i))
         var verdict = toks[2]
-        if kind == 1:
-            var ext = extract_ctx(inp)
+        if kind == 1 or kind == 3:
+            var ext = extract_ctx(inp, 8, 32, 40, 41)
+            if kind == 3:
+                ext = extract_tctx(inp)
             if ext.reason != verdict:
                 raise DumpError(
-                    "ctx "
+                    tag
+                    + " "
                     + String(i)
                     + ": got "
                     + ext.reason
@@ -343,10 +413,10 @@ def run(bin_path: String, txt_path: String, out_path: String) raises DumpError -
                     + verdict
                 )
             if ext.reason != "OK":
-                dump += String(i) + " ctx " + verdict + "\n"
+                dump += String(i) + " " + tag + " " + verdict + "\n"
                 continue
             if len(toks) != 9:
-                raise DumpError("ctx OK line must carry fields")
+                raise DumpError(tag + " OK line must carry fields")
             var seq = UInt64(i)
             var ktime = _KTIME_BASE + UInt64(i)
             var packed = pack_attempt(
@@ -355,7 +425,8 @@ def run(bin_path: String, txt_path: String, out_path: String) raises DumpError -
             var decoded = decode_for_dump(packed)
             if decoded.reason != "OK":
                 raise DumpError(
-                    "ctx " + String(i) + " pipeline: " + decoded.reason
+                    tag + " " + String(i) + " pipeline: "
+                    + decoded.reason
                 )
             _check_ok_fields(
                 toks, i, True, decoded.size, decoded.force,

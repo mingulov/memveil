@@ -5,14 +5,16 @@
 Emits tests/fixtures/attempts/corpus.bin (length-prefixed inputs)
 and corpus.txt (one expectation line per record):
 
-    <idx> <ctx|payload> <verdict> [size=N force=N seq=N|- ktime=N|-
-    namelen=N name=<hex>]
+    <idx> <ctx|tctx|payload> <verdict> [size=N force=N seq=N|-
+    ktime=N|- namelen=N name=<hex>]
 
 `seq`/`ktime` are `-` for ctx records (the extractor assigns them;
 the test passes seq=<idx> and a fixed ktime, so dumps stay
-deterministic). Verdicts are the shared reason vocabulary from
-bpf/include/memveil_events.h. Regeneration is byte-identical;
-`--check` fails on any drift.
+deterministic). `tctx` records prepend the 24-byte load-time
+offset table to the context bytes, exercising the tabled read
+path (moved pins, zero/bad tables). Verdicts are the shared
+reason vocabulary from bpf/include/memveil_events.h.
+Regeneration is byte-identical; `--check` fails on any drift.
 """
 
 import os
@@ -27,8 +29,10 @@ TXT_PATH = os.path.join(HERE, "corpus.txt")
 U64MAX = (1 << 64) - 1
 KIND_CTX = 1
 KIND_PAYLOAD = 2
+KIND_TCTX = 3
 
 MAGIC = 0x3741564D  # "MVA7" little-endian
+OFF_MAGIC = 0x35464D4D  # "MFO5" little-endian
 
 
 def ctx_fixed(dev_off, dev_dlen, size=98, force=0):
@@ -39,6 +43,26 @@ def ctx_fixed(dev_off, dev_dlen, size=98, force=0):
         382, 0, 0, 1234, loc, b"\0\0\0\0",
         0xFFFFFFFF, 0x123456789ABCDEF0, size, force,
     )
+
+
+def off_table(loc=8, size=32, force=40, fixed_end=41, magic=OFF_MAGIC,
+              version=1):
+    """24-byte load-time offset table (struct mv_offsets)."""
+    return struct.pack("<IHHIIII", magic, version, 0, loc, size,
+                       force, fixed_end)
+
+
+def ctx_moved(loc_off, size_off, force_off, fixed_end, dev_off,
+              dev_dlen, size=98, force=0):
+    """Fixed context with the pinned slots at drifted offsets."""
+    assert dev_off >= fixed_end, "name must sit past the floor"
+    buf = bytearray(fixed_end)
+    struct.pack_into("<H", buf, 0, 382)
+    loc = ((dev_dlen & 0xFFFF) << 16) | (dev_off & 0xFFFF)
+    struct.pack_into("<I", buf, loc_off, loc)
+    struct.pack_into("<Q", buf, size_off, size)
+    struct.pack_into("<B", buf, force_off, force)
+    return bytes(buf)
 
 
 def payload(magic=MAGIC, version=1, flags=0, seq=7, ktime=123456789,
@@ -68,6 +92,9 @@ def build_vectors():
 
     def pay_vec(buf, verdict, **fields):
         vecs.append((KIND_PAYLOAD, buf, verdict, fields or None))
+
+    def tctx_vec(table, buf, verdict, **fields):
+        vecs.append((KIND_TCTX, table + buf, verdict, fields or None))
 
     name12 = b"0000:00:02.0"
     # 0: valid normal ctx.
@@ -149,6 +176,35 @@ def build_vectors():
             ktime=123456789, namelen=0, name="")
     pay_vec(payload(name=raw13), "OK", size=98, force=0, seq=7,
             ktime=123456789, namelen=3, name=hexed(raw13))
+    # 30: pins table over the pinned vector 0 bytes: the
+    # tabled read path extracts identical fields.
+    tctx_vec(off_table(), ctx_fixed(41, 13) + name12 + b"\0", "OK",
+             size=98, force=0, seq="-", ktime="-", namelen=12,
+             name=hexed(name12))
+    # 31: drifted slots (loc@8, size@40, force@48, floor 49).
+    tctx_vec(off_table(8, 40, 48, 49),
+             ctx_moved(8, 40, 48, 49, 49, 13) + name12 + b"\0",
+             "OK", size=98, force=0, seq="-", ktime="-",
+             namelen=12, name=hexed(name12))
+    # 32: drifted slots, forced, max-u64 size.
+    tctx_vec(off_table(8, 40, 48, 49),
+             ctx_moved(8, 40, 48, 49, 49, 13, size=U64MAX,
+                       force=1) + name12 + b"\0",
+             "OK", size=U64MAX, force=1, seq="-", ktime="-",
+             namelen=12, name=hexed(name12))
+    # 33-38: bad tables refuse before any read.
+    tctx_vec(bytes(24), ctx_fixed(41, 13) + name12 + b"\0",
+             "CTX_TABLE_BAD")
+    tctx_vec(off_table(magic=0x0),
+             ctx_fixed(41, 13) + name12 + b"\0", "CTX_TABLE_BAD")
+    tctx_vec(off_table(version=2),
+             ctx_fixed(41, 13) + name12 + b"\0", "CTX_TABLE_BAD")
+    tctx_vec(off_table(8, 40, 40, 49),
+             ctx_fixed(41, 13) + name12 + b"\0", "CTX_TABLE_BAD")
+    tctx_vec(off_table(8, 32, 200, 41),
+             ctx_fixed(41, 13) + name12 + b"\0", "CTX_TABLE_BAD")
+    tctx_vec(off_table(8, 32, 40, 129),
+             ctx_fixed(41, 13) + name12 + b"\0", "CTX_TABLE_BAD")
     return vecs
 
 
@@ -158,7 +214,12 @@ def render(vecs):
     for idx, (kind, buf, verdict, fields) in enumerate(vecs):
         out_bin.append(struct.pack("<II", kind, len(buf)))
         out_bin.append(buf)
-        tag = "ctx" if kind == KIND_CTX else "payload"
+        if kind == KIND_CTX:
+            tag = "ctx"
+        elif kind == KIND_TCTX:
+            tag = "tctx"
+        else:
+            tag = "payload"
         line = "%d %s %s" % (idx, tag, verdict)
         if fields is not None:
             line += (" size=%s force=%s seq=%s ktime=%s namelen=%s"
