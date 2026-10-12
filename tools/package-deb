@@ -94,9 +94,11 @@ Files: *
 Copyright: See LICENSE and THIRD-PARTY-NOTICES.md in this directory.
 License: GPL-3.0-or-later
  The MemVeil sources are available under GPL-3.0-or-later; the full
- license text is in LICENSE. BPF objects are GPL-2.0-only (LICENSES/).
- Redistributed third-party texts, including the libbpf-mojo bridge
- license, live in licenses/, with notices in THIRD-PARTY-NOTICES.md
+ license text is in LICENSE. On Debian systems the GPL-3 text is
+ also in /usr/share/common-licenses/GPL-3. BPF objects are
+ GPL-2.0-only (LICENSES/). Redistributed third-party texts,
+ including the libbpf-mojo bridge license, live in licenses/,
+ with notices in THIRD-PARTY-NOTICES.md
  and THIRD-PARTY-NOTICES.libbpf-mojo.md.
 """
 

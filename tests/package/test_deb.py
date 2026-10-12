@@ -429,6 +429,10 @@ def test_copyright_points_at_texts(extracted):
     assert "GPL-3.0-or-later" in text, text
     assert "THIRD-PARTY-NOTICES" in text, text
     assert "GPL-2.0-only" in text, text
+    # DEP-5 use of the common license files: lintian's
+    # copyright-not-using-common-license-for-gpl fires when
+    # no /usr/share/common-licenses pointer is present.
+    assert "/usr/share/common-licenses/GPL-3" in text, text
 
 
 @needs_deb
