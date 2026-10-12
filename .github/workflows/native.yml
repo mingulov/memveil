@@ -1,8 +1,19 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Tier 2: native and FFI suites. Needs system clang for the C
-# eBPF programs and native fixtures. Unprivileged; safe for
-# pull requests. Sanitizer builds run here once the native
-# fixtures adopt them.
+# Tier 2: native and FFI suites. Needs the system clang
+# toolchain for the C eBPF programs and native fixtures.
+# Unprivileged; safe for pull requests.
+#
+# Tier meanings, shared with the offline workflow: Tier 1
+# is the unprivileged offline suites (no privileges, no
+# network fixtures, no secrets; safe for pull requests
+# from any source); Tier 2 is this workflow; Tier 3 is
+# the confidential gates needing armed live kernels
+# (confidential-ranges, confidential-real,
+# confidential-late-attach), which no workflow schedules
+# and which exit 77 unarmed. The vm-*, perf-workload,
+# and soak suites run under the manual vm workflow on a
+# trusted self-hosted runner; deb, rpm-journey, and
+# extracted-robustness run on demand, not in CI.
 #
 # Same provisioning as Tier 1: the locked ubuntu-26.04
 # toolchain generations, apt system tools, and the vendored

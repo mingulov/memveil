@@ -11,11 +11,17 @@
 # here and re-verified by the build); without it the build
 # fails instead of compiling a bridge-less binary.
 #
-# Deliberately absent: confidential-ranges, confidential-real,
-# confidential-late-attach. Those gates need armed live kernels
-# (exit 77 unarmed), so they belong to Tier 3 runners with real
-# fixtures, not to this unprivileged tier. Everything else in
-# `tools/test --help` runs in Tier 1 or Tier 2.
+# Tier meanings, shared with the native workflow: Tier 1
+# is this workflow; Tier 2 is the native and FFI suites
+# needing the system clang toolchain and native fixtures
+# (unprivileged; safe for pull requests); Tier 3 is the
+# confidential gates needing armed live kernels
+# (confidential-ranges, confidential-real,
+# confidential-late-attach), which no workflow schedules
+# and which exit 77 unarmed. The vm-*, perf-workload,
+# and soak suites run under the manual vm workflow on a
+# trusted self-hosted runner; deb, rpm-journey, and
+# extracted-robustness run on demand, not in CI.
 name: offline
 
 on:
