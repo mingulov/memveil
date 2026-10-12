@@ -10,8 +10,9 @@ plus a boot_id file:
   noconfig   drops both config sources (config uncheckable).
   diffconfig swaps config.gz bytes (config mismatch).
   moved      swaps the format for layout/moved.format (the
-             size field drifted; admission must refuse with
-             the named field diff).
+             size field drifted; the hook probe admits with
+             probed offsets while fixed-profile binding
+             still refuses).
 
 Profiles under tests/fixtures/scan/profiles/ carry section 5
 grammar bindings computed from the CURRENT fixture bytes:
@@ -21,6 +22,9 @@ grammar bindings computed from the CURRENT fixture bytes:
   unbound.json reference-unvalidated, free-text note.
   sat.json     reference-unvalidated, object+badring ring
                (saturation mechanism stand-in).
+  movedok.json reference-unvalidated, bindings re-authored
+               for moved/ (drifted format admitted with
+               probed offsets).
   ref-stale.json reference-unvalidated, current bindings;
                its receipt still names the previous format
                hash (stale-receipt stand-in).
@@ -412,6 +416,21 @@ def main() -> int:
             json.dumps(profile_doc(pid, status, note, attempt), indent=2)
             + "\n"
         )
+    moved_bind = {**bind, "format": sha(SCAN / "moved" / FMT_PATH[1:])}
+    assert moved_bind["format"] == sha(LAYOUT_MOVED), "moved format drift"
+    (prof / "movedok.json").write_text(
+        json.dumps(
+            profile_doc(
+                "scan-movedok",
+                "reference-unvalidated",
+                note_for(moved_bind),
+                "candidate",
+                format_text=LAYOUT_MOVED.read_text(),
+            ),
+            indent=2,
+        )
+        + "\n"
+    )
     (prof / "valid-unbound.json").write_text(
         json.dumps(
             profile_doc(

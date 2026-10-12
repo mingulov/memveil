@@ -91,6 +91,10 @@ def test_scan_validated_wins() raises:
     assert_equal(d.ring_bytes, 8388608)
     assert_equal(d.tp_system, String("swiotlb"))
     assert_equal(d.tp_event, String("swiotlb_bounced"))
+    assert_equal(d.off_loc, 8)
+    assert_equal(d.off_size, 32)
+    assert_equal(d.off_force, 40)
+    assert_equal(d.off_fixed_end, 41)
 
 
 def test_scan_bound_measurements() raises:
@@ -1034,9 +1038,11 @@ def test_scan_receipt_bridge_unknown_partial() raises:
 
 def test_scan_moved_layout_refuses_named_diff() raises:
     # The moved/ root carries a format whose size field
-    # drifted. Explicit and scan admission alike must
-    # refuse with the named field diff, never parse as
-    # good or fall back to partial.
+    # drifted. The hook probe admits offset-only drift,
+    # so the refusal moves to the binding gate: a fixed
+    # profile still refuses (explicit) or falls back to
+    # partial (scan), exactly like any other identity
+    # mismatch. Only a re-authored profile binds.
     var d = decide_record(
         String(_MOVED),
         _kernel(),
@@ -1052,7 +1058,7 @@ def test_scan_moved_layout_refuses_named_diff() raises:
     )
     assert_true(not d.ok)
     assert_equal(
-        d.refusal, String("layout: field size: want @32:8")
+        d.refusal, String("binding failed: mismatch format")
     )
     var s = decide_record(
         String(_MOVED),
@@ -1067,10 +1073,40 @@ def test_scan_moved_layout_refuses_named_diff() raises:
         String(""),
         String(""),
     )
-    assert_true(not s.ok)
+    assert_true(s.ok)
+    assert_equal(s.kind, String("partial"))
     assert_equal(
-        s.refusal, String("layout: field size: want @32:8")
+        s.reason,
+        String("partial scan-valid: narrow identity unverified"),
     )
+    assert_equal(s.off_loc, 8)
+    assert_equal(s.off_size, 40)
+    assert_equal(s.off_force, 48)
+    assert_equal(s.off_fixed_end, 49)
+
+
+def test_scan_moved_reauthored_admits_offsets() raises:
+    # A profile re-authored for the drifted format binds
+    # and carries the probed offsets to the collector.
+    var d = decide_record(
+        String(_MOVED),
+        _kernel(),
+        List[Profile](),
+        String(_PROFILES) + String("/movedok.json"),
+        True,
+        String(_ELF_OK),
+        String(""),
+        String(""),
+        String(""),
+        String(""),
+        String(""),
+    )
+    assert_true(d.ok)
+    assert_equal(d.kind, String("candidate"))
+    assert_equal(d.off_loc, 8)
+    assert_equal(d.off_size, 40)
+    assert_equal(d.off_force, 48)
+    assert_equal(d.off_fixed_end, 49)
 
 
 def run() raises -> Int:
@@ -1119,6 +1155,7 @@ def run() raises -> Int:
     suite.test[test_scan_receipt_bridge_mismatch_partial]()
     suite.test[test_scan_receipt_bridge_unknown_partial]()
     suite.test[test_scan_moved_layout_refuses_named_diff]()
+    suite.test[test_scan_moved_reauthored_admits_offsets]()
     suite^.run()
     return 0
 
