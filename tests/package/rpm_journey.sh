@@ -37,7 +37,14 @@ die() {
 # staged tests; the container journey leaves it unset.
 RECEIPTS_DIR=${MV_RECEIPTS_DIR:-/var/lib/memveil/receipts}
 if [ -d "$RECEIPTS_DIR" ]; then
-    kept=$(ls -A "$RECEIPTS_DIR" | paste -sd, - | sed 's/,/, /g')
+    # Fail closed: an unreadable listing (empty output
+    # plus nonzero status) must refuse, never read as
+    # fresh state. The status is captured before the
+    # name formatting, which would otherwise mask it.
+    listed=$(ls -A "$RECEIPTS_DIR"); rc=$?
+    [ "$rc" -eq 0 ] \
+        || die "refusing install: cannot list $RECEIPTS_DIR (ls exit $rc); resolve the error, then rerun"
+    kept=$(printf '%s\n' "$listed" | paste -sd, - | sed 's/,/, /g')
     [ -z "$kept" ] || die "refusing install: $RECEIPTS_DIR holds retained receipts ($kept); back them up or remove them, then rerun"
 fi
 
