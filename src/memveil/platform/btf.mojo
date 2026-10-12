@@ -3,19 +3,21 @@
 """Minimal BTF map-definition reader for admission.
 
 Locates the `.BTF` section of a BPF object, walks its type
-section, and extracts the two map definitions the product
-needs: `mv_counts` (ARRAY geometry, pinned exactly) and
-`mv_attempts` (RINGBUF type plus its declared ring size).
-The ring size becomes the live `ring_bytes` identity value
-and the collector's post-load gate; the exact expected
-value is pinned by the admitting profile binding, never
-here. Anything structurally off refuses: this never loads
-or executes anything.
+section, and extracts the map definitions the product
+needs: `mv_counts` (ARRAY geometry, pinned exactly),
+`mv_attempts` (RINGBUF type plus its declared ring size),
+and, for the attempt object only, `mv_offsets` (ARRAY
+geometry, pinned exactly). The ring size becomes the live
+`ring_bytes` identity value and the collector's post-load
+gate; the exact expected value is pinned by the admitting
+profile binding, never here. Anything structurally off
+refuses: this never loads or executes anything.
 
 BTF layout follows `linux/btf.h` (magic 0xeB9F, kind ids
 0..19). `__uint` members resolve as PTR straight to ARRAY
 with the value in `nr_elems`; `__type` members resolve as
-PTR through modifiers to INT with the size in bytes.
+PTR through modifiers to INT with the size in bytes, or
+to STRUCT with the size in bytes for the offsets value.
 """
 
 comptime _BTF_MAGIC = 0xEB9F
@@ -294,6 +296,28 @@ struct _BtfWalk(Copyable):
             cur = self.sizes[cur - 1]
         return -1
 
+    def struct_size(self, data: Span[UInt8, _], tid: Int) -> Int:
+        """Pointee STRUCT size through modifiers, or -1."""
+        if not self.rec_valid(tid) or self.kinds[tid - 1] != 2:
+            return -1
+        var cur = self.sizes[tid - 1]
+        for _ in range(_MAX_SPELL_DEPTH):
+            if not self.rec_valid(cur):
+                return -1
+            var kind = self.kinds[cur - 1]
+            if kind == 4:
+                return self.sizes[cur - 1]
+            if (
+                kind != 8
+                and kind != 9
+                and kind != 10
+                and kind != 11
+                and kind != 18
+            ):
+                return -1
+            cur = self.sizes[cur - 1]
+        return -1
+
     def var_linkage(self, data: Span[UInt8, _], rec: Int) -> Int:
         return _u32(data, self.offsets[rec] + 12)
 
@@ -404,16 +428,18 @@ def _is_pow2(v: Int) -> Bool:
 
 
 def read_btf_maps(data: Span[UInt8, _]) -> BtfMaps:
-    """Read the mv_counts/mv_attempts definitions from an object.
+    """Read the mv_counts/mv_attempts/mv_offsets definitions.
 
     mv_counts geometry is pinned exactly (ARRAY, key 4,
     value 8, 6 entries); mv_attempts must be RINGBUF with
-    a sane power-of-two ring size, which is returned. The
-    exact expected ring size is the profile binding's job,
-    never this reader's.
+    a sane power-of-two ring size, which is returned; the
+    mv_offsets table geometry is pinned exactly (ARRAY,
+    key 4, value 24, 1 entry). The exact expected ring
+    size is the profile binding's job, never this
+    reader's.
     """
     return _read_btf_maps(
-        data, String("mv_attempts"), String("attempts"))
+        data, String("mv_attempts"), String("attempts"), True)
 
 
 def read_btf_maps_ring(
@@ -425,12 +451,92 @@ def read_btf_maps_ring(
     named ring variable must be RINGBUF with a sane
     power-of-two size. Diagnostics name ring_word (short
     channel word) and ring_var (BTF variable name).
+    Tracing channels carry no offset table, so no
+    offsets pin applies here.
     """
-    return _read_btf_maps(data, ring_var, ring_word)
+    return _read_btf_maps(data, ring_var, ring_word, False)
+
+
+def _check_offsets_map(data: Span[UInt8, _], walk: _BtfWalk) -> String:
+    """Offsets-table geometry verdict for one walk, else "".
+
+    mv_offsets must be a defined VAR in the maps DATASEC
+    with exactly ARRAY type, 1 entry, key width 4, and a
+    24-byte struct value (struct mv_offsets).
+    """
+    var found = walk.find_var(data, String("mv_offsets"))
+    if found == -1:
+        return String("missing mv_offsets")
+    if found == -2:
+        return String("BTF strings corrupt")
+    if found == -3:
+        return String("duplicate mv_offsets")
+    var mem = walk.datasec_var(data, String(".maps"), found)
+    if mem == 0:
+        return String("no maps DATASEC")
+    if mem == -1:
+        return String("BTF strings corrupt")
+    if mem == -2:
+        return String("duplicate maps DATASEC")
+    if mem == -4:
+        return String("offsets not in maps DATASEC")
+    var def_struct = walk.sizes[found]
+    if not walk.rec_valid(def_struct):
+        return String("offsets not a struct")
+    var rec = def_struct - 1
+    if walk.kinds[rec] != 4:
+        return String("offsets not a struct")
+    var link = walk.var_linkage(data, found)
+    if link != 0 and link != 1:
+        return String(t"offsets linkage {link}")
+    var otype = walk.member_type(data, rec, String("type"))
+    if otype == -1:
+        return String("offsets missing type")
+    if otype == -2:
+        return String("BTF strings corrupt")
+    var otype_v = walk.uint_value(data, otype)
+    if otype_v < 0:
+        return String("offsets bad type")
+    if otype_v != _MAP_ARRAY:
+        return String(t"offsets type {otype_v}, want 2")
+    var omax = walk.member_type(data, rec, String("max_entries"))
+    if omax == -1:
+        return String("offsets missing max_entries")
+    if omax == -2:
+        return String("BTF strings corrupt")
+    var omax_v = walk.uint_value(data, omax)
+    if omax_v < 0:
+        return String("offsets bad max_entries")
+    if omax_v != 1:
+        return String(t"offsets max_entries {omax_v}, want 1")
+    var okey = walk.member_type(data, rec, String("key"))
+    if okey == -1:
+        return String("offsets missing key")
+    if okey == -2:
+        return String("BTF strings corrupt")
+    var okey_v = walk.int_size(data, okey)
+    if okey_v < 0:
+        return String("offsets bad key")
+    if okey_v != 4:
+        return String(t"offsets key {okey_v}, want 4")
+    var oval = walk.member_type(data, rec, String("value"))
+    if oval == -1:
+        return String("offsets missing value")
+    if oval == -2:
+        return String("BTF strings corrupt")
+    var oval_v = walk.struct_size(data, oval)
+    if oval_v < 0:
+        return String("offsets bad value")
+    if oval_v != 24:
+        return String(t"offsets value {oval_v}, want 24")
+    return String("")
 
 
 def _read_btf_maps(
-    data: Span[UInt8, _], ring_var: String, ring_word: String
+    data: Span[UInt8, _],
+    ring_var: String,
+    ring_word: String,
+    want_offsets: Bool,
 ) -> BtfMaps:
     """Shared worker: read_btf_maps with a ring variable name."""
     var sec = _find_section(data, String(".BTF"))
@@ -554,6 +660,10 @@ def _read_btf_maps(
     ):
         return _refuse_maps(
             String(t"{ring_word} ring size {ring} rejected"))
+    if want_offsets:
+        var bad = _check_offsets_map(data, walk)
+        if bad != String(""):
+            return _refuse_maps(bad)
     var out = BtfMaps()
     out.ok = True
     out.message = String("")

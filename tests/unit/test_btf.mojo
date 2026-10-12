@@ -83,6 +83,27 @@ def test_btf_dupvar() raises:
     assert_equal(v.message, String("duplicate mv_counts"))
 
 
+def test_btf_offsets_map_ok() raises:
+    # ok.o is the byte copy of the rebuilt attempt object:
+    # the static pin holds over the real mv_offsets map.
+    var raw = _read_fixture(String("tests/fixtures/elf/ok.o"))
+    var v = read_btf_maps(Span(raw))
+    assert_true(v.ok)
+    assert_equal(v.message, String(""))
+    assert_equal(v.ring_bytes, 8388608)
+
+
+def test_btf_offsets_map_bad_geometry() raises:
+    var raw = _read_fixture(String("tests/fixtures/elf/badoff.o"))
+    var v = read_btf_maps(Span(raw))
+    assert_true(not v.ok)
+    assert_equal(v.message, String("offsets max_entries 2, want 1"))
+    var missing = _read_fixture(String("tests/fixtures/elf/nooff.o"))
+    var w = read_btf_maps(Span(missing))
+    assert_true(not w.ok)
+    assert_equal(w.message, String("missing mv_offsets"))
+
+
 def test_btf_inline_edges() raises:
     var empty = List[UInt8]()
     var v = read_btf_maps(Span(empty))
@@ -316,6 +337,8 @@ def run() raises -> Int:
     suite.test[test_btf_nodatasec]()
     suite.test[test_btf_unlisted]()
     suite.test[test_btf_dupvar]()
+    suite.test[test_btf_offsets_map_ok]()
+    suite.test[test_btf_offsets_map_bad_geometry]()
     suite.test[test_btf_inline_edges]()
     suite.test[test_btf_lifecycle_ring]()
     suite.test[test_btf_copy_ring]()

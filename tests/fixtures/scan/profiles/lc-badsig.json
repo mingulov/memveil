@@ -8,7 +8,7 @@
     "source": {
       "origin": "test",
       "revision": "7.0.0-test",
-      "note": "config=sha256:a5af36b05630b51bb596bc68f955ab97bb8802e857cd2fc1de05c0628e398fbb config_src=gz btf=sha256:785b0751fc2c53dc14a4ce3d800e69ef9ce1009eb327ccf458afe09c242c26c9 format=sha256:43b8d6d56b37ff999c0b715373b2951f11e36d7daaa9db65ff524de99ed466dc object=sha256:de95690aba8f0462aa24599fa7949dbe81f4cafb2720641645951bbe304ccb8d image=sha256:11a663ae36f0cdbecf94b8b7319503bbd0fffc2c3ba02c01cf81600d423dd251 image_bid=0102030405060708090a0b0c0d0e0f1011121314 ring_bytes=8388608 lc_object=sha256:b705ba5013c3f8b1add8f4228575fd0606d566a26864dc1162d99d055e2e5ed4 lc_ring_bytes=8388608 cp_object=sha256:b7853c92a677a74ac18facffac1728f71322f056f3b1a4c5c99794d52a3b1bf3 cp_ring_bytes=8388608"
+      "note": "config=sha256:a5af36b05630b51bb596bc68f955ab97bb8802e857cd2fc1de05c0628e398fbb config_src=gz btf=sha256:785b0751fc2c53dc14a4ce3d800e69ef9ce1009eb327ccf458afe09c242c26c9 format=sha256:43b8d6d56b37ff999c0b715373b2951f11e36d7daaa9db65ff524de99ed466dc object=sha256:dbf15c855039a80fb1b4a3f015249c456bebeba4ec889db0ed0fe1f53d8aa3ce image=sha256:11a663ae36f0cdbecf94b8b7319503bbd0fffc2c3ba02c01cf81600d423dd251 image_bid=0102030405060708090a0b0c0d0e0f1011121314 ring_bytes=8388608 lc_object=sha256:769bb7fd59e38a04555c4f80624769ca03dddb5d8d866b2b456b23d6c2b7033a lc_ring_bytes=8388608 cp_object=sha256:ffce58f0318dcaea4b756ca0865d04a235e7e851fb260435f9b7d219101909da cp_ring_bytes=8388608"
     },
     "note": "Scan-fixture identity; never ship."
   },
