@@ -61,7 +61,7 @@ Summary: swiotlb bounce-attempt capture and offline replay on x86-64 Linux
 License: GPL-3.0-or-later AND GPL-2.0-only
 ExclusiveArch: x86_64
 Source0: memveil-%{version}.tar.gz
-Source1: libbpf-mojo-0.1.0.tar.gz
+Source1: libbpf-mojo-0.2.0.tar.gz
 BuildRequires: binutils
 BuildRequires: patchelf
 BuildRequires: python3

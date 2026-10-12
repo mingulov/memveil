@@ -95,7 +95,7 @@ from [build](build.md) plus `rpmbuild`):
     mkdir -p ~/rpmbuild/{SOURCES,BUILD,RPMS,SRPMS,BUILDROOT}
     git archive --prefix=memveil-$SPEC_VER/ HEAD \
         -o ~/rpmbuild/SOURCES/memveil-$SPEC_VER.tar.gz
-    cp third_party/libbpf-mojo-0.1.0.tar.gz ~/rpmbuild/SOURCES/$SRC1
+    cp third_party/libbpf-mojo-0.2.0.tar.gz ~/rpmbuild/SOURCES/$SRC1
     rpmbuild -bb --define "_topdir $HOME/rpmbuild" \
         --define "debug_package %{nil}" packaging/rpm/memveil.spec
 
