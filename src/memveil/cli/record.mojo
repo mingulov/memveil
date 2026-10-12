@@ -1395,6 +1395,21 @@ comptime _OWN_S_IFMT = 0o170000
 comptime _OWN_S_IFREG = 0o100000
 comptime _OWN_S_IFDIR = 0o040000
 comptime _OWN_DIRENT_NAME_OFF = 19
+comptime _OWN_DIRENT_BUF_SIZE = 8192
+
+
+def _own_name_is(
+    buf: List[UInt8], base: Int, nlen: Int, text: String
+) -> Bool:
+    """True when the NUL-bounded name equals text, byte-wise."""
+    var i = 0
+    for b in text.as_bytes():
+        if i >= nlen:
+            return False
+        if buf[base + i] != b:
+            return False
+        i += 1
+    return i == nlen
 
 
 def _own_le32(buf: List[UInt8], off: Int) -> UInt32:
@@ -1463,62 +1478,68 @@ def _own_dir_has_foreign(dir_fd: Int32) -> Bool:
     session.json; any other entry proves a planted or
     swapped-in foreign file, and the repair must not
     transfer the directory out from under it. Listing
-    failures also refuse (fail closed). Reads through
-    a dup'd stream: dup shares the open file
-    description and its offset, so the caller must
-    pass a fresh descriptor (as the repair path
-    does); the dup exists only so that closedir
-    cannot close the held fd. Never raises.
+    failures also refuse (fail closed). Lists entries
+    with getdents64 straight off the held fd (no
+    DIR stream, so no libc symbols the stdlib also
+    declares): getdents64 advances the directory
+    offset, so the caller must pass a fresh
+    descriptor it never lists twice (as the repair
+    path does). Never raises.
     """
-    var dup_fd = external_call["dup", Int32](dir_fd)
-    if dup_fd < Int32(0):
-        return True
-    var dirp = external_call["fdopendir", UInt64](dup_fd)
-    if dirp == UInt64(0):
-        _own_close_quiet(dup_fd)
-        return True
-    var dot = _to_cstr(String("."))
-    var dotdot = _to_cstr(String(".."))
-    var ev = _to_cstr(String("events.ndjson"))
-    var se = _to_cstr(String("session.json"))
-    var eptr = external_call[
-        "__errno_location", Pointer[Int32, MutAnyOrigin]
-    ]()
+    var buf = List[UInt8]()
+    for _ in range(_OWN_DIRENT_BUF_SIZE):
+        buf.append(UInt8(0))
     var foreign = False
     var failed = False
     while True:
-        eptr.unsafe_store(Int32(0))
-        var ent = external_call["readdir", UInt64](dirp)
-        if ent == UInt64(0):
-            if _own_errno_now() != 0:
-                failed = True
+        var n = external_call["getdents64", Int64](
+            dir_fd, Span(buf).unsafe_ptr(), UInt64(len(buf))
+        )
+        if n < Int64(0):
+            failed = True
             break
-        # d_name sits at byte 19 of the x86-64 Linux
-        # dirent (ino 8, off 8, reclen 2, type 1).
-        var name = ent + UInt64(_OWN_DIRENT_NAME_OFF)
-        var skip = external_call["strcmp", Int32](
-            name, Span(dot).unsafe_ptr()
-        )
-        if Int(skip) == 0:
-            continue
-        skip = external_call["strcmp", Int32](
-            name, Span(dotdot).unsafe_ptr()
-        )
-        if Int(skip) == 0:
-            continue
-        skip = external_call["strcmp", Int32](
-            name, Span(ev).unsafe_ptr()
-        )
-        if Int(skip) == 0:
-            continue
-        skip = external_call["strcmp", Int32](
-            name, Span(se).unsafe_ptr()
-        )
-        if Int(skip) == 0:
-            continue
-        foreign = True
-        break
-    _ = external_call["closedir", Int32](dirp)
+        if n == Int64(0):
+            break
+        var total = Int(n)
+        var off = 0
+        while off < total:
+            var nbase = off + _OWN_DIRENT_NAME_OFF
+            if nbase > total:
+                failed = True
+                break
+            var reclen = Int(buf[off + 16]) | (
+                Int(buf[off + 17]) << 8
+            )
+            if reclen < 20 or off + reclen > total:
+                failed = True
+                break
+            # d_name sits at byte 19 of the x86-64
+            # Linux dirent (ino 8, off 8, reclen 2,
+            # type 1); match the capture files
+            # byte-wise, anything else is foreign.
+            var nlen = 0
+            while _OWN_DIRENT_NAME_OFF + nlen < reclen:
+                if buf[nbase + nlen] == UInt8(0):
+                    break
+                nlen += 1
+            var known = _own_name_is(
+                buf, nbase, nlen, String(".")
+            )
+            known = known or _own_name_is(
+                buf, nbase, nlen, String("..")
+            )
+            known = known or _own_name_is(
+                buf, nbase, nlen, String("events.ndjson")
+            )
+            known = known or _own_name_is(
+                buf, nbase, nlen, String("session.json")
+            )
+            if not known:
+                foreign = True
+                break
+            off += reclen
+        if foreign or failed:
+            break
     return foreign or failed
 
 
