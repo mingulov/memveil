@@ -11,6 +11,12 @@
  * submit_fail while no wrap bit is set; byte coverage needs
  * the flags word fully clear).
  *
+ * Field positions come from the single-entry mv_offsets table
+ * userspace installs between load and attach, so kernels whose
+ * format drifted stay collectable. A missing, zero, or
+ * inconsistent table fails closed: counted reject, never a
+ * misread.
+ *
  * dev_addr and dma_mask are never read: no schema consumer.
  *
  * Build: clang --target=bpf -O2 -g -D__BPF__ -I bpf/include
@@ -41,6 +47,13 @@ struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, MV_RING_BYTES);
 } mv_attempts SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct mv_offsets);
+} mv_offsets SEC(".maps");
 
 /* Atomically OR one sticky flag bit. */
 static __always_inline void mv_raise(__u64 bit)
@@ -78,7 +91,7 @@ int mv_swiotlb_attempt(void *ctx)
     __u64 *flags;
     __u64 o, b, e, eb, size;
     __u32 loc, off, dlen, i;
-    __u8 fix[MV_CTX_FIXED];
+    __u32 loc_off, size_off, force_off, fixed_end;
     __u8 payload[MV_PAYLOAD_LEN];
     __u8 force;
 
@@ -100,11 +113,29 @@ int mv_swiotlb_attempt(void *ctx)
         mv_submit_fail();
         return 0;
     }
-    /* One fixed read covers loc@8, size@32, and force@40. A
-     * short context fails here: the firing's size is
-     * unknowable, so the byte aggregate loses coverage
-     * (sticky bit) on top of the counted reject. */
-    if (bpf_probe_read_kernel(fix, sizeof(fix), ctx) != 0) {
+    /* Step 2b: load and validate the offset table. A
+     * missing, zero, or inconsistent table fails closed:
+     * the firing counts as rejected, never misread. */
+    {
+        __u32 tab_key = 0;
+        struct mv_offsets *tab =
+            bpf_map_lookup_elem(&mv_offsets, &tab_key);
+
+        if (!tab || mv_validate_offsets(tab) != MV_OK) {
+            mv_submit_fail();
+            return 0;
+        }
+        loc_off = tab->loc_off;
+        size_off = tab->size_off;
+        force_off = tab->force_off;
+        fixed_end = tab->fixed_end;
+    }
+    /* Step 2c: read the size slot. A short context fails
+     * here: the firing's size is unknowable, so the byte
+     * aggregate loses coverage (sticky bit) on top of the
+     * counted reject. */
+    if (bpf_probe_read_kernel(&size, sizeof(size),
+                              (__u8 *)ctx + size_off) != 0) {
         mv_raise(MV_FLAG_BYTE_COVERAGE);
         mv_submit_fail();
         return 0;
@@ -114,21 +145,25 @@ int mv_swiotlb_attempt(void *ctx)
     observed_bytes = bpf_map_lookup_elem(&mv_counts, &key1);
     if (!observed_bytes)
         return 0;
-    size = mv_read_le64(fix + 32);
     b = __sync_fetch_and_add(observed_bytes, size);
     if (b > 0xFFFFFFFFFFFFFFFFULL - size) {
         mv_raise(MV_FLAG_OBSERVED_BYTES_WRAP);
         mv_submit_fail();
         return 0;
     }
-    /* Step 4: validate the __data_loc pair. The kernel
-     * record length is unknown here, so the read cap is
-     * the extent oracle and probe_read failure covers
-     * actual shortness; both reject identically. */
-    loc = mv_read_le32(fix + 8);
+    /* Step 4: read and validate the __data_loc pair. The
+     * kernel record length is unknown here, so the read
+     * cap is the extent oracle and probe_read failure
+     * covers actual shortness; both reject identically. */
+    if (bpf_probe_read_kernel(&loc, sizeof(loc),
+                              (__u8 *)ctx + loc_off) != 0) {
+        mv_submit_fail();
+        return 0;
+    }
     off = loc & 0xFFFFu;
     dlen = (loc >> 16) & 0xFFFFu;
-    if (mv_validate_loc(off, dlen, MV_CTX_READ_CAP) != MV_OK) {
+    if (mv_validate_loc_floor(off, dlen, MV_CTX_READ_CAP, fixed_end) !=
+        MV_OK) {
         mv_submit_fail();
         return 0;
     }
@@ -154,7 +189,12 @@ int mv_swiotlb_attempt(void *ctx)
             return 0;
         }
     }
-    force = fix[40];
+    /* Step 5b: read the force byte at its tabled offset. */
+    if (bpf_probe_read_kernel(&force, sizeof(force),
+                              (__u8 *)ctx + force_off) != 0) {
+        mv_submit_fail();
+        return 0;
+    }
     if (force != 0 && force != 1) {
         mv_submit_fail();
         return 0;

@@ -11,7 +11,7 @@
  *
  * Reason vocabulary (shared with the corpus and the Mojo decoder):
  *   OK, CTX_SHORT, CTX_LOC_OOB, CTX_DLEN_ZERO, CTX_DLEN_BIG,
- *   CTX_NUL_MISSING, CTX_NUL_EARLY, CTX_FORCE_BAD,
+ *   CTX_NUL_MISSING, CTX_NUL_EARLY, CTX_FORCE_BAD, CTX_TABLE_BAD,
  *   PAY_SHORT, PAY_LONG, PAY_MAGIC, PAY_VERSION, PAY_FLAGS,
  *   PAY_NAMELEN, PAY_NUL, PAY_PAD,
  *   PAY_KIND, PAY_DIR, PAY_REASON, PAY_RANGE.
@@ -57,6 +57,25 @@ typedef int64_t __s64;
 #define MV_CTX_FIXED 41u /* end of last fixed field (force@40:1) */
 #define MV_CTX_READ_CAP 512u /* dynamic extent must fit inside this */
 
+/* Load-time trace-offset table: userspace probes the live
+ * format and installs one entry before attach, so
+ * offset-drifted kernels stay collectable. The program
+ * fails closed on a missing, zero, or inconsistent
+ * table: the firing counts as rejected, never misread. */
+#define MV_OFF_TABLE_MAGIC 0x35464D4Du /* "MFO5" */
+#define MV_OFF_TABLE_VERSION 1u
+#define MV_FIXED_MAX 128u /* tabled extents and floor stay inside this */
+#define MV_OFFSETS_TABLE_LEN 24u
+struct mv_offsets {
+    __u32 magic; /* must equal MV_OFF_TABLE_MAGIC */
+    __u16 version; /* must equal MV_OFF_TABLE_VERSION */
+    __u16 reserved0;
+    __u32 loc_off; /* dev_name __data_loc slot */
+    __u32 size_off; /* size u64 slot */
+    __u32 force_off; /* force byte slot */
+    __u32 fixed_end; /* dynamic-data floor over live fixed fields */
+};
+
 /* Counter map indices (mv_counts, ARRAY of 6 u64). */
 #define MV_CNT_OBSERVED 0u
 #define MV_CNT_OBSERVED_BYTES 1u
@@ -86,6 +105,7 @@ enum mv_reason {
     MV_CTX_NUL_MISSING,
     MV_CTX_NUL_EARLY,
     MV_CTX_FORCE_BAD,
+    MV_CTX_TABLE_BAD,
     MV_PAY_SHORT,
     MV_PAY_LONG,
     MV_PAY_MAGIC,
@@ -129,22 +149,70 @@ static __inline __u64 mv_read_le64(const __u8 *p)
            ((__u64)p[7] << 56);
 }
 
-/* Validate a __data_loc pair against the fixed floor, the name cap,
- * the read cap, and the available context length. Check order is
- * part of the contract: length faults precede extent faults. */
-static __inline enum mv_reason mv_validate_loc(__u32 off, __u32 dlen,
-                                               __u32 ctx_len)
+/* Validate a __data_loc pair against a dynamic-data floor, the
+ * name cap, the read cap, and the available context length.
+ * Check order is part of the contract: length faults precede
+ * extent faults. */
+static __inline enum mv_reason mv_validate_loc_floor(__u32 off, __u32 dlen,
+                                                     __u32 ctx_len,
+                                                     __u32 floor)
 {
     if (dlen == 0)
         return MV_CTX_DLEN_ZERO;
     if (dlen > MV_NAME_MAX + 1)
         return MV_CTX_DLEN_BIG;
-    if (off < MV_CTX_FIXED)
+    if (off < floor)
         return MV_CTX_LOC_OOB;
     if (off + dlen > MV_CTX_READ_CAP)
         return MV_CTX_LOC_OOB;
     if (off + dlen > ctx_len)
         return MV_CTX_LOC_OOB;
+    return MV_OK;
+}
+
+/* Pinned-floor variant: identical behavior to the original
+ * single-floor check, kept for the host reference build. */
+static __inline enum mv_reason mv_validate_loc(__u32 off, __u32 dlen,
+                                               __u32 ctx_len)
+{
+    return mv_validate_loc_floor(off, dlen, ctx_len, MV_CTX_FIXED);
+}
+
+/* Validate one installed offset table the way the program
+ * does: magic, version, per-extent caps, dynamic-floor
+ * cap, and pairwise overlap among the tabled extents.
+ * Shared so the host reference mirrors the program. */
+static __inline enum mv_reason
+mv_validate_offsets(const struct mv_offsets *tab)
+{
+    __u32 loc_off, size_off, force_off, fixed_end;
+    __u32 loc_end, size_end, force_end;
+
+    if (tab->magic != MV_OFF_TABLE_MAGIC)
+        return MV_CTX_TABLE_BAD;
+    if (tab->version != MV_OFF_TABLE_VERSION)
+        return MV_CTX_TABLE_BAD;
+    loc_off = tab->loc_off;
+    size_off = tab->size_off;
+    force_off = tab->force_off;
+    fixed_end = tab->fixed_end;
+    if (loc_off > MV_FIXED_MAX - 4)
+        return MV_CTX_TABLE_BAD;
+    if (size_off > MV_FIXED_MAX - 8)
+        return MV_CTX_TABLE_BAD;
+    if (force_off > MV_FIXED_MAX - 1)
+        return MV_CTX_TABLE_BAD;
+    if (fixed_end > MV_FIXED_MAX)
+        return MV_CTX_TABLE_BAD;
+    loc_end = loc_off + 4;
+    size_end = size_off + 8;
+    force_end = force_off + 1;
+    if (loc_off < size_end && size_off < loc_end)
+        return MV_CTX_TABLE_BAD;
+    if (loc_off < force_end && force_off < loc_end)
+        return MV_CTX_TABLE_BAD;
+    if (size_off < force_end && force_off < size_end)
+        return MV_CTX_TABLE_BAD;
     return MV_OK;
 }
 
@@ -212,6 +280,9 @@ _Static_assert(MV_OFF_NAME + MV_NAME_MAX + 1 == MV_PAYLOAD_LEN,
               "name field ends the payload");
 _Static_assert(MV_CTX_FIXED == 41, "dynamic-data floor");
 _Static_assert(MV_CTX_READ_CAP == 512, "context read cap");
+_Static_assert(sizeof(struct mv_offsets) == 24, "offset table size");
+_Static_assert(MV_OFFSETS_TABLE_LEN == 24, "offset table length");
+_Static_assert(MV_FIXED_MAX == 128, "fixed-region cap");
 _Static_assert(MV_CNT_LEN == 6, "counter map length");
 
 /* Lifecycle v2 record: exactly 44 bytes, little-endian, packed.
