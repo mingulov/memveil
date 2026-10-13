@@ -161,7 +161,8 @@ struct DiagnosisEngine:
         f.explanation = (
             format_u64(row.value)
             + " lifecycle events could not be paired and were"
-            " excluded from lifecycle totals."
+            " excluded from pairing-dependent totals;"
+            " independent facts retained."
         )
         f.evidence_refs.append(
             String("metric:unpaired_lifecycle_events")

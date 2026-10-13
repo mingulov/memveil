@@ -156,6 +156,22 @@ class Uncertainty(unittest.TestCase):
         self.assertIsNone(completed['value'])
         self.assertIn('No release events', completed['notes'])
 
+    def test_unpaired_copy_bytes_reported(self):
+        self.load('lifecycle/unpaired-copies')
+        r = self.report()
+        self.incomplete(r)
+        cp = self.metric(r, 'copy_original_to_bounce_bytes')
+        self.assertEqual(cp['value'], '5120')
+        self.assertEqual(cp['coverage'], 'partial')
+
+    def test_unpaired_failure_reported(self):
+        self.load('lifecycle/unpaired-failure')
+        r = self.report()
+        self.incomplete(r)
+        fails = self.metric(r, 'failed_allocations')
+        self.assertEqual(fails['value'], '1')
+        self.assertEqual(fails['coverage'], 'partial')
+
     def test_terminal_partial_and_unavailable(self):
         for status in ('partial', 'unavailable'):
             with self.subTest(status=status):

@@ -10,7 +10,8 @@ report. Oracle slices compare exactly (attempts, bytes,
 allocations, releases, paired lifetimes); the fail slice proves
 the internal/final boundary (failed outer, surviving copies, no
 outer release); the I/O slice proves liveness under real traffic;
-effective-copy totals admit paired sources only.
+effective-copy totals sum every executed copy event per
+direction, paired or not; attribution stays a separate scope.
 """
 
 import hashlib
@@ -193,12 +194,15 @@ def check_report(report, events, bundle, tag, drained=True):
     if _metric(report, "mapped_bytes_total")["value"] != str(
             want_mapped):
         bad.append("%s: report mapped-bytes drift" % tag)
-    for name in ("copy_original_to_bounce_bytes",
-                 "copy_bounce_to_original_bytes"):
+    for name, direction in (
+            ("copy_original_to_bounce_bytes", "original_to_bounce"),
+            ("copy_bounce_to_original_bytes", "bounce_to_original")):
         metric = _metric(report, name)
-        if metric["value"] != "0":
-            bad.append("%s: report %s counts unpaired %r" % (
-                tag, name, metric["value"]))
+        want = sum(int(e["data"]["bytes"]) for e in copies
+                   if e["data"]["direction"] == direction)
+        if metric["value"] != str(want):
+            bad.append("%s: report %s bytes %r != oracle %d" % (
+                tag, name, metric["value"], want))
         if metric["coverage"] != "partial":
             bad.append("%s: report %s coverage %r" % (
                 tag, name, metric["coverage"]))

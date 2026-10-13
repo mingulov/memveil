@@ -177,7 +177,8 @@ struct Analyzer:
             rep.q_correlation.reason = String(
                 String(unpaired)
                 + " unpaired lifecycle events excluded from"
-                " lifecycle totals."
+                " pairing-dependent totals; independent facts"
+                " retained."
             )
             # Observed pairing evidence as a row: diagnosis
             # derives its finding from this count, never from
@@ -195,7 +196,8 @@ struct Analyzer:
             um.scope = window + "; observed mappings"
             um.notes = String(
                 "Lifecycle events the correlator left unpaired;"
-                " excluded from lifecycle totals."
+                " excluded from pairing-dependent state,"
+                " independent facts retained."
             )
             rep.metrics.append(um^)
         if len(rep.metrics) > MAX_REPORT_METRICS:

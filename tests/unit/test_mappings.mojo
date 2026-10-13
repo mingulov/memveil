@@ -447,6 +447,136 @@ def test_unpaired_unmap_invalidates_live() raises:
     assert_true(not _global(rows, "live_observed_allocation_bytes").has_value)
 
 
+def test_unpaired_copy_bytes_retained() raises:
+    # Known identityless copies are independent byte facts:
+    # 4096 + 1024 aggregate to 5120 even though neither
+    # carries attribution.
+    var t = MappingTracker()
+    var first = _copy(
+        "lc-101", "", "original_to_bounce", UInt64(4096), UInt64(1)
+    )
+    first.source_correlation = String("unpaired")
+    t.consume(first^)
+    var second = _copy(
+        "lc-102", "", "original_to_bounce", UInt64(1024), UInt64(2)
+    )
+    second.source_correlation = String("unpaired")
+    t.consume(second^)
+    var rows = t.metrics("window [0,1000)")
+    var cp = _global(rows, "copy_original_to_bounce_bytes")
+    assert_equal(cp.value, UInt64(5120))
+    assert_equal(cp.coverage, String("partial"))
+    # No bounce-to-original copies observed: a measured zero
+    # over observed events, not an unknown.
+    var back = _global(rows, "copy_bounce_to_original_bytes")
+    assert_true(back.has_value)
+    assert_equal(back.value, UInt64(0))
+
+
+def test_unpaired_bounce_to_original_retained() raises:
+    var t = MappingTracker()
+    var ev = _copy(
+        "lc-103", "", "bounce_to_original", UInt64(2048), UInt64(1)
+    )
+    ev.source_correlation = String("unpaired")
+    t.consume(ev^)
+    var rows = t.metrics("window [0,1000)")
+    var cp = _global(rows, "copy_bounce_to_original_bytes")
+    assert_equal(cp.value, UInt64(2048))
+    assert_equal(cp.coverage, String("partial"))
+
+
+def test_unpaired_failure_counted() raises:
+    # An explicit failed inner allocation with no mapping
+    # identity is one observed failure, not a silent drop;
+    # it opens no lifetime.
+    var t = MappingTracker()
+    var ev = _map("lc-103", False, "", UInt64(0), UInt64(100), UInt64(1))
+    ev.source_correlation = String("unpaired")
+    t.consume(ev^)
+    var rows = t.metrics("window [0,1000)")
+    var fails = _global(rows, "failed_allocations")
+    assert_equal(fails.value, UInt64(1))
+    assert_equal(fails.coverage, String("partial"))
+    var allocs = _global(rows, "successful_allocations")
+    assert_true(allocs.has_value)
+    assert_equal(allocs.value, UInt64(0))
+    var opened = _global(rows, "open_mappings")
+    assert_true(opened.has_value)
+    assert_equal(opened.value, UInt64(0))
+    assert_true(
+        not _global(rows, "completed_lifetime_count").has_value
+    )
+
+
+def test_unpaired_copy_before_failure() raises:
+    # Copies survive a later outer failure even when both
+    # records are unpaired: bytes and failure count coexist.
+    var t = MappingTracker()
+    var cp = _copy(
+        "lc-104", "", "original_to_bounce", UInt64(4096), UInt64(1)
+    )
+    cp.source_correlation = String("unpaired")
+    t.consume(cp^)
+    var fail = _map("lc-104", False, "", UInt64(0), UInt64(100), UInt64(2))
+    fail.source_correlation = String("unpaired")
+    t.consume(fail^)
+    var rows = t.metrics("window [0,1000)")
+    assert_equal(
+        _global(rows, "copy_original_to_bounce_bytes").value,
+        UInt64(4096),
+    )
+    assert_equal(_global(rows, "failed_allocations").value, UInt64(1))
+
+
+def test_mixed_paired_unpaired_copies() raises:
+    # Paired and unpaired copies sum into the global total;
+    # only the paired copy lands in the device subset, even
+    # when an unpaired copy names a resolvable mapping.
+    var t = MappingTracker()
+    t.consume(_attempt("op1", "d1", UInt64(1)))
+    t.consume(_map("op1", True, "m1", UInt64(4096), UInt64(100), UInt64(2)))
+    t.consume(
+        _copy("op1", "m1", "original_to_bounce", UInt64(4096), UInt64(3))
+    )
+    var loose = _copy(
+        "lc-9", "", "original_to_bounce", UInt64(1024), UInt64(4)
+    )
+    loose.source_correlation = String("unpaired")
+    t.consume(loose^)
+    var sneaky = _copy(
+        "lc-10", "m1", "original_to_bounce", UInt64(512), UInt64(5)
+    )
+    sneaky.source_correlation = String("unpaired")
+    t.consume(sneaky^)
+    var rows = t.metrics("window [0,1000)")
+    assert_equal(
+        _global(rows, "copy_original_to_bounce_bytes").value,
+        UInt64(5632),
+    )
+    var subset = _find(rows, "copy_original_to_bounce_bytes", "d1")
+    assert_true(subset.has_value)
+    assert_equal(subset.value, UInt64(4096))
+
+
+def test_unpaired_copy_overflow_withheld() raises:
+    var t = MappingTracker()
+    var first = _copy(
+        "lc-1", "", "original_to_bounce", u64max(), UInt64(1)
+    )
+    first.source_correlation = String("unpaired")
+    t.consume(first^)
+    var second = _copy(
+        "lc-2", "", "original_to_bounce", UInt64(1), UInt64(2)
+    )
+    second.source_correlation = String("unpaired")
+    t.consume(second^)
+    var rows = t.metrics("window [0,1000)")
+    var cp = _global(rows, "copy_original_to_bounce_bytes")
+    assert_true(not cp.has_value)
+    assert_true(cp.notes != "")
+
+
 def test_active_budget() raises:
     var t = MappingTracker[1]()
     t.consume(_attempt("op1", "d1", UInt64(1)))
@@ -644,6 +774,12 @@ def run() raises -> Int:
     suite.test[test_reversed_timestamps_uncertain]()
     suite.test[test_unpaired_map_excluded]()
     suite.test[test_unpaired_unmap_invalidates_live]()
+    suite.test[test_unpaired_copy_bytes_retained]()
+    suite.test[test_unpaired_bounce_to_original_retained]()
+    suite.test[test_unpaired_failure_counted]()
+    suite.test[test_unpaired_copy_before_failure]()
+    suite.test[test_mixed_paired_unpaired_copies]()
+    suite.test[test_unpaired_copy_overflow_withheld]()
     suite.test[test_active_budget]()
     suite.test[test_resolved_history_bounded]()
     suite.test[test_retired_history_bounded]()

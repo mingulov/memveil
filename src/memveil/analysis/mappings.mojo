@@ -19,8 +19,10 @@ actual-copy, live-byte, and completed-lifetime metrics:
 - Device attribution needs a proven operation or mapping link.
   Unattributable bytes stay in global totals with a note.
 - Events the correlator left unpaired degrade gracefully: an
-  unpaired success creates no mapping, an unpaired copy adds no
-  bytes, and an unpaired release invalidates live state.
+  unpaired success creates no mapping, an unpaired copy still
+  adds its bytes to direction totals without attribution,
+  an unpaired failure still counts, and an unpaired release
+  invalidates live state.
 
 Metrics are a pure function of consumed state, so snapshot and
 finish share this one implementation.
@@ -370,6 +372,10 @@ struct MappingTracker[
         if not paired:
             self._unpaired += 1
             self._degrade("unpaired lifecycle evidence")
+            # An explicit failure is an independent fact: it
+            # counts even though it opens no lifetime.
+            if not ev.map_result.success:
+                self._failed = checked_add(self._failed, UInt64(1))
             return
         if op in self._resolved:
             self._invalidate_live(
@@ -442,25 +448,10 @@ struct MappingTracker[
         ):
             self._degrade("copy with unknown direction")
             return
-        if not paired:
-            self._unpaired += 1
-            self._degrade("unpaired lifecycle evidence")
-            return
+        # Executed bytes are an independent event fact: every
+        # observed copy aggregates into its direction total
+        # before pairing decides attribution.
         var n = ev.copy.bytes
-        var dev = String("")
-        var attributed = False
-        if ev.copy.has_mapping_id:
-            var mapping = ev.copy.mapping_id
-            if mapping in self._live:
-                var rec = self._live.get(mapping, _LiveMapping())
-                if rec.has_device:
-                    dev = rec.device
-                    attributed = True
-        else:
-            var op = ev.copy.operation_id
-            if op in self._op_device:
-                dev = self._op_device.get(op, String(""))
-                attributed = True
         if direction == "original_to_bounce":
             try:
                 self._o2b = checked_add(self._o2b, n)
@@ -481,6 +472,24 @@ struct MappingTracker[
                         "Bounce-to-original total exceeds u64"
                         " range; value withheld."
                     )
+        if not paired:
+            self._unpaired += 1
+            self._degrade("unpaired lifecycle evidence")
+            return
+        var dev = String("")
+        var attributed = False
+        if ev.copy.has_mapping_id:
+            var mapping = ev.copy.mapping_id
+            if mapping in self._live:
+                var rec = self._live.get(mapping, _LiveMapping())
+                if rec.has_device:
+                    dev = rec.device
+                    attributed = True
+        else:
+            var op = ev.copy.operation_id
+            if op in self._op_device:
+                dev = self._op_device.get(op, String(""))
+                attributed = True
         if not attributed:
             try:
                 self._unattributed_copy_bytes = checked_add(
@@ -590,10 +599,13 @@ struct MappingTracker[
             out.append(
                 _plural(
                     self._unpaired,
-                    "unpaired lifecycle event excluded;",
-                    "unpaired lifecycle events excluded;",
+                    "unpaired lifecycle event excluded from"
+                    " pairing-dependent state;",
+                    "unpaired lifecycle events excluded from"
+                    " pairing-dependent state;",
                 )
-                + " affected totals degrade."
+                + " independent facts retained; affected"
+                " totals degrade."
             )
         if self._refused_ops > 0 or self._refused_active > 0:
             out.append(
