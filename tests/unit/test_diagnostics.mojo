@@ -178,6 +178,46 @@ def test_requested_scope_missing() raises:
     assert_equal(_codes(out, "PROBE_UNAVAILABLE"), 1)
 
 
+def test_finding_evidence_refs_resolve() raises:
+    # Every metric:/pool: ref a finding emits must resolve
+    # against the diagnosed row set; budgeting must never
+    # strand a finding without its evidence.
+    var eng = DiagnosisEngine()
+    var r = _report()
+    r.metrics.append(
+        _metric(String("unpaired_lifecycle_events"), UInt64(1), String(""))
+    )
+    r.metrics.append(
+        _metric(String("conversion_failures"), UInt64(1), String(""))
+    )
+    r.metrics.append(
+        _metric(String("pool_pressure_samples"), UInt64(3), String("p1"))
+    )
+    var names = List[String]()
+    var pools = List[String]()
+    for i in range(len(r.metrics)):
+        names.append(r.metrics[i].name)
+        if r.metrics[i].has_pool_id:
+            pools.append(r.metrics[i].pool_id)
+    var out = eng.evaluate(r^, DiagnosticPolicy())
+    assert_equal(len(out), 3)
+    for i in range(len(out)):
+        for j in range(len(out[i].evidence_refs)):
+            var parts = out[i].evidence_refs[j].split(":")
+            assert_equal(len(parts), 2)
+            var want = String(parts[1])
+            var found = False
+            if String(parts[0]) == "metric":
+                for k in range(len(names)):
+                    if names[k] == want:
+                        found = True
+            elif String(parts[0]) == "pool":
+                for k in range(len(pools)):
+                    if pools[k] == want:
+                        found = True
+            assert_true(found)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_healthy_empty_scope]()
@@ -190,6 +230,7 @@ def run() raises -> Int:
     suite.test[test_pool_pressure]()
     suite.test[test_conversion_failures]()
     suite.test[test_requested_scope_missing]()
+    suite.test[test_finding_evidence_refs_resolve]()
     suite^.run()
     return 0
 

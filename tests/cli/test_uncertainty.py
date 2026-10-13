@@ -172,6 +172,132 @@ class Uncertainty(unittest.TestCase):
         self.assertEqual(fails['value'], '1')
         self.assertEqual(fails['coverage'], 'partial')
 
+    def diagnostic_capture(self, devices, triggers=True, pools=('p1',)):
+        cap = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        session = json.loads((ROOT / 'tests/fixtures/regions/region-union/session.json').read_text())
+        session['session_id'] = cap.name
+        session['capture']['window'] = {'start_ns': '1000000000', 'end_ns': '2000000000'}
+        session['device_catalog']['devices'] = [
+            {'device_id': 'd%d' % i, 'name': 'test%d' % i,
+             'driver': 'synthetic-test', 'identity_status': 'resolved'}
+            for i in range(devices)]
+        for name in ('mapping_lifecycle', 'pool_stats'):
+            session['capabilities'][name].update(
+                status='verified', reason='Independent synthetic diagnostics test.',
+                hooks=['synthetic:review'], profile_id='synthetic-regions-1')
+        session['quality']['detail']['scope'] = 'Independently authored complete synthetic records'
+        session['quality']['correlation']['reason'] = 'No omitted records; one explicitly unpaired map'
+        events = []
+
+        def event(kind, data, correlation='direct'):
+            n = len(events) + 1
+            events.append({
+                'schema_version': '0.1.1', 'session_id': cap.name,
+                'seq': str(n), 'ts_ns': str(1100000000 + n * 1000),
+                'kind': kind, 'source': {
+                    'hook': 'synthetic:review', 'backend': 'synthetic',
+                    'profile_id': 'synthetic-regions-1',
+                    'measurement': 'observed', 'correlation': correlation},
+                'data': data})
+
+        for i in range(devices):
+            event('bounce_attempt', {
+                'device_id': 'd%d' % i, 'requested_bytes': '4096',
+                'forced': False, 'operation_id': 'op%d' % i})
+        if triggers:
+            event('map_result', {
+                'operation_id': 'unpaired-op', 'success': True,
+                'mapping_id': 'm1', 'return_code': None,
+                'mapped_bytes': '4096', 'wire_generation': None,
+                'wire_identity': None}, 'unpaired')
+            event('transition_result', {
+                'region_id': 'r1', 'requested_state': 'shared',
+                'success': False, 'return_code': -5, 'offset': '0',
+                'length': '8192', 'address_space': 'guest_physical',
+                'resolution': 'resolved'})
+            for pool in pools:
+                used = '900' if pool == 'p1' else '100'
+                for _ in range(3):
+                    event('pool_sample', {
+                        'pool_id': pool, 'used_bytes': used,
+                        'capacity_bytes': '1000', 'unit': 'bytes'})
+        else:
+            for pool in pools:
+                for _ in range(3):
+                    event('pool_sample', {
+                        'pool_id': pool, 'used_bytes': '100',
+                        'capacity_bytes': '1000', 'unit': 'bytes'})
+        (cap / 'session.json').write_text(json.dumps(session))
+        (cap / 'events.ndjson').write_text(
+            ''.join(json.dumps(ev) + '\n' for ev in events))
+        return cap
+
+    def report_json(self, cap):
+        proc = subprocess.run(
+            [str(ROOT / 'build/memveil'), 'report', '--format', 'json', str(cap)],
+            capture_output=True, text=True)
+        return proc.returncode, json.loads(proc.stdout) if proc.stdout else None
+
+    def refs_resolve(self, report):
+        names = set(m['name'] for m in report['metrics'])
+        pools = set(m['dimensions'].get('pool_id') for m in report['metrics'])
+        for finding in report['findings']:
+            for ref in finding['evidence_refs']:
+                kind, _, value = ref.partition(':')
+                if kind == 'metric':
+                    self.assertIn(value, names, ref)
+                elif kind == 'pool':
+                    self.assertIn(value, pools, ref)
+
+    def test_high_cardinality_preserves_diagnostics(self):
+        small = self.report_json(self.diagnostic_capture(1))
+        large = self.report_json(self.diagnostic_capture(2050))
+        ceiling = self.report_json(self.diagnostic_capture(4096))
+        for tag, (rc, report), devices in (
+                ('small', small, 1), ('large', large, 2050),
+                ('ceiling', ceiling, 4096)):
+            with self.subTest(tag=tag):
+                self.assertEqual(rc, 4)
+                self.assertEqual(
+                    sorted(f['code'] for f in report['findings']),
+                    ['CONVERSION_FAILED', 'POOL_PRESSURE', 'UNPAIRED_LIFECYCLE'])
+                self.assertEqual(
+                    self.metric(report, 'bounce_attempts')['value'], str(devices))
+                self.assertLessEqual(len(report['metrics']), 4096)
+                self.refs_resolve(report)
+        self.assertEqual(
+            sorted(f['code'] for f in small[1]['findings']),
+            sorted(f['code'] for f in large[1]['findings']))
+
+    def test_high_cardinality_multi_pool_and_quiet(self):
+        rc, report = self.report_json(
+            self.diagnostic_capture(2050, pools=('p1', 'p2')))
+        self.assertEqual(rc, 4)
+        pressure = [f for f in report['findings'] if f['code'] == 'POOL_PRESSURE']
+        self.assertEqual(len(pressure), 1)
+        self.assertIn('p1', pressure[0]['scope'])
+        self.assertTrue(any(
+            m['name'] == 'pool_used_bytes' and m['dimensions'].get('pool_id') == 'p2'
+            for m in report['metrics']))
+        self.refs_resolve(report)
+        _, quiet_small = self.report_json(
+            self.diagnostic_capture(1, triggers=False))
+        rc, report = self.report_json(self.diagnostic_capture(
+            2050, triggers=False, pools=('p1', 'p2')))
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            [f for f in report['findings'] if f['severity'] == 'warning'], [])
+        self.assertEqual(len(report['metrics']), 4096)
+        self.assertTrue(any(
+            'metric rows withheld (4096-row report budget)' in note
+            for note in report['limitations']))
+        for channel in report['quality']:
+            with self.subTest(channel=channel):
+                for key in ('status', 'loss_count'):
+                    self.assertEqual(
+                        report['quality'][channel][key],
+                        quiet_small['quality'][channel][key])
+
     def test_terminal_partial_and_unavailable(self):
         for status in ('partial', 'unavailable'):
             with self.subTest(status=status):

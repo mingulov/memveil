@@ -52,6 +52,80 @@ struct TruncatedRows:
         self.withheld = 0
 
 
+def budget_rows(rows: List[Metric], budget: Int) -> TruncatedRows:
+    """Keep mandatory evidence rows before optional device detail.
+
+    Rows without a device id (global measurements and per-pool
+    diagnostic evidence) hold the diagnosis and exit inputs, so
+    they receive budget first in merge order; per-device detail
+    rows fill whatever budget remains, also in merge order. No
+    finding derives from a per-device row, so omitting device
+    detail can never suppress a positive. When mandatory rows
+    alone exceed the budget, the first budget mandatory rows
+    win; that degenerate case keeps the row bound but may
+    still omit evidence. At or under budget every row is kept
+    in merge order, so small reports never reorder.
+    """
+    if len(rows) <= budget:
+        return truncate_rows(rows, budget)
+    var out = TruncatedRows()
+    var room = budget
+    if room < 0:
+        room = 0
+    for i in range(len(rows)):
+        if room <= 0:
+            break
+        if rows[i].has_device_id:
+            continue
+        out.rows.append(rows[i])
+        room -= 1
+    for i in range(len(rows)):
+        if room <= 0:
+            break
+        if not rows[i].has_device_id:
+            continue
+        out.rows.append(rows[i])
+        room -= 1
+    out.withheld = len(rows) - len(out.rows)
+    return out^
+
+
+def finalize_limitations(
+    notes: List[String], withheld_rows: Int
+) -> List[String]:
+    """Cap tracker notes to the schema budget, keeping disclosure.
+
+    Tracker notes share one 256-note budget: keep the first
+    notes in merge order and summarize the rest. When rows
+    were withheld, their disclosure reserves the last slot so
+    the omission notice always survives capping.
+    """
+    var out = List[String]()
+    var room = MAX_REPORT_LIMITATIONS
+    var extra = String("")
+    if withheld_rows > 0:
+        extra = (
+            String(withheld_rows)
+            + " metric rows withheld (4096-row report budget)."
+        )
+        room -= 1
+    if len(notes) > room:
+        for i in range(room - 1):
+            out.append(notes[i])
+        var dropped = len(notes) - (room - 1)
+        out.append(
+            String(dropped)
+            + " further limitations withheld (256-note"
+            " report budget)."
+        )
+    else:
+        for i in range(len(notes)):
+            out.append(notes[i])
+    if extra != "":
+        out.append(extra)
+    return out^
+
+
 def truncate_rows(rows: List[Metric], budget: Int) -> TruncatedRows:
     """Keep the first budget rows in order; count the rest."""
     var out = TruncatedRows()
@@ -200,30 +274,17 @@ struct Analyzer:
                 " independent facts retained."
             )
             rep.metrics.append(um^)
+        var withheld_rows = 0
         if len(rep.metrics) > MAX_REPORT_METRICS:
-            var cut = truncate_rows(rep.metrics, MAX_REPORT_METRICS)
-            var dropped = cut.withheld
+            var cut = budget_rows(rep.metrics, MAX_REPORT_METRICS)
+            withheld_rows = cut.withheld
             rep.metrics = cut.rows.copy()
-            rep.limitations.append(
-                String(dropped)
-                + " metric rows withheld (4096-row report budget)."
-            )
-        # Merged tracker notes share one 256-note schema budget:
-        # keep the first 255 in merge order and summarize the
-        # rest, then cap every note at 1024 codepoints.
-        if len(rep.limitations) > MAX_REPORT_LIMITATIONS:
-            var kept = List[String]()
-            for i in range(MAX_REPORT_LIMITATIONS - 1):
-                kept.append(rep.limitations[i])
-            var withheld = len(rep.limitations) - (
-                MAX_REPORT_LIMITATIONS - 1
-            )
-            kept.append(
-                String(withheld)
-                + " further limitations withheld (256-note"
-                " report budget)."
-            )
-            rep.limitations = kept^
+        # Merged tracker notes share one 256-note schema budget;
+        # the row-budget disclosure keeps the last slot, then
+        # every note is capped at 1024 codepoints.
+        rep.limitations = finalize_limitations(
+            rep.limitations, withheld_rows
+        )
         for i in range(len(rep.limitations)):
             rep.limitations[i] = truncate_note(rep.limitations[i])
         return rep^

@@ -17,7 +17,12 @@ from memveil.analysis.diagnostics import (
     DiagnosisEngine,
     DiagnosticPolicy,
 )
-from memveil.analysis.engine import MAX_REPORT_METRICS, truncate_rows
+from memveil.analysis.engine import (
+    MAX_REPORT_METRICS,
+    budget_rows,
+    finalize_limitations,
+    truncate_rows,
+)
 from memveil.analysis.mappings import MappingTracker
 from memveil.analysis.pools import PoolTracker
 from memveil.capture.correlation import CorrelationRegistry
@@ -246,6 +251,151 @@ def test_findings_bounded() raises:
     assert_true(len(out) <= 8)
 
 
+def _row(name: String, device: String, pool: String) -> Metric:
+    var m = Metric()
+    m.name = name
+    m.has_value = True
+    m.value = UInt64(1)
+    if device != "":
+        m.has_device_id = True
+        m.device_id = device
+    if pool != "":
+        m.has_pool_id = True
+        m.pool_id = pool
+    return m^
+
+
+def _names(rows: List[Metric]) -> List[String]:
+    var out = List[String]()
+    for i in range(len(rows)):
+        out.append(rows[i].name)
+    return out^
+
+
+def test_budget_keeps_mandatory_first() raises:
+    # Device detail floods the budget; global and per-pool
+    # evidence rows still win it in merge order.
+    var rows = List[Metric]()
+    for i in range(10):
+        rows.append(_row(String("dev") + String(i), String("d"), String("")))
+    rows.append(_row(String("global-a"), String(""), String("")))
+    rows.append(_row(String("pool-p"), String(""), String("p1")))
+    rows.append(_row(String("global-b"), String(""), String("")))
+    var cut = budget_rows(rows, 5)
+    assert_equal(len(cut.rows), 5)
+    assert_equal(cut.withheld, 8)
+    var names = _names(cut.rows)
+    assert_equal(names[0], String("global-a"))
+    assert_equal(names[1], String("pool-p"))
+    assert_equal(names[2], String("global-b"))
+    assert_equal(names[3], String("dev0"))
+    assert_equal(names[4], String("dev1"))
+
+
+def test_budget_under_budget_keeps_order() raises:
+    var rows = List[Metric]()
+    rows.append(_row(String("dev0"), String("d0"), String("")))
+    rows.append(_row(String("global"), String(""), String("")))
+    rows.append(_row(String("dev1"), String("d1"), String("")))
+    var cut = budget_rows(rows, 4096)
+    assert_equal(len(cut.rows), 3)
+    assert_equal(cut.withheld, 0)
+    var names = _names(cut.rows)
+    assert_equal(names[0], String("dev0"))
+    assert_equal(names[1], String("global"))
+    assert_equal(names[2], String("dev1"))
+
+
+def test_budget_degenerate_mandatory_overflow() raises:
+    # Mandatory rows alone exceed the budget: the first
+    # budget mandatory rows win in merge order.
+    var rows = List[Metric]()
+    for i in range(6):
+        rows.append(_row(String("g") + String(i), String(""), String("")))
+    var cut = budget_rows(rows, 4)
+    assert_equal(len(cut.rows), 4)
+    assert_equal(cut.withheld, 2)
+    assert_equal(cut.rows[0].name, String("g0"))
+    assert_equal(cut.rows[3].name, String("g3"))
+
+
+def test_budget_boundaries() raises:
+    var none = List[Metric]()
+    var empty = budget_rows(none, 5)
+    assert_equal(len(empty.rows), 0)
+    assert_equal(empty.withheld, 0)
+    var rows = List[Metric]()
+    rows.append(_row(String("dev0"), String("d0"), String("")))
+    rows.append(_row(String("global"), String(""), String("")))
+    # Exact budget keeps merge order, never reorders.
+    var exact = budget_rows(rows, 2)
+    assert_equal(len(exact.rows), 2)
+    assert_equal(exact.withheld, 0)
+    assert_equal(exact.rows[0].name, String("dev0"))
+    assert_equal(exact.rows[1].name, String("global"))
+    var zero = budget_rows(rows, 0)
+    assert_equal(len(zero.rows), 0)
+    assert_equal(zero.withheld, 2)
+    var neg = budget_rows(rows, -3)
+    assert_equal(len(neg.rows), 0)
+    assert_equal(neg.withheld, 2)
+
+
+def test_budget_all_device_keeps_prefix() raises:
+    var rows = List[Metric]()
+    for i in range(6):
+        rows.append(
+            _row(String("dev") + String(i), String("d"), String(""))
+        )
+    var cut = budget_rows(rows, 4)
+    assert_equal(len(cut.rows), 4)
+    assert_equal(cut.withheld, 2)
+    assert_equal(cut.rows[0].name, String("dev0"))
+    assert_equal(cut.rows[3].name, String("dev3"))
+
+
+def _notes(n: Int) -> List[String]:
+    var out = List[String]()
+    for i in range(n):
+        out.append(String("note") + String(i))
+    return out^
+
+
+def test_finalize_limitations_keeps_row_disclosure() raises:
+    # Both ceilings at once: 300 tracker notes plus withheld
+    # rows still disclose the row omission in the last slot.
+    var capped = finalize_limitations(_notes(300), 17)
+    assert_equal(len(capped), 256)
+    assert_equal(capped[0], String("note0"))
+    assert_equal(capped[253], String("note253"))
+    assert_true(
+        capped[254].find(String("further limitations withheld")) != -1
+    )
+    assert_equal(
+        capped[255],
+        String("17 metric rows withheld (4096-row report budget)."),
+    )
+
+
+def test_finalize_limitations_without_rows() raises:
+    var same = finalize_limitations(_notes(10), 0)
+    assert_equal(len(same), 10)
+    assert_equal(same[9], String("note9"))
+    var capped = finalize_limitations(_notes(300), 0)
+    assert_equal(len(capped), 256)
+    assert_equal(capped[254], String("note254"))
+    assert_true(
+        capped[255].find(String("further limitations withheld")) != -1
+    )
+    var edge = finalize_limitations(_notes(255), 5)
+    assert_equal(len(edge), 256)
+    assert_equal(edge[254], String("note254"))
+    assert_equal(
+        edge[255],
+        String("5 metric rows withheld (4096-row report budget)."),
+    )
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_pending_ceiling]()
@@ -256,6 +406,13 @@ def run() raises -> Int:
     suite.test[test_mapping_tracker_active_refusal_withholds_live]()
     suite.test[test_pool_table_refusal_visible]()
     suite.test[test_report_row_truncation_exact]()
+    suite.test[test_budget_keeps_mandatory_first]()
+    suite.test[test_budget_under_budget_keeps_order]()
+    suite.test[test_budget_degenerate_mandatory_overflow]()
+    suite.test[test_budget_boundaries]()
+    suite.test[test_budget_all_device_keeps_prefix]()
+    suite.test[test_finalize_limitations_keeps_row_disclosure]()
+    suite.test[test_finalize_limitations_without_rows]()
     suite.test[test_findings_bounded]()
     suite^.run()
     return 0
