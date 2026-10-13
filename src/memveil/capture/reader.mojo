@@ -391,7 +391,7 @@ struct CaptureReader:
                 )
         elif ev.kind == "map_result":
             self._note_op(ev.kind, ev.map_result.operation_id, tag, lineno)
-            if ev.map_result.success:
+            if ev.map_result.success and ev.map_result.has_mapping_id:
                 var mid = ev.map_result.mapping_id
                 if mid in self._maps:
                     raise ReadError(

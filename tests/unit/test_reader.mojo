@@ -1725,6 +1725,39 @@ def test_reader_f2_lifecycle_ok() raises:
     assert_true(not g.partial)
 
 
+def test_multiple_unassigned_map_results() raises:
+    # Two GEN_UNASSIGNED successes share no identity: absent
+    # mapping ids must never collide in duplicate tracking, and
+    # neither record may mint a known mapping.
+    var r = read_capture(
+        String("tests/fixtures/reader/f2-unassigned-maps-ok"), False,
+        default_limits(),
+    )
+    var evs = drain_events(r)
+    assert_equal(len(evs), 2)
+    assert_true(not evs[0].map_result.has_mapping_id)
+    assert_true(not evs[1].map_result.has_mapping_id)
+    assert_equal(len(r._maps), 0)
+    assert_true(not r.partial)
+    # Known and unknown identities mix freely; only the known
+    # ids enter the registry.
+    var m = read_capture(
+        String("tests/fixtures/reader/f2-known-unassigned-mix-ok"), False,
+        default_limits(),
+    )
+    assert_equal(len(drain_events(m)), 3)
+    assert_equal(len(m._maps), 2)
+    assert_true(not m.partial)
+    # Real duplicate known ids still refuse.
+    expect_read_error(
+        String("tests/fixtures/reader/f2-duplicate-mapping"),
+        False,
+        default_limits(),
+        READ_INVALID,
+        7,
+    )
+
+
 def test_reader_expected_dangling_ok() raises:
     # A dangling copy/sync reference the session's correlation
     # channel declares unpairable reads clean; the analyzer
@@ -2019,6 +2052,7 @@ def run() raises -> Int:
     suite.test[test_reader_tail_foreign_rejected]()
     suite.test[test_reader_f2_identities]()
     suite.test[test_reader_f2_lifecycle_ok]()
+    suite.test[test_multiple_unassigned_map_results]()
     suite.test[test_reader_expected_dangling_ok]()
     suite.test[test_reader_denied_dangling_refused]()
     suite.test[test_reader_unavailable_dangling_ok]()

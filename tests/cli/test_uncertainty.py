@@ -147,6 +147,15 @@ class Uncertainty(unittest.TestCase):
                 self.assertNotIn('exposure', m['notes'])
                 self.assertIn('allocation', m['notes'].lower())
 
+    def test_unassigned_map_results_parse_to_partial_report(self):
+        self.load('reader/f2-unassigned-maps-ok')
+        r = self.report()
+        self.incomplete(r)
+        self.assertIsNone(self.metric(r, 'live_observed_allocation_bytes')['value'])
+        completed = self.metric(r, 'completed_lifetime_count')
+        self.assertIsNone(completed['value'])
+        self.assertIn('No release events', completed['notes'])
+
     def test_terminal_partial_and_unavailable(self):
         for status in ('partial', 'unavailable'):
             with self.subTest(status=status):
