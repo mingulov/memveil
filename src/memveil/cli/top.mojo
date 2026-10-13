@@ -117,7 +117,8 @@ def top_usage() -> String:
         "   or: memveil top --output DIR [--object PATH]\n"
         "       [--duration SEC] [--max-events-bytes N]\n"
         "       [--bridge PATH] [--profile ID|PATH]\n"
-        "       [--capability IDS] [--lc-object PATH] [--cp-object PATH]\n"
+        "       [--profiles-dir DIR] [--capability IDS]\n"
+        "       [--lc-object PATH] [--cp-object PATH]\n"
         "       [--interval DURATION] [--device NAME]\n"
         "       [--long-lived-after DURATION]\n"
         "\n"
@@ -215,6 +216,7 @@ def _is_live_flag(tok: String) -> Bool:
         or tok == "--object"
         or tok == "--bridge"
         or tok == "--profile"
+        or tok == "--profiles-dir"
         or tok == "--capability"
         or tok == "--lc-object"
         or tok == "--cp-object"
@@ -576,19 +578,20 @@ def run_top_live(opts: TopOptions) raises -> Int:
     Refusals name their reason on stderr and create
     nothing; printed prefixes stand when the run fails.
     """
-    var profiles_dir: String
-    try:
-        profiles_dir = resolve_profiles_dir()
-    except e:
+    var profiles_dir = opts.live.profiles_dir
+    if not opts.live.has_profiles_dir:
         try:
-            write_stderr(
-                "memveil top: cannot resolve profiles location: "
-                + sanitize_diagnostic(e.message)
-                + String("\n")
-            )
-        except:
-            pass
-        return EXIT_REFUSAL
+            profiles_dir = resolve_profiles_dir()
+        except e:
+            try:
+                write_stderr(
+                    "memveil top: cannot resolve profiles location: "
+                    + sanitize_diagnostic(e.message)
+                    + String("\n")
+                )
+            except:
+                pass
+            return EXIT_REFUSAL
     var template = _live_template()
     var sink = StdoutSink(opts)
     var writer = TeeWriter[StdoutSink](

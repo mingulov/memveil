@@ -81,15 +81,16 @@ out, publishes a machine-local `local-auto` receipt.
 Expected: `qualify: local-auto <profile> caps=attempt-trace
 receipt=...`, exit 0. The receipt lands under
 `profiles/receipts/` beside the binary, or under
-`--profiles-dir DIR/receipts/` when given; `record` and
-`doctor` must then use the same `--profiles-dir`. A
+`--profiles-dir DIR/receipts/` when given; `record`,
+`doctor`, and live `top` must then use the same
+`--profiles-dir`. A
 receipt never claims `validated`: it binds one kernel,
 one profile document, and the exact artifacts and
 workload that produced it. Re-running `doctor` still
 reports the receipt as explicitly bridge-unchecked
 with exit 3: the passive path performs no bridge
-binding, so only `record` — which verifies bridge
-admission at every start — admits the receipt as
+binding, so only `record` and live `top` — which verify
+bridge admission at every start — admit the receipt as
 `local-auto`. Exit 3 names the exact cause (planning
 or smoke refusal, or the unchecked receipt); exit 2
 is a usage error; exit 1 is an internal failure

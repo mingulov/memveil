@@ -9,7 +9,11 @@ handling, and live-mode failure behavior. Exits nonzero on
 the first failure.
 """
 
+import hashlib
+import json
 import os
+import platform
+import shutil
 import signal
 import subprocess
 import sys
@@ -182,6 +186,174 @@ def main():
           "exit %d" % p.returncode)
     check("live-bad-duration-msg", "bad decimal: nope" in p.stderr,
           repr(p.stderr[:160]))
+
+    p = run(["top", NESTED, "--profiles-dir", "/alt/profiles"])
+    check("replay-profiles-refused", p.returncode == 2,
+          "exit %d" % p.returncode)
+    check("replay-profiles-refused-msg",
+          "live options need --output" in p.stderr,
+          repr(p.stderr[:160]))
+
+    # Profile resolution runs past the kernel-floor gate, so
+    # the admission checks below need x86_64 kernel >= 7,
+    # mirroring the record/qualify lanes; parser, replay, and
+    # no-bridge checks stay unconditional. The floor refusal
+    # itself is pinned fixture-backed in test_qualify.mojo
+    # (test_plan_below_floor_refuses).
+    eligible = False
+    major = platform.release().split(".")[0]
+    if (platform.machine() == "x86_64" and len(major) > 0
+            and all(c in "0123456789" for c in major)):
+        eligible = int(major) >= 7
+    if not eligible:
+        print("skip live-profiles-* (needs x86_64 kernel >= 7)")
+    else:
+        # The selected cache, not the default, reaches
+        # admission: a missing override refuses at profile
+        # load, while the default profiles proceed past it.
+        missing = os.path.join(
+            tempfile.mkdtemp(prefix="mvtopprof"), "no-such-dir")
+        p = run(["top", "--output", live_out, "--object", dummy,
+                 "--bridge", dummy, "--profiles-dir", missing],
+                env=live_env)
+        check("live-profiles-missing", p.returncode == 3,
+              "exit %d" % p.returncode)
+        check("live-profiles-missing-msg",
+              "cannot load profiles" in p.stderr,
+              repr(p.stderr[:160]))
+        check("live-profiles-missing-clean",
+              not os.path.exists(live_out), live_out)
+
+        # A malformed manifest in the override refuses the
+        # same way: the manifest half of the cache is read
+        # from the selected directory.
+        bad = os.path.join(tempfile.mkdtemp(prefix="mvtopbad"),
+                           "profiles")
+        os.makedirs(bad)
+        with open(os.path.join(bad, "manifest.txt"), "w") as fh:
+            fh.write("linux-x86_64-7.0-reference.json\n\n")
+        p = run(["top", "--output", live_out, "--object", dummy,
+                 "--bridge", dummy, "--profiles-dir", bad],
+                env=live_env)
+        check("live-profiles-bad-manifest", p.returncode == 3,
+              "exit %d" % p.returncode)
+        check("live-profiles-bad-manifest-msg",
+              "cannot load profiles" in p.stderr,
+              repr(p.stderr[:160]))
+
+        # Receipt-sensitive routing oracle: mint an alternate
+        # cache whose reference profile covers the live kernel,
+        # with a receipt verifying for this host (live release
+        # plus the resolved bridge hash). A verifying receipt
+        # admits the profile, so the unsupported extra
+        # capability names it; a missing or stale receipt
+        # admits nothing. Both verbs must agree on every
+        # diagnostic: top consults the selected receipts with
+        # the shared checks, never weaker ones.
+        live = platform.release()
+        ok_obj = os.path.join(REPO, "tests", "fixtures", "elf", "ok.o")
+        lc_obj = os.path.join(REPO, "tests", "fixtures", "elf", "lc-ok.o")
+        with open(ok_obj, "rb") as fh:
+            bridge_sha = hashlib.sha256(fh.read()).hexdigest()
+
+        def sha(c):
+            return "sha256:" + c * 64
+
+        doc = json.load(open(os.path.join(
+            REPO, "profiles", "linux-x86_64-7.0-reference.json")))
+        doc["profile_id"] = "live-synth"
+        doc["identity"]["source"]["revision"] = live
+        doc["identity"]["source"]["note"] = (
+            "config=%s config_src=file btf=%s format=%s object=%s "
+            "image=%s image_bid=%s ring_bytes=131072 "
+            "lc_object=%s lc_ring_bytes=131072 "
+            "cp_object=%s cp_ring_bytes=131072"
+            % (sha("a"), sha("b"), sha("c"), sha("d"), sha("e"),
+               "f" * 40, sha("1"), sha("2")))
+
+        def receipt_for(release):
+            return {
+                "schema_version": "0.1.0",
+                "kind": "memveil-qualification-receipt",
+                "profile_id": "live-synth", "grade": "local-auto",
+                "created_ns": "123456789",
+                "kernel": {"arch": "x86_64", "release": release},
+                "bindings": {
+                    "config": sha("a"), "config_src": "file",
+                    "btf": sha("b"), "format": sha("c"),
+                    "image": sha("e"), "image_bid": "f" * 40},
+                "capabilities": {
+                    "attempt-trace": {
+                        "status": "qualified",
+                        "detail": "synthetic test smoke"},
+                    "mapping-lifecycle": {
+                        "status": "qualified",
+                        "detail": "synthetic test smoke"}},
+                "artifacts": {
+                    "memveil": "0.1.0",
+                    "bridge": "sha256:" + bridge_sha,
+                    "objects": {"attempt": sha("d"),
+                                "lifecycle": sha("1")}},
+                "workload": {
+                    "kind": "smoke", "duration_s": "3",
+                    "traffic_required": False,
+                    "note": "synthetic test receipt"},
+            }
+
+        def cache_with(receipt):
+            alt = os.path.join(
+                tempfile.mkdtemp(prefix="mvtopalt"), "profiles")
+            os.makedirs(alt)
+            with open(os.path.join(alt, "live-synth.json"), "w") as fh:
+                json.dump(doc, fh)
+            with open(os.path.join(alt, "manifest.txt"), "w") as fh:
+                fh.write("live-synth.json\n")
+            if receipt is not None:
+                os.makedirs(os.path.join(alt, "receipts"))
+                with open(os.path.join(
+                        alt, "receipts", "live-synth.json"), "w") as fh:
+                    json.dump(receipt, fh)
+            return alt
+
+        receipt_cases = [
+            ("live-receipt", cache_with(receipt_for(live)),
+             "capability mapping-lifecycle unsupported by live-synth"),
+            ("live-no-receipt", cache_with(None),
+             "no profile satisfies requested capabilities"),
+            ("live-stale-receipt",
+             cache_with(receipt_for("0.0.0-test")),
+             "no profile satisfies requested capabilities"),
+        ]
+        for tag, alt, want in receipt_cases:
+            rec_out = os.path.join(
+                tempfile.mkdtemp(prefix="mvtoprec"), "cap")
+            top_out = os.path.join(
+                tempfile.mkdtemp(prefix="mvtoptop"), "cap")
+            rec = run(["record", "--output", rec_out,
+                       "--object", ok_obj, "--lc-object", lc_obj,
+                       "--bridge", ok_obj, "--profiles-dir", alt,
+                       "--capability", "attempt-trace,mapping-lifecycle"],
+                      env=live_env)
+            top = run(["top", "--output", top_out,
+                       "--object", ok_obj, "--lc-object", lc_obj,
+                       "--bridge", ok_obj, "--profiles-dir", alt,
+                       "--capability", "attempt-trace,mapping-lifecycle"],
+                      env=live_env)
+            check(tag + "-record-exit", rec.returncode == 3,
+                  "exit %d" % rec.returncode)
+            check(tag + "-top-exit", top.returncode == 3,
+                  "exit %d" % top.returncode)
+            rec_diag = rec.stderr.replace("memveil record: ", "").strip()
+            top_diag = top.stderr.replace("memveil top: ", "").strip()
+            check(tag + "-record-want", rec_diag == want, rec_diag[:160])
+            check(tag + "-top-want", top_diag == want, top_diag[:160])
+            check(tag + "-same-refusal", rec_diag == top_diag,
+                  "record %r top %r"
+                  % (rec.stderr[:160], top.stderr[:160]))
+            check(tag + "-record-clean",
+                  not os.path.exists(rec_out), rec_out)
+            check(tag + "-top-clean",
+                  not os.path.exists(top_out), top_out)
 
     # Refusal precedes any write: an occupied dir stays
     # untouched when admission refuses first. The exact

@@ -156,6 +156,39 @@ def test_top_usage_discovery() raises:
     assert_true(_contains(text, String("discover")))
 
 
+def test_top_live_profiles_dir() raises:
+    # Live top forwards the alternate profiles/receipt cache
+    # into the shared record options, like record itself.
+    var args = List[String]()
+    args.append(String("--output"))
+    args.append(String("out"))
+    args.append(String("--profiles-dir"))
+    args.append(String("/alt/profiles"))
+    var opts = parse_top_args(args^)
+    assert_true(opts.has_output)
+    assert_true(opts.live.has_profiles_dir)
+    assert_equal(opts.live.profiles_dir, String("/alt/profiles"))
+
+
+def test_top_replay_refuses_profiles_dir() raises:
+    # The override is live-only: replay keeps refusing it.
+    var args = List[String]()
+    args.append(String("--profiles-dir"))
+    args.append(String("/alt/profiles"))
+    args.append(String("capdir"))
+    var msg = String("")
+    try:
+        _ = parse_top_args(args^)
+    except e:
+        msg = String(e.message)
+    assert_true(_contains(msg, String("live options need --output")))
+
+
+def test_top_usage_profiles_dir() raises:
+    var text = top_usage()
+    assert_true(_contains(text, String("[--profiles-dir DIR]")))
+
+
 def test_boundaries() raises:
     var cur = BoundaryCursor(
         UInt64(0), UInt64(2300000000), UInt64(1000000000)
@@ -764,7 +797,10 @@ def run() raises -> Int:
     suite.test[test_top_flags]()
     suite.test[test_top_arg_errors]()
     suite.test[test_top_live_object_optional]()
+    suite.test[test_top_live_profiles_dir]()
+    suite.test[test_top_replay_refuses_profiles_dir]()
     suite.test[test_top_usage_discovery]()
+    suite.test[test_top_usage_profiles_dir]()
     suite.test[test_boundaries]()
     suite.test[test_cursor_streams_long_window]()
     suite.test[test_wait_slices_bounded]()

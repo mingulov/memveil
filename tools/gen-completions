@@ -38,7 +38,7 @@ FROZEN_FLAGS = {
             "--lc-object", "--long-lived-after",
             "--max-events-bytes", "--max-line-bytes",
             "--max-session-bytes", "--object", "--output",
-            "--profile", "-h"),
+            "--profile", "--profiles-dir", "-h"),
     "doctor": ("--help", "--json", "--profiles-dir", "-h"),
     "qualify": ("--bridge", "--capability", "--cp-object",
                 "--help", "--lc-object", "--object",
