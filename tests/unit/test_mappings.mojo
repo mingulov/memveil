@@ -299,6 +299,207 @@ def test_byte_time_withheld_without_horizon_while_open() raises:
     )
 
 
+def test_overlapping_intervals_delivered_out_of_time_order() raises:
+    # [1.1s,1.3s) and [1.2s,1.4s) overlap over 100ms: the
+    # independent interval peak is 8192, but delivery order
+    # map1/release1/map2/release2 only ever sees 4096 live.
+    # The peak is withheld with an ordering reason instead
+    # of claiming 4096 complete.
+    var t = MappingTracker()
+    t.consume(_attempt("op1", "d1", UInt64(1)))
+    t.consume(_attempt("op2", "d1", UInt64(2)))
+    t.consume(
+        _map("op1", True, "m1", UInt64(4096), UInt64(1100000000), UInt64(3))
+    )
+    t.consume(_unmap("m1", UInt64(1300000000), UInt64(4)))
+    t.consume(
+        _map("op2", True, "m2", UInt64(4096), UInt64(1200000000), UInt64(5))
+    )
+    t.consume(_unmap("m2", UInt64(1400000000), UInt64(6)))
+    var rows = t.metrics("window [0,2000000000)")
+    var peak = _global(rows, "peak_live_observed_allocation_bytes")
+    assert_true(not peak.has_value)
+    assert_equal(peak.measurement, String("unavailable"))
+    assert_equal(peak.coverage, String("unavailable"))
+    assert_true(peak.notes.find(String("timestamp order")) != -1)
+    # Per-generation facts stay valid and complete: two 200ms
+    # lifetimes, their byte-time, and no live bytes at the
+    # horizon. Withholding the peak must not degrade them.
+    var completed = _global(rows, "completed_lifetime_count")
+    assert_equal(completed.value, UInt64(2))
+    assert_equal(completed.coverage, String("complete_for_scope"))
+    var mean = _global(rows, "lifetime_mean_ns")
+    assert_equal(mean.value, UInt64(200000000))
+    assert_equal(mean.coverage, String("complete_for_scope"))
+    assert_equal(
+        _global(rows, "allocation_byte_microseconds").value,
+        UInt64(1638400000),
+    )
+    var live = _global(rows, "live_observed_allocation_bytes")
+    assert_equal(live.value, UInt64(0))
+    assert_equal(live.coverage, String("complete_for_scope"))
+    # Repeated violations still disclose exactly once.
+    var u = MappingTracker()
+    u.consume(_attempt("op1", "d1", UInt64(1)))
+    u.consume(_attempt("op2", "d1", UInt64(2)))
+    u.consume(_map("op1", True, "m1", UInt64(4096), UInt64(200), UInt64(3)))
+    u.consume(_map("op2", True, "m2", UInt64(4096), UInt64(100), UInt64(4)))
+    u.consume(_unmap("m1", UInt64(50), UInt64(5)))
+    u.consume(_unmap("m2", UInt64(300), UInt64(6)))
+    var notes = u.limitations()
+    var order_notes = 0
+    for i in range(len(notes)):
+        if notes[i].find(String("timestamp order")) != -1:
+            order_notes += 1
+    assert_equal(order_notes, 1)
+
+
+def test_ordered_overlap_reports_peak() raises:
+    # Same intervals delivered in timestamp order: the sweep
+    # is valid and the 8192 peak stands with full coverage.
+    var t = MappingTracker()
+    t.consume(_attempt("op1", "d1", UInt64(1)))
+    t.consume(_attempt("op2", "d1", UInt64(2)))
+    t.consume(
+        _map("op1", True, "m1", UInt64(4096), UInt64(1100000000), UInt64(3))
+    )
+    t.consume(
+        _map("op2", True, "m2", UInt64(4096), UInt64(1200000000), UInt64(4))
+    )
+    t.consume(_unmap("m1", UInt64(1300000000), UInt64(5)))
+    t.consume(_unmap("m2", UInt64(1400000000), UInt64(6)))
+    var rows = t.metrics("window [0,2000000000)")
+    var peak = _global(rows, "peak_live_observed_allocation_bytes")
+    assert_true(peak.has_value)
+    assert_equal(peak.value, UInt64(8192))
+    assert_equal(peak.coverage, String("complete_for_scope"))
+
+
+def test_ordered_disjoint_reports_peak() raises:
+    var t = MappingTracker()
+    t.consume(_attempt("op1", "d1", UInt64(1)))
+    t.consume(_attempt("op2", "d1", UInt64(2)))
+    t.consume(
+        _map("op1", True, "m1", UInt64(4096), UInt64(1100000000), UInt64(3))
+    )
+    t.consume(_unmap("m1", UInt64(1200000000), UInt64(4)))
+    t.consume(
+        _map("op2", True, "m2", UInt64(4096), UInt64(1300000000), UInt64(5))
+    )
+    t.consume(_unmap("m2", UInt64(1400000000), UInt64(6)))
+    var rows = t.metrics("window [0,2000000000)")
+    var peak = _global(rows, "peak_live_observed_allocation_bytes")
+    assert_true(peak.has_value)
+    assert_equal(peak.value, UInt64(4096))
+
+
+def test_equal_timestamp_release_first_keeps_peak() raises:
+    # Half-open [1.1,1.2) and [1.2,1.4) never coincide; the
+    # release-first tie order is a valid sweep.
+    var t = MappingTracker()
+    t.consume(_attempt("op1", "d1", UInt64(1)))
+    t.consume(_attempt("op2", "d1", UInt64(2)))
+    t.consume(
+        _map("op1", True, "m1", UInt64(4096), UInt64(1100000000), UInt64(3))
+    )
+    t.consume(_unmap("m1", UInt64(1200000000), UInt64(4)))
+    t.consume(
+        _map("op2", True, "m2", UInt64(4096), UInt64(1200000000), UInt64(5))
+    )
+    t.consume(_unmap("m2", UInt64(1400000000), UInt64(6)))
+    var rows = t.metrics("window [0,2000000000)")
+    var peak = _global(rows, "peak_live_observed_allocation_bytes")
+    assert_true(peak.has_value)
+    assert_equal(peak.value, UInt64(4096))
+
+
+def test_equal_timestamp_map_first_withholds_peak() raises:
+    # Map before release at the shared instant would sum both
+    # intervals the delivery order cannot separate.
+    var t = MappingTracker()
+    t.consume(_attempt("op1", "d1", UInt64(1)))
+    t.consume(_attempt("op2", "d1", UInt64(2)))
+    t.consume(
+        _map("op1", True, "m1", UInt64(4096), UInt64(1100000000), UInt64(3))
+    )
+    t.consume(
+        _map("op2", True, "m2", UInt64(4096), UInt64(1200000000), UInt64(4))
+    )
+    t.consume(_unmap("m1", UInt64(1200000000), UInt64(5)))
+    t.consume(_unmap("m2", UInt64(1400000000), UInt64(6)))
+    var rows = t.metrics("window [0,2000000000)")
+    var peak = _global(rows, "peak_live_observed_allocation_bytes")
+    assert_true(not peak.has_value)
+    assert_true(peak.notes.find(String("timestamp order")) != -1)
+
+
+def test_reversed_lifetime_withholds_peak() raises:
+    # A release predating its mapping breaks the sweep proof
+    # as well as the per-generation duration.
+    var t = MappingTracker()
+    t.consume(_attempt("op1", "d1", UInt64(1)))
+    t.consume(_map("op1", True, "m1", UInt64(4096), UInt64(500), UInt64(2)))
+    t.consume(_unmap("m1", UInt64(100), UInt64(3)))
+    var rows = t.metrics("window [0,1000)")
+    var peak = _global(rows, "peak_live_observed_allocation_bytes")
+    assert_true(not peak.has_value)
+    assert_equal(
+        _global(rows, "completed_lifetime_count").value, UInt64(0)
+    )
+
+
+def test_ordered_open_intervals_keep_peak() raises:
+    var t = MappingTracker()
+    t.consume(_attempt("op1", "d1", UInt64(1)))
+    t.consume(_attempt("op2", "d1", UInt64(2)))
+    t.consume(
+        _map("op1", True, "m1", UInt64(4096), UInt64(1100000000), UInt64(3))
+    )
+    t.consume(
+        _map("op2", True, "m2", UInt64(4096), UInt64(1200000000), UInt64(4))
+    )
+    var rows = t.metrics("window [0,2000000000)")
+    var peak = _global(rows, "peak_live_observed_allocation_bytes")
+    assert_true(peak.has_value)
+    assert_equal(peak.value, UInt64(8192))
+    assert_equal(_global(rows, "open_mappings").value, UInt64(2))
+
+
+def test_zero_timestamp_tie_withholds_spike() raises:
+    # A zero-duration map/release tie at timestamp zero needs
+    # no initialization sentinel: the delivery-order spike is
+    # withheld while the valid zero-duration lifetime stands.
+    var t = MappingTracker()
+    t.consume(_attempt("op1", "d1", UInt64(1)))
+    t.consume(_map("op1", True, "m1", UInt64(4096), UInt64(0), UInt64(2)))
+    t.consume(_unmap("m1", UInt64(0), UInt64(3)))
+    var rows = t.metrics("window [0,1000)")
+    var peak = _global(rows, "peak_live_observed_allocation_bytes")
+    assert_true(not peak.has_value)
+    assert_equal(
+        _global(rows, "completed_lifetime_count").value, UInt64(1)
+    )
+
+
+def test_non_state_events_ignore_peak_proof() raises:
+    # Copies, syncs, and attempts never join the live sweep,
+    # so their timestamps cannot break its proof.
+    var t = MappingTracker()
+    t.consume(_attempt("op1", "d1", UInt64(1)))
+    t.consume(_map("op1", True, "m1", UInt64(4096), UInt64(1100000000), UInt64(2)))
+    var cp = _copy("op1", "m1", "original_to_bounce", UInt64(4096), UInt64(3))
+    cp.ts_ns = UInt64(0)
+    t.consume(cp^)
+    var sy = _sync("op1", "m1", UInt64(1024), UInt64(4))
+    sy.ts_ns = UInt64(0)
+    t.consume(sy^)
+    t.consume(_unmap("m1", UInt64(1300000000), UInt64(5)))
+    var rows = t.metrics("window [0,2000000000)")
+    var peak = _global(rows, "peak_live_observed_allocation_bytes")
+    assert_true(peak.has_value)
+    assert_equal(peak.value, UInt64(4096))
+
+
 def test_lifetime_p95() raises:
     var t = MappingTracker()
     t.consume(_attempt("op1", "d1", UInt64(1)))
@@ -764,6 +965,15 @@ def run() raises -> Int:
     suite.test[test_peak_and_byte_time]()
     suite.test[test_peak_and_byte_time_withheld_when_live_invalid]()
     suite.test[test_byte_time_withheld_without_horizon_while_open]()
+    suite.test[test_overlapping_intervals_delivered_out_of_time_order]()
+    suite.test[test_ordered_overlap_reports_peak]()
+    suite.test[test_ordered_disjoint_reports_peak]()
+    suite.test[test_equal_timestamp_release_first_keeps_peak]()
+    suite.test[test_equal_timestamp_map_first_withholds_peak]()
+    suite.test[test_reversed_lifetime_withholds_peak]()
+    suite.test[test_ordered_open_intervals_keep_peak]()
+    suite.test[test_zero_timestamp_tie_withholds_spike]()
+    suite.test[test_non_state_events_ignore_peak_proof]()
     suite.test[test_lifetime_p95]()
     suite.test[test_detail_gap_invalidates_live]()
     suite.test[test_duplicate_result_refused]()

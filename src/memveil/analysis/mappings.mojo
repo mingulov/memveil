@@ -135,6 +135,9 @@ struct MappingTracker[
     var _live_invalid: Bool
     var _live_cause: String
     var _peak_live_bytes: UInt64
+    var _peak_order_ok: Bool
+    var _peak_ts_high: UInt64
+    var _peak_map_at_high: Bool
     var _byte_us: UInt64
     var _byte_us_overflow: Bool
     var _degraded: Bool
@@ -184,6 +187,9 @@ struct MappingTracker[
         self._live_invalid = False
         self._live_cause = String("")
         self._peak_live_bytes = UInt64(0)
+        self._peak_order_ok = True
+        self._peak_ts_high = UInt64(0)
+        self._peak_map_at_high = False
         self._byte_us = UInt64(0)
         self._byte_us_overflow = False
         self._degraded = False
@@ -244,6 +250,43 @@ struct MappingTracker[
     def _note_live_level(mut self):
         if self._live_bytes > self._peak_live_bytes:
             self._peak_live_bytes = self._live_bytes
+
+    def _note_peak_order(mut self, is_map: Bool, ts: UInt64):
+        """Extend the delivery-order proof behind the peak sweep.
+
+        The delivery-order live accumulator is a valid
+        time-domain occupancy sweep while map/unmap state
+        events arrive in non-decreasing timestamp order with
+        releases before maps at equal timestamps (half-open
+        interval sweep order). That sweep order is a sufficient
+        certificate, not a necessary one: some out-of-order
+        deliveries still have a provable peak, but the tracker
+        conservatively withholds those too. The first violation
+        latches the peak unavailable with a concrete reason;
+        live bytes, open counts, and per-generation durations
+        stay valid.
+        """
+        if not self._peak_order_ok:
+            return
+        if ts < self._peak_ts_high:
+            self._break_peak_order()
+            return
+        if ts > self._peak_ts_high:
+            self._peak_ts_high = ts
+            self._peak_map_at_high = is_map
+            return
+        if not is_map and self._peak_map_at_high:
+            self._break_peak_order()
+            return
+        if is_map:
+            self._peak_map_at_high = True
+
+    def _break_peak_order(mut self):
+        self._peak_order_ok = False
+        self._note(
+            "Mapping/release delivery order does not prove"
+            " timestamp order; peak withheld."
+        )
 
     def _add_byte_us(mut self, byte_us: UInt64):
         try:
@@ -395,6 +438,7 @@ struct MappingTracker[
         if not ev.map_result.has_mapping_id:
             self._invalidate_live("Success lacks mapping identity")
             return
+        self._note_peak_order(True, ev.ts_ns)
         var mapping = ev.map_result.mapping_id
         var mapped = UInt64(0)
         if ev.map_result.has_mapped_bytes:
@@ -527,6 +571,7 @@ struct MappingTracker[
         if not ev.unmap.has_mapping_id:
             self._invalidate_live("Release lacks mapping identity")
             return
+        self._note_peak_order(False, ev.ts_ns)
         var mapping = ev.unmap.mapping_id
         if mapping not in self._live:
             self._orphan_releases += 1
@@ -996,22 +1041,35 @@ struct MappingTracker[
                     ),
                 )
             )
-            out.append(
-                self._valued(
-                    String("peak_live_observed_allocation_bytes"),
-                    String("bytes"),
-                    self._peak_live_bytes,
-                    String("gauge"),
-                    False,
-                    UInt64(0),
-                    scope,
-                    String(
-                        "Maximum live mapped bytes reached; peak"
-                        " observed allocation occupancy in this window;"
-                        " release does not prove reprivatization or erasure."
-                    ),
+            if not self._peak_order_ok:
+                out.append(
+                    self._missing(
+                        String("peak_live_observed_allocation_bytes"),
+                        String("bytes"),
+                        scope,
+                        String(
+                            "Mapping/release delivery order does not"
+                            " prove timestamp order; peak withheld."
+                        ),
+                    )
                 )
-            )
+            else:
+                out.append(
+                    self._valued(
+                        String("peak_live_observed_allocation_bytes"),
+                        String("bytes"),
+                        self._peak_live_bytes,
+                        String("gauge"),
+                        False,
+                        UInt64(0),
+                        scope,
+                        String(
+                            "Maximum live mapped bytes reached; peak"
+                            " observed allocation occupancy in this window;"
+                            " release does not prove reprivatization or erasure."
+                        ),
+                    )
+                )
         if (
             has_mapping_state
             and not self._live_invalid

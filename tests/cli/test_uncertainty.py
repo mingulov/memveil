@@ -172,6 +172,19 @@ class Uncertainty(unittest.TestCase):
         self.assertEqual(fails['value'], '1')
         self.assertEqual(fails['coverage'], 'partial')
 
+    def test_reordered_delivery_withholds_peak(self):
+        self.load('lifecycle/reordered-peak')
+        r = self.report(0)
+        peak = self.metric(r, 'peak_live_observed_allocation_bytes')
+        self.assertIsNone(peak['value'])
+        self.assertIn('timestamp order', peak['notes'])
+        self.assertEqual(
+            self.metric(r, 'completed_lifetime_count')['value'], '2')
+        self.assertEqual(
+            self.metric(r, 'lifetime_mean_ns')['value'], '200000000')
+        self.assertEqual(
+            self.metric(r, 'live_observed_allocation_bytes')['value'], '0')
+
     def diagnostic_capture(self, devices, triggers=True, pools=('p1',)):
         cap = Path(tempfile.mkdtemp(dir=self.tmp.name))
         session = json.loads((ROOT / 'tests/fixtures/regions/region-union/session.json').read_text())
