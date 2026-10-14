@@ -4,7 +4,13 @@
 
 Builds the distributable binary (``$ORIGIN``-relative RUNPATH),
 ships the Mojo runtime closure plus the pinned native bridge and
-BPF object, and records every payload hash in MANIFEST.json.
+BPF object, and records every payload hash in MANIFEST.json. A
+source inventory sealed at build start verifies every
+source-derived and build-output copy before staging ships; the
+git revision stays descriptive next to the inventory digest.
+Every archived file binds to its verified bytes as consumed,
+and the tarball hashes before publication and again after the
+rename, so bytes changed after verification fail the package.
 
 Layout of ``dist/memveil-<version>/``::
 
@@ -33,16 +39,21 @@ outside the shipped lib/ set and the system allowlist.
 
 import gzip
 import hashlib
+import io
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+sys.path.insert(0, os.path.join(ROOT, "tools"))
+import build_receipt  # noqa: E402
 
 # NEEDED entries the bundle binary and bridge may name that must
 # resolve to the host C library set. Anything else must ship in
@@ -164,6 +175,298 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
+class _HashingWriter:
+    """Fileobj wrapper hashing every byte written through it."""
+
+    def __init__(self, raw):
+        self._raw = raw
+        self._digest = hashlib.sha256()
+
+    def write(self, data):
+        self._digest.update(data)
+        return self._raw.write(data)
+
+    def flush(self):
+        self._raw.flush()
+
+    def hexdigest(self):
+        return self._digest.hexdigest()
+
+
+# Staged subtree to sealed-source subtree for files copied from
+# the worktree: staged bytes must match their sealed hashes.
+SOURCE_STAGED_PREFIXES = (
+    ("docs", "docs"),
+    ("profiles", "profiles"),
+    ("examples/real-capture", "examples/real-capture"),
+    ("LICENSES", "LICENSES"),
+)
+SOURCE_STAGED_FILES = {
+    "LICENSE": "LICENSE",
+    "THIRD-PARTY-NOTICES.md": "THIRD-PARTY-NOTICES.md",
+}
+# Staged path to build-receipt output for files produced or
+# unpacked by the build: staged bytes must match the receipt.
+# Longer prefixes first so libbpf-mojo-LICENSES/ wins over
+# the licenses/ file prefix.
+OUTPUT_STAGED_PREFIXES = (
+    ("bpf", "bpf"),
+    ("licenses/libbpf-mojo-LICENSES", "deps/lmb/LICENSES"),
+    ("licenses", "deps/lmb/licenses"),
+)
+OUTPUT_STAGED_FILES = {
+    "lib/libbpf_mojo.so.1": "deps/lmb/lib/libbpf_mojo.so.1",
+    "licenses/libbpf-mojo-LICENSE": "deps/lmb/LICENSE",
+    "THIRD-PARTY-NOTICES.libbpf-mojo.md":
+        "deps/lmb/THIRD-PARTY-NOTICES.md",
+}
+
+
+def _keep_doc(rest):
+    """Docs stager: recursive walk, markdown files only."""
+    return rest.endswith(".md")
+
+
+def _keep_profile(rest):
+    """Profiles stager: top-level manifest and JSON only."""
+    return "/" not in rest and (
+        rest == "manifest.txt" or rest.endswith(".json"))
+
+
+def _keep_all(rest):
+    """Copied-subtree stager: the whole subtree ships."""
+    del rest
+    return True
+
+
+# Sealed-source prefix to its staging rule: which sealed
+# members the stager was told to stage (mirrors the copies
+# in main, so deletions under staging cannot hide).
+SOURCE_STAGED_KEEP = {
+    "docs": _keep_doc,
+    "profiles": _keep_profile,
+    "examples/real-capture": _keep_all,
+    "LICENSES": _keep_all,
+}
+
+# Source prefixes staged by whole-subtree copy: sealed
+# directories under them must exist staged too. Filtered
+# prefixes only promise their kept files.
+COPYTREE_PREFIXES = frozenset((
+    "examples/real-capture",
+    "LICENSES",
+))
+
+
+def verify_staged_tree(staged, inventory_files, receipt_outputs,
+                       expected_outputs):
+    """Staged bytes against seals; [] means every copy matches.
+
+    Worktree-derived copies match the source inventory, build
+    outputs match the receipt, and anything else staged (apart
+    from the fresh binary, the not-yet-written manifest, and
+    Mojo runtime libraries owned by later origin work) trips.
+    Expected membership comes from the seals, not from the
+    staging walk: every kept sealed copy and every expected
+    output must be present, with matching bytes and mode.
+    Staged directory symlinks are rejected at every depth:
+    prefix walks would follow them while the manifest and
+    archive walks skip them, silently omitting payload.
+
+    Returns (problems, observed): observed maps every staged
+    regular file to its verified sha256, and the manifest and
+    the archive bind to those bytes.
+    """
+    sealed = {entry["path"]: entry for entry in inventory_files}
+    problems = []
+    observed = {}
+    checked = set()
+
+    def check_copy(staged_rel, want, origin):
+        full = os.path.join(staged, staged_rel)
+        if not os.path.isfile(full) or os.path.islink(full):
+            problems.append("staged copy missing: %s" % staged_rel)
+            return
+        digest = sha256_file(full)
+        observed[staged_rel] = digest
+        if digest != want.get("sha256"):
+            problems.append("staged copy differs from %s: %s"
+                            % (origin, staged_rel))
+        if want.get("mode") is not None and oct(stat.S_IMODE(
+                os.stat(full).st_mode)) != want["mode"]:
+            problems.append("staged copy mode differs from %s: %s"
+                            % (origin, staged_rel))
+
+    def check_prefix(staged_prefix, origin_prefix, table, label):
+        base = os.path.join(staged, *staged_prefix.split("/"))
+        if not os.path.isdir(base):
+            problems.append("staged subtree missing: %s"
+                            % staged_prefix)
+            return
+        for current, _, files in os.walk(base):
+            for name in sorted(files):
+                rel = os.path.relpath(
+                    os.path.join(current, name),
+                    staged).replace(os.sep, "/")
+                origin = origin_prefix + rel[len(staged_prefix):]
+                want = table.get(origin)
+                if want is None:
+                    problems.append(
+                        "staged file has no %s origin: %s"
+                        % (label, rel))
+                    continue
+                checked.add(rel)
+                check_copy(rel, want, "%s %s" % (label, origin))
+
+    for staged_prefix, source_prefix in SOURCE_STAGED_PREFIXES:
+        check_prefix(staged_prefix, source_prefix, sealed, "sealed")
+    for staged_rel, origin in sorted(SOURCE_STAGED_FILES.items()):
+        want = sealed.get(origin)
+        if want is None:
+            problems.append("sealed source missing: %s" % origin)
+            continue
+        checked.add(staged_rel)
+        check_copy(staged_rel, want, "sealed " + origin)
+    outputs = {rel: entry for rel, entry in
+               receipt_outputs.items()}
+    exact = dict(OUTPUT_STAGED_FILES)
+    for staged_prefix, output_prefix in OUTPUT_STAGED_PREFIXES:
+        base = os.path.join(staged, *staged_prefix.split("/"))
+        if not os.path.isdir(base):
+            problems.append("staged subtree missing: %s"
+                            % staged_prefix)
+            continue
+        for current, _, files in os.walk(base):
+            for name in sorted(files):
+                rel = os.path.relpath(
+                    os.path.join(current, name),
+                    staged).replace(os.sep, "/")
+                if rel in exact or rel in checked:
+                    continue
+                origin = output_prefix + rel[len(staged_prefix):]
+                want = outputs.get(origin)
+                if want is None:
+                    problems.append(
+                        "staged file has no receipt origin: %s"
+                        % rel)
+                    continue
+                checked.add(rel)
+                check_copy(rel, want, "receipt " + origin)
+    for staged_rel, origin in sorted(exact.items()):
+        want = outputs.get(origin)
+        if want is None:
+            problems.append("receipt lacks output: %s" % origin)
+            continue
+        checked.add(staged_rel)
+        check_copy(staged_rel, want, "receipt " + origin)
+    for staged_prefix, source_prefix in SOURCE_STAGED_PREFIXES:
+        keep = SOURCE_STAGED_KEEP[source_prefix]
+        for path, entry in sorted(sealed.items()):
+            if not path.startswith(source_prefix + "/"):
+                continue
+            rest = path[len(source_prefix) + 1:]
+            staged_rel = staged_prefix + "/" + rest
+            full = os.path.join(staged, staged_rel)
+            if entry.get("kind") == "dir":
+                if source_prefix in COPYTREE_PREFIXES \
+                        and not os.path.isdir(full):
+                    problems.append(
+                        "expected sealed directory missing from "
+                        "staging: %s" % staged_rel)
+                continue
+            if entry.get("kind") != "file" or not keep(rest):
+                continue
+            if not os.path.isfile(full) or os.path.islink(full):
+                problems.append(
+                    "expected sealed copy missing from staging: "
+                    "%s" % staged_rel)
+    for staged_rel in sorted(expected_outputs):
+        full = os.path.join(staged, staged_rel)
+        if not os.path.isfile(full) or os.path.islink(full):
+            problems.append(
+                "expected sealed output missing from staging: %s"
+                % staged_rel)
+    if os.path.islink(staged):
+        problems.append("staged tree root is a symlink")
+    for current, dirs, files in os.walk(staged):
+        for name in sorted(dirs):
+            full = os.path.join(current, name)
+            if os.path.islink(full):
+                problems.append(
+                    "staged directory is a symlink: %s"
+                    % os.path.relpath(full, staged).replace(
+                        os.sep, "/"))
+        for name in sorted(files):
+            full = os.path.join(current, name)
+            rel = os.path.relpath(full, staged).replace(
+                os.sep, "/")
+            if rel not in observed and os.path.isfile(full) \
+                    and not os.path.islink(full):
+                observed[rel] = sha256_file(full)
+            if rel in checked or rel == "MANIFEST.json" \
+                    or rel == "bin/memveil":
+                continue
+            if rel.startswith("lib/") \
+                    and rel != "lib/libbpf_mojo.so.1":
+                continue
+            problems.append("staged file is unsealed: %s" % rel)
+    return problems, observed
+
+
+def sealed_lock_bytes(root, inventory_files):
+    """toolchain.lock.json parsed from seal-checked bytes.
+
+    Manifest metadata comes from these bytes, never from a
+    live lock re-read after verification.
+    """
+    want = None
+    for entry in inventory_files:
+        if entry.get("path") == "toolchain.lock.json" \
+                and entry.get("kind") == "file":
+            want = entry.get("sha256")
+    path = os.path.join(root, "toolchain.lock.json")
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read()
+    except OSError as exc:
+        fail("manifest lock unreadable: %s" % exc)
+    if want is None or hashlib.sha256(data).hexdigest() != want:
+        fail("manifest lock bytes differ from seal: "
+             "toolchain.lock.json")
+    try:
+        return json.loads(data.decode("utf-8"))
+    except ValueError:
+        fail("manifest lock bytes are not JSON: "
+             "toolchain.lock.json")
+
+
+def _drop_candidates(out_dir, tag):
+    """Best-effort removal of a tag's bundle and tarball.
+
+    A failed run leaves no apparently successful final
+    candidate for its tag. Never raises and never escapes
+    the output directory.
+    """
+    try:
+        validate_tag(tag)
+    except ValueError:
+        return
+    try:
+        final = os.path.join(out_dir, tag)
+        tarball = os.path.join(out_dir, tag + ".tar.gz")
+        if not contained(final, out_dir) \
+                or os.path.realpath(final) == \
+                os.path.realpath(out_dir):
+            return
+        shutil.rmtree(final, ignore_errors=True)
+        if os.path.isdir(tarball) and not os.path.islink(tarball):
+            shutil.rmtree(tarball, ignore_errors=True)
+        elif os.path.exists(tarball):
+            os.remove(tarball)
+    except OSError:
+        pass
+
+
 def owns_git_root(path):
     """Require the canonical source root to equal Git's top-level.
 
@@ -212,344 +515,517 @@ def main(argv):
             tag = args.pop(0)
             continue
         fail("unknown option: %s" % opt)
-    if not os.environ.get("LMB_PACKAGE"):
-        fail("LMB_PACKAGE is not set; refusing an unpinned bridge")
-    lmb_package = os.environ["LMB_PACKAGE"]
-    if not os.path.isfile(lmb_package):
-        fail("LMB_PACKAGE is not a file: %s" % lmb_package)
-    memveil_rev = git_rev_or_none(ROOT)
-    if memveil_rev is not None:
-        if not git_clean(ROOT):
-            fail("worktree has uncommitted changes; commit first")
-    else:
-        # Git-free source export: no commit identity to record
-        # and no worktree state to enforce. The manifest says
-        # "export" so nobody mistakes this for a commit-anchored
-        # build, and tarball mtimes fall back to the youngest
-        # staged file instead of the commit clock.
-        memveil_rev = "export"
-        print("package: git-free export; revision recorded as export")
-
-    build = run([os.path.join(ROOT, "tools", "build")])
-    if build.returncode != 0:
-        print(build.stdout)
-        print(build.stderr, file=sys.stderr)
-        fail("tools/build failed")
-    print(build.stdout.strip())
-
-    lmb_mojo = os.path.join(ROOT, "build", "deps", "lmb", "mojo")
-    lmb_lib = os.path.join(ROOT, "build", "deps", "lmb", "lib")
-    if not os.path.isdir(os.path.join(lmb_mojo, "libbpf_mojo")):
-        fail("libbpf-mojo import path missing after build")
-    bridge = os.path.join(lmb_lib, "libbpf_mojo.so.1")
-    if not os.path.isfile(bridge):
-        fail("native bridge missing: %s" % bridge)
-    bpf_objs = [
-        os.path.join(
-            ROOT, "build", "bpf", "swiotlb_attempt.bpf.o"
-        ),
-        os.path.join(
-            ROOT, "build", "bpf", "swiotlb_lifecycle.bpf.o"
-        ),
-        os.path.join(
-            ROOT, "build", "bpf", "swiotlb_copy.bpf.o"
-        ),
-    ]
-    for bpf_obj in bpf_objs:
-        if not os.path.isfile(bpf_obj):
-            fail("BPF object missing: %s" % bpf_obj)
-
-    # Bundle version comes from the engine itself, never from a
-    # duplicated string here.
-    staged = os.path.join(out_dir, ".stage")
-    bindir = os.path.join(staged, "bin")
-    libdir = os.path.join(staged, "lib")
-    shutil.rmtree(staged, ignore_errors=True)
-    os.makedirs(bindir)
-    os.makedirs(libdir)
-    link = run([
-        "pixi", "run", "--frozen", "mojo", "build",
-        "-I", "src", "-I", "build/deps/lmb/mojo",
-        "--target-cpu", "x86-64-v2",
-        "-Xlinker", "-rpath", "-Xlinker", "$ORIGIN/../lib",
-        "-o", os.path.join(bindir, "memveil"),
-        "src/memveil/main.mojo",
-    ])
-    if link.returncode != 0:
-        print(link.stdout)
-        print(link.stderr, file=sys.stderr)
-        fail("relocatable link failed")
-    binary = os.path.join(bindir, "memveil")
-    proc = run([binary, "version"])
-    if proc.returncode != 0 or not proc.stdout.startswith("memveil-"):
-        fail("bundle binary version check failed: %r" % proc.stdout)
-    version = proc.stdout.strip().split("-", 1)[1]
-    if tag is None:
-        tag = "memveil-" + version
-    try:
-        validate_tag(tag)
-    except ValueError as err:
-        fail(str(err))
-
-    # Transitive closure over the binary and the bridge: every
-    # NEEDED name outside the system allowlist must resolve to a
-    # shippable file, and shipped libs must not widen the closure.
-    # Refuse unknown names instead of guessing.
-    # The bridge is dlopen'd, never a NEEDED entry: seed it.
-    ship = {"libbpf_mojo.so.1": bridge}
-    queue = [binary, bridge]
-    while queue:
-        path = queue.pop(0)
-        for name in needed(path):
-            if name in SYSTEM_ALLOW or name in ship:
-                continue
-            try:
-                validate_lib_name(name, os.path.basename(path))
-            except ValueError as err:
-                fail(str(err))
-            cand = os.path.join(RUNTIME_LIB_DIR, name)
-            if name == "libbpf_mojo.so.1":
-                cand = bridge
-            if not os.path.isfile(cand):
-                fail("no source for NEEDED %s (from %s)"
-                     % (name, os.path.basename(path)))
-            ship[name] = cand
-            queue.append(cand)
-    for name in sorted(ship):
-        dest = os.path.join(libdir, name)
-        if not contained(dest, libdir):
-            fail("staging escapes lib/: %s" % name)
-        shutil.copy2(ship[name], dest)
-    for name in sorted(os.listdir(libdir)):
-        for dep in needed(os.path.join(libdir, name)):
-            if dep in SYSTEM_ALLOW or dep in ship:
-                continue
-            fail("shipped %s needs %s: outside closure" % (name, dep))
-    # The Mojo driver prepends its own pixi RUNPATH entry ahead of
-    # ours; now that lib/ is populated, rewrite to exactly
-    # $ORIGIN/../lib so the bundle carries no absolute build-host
-    # paths, then prove the binary still starts.
-    if shutil.which("patchelf") is None:
-        fail("patchelf is required to stage a relocatable binary "
-             "(apt install patchelf)")
-    rewrite = None
-    for attempt in range(6):
-        rewrite = run(["patchelf", "--set-rpath", "$ORIGIN/../lib",
-                       binary])
-        if rewrite.returncode == 0:
-            break
-        # ETXTBSY is transient (a just-reaped exec image still
-        # clearing); retry bounded, then fail with holder evidence.
-        if "Text file busy" not in rewrite.stderr or attempt == 5:
-            holders = ""
-            if shutil.which("fuser") is not None:
-                seen = run(["fuser", binary])
-                holders = (seen.stdout + seen.stderr).strip()
-            fail("patchelf RUNPATH rewrite failed "
-                 "(attempt %d; holders: %s):\n%s"
-                 % (attempt + 1, holders or "none observed",
-                    rewrite.stderr))
-        time.sleep(2)
-    dyn = run(["readelf", "-d", binary])
-    if dyn.returncode != 0:
-        fail("readelf failed on staged binary:\n%s" % dyn.stderr)
-    abspaths = runpath_abspaths(dyn.stdout)
-    if abspaths:
-        fail("staged binary keeps absolute RUNPATH entries %s:\n%s"
-             % (", ".join(abspaths), dyn.stdout))
-    rerun = run([binary, "version"])
-    if rerun.returncode != 0 \
-            or rerun.stdout.strip() != "memveil-" + version:
-        fail("bundle binary fails to start after RUNPATH rewrite: %r"
-             % rerun.stdout)
-    print("package: lib closure: %s" % ", ".join(sorted(ship)))
-
-    for sub in ("bpf", "profiles", "docs", "examples"):
-        os.makedirs(os.path.join(staged, sub))
-    for bpf_obj in bpf_objs:
-        shutil.copy2(bpf_obj, os.path.join(
-            staged, "bpf", os.path.basename(bpf_obj)))
-    for name in sorted(os.listdir(os.path.join(ROOT, "profiles"))):
-        if name == "manifest.txt" or name.endswith(".json"):
-            shutil.copy2(os.path.join(ROOT, "profiles", name),
-                         os.path.join(staged, "profiles", name))
-    # Ship the whole manuals tree: quickstart and support
-    # reference troubleshooting, performance, resource-limits,
-    # and permissions, so staging a subset would ship dangling
-    # references. Every staged manual must resolve its local
-    # links inside the bundle (pinned by the package lane).
-    for base, dirs, files in os.walk(os.path.join(ROOT, "docs")):
-        dirs.sort()
-        for name in sorted(files):
-            if not name.endswith(".md"):
-                continue
-            src = os.path.join(base, name)
-            rel = os.path.relpath(src, os.path.join(ROOT, "docs"))
-            dest = os.path.join(staged, "docs", rel)
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            shutil.copy2(src, dest)
-    for name in ("quickstart.md", "support.md", "privacy.md"):
-        if not os.path.isfile(os.path.join(staged, "docs", name)):
-            fail("missing docs/%s" % name)
-    example = os.path.join(ROOT, "examples", "real-capture")
-    for name in ("events.ndjson", "session.json"):
-        src = os.path.join(example, name)
-        if not os.path.isfile(src):
-            fail("missing %s" % src)
-    shutil.copytree(example,
-                    os.path.join(staged, "examples", "real-capture"))
-
-    # License texts: MemVeil's own plus everything the bundle
-    # redistributes through the pinned bridge. The libbpf-mojo
-    # texts below are pinned by the tarball hash checked against
-    # the lock further down; a missing text fails the package.
-    lmb_dir = os.path.join(ROOT, "build", "deps", "lmb")
-    own_texts = ["LICENSE", "THIRD-PARTY-NOTICES.md"]
-    for name in own_texts:
-        src = os.path.join(ROOT, name)
-        if not os.path.isfile(src):
-            fail("missing %s" % src)
-        shutil.copy2(src, os.path.join(staged, name))
-    own_licenses = os.path.join(ROOT, "LICENSES")
-    for name in ("GPL-2.0-only.txt", "GPL-2.0-or-later.txt"):
-        if not os.path.isfile(os.path.join(own_licenses, name)):
-            fail("missing LICENSES/%s" % name)
-    shutil.copytree(own_licenses, os.path.join(staged, "LICENSES"))
-    staged_licenses = os.path.join(staged, "licenses")
-    os.makedirs(staged_licenses)
-    third_party = (
-        "GPL-3.0.txt",
-        "LICENSE.BSD-2-Clause.libbpf",
-        "LICENSE.mojo-compiler",
-        "LICENSE.zlib",
-        "NOTICE.mojo-runtime.md",
-        "RUNTIME.LIBRARY.EXCEPTION",
-        "Third-Party-Notices.mojo-compiler",
-    )
-    lmb_licenses = os.path.join(lmb_dir, "licenses")
-    for name in third_party:
-        src = os.path.join(lmb_licenses, name)
-        if not os.path.isfile(src):
-            fail("missing pinned license text %s" % src)
-        shutil.copy2(src, os.path.join(staged_licenses, name))
-    lmb_own = os.path.join(lmb_dir, "LICENSE")
-    if not os.path.isfile(lmb_own):
-        fail("missing pinned libbpf-mojo LICENSE")
-    shutil.copy2(lmb_own,
-                 os.path.join(staged_licenses, "libbpf-mojo-LICENSE"))
-    lmb_own_dir = os.path.join(lmb_dir, "LICENSES")
-    for name in ("GPL-2.0-only.txt", "LLVM-exception.txt"):
-        if not os.path.isfile(os.path.join(lmb_own_dir, name)):
-            fail("missing pinned libbpf-mojo LICENSES/%s" % name)
-    shutil.copytree(lmb_own_dir,
-                    os.path.join(staged_licenses,
-                                 "libbpf-mojo-LICENSES"))
-    lmb_notices = os.path.join(lmb_dir, "THIRD-PARTY-NOTICES.md")
-    if not os.path.isfile(lmb_notices):
-        fail("missing pinned libbpf-mojo notices")
-    shutil.copy2(lmb_notices,
-                 os.path.join(staged,
-                              "THIRD-PARTY-NOTICES.libbpf-mojo.md"))
-    print("package: license texts staged")
-
-    lock = json.load(open(os.path.join(ROOT, "toolchain.lock.json")))
-    lmb_pin = lock["dependencies"]["libbpf-mojo"]
-    manifest = {
-        "bundle": tag,
-        "engine_version": version,
-        "memveil_revision": memveil_rev,
-        "libbpf_mojo": {
-            "version": lmb_pin["version"],
-            "source_commit": lmb_pin["source_commit"],
-            "tarball_sha256": lmb_pin["tarball_sha256"],
-            "tarball_used_sha256": sha256_file(lmb_package),
-        },
-        "toolchain": lock["toolchain"],
-        "system_libraries": sorted(SYSTEM_ALLOW),
-        "first_party": {
-            "license_default": "GPL-3.0-or-later",
-            "licenses": {
-                "GPL-2.0-only": "LICENSES/GPL-2.0-only.txt",
-                "GPL-2.0-or-later": "LICENSES/GPL-2.0-or-later.txt",
-                "GPL-3.0-or-later": "LICENSE",
-            },
-            "paths": {
-                "bpf/swiotlb_attempt.bpf.o": "GPL-2.0-only",
-                "bpf/swiotlb_lifecycle.bpf.o": "GPL-2.0-only",
-                "bpf/swiotlb_copy.bpf.o": "GPL-2.0-only",
-            },
-        },
-        "files": {},
-    }
-    if (manifest["libbpf_mojo"]["tarball_used_sha256"]
-            != lmb_pin["tarball_sha256"]):
-        fail("LMB_PACKAGE does not match the pinned hash")
-    for base, _, files in os.walk(staged):
-        for name in files:
-            full = os.path.join(base, name)
-            rel = os.path.relpath(full, staged)
-            manifest["files"][rel] = sha256_file(full)
-    with open(os.path.join(staged, "MANIFEST.json"), "w") as handle:
-        json.dump(manifest, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-
-    final = os.path.join(out_dir, tag)
-    if not contained(final, out_dir) \
-            or os.path.realpath(final) == os.path.realpath(out_dir):
-        fail("bundle target escapes output dir: %s" % tag)
-    shutil.rmtree(final, ignore_errors=True)
-    os.rename(staged, final)
-    tarball = os.path.join(out_dir, tag + ".tar.gz")
-    if os.path.exists(tarball):
-        os.remove(tarball)
-    if memveil_rev == "export":
-        mtime = 0
-        for base, _, files in os.walk(final):
-            for name in files:
-                stamp = int(os.path.getmtime(
-                    os.path.join(base, name)))
-                if stamp > mtime:
-                    mtime = stamp
-    else:
-        mtime = int(run(["git", "-C", ROOT, "log", "-1",
-                         "--format=%ct"]).stdout.strip())
-    # Zero-mtime gzip header: "w:gz" stamps the current time,
-    # which would make identical revisions hash differently.
-    # Explicit directory members plus normalized modes keep
-    # extraction identical on any umask (dirs 0755, files
-    # 0644, executable bit kept).
-    with open(tarball, "wb") as raw:
-        gz = gzip.GzipFile(filename="", mode="wb", fileobj=raw,
-                           compresslevel=9, mtime=0)
+    if tag is not None:
         try:
-            with tarfile.open(fileobj=gz, mode="w") as tar:
-                for base, dirs, files in os.walk(final):
-                    dirs.sort()
-                    info = tar.gettarinfo(
-                        base, os.path.relpath(base, out_dir))
-                    info.mtime = mtime
-                    info.uid = info.gid = 0
-                    info.uname = info.gname = ""
-                    info.mode = tar_member_mode(base, True)
-                    tar.addfile(info)
-                    for name in sorted(files):
-                        full = os.path.join(base, name)
-                        info = tar.gettarinfo(
-                            full, os.path.relpath(full, out_dir))
-                        info.mtime = mtime
-                        info.uid = info.gid = 0
-                        info.uname = info.gname = ""
-                        info.mode = tar_member_mode(full, False)
-                        with open(full, "rb") as handle:
-                            tar.addfile(info, handle)
-        finally:
-            gz.close()
-    digest = sha256_file(tarball)
-    print("package: %s" % tarball)
-    print("package: sha256 %s" % digest)
-    print("package: %d files, MANIFEST.json recorded" %
-          len(manifest["files"]))
-    return 0
+            validate_tag(tag)
+        except ValueError as err:
+            fail(str(err))
+    staged = None
+    # A failed run leaves no staging directory and no
+    # apparently successful final candidate: every failure
+    # below drops this run's tag candidates (once the tag
+    # is known) and the staging directory.
+    try:
+        if not os.environ.get("LMB_PACKAGE"):
+            fail("LMB_PACKAGE is not set; refusing an unpinned bridge")
+        lmb_package = os.environ["LMB_PACKAGE"]
+        if not os.path.isfile(lmb_package):
+            fail("LMB_PACKAGE is not a file: %s" % lmb_package)
+        memveil_rev = git_rev_or_none(ROOT)
+        if memveil_rev is not None:
+            if not git_clean(ROOT):
+                fail("worktree has uncommitted changes; commit first")
+        else:
+            # Git-free source export: no commit identity to record
+            # and no worktree state to enforce. The manifest says
+            # "export" so nobody mistakes this for a commit-anchored
+            # build, and tarball mtimes fall back to the youngest
+            # staged file instead of the commit clock.
+            memveil_rev = "export"
+            print("package: git-free export; revision recorded as export")
+
+        build = run([os.path.join(ROOT, "tools", "build")])
+        if build.returncode != 0:
+            print(build.stdout)
+            print(build.stderr, file=sys.stderr)
+            fail("tools/build failed")
+        print(build.stdout.strip())
+
+        # The build sealed its inputs and bound its outputs; refuse
+        # any drift before staging reads a single source byte. One
+        # pinned baseline serves every phase below: the receipt path
+        # is never re-read, so a concurrent build cannot swap the
+        # baseline between verifications.
+        receipt_path = os.path.join(ROOT, "build", "build-receipt.json")
+        try:
+            with open(receipt_path, "rb") as handle:
+                receipt_bytes = handle.read()
+        except OSError as exc:
+            fail("build receipt unreadable: %s" % exc)
+        try:
+            receipt = json.loads(receipt_bytes.decode("utf-8"))
+        except ValueError as exc:
+            fail("build receipt unreadable: %s" % exc)
+        receipt_sha256 = hashlib.sha256(receipt_bytes).hexdigest()
+        seal_problems = build_receipt.verify_loaded(
+            receipt, ROOT, "build")
+        if seal_problems:
+            for problem in seal_problems[:10]:
+                print("package: %s" % problem, file=sys.stderr)
+            fail("tree or build outputs drifted from the build seal")
+
+        lmb_mojo = os.path.join(ROOT, "build", "deps", "lmb", "mojo")
+        lmb_lib = os.path.join(ROOT, "build", "deps", "lmb", "lib")
+        if not os.path.isdir(os.path.join(lmb_mojo, "libbpf_mojo")):
+            fail("libbpf-mojo import path missing after build")
+        bridge = os.path.join(lmb_lib, "libbpf_mojo.so.1")
+        if not os.path.isfile(bridge):
+            fail("native bridge missing: %s" % bridge)
+        bpf_objs = [
+            os.path.join(
+                ROOT, "build", "bpf", "swiotlb_attempt.bpf.o"
+            ),
+            os.path.join(
+                ROOT, "build", "bpf", "swiotlb_lifecycle.bpf.o"
+            ),
+            os.path.join(
+                ROOT, "build", "bpf", "swiotlb_copy.bpf.o"
+            ),
+        ]
+        for bpf_obj in bpf_objs:
+            if not os.path.isfile(bpf_obj):
+                fail("BPF object missing: %s" % bpf_obj)
+
+        # Bundle version comes from the engine itself, never from a
+        # duplicated string here.
+        staged = os.path.join(out_dir, ".stage")
+        bindir = os.path.join(staged, "bin")
+        libdir = os.path.join(staged, "lib")
+        shutil.rmtree(staged, ignore_errors=True)
+        try:
+            os.makedirs(bindir)
+            os.makedirs(libdir)
+        except OSError as exc:
+            fail("staging setup failed: %s" % exc)
+        link = run([
+            "pixi", "run", "--frozen", "mojo", "build",
+            "-I", "src", "-I", "build/deps/lmb/mojo",
+            "--target-cpu", "x86-64-v2",
+            "-Xlinker", "-rpath", "-Xlinker", "$ORIGIN/../lib",
+            "-o", os.path.join(bindir, "memveil"),
+            "src/memveil/main.mojo",
+        ])
+        if link.returncode != 0:
+            print(link.stdout)
+            print(link.stderr, file=sys.stderr)
+            fail("relocatable link failed")
+        binary = os.path.join(bindir, "memveil")
+        proc = run([binary, "version"])
+        if proc.returncode != 0 or not proc.stdout.startswith("memveil-"):
+            fail("bundle binary version check failed: %r" % proc.stdout)
+        version = proc.stdout.strip().split("-", 1)[1]
+        if tag is None:
+            tag = "memveil-" + version
+        try:
+            validate_tag(tag)
+        except ValueError as err:
+            fail(str(err))
+
+        # The relocatable link compiled sealed sources; refuse any
+        # input drift across it before staging reads the tree, against
+        # the same pinned baseline as every other phase.
+        seal_problems = build_receipt.verify_loaded(
+            receipt, ROOT, "build")
+        if seal_problems:
+            for problem in seal_problems[:10]:
+                print("package: %s" % problem, file=sys.stderr)
+            fail("sources changed under the build seal during the "
+                 "relocatable link")
+
+        # A failed run must leave no apparently successful final
+        # candidate: drop any previous bundle and tarball for this
+        # tag now, before staging produces a new one.
+        final = os.path.join(out_dir, tag)
+        tarball = os.path.join(out_dir, tag + ".tar.gz")
+        if not contained(final, out_dir) \
+                or os.path.realpath(final) == os.path.realpath(out_dir):
+            fail("bundle target escapes output dir: %s" % tag)
+        _drop_candidates(out_dir, tag)
+
+        # Transitive closure over the binary and the bridge: every
+        # NEEDED name outside the system allowlist must resolve to a
+        # shippable file, and shipped libs must not widen the closure.
+        # Refuse unknown names instead of guessing.
+        # The bridge is dlopen'd, never a NEEDED entry: seed it.
+        ship = {"libbpf_mojo.so.1": bridge}
+        queue = [binary, bridge]
+        while queue:
+            path = queue.pop(0)
+            for name in needed(path):
+                if name in SYSTEM_ALLOW or name in ship:
+                    continue
+                try:
+                    validate_lib_name(name, os.path.basename(path))
+                except ValueError as err:
+                    fail(str(err))
+                cand = os.path.join(RUNTIME_LIB_DIR, name)
+                if name == "libbpf_mojo.so.1":
+                    cand = bridge
+                if not os.path.isfile(cand):
+                    fail("no source for NEEDED %s (from %s)"
+                         % (name, os.path.basename(path)))
+                ship[name] = cand
+                queue.append(cand)
+        for name in sorted(ship):
+            dest = os.path.join(libdir, name)
+            if not contained(dest, libdir):
+                fail("staging escapes lib/: %s" % name)
+            shutil.copy2(ship[name], dest)
+        for name in sorted(os.listdir(libdir)):
+            for dep in needed(os.path.join(libdir, name)):
+                if dep in SYSTEM_ALLOW or dep in ship:
+                    continue
+                fail("shipped %s needs %s: outside closure" % (name, dep))
+        # The Mojo driver prepends its own pixi RUNPATH entry ahead of
+        # ours; now that lib/ is populated, rewrite to exactly
+        # $ORIGIN/../lib so the bundle carries no absolute build-host
+        # paths, then prove the binary still starts.
+        if shutil.which("patchelf") is None:
+            fail("patchelf is required to stage a relocatable binary "
+                 "(apt install patchelf)")
+        rewrite = None
+        for attempt in range(6):
+            rewrite = run(["patchelf", "--set-rpath", "$ORIGIN/../lib",
+                           binary])
+            if rewrite.returncode == 0:
+                break
+            # ETXTBSY is transient (a just-reaped exec image still
+            # clearing); retry bounded, then fail with holder evidence.
+            if "Text file busy" not in rewrite.stderr or attempt == 5:
+                holders = ""
+                if shutil.which("fuser") is not None:
+                    seen = run(["fuser", binary])
+                    holders = (seen.stdout + seen.stderr).strip()
+                fail("patchelf RUNPATH rewrite failed "
+                     "(attempt %d; holders: %s):\n%s"
+                     % (attempt + 1, holders or "none observed",
+                        rewrite.stderr))
+            time.sleep(2)
+        dyn = run(["readelf", "-d", binary])
+        if dyn.returncode != 0:
+            fail("readelf failed on staged binary:\n%s" % dyn.stderr)
+        abspaths = runpath_abspaths(dyn.stdout)
+        if abspaths:
+            fail("staged binary keeps absolute RUNPATH entries %s:\n%s"
+                 % (", ".join(abspaths), dyn.stdout))
+        rerun = run([binary, "version"])
+        if rerun.returncode != 0 \
+                or rerun.stdout.strip() != "memveil-" + version:
+            fail("bundle binary fails to start after RUNPATH rewrite: %r"
+                 % rerun.stdout)
+        print("package: lib closure: %s" % ", ".join(sorted(ship)))
+
+        for sub in ("bpf", "profiles", "docs", "examples"):
+            os.makedirs(os.path.join(staged, sub))
+        for bpf_obj in bpf_objs:
+            shutil.copy2(bpf_obj, os.path.join(
+                staged, "bpf", os.path.basename(bpf_obj)))
+        for name in sorted(os.listdir(os.path.join(ROOT, "profiles"))):
+            if name == "manifest.txt" or name.endswith(".json"):
+                shutil.copy2(os.path.join(ROOT, "profiles", name),
+                             os.path.join(staged, "profiles", name))
+        # Ship the whole manuals tree: quickstart and support
+        # reference troubleshooting, performance, resource-limits,
+        # and permissions, so staging a subset would ship dangling
+        # references. Every staged manual must resolve its local
+        # links inside the bundle (pinned by the package lane).
+        for base, dirs, files in os.walk(os.path.join(ROOT, "docs")):
+            dirs.sort()
+            for name in sorted(files):
+                if not name.endswith(".md"):
+                    continue
+                src = os.path.join(base, name)
+                rel = os.path.relpath(src, os.path.join(ROOT, "docs"))
+                dest = os.path.join(staged, "docs", rel)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                shutil.copy2(src, dest)
+        for name in ("quickstart.md", "support.md", "privacy.md"):
+            if not os.path.isfile(os.path.join(staged, "docs", name)):
+                fail("missing docs/%s" % name)
+        example = os.path.join(ROOT, "examples", "real-capture")
+        for name in ("events.ndjson", "session.json"):
+            src = os.path.join(example, name)
+            if not os.path.isfile(src):
+                fail("missing %s" % src)
+        shutil.copytree(example,
+                        os.path.join(staged, "examples", "real-capture"))
+
+        # License texts: MemVeil's own plus everything the bundle
+        # redistributes through the pinned bridge. The libbpf-mojo
+        # texts below are pinned by the tarball hash checked against
+        # the lock further down; a missing text fails the package.
+        lmb_dir = os.path.join(ROOT, "build", "deps", "lmb")
+        own_texts = ["LICENSE", "THIRD-PARTY-NOTICES.md"]
+        for name in own_texts:
+            src = os.path.join(ROOT, name)
+            if not os.path.isfile(src):
+                fail("missing %s" % src)
+            shutil.copy2(src, os.path.join(staged, name))
+        own_licenses = os.path.join(ROOT, "LICENSES")
+        for name in ("GPL-2.0-only.txt", "GPL-2.0-or-later.txt"):
+            if not os.path.isfile(os.path.join(own_licenses, name)):
+                fail("missing LICENSES/%s" % name)
+        shutil.copytree(own_licenses, os.path.join(staged, "LICENSES"))
+        staged_licenses = os.path.join(staged, "licenses")
+        os.makedirs(staged_licenses)
+        third_party = (
+            "GPL-3.0.txt",
+            "LICENSE.BSD-2-Clause.libbpf",
+            "LICENSE.mojo-compiler",
+            "LICENSE.zlib",
+            "NOTICE.mojo-runtime.md",
+            "RUNTIME.LIBRARY.EXCEPTION",
+            "Third-Party-Notices.mojo-compiler",
+        )
+        lmb_licenses = os.path.join(lmb_dir, "licenses")
+        for name in third_party:
+            src = os.path.join(lmb_licenses, name)
+            if not os.path.isfile(src):
+                fail("missing pinned license text %s" % src)
+            shutil.copy2(src, os.path.join(staged_licenses, name))
+        lmb_own = os.path.join(lmb_dir, "LICENSE")
+        if not os.path.isfile(lmb_own):
+            fail("missing pinned libbpf-mojo LICENSE")
+        shutil.copy2(lmb_own,
+                     os.path.join(staged_licenses, "libbpf-mojo-LICENSE"))
+        lmb_own_dir = os.path.join(lmb_dir, "LICENSES")
+        for name in ("GPL-2.0-only.txt", "LLVM-exception.txt"):
+            if not os.path.isfile(os.path.join(lmb_own_dir, name)):
+                fail("missing pinned libbpf-mojo LICENSES/%s" % name)
+        shutil.copytree(lmb_own_dir,
+                        os.path.join(staged_licenses,
+                                     "libbpf-mojo-LICENSES"))
+        lmb_notices = os.path.join(lmb_dir, "THIRD-PARTY-NOTICES.md")
+        if not os.path.isfile(lmb_notices):
+            fail("missing pinned libbpf-mojo notices")
+        shutil.copy2(lmb_notices,
+                     os.path.join(staged,
+                                  "THIRD-PARTY-NOTICES.libbpf-mojo.md"))
+        print("package: license texts staged")
+
+        # Every staged source-derived and build-output copy must
+        # match its seal; a torn copy or a source changed under
+        # staging fails here, before the manifest is written.
+        # Staging intent for receipt-derived copies: the verifier
+        # requires every one present (a deletion under staging is
+        # otherwise invisible). Mirrors the bpf_objs, third_party,
+        # and libbpf-mojo text copies above.
+        expected_outputs = {
+            "bpf/" + os.path.basename(path) for path in bpf_objs}
+        expected_outputs.update(
+            "licenses/" + name for name in third_party)
+        expected_outputs.update((
+            "licenses/libbpf-mojo-LICENSE",
+            "licenses/libbpf-mojo-LICENSES/GPL-2.0-only.txt",
+            "licenses/libbpf-mojo-LICENSES/LLVM-exception.txt",
+        ))
+        staged_problems, observed = verify_staged_tree(
+            staged, receipt["inventory"]["files"],
+            receipt["outputs"], expected_outputs)
+        if staged_problems:
+            for problem in staged_problems[:10]:
+                print("package: %s" % problem, file=sys.stderr)
+            fail("staged tree differs from its seals")
+        print("package: staged tree matches its seals")
+
+        lock = sealed_lock_bytes(ROOT, receipt["inventory"]["files"])
+        lmb_pin = lock["dependencies"]["libbpf-mojo"]
+        manifest = {
+            "bundle": tag,
+            "engine_version": version,
+            "memveil_revision": memveil_rev,
+            "source_inventory_digest": receipt["inventory"]["digest"],
+            "source_inventory": receipt["inventory"]["files"],
+            "build_receipt_sha256": receipt_sha256,
+            "libbpf_mojo": {
+                "version": lmb_pin["version"],
+                "source_commit": lmb_pin["source_commit"],
+                "tarball_sha256": lmb_pin["tarball_sha256"],
+                "tarball_used_sha256": sha256_file(lmb_package),
+            },
+            "toolchain": lock["toolchain"],
+            "system_libraries": sorted(SYSTEM_ALLOW),
+            "first_party": {
+                "license_default": "GPL-3.0-or-later",
+                "licenses": {
+                    "GPL-2.0-only": "LICENSES/GPL-2.0-only.txt",
+                    "GPL-2.0-or-later": "LICENSES/GPL-2.0-or-later.txt",
+                    "GPL-3.0-or-later": "LICENSE",
+                },
+                "paths": {
+                    "bpf/swiotlb_attempt.bpf.o": "GPL-2.0-only",
+                    "bpf/swiotlb_lifecycle.bpf.o": "GPL-2.0-only",
+                    "bpf/swiotlb_copy.bpf.o": "GPL-2.0-only",
+                },
+            },
+            "files": {},
+        }
+        if (manifest["libbpf_mojo"]["tarball_used_sha256"]
+                != lmb_pin["tarball_sha256"]):
+            fail("LMB_PACKAGE does not match the pinned hash")
+        # Payload hashes come from the verification reads, never
+        # from a live re-walk: bytes changed after verification
+        # fail at archive time instead of shipping self-consistent.
+        manifest["files"] = dict(observed)
+        manifest_text = json.dumps(
+            manifest, indent=2, sort_keys=True) + "\n"
+        manifest_bytes = manifest_text.encode("utf-8")
+        with open(os.path.join(staged, "MANIFEST.json"), "w") as handle:
+            handle.write(manifest_text)
+
+        # The archive publishes the bundle: write it from the
+        # staging directory first, then rename into place only
+        # after the bytes hash. An archive-write failure leaves
+        # neither a final bundle nor a partial tarball.
+        if memveil_rev == "export":
+            mtime = 0
+            for base, _, files in os.walk(staged):
+                for name in files:
+                    stamp = int(os.path.getmtime(
+                        os.path.join(base, name)))
+                    if stamp > mtime:
+                        mtime = stamp
+        else:
+            mtime = int(run(["git", "-C", ROOT, "log", "-1",
+                             "--format=%ct"]).stdout.strip())
+        # Zero-mtime gzip header: "w:gz" stamps the current time,
+        # which would make identical revisions hash differently.
+        # Explicit directory members plus normalized modes keep
+        # extraction identical on any umask (dirs 0755, files
+        # 0644, executable bit kept). Every archived file binds to
+        # its verified bytes as consumed: a change after
+        # verification fails here instead of shipping.
+        archived = set()
+        written_digest = None
+        try:
+            with open(tarball, "wb") as raw:
+                wrapped = _HashingWriter(raw)
+                gz = gzip.GzipFile(filename="", mode="wb",
+                                   fileobj=wrapped, compresslevel=9,
+                                   mtime=0)
+                try:
+                    with tarfile.open(fileobj=gz, mode="w") as tar:
+                        for base, dirs, files in os.walk(staged):
+                            dirs.sort()
+                            rel = os.path.relpath(base, staged)
+                            arcbase = tag if rel == "." else \
+                                tag + "/" + rel.replace(os.sep, "/")
+                            info = tar.gettarinfo(base, arcbase)
+                            if not info.isdir():
+                                fail("staged directory changed "
+                                     "under archiving after seal "
+                                     "verification: %s" % arcbase)
+                            info.mtime = mtime
+                            info.uid = info.gid = 0
+                            info.uname = info.gname = ""
+                            info.mode = tar_member_mode(base, True)
+                            tar.addfile(info)
+                            for name in sorted(files):
+                                full = os.path.join(base, name)
+                                rel = os.path.relpath(
+                                    full, staged).replace(
+                                        os.sep, "/")
+                                if os.path.islink(full):
+                                    fail("staged file changed under "
+                                         "archiving after seal "
+                                         "verification: %s" % rel)
+                                try:
+                                    with open(full, "rb") as handle:
+                                        data = handle.read()
+                                except OSError:
+                                    fail("staged file vanished under "
+                                         "archiving after seal "
+                                         "verification: %s" % rel)
+                                if rel == "MANIFEST.json":
+                                    match = data == manifest_bytes
+                                else:
+                                    want = observed.get(rel)
+                                    match = want is not None and \
+                                        hashlib.sha256(data) \
+                                        .hexdigest() == want
+                                if not match:
+                                    fail("staged file changed under "
+                                         "archiving after seal "
+                                         "verification: %s" % rel)
+                                info = tar.gettarinfo(
+                                    full, tag + "/" + rel)
+                                if not info.isfile():
+                                    fail("staged file changed under "
+                                         "archiving after seal "
+                                         "verification: %s" % rel)
+                                info.mtime = mtime
+                                info.uid = info.gid = 0
+                                info.uname = info.gname = ""
+                                info.mode = tar_member_mode(
+                                    full, False)
+                                info.size = len(data)
+                                tar.addfile(info, io.BytesIO(data))
+                                archived.add(rel)
+                finally:
+                    gz.close()
+                written_digest = wrapped.hexdigest()
+        except OSError as exc:
+            try:
+                if os.path.exists(tarball):
+                    os.remove(tarball)
+            except OSError:
+                pass
+            fail("bundle archive failed: %s" % exc)
+        expected = set(observed) | {"MANIFEST.json"}
+        if archived != expected:
+            fail("archived payload differs from seal-verified "
+                 "staging: missing=%s extra=%s"
+                 % (sorted(expected - archived),
+                    sorted(archived - expected)))
+        # Hash before publication, rename, then re-hash, each
+        # bound to the digest computed while writing the
+        # verified archive: a swap at any point fails instead
+        # of shipping, and any hashing or rename failure leaves
+        # neither a final bundle nor a tarball.
+        try:
+            digest = sha256_file(tarball)
+        except OSError as exc:
+            _drop_candidates(out_dir, tag)
+            fail("bundle archive unreadable before publication: %s"
+                 % exc)
+        if digest != written_digest:
+            _drop_candidates(out_dir, tag)
+            fail("tarball changed after archiving")
+        try:
+            os.rename(staged, final)
+        except OSError as exc:
+            _drop_candidates(out_dir, tag)
+            fail("bundle publication failed: %s" % exc)
+        try:
+            published = sha256_file(tarball)
+        except OSError as exc:
+            _drop_candidates(out_dir, tag)
+            fail("published tarball unreadable: %s" % exc)
+        if published != written_digest:
+            _drop_candidates(out_dir, tag)
+            fail("published tarball changed during publication")
+        print("package: %s" % tarball)
+        print("package: sha256 %s" % digest)
+        print("package: %d files, MANIFEST.json recorded" %
+              len(manifest["files"]))
+        return 0
+    except BaseException:
+        if tag is not None:
+            _drop_candidates(out_dir, tag)
+        raise
+    finally:
+        if staged is not None:
+            shutil.rmtree(staged, ignore_errors=True)
 
 
 if __name__ == "__main__":

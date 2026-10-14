@@ -175,6 +175,19 @@ def main():
             with open(full, "rb") as handle:
                 check("export-hash-%s" % rel,
                       hashlib.sha256(handle.read()).hexdigest() == want)
+        sealed = subprocess.run(
+            ["python3", "tools/source_inventory.py", "."],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, cwd=third, timeout=300)
+        check("export-inventory-runs", sealed.returncode == 0,
+              sealed.stderr[-1000:])
+        inventory = _json.loads(sealed.stdout or "{}")
+        check("export-manifest-inventory",
+              manifest.get("source_inventory_digest")
+              == inventory.get("digest")
+              and manifest.get("source_inventory")
+              == inventory.get("files"),
+              "manifest inventory must match the exported tree")
         for name in ("troubleshooting.md", "performance.md",
                      "resource-limits.md", "permissions.md",
                      "oracles.md"):

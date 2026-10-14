@@ -104,3 +104,33 @@ interface header (no native implementation sources); the build
 links the prebuilt bridge, it never compiles it. `LMB_PACKAGE`
 overrides the vendored bytes with another tarball, which must
 match the same pin before the build accepts it.
+
+## Source sealing
+
+`tools/build` settles resolved dependency inputs (the
+libbpf-mojo wrappers and libbpf headers compilers consume)
+before sealing, then seals the source inventory plus the
+resolved inputs (`tools/source_inventory.py`) and finalizes
+`build/build-receipt.json` after compiling: any mid-build
+input change (content, mode, membership, or a touch restoring
+identical bytes, in sources or resolved dependencies) fails
+the build. Restore detection assumes the mutation and the
+restore land in distinct timestamp quanta. `tools/package`
+loads one pinned receipt baseline and verifies every phase
+against those same bytes (never re-reading the receipt path),
+checks every staged source-derived and build-output copy
+against its seal (missing expected copies fail as well as
+differing bytes or modes; staged symlinks are rejected), and
+reads manifest lock metadata from seal-checked bytes. The
+manifest records the verification reads, and every archived
+file binds to those verified bytes as consumed, so bytes
+changed after verification fail the package instead of
+shipping. The manifest records the full inventory and its
+digest next to the descriptive git revision. A failed run
+leaves no staging directory and no final candidate for its
+tag: the archive digest is computed while writing the
+verified bytes, then the tarball hashes, renames into place,
+and hashes again with every read bound to the write digest,
+and any failure drops the tag's bundle and tarball. Explicit
+bundle tags validate before any failure cleanup can act, so
+cleanup only ever drops candidates for a valid tag.

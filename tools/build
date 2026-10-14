@@ -5,8 +5,11 @@
 # Usage: tools/build [--check-toolchain] [--help]
 #
 # Verifies the pinned toolchain and builds every registered compile target.
-# When no compile targets are registered yet, exit 0 covers toolchain
-# verification plus an explicit notice naming the missing targets.
+# Seals the source inventory before compiling and finalizes
+# build/build-receipt.json after; any mid-build input change
+# fails the build. When no compile targets are registered yet,
+# exit 0 covers toolchain verification plus an explicit notice
+# naming the missing targets.
 # Prints each underlying command before running it. Exit 0 only when every
 # step passes; exit 1 on build failure; exit 2 on invalid usage.
 # One action per invocation; extra arguments are rejected.
@@ -347,6 +350,8 @@ EOF
 }
 
 build_bpf() {
+    # Already fetched before the seal; this re-verifies the
+    # cache read-only before compiling against it.
     fetch_libbpf_src || return 1
     # x86-64-only floor (toolchain.lock.json platform_floor).
     ARCH_INC="/usr/include/x86_64-linux-gnu"
@@ -418,7 +423,19 @@ main() {
             check_pixi_lock && check_toolchain || return 1
             log tools/validate-schemas
             "$ROOT/tools/validate-schemas" || return 1
+            mkdir -p "$ROOT/build" || return 1
+            # Resolved dependency inputs settle before the seal:
+            # the wrappers and headers compilers consume are
+            # sealed here and compared again after compiling, so
+            # mid-build dependency changes fail the build.
             prepare_lmb || return 1
+            if [ -f "$ROOT/bpf/programs/swiotlb_attempt.bpf.c" ]; then
+                fetch_libbpf_src || return 1
+            fi
+            log python3 tools/build_receipt.py seal
+            python3 "$ROOT/tools/build_receipt.py" seal \
+                --root "$ROOT" --build-dir build \
+                --out "$ROOT/build/sources-pre.json" || return 1
             MOJO_INCS=(-I src)
             if [ -d "$ROOT/build/deps/lmb/mojo/libbpf_mojo" ]; then
                 MOJO_INCS+=(-I "$ROOT/build/deps/lmb/mojo")
@@ -493,6 +510,10 @@ main() {
             else
                 echo "build: no VM consumer registered yet" >&2
             fi
+            log python3 tools/build_receipt.py finalize
+            python3 "$ROOT/tools/build_receipt.py" finalize \
+                --root "$ROOT" --build-dir build \
+                --pre "$ROOT/build/sources-pre.json" || return 1
             ;;
         *)
             echo "build: unknown argument: $1" >&2
