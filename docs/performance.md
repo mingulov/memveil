@@ -28,10 +28,10 @@ only the tested mode and artifact. Offline comparison math and raw probe
 traffic do not qualify shipping lifecycle accounting.
 
 Summary-mode targets are at most 5% throughput decrease and at most 10% p99
-increase. Live `top` is not implemented, so replay `top` cannot qualify that
-mode. Detailed-attempt recording, attached-idle, and saturation results must
-be recorded separately. No current-candidate live overhead claim is earned
-from historical lane successes.
+increase. Replay `top` cannot qualify live overhead, and no live-overhead
+run exists yet for the current candidate. Detailed-attempt recording,
+attached-idle, and saturation results must be recorded separately, and no
+live overhead claim is earned from historical lane successes.
 
 ## Soak
 

@@ -13,9 +13,11 @@ captures that carry the corresponding events.
 Status: attempt/lifecycle/copy development bundle 0.1.0, with runnable
 build, test, and tarball packaging wrappers. The shipping collector
 records attempts, mapping lifetimes, and executed copies on the
-admitted profile, plus optional readable default-pool start/end samples.
-`top` replays finished captures; a live summary is still missing.
-Laboratory probes and offline reducers do not qualify shipping
+admitted profile, plus optional readable default-pool samples at
+start, on a best-effort 1 s cadence, and close. `top` observes live
+or replays finished captures; samples alone cannot diagnose
+sustained pressure. Laboratory probes and offline reducers do not
+qualify shipping
 collection, successful DMA, sustained pressure, or
 confidential-memory collection. The original lifecycle preview and
 full confidential first-release gates remain open.
@@ -61,8 +63,9 @@ library, Mojo wrappers, and C header, never a sibling checkout;
     LMB_PACKAGE=third_party/libbpf-mojo-0.2.0.tar.gz ./tools/test buildcache
     LMB_PACKAGE=... ./tools/package                  # owner bundle + MANIFEST
 
-`report`, `top`, and `doctor` work without the bridge library;
-only `record` loads it (lazily, at session open).
+`report`, replay `top`, and `doctor` work without the bridge library;
+`record` and live `top` load it at session open, and `qualify` checks
+its binding when proving the host.
 
 ## Licensing
 

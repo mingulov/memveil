@@ -26,7 +26,10 @@
 # invalid usage; 77 when a suite with unmet inputs skips.
 # One suite per invocation; extra arguments are rejected.
 #
-# The unit suite runs every Mojo unit test through the pinned toolchain.
+# The unit suite runs core unit files (test_reader.mojo,
+# test_attempts.mojo, test_report.mojo, test_runtime.mojo)
+# through the pinned toolchain; other suites describe their
+# own checks below.
 # The reports suite drives the built report binary end to end: golden
 # stdout bytes, exact exit codes (0 sufficient, 4 materially
 # incomplete, 2 invalid input), and independently recomputed counts

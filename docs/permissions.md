@@ -2,8 +2,8 @@
 # Permissions and privilege separation
 
 Summary table in `support.md`; this page gives the details.
-`doctor`, `report`, and `top` never need privilege. Only
-`record` loads BPF, and only `record` needs root.
+`doctor`, `report`, and replay `top` never need privilege. Only
+`record`, live `top`, and `qualify` load BPF, and only they need root.
 
 ## Per-verb requirements
 
@@ -11,8 +11,10 @@ Summary table in `support.md`; this page gives the details.
 |---|---|---|
 | `doctor` | none (passive) | reads sysfs/debugfs state, never attaches |
 | `report` | read access to the capture directory | reads `session.json` + `events.ndjson` |
-| `top` | read access to the capture directory | same as `report`, repeatedly |
+| `top DIR` (replay) | read access to the capture directory | same as `report`, repeatedly |
+| `top --output` (live) | root: same admission as `record` | retains a capture while printing prefix summaries |
 | `record` | root: BPF load, tracefs, BTF read | creates the capture directory, attaches probes |
+| `qualify` | root: live smoke collection | runs a smoke capture, writes the local receipt |
 
 `record` discovers its bridge and BPF object: explicit
 `--bridge`/`--object` win verbatim, then `LMB_NATIVE_LIB`
@@ -23,7 +25,8 @@ optionally pins one semantic profile.
 Profiles resolve from the executable location
 (`<root>/bin/memveil` reads `<root>/profiles`), never from the
 working directory. Without `--profile`, the first validated
-profile passing full identity binding wins, else the first
+profile passing full identity binding wins, then the first
+reference profile whose receipt verifies, else the first
 covering profile runs partial; an explicit `--profile` that
 fails binding refuses. One distinct case is not a refusal:
 an explicit profile whose bindings note is unparseable can

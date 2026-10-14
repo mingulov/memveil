@@ -167,14 +167,15 @@ diagnostic.
 
 ## Unsupported (explicitly out of scope)
 
-Older kernels (< 7.0); shipping region, periodic pool
-sampling and live summary (laboratory probes and offline
-reducers do not supply these shipping capabilities); sharing
-transitions and
+Older kernels (< 7.0); shipping region (laboratory probes
+and offline reducers do not supply this shipping capability);
+sharing transitions and
 physical unions (rendered unavailable, never inferred);
 SNP/TDX or any attestation verdict; joint runs with other
 observers; multi-profile fleets. Doctor verdicts are passive
-observations, not host-access decisions.
+observations, not host-access decisions. The capability table
+above is the support contract; sustained-pressure diagnosis
+stays unqualified even though periodic sampling ships.
 
 On the admitted profile, mapping lifecycle and actual copy
 bytes ship from the collector; pool pressure, conversion

@@ -26,7 +26,8 @@ free-form payload channel.
 - Counter snapshots (bounded u64 attempt/byte counters).
 - Default-pool allocator counters (`io_tlb_used`,
   `io_tlb_nslabs`, `io_tlb_used_hiwater`) sampled at
-  capture start and close: aggregate slot counts only, no
+  capture start, on a best-effort 1 s cadence (cap 4,096
+  samples), and close: aggregate slot counts only, no
   addresses or device state. Unreadable counters persist
   as unavailable halves with a reason, never as zeros.
   Transient and dynamic pools are not sampled.
