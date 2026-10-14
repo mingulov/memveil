@@ -20,6 +20,7 @@ from memveil.model.identity import (
     DEVICE_MAX_ID,
     NESTED_MAX,
     PENDING_MAX,
+    RESOLVED_MAX,
     RETIRED_MAX,
 )
 
@@ -366,6 +367,7 @@ def test_default_budgets() raises:
     assert_equal(b.nested, NESTED_MAX)
     assert_equal(b.retired, RETIRED_MAX)
     assert_equal(b.devices, DEVICE_MAX_ID)
+    assert_equal(b.resolved, RESOLVED_MAX)
 
 
 def test_malformed_raises() raises:
@@ -560,6 +562,360 @@ def test_wire_token_mismatch_raises() raises:
     assert_true(raised)
 
 
+def test_completed_success_cycles_free_pending_capacity() raises:
+    var reg = CorrelationRegistry[2, 65536, 8, 16384, 4096]()
+    reg.admit_hook("h", "iova")
+    var s = 1
+    for i in range(3):
+        var op = "op" + String(i)
+        var opened = reg.normalize(
+            _attempt(op, "d1", "h", UInt64(s)), "ring"
+        )
+        s += 1
+        assert_true(_paired(opened))
+        var done = reg.normalize(
+            _map(op, True, "m" + String(i), "h", UInt64(s)),
+            "ring",
+        )
+        s += 1
+        assert_true(_paired(done))
+    assert_equal(reg.health().status, String("complete_for_scope"))
+
+
+def test_completed_failure_cycles_free_pending_capacity() raises:
+    var reg = CorrelationRegistry[2, 65536, 8, 16384, 4096]()
+    reg.admit_hook("h", "iova")
+    var s = 1
+    for i in range(5):
+        var op = "fop" + String(i)
+        var opened = reg.normalize(
+            _attempt(op, "d1", "h", UInt64(s)), "ring"
+        )
+        s += 1
+        assert_true(_paired(opened))
+        var failed = reg.normalize(
+            _map(op, False, "", "h", UInt64(s)), "ring"
+        )
+        s += 1
+        assert_true(_paired(failed))
+    assert_equal(reg.health().status, String("complete_for_scope"))
+
+
+def test_sequential_completions_beyond_pending_budget() raises:
+    var reg = CorrelationRegistry[2, 65536, 8, 16384, 4096]()
+    reg.admit_hook("h", "iova")
+    var s = 1
+    for i in range(8):
+        var op = "cop" + String(i)
+        var opened = reg.normalize(
+            _attempt(op, "d1", "h", UInt64(s)), "ring"
+        )
+        s += 1
+        assert_true(_paired(opened))
+        if i % 2 == 0:
+            var tok = "cm" + String(i)
+            var done = reg.normalize(
+                _map(op, True, tok, "h", UInt64(s)), "ring"
+            )
+            s += 1
+            assert_true(_paired(done))
+            var rel = reg.normalize(
+                _unmap(tok, "h", UInt64(s)), "ring"
+            )
+            s += 1
+            assert_true(_paired(rel))
+        else:
+            var failed = reg.normalize(
+                _map(op, False, "", "h", UInt64(s)), "ring"
+            )
+            s += 1
+            assert_true(_paired(failed))
+    assert_equal(reg.active_count(), 0)
+    assert_equal(reg.health().status, String("complete_for_scope"))
+
+
+def test_completion_frees_saturated_pending() raises:
+    var reg = CorrelationRegistry[2, 65536, 8, 16384, 4096]()
+    reg.admit_hook("h", "iova")
+    var first = reg.normalize(
+        _attempt("op1", "d1", "h", UInt64(1)), "ring"
+    )
+    assert_true(_paired(first))
+    var second = reg.normalize(
+        _attempt("op2", "d1", "h", UInt64(2)), "ring"
+    )
+    assert_true(_paired(second))
+    var refused = reg.normalize(
+        _attempt("op3", "d1", "h", UInt64(3)), "ring"
+    )
+    assert_true(not _paired(refused))
+    assert_true(
+        reg.health().reason.find(String("pending table exhausted"))
+        != -1
+    )
+    var done = reg.normalize(
+        _map("op1", True, "m1", "h", UInt64(4)), "ring"
+    )
+    assert_true(_paired(done))
+    var retry = reg.normalize(
+        _attempt("op3", "d1", "h", UInt64(5)), "ring"
+    )
+    assert_true(_paired(retry))
+
+
+def test_mapping_token_reuse_across_cycles() raises:
+    var reg = CorrelationRegistry[2, 65536, 8, 16384, 4096]()
+    reg.admit_hook("h", "iova")
+    var s = 1
+    for i in range(3):
+        var op = "rop" + String(i)
+        var opened = reg.normalize(
+            _attempt(op, "d1", "h", UInt64(s)), "ring"
+        )
+        s += 1
+        assert_true(_paired(opened))
+        var done = reg.normalize(
+            _map(op, True, "m", "h", UInt64(s)), "ring"
+        )
+        s += 1
+        assert_true(_paired(done))
+        assert_equal(
+            reg.generation_of("d1", "iova", "m"), UInt64(i + 1)
+        )
+        var rel = reg.normalize(
+            _unmap("m", "h", UInt64(s)), "ring"
+        )
+        s += 1
+        assert_true(_paired(rel))
+    assert_equal(reg.health().status, String("complete_for_scope"))
+
+
+def test_production_pending_churn_at_concurrency_one() raises:
+    var reg = CorrelationRegistry()
+    reg.admit_hook("h", "iova")
+    for i in range(PENDING_MAX + 1):
+        var op = "pop" + String(i)
+        var opened = reg.normalize(
+            _attempt(op, "d1", "h", UInt64(2 * i + 1)), "ring"
+        )
+        assert_true(_paired(opened))
+        var failed = reg.normalize(
+            _map(op, False, "", "h", UInt64(2 * i + 2)), "ring"
+        )
+        assert_true(_paired(failed))
+    assert_true(
+        reg.health().reason.find(
+            String("resolved-operation history exceeded")
+        )
+        != -1
+    )
+    assert_true(
+        reg.health().reason.find(String("pending table exhausted"))
+        == -1
+    )
+
+
+def test_duplicate_result_after_other_cycles() raises:
+    var reg = CorrelationRegistry()
+    reg.admit_hook("h", "iova")
+    _ = reg.normalize(_attempt("op1", "d1", "h", UInt64(1)), "ring")
+    _ = reg.normalize(_map("op1", True, "m1", "h", UInt64(2)), "ring")
+    _ = reg.normalize(_attempt("op2", "d1", "h", UInt64(3)), "ring")
+    _ = reg.normalize(_map("op2", True, "m2", "h", UInt64(4)), "ring")
+    var dup = reg.normalize(
+        _map("op1", True, "m9", "h", UInt64(5)), "ring"
+    )
+    assert_true(not _paired(dup))
+    assert_true(
+        reg.health().reason.find(String("duplicate result for op1"))
+        != -1
+    )
+
+
+def test_duplicate_attempt_after_resolution() raises:
+    var reg = CorrelationRegistry()
+    reg.admit_hook("h", "iova")
+    _ = reg.normalize(_attempt("op1", "d1", "h", UInt64(1)), "ring")
+    _ = reg.normalize(_map("op1", False, "", "h", UInt64(2)), "ring")
+    var dup = reg.normalize(
+        _attempt("op1", "d1", "h", UInt64(3)), "ring"
+    )
+    assert_true(not _paired(dup))
+    assert_true(
+        reg.health().reason.find(String("duplicate operation op1"))
+        != -1
+    )
+
+
+def test_copy_against_wire_mapping_stays_unpaired() raises:
+    var reg = CorrelationRegistry()
+    reg.admit_hook("hm", "tlb-phys")
+    _ = reg.normalize(
+        _wire_map("lc-1", UInt64(7), "hm", UInt64(1)), "ring"
+    )
+    var out = reg.normalize(
+        _copy("lc-1", "gen-7", "hm", UInt64(2)), "ring"
+    )
+    assert_true(not _paired(out))
+    assert_true(
+        reg.health().reason.find(
+            String("copy without pending operation")
+        )
+        != -1
+    )
+
+
+def test_resolved_history_pressure_is_explicit() raises:
+    var reg = CorrelationRegistry[2, 65536, 8, 16384, 4096, 2]()
+    reg.admit_hook("h", "iova")
+    var s = 1
+    for i in range(3):
+        var op = "eop" + String(i)
+        var opened = reg.normalize(
+            _attempt(op, "d1", "h", UInt64(s)), "ring"
+        )
+        s += 1
+        assert_true(_paired(opened))
+        var failed = reg.normalize(
+            _map(op, False, "", "h", UInt64(s)), "ring"
+        )
+        s += 1
+        assert_true(_paired(failed))
+    assert_equal(reg.health().status, String("partial"))
+    assert_true(
+        reg.health().reason.find(
+            String("resolved-operation history exceeded")
+        )
+        != -1
+    )
+    assert_true(
+        reg.health().reason.find(String("pending table exhausted"))
+        == -1
+    )
+
+
+def test_delayed_copy_survives_resolved_eviction() raises:
+    var reg = CorrelationRegistry[2, 65536, 8, 16384, 4096, 2]()
+    reg.admit_hook("h", "iova")
+    _ = reg.normalize(_attempt("op1", "d1", "h", UInt64(1)), "ring")
+    _ = reg.normalize(_map("op1", True, "m1", "h", UInt64(2)), "ring")
+    _ = reg.normalize(_attempt("op2", "d1", "h", UInt64(3)), "ring")
+    _ = reg.normalize(_map("op2", False, "", "h", UInt64(4)), "ring")
+    _ = reg.normalize(_attempt("op3", "d1", "h", UInt64(5)), "ring")
+    _ = reg.normalize(_map("op3", False, "", "h", UInt64(6)), "ring")
+    # op1 left retained history when op3 resolved, but its
+    # mapping is still live, so the delayed reference pairs.
+    var late = reg.normalize(
+        _copy("op1", "m1", "h", UInt64(7)), "ring"
+    )
+    assert_true(_paired(late))
+    assert_true(
+        reg.health().reason.find(
+            String("resolved-operation history exceeded")
+        )
+        != -1
+    )
+
+
+def test_expired_duplicate_loses_duplicate_verdict() raises:
+    var reg = CorrelationRegistry[2, 65536, 8, 16384, 4096, 2]()
+    reg.admit_hook("h", "iova")
+    var s = 1
+    for i in range(3):
+        var op = "xop" + String(i)
+        _ = reg.normalize(
+            _attempt(op, "d1", "h", UInt64(s)), "ring"
+        )
+        s += 1
+        _ = reg.normalize(
+            _map(op, False, "", "h", UInt64(s)), "ring"
+        )
+        s += 1
+    var dup = reg.normalize(
+        _map("xop0", False, "", "h", UInt64(7)), "ring"
+    )
+    assert_true(not _paired(dup))
+    assert_true(
+        reg.health().reason.find(
+            String("map_result without pending operation")
+        )
+        != -1
+    )
+    assert_true(
+        reg.health().reason.find(String("duplicate result for xop0"))
+        == -1
+    )
+    var dup_kept = reg.normalize(
+        _map("xop2", False, "", "h", UInt64(8)), "ring"
+    )
+    assert_true(not _paired(dup_kept))
+    assert_true(
+        reg.health().reason.find(String("duplicate result for xop2"))
+        != -1
+    )
+
+
+def test_operation_id_reuse_after_expiry_pairs_as_new() raises:
+    var reg = CorrelationRegistry[2, 65536, 8, 16384, 4096, 2]()
+    reg.admit_hook("h", "iova")
+    var s = 1
+    for i in range(3):
+        var op = "rop" + String(i)
+        _ = reg.normalize(
+            _attempt(op, "d1", "h", UInt64(s)), "ring"
+        )
+        s += 1
+        _ = reg.normalize(
+            _map(op, False, "", "h", UInt64(s)), "ring"
+        )
+        s += 1
+    var reopened = reg.normalize(
+        _attempt("rop0", "d1", "h", UInt64(7)), "ring"
+    )
+    assert_true(_paired(reopened))
+    var redone = reg.normalize(
+        _map("rop0", False, "", "h", UInt64(8)), "ring"
+    )
+    assert_true(_paired(redone))
+
+
+def test_duplicate_churn_keeps_bounded_causes() raises:
+    # Turnover-plus-duplicates regression: repeated completed
+    # cycles with duplicate replays must plateau diagnostic
+    # causes by fixed code instead of retaining one cause
+    # string per operation identity.
+    var reg = CorrelationRegistry[2, 65536, 8, 16384, 4096, 2]()
+    reg.admit_hook("h", "iova")
+    var s = 1
+    for i in range(64):
+        var op = "dop" + String(i)
+        var opened = reg.normalize(
+            _attempt(op, "d1", "h", UInt64(s)), "ring"
+        )
+        s += 1
+        assert_true(_paired(opened))
+        var failed = reg.normalize(
+            _map(op, False, "", "h", UInt64(s)), "ring"
+        )
+        s += 1
+        assert_true(_paired(failed))
+        var dup = reg.normalize(
+            _map(op, False, "", "h", UInt64(s)), "ring"
+        )
+        s += 1
+        assert_true(not _paired(dup))
+    assert_equal(len(reg._pending), 0)
+    assert_equal(len(reg._resolved), 2)
+    assert_equal(len(reg._cause_order), 2)
+    assert_equal(
+        reg.health().reason,
+        String(
+            "duplicate result for dop0; "
+            "resolved-operation history exceeded"
+        ),
+    )
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_attempt_opens_pending]()
@@ -592,6 +948,20 @@ def run() raises -> Int:
     suite.test[test_wire_miss_never_pairs]()
     suite.test[test_wire_failed_map_unpaired]()
     suite.test[test_wire_token_mismatch_raises]()
+    suite.test[test_completed_success_cycles_free_pending_capacity]()
+    suite.test[test_completed_failure_cycles_free_pending_capacity]()
+    suite.test[test_sequential_completions_beyond_pending_budget]()
+    suite.test[test_completion_frees_saturated_pending]()
+    suite.test[test_mapping_token_reuse_across_cycles]()
+    suite.test[test_production_pending_churn_at_concurrency_one]()
+    suite.test[test_duplicate_result_after_other_cycles]()
+    suite.test[test_duplicate_attempt_after_resolution]()
+    suite.test[test_copy_against_wire_mapping_stays_unpaired]()
+    suite.test[test_resolved_history_pressure_is_explicit]()
+    suite.test[test_delayed_copy_survives_resolved_eviction]()
+    suite.test[test_expired_duplicate_loses_duplicate_verdict]()
+    suite.test[test_operation_id_reuse_after_expiry_pairs_as_new]()
+    suite.test[test_duplicate_churn_keeps_bounded_causes]()
     suite^.run()
     return 0
 

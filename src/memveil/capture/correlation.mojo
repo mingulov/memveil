@@ -21,10 +21,18 @@ timestamp proximity, or hidden collector state:
 - Hook names map to address namespaces through the admitted
   profile table only. Events from unadmitted hooks stay unpaired.
 
-Every store refuses past its budget with an explicit quality
-change; nothing is silently evicted. Budgets are struct
-parameters so tests prove N/N+1 logic on small instances while
-production uses the contract ceilings.
+Pending holds unresolved operations only: each result moves
+its operation into bounded resolved history, so completed
+churn never refuses new attempts as pending exhaustion.
+Resolved pressure degrades correlation quality explicitly,
+and references past the retained horizon stay uncertain
+instead of borrowing duplicate or nesting verdicts.
+A copy naming a live mapping pairs against the mapping's
+recorded operation, so delayed references survive resolved
+turnover; copies against wire-created mappings still need
+a known operation. Budgets are struct parameters so tests
+prove N/N+1 logic on small instances while production
+uses the contract ceilings.
 """
 
 from memveil.model.event import Event
@@ -33,6 +41,7 @@ from memveil.model.identity import (
     DEVICE_MAX_ID,
     NESTED_MAX,
     PENDING_MAX,
+    RESOLVED_MAX,
     RETIRED_MAX,
     check_address_space,
 )
@@ -56,28 +65,28 @@ struct RegistryBudgets(ImplicitlyCopyable):
     var nested: Int
     var retired: Int
     var devices: Int
+    var resolved: Int
 
 
 def budgets() -> RegistryBudgets:
     """Contract ceilings used by default registry instances."""
     return RegistryBudgets(
-        PENDING_MAX, ACTIVE_MAX, NESTED_MAX, RETIRED_MAX, DEVICE_MAX_ID
+        PENDING_MAX,
+        ACTIVE_MAX,
+        NESTED_MAX,
+        RETIRED_MAX,
+        DEVICE_MAX_ID,
+        RESOLVED_MAX,
     )
 
 
 struct _PendingOp(ImplicitlyCopyable):
     var device: String
     var nested: Int
-    var resolved: Bool
-    var has_mapping: Bool
-    var mapping: String
 
     def __init__(out self):
         self.device = String("")
         self.nested = 0
-        self.resolved = False
-        self.has_mapping = False
-        self.mapping = String("")
 
 
 struct _ActiveMapping(ImplicitlyCopyable):
@@ -87,6 +96,7 @@ struct _ActiveMapping(ImplicitlyCopyable):
     var generation: UInt64
     var map_ts: UInt64
     var mapped_bytes: UInt64
+    var wire: Bool
 
     def __init__(out self):
         self.op = String("")
@@ -95,6 +105,7 @@ struct _ActiveMapping(ImplicitlyCopyable):
         self.generation = UInt64(0)
         self.map_ts = UInt64(0)
         self.mapped_bytes = UInt64(0)
+        self.wire = False
 
 
 def _is_lifecycle(kind: String) -> Bool:
@@ -113,11 +124,20 @@ struct CorrelationRegistry[
     NESTED_N: Int = NESTED_MAX,
     RETIRED_N: Int = RETIRED_MAX,
     DEVICE_N: Int = DEVICE_MAX_ID,
+    RESOLVED_N: Int = RESOLVED_MAX,
 ]:
-    """Pairing validator with bounded pending/active/retired stores."""
+    """Pairing validator with bounded pending/active/resolved stores.
+
+    Pending holds unresolved operations only; each result moves
+    its operation into the bounded resolved ring, whose pressure
+    degrades quality explicitly.
+    """
 
     var _hooks: Dict[String, String]
     var _pending: Dict[String, _PendingOp]
+    var _resolved: Dict[String, Bool]
+    var _resolved_order: List[String]
+    var _resolved_next: Int
     var _active: Dict[String, _ActiveMapping]
     var _retired: Dict[String, UInt64]
     var _retired_order: List[String]
@@ -132,6 +152,9 @@ struct CorrelationRegistry[
     def __init__(out self):
         self._hooks = Dict[String, String]()
         self._pending = Dict[String, _PendingOp]()
+        self._resolved = Dict[String, Bool]()
+        self._resolved_order = List[String]()
+        self._resolved_next = 0
         self._active = Dict[String, _ActiveMapping]()
         self._retired = Dict[String, UInt64]()
         self._retired_order = List[String]()
@@ -185,20 +208,35 @@ struct CorrelationRegistry[
             out.evidence_refs.append(self._refs[i])
         return out^
 
-    def _note(mut self, cause: String, seq: UInt64, source: String):
+    def _note(
+        mut self, code: String, example: String, seq: UInt64,
+        source: String,
+    ):
+        """Record one unpaired event under a fixed cause code.
+
+        Deduplication keys on the fixed code only: the first
+        identity example is retained for diagnosis and later
+        identities under the same code add no storage, so
+        diagnostic history plateaus with the code set instead
+        of growing per operation or mapping identity.
+        """
         self._unpaired += 1
-        if cause not in self._causes:
-            self._causes[cause] = True
-            self._cause_order.append(cause)
+        if code not in self._causes:
+            self._causes[code] = True
+            if example == "":
+                self._cause_order.append(code)
+            else:
+                self._cause_order.append(code + example)
         if len(self._refs) < 8:
             self._refs.append(
                 source + ":seq=" + format_u64(seq)
             )
 
     def _unpaired_event(
-        mut self, var ev: Event, cause: String, source: String
+        mut self, var ev: Event, code: String, example: String,
+        source: String,
     ) -> Event:
-        self._note(cause, ev.seq, source)
+        self._note(code, example, ev.seq, source)
         ev.source_correlation = String("unpaired")
         return ev^
 
@@ -230,7 +268,10 @@ struct CorrelationRegistry[
         var ns = self._namespace_for(hook, admitted)
         if not admitted:
             return self._unpaired_event(
-                ev^, "hook not admitted: " + hook, source
+                ev^,
+                "hook not admitted",
+                ": " + hook,
+                source,
             )
         if ev.kind == "bounce_attempt":
             return self._open_attempt(ev^, ns, source)
@@ -250,19 +291,28 @@ struct CorrelationRegistry[
         var dev = ev.bounce.device_id
         if op == "" or dev == "":
             raise CorrelationError("malformed attempt")
-        if op in self._pending:
+        if op in self._pending or op in self._resolved:
             return self._unpaired_event(
-                ev^, "duplicate operation " + op, source
+                ev^,
+                "duplicate operation",
+                " " + op,
+                source,
             )
         if dev not in self._devices:
             if len(self._devices) >= Self.DEVICE_N:
                 return self._unpaired_event(
-                    ev^, "device table exhausted", source
+                    ev^,
+                    "device table exhausted",
+                    String(""),
+                    source,
                 )
             self._devices[dev] = True
         if len(self._pending) >= Self.PENDING_N:
             return self._unpaired_event(
-                ev^, "pending table exhausted", source
+                ev^,
+                "pending table exhausted",
+                String(""),
+                source,
             )
         var p = _PendingOp()
         p.device = dev
@@ -291,7 +341,10 @@ struct CorrelationRegistry[
             if gen != UInt64(0):
                 raise CorrelationError("failure carries generation")
             return self._unpaired_event(
-                ev^, "failure carries no mapping", source
+                ev^,
+                "failure carries no mapping",
+                String(""),
+                source,
             )
         if not ev.map_result.has_wire_identity:
             raise CorrelationError("success lacks wire_identity")
@@ -302,7 +355,10 @@ struct CorrelationRegistry[
             if ev.map_result.has_mapping_id:
                 raise CorrelationError("unassigned carries mapping")
             return self._unpaired_event(
-                ev^, "unassigned mapping identity", source
+                ev^,
+                "unassigned mapping identity",
+                String(""),
+                source,
             )
         if not ev.map_result.has_mapping_id:
             raise CorrelationError("known identity lacks mapping")
@@ -314,12 +370,16 @@ struct CorrelationRegistry[
         if key in self._active:
             return self._unpaired_event(
                 ev^,
-                "mapping already live: " + ev.map_result.mapping_id,
+                "mapping already live",
+                ": " + ev.map_result.mapping_id,
                 source,
             )
         if len(self._active) >= Self.ACTIVE_N:
             return self._unpaired_event(
-                ev^, "active table exhausted", source
+                ev^,
+                "active table exhausted",
+                String(""),
+                source,
             )
         var m = _ActiveMapping()
         m.op = op
@@ -328,6 +388,7 @@ struct CorrelationRegistry[
         m.generation = gen
         m.map_ts = ev.ts_ns
         m.mapped_bytes = ev.map_result.mapped_bytes
+        m.wire = True
         self._active[key] = m
         ev.source_correlation = String("direct")
         return ev^
@@ -340,20 +401,26 @@ struct CorrelationRegistry[
             raise CorrelationError("malformed map_result")
         if ev.map_result.has_wire_generation:
             return self._apply_wire_map(ev^, ns, source)
+        if op in self._resolved:
+            return self._unpaired_event(
+                ev^,
+                "duplicate result",
+                " for " + op,
+                source,
+            )
         if op not in self._pending:
             return self._unpaired_event(
-                ev^, "map_result without pending operation", source
+                ev^,
+                "map_result without pending operation",
+                String(""),
+                source,
             )
         var p = self._pending[op]
-        if p.resolved:
-            return self._unpaired_event(
-                ev^, "duplicate result for " + op, source
-            )
         if not ev.map_result.success:
             if ev.map_result.has_mapping_id:
                 raise CorrelationError("failure carries mapping")
-            p.resolved = True
-            self._pending[op] = p
+            _ = self._pending.pop(op)
+            self._remember_resolved(op, ev.seq, source)
             ev.source_correlation = String("direct")
             return ev^
         if not ev.map_result.has_mapping_id:
@@ -364,12 +431,16 @@ struct CorrelationRegistry[
         if key in self._active:
             return self._unpaired_event(
                 ev^,
-                "mapping already live: " + ev.map_result.mapping_id,
+                "mapping already live",
+                ": " + ev.map_result.mapping_id,
                 source,
             )
         if len(self._active) >= Self.ACTIVE_N:
             return self._unpaired_event(
-                ev^, "active table exhausted", source
+                ev^,
+                "active table exhausted",
+                String(""),
+                source,
             )
         var lineage = p.device + "|" + ns
         var gen = 1
@@ -384,10 +455,8 @@ struct CorrelationRegistry[
         m.map_ts = ev.ts_ns
         m.mapped_bytes = ev.map_result.mapped_bytes
         self._active[key] = m
-        p.resolved = True
-        p.has_mapping = True
-        p.mapping = ev.map_result.mapping_id
-        self._pending[op] = p
+        _ = self._pending.pop(op)
+        self._remember_resolved(op, ev.seq, source)
         ev.source_correlation = String("direct")
         return ev^
 
@@ -397,30 +466,53 @@ struct CorrelationRegistry[
         var op = ev.copy.operation_id
         if op == "":
             raise CorrelationError("malformed copy")
-        if op not in self._pending:
-            return self._unpaired_event(
-                ev^, "copy without pending operation", source
-            )
-        var p = self._pending[op]
         if ev.copy.has_mapping_id:
             var key = ns + "|" + ev.copy.mapping_id
             if key not in self._active:
                 return self._unpaired_event(
-                    ev^, "copy references unknown mapping", source
+                    ev^,
+                    "copy references unknown mapping",
+                    String(""),
+                    source,
                 )
             if self._active[key].op != op:
                 return self._unpaired_event(
-                    ev^, "copy operation mismatch", source
+                    ev^,
+                    "copy operation mismatch",
+                    String(""),
+                    source,
+                )
+            var known = op in self._pending or op in self._resolved
+            if not known and self._active[key].wire:
+                return self._unpaired_event(
+                    ev^,
+                    "copy without pending operation",
+                    String(""),
+                    source,
                 )
             ev.source_correlation = String("direct")
             return ev^
-        if p.resolved:
+        if op in self._resolved:
             return self._unpaired_event(
-                ev^, "copy after operation resolved", source
+                ev^,
+                "copy after operation resolved",
+                String(""),
+                source,
             )
+        if op not in self._pending:
+            return self._unpaired_event(
+                ev^,
+                "copy without pending operation",
+                String(""),
+                source,
+            )
+        var p = self._pending[op]
         if p.nested >= Self.NESTED_N:
             return self._unpaired_event(
-                ev^, "nesting budget exceeded", source
+                ev^,
+                "nesting budget exceeded",
+                String(""),
+                source,
             )
         p.nested += 1
         self._pending[op] = p
@@ -436,11 +528,17 @@ struct CorrelationRegistry[
         var key = ns + "|" + ev.sync.mapping_id
         if key not in self._active:
             return self._unpaired_event(
-                ev^, "sync references unknown mapping", source
+                ev^,
+                "sync references unknown mapping",
+                String(""),
+                source,
             )
         if self._active[key].op != op:
             return self._unpaired_event(
-                ev^, "sync operation mismatch", source
+                ev^,
+                "sync operation mismatch",
+                String(""),
+                source,
             )
         ev.source_correlation = String("direct")
         return ev^
@@ -458,7 +556,10 @@ struct CorrelationRegistry[
                 if ev.unmap.has_mapping_id:
                     raise CorrelationError("miss carries mapping")
                 return self._unpaired_event(
-                    ev^, "release of unknown mapping", source
+                    ev^,
+                    "release of unknown mapping",
+                    String(""),
+                    source,
                 )
             if not ev.unmap.has_mapping_id:
                 raise CorrelationError("known identity lacks mapping")
@@ -477,11 +578,48 @@ struct CorrelationRegistry[
             return ev^
         if key in self._retired:
             return self._unpaired_event(
-                ev^, "release of retired mapping", source
+                ev^,
+                "release of retired mapping",
+                String(""),
+                source,
             )
         return self._unpaired_event(
-            ev^, "release of unknown mapping", source
+            ev^,
+            "release of unknown mapping",
+            String(""),
+            source,
         )
+
+    def _remember_resolved(
+        mut self, op: String, seq: UInt64, source: String
+    ) raises:
+        """Move one resolved operation into bounded history.
+
+        Eviction is explicit: forgotten operations lose their
+        duplicate and nesting verdicts, and correlation
+        quality records the pressure instead of refusing new
+        attempts as pending exhaustion.
+        """
+        if op in self._resolved:
+            return
+        if Self.RESOLVED_N <= 0:
+            return
+        if len(self._resolved_order) < Self.RESOLVED_N:
+            self._resolved_order.append(op)
+        else:
+            var victim = self._resolved_order[self._resolved_next]
+            _ = self._resolved.pop(victim)
+            self._resolved_order[self._resolved_next] = op
+            self._resolved_next += 1
+            if self._resolved_next >= Self.RESOLVED_N:
+                self._resolved_next = 0
+            self._note(
+                "resolved-operation history exceeded",
+                String(""),
+                seq,
+                source,
+            )
+        self._resolved[op] = True
 
     def _retire(mut self, key: String, gen: UInt64) raises:
         """Record one tombstone in the bounded ring."""

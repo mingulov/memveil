@@ -12,6 +12,7 @@ silently evicted, and no refusal corrupts unrelated state.
 | Ring reservation (live) | 8 MiB default | submit fails count in `submit_fail`; detail degrades, counters survive |
 | Native staging (live) | bridge bound | malformed/dropped counts; see the bridge contract |
 | Pending operations | 65,536 | `pending table exhausted`; event unpaired |
+| Resolved operations | 16,384 | oldest history cycles; `resolved-operation history exceeded`, quality partial |
 | Active mappings | 65,536 | `active table exhausted`; event unpaired |
 | Nested copies per operation | 8 | `nesting budget exceeded`; event unpaired |
 | Retired identities | 16,384 tombstones | oldest tombstone cycles; repeat release unpaired |
@@ -36,6 +37,29 @@ churn with small live occupancy, tracker refusals with
 limitation notes, exact row truncation (4,096/4,097), and the
 findings bound. The active-ceiling case takes about a minute;
 that cost is the proof.
+
+## Resolved-operation history
+
+Completed operations leave the pending table for a bounded
+resolved history of 16,384 operation identities. This bound
+is separate from the 16,384 retired mapping tombstones: one
+bounds duplicate and nesting verdicts for operations, the
+other bounds release verdicts for mapping tokens.
+
+When turnover exceeds the history, the oldest entry cycles
+and correlation quality degrades to partial with a
+`resolved-operation history exceeded` cause; the resolving
+event still pairs, and completed churn is never refused as
+pending exhaustion. Past the retained horizon, verdicts
+turn uncertain instead of borrowing certainty: a duplicate
+result reads `map_result without pending operation`, and a
+reused operation id opens as a new operation. A copy naming
+a live mapping still pairs against the mapping's recorded
+operation after the operation left history, while a
+mapping-less copy after a retained resolution reads `copy
+after operation resolved`. The `correlation` lane proves
+the plateau, the explicit pressure cause, and the
+expired-horizon verdicts on small histories.
 
 ## Loss-channel matrix
 
