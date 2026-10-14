@@ -90,18 +90,6 @@ def check_id(value, where):
     return value
 
 
-def check_decimal(value, where):
-    # Canonical decimal shape only, mirroring the Mojo
-    # producer's _check_u64_dec: neither the schema nor
-    # the parser range-gates u64, so the validator must
-    # not reject a 20-digit value the producer accepts.
-    if not isinstance(value, str):
-        fail("u64-type", "%s must be a decimal string, got %s"
-             % (where, type(value).__name__))
-    if not U64RE.fullmatch(value):
-        fail("u64-canonical", "%s is not canonical: %r" % (where, value))
-
-
 def check_sha256(value, where):
     if not isinstance(value, str) or not SHA256RE.fullmatch(value):
         fail("bad-hash", "%s is not sha256 hex: %r" % (where, value))
@@ -1316,7 +1304,7 @@ def check_receipt(obj):
              % (obj["profile_id"],))
     if obj["grade"] != "local-auto":
         fail("bad-enum", "receipt.grade")
-    check_decimal(obj["created_ns"], "receipt.created_ns")
+    check_u64(obj["created_ns"], "receipt.created_ns")
     kernel = obj["kernel"]
     check_keys(kernel, ("arch", "release"), (), "receipt.kernel")
     check_text(kernel["arch"], 32, "receipt.kernel.arch")
@@ -1366,7 +1354,7 @@ def check_receipt(obj):
                           "note"), (), "receipt.workload")
     if workload["kind"] != "smoke":
         fail("bad-enum", "receipt.workload.kind")
-    check_decimal(workload["duration_s"], "receipt.workload.duration_s")
+    check_u64(workload["duration_s"], "receipt.workload.duration_s")
     if workload["traffic_required"] is not False:
         fail("bad-enum", "receipt.workload.traffic_required")
     check_text(workload["note"], 512, "receipt.workload.note")
@@ -1639,6 +1627,51 @@ def run_selftest():
         return "receipt shape accepted"
 
     check("receipt-positive", receipt_positive)
+
+    def receipt_u64_max():
+        obj = _receipt_ok()
+        obj["created_ns"] = "18446744073709551615"
+        obj["workload"]["duration_s"] = "18446744073709551615"
+        check_receipt(obj)
+        return "u64 max accepted"
+
+    check("receipt-u64-max", receipt_u64_max)
+
+    def receipt_reject_created_ns_over():
+        obj = _receipt_ok()
+        obj["created_ns"] = "18446744073709551616"
+        check_receipt(obj)
+
+    results.append(expect_reject("receipt-created-ns-over",
+                                 receipt_reject_created_ns_over,
+                                 "u64-range"))
+
+    def receipt_reject_created_ns_huge():
+        obj = _receipt_ok()
+        obj["created_ns"] = "99999999999999999999"
+        check_receipt(obj)
+
+    results.append(expect_reject("receipt-created-ns-huge",
+                                 receipt_reject_created_ns_huge,
+                                 "u64-range"))
+
+    def receipt_reject_duration_over():
+        obj = _receipt_ok()
+        obj["workload"]["duration_s"] = "18446744073709551616"
+        check_receipt(obj)
+
+    results.append(expect_reject("receipt-duration-over",
+                                 receipt_reject_duration_over,
+                                 "u64-range"))
+
+    def receipt_reject_duration_huge():
+        obj = _receipt_ok()
+        obj["workload"]["duration_s"] = "99999999999999999999"
+        check_receipt(obj)
+
+    results.append(expect_reject("receipt-duration-huge",
+                                 receipt_reject_duration_huge,
+                                 "u64-range"))
 
     def receipt_reject_grade():
         obj = _receipt_ok()

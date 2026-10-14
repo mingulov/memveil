@@ -28,6 +28,7 @@ from memveil.model.common import (
     object_is_empty,
     object_next,
     parse_maybe_string,
+    parse_u64_field,
 )
 from memveil.model.validate import ValidationError, check_bounded_text
 from memveil.platform.btf import read_btf_func_proto
@@ -1790,20 +1791,6 @@ struct _ReceiptData(Copyable, Movable):
         self.obj_cp = String("")
 
 
-def _check_u64_dec(v: String, what: String) raises:
-    """Check ^(0|[1-9][0-9]{0,19})$ decimal shape."""
-    var raw = v.as_bytes()
-    if len(raw) == 0 or len(raw) > 20:
-        raise ValidationError(what, "bad decimal")
-    if raw[0] == UInt8(0x30):
-        if len(raw) != 1:
-            raise ValidationError(what, "leading zero")
-        return
-    for i in range(len(raw)):
-        if raw[i] < UInt8(0x30) or raw[i] > UInt8(0x39):
-            raise ValidationError(what, "bad decimal")
-
-
 def _parse_receipt_kernel(mut scan: Scanner, mut rec: _ReceiptData) raises:
     """Parse receipt.kernel: arch, release."""
     scan.begin_object()
@@ -2155,9 +2142,7 @@ def _parse_receipt_workload(mut scan: Scanner) raises:
                     raise ValidationError(
                         "receipt.workload", "duplicate"
                     )
-                _check_u64_dec(
-                    scan.parse_string(), "receipt.workload.duration_s"
-                )
+                _ = parse_u64_field(scan, "receipt.workload.duration_s")
                 has_duration = True
             elif key == "traffic_required":
                 if has_traffic:
@@ -2271,9 +2256,7 @@ def verify_qualification_receipt(
                 elif key == "created_ns":
                     if seen[4]:
                         raise ValidationError("receipt", "duplicate")
-                    _check_u64_dec(
-                        scan.parse_string(), "receipt.created_ns"
-                    )
+                    _ = parse_u64_field(scan, "receipt.created_ns")
                     seen[4] = True
                 elif key == "kernel":
                     if seen[5]:

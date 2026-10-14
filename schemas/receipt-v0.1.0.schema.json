@@ -33,7 +33,8 @@
     },
     "created_ns": {
       "type": "string",
-      "pattern": "^(0|[1-9][0-9]{0,19})$"
+      "pattern": "^(0|[1-9][0-9]{0,19})$",
+      "description": "Monotonic creation timestamp in nanoseconds. Canonical unsigned 64-bit decimal string; the application must also check range 0..18446744073709551615."
     },
     "kernel": {
       "type": "object",
@@ -173,7 +174,8 @@
         },
         "duration_s": {
           "type": "string",
-          "pattern": "^(0|[1-9][0-9]{0,19})$"
+          "pattern": "^(0|[1-9][0-9]{0,19})$",
+          "description": "Smoke workload duration in seconds. Canonical unsigned 64-bit decimal string; the application must also check range 0..18446744073709551615."
         },
         "traffic_required": {
           "const": false

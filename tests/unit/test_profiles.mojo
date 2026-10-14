@@ -1507,6 +1507,65 @@ def test_receipt_duration_shape() raises:
     assert_true(contains(msg, String("receipt.workload")))
 
 
+def test_receipt_u64_max() raises:
+    var js = _mint_good()
+    var good = js.replace(
+        String('"created_ns": "123456789"'),
+        String('"created_ns": "18446744073709551615"'),
+    ).replace(
+        String('"duration_s": "3"'),
+        String('"duration_s": "18446744073709551615"'),
+    )
+    var r = open_evidence_reader(fx("bound-host"))
+    var env = detect_environment(r)
+    var doc = _receipt_doc()
+    var v = verify_qualification_receipt(
+        good.as_bytes(), doc, env.kernel, String(_MINT_BRIDGE)
+    )
+    assert_true(v.ok)
+    assert_equal(v.message, String(""))
+
+
+def test_receipt_created_ns_range() raises:
+    var js = _mint_good()
+    var bad = js.replace(
+        String('"created_ns": "123456789"'),
+        String('"created_ns": "18446744073709551616"'),
+    )
+    var msg = _verify_text(bad)
+    assert_true(contains(msg, String("receipt.created_ns")))
+
+
+def test_receipt_created_ns_huge() raises:
+    var js = _mint_good()
+    var bad = js.replace(
+        String('"created_ns": "123456789"'),
+        String('"created_ns": "99999999999999999999"'),
+    )
+    var msg = _verify_text(bad)
+    assert_true(contains(msg, String("receipt.created_ns")))
+
+
+def test_receipt_duration_range() raises:
+    var js = _mint_good()
+    var bad = js.replace(
+        String('"duration_s": "3"'),
+        String('"duration_s": "18446744073709551616"'),
+    )
+    var msg = _verify_text(bad)
+    assert_true(contains(msg, String("receipt.workload")))
+
+
+def test_receipt_duration_huge() raises:
+    var js = _mint_good()
+    var bad = js.replace(
+        String('"duration_s": "3"'),
+        String('"duration_s": "99999999999999999999"'),
+    )
+    var msg = _verify_text(bad)
+    assert_true(contains(msg, String("receipt.workload")))
+
+
 def test_receipt_note_empty() raises:
     var js = _mint_good()
     var bad = js.replace(
@@ -2831,6 +2890,11 @@ def run() raises -> Int:
     suite.test[test_receipt_workload_kind]()
     suite.test[test_receipt_traffic_true]()
     suite.test[test_receipt_duration_shape]()
+    suite.test[test_receipt_u64_max]()
+    suite.test[test_receipt_created_ns_range]()
+    suite.test[test_receipt_created_ns_huge]()
+    suite.test[test_receipt_duration_range]()
+    suite.test[test_receipt_duration_huge]()
     suite.test[test_receipt_note_empty]()
     suite.test[test_receipt_memveil_empty]()
     suite.test[test_receipt_objects_unknown_field]()
