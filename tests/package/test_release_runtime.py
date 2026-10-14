@@ -15,6 +15,7 @@ Environment: MV_BUNDLE_TARBALL (required), MV_VALID_EMPTY
 defaults to this checkout, to import tools/package).
 """
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -193,6 +194,66 @@ def test_loader_layout(bundle):
         for name in needed(target):
             assert name in shipped or name in allow, \
                 "%s needs %s: outside closure" % (target.name, name)
+
+
+def _lock_packages():
+    path = os.path.join(REPO, "tools", "runtime_provenance.py")
+    loader = SourceFileLoader("mvruntimeprov", path)
+    spec = importlib.util.spec_from_loader("mvruntimeprov", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    with open(os.path.join(REPO, "pixi.lock"), "r",
+              encoding="utf-8") as handle:
+        text = handle.read()
+    packages, problems = module.read_lock_packages(text)
+    assert problems == [], problems
+    return packages
+
+
+def _sha_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def test_runtime_provenance_pinned(bundle):
+    root, manifest = bundle
+    prov = manifest["runtime_provenance"]
+    libs = sorted(
+        "lib/%s" % path.name
+        for path in (root / "lib").glob("*.so*")
+        if path.name != "libbpf_mojo.so.1")
+    assert sorted(prov) == libs, prov
+    packages = _lock_packages()
+    for rel in libs:
+        record = prov[rel]
+        digest = _sha_file(root / rel)
+        assert digest == record["staged_sha256"], rel
+        assert digest == record["member_sha256"], rel
+        assert digest == manifest["files"][rel], rel
+        entry = packages[record["archive"]]
+        assert record["package"] == entry["name"], rel
+        assert record["version"] == entry["version"], rel
+        assert record["archive_sha256"] == entry["sha256"], rel
+        assert record["relocation"] is None, rel
+    assert prov["lib/libstdc++.so.6"]["member"].endswith(
+        ".so.6.0.36")
+
+
+def test_runtime_licenses_match(bundle):
+    root, manifest = bundle
+    texts = manifest["runtime_licenses"]
+    assert sorted(texts) == [
+        "licenses/LICENSE.mojo-compiler",
+        "licenses/RUNTIME.LIBRARY.EXCEPTION",
+        "licenses/Third-Party-Notices.mojo-compiler",
+    ], texts
+    for rel, record in texts.items():
+        digest = _sha_file(root / rel)
+        assert digest == record["sha256"], rel
+        assert digest == manifest["files"][rel], rel
 
 
 def test_permissions(bundle):

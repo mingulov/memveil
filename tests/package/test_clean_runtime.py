@@ -142,6 +142,18 @@ def test_manifest_hashes(bundle):
             "hash mismatch on %s" % rel
 
 
+def test_runtime_provenance_matches_payload(bundle):
+    root, manifest = bundle
+    prov = manifest["runtime_provenance"]
+    libs = sorted(
+        "lib/%s" % name for name in os.listdir(root / "lib")
+        if name != "libbpf_mojo.so.1")
+    assert sorted(prov) == libs, prov
+    for rel in libs:
+        assert sha_file(root / rel) == \
+            prov[rel]["staged_sha256"], rel
+
+
 def test_license_texts_and_first_party(bundle):
     root, manifest = bundle
     first = manifest.get("first_party", {})

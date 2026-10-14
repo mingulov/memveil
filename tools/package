@@ -11,6 +11,12 @@ git revision stays descriptive next to the inventory digest.
 Every archived file binds to its verified bytes as consumed,
 and the tarball hashes before publication and again after the
 rename, so bytes changed after verification fail the package.
+Every shipped runtime file except the natively built bridge
+traces to pinned package bytes: the packager fetches the locked
+archives, verifies them against pixi.lock, and compares staged
+bytes against archive members with explicit relocation
+handling, recording owner, member, digests, and license texts
+in the manifest.
 
 Layout of ``dist/memveil-<version>/``::
 
@@ -54,6 +60,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 import build_receipt  # noqa: E402
+import runtime_provenance  # noqa: E402
 
 # NEEDED entries the bundle binary and bridge may name that must
 # resolve to the host C library set. Anything else must ship in
@@ -76,6 +83,18 @@ SYSTEM_ALLOW = {
 # lib/ fails the build.
 RUNTIME_LIB_DIR = os.path.join(
     ROOT, ".pixi", "envs", "default", "lib"
+)
+
+# Staged files whose bytes must equal a member of the verified
+# owner archive: (staged rel, package name, stream, member).
+# "pkg" selects the payload stream, "info" the metadata stream.
+RUNTIME_LICENSES = (
+    ("licenses/LICENSE.mojo-compiler", "mojo-compiler", "info",
+     "info/licenses/LICENSE"),
+    ("licenses/Third-Party-Notices.mojo-compiler", "mojo-compiler",
+     "info", "info/licenses/Third-Party-Notices"),
+    ("licenses/RUNTIME.LIBRARY.EXCEPTION", "libgcc", "pkg",
+     "share/licenses/gcc-libs/RUNTIME.LIBRARY.EXCEPTION"),
 )
 
 
@@ -259,7 +278,7 @@ COPYTREE_PREFIXES = frozenset((
 
 
 def verify_staged_tree(staged, inventory_files, receipt_outputs,
-                       expected_outputs):
+                       expected_outputs, provenanced):
     """Staged bytes against seals; [] means every copy matches.
 
     Worktree-derived copies match the source inventory, build
@@ -275,7 +294,10 @@ def verify_staged_tree(staged, inventory_files, receipt_outputs,
 
     Returns (problems, observed): observed maps every staged
     regular file to its verified sha256, and the manifest and
-    the archive bind to those bytes.
+    the archive bind to those bytes. provenanced maps staged
+    runtime rels to the verified provenance records; any
+    other staged lib file trips, and a provenanced file trips
+    unless its bytes still match the record's staged digest.
     """
     sealed = {entry["path"]: entry for entry in inventory_files}
     problems = []
@@ -406,11 +428,50 @@ def verify_staged_tree(staged, inventory_files, receipt_outputs,
             if rel in checked or rel == "MANIFEST.json" \
                     or rel == "bin/memveil":
                 continue
-            if rel.startswith("lib/") \
-                    and rel != "lib/libbpf_mojo.so.1":
+            if rel.startswith("lib/"):
+                if rel not in provenanced:
+                    problems.append(
+                        "staged runtime file lacks provenance: %s"
+                        % rel)
                 continue
             problems.append("staged file is unsealed: %s" % rel)
+    for staged_rel, record in sorted(provenanced.items()):
+        full = os.path.join(staged, *staged_rel.split("/"))
+        if not os.path.isfile(full) or os.path.islink(full):
+            problems.append(
+                "expected provenanced runtime file missing from "
+                "staging: %s" % staged_rel)
+        elif observed.get(staged_rel) != record.get(
+                "staged_sha256"):
+            problems.append(
+                "staged runtime file differs from verified "
+                "provenance: %s" % staged_rel)
     return problems, observed
+
+
+def sealed_pixi_lock_text(root, inventory_files):
+    """pixi.lock text from seal-checked bytes.
+
+    Runtime provenance parses these bytes, never a live lock
+    re-read after verification.
+    """
+    want = None
+    for entry in inventory_files:
+        if entry.get("path") == "pixi.lock" \
+                and entry.get("kind") == "file":
+            want = entry.get("sha256")
+    path = os.path.join(root, "pixi.lock")
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read()
+    except OSError as exc:
+        fail("runtime lock unreadable: %s" % exc)
+    if want is None or hashlib.sha256(data).hexdigest() != want:
+        fail("runtime lock bytes differ from seal: pixi.lock")
+    try:
+        return data.decode("utf-8")
+    except ValueError:
+        fail("runtime lock bytes are not text: pixi.lock")
 
 
 def sealed_lock_bytes(root, inventory_files):
@@ -829,9 +890,29 @@ def main(argv):
             "licenses/libbpf-mojo-LICENSES/GPL-2.0-only.txt",
             "licenses/libbpf-mojo-LICENSES/LLVM-exception.txt",
         ))
+        # Every staged runtime file except the natively built
+        # bridge must trace to pinned package bytes, and staged
+        # runtime license texts must equal their archive members;
+        # records land in the manifest and bind the lib sweep.
+        runtime_names = sorted(
+            name for name in ship if name != "libbpf_mojo.so.1")
+        pixi_lock_text = sealed_pixi_lock_text(
+            ROOT, receipt["inventory"]["files"])
+        prov_problems, prov_records, lic_records = \
+            runtime_provenance.verify_packaged_runtime(
+                runtime_names, libdir, RUNTIME_LIB_DIR,
+                pixi_lock_text,
+                os.path.dirname(RUNTIME_LIB_DIR),
+                os.path.join(ROOT, "build", "deps", "runtime"),
+                RUNTIME_LICENSES)
+        if prov_problems:
+            for problem in prov_problems[:10]:
+                print("package: %s" % problem, file=sys.stderr)
+            fail("staged runtime files lack verified provenance")
         staged_problems, observed = verify_staged_tree(
             staged, receipt["inventory"]["files"],
-            receipt["outputs"], expected_outputs)
+            receipt["outputs"], expected_outputs,
+            prov_records)
         if staged_problems:
             for problem in staged_problems[:10]:
                 print("package: %s" % problem, file=sys.stderr)
@@ -855,6 +936,8 @@ def main(argv):
             },
             "toolchain": lock["toolchain"],
             "system_libraries": sorted(SYSTEM_ALLOW),
+            "runtime_provenance": prov_records,
+            "runtime_licenses": lic_records,
             "first_party": {
                 "license_default": "GPL-3.0-or-later",
                 "licenses": {

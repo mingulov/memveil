@@ -134,3 +134,27 @@ and hashes again with every read bound to the write digest,
 and any failure drops the tag's bundle and tarball. Explicit
 bundle tags validate before any failure cleanup can act, so
 cleanup only ever drops candidates for a valid tag.
+
+## Runtime provenance
+
+The Mojo runtime closure ships from the pixi environment, which
+the source seal does not cover, so `tools/package` verifies
+every staged runtime file except the natively built bridge
+against pinned package bytes (`tools/runtime_provenance.py`).
+The packager downloads the locked `.conda` archives (cached
+under `build/deps/runtime/`), verifies each against the
+seal-checked `pixi.lock` bytes, parses each archive from one
+verified in-memory snapshot, and compares staged bytes against
+archive members: exact match, or match through a declared conda
+prefix relocation whose original and staged digests are both
+recorded. Binary relocations follow the installer c-string
+transform (the prefix takes the placeholder's place, the
+suffix stays, zeros pad the field end). Symlink chains resolve
+on both sides, staged symlinks fail, and staged runtime license
+texts must equal their archive members. The manifest records
+owner package, archive digest, member, digests, and
+transformation per file; the staged tree check re-binds staged
+bytes to the verified digests, and any unowned, missing, or
+mismatched payload fails the package. Archive streams
+decompress with the `zstd` CLI, a packaging prerequisite like
+patchelf.

@@ -11,11 +11,15 @@ success/failure counterexamples.
 import hashlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
+import posixpath
 import shutil
 import subprocess
 import sys
+import tarfile
+import zipfile
 from importlib.machinery import SourceFileLoader
 
 import pytest
@@ -822,7 +826,8 @@ class TestPackagingSeal:
             root, "build", pre, receipt.PROBES) == 0
 
     def _run(self, package, root, monkeypatch, link_hook=None,
-             version_hook=None, argv=None, lmb="default"):
+             version_hook=None, argv=None, lmb="default",
+             stub_provenance=True, runtime_libdir=None):
         real_run = package.run
 
         def fake_run(cmd, **kwargs):
@@ -846,7 +851,30 @@ class TestPackagingSeal:
         monkeypatch.setattr(
             package, "RUNTIME_LIB_DIR",
             os.path.join(REPO, ".pixi", "envs", "default", "lib"))
+        def fake_provenance(names, staged_libdir, env_libdir,
+                              lock_text, prefix, cache_dir, table,
+                              zstd="zstd"):
+            records = {}
+            for name in names:
+                full = os.path.join(staged_libdir, name)
+                try:
+                    with open(full, "rb") as handle:
+                        digest = hashlib.sha256(
+                            handle.read()).hexdigest()
+                except OSError:
+                    digest = None
+                records["lib/%s" % name] = {
+                    "package": "stub", "staged_sha256": digest}
+            return [], records, {}
+
+        if stub_provenance:
+            monkeypatch.setattr(
+                package.runtime_provenance,
+                "verify_packaged_runtime", fake_provenance)
         monkeypatch.setattr(package, "run", fake_run)
+        if runtime_libdir is not None:
+            monkeypatch.setattr(
+                package, "RUNTIME_LIB_DIR", runtime_libdir)
         if lmb == "default":
             monkeypatch.setenv(
                 "LMB_PACKAGE",
@@ -1363,6 +1391,195 @@ class TestPackagingSeal:
         assert exc.value.code == 1
         assert os.listdir(out) == [], os.listdir(out)
 
+    def _seed_runtime_cache(self, probe):
+        repo_cache = os.path.join(REPO, "build", "deps", "runtime")
+        probe_cache = os.path.join(probe, "build", "deps", "runtime")
+        if os.path.isdir(repo_cache):
+            os.makedirs(probe_cache, exist_ok=True)
+            for leaf in os.listdir(repo_cache):
+                if leaf.endswith(".conda"):
+                    shutil.copy2(os.path.join(repo_cache, leaf),
+                                 os.path.join(probe_cache, leaf))
+        return probe_cache, repo_cache
+
+    def _save_runtime_cache(self, probe_cache, repo_cache):
+        if not os.path.isdir(probe_cache):
+            return
+        os.makedirs(repo_cache, exist_ok=True)
+        for leaf in os.listdir(probe_cache):
+            if leaf.endswith(".conda") and not leaf.endswith(
+                    ".part"):
+                shutil.copy2(os.path.join(probe_cache, leaf),
+                             os.path.join(repo_cache, leaf))
+
+    def test_provenance_wiring_covers_closure(
+            self, package, receipt, probe, monkeypatch):
+        self._commit(probe)
+        self._seal(receipt, probe, monkeypatch)
+        code, out = self._run(package, probe, monkeypatch)
+        assert code == 0
+        tag, manifest = self._manifest(out)
+        libs = sorted(
+            "lib/%s" % name
+            for name in os.listdir(os.path.join(out, tag, "lib"))
+            if name != "libbpf_mojo.so.1")
+        assert sorted(manifest["runtime_provenance"]) == libs, \
+            manifest["runtime_provenance"]
+
+    def test_runtime_provenance_end_to_end(
+            self, package, receipt, probe, monkeypatch, capsys):
+        self._commit(probe)
+        self._seal(receipt, probe, monkeypatch)
+        probe_cache, repo_cache = self._seed_runtime_cache(probe)
+        try:
+            code, out = self._run(
+                package, probe, monkeypatch, stub_provenance=False)
+        except SystemExit:
+            if "cannot fetch" in capsys.readouterr().err:
+                pytest.skip("needs runtime archive download")
+            raise
+        assert code == 0
+        self._save_runtime_cache(probe_cache, repo_cache)
+        tag, manifest = self._manifest(out)
+        prov = manifest["runtime_provenance"]
+        libs = sorted(
+            "lib/%s" % name
+            for name in os.listdir(os.path.join(out, tag, "lib"))
+            if name != "libbpf_mojo.so.1")
+        assert sorted(prov) == libs, prov
+        for rel, record in prov.items():
+            with open(os.path.join(out, tag, rel), "rb") as handle:
+                digest = hashlib.sha256(handle.read()).hexdigest()
+            assert digest == record["staged_sha256"], rel
+            assert record["archive_sha256"], rel
+            assert record["member_sha256"], rel
+        assert manifest["runtime_licenses"], manifest
+
+    def test_scratch_mutated_runtime_refused(
+            self, package, receipt, probe, monkeypatch, capsys):
+        scratch = os.path.join(probe, "scratch-env", "lib")
+        os.makedirs(scratch)
+        for name in ("libMSupportGlobals.so",
+                     "libKGENCompilerRTShared.so",
+                     "libAsyncRTRuntimeGlobals.so",
+                     "libgcc_s.so.1", "libstdc++.so.6"):
+            shutil.copy2(
+                os.path.join(REPO, ".pixi", "envs", "default",
+                             "lib", name),
+                os.path.join(scratch, name))
+        with open(os.path.join(
+                scratch, "libMSupportGlobals.so"), "ab") as handle:
+            handle.write(b"tail-mutation")
+        shutil.copytree(
+            os.path.join(REPO, ".pixi", "envs", "default",
+                         "conda-meta"),
+            os.path.join(probe, "scratch-env", "conda-meta"))
+        self._commit(probe)
+        self._seal(receipt, probe, monkeypatch)
+        probe_cache, repo_cache = self._seed_runtime_cache(probe)
+        with pytest.raises(SystemExit) as exc:
+            self._run(package, probe, monkeypatch,
+                       stub_provenance=False,
+                       runtime_libdir=scratch)
+        err = capsys.readouterr().err
+        if "cannot fetch" in err:
+            pytest.skip("needs runtime archive download")
+        assert exc.value.code == 1
+        assert "provenance" in err, err
+        self._save_runtime_cache(probe_cache, repo_cache)
+
+    def test_staged_runtime_mutation_after_proof_refused(
+            self, package, receipt, probe, monkeypatch, capsys):
+        def mutate(staged):
+            with open(os.path.join(
+                    staged, "lib", "libMSupportGlobals.so"),
+                    "ab") as handle:
+                handle.write(b"torn\n")
+
+        self._refused(
+            package, receipt, probe, monkeypatch, capsys,
+            verify_hook=mutate, expect="libMSupportGlobals.so")
+
+    def test_staged_runtime_deletion_refused(
+            self, package, receipt, probe, monkeypatch, capsys):
+        def delete(staged):
+            os.remove(os.path.join(
+                staged, "lib", "libgcc_s.so.1"))
+
+        self._refused(
+            package, receipt, probe, monkeypatch, capsys,
+            verify_hook=delete, expect="libgcc_s.so.1")
+
+    def test_swapped_lock_after_seal_refused(
+            self, package, receipt, probe, monkeypatch, capsys):
+        evil_staged = {}
+
+        def swap(staged):
+            target = os.path.join(
+                staged, "lib", "libMSupportGlobals.so")
+            with open(target, "rb") as handle:
+                original = handle.read()
+            mutated = original + b"evil-tail\n"
+            with open(target, "wb") as handle:
+                handle.write(mutated)
+            evil = os.path.join(probe, "evil.conda")
+            path, _ = _make_conda(
+                probe, "mojo-compiler", "1.0.0", "evil",
+                {"lib/libMSupportGlobals.so": mutated})
+            os.replace(path, evil)
+            with open(evil, "rb") as handle:
+                digest = hashlib.sha256(handle.read()).hexdigest()
+            real = os.path.join(probe, "pixi.lock")
+            with open(real, "r", encoding="utf-8") as handle:
+                text = handle.read()
+            start = text.index("packages:")
+            head, tail = text[:start], text[start:]
+            lines = []
+            skip = False
+            for line in tail.splitlines(keepends=True):
+                if line.startswith("- conda:"):
+                    filename = line.rsplit("/", 1)[-1].strip()
+                    skip = (filename ==
+                            "mojo-compiler-1.1.0-release.conda")
+                    if skip:
+                        lines.append(
+                            "- conda: file://%s\n" % evil)
+                        continue
+                if skip and line.startswith("  sha256:"):
+                    lines.append("  sha256: %s\n" % digest)
+                    skip = False
+                    continue
+                if skip and not line.startswith("  "):
+                    skip = False
+                lines.append(line)
+            with open(real, "w", encoding="utf-8") as handle:
+                handle.write(head + "".join(lines))
+            evil_staged["done"] = True
+
+        # The sealed bytes stay authoritative: the swapped lock
+        # never legitimizes the mutated library, so the staged
+        # binding refuses it.
+        self._refused(
+            package, receipt, probe, monkeypatch, capsys,
+            verify_hook=swap, expect="libMSupportGlobals.so")
+        assert evil_staged == {"done": True}
+
+    def test_pixi_lock_tamper_after_seal_refused(
+            self, package, receipt, probe, monkeypatch, capsys):
+        real_reader = package.sealed_pixi_lock_text
+
+        def tampering(root, inventory):
+            # Strike after the last receipt check, just before
+            # the sealed lock read: only the reader can refuse.
+            self._mutate(root, "pixi.lock")
+            return real_reader(root, inventory)
+
+        monkeypatch.setattr(
+            package, "sealed_pixi_lock_text", tampering)
+        self._refused(
+            package, receipt, probe, monkeypatch, capsys,
+            expect="pixi.lock")
+
     def test_failed_run_preserves_other_bundles(
             self, package, receipt, probe, monkeypatch, capsys):
         out = os.path.join(probe, "dist-seal")
@@ -1382,3 +1599,796 @@ class TestPackagingSeal:
             "other-tag", "sentinel.txt"], os.listdir(out)
         with open(sentinel, "rb") as handle:
             assert handle.read() == b"keep\n"
+
+
+def _require_zstd():
+    if shutil.which("zstd") is None:
+        pytest.fail("zstd is required to build synthetic runtime "
+                    "archives (apt install zstd)")
+
+
+def _zstd_compress(data):
+    proc = subprocess.run(
+        ["zstd", "-c", "-q"], input=data,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout
+
+
+def _tar_bytes(members):
+    """Members: list of (name, bytes) files or (name, linkto) links."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        for name, payload in members:
+            info = tarfile.TarInfo(name)
+            if isinstance(payload, bytes):
+                info.size = len(payload)
+                info.mtime = 0
+                tar.addfile(info, io.BytesIO(payload))
+            else:
+                info.type = tarfile.SYMTYPE
+                info.linkname = payload
+                info.mtime = 0
+                tar.addfile(info)
+    return buffer.getvalue()
+
+
+def _make_conda(dest, name, version, build, files, links=None,
+                placeholders=None, licenses=None, format_version=2,
+                path_overrides=None):
+    """Write a synthetic .conda; return (path, sha256).
+
+    files maps archive paths to member bytes; links maps archive
+    paths to symlink targets; placeholders maps paths to
+    (placeholder, file_mode) with archive bytes already holding
+    the placeholder; licenses maps info/licenses names to bytes.
+    path_overrides replaces recorded paths.json fields per path.
+    """
+    _require_zstd()
+    links = links or {}
+    placeholders = placeholders or {}
+    licenses = licenses or {}
+    path_overrides = path_overrides or {}
+    filename = "%s-%s-%s.conda" % (name, version, build)
+    paths = []
+    for rel in sorted(files):
+        entry = {"_path": rel, "path_type": "hardlink",
+                 "sha256": hashlib.sha256(files[rel]).hexdigest(),
+                 "size_in_bytes": len(files[rel])}
+        if rel in placeholders:
+            entry["prefix_placeholder"], entry["file_mode"] = \
+                placeholders[rel]
+        entry.update(path_overrides.get(rel, {}))
+        paths.append(entry)
+    for rel in sorted(links):
+        target = links[rel]
+        if not target.startswith("/"):
+            target = posixpath.normpath(posixpath.join(
+                posixpath.dirname(rel), target))
+        else:
+            target = target.lstrip("/")
+        resolved = files.get(target, b"")
+        entry = {"_path": rel, "path_type": "softlink",
+                 "sha256": hashlib.sha256(resolved).hexdigest(),
+                 "size_in_bytes": len(resolved)}
+        entry.update(path_overrides.get(rel, {}))
+        paths.append(entry)
+    paths_doc = {"paths_version": 1, "paths": paths}
+    members = [(rel, files[rel]) for rel in sorted(files)]
+    members += [(rel, links[rel]) for rel in sorted(links)]
+    pkg = _zstd_compress(_tar_bytes(members))
+    info_members = [("info/paths.json",
+                     json.dumps(paths_doc, sort_keys=True).encode(
+                         "utf-8"))]
+    info_members += [("info/licenses/" + rel, data)
+                     for rel, data in sorted(licenses.items())]
+    info = _zstd_compress(_tar_bytes(info_members))
+    path = os.path.join(dest, filename)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr(
+            "metadata.json",
+            '{"conda_pkg_format_version": %d}' % format_version)
+        archive.writestr("pkg-%s-%s_%s.tar.zst"
+                         % (name, version, build), pkg)
+        archive.writestr("info-%s-%s_%s.tar.zst"
+                         % (name, version, build), info)
+    with open(path, "rb") as handle:
+        digest = hashlib.sha256(handle.read()).hexdigest()
+    return path, digest
+
+
+def _lock_text(entries, channels=()):
+    """Minimal pixi.lock subset: entries of (url, sha256)."""
+    lines = ["version: 7", "environments:", "  default:",
+             "    channels:"]
+    lines += ["    - url: %s" % url for url in channels]
+    lines += ["    packages:", "      linux-64:"]
+    lines += ["      - conda: %s" % url for url, _ in entries]
+    lines.append("packages:")
+    for url, sha in entries:
+        lines.append("- conda: %s" % url)
+        lines.append("  sha256: %s" % sha)
+    return "\n".join(lines) + "\n"
+
+
+class TestRuntimeProvenance:
+    @pytest.fixture(scope="class")
+    def provenance(self):
+        return load_tool_module("runtime_provenance")
+
+    def test_lock_parses_pins(self, provenance, tmp_path):
+        text = _lock_text(
+            [("https://example.invalid/c/linux-64/a-1.0-0.conda",
+              "0" * 64),
+             ("https://example.invalid/c/linux-64/b-2.0-3.conda",
+              "f" * 64)],
+            channels=["https://example.invalid/c/"])
+        packages, problems = provenance.read_lock_packages(text)
+        assert problems == [], problems
+        assert packages["a-1.0-0.conda"]["sha256"] == "0" * 64
+        assert packages["b-2.0-3.conda"]["version"] == "2.0"
+        assert packages["b-2.0-3.conda"]["build"] == "3"
+
+    def test_lock_rejects_anomalies(self, provenance, tmp_path):
+        good = ("https://example.invalid/c/linux-64/a-1.0-0.conda",
+                "0" * 64)
+        text = _lock_text(
+            [good], channels=["https://example.invalid/c/"])
+        _, problems = provenance.read_lock_packages(text)
+        assert problems == [], problems
+        bad_sha = _lock_text(
+            [("https://example.invalid/c/linux-64/a-1.0-0.conda",
+              "xyz")],
+            channels=["https://example.invalid/c/"])
+        _, problems = provenance.read_lock_packages(bad_sha)
+        assert problems != []
+        foreign = _lock_text(
+            [("https://evil.invalid/c/linux-64/a-1.0-0.conda",
+              "0" * 64)],
+            channels=["https://example.invalid/c/"])
+        _, problems = provenance.read_lock_packages(foreign)
+        assert problems != []
+        missing = _lock_text([], channels=[]) + "- conda: " \
+            "file:///tmp/x/x-1.0-0.conda\n"
+        _, problems = provenance.read_lock_packages(missing)
+        assert problems == [
+            "lock entry lacks sha256: file:///tmp/x/x-1.0-0.conda"]
+
+    def test_lock_parses_real_pins(self, provenance):
+        with open(os.path.join(REPO, "pixi.lock"), "r",
+                  encoding="utf-8") as handle:
+            text = handle.read()
+        packages, problems = provenance.read_lock_packages(text)
+        assert problems == [], problems
+        mojo = packages["mojo-compiler-1.1.0-release.conda"]
+        assert mojo["version"] == "1.1.0"
+        assert mojo["sha256"] == \
+            "1ff52b39a0d2a1bedb8c4705aadc460205ca62fc19f63426bc545e4b60a31aa0"
+        assert packages["libgcc-16.2.0-ha9f2e26_7.conda"][
+            "sha256"] == \
+            "e031634c3a928f9594eba868bc46ef5230d6571a364a0c63215b06c4563bfcea"
+
+    def _runtime_tree(self, tmp_path, files):
+        staged = tmp_path / "staged" / "lib"
+        env = tmp_path / "env" / "lib"
+        staged.mkdir(parents=True)
+        env.mkdir(parents=True)
+        for name, data in files.items():
+            (staged / name).write_bytes(data)
+            (env / name).write_bytes(data)
+        return staged, env
+
+    def _file_lock(self, tmp_path, archives):
+        entries = [("file://%s" % path, digest)
+                   for path, digest in archives]
+        return _lock_text(entries)
+
+    def test_accepts_pinned_bytes(self, provenance, tmp_path):
+        member = b"ELF-fake-runtime-bytes\n"
+        archive = _make_conda(
+            str(tmp_path), "libfoo", "1.0", "0",
+            {"lib/libfoo.so.1": member})
+        staged, env = self._runtime_tree(
+            tmp_path, {"libfoo.so.1": member})
+        lock = self._file_lock(tmp_path, [archive])
+        problems, records = provenance.verify_closure(
+            {"libfoo.so.1": str(staged / "libfoo.so.1")},
+            {"libfoo.so.1": str(env / "libfoo.so.1")},
+            {"libfoo.so.1": "libfoo-1.0-0.conda"},
+            lock, str(tmp_path / "env"),
+            str(tmp_path / "cache"))
+        assert problems == [], problems
+        record = records["lib/libfoo.so.1"]
+        assert record["package"] == "libfoo"
+        assert record["version"] == "1.0"
+        assert record["archive_sha256"] == archive[1]
+        assert record["member"] == "lib/libfoo.so.1"
+        assert record["member_sha256"] == \
+            hashlib.sha256(member).hexdigest()
+        assert record["staged_sha256"] == record["member_sha256"]
+        assert record["relocation"] is None
+        assert record["symlink"] is None
+
+    def test_refuses_tail_mutation(self, provenance, tmp_path):
+        member = b"ELF-fake-runtime-bytes\n"
+        archive = _make_conda(
+            str(tmp_path), "libfoo", "1.0", "0",
+            {"lib/libfoo.so.1": member})
+        staged, env = self._runtime_tree(
+            tmp_path, {"libfoo.so.1": member + b"TORN"})
+        lock = self._file_lock(tmp_path, [archive])
+        problems, _ = provenance.verify_closure(
+            {"libfoo.so.1": str(staged / "libfoo.so.1")},
+            {"libfoo.so.1": str(env / "libfoo.so.1")},
+            {"libfoo.so.1": "libfoo-1.0-0.conda"},
+            lock, str(tmp_path / "env"),
+            str(tmp_path / "cache"))
+        assert any("libfoo.so.1" in problem for problem in problems), \
+            problems
+
+    def test_refuses_wrong_owner(self, provenance, tmp_path):
+        first = _make_conda(
+            str(tmp_path), "liba", "1.0", "0",
+            {"lib/libdup.so.1": b"bytes-from-a\n"})
+        second = _make_conda(
+            str(tmp_path), "libb", "1.0", "0",
+            {"lib/libdup.so.1": b"bytes-from-b\n"})
+        staged, env = self._runtime_tree(
+            tmp_path, {"libdup.so.1": b"bytes-from-b\n"})
+        lock = self._file_lock(tmp_path, [first, second])
+        problems, _ = provenance.verify_closure(
+            {"libdup.so.1": str(staged / "libdup.so.1")},
+            {"libdup.so.1": str(env / "libdup.so.1")},
+            {"libdup.so.1": "liba-1.0-0.conda"},
+            lock, str(tmp_path / "env"),
+            str(tmp_path / "cache"))
+        assert problems != []
+
+    def test_refuses_missing_origin(self, provenance, tmp_path):
+        archive = _make_conda(
+            str(tmp_path), "libfoo", "1.0", "0",
+            {"lib/libfoo.so.1": b"bytes\n"})
+        staged, env = self._runtime_tree(
+            tmp_path, {"libghost.so.1": b"bytes\n"})
+        lock = self._file_lock(tmp_path, [archive])
+        problems, _ = provenance.verify_closure(
+            {"libghost.so.1": str(staged / "libghost.so.1")},
+            {"libghost.so.1": str(env / "libghost.so.1")},
+            {"libghost.so.1": "libfoo-1.0-0.conda"},
+            lock, str(tmp_path / "env"),
+            str(tmp_path / "cache"))
+        assert problems != []
+        problems, _ = provenance.verify_closure(
+            {"libghost.so.1": str(staged / "libghost.so.1")},
+            {"libghost.so.1": str(env / "libghost.so.1")},
+            {"libghost.so.1": "libabsent-1.0-0.conda"},
+            lock, str(tmp_path / "env"),
+            str(tmp_path / "cache"))
+        assert problems != []
+
+    def test_accepts_relocated_text(self, provenance, tmp_path):
+        prefix = str(tmp_path / "env")
+        archived = b"root=/placeholder/prefix/lib\n"
+        installed = archived.replace(
+            b"/placeholder/prefix", prefix.encode("utf-8"))
+        archive = _make_conda(
+            str(tmp_path), "libfoo", "1.0", "0",
+            {"lib/libfoo.so.1": archived},
+            placeholders={"lib/libfoo.so.1": (
+                "/placeholder/prefix", "text")})
+        staged, env = self._runtime_tree(
+            tmp_path, {"libfoo.so.1": installed})
+        lock = self._file_lock(tmp_path, [archive])
+        problems, records = provenance.verify_closure(
+            {"libfoo.so.1": str(staged / "libfoo.so.1")},
+            {"libfoo.so.1": str(env / "libfoo.so.1")},
+            {"libfoo.so.1": "libfoo-1.0-0.conda"},
+            lock, prefix, str(tmp_path / "cache"))
+        assert problems == [], problems
+        record = records["lib/libfoo.so.1"]
+        assert record["member_sha256"] != record["staged_sha256"]
+        assert record["relocation"] == {
+            "placeholder": "/placeholder/prefix", "prefix": prefix,
+            "file_mode": "text"}
+
+    def test_refuses_truncated_binary_relocation(
+            self, provenance, tmp_path):
+        prefix = str(tmp_path / "env")
+        placeholder = "P" * (len(prefix) + 16)
+        archived = b"head" + placeholder.encode("utf-8") \
+            + b"/lib\x00tail"
+        archive = _make_conda(
+            str(tmp_path), "libfoo", "1.0", "0",
+            {"lib/libfoo.so.1": archived},
+            placeholders={"lib/libfoo.so.1": (
+                placeholder, "binary")})
+        # Padding right after the prefix truncates the c-string:
+        # installers preserve the suffix and pad at the end.
+        truncated = b"head" + prefix.encode("utf-8").ljust(
+            len(placeholder), b"\0") + b"/lib\x00tail"
+        staged, env = self._runtime_tree(
+            tmp_path, {"libfoo.so.1": truncated})
+        lock = self._file_lock(tmp_path, [archive])
+        problems, _ = provenance.verify_closure(
+            {"libfoo.so.1": str(staged / "libfoo.so.1")},
+            {"libfoo.so.1": str(env / "libfoo.so.1")},
+            {"libfoo.so.1": "libfoo-1.0-0.conda"},
+            lock, prefix, str(tmp_path / "cache"))
+        assert problems != []
+
+    def test_accepts_binary_relocation_real_prefix(
+            self, provenance, tmp_path):
+        prefix = str(tmp_path / "env")
+        placeholder = "P" * (len(prefix) + 16)
+        archived = b"head" + placeholder.encode("utf-8") \
+            + b"/lib\x00tail"
+        archive = _make_conda(
+            str(tmp_path), "libfoo", "1.0", "0",
+            {"lib/libfoo.so.1": archived},
+            placeholders={"lib/libfoo.so.1": (
+                placeholder, "binary")})
+        installed = b"head" + prefix.encode("utf-8") + b"/lib\x00" \
+            + b"\x00" * 16 + b"tail"
+        assert len(installed) == len(archived)
+        staged, env = self._runtime_tree(
+            tmp_path, {"libfoo.so.1": installed})
+        lock = self._file_lock(tmp_path, [archive])
+        problems, records = provenance.verify_closure(
+            {"libfoo.so.1": str(staged / "libfoo.so.1")},
+            {"libfoo.so.1": str(env / "libfoo.so.1")},
+            {"libfoo.so.1": "libfoo-1.0-0.conda"},
+            lock, prefix, str(tmp_path / "cache"))
+        assert problems == [], problems
+        record = records["lib/libfoo.so.1"]
+        assert record["relocation"]["file_mode"] == "binary"
+
+    def test_accepts_repeated_binary_relocation(
+            self, provenance, tmp_path):
+        prefix = str(tmp_path / "env")
+        placeholder = "R" * (len(prefix) + 8)
+        archived = placeholder.encode("utf-8") + b":/\x00" \
+            + placeholder.encode("utf-8") + b"\x00"
+        archive = _make_conda(
+            str(tmp_path), "libfoo", "1.0", "0",
+            {"lib/libfoo.so.1": archived},
+            placeholders={"lib/libfoo.so.1": (
+                placeholder, "binary")})
+        installed = prefix.encode("utf-8") + b":/" + b"\x00" * 8 \
+            + b"\x00" + prefix.encode("utf-8") + b"\x00" * 8 \
+            + b"\x00"
+        assert len(installed) == len(archived)
+        staged, env = self._runtime_tree(
+            tmp_path, {"libfoo.so.1": installed})
+        lock = self._file_lock(tmp_path, [archive])
+        problems, _ = provenance.verify_closure(
+            {"libfoo.so.1": str(staged / "libfoo.so.1")},
+            {"libfoo.so.1": str(env / "libfoo.so.1")},
+            {"libfoo.so.1": "libfoo-1.0-0.conda"},
+            lock, prefix, str(tmp_path / "cache"))
+        assert problems == [], problems
+
+    def test_accepts_unmatched_placeholder_verbatim(
+            self, provenance, tmp_path):
+        archived = b"xxUNMATCHED"
+        archive = _make_conda(
+            str(tmp_path), "libfoo", "1.0", "0",
+            {"lib/libfoo.so.1": archived},
+            placeholders={"lib/libfoo.so.1": (
+                "UNMATCHED", "binary")})
+        staged, env = self._runtime_tree(
+            tmp_path, {"libfoo.so.1": archived})
+        lock = self._file_lock(tmp_path, [archive])
+        problems, _ = provenance.verify_closure(
+            {"libfoo.so.1": str(staged / "libfoo.so.1")},
+            {"libfoo.so.1": str(env / "libfoo.so.1")},
+            {"libfoo.so.1": "libfoo-1.0-0.conda"},
+            lock, str(tmp_path / "env"),
+            str(tmp_path / "cache"))
+        assert problems == [], problems
+
+    def test_binary_relocation_preserves_suffix(
+            self, provenance, tmp_path):
+        # Installer semantics: the prefix replaces the
+        # placeholder, the suffix stays at its offset, and
+        # zeros pad the c-string end (conda binary_replace).
+        raw = b"xxPLACEHOLDER/lib\0yy"
+        want = b"xx/e/lib" + b"\0" * 9 + b"\0yy"
+        installed, problem = provenance.apply_relocation(
+            raw, "PLACEHOLDER", "/e", "binary")
+        assert problem is None
+        assert installed == want
+        prefix = str(tmp_path / "env")
+        marker = "P" * (len(prefix) + 2)
+        raw = b"xx" + marker.encode("utf-8") + b"/lib\0yy"
+        reloc, problem = provenance.apply_relocation(
+            raw, marker, prefix, "binary")
+        assert problem is None
+        archive = _make_conda(
+            str(tmp_path), "libfoo", "1.0", "0",
+            {"lib/libfoo.so.1": raw},
+            placeholders={"lib/libfoo.so.1": (marker, "binary")})
+        staged, env = self._runtime_tree(tmp_path, {})
+        (staged / "libfoo.so.1").write_bytes(reloc)
+        (env / "libfoo.so.1").write_bytes(reloc)
+        lock = self._file_lock(tmp_path, [archive])
+        problems, records = provenance.verify_closure(
+            {"libfoo.so.1": str(staged / "libfoo.so.1")},
+            {"libfoo.so.1": str(env / "libfoo.so.1")},
+            {"libfoo.so.1": "libfoo-1.0-0.conda"},
+            lock, prefix, str(tmp_path / "cache"))
+        assert problems == [], problems
+        assert records["lib/libfoo.so.1"]["relocation"] == {
+            "placeholder": marker, "prefix": prefix,
+            "file_mode": "binary",
+        }
+
+    def test_binary_relocation_replaces_same_field_repeats(
+            self, provenance, tmp_path):
+        # Conda replaces every occurrence within the match and
+        # pads by the total reduction, after the terminator.
+        raw = b"PLACEHOLDER/lib:PLACEHOLDER/bin\0"
+        want = b"/e/lib:/e/bin\0" + b"\0" * 18
+        assert len(want) == len(raw)
+        installed, problem = provenance.apply_relocation(
+            raw, "PLACEHOLDER", "/e", "binary")
+        assert problem is None
+        assert installed == want
+
+    def test_refuses_overlong_binary_prefix(
+            self, provenance, tmp_path):
+        archived = b"\x7fELF" + b"SHORTPH" + b"/lib\x00\n"
+        archive = _make_conda(
+            str(tmp_path), "libfoo", "1.0", "0",
+            {"lib/libfoo.so.1": archived},
+            placeholders={"lib/libfoo.so.1": (
+                "SHORTPH", "binary")})
+        staged, env = self._runtime_tree(
+            tmp_path, {"libfoo.so.1": archived})
+        lock = self._file_lock(tmp_path, [archive])
+        problems, _ = provenance.verify_closure(
+            {"libfoo.so.1": str(staged / "libfoo.so.1")},
+            {"libfoo.so.1": str(env / "libfoo.so.1")},
+            {"libfoo.so.1": "libfoo-1.0-0.conda"},
+            lock, str(tmp_path / "env"),
+            str(tmp_path / "cache"))
+        assert problems != []
+
+    def test_resolves_symlink_chain(self, provenance, tmp_path):
+        member = b"ELF-target-bytes\n"
+        archive = _make_conda(
+            str(tmp_path), "libfoo", "1.0", "0",
+            {"lib/libfoo.so.1.2": member},
+            links={"lib/libfoo.so.1": "libfoo.so.1.2"})
+        staged = tmp_path / "staged" / "lib"
+        env = tmp_path / "env" / "lib"
+        staged.mkdir(parents=True)
+        env.mkdir(parents=True)
+        (staged / "libfoo.so.1").write_bytes(member)
+        (env / "libfoo.so.1.2").write_bytes(member)
+        os.symlink("libfoo.so.1.2", env / "libfoo.so.1")
+        lock = self._file_lock(tmp_path, [archive])
+        problems, records = provenance.verify_closure(
+            {"libfoo.so.1": str(staged / "libfoo.so.1")},
+            {"libfoo.so.1": str(env / "libfoo.so.1")},
+            {"libfoo.so.1": "libfoo-1.0-0.conda"},
+            lock, str(tmp_path / "env"),
+            str(tmp_path / "cache"))
+        assert problems == [], problems
+        record = records["lib/libfoo.so.1"]
+        assert record["member"] == "lib/libfoo.so.1.2"
+        assert record["symlink"]["env"] == [
+            "lib/libfoo.so.1", "lib/libfoo.so.1.2"]
+        assert record["symlink"]["archive"] == [
+            "lib/libfoo.so.1", "lib/libfoo.so.1.2"]
+
+    def test_refuses_escaping_symlink(self, provenance, tmp_path):
+        member = b"ELF-target-bytes\n"
+        archive = _make_conda(
+            str(tmp_path), "libfoo", "1.0", "0",
+            {"lib/libfoo.so.1": member})
+        staged = tmp_path / "staged" / "lib"
+        env = tmp_path / "env" / "lib"
+        staged.mkdir(parents=True)
+        env.mkdir(parents=True)
+        outside = tmp_path / "outside.bin"
+        outside.write_bytes(member)
+        (staged / "libfoo.so.1").write_bytes(member)
+        os.symlink(str(outside), env / "libfoo.so.1")
+        lock = self._file_lock(tmp_path, [archive])
+        problems, _ = provenance.verify_closure(
+            {"libfoo.so.1": str(staged / "libfoo.so.1")},
+            {"libfoo.so.1": str(env / "libfoo.so.1")},
+            {"libfoo.so.1": "libfoo-1.0-0.conda"},
+            lock, str(tmp_path / "env"),
+            str(tmp_path / "cache"))
+        assert problems != []
+
+    def test_refuses_archive_sha_mismatch(
+            self, provenance, tmp_path):
+        member = b"ELF-fake-runtime-bytes\n"
+        archive = _make_conda(
+            str(tmp_path), "libfoo", "1.0", "0",
+            {"lib/libfoo.so.1": member})
+        staged, env = self._runtime_tree(
+            tmp_path, {"libfoo.so.1": member})
+        wrong = ("file://%s" % archive[0], "0" * 64)
+        text = _lock_text([wrong])
+        problems, _ = provenance.verify_closure(
+            {"libfoo.so.1": str(staged / "libfoo.so.1")},
+            {"libfoo.so.1": str(env / "libfoo.so.1")},
+            {"libfoo.so.1": "libfoo-1.0-0.conda"},
+            text, str(tmp_path / "env"),
+            str(tmp_path / "cache"))
+        assert problems == [
+            "libfoo.so.1: libfoo-1.0-0.conda sha256 mismatch; "
+            "want " + "0" * 64]
+
+    def test_refuses_malformed_archives(
+            self, provenance, tmp_path):
+        member = b"ELF-fake-runtime-bytes\n"
+        good = _make_conda(
+            str(tmp_path), "libfoo", "1.0", "0",
+            {"lib/libfoo.so.1": member})
+        staged, env = self._runtime_tree(
+            tmp_path, {"libfoo.so.1": member})
+
+        def check(broken, want):
+            with open(broken[0], "rb") as handle:
+                digest = hashlib.sha256(handle.read()).hexdigest()
+            text = _lock_text(
+                [("file://%s" % broken[0], digest)])
+            problems, _ = provenance.verify_closure(
+                {"libfoo.so.1": str(staged / "libfoo.so.1")},
+                {"libfoo.so.1": str(env / "libfoo.so.1")},
+                {"libfoo.so.1": broken[2]},
+                text, str(tmp_path / "env"),
+                str(tmp_path / "cache"))
+            assert problems == [want], broken[2]
+
+        # Missing payload tarball.
+        bare = os.path.join(str(tmp_path), "libbare-1.0-0.conda")
+        with zipfile.ZipFile(bare, "w", zipfile.ZIP_STORED) as zf:
+            zf.writestr("metadata.json",
+                        '{"conda_pkg_format_version": 2}')
+        check((bare, None, "libbare-1.0-0.conda"),
+              "libfoo.so.1: archive must hold exactly one "
+              "payload and one info stream")
+        # Unknown format version.
+        future = _make_conda(
+            str(tmp_path), "libfut", "1.0", "0",
+            {"lib/libfut.so.1": member}, format_version=99)
+        staged3, env3 = self._runtime_tree(
+            tmp_path / "t3", {"libfut.so.1": member})
+        text = _lock_text(
+            [("file://%s" % future[0], future[1])])
+        problems, _ = provenance.verify_closure(
+            {"libfut.so.1": str(staged3 / "libfut.so.1")},
+            {"libfut.so.1": str(env3 / "libfut.so.1")},
+            {"libfut.so.1": "libfut-1.0-0.conda"},
+            text, str(tmp_path / "t3" / "env"),
+            str(tmp_path / "cache"))
+        assert problems == [
+            "libfut.so.1: archive has an unsupported format: 99"]
+        # Member bytes disagree with paths.json.
+        lying = _make_conda(
+            str(tmp_path), "liblying", "1.0", "0",
+            {"lib/liblying.so.1": b"member-bytes\n"},
+            path_overrides={"lib/liblying.so.1": {
+                "sha256": hashlib.sha256(b"other\n").hexdigest()}})
+        staged2 = tmp_path / "staged2" / "lib"
+        env2 = tmp_path / "env2" / "lib"
+        staged2.mkdir(parents=True)
+        env2.mkdir(parents=True)
+        (staged2 / "liblying.so.1").write_bytes(b"member-bytes\n")
+        (env2 / "liblying.so.1").write_bytes(b"member-bytes\n")
+        text = _lock_text(
+            [("file://%s" % lying[0], lying[1])])
+        problems, _ = provenance.verify_closure(
+            {"liblying.so.1": str(staged2 / "liblying.so.1")},
+            {"liblying.so.1": str(env2 / "liblying.so.1")},
+            {"liblying.so.1": "liblying-1.0-0.conda"},
+            text, str(tmp_path / "env2"),
+            str(tmp_path / "cache"))
+        assert problems == [
+            "liblying.so.1: archive member disagrees with its "
+            "record: lib/liblying.so.1"]
+        # Traversal member poisons the archive.
+        evil = _make_conda(
+            str(tmp_path), "libevil", "1.0", "0",
+            {"lib/libevil.so.1": member, "../evil": b"x\n"})
+        staged4, env4 = self._runtime_tree(
+            tmp_path / "t4", {"libevil.so.1": member})
+        text = _lock_text(
+            [("file://%s" % evil[0], evil[1])])
+        problems, _ = provenance.verify_closure(
+            {"libevil.so.1": str(staged4 / "libevil.so.1")},
+            {"libevil.so.1": str(env4 / "libevil.so.1")},
+            {"libevil.so.1": "libevil-1.0-0.conda"},
+            text, str(tmp_path / "t4" / "env"),
+            str(tmp_path / "cache"))
+        assert problems == [
+            "libevil.so.1: tar member escapes its root: "
+            "'../evil'"]
+
+    def test_verifies_licenses(self, provenance, tmp_path):
+        text = b"fake license text\n"
+        archive = _make_conda(
+            str(tmp_path), "libfoo", "1.0", "0",
+            {"lib/libfoo.so.1": b"bytes\n"},
+            licenses={"LICENSE": text})
+        staged = tmp_path / "staged"
+        (staged / "licenses").mkdir(parents=True)
+        (staged / "licenses" / "LICENSE.foo").write_bytes(text)
+        lock = self._file_lock(tmp_path, [archive])
+        table = [("licenses/LICENSE.foo", "libfoo-1.0-0.conda",
+                  "info", "info/licenses/LICENSE")]
+        problems, records = provenance.verify_runtime_licenses(
+            str(staged), table, lock, str(tmp_path / "cache"))
+        assert problems == [], problems
+        assert records["licenses/LICENSE.foo"]["sha256"] == \
+            hashlib.sha256(text).hexdigest()
+        (staged / "licenses" / "LICENSE.foo").write_bytes(
+            b"altered\n")
+        problems, _ = provenance.verify_runtime_licenses(
+            str(staged), table, lock, str(tmp_path / "cache"))
+        assert problems != []
+
+    def test_refuses_symlinked_download_target(
+            self, provenance, tmp_path):
+        member = b"ELF-fake-runtime-bytes\n"
+        archive = _make_conda(
+            str(tmp_path), "libfoo", "1.0", "0",
+            {"lib/libfoo.so.1": member})
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        victim = tmp_path / "victim.bin"
+        victim.write_bytes(b"untouched\n")
+        os.symlink(str(victim), cache / "libfoo-1.0-0.conda.part")
+        problems, _ = provenance.verify_closure(
+            {"libfoo.so.1": str(tmp_path / "staged")},
+            {"libfoo.so.1": str(tmp_path / "env")},
+            {"libfoo.so.1": "libfoo-1.0-0.conda"},
+            self._file_lock(tmp_path, [archive]),
+            str(tmp_path / "env"), str(cache))
+        assert problems != []
+        assert victim.read_bytes() == b"untouched\n"
+        assert not os.path.exists(cache / "libfoo-1.0-0.conda")
+
+    def test_heals_stale_download_part(self, provenance, tmp_path):
+        member = b"ELF-fake-runtime-bytes\n"
+        archive = _make_conda(
+            str(tmp_path), "libfoo", "1.0", "0",
+            {"lib/libfoo.so.1": member})
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        (cache / "libfoo-1.0-0.conda.part").write_bytes(b"stale\n")
+        staged, env = self._runtime_tree(
+            tmp_path, {"libfoo.so.1": member})
+        lock = self._file_lock(tmp_path, [archive])
+        problems, records = provenance.verify_closure(
+            {"libfoo.so.1": str(staged / "libfoo.so.1")},
+            {"libfoo.so.1": str(env / "libfoo.so.1")},
+            {"libfoo.so.1": "libfoo-1.0-0.conda"},
+            lock, str(tmp_path / "env"), str(cache))
+        assert problems == [], problems
+        assert records["lib/libfoo.so.1"]["package"] == "libfoo"
+        assert not os.path.exists(
+            cache / "libfoo-1.0-0.conda.part")
+
+    def test_failed_retention_cleans_part(
+            self, provenance, tmp_path):
+        member = b"ELF-fake-runtime-bytes\n"
+        archive = _make_conda(
+            str(tmp_path), "libfoo", "1.0", "0",
+            {"lib/libfoo.so.1": member})
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        os.mkdir(cache / "libfoo-1.0-0.conda")
+        staged, env = self._runtime_tree(
+            tmp_path, {"libfoo.so.1": member})
+        lock = self._file_lock(tmp_path, [archive])
+        problems, _ = provenance.verify_closure(
+            {"libfoo.so.1": str(staged / "libfoo.so.1")},
+            {"libfoo.so.1": str(env / "libfoo.so.1")},
+            {"libfoo.so.1": "libfoo-1.0-0.conda"},
+            lock, str(tmp_path / "env"), str(cache))
+        assert problems != []
+        assert not os.path.exists(
+            cache / "libfoo-1.0-0.conda.part")
+        assert sorted(os.listdir(cache)) == ["libfoo-1.0-0.conda"]
+
+    def test_refuses_outside_symlink_hop(
+            self, provenance, tmp_path):
+        member = b"ELF-target-bytes\n"
+        archive = _make_conda(
+            str(tmp_path), "libfoo", "1.0", "0",
+            {"lib/libfoo.so.1": member,
+             "lib/libfoo.so.1.2": member})
+        env = tmp_path / "env" / "lib"
+        env.mkdir(parents=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (env / "libfoo.so.1.2").write_bytes(member)
+        os.symlink(str(env / "libfoo.so.1.2"),
+                   outside / "backlink")
+        os.symlink(str(outside / "backlink"), env / "libfoo.so.1")
+        staged = tmp_path / "staged" / "lib"
+        staged.mkdir(parents=True)
+        (staged / "libfoo.so.1").write_bytes(member)
+        lock = self._file_lock(tmp_path, [archive])
+        problems, _ = provenance.verify_closure(
+            {"libfoo.so.1": str(staged / "libfoo.so.1")},
+            {"libfoo.so.1": str(env / "libfoo.so.1")},
+            {"libfoo.so.1": "libfoo-1.0-0.conda"},
+            lock, str(tmp_path / "env"),
+            str(tmp_path / "cache"))
+        assert problems != []
+
+    def test_cache_swap_after_hash_refused(
+            self, provenance, tmp_path, monkeypatch):
+        member = b"ELF-fake-runtime-bytes\n"
+        forged_member = b"ELF-forged-runtime-bytes\n"
+        good = _make_conda(
+            str(tmp_path), "libfoo", "1.0", "0",
+            {"lib/libfoo.so.1": member})
+        forged = _make_conda(
+            str(tmp_path), "libforged", "1.0", "0",
+            {"lib/libfoo.so.1": forged_member})
+        staged, env = self._runtime_tree(
+            tmp_path, {"libfoo.so.1": forged_member})
+        lock = self._file_lock(tmp_path, [good])
+        cache = tmp_path / "cache"
+        real_zipfile = provenance.zipfile.ZipFile
+
+        def swapping(*args, **kwargs):
+            if args and isinstance(args[0], str) \
+                    and args[0].endswith(".conda"):
+                shutil.copyfile(forged[0], args[0])
+            return real_zipfile(*args, **kwargs)
+
+        monkeypatch.setattr(
+            provenance.zipfile, "ZipFile", swapping)
+        problems, _ = provenance.verify_closure(
+            {"libfoo.so.1": str(staged / "libfoo.so.1")},
+            {"libfoo.so.1": str(env / "libfoo.so.1")},
+            {"libfoo.so.1": "libfoo-1.0-0.conda"},
+            lock, str(tmp_path / "env"), str(cache))
+        assert problems != []
+
+    def test_owners_from_conda_meta(self, provenance, tmp_path):
+        meta = tmp_path / "env" / "conda-meta"
+        meta.mkdir(parents=True)
+        (meta / "libfoo-1.0-0.json").write_text(json.dumps({
+            "fn": "libfoo-1.0-0.conda",
+            "files": ["lib/libfoo.so.1", "lib/libshared.so.1"]}))
+        (meta / "libbar-2.0-1.json").write_text(json.dumps({
+            "fn": "libbar-2.0-1.conda",
+            "files": ["lib/libbar.so.1", "lib/libshared.so.1"]}))
+        owners, problems = provenance.owners_from_conda_meta(
+            str(tmp_path / "env"), ["libfoo.so.1", "libbar.so.1"])
+        assert problems == [], problems
+        assert owners == {"libfoo.so.1": "libfoo-1.0-0.conda",
+                          "libbar.so.1": "libbar-2.0-1.conda"}
+        _, problems = provenance.owners_from_conda_meta(
+            str(tmp_path / "env"), ["libshared.so.1"])
+        assert problems != []
+        _, problems = provenance.owners_from_conda_meta(
+            str(tmp_path / "env"), ["libghost.so.1"])
+        assert problems != []
+
+    def test_requires_zstd(self, provenance, tmp_path):
+        member = b"ELF-fake-runtime-bytes\n"
+        archive = _make_conda(
+            str(tmp_path), "libfoo", "1.0", "0",
+            {"lib/libfoo.so.1": member})
+        staged, env = self._runtime_tree(
+            tmp_path, {"libfoo.so.1": member})
+        lock = self._file_lock(tmp_path, [archive])
+        problems, _ = provenance.verify_closure(
+            {"libfoo.so.1": str(staged / "libfoo.so.1")},
+            {"libfoo.so.1": str(env / "libfoo.so.1")},
+            {"libfoo.so.1": "libfoo-1.0-0.conda"},
+            lock, str(tmp_path / "env"),
+            str(tmp_path / "cache"), zstd="/nonexistent/zstd")
+        assert any("zstd" in problem for problem in problems), \
+            problems
