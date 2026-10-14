@@ -906,13 +906,382 @@ def test_duplicate_churn_keeps_bounded_causes() raises:
         assert_true(not _paired(dup))
     assert_equal(len(reg._pending), 0)
     assert_equal(len(reg._resolved), 2)
-    assert_equal(len(reg._cause_order), 2)
+    assert_equal(len(reg._cause_order_map), 2)
     assert_equal(
         reg.health().reason,
         String(
-            "duplicate result for dop0; "
-            "resolved-operation history exceeded"
+            "mapping_release partial (duplicate result for dop0; "
+            "resolved-operation history exceeded)"
         ),
+    )
+
+
+def _long_id(prefix: String, n: Int) -> String:
+    var out = prefix
+    for _ in range(n):
+        out += "x"
+    return out^
+
+
+def test_complete_health_has_complete_relations() raises:
+    var reg = CorrelationRegistry()
+    reg.admit_hook("h", "iova")
+    _ = reg.normalize(_attempt("op1", "d1", "h", UInt64(1)), "ring")
+    _ = reg.normalize(
+        _map("op1", True, "m1", "h", UInt64(2)), "ring"
+    )
+    var full = reg.health_full()
+    assert_equal(full.mapping_release.status, "complete_for_scope")
+    assert_true(full.mapping_release.has_loss_count)
+    assert_equal(full.mapping_release.loss_count, UInt64(0))
+    assert_equal(
+        full.mapping_release.scope, "mapping and release pairing"
+    )
+    assert_equal(full.copy_attribution.status, "complete_for_scope")
+    assert_true(full.copy_attribution.has_loss_count)
+    assert_equal(full.copy_attribution.scope, "copy attribution")
+    assert_equal(full.sync_attribution.status, "complete_for_scope")
+    assert_true(full.sync_attribution.has_loss_count)
+    assert_equal(full.sync_attribution.scope, "sync attribution")
+    assert_equal(full.aggregate.status, "complete_for_scope")
+    assert_equal(
+        full.aggregate.reason, "all lifecycle events paired"
+    )
+    assert_equal(reg.health().status, "complete_for_scope")
+
+
+def test_copy_loss_scoped_to_copy_class() raises:
+    var reg = CorrelationRegistry()
+    reg.admit_hook("h", "iova")
+    _ = reg.normalize(_attempt("op1", "d1", "h", UInt64(1)), "ring")
+    _ = reg.normalize(
+        _map("op1", True, "m1", "h", UInt64(2)), "ring"
+    )
+    _ = reg.normalize(_attempt("op2", "d1", "h", UInt64(3)), "ring")
+    var out = reg.normalize(
+        _copy("op2", "m1", "h", UInt64(4)), "ring"
+    )
+    assert_true(not _paired(out))
+    var full = reg.health_full()
+    assert_equal(full.mapping_release.status, "complete_for_scope")
+    assert_equal(full.copy_attribution.status, "partial")
+    assert_true(not full.copy_attribution.has_loss_count)
+    assert_true(
+        full.copy_attribution.reason.find(
+            String("copy operation mismatch")
+        )
+        != -1
+    )
+    assert_equal(full.sync_attribution.status, "complete_for_scope")
+    assert_equal(full.aggregate.status, "partial")
+    assert_true(
+        full.aggregate.reason.find(String("copy_attribution")) != -1
+    )
+    assert_true(
+        full.aggregate.reason.find(String("mapping_release")) == -1
+    )
+    assert_true(
+        full.aggregate.reason.find(String("sync_attribution"))
+        == -1
+    )
+
+
+def test_sync_loss_scoped_to_sync_class() raises:
+    var reg = CorrelationRegistry()
+    reg.admit_hook("h", "iova")
+    _ = reg.normalize(_attempt("op1", "d1", "h", UInt64(1)), "ring")
+    _ = reg.normalize(
+        _map("op1", True, "m1", "h", UInt64(2)), "ring"
+    )
+    var out = reg.normalize(
+        _sync("op1", "ghost", "h", UInt64(3)), "ring"
+    )
+    assert_true(not _paired(out))
+    var full = reg.health_full()
+    assert_equal(full.mapping_release.status, "complete_for_scope")
+    assert_equal(full.copy_attribution.status, "complete_for_scope")
+    assert_equal(full.sync_attribution.status, "partial")
+    assert_true(
+        full.sync_attribution.reason.find(
+            String("sync references unknown mapping")
+        )
+        != -1
+    )
+    assert_equal(full.aggregate.status, "partial")
+    assert_true(
+        full.aggregate.reason.find(String("sync_attribution")) != -1
+    )
+    assert_true(
+        full.aggregate.reason.find(String("mapping_release")) == -1
+    )
+
+
+def test_mapping_loss_scoped_to_mapping_class() raises:
+    var reg = CorrelationRegistry()
+    reg.admit_hook("h", "iova")
+    var out = reg.normalize(
+        _map("ghost", True, "m1", "h", UInt64(1)), "ring"
+    )
+    assert_true(not _paired(out))
+    var full = reg.health_full()
+    assert_equal(full.mapping_release.status, "partial")
+    assert_true(
+        full.mapping_release.reason.find(
+            String("map_result without pending operation")
+        )
+        != -1
+    )
+    assert_equal(full.copy_attribution.status, "complete_for_scope")
+    assert_equal(full.sync_attribution.status, "complete_for_scope")
+    assert_equal(
+        full.aggregate.reason,
+        "mapping_release partial"
+        " (map_result without pending operation)",
+    )
+
+
+def test_resolved_pressure_scoped_to_mapping_class() raises:
+    var reg = CorrelationRegistry[2, 65536, 8, 16384, 4096, 2]()
+    reg.admit_hook("h", "iova")
+    var s = 1
+    for i in range(3):
+        var op = "rop" + String(i)
+        _ = reg.normalize(
+            _attempt(op, "d1", "h", UInt64(s)), "ring"
+        )
+        s += 1
+        _ = reg.normalize(
+            _map(op, False, "", "h", UInt64(s)), "ring"
+        )
+        s += 1
+    var full = reg.health_full()
+    assert_equal(full.mapping_release.status, "partial")
+    assert_true(
+        full.mapping_release.reason.find(
+            String("resolved-operation history exceeded")
+        )
+        != -1
+    )
+    assert_equal(full.copy_attribution.status, "complete_for_scope")
+    assert_equal(full.sync_attribution.status, "complete_for_scope")
+    assert_true(
+        full.aggregate.reason.find(String("mapping_release")) != -1
+    )
+
+
+def test_hook_not_admitted_scoped_by_kind() raises:
+    var reg = CorrelationRegistry()
+    reg.admit_hook("h", "iova")
+    _ = reg.normalize(
+        _attempt("op1", "d1", "nope", UInt64(1)), "ring"
+    )
+    _ = reg.normalize(_copy("op1", "", "nope", UInt64(2)), "ring")
+    _ = reg.normalize(
+        _sync("op1", "m1", "nope", UInt64(3)), "ring"
+    )
+    var full = reg.health_full()
+    assert_equal(full.mapping_release.status, "partial")
+    assert_true(
+        full.mapping_release.reason.find(String("hook not admitted"))
+        != -1
+    )
+    assert_equal(full.copy_attribution.status, "partial")
+    assert_true(
+        full.copy_attribution.reason.find(String("hook not admitted"))
+        != -1
+    )
+    assert_equal(full.sync_attribution.status, "partial")
+    assert_true(
+        full.sync_attribution.reason.find(String("hook not admitted"))
+        != -1
+    )
+
+
+def test_mixed_loss_names_every_class_in_order() raises:
+    var reg = CorrelationRegistry()
+    reg.admit_hook("h", "iova")
+    _ = reg.normalize(
+        _map("ghost", True, "m1", "h", UInt64(1)), "ring"
+    )
+    _ = reg.normalize(_copy("ghost", "", "h", UInt64(2)), "ring")
+    _ = reg.normalize(
+        _sync("ghost", "ghost", "h", UInt64(3)), "ring"
+    )
+    var full = reg.health_full()
+    assert_equal(full.mapping_release.status, "partial")
+    assert_equal(full.copy_attribution.status, "partial")
+    assert_equal(full.sync_attribution.status, "partial")
+    var at_map = full.aggregate.reason.find(
+        String("mapping_release")
+    )
+    var at_copy = full.aggregate.reason.find(
+        String("copy_attribution")
+    )
+    var at_sync = full.aggregate.reason.find(
+        String("sync_attribution")
+    )
+    assert_true(at_map != -1)
+    assert_true(at_copy != -1)
+    assert_true(at_sync != -1)
+    assert_true(at_map < at_copy)
+    assert_true(at_copy < at_sync)
+
+
+def test_relation_refs_capped_per_class_and_total() raises:
+    var reg = CorrelationRegistry()
+    reg.admit_hook("h", "iova")
+    for i in range(10):
+        _ = reg.normalize(
+            _copy("cop" + String(i), "", "h", UInt64(i + 1)),
+            "ring",
+        )
+    var full = reg.health_full()
+    assert_equal(len(full.copy_attribution.evidence_refs), 8)
+    assert_equal(full.copy_attribution.evidence_refs[0], "ring:seq=1")
+    assert_true(len(full.aggregate.evidence_refs) <= 8)
+
+
+def test_relation_reasons_stay_bounded() raises:
+    var reg = CorrelationRegistry[8, 2, 1, 16384, 2, 2]()
+    reg.admit_hook("h", "iova")
+    var s = 1
+    var big1 = _long_id("op-", 100)
+    _ = reg.normalize(_attempt(big1, "d1", "h", UInt64(s)), "ring")
+    s += 1
+    _ = reg.normalize(_attempt(big1, "d1", "h", UInt64(s)), "ring")
+    s += 1
+    var big2 = _long_id("res-", 100)
+    _ = reg.normalize(_attempt(big2, "d1", "h", UInt64(s)), "ring")
+    s += 1
+    _ = reg.normalize(
+        _map(big2, False, "", "h", UInt64(s)), "ring"
+    )
+    s += 1
+    _ = reg.normalize(
+        _map(big2, False, "", "h", UInt64(s)), "ring"
+    )
+    s += 1
+    _ = reg.normalize(
+        _map("ghost", True, "m1", "h", UInt64(s)), "ring"
+    )
+    s += 1
+    _ = reg.normalize(
+        _attempt("opA", "d1", "h", UInt64(s)), "ring"
+    )
+    s += 1
+    _ = reg.normalize(
+        _map("opA", True, "mA", "h", UInt64(s)), "ring"
+    )
+    s += 1
+    _ = reg.normalize(
+        _attempt("opB", "d1", "h", UInt64(s)), "ring"
+    )
+    s += 1
+    _ = reg.normalize(
+        _map("opB", True, "mA", "h", UInt64(s)), "ring"
+    )
+    s += 1
+    _ = reg.normalize(
+        _attempt("opC", "d1", "h", UInt64(s)), "ring"
+    )
+    s += 1
+    _ = reg.normalize(
+        _map("opC", True, "mC", "h", UInt64(s)), "ring"
+    )
+    s += 1
+    _ = reg.normalize(
+        _attempt("opD", "d1", "h", UInt64(s)), "ring"
+    )
+    s += 1
+    _ = reg.normalize(
+        _map("opD", True, "mD", "h", UInt64(s)), "ring"
+    )
+    s += 1
+    _ = reg.normalize(_unmap("mA", "h", UInt64(s)), "ring")
+    s += 1
+    _ = reg.normalize(_unmap("mA", "h", UInt64(s)), "ring")
+    s += 1
+    _ = reg.normalize(_unmap("ghost", "h", UInt64(s)), "ring")
+    s += 1
+    _ = reg.normalize(
+        _attempt("opE", "d2", "h", UInt64(s)), "ring"
+    )
+    s += 1
+    _ = reg.normalize(
+        _attempt("opF", "d3", "h", UInt64(s)), "ring"
+    )
+    s += 1
+    _ = reg.normalize(_copy("opB", "mC", "h", UInt64(s)), "ring")
+    s += 1
+    _ = reg.normalize(
+        _copy("opB", "ghost-map", "h", UInt64(s)), "ring"
+    )
+    s += 1
+    _ = reg.normalize(
+        _copy("ghost-op", "", "h", UInt64(s)), "ring"
+    )
+    s += 1
+    _ = reg.normalize(_copy("opC", "", "h", UInt64(s)), "ring")
+    s += 1
+    _ = reg.normalize(_copy("opE", "", "h", UInt64(s)), "ring")
+    s += 1
+    _ = reg.normalize(_copy("opE", "", "h", UInt64(s)), "ring")
+    s += 1
+    _ = reg.normalize(
+        _sync("opC", "ghost-sync", "h", UInt64(s)), "ring"
+    )
+    s += 1
+    _ = reg.normalize(
+        _sync("opB", "mC", "h", UInt64(s)), "ring"
+    )
+    s += 1
+    var long_hook = _long_id("hook-", 400)
+    _ = reg.normalize(
+        _attempt("opG", "d1", long_hook, UInt64(s)), "ring"
+    )
+    s += 1
+    _ = reg.normalize(
+        _copy("cop1", "mC", long_hook, UInt64(s)), "ring"
+    )
+    s += 1
+    _ = reg.normalize(
+        _sync("opC", "mC", long_hook, UInt64(s)), "ring"
+    )
+    s += 1
+    var full = reg.health_full()
+    assert_equal(full.mapping_release.status, "partial")
+    assert_equal(full.copy_attribution.status, "partial")
+    assert_equal(full.sync_attribution.status, "partial")
+    assert_true(
+        full.mapping_release.reason.count_codepoints() <= 512
+    )
+    assert_true(
+        full.copy_attribution.reason.count_codepoints() <= 512
+    )
+    assert_true(
+        full.sync_attribution.reason.count_codepoints() <= 512
+    )
+    assert_true(full.aggregate.reason.count_codepoints() <= 512)
+    assert_true(
+        full.mapping_release.reason.find(String("duplicate operation"))
+        != -1
+    )
+    assert_true(
+        full.copy_attribution.reason.find(String("hook not admitted"))
+        != -1
+    )
+    assert_true(
+        full.copy_attribution.reason.find(long_hook) == -1
+    )
+    assert_true(
+        full.aggregate.reason.find(String("mapping_release")) != -1
+    )
+    assert_true(
+        full.aggregate.reason.find(String("copy_attribution"))
+        != -1
+    )
+    assert_true(
+        full.aggregate.reason.find(String("sync_attribution")) != -1
     )
 
 
@@ -962,6 +1331,15 @@ def run() raises -> Int:
     suite.test[test_expired_duplicate_loses_duplicate_verdict]()
     suite.test[test_operation_id_reuse_after_expiry_pairs_as_new]()
     suite.test[test_duplicate_churn_keeps_bounded_causes]()
+    suite.test[test_complete_health_has_complete_relations]()
+    suite.test[test_copy_loss_scoped_to_copy_class]()
+    suite.test[test_sync_loss_scoped_to_sync_class]()
+    suite.test[test_mapping_loss_scoped_to_mapping_class]()
+    suite.test[test_resolved_pressure_scoped_to_mapping_class]()
+    suite.test[test_hook_not_admitted_scoped_by_kind]()
+    suite.test[test_mixed_loss_names_every_class_in_order]()
+    suite.test[test_relation_refs_capped_per_class_and_total]()
+    suite.test[test_relation_reasons_stay_bounded]()
     suite^.run()
     return 0
 

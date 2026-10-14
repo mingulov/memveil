@@ -30,9 +30,13 @@ import json
 import os
 import re
 import sys
+import tempfile
 
 VERSION = "0.1.0"
+REPORT_VERSION = "0.1.1"
 SESSION_VERSION = "0.1.1"
+SESSION_VERSION_NEXT = "0.1.2"
+RELATIONS = ("mapping_release", "copy_attribution", "sync_attribution")
 EVENT_VERSION = "0.1.1"
 PROFILE_VERSION = "0.1.1"
 U64MAX = 18446744073709551615
@@ -229,25 +233,45 @@ def read_json_file(path, what):
     return parse_json(text, what)
 
 
-def check_quality(quality, where):
+def check_channel_body(channel, target):
+    check_enum(channel["status"],
+               ("complete_for_scope", "partial", "unavailable",
+                "not_applicable"), target + ".status")
+    if channel["loss_count"] is not None:
+        check_u64(channel["loss_count"], target + ".loss_count")
+    check_text(channel["scope"], 256, target + ".scope")
+    check_text(channel["reason"], 512, target + ".reason")
+    refs = channel.get("evidence_refs", [])
+    if not isinstance(refs, list) or len(refs) > 32:
+        fail("bad-type", target + ".evidence_refs")
+    for ref in refs:
+        check_text(ref, 256, target + ".evidence_refs[]")
+
+
+def check_channel(channel, target):
+    check_keys(channel, ("status", "loss_count", "scope", "reason"),
+               ("evidence_refs",), target)
+    check_channel_body(channel, target)
+
+
+def check_quality(quality, where, relations_allowed=False):
     check_keys(quality, CHANNELS, (), where)
     for name in CHANNELS:
         channel = quality[name]
         target = "%s.%s" % (where, name)
-        check_keys(channel, ("status", "loss_count", "scope", "reason"),
-                   ("evidence_refs",), target)
-        check_enum(channel["status"],
-                   ("complete_for_scope", "partial", "unavailable",
-                    "not_applicable"), target + ".status")
-        if channel["loss_count"] is not None:
-            check_u64(channel["loss_count"], target + ".loss_count")
-        check_text(channel["scope"], 256, target + ".scope")
-        check_text(channel["reason"], 512, target + ".reason")
-        refs = channel.get("evidence_refs", [])
-        if not isinstance(refs, list) or len(refs) > 32:
-            fail("bad-type", target + ".evidence_refs")
-        for ref in refs:
-            check_text(ref, 256, target + ".evidence_refs[]")
+        if name == "correlation" and relations_allowed:
+            check_keys(channel, ("status", "loss_count", "scope", "reason"),
+                       ("evidence_refs", "relations"), target)
+            check_channel_body(channel, target)
+            if "relations" in channel:
+                rel = channel["relations"]
+                check_keys(rel, RELATIONS, (),
+                           target + ".relations")
+                for cls in RELATIONS:
+                    check_channel(rel[cls],
+                                  "%s.relations.%s" % (target, cls))
+        else:
+            check_channel(channel, target)
 
 
 def check_device_catalog(catalog, where):
@@ -331,7 +355,8 @@ def check_session(obj):
                 "environment", "capture", "device_catalog", "baseline",
                 "capabilities", "quality", "stop"),
                ("boot_id",), "session")
-    if obj["schema_version"] != SESSION_VERSION:
+    if obj["schema_version"] not in (SESSION_VERSION,
+                                      SESSION_VERSION_NEXT):
         fail("bad-version", "session schema_version %r"
              % (obj["schema_version"],))
     session_id = check_id(obj["session_id"], "session_id")
@@ -424,7 +449,9 @@ def check_session(obj):
             check_enum(capability["grade"],
                        ("validated", "local-auto", "candidate", "partial"),
                        "capability.%s.grade" % name)
-    check_quality(obj["quality"], "quality")
+    check_quality(obj["quality"], "quality",
+                    relations_allowed=(obj["schema_version"]
+                                        == SESSION_VERSION_NEXT))
     check_stop(obj["stop"])
     return {"id": session_id, "synthetic": obj["synthetic"],
             "start": start, "end": end,
@@ -820,7 +847,7 @@ def validate_stream(session, events_path):
                          % (lineno, ref))
                 state["released"] = True
             else:
-                pending_refs.append((event["seq"], ref))
+                pending_refs.append((event["seq"], ref, event["kind"]))
         if len(operations) + len(mappings) > MAX_TRACKED_IDS:
             fail("too-many-identities",
                  "capture exceeds %d tracked identities" % MAX_TRACKED_IDS)
@@ -839,16 +866,28 @@ def validate_stream(session, events_path):
         if event["kind"] == "pool_sample":
             pools.add(event["pool"])
         count += 1
-    # Copy/sync references the session's correlation channel
+    # Copy/sync references the session's correlation evidence
     # declares unpairable (partial or unavailable) are expected:
     # v2 syncs keep record-local ids that never match gen-N keys
-    # and copies keep operation id only. A dangling reference
+    # and copies keep operation id only. Without relations the
+    # aggregate excuses either kind; with relations each kind
+    # needs its own class partial, so copy uncertainty never
+    # excuses a dangling sync reference. A dangling reference
     # while the session claims complete correlation contradicts
     # the capture and refuses. Unmap releases stay strict above.
     corr = session.get("quality", {}).get("correlation", {})
-    expected = corr.get("status") in ("partial", "unavailable")
-    for seq, ref in pending_refs:
-        if ref not in mappings and not expected:
+    relations = corr.get("relations")
+    for seq, ref, kind in pending_refs:
+        if ref in mappings:
+            continue
+        if relations is None:
+            expected = corr.get("status") in ("partial", "unavailable")
+        else:
+            cls = ("copy_attribution" if kind == "copy"
+                   else "sync_attribution")
+            expected = relations.get(cls, {}).get("status") in (
+                "partial", "unavailable")
+        if not expected:
             fail("unknown-mapping",
                  "seq %d references unknown mapping %s" % (seq, ref))
     return {"count": count, "attempts": attempts, "requested": requested,
@@ -921,7 +960,7 @@ def compare_report_obj(obj, session, summary):
                 "quality", "metrics", "findings", "limitations"),
                ("capabilities",),
                "report")
-    if obj["schema_version"] != VERSION:
+    if obj["schema_version"] != REPORT_VERSION:
         fail("bad-version", "report schema_version")
     if obj["session_id"] != session["id"]:
         fail("session-mismatch", "report session reference")
@@ -940,7 +979,8 @@ def compare_report_obj(obj, session, summary):
              "report device catalog differs from session")
     if "capabilities" in obj:
         check_report_capabilities(obj["capabilities"], session)
-    check_quality(obj["quality"], "report.quality")
+    check_quality(obj["quality"], "report.quality",
+                    relations_allowed=True)
     metrics = obj["metrics"]
     if not isinstance(metrics, list) or len(metrics) > 4096:
         fail("bad-type", "report.metrics")
@@ -1392,8 +1432,10 @@ def run_selftest():
         else:
             results.append((True, "%s: %s" % (label, detail or "ok")))
 
-    schemas = ("session-v0.1.1.schema.json", "event-v0.1.1.schema.json",
-               "report-v0.1.0.schema.json", "profile-v0.1.1.schema.json",
+    schemas = ("session-v0.1.1.schema.json", "session-v0.1.2.schema.json",
+               "event-v0.1.1.schema.json",
+               "report-v0.1.0.schema.json", "report-v0.1.1.schema.json",
+               "profile-v0.1.1.schema.json",
                "doctor-v0.1.0.schema.json", "receipt-v0.1.0.schema.json")
 
     def schema_files():
@@ -1879,6 +1921,185 @@ def run_selftest():
         return "session-declared unpairable refs tolerated"
 
     check("dangling-ref-expected", dangling_ref_expected)
+
+    def _relations_selftest(mapping, copy, sync):
+        def channel(status):
+            return {"status": status,
+                    "loss_count": ("0" if status == "complete_for_scope"
+                                   else None),
+                    "scope": "selftest scope",
+                    "reason": "Selftest: %s." % status}
+        return {"mapping_release": channel(mapping),
+                "copy_attribution": channel(copy),
+                "sync_attribution": channel(sync)}
+
+    def session_012_relations_ok():
+        obj = read_json_file(os.path.join(fixture, "session.json"),
+                             "session.json")
+        obj["schema_version"] = "0.1.2"
+        obj["quality"]["correlation"]["relations"] = _relations_selftest(
+            "complete_for_scope", "partial", "complete_for_scope")
+        session = check_session(obj)
+        got = session["quality"]["correlation"]["relations"]
+        if set(got) != {"mapping_release", "copy_attribution",
+                        "sync_attribution"}:
+            fail("wrong-metric", "relations not retained")
+        return "0.1.2 relations accepted"
+
+    check("session-012-relations", session_012_relations_ok)
+
+    def session_011_relations_denied():
+        obj = read_json_file(os.path.join(fixture, "session.json"),
+                             "session.json")
+        obj["quality"]["correlation"]["relations"] = _relations_selftest(
+            "complete_for_scope", "complete_for_scope",
+            "complete_for_scope")
+        check_session(obj)
+
+    results.append(expect_reject("session-011-relations",
+                                 session_011_relations_denied,
+                                 "unknown-field"))
+
+    def session_012_relations_shape_denied():
+        obj = read_json_file(os.path.join(fixture, "session.json"),
+                             "session.json")
+        obj["schema_version"] = "0.1.2"
+        rel = _relations_selftest("complete_for_scope",
+                                  "complete_for_scope",
+                                  "complete_for_scope")
+        del rel["sync_attribution"]
+        obj["quality"]["correlation"]["relations"] = rel
+        check_session(obj)
+
+    results.append(expect_reject("session-012-relations-shape",
+                                 session_012_relations_shape_denied,
+                                 "missing-required"))
+
+    def report_011_relations_ok():
+        session, summary = validate_capture(fixture)
+        obj = read_json_file(
+            os.path.join(fixture, "expected-report.json"),
+            "expected report")
+        obj["schema_version"] = "0.1.1"
+        obj["quality"]["correlation"]["relations"] = _relations_selftest(
+            "complete_for_scope", "complete_for_scope",
+            "complete_for_scope")
+        compare_report_obj(obj, session, summary)
+        return "0.1.1 report relations accepted"
+
+    check("report-011-relations", report_011_relations_ok)
+
+    def report_010_denied():
+        session, summary = validate_capture(fixture)
+        obj = read_json_file(
+            os.path.join(fixture, "expected-report.json"),
+            "expected report")
+        obj["schema_version"] = "0.1.0"
+        compare_report_obj(obj, session, summary)
+
+    results.append(expect_reject("report-010-denied",
+                                 report_010_denied, "bad-version"))
+
+    def dangling_copy_excused_by_copy_class():
+        split = copy.deepcopy(life_session)
+        split["quality"]["correlation"]["relations"] = (
+            _relations_selftest("complete_for_scope", "partial",
+                                "complete_for_scope"))
+        summary = validate_stream(
+            split, os.path.join(life, "events-dangling-ref.ndjson"))
+        if summary["count"] != 8:
+            fail("wrong-metric",
+                 "split dangling summary %r" % (summary,))
+        return "copy-class partiality excuses a dangling copy ref"
+
+    check("dangling-copy-class-excused",
+          dangling_copy_excused_by_copy_class)
+
+    def dangling_copy_denied_by_sync_only():
+        split = copy.deepcopy(life_session)
+        split["quality"]["correlation"]["relations"] = (
+            _relations_selftest("complete_for_scope",
+                                "complete_for_scope", "partial"))
+        validate_stream(
+            split, os.path.join(life, "events-dangling-ref.ndjson"))
+
+    results.append(expect_reject("dangling-copy-sync-only",
+                                 dangling_copy_denied_by_sync_only,
+                                 "unknown-mapping"))
+
+    def _sync_dangling_stream(path):
+        lines = []
+
+        def event(seq, kind, data):
+            lines.append({
+                "schema_version": "0.1.1",
+                "session_id": life_session["id"],
+                "seq": str(seq),
+                "ts_ns": str(1100000000 + seq * 1000),
+                "kind": kind,
+                "source": {"hook": "synthetic:selftest",
+                           "backend": "synthetic",
+                           "profile_id": "selftest",
+                           "measurement": "observed",
+                           "correlation": "direct"},
+                "data": data})
+
+        event(1, "bounce_attempt",
+              {"device_id": "dev-1", "requested_bytes": "4096",
+               "forced": False, "operation_id": "op-1"})
+        event(2, "map_result",
+              {"operation_id": "op-1", "success": True,
+               "mapping_id": "m-1", "return_code": None,
+               "mapped_bytes": "4096", "wire_generation": None,
+               "wire_identity": None})
+        event(3, "sync_request",
+              {"operation_id": "op-1", "mapping_id": "m-9",
+               "offset_known": True, "offset": "0",
+               "length": "1024"})
+        with open(path, "w", encoding="utf-8") as handle:
+            for line in lines:
+                handle.write(json.dumps(line) + "\n")
+
+    def dangling_sync_excused_by_sync_class():
+        fd, path = tempfile.mkstemp(prefix="selftest-sync-dangling-",
+                                    suffix=".ndjson")
+        os.close(fd)
+        _sync_dangling_stream(path)
+        try:
+            split = copy.deepcopy(life_session)
+            split["quality"]["correlation"][
+                "relations"] = _relations_selftest(
+                    "complete_for_scope", "complete_for_scope",
+                    "partial")
+            summary = validate_stream(split, path)
+            if summary["count"] != 3:
+                fail("wrong-metric",
+                     "sync dangling summary %r" % (summary,))
+            return "sync-class partiality excuses a dangling sync ref"
+        finally:
+            os.unlink(path)
+
+    check("dangling-sync-class-excused",
+          dangling_sync_excused_by_sync_class)
+
+    def dangling_sync_denied_by_copy_only():
+        fd, path = tempfile.mkstemp(prefix="selftest-sync-dangling-",
+                                    suffix=".ndjson")
+        os.close(fd)
+        _sync_dangling_stream(path)
+        try:
+            split = copy.deepcopy(life_session)
+            split["quality"]["correlation"][
+                "relations"] = _relations_selftest(
+                    "complete_for_scope", "partial",
+                    "complete_for_scope")
+            validate_stream(split, path)
+        finally:
+            os.unlink(path)
+
+    results.append(expect_reject("dangling-sync-copy-only",
+                                 dangling_sync_denied_by_copy_only,
+                                 "unknown-mapping"))
 
     poolx = repo_path("tests", "fixtures", "pools", "extended")
     try:

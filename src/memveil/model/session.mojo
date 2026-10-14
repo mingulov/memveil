@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Typed capture session: session.json, format 0.1.1.
+"""Typed capture session: session.json, formats 0.1.1 and 0.1.2.
 
 The parser validates the whole document against the frozen session
-schema: required fields, const values, enum membership, string
-lengths, array item caps, and no unknown or duplicated keys. The
-observation window must satisfy start <= end; an empty window is
-valid and simply matches no event. Device IDs must be unique within
-the catalog.
+schemas: required fields, version membership, enum membership, string
+lengths, array item caps, and no unknown or duplicated keys. Format
+0.1.2 adds the optional correlation relations object; 0.1.1
+documents carrying relations are refused. The observation window
+must satisfy start <= end; an empty window is valid and simply
+matches no event. Device IDs must be unique within the catalog.
 """
 
 from memveil.jsonscan import Scanner
@@ -38,8 +39,16 @@ comptime MAX_DEVICES = 4096
 comptime MAX_REGION_OBSERVATIONS = 4096
 comptime MAX_HOOKS = 32
 comptime MAX_EVIDENCE_REFS = 32
-comptime SESSION_SCHEMA_VERSION = "0.1.1"
+comptime SESSION_SCHEMA_VERSION = "0.1.2"
+comptime SESSION_SCHEMA_VERSION_PREV = "0.1.1"
 comptime PRODUCT_NAME = "memveil"
+
+comptime CORR_RELATION_MAPPING = "mapping_release"
+comptime CORR_RELATION_COPY = "copy_attribution"
+comptime CORR_RELATION_SYNC = "sync_attribution"
+comptime CORR_SCOPE_MAPPING = "mapping and release pairing"
+comptime CORR_SCOPE_COPY = "copy attribution"
+comptime CORR_SCOPE_SYNC = "sync attribution"
 
 
 struct EvidenceItem(ImplicitlyCopyable):
@@ -129,6 +138,256 @@ struct Channel(Copyable):
         self.scope = existing.scope
         self.reason = existing.reason
         self.evidence_refs = existing.evidence_refs.copy()
+
+
+def truncate_codepoints(text: String, limit: Int) -> String:
+    """Cap text at limit codepoints, on a char boundary."""
+    if text.count_codepoints() <= limit:
+        return text
+    var out = String("")
+    var n = 0
+    for cp in text.codepoint_slices():
+        if n >= limit:
+            break
+        out += String(cp)
+        n += 1
+    return out^
+
+
+def _join_causes(items: List[String]) -> String:
+    var out = String("")
+    for i in range(len(items)):
+        if i > 0:
+            out += "; "
+        out += items[i]
+    return out^
+
+
+def bound_cause_reason(
+    causes: List[String], codes: List[String]
+) -> String:
+    """Bound one per-class cause list to the 512-char channel limit.
+
+    Full code-plus-example text first, then codes only, then
+    trailing causes drop; the first code is always kept. Callers
+    pass at least one cause.
+    """
+    var full = _join_causes(causes)
+    if full.count_codepoints() <= 512:
+        return full^
+    var short = _join_causes(codes)
+    if short.count_codepoints() <= 512:
+        return short^
+    var kept = len(codes)
+    while kept > 1:
+        kept -= 1
+        var probe = List[String]()
+        for i in range(kept):
+            probe.append(codes[i])
+        if _join_causes(probe).count_codepoints() <= 512:
+            return _join_causes(probe)
+    return truncate_codepoints(codes[0], 512)
+
+
+def rollup_correlation_status(
+    mapping: Channel, copy: Channel, sync: Channel
+) -> String:
+    """Aggregate status over the three relation classes.
+
+    The producer and the analyzer apply this same rule:
+    not_applicable only when every class is, complete only
+    when every class is, else partial.
+    """
+    if (
+        mapping.status == "not_applicable"
+        and copy.status == "not_applicable"
+        and sync.status == "not_applicable"
+    ):
+        return String("not_applicable")
+    if (
+        mapping.status == "complete_for_scope"
+        and copy.status == "complete_for_scope"
+        and sync.status == "complete_for_scope"
+    ):
+        return String("complete_for_scope")
+    return String("partial")
+
+
+def _render_rollup(
+    statuses: List[String],
+    kept_map: List[String],
+    kept_copy: List[String],
+    kept_sync: List[String],
+) -> String:
+    """Render class tokens plus their kept causes, in class order."""
+    var out = String("")
+    var first = True
+    for cls in range(3):
+        if statuses[cls] == "complete_for_scope":
+            continue
+        if not first:
+            out += "; "
+        first = False
+        if cls == 0:
+            out += CORR_RELATION_MAPPING + " " + statuses[cls]
+            if len(kept_map) > 0:
+                out += " (" + _join_causes(kept_map) + ")"
+        elif cls == 1:
+            out += CORR_RELATION_COPY + " " + statuses[cls]
+            if len(kept_copy) > 0:
+                out += " (" + _join_causes(kept_copy) + ")"
+        else:
+            out += CORR_RELATION_SYNC + " " + statuses[cls]
+            if len(kept_sync) > 0:
+                out += " (" + _join_causes(kept_sync) + ")"
+    return out^
+
+
+def _rollup_kept(
+    cls: Int,
+    kept_map: List[String],
+    kept_copy: List[String],
+    kept_sync: List[String],
+) -> Int:
+    """Length of one class's kept-cause list."""
+    if cls == 0:
+        return len(kept_map)
+    if cls == 1:
+        return len(kept_copy)
+    return len(kept_sync)
+
+
+def rollup_correlation_reason(
+    mapping: Channel,
+    copy: Channel,
+    sync: Channel,
+    mapping_causes: List[String],
+    copy_causes: List[String],
+    sync_causes: List[String],
+) -> String:
+    """Bounded aggregate summary naming every non-complete class.
+
+    Every affected class keeps its "<class> <status>" token;
+    causes fill the remaining 512-char budget in fixed class
+    order, so later detail drops before any class name does.
+    """
+    var statuses = List[String]()
+    statuses.append(mapping.status)
+    statuses.append(copy.status)
+    statuses.append(sync.status)
+    var affected = 0
+    for i in range(3):
+        if statuses[i] != "complete_for_scope":
+            affected += 1
+    if affected == 0:
+        return String("all lifecycle events paired")
+    if (
+        mapping.status == "not_applicable"
+        and copy.status == "not_applicable"
+        and sync.status == "not_applicable"
+    ):
+        return String("no cross-event correlation in scope")
+    var kept_map = List[String]()
+    var kept_copy = List[String]()
+    var kept_sync = List[String]()
+    var order = List[Int]()
+    for i in range(3):
+        if statuses[i] != "complete_for_scope":
+            order.append(i)
+    var stopped = False
+    for oi in range(len(order)):
+        if stopped:
+            break
+        var cls = order[oi]
+        var total = len(sync_causes)
+        if cls == 0:
+            total = len(mapping_causes)
+        elif cls == 1:
+            total = len(copy_causes)
+        for c in range(total):
+            var cause: String
+            if cls == 0:
+                cause = mapping_causes[c]
+            elif cls == 1:
+                cause = copy_causes[c]
+            else:
+                cause = sync_causes[c]
+            if cls == 0:
+                kept_map.append(cause)
+            elif cls == 1:
+                kept_copy.append(cause)
+            else:
+                kept_sync.append(cause)
+            var rendered = _render_rollup(
+                statuses, kept_map, kept_copy, kept_sync
+            )
+            if rendered.count_codepoints() <= 512:
+                continue
+            if cls == 0:
+                _ = kept_map.pop()
+            elif cls == 1:
+                _ = kept_copy.pop()
+            else:
+                _ = kept_sync.pop()
+            var base = _render_rollup(
+                statuses, kept_map, kept_copy, kept_sync
+            )
+            var overhead = 2
+            if _rollup_kept(cls, kept_map, kept_copy, kept_sync) == 0:
+                overhead = 3
+            var room = 512 - base.count_codepoints() - overhead
+            if room >= 16:
+                var frag = truncate_codepoints(cause, room)
+                if cls == 0:
+                    kept_map.append(frag)
+                elif cls == 1:
+                    kept_copy.append(frag)
+                else:
+                    kept_sync.append(frag)
+            stopped = True
+            break
+    return _render_rollup(statuses, kept_map, kept_copy, kept_sync)
+
+
+def rollup_correlation(
+    mapping: Channel,
+    copy: Channel,
+    sync: Channel,
+    mapping_causes: List[String],
+    copy_causes: List[String],
+    sync_causes: List[String],
+) -> Channel:
+    """Aggregate channel over three relation classes, same rule.
+
+    Both the producer registry and the analyzer build their
+    aggregate through this helper: fixed class order, bounded
+    reason, per-class refs concatenated and capped at 8. The
+    session-side loss convention is 0 when complete, null when
+    partial; report-side exact counts are set by the analyzer
+    after the rollup.
+    """
+    var out = Channel()
+    out.status = rollup_correlation_status(mapping, copy, sync)
+    if out.status == "complete_for_scope":
+        out.has_loss_count = True
+        out.loss_count = UInt64(0)
+    out.scope = String("correlated lifecycle events")
+    out.reason = rollup_correlation_reason(
+        mapping, copy, sync, mapping_causes, copy_causes, sync_causes
+    )
+    for i in range(len(mapping.evidence_refs)):
+        if len(out.evidence_refs) >= 8:
+            break
+        out.evidence_refs.append(mapping.evidence_refs[i])
+    for i in range(len(copy.evidence_refs)):
+        if len(out.evidence_refs) >= 8:
+            break
+        out.evidence_refs.append(copy.evidence_refs[i])
+    for i in range(len(sync.evidence_refs)):
+        if len(out.evidence_refs) >= 8:
+            break
+        out.evidence_refs.append(sync.evidence_refs[i])
+    return out^
 
 
 @fieldwise_init
@@ -507,6 +766,148 @@ def _parse_channel(mut scan: Scanner, what: String) raises -> Channel:
     if not has_status or not has_loss or not has_scope or not has_reason:
         raise ValidationError(what, "missing field")
     return out^
+
+
+def _parse_relations(mut scan: Scanner, mut out: Session) raises:
+    """Parse the optional correlation relations object.
+
+    All three relation classes are required when present. The
+    version gate lives in parse_session, so refusing relations
+    in a legacy document never depends on key order.
+    """
+    scan.begin_object()
+    var seen = List[String]()
+    if not object_is_empty(scan):
+        while True:
+            scan.skip_ws()
+            var key = scan.parse_string()
+            expect_colon(scan, "quality.correlation.relations")
+            for prior in seen:
+                if prior == key:
+                    raise ValidationError(
+                        "quality.correlation.relations",
+                        "duplicate member",
+                    )
+            seen.append(key)
+            if key == CORR_RELATION_MAPPING:
+                out.q_corr_mapping = _parse_channel(
+                    scan,
+                    "quality.correlation.relations.mapping_release",
+                )
+            elif key == CORR_RELATION_COPY:
+                out.q_corr_copy = _parse_channel(
+                    scan,
+                    "quality.correlation.relations.copy_attribution",
+                )
+            elif key == CORR_RELATION_SYNC:
+                out.q_corr_sync = _parse_channel(
+                    scan,
+                    "quality.correlation.relations.sync_attribution",
+                )
+            else:
+                raise ValidationError(
+                    "quality.correlation.relations",
+                    "unknown relation class",
+                )
+            if not object_next(scan, "quality.correlation.relations"):
+                break
+    scan.end_object()
+    if len(seen) != 3:
+        raise ValidationError(
+            "quality.correlation.relations", "missing field"
+        )
+    out.has_corr_relations = True
+
+
+def _parse_correlation_channel(
+    mut scan: Scanner, mut out: Session
+) raises:
+    """Parse quality.correlation with its optional relations object."""
+    scan.begin_object()
+    var ch = Channel()
+    var has_status = False
+    var has_loss = False
+    var has_scope = False
+    var has_reason = False
+    var has_refs = False
+    var has_relations = False
+    var what = String("quality.correlation")
+    if not object_is_empty(scan):
+        while True:
+            scan.skip_ws()
+            var key = scan.parse_string()
+            expect_colon(scan, what)
+            if key == "status":
+                if has_status:
+                    raise ValidationError(what + ".status", "duplicate")
+                var v = scan.parse_string()
+                _check_channel_status(v)
+                ch.status = v
+                has_status = True
+            elif key == "loss_count":
+                if has_loss:
+                    raise ValidationError(what + ".loss_count", "duplicate")
+                scan.skip_ws()
+                if scan.peek() == UInt8(0x6E):
+                    scan.parse_null()
+                else:
+                    ch.loss_count = parse_u64_field(
+                        scan, what + ".loss_count"
+                    )
+                    ch.has_loss_count = True
+                has_loss = True
+            elif key == "scope":
+                if has_scope:
+                    raise ValidationError(what + ".scope", "duplicate")
+                var v = scan.parse_string()
+                check_bounded_text(v, 1, 256, what + ".scope")
+                ch.scope = v
+                has_scope = True
+            elif key == "reason":
+                if has_reason:
+                    raise ValidationError(what + ".reason", "duplicate")
+                var v = scan.parse_string()
+                check_bounded_text(v, 1, 512, what + ".reason")
+                ch.reason = v
+                has_reason = True
+            elif key == "evidence_refs":
+                if has_refs:
+                    raise ValidationError(
+                        what + ".evidence_refs", "duplicate"
+                    )
+                scan.begin_array()
+                if not array_is_empty(scan):
+                    while True:
+                        scan.skip_ws()
+                        var v = scan.parse_string()
+                        check_bounded_text(
+                            v, 1, 256, what + ".evidence_refs[]"
+                        )
+                        ch.evidence_refs.append(v)
+                        if len(ch.evidence_refs) > MAX_EVIDENCE_REFS:
+                            raise ValidationError(
+                                what + ".evidence_refs",
+                                "too many items",
+                            )
+                        if not array_next(scan, what + ".evidence_refs"):
+                            break
+                scan.end_array()
+                has_refs = True
+            elif key == "relations":
+                if has_relations:
+                    raise ValidationError(
+                        what + ".relations", "duplicate"
+                    )
+                _parse_relations(scan, out)
+                has_relations = True
+            else:
+                raise ValidationError(what, "unknown channel field")
+            if not object_next(scan, what):
+                break
+    scan.end_object()
+    if not has_status or not has_loss or not has_scope or not has_reason:
+        raise ValidationError(what, "missing field")
+    out.q_correlation = ch^
 
 
 def _parse_region_observation(mut scan: Scanner) raises -> RegionObservation:
@@ -980,6 +1381,10 @@ struct Session(Copyable):
     var q_detail: Channel
     var q_aggregate: Channel
     var q_correlation: Channel
+    var has_corr_relations: Bool
+    var q_corr_mapping: Channel
+    var q_corr_copy: Channel
+    var q_corr_sync: Channel
     var q_baseline: Channel
     var q_terminal: Channel
     var stop: StopState
@@ -1025,6 +1430,10 @@ struct Session(Copyable):
         self.q_detail = Channel()
         self.q_aggregate = Channel()
         self.q_correlation = Channel()
+        self.has_corr_relations = False
+        self.q_corr_mapping = Channel()
+        self.q_corr_copy = Channel()
+        self.q_corr_sync = Channel()
         self.q_baseline = Channel()
         self.q_terminal = Channel()
         self.stop = StopState()
@@ -1070,6 +1479,10 @@ struct Session(Copyable):
         self.q_detail = existing.q_detail.copy()
         self.q_aggregate = existing.q_aggregate.copy()
         self.q_correlation = existing.q_correlation.copy()
+        self.has_corr_relations = existing.has_corr_relations
+        self.q_corr_mapping = existing.q_corr_mapping.copy()
+        self.q_corr_copy = existing.q_corr_copy.copy()
+        self.q_corr_sync = existing.q_corr_sync.copy()
         self.q_baseline = existing.q_baseline.copy()
         self.q_terminal = existing.q_terminal.copy()
         self.stop = existing.stop.copy()
@@ -1188,7 +1601,7 @@ def _parse_quality(mut scan: Scanner, mut out: Session) raises:
             elif key == "aggregate":
                 out.q_aggregate = _parse_channel(scan, "quality.aggregate")
             elif key == "correlation":
-                out.q_correlation = _parse_channel(scan, "quality.correlation")
+                _parse_correlation_channel(scan, out)
             elif key == "baseline":
                 out.q_baseline = _parse_channel(scan, "quality.baseline")
             elif key == "terminal":
@@ -1360,6 +1773,7 @@ def parse_session(data: List[UInt8]) raises -> Session:
     scan.skip_ws()
     scan.begin_object()
     var out = Session()
+    var out_version = String("")
     var has_version = False
     var has_session = False
     var has_boot = False
@@ -1381,8 +1795,12 @@ def parse_session(data: List[UInt8]) raises -> Session:
                 if has_version:
                     raise ValidationError("schema_version", "duplicate")
                 var v = scan.parse_string()
-                if v != SESSION_SCHEMA_VERSION:
+                if (
+                    v != SESSION_SCHEMA_VERSION
+                    and v != SESSION_SCHEMA_VERSION_PREV
+                ):
                     raise ValidationError("schema_version", "bad const")
+                out_version = v
                 has_version = True
             elif key == "session_id":
                 if has_session:
@@ -1485,6 +1903,12 @@ def parse_session(data: List[UInt8]) raises -> Session:
         raise ValidationError("session", "missing field")
     if out.synthetic != (out.capture_mode == "synthetic"):
         raise ValidationError("synthetic", "contradicts capture mode")
+    if out_version == SESSION_SCHEMA_VERSION_PREV:
+        if out.has_corr_relations:
+            raise ValidationError(
+                "quality.correlation.relations",
+                "relations need schema 0.1.2",
+            )
     scan.skip_ws()
     if not scan.at_end():
         raise ValidationError("session", "trailing data")

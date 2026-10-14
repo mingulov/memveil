@@ -3,14 +3,16 @@
 
 Capture, event, session, and report schemas are versioned
 independently; the frozen set (events 0.1.1, profiles 0.1.1,
-session 0.1.1; report, doctor 0.1.0) is the only supported
-input. Session 0.1.1 adds the required terminal stop object;
-0.1.0 session documents are refused, never tolerated.
+session 0.1.1 and 0.1.2; report 0.1.1, doctor 0.1.0) is the
+only supported input. Session 0.1.1 adds the required terminal
+stop object; 0.1.0 session documents are refused, never
+tolerated. Session 0.1.2 adds the optional correlation
+relations object; 0.1.1 stays frozen and accepted.
 The replay path treats every capture as untrusted and stays
 offline: it never loads BPF objects, touches tracefs or
 BTF, opens the network, or requires privileges.
 
-## Reader policy (events 0.1.1, profiles 0.1.1, session 0.1.1, rest 0.1.0)
+## Reader policy (events 0.1.1, profiles 0.1.1, session 0.1.1/0.1.2, report 0.1.1, rest 0.1.0)
 
 - Unknown schema major, unknown event kind, unknown field, or
   duplicated key: refused, exit 2. There is no last-wins, no
@@ -31,6 +33,26 @@ BTF, opens the network, or requires privileges.
 `source.measurement=observed`. Estimated or derived copy records
 are refused with exit 2, including streams mixing them with observed
 copies. Other event kinds retain their supported measurement enum.
+
+## Correlation relations (session 0.1.2, report 0.1.1)
+
+The producer splits correlation evidence into three relation
+classes (`mapping_release`, `copy_attribution`, `sync_attribution`)
+under `quality.correlation.relations`, keeping the aggregate rollup
+as the channel body. The rollup is `complete_for_scope` only when
+every class is, `not_applicable` only when every class is, else
+`partial`, and its reason names every non-complete class in fixed
+class order with a bounded summary of their causes.
+
+Relations in a `0.1.1` document are refused whatever the key order,
+so the frozen schema needs no new parser. A `0.1.2` document without
+relations, like every `0.1.1` document, expands
+legacy-conservatively: the aggregate applies to every class, and
+analysis keeps its coarse degradation. Only a present relations
+object narrows uncertainty to one class: copy-attribution-only loss
+preserves proven occupancy, while unknown or lost releases still
+withhold it, and a dangling copy reference never excuses a dangling
+sync reference.
 
 ## Partial mode
 

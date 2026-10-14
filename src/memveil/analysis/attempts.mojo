@@ -24,7 +24,13 @@ rules:
 from memveil.model.event import Event
 from memveil.model.metric import Finding, Metric
 from memveil.model.report import ENGINE_VERSION, Report, ReportCap
-from memveil.model.session import Capability, Channel, Session
+from memveil.model.session import (
+    Capability,
+    Channel,
+    Session,
+    rollup_correlation,
+    truncate_codepoints,
+)
 from memveil.model.validate import checked_add, format_u64
 
 comptime MAX_SUMMANDS = 8
@@ -360,6 +366,26 @@ def _coverage(status: String) -> String:
     if status == "partial":
         return String("partial")
     return String("unavailable")
+
+
+def _rollup_split_relations(
+    mapping: Channel, copy: Channel, sync: Channel
+) -> Channel:
+    """Analyzer aggregate over the three relation classes.
+
+    The analyzer never trusts a producer aggregate in split
+    mode: the aggregate is recomputed from the classes on
+    every report, so any non-complete class yields partial.
+    """
+    var map_causes = List[String]()
+    map_causes.append(mapping.reason)
+    var copy_causes = List[String]()
+    copy_causes.append(copy.reason)
+    var sync_causes = List[String]()
+    sync_causes.append(sync.reason)
+    return rollup_correlation(
+        mapping, copy, sync, map_causes, copy_causes, sync_causes
+    )
 
 
 def _summand_text(values: List[UInt64], total: UInt64, n: Int) -> String:
@@ -1083,18 +1109,23 @@ struct AttemptAnalyzer:
             )
         return ch^
 
-    def _build_correlation(mut self) -> Channel:
+    def _build_correlation(
+        mut self,
+        mut rel_mapping: Channel,
+        mut rel_copy: Channel,
+        mut rel_sync: Channel,
+    ) -> Channel:
         var producer = self._session.q_correlation.copy()
+        if self._session.has_corr_relations:
+            rel_mapping = self._session.q_corr_mapping.copy()
+            rel_copy = self._session.q_corr_copy.copy()
+            rel_sync = self._session.q_corr_sync.copy()
         if self._corr_gaps == 0:
-            return producer^
-        var ch = Channel()
-        ch.status = String("partial")
-        ch.scope = producer.scope
-        ch.reason = _plural(
-            self._corr_gaps,
-            "correlation gap event observed;",
-            "correlation gap events observed;",
-        ) + " cross-event evidence may be missing."
+            if not self._session.has_corr_relations:
+                return producer^
+            return _rollup_split_relations(
+                rel_mapping, rel_copy, rel_sync
+            )
         self._note_fixed(
             _plural(
                 self._corr_gaps,
@@ -1103,7 +1134,35 @@ struct AttemptAnalyzer:
             )
             + " channel partial."
         )
-        return ch^
+        if not self._session.has_corr_relations:
+            var ch = Channel()
+            ch.status = String("partial")
+            ch.scope = producer.scope
+            ch.reason = _plural(
+                self._corr_gaps,
+                "correlation gap event observed;",
+                "correlation gap events observed;",
+            ) + " cross-event evidence may be missing."
+            return ch^
+        # Split mode: a generic correlation gap is attributed
+        # to the mapping/release class; the other classes pass
+        # through untouched.
+        var phrase = _plural(
+            self._corr_gaps,
+            "correlation gap event observed;",
+            "correlation gap events observed;",
+        ) + " cross-event evidence may be missing."
+        if rel_mapping.status == String("partial"):
+            rel_mapping.reason = truncate_codepoints(
+                phrase + "; previously: " + rel_mapping.reason, 512
+            )
+        else:
+            rel_mapping.reason = phrase
+        rel_mapping.status = String("partial")
+        rel_mapping.has_loss_count = False
+        return _rollup_split_relations(
+            rel_mapping, rel_copy, rel_sync
+        )
 
     def _build_baseline(mut self) -> Channel:
         var producer = self._session.q_baseline.copy()
@@ -1693,7 +1752,17 @@ struct AttemptAnalyzer:
         var order = self._group_order()
         out.q_detail = self._build_detail(partial)
         out.q_aggregate = self._build_aggregate(noun, order)
-        out.q_correlation = self._build_correlation()
+        var rel_mapping = Channel()
+        var rel_copy = Channel()
+        var rel_sync = Channel()
+        out.q_correlation = self._build_correlation(
+            rel_mapping, rel_copy, rel_sync
+        )
+        if self._session.has_corr_relations:
+            out.has_corr_relations = True
+            out.q_corr_mapping = rel_mapping^
+            out.q_corr_copy = rel_copy^
+            out.q_corr_sync = rel_sync^
         out.q_baseline = self._build_baseline()
         if self._detail_gaps > 0:
             var lost = String("unknown")

@@ -268,6 +268,37 @@ def test_render_json_wellformed() raises:
     assert_true(s.at_end())
 
 
+def test_render_json_report_version() raises:
+    var rep = analyze(String("tests/fixtures/attempts"))
+    var doc = render_json(rep)
+    assert_true(
+        doc.find(String('"schema_version": "0.1.1"')) != -1
+    )
+
+
+def test_render_json_relations_present_when_split() raises:
+    var rep = analyze(
+        String("tests/fixtures/lifecycle/relations-copy-only")
+    )
+    assert_true(rep.has_corr_relations)
+    var doc = render_json(rep)
+    assert_true(doc.find(String('"relations"')) != -1)
+    assert_true(doc.find(String('"copy_attribution"')) != -1)
+    var s = Scanner(doc)
+    s.skip_value()
+    s.skip_ws()
+    assert_true(s.at_end())
+
+
+def test_render_json_relations_absent_when_legacy() raises:
+    var rep = analyze(
+        String("tests/fixtures/lifecycle/relations-legacy-copy")
+    )
+    assert_true(not rep.has_corr_relations)
+    var doc = render_json(rep)
+    assert_equal(doc.find(String('"relations"')), -1)
+
+
 def test_render_json_escapes() raises:
     var rep = analyze(String("tests/fixtures/reader/escape"))
     var out = render_json(rep)
@@ -446,6 +477,9 @@ def run() raises -> Int:
     suite.test[test_render_markdown_attempts]()
     suite.test[test_render_markdown_escape]()
     suite.test[test_render_json_wellformed]()
+    suite.test[test_render_json_report_version]()
+    suite.test[test_render_json_relations_present_when_split]()
+    suite.test[test_render_json_relations_absent_when_legacy]()
     suite.test[test_render_json_escapes]()
     suite.test[test_render_missing_identity]()
     suite.test[test_render_json_exact_u64]()

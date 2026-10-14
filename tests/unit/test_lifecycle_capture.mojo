@@ -390,9 +390,25 @@ def test_nested_copies() raises:
             String(
                 '"correlation":{"status":"partial",'
                 '"loss_count":null,"scope":"correlated '
-                'lifecycle events","reason":"copy without '
-                'pending operation","evidence_refs":'
-                '["capture:seq=0","capture:seq=1"]}'
+                'lifecycle events","reason":"copy_attribution '
+                'partial (copy without pending operation)",'
+                '"evidence_refs":'
+                '["capture:seq=0","capture:seq=1"],'
+                '"relations":{"mapping_release":{"status":'
+                '"complete_for_scope","loss_count":"0",'
+                '"scope":"mapping and release pairing",'
+                '"reason":"all mapping and release '
+                'relationships paired","evidence_refs":[]},'
+                '"copy_attribution":{"status":"partial",'
+                '"loss_count":null,"scope":"copy attribution",'
+                '"reason":"copy without pending operation",'
+                '"evidence_refs":'
+                '["capture:seq=0","capture:seq=1"]},'
+                '"sync_attribution":{"status":'
+                '"complete_for_scope","loss_count":"0",'
+                '"scope":"sync attribution","reason":"all sync '
+                'attribution relationships paired",'
+                '"evidence_refs":[]}}}'
             ),
         )
     )
@@ -457,8 +473,9 @@ def test_copy_before_failed_map() raises:
         _contains(
             c.session,
             String(
-                '"reason":"copy without pending operation; '
-                'failure carries no mapping"'
+                '"reason":"mapping_release partial (failure '
+                'carries no mapping); copy_attribution partial '
+                '(copy without pending operation)"'
             ),
         )
     )
@@ -493,7 +510,10 @@ def test_sync_invents_nothing() raises:
     assert_true(
         _contains(
             c.session,
-            String('"reason":"sync references unknown mapping"'),
+            String(
+                '"reason":"sync_attribution partial (sync '
+                'references unknown mapping)"'
+            ),
         )
     )
     assert_true(

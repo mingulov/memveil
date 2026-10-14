@@ -65,6 +65,10 @@ struct Report:
     var q_detail: Channel
     var q_aggregate: Channel
     var q_correlation: Channel
+    var has_corr_relations: Bool
+    var q_corr_mapping: Channel
+    var q_corr_copy: Channel
+    var q_corr_sync: Channel
     var q_baseline: Channel
     var q_terminal: Channel
     var metrics: List[Metric]
@@ -84,6 +88,10 @@ struct Report:
         self.q_detail = Channel()
         self.q_aggregate = Channel()
         self.q_correlation = Channel()
+        self.has_corr_relations = False
+        self.q_corr_mapping = Channel()
+        self.q_corr_copy = Channel()
+        self.q_corr_sync = Channel()
         self.q_baseline = Channel()
         self.q_terminal = Channel()
         self.metrics = List[Metric]()

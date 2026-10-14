@@ -7,8 +7,10 @@ validation never fetches references from the network. Each family is
 versioned independently of the product version, the native bridge
 ABI, and the BPF wire version: events are at `0.1.1` (wire
 generations and unknown sync offsets); profiles are at `0.1.1`
-(tracing-hook bindings); session is at `0.1.1` (terminal stop
-evidence); report and doctor stay at `0.1.0`.
+(tracing-hook bindings); session is at `0.1.2` (optional
+correlation relations; `0.1.1` stays frozen and accepted);
+report is at `0.1.1` (optional correlation relations);
+doctor stays at `0.1.0`.
 
 ## Files and integer representation
 
@@ -69,7 +71,12 @@ from the manifest.
 
 Quality channels are independent: `detail`, `aggregate`, `correlation`,
 `baseline`, and `terminal`. Their `loss_count` is null when unobservable,
-zero only when measured as zero. The device catalog preserves resolvable
+zero only when measured as zero. The correlation channel carries an
+aggregate rollup plus, in session `0.1.2` and report `0.1.1`, an optional
+`relations` object splitting that rollup into the `mapping_release`,
+`copy_attribution`, and `sync_attribution` classes. Absent relations mean
+legacy-conservative expansion: the aggregate applies to every class. The
+device catalog preserves resolvable
 device labels and driver information behind session-local IDs. Reports copy
 that catalog; each metric has `dimensions.device_id` and
 `dimensions.pool_id` for machine-readable grouping. Null dimensions mean the

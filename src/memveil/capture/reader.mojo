@@ -114,9 +114,12 @@ struct CaptureReader:
     var _ops: Dict[String, Bool]
     var _maps: Dict[String, Bool]
     var _dead: Dict[String, Bool]
-    var _ref_ids: List[String]
-    var _ref_lines: List[Int]
-    var _seen_refs: Dict[String, Bool]
+    var _ref_copy_ids: List[String]
+    var _ref_copy_lines: List[Int]
+    var _seen_copy_refs: Dict[String, Bool]
+    var _ref_sync_ids: List[String]
+    var _ref_sync_lines: List[Int]
+    var _seen_sync_refs: Dict[String, Bool]
     var _req_total: UInt64
     var _req_dev: Dict[String, UInt64]
 
@@ -142,9 +145,12 @@ struct CaptureReader:
         self._ops = Dict[String, Bool]()
         self._maps = Dict[String, Bool]()
         self._dead = Dict[String, Bool]()
-        self._ref_ids = List[String]()
-        self._ref_lines = List[Int]()
-        self._seen_refs = Dict[String, Bool]()
+        self._ref_copy_ids = List[String]()
+        self._ref_copy_lines = List[Int]()
+        self._seen_copy_refs = Dict[String, Bool]()
+        self._ref_sync_ids = List[String]()
+        self._ref_sync_lines = List[Int]()
+        self._seen_sync_refs = Dict[String, Bool]()
         self._req_total = UInt64(0)
         self._req_dev = Dict[String, UInt64]()
 
@@ -342,7 +348,10 @@ struct CaptureReader:
             )
         self._check_identities(ev, lineno)
         var tracked = (
-            len(self._ops) + len(self._maps) + len(self._ref_ids)
+            len(self._ops)
+            + len(self._maps)
+            + len(self._ref_copy_ids)
+            + len(self._ref_sync_ids)
         )
         if tracked > _MAX_TRACKED_IDS:
             raise ReadError(
@@ -418,12 +427,12 @@ struct CaptureReader:
             # first line per id, and distinct ids draw from the
             # same identity budget as operations and mappings.
             if ev.copy.has_mapping_id:
-                self._note_ref(ev.copy.mapping_id, lineno)
+                self._note_copy_ref(ev.copy.mapping_id, lineno)
         elif ev.kind == "sync_request":
             # Syncs repeat freely under one operation for the
             # same reason as copies.
             if ev.sync.has_mapping_id:
-                self._note_ref(ev.sync.mapping_id, lineno)
+                self._note_sync_ref(ev.sync.mapping_id, lineno)
         elif ev.kind == "counter_snapshot":
             if ev.snapshot.has_scope_device:
                 if ev.snapshot.scope_device_id not in self._devices:
@@ -453,40 +462,76 @@ struct CaptureReader:
             )
         self._ops[key] = True
 
-    def _note_ref(mut self, mid: String, lineno: Int):
-        """Defer one copy/sync mapping reference, first line kept.
+    def _note_copy_ref(mut self, mid: String, lineno: Int):
+        """Defer one copy mapping reference, first line kept.
 
         Repeats of an already-recorded id add nothing: forward
         references still resolve at end of stream, and an
         unknown id still reports its first line. Distinct ids
         join the identity budget enforced after each event.
+        Copy and sync references defer separately so each
+        kind resolves against its own relation class.
         """
-        if mid in self._seen_refs:
+        if mid in self._seen_copy_refs:
             return
-        self._seen_refs[mid] = True
-        self._ref_ids.append(mid)
-        self._ref_lines.append(lineno)
+        self._seen_copy_refs[mid] = True
+        self._ref_copy_ids.append(mid)
+        self._ref_copy_lines.append(lineno)
+
+    def _note_sync_ref(mut self, mid: String, lineno: Int):
+        """Defer one sync mapping reference, first line kept."""
+        if mid in self._seen_sync_refs:
+            return
+        self._seen_sync_refs[mid] = True
+        self._ref_sync_ids.append(mid)
+        self._ref_sync_lines.append(lineno)
+
+    def _class_expected(self, cls_status: String) -> Bool:
+        """True when one class excuses a dangling reference."""
+        if not self.session.has_corr_relations:
+            var corr = self.session.q_correlation.status
+            return corr == String("partial") or corr == String(
+                "unavailable"
+            )
+        return cls_status == String("partial") or cls_status == String(
+            "unavailable"
+        )
 
     def _finish_checks(self) raises ReadError:
         """Resolve deferred copy/sync mapping references at end.
 
-        References the session's correlation channel declares
+        References the session's correlation evidence declares
         unpairable (partial or unavailable) are expected: v2
         syncs keep record-local ids that never match gen-N keys
         and copies keep operation id only. The analyzer counts
-        them as unpaired lifecycle events. A dangling reference
+        them as unpaired lifecycle events. Without relations
+        the aggregate excuses either kind; with relations each
+        kind needs its own class, so copy uncertainty never
+        excuses a dangling sync reference. A dangling reference
         while the session claims complete correlation
         contradicts the capture and refuses.
         """
-        var corr = self.session.q_correlation.status
-        var expected = corr == String("partial") or corr == String(
-            "unavailable"
+        var copy_ok = self._class_expected(
+            self.session.q_corr_copy.status
         )
-        for i in range(len(self._ref_ids)):
-            if self._ref_ids[i] not in self._maps:
-                if expected:
+        for i in range(len(self._ref_copy_ids)):
+            if self._ref_copy_ids[i] not in self._maps:
+                if copy_ok:
                     continue
-                var lineno = self._ref_lines[i]
+                var lineno = self._ref_copy_lines[i]
+                raise ReadError(
+                    READ_INVALID,
+                    lineno,
+                    "line " + String(lineno) + ": unknown mapping",
+                )
+        var sync_ok = self._class_expected(
+            self.session.q_corr_sync.status
+        )
+        for i in range(len(self._ref_sync_ids)):
+            if self._ref_sync_ids[i] not in self._maps:
+                if sync_ok:
+                    continue
+                var lineno = self._ref_sync_lines[i]
                 raise ReadError(
                     READ_INVALID,
                     lineno,

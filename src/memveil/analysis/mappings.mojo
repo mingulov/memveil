@@ -149,6 +149,12 @@ struct MappingTracker[
     var _byte_us_overflow: Bool
     var _degraded: Bool
     var _degrade_cause: String
+    var _degraded_copy: Bool
+    var _degrade_copy_cause: String
+    var _degraded_sync: Bool
+    var _degrade_sync_cause: String
+    var _detail_lost: Bool
+    var _split_relations: Bool
     var _completed: UInt64
     var _lifetime_total: UInt64
     var _lifetime_overflow: Bool
@@ -158,6 +164,9 @@ struct MappingTracker[
     var _uncertain_closes: Int
     var _orphan_releases: Int
     var _unpaired: Int
+    var _unpaired_map: Int
+    var _unpaired_copy: Int
+    var _unpaired_sync: Int
     var _unattributed_copy_bytes: UInt64
     var _refused_ops: Int
     var _refused_active: Int
@@ -201,6 +210,12 @@ struct MappingTracker[
         self._byte_us_overflow = False
         self._degraded = False
         self._degrade_cause = String("")
+        self._degraded_copy = False
+        self._degrade_copy_cause = String("")
+        self._degraded_sync = False
+        self._degrade_sync_cause = String("")
+        self._detail_lost = False
+        self._split_relations = False
         self._completed = UInt64(0)
         self._lifetime_total = UInt64(0)
         self._lifetime_overflow = False
@@ -210,6 +225,9 @@ struct MappingTracker[
         self._uncertain_closes = 0
         self._orphan_releases = 0
         self._unpaired = 0
+        self._unpaired_map = 0
+        self._unpaired_copy = 0
+        self._unpaired_sync = 0
         self._unattributed_copy_bytes = UInt64(0)
         self._refused_ops = 0
         self._refused_active = 0
@@ -224,6 +242,26 @@ struct MappingTracker[
     def unpaired_count(self) -> Int:
         return self._unpaired
 
+    def unpaired_mapping_count(self) -> Int:
+        return self._unpaired_map
+
+    def unpaired_copy_count(self) -> Int:
+        return self._unpaired_copy
+
+    def unpaired_sync_count(self) -> Int:
+        return self._unpaired_sync
+
+    def set_relation_split(mut self, split: Bool):
+        """Select split relation-class interpretation.
+
+        Legacy mode (default) propagates analyzer-observed
+        unpaired copies and syncs coarsely to every mapping-row
+        family. Split mode degrades only the affected family:
+        copy uncertainty preserves proven occupancy, and sync
+        uncertainty preserves everything but the sync row.
+        """
+        self._split_relations = split
+
     def note_detail_loss(mut self):
         """Invalidate live state and degrade aggregates.
 
@@ -231,14 +269,33 @@ struct MappingTracker[
         observed detail gap, so open mappings and live bytes are
         withheld; cumulative counters keep their values with
         partial coverage. This covers producer-claimed loss and
-        recovered tails the event stream never shows.
+        recovered tails the event stream never shows. The loss
+        is shared across every row family, including split
+        copy and sync coverage.
         """
+        self._detail_lost = True
         self._invalidate_live(_detail_loss_cause())
 
     def note_correlation_loss(mut self):
         """Lost relationships may hide a mapping release."""
         self._invalidate_live(
             "Correlation loss may hide a release relationship"
+        )
+
+    def note_copy_attribution_loss(mut self):
+        """Lost copy attribution degrades copy rows only.
+
+        Proven occupancy is unaffected: a missing copy link
+        cannot hide a release.
+        """
+        self._degrade_copy(
+            "Copy attribution loss may hide a copy relationship"
+        )
+
+    def note_sync_attribution_loss(mut self):
+        """Lost sync attribution degrades the sync row only."""
+        self._degrade_sync(
+            "Sync attribution loss may hide a sync relationship"
         )
 
     def _invalidate_live(mut self, cause: String):
@@ -251,6 +308,43 @@ struct MappingTracker[
         if not self._degraded:
             self._degraded = True
             self._degrade_cause = cause
+
+    def _degrade_copy(mut self, cause: String):
+        if not self._degraded_copy:
+            self._degraded_copy = True
+            self._degrade_copy_cause = cause
+
+    def _degrade_sync(mut self, cause: String):
+        if not self._degraded_sync:
+            self._degraded_sync = True
+            self._degrade_sync_cause = cause
+
+    def _note_unpaired_mapping(mut self):
+        self._unpaired += 1
+        self._unpaired_map += 1
+        if self._split_relations:
+            # Observed mapping loss makes the mapping/release
+            # class partial, and valued occupancy needs that
+            # class complete: withhold it.
+            self._invalidate_live("Unpaired mapping observed")
+        else:
+            self._degrade("unpaired lifecycle evidence")
+
+    def _note_unpaired_copy(mut self):
+        self._unpaired += 1
+        self._unpaired_copy += 1
+        if self._split_relations:
+            self._degrade_copy("unpaired copy evidence")
+        else:
+            self._degrade("unpaired lifecycle evidence")
+
+    def _note_unpaired_sync(mut self):
+        self._unpaired += 1
+        self._unpaired_sync += 1
+        if self._split_relations:
+            self._degrade_sync("unpaired sync evidence")
+        else:
+            self._degrade("unpaired lifecycle evidence")
 
     def _note_live_level(mut self):
         if self._live_bytes > self._peak_live_bytes:
@@ -345,8 +439,7 @@ struct MappingTracker[
             self._saw_sync = True
             self._syncs = checked_add(self._syncs, UInt64(1))
             if not paired:
-                self._unpaired += 1
-                self._degrade("unpaired lifecycle evidence")
+                self._note_unpaired_sync()
             return
         if kind == "unmap":
             self._lifecycle_events += 1
@@ -357,7 +450,8 @@ struct MappingTracker[
             self.note_correlation_loss()
             return
         if kind == "gap" and ev.gap.channel == "detail":
-            self._invalidate_live("detail loss may hide a release")
+            self._detail_lost = True
+            self._invalidate_live("Detail loss may hide a release")
             return
 
     def _remember_op(mut self, op: String, dev: String):
@@ -418,8 +512,7 @@ struct MappingTracker[
     def _apply_map(mut self, ev: Event, paired: Bool) raises:
         var op = ev.map_result.operation_id
         if not paired:
-            self._unpaired += 1
-            self._degrade("unpaired lifecycle evidence")
+            self._note_unpaired_mapping()
             # An explicit failure is an independent fact: it
             # counts even though it opens no lifetime.
             if not ev.map_result.success:
@@ -522,8 +615,7 @@ struct MappingTracker[
                         " range; value withheld."
                     )
         if not paired:
-            self._unpaired += 1
-            self._degrade("unpaired lifecycle evidence")
+            self._note_unpaired_copy()
             return
         var dev = String("")
         var attributed = False
@@ -571,6 +663,7 @@ struct MappingTracker[
     def _apply_unmap(mut self, ev: Event, paired: Bool) raises:
         if not paired:
             self._unpaired += 1
+            self._unpaired_map += 1
             self._invalidate_live("Unpaired release observed")
             return
         if not ev.unmap.has_mapping_id:
@@ -698,6 +791,58 @@ struct MappingTracker[
             return String("partial")
         return String("complete_for_scope")
 
+    def _coverage_copy(self, overlay_detail_loss: Bool) -> String:
+        """Copy-family coverage: coarse in legacy, scoped in split.
+
+        Split scoping still shares consumed detail loss across
+        every family; only mapping-only correlation loss stays
+        out of this family's verdict.
+        """
+        if not self._split_relations:
+            return self._coverage(overlay_detail_loss)
+        if (
+            self._degraded_copy
+            or self._detail_lost
+            or overlay_detail_loss
+        ):
+            return String("partial")
+        return String("complete_for_scope")
+
+    def _coverage_sync(self, overlay_detail_loss: Bool) -> String:
+        """Sync-family coverage: coarse in legacy, scoped in split.
+
+        Split scoping still shares consumed detail loss across
+        every family; only mapping-only correlation loss stays
+        out of this family's verdict.
+        """
+        if not self._split_relations:
+            return self._coverage(overlay_detail_loss)
+        if (
+            self._degraded_sync
+            or self._detail_lost
+            or overlay_detail_loss
+        ):
+            return String("partial")
+        return String("complete_for_scope")
+
+    def _coverage_device(self, overlay_detail_loss: Bool) -> String:
+        """Device-row coverage: mapping or copy loss degrades.
+
+        Per-device rows carry attribution, so in split mode they
+        degrade under either mapping or copy uncertainty; the
+        sync row is the only family sync loss touches. Legacy
+        mode stays coarse.
+        """
+        if not self._split_relations:
+            return self._coverage(overlay_detail_loss)
+        if (
+            self._degraded
+            or self._degraded_copy
+            or overlay_detail_loss
+        ):
+            return String("partial")
+        return String("complete_for_scope")
+
     def _view_live_invalid(self, overlay_detail_loss: Bool) -> Bool:
         """Live state is withheld under consumed or overlaid loss."""
         return self._live_invalid or overlay_detail_loss
@@ -764,6 +909,62 @@ struct MappingTracker[
             value,
             String("observed"),
             self._coverage(overlay_detail_loss),
+            aggregation,
+            has_samples,
+            samples,
+            False,
+            String(""),
+            scope,
+            notes,
+        )
+
+    def _valued_copy(
+        self,
+        name: String,
+        unit: String,
+        value: UInt64,
+        aggregation: String,
+        has_samples: Bool,
+        samples: UInt64,
+        scope: String,
+        notes: String,
+        overlay_detail_loss: Bool,
+    ) -> Metric:
+        return self._row(
+            name,
+            unit,
+            True,
+            value,
+            String("observed"),
+            self._coverage_copy(overlay_detail_loss),
+            aggregation,
+            has_samples,
+            samples,
+            False,
+            String(""),
+            scope,
+            notes,
+        )
+
+    def _valued_sync(
+        self,
+        name: String,
+        unit: String,
+        value: UInt64,
+        aggregation: String,
+        has_samples: Bool,
+        samples: UInt64,
+        scope: String,
+        notes: String,
+        overlay_detail_loss: Bool,
+    ) -> Metric:
+        return self._row(
+            name,
+            unit,
+            True,
+            value,
+            String("observed"),
+            self._coverage_sync(overlay_detail_loss),
             aggregation,
             has_samples,
             samples,
@@ -949,7 +1150,7 @@ struct MappingTracker[
                 )
             else:
                 out.append(
-                    self._valued(
+                    self._valued_copy(
                         String("copy_original_to_bounce_bytes"),
                         String("bytes"),
                         self._o2b,
@@ -975,7 +1176,7 @@ struct MappingTracker[
                 )
             else:
                 out.append(
-                    self._valued(
+                    self._valued_copy(
                         String("copy_bounce_to_original_bytes"),
                         String("bytes"),
                         self._b2o,
@@ -1159,7 +1360,7 @@ struct MappingTracker[
         )
         if self._saw_sync:
             out.append(
-                self._valued(
+                self._valued_sync(
                     String("sync_requests"),
                     String("count"),
                     self._syncs,
@@ -1529,7 +1730,7 @@ struct MappingTracker[
             m.confidence = String("high")
             if self._saw_map:
                 m.measurement = String("observed")
-                m.coverage = self._coverage(overlay_detail_loss)
+                m.coverage = self._coverage_device(overlay_detail_loss)
                 m.has_aggregation = True
                 m.aggregation = String("counter")
                 m.notes = String("Map successes on this device.")
@@ -1564,7 +1765,7 @@ struct MappingTracker[
                 b.has_aggregation = True
                 b.aggregation = String("counter")
                 b.notes = String("Mapped bytes on this device.")
-                b.coverage = self._coverage(overlay_detail_loss)
+                b.coverage = self._coverage_device(overlay_detail_loss)
             b.has_device_id = True
             b.device_id = dev
             b.scope = scope
@@ -1588,7 +1789,7 @@ struct MappingTracker[
                 o.has_aggregation = True
                 o.aggregation = String("counter")
                 o.notes = String("Attributed copies on this device.")
-                o.coverage = self._coverage(overlay_detail_loss)
+                o.coverage = self._coverage_device(overlay_detail_loss)
             o.has_device_id = True
             o.device_id = dev
             o.scope = scope
@@ -1612,7 +1813,7 @@ struct MappingTracker[
                 r.has_aggregation = True
                 r.aggregation = String("counter")
                 r.notes = String("Attributed copies on this device.")
-                r.coverage = self._coverage(overlay_detail_loss)
+                r.coverage = self._coverage_device(overlay_detail_loss)
             r.has_device_id = True
             r.device_id = dev
             r.scope = scope

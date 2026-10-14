@@ -16,7 +16,7 @@ from memveil.model.session import Channel
 from memveil.model.validate import format_u64
 from memveil.render.filter import resolve_device_filter
 
-comptime REPORT_SCHEMA_VERSION = "0.1.0"
+comptime REPORT_SCHEMA_VERSION = "0.1.1"
 
 
 def _hex_nibble(v: Int) -> UInt8:
@@ -92,8 +92,50 @@ def _channel_json(label: String, ch: Channel, level: Int) raises -> String:
     return out
 
 
+def _correlation_json(rep: Report, level: Int) raises -> String:
+    """Render quality.correlation with its optional relations."""
+    var pad = String("")
+    for _ in range(level):
+        pad += "  "
+    var inner = pad + "  "
+    var ch = rep.q_correlation.copy()
+    var out = pad + escape_json(String("correlation")) + ": {\n"
+    out += inner + '"status": ' + escape_json(ch.status) + ",\n"
+    out += inner + '"loss_count": '
+    if ch.has_loss_count:
+        out += '"' + format_u64(ch.loss_count) + '"'
+    else:
+        out += "null"
+    out += ",\n"
+    out += inner + '"scope": ' + escape_json(ch.scope) + ",\n"
+    out += inner + '"reason": ' + escape_json(ch.reason)
+    if len(ch.evidence_refs) > 0:
+        out += ",\n" + inner + '"evidence_refs": ['
+        for i in range(len(ch.evidence_refs)):
+            if i > 0:
+                out += ", "
+            out += escape_json(ch.evidence_refs[i])
+        out += "]"
+    if rep.has_corr_relations:
+        out += ",\n" + inner + '"relations": {\n'
+        out += _channel_json(
+            String("mapping_release"), rep.q_corr_mapping, level + 2
+        )
+        out += ",\n"
+        out += _channel_json(
+            String("copy_attribution"), rep.q_corr_copy, level + 2
+        )
+        out += ",\n"
+        out += _channel_json(
+            String("sync_attribution"), rep.q_corr_sync, level + 2
+        )
+        out += "\n" + inner + "}"
+    out += "\n" + pad + "}"
+    return out
+
+
 def render_json(rep: Report, device_filter: String = "") raises -> String:
-    """Render the report as pretty JSON per report-v0.1.0.schema.json."""
+    """Render the report as pretty JSON per report-v0.1.1.schema.json."""
     var filt = resolve_device_filter(rep.devices, device_filter)
     var out = String("{\n")
     out += '  "schema_version": "' + REPORT_SCHEMA_VERSION + '",\n'
@@ -168,7 +210,7 @@ def render_json(rep: Report, device_filter: String = "") raises -> String:
     out += '  "quality": {\n'
     out += _channel_json(String("detail"), rep.q_detail, 2) + ",\n"
     out += _channel_json(String("aggregate"), rep.q_aggregate, 2) + ",\n"
-    out += _channel_json(String("correlation"), rep.q_correlation, 2) + ",\n"
+    out += _correlation_json(rep, 2) + ",\n"
     out += _channel_json(String("baseline"), rep.q_baseline, 2) + ",\n"
     out += _channel_json(String("terminal"), rep.q_terminal, 2) + "\n"
     out += "  },\n"

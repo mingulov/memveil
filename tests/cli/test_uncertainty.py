@@ -172,6 +172,77 @@ class Uncertainty(unittest.TestCase):
         self.assertEqual(fails['value'], '1')
         self.assertEqual(fails['coverage'], 'partial')
 
+    def test_relations_copy_only_preserves_occupancy(self):
+        self.load('lifecycle/relations-copy-only')
+        r = self.report()
+        live = self.metric(r, 'live_observed_allocation_bytes')
+        self.assertEqual(live['value'], '4096')
+        self.assertEqual(live['coverage'], 'complete_for_scope')
+        cp = self.metric(r, 'copy_original_to_bounce_bytes')
+        self.assertEqual(cp['value'], '5120')
+        self.assertEqual(cp['coverage'], 'partial')
+        rel = r['quality']['correlation']['relations']
+        self.assertEqual(
+            rel['mapping_release']['status'], 'complete_for_scope')
+        self.assertEqual(rel['copy_attribution']['status'], 'partial')
+        self.assertEqual(rel['copy_attribution']['loss_count'], '1')
+        self.incomplete(r)
+
+    def test_relations_lost_release_withholds_occupancy(self):
+        self.load('lifecycle/relations-lost-release')
+        r = self.report()
+        self.assertIsNone(
+            self.metric(r, 'live_observed_allocation_bytes')['value'])
+        cp = self.metric(r, 'copy_original_to_bounce_bytes')
+        self.assertEqual(cp['value'], '5120')
+        self.assertEqual(cp['coverage'], 'complete_for_scope')
+        rel = r['quality']['correlation']['relations']
+        self.assertEqual(rel['mapping_release']['status'], 'partial')
+        self.assertEqual(rel['mapping_release']['loss_count'], '1')
+        self.incomplete(r)
+
+    def test_relations_contradictory_aggregate_recomputed(self):
+        self.load('lifecycle/relations-copy-only')
+        self.events = [ev for ev in self.events
+                       if ev['source']['correlation'] == 'direct']
+        corr = self.session['quality']['correlation']
+        corr.update(status='complete_for_scope', loss_count='0',
+                    reason='all lifecycle events paired')
+        self.assertEqual(
+            corr['relations']['copy_attribution']['status'], 'partial')
+        r = self.report()
+        self.assertEqual(
+            r['quality']['correlation']['status'], 'partial')
+        cp = self.metric(r, 'copy_original_to_bounce_bytes')
+        self.assertEqual(cp['value'], '1024')
+        self.assertEqual(cp['coverage'], 'partial')
+        self.incomplete(r)
+
+    def test_relations_legacy_copy_degrades_coarsely(self):
+        self.load('lifecycle/relations-legacy-copy')
+        r = self.report()
+        live = self.metric(r, 'live_observed_allocation_bytes')
+        self.assertEqual(live['value'], '0')
+        self.assertEqual(live['coverage'], 'partial')
+        self.assertEqual(
+            self.metric(r, 'successful_allocations')['coverage'],
+            'partial')
+        self.assertNotIn('relations', r['quality']['correlation'])
+        self.assertEqual(len(r['findings']), 1)
+        self.assertEqual(r['findings'][0]['code'], 'UNPAIRED_LIFECYCLE')
+
+    def test_relations_legacy_sync_degrades_coarsely(self):
+        self.load('lifecycle/relations-legacy-sync')
+        r = self.report()
+        self.assertEqual(
+            self.metric(r, 'sync_requests')['coverage'], 'partial')
+        self.assertEqual(
+            self.metric(r, 'live_observed_allocation_bytes')['coverage'],
+            'partial')
+        self.assertNotIn('relations', r['quality']['correlation'])
+        self.assertEqual(len(r['findings']), 1)
+        self.assertEqual(r['findings'][0]['code'], 'UNPAIRED_LIFECYCLE')
+
     def test_reordered_delivery_withholds_peak(self):
         self.load('lifecycle/reordered-peak')
         r = self.report(0)

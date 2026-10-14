@@ -635,6 +635,11 @@ def test_unpaired_map_excluded() raises:
         _global(rows, "successful_allocations").coverage,
         String("partial"),
     )
+    # Legacy mode keeps the coarse verdict: coverage
+    # degrades but occupancy stays valued.
+    assert_true(
+        _global(rows, "live_observed_allocation_bytes").has_value
+    )
 
 
 def test_unpaired_unmap_invalidates_live() raises:
@@ -925,6 +930,279 @@ def _feed_prefix(mut t: MappingTracker) raises:
     )
 
 
+def test_legacy_unpaired_copy_degrades_all_rows() raises:
+    # Default legacy mode: one unpaired copy degrades every
+    # mapping-row family coarsely.
+    var t = MappingTracker()
+    t.consume(_attempt("op1", "dev1", UInt64(1)))
+    var cp = _copy(
+        "op1", "", "original_to_bounce", UInt64(1024), UInt64(2)
+    )
+    cp.source_correlation = String("unpaired")
+    t.consume(cp)
+    t.consume(
+        _map("op1", True, "m1", UInt64(4096), UInt64(5000), UInt64(3))
+    )
+    var rows = t.metrics("window [0,6000)")
+    var live = _global(rows, "live_observed_allocation_bytes")
+    assert_true(live.has_value)
+    assert_equal(live.value, UInt64(4096))
+    assert_equal(live.coverage, "partial")
+    var allocs = _global(rows, "successful_allocations")
+    assert_equal(allocs.coverage, "partial")
+    var o2b = _global(rows, "copy_original_to_bounce_bytes")
+    assert_equal(o2b.value, UInt64(1024))
+    assert_equal(o2b.coverage, "partial")
+
+
+def test_split_unpaired_copy_preserves_mapping_coverage() raises:
+    # Split mode: copy-attribution-only uncertainty preserves
+    # proven occupancy with complete mapping coverage while
+    # only copy and device-attribution rows degrade.
+    var t = MappingTracker()
+    t.set_relation_split(True)
+    t.consume(_attempt("op1", "dev1", UInt64(1)))
+    var cp = _copy(
+        "op1", "", "original_to_bounce", UInt64(1024), UInt64(2)
+    )
+    cp.source_correlation = String("unpaired")
+    t.consume(cp)
+    t.consume(
+        _map("op1", True, "m1", UInt64(4096), UInt64(5000), UInt64(3))
+    )
+    t.consume(
+        _copy(
+            "op1", "m1", "original_to_bounce", UInt64(512),
+            UInt64(4),
+        )
+    )
+    assert_equal(t.unpaired_count(), 1)
+    assert_equal(t.unpaired_copy_count(), 1)
+    assert_equal(t.unpaired_sync_count(), 0)
+    assert_equal(t.unpaired_mapping_count(), 0)
+    var rows = t.metrics("window [0,6000)")
+    var live = _global(rows, "live_observed_allocation_bytes")
+    assert_true(live.has_value)
+    assert_equal(live.value, UInt64(4096))
+    assert_equal(live.coverage, "complete_for_scope")
+    var allocs = _global(rows, "successful_allocations")
+    assert_equal(allocs.coverage, "complete_for_scope")
+    var o2b = _global(rows, "copy_original_to_bounce_bytes")
+    assert_equal(o2b.value, UInt64(1536))
+    assert_equal(o2b.coverage, "partial")
+    var dev = _find(rows, "successful_allocations", "dev1")
+    assert_equal(dev.coverage, "partial")
+
+
+def test_split_unpaired_sync_scoped_to_sync_row() raises:
+    var t = MappingTracker()
+    t.set_relation_split(True)
+    t.consume(_attempt("op1", "dev1", UInt64(1)))
+    t.consume(
+        _map("op1", True, "m1", UInt64(4096), UInt64(5000), UInt64(2))
+    )
+    var sy = _sync("op1", "m1", UInt64(1024), UInt64(3))
+    sy.source_correlation = String("unpaired")
+    t.consume(sy)
+    assert_equal(t.unpaired_sync_count(), 1)
+    assert_equal(t.unpaired_copy_count(), 0)
+    var rows = t.metrics("window [0,6000)")
+    var syncs = _global(rows, "sync_requests")
+    assert_true(syncs.has_value)
+    assert_equal(syncs.value, UInt64(1))
+    assert_equal(syncs.coverage, "partial")
+    var live = _global(rows, "live_observed_allocation_bytes")
+    assert_true(live.has_value)
+    assert_equal(live.coverage, "complete_for_scope")
+    var allocs = _global(rows, "successful_allocations")
+    assert_equal(allocs.coverage, "complete_for_scope")
+
+
+def test_split_unpaired_release_withholds_live_only() raises:
+    var t = MappingTracker()
+    t.set_relation_split(True)
+    t.consume(_attempt("op1", "dev1", UInt64(1)))
+    t.consume(
+        _map("op1", True, "m1", UInt64(4096), UInt64(5000), UInt64(2))
+    )
+    t.consume(
+        _copy(
+            "op1", "m1", "original_to_bounce", UInt64(512),
+            UInt64(3),
+        )
+    )
+    var rel = _unmap("ghost", UInt64(5500), UInt64(4))
+    rel.source_correlation = String("unpaired")
+    t.consume(rel)
+    assert_equal(t.unpaired_mapping_count(), 1)
+    var rows = t.metrics("window [0,6000)")
+    var live = _global(rows, "live_observed_allocation_bytes")
+    assert_true(not live.has_value)
+    var allocs = _global(rows, "successful_allocations")
+    assert_true(allocs.has_value)
+    assert_equal(allocs.coverage, "partial")
+    var o2b = _global(rows, "copy_original_to_bounce_bytes")
+    assert_equal(o2b.value, UInt64(512))
+    assert_equal(o2b.coverage, "complete_for_scope")
+
+
+def test_split_producer_copy_loss_scoped() raises:
+    var t = MappingTracker()
+    t.set_relation_split(True)
+    t.consume(_attempt("op1", "dev1", UInt64(1)))
+    t.consume(
+        _map("op1", True, "m1", UInt64(4096), UInt64(5000), UInt64(2))
+    )
+    t.consume(
+        _copy(
+            "op1", "m1", "original_to_bounce", UInt64(512),
+            UInt64(3),
+        )
+    )
+    t.note_copy_attribution_loss()
+    var rows = t.metrics("window [0,6000)")
+    var live = _global(rows, "live_observed_allocation_bytes")
+    assert_true(live.has_value)
+    assert_equal(live.coverage, "complete_for_scope")
+    var o2b = _global(rows, "copy_original_to_bounce_bytes")
+    assert_equal(o2b.coverage, "partial")
+    var dev = _find(rows, "mapped_bytes_total", "dev1")
+    assert_equal(dev.coverage, "partial")
+
+
+def test_split_producer_sync_loss_scoped() raises:
+    var t = MappingTracker()
+    t.set_relation_split(True)
+    t.consume(_attempt("op1", "dev1", UInt64(1)))
+    t.consume(
+        _map("op1", True, "m1", UInt64(4096), UInt64(5000), UInt64(2))
+    )
+    t.consume(_sync("op1", "m1", UInt64(1024), UInt64(3)))
+    t.note_sync_attribution_loss()
+    var rows = t.metrics("window [0,6000)")
+    var syncs = _global(rows, "sync_requests")
+    assert_equal(syncs.coverage, "partial")
+    var live = _global(rows, "live_observed_allocation_bytes")
+    assert_true(live.has_value)
+    assert_equal(live.coverage, "complete_for_scope")
+
+
+def test_split_gap_correlation_hits_mapping_only() raises:
+    var t = MappingTracker()
+    t.set_relation_split(True)
+    t.consume(_attempt("op1", "dev1", UInt64(1)))
+    t.consume(
+        _map("op1", True, "m1", UInt64(4096), UInt64(5000), UInt64(2))
+    )
+    t.consume(
+        _copy(
+            "op1", "m1", "original_to_bounce", UInt64(512),
+            UInt64(3),
+        )
+    )
+    var ev = _base("gap", UInt64(4), UInt64(4004))
+    ev.gap.channel = String("correlation")
+    ev.gap.has_lost_count = True
+    ev.gap.lost_count = UInt64(2)
+    ev.gap.reason = String("test drop")
+    t.consume(ev)
+    var rows = t.metrics("window [0,6000)")
+    var live = _global(rows, "live_observed_allocation_bytes")
+    assert_true(not live.has_value)
+    var o2b = _global(rows, "copy_original_to_bounce_bytes")
+    assert_equal(o2b.value, UInt64(512))
+    assert_equal(o2b.coverage, "complete_for_scope")
+
+
+def test_split_producer_detail_loss_degrades_copy_and_sync() raises:
+    # Split mode: producer-declared detail loss is shared
+    # across every family, so copy bytes and sync requests
+    # degrade even though no attribution loss occurred.
+    var t = MappingTracker()
+    t.set_relation_split(True)
+    t.consume(_attempt("op1", "dev1", UInt64(1)))
+    t.consume(
+        _map("op1", True, "m1", UInt64(4096), UInt64(5000), UInt64(2))
+    )
+    t.consume(
+        _copy(
+            "op1", "m1", "original_to_bounce", UInt64(1024),
+            UInt64(3),
+        )
+    )
+    t.consume(_sync("op1", "m1", UInt64(1024), UInt64(4)))
+    t.note_detail_loss()
+    var rows = t.metrics("window [0,6000)")
+    var live = _global(rows, "live_observed_allocation_bytes")
+    assert_true(not live.has_value)
+    var o2b = _global(rows, "copy_original_to_bounce_bytes")
+    assert_equal(o2b.value, UInt64(1024))
+    assert_equal(o2b.coverage, "partial")
+    var syncs = _global(rows, "sync_requests")
+    assert_equal(syncs.value, UInt64(1))
+    assert_equal(syncs.coverage, "partial")
+
+
+def test_split_consumed_detail_gap_degrades_copy_and_sync() raises:
+    # Split mode: a consumed detail gap carries the same
+    # shared loss as a producer declaration.
+    var t = MappingTracker()
+    t.set_relation_split(True)
+    t.consume(_attempt("op1", "dev1", UInt64(1)))
+    t.consume(
+        _map("op1", True, "m1", UInt64(4096), UInt64(5000), UInt64(2))
+    )
+    t.consume(
+        _copy(
+            "op1", "m1", "original_to_bounce", UInt64(1024),
+            UInt64(3),
+        )
+    )
+    t.consume(_sync("op1", "m1", UInt64(1024), UInt64(4)))
+    t.consume(_gap(UInt64(5)))
+    var rows = t.metrics("window [0,6000)")
+    var live = _global(rows, "live_observed_allocation_bytes")
+    assert_true(not live.has_value)
+    var o2b = _global(rows, "copy_original_to_bounce_bytes")
+    assert_equal(o2b.value, UInt64(1024))
+    assert_equal(o2b.coverage, "partial")
+    var syncs = _global(rows, "sync_requests")
+    assert_equal(syncs.value, UInt64(1))
+    assert_equal(syncs.coverage, "partial")
+
+
+def test_split_unpaired_map_withholds_occupancy() raises:
+    # Split mode: an observed unpaired mapping invalidates
+    # occupancy (mapping/release evidence incomplete) while
+    # copy rows keep their scoped coverage.
+    var t = MappingTracker()
+    t.set_relation_split(True)
+    t.consume(_attempt("op1", "dev1", UInt64(1)))
+    t.consume(
+        _map("op1", True, "m1", UInt64(4096), UInt64(5000), UInt64(2))
+    )
+    t.consume(
+        _copy(
+            "op1", "m1", "original_to_bounce", UInt64(512),
+            UInt64(3),
+        )
+    )
+    var extra = _map(
+        "op2", True, "m2", UInt64(4096), UInt64(5100), UInt64(4)
+    )
+    extra.source_correlation = String("unpaired")
+    t.consume(extra)
+    assert_equal(t.unpaired_mapping_count(), 1)
+    var rows = t.metrics("window [0,6000)")
+    var live = _global(rows, "live_observed_allocation_bytes")
+    assert_true(not live.has_value)
+    var opened = _global(rows, "open_mappings")
+    assert_true(not opened.has_value)
+    var o2b = _global(rows, "copy_original_to_bounce_bytes")
+    assert_equal(o2b.value, UInt64(512))
+    assert_equal(o2b.coverage, "complete_for_scope")
+
+
 def test_snapshot_replay_equivalence() raises:
     # Snapshotting mid-stream must not change the final result:
     # metrics() shares the finish reducers with no destructive
@@ -994,6 +1272,16 @@ def run() raises -> Int:
     suite.test[test_resolved_history_bounded]()
     suite.test[test_retired_history_bounded]()
     suite.test[test_per_device_rows]()
+    suite.test[test_legacy_unpaired_copy_degrades_all_rows]()
+    suite.test[test_split_unpaired_copy_preserves_mapping_coverage]()
+    suite.test[test_split_unpaired_sync_scoped_to_sync_row]()
+    suite.test[test_split_unpaired_release_withholds_live_only]()
+    suite.test[test_split_producer_copy_loss_scoped]()
+    suite.test[test_split_producer_sync_loss_scoped]()
+    suite.test[test_split_gap_correlation_hits_mapping_only]()
+    suite.test[test_split_producer_detail_loss_degrades_copy_and_sync]()
+    suite.test[test_split_consumed_detail_gap_degrades_copy_and_sync]()
+    suite.test[test_split_unpaired_map_withholds_occupancy]()
     suite.test[test_snapshot_replay_equivalence]()
     suite^.run()
     return 0

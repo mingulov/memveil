@@ -45,8 +45,19 @@ from memveil.model.identity import (
     RETIRED_MAX,
     check_address_space,
 )
-from memveil.model.session import Channel
+from memveil.model.session import (
+    CORR_SCOPE_COPY,
+    CORR_SCOPE_MAPPING,
+    CORR_SCOPE_SYNC,
+    Channel,
+    bound_cause_reason,
+    rollup_correlation,
+)
 from memveil.model.validate import format_u64
+
+comptime CLS_MAPPING = 0
+comptime CLS_COPY = 1
+comptime CLS_SYNC = 2
 
 
 @fieldwise_init
@@ -118,6 +129,36 @@ def _is_lifecycle(kind: String) -> Bool:
     )
 
 
+def _class_for_kind(kind: String) -> Int:
+    """Relation class owning one lifecycle kind's pairing."""
+    if kind == "copy":
+        return CLS_COPY
+    if kind == "sync_request":
+        return CLS_SYNC
+    return CLS_MAPPING
+
+
+struct CorrelationHealth(Copyable):
+    """Producer correlation evidence: aggregate plus classes."""
+
+    var aggregate: Channel
+    var mapping_release: Channel
+    var copy_attribution: Channel
+    var sync_attribution: Channel
+
+    def __init__(out self):
+        self.aggregate = Channel()
+        self.mapping_release = Channel()
+        self.copy_attribution = Channel()
+        self.sync_attribution = Channel()
+
+    def __copyinit__(mut self, existing: Self):
+        self.aggregate = existing.aggregate.copy()
+        self.mapping_release = existing.mapping_release.copy()
+        self.copy_attribution = existing.copy_attribution.copy()
+        self.sync_attribution = existing.sync_attribution.copy()
+
+
 struct CorrelationRegistry[
     PENDING_N: Int = PENDING_MAX,
     ACTIVE_N: Int = ACTIVE_MAX,
@@ -145,9 +186,21 @@ struct CorrelationRegistry[
     var _lineage_next: Dict[String, Int]
     var _devices: Dict[String, Bool]
     var _unpaired: Int
-    var _causes: Dict[String, Bool]
-    var _cause_order: List[String]
-    var _refs: List[String]
+    var _unpaired_map: Int
+    var _unpaired_copy: Int
+    var _unpaired_sync: Int
+    var _causes_map: Dict[String, Bool]
+    var _causes_copy: Dict[String, Bool]
+    var _causes_sync: Dict[String, Bool]
+    var _cause_order_map: List[String]
+    var _cause_order_copy: List[String]
+    var _cause_order_sync: List[String]
+    var _cause_codes_map: List[String]
+    var _cause_codes_copy: List[String]
+    var _cause_codes_sync: List[String]
+    var _refs_map: List[String]
+    var _refs_copy: List[String]
+    var _refs_sync: List[String]
 
     def __init__(out self):
         self._hooks = Dict[String, String]()
@@ -162,9 +215,21 @@ struct CorrelationRegistry[
         self._lineage_next = Dict[String, Int]()
         self._devices = Dict[String, Bool]()
         self._unpaired = 0
-        self._causes = Dict[String, Bool]()
-        self._cause_order = List[String]()
-        self._refs = List[String]()
+        self._unpaired_map = 0
+        self._unpaired_copy = 0
+        self._unpaired_sync = 0
+        self._causes_map = Dict[String, Bool]()
+        self._causes_copy = Dict[String, Bool]()
+        self._causes_sync = Dict[String, Bool]()
+        self._cause_order_map = List[String]()
+        self._cause_order_copy = List[String]()
+        self._cause_order_sync = List[String]()
+        self._cause_codes_map = List[String]()
+        self._cause_codes_copy = List[String]()
+        self._cause_codes_sync = List[String]()
+        self._refs_map = List[String]()
+        self._refs_copy = List[String]()
+        self._refs_sync = List[String]()
 
     def admit_hook(mut self, hook: String, namespace: String) raises:
         """Admit one hook under an address namespace."""
@@ -187,56 +252,140 @@ struct CorrelationRegistry[
             return self._retired[key]
         raise CorrelationError("unknown mapping " + mapping)
 
-    def health(self) -> Channel:
-        """Correlation quality: paired scope or explicit causes."""
+    def _class_channel(self, cls: Int) -> Channel:
+        """One relation class: paired scope or its own causes."""
         var out = Channel()
-        out.scope = String("correlated lifecycle events")
-        if self._unpaired == 0:
+        var scope = String(CORR_SCOPE_MAPPING)
+        var done = String(
+            "all mapping and release relationships paired"
+        )
+        var n = self._unpaired_map
+        if cls == CLS_COPY:
+            scope = String(CORR_SCOPE_COPY)
+            done = String("all copy attribution relationships paired")
+            n = self._unpaired_copy
+        elif cls == CLS_SYNC:
+            scope = String(CORR_SCOPE_SYNC)
+            done = String("all sync attribution relationships paired")
+            n = self._unpaired_sync
+        out.scope = scope
+        if n == 0:
             out.status = String("complete_for_scope")
             out.has_loss_count = True
             out.loss_count = UInt64(0)
-            out.reason = String("all lifecycle events paired")
+            out.reason = done
             return out^
         out.status = String("partial")
-        var reason = String("")
-        for i in range(len(self._cause_order)):
-            if i > 0:
-                reason += "; "
-            reason += self._cause_order[i]
-        out.reason = reason
-        for i in range(len(self._refs)):
-            out.evidence_refs.append(self._refs[i])
+        if cls == CLS_COPY:
+            out.reason = bound_cause_reason(
+                self._cause_order_copy, self._cause_codes_copy
+            )
+            for i in range(len(self._refs_copy)):
+                out.evidence_refs.append(self._refs_copy[i])
+        elif cls == CLS_SYNC:
+            out.reason = bound_cause_reason(
+                self._cause_order_sync, self._cause_codes_sync
+            )
+            for i in range(len(self._refs_sync)):
+                out.evidence_refs.append(self._refs_sync[i])
+        else:
+            out.reason = bound_cause_reason(
+                self._cause_order_map, self._cause_codes_map
+            )
+            for i in range(len(self._refs_map)):
+                out.evidence_refs.append(self._refs_map[i])
         return out^
 
+    def health_full(self) -> CorrelationHealth:
+        """Correlation quality: aggregate rollup plus classes."""
+        var out = CorrelationHealth()
+        out.mapping_release = self._class_channel(CLS_MAPPING)
+        out.copy_attribution = self._class_channel(CLS_COPY)
+        out.sync_attribution = self._class_channel(CLS_SYNC)
+        out.aggregate = rollup_correlation(
+            out.mapping_release,
+            out.copy_attribution,
+            out.sync_attribution,
+            self._cause_order_map,
+            self._cause_order_copy,
+            self._cause_order_sync,
+        )
+        return out^
+
+    def health(self) -> Channel:
+        """Correlation quality aggregate: paired scope or causes."""
+        var full = self.health_full()
+        return full.aggregate.copy()
+
     def _note(
-        mut self, code: String, example: String, seq: UInt64,
+        mut self,
+        cls: Int,
+        code: String,
+        example: String,
+        seq: UInt64,
         source: String,
     ):
-        """Record one unpaired event under a fixed cause code.
+        """Record one unpaired event under a fixed class cause code.
 
-        Deduplication keys on the fixed code only: the first
-        identity example is retained for diagnosis and later
-        identities under the same code add no storage, so
+        Deduplication keys on the (class, code) pair only: the
+        first identity example is retained for diagnosis and
+        later identities under the same code add no storage, so
         diagnostic history plateaus with the code set instead
-        of growing per operation or mapping identity.
+        of growing per operation or mapping identity. A cause
+        never merges across classes, so copy uncertainty cannot
+        excuse a dangling sync reference.
         """
         self._unpaired += 1
-        if code not in self._causes:
-            self._causes[code] = True
-            if example == "":
-                self._cause_order.append(code)
-            else:
-                self._cause_order.append(code + example)
-        if len(self._refs) < 8:
-            self._refs.append(
-                source + ":seq=" + format_u64(seq)
-            )
+        var anchor = source + ":seq=" + format_u64(seq)
+        if cls == CLS_COPY:
+            self._unpaired_copy += 1
+            if code not in self._causes_copy:
+                self._causes_copy[code] = True
+                self._cause_codes_copy.append(code)
+                if example == "":
+                    self._cause_order_copy.append(code)
+                else:
+                    self._cause_order_copy.append(code + example)
+            if len(self._refs_copy) < 8:
+                self._refs_copy.append(anchor)
+        elif cls == CLS_SYNC:
+            self._unpaired_sync += 1
+            if code not in self._causes_sync:
+                self._causes_sync[code] = True
+                self._cause_codes_sync.append(code)
+                if example == "":
+                    self._cause_order_sync.append(code)
+                else:
+                    self._cause_order_sync.append(code + example)
+            if len(self._refs_sync) < 8:
+                self._refs_sync.append(anchor)
+        else:
+            self._unpaired_map += 1
+            if code not in self._causes_map:
+                self._causes_map[code] = True
+                self._cause_codes_map.append(code)
+                if example == "":
+                    self._cause_order_map.append(code)
+                else:
+                    self._cause_order_map.append(code + example)
+            if len(self._refs_map) < 8:
+                self._refs_map.append(anchor)
 
     def _unpaired_event(
-        mut self, var ev: Event, code: String, example: String,
+        mut self,
+        var ev: Event,
+        code: String,
+        example: String,
         source: String,
+        cls: Int = CLS_MAPPING,
     ) -> Event:
-        self._note(code, example, ev.seq, source)
+        """Label one event unpaired under one relation class.
+
+        The mapping/release class is the default: attempt, map,
+        and unmap pairing plus resolved-history pressure. Copy
+        and sync call sites pass their class explicitly.
+        """
+        self._note(cls, code, example, ev.seq, source)
         ev.source_correlation = String("unpaired")
         return ev^
 
@@ -267,11 +416,13 @@ struct CorrelationRegistry[
         var hook = ev.source_hook
         var ns = self._namespace_for(hook, admitted)
         if not admitted:
+            var cls = _class_for_kind(ev.kind)
             return self._unpaired_event(
                 ev^,
                 "hook not admitted",
                 ": " + hook,
                 source,
+                cls,
             )
         if ev.kind == "bounce_attempt":
             return self._open_attempt(ev^, ns, source)
@@ -474,6 +625,7 @@ struct CorrelationRegistry[
                     "copy references unknown mapping",
                     String(""),
                     source,
+                    CLS_COPY,
                 )
             if self._active[key].op != op:
                 return self._unpaired_event(
@@ -481,6 +633,7 @@ struct CorrelationRegistry[
                     "copy operation mismatch",
                     String(""),
                     source,
+                    CLS_COPY,
                 )
             var known = op in self._pending or op in self._resolved
             if not known and self._active[key].wire:
@@ -489,6 +642,7 @@ struct CorrelationRegistry[
                     "copy without pending operation",
                     String(""),
                     source,
+                    CLS_COPY,
                 )
             ev.source_correlation = String("direct")
             return ev^
@@ -498,6 +652,7 @@ struct CorrelationRegistry[
                 "copy after operation resolved",
                 String(""),
                 source,
+                CLS_COPY,
             )
         if op not in self._pending:
             return self._unpaired_event(
@@ -505,6 +660,7 @@ struct CorrelationRegistry[
                 "copy without pending operation",
                 String(""),
                 source,
+                CLS_COPY,
             )
         var p = self._pending[op]
         if p.nested >= Self.NESTED_N:
@@ -513,6 +669,7 @@ struct CorrelationRegistry[
                 "nesting budget exceeded",
                 String(""),
                 source,
+                CLS_COPY,
             )
         p.nested += 1
         self._pending[op] = p
@@ -532,6 +689,7 @@ struct CorrelationRegistry[
                 "sync references unknown mapping",
                 String(""),
                 source,
+                CLS_SYNC,
             )
         if self._active[key].op != op:
             return self._unpaired_event(
@@ -539,6 +697,7 @@ struct CorrelationRegistry[
                 "sync operation mismatch",
                 String(""),
                 source,
+                CLS_SYNC,
             )
         ev.source_correlation = String("direct")
         return ev^
@@ -614,6 +773,7 @@ struct CorrelationRegistry[
             if self._resolved_next >= Self.RESOLVED_N:
                 self._resolved_next = 0
             self._note(
+                CLS_MAPPING,
                 "resolved-operation history exceeded",
                 String(""),
                 seq,

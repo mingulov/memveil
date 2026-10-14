@@ -532,6 +532,47 @@ def _encode_channel(ch: Channel) raises EncodeError -> String:
     return _jobj(parts^)
 
 
+def _encode_correlation(s: Session) raises EncodeError -> String:
+    """Encode quality.correlation with its optional relations."""
+    var parts = List[String]()
+    var ch = s.q_correlation.copy()
+    parts.append(_member(String("status"), _jstr(ch.status)))
+    if ch.has_loss_count:
+        parts.append(
+            _member(String("loss_count"), _ju64(ch.loss_count))
+        )
+    else:
+        parts.append(_member(String("loss_count"), _jnull()))
+    parts.append(_member(String("scope"), _jstr(ch.scope)))
+    parts.append(_member(String("reason"), _jstr(ch.reason)))
+    var refs = List[String]()
+    for i in range(len(ch.evidence_refs)):
+        refs.append(_jstr(ch.evidence_refs[i]))
+    parts.append(_member(String("evidence_refs"), _jarr(refs^)))
+    if s.has_corr_relations:
+        var rel = List[String]()
+        rel.append(
+            _member(
+                String("mapping_release"),
+                _encode_channel(s.q_corr_mapping),
+            )
+        )
+        rel.append(
+            _member(
+                String("copy_attribution"),
+                _encode_channel(s.q_corr_copy),
+            )
+        )
+        rel.append(
+            _member(
+                String("sync_attribution"),
+                _encode_channel(s.q_corr_sync),
+            )
+        )
+        parts.append(_member(String("relations"), _jobj(rel^)))
+    return _jobj(parts^)
+
+
 def _encode_device(dev: DeviceEntry) raises EncodeError -> String:
     var parts = List[String]()
     parts.append(
@@ -723,7 +764,7 @@ def encode_session(s: Session) raises EncodeError -> String:
         _member(String("aggregate"), _encode_channel(s.q_aggregate))
     )
     quality.append(
-        _member(String("correlation"), _encode_channel(s.q_correlation))
+        _member(String("correlation"), _encode_correlation(s))
     )
     quality.append(
         _member(String("baseline"), _encode_channel(s.q_baseline))

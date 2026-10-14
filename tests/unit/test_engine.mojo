@@ -18,6 +18,7 @@ from memveil.analysis.engine import (
     truncate_note,
     truncate_rows,
 )
+from memveil.capture.reader import default_limits, read_capture
 from memveil.model.event import Event
 from memveil.model.metric import Metric
 from memveil.model.report import Report
@@ -109,6 +110,17 @@ def _unmap(mapping: String, ts: UInt64, seq: UInt64) -> Event:
     return ev^
 
 
+def _sync(op: String, mapping: String, seq: UInt64) -> Event:
+    var ev = _base("sync_request", seq, UInt64(700) + seq)
+    ev.sync.operation_id = op
+    ev.sync.has_mapping_id = True
+    ev.sync.mapping_id = mapping
+    ev.sync.has_offset = True
+    ev.sync.offset = UInt64(0)
+    ev.sync.length = UInt64(1024)
+    return ev^
+
+
 def _pool(pool: String, used: UInt64, cap: UInt64, seq: UInt64) -> Event:
     var ev = _base("pool_sample", seq, UInt64(700) + seq)
     ev.pool.pool_id = pool
@@ -197,6 +209,315 @@ def _feed_nested(mut a: Analyzer) raises:
     a.consume(_copy("op1", UInt64(4096), UInt64(2)))
     a.consume(_map("op1", "m1", UInt64(1300000000), UInt64(3)))
     a.consume(_unmap("m1", UInt64(2300000000), UInt64(4)))
+
+
+def _split_copy_session() -> Session:
+    var s = _session()
+    s.q_correlation.status = String("partial")
+    s.q_correlation.has_loss_count = False
+    s.q_correlation.loss_count = UInt64(0)
+    s.q_correlation.reason = String(
+        "copy_attribution partial (copy without pending operation)"
+    )
+    s.has_corr_relations = True
+    s.q_corr_mapping.status = String("complete_for_scope")
+    s.q_corr_mapping.has_loss_count = True
+    s.q_corr_mapping.loss_count = UInt64(0)
+    s.q_corr_mapping.scope = String("mapping and release pairing")
+    s.q_corr_mapping.reason = String("test: every mapping pairs")
+    s.q_corr_copy.status = String("partial")
+    s.q_corr_copy.has_loss_count = False
+    s.q_corr_copy.scope = String("copy attribution")
+    s.q_corr_copy.reason = String(
+        "test: copy without pending operation"
+    )
+    s.q_corr_sync.status = String("complete_for_scope")
+    s.q_corr_sync.has_loss_count = True
+    s.q_corr_sync.loss_count = UInt64(0)
+    s.q_corr_sync.scope = String("sync attribution")
+    s.q_corr_sync.reason = String("test: every sync pairs")
+    return s^
+
+
+def _split_mapping_session() -> Session:
+    var s = _session()
+    s.q_correlation.status = String("partial")
+    s.q_correlation.has_loss_count = False
+    s.q_correlation.loss_count = UInt64(0)
+    s.q_correlation.reason = String(
+        "mapping_release partial (release of unknown mapping)"
+    )
+    s.has_corr_relations = True
+    s.q_corr_mapping.status = String("partial")
+    s.q_corr_mapping.has_loss_count = False
+    s.q_corr_mapping.scope = String("mapping and release pairing")
+    s.q_corr_mapping.reason = String(
+        "test: release of unknown mapping"
+    )
+    s.q_corr_copy.status = String("complete_for_scope")
+    s.q_corr_copy.has_loss_count = True
+    s.q_corr_copy.loss_count = UInt64(0)
+    s.q_corr_copy.scope = String("copy attribution")
+    s.q_corr_copy.reason = String("test: every copy pairs")
+    s.q_corr_sync.status = String("complete_for_scope")
+    s.q_corr_sync.has_loss_count = True
+    s.q_corr_sync.loss_count = UInt64(0)
+    s.q_corr_sync.scope = String("sync attribution")
+    s.q_corr_sync.reason = String("test: every sync pairs")
+    return s^
+
+
+def _split_complete_session() -> Session:
+    var s = _session()
+    s.has_corr_relations = True
+    s.q_corr_mapping.status = String("complete_for_scope")
+    s.q_corr_mapping.has_loss_count = True
+    s.q_corr_mapping.loss_count = UInt64(0)
+    s.q_corr_mapping.scope = String("mapping and release pairing")
+    s.q_corr_mapping.reason = String("test: every mapping pairs")
+    s.q_corr_copy.status = String("complete_for_scope")
+    s.q_corr_copy.has_loss_count = True
+    s.q_corr_copy.loss_count = UInt64(0)
+    s.q_corr_copy.scope = String("copy attribution")
+    s.q_corr_copy.reason = String("test: every copy pairs")
+    s.q_corr_sync.status = String("complete_for_scope")
+    s.q_corr_sync.has_loss_count = True
+    s.q_corr_sync.loss_count = UInt64(0)
+    s.q_corr_sync.scope = String("sync attribution")
+    s.q_corr_sync.reason = String("test: every sync pairs")
+    return s^
+
+
+def test_split_producer_copy_loss_preserves_occupancy() raises:
+    # Producer copy-attribution-only loss with every event
+    # paired: occupancy stays valued with complete mapping
+    # coverage; copy rows degrade.
+    var a = Analyzer(_split_copy_session())
+    a.consume(_attempt("op1", UInt64(1)))
+    a.consume(_map("op1", "m1", UInt64(1300000000), UInt64(2)))
+    a.consume(_copy("op1", UInt64(512), UInt64(3)))
+    var rep = a.finish(UInt64(2300000000), False)
+    var live = _find(rep.metrics, "live_observed_allocation_bytes")
+    assert_true(live.has_value)
+    assert_equal(live.value, UInt64(4096))
+    assert_equal(live.coverage, "complete_for_scope")
+    var o2b = _find(rep.metrics, "copy_original_to_bounce_bytes")
+    assert_equal(o2b.value, UInt64(512))
+    assert_equal(o2b.coverage, "partial")
+    assert_true(rep.has_corr_relations)
+    assert_equal(rep.q_corr_mapping.status, "complete_for_scope")
+    assert_true(rep.q_corr_mapping.has_loss_count)
+    assert_equal(rep.q_corr_copy.status, "partial")
+    assert_equal(rep.q_corr_sync.status, "complete_for_scope")
+    assert_equal(rep.q_correlation.status, "partial")
+
+
+def test_split_producer_mapping_loss_withholds_occupancy() raises:
+    # Producer mapping/release loss withholds occupancy even
+    # though every observed event pairs; copy rows stay valued
+    # with complete coverage.
+    var a = Analyzer(_split_mapping_session())
+    a.consume(_attempt("op1", UInt64(1)))
+    a.consume(_map("op1", "m1", UInt64(1300000000), UInt64(2)))
+    a.consume(_copy("op1", UInt64(512), UInt64(3)))
+    var rep = a.finish(UInt64(2300000000), False)
+    var live = _find(rep.metrics, "live_observed_allocation_bytes")
+    assert_true(not live.has_value)
+    var o2b = _find(rep.metrics, "copy_original_to_bounce_bytes")
+    assert_equal(o2b.value, UInt64(512))
+    assert_equal(o2b.coverage, "complete_for_scope")
+    assert_true(rep.has_corr_relations)
+    assert_equal(rep.q_corr_mapping.status, "partial")
+    assert_equal(rep.q_corr_copy.status, "complete_for_scope")
+
+
+def test_split_detail_loss_degrades_copy_and_sync_rows() raises:
+    # Replay probe: split relations with complete pairing
+    # claims plus producer-declared detail loss labels copy
+    # bytes and sync requests partial.
+    var s = _split_complete_session()
+    s.q_detail.status = String("partial")
+    s.q_detail.has_loss_count = False
+    s.q_detail.reason = String("test: producer detail loss")
+    var a = Analyzer(s)
+    a.consume(_attempt("op1", UInt64(1)))
+    a.consume(_map("op1", "m1", UInt64(1300000000), UInt64(2)))
+    a.consume(_copy("op1", UInt64(1024), UInt64(3)))
+    a.consume(_sync("op1", "m1", UInt64(4)))
+    var rep = a.finish(UInt64(2300000000), False)
+    var live = _find(rep.metrics, "live_observed_allocation_bytes")
+    assert_true(not live.has_value)
+    var o2b = _find(rep.metrics, "copy_original_to_bounce_bytes")
+    assert_equal(o2b.value, UInt64(1024))
+    assert_equal(o2b.coverage, "partial")
+    var syncs = _find(rep.metrics, "sync_requests")
+    assert_equal(syncs.value, UInt64(1))
+    assert_equal(syncs.coverage, "partial")
+
+
+def test_split_observed_mapping_loss_withholds_occupancy() raises:
+    # Replay probe: complete split headers, one known open
+    # mapping, one additional unpaired successful map_result:
+    # mapping_release turns partial and every occupancy row
+    # is withheld while attribution classes stay complete.
+    var a = Analyzer(_split_complete_session())
+    a.consume(_attempt("op1", UInt64(1)))
+    a.consume(_map("op1", "m1", UInt64(1300000000), UInt64(2)))
+    var extra = _map("op2", "m2", UInt64(1400000000), UInt64(3))
+    extra.source_correlation = String("unpaired")
+    a.consume(extra^)
+    var rep = a.finish(UInt64(2300000000), False)
+    var live = _find(rep.metrics, "live_observed_allocation_bytes")
+    assert_true(not live.has_value)
+    var opened = _find(rep.metrics, "open_mappings")
+    assert_true(not opened.has_value)
+    var peak = _find(rep.metrics, "peak_live_observed_allocation_bytes")
+    assert_true(not peak.has_value)
+    var age = _find(rep.metrics, "oldest_open_mapping_age_ns")
+    assert_true(not age.has_value)
+    var byte_time = _find(rep.metrics, "allocation_byte_microseconds")
+    assert_true(not byte_time.has_value)
+    assert_equal(rep.q_corr_mapping.status, "partial")
+    assert_true(rep.q_corr_mapping.has_loss_count)
+    assert_equal(rep.q_corr_mapping.loss_count, UInt64(1))
+    assert_equal(rep.q_corr_copy.status, "complete_for_scope")
+    assert_equal(rep.q_corr_sync.status, "complete_for_scope")
+
+
+def test_split_contradictory_aggregate_recomputed() raises:
+    # A split header claiming a complete aggregate over a
+    # partial class is recomputed: with no gaps and no
+    # observed unpaired events the analyzer aggregate is
+    # partial and the incompleteness is found.
+    var s = _split_copy_session()
+    s.q_correlation.status = String("complete_for_scope")
+    s.q_correlation.has_loss_count = True
+    s.q_correlation.loss_count = UInt64(0)
+    s.q_correlation.reason = String("all lifecycle events paired")
+    var a = Analyzer(s)
+    a.consume(_attempt("op1", UInt64(1)))
+    a.consume(_map("op1", "m1", UInt64(1300000000), UInt64(2)))
+    a.consume(_copy("op1", UInt64(512), UInt64(3)))
+    var rep = a.finish(UInt64(2300000000), False)
+    assert_equal(rep.q_correlation.status, "partial")
+    assert_equal(rep.q_corr_copy.status, "partial")
+    assert_equal(len(rep.findings), 1)
+    assert_equal(rep.findings[0].code, "CAPTURE_INCOMPLETE")
+
+
+def _analyze_fixture(dir: String) raises -> Report:
+    var r = read_capture(dir, False, default_limits())
+    var a = Analyzer(r.session)
+    while r.has_more():
+        a.consume(r.next_event())
+    return a.finish(r.session.window_end_ns, r.partial)
+
+
+def test_fixture_copy_only_preserves_occupancy() raises:
+    var rep = _analyze_fixture(
+        String("tests/fixtures/lifecycle/relations-copy-only")
+    )
+    var live = _find(rep.metrics, "live_observed_allocation_bytes")
+    assert_true(live.has_value)
+    assert_equal(live.value, UInt64(4096))
+    assert_equal(live.coverage, "complete_for_scope")
+    var o2b = _find(rep.metrics, "copy_original_to_bounce_bytes")
+    assert_equal(o2b.value, UInt64(5120))
+    assert_equal(o2b.coverage, "partial")
+    var syncs = _find(rep.metrics, "sync_requests")
+    assert_equal(syncs.value, UInt64(1))
+    assert_equal(syncs.coverage, "complete_for_scope")
+    assert_true(rep.has_corr_relations)
+    assert_equal(rep.q_corr_mapping.status, "complete_for_scope")
+    assert_true(rep.q_corr_mapping.has_loss_count)
+    assert_equal(rep.q_corr_mapping.loss_count, UInt64(0))
+    assert_equal(rep.q_corr_copy.status, "partial")
+    assert_true(rep.q_corr_copy.has_loss_count)
+    assert_equal(rep.q_corr_copy.loss_count, UInt64(1))
+    assert_equal(rep.q_corr_sync.status, "complete_for_scope")
+    assert_equal(rep.q_correlation.status, "partial")
+    assert_true(rep.q_correlation.has_loss_count)
+    assert_equal(rep.q_correlation.loss_count, UInt64(1))
+
+
+def test_fixture_lost_release_withholds_occupancy() raises:
+    var rep = _analyze_fixture(
+        String("tests/fixtures/lifecycle/relations-lost-release")
+    )
+    var live = _find(rep.metrics, "live_observed_allocation_bytes")
+    assert_true(not live.has_value)
+    var opened = _find(rep.metrics, "open_mappings")
+    assert_true(not opened.has_value)
+    var o2b = _find(rep.metrics, "copy_original_to_bounce_bytes")
+    assert_equal(o2b.value, UInt64(5120))
+    assert_equal(o2b.coverage, "complete_for_scope")
+    assert_true(rep.has_corr_relations)
+    assert_equal(rep.q_corr_mapping.status, "partial")
+    assert_true(rep.q_corr_mapping.has_loss_count)
+    assert_equal(rep.q_corr_mapping.loss_count, UInt64(1))
+    assert_equal(rep.q_corr_copy.status, "complete_for_scope")
+    assert_equal(rep.q_corr_sync.status, "complete_for_scope")
+
+
+def test_fixture_legacy_copy_degrades_coarsely() raises:
+    # Legacy 0.1.1 header claims complete correlation but the
+    # stream holds an unpaired copy: every mapping-row family
+    # degrades, exactly as before relation classes existed.
+    var rep = _analyze_fixture(
+        String("tests/fixtures/lifecycle/relations-legacy-copy")
+    )
+    assert_true(not rep.has_corr_relations)
+    var live = _find(rep.metrics, "live_observed_allocation_bytes")
+    assert_true(live.has_value)
+    assert_equal(live.value, UInt64(0))
+    assert_equal(live.coverage, "partial")
+    var allocs = _find(rep.metrics, "successful_allocations")
+    assert_equal(allocs.coverage, "partial")
+    var o2b = _find(rep.metrics, "copy_original_to_bounce_bytes")
+    assert_equal(o2b.coverage, "partial")
+    assert_equal(rep.q_correlation.status, "partial")
+    assert_true(rep.q_correlation.has_loss_count)
+    assert_equal(rep.q_correlation.loss_count, UInt64(1))
+
+
+def test_fixture_legacy_sync_degrades_coarsely() raises:
+    var rep = _analyze_fixture(
+        String("tests/fixtures/lifecycle/relations-legacy-sync")
+    )
+    assert_true(not rep.has_corr_relations)
+    var live = _find(rep.metrics, "live_observed_allocation_bytes")
+    assert_true(live.has_value)
+    assert_equal(live.value, UInt64(0))
+    assert_equal(live.coverage, "partial")
+    var syncs = _find(rep.metrics, "sync_requests")
+    assert_equal(syncs.coverage, "partial")
+    assert_equal(rep.q_correlation.status, "partial")
+    assert_equal(rep.q_correlation.loss_count, UInt64(1))
+
+
+def test_fixture_gap_open_still_withholds() raises:
+    # Independent safeguards stay authoritative: complete
+    # correlation with detail loss still withholds live state.
+    var rep = _analyze_fixture(
+        String("tests/fixtures/lifecycle/quality-gap-open")
+    )
+    var live = _find(rep.metrics, "live_observed_allocation_bytes")
+    assert_true(not live.has_value)
+
+
+def test_fixture_reordered_peak_still_withheld() raises:
+    # Complete correlation with unproven peak order still
+    # withholds the peak while settled state stays valued.
+    var rep = _analyze_fixture(
+        String("tests/fixtures/lifecycle/reordered-peak")
+    )
+    var peak = _find(
+        rep.metrics, "peak_live_observed_allocation_bytes"
+    )
+    assert_true(not peak.has_value)
+    var live = _find(rep.metrics, "live_observed_allocation_bytes")
+    assert_true(live.has_value)
+    assert_equal(live.value, UInt64(0))
 
 
 def test_merged_rows() raises:
@@ -713,6 +1034,17 @@ def run() raises -> Int:
     suite.test[test_unpaired_degrades_correlation]()
     suite.test[test_unpaired_events_emit_metric]()
     suite.test[test_paired_events_emit_no_unpaired_metric]()
+    suite.test[test_split_producer_copy_loss_preserves_occupancy]()
+    suite.test[test_split_producer_mapping_loss_withholds_occupancy]()
+    suite.test[test_split_detail_loss_degrades_copy_and_sync_rows]()
+    suite.test[test_split_observed_mapping_loss_withholds_occupancy]()
+    suite.test[test_split_contradictory_aggregate_recomputed]()
+    suite.test[test_fixture_copy_only_preserves_occupancy]()
+    suite.test[test_fixture_lost_release_withholds_occupancy]()
+    suite.test[test_fixture_legacy_copy_degrades_coarsely]()
+    suite.test[test_fixture_legacy_sync_degrades_coarsely]()
+    suite.test[test_fixture_gap_open_still_withholds]()
+    suite.test[test_fixture_reordered_peak_still_withheld]()
     suite.test[test_region_rows_merged]()
     suite.test[test_region_rows_absent_without_source]()
     suite.test[test_partial_tail_downgrades_stateful_metrics]()

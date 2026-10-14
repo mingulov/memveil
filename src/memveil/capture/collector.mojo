@@ -66,6 +66,9 @@ from memveil.model.event import (
 )
 from memveil.model.report import ENGINE_VERSION
 from memveil.model.session import (
+    CORR_SCOPE_COPY,
+    CORR_SCOPE_MAPPING,
+    CORR_SCOPE_SYNC,
     Capability,
     Channel,
     DeviceEntry,
@@ -2748,15 +2751,24 @@ struct Collector:
         else:
             out.q_aggregate.scope = String("counter snapshots")
         if self._extra_channels():
-            var health = self.registry.health()
-            out.q_correlation.status = health.status
-            out.q_correlation.has_loss_count = health.has_loss_count
-            out.q_correlation.loss_count = health.loss_count
-            out.q_correlation.scope = health.scope
-            out.q_correlation.reason = health.reason
-            out.q_correlation.evidence_refs = (
-                health.evidence_refs.copy()
+            var health = self.registry.health_full()
+            out.q_correlation.status = health.aggregate.status
+            out.q_correlation.has_loss_count = (
+                health.aggregate.has_loss_count
             )
+            out.q_correlation.loss_count = health.aggregate.loss_count
+            out.q_correlation.scope = health.aggregate.scope
+            out.q_correlation.reason = health.aggregate.reason
+            out.q_correlation.evidence_refs = (
+                health.aggregate.evidence_refs.copy()
+            )
+            out.has_corr_relations = True
+            var rel_map = health.mapping_release.copy()
+            out.q_corr_mapping = rel_map^
+            var rel_copy = health.copy_attribution.copy()
+            out.q_corr_copy = rel_copy^
+            var rel_sync = health.sync_attribution.copy()
+            out.q_corr_sync = rel_sync^
         else:
             out.q_correlation.status = String("not_applicable")
             out.q_correlation.has_loss_count = False
@@ -2764,6 +2776,28 @@ struct Collector:
             out.q_correlation.reason = String(
                 "Attempt counting needs no cross-event correlation."
             )
+            out.has_corr_relations = True
+            var na_map = Channel()
+            na_map.status = String("not_applicable")
+            na_map.scope = String(CORR_SCOPE_MAPPING)
+            na_map.reason = String(
+                "Attempt counting needs no cross-event correlation."
+            )
+            out.q_corr_mapping = na_map^
+            var na_copy = Channel()
+            na_copy.status = String("not_applicable")
+            na_copy.scope = String(CORR_SCOPE_COPY)
+            na_copy.reason = String(
+                "Attempt counting needs no cross-event correlation."
+            )
+            out.q_corr_copy = na_copy^
+            var na_sync = Channel()
+            na_sync.status = String("not_applicable")
+            na_sync.scope = String(CORR_SCOPE_SYNC)
+            na_sync.reason = String(
+                "Attempt counting needs no cross-event correlation."
+            )
+            out.q_corr_sync = na_sync^
         out.q_baseline.status = String("not_applicable")
         out.q_baseline.has_loss_count = False
         out.q_baseline.scope = String("attempt metrics")

@@ -20,6 +20,7 @@ from memveil.model.validate import (
     check_opaque_id,
     parse_u64,
 )
+from memveil.model.encode import encode_session
 from memveil.model.session import (
     MAX_EVIDENCE_ITEMS,
     Session,
@@ -501,6 +502,189 @@ def test_session_rejects_shape() raises:
         base.replace(String('"task_context": {'), String('"task_context2": {'))
     )
     for bad in cases:
+        var raised = False
+        try:
+            _ = parse_session(utf8_bytes(bad))
+        except:
+            raised = True
+        assert_true(raised)
+
+
+def _relations_object() -> String:
+    return String(
+        '"relations": {'
+        ' "mapping_release": {'
+        ' "status": "complete_for_scope", "loss_count": "0",'
+        ' "scope": "mapping and release pairing",'
+        ' "reason": "Authored test: every mapping pairs."},'
+        ' "copy_attribution": {'
+        ' "status": "complete_for_scope", "loss_count": "0",'
+        ' "scope": "copy attribution",'
+        ' "reason": "Authored test: every copy pairs."},'
+        ' "sync_attribution": {'
+        ' "status": "partial", "loss_count": null,'
+        ' "scope": "sync attribution",'
+        ' "reason": "Authored test: one sync unpaired.",'
+        ' "evidence_refs": ["capture:seq=4"]}}'
+    )
+
+
+def _with_relations(base: String) raises -> String:
+    var needle = String(
+        '"reason": "Attempt counting needs no cross-event'
+        ' correlation."\n    }'
+    )
+    assert_true(base.find(needle) != -1)
+    return base.replace(
+        needle,
+        String(
+            '"reason": "Attempt counting needs no cross-event'
+            ' correlation.",\n      '
+        )
+        + _relations_object()
+        + String("\n    }"),
+    )
+
+
+def _channels_same(a: Session, b: Session) -> Bool:
+    return (
+        a.has_corr_relations == b.has_corr_relations
+        and a.q_corr_mapping.status == b.q_corr_mapping.status
+        and a.q_corr_copy.status == b.q_corr_copy.status
+        and a.q_corr_sync.status == b.q_corr_sync.status
+        and a.q_corr_sync.reason == b.q_corr_sync.reason
+        and len(a.q_corr_sync.evidence_refs)
+        == len(b.q_corr_sync.evidence_refs)
+    )
+
+
+def test_session_legacy_011_has_no_relations() raises:
+    var s = parse_session(fixture_bytes(ATTEMPTS_SESSION))
+    assert_true(not s.has_corr_relations)
+
+
+def test_session_012_without_relations_is_legacy() raises:
+    var base = fixture_text(ATTEMPTS_SESSION)
+    var bumped = base.replace(
+        String('"schema_version": "0.1.1"'),
+        String('"schema_version": "0.1.2"'),
+    )
+    var s = parse_session(utf8_bytes(bumped))
+    assert_true(not s.has_corr_relations)
+    assert_equal(s.q_correlation.status, "complete_for_scope")
+
+
+def test_session_012_relations_parse() raises:
+    var base = fixture_text(ATTEMPTS_SESSION)
+    var bumped = base.replace(
+        String('"schema_version": "0.1.1"'),
+        String('"schema_version": "0.1.2"'),
+    )
+    var s = parse_session(utf8_bytes(_with_relations(bumped)))
+    assert_true(s.has_corr_relations)
+    assert_equal(s.q_corr_mapping.status, "complete_for_scope")
+    assert_true(s.q_corr_mapping.has_loss_count)
+    assert_equal(s.q_corr_mapping.loss_count, UInt64(0))
+    assert_equal(s.q_corr_copy.status, "complete_for_scope")
+    assert_equal(s.q_corr_sync.status, "partial")
+    assert_true(not s.q_corr_sync.has_loss_count)
+    assert_equal(len(s.q_corr_sync.evidence_refs), 1)
+    assert_equal(
+        s.q_corr_sync.evidence_refs[0], "capture:seq=4"
+    )
+
+
+def test_session_012_relations_encode_roundtrip() raises:
+    var base = fixture_text(ATTEMPTS_SESSION)
+    var bumped = base.replace(
+        String('"schema_version": "0.1.1"'),
+        String('"schema_version": "0.1.2"'),
+    )
+    var s = parse_session(utf8_bytes(_with_relations(bumped)))
+    var again = parse_session(utf8_bytes(encode_session(s)))
+    assert_true(_channels_same(s, again))
+    assert_true(again.has_corr_relations)
+
+
+def test_session_011_relations_refused_version_first() raises:
+    var doc = _with_relations(fixture_text(ATTEMPTS_SESSION))
+    var raised = False
+    try:
+        _ = parse_session(utf8_bytes(doc))
+    except:
+        raised = True
+    assert_true(raised)
+
+
+def _version_last(base: String) raises -> String:
+    var headless = base.replace(
+        String('{\n  "schema_version": "0.1.1",\n'),
+        String('{\n'),
+    )
+    assert_true(headless != base)
+    return headless.replace(
+        String('    "open_mappings": "0"\n  }\n}\n'),
+        String(
+            '    "open_mappings": "0"\n  },\n'
+            '  "schema_version": "0.1.1"\n}\n'
+        ),
+    )
+
+
+def test_session_key_order_free_without_relations() raises:
+    var s = parse_session(
+        utf8_bytes(_version_last(fixture_text(ATTEMPTS_SESSION)))
+    )
+    assert_equal(s.session_id, "attempts-3-session")
+
+
+def test_session_011_relations_refused_version_last() raises:
+    var doc = _version_last(
+        _with_relations(fixture_text(ATTEMPTS_SESSION))
+    )
+    var raised = False
+    try:
+        _ = parse_session(utf8_bytes(doc))
+    except:
+        raised = True
+    assert_true(raised)
+
+
+def test_session_013_refused() raises:
+    var base = fixture_text(ATTEMPTS_SESSION)
+    var bad = base.replace(
+        String('"schema_version": "0.1.1"'),
+        String('"schema_version": "0.1.3"'),
+    )
+    var raised = False
+    try:
+        _ = parse_session(utf8_bytes(bad))
+    except:
+        raised = True
+    assert_true(raised)
+
+
+def test_session_012_relations_shape_strict() raises:
+    var base = fixture_text(ATTEMPTS_SESSION)
+    var bumped = base.replace(
+        String('"schema_version": "0.1.1"'),
+        String('"schema_version": "0.1.2"'),
+    )
+    var good = _with_relations(bumped)
+    var bogus = good.replace(
+        String('"sync_attribution": {'),
+        String('"bogus_attribution": {'),
+    )
+    var dupe = good.replace(
+        String('"mapping_release": {'),
+        String(
+            '"mapping_release": {"status":'
+            ' "complete_for_scope", "loss_count": "0",'
+            ' "scope": "x", "reason": "y"},'
+            ' "mapping_release": {'
+        ),
+    )
+    for bad in [bogus, dupe]:
         var raised = False
         try:
             _ = parse_session(utf8_bytes(bad))
@@ -1783,27 +1967,79 @@ def test_reader_denied_dangling_refused() raises:
     )
 
 
+def test_reader_split_copy_dangling_ok() raises:
+    # Copy-class partiality excuses a dangling copy reference
+    # while the other classes stay complete.
+    var r = read_capture(
+        String("tests/fixtures/reader/f2-dangling-split-copy-ok"),
+        False,
+        default_limits(),
+    )
+    assert_equal(len(drain_events(r)), 8)
+    assert_true(not r.partial)
+
+
+def test_reader_split_copy_dangling_denied() raises:
+    # Sync-class partiality alone never excuses a dangling
+    # copy reference.
+    expect_read_error(
+        String("tests/fixtures/reader/f2-dangling-split-copy-deny"),
+        False,
+        default_limits(),
+        READ_INVALID,
+        3,
+    )
+
+
+def test_reader_split_sync_dangling_ok() raises:
+    # Sync-class partiality excuses a dangling sync reference
+    # while the other classes stay complete.
+    var r = read_capture(
+        String("tests/fixtures/reader/f2-dangling-split-sync-ok"),
+        False,
+        default_limits(),
+    )
+    assert_equal(len(drain_events(r)), 8)
+    assert_true(not r.partial)
+
+
+def test_reader_split_sync_dangling_denied() raises:
+    # Copy-class partiality alone never excuses a dangling
+    # sync reference.
+    expect_read_error(
+        String("tests/fixtures/reader/f2-dangling-split-sync-deny"),
+        False,
+        default_limits(),
+        READ_INVALID,
+        3,
+    )
+
+
 def test_reader_unavailable_dangling_ok() raises:
     var r = CaptureReader()
     r.session.q_correlation.status = String("unavailable")
-    r._note_ref(String("lc-9"), 8)
+    r._note_copy_ref(String("lc-9"), 8)
+    r._note_sync_ref(String("lc-10"), 9)
     r._finish_checks()
 
 
 def test_reader_ref_dedup() raises:
     # White-box bound check: repeated copy/sync references to
-    # one mapping record once (first line kept), so N repeats
-    # cost one deferred entry, not N.
+    # one mapping record once per kind (first line kept), so N
+    # repeats cost one deferred entry per kind, not N.
     var r = CaptureReader()
-    r._note_ref(String("m1"), 5)
-    r._note_ref(String("m1"), 7)
-    r._note_ref(String("m1"), 9)
-    r._note_ref(String("m2"), 11)
-    assert_equal(len(r._ref_ids), 2)
-    assert_equal(r._ref_ids[0], String("m1"))
-    assert_equal(r._ref_lines[0], 5)
-    assert_equal(r._ref_ids[1], String("m2"))
-    assert_equal(r._ref_lines[1], 11)
+    r._note_copy_ref(String("m1"), 5)
+    r._note_copy_ref(String("m1"), 7)
+    r._note_sync_ref(String("m1"), 9)
+    r._note_copy_ref(String("m2"), 11)
+    assert_equal(len(r._ref_copy_ids), 2)
+    assert_equal(r._ref_copy_ids[0], String("m1"))
+    assert_equal(r._ref_copy_lines[0], 5)
+    assert_equal(r._ref_copy_ids[1], String("m2"))
+    assert_equal(r._ref_copy_lines[1], 11)
+    assert_equal(len(r._ref_sync_ids), 1)
+    assert_equal(r._ref_sync_ids[0], String("m1"))
+    assert_equal(r._ref_sync_lines[0], 9)
     # An unknown id still reports its first line at finish.
     var code = UInt32(0)
     var line = -1
@@ -2020,6 +2256,15 @@ def run() raises -> Int:
     suite.test[test_opaque_id_rejects]()
     suite.test[test_bounded_text_counts_codepoints]()
     suite.test[test_parse_session_attempts]()
+    suite.test[test_session_legacy_011_has_no_relations]()
+    suite.test[test_session_012_without_relations_is_legacy]()
+    suite.test[test_session_012_relations_parse]()
+    suite.test[test_session_012_relations_encode_roundtrip]()
+    suite.test[test_session_011_relations_refused_version_first]()
+    suite.test[test_session_key_order_free_without_relations]()
+    suite.test[test_session_011_relations_refused_version_last]()
+    suite.test[test_session_013_refused]()
+    suite.test[test_session_012_relations_shape_strict]()
     suite.test[test_session_missing_synthetic]()
     suite.test[test_session_rejects_shape]()
     suite.test[test_session_stop_evidence]()
@@ -2055,6 +2300,10 @@ def run() raises -> Int:
     suite.test[test_multiple_unassigned_map_results]()
     suite.test[test_reader_expected_dangling_ok]()
     suite.test[test_reader_denied_dangling_refused]()
+    suite.test[test_reader_split_copy_dangling_ok]()
+    suite.test[test_reader_split_copy_dangling_denied]()
+    suite.test[test_reader_split_sync_dangling_ok]()
+    suite.test[test_reader_split_sync_dangling_denied]()
     suite.test[test_reader_unavailable_dangling_ok]()
     suite.test[test_reader_ref_dedup]()
     suite.test[test_reader_f3_overflow]()

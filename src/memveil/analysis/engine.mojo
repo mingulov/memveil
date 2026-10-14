@@ -23,7 +23,12 @@ from memveil.analysis.regions import RegionTracker
 from memveil.model.event import Event
 from memveil.model.metric import Metric
 from memveil.model.report import Report
-from memveil.model.session import Session
+from memveil.model.session import (
+    Channel,
+    Session,
+    rollup_correlation,
+    truncate_codepoints,
+)
 
 comptime MAX_REPORT_METRICS = 4096
 comptime MAX_REPORT_LIMITATIONS = 256
@@ -143,6 +148,29 @@ def truncate_rows(rows: List[Metric], budget: Int) -> TruncatedRows:
     return out^
 
 
+def _fold_class_count(
+    mut ch: Channel, observed: Int, noun_phrase: String
+):
+    """Fold an exact observed count into one report class.
+
+    A producer-complete class turns partial with the exact
+    count; any other class keeps its claim and appends the
+    exact observed count, bounded to the channel limit.
+    """
+    var note = String(
+        String(observed) + " unpaired " + noun_phrase
+    )
+    if ch.status == String("complete_for_scope"):
+        ch.reason = note
+    else:
+        ch.reason = truncate_codepoints(
+            ch.reason + "; " + note, 512
+        )
+    ch.status = String("partial")
+    ch.has_loss_count = True
+    ch.loss_count = UInt64(observed)
+
+
 struct Analyzer:
     """One-stream, four-tracker composed reducer."""
 
@@ -155,6 +183,7 @@ struct Analyzer:
     def __init__(out self, session: Session):
         self._attempts = AttemptAnalyzer(session)
         self._mappings = MappingTracker()
+        self._mappings.set_relation_split(session.has_corr_relations)
         self._pools = PoolTracker()
         var status = session.cap_region_state.status
         var admitted = status == "verified" or status == "partial"
@@ -178,6 +207,70 @@ struct Analyzer:
     def finish(mut self, end_ns: UInt64, partial: Bool) raises -> Report:
         """Reduce the whole capture; the horizon must match."""
         return self._merge(end_ns, partial, True)
+
+    def _fold_observed_unpaired(mut self, mut rep: Report):
+        """Fold analyzer-observed unpaired counts into relations.
+
+        Report-side classes carry exact per-class counts plus an
+        aggregate total. A producer-complete class with observed
+        unpaired events turns partial with the exact count; a
+        producer-non-complete class keeps its claim and appends
+        the exact observed count.
+        """
+        var um = self._mappings.unpaired_mapping_count()
+        var uc = self._mappings.unpaired_copy_count()
+        var us = self._mappings.unpaired_sync_count()
+        var mapping = rep.q_corr_mapping.copy()
+        var copy = rep.q_corr_copy.copy()
+        var sync = rep.q_corr_sync.copy()
+        var map_causes = List[String]()
+        var copy_causes = List[String]()
+        var sync_causes = List[String]()
+        if um > 0:
+            _fold_class_count(
+                mapping,
+                um,
+                String(
+                    "mapping or release events excluded from"
+                    " pairing-dependent totals; independent facts"
+                    " retained."
+                ),
+            )
+        map_causes.append(mapping.reason)
+        if uc > 0:
+            _fold_class_count(
+                copy,
+                uc,
+                String(
+                    "copy events excluded from copy attribution;"
+                    " independent facts retained."
+                ),
+            )
+        copy_causes.append(copy.reason)
+        if us > 0:
+            _fold_class_count(
+                sync,
+                us,
+                String(
+                    "sync events excluded from sync attribution;"
+                    " independent facts retained."
+                ),
+            )
+        sync_causes.append(sync.reason)
+        var aggregate = rollup_correlation(
+            mapping,
+            copy,
+            sync,
+            map_causes,
+            copy_causes,
+            sync_causes,
+        )
+        aggregate.has_loss_count = True
+        aggregate.loss_count = UInt64(um + uc + us)
+        rep.q_correlation = aggregate^
+        rep.q_corr_mapping = mapping^
+        rep.q_corr_copy = copy^
+        rep.q_corr_sync = sync^
 
     def _merge(
         mut self, end_ns: UInt64, partial: Bool, strict: Bool
@@ -207,11 +300,16 @@ struct Analyzer:
             self._mappings.note_detail_loss()
             self._regions.note_detail_loss()
             self._pools.note_detail_loss()
-        if (
-            self._mappings.sees_lifecycle()
-            and rep.q_correlation.status != "complete_for_scope"
-        ):
-            self._mappings.note_correlation_loss()
+        if self._mappings.sees_lifecycle():
+            if self._session.has_corr_relations:
+                if rep.q_corr_mapping.status != "complete_for_scope":
+                    self._mappings.note_correlation_loss()
+                if rep.q_corr_copy.status != "complete_for_scope":
+                    self._mappings.note_copy_attribution_loss()
+                if rep.q_corr_sync.status != "complete_for_scope":
+                    self._mappings.note_sync_attribution_loss()
+            elif rep.q_correlation.status != "complete_for_scope":
+                self._mappings.note_correlation_loss()
         if (
             rep.q_baseline.status != "complete_for_scope"
             and rep.q_baseline.status != "not_applicable"
@@ -244,7 +342,9 @@ struct Analyzer:
             for i in range(len(rnotes)):
                 rep.limitations.append(rnotes[i])
         var unpaired = self._mappings.unpaired_count()
-        if unpaired > 0:
+        if unpaired > 0 and self._session.has_corr_relations:
+            self._fold_observed_unpaired(rep)
+        if unpaired > 0 and not self._session.has_corr_relations:
             rep.q_correlation.status = String("partial")
             rep.q_correlation.has_loss_count = True
             rep.q_correlation.loss_count = UInt64(unpaired)
@@ -257,6 +357,7 @@ struct Analyzer:
                 " pairing-dependent totals; independent facts"
                 " retained."
             )
+        if unpaired > 0:
             # Observed pairing evidence as a row: diagnosis
             # derives its finding from this count, never from
             # channel loss alone.

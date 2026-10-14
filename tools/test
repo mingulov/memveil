@@ -260,6 +260,18 @@ suite_reports() {
     expect_json "unpaired-json" \
         tests/fixtures/lifecycle/unpaired 4 \
         "capture OK: 2 events, 1 attempts, 4096 requested bytes"
+    expect_json "relations-copy-only-json" \
+        tests/fixtures/lifecycle/relations-copy-only 4 \
+        "capture OK: 5 events, 1 attempts, 4096 requested bytes"
+    expect_json "relations-lost-release-json" \
+        tests/fixtures/lifecycle/relations-lost-release 4 \
+        "capture OK: 6 events, 1 attempts, 4096 requested bytes"
+    expect_json "relations-legacy-copy-json" \
+        tests/fixtures/lifecycle/relations-legacy-copy 4 \
+        "capture OK: 6 events, 1 attempts, 4096 requested bytes"
+    expect_json "relations-legacy-sync-json" \
+        tests/fixtures/lifecycle/relations-legacy-sync 4 \
+        "capture OK: 6 events, 1 attempts, 4096 requested bytes"
     expect_json "correlation-loss-attempts-json" \
         tests/fixtures/reader/correlation-loss-attempts 0 \
         "capture OK: 3 events, 3 attempts, 9216 requested bytes"

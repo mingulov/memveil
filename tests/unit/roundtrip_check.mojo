@@ -306,6 +306,15 @@ def sessions_equal(a: Session, b: Session) -> Bool:
         or not _channels_equal(a.q_terminal, b.q_terminal)
     ):
         return False
+    if a.has_corr_relations != b.has_corr_relations:
+        return False
+    if a.has_corr_relations:
+        if (
+            not _channels_equal(a.q_corr_mapping, b.q_corr_mapping)
+            or not _channels_equal(a.q_corr_copy, b.q_corr_copy)
+            or not _channels_equal(a.q_corr_sync, b.q_corr_sync)
+        ):
+            return False
     return True
 
 
