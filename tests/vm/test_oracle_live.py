@@ -28,6 +28,8 @@ from consume import (author_reducer_fixture, check_conservation, check_lifetime_
                      compare_scripted, parse_consume_file,
                      parse_oracle_log, replay_oracle_ledger,
                      translate_session)
+from evidence_retention import (expected_from_verified,
+                                retain_failure)
 from lifecycle_env import (CONSUMER, COPY_PROBE, LIFECYCLE_PROBE,
                            ensure_oracle_module)
 from vm_boot import cleanup, run_guest, verify_exports
@@ -73,13 +75,15 @@ def test_guest_comparison(tmp_path):
         if not os.path.isfile(path):
             pytest.fail("armed but missing: %s" % path)
     ensure_oracle_module()
-    tmp, proc = run_guest("oracle")
+    tmp = None
     try:
+        tmp, proc = run_guest("oracle")
         assert proc.returncode == 0, \
             "guest failed: %s" % proc.stderr[-2000:]
         got = verify_exports(tmp, "oracle",
                              ["identity.json", "cmp-lc.txt",
                               "cmp-cp.txt", "cmp-oracle.log"])
+        expected = expected_from_verified(got, "oracle")
         lc, lc_sum = parse_consume_file(str(got["cmp-lc.txt"]))
         cp, cp_sum = parse_consume_file(str(got["cmp-cp.txt"]))
         bad = check_conservation(lc, lc_sum, "cmp-lc")
@@ -111,7 +115,8 @@ def test_guest_comparison(tmp_path):
         print("oracle: 8 lc + 17 cp exact, report matches "
               "ledger in separately authored synthetic reducer fixture")
     except Exception:
+        retain_failure(tmp, "oracle")
         print(f"gate artifacts kept at {tmp}")
         raise
     else:
-        cleanup(tmp)
+        cleanup(tmp, "oracle", expected=expected)

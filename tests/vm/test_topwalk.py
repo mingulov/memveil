@@ -20,6 +20,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from evidence_retention import (expected_from_verified,
+                                retain_failure)
 from lifecycle_env import (BRIDGE, COPY_PROBE, LIFECYCLE_PROBE,
                            ensure_oracle_module,
                            require_lifecycle_env)
@@ -66,8 +68,9 @@ def test_topwalk_live_top_walkthrough():
     require_lifecycle_env(LIFECYCLE_PROBE, COPY_PROBE,
                           ATTEMPT_PROBE, BRIDGE)
     ensure_oracle_module()
-    tmp, proc = run_guest("topwalk", timeout=900)
+    tmp = None
     try:
+        tmp, proc = run_guest("topwalk", timeout=900)
         assert proc.returncode == 0, \
             "guest failed: %s" % proc.stderr[-2000:]
         got = verify_exports(
@@ -75,6 +78,7 @@ def test_topwalk_live_top_walkthrough():
             ["identity.json", "walk.json", "live.txt",
              "live.err", "cap-session.json",
              "cap-events.ndjson"])
+        expected = expected_from_verified(got, "topwalk")
         ident = json.loads(got["identity.json"].read_text())
         assert ident["release"] == "7.0.0-34-generic", ident
         ledger = json.loads(got["walk.json"].read_text())
@@ -159,5 +163,9 @@ def test_topwalk_live_top_walkthrough():
         print("topwalk: %d live blocks, %d periodic samples, "
               "replay-equal final" % (len(live_blocks),
                                       periodic))
-    finally:
-        cleanup(tmp)
+    except Exception:
+        retain_failure(tmp, "topwalk")
+        print(f"gate artifacts kept at {tmp}")
+        raise
+    else:
+        cleanup(tmp, "topwalk", expected=expected)

@@ -100,8 +100,39 @@ def run_guest(mode, profile, obj, duration):
     return tmp, proc
 
 
-def cleanup(tmp):
-    """Remove the run dir, escalating only for root-owned files."""
+def cleanup(tmp, gate=None, disposition="passed", detail=None,
+            expected=None, export_prefix=None):
+    """Retain verified evidence, then remove the run dir.
+
+    When MEMVEIL_EVIDENCE_DIR names the workflow-owned
+    evidence directory, the verified exports are copied and
+    verified there before the temporary directory is
+    deleted; a retention failure records failed evidence,
+    keeps the run dir, and raises. MEMVEIL_VM_KEEP_EXPORTS=1
+    still keeps the run
+    dir, but only after the owned-directory retention above.
+    expected carries the verified names and hashes; every
+    expected export is required.
+    """
+    from evidence_retention import (evidence_dir, infer_gate,
+                                    mark_cleanup_uncertain,
+                                    retain_failure,
+                                    retain_gate_evidence)
+    retained = None
+    if evidence_dir() is not None:
+        name = gate or infer_gate(tmp)
+        if name is None:
+            raise ValueError(
+                "evidence retention needs a gate identity")
+        try:
+            retain_gate_evidence(tmp, name, disposition, detail,
+                                 expected=expected,
+                                 export_prefix=export_prefix)
+        except Exception:
+            retain_failure(tmp, name, expected=expected,
+                           export_prefix=export_prefix)
+            raise
+        retained = name
     if os.environ.get("MEMVEIL_VM_KEEP_EXPORTS") == "1":
         print(f"gate exports retained at {tmp}")
         return
@@ -110,7 +141,20 @@ def cleanup(tmp):
         return
     except OSError:
         pass
-    r = subprocess.run(["sudo", "-n", "rm", "-rf", str(tmp)])
+    try:
+        r = subprocess.run(["sudo", "-n", "rm", "-rf", str(tmp)])
+    except Exception:
+        if retained is not None:
+            try:
+                mark_cleanup_uncertain(retained)
+            except Exception:
+                pass
+        raise
+    if r.returncode != 0 and retained is not None:
+        try:
+            mark_cleanup_uncertain(retained)
+        except Exception:
+            pass
     assert r.returncode == 0, f"cannot clean {tmp}"
 
 
@@ -129,18 +173,9 @@ EXPORT_NAMES = (
 
 
 def verify_exports(tmp, mode):
+    from evidence_retention import VerifiedExports, snapshot_exports
     export = tmp / "export"
-    got = {}
-    for name in EXPORT_NAMES:
-        f = export / f"{mode}-{name}"
-        s = Path(str(f) + ".sha256")
-        assert f.is_file(), f"missing export {mode}-{name}"
-        assert s.is_file(), f"missing sidecar {mode}-{name}.sha256"
-        sidecar=s.read_text()
-        assert re.fullmatch(r"[0-9a-f]{64}(?:  " + re.escape(f.name) + r")?\n", sidecar), "invalid hash sidecar"
-        want = sidecar.split()[0]
-        assert sha_file(f) == want, f"hash mismatch {mode}-{name}"
-        got[name] = f
+    got, verified = snapshot_exports(tmp, mode, EXPORT_NAMES)
     # Exact inventory: no more, no fewer (the raw ftrace pipe
     # must never cross), and no raw DMA addresses anywhere.
     want_files = {f"{mode}-{n}" for n in EXPORT_NAMES}
@@ -149,7 +184,7 @@ def verify_exports(tmp, mode):
     assert have == want_files, f"export inventory drift: {have ^ want_files}"
     from export_validation import validate_attempt_exports
     validate_attempt_exports(got, mode)
-    return got
+    return VerifiedExports(got, verified)
 
 
 def _is_int(v):
@@ -281,19 +316,26 @@ def global_metric(report, name):
 
 
 def test_correctness():
-    tmp, proc = run_guest("correctness", NARROW_DOC, PROD_OBJ, 40)
+    tmp = None
     try:
+        tmp, proc = run_guest("correctness", NARROW_DOC, PROD_OBJ, 40)
         assert proc.returncode == 0, f"guest failed: {proc.stderr[-2000:]}"
-        check_correctness(tmp)
+        expected = check_correctness(tmp)
     except Exception:
+        from evidence_retention import retain_failure
+        retain_failure(tmp, "attempt-correctness",
+                       export_prefix="correctness")
         print(f"gate artifacts kept at {tmp}")
         raise
     else:
-        cleanup(tmp)
+        cleanup(tmp, "attempt-correctness", expected=expected,
+                export_prefix="correctness")
 
 
 def check_correctness(tmp):
     got = verify_exports(tmp, "correctness")
+    from evidence_retention import expected_from_verified
+    expected = expected_from_verified(got, "correctness")
     ledger = json.loads(got["ledger.json"].read_text())
     session = json.loads(got["session.json"].read_text())
     assert ledger["record_exit"] == 4
@@ -367,22 +409,30 @@ def check_correctness(tmp):
     assert int(req["value"]) == o_bytes
     assert int(counter_req["value"]) == o_bytes
     print(f"correctness: oracle={len(o_in)} bytes={o_bytes} exact")
+    return expected
 
 
 def test_saturation():
-    tmp, proc = run_guest("saturation", SAT_DOC, SAT_OBJ, 60)
+    tmp = None
     try:
+        tmp, proc = run_guest("saturation", SAT_DOC, SAT_OBJ, 60)
         assert proc.returncode == 0, f"guest failed: {proc.stderr[-2000:]}"
-        check_saturation(tmp)
+        expected = check_saturation(tmp)
     except Exception:
+        from evidence_retention import retain_failure
+        retain_failure(tmp, "attempt-saturation",
+                       export_prefix="saturation")
         print(f"gate artifacts kept at {tmp}")
         raise
     else:
-        cleanup(tmp)
+        cleanup(tmp, "attempt-saturation", expected=expected,
+                export_prefix="saturation")
 
 
 def check_saturation(tmp):
     got = verify_exports(tmp, "saturation")
+    from evidence_retention import expected_from_verified
+    expected = expected_from_verified(got, "saturation")
     ledger = json.loads(got["ledger.json"].read_text())
     session = json.loads(got["session.json"].read_text())
     assert ledger["record_exit"] == 4
@@ -454,3 +504,4 @@ def check_saturation(tmp):
         f"saturation: oracle={len(o_in)} persisted={len(p_in)}"
         f" loss={loss} exact"
     )
+    return expected

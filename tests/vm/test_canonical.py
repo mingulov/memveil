@@ -24,6 +24,8 @@ from consume import (check_conservation, check_oracle_witness,
                      compare_multisets, parse_consume_file,
                      parse_oracle_log,
                      replay_oracle_witness_ledger)
+from evidence_retention import (expected_from_verified,
+                                retain_failure)
 from lifecycle_env import (CONSUMER, COPY_PROBE, LIFECYCLE_PROBE,
                            ensure_oracle_module,
                            require_lifecycle_env)
@@ -189,8 +191,9 @@ def test_canonical_windows():
     with open(SPEC) as handle:
         frozen = json.load(handle)
     assert frozen["frozen_for_module"] == "0.4.0", frozen
-    tmp, proc = run_guest("canonical")
+    tmp = None
     try:
+        tmp, proc = run_guest("canonical")
         assert proc.returncode == 0, \
             "guest failed: %s" % proc.stderr[-2000:]
         names = ["identity.json"]
@@ -198,6 +201,7 @@ def test_canonical_windows():
             names += ["%s-lc.txt" % tag, "%s-cp.txt" % tag,
                       "%s-oracle.log" % tag]
         got = verify_exports(tmp, "canonical", names)
+        expected = expected_from_verified(got, "canonical")
         ident = json.loads(got["identity.json"].read_text())
         assert ident["release"] == "7.0.0-34-generic", ident
         bad, _, _, _, _ = check_window(got, "n", frozen["n"])
@@ -221,7 +225,8 @@ def test_canonical_windows():
         assert not bad, "\n".join(bad)
         print("r: reuse generations distinct ok")
     except Exception:
+        retain_failure(tmp, "canonical")
         print(f"gate artifacts kept at {tmp}")
         raise
     else:
-        cleanup(tmp)
+        cleanup(tmp, "canonical", expected=expected)

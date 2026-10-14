@@ -17,6 +17,8 @@ from collections import Counter
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from consume import check_conservation, parse_consume_file
+from evidence_retention import (expected_from_verified,
+                                retain_failure)
 from lifecycle_env import (CONSUMER, COPY_PROBE, LIFECYCLE_PROBE,
                            ensure_oracle_module, require_lifecycle_env)
 from vm_boot import cleanup, run_guest, verify_exports
@@ -92,13 +94,15 @@ def check_consistency(lc_events, cp_events, workload):
 def test_real_io_slice():
     require_lifecycle_env(LIFECYCLE_PROBE, COPY_PROBE, CONSUMER)
     ensure_oracle_module()
-    tmp, proc = run_guest("realio", network=True)
+    tmp = None
     try:
+        tmp, proc = run_guest("realio", network=True)
         assert proc.returncode == 0, \
             "guest failed: %s" % proc.stderr[-2000:]
         got = verify_exports(tmp, "realio",
                              ["identity.json", "io-lc.txt",
                               "io-cp.txt", "workload.json"])
+        expected = expected_from_verified(got, "realio")
         workload = json.loads(got["workload.json"].read_text())
         assert workload["ping_tx"] == 2000, workload
         assert workload["ping_rx"] == 2000, workload
@@ -117,7 +121,8 @@ def test_real_io_slice():
               % (len(lc), len(cp), live_bytes,
                  min(workload["used_before"])))
     except Exception:
+        retain_failure(tmp, "realio")
         print(f"gate artifacts kept at {tmp}")
         raise
     else:
-        cleanup(tmp)
+        cleanup(tmp, "realio", expected=expected)

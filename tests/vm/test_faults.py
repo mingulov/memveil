@@ -24,6 +24,8 @@ from consume import parse_oracle_log, scripted_expectation
 from lifecycle_env import (BRIDGE, COPY_PROBE, LIFECYCLE_PROBE,
                            ensure_oracle_module,
                            require_lifecycle_env)
+from evidence_retention import (expected_from_verified,
+                                retain_failure)
 from test_bundle import check_report
 from test_record3 import (ATTEMPT_PROBE, _events, _mint_profile,
                           check_capture_session, check_lifetimes,
@@ -142,8 +144,9 @@ def test_faults_multi_channel():
     ensure_oracle_module()
     _mint_profile()
     want = scripted_expectation(FLOOD_OPS, -1)
-    tmp, proc = run_guest("faults", timeout=1200, network=True)
+    tmp = None
     try:
+        tmp, proc = run_guest("faults", timeout=1200, network=True)
         assert proc.returncode == 0, \
             "guest failed: %s" % proc.stderr[-2000:]
         names = ["identity.json", "faults.json",
@@ -153,6 +156,7 @@ def test_faults_multi_channel():
             names += [f"{tag}-record.json", f"{tag}-session.json",
                       f"{tag}-events.ndjson", f"{tag}-oracle.log"]
         got = verify_exports(tmp, "faults", names)
+        expected = expected_from_verified(got, "faults")
         ident = json.loads(got["identity.json"].read_text())
         assert ident["release"] == "7.0.0-34-generic", ident
         ledger = {row["scenario"]: row for row in
@@ -315,7 +319,8 @@ def test_faults_multi_channel():
               "%d ambient" % len(ambient))
         assert not bad, "\n".join(bad)
     except Exception:
+        retain_failure(tmp, "faults")
         print(f"gate artifacts kept at {tmp}")
         raise
     else:
-        cleanup(tmp)
+        cleanup(tmp, "faults", expected=expected)

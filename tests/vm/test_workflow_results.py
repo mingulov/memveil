@@ -155,3 +155,173 @@ def test_only_lane_with_uncertain_cleanup_cannot_pass(tmp_path, monkeypatch):
 
 def test_last_lane_with_uncertain_cleanup_cannot_pass(tmp_path, monkeypatch):
     _uncertain_final_lane(tmp_path, monkeypatch, ['first', 'only'])
+
+
+def fake_tool(repo, body):
+    script = repo / 'tools/test'
+    script.write_text(body)
+    script.chmod(0o755)
+
+
+def owned_repo(tmp_path):
+    repo = tmp_path / 'repo'
+    (repo / 'tools').mkdir(parents=True)
+    return repo
+
+
+def test_child_suites_inherit_the_owned_evidence_directory(tmp_path):
+    module = load()
+    repo = owned_repo(tmp_path)
+    seen = tmp_path / 'seen.env'
+    fake_tool(repo, '#!/bin/sh\necho \"$MEMVEIL_EVIDENCE_DIR\" > '
+              + str(seen) + '\n')
+    out = tmp_path / 'out'
+    assert module.run_suites(repo, out, ['a']) == 0
+    assert seen.read_text().strip() == str(out.resolve())
+
+
+def test_skipped_lane_writes_a_skipped_receipt(tmp_path):
+    module = load()
+    repo = owned_repo(tmp_path)
+    fake_tool(repo, '#!/bin/sh\nexit 77\n')
+    out = tmp_path / 'out'
+    assert module.run_suites(repo, out, ['a']) == 1
+    receipt = json.loads((out / 'gates' / 'a' /
+                          'receipt.json').read_text())
+    assert receipt['schema'] == 'memveil-gate-evidence/1'
+    assert receipt['disposition'] == 'skipped'
+    assert receipt['complete'] is False
+    assert receipt['files'] == []
+    assert receipt['detail']['native_exit'] == 77
+
+
+def test_uncertain_cleanup_lane_writes_cleanup_uncertain_receipt(
+        tmp_path, monkeypatch):
+    module = load()
+    repo = owned_repo(tmp_path)
+    tool = repo / 'tools/test'
+    tool.write_text('#!/bin/sh\nsleep 30\n')
+    tool.chmod(0o755)
+    terminate = module._terminate_owned
+
+    def uncertain(proc, prior):
+        result = terminate(proc, prior)
+        result['signal_errors'] = 1
+        return result
+
+    monkeypatch.setattr(module, '_terminate_owned', uncertain)
+    assert module.run_suites(
+        repo, tmp_path / 'out', ['finite'],
+        {'finite': .2}) == 1
+    receipt = json.loads((tmp_path / 'out/gates/finite/'
+                          'receipt.json').read_text())
+    assert receipt['disposition'] == 'cleanup-uncertain'
+    assert receipt['complete'] is False
+    assert receipt['detail']['signal_errors'] == 1
+
+
+def test_blocked_lane_after_unresolved_cleanup_stays_uncertain(
+        tmp_path, monkeypatch):
+    module = load()
+    repo = owned_repo(tmp_path)
+    tool = repo / 'tools/test'
+    tool.write_text('#!/bin/sh\nsleep 30\n')
+    tool.chmod(0o755)
+    terminate = module._terminate_owned
+
+    def uncertain(proc, prior):
+        result = terminate(proc, prior)
+        result['signal_errors'] = 1
+        return result
+
+    monkeypatch.setattr(module, '_terminate_owned', uncertain)
+    out = tmp_path / 'out'
+    assert module.run_suites(
+        repo, out, ['finite', 'later'],
+        {'finite': .2}) == 1
+    receipt = json.loads((out / 'gates/later/'
+                          'receipt.json').read_text())
+    assert receipt['disposition'] == 'cleanup-uncertain'
+    assert receipt['complete'] is False
+    assert receipt['detail']['status'] == 'BLOCKED'
+
+
+def test_finished_lane_keeps_gate_authored_evidence(tmp_path):
+    module = load()
+    repo = owned_repo(tmp_path)
+    fake_tool(repo, '#!/bin/sh\nexit 0\n')
+    out = tmp_path / 'out'
+    assert module.run_suites(repo, out, ['a']) == 0
+    assert not (out / 'gates' / 'a' / 'receipt.json').exists()
+
+
+def test_failed_lane_writes_a_failed_receipt(tmp_path):
+    module = load()
+    repo = owned_repo(tmp_path)
+    fake_tool(repo, '#!/bin/sh\nexit 1\n')
+    out = tmp_path / 'out'
+    assert module.run_suites(repo, out, ['a']) == 1
+    receipt = json.loads((out / 'gates' / 'a' /
+                          'receipt.json').read_text())
+    assert receipt['disposition'] == 'failed'
+    assert receipt['complete'] is False
+    assert receipt['detail']['status'] == 'FAIL'
+    assert receipt['detail']['native_exit'] == 1
+    assert receipt['detail']['timed_out'] is False
+
+
+def test_clean_timeout_writes_a_failed_receipt(tmp_path):
+    module = load()
+    repo = owned_repo(tmp_path)
+    tool = repo / 'tools/test'
+    tool.write_text('#!/bin/sh\nsleep 30\n')
+    tool.chmod(0o755)
+    out = tmp_path / 'out'
+    assert module.run_suites(
+        repo, out, ['finite'], {'finite': .2}) == 1
+    lane = json.loads(
+        (out / 'results.json').read_text())['lanes'][0]
+    assert lane['timed_out'] is True
+    assert lane['cleanup']['remaining_owned'] == 0
+    assert lane['cleanup']['signal_errors'] == 0
+    receipt = json.loads((out / 'gates/finite/'
+                          'receipt.json').read_text())
+    assert receipt['disposition'] == 'failed'
+    assert receipt['complete'] is False
+    assert receipt['detail']['timed_out'] is True
+
+
+def test_owned_directory_holds_lane_and_gate_receipts(tmp_path):
+    module = load()
+    repo = owned_repo(tmp_path)
+    gate = tmp_path / 'gate-tmp'
+    export = gate / 'export'
+    export.mkdir(parents=True)
+    identity = dict(
+        release='7.0.0-34-generic', swiotlb_force=True,
+        **{key: 'a' * 64 for key in (
+            'config_sha', 'btf_sha', 'bridge_sha', 'consume_sha',
+            'lc_sha', 'cp_sha', 'ko_sha')})
+    body = json.dumps(identity)
+    (export / 'bundle-identity.json').write_text(body)
+    import hashlib
+    (export / 'bundle-identity.json.sha256').write_text(
+        hashlib.sha256(body.encode()).hexdigest() + '\n')
+    gate_run = tmp_path / 'gate-run.py'
+    gate_run.write_text(
+        'import sys\n'
+        'sys.path.insert(0, ' +
+        repr(str(Path(__file__).resolve().parent)) + ')\n'
+        'from test_attempt_capture import cleanup\n'
+        'cleanup(sys.argv[1], "bundle")\n')
+    fake_tool(repo, '#!/bin/sh\nif [ \"$1\" = gates ]; then '
+              'python3 ' + str(gate_run) + ' ' + str(gate) +
+              '; else exit 77; fi\n')
+    out = tmp_path / 'out'
+    assert module.run_suites(repo, out, ['gates', 'rest']) == 1
+    assert not gate.exists()
+    assert json.loads((out / 'gates/bundle/'
+                             'receipt.json').read_text())['complete'] is True
+    assert json.loads((out / 'gates/rest/'
+                             'receipt.json').read_text())[
+        'disposition'] == 'skipped'

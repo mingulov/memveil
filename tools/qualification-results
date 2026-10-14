@@ -3,8 +3,9 @@
 """Collect required suite native exits and sanitized receipts, even on failure.
 
 Usage: tools/qualification-results OUTPUT SUITE [SUITE...]
-Native output stays local in OUTPUT/raw; only results.json and the allowlisted
-per-lane .log receipts may be uploaded. A required skip blocks qualification.
+Native output stays local in OUTPUT/raw; only results.json, the allowlisted
+per-lane .log receipts, and the retained gate evidence under OUTPUT/gates
+may be uploaded. A required skip blocks qualification.
 """
 import hashlib
 import ctypes
@@ -135,9 +136,21 @@ def _terminate_owned(proc, prior_children):
                 remaining_owned=remaining, signal_errors=errors)
 
 
+def _retention():
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+    path=Path(__file__).resolve().parent.parent/'tests'/'vm'/'evidence_retention.py'
+    loader=SourceFileLoader('evidence_retention',str(path))
+    spec=importlib.util.spec_from_loader(loader.name,loader)
+    module=importlib.util.module_from_spec(spec);loader.exec_module(module)
+    return module
+
+
 def run_suites(repo,out,suites,timeouts=None):
     out.mkdir(parents=True,exist_ok=True)
     raw=out/'raw';raw.mkdir(exist_ok=True)
+    retention=_retention()
+    owned=out.resolve()
     lanes=[]
     # Subreaper ownership belongs only to this development runner process.
     libc=ctypes.CDLL(None,use_errno=True)
@@ -158,8 +171,11 @@ def run_suites(repo,out,suites,timeouts=None):
             with target.open('wb') as log:
                 if unresolved_cleanup:
                     raise OSError("previous owned suite cleanup is unresolved")
+                child_env=dict(os.environ)
+                child_env['MEMVEIL_EVIDENCE_DIR']=str(owned)
                 proc=subprocess.Popen([str(repo/'tools/test'),suite],stdout=log,
-                                      stderr=subprocess.STDOUT,start_new_session=True)
+                                      stderr=subprocess.STDOUT,start_new_session=True,
+                                      env=child_env)
                 try:
                     rc=proc.wait(timeout=budget)
                 except subprocess.TimeoutExpired:
@@ -186,6 +202,38 @@ def run_suites(repo,out,suites,timeouts=None):
         lanes.append(lane)
         # Exact allowlist: no raw command/kernel/event text crosses to CI artifacts.
         (out/(suite+'.log')).write_text(json.dumps(lane,sort_keys=True)+'\n')
+        # Lanes without gate-authored evidence still explain
+        # themselves: skipped lanes never ran, lanes with
+        # uncertain cleanup cannot trust their run directories,
+        # and failed lanes (including cleanly reaped timeouts)
+        # record their owned failure summary. Passed lanes keep
+        # gate-authored evidence.
+        if status=='SKIP':
+            retention.record_lane_disposition(
+                suite,'skipped',dict(status=status,native_exit=rc,
+                                     timed_out=timed_out),root=out)
+        elif status=='BLOCKED' or (cleanup is not None and (
+                cleanup['remaining_owned'] or
+                cleanup['signal_errors'])):
+            detail=dict(status=status,timed_out=timed_out)
+            if rc is not None:
+                detail['native_exit']=rc
+            if cleanup is not None:
+                for key in ('owned_processes','reaped_descendants',
+                            'remaining_owned','signal_errors'):
+                    detail[key]=cleanup[key]
+            retention.record_lane_disposition(
+                suite,'cleanup-uncertain',detail,root=out)
+        elif status=='FAIL':
+            detail=dict(status=status,timed_out=timed_out)
+            if rc is not None:
+                detail['native_exit']=rc
+            if cleanup is not None:
+                for key in ('owned_processes','reaped_descendants',
+                            'remaining_owned','signal_errors'):
+                    detail[key]=cleanup[key]
+            retention.record_lane_disposition(
+                suite,'failed',detail,root=out)
         print('%s %s native_exit=%s' % (suite,status,rc),flush=True)
     status=('FAIL' if any(r['status']=='FAIL' for r in lanes) else
             'BLOCKED' if not lanes or any(r['status'] in ('SKIP','BLOCKED') for r in lanes) else 'PASS')

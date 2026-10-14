@@ -20,6 +20,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from evidence_retention import (expected_from_verified,
+                                retain_failure)
 from vm_boot import cleanup, run_guest, verify_exports
 
 CYCLES = 100
@@ -59,16 +61,19 @@ def armed_preflight():
 
 
 def run_flow():
-    tmp, proc = run_guest("cleanup", timeout=1200)
+    tmp = None
     try:
+        tmp, proc = run_guest("cleanup", timeout=1200)
         if proc.returncode != 0:
             print("FAIL vm-cleanup: guest failed: %s"
                   % proc.stderr[-2000:])
+            retain_failure(tmp, "cleanup")
             print(f"gate artifacts kept at {tmp}")
             return 1
         got = verify_exports(tmp, "cleanup",
                              ["identity.json", "ledger.json",
                               "inventory.json"])
+        expected = expected_from_verified(got, "cleanup")
         ledger = json.loads(got["ledger.json"].read_text())
         inventory = json.loads(got["inventory.json"].read_text())
         bad = []
@@ -121,6 +126,7 @@ def run_flow():
             print("FAIL vm-cleanup:")
             for line in bad:
                 print("  " + line)
+            retain_failure(tmp, "cleanup")
             print(f"gate artifacts kept at {tmp}")
             return 1
         print("vm-cleanup: PASS: %d cycles, BPF %r, floor %d, "
@@ -128,10 +134,14 @@ def run_flow():
                             min(after["io_tlb_used"])))
     except Exception as exc:
         print(f"FAIL vm-cleanup: {exc}")
+        retain_failure(tmp, "cleanup")
         print(f"gate artifacts kept at {tmp}")
         return 1
     else:
-        cleanup(tmp)
+        cleanup(tmp, "cleanup",
+                detail=dict(cycles=CYCLES,
+                            suspicious=inventory["suspicious"]),
+                expected=expected)
         return 0
 
 

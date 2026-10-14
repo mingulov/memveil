@@ -25,6 +25,8 @@ from consume import (check_conservation, check_oracle_script,
                      compare_scripted, consumed_multisets,
                      parse_consume_file, parse_oracle_log,
                      scripted_expectation)
+from evidence_retention import (expected_from_verified,
+                                retain_failure)
 from vm_boot import cleanup, run_guest, verify_exports
 
 
@@ -128,11 +130,13 @@ def check_short_cycle(got, tag):
 
 
 def run_flow():
-    tmp, proc = run_guest("stop")
+    tmp = None
     try:
+        tmp, proc = run_guest("stop")
         if proc.returncode != 0:
             print("FAIL vm-stop: guest failed: %s"
                   % proc.stderr[-2000:])
+            retain_failure(tmp, "stop")
             print(f"gate artifacts kept at {tmp}")
             return 1
         names = ["identity.json"]
@@ -145,6 +149,7 @@ def run_flow():
         if not cp_victim.is_file():
             names.remove("c1-cp.txt")
         got = verify_exports(tmp, "stop", names)
+        expected = expected_from_verified(got, "stop")
         ledger = json.loads(got["ledger.json"].read_text())
         bad = []
         modes = [row["mode"] for row in ledger]
@@ -187,16 +192,18 @@ def run_flow():
             print("FAIL vm-stop:")
             for line in bad:
                 print("  " + line)
+            retain_failure(tmp, "stop")
             print(f"gate artifacts kept at {tmp}")
             return 1
         print("vm-stop: PASS: 5 cycles (stop, victim, quiet, "
               "stop-lc, short) with conservation + exact traffic")
     except Exception as exc:
         print(f"FAIL vm-stop: {exc}")
+        retain_failure(tmp, "stop")
         print(f"gate artifacts kept at {tmp}")
         return 1
     else:
-        cleanup(tmp)
+        cleanup(tmp, "stop", expected=expected)
         return 0
 
 

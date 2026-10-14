@@ -19,6 +19,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from consume import parse_oracle_log
+from evidence_retention import (expected_from_verified,
+                                retain_failure)
 from lifecycle_env import (BRIDGE, COPY_PROBE, LIFECYCLE_PROBE,
                            ensure_oracle_module,
                            require_lifecycle_env)
@@ -253,8 +255,9 @@ def test_record3_three_channel_capture():
     with open(SPEC) as handle:
         frozen = json.load(handle)
     assert frozen["frozen_for_module"] == "0.4.0", frozen
-    tmp, proc = run_guest("record3", timeout=900)
+    tmp = None
     try:
+        tmp, proc = run_guest("record3", timeout=900)
         assert proc.returncode == 0, \
             "guest failed: %s" % proc.stderr[-2000:]
         got = verify_exports(
@@ -262,6 +265,7 @@ def test_record3_three_channel_capture():
             ["identity.json", "record.json",
              "cap-session.json", "cap-events.ndjson",
              "r3-oracle.log"])
+        expected = expected_from_verified(got, "record3")
         ident = json.loads(got["identity.json"].read_text())
         assert ident["release"] == "7.0.0-34-generic", ident
         record = json.loads(got["record.json"].read_text())
@@ -287,7 +291,8 @@ def test_record3_three_channel_capture():
                      if e["kind"] == "bounce_attempt"),
                  eff))
     except Exception:
+        retain_failure(tmp, "record3")
         print(f"gate artifacts kept at {tmp}")
         raise
     else:
-        cleanup(tmp)
+        cleanup(tmp, "record3", expected=expected)

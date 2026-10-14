@@ -275,7 +275,8 @@ def validate_lifecycle_exports(got,sub):
                     if window[0] >= window[1]: raise ValueError('empty fault window')
         elif name=='live.txt':
             body=path.read_text()
-            if 'ready session=' not in body.splitlines()[0]:
+            lines=body.splitlines()
+            if not lines or 'ready session=' not in lines[0]:
                 raise ValueError('live blocks lack readiness preamble')
             if '--- refresh ' not in body:
                 raise ValueError('live blocks lack refreshes')
@@ -286,6 +287,95 @@ def validate_lifecycle_exports(got,sub):
             if len(body) > 65536:
                 raise ValueError('live diagnostics exceed 64 KiB cap')
         else: raise ValueError('unrecognized lifecycle export '+name)
+
+
+RECEIPT_SCHEMA='memveil-gate-evidence/1'
+RECEIPT_DISPOSITIONS=('passed','failed','skipped','cleanup-uncertain')
+RECEIPT_FILE_ERRORS=('missing sidecar','hash mismatch',
+                     'unreadable source','copy failed',
+                     'missing export','no verified exports')
+
+
+def receipt_gate(value):
+    if type(value) is not str or not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,63}',value):
+        raise ValueError('invalid evidence gate identity')
+
+
+RECEIPT_DETAIL_STATUS=('PASS','FAIL','SKIP','BLOCKED')
+RECEIPT_DETAIL_COUNTS=('files_verified','cycles','suspicious',
+                       'owned_processes','reaped_descendants',
+                       'remaining_owned','signal_errors')
+RECEIPT_DETAIL_EXITS=('native_exit','report_exit')
+RECEIPT_DETAIL_KEYS=('status','timed_out')+RECEIPT_DETAIL_EXITS+RECEIPT_DETAIL_COUNTS
+
+
+def receipt_detail(doc):
+    """Explicit allowlisted summary: lane status plus bounded counts.
+
+    Only the fixed status, exit, flag, and count fields wired by
+    gates and the lane runner may cross. No payloads, raw
+    addresses, command lines, or environment text may cross
+    into retained evidence. Errors never echo the offending
+    value.
+    """
+    if doc is None:return
+    if type(doc) is not dict:raise ValueError('invalid evidence detail')
+    for key,value in doc.items():
+        if key not in RECEIPT_DETAIL_KEYS:
+            raise ValueError('invalid evidence detail key')
+        if key=='status':
+            if value not in RECEIPT_DETAIL_STATUS:
+                raise ValueError('invalid evidence detail value')
+            continue
+        if key=='timed_out':
+            if type(value) is not bool:
+                raise ValueError('invalid evidence detail value')
+            continue
+        if key in RECEIPT_DETAIL_EXITS:
+            if key=='native_exit' and value is None:continue
+            if type(value) is bool or type(value) is not int:
+                raise ValueError('invalid evidence detail value')
+            if not -128 <= value <= 255:
+                raise ValueError('invalid evidence detail value')
+            continue
+        if type(value) is bool or type(value) is not int:
+            raise ValueError('invalid evidence detail value')
+        if not 0 <= value <= 1000000:
+            raise ValueError('invalid evidence detail value')
+
+
+def validate_evidence_receipt(doc):
+    """Sanitized receipt inventory grammar (no filesystem)."""
+    keys(doc,('schema','gate','disposition','complete','files','file_errors','detail'),('export_prefix',))
+    if doc['schema'] != RECEIPT_SCHEMA:raise ValueError('invalid evidence schema')
+    receipt_gate(doc['gate'])
+    if 'export_prefix' in doc:
+        receipt_gate(doc['export_prefix'])
+    prefix=doc.get('export_prefix') or doc['gate']
+    if doc['disposition'] not in RECEIPT_DISPOSITIONS:
+        raise ValueError('unknown evidence disposition')
+    if doc['complete'] is not True and doc['complete'] is not False:
+        raise ValueError('invalid evidence completeness flag')
+    if type(doc['files']) is not list:raise ValueError('invalid evidence file inventory')
+    for entry in doc['files']:
+        keys(entry,('name','sha256','bytes'))
+        name=entry['name']
+        if type(name) is not str or not re.fullmatch(r'[a-z0-9][a-z0-9-.]{0,127}',name):
+            raise ValueError('invalid evidence file name')
+        if not name.startswith(prefix+'-'):
+            raise ValueError('evidence file outside gate inventory')
+        sha(entry['sha256']);integer(entry['bytes'])
+    if type(doc['file_errors']) is not list:
+        raise ValueError('invalid evidence error inventory')
+    for entry in doc['file_errors']:
+        keys(entry,('name','error'))
+        if type(entry['name']) is not str or not re.fullmatch(r'[a-z0-9][a-z0-9-.]{0,127}',entry['name']):
+            raise ValueError('invalid evidence error name')
+        if entry['error'] not in RECEIPT_FILE_ERRORS:
+            raise ValueError('unrecognized evidence file error')
+    receipt_detail(doc['detail'])
+    if doc['complete'] is True and (doc['disposition'] != 'passed' or not doc['files'] or doc['file_errors']):
+        raise ValueError('complete evidence requires a passed gate with verified files')
 
 
 def _schemas():

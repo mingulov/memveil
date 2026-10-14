@@ -31,6 +31,8 @@ from consume import (author_reducer_fixture, check_conservation,
                      parse_oracle_log,
                      replay_oracle_witness_ledger,
                      translate_session)
+from evidence_retention import (expected_from_verified,
+                                retain_failure)
 from lifecycle_env import (CONSUMER, COPY_PROBE, LIFECYCLE_PROBE,
                            ensure_oracle_module,
                            require_lifecycle_env)
@@ -126,8 +128,9 @@ def test_witness_windows(tmp_path):
     with open(SPEC) as handle:
         frozen = json.load(handle)
     assert frozen["frozen_for_module"] == "0.4.0", frozen
-    tmp, proc = run_guest("witness")
+    tmp = None
     try:
+        tmp, proc = run_guest("witness")
         assert proc.returncode == 0, \
             "guest failed: %s" % proc.stderr[-2000:]
         got = verify_exports(tmp, "witness",
@@ -135,6 +138,7 @@ def test_witness_windows(tmp_path):
                               "w-cp.txt", "w-oracle.log",
                               "f-lc.txt", "f-cp.txt",
                               "f-oracle.log"])
+        expected = expected_from_verified(got, "witness")
         ident = json.loads(got["identity.json"].read_text())
         assert ident["release"] == "7.0.0-34-generic", ident
         bad, w_lc, w_cp, w_ops, w_rel = check_window(
@@ -187,7 +191,8 @@ def test_witness_windows(tmp_path):
         assert not mismatches, "\n".join(mismatches)
         print("w: report metrics match witnessed executed bytes")
     except Exception:
+        retain_failure(tmp, "witness")
         print(f"gate artifacts kept at {tmp}")
         raise
     else:
-        cleanup(tmp)
+        cleanup(tmp, "witness", expected=expected)

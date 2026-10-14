@@ -19,6 +19,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from consume import (check_conservation, check_oracle_script,
                      compare_scripted, parse_consume_file,
                      parse_oracle_log)
+from evidence_retention import (expected_from_verified,
+                                retain_failure)
 from lifecycle_env import (CONSUMER, COPY_PROBE, LIFECYCLE_PROBE,
                            ensure_oracle_module, require_lifecycle_env)
 from vm_boot import cleanup, run_guest, verify_exports
@@ -84,8 +86,9 @@ def check_step(got, delay_ms):
 def test_low_rate_matrix():
     require_lifecycle_env(LIFECYCLE_PROBE, COPY_PROBE, CONSUMER)
     ensure_oracle_module()
-    tmp, proc = run_guest("matrix")
+    tmp = None
     try:
+        tmp, proc = run_guest("matrix")
         assert proc.returncode == 0, \
             "guest failed: %s" % proc.stderr[-2000:]
         names = ["identity.json"]
@@ -94,12 +97,14 @@ def test_low_rate_matrix():
             names += ["%s-lc.txt" % tag, "%s-cp.txt" % tag,
                       "%s-oracle.log" % tag]
         got = verify_exports(tmp, "matrix", names)
+        expected = expected_from_verified(got, "matrix")
         ident = json.loads(got["identity.json"].read_text())
         assert ident["release"] == "7.0.0-34-generic", ident
         for delay_ms in STEPS:
             check_step(got, delay_ms)
     except Exception:
+        retain_failure(tmp, "matrix")
         print(f"gate artifacts kept at {tmp}")
         raise
     else:
-        cleanup(tmp)
+        cleanup(tmp, "matrix", expected=expected)

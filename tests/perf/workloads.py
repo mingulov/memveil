@@ -39,6 +39,8 @@ sys.path.insert(0, os.path.join(REPO, "tests", "perf"))
 from compare import assess, compare
 from export_validation import validate_perf_pairs
 from consume import check_conservation, parse_consume_file
+from evidence_retention import (expected_from_verified,
+                                retain_failure)
 from vm_boot import cleanup, run_guest, verify_exports
 
 
@@ -107,17 +109,20 @@ def leg_runs(leg, pair, mode):
 
 
 def run_flow():
-    tmp, proc = run_guest("perf", timeout=1500, network=True)
+    tmp = None
     try:
+        tmp, proc = run_guest("perf", timeout=1500, network=True)
         if proc.returncode != 0:
             print("FAIL perf-workload: guest failed: %s"
                   % proc.stderr[-2000:])
+            retain_failure(tmp, "perf")
             print(f"gate artifacts kept at {tmp}")
             return 1
         names = ["identity.json", "pairs.json"]
         for pair in range(6):
             names += ["p%d-lc.txt" % pair, "p%d-cp.txt" % pair]
         got = verify_exports(tmp, "perf", names)
+        expected = expected_from_verified(got, "perf")
         pairs = json.loads(got["pairs.json"].read_text())
         validate_perf_pairs(pairs, expected_count=6)
         windows = {"p%d-%s.txt" % (pair, ring)
@@ -176,6 +181,7 @@ def run_flow():
             print("FAIL perf-workload:")
             for line in bad:
                 print("  " + line)
+            retain_failure(tmp, "perf")
             print(f"gate artifacts kept at {tmp}")
             return 1
         limits = []
@@ -192,6 +198,7 @@ def run_flow():
             print("FAIL perf-workload:")
             for line in bad:
                 print("  " + line)
+            retain_failure(tmp, "perf")
             print(f"gate artifacts kept at {tmp}")
             return 1
         if limits:
@@ -201,10 +208,11 @@ def run_flow():
               "measurement (off vs observed); full product overhead NOT RUN")
     except Exception as exc:
         print(f"FAIL perf-workload: {exc}")
+        retain_failure(tmp, "perf")
         print(f"gate artifacts kept at {tmp}")
         return 1
     else:
-        cleanup(tmp)
+        cleanup(tmp, "perf", expected=expected)
         return 0
 
 

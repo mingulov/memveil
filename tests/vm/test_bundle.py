@@ -28,6 +28,8 @@ from lifecycle_env import (BRIDGE, COPY_PROBE, LIFECYCLE_PROBE,
 from test_record3 import (ATTEMPT_PROBE, SPEC, _events,
                           _mint_profile, check_capture_session,
                           check_lifetimes, check_oracle_slice)
+from evidence_retention import (expected_from_verified,
+                                retain_failure)
 from vm_boot import cleanup, run_guest, verify_exports
 
 REPO = os.path.dirname(
@@ -261,8 +263,9 @@ def test_bundle_three_phase_capture():
             "witness-expectations.json")) as handle:
         witness = json.load(handle)
     assert witness["frozen_for_module"] == "0.4.0", witness
-    tmp, proc = run_guest("bundle", timeout=900, network=True)
+    tmp = None
     try:
+        tmp, proc = run_guest("bundle", timeout=900, network=True)
         assert proc.returncode == 0, \
             "guest failed: %s" % proc.stderr[-2000:]
         got = verify_exports(
@@ -271,6 +274,7 @@ def test_bundle_three_phase_capture():
              "cap-session.json", "cap-events.ndjson",
              "o-oracle.log", "f-oracle.log",
              "workload.json", "bundle.json", "report.json"])
+        expected = expected_from_verified(got, "bundle")
         ident = json.loads(got["identity.json"].read_text())
         assert ident["release"] == "7.0.0-34-generic", ident
         bundle = json.loads(got["bundle.json"].read_text())
@@ -364,7 +368,12 @@ def test_bundle_three_phase_capture():
               % (len(o_slice), len(f_slice), len(io_slice),
                  len(ambient)))
     except Exception:
+        retain_failure(tmp, "bundle")
         print(f"gate artifacts kept at {tmp}")
         raise
     else:
-        cleanup(tmp)
+        cleanup(tmp, "bundle",
+                detail=dict(report_exit=bundle["report_exit"],
+                            files_verified=bundle[
+                                "files_verified"]),
+                expected=expected)

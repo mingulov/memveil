@@ -17,6 +17,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from consume import (check_conservation, check_oracle_script,
                      compare_scripted, parse_consume_file,
                      parse_oracle_log)
+from evidence_retention import (expected_from_verified,
+                                retain_failure)
 from lifecycle_env import (CONSUMER, COPY_PROBE, LIFECYCLE_PROBE,
                            ensure_oracle_module, require_lifecycle_env)
 from vm_boot import cleanup, run_guest, verify_exports
@@ -78,8 +80,9 @@ def check_window(got, tag, fail_op):
 def test_copy_semantics():
     require_lifecycle_env(LIFECYCLE_PROBE, COPY_PROBE, CONSUMER)
     ensure_oracle_module()
-    tmp, proc = run_guest("copy")
+    tmp = None
     try:
+        tmp, proc = run_guest("copy")
         assert proc.returncode == 0, \
             "guest failed: %s" % proc.stderr[-2000:]
         got = verify_exports(tmp, "copy",
@@ -87,10 +90,12 @@ def test_copy_semantics():
                               "a-cp.txt", "a-oracle.log",
                               "b-lc.txt", "b-cp.txt",
                               "b-oracle.log"])
+        expected = expected_from_verified(got, "copy")
         check_window(got, "a", -1)
         check_window(got, "b", 2)
     except Exception:
+        retain_failure(tmp, "copy")
         print(f"gate artifacts kept at {tmp}")
         raise
     else:
-        cleanup(tmp)
+        cleanup(tmp, "copy", expected=expected)

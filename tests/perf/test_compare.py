@@ -125,8 +125,10 @@ def perf_flow(tmp_path, monkeypatch, p99=1.0, observed_seconds=1.0, mutation=Non
     # pair binding, comparator and native result propagation boundary here.
     monkeypatch.setattr(workloads, 'parse_consume_file', lambda *a: ([{'kind': 1}], {'cnt_fail': 0}))
     monkeypatch.setattr(workloads, 'check_conservation', lambda *a: [])
+    monkeypatch.setattr(workloads, 'expected_from_verified', lambda *a, **k: {})
+    monkeypatch.setattr(workloads, 'retain_failure', lambda *a, **k: None)
     cleaned = []
-    monkeypatch.setattr(workloads, 'cleanup', lambda path: cleaned.append(path))
+    monkeypatch.setattr(workloads, 'cleanup', lambda path, *a, **k: cleaned.append(path))
     return workloads.run_flow(), cleaned
 
 

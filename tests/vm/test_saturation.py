@@ -23,6 +23,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from consume import (check_conservation, check_retained_script, check_oracle_script,
                      parse_consume_file, parse_oracle_log,
                      scripted_expectation)
+from evidence_retention import (expected_from_verified,
+                                retain_failure)
 from vm_boot import cleanup, run_guest, verify_exports
 
 FLOOD_OPS = 300
@@ -62,16 +64,20 @@ def armed_preflight():
 
 
 def run_flow():
-    tmp, proc = run_guest("saturation")
+    tmp = None
     try:
+        tmp, proc = run_guest("saturation")
         if proc.returncode != 0:
             print("FAIL vm-saturation: guest failed: %s"
                   % proc.stderr[-2000:])
+            retain_failure(tmp, "lifecycle-saturation",
+                           export_prefix="saturation")
             print(f"gate artifacts kept at {tmp}")
             return 1
         got = verify_exports(tmp, "saturation",
                              ["identity.json", "flood-lc.txt",
                               "flood-cp.txt", "flood-oracle.log"])
+        expected = expected_from_verified(got, "saturation")
         lc, lc_sum = parse_consume_file(str(got["flood-lc.txt"]))
         cp, cp_sum = parse_consume_file(str(got["flood-cp.txt"]))
         bad = check_conservation(lc, lc_sum, "flood-lc")
@@ -115,6 +121,8 @@ def run_flow():
             print("FAIL vm-saturation:")
             for line in bad:
                 print("  " + line)
+            retain_failure(tmp, "lifecycle-saturation",
+                           export_prefix="saturation")
             print(f"gate artifacts kept at {tmp}")
             return 1
         print("vm-saturation: PASS: lc obs=%d emit=%d fail=%d, "
@@ -125,10 +133,13 @@ def run_flow():
                  FLOOD_OPS))
     except Exception as exc:
         print(f"FAIL vm-saturation: {exc}")
+        retain_failure(tmp, "lifecycle-saturation",
+                       export_prefix="saturation")
         print(f"gate artifacts kept at {tmp}")
         return 1
     else:
-        cleanup(tmp)
+        cleanup(tmp, "lifecycle-saturation", expected=expected,
+                export_prefix="saturation")
         return 0
 
 

@@ -89,18 +89,9 @@ def sha_file(path):
 
 def verify_exports(tmp, sub, names):
     """Check the exact export inventory with sidecar hashes."""
+    from evidence_retention import VerifiedExports, snapshot_exports
     export = tmp / "export"
-    got = {}
-    for name in names:
-        target = export / f"{sub}-{name}"
-        sidecar = Path(str(target) + ".sha256")
-        assert target.is_file(), f"missing export {sub}-{name}"
-        assert sidecar.is_file(), f"missing sidecar {sub}-{name}.sha256"
-        sidecar_text=sidecar.read_text()
-        assert re.fullmatch(r"[0-9a-f]{64}(?:  " + re.escape(target.name) + r")?\n",sidecar_text), "invalid hash sidecar"
-        want = sidecar_text.split()[0]
-        assert sha_file(target) == want, f"hash mismatch {sub}-{name}"
-        got[name] = target
+    got, verified = snapshot_exports(tmp, sub, names)
     want_files = {f"{sub}-{n}" for n in names}
     want_files |= {f"{sub}-{n}.sha256" for n in names}
     have = {p.name for p in export.iterdir()}
@@ -119,7 +110,7 @@ def verify_exports(tmp, sub, names):
                           ("bridge_sha",REPO/"build/deps/lmb/lib/libbpf_mojo.so.1"),
                           ("ko_sha",Path(ORACLE_KO))):
             assert identity[key] == sha_file(path), "guest artifact mismatch: " + key
-    return got
+    return VerifiedExports(got, verified)
 
 
 __all__ = ["REPO", "GUEST_FLOW", "run_guest", "verify_exports",
