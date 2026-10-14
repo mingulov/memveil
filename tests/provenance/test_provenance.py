@@ -11,6 +11,18 @@ tools/package needs from this tree exists. Pinned-bridge bytes
 (LMB_PACKAGE hash, staged license copies) are verified at pack
 time, not here. Exits nonzero on the first failure.
 Standard library only.
+
+The file inventory comes from Git only when this source root
+owns its Git top level; a standalone source archive (outside
+any repository, or nested under an unrelated one) enumerates
+the complete validated tree inventory instead, so a foreign
+parent's ignore rules can never shrink the checked set.
+`test_provenance.py --list-files` prints the enumerated set.
+Both Git calls run with repository, index, and
+configuration overrides removed from the environment,
+so foreign GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE,
+or GIT_CONFIG_* values can neither spoof ownership
+nor shrink the enumerated file set.
 """
 
 import json
@@ -21,6 +33,9 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))))
+
+sys.path.insert(0, os.path.join(ROOT, "tools"))
+import source_inventory  # noqa: E402
 
 KNOWN_IDS = {
     "GPL-3.0-or-later": "LICENSE",
@@ -37,6 +52,17 @@ SKIP_DIRS = ("build", "dist", ".pixi", "__pycache__", ".pytest_cache",
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
+STATIC_INPUTS = [
+    "LICENSE", "THIRD-PARTY-NOTICES.md",
+    "LICENSES/GPL-2.0-only.txt", "LICENSES/GPL-2.0-or-later.txt",
+    "docs/quickstart.md", "docs/support.md", "docs/privacy.md",
+    "examples/real-capture/events.ndjson",
+    "examples/real-capture/session.json",
+    "profiles/manifest.txt",
+    "bpf/programs/swiotlb_attempt.bpf.c",
+    "src/memveil/main.mojo", "toolchain.lock.json",
+]
+
 
 def check(name, cond, detail=""):
     if not cond:
@@ -45,16 +71,63 @@ def check(name, cond, detail=""):
     print("ok %s" % name)
 
 
+def git_env():
+    """Environment for Git calls: repository, index, and
+    configuration overrides removed, so neither the
+    ownership comparison nor the file set can be
+    relocated or shrunk from the environment."""
+    return {key: value for key, value in os.environ.items()
+            if not key.startswith("GIT_")}
+
+
+def owns_git_root(path):
+    """True when path is its own canonical Git top level.
+
+    A source archive nested under an unrelated repository must
+    never inherit that parent's identity or ignore rules.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", path, "rev-parse", "--show-toplevel"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=git_env())
+    except FileNotFoundError:
+        return False
+    return (proc.returncode == 0 and bool(proc.stdout.strip())
+            and os.path.realpath(proc.stdout.strip())
+            == os.path.realpath(path))
+
+
 def tracked_files():
     proc = subprocess.run(
         ["git", "ls-files", "-c", "-o", "--exclude-standard", "-z"],
-        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=git_env())
     if proc.returncode != 0:
         print("FAIL provenance: git ls-files failed")
         sys.exit(1)
     return [rel for rel in
             proc.stdout.decode("utf-8", "surrogateescape").split("\0")
             if rel]
+
+
+def archive_files():
+    """Complete file set from the explicit tree inventory."""
+    try:
+        inventory = source_inventory.take_tree_inventory(ROOT)
+    except OSError as exc:
+        print("FAIL provenance: tree inventory failed: %s" % exc)
+        sys.exit(1)
+    return sorted(entry["path"]
+                  for entry in inventory.get("files", [])
+                  if entry.get("kind") in ("file", "symlink"))
+
+
+def enumerated_files():
+    """(files, mode): Git only for an owning checkout."""
+    if owns_git_root(ROOT):
+        return tracked_files(), "git"
+    return archive_files(), "archive"
 
 
 def is_code(rel):
@@ -81,10 +154,24 @@ def spdx_of(path):
     return match.group(1) if match else None
 
 
-def main():
-    files = tracked_files()
+def main(argv):
+    if argv and argv != ["--list-files"]:
+        print("usage: test_provenance.py [--list-files]",
+              file=sys.stderr)
+        return 2
+    files, mode = enumerated_files()
+    if argv == ["--list-files"]:
+        for rel in sorted(files):
+            print(rel)
+        return 0
+    print("provenance: inventory mode %s (%d files)"
+          % (mode, len(files)))
     check("file-inventory-nonempty", len(files) > 100,
           "got %d" % len(files))
+    present = set(files)
+    omitted = [rel for rel in STATIC_INPUTS if rel not in present]
+    check("inventory-required-present", not omitted,
+          "; ".join(omitted[:5]))
 
     offenders = []
     seen_ids = set()
@@ -189,17 +276,7 @@ def main():
     else:
         print("ok engine-version-matches-pixi (no built binary; skipped)")
 
-    static_inputs = [
-        "LICENSE", "THIRD-PARTY-NOTICES.md",
-        "LICENSES/GPL-2.0-only.txt", "LICENSES/GPL-2.0-or-later.txt",
-        "docs/quickstart.md", "docs/support.md", "docs/privacy.md",
-        "examples/real-capture/events.ndjson",
-        "examples/real-capture/session.json",
-        "profiles/manifest.txt",
-        "bpf/programs/swiotlb_attempt.bpf.c",
-        "src/memveil/main.mojo", "toolchain.lock.json",
-    ]
-    missing = [rel for rel in static_inputs
+    missing = [rel for rel in STATIC_INPUTS
                if not os.path.isfile(os.path.join(ROOT, rel))]
     check("package-static-inputs", not missing, "; ".join(missing))
     with open(os.path.join(ROOT, "profiles", "manifest.txt")) as handle:
@@ -216,4 +293,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

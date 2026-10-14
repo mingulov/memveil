@@ -24,6 +24,7 @@ Usage: source_inventory.py [ROOT] [--out FILE]
   2 on invalid usage or an unreadable tree.
 """
 
+import errno
 import hashlib
 import json
 import os
@@ -82,6 +83,14 @@ EXCLUDED_ANY = frozenset((
 # Suffixes excluded at any depth.
 EXCLUDED_SUFFIXES = (".pyc",)
 
+# Full-tree inventory for provenance callers: every file under
+# the root except VCS metadata, build outputs, environments,
+# and tool caches. Ignore rules are never consulted, so a
+# source archive nested under an unrelated repository
+# enumerates the same complete set anywhere.
+TREE_DIRS = (".",)
+TREE_FILES = ()
+
 
 def sha256_of(handle):
     digest = hashlib.sha256()
@@ -93,7 +102,11 @@ def sha256_of(handle):
 def describe(root, rel, exclude_top=EXCLUDED_TOP,
              exclude_any=EXCLUDED_ANY,
              exclude_suffixes=EXCLUDED_SUFFIXES):
-    """One inventory entry for rel, or None when excluded."""
+    """One inventory entry for rel, or None when excluded.
+
+    Read failures on admitted paths raise OSError: the
+    caller must fail loudly, never ship a silent gap.
+    """
     parts = rel.replace(os.sep, "/").split("/")
     if parts[0] in exclude_top:
         return None
@@ -102,10 +115,7 @@ def describe(root, rel, exclude_top=EXCLUDED_TOP,
     if parts[-1].endswith(exclude_suffixes):
         return None
     full = os.path.join(root, rel)
-    try:
-        info = os.lstat(full)
-    except OSError:
-        return None
+    info = os.lstat(full)
     # Paths stay relative with forward slashes so the digest
     # compares across checkouts and platforms.
     entry = {
@@ -136,7 +146,12 @@ def take_inventory(root, dirs=INPUT_DIRS, files=INPUT_FILES,
                    exclude_any=EXCLUDED_ANY,
                    exclude_suffixes=EXCLUDED_SUFFIXES,
                    label=FORMAT):
-    """Walk admitted inputs; return the inventory dict."""
+    """Walk admitted inputs; return the inventory dict.
+
+    Missing inputs contribute nothing, but any read
+    failure on an admitted path raises OSError instead
+    of silently shrinking the inventoried set.
+    """
     root = os.path.realpath(root)
     entries = {}
 
@@ -147,13 +162,17 @@ def take_inventory(root, dirs=INPUT_DIRS, files=INPUT_FILES,
             exclude_suffixes=exclude_suffixes)
         if entry is not None:
             entries[entry["path"]] = entry
+        return entry
+
+    def strict(error):
+        raise error
 
     for top in dirs:
         base = os.path.join(root, top)
-        if not os.path.isdir(base) and not os.path.islink(base):
+        if not os.path.lexists(base):
             continue
-        for current, subdirs, names in os.walk(base,
-                                               followlinks=False):
+        for current, subdirs, names in os.walk(
+                base, followlinks=False, onerror=strict):
             subdirs.sort()
             for name in sorted(subdirs):
                 # os.walk never descends into symlinked
@@ -162,12 +181,61 @@ def take_inventory(root, dirs=INPUT_DIRS, files=INPUT_FILES,
                 full = os.path.join(current, name)
                 if os.path.islink(full):
                     record(os.path.relpath(full, root))
+            # Prune excluded subtrees before descending: their
+            # entries were dropped by describe() anyway, but a
+            # full-tree walk would otherwise crawl environments
+            # (.pixi), version control (.git), and caches.
+            keep = []
+            for name in subdirs:
+                rel = os.path.relpath(
+                    os.path.join(current, name),
+                    root).replace(os.sep, "/")
+                if name in exclude_any:
+                    continue
+                if rel.split("/")[0] in exclude_top:
+                    continue
+                keep.append(name)
+            subdirs[:] = keep
             rel_dir = os.path.relpath(current, root)
             if rel_dir != ".":
                 record(rel_dir)
             for name in sorted(names):
-                record(os.path.relpath(
+                # os.walk swallows classification errors:
+                # when is_dir() raises, the entry lands
+                # here even when it is a directory, and
+                # the walk never descends into it. Such a
+                # directory is a loud failure, not input.
+                entry = record(os.path.relpath(
                     os.path.join(current, name), root))
+                if entry is not None \
+                        and entry.get("kind") == "dir":
+                    raise OSError(
+                        errno.EIO,
+                        "directory enumerated as a file",
+                        os.path.join(current, name))
+                if entry is None:
+                    # Suffix exclusions filter names but
+                    # never prune subtrees, so children
+                    # stay admitted. Only definitely
+                    # pruned subtrees stay silent; the
+                    # probe itself must fail closed, so
+                    # an unprovable entry never hides a
+                    # directory behind a silent skip.
+                    full = os.path.join(current, name)
+                    rel = os.path.relpath(full, root)
+                    parts = rel.replace(
+                        os.sep, "/").split("/")
+                    if parts[0] in exclude_top:
+                        continue
+                    if any(part in exclude_any
+                           for part in parts):
+                        continue
+                    info = os.lstat(full)
+                    if stat.S_ISDIR(info.st_mode):
+                        raise OSError(
+                            errno.EIO,
+                            "directory enumerated as a file",
+                            full)
     for rel in files:
         if os.path.lexists(os.path.join(root, rel)):
             record(rel)
@@ -185,6 +253,19 @@ def take_inventory(root, dirs=INPUT_DIRS, files=INPUT_FILES,
         "files": ordered,
         "digest": digest.hexdigest(),
     }
+
+
+def take_tree_inventory(root):
+    """Complete file set of a source tree, validated by shape.
+
+    Every file under root except VCS metadata, build outputs,
+    environments, and tool caches; required-input membership is
+    the caller's check against this explicit inventory, never a
+    silent omission and never a parent repository's ignore
+    rules.
+    """
+    return take_inventory(
+        root, dirs=TREE_DIRS, files=TREE_FILES)
 
 
 def compare(before, after):
