@@ -98,6 +98,13 @@ def _plural(n: Int, one: String, many: String) -> String:
     return String(n) + " " + many
 
 
+def _detail_loss_cause() -> String:
+    """Shared cause when detail loss may hide a release."""
+    return String(
+        "Detail loss reported by the producer may hide a release"
+    )
+
+
 struct MappingTracker[
     ACTIVE_N: Int = ACTIVE_MAX,
     PENDING_N: Int = PENDING_MAX,
@@ -226,9 +233,7 @@ struct MappingTracker[
         partial coverage. This covers producer-claimed loss and
         recovered tails the event stream never shows.
         """
-        self._invalidate_live(
-            "Detail loss reported by the producer may hide a release"
-        )
+        self._invalidate_live(_detail_loss_cause())
 
     def note_correlation_loss(mut self):
         """Lost relationships may hide a mapping release."""
@@ -688,10 +693,22 @@ struct MappingTracker[
             )
         return out^
 
-    def _coverage(self) -> String:
-        if self._degraded:
+    def _coverage(self, overlay_detail_loss: Bool) -> String:
+        if self._degraded or overlay_detail_loss:
             return String("partial")
         return String("complete_for_scope")
+
+    def _view_live_invalid(self, overlay_detail_loss: Bool) -> Bool:
+        """Live state is withheld under consumed or overlaid loss."""
+        return self._live_invalid or overlay_detail_loss
+
+    def _view_live_cause(self, overlay_detail_loss: Bool) -> String:
+        """Withhold reason, preferring the latched consumed cause."""
+        if self._live_invalid:
+            return self._live_cause.copy()
+        if overlay_detail_loss:
+            return _detail_loss_cause()
+        return self._live_cause.copy()
 
     def _row(
         self,
@@ -738,6 +755,7 @@ struct MappingTracker[
         samples: UInt64,
         scope: String,
         notes: String,
+        overlay_detail_loss: Bool,
     ) -> Metric:
         return self._row(
             name,
@@ -745,7 +763,7 @@ struct MappingTracker[
             True,
             value,
             String("observed"),
-            self._coverage(),
+            self._coverage(overlay_detail_loss),
             aggregation,
             has_samples,
             samples,
@@ -777,13 +795,20 @@ struct MappingTracker[
             notes,
         )
 
-    def metrics(self, window: String) raises -> List[Metric]:
+    def metrics(
+        self, window: String, overlay_detail_loss: Bool = False
+    ) raises -> List[Metric]:
         """One deterministic row set; shared by snapshot/finish.
 
         Without a horizon the oldest-open age stays unavailable;
-        pass the horizon explicitly for age-aware rows.
+        pass the horizon explicitly for age-aware rows. The
+        overlay renders call-local detail uncertainty (a
+        dropped tail) without latching tracker state, so a
+        partial snapshot cannot alter later facts.
         """
-        return self.metrics_horizon(window, UInt64(0))
+        return self.metrics_horizon(
+            window, UInt64(0), overlay_detail_loss
+        )
 
     def _oldest_open_ts(self) -> UInt64:
         """Minimum map timestamp over live mappings; 0 when none."""
@@ -798,13 +823,18 @@ struct MappingTracker[
         return oldest
 
     def metrics_horizon(
-        self, window: String, horizon_ns: UInt64
+        self,
+        window: String,
+        horizon_ns: UInt64,
+        overlay_detail_loss: Bool = False,
     ) raises -> List[Metric]:
         """Row set with oldest-open age against one horizon.
 
         Each family stays null without its own source kinds: a
         zero would claim an empty observation the capture cannot
-        prove. Unknown is null with a reason, never zero.
+        prove. Unknown is null with a reason, never zero. The
+        overlay renders call-local detail uncertainty (a
+        dropped tail) without latching tracker state.
         """
         var out = List[Metric]()
         var scope = window + "; observed mappings"
@@ -847,6 +877,7 @@ struct MappingTracker[
                     UInt64(0),
                     scope,
                     String("Map successes with mapping identity."),
+                    overlay_detail_loss,
                 )
             )
             out.append(
@@ -859,6 +890,7 @@ struct MappingTracker[
                     UInt64(0),
                     scope,
                     String("Map failures; no mapping created."),
+                    overlay_detail_loss,
                 )
             )
             if self._mapped_overflow:
@@ -884,6 +916,7 @@ struct MappingTracker[
                         UInt64(0),
                         scope,
                         String("Sum of mapped bytes over successes."),
+                        overlay_detail_loss,
                     )
                 )
         if not self._saw_copy:
@@ -928,6 +961,7 @@ struct MappingTracker[
                             "Observed original-to-bounce copies"
                             " only; sync requests add nothing."
                         ),
+                        overlay_detail_loss,
                     )
                 )
             if self._b2o_overflow:
@@ -953,11 +987,12 @@ struct MappingTracker[
                             "Observed bounce-to-original copies"
                             " only; sync requests add nothing."
                         ),
+                        overlay_detail_loss,
                     )
                 )
         var has_mapping_state = self._saw_map or self._saw_unmap
-        if self._live_invalid:
-            var cause = self._live_cause
+        if self._view_live_invalid(overlay_detail_loss):
+            var cause = self._view_live_cause(overlay_detail_loss)
             if not has_mapping_state and cause == "":
                 cause = String("No mapping evidence")
             out.append(
@@ -1024,6 +1059,7 @@ struct MappingTracker[
                     UInt64(0),
                     scope,
                     String("Mapped bytes still open at the horizon."),
+                    overlay_detail_loss,
                 )
             )
             out.append(
@@ -1039,6 +1075,7 @@ struct MappingTracker[
                         "Open mappings are censored from completed"
                         " lifetimes, not leaks."
                     ),
+                    overlay_detail_loss,
                 )
             )
             if not self._peak_order_ok:
@@ -1068,11 +1105,12 @@ struct MappingTracker[
                             " observed allocation occupancy in this window;"
                             " release does not prove reprivatization or erasure."
                         ),
+                        overlay_detail_loss,
                     )
                 )
         if (
             has_mapping_state
-            and not self._live_invalid
+            and not self._view_live_invalid(overlay_detail_loss)
             and len(self._live) > 0
             and horizon_ns > UInt64(0)
             and self._oldest_open_ts() <= horizon_ns
@@ -1091,6 +1129,7 @@ struct MappingTracker[
                         " input to the long-lived policy, never a"
                         " leak verdict."
                     ),
+                    overlay_detail_loss,
                 )
             )
         else:
@@ -1099,8 +1138,10 @@ struct MappingTracker[
                 age_why = String(
                     "No map or release events in this capture."
                 )
-            elif self._live_invalid:
-                age_why = self._live_cause + "; age withheld."
+            elif self._view_live_invalid(overlay_detail_loss):
+                age_why = self._view_live_cause(overlay_detail_loss) + (
+                    "; age withheld."
+                )
             elif len(self._live) > 0 and horizon_ns == UInt64(0):
                 age_why = String("No horizon supplied for open age.")
             out.append(
@@ -1111,7 +1152,11 @@ struct MappingTracker[
                     age_why,
                 )
             )
-        out.append(self._byte_time_row(scope, horizon_ns, has_mapping_state))
+        out.append(
+            self._byte_time_row(
+                scope, horizon_ns, has_mapping_state, overlay_detail_loss
+            )
+        )
         if self._saw_sync:
             out.append(
                 self._valued(
@@ -1126,6 +1171,7 @@ struct MappingTracker[
                         "Sync requests observed; requests are not"
                         " copies."
                     ),
+                    overlay_detail_loss,
                 )
             )
         else:
@@ -1151,6 +1197,7 @@ struct MappingTracker[
                         "Releases with provable durations; open and"
                         " uncertain mappings excluded."
                     ),
+                    overlay_detail_loss,
                 )
             )
         else:
@@ -1223,7 +1270,7 @@ struct MappingTracker[
                 )
             )
         else:
-            out.append(self._mean_row(scope))
+            out.append(self._mean_row(scope, overlay_detail_loss))
             out.append(
                 self._row(
                     String("lifetime_min_ns"),
@@ -1231,7 +1278,7 @@ struct MappingTracker[
                     True,
                     self._min_life,
                     String("observed"),
-                    self._coverage(),
+                    self._coverage(overlay_detail_loss),
                     String("gauge"),
                     True,
                     self._completed,
@@ -1248,7 +1295,7 @@ struct MappingTracker[
                     True,
                     self._max_life,
                     String("observed"),
-                    self._coverage(),
+                    self._coverage(overlay_detail_loss),
                     String("gauge"),
                     True,
                     self._completed,
@@ -1266,7 +1313,7 @@ struct MappingTracker[
                     True,
                     p50,
                     String("estimated"),
-                    self._coverage(),
+                    self._coverage(overlay_detail_loss),
                     String("p50"),
                     True,
                     self._completed,
@@ -1287,7 +1334,7 @@ struct MappingTracker[
                     True,
                     p95,
                     String("estimated"),
-                    self._coverage(),
+                    self._coverage(overlay_detail_loss),
                     String("p95"),
                     True,
                     self._completed,
@@ -1308,7 +1355,7 @@ struct MappingTracker[
                     True,
                     p99,
                     String("estimated"),
-                    self._coverage(),
+                    self._coverage(overlay_detail_loss),
                     String("p99"),
                     True,
                     self._completed,
@@ -1321,11 +1368,15 @@ struct MappingTracker[
                     ),
                 )
             )
-        self._device_rows(out, window)
+        self._device_rows(out, window, overlay_detail_loss)
         return out^
 
     def _byte_time_row(
-        self, scope: String, horizon_ns: UInt64, has_mapping_state: Bool
+        self,
+        scope: String,
+        horizon_ns: UInt64,
+        has_mapping_state: Bool,
+        overlay_detail_loss: Bool,
     ) -> Metric:
         """Allocation byte-time: completed plus open mappings.
 
@@ -1334,12 +1385,13 @@ struct MappingTracker[
         exactly. Open mappings need a horizon; without one the
         row is withheld while anything is still open.
         """
-        if self._live_invalid:
+        if self._view_live_invalid(overlay_detail_loss):
             return self._missing(
                 String("allocation_byte_microseconds"),
                 String("byte_microseconds"),
                 scope,
-                self._live_cause + "; byte-time withheld with live state.",
+                self._view_live_cause(overlay_detail_loss)
+                + "; byte-time withheld with live state.",
             )
         if not has_mapping_state:
             return self._missing(
@@ -1418,9 +1470,12 @@ struct MappingTracker[
                 " exact durations; open mappings integrate to"
                 " the horizon."
             ),
+            overlay_detail_loss,
         )
 
-    def _mean_row(self, scope: String) raises -> Metric:
+    def _mean_row(
+        self, scope: String, overlay_detail_loss: Bool
+    ) raises -> Metric:
         if self._lifetime_overflow:
             return self._missing(
                 String("lifetime_mean_ns"),
@@ -1437,7 +1492,7 @@ struct MappingTracker[
             True,
             floor_mean(self._lifetime_total, self._completed),
             String("observed"),
-            self._coverage(),
+            self._coverage(overlay_detail_loss),
             String("mean"),
             True,
             self._completed,
@@ -1447,7 +1502,9 @@ struct MappingTracker[
             String("Floor mean over completed lifetimes."),
         )
 
-    def _device_rows(self, mut out: List[Metric], window: String):
+    def _device_rows(
+        self, mut out: List[Metric], window: String, overlay_detail_loss: Bool
+    ):
         """Per-device detail rows in sorted device order.
 
         Families follow the same source gates as the global
@@ -1472,7 +1529,7 @@ struct MappingTracker[
             m.confidence = String("high")
             if self._saw_map:
                 m.measurement = String("observed")
-                m.coverage = self._coverage()
+                m.coverage = self._coverage(overlay_detail_loss)
                 m.has_aggregation = True
                 m.aggregation = String("counter")
                 m.notes = String("Map successes on this device.")
@@ -1507,7 +1564,7 @@ struct MappingTracker[
                 b.has_aggregation = True
                 b.aggregation = String("counter")
                 b.notes = String("Mapped bytes on this device.")
-                b.coverage = self._coverage()
+                b.coverage = self._coverage(overlay_detail_loss)
             b.has_device_id = True
             b.device_id = dev
             b.scope = scope
@@ -1531,7 +1588,7 @@ struct MappingTracker[
                 o.has_aggregation = True
                 o.aggregation = String("counter")
                 o.notes = String("Attributed copies on this device.")
-                o.coverage = self._coverage()
+                o.coverage = self._coverage(overlay_detail_loss)
             o.has_device_id = True
             o.device_id = dev
             o.scope = scope
@@ -1555,7 +1612,7 @@ struct MappingTracker[
                 r.has_aggregation = True
                 r.aggregation = String("counter")
                 r.notes = String("Attributed copies on this device.")
-                r.coverage = self._coverage()
+                r.coverage = self._coverage(overlay_detail_loss)
             r.has_device_id = True
             r.device_id = dev
             r.scope = scope

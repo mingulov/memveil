@@ -108,8 +108,8 @@ struct RegionTracker[REGION_N: Int = REGION_MAX, SEG_N: Int = SEGMENTS_MAX]:
         """Degrade unions alone: seeded state may be incomplete."""
         self._baseline_loss = True
 
-    def _counter_coverage(self) -> String:
-        if self._detail_loss:
+    def _counter_coverage(self, overlay_detail_loss: Bool) -> String:
+        if self._detail_loss or overlay_detail_loss:
             return String("partial")
         return String("complete_for_scope")
 
@@ -223,11 +223,16 @@ struct RegionTracker[REGION_N: Int = REGION_MAX, SEG_N: Int = SEGMENTS_MAX]:
         else:
             self._apply(idx, ev.transition.offset, end, String("unknown"))
 
-    def metrics(self, window: String) -> List[Metric]:
+    def metrics(
+        self, window: String, overlay_detail_loss: Bool = False
+    ) -> List[Metric]:
         """Request counts plus guest-physical state rows.
 
         Counters need transition evidence of their own: a
         seeded baseline proves state, never request counts.
+        The overlay renders call-local detail uncertainty (a
+        dropped tail) without latching tracker state, so a
+        partial snapshot cannot alter later facts.
         """
         var out = List[Metric]()
         if not self.sees_regions():
@@ -252,7 +257,7 @@ struct RegionTracker[REGION_N: Int = REGION_MAX, SEG_N: Int = SEGMENTS_MAX]:
             rq.unit = String("count")
             rq.confidence = String("high")
             rq.measurement = String("observed")
-            rq.coverage = self._counter_coverage()
+            rq.coverage = self._counter_coverage(overlay_detail_loss)
             rq.has_aggregation = True
             rq.aggregation = String("counter")
             rq.scope = window
@@ -268,7 +273,7 @@ struct RegionTracker[REGION_N: Int = REGION_MAX, SEG_N: Int = SEGMENTS_MAX]:
             fl.unit = String("count")
             fl.confidence = String("high")
             fl.measurement = String("observed")
-            fl.coverage = self._counter_coverage()
+            fl.coverage = self._counter_coverage(overlay_detail_loss)
             fl.has_aggregation = True
             fl.aggregation = String("counter")
             fl.scope = window
@@ -292,7 +297,9 @@ struct RegionTracker[REGION_N: Int = REGION_MAX, SEG_N: Int = SEGMENTS_MAX]:
                 )
             else:
                 rb.measurement = String("observed")
-                rb.coverage = self._counter_coverage()
+                rb.coverage = self._counter_coverage(
+                    overlay_detail_loss
+                )
                 rb.has_aggregation = True
                 rb.aggregation = String("counter")
                 rb.notes = String(
@@ -378,22 +385,23 @@ struct RegionTracker[REGION_N: Int = REGION_MAX, SEG_N: Int = SEGMENTS_MAX]:
             or self._invalidated > 0
             or self._opaque > 0
             or self._detail_loss
+            or overlay_detail_loss
             or self._baseline_loss
         )
         out.append(self._union_row(
             String("known_shared_region_bytes"), scope, shared,
             unknown, overflow, partial,
-            String("known-shared"),
+            String("known-shared"), overlay_detail_loss,
         ))
         out.append(self._union_row(
             String("known_private_region_bytes"), scope, private,
             unknown, overflow, partial,
-            String("known-private"),
+            String("known-private"), overlay_detail_loss,
         ))
         out.append(self._union_row(
             String("unknown_region_bytes"), scope, unknown,
             unknown, overflow, partial,
-            String("unknown-state"),
+            String("unknown-state"), overlay_detail_loss,
         ))
         return out^
 
@@ -406,13 +414,14 @@ struct RegionTracker[REGION_N: Int = REGION_MAX, SEG_N: Int = SEGMENTS_MAX]:
         overflow: Bool,
         partial: Bool,
         what: String,
+        overlay_detail_loss: Bool,
     ) -> Metric:
         var m = Metric()
         m.name = name
         m.unit = String("bytes")
         m.scope = scope
         m.confidence = String("medium")
-        if self._detail_loss:
+        if self._detail_loss or overlay_detail_loss:
             m.has_value = False
             m.measurement = String("unavailable")
             m.coverage = String("unavailable")

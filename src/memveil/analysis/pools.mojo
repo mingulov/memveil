@@ -97,8 +97,8 @@ struct PoolTracker[POOL_N: Int = POOL_MAX]:
             st.streak = 0
             self._pools[name] = st
 
-    def _coverage(self) -> String:
-        if self._detail_loss:
+    def _coverage(self, overlay_detail_loss: Bool) -> String:
+        if self._detail_loss or overlay_detail_loss:
             return String("partial")
         return String("complete_for_scope")
 
@@ -202,8 +202,17 @@ struct PoolTracker[POOL_N: Int = POOL_MAX]:
                 return
         self._notes.append(text)
 
-    def metrics(self, window: String) -> List[Metric]:
-        """Per-pool rows in sorted pool order."""
+    def metrics(
+        self, window: String, overlay_detail_loss: Bool = False
+    ) -> List[Metric]:
+        """Per-pool rows in sorted pool order.
+
+        The overlay renders call-local detail uncertainty (a
+        dropped tail) without latching tracker state: gauge
+        coverage degrades and the proved streak reads zero in
+        this view only, so a partial snapshot cannot alter
+        later facts.
+        """
         var out = List[Metric]()
         var names = _sorted_pool_ids(self._pools)
         var kept = len(names)
@@ -224,7 +233,7 @@ struct PoolTracker[POOL_N: Int = POOL_MAX]:
                 u.has_aggregation = True
                 u.aggregation = String("gauge")
                 u.notes = String("Latest available usage sample.")
-                u.coverage = self._coverage()
+                u.coverage = self._coverage(overlay_detail_loss)
             else:
                 u.measurement = String("unavailable")
                 u.notes = String(
@@ -246,7 +255,7 @@ struct PoolTracker[POOL_N: Int = POOL_MAX]:
                 c.has_aggregation = True
                 c.aggregation = String("gauge")
                 c.notes = String("Latest available capacity sample.")
-                c.coverage = self._coverage()
+                c.coverage = self._coverage(overlay_detail_loss)
             else:
                 c.measurement = String("unavailable")
                 c.notes = String(
@@ -257,14 +266,17 @@ struct PoolTracker[POOL_N: Int = POOL_MAX]:
             c.pool_id = pool
             c.scope = scope
             out.append(c^)
+            var shown_streak = st.streak
+            if overlay_detail_loss:
+                shown_streak = 0
             var s = Metric()
             s.name = String("pool_pressure_samples")
             s.has_value = True
-            s.value = UInt64(st.streak)
+            s.value = UInt64(shown_streak)
             s.unit = String("count")
             s.confidence = String("high")
             s.measurement = String("observed")
-            s.coverage = self._coverage()
+            s.coverage = self._coverage(overlay_detail_loss)
             s.has_aggregation = True
             s.aggregation = String("gauge")
             s.has_pool_id = True
@@ -293,7 +305,7 @@ struct PoolTracker[POOL_N: Int = POOL_MAX]:
                     " scope: the sampler never resets it, so the"
                     " reset epoch is unproved."
                 )
-                h.coverage = self._coverage()
+                h.coverage = self._coverage(overlay_detail_loss)
             else:
                 h.measurement = String("unavailable")
                 h.notes = String(

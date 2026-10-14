@@ -36,6 +36,7 @@ def _contains(hay: String, needle: String) -> Bool:
     """True when needle occurs in hay at least once."""
     return len(hay.split(String(needle))) > 1
 from memveil.model.event import Event
+from memveil.model.metric import Metric
 from memveil.model.report import Report
 from memveil.model.session import DeviceEntry, Session
 from memveil.model.validate import format_u64
@@ -789,6 +790,145 @@ def test_finish_live_forwards_byte_budget() raises:
     assert_true(text.startswith(String("--- refresh 1 @ ")))
 
 
+def _refresh_session() -> Session:
+    var s = Session()
+    s.session_id = String("refresh")
+    s.synthetic = True
+    s.product_version = String("0.0.0")
+    s.env_mode = String("unknown")
+    s.env_detection = String("unverified")
+    s.env_attestation = String("not_performed")
+    s.capture_mode = String("replay")
+    s.window_start_ns = UInt64(100)
+    s.window_end_ns = UInt64(1000)
+    s.finalized = True
+    s.q_detail.status = String("complete_for_scope")
+    s.q_detail.has_loss_count = True
+    s.q_detail.loss_count = UInt64(0)
+    s.q_detail.scope = String("sc")
+    s.q_detail.reason = String("rs")
+    s.q_aggregate.status = String("complete_for_scope")
+    s.q_aggregate.has_loss_count = True
+    s.q_aggregate.loss_count = UInt64(0)
+    s.q_aggregate.scope = String("sc")
+    s.q_aggregate.reason = String("rs")
+    s.q_correlation.status = String("complete_for_scope")
+    s.q_correlation.has_loss_count = True
+    s.q_correlation.loss_count = UInt64(0)
+    s.q_correlation.scope = String("sc")
+    s.q_correlation.reason = String("rs")
+    s.q_baseline.status = String("not_applicable")
+    s.q_baseline.scope = String("sc")
+    s.q_baseline.reason = String("rs")
+    s.q_terminal.status = String("complete_for_scope")
+    s.q_terminal.scope = String("sc")
+    s.q_terminal.reason = String("rs")
+    return s^
+
+
+def _refresh_map(
+    op: String, mapping: String, ts: UInt64, seq: UInt64
+) -> Event:
+    var ev = Event()
+    ev.session_id = String("refresh")
+    ev.seq = seq
+    ev.ts_ns = ts
+    ev.kind = String("map_result")
+    ev.source_hook = String("h")
+    ev.source_backend = String("test")
+    ev.source_profile_id = String("p1")
+    ev.source_measurement = String("observed")
+    ev.source_correlation = String("direct")
+    ev.map_result.operation_id = op
+    ev.map_result.success = True
+    ev.map_result.has_mapping_id = True
+    ev.map_result.mapping_id = mapping
+    ev.map_result.has_mapped_bytes = True
+    ev.map_result.mapped_bytes = UInt64(4096)
+    return ev^
+
+
+def _refresh_pool(pool: String, seq: UInt64, ts: UInt64) -> Event:
+    var ev = Event()
+    ev.session_id = String("refresh")
+    ev.seq = seq
+    ev.ts_ns = ts
+    ev.kind = String("pool_sample")
+    ev.source_hook = String("h")
+    ev.source_backend = String("test")
+    ev.source_profile_id = String("p1")
+    ev.source_measurement = String("observed")
+    ev.source_correlation = String("direct")
+    ev.pool.pool_id = pool
+    ev.pool.has_used = True
+    ev.pool.used_bytes = UInt64(900)
+    ev.pool.has_capacity = True
+    ev.pool.capacity_bytes = UInt64(1000)
+    ev.pool.unit = String("bytes")
+    return ev^
+
+
+def _refresh_find(rows: List[Metric], name: String) raises -> Metric:
+    for i in range(len(rows)):
+        var m = rows[i]
+        if m.name == name and not m.has_device_id and not m.has_pool_id:
+            return m
+    raise Error("metric not found: " + name)
+
+
+def _refresh_find_pool(
+    rows: List[Metric], name: String, pool: String
+) raises -> Metric:
+    for i in range(len(rows)):
+        var m = rows[i]
+        if m.name == name and m.has_pool_id and m.pool_id == pool:
+            return m
+    raise Error("pool metric not found: " + name)
+
+
+def test_refresh_snapshots_preserve_later_facts() raises:
+    # Live-style refresh interleaved with consumption: prefix
+    # snapshots, including one partial prefix, must not alter
+    # the final finish.
+    var probed = Analyzer(_refresh_session())
+    probed.consume(_sink_attempt("op1", UInt64(0), UInt64(100)))
+    probed.consume(_refresh_map("op1", "m1", UInt64(150), UInt64(1)))
+    probed.consume(_refresh_pool("p1", UInt64(2), UInt64(160)))
+    probed.consume(_refresh_pool("p1", UInt64(3), UInt64(170)))
+    _ = probed.snapshot(UInt64(300), False)
+    _ = probed.snapshot(UInt64(500), True)
+    probed.consume(_refresh_pool("p1", UInt64(4), UInt64(180)))
+    _ = probed.snapshot(UInt64(700), False)
+    var fin = probed.finish(UInt64(1000), False)
+    var fresh = Analyzer(_refresh_session())
+    fresh.consume(_sink_attempt("op1", UInt64(0), UInt64(100)))
+    fresh.consume(_refresh_map("op1", "m1", UInt64(150), UInt64(1)))
+    fresh.consume(_refresh_pool("p1", UInt64(2), UInt64(160)))
+    fresh.consume(_refresh_pool("p1", UInt64(3), UInt64(170)))
+    fresh.consume(_refresh_pool("p1", UInt64(4), UInt64(180)))
+    var want = fresh.finish(UInt64(1000), False)
+    assert_equal(len(fin.metrics), len(want.metrics))
+    for i in range(len(fin.metrics)):
+        assert_equal(fin.metrics[i].name, want.metrics[i].name)
+        assert_equal(
+            fin.metrics[i].has_value, want.metrics[i].has_value
+        )
+        if fin.metrics[i].has_value:
+            assert_equal(fin.metrics[i].value, want.metrics[i].value)
+        assert_equal(
+            fin.metrics[i].coverage, want.metrics[i].coverage
+        )
+    var live = _refresh_find(
+        fin.metrics, "live_observed_allocation_bytes"
+    )
+    assert_true(live.has_value)
+    assert_equal(live.value, UInt64(4096))
+    var streak = _refresh_find_pool(
+        fin.metrics, "pool_pressure_samples", "p1"
+    )
+    assert_equal(streak.value, UInt64(3))
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_duration_units]()
@@ -819,6 +959,7 @@ def run() raises -> Int:
     suite.test[test_sink_known_device_filter_is_quiet]()
     suite.test[test_filter_resolves_catalog_id_and_name]()
     suite.test[test_filter_resolves_observed_metric_id]()
+    suite.test[test_refresh_snapshots_preserve_later_facts]()
     suite^.run()
     return 0
 

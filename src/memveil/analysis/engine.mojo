@@ -7,10 +7,13 @@ their rows into one report. Attempts-only captures keep exactly
 their old rows and notes; lifecycle, pool, and region rows
 appear only with observed evidence, and the scope note switches
 to the extended wording exactly then. Snapshot and finish share
-every tracker reducer with no destructive finalization, and the
-merged row set never exceeds the 4096-row external budget: any
-excess is withheld deterministically (tracker order, then row
-order) with a visible limitation.
+every tracker reducer with no destructive finalization: consumed
+loss latches tracker state monotonically, while a partial call
+overlays its call-local uncertainty on the returned view only,
+so a partial snapshot cannot alter later facts. The merged row
+set never exceeds the 4096-row external budget: any excess is
+withheld deterministically (tracker order, then row order) with
+a visible limitation.
 """
 
 from memveil.analysis.attempts import AttemptAnalyzer, window_label
@@ -194,17 +197,15 @@ struct Analyzer:
         # tails, and producer claims into the quality channels;
         # trackers only see events, so loss the stream never
         # shows is propagated here before any tracker rows emit.
-        # Each note is idempotent across snapshot and finish.
-        if rep.q_detail.status != "complete_for_scope":
+        # Consumed detail loss latches tracker state
+        # monotonically: observed gaps already folded at consume
+        # time, producer claims echoed here. The call-local
+        # dropped tail never latches; it renders as a view
+        # overlay in this report only, so a partial snapshot
+        # cannot alter later facts.
+        if self._session.q_detail.status != "complete_for_scope":
             self._mappings.note_detail_loss()
             self._regions.note_detail_loss()
-        # Located detail gaps reset streaks when consumed. Only
-        # unlocated producer loss or a dropped tail invalidates
-        # the currently proved post-gap run at report time.
-        if (
-            self._session.q_detail.status != "complete_for_scope"
-            or partial
-        ):
             self._pools.note_detail_loss()
         if (
             self._mappings.sees_lifecycle()
@@ -220,21 +221,23 @@ struct Analyzer:
             self._session.window_start_ns, end_ns
         )
         if self._mappings.sees_lifecycle():
-            var mrows = self._mappings.metrics_horizon(window, end_ns)
+            var mrows = self._mappings.metrics_horizon(
+                window, end_ns, partial
+            )
             for i in range(len(mrows)):
                 rep.metrics.append(mrows[i])
             var mnotes = self._mappings.limitations()
             for i in range(len(mnotes)):
                 rep.limitations.append(mnotes[i])
         if self._pools.sees_pools():
-            var prows = self._pools.metrics(window)
+            var prows = self._pools.metrics(window, partial)
             for i in range(len(prows)):
                 rep.metrics.append(prows[i])
             var pnotes = self._pools.limitations()
             for i in range(len(pnotes)):
                 rep.limitations.append(pnotes[i])
         if self._regions.sees_regions():
-            var rrows = self._regions.metrics(window)
+            var rrows = self._regions.metrics(window, partial)
             for i in range(len(rrows)):
                 rep.metrics.append(rrows[i])
             var rnotes = self._regions.limitations()

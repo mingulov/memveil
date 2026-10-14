@@ -20,6 +20,7 @@ from memveil.analysis.engine import (
 )
 from memveil.model.event import Event
 from memveil.model.metric import Metric
+from memveil.model.report import Report
 from memveil.model.session import Session
 
 
@@ -409,6 +410,191 @@ def test_baseline_gap_downgrades_region_unions_only() raises:
     )
 
 
+def _feed_snapshot_control(mut a: Analyzer) raises:
+    """Open 4096-byte mapping, 3 pressure samples, 8192 shared bytes."""
+    a.consume(_attempt("op1", UInt64(1)))
+    a.consume(_map("op1", "m1", UInt64(1300000000), UInt64(2)))
+    a.consume(_pool("p1", UInt64(900), UInt64(1000), UInt64(3)))
+    a.consume(_pool("p1", UInt64(900), UInt64(1000), UInt64(4)))
+    a.consume(_pool("p1", UInt64(900), UInt64(1000), UInt64(5)))
+    a.consume(_transition("r1", "shared", UInt64(6)))
+
+
+def _assert_same_metrics(got: Report, want: Report) raises:
+    """Every returned row matches: name, value, and coverage."""
+    assert_equal(len(got.metrics), len(want.metrics))
+    for i in range(len(got.metrics)):
+        assert_equal(got.metrics[i].name, want.metrics[i].name)
+        assert_equal(
+            got.metrics[i].has_value, want.metrics[i].has_value
+        )
+        if got.metrics[i].has_value:
+            assert_equal(got.metrics[i].value, want.metrics[i].value)
+        assert_equal(
+            got.metrics[i].coverage, want.metrics[i].coverage
+        )
+        assert_equal(
+            got.metrics[i].measurement, want.metrics[i].measurement
+        )
+
+
+def test_partial_snapshot_preserves_later_facts() raises:
+    var probed = Analyzer(_region_session())
+    _feed_snapshot_control(probed)
+    var snap = probed.snapshot(UInt64(2300000000), True)
+    # The partial view itself stays degraded: a dropped tail may
+    # hide a release, a transition, or the latest pool sample.
+    var snap_live = _find(
+        snap.metrics, "live_observed_allocation_bytes"
+    )
+    assert_true(not snap_live.has_value)
+    assert_equal(snap_live.coverage, String("unavailable"))
+    var snap_streak = _find_pool(
+        snap.metrics, "pool_pressure_samples", "p1"
+    )
+    assert_equal(snap_streak.value, UInt64(0))
+    assert_equal(snap_streak.coverage, String("partial"))
+    var snap_shared = _find(
+        snap.metrics, "known_shared_region_bytes"
+    )
+    assert_true(not snap_shared.has_value)
+    # The later finish matches a fresh analyzer exactly.
+    var fin = probed.finish(UInt64(2300000000), False)
+    var fresh = Analyzer(_region_session())
+    _feed_snapshot_control(fresh)
+    var want = fresh.finish(UInt64(2300000000), False)
+    _assert_same_metrics(fin, want)
+    var live = _find(fin.metrics, "live_observed_allocation_bytes")
+    assert_true(live.has_value)
+    assert_equal(live.value, UInt64(4096))
+    assert_equal(live.coverage, String("complete_for_scope"))
+    assert_equal(_find(fin.metrics, "open_mappings").value, UInt64(1))
+    var shared = _find(fin.metrics, "known_shared_region_bytes")
+    assert_true(shared.has_value)
+    assert_equal(shared.value, UInt64(8192))
+    assert_equal(shared.coverage, String("complete_for_scope"))
+    var streak = _find_pool(
+        fin.metrics, "pool_pressure_samples", "p1"
+    )
+    assert_equal(streak.value, UInt64(3))
+    assert_equal(streak.coverage, String("complete_for_scope"))
+    assert_equal(fin.q_detail.status, String("complete_for_scope"))
+
+
+def test_repeated_partial_snapshots_preserve_facts() raises:
+    var probed = Analyzer(_region_session())
+    probed.consume(_attempt("op1", UInt64(1)))
+    probed.consume(_map("op1", "m1", UInt64(1300000000), UInt64(2)))
+    probed.consume(_pool("p1", UInt64(900), UInt64(1000), UInt64(3)))
+    probed.consume(_pool("p1", UInt64(900), UInt64(1000), UInt64(4)))
+    probed.consume(_transition("r1", "shared", UInt64(5)))
+    _ = probed.snapshot(UInt64(2300000000), True)
+    _ = probed.snapshot(UInt64(2300000000), False)
+    _ = probed.snapshot(UInt64(2300000000), True)
+    probed.consume(_pool("p1", UInt64(900), UInt64(1000), UInt64(6)))
+    _ = probed.snapshot(UInt64(2300000000), True)
+    var fin = probed.finish(UInt64(2300000000), False)
+    var fresh = Analyzer(_region_session())
+    fresh.consume(_attempt("op1", UInt64(1)))
+    fresh.consume(_map("op1", "m1", UInt64(1300000000), UInt64(2)))
+    fresh.consume(_pool("p1", UInt64(900), UInt64(1000), UInt64(3)))
+    fresh.consume(_pool("p1", UInt64(900), UInt64(1000), UInt64(4)))
+    fresh.consume(_transition("r1", "shared", UInt64(5)))
+    fresh.consume(_pool("p1", UInt64(900), UInt64(1000), UInt64(6)))
+    var want = fresh.finish(UInt64(2300000000), False)
+    _assert_same_metrics(fin, want)
+    assert_equal(
+        _find_pool(
+            fin.metrics, "pool_pressure_samples", "p1"
+        ).value,
+        UInt64(3),
+    )
+    assert_equal(
+        _find(
+            fin.metrics, "live_observed_allocation_bytes"
+        ).value,
+        UInt64(4096),
+    )
+    assert_equal(
+        _find(fin.metrics, "known_shared_region_bytes").value,
+        UInt64(8192),
+    )
+
+
+def test_consumed_detail_gap_stays_degraded() raises:
+    var probed = Analyzer(_region_session())
+    _feed_snapshot_control(probed)
+    probed.consume(_gap("detail", UInt64(7)))
+    probed.consume(_pool("p1", UInt64(900), UInt64(1000), UInt64(8)))
+    _ = probed.snapshot(UInt64(2300000000), True)
+    _ = probed.snapshot(UInt64(2300000000), False)
+    var fin = probed.finish(UInt64(2300000000), False)
+    var fresh = Analyzer(_region_session())
+    _feed_snapshot_control(fresh)
+    fresh.consume(_gap("detail", UInt64(7)))
+    fresh.consume(_pool("p1", UInt64(900), UInt64(1000), UInt64(8)))
+    var want = fresh.finish(UInt64(2300000000), False)
+    _assert_same_metrics(fin, want)
+    # Real loss stays degraded: live and current region state
+    # are withheld, counters keep partial coverage, and only
+    # the post-gap pool sample rebuilds the streak.
+    var live = _find(fin.metrics, "live_observed_allocation_bytes")
+    assert_true(not live.has_value)
+    assert_equal(
+        _find(fin.metrics, "successful_allocations").coverage,
+        String("partial"),
+    )
+    assert_equal(
+        _find_pool(
+            fin.metrics, "pool_used_bytes", "p1"
+        ).coverage,
+        String("partial"),
+    )
+    assert_equal(
+        _find_pool(
+            fin.metrics, "pool_pressure_samples", "p1"
+        ).value,
+        UInt64(1),
+    )
+    assert_equal(
+        _find(fin.metrics, "conversion_requests").coverage,
+        String("partial"),
+    )
+    assert_equal(
+        _find(fin.metrics, "known_shared_region_bytes").coverage,
+        String("unavailable"),
+    )
+
+
+def test_gap_between_snapshots_stays_degraded() raises:
+    var probed = Analyzer(_region_session())
+    _feed_snapshot_control(probed)
+    _ = probed.snapshot(UInt64(2300000000), True)
+    probed.consume(_gap("detail", UInt64(7)))
+    _ = probed.snapshot(UInt64(2300000000), False)
+    var fin = probed.finish(UInt64(2300000000), False)
+    var fresh = Analyzer(_region_session())
+    _feed_snapshot_control(fresh)
+    fresh.consume(_gap("detail", UInt64(7)))
+    var want = fresh.finish(UInt64(2300000000), False)
+    _assert_same_metrics(fin, want)
+    assert_true(
+        not _find(
+            fin.metrics, "live_observed_allocation_bytes"
+        ).has_value
+    )
+    assert_equal(
+        _find_pool(
+            fin.metrics, "pool_pressure_samples", "p1"
+        ).value,
+        UInt64(0),
+    )
+    assert_equal(
+        _find(fin.metrics, "known_shared_region_bytes").coverage,
+        String("unavailable"),
+    )
+
+
 def test_post_gap_pool_run_survives_snapshots() raises:
     var a = Analyzer(_session())
     a.consume(_pool("p1", UInt64(900), UInt64(1000), UInt64(1)))
@@ -532,6 +718,10 @@ def run() raises -> Int:
     suite.test[test_partial_tail_downgrades_stateful_metrics]()
     suite.test[test_detail_gap_downgrades_pool_and_region]()
     suite.test[test_baseline_gap_downgrades_region_unions_only]()
+    suite.test[test_partial_snapshot_preserves_later_facts]()
+    suite.test[test_repeated_partial_snapshots_preserve_facts]()
+    suite.test[test_consumed_detail_gap_stays_degraded]()
+    suite.test[test_gap_between_snapshots_stays_degraded]()
     suite.test[test_post_gap_pool_run_survives_snapshots]()
     suite.test[test_sustained_churn_stable]()
     suite.test[test_limitations_capped_at_schema_budget]()
