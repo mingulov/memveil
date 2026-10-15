@@ -1264,7 +1264,8 @@ suite_preview_package() {
 }
 
 suite_provenance() {
-    python3 "$ROOT/tests/provenance/test_provenance.py"
+    python3 "$ROOT/tests/provenance/test_provenance.py" || return 1
+    python3 "$ROOT/tests/provenance/test_provenance.py" --selftest
 }
 
 suite_source_export() {

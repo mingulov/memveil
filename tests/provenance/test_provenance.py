@@ -9,8 +9,11 @@ origins and agrees with the pixi manifest; product, schema, and
 bridge versions stay distinct; and every static input
 tools/package needs from this tree exists. Pinned-bridge bytes
 (LMB_PACKAGE hash, staged license copies) are verified at pack
-time, not here. Exits nonzero on the first failure.
-Standard library only.
+time, not here. Each schema family ships its current contract
+plus any retained (superseded but still shipped) versions
+pinned in the lock. Exits nonzero on the first failure.
+Standard library only. `test_provenance.py --selftest`
+exercises the schema-file rule.
 
 The file inventory comes from Git only when this source root
 owns its Git top level; a standalone source archive (outside
@@ -25,6 +28,7 @@ or GIT_CONFIG_* values can neither spoof ownership
 nor shrink the enumerated file set.
 """
 
+import glob
 import json
 import os
 import re
@@ -154,11 +158,143 @@ def spdx_of(path):
     return match.group(1) if match else None
 
 
+# Schema families: filename prefix, current-version lock key,
+# retained-versions lock key. The session family uses the bare
+# schema_version key. A family without a retained key ships only
+# its current contract.
+SCHEMA_FAMILIES = (
+    ("event-v", "event_schema_version", "event_retained_versions"),
+    ("profile-v", "profile_schema_version",
+     "profile_retained_versions"),
+    ("doctor-v", "doctor_schema_version",
+     "doctor_retained_versions"),
+    ("report-v", "report_schema_version",
+     "report_retained_versions"),
+    ("receipt-v", "receipt_schema_version",
+     "receipt_retained_versions"),
+    ("session-v", "schema_version", "schema_retained_versions"),
+)
+
+
+def schema_file_status(basenames, contracts):
+    """(bad, missing, inconsistent) for schema files against the lock.
+
+    bad: files matching no pinned (current or retained) version
+    for their own family, including unknown families.
+    missing: pinned current or retained versions with no file.
+    inconsistent: retained pins that are malformed or repeat an
+    already pinned version.
+    """
+    current = contracts["schema_version"]
+    present = set(basenames)
+    bad = []
+    missing = []
+    inconsistent = []
+    pinned_by_prefix = {}
+    for prefix, cur_key, ret_key in SCHEMA_FAMILIES:
+        pinned = {"%s" % contracts.get(cur_key, current)}
+        raw = contracts.get(ret_key, [])
+        if not isinstance(raw, list):
+            inconsistent.append("%s: not a list" % ret_key)
+            raw = []
+        for entry in raw:
+            if not isinstance(entry, str) or not entry:
+                inconsistent.append(
+                    "%s: %r not a version" % (ret_key, entry))
+            elif entry in pinned:
+                inconsistent.append(
+                    "%s: %s repeats a pin" % (ret_key, entry))
+            else:
+                pinned.add(entry)
+        pinned_by_prefix[prefix] = pinned
+        for version in sorted(pinned):
+            name = "%s%s.schema.json" % (prefix, version)
+            if name not in present:
+                missing.append(name)
+    for base in basenames:
+        match = None
+        for prefix in pinned_by_prefix:
+            if base.startswith(prefix):
+                match = prefix
+                break
+        if match is None:
+            bad.append(base)
+        elif (not base.endswith(".schema.json")
+              or base[len(match):-len(".schema.json")]
+              not in pinned_by_prefix[match]):
+            bad.append(base)
+    return sorted(bad), sorted(missing), sorted(inconsistent)
+
+
+def run_selftest():
+    """Exercise the schema-file rule against the real lock and tree."""
+    with open(os.path.join(ROOT, "toolchain.lock.json")) as handle:
+        contracts = json.load(handle)["product_contracts"]
+    real = sorted(os.path.basename(path) for path in glob.glob(
+        os.path.join(ROOT, "schemas", "*.json")))
+    results = []
+
+    def check(label, cond, detail=""):
+        results.append((bool(cond), "%s%s" % (
+            label, (": %s" % detail) if detail and not cond else "")))
+
+    bad, missing, inconsistent = schema_file_status(real, contracts)
+    check("known-set-passes",
+          not bad and not missing and not inconsistent,
+          "; ".join(bad + missing + inconsistent))
+    bad, _, _ = schema_file_status(
+        real + ["session-v9.9.9.schema.json"], contracts)
+    check("stray-unpinned-fails", bad == ["session-v9.9.9.schema.json"],
+          "; ".join(bad))
+    bad, _, _ = schema_file_status(
+        real + ["event-v0.1.0.schema.json"], contracts)
+    check("unpinned-version-other-family-fails",
+          bad == ["event-v0.1.0.schema.json"], "; ".join(bad))
+    bad, _, _ = schema_file_status(
+        real + ["audit-v0.1.1.schema.json"], contracts)
+    check("unknown-family-fails", bad == ["audit-v0.1.1.schema.json"],
+          "; ".join(bad))
+    dropped = "session-v%s.schema.json" % contracts["schema_version"]
+    _, missing, _ = schema_file_status(
+        [base for base in real if base != dropped], contracts)
+    check("missing-current-fails", missing == [dropped],
+          "; ".join(missing))
+    retained = contracts["schema_retained_versions"]
+    check("lock-has-retained-fixture", bool(retained), repr(retained))
+    if retained:
+        dropped = "session-v%s.schema.json" % retained[0]
+        _, missing, _ = schema_file_status(
+            [base for base in real if base != dropped], contracts)
+        check("missing-retained-fails", missing == [dropped],
+              "; ".join(missing))
+    repeat = dict(contracts)
+    repeat["schema_retained_versions"] = [contracts["schema_version"]]
+    _, _, inconsistent = schema_file_status(real, repeat)
+    check("retained-repeats-current-fails", len(inconsistent) == 1,
+          "; ".join(inconsistent))
+    malformed = dict(contracts)
+    malformed["report_retained_versions"] = "0.1.0"
+    _, _, inconsistent = schema_file_status(real, malformed)
+    check("retained-malformed-fails", len(inconsistent) == 1,
+          "; ".join(inconsistent))
+    return results
+
+
 def main(argv):
-    if argv and argv != ["--list-files"]:
-        print("usage: test_provenance.py [--list-files]",
+    if argv and argv not in (["--list-files"], ["--selftest"]):
+        print("usage: test_provenance.py [--list-files|--selftest]",
               file=sys.stderr)
         return 2
+    if argv == ["--selftest"]:
+        results = run_selftest()
+        failed = 0
+        for passed, message in results:
+            print(("ok " if passed else "FAIL ") + message)
+            if not passed:
+                failed += 1
+        print("provenance-selftest: %d passed, %d failed, %d total"
+              % (len(results) - failed, failed, len(results)))
+        return 1 if failed else 0
     files, mode = enumerated_files()
     if argv == ["--list-files"]:
         for rel in sorted(files):
@@ -228,38 +364,15 @@ def main(argv):
           lock["toolchain"]["mojo"]["version"] == mmojo.group(1))
     check("pixi-license-declared", 'license = "GPL-3.0-or-later"' in pixi)
 
-    schema_version = lock["product_contracts"]["schema_version"]
-    event_version = lock["product_contracts"].get(
-        "event_schema_version", schema_version)
-    profile_version = lock["product_contracts"].get(
-        "profile_schema_version", schema_version)
-    doctor_version = lock["product_contracts"].get(
-        "doctor_schema_version", schema_version)
-    report_version = lock["product_contracts"].get(
-        "report_schema_version", schema_version)
-    receipt_version = lock["product_contracts"].get(
-        "receipt_schema_version", schema_version)
-    import glob
+    contracts = lock["product_contracts"]
     schemas = sorted(glob.glob(os.path.join(ROOT, "schemas", "*.json")))
     check("schemas-present", len(schemas) >= 4, str(len(schemas)))
-    bad = []
-    for p in schemas:
-        base = os.path.basename(p)
-        if base.startswith("event-v"):
-            want = event_version
-        elif base.startswith("profile-v"):
-            want = profile_version
-        elif base.startswith("doctor-v"):
-            want = doctor_version
-        elif base.startswith("report-v"):
-            want = report_version
-        elif base.startswith("receipt-v"):
-            want = receipt_version
-        else:
-            want = schema_version
-        if "-v%s.schema.json" % want not in p:
-            bad.append(base)
+    bad, missing, inconsistent = schema_file_status(
+        [os.path.basename(path) for path in schemas], contracts)
     check("schemas-versioned", not bad, "; ".join(bad[:5]))
+    check("schemas-pinned-present", not missing, "; ".join(missing[:5]))
+    check("schemas-retained-consistent", not inconsistent,
+          "; ".join(inconsistent[:5]))
     check("versions-distinct-note",
           any("independent" in d
               for d in lock.get("decisions", [])))
