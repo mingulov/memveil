@@ -17,6 +17,25 @@ counts. Earlier documentation reported 5.5 seconds and 123.5 MiB on a
 16-core x86-64 runner with 59 GiB RAM; those are historical development
 observations, not current-artifact results or a live-path overhead limit.
 
+## Region scaling protocol
+
+`./tools/test perf-region` replays mixed attempt/mapping/
+fragmented-region captures with known unions and lifetimes at
+doubling big-region sizes up to the admitted 65,536-segment
+ceiling. Each step pairs a large fragmented region (one shared
+span with doubling private holes) with a small region churned
+after the fragments are fully built, so every churned update
+meets the full fragmented state, plus background mappings held
+at a controlled peak of open lifetimes. An independent
+interval oracle, itself checked against the pinned region
+fixtures, recomputes every union and count; the lane asserts
+exact equality first, then the envelope: at most 60 seconds
+per scale replay and at most 256 MiB peak RSS, with throughput
+reported next to the replay target above. The workload and
+envelope are declared at the top of
+`tests/perf/region_replay.py`; historical development
+measurements do not qualify a rebuilt package.
+
 ## Live workload protocol
 
 The laboratory protocol uses 10 seconds warmup, a 60-second measured window

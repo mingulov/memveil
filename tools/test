@@ -17,7 +17,8 @@
 # vm-saturation, reader-adversarial, fuzz-smoke, fuzz-campaign,
 # record-failures, output-paths, vm-cleanup, privacy,
 # render-escaping, offline-environment, perf-replay,
-# perf-workload, soak, preview-package, provenance, source-export,
+# perf-region, perf-workload, soak, preview-package, provenance,
+# source-export,
 # release-runtime, docs, examples, extracted-robustness, deb,
 # rpm-journey.
 #
@@ -1181,6 +1182,15 @@ suite_perf_replay() {
         return 1
     fi
     python3 "$ROOT/tests/perf/replay.py"
+}
+
+suite_perf_region() {
+    if [ ! -x "$ROOT/build/memveil" ]; then
+        echo "perf-region: missing build/memveil" \
+            "(run tools/build first)" >&2
+        return 1
+    fi
+    python3 "$ROOT/tests/perf/region_replay.py"
 }
 
 suite_perf_workload() {
@@ -3708,6 +3718,9 @@ case "$1" in
         ;;
     perf-replay)
         suite_perf_replay
+        ;;
+    perf-region)
+        suite_perf_region
         ;;
     perf-workload)
         suite_perf_workload
