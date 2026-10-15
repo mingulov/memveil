@@ -21,7 +21,7 @@ from std.testing import TestSuite, assert_equal, assert_true
 from scripted import _stop_mkdtemp
 
 from memveil.capture.writer import EventWriter
-from memveil.cli.record import (
+from memveil.platform.artifact_files import (
     _own_child_ok,
     _own_close_quiet,
     _own_fd_uid,
@@ -30,7 +30,7 @@ from memveil.cli.record import (
     _own_open_dir,
     _own_repair_child,
     _parse_sudo_id,
-    _restore_sudo_ownership,
+    restore_capture_ownership,
 )
 from memveil.platform.reader import (
     _geteuid_live,
@@ -182,7 +182,9 @@ def test_restore_rejects_symlink_swap() raises:
     _t_write(victim, String("VICTIM\n"))
     _t_symlink(victim, cap + String("/session.json"))
     var want = _t_want_for(cap, String("events.ndjson"), True)
-    _restore_sudo_ownership(cap, want^)
+    var repair = restore_capture_ownership(cap, want^)
+    assert_true(repair.attempted)
+    assert_true(not repair.repaired)
     assert_equal(_t_lstat_uid(victim), 0)
     assert_equal(_t_lstat_uid(cap + String("/events.ndjson")), uid)
     assert_equal(_t_lstat_uid(cap), uid)
@@ -346,12 +348,16 @@ def test_restore_rejects_dir_replacement() raises:
     # as in a user-writable parent).
     _t_rename(cap1, base + String("/cap1.orig"))
     _t_rename(sub, cap1)
-    _restore_sudo_ownership(cap1, want1)
+    var sub_repair = restore_capture_ownership(cap1, want1)
+    assert_true(sub_repair.attempted)
+    assert_true(not sub_repair.repaired)
     assert_equal(_t_lstat_uid(cap1), 0)
     assert_equal(_t_lstat_uid(cap1 + String("/events.ndjson")), 0)
     assert_equal(_t_lstat_uid(cap1 + String("/session.json")), 0)
     # Positive control: the original dir repairs.
-    _restore_sudo_ownership(cap2, want2)
+    var orig_repair = restore_capture_ownership(cap2, want2)
+    assert_true(orig_repair.attempted)
+    assert_true(orig_repair.repaired)
     assert_equal(_t_lstat_uid(cap2), uid)
     assert_equal(_t_lstat_uid(cap2 + String("/events.ndjson")), uid)
     assert_equal(_t_lstat_uid(cap2 + String("/session.json")), uid)
@@ -375,13 +381,17 @@ def test_restore_refuses_foreign_entries() raises:
     var want1 = _t_finalize_cap(cap1)
     var want2 = _t_finalize_cap(cap2)
     _t_write(cap1 + String("/stowaway.txt"), String("FOREIGN\n"))
-    _restore_sudo_ownership(cap1, want1)
+    var away_repair = restore_capture_ownership(cap1, want1)
+    assert_true(away_repair.attempted)
+    assert_true(not away_repair.repaired)
     assert_equal(_t_lstat_uid(cap1), 0)
     assert_equal(_t_lstat_uid(cap1 + String("/events.ndjson")), 0)
     assert_equal(_t_lstat_uid(cap1 + String("/session.json")), 0)
     assert_equal(_t_lstat_uid(cap1 + String("/stowaway.txt")), 0)
     # Positive control: the clean dir repairs.
-    _restore_sudo_ownership(cap2, want2)
+    var clean_repair = restore_capture_ownership(cap2, want2)
+    assert_true(clean_repair.attempted)
+    assert_true(clean_repair.repaired)
     assert_equal(_t_lstat_uid(cap2), uid)
     assert_equal(_t_lstat_uid(cap2 + String("/events.ndjson")), uid)
     assert_equal(_t_lstat_uid(cap2 + String("/session.json")), uid)

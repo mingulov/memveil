@@ -5,12 +5,8 @@
 from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
 
-from memveil.cli.record import (
-    parse_record_args,
-    record_usage,
-    resolve_bridge,
-    resolve_object,
-)
+from memveil.capture.run import resolve_bridge, resolve_object
+from memveil.cli.record import parse_record_args, record_usage
 from memveil.platform.reader import read_host_file
 
 comptime _EXE = "tests/fixtures/runtime/bin/memveil"

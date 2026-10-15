@@ -17,11 +17,8 @@ from std.testing import TestSuite, assert_equal, assert_true
 
 from scripted import ScriptWriter, _stop_mkdtemp
 
-from memveil.cli.record import (
-    RecordOptions,
-    open_bridge_snapshot,
-    run_collector_with,
-)
+from memveil.capture.run import RecordOptions, run_collector_with
+from memveil.platform.artifact_files import open_bridge_snapshot
 from memveil.platform.hash import sha256_hex
 from memveil.platform.reader import read_host_file
 

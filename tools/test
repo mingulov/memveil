@@ -3298,6 +3298,8 @@ suite_record() {
     run_unit_file tests/unit/test_record_args.mojo || return 1
     run_unit_file tests/unit/test_bridge_snapshot.mojo || return 1
     run_unit_file tests/unit/test_record_ownership.mojo || return 1
+    run_unit_file tests/unit/test_run_service.mojo || return 1
+    run_unit_file tests/unit/test_artifact_files.mojo || return 1
     run_unit_file tests/unit/test_qualify.mojo || return 1
     echo "record: unit suites passed"
     BIN="$ROOT/build/memveil"

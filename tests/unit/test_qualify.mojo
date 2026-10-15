@@ -26,8 +26,8 @@ from memveil.cli.qualify import (
     qualify_usage,
     smoke_shutdown_ok,
 )
-from memveil.cli.record import (
-    decide_record,
+from memveil.capture.run import decide_record
+from memveil.platform.artifact_files import (
     open_bridge_snapshot,
     open_object_snapshot,
 )

@@ -19,18 +19,16 @@ from std.ffi import external_call
 
 from memveil.capture.collector import EXIT_REFUSAL
 from memveil.capture.live import LiveWriter
-from memveil.cli.doctor import resolve_profiles_dir
-from memveil.cli.record import (
-    BridgeSnapshot,
+from memveil.capture.run import (
     MAX_PROFILE_DOC_BYTES,
     RecordOptions,
-    open_bridge_snapshot,
-    open_object_snapshot,
     parse_requested_caps,
+    repair_warning_for,
     resolve_bridge,
     resolve_object,
     run_collector_with,
 )
+from memveil.cli.doctor import resolve_profiles_dir
 from memveil.cli.report import (
     EXIT_INTERNAL,
     EXIT_INVALID,
@@ -41,6 +39,12 @@ from memveil.cli.report import (
 )
 from memveil.model.report import ENGINE_VERSION
 from memveil.model.session import parse_session
+from memveil.platform.artifact_files import (
+    BridgeSnapshot,
+    join_root,
+    open_bridge_snapshot,
+    open_object_snapshot,
+)
 from memveil.platform.clock import wall_ns
 from memveil.platform.evidence import KernelInfo, detect_environment
 from memveil.platform.hash import sha256_hex
@@ -272,12 +276,6 @@ def _refuse_plan(reason: String) -> QualPlan:
     return out^
 
 
-def _join(root: String, path: String) -> String:
-    if root == String("/") or root == String(""):
-        return path
-    return root + path
-
-
 def _covers(kernel: KernelInfo, doc: Profile) -> Bool:
     var one = List[Profile]()
     one.append(doc.copy())
@@ -417,7 +415,7 @@ def plan_qualification(
     var btf: List[UInt8]
     try:
         btf = read_host_file(
-            _join(root, String(_BTF_PATH)),
+            join_root(root, String(_BTF_PATH)),
             String("btf"),
             MAX_NARROW_BTF_BYTES,
         )
@@ -793,6 +791,16 @@ def run_qualify_with(
     _ = obj_snap.fd
     _ = lc_snap.fd
     _ = cp_snap.fd
+    if result.outcome == String("finalized"):
+        # A published capture lands root-owned under sudo;
+        # hand it to the invoking user. Warn-only: the
+        # capture stands whatever ownership repair does.
+        var repair_line = repair_warning_for(output, writer)
+        if repair_line != String(""):
+            try:
+                write_stderr(repair_line)
+            except:
+                pass
     if (
         result.outcome != String("finalized")
         or result.end_reason != String("duration")

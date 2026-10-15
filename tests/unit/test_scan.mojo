@@ -7,14 +7,14 @@ from std.testing import TestSuite, assert_equal, assert_true
 
 from scripted import ScriptWriter
 
-from memveil.cli.record import (
+from memveil.capture.run import (
     RecordOptions,
     ScanDecision,
     decide_record,
     render_provenance,
     run_collector_with,
-    run_record_with,
 )
+from memveil.cli.record import run_record_with
 from memveil.platform.evidence import KernelInfo
 from memveil.platform.narrow import LiveValue
 from memveil.platform.profiles import (
@@ -576,14 +576,14 @@ def test_scan_valid_lc_record() raises:
     assert_true(d.ok)
     assert_equal(d.kind, String("validated"))
     assert_equal(d.selected_caps, String(_CAPS3))
-    assert_true(d.has_lifecycle)
-    assert_true(d.has_copy)
-    assert_equal(d.lc_object_sha, String(_LC_SHA))
-    assert_equal(d.cp_object_sha, String(_CP_SHA))
-    assert_equal(d.lc_ring_bytes, 8388608)
-    assert_equal(d.cp_ring_bytes, 8388608)
-    assert_true(len(d.lc_elf) > 0)
-    assert_true(len(d.cp_elf) > 0)
+    assert_true(d.lc.present)
+    assert_true(d.cp.present)
+    assert_equal(d.lc.object_sha, String(_LC_SHA))
+    assert_equal(d.cp.object_sha, String(_CP_SHA))
+    assert_equal(d.lc.ring_bytes, 8388608)
+    assert_equal(d.cp.ring_bytes, 8388608)
+    assert_true(len(d.lc.elf) > 0)
+    assert_true(len(d.cp.elf) > 0)
 
 
 def test_scan_valid_lc_no_tracing() raises:
@@ -891,8 +891,8 @@ def test_scan_receipt_extras() raises:
     assert_true(d.ok)
     assert_equal(d.kind, String("local-auto"))
     assert_equal(d.profile.profile_id, String("scan-ref-lc"))
-    assert_true(d.has_lifecycle)
-    assert_true(d.has_copy)
+    assert_true(d.lc.present)
+    assert_true(d.cp.present)
     assert_equal(d.selected_caps, String(_CAPS3))
 
 

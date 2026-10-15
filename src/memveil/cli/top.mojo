@@ -48,13 +48,13 @@ from memveil.capture.reader import (
 from memveil.capture.tee import RefreshSink, TeeWriter
 from memveil.cli.doctor import resolve_profiles_dir
 from memveil.cli.durations import parse_duration_ns
-from memveil.cli.record import (
-    EXIT_ERROR,
-    EXIT_REFUSAL,
+from memveil.capture.collector import EXIT_ERROR, EXIT_REFUSAL
+from memveil.capture.run import (
     RecordOptions,
-    parse_record_args,
+    repair_warning_for,
     run_collector_with,
 )
+from memveil.cli.record import parse_record_args
 from memveil.cli.report import (
     EXIT_INTERNAL,
     EXIT_INVALID,
@@ -600,6 +600,16 @@ def run_top_live(opts: TopOptions) raises -> Int:
     var result = run_collector_with(
         String(""), profiles_dir, opts.live, writer
     )
+    if result.outcome == String("finalized"):
+        # A published capture lands root-owned under sudo;
+        # hand it to the invoking user. Warn-only: the
+        # capture stands whatever ownership repair does.
+        var repair_line = repair_warning_for(opts.live.output, writer)
+        if repair_line != String(""):
+            try:
+                write_stderr(repair_line)
+            except:
+                pass
     if result.exit_code == EXIT_ERROR or result.exit_code == EXIT_REFUSAL:
         try:
             write_stderr(
