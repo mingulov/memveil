@@ -60,8 +60,10 @@ selection refuses it with the exact cause:
     memveil qualify: profile linux-x86_64-7.0-reference bindings unparseable: narrow note: want 8 or 12 fields
 
 Preparing the bound document is a one-per-kernel task
-done from a source checkout; everything below runs from
-the bundle and selects that document explicitly.
+done from a source checkout; follow the
+[bound-reference recipe](profiles.md)
+for the exact authoring steps, then run everything below
+from the bundle, selecting that document explicitly.
 Register it once in the active profiles directory's
 `manifest.txt` (one file name per line, no blank lines
 or duplicates), including under a `--profiles-dir`

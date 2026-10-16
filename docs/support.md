@@ -37,7 +37,9 @@ pressure finding is not evidence of absent pressure.
   from `memveil qualify` admits a bound reference profile as
   `local-auto`: the document needs covering identity,
   grammar bindings matching the live host, and recorded
-  format text; the shipped reference is an unbound
+  format text (see the
+  [bound-reference recipe](profiles.md)); the shipped
+  reference is an unbound
   inspection record and planning refuses it. A receipt
   binds one kernel, one profile document, and the exact
   artifacts and workload that produced it, and never

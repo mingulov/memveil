@@ -46,7 +46,8 @@ A rebuilt package or matching kernel name alone earns no qualification.
 `docs/privacy.md` lists exactly what a capture contains.
 `docs/permissions.md` details privilege separation and the
 record refusal gates; `docs/troubleshooting.md` is the
-symptom-to-fix index.
+symptom-to-fix index; `docs/profiles.md` walks
+bound-reference authoring from `doctor` to `qualify`.
 `examples/real-capture` is a reviewed 30-event capture with
 expected outputs.
 
