@@ -19,6 +19,7 @@ from memveil.analysis.engine import Analyzer
 from memveil.cli.durations import parse_duration_ns
 from memveil.cli.top import (
     BoundaryCursor,
+    FilterWatch,
     StdoutSink,
     TopOptions,
     WaitSlices,
@@ -27,6 +28,7 @@ from memveil.cli.top import (
     _live_template,
     _snapshot_block,
     _wait_interval,
+    filter_header_suffix,
     parse_top_args,
     top_usage,
 )
@@ -36,7 +38,7 @@ def _contains(hay: String, needle: String) -> Bool:
     """True when needle occurs in hay at least once."""
     return len(hay.split(String(needle))) > 1
 from memveil.model.event import Event
-from memveil.model.metric import Metric
+from memveil.model.metric import Finding, Metric
 from memveil.model.report import Report
 from memveil.model.session import DeviceEntry, Session
 from memveil.model.validate import format_u64
@@ -434,14 +436,17 @@ def _block_want(seq: Int, horizon: UInt64, filt: String) raises -> String:
     var oracle = _sink_report(horizon)
     _diagnose(oracle, False, UInt64(0))
     var text = render(oracle, String("text"), filt)
-    var want = (
+    var head = (
         String("--- refresh ")
         + String(seq)
         + String(" @ ")
         + format_u64(horizon)
-        + String(" ns ---\n")
-        + text
+        + String(" ns ---")
     )
+    if filt != "":
+        head += String(" [device: ") + filt + String("]")
+    head += String("\n")
+    var want = head + text
     var raw = text.as_bytes()
     if len(raw) == 0 or raw[len(raw) - 1] != UInt8(0x0A):
         want += String("\n")
@@ -524,8 +529,9 @@ def test_sink_filter_matches_replay_render() raises:
     e1.bounce.device_id = String("d2")
     a.consume(e0)
     a.consume(e1)
+    var watch = FilterWatch(opts)
     var saved2 = _redirect_stdout(replay_out)
-    var rc = _snapshot_block(a, opts, UInt64(200), 1)
+    var rc = _snapshot_block(a, opts, UInt64(200), 1, watch)
     _restore_stdout(saved2)
     assert_equal(rc, 0)
     var live_raw = read_host_file(live_out, String("live"), 1048576)
@@ -929,6 +935,425 @@ def test_refresh_snapshots_preserve_later_facts() raises:
     assert_equal(streak.value, UInt64(3))
 
 
+def test_filter_suffix_clean() raises:
+    assert_equal(filter_header_suffix(String("")), String(""))
+    assert_equal(
+        filter_header_suffix(String("d1")), String(" [device: d1]")
+    )
+
+
+def _hostile_filter() raises -> String:
+    """Device filter with ESC, newline, tab, CR, BEL, DEL bytes."""
+    var fb = List[UInt8]()
+    fb.append(UInt8(0x61))
+    fb.append(UInt8(0x1B))
+    fb.append(UInt8(0x5B))
+    fb.append(UInt8(0x32))
+    fb.append(UInt8(0x4A))
+    fb.append(UInt8(0x0A))
+    fb.append(UInt8(0x62))
+    fb.append(UInt8(0x09))
+    fb.append(UInt8(0x63))
+    fb.append(UInt8(0x0D))
+    fb.append(UInt8(0x64))
+    fb.append(UInt8(0x07))
+    fb.append(UInt8(0x65))
+    fb.append(UInt8(0x7F))
+    fb.append(UInt8(0x66))
+    return String(from_utf8=Span(fb))
+
+
+def _hostile_escaped() raises -> String:
+    """The hostile filter after single-line diagnostic escaping."""
+    var eb = List[UInt8]()
+    eb.append(UInt8(0x61))
+    eb.append(UInt8(0xEF))
+    eb.append(UInt8(0xBF))
+    eb.append(UInt8(0xBD))
+    eb.append(UInt8(0x5B))
+    eb.append(UInt8(0x32))
+    eb.append(UInt8(0x4A))
+    eb.append(UInt8(0x5C))
+    eb.append(UInt8(0x6E))
+    eb.append(UInt8(0x62))
+    eb.append(UInt8(0x5C))
+    eb.append(UInt8(0x74))
+    eb.append(UInt8(0x63))
+    eb.append(UInt8(0x5C))
+    eb.append(UInt8(0x72))
+    eb.append(UInt8(0x64))
+    eb.append(UInt8(0xEF))
+    eb.append(UInt8(0xBF))
+    eb.append(UInt8(0xBD))
+    eb.append(UInt8(0x65))
+    eb.append(UInt8(0xEF))
+    eb.append(UInt8(0xBF))
+    eb.append(UInt8(0xBD))
+    eb.append(UInt8(0x66))
+    return String(from_utf8=Span(eb))
+
+
+def _has_byte(text: String, want: UInt8) -> Bool:
+    var raw = text.as_bytes()
+    for i in range(len(raw)):
+        if raw[i] == want:
+            return True
+    return False
+
+
+def test_filter_suffix_escapes_controls() raises:
+    var want = (
+        String(" [device: ") + _hostile_escaped() + String("]")
+    )
+    assert_equal(filter_header_suffix(_hostile_filter()), want)
+
+
+def test_sink_header_displays_filter() raises:
+    var scratch = _mkdtemp()
+    var out = scratch + String("/out.txt")
+    var opts = TopOptions()
+    opts.has_device = True
+    opts.device = String("d1")
+    var sink = StdoutSink(opts)
+    var rep = _sink_report(UInt64(200))
+    var saved = _redirect_stdout(out)
+    var ok = sink.emit(rep^, UInt64(200))
+    _restore_stdout(saved)
+    assert_true(ok)
+    var text = _sink_text(read_host_file(out, String("out"), 1048576))
+    var lines = text.split(String("\n"))
+    assert_equal(
+        String(lines[0]),
+        String("--- refresh 1 @ 200 ns --- [device: d1]"),
+    )
+
+
+def test_sink_header_escapes_hostile_filter() raises:
+    var scratch = _mkdtemp()
+    var out = scratch + String("/out.txt")
+    var err = scratch + String("/err.txt")
+    var opts = TopOptions()
+    opts.has_device = True
+    opts.device = _hostile_filter()
+    var sink = StdoutSink(opts)
+    var rep = _sink_report(UInt64(200))
+    var saved_out = _redirect_stdout(out)
+    var saved_err = _redirect_stderr(err)
+    var ok = sink.emit(rep^, UInt64(200))
+    _restore_stdout(saved_out)
+    _restore_stderr(saved_err)
+    assert_true(ok)
+    var text = _sink_text(read_host_file(out, String("out"), 1048576))
+    var want_head = (
+        String("--- refresh 1 @ 200 ns --- [device: ")
+        + _hostile_escaped()
+        + String("]")
+    )
+    var lines = text.split(String("\n"))
+    assert_equal(String(lines[0]), want_head)
+    assert_true(not _has_byte(text, UInt8(0x1B)))
+    assert_true(not _has_byte(text, UInt8(0x7F)))
+    var diag = _sink_text(read_host_file(err, String("err"), 1048576))
+    var want_diag = (
+        String("memveil top: --device '")
+        + _hostile_escaped()
+        + String("' matches no known device\n")
+    )
+    assert_equal(diag, want_diag)
+
+
+def _snapshot_analyzer() raises -> Analyzer:
+    """Analyzer with two attempts folded on device d1."""
+    var s = _live_template()
+    s.window_start_ns = UInt64(100)
+    s.window_end_ns = ~UInt64(0)
+    var a = Analyzer(s)
+    var e0 = _sink_attempt("op1", UInt64(0), UInt64(100))
+    var e1 = _sink_attempt("op2", UInt64(1), UInt64(200))
+    a.consume(e0)
+    a.consume(e1)
+    return a^
+
+
+def test_replay_header_displays_filter() raises:
+    var scratch = _mkdtemp()
+    var out = scratch + String("/out.txt")
+    var opts = TopOptions()
+    opts.has_device = True
+    opts.device = String("d1")
+    var a = _snapshot_analyzer()
+    var watch = FilterWatch(opts)
+    var saved = _redirect_stdout(out)
+    var rc = _snapshot_block(a, opts, UInt64(200), 1, watch)
+    _restore_stdout(saved)
+    assert_equal(rc, 0)
+    var text = _sink_text(read_host_file(out, String("out"), 1048576))
+    var lines = text.split(String("\n"))
+    assert_equal(
+        String(lines[0]),
+        String("--- refresh 1 @ 200 ns --- [device: d1]"),
+    )
+
+
+def test_replay_warns_once_for_unknown_device() raises:
+    # Both refresh blocks print with the filter displayed;
+    # stderr carries exactly one warning; global rows stay
+    # while device rows hide rather than print as zeroes.
+    var scratch = _mkdtemp()
+    var out = scratch + String("/out.txt")
+    var err = scratch + String("/err.txt")
+    var opts = TopOptions()
+    opts.has_device = True
+    opts.device = String("nope")
+    var a = _snapshot_analyzer()
+    var watch = FilterWatch(opts)
+    var saved_out = _redirect_stdout(out)
+    var saved_err = _redirect_stderr(err)
+    var r0 = _snapshot_block(a, opts, UInt64(150), 1, watch)
+    var r1 = _snapshot_block(a, opts, UInt64(200), 2, watch)
+    _restore_stdout(saved_out)
+    _restore_stderr(saved_err)
+    assert_equal(r0, 0)
+    assert_equal(r1, 0)
+    var text = _sink_text(read_host_file(out, String("out"), 1048576))
+    assert_true(
+        _contains(
+            text,
+            String("--- refresh 1 @ 150 ns --- [device: nope]"),
+        )
+    )
+    assert_true(
+        _contains(
+            text,
+            String("--- refresh 2 @ 200 ns --- [device: nope]"),
+        )
+    )
+    assert_true(not _contains(text, String("{device=")))
+    assert_true(_contains(text, String("bounce_attempts = 2")))
+    var diag = _sink_text(read_host_file(err, String("err"), 1048576))
+    assert_equal(
+        diag,
+        String(
+            "memveil top: --device 'nope' matches no known device\n"
+        ),
+    )
+
+
+def test_replay_known_device_filter_is_quiet() raises:
+    var scratch = _mkdtemp()
+    var out = scratch + String("/out.txt")
+    var err = scratch + String("/err.txt")
+    var opts = TopOptions()
+    opts.has_device = True
+    opts.device = String("d1")
+    var a = _snapshot_analyzer()
+    var watch = FilterWatch(opts)
+    var saved_out = _redirect_stdout(out)
+    var saved_err = _redirect_stderr(err)
+    var rc = _snapshot_block(a, opts, UInt64(200), 1, watch)
+    _restore_stdout(saved_out)
+    _restore_stderr(saved_err)
+    assert_equal(rc, 0)
+    var text = _sink_text(read_host_file(out, String("out"), 1048576))
+    assert_true(_contains(text, String("{device=d1}")))
+    var diag = _sink_text(read_host_file(err, String("err"), 1048576))
+    assert_equal(diag, String(""))
+
+
+def test_replay_later_match_shows_rows() raises:
+    # The first refresh warns while d2 is still unseen; once
+    # a d2 event folds, the next refresh shows its rows with
+    # no second warning and no refusal.
+    var scratch = _mkdtemp()
+    var out = scratch + String("/out.txt")
+    var err = scratch + String("/err.txt")
+    var opts = TopOptions()
+    opts.has_device = True
+    opts.device = String("d2")
+    var s = _live_template()
+    s.window_start_ns = UInt64(100)
+    s.window_end_ns = ~UInt64(0)
+    var a = Analyzer(s)
+    var e0 = _sink_attempt("op1", UInt64(0), UInt64(100))
+    a.consume(e0)
+    var watch = FilterWatch(opts)
+    var saved_out = _redirect_stdout(out)
+    var saved_err = _redirect_stderr(err)
+    var r0 = _snapshot_block(a, opts, UInt64(150), 1, watch)
+    var e1 = _sink_attempt("op2", UInt64(1), UInt64(200))
+    e1.bounce.device_id = String("d2")
+    a.consume(e1)
+    var r1 = _snapshot_block(a, opts, UInt64(250), 2, watch)
+    _restore_stdout(saved_out)
+    _restore_stderr(saved_err)
+    assert_equal(r0, 0)
+    assert_equal(r1, 0)
+    var text = _sink_text(read_host_file(out, String("out"), 1048576))
+    var parts = text.split(String("--- refresh "))
+    assert_equal(len(parts), 3)
+    assert_true(not _contains(String(parts[1]), String("{device=")))
+    assert_true(_contains(String(parts[2]), String("{device=d2}")))
+    var diag = _sink_text(read_host_file(err, String("err"), 1048576))
+    assert_equal(
+        diag,
+        String(
+            "memveil top: --device 'd2' matches no known device\n"
+        ),
+    )
+
+
+def test_sink_later_match_shows_rows() raises:
+    # Live prefixes share the replay policy: the early miss
+    # warns once, then the later match prints rows without
+    # a second warning and without refusing either block.
+    var scratch = _mkdtemp()
+    var out = scratch + String("/out.txt")
+    var err = scratch + String("/err.txt")
+    var opts = TopOptions()
+    opts.has_device = True
+    opts.device = String("d2")
+    var sink = StdoutSink(opts)
+    var rep0 = _sink_report(UInt64(300))
+    var rep1 = _sink_report_dev(UInt64(400))
+    var saved_out = _redirect_stdout(out)
+    var saved_err = _redirect_stderr(err)
+    var r0 = sink.emit(rep0^, UInt64(300))
+    var r1 = sink.emit(rep1^, UInt64(400))
+    _restore_stdout(saved_out)
+    _restore_stderr(saved_err)
+    assert_true(r0)
+    assert_true(r1)
+    var text = _sink_text(read_host_file(out, String("out"), 1048576))
+    var parts = text.split(String("--- refresh "))
+    assert_equal(len(parts), 3)
+    assert_true(not _contains(String(parts[1]), String("{device=")))
+    assert_true(_contains(String(parts[2]), String("{device=d2}")))
+    var diag = _sink_text(read_host_file(err, String("err"), 1048576))
+    assert_equal(
+        diag,
+        String(
+            "memveil top: --device 'd2' matches no known device\n"
+        ),
+    )
+
+
+def test_watch_exact_id_and_name_are_quiet() raises:
+    var rep = Report()
+    var dev = DeviceEntry()
+    dev.device_id = String("d9")
+    dev.name = String("disk9")
+    rep.devices.append(dev)
+    var opts = TopOptions()
+    opts.has_device = True
+    opts.device = String("d9")
+    var w0 = FilterWatch(opts)
+    assert_equal(w0.warn_for(rep), String(""))
+    opts.device = String("disk9")
+    var w1 = FilterWatch(opts)
+    assert_equal(w1.warn_for(rep), String(""))
+    opts.device = String("nope")
+    var w2 = FilterWatch(opts)
+    assert_equal(
+        w2.warn_for(rep),
+        String(
+            "memveil top: --device 'nope' matches no known device\n"
+        ),
+    )
+    assert_equal(w2.warn_for(rep), String(""))
+
+
+def test_watch_control_byte_name_matches_exactly() raises:
+    # A catalog name carrying control bytes still resolves
+    # by exact bytes: matching never normalizes or escapes
+    # before comparing.
+    var rep = Report()
+    var dev = DeviceEntry()
+    dev.device_id = String("d9")
+    dev.name = _hostile_filter()
+    rep.devices.append(dev)
+    var opts = TopOptions()
+    opts.has_device = True
+    opts.device = _hostile_filter()
+    var watch = FilterWatch(opts)
+    assert_equal(watch.warn_for(rep), String(""))
+
+
+def test_sink_filtered_block_keeps_global_findings() raises:
+    var scratch = _mkdtemp()
+    var out = scratch + String("/out.txt")
+    var opts = TopOptions()
+    opts.has_device = True
+    opts.device = String("d1")
+    var sink = StdoutSink(opts)
+    var rep = _sink_report_dev(UInt64(200))
+    var f = Finding()
+    f.code = String("PROBE_FINDING")
+    f.severity = String("informational")
+    f.explanation = String("probe")
+    f.scope = String("global")
+    f.limitations = String("none")
+    rep.findings.append(f^)
+    var saved = _redirect_stdout(out)
+    var ok = sink.emit(rep^, UInt64(200))
+    _restore_stdout(saved)
+    assert_true(ok)
+    var text = _sink_text(read_host_file(out, String("out"), 1048576))
+    var lines = text.split(String("\n"))
+    assert_equal(
+        String(lines[0]),
+        String("--- refresh 1 @ 200 ns --- [device: d1]"),
+    )
+    assert_true(_contains(text, String("PROBE_FINDING")))
+
+
+def test_finish_live_warns_without_prefixes() raises:
+    # A prefix-less live run warns at its final block; the
+    # filter still refuses nothing.
+    var dir = String("tests/fixtures/attempts")
+    var opts = TopOptions()
+    opts.has_device = True
+    opts.device = String("nope")
+    var scratch = _mkdtemp()
+    var out = scratch + String("/out.txt")
+    var err = scratch + String("/err.txt")
+    var saved_out = _redirect_stdout(out)
+    var saved_err = _redirect_stderr(err)
+    var rc = _finish_live(dir, opts, 0)
+    _restore_stdout(saved_out)
+    _restore_stderr(saved_err)
+    assert_equal(rc, 0)
+    var text = _sink_text(read_host_file(out, String("out"), 1048576))
+    assert_true(_contains(text, String("[device: nope]")))
+    assert_true(not _contains(text, String("{device=")))
+    var diag = _sink_text(read_host_file(err, String("err"), 1048576))
+    assert_equal(
+        diag,
+        String(
+            "memveil top: --device 'nope' matches no known device\n"
+        ),
+    )
+
+
+def test_finish_live_silent_after_prefixes() raises:
+    # Prefixes already carried the warn-once latch, so the
+    # final live block never warns twice.
+    var dir = String("tests/fixtures/attempts")
+    var opts = TopOptions()
+    opts.has_device = True
+    opts.device = String("nope")
+    var scratch = _mkdtemp()
+    var out = scratch + String("/out.txt")
+    var err = scratch + String("/err.txt")
+    var saved_out = _redirect_stdout(out)
+    var saved_err = _redirect_stderr(err)
+    var rc = _finish_live(dir, opts, 1)
+    _restore_stdout(saved_out)
+    _restore_stderr(saved_err)
+    assert_equal(rc, 0)
+    var diag = _sink_text(read_host_file(err, String("err"), 1048576))
+    assert_equal(diag, String(""))
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_duration_units]()
@@ -960,6 +1385,20 @@ def run() raises -> Int:
     suite.test[test_filter_resolves_catalog_id_and_name]()
     suite.test[test_filter_resolves_observed_metric_id]()
     suite.test[test_refresh_snapshots_preserve_later_facts]()
+    suite.test[test_filter_suffix_clean]()
+    suite.test[test_filter_suffix_escapes_controls]()
+    suite.test[test_sink_header_displays_filter]()
+    suite.test[test_sink_header_escapes_hostile_filter]()
+    suite.test[test_replay_header_displays_filter]()
+    suite.test[test_replay_warns_once_for_unknown_device]()
+    suite.test[test_replay_known_device_filter_is_quiet]()
+    suite.test[test_replay_later_match_shows_rows]()
+    suite.test[test_sink_later_match_shows_rows]()
+    suite.test[test_watch_exact_id_and_name_are_quiet]()
+    suite.test[test_watch_control_byte_name_matches_exactly]()
+    suite.test[test_sink_filtered_block_keeps_global_findings]()
+    suite.test[test_finish_live_warns_without_prefixes]()
+    suite.test[test_finish_live_silent_after_prefixes]()
     suite^.run()
     return 0
 

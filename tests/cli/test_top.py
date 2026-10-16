@@ -92,6 +92,55 @@ def main():
     p = run(["top", "--interval", "1s", "--device", "nope", NESTED])
     check("device-none", "{device=" not in p.stdout)
     check("device-global", "bounce_attempts = 1" in p.stdout)
+    check("device-filter-shown", "[device: nope]" in p.stdout)
+    check("device-warn-once",
+          p.stderr.count("matches no known device") == 1,
+          repr(p.stderr))
+    check("device-warn-text",
+          "memveil top: --device 'nope' matches no known device\n"
+          in p.stderr, repr(p.stderr))
+    check("device-no-refusal", p.returncode == 0,
+          "exit %d" % p.returncode)
+
+    p = run(["top", "--interval", "1s", "--device", "dev-1", NESTED])
+    check("device-id-quiet", "matches no known device" not in p.stderr,
+          repr(p.stderr))
+    check("device-id-shown", "[device: dev-1]" in p.stdout)
+    p = run(["top", "--interval", "1s", "--device", "testdev0", NESTED])
+    check("device-name-quiet", "matches no known device" not in p.stderr,
+          repr(p.stderr))
+    check("device-name-filter-shown", "[device: testdev0]" in p.stdout)
+
+    # Hostile filter bytes: the header stays one line with no
+    # terminal escape, and the warning echoes the same escape.
+    hostile = "a\x1b[2J\nb\tc\rd\x07e\x7ff"
+    esc = "a\ufffd[2J\\nb\\tc\\rd\ufffde\ufffdf"
+    p = run(["top", "--interval", "1s", "--device", hostile, NESTED])
+    check("device-hostile-exit", p.returncode == 0,
+          "exit %d" % p.returncode)
+    check("device-hostile-warn",
+          p.stderr.count("matches no known device") == 1,
+          repr(p.stderr))
+    check("device-hostile-clean",
+          "\x1b" not in p.stdout and "\x1b" not in p.stderr)
+    check("device-hostile-del",
+          "\x7f" not in p.stdout and "\x7f" not in p.stderr)
+    check("device-hostile-h1",
+          "--- refresh 1 @ 2000000000 ns --- [device: %s]" % esc
+          in p.stdout)
+    check("device-hostile-h2",
+          "--- refresh 2 @ 2500000000 ns --- [device: %s]" % esc
+          in p.stdout)
+
+    # Global findings survive a filter that matches nothing.
+    p = run(["top", "--interval", "1s", "--device", "nope",
+             "--long-lived-after", "1s", OPEN])
+    check("device-findings-exit", p.returncode == 0,
+          "exit %d" % p.returncode)
+    check("device-findings-kept", "LONG_LIVED_ALLOCATION" in p.stdout)
+    check("device-findings-warn",
+          p.stderr.count("matches no known device") == 1,
+          repr(p.stderr))
 
     p = run(["top", "--interval", "1s", OPEN])
     check("open-exit", p.returncode == 0)

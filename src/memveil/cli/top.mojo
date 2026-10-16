@@ -27,7 +27,9 @@ timestamp names.
 
 The device option is a display filter over per-device rows
 (exact device id or catalog name); analysis always covers
-the whole capture. Summaries are line-oriented plain text with escaped
+the whole capture. Every block names the active filter, and
+a filter matching no device rows warns once on stderr.
+Summaries are line-oriented plain text with escaped
 fields, safe for non-TTY pipes. Between refreshes top waits
 the interval in wall time, polling for stops first and every
 100 ms; a pending SIGINT/SIGTERM finishes the remaining
@@ -138,6 +140,8 @@ def top_usage() -> String:
         "  --device NAME     show only this device's per-device rows\n"
         "                    (exact device id or catalog name);\n"
         "                    analysis still covers the whole capture.\n"
+        "                    Blocks name the active filter; a filter\n"
+        "                    matching no device warns once.\n"
         "  --long-lived-after DURATION\n"
         "                    enable the informational long-lived\n"
         "                    finding past this open age.\n"
@@ -341,18 +345,89 @@ def _top_failed(prefix: String, detail: String) raises -> Int:
     return EXIT_INVALID
 
 
-def _print_block(text: String, seq: Int, horizon_ns: UInt64) raises:
+def filter_header_suffix(filt: String) raises -> String:
+    """Block-header annotation naming the active device filter.
+
+    Empty without a filter, so unfiltered output stays byte
+    for byte unchanged; otherwise ` [device: <escaped>]`. The
+    filter shows as given, not as resolved: a catalog name
+    stays a name even though rows carry ids. The value is
+    diagnostic-escaped, so hostile bytes can neither split
+    the header line nor smuggle terminal sequences into
+    stdout.
+    """
+    if filt == "":
+        return String("")
+    return (
+        String(" [device: ")
+        + sanitize_diagnostic(filt)
+        + String("]")
+    )
+
+
+struct FilterWatch:
+    """Warn-once latch for one top run's device selection.
+
+    Replay refreshes and live prefixes share one policy: the
+    first block whose report has no matching device rows
+    warns on stderr, and later blocks stay silent whether or
+    not they match, while matching rows always print. The
+    warning never fails the run: a dead filter hides device
+    rows but leaves global rows, findings, and the exit code
+    alone.
+    """
+
+    var filt: String
+    var warned: Bool
+
+    def __init__(out self, opts: TopOptions):
+        self.filt = String("")
+        if opts.has_device:
+            self.filt = opts.device.copy()
+        self.warned = False
+
+    def warn_for(mut self, rep: Report) -> String:
+        """Warning line once when filt matches no rows.
+
+        Empty without a filter, once the filter resolves, or
+        once the run already warned. Never raises: the
+        warning is a stderr diagnostic, so an unescapable
+        filter blanks its echo instead of failing the run.
+        """
+        if self.warned or self.filt == "":
+            return String("")
+        if device_filter_resolves(rep, self.filt):
+            return String("")
+        self.warned = True
+        var shown = String("")
+        try:
+            shown = sanitize_diagnostic(self.filt)
+        except:
+            shown = String("")
+        return (
+            String("memveil top: --device '")
+            + shown
+            + String("' matches no known device\n")
+        )
+
+
+def _print_block(
+    text: String, seq: Int, horizon_ns: UInt64, filt: String
+) raises:
     """Print one refresh block.
 
     Every byte goes through the checked stdout writer: a short
     write or error reports on stderr and raises, so a blocked
-    stdout fails the run instead of printing success.
+    stdout fails the run instead of printing success. The
+    header names the active device filter, if any.
     """
     var head = String("--- refresh ")
     head += String(seq)
     head += String(" @ ")
     head += format_u64(horizon_ns)
-    head += String(" ns ---\n")
+    head += String(" ns ---")
+    head += filter_header_suffix(filt)
+    head += String("\n")
     try:
         write_stdout(head)
         write_stdout(text)
@@ -390,7 +465,7 @@ def _emit_report(
         check_rendered_size(text, MAX_RENDERED_BYTES)
     except e:
         return _top_failed("memveil top: ", e.message)
-    _print_block(text, seq, horizon_ns)
+    _print_block(text, seq, horizon_ns, filt)
     return 0
 
 
@@ -399,15 +474,24 @@ def _snapshot_block(
     opts: TopOptions,
     horizon_ns: UInt64,
     seq: Int,
+    mut watch: FilterWatch,
 ) raises -> Int:
-    """Render and print one refresh."""
+    """Render and print one refresh.
+
+    Warns through the run's shared latch before printing;
+    replay and live share the FilterWatch policy, so a dead
+    filter warns once per run.
+    """
     var rep = analyzer.snapshot(horizon_ns, False)
-    var filt = String("")
-    if opts.has_device:
-        filt = opts.device
+    var line = watch.warn_for(rep)
+    if line != String(""):
+        try:
+            write_stderr(line)
+        except:
+            pass
     return _emit_report(
         rep^,
-        filt,
+        watch.filt,
         opts.has_long_lived_after,
         opts.long_lived_after_ns,
         seq,
@@ -421,50 +505,36 @@ struct StdoutSink(RefreshSink):
     Block numbering starts at one and rises per accepted
     refresh. A refused emission still consumes its number,
     but refusals fail the run, so the gap never prints.
-    A device filter that matches no known device warns on
-    stderr once: every refresh would otherwise print
-    global-only blocks with no hint the filter is dead.
+    The device filter shares the replay warn-once latch: a
+    filter matching no known device warns on stderr once,
+    since every prefix would otherwise print global-only
+    blocks with no hint the filter is dead.
     """
 
-    var _has_device: Bool
-    var _device: String
+    var _watch: FilterWatch
     var _has_long_lived_after: Bool
     var _long_lived_after_ns: UInt64
     var _seq: Int
-    var _warned_filter: Bool
 
     def __init__(out self, opts: TopOptions):
-        self._has_device = opts.has_device
-        self._device = opts.device.copy()
+        self._watch = FilterWatch(opts)
         self._has_long_lived_after = opts.has_long_lived_after
         self._long_lived_after_ns = opts.long_lived_after_ns
         self._seq = 0
-        self._warned_filter = False
 
     def emit(mut self, var rep: Report, horizon_ns: UInt64) -> Bool:
         self._seq += 1
-        var filt = String("")
-        if self._has_device:
-            filt = self._device
-        if (
-            self._has_device
-            and not self._warned_filter
-            and not device_filter_resolves(rep, filt)
-        ):
-            self._warned_filter = True
+        var line = self._watch.warn_for(rep)
+        if line != String(""):
             try:
-                write_stderr(
-                    String("memveil top: --device '")
-                    + sanitize_diagnostic(filt)
-                    + String("' matches no known device\n")
-                )
+                write_stderr(line)
             except:
                 pass
         var rc: Int
         try:
             rc = _emit_report(
                 rep^,
-                filt,
+                self._watch.filt,
                 self._has_long_lived_after,
                 self._long_lived_after_ns,
                 self._seq,
@@ -565,7 +635,14 @@ def _finish_live(
             "memveil top: cannot read capture: ", e.message
         )
     var analyzer = Analyzer(reader.session)
-    return _finish_after_signal(reader, analyzer, opts, shown)
+    var watch = FilterWatch(opts)
+    if shown > 0:
+        # Printed prefixes already carried the warn-once
+        # latch through the sink, so the final block never
+        # warns twice. Only a prefix-less run can reach its
+        # final block with the filter still unevaluated.
+        watch.warned = True
+    return _finish_after_signal(reader, analyzer, opts, shown, watch)
 
 
 def run_top_live(opts: TopOptions) raises -> Int:
@@ -684,8 +761,9 @@ def run_top(args: List[String]) raises -> Int:
         opts.interval_ns,
     )
     var seq = 0
+    var watch = FilterWatch(opts)
     var code = _drain(
-        reader, analyzer, opts, signal, clock, cursor, seq
+        reader, analyzer, opts, signal, clock, cursor, seq, watch
     )
     signal.teardown()
     return code
@@ -766,6 +844,7 @@ def _drain(
     mut clock: MonoClock,
     mut cursor: BoundaryCursor,
     mut seq: Int,
+    mut watch: FilterWatch,
 ) raises -> Int:
     """Stream events, refreshing at each boundary, then finish."""
     while True:
@@ -803,7 +882,7 @@ def _drain(
             var horizon = cursor.pop()
             seq += 1
             var rc = _snapshot_block(
-                analyzer, opts, horizon, seq
+                analyzer, opts, horizon, seq, watch
             )
             if rc != 0:
                 return rc
@@ -819,10 +898,10 @@ def _drain(
             )
         if stopped:
             return _finish_after_signal(
-                reader, analyzer, opts, seq
+                reader, analyzer, opts, seq, watch
             )
         var outcome = _poll_signal(
-            reader, analyzer, opts, signal, seq
+            reader, analyzer, opts, signal, seq, watch
         )
         if outcome >= 0:
             return outcome
@@ -832,13 +911,16 @@ def _drain(
         rep = analyzer.finish(reader.session.window_end_ns, False)
     except e:
         return _top_failed("memveil top: ", String(e))
+    var line = watch.warn_for(rep)
+    if line != String(""):
+        try:
+            write_stderr(line)
+        except:
+            pass
     _diagnose(rep, opts.has_long_lived_after, opts.long_lived_after_ns)
-    var filt = String("")
-    if opts.has_device:
-        filt = opts.device
     var text: String
     try:
-        text = render(rep, String("text"), filt)
+        text = render(rep, String("text"), watch.filt)
     except e:
         write_stderr(
             "memveil top: internal error: cannot render report\n"
@@ -848,7 +930,7 @@ def _drain(
         check_rendered_size(text, MAX_RENDERED_BYTES)
     except e:
         return _top_failed("memveil top: ", e.message)
-    _print_block(text, seq, reader.session.window_end_ns)
+    _print_block(text, seq, reader.session.window_end_ns, watch.filt)
     return exit_for_report(rep)
 
 
@@ -858,6 +940,7 @@ def _poll_signal(
     opts: TopOptions,
     mut signal: LiveSignalSource,
     seq: Int,
+    mut watch: FilterWatch,
 ) raises -> Int:
     """Handle a pending stop signal; -1 means keep going."""
     var got = signal.check()
@@ -865,7 +948,7 @@ def _poll_signal(
         return -1
     if got.state == "error":
         return _signal_failed(got.message)
-    return _finish_after_signal(reader, analyzer, opts, seq)
+    return _finish_after_signal(reader, analyzer, opts, seq, watch)
 
 
 def _finish_after_signal(
@@ -873,6 +956,7 @@ def _finish_after_signal(
     mut analyzer: Analyzer,
     opts: TopOptions,
     seq: Int,
+    mut watch: FilterWatch,
 ) raises -> Int:
     """Drain the rest quietly, print the final summary and code."""
     while True:
@@ -903,17 +987,20 @@ def _finish_after_signal(
         rep = analyzer.finish(reader.session.window_end_ns, False)
     except e:
         return _top_failed("memveil top: ", String(e))
+    var line = watch.warn_for(rep)
+    if line != String(""):
+        try:
+            write_stderr(line)
+        except:
+            pass
     _diagnose(rep, opts.has_long_lived_after, opts.long_lived_after_ns)
-    var filt = String("")
-    if opts.has_device:
-        filt = opts.device
     var text: String
     try:
-        text = render(rep, String("text"), filt)
+        text = render(rep, String("text"), watch.filt)
     except e:
         write_stderr(
             "memveil top: internal error: cannot render report\n"
         )
         return EXIT_INTERNAL
-    _print_block(text, seq + 1, reader.session.window_end_ns)
+    _print_block(text, seq + 1, reader.session.window_end_ns, watch.filt)
     return exit_for_report(rep)
