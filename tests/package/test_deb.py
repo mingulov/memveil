@@ -152,7 +152,7 @@ FROZEN_VERBS = ("record", "report", "top", "doctor", "qualify",
 FROZEN_TOP_FLAGS = ("--help", "--version", "-h")
 FROZEN_FLAGS = {
     "record": ("--bridge", "--capability", "--cp-object",
-               "--duration", "--help", "--lc-object",
+               "--device", "--duration", "--help", "--lc-object",
                "--max-events-bytes", "--object", "--output",
                "--profile", "--profiles-dir", "-h"),
     "report": ("--allow-partial", "--format", "--help",
