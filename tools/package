@@ -28,6 +28,8 @@ Layout of ``dist/memveil-<version>/``::
     docs/                  the full manuals tree (every manual
                            quickstart/support reference ships)
     examples/real-capture/ sanitized real capture (worked example)
+    examples/lifecycle-copy/ recorded three-channel capture
+                           (worked example with oracle logs)
     LICENSE, LICENSES/   MemVeil's own license texts
     licenses/              third-party texts + libbpf-mojo's own
     THIRD-PARTY-NOTICES*   attribution (own + libbpf-mojo verbatim)
@@ -218,6 +220,7 @@ SOURCE_STAGED_PREFIXES = (
     ("docs", "docs"),
     ("profiles", "profiles"),
     ("examples/real-capture", "examples/real-capture"),
+    ("examples/lifecycle-copy", "examples/lifecycle-copy"),
     ("LICENSES", "LICENSES"),
 )
 SOURCE_STAGED_FILES = {
@@ -265,6 +268,7 @@ SOURCE_STAGED_KEEP = {
     "docs": _keep_doc,
     "profiles": _keep_profile,
     "examples/real-capture": _keep_all,
+    "examples/lifecycle-copy": _keep_all,
     "LICENSES": _keep_all,
 }
 
@@ -273,6 +277,7 @@ SOURCE_STAGED_KEEP = {
 # prefixes only promise their kept files.
 COPYTREE_PREFIXES = frozenset((
     "examples/real-capture",
+    "examples/lifecycle-copy",
     "LICENSES",
 ))
 
@@ -813,13 +818,14 @@ def main(argv):
         for name in ("quickstart.md", "support.md", "privacy.md"):
             if not os.path.isfile(os.path.join(staged, "docs", name)):
                 fail("missing docs/%s" % name)
-        example = os.path.join(ROOT, "examples", "real-capture")
-        for name in ("events.ndjson", "session.json"):
-            src = os.path.join(example, name)
-            if not os.path.isfile(src):
-                fail("missing %s" % src)
-        shutil.copytree(example,
-                        os.path.join(staged, "examples", "real-capture"))
+        for leaf in ("real-capture", "lifecycle-copy"):
+            example = os.path.join(ROOT, "examples", leaf)
+            for name in ("events.ndjson", "session.json"):
+                src = os.path.join(example, name)
+                if not os.path.isfile(src):
+                    fail("missing %s" % src)
+            shutil.copytree(example,
+                            os.path.join(staged, "examples", leaf))
 
         # License texts: MemVeil's own plus everything the bundle
         # redistributes through the pinned bridge. The libbpf-mojo

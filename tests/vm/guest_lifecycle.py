@@ -51,6 +51,41 @@ def mono_ns():
     return time.clock_gettime_ns(time.CLOCK_MONOTONIC)
 
 
+def remove_scsi_debug(short, sysfs="/sys", poll_rounds=50,
+                      poll_gap=0.1, unload_rounds=10,
+                      unload_gap=0.5):
+    """Delete the owned scsi_debug disk, then unload the module.
+
+    sysfs device deletion completes asynchronously in the
+    guest: poll until the block node is gone (bounded), then
+    retry the unload a few times. A device that never leaves
+    or an unload that never succeeds still fails loudly with
+    its cause instead of hanging the gate.
+    """
+    try:
+        with open(os.path.join(sysfs, "block", short, "device",
+                               "delete"), "w") as fh:
+            fh.write("1")
+    except OSError as exc:
+        fail("scsi_debug delete failed for %s: %s" % (short, exc))
+    node = os.path.join(sysfs, "block", short)
+    for _ in range(poll_rounds):
+        if not os.path.exists(node):
+            break
+        time.sleep(poll_gap)
+    else:
+        fail("scsi_debug disk %s still present after delete"
+             % short)
+    last = ""
+    for _ in range(unload_rounds):
+        r = sh(["rmmod", "scsi_debug"])
+        if r.returncode == 0:
+            return
+        last = r.stderr.strip()
+        time.sleep(unload_gap)
+    fail("scsi_debug rmmod failed: %s" % last)
+
+
 def validate_victim(alive, rc):
     if alive is not True or rc != -signal.SIGTERM:
         raise ValueError("victim was not alive or did not terminate by SIGTERM")
@@ -404,12 +439,7 @@ def run_realio(gate):
     if wr.returncode != 0:
         fail(f"disk write failed: {wr.stderr.strip()[-200:]}")
     workload["disk_bytes"] = 2 * 256 * 65536
-    with open(os.path.join("/sys/block", new, "device",
-                           "delete"), "w") as fh:
-        fh.write("1")
-    r = sh(["rmmod", "scsi_debug"])
-    if r.returncode != 0:
-        fail(f"scsi_debug rmmod failed: {r.stderr.strip()}")
+    remove_scsi_debug(new)
     workload["end_ns"] = mono_ns()
     gate.wait_consumer(plc, "realio-lc")
     gate.wait_consumer(pcp, "realio-cp")
@@ -753,12 +783,7 @@ def run_perf(gate):
             legs.append(leg)
         pairs.append(legs)
     short = disk.rsplit("/", 1)[1]
-    with open(os.path.join("/sys/block", short, "device",
-                           "delete"), "w") as fh:
-        fh.write("1")
-    r = sh(["rmmod", "scsi_debug"])
-    if r.returncode != 0:
-        fail(f"scsi_debug rmmod failed: {r.stderr.strip()}")
+    remove_scsi_debug(short)
     gate.write_json("pairs.json", pairs)
     names.append("pairs.json")
     gate.export(names)
@@ -1114,12 +1139,7 @@ def run_topwalk(gate):
         writer.kill()
         writer.wait()
         fail("workload writer ignored SIGTERM")
-    with open(os.path.join("/sys/block", new, "device",
-                           "delete"), "w") as fh:
-        fh.write("1")
-    r = sh(["rmmod", "scsi_debug"])
-    if r.returncode != 0:
-        fail(f"scsi_debug rmmod failed: {r.stderr.strip()}")
+    remove_scsi_debug(new)
     witness["used_after"] = gate.io_tlb_samples(count=3, gap=1.0)
     witness["nslabs_after"] = _read_int_file(
         "/sys/kernel/debug/swiotlb/io_tlb_nslabs")
@@ -1301,12 +1321,7 @@ def run_bundle(gate):
     if wr.returncode != 0:
         fail(f"disk write failed: {wr.stderr.strip()[-200:]}")
     workload["disk_bytes"] = 2 * 8 * 65536
-    with open(os.path.join("/sys/block", new, "device",
-                           "delete"), "w") as fh:
-        fh.write("1")
-    r = sh(["rmmod", "scsi_debug"])
-    if r.returncode != 0:
-        fail(f"scsi_debug rmmod failed: {r.stderr.strip()}")
+    remove_scsi_debug(new)
     workload["end_ns"] = mono_ns()
     phases["io"].append(workload["end_ns"])
     try:

@@ -44,6 +44,7 @@ INPUT_DIRS = (
     "docs",
     "schemas",
     "examples/real-capture",
+    "examples/lifecycle-copy",
     "tests/native",
     "tests/shim",
     "tests/vm",

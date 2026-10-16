@@ -1,0 +1,9 @@
+[   31.869557] mv-oracle: op=0 attempt requested=4096 forced=0
+[   31.869610] mv-oracle: op=0 outcome=success mapping=0 mapped=4096
+[   31.869621] mv-oracle: op=0 mapping=0 witness copy=map copied=4096 verified=4096
+[   31.975999] mv-oracle: op=1 attempt requested=1024 forced=0
+[   31.976055] mv-oracle: op=1 outcome=success mapping=1 mapped=1024
+[   31.976064] mv-oracle: op=1 mapping=1 witness copy=map copied=1024 verified=1024
+[   31.976073] mv-oracle: mapping=0 release lifetime_ns=106493097
+[   31.976080] mv-oracle: mapping=1 release lifetime_ns=58730
+[   31.976084] mv-oracle: script complete ops=2

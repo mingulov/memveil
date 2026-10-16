@@ -1,0 +1,29 @@
+[   40.007487] mv-oracle: unloaded
+[   42.115823] mv-oracle: op=0 attempt requested=512 forced=0
+[   42.116017] mv-oracle: op=0 outcome=success mapping=0 mapped=512
+[   42.116030] mv-oracle: op=0 mapping=0 witness copy=map copied=512 verified=512
+[   42.116038] mv-oracle: op=0 mapping=0 sync dir=1 len=512 for=device
+[   42.116044] mv-oracle: op=0 mapping=0 witness copy=sync copied=512 verified=512
+[   42.116052] mv-oracle: mapping=0 release lifetime_ns=161523
+[   42.224637] mv-oracle: op=1 attempt requested=1024 forced=0
+[   42.224690] mv-oracle: op=1 outcome=success mapping=1 mapped=1024
+[   42.224697] mv-oracle: op=1 mapping=1 witness copy=map copied=1024 verified=1024
+[   42.224703] mv-oracle: op=1 mapping=1 sync dir=2 len=1024 for=device
+[   42.224708] mv-oracle: op=1 mapping=1 sync dir=2 len=1024 for=device
+[   42.224718] mv-oracle: op=1 mapping=1 witness copy=release copied=1024 verified=1024
+[   42.224723] mv-oracle: mapping=1 release lifetime_ns=60424
+[   42.328634] mv-oracle: op=2 attempt requested=2048 forced=0
+[   42.329174] mv-oracle: op=2 outcome=failure rc=-EIO
+[   42.329179] mv-oracle: op=2 fail-probe map rc=-5
+[   42.329196] mv-oracle: op=2 inner-probe map ok=1 mapped=2048
+[   42.329203] mv-oracle: op=2 mapping=2 witness copy=inner-map copied=2048 verified=2048
+[   42.329210] mv-oracle: op=2 inner=healthy retry=success
+[   42.431998] mv-oracle: op=3 attempt requested=4096 forced=0
+[   42.432048] mv-oracle: op=3 outcome=success mapping=3 mapped=4096
+[   42.432058] mv-oracle: op=3 mapping=3 witness copy=map copied=4096 verified=4096
+[   42.432064] mv-oracle: op=3 mapping=3 sync dir=2 len=4096 for=device
+[   42.432069] mv-oracle: op=3 mapping=3 held-open
+[   42.432073] mv-oracle: script complete ops=4
+[   52.458257] mv-oracle: op=3 mapping=3 exit-release
+[   52.458305] mv-oracle: op=3 mapping=3 witness copy=release copied=4096 verified=4096
+[   52.458310] mv-oracle: mapping=3 release lifetime_ns=10026283161

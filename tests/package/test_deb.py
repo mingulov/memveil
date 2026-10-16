@@ -82,6 +82,11 @@ FIXED_FILES = {
     "usr/share/memveil/docs/examples/real-capture/README.md",
     "usr/share/memveil/docs/examples/real-capture/events.ndjson",
     "usr/share/memveil/docs/examples/real-capture/session.json",
+    "usr/share/memveil/docs/examples/lifecycle-copy/README.md",
+    "usr/share/memveil/docs/examples/lifecycle-copy/events.ndjson",
+    "usr/share/memveil/docs/examples/lifecycle-copy/session.json",
+    "usr/share/memveil/docs/examples/lifecycle-copy/oracle-phase.log",
+    "usr/share/memveil/docs/examples/lifecycle-copy/fail-phase.log",
 }
 
 MAN_FILES = {

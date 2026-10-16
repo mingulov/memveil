@@ -62,6 +62,8 @@ STATIC_INPUTS = [
     "docs/quickstart.md", "docs/support.md", "docs/privacy.md",
     "examples/real-capture/events.ndjson",
     "examples/real-capture/session.json",
+    "examples/lifecycle-copy/events.ndjson",
+    "examples/lifecycle-copy/session.json",
     "profiles/manifest.txt",
     "bpf/programs/swiotlb_attempt.bpf.c",
     "src/memveil/main.mojo", "toolchain.lock.json",

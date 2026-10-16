@@ -327,6 +327,18 @@ def _tree(tmp_path, names):
     return str(tmp_path)
 
 
+def test_staging_covers_both_examples():
+    staged = dict(PKG.SOURCE_STAGED_PREFIXES)
+    assert staged.get("examples/real-capture") == "examples/real-capture"
+    assert staged.get("examples/lifecycle-copy") == "examples/lifecycle-copy"
+    for prefix in ("examples/real-capture", "examples/lifecycle-copy"):
+        assert prefix in PKG.SOURCE_STAGED_KEEP
+        assert prefix in PKG.COPYTREE_PREFIXES
+        keep = PKG.SOURCE_STAGED_KEEP[prefix]
+        assert keep("events.ndjson") is True
+        assert keep("oracle-phase.log") is True
+
+
 def test_manifest_exact_match_passes(tmp_path):
     names = ("bin/memveil", "lib/libbpf_mojo.so.1",
              "bpf/swiotlb_attempt.bpf.o",
@@ -388,6 +400,8 @@ def _admitted_tree(root):
     _write(root / "schemas" / "s.json", b"{}\n")
     _write(root / "examples" / "real-capture" / "events.ndjson",
            b"{}\n")
+    _write(root / "examples" / "lifecycle-copy" / "events.ndjson",
+           b"{}\n")
     _write(root / "tests" / "native" / "t.c", b"int y;\n")
     _write(root / "tests" / "shim" / "s.c", b"int z;\n")
     _write(root / "tests" / "vm" / "v.mojo", b"def v():\n")
@@ -419,6 +433,13 @@ class TestSourceInventory:
         assert paths == sorted(paths)
         assert "src/memveil/main.mojo" in paths
         assert "toolchain.lock.json" in paths
+
+    def test_covers_both_examples(self, inventory, tmp_path):
+        _admitted_tree(tmp_path)
+        paths = [entry["path"] for entry in
+                 inventory.take_inventory(str(tmp_path))["files"]]
+        assert "examples/real-capture/events.ndjson" in paths
+        assert "examples/lifecycle-copy/events.ndjson" in paths
 
     def test_records_mode_symlink_and_dir(self, inventory, tmp_path):
         target = _write(tmp_path / "src" / "real.mojo", b"r\n")
