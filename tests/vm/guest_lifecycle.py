@@ -1703,6 +1703,18 @@ def run_faults(gate):
     print("guest_lifecycle: faults exported")
 
 
+def run_overhead(gate):
+    """Live-overhead campaign; implementation in overhead_guest."""
+    from overhead_guest import run_overhead as impl
+    return impl(gate)
+
+
+def run_overhead_probe(gate):
+    """Live-overhead fail-fast probe; see overhead_guest."""
+    from overhead_guest import run_overhead_probe as impl
+    return impl(gate)
+
+
 SUBS = {
     "matrix": run_matrix,
     "copy": run_copy,
@@ -1718,6 +1730,8 @@ SUBS = {
     "topwalk": run_topwalk,
     "bundle": run_bundle,
     "faults": run_faults,
+    "overhead": run_overhead,
+    "overhead-probe": run_overhead_probe,
 }
 
 

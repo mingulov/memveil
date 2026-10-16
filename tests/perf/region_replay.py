@@ -23,6 +23,11 @@ Workload (declared before measurement):
   Background: MAP_OPS attempt/map pairs with FIFO unmaps at a
     controlled peak of PEAK_OPEN open mappings; every mapping
     opens and closes exactly once on dev-1.
+  Active-ceiling step: one further capture with a small
+    fragmented region but MAP_OPS_CEILING mappings peaking at
+    PEAK_CEILING simultaneously open lifetimes, one slot
+    under the admitted ACTIVE_MAX ceiling, proving the
+    active-mapping envelope with exact counts.
 Envelope (replay targets from docs/performance.md):
   wall <= 60 s per scale replay, benchmark peak RSS <= 256 MiB,
   exact output equality at every step. Throughput is reported
@@ -50,6 +55,11 @@ STEPS = (1024, 2048, 4096, 8192, 16384, 32766)
 HOT_TOGGLES = 4096
 MAP_OPS = 4096
 PEAK_OPEN = 1024
+# Active-ceiling step: small region, mappings driven to one
+# slot under the admitted ACTIVE_MAX ceiling (65535 live).
+CEILING_HOLES = 64
+MAP_OPS_CEILING = 66000
+PEAK_CEILING = 65535
 MAP_BYTES = 4096
 HOLE_STRIDE = 8192
 HOLE_BYTES = 4096
@@ -467,7 +477,8 @@ def transition_line(sid, seq, ts, region, state, success, offset,
         separators=(",", ":"))
 
 
-def generate(path, sid, holes):
+def generate(path, sid, holes, map_ops=MAP_OPS,
+             peak_open_limit=PEAK_OPEN):
     """Write one mixed capture; return known facts for the oracle."""
     os.makedirs(path, exist_ok=True)
     transitions = []
@@ -475,12 +486,12 @@ def generate(path, sid, holes):
     seq = 0
     peak_open = 0
     open_now = 0
-    for i in range(MAP_OPS):
-        if i >= PEAK_OPEN:
+    for i in range(map_ops):
+        if i >= peak_open_limit:
             seq += 1
             lines.append(unmap_line(
                 sid, seq, WINDOW_START + seq * TS_STEP,
-                "map-%06d" % (i - PEAK_OPEN)))
+                "map-%06d" % (i - peak_open_limit)))
             open_now -= 1
         seq += 1
         lines.append(attempt_line(
@@ -522,7 +533,7 @@ def generate(path, sid, holes):
             sid, seq, WINDOW_START + seq * TS_STEP,
             "hot", state, True, 0, 4096))
         transitions.append(("hot", state, True, 0, 4096))
-    for i in range(MAP_OPS - PEAK_OPEN, MAP_OPS):
+    for i in range(map_ops - peak_open_limit, map_ops):
         seq += 1
         lines.append(unmap_line(
             sid, seq, WINDOW_START + seq * TS_STEP,
@@ -545,10 +556,10 @@ def generate(path, sid, holes):
         "unknown": 4096,
         "segments": 2 * holes + 3,
         "lineages": 3,
-        "bounce": MAP_OPS,
-        "bounce_bytes": MAP_OPS * MAP_BYTES,
-        "allocations": MAP_OPS,
-        "mapped_bytes": MAP_OPS * MAP_BYTES,
+        "bounce": map_ops,
+        "bounce_bytes": map_ops * MAP_BYTES,
+        "allocations": map_ops,
+        "mapped_bytes": map_ops * MAP_BYTES,
         "peak_open": peak_open,
         "events": len(lines),
     }
@@ -594,13 +605,16 @@ def main():
     check_oracle_on_frozen_fixtures()
     tmp = tempfile.mkdtemp(prefix="mvregion")
     peak_rss = 0
+    specs = [("holes-%d" % holes, "region-scale-%d" % holes,
+              holes, MAP_OPS, PEAK_OPEN) for holes in STEPS]
+    specs.append(("active-ceiling", "region-active-ceiling",
+                  CEILING_HOLES, MAP_OPS_CEILING, PEAK_CEILING))
     try:
-        for holes in STEPS:
-            tag = "holes-%d" % holes
+        for tag, sid, holes, map_ops, peak_want in specs:
             path = os.path.join(tmp, tag)
-            sid = "region-scale-%d" % holes
             t0 = time.monotonic()
-            transitions, closed = generate(path, sid, holes)
+            transitions, closed = generate(
+                path, sid, holes, map_ops, peak_want)
             gen_s = time.monotonic() - t0
             oracle = IntervalOracle()
             for region, state, ok, off, ln in transitions:
@@ -624,12 +638,12 @@ def main():
                   oracle.request_bytes == closed["request_bytes"] and
                   not oracle.bytes_overflow)
             check("%s-peak-open" % tag,
-                  closed["peak_open"] == PEAK_OPEN and
-                  PEAK_OPEN <= ACTIVE_MAX,
+                  closed["peak_open"] == peak_want and
+                  peak_want <= ACTIVE_MAX,
                   "%d" % closed["peak_open"])
             life = lifetime_oracle_from_capture(path)
             check("%s-lifetime-oracle-count" % tag,
-                  life.completed == MAP_OPS,
+                  life.completed == map_ops,
                   "%d" % life.completed)
             check("%s-lifetime-oracle-open" % tag,
                   life.open_count == 0 and
@@ -637,8 +651,8 @@ def main():
                   "open %d live %d"
                   % (life.open_count, life.live_bytes))
             check("%s-lifetime-oracle-peak" % tag,
-                  life.peak_bytes == PEAK_OPEN * MAP_BYTES and
-                  life.peak_open == PEAK_OPEN,
+                  life.peak_bytes == peak_want * MAP_BYTES and
+                  life.peak_open == peak_want,
                   "%d" % life.peak_bytes)
             size = os.path.getsize(
                 os.path.join(path, "events.ndjson"))
@@ -693,7 +707,7 @@ def main():
             check("%s-completed-lifetimes" % tag,
                   gmetric(doc, "completed_lifetime_count")["value"]
                   == str(life.completed) and
-                  life.completed == MAP_OPS)
+                  life.completed == map_ops)
             check("%s-open" % tag,
                   gmetric(doc, "open_mappings")["value"] == "0" and
                   life.open_count == 0)
@@ -703,7 +717,7 @@ def main():
             check("%s-peak-live" % tag,
                   gmetric(doc, "peak_live_observed_allocation_bytes")
                   ["value"] == str(life.peak_bytes) and
-                  life.peak_bytes == PEAK_OPEN * MAP_BYTES)
+                  life.peak_bytes == peak_want * MAP_BYTES)
             check("%s-lifetime-mean" % tag,
                   gmetric(doc, "lifetime_mean_ns")["value"]
                   == str(life.mean_ns))
@@ -725,7 +739,8 @@ def main():
             check("%s-no-budget-refusal" % tag,
                   not any("interval budget exceeded" in lim or
                           "region table exhausted" in lim or
-                          "token reused" in lim
+                          "token reused" in lim or
+                          "Active mapping table exhausted" in lim
                           for lim in doc.get("limitations", [])),
                   "%r" % (doc.get("limitations", []),))
             rate = closed["events"] / wall if wall > 0 else 0.0

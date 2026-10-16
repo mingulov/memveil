@@ -17,7 +17,7 @@
 # vm-saturation, reader-adversarial, fuzz-smoke, fuzz-campaign,
 # record-failures, output-paths, vm-cleanup, privacy,
 # render-escaping, offline-environment, perf-replay,
-# perf-region, perf-workload, soak, preview-package, provenance,
+# perf-region, perf-workload, perf-overhead, soak, preview-package, provenance,
 # source-export,
 # release-runtime, docs, examples, extracted-robustness, deb,
 # rpm-journey.
@@ -1284,6 +1284,16 @@ suite_perf_workload() {
     python3 -m pytest "$ROOT/tests/perf/test_compare.py" -q \
         || return 1
     python3 "$ROOT/tests/perf/workloads.py"
+}
+
+suite_perf_overhead() {
+    if ! python3 -m pytest --version >/dev/null 2>&1; then
+        echo "perf-overhead: pytest not importable" >&2
+        return 1
+    fi
+    python3 -m pytest "$ROOT/tests/perf/test_overhead.py" -q \
+        || return 1
+    python3 "$ROOT/tests/perf/overhead.py"
 }
 
 suite_soak() {
@@ -3804,6 +3814,9 @@ case "$1" in
         ;;
     perf-workload)
         suite_perf_workload
+        ;;
+    perf-overhead)
+        suite_perf_overhead
         ;;
     soak)
         suite_soak

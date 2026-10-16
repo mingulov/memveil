@@ -101,6 +101,272 @@ def validate_perf_pairs(pairs, expected_count=None):
         raise ValueError("missing or unexpected perf pair identity")
 
 
+def _nonneg_number(value):
+    if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+        raise ValueError('invalid export measurement')
+
+
+def _overhead_counts(doc):
+    keys(doc, ('progs', 'maps')); numbers(doc)
+
+
+def _overhead_workload(doc):
+    from overhead_guest import (WARMUP_MAX_S, WARMUP_MIN_S,
+                                WINDOW_SLACK_S)
+    keys(doc, ('window', 'warmup', 'ping', 'dd'))
+    window = doc['window']
+    keys(window, ('warmup_start_ns', 'measured_start_ns', 'end_ns'))
+    for key in window: integer(window[key])
+    if not window['warmup_start_ns'] < window['measured_start_ns'] < window['end_ns']:
+        raise ValueError('empty overhead window')
+    warmup = doc['warmup']
+    keys(warmup, ('seconds', 'ok', 'detail'))
+    _nonneg_number(warmup['seconds'])
+    warmup_ep = (window['measured_start_ns']
+                 - window['warmup_start_ns']) / 1e9
+    if not WARMUP_MIN_S <= warmup_ep <= WARMUP_MAX_S:
+        raise ValueError('overhead warmup window %.2fs '
+                         'outside [%.0f, %.0f] s endpoints'
+                         % (warmup_ep, WARMUP_MIN_S,
+                            WARMUP_MAX_S))
+    if abs(warmup['seconds'] - warmup_ep) > WINDOW_SLACK_S:
+        raise ValueError('overhead warmup seconds field %.2fs '
+                         'contradicts %.2fs endpoints'
+                         % (warmup['seconds'], warmup_ep))
+    if warmup['ok'] is not True and warmup['ok'] is not False:
+        raise ValueError('invalid warmup flag')
+    if type(warmup['detail']) is not str or len(warmup['detail']) > 300:
+        raise ValueError('invalid warmup detail')
+    ping = doc['ping']
+    keys(ping, ('tx', 'rx', 'seconds', 'rtts', 'sample_tx',
+                'sample_rx', 'sample_count', 'p50_ms', 'p95_ms',
+                'p99_ms'))
+    integer(ping['tx']); integer(ping['rx'])
+    _nonneg_number(ping['seconds'])
+    rtts = ping['rtts']
+    if type(rtts) is not list or len(rtts) > 10000:
+        raise ValueError('invalid RTT sample')
+    for value in rtts: _nonneg_number(value)
+    for key in ('sample_tx', 'sample_rx'):
+        if ping[key] is not None: integer(ping[key])
+    integer(ping['sample_count'])
+    for key in ('p50_ms', 'p95_ms', 'p99_ms'):
+        _nonneg_number(ping[key])
+    dd = doc['dd']
+    keys(dd, ('bytes', 'seconds'))
+    integer(dd['bytes']); _nonneg_number(dd['seconds'])
+
+
+def _overhead_collector(doc):
+    if type(doc) is not dict or 'kind' not in doc:
+        raise ValueError('invalid overhead collector')
+    kind = doc['kind']
+    if kind == 'none':
+        keys(doc, ('kind',))
+    elif kind == 'product':
+        keys(doc, ('kind', 'capabilities', 'exit', 'ready',
+                   'stopped', 'killed', 'utime_s', 'stime_s',
+                   'maxrss_kb', 'attach_ns', 'detach_ns',
+                   'term_ns', 'stderr_tail', 'capture_bytes'))
+        caps = doc['capabilities']
+        if type(caps) is not list or not caps or any(
+                c not in ('attempt-trace', 'mapping-lifecycle',
+                          'copy-actual') for c in caps):
+            raise ValueError('invalid overhead capabilities')
+        integer(doc['exit'], True)
+        if type(doc['ready']) is not str or \
+                'ready session=' not in doc['ready']:
+            raise ValueError('invalid overhead readiness')
+        if doc['stopped'] is not True and doc['stopped'] is not False:
+            raise ValueError('invalid stopped flag')
+        if doc['killed'] is not True and doc['killed'] is not False:
+            raise ValueError('invalid killed flag')
+        _nonneg_number(doc['utime_s']); _nonneg_number(doc['stime_s'])
+        integer(doc['maxrss_kb'])
+        for key in ('attach_ns', 'detach_ns', 'term_ns'):
+            integer(doc[key])
+        if not doc['attach_ns'] < doc['term_ns'] < doc['detach_ns']:
+            raise ValueError('incoherent overhead stop order')
+        if type(doc['stderr_tail']) is not str or \
+                len(doc['stderr_tail']) > 512:
+            raise ValueError('invalid overhead diagnostics')
+        integer(doc['capture_bytes'])
+    elif kind == 'lab':
+        keys(doc, ('kind', 'rings', 'lc', 'cp', 'attach_ns',
+                   'detach_ns', 'capture_bytes'))
+        if doc['rings'] != ['mv_lifecycle', 'mv_copies']:
+            raise ValueError('invalid overhead lab rings')
+        for side in ('lc', 'cp'):
+            keys(doc[side], ('exit', 'utime_s', 'stime_s',
+                             'maxrss_kb'))
+            integer(doc[side]['exit'], True)
+            _nonneg_number(doc[side]['utime_s'])
+            _nonneg_number(doc[side]['stime_s'])
+            integer(doc[side]['maxrss_kb'])
+        integer(doc['attach_ns']); integer(doc['detach_ns'])
+        if not doc['attach_ns'] < doc['detach_ns']:
+            raise ValueError('incoherent overhead lab window')
+        integer(doc['capture_bytes'])
+    else:
+        raise ValueError('unknown overhead collector kind')
+
+
+def _overhead_leg(leg):
+    keys(leg, ('seq', 'round', 'mode', 'pair', 'tag', 'files',
+               'error'),
+         ('workload', 'collector', 'bpf', 'bpf_mem', 'io_tlb'))
+    integer(leg['seq']); integer(leg['round'])
+    if leg['mode'] not in ('off', 'attached-idle', 'summary',
+                           'detail', 'undersized-buffer'):
+        raise ValueError('invalid overhead mode')
+    if type(leg['pair']) is not str or not leg['pair']:
+        raise ValueError('invalid overhead pair identity')
+    if type(leg['tag']) is not str or not re.fullmatch(
+            r'[a-z][0-9]{1,2}', leg['tag']):
+        raise ValueError('invalid overhead leg tag')
+    files = leg['files']
+    if type(files) is not list or any(
+            type(name) is not str or not re.fullmatch(
+                r'[a-z][0-9]{1,2}-(session\.json|events\.ndjson|lc\.txt|cp\.txt)',
+                name) for name in files):
+        raise ValueError('invalid overhead leg files')
+    if type(leg['error']) is not str or len(leg['error']) > 300:
+        raise ValueError('invalid overhead leg error')
+    if leg['error']:
+        return
+    for key in ('workload', 'collector', 'bpf', 'bpf_mem',
+                'io_tlb'):
+        if key not in leg:
+            raise ValueError('clean overhead leg lacks ' + key)
+    _overhead_workload(leg['workload'])
+    _overhead_collector(leg['collector'])
+    bpf = leg['bpf']
+    keys(bpf, ('before', 'after', 'settled_waited_s', 'settled'))
+    _overhead_counts(bpf['before']); _overhead_counts(bpf['after'])
+    settle_seconds(bpf['settled_waited_s'])
+    if bpf['settled'] is not True and bpf['settled'] is not False:
+        raise ValueError('invalid settled flag')
+    mem = leg['bpf_mem']
+    keys(mem, ('owned_memlock_bytes', 'reason'))
+    if mem['owned_memlock_bytes'] is not None:
+        integer(mem['owned_memlock_bytes'])
+    if type(mem['reason']) is not str or len(mem['reason']) > 200:
+        raise ValueError('invalid memlock reason')
+    io_tlb = leg['io_tlb']
+    keys(io_tlb, ('before', 'after'))
+    for key in ('before', 'after'):
+        integer_list(io_tlb[key])
+        if len(io_tlb[key]) != 3:
+            raise ValueError('invalid io_tlb sample count')
+
+
+def _overhead_common(doc, schema):
+    keys(doc, ('schema', 'seed', 'artifacts', 'workload',
+               'fixture', 'legs', 'epilogue'),
+         ('rounds', 'schedule'))
+    if doc['schema'] != schema:
+        raise ValueError('unexpected overhead schema')
+    integer(doc['seed'])
+    artifacts = doc['artifacts']
+    keys(artifacts, ('memveil_sha', 'attempt_sha', 'lc_sha',
+                     'cp_sha', 'lc_test_sha', 'cp_test_sha',
+                     'bridge_sha', 'profile_sha', 'profile_id'))
+    for key, value in artifacts.items():
+        if key == 'profile_id':
+            if type(value) is not str or not value:
+                raise ValueError('invalid overhead profile id')
+        else:
+            sha(value)
+    spec = doc['workload']
+    keys(spec, ('gateway', 'flood_count', 'sample_count',
+                'warmup_ping_count', 'dd_count', 'dd_bytes',
+                'warmup_dd_count', 'record_duration_s',
+                'lab_window_s', 'seed', 'rounds'))
+    if spec['gateway'] != '10.0.3.2':
+        raise ValueError('workload gateway drift')
+    for key in ('flood_count', 'sample_count',
+                'warmup_ping_count', 'dd_count', 'dd_bytes',
+                'warmup_dd_count', 'record_duration_s',
+                'lab_window_s', 'seed', 'rounds'):
+        integer(spec[key])
+    fixture = doc['fixture']
+    keys(fixture, ('iface', 'disk', 'nslabs', 'bpf_boot',
+                   'io_tlb_boot'))
+    if not re.fullmatch(r'[a-zA-Z0-9_-]{1,32}', fixture['iface']):
+        raise ValueError('invalid overhead iface')
+    if not re.fullmatch(r'/dev/sd[a-z]', fixture['disk']):
+        raise ValueError('invalid overhead disk')
+    integer(fixture['nslabs'])
+    _overhead_counts(fixture['bpf_boot'])
+    integer_list(fixture['io_tlb_boot'])
+    if len(fixture['io_tlb_boot']) != 3:
+        raise ValueError('invalid boot io_tlb samples')
+    epilogue = doc['epilogue']
+    keys(epilogue, ('bpf_end', 'settled_waited_s', 'settled'))
+    _overhead_counts(epilogue['bpf_end'])
+    settle_seconds(epilogue['settled_waited_s'])
+    if epilogue['settled'] is not True and \
+            epilogue['settled'] is not False:
+        raise ValueError('invalid epilogue settled flag')
+
+
+def validate_overhead_legs(doc):
+    """Bind 40 campaign legs to the frozen seeded schedule."""
+    from overhead_guest import SEED, build_schedule
+    _overhead_common(doc, 'memveil-overhead-legs/1')
+    if doc['seed'] != SEED:
+        raise ValueError('overhead seed drift')
+    if doc['rounds'] != 5:
+        raise ValueError('overhead round drift')
+    expected = [[rnd, mode, pair]
+                for rnd, mode, pair in build_schedule(SEED)]
+    if doc['schedule'] != expected:
+        raise ValueError('overhead schedule drift')
+    legs = doc['legs']
+    if type(legs) is not list or len(legs) != 40:
+        raise ValueError('overhead leg count drift')
+    seen = set()
+    for seq, leg in enumerate(legs):
+        _overhead_leg(leg)
+        if leg['seq'] != seq:
+            raise ValueError('overhead leg order drift')
+        rnd, mode, pair = expected[seq]
+        if (leg['round'], leg['mode'], leg['pair']) != \
+                (rnd, mode, pair):
+            raise ValueError('overhead leg identity drift')
+        if leg['tag'] != 'l%02d' % seq:
+            raise ValueError('overhead leg tag drift')
+        seen.add(pair)
+    if len(seen) != 20:
+        raise ValueError('overhead pair count drift')
+    for pair in seen:
+        members = [leg for leg in legs if leg['pair'] == pair]
+        modes = [leg['mode'] for leg in members]
+        if len(members) != 2 or 'off' not in modes or \
+                len(set(modes)) != 2:
+            raise ValueError('overhead pair is not off/observed')
+
+
+def validate_overhead_probe(doc):
+    """Bind the 2-leg fail-fast probe document."""
+    from overhead_guest import SEED
+    _overhead_common(doc, 'memveil-overhead-probe/1')
+    if doc['seed'] != SEED:
+        raise ValueError('overhead probe seed drift')
+    if 'rounds' in doc or 'schedule' in doc:
+        raise ValueError('probe carries campaign fields')
+    legs = doc['legs']
+    if type(legs) is not list or len(legs) != 2:
+        raise ValueError('overhead probe leg drift')
+    for leg, mode, pair, tag in (
+            (legs[0], 'summary', 'probe-summary', 'p0'),
+            (legs[1], 'attached-idle', 'probe-idle', 'p1')):
+        _overhead_leg(leg)
+        if leg['mode'] != mode or leg['pair'] != pair or \
+                leg['tag'] != tag:
+            raise ValueError('overhead probe identity drift')
+
+
 def validate_lifecycle_exports(got,sub):
     for name,path in got.items():
         if name=='identity.json': identity(strict_json(path.read_text()))
@@ -286,6 +552,10 @@ def validate_lifecycle_exports(got,sub):
             body=path.read_text()
             if len(body) > 65536:
                 raise ValueError('live diagnostics exceed 64 KiB cap')
+        elif name=='legs.json':
+            validate_overhead_legs(strict_json(path.read_text()))
+        elif name=='probe.json':
+            validate_overhead_probe(strict_json(path.read_text()))
         else: raise ValueError('unrecognized lifecycle export '+name)
 
 

@@ -22,11 +22,15 @@ observations, not current-artifact results or a live-path overhead limit.
 `./tools/test perf-region` replays mixed attempt/mapping/
 fragmented-region captures with known unions and lifetimes at
 doubling big-region sizes up to the admitted 65,536-segment
-ceiling. Each step pairs a large fragmented region (one shared
-span with doubling private holes) with a small region churned
-after the fragments are fully built, so every churned update
-meets the full fragmented state, plus background mappings held
-at a controlled peak of open lifetimes. An independent
+ceiling, plus one active-mapping ceiling step with a small
+fragmented region and 66,000 mappings peaking at 65,535
+simultaneously open lifetimes, one slot under the admitted
+active-mapping ceiling. Each scale step pairs a large
+fragmented region (one shared span with doubling private
+holes) with a small region churned after the fragments are
+fully built, so every churned update meets the full
+fragmented state, plus background mappings held at a
+controlled peak of open lifetimes. An independent
 interval oracle, itself checked against the pinned region
 fixtures, recomputes every union and count; the lane asserts
 exact equality first, then the envelope: at most 60 seconds
@@ -46,11 +50,36 @@ block and virtual network paths independently proved to reach the hooks.
 only the tested mode and artifact. Offline comparison math and raw probe
 traffic do not qualify shipping lifecycle accounting.
 
+`./tools/test perf-overhead` measures product collector cost on the
+admitted guest kernel: a fail-fast probe (one summary leg plus one
+attached-idle leg) then a 40-leg campaign (5 rounds; every observed
+mode paired with its own matched off leg in seeded order) over fixed
+scratch block and virtual network workloads. Modes are off (bare
+control), attached-idle (a three-channel record held stopped across
+the measured window), summary (attempt-trace record), detail
+(three-channel record), and undersized-buffer (lab consumers on the
+4 KiB test rings). The lane requires its explicit `MEMVEIL_VM_PERF=1`
+lease; an unarmed lane skips, and an armed result proves only the
+tested modes and artifact. The workload, modes, and envelope are
+declared at the top of `tests/perf/overhead.py` and
+`tests/vm/overhead_guest.py`.
+
 Summary-mode targets are at most 5% throughput decrease and at most 10% p99
-increase. Replay `top` cannot qualify live overhead, and no live-overhead
-run exists yet for the current candidate. Detailed-attempt recording,
-attached-idle, and saturation results must be recorded separately, and no
-live overhead claim is earned from historical lane successes.
+increase on the documented reference workload, with at most 256 MiB peak
+userspace RSS per leg and BPF memory reported separately. Detail,
+attached-idle, and undersized-buffer ratios report as measured without
+thresholds; a summary ratio outside the targets is a declared
+limitation, never a silent pass. One measured campaign on source
+`f8f0b1a` (binary `d9ebadb7`, narrow 7.0.0-34-generic profile)
+qualified 20/20 pairs with at least 10 s warmup and at least 60 s
+measured workload inside every collector window: summary ping
+throughput missed its target (ratio 0.929) while summary p99
+(1.083) and summary dd (1.002) passed, worst per-process peak
+RSS was 66.2 MiB with a worst aggregate bound of 96.3 MiB on
+the two-consumer lab legs, and every leg's losses stayed
+explicitly accounted. Those are historical development
+observations, not current-artifact results; a rebuilt package
+re-runs the lane.
 
 ## Soak
 
