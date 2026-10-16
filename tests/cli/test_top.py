@@ -111,6 +111,27 @@ def main():
           repr(p.stderr))
     check("device-name-filter-shown", "[device: testdev0]" in p.stdout)
 
+    # Replay over a capture recorded under a device selection:
+    # the recorded filter stays in the metric scopes, global
+    # rows survive, and the display filter composes with it.
+    SEL = os.path.join(REPO, "tests", "fixtures", "reader",
+                       "selection-retained")
+    p = run(["top", "--interval", "1s", SEL])
+    check("sel-replay-exit", p.returncode == 0,
+          "exit %d: %s" % (p.returncode, p.stderr))
+    check("sel-replay-filter",
+          "(filter: testdev0)" in p.stdout)
+    check("sel-replay-global",
+          "conversion_requests = 1" in p.stdout)
+    p = run(["top", "--interval", "1s", "--device", "nope", SEL])
+    check("sel-display-exit", p.returncode == 0)
+    check("sel-display-none", "{device=" not in p.stdout)
+    check("sel-display-global",
+          "conversion_requests = 1" in p.stdout)
+    check("sel-display-warn-once",
+          p.stderr.count("matches no known device") == 1,
+          repr(p.stderr))
+
     # Hostile filter bytes: the header stays one line with no
     # terminal escape, and the warning echoes the same escape.
     hostile = "a\x1b[2J\nb\tc\rd\x07e\x7ff"

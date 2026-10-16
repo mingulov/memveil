@@ -47,6 +47,9 @@ comptime _FIXED_TAIL_METRICS = 10
 comptime _MAX_DETAILED_DEVICES = (
     _MAX_METRICS - 2 - _FIXED_TAIL_METRICS - 2
 ) // 2
+# Rendered metric scopes share the external report bound: a
+# complete scope may name at most 256 characters.
+comptime REPORT_SCOPE_MAX = 256
 
 
 @fieldwise_init
@@ -321,7 +324,7 @@ def _group_scope_label(has_device: Bool, device: String) -> String:
     even when a capture filter is active: the filter selects which
     detail events were recorded, and its effect on the producer's
     aggregate channel is unknown. Only detail-side scopes carry the
-    filter phrase (see _unscoped_devices).
+    filter phrase (see _bounded_device_scope).
     """
     if has_device:
         return "device " + device
@@ -492,6 +495,7 @@ struct AttemptAnalyzer:
     var _disagree_text: String
     var _disagree_extra: Int
     var _disagree_refs: List[String]
+    var _scope_elided: Bool
 
     def __init__(out self, session: Session):
         self._session = session.copy()
@@ -531,6 +535,7 @@ struct AttemptAnalyzer:
         self._disagree_text = String("")
         self._disagree_extra = 0
         self._disagree_refs = List[String]()
+        self._scope_elided = False
 
     def _note_fixed(mut self, text: String):
         """Record one structural limitation (few by construction)."""
@@ -549,21 +554,32 @@ struct AttemptAnalyzer:
             or self._saw_sync
         )
 
-    def _unscoped_devices(self) -> String:
-        """Device phrase for totals spanning the recorded set.
+    def _bounded_device_scope(mut self, window: String, suffix: String) -> String:
+        """Complete windowed device scope within REPORT_SCOPE_MAX.
 
         Without a capture filter the totals cover every recorded
         device; with one, only the filtered subset was recorded, so
         the literal filter stays in the scope instead of claiming
-        all devices.
+        all devices. The literal is named only when the complete
+        scope fits the report bound; otherwise the scope elides to
+        `recorded devices (filtered)` and the flag preserves the
+        exact selector in the report limitations.
         """
+        var phrase = String("all devices")
         if self._session.has_filter_device:
-            return (
+            phrase = (
                 "recorded devices (filter: "
                 + self._session.filter_device
                 + ")"
             )
-        return String("all devices")
+        var full = window + ", " + phrase + suffix
+        if (
+            not self._session.has_filter_device
+            or full.count_codepoints() <= REPORT_SCOPE_MAX
+        ):
+            return full^
+        self._scope_elided = True
+        return window + ", recorded devices (filtered)" + suffix
 
     def consume(mut self, ev: Event) raises:
         """Fold one validated event into the reduction."""
@@ -1221,7 +1237,9 @@ struct AttemptAnalyzer:
             or producer_detail == "complete_for_scope"
             or producer_detail == "partial"
         )
-        var all_scope = window + ", " + self._unscoped_devices() + ", detail channel"
+        var all_scope = self._bounded_device_scope(
+            window, String(", detail channel")
+        )
         if usable_detail:
             out.metrics.append(
                 _detail_metric(
@@ -1508,7 +1526,7 @@ struct AttemptAnalyzer:
                 )
                 + " metric budget exhausted."
             )
-        var uscope = window + ", " + self._unscoped_devices()
+        var uscope = self._bounded_device_scope(window, String(""))
         # Placeholders are skipped exactly when the composed
         # engine's tracker rows cover the same (name,
         # dimensions) key, so each key keeps one measurement
@@ -1681,6 +1699,7 @@ struct AttemptAnalyzer:
         has_pools: Bool,
         has_regions: Bool,
     ) raises -> Report:
+        self._scope_elided = False
         var out = Report()
         out.session_id = self._session.session_id
         out.synthetic = self._session.synthetic
@@ -1869,6 +1888,17 @@ struct AttemptAnalyzer:
                 " capture does not by itself establish settlement."
             )
             out.findings.append(f^)
+        if self._scope_elided:
+            # The reader bounds the recorded selector to 256
+            # characters, so this limitation always fits the
+            # 1024-character report budget. Fixed notes always
+            # survive the merge, so the literal is never withheld.
+            self._note_fixed(
+                "Device scope elided to fit the 256-character"
+                " report bound; capture recorded devices (filter: "
+                + self._session.filter_device
+                + ")."
+            )
         self._merge_limitations(out)
         return out^
 

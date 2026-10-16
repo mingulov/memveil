@@ -25,6 +25,7 @@ from memveil.capture.normalize import (
     hex_to_bytes,
     is_pci_scope,
     normalize_attempt,
+    selection_matches,
 )
 
 
@@ -278,8 +279,78 @@ def test_hex_roundtrip() raises:
         assert_true(raised)
 
 
+def test_selection_exact_match() raises:
+    assert_true(
+        selection_matches(
+            name_bytes(String("0000:00:1f.2")),
+            String("0000:00:1f.2"),
+        )
+    )
+    assert_true(
+        not selection_matches(
+            name_bytes(String("0000:00:1f.2")),
+            String("0000:00:1f.3"),
+        )
+    )
+
+
+def test_selection_no_partial_match() raises:
+    # Substrings, prefixes, and case variants never match:
+    # the selector is literal exact bytes.
+    var name = name_bytes(String("0000:00:1f.2"))
+    assert_true(not selection_matches(name, String("1f.2")))
+    assert_true(not selection_matches(name, String("0000:00:1f.")))
+    assert_true(not selection_matches(name, String("0000:00:1F.2")))
+    assert_true(not selection_matches(name, String("")))
+
+
+def test_selection_glob_is_literal() raises:
+    # Shell metacharacters match only themselves.
+    assert_true(
+        selection_matches(
+            name_bytes(String("dev*0")), String("dev*0")
+        )
+    )
+    assert_true(
+        not selection_matches(
+            name_bytes(String("devX0")), String("dev*0")
+        )
+    )
+    assert_true(
+        not selection_matches(
+            name_bytes(String("dev*0")), String("devX0")
+        )
+    )
+
+
+def test_selection_non_utf8_never_matches() raises:
+    var raw = List[UInt8]()
+    raw.append(UInt8(0xFF))
+    raw.append(UInt8(0xFE))
+    assert_true(not selection_matches(raw, String("??")))
+    assert_true(not selection_matches(raw, String("")))
+
+
+def test_selection_whitespace_is_literal() raises:
+    assert_true(
+        selection_matches(
+            name_bytes(String(" dev0 ")), String(" dev0 ")
+        )
+    )
+    assert_true(
+        not selection_matches(
+            name_bytes(String(" dev0 ")), String("dev0")
+        )
+    )
+
+
 def run() raises -> Int:
     var suite = TestSuite()
+    suite.test[test_selection_exact_match]()
+    suite.test[test_selection_no_partial_match]()
+    suite.test[test_selection_glob_is_literal]()
+    suite.test[test_selection_non_utf8_never_matches]()
+    suite.test[test_selection_whitespace_is_literal]()
     suite.test[test_catalog_entries]()
     suite.test[test_pci_scope_vectors]()
     suite.test[test_hex_roundtrip]()

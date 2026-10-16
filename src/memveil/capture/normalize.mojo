@@ -326,3 +326,21 @@ def normalize_attempt(
         decoded.ktime,
     )
     return out^
+
+
+def selection_matches(name: List[UInt8], selector: String) -> Bool:
+    """True when raw name bytes exactly equal the selector.
+
+    The capture-time device selector is literal bytes: no
+    glob, prefix, case folding, or trimming. An empty
+    selector never matches; callers only invoke this when
+    a selector is present. Non-UTF8 names can never match
+    a String selector.
+    """
+    var want = selector.as_bytes()
+    if len(name) != len(want):
+        return False
+    for i in range(len(name)):
+        if name[i] != want[i]:
+            return False
+    return True

@@ -1013,6 +1013,115 @@ def test_many_devices_2042_withheld() raises:
     assert_true(not found)
 
 
+def _att_repeat(unit: String, n: Int) -> String:
+    var out = String("")
+    for _ in range(n):
+        out += unit
+    return out^
+
+
+def _att_eacute() raises -> String:
+    var raw = List[UInt8]()
+    raw.append(UInt8(0xC3))
+    raw.append(UInt8(0xA9))
+    try:
+        return String(from_utf8=Span(raw))
+    except:
+        raise Error("bad test utf-8")
+
+
+def _analyze_with_filter(dir: String, selector: String) raises -> Report:
+    var r = read_capture(dir, False, default_limits())
+    var s = r.session.copy()
+    s.has_filter_device = True
+    s.filter_device = selector
+    var a = AttemptAnalyzer(s^)
+    while r.has_more():
+        a.consume(r.next_event())
+    return a.finish(r.session.window_end_ns, r.partial)
+
+
+def test_long_filter_scopes_bounded() raises:
+    # A 256-character recorded selector must still render a
+    # schema-valid report: every metric scope stays within 256
+    # characters, elided scopes say so, and the exact literal
+    # survives in the report limitations.
+    var literal = String("longsel-") + _att_repeat(String("z"), 248)
+    assert_equal(literal.count_codepoints(), 256)
+    var rep = analyze(
+        String("tests/fixtures/reader/selection-long"), False
+    )
+    for i in range(len(rep.metrics)):
+        var scope = rep.metrics[i].scope
+        assert_true(scope.count_codepoints() <= 256)
+        assert_true(scope.find(literal) == -1)
+    var head = metric_by_name(
+        rep, String("bounce_attempts"), String("")
+    )
+    assert_true(
+        head.scope.find(String("recorded devices (filtered)")) != -1
+    )
+    assert_true(has_limitation(rep, literal))
+
+
+def test_filter_scope_exact_fit_boundary() raises:
+    # Window [1000000000,4000000000) labels 30 characters, so
+    # the fixed frame around the selector fits a 181-character
+    # selector at exactly 256 characters and elides at 182.
+    var fitting = _att_repeat(String("q"), 181)
+    var fit = _analyze_with_filter(
+        String("tests/fixtures/reader/selection-unmatched"), fitting
+    )
+    var head = metric_by_name(
+        fit, String("bounce_attempts"), String("")
+    )
+    assert_equal(head.scope.count_codepoints(), 256)
+    assert_true(head.scope.find(fitting) != -1)
+    assert_true(not has_limitation(fit, String("elided")))
+    var past = _att_repeat(String("q"), 182)
+    var over = _analyze_with_filter(
+        String("tests/fixtures/reader/selection-unmatched"), past
+    )
+    var ohead = metric_by_name(
+        over, String("bounce_attempts"), String("")
+    )
+    assert_true(ohead.scope.count_codepoints() <= 256)
+    assert_true(
+        ohead.scope.find(String("recorded devices (filtered)")) != -1
+    )
+    assert_true(has_limitation(over, past))
+
+
+def test_filter_scope_counts_codepoints() raises:
+    # Scope fit is measured in characters, not bytes: 181
+    # two-byte codepoints still name the selector verbatim at
+    # exactly 256 characters, while 182 elide with the exact
+    # literal preserved in the limitations.
+    var eacute = _att_eacute()
+    var fitting = _att_repeat(eacute, 181)
+    assert_equal(fitting.count_codepoints(), 181)
+    var fit = _analyze_with_filter(
+        String("tests/fixtures/reader/selection-unmatched"), fitting
+    )
+    var head = metric_by_name(
+        fit, String("bounce_attempts"), String("")
+    )
+    assert_equal(head.scope.count_codepoints(), 256)
+    assert_true(head.scope.find(fitting) != -1)
+    var past = _att_repeat(eacute, 182)
+    var over = _analyze_with_filter(
+        String("tests/fixtures/reader/selection-unmatched"), past
+    )
+    var ohead = metric_by_name(
+        over, String("bounce_attempts"), String("")
+    )
+    assert_true(ohead.scope.count_codepoints() <= 256)
+    assert_true(
+        ohead.scope.find(String("recorded devices (filtered)")) != -1
+    )
+    assert_true(has_limitation(over, past))
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_format_u64]()
@@ -1051,6 +1160,9 @@ def run() raises -> Int:
     suite.test[test_finish_horizon]()
     suite.test[test_many_devices_2041_clean]()
     suite.test[test_many_devices_2042_withheld]()
+    suite.test[test_long_filter_scopes_bounded]()
+    suite.test[test_filter_scope_exact_fit_boundary]()
+    suite.test[test_filter_scope_counts_codepoints]()
     suite^.run()
     return 0
 

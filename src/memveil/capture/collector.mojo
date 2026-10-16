@@ -39,6 +39,7 @@ from memveil.capture.normalize import (
     NormalizeError,
     decode_payload,
     normalize_attempt,
+    selection_matches,
 )
 from memveil.capture.pools import (
     POOL_SWIOTLB_ALLOCATOR,
@@ -86,6 +87,7 @@ from memveil.platform.outcome import OpOut
 from memveil.platform.reader import (
     EvidenceReader,
     fs_type_name,
+    is_valid_utf8,
     open_evidence_reader,
 )
 from memveil.platform.signal import SignalOut, SignalSource
@@ -123,6 +125,7 @@ comptime FLAG_BYTE_COVERAGE = UInt64(32)
 
 comptime MAP_TYPE_ARRAY = 2
 comptime MAP_TYPE_RINGBUF = 27
+comptime DETAIL_SCOPE_MAX = 256
 
 
 @fieldwise_init
@@ -342,6 +345,8 @@ struct CollectorConfig(Copyable, Movable):
     var lifecycle_ring_bytes: UInt32
     var has_copy: Bool
     var copy_ring_bytes: UInt32
+    var has_device_filter: Bool
+    var device_filter: String
 
     def __init__(out self):
         self.duration_s = UInt64(60)
@@ -368,6 +373,8 @@ struct CollectorConfig(Copyable, Movable):
         self.lifecycle_ring_bytes = UInt32(0)
         self.has_copy = False
         self.copy_ring_bytes = UInt32(0)
+        self.has_device_filter = False
+        self.device_filter = String("")
 
 
 @fieldwise_init
@@ -646,6 +653,7 @@ struct Collector:
     var duration_omitted: UInt64
     var signal_omitted: UInt64
     var rejected: UInt64
+    var filtered: UInt64
     var write_failed: UInt64
     var max_persisted_ts: UInt64
     var start_ns: UInt64
@@ -716,6 +724,7 @@ struct Collector:
         self.duration_omitted = UInt64(0)
         self.signal_omitted = UInt64(0)
         self.rejected = UInt64(0)
+        self.filtered = UInt64(0)
         self.write_failed = UInt64(0)
         self.max_persisted_ts = UInt64(0)
         self.start_ns = UInt64(0)
@@ -1563,6 +1572,17 @@ struct Collector:
         var gate = self._gate(clock, signal, deadline)
         if gate != String(""):
             return gate
+        # Malformed names stay malformed under a filter;
+        # selection runs on valid names before interning so
+        # dropped devices consume no catalog ids.
+        if not is_valid_utf8(attempt.name):
+            self.rejected += UInt64(1)
+            return String("")
+        if self.cfg.has_device_filter and not selection_matches(
+            attempt.name, self.cfg.device_filter
+        ):
+            self.filtered += UInt64(1)
+            return String("")
         var normalized: NormalizedAttempt
         try:
             normalized = normalize_attempt(attempt, self.table)
@@ -2220,6 +2240,9 @@ struct Collector:
             var delivered_d = final.delivered - start.delivered
             var malformed_d = final.malformed - start.malformed
             var dropped_d = final.dropped - start.dropped
+            # Selection drops are bridge-delivered payloads
+            # with a known disposition, so they belong in
+            # the delivery identity (never in loss totals).
             var app_total = (
                 self.persisted
                 + self.size_omitted
@@ -2227,6 +2250,7 @@ struct Collector:
                 + self.signal_omitted
                 + self.rejected
                 + self.write_failed
+                + self.filtered
             )
             if delivered_d != app_total:
                 return String("unfinalizable")
@@ -2491,7 +2515,9 @@ struct Collector:
         out.window_end_ns = self.end_ns
         out.has_baseline_start_ns = True
         out.baseline_start_ns = self.start_pair_ts
-        out.has_filter_device = False
+        out.has_filter_device = self.cfg.has_device_filter
+        if self.cfg.has_device_filter:
+            out.filter_device = self.cfg.device_filter
         out.finalized = True
         out.has_end_reason = True
         out.end_reason = self.stop_reason
@@ -2687,6 +2713,31 @@ struct Collector:
                 + String(" copy/sync_request")
             )
         scope += String(" events")
+        if self.cfg.has_device_filter:
+            # Deliberate narrowing is recorded scope, never
+            # loss: the dropped count stays out of the loss
+            # total below.
+            var phrase = (
+                String("; device selection ")
+                + self.cfg.device_filter
+                + String(" dropped ")
+                + format_u64(self.filtered)
+                + String(" non-matching attempts")
+            )
+            # The selector alone may span the whole scope
+            # bound, so it is named only when the phrase
+            # fits: the exact selector always stays in
+            # capture.filters.device, and the elided form
+            # still records the dropped count.
+            var candidate = scope + phrase
+            if candidate.count_codepoints() <= DETAIL_SCOPE_MAX:
+                scope = candidate
+            else:
+                scope += (
+                    String("; device selection dropped ")
+                    + format_u64(self.filtered)
+                    + String(" non-matching attempts")
+                )
         if self.loss_known():
             var submit_fail = self._submit_fail_total()
             var total = (

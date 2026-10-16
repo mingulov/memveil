@@ -77,6 +77,8 @@ def test_service_options_defaults() raises:
     assert_equal(opts.lc_object, String(""))
     assert_equal(opts.cp_object, String(""))
     assert_equal(opts.capabilities, String(""))
+    assert_equal(opts.device, String(""))
+    assert_true(not opts.has_device)
 
 
 def test_service_caps_default_attempt() raises:

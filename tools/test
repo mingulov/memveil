@@ -353,6 +353,15 @@ suite_reports() {
     expect_json "f13-literal-filter-json" \
         tests/fixtures/reader/literal-filter 0 \
         "capture OK: 3 events, 3 attempts, 9216 requested bytes"
+    expect_json "selection-retained-json" \
+        tests/fixtures/reader/selection-retained 0 \
+        "capture OK: 7 events, 1 attempts, 4096 requested bytes"
+    expect_json "selection-unmatched-json" \
+        tests/fixtures/reader/selection-unmatched 0 \
+        "capture OK: 2 events, 0 attempts, 0 requested bytes"
+    expect_json "selection-long-json" \
+        tests/fixtures/reader/selection-long 0 \
+        "capture OK: 2 events, 0 attempts, 0 requested bytes"
     expect_json "provenance-json" \
         tests/fixtures/reader/provenance 0 \
         "capture OK: 0 events, 0 attempts, 0 requested bytes"
@@ -421,6 +430,80 @@ PYEOF
         report_bad "literal-filter-text: unqualified all-devices claim"
     else
         report_ok "literal-filter-text (filter qualified, no all-devices claim)"
+    fi
+    "$BIN" report "$ROOT/tests/fixtures/reader/selection-retained" \
+        >"$TMP/sel-ret.txt" 2>"$TMP/err"
+    if [ "$?" -ne 0 ]; then
+        report_bad "selection-retained-text: want exit 0"
+    elif ! grep -q "recorded devices (filter: testdev0)" "$TMP/sel-ret.txt"; then
+        report_bad "selection-retained-text: filter literal missing from scope"
+    elif ! grep -q "conversion_requests = 1" "$TMP/sel-ret.txt"; then
+        report_bad "selection-retained-text: global conversion row missing"
+    elif grep -A1 -F "conversion_requests = 1 count" "$TMP/sel-ret.txt" \
+        | grep -q "filter:"; then
+        report_bad "selection-retained-text: conversion scope carries the filter"
+    elif ! grep -q "successful_allocations = 1" "$TMP/sel-ret.txt"; then
+        report_bad "selection-retained-text: retained lifecycle row missing"
+    elif ! grep -q "copy_original_to_bounce_bytes = 4096" "$TMP/sel-ret.txt"; then
+        report_bad "selection-retained-text: retained copy row missing"
+    elif ! grep -q "counter comparison inconclusive" "$TMP/sel-ret.txt"; then
+        report_bad "selection-retained-text: counter alternative not inconclusive"
+    else
+        report_ok "selection-retained-text (filter qualified, globals retained)"
+    fi
+    "$BIN" report "$ROOT/tests/fixtures/reader/selection-unmatched" \
+        >"$TMP/sel-un.txt" 2>"$TMP/err"
+    if [ "$?" -ne 0 ]; then
+        report_bad "selection-unmatched-text: want exit 0"
+    elif ! grep -q "recorded devices (filter: never-seen)" "$TMP/sel-un.txt"; then
+        report_bad "selection-unmatched-text: filter literal missing from scope"
+    elif grep -q "{device=" "$TMP/sel-un.txt"; then
+        report_bad "selection-unmatched-text: device rows without a match"
+    elif ! grep -q "devices (0):" "$TMP/sel-un.txt"; then
+        report_bad "selection-unmatched-text: empty catalog not shown"
+    else
+        report_ok "selection-unmatched-text (unavailable name finalizes empty)"
+    fi
+    "$BIN" report "$ROOT/tests/fixtures/reader/selection-long" \
+        >"$TMP/sel-long.txt" 2>"$TMP/err"
+    if [ "$?" -ne 0 ]; then
+        report_bad "selection-long-text: want exit 0"
+    elif ! grep -q "recorded devices (filtered)" "$TMP/sel-long.txt"; then
+        report_bad "selection-long-text: elided scope missing"
+    elif ! grep -q "longsel-zzzz" "$TMP/sel-long.txt"; then
+        report_bad "selection-long-text: exact selector missing from output"
+    elif ! python3 - "$TMP/sel-long.txt" <<'PYEOF'
+import sys
+for line in open(sys.argv[1], errors="replace"):
+    if line.startswith("    scope: ") and len(line.rstrip("\n")) - 11 > 256:
+        raise SystemExit("overlong scope line: %d chars" % (len(line.rstrip("\n")) - 11))
+PYEOF
+    then
+        report_bad "selection-long-text: scope line exceeds 256 characters"
+    else
+        report_ok "selection-long-text (scopes bounded, selector preserved)"
+    fi
+    "$BIN" report --format json \
+        "$ROOT/tests/fixtures/reader/selection-long" \
+        >"$TMP/sel-long.json" 2>"$TMP/err"
+    if [ "$?" -ne 0 ]; then
+        report_bad "selection-long-scopes: want exit 0"
+    elif ! python3 - "$TMP/sel-long.json" <<'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+literal = "longsel-" + "z" * 248
+assert len(literal) == 256, len(literal)
+for m in d["metrics"]:
+    assert len(m["scope"]) <= 256, (m["name"], len(m["scope"]))
+    assert literal not in m["scope"], m["name"]
+    assert len(m.get("notes", "")) <= 1024, m["name"]
+assert any(literal in lim for lim in d["limitations"]), "literal lost"
+assert all(len(lim) <= 1024 for lim in d["limitations"]), "limitation too long"
+PYEOF
+    then
+        report_bad "selection-long-scopes: scope bound or literal check failed"
+    else
+        report_ok "selection-long-scopes (every scope bounded, literal kept)"
     fi
 
     expect_text_exit "partial-tail-recovered" \
@@ -3299,6 +3382,7 @@ suite_record() {
     run_unit_file tests/unit/test_bridge_snapshot.mojo || return 1
     run_unit_file tests/unit/test_record_ownership.mojo || return 1
     run_unit_file tests/unit/test_run_service.mojo || return 1
+    run_unit_file tests/unit/test_selection.mojo || return 1
     run_unit_file tests/unit/test_artifact_files.mojo || return 1
     run_unit_file tests/unit/test_qualify.mojo || return 1
     echo "record: unit suites passed"
@@ -3322,7 +3406,7 @@ suite_record() {
             rfailed=1
             return 0
         fi
-        if ! grep -qF "$want_err" "$TMP/$cname.err"; then
+        if ! grep -qF -- "$want_err" "$TMP/$cname.err"; then
             echo "record: case $cname missing [$want_err]" >&2
             cat "$TMP/$cname.err" >&2
             rfailed=1
@@ -3351,6 +3435,13 @@ suite_record() {
     rexpect duration-suffix 2 "bad decimal" "" -- \
         --output "$TMP/r" --object "$ROOT/tests/fixtures/elf/ok.o" \
         --duration 60s
+    rexpect device-empty 2 "--device needs a value" "" -- \
+        --output "$TMP/r-deve" --object "$ROOT/tests/fixtures/elf/ok.o" \
+        --device ""
+    devlong=$(python3 -c "print('d' * 257)")
+    rexpect device-long 2 "--device must be 1..256 characters" "" -- \
+        --output "$TMP/r-devl" --object "$ROOT/tests/fixtures/elf/ok.o" \
+        --device "$devlong"
     rexpect budget-low 3 "below 131072" "$TMP/r-low" -- \
         --output "$TMP/r-low" --object "$ROOT/tests/fixtures/elf/ok.o" \
         --bridge "$TMP/nolib.so" --max-events-bytes 131071

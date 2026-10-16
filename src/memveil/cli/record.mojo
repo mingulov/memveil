@@ -4,10 +4,12 @@
 
 ``run_record`` implements ``record --duration SEC --max-events-bytes
 N --output DIR [--object PATH] [--bridge PATH] [--profile ID]
-[--capability IDS] [--lc-object PATH] [--cp-object PATH]`` against
+[--capability IDS] [--lc-object PATH] [--cp-object PATH]
+[--device NAME]`` against
 the live host. ``run_record_with`` is the same flow against an
-explicit evidence root and profiles directory, so tests drive
-fixtures through the identical code path. Admission and
+explicit evidence root and profiles directory (plus an
+optional literal ``--device NAME`` attempt selector), so
+tests drive fixtures through the identical code path. Admission and
 collection run through the shared collection service; this
 module owns only record argument parsing, usage, dispatch, and
 rendering.
@@ -47,6 +49,7 @@ def record_usage() -> String:
         "       [--bridge PATH] [--profile ID|PATH]\n"
         "       [--profiles-dir DIR] [--capability IDS]\n"
         "       [--lc-object PATH] [--cp-object PATH]\n"
+        "       [--device NAME]\n"
         "\n"
         "Capture swiotlb bounce attempts into DIR. SEC defaults\n"
         "to 60; N defaults to 1073741824 (1 GiB) and must lie\n"
@@ -71,6 +74,14 @@ def record_usage() -> String:
         "bind the matching object bytes, else the run refuses\n"
         "naming the capability. Extra channels never run\n"
         "partial: without full narrow binding the run refuses.\n"
+        "\n"
+        "--device NAME keeps only the bounce attempts whose\n"
+        "observed device name is exactly NAME (a literal\n"
+        "exact match: no glob, prefix, or case folding).\n"
+        "Lifecycle/copy records and global counters, pool\n"
+        "samples, and conversions are always retained, and\n"
+        "the selector is recorded in the session capture\n"
+        "filters with its dropped-attempt count.\n"
         "\n"
         "Exit 4 for a finalized capture (including zero-event\n"
         "and signal stops), 3 when the run cannot start, 2 on\n"
@@ -179,6 +190,16 @@ def parse_record_args(args: List[String]) raises CliError -> RecordOptions:
             if args[i + 1] == "":
                 raise CliError("--capability needs a value")
             opts.capabilities = args[i + 1]
+            i += 2
+        elif tok == "--device":
+            if i + 1 >= len(args):
+                raise CliError("--device needs a value")
+            if args[i + 1] == "":
+                raise CliError("--device needs a value")
+            if args[i + 1].count_codepoints() > 256:
+                raise CliError("--device must be 1..256 characters")
+            opts.device = args[i + 1]
+            opts.has_device = True
             i += 2
         elif _is_option(tok):
             raise CliError("unknown option: " + tok)

@@ -163,6 +163,18 @@ bundle:
 (`--lc-object` and `--cp-object` override discovery
 for non-bundled objects.)
 
+To narrow one capture to a single device, pass its exact
+observed name:
+
+    sudo ./bin/memveil record --output /tmp/cap4 --device 0000:00:1f.2 \
+        --duration 10
+
+Only matching bounce attempts are kept; lifecycle/copy
+records and global counters, pool samples, and
+conversions are always retained. See
+[recording selection](recording-selection.md) for the
+full scope contract.
+
 Anything but the exact bound kernel and objects refuses with
 exit 3 instead of recording an unverified channel. On a
 qualified host the receipt admits the channel as `local-auto`;
