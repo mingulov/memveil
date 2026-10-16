@@ -14,8 +14,7 @@ from memveil.capture.collector import (
 )
 from memveil.capture.live import (
     LiveWriter,
-    _residual_tail,
-    _strip_residual_tail,
+    _construction_note,
 )
 from memveil.capture.tee import RefreshSink, TeeWriter
 from memveil.model.encode import encode_event_line
@@ -115,38 +114,52 @@ def test_empty_abandon_succeeds() raises:
     assert_equal(w.abandon(), String(""))
 
 
-def test_residual_tail() raises:
+def test_construction_note_renders_typed_bits() raises:
+    # The once-only abandon note renders from typed
+    # residual bits alone; no message text is parsed.
+    assert_equal(_construction_note(UInt8(0)), String(""))
     assert_equal(
-        _residual_tail(String("fstat failed: errno 5")),
-        String(""),
+        _construction_note(UInt8(1)),
+        String("construction residuals: events"),
     )
     assert_equal(
-        _residual_tail(
-            String("fstat failed: errno 5; residuals: events,dir")
-        ),
-        String("events,dir"),
+        _construction_note(UInt8(2)),
+        String("construction residuals: dir"),
     )
     assert_equal(
-        _residual_tail(String("x; residuals: events")),
-        String("events"),
+        _construction_note(UInt8(3)),
+        String("construction residuals: events,dir"),
+    )
+    assert_equal(
+        _construction_note(UInt8(255)),
+        String("construction residuals: events,dir"),
     )
 
 
-def test_strip_residual_tail() raises:
-    assert_equal(
-        _strip_residual_tail(String("fstat failed: errno 5")),
-        String("fstat failed: errno 5"),
+def test_failed_create_reports_no_prose_account() raises:
+    # Failed construction keeps the cause message free of
+    # any residual suffix and leaves no rollback account
+    # behind: abandon stays empty, repeatedly.
+    var scratch = _mkdtemp()
+    var w = LiveWriter()
+    var small = w.create(scratch + String("/small"), 1024)
+    assert_true(not small.ok)
+    assert_true(
+        not _contains_text(small.message, String("; residuals:"))
     )
-    assert_equal(
-        _strip_residual_tail(
-            String("fstat failed: errno 5; residuals: events,dir")
-        ),
-        String("fstat failed: errno 5"),
+    assert_equal(w.abandon(), String(""))
+    assert_equal(w.abandon(), String(""))
+    var w2 = LiveWriter()
+    var target = scratch + String("/taken")
+    assert_true(w2.create(target, 131072).ok)
+    var w3 = LiveWriter()
+    var exists = w3.create(target, 131072)
+    assert_true(not exists.ok)
+    assert_true(
+        not _contains_text(exists.message, String("; residuals:"))
     )
-    assert_equal(
-        _strip_residual_tail(String("x; residuals: events")),
-        String("x"),
-    )
+    assert_equal(w3.abandon(), String(""))
+    assert_equal(w3.abandon(), String(""))
 
 
 def test_create_guards() raises:
@@ -1363,8 +1376,8 @@ def run() raises -> Int:
     suite.test[test_lifecycle]()
     suite.test[test_misuse_before_create]()
     suite.test[test_empty_abandon_succeeds]()
-    suite.test[test_residual_tail]()
-    suite.test[test_strip_residual_tail]()
+    suite.test[test_construction_note_renders_typed_bits]()
+    suite.test[test_failed_create_reports_no_prose_account]()
     suite.test[test_create_guards]()
     suite.test[test_abandon_and_discard]()
     suite.test[test_tee_forwards_bytes_identical]()

@@ -38,7 +38,10 @@ comptime _ENOENT = 2
 comptime _EEXIST = 17
 
 
-@fieldwise_init
+comptime RESIDUAL_EVENTS = UInt8(1)
+comptime RESIDUAL_DIR = UInt8(2)
+
+
 struct WriteError(Copyable, Writable):
     """One writer failure: kind routes the collector decision.
 
@@ -47,10 +50,48 @@ struct WriteError(Copyable, Writable):
     attempted), append_failed (attempted append failed;
     prefix recovered), fatal (unrecoverable mid-append),
     misuse (use after finalize/close).
+
+    Residuals is a bitmask of stuck construction
+    artifacts (RESIDUAL_EVENTS, RESIDUAL_DIR), nonzero
+    only when creation failed and its unwind left owned
+    artifacts behind. The message keeps the failure
+    cause alone; residual accounting reads the typed
+    field, never the message text.
     """
 
     var kind: String
     var message: String
+    var residuals: UInt8
+
+    def __init__(out self, var kind: String, var message: String):
+        self.kind = kind^
+        self.message = message^
+        self.residuals = UInt8(0)
+
+    def __init__(
+        out self, var kind: String, var message: String, residuals: UInt8
+    ):
+        self.kind = kind^
+        self.message = message^
+        self.residuals = residuals & UInt8(3)
+
+
+def residual_text(residuals: UInt8) -> String:
+    """Canonical stuck-artifact list for typed residual bits.
+
+    Bound: at most the two known construction artifacts,
+    in fixed order ("", "events", "dir", "events,dir").
+    Unknown bits are ignored so the list can never name
+    anything outside the owned construction artifacts.
+    """
+    var bits = residuals & UInt8(3)
+    if bits == UInt8(3):
+        return String("events,dir")
+    if bits == RESIDUAL_EVENTS:
+        return String("events")
+    if bits == RESIDUAL_DIR:
+        return String("dir")
+    return String("")
 
 
 @fieldwise_init
@@ -439,9 +480,11 @@ struct EventWriter(Movable):
             # failure leaves no orphaned artifacts. No pins
             # exist yet to compare against, so the window is
             # the microseconds since O_EXCL creation. Unwind
-            # failures ride along in the raised error: no
-            # writer exists to carry residuals.
-            var stuck = String("")
+            # failures ride along as typed residual bits in
+            # the raised error: no writer exists to carry
+            # residuals, and the message keeps the cause
+            # alone.
+            var stuck_events = False
             try:
                 var ev_name = _cstr("events.ndjson")
                 var r = external_call["unlinkat", Int32](
@@ -450,32 +493,28 @@ struct EventWriter(Movable):
                     Int32(0),
                 )
                 if Int(r) != 0 and _errno_now() != _ENOENT:
-                    stuck = String("events")
+                    stuck_events = True
             except:
-                stuck = String("events")
-            try:
-                var r = external_call["unlinkat", Int32](
-                    parent_fd,
-                    Span(base_cstr).unsafe_ptr(),
-                    Int32(_AT_REMOVEDIR),
-                )
-                if Int(r) != 0 and _errno_now() != _ENOENT:
-                    if stuck != String(""):
-                        stuck = stuck + String(",")
-                    stuck = stuck + String("dir")
-            except:
-                if stuck != String(""):
-                    stuck = stuck + String(",")
-                stuck = stuck + String("dir")
+                stuck_events = True
+            var stuck_dir = False
+            var rdir = external_call["unlinkat", Int32](
+                parent_fd,
+                Span(base_cstr).unsafe_ptr(),
+                Int32(_AT_REMOVEDIR),
+            )
+            if Int(rdir) != 0 and _errno_now() != _ENOENT:
+                stuck_dir = True
             _close_quiet(ev_fd)
             _close_quiet(dir_fd)
             _close_quiet(parent_fd)
-            if stuck != String(""):
+            if stuck_events or stuck_dir:
+                var bits = UInt8(0)
+                if stuck_events:
+                    bits |= RESIDUAL_EVENTS
+                if stuck_dir:
+                    bits |= RESIDUAL_DIR
                 raise WriteError(
-                    e.kind.copy(),
-                    e.message.copy()
-                    + String("; residuals: ")
-                    + stuck,
+                    e.kind.copy(), e.message.copy(), bits
                 )
             raise e^
         self._dir_path = dir_path.copy()

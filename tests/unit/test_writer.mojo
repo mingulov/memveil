@@ -16,8 +16,12 @@ from memveil.capture.writer import (
     CLOSING_RESERVE,
     MAX_EVENTS_BUDGET,
     MIN_EVENTS_BUDGET,
+    RESIDUAL_DIR,
+    RESIDUAL_EVENTS,
     EventWriter,
+    WriteError,
     _require_private_empty_dir,
+    residual_text,
 )
 from memveil.platform.reader import (
     _geteuid_live,
@@ -615,8 +619,65 @@ def test_append_closing_uses_reserve() raises:
     assert_equal(outcome.status, String("finalized"))
 
 
+def test_write_error_residuals_default_none() raises:
+    var e = WriteError(String("io"), String("fstat failed: errno 5"))
+    assert_equal(e.residuals, UInt8(0))
+    assert_equal(residual_text(e.residuals), String(""))
+
+
+def test_write_error_residual_bits_render() raises:
+    assert_equal(residual_text(RESIDUAL_EVENTS), String("events"))
+    assert_equal(residual_text(RESIDUAL_DIR), String("dir"))
+    assert_equal(
+        residual_text(RESIDUAL_EVENTS | RESIDUAL_DIR),
+        String("events,dir"),
+    )
+    var e = WriteError(
+        String("io"),
+        String("fstat failed: errno 5"),
+        RESIDUAL_EVENTS | RESIDUAL_DIR,
+    )
+    assert_equal(e.message, String("fstat failed: errno 5"))
+    assert_equal(residual_text(e.residuals), String("events,dir"))
+
+
+def test_write_error_ignores_prose_residuals() raises:
+    # Altered-message control: residual-looking prose in the
+    # message never becomes typed residuals; the typed bits
+    # render from the field alone, whatever the prose says.
+    var e = WriteError(
+        String("io"),
+        String("fstat failed: errno 5; residuals: events,dir"),
+    )
+    assert_equal(e.residuals, UInt8(0))
+    assert_equal(residual_text(e.residuals), String(""))
+    var local = WriteError(
+        String("io"),
+        String("LOCALIZED fstat failure; residus: events,dir"),
+    )
+    assert_equal(local.residuals, UInt8(0))
+    assert_equal(residual_text(local.residuals), String(""))
+    var typed = WriteError(
+        String("io"),
+        String("unrelated; residuals: dir"),
+        RESIDUAL_EVENTS,
+    )
+    assert_equal(residual_text(typed.residuals), String("events"))
+
+
+def test_write_error_residuals_bounded() raises:
+    var e = WriteError(String("io"), String("x"), UInt8(255))
+    assert_equal(e.residuals, UInt8(3))
+    assert_equal(residual_text(UInt8(255)), String("events,dir"))
+    assert_equal(residual_text(UInt8(4)), String(""))
+
+
 def run() raises -> Int:
     var suite = TestSuite()
+    suite.test[test_write_error_residuals_default_none]()
+    suite.test[test_write_error_residual_bits_render]()
+    suite.test[test_write_error_ignores_prose_residuals]()
+    suite.test[test_write_error_residuals_bounded]()
     suite.test[test_create_append_finalize]()
     suite.test[test_exists_variants]()
     suite.test[test_budget_range]()

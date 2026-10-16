@@ -16,85 +16,42 @@ from memveil.capture.collector import (
     GroupOut,
     WriterSource,
 )
-from memveil.capture.writer import EventWriter, WriteError
+from memveil.capture.writer import (
+    EventWriter,
+    WriteError,
+    residual_text,
+)
 
 
 def _writer_message(e: WriteError) -> String:
     return e.kind + String(": ") + e.message
 
 
-def _residual_mark_at(message: String) -> Int:
-    """Byte index of '; residuals: ', or -1 when absent."""
-    var mark = String("; residuals: ").as_bytes()
-    var body = message.as_bytes()
-    var i = 0
-    while i + len(mark) <= len(body):
-        var j = 0
-        while j < len(mark):
-            if body[i + j] != mark[j]:
-                break
-            j += 1
-        if j == len(mark):
-            return i
-        i += 1
-    return -1
+def _construction_note(residuals: UInt8) -> String:
+    """Display text for stuck construction artifacts, or '' when none.
 
-
-def _residual_tail(message: String) -> String:
-    """Text after '; residuals: ', or '' when absent.
-
-    The construction unwind reports stuck artifacts in the
-    raised error; this lifts the stuck list so a failed
-    create still leaves a rollback account behind.
+    Rendered from the typed residual bits alone. The
+    adapter boundary reports them exactly once, via
+    abandon(): the creation error keeps the failure
+    cause, never a residual suffix, so rollback cannot
+    repeat the list. Error message text is never parsed.
     """
-    var at = _residual_mark_at(message)
-    if at < 0:
+    var tail = residual_text(residuals)
+    if tail == String(""):
         return String("")
-    try:
-        var tail = List[UInt8]()
-        var body = message.as_bytes()
-        var k = at + len(String("; residuals: ").as_bytes())
-        while k < len(body):
-            tail.append(body[k])
-            k += 1
-        return String(from_utf8=Span(tail))
-    except:
-        return String("unparseable")
-
-
-def _strip_residual_tail(message: String) -> String:
-    """Head before '; residuals: '; full message when absent.
-
-    The adapter boundary reports stuck construction
-    artifacts exactly once, via abandon(): the creation
-    error keeps the failure cause, never the residual
-    suffix, so rollback cannot repeat the list.
-    """
-    var at = _residual_mark_at(message)
-    if at < 0:
-        return message.copy()
-    try:
-        var head = List[UInt8]()
-        var body = message.as_bytes()
-        var k = 0
-        while k < at:
-            head.append(body[k])
-            k += 1
-        return String(from_utf8=Span(head))
-    except:
-        return message.copy()
+    return String("construction residuals: ") + tail
 
 
 struct LiveWriter(WriterSource):
     """WriterSource backed by one EventWriter."""
 
     var _writer: Optional[EventWriter]
-    var _construction_residual: String
+    var _construction_residuals: UInt8
     var _final_ids: List[UInt64]
 
     def __init__(out self):
         self._writer = None
-        self._construction_residual = String("")
+        self._construction_residuals = UInt8(0)
         self._final_ids = List[UInt64]()
 
     def create(mut self, path: String, budget: Int) -> CreateOut:
@@ -104,14 +61,8 @@ struct LiveWriter(WriterSource):
             var w = EventWriter(path, budget)
             self._writer = Optional(w^)
         except e:
-            var stuck = _residual_tail(e.message)
-            if stuck != String(""):
-                self._construction_residual = stuck
-                return CreateOut(
-                    False,
-                    e.kind.copy(),
-                    _strip_residual_tail(e.message),
-                )
+            if e.residuals != UInt8(0):
+                self._construction_residuals = e.residuals
             return CreateOut(False, e.kind.copy(), e.message.copy())
         return CreateOut(True, String(""), String(""))
 
@@ -193,10 +144,10 @@ struct LiveWriter(WriterSource):
         # behind reports them once, so the refusal becomes a
         # rollback failure instead of a clean refusal.
         if not self._writer:
-            if self._construction_residual != String(""):
-                var stuck = self._construction_residual.copy()
-                self._construction_residual = String("")
-                return String("construction residuals: ") + stuck
+            if self._construction_residuals != UInt8(0):
+                var bits = self._construction_residuals
+                self._construction_residuals = UInt8(0)
+                return _construction_note(bits)
             return String("")
         var w = self._writer.take()
         return w.abandon()
