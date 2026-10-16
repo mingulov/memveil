@@ -1358,7 +1358,9 @@ suite_preview_package() {
 
 suite_provenance() {
     python3 "$ROOT/tests/provenance/test_provenance.py" || return 1
-    python3 "$ROOT/tests/provenance/test_provenance.py" --selftest
+    python3 "$ROOT/tests/provenance/test_provenance.py" --selftest \
+        || return 1
+    python3 "$ROOT/tests/provenance/test_input_pins.py"
 }
 
 suite_source_export() {
@@ -1500,33 +1502,18 @@ suite_rpm_journey() {
         trap 'rm -rf "$RTMP"' EXIT
         mkdir -p "$RTMP/SOURCES" "$RTMP/BUILD" "$RTMP/RPMS" \
             "$RTMP/SRPMS" "$RTMP/BUILDROOT"
-        # Source0 is the exact tracked plus unignored-untracked
-        # set, so the .rpm tests the tree as-is (on a clean
-        # tree this equals git archive HEAD; ignored build
-        # residue never enters). Outside a checkout, tar the
-        # source-export tree minus generated directories.
-        if git -C "$ROOT" rev-parse --is-inside-work-tree \
-            >/dev/null 2>&1; then
-            (cd "$ROOT" && { git ls-files -z; git ls-files \
-                --others --exclude-standard -z; } | tar --null \
-                --no-recursion -czf \
-                "$RTMP/SOURCES/memveil-$SPEC_VER.tar.gz" \
-                --transform "s,^,memveil-$SPEC_VER/," -T -) \
-                || {
-                echo "rpm-journey: Source0 tar failed" >&2
-                return 1
-            }
-        else
-            (cd "$ROOT" && tar -czf \
-                "$RTMP/SOURCES/memveil-$SPEC_VER.tar.gz" \
-                --transform "s,^./,memveil-$SPEC_VER/," \
-                --exclude='./build' --exclude='./dist' \
-                --exclude='./.pixi' --exclude='./.git' \
-                --exclude='*__pycache__*' \
-                --exclude='./.pytest_cache' .) || {
-                echo "rpm-journey: Source0 tar failed" >&2
-                return 1
-            }
+        # Source0 is the tree's own file set (tools/rpm-source0
+        # owns the selection: an owning checkout contributes
+        # exactly its tracked plus unignored-untracked files,
+        # while a plain tree under an unrelated parent
+        # repository never inherits that parent's files).
+        if ! "$ROOT/tools/rpm-source0" --root "$ROOT" \
+            --version "$SPEC_VER" \
+            --out "$RTMP/SOURCES/memveil-$SPEC_VER.tar.gz" \
+            >"$RTMP/rpm-source0.log" 2>&1; then
+            echo "rpm-journey: Source0 tar failed" >&2
+            cat "$RTMP/rpm-source0.log" >&2
+            return 1
         fi
         cp "$LMB_PACKAGE" "$RTMP/SOURCES/$SRC1" || {
             echo "rpm-journey: Source1 copy failed" >&2

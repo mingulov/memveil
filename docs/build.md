@@ -8,7 +8,9 @@ exact); the `pixi.lock` file carries authoritative conda package hashes.
 
 ## Prerequisites
 
-- `pixi` 0.81.0 exactly, to create the Mojo environment.
+- `pixi` 0.81.0 exactly, to create the Mojo environment
+  (`python3 tools/install-pixi` installs the locked release
+  after verifying its digest; see below).
 - System `clang` and `bpftool` at the locked versions, for C eBPF programs.
 - `python3` for development-only validation tooling.
 - `python3-pytest` (`apt install python3-pytest`): the pytest-driven suites fail loudly without it.
@@ -158,3 +160,65 @@ bytes to the verified digests, and any unowned, missing, or
 mismatched payload fails the package. Archive streams
 decompress with the `zstd` CLI, a packaging prerequisite like
 patchelf.
+
+## Pinned executable inputs
+
+Every executable input that enters a build or automation
+lane is either pinned to an immutable identity verified
+before use, or an ambient OS-generation input verified
+fail-closed against exact versions and retained in
+receipts. Pinning every ambient OS byte is out of scope:
+drift there is detected, not silently accepted, because
+the build refuses unexpected tool versions.
+
+Packaging-only helpers stay outside that claim as
+documented ambient exceptions: `tools/package` runs
+`patchelf` (RUNPATH normalization) after an availability
+check without recording its version; `tools/package-deb`
+additionally runs `strip` (release ELF), `readelf`
+(dependency floor derivation), and `dpkg-deb` (assembly)
+the same way; and the runtime provenance check shells
+out to `zstd` (archive decompression) after an
+availability check only. The `.deb` control records the
+observed `dpkg-deb` and `patchelf` versions
+(`X-Memveil-Build-Tools`); the bundle manifest and the
+build receipt carry no packaging-helper identities.
+These helpers can change while every build-tool check
+passes, so reproducing a byte-identical package needs
+the same host toolset.
+
+| Input | Immutable identity | Verified by |
+|---|---|---|
+| Automation actions | Full commit SHA plus the tag comment in `.github/workflows/*.yml` | Provenance gate |
+| pixi installer | Versioned release tarball plus `release_sha256` in `toolchain.lock.json` | `tools/install-pixi`, provenance and input-pins gates |
+| Conda toolchain | `pixi.lock` hashes with `--frozen` resolution and exact first-line checks | `tools/build` |
+| libbpf source | `tarball_sha256` in `toolchain.lock.json` | `tools/build` fetch, build receipt |
+| libbpf-mojo bridge | `tarball_sha256` in `toolchain.lock.json` | `tools/build`, build receipt, packager |
+| rpm Source0 | Owned selection: an owning checkout contributes tracked plus unignored-untracked files, never a parent's set | `tools/rpm-source0`, Source0 tests |
+| apt tools, runner image | Verified ambient: exact versions in `toolchain.lock.json`, floors where noted | `tools/build` refusal, receipts |
+| Packaging helpers (`patchelf`, `strip`, `zstd`, `dpkg-deb`, `readelf`) | Ambient exception: availability-checked at packaging time, no admission pin | `.deb` control records `dpkg-deb`/`patchelf` versions only |
+
+Refresh routes, one input at a time with the affected lanes
+re-run:
+
+- Actions: resolve the tag to its commit with `git ls-remote`
+  against the action repository (corroborate with the
+  published tag listing), then update the SHA and the tag
+  comment together.
+- pixi: set the new `version`, `release_asset`,
+  `release_url`, and `release_sha256` together; confirm the
+  digest by downloading the versioned asset independently and
+  running `tools/install-pixi` from a clean prefix.
+- Conda, libbpf, bridge: update the lock, the vendored bytes
+  where applicable, and the recorded hashes together; the
+  build and the provenance gate re-verify each side.
+- Ambient tools: re-qualify the new versions, then update the
+  expected lines in the lock; builds keep refusing anything
+  else.
+
+`build/build-receipt.json` retains the observed tool versions
+and the consumed dependency digests for the build; the bundle
+`MANIFEST.json` carries the source digest, receipt hash, and
+dependency identities, and the `.deb` control fields (`X-`
+entries) carry the revision, bridge digest, and observed
+`dpkg-deb`/`patchelf` versions into the artifacts.

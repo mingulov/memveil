@@ -41,7 +41,9 @@ files, never hardcoded); no maintainer scripts (the private
 lib needs no ldconfig, no collection runs at install);
 DEBIAN/md5sums is generated over the payload for dpkg --verify;
 no setuid bits or file capabilities. X-Memveil-Revision and
-X-LMB-Tarball-SHA256 record the exact source and bridge bytes.
+X-LMB-Tarball-SHA256 record the exact source and bridge bytes;
+X-Memveil-Build-Tools records the exact dpkg-deb and patchelf
+versions that assembled the package.
 
 Third-party origin: the conda/pixi Mojo toolchain cannot enter
 Debian, so this package is built outside the archive for a
@@ -373,7 +375,25 @@ def write_changelog(licdir, upstream, memveil_rev):
         handle.write(buffer.getvalue())
 
 
-def control_text(upstream, memveil_rev, lmb_sha, depends):
+def tool_line(argv):
+    """First version line of a required packaging tool.
+
+    Fails closed when the tool errors or prints no version:
+    the .deb records the exact packager versions, never a
+    blank.
+    """
+    proc = run(argv)
+    if proc.returncode != 0:
+        fail("%s --version failed" % argv[0])
+    text = proc.stdout if proc.stdout.strip() else proc.stderr
+    first = text.splitlines()[0].strip() if text.strip() else ""
+    if not first:
+        fail("%s printed no version" % argv[0])
+    return first
+
+
+def control_text(upstream, memveil_rev, lmb_sha, depends,
+                 build_tools):
     lines = [
         "Package: %s" % PACKAGE,
         "Version: %s-1" % upstream,
@@ -386,6 +406,7 @@ def control_text(upstream, memveil_rev, lmb_sha, depends):
         LONG_DESC,
         "X-Memveil-Revision: %s" % memveil_rev,
         "X-LMB-Tarball-SHA256: %s" % lmb_sha,
+        "X-Memveil-Build-Tools: %s" % build_tools,
         "",
     ]
     return "\n".join(lines)
@@ -421,6 +442,9 @@ def main(argv):
     if shutil.which("strip") is None:
         fail("strip is required to strip the staged release ELF "
              "(apt install binutils)")
+    build_tools = "dpkg-deb=%s; patchelf=%s" % (
+        tool_line(["dpkg-deb", "--version"]),
+        tool_line(["patchelf", "--version"]))
 
     work = tempfile.mkdtemp(prefix="memveil-deb-")
     try:
@@ -581,7 +605,8 @@ def main(argv):
             DEB_DEPENDS_BASE, glibc_floor(staged_elf))
         with open(os.path.join(debdir, "control"), "w") as handle:
             handle.write(control_text(upstream, memveil_rev,
-                                      lmb_sha, depends))
+                                      lmb_sha, depends,
+                                      build_tools))
 
         write_md5sums(root)
         fix_modes(root)

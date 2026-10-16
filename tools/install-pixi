@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Install exactly the locked pixi release, verified before use.
+
+Reads the pixi version, release URL, and sha256 from
+toolchain.lock.json, downloads the release tarball (or reuses
+a verified --cache copy without network), refuses mismatched
+or unavailable bytes, installs the single pixi binary under
+PREFIX/bin, and requires its --version to equal the locked
+version. Nothing is installed unless every check passes.
+Hashing and extraction bind to one immutable in-memory
+snapshot: the cache path is never re-read after hashing, so
+a concurrent cache replacement cannot swap installed bytes.
+
+Usage: tools/install-pixi [--lock FILE] [--prefix DIR]
+                          [--cache FILE]
+  --lock FILE    toolchain lock (default: this repository's
+                 toolchain.lock.json)
+  --prefix DIR   install prefix (default: $HOME/.pixi)
+  --cache FILE   reuse a verified tarball copy here, and keep
+                 fresh downloads here for later offline reuse
+Exit 0 when the installed binary verifies, 1 on a download,
+digest, layout, version, or install failure, 2 on invalid
+usage. Standard library only.
+"""
+
+import hashlib
+import io
+import json
+import os
+import re
+import subprocess
+import sys
+import tarfile
+import tempfile
+import urllib.request
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def fail(message):
+    print("install-pixi: %s" % message, file=sys.stderr)
+    return 1
+
+
+def load_pin(lock_path):
+    try:
+        with open(lock_path, "r", encoding="utf-8") as handle:
+            lock = json.load(handle)
+        pin = lock["toolchain"]["pixi"]
+        version = pin["version"]
+        url = pin["release_url"]
+        sha = pin["release_sha256"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return None, "lock unreadable: %s" % exc
+    if not version or not isinstance(version, str):
+        return None, "lock pixi version is empty"
+    if not url or not isinstance(url, str):
+        return None, "lock pixi release_url is empty"
+    if not isinstance(sha, str) or not HEX64.match(sha):
+        return None, "lock pixi release_sha256 is not a digest"
+    return {"version": version, "url": url, "sha": sha}, ""
+
+
+def read_snapshot(path):
+    """Whole file bytes, or (None, error)."""
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(), ""
+    except OSError as exc:
+        return None, "%s" % exc
+
+
+def fetch(pin, cache):
+    """Return one verified tarball byte snapshot, or (None, error).
+
+    The digest check and the later extraction both bind to
+    these same bytes: no path is re-read after hashing, so a
+    shared-cache replacement between the reads cannot swap
+    the installed bytes.
+    """
+    if cache and os.path.isfile(cache):
+        data, _ = read_snapshot(cache)
+        if data is not None \
+                and hashlib.sha256(data).hexdigest() == pin["sha"]:
+            print("install-pixi: verified cache %s" % cache)
+            return data, ""
+        print("install-pixi: cache digest differs; refetching")
+    if cache:
+        parent = os.path.dirname(os.path.abspath(cache))
+    else:
+        parent = tempfile.gettempdir()
+    try:
+        os.makedirs(parent, exist_ok=True)
+    except OSError as exc:
+        return None, "cannot create %s: %s" % (parent, exc)
+    fd, tmp = tempfile.mkstemp(prefix="pixi-release-",
+                               suffix=".tar.gz", dir=parent)
+    os.close(fd)
+    try:
+        print("install-pixi: fetch %s" % pin["url"])
+        urllib.request.urlretrieve(pin["url"], tmp)
+    except Exception as exc:  # noqa: BLE001 - any fetch failure
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return None, "download failed: %s" % exc
+    data, error = read_snapshot(tmp)
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    if data is None:
+        return None, "download unreadable: %s" % error
+    if hashlib.sha256(data).hexdigest() != pin["sha"]:
+        return None, "sha256 mismatch for %s; want %s" % (
+            pin["url"], pin["sha"])
+    if cache:
+        fd, staging = tempfile.mkstemp(
+            prefix="pixi-release-", suffix=".tar.gz", dir=parent)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+            os.replace(staging, cache)
+        except OSError as exc:
+            try:
+                os.unlink(staging)
+            except OSError:
+                pass
+            return None, "cannot keep cache %s: %s" % (cache, exc)
+    return data, ""
+
+
+def install_from(data, pin, prefix):
+    """Install the single binary from a verified snapshot.
+
+    data is the exact bytes fetch() hashed: extraction never
+    touches the cache or download path again. Returns 0 or
+    prints and returns 1.
+    """
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+            members = tar.getmembers()
+            names = [member.name for member in members]
+            if names != ["pixi"] or not members[0].isfile():
+                print("install-pixi: tarball must hold exactly the "
+                      "single pixi binary, got: %s" % ", ".join(names),
+                      file=sys.stderr)
+                return 1
+            reader = tar.extractfile(members[0])
+            if reader is None:
+                print("install-pixi: cannot read pixi member",
+                      file=sys.stderr)
+                return 1
+            payload = reader.read()
+    except (OSError, tarfile.TarError) as exc:
+        print("install-pixi: tarball unreadable: %s" % exc,
+              file=sys.stderr)
+        return 1
+    bindir = os.path.join(prefix, "bin")
+    try:
+        os.makedirs(bindir, exist_ok=True)
+    except OSError as exc:
+        print("install-pixi: cannot create %s: %s" % (bindir, exc),
+              file=sys.stderr)
+        return 1
+    fd, staging = tempfile.mkstemp(prefix="pixi-", dir=bindir)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+        os.chmod(staging, 0o755)
+        try:
+            proc = subprocess.run(
+                [staging, "--version"], stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True)
+        except OSError as exc:
+            print("install-pixi: cannot run staged binary: %s"
+                  % exc, file=sys.stderr)
+            return 1
+        first = proc.stdout.splitlines()[0] \
+            if proc.stdout else ""
+        want = "pixi %s" % pin["version"]
+        if proc.returncode != 0 or first.strip() != want:
+            print("install-pixi: staged binary reports %r, "
+                  "want exactly %r" % (first.strip(), want),
+                  file=sys.stderr)
+            return 1
+        target = os.path.join(bindir, "pixi")
+        os.replace(staging, target)
+    except OSError as exc:
+        print("install-pixi: install failed: %s" % exc,
+              file=sys.stderr)
+        return 1
+    finally:
+        try:
+            os.unlink(staging)
+        except OSError:
+            pass
+    print("install-pixi: %s (%s)"
+          % (os.path.join(bindir, "pixi"), want))
+    return 0
+
+
+def usage():
+    print(__doc__, file=sys.stderr)
+
+
+def main(argv):
+    lock_path = os.path.join(ROOT, "toolchain.lock.json")
+    prefix = os.path.join(os.path.expanduser("~"), ".pixi")
+    cache = None
+    args = list(argv)
+    while args:
+        opt = args.pop(0)
+        if opt in ("--help", "-h"):
+            print(__doc__)
+            return 0
+        if opt == "--lock" and args:
+            lock_path = args.pop(0)
+            continue
+        if opt == "--prefix" and args:
+            prefix = args.pop(0)
+            continue
+        if opt == "--cache" and args:
+            cache = args.pop(0)
+            continue
+        usage()
+        return 2
+    pin, error = load_pin(lock_path)
+    if pin is None:
+        return fail(error)
+    data, error = fetch(pin, cache)
+    if data is None:
+        return fail(error)
+    return install_from(data, pin, prefix)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

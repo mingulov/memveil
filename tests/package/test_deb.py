@@ -280,6 +280,9 @@ def test_control_fields(engine_version):
     lock = json.load(open(os.path.join(
         REPO, "toolchain.lock.json")))
     assert lmb == lock["dependencies"]["libbpf-mojo"]["tarball_sha256"]
+    tools = deb_field("X-Memveil-Build-Tools").strip()
+    assert tools.startswith("dpkg-deb=") \
+        and "; patchelf=" in tools, tools
     want_name = "memveil_%s-1_amd64.deb" % engine_version
     assert os.path.basename(DEB) == want_name, DEB
 

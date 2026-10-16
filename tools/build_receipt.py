@@ -37,6 +37,8 @@ PROBES = [
     ("mojo", ["pixi", "run", "--frozen", "mojo", "--version"]),
     ("clang", ["clang", "--version"]),
     ("bpftool", ["bpftool", "--version"]),
+    ("cmake", ["cmake", "--version"]),
+    ("ninja", ["ninja", "--version"]),
     ("python", ["python3", "--version"]),
 ]
 

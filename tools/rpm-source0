@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Build the rpm Source0 tarball from this tree's own files.
+
+Inside an owning checkout the selection is exactly the tracked
+plus unignored-untracked set, so the .rpm tests the tree as-is
+(on a clean tree this equals git archive HEAD; ignored build
+residue never enters). A plain tree under an unrelated parent
+repository, or outside any repository, tars the tree minus
+generated directories instead of inheriting the parent's file
+set. Git repository, index, and configuration overrides
+from the environment can neither relocate the ownership
+check nor shrink the selected file set. Members land under
+the memveil-<version>/ prefix the spec's Source0 expects.
+
+Usage: tools/rpm-source0 --root DIR --version VER --out FILE
+Exit 0 on success, 1 on a selection or archive failure, 2 on
+invalid usage. Standard library only.
+"""
+
+import os
+import re
+import subprocess
+import sys
+
+VERSION_PATTERN = re.compile(r"[0-9][A-Za-z0-9.+~]*\Z")
+
+GENERATED_EXCLUDES = (
+    "./build", "./dist", "./.pixi", "./.git",
+    "*__pycache__*", "./.pytest_cache", "./.mypy_cache",
+)
+
+
+def git_env():
+    """Environment without Git overrides.
+
+    Repository, index, and configuration overrides are all
+    removed, so neither the ownership comparison nor the
+    file set can be relocated or shrunk from the
+    environment.
+    """
+    return {key: value for key, value in os.environ.items()
+            if not key.startswith("GIT_")}
+
+
+def owns_git_root(path):
+    """True when path is its own canonical Git top level."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", path, "rev-parse", "--show-toplevel"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, env=git_env())
+    except OSError:
+        return False
+    return (proc.returncode == 0 and bool(proc.stdout.strip())
+            and os.path.realpath(proc.stdout.strip())
+            == os.path.realpath(path))
+
+
+def git_selection(root):
+    """NUL-joined tracked plus unignored-untracked paths."""
+    entries = b""
+    for args in (["ls-files", "-z"],
+                 ["ls-files", "--others", "--exclude-standard",
+                  "-z"]):
+        try:
+            proc = subprocess.run(
+                ["git", "-C", root] + args,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=git_env())
+        except OSError as exc:
+            return None, "git failed: %s" % exc
+        if proc.returncode != 0:
+            return None, "git %s failed: %s" % (
+                " ".join(args), proc.stderr.decode(
+                    "utf-8", "replace").strip()[-200:])
+        entries += proc.stdout
+    names = [name for name in entries.split(b"\0") if name]
+    if not names:
+        return None, "empty source selection"
+    return entries, ""
+
+
+def run_tar(args, root, data=None):
+    try:
+        proc = subprocess.run(
+            ["tar"] + args, cwd=root, input=data,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as exc:
+        return "tar failed: %s" % exc
+    if proc.returncode != 0:
+        return "tar failed: %s" % proc.stderr.decode(
+            "utf-8", "replace").strip()[-300:]
+    return ""
+
+
+def usage():
+    print("usage: rpm-source0 --root DIR --version VER --out FILE",
+          file=sys.stderr)
+
+
+def main(argv):
+    args = list(argv)
+    if args and args[0] in ("--help", "-h"):
+        print(__doc__)
+        return 0
+    root = None
+    version = None
+    out = None
+    while args:
+        opt = args.pop(0)
+        if opt == "--root" and args:
+            root = args.pop(0)
+            continue
+        if opt == "--version" and args:
+            version = args.pop(0)
+            continue
+        if opt == "--out" and args:
+            out = args.pop(0)
+            continue
+        usage()
+        return 2
+    if root is None or version is None or out is None \
+            or not os.path.isdir(root):
+        usage()
+        return 2
+    if not VERSION_PATTERN.match(version):
+        print("rpm-source0: bad version %r" % version,
+              file=sys.stderr)
+        return 2
+    prefix = "memveil-%s/" % version
+    if owns_git_root(root):
+        entries, error = git_selection(root)
+        if entries is None:
+            print("rpm-source0: %s" % error, file=sys.stderr)
+            return 1
+        error = run_tar(
+            ["--null", "--no-recursion", "-czf", out,
+             "--transform", "s,^,%s," % prefix, "-T", "-"],
+            root, data=entries)
+        if error:
+            print("rpm-source0: %s" % error, file=sys.stderr)
+            return 1
+    else:
+        tar_args = ["-czf", out, "--transform",
+                    "s,^./,%s," % prefix]
+        for exclude in GENERATED_EXCLUDES:
+            tar_args += ["--exclude", exclude]
+        tar_args += ["."]
+        error = run_tar(tar_args, root)
+        if error:
+            print("rpm-source0: %s" % error, file=sys.stderr)
+            return 1
+    print("rpm-source0: %s" % out)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -161,6 +161,14 @@ def test_glibc_floor_ignores_non_glibc():
     assert DEB_PKG.parse_glibc_floor("") is None
 
 
+def test_control_text_records_build_tools():
+    text = DEB_PKG.control_text(
+        "0.1.0", "export", "l" * 64, "libc6 (>= 2.38)",
+        "dpkg-deb=dpkg-deb 1.23.7; patchelf=patchelf 0.18.0")
+    assert "X-Memveil-Build-Tools: dpkg-deb=dpkg-deb 1.23.7; " \
+        "patchelf=patchelf 0.18.0" in text.splitlines(), text
+
+
 CLEAN_TRACE = """\
 100 execve("/b/bin/memveil", ["report"], 0x7f) = 0
 100 openat(AT_FDCWD, "/b/lib/libK.so", O_RDONLY) = -1 ENOENT (No such file)
@@ -583,6 +591,13 @@ class TestBuildReceipt:
         assert receipt.cmd_finalize(
             str(root), "build", str(pre), probes) == 0
         return root / "build" / "build-receipt.json"
+
+    def test_default_probes_cover_checked_toolchain(
+            self, receipt):
+        names = [name for name, _ in receipt.PROBES]
+        for name in ("pixi", "mojo", "clang", "bpftool", "cmake",
+                     "ninja", "python"):
+            assert name in names, names
 
     def test_finalize_writes_versioned_receipt(
             self, receipt, probes, tmp_path):

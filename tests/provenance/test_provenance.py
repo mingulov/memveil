@@ -158,6 +158,27 @@ def spdx_of(path):
     return match.group(1) if match else None
 
 
+VENDOR_TOKEN = "unknown-linux-musl"
+
+
+def redacted_lock_text(lock):
+    """Lock JSON with exactly the validated vendor token exempted.
+
+    The pixi release pin names the upstream musl asset, whose
+    target triple legitimately contains "unknown" as the vendor
+    field. Only that token occurrence inside each release field
+    is removed before placeholder scanning, so placeholder text
+    hiding anywhere else in those fields still fails the gate.
+    """
+    redacted = json.dumps(lock)
+    for key in ("release_url", "release_asset"):
+        field = lock["toolchain"]["pixi"].get(key, "")
+        if field and VENDOR_TOKEN in field:
+            redacted = redacted.replace(
+                field, field.replace(VENDOR_TOKEN, "", 1), 1)
+    return redacted
+
+
 # Schema families: filename prefix, current-version lock key,
 # retained-versions lock key. The session family uses the bare
 # schema_version key. A family without a retained key ships only
@@ -277,6 +298,21 @@ def run_selftest():
     _, _, inconsistent = schema_file_status(real, malformed)
     check("retained-malformed-fails", len(inconsistent) == 1,
           "; ".join(inconsistent))
+    with open(os.path.join(ROOT, "toolchain.lock.json")) as handle:
+        full_lock = json.load(handle)
+    redacted = redacted_lock_text(full_lock).lower()
+    check("placeholder-real-lock-clean",
+          "unknown" not in redacted and "tbd" not in redacted,
+          redacted[:200])
+    tampered = json.loads(json.dumps(full_lock))
+    tampered_asset = "pixi-TBD-unknown-linux-musl.tar.gz"
+    tampered["toolchain"]["pixi"]["release_asset"] = tampered_asset
+    tampered["toolchain"]["pixi"]["release_url"] = \
+        "https://github.com/prefix-dev/pixi/releases/download/v%s/%s" \
+        % (tampered["toolchain"]["pixi"]["version"], tampered_asset)
+    redacted = redacted_lock_text(tampered).lower()
+    check("placeholder-tampered-asset-detected",
+          "tbd" in redacted, redacted[:200])
     return results
 
 
@@ -338,9 +374,70 @@ def main(argv):
           and pin.get("version") and pin.get("source_commit")
           and HEX64.match(pin.get("tarball_sha256", "")),
           json.dumps(pin, sort_keys=True)[:160])
-    dumped = json.dumps(lock).lower()
+    # The pixi release pin names the upstream x86-64 musl asset,
+    # whose target triple legitimately contains "unknown" as the
+    # vendor field; only that validated token is exempted before
+    # scanning for placeholder text, so placeholders hiding
+    # elsewhere in the release fields still fail the gate.
+    dumped = redacted_lock_text(lock).lower()
     check("lock-no-unknown",
           "unknown" not in dumped and "tbd" not in dumped)
+
+    pixi_pin = lock["toolchain"]["pixi"]
+    pixi_asset_ok = (
+        pixi_pin.get("release_asset", "").startswith("pixi-")
+        and pixi_pin.get("release_asset", "").endswith(".tar.gz"))
+    pixi_url_ok = (pixi_pin.get("release_url")
+                   == "https://github.com/prefix-dev/pixi/releases/"
+                   "download/v%s/%s"
+                   % (pixi_pin.get("version", ""),
+                      pixi_pin.get("release_asset", "")))
+    check("lock-pixi-release-pin",
+          bool(pixi_pin.get("version"))
+          and pixi_asset_ok and pixi_url_ok
+          and HEX64.match(pixi_pin.get("release_sha256", "")),
+          json.dumps(pixi_pin, sort_keys=True)[:160])
+
+    workflows = sorted(glob.glob(os.path.join(
+        ROOT, ".github", "workflows", "*.yml")))
+    check("ci-workflows-present", len(workflows) >= 1,
+          "found %d" % len(workflows))
+    uses_pattern = re.compile(
+        r"^\s*(?:-\s*)?uses:\s*(\S+)(?:\s+#\s*(.*?))?\s*$")
+    ref_pattern = re.compile(r"^[\w.-]+/[\w.-]+@[0-9a-f]{40}$")
+    tag_pattern = re.compile(r"^v\d+\.\d+\.\d+$")
+    for path in workflows:
+        base = os.path.basename(path)
+        with open(path) as handle:
+            text = handle.read()
+        refs = []
+        for lineno, line in enumerate(text.splitlines(), 1):
+            match = uses_pattern.match(line)
+            if match:
+                refs.append((lineno, match.group(1),
+                             (match.group(2) or "").strip()))
+        check("ci-actions-pinned-%s" % base,
+              len(refs) >= 1
+              and all(ref_pattern.match(ref) for _, ref, _ in refs)
+              and all(tag_pattern.match(tag) for _, _, tag in refs),
+              "; ".join("line %d: %s%s" % (lineno, ref,
+                                           " #%s" % tag if tag else "")
+                        for lineno, ref, tag in refs)[:200])
+        piped_shell = re.search(r"\|\s*(bash|sh)(\s|$|;|&)", text)
+        check("ci-no-piped-installers-%s" % base,
+              not piped_shell
+              and "pixi.sh/install.sh" not in text,
+              piped_shell.group(0).strip() if piped_shell else "")
+        check("ci-pixi-bootstrap-%s" % base,
+              "tools/install-pixi" in text)
+        runners = re.findall(r"^\s*runs-on:\s*(.+?)\s*$",
+                             text, re.M)
+        check("ci-runners-known-%s" % base,
+              len(runners) >= 1
+              and all(run in ("ubuntu-26.04",
+                              "[self-hosted, Linux, X64]")
+                             for run in runners),
+              "; ".join(runners)[:120])
 
     notices_path = os.path.join(ROOT, "THIRD-PARTY-NOTICES.md")
     check("notices-present", os.path.isfile(notices_path))
