@@ -15,6 +15,7 @@ from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
 
 from scripted import (
+    AppendFault,
     ScriptClock,
     ScriptKernel,
     ScriptSignal,
@@ -28,8 +29,10 @@ from scripted import (
 )
 from memveil.capture.collector import (
     CNT_FLAGS,
+    EXIT_ERROR,
     EXIT_OK,
     EXIT_PARTIAL,
+    EXIT_REFUSAL,
     FLAG_OBSERVED_WRAP,
     Collector,
     CollectorConfig,
@@ -589,6 +592,133 @@ def test_close_requires_ready() raises:
     assert_true(raised)
 
 
+def test_signal_storm_first_latch_stands() raises:
+    # A storm of pending signals latches once on the
+    # first: the immutable stop reason stands, the
+    # close-out completes, and terminal evidence stays
+    # honest. Ten pendings arrive; exactly one is
+    # observed (three quiet checks, then the latch).
+    # The close-out reads no signal state, so the
+    # storm's tail can neither disturb nor extend it.
+    var tmp = _stop_mkdtemp()
+    var cfg = CollectorConfig()
+    cfg.duration_s = UInt64(60)
+    cfg.max_events_bytes = 134217728
+    cfg.output = tmp + String("/cap")
+    cfg.profile_id = String("stop-storm-probe")
+    cfg.pid = 4242
+    var kernel = ScriptKernel()
+    kernel.add_poll(_stop_timeout(), 300)
+    _stop_zeros(kernel, 8, 4)
+    var clock = ScriptClock()
+    clock.add(UInt64(1000000000))
+    var signal = ScriptSignal()
+    for _ in range(3):
+        signal.add(String("none"))
+    for _ in range(10):
+        signal.add(String("pending"))
+    var writer = ScriptWriter()
+    var collector = Collector(cfg^)
+    var result = collector.run(kernel, clock, signal, writer)
+    assert_equal(result.exit_code, 4)
+    assert_equal(result.end_reason, String("signal"))
+    assert_equal(signal.checks, 4)
+    assert_equal(signal.idx, 4)
+    assert_equal(kernel.closes_done, 0)
+    var parsed = False
+    var s = Session()
+    try:
+        s = _stop_session(tmp + String("/cap"))
+        parsed = True
+    except:
+        parsed = False
+    assert_true(parsed)
+    assert_equal(s.end_reason, String("signal"))
+    assert_equal(s.stop.outcome, String("partial"))
+    assert_equal(s.stop.reason, String("quiescence unproven"))
+    assert_equal(s.stop.budget_ms, UInt64(5000))
+    assert_true(s.stop.elapsed_ms <= UInt64(5000))
+    assert_true(s.stop.admission_closed)
+    assert_true(not s.stop.quiescence_observed)
+    assert_true(not s.stop.busy_at_drain)
+    assert_true(s.stop.counters_valid)
+
+
+def test_refusal_closes_session_once() raises:
+    # A pre-readiness refusal releases the owned
+    # session exactly once: the rollback accounts for
+    # the resource instead of leaking it or closing
+    # twice.
+    var tmp = _stop_mkdtemp()
+    var cfg = CollectorConfig()
+    cfg.duration_s = UInt64(60)
+    cfg.max_events_bytes = 134217728
+    cfg.output = tmp + String("/cap")
+    cfg.profile_id = String("stop-refuse-probe")
+    cfg.pid = 4242
+    var kernel = ScriptKernel()
+    kernel.attach_out = OpOut(False, String("scripted attach failure"))
+    _stop_zeros(kernel, 2, 2)
+    var clock = ScriptClock()
+    clock.add(UInt64(1000000000))
+    var signal = ScriptSignal()
+    var writer = ScriptWriter()
+    var collector = Collector(cfg^)
+    var result = collector.run(kernel, clock, signal, writer)
+    assert_equal(result.exit_code, EXIT_REFUSAL)
+    assert_equal(result.end_reason, String("unknown"))
+    assert_equal(result.outcome, String("refused"))
+    assert_equal(kernel.closes_done, 1)
+
+
+def test_closing_snapshot_fault_keeps_readable_session() raises:
+    # Blocked output during close-out: the first
+    # closing snapshot append fails, the rollback
+    # group aborts, and the run degrades to error
+    # state. The session still finalizes readably
+    # (end reason error, stop evidence present) with
+    # zero committed closing bytes; the failure is
+    # loud, never a silent complete.
+    var tmp = _stop_mkdtemp()
+    var cfg = CollectorConfig()
+    cfg.duration_s = UInt64(0)
+    cfg.max_events_bytes = 134217728
+    cfg.output = tmp + String("/cap")
+    cfg.profile_id = String("stop-closing-probe")
+    cfg.pid = 4242
+    var kernel = ScriptKernel()
+    kernel.add_poll(_stop_timeout(), 300)
+    _stop_zeros(kernel, 8, 4)
+    var clock = ScriptClock()
+    clock.add(UInt64(1000000000))
+    var signal = ScriptSignal()
+    var writer = ScriptWriter()
+    writer.append_faults.append(AppendFault(1, String("io")))
+    var collector = Collector(cfg^)
+    var result = collector.run(kernel, clock, signal, writer)
+    assert_equal(result.exit_code, EXIT_ERROR)
+    assert_equal(result.end_reason, String("error"))
+    assert_equal(result.outcome, String("error"))
+    assert_equal(writer.appends, 1)
+    assert_equal(writer.committed_len(), 0)
+    var parsed = False
+    var s = Session()
+    try:
+        s = _stop_session(tmp + String("/cap"))
+        parsed = True
+    except:
+        parsed = False
+    assert_true(parsed)
+    assert_equal(s.end_reason, String("error"))
+    assert_true(
+        s.cap_bounce_attempts.reason.find(String("capture error")) != -1
+    )
+    assert_equal(s.stop.outcome, String("partial"))
+    assert_equal(s.stop.reason, String("quiescence unproven"))
+    assert_true(s.stop.admission_closed)
+    assert_true(not s.stop.busy_at_drain)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_clean_stop_completes]()
@@ -618,6 +748,9 @@ def run() raises -> Int:
     suite.test[test_failed_admission_close_partial]()
     suite.test[test_closeout_records_stop_evidence]()
     suite.test[test_closeout_detach_failure_partial]()
+    suite.test[test_signal_storm_first_latch_stands]()
+    suite.test[test_refusal_closes_session_once]()
+    suite.test[test_closing_snapshot_fault_keeps_readable_session]()
     suite^.run()
     return 0
 

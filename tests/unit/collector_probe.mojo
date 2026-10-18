@@ -717,6 +717,115 @@ def _script_drainbudget(dir: String):
     _run(dir, kernel, clock, signal, writer)
 
 
+def _script_stopbudget(dir: String):
+    """Close-out overruns the 5000 ms total: honest partial.
+
+    The clock jumps six seconds inside the drain, past
+    the stop budget but inside the 30 s drain poll
+    budget: the drain converges quietly, no BUSY is
+    recorded, and the stop evidence stays partial with
+    the measured overrun beside the budget.
+    """
+    var kernel = ScriptKernel()
+    kernel.add_poll(_timeout(), 200)
+    var zstats = _flow_stats(UInt64(0), UInt64(0))
+    for _ in range(5):
+        kernel.add_stats(zstats.copy())
+    _zeros(kernel, 0, 4)
+    var clock = ScriptClock()
+    var base = UInt64(1000000000)
+    clock.add(base)
+    clock.add(base + UInt64(1))
+    clock.add(base + UInt64(2))
+    clock.add(base + UInt64(3))
+    clock.add(base + UInt64(4))
+    var latch = base + UInt64(61000000001)
+    clock.add(latch)
+    clock.add(latch + UInt64(1))
+    clock.add(latch + UInt64(2))
+    clock.add(latch + UInt64(6000000003))
+    clock.add(latch + UInt64(6000000004))
+    clock.add(latch + UInt64(6000000005))
+    clock.add(latch + UInt64(6000000006))
+    var signal = ScriptSignal()
+    var writer = ScriptWriter()
+    _run(dir, kernel, clock, signal, writer)
+
+
+def _script_stuckdrain(dir: String):
+    """Producer never stops: 100000-poll bound, busy, unknown.
+
+    The clock freezes after the duration latch while
+    batches keep arriving: the drain consumes exactly
+    the poll-count bound, marks BUSY, and notes the
+    exhausted budget. Transport accounts exactly for
+    the consumed batches, so the capture finalizes
+    with honest busy evidence instead of going
+    unfinalizable.
+    """
+    var kernel = ScriptKernel()
+    var base = UInt64(1000000000)
+    kernel.add_poll(
+        _record_batch(UInt64(0), base + UInt64(10), UInt64(64)),
+        100000,
+    )
+    kernel.add_poll(_timeout(), 100)
+    kernel.add_stats(_flow_stats(UInt64(0), UInt64(0)))
+    var flow = _flow_stats(UInt64(100000), UInt64(100000))
+    kernel.add_stats(flow.copy())
+    kernel.add_stats(flow.copy())
+    _cuts(
+        kernel,
+        UInt64(100000),
+        UInt64(0),
+        UInt64(100000),
+        UInt64(0),
+        UInt64(0),
+        UInt64(0),
+    )
+    var clock = ScriptClock()
+    clock.step = UInt64(0)
+    for i in range(8):
+        clock.add(base + UInt64(i))
+    var signal = ScriptSignal()
+    var writer = ScriptWriter()
+    _run_dur(dir, kernel, clock, signal, writer, UInt64(0))
+
+
+def _script_stageddrain(dir: String):
+    """Five records stuck staged at final: busy, error shutdown.
+
+    The drain converges quietly, then the drain
+    snapshot finds five records staged that never
+    deliver: the stop evidence records BUSY at the
+    drain, and closing notes the unstaged remainder
+    instead of claiming a clean boundary.
+    """
+    var kernel = ScriptKernel()
+    kernel.add_poll(_timeout(), 200)
+    var zstats = _flow_stats(UInt64(0), UInt64(0))
+    for _ in range(3):
+        kernel.add_stats(zstats.copy())
+    var stuck = stats_ok(
+        UInt64(5), UInt64(0), UInt64(5), UInt64(0), UInt64(0)
+    )
+    kernel.add_stats(stuck.copy())
+    kernel.add_stats(stuck.copy())
+    _cuts(
+        kernel,
+        UInt64(0),
+        UInt64(0),
+        UInt64(0),
+        UInt64(0),
+        UInt64(0),
+        UInt64(0),
+    )
+    var clock = _clock(2)
+    var signal = ScriptSignal()
+    var writer = ScriptWriter()
+    _run(dir, kernel, clock, signal, writer)
+
+
 def _script_delaysubmit(dir: String):
     """Submit-fail increment lands mid-protocol; cut exact."""
     var kernel = ScriptKernel()
@@ -1703,6 +1812,12 @@ def main() raises:
         _script_confirmact(args[2])
     elif args[1] == String("drainbudget"):
         _script_drainbudget(args[2])
+    elif args[1] == String("stopbudget"):
+        _script_stopbudget(args[2])
+    elif args[1] == String("stuckdrain"):
+        _script_stuckdrain(args[2])
+    elif args[1] == String("stageddrain"):
+        _script_stageddrain(args[2])
     elif args[1] == String("delaysubmit"):
         _script_delaysubmit(args[2])
     elif args[1] == String("latesubmit"):

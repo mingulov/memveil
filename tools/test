@@ -1873,6 +1873,40 @@ suite_attempts() {
         "unknown: drain budget exhausted"
     mgap drainbudget 4 "detail closure unproven: drain budget exhausted"
     mreplay4 drainbudget 0 0 0 0
+    mcase stopbudget 4 103 5 4 14 1494 \
+        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
+    mqual stopbudget complete_for_scope 0 complete_for_scope 0 proven
+    python3 "$JASSERT" field "$TMP/stopbudget/session.json" \
+        stop.budget_ms 5000 || afailed=1
+    python3 "$JASSERT" field "$TMP/stopbudget/session.json" \
+        stop.elapsed_ms 6102 || afailed=1
+    python3 "$JASSERT" field "$TMP/stopbudget/session.json" \
+        stop.busy_at_drain false || afailed=1
+    python3 "$JASSERT" field "$TMP/stopbudget/session.json" \
+        stop.drained_records 0 || afailed=1
+    mreplay4 stopbudget 0 0 0 0
+    mcase stuckdrain 4 100100 3 4 100011 1904 \
+        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
+    mqual stuckdrain partial null complete_for_scope 0 \
+        "unknown: drain budget exhausted"
+    mgap stuckdrain 4 "detail closure unproven: drain budget exhausted"
+    python3 "$JASSERT" field "$TMP/stuckdrain/session.json" \
+        stop.elapsed_ms 101 || afailed=1
+    python3 "$JASSERT" field "$TMP/stuckdrain/session.json" \
+        stop.busy_at_drain true || afailed=1
+    python3 "$JASSERT" field "$TMP/stuckdrain/session.json" \
+        stop.drained_records 100000 || afailed=1
+    mreplay4 stuckdrain 0 0 100000 0
+    mcase stageddrain 4 104 5 4 15 1895 \
+        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
+    mqual stageddrain partial null complete_for_scope 0 \
+        "unknown: error shutdown"
+    mgap stageddrain 4 "detail closure unproven: error shutdown"
+    python3 "$JASSERT" field "$TMP/stageddrain/session.json" \
+        stop.busy_at_drain true || afailed=1
+    python3 "$JASSERT" field "$TMP/stageddrain/session.json" \
+        stop.drained_records 0 || afailed=1
+    mreplay4 stageddrain 0 0 0 0
     mreason() { # <case> <reason>
         python3 "$JASSERT" field "$TMP/$1/session.json" \
             quality.detail.reason "$2" || afailed=1

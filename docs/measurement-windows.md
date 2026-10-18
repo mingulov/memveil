@@ -87,6 +87,83 @@ deviation (no failed detach, no drain error, no exhausted
 budget, no unresolved snapshot). It does not claim the six
 stages above; the terminal channel stays `partial` beside it.
 
+## Stop budget and the live drain path
+
+The 5000 ms stop budget is a total over close-out,
+measured from detach to the finalize stamp with
+milliseconds rounded up. The stamp precedes the
+closing writes and session publication, so
+`elapsed_ms` excludes any delay there. It bounds the complete
+claim, not liveness: a close-out that exceeds the
+budget stays partial, and the measured elapsed time
+travels beside the budget in the evidence so the
+overrun stays visible.
+
+The live drain path is longer than the budget on
+purpose: the drain consumes up to 30 s / 100,000
+polls so a busy transport still gets a bounded
+chance to settle, and either bound marks BUSY with
+a named cause when it trips. A drain that actually
+consumes more than 5000 ms therefore reports
+partial; on the live path the reason names the
+first unproven stage (below), which is quiescence
+until the kernel-side protocol is wired, while
+`elapsed_ms` above `budget_ms` records the
+overrun. No relaxed total is claimed: a larger
+budget needs an accepted contract change first.
+
+## Failure states and reason precedence
+
+A partial outcome carries the first unproven
+stage, in stop order:
+
+1. `admission close failed` — the detach failed,
+   so the close is not claimed.
+2. `quiescence unproven` — an admitted writer may
+   still be in flight.
+3. `drain missing` — no drain reached a boundary.
+4. `transport BUSY at drain` — the boundary was
+   missed (exhausted budget, drain error,
+   unreadable stats, or records still staged).
+5. `late submit past drain` — a submit landed
+   after the boundary claim; only a later drain
+   re-proves it.
+6. `final counter sample failed` — the end cut is
+   missing or unusable, or a re-drain invalidated
+   an earlier sample.
+7. `stop budget exhausted` — close-out exceeded
+   5000 ms with every earlier stage proved.
+
+Later stages still record their own evidence
+fields (busy flag, drain count, sample validity,
+elapsed time) beside the first failure, so a
+single reason never hides a second deviation.
+
+## Output and cleanup bounds
+
+Close-out output is bounded in volume, not in
+wait time. The drain and confirmation phases
+append nothing; closing appends at most six
+bounded lines (four counter snapshots under a
+rollback group, one pool sample, one gap
+record) and then one session document. Each
+append and the session publication perform
+synchronous writes with no deadline and retry
+interrupted calls without a bound, so bounded
+handling of stalled output is UNPROVEN: a
+stalled filesystem can stall close-out past
+the budget, and that delay is absent from
+`elapsed_ms`. Blocked output degrades loudly: a
+failed closing append aborts its group and the
+session still finalizes with error state; a
+failed session write keeps the events file for
+forensics with no session. Every path accounts
+for its resources: a pre-readiness refusal
+closes the owned session exactly once, and
+post-readiness release belongs to the adapter's
+scope exit, whose leak-freedom the cleanup gate
+proves by inventory equality.
+
 ## Kernel-side protocol (staged)
 
 `bpf/include/memveil_control.h` inventories the current probe
