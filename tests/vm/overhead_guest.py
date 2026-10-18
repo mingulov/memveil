@@ -88,8 +88,60 @@ SETTLE_PER_LEG = 10
 SETTLE_GLOBAL = 30
 
 
+# Exported leg diagnostics carry allowlisted codes plus
+# integer facts only; raw tool stderr, exception text,
+# addresses, and command lines stay guest-local (console).
+LEG_ERROR_CODES = frozenset((
+    "ping-flood-failed", "ping-flood-unparseable",
+    "ping-sample-failed", "empty-rtt-sample",
+    "dd-failed", "dd-unparseable",
+    "collector-reaped", "collector-timeout",
+    "bpftool-missing", "bpftool-failed",
+    "bpftool-unparseable", "bpftool-malformed",
+    "bpftool-entry-malformed",
+    "lab-exited-early", "lab-attach-timeout",
+    "lab-never-ready", "lab-exit",
+    "missing-memveil", "missing-attempt-obj",
+    "missing-lc-obj", "missing-cp-obj",
+    "missing-bridge", "missing-profile",
+    "record-not-ready", "sigterm-failed",
+    "record-would-not-die", "unknown-mode",
+    "bpf-unsettled", "unexpected",
+))
+LEG_FACT_KEYS = frozenset((
+    "rc", "errno", "lc", "cp", "progs_rc", "maps_rc",
+    "before_progs", "before_maps",
+    "after_progs", "after_maps",
+))
+
+
 class LegError(Exception):
-    """One leg failed; the campaign records it and continues."""
+    """One leg failed; the campaign records it and continues.
+
+    Only the code plus integer facts cross into exports, via
+    export(); detail stays guest-local (console only, never
+    retained) so it may name raw stderr and paths.
+    """
+
+    def __init__(self, code, facts=None, detail=""):
+        if code not in LEG_ERROR_CODES:
+            raise ValueError(
+                "unknown leg error code %r" % (code,))
+        self.code = code
+        self.facts = dict(facts or {})
+        for key, val in self.facts.items():
+            if key not in LEG_FACT_KEYS or \
+                    type(val) is not int:
+                raise ValueError(
+                    "invalid leg error fact %r" % (key,))
+        self.detail = detail or code
+        super().__init__(self.detail)
+
+    def export(self):
+        parts = [self.code] + [
+            "%s=%d" % (key, self.facts[key])
+            for key in sorted(self.facts)]
+        return " ".join(parts)
 
 
 def build_schedule(seed=SEED):
@@ -145,11 +197,15 @@ def ping_flood(gateway):
     elapsed = (mono_ns() - start) / 1e9
     if proc.returncode != 0:
         raise LegError(
-            "ping flood failed: %s" % proc.stderr.strip()[-300:])
+            "ping-flood-failed", {"rc": proc.returncode},
+            detail="ping flood failed rc=%d: %s"
+            % (proc.returncode,
+               proc.stderr.strip()[-300:]))
     sent = re.search(r"(\d+) packets transmitted", proc.stdout)
     rcvd = re.search(r"(\d+) received", proc.stdout)
     if sent is None or rcvd is None:
-        raise LegError("ping flood output unparseable")
+        raise LegError("ping-flood-unparseable",
+                       detail="ping flood output unparseable")
     return int(sent.group(1)), int(rcvd.group(1)), elapsed
 
 
@@ -159,7 +215,10 @@ def ping_sample(gateway):
                str(SAMPLE_COUNT), gateway])
     if proc.returncode != 0:
         raise LegError(
-            "ping sample failed: %s" % proc.stderr.strip()[-300:])
+            "ping-sample-failed", {"rc": proc.returncode},
+            detail="ping sample failed rc=%d: %s"
+            % (proc.returncode,
+               proc.stderr.strip()[-300:]))
     rtts = [float(v) for v in
             re.findall(r"time=([\d.]+) ms", proc.stdout)]
     sent = re.search(r"(\d+) packets transmitted", proc.stdout)
@@ -180,10 +239,14 @@ def dd_run(dev, count):
     elapsed = (mono_ns() - start) / 1e9
     if proc.returncode != 0:
         raise LegError(
-            "dd failed: %s" % proc.stderr.strip()[-200:])
+            "dd-failed", {"rc": proc.returncode},
+            detail="dd failed rc=%d: %s"
+            % (proc.returncode,
+               proc.stderr.strip()[-200:]))
     copied = re.search(r"(\d+) bytes .* copied", proc.stderr)
     if copied is None:
-        raise LegError("dd output unparseable")
+        raise LegError("dd-unparseable",
+                       detail="dd output unparseable")
     return int(copied.group(1)), elapsed
 
 
@@ -201,7 +264,11 @@ def run_warmup(gateway, dev):
             return (mono_ns() - start) / 1e9, False, \
                 "warmup dd bytes=%d" % nbytes
     except LegError as exc:
-        return (mono_ns() - start) / 1e9, False, str(exc)
+        if exc.code == "dd-failed":
+            detail = "warmup dd rc=%d" % exc.facts["rc"]
+        else:
+            detail = "warmup dd unparseable"
+        return (mono_ns() - start) / 1e9, False, detail
     return (mono_ns() - start) / 1e9, True, "ok"
 
 
@@ -236,7 +303,8 @@ def reap(proc, timeout):
             pid, status, rusage = os.wait4(
                 proc.pid, os.WNOHANG)
         except ChildProcessError:
-            raise LegError("collector already reaped")
+            raise LegError("collector-reaped",
+                           detail="collector already reaped")
         if pid != 0:
             break
         if time.monotonic() >= deadline:
@@ -264,17 +332,25 @@ def bpf_mem_snapshot():
         progs = sh(["bpftool", "-j", "prog", "show"])
         maps = sh(["bpftool", "-j", "map", "show"])
     except OSError as exc:
-        raise LegError("bpftool missing: %s" % exc)
+        errno = exc.errno if type(exc.errno) is int else -1
+        raise LegError("bpftool-missing", {"errno": errno},
+                       detail="bpftool missing: %s" % exc)
     if progs.returncode != 0 or maps.returncode != 0:
-        raise LegError("bpftool inventory failed")
+        raise LegError(
+            "bpftool-failed",
+            {"progs_rc": progs.returncode,
+             "maps_rc": maps.returncode},
+            detail="bpftool inventory failed")
     try:
         prog_list = json.loads(progs.stdout)
         map_list = json.loads(maps.stdout)
     except ValueError:
-        raise LegError("bpftool output unparseable")
+        raise LegError("bpftool-unparseable",
+                       detail="bpftool output unparseable")
     if not isinstance(prog_list, list) or \
             not isinstance(map_list, list):
-        raise LegError("bpftool output malformed")
+        raise LegError("bpftool-malformed",
+                       detail="bpftool output malformed")
     prog_ids = set()
     map_ids = set()
     mem = {}
@@ -283,7 +359,8 @@ def bpf_mem_snapshot():
         for obj in entry:
             if not isinstance(obj, dict) or \
                     type(obj.get("id")) is not int:
-                raise LegError("bpftool entry malformed")
+                raise LegError("bpftool-entry-malformed",
+                               detail="bpftool entry malformed")
             ids.add(obj["id"])
             mem[(kind, obj["id"])] = obj.get("bytes_memlock")
     return prog_ids, map_ids, mem
@@ -312,7 +389,9 @@ def wait_lab_ready(procs, timeout=READY_TIMEOUT):
     while pending and time.monotonic() < end:
         for proc in list(pending):
             if proc.poll() is not None:
-                raise LegError("lab consumer exited before ready")
+                raise LegError(
+                    "lab-exited-early",
+                    detail="lab consumer exited before ready")
             ready, _, _ = select.select([proc.stdout], [], [], 0.1)
             if ready:
                 line = proc.stdout.readline()
@@ -321,17 +400,23 @@ def wait_lab_ready(procs, timeout=READY_TIMEOUT):
                     pending.remove(proc)
         if not pending:
             return
-    raise LegError("lab consumer attachment timed out")
+    raise LegError("lab-attach-timeout",
+                       detail="lab consumer attachment timed out")
 
 
 def start_product(ctx, gate, tag, capabilities):
     """Start product record; (proc, ready, capdir, errpath)."""
     capdir = os.path.join(gate.work, "cap-" + tag)
     errpath = os.path.join(gate.work, tag + "-record.stderr")
-    for path in (ctx["memveil"], ctx["attempt_obj"], ctx["profile"],
-                 ctx["lc_obj"], ctx["cp_obj"], ctx["bridge"]):
+    for code, path in (
+            ("missing-memveil", ctx["memveil"]),
+            ("missing-attempt-obj", ctx["attempt_obj"]),
+            ("missing-profile", ctx["profile"]),
+            ("missing-lc-obj", ctx["lc_obj"]),
+            ("missing-cp-obj", ctx["cp_obj"]),
+            ("missing-bridge", ctx["bridge"])):
         if not os.path.isfile(path):
-            raise LegError("missing %s" % path)
+            raise LegError(code, detail="missing %s" % path)
     proc = spawn(
         [ctx["memveil"], "record",
          "--duration", str(RECORD_DURATION),
@@ -347,7 +432,7 @@ def start_product(ctx, gate, tag, capabilities):
     try:
         ready, _tail = await_record_ready(
             proc, gate.work, errname=tag + "-record.stderr")
-    except SystemExit:
+    except SystemExit as exc:
         try:
             reap(proc, 10)
         except (LegError, TimeoutError):
@@ -355,7 +440,9 @@ def start_product(ctx, gate, tag, capabilities):
                 proc.kill()
             except OSError:
                 pass
-        raise LegError("record never reached readiness")
+        raise LegError("record-not-ready",
+                       detail="record never reached readiness: %s"
+                       % exc.code)
     return proc, ready, capdir, errpath
 
 
@@ -365,7 +452,9 @@ def stop_product(proc, timeout=TERM_TIMEOUT):
     try:
         os.kill(proc.pid, signal.SIGTERM)
     except OSError as exc:
-        raise LegError("SIGTERM failed: %s" % exc)
+        errno = exc.errno if type(exc.errno) is int else -1
+        raise LegError("sigterm-failed", {"errno": errno},
+                       detail="SIGTERM failed: %s" % exc)
     try:
         exit_code, rusage, rest = reap(proc, timeout)
         return exit_code, rusage, rest, term_ns, False
@@ -378,16 +467,34 @@ def stop_product(proc, timeout=TERM_TIMEOUT):
     try:
         exit_code, rusage, rest = reap(proc, 10)
     except (LegError, TimeoutError) as exc:
-        raise LegError("record would not die: %s" % exc)
+        raise LegError("record-would-not-die",
+                       detail="record would not die: %s" % exc)
     return exit_code, rusage, rest, term_ns, True
 
 
-def stderr_tail(path, limit=512):
+def stderr_text(path, limit=512):
+    """Raw tail for the guest console only; never exported."""
     try:
         with open(path, "rb") as fh:
             return fh.read()[-limit:].decode("utf-8", "replace")
     except OSError:
         return ""
+
+
+def stderr_summary(path):
+    """Allowlisted record-stderr summary for exports.
+
+    Counts only: raw addresses and command text stay
+    guest-local. The caller prints the raw tail to the guest
+    console for debugging.
+    """
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return "record-stderr unreadable"
+    return "record-stderr bytes=%d lines=%d" % (
+        len(data), data.count(b"\n"))
 
 
 def rusage_dict(rusage):
@@ -408,7 +515,8 @@ def run_workload(gateway, dev):
     dd_bytes, dd_s = dd_run(dev, DD_COUNT)
     end_ns = mono_ns()
     if not sample["rtts"]:
-        raise LegError("empty paced RTT sample")
+        raise LegError("empty-rtt-sample",
+                       detail="empty paced RTT sample")
     pct = percentiles(sample["rtts"])
     return {
         "window": {
@@ -443,6 +551,15 @@ def kill_quietly(proc):
         pass
 
 
+def _record_leg_error(leg, coded):
+    """Export the code; print code plus detail guest-locally."""
+    leg["error"] = coded.export()
+    print("leg %s error: %s (%s)"
+          % (leg["tag"], coded.export(), coded.detail),
+          file=sys.stderr)
+    return leg
+
+
 def run_one_leg(ctx, gate, seq, rnd, mode, pair, tag):
     """Run one leg; always returns a leg doc, never raises."""
     leg = {"seq": seq, "round": rnd, "mode": mode, "pair": pair,
@@ -450,11 +567,15 @@ def run_one_leg(ctx, gate, seq, rnd, mode, pair, tag):
     try:
         return _run_one_leg(ctx, gate, leg)
     except LegError as exc:
-        leg["error"] = str(exc)[:300]
-        return leg
+        return _record_leg_error(leg, exc)
+    except TimeoutError as exc:
+        return _record_leg_error(
+            leg, LegError("collector-timeout",
+                          detail=str(exc)))
     except Exception as exc:  # noqa: BLE001 (evidence, not silence)
-        leg["error"] = "unexpected: %r" % (exc,)[:300]
-        return leg
+        return _record_leg_error(
+            leg, LegError("unexpected",
+                          detail="%r" % (exc,)))
 
 
 def _run_one_leg(ctx, gate, leg):
@@ -465,7 +586,7 @@ def _run_one_leg(ctx, gate, leg):
         mem_before = bpf_mem_snapshot()
     except LegError as exc:
         mem_before = None
-        mem_error = str(exc)
+        mem_error = exc.export()
     else:
         mem_error = ""
     io_before = gate.io_tlb_samples(count=3, gap=0.2)
@@ -485,7 +606,7 @@ def _run_one_leg(ctx, gate, leg):
                 mem_after = bpf_mem_snapshot()
             except LegError as exc:
                 mem_after = None
-                mem_error = mem_error or str(exc)
+                mem_error = mem_error or exc.export()
             if mem_before is not None and mem_after is not None:
                 mem_bytes, mem_reason = owned_memlock(
                     mem_before, mem_after)
@@ -527,10 +648,15 @@ def _run_one_leg(ctx, gate, leg):
                 "attach_ns": attach_ns,
                 "detach_ns": detach_ns,
                 "term_ns": term_ns,
-                "stderr_tail": stderr_tail(errpath)
+                "stderr_tail": stderr_summary(errpath)
                 if exit_code != 4 else "",
                 "capture_bytes": cap_bytes,
             }
+            if exit_code != 4:
+                print("leg %s record exit=%d stderr: %r"
+                      % (tag, exit_code,
+                         stderr_text(errpath)),
+                      file=sys.stderr)
             leg["files"] = names
             leg["bpf_mem"] = {"owned_memlock_bytes": mem_bytes,
                               "reason": mem_reason}
@@ -550,7 +676,7 @@ def _run_one_leg(ctx, gate, leg):
                 mem_after = bpf_mem_snapshot()
             except LegError as exc:
                 mem_after = None
-                mem_error = mem_error or str(exc)
+                mem_error = mem_error or exc.export()
             if mem_before is not None and mem_after is not None:
                 mem_bytes, mem_reason = owned_memlock(
                     mem_before, mem_after)
@@ -565,12 +691,15 @@ def _run_one_leg(ctx, gate, leg):
                     gate.consumers.remove(proc)
                 if not getattr(proc, "gate_ready", False) and \
                         "ready ring=" not in rest:
-                    raise LegError("lab consumer never ready")
+                    raise LegError("lab-never-ready",
+                                   detail="lab consumer never ready")
             procs.clear()
             detach_ns = mono_ns()
             if lc_exit != 0 or cp_exit != 0:
                 raise LegError(
-                    "lab consumer exit lc=%d cp=%d"
+                    "lab-exit",
+                    {"lc": lc_exit, "cp": cp_exit},
+                    detail="lab consumer exit lc=%d cp=%d"
                     % (lc_exit, cp_exit))
             cap_bytes = os.path.getsize(lc_path) + \
                 os.path.getsize(cp_path)
@@ -587,7 +716,8 @@ def _run_one_leg(ctx, gate, leg):
             leg["bpf_mem"] = {"owned_memlock_bytes": mem_bytes,
                               "reason": mem_reason}
         else:
-            raise LegError("unknown mode %r" % (mode,))
+            raise LegError("unknown-mode",
+                           detail="unknown mode %r" % (mode,))
         if mode == "off":
             workload = run_workload(ctx["gateway"], ctx["dev"])
             leg["bpf_mem"] = {"owned_memlock_bytes": 0,
@@ -607,8 +737,14 @@ def _run_one_leg(ctx, gate, leg):
                   "settled": bpf_after == bpf_before}
     leg["io_tlb"] = {"before": io_before, "after": io_after}
     if not leg["bpf"]["settled"]:
-        leg["error"] = "BPF inventory did not settle: %r -> %r" % (
-            bpf_before, bpf_after)
+        return _record_leg_error(leg, LegError(
+            "bpf-unsettled",
+            {"before_progs": bpf_before["progs"],
+             "before_maps": bpf_before["maps"],
+             "after_progs": bpf_after["progs"],
+             "after_maps": bpf_after["maps"]},
+            detail="BPF inventory did not settle: %r -> %r"
+            % (bpf_before, bpf_after)))
     return leg
 
 

@@ -78,8 +78,12 @@ Do not silently rewrite a profile hash to make them admitted.
 
 ## Compatibility
 
-Report schemas are `v0.1.0`, event/session schemas `v0.1.1`;
-reader rules live in
+Current output versions are report `v0.1.1` and
+session `v0.1.2`; events stay at `v0.1.1`. Readers still
+accept the retained session `v0.1.1` contract (frozen;
+without correlation relations), while report readers
+require `v0.1.1` — the `v0.1.0` report schema file stays
+for reference only. Full reader rules live in
 [format compatibility](format-compatibility.md). Captures are self-describing
 and replay without the recording host or native bridge. JSON metric meanings,
 integer values and exit policy are unchanged by the human-context correction.

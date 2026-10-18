@@ -416,18 +416,30 @@ artifact hashes. Distinguish PASS, FAIL, BLOCKED, SKIPPED,
 and NOT RUN. Re-run evidence invalidated by a relevant
 change; never relabel an older receipt as current.
 
-## Laboratory comparisons
+## Laboratory comparisons and shipped capture gates
 
-The scripted laboratory gates below compare decoded probe
-records against independent module facts; the shipped
-record and bundle rows additionally run the packaged or
-built capture verbs end to end without producing a
-shipping capture. They need `MEMVEIL_VM_LIFECYCLE=1`,
-the laboratory lifecycle probes in `build/bpf`, the oracle
-module source building against the guest kernel, and the
-frozen harness; without all four they skip fast with
-exit 77, and a skip is never a pass. Neither outcome
-qualifies packaged collection.
+The laboratory-only comparisons below (low-rate matrix,
+per-direction witness, canonical, and fault rows, plus
+the copy and real-I/O lanes) compare decoded laboratory
+probe records against independent module facts. They
+never run shipping capture and never qualify packaged
+collection.
+
+The shipped three-channel record and shipped-bundle rows
+are different: they run the packaged or built capture
+verbs end to end, and their PASS is the shipping
+lifecycle/copy qualification, limited to the exact tested
+artifact on the admitted profile — the bundle or built
+tree whose BPF bytes match the narrow profile bindings,
+on the narrow 7.0.0-34-generic environment the profile
+names. A PASS never qualifies a rebuilt object with
+different bytes, another kernel, or another profile.
+
+Every row needs `MEMVEIL_VM_LIFECYCLE=1`, the laboratory
+lifecycle probes in `build/bpf`, the oracle module source
+building against the guest kernel, and the frozen
+harness; without all four they skip fast with exit 77,
+and a skip is never a pass.
 
 | Lane | What it proves |
 |---|---|

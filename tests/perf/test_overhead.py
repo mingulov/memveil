@@ -16,7 +16,8 @@ import overhead
 from overhead_guest import (DD_BYTES, DD_COUNT, FLOOD_COUNT, LAB_WINDOW,
                             RECORD_DURATION, ROUNDS, SAMPLE_COUNT, SEED,
                             WARMUP_DD_COUNT, WARMUP_PING_COUNT,
-                            build_schedule)
+                            LegError, build_schedule,
+                            stderr_summary)
 from export_validation import (validate_overhead_legs,
                                validate_overhead_probe)
 
@@ -267,8 +268,150 @@ def test_legs_accept_error_leg():
                       "mode": doc["legs"][0]["mode"],
                       "pair": doc["legs"][0]["pair"],
                       "tag": "l00", "files": [],
-                      "error": "guest: ping flood failed"}
+                      "error": "ping-flood-failed rc=1"}
     validate_overhead_legs(doc)
+
+
+def test_legs_error_leg_with_valid_facts_accepted():
+    doc = ledger()
+    row = doc["legs"][0]
+    row["error"] = ("bpf-unsettled before_progs=0 "
+                    "before_maps=0 after_progs=1 "
+                    "after_maps=0")
+    row["bpf"]["settled"] = False
+    row["bpf"]["after"] = {"progs": 1, "maps": 0}
+    validate_overhead_legs(doc)
+
+
+def test_legs_error_leg_with_nested_payload_refused():
+    doc = ledger()
+    row = doc["legs"][0]
+    row["error"] = "collector-timeout"
+    row["collector"] = {"kind": "none",
+                        "payload": {"nested": [1, 2, 3]}}
+    with pytest.raises(ValueError):
+        validate_overhead_legs(doc)
+
+
+def test_legs_error_leg_with_invalid_workload_refused():
+    doc = ledger()
+    row = doc["legs"][0]
+    row["error"] = "unexpected"
+    window = row["workload"]["window"]
+    window["end_ns"] = window["measured_start_ns"]
+    with pytest.raises(ValueError):
+        validate_overhead_legs(doc)
+
+
+def test_legs_refuse_free_text_error():
+    doc = ledger()
+    doc["legs"][0] = {"seq": 0, "round": 0,
+                      "mode": doc["legs"][0]["mode"],
+                      "pair": doc["legs"][0]["pair"],
+                      "tag": "l00", "files": [],
+                      "error": "ping failed at 0xffff888012345000 "
+                               "cmd='ping -A -c 1000'"}
+    with pytest.raises(ValueError):
+        validate_overhead_legs(doc)
+
+
+def test_legs_refuse_address_in_stderr_tail():
+    doc = ledger()
+    row = next(r for r in doc["legs"] if r["mode"] in CAPS)
+    row["collector"]["exit"] = 1
+    row["collector"]["stderr_tail"] = \
+        "panic at 0x7f3a9c001234 during record"
+    with pytest.raises(ValueError):
+        validate_overhead_legs(doc)
+
+
+def test_legs_error_leg_refuses_command_in_stderr_tail():
+    doc = ledger()
+    row = next(r for r in doc["legs"] if r["mode"] in CAPS)
+    row["error"] = "record-would-not-die"
+    row["collector"]["exit"] = 1
+    row["collector"]["stderr_tail"] = \
+        "cmdline: memveil record --output /tmp/work/cap"
+    with pytest.raises(ValueError):
+        validate_overhead_legs(doc)
+
+
+def test_legs_accept_stderr_summary():
+    doc = ledger()
+    row = next(r for r in doc["legs"] if r["mode"] in CAPS)
+    row["collector"]["exit"] = 1
+    row["collector"]["stderr_tail"] = \
+        "record-stderr bytes=128 lines=3"
+    validate_overhead_legs(doc)
+
+
+def test_legs_accept_unreadable_stderr_summary():
+    doc = ledger()
+    row = next(r for r in doc["legs"] if r["mode"] in CAPS)
+    row["collector"]["exit"] = 1
+    row["collector"]["stderr_tail"] = "record-stderr unreadable"
+    validate_overhead_legs(doc)
+
+
+def test_legs_refuse_address_in_warmup_detail():
+    doc = ledger()
+    warmup = doc["legs"][0]["workload"]["warmup"]
+    warmup["ok"] = False
+    warmup["detail"] = "dd failed: 0xffff888012345000"
+    with pytest.raises(ValueError):
+        validate_overhead_legs(doc)
+
+
+def test_legs_accept_warmup_dd_codes():
+    doc = ledger()
+    warmup = doc["legs"][0]["workload"]["warmup"]
+    warmup["ok"] = False
+    warmup["detail"] = "warmup dd rc=1"
+    validate_overhead_legs(doc)
+    warmup["detail"] = "warmup dd unparseable"
+    validate_overhead_legs(doc)
+
+
+def test_legs_refuse_command_text_in_memlock_reason():
+    doc = ledger()
+    mem = doc["legs"][0]["bpf_mem"]
+    mem["owned_memlock_bytes"] = None
+    mem["reason"] = "bpftool missing: [Errno 2] bpftool"
+    with pytest.raises(ValueError):
+        validate_overhead_legs(doc)
+
+
+def test_legs_accept_bpftool_memlock_reason():
+    doc = ledger()
+    mem = doc["legs"][0]["bpf_mem"]
+    mem["owned_memlock_bytes"] = None
+    mem["reason"] = "bpftool-missing errno=2"
+    validate_overhead_legs(doc)
+
+
+def test_leg_error_export_carries_code_and_facts_only():
+    exc = LegError("ping-flood-failed", {"rc": 1},
+                   detail="raw 0xffff at cmd 'x'")
+    assert exc.export() == "ping-flood-failed rc=1"
+    assert str(exc) == "raw 0xffff at cmd 'x'"
+
+
+def test_leg_error_rejects_unknown_code_and_fact():
+    with pytest.raises(ValueError):
+        LegError("nope")
+    with pytest.raises(ValueError):
+        LegError("unexpected", {"cmd": 1})
+    with pytest.raises(ValueError):
+        LegError("unexpected", {"rc": "1"})
+
+
+def test_stderr_summary_counts_only(tmp_path):
+    err = tmp_path / "r.stderr"
+    err.write_bytes(b"panic at 0xdeadbeef\nsecond line\n")
+    assert stderr_summary(str(err)) == \
+        "record-stderr bytes=32 lines=2"
+    assert stderr_summary(str(tmp_path / "absent")) == \
+        "record-stderr unreadable"
 
 
 def test_legs_refuse_clean_leg_missing_facts():
@@ -664,7 +807,8 @@ def test_report_mode_few_valid_is_unqualified(tmp_path):
         members = {row["mode"]: row for row in doc["legs"]
                    if row["pair"] == "r%d-detail" % rnd}
         if rnd < 2:
-            members["detail"]["error"] = "guest: boom"
+            members["detail"]["error"] = \
+                "ping-flood-failed rc=1"
             del members["detail"]["workload"]
             del members["detail"]["collector"]
         pairs.append((members["off"], members["detail"]))
@@ -722,7 +866,7 @@ def test_flow_unqualified_fails(tmp_path, monkeypatch, capsys):
     doc = ledger()
     for row in doc["legs"]:
         if row["mode"] == "detail":
-            row["error"] = "guest: boom"
+            row["error"] = "ping-flood-failed rc=1"
             del row["workload"]
             del row["collector"]
     got = campaign_got(tmp_path, doc)

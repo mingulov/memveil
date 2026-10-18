@@ -468,6 +468,120 @@ def test_failed_path_retention_never_masks_the_gate_error(
         run, 'bundle') is None
 
 
+def overhead_legs_doc(change=None):
+    import overhead_guest
+    schedule = overhead_guest.build_schedule()
+    legs = []
+    for seq, (rnd, mode, pair) in enumerate(schedule):
+        legs.append({'seq': seq, 'round': rnd, 'mode': mode,
+                     'pair': pair, 'tag': 'l%02d' % seq,
+                     'files': [], 'error': 'unexpected'})
+    doc = {
+        'schema': 'memveil-overhead-legs/1',
+        'seed': overhead_guest.SEED,
+        'rounds': 5,
+        'schedule': [[rnd, mode, pair]
+                     for rnd, mode, pair in schedule],
+        'artifacts': dict(
+            **{key: 'b' * 64 for key in (
+                'memveil_sha', 'attempt_sha', 'lc_sha',
+                'cp_sha', 'lc_test_sha', 'cp_test_sha',
+                'bridge_sha', 'profile_sha')},
+            profile_id='linux-x86_64-7.0.0-34-generic'),
+        'workload': {
+            'gateway': '10.0.3.2',
+            'flood_count': overhead_guest.FLOOD_COUNT,
+            'sample_count': overhead_guest.SAMPLE_COUNT,
+            'warmup_ping_count':
+                overhead_guest.WARMUP_PING_COUNT,
+            'dd_count': overhead_guest.DD_COUNT,
+            'dd_bytes': overhead_guest.DD_BYTES,
+            'warmup_dd_count':
+                overhead_guest.WARMUP_DD_COUNT,
+            'record_duration_s':
+                overhead_guest.RECORD_DURATION,
+            'lab_window_s': overhead_guest.LAB_WINDOW,
+            'seed': overhead_guest.SEED,
+            'rounds': overhead_guest.ROUNDS},
+        'fixture': {'iface': 'enp0s1', 'disk': '/dev/sdb',
+                    'nslabs': 1024,
+                    'bpf_boot': {'progs': 0, 'maps': 0},
+                    'io_tlb_boot': [1, 1, 1]},
+        'legs': legs,
+        'epilogue': {'bpf_end': {'progs': 0, 'maps': 0},
+                     'settled_waited_s': 0.2,
+                     'settled': True},
+    }
+    if change:
+        change(doc)
+    return doc
+
+
+def overhead_retention_run(tmp_path, legs_doc):
+    return retention_run(tmp_path, gate='overhead', files={
+        'identity.json': json.dumps(IDENTITY_DOC),
+        'legs.json': json.dumps(legs_doc),
+    })
+
+
+def test_retention_admits_sanitized_error_legs(
+        tmp_path, monkeypatch):
+    import evidence_retention
+    run = overhead_retention_run(tmp_path, overhead_legs_doc())
+    owned_dir(tmp_path, monkeypatch)
+    evidence_retention.retain_gate_evidence(
+        run, 'overhead', 'passed')
+    doc = evidence_retention.verify_retained('overhead')
+    assert doc['complete'] is True
+    assert {entry['name'] for entry in doc['files']} == {
+        'overhead-identity.json', 'overhead-legs.json'}
+
+
+def test_retention_refuses_nested_payload_on_error_leg(
+        tmp_path, monkeypatch):
+    import evidence_retention
+    def poison(doc):
+        doc['legs'][0]['collector'] = {
+            'kind': 'none', 'payload': {'nested': [1]}}
+    run = overhead_retention_run(
+        tmp_path, overhead_legs_doc(poison))
+    owned_dir(tmp_path, monkeypatch)
+    with pytest.raises(ValueError):
+        evidence_retention.retain_gate_evidence(
+            run, 'overhead', 'passed')
+    evidence_retention.retain_gate_evidence(
+        run, 'overhead', 'failed')
+    doc = evidence_retention.verify_retained('overhead')
+    assert doc['complete'] is False
+    assert doc['files'] == []
+    assert doc['file_errors'] == [
+        {'name': 'overhead-exports',
+         'error': 'no verified exports'}]
+
+
+def test_retention_refuses_address_text_in_leg_error(
+        tmp_path, monkeypatch):
+    import evidence_retention
+    def poison(doc):
+        doc['legs'][0]['error'] = (
+            "failed at 0xffff888012345000 "
+            "cmd='dd if=/dev/sdb'")
+    run = overhead_retention_run(
+        tmp_path, overhead_legs_doc(poison))
+    owned_dir(tmp_path, monkeypatch)
+    with pytest.raises(ValueError):
+        evidence_retention.retain_gate_evidence(
+            run, 'overhead', 'passed')
+    evidence_retention.retain_gate_evidence(
+        run, 'overhead', 'failed')
+    doc = evidence_retention.verify_retained('overhead')
+    assert doc['complete'] is False
+    assert doc['files'] == []
+    assert doc['file_errors'] == [
+        {'name': 'overhead-exports',
+         'error': 'no verified exports'}]
+
+
 def test_cleanup_uncertain_without_exports_stays_incomplete(
         tmp_path, monkeypatch):
     import evidence_retention

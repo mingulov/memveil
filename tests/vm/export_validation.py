@@ -135,8 +135,7 @@ def _overhead_workload(doc):
                          % (warmup['seconds'], warmup_ep))
     if warmup['ok'] is not True and warmup['ok'] is not False:
         raise ValueError('invalid warmup flag')
-    if type(warmup['detail']) is not str or len(warmup['detail']) > 300:
-        raise ValueError('invalid warmup detail')
+    _overhead_warmup_detail(warmup['detail'])
     ping = doc['ping']
     keys(ping, ('tx', 'rx', 'seconds', 'rtts', 'sample_tx',
                 'sample_rx', 'sample_count', 'p50_ms', 'p95_ms',
@@ -187,9 +186,7 @@ def _overhead_collector(doc):
             integer(doc[key])
         if not doc['attach_ns'] < doc['term_ns'] < doc['detach_ns']:
             raise ValueError('incoherent overhead stop order')
-        if type(doc['stderr_tail']) is not str or \
-                len(doc['stderr_tail']) > 512:
-            raise ValueError('invalid overhead diagnostics')
+        _overhead_stderr_tail(doc['stderr_tail'])
         integer(doc['capture_bytes'])
     elif kind == 'lab':
         keys(doc, ('kind', 'rings', 'lc', 'cp', 'attach_ns',
@@ -211,6 +208,85 @@ def _overhead_collector(doc):
         raise ValueError('unknown overhead collector kind')
 
 
+def _overhead_diag(value, what):
+    """Allowlisted `code k=v ...` diagnostics: codes, integer facts."""
+    from overhead_guest import LEG_ERROR_CODES, LEG_FACT_KEYS
+    if type(value) is not str or len(value) > 300:
+        raise ValueError('invalid overhead ' + what)
+    if not value:
+        return
+    parts = value.split(' ')
+    if parts[0] not in LEG_ERROR_CODES:
+        raise ValueError('unknown overhead ' + what)
+    for fact in parts[1:]:
+        key, sep, num = fact.partition('=')
+        if not sep or key not in LEG_FACT_KEYS or \
+                not re.fullmatch(r'-?[0-9]{1,20}', num):
+            raise ValueError('invalid overhead ' + what)
+
+
+def _overhead_warmup_detail(value):
+    if value == 'ok':
+        return
+    if type(value) is not str or len(value) > 300:
+        raise ValueError('invalid warmup detail')
+    if value == 'warmup dd unparseable':
+        return
+    if re.fullmatch(r'warmup ping rc=-?[0-9]{1,20}', value):
+        return
+    if re.fullmatch(r'warmup dd bytes=[0-9]{1,20}', value):
+        return
+    if re.fullmatch(r'warmup dd rc=-?[0-9]{1,20}', value):
+        return
+    raise ValueError('invalid warmup detail')
+
+
+def _overhead_stderr_tail(value):
+    if value == '':
+        return
+    if type(value) is not str or not re.fullmatch(
+            r'record-stderr (bytes=[0-9]{1,20} '
+            r'lines=[0-9]{1,20}|unreadable)', value):
+        raise ValueError('invalid overhead diagnostics')
+
+
+def _overhead_mem_reason(value):
+    if value in ('no collector', 'no mem snapshot'):
+        return
+    if type(value) is not str or len(value) > 200:
+        raise ValueError('invalid memlock reason')
+    if re.fullmatch(r'owned [0-9]{1,20} progs [0-9]{1,20} '
+                    r'maps', value):
+        return
+    if re.fullmatch(r'bytes_memlock missing for (prog|map) '
+                    r'[0-9]{1,20}', value):
+        return
+    _overhead_diag(value, 'memlock reason')
+
+
+def _overhead_bpf(bpf):
+    keys(bpf, ('before', 'after', 'settled_waited_s', 'settled'))
+    _overhead_counts(bpf['before']); _overhead_counts(bpf['after'])
+    settle_seconds(bpf['settled_waited_s'])
+    if bpf['settled'] is not True and bpf['settled'] is not False:
+        raise ValueError('invalid settled flag')
+
+
+def _overhead_bpf_mem(mem):
+    keys(mem, ('owned_memlock_bytes', 'reason'))
+    if mem['owned_memlock_bytes'] is not None:
+        integer(mem['owned_memlock_bytes'])
+    _overhead_mem_reason(mem['reason'])
+
+
+def _overhead_io_tlb(io_tlb):
+    keys(io_tlb, ('before', 'after'))
+    for key in ('before', 'after'):
+        integer_list(io_tlb[key])
+        if len(io_tlb[key]) != 3:
+            raise ValueError('invalid io_tlb sample count')
+
+
 def _overhead_leg(leg):
     keys(leg, ('seq', 'round', 'mode', 'pair', 'tag', 'files',
                'error'),
@@ -230,9 +306,16 @@ def _overhead_leg(leg):
                 r'[a-z][0-9]{1,2}-(session\.json|events\.ndjson|lc\.txt|cp\.txt)',
                 name) for name in files):
         raise ValueError('invalid overhead leg files')
-    if type(leg['error']) is not str or len(leg['error']) > 300:
-        raise ValueError('invalid overhead leg error')
+    _overhead_diag(leg['error'], 'leg error')
     if leg['error']:
+        for key, check in (
+                ('workload', _overhead_workload),
+                ('collector', _overhead_collector),
+                ('bpf', _overhead_bpf),
+                ('bpf_mem', _overhead_bpf_mem),
+                ('io_tlb', _overhead_io_tlb)):
+            if key in leg:
+                check(leg[key])
         return
     for key in ('workload', 'collector', 'bpf', 'bpf_mem',
                 'io_tlb'):
@@ -240,24 +323,9 @@ def _overhead_leg(leg):
             raise ValueError('clean overhead leg lacks ' + key)
     _overhead_workload(leg['workload'])
     _overhead_collector(leg['collector'])
-    bpf = leg['bpf']
-    keys(bpf, ('before', 'after', 'settled_waited_s', 'settled'))
-    _overhead_counts(bpf['before']); _overhead_counts(bpf['after'])
-    settle_seconds(bpf['settled_waited_s'])
-    if bpf['settled'] is not True and bpf['settled'] is not False:
-        raise ValueError('invalid settled flag')
-    mem = leg['bpf_mem']
-    keys(mem, ('owned_memlock_bytes', 'reason'))
-    if mem['owned_memlock_bytes'] is not None:
-        integer(mem['owned_memlock_bytes'])
-    if type(mem['reason']) is not str or len(mem['reason']) > 200:
-        raise ValueError('invalid memlock reason')
-    io_tlb = leg['io_tlb']
-    keys(io_tlb, ('before', 'after'))
-    for key in ('before', 'after'):
-        integer_list(io_tlb[key])
-        if len(io_tlb[key]) != 3:
-            raise ValueError('invalid io_tlb sample count')
+    _overhead_bpf(leg['bpf'])
+    _overhead_bpf_mem(leg['bpf_mem'])
+    _overhead_io_tlb(leg['io_tlb'])
 
 
 def _overhead_common(doc, schema):
