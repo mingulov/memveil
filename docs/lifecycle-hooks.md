@@ -190,13 +190,15 @@ records the copy. `mv_bounce_exit` releases the claim and
 records the copy only when no matching claim exists, so each
 copy is recorded once. The fexit program attaches before the
 fentry program and detaches after it. A full probe window leaves
-the copy to `mv_bounce_exit`; a call neither program can match
-counts as `submit_fail`.
+the copy to `mv_bounce_exit` and counts deferred in `mv_copy_fb`;
+a call neither program can match counts as `submit_fail`.
 
-`recursion_missed` still sums `recursion_misses` over every copy
-program, so a skipped `mv_bounce` run that `mv_bounce_exit`
-recovered still counts: the sum is an upper bound on lost copy
-records, never an undercount.
+`recursion_missed` charges exact copy loss: misses of every
+program except `mv_bounce` and `mv_bounce_exit`, plus
+misses(`mv_bounce`) + deferred - recovered. Exit-only misses
+never lose a copy. Raw per-program misses with deferred and
+recovered persist as session evidence; a negative remainder
+contradicts the counters and makes detail loss unknown.
 
 ## Semantic edges
 

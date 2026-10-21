@@ -21,9 +21,11 @@ Attach sites are frozen per channel; record selects
 which channels exist by passing their object bytes.
 
 Each channel remembers the program fds its load created
-(diffed from /proc/self/fdinfo, no bridge call needed), so
-recursion_misses can sum the kernel's per-program
-recursion_misses counters across present channels.
+(diffed from /proc/self/fdinfo, no bridge call needed).
+Without copy, recursion_misses sums the per-program
+counters; with copy, it identifies each tracing program
+by kernel name and reads the fallback counters, so the
+collector can charge exact copy loss.
 
 Poll rotates across present channels (sticky on short:
 a short pins the next poll to the channel holding the
@@ -41,6 +43,7 @@ from libbpf_mojo.batch import (
 )
 from libbpf_mojo.error import EINTR, LmbError
 from libbpf_mojo.session import AttachSpec, Session
+from std.ffi import external_call
 from std.os import listdir
 
 from memveil.capture.collector import (
@@ -74,6 +77,14 @@ comptime _RING_LIFECYCLE = "mv_lifecycle"
 comptime _RING_COPY = "mv_copies"
 comptime _FDINFO_DIR = "/proc/self/fdinfo"
 comptime _FDINFO_CAP = 4096
+comptime _FB_MAP = "mv_copy_fb"
+comptime _FB_KEYS = 3
+comptime _SYS_BPF = 321
+comptime _BPF_OBJ_GET_INFO = 15
+comptime _PROG_INFO_SIZE = 232
+comptime _PROG_NAME_OFF = 64
+comptime _PROG_NAME_LEN = 16
+comptime _PROG_REC_OFF = 208
 
 
 def poll_outcome(kind: UInt32, code: Int32) -> String:
@@ -367,6 +378,234 @@ def added_fds(before: List[Int], after: List[Int]) -> List[Int]:
     return out^
 
 
+def parse_prog_name(info: Span[UInt8, _]) -> Optional[String]:
+    """Program name from a bpf_prog_info image, if readable."""
+    if len(info) < _PROG_NAME_OFF + _PROG_NAME_LEN:
+        return None
+    var raw = List[UInt8]()
+    for i in range(_PROG_NAME_LEN):
+        var b = info[_PROG_NAME_OFF + i]
+        if b == UInt8(0):
+            break
+        raw.append(b)
+    if len(raw) == 0:
+        return None
+    for i in range(len(raw)):
+        var b = raw[i]
+        var ok = (
+            (b >= UInt8(0x41) and b <= UInt8(0x5A))
+            or (b >= UInt8(0x61) and b <= UInt8(0x7A))
+            or (b >= UInt8(0x30) and b <= UInt8(0x39))
+            or b == UInt8(0x5F)
+        )
+        if not ok:
+            return None
+    try:
+        return String(from_utf8=Span(raw))
+    except:
+        return None
+
+
+def parse_prog_misses(info: Span[UInt8, _]) -> UInt64:
+    """Recursion misses from a bpf_prog_info image, else 0."""
+    if len(info) < _PROG_REC_OFF + 8:
+        return UInt64(0)
+    var v = UInt64(0)
+    for i in range(8):
+        v |= UInt64(info[_PROG_REC_OFF + i]) << UInt64(8 * i)
+    return v
+
+
+@fieldwise_init
+struct CopyProgs(Copyable, Movable):
+    """One copy-channel identification (misses valid when ok)."""
+
+    var ok: Bool
+    var message: String
+    var bounce: UInt64
+    var exit_misses: UInt64
+    var sync_device: UInt64
+    var sync_cpu: UInt64
+
+
+def identify_copy_progs(
+    names: List[String], misses: List[UInt64]
+) -> CopyProgs:
+    """Match the four frozen copy programs by kernel name."""
+    if len(names) != 4 or len(misses) != 4:
+        return CopyProgs(
+            False, String("copy program count"), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(0),
+        )
+    var bounce = UInt64(0)
+    var exit_misses = UInt64(0)
+    var sync_device = UInt64(0)
+    var sync_cpu = UInt64(0)
+    var seen_bounce = False
+    var seen_exit = False
+    var seen_dev = False
+    var seen_cpu = False
+    for i in range(4):
+        var n = names[i]
+        if n == String("mv_bounce"):
+            if seen_bounce:
+                return CopyProgs(
+                    False, String("copy program ambiguous"),
+                    UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+                )
+            seen_bounce = True
+            bounce = misses[i]
+        elif n == String("mv_bounce_exit"):
+            if seen_exit:
+                return CopyProgs(
+                    False, String("copy program ambiguous"),
+                    UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+                )
+            seen_exit = True
+            exit_misses = misses[i]
+        elif n == String("mv_sync_device"):
+            if seen_dev:
+                return CopyProgs(
+                    False, String("copy program ambiguous"),
+                    UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+                )
+            seen_dev = True
+            sync_device = misses[i]
+        elif n == String("mv_sync_cpu"):
+            if seen_cpu:
+                return CopyProgs(
+                    False, String("copy program ambiguous"),
+                    UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+                )
+            seen_cpu = True
+            sync_cpu = misses[i]
+        else:
+            return CopyProgs(
+                False, String("copy program unexpected"),
+                UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+            )
+    if not (seen_bounce and seen_exit and seen_dev and seen_cpu):
+        return CopyProgs(
+            False, String("copy program missing"), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(0),
+        )
+    return CopyProgs(
+        True, String(""), bounce, exit_misses, sync_device,
+        sync_cpu,
+    )
+
+
+@fieldwise_init
+struct LifecycleProgs(Copyable, Movable):
+    """One lifecycle-channel identification (valid when ok)."""
+
+    var ok: Bool
+    var message: String
+    var map_misses: UInt64
+    var unmap_misses: UInt64
+
+
+def identify_lifecycle_progs(
+    names: List[String], misses: List[UInt64]
+) -> LifecycleProgs:
+    """Match the two frozen lifecycle programs by kernel name."""
+    if len(names) != 2 or len(misses) != 2:
+        return LifecycleProgs(
+            False, String("lifecycle program count"), UInt64(0),
+            UInt64(0),
+        )
+    var map_misses = UInt64(0)
+    var unmap_misses = UInt64(0)
+    var seen_map = False
+    var seen_unmap = False
+    for i in range(2):
+        var n = names[i]
+        if n == String("mv_map_result"):
+            if seen_map:
+                return LifecycleProgs(
+                    False, String("lifecycle program ambiguous"),
+                    UInt64(0), UInt64(0),
+                )
+            seen_map = True
+            map_misses = misses[i]
+        elif n == String("mv_unmap"):
+            if seen_unmap:
+                return LifecycleProgs(
+                    False, String("lifecycle program ambiguous"),
+                    UInt64(0), UInt64(0),
+                )
+            seen_unmap = True
+            unmap_misses = misses[i]
+        else:
+            return LifecycleProgs(
+                False, String("lifecycle program unexpected"),
+                UInt64(0), UInt64(0),
+            )
+    if not (seen_map and seen_unmap):
+        return LifecycleProgs(
+            False, String("lifecycle program missing"), UInt64(0),
+            UInt64(0),
+        )
+    return LifecycleProgs(True, String(""), map_misses, unmap_misses)
+
+
+@fieldwise_init
+struct ProgInfo(Copyable, Movable):
+    """One program identity read (name/misses valid when ok)."""
+
+    var ok: Bool
+    var message: String
+    var name: String
+    var misses: UInt64
+
+
+def prog_info(fd: Int) -> ProgInfo:
+    """Kernel name and misses for one program fd, via info call."""
+    var info = List[UInt8]()
+    for _ in range(_PROG_INFO_SIZE):
+        info.append(UInt8(0))
+    var attr = List[UInt8]()
+    for _ in range(16):
+        attr.append(UInt8(0))
+    var fdu = UInt32(fd)
+    for i in range(4):
+        attr[i] = UInt8((fdu >> UInt32(8 * i)) & UInt32(0xFF))
+    var info_len = UInt32(_PROG_INFO_SIZE)
+    for i in range(4):
+        attr[4 + i] = UInt8(
+            (info_len >> UInt32(8 * i)) & UInt32(0xFF)
+        )
+    var ptr = UInt64(Span(info).unsafe_ptr())
+    for i in range(8):
+        attr[8 + i] = UInt8((ptr >> UInt64(8 * i)) & UInt64(0xFF))
+    var rc: Int64
+    try:
+        rc = external_call["syscall", Int64](
+            Int64(_SYS_BPF), Int64(_BPF_OBJ_GET_INFO),
+            Span(attr).unsafe_ptr(), Int64(16),
+        )
+    except:
+        return ProgInfo(
+            False, String("prog info syscall failed"), String(""),
+            UInt64(0),
+        )
+    if rc != Int64(0):
+        return ProgInfo(
+            False,
+            String("prog info unreadable for fd ") + String(fd),
+            String(""), UInt64(0),
+        )
+    var name = parse_prog_name(Span(info))
+    if not name:
+        return ProgInfo(
+            False,
+            String("program identity unreadable for fd ")
+            + String(fd),
+            String(""), UInt64(0),
+        )
+    return ProgInfo(True, String(""), name.value(), parse_prog_misses(Span(info)))
+
+
 struct _Channel(Movable):
     """One object's session slot: elf, ring, sites, session."""
 
@@ -469,6 +708,77 @@ struct _Channel(Movable):
                 )
             total += m
         return MissOut(True, total, String(""))
+
+    def prog_names_misses(mut self) -> Tuple[Bool, String, List[String], List[UInt64]]:
+        """Kernel names and misses for every program fd, in order."""
+        var names = List[String]()
+        var misses = List[UInt64]()
+        if not self.is_open():
+            return (False, String("session not open"), names^, misses^)
+        if not self.progs_known:
+            return (False, String("program fds unknown"), names^, misses^)
+        for k in range(len(self.progs)):
+            var got = prog_info(self.progs[k])
+            if not got.ok:
+                var nn = List[String]()
+                var mm = List[UInt64]()
+                return (False, got.message, nn^, mm^)
+            names.append(got.name)
+            misses.append(got.misses)
+        return (True, String(""), names^, misses^)
+
+    def misses_lifecycle(mut self) -> LifecycleProgs:
+        var r = self.prog_names_misses()
+        if not r[0]:
+            return LifecycleProgs(False, r[1], UInt64(0), UInt64(0))
+        return identify_lifecycle_progs(r[2].copy(), r[3].copy())
+
+    def misses_copy(mut self) -> CopyProgs:
+        var r = self.prog_names_misses()
+        if not r[0]:
+            return CopyProgs(
+                False, r[1], UInt64(0), UInt64(0), UInt64(0),
+                UInt64(0),
+            )
+        return identify_copy_progs(r[2].copy(), r[3].copy())
+
+    def read_fb(mut self) -> SnapOut:
+        if not self.is_open():
+            return SnapOut(
+                False, List[UInt64](), String("session not open")
+            )
+        var s = self.sess.take()
+        var vals = List[UInt64]()
+        try:
+            for key in range(_FB_KEYS):
+                var key_bytes = List[UInt8]()
+                for i in range(4):
+                    key_bytes.append(
+                        UInt8((UInt32(key) >> UInt32(8 * i)) & UInt32(0xFF))
+                    )
+                var got = s.map_read(
+                    String(_FB_MAP),
+                    Span(key_bytes),
+                    UInt32(8),
+                )
+                if got.is_short() or len(got.data) != 8:
+                    self.sess = Optional(s^)
+                    return SnapOut(
+                        False,
+                        List[UInt64](),
+                        String("short fallback read"),
+                    )
+                var v = UInt64(0)
+                for i in range(8):
+                    v |= UInt64(got.data[i]) << UInt64(8 * i)
+                vals.append(v)
+        except e:
+            self.sess = Optional(s^)
+            return SnapOut(
+                False, List[UInt64](), _lmb_message(e.copy())
+            )
+        self.sess = Optional(s^)
+        return SnapOut(True, vals^, String(""))
 
     def map_info(mut self, name: String) -> GeomOut:
         if not self.is_open():
@@ -1034,30 +1344,64 @@ struct LmbKernel(ChannelPoller, KernelSource):
     def recursion_misses(mut self) -> MissOut:
         if not self._any_open():
             return MissOut(False, UInt64(0), String("session not open"))
-        var total = UInt64(0)
-        var attempt = UInt64(0)
-        var order = self._order()
-        for k in range(len(order)):
-            var ch = order[k]
-            var m: MissOut
-            if ch == 1:
-                m = self._ch1.misses()
-            elif ch == 2:
-                m = self._ch2.misses()
-            else:
-                m = self._ch0.misses()
-            if not m.ok:
+        var ch0 = self._ch0.misses()
+        if not ch0.ok:
+            return MissOut(
+                False, UInt64(0),
+                _channel_tag(0) + ch0.message,
+            )
+        if not self._ch2.present:
+            var total = ch0.count
+            var attempt = ch0.count
+            if self._ch1.present:
+                var lc = self._ch1.misses()
+                if not lc.ok:
+                    return MissOut(
+                        False, UInt64(0),
+                        _channel_tag(1) + lc.message,
+                    )
+                if total > UInt64(0xFFFFFFFFFFFFFFFF) - lc.count:
+                    return MissOut(
+                        False, UInt64(0),
+                        String("recursion misses wrap"),
+                    )
+                total += lc.count
+            return MissOut(True, total, String(""), attempt)
+        var lc_map = UInt64(0)
+        var lc_unmap = UInt64(0)
+        if self._ch1.present:
+            var lc = self._ch1.misses_lifecycle()
+            if not lc.ok:
                 return MissOut(
-                    False, UInt64(0), _channel_tag(ch) + m.message
+                    False, UInt64(0),
+                    _channel_tag(1) + lc.message,
                 )
-            if total > UInt64(0xFFFFFFFFFFFFFFFF) - m.count:
-                return MissOut(
-                    False, UInt64(0), String("recursion misses wrap")
-                )
-            total += m.count
-            if ch == 0:
-                attempt = m.count
-        return MissOut(True, total, String(""), attempt)
+            lc_map = lc.map_misses
+            lc_unmap = lc.unmap_misses
+        var cp = self._ch2.misses_copy()
+        if not cp.ok:
+            return MissOut(
+                False, UInt64(0),
+                _channel_tag(2) + cp.message,
+            )
+        var fb = self._ch2.read_fb()
+        if not fb.ok:
+            return MissOut(
+                False, UInt64(0),
+                _channel_tag(2) + String("fallback: ") + fb.message,
+            )
+        if len(fb.vals) != _FB_KEYS or fb.vals[2] != UInt64(0):
+            return MissOut(
+                False, UInt64(0),
+                _channel_tag(2)
+                + String("fallback counters wrapped"),
+            )
+        return MissOut(
+            True, UInt64(0), String(""), ch0.count, True,
+            cp.bounce, cp.exit_misses, cp.sync_device,
+            cp.sync_cpu, lc_map, lc_unmap, fb.vals[0],
+            fb.vals[1],
+        )
 
     def close(mut self) -> OpOut:
         # Idempotent cleanup: closing a never-opened (or

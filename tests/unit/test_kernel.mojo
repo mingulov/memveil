@@ -26,7 +26,10 @@ from memveil.capture.kernel import (
     PollRotation,
     added_fds,
     fdinfo_u64,
+    identify_copy_progs,
     join_op_message,
+    parse_prog_misses,
+    parse_prog_name,
     poll_advance,
     poll_outcome,
     prog_fds,
@@ -506,6 +509,89 @@ def test_copy_specs_attach_fallback_first() raises:
     assert_equal(specs[3].target_a, String("swiotlb_bounce"))
 
 
+def _prog_info_bytes(name: String, misses: UInt64) raises -> List[UInt8]:
+    var out = List[UInt8]()
+    for _ in range(232):
+        out.append(UInt8(0))
+    var nb = name.as_bytes()
+    for i in range(len(nb)):
+        out[64 + i] = nb[i]
+    var v = misses
+    for i in range(8):
+        out[208 + i] = UInt8(v & UInt64(0xFF))
+        v >>= UInt64(8)
+    return out^
+
+
+def test_parse_prog_name() raises:
+    var raw = _prog_info_bytes(String("mv_bounce"), UInt64(7))
+    var got = parse_prog_name(Span(raw))
+    assert_true(Bool(got))
+    assert_equal(got.value(), String("mv_bounce"))
+    var empty = List[UInt8]()
+    for _ in range(232):
+        empty.append(UInt8(0))
+    assert_true(not parse_prog_name(Span(empty)))
+    var short = List[UInt8]()
+    for _ in range(10):
+        short.append(UInt8(0))
+    assert_true(not parse_prog_name(Span(short)))
+
+
+def test_parse_prog_misses() raises:
+    var raw = _prog_info_bytes(String("mv_bounce"), UInt64(123))
+    assert_equal(parse_prog_misses(Span(raw)), UInt64(123))
+    var short = List[UInt8]()
+    for _ in range(10):
+        short.append(UInt8(0))
+    assert_equal(parse_prog_misses(Span(short)), UInt64(0))
+
+
+def test_identify_copy_progs() raises:
+    var names = List[String]()
+    names.append(String("mv_sync_cpu"))
+    names.append(String("mv_bounce_exit"))
+    names.append(String("mv_bounce"))
+    names.append(String("mv_sync_device"))
+    var misses = List[UInt64]()
+    misses.append(UInt64(1))
+    misses.append(UInt64(2))
+    misses.append(UInt64(3))
+    misses.append(UInt64(4))
+    var got = identify_copy_progs(names, misses)
+    assert_true(got.ok)
+    assert_equal(got.bounce, UInt64(3))
+    assert_equal(got.exit_misses, UInt64(2))
+    assert_equal(got.sync_device, UInt64(4))
+    assert_equal(got.sync_cpu, UInt64(1))
+
+
+def test_identify_copy_progs_ambiguous() raises:
+    var names = List[String]()
+    names.append(String("mv_bounce"))
+    names.append(String("mv_bounce"))
+    names.append(String("mv_sync_device"))
+    names.append(String("mv_sync_cpu"))
+    var misses = List[UInt64]()
+    for _ in range(4):
+        misses.append(UInt64(0))
+    var got = identify_copy_progs(names, misses)
+    assert_true(not got.ok)
+    assert_true(got.message.count_codepoints() > 0)
+
+
+def test_identify_copy_progs_missing() raises:
+    var names = List[String]()
+    names.append(String("mv_bounce"))
+    names.append(String("mv_sync_device"))
+    names.append(String("mv_sync_cpu"))
+    var misses = List[UInt64]()
+    for _ in range(3):
+        misses.append(UInt64(0))
+    var got = identify_copy_progs(names, misses)
+    assert_true(not got.ok)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_not_open_taxonomy]()
@@ -534,6 +620,11 @@ def run() raises -> Int:
     suite.test[test_prog_fds_lists_without_programs]()
     suite.test[test_recursion_misses_before_open]()
     suite.test[test_copy_specs_attach_fallback_first]()
+    suite.test[test_parse_prog_name]()
+    suite.test[test_parse_prog_misses]()
+    suite.test[test_identify_copy_progs]()
+    suite.test[test_identify_copy_progs_ambiguous]()
+    suite.test[test_identify_copy_progs_missing]()
     suite^.run()
     return 0
 

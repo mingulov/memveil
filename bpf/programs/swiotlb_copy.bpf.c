@@ -26,8 +26,8 @@
  * mv_bounce first claims a slot keyed by the trampoline frame
  * (ctx), unique among live calls; mv_bounce_exit records the
  * call only when no claim of this frame and call id exists.
- * A skipped program still counts in recursion_misses, so the
- * summed misses stay an upper bound on lost copies.
+ * Deferred and recovered counts in mv_copy_fb make the loss
+ * exact: misses(mv_bounce) + deferred - recovered.
  *
  * Build: clang --target=bpf -O2 -g -D__BPF__ -I bpf/include
  *   -I <libbpf-1.7.0>/src -I /usr/include/x86_64-linux-gnu
@@ -70,6 +70,21 @@ struct {
     __type(value, struct mv_claim);
 } mv_claims SEC(".maps");
 
+/* Fallback counters: deferred, recovered, flags. */
+#define MV_CP_FB_DEFERRED 0u
+#define MV_CP_FB_RECOVERED 1u
+#define MV_CP_FB_FLAGS 2u
+#define MV_CP_FB_LEN 3u
+#define MV_CP_FB_FLAG_DEFERRED_WRAP (1ULL << 0)
+#define MV_CP_FB_FLAG_RECOVERED_WRAP (1ULL << 1)
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, MV_CP_FB_LEN);
+    __type(key, __u32);
+    __type(value, __u64);
+} mv_copy_fb SEC(".maps");
+
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, MV_RING_BYTES);
@@ -97,6 +112,40 @@ static __always_inline void mv_submit_fail(void)
     old = __sync_fetch_and_add(slot, 1);
     if (old == 0xFFFFFFFFFFFFFFFFULL)
         mv_raise(MV_FLAG_SUBMIT_WRAP);
+}
+
+/* Sticky fallback flag bit. */
+static __always_inline void mv_fb_raise(__u64 bit)
+{
+    __u32 key = MV_CP_FB_FLAGS;
+    __u64 *slot = bpf_map_lookup_elem(&mv_copy_fb, &key);
+
+    if (slot)
+        __sync_fetch_and_or(slot, bit);
+}
+
+/* Deferred count; the wrapped value is never trusted. */
+static __always_inline void mv_fb_deferred(void)
+{
+    __u32 key = MV_CP_FB_DEFERRED;
+    __u64 *slot = bpf_map_lookup_elem(&mv_copy_fb, &key);
+
+    if (!slot)
+        return;
+    if (__sync_fetch_and_add(slot, 1) == 0xFFFFFFFFFFFFFFFFULL)
+        mv_fb_raise(MV_CP_FB_FLAG_DEFERRED_WRAP);
+}
+
+/* Recovered count; the wrapped value is never trusted. */
+static __always_inline void mv_fb_recovered(void)
+{
+    __u32 key = MV_CP_FB_RECOVERED;
+    __u64 *slot = bpf_map_lookup_elem(&mv_copy_fb, &key);
+
+    if (!slot)
+        return;
+    if (__sync_fetch_and_add(slot, 1) == 0xFFFFFFFFFFFFFFFFULL)
+        mv_fb_raise(MV_CP_FB_FLAG_RECOVERED_WRAP);
 }
 
 /* Shared emit path: counts the firing, validates, submits. */
@@ -386,9 +435,11 @@ int BPF_PROG(mv_bounce, struct device *dev, mv_phys_addr_t tlb_addr,
         mv_lost();
         return 0;
     }
-    /* Table full: no claim, so mv_bounce_exit records the copy. */
-    if (!mv_claim(frame, mv_call_id(tlb_addr, size, dir)))
+    /* Table full: count the deferral for mv_bounce_exit. */
+    if (!mv_claim(frame, mv_call_id(tlb_addr, size, dir))) {
+        mv_fb_deferred();
         return 0;
+    }
     return mv_emit_bounce(dev, tlb_addr, size, dir, pool);
 }
 
@@ -401,8 +452,11 @@ int BPF_PROG(mv_bounce_exit, struct device *dev, mv_phys_addr_t tlb_addr,
     __u64 frame = mv_frame(ctx);
 
     /* No frame: mv_bounce counted the loss, so never record twice. */
-    if (!frame || mv_release(frame, mv_call_id(tlb_addr, size, dir)))
+    if (!frame)
         return 0;
+    if (mv_release(frame, mv_call_id(tlb_addr, size, dir)))
+        return 0;
+    mv_fb_recovered();
     return mv_emit_bounce(dev, tlb_addr, size, dir, pool);
 }
 

@@ -1156,5 +1156,187 @@ def test_dropped_map_unmap_still_reports() raises:
     assert_true(_contains(js, String('"status": "partial"')))
 
 
+
+def _detail_misses(
+    bounce: UInt64,
+    exit_misses: UInt64,
+    sync_device: UInt64,
+    sync_cpu: UInt64,
+    lc_map: UInt64,
+    lc_unmap: UInt64,
+    deferred: UInt64,
+    recovered: UInt64,
+    attempt: UInt64 = UInt64(0),
+) raises -> MissOut:
+    return MissOut(
+        True, UInt64(0), String(""), attempt, True, bounce,
+        exit_misses, sync_device, sync_cpu, lc_map, lc_unmap,
+        deferred, recovered,
+    )
+
+
+def test_exact_copy_loss_zero_stays_complete() raises:
+    # E=100, D=10, R=110: every skipped or deferred copy
+    # recovered, so busy capture stays complete.
+    var c = _one_copy_run(
+        _detail_misses(
+            UInt64(100), UInt64(3), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(10), UInt64(110),
+        )
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"reason":"detail loss 0 (submit_fail=(0) '
+                'malformed=(0) dropped=(0) recursion_missed=(0) '
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"detail":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+    assert_true(
+        _contains(c.session, String("copy.mv_bounce_misses"))
+    )
+    assert_true(_contains(c.session, String("copy.deferred")))
+    assert_true(_contains(c.session, String("copy.recovered")))
+
+
+def test_exact_copy_loss_positive_is_partial() raises:
+    # Others=3, E=10, D=2, R=5: loss is 3+7=10.
+    var c = _one_copy_run(
+        _detail_misses(
+            UInt64(10), UInt64(4), UInt64(1), UInt64(0),
+            UInt64(1), UInt64(1), UInt64(2), UInt64(5),
+        )
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"reason":"detail loss 10 (submit_fail=(0) '
+                'malformed=(0) dropped=(0) recursion_missed=(10) '
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":"10",'),
+        )
+    )
+
+
+def test_exact_copy_loss_negative_is_unknown() raises:
+    # R exceeds E+D: counters contradict, loss unknown.
+    var c = _one_copy_run(
+        _detail_misses(
+            UInt64(5), UInt64(0), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(0), UInt64(10),
+        )
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+    assert_true(_contains(c.session, String("contradict")))
+    assert_true(
+        _contains(c.session, String("copy.mv_bounce_misses"))
+    )
+
+
+def test_exact_copy_exit_only_stays_complete() raises:
+    # Exit misses alone never lose a copy.
+    var c = _one_copy_run(
+        _detail_misses(
+            UInt64(0), UInt64(5), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+        )
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"reason":"detail loss 0 (submit_fail=(0) '
+                'malformed=(0) dropped=(0) recursion_missed=(0) '
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"detail":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+
+
+def test_exact_copy_identity_unreadable_is_unknown() raises:
+    var c = _one_copy_run(
+        MissOut(
+            False, UInt64(0),
+            String("copy program identity unreadable: no name"),
+        )
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+    assert_true(_contains(c.session, String("identity")))
+    assert_true(
+        _contains(
+            c.session, String("recursion_missed=(unavailable)")
+        )
+    )
+
+
+def test_copy_fb_geometry_refuses() raises:
+    var tmp = _mkdtemp()
+    var cfg = CollectorConfig()
+    cfg.duration_s = UInt64(60)
+    cfg.max_events_bytes = 1073741824
+    cfg.output = tmp + String("/cap")
+    cfg.profile_id = String("test-profile-1")
+    cfg.pid = 7
+    cfg.has_ring_bytes = True
+    cfg.ring_bytes = UInt32(8388608)
+    cfg.has_copy = True
+    cfg.copy_ring_bytes = UInt32(8388608)
+    var kernel = ScriptKernel()
+    kernel.channels = 3
+    kernel.fb_geom.max_entries = UInt32(2)
+    var signal = ScriptSignal()
+    var clock = ScriptClock()
+    clock.add(UInt64(0))
+    var writer = ScriptWriter()
+    var collector = Collector(cfg)
+    var result = collector.run(kernel, clock, signal, writer)
+    assert_equal(result.exit_code, EXIT_REFUSAL)
+    assert_equal(result.outcome, String("refused"))
+    assert_true(
+        _contains(
+            result.diagnostic,
+            String("map cp mv_copy_fb geometry"),
+        )
+    )
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

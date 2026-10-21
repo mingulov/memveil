@@ -6,11 +6,13 @@ from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
 
 from memveil.platform.btf import (
+    read_btf_copy_fb,
     read_btf_func_proto,
     read_btf_maps,
     read_btf_maps_ring,
     read_btf_member,
 )
+from memveil.platform.narrow import verify_object_program
 from memveil.platform.reader import read_host_file
 
 
@@ -391,6 +393,19 @@ def test_btf_member_not_found() raises:
     )
 
 
+def test_btf_copy_fallback_declared() raises:
+    var raw = _read_fixture(String("build/bpf/swiotlb_copy.bpf.o"))
+    var fb = read_btf_copy_fb(Span(raw))
+    assert_true(fb.ok)
+    assert_equal(fb.message, String(""))
+    var e = verify_object_program(
+        Span(raw), String("mv_bounce"), String("fentry/"))
+    assert_true(e.ok)
+    var x = verify_object_program(
+        Span(raw), String("mv_bounce_exit"), String("fexit/"))
+    assert_true(x.ok)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_btf_ok]()
@@ -432,6 +447,7 @@ def run() raises -> Int:
     suite.test[test_btf_member_slot]()
     suite.test[test_btf_member_device]()
     suite.test[test_btf_member_not_found]()
+    suite.test[test_btf_copy_fallback_declared]()
     suite^.run()
     return 0
 

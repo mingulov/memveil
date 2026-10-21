@@ -671,6 +671,90 @@ def _read_btf_maps(
     return out^
 
 
+def read_btf_copy_fb(data: Span[UInt8, _]) -> BtfMaps:
+    """Read the mv_copy_fb fallback counter definition.
+
+    Pinned exactly (ARRAY, key 4, value 8, 3 entries:
+    deferred, recovered, flags). Ring size unused (0).
+    """
+    var sec = _find_section(data, String(".BTF"))
+    if not sec.found:
+        return _refuse_maps(String("no BTF section"))
+    var walk = _walk_btf(data, sec.offset, sec.size)
+    if not walk.ok:
+        return _refuse_maps(walk.message.copy())
+    var found = walk.find_var(data, String("mv_copy_fb"))
+    if found == -1:
+        return _refuse_maps(String("missing mv_copy_fb"))
+    if found == -2:
+        return _refuse_maps(String("BTF strings corrupt"))
+    if found == -3:
+        return _refuse_maps(String("duplicate mv_copy_fb"))
+    var mem = walk.datasec_var(data, String(".maps"), found)
+    if mem == 0:
+        return _refuse_maps(String("no maps DATASEC"))
+    if mem == -1:
+        return _refuse_maps(String("BTF strings corrupt"))
+    if mem == -2:
+        return _refuse_maps(String("duplicate maps DATASEC"))
+    if mem == -4:
+        return _refuse_maps(String("fallback not in maps DATASEC"))
+    var fb_struct = walk.sizes[found]
+    if not walk.rec_valid(fb_struct):
+        return _refuse_maps(String("fallback not a struct"))
+    var rec = fb_struct - 1
+    if walk.kinds[rec] != 4:
+        return _refuse_maps(String("fallback not a struct"))
+    var link = walk.var_linkage(data, found)
+    if link != 0 and link != 1:
+        return _refuse_maps(String(t"fallback linkage {link}"))
+    var ftype = walk.member_type(data, rec, String("type"))
+    if ftype == -1:
+        return _refuse_maps(String("fallback missing type"))
+    if ftype == -2:
+        return _refuse_maps(String("BTF strings corrupt"))
+    var ftype_v = walk.uint_value(data, ftype)
+    if ftype_v < 0:
+        return _refuse_maps(String("fallback bad type"))
+    if ftype_v != _MAP_ARRAY:
+        return _refuse_maps(String(t"fallback type {ftype_v}, want 2"))
+    var fmax = walk.member_type(data, rec, String("max_entries"))
+    if fmax == -1:
+        return _refuse_maps(String("fallback missing max_entries"))
+    if fmax == -2:
+        return _refuse_maps(String("BTF strings corrupt"))
+    var fmax_v = walk.uint_value(data, fmax)
+    if fmax_v < 0:
+        return _refuse_maps(String("fallback bad max_entries"))
+    if fmax_v != 3:
+        return _refuse_maps(String(t"fallback max_entries {fmax_v}, want 3"))
+    var fkey = walk.member_type(data, rec, String("key"))
+    if fkey == -1:
+        return _refuse_maps(String("fallback missing key"))
+    if fkey == -2:
+        return _refuse_maps(String("BTF strings corrupt"))
+    var fkey_v = walk.int_size(data, fkey)
+    if fkey_v < 0:
+        return _refuse_maps(String("fallback bad key"))
+    if fkey_v != 4:
+        return _refuse_maps(String(t"fallback key {fkey_v}, want 4"))
+    var fval = walk.member_type(data, rec, String("value"))
+    if fval == -1:
+        return _refuse_maps(String("fallback missing value"))
+    if fval == -2:
+        return _refuse_maps(String("BTF strings corrupt"))
+    var fval_v = walk.int_size(data, fval)
+    if fval_v < 0:
+        return _refuse_maps(String("fallback bad value"))
+    if fval_v != 8:
+        return _refuse_maps(String(t"fallback value {fval_v}, want 8"))
+    var out = BtfMaps()
+    out.ok = True
+    out.message = String("")
+    out.ring_bytes = 0
+    return out^
+
+
 struct BtfFuncProto(Copyable, Movable):
     """One BTF function prototype read (canonical iff ok)."""
 

@@ -53,6 +53,7 @@ struct ScriptKernel(KernelSource):
     var ring_geom1: GeomOut
     var ring_geom2: GeomOut
     var offsets_geom: GeomOut
+    var fb_geom: GeomOut
     var install_out: OpOut
     var installed: List[UInt8]
     var install_calls: Int
@@ -110,6 +111,10 @@ struct ScriptKernel(KernelSource):
         )
         self.offsets_geom = GeomOut(
             True, UInt32(2), UInt32(4), UInt32(24), UInt32(1),
+            String(""),
+        )
+        self.fb_geom = GeomOut(
+            True, UInt32(2), UInt32(4), UInt32(8), UInt32(3),
             String(""),
         )
         self.install_out = ok.copy()
@@ -173,6 +178,8 @@ struct ScriptKernel(KernelSource):
             )
         if name == String("mv_counts"):
             return self.counts_geom.copy()
+        if name == String("mv_copy_fb"):
+            return self.fb_geom.copy()
         if channel == 1:
             return self.ring_geom1.copy()
         if channel == 2:

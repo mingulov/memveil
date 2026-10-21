@@ -185,6 +185,16 @@ struct MissOut(Copyable, Movable):
     var message: String
     # Subset of count skipped by the attempt (channel 0) programs.
     var attempt: UInt64
+    # Exact copy detail; per-program fields valid when set.
+    var has_copy_detail: Bool
+    var bounce: UInt64
+    var exit_misses: UInt64
+    var sync_device: UInt64
+    var sync_cpu: UInt64
+    var lc_map: UInt64
+    var lc_unmap: UInt64
+    var deferred: UInt64
+    var recovered: UInt64
 
     def __init__(
         out self,
@@ -192,11 +202,29 @@ struct MissOut(Copyable, Movable):
         count: UInt64,
         message: String,
         attempt: UInt64 = UInt64(0),
+        has_copy_detail: Bool = False,
+        bounce: UInt64 = UInt64(0),
+        exit_misses: UInt64 = UInt64(0),
+        sync_device: UInt64 = UInt64(0),
+        sync_cpu: UInt64 = UInt64(0),
+        lc_map: UInt64 = UInt64(0),
+        lc_unmap: UInt64 = UInt64(0),
+        deferred: UInt64 = UInt64(0),
+        recovered: UInt64 = UInt64(0),
     ):
         self.ok = ok
         self.count = count
         self.message = message
         self.attempt = attempt
+        self.has_copy_detail = has_copy_detail
+        self.bounce = bounce
+        self.exit_misses = exit_misses
+        self.sync_device = sync_device
+        self.sync_cpu = sync_cpu
+        self.lc_map = lc_map
+        self.lc_unmap = lc_unmap
+        self.deferred = deferred
+        self.recovered = recovered
 
 
 @fieldwise_init
@@ -716,6 +744,15 @@ struct Collector:
     var recursion_missed: UInt64
     var attempt_missed: UInt64
     var has_recursion: Bool
+    var rec_has_detail: Bool
+    var rec_bounce: UInt64
+    var rec_exit: UInt64
+    var rec_sync_device: UInt64
+    var rec_sync_cpu: UInt64
+    var rec_lc_map: UInt64
+    var rec_lc_unmap: UInt64
+    var rec_deferred: UInt64
+    var rec_recovered: UInt64
     var stats_start_ch0: StatsOut
     var stats_final_ch0: StatsOut
     var stats_start_lc: StatsOut
@@ -814,6 +851,15 @@ struct Collector:
         self.recursion_missed = UInt64(0)
         self.attempt_missed = UInt64(0)
         self.has_recursion = False
+        self.rec_has_detail = False
+        self.rec_bounce = UInt64(0)
+        self.rec_exit = UInt64(0)
+        self.rec_sync_device = UInt64(0)
+        self.rec_sync_cpu = UInt64(0)
+        self.rec_lc_map = UInt64(0)
+        self.rec_lc_unmap = UInt64(0)
+        self.rec_deferred = UInt64(0)
+        self.rec_recovered = UInt64(0)
         self.stats_start_ch0 = StatsOut(
             False,
             UInt64(0),
@@ -1328,6 +1374,16 @@ struct Collector:
             )
             if cp_maps != String(""):
                 return cp_maps
+            var fb = kernel.map_info_at(2, String("mv_copy_fb"))
+            if not fb.ok:
+                return String("map cp mv_copy_fb: ") + fb.message
+            if (
+                fb.map_type != UInt32(MAP_TYPE_ARRAY)
+                or fb.key_size != UInt32(4)
+                or fb.value_size != UInt32(8)
+                or fb.max_entries != UInt32(3)
+            ):
+                return String("map cp mv_copy_fb geometry")
         if not self.stable_pair_at(kernel, clock, 0):
             return String("start snapshot unresolved")
         self.start_vals = self.end_vals.copy()
@@ -1857,14 +1913,60 @@ struct Collector:
     def _read_misses[K: KernelSource](mut self, mut kernel: K):
         """Read skipped program runs once the probes are detached."""
         var m = kernel.recursion_misses()
-        if m.ok:
-            self.recursion_missed = m.count
-            self.attempt_missed = m.attempt
-            self.has_recursion = True
-        else:
+        if not m.ok:
             self.note_unknown(
                 String("recursion misses unreadable: ") + m.message
             )
+            return
+        if not m.has_copy_detail:
+            self.recursion_missed = m.count
+            self.attempt_missed = m.attempt
+            self.has_recursion = True
+            return
+        self.rec_has_detail = True
+        self.rec_bounce = m.bounce
+        self.rec_exit = m.exit_misses
+        self.rec_sync_device = m.sync_device
+        self.rec_sync_cpu = m.sync_cpu
+        self.rec_lc_map = m.lc_map
+        self.rec_lc_unmap = m.lc_unmap
+        self.rec_deferred = m.deferred
+        self.rec_recovered = m.recovered
+        self.attempt_missed = m.attempt
+        var top = ~UInt64(0)
+        if m.bounce > top - m.deferred:
+            self.note_unknown(String("copy recursion counters overflow"))
+            return
+        var have = m.bounce + m.deferred
+        if have < m.recovered:
+            self.note_unknown(
+                String("copy recursion counters contradict: E=")
+                + format_u64(m.bounce)
+                + String(" D=")
+                + format_u64(m.deferred)
+                + String(" R=")
+                + format_u64(m.recovered)
+            )
+            return
+        var loss_cp = have - m.recovered
+        var others = m.attempt
+        var parts = List[UInt64]()
+        parts.append(m.lc_map)
+        parts.append(m.lc_unmap)
+        parts.append(m.sync_device)
+        parts.append(m.sync_cpu)
+        for i in range(len(parts)):
+            if others > top - parts[i]:
+                self.note_unknown(
+                    String("copy recursion counters overflow")
+                )
+                return
+            others += parts[i]
+        if others > top - loss_cp:
+            self.note_unknown(String("copy recursion counters overflow"))
+            return
+        self.recursion_missed = others + loss_cp
+        self.has_recursion = True
 
     def confirm[K: KernelSource](mut self, mut kernel: K):
         """Bounded confirmation drain after the end snapshot."""
@@ -3024,6 +3126,39 @@ struct Collector:
                 joined += String("; ") + self.secondary_causes[i]
             self.provenance(
                 out, String("shutdown.secondary_causes"), joined
+            )
+        if self.rec_has_detail:
+            self.provenance(
+                out, String("copy.mv_bounce_misses"),
+                format_u64(self.rec_bounce),
+            )
+            self.provenance(
+                out, String("copy.mv_bounce_exit_misses"),
+                format_u64(self.rec_exit),
+            )
+            self.provenance(
+                out, String("copy.mv_sync_device_misses"),
+                format_u64(self.rec_sync_device),
+            )
+            self.provenance(
+                out, String("copy.mv_sync_cpu_misses"),
+                format_u64(self.rec_sync_cpu),
+            )
+            self.provenance(
+                out, String("lifecycle.mv_map_result_misses"),
+                format_u64(self.rec_lc_map),
+            )
+            self.provenance(
+                out, String("lifecycle.mv_unmap_misses"),
+                format_u64(self.rec_lc_unmap),
+            )
+            self.provenance(
+                out, String("copy.deferred"),
+                format_u64(self.rec_deferred),
+            )
+            self.provenance(
+                out, String("copy.recovered"),
+                format_u64(self.rec_recovered),
             )
         while len(out.evidence) > 64:
             _ = out.evidence.pop()
