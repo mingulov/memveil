@@ -1911,7 +1911,7 @@ def test_error_close_unreadable_second_read_notes_post_snapshot() raises:
     )
 
 
-def _Detail_failed(attempt: UInt64, reason: String) raises -> MissOut:
+def _detail_failed(attempt: UInt64, reason: String) raises -> MissOut:
     var m = MissOut(True, UInt64(0), String(""), attempt)
     m.detail_error = reason
     return m^
@@ -1920,7 +1920,7 @@ def _Detail_failed(attempt: UInt64, reason: String) raises -> MissOut:
 def test_wrapped_fallback_keeps_attempt_count() raises:
     # Wrapped fallback counters poison detail, not a read attempt count.
     var c = _one_copy_run(
-        _Detail_failed(
+        _detail_failed(
             UInt64(3), String("ch2 fallback counters wrapped"))
     )
     assert_true(
@@ -1961,7 +1961,7 @@ def test_wrapped_fallback_keeps_attempt_count() raises:
 def test_frame_lost_fallback_keeps_attempt_count() raises:
     # A lost frame names itself, never a counter wrap.
     var c = _one_copy_run(
-        _Detail_failed(
+        _detail_failed(
             UInt64(3), String("ch2 fallback frame lost"))
     )
     assert_true(
@@ -1995,7 +1995,7 @@ def test_frame_lost_fallback_keeps_attempt_count() raises:
 def test_unreadable_fallback_keeps_attempt_count() raises:
     # An unreadable fallback map poisons detail, not the attempt count.
     var c = _one_copy_run(
-        _Detail_failed(
+        _detail_failed(
             UInt64(3), String("ch2 fallback: short fallback read"))
     )
     assert_true(
@@ -2030,7 +2030,7 @@ def test_unreadable_fallback_keeps_attempt_count() raises:
 def test_unreadable_lifecycle_misses_keep_attempt_count() raises:
     # Unreadable lifecycle misses poison detail, not the attempt count.
     var c = _one_copy_run(
-        _Detail_failed(
+        _detail_failed(
             UInt64(3), String("ch1 lifecycle program count"))
     )
     assert_true(
@@ -2069,7 +2069,7 @@ def test_unreadable_lifecycle_misses_keep_attempt_count() raises:
 def test_unreadable_copy_misses_keep_attempt_count() raises:
     # Unreadable copy misses poison detail, not the attempt count.
     var c = _one_copy_run(
-        _Detail_failed(
+        _detail_failed(
             UInt64(3), String("ch2 copy program count"))
     )
     assert_true(
