@@ -93,9 +93,6 @@ def armed_preflight():
                   "object " + name) and ok
     ok = need(os.path.join(REPO, "build", "vm", "mv_consume"),
               "consumer") and ok
-    ok = need(os.path.join(
-        REPO, "profiles",
-        "linux-x86_64-7.0.0-34-generic.json"), "narrow profile") and ok
     if not shutil.which("vng"):
         print("FAIL perf-overhead: armed but vng not available")
         return False
@@ -109,6 +106,12 @@ def armed_preflight():
                            capture_output=True)
     if probe.returncode != 0:
         print("FAIL perf-overhead: armed but no passwordless sudo")
+        return False
+    import gate_kernel
+    try:
+        gate_kernel.prepare()
+    except gate_kernel.GateKernelError as exc:
+        print("FAIL perf-overhead: armed but %s" % exc)
         return False
     return ok
 
@@ -187,8 +190,7 @@ def snapshot_campaign(tmp, sub, ledger_name, validate_ledger):
                 REPO, "build", "deps", "lmb", "lib",
                 "libbpf_mojo.so.1")),
             ("profile_sha", os.path.join(
-                REPO, "profiles",
-                "linux-x86_64-7.0.0-34-generic.json"))):
+                REPO, "build", "vm", "gate-profile.json"))):
         if artifacts[key] != sha_file(path):
             raise ValueError("campaign input mismatch: " + key)
     return VerifiedExports(got, verified), ledger

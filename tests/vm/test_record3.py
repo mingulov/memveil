@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from consume import parse_oracle_log
 from evidence_retention import (expected_from_verified,
                                 retain_failure)
+import gate_kernel  # noqa: E402
 from lifecycle_env import (BRIDGE, COPY_PROBE, LIFECYCLE_PROBE,
                            ensure_oracle_module,
                            require_lifecycle_env)
@@ -42,7 +43,7 @@ def _mint_profile():
         [sys.executable,
          os.path.join(REPO, "tests", "vm",
                       "mint_record3_profile.py"),
-         "--out", out],
+         "--base", str(gate_kernel.SELECTED), "--out", out],
         capture_output=True, text=True, timeout=180)
     assert proc.returncode == 0, proc.stderr[-2000:]
     with open(out) as handle:
@@ -267,7 +268,7 @@ def test_record3_three_channel_capture():
              "r3-oracle.log"])
         expected = expected_from_verified(got, "record3")
         ident = json.loads(got["identity.json"].read_text())
-        assert ident["release"] == "7.0.0-34-generic", ident
+        assert ident["release"] == gate_kernel.selected().release, ident
         record = json.loads(got["record.json"].read_text())
         session = json.loads(
             got["cap-session.json"].read_text())

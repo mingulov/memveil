@@ -11,14 +11,14 @@ Outputs:
     unvalidated until the promotion commit flips ONLY the
     status line; tracing caps supported with frozen hooks
     and current lc/cp bindings)
-  tests/fixtures/profiles/saturation-candidate.json (test
-    expectation, explicit path only, never scanned)
 
 The tracing transform is the record3 minter's shared
 implementation, so re-mints cannot drift from the qualified
-lanes. Re-running after a kernel/producer change
-re-qualifies the bindings; the gate itself enforces the
-checked-in values.
+lanes. gate_docs is also the transform tests/vm/gate_kernel.py
+uses to mint the gate and saturation-candidate profiles for
+the running kernel on every armed VM run. Re-running after a
+kernel/producer change re-qualifies the bindings; the gate
+itself enforces the checked-in values.
 """
 import hashlib
 import importlib.util
@@ -29,7 +29,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DOC = ROOT / "profiles/linux-x86_64-7.0.0-34-generic.json"
-SAT = ROOT / "tests/fixtures/profiles/saturation-candidate.json"
 PROD_OBJ = ROOT / "build/bpf/swiotlb_attempt.bpf.o"
 SAT_OBJ = ROOT / "build/bpf/swiotlb_attempt-test.bpf.o"
 LC_OBJ = ROOT / "build/bpf/swiotlb_lifecycle.bpf.o"
@@ -141,15 +140,8 @@ def doc_for(
     }
 
 
-def main() -> int:
-    if len(sys.argv) != 3:
-        print(
-            "usage: emit-gate-profiles IDENTITY_JSON LIVE_FORMAT",
-            file=sys.stderr,
-        )
-        return 2
-    ident = json.loads(Path(sys.argv[1]).read_text())
-    fmt_text = Path(sys.argv[2]).read_text()
+def gate_docs(ident: dict, fmt_text: str, gate_id: str) -> tuple:
+    """Gate and saturation docs for one measured identity."""
     for key in (
         "release",
         "config_src",
@@ -160,11 +152,9 @@ def main() -> int:
         "image_bid",
     ):
         if not ident.get(key):
-            print(f"identity lacks {key}", file=sys.stderr)
-            return 1
+            raise ValueError(f"identity lacks {key}")
     if hashlib.sha256(fmt_text.encode()).hexdigest() != ident["format_sha"]:
-        print("format text does not match format_sha", file=sys.stderr)
-        return 1
+        raise ValueError("format text does not match format_sha")
     bind = {
         "config": ident["config_sha"],
         "config_src": ident["config_src"],
@@ -176,7 +166,7 @@ def main() -> int:
         "ring": "8388608",
     }
     gate = doc_for(
-        "linux-x86_64-7.0.0-34-generic",
+        gate_id,
         "reference-unvalidated",
         ident["release"],
         note_for(bind),
@@ -186,26 +176,35 @@ def main() -> int:
     minter().apply_tracing(
         gate, LC_OBJ, CP_OBJ, LC_REASON, CP_REASON, HOOK_NOTE
     )
-    DOC.write_text(json.dumps(gate, indent=2) + "\n")
-    SAT.parent.mkdir(parents=True, exist_ok=True)
-    SAT.write_text(
-        json.dumps(
-            doc_for(
-                "saturation-candidate",
-                "reference-unvalidated",
-                ident["release"],
-                note_for(
-                    {**bind, "object": sha(SAT_OBJ), "ring": "4096"}
-                ),
-                fmt_text,
-                "candidate",
-            ),
-            indent=2,
-        )
-        + "\n"
+    sat = doc_for(
+        "saturation-candidate",
+        "reference-unvalidated",
+        ident["release"],
+        note_for({**bind, "object": sha(SAT_OBJ), "ring": "4096"}),
+        fmt_text,
+        "candidate",
     )
+    return gate, sat
+
+
+def main() -> int:
+    if len(sys.argv) != 3:
+        print(
+            "usage: emit-gate-profiles IDENTITY_JSON LIVE_FORMAT",
+            file=sys.stderr,
+        )
+        return 2
+    ident = json.loads(Path(sys.argv[1]).read_text())
+    fmt_text = Path(sys.argv[2]).read_text()
+    try:
+        gate, _ = gate_docs(
+            ident, fmt_text, "linux-x86_64-7.0.0-34-generic"
+        )
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    DOC.write_text(json.dumps(gate, indent=2) + "\n")
     print(f"wrote {DOC.relative_to(ROOT)}")
-    print(f"wrote {SAT.relative_to(ROOT)}")
     return 0
 
 

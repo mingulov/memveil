@@ -30,7 +30,8 @@ from consume import (author_reducer_fixture, check_conservation, check_lifetime_
                      translate_session)
 from evidence_retention import (expected_from_verified,
                                 retain_failure)
-from lifecycle_env import (CONSUMER, COPY_PROBE, LIFECYCLE_PROBE,
+import gate_kernel  # noqa: E402
+from lifecycle_env import (prepare_gate_kernel, CONSUMER, COPY_PROBE, LIFECYCLE_PROBE,
                            ensure_oracle_module)
 from vm_boot import cleanup, run_guest, verify_exports
 
@@ -74,6 +75,7 @@ def test_guest_comparison(tmp_path):
                  MEMVEIL_BIN):
         if not os.path.isfile(path):
             pytest.fail("armed but missing: %s" % path)
+    prepare_gate_kernel()
     ensure_oracle_module()
     tmp = None
     try:
@@ -98,7 +100,7 @@ def test_guest_comparison(tmp_path):
         cap_dir.mkdir()
         probe_lifetimes = translate_session(
             lc, cp, ops_log, str(cap_dir), "oracle-live-session",
-            "linux-x86_64-7.0.0-34-generic")
+            gate_kernel.selected_profile_id())
         authored = tmp_path / "authored-reducer-fixture"
         author_reducer_fixture(cap_dir, authored)
         rep = subprocess.run(

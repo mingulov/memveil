@@ -21,6 +21,7 @@ from consume import (check_conservation, check_oracle_script,
                      parse_oracle_log)
 from evidence_retention import (expected_from_verified,
                                 retain_failure)
+import gate_kernel  # noqa: E402
 from lifecycle_env import (CONSUMER, COPY_PROBE, LIFECYCLE_PROBE,
                            ensure_oracle_module, require_lifecycle_env)
 from vm_boot import cleanup, run_guest, verify_exports
@@ -99,7 +100,7 @@ def test_low_rate_matrix():
         got = verify_exports(tmp, "matrix", names)
         expected = expected_from_verified(got, "matrix")
         ident = json.loads(got["identity.json"].read_text())
-        assert ident["release"] == "7.0.0-34-generic", ident
+        assert ident["release"] == gate_kernel.selected().release, ident
         for delay_ms in STEPS:
             check_step(got, delay_ms)
     except Exception:

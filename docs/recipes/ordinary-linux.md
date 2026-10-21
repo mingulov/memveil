@@ -37,6 +37,30 @@ transitions, or sustained pool pressure; see the
 - A root shell inside the guest for module loading,
   networking, and block-device setup (steps 3-7).
 
+## VM gate kernel
+
+Every armed VM gate first selects the kernel it tests
+(`tests/vm/gate_kernel.py`). A validated shipped profile
+that names the guest release and whose bindings hold
+against the measured identity and the current objects is
+used as is. Otherwise, when the guest boots the host
+kernel, the host measures the identity with the guest's
+rules and mints `build/vm/gate-profiles/<release>/gate.json`
+(status `reference-unvalidated`) plus a saturation
+candidate; the selection is copied to
+`build/vm/gate-profile.json` for guest-side readers. The
+guest measures again and every exact assertion compares
+against the selection, so minting names the kernel under
+test without relaxing any check. Lanes that load probes
+without record's admission also require `memveil doctor`
+to report every capability live-verified on that kernel.
+
+A different guest release with no holding shipped profile
+fails closed. `MEMVEIL_VM_REQUIRE_SHIPPED=1` refuses minted
+mode; use it for runs that confirm a shipped claim. A
+minted run proves the code on that kernel and qualifies no
+collection.
+
 ## Guest kernel when the host differs
 
 Guests normally boot the host kernel. When the host runs a
@@ -432,8 +456,10 @@ lifecycle/copy qualification, limited to the exact tested
 artifact on the admitted profile — the bundle or built
 tree whose BPF bytes match the narrow profile bindings,
 on the narrow 7.0.0-34-generic environment the profile
-names. A PASS never qualifies a rebuilt object with
-different bytes, another kernel, or another profile.
+names, selected in shipped mode (see
+[VM gate kernel](#vm-gate-kernel)). A PASS never qualifies
+a rebuilt object with different bytes, another kernel,
+another profile, or a minted gate profile.
 
 Every row needs `MEMVEIL_VM_LIFECYCLE=1`, the laboratory
 lifecycle probes in `build/bpf`, the oracle module source

@@ -391,7 +391,13 @@ def main():
             rec.kill()
         except OSError:
             pass
-        fail("record never reached readiness")
+        rec.wait()
+        try:
+            with open(os.path.join(work, "record.stderr"), "rb") as fh:
+                tail = fh.read()[-1500:].decode("utf-8", "replace")
+        except OSError:
+            tail = "(record.stderr unreadable)"
+        fail("record never reached readiness: " + tail.strip())
     ledger["ready"] = ready
     out_path = os.path.join(work, "record.stdout")
     with open(out_path, "w") as fh:

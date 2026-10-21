@@ -26,6 +26,7 @@ from consume import (check_conservation, check_oracle_witness,
                      replay_oracle_witness_ledger)
 from evidence_retention import (expected_from_verified,
                                 retain_failure)
+import gate_kernel  # noqa: E402
 from lifecycle_env import (CONSUMER, COPY_PROBE, LIFECYCLE_PROBE,
                            ensure_oracle_module,
                            require_lifecycle_env)
@@ -203,7 +204,7 @@ def test_canonical_windows():
         got = verify_exports(tmp, "canonical", names)
         expected = expected_from_verified(got, "canonical")
         ident = json.loads(got["identity.json"].read_text())
-        assert ident["release"] == "7.0.0-34-generic", ident
+        assert ident["release"] == gate_kernel.selected().release, ident
         bad, _, _, _, _ = check_window(got, "n", frozen["n"])
         assert not bad, "\n".join(bad)
         print("n: nested 4096+1024 -> 5120 ok")

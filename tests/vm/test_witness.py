@@ -33,6 +33,7 @@ from consume import (author_reducer_fixture, check_conservation,
                      translate_session)
 from evidence_retention import (expected_from_verified,
                                 retain_failure)
+import gate_kernel  # noqa: E402
 from lifecycle_env import (CONSUMER, COPY_PROBE, LIFECYCLE_PROBE,
                            ensure_oracle_module,
                            require_lifecycle_env)
@@ -140,7 +141,7 @@ def test_witness_windows(tmp_path):
                               "f-oracle.log"])
         expected = expected_from_verified(got, "witness")
         ident = json.loads(got["identity.json"].read_text())
-        assert ident["release"] == "7.0.0-34-generic", ident
+        assert ident["release"] == gate_kernel.selected().release, ident
         bad, w_lc, w_cp, w_ops, w_rel = check_window(
             got, "w", frozen["w"])
         assert not bad, "\n".join(bad)
@@ -173,7 +174,7 @@ def test_witness_windows(tmp_path):
         cap_dir.mkdir()
         probe_lifetimes = translate_session(
             w_lc, w_cp, w_ops, str(cap_dir), "witness-w-session",
-            "linux-x86_64-7.0.0-34-generic")
+            gate_kernel.selected_profile_id())
         authored = tmp_path / "authored-reducer-fixture"
         author_reducer_fixture(cap_dir, authored)
         rep = subprocess.run(

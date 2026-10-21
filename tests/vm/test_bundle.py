@@ -22,6 +22,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from consume import parse_oracle_log
+import gate_kernel  # noqa: E402
 from lifecycle_env import (BRIDGE, COPY_PROBE, LIFECYCLE_PROBE,
                            ensure_oracle_module,
                            require_lifecycle_env)
@@ -276,7 +277,7 @@ def test_bundle_three_phase_capture():
              "workload.json", "bundle.json", "report.json"])
         expected = expected_from_verified(got, "bundle")
         ident = json.loads(got["identity.json"].read_text())
-        assert ident["release"] == "7.0.0-34-generic", ident
+        assert ident["release"] == gate_kernel.selected().release, ident
         bundle = json.loads(got["bundle.json"].read_text())
         assert bundle["tarball_sha"] == _sha(TARBALL), bundle
         manifest = json.load(open(MANIFEST))

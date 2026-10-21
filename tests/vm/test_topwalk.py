@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from evidence_retention import (expected_from_verified,
                                 retain_failure)
+import gate_kernel  # noqa: E402
 from lifecycle_env import (BRIDGE, COPY_PROBE, LIFECYCLE_PROBE,
                            ensure_oracle_module,
                            require_lifecycle_env)
@@ -33,7 +34,6 @@ REPO = os.path.dirname(
 MEMVEIL = os.path.join(REPO, "build", "memveil")
 ATTEMPT_PROBE = os.path.join(
     REPO, "build", "bpf", "swiotlb_attempt.bpf.o")
-NARROW_PROFILE = "linux-x86_64-7.0.0-34-generic"
 POOL_SLOT_BYTES = 2048
 
 
@@ -80,14 +80,14 @@ def test_topwalk_live_top_walkthrough():
              "cap-events.ndjson"])
         expected = expected_from_verified(got, "topwalk")
         ident = json.loads(got["identity.json"].read_text())
-        assert ident["release"] == "7.0.0-34-generic", ident
+        assert ident["release"] == gate_kernel.selected().release, ident
         ledger = json.loads(got["walk.json"].read_text())
         assert ledger["memveil_rc"] == 4, ledger
         assert ledger["end_reason"] == "duration", ledger
         for cap in ("bounce_attempts", "mapping_lifecycle",
                     "copy_bytes"):
             assert ledger["profile_ids"][cap] == \
-                NARROW_PROFILE, ledger
+                gate_kernel.selected_profile_id(), ledger
         assert ledger["bpf_after"] == ledger["bpf_before"], \
             ledger
         session = json.loads(
@@ -155,11 +155,12 @@ def test_topwalk_live_top_walkthrough():
         assert got["live.err"].read_text() == "", \
             got["live.err"].read_text()[-500:]
         # Honest unknowns stay explicit in the final answer,
-        # and the binding names the narrow profile.
+        # and the binding names the selected gate profile.
         final_body = live_blocks[-1][2]
         assert "loss=unknown" in final_body, final_body[-2000:]
-        assert "validated %s: bindings hold" % \
-            NARROW_PROFILE in final_body, final_body[-2000:]
+        sel = gate_kernel.selected()
+        assert sel.decision(sel.gate_doc) in final_body, \
+            final_body[-2000:]
         print("topwalk: %d live blocks, %d periodic samples, "
               "replay-equal final" % (len(live_blocks),
                                       periodic))

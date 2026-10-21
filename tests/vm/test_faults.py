@@ -21,6 +21,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from consume import parse_oracle_log, scripted_expectation
+import gate_kernel  # noqa: E402
 from lifecycle_env import (BRIDGE, COPY_PROBE, LIFECYCLE_PROBE,
                            ensure_oracle_module,
                            require_lifecycle_env)
@@ -158,7 +159,7 @@ def test_faults_multi_channel():
         got = verify_exports(tmp, "faults", names)
         expected = expected_from_verified(got, "faults")
         ident = json.loads(got["identity.json"].read_text())
-        assert ident["release"] == "7.0.0-34-generic", ident
+        assert ident["release"] == gate_kernel.selected().release, ident
         ledger = {row["scenario"]: row for row in
                   json.loads(got["faults.json"].read_text())}
         for tag, row in sorted(ledger.items()):

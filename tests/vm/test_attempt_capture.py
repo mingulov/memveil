@@ -3,7 +3,7 @@
 """VM gate: live attempt capture with an ftrace oracle.
 
 Two boots of the frozen harness (virtme-ng 1.41, qemu 10.2.1,
-host kernel 7.0.0-34-generic, 6G, pcnet32 stimulus): a
+the gate kernel from gate_kernel.py, 6G, pcnet32 stimulus): a
 correctness run demanding exact cross-equalities with zero
 loss, and a SIGSTOP saturation run demanding exact loss
 accounting. Both require narrow candidate admission; any
@@ -29,8 +29,6 @@ MEMVEIL = REPO / "build" / "memveil"
 BRIDGE = REPO / "build" / "deps" / "lmb" / "lib" / "libbpf_mojo.so.1"
 PROD_OBJ = REPO / "build" / "bpf" / "swiotlb_attempt.bpf.o"
 SAT_OBJ = REPO / "build" / "bpf" / "swiotlb_attempt-test.bpf.o"
-NARROW_DOC = REPO / "profiles" / "linux-x86_64-7.0.0-34-generic.json"
-SAT_DOC = REPO / "tests" / "fixtures" / "profiles" / "saturation-candidate.json"
 GUEST_FLOW = REPO / "tests" / "vm" / "guest_flow.py"
 
 def find_vng():
@@ -73,6 +71,18 @@ def gate_prefix():
         + ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     )
     return ["sudo", "-n", "env", f"PATH={env['PATH']}", vng], env
+
+
+def gate_kernel():
+    """Selected or minted gate profiles; armed refusals fail."""
+    import gate_kernel as gk
+    try:
+        sel = gk.select()
+    except gk.GateKernelError as exc:
+        pytest.fail("gate kernel: %s" % exc)
+    print("gate kernel %s: %s (%s)" % (sel.release, sel.mode,
+                                       sel.gate_doc))
+    return sel
 
 
 def run_guest(mode, profile, obj, duration):
@@ -318,9 +328,12 @@ def global_metric(report, name):
 def test_correctness():
     tmp = None
     try:
-        tmp, proc = run_guest("correctness", NARROW_DOC, PROD_OBJ, 40)
+        if os.environ.get("MEMVEIL_VM_ATTEMPTS") != "1":
+            pytest.skip("attempt VM gates need MEMVEIL_VM_ATTEMPTS=1")
+        sel = gate_kernel()
+        tmp, proc = run_guest("correctness", sel.gate_doc, PROD_OBJ, 40)
         assert proc.returncode == 0, f"guest failed: {proc.stderr[-2000:]}"
-        expected = check_correctness(tmp)
+        expected = check_correctness(tmp, sel)
     except Exception:
         from evidence_retention import retain_failure
         retain_failure(tmp, "attempt-correctness",
@@ -332,7 +345,7 @@ def test_correctness():
                 export_prefix="correctness")
 
 
-def check_correctness(tmp):
+def check_correctness(tmp, sel):
     got = verify_exports(tmp, "correctness")
     from evidence_retention import expected_from_verified
     expected = expected_from_verified(got, "correctness")
@@ -342,10 +355,10 @@ def check_correctness(tmp):
     assert session["capture"]["end_reason"] == "duration"
     assert (
         evidence(session, "profile.decision")
-        == "validated linux-x86_64-7.0.0-34-generic: bindings hold"
+        == sel.decision(sel.gate_doc)
     )
-    check_identity_against_doc(ledger, NARROW_DOC)
-    check_provenance(session, "7.0.0-34-generic")
+    check_identity_against_doc(ledger, sel.gate_doc)
+    check_provenance(session, sel.release)
     assert ledger["ping_transmitted"] == 5000, ledger["ping_transmitted"]
     assert ledger["lost_markers"] == 0
     for cpu, stats in sorted(ledger["percpu"].items()):
@@ -415,9 +428,12 @@ def check_correctness(tmp):
 def test_saturation():
     tmp = None
     try:
-        tmp, proc = run_guest("saturation", SAT_DOC, SAT_OBJ, 60)
+        if os.environ.get("MEMVEIL_VM_ATTEMPTS") != "1":
+            pytest.skip("attempt VM gates need MEMVEIL_VM_ATTEMPTS=1")
+        sel = gate_kernel()
+        tmp, proc = run_guest("saturation", sel.sat_doc, SAT_OBJ, 60)
         assert proc.returncode == 0, f"guest failed: {proc.stderr[-2000:]}"
-        expected = check_saturation(tmp)
+        expected = check_saturation(tmp, sel)
     except Exception:
         from evidence_retention import retain_failure
         retain_failure(tmp, "attempt-saturation",
@@ -429,7 +445,7 @@ def test_saturation():
                 export_prefix="saturation")
 
 
-def check_saturation(tmp):
+def check_saturation(tmp, sel):
     got = verify_exports(tmp, "saturation")
     from evidence_retention import expected_from_verified
     expected = expected_from_verified(got, "saturation")
@@ -439,11 +455,10 @@ def check_saturation(tmp):
     assert session["capture"]["end_reason"] == "signal"
     assert (
         evidence(session, "profile.decision")
-        == "candidate saturation-candidate:"
-        " bindings hold (profile unvalidated)"
+        == sel.decision(sel.sat_doc)
     )
-    check_identity_against_doc(ledger, SAT_DOC)
-    check_provenance(session, "7.0.0-34-generic")
+    check_identity_against_doc(ledger, sel.sat_doc)
+    check_provenance(session, sel.release)
     assert ledger["ping_transmitted"] == 5000, ledger["ping_transmitted"]
     assert ledger["lost_markers"] == 0, "oracle unreliable under flood"
     for cpu, stats in sorted(ledger["percpu"].items()):

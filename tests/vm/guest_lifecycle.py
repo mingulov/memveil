@@ -1047,7 +1047,7 @@ def run_topwalk(gate):
     """Live top walkthrough: ordinary disk I/O under live capture.
 
     Runs the real `memveil top --output` with attempt,
-    lifecycle, and copy channels against the shipped narrow
+    lifecycle, and copy channels against the selected gate
     profile while ordinary direct-I/O disk traffic flows
     through the swiotlb path, then exports the live blocks
     plus the retained capture for host-side replay
@@ -1058,7 +1058,7 @@ def run_topwalk(gate):
     attempt_obj = os.path.join(
         gate.repo, "build", "bpf", "swiotlb_attempt.bpf.o")
     profile = os.path.join(
-        gate.repo, "profiles", "linux-x86_64-7.0.0-34-generic.json")
+        gate.repo, "build", "vm", "gate-profile.json")
     for path in (memveil, attempt_obj, profile):
         if not os.path.isfile(path):
             fail(f"missing {path}")

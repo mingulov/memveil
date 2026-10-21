@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Mint the ephemeral 3-channel test profile for the record3 lane.
 
-Derives from the shipped narrow doc: keeps the qualified base
+Derives from --base (default the shipped narrow doc): keeps its base
 bindings (config/btf/format/object/image build the same
 kernel the attempt lane qualifies), appends lc/cp object and
 ring bindings from the current builds, adds the frozen
@@ -268,7 +268,18 @@ def apply_tracing(doc, lc_obj, cp_obj, lc_reason,
 
 
 def main():
-    doc = json.loads(DOC.read_text())
+    out = OUT
+    base = DOC
+    args = sys.argv[1:]
+    while args:
+        if args[0] not in ("--out", "--base") or len(args) < 2:
+            fail("usage: mint_record3_profile.py [--base DOC] [--out PATH]")
+        if args[0] == "--out":
+            out = Path(args[1])
+        else:
+            base = Path(args[1])
+        args = args[2:]
+    doc = json.loads(base.read_text())
     if doc.get("schema_version") != "0.1.1":
         fail("shipped doc is not profile 0.1.1")
     attempt = [c for c in doc["capabilities"]
@@ -282,14 +293,6 @@ def main():
         "Record3 test hook.")
     doc["profile_id"] = "record3-ephemeral"
     doc["status"] = "reference-unvalidated"
-    out = OUT
-    args = sys.argv[1:]
-    if args[:1] == ["--out"]:
-        if len(args) != 2:
-            fail("--out needs a value")
-        out = Path(args[1])
-    elif args:
-        fail("usage: mint_record3_profile.py [--out PATH]")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(doc, indent=2) + "\n")
     print("minted %s" % out)

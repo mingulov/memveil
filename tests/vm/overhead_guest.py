@@ -748,6 +748,11 @@ def _run_one_leg(ctx, gate, leg):
     return leg
 
 
+def profile_id(path):
+    with open(path) as handle:
+        return json.load(handle)["profile_id"]
+
+
 def build_ctx(gate, iface, dev):
     """Fixed collector paths plus the owned workload endpoints."""
     repo = gate.repo
@@ -760,9 +765,8 @@ def build_ctx(gate, iface, dev):
         "lc_test_obj": gate.lc_test_obj,
         "cp_test_obj": gate.cp_test_obj,
         "bridge": gate.bridge,
-        "profile": os.path.join(
-            repo, "profiles",
-            "linux-x86_64-7.0.0-34-generic.json"),
+        "profile": os.path.join(repo, "build", "vm",
+                                "gate-profile.json"),
         "gateway": GATEWAY,
         "iface": iface,
         "dev": dev,
@@ -780,7 +784,7 @@ def record_artifacts(ctx):
         "cp_test_sha": sha_file(ctx["cp_test_obj"]),
         "bridge_sha": sha_file(ctx["bridge"]),
         "profile_sha": sha_file(ctx["profile"]),
-        "profile_id": os.path.basename(ctx["profile"])[:-len(".json")],
+        "profile_id": profile_id(ctx["profile"]),
     }
 
 

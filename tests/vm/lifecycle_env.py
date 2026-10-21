@@ -32,6 +32,8 @@ import json
 import tempfile
 from pathlib import Path
 
+import gate_kernel
+
 REPO = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LIFECYCLE_PROBE = os.path.join(
@@ -68,6 +70,15 @@ def require_lifecycle_env(*probes):
     probe = subprocess.run(["sudo", "-n", "true"], capture_output=True)
     if probe.returncode != 0:
         pytest.fail("armed but no passwordless sudo for vng")
+    prepare_gate_kernel()
+
+
+def prepare_gate_kernel():
+    """Select and live-verify the gate kernel, or fail the gate."""
+    try:
+        return gate_kernel.prepare()
+    except gate_kernel.GateKernelError as exc:
+        pytest.fail("armed but %s" % exc)
 
 
 def profile_btf_pin(note):
