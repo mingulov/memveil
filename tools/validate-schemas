@@ -19,8 +19,10 @@ identity resolution and uniqueness). Exit 0 on success, 1 on failure.
 
 Only the attempts slice is independently recomputed; lifecycle, region, and
 pool metrics need their own checks once captures carry those events.
-Mapping references must resolve within the capture in this strict mode;
-partial-capture recovery belongs to the product reader, not this tool.
+Mapping references resolve within the capture unless the session's
+correlation evidence declares their class unpairable (partial or
+unavailable): unmaps follow the mapping-release class, copies and
+syncs their own class, and repeats stay strict.
 
 Python standard library only.
 """
@@ -802,7 +804,15 @@ def validate_stream(session, events_path):
     previous_seq = None
     operations = set()
     mappings = {}
+    excused = set()
     pending_refs = []
+    corr = session.get("quality", {}).get("correlation", {})
+    relations = corr.get("relations")
+    if relations is None:
+        unmap_expected = corr.get("status") in ("partial", "unavailable")
+    else:
+        unmap_expected = relations.get("mapping_release", {}).get(
+            "status") in ("partial", "unavailable")
     for lineno, raw in iter_lines(events_path):
         try:
             text = raw.decode("utf-8")
@@ -828,7 +838,8 @@ def validate_stream(session, events_path):
                          % (lineno, event["op"], event["kind"]))
                 operations.add(key)
         if "mapping" in event:
-            if event["mapping"] in mappings:
+            # An excused release admits no later creation of its id.
+            if event["mapping"] in mappings or event["mapping"] in excused:
                 fail("duplicate-id",
                      "mapping %s repeats" % event["mapping"])
             mappings[event["mapping"]] = {"seq": event["seq"],
@@ -838,17 +849,26 @@ def validate_stream(session, events_path):
             if event["kind"] == "unmap":
                 state = mappings.get(ref)
                 if state is None:
-                    fail("unknown-mapping",
-                         "line %d releases mapping %s without prior "
-                         "creation" % (lineno, ref))
-                if state["released"]:
+                    if ref in excused:
+                        fail("double-release",
+                             "line %d releases mapping %s twice"
+                             % (lineno, ref))
+                    # Declared loss excuses the release at once; no forward form.
+                    if unmap_expected:
+                        excused.add(ref)
+                    else:
+                        fail("unknown-mapping",
+                             "line %d releases mapping %s without prior "
+                             "creation" % (lineno, ref))
+                elif state["released"]:
                     fail("double-release",
                          "line %d releases mapping %s twice"
                          % (lineno, ref))
-                state["released"] = True
+                else:
+                    state["released"] = True
             else:
                 pending_refs.append((event["seq"], ref, event["kind"]))
-        if len(operations) + len(mappings) > MAX_TRACKED_IDS:
+        if len(operations) + len(mappings) + len(excused) > MAX_TRACKED_IDS:
             fail("too-many-identities",
                  "capture exceeds %d tracked identities" % MAX_TRACKED_IDS)
         if event["kind"] == "bounce_attempt":
@@ -874,9 +894,9 @@ def validate_stream(session, events_path):
     # needs its own class partial, so copy uncertainty never
     # excuses a dangling sync reference. A dangling reference
     # while the session claims complete correlation contradicts
-    # the capture and refuses. Unmap releases stay strict above.
-    corr = session.get("quality", {}).get("correlation", {})
-    relations = corr.get("relations")
+    # the capture and refuses. Unknown unmaps took the same
+    # verdict above at once: the mapping-release class, or the
+    # aggregate without relations.
     for seq, ref, kind in pending_refs:
         if ref in mappings:
             continue
@@ -1949,6 +1969,44 @@ def run_selftest():
 
     check("dangling-ref-expected", dangling_ref_expected)
 
+    def dangling_unmap_expected():
+        partial = copy.deepcopy(life_session)
+        partial["quality"]["correlation"]["status"] = "partial"
+        partial["quality"]["correlation"]["loss_count"] = None
+        summary = validate_stream(
+            partial,
+            os.path.join(life, "events-early-unmap.ndjson"))
+        if summary["count"] != 1:
+            fail("wrong-metric",
+                 "dangling unmap summary %r" % (summary,))
+        return "session-declared mapping loss excuses one release"
+
+    check("dangling-unmap-expected", dangling_unmap_expected)
+
+    def excused_unmap_repeat_denied():
+        partial = copy.deepcopy(life_session)
+        partial["quality"]["correlation"]["status"] = "partial"
+        partial["quality"]["correlation"]["loss_count"] = None
+        validate_stream(
+            partial,
+            os.path.join(life, "events-excused-unmap-repeat.ndjson"))
+
+    results.append(expect_reject("events-excused-unmap-repeat.ndjson",
+                                 excused_unmap_repeat_denied,
+                                 "double-release"))
+
+    def excused_unmap_remap_denied():
+        partial = copy.deepcopy(life_session)
+        partial["quality"]["correlation"]["status"] = "partial"
+        partial["quality"]["correlation"]["loss_count"] = None
+        validate_stream(
+            partial,
+            os.path.join(life, "events-excused-unmap-remap.ndjson"))
+
+    results.append(expect_reject("events-excused-unmap-remap.ndjson",
+                                 excused_unmap_remap_denied,
+                                 "duplicate-id"))
+
     def _relations_selftest(mapping, copy, sync):
         def channel(status):
             return {"status": status,
@@ -2126,6 +2184,33 @@ def run_selftest():
 
     results.append(expect_reject("dangling-sync-copy-only",
                                  dangling_sync_denied_by_copy_only,
+                                 "unknown-mapping"))
+
+    def dangling_unmap_excused_by_mapping_class():
+        split = copy.deepcopy(life_session)
+        split["quality"]["correlation"]["relations"] = (
+            _relations_selftest("partial", "complete_for_scope",
+                                "complete_for_scope"))
+        summary = validate_stream(
+            split, os.path.join(life, "events-early-unmap.ndjson"))
+        if summary["count"] != 1:
+            fail("wrong-metric",
+                 "split dangling unmap summary %r" % (summary,))
+        return "mapping-class partiality excuses a dangling unmap"
+
+    check("dangling-unmap-class-excused",
+          dangling_unmap_excused_by_mapping_class)
+
+    def dangling_unmap_denied_by_sync_only():
+        split = copy.deepcopy(life_session)
+        split["quality"]["correlation"]["relations"] = (
+            _relations_selftest("complete_for_scope",
+                                "complete_for_scope", "partial"))
+        validate_stream(
+            split, os.path.join(life, "events-early-unmap.ndjson"))
+
+    results.append(expect_reject("dangling-unmap-sync-only",
+                                 dangling_unmap_denied_by_sync_only,
                                  "unknown-mapping"))
 
     poolx = repo_path("tests", "fixtures", "pools", "extended")

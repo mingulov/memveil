@@ -206,6 +206,7 @@ suite_reports() {
         return 1
     fi
     python3 "$ROOT/tests/cli/test_report_context.py" || return 1
+    python3 "$ROOT/tests/cli/test_dangling_unmap.py" || return 1
     TMP=$(mktemp -d)
     trap 'rm -rf "$TMP"' EXIT
     report_pass=0
@@ -267,6 +268,11 @@ suite_reports() {
     expect_json "relations-lost-release-json" \
         tests/fixtures/lifecycle/relations-lost-release 4 \
         "capture OK: 6 events, 1 attempts, 4096 requested bytes"
+    expect_json "dangling-unmap-json" \
+        tests/fixtures/reader/f2-dangling-unmap-expected 4 \
+        "capture OK: 8 events, 2 attempts, 5120 requested bytes"
+    expect_error "dangling-unmap-denied" 2 \
+        report "$ROOT/tests/fixtures/reader/f2-dangling-unmap-denied"
     expect_json "relations-legacy-copy-json" \
         tests/fixtures/lifecycle/relations-legacy-copy 4 \
         "capture OK: 6 events, 1 attempts, 4096 requested bytes"

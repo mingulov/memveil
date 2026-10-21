@@ -654,9 +654,7 @@ def test_unpaired_unmap_invalidates_live() raises:
 
 
 def test_unpaired_release_without_map_degrades() raises:
-    # A dropped map whose unmap still persists: no open
-    # mapping exists, no release is invented, and the
-    # affected totals degrade instead of crashing.
+    # A dropped map with a persisting unmap degrades totals without release.
     for split in [False, True]:
         var t = MappingTracker()
         t.set_relation_split(split)
@@ -670,14 +668,12 @@ def test_unpaired_release_without_map_degrades() raises:
         assert_true(not live.has_value)
         assert_equal(live.measurement, String("unavailable"))
         assert_true(not _global(rows, "open_mappings").has_value)
-        # No release invented: zero completed with partial
-        # coverage, never a phantom sample.
+        # No release invented: zero completed, never a phantom sample.
         var done = _global(rows, "completed_lifetime_count")
         assert_true(done.has_value)
         assert_equal(done.value, UInt64(0))
         assert_equal(done.coverage, String("partial"))
-        # No map kind observed: allocation rows stay null
-        # with a reason, never a zero that claims proof.
+        # No map kind observed: allocation rows stay null with a reason.
         var allocs = _global(rows, "successful_allocations")
         assert_true(not allocs.has_value)
         assert_equal(allocs.measurement, String("unavailable"))

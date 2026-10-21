@@ -66,6 +66,29 @@ def expect_read_error(
     assert_equal(line, want_line)
 
 
+def expect_read_message(
+    dir: String,
+    allow: Bool,
+    limits: ReaderLimits,
+    want_code: UInt32,
+    want_line: Int,
+    want_message: String,
+) raises:
+    var code = UInt32(0)
+    var line = -1
+    var message = String("")
+    try:
+        var r = read_capture(dir, allow, limits)
+        _ = drain_events(r)
+    except e:
+        code = e.code
+        line = e.line_no
+        message = e.message
+    assert_equal(code, want_code)
+    assert_equal(line, want_line)
+    assert_equal(message, want_message)
+
+
 def event_doc(kind: String, data: String) raises -> String:
     return String(
         '{"schema_version": "0.1.1", "session_id": "s1", "seq": "7",'
@@ -2024,8 +2047,7 @@ def test_reader_unavailable_dangling_ok() raises:
 
 
 def test_reader_unmap_aggregate_partial_ok() raises:
-    # An unmap of a never-persisted mapping reads clean when
-    # the aggregate correlation declares the loss partial.
+    # Aggregate partial excuses an unmap of a never-persisted mapping.
     var r = read_capture(
         String("tests/fixtures/reader/f2-dangling-unmap-expected"),
         False,
@@ -2047,8 +2069,7 @@ def test_reader_unmap_aggregate_unavailable_ok() raises:
 
 
 def test_reader_unmap_aggregate_complete_denied() raises:
-    # The same dangling unmap contradicts a session that
-    # claims complete aggregate correlation and refuses.
+    # Complete aggregate contradicts the same dangling unmap.
     expect_read_error(
         String("tests/fixtures/reader/f2-dangling-unmap-denied"),
         False,
@@ -2059,8 +2080,7 @@ def test_reader_unmap_aggregate_complete_denied() raises:
 
 
 def test_reader_split_mapping_unmap_ok() raises:
-    # Mapping-class partiality excuses a dangling unmap
-    # while the other classes stay complete.
+    # Mapping-class partial excuses a dangling unmap; others stay complete.
     var r = read_capture(
         String("tests/fixtures/reader/f2-dangling-split-mapping-ok"),
         False,
@@ -2071,8 +2091,7 @@ def test_reader_split_mapping_unmap_ok() raises:
 
 
 def test_reader_split_mapping_unmap_denied() raises:
-    # Sync-class partiality alone never excuses a dangling
-    # unmap when mapping_release claims complete.
+    # Sync-only partial never excuses a dangling unmap.
     expect_read_error(
         String("tests/fixtures/reader/f2-dangling-split-mapping-deny"),
         False,
@@ -2083,8 +2102,7 @@ def test_reader_split_mapping_unmap_denied() raises:
 
 
 def test_reader_double_unmap_partial_still_refused() raises:
-    # A second release of a known mapping refuses even
-    # when aggregate correlation is partial.
+    # A second release of a known mapping refuses under partial too.
     expect_read_error(
         String("tests/fixtures/reader/f2-double-unmap-partial"),
         False,
@@ -2092,6 +2110,52 @@ def test_reader_double_unmap_partial_still_refused() raises:
         READ_INVALID,
         4,
     )
+
+
+def test_reader_excused_unmap_repeat_refused() raises:
+    # A repeat unmap of an excused id refuses as released twice.
+    expect_read_message(
+        String("tests/fixtures/reader/f2-excused-unmap-repeat"),
+        False,
+        default_limits(),
+        READ_INVALID,
+        4,
+        String("line 4: mapping released twice"),
+    )
+
+
+def test_reader_excused_unmap_remap_refused() raises:
+    # A later map creating an excused id refuses as duplicate mapping.
+    expect_read_message(
+        String("tests/fixtures/reader/f2-excused-unmap-remap"),
+        False,
+        default_limits(),
+        READ_INVALID,
+        4,
+        String("line 4: duplicate mapping"),
+    )
+
+
+def test_reader_early_unmap_partial_ok() raises:
+    # One dangling unmap reads clean under partial aggregate correlation.
+    var r = read_capture(
+        String("tests/fixtures/reader/f2-early-unmap-partial"),
+        False,
+        default_limits(),
+    )
+    assert_equal(len(drain_events(r)), 1)
+    assert_true(not r.partial)
+
+
+def test_reader_split_mapping_unmap_unavailable_ok() raises:
+    # Unavailable mapping class excuses a dangling unmap in split mode.
+    var r = read_capture(
+        String("tests/fixtures/reader/f2-dangling-split-mapping-unavailable"),
+        False,
+        default_limits(),
+    )
+    assert_equal(len(drain_events(r)), 8)
+    assert_true(not r.partial)
 
 
 def test_reader_ref_dedup() raises:
@@ -2382,6 +2446,10 @@ def run() raises -> Int:
     suite.test[test_reader_split_mapping_unmap_ok]()
     suite.test[test_reader_split_mapping_unmap_denied]()
     suite.test[test_reader_double_unmap_partial_still_refused]()
+    suite.test[test_reader_excused_unmap_repeat_refused]()
+    suite.test[test_reader_excused_unmap_remap_refused]()
+    suite.test[test_reader_early_unmap_partial_ok]()
+    suite.test[test_reader_split_mapping_unmap_unavailable_ok]()
     suite.test[test_reader_ref_dedup]()
     suite.test[test_reader_f3_overflow]()
     suite.test[test_reader_multi_chunk]()

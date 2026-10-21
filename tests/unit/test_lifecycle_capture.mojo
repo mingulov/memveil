@@ -1027,11 +1027,7 @@ def test_stop_open_mappings_churn() raises:
 
 
 def test_dropped_map_unmap_still_reports() raises:
-    # The bridge drops the map record (counted as dropped)
-    # while its unmap persists: the capture finalizes with
-    # detail and correlation loss, and the offline report
-    # over that capture succeeds with partial correlation
-    # instead of refusing the whole capture.
+    # A dropped map with a persisting unmap still reports under partial loss.
     var tmp = _mkdtemp()
     var out_dir = tmp + String("/cap")
     var cfg = CollectorConfig()
@@ -1061,8 +1057,7 @@ def test_dropped_map_unmap_still_reports() raises:
     kernel.add_snap_at(1, SnapOut(True, lc_cut.copy(), String("")))
     kernel.add_snap_at(2, SnapOut(True, _zero_cut().copy(), String("")))
     kernel.add_snap_at(2, SnapOut(True, _zero_cut().copy(), String("")))
-    # BPF observed and emitted both records; the bridge
-    # delivered only the unmap and dropped the map.
+    # BPF emitted both records; the bridge delivered only the unmap.
     var flow = _stats(UInt64(2), UInt64(1), UInt64(0), UInt64(1))
     var ch0n = _stats(UInt64(0), UInt64(0), UInt64(0), UInt64(0))
     kernel.add_stats(_zero_stats())
@@ -1077,8 +1072,7 @@ def test_dropped_map_unmap_still_reports() raises:
     kernel.add_stats_at(2, _zero_stats())
     kernel.add_stats_at(2, _zero_stats())
     var payloads = List[List[UInt8]]()
-    # ktime 30s lands inside the read-back window (attach
-    # is milliseconds after the zero clock start).
+    # Ktime 30s lands inside the read-back window.
     payloads.append(
         _lc_raw(2, 3, 2, UInt64(121), UInt64(30000000000),
                 UInt64(4096), UInt64(41)))
@@ -1122,8 +1116,7 @@ def test_dropped_map_unmap_still_reports() raises:
             ),
         )
     )
-    # The offline report reads the capture instead of
-    # refusing it, with partial mapping correlation.
+    # The offline report reads the capture with partial mapping correlation.
     var r = read_capture(out_dir, False, default_limits())
     var analyzer = Analyzer(r.session)
     var count = 0
@@ -1136,8 +1129,7 @@ def test_dropped_map_unmap_still_reports() raises:
     assert_equal(rep.q_correlation.status, String("partial"))
     assert_equal(rep.q_corr_mapping.status, String("partial"))
     assert_true(rep.q_corr_mapping.has_loss_count)
-    # No release invented: zero completed with partial
-    # coverage, and the unpaired event is counted.
+    # No release invented: zero completed, one unpaired counted.
     var saw_completed = False
     var saw_unpaired = False
     for i in range(len(rep.metrics)):

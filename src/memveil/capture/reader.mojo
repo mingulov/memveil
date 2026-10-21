@@ -114,6 +114,7 @@ struct CaptureReader:
     var _ops: Dict[String, Bool]
     var _maps: Dict[String, Bool]
     var _dead: Dict[String, Bool]
+    var _excused: Dict[String, Bool]
     var _ref_copy_ids: List[String]
     var _ref_copy_lines: List[Int]
     var _seen_copy_refs: Dict[String, Bool]
@@ -145,6 +146,7 @@ struct CaptureReader:
         self._ops = Dict[String, Bool]()
         self._maps = Dict[String, Bool]()
         self._dead = Dict[String, Bool]()
+        self._excused = Dict[String, Bool]()
         self._ref_copy_ids = List[String]()
         self._ref_copy_lines = List[Int]()
         self._seen_copy_refs = Dict[String, Bool]()
@@ -350,6 +352,7 @@ struct CaptureReader:
         var tracked = (
             len(self._ops)
             + len(self._maps)
+            + len(self._excused)
             + len(self._ref_copy_ids)
             + len(self._ref_sync_ids)
         )
@@ -365,11 +368,12 @@ struct CaptureReader:
 
         Device membership, per-(kind, operation) uniqueness, mapping
         creation/release pairing, and deferred copy/sync references
-        match the schema validator exactly: unmap needs a prior live
-        creation, while copy/sync references resolve when the stream
-        ends so forward references stay valid. An unmap of a never-
-        persisted mapping is excused only when the session's
-        mapping-release class already declares the loss.
+        agree with the schema validator: unmap needs a prior live
+        creation unless the mapping-release class (or the aggregate
+        without relations) is partial or unavailable, in which case
+        the id is remembered; a repeat release refuses as released
+        twice and a later creation as duplicate. Copy/sync references
+        resolve when the stream ends so forward references stay valid.
         """
         var tag = "line " + String(lineno) + ": "
         if ev.kind == "bounce_attempt":
@@ -408,6 +412,11 @@ struct CaptureReader:
                     raise ReadError(
                         READ_INVALID, lineno, tag + "duplicate mapping"
                     )
+                # An excused release admits no later creation of its id.
+                if mid in self._excused:
+                    raise ReadError(
+                        READ_INVALID, lineno, tag + "duplicate mapping"
+                    )
                 self._maps[mid] = True
         elif ev.kind == "unmap":
             if ev.unmap.has_mapping_id:
@@ -416,12 +425,16 @@ struct CaptureReader:
                     raise ReadError(
                         READ_INVALID, lineno, tag + "mapping released twice"
                     )
+                if target in self._excused:
+                    raise ReadError(
+                        READ_INVALID, lineno, tag + "mapping released twice"
+                    )
                 if target not in self._maps:
-                    # Session precedes events: excuse only under
-                    # declared mapping-release loss.
+                    # Session precedes events; excuse only declared loss.
                     if self._class_expected(
                         self.session.q_corr_mapping.status
                     ):
+                        self._excused[target] = True
                         return
                     raise ReadError(
                         READ_INVALID, lineno, tag + "unknown mapping"
