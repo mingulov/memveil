@@ -101,6 +101,24 @@ static __always_inline int mv_quarantined(const struct mv_gen_key *key)
     return bpf_map_lookup_elem(&mv_gen_quarantine, key) != NULL;
 }
 
+/* After a failed delete: tombstone, then quarantine, then global
+ * dark, so a stale value can never reach a future unmap emission. */
+static __always_inline void mv_escalate(const struct mv_gen_key *key)
+{
+    __u64 zero = 0;
+    __u8 one = 1;
+    __u32 z = 0;
+    __u8 *dark;
+
+    if (bpf_map_update_elem(&mv_gen_table, key, &zero, BPF_EXIST) == 0)
+        return;
+    if (bpf_map_update_elem(&mv_gen_quarantine, key, &one, BPF_ANY) == 0)
+        return;
+    dark = bpf_map_lookup_elem(&mv_gen_dark, &z);
+    if (dark)
+        *dark = 1;
+}
+
 /* Allocate one generation without wrapping: returns 1 with
  * *gen set, or 0 to divert (terminal, contention, or missing
  * counter). The counter never advances past GEN_MAX, so no
@@ -154,7 +172,8 @@ static __always_inline void mv_submit_fail(void)
         mv_raise(MV_FLAG_SUBMIT_WRAP);
 }
 
-/* Shared emit path: counts the firing, validates, submits. */
+/* Shared emit path: counts the firing, validates, submits; returns
+ * 1 once the record is in the ring, 0 when it was not emitted. */
 static __always_inline int mv_emit_lc(__u16 kind, __u16 flags, __u64 dir,
                                      __u64 size, __u64 gen)
 {
@@ -239,14 +258,14 @@ static __always_inline int mv_emit_lc(__u16 kind, __u16 flags, __u64 dir,
     emitted = bpf_map_lookup_elem(&mv_counts, &key2);
     emitted_bytes = bpf_map_lookup_elem(&mv_counts, &key3);
     if (!emitted || !emitted_bytes)
-        return 0;
+        return 1;
     e = __sync_fetch_and_add(emitted, 1);
     if (e == 0xFFFFFFFFFFFFFFFFULL)
         mv_raise(MV_FLAG_EMITTED_WRAP);
     eb = __sync_fetch_and_add(emitted_bytes, size);
     if (eb > 0xFFFFFFFFFFFFFFFFULL - size)
         mv_raise(MV_FLAG_EMITTED_BYTES_WRAP);
-    return 0;
+    return 1;
 }
 
 SEC("fexit/swiotlb_tbl_map_single")
@@ -265,9 +284,11 @@ int BPF_PROG(mv_map_result, struct device *dev, mv_phys_addr_t orig_addr,
     (void)orig_addr;
     (void)alloc_align_mask;
     (void)attrs;
-    if (ret == MV_INVALID_PHYS)
-        return mv_emit_lc(MV_LC_KIND_MAP, 0, (__u64)dir,
-                          (mv_size_t)mapping_size, 0);
+    if (ret == MV_INVALID_PHYS) {
+        mv_emit_lc(MV_LC_KIND_MAP, 0, (__u64)dir,
+                   (mv_size_t)mapping_size, 0);
+        return 0;
+    }
     key.dev = (__u64)dev;
     key.tlb = (__u64)ret;
     /* Dark or quarantined keys divert without burning a
@@ -282,8 +303,13 @@ int BPF_PROG(mv_map_result, struct device *dev, mv_phys_addr_t orig_addr,
     } else {
         flags |= MV_LC_FLAG_OK | MV_LC_FLAG_GEN_UNASSIGNED;
     }
-    return mv_emit_lc(MV_LC_KIND_MAP, flags, (__u64)dir,
-                      (mv_size_t)mapping_size, gen);
+    /* A map record lost before the ring must take its generation
+     * with it, or the later unmap claims an identity never emitted. */
+    if (!mv_emit_lc(MV_LC_KIND_MAP, flags, (__u64)dir,
+                    (mv_size_t)mapping_size, gen) && gen != 0 &&
+        bpf_map_delete_elem(&mv_gen_table, &key) != 0)
+        mv_escalate(&key);
+    return 0;
 }
 
 SEC("fentry/__swiotlb_tbl_unmap_single")
@@ -309,26 +335,8 @@ int BPF_PROG(mv_unmap, struct device *dev, mv_phys_addr_t tlb_addr,
         if (slot && *slot != 0) {
             gen = *slot;
             if (bpf_map_delete_elem(&mv_gen_table, &key) != 0) {
-                /* Delete failed: tombstone, then quarantine,
-                 * then global dark. Every tier emits miss so
-                 * a stale value can never reach a future
-                 * unmap emission. */
-                __u64 zero = 0;
-
-                if (bpf_map_update_elem(&mv_gen_table, &key, &zero,
-                                        BPF_EXIST) != 0) {
-                    __u8 one = 1;
-
-                    if (bpf_map_update_elem(&mv_gen_quarantine, &key,
-                                            &one, BPF_ANY) != 0) {
-                        __u32 z = 0;
-                        __u8 *dark;
-
-                        dark = bpf_map_lookup_elem(&mv_gen_dark, &z);
-                        if (dark)
-                            *dark = 1;
-                    }
-                }
+                /* Every tier emits miss, never the stale value. */
+                mv_escalate(&key);
                 gen = 0;
                 flags |= MV_LC_FLAG_GEN_MISS;
             }
@@ -338,8 +346,9 @@ int BPF_PROG(mv_unmap, struct device *dev, mv_phys_addr_t tlb_addr,
     } else {
         flags |= MV_LC_FLAG_GEN_MISS;
     }
-    return mv_emit_lc(MV_LC_KIND_UNMAP, flags, (__u64)dir,
-                      (mv_size_t)mapping_size, gen);
+    mv_emit_lc(MV_LC_KIND_UNMAP, flags, (__u64)dir,
+               (mv_size_t)mapping_size, gen);
+    return 0;
 }
 
 char MV_LICENSE[] SEC("license") = "GPL";

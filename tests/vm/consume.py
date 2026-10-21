@@ -193,6 +193,26 @@ def check_retained_script(lc, cp, ops, fail_op, tag):
                   for key in want if Counter(got[key]) - Counter(want[key]))
 
 
+def check_identity_closure(lc_events, tag):
+    """A known unmap generation must follow its persisted map.
+
+    Loss may hide a map, but then the probe must report the
+    release as a miss (gen 0): a known generation whose map
+    never reached the ring is a dangling identity.
+    """
+    bad = []
+    mapped = set()
+    for e in sorted(lc_events, key=lambda ev: ev["seq"]):
+        if e["kind"] == 1 and e["gen"]:
+            mapped.add(e["gen"])
+        elif e["kind"] == 2 and e["gen"] and e["gen"] not in mapped:
+            bad.append("%s: unmap seq %d claims gen %d with no persisted map"
+                       % (tag, e["seq"], e["gen"]))
+    if len(bad) > 5:
+        bad = bad[:5] + ["%s: %d more dangling" % (tag, len(bad) - 5)]
+    return bad
+
+
 def check_conservation(events, summary, tag):
     """Check one window's counter conservation laws.
 

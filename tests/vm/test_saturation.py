@@ -20,7 +20,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from consume import (check_conservation, check_retained_script, check_oracle_script,
+from consume import (check_conservation, check_identity_closure,
+                     check_retained_script, check_oracle_script,
                      parse_consume_file, parse_oracle_log,
                      scripted_expectation)
 from evidence_retention import (expected_from_verified,
@@ -90,6 +91,7 @@ def run_flow():
         bad += check_oracle_script(ops_log, releases, complete,
                                    FLOOD_OPS, -1, "flood")
         bad += check_retained_script(lc, cp, FLOOD_OPS, -1, "flood")
+        bad += check_identity_closure(lc, "flood-lc")
         want = scripted_expectation(FLOOD_OPS, -1)
         want_lc = len(want["maps"]) + len(want["unmaps"])
         want_cp = (len(want["syncs_dev"]) + len(want["syncs_cpu"])
