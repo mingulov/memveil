@@ -165,6 +165,7 @@ chmod 0755 "%{buildroot}/usr/bin/memveil"
 /usr/share/doc/memveil/THIRD-PARTY-NOTICES.libbpf-mojo.md
 /usr/share/doc/memveil/LICENSES/GPL-2.0-only.txt
 /usr/share/doc/memveil/LICENSES/GPL-2.0-or-later.txt
+/usr/share/doc/memveil/LICENSES/GPL-2.0.txt
 /usr/share/doc/memveil/licenses/GPL-3.0.txt
 /usr/share/doc/memveil/licenses/LICENSE.BSD-2-Clause.libbpf
 /usr/share/doc/memveil/licenses/LICENSE.mojo-compiler
