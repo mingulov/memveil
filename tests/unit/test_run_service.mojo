@@ -12,6 +12,7 @@ no output resource), and the grouped extra-channel records
 each admitted decision carries.
 """
 
+from std.ffi import external_call
 from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
 
@@ -62,6 +63,25 @@ def _svc_absent(path: String) -> Bool:
     except:
         return True
     return False
+
+
+def _svc_cstr(text: String) -> List[UInt8]:
+    var out = List[UInt8]()
+    for b in text.as_bytes():
+        out.append(b)
+    out.append(UInt8(0))
+    return out^
+
+
+def _svc_dirabsent(path: String) -> Bool:
+    # F_OK probe mirroring the platform reader call shape: the
+    # mode stays an untyped literal so both access declarations
+    # lower identically.
+    var cpath = _svc_cstr(path)
+    var r = external_call["access", Int32](
+        Span(cpath).unsafe_ptr(), 0
+    )
+    return Int(r) != 0
 
 
 def test_service_options_defaults() raises:
@@ -115,6 +135,8 @@ def test_service_run_budget_low_refuses() raises:
     assert_equal(
         result.diagnostic, String("budget 131071 below 131072")
     )
+    assert_equal(writer.creates, 0)
+    assert_true(_svc_dirabsent(out))
     assert_true(_svc_absent(out + String("/session.json")))
 
 
@@ -132,6 +154,8 @@ def test_service_run_budget_high_refuses() raises:
         result.diagnostic,
         String("budget 4294967297 above 4294967296"),
     )
+    assert_equal(writer.creates, 0)
+    assert_true(_svc_dirabsent(out))
     assert_true(_svc_absent(out + String("/session.json")))
 
 
@@ -153,6 +177,8 @@ def test_service_run_no_bridge_refuses() raises:
     )
     assert_equal(result.exit_code, 3)
     assert_true(_svc_contains(result.diagnostic, String("no bridge")))
+    assert_equal(writer.creates, 0)
+    assert_true(_svc_dirabsent(out))
     assert_true(_svc_absent(out + String("/session.json")))
 
 
@@ -169,6 +195,8 @@ def test_service_run_below_floor_refuses() raises:
         result.diagnostic,
         String("kernel 6.8.0-test below floor 7.0"),
     )
+    assert_equal(writer.creates, 0)
+    assert_true(_svc_dirabsent(out))
     assert_true(_svc_absent(out + String("/session.json")))
 
 
@@ -184,6 +212,8 @@ def test_service_run_profiles_unloadable_refuses() raises:
     assert_true(
         _svc_contains(result.diagnostic, String("cannot load profiles: "))
     )
+    assert_equal(writer.creates, 0)
+    assert_true(_svc_dirabsent(out))
     assert_true(_svc_absent(out + String("/session.json")))
 
 

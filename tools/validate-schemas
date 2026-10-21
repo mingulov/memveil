@@ -2064,8 +2064,8 @@ def run_selftest():
         fd, path = tempfile.mkstemp(prefix="selftest-sync-dangling-",
                                     suffix=".ndjson")
         os.close(fd)
-        _sync_dangling_stream(path)
         try:
+            _sync_dangling_stream(path)
             split = copy.deepcopy(life_session)
             split["quality"]["correlation"][
                 "relations"] = _relations_selftest(
@@ -2086,8 +2086,8 @@ def run_selftest():
         fd, path = tempfile.mkstemp(prefix="selftest-sync-dangling-",
                                     suffix=".ndjson")
         os.close(fd)
-        _sync_dangling_stream(path)
         try:
+            _sync_dangling_stream(path)
             split = copy.deepcopy(life_session)
             split["quality"]["correlation"][
                 "relations"] = _relations_selftest(

@@ -524,6 +524,35 @@ def overhead_retention_run(tmp_path, legs_doc):
     })
 
 
+def _retention_workload(detail='ok'):
+    return {
+        'window': {'warmup_start_ns': 2000,
+                   'measured_start_ns': 11000002000,
+                   'end_ns': 75000002000},
+        'warmup': {'seconds': 11.0, 'ok': True,
+                   'detail': detail},
+        'ping': {'tx': 1000, 'rx': 1000, 'seconds': 2.0,
+                 'rtts': [0.5], 'sample_tx': 1,
+                 'sample_rx': 1, 'sample_count': 1,
+                 'p50_ms': 0.5, 'p95_ms': 0.5,
+                 'p99_ms': 0.5},
+        'dd': {'bytes': 512, 'seconds': 1.0},
+    }
+
+
+def _retention_collector(stderr_tail=''):
+    return {'kind': 'product',
+            'capabilities': ['attempt-trace'],
+            'exit': 4, 'ready': 'ready session=sess-ret',
+            'stopped': False, 'killed': False,
+            'utime_s': 1.5, 'stime_s': 0.5,
+            'maxrss_kb': 123456, 'attach_ns': 1000,
+            'detach_ns': 77000002000,
+            'term_ns': 76000002000,
+            'stderr_tail': stderr_tail,
+            'capture_bytes': 100}
+
+
 def test_retention_admits_sanitized_error_legs(
         tmp_path, monkeypatch):
     import evidence_retention
@@ -568,6 +597,66 @@ def test_retention_refuses_address_text_in_leg_error(
             "cmd='dd if=/dev/sdb'")
     run = overhead_retention_run(
         tmp_path, overhead_legs_doc(poison))
+    owned_dir(tmp_path, monkeypatch)
+    with pytest.raises(ValueError):
+        evidence_retention.retain_gate_evidence(
+            run, 'overhead', 'passed')
+    evidence_retention.retain_gate_evidence(
+        run, 'overhead', 'failed')
+    doc = evidence_retention.verify_retained('overhead')
+    assert doc['complete'] is False
+    assert doc['files'] == []
+    assert doc['file_errors'] == [
+        {'name': 'overhead-exports',
+         'error': 'no verified exports'}]
+
+
+def test_retention_admits_sanitized_carriers_on_error_leg(
+        tmp_path, monkeypatch):
+    import evidence_retention
+
+    def carry(doc):
+        leg = doc['legs'][0]
+        leg['collector'] = _retention_collector(
+            'record-stderr bytes=128 lines=3')
+        workload = _retention_workload('warmup dd rc=1')
+        leg['workload'] = workload
+        leg['bpf_mem'] = {'owned_memlock_bytes': None,
+                          'reason': 'bpftool-missing errno=2'}
+    run = overhead_retention_run(
+        tmp_path, overhead_legs_doc(carry))
+    owned_dir(tmp_path, monkeypatch)
+    evidence_retention.retain_gate_evidence(
+        run, 'overhead', 'passed')
+    doc = evidence_retention.verify_retained('overhead')
+    assert doc['complete'] is True
+    assert {entry['name'] for entry in doc['files']} == {
+        'overhead-identity.json', 'overhead-legs.json'}
+
+
+@pytest.mark.parametrize('carrier,poison', [
+    ('collector',
+     'panic at 0xffff888012345000 during record'),
+    ('workload',
+     'dd failed: 0xffff888012345000'),
+    ('bpf_mem',
+     'bpftool missing: 0xffff888012345000'),
+])
+def test_retention_refuses_unsanitized_carrier_on_error_leg(
+        tmp_path, monkeypatch, carrier, poison):
+    import evidence_retention
+
+    def dirty(doc):
+        leg = doc['legs'][0]
+        if carrier == 'collector':
+            leg['collector'] = _retention_collector(poison)
+        elif carrier == 'workload':
+            leg['workload'] = _retention_workload(poison)
+        else:
+            leg['bpf_mem'] = {'owned_memlock_bytes': None,
+                              'reason': poison}
+    run = overhead_retention_run(
+        tmp_path, overhead_legs_doc(dirty))
     owned_dir(tmp_path, monkeypatch)
     with pytest.raises(ValueError):
         evidence_retention.retain_gate_evidence(
