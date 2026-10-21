@@ -260,6 +260,9 @@ def _run(
     disarm_out: OpOut = OpOut(True, String("")),
     read_files: Bool = True,
     channels: Int = 3,
+    timeouts: Int = 103,
+    confirm_poll_err: Bool = False,
+    fail_confirm_stats: Bool = False,
 ) raises -> CaseOut:
     """Run one scripted multi-channel capture; return its outputs.
 
@@ -268,7 +271,10 @@ def _run(
     end0/end1/end2 are the 6-word end cuts and rx1/rx2
     the lifecycle/copy received/delivered counts
     (attempt traffic is the remainder). Signals stop
-    the run after the last batch.
+    the run after the last batch. Timeouts sizes the
+    trailing timeout script; confirm_poll_err appends
+    one error poll after it; fail_confirm_stats breaks
+    the confirm final on multi-channel runs.
     """
     var tmp = _mkdtemp()
     var cfg = CollectorConfig()
@@ -320,7 +326,16 @@ def _run(
     kernel.add_stats(total.copy())
     kernel.add_stats(total.copy())
     kernel.add_stats(total.copy())
-    kernel.add_stats(total.copy())
+    if fail_confirm_stats:
+        kernel.add_stats(
+            StatsOut(
+                False, UInt64(0), UInt64(0), UInt64(0),
+                UInt64(0), UInt64(0),
+                String("confirm stats lost"),
+            )
+        )
+    else:
+        kernel.add_stats(total.copy())
     if channels >= 2:
         kernel.add_stats(ch0n)
         kernel.add_stats_at(1, _zero_stats())
@@ -330,7 +345,15 @@ def _run(
         kernel.add_stats_at(2, _stats(rx2, rx2, UInt64(0), UInt64(0)))
     for i in range(len(payloads)):
         kernel.add_poll(_batch(payloads[i]), 1)
-    kernel.add_poll(_timeout(), 103)
+    kernel.add_poll(_timeout(), timeouts)
+    if confirm_poll_err:
+        kernel.add_poll(
+            PollOut(
+                String("error"), List[UInt8](), UInt32(0),
+                String("confirm poll failed"),
+            ),
+            1,
+        )
     # One head check plus one gate per frame; the next head check latches.
     var signal = ScriptSignal()
     for i in range(len(payloads) + 1):
@@ -724,6 +747,9 @@ def _one_copy_run(
     misses: MissOut,
     misses2: MissOut = MissOut(True, UInt64(0), String("")),
     use_misses2: Bool = False,
+    timeouts: Int = 103,
+    confirm_poll_err: Bool = False,
+    fail_confirm_stats: Bool = False,
 ) raises -> CaseOut:
     var payloads = List[List[UInt8]]()
     payloads.append(
@@ -733,7 +759,9 @@ def _one_copy_run(
         payloads^, _zero_cut(), _zero_cut(), UInt64(0),
         _cut(UInt64(1), UInt64(4096), UInt64(1), UInt64(4096)),
         UInt64(1), misses=misses, misses2=misses2,
-        use_misses2=use_misses2)
+        use_misses2=use_misses2, timeouts=timeouts,
+        confirm_poll_err=confirm_poll_err,
+        fail_confirm_stats=fail_confirm_stats)
 
 
 def _error_copy_run(
@@ -2240,6 +2268,393 @@ def test_error_close_copy_failed_second_detail_read() raises:
     )
     assert_true(
         not _contains(c.session, String("post-snapshot activity"))
+    )
+
+
+def test_attempt_growth_after_detach_leaves_aggregate_unknown() raises:
+    # A moved attempt count voids the first-read aggregate loss.
+    var c = _one_copy_run(
+        _stable_detail(),
+        _detail_misses(
+            UInt64(100), UInt64(3), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(10), UInt64(110),
+            UInt64(1),
+        ),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"partial",'
+                '"loss_count":null,'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "attempt program skips unknown "
+                "(post-snapshot activity)"
+            ),
+        )
+    )
+
+
+def test_error_close_attempt_growth_leaves_aggregate_unknown() raises:
+    var c = _error_copy_run(
+        _stable_detail(),
+        _detail_misses(
+            UInt64(100), UInt64(3), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(10), UInt64(110),
+            UInt64(1),
+        ),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"partial",'
+                '"loss_count":null,'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "attempt program skips unknown "
+                "(post-snapshot activity)"
+            ),
+        )
+    )
+
+
+def test_attempt_only_attempt_growth_leaves_aggregate_unknown() raises:
+    # A moved attempt count voids the aggregate without extras.
+    var c = _one_attempt_run(
+        MissOut(True, UInt64(0), String(""), UInt64(0)),
+        MissOut(True, UInt64(0), String(""), UInt64(1)),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"partial",'
+                '"loss_count":null,'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "attempt program skips unknown "
+                "(post-snapshot activity)"
+            ),
+        )
+    )
+
+
+def test_error_close_attempt_only_attempt_growth_unknown() raises:
+    var c = _error_attempt_run(
+        MissOut(True, UInt64(0), String(""), UInt64(0)),
+        MissOut(True, UInt64(0), String(""), UInt64(1)),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"partial",'
+                '"loss_count":null,'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "attempt program skips unknown "
+                "(post-snapshot activity)"
+            ),
+        )
+    )
+
+
+def test_unreadable_second_read_leaves_aggregate_unknown() raises:
+    # An unreadable ch0 re-read voids the aggregate loss.
+    var c = _one_copy_run(
+        _stable_detail(),
+        MissOut(False, UInt64(0), String("fdinfo gone")),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"partial",'
+                '"loss_count":null,'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "attempt program skips unknown "
+                "(post-snapshot activity)"
+            ),
+        )
+    )
+
+
+def test_error_close_unreadable_second_read_aggregate_unknown() raises:
+    var c = _error_copy_run(
+        _stable_detail(),
+        MissOut(False, UInt64(0), String("fdinfo gone")),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"partial",'
+                '"loss_count":null,'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "attempt program skips unknown "
+                "(post-snapshot activity)"
+            ),
+        )
+    )
+
+
+def test_attempt_only_unreadable_second_read_aggregate_unknown() raises:
+    # An unreadable ch0 re-read voids the aggregate alone.
+    var c = _one_attempt_run(
+        MissOut(True, UInt64(0), String("")),
+        MissOut(False, UInt64(0), String("fdinfo gone")),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"partial",'
+                '"loss_count":null,'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "attempt program skips unknown "
+                "(post-snapshot activity)"
+            ),
+        )
+    )
+
+
+def test_error_close_attempt_only_unreadable_second_read_unknown() raises:
+    var c = _error_attempt_run(
+        MissOut(True, UInt64(0), String("")),
+        MissOut(False, UInt64(0), String("fdinfo gone")),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"partial",'
+                '"loss_count":null,'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "attempt program skips unknown "
+                "(post-snapshot activity)"
+            ),
+        )
+    )
+
+
+def test_confirm_poll_error_leaves_aggregate_unknown() raises:
+    # A confirm poll failure skips the re-read; no exact loss.
+    var c = _one_copy_run(
+        _stable_detail(),
+        timeouts=3,
+        confirm_poll_err=True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(_contains(c.session, String("error shutdown")))
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"partial",'
+                '"loss_count":null,'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "attempt program skips unknown "
+                "(post-snapshot activity)"
+            ),
+        )
+    )
+
+
+def test_confirm_stats_error_leaves_aggregate_unknown() raises:
+    # Unreadable confirm stats skip the re-read; no exact loss.
+    var c = _one_copy_run(
+        _stable_detail(),
+        fail_confirm_stats=True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(_contains(c.session, String("error shutdown")))
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"partial",'
+                '"loss_count":null,'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "attempt program skips unknown "
+                "(post-snapshot activity)"
+            ),
+        )
+    )
+
+
+def test_copy_failed_second_read_with_attempt_growth_unknown() raises:
+    # A failed detail re-read with a moved attempt voids both.
+    var c = _one_copy_run(
+        _stable_detail(),
+        _detail_failed(
+            UInt64(2), String("ch2 fallback counters wrapped")),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(
+            c.session,
+            String("recursion misses unreadable after settle"),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"partial",'
+                '"loss_count":null,'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "attempt program skips unknown "
+                "(post-snapshot activity)"
+            ),
+        )
+    )
+
+
+def test_error_close_copy_failed_second_read_attempt_growth() raises:
+    var c = _error_copy_run(
+        _stable_detail(),
+        _detail_failed(
+            UInt64(2), String("ch2 fallback counters wrapped")),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"partial",'
+                '"loss_count":null,'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "attempt program skips unknown "
+                "(post-snapshot activity)"
+            ),
+        )
     )
 
 

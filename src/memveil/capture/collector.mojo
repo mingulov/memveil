@@ -752,6 +752,7 @@ struct Collector:
     var recursion_missed: UInt64
     var attempt_missed: UInt64
     var attempt_known: Bool
+    var attempt_post_snapshot: Bool
     var has_recursion: Bool
     var rec_has_detail: Bool
     var rec_bounce: UInt64
@@ -860,6 +861,7 @@ struct Collector:
         self.recursion_missed = UInt64(0)
         self.attempt_missed = UInt64(0)
         self.attempt_known = False
+        self.attempt_post_snapshot = False
         self.has_recursion = False
         self.rec_has_detail = False
         self.rec_bounce = UInt64(0)
@@ -2012,7 +2014,15 @@ struct Collector:
         if not self.attempt_known:
             return
         var m = kernel.recursion_misses()
-        if not m.ok or m.detail_error != String(""):
+        if not m.ok:
+            self.attempt_post_snapshot = True
+            self.note_unknown(
+                String("recursion misses unreadable after settle")
+            )
+            return
+        if m.detail_error != String(""):
+            if m.attempt != self.attempt_missed:
+                self.attempt_post_snapshot = True
             self.note_unknown(
                 String("recursion misses unreadable after settle")
             )
@@ -2021,8 +2031,11 @@ struct Collector:
             self.note_unknown(String("post-snapshot activity"))
             return
         if self.rec_has_detail:
+            var attempt_moved = m.attempt != self.attempt_missed
+            if attempt_moved:
+                self.attempt_post_snapshot = True
             if (
-                m.attempt != self.attempt_missed
+                attempt_moved
                 or m.bounce != self.rec_bounce
                 or m.exit_misses != self.rec_exit
                 or m.sync_device != self.rec_sync_device
@@ -2034,10 +2047,10 @@ struct Collector:
             ):
                 self.note_unknown(String("post-snapshot activity"))
             return
-        if (
-            m.attempt != self.attempt_missed
-            or m.count != self.recursion_missed
-        ):
+        var attempt_moved = m.attempt != self.attempt_missed
+        if attempt_moved:
+            self.attempt_post_snapshot = True
+        if attempt_moved or m.count != self.recursion_missed:
             self.note_unknown(String("post-snapshot activity"))
 
     def confirm[K: KernelSource](mut self, mut kernel: K):
@@ -2050,10 +2063,12 @@ struct Collector:
             elif out.kind != String("timeout"):
                 self.note_unknown(String("error shutdown"))
                 self.result_state = String("error")
+                self.attempt_post_snapshot = True
                 return
         var final = kernel.stats()
         if not final.ok:
             self.note_unknown(String("error shutdown"))
+            self.attempt_post_snapshot = True
             return
         self.stats_final = final.copy()
         self.has_final_stats = True
@@ -3041,6 +3056,14 @@ struct Collector:
             out.q_aggregate.reason += String(
                 "; attempt program skips unknown (recursion misses "
                 "unreadable)"
+            )
+        elif self.snapshots_present and self.attempt_post_snapshot:
+            # A moved or unchecked attempt count voids exact loss.
+            out.q_aggregate.status = String("partial")
+            out.q_aggregate.has_loss_count = False
+            out.q_aggregate.reason = aggregate_reason(True, String(""))
+            out.q_aggregate.reason += String(
+                "; attempt program skips unknown (post-snapshot activity)"
             )
         elif self.snapshots_present and self.attempt_missed > 0:
             out.q_aggregate.status = String("partial")
