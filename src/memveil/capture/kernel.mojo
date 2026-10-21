@@ -1026,6 +1026,7 @@ struct LmbKernel(ChannelPoller, KernelSource):
         if not self._any_open():
             return MissOut(False, UInt64(0), String("session not open"))
         var total = UInt64(0)
+        var attempt = UInt64(0)
         var order = self._order()
         for k in range(len(order)):
             var ch = order[k]
@@ -1045,7 +1046,9 @@ struct LmbKernel(ChannelPoller, KernelSource):
                     False, UInt64(0), String("recursion misses wrap")
                 )
             total += m.count
-        return MissOut(True, total, String(""))
+            if ch == 0:
+                attempt = m.count
+        return MissOut(True, total, String(""), attempt)
 
     def close(mut self) -> OpOut:
         # Idempotent cleanup: closing a never-opened (or

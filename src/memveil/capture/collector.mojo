@@ -177,13 +177,26 @@ struct SnapOut(Copyable, Movable):
     var message: String
 
 
-@fieldwise_init
 struct MissOut(Copyable, Movable):
-    """Summed program recursion misses (count valid when ok)."""
+    """Summed program recursion misses (counts valid when ok)."""
 
     var ok: Bool
     var count: UInt64
     var message: String
+    # Subset of count skipped by the attempt (channel 0) programs.
+    var attempt: UInt64
+
+    def __init__(
+        out self,
+        ok: Bool,
+        count: UInt64,
+        message: String,
+        attempt: UInt64 = UInt64(0),
+    ):
+        self.ok = ok
+        self.count = count
+        self.message = message
+        self.attempt = attempt
 
 
 @fieldwise_init
@@ -701,6 +714,7 @@ struct Collector:
     var stats_final: StatsOut
     var has_final_stats: Bool
     var recursion_missed: UInt64
+    var attempt_missed: UInt64
     var has_recursion: Bool
     var stats_start_ch0: StatsOut
     var stats_final_ch0: StatsOut
@@ -798,6 +812,7 @@ struct Collector:
         )
         self.has_final_stats = False
         self.recursion_missed = UInt64(0)
+        self.attempt_missed = UInt64(0)
         self.has_recursion = False
         self.stats_start_ch0 = StatsOut(
             False,
@@ -1844,9 +1859,12 @@ struct Collector:
         var m = kernel.recursion_misses()
         if m.ok:
             self.recursion_missed = m.count
+            self.attempt_missed = m.attempt
             self.has_recursion = True
         else:
-            self.note_unknown(String("recursion misses unreadable"))
+            self.note_unknown(
+                String("recursion misses unreadable: ") + m.message
+            )
 
     def confirm[K: KernelSource](mut self, mut kernel: K):
         """Bounded confirmation drain after the end snapshot."""
@@ -2832,7 +2850,26 @@ struct Collector:
                 self.write_failed,
             )
         out.q_detail.scope = scope
-        if self.snapshots_present:
+        if self.snapshots_present and not self.has_recursion:
+            # Skipped attempt runs never advance the counters.
+            out.q_aggregate.status = String("partial")
+            out.q_aggregate.has_loss_count = False
+            out.q_aggregate.reason = aggregate_reason(True, String(""))
+            out.q_aggregate.reason += String(
+                "; attempt program skips unknown (recursion misses "
+                "unreadable)"
+            )
+        elif self.snapshots_present and self.attempt_missed > 0:
+            out.q_aggregate.status = String("partial")
+            out.q_aggregate.has_loss_count = True
+            out.q_aggregate.loss_count = self.attempt_missed
+            out.q_aggregate.reason = aggregate_reason(True, String(""))
+            out.q_aggregate.reason += (
+                String("; attempt program runs skipped ")
+                + format_u64(self.attempt_missed)
+                + String(" (recursion)")
+            )
+        elif self.snapshots_present:
             out.q_aggregate.status = String("complete_for_scope")
             out.q_aggregate.has_loss_count = True
             out.q_aggregate.loss_count = UInt64(0)

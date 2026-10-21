@@ -209,11 +209,13 @@ struct CaseOut(Movable):
     var diagnostic: String
     var events: String
     var session: String
+    var signal_checks: Int
+    var loop_polls: Int
 
     def __init__(
         out self, exit_code: Int, end_reason: String,
         outcome: String, diagnostic: String, events: String,
-        session: String,
+        session: String, signal_checks: Int = 0, loop_polls: Int = 0,
     ):
         self.exit_code = exit_code
         self.end_reason = end_reason
@@ -221,6 +223,8 @@ struct CaseOut(Movable):
         self.diagnostic = diagnostic
         self.events = events
         self.session = session
+        self.signal_checks = signal_checks
+        self.loop_polls = loop_polls
 
 
 def _read_text(path: String) raises -> String:
@@ -296,9 +300,10 @@ def _run(
     kernel.add_stats_at(2, _stats(rx2, rx2, UInt64(0), UInt64(0)))
     for i in range(len(payloads)):
         kernel.add_poll(_batch(payloads[i]), 1)
-    kernel.add_poll(_timeout(), 102)
+    kernel.add_poll(_timeout(), 103)
+    # One head check plus one gate per frame; the next head check latches.
     var signal = ScriptSignal()
-    for i in range(2 * len(payloads)):
+    for i in range(len(payloads) + 1):
         signal.add(String("none"))
     signal.add(String("pending"))
     var clock = ScriptClock()
@@ -308,6 +313,11 @@ def _run(
     var result = collector.run(kernel, clock, signal, writer)
     var events = _read_text(cfg.output + String("/events.ndjson"))
     var session = _read_text(cfg.output + String("/session.json"))
+    # Close-out drains poll with timeout 0; the loop never does.
+    var loop_polls = 0
+    for t in kernel.poll_timeouts:
+        if t != 0:
+            loop_polls += 1
     var out = CaseOut(
         result.exit_code,
         result.end_reason,
@@ -315,6 +325,8 @@ def _run(
         result.diagnostic,
         events,
         session,
+        signal.checks,
+        loop_polls,
     )
     return out^
 
@@ -742,7 +754,8 @@ def test_unreadable_recursion_misses_make_loss_unknown() raises:
             c.session,
             String(
                 '"reason":"detail loss unknown (recursion misses '
-                'unreadable; known: submit_fail=(0) malformed=(0) '
+                'unreadable: fdinfo gone; known: submit_fail=(0) '
+                'malformed=(0) '
                 'dropped=(0) recursion_missed=(unavailable) '
             ),
         )
@@ -753,6 +766,52 @@ def test_unreadable_recursion_misses_make_loss_unknown() raises:
             String('"detail":{"status":"partial","loss_count":null,'),
         )
     )
+    assert_true(
+        _contains(
+            c.session,
+            String('"aggregate":{"status":"partial","loss_count":null,'),
+        )
+    )
+
+
+def test_attempt_misses_make_aggregate_partial() raises:
+    # Skipped attempt runs never advance the aggregate counters.
+    var c = _one_copy_run(
+        MissOut(True, UInt64(5), String(""), UInt64(3))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"aggregate":{"status":"partial","loss_count":"3",'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String("attempt program runs skipped 3 (recursion)"),
+        )
+    )
+
+
+def test_copy_only_misses_keep_aggregate_complete() raises:
+    var c = _one_copy_run(MissOut(True, UInt64(5), String("")))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+
+
+def test_admitted_frame_skips_only_its_own_signal_check() raises:
+    # Head check, frame, gate check, timeout, head check latches.
+    var c = _one_copy_run(MissOut(True, UInt64(0), String("")))
+    assert_equal(c.end_reason, String("signal"))
+    assert_equal(c.signal_checks, 3)
+    assert_equal(c.loop_polls, 2)
 
 
 def test_foreign_payload_aborts() raises:
