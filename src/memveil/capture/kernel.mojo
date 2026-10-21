@@ -22,7 +22,8 @@ which channels exist by passing their object bytes.
 
 Poll rotates across present channels (sticky on short:
 a short pins the next poll to the channel holding the
-retained record). Stats sum across present channels;
+retained record) and waits only when every channel is
+empty. Stats sum across present channels;
 per-channel counters stay available through stats_at
 and read_full_at.
 """
@@ -123,6 +124,70 @@ def join_op_message(acc: String, channel: Int, message: String) -> String:
     if acc == String(""):
         return piece
     return acc + String("; ") + piece
+
+
+trait ChannelPoller:
+    """One bounded poll on one channel; rotate_poll owns policy."""
+
+    def poll_channel(
+        mut self, channel: Int, timeout_ms: Int, capacity: UInt32
+    ) -> PollOut:
+        ...
+
+
+@fieldwise_init
+struct PollRotation(Copyable, Movable):
+    """Rotation state: next order position, pinned short channel."""
+
+    var next: Int
+    var short_ch: Int
+
+
+def rotate_poll[P: ChannelPoller](
+    mut poller: P, mut rot: PollRotation, order: List[Int],
+    timeout_ms: Int, capacity: UInt32,
+) -> PollOut:
+    """One multi-channel poll over order (sticky on short).
+
+    Every channel is probed without waiting first; only when
+    all are empty does the start channel wait timeout_ms, so
+    a quiet ring never holds the wait while another ring has
+    records queued. Data arriving on a non-waited channel is
+    picked up by the next call, at most one wait later.
+    """
+    if rot.short_ch >= 0:
+        var ch = rot.short_ch
+        var retry = poller.poll_channel(ch, timeout_ms, capacity)
+        if retry.kind != String("short"):
+            rot.short_ch = -1
+        if retry.kind == String("error"):
+            retry.message = _channel_tag(ch) + retry.message
+        return retry^
+    var n = len(order)
+    var start = rot.next % n
+    var probes = n
+    if timeout_ms != 0:
+        probes = n + 1
+    for k in range(probes):
+        var pos = k % n
+        var ch = order[(start + pos) % n]
+        var wait = 0
+        if k == n:
+            wait = timeout_ms
+        var out = poller.poll_channel(ch, wait, capacity)
+        if out.kind == String("batch"):
+            rot.next = poll_advance(n, start, pos)
+            return out^
+        if out.kind == String("short"):
+            rot.short_ch = ch
+            return out^
+        if out.kind == String("error"):
+            out.message = _channel_tag(ch) + out.message
+            return out^
+    rot.next = (start + 1) % n
+    return PollOut(
+        String("timeout"), List[UInt8](), UInt32(0), String("")
+    )
 
 
 def _attempt_specs(
@@ -478,15 +543,14 @@ struct _Channel(Movable):
         return OpOut(True, String(""))
 
 
-struct LmbKernel(KernelSource):
+struct LmbKernel(ChannelPoller, KernelSource):
     """KernelSource backed by up to three libbpf-mojo sessions."""
 
     var _lib_path: String
     var _ch0: _Channel
     var _ch1: _Channel
     var _ch2: _Channel
-    var _poll_next: Int
-    var _short_ch: Int
+    var _rot: PollRotation
 
     def __init__(
         out self,
@@ -501,8 +565,7 @@ struct LmbKernel(KernelSource):
         self._ch0 = _Channel()
         self._ch1 = _Channel()
         self._ch2 = _Channel()
-        self._poll_next = 0
-        self._short_ch = -1
+        self._rot = PollRotation(0, -1)
         self._ch0.setup(
             elf, ring,
             _attempt_specs(program, tp_system, tp_event),
@@ -681,7 +744,7 @@ struct LmbKernel(KernelSource):
                 return OpOut(False, msg)
         return OpOut(True, String(""))
 
-    def _poll_channel(
+    def poll_channel(
         mut self, channel: Int, timeout_ms: Int, capacity: UInt32
     ) -> PollOut:
         if channel == 1:
@@ -705,40 +768,12 @@ struct LmbKernel(KernelSource):
                 String("error"), List[UInt8](), UInt32(0),
                 String("session not open"),
             )
-        if self._short_ch >= 0:
-            var ch = self._short_ch
-            var retry = self._poll_channel(ch, timeout_ms, capacity)
-            if retry.kind != String("short"):
-                self._short_ch = -1
-            if retry.kind == String("error"):
-                retry.message = (
-                    _channel_tag(ch) + retry.message
-                )
-            return retry^
-        var order = self._order()
-        var start = self._poll_next % len(order)
-        for k in range(len(order)):
-            var ch = order[(start + k) % len(order)]
-            var wait = timeout_ms
-            if k > 0:
-                wait = 0
-            var out = self._poll_channel(ch, wait, capacity)
-            if out.kind == String("batch"):
-                self._poll_next = poll_advance(
-                    len(order), start, k
-                )
-                return out^
-            if out.kind == String("short"):
-                self._short_ch = ch
-                return out^
-            if out.kind == String("error"):
-                out.message = _channel_tag(ch) + out.message
-                return out^
-        self._poll_next = (start + 1) % len(order)
-        return PollOut(
-            String("timeout"), List[UInt8](), UInt32(0),
-            String(""),
+        var rot = self._rot.copy()
+        var out = rotate_poll(
+            self, rot, self._order(), timeout_ms, capacity
         )
+        self._rot = rot^
+        return out^
 
     def stats(mut self) -> StatsOut:
         if not self._any_open():
@@ -855,7 +890,7 @@ struct LmbKernel(KernelSource):
             if not out.ok:
                 failed = True
                 msg = join_op_message(msg, ch, out.message)
-        self._short_ch = -1
+        self._rot.short_ch = -1
         if failed:
             return OpOut(False, msg^)
         return OpOut(True, String(""))

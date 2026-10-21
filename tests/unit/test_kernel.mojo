@@ -18,11 +18,15 @@ from libbpf_mojo.batch import (
 )
 from libbpf_mojo.error import EINTR
 
+from memveil.capture.collector import PollOut
 from memveil.capture.kernel import (
+    ChannelPoller,
     LmbKernel,
+    PollRotation,
     join_op_message,
     poll_advance,
     poll_outcome,
+    rotate_poll,
 )
 
 
@@ -216,6 +220,74 @@ def test_poll_advance_sparse_order() raises:
     assert_equal(poll_advance(1, 0, 0), 0)
 
 
+struct _Backlog(ChannelPoller):
+    """Synthetic rings: a fixed backlog per channel, no arrivals.
+
+    A nonzero wait on an empty channel burns the whole
+    timeout on blocked_ms, as epoll_wait does on a quiet ring.
+    """
+
+    var pending: List[Int]
+    var delivered: List[Int]
+    var blocked_ms: Int
+    var order: List[Int]
+
+    def __init__(out self, c0: Int, c1: Int, c2: Int):
+        self.pending = [c0, c1, c2]
+        self.delivered = [0, 0, 0]
+        self.blocked_ms = 0
+        self.order = List[Int]()
+
+    def poll_channel(
+        mut self, channel: Int, timeout_ms: Int, capacity: UInt32
+    ) -> PollOut:
+        if self.pending[channel] == 0:
+            self.blocked_ms += timeout_ms
+            return PollOut(
+                String("timeout"), List[UInt8](), UInt32(0), String("")
+            )
+        self.pending[channel] -= 1
+        self.delivered[channel] += 1
+        self.order.append(channel)
+        return PollOut(
+            String("batch"), [UInt8(channel)], UInt32(0), String("")
+        )
+
+
+def _drain(mut ring: _Backlog, polls: Int):
+    var rot = PollRotation(0, -1)
+    for _ in range(polls):
+        _ = rotate_poll(ring, rot, [0, 1, 2], 100, UInt32(65536))
+
+
+def test_rotate_empty_channel_never_stalls_backlog() raises:
+    # Attempt ring drained, lifecycle/copy backlogged: every
+    # queued record is reachable without a blocking wait.
+    var ring = _Backlog(0, 1000, 1000)
+    _drain(ring, 2000)
+    assert_equal(ring.delivered[1], 1000)
+    assert_equal(ring.delivered[2], 1000)
+    assert_equal(ring.blocked_ms, 0)
+
+
+def test_rotate_all_empty_blocks_one_quantum() raises:
+    # Quiet rings: one poll waits exactly one quantum, no spin.
+    var ring = _Backlog(0, 0, 0)
+    var rot = PollRotation(0, -1)
+    var out = rotate_poll(ring, rot, [0, 1, 2], 100, UInt32(65536))
+    assert_equal(out.kind, String("timeout"))
+    assert_equal(ring.blocked_ms, 100)
+
+
+def test_rotate_busy_channels_round_robin() raises:
+    var ring = _Backlog(2, 2, 2)
+    _drain(ring, 6)
+    assert_equal(len(ring.order), 6)
+    for i in range(6):
+        assert_equal(ring.order[i], i % 3)
+    assert_equal(ring.blocked_ms, 0)
+
+
 def test_join_op_message() raises:
     assert_equal(
         join_op_message(String(""), 0, String("boom")),
@@ -237,6 +309,9 @@ def run() raises -> Int:
     suite.test[test_multi_not_open_taxonomy]()
     suite.test[test_multi_open_failure_shape]()
     suite.test[test_poll_advance_sparse_order]()
+    suite.test[test_rotate_empty_channel_never_stalls_backlog]()
+    suite.test[test_rotate_all_empty_blocks_one_quantum]()
+    suite.test[test_rotate_busy_channels_round_robin]()
     suite.test[test_join_op_message]()
     suite^.run()
     return 0
