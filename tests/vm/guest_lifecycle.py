@@ -27,6 +27,7 @@ LC_SITES = ("mv_map_result:swiotlb_tbl_map_single,"
             "mv_unmap:__swiotlb_tbl_unmap_single")
 CP_SITES = ("mv_sync_device:__swiotlb_sync_single_for_device,"
             "mv_sync_cpu:__swiotlb_sync_single_for_cpu,"
+            "mv_bounce_exit:swiotlb_bounce,"
             "mv_bounce:swiotlb_bounce")
 
 

@@ -11,7 +11,7 @@ silently evicted, and no refusal corrupts unrelated state.
 |---|---|---|
 | Ring reservation (live) | 8 MiB attempt, 32 MiB lifecycle and copy | submit fails count in `submit_fail`; detail degrades, counters survive |
 | Native staging (live) | bridge bound | malformed/dropped counts; see the bridge contract |
-| Probe recursion (live) | kernel | runs the kernel skips while a probe already runs on that CPU count in `recursion_missed` (each program's `recursion_misses`); detail degrades; unreadable makes detail loss unknown |
+| Probe recursion (live) | kernel | runs the kernel skips while a probe already runs on that CPU count in `recursion_missed` (each program's `recursion_misses`, an upper bound for copies since `mv_bounce_exit` recovers skipped `mv_bounce` runs); detail degrades; unreadable makes detail loss unknown |
 | Pending operations | 65,536 | `pending table exhausted`; event unpaired |
 | Resolved operations | 16,384 | oldest history cycles; `resolved-operation history exceeded`, quality partial |
 | Active mappings | 65,536 | `active table exhausted`; event unpaired |

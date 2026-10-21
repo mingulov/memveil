@@ -21,6 +21,7 @@ from libbpf_mojo.error import EINTR
 from memveil.capture.collector import PollOut
 from memveil.capture.kernel import (
     ChannelPoller,
+    _copy_specs,
     LmbKernel,
     PollRotation,
     added_fds,
@@ -493,6 +494,18 @@ def test_recursion_misses_before_open() raises:
     assert_equal(m.message, String("session not open"))
 
 
+def test_copy_specs_attach_fallback_first() raises:
+    # fexit attaches before fentry: mv_bounce never runs without its fallback.
+    var specs = _copy_specs()
+    assert_equal(len(specs), 4)
+    assert_equal(specs[0].program, String("mv_sync_device"))
+    assert_equal(specs[1].program, String("mv_sync_cpu"))
+    assert_equal(specs[2].program, String("mv_bounce_exit"))
+    assert_equal(specs[2].target_a, String("swiotlb_bounce"))
+    assert_equal(specs[3].program, String("mv_bounce"))
+    assert_equal(specs[3].target_a, String("swiotlb_bounce"))
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_not_open_taxonomy]()
@@ -520,6 +533,7 @@ def run() raises -> Int:
     suite.test[test_added_fds_diff]()
     suite.test[test_prog_fds_lists_without_programs]()
     suite.test[test_recursion_misses_before_open]()
+    suite.test[test_copy_specs_attach_fallback_first]()
     suite^.run()
     return 0
 

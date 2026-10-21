@@ -42,6 +42,7 @@ comptime _ELF_RING = "tests/fixtures/elf/badring.o"
 comptime _ELF_LC = "tests/fixtures/elf/lc-ok.o"
 comptime _ELF_CP = "tests/fixtures/elf/cp-ok.o"
 comptime _ELF_LC_BAD = "tests/fixtures/elf/lc-wrongsec.o"
+comptime _ELF_CP_NOFEXIT = "tests/fixtures/elf/cp-nofexit.o"
 comptime _SYSTEM_BPF = "/usr/lib/memveil"
 comptime _ATTEMPT_OBJECT = "swiotlb_attempt.bpf.o"
 comptime _SCAN_BRIDGE = "f7e94e6379e43373ca0cd76b641307df0d7e801df60dd5dd4306e86400d00a8a"
@@ -654,7 +655,7 @@ def test_scan_explicit_notext() raises:
 
 comptime _CAPS3 = "attempt-trace,mapping-lifecycle,copy-actual"
 comptime _LC_SHA = "77034c5a968950b8298a7e63a8ada13a41bdffd7e7f92aaa0f804056927e6e53"
-comptime _CP_SHA = "4cb494d6e604222e7f0d6dbca82ac435ab2c00662143f22d986ae67b1bb00bf0"
+comptime _CP_SHA = "10fee61cc636781f230134c6afe5dee1837aa7be031935d035ab3ba97cf4552f"
 
 
 def _decide_lc(
@@ -722,6 +723,23 @@ def test_scan_valid_lc_no_tracing() raises:
     assert_true(not d.ok)
     assert_equal(
         d.refusal, String("lc object refused: no fentry section")
+    )
+
+
+def test_scan_cp_no_fexit_refuses() raises:
+    """A copy object without the fexit fallback cannot satisfy the request."""
+    var d = _decide_lc(
+        String(_OK),
+        String(_PROFILES) + String("/valid-lc.json"),
+        True,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(_ELF_CP_NOFEXIT),
+        String(_CAPS3),
+    )
+    assert_true(not d.ok)
+    assert_equal(
+        d.refusal, String("cp object refused: no fexit section")
     )
 
 
@@ -1241,6 +1259,7 @@ def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_scan_valid_lc_record]()
     suite.test[test_scan_valid_lc_no_tracing]()
+    suite.test[test_scan_cp_no_fexit_refuses]()
     suite.test[test_scan_skew_lc_refuses]()
     suite.test[test_scan_lc_unsupported_refuses]()
     suite.test[test_scan_unknown_capability_refuses]()

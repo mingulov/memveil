@@ -257,6 +257,15 @@ def _copy_specs() -> List[AttachSpec]:
             String(""),
         )
     )
+    # fexit attaches first, detaches last: records copies mv_bounce skips.
+    out.append(
+        AttachSpec(
+            String("mv_bounce_exit"),
+            _ATTACH_TRACING,
+            String("swiotlb_bounce"),
+            String(""),
+        )
+    )
     out.append(
         AttachSpec(
             String("mv_bounce"),

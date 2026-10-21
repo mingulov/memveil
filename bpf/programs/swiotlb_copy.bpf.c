@@ -4,7 +4,7 @@
  *
  * fentry on __swiotlb_sync_single_for_device,
  * __swiotlb_sync_single_for_cpu (sync requests: direction and
- * length, never executed bytes), plus fentry on
+ * length, never executed bytes), plus fentry and fexit on
  * swiotlb_bounce (executed copies with replicated effective
  * bytes). Emits 48-byte MVCP v1 records on mv_copies. Byte
  * aggregates cover REQUESTED bytes (observed and emitted in
@@ -17,6 +17,17 @@
  * applies the hook's clamp rule from memveil_events.h. Any
  * failed read degrades that event to unknown-with-reason;
  * the request fact (size, direction) is still emitted.
+ *
+ * Each copy is recorded once, by mv_bounce or else by
+ * mv_bounce_exit. On x86 one per-CPU counter guards each
+ * program across task, softirq and hardirq context, so a
+ * bounce in an interrupt that lands while mv_bounce runs on
+ * the interrupted task skips mv_bounce (a recursion miss).
+ * mv_bounce first claims a slot keyed by the trampoline frame
+ * (ctx), unique among live calls; mv_bounce_exit records the
+ * call only when no claim of this frame and call id exists.
+ * A skipped program still counts in recursion_misses, so the
+ * summed misses stay an upper bound on lost copies.
  *
  * Build: clang --target=bpf -O2 -g -D__BPF__ -I bpf/include
  *   -I <libbpf-1.7.0>/src -I /usr/include/x86_64-linux-gnu
@@ -42,6 +53,22 @@ struct {
     __type(key, __u32);
     __type(value, __u64);
 } mv_counts SEC(".maps");
+
+/* Claim table: 4096 slots, 8 linear probes per frame. */
+#define MV_CLAIM_SLOTS 4096u
+#define MV_CLAIM_PROBES 8u
+
+struct mv_claim {
+    __u64 frame;
+    __u64 id;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, MV_CLAIM_SLOTS);
+    __type(key, __u32);
+    __type(value, struct mv_claim);
+} mv_claims SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
@@ -200,10 +227,12 @@ int BPF_PROG(mv_sync_cpu, struct device *dev, mv_phys_addr_t tlb_addr,
                       MV_CP_REASON_NOT_COPY);
 }
 
-SEC("fentry/swiotlb_bounce")
-int BPF_PROG(mv_bounce, struct device *dev, mv_phys_addr_t tlb_addr,
-             mv_size_t size, enum mv_dma_data_direction dir,
-             struct io_tlb_pool *pool)
+/* Records one executed copy (shared by the fentry and fexit paths). */
+static __always_inline int mv_emit_bounce(struct device *dev,
+                                          mv_phys_addr_t tlb_addr,
+                                          mv_size_t size,
+                                          enum mv_dma_data_direction dir,
+                                          struct io_tlb_pool *pool)
 {
     struct device_dma_parameters *parms;
     struct io_tlb_slot *slots, slot;
@@ -214,7 +243,6 @@ int BPF_PROG(mv_bounce, struct device *dev, mv_phys_addr_t tlb_addr,
     __u16 flags, reason = MV_CP_REASON_NONE;
     __s64 off;
 
-    (void)ctx;
     /* The shared emit path rejects dir outside 1..2 for a
      * copy, mirroring the decoder's per-kind rule. */
     flags = dir64 == MV_DMA_TO_DEVICE ? MV_CP_FLAG_TO_DEVICE : 0;
@@ -255,6 +283,127 @@ int BPF_PROG(mv_bounce, struct device *dev, mv_phys_addr_t tlb_addr,
     }
     return mv_emit_cp(MV_CP_KIND_COPY, flags, dir64, size,
                       effective, reason);
+}
+
+/* Counts a firing whose copy neither path can record. */
+static __always_inline void mv_lost(void)
+{
+    __u32 key = MV_CNT_OBSERVED;
+    __u64 *observed = bpf_map_lookup_elem(&mv_counts, &key);
+
+    if (!observed)
+        return;
+    if (__sync_fetch_and_add(observed, 1) == 0xFFFFFFFFFFFFFFFFULL)
+        mv_raise(MV_FLAG_OBSERVED_WRAP);
+    mv_submit_fail();
+}
+
+/* Trampoline frame address as a scalar (the verifier forbids hashing ctx). */
+static __always_inline __u64 mv_frame(void *ctx)
+{
+    void *p = ctx;
+    __u64 v = 0;
+
+    if (bpf_probe_read_kernel(&v, sizeof(v), &p))
+        return 0;
+    return v;
+}
+
+/* Call id: arguments distinguish successive calls in one frame. */
+static __always_inline __u64 mv_call_id(mv_phys_addr_t tlb_addr,
+                                        mv_size_t size, __u64 dir)
+{
+    return tlb_addr ^ (size * 0x9E3779B97F4A7C15ULL) ^ dir;
+}
+
+static __always_inline __u32 mv_claim_index(__u64 frame, __u32 i)
+{
+    return ((__u32)(frame >> 4) ^ (__u32)(frame >> 16)) + i;
+}
+
+/* Claims frame's slot for id; 0 when every probed slot is busy. */
+static __always_inline int mv_claim(__u64 frame, __u64 id)
+{
+    struct mv_claim *s;
+    __u32 i, k;
+
+    /* A slot holding this frame is stale: live frames are unique. */
+    for (i = 0; i < MV_CLAIM_PROBES; i++) {
+        k = mv_claim_index(frame, i) & (MV_CLAIM_SLOTS - 1);
+        s = bpf_map_lookup_elem(&mv_claims, &k);
+        if (!s)
+            return 0;
+        if (s->frame == frame) {
+            s->id = id;
+            return 1;
+        }
+    }
+    for (i = 0; i < MV_CLAIM_PROBES; i++) {
+        k = mv_claim_index(frame, i) & (MV_CLAIM_SLOTS - 1);
+        s = bpf_map_lookup_elem(&mv_claims, &k);
+        if (!s)
+            return 0;
+        if (s->frame == 0 &&
+            __sync_val_compare_and_swap(&s->frame, 0, frame) == 0) {
+            s->id = id;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Releases frame's slot; 1 when it held id (mv_bounce recorded this call). */
+static __always_inline int mv_release(__u64 frame, __u64 id)
+{
+    struct mv_claim *s;
+    __u32 i, k;
+    int mine;
+
+    for (i = 0; i < MV_CLAIM_PROBES; i++) {
+        k = mv_claim_index(frame, i) & (MV_CLAIM_SLOTS - 1);
+        s = bpf_map_lookup_elem(&mv_claims, &k);
+        /* Unreadable table: never record twice. */
+        if (!s)
+            return 1;
+        if (s->frame == frame) {
+            mine = s->id == id;
+            s->frame = 0;
+            return mine;
+        }
+    }
+    return 0;
+}
+
+SEC("fentry/swiotlb_bounce")
+int BPF_PROG(mv_bounce, struct device *dev, mv_phys_addr_t tlb_addr,
+             mv_size_t size, enum mv_dma_data_direction dir,
+             struct io_tlb_pool *pool)
+{
+    __u64 frame = mv_frame(ctx);
+
+    /* No frame: mv_bounce_exit cannot match either, so count the loss. */
+    if (!frame) {
+        mv_lost();
+        return 0;
+    }
+    /* Table full: no claim, so mv_bounce_exit records the copy. */
+    if (!mv_claim(frame, mv_call_id(tlb_addr, size, dir)))
+        return 0;
+    return mv_emit_bounce(dev, tlb_addr, size, dir, pool);
+}
+
+/* Records the copy when mv_bounce skipped this call or found no free slot. */
+SEC("fexit/swiotlb_bounce")
+int BPF_PROG(mv_bounce_exit, struct device *dev, mv_phys_addr_t tlb_addr,
+             mv_size_t size, enum mv_dma_data_direction dir,
+             struct io_tlb_pool *pool)
+{
+    __u64 frame = mv_frame(ctx);
+
+    /* No frame: mv_bounce counted the loss, so never record twice. */
+    if (!frame || mv_release(frame, mv_call_id(tlb_addr, size, dir)))
+        return 0;
+    return mv_emit_bounce(dev, tlb_addr, size, dir, pool);
 }
 
 char MV_LICENSE[] SEC("license") = "GPL";

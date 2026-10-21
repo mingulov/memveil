@@ -807,6 +807,10 @@ def test_object_tracing_ok() raises:
         var v = verify_object_program(
             Span(cp), names[i], String("fentry/"))
         assert_true(v.ok)
+    # The fexit fallback records bounces that skipped mv_bounce.
+    var x = verify_object_program(
+        Span(cp), String("mv_bounce_exit"), String("fexit/"))
+    assert_true(x.ok)
 
 
 def test_object_tracing_wrongsec() raises:

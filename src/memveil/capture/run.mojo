@@ -386,6 +386,7 @@ def _cp_progs() -> List[_ProgWant]:
     out.append(_ProgWant(String("mv_sync_device"), String("fentry/")))
     out.append(_ProgWant(String("mv_sync_cpu"), String("fentry/")))
     out.append(_ProgWant(String("mv_bounce"), String("fentry/")))
+    out.append(_ProgWant(String("mv_bounce_exit"), String("fexit/")))
     return out^
 
 

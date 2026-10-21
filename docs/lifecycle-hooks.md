@@ -30,6 +30,11 @@ capabilities supported with the frozen hook sets below.
 | `mv_sync_device` | fentry | `__swiotlb_sync_single_for_device` |
 | `mv_sync_cpu` | fentry | `__swiotlb_sync_single_for_cpu` |
 | `mv_bounce` | fentry | `swiotlb_bounce` |
+| `mv_bounce_exit` | fexit | `swiotlb_bounce` |
+
+`mv_bounce_exit` is the recursion fallback for the
+`fentry:swiotlb_bounce` hook (same function and signature), not a
+separate profile hook; see [Recursion fallback](#recursion-fallback).
 
 The attempt tracepoint `swiotlb:swiotlb_bounced` is unchanged and
 stays the only attempt source.
@@ -167,6 +172,31 @@ otherwise the request clamps to `alloc_size - tlb_offset` with the
 hook signed offset math, where a negative offset widens the room.
 Any failed read degrades that event to unknown-with-reason while
 the request fact (size, direction) is still emitted.
+
+## Recursion fallback
+
+On x86 the kernel guards each tracing program with one per-CPU
+counter shared by task, softirq and hardirq context. A bounce in
+an interrupt (for example NVMe completion unmapping in hardirq)
+that lands while `mv_bounce` runs on the interrupted task is
+skipped and counted in that program's `recursion_misses`; one
+interrupt completing a batch loses the whole batch.
+
+`mv_bounce_exit` recovers those copies. `mv_bounce` claims a
+slot in the kernel-private `mv_claims` table keyed by the
+trampoline frame address (unique among live calls in any
+context) and a call id from `tlb_addr`, `size` and `dir`, then
+records the copy. `mv_bounce_exit` releases the claim and
+records the copy only when no matching claim exists, so each
+copy is recorded once. The fexit program attaches before the
+fentry program and detaches after it. A full probe window leaves
+the copy to `mv_bounce_exit`; a call neither program can match
+counts as `submit_fail`.
+
+`recursion_missed` still sums `recursion_misses` over every copy
+program, so a skipped `mv_bounce` run that `mv_bounce_exit`
+recovered still counts: the sum is an upper bound on lost copy
+records, never an undercount.
 
 ## Semantic edges
 

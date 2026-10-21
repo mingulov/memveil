@@ -10,7 +10,7 @@ Inputs : build/bpf/swiotlb_attempt.bpf.o  (built by tools/build)
          build/bpf/swiotlb_lifecycle.bpf.o and
          build/bpf/swiotlb_copy.bpf.o (same build).
 Outputs: tests/fixtures/elf/*.o (10 base + 9 admission negatives,
-         plus 2 tracing positives + 3 tracing negatives).
+         plus 2 tracing positives + 4 tracing negatives).
 
 Patches (verified structurally after writing):
   badarch : e_machine BPF(247) -> EM_X86_64(62).
@@ -38,13 +38,16 @@ Patches (verified structurally after writing):
   lc-ok   : unpatched lifecycle object (fexit mv_map_result,
             fentry mv_unmap, mv_lifecycle ring).
   cp-ok   : unpatched copy object (fentry mv_sync_device,
-            mv_sync_cpu, mv_bounce, mv_copies ring).
+            mv_sync_cpu, mv_bounce, fexit mv_bounce_exit,
+            mv_copies ring).
   lc-wrongsec: lifecycle object with its only fentry/ section
             renamed to kprobe/ (tracing admission refused).
   cp-wrongsec: copy object with fentry/swiotlb_bounce renamed
             to kprobe/ (program placement refused).
   cp-nonpow2 : mv_copies max_entries 33554432 -> 1000
             (ring geometry refused).
+  cp-nofexit : copy object with fexit/swiotlb_bounce renamed
+            to xexit/ (no fexit section: fallback refused).
 """
 import struct
 import sys
@@ -519,6 +522,13 @@ def main() -> int:
     cp_wrongsec[cp_sec : cp_sec + 6] = b"kprobe"  # same length
     (OUT / "cp-wrongsec.o").write_bytes(bytes(cp_wrongsec))
 
+    # Copy object without its fexit fallback section: the
+    # mv_bounce_exit symbol survives but no fexit section exists.
+    cp_nofexit = bytearray(cp_base)
+    cp_fx = find_in_shstrtab(cp_nofexit, b"fexit/swiotlb_bounce\x00")
+    cp_nofexit[cp_fx : cp_fx + 5] = b"xexit"  # same length
+    (OUT / "cp-nofexit.o").write_bytes(bytes(cp_nofexit))
+
     # Copy ring with a non-power-of-two size: geometry refuses.
     cp_nonpow2 = bytearray(cp_base)
     cp_ring_off = _btf_array_nelems_off(
@@ -606,10 +616,11 @@ def main() -> int:
          (b"fexit/swiotlb_tbl_map_single",
           b"fentry/__swiotlb_tbl_unmap_single")),
         ("cp-ok.o", (b"mv_sync_device\x00", b"mv_sync_cpu\x00",
-                     b"mv_bounce\x00"),
+                     b"mv_bounce\x00", b"mv_bounce_exit\x00"),
          (b"fentry/__swiotlb_sync_single_for_device",
           b"fentry/__swiotlb_sync_single_for_cpu",
-          b"fentry/swiotlb_bounce")),
+          b"fentry/swiotlb_bounce",
+          b"fexit/swiotlb_bounce")),
     ]:
         d = (OUT / name).read_bytes()
         assert d[0:4] == b"\x7fELF", name
@@ -632,13 +643,21 @@ def main() -> int:
         raise SystemExit("cp-wrongsec.o still has the fentry section")
     except AssertionError:
         pass
+    cpx = (OUT / "cp-nofexit.o").read_bytes()
+    find_in_section(cpx, b"mv_bounce_exit\x00", b".strtab")
+    _sec_index_by_name(cpx, b"fentry/swiotlb_bounce")
+    try:
+        _sec_index_by_name(cpx, b"fexit/swiotlb_bounce")
+        raise SystemExit("cp-nofexit.o still has the fexit section")
+    except AssertionError:
+        pass
     cpn = (OUT / "cp-nonpow2.o").read_bytes()
     assert (
         _btf_array_nelems_off(cpn, b"mv_copies", b"max_entries")
         == cp_ring_off
     )
     assert struct.unpack_from("<I", cpn, cp_ring_off)[0] == 1000
-    print(f"wrote 22 fixtures to {OUT}")
+    print(f"wrote 23 fixtures to {OUT}")
 
     # Structural self-check of every fixture (.strtab-scoped symbol check,
     # since __btf_strings legitimately repeats the program name).
