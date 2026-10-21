@@ -22,6 +22,10 @@ also need the running kernel's hook signatures and layouts
 verified; prepare() requires memveil doctor to report every
 capability live-verified before a guest boots, and copies the
 selection to build/vm/gate-profile.json for guest-side readers.
+Doctor cannot reach a foreign guest kernel from the host: there
+the shipped qualification stands in, since the guest verifies
+the identity it was qualified on and select() refuses any drift
+of the objects from its bindings.
 """
 
 import gzip
@@ -215,6 +219,10 @@ def select(release=None, root="/", out_root=OUT_ROOT,
                 + release)
         # The host cannot measure a foreign kernel; its shipped claim names it.
         doc = json.loads(path.read_text())
+        drift = binding_drift(doc, shipped_identity(doc), objects)
+        if drift:
+            raise GateKernelError("shipped %s bindings drift: %s"
+                                  % (path.name, ", ".join(drift)))
         _, sat_doc = emitter().gate_docs(shipped_identity(doc),
                                          doc["hooks"][0]["format_text"],
                                          doc["profile_id"])
@@ -256,15 +264,22 @@ def require_live_interfaces(caps, memveil=MEMVEIL):
     """Fail unless memveil doctor live-verifies every cap here."""
     proc = subprocess.run(["sudo", "-n", str(memveil), "doctor", "--json"],
                           capture_output=True, text=True, timeout=120)
-    try:
-        doc = json.loads(proc.stdout)
-    except ValueError:
-        raise GateKernelError("doctor --json unreadable (exit %d): %s"
-                              % (proc.returncode, proc.stderr[-500:]))
-    gaps = live_gaps(doc, caps)
+    gaps = live_gaps(doctor_doc(proc), caps)
     if gaps:
         raise GateKernelError("not live-verified on %s: %s"
                               % (os.uname().release, "; ".join(gaps)))
+
+
+def doctor_doc(proc):
+    """Doctor's JSON when it exited ready (0) or unavailable (3)."""
+    if proc.returncode not in (0, 3):
+        raise GateKernelError("doctor --json failed (exit %d): %s"
+                              % (proc.returncode, proc.stderr[-500:]))
+    try:
+        return json.loads(proc.stdout)
+    except ValueError:
+        raise GateKernelError("doctor --json unreadable (exit %d): %s"
+                              % (proc.returncode, proc.stderr[-500:]))
 
 
 def live_gaps(doc, caps):

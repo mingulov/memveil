@@ -54,6 +54,10 @@ against the selection, so minting names the kernel under
 test without relaxing any check. Lanes that load probes
 without record's admission also require `memveil doctor`
 to report every capability live-verified on that kernel.
+Doctor cannot reach a foreign guest kernel from the host;
+there the shipped qualification stands in, because the
+guest verifies the identity it was qualified on and any
+drift of the objects from its bindings is refused.
 
 A different guest release with no holding shipped profile
 fails closed. `MEMVEIL_VM_REQUIRE_SHIPPED=1` refuses minted

@@ -182,6 +182,20 @@ def test_foreign_release_uses_shipped_claim_and_mints_saturation(tmp_path):
     assert gate_kernel.shipped_identity(gate) == ident
 
 
+@needs_build
+def test_foreign_release_refuses_object_drift(tmp_path):
+    root = kernel_tree(tmp_path)
+    ident, fmt = gate_kernel.measure_identity(REL, str(root))
+    gate, _ = gate_kernel.emitter().gate_docs(ident, fmt, "linux-shipped")
+    gate["status"] = "validated"
+    profiles = _profiles(tmp_path, {"linux-shipped.json": gate})
+    with pytest.raises(gate_kernel.GateKernelError,
+                       match="drift: object, lc_object, cp_object"):
+        gate_kernel.select(REL, str(tmp_path / "absent"), tmp_path / "out",
+                           objects=objects(tmp_path), profiles=profiles,
+                           host_release="9.9.1-host")
+
+
 def test_foreign_release_without_shipped_profile_fails_closed(tmp_path):
     with pytest.raises(gate_kernel.GateKernelError,
                        match="guest kernel 9.9.1-other"):
@@ -221,6 +235,15 @@ def test_shipped_34_profile_regenerates_from_its_own_bindings():
     gate, _ = gate_kernel.emitter().gate_docs(ident, fmt, shipped["profile_id"])
     gate["status"] = shipped["status"]
     assert gate == shipped
+
+
+def test_doctor_doc_refuses_error_exit():
+    good = '{"capabilities": []}'
+    for code in (0, 3):
+        proc = subprocess.CompletedProcess([], code, good, "")
+        assert gate_kernel.doctor_doc(proc) == {"capabilities": []}
+    with pytest.raises(gate_kernel.GateKernelError, match="exit 2"):
+        gate_kernel.doctor_doc(subprocess.CompletedProcess([], 2, good, "x"))
 
 
 def test_live_gaps_require_available_and_live_verified():
