@@ -85,7 +85,13 @@ test-only oracle kernel modules
 (`tests/kernel/memveil_dma_oracle.c`,
 `tests/kernel/memveil_region_oracle.c`, and
 `tests/kernel/Makefile`, GPL-2.0-only); texts in
-`LICENSES/`. Every source file carries an SPDX header.
+`LICENSES/`. Every first-party source file carries an
+SPDX header. The BPF build also vendors 13 UAPI headers
+under `bpf/include/uapi/` (byte-exact copies from
+linux-libc-dev 7.0.0-38.38, GPL-2.0 WITH
+Linux-syscall-note; see `bpf/include/uapi/README`),
+whose license text is staged as `LICENSES/GPL-2.0.txt`;
+the vendored `asm/types.h` carries no SPDX line.
 Redistributed third-party components, with their staged
 license texts, are listed in `THIRD-PARTY-NOTICES.md`. The
 owner bundle stages all of these plus the pinned
