@@ -251,6 +251,24 @@ def test_built_objects_contain_no_checkout_path():
         assert root not in data, name
 
 
+@needs_build
+def test_built_objects_match_shipped_bindings():
+    # A fresh build reproduces the shipped bindings byte for byte.
+    doc = json.loads(
+        (REPO / "profiles" / "linux-x86_64-7.0.0-34-generic.json"
+         ).read_text())
+    note = dict(part.split("=", 1)
+                for part in doc["identity"]["source"]["note"].split())
+    objs = (("object", gate_kernel.PROD_OBJ),
+            ("lc_object", gate_kernel.LC_OBJ),
+            ("cp_object", gate_kernel.CP_OBJ))
+    for key, path in objs:
+        want = note[key]
+        assert want.startswith("sha256:")
+        got = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+        assert got == want, key
+
+
 def test_doctor_doc_refuses_error_exit():
     good = '{"capabilities": []}'
     for code in (0, 3):

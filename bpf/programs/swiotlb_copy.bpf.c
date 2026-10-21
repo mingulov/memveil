@@ -21,8 +21,8 @@
  * Each copy is recorded once: entry claims its frame, armed exit records unclaimed calls.
  * Loss stays exact: misses(mv_bounce) + deferred - recovered.
  *
- * Build: clang --target=bpf -O2 -g -D__BPF__ -I bpf/include
- *   -I <libbpf-1.7.0>/src -I /usr/include/x86_64-linux-gnu
+ * Build: clang --target=bpf -O2 -g -D__BPF__ -nostdinc -isystem <clang-resource>/include
+ *   -I bpf/include -I <libbpf-1.7.0>/src -I bpf/include/uapi
  */
 #include <linux/bpf.h>
 #include <linux/types.h>

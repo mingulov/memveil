@@ -19,8 +19,8 @@
  *
  * dev_addr and dma_mask are never read: no schema consumer.
  *
- * Build: clang --target=bpf -O2 -g -D__BPF__ -I bpf/include
- *   -I <libbpf-1.7.0>/src -I /usr/include/x86_64-linux-gnu
+ * Build: clang --target=bpf -O2 -g -D__BPF__ -nostdinc -isystem <clang-resource>/include
+ *   -I bpf/include -I <libbpf-1.7.0>/src -I bpf/include/uapi
  * The saturation test build overrides -DMV_RING_BYTES=4096;
  * that object is admissible only under the saturation
  * expectation, never under the production profile.

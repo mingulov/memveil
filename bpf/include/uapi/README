@@ -1,0 +1,26 @@
+# Vendored UAPI headers for the BPF build
+
+The BPF objects compile with `-nostdinc`, so every header outside
+clang's own resource directory is vendored here. These 13 files are
+byte-exact copies from the installed `linux-libc-dev` package; do not
+edit them. `asm/` holds the x86-64 arch headers (the build targets
+x86-64 only); `linux/` and `asm-generic/` keep their include paths.
+
+Source package: linux-libc-dev:amd64
+Source version: 7.0.0-38.38
+License: GPL-2.0 WITH Linux-syscall-note (see the SPDX line in each file)
+
+sha256:
+4152b3c5d095f5cf0adf5cc13ee0670e737eb7c4efef5fa08e9d1eb87e68ed78  linux/types.h
+b75746f43d7f29c8ca5bd3abc2242e9f777dd5dc0ef4abc7d568a1e1fc63361e  linux/bpf.h
+7475540d7fb41f7da5987d78532403d47ee493aba277694df6fa9025b9a767aa  linux/bpf_common.h
+bc68636a383418f235d3457e4b21cf27cefc7c7f3edea4c1f6706f1018db196f  linux/posix_types.h
+8de0ac8eae3695cbf769f27069f44dd622f9bb4ba2ca8e35e4af8c2a14f0bf5f  linux/stddef.h
+09b4477d655ddd2c5657e83a0761700d6706f012c7365f310a6b0a6696936a10  asm-generic/types.h
+eb8b891e775ebb50af0353fdcbc625854fd98780399b3a57a404d36af6c29749  asm-generic/int-ll64.h
+3a8e58cc67210c5a2b3bf24c84a96328e974dfe94206c74e5478d3142c991cf7  asm-generic/bitsperlong.h
+f9b2bcd020a7041ca71acdc66ed04113d37d4141eba74a26f9a9fd81286c14fe  asm-generic/posix_types.h
+b6bdcd528bce555b2ecb58e8a1624e3e13e09312c31318023c4e86b957e2b01f  asm/types.h
+8ef5efeb3f25ae47ce03ba892f5caf77631b1257715fc12de72c21e61db17e43  asm/bitsperlong.h
+983090c7e5e7eaff27114ec216889a8ad26e40ad8fbb78b8ae6c09391dc61543  asm/posix_types.h
+5cdabc01dac0a3e9731ac16353210a615ca44e85b6ec9eafd2e79206e0b26c76  asm/posix_types_64.h

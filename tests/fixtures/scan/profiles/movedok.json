@@ -8,7 +8,7 @@
     "source": {
       "origin": "test",
       "revision": "7.0.0-test",
-      "note": "config=sha256:a5af36b05630b51bb596bc68f955ab97bb8802e857cd2fc1de05c0628e398fbb config_src=gz btf=sha256:785b0751fc2c53dc14a4ce3d800e69ef9ce1009eb327ccf458afe09c242c26c9 format=sha256:c3915393aef78f85f2dbe62ae689b6af3be438878466a688236a18e00d421548 object=sha256:ff9109de43742081aca7dd5b3f465a05fbe41969ffacfd6592089e6430aded43 image=sha256:11a663ae36f0cdbecf94b8b7319503bbd0fffc2c3ba02c01cf81600d423dd251 image_bid=0102030405060708090a0b0c0d0e0f1011121314 ring_bytes=8388608"
+      "note": "config=sha256:a5af36b05630b51bb596bc68f955ab97bb8802e857cd2fc1de05c0628e398fbb config_src=gz btf=sha256:785b0751fc2c53dc14a4ce3d800e69ef9ce1009eb327ccf458afe09c242c26c9 format=sha256:c3915393aef78f85f2dbe62ae689b6af3be438878466a688236a18e00d421548 object=sha256:da3eb1c12057b294ded5e27cb13ee32ff1d40e20ff312fa1431c9fb537ce7df4 image=sha256:11a663ae36f0cdbecf94b8b7319503bbd0fffc2c3ba02c01cf81600d423dd251 image_bid=0102030405060708090a0b0c0d0e0f1011121314 ring_bytes=8388608"
     },
     "note": "Scan-fixture identity; never ship."
   },

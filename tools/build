@@ -353,50 +353,68 @@ build_bpf() {
     # Already fetched before the seal; this re-verifies the
     # cache read-only before compiling against it.
     fetch_libbpf_src || return 1
-    # x86-64-only floor (toolchain.lock.json platform_floor).
-    ARCH_INC="/usr/include/x86_64-linux-gnu"
-    if [ ! -f "$ARCH_INC/asm/types.h" ]; then
-        echo "build: missing $ARCH_INC/asm/types.h" >&2
+    # Hermetic UAPI (x86-64-only floor): the BPF build reads
+    # no host headers, only vendored bytes plus clang's own.
+    UAPI_INC="$ROOT/bpf/include/uapi"
+    for h in linux/bpf.h linux/bpf_common.h linux/posix_types.h \
+             linux/stddef.h linux/types.h asm-generic/bitsperlong.h \
+             asm-generic/int-ll64.h asm-generic/posix_types.h \
+             asm-generic/types.h asm/bitsperlong.h \
+             asm/posix_types.h asm/posix_types_64.h asm/types.h; do
+        if [ ! -f "$UAPI_INC/$h" ]; then
+            echo "build: missing vendored UAPI header $h" >&2
+            return 1
+        fi
+    done
+    CLANG_RES="$(clang -print-resource-dir)/include"
+    if [ ! -d "$CLANG_RES" ]; then
+        echo "build: missing clang resource include dir" >&2
         return 1
     fi
     LIBBPF_INC="$ROOT/build/deps/include"
     mkdir -p "$ROOT/build/bpf" || return 1
     log clang --target=bpf production object
     clang --target=bpf -O2 -g -Wall -Wextra -Werror -D__BPF__ \
+        -nostdinc -isystem "$CLANG_RES" \
         -ffile-prefix-map="$ROOT"=. \
-        -I bpf/include -I "$LIBBPF_INC" -I "$ARCH_INC" \
+        -I bpf/include -I "$LIBBPF_INC" -I "$UAPI_INC" \
         -c bpf/programs/swiotlb_attempt.bpf.c \
         -o build/bpf/swiotlb_attempt.bpf.o || return 1
     log clang --target=bpf saturation test object
     clang --target=bpf -O2 -g -Wall -Wextra -Werror -D__BPF__ \
+        -nostdinc -isystem "$CLANG_RES" \
         -ffile-prefix-map="$ROOT"=. \
         -DMV_RING_BYTES=4096 \
-        -I bpf/include -I "$LIBBPF_INC" -I "$ARCH_INC" \
+        -I bpf/include -I "$LIBBPF_INC" -I "$UAPI_INC" \
         -c bpf/programs/swiotlb_attempt.bpf.c \
         -o build/bpf/swiotlb_attempt-test.bpf.o || return 1
     log clang --target=bpf lifecycle object
     clang --target=bpf -O2 -g -Wall -Wextra -Werror -D__BPF__ \
+        -nostdinc -isystem "$CLANG_RES" \
         -ffile-prefix-map="$ROOT"=. \
-        -I bpf/include -I "$LIBBPF_INC" -I "$ARCH_INC" \
+        -I bpf/include -I "$LIBBPF_INC" -I "$UAPI_INC" \
         -c bpf/programs/swiotlb_lifecycle.bpf.c \
         -o build/bpf/swiotlb_lifecycle.bpf.o || return 1
     log clang --target=bpf copy object
     clang --target=bpf -O2 -g -Wall -Wextra -Werror -D__BPF__ \
+        -nostdinc -isystem "$CLANG_RES" \
         -ffile-prefix-map="$ROOT"=. \
-        -I bpf/include -I "$LIBBPF_INC" -I "$ARCH_INC" \
+        -I bpf/include -I "$LIBBPF_INC" -I "$UAPI_INC" \
         -c bpf/programs/swiotlb_copy.bpf.c \
         -o build/bpf/swiotlb_copy.bpf.o || return 1
     log clang --target=bpf saturation lifecycle/copy test objects
     clang --target=bpf -O2 -g -Wall -Wextra -Werror -D__BPF__ \
+        -nostdinc -isystem "$CLANG_RES" \
         -ffile-prefix-map="$ROOT"=. \
         -DMV_RING_BYTES=4096 \
-        -I bpf/include -I "$LIBBPF_INC" -I "$ARCH_INC" \
+        -I bpf/include -I "$LIBBPF_INC" -I "$UAPI_INC" \
         -c bpf/programs/swiotlb_lifecycle.bpf.c \
         -o build/bpf/swiotlb_lifecycle-test.bpf.o || return 1
     clang --target=bpf -O2 -g -Wall -Wextra -Werror -D__BPF__ \
+        -nostdinc -isystem "$CLANG_RES" \
         -ffile-prefix-map="$ROOT"=. \
         -DMV_RING_BYTES=4096 \
-        -I bpf/include -I "$LIBBPF_INC" -I "$ARCH_INC" \
+        -I bpf/include -I "$LIBBPF_INC" -I "$UAPI_INC" \
         -c bpf/programs/swiotlb_copy.bpf.c \
         -o build/bpf/swiotlb_copy-test.bpf.o || return 1
     sha256sum build/bpf/swiotlb_attempt.bpf.o \
