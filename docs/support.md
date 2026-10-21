@@ -144,7 +144,7 @@ details live in `permissions.md`; surprises go to
 
 ## Resource defaults
 
-- `--duration` 60 s; `--max-events-bytes` 256 MiB, the
+- `--duration` 60 s; `--max-events-bytes` 1 GiB, the
   replay default, so a default capture always reports (allowed
   128 KiB..4 GiB, minus a 64 KiB closing reserve); at most
   4,194,304 attempt records; ring buffers of 8 MiB for
@@ -163,7 +163,7 @@ details live in `permissions.md`; surprises go to
   overrides); see
   [lifecycle hooks](lifecycle-hooks.md#capability-requested-selection).
 - Report caps: 64 KiB per record, 16 MiB session file,
-  256 MiB events total by default, 16 MiB rendered output,
+  1 GiB events total by default, 16 MiB rendered output,
   JSON depth 64, and 4,194,304 tracked identities. Only the
   events cap is raisable (up to 4 GiB): a capture recorded
   with a larger `--max-events-bytes` replays with the same

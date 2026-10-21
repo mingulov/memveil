@@ -90,7 +90,7 @@ def _svc_dirabsent(path: String) -> Bool:
 def test_service_options_defaults() raises:
     var opts = RecordOptions()
     assert_equal(opts.duration_s, UInt64(60))
-    assert_equal(opts.max_events_bytes, 268435456)
+    assert_equal(opts.max_events_bytes, 1073741824)
     assert_equal(opts.max_events_bytes, REPLAY_MAX_EVENTS_BYTES)
     assert_equal(opts.output, String(""))
     assert_equal(opts.object, String(""))

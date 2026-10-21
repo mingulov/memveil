@@ -679,7 +679,7 @@ PYEOF
     # stays flat no matter how large events.ndjson is. Both captures
     # below are generated into $TMP (never committed); RSS is the
     # child's getrusage maxrss in KiB. The 270MB capture must exit 2
-    # for exceeding the 256MiB bound while staying far below the
+    # for exceeding an explicit 256MiB bound while staying far below the
     # 945MB RSS the whole-file reader needed for the same input.
     python3 - "$TMP" "$ROOT/tests/fixtures/reader/corrupt-tail" <<'PYEOF'
 import json, os, sys
@@ -715,7 +715,7 @@ with open(tmp + '/large-cap/events.ndjson', 'wb') as f:
     for i in range(1, 164001):
         f.write(line(i))
 PYEOF
-    python3 - "$BIN" report "$TMP/sparse-cap" \
+    python3 - "$BIN" report --max-events-bytes 268435456 "$TMP/sparse-cap" \
         "$TMP/sparse" >"$TMP/measure" 2>&1 <<'PYEOF'
 import subprocess, resource, sys
 binary, args, prefix = sys.argv[1], sys.argv[2:-1], sys.argv[-1]

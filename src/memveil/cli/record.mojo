@@ -52,7 +52,7 @@ def record_usage() -> String:
         "       [--device NAME]\n"
         "\n"
         "Capture swiotlb bounce attempts into DIR. SEC defaults\n"
-        "to 60; N defaults to 268435456 (256 MiB, the replay\n"
+        "to 60; N defaults to 1073741824 (1 GiB, the replay\n"
         "default) and must lie in 131072..4294967296; a larger\n"
         "capture replays with the same --max-events-bytes.\n"
         "Without --bridge, the native bridge is discovered:\n"

@@ -20,7 +20,7 @@ BTF, opens the network, or requires privileges.
   release; compatible minor additive fields stay a documented
   future policy, never an implemented leniency.
 - Exact byte bounds: session document 16 MiB, single line
-  64 KiB including its newline, events total 256 MiB, JSON
+  64 KiB including its newline, events total 1 GiB by default, JSON
   depth 64. Over-bound input is refused before it is parsed.
 - Cross-record rules: every event matches the session id,
   sequence numbers strictly increase, timestamps land inside

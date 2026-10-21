@@ -9,7 +9,7 @@ See the [support table](support.md#capabilities-by-mode) for the shipping modes.
 ## Replay protocol and targets
 
 `./tools/test perf-replay` generates a fixed 600,000-record synthetic
-capture (214,148,895 bytes, under the default 256 MiB input cap) with
+capture (214,148,895 bytes, under the default 1 GiB input cap) with
 independently known totals. It measures the built `report` verb and verifies
 prefix scaling and a paced FIFO stream. Targets are at most 60 seconds,
 at most 256 MiB userspace RSS and at least 10,000 records/second, with exact
