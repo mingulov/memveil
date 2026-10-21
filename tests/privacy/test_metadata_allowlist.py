@@ -130,7 +130,11 @@ def main():
     # through three checked relocating reads, one pool
     # slot (bulk copy over a relocated pointer), plus the
     # device align mask through two checked relocating reads
-    # to replicate the hook's clamp. Any checked-read failure
+    # to replicate the hook's clamp.
+    # Copy also reads the trampoline frame pointer from its own BPF
+    # stack (one bpf_probe_read_kernel of a local), used only as a key
+    # in a kernel-private claim map and never emitted.
+    # Any checked-read failure
     # degrades to unknown-with-reason. Transient kernel reads
     # never reach a record: emitted bytes are sizes,
     # directions, and outcome flags only. A new probe file, or
@@ -139,7 +143,7 @@ def main():
     # bpf_core_read) call sites.
     read_sites = {
         "swiotlb_attempt.bpf.c": (4, 0, 0),
-        "swiotlb_copy.bpf.c": (1, 0, 5),
+        "swiotlb_copy.bpf.c": (2, 0, 5),
         "swiotlb_lifecycle.bpf.c": (0, 0, 0),
     }
     check("bpf-files-frozen",
