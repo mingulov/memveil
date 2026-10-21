@@ -1955,9 +1955,10 @@ struct Collector:
         if m.detail_error != String(""):
             self.attempt_missed = m.attempt
             self.attempt_known = True
-            self.note_unknown(
-                String("copy detail unreadable: ") + m.detail_error
-            )
+            var label = String("lifecycle detail unreadable: ")
+            if self.cfg.has_copy:
+                label = String("copy detail unreadable: ")
+            self.note_unknown(label + m.detail_error)
             return
         self.attempt_missed = m.attempt
         self.attempt_known = True

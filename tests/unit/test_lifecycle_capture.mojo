@@ -3171,6 +3171,65 @@ def test_count_shape_flip_zero_counters_makes_unknown() raises:
     )
 
 
+def test_lifecycle_only_detail_failure_names_lifecycle_channel() raises:
+    # A lifecycle-only detail failure names its own channel.
+    var c = _one_lc_run(
+        _detail_failed(
+            UInt64(3), String("ch1 lifecycle program count"))
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "lifecycle detail unreadable: "
+                "ch1 lifecycle program count"
+            ),
+        )
+    )
+    assert_true(
+        not _contains(c.session, String("copy detail unreadable"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"detail":{"status":"partial",'
+                '"loss_count":null,'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"partial",'
+                '"loss_count":"3",'
+            ),
+        )
+    )
+
+
+def test_error_close_lifecycle_only_detail_failure_names_channel() raises:
+    var c = _error_lc_run(
+        _detail_failed(
+            UInt64(3), String("ch1 lifecycle program count"))
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "lifecycle detail unreadable: "
+                "ch1 lifecycle program count"
+            ),
+        )
+    )
+    assert_true(
+        not _contains(c.session, String("copy detail unreadable"))
+    )
+
+
 def test_error_close_count_shape_flip_zero_counters() raises:
     var c = _error_attempt_run(
         MissOut(True, UInt64(0), String("")),
