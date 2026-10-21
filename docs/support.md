@@ -144,11 +144,12 @@ details live in `permissions.md`; surprises go to
 
 ## Resource defaults
 
-- `--duration` 60 s; `--max-events-bytes` 1 GiB (allowed
+- `--duration` 60 s; `--max-events-bytes` 256 MiB, the
+  replay default, so a default capture always reports (allowed
   128 KiB..4 GiB, minus a 64 KiB closing reserve); at most
-  4,194,304 attempt records; ring buffer 8 MiB per enabled
-  channel (24 MiB with attempt, lifecycle, and copy
-  channels); the bridge and BPF objects are discovered
+  4,194,304 attempt records; ring buffers of 8 MiB for
+  attempt and 32 MiB each for lifecycle and copy (72 MiB
+  with all three channels); the bridge and BPF objects are discovered
   (explicit `--bridge`/`--object` win verbatim;
   `LMB_NATIVE_LIB` is honored only when unprivileged;
   then the executable-relative bundle path, then the
@@ -164,9 +165,9 @@ details live in `permissions.md`; surprises go to
 - Report caps: 64 KiB per record, 16 MiB session file,
   256 MiB events total by default, 16 MiB rendered output,
   JSON depth 64, and 4,194,304 tracked identities. Only the
-  events cap is raisable (up to 4 GiB, e.g. with
-  `--max-events-bytes 1073741824` on both replay verbs for a
-  capture recorded above the replay default); the record and
+  events cap is raisable (up to 4 GiB): a capture recorded
+  with a larger `--max-events-bytes` replays with the same
+  value on both replay verbs; the record and
   session caps accept their default or lower (a higher value
   is refused with exit 2). `--allow-partial` drops only a
   clean truncated unterminated tail and reports the loss

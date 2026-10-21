@@ -363,7 +363,7 @@ struct CollectorConfig(Copyable, Movable):
 
     def __init__(out self):
         self.duration_s = UInt64(60)
-        self.max_events_bytes = 1073741824
+        self.max_events_bytes = 268435456
         self.output = String("")
         self.profile_id = String("")
         self.grade = String("")

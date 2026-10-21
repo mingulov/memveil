@@ -35,8 +35,8 @@
     "bridge": "sha256:f7e94e6379e43373ca0cd76b641307df0d7e801df60dd5dd4306e86400d00a8a",
     "objects": {
       "attempt": "sha256:f7e94e6379e43373ca0cd76b641307df0d7e801df60dd5dd4306e86400d00a8a",
-      "lifecycle": "sha256:1b4c80e344c1f615b3a6e3b5a7bc6d5d9dc9fc5d38b69912b40b351f70cc610b",
-      "copy": "sha256:5322bcf9fb243eb023c2b4fee8d89b523be818c4f757c4984a1410bfe118fcde"
+      "lifecycle": "sha256:77034c5a968950b8298a7e63a8ada13a41bdffd7e7f92aaa0f804056927e6e53",
+      "copy": "sha256:4cb494d6e604222e7f0d6dbca82ac435ab2c00662143f22d986ae67b1bb00bf0"
     }
   },
   "workload": {

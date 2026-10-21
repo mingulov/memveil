@@ -9,7 +9,7 @@ silently evicted, and no refusal corrupts unrelated state.
 
 | Store | Budget | Overflow behavior |
 |---|---|---|
-| Ring reservation (live) | 8 MiB default | submit fails count in `submit_fail`; detail degrades, counters survive |
+| Ring reservation (live) | 8 MiB attempt, 32 MiB lifecycle and copy | submit fails count in `submit_fail`; detail degrades, counters survive |
 | Native staging (live) | bridge bound | malformed/dropped counts; see the bridge contract |
 | Probe recursion (live) | kernel | runs the kernel skips while a probe already runs on that CPU count in `recursion_missed` (each program's `recursion_misses`); detail degrades; unreadable makes detail loss unknown |
 | Pending operations | 65,536 | `pending table exhausted`; event unpaired |

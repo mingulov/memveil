@@ -122,7 +122,7 @@ def test_btf_lifecycle_ring() raises:
         Span(raw), String("mv_lifecycle"), String("lifecycle"))
     assert_true(v.ok)
     assert_equal(v.message, String(""))
-    assert_equal(v.ring_bytes, 8388608)
+    assert_equal(v.ring_bytes, 33554432)
 
 
 def test_btf_copy_ring() raises:
@@ -131,7 +131,7 @@ def test_btf_copy_ring() raises:
         Span(raw), String("mv_copies"), String("copies"))
     assert_true(v.ok)
     assert_equal(v.message, String(""))
-    assert_equal(v.ring_bytes, 8388608)
+    assert_equal(v.ring_bytes, 33554432)
 
 
 def test_btf_copy_nonpow2() raises:

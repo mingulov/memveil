@@ -31,8 +31,9 @@
 #include "memveil_events.h"
 #include "mv_fentry_types.h"
 
+/* 32 MiB holds the measured dd burst (196,608 records, ~11 MiB). */
 #ifndef MV_RING_BYTES
-#define MV_RING_BYTES 8388608u
+#define MV_RING_BYTES 33554432u
 #endif
 
 struct {

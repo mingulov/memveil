@@ -43,7 +43,7 @@ Patches (verified structurally after writing):
             renamed to kprobe/ (tracing admission refused).
   cp-wrongsec: copy object with fentry/swiotlb_bounce renamed
             to kprobe/ (program placement refused).
-  cp-nonpow2 : mv_copies max_entries 8388608 -> 1000
+  cp-nonpow2 : mv_copies max_entries 33554432 -> 1000
             (ring geometry refused).
 """
 import struct
@@ -523,7 +523,7 @@ def main() -> int:
     cp_nonpow2 = bytearray(cp_base)
     cp_ring_off = _btf_array_nelems_off(
         cp_nonpow2, b"mv_copies", b"max_entries")
-    assert struct.unpack_from("<I", cp_nonpow2, cp_ring_off)[0] == 8388608
+    assert struct.unpack_from("<I", cp_nonpow2, cp_ring_off)[0] == 33554432
     struct.pack_into("<I", cp_nonpow2, cp_ring_off, 1000)
     (OUT / "cp-nonpow2.o").write_bytes(bytes(cp_nonpow2))
 

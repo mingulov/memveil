@@ -653,8 +653,8 @@ def test_scan_explicit_notext() raises:
 
 
 comptime _CAPS3 = "attempt-trace,mapping-lifecycle,copy-actual"
-comptime _LC_SHA = "1b4c80e344c1f615b3a6e3b5a7bc6d5d9dc9fc5d38b69912b40b351f70cc610b"
-comptime _CP_SHA = "5322bcf9fb243eb023c2b4fee8d89b523be818c4f757c4984a1410bfe118fcde"
+comptime _LC_SHA = "77034c5a968950b8298a7e63a8ada13a41bdffd7e7f92aaa0f804056927e6e53"
+comptime _CP_SHA = "4cb494d6e604222e7f0d6dbca82ac435ab2c00662143f22d986ae67b1bb00bf0"
 
 
 def _decide_lc(
@@ -702,8 +702,8 @@ def test_scan_valid_lc_record() raises:
     assert_true(d.cp.present)
     assert_equal(d.lc.object_sha, String(_LC_SHA))
     assert_equal(d.cp.object_sha, String(_CP_SHA))
-    assert_equal(d.lc.ring_bytes, 8388608)
-    assert_equal(d.cp.ring_bytes, 8388608)
+    assert_equal(d.lc.ring_bytes, 33554432)
+    assert_equal(d.cp.ring_bytes, 33554432)
     assert_true(len(d.lc.elf) > 0)
     assert_true(len(d.cp.elf) > 0)
 

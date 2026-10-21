@@ -27,6 +27,9 @@ from memveil.capture.collector import (
     WriterSource,
 )
 from memveil.capture.kernel import LmbKernel
+from memveil.capture.reader import (
+    DEFAULT_MAX_EVENTS_BYTES as REPLAY_MAX_EVENTS_BYTES,
+)
 from memveil.model.session import EvidenceItem
 from memveil.model.validate import check_opaque_id
 from memveil.platform.artifact_files import (
@@ -92,7 +95,8 @@ from memveil.platform.runtime import (
 from memveil.platform.signal import LiveSignalSource
 
 comptime DEFAULT_DURATION_S = UInt64(60)
-comptime DEFAULT_MAX_EVENTS_BYTES = 1073741824
+# A default capture always replays under the default report cap.
+comptime DEFAULT_MAX_EVENTS_BYTES = REPLAY_MAX_EVENTS_BYTES
 comptime MIN_RECORD_BYTES = 131072
 comptime MAX_RECORD_BYTES = 4294967296
 comptime MAX_PROFILE_DOC_BYTES = 1048576

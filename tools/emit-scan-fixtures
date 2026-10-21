@@ -481,9 +481,9 @@ def main() -> int:
     )
     extra = {
         "lc_object": sha(ELF_LC_OK),
-        "lc_ring": "8388608",
+        "lc_ring": "33554432",
         "cp_object": sha(ELF_CP_OK),
-        "cp_ring": "8388608",
+        "cp_ring": "33554432",
     }
     lc_doc = profile_doc(
         "scan-valid-lc",

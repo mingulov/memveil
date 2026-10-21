@@ -26,6 +26,9 @@ from memveil.capture.run import (
     resolve_bridge,
     run_collector_with,
 )
+from memveil.capture.reader import (
+    DEFAULT_MAX_EVENTS_BYTES as REPLAY_MAX_EVENTS_BYTES,
+)
 from memveil.platform.evidence import KernelInfo
 from memveil.platform.profiles import Profile, load_profiles
 from memveil.platform.reader import read_host_file
@@ -87,7 +90,8 @@ def _svc_dirabsent(path: String) -> Bool:
 def test_service_options_defaults() raises:
     var opts = RecordOptions()
     assert_equal(opts.duration_s, UInt64(60))
-    assert_equal(opts.max_events_bytes, 1073741824)
+    assert_equal(opts.max_events_bytes, 268435456)
+    assert_equal(opts.max_events_bytes, REPLAY_MAX_EVENTS_BYTES)
     assert_equal(opts.output, String(""))
     assert_equal(opts.object, String(""))
     assert_equal(opts.bridge, String(""))
@@ -248,8 +252,8 @@ def test_service_extra_channels_grouped() raises:
     assert_true(d.cp.present)
     assert_true(len(d.lc.elf) > 0)
     assert_true(len(d.cp.elf) > 0)
-    assert_equal(d.lc.ring_bytes, 8388608)
-    assert_equal(d.cp.ring_bytes, 8388608)
+    assert_equal(d.lc.ring_bytes, 33554432)
+    assert_equal(d.cp.ring_bytes, 33554432)
     assert_true(d.lc.object_sha != String(""))
     assert_true(d.cp.object_sha != String(""))
 
