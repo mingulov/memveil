@@ -288,6 +288,125 @@ def test_rotate_busy_channels_round_robin() raises:
     assert_equal(ring.blocked_ms, 0)
 
 
+struct _Script(ChannelPoller):
+    """Scripted rings: per-channel result kinds, logged calls.
+
+    Each call pops the channel's next kind ("batch", "short",
+    "error"); an empty script reads as "timeout".
+    """
+
+    var script: List[List[String]]
+    var calls: List[Int]
+    var waits: List[Int]
+
+    def __init__(out self):
+        self.script = [List[String](), List[String](), List[String]()]
+        self.calls = List[Int]()
+        self.waits = List[Int]()
+
+    def poll_channel(
+        mut self, channel: Int, timeout_ms: Int, capacity: UInt32
+    ) -> PollOut:
+        self.calls.append(channel)
+        self.waits.append(timeout_ms)
+        if len(self.script[channel]) == 0:
+            return PollOut(
+                String("timeout"), List[UInt8](), UInt32(0), String("")
+            )
+        var kind = self.script[channel].pop(0)
+        return PollOut(kind, List[UInt8](), UInt32(9), String("boom"))
+
+
+def test_rotate_short_in_sweep_pins_channel() raises:
+    var ring = _Script()
+    ring.script[2].append(String("short"))
+    ring.script[2].append(String("batch"))
+    var rot = PollRotation(1, -1)
+    var out = rotate_poll(ring, rot, [0, 1, 2], 100, UInt32(4))
+    assert_equal(out.kind, String("short"))
+    assert_equal(rot.short_ch, 2)
+    # The retry polls only the pinned channel, then unpins.
+    var retry = rotate_poll(ring, rot, [0, 1, 2], 100, UInt32(9))
+    assert_equal(retry.kind, String("batch"))
+    assert_equal(ring.calls[len(ring.calls) - 1], 2)
+    assert_equal(len(ring.calls), 3)
+    assert_equal(rot.short_ch, -1)
+
+
+def test_rotate_short_in_wait_pins_channel() raises:
+    var ring = _Script()
+    var rot = PollRotation(0, -1)
+    # Sweep sees nothing; the start channel's wait yields short.
+    ring.script[0].append(String("timeout"))
+    ring.script[0].append(String("short"))
+    var out = rotate_poll(ring, rot, [0, 1, 2], 100, UInt32(4))
+    assert_equal(out.kind, String("short"))
+    assert_equal(rot.short_ch, 0)
+    assert_equal(ring.waits[len(ring.waits) - 1], 100)
+
+
+def test_rotate_errors_tagged_by_channel() raises:
+    var ring = _Script()
+    ring.script[1].append(String("error"))
+    var rot = PollRotation(0, -1)
+    var out = rotate_poll(ring, rot, [0, 1, 2], 100, UInt32(4))
+    assert_equal(out.message, String("ch1 boom"))
+    var waited = _Script()
+    waited.script[0].append(String("timeout"))
+    waited.script[0].append(String("error"))
+    var rot2 = PollRotation(0, -1)
+    var out2 = rotate_poll(waited, rot2, [0, 1, 2], 100, UInt32(4))
+    assert_equal(out2.message, String("ch0 boom"))
+
+
+def test_rotate_zero_timeout_never_waits() raises:
+    # The stop drain polls with 0: n probes, none waits.
+    var ring = _Script()
+    var rot = PollRotation(0, -1)
+    var out = rotate_poll(ring, rot, [0, 1, 2], 0, UInt32(4))
+    assert_equal(out.kind, String("timeout"))
+    assert_equal(len(ring.calls), 3)
+    for i in range(3):
+        assert_equal(ring.waits[i], 0)
+
+
+def test_rotate_idle_wait_rotates() raises:
+    var ring = _Script()
+    var rot = PollRotation(0, -1)
+    _ = rotate_poll(ring, rot, [0, 1, 2], 100, UInt32(4))
+    _ = rotate_poll(ring, rot, [0, 1, 2], 100, UInt32(4))
+    # Waits land on channel 0, then channel 1.
+    assert_equal(ring.calls[3], 0)
+    assert_equal(ring.waits[3], 100)
+    assert_equal(ring.calls[7], 1)
+    assert_equal(ring.waits[7], 100)
+
+
+def test_rotate_sparse_order() raises:
+    # Order [0, 2] with copy busy: attempt is probed every poll.
+    var ring = _Script()
+    for _ in range(4):
+        ring.script[2].append(String("batch"))
+    var rot = PollRotation(0, -1)
+    for _ in range(4):
+        var out = rotate_poll(ring, rot, [0, 2], 100, UInt32(4))
+        assert_equal(out.kind, String("batch"))
+    var probes0 = 0
+    for i in range(len(ring.calls)):
+        assert_true(ring.calls[i] != 1)
+        if ring.calls[i] == 0:
+            probes0 += 1
+    assert_equal(probes0, 4)
+
+
+def test_rotate_empty_order_errors() raises:
+    var ring = _Script()
+    var rot = PollRotation(0, -1)
+    var out = rotate_poll(ring, rot, List[Int](), 100, UInt32(4))
+    assert_equal(out.kind, String("error"))
+    assert_equal(len(ring.calls), 0)
+
+
 def test_join_op_message() raises:
     assert_equal(
         join_op_message(String(""), 0, String("boom")),
@@ -312,6 +431,13 @@ def run() raises -> Int:
     suite.test[test_rotate_empty_channel_never_stalls_backlog]()
     suite.test[test_rotate_all_empty_blocks_one_quantum]()
     suite.test[test_rotate_busy_channels_round_robin]()
+    suite.test[test_rotate_short_in_sweep_pins_channel]()
+    suite.test[test_rotate_short_in_wait_pins_channel]()
+    suite.test[test_rotate_errors_tagged_by_channel]()
+    suite.test[test_rotate_zero_timeout_never_waits]()
+    suite.test[test_rotate_idle_wait_rotates]()
+    suite.test[test_rotate_sparse_order]()
+    suite.test[test_rotate_empty_order_errors]()
     suite.test[test_join_op_message]()
     suite^.run()
     return 0

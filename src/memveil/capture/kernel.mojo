@@ -153,7 +153,8 @@ def rotate_poll[P: ChannelPoller](
     all are empty does the start channel wait timeout_ms, so
     a quiet ring never holds the wait while another ring has
     records queued. Data arriving on a non-waited channel is
-    picked up by the next call, at most one wait later.
+    picked up by the next call, at most one finite wait later.
+    An empty order is an error, never a division by zero.
     """
     if rot.short_ch >= 0:
         var ch = rot.short_ch
@@ -164,6 +165,11 @@ def rotate_poll[P: ChannelPoller](
             retry.message = _channel_tag(ch) + retry.message
         return retry^
     var n = len(order)
+    if n == 0:
+        return PollOut(
+            String("error"), List[UInt8](), UInt32(0),
+            String("no channels to poll"),
+        )
     var start = rot.next % n
     var probes = n
     if timeout_ms != 0:
@@ -747,6 +753,7 @@ struct LmbKernel(ChannelPoller, KernelSource):
     def poll_channel(
         mut self, channel: Int, timeout_ms: Int, capacity: UInt32
     ) -> PollOut:
+        """Raw one-channel poll for rotate_poll; skips the short pin."""
         if channel == 1:
             return self._ch1.poll(timeout_ms, capacity)
         if channel == 2:

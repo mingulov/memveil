@@ -1279,8 +1279,7 @@ def run_bundle(gate):
     phases["io"] = [mono_ns()]
     workload["start_ns"] = phases["io"][0]
     # Low-rate I/O: the F2-6 bar is exact low-rate comparison,
-    # not flood absorption (burst overrun under the rotating
-    # poll quantum is F2-7's sparse-channel-busy subject).
+    # not flood absorption (burst overrun is F2-7's subject).
     ping = sh(["timeout", "60", "ping", "-A", "-c", "200",
                "-q", "10.0.3.2"])
     if ping.returncode != 0:
