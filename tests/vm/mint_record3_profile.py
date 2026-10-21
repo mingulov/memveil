@@ -120,16 +120,13 @@ def btf_ring_bytes(obj_path, var_name):
         vlen = info & 0xFFFF
         body = types[pos + 12:]
         recs.append((name_off, kind, vlen, size, body))
-        if kind == 1:
+        # Trailing data per BTF kind; FUNC vlen is linkage, not members.
+        if kind in (1, KIND_VAR, 17):
             pos += 12 + 4
-        elif kind == KIND_VAR:
-            pos += 12 + 4
-        elif kind in (KIND_STRUCT, 5, 7, 10, 12):
+        elif kind in (KIND_STRUCT, 5, 15, 19):
             pos += 12 + vlen * 12
         elif kind in (6, 13):
             pos += 12 + vlen * 8
-        elif kind == 19:
-            pos += 12 + vlen * 12
         elif kind == KIND_ARRAY:
             pos += 12 + 12
         else:
