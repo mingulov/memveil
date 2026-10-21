@@ -924,3 +924,107 @@ def read_btf_func_proto(data: Span[UInt8, _], name: String) -> BtfFuncProto:
     out.message = String("")
     out.canonical = canon
     return out^
+
+
+struct BtfMember(Copyable, Movable):
+    """One BTF struct member read (offsets valid iff ok)."""
+
+    var ok: Bool
+    var message: String
+    var bit_offset: Int
+    var bit_size: Int
+
+    def __init__(out self):
+        self.ok = False
+        self.message = String("")
+        self.bit_offset = 0
+        self.bit_size = 0
+
+
+def read_btf_member(
+    data: Span[UInt8, _], struct_name: String, field_name: String
+) -> BtfMember:
+    """Find STRUCT struct_name's member field_name in a raw BTF blob.
+
+    The blob is a header-at-zero BTF image such as
+    /sys/kernel/btf/vmlinux. The member's bit offset comes
+    straight from its record; its bit size is the member
+    type's byte width times eight, resolved through
+    typedefs and modifiers (pointers are 8 bytes, integers
+    use their size field). Anything else refuses with the
+    exact cause.
+    """
+    var out = BtfMember()
+    var walk = _walk_btf(data, 0, len(data))
+    if not walk.ok:
+        out.message = walk.message.copy()
+        return out^
+    var found = -1
+    for i in range(len(walk.offsets)):
+        if walk.kinds[i] != 4:
+            continue
+        var text = String("")
+        if not walk.type_name(data, i, text):
+            out.message = String("BTF strings corrupt")
+            return out^
+        if text == struct_name:
+            if found >= 0:
+                out.message = String(t"duplicate struct {struct_name}")
+                return out^
+            found = i
+    if found < 0:
+        out.message = String(t"struct {struct_name} not found")
+        return out^
+    var base = walk.offsets[found]
+    var member_tid = -1
+    var member_off = 0
+    var member_found = False
+    for m in range(walk.vlens[found]):
+        var name_off = _u32(data, base + 12 + m * 12)
+        var text = String("")
+        if not _table_text(
+            data, walk.str_base, walk.str_end, name_off, text
+        ):
+            out.message = String("BTF strings corrupt")
+            return out^
+        if text == field_name:
+            member_tid = _u32(data, base + 12 + m * 12 + 4)
+            member_off = _u32(data, base + 12 + m * 12 + 8)
+            member_found = True
+            break
+    if not member_found:
+        out.message = String(
+            t"member {field_name} not found in {struct_name}"
+        )
+        return out^
+    var size_bytes = -1
+    var cur = member_tid
+    for _ in range(_MAX_SPELL_DEPTH):
+        if not walk.rec_valid(cur):
+            out.message = String("type id out of range")
+            return out^
+        var kind = walk.kinds[cur - 1]
+        if kind == 2:
+            size_bytes = 8
+            break
+        if kind == 1:
+            size_bytes = walk.sizes[cur - 1]
+            break
+        if (
+            kind != 8
+            and kind != 9
+            and kind != 10
+            and kind != 11
+            and kind != 18
+        ):
+            out.message = String(t"unsupported member type kind {kind}")
+            return out^
+        cur = walk.sizes[cur - 1]
+    if size_bytes < 0:
+        out.message = String("type graph too deep")
+        return out^
+    out.ok = True
+    out.message = String("")
+    out.bit_offset = member_off
+    out.bit_size = size_bytes * 8
+    return out^

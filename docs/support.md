@@ -12,7 +12,7 @@ has passed its gates.
 | --- | --- | --- |
 | Bounce attempts/requested bytes | `swiotlb_bounced` attempts on an admitted profile; attempts are not successful DMA or actual copies | Report and replay `top` reduce captured attempts/counters without adding alternative measurements |
 | Default-pool capacity/used/high-water | Readable debugfs samples at start, on a best-effort 1 s cadence (cap 4,096; missed ticks skipped), and close; unreadable reads persist as unavailable, never failed runs | Pool reducers require matching generation/scope; samples are opportunistic reads with possible gaps, so they cannot establish sustained pressure alone |
-| Allocation occupancy, copy, sync, lifetimes | Qualified on `linux-x86_64-7.0.0-34-generic` via `--capability` (with `--lc-object`/`--cp-object` as optional overrides), or per host by a machine-local `local-auto` receipt from `memveil qualify`; exact bindings refuse anything else | Offline reducers accept corresponding records; laboratory probes and scripted DMA comparisons do not qualify packaged lifecycle collection |
+| Allocation occupancy, copy, sync, lifetimes | Qualified on `linux-x86_64-7.0.0-34-generic` via `--capability` (with `--lc-object`/`--cp-object` as optional overrides), per host by a machine-local `local-auto` receipt from `memveil qualify`, or on any covered kernel through the live interface checks (see Kernel generations); exact bindings and live checks refuse anything else | Offline reducers accept corresponding records; laboratory probes and scripted DMA comparisons do not qualify packaged lifecycle collection |
 | Private/shared state and physical unions | No qualified shipping source | Offline region/baseline reducers and laboratory conversion probes; ordinary-Linux APIs do not prove confidential transitions |
 | Summary | `top --output DIR [--object PATH]` observes live under the same admission as `record`, retaining the capture while printing prefix summaries (provisional; the final answer always equals a replay of the retained capture); startup/collection refusals exit 3 | `top DIR` replays prefixes of a finished capture |
 | Joint observers/two instances | No current-candidate qualification | Historical experiments only; see [coexistence](coexistence.md) |
@@ -78,6 +78,49 @@ pressure finding is not evidence of absent pressure.
   objects resolve the same way (`<root>/lib`,
   `<root>/bpf`) before the system paths, so no
   environment setup is needed and plain `sudo` works.
+
+## Kernel generations
+
+Admission is by live interface checks (BTF signatures,
+tracepoint format, ftrace attachability), never by trusting
+the release string. One prebuilt probe set covers every row;
+no rebuild on the device.
+
+| Kernel | attempt-trace | lifecycle + copy |
+| --- | --- | --- |
+| 7.3, 7.3rc1-rc7, mainline (7.4 pre-) | full | full, both map shapes |
+| 7.0-7.2, any build (incl. `-aws`) | full | full |
+| 6.11 up to (not incl.) 7.0, any build | full | full |
+| 6.0-6.10 | full | refused, needs 6.11+ |
+| below 6.0 | refused | refused |
+
+Notes:
+
+- 7.3 changes one detail: `swiotlb_tbl_map_single`
+  takes `attrs` as a pointer (present since rc1,
+  verified through rc7, release, and current mainline).
+  The shipped probe never reads map-side `attrs`
+  (`fexit` map ignores it; `unmap` still passes it by
+  value), so the same object serves both shapes and the
+  signature check accepts either. If a future probe
+  reads map-side `attrs`, this row must be revisited.
+- Release candidates and mainline snapshots parse to
+  their triple (`7.3.0-rc2` is 7.3.0) and are admitted
+  by the same live checks. They are moving targets: a
+  newer rc that changes a shape is refused fail-closed
+  with the exact diff, never silently admitted.
+- Trying a 7.4 pre-alpha means two checks: the source
+  check above (re-fetch mainline
+  `kernel/dma/swiotlb.c` and the trace header, diff the
+  five hooks plus the tracepoint fields), then a boot
+  check (run `doctor` and `record` on the new kernel).
+  Admission without the boot check is not a support
+  claim.
+- Admission is not qualification: VM-gated `validated`
+  evidence stays on the narrow profile's kernel. Other
+  builds additionally need a machine-local `local-auto`
+  receipt from `memveil qualify` plus the independent
+  oracle comparison before results are trusted.
 
 ## Permissions
 
@@ -169,7 +212,8 @@ diagnostic.
 
 ## Unsupported (explicitly out of scope)
 
-Older kernels (< 7.0); shipping region (laboratory probes
+Older kernels (< 6.0, see the generations matrix);
+shipping region (laboratory probes
 and offline reducers do not supply this shipping capability);
 sharing transitions and
 physical unions (rendered unavailable, never inferred);

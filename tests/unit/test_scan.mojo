@@ -35,6 +35,8 @@ comptime _SKEW = "tests/fixtures/scan/skew"
 comptime _NOCONFIG = "tests/fixtures/scan/noconfig"
 comptime _DIFFCONFIG = "tests/fixtures/scan/diffconfig"
 comptime _PROFILES = "tests/fixtures/scan/profiles"
+comptime _LIVE38 = "tests/fixtures/scan/live38"
+comptime _PROFILES_LIVE = "tests/fixtures/scan/profiles-live"
 comptime _ELF_OK = "tests/fixtures/elf/ok.o"
 comptime _ELF_RING = "tests/fixtures/elf/badring.o"
 comptime _ELF_LC = "tests/fixtures/elf/lc-ok.o"
@@ -72,6 +74,66 @@ def _opts(output: String) -> RecordOptions:
     opts.bridge = String("test-bridge")
     opts.has_bridge = True
     return opts^
+
+
+def _kernel_68() -> KernelInfo:
+    return KernelInfo(
+        String("6.8.0-test"), String("x86_64"), True, String("")
+    )
+
+
+def _kernel_38() -> KernelInfo:
+    return KernelInfo(
+        String("7.0.0-38-generic"), String("x86_64"), True, String("")
+    )
+
+
+def test_scan_lc_below_611_refuses() raises:
+    var d = decide_record(
+        String(_OK),
+        _kernel_68(),
+        _profiles(),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(""),
+        String(""),
+        String("attempt-trace,mapping-lifecycle"),
+        String(""),
+        String(""),
+    )
+    assert_true(not d.ok)
+    assert_equal(
+        d.refusal,
+        String(
+            "capability mapping-lifecycle needs kernel 6.11+"
+            " (this kernel: 6.8.0-test)"
+        ),
+    )
+
+
+def test_scan_cp_below_611_refuses() raises:
+    var d = decide_record(
+        String(_OK),
+        _kernel_68(),
+        _profiles(),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(""),
+        String(""),
+        String("attempt-trace,copy-actual"),
+        String(""),
+        String(""),
+    )
+    assert_true(not d.ok)
+    assert_equal(
+        d.refusal,
+        String(
+            "capability copy-actual needs kernel 6.11+"
+            " (this kernel: 6.8.0-test)"
+        ),
+    )
 
 
 def test_scan_validated_wins() raises:
@@ -312,6 +374,58 @@ def test_scan_explicit_candidate() raises:
     )
 
 
+def test_scan_live38_lc_candidate() raises:
+    var d = decide_record(
+        String(_LIVE38),
+        _kernel_38(),
+        load_profiles(String(_PROFILES_LIVE)),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(""),
+        String("attempt-trace,mapping-lifecycle"),
+        String(""),
+        String(""),
+    )
+    assert_true(d.ok)
+    assert_equal(d.kind, String("candidate"))
+    assert_equal(
+        d.reason,
+        String(
+            "candidate scan-live-ref: live interfaces verified"
+            " (profile unvalidated)"
+        ),
+    )
+    assert_equal(d.measured_btf.state, String("value"))
+    assert_equal(d.measured_btf.value.byte_length(), 64)
+
+
+def test_scan_live_explicit_candidate() raises:
+    var d = decide_record(
+        String(_LIVE38),
+        _kernel_38(),
+        load_profiles(String(_PROFILES_LIVE)),
+        String(_PROFILES_LIVE) + String("/live-ref.json"),
+        True,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(""),
+        String("attempt-trace,mapping-lifecycle"),
+        String(""),
+        String(""),
+    )
+    assert_true(d.ok)
+    assert_equal(d.kind, String("candidate"))
+    assert_equal(
+        d.reason,
+        String(
+            "candidate scan-live-ref: live interfaces verified"
+            " (profile unvalidated)"
+        ),
+    )
+
+
 def _path_readable(path: String) -> Bool:
     """Independent fopen-based readability oracle.
 
@@ -450,6 +564,10 @@ def test_scan_no_coverage() raises:
 
 
 def test_scan_explicit_unbound_reference() raises:
+    # A reference doc with an unparseable note takes the
+    # live path; the ok root's format probes clean and the
+    # missing id file is best-effort, so explicit mode
+    # admits as a candidate.
     var d = decide_record(
         String(_OK),
         _kernel(),
@@ -464,9 +582,13 @@ def test_scan_explicit_unbound_reference() raises:
         String(""),
     )
     assert_true(d.ok)
-    assert_equal(d.kind, String("partial"))
+    assert_equal(d.kind, String("candidate"))
     assert_equal(
-        d.reason, String("explicit scan-unbound (reference, no bindings)")
+        d.reason,
+        String(
+            "candidate scan-unbound: live interfaces verified"
+            " (profile unvalidated)"
+        ),
     )
 
 
@@ -804,7 +926,12 @@ def test_scan_lc_badsig_refuses() raises:
 
 
 def test_scan_lc_unknown_kernel_refuses() raises:
-    """An unparseable release covers nothing, even bound docs."""
+    """An unparseable release refuses at the floor gate.
+
+    The per-capability floor precedes cover checks, so a
+    release that cannot be assessed refuses as unknown
+    instead of reaching profile binding.
+    """
     var kernel = KernelInfo(
         String("bogus"), String("x86_64"), True, String("")
     )
@@ -824,7 +951,8 @@ def test_scan_lc_unknown_kernel_refuses() raises:
     )
     assert_true(not d.ok)
     assert_equal(
-        d.refusal, String("profile does not cover this kernel")
+        d.refusal,
+        String("release bogus is unparseable; floor unknown"),
     )
 
 
@@ -1126,6 +1254,8 @@ def run() raises -> Int:
     suite.test[test_scan_lc_extra_refuses]()
     suite.test[test_scan_lc_badsig_refuses]()
     suite.test[test_scan_lc_unknown_kernel_refuses]()
+    suite.test[test_scan_lc_below_611_refuses]()
+    suite.test[test_scan_cp_below_611_refuses]()
     suite.test[test_scan_lc_skew_root_refuses]()
     suite.test[test_scan_validated_wins]()
     suite.test[test_scan_bound_measurements]()
@@ -1138,6 +1268,8 @@ def run() raises -> Int:
     suite.test[test_scan_diffconfig_partial]()
     suite.test[test_scan_skew_partial]()
     suite.test[test_scan_explicit_candidate]()
+    suite.test[test_scan_live38_lc_candidate]()
+    suite.test[test_scan_live_explicit_candidate]()
     suite.test[test_scan_no_object_refuses]()
     suite.test[test_scan_explicit_mismatch_refuses]()
     suite.test[test_scan_saturation_mechanism]()

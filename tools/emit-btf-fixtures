@@ -8,7 +8,7 @@ consume them as raw vmlinux-style blobs (header at offset 0).
 
 Outputs: tests/fixtures/btf/*.bin (funcproto, dupfunc, cycle, anon,
   unnamed, voidptr, array, badref, fnptr, chain31, chain32, kflag,
-  intsizes, intsize-bad).
+  intsizes, intsize-bad, swiotlb-live, swiotlb-live-73).
 
   funcproto : FUNC test_fn -> PROTO (int, [dev: PTR STRUCT device,
                 size: TYPEDEF size_t]); canonical
@@ -48,6 +48,12 @@ Outputs: tests/fixtures/btf/*.bin (funcproto, dupfunc, cycle, anon,
   intsize-bad: FUNC badret returning "long" with size 4 and
                 FUNC badpar taking "long" with size 4; both
                 refused by the LP64 size check.
+  swiotlb-live : the five swiotlb FUNCs with 7.0-generation
+                canonical spellings plus the four structs the
+                copy probe reads (real 7.0.0-38 member
+                offsets); feeds live-verification tests.
+  swiotlb-live-73: swiotlb-live with the 7.3 map shape
+                (attrs as a pointer).
 """
 import struct
 import sys
@@ -57,6 +63,7 @@ ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "tests" / "fixtures" / "btf"
 
 K_INT, K_PTR, K_ARRAY, K_STRUCT = 1, 2, 3, 4
+K_ENUM = 6
 K_TYPEDEF, K_VOLATILE, K_CONST = 8, 9, 10
 K_FUNC, K_PROTO = 12, 13
 K_ENUM64 = 19
@@ -285,6 +292,99 @@ def intsize_bad():
     return b.build()
 
 
+def _swiotlb_types(b):
+    """Shared swiotlb types; returns ids the live blobs reuse.
+
+    Struct members carry the real 7.0.0-38-generic BTF
+    (bit_offset, bit_size) pairs, verified against
+    /sys/kernel/btf/vmlinux with bpftool plus an
+    independent BTF walk: the copy probe reads exactly
+    these members through CO-RE.
+    """
+    t_uint = b.t(b.s("unsigned int"), K_INT, 0, 4, int_data(32, 0))
+    t_ulong = b.t(b.s("unsigned long"), K_INT, 0, 8, int_data(64, 0))
+    t_phys = b.t(b.s("phys_addr_t"), K_TYPEDEF, 0, t_ulong)
+    t_size = b.t(b.s("size_t"), K_TYPEDEF, 0, t_ulong)
+    t_dir = b.t(b.s("dma_data_direction"), K_ENUM, 0, 4)
+    mem = struct.pack("<III", b.s("min_align_mask"), t_uint, 32)
+    t_parms = b.t(b.s("device_dma_parameters"), K_STRUCT, 1, 16, mem)
+    t_parms_ptr = b.t(0, K_PTR, 0, t_parms)
+    mem = struct.pack("<III", b.s("dma_parms"), t_parms_ptr, 5056)
+    t_dev = b.t(b.s("device"), K_STRUCT, 1, 808, mem)
+    mem = struct.pack("<III", b.s("orig_addr"), t_phys, 0)
+    mem += struct.pack("<III", b.s("alloc_size"), t_size, 64)
+    t_slot = b.t(b.s("io_tlb_slot"), K_STRUCT, 2, 24, mem)
+    t_slot_ptr = b.t(0, K_PTR, 0, t_slot)
+    mem = struct.pack("<III", b.s("start"), t_phys, 0)
+    mem += struct.pack("<III", b.s("nslabs"), t_ulong, 192)
+    mem += struct.pack("<III", b.s("slots"), t_slot_ptr, 448)
+    t_pool = b.t(b.s("io_tlb_pool"), K_STRUCT, 3, 104, mem)
+    return {
+        "uint": t_uint, "ulong": t_ulong, "phys": t_phys,
+        "size": t_size, "dir": t_dir, "dev": t_dev,
+        "pool": t_pool, "slot": t_slot,
+    }
+
+
+def _swiotlb_funcs(b, ids, map_attrs_ptr):
+    t_dev_ptr = b.t(0, K_PTR, 0, ids["dev"])
+    t_pool_ptr = b.t(0, K_PTR, 0, ids["pool"])
+    params = struct.pack("<II", b.s("dev"), t_dev_ptr)
+    params += struct.pack("<II", b.s("orig_addr"), ids["phys"])
+    params += struct.pack("<II", b.s("mapping_size"), ids["size"])
+    params += struct.pack("<II", b.s("alloc_align_mask"), ids["uint"])
+    params += struct.pack("<II", b.s("dir"), ids["dir"])
+    if map_attrs_ptr:
+        t_ap = b.t(0, K_PTR, 0, ids["ulong"])
+        params += struct.pack("<II", b.s("attrs"), t_ap)
+    else:
+        params += struct.pack("<II", b.s("attrs"), ids["ulong"])
+    t_proto = b.t(0, K_PROTO, 6, ids["phys"], params)
+    b.t(b.s("swiotlb_tbl_map_single"), K_FUNC, 0, t_proto)
+    params = struct.pack("<II", b.s("dev"), t_dev_ptr)
+    params += struct.pack("<II", b.s("tlb_addr"), ids["phys"])
+    params += struct.pack("<II", b.s("mapping_size"), ids["size"])
+    params += struct.pack("<II", b.s("dir"), ids["dir"])
+    params += struct.pack("<II", b.s("attrs"), ids["ulong"])
+    params += struct.pack("<II", b.s("pool"), t_pool_ptr)
+    t_proto = b.t(0, K_PROTO, 6, 0, params)
+    b.t(b.s("__swiotlb_tbl_unmap_single"), K_FUNC, 0, t_proto)
+    for name in ("__swiotlb_sync_single_for_device",
+                 "__swiotlb_sync_single_for_cpu"):
+        params = struct.pack("<II", b.s("dev"), t_dev_ptr)
+        params += struct.pack("<II", b.s("tlb_addr"), ids["phys"])
+        params += struct.pack("<II", b.s("size"), ids["size"])
+        params += struct.pack("<II", b.s("dir"), ids["dir"])
+        params += struct.pack("<II", b.s("pool"), t_pool_ptr)
+        t_proto = b.t(0, K_PROTO, 5, 0, params)
+        b.t(b.s(name), K_FUNC, 0, t_proto)
+    params = struct.pack("<II", b.s("dev"), t_dev_ptr)
+    params += struct.pack("<II", b.s("tlb_addr"), ids["phys"])
+    params += struct.pack("<II", b.s("size"), ids["size"])
+    params += struct.pack("<II", b.s("dir"), ids["dir"])
+    params += struct.pack("<II", b.s("mem"), t_pool_ptr)
+    t_proto = b.t(0, K_PROTO, 5, 0, params)
+    b.t(b.s("swiotlb_bounce"), K_FUNC, 0, t_proto)
+    # A sixth FUNC present in BTF but absent from the test
+    # filter-function lists: unattachable by fixture design.
+    # It reuses the bounce prototype so doc-rename tests keep
+    # a matching signature; only the name presence is tested.
+    params = struct.pack("<II", b.s("dev"), t_dev_ptr)
+    params += struct.pack("<II", b.s("tlb_addr"), ids["phys"])
+    params += struct.pack("<II", b.s("size"), ids["size"])
+    params += struct.pack("<II", b.s("dir"), ids["dir"])
+    params += struct.pack("<II", b.s("mem"), t_pool_ptr)
+    t_proto = b.t(0, K_PROTO, 5, 0, params)
+    b.t(b.s("swiotlb_map"), K_FUNC, 0, t_proto)
+
+
+def swiotlb_live(map_attrs_ptr):
+    b = Blob()
+    ids = _swiotlb_types(b)
+    _swiotlb_funcs(b, ids, map_attrs_ptr)
+    return b.build()
+
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     blobs = {"funcproto": funcproto(), "dupfunc": dupfunc(),
@@ -294,7 +394,9 @@ def main():
              "chain31": chain(31, "deep31"),
              "chain32": chain(32, "deep32"),
              "kflag": kflag(), "intsizes": intsizes(),
-             "intsize-bad": intsize_bad()}
+             "intsize-bad": intsize_bad(),
+             "swiotlb-live": swiotlb_live(False),
+             "swiotlb-live-73": swiotlb_live(True)}
     for name, data in blobs.items():
         (OUT / (name + ".bin")).write_bytes(data)
     print("wrote %d BTF fixtures to %s" % (len(blobs), OUT))

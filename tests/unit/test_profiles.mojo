@@ -19,7 +19,11 @@ from memveil.platform.capabilities import (
     discover_capabilities,
 )
 from memveil.platform.evidence import detect_environment, parse_kernel_triple
-from memveil.platform.narrow import parse_narrow_note
+from memveil.platform.narrow import (
+    NarrowBindings,
+    measure_live_bindings,
+    parse_narrow_note,
+)
 from memveil.platform.profiles import (
     CapQualification,
     Profile,
@@ -31,9 +35,12 @@ from memveil.platform.profiles import (
     load_profiles,
     mint_qualification_receipt,
     parse_profile_bytes,
+    select_attempt_hook,
     select_profile,
     select_profile_bound,
     verify_hook_signatures,
+    verify_live_interfaces,
+    verify_live_receipt,
     verify_qualification_receipt,
 )
 from memveil.platform.reader import (
@@ -446,17 +453,27 @@ def test_floor_pass() raises:
     assert_true(env.kernel.eligible_floor)
     assert_equal(
         env.kernel.floor_reason,
-        String("release 7.0.0-34-generic meets the 7.0 floor"),
+        String("release 7.0.0-34-generic meets the 6.0 floor"),
     )
 
 
-def test_floor_fail() raises:
+def test_floor_68_pass() raises:
     var r = open_evidence_reader(fx("kernel-6.8"))
+    var env = detect_environment(r)
+    assert_true(env.kernel.eligible_floor)
+    assert_equal(
+        env.kernel.floor_reason,
+        String("release 6.8.0-41-generic meets the 6.0 floor"),
+    )
+
+
+def test_floor_515_fail() raises:
+    var r = open_evidence_reader(fx("kernel-5.15"))
     var env = detect_environment(r)
     assert_true(not env.kernel.eligible_floor)
     assert_equal(
         env.kernel.floor_reason,
-        String("release 6.8.0-41-generic is below the 7.0 floor"),
+        String("release 5.15.0-test is below the 6.0 floor"),
     )
 
 
@@ -701,12 +718,18 @@ def test_parse_minimal_ok() raises:
 
 def test_parse_reference_file() raises:
     var ps = load_profiles(String("profiles"))
-    assert_equal(len(ps), 2)
+    assert_equal(len(ps), 3)
     assert_equal(ps[0].profile_id, String("linux-x86_64-7.0-reference"))
     assert_equal(ps[0].status, String("reference-unvalidated"))
-    assert_equal(len(ps[0].hooks), 1)
+    assert_equal(len(ps[0].hooks), 6)
     assert_equal(len(ps[0].caps), 3)
     assert_equal(len(ps[0].notes), 3)
+    assert_equal(len(ps[0].layouts), 7)
+    assert_equal(ps[0].hooks[0].kind, String("tracepoint"))
+    assert_equal(
+        ps[0].hooks[1].name, String("fexit:swiotlb_tbl_map_single")
+    )
+    assert_equal(len(ps[0].hooks[1].signature_alt), 1)
     # Manifest order stays reference-first; the narrow gate
     # doc appends for the two-phase collection scan. Its
     # status is asserted by the VM gate, not pinned here.
@@ -716,6 +739,15 @@ def test_parse_reference_file() raises:
     assert_equal(len(ps[1].hooks), 6)
     assert_true(ps[1].hooks[0].format_has)
     assert_equal(len(ps[1].caps), 3)
+    # The 6plus reference reuses the same pins with a 6.0 floor.
+    assert_equal(
+        ps[2].profile_id, String("linux-x86_64-6plus-reference")
+    )
+    assert_equal(ps[2].status, String("reference-unvalidated"))
+    assert_equal(ps[2].identity.min_kernel, String("6.0"))
+    assert_equal(len(ps[2].hooks), 6)
+    assert_equal(len(ps[2].layouts), 7)
+    assert_equal(len(ps[2].hooks[1].signature_alt), 1)
 
 
 def test_gate_doc_tracing_caps_supported() raises:
@@ -1936,13 +1968,25 @@ def test_select_arch_mismatch() raises:
     assert_true(contains(d.reason, String("no profile covers")))
 
 
-def test_select_release_below_min() raises:
+def test_select_68_covers_6plus_reference() raises:
+    # A 6.8 kernel misses the 7.0 docs but the 6plus
+    # reference covers it (still reference-unvalidated).
     var r = open_evidence_reader(fx("kernel-6.8"))
     var env = detect_environment(r)
     var ps = load_profiles(String("profiles"))
     var d = select_profile(env.kernel, ps^)
-    assert_true(not d.has_profile)
-    assert_true(contains(d.reason, String("no profile covers")))
+    assert_true(not d.matched)
+    assert_true(d.has_profile)
+    assert_equal(
+        d.profile.profile_id, String("linux-x86_64-6plus-reference")
+    )
+    assert_equal(
+        d.reason,
+        String(
+            "profile linux-x86_64-6plus-reference covers this identity"
+            " but is reference-unvalidated"
+        ),
+    )
 
 
 def test_select_empty() raises:
@@ -1998,22 +2042,29 @@ def validated_doc(cap_status: String) -> String:
 def test_discover_candidate_unknown() raises:
     var rep = judge(String("ordinary-7.0"), String("profiles"))
     var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("unknown"))
+    # Unbound candidate, so the live judgment runs: the
+    # stand-in format parses but lacks required fields, a
+    # proven-unavailable verdict, not unknown.
+    assert_equal(a.status, String("unavailable"))
     assert_equal(
-        a.reason,
-        String(
-            "hook swiotlb:swiotlb_bounced has no recorded format"
-            " in profile linux-x86_64-7.0-reference"
-        ),
+        a.reason, String("layout: missing field common_type")
     )
     var l = find_entry(rep, String("mapping-lifecycle"))
-    assert_equal(l.status, String("unsupported"))
+    # The ordinary-7.0 root carries stand-in BTF, so the live
+    # judgment fails with the reader cause, not "unproven".
+    assert_equal(l.status, String("unavailable"))
     assert_equal(
         l.reason,
-        String("No validated lifecycle mechanism exists in this profile."),
+        String("fexit:swiotlb_tbl_map_single: bad BTF header"),
     )
     var c = find_entry(rep, String("copy-actual"))
-    assert_equal(c.status, String("unsupported"))
+    assert_equal(c.status, String("unavailable"))
+    assert_equal(
+        c.reason,
+        String(
+            "fentry:__swiotlb_sync_single_for_device: bad BTF header"
+        ),
+    )
 
 
 def test_discover_hook_absent() raises:
@@ -2022,20 +2073,17 @@ def test_discover_hook_absent() raises:
     assert_equal(a.status, String("unavailable"))
     assert_equal(
         a.reason,
-        String(
-            "hook swiotlb:swiotlb_bounced id"
-            " /sys/kernel/tracing/events/swiotlb/swiotlb_bounced/id"
-            " absent"
-        ),
+        String("tracepoint swiotlb:swiotlb_bounced absent"),
     )
-    # ENOENT proves only the configured path is unseen: order
-    # path/mount visibility before any kernel-absence verdict.
+    # The live branch sets no remedy, but the discover
+    # terminal adds the re-qualification advice for a
+    # supporting-but-unqualified profile.
     assert_equal(
         a.remedy,
         String(
-            "verify the profile path and tracefs mount; when both"
-            " are correct, this kernel lacks the hook and"
-            " no command provides it"
+            "refresh the profile's recorded signatures from this"
+            " kernel, then re-prove with memveil qualify (see"
+            " memveil qualify --help)"
         ),
     )
 
@@ -2069,9 +2117,7 @@ def test_discover_hook_denied() raises:
     assert_equal(
         a.reason,
         String(
-            "hook swiotlb:swiotlb_bounced format"
-            " /sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format"
-            " denied (privilege)"
+            "tracepoint swiotlb:swiotlb_bounced denied (privilege)"
         ),
     )
     assert_equal(
@@ -2084,14 +2130,38 @@ def test_discover_hook_denied() raises:
     )
 
 
-def test_discover_floor() raises:
+def test_discover_68_attempt_judged() raises:
+    # A 6.8 kernel meets the 6.0 floor and the 6plus
+    # reference covers it, so the live judgment runs:
+    # the stand-in format lacks required fields, proven
+    # unavailable, not unknown.
     var rep = judge(String("kernel-6.8"), String("profiles"))
     var a = find_entry(rep, String("attempt-trace"))
     assert_equal(a.status, String("unavailable"))
     assert_equal(
-        a.reason,
-        String("kernel 6.8.0-41-generic is below the 7.0 floor"),
+        a.reason, String("layout: missing field common_type")
     )
+
+
+def test_discover_515_attempt_floor() raises:
+    # Below the 6.0 floor, attempt-trace demotes to
+    # unavailable with the floor reason even with no
+    # covering profile; unknown lifecycle entries stand.
+    var r = open_evidence_reader(fx("kernel-5.15"))
+    var env = detect_environment(r)
+    var ps = List[Profile]()
+    ps.append(parse_profile_bytes(bytes_of(low_floor_doc())))
+    var d = select_profile(env.kernel, ps^)
+    assert_true(not d.matched)
+    var rep = discover_capabilities(r, d^)
+    var a = find_entry(rep, String("attempt-trace"))
+    assert_equal(a.status, String("unavailable"))
+    assert_equal(
+        a.reason,
+        String("kernel 5.15.0-test is below the 6.0 floor"),
+    )
+    var l = find_entry(rep, String("mapping-lifecycle"))
+    assert_equal(l.status, String("unknown"))
 
 
 def test_discover_no_cover() raises:
@@ -2202,17 +2272,20 @@ def test_discover_undeclared() raises:
     var a = find_entry(rep, String("attempt-trace"))
     assert_equal(a.status, String("unavailable"))
     assert_equal(
-        a.reason, String("hook h id /i absent")
+        a.reason, String("tracepoint h absent")
     )
 
 
 def low_floor_doc() -> String:
     """One validated doc with min_kernel 6.0 for floor interplay.
 
-    Covers a 6.8 kernel while the 7.0 floor fails, so the attempt
-    and available demotions plus the unsupported terminal apply.
-    The lifecycle hooks match the frozen bindings exactly so the
-    cap judges available pre-demotion, not tracing-refused.
+    Covers a 6.8 kernel, which meets the 6.0 floor but misses
+    the 6.11 lifecycle floor, so attempt-trace judges
+    available while mapping-lifecycle demotes with the
+    lifecycle floor reason and the unsupported terminal
+    applies. The lifecycle hooks match the frozen bindings
+    exactly so the cap judges available pre-demotion, not
+    tracing-refused.
     """
     return (
         String(
@@ -2247,20 +2320,542 @@ def test_discover_unsupported_terminal() raises:
     assert_true(d.matched)
     var rep = discover_capabilities(r, d^)
     var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("unavailable"))
+    assert_equal(a.status, String("available"))
     assert_equal(
         a.reason,
-        String("kernel 6.8.0-41-generic is below the 7.0 floor"),
+        String("verified under validated profile t-low"),
     )
     var l = find_entry(rep, String("mapping-lifecycle"))
     assert_equal(l.status, String("unavailable"))
     assert_equal(
         l.reason,
-        String("kernel 6.8.0-41-generic is below the 7.0 floor"),
+        String("kernel 6.8.0-41-generic is below the 6.11 floor"),
     )
     var c = find_entry(rep, String("copy-actual"))
     assert_equal(c.status, String("unsupported"))
     assert_equal(c.reason, String("never"))
+
+
+def live_ref_doc() -> String:
+    """One unbound reference doc with all five frozen hooks.
+
+    No narrow note, so exact binding can never apply; the
+    live path verifies the tracing signatures plus
+    attachability instead. Lifecycle and copy declare
+    candidate, attempt declares supported with no hooks.
+    """
+    return (
+        String(
+            '{"schema_version":"0.1.1","profile_id":"t-live",'
+            '"status":"reference-unvalidated",'
+            '"identity":{"arch":"x86_64","min_kernel":"7.0",'
+            '"source":{"origin":"o","revision":"r"}},'
+            '"hooks":['
+            '{"name":"swiotlb:swiotlb_bounced","kind":"tracepoint",'
+            '"id_path":"/sys/kernel/tracing/events/swiotlb/'
+            'swiotlb_bounced/id","format_path":"/sys/kernel/'
+            'tracing/events/swiotlb/swiotlb_bounced/format"},'
+        )
+        + _frozen_hooks_json(lc_trace())
+        + String(",")
+        + _frozen_hooks_json(cp_trace())
+        + String(
+            '],"capabilities":[{"id":"attempt-trace",'
+            '"status":"supported","hooks":[],"reason":"r"},'
+            '{"id":"mapping-lifecycle","status":"candidate",'
+            '"hooks":['
+        )
+        + _frozen_hook_names_json(lc_trace())
+        + String(
+            '],"reason":"r"},'
+            '{"id":"copy-actual","status":"candidate",'
+            '"hooks":['
+        )
+        + _frozen_hook_names_json(cp_trace())
+        + String('],"reason":"r"}]}')
+    )
+
+
+def _frozen_map_73() -> String:
+    """Frozen 7.3 map signature: attrs arrives as a pointer."""
+    return String(
+        "phys_addr_t swiotlb_tbl_map_single(struct device *dev,"
+        " phys_addr_t orig_addr, size_t mapping_size,"
+        " unsigned int alloc_align_mask,"
+        " enum dma_data_direction dir, unsigned long *attrs)"
+    )
+
+
+def _live_doc_with_map_alt(alt: String) -> String:
+    """live_ref_doc plus one map signature_alt entry."""
+    var frozen70 = String(
+        "phys_addr_t swiotlb_tbl_map_single(struct device *dev,"
+        " phys_addr_t orig_addr, size_t mapping_size,"
+        " unsigned int alloc_align_mask,"
+        " enum dma_data_direction dir, unsigned long attrs)"
+    )
+    return live_ref_doc().replace(
+        String('"signature":"') + frozen70 + String('"'),
+        String('"signature":"') + frozen70
+        + String('","signature_alt":["') + alt + String('"]'),
+    )
+
+
+def _live_doc_with_layouts(layouts_json: String) -> String:
+    """live_ref_doc plus a layouts array from caller JSON."""
+    var parts = live_ref_doc().split(String("}]}"))
+    return (
+        String(parts[0])
+        + String('}],"layouts":[')
+        + layouts_json
+        + String("]}")
+    )
+
+
+def _seven_layouts_json() -> String:
+    """The seven verified swiotlb member layouts as JSON."""
+    return String(
+        '{"struct":"io_tlb_pool","field":"start",'
+        '"bit_offset":0,"bit_size":64},'
+        '{"struct":"io_tlb_pool","field":"nslabs",'
+        '"bit_offset":192,"bit_size":64},'
+        '{"struct":"io_tlb_pool","field":"slots",'
+        '"bit_offset":448,"bit_size":64},'
+        '{"struct":"io_tlb_slot","field":"orig_addr",'
+        '"bit_offset":0,"bit_size":64},'
+        '{"struct":"io_tlb_slot","field":"alloc_size",'
+        '"bit_offset":64,"bit_size":64},'
+        '{"struct":"device_dma_parameters","field":"min_align_mask",'
+        '"bit_offset":32,"bit_size":32},'
+        '{"struct":"device","field":"dma_parms",'
+        '"bit_offset":5056,"bit_size":64}'
+    )
+
+
+def test_verify_live_ok() raises:
+    var doc = parse_profile_bytes(bytes_of(live_ref_doc()))
+    var caps = List[String]()
+    caps.append(String("attempt-trace"))
+    caps.append(String("mapping-lifecycle"))
+    var v = verify_live_interfaces(
+        fx("kernel-38"), doc^, caps^
+    )
+    assert_true(v.ok)
+    assert_equal(v.reason, String(""))
+
+
+def test_verify_live_sig_mismatch() raises:
+    var doc = parse_profile_bytes(
+        bytes_of(
+            live_ref_doc().replace(
+                String("unsigned long attrs)"),
+                String("unsigned long long attrs)"),
+            )
+        )
+    )
+    var caps = List[String]()
+    caps.append(String("mapping-lifecycle"))
+    var v = verify_live_interfaces(
+        fx("kernel-38"), doc^, caps^
+    )
+    assert_true(not v.ok)
+    assert_equal(
+        v.reason,
+        String(
+            "fexit:swiotlb_tbl_map_single: signature mismatch"
+            " (live: phys_addr_t (struct device *dev,"
+            " phys_addr_t orig_addr, size_t mapping_size,"
+            " unsigned int alloc_align_mask,"
+            " enum dma_data_direction dir, unsigned long attrs))"
+        ),
+    )
+
+
+def test_verify_live_unattachable() raises:
+    # swiotlb_map is present in the fixture BTF (with the
+    # bounce prototype, so the signature matches) but
+    # absent from the fixture filter-function list.
+    var doc = parse_profile_bytes(
+        bytes_of(
+            live_ref_doc()
+            .replace(
+                String('swiotlb_bounce"'), String('swiotlb_map"')
+            )
+            .replace(
+                String("swiotlb_bounce("), String("swiotlb_map(")
+            )
+        )
+    )
+    var caps = List[String]()
+    caps.append(String("copy-actual"))
+    var v = verify_live_interfaces(
+        fx("kernel-38"), doc^, caps^
+    )
+    assert_true(not v.ok)
+    assert_equal(
+        v.reason,
+        String(
+            "fentry:swiotlb_map: function swiotlb_map not listed in"
+            " available_filter_functions"
+        ),
+    )
+
+
+def test_verify_live_btf_absent() raises:
+    var doc = parse_profile_bytes(bytes_of(live_ref_doc()))
+    var caps = List[String]()
+    caps.append(String("mapping-lifecycle"))
+    var v = verify_live_interfaces(
+        fx("missing-btf"), doc^, caps^
+    )
+    assert_true(not v.ok)
+    assert_true(not v.unknown)
+    assert_true(v.reason.startswith(String("BTF absent")))
+
+
+def test_verify_live_btf_corrupt() raises:
+    var doc = parse_profile_bytes(bytes_of(live_ref_doc()))
+    var caps = List[String]()
+    caps.append(String("mapping-lifecycle"))
+    var v = verify_live_interfaces(
+        fx("kernel-6.8"), doc^, caps^
+    )
+    assert_true(not v.ok)
+    assert_equal(
+        v.reason,
+        String("fexit:swiotlb_tbl_map_single: bad BTF header"),
+    )
+
+
+def test_verify_live_73_sig_mismatch() raises:
+    # The 7.3 map shape passes attrs as a pointer; without
+    # an alt the frozen 7.0 spelling mismatches loudly.
+    var doc = parse_profile_bytes(bytes_of(live_ref_doc()))
+    var caps = List[String]()
+    caps.append(String("mapping-lifecycle"))
+    var v = verify_live_interfaces(
+        fx("kernel-38-73"), doc^, caps^
+    )
+    assert_true(not v.ok)
+    assert_equal(
+        v.reason,
+        String(
+            "fexit:swiotlb_tbl_map_single: signature mismatch"
+            " (live: phys_addr_t (struct device *dev,"
+            " phys_addr_t orig_addr, size_t mapping_size,"
+            " unsigned int alloc_align_mask,"
+            " enum dma_data_direction dir, unsigned long *attrs))"
+        ),
+    )
+
+
+def test_verify_live_73_alt_ok() raises:
+    var doc = parse_profile_bytes(
+        bytes_of(_live_doc_with_map_alt(_frozen_map_73()))
+    )
+    var caps = List[String]()
+    caps.append(String("mapping-lifecycle"))
+    var v = verify_live_interfaces(
+        fx("kernel-38-73"), doc^, caps^
+    )
+    assert_true(v.ok)
+    assert_equal(v.reason, String(""))
+    # The primary spelling still admits the 7.0 shape.
+    var doc70 = parse_profile_bytes(
+        bytes_of(_live_doc_with_map_alt(_frozen_map_73()))
+    )
+    var caps70 = List[String]()
+    caps70.append(String("mapping-lifecycle"))
+    var v70 = verify_live_interfaces(
+        fx("kernel-38"), doc70^, caps70^
+    )
+    assert_true(v70.ok)
+
+
+def test_verify_live_alt_malformed() raises:
+    var doc = parse_profile_bytes(
+        bytes_of(_live_doc_with_map_alt(String("not a signature")))
+    )
+    var caps = List[String]()
+    caps.append(String("mapping-lifecycle"))
+    var v = verify_live_interfaces(
+        fx("kernel-38"), doc^, caps^
+    )
+    assert_true(not v.ok)
+    assert_equal(
+        v.reason,
+        String(
+            "fexit:swiotlb_tbl_map_single:"
+            " frozen signature_alt malformed"
+        ),
+    )
+
+
+def test_verify_live_layout_ok() raises:
+    var doc = parse_profile_bytes(
+        bytes_of(_live_doc_with_layouts(_seven_layouts_json()))
+    )
+    var caps = List[String]()
+    caps.append(String("copy-actual"))
+    var v = verify_live_interfaces(
+        fx("kernel-38"), doc^, caps^
+    )
+    assert_true(v.ok)
+    assert_equal(v.reason, String(""))
+
+
+def test_verify_live_layout_mismatch() raises:
+    # A single drifted bit offset refuses with the live
+    # geometry quoted.
+    var layouts = String(
+        '{"struct":"io_tlb_pool","field":"start",'
+        '"bit_offset":8,"bit_size":64}'
+    )
+    var doc = parse_profile_bytes(
+        bytes_of(_live_doc_with_layouts(layouts))
+    )
+    var caps = List[String]()
+    caps.append(String("copy-actual"))
+    var v = verify_live_interfaces(
+        fx("kernel-38"), doc^, caps^
+    )
+    assert_true(not v.ok)
+    assert_equal(
+        v.reason,
+        String(
+            "io_tlb_pool.start: layout mismatch"
+            " (live offset 0 size 64)"
+        ),
+    )
+
+
+def test_verify_live_layout_skipped_for_lifecycle() raises:
+    # Layouts bind copy-actual only; a drifted layout
+    # never refuses the lifecycle cap.
+    var layouts = String(
+        '{"struct":"io_tlb_pool","field":"start",'
+        '"bit_offset":8,"bit_size":64}'
+    )
+    var doc = parse_profile_bytes(
+        bytes_of(_live_doc_with_layouts(layouts))
+    )
+    var caps = List[String]()
+    caps.append(String("mapping-lifecycle"))
+    var v = verify_live_interfaces(
+        fx("kernel-38"), doc^, caps^
+    )
+    assert_true(v.ok)
+    assert_equal(v.reason, String(""))
+
+
+def test_parse_signature_alt_ok() raises:
+    var doc = tracing_doc().replace(
+        String('"attach":"fexit"'),
+        String('"attach":"fexit","signature_alt":["x","y"]'),
+    )
+    var p = parse_profile_bytes(bytes_of(doc))
+    assert_equal(len(p.hooks[0].signature_alt), 2)
+    assert_equal(p.hooks[0].signature_alt[0], String("x"))
+    assert_equal(p.hooks[0].signature_alt[1], String("y"))
+
+
+def test_parse_signature_alt_empty_rejects() raises:
+    var doc = tracing_doc().replace(
+        String('"attach":"fexit"'),
+        String('"attach":"fexit","signature_alt":[""]'),
+    )
+    expect_reject(doc)
+
+
+def test_parse_signature_alt_too_many_rejects() raises:
+    var doc = tracing_doc().replace(
+        String('"attach":"fexit"'),
+        String(
+            '"attach":"fexit",'
+            '"signature_alt":["a","b","c","d","e"]'
+        ),
+    )
+    expect_reject(doc)
+
+
+def test_parse_signature_alt_on_tracepoint_rejects() raises:
+    var doc = minimal_doc().replace(
+        String('"format_path":"/f"'),
+        String('"format_path":"/f","signature_alt":["x"]'),
+    )
+    expect_reject(doc)
+
+
+def test_parse_layouts_ok() raises:
+    var parts = minimal_doc().split(String("}]}"))
+    assert_equal(len(parts), 2)
+    var doc = String(parts[0]) + String(
+        '}],"layouts":[{"struct":"io_tlb_pool","field":"start",'
+        '"bit_offset":0,"bit_size":64}]}'
+    )
+    var p = parse_profile_bytes(bytes_of(doc))
+    assert_equal(len(p.layouts), 1)
+    assert_equal(p.layouts[0].struct_name, String("io_tlb_pool"))
+    assert_equal(p.layouts[0].field_name, String("start"))
+    assert_equal(p.layouts[0].bit_offset, 0)
+    assert_equal(p.layouts[0].bit_size, 64)
+
+
+def test_parse_layouts_negative_rejects() raises:
+    var parts = minimal_doc().split(String("}]}"))
+    assert_equal(len(parts), 2)
+    var doc = String(parts[0]) + String(
+        '}],"layouts":[{"struct":"s","field":"f",'
+        '"bit_offset":-1,"bit_size":64}]}'
+    )
+    expect_reject(doc)
+
+
+def test_parse_layouts_too_many_rejects() raises:
+    var parts = minimal_doc().split(String("}]}"))
+    assert_equal(len(parts), 2)
+    var items = String("")
+    for i in range(17):
+        if i > 0:
+            items += String(",")
+        items += String('{"struct":"s","field":"f')
+        items += String(i)
+        items += String('","bit_offset":0,"bit_size":8}')
+    var doc = (
+        String(parts[0])
+        + String('}],"layouts":[')
+        + items
+        + String("]}")
+    )
+    expect_reject(doc)
+
+
+def _mint_live() raises -> String:
+    """Mint a local-auto receipt over live-measured bindings."""
+    var r = open_evidence_reader(fx("kernel-38"))
+    var env = detect_environment(r)
+    var doc = parse_profile_bytes(bytes_of(live_ref_doc()))
+    var sel = select_attempt_hook(doc)
+    assert_true(sel.ok)
+    var bind = NarrowBindings()
+    var unmeasured = measure_live_bindings(
+        fx("kernel-38"),
+        env.kernel.release,
+        String("libz.so.1"),
+        sel.hook.format_path,
+        bind,
+    )
+    assert_equal(unmeasured, String(""))
+    var caps = List[CapQualification]()
+    caps.append(
+        CapQualification(String("attempt-trace"), String("smoke ok"))
+    )
+    caps.append(
+        CapQualification(String("mapping-lifecycle"), String("smoke ok"))
+    )
+    return mint_qualification_receipt(
+        String("t-live"),
+        env.kernel,
+        bind,
+        UInt64(123456789),
+        caps^,
+        String("0.1.0"),
+        String("sha256:") + String(_MINT_BRIDGE),
+        String("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        String("sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        String(""),
+        UInt64(3),
+        String("smoke: attach/poll/detach, no traffic required"),
+    )
+
+
+def test_live_receipt_roundtrip() raises:
+    var r = open_evidence_reader(fx("kernel-38"))
+    var env = detect_environment(r)
+    var doc = parse_profile_bytes(bytes_of(live_ref_doc()))
+    var js = _mint_live()
+    # Object shas arrive bare (receipt parse strips the
+    # prefix; record resolves bare hex the same way).
+    var v = verify_live_receipt(
+        js.as_bytes(),
+        doc,
+        env.kernel,
+        String(_MINT_BRIDGE),
+        fx("kernel-38"),
+        String("libz.so.1"),
+        String("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        String("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        String(""),
+    )
+    assert_true(v.ok)
+    assert_equal(len(v.caps), 2)
+
+
+def test_live_receipt_drift_refuses() raises:
+    # kernel-38-73 matches kernel-38 everywhere except
+    # the BTF bytes, so the kernel-38 receipt fails there
+    # with the live (not note) wording.
+    var r = open_evidence_reader(fx("kernel-38"))
+    var env = detect_environment(r)
+    var doc = parse_profile_bytes(bytes_of(live_ref_doc()))
+    var js = _mint_live()
+    var v = verify_live_receipt(
+        js.as_bytes(),
+        doc,
+        env.kernel,
+        String(_MINT_BRIDGE),
+        fx("kernel-38-73"),
+        String("libz.so.1"),
+        String(""),
+        String(""),
+        String(""),
+    )
+    assert_true(not v.ok)
+    assert_equal(
+        v.message, String("receipt bindings differ from live")
+    )
+
+
+def test_live_receipt_object_drift_refuses() raises:
+    var r = open_evidence_reader(fx("kernel-38"))
+    var env = detect_environment(r)
+    var doc = parse_profile_bytes(bytes_of(live_ref_doc()))
+    var js = _mint_live()
+    var v = verify_live_receipt(
+        js.as_bytes(),
+        doc,
+        env.kernel,
+        String(_MINT_BRIDGE),
+        fx("kernel-38"),
+        String("libz.so.1"),
+        String("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"),
+        String(""),
+        String(""),
+    )
+    assert_true(not v.ok)
+    assert_equal(
+        v.message, String("receipt artifacts differ from objects")
+    )
+
+
+def test_discover_live38_candidate_available() raises:
+    # A covering reference doc carries has_profile without
+    # matched (only validated matches); the live path
+    # judges that real decision against kernel-38 evidence.
+    var r = open_evidence_reader(fx("kernel-38"))
+    var env = detect_environment(r)
+    var ps = List[Profile]()
+    ps.append(parse_profile_bytes(bytes_of(live_ref_doc())))
+    var d = select_profile(env.kernel, ps^)
+    assert_true(not d.matched)
+    assert_true(d.has_profile)
+    var rep = discover_capabilities(r, d^)
+    var l = find_entry(rep, String("mapping-lifecycle"))
+    assert_equal(l.status, String("available"))
+    assert_equal(
+        l.reason,
+        String("live-verified under reference profile t-live"),
+    )
 
 
 def reference_recorded_doc() -> String:
@@ -2292,13 +2887,13 @@ def test_discover_candidate_reference_verified() raises:
     assert_true(d.has_profile)
     var rep = discover_capabilities(r, d^)
     var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("unknown"))
+    # The ready-validated root carries a synthetic format the
+    # offset probe cannot parse, so the live judgment fails
+    # with the layout cause, not "unproven".
+    assert_equal(a.status, String("unavailable"))
     assert_equal(
         a.reason,
-        String(
-            "candidate under reference-unvalidated profile t3:"
-            " hooks present, semantics unproven"
-        ),
+        String("layout: missing field common_type"),
     )
 
 
@@ -2807,7 +3402,8 @@ def run() raises -> Int:
     suite.test[test_utf8_invalid]()
     suite.test[test_triple_parse]()
     suite.test[test_floor_pass]()
-    suite.test[test_floor_fail]()
+    suite.test[test_floor_68_pass]()
+    suite.test[test_floor_515_fail]()
     suite.test[test_floor_unparseable]()
     suite.test[test_guest_ordinary]()
     suite.test[test_guest_snp]()
@@ -2909,14 +3505,37 @@ def run() raises -> Int:
     suite.test[test_receipt_empty_capabilities]()
     suite.test[test_receipt_wrong_grade]()
     suite.test[test_select_arch_mismatch]()
-    suite.test[test_select_release_below_min]()
+    suite.test[test_select_68_covers_6plus_reference]()
     suite.test[test_select_empty]()
     suite.test[test_select_unparseable]()
     suite.test[test_discover_candidate_unknown]()
     suite.test[test_discover_hook_absent]()
     suite.test[test_discover_remedy_qualify]()
     suite.test[test_discover_hook_denied]()
-    suite.test[test_discover_floor]()
+    suite.test[test_discover_68_attempt_judged]()
+    suite.test[test_discover_515_attempt_floor]()
+    suite.test[test_verify_live_ok]()
+    suite.test[test_verify_live_sig_mismatch]()
+    suite.test[test_verify_live_unattachable]()
+    suite.test[test_verify_live_btf_absent]()
+    suite.test[test_verify_live_btf_corrupt]()
+    suite.test[test_verify_live_73_sig_mismatch]()
+    suite.test[test_verify_live_73_alt_ok]()
+    suite.test[test_verify_live_alt_malformed]()
+    suite.test[test_verify_live_layout_ok]()
+    suite.test[test_verify_live_layout_mismatch]()
+    suite.test[test_verify_live_layout_skipped_for_lifecycle]()
+    suite.test[test_parse_signature_alt_ok]()
+    suite.test[test_parse_signature_alt_empty_rejects]()
+    suite.test[test_parse_signature_alt_too_many_rejects]()
+    suite.test[test_parse_signature_alt_on_tracepoint_rejects]()
+    suite.test[test_parse_layouts_ok]()
+    suite.test[test_parse_layouts_negative_rejects]()
+    suite.test[test_parse_layouts_too_many_rejects]()
+    suite.test[test_discover_live38_candidate_available]()
+    suite.test[test_live_receipt_roundtrip]()
+    suite.test[test_live_receipt_drift_refuses]()
+    suite.test[test_live_receipt_object_drift_refuses]()
     suite.test[test_discover_no_cover]()
     suite.test[test_discover_unparseable]()
     suite.test[test_discover_available]()

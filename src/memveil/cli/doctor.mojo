@@ -299,7 +299,7 @@ def render_doctor_text(rep: DoctorReport) raises -> String:
         + sanitize_diagnostic(rep.kernel.release)
         + " "
         + sanitize_diagnostic(rep.kernel.arch)
-        + " (floor 7.0: "
+        + " (floor 6.0: "
     )
     if rep.kernel.eligible_floor:
         out += "yes"

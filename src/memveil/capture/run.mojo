@@ -35,6 +35,7 @@ from memveil.platform.artifact_files import (
     restore_capture_ownership,
 )
 from memveil.platform.btf import read_btf_maps, read_btf_maps_ring
+from memveil.platform.capabilities import cap_floor_ok, cap_floor_refusal
 from memveil.platform.clock import (
     MonoClock,
     check_timens_live,
@@ -72,6 +73,8 @@ from memveil.platform.profiles import (
     select_attempt_hook,
     select_profile,
     tracing_gap,
+    verify_live_interfaces,
+    verify_live_receipt,
     verify_qualification_receipt,
 )
 from memveil.platform.reader import (
@@ -600,6 +603,52 @@ def _check_binding(
     return out^
 
 
+def _measure_binding(
+    root: String,
+    release: String,
+    hook: ProfileHook,
+    format_bytes: Span[UInt8, _],
+) -> _BindingOut:
+    """Measure live narrow identities without comparing.
+
+    Reads the same live sources ``_check_binding``
+    hashes (config plus source, btf, format, image,
+    image build-id) for live-path candidates, which
+    carry no parsed note to compare against. The hook
+    rides along for the call shape only; no format
+    text comparison runs here.
+    """
+    var out = _BindingOut()
+    var live = NarrowLive()
+    var cfg = read_live_config(root, release, String(_ZLIB))
+    live.config = cfg.value
+    live.config_src = cfg.src
+    live.btf = read_live_bytes(
+        root,
+        String("/sys/kernel/btf/vmlinux"),
+        String("btf"),
+        MAX_NARROW_BTF_BYTES,
+    )
+    live.format.state = String("value")
+    live.format.value = sha256_hex(format_bytes)
+    live.image = read_live_bytes(
+        root,
+        String("/boot/vmlinuz-") + release,
+        String("image"),
+        MAX_NARROW_IMAGE_BYTES,
+    )
+    live.image_bid = read_live_bid(root)
+    out.config = live.config.copy()
+    out.config_src = live.config_src.copy()
+    out.btf = live.btf.copy()
+    out.format = live.format.copy()
+    out.image = live.image.copy()
+    out.image_bid = live.image_bid.copy()
+    out.ok = True
+    out.reason = String("")
+    return out^
+
+
 def _covers(kernel: KernelInfo, doc: Profile) -> Bool:
     var one = List[Profile]()
     one.append(doc.copy())
@@ -613,14 +662,21 @@ def _receipt_covers(
     pdir: String,
     bridge_sha: String,
     mut bridge_mismatch: Bool,
+    root: String,
+    obj_attempt: String,
+    obj_lc: String,
+    obj_cp: String,
 ) -> Bool:
     """True when a verifying receipt covers every wanted cap.
 
     The receipt at <receipts-dir>/<id>.json must verify
     against the doc, the live kernel, and the resolved
     bridge hash, and qualify each requested capability.
-    An empty pdir, a missing file, or any verify failure
-    yields False: scan falls through to the next
+    Docs with a parseable narrow note verify exactly;
+    docs with no usable note verify against fresh live
+    measurements plus the given live-resolved object
+    shas. An empty pdir, a missing file, or any verify
+    failure yields False: scan falls through to the next
     candidate. ``bridge_mismatch`` reports True when the
     receipt was otherwise valid but named another
     bridge, so the fallback reason can name it. Never
@@ -642,16 +698,38 @@ def _receipt_covers(
         )
     except:
         return False
-    var v = verify_qualification_receipt(
-        Span(raw), doc, kernel, bridge_sha
-    )
-    if not v.ok:
-        bridge_mismatch = v.bridge_mismatch
-        return False
+    var noted = doc.identity.source.has_note and parse_narrow_note(
+        doc.identity.source.note
+    ).ok
+    var hit_caps = List[String]()
+    if noted:
+        var v = verify_qualification_receipt(
+            Span(raw), doc, kernel, bridge_sha
+        )
+        if not v.ok:
+            bridge_mismatch = v.bridge_mismatch
+            return False
+        hit_caps = v.caps.copy()
+    else:
+        var v = verify_live_receipt(
+            Span(raw),
+            doc,
+            kernel,
+            bridge_sha,
+            root,
+            String(_ZLIB),
+            obj_attempt,
+            obj_lc,
+            obj_cp,
+        )
+        if not v.ok:
+            bridge_mismatch = v.bridge_mismatch
+            return False
+        hit_caps = v.caps.copy()
     for i in range(len(want)):
         var found = False
-        for j in range(len(v.caps)):
-            if v.caps[j] == want[i]:
+        for j in range(len(hit_caps)):
+            if hit_caps[j] == want[i]:
                 found = True
                 break
         if not found:
@@ -734,6 +812,23 @@ def _selection_gap(doc: Profile, caps: List[String]) -> String:
     return String("")
 
 
+def _live_doc(doc: Profile) -> Bool:
+    """True when the doc can only take the live path.
+
+    Reference docs (any status but validated) whose
+    narrow note is unusable — the source carries no
+    note or the note fails to parse — never bind
+    exactly; they verify live interfaces instead.
+    Docs with a parseable note never take the live
+    path.
+    """
+    if doc.status == String("validated"):
+        return False
+    if not doc.identity.source.has_note:
+        return True
+    return not parse_narrow_note(doc.identity.source.note).ok
+
+
 def decide_record(
     root: String,
     kernel: KernelInfo,
@@ -766,7 +861,11 @@ def decide_record(
     mode only. Requested extra capabilities need a
     supported declaration, a resolvable object path, and
     full extended binding; they never fall back to
-    partial.
+    partial. Reference docs without a usable narrow
+    note take the live path instead: their tracing
+    interfaces verify against the live host, and
+    success admits a candidate carrying measured
+    identities without exact binding.
     """
     var out = ScanDecision()
     var ask = parse_requested_caps(want_caps)
@@ -784,6 +883,11 @@ def decide_record(
                 String(
                     "capability conversion-observe has no record channel"
                 )
+            )
+    for i in range(len(ask.caps)):
+        if not cap_floor_ok(ask.caps[i], kernel.release):
+            return _refuse_scan(
+                cap_floor_refusal(ask.caps[i], kernel.release)
             )
     var want_extra = want_lc or want_cp
     var selected = ask.caps[0].copy()
@@ -881,15 +985,18 @@ def decide_record(
             return _refuse_scan(cp.refusal.copy())
     var order = List[Int]()
     var order_receipt = List[Bool]()
+    var order_live = List[Bool]()
     var saw_bridge_mismatch = False
     if want_explicit:
         order.append(0)
         order_receipt.append(False)
+        order_live.append(_live_doc(candidates[0]))
     else:
         for i in range(len(candidates)):
             if candidates[i].status == String("validated"):
                 order.append(i)
                 order_receipt.append(False)
+                order_live.append(False)
         for i in range(len(candidates)):
             if candidates[i].status == String("validated"):
                 continue
@@ -901,11 +1008,23 @@ def decide_record(
                 profiles_dir,
                 bridge_sha,
                 mism,
+                root,
+                sha,
+                lc.sha,
+                cp.sha,
             ):
                 order.append(i)
                 order_receipt.append(True)
+                order_live.append(False)
             elif mism:
                 saw_bridge_mismatch = True
+        for i in range(len(candidates)):
+            if candidates[i].status == String("validated"):
+                continue
+            if _live_doc(candidates[i]):
+                order.append(i)
+                order_receipt.append(False)
+                order_live.append(True)
     var skip_reason = String("")
     for oi in range(len(order)):
         var doc = candidates[order[oi]].copy()
@@ -934,6 +1053,81 @@ def decide_record(
                 return _refuse_scan(herr)
             skip_reason = herr.copy()
             continue
+        if order_live[oi]:
+            var live = verify_live_interfaces(
+                root, doc.copy(), ask.caps.copy()
+            )
+            if not live.ok:
+                if want_explicit:
+                    if want_extra:
+                        return _refuse_scan(
+                            String("live check failed: ") + live.reason
+                        )
+                    out.ok = True
+                    out.kind = String("partial")
+                    out.reason = (
+                        String("explicit ")
+                        + doc.profile_id.copy()
+                        + String(" (reference, live check failed: ")
+                        + live.reason
+                        + String(")")
+                    )
+                    out.profile = doc.copy()
+                    out.hook = hook.copy()
+                    out.object_sha = sha.copy()
+                    out.ring_bytes = ring
+                    out.off_loc = probe.loc_off
+                    out.off_size = probe.size_off
+                    out.off_force = probe.force_off
+                    out.off_fixed_end = probe.fixed_end
+                    out.elf = elf.copy()
+                    out.tp_system = sys.copy()
+                    out.tp_event = evt.copy()
+                    out.selected_caps = selected.copy()
+                    return out^
+                skip_reason = (
+                    String("live check failed: ") + live.reason
+                )
+                continue
+            var measured = _measure_binding(
+                root, kernel.release, hook.copy(), Span(raw)
+            )
+            out.ok = True
+            out.kind = String("candidate")
+            out.reason = (
+                String("candidate ")
+                + doc.profile_id.copy()
+                + String(": live interfaces verified (profile unvalidated)")
+            )
+            out.profile = doc.copy()
+            out.hook = hook.copy()
+            out.object_sha = sha.copy()
+            out.ring_bytes = ring
+            out.off_loc = probe.loc_off
+            out.off_size = probe.size_off
+            out.off_force = probe.force_off
+            out.off_fixed_end = probe.fixed_end
+            out.elf = elf.copy()
+            out.tp_system = sys.copy()
+            out.tp_event = evt.copy()
+            out.measured_config = measured.config.copy()
+            out.measured_config_src = measured.config_src.copy()
+            out.measured_btf = measured.btf.copy()
+            out.measured_format = measured.format.copy()
+            out.measured_image = measured.image.copy()
+            out.measured_image_bid = measured.image_bid.copy()
+            out.selected_caps = selected.copy()
+            out.lc.present = want_lc
+            out.cp.present = want_cp
+            if want_lc:
+                out.lc.elf = lc.elf.copy()
+                out.lc.object_sha = lc.sha.copy()
+                out.lc.ring_bytes = lc.ring
+            if want_cp:
+                out.cp.elf = cp.elf.copy()
+                out.cp.object_sha = cp.sha.copy()
+                out.cp.ring_bytes = cp.ring
+            return out^
         var parsed = parse_narrow_note(doc.identity.source.note)
         if not parsed.ok:
             if want_explicit:
@@ -1330,7 +1524,7 @@ def run_collector_with[W: WriterSource](
             EXIT_REFUSAL, String(""), String(""),
             String("kernel ")
             + env.kernel.release
-            + String(" below floor 7.0"),
+            + String(" below floor 6.0"),
         )
     var profiles: List[Profile]
     try:

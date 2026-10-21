@@ -495,6 +495,57 @@ def read_live_bid(root: String) -> LiveValue:
         return _uncheckable(String("notes unreadable"))
 
 
+def measure_live_bindings(
+    root: String,
+    release: String,
+    zlib: String,
+    format_path: String,
+    mut bindings: NarrowBindings,
+) -> String:
+    """Measure live identity values; "" when all six read.
+
+    Reads config, BTF, trace format, image, and build-id
+    from the evidence tree under root into bindings.
+    Object and ring bindings stay empty: object bytes come
+    from an explicit path and ring sizes from the loaded
+    object, neither of which measuring owns. Shared by
+    qualify planning and live receipt verification so both
+    read the same six files the same way.
+    """
+    var cfg = read_live_config(root, release, zlib)
+    if cfg.src == String("") or cfg.value.state != String("value"):
+        return String("live bindings unmeasurable: config")
+    var btf = read_live_bytes(
+        root, String("/sys/kernel/btf/vmlinux"), String("btf"),
+        MAX_NARROW_BTF_BYTES,
+    )
+    if btf.state != String("value"):
+        return String("live bindings unmeasurable: btf")
+    var form = read_live_bytes(
+        root, format_path, String("format"), MAX_NARROW_FORMAT_BYTES
+    )
+    if form.state != String("value"):
+        return String("live bindings unmeasurable: format")
+    var image = read_live_bytes(
+        root,
+        String("/boot/vmlinuz-") + release,
+        String("image"),
+        MAX_NARROW_IMAGE_BYTES,
+    )
+    if image.state != String("value"):
+        return String("live bindings unmeasurable: image")
+    var bid = read_live_bid(root)
+    if bid.state != String("value"):
+        return String("live bindings unmeasurable: image_bid")
+    bindings.config = cfg.value.value.copy()
+    bindings.config_src = cfg.src.copy()
+    bindings.btf = btf.value.copy()
+    bindings.format = form.value.copy()
+    bindings.image = image.value.copy()
+    bindings.image_bid = bid.value.copy()
+    return String("")
+
+
 def check_narrow(
     bind: NarrowBindings, live: NarrowLive
 ) -> NarrowVerdict:

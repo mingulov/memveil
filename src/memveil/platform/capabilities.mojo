@@ -5,10 +5,12 @@
 ``discover_capabilities`` judges each known capability without
 loading BPF or attaching anything:
 
-- the kernel floor fails: ``attempt-trace`` is unavailable, and
-  any other available judgment is demoted to unavailable with the
-  floor reason. Below the floor no support claim of any kind is
-  valid. Eligibility stays separate from source support and
+- a capability's kernel floor fails (6.0 for attempt-trace,
+  6.11 for the tracing capabilities): its entry demotes to
+  unavailable with the floor reason, except unknown and
+  unsupported judgments, which stand. Below its floor no
+  support claim of any kind is valid for that capability.
+  Eligibility stays separate from source support and
   attachment.
 - no covering profile: every capability is unknown.
 - declared ``unsupported``: stays unsupported with the profile's
@@ -18,6 +20,12 @@ loading BPF or attaching anything:
 - declared ``supported`` with every hook verified byte for byte:
   available, but only under a validated (matched) profile. The
   same evidence under a reference profile stays unknown.
+- declared ``candidate`` or ``supported`` under a covering
+  reference profile: live interface verification decides
+  (verified is available, else the live reason verbatim
+  as unknown or unavailable). Recorded-text hook marks
+  never gate a live judgment; the probes still run for
+  their denied-path side effects.
 - a hook id/format file absent: unavailable, naming the path.
 - a hook id/format file denied: unknown, naming the path as a
   privilege restriction; the path joins ``denied``.
@@ -38,9 +46,13 @@ The function is total: late read failures degrade to explicit
 unknown reasons, never to an exception.
 """
 
-from memveil.platform.evidence import parse_kernel_triple
+from memveil.platform.evidence import parse_kernel_triple, triple_ge
 from memveil.platform.narrow import probe_trace_offsets
-from memveil.platform.profiles import ProfileDecision, tracing_gap
+from memveil.platform.profiles import (
+    ProfileDecision,
+    tracing_gap,
+    verify_live_interfaces,
+)
 from memveil.platform.reader import (
     EVIDENCE_ABSENT,
     EVIDENCE_DENIED,
@@ -276,6 +288,53 @@ def _judge_declared(
             ),
         )
     var marks = _probe_hooks(reader, decision, cap_index, denied)
+    var live_eligible = (
+        decision.grade == String("")
+        and decision.profile.status != String("validated")
+    )
+    if live_eligible:
+        # A covering reference doc carries no receipt grade
+        # (matched stays False: only validated matches).
+        # The probes above ran for their denied-path side
+        # effects only; their recorded-text marks never gate
+        # a live judgment, which probes the live tree
+        # instead. Validated and local-auto grades never
+        # land here, so their judgments below are untouched.
+        var live_caps = List[String]()
+        live_caps.append(cap_id.copy())
+        var live = verify_live_interfaces(
+            reader, decision.profile, live_caps^
+        )
+        if live.ok:
+            return CapEntry(
+                cap_id,
+                String("available"),
+                "live-verified under reference profile " + profile_id,
+                String(""),
+            )
+        if live.unknown:
+            var remedy = String(
+                "run memveil qualify for local-auto,"
+                " or await validated evidence"
+            )
+            if live.reason.endswith(String("(privilege)")):
+                remedy = String("re-run with elevated privileges (root)")
+            return CapEntry(
+                cap_id,
+                String("unknown"),
+                live.reason,
+                remedy^,
+            )
+        return CapEntry(
+            cap_id,
+            String("unavailable"),
+            live.reason,
+            String(
+                "refresh the profile's recorded signatures from"
+                " this kernel, then re-prove with memveil qualify"
+                " (see memveil qualify --help)"
+            ),
+        )
     if marks.has_absent:
         return CapEntry(
             cap_id,
@@ -458,56 +517,127 @@ def _judge_one(
     return _judge_declared(reader, decision, at, denied)
 
 
+def cap_floor_need(cap_id: String) -> String:
+    """Lowest ``major.minor`` serving one capability id.
+
+    Attempt-trace rides the tracepoint that is stable from
+    6.0 on; lifecycle and copy need the tracing interfaces
+    verified from 6.11 on. Unknown ids need nothing because
+    no gate admits them.
+    """
+    if cap_id == String("attempt-trace"):
+        return String("6.0")
+    if cap_id == String("mapping-lifecycle"):
+        return String("6.11")
+    if cap_id == String("copy-actual"):
+        return String("6.11")
+    return String("")
+
+
+def cap_floor_ok(cap_id: String, release: String) -> Bool:
+    """True when a release reaches one capability's floor."""
+    var need = cap_floor_need(cap_id)
+    if need == String(""):
+        return False
+    var triple = parse_kernel_triple(release)
+    if need == String("6.0"):
+        return triple_ge(triple, 6, 0)
+    return triple_ge(triple, 6, 11)
+
+
+def cap_floor_refusal(cap_id: String, release: String) -> String:
+    """Refusal naming the floor one capability needs.
+
+    An unparseable release cannot reach any floor, so it
+    refuses as unknown rather than naming a version it
+    might already satisfy.
+    """
+    var triple = parse_kernel_triple(release)
+    if not triple.ok:
+        return (
+            String("release ")
+            + release
+            + String(" is unparseable; floor unknown")
+        )
+    return (
+        String("capability ")
+        + cap_id
+        + String(" needs kernel ")
+        + cap_floor_need(cap_id)
+        + String("+ (this kernel: ")
+        + release
+        + String(")")
+    )
+
+
 def discover_capabilities(
     reader: EvidenceReader, decision: ProfileDecision
 ) -> CapabilityReport:
     """Judge the known capabilities. Never raises.
 
     The known universe is the schema's three ids; a profile that
-    omits one leaves it unknown. When the kernel floor fails,
-    ``attempt-trace`` demotes to unavailable with the floor reason
-    and any other available judgment demotes the same way; other
-    unknown and unsupported judgments stand.
+    omits one leaves it unknown. An entry below its
+    capability's floor demotes to unavailable with the floor
+    reason (available and candidate judgments; attempt-trace
+    demotes whatever its judgment is); unknown and
+    unsupported judgments stand.
     """
     var denied = List[String]()
     var entries = List[CapEntry]()
     var triple = parse_kernel_triple(reader.release)
-    var floor_ok = triple.ok and triple.major >= 7
     var ids = List[String]()
     ids.append(String("attempt-trace"))
     ids.append(String("mapping-lifecycle"))
     ids.append(String("copy-actual"))
     for k in range(len(ids)):
         var entry = _judge_one(reader, decision, ids[k], denied)
-        if not floor_ok:
-            if not triple.ok and entry.id == "attempt-trace":
-                entry = CapEntry(
-                    entry.id,
-                    String("unknown"),
-                    "release "
-                    + reader.release
-                    + " is unparseable; floor unknown",
-                    String(
-                        "this release cannot be assessed;"
-                        " use a standard kernel release"
-                    ),
-                )
-            elif (
-                triple.ok
-                and entry.status != "unsupported"
-                and (
-                    entry.id == "attempt-trace"
-                    or entry.status == "available"
-                )
-            ):
+        if not triple.ok and entry.id == "attempt-trace":
+            entry = CapEntry(
+                entry.id,
+                String("unknown"),
+                "release "
+                + reader.release
+                + " is unparseable; floor unknown",
+                String(
+                    "this release cannot be assessed;"
+                    " use a standard kernel release"
+                ),
+            )
+        elif triple.ok and not cap_floor_ok(entry.id, reader.release):
+            if entry.status != "unsupported" and entry.status != "unknown":
+                var need = cap_floor_need(entry.id)
                 entry = CapEntry(
                     entry.id,
                     String("unavailable"),
                     "kernel "
                     + reader.release
-                    + " is below the 7.0 floor",
-                    String(
-                        "boot a 7.0+ kernel;"
+                    + " is below the "
+                    + need
+                    + " floor",
+                    String("boot a ")
+                    + need
+                    + String(
+                        "+ kernel;"
+                        " no command qualifies this one"
+                    ),
+                )
+            elif (
+                entry.id == "attempt-trace"
+                and entry.status != "unsupported"
+            ):
+                var need = cap_floor_need(entry.id)
+                entry = CapEntry(
+                    entry.id,
+                    String("unavailable"),
+                    "kernel "
+                    + reader.release
+                    + " is below the "
+                    + need
+                    + " floor",
+                    String("boot a ")
+                    + need
+                    + String(
+                        "+ kernel;"
                         " no command qualifies this one"
                     ),
                 )

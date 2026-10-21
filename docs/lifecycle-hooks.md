@@ -3,8 +3,13 @@
 
 Frozen attach points and source semantics for swiotlb mapping
 lifetimes and executed copies. A profile admits these capabilities
-only with the exact kernel source, config, BTF, and object bytes
-recorded in its narrow bindings; anything else refuses.
+through one of two lanes: a bound document whose narrow
+bindings match the kernel source, config, BTF, and object
+bytes exactly, or an unbound reference document whose
+tracing interfaces verify against the running kernel (live
+tracepoint format, BTF hook signatures, ftrace
+attachability). Object statics — program set, map layout,
+ring sizes — verify in both lanes; anything else refuses.
 
 ## Attach points
 
@@ -47,14 +52,18 @@ executable or under the system directory; `--lc-object`
 and `--cp-object` are optional overrides for non-bundled
 objects. The winning profile must declare each requested
 capability `supported` (or `candidate`) with all named hooks
-present, and its narrow note must bind the exact extra object
-hashes and ring sizes (`lc_object`, `lc_ring_bytes`,
-`cp_object`, `cp_ring_bytes`); anything else refuses with
-exit 3 naming the capability, for example
-`capability mapping-lifecycle unsupported by <profile-id>` or
-`binding failed: mismatch lc_object`. Extra channels never run
-partial: without full narrow binding the run refuses instead of
-recording an unverified channel.
+present. A bound document must also match the exact extra
+object hashes and ring sizes in its narrow note
+(`lc_object`, `lc_ring_bytes`, `cp_object`,
+`cp_ring_bytes`); an unbound reference document instead
+verifies the tracing interfaces live and records measured
+identities. Anything else refuses with exit 3 naming the
+capability, for example
+`capability mapping-lifecycle unsupported by <profile-id>`,
+`binding failed: mismatch lc_object`, or
+`live check failed: ...`. Extra channels never run
+partial: without full binding or a passing live check the
+run refuses instead of recording an unverified channel.
 
 Each requested extra capability also binds its hooks
 one by one: every named hook must be a `tracing` hook whose
@@ -66,17 +75,22 @@ signature text, and every frozen member must be named. A
 wrong function, a wrong attach point, a missing or extra
 hook, or a corrupted signature refuses admission before any
 probe attaches. Live signature identity rides the
-whole-BTF narrow binding plus CO-RE at load; the profile
-text is the auditable document side of that chain, pinned
-by profile schema 0.1.1.
+whole-BTF narrow binding plus CO-RE at load for bound
+documents; the live lane compares the same frozen
+signatures against the running kernel's BTF instead
+(accepting the 7.3 map shape via `signature_alt`). The
+profile text is the auditable document side of that chain,
+pinned by profile schema 0.1.1.
 
 ## Signatures
 
 Signatures below are frozen against the 7.0.0-34-generic BTF
 (`phys_addr_t` is 64-bit, `size_t` is 64-bit,
 `dma_data_direction` is 0 BIDIRECTIONAL, 1 TO_DEVICE,
-2 FROM_DEVICE, 3 NONE). A profile binds these exact
-signatures before it admits the hooks; any mismatch refuses.
+2 FROM_DEVICE, 3 NONE). A bound profile binds these exact
+signatures before it admits the hooks; the live lane
+checks them against the running kernel's BTF instead.
+Any mismatch refuses.
 
 ```c
 phys_addr_t swiotlb_tbl_map_single(struct device *dev,
@@ -195,6 +209,8 @@ the request fact (size, direction) is still emitted.
 - Sync ranges: the wire observes no sync offset, so coverage is
   unknown, never assumed whole-mapping.
 - Kernels, configs, BTF builds, or object bytes outside the
-  admitting profile's narrow bindings: refused, never degraded.
-- Other architectures and kernels below the 7.0 floor: no hooks
-  are admitted there.
+  admitting profile's narrow bindings (or failing the live
+  interface checks for an unbound reference): refused, never
+  degraded.
+- Other architectures and kernels below the 6.11 lifecycle
+  floor: no hooks are admitted there.

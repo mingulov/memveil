@@ -186,6 +186,20 @@ def test_plan_caps() raises:
     assert_equal(plan.caps[1], String("mapping-lifecycle"))
 
 
+def test_plan_live_reference() raises:
+    var opts = _opts()
+    opts.capabilities = String("attempt-trace,mapping-lifecycle")
+    var plan = plan_qualification(
+        String("tests/fixtures/qualify/host-live38"),
+        String("tests/fixtures/qualify/profiles-live"),
+        opts^,
+    )
+    assert_true(plan.ok)
+    assert_equal(plan.doc.profile_id, String("scan-live-ref"))
+    assert_equal(len(plan.caps), 2)
+    assert_equal(plan.caps[1], String("mapping-lifecycle"))
+
+
 def test_plan_bad_caps() raises:
     var opts = _opts()
     opts.capabilities = String("bogus")
@@ -301,15 +315,19 @@ def test_plan_unknown_profile() raises:
 
 
 def test_plan_unbound_note() raises:
+    # A prose note is outside the narrow grammar, so the
+    # doc is unbound and plans from live interfaces like a
+    # noteless reference instead of refusing on bindings.
     var opts = _opts()
     opts.profile = String(_PDIR) + String("/qual-unbound.json")
     opts.has_profile = True
     var plan = plan_qualification(
         String(_HOST), String(_PDIR), opts^
     )
-    assert_true(not plan.ok)
-    assert_true(contains(plan.refusal, String("qual-unbound")))
-    assert_true(contains(plan.refusal, String("bindings")))
+    assert_true(plan.ok)
+    assert_equal(plan.doc.profile_id, String("qual-unbound"))
+    assert_equal(len(plan.caps), 1)
+    assert_equal(plan.caps[0], String("attempt-trace"))
 
 
 def test_plan_bad_signature() raises:
@@ -372,7 +390,25 @@ def test_plan_below_floor_refuses() raises:
     )
     assert_true(not plan.ok)
     assert_equal(
-        plan.refusal, String("kernel 6.8.0-test below floor 7.0")
+        plan.refusal, String("kernel 5.15.0-test below floor 6.0")
+    )
+
+
+def test_plan_lc_below_611_refuses() raises:
+    var opts = _opts()
+    opts.capabilities = String("attempt-trace,mapping-lifecycle")
+    var plan = plan_qualification(
+        String("tests/fixtures/qualify/host-68"),
+        String(_PDIR),
+        opts^,
+    )
+    assert_true(not plan.ok)
+    assert_equal(
+        plan.refusal,
+        String(
+            "capability mapping-lifecycle needs kernel 6.11+"
+            " (this kernel: 6.8.0-test)"
+        ),
     )
 
 
@@ -1016,6 +1052,7 @@ def run() raises -> Int:
     suite.test[test_qualify_usage]()
     suite.test[test_plan_ok]()
     suite.test[test_plan_caps]()
+    suite.test[test_plan_live_reference]()
     suite.test[test_plan_bad_caps]()
     suite.test[test_plan_source_survives_cwd_shadow]()
     suite.test[test_plan_convert_refuses]()
@@ -1045,6 +1082,7 @@ def run() raises -> Int:
     suite.test[test_publish_reader_sees_whole_files]()
     suite.test[test_publish_stale_tmp_recycled]()
     suite.test[test_plan_below_floor_refuses]()
+    suite.test[test_plan_lc_below_611_refuses]()
     suite.test[test_smoke_bridge_binds_exercised_bytes]()
     suite.test[test_smoke_bridge_unbound_refuses]()
     suite.test[test_smoke_object_binds_exercised_bytes]()

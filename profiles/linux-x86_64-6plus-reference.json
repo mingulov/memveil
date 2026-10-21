@@ -1,0 +1,146 @@
+{
+  "schema_version": "0.1.1",
+  "profile_id": "linux-x86_64-6plus-reference",
+  "status": "reference-unvalidated",
+  "identity": {
+    "arch": "x86_64",
+    "min_kernel": "6.0",
+    "source": {
+      "origin": "upstream",
+      "revision": "028ef9c96e96197026887c0f092424679298aae8",
+      "note": "Upstream v7.0 inspected during planning. Inspection is not qualification evidence; this profile stays reference-unvalidated until test evidence admits it."
+    },
+    "note": "Reference identity only. A running kernel also needs its own source/config/BTF identity plus attachment and test evidence before any validated claim."
+  },
+  "hooks": [
+    {
+      "name": "swiotlb:swiotlb_bounced",
+      "kind": "tracepoint",
+      "id_path": "/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/id",
+      "format_path": "/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format",
+      "format_text": null,
+      "note": "No recorded format signature yet, so layout conformity cannot be verified under this profile."
+    },
+    {
+      "name": "fexit:swiotlb_tbl_map_single",
+      "kind": "tracing",
+      "function": "swiotlb_tbl_map_single",
+      "attach": "fexit",
+      "signature": "phys_addr_t swiotlb_tbl_map_single(struct device *dev, phys_addr_t orig_addr, size_t mapping_size, unsigned int alloc_align_mask, enum dma_data_direction dir, unsigned long attrs)",
+      "signature_alt": [
+        "phys_addr_t swiotlb_tbl_map_single(struct device *dev, phys_addr_t orig_addr, size_t mapping_size, unsigned int alloc_align_mask, enum dma_data_direction dir, unsigned long *attrs)"
+      ],
+      "note": "Frozen tracing hook; live verification decides under this profile."
+    },
+    {
+      "name": "fentry:__swiotlb_tbl_unmap_single",
+      "kind": "tracing",
+      "function": "__swiotlb_tbl_unmap_single",
+      "attach": "fentry",
+      "signature": "void __swiotlb_tbl_unmap_single(struct device *dev, phys_addr_t tlb_addr, size_t mapping_size, enum dma_data_direction dir, unsigned long attrs, struct io_tlb_pool *pool)",
+      "note": "Frozen tracing hook; live verification decides under this profile."
+    },
+    {
+      "name": "fentry:__swiotlb_sync_single_for_device",
+      "kind": "tracing",
+      "function": "__swiotlb_sync_single_for_device",
+      "attach": "fentry",
+      "signature": "void __swiotlb_sync_single_for_device(struct device *dev, phys_addr_t tlb_addr, size_t size, enum dma_data_direction dir, struct io_tlb_pool *pool)",
+      "note": "Frozen tracing hook; live verification decides under this profile."
+    },
+    {
+      "name": "fentry:__swiotlb_sync_single_for_cpu",
+      "kind": "tracing",
+      "function": "__swiotlb_sync_single_for_cpu",
+      "attach": "fentry",
+      "signature": "void __swiotlb_sync_single_for_cpu(struct device *dev, phys_addr_t tlb_addr, size_t size, enum dma_data_direction dir, struct io_tlb_pool *pool)",
+      "note": "Frozen tracing hook; live verification decides under this profile."
+    },
+    {
+      "name": "fentry:swiotlb_bounce",
+      "kind": "tracing",
+      "function": "swiotlb_bounce",
+      "attach": "fentry",
+      "signature": "void swiotlb_bounce(struct device *dev, phys_addr_t tlb_addr, size_t size, enum dma_data_direction dir, struct io_tlb_pool *mem)",
+      "note": "Frozen tracing hook; live verification decides under this profile."
+    }
+  ],
+  "capabilities": [
+    {
+      "id": "attempt-trace",
+      "status": "candidate",
+      "hooks": [
+        "swiotlb:swiotlb_bounced"
+      ],
+      "reason": "Candidate collection source; availability is checked passively, semantics are unproven under this profile."
+    },
+    {
+      "id": "mapping-lifecycle",
+      "status": "candidate",
+      "hooks": [
+        "fexit:swiotlb_tbl_map_single",
+        "fentry:__swiotlb_tbl_unmap_single"
+      ],
+      "reason": "Candidate lifecycle source; live interfaces are verified per host, semantics are unproven under this profile."
+    },
+    {
+      "id": "copy-actual",
+      "status": "candidate",
+      "hooks": [
+        "fentry:__swiotlb_sync_single_for_device",
+        "fentry:__swiotlb_sync_single_for_cpu",
+        "fentry:swiotlb_bounce"
+      ],
+      "reason": "Candidate executed-length source; live interfaces and member layouts are verified per host, semantics are unproven under this profile."
+    }
+  ],
+  "notes": [
+    "This file must not acquire validated status without the evidence gates in the execution plan.",
+    "Distro builds (for example 7.0.0-34-generic) need their own source/config/BTF identity before qualification.",
+    "Inventory status: upstream v7.0 source inspected during planning (see identity.source); distro patch set not recorded; kernel config identity not recorded; BTF build identity not recorded; tracepoint format signature not recorded; tracepoint call site not verified. None of these become evidence until a validated profile records them with test receipts."
+  ],
+  "layouts": [
+    {
+      "struct": "io_tlb_pool",
+      "field": "start",
+      "bit_offset": 0,
+      "bit_size": 64
+    },
+    {
+      "struct": "io_tlb_pool",
+      "field": "nslabs",
+      "bit_offset": 192,
+      "bit_size": 64
+    },
+    {
+      "struct": "io_tlb_pool",
+      "field": "slots",
+      "bit_offset": 448,
+      "bit_size": 64
+    },
+    {
+      "struct": "io_tlb_slot",
+      "field": "orig_addr",
+      "bit_offset": 0,
+      "bit_size": 64
+    },
+    {
+      "struct": "io_tlb_slot",
+      "field": "alloc_size",
+      "bit_offset": 64,
+      "bit_size": 64
+    },
+    {
+      "struct": "device_dma_parameters",
+      "field": "min_align_mask",
+      "bit_offset": 32,
+      "bit_size": 32
+    },
+    {
+      "struct": "device",
+      "field": "dma_parms",
+      "bit_offset": 5056,
+      "bit_size": 64
+    }
+  ]
+}

@@ -193,7 +193,7 @@ def test_service_run_below_floor_refuses() raises:
     assert_equal(result.exit_code, 3)
     assert_equal(
         result.diagnostic,
-        String("kernel 6.8.0-test below floor 7.0"),
+        String("kernel 5.15.0-test below floor 6.0"),
     )
     assert_equal(writer.creates, 0)
     assert_true(_svc_dirabsent(out))

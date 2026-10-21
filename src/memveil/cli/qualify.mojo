@@ -45,20 +45,28 @@ from memveil.platform.artifact_files import (
     open_bridge_snapshot,
     open_object_snapshot,
 )
+from memveil.platform.capabilities import cap_floor_ok, cap_floor_refusal
 from memveil.platform.clock import wall_ns
 from memveil.platform.evidence import KernelInfo, detect_environment
 from memveil.platform.hash import sha256_hex
 from memveil.platform.narrow import (
     MAX_NARROW_BTF_BYTES,
+    MAX_NARROW_FORMAT_BYTES,
+    MAX_NARROW_IMAGE_BYTES,
     MAX_NARROW_OBJECT_BYTES,
     NarrowBindings,
     check_identity_bindings,
+    measure_live_bindings,
     parse_narrow_note,
+    read_live_bid,
+    read_live_bytes,
+    read_live_config,
 )
 from memveil.platform.profiles import (
     CapQualification,
     NamedProfiles,
     Profile,
+    ProfileHook,
     SigVerdict,
     default_receipts_dir,
     load_profiles_named,
@@ -67,6 +75,7 @@ from memveil.platform.profiles import (
     select_attempt_hook,
     select_profile,
     verify_hook_signatures,
+    verify_live_interfaces,
 )
 from memveil.platform.reader import (
     EvidenceReader,
@@ -319,19 +328,98 @@ def _explicit_doc(
     return String("unknown --profile: ") + explicit
 
 
+def _plan_live(
+    root: String,
+    doc: Profile,
+    source: String,
+    kernel: KernelInfo,
+    caps: List[String],
+) -> QualPlan:
+    """Plan from live interfaces for a noteless doc; never raises.
+
+    The live check proves the requested capabilities'
+    trace formats, hook signatures, and attachability;
+    then the attempt hook is selected, the live
+    identity values are measured, BTF is re-read, and
+    every tracing-hook signature must match. Any
+    failure refuses with its exact cause.
+    """
+    var live = verify_live_interfaces(root, doc, caps.copy())
+    if not live.ok:
+        return _refuse_plan(
+            String("live check failed: ") + live.reason
+        )
+    var sel = select_attempt_hook(doc)
+    if not sel.ok:
+        return _refuse_plan(sel.refusal.copy())
+    var bindings = NarrowBindings()
+    var unmeasured = measure_live_bindings(
+        root,
+        kernel.release,
+        String(_ZLIB),
+        sel.hook.format_path,
+        bindings,
+    )
+    if unmeasured != String(""):
+        return _refuse_plan(unmeasured)
+    var btf: List[UInt8]
+    try:
+        btf = read_host_file(
+            join_root(root, String(_BTF_PATH)),
+            String("btf"),
+            MAX_NARROW_BTF_BYTES,
+        )
+    except e:
+        return _refuse_plan(String("BTF unreadable: ") + String(e))
+    # Only hooks serving requested capabilities prove
+    # signatures: an attempt-only plan must not trip on an
+    # unrequested lifecycle hook this kernel does not have.
+    var wanted = List[String]()
+    for i in range(len(caps)):
+        for j in range(len(doc.caps)):
+            if doc.caps[j].id == caps[i]:
+                for k in range(len(doc.caps[j].hooks)):
+                    wanted.append(doc.caps[j].hooks[k].copy())
+    var sub = doc.copy()
+    sub.hooks = List[ProfileHook]()
+    for i in range(len(doc.hooks)):
+        for j in range(len(wanted)):
+            if doc.hooks[i].name == wanted[j]:
+                sub.hooks.append(doc.hooks[i].copy())
+                break
+    var sigs = verify_hook_signatures(sub, Span(btf))
+    for i in range(len(sigs)):
+        if not sigs[i].ok:
+            return _refuse_plan(sigs[i].reason.copy())
+    var out = QualPlan()
+    out.ok = True
+    out.doc = doc.copy()
+    out.doc_source = source.copy()
+    out.kernel = kernel.copy()
+    out.bindings = bindings.copy()
+    out.caps = caps.copy()
+    out.signatures = sigs.copy()
+    return out^
+
+
 def plan_qualification(
     root: String, profiles_dir: String, opts: QualifyOptions
 ) -> QualPlan:
-    """Select one doc and prove it statically; never raises.
+    """Select one doc and prove it; never raises.
 
     The capability request must parse and name a record
-    channel, the evidence root must open above the 7.0
+    channel, the evidence root must open above the 6.0
+    floor with every requested capability above its own
     floor, and one covering doc must exist (explicit or
-    first in manifest order). The doc's identity
-    bindings must parse and hold against the live tree,
-    and every tracing-hook signature must match live
-    BTF. Any failure refuses with its exact cause; the
-    smoke runs only on an ok plan.
+    first in manifest order). A doc with a parseable
+    narrow note must hold its identity bindings against
+    the live tree; a non-validated doc with no usable
+    note (absent, or outside the narrow grammar) instead
+    proves the requested capabilities' live interfaces
+    and measures the live identity values. Every
+    requested tracing-hook signature must match live BTF
+    either way. Any failure refuses with its exact cause;
+    the smoke runs only on an ok plan.
     """
     var ask = parse_requested_caps(opts.capabilities)
     if not ask.ok:
@@ -355,8 +443,13 @@ def plan_qualification(
         return _refuse_plan(
             String("kernel ")
             + env.kernel.release
-            + String(" below floor 7.0")
+            + String(" below floor 6.0")
         )
+    for i in range(len(ask.caps)):
+        if not cap_floor_ok(ask.caps[i], env.kernel.release):
+            return _refuse_plan(
+                cap_floor_refusal(ask.caps[i], env.kernel.release)
+            )
     var named: NamedProfiles
     try:
         named = load_profiles_named(profiles_dir)
@@ -392,6 +485,18 @@ def plan_qualification(
             )
     var parsed = parse_narrow_note(doc.identity.source.note)
     if not parsed.ok:
+        # An unbound reference (no note, or a note outside
+        # the narrow grammar, prose included) never binds
+        # exactly; it plans from live interfaces, mirroring
+        # record's admission trigger.
+        if doc.status != String("validated"):
+            return _plan_live(
+                root,
+                doc.copy(),
+                source.copy(),
+                env.kernel.copy(),
+                ask.caps.copy(),
+            )
         return _refuse_plan(
             String("profile ")
             + doc.profile_id

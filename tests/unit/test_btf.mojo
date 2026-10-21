@@ -9,6 +9,7 @@ from memveil.platform.btf import (
     read_btf_func_proto,
     read_btf_maps,
     read_btf_maps_ring,
+    read_btf_member,
 )
 from memveil.platform.reader import read_host_file
 
@@ -326,6 +327,70 @@ def test_func_proto_int_size_lp64_ok() raises:
     assert_equal(v.canonical, want)
 
 
+def test_btf_member_pool() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/swiotlb-live.bin"))
+    var s = read_btf_member(
+        Span(raw), String("io_tlb_pool"), String("start"))
+    assert_true(s.ok)
+    assert_equal(s.message, String(""))
+    assert_equal(s.bit_offset, 0)
+    assert_equal(s.bit_size, 64)
+    var n = read_btf_member(
+        Span(raw), String("io_tlb_pool"), String("nslabs"))
+    assert_true(n.ok)
+    assert_equal(n.bit_offset, 192)
+    assert_equal(n.bit_size, 64)
+    var q = read_btf_member(
+        Span(raw), String("io_tlb_pool"), String("slots"))
+    assert_true(q.ok)
+    assert_equal(q.bit_offset, 448)
+    assert_equal(q.bit_size, 64)
+
+
+def test_btf_member_slot() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/swiotlb-live.bin"))
+    var o = read_btf_member(
+        Span(raw), String("io_tlb_slot"), String("orig_addr"))
+    assert_true(o.ok)
+    assert_equal(o.bit_offset, 0)
+    assert_equal(o.bit_size, 64)
+    var a = read_btf_member(
+        Span(raw), String("io_tlb_slot"), String("alloc_size"))
+    assert_true(a.ok)
+    assert_equal(a.bit_offset, 64)
+    assert_equal(a.bit_size, 64)
+
+
+def test_btf_member_device() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/swiotlb-live.bin"))
+    var m = read_btf_member(
+        Span(raw), String("device_dma_parameters"),
+        String("min_align_mask"),
+    )
+    assert_true(m.ok)
+    assert_equal(m.bit_offset, 32)
+    assert_equal(m.bit_size, 32)
+    var d = read_btf_member(
+        Span(raw), String("device"), String("dma_parms"))
+    assert_true(d.ok)
+    assert_equal(d.bit_offset, 5056)
+    assert_equal(d.bit_size, 64)
+
+
+def test_btf_member_not_found() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/swiotlb-live.bin"))
+    var s = read_btf_member(
+        Span(raw), String("no_such_struct"), String("start"))
+    assert_true(not s.ok)
+    assert_equal(s.message, String("struct no_such_struct not found"))
+    var m = read_btf_member(
+        Span(raw), String("io_tlb_pool"), String("no_such_field"))
+    assert_true(not m.ok)
+    assert_equal(
+        m.message, String("member no_such_field not found in io_tlb_pool")
+    )
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_btf_ok]()
@@ -363,6 +428,10 @@ def run() raises -> Int:
     suite.test[test_btf_kind_flag_enum64_ok]()
     suite.test[test_func_proto_int_size_mismatch]()
     suite.test[test_func_proto_int_size_lp64_ok]()
+    suite.test[test_btf_member_pool]()
+    suite.test[test_btf_member_slot]()
+    suite.test[test_btf_member_device]()
+    suite.test[test_btf_member_not_found]()
     suite^.run()
     return 0
 

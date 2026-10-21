@@ -161,8 +161,23 @@ def parse_kernel_triple(release: String) -> KernelTriple:
     return KernelTriple(True, major, minor, patch)
 
 
+def triple_ge(t: KernelTriple, major: Int, minor: Int) -> Bool:
+    """True when a parsed triple reaches ``major.minor``."""
+    if not t.ok:
+        return False
+    if t.major != major:
+        return t.major > major
+    return t.minor >= minor
+
+
 def _check_floor(release: String, arch: String) -> KernelInfo:
-    """Check one release/arch pair against the 7.0 floor."""
+    """Check one release/arch pair against the 6.0 floor.
+
+    The program floor is the lowest kernel any capability
+    can serve (attempt-trace via its tracepoint); each
+    capability enforces its own higher floor where needed
+    (see ``cap_floor_ok`` in capabilities).
+    """
     var triple = parse_kernel_triple(release)
     if not triple.ok:
         return KernelInfo(
@@ -171,15 +186,15 @@ def _check_floor(release: String, arch: String) -> KernelInfo:
             False,
             "release " + release + " is unparseable; floor unknown",
         )
-    if triple.major >= 7:
+    if triple_ge(triple, 6, 0):
         return KernelInfo(
             release,
             arch,
             True,
-            "release " + release + " meets the 7.0 floor",
+            "release " + release + " meets the 6.0 floor",
         )
     return KernelInfo(
-        release, arch, False, "release " + release + " is below the 7.0 floor"
+        release, arch, False, "release " + release + " is below the 6.0 floor"
     )
 
 

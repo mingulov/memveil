@@ -31,15 +31,29 @@ from memveil.model.common import (
     parse_u64_field,
 )
 from memveil.model.validate import ValidationError, check_bounded_text
-from memveil.platform.btf import read_btf_func_proto
+from memveil.platform.artifact_files import join_root
+from memveil.platform.btf import read_btf_func_proto, read_btf_member
 from memveil.platform.evidence import KernelInfo, parse_kernel_triple
 from memveil.platform.narrow import (
+    MAX_NARROW_BTF_BYTES,
+    MAX_NARROW_FORMAT_BYTES,
     NarrowBindings,
     check_identity_bindings,
     is_sha256_value,
+    measure_live_bindings,
     parse_narrow_note,
+    probe_trace_offsets,
 )
-from memveil.platform.reader import bytes_to_text, read_host_file
+from memveil.platform.reader import (
+    EVIDENCE_ABSENT,
+    EVIDENCE_DENIED,
+    EVIDENCE_OK,
+    EvidenceReader,
+    bytes_to_text,
+    file_state,
+    open_evidence_reader,
+    read_host_file,
+)
 from memveil.render.json import escape_json
 
 
@@ -48,10 +62,13 @@ comptime MAX_PROFILE_HOOKS = 32
 comptime MAX_PROFILE_CAPS = 16
 comptime MAX_PROFILE_NOTES = 32
 comptime MAX_CAP_HOOKS = 32
+comptime MAX_HOOK_ALT = 4
+comptime MAX_PROFILE_LAYOUTS = 16
 comptime _MANIFEST_CAP = 65536
 comptime _PROFILE_CAP = 1048576
 comptime _INSTALLED_PROFILES_DIR = "/usr/share/memveil/profiles"
 comptime _INSTALLED_RECEIPTS_DIR = "/var/lib/memveil/receipts"
+comptime MAX_FILTER_FUNCS_BYTES = 8388608
 
 
 struct ProfileHook(Copyable):
@@ -59,8 +76,8 @@ struct ProfileHook(Copyable):
 
     Tracepoint hooks carry id/format paths plus optional layout
     text; tracing hooks carry the frozen function identity
-    (function, attach, signature) instead. Each kind forbids
-    the other's fields.
+    (function, attach, signature) plus optional alternate
+    signatures instead. Each kind forbids the other's fields.
     """
 
     var name: String
@@ -72,6 +89,7 @@ struct ProfileHook(Copyable):
     var function: String
     var attach: String
     var signature: String
+    var signature_alt: List[String]
     var has_note: Bool
     var note: String
 
@@ -85,6 +103,7 @@ struct ProfileHook(Copyable):
         self.function = String("")
         self.attach = String("")
         self.signature = String("")
+        self.signature_alt = List[String]()
         self.has_note = False
         self.note = String("")
 
@@ -142,6 +161,21 @@ struct ProfileIdentity(Copyable):
         self.note = String("")
 
 
+struct ProfileLayout(Copyable):
+    """One recorded BTF member layout: struct field plus bit geometry."""
+
+    var struct_name: String
+    var field_name: String
+    var bit_offset: Int
+    var bit_size: Int
+
+    def __init__(out self):
+        self.struct_name = String("")
+        self.field_name = String("")
+        self.bit_offset = 0
+        self.bit_size = 0
+
+
 struct Profile(Copyable):
     """One validated profile manifest."""
 
@@ -151,6 +185,7 @@ struct Profile(Copyable):
     var hooks: List[ProfileHook]
     var caps: List[ProfileCapability]
     var notes: List[String]
+    var layouts: List[ProfileLayout]
 
     def __init__(out self):
         self.profile_id = String("")
@@ -159,6 +194,7 @@ struct Profile(Copyable):
         self.hooks = List[ProfileHook]()
         self.caps = List[ProfileCapability]()
         self.notes = List[String]()
+        self.layouts = List[ProfileLayout]()
 
 
 struct ProfileDecision(Copyable):
@@ -440,8 +476,9 @@ def _parse_hook(mut scan: Scanner) raises -> ProfileHook:
 
     Tracepoint hooks need id/format paths with optional
     layout text; tracing hooks need the frozen function
-    identity (function, attach, signature). Each kind
-    forbids the other's fields.
+    identity (function, attach, signature) plus optional
+    alternate signatures. Each kind forbids the other's
+    fields.
     """
     scan.begin_object()
     var out = ProfileHook()
@@ -453,6 +490,7 @@ def _parse_hook(mut scan: Scanner) raises -> ProfileHook:
     var has_function = False
     var has_attach = False
     var has_signature = False
+    var has_alt = False
     var has_note = False
     if not object_is_empty(scan):
         while True:
@@ -540,6 +578,33 @@ def _parse_hook(mut scan: Scanner) raises -> ProfileHook:
                     raise ValidationError("hook.signature", String(e))
                 out.signature = v
                 has_signature = True
+            elif key == "signature_alt":
+                if has_alt:
+                    raise ValidationError(
+                        "hook.signature_alt", "duplicate"
+                    )
+                scan.begin_array()
+                if not array_is_empty(scan):
+                    while True:
+                        scan.skip_ws()
+                        var v = scan.parse_string()
+                        try:
+                            check_bounded_text(
+                                v, 1, 512, "hook.signature_alt[]"
+                            )
+                        except e:
+                            raise ValidationError(
+                                "hook.signature_alt[]", String(e)
+                            )
+                        out.signature_alt.append(v)
+                        if len(out.signature_alt) > MAX_HOOK_ALT:
+                            raise ValidationError(
+                                "hook.signature_alt", "too many items"
+                            )
+                        if not array_next(scan, "hook.signature_alt"):
+                            break
+                scan.end_array()
+                has_alt = True
             elif key == "note":
                 if has_note:
                     raise ValidationError("hook.note", "duplicate")
@@ -564,10 +629,75 @@ def _parse_hook(mut scan: Scanner) raises -> ProfileHook:
         if not has_function or not has_attach or not has_signature:
             raise ValidationError("hook", "missing field")
     else:
-        if has_function or has_attach or has_signature:
+        if has_function or has_attach or has_signature or has_alt:
             raise ValidationError("hook", "tracing field on tracepoint")
         if not has_id or not has_format:
             raise ValidationError("hook", "missing field")
+    return out^
+
+
+def _parse_layout(mut scan: Scanner) raises -> ProfileLayout:
+    """Parse one layouts[] item: struct, field, bit_offset, bit_size."""
+    scan.begin_object()
+    var out = ProfileLayout()
+    var has_struct = False
+    var has_field = False
+    var has_off = False
+    var has_size = False
+    if not object_is_empty(scan):
+        while True:
+            scan.skip_ws()
+            var key = scan.parse_string()
+            expect_colon(scan, "layout")
+            if key == "struct":
+                if has_struct:
+                    raise ValidationError("layout.struct", "duplicate")
+                var v = scan.parse_string()
+                try:
+                    check_bounded_text(v, 1, 128, "layout.struct")
+                except e:
+                    raise ValidationError("layout.struct", String(e))
+                out.struct_name = v
+                has_struct = True
+            elif key == "field":
+                if has_field:
+                    raise ValidationError("layout.field", "duplicate")
+                var v = scan.parse_string()
+                try:
+                    check_bounded_text(v, 1, 128, "layout.field")
+                except e:
+                    raise ValidationError("layout.field", String(e))
+                out.field_name = v
+                has_field = True
+            elif key == "bit_offset":
+                if has_off:
+                    raise ValidationError("layout.bit_offset", "duplicate")
+                scan.skip_ws()
+                var v = scan.parse_int()
+                if v < Int64(0):
+                    raise ValidationError(
+                        "layout.bit_offset", "out of range"
+                    )
+                out.bit_offset = Int(v)
+                has_off = True
+            elif key == "bit_size":
+                if has_size:
+                    raise ValidationError("layout.bit_size", "duplicate")
+                scan.skip_ws()
+                var v = scan.parse_int()
+                if v < Int64(0):
+                    raise ValidationError(
+                        "layout.bit_size", "out of range"
+                    )
+                out.bit_size = Int(v)
+                has_size = True
+            else:
+                raise ValidationError("layout", "unknown layout field")
+            if not object_next(scan, "layout"):
+                break
+    scan.end_object()
+    if not has_struct or not has_field or not has_off or not has_size:
+        raise ValidationError("layout", "missing field")
     return out^
 
 
@@ -669,6 +799,7 @@ def parse_profile_bytes(data: List[UInt8]) raises -> Profile:
     var has_hooks = False
     var has_caps = False
     var has_notes = False
+    var has_layouts = False
     if not object_is_empty(scan):
         while True:
             scan.skip_ws()
@@ -764,6 +895,22 @@ def parse_profile_bytes(data: List[UInt8]) raises -> Profile:
                             break
                 scan.end_array()
                 has_notes = True
+            elif key == "layouts":
+                if has_layouts:
+                    raise ValidationError("layouts", "duplicate")
+                scan.begin_array()
+                if not array_is_empty(scan):
+                    while True:
+                        var l = _parse_layout(scan)
+                        out.layouts.append(l^)
+                        if len(out.layouts) > MAX_PROFILE_LAYOUTS:
+                            raise ValidationError(
+                                "layouts", "too many items"
+                            )
+                        if not array_next(scan, "layouts"):
+                            break
+                scan.end_array()
+                has_layouts = True
             else:
                 raise ValidationError("profile", "unknown profile field")
             if not object_next(scan, "profile"):
@@ -1262,8 +1409,9 @@ def verify_hook_signatures(
     One verdict per tracing hook in profile order; tracepoint
     hooks are skipped (their tracefs layout is checked
     separately). A verdict is ok only when the frozen
-    signature normalizes and spells exactly the live BTF
-    prototype; every refusal names the hook and the cause.
+    signature (or any recorded alternate) normalizes and
+    spells exactly the live BTF prototype; every refusal
+    names the hook and the cause.
     """
     var out = List[SigVerdict]()
     for i in range(len(profile.hooks)):
@@ -1277,19 +1425,377 @@ def verify_hook_signatures(
             v.reason = String(t"{h.name}: frozen signature malformed")
             out.append(v.copy())
             continue
+        var alts = List[String]()
+        var alt_bad = False
+        for a in range(len(h.signature_alt)):
+            var an = _normalize_frozen_signature(
+                h.signature_alt[a], h.function
+            )
+            if not an.has:
+                alt_bad = True
+                break
+            alts.append(an.value.copy())
+        if alt_bad:
+            v.reason = String(t"{h.name}: frozen signature_alt malformed")
+            out.append(v.copy())
+            continue
         var live = read_btf_func_proto(btf, h.function)
         if not live.ok:
             v.reason = String(t"{h.name}: {live.message}")
             out.append(v.copy())
             continue
         v.live = live.canonical.copy()
-        if live.canonical != norm.value:
+        var hit = live.canonical == norm.value
+        for a in range(len(alts)):
+            if live.canonical == alts[a]:
+                hit = True
+                break
+        if not hit:
             v.reason = String(t"{h.name}: signature mismatch")
             out.append(v.copy())
             continue
         v.ok = True
         out.append(v.copy())
     return out^
+
+
+struct LiveVerdict(Copyable):
+    """One live-interface verdict: ok, refused, or unknown.
+
+    ``unknown`` True means the evidence was unreadable, so
+    the interfaces are neither verified nor refused; every
+    other refusal carries ``unknown`` False. ``reason`` is
+    "" exactly when ``ok``.
+    """
+
+    var ok: Bool
+    var reason: String
+    var unknown: Bool
+
+    def __init__(out self):
+        self.ok = False
+        self.reason = String("")
+        self.unknown = False
+
+    def __init__(out self, ok: Bool, reason: String, unknown: Bool):
+        self.ok = ok
+        self.reason = reason.copy()
+        self.unknown = unknown
+
+
+def _live_refuse(reason: String) -> LiveVerdict:
+    """One refusal verdict: not ok, known, with the reason."""
+    return LiveVerdict(False, reason.copy(), False)
+
+
+def _live_unknown(reason: String) -> LiveVerdict:
+    """One unknown verdict: unreadable evidence, with the reason."""
+    return LiveVerdict(False, reason.copy(), True)
+
+
+def _read_live_btf(
+    reader: EvidenceReader, mut btf: List[UInt8]
+) -> LiveVerdict:
+    """Read host BTF with absent/denied tri-state.
+
+    Ok verdict carries the bytes in btf; anything else
+    carries the failure verdict. Absence refuses (a BTF-less
+    kernel cannot serve tracing), denial reports unknown.
+    """
+    var done = LiveVerdict()
+    var st = file_state(reader, String("/sys/kernel/btf/vmlinux"))
+    if st == EVIDENCE_ABSENT:
+        return _live_refuse(
+            String("BTF absent (kernel built without BTF)")
+        )
+    if st == EVIDENCE_DENIED:
+        return _live_unknown(String("BTF denied (privilege)"))
+    try:
+        btf = read_host_file(
+            join_root(reader.root, String("/sys/kernel/btf/vmlinux")),
+            String("btf"),
+            MAX_NARROW_BTF_BYTES,
+        )
+    except e:
+        return _live_unknown(
+            String("BTF unreadable: ") + String(e)
+        )
+    done.ok = True
+    return done^
+
+
+def verify_live_cap(
+    reader: EvidenceReader, profile: Profile, cap_id: String
+) -> LiveVerdict:
+    """Verify one capability's live interfaces under reader.
+
+    Reads host BTF only when a tracing hook or a copy
+    layout needs it, then checks the capability's
+    declared hooks against the live kernel: the first
+    tracepoint-kind hook's format must read and its
+    layout must probe (offsets are probed live, never
+    pinned against recorded text; the id file is
+    best-effort, mirroring record, which never reads it),
+    every tracing hook's
+    frozen signature (or any recorded alternate) must
+    spell exactly the live BTF prototype, copy-actual
+    also checks every recorded member layout against the
+    same BTF bytes, and every traced function must appear
+    as a full line in available_filter_functions. A
+    capability naming no tracepoint hook falls back to
+    the doc's first tracepoint site only for
+    attempt-trace, one with no tracing hooks skips the
+    filter list, and only copy-actual checks member
+    layouts, so tracing-only caps never depend on
+    tracefs layout and tracepoint-only caps never depend
+    on ftrace. Never raises: unreadable evidence reports
+    unknown, everything else reports its own refusal.
+    """
+    var cap = ProfileCapability()
+    var found = False
+    for i in range(len(profile.caps)):
+        if profile.caps[i].id == cap_id:
+            cap = profile.caps[i].copy()
+            found = True
+            break
+    if not found:
+        return _live_refuse(String(t"{cap_id}: capability not declared"))
+    var btf = List[UInt8]()
+    var site = ProfileHook()
+    var has_site = False
+    for i in range(len(cap.hooks)):
+        for j in range(len(profile.hooks)):
+            if profile.hooks[j].name == cap.hooks[i]:
+                if profile.hooks[j].kind == String("tracepoint"):
+                    site = profile.hooks[j].copy()
+                    has_site = True
+                break
+        if has_site:
+            break
+    if not has_site and cap_id == String("attempt-trace"):
+        # Mirror select_attempt_hook: attempt-trace naming
+        # no tracepoint hook still proves the doc's first
+        # tracepoint site when the doc carries one.
+        # Tracing-only capabilities never fall back: they
+        # must not depend on tracefs layout.
+        for j in range(len(profile.hooks)):
+            if profile.hooks[j].kind == String("tracepoint"):
+                site = profile.hooks[j].copy()
+                has_site = True
+                break
+    if has_site:
+        try:
+            _ = read_host_file(
+                join_root(reader.root, site.id_path),
+                String("id"),
+                MAX_NARROW_FORMAT_BYTES,
+            )
+        except:
+            pass
+        var fstate = file_state(reader, site.format_path)
+        if fstate == EVIDENCE_ABSENT:
+            return _live_refuse(
+                String("tracepoint ") + site.name + String(" absent")
+            )
+        if fstate == EVIDENCE_DENIED:
+            return _live_unknown(
+                String("tracepoint ")
+                + site.name
+                + String(" denied (privilege)")
+            )
+        var form = List[UInt8]()
+        try:
+            form = read_host_file(
+                join_root(reader.root, site.format_path),
+                String("format"),
+                MAX_NARROW_FORMAT_BYTES,
+            )
+        except e:
+            return _live_unknown(
+                String("tracepoint ")
+                + site.name
+                + String(" unreadable: ")
+                + String(e)
+            )
+        var probe = probe_trace_offsets(Span(form))
+        if not probe.ok:
+            return _live_refuse(
+                String("layout: ") + probe.message
+            )
+    var needs_btf = False
+    for i in range(len(cap.hooks)):
+        for j in range(len(profile.hooks)):
+            if profile.hooks[j].name == cap.hooks[i]:
+                if profile.hooks[j].kind == String("tracing"):
+                    needs_btf = True
+                break
+        if needs_btf:
+            break
+    if cap_id == String(COPY_CAP_ID) and len(profile.layouts) > 0:
+        needs_btf = True
+    if needs_btf:
+        var bread = _read_live_btf(reader, btf)
+        if not bread.ok:
+            return bread^
+    var want_names = List[String]()
+    var want_fns = List[String]()
+    for i in range(len(cap.hooks)):
+        var hook = ProfileHook()
+        var known = False
+        for j in range(len(profile.hooks)):
+            if profile.hooks[j].name == cap.hooks[i]:
+                hook = profile.hooks[j].copy()
+                known = True
+                break
+        if not known:
+            return _live_refuse(
+                String(t"{cap.id}: hook {cap.hooks[i]} missing")
+            )
+        if hook.kind != String("tracing"):
+            continue
+        var norm = _normalize_frozen_signature(
+            hook.signature, hook.function
+        )
+        if not norm.has:
+            return _live_refuse(
+                String(t"{hook.name}: frozen signature malformed")
+            )
+        var alts = List[String]()
+        for a in range(len(hook.signature_alt)):
+            var an = _normalize_frozen_signature(
+                hook.signature_alt[a], hook.function
+            )
+            if not an.has:
+                return _live_refuse(
+                    String(t"{hook.name}: frozen signature_alt malformed")
+                )
+            alts.append(an.value.copy())
+        var live = read_btf_func_proto(Span(btf), hook.function)
+        if not live.ok:
+            return _live_refuse(
+                String(t"{hook.name}: {live.message}")
+            )
+        var hit = live.canonical == norm.value
+        for a in range(len(alts)):
+            if live.canonical == alts[a]:
+                hit = True
+                break
+        if not hit:
+            return _live_refuse(
+                hook.name
+                + String(": signature mismatch (live: ")
+                + live.canonical
+                + String(")")
+            )
+        want_names.append(hook.name.copy())
+        want_fns.append(hook.function.copy())
+    if cap_id == String(COPY_CAP_ID):
+        for i in range(len(profile.layouts)):
+            var lay = profile.layouts[i].copy()
+            var m = read_btf_member(
+                Span(btf), lay.struct_name, lay.field_name
+            )
+            if not m.ok:
+                return _live_refuse(
+                    lay.struct_name + "." + lay.field_name + ": " + m.message
+                )
+            if m.bit_offset != lay.bit_offset or m.bit_size != lay.bit_size:
+                return _live_refuse(
+                    lay.struct_name
+                    + "."
+                    + lay.field_name
+                    + ": layout mismatch (live offset "
+                    + String(m.bit_offset)
+                    + " size "
+                    + String(m.bit_size)
+                    + ")"
+                )
+    if len(want_fns) > 0:
+        var fpath = String(
+            "/sys/kernel/tracing/available_filter_functions"
+        )
+        var lstate = file_state(reader, fpath)
+        if lstate == EVIDENCE_ABSENT:
+            return _live_refuse(
+                String(
+                    "available_filter_functions absent"
+                    " (kernel built without ftrace)"
+                )
+            )
+        if lstate == EVIDENCE_DENIED:
+            return _live_unknown(
+                String(
+                    "available_filter_functions denied (privilege)"
+                )
+            )
+        var listed = List[UInt8]()
+        try:
+            listed = read_host_file(
+                join_root(reader.root, fpath),
+                String("filter functions"),
+                MAX_FILTER_FUNCS_BYTES,
+            )
+        except e:
+            return _live_unknown(
+                String("available_filter_functions unreadable: ")
+                + String(e)
+            )
+        var text = bytes_to_text(listed^)
+        var lines = text.split(String("\n"))
+        for i in range(len(want_fns)):
+            var seen = False
+            for j in range(len(lines)):
+                if String(lines[j]) == want_fns[i]:
+                    seen = True
+                    break
+            if not seen:
+                return _live_refuse(
+                    want_names[i]
+                    + String(": function ")
+                    + want_fns[i]
+                    + String(
+                        " not listed in available_filter_functions"
+                    )
+                )
+    var done = LiveVerdict()
+    done.ok = True
+    return done^
+
+
+def verify_live_interfaces(
+    reader: EvidenceReader, profile: Profile, caps: List[String]
+) -> LiveVerdict:
+    """Verify every named capability's live interfaces.
+
+    Checks each capability in order; the first refusal or
+    unknown wins. All verified yields ok with an empty
+    reason.
+    """
+    for i in range(len(caps)):
+        var v = verify_live_cap(reader, profile, caps[i])
+        if not v.ok:
+            return v^
+    var done = LiveVerdict()
+    done.ok = True
+    return done^
+
+
+def verify_live_interfaces(
+    root: String, profile: Profile, caps: List[String]
+) -> LiveVerdict:
+    """Verify live interfaces from a root path.
+
+    Opens the evidence reader (live host for "", else
+    the fixture's meta, denied list included) and
+    delegates. An unopenable root reports unknown.
+    """
+    try:
+        var reader = open_evidence_reader(root)
+        return verify_live_interfaces(reader, profile, caps.copy())
+    except e:
+        return _live_unknown(
+            String("evidence root unusable: ") + String(e)
+        )
 
 
 struct _ReceiptHit(Copyable, Movable):
@@ -1427,6 +1933,39 @@ def _check_receipt(
         raw = read_host_file(path, String("receipt"), _PROFILE_CAP)
     except:
         out.note = String("absent")
+        return out^
+    var noted = doc.identity.source.has_note and parse_narrow_note(
+        doc.identity.source.note
+    ).ok
+    if not noted:
+        # A doc with no usable note verifies its receipt
+        # against fresh live measurements; the passive
+        # path resolves no objects, so artifact hashes are
+        # presence-checked only.
+        var v = verify_live_receipt(
+            Span(raw),
+            doc,
+            kernel,
+            bridge_sha,
+            root,
+            zlib,
+            String(""),
+            String(""),
+            String(""),
+        )
+        if not v.ok:
+            if v.bridge_mismatch and bridge_sha == String(""):
+                out.note = (
+                    doc.profile_id
+                    + String(
+                        " receipt bridge unchecked:"
+                        " no binding performed on this path"
+                    )
+                )
+                return out^
+            out.note = doc.profile_id + String(" ") + v.message
+            return out^
+        out.caps = v.caps.copy()
         return out^
     var v = verify_qualification_receipt(
         Span(raw), doc, kernel, bridge_sha
@@ -2177,37 +2716,33 @@ def _parse_receipt_workload(mut scan: Scanner) raises:
         raise ValidationError("receipt.workload", "missing field")
 
 
-def verify_qualification_receipt(
-    data: Span[UInt8, _],
-    doc: Profile,
-    kernel: KernelInfo,
-    bridge_sha: String,
-) -> ReceiptVerdict:
-    """Verify a receipt against its document and the live kernel.
+struct _ReceiptParse(Copyable, Movable):
+    """Parsed receipt bytes: ok plus fields, else the cause."""
 
-    The receipt must parse with no trailing data, carry
-    schema 0.1.0 and grade local-auto for this document,
-    name this kernel, and repeat the document note's
-    identity bindings exactly. The kernel must also equal
-    the document revision, and every object hash the
-    receipt claims must equal the note's binding, so an
-    updated document or object cannot inherit an old
-    receipt. ``bridge_sha`` is the bare hex sha256 of the
-    currently-resolved bridge ("" when unresolvable);
-    the receipt's bridge hash must equal it, so a receipt
-    minted for one bridge cannot admit another. The
-    bridge compares last, after document and object
-    drift, so a pure bridge rotation names the bridge.
-    At least one capability must qualify; the workload
-    is shape-checked audit context. Never raises.
+    var ok: Bool
+    var message: String
+    var rec: _ReceiptData
+
+    def __init__(out self):
+        self.ok = False
+        self.message = String("")
+        self.rec = _ReceiptData()
+
+
+def _parse_receipt_data(data: Span[UInt8, _]) -> _ReceiptParse:
+    """Parse one receipt blob with no trailing data.
+
+    Shared by the exact and live verifiers so both
+    enforce the same schema, grade, and field grammar.
+    JSON consumption validation finishes before any
+    binding or bridge comparison.
     """
-    var out = ReceiptVerdict()
-    var text = String("")
+    var out = _ReceiptParse()
     try:
         var raw = List[UInt8]()
         for i in range(len(data)):
             raw.append(data[i])
-        text = bytes_to_text(raw^)
+        var text = bytes_to_text(raw^)
         var scan = Scanner(text, 64)
         scan.begin_object()
         var rec = _ReceiptData()
@@ -2291,6 +2826,49 @@ def verify_qualification_receipt(
         for i in range(10):
             if not seen[i]:
                 raise ValidationError("receipt", "missing field")
+        scan.skip_ws()
+        if not scan.at_end():
+            raise ValidationError("receipt", "trailing data")
+        out.ok = True
+        out.rec = rec^
+    except e:
+        out.message = String("receipt unparseable: ") + String(e)
+        return out^
+    out.message = String("")
+    return out^
+
+
+def verify_qualification_receipt(
+    data: Span[UInt8, _],
+    doc: Profile,
+    kernel: KernelInfo,
+    bridge_sha: String,
+) -> ReceiptVerdict:
+    """Verify a receipt against its document and the live kernel.
+
+    The receipt must parse with no trailing data, carry
+    schema 0.1.0 and grade local-auto for this document,
+    name this kernel, and repeat the document note's
+    identity bindings exactly. The kernel must also equal
+    the document revision, and every object hash the
+    receipt claims must equal the note's binding, so an
+    updated document or object cannot inherit an old
+    receipt. ``bridge_sha`` is the bare hex sha256 of the
+    currently-resolved bridge ("" when unresolvable);
+    the receipt's bridge hash must equal it, so a receipt
+    minted for one bridge cannot admit another. The
+    bridge compares last, after document and object
+    drift, so a pure bridge rotation names the bridge.
+    At least one capability must qualify; the workload
+    is shape-checked audit context. Never raises.
+    """
+    var out = ReceiptVerdict()
+    var pre = _parse_receipt_data(data)
+    if not pre.ok:
+        out.message = pre.message.copy()
+        return out^
+    var rec = pre.rec.copy()
+    try:
         if rec.profile_id != doc.profile_id:
             out.message = String("receipt names another profile")
             return out^
@@ -2350,9 +2928,6 @@ def verify_qualification_receipt(
         ):
             out.message = String("receipt artifacts differ from note")
             return out^
-        scan.skip_ws()
-        if not scan.at_end():
-            raise ValidationError("receipt", "trailing data")
         if rec.bridge != bridge_sha:
             out.message = String(
                 "receipt bridge differs from resolved bridge"
@@ -2363,6 +2938,104 @@ def verify_qualification_receipt(
     except e:
         out.message = String("receipt unparseable: ") + String(e)
         return out^
+    out.ok = True
+    out.message = String("")
+    return out^
+
+
+def verify_live_receipt(
+    data: Span[UInt8, _],
+    doc: Profile,
+    kernel: KernelInfo,
+    bridge_sha: String,
+    root: String,
+    zlib: String,
+    obj_attempt: String,
+    obj_lc: String,
+    obj_cp: String,
+) -> ReceiptVerdict:
+    """Verify a receipt for a doc with no usable narrow note.
+
+    Same schema, grade, profile, kernel, and bridge checks
+    as the exact verifier, but the receipt's identity
+    bindings compare against fresh live measurements under
+    root instead of a note, and the revision check is
+    skipped (a noteless revision is free text; the
+    receipt-kernel check still pins the kernel). Object
+    hashes compare against the given live-resolved shas;
+    an empty live sha skips that comparison (the passive
+    path resolves no objects), while qualified channels
+    still need their receipt hash present. Never raises.
+    """
+    var out = ReceiptVerdict()
+    var pre = _parse_receipt_data(data)
+    if not pre.ok:
+        out.message = pre.message.copy()
+        return out^
+    var rec = pre.rec.copy()
+    if rec.profile_id != doc.profile_id:
+        out.message = String("receipt names another profile")
+        return out^
+    if rec.arch != kernel.arch or rec.release != kernel.release:
+        out.message = String("receipt names another kernel")
+        return out^
+    var sel = select_attempt_hook(doc)
+    if not sel.ok:
+        out.message = sel.refusal.copy()
+        return out^
+    var live = NarrowBindings()
+    var unmeasured = measure_live_bindings(
+        root, kernel.release, zlib, sel.hook.format_path, live
+    )
+    if unmeasured != String(""):
+        out.message = unmeasured.copy()
+        return out^
+    if (
+        rec.config != live.config
+        or rec.config_src != live.config_src
+        or rec.btf != live.btf
+        or rec.format != live.format
+        or rec.image != live.image
+        or rec.image_bid != live.image_bid
+    ):
+        out.message = String("receipt bindings differ from live")
+        return out^
+    var qualifies_lc = False
+    var qualifies_cp = False
+    for i in range(len(rec.cap_ids)):
+        if rec.cap_ids[i] == String(LIFECYCLE_CAP_ID):
+            qualifies_lc = True
+        if rec.cap_ids[i] == String(COPY_CAP_ID):
+            qualifies_cp = True
+    if qualifies_lc and rec.obj_lc == String(""):
+        out.message = String(
+            "receipt lacks lifecycle hash for qualified"
+            " mapping-lifecycle"
+        )
+        return out^
+    if qualifies_cp and rec.obj_cp == String(""):
+        out.message = String(
+            "receipt lacks copy hash for qualified copy-actual"
+        )
+        return out^
+    if obj_attempt != String("") and rec.obj_attempt != obj_attempt:
+        out.message = String("receipt artifacts differ from objects")
+        return out^
+    if obj_lc != String("") and rec.obj_lc != String(""):
+        if rec.obj_lc != obj_lc:
+            out.message = String("receipt artifacts differ from objects")
+            return out^
+    if obj_cp != String("") and rec.obj_cp != String(""):
+        if rec.obj_cp != obj_cp:
+            out.message = String("receipt artifacts differ from objects")
+            return out^
+    if rec.bridge != bridge_sha:
+        out.message = String(
+            "receipt bridge differs from resolved bridge"
+        )
+        out.bridge_mismatch = True
+        return out^
+    out.caps = rec.cap_ids.copy()
     out.ok = True
     out.message = String("")
     return out^

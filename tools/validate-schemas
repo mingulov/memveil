@@ -1155,7 +1155,8 @@ FUNC_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 def check_profile(obj):
     check_keys(obj, ("schema_version", "profile_id", "status", "identity",
-                     "hooks", "capabilities"), ("notes",), "profile")
+                     "hooks", "capabilities"), ("notes", "layouts"),
+               "profile")
     if obj["schema_version"] != PROFILE_VERSION:
         fail("bad-version", "profile.schema_version")
     check_id(obj["profile_id"], "profile.profile_id")
@@ -1211,7 +1212,8 @@ def check_profile(obj):
                            "profile.hooks[].format_text", allow_empty=True)
         elif kind == "tracing":
             check_keys(hook, ("name", "kind", "function", "attach",
-                              "signature"), ("note",), "profile.hooks[]")
+                              "signature"), ("note", "signature_alt"),
+                       "profile.hooks[]")
             check_text(hook["function"], 128, "profile.hooks[].function")
             if not FUNC_RE.fullmatch(hook["function"]):
                 fail("bad-charset", "profile.hooks[].function")
@@ -1219,6 +1221,13 @@ def check_profile(obj):
                        "profile.hooks[].attach")
             check_text(hook["signature"], 1024,
                        "profile.hooks[].signature")
+            if "signature_alt" in hook:
+                alts = hook["signature_alt"]
+                if not isinstance(alts, list) or len(alts) > 4:
+                    fail("bad-type", "profile.hooks[].signature_alt")
+                for alt in alts:
+                    check_text(alt, 512,
+                               "profile.hooks[].signature_alt[]")
         else:
             fail("bad-enum", "profile.hooks[].kind")
         if "note" in hook:
@@ -1251,6 +1260,22 @@ def check_profile(obj):
             fail("bad-type", "profile.notes")
         for note in obj["notes"]:
             check_text(note, 512, "profile.notes[]", allow_empty=True)
+    if "layouts" in obj:
+        layouts = obj["layouts"]
+        if not isinstance(layouts, list) or len(layouts) > 16:
+            fail("bad-type", "profile.layouts")
+        for item in layouts:
+            check_keys(item, ("struct", "field", "bit_offset",
+                              "bit_size"), (), "profile.layouts[]")
+            check_text(item["struct"], 128, "profile.layouts[].struct")
+            check_text(item["field"], 128, "profile.layouts[].field")
+            for key in ("bit_offset", "bit_size"):
+                value = item[key]
+                if (not isinstance(value, int)
+                        or isinstance(value, bool) or value < 0):
+                    fail("bad-type",
+                         "profile.layouts[].%s must be a non-negative int"
+                         % key)
     return obj
 
 
@@ -1555,12 +1580,14 @@ def run_selftest():
         obj = read_json_file(
             repo_path("profiles", "linux-x86_64-7.0-reference.json"),
             "reference profile")
+        # Synthetic name: the shipped reference already
+        # carries the real tracing hooks.
         obj["hooks"].append({
-            "name": "fexit:swiotlb_tbl_map_single",
+            "name": "fexit:synthetic_probe_fn",
             "kind": "tracing",
-            "function": "swiotlb_tbl_map_single",
+            "function": "synthetic_probe_fn",
             "attach": "fexit",
-            "signature": "phys_addr_t swiotlb_tbl_map_single()",
+            "signature": "void synthetic_probe_fn()",
         })
         return obj
 

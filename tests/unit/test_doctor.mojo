@@ -64,11 +64,7 @@ def test_build_ordinary() raises:
     assert_equal(drep.verdict, String("unavailable"))
     assert_equal(
         drep.summary,
-        String(
-            "unavailable: hook swiotlb:swiotlb_bounced"
-            " has no recorded format"
-            " in profile linux-x86_64-7.0-reference"
-        ),
+        String("unavailable: layout: missing field common_type"),
     )
     assert_equal(drep.euid, 1001)
     assert_equal(len(drep.denied), 0)
@@ -160,7 +156,7 @@ def test_json_ordinary_exact() raises:
         '    "arch": "x86_64",\n'
         '    "eligible_floor": true,\n'
         '    "floor_reason":'
-        ' "release 7.0.0-34-generic meets the 7.0 floor"\n'
+        ' "release 7.0.0-34-generic meets the 6.0 floor"\n'
         "  },\n"
         '  "guest": {\n'
         '    "tech": "ordinary",\n'
@@ -178,26 +174,28 @@ def test_json_ordinary_exact() raises:
         '    "reason": "profile linux-x86_64-7.0-reference covers'
         " this identity but is reference-unvalidated\"\n"
         "  },\n"
-        '  "capabilities": [{"id": "attempt-trace", "status": "unknown",'
-        ' "reason": "hook swiotlb:swiotlb_bounced has no recorded format'
-        ' in profile linux-x86_64-7.0-reference",'
-        ' "remedy": "record the hook format in the profile"},'
-        ' {"id": "mapping-lifecycle", "status": "unsupported",'
-        ' "reason": "No validated lifecycle mechanism exists'
-        ' in this profile.",'
-        ' "remedy": "use a profile declaring mapping-lifecycle support"},'
-        ' {"id": "copy-actual", "status": "unsupported",'
-        ' "reason": "No validated executed-length source exists'
-        ' in this profile.",'
-        ' "remedy": "use a profile declaring copy-actual support"}],\n'
+        '  "capabilities": [{"id": "attempt-trace", "status": "unavailable",'
+        ' "reason": "layout: missing field common_type",'
+        ' "remedy": "refresh the profile\'s recorded signatures from'
+        ' this kernel, then re-prove with memveil qualify'
+        ' (see memveil qualify --help)"},'
+        ' {"id": "mapping-lifecycle", "status": "unavailable",'
+        ' "reason": "fexit:swiotlb_tbl_map_single: bad BTF header",'
+        ' "remedy": "refresh the profile\'s recorded signatures from'
+        ' this kernel, then re-prove with memveil qualify'
+        ' (see memveil qualify --help)"},'
+        ' {"id": "copy-actual", "status": "unavailable",'
+        ' "reason": "fentry:__swiotlb_sync_single_for_device:'
+        ' bad BTF header",'
+        ' "remedy": "refresh the profile\'s recorded signatures from'
+        ' this kernel, then re-prove with memveil qualify'
+        ' (see memveil qualify --help)"}],\n'
         '  "privilege": {\n'
         '    "euid": 1001,\n'
         '    "denied_paths": []\n'
         "  },\n"
         '  "verdict": "unavailable",\n'
-        '  "summary": "unavailable: hook swiotlb:swiotlb_bounced'
-        " has no recorded format"
-        " in profile linux-x86_64-7.0-reference\"\n"
+        '  "summary": "unavailable: layout: missing field common_type"\n'
         "}\n"
     )
     assert_equal(js, want)
@@ -206,17 +204,18 @@ def test_json_ordinary_exact() raises:
 def test_text_fix_lines() raises:
     var drep = drep_for(String("ordinary-7.0"), String("profiles"))
     var text = render_doctor_text(drep)
+    # The live judgment proves the stand-in format
+    # unusable, so the attempt reason names the layout
+    # gap instead of asking for a recorded format.
     assert_true(
-        text.find(
-            String("    fix: record the hook format in the profile\n")
-        )
-        != -1
+        contains(text, String("layout: missing field common_type"))
     )
     assert_true(
         text.find(
             String(
-                "    fix: use a profile declaring"
-                " mapping-lifecycle support\n"
+                "    fix: refresh the profile's recorded signatures"
+                " from this kernel, then re-prove with memveil"
+                " qualify (see memveil qualify --help)\n"
             )
         )
         != -1

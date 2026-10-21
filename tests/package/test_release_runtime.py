@@ -100,7 +100,7 @@ def test_replaced_bridge_reaches_named_refusal_boundary(bundle, tmp_path):
     assert proc.returncode == 3, proc.stderr
     # This lane names the gate it actually reached. ABI rejection itself
     # requires a qualified live environment that passes all preceding gates.
-    boundaries = ("requires x86_64", "requires Linux", "below floor 7.0", "format unreadable",
+    boundaries = ("requires x86_64", "requires Linux", "below floor 6.0", "format unreadable",
                   "binding failed", "setup failed", "bridge", "time namespace")
     assert any(reason in proc.stderr for reason in boundaries), proc.stderr
     print("replaced-bridge refusal boundary: " + proc.stderr.strip())

@@ -5,11 +5,14 @@ A bound reference is a semantic profile document that names
 one exact host identity — kernel image, config, BTF,
 tracepoint format, BPF objects, and hook semantics — so
 `memveil qualify` can prove that host and mint a
-machine-local `local-auto` receipt. This recipe walks the
-whole journey on a fresh eligible host: passive `doctor`
-output, evidence capture, binding computation, document
-authoring, manifest registration, qualify, reuse, and
-stale-input refusal. Every command below was checked
+machine-local `local-auto` receipt. Hosts covered by a
+shipped reference need no authoring: an unbound reference
+admits them through the live judgment, which probes the
+running kernel instead of comparing recorded hashes
+(step 1). This recipe walks the whole journey on a fresh
+eligible host: passive `doctor` output, evidence capture,
+binding computation, document authoring, manifest
+registration, qualify, reuse, and stale-input refusal. Every command below was checked
 against its wrapper help. The qualify planning
 refusals in step 7 were observed live; the receipt
 diagnostics in steps 8 and 9 were observed through
@@ -47,36 +50,53 @@ artifact and its test evidence
 ## 1. Inspect the fresh host
 
 Start unprivileged and passive. On an x86-64 host running
-`7.0.0-38-generic` with no bound profile:
+`7.0.0-38-generic` with the shipped profiles:
 
     ./build/memveil doctor
 
 prints, in part:
 
-    kernel: 7.0.0-38-generic x86_64 (floor 7.0: yes)
+    kernel: 7.0.0-38-generic x86_64 (floor 6.0: yes)
     profile: linux-x86_64-7.0-reference (reference-unvalidated)
     profile-detail: profile linux-x86_64-7.0-reference covers this identity but is reference-unvalidated; linux-x86_64-7.0.0-34-generic identity mismatch: revision
-      attempt-trace: unknown - hook swiotlb:swiotlb_bounced id /sys/kernel/tracing/events/swiotlb/swiotlb_bounced/id denied (privilege)
+    capabilities:
+      attempt-trace: unknown - tracepoint swiotlb:swiotlb_bounced denied (privilege)
         fix: re-run with elevated privileges (root)
+      mapping-lifecycle: unknown - available_filter_functions denied (privilege)
+        fix: re-run with elevated privileges (root)
+      copy-actual: unknown - available_filter_functions denied (privilege)
+        fix: re-run with elevated privileges (root)
+    privilege: euid 1001, denied: /sys/kernel/tracing/events/swiotlb/swiotlb_bounced/id /sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format
     verdict: unavailable
 
-with exit 3. Read it as: the kernel clears the 7.0 floor;
+with exit 3. Read it as: the kernel clears the 6.0 floor;
 the shipped reference covers this kernel by identity but
 is unvalidated; the narrow `7.0.0-34-generic` profile does
-not cover this revision; and tracefs is unreadable without
-privilege. Re-run passively as root for the full picture:
+not cover this revision; and tracefs plus the ftrace
+function list are unreadable without privilege, so every
+capability is unknown rather than refused. Re-run
+passively as root for the full picture:
 
     sudo ./build/memveil doctor
 
     profile: linux-x86_64-7.0-reference (reference-unvalidated)
-      attempt-trace: unknown - hook swiotlb:swiotlb_bounced has no recorded format in profile linux-x86_64-7.0-reference
-        fix: record the hook format in the profile
-    verdict: unavailable
+    capabilities:
+      attempt-trace: available - live-verified under reference profile linux-x86_64-7.0-reference
+      mapping-lifecycle: available - live-verified under reference profile linux-x86_64-7.0-reference
+      copy-actual: available - live-verified under reference profile linux-x86_64-7.0-reference
+    privilege: euid 0
+    verdict: ready
 
-Still exit 3: the reference is an unbound inspection
-record with no recorded format text, so there is nothing
-to bind against. That missing binding is what the next
-steps author.
+Exit 0: the unbound reference admits this host through
+the live judgment, which verifies the tracepoint
+format, hook signatures, and attachability on the
+running kernel. Recording works here with no authoring.
+The rest of this recipe covers the harder case:
+capturing evidence, computing narrow bindings, and
+authoring a bound reference for a host the shipped
+references do not cover — plus the `memveil qualify`
+step that mints a machine-local `local-auto` receipt
+pinning a document to one host.
 
 ## 2. Capture the evidence inventory
 
