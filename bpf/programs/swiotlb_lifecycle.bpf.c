@@ -102,8 +102,7 @@ static __always_inline int mv_quarantined(const struct mv_gen_key *key)
     return bpf_map_lookup_elem(&mv_gen_quarantine, key) != NULL;
 }
 
-/* After a failed delete: tombstone, then quarantine, then global
- * dark, so a stale value can never reach a future unmap emission. */
+/* Failed delete escalates through tombstone, quarantine, dark. */
 static __always_inline void mv_escalate(const struct mv_gen_key *key)
 {
     __u64 zero = 0;
@@ -292,9 +291,7 @@ int BPF_PROG(mv_map_result, struct device *dev, mv_phys_addr_t orig_addr,
     }
     key.dev = (__u64)dev;
     key.tlb = (__u64)ret;
-    /* Dark or quarantined keys divert without burning a
-     * generation; a failed insert diverts too. The emission
-     * never claims an identity the table may not hold. */
+    /* Divert without claiming when dark, quarantined, or insert fails. */
     if (!mv_dark() && !mv_quarantined(&key) &&
         mv_alloc_gen(&assigned) &&
         bpf_map_update_elem(&mv_gen_table, &key, &assigned,
@@ -304,8 +301,7 @@ int BPF_PROG(mv_map_result, struct device *dev, mv_phys_addr_t orig_addr,
     } else {
         flags |= MV_LC_FLAG_OK | MV_LC_FLAG_GEN_UNASSIGNED;
     }
-    /* A map record lost before the ring must take its generation
-     * with it, or the later unmap claims an identity never emitted. */
+    /* A lost map record deletes its generation. */
     if (!mv_emit_lc(MV_LC_KIND_MAP, flags, (__u64)dir,
                     (mv_size_t)mapping_size, gen) && gen != 0 &&
         bpf_map_delete_elem(&mv_gen_table, &key) != 0)

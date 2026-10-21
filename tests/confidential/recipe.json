@@ -9,7 +9,7 @@
   },
   "enabled_proof": {
     "sev-snp": ["sev_snp CPU flag", "/dev/sev-guest node", "kernel SNP-active marker"],
-    "tdx": ["tdx_guest CPU flag", "/dev/tdx-guest node", "kernel TDX-guest marker"],
+    "tdx": ["tdx_guest CPU flag", "/dev/tdx_guest node", "kernel TDX-guest marker"],
     "never_sufficient_alone": ["CPU flags", "VM marketing name", "guest-root access", "user assertion"]
   },
   "permissions": {

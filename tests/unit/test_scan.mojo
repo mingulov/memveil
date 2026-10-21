@@ -654,7 +654,7 @@ def test_scan_explicit_notext() raises:
 
 
 comptime _CAPS3 = "attempt-trace,mapping-lifecycle,copy-actual"
-comptime _LC_SHA = "e61104d1c1c0581411015be9bda3a3adef7236e921f8471c1f15511a611b5a3d"
+comptime _LC_SHA = "6ee4887b9498fa7f81b6e69a99b726420cb0391474a0ab7c3a19f9050e406920"
 comptime _CP_SHA = "64c90fa40280a0293d14e49f153bea8d1f33b332c48d03b5b2dc463f8a838192"
 
 
