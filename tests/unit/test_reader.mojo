@@ -2023,6 +2023,77 @@ def test_reader_unavailable_dangling_ok() raises:
     r._finish_checks()
 
 
+def test_reader_unmap_aggregate_partial_ok() raises:
+    # An unmap of a never-persisted mapping reads clean when
+    # the aggregate correlation declares the loss partial.
+    var r = read_capture(
+        String("tests/fixtures/reader/f2-dangling-unmap-expected"),
+        False,
+        default_limits(),
+    )
+    assert_equal(len(drain_events(r)), 8)
+    assert_true(not r.partial)
+
+
+def test_reader_unmap_aggregate_unavailable_ok() raises:
+    # Unavailable aggregate excuses the same dangling unmap.
+    var r = read_capture(
+        String("tests/fixtures/reader/f2-dangling-unmap-unavailable"),
+        False,
+        default_limits(),
+    )
+    assert_equal(len(drain_events(r)), 8)
+    assert_true(not r.partial)
+
+
+def test_reader_unmap_aggregate_complete_denied() raises:
+    # The same dangling unmap contradicts a session that
+    # claims complete aggregate correlation and refuses.
+    expect_read_error(
+        String("tests/fixtures/reader/f2-dangling-unmap-denied"),
+        False,
+        default_limits(),
+        READ_INVALID,
+        3,
+    )
+
+
+def test_reader_split_mapping_unmap_ok() raises:
+    # Mapping-class partiality excuses a dangling unmap
+    # while the other classes stay complete.
+    var r = read_capture(
+        String("tests/fixtures/reader/f2-dangling-split-mapping-ok"),
+        False,
+        default_limits(),
+    )
+    assert_equal(len(drain_events(r)), 8)
+    assert_true(not r.partial)
+
+
+def test_reader_split_mapping_unmap_denied() raises:
+    # Sync-class partiality alone never excuses a dangling
+    # unmap when mapping_release claims complete.
+    expect_read_error(
+        String("tests/fixtures/reader/f2-dangling-split-mapping-deny"),
+        False,
+        default_limits(),
+        READ_INVALID,
+        3,
+    )
+
+
+def test_reader_double_unmap_partial_still_refused() raises:
+    # A second release of a known mapping refuses even
+    # when aggregate correlation is partial.
+    expect_read_error(
+        String("tests/fixtures/reader/f2-double-unmap-partial"),
+        False,
+        default_limits(),
+        READ_INVALID,
+        4,
+    )
+
+
 def test_reader_ref_dedup() raises:
     # White-box bound check: repeated copy/sync references to
     # one mapping record once per kind (first line kept), so N
@@ -2305,6 +2376,12 @@ def run() raises -> Int:
     suite.test[test_reader_split_sync_dangling_ok]()
     suite.test[test_reader_split_sync_dangling_denied]()
     suite.test[test_reader_unavailable_dangling_ok]()
+    suite.test[test_reader_unmap_aggregate_partial_ok]()
+    suite.test[test_reader_unmap_aggregate_unavailable_ok]()
+    suite.test[test_reader_unmap_aggregate_complete_denied]()
+    suite.test[test_reader_split_mapping_unmap_ok]()
+    suite.test[test_reader_split_mapping_unmap_denied]()
+    suite.test[test_reader_double_unmap_partial_still_refused]()
     suite.test[test_reader_ref_dedup]()
     suite.test[test_reader_f3_overflow]()
     suite.test[test_reader_multi_chunk]()

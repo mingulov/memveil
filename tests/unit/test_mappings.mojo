@@ -653,6 +653,36 @@ def test_unpaired_unmap_invalidates_live() raises:
     assert_true(not _global(rows, "live_observed_allocation_bytes").has_value)
 
 
+def test_unpaired_release_without_map_degrades() raises:
+    # A dropped map whose unmap still persists: no open
+    # mapping exists, no release is invented, and the
+    # affected totals degrade instead of crashing.
+    for split in [False, True]:
+        var t = MappingTracker()
+        t.set_relation_split(split)
+        var ev = _unmap("m-9", UInt64(1300), UInt64(1))
+        ev.source_correlation = String("unpaired")
+        t.consume(ev^)
+        assert_equal(t.unpaired_count(), 1)
+        assert_equal(t.unpaired_mapping_count(), 1)
+        var rows = t.metrics("window [0,1000)")
+        var live = _global(rows, "live_observed_allocation_bytes")
+        assert_true(not live.has_value)
+        assert_equal(live.measurement, String("unavailable"))
+        assert_true(not _global(rows, "open_mappings").has_value)
+        # No release invented: zero completed with partial
+        # coverage, never a phantom sample.
+        var done = _global(rows, "completed_lifetime_count")
+        assert_true(done.has_value)
+        assert_equal(done.value, UInt64(0))
+        assert_equal(done.coverage, String("partial"))
+        # No map kind observed: allocation rows stay null
+        # with a reason, never a zero that claims proof.
+        var allocs = _global(rows, "successful_allocations")
+        assert_true(not allocs.has_value)
+        assert_equal(allocs.measurement, String("unavailable"))
+
+
 def test_unpaired_copy_bytes_retained() raises:
     # Known identityless copies are independent byte facts:
     # 4096 + 1024 aggregate to 5120 even though neither
@@ -1262,6 +1292,7 @@ def run() raises -> Int:
     suite.test[test_reversed_timestamps_uncertain]()
     suite.test[test_unpaired_map_excluded]()
     suite.test[test_unpaired_unmap_invalidates_live]()
+    suite.test[test_unpaired_release_without_map_degrades]()
     suite.test[test_unpaired_copy_bytes_retained]()
     suite.test[test_unpaired_bounce_to_original_retained]()
     suite.test[test_unpaired_failure_counted]()

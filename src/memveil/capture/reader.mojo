@@ -367,7 +367,9 @@ struct CaptureReader:
         creation/release pairing, and deferred copy/sync references
         match the schema validator exactly: unmap needs a prior live
         creation, while copy/sync references resolve when the stream
-        ends so forward references stay valid.
+        ends so forward references stay valid. An unmap of a never-
+        persisted mapping is excused only when the session's
+        mapping-release class already declares the loss.
         """
         var tag = "line " + String(lineno) + ": "
         if ev.kind == "bounce_attempt":
@@ -415,6 +417,12 @@ struct CaptureReader:
                         READ_INVALID, lineno, tag + "mapping released twice"
                     )
                 if target not in self._maps:
+                    # Session precedes events: excuse only under
+                    # declared mapping-release loss.
+                    if self._class_expected(
+                        self.session.q_corr_mapping.status
+                    ):
+                        return
                     raise ReadError(
                         READ_INVALID, lineno, tag + "unknown mapping"
                     )

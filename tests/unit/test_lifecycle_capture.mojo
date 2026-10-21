@@ -20,6 +20,7 @@ channel geometry refuses before any capture exists.
 from std.ffi import external_call
 from std.testing import TestSuite, assert_equal, assert_true
 
+from memveil.analysis.engine import Analyzer
 from memveil.capture.collector import (
     EXIT_ERROR,
     EXIT_PARTIAL,
@@ -31,7 +32,11 @@ from memveil.capture.collector import (
     SnapOut,
     StatsOut,
 )
+from memveil.capture.reader import default_limits, read_capture
 from memveil.model.session import parse_session
+from memveil.render.json import render_json
+from memveil.render.markdown import render_markdown
+from memveil.render.text import render_text
 from memveil.platform.reader import (
     bytes_to_text,
     is_valid_utf8,
@@ -1019,6 +1024,144 @@ def test_stop_open_mappings_churn() raises:
     )
     assert_true(
         _contains(c.session, String('"open_mappings":"0"')))
+
+
+def test_dropped_map_unmap_still_reports() raises:
+    # The bridge drops the map record (counted as dropped)
+    # while its unmap persists: the capture finalizes with
+    # detail and correlation loss, and the offline report
+    # over that capture succeeds with partial correlation
+    # instead of refusing the whole capture.
+    var tmp = _mkdtemp()
+    var out_dir = tmp + String("/cap")
+    var cfg = CollectorConfig()
+    cfg.duration_s = UInt64(60)
+    cfg.max_events_bytes = 1073741824
+    cfg.output = out_dir
+    cfg.profile_id = String("test-profile-1")
+    cfg.pid = 7
+    cfg.has_ring_bytes = True
+    cfg.ring_bytes = UInt32(8388608)
+    cfg.has_lifecycle = True
+    cfg.lifecycle_ring_bytes = UInt32(8388608)
+    cfg.has_copy = True
+    cfg.copy_ring_bytes = UInt32(8388608)
+    var kernel = ScriptKernel()
+    kernel.channels = 3
+    kernel.add_snap(_zero_snap())
+    kernel.add_snap(_zero_snap())
+    kernel.add_snap_at(1, _zero_snap())
+    kernel.add_snap_at(1, _zero_snap())
+    kernel.add_snap_at(2, _zero_snap())
+    kernel.add_snap_at(2, _zero_snap())
+    kernel.add_snap(SnapOut(True, _zero_cut().copy(), String("")))
+    kernel.add_snap(SnapOut(True, _zero_cut().copy(), String("")))
+    var lc_cut = _cut(UInt64(2), UInt64(8192), UInt64(2), UInt64(8192))
+    kernel.add_snap_at(1, SnapOut(True, lc_cut.copy(), String("")))
+    kernel.add_snap_at(1, SnapOut(True, lc_cut.copy(), String("")))
+    kernel.add_snap_at(2, SnapOut(True, _zero_cut().copy(), String("")))
+    kernel.add_snap_at(2, SnapOut(True, _zero_cut().copy(), String("")))
+    # BPF observed and emitted both records; the bridge
+    # delivered only the unmap and dropped the map.
+    var flow = _stats(UInt64(2), UInt64(1), UInt64(0), UInt64(1))
+    var ch0n = _stats(UInt64(0), UInt64(0), UInt64(0), UInt64(0))
+    kernel.add_stats(_zero_stats())
+    kernel.add_stats(_zero_stats())
+    kernel.add_stats(flow.copy())
+    kernel.add_stats(flow.copy())
+    kernel.add_stats(flow.copy())
+    kernel.add_stats(flow.copy())
+    kernel.add_stats(ch0n)
+    kernel.add_stats_at(1, _zero_stats())
+    kernel.add_stats_at(1, flow.copy())
+    kernel.add_stats_at(2, _zero_stats())
+    kernel.add_stats_at(2, _zero_stats())
+    var payloads = List[List[UInt8]]()
+    # ktime 30s lands inside the read-back window (attach
+    # is milliseconds after the zero clock start).
+    payloads.append(
+        _lc_raw(2, 3, 2, UInt64(121), UInt64(30000000000),
+                UInt64(4096), UInt64(41)))
+    for i in range(len(payloads)):
+        kernel.add_poll(_batch(payloads[i]), 1)
+    kernel.add_poll(_timeout(), 103)
+    var signal = ScriptSignal()
+    for i in range(len(payloads) + 1):
+        signal.add(String("none"))
+    signal.add(String("pending"))
+    var clock = ScriptClock()
+    clock.add(UInt64(0))
+    var writer = ScriptWriter()
+    var collector = Collector(cfg)
+    var result = collector.run(kernel, clock, signal, writer)
+    assert_equal(result.exit_code, EXIT_PARTIAL)
+    assert_equal(result.outcome, String("finalized"))
+    var events = _read_text(out_dir + String("/events.ndjson"))
+    var session = _read_text(out_dir + String("/session.json"))
+    var lines = _lines(events)
+    assert_equal(len(lines), 5)
+    assert_true(_contains(lines[0], String('"kind":"unmap"')))
+    assert_true(_contains(lines[0], String('"mapping_id":"gen-41"')))
+    assert_true(
+        _contains(lines[0], String('"correlation":"unpaired"')))
+    assert_true(
+        _contains(
+            session,
+            String(
+                '"reason":"detail loss 1 (submit_fail=(0) '
+                'malformed=(0) dropped=(1) '
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            session,
+            String(
+                '"reason":"mapping_release partial (release '
+                'of unknown mapping)"'
+            ),
+        )
+    )
+    # The offline report reads the capture instead of
+    # refusing it, with partial mapping correlation.
+    var r = read_capture(out_dir, False, default_limits())
+    var analyzer = Analyzer(r.session)
+    var count = 0
+    while r.has_more():
+        analyzer.consume(r.next_event())
+        count += 1
+    assert_equal(count, 5)
+    assert_true(not r.partial)
+    var rep = analyzer.finish(r.session.window_end_ns, r.partial)
+    assert_equal(rep.q_correlation.status, String("partial"))
+    assert_equal(rep.q_corr_mapping.status, String("partial"))
+    assert_true(rep.q_corr_mapping.has_loss_count)
+    # No release invented: zero completed with partial
+    # coverage, and the unpaired event is counted.
+    var saw_completed = False
+    var saw_unpaired = False
+    for i in range(len(rep.metrics)):
+        if rep.metrics[i].name == String("completed_lifetime_count"):
+            saw_completed = True
+            assert_true(rep.metrics[i].has_value)
+            assert_equal(rep.metrics[i].value, UInt64(0))
+            assert_equal(rep.metrics[i].coverage, String("partial"))
+        if rep.metrics[i].name == String("unpaired_lifecycle_events"):
+            saw_unpaired = True
+            assert_true(rep.metrics[i].has_value)
+            assert_equal(rep.metrics[i].value, UInt64(1))
+    assert_true(saw_completed)
+    assert_true(saw_unpaired)
+    # Every renderer handles the degraded report.
+    var text = render_text(rep)
+    var md = render_markdown(rep)
+    var js = render_json(rep)
+    assert_true(text.byte_length() > 0)
+    assert_true(md.byte_length() > 0)
+    assert_true(js.byte_length() > 0)
+    assert_true(_contains(text, String("partial")))
+    assert_true(_contains(md, String("partial")))
+    assert_true(_contains(js, String('"status": "partial"')))
 
 
 def main() raises:
