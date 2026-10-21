@@ -29,6 +29,7 @@ nor shrink the enumerated file set.
 """
 
 import glob
+import hashlib
 import json
 import os
 import re
@@ -43,6 +44,7 @@ import source_inventory  # noqa: E402
 
 KNOWN_IDS = {
     "GPL-3.0-or-later": "LICENSE",
+    "GPL-2.0": "LICENSES/GPL-2.0.txt",
     "GPL-2.0-only": "LICENSES/GPL-2.0-only.txt",
     "GPL-2.0-or-later": "LICENSES/GPL-2.0-or-later.txt",
 }
@@ -58,6 +60,7 @@ HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 STATIC_INPUTS = [
     "LICENSE", "THIRD-PARTY-NOTICES.md",
+    "LICENSES/GPL-2.0.txt",
     "LICENSES/GPL-2.0-only.txt", "LICENSES/GPL-2.0-or-later.txt",
     "docs/quickstart.md", "docs/support.md", "docs/privacy.md",
     "examples/real-capture/events.ndjson",
@@ -145,6 +148,11 @@ def is_code(rel):
     # They inherit the repository default license (LICENSE).
     if parts[0] == "tests" and len(parts) > 1 and parts[1] == "golden":
         return False
+    # The x86 asm/types.h UAPI shim carries no SPDX tag and must
+    # stay byte-identical to the vendor package; the vendored set
+    # is licensed per bpf/include/uapi/README (hash-checked below).
+    if rel == "bpf/include/uapi/asm/types.h":
+        return False
     base = parts[-1]
     if rel == "pixi.toml" or parts[0] == "tools":
         return True
@@ -158,6 +166,32 @@ def spdx_of(path):
         head = handle.read(4096).decode("utf-8", "replace")
     match = re.search(r"SPDX-License-Identifier:\s*(\S+)", head)
     return match.group(1) if match else None
+
+
+def verify_uapi_readme():
+    """Vendored UAPI bytes must match bpf/include/uapi/README hashes."""
+    root = os.path.join(ROOT, "bpf", "include", "uapi")
+    try:
+        with open(os.path.join(root, "README")) as handle:
+            text = handle.read()
+    except OSError:
+        return False, "README missing"
+    want = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and HEX64.match(parts[0]):
+            want[parts[1]] = parts[0]
+    if len(want) != 13:
+        return False, "got %d hashes" % len(want)
+    for rel in sorted(want):
+        path = os.path.join(root, rel)
+        if not os.path.isfile(path):
+            return False, "missing " + rel
+        with open(path, "rb") as handle:
+            got = hashlib.sha256(handle.read()).hexdigest()
+        if got != want[rel]:
+            return False, "drift " + rel
+    return True, "13 files"
 
 
 VENDOR_TOKEN = "unknown-linux-musl"
@@ -360,6 +394,7 @@ def main(argv):
         else:
             seen_ids.add(found)
     check("spdx-coverage", not offenders, "; ".join(offenders[:5]))
+    check("uapi-readme-hashes", *verify_uapi_readme())
 
     for ident in sorted(seen_ids):
         staged = os.path.join(ROOT, KNOWN_IDS[ident])
