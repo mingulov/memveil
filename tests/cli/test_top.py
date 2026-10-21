@@ -332,6 +332,16 @@ def main():
         doc = json.load(open(os.path.join(
             REPO, "profiles", "linux-x86_64-7.0-reference.json")))
         doc["profile_id"] = "live-synth"
+        # The routing oracle needs an unsupported extra
+        # capability; the shipped reference now declares
+        # lifecycle a live-verified candidate, so force it
+        # back for this fixture.
+        for cap in doc["capabilities"]:
+            if cap["id"] == "mapping-lifecycle":
+                cap["status"] = "unsupported"
+                cap["hooks"] = []
+                cap["reason"] = ("Synthetic routing oracle:"
+                                 " extra cap unsupported.")
         doc["identity"]["source"]["revision"] = live
         doc["identity"]["source"]["note"] = (
             "config=%s config_src=file btf=%s format=%s object=%s "
