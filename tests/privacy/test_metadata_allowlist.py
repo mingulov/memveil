@@ -134,11 +134,11 @@ def main():
     # Copy also reads the trampoline frame pointer from its own BPF
     # stack (one bpf_probe_read_kernel of a local), used only as a key
     # in a kernel-private claim map and never emitted.
-    # Any checked-read failure
-    # degrades to unknown-with-reason. Transient kernel reads
-    # never reach a record: emitted bytes are sizes,
-    # directions, and outcome flags only. A new probe file, or
-    # a new read in an old file, fails here until reviewed.
+    # Any checked-read failure degrades to unknown-with-reason.
+    # Transient kernel reads never reach a record: emitted
+    # bytes are sizes, directions, and outcome flags only. A
+    # new probe file, or a new read in an old file, fails here
+    # until reviewed.
     # Tuples are (bpf_probe_read_kernel, BPF_CORE_READ,
     # bpf_core_read) call sites.
     read_sites = {

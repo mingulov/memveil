@@ -674,8 +674,8 @@ def _read_btf_maps(
 def read_btf_copy_fb(data: Span[UInt8, _]) -> BtfMaps:
     """Read the mv_copy_fb fallback counter definition.
 
-    Pinned exactly (ARRAY, key 4, value 8, 3 entries:
-    deferred, recovered, flags). Ring size unused (0).
+    Pinned exactly (ARRAY, key 4, value 8, 4 entries:
+    deferred, recovered, flags, armed). Ring size unused (0).
     """
     var sec = _find_section(data, String(".BTF"))
     if not sec.found:
@@ -726,8 +726,8 @@ def read_btf_copy_fb(data: Span[UInt8, _]) -> BtfMaps:
     var fmax_v = walk.uint_value(data, fmax)
     if fmax_v < 0:
         return _refuse_maps(String("fallback bad max_entries"))
-    if fmax_v != 3:
-        return _refuse_maps(String(t"fallback max_entries {fmax_v}, want 3"))
+    if fmax_v != 4:
+        return _refuse_maps(String(t"fallback max_entries {fmax_v}, want 4"))
     var fkey = walk.member_type(data, rec, String("key"))
     if fkey == -1:
         return _refuse_maps(String("fallback missing key"))

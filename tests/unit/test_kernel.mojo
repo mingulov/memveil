@@ -25,6 +25,7 @@ from memveil.capture.kernel import (
     LmbKernel,
     PollRotation,
     added_fds,
+    fb_valid,
     fdinfo_u64,
     identify_copy_progs,
     join_op_message,
@@ -497,15 +498,22 @@ def test_recursion_misses_before_open() raises:
     assert_equal(m.message, String("session not open"))
 
 
-def test_copy_specs_attach_fallback_first() raises:
-    # fexit attaches before fentry: mv_bounce never runs without its fallback.
+def test_copy_armed_before_open() raises:
+    var k = _kernel()
+    var got = k.set_copy_armed(True)
+    assert_true(not got.ok)
+    assert_equal(got.message, String("session not open"))
+
+
+def test_copy_specs_attach_entry_first() raises:
+    # fentry attaches before fexit: the armed slot gates the fallback.
     var specs = _copy_specs()
     assert_equal(len(specs), 4)
     assert_equal(specs[0].program, String("mv_sync_device"))
     assert_equal(specs[1].program, String("mv_sync_cpu"))
-    assert_equal(specs[2].program, String("mv_bounce_exit"))
+    assert_equal(specs[2].program, String("mv_bounce"))
     assert_equal(specs[2].target_a, String("swiotlb_bounce"))
-    assert_equal(specs[3].program, String("mv_bounce"))
+    assert_equal(specs[3].program, String("mv_bounce_exit"))
     assert_equal(specs[3].target_a, String("swiotlb_bounce"))
 
 
@@ -592,6 +600,29 @@ def test_identify_copy_progs_missing() raises:
     assert_true(not got.ok)
 
 
+def test_fb_valid_rejects_any_flag() raises:
+    # Any fallback flag poisons the counters, never a zero loss.
+    var clean = List[UInt64]()
+    clean.append(UInt64(0))
+    clean.append(UInt64(0))
+    clean.append(UInt64(0))
+    assert_true(fb_valid(clean))
+    var bits = List[UInt64]()
+    bits.append(UInt64(1))
+    bits.append(UInt64(2))
+    bits.append(UInt64(4))
+    for i in range(len(bits)):
+        var flagged = List[UInt64]()
+        flagged.append(UInt64(0))
+        flagged.append(UInt64(0))
+        flagged.append(bits[i])
+        assert_true(not fb_valid(flagged))
+    var short = List[UInt64]()
+    short.append(UInt64(0))
+    short.append(UInt64(0))
+    assert_true(not fb_valid(short))
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_not_open_taxonomy]()
@@ -619,12 +650,14 @@ def run() raises -> Int:
     suite.test[test_added_fds_diff]()
     suite.test[test_prog_fds_lists_without_programs]()
     suite.test[test_recursion_misses_before_open]()
-    suite.test[test_copy_specs_attach_fallback_first]()
+    suite.test[test_copy_armed_before_open]()
+    suite.test[test_copy_specs_attach_entry_first]()
     suite.test[test_parse_prog_name]()
     suite.test[test_parse_prog_misses]()
     suite.test[test_identify_copy_progs]()
     suite.test[test_identify_copy_progs_ambiguous]()
     suite.test[test_identify_copy_progs_missing]()
+    suite.test[test_fb_valid_rejects_any_flag]()
     suite^.run()
     return 0
 

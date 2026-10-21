@@ -187,11 +187,15 @@ slot in the kernel-private `mv_claims` table keyed by the
 trampoline frame address (unique among live calls in any
 context) and a call id from `tlb_addr`, `size` and `dir`, then
 records the copy. `mv_bounce_exit` releases the claim and
-records the copy only when no matching claim exists, so each
-copy is recorded once. The fexit program attaches before the
-fentry program and detaches after it. A full probe window leaves
-the copy to `mv_bounce_exit` and counts deferred in `mv_copy_fb`;
-a call neither program can match counts as `submit_fail`.
+records the copy only when no matching claim exists and the
+fallback is armed, so each copy is recorded once. The fentry
+program attaches before the fexit program; the armed slot in
+`mv_copy_fb` (written after attach, cleared before detach)
+keeps a bare exit from counting recoveries, so the accounting
+holds regardless of attach or detach order. A full probe window
+leaves the copy to `mv_bounce_exit` and counts deferred in
+`mv_copy_fb`; a call neither program can match counts as
+`submit_fail`.
 
 `recursion_missed` charges exact copy loss: misses of every
 program except `mv_bounce` and `mv_bounce_exit`, plus

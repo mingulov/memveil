@@ -79,6 +79,7 @@ comptime _FDINFO_DIR = "/proc/self/fdinfo"
 comptime _FDINFO_CAP = 4096
 comptime _FB_MAP = "mv_copy_fb"
 comptime _FB_KEYS = 3
+comptime _FB_ARMED_KEY = 3
 comptime _SYS_BPF = 321
 comptime _BPF_OBJ_GET_INFO = 15
 comptime _PROG_INFO_SIZE = 232
@@ -268,10 +269,10 @@ def _copy_specs() -> List[AttachSpec]:
             String(""),
         )
     )
-    # fexit attaches first, detaches last: records copies mv_bounce skips.
+    # Entry attaches first; the armed slot gates the exit, so order never inflates recoveries.
     out.append(
         AttachSpec(
-            String("mv_bounce_exit"),
+            String("mv_bounce"),
             _ATTACH_TRACING,
             String("swiotlb_bounce"),
             String(""),
@@ -279,7 +280,7 @@ def _copy_specs() -> List[AttachSpec]:
     )
     out.append(
         AttachSpec(
-            String("mv_bounce"),
+            String("mv_bounce_exit"),
             _ATTACH_TRACING,
             String("swiotlb_bounce"),
             String(""),
@@ -780,6 +781,35 @@ struct _Channel(Movable):
         self.sess = Optional(s^)
         return SnapOut(True, vals^, String(""))
 
+    def set_fb_armed(mut self, armed: Bool) -> OpOut:
+        """Write the fallback armed slot; exactly 1 arms the exit."""
+        if not self.is_open():
+            return OpOut(False, String("session not open"))
+        var key_bytes = List[UInt8]()
+        for i in range(4):
+            key_bytes.append(
+                UInt8(
+                    (UInt32(_FB_ARMED_KEY) >> UInt32(8 * i))
+                    & UInt32(0xFF)
+                )
+            )
+        var val_bytes = List[UInt8]()
+        var v = UInt64(1) if armed else UInt64(0)
+        for i in range(8):
+            val_bytes.append(
+                UInt8((v >> UInt64(8 * i)) & UInt64(0xFF))
+            )
+        var s = self.sess.take()
+        try:
+            s.map_write(
+                String(_FB_MAP), Span(key_bytes), Span(val_bytes)
+            )
+        except e:
+            self.sess = Optional(s^)
+            return OpOut(False, _lmb_message(e.copy()))
+        self.sess = Optional(s^)
+        return OpOut(True, String(""))
+
     def map_info(mut self, name: String) -> GeomOut:
         if not self.is_open():
             return GeomOut(
@@ -1014,6 +1044,13 @@ struct _Channel(Movable):
         return OpOut(True, String(""))
 
 
+def fb_valid(vals: List[UInt64]) -> Bool:
+    """Fallback reads are usable only with three slots and no flags."""
+    if len(vals) != _FB_KEYS:
+        return False
+    return vals[2] == UInt64(0)
+
+
 struct LmbKernel(ChannelPoller, KernelSource):
     """KernelSource backed by up to three libbpf-mojo sessions."""
 
@@ -1176,6 +1213,14 @@ struct LmbKernel(ChannelPoller, KernelSource):
         if not self._any_open():
             return OpOut(False, String("session not open"))
         return self._ch0.install_offsets(table.copy())
+
+    def set_copy_armed(mut self, armed: Bool) -> OpOut:
+        """Write the copy fallback armed slot (copy channel only)."""
+        if not self._any_open():
+            return OpOut(False, String("session not open"))
+        if not self._ch2.present:
+            return OpOut(False, String("copy channel absent"))
+        return self._ch2.set_fb_armed(armed)
 
     def attach(mut self) -> OpOut:
         if not self._any_open():
@@ -1390,7 +1435,7 @@ struct LmbKernel(ChannelPoller, KernelSource):
                 False, UInt64(0),
                 _channel_tag(2) + String("fallback: ") + fb.message,
             )
-        if len(fb.vals) != _FB_KEYS or fb.vals[2] != UInt64(0):
+        if not fb_valid(fb.vals):
             return MissOut(
                 False, UInt64(0),
                 _channel_tag(2)

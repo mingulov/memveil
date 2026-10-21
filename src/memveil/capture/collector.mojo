@@ -294,6 +294,10 @@ trait KernelSource:
     def attach(mut self) -> OpOut:
         ...
 
+    def set_copy_armed(mut self, armed: Bool) -> OpOut:
+        """Write the copy fallback armed slot (copy channel only)."""
+        ...
+
     def poll(mut self, timeout_ms: Int, capacity: UInt32) -> PollOut:
         ...
 
@@ -1381,7 +1385,7 @@ struct Collector:
                 fb.map_type != UInt32(MAP_TYPE_ARRAY)
                 or fb.key_size != UInt32(4)
                 or fb.value_size != UInt32(8)
-                or fb.max_entries != UInt32(3)
+                or fb.max_entries != UInt32(4)
             ):
                 return String("map cp mv_copy_fb geometry")
         if not self.stable_pair_at(kernel, clock, 0):
@@ -1442,6 +1446,11 @@ struct Collector:
         var attached = kernel.attach()
         if not attached.ok:
             return String("attach: ") + attached.message
+        if self.cfg.has_copy:
+            # Arm only after every copy link exists, so no bare exit inflates recoveries.
+            var armed = kernel.set_copy_armed(True)
+            if not armed.ok:
+                return String("arm copy: ") + armed.message
         if self.cfg.has_pool_sample:
             # Baseline pool sample, persisted first: the file
             # stays chronological (baseline, periodic, final)
@@ -1811,6 +1820,13 @@ struct Collector:
         mut self, mut kernel: K, mut clock: C, mut writer: W
     ):
         """DETACHING -> SETTLE -> DRAINING -> STATS -> CONFIRM."""
+        if self.cfg.has_copy:
+            # Disarm before detach, so no late exit recovers after the end cut.
+            var disarmed = kernel.set_copy_armed(False)
+            if not disarmed.ok:
+                self.note_unknown(
+                    String("copy disarm failed: ") + disarmed.message
+                )
         var detached = kernel.detach()
         self.detach_ns = clock.now()
         self._stop_close(detached.ok)
@@ -2018,6 +2034,13 @@ struct Collector:
         mut self, mut kernel: K, mut clock: C, mut writer: W
     ) -> RunResult:
         """ERROR_DETACH -> ERROR_STATS -> FINALIZING; no drain."""
+        if self.cfg.has_copy:
+            # Disarm before detach, so no late exit recovers after the end cut.
+            var disarmed = kernel.set_copy_armed(False)
+            if not disarmed.ok:
+                self.note_unknown(
+                    String("copy disarm failed: ") + disarmed.message
+                )
         var detached = kernel.detach()
         self.detach_ns = clock.now()
         self._stop_close(detached.ok)

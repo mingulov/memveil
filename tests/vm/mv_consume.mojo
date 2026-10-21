@@ -467,6 +467,17 @@ def run(args: List[String]) raises Fail -> Int:
         if skipped:
             raise Fail(77, detail)
         raise Fail(1, detail)
+    if is_cp:
+        # Arm only after every copy link exists, so no bare exit inflates recoveries.
+        try:
+            var arm_key = le_bytes(UInt64(3), 4)
+            var arm_val = le_bytes(UInt64(1), 8)
+            session.map_write(
+                String("mv_copy_fb"), Span(arm_key), Span(arm_val)
+            )
+        except e:
+            close_quietly(session)
+            raise Fail(1, String("arm copy: ") + String(e))
     print(String("ready ring=") + ring)
     var lines = List[String]()
     var observed = UInt64(0)
@@ -482,6 +493,18 @@ def run(args: List[String]) raises Fail -> Int:
         if not detached and elapsed_ns >= budget_ns:
             # Detach closes new attachments; it does not prove in-flight
             # writers quiesced. The translated terminal remains partial.
+            if is_cp:
+                # Disarm before detach, so no late exit recovers after the end cut.
+                try:
+                    var dis_key = le_bytes(UInt64(3), 4)
+                    var dis_val = le_bytes(UInt64(0), 8)
+                    session.map_write(
+                        String("mv_copy_fb"), Span(dis_key),
+                        Span(dis_val),
+                    )
+                except e:
+                    close_quietly(session)
+                    raise Fail(1, String("disarm copy: ") + String(e))
             try:
                 session.detach()
             except e:

@@ -59,6 +59,9 @@ struct ScriptKernel(KernelSource):
     var install_calls: Int
     var attach_out: OpOut
     var attach_calls: Int
+    var arm_out: OpOut
+    var disarm_out: OpOut
+    var calls: List[String]
     var detach_out: OpOut
     var close_out: OpOut
     var misses_out: MissOut
@@ -114,7 +117,7 @@ struct ScriptKernel(KernelSource):
             String(""),
         )
         self.fb_geom = GeomOut(
-            True, UInt32(2), UInt32(4), UInt32(8), UInt32(3),
+            True, UInt32(2), UInt32(4), UInt32(8), UInt32(4),
             String(""),
         )
         self.install_out = ok.copy()
@@ -122,6 +125,9 @@ struct ScriptKernel(KernelSource):
         self.install_calls = 0
         self.attach_out = ok.copy()
         self.attach_calls = 0
+        self.arm_out = ok.copy()
+        self.disarm_out = ok.copy()
+        self.calls = List[String]()
         self.detach_out = ok.copy()
         self.close_out = ok.copy()
         self.misses_out = MissOut(True, UInt64(0), String(""))
@@ -196,7 +202,15 @@ struct ScriptKernel(KernelSource):
 
     def attach(mut self) -> OpOut:
         self.attach_calls += 1
+        self.calls.append(String("attach"))
         return self.attach_out.copy()
+
+    def set_copy_armed(mut self, armed: Bool) -> OpOut:
+        if armed:
+            self.calls.append(String("arm"))
+            return self.arm_out.copy()
+        self.calls.append(String("disarm"))
+        return self.disarm_out.copy()
 
     def add_poll(mut self, item: PollOut, repeat: Int):
         self.polls.append(ScriptPollItem(item.copy(), repeat))
@@ -355,6 +369,7 @@ struct ScriptKernel(KernelSource):
         return self.read_full()
 
     def detach(mut self) -> OpOut:
+        self.calls.append(String("detach"))
         return self.detach_out.copy()
 
     def recursion_misses(mut self) -> MissOut:

@@ -28,6 +28,7 @@ from memveil.capture.collector import (
     Collector,
     CollectorConfig,
     MissOut,
+    OpOut,
     PollOut,
     SnapOut,
     StatsOut,
@@ -216,11 +217,13 @@ struct CaseOut(Movable):
     var session: String
     var signal_checks: Int
     var loop_polls: Int
+    var calls: List[String]
 
     def __init__(
         out self, exit_code: Int, end_reason: String,
         outcome: String, diagnostic: String, events: String,
         session: String, signal_checks: Int = 0, loop_polls: Int = 0,
+        calls: List[String] = List[String](),
     ):
         self.exit_code = exit_code
         self.end_reason = end_reason
@@ -230,6 +233,7 @@ struct CaseOut(Movable):
         self.session = session
         self.signal_checks = signal_checks
         self.loop_polls = loop_polls
+        self.calls = calls.copy()
 
 
 def _read_text(path: String) raises -> String:
@@ -248,6 +252,9 @@ def _run(
     rx2: UInt64,
     grade: String = String(""),
     misses: MissOut = MissOut(True, UInt64(0), String("")),
+    arm_out: OpOut = OpOut(True, String("")),
+    disarm_out: OpOut = OpOut(True, String("")),
+    read_files: Bool = True,
 ) raises -> CaseOut:
     """Run one scripted multi-channel capture; return its outputs.
 
@@ -274,6 +281,8 @@ def _run(
     var kernel = ScriptKernel()
     kernel.channels = 3
     kernel.misses_out = misses.copy()
+    kernel.arm_out = arm_out.copy()
+    kernel.disarm_out = disarm_out.copy()
     kernel.add_snap(_zero_snap())
     kernel.add_snap(_zero_snap())
     kernel.add_snap_at(1, _zero_snap())
@@ -316,8 +325,11 @@ def _run(
     var writer = ScriptWriter()
     var collector = Collector(cfg)
     var result = collector.run(kernel, clock, signal, writer)
-    var events = _read_text(cfg.output + String("/events.ndjson"))
-    var session = _read_text(cfg.output + String("/session.json"))
+    var events = String("")
+    var session = String("")
+    if read_files:
+        events = _read_text(cfg.output + String("/events.ndjson"))
+        session = _read_text(cfg.output + String("/session.json"))
     # Close-out drains poll with timeout 0; the loop never does.
     var loop_polls = 0
     for t in kernel.poll_timeouts:
@@ -332,6 +344,7 @@ def _run(
         session,
         signal.checks,
         loop_polls,
+        kernel.calls.copy(),
     )
     return out^
 
@@ -1337,6 +1350,56 @@ def test_copy_fb_geometry_refuses() raises:
             String("map cp mv_copy_fb geometry"),
         )
     )
+
+
+def test_copy_arm_failure_refuses_start() raises:
+    # A failed arm write fails the capture closed, never unarmed.
+    var payloads = List[List[UInt8]]()
+    var c = _run(
+        payloads^, _zero_cut(), _zero_cut(), UInt64(0),
+        _zero_cut(), UInt64(0),
+        arm_out=OpOut(False, String("map write denied")),
+        read_files=False,
+    )
+    assert_equal(c.exit_code, EXIT_REFUSAL)
+    assert_equal(c.outcome, String("refused"))
+    assert_true(_contains(c.diagnostic, String("arm copy")))
+    assert_equal(len(c.calls), 2)
+    assert_equal(c.calls[0], String("attach"))
+    assert_equal(c.calls[1], String("arm"))
+
+
+def test_copy_disarm_failure_makes_detail_unknown() raises:
+    # A failed disarm write leaves copy detail unknown, never complete.
+    var payloads = List[List[UInt8]]()
+    payloads.append(
+        _cp_raw(2, 3, 1, UInt64(101), UInt64(1001), UInt64(4096),
+                UInt64(4096), 0))
+    var c = _run(
+        payloads^, _zero_cut(), _zero_cut(), UInt64(0),
+        _cut(UInt64(1), UInt64(4096), UInt64(1), UInt64(4096)),
+        UInt64(1),
+        disarm_out=OpOut(False, String("map write denied")),
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(
+            c.session,
+            String('\"detail\":{\"status\":\"partial\",\"loss_count\":null,'),
+        )
+    )
+    assert_true(_contains(c.session, String("copy disarm")))
+
+
+def test_copy_arm_disarm_bracket_the_capture() raises:
+    # The arm write lands after attach, the disarm before detach.
+    var c = _one_copy_run(MissOut(True, UInt64(0), String("")))
+    assert_equal(len(c.calls), 4)
+    assert_equal(c.calls[0], String("attach"))
+    assert_equal(c.calls[1], String("arm"))
+    assert_equal(c.calls[2], String("disarm"))
+    assert_equal(c.calls[3], String("detach"))
+
 
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

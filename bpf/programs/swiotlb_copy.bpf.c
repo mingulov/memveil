@@ -18,16 +18,8 @@
  * failed read degrades that event to unknown-with-reason;
  * the request fact (size, direction) is still emitted.
  *
- * Each copy is recorded once, by mv_bounce or else by
- * mv_bounce_exit. On x86 one per-CPU counter guards each
- * program across task, softirq and hardirq context, so a
- * bounce in an interrupt that lands while mv_bounce runs on
- * the interrupted task skips mv_bounce (a recursion miss).
- * mv_bounce first claims a slot keyed by the trampoline frame
- * (ctx), unique among live calls; mv_bounce_exit records the
- * call only when no claim of this frame and call id exists.
- * Deferred and recovered counts in mv_copy_fb make the loss
- * exact: misses(mv_bounce) + deferred - recovered.
+ * Each copy is recorded once: entry claims its frame, armed exit records unclaimed calls.
+ * Loss stays exact: misses(mv_bounce) + deferred - recovered.
  *
  * Build: clang --target=bpf -O2 -g -D__BPF__ -I bpf/include
  *   -I <libbpf-1.7.0>/src -I /usr/include/x86_64-linux-gnu
@@ -70,13 +62,15 @@ struct {
     __type(value, struct mv_claim);
 } mv_claims SEC(".maps");
 
-/* Fallback counters: deferred, recovered, flags. */
+/* Fallback counters: deferred, recovered, flags, armed. */
 #define MV_CP_FB_DEFERRED 0u
 #define MV_CP_FB_RECOVERED 1u
 #define MV_CP_FB_FLAGS 2u
-#define MV_CP_FB_LEN 3u
+#define MV_CP_FB_ARMED 3u
+#define MV_CP_FB_LEN 4u
 #define MV_CP_FB_FLAG_DEFERRED_WRAP (1ULL << 0)
 #define MV_CP_FB_FLAG_RECOVERED_WRAP (1ULL << 1)
+#define MV_CP_FB_FLAG_FRAME_LOST (1ULL << 2)
 
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
@@ -146,6 +140,17 @@ static __always_inline void mv_fb_recovered(void)
         return;
     if (__sync_fetch_and_add(slot, 1) == 0xFFFFFFFFFFFFFFFFULL)
         mv_fb_raise(MV_CP_FB_FLAG_RECOVERED_WRAP);
+}
+
+/* Armed only while userspace holds the gate at exactly 1. */
+static __always_inline int mv_armed(void)
+{
+    __u32 key = MV_CP_FB_ARMED;
+    __u64 *slot = bpf_map_lookup_elem(&mv_copy_fb, &key);
+
+    if (!slot)
+        return 0;
+    return *slot == 1;
 }
 
 /* Shared emit path: counts the firing, validates, submits. */
@@ -430,8 +435,9 @@ int BPF_PROG(mv_bounce, struct device *dev, mv_phys_addr_t tlb_addr,
 {
     __u64 frame = mv_frame(ctx);
 
-    /* No frame: mv_bounce_exit cannot match either, so count the loss. */
+    /* No frame: count the loss; a live exit may still record it unmatched. */
     if (!frame) {
+        mv_fb_raise(MV_CP_FB_FLAG_FRAME_LOST);
         mv_lost();
         return 0;
     }
@@ -449,6 +455,9 @@ int BPF_PROG(mv_bounce_exit, struct device *dev, mv_phys_addr_t tlb_addr,
              mv_size_t size, enum mv_dma_data_direction dir,
              struct io_tlb_pool *pool)
 {
+    /* Disarmed exit stays out: its recoveries would match no entry miss. */
+    if (!mv_armed())
+        return 0;
     __u64 frame = mv_frame(ctx);
 
     /* No frame: mv_bounce counted the loss, so never record twice. */
