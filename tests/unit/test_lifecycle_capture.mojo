@@ -26,6 +26,7 @@ from memveil.capture.collector import (
     EXIT_REFUSAL,
     Collector,
     CollectorConfig,
+    MissOut,
     PollOut,
     SnapOut,
     StatsOut,
@@ -237,6 +238,7 @@ def _run(
     end2: List[UInt64],
     rx2: UInt64,
     grade: String = String(""),
+    misses: MissOut = MissOut(True, UInt64(0), String("")),
 ) raises -> CaseOut:
     """Run one scripted multi-channel capture; return its outputs.
 
@@ -262,6 +264,7 @@ def _run(
     cfg.copy_ring_bytes = UInt32(8388608)
     var kernel = ScriptKernel()
     kernel.channels = 3
+    kernel.misses_out = misses.copy()
     kernel.add_snap(_zero_snap())
     kernel.add_snap(_zero_snap())
     kernel.add_snap_at(1, _zero_snap())
@@ -662,10 +665,92 @@ def test_unknown_copy_drops_as_rejected() raises:
             c.session,
             String(
                 '"reason":"detail loss 1 (submit_fail=(0) '
-                'malformed=(0) dropped=(0) size_omitted=(0) '
+                'malformed=(0) dropped=(0) recursion_missed=(0) '
+                'size_omitted=(0) '
                 'duration_omitted=(0) signal_omitted=(0) '
                 'rejected=(1) write_failed=(0))"'
             ),
+        )
+    )
+
+
+def _one_copy_run(misses: MissOut) raises -> CaseOut:
+    var payloads = List[List[UInt8]]()
+    payloads.append(
+        _cp_raw(2, 3, 1, UInt64(101), UInt64(1001), UInt64(4096),
+                UInt64(4096), 0))
+    return _run(
+        payloads^, _zero_cut(), _zero_cut(), UInt64(0),
+        _cut(UInt64(1), UInt64(4096), UInt64(1), UInt64(4096)),
+        UInt64(1), misses=misses)
+
+
+def test_recursion_misses_are_detail_loss() raises:
+    # Kernel-skipped program runs never reach a ring; they
+    # are loss, so a clean ring with misses is not complete.
+    var c = _one_copy_run(MissOut(True, UInt64(5), String("")))
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"reason":"detail loss 5 (submit_fail=(0) '
+                'malformed=(0) dropped=(0) recursion_missed=(5) '
+                'size_omitted=(0) duration_omitted=(0) '
+                'signal_omitted=(0) rejected=(0) write_failed=(0))"'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":"5",'),
+        )
+    )
+
+
+def test_zero_recursion_misses_stay_complete() raises:
+    var c = _one_copy_run(MissOut(True, UInt64(0), String("")))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"reason":"detail loss 0 (submit_fail=(0) '
+                'malformed=(0) dropped=(0) recursion_missed=(0) '
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"detail":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+
+
+def test_unreadable_recursion_misses_make_loss_unknown() raises:
+    # An unreadable count can never be reported as zero.
+    var c = _one_copy_run(
+        MissOut(False, UInt64(0), String("fdinfo gone"))
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"reason":"detail loss unknown (recursion misses '
+                'unreadable; known: submit_fail=(0) malformed=(0) '
+                'dropped=(0) recursion_missed=(unavailable) '
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
         )
     )
 

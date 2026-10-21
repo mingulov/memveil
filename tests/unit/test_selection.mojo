@@ -576,6 +576,7 @@ def test_selection_drops_are_not_loss() raises:
     for _ in range(6):
         coll.end_vals.append(UInt64(0))
     coll.has_final_stats = True
+    coll.has_recursion = True
     var sess = coll.assemble()
     assert_equal(sess.q_detail.status, String("complete_for_scope"))
     assert_true(sess.q_detail.has_loss_count)

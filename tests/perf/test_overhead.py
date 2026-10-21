@@ -149,7 +149,8 @@ def session_doc(mode, session_id):
             "quality": {"detail": {
                 "loss_count": "0",
                 "reason": "submit_fail=(0) malformed=(0) "
-                          "dropped=(0) size_omitted=(0) "
+                          "dropped=(0) recursion_missed=(0) "
+                          "size_omitted=(0) "
                           "duration_omitted=(0) "
                           "signal_omitted=(0) rejected=(0) "
                           "write_failed=(0)"}},

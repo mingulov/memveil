@@ -23,9 +23,12 @@ from memveil.capture.kernel import (
     ChannelPoller,
     LmbKernel,
     PollRotation,
+    added_fds,
+    fdinfo_u64,
     join_op_message,
     poll_advance,
     poll_outcome,
+    prog_fds,
     rotate_poll,
 )
 
@@ -418,6 +421,78 @@ def test_join_op_message() raises:
     )
 
 
+comptime _PROG_FDINFO = (
+    "pos:\t0\nflags:\t02000002\nmnt_id:\t16\nino:\t1057\n"
+    "prog_type:\t26\nprog_jited:\t1\nprog_tag:\t3b185187f1855c4c\n"
+    "memlock:\t4096\nprog_id:\t912\nrun_time_ns:\t0\nrun_cnt:\t0\n"
+    "recursion_misses:\t11808\nverified_insns:\t371\n"
+)
+
+
+def test_fdinfo_u64_reads_fields() raises:
+    var t = String(_PROG_FDINFO)
+    assert_equal(fdinfo_u64(t, String("recursion_misses")).value(), UInt64(11808))
+    assert_equal(fdinfo_u64(t, String("prog_type")).value(), UInt64(26))
+    assert_equal(fdinfo_u64(t, String("prog_id")).value(), UInt64(912))
+
+
+def test_fdinfo_u64_refuses_partial_keys_and_junk() raises:
+    var t = String(_PROG_FDINFO)
+    # A key matches only whole at a line start.
+    assert_true(not fdinfo_u64(t, String("misses")))
+    assert_true(not fdinfo_u64(t, String("prog")))
+    assert_true(not fdinfo_u64(t, String("link_type")))
+    # Hex, empty, trailing junk and overflow never parse.
+    assert_true(not fdinfo_u64(String("prog_tag:\tdeadbeef\n"), String("prog_tag")))
+    assert_true(not fdinfo_u64(String("x:\t\n"), String("x")))
+    assert_true(not fdinfo_u64(String("x:\t12ab\n"), String("x")))
+    assert_true(
+        not fdinfo_u64(String("x:\t18446744073709551616\n"), String("x"))
+    )
+    assert_equal(
+        fdinfo_u64(String("x:\t18446744073709551615"), String("x")).value(),
+        UInt64(0xFFFFFFFFFFFFFFFF),
+    )
+
+
+def test_link_fdinfo_is_not_a_program() raises:
+    # Links carry prog_id too; only prog_type marks a program.
+    var link = String(
+        "link_type:\ttracing\nlink_id:\t5\nprog_tag:\tab\n"
+        "prog_id:\t912\nattach_type:\t25\n"
+    )
+    assert_true(not fdinfo_u64(link, String("prog_type")))
+
+
+def test_added_fds_diff() raises:
+    var before = List[Int]()
+    before.append(3)
+    before.append(7)
+    var after = List[Int]()
+    after.append(3)
+    after.append(9)
+    after.append(7)
+    after.append(12)
+    var got = added_fds(before, after)
+    assert_equal(len(got), 2)
+    assert_equal(got[0], 9)
+    assert_equal(got[1], 12)
+
+
+def test_prog_fds_lists_without_programs() raises:
+    # This test process holds no BPF programs.
+    var got = prog_fds()
+    assert_true(Bool(got))
+    assert_equal(len(got.value()), 0)
+
+
+def test_recursion_misses_before_open() raises:
+    var k = _kernel()
+    var m = k.recursion_misses()
+    assert_true(not m.ok)
+    assert_equal(m.message, String("session not open"))
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_not_open_taxonomy]()
@@ -439,6 +514,12 @@ def run() raises -> Int:
     suite.test[test_rotate_sparse_order]()
     suite.test[test_rotate_empty_order_errors]()
     suite.test[test_join_op_message]()
+    suite.test[test_fdinfo_u64_reads_fields]()
+    suite.test[test_fdinfo_u64_refuses_partial_keys_and_junk]()
+    suite.test[test_link_fdinfo_is_not_a_program]()
+    suite.test[test_added_fds_diff]()
+    suite.test[test_prog_fds_lists_without_programs]()
+    suite.test[test_recursion_misses_before_open]()
     suite^.run()
     return 0
 

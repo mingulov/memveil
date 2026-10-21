@@ -262,7 +262,7 @@ def product_facts(got, leg, profile_id):
     reason = detail.get("reason", "")
     fails = {}
     for key in ("submit_fail", "malformed", "dropped",
-                "size_omitted", "duration_omitted",
+                "recursion_missed", "size_omitted", "duration_omitted",
                 "signal_omitted", "rejected", "write_failed"):
         hit = re.search(r"%s=\((\d+)\)" % key, reason or "")
         fails[key] = int(hit.group(1)) if hit else None

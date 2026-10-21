@@ -20,6 +20,11 @@ tracing object; channel 2 the copy tracing object.
 Attach sites are frozen per channel; record selects
 which channels exist by passing their object bytes.
 
+Each channel remembers the program fds its load created
+(diffed from /proc/self/fdinfo, no bridge call needed), so
+recursion_misses can sum the kernel's per-program
+recursion_misses counters across present channels.
+
 Poll rotates across present channels (sticky on short:
 a short pins the next poll to the channel holding the
 retained record) and waits only when every channel is
@@ -36,10 +41,12 @@ from libbpf_mojo.batch import (
 )
 from libbpf_mojo.error import EINTR, LmbError
 from libbpf_mojo.session import AttachSpec, Session
+from std.os import listdir
 
 from memveil.capture.collector import (
     GeomOut,
     KernelSource,
+    MissOut,
     OpOut,
     PollOut,
     SnapOut,
@@ -49,6 +56,7 @@ from memveil.platform.narrow import (
     MV_OFFSETS_TABLE_LEN,
     MV_OFF_TABLE_MAGIC,
 )
+from memveil.platform.reader import bytes_to_text, read_host_file
 
 # abi-v1 frozen values (libbpf-mojo 0.2.0): tracepoint
 # and tracing attach kinds, and the retained-record
@@ -64,6 +72,8 @@ comptime _COUNT_KEYS = 6
 comptime _RING_ATTEMPT = "mv_attempts"
 comptime _RING_LIFECYCLE = "mv_lifecycle"
 comptime _RING_COPY = "mv_copies"
+comptime _FDINFO_DIR = "/proc/self/fdinfo"
+comptime _FDINFO_CAP = 4096
 
 
 def poll_outcome(kind: UInt32, code: Int32) -> String:
@@ -258,6 +268,96 @@ def _copy_specs() -> List[AttachSpec]:
     return out^
 
 
+def fdinfo_u64(text: String, key: String) -> Optional[UInt64]:
+    """Decimal value of the `key:` line of one fdinfo text, if any."""
+    var b = text.as_bytes()
+    var k = key.as_bytes()
+    var n = len(b)
+    var i = 0
+    while i < n:
+        var j = 0
+        while j < len(k) and i + j < n and b[i + j] == k[j]:
+            j += 1
+        if j == len(k) and i + j < n and b[i + j] == UInt8(58):
+            var p = i + j + 1
+            while p < n and (b[p] == UInt8(9) or b[p] == UInt8(32)):
+                p += 1
+            var v = UInt64(0)
+            var digits = 0
+            while p < n and b[p] >= UInt8(48) and b[p] <= UInt8(57):
+                var d = UInt64(b[p] - UInt8(48))
+                if v > (UInt64(0xFFFFFFFFFFFFFFFF) - d) // UInt64(10):
+                    return None
+                v = v * UInt64(10) + d
+                digits += 1
+                p += 1
+            if digits == 0 or (p < n and b[p] != UInt8(10)):
+                return None
+            return v
+        while i < n and b[i] != UInt8(10):
+            i += 1
+        i += 1
+    return None
+
+
+def _fd_number(name: String) -> Int:
+    """Decimal fd from a /proc/self/fdinfo entry name, or -1."""
+    var b = name.as_bytes()
+    if len(b) == 0 or len(b) > 9:
+        return -1
+    var v = 0
+    for i in range(len(b)):
+        if b[i] < UInt8(48) or b[i] > UInt8(57):
+            return -1
+        v = v * 10 + Int(b[i] - UInt8(48))
+    return v
+
+
+def _fdinfo_text(fd: Int) raises -> String:
+    var path = String(_FDINFO_DIR) + String("/") + String(fd)
+    try:
+        return bytes_to_text(
+            read_host_file(path, String("fdinfo"), _FDINFO_CAP)
+        )
+    except e:
+        raise Error(e.message)
+
+
+def prog_fds() -> Optional[List[Int]]:
+    """This process's open BPF program fds; None if unlistable."""
+    var names: List[String]
+    try:
+        names = listdir(String(_FDINFO_DIR))
+    except:
+        return None
+    var out = List[Int]()
+    for k in range(len(names)):
+        var fd = _fd_number(names[k])
+        if fd < 0:
+            continue
+        # Fds closed since the listing (its own dir fd) are skipped.
+        try:
+            if fdinfo_u64(_fdinfo_text(fd), String("prog_type")):
+                out.append(fd)
+        except:
+            continue
+    return out^
+
+
+def added_fds(before: List[Int], after: List[Int]) -> List[Int]:
+    """Fds in after that before lacks, in after's order."""
+    var out = List[Int]()
+    for i in range(len(after)):
+        var seen = False
+        for j in range(len(before)):
+            if before[j] == after[i]:
+                seen = True
+                break
+        if not seen:
+            out.append(after[i])
+    return out^
+
+
 struct _Channel(Movable):
     """One object's session slot: elf, ring, sites, session."""
 
@@ -267,6 +367,8 @@ struct _Channel(Movable):
     var sess: Optional[Session]
     var poll_buf: List[UInt8]
     var present: Bool
+    var progs: List[Int]
+    var progs_known: Bool
 
     def __init__(out self):
         self.elf = List[UInt8]()
@@ -275,6 +377,8 @@ struct _Channel(Movable):
         self.sess = None
         self.poll_buf = List[UInt8]()
         self.present = False
+        self.progs = List[Int]()
+        self.progs_known = False
 
     def setup(
         mut self, elf: List[UInt8], ring: String,
@@ -308,6 +412,7 @@ struct _Channel(Movable):
     def load(mut self) -> OpOut:
         if not self.is_open():
             return OpOut(False, String("session not open"))
+        var before = prog_fds()
         var s = self.sess.take()
         try:
             s.load()
@@ -315,7 +420,46 @@ struct _Channel(Movable):
             self.sess = Optional(s^)
             return OpOut(False, _lmb_message(e.copy()))
         self.sess = Optional(s^)
+        var after = prog_fds()
+        if Bool(before) and Bool(after):
+            self.progs = added_fds(before.value(), after.value())
+            self.progs_known = len(self.progs) > 0
         return OpOut(True, String(""))
+
+    def misses(mut self) -> MissOut:
+        if not self.is_open():
+            return MissOut(False, UInt64(0), String("session not open"))
+        if not self.progs_known:
+            return MissOut(
+                False, UInt64(0), String("program fds unknown")
+            )
+        var total = UInt64(0)
+        for k in range(len(self.progs)):
+            var fd = self.progs[k]
+            var got: Optional[UInt64]
+            try:
+                got = fdinfo_u64(
+                    _fdinfo_text(fd), String("recursion_misses")
+                )
+            except e:
+                return MissOut(
+                    False, UInt64(0),
+                    String("fdinfo ") + String(fd) + String(": ")
+                    + String(e),
+                )
+            if not got:
+                return MissOut(
+                    False, UInt64(0),
+                    String("fdinfo ") + String(fd)
+                    + String(": no recursion_misses"),
+                )
+            var m = got.value()
+            if total > UInt64(0xFFFFFFFFFFFFFFFF) - m:
+                return MissOut(
+                    False, UInt64(0), String("recursion misses wrap")
+                )
+            total += m
+        return MissOut(True, total, String(""))
 
     def map_info(mut self, name: String) -> GeomOut:
         if not self.is_open():
@@ -546,6 +690,8 @@ struct _Channel(Movable):
             self.sess = Optional(s^)
             return OpOut(False, _lmb_message(e.copy()))
         self.sess = None
+        self.progs = List[Int]()
+        self.progs_known = False
         return OpOut(True, String(""))
 
 
@@ -875,6 +1021,31 @@ struct LmbKernel(ChannelPoller, KernelSource):
         if failed:
             return OpOut(False, msg^)
         return OpOut(True, String(""))
+
+    def recursion_misses(mut self) -> MissOut:
+        if not self._any_open():
+            return MissOut(False, UInt64(0), String("session not open"))
+        var total = UInt64(0)
+        var order = self._order()
+        for k in range(len(order)):
+            var ch = order[k]
+            var m: MissOut
+            if ch == 1:
+                m = self._ch1.misses()
+            elif ch == 2:
+                m = self._ch2.misses()
+            else:
+                m = self._ch0.misses()
+            if not m.ok:
+                return MissOut(
+                    False, UInt64(0), _channel_tag(ch) + m.message
+                )
+            if total > UInt64(0xFFFFFFFFFFFFFFFF) - m.count:
+                return MissOut(
+                    False, UInt64(0), String("recursion misses wrap")
+                )
+            total += m.count
+        return MissOut(True, total, String(""))
 
     def close(mut self) -> OpOut:
         # Idempotent cleanup: closing a never-opened (or

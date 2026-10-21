@@ -42,6 +42,7 @@ def test_detail_known_grammar() raises:
         UInt64(1),
         UInt64(2),
         UInt64(0),
+        UInt64(3),
         UInt64(0),
         UInt64(4),
         UInt64(0),
@@ -51,8 +52,8 @@ def test_detail_known_grammar() raises:
     assert_equal(
         got,
         String(
-            "detail loss 8 (submit_fail=(1) malformed=(2)"
-            " dropped=(0) size_omitted=(0)"
+            "detail loss 11 (submit_fail=(1) malformed=(2)"
+            " dropped=(0) recursion_missed=(3) size_omitted=(0)"
             " duration_omitted=(4) signal_omitted=(0)"
             " rejected=(1) write_failed=(0))"
         ),
@@ -65,6 +66,7 @@ def test_detail_unknown_grammar() raises:
         String("unavailable"),
         String("3"),
         String("0"),
+        String("unavailable"),
         UInt64(0),
         UInt64(9),
         UInt64(0),
@@ -76,7 +78,8 @@ def test_detail_unknown_grammar() raises:
         String(
             "detail loss unknown (drain budget exhausted;"
             + " known: submit_fail=(unavailable) malformed=(3)"
-            " dropped=(0) size_omitted=(0)"
+            " dropped=(0) recursion_missed=(unavailable)"
+            " size_omitted=(0)"
             " duration_omitted=(9) signal_omitted=(0)"
             " rejected=(0) write_failed=(0))"
         ),

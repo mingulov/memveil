@@ -178,6 +178,15 @@ struct SnapOut(Copyable, Movable):
 
 
 @fieldwise_init
+struct MissOut(Copyable, Movable):
+    """Summed program recursion misses (count valid when ok)."""
+
+    var ok: Bool
+    var count: UInt64
+    var message: String
+
+
+@fieldwise_init
 struct CreateOut(Copyable, Movable):
     """One writer-create outcome (kind valid when not ok)."""
 
@@ -263,6 +272,10 @@ trait KernelSource:
         ...
 
     def detach(mut self) -> OpOut:
+        ...
+
+    def recursion_misses(mut self) -> MissOut:
+        """Runs the kernel skipped (trampoline recursion), summed."""
         ...
 
     def close(mut self) -> OpOut:
@@ -520,17 +533,19 @@ def detail_reason_known(
     submit_fail: UInt64,
     malformed: UInt64,
     dropped: UInt64,
+    recursion_missed: UInt64,
     size_omitted: UInt64,
     duration_omitted: UInt64,
     signal_omitted: UInt64,
     rejected: UInt64,
     write_failed: UInt64,
 ) -> String:
-    """Strict `detail loss <N> (<8 pairs>)` grammar."""
+    """Strict `detail loss <N> (<9 pairs>)` grammar."""
     var total = (
         submit_fail
         + malformed
         + dropped
+        + recursion_missed
         + size_omitted
         + duration_omitted
         + signal_omitted
@@ -540,6 +555,9 @@ def detail_reason_known(
     var pairs = _pair(String("submit_fail"), format_u64(submit_fail))
     pairs += String(" ") + _pair(String("malformed"), format_u64(malformed))
     pairs += String(" ") + _pair(String("dropped"), format_u64(dropped))
+    pairs += String(" ") + _pair(
+        String("recursion_missed"), format_u64(recursion_missed)
+    )
     pairs += String(" ") + _pair(
         String("size_omitted"), format_u64(size_omitted)
     )
@@ -567,6 +585,7 @@ def detail_reason_unknown(
     submit_fail: String,
     malformed: String,
     dropped: String,
+    recursion_missed: String,
     size_omitted: UInt64,
     duration_omitted: UInt64,
     signal_omitted: UInt64,
@@ -577,6 +596,9 @@ def detail_reason_unknown(
     var pairs = _pair(String("submit_fail"), submit_fail)
     pairs += String(" ") + _pair(String("malformed"), malformed)
     pairs += String(" ") + _pair(String("dropped"), dropped)
+    pairs += String(" ") + _pair(
+        String("recursion_missed"), recursion_missed
+    )
     pairs += String(" ") + _pair(
         String("size_omitted"), format_u64(size_omitted)
     )
@@ -678,6 +700,8 @@ struct Collector:
     var stats_drain: StatsOut
     var stats_final: StatsOut
     var has_final_stats: Bool
+    var recursion_missed: UInt64
+    var has_recursion: Bool
     var stats_start_ch0: StatsOut
     var stats_final_ch0: StatsOut
     var stats_start_lc: StatsOut
@@ -773,6 +797,8 @@ struct Collector:
             String(""),
         )
         self.has_final_stats = False
+        self.recursion_missed = UInt64(0)
+        self.has_recursion = False
         self.stats_start_ch0 = StatsOut(
             False,
             UInt64(0),
@@ -1714,6 +1740,7 @@ struct Collector:
         self._stop_close(detached.ok)
         if not detached.ok:
             self.note_unknown(String("detach failed; shutdown evidence unresolved"))
+        self._read_misses(kernel)
         clock.sleep_ms(SETTLE_MS)
         self.drain(kernel, clock)
         if not self.stable_pair_at(kernel, clock, 0):
@@ -1807,6 +1834,15 @@ struct Collector:
         self.note_unknown(String("drain budget exhausted"))
         self.stop_drain_busy = True
 
+    def _read_misses[K: KernelSource](mut self, mut kernel: K):
+        """Read skipped program runs once the probes are detached."""
+        var m = kernel.recursion_misses()
+        if m.ok:
+            self.recursion_missed = m.count
+            self.has_recursion = True
+        else:
+            self.note_unknown(String("recursion misses unreadable"))
+
     def confirm[K: KernelSource](mut self, mut kernel: K):
         """Bounded confirmation drain after the end snapshot."""
         for _ in range(CONFIRM_POLLS):
@@ -1862,6 +1898,7 @@ struct Collector:
         self._stop_close(detached.ok)
         if not detached.ok:
             self.note_unknown(String("detach failed; shutdown evidence unresolved"))
+        self._read_misses(kernel)
         var final = kernel.stats()
         if final.ok:
             self.stats_final = final.copy()
@@ -2470,6 +2507,9 @@ struct Collector:
         var submit = String("unavailable")
         var malformed = String("unavailable")
         var dropped = String("unavailable")
+        var missed = String("unavailable")
+        if self.has_recursion:
+            missed = format_u64(self.recursion_missed)
         if self._submit_valid_all():
             submit = format_u64(self._submit_fail_total())
         if self.has_final_stats:
@@ -2483,6 +2523,7 @@ struct Collector:
         out.append(submit)
         out.append(malformed)
         out.append(dropped)
+        out.append(missed)
         return out^
 
     def loss_known(self) -> Bool:
@@ -2490,6 +2531,8 @@ struct Collector:
         if self.unknown_cause != String(""):
             return False
         if not self.has_end_cut or not self.has_final_stats:
+            return False
+        if not self.has_recursion:
             return False
         if not self._submit_valid_all():
             return False
@@ -2744,6 +2787,7 @@ struct Collector:
                 submit_fail
                 + (self.stats_final.malformed - self.stats_start.malformed)
                 + (self.stats_final.dropped - self.stats_start.dropped)
+                + self.recursion_missed
                 + self.size_omitted
                 + self.duration_omitted
                 + self.signal_omitted
@@ -2760,6 +2804,7 @@ struct Collector:
                 submit_fail,
                 self.stats_final.malformed - self.stats_start.malformed,
                 self.stats_final.dropped - self.stats_start.dropped,
+                self.recursion_missed,
                 self.size_omitted,
                 self.duration_omitted,
                 self.signal_omitted,
@@ -2774,6 +2819,7 @@ struct Collector:
                 pairs[0],
                 pairs[1],
                 pairs[2],
+                pairs[3],
                 self.size_omitted,
                 self.duration_omitted,
                 self.signal_omitted,

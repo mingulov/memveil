@@ -1923,7 +1923,7 @@ suite_attempts() {
     mcase delaysubmit 4 104 5 6 17 1495 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     mqual delaysubmit partial 1 complete_for_scope 0 proven
-    mreason delaysubmit "detail loss 1 (submit_fail=(1) malformed=(0) dropped=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
+    mreason delaysubmit "detail loss 1 (submit_fail=(1) malformed=(0) dropped=(0) recursion_missed=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
     mreplay4 delaysubmit 0 0 1 64
     mcase latesubmit 4 103 5 4 15 754 "bounce_attempt,gap"
     mqual latesubmit partial null unavailable null \
@@ -1954,7 +1954,7 @@ suite_attempts() {
     python3 "$JASSERT" field "$TMP/wrapsubmit/session.json" \
         stop.counters_valid false || afailed=1
     mgap wrapsubmit 0 "detail closure unproven: invalid epoch"
-    mreason wrapsubmit "detail loss unknown (invalid epoch; known: submit_fail=(unavailable) malformed=(0) dropped=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
+    mreason wrapsubmit "detail loss unknown (invalid epoch; known: submit_fail=(unavailable) malformed=(0) dropped=(0) recursion_missed=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
     mreplay4 wrapsubmit 0 0 absent absent
     mcase wrapobsbytes 4 104 5 4 15 0 ""
     mqual wrapobsbytes partial 1 unavailable null proven
@@ -1968,7 +1968,7 @@ suite_attempts() {
     mcase recoverable 4 106 5 4 19 1839 \
         "bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     mqual recoverable partial 4 complete_for_scope 0 proven
-    mreason recoverable "detail loss 4 (submit_fail=(0) malformed=(1) dropped=(1) size_omitted=(0) duration_omitted=(1) signal_omitted=(0) rejected=(1) write_failed=(0))"
+    mreason recoverable "detail loss 4 (submit_fail=(0) malformed=(1) dropped=(1) recursion_missed=(0) size_omitted=(0) duration_omitted=(1) signal_omitted=(0) rejected=(1) write_failed=(0))"
     mattempt recoverable 0 d000001 64 op0
     mreplay4 recoverable 1 64 5 144
     merrcase() { # <case> <polls> <stats> <snaps> <reads> <committed> <events>
@@ -2124,7 +2124,7 @@ suite_attempts() {
     mecase siginhand 4 signal finalized 103 5 4 13 1495 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     mqualE siginhand signal partial 1 complete_for_scope 0 proven
-    mreason siginhand "detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(1) rejected=(0) write_failed=(0))"
+    mreason siginhand "detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) recursion_missed=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(1) rejected=(0) write_failed=(0))"
     mreplay4 siginhand 0 0 1 64
     mecase sigreaderr 1 error error 103 5 4 13 1495 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
@@ -2165,7 +2165,7 @@ suite_attempts() {
     SIZEREF_EVENTS=$(python3 -c "print(','.join(['bounce_attempt']*189 + ['counter_snapshot']*4))")
     mecase sizerefused 4 size_limit finalized 292 5 4 392 66871 "$SIZEREF_EVENTS"
     mqualE sizerefused size_limit partial 1 complete_for_scope 0 proven
-    mreason sizerefused "detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) size_omitted=(1) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
+    mreason sizerefused "detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) recursion_missed=(0) size_omitted=(1) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
     mreplay4 sizerefused 189 12096 190 12160
     "$CPROBE" opcount "$TMP/opcount" >"$TMP/opcount.log" 2>&1
     awant opcount "ready session=cap-1000000000-4242 start_ns=1000000000"
@@ -2179,7 +2179,7 @@ suite_attempts() {
     awant opcount "appends=4194308"
     awant opcount "committed=1462702516"
     mqualE opcount size_limit partial 1 complete_for_scope 0 proven
-    mreason opcount "detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) size_omitted=(1) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
+    mreason opcount "detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) recursion_missed=(0) size_omitted=(1) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
     python3 "$JASSERT" nofile "$TMP/opcount/events.ndjson" || afailed=1
     mcase pausedbytes 4 103 5 4 15 753 "bounce_attempt,gap"
     mqual pausedbytes partial null unavailable null \
@@ -2190,12 +2190,12 @@ suite_attempts() {
     mecase u64sum 4 size_limit finalized 104 5 4 16 1874 \
         "bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     mqualE u64sum size_limit partial 1 complete_for_scope 0 proven
-    mreason u64sum "detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) size_omitted=(1) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
+    mreason u64sum "detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) recursion_missed=(0) size_omitted=(1) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
     mattempt u64sum 0 d000001 18446744073709551615 op0
     mreplay4 u64sum 1 18446744073709551615 2 18446744073709551615
     mcase flowinject 4 104 5 4 15 0 ""
     mqual flowinject partial 2 unavailable null proven
-    mreason flowinject "detail loss 2 (submit_fail=(2) malformed=(0) dropped=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
+    mreason flowinject "detail loss 2 (submit_fail=(2) malformed=(0) dropped=(0) recursion_missed=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
     mreplay4 flowinject 0 0 absent absent
     mecase unsynced 1 duration present_unsynced 104 5 4 15 1494 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
