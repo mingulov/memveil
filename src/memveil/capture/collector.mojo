@@ -2012,8 +2012,10 @@ struct Collector:
         if not self.attempt_known:
             return
         var m = kernel.recursion_misses()
-        if not m.ok:
-            self.note_unknown(String("post-snapshot activity"))
+        if not m.ok or m.detail_error != String(""):
+            self.note_unknown(
+                String("recursion misses unreadable after settle")
+            )
             return
         if self.rec_has_detail != m.has_copy_detail:
             self.note_unknown(String("post-snapshot activity"))

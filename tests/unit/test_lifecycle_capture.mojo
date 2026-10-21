@@ -259,14 +259,16 @@ def _run(
     arm_out: OpOut = OpOut(True, String("")),
     disarm_out: OpOut = OpOut(True, String("")),
     read_files: Bool = True,
+    channels: Int = 3,
 ) raises -> CaseOut:
     """Run one scripted multi-channel capture; return its outputs.
 
-    Both lifecycle and copy channels are enabled with
-    8 MiB rings; end0/end1/end2 are the 6-word end cuts
-    and rx1/rx2 the lifecycle/copy received/delivered
-    counts (attempt traffic is the remainder). Signals
-    stop the run after the last batch.
+    Channels selects attempt-only (1), lifecycle (2),
+    or copy (3); enabled channels use 8 MiB rings;
+    end0/end1/end2 are the 6-word end cuts and rx1/rx2
+    the lifecycle/copy received/delivered counts
+    (attempt traffic is the remainder). Signals stop
+    the run after the last batch.
     """
     var tmp = _mkdtemp()
     var cfg = CollectorConfig()
@@ -278,12 +280,12 @@ def _run(
     cfg.pid = 7
     cfg.has_ring_bytes = True
     cfg.ring_bytes = UInt32(8388608)
-    cfg.has_lifecycle = True
+    cfg.has_lifecycle = channels >= 2
     cfg.lifecycle_ring_bytes = UInt32(8388608)
-    cfg.has_copy = True
+    cfg.has_copy = channels >= 3
     cfg.copy_ring_bytes = UInt32(8388608)
     var kernel = ScriptKernel()
-    kernel.channels = 3
+    kernel.channels = channels
     kernel.misses_out = misses.copy()
     kernel.misses_out2 = misses2.copy()
     kernel.use_misses2 = use_misses2
@@ -291,33 +293,41 @@ def _run(
     kernel.disarm_out = disarm_out.copy()
     kernel.add_snap(_zero_snap())
     kernel.add_snap(_zero_snap())
-    kernel.add_snap_at(1, _zero_snap())
-    kernel.add_snap_at(1, _zero_snap())
-    kernel.add_snap_at(2, _zero_snap())
-    kernel.add_snap_at(2, _zero_snap())
+    if channels >= 2:
+        kernel.add_snap_at(1, _zero_snap())
+        kernel.add_snap_at(1, _zero_snap())
+    if channels >= 3:
+        kernel.add_snap_at(2, _zero_snap())
+        kernel.add_snap_at(2, _zero_snap())
     kernel.add_snap(SnapOut(True, end0.copy(), String("")))
     kernel.add_snap(SnapOut(True, end0.copy(), String("")))
-    kernel.add_snap_at(1, SnapOut(True, end1.copy(), String("")))
-    kernel.add_snap_at(1, SnapOut(True, end1.copy(), String("")))
-    kernel.add_snap_at(2, SnapOut(True, end2.copy(), String("")))
-    kernel.add_snap_at(2, SnapOut(True, end2.copy(), String("")))
+    if channels >= 2:
+        kernel.add_snap_at(1, SnapOut(True, end1.copy(), String("")))
+        kernel.add_snap_at(1, SnapOut(True, end1.copy(), String("")))
+    if channels >= 3:
+        kernel.add_snap_at(2, SnapOut(True, end2.copy(), String("")))
+        kernel.add_snap_at(2, SnapOut(True, end2.copy(), String("")))
     var n = UInt64(len(payloads))
     # Shared stats queue in read order: sum baseline, ch0
     # baseline, drain pair, drain cut, final sum, ch0 final.
+    # Attempt-only skips both ch0 entries (no _at reads).
     var total = _stats(n, n, UInt64(0), UInt64(0))
     var ch0n = _stats(
         n - rx1 - rx2, n - rx1 - rx2, UInt64(0), UInt64(0))
     kernel.add_stats(_zero_stats())
-    kernel.add_stats(_zero_stats())
+    if channels >= 2:
+        kernel.add_stats(_zero_stats())
     kernel.add_stats(total.copy())
     kernel.add_stats(total.copy())
     kernel.add_stats(total.copy())
     kernel.add_stats(total.copy())
-    kernel.add_stats(ch0n)
-    kernel.add_stats_at(1, _zero_stats())
-    kernel.add_stats_at(1, _stats(rx1, rx1, UInt64(0), UInt64(0)))
-    kernel.add_stats_at(2, _zero_stats())
-    kernel.add_stats_at(2, _stats(rx2, rx2, UInt64(0), UInt64(0)))
+    if channels >= 2:
+        kernel.add_stats(ch0n)
+        kernel.add_stats_at(1, _zero_stats())
+        kernel.add_stats_at(1, _stats(rx1, rx1, UInt64(0), UInt64(0)))
+    if channels >= 3:
+        kernel.add_stats_at(2, _zero_stats())
+        kernel.add_stats_at(2, _stats(rx2, rx2, UInt64(0), UInt64(0)))
     for i in range(len(payloads)):
         kernel.add_poll(_batch(payloads[i]), 1)
     kernel.add_poll(_timeout(), 103)
@@ -742,6 +752,72 @@ def _error_copy_run(
         _zero_cut(), UInt64(0), _zero_cut(), UInt64(0),
         misses=misses, misses2=misses2,
         use_misses2=use_misses2)
+
+
+def _one_attempt_run(
+    misses: MissOut,
+    misses2: MissOut = MissOut(True, UInt64(0), String("")),
+    use_misses2: Bool = False,
+) raises -> CaseOut:
+    var payloads = List[List[UInt8]]()
+    return _run(
+        payloads^, _zero_cut(), _zero_cut(), UInt64(0),
+        _zero_cut(), UInt64(0),
+        misses=misses, misses2=misses2,
+        use_misses2=use_misses2, channels=1)
+
+
+def _error_attempt_run(
+    misses: MissOut,
+    misses2: MissOut = MissOut(True, UInt64(0), String("")),
+    use_misses2: Bool = False,
+) raises -> CaseOut:
+    var payloads = List[List[UInt8]]()
+    var bad = List[UInt8]()
+    for i in range(37):
+        bad.append(UInt8(0))
+    payloads.append(bad^)
+    return _run(
+        payloads^,
+        _cut(UInt64(1), UInt64(37), UInt64(1), UInt64(37)),
+        _zero_cut(), UInt64(0), _zero_cut(), UInt64(0),
+        misses=misses, misses2=misses2,
+        use_misses2=use_misses2, channels=1)
+
+
+def _one_lc_run(
+    misses: MissOut,
+    misses2: MissOut = MissOut(True, UInt64(0), String("")),
+    use_misses2: Bool = False,
+) raises -> CaseOut:
+    var payloads = List[List[UInt8]]()
+    payloads.append(
+        _lc_raw(1, 1, 1, UInt64(121), UInt64(1021),
+                UInt64(4096), UInt64(41)))
+    return _run(
+        payloads^, _zero_cut(),
+        _cut(UInt64(1), UInt64(4096), UInt64(1), UInt64(4096)),
+        UInt64(1), _zero_cut(), UInt64(0),
+        misses=misses, misses2=misses2,
+        use_misses2=use_misses2, channels=2)
+
+
+def _error_lc_run(
+    misses: MissOut,
+    misses2: MissOut = MissOut(True, UInt64(0), String("")),
+    use_misses2: Bool = False,
+) raises -> CaseOut:
+    var payloads = List[List[UInt8]]()
+    var bad = List[UInt8]()
+    for i in range(37):
+        bad.append(UInt8(0))
+    payloads.append(bad^)
+    return _run(
+        payloads^,
+        _cut(UInt64(1), UInt64(37), UInt64(1), UInt64(37)),
+        _zero_cut(), UInt64(0), _zero_cut(), UInt64(0),
+        misses=misses, misses2=misses2,
+        use_misses2=use_misses2, channels=2)
 
 
 def test_recursion_misses_are_detail_loss() raises:
@@ -1824,7 +1900,10 @@ def test_unreadable_second_miss_read_makes_loss_unknown() raises:
     )
     assert_equal(c.outcome, String("finalized"))
     assert_true(
-        _contains(c.session, String("post-snapshot activity"))
+        _contains(
+            c.session,
+            String("recursion misses unreadable after settle"),
+        )
     )
     assert_true(
         _contains(
@@ -1899,7 +1978,7 @@ def test_error_close_grown_recovered_note_post_snapshot() raises:
     )
 
 
-def test_error_close_unreadable_second_read_notes_post_snapshot() raises:
+def test_error_close_unreadable_second_read_notes_unreadable() raises:
     var c = _error_copy_run(
         _stable_detail(),
         MissOut(False, UInt64(0), String("fdinfo gone")),
@@ -1907,7 +1986,260 @@ def test_error_close_unreadable_second_read_notes_post_snapshot() raises:
     )
     assert_equal(c.outcome, String("error"))
     assert_true(
-        _contains(c.session, String("post-snapshot activity"))
+        _contains(
+            c.session,
+            String("recursion misses unreadable after settle"),
+        )
+    )
+
+
+def test_attempt_only_stable_second_read_keeps_exact_loss() raises:
+    # Unchanged attempt counters keep exact loss without extras.
+    var c = _one_attempt_run(
+        MissOut(True, UInt64(0), String("")),
+        MissOut(True, UInt64(0), String("")),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"detail":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+    assert_true(
+        not _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        not _contains(
+            c.session,
+            String("recursion misses unreadable after settle"),
+        )
+    )
+
+
+def test_lifecycle_only_stable_second_read_keeps_exact_loss() raises:
+    # Unchanged lifecycle counters keep exact loss without copy.
+    var c = _one_lc_run(
+        MissOut(True, UInt64(0), String("")),
+        MissOut(True, UInt64(0), String("")),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"detail":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+    assert_true(
+        not _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        not _contains(
+            c.session,
+            String("recursion misses unreadable after settle"),
+        )
+    )
+
+
+def test_error_close_attempt_only_stable_read_keeps_error_cause() raises:
+    # A quiet attempt-only error stop keeps its own cause.
+    var c = _error_attempt_run(
+        MissOut(True, UInt64(0), String("")),
+        MissOut(True, UInt64(0), String("")),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(_contains(c.session, String("error shutdown")))
+    assert_true(
+        not _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        not _contains(
+            c.session,
+            String("recursion misses unreadable after settle"),
+        )
+    )
+
+
+def test_error_close_lifecycle_only_stable_read_keeps_error_cause() raises:
+    # A quiet lifecycle-only error stop keeps its own cause.
+    var c = _error_lc_run(
+        MissOut(True, UInt64(0), String("")),
+        MissOut(True, UInt64(0), String("")),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(_contains(c.session, String("error shutdown")))
+    assert_true(
+        not _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        not _contains(
+            c.session,
+            String("recursion misses unreadable after settle"),
+        )
+    )
+
+
+def test_attempt_only_unreadable_second_read_goes_unknown() raises:
+    # An unreadable ch0 re-read cannot prove a quiet stop.
+    var c = _one_attempt_run(
+        MissOut(True, UInt64(0), String("")),
+        MissOut(False, UInt64(0), String("fdinfo gone")),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(
+            c.session,
+            String("recursion misses unreadable after settle"),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+
+
+def test_error_close_attempt_only_unreadable_second_read() raises:
+    var c = _error_attempt_run(
+        MissOut(True, UInt64(0), String("")),
+        MissOut(False, UInt64(0), String("fdinfo gone")),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(
+            c.session,
+            String("recursion misses unreadable after settle"),
+        )
+    )
+
+
+def test_lifecycle_only_failed_second_read_goes_unknown() raises:
+    # A failed ch1 re-read fails closed with a stable attempt.
+    var c = _one_lc_run(
+        MissOut(True, UInt64(0), String("")),
+        _detail_failed(
+            UInt64(0), String("ch1 lifecycle program count")),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(
+            c.session,
+            String("recursion misses unreadable after settle"),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+    assert_true(
+        not _contains(c.session, String("post-snapshot activity"))
+    )
+
+
+def test_error_close_lifecycle_only_failed_second_read() raises:
+    var c = _error_lc_run(
+        MissOut(True, UInt64(0), String("")),
+        _detail_failed(
+            UInt64(0), String("ch1 lifecycle program count")),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(
+            c.session,
+            String("recursion misses unreadable after settle"),
+        )
+    )
+    assert_true(
+        not _contains(c.session, String("post-snapshot activity"))
+    )
+
+
+def test_copy_failed_second_detail_read_goes_unknown() raises:
+    # A failed copy-detail re-read fails closed, first kept.
+    var c = _one_copy_run(
+        _stable_detail(),
+        _detail_failed(
+            UInt64(0), String("ch2 fallback counters wrapped")),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(
+            c.session,
+            String("recursion misses unreadable after settle"),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"source":"copy.mv_bounce_misses",'
+                '"interpretation":"100"'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+    assert_true(
+        not _contains(c.session, String("post-snapshot activity"))
+    )
+
+
+def test_error_close_copy_failed_second_detail_read() raises:
+    var c = _error_copy_run(
+        _stable_detail(),
+        _detail_failed(
+            UInt64(0), String("ch2 fallback counters wrapped")),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(
+            c.session,
+            String("recursion misses unreadable after settle"),
+        )
+    )
+    assert_true(
+        not _contains(c.session, String("post-snapshot activity"))
     )
 
 
