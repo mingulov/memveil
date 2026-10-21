@@ -269,7 +269,7 @@ def _copy_specs() -> List[AttachSpec]:
             String(""),
         )
     )
-    # Entry attaches first; the armed slot gates the exit, so order never inflates recoveries.
+    # Entry attaches first; the gate plus this order make recoveries exact.
     out.append(
         AttachSpec(
             String("mv_bounce"),
@@ -1051,6 +1051,25 @@ def fb_valid(vals: List[UInt64]) -> Bool:
     return vals[2] == UInt64(0)
 
 
+def fb_flag_reason(flags: UInt64) -> String:
+    """Name for nonzero fallback flags; empty when clean."""
+    if flags == UInt64(0):
+        return String("")
+    # Bits 0-1 are counter wraps, bit 2 a lost frame.
+    var out = String("")
+    if (flags & UInt64(3)) != UInt64(0):
+        out = String("fallback counters wrapped")
+    if (flags & UInt64(4)) != UInt64(0):
+        if out != String(""):
+            out += String("; ")
+        out += String("fallback frame lost")
+    if (flags & ~UInt64(7)) != UInt64(0):
+        if out != String(""):
+            out += String("; ")
+        out += String("fallback flags invalid")
+    return out^
+
+
 struct LmbKernel(ChannelPoller, KernelSource):
     """KernelSource backed by up to three libbpf-mojo sessions."""
 
@@ -1401,10 +1420,10 @@ struct LmbKernel(ChannelPoller, KernelSource):
             if self._ch1.present:
                 var lc = self._ch1.misses()
                 if not lc.ok:
-                    return MissOut(
-                        False, UInt64(0),
-                        _channel_tag(1) + lc.message,
-                    )
+                    var out = MissOut(
+                        True, UInt64(0), String(""), ch0.count)
+                    out.detail_error = _channel_tag(1) + lc.message
+                    return out^
                 if total > UInt64(0xFFFFFFFFFFFFFFFF) - lc.count:
                     return MissOut(
                         False, UInt64(0),
@@ -1417,30 +1436,38 @@ struct LmbKernel(ChannelPoller, KernelSource):
         if self._ch1.present:
             var lc = self._ch1.misses_lifecycle()
             if not lc.ok:
-                return MissOut(
-                    False, UInt64(0),
-                    _channel_tag(1) + lc.message,
-                )
+                var out = MissOut(
+                    True, UInt64(0), String(""), ch0.count)
+                out.detail_error = _channel_tag(1) + lc.message
+                return out^
             lc_map = lc.map_misses
             lc_unmap = lc.unmap_misses
         var cp = self._ch2.misses_copy()
         if not cp.ok:
-            return MissOut(
-                False, UInt64(0),
-                _channel_tag(2) + cp.message,
-            )
+            var out = MissOut(
+                True, UInt64(0), String(""), ch0.count)
+            out.detail_error = _channel_tag(2) + cp.message
+            return out^
         var fb = self._ch2.read_fb()
         if not fb.ok:
-            return MissOut(
-                False, UInt64(0),
-                _channel_tag(2) + String("fallback: ") + fb.message,
+            var out = MissOut(
+                True, UInt64(0), String(""), ch0.count)
+            out.detail_error = (
+                _channel_tag(2) + String("fallback: ") + fb.message
             )
+            return out^
         if not fb_valid(fb.vals):
-            return MissOut(
-                False, UInt64(0),
-                _channel_tag(2)
-                + String("fallback counters wrapped"),
-            )
+            var out = MissOut(
+                True, UInt64(0), String(""), ch0.count)
+            if len(fb.vals) != _FB_KEYS:
+                out.detail_error = (
+                    _channel_tag(2) + String("fallback flags invalid")
+                )
+            else:
+                out.detail_error = (
+                    _channel_tag(2) + fb_flag_reason(fb.vals[2])
+                )
+            return out^
         return MissOut(
             True, UInt64(0), String(""), ch0.count, True,
             cp.bounce, cp.exit_misses, cp.sync_device,

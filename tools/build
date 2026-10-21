@@ -353,8 +353,7 @@ build_bpf() {
     # Already fetched before the seal; this re-verifies the
     # cache read-only before compiling against it.
     fetch_libbpf_src || return 1
-    # Hermetic UAPI (x86-64-only floor): the BPF build reads
-    # no host headers, only vendored bytes plus clang's own.
+    # Hermetic UAPI: no host headers, only vendored bytes plus clang's own.
     UAPI_INC="$ROOT/bpf/include/uapi"
     for h in linux/bpf.h linux/bpf_common.h linux/posix_types.h \
              linux/stddef.h linux/types.h asm-generic/bitsperlong.h \

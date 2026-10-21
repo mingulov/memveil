@@ -1605,6 +1605,17 @@ def test_copy_arm_disarm_bracket_the_capture() raises:
     assert_equal(c.calls[3], String("detach"))
 
 
+def test_copy_disarm_precedes_detach_on_error_close() raises:
+    # The error path disarms before detach like the normal close.
+    var c = _error_copy_run(MissOut(True, UInt64(0), String("")))
+    assert_equal(c.outcome, String("error"))
+    assert_equal(len(c.calls), 4)
+    assert_equal(c.calls[0], String("attach"))
+    assert_equal(c.calls[1], String("arm"))
+    assert_equal(c.calls[2], String("disarm"))
+    assert_equal(c.calls[3], String("detach"))
+
+
 def test_copy_contradiction_keeps_aggregate_complete() raises:
     # A copy-counter contradiction poisons detail, not a clean aggregate.
     var c = _one_copy_run(
@@ -1897,6 +1908,195 @@ def test_error_close_unreadable_second_read_notes_post_snapshot() raises:
     assert_equal(c.outcome, String("error"))
     assert_true(
         _contains(c.session, String("post-snapshot activity"))
+    )
+
+
+def _Detail_failed(attempt: UInt64, reason: String) raises -> MissOut:
+    var m = MissOut(True, UInt64(0), String(""), attempt)
+    m.detail_error = reason
+    return m^
+
+
+def test_wrapped_fallback_keeps_attempt_count() raises:
+    # Wrapped fallback counters poison detail, not a read attempt count.
+    var c = _one_copy_run(
+        _Detail_failed(
+            UInt64(3), String("ch2 fallback counters wrapped"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '\"aggregate\":{\"status\":\"partial\",'
+                '\"loss_count\":\"3\",'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String("attempt program runs skipped 3 (recursion)"),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '\"detail\":{\"status\":\"partial\",'
+                '\"loss_count\":null,'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "copy detail unreadable: "
+                "ch2 fallback counters wrapped"
+            ),
+        )
+    )
+
+
+def test_frame_lost_fallback_keeps_attempt_count() raises:
+    # A lost frame names itself, never a counter wrap.
+    var c = _one_copy_run(
+        _Detail_failed(
+            UInt64(3), String("ch2 fallback frame lost"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '\"aggregate\":{\"status\":\"partial\",'
+                '\"loss_count\":\"3\",'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '\"detail\":{\"status\":\"partial\",'
+                '\"loss_count\":null,'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "copy detail unreadable: ch2 fallback frame lost"
+            ),
+        )
+    )
+
+
+def test_unreadable_fallback_keeps_attempt_count() raises:
+    # An unreadable fallback map poisons detail, not the attempt count.
+    var c = _one_copy_run(
+        _Detail_failed(
+            UInt64(3), String("ch2 fallback: short fallback read"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '\"aggregate\":{\"status\":\"partial\",'
+                '\"loss_count\":\"3\",'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '\"detail\":{\"status\":\"partial\",'
+                '\"loss_count\":null,'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "copy detail unreadable: "
+                "ch2 fallback: short fallback read"
+            ),
+        )
+    )
+
+
+def test_unreadable_lifecycle_misses_keep_attempt_count() raises:
+    # Unreadable lifecycle misses poison detail, not the attempt count.
+    var c = _one_copy_run(
+        _Detail_failed(
+            UInt64(3), String("ch1 lifecycle program count"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '\"aggregate\":{\"status\":\"partial\",'
+                '\"loss_count\":\"3\",'
+            ),
+        )
+    )
+    assert_true(
+        not _contains(
+            c.session, String("attempt program skips unknown"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '\"detail\":{\"status\":\"partial\",'
+                '\"loss_count\":null,'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "copy detail unreadable: "
+                "ch1 lifecycle program count"
+            ),
+        )
+    )
+
+
+def test_unreadable_copy_misses_keep_attempt_count() raises:
+    # Unreadable copy misses poison detail, not the attempt count.
+    var c = _one_copy_run(
+        _Detail_failed(
+            UInt64(3), String("ch2 copy program count"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '\"aggregate\":{\"status\":\"partial\",'
+                '\"loss_count\":\"3\",'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '\"detail\":{\"status\":\"partial\",'
+                '\"loss_count\":null,'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "copy detail unreadable: ch2 copy program count"
+            ),
+        )
     )
 
 

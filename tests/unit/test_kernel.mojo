@@ -25,6 +25,7 @@ from memveil.capture.kernel import (
     LmbKernel,
     PollRotation,
     added_fds,
+    fb_flag_reason,
     fb_valid,
     fdinfo_u64,
     identify_copy_progs,
@@ -684,6 +685,31 @@ def test_fb_valid_rejects_any_flag() raises:
     assert_true(not fb_valid(short))
 
 
+def test_fb_flag_reason_names_each_flag() raises:
+    # Wrap bits and a lost frame report their own reasons.
+    assert_equal(fb_flag_reason(UInt64(0)), String(""))
+    assert_equal(
+        fb_flag_reason(UInt64(1)),
+        String("fallback counters wrapped"),
+    )
+    assert_equal(
+        fb_flag_reason(UInt64(2)),
+        String("fallback counters wrapped"),
+    )
+    assert_equal(
+        fb_flag_reason(UInt64(4)),
+        String("fallback frame lost"),
+    )
+    assert_equal(
+        fb_flag_reason(UInt64(5)),
+        String("fallback counters wrapped; fallback frame lost"),
+    )
+    assert_equal(
+        fb_flag_reason(UInt64(8)),
+        String("fallback flags invalid"),
+    )
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_not_open_taxonomy]()
@@ -724,6 +750,7 @@ def run() raises -> Int:
     suite.test[test_identify_lifecycle_progs_missing]()
     suite.test[test_identify_lifecycle_progs_unexpected]()
     suite.test[test_fb_valid_rejects_any_flag]()
+    suite.test[test_fb_flag_reason_names_each_flag]()
     suite^.run()
     return 0
 

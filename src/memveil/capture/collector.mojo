@@ -195,6 +195,8 @@ struct MissOut(Copyable, Movable):
     var lc_unmap: UInt64
     var deferred: UInt64
     var recovered: UInt64
+    # Copy-detail failure with attempt still valid; empty when none.
+    var detail_error: String
 
     def __init__(
         out self,
@@ -211,6 +213,7 @@ struct MissOut(Copyable, Movable):
         lc_unmap: UInt64 = UInt64(0),
         deferred: UInt64 = UInt64(0),
         recovered: UInt64 = UInt64(0),
+        detail_error: String = String(""),
     ):
         self.ok = ok
         self.count = count
@@ -225,6 +228,7 @@ struct MissOut(Copyable, Movable):
         self.lc_unmap = lc_unmap
         self.deferred = deferred
         self.recovered = recovered
+        self.detail_error = detail_error.copy()
 
 
 @fieldwise_init
@@ -1944,6 +1948,13 @@ struct Collector:
         if not m.ok:
             self.note_unknown(
                 String("recursion misses unreadable: ") + m.message
+            )
+            return
+        if m.detail_error != String(""):
+            self.attempt_missed = m.attempt
+            self.attempt_known = True
+            self.note_unknown(
+                String("copy detail unreadable: ") + m.detail_error
             )
             return
         self.attempt_missed = m.attempt

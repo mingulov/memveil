@@ -191,8 +191,8 @@ records the copy only when no matching claim exists and the
 fallback is armed, so each copy is recorded once. The fentry
 program attaches before the fexit program; the armed slot in
 `mv_copy_fb` (written after attach, cleared before detach)
-keeps a bare exit from counting recoveries, so the accounting
-holds regardless of attach or detach order. A full probe window
+keeps a bare exit from counting recoveries, so the gate plus
+entry-first order make the count exact. A full probe window
 leaves the copy to `mv_bounce_exit` and counts deferred in
 `mv_copy_fb`; a call neither program can match counts as
 `submit_fail`.

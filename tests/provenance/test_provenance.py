@@ -44,9 +44,13 @@ import source_inventory  # noqa: E402
 
 KNOWN_IDS = {
     "GPL-3.0-or-later": "LICENSE",
-    "GPL-2.0": "LICENSES/GPL-2.0.txt",
     "GPL-2.0-only": "LICENSES/GPL-2.0-only.txt",
     "GPL-2.0-or-later": "LICENSES/GPL-2.0-or-later.txt",
+}
+
+UAPI_PREFIX = "bpf/include/uapi/"
+UAPI_IDS = {
+    "GPL-2.0 WITH Linux-syscall-note": "LICENSES/GPL-2.0.txt",
 }
 
 CODE_SUFFIXES = (
@@ -164,8 +168,14 @@ def is_code(rel):
 def spdx_of(path):
     with open(path, "rb") as handle:
         head = handle.read(4096).decode("utf-8", "replace")
-    match = re.search(r"SPDX-License-Identifier:\s*(\S+)", head)
-    return match.group(1) if match else None
+    match = re.search(r"SPDX-License-Identifier:\s*([^\n]+)", head)
+    if not match:
+        return None
+    found = match.group(1).strip()
+    for tail in ("*/", "-->"):
+        if found.endswith(tail):
+            found = found[:-len(tail)].strip()
+    return found
 
 
 def verify_uapi_readme():
@@ -383,12 +393,18 @@ def main(argv):
 
     offenders = []
     seen_ids = set()
+    seen_uapi = set()
     for rel in sorted(files):
         if not is_code(rel):
             continue
         found = spdx_of(os.path.join(ROOT, rel))
         if found is None:
             offenders.append(rel + " (missing)")
+        elif rel.startswith(UAPI_PREFIX):
+            if found not in UAPI_IDS:
+                offenders.append(rel + " (unknown id %s)" % found)
+            else:
+                seen_uapi.add(found)
         elif found not in KNOWN_IDS:
             offenders.append(rel + " (unknown id %s)" % found)
         else:
@@ -399,6 +415,9 @@ def main(argv):
     for ident in sorted(seen_ids):
         staged = os.path.join(ROOT, KNOWN_IDS[ident])
         check("license-text-%s" % ident, os.path.isfile(staged), staged)
+    for ident in sorted(seen_uapi):
+        staged = os.path.join(ROOT, UAPI_IDS[ident])
+        check("license-text-uapi", os.path.isfile(staged), staged)
     check("license-default", os.path.isfile(os.path.join(ROOT, "LICENSE")))
 
     lock_path = os.path.join(ROOT, "toolchain.lock.json")

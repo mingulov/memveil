@@ -8,7 +8,7 @@ x86-64 only); `linux/` and `asm-generic/` keep their include paths.
 
 Source package: linux-libc-dev:amd64
 Source version: 7.0.0-38.38
-License: GPL-2.0 WITH Linux-syscall-note (see the SPDX line in each file)
+License: GPL-2.0 WITH Linux-syscall-note (SPDX line in every file except asm/types.h)
 
 sha256:
 4152b3c5d095f5cf0adf5cc13ee0670e737eb7c4efef5fa08e9d1eb87e68ed78  linux/types.h
