@@ -213,6 +213,20 @@ after every copy link attaches and cleared before detach, a
 failed arm write refuses the capture, a failed disarm write
 leaves copy detail unknown, and a disarmed exit records nothing.
 
+After the end cut, the collector re-reads every recursion
+counter and compares it with the first read, which is
+never replaced. A detected move marks detail loss unknown
+with reason `post-snapshot activity`; an unreadable
+re-read marks it unknown with reason `recursion misses
+unreadable after settle`. A moved or unreadable attempt
+count, or a skipped re-read, also marks the aggregate
+loss unknown with its own reason.
+
+A first-read detail failure with a valid attempt count
+keeps the count and marks only detail unknown, with
+reason `copy detail unreadable: ...` (or `lifecycle
+detail unreadable: ...` without a copy channel).
+
 ## Semantic edges
 
 - Clamps: a clamped copy sets the clamped flag; requested and
