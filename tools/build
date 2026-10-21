@@ -363,32 +363,38 @@ build_bpf() {
     mkdir -p "$ROOT/build/bpf" || return 1
     log clang --target=bpf production object
     clang --target=bpf -O2 -g -Wall -Wextra -Werror -D__BPF__ \
+        -ffile-prefix-map="$ROOT"=. \
         -I bpf/include -I "$LIBBPF_INC" -I "$ARCH_INC" \
         -c bpf/programs/swiotlb_attempt.bpf.c \
         -o build/bpf/swiotlb_attempt.bpf.o || return 1
     log clang --target=bpf saturation test object
     clang --target=bpf -O2 -g -Wall -Wextra -Werror -D__BPF__ \
+        -ffile-prefix-map="$ROOT"=. \
         -DMV_RING_BYTES=4096 \
         -I bpf/include -I "$LIBBPF_INC" -I "$ARCH_INC" \
         -c bpf/programs/swiotlb_attempt.bpf.c \
         -o build/bpf/swiotlb_attempt-test.bpf.o || return 1
     log clang --target=bpf lifecycle object
     clang --target=bpf -O2 -g -Wall -Wextra -Werror -D__BPF__ \
+        -ffile-prefix-map="$ROOT"=. \
         -I bpf/include -I "$LIBBPF_INC" -I "$ARCH_INC" \
         -c bpf/programs/swiotlb_lifecycle.bpf.c \
         -o build/bpf/swiotlb_lifecycle.bpf.o || return 1
     log clang --target=bpf copy object
     clang --target=bpf -O2 -g -Wall -Wextra -Werror -D__BPF__ \
+        -ffile-prefix-map="$ROOT"=. \
         -I bpf/include -I "$LIBBPF_INC" -I "$ARCH_INC" \
         -c bpf/programs/swiotlb_copy.bpf.c \
         -o build/bpf/swiotlb_copy.bpf.o || return 1
     log clang --target=bpf saturation lifecycle/copy test objects
     clang --target=bpf -O2 -g -Wall -Wextra -Werror -D__BPF__ \
+        -ffile-prefix-map="$ROOT"=. \
         -DMV_RING_BYTES=4096 \
         -I bpf/include -I "$LIBBPF_INC" -I "$ARCH_INC" \
         -c bpf/programs/swiotlb_lifecycle.bpf.c \
         -o build/bpf/swiotlb_lifecycle-test.bpf.o || return 1
     clang --target=bpf -O2 -g -Wall -Wextra -Werror -D__BPF__ \
+        -ffile-prefix-map="$ROOT"=. \
         -DMV_RING_BYTES=4096 \
         -I bpf/include -I "$LIBBPF_INC" -I "$ARCH_INC" \
         -c bpf/programs/swiotlb_copy.bpf.c \

@@ -164,7 +164,7 @@ commands. With `H=tests/fixtures/qualify/host`:
     sha256sum $H/boot/vmlinuz-7.0.0-test
 
 yield, in order, `a5af36b0...`, `6c7ff9b3...`,
-`43b8d6d5...`, `f7e94e63...`, and `11a663ae...`, each
+`43b8d6d5...`, `ff9109de...`, and `11a663ae...`, each
 matching the corresponding `sha256:` value in the
 `identity.source.note` of
 `tests/fixtures/qualify/profiles/qual-ref.json`

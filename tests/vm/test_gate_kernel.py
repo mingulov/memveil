@@ -237,6 +237,20 @@ def test_shipped_34_profile_regenerates_from_its_own_bindings():
     assert gate == shipped
 
 
+@needs_build
+def test_built_objects_contain_no_checkout_path():
+    # Prefix-mapped objects reproduce across checkouts.
+    root = str(REPO).encode()
+    names = (
+        "swiotlb_attempt.bpf.o", "swiotlb_attempt-test.bpf.o",
+        "swiotlb_lifecycle.bpf.o", "swiotlb_lifecycle-test.bpf.o",
+        "swiotlb_copy.bpf.o", "swiotlb_copy-test.bpf.o",
+    )
+    for name in names:
+        data = (REPO / "build" / "bpf" / name).read_bytes()
+        assert root not in data, name
+
+
 def test_doctor_doc_refuses_error_exit():
     good = '{"capabilities": []}'
     for code in (0, 3):
