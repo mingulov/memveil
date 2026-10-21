@@ -1,0 +1,127 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Release: tag-triggered artifact build and GitHub Release
+# publication. A tag `vX.Y.Z` (or a manual dispatch dry run)
+# provisions the locked toolchain exactly like the tier
+# workflows, runs the Tier 1 + Tier 2 gate suites, builds
+# the owner bundle, the .deb, and the .rpm from the clean
+# tag tree, re-verifies each artifact through its own lane,
+# and uploads the set plus a sha256 file to the tag's
+# GitHub Release. Dispatch runs build everything but
+# publish nothing. Rollback is a new tag: releases are
+# immutable file sets, never mutated in place.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - name: Install pixi
+        run: |
+          python3 tools/install-pixi --prefix "$HOME/.pixi"
+          echo "$HOME/.pixi/bin" >> "$GITHUB_PATH"
+      - name: Install system toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang bpftool cmake ninja-build python3-pytest \
+            strace patchelf rpm
+      - name: Provision libbpf-mojo tarball
+        run: |
+          VER="$(python3 -c "import json; print(json.load(open('toolchain.lock.json'))['dependencies']['libbpf-mojo']['version'])")"
+          TARBALL="third_party/libbpf-mojo-$VER.tar.gz"
+          WANT="$(python3 -c "import json; print(json.load(open('toolchain.lock.json'))['dependencies']['libbpf-mojo']['tarball_sha256'])")"
+          echo "$WANT  $TARBALL" | sha256sum --check -
+          echo "LMB_PACKAGE=$GITHUB_WORKSPACE/$TARBALL" >> "$GITHUB_ENV"
+      - name: Build
+        run: ./tools/build
+      - name: Tag matches engine version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          ENGINE="$(./build/memveil version)"
+          WANT="v${ENGINE#memveil-}"
+          if [ "$TAG" != "$WANT" ]; then
+            echo "tag $TAG does not match engine $ENGINE" >&2
+            exit 1
+          fi
+      - name: Gate suites (Tier 1)
+        run: |
+          for suite in schemas unit reports profiles doctor qualify \
+              identity correlation mappings lifetimes pools \
+              regions conversion-normalize confidential-hooks \
+              region-resolution baseline confidential-inventory \
+              diagnostics top oracle-ledger profile-semantics \
+              stop budgets quality reader-adversarial \
+              fuzz-smoke fuzz-campaign record-failures \
+              output-paths privacy render-escaping \
+              offline-environment perf-replay preview-package \
+              provenance docs examples package source-export \
+              release-runtime; do
+            ./tools/test "$suite" || exit 1
+          done
+      - name: Gate suites (Tier 2)
+        run: |
+          for suite in attempts native-decode writer signals record buildcache; do
+            ./tools/test "$suite" || exit 1
+          done
+      - name: Build bundle
+        run: ./tools/package
+      - name: Build deb
+        run: |
+          ./tools/package-deb
+          MV_DEB=dist/memveil_*-1_amd64.deb ./tools/test deb || exit 1
+      - name: Build rpm
+        run: |
+          SPEC="$GITHUB_WORKSPACE/packaging/rpm/memveil.spec"
+          SPEC_VER="$(sed -n 's/^Version: *//p' "$SPEC")"
+          SRC1="$(sed -n 's/^Source1: *//p' "$SPEC")"
+          RTOP="$GITHUB_WORKSPACE/dist/rpmbuild"
+          mkdir -p "$RTOP/SOURCES" "$RTOP/BUILD" "$RTOP/RPMS" \
+            "$RTOP/SRPMS" "$RTOP/BUILDROOT"
+          ./tools/rpm-source0 --root "$GITHUB_WORKSPACE" \
+            --version "$SPEC_VER" \
+            --out "$RTOP/SOURCES/memveil-$SPEC_VER.tar.gz"
+          cp "$LMB_PACKAGE" "$RTOP/SOURCES/$SRC1"
+          rpmbuild -bb --define "_topdir $RTOP" \
+            --define "debug_package %{nil}" "$SPEC"
+          RPM="$(find "$RTOP/RPMS" -name '*.rpm' | head -1)"
+          cp "$RPM" "$GITHUB_WORKSPACE/dist/"
+          MV_RPM="$GITHUB_WORKSPACE/dist/$(basename "$RPM")" \
+            ./tools/test rpm-journey || exit 1
+      - name: Verify bundle runtime
+        run: |
+          MV_BUNDLE_TARBALL="$(echo dist/memveil-*.tar.gz)" \
+            ./tools/test release-runtime || exit 1
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum memveil-*.tar.gz memveil_*.deb memveil-*.rpm \
+            > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "$TAG" \
+              --generate-notes
+          fi
+          gh release upload "$TAG" --clobber \
+            dist/memveil-*.tar.gz dist/memveil_*.deb \
+            dist/memveil-*.rpm dist/SHA256SUMS.txt
