@@ -237,6 +237,19 @@ def test_shipped_34_profile_regenerates_from_its_own_bindings():
     assert gate == shipped
 
 
+def comp_dirs(obj):
+    """DW_AT_comp_dir values of one object via readelf (binutils)."""
+    proc = subprocess.run(
+        ["readelf", "--debug-dump=info", str(obj)],
+        capture_output=True, text=True)
+    assert proc.returncode == 0, obj
+    out = []
+    for line in proc.stdout.splitlines():
+        if "DW_AT_comp_dir" in line:
+            out.append(line.rsplit(": ", 1)[-1].strip())
+    return out
+
+
 @needs_build
 def test_built_objects_contain_no_checkout_path():
     # Prefix-mapped objects reproduce across checkouts.
@@ -249,16 +262,10 @@ def test_built_objects_contain_no_checkout_path():
     for name in names:
         data = (REPO / "build" / "bpf" / name).read_bytes()
         assert root not in data, name
-        proc = subprocess.run(
-            ["llvm-dwarfdump", "--debug-info",
-             str(REPO / "build" / "bpf" / name)],
-            capture_output=True, text=True)
-        assert proc.returncode == 0, name
-        dirs = [ln for ln in proc.stdout.splitlines()
-                if "DW_AT_comp_dir" in ln]
+        dirs = comp_dirs(REPO / "build" / "bpf" / name)
         assert dirs, name
-        for line in dirs:
-            assert '(".")' in line, (name, line)
+        for value in dirs:
+            assert value == ".", (name, value)
 
 
 @needs_build
