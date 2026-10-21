@@ -27,9 +27,11 @@ from memveil.capture.collector import (
     EXIT_REFUSAL,
     Collector,
     CollectorConfig,
+    GeomOut,
     MissOut,
     OpOut,
     PollOut,
+    RunResult,
     SnapOut,
     StatsOut,
 )
@@ -1270,6 +1272,59 @@ def test_exact_copy_loss_negative_is_unknown() raises:
     )
 
 
+def test_exact_copy_loss_counts_attempt_misses() raises:
+    # Attempt misses charge both detail and the aggregate.
+    var c = _one_copy_run(
+        _detail_misses(
+            UInt64(10), UInt64(4), UInt64(1), UInt64(0),
+            UInt64(1), UInt64(1), UInt64(2), UInt64(5),
+            UInt64(3),
+        )
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '\"reason\":\"detail loss 13 (submit_fail=(0) '
+                'malformed=(0) dropped=(0) recursion_missed=(13) '
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('\"aggregate\":{\"status\":\"partial\",\"loss_count\":\"3\",'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String("attempt program runs skipped 3 (recursion)"),
+        )
+    )
+
+
+def test_exact_copy_loss_counts_sync_cpu_misses() raises:
+    # Sync_cpu misses charge detail like every other program.
+    var c = _one_copy_run(
+        _detail_misses(
+            UInt64(0), UInt64(0), UInt64(0), UInt64(2),
+            UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+        )
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '\"reason\":\"detail loss 2 (submit_fail=(0) '
+                'malformed=(0) dropped=(0) recursion_missed=(2) '
+            ),
+        )
+    )
+
+
 def test_exact_copy_exit_only_stays_complete() raises:
     # Exit misses alone never lose a copy.
     var c = _one_copy_run(
@@ -1352,6 +1407,128 @@ def test_copy_fb_geometry_refuses() raises:
     )
 
 
+def _good_fb() -> GeomOut:
+    return GeomOut(
+        True, UInt32(2), UInt32(4), UInt32(8), UInt32(4),
+        String(""),
+    )
+
+
+def _good_claims() -> GeomOut:
+    return GeomOut(
+        True, UInt32(2), UInt32(4), UInt32(16), UInt32(4096),
+        String(""),
+    )
+
+
+def _run_geom(fb: GeomOut, claims: GeomOut) raises -> RunResult:
+    var tmp = _mkdtemp()
+    var cfg = CollectorConfig()
+    cfg.duration_s = UInt64(60)
+    cfg.max_events_bytes = 1073741824
+    cfg.output = tmp + String("/cap")
+    cfg.profile_id = String("test-profile-1")
+    cfg.pid = 7
+    cfg.has_ring_bytes = True
+    cfg.ring_bytes = UInt32(8388608)
+    cfg.has_copy = True
+    cfg.copy_ring_bytes = UInt32(8388608)
+    var kernel = ScriptKernel()
+    kernel.channels = 3
+    kernel.fb_geom = fb.copy()
+    kernel.claims_geom = claims.copy()
+    var signal = ScriptSignal()
+    var clock = ScriptClock()
+    clock.add(UInt64(0))
+    var writer = ScriptWriter()
+    var collector = Collector(cfg)
+    return collector.run(kernel, clock, signal, writer)
+
+
+def test_copy_fb_wrong_type_refuses() raises:
+    var fb = _good_fb()
+    fb.map_type = UInt32(1)
+    var result = _run_geom(fb^, _good_claims())
+    assert_equal(result.exit_code, EXIT_REFUSAL)
+    assert_true(
+        _contains(
+            result.diagnostic, String("map cp mv_copy_fb geometry")
+        )
+    )
+
+
+def test_copy_fb_wrong_key_refuses() raises:
+    var fb = _good_fb()
+    fb.key_size = UInt32(8)
+    var result = _run_geom(fb^, _good_claims())
+    assert_equal(result.exit_code, EXIT_REFUSAL)
+    assert_true(
+        _contains(
+            result.diagnostic, String("map cp mv_copy_fb geometry")
+        )
+    )
+
+
+def test_copy_fb_wrong_value_refuses() raises:
+    var fb = _good_fb()
+    fb.value_size = UInt32(4)
+    var result = _run_geom(fb^, _good_claims())
+    assert_equal(result.exit_code, EXIT_REFUSAL)
+    assert_true(
+        _contains(
+            result.diagnostic, String("map cp mv_copy_fb geometry")
+        )
+    )
+
+
+def test_copy_claims_wrong_type_refuses() raises:
+    var claims = _good_claims()
+    claims.map_type = UInt32(1)
+    var result = _run_geom(_good_fb(), claims^)
+    assert_equal(result.exit_code, EXIT_REFUSAL)
+    assert_true(
+        _contains(
+            result.diagnostic, String("map cp mv_claims geometry")
+        )
+    )
+
+
+def test_copy_claims_wrong_key_refuses() raises:
+    var claims = _good_claims()
+    claims.key_size = UInt32(8)
+    var result = _run_geom(_good_fb(), claims^)
+    assert_equal(result.exit_code, EXIT_REFUSAL)
+    assert_true(
+        _contains(
+            result.diagnostic, String("map cp mv_claims geometry")
+        )
+    )
+
+
+def test_copy_claims_wrong_value_refuses() raises:
+    var claims = _good_claims()
+    claims.value_size = UInt32(8)
+    var result = _run_geom(_good_fb(), claims^)
+    assert_equal(result.exit_code, EXIT_REFUSAL)
+    assert_true(
+        _contains(
+            result.diagnostic, String("map cp mv_claims geometry")
+        )
+    )
+
+
+def test_copy_claims_wrong_max_refuses() raises:
+    var claims = _good_claims()
+    claims.max_entries = UInt32(1024)
+    var result = _run_geom(_good_fb(), claims^)
+    assert_equal(result.exit_code, EXIT_REFUSAL)
+    assert_true(
+        _contains(
+            result.diagnostic, String("map cp mv_claims geometry")
+        )
+    )
+
+
 def test_copy_arm_failure_refuses_start() raises:
     # A failed arm write fails the capture closed, never unarmed.
     var payloads = List[List[UInt8]]()
@@ -1399,6 +1576,80 @@ def test_copy_arm_disarm_bracket_the_capture() raises:
     assert_equal(c.calls[1], String("arm"))
     assert_equal(c.calls[2], String("disarm"))
     assert_equal(c.calls[3], String("detach"))
+
+
+def test_copy_contradiction_keeps_aggregate_complete() raises:
+    # A copy-counter contradiction poisons detail, not a clean aggregate.
+    var c = _one_copy_run(
+        _detail_misses(
+            UInt64(5), UInt64(0), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(0), UInt64(10),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('\"detail\":{\"status\":\"partial\",\"loss_count\":null,'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '\"aggregate\":{\"status\":\"complete_for_scope\",'
+                '\"loss_count\":\"0\",'
+            ),
+        )
+    )
+
+
+def test_copy_contradiction_keeps_attempt_loss() raises:
+    # Attempt skips still charge the aggregate under a contradiction.
+    var c = _one_copy_run(
+        _detail_misses(
+            UInt64(5), UInt64(0), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(0), UInt64(10),
+            UInt64(2),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('\"detail\":{\"status\":\"partial\",\"loss_count\":null,'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('\"aggregate\":{\"status\":\"partial\",\"loss_count\":\"2\",'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String("attempt program runs skipped 2 (recursion)"),
+        )
+    )
+
+
+def test_copy_overflow_keeps_aggregate_complete() raises:
+    # A copy-counter overflow poisons detail, not a clean aggregate.
+    var c = _one_copy_run(
+        _detail_misses(
+            ~UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(1), UInt64(0),
+        )
+    )
+    assert_true(_contains(c.session, String("overflow")))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '\"aggregate\":{\"status\":\"complete_for_scope\",'
+                '\"loss_count\":\"0\",'
+            ),
+        )
+    )
 
 
 def main() raises:

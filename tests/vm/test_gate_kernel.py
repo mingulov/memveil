@@ -249,6 +249,16 @@ def test_built_objects_contain_no_checkout_path():
     for name in names:
         data = (REPO / "build" / "bpf" / name).read_bytes()
         assert root not in data, name
+        proc = subprocess.run(
+            ["llvm-dwarfdump", "--debug-info",
+             str(REPO / "build" / "bpf" / name)],
+            capture_output=True, text=True)
+        assert proc.returncode == 0, name
+        dirs = [ln for ln in proc.stdout.splitlines()
+                if "DW_AT_comp_dir" in ln]
+        assert dirs, name
+        for line in dirs:
+            assert '(".")' in line, (name, line)
 
 
 @needs_build

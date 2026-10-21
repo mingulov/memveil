@@ -747,6 +747,7 @@ struct Collector:
     var has_final_stats: Bool
     var recursion_missed: UInt64
     var attempt_missed: UInt64
+    var attempt_known: Bool
     var has_recursion: Bool
     var rec_has_detail: Bool
     var rec_bounce: UInt64
@@ -854,6 +855,7 @@ struct Collector:
         self.has_final_stats = False
         self.recursion_missed = UInt64(0)
         self.attempt_missed = UInt64(0)
+        self.attempt_known = False
         self.has_recursion = False
         self.rec_has_detail = False
         self.rec_bounce = UInt64(0)
@@ -1388,6 +1390,16 @@ struct Collector:
                 or fb.max_entries != UInt32(4)
             ):
                 return String("map cp mv_copy_fb geometry")
+            var claims = kernel.map_info_at(2, String("mv_claims"))
+            if not claims.ok:
+                return String("map cp mv_claims: ") + claims.message
+            if (
+                claims.map_type != UInt32(MAP_TYPE_ARRAY)
+                or claims.key_size != UInt32(4)
+                or claims.value_size != UInt32(16)
+                or claims.max_entries != UInt32(4096)
+            ):
+                return String("map cp mv_claims geometry")
         if not self.stable_pair_at(kernel, clock, 0):
             return String("start snapshot unresolved")
         self.start_vals = self.end_vals.copy()
@@ -1934,9 +1946,10 @@ struct Collector:
                 String("recursion misses unreadable: ") + m.message
             )
             return
+        self.attempt_missed = m.attempt
+        self.attempt_known = True
         if not m.has_copy_detail:
             self.recursion_missed = m.count
-            self.attempt_missed = m.attempt
             self.has_recursion = True
             return
         self.rec_has_detail = True
@@ -1948,7 +1961,6 @@ struct Collector:
         self.rec_lc_unmap = m.lc_unmap
         self.rec_deferred = m.deferred
         self.rec_recovered = m.recovered
-        self.attempt_missed = m.attempt
         var top = ~UInt64(0)
         if m.bounce > top - m.deferred:
             self.note_unknown(String("copy recursion counters overflow"))
@@ -2975,7 +2987,7 @@ struct Collector:
                 self.write_failed,
             )
         out.q_detail.scope = scope
-        if self.snapshots_present and not self.has_recursion:
+        if self.snapshots_present and not self.attempt_known:
             # Skipped attempt runs never advance the counters.
             out.q_aggregate.status = String("partial")
             out.q_aggregate.has_loss_count = False

@@ -10,7 +10,7 @@ Inputs : build/bpf/swiotlb_attempt.bpf.o  (built by tools/build)
          build/bpf/swiotlb_lifecycle.bpf.o and
          build/bpf/swiotlb_copy.bpf.o (same build).
 Outputs: tests/fixtures/elf/*.o (10 base + 9 admission negatives,
-         plus 2 tracing positives + 4 tracing negatives).
+         plus 2 tracing positives + 5 tracing negatives).
 
 Patches (verified structurally after writing):
   badarch : e_machine BPF(247) -> EM_X86_64(62).
@@ -48,6 +48,7 @@ Patches (verified structurally after writing):
             (ring geometry refused).
   cp-nofexit : copy object with fexit/swiotlb_bounce renamed
             to xexit/ (no fexit section: fallback refused).
+  cp-badfb   : mv_copy_fb max_entries 4 -> 3 (fallback refused).
 """
 import struct
 import sys
@@ -537,6 +538,14 @@ def main() -> int:
     struct.pack_into("<I", cp_nonpow2, cp_ring_off, 1000)
     (OUT / "cp-nonpow2.o").write_bytes(bytes(cp_nonpow2))
 
+    # Copy fallback with a short slot count: geometry refuses.
+    cp_badfb = bytearray(cp_base)
+    cp_fb_off = _btf_array_nelems_off(
+        cp_badfb, b"mv_copy_fb", b"max_entries")
+    assert struct.unpack_from("<I", cp_badfb, cp_fb_off)[0] == 4
+    struct.pack_into("<I", cp_badfb, cp_fb_off, 3)
+    (OUT / "cp-badfb.o").write_bytes(bytes(cp_badfb))
+
     tiny = (OUT / "tiny.o").read_bytes()
     assert tiny == ok[:40] and len(tiny) == 40, "tiny.o"
     # wrongsec.o is synthetic: validate its section table independently.
@@ -657,7 +666,13 @@ def main() -> int:
         == cp_ring_off
     )
     assert struct.unpack_from("<I", cpn, cp_ring_off)[0] == 1000
-    print(f"wrote 23 fixtures to {OUT}")
+    cpf = (OUT / "cp-badfb.o").read_bytes()
+    assert (
+        _btf_array_nelems_off(cpf, b"mv_copy_fb", b"max_entries")
+        == cp_fb_off
+    )
+    assert struct.unpack_from("<I", cpf, cp_fb_off)[0] == 3
+    print(f"wrote 24 fixtures to {OUT}")
 
     # Structural self-check of every fixture (.strtab-scoped symbol check,
     # since __btf_strings legitimately repeats the program name).

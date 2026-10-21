@@ -37,7 +37,11 @@ from memveil.platform.artifact_files import (
     open_bridge_snapshot,
     restore_capture_ownership,
 )
-from memveil.platform.btf import read_btf_maps, read_btf_maps_ring
+from memveil.platform.btf import (
+    read_btf_copy_fb,
+    read_btf_maps,
+    read_btf_maps_ring,
+)
 from memveil.platform.capabilities import cap_floor_ok, cap_floor_refusal
 from memveil.platform.clock import (
     MonoClock,
@@ -447,6 +451,13 @@ def _verify_extra_object(
     if maps.ring_bytes > MAX_NARROW_RING_BYTES:
         out.refusal = word + String(" object ring too large")
         return out^
+    if word == String("cp"):
+        var fb = read_btf_copy_fb(Span(elf))
+        if not fb.ok:
+            out.refusal = (
+                word + String(" object refused: ") + fb.message
+            )
+            return out^
     out.ok = True
     out.elf = elf.copy()
     out.sha = sha256_hex(Span(elf))

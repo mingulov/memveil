@@ -28,6 +28,7 @@ from memveil.capture.kernel import (
     fb_valid,
     fdinfo_u64,
     identify_copy_progs,
+    identify_lifecycle_progs,
     join_op_message,
     parse_prog_misses,
     parse_prog_name,
@@ -600,6 +601,66 @@ def test_identify_copy_progs_missing() raises:
     assert_true(not got.ok)
 
 
+def test_identify_copy_progs_unexpected() raises:
+    var names = List[String]()
+    names.append(String("mv_bounce"))
+    names.append(String("mv_bounce_exit"))
+    names.append(String("mv_sync_device"))
+    names.append(String("mv_other"))
+    var misses = List[UInt64]()
+    for _ in range(4):
+        misses.append(UInt64(0))
+    var got = identify_copy_progs(names, misses)
+    assert_true(not got.ok)
+    assert_equal(got.message, String("copy program unexpected"))
+
+
+def test_identify_lifecycle_progs() raises:
+    var names = List[String]()
+    names.append(String("mv_unmap"))
+    names.append(String("mv_map_result"))
+    var misses = List[UInt64]()
+    misses.append(UInt64(2))
+    misses.append(UInt64(7))
+    var got = identify_lifecycle_progs(names, misses)
+    assert_true(got.ok)
+    assert_equal(got.map_misses, UInt64(7))
+    assert_equal(got.unmap_misses, UInt64(2))
+
+
+def test_identify_lifecycle_progs_ambiguous() raises:
+    var names = List[String]()
+    names.append(String("mv_map_result"))
+    names.append(String("mv_map_result"))
+    var misses = List[UInt64]()
+    for _ in range(2):
+        misses.append(UInt64(0))
+    var got = identify_lifecycle_progs(names, misses)
+    assert_true(not got.ok)
+    assert_true(got.message.count_codepoints() > 0)
+
+
+def test_identify_lifecycle_progs_missing() raises:
+    var names = List[String]()
+    names.append(String("mv_map_result"))
+    var misses = List[UInt64]()
+    misses.append(UInt64(0))
+    var got = identify_lifecycle_progs(names, misses)
+    assert_true(not got.ok)
+
+
+def test_identify_lifecycle_progs_unexpected() raises:
+    var names = List[String]()
+    names.append(String("mv_map_result"))
+    names.append(String("mv_other"))
+    var misses = List[UInt64]()
+    for _ in range(2):
+        misses.append(UInt64(0))
+    var got = identify_lifecycle_progs(names, misses)
+    assert_true(not got.ok)
+    assert_equal(got.message, String("lifecycle program unexpected"))
+
+
 def test_fb_valid_rejects_any_flag() raises:
     # Any fallback flag poisons the counters, never a zero loss.
     var clean = List[UInt64]()
@@ -657,6 +718,11 @@ def run() raises -> Int:
     suite.test[test_identify_copy_progs]()
     suite.test[test_identify_copy_progs_ambiguous]()
     suite.test[test_identify_copy_progs_missing]()
+    suite.test[test_identify_copy_progs_unexpected]()
+    suite.test[test_identify_lifecycle_progs]()
+    suite.test[test_identify_lifecycle_progs_ambiguous]()
+    suite.test[test_identify_lifecycle_progs_missing]()
+    suite.test[test_identify_lifecycle_progs_unexpected]()
     suite.test[test_fb_valid_rejects_any_flag]()
     suite^.run()
     return 0

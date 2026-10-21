@@ -204,6 +204,15 @@ never lose a copy. Raw per-program misses with deferred and
 recovered persist as session evidence; a negative remainder
 contradicts the counters and makes detail loss unknown.
 
+The eight persisted names are `copy.mv_bounce_misses`,
+`copy.mv_bounce_exit_misses`, `copy.mv_sync_device_misses`,
+`copy.mv_sync_cpu_misses`, `lifecycle.mv_map_result_misses`,
+`lifecycle.mv_unmap_misses`, `copy.deferred` and `copy.recovered`.
+Arming is a capture gate, not evidence: the armed slot is set
+after every copy link attaches and cleared before detach, a
+failed arm write refuses the capture, a failed disarm write
+leaves copy detail unknown, and a disarmed exit records nothing.
+
 ## Semantic edges
 
 - Clamps: a clamped copy sets the clamped flag; requested and

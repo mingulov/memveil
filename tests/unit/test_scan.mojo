@@ -43,6 +43,7 @@ comptime _ELF_LC = "tests/fixtures/elf/lc-ok.o"
 comptime _ELF_CP = "tests/fixtures/elf/cp-ok.o"
 comptime _ELF_LC_BAD = "tests/fixtures/elf/lc-wrongsec.o"
 comptime _ELF_CP_NOFEXIT = "tests/fixtures/elf/cp-nofexit.o"
+comptime _ELF_CP_BADFB = "tests/fixtures/elf/cp-badfb.o"
 comptime _SYSTEM_BPF = "/usr/lib/memveil"
 comptime _ATTEMPT_OBJECT = "swiotlb_attempt.bpf.o"
 comptime _SCAN_BRIDGE = "da3eb1c12057b294ded5e27cb13ee32ff1d40e20ff312fa1431c9fb537ce7df4"
@@ -743,6 +744,24 @@ def test_scan_cp_no_fexit_refuses() raises:
     )
 
 
+def test_scan_cp_bad_fallback_refuses() raises:
+    """A copy object with a short fallback table cannot satisfy the request."""
+    var d = _decide_lc(
+        String(_OK),
+        String(_PROFILES) + String("/valid-lc.json"),
+        True,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(_ELF_CP_BADFB),
+        String(_CAPS3),
+    )
+    assert_true(not d.ok)
+    assert_equal(
+        d.refusal,
+        String("cp object refused: fallback max_entries 3, want 4"),
+    )
+
+
 def test_scan_skew_lc_refuses() raises:
     """A skewed lc_object binding refuses the requested channel."""
     var d = _decide_lc(
@@ -1260,6 +1279,7 @@ def run() raises -> Int:
     suite.test[test_scan_valid_lc_record]()
     suite.test[test_scan_valid_lc_no_tracing]()
     suite.test[test_scan_cp_no_fexit_refuses]()
+    suite.test[test_scan_cp_bad_fallback_refuses]()
     suite.test[test_scan_skew_lc_refuses]()
     suite.test[test_scan_lc_unsupported_refuses]()
     suite.test[test_scan_unknown_capability_refuses]()
