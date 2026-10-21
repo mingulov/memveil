@@ -1457,16 +1457,13 @@ struct LmbKernel(ChannelPoller, KernelSource):
             )
             return out^
         if not fb_valid(fb.vals):
+            # read_fb returns ok only with three slots, so a
+            # failed check here is always nonzero flags.
             var out = MissOut(
                 True, UInt64(0), String(""), ch0.count)
-            if len(fb.vals) != _FB_KEYS:
-                out.detail_error = (
-                    _channel_tag(2) + String("fallback flags invalid")
-                )
-            else:
-                out.detail_error = (
-                    _channel_tag(2) + fb_flag_reason(fb.vals[2])
-                )
+            out.detail_error = (
+                _channel_tag(2) + fb_flag_reason(fb.vals[2])
+            )
             return out^
         return MissOut(
             True, UInt64(0), String(""), ch0.count, True,
