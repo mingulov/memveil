@@ -170,6 +170,16 @@ def binding_drift(doc, ident, objects):
     return drift
 
 
+def shipped_identity(doc):
+    """Identity a shipped profile binds, in measure_identity's shape."""
+    note = _note(doc)
+    return {"release": doc["identity"]["source"]["revision"],
+            "config_src": note["config_src"],
+            "config_sha": note["config"][7:], "btf_sha": note["btf"][7:],
+            "format_sha": note["format"][7:], "image_sha": note["image"][7:],
+            "image_bid": note["image_bid"]}
+
+
 def shipped_profile(release, profiles=PROFILES):
     """Path of the validated shipped profile naming release, or None."""
     for name in (Path(profiles) / "manifest.txt").read_text().split():
@@ -203,7 +213,16 @@ def select(release=None, root="/", out_root=OUT_ROOT,
             raise GateKernelError(
                 "no validated shipped profile names guest kernel "
                 + release)
-        return GateKernel("shipped", release, path, path)
+        # The host cannot measure a foreign kernel; its shipped claim names it.
+        doc = json.loads(path.read_text())
+        _, sat_doc = emitter().gate_docs(shipped_identity(doc),
+                                         doc["hooks"][0]["format_text"],
+                                         doc["profile_id"])
+        out = Path(out_root) / release
+        out.mkdir(parents=True, exist_ok=True)
+        sat = out / "saturation-candidate.json"
+        sat.write_text(json.dumps(sat_doc, indent=2) + "\n")
+        return GateKernel("shipped", release, path, sat)
     ident, fmt_text = measure_identity(release, root)
     out = Path(out_root) / release
     out.mkdir(parents=True, exist_ok=True)

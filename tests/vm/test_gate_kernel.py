@@ -165,6 +165,23 @@ def test_drifted_shipped_profile_mints_or_refuses(tmp_path):
     assert sel.mode == "minted"
 
 
+@needs_build
+def test_foreign_release_uses_shipped_claim_and_mints_saturation(tmp_path):
+    root = kernel_tree(tmp_path)
+    ident, fmt = gate_kernel.measure_identity(REL, str(root))
+    gate, _ = gate_kernel.emitter().gate_docs(ident, fmt, "linux-shipped")
+    gate["status"] = "validated"
+    profiles = _profiles(tmp_path, {"linux-shipped.json": gate})
+    sel = gate_kernel.select(REL, str(tmp_path / "absent"), tmp_path / "out",
+                             profiles=profiles, host_release="9.9.1-host")
+    assert sel.mode == "shipped"
+    assert sel.gate_doc == profiles / "linux-shipped.json"
+    sat = json.loads(sel.sat_doc.read_text())
+    assert sat["profile_id"] == "saturation-candidate"
+    assert sat["identity"]["source"]["revision"] == REL
+    assert gate_kernel.shipped_identity(gate) == ident
+
+
 def test_foreign_release_without_shipped_profile_fails_closed(tmp_path):
     with pytest.raises(gate_kernel.GateKernelError,
                        match="guest kernel 9.9.1-other"):
@@ -199,14 +216,8 @@ def test_shipped_34_profile_regenerates_from_its_own_bindings():
     # The refactored transform reproduces the checked-in gate doc.
     path = REPO / "profiles" / "linux-x86_64-7.0.0-34-generic.json"
     shipped = json.loads(path.read_text())
-    note = dict(p.split("=", 1)
-                for p in shipped["identity"]["source"]["note"].split())
     fmt = shipped["hooks"][0]["format_text"]
-    ident = {"release": shipped["identity"]["source"]["revision"],
-             "config_src": note["config_src"],
-             "config_sha": note["config"][7:], "btf_sha": note["btf"][7:],
-             "format_sha": note["format"][7:], "image_sha": note["image"][7:],
-             "image_bid": note["image_bid"]}
+    ident = gate_kernel.shipped_identity(shipped)
     gate, _ = gate_kernel.emitter().gate_docs(ident, fmt, shipped["profile_id"])
     gate["status"] = shipped["status"]
     assert gate == shipped
