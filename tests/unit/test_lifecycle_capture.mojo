@@ -2658,6 +2658,494 @@ def test_error_close_copy_failed_second_read_attempt_growth() raises:
     )
 
 
+def test_grown_exit_misses_after_detach_make_loss_unknown() raises:
+    # Exit misses grow alone: detail unknown, first kept.
+    var c = _one_copy_run(
+        _stable_detail(),
+        _detail_misses(
+            UInt64(100), UInt64(4), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(10), UInt64(110),
+        ),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"source":"copy.mv_bounce_exit_misses",'
+                '"interpretation":"3"'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+
+
+def test_error_close_grown_exit_misses_note_post_snapshot() raises:
+    var c = _error_copy_run(
+        _stable_detail(),
+        _detail_misses(
+            UInt64(100), UInt64(4), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(10), UInt64(110),
+        ),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+
+
+def test_grown_sync_device_misses_after_detach_make_unknown() raises:
+    # Sync-device misses grow alone: detail unknown, first kept.
+    var c = _one_copy_run(
+        _stable_detail(),
+        _detail_misses(
+            UInt64(100), UInt64(3), UInt64(1), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(10), UInt64(110),
+        ),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"source":"copy.mv_sync_device_misses",'
+                '"interpretation":"0"'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+
+
+def test_error_close_grown_sync_device_note_post_snapshot() raises:
+    var c = _error_copy_run(
+        _stable_detail(),
+        _detail_misses(
+            UInt64(100), UInt64(3), UInt64(1), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(10), UInt64(110),
+        ),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+
+
+def test_grown_sync_cpu_misses_after_detach_make_unknown() raises:
+    # Sync-cpu misses grow alone: detail unknown, first kept.
+    var c = _one_copy_run(
+        _stable_detail(),
+        _detail_misses(
+            UInt64(100), UInt64(3), UInt64(0), UInt64(1),
+            UInt64(0), UInt64(0), UInt64(10), UInt64(110),
+        ),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"source":"copy.mv_sync_cpu_misses",'
+                '"interpretation":"0"'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+
+
+def test_error_close_grown_sync_cpu_note_post_snapshot() raises:
+    var c = _error_copy_run(
+        _stable_detail(),
+        _detail_misses(
+            UInt64(100), UInt64(3), UInt64(0), UInt64(1),
+            UInt64(0), UInt64(0), UInt64(10), UInt64(110),
+        ),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+
+
+def test_grown_lc_map_misses_after_detach_make_unknown() raises:
+    # Map misses grow alone: detail unknown, first kept.
+    var c = _one_copy_run(
+        _stable_detail(),
+        _detail_misses(
+            UInt64(100), UInt64(3), UInt64(0), UInt64(0),
+            UInt64(1), UInt64(0), UInt64(10), UInt64(110),
+        ),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"source":"lifecycle.mv_map_result_misses",'
+                '"interpretation":"0"'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+
+
+def test_error_close_grown_lc_map_note_post_snapshot() raises:
+    var c = _error_copy_run(
+        _stable_detail(),
+        _detail_misses(
+            UInt64(100), UInt64(3), UInt64(0), UInt64(0),
+            UInt64(1), UInt64(0), UInt64(10), UInt64(110),
+        ),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+
+
+def test_grown_lc_unmap_misses_after_detach_make_unknown() raises:
+    # Unmap misses grow alone: detail unknown, first kept.
+    var c = _one_copy_run(
+        _stable_detail(),
+        _detail_misses(
+            UInt64(100), UInt64(3), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(1), UInt64(10), UInt64(110),
+        ),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"source":"lifecycle.mv_unmap_misses",'
+                '"interpretation":"0"'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+
+
+def test_error_close_grown_lc_unmap_note_post_snapshot() raises:
+    var c = _error_copy_run(
+        _stable_detail(),
+        _detail_misses(
+            UInt64(100), UInt64(3), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(1), UInt64(10), UInt64(110),
+        ),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+
+
+def test_detail_shape_flip_after_detach_makes_loss_unknown() raises:
+    # A detail-to-count shape flip cannot prove a quiet stop.
+    var c = _one_copy_run(
+        _stable_detail(),
+        MissOut(True, UInt64(0), String(""), UInt64(0)),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"source":"copy.mv_bounce_misses",'
+                '"interpretation":"100"'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+
+
+def test_error_close_detail_shape_flip_notes_post_snapshot() raises:
+    var c = _error_copy_run(
+        _stable_detail(),
+        MissOut(True, UInt64(0), String(""), UInt64(0)),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+
+
+def test_count_shape_flip_after_detach_makes_loss_unknown() raises:
+    # A count-to-detail shape flip cannot prove a quiet stop.
+    var c = _one_attempt_run(
+        MissOut(True, UInt64(0), String("")),
+        _stable_detail(),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+
+
+def test_error_close_count_shape_flip_notes_post_snapshot() raises:
+    var c = _error_attempt_run(
+        MissOut(True, UInt64(0), String("")),
+        _stable_detail(),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+
+
+def test_lifecycle_only_count_growth_keeps_attempt_loss() raises:
+    # A count move with a stable attempt keeps exact attempt loss.
+    var c = _one_lc_run(
+        MissOut(True, UInt64(5), String(""), UInt64(2)),
+        MissOut(True, UInt64(6), String(""), UInt64(2)),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"partial",'
+                '"loss_count":"2",'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String("attempt program runs skipped 2 (recursion)"),
+        )
+    )
+
+
+def test_error_close_lifecycle_only_count_growth_keeps_loss() raises:
+    var c = _error_lc_run(
+        MissOut(True, UInt64(5), String(""), UInt64(2)),
+        MissOut(True, UInt64(6), String(""), UInt64(2)),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"partial",'
+                '"loss_count":"2",'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String("attempt program runs skipped 2 (recursion)"),
+        )
+    )
+
+
 def _detail_failed(attempt: UInt64, reason: String) raises -> MissOut:
     var m = MissOut(True, UInt64(0), String(""), attempt)
     m.detail_error = reason
