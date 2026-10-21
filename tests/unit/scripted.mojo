@@ -66,6 +66,8 @@ struct ScriptKernel(KernelSource):
     var detach_out: OpOut
     var close_out: OpOut
     var misses_out: MissOut
+    var misses_out2: MissOut
+    var use_misses2: Bool
     var misses_reads: Int
     var channels: Int
     var polls: List[ScriptPollItem]
@@ -136,6 +138,8 @@ struct ScriptKernel(KernelSource):
         self.detach_out = ok.copy()
         self.close_out = ok.copy()
         self.misses_out = MissOut(True, UInt64(0), String(""))
+        self.misses_out2 = MissOut(True, UInt64(0), String(""))
+        self.use_misses2 = False
         self.misses_reads = 0
         self.channels = 1
         self.polls = List[ScriptPollItem]()
@@ -381,6 +385,8 @@ struct ScriptKernel(KernelSource):
 
     def recursion_misses(mut self) -> MissOut:
         self.misses_reads += 1
+        if self.use_misses2 and self.misses_reads > 1:
+            return self.misses_out2.copy()
         return self.misses_out.copy()
 
     def close(mut self) -> OpOut:

@@ -254,6 +254,8 @@ def _run(
     rx2: UInt64,
     grade: String = String(""),
     misses: MissOut = MissOut(True, UInt64(0), String("")),
+    misses2: MissOut = MissOut(True, UInt64(0), String("")),
+    use_misses2: Bool = False,
     arm_out: OpOut = OpOut(True, String("")),
     disarm_out: OpOut = OpOut(True, String("")),
     read_files: Bool = True,
@@ -283,6 +285,8 @@ def _run(
     var kernel = ScriptKernel()
     kernel.channels = 3
     kernel.misses_out = misses.copy()
+    kernel.misses_out2 = misses2.copy()
+    kernel.use_misses2 = use_misses2
     kernel.arm_out = arm_out.copy()
     kernel.disarm_out = disarm_out.copy()
     kernel.add_snap(_zero_snap())
@@ -706,7 +710,11 @@ def test_unknown_copy_drops_as_rejected() raises:
     )
 
 
-def _one_copy_run(misses: MissOut) raises -> CaseOut:
+def _one_copy_run(
+    misses: MissOut,
+    misses2: MissOut = MissOut(True, UInt64(0), String("")),
+    use_misses2: Bool = False,
+) raises -> CaseOut:
     var payloads = List[List[UInt8]]()
     payloads.append(
         _cp_raw(2, 3, 1, UInt64(101), UInt64(1001), UInt64(4096),
@@ -714,7 +722,26 @@ def _one_copy_run(misses: MissOut) raises -> CaseOut:
     return _run(
         payloads^, _zero_cut(), _zero_cut(), UInt64(0),
         _cut(UInt64(1), UInt64(4096), UInt64(1), UInt64(4096)),
-        UInt64(1), misses=misses)
+        UInt64(1), misses=misses, misses2=misses2,
+        use_misses2=use_misses2)
+
+
+def _error_copy_run(
+    misses: MissOut,
+    misses2: MissOut = MissOut(True, UInt64(0), String("")),
+    use_misses2: Bool = False,
+) raises -> CaseOut:
+    var payloads = List[List[UInt8]]()
+    var bad = List[UInt8]()
+    for i in range(37):
+        bad.append(UInt8(0))
+    payloads.append(bad^)
+    return _run(
+        payloads^,
+        _cut(UInt64(1), UInt64(37), UInt64(1), UInt64(37)),
+        _zero_cut(), UInt64(0), _zero_cut(), UInt64(0),
+        misses=misses, misses2=misses2,
+        use_misses2=use_misses2)
 
 
 def test_recursion_misses_are_detail_loss() raises:
@@ -1649,6 +1676,227 @@ def test_copy_overflow_keeps_aggregate_complete() raises:
                 '\"loss_count\":\"0\",'
             ),
         )
+    )
+
+
+def _stable_detail() raises -> MissOut:
+    return _detail_misses(
+        UInt64(100), UInt64(3), UInt64(0), UInt64(0),
+        UInt64(0), UInt64(0), UInt64(10), UInt64(110),
+    )
+
+
+def test_stable_second_miss_read_keeps_exact_loss() raises:
+    # Unchanged counters after settle and drain keep exact loss.
+    var c = _one_copy_run(_stable_detail(), _stable_detail(), True)
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"reason":"detail loss 0 (submit_fail=(0) '
+                'malformed=(0) dropped=(0) recursion_missed=(0) '
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"detail":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+    assert_true(
+        not _contains(c.session, String("post-snapshot activity"))
+    )
+
+
+def test_grown_entry_misses_after_detach_make_loss_unknown() raises:
+    # E grows after the first read: detail loss unknown, first kept.
+    var c = _one_copy_run(
+        _stable_detail(),
+        _detail_misses(
+            UInt64(101), UInt64(3), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(10), UInt64(110),
+        ),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"source":"copy.mv_bounce_misses",'
+                '"interpretation":"100"'
+            ),
+        )
+    )
+
+
+def test_grown_deferred_after_detach_make_loss_unknown() raises:
+    # D grows after the first read: detail loss unknown, first kept.
+    var c = _one_copy_run(
+        _stable_detail(),
+        _detail_misses(
+            UInt64(100), UInt64(3), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(11), UInt64(110),
+        ),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"source":"copy.deferred","interpretation":"10"'
+            ),
+        )
+    )
+
+
+def test_grown_recovered_after_detach_make_loss_unknown() raises:
+    # R grows after the first read: detail loss unknown, first kept.
+    var c = _one_copy_run(
+        _stable_detail(),
+        _detail_misses(
+            UInt64(100), UInt64(3), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(10), UInt64(111),
+        ),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"source":"copy.recovered","interpretation":"110"'
+            ),
+        )
+    )
+
+
+def test_unreadable_second_miss_read_makes_loss_unknown() raises:
+    # An unreadable second read cannot prove a quiet stop.
+    var c = _one_copy_run(
+        _stable_detail(),
+        MissOut(False, UInt64(0), String("fdinfo gone")),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"source":"copy.mv_bounce_misses",'
+                '"interpretation":"100"'
+            ),
+        )
+    )
+
+
+def test_error_close_stable_read_keeps_error_cause() raises:
+    # A quiet error stop keeps its own cause, never a late one.
+    var c = _error_copy_run(
+        _stable_detail(), _stable_detail(), True)
+    assert_equal(c.outcome, String("error"))
+    assert_true(_contains(c.session, String("error shutdown")))
+    assert_true(
+        not _contains(c.session, String("post-snapshot activity"))
+    )
+
+
+def test_error_close_grown_entry_misses_note_post_snapshot() raises:
+    var c = _error_copy_run(
+        _stable_detail(),
+        _detail_misses(
+            UInt64(101), UInt64(3), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(10), UInt64(110),
+        ),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+
+
+def test_error_close_grown_deferred_note_post_snapshot() raises:
+    var c = _error_copy_run(
+        _stable_detail(),
+        _detail_misses(
+            UInt64(100), UInt64(3), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(11), UInt64(110),
+        ),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+
+
+def test_error_close_grown_recovered_note_post_snapshot() raises:
+    var c = _error_copy_run(
+        _stable_detail(),
+        _detail_misses(
+            UInt64(100), UInt64(3), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(10), UInt64(111),
+        ),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+
+
+def test_error_close_unreadable_second_read_notes_post_snapshot() raises:
+    var c = _error_copy_run(
+        _stable_detail(),
+        MissOut(False, UInt64(0), String("fdinfo gone")),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
     )
 
 

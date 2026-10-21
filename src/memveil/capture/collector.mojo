@@ -1996,6 +1996,37 @@ struct Collector:
         self.recursion_missed = others + loss_cp
         self.has_recursion = True
 
+    def _verify_misses_stable[K: KernelSource](mut self, mut kernel: K):
+        """Re-read miss counters; any move past the first read is unknown."""
+        if not self.attempt_known:
+            return
+        var m = kernel.recursion_misses()
+        if not m.ok:
+            self.note_unknown(String("post-snapshot activity"))
+            return
+        if self.rec_has_detail != m.has_copy_detail:
+            self.note_unknown(String("post-snapshot activity"))
+            return
+        if self.rec_has_detail:
+            if (
+                m.attempt != self.attempt_missed
+                or m.bounce != self.rec_bounce
+                or m.exit_misses != self.rec_exit
+                or m.sync_device != self.rec_sync_device
+                or m.sync_cpu != self.rec_sync_cpu
+                or m.lc_map != self.rec_lc_map
+                or m.lc_unmap != self.rec_lc_unmap
+                or m.deferred != self.rec_deferred
+                or m.recovered != self.rec_recovered
+            ):
+                self.note_unknown(String("post-snapshot activity"))
+            return
+        if (
+            m.attempt != self.attempt_missed
+            or m.count != self.recursion_missed
+        ):
+            self.note_unknown(String("post-snapshot activity"))
+
     def confirm[K: KernelSource](mut self, mut kernel: K):
         """Bounded confirmation drain after the end snapshot."""
         for _ in range(CONFIRM_POLLS):
@@ -2021,6 +2052,7 @@ struct Collector:
                 or final.malformed != self.stats_drain.malformed
             ):
                 self.note_unknown(String("post-snapshot activity"))
+        self._verify_misses_stable(kernel)
 
     def _read_channel_finals[K: KernelSource](mut self, mut kernel: K):
         """Read per-channel final transport stats; failures close."""
@@ -2077,6 +2109,7 @@ struct Collector:
                 if not self.stable_pair_at(kernel, clock, 2):
                     self.note_unknown(String("cp snapshot unresolved"))
                     self.has_end_cut_cp = False
+        self._verify_misses_stable(kernel)
         if self.cfg.has_pool_sample:
             var fin = self._sample_pool_now(clock)
             self.pool_final = fin[0]
