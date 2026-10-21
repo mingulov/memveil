@@ -3085,6 +3085,116 @@ def test_error_close_count_shape_flip_notes_post_snapshot() raises:
     )
 
 
+def test_detail_shape_flip_zero_counters_makes_unknown() raises:
+    # A shape flip alone, with every counter zero, is unknown.
+    var c = _one_copy_run(
+        _detail_misses(
+            UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+        ),
+        MissOut(True, UInt64(0), String(""), UInt64(0)),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+
+
+def test_error_close_detail_shape_flip_zero_counters() raises:
+    var c = _error_copy_run(
+        _detail_misses(
+            UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+        ),
+        MissOut(True, UInt64(0), String(""), UInt64(0)),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+
+
+def test_count_shape_flip_zero_counters_makes_unknown() raises:
+    # A shape flip alone, with every counter zero, is unknown.
+    var c = _one_attempt_run(
+        MissOut(True, UInt64(0), String("")),
+        _detail_misses(
+            UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+        ),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+
+
+def test_error_close_count_shape_flip_zero_counters() raises:
+    var c = _error_attempt_run(
+        MissOut(True, UInt64(0), String("")),
+        _detail_misses(
+            UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+        ),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+
+
 def test_lifecycle_only_count_growth_keeps_attempt_loss() raises:
     # A count move with a stable attempt keeps exact attempt loss.
     var c = _one_lc_run(
