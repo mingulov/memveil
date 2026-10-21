@@ -73,7 +73,7 @@ struct LiveWriter(WriterSource):
             )
         var w = self._writer.take()
         try:
-            w.append(line.copy())
+            w.append(line)
         except e:
             self._writer = Optional(w^)
             return AppendOut(False, e.kind.copy(), e.message.copy())

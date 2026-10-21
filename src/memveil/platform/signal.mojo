@@ -216,12 +216,15 @@ struct LiveSignalSource(SignalSource):
     var old_mask: List[UInt8]
     var armed: Bool
     var test_fail_setup_at: String
+    var info: List[UInt8]
 
     def __init__(out self):
         self.fd = Int32(-1)
         self.old_mask = List[UInt8]()
         self.armed = False
         self.test_fail_setup_at = String("")
+        # One siginfo buffer reused by every check.
+        self.info = List[UInt8](length=_SIGINFO_BYTES, fill=UInt8(0))
 
     def __deinit__(deinit self):
         self.teardown()
@@ -275,13 +278,10 @@ struct LiveSignalSource(SignalSource):
         return OpOut(True, String(""))
 
     def check(mut self) -> SignalOut:
-        var buf = List[UInt8]()
-        for _ in range(_SIGINFO_BYTES):
-            buf.append(UInt8(0))
         while True:
             var n = external_call["read", Int64](
                 self.fd,
-                Span(buf).unsafe_ptr(),
+                Span(self.info).unsafe_ptr(),
                 UInt64(_SIGINFO_BYTES),
             )
             var no = 0

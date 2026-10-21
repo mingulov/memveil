@@ -1457,16 +1457,20 @@ struct Collector:
         # The duration budget starts at readiness (attach),
         # not at pre-init: init latency must not burn it.
         var deadline = checked_add(self.attach_ns, dur_ns)
+        # After an admitted frame its gate has just checked signals.
+        var gated = False
         while True:
-            var sig = signal.check()
-            if sig.state == String("pending"):
-                self.latch(String("signal"))
-                return String("closed")
-            if sig.state == String("error"):
-                self.latch(String("signal"))
-                self.result_state = String("error")
-                self.signal_error = sig.message
-                return String("closed")
+            if not gated:
+                var sig = signal.check()
+                if sig.state == String("pending"):
+                    self.latch(String("signal"))
+                    return String("closed")
+                if sig.state == String("error"):
+                    self.latch(String("signal"))
+                    self.result_state = String("error")
+                    self.signal_error = sig.message
+                    return String("closed")
+            gated = False
             var now = clock.now()
             if now >= deadline:
                 self.latch(String("duration"))
@@ -1489,6 +1493,7 @@ struct Collector:
             )
             if verdict != String(""):
                 return verdict
+            gated = True
 
     def admit[
         K: KernelSource, C: ClockSource, G: SignalSource, W: WriterSource
