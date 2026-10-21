@@ -55,48 +55,356 @@ def _hex_lo(v: Int) -> UInt8:
     return UInt8(0x61 + v - 10)
 
 
-def quote_json(text: String) raises EncodeError -> String:
-    """Quote one string with canonical escapes."""
-    var buf = List[UInt8]()
+# Typical event lines are 300-400 bytes; longer ones grow the buffer.
+comptime _LINE_RESERVE = 512
+
+
+def _lit(mut buf: List[UInt8], text: StringLiteral):
+    buf.extend(text.as_bytes())
+
+
+def _put_span(mut buf: List[UInt8], raw: Span[UInt8, _]) raises EncodeError:
+    """Append one quoted string; unescaped runs copy in bulk."""
+    var start = len(buf)
     buf.append(UInt8(0x22))
-    var raw = text.as_bytes()
-    for i in range(len(raw)):
+    var n = len(raw)
+    var run = 0
+    var seen = UInt8(0)
+    for i in range(n):
         var b = raw[i]
+        seen |= b
+        if b >= UInt8(0x20) and b != UInt8(0x22) and b != UInt8(0x5C):
+            continue
+        if i > run:
+            buf.extend(raw[run:i])
+        run = i + 1
+        buf.append(UInt8(0x5C))
         if b == UInt8(0x22):
-            buf.append(UInt8(0x5C))
             buf.append(UInt8(0x22))
         elif b == UInt8(0x5C):
             buf.append(UInt8(0x5C))
-            buf.append(UInt8(0x5C))
         elif b == UInt8(0x08):
-            buf.append(UInt8(0x5C))
             buf.append(UInt8(0x62))
         elif b == UInt8(0x09):
-            buf.append(UInt8(0x5C))
             buf.append(UInt8(0x74))
         elif b == UInt8(0x0A):
-            buf.append(UInt8(0x5C))
             buf.append(UInt8(0x6E))
         elif b == UInt8(0x0C):
-            buf.append(UInt8(0x5C))
             buf.append(UInt8(0x66))
         elif b == UInt8(0x0D):
-            buf.append(UInt8(0x5C))
             buf.append(UInt8(0x72))
-        elif b < UInt8(0x20):
-            buf.append(UInt8(0x5C))
+        else:
             buf.append(UInt8(0x75))
             buf.append(UInt8(0x30))
             buf.append(UInt8(0x30))
             buf.append(_hex_lo(Int(b) // 16))
             buf.append(_hex_lo(Int(b) % 16))
-        else:
-            buf.append(b)
+    if n > run:
+        buf.extend(raw[run:n])
     buf.append(UInt8(0x22))
-    try:
-        return String(from_utf8=Span(buf))
-    except:
-        raise EncodeError("string", "unencodable text")
+    # Only non-ASCII input can be invalid; check the quoted bytes as before.
+    if seen >= UInt8(0x80):
+        try:
+            _ = String(from_utf8=Span(buf)[start:])
+        except:
+            raise EncodeError("string", "unencodable text")
+
+
+def _put_str(mut buf: List[UInt8], text: String) raises EncodeError:
+    _put_span(buf, text.as_bytes())
+
+
+def _put_u64(mut buf: List[UInt8], v: UInt64):
+    """Bare canonical decimal, written in place."""
+    var start = len(buf)
+    var n = v
+    while True:
+        buf.append(UInt8(0x30) + UInt8(n % UInt64(10)))
+        n //= UInt64(10)
+        if n == UInt64(0):
+            break
+    var lo = start
+    var hi = len(buf) - 1
+    while lo < hi:
+        var t = buf[lo]
+        buf[lo] = buf[hi]
+        buf[hi] = t
+        lo += 1
+        hi -= 1
+
+
+def _put_qu64(mut buf: List[UInt8], v: UInt64):
+    buf.append(UInt8(0x22))
+    _put_u64(buf, v)
+    buf.append(UInt8(0x22))
+
+
+def _put_i64(mut buf: List[UInt8], v: Int64):
+    if v >= Int64(0):
+        _put_u64(buf, UInt64(v))
+        return
+    buf.append(UInt8(0x2D))
+    # Two's-complement magnitude; exact for the i64 minimum too.
+    _put_u64(buf, UInt64(0) - UInt64(v))
+
+
+def _put_bool(mut buf: List[UInt8], v: Bool):
+    if v:
+        _lit(buf, "true")
+    else:
+        _lit(buf, "false")
+
+
+def quote_json(text: String) raises EncodeError -> String:
+    """Quote one string with canonical escapes."""
+    var buf = List[UInt8](capacity=text.byte_length() + 2)
+    _put_str(buf, text)
+    return String(unsafe_from_utf8=Span(buf))
+
+
+def _put_observer(mut buf: List[UInt8], ev: Event) raises EncodeError:
+    buf.append(UInt8(0x7B))
+    if ev.has_cpu:
+        _lit(buf, "\"cpu\":")
+        _put_i64(buf, ev.cpu)
+        buf.append(UInt8(0x2C))
+    if ev.has_pid:
+        _lit(buf, "\"pid\":")
+        _put_i64(buf, ev.pid)
+        buf.append(UInt8(0x2C))
+    if ev.has_tgid:
+        _lit(buf, "\"tgid\":")
+        _put_i64(buf, ev.tgid)
+        buf.append(UInt8(0x2C))
+    if ev.has_comm:
+        _lit(buf, "\"comm\":")
+        _put_str(buf, ev.comm)
+        buf.append(UInt8(0x2C))
+    if ev.has_cgroup_id:
+        _lit(buf, "\"cgroup_id\":")
+        _put_str(buf, ev.cgroup_id)
+        buf.append(UInt8(0x2C))
+    _lit(buf, "\"relation\":\"execution_context_only\"}")
+
+
+def _put_data(mut buf: List[UInt8], ev: Event) raises EncodeError:
+    if ev.kind == "bounce_attempt":
+        _lit(buf, "{\"device_id\":")
+        _put_str(buf, ev.bounce.device_id)
+        _lit(buf, ",\"requested_bytes\":")
+        _put_qu64(buf, ev.bounce.requested_bytes)
+        _lit(buf, ",\"forced\":")
+        _put_bool(buf, ev.bounce.forced)
+        _lit(buf, ",\"operation_id\":")
+        _put_str(buf, ev.bounce.operation_id)
+    elif ev.kind == "map_result":
+        _lit(buf, "{\"operation_id\":")
+        _put_str(buf, ev.map_result.operation_id)
+        _lit(buf, ",\"success\":")
+        _put_bool(buf, ev.map_result.success)
+        _lit(buf, ",\"mapping_id\":")
+        if ev.map_result.has_mapping_id:
+            _put_str(buf, ev.map_result.mapping_id)
+        else:
+            _lit(buf, "null")
+        _lit(buf, ",\"return_code\":")
+        if ev.map_result.has_return_code:
+            _put_i64(buf, ev.map_result.return_code)
+        else:
+            _lit(buf, "null")
+        _lit(buf, ",\"mapped_bytes\":")
+        if ev.map_result.has_mapped_bytes:
+            _put_qu64(buf, ev.map_result.mapped_bytes)
+        else:
+            _lit(buf, "null")
+        _lit(buf, ",\"wire_generation\":")
+        if ev.map_result.has_wire_generation:
+            _put_qu64(buf, ev.map_result.wire_generation)
+        else:
+            _lit(buf, "null")
+        _lit(buf, ",\"wire_identity\":")
+        if ev.map_result.has_wire_identity:
+            _put_str(buf, ev.map_result.wire_identity)
+        else:
+            _lit(buf, "null")
+    elif ev.kind == "unmap":
+        _lit(buf, "{\"mapping_id\":")
+        if ev.unmap.has_mapping_id:
+            _put_str(buf, ev.unmap.mapping_id)
+        else:
+            _lit(buf, "null")
+        _lit(buf, ",\"wire_generation\":")
+        if ev.unmap.has_wire_generation:
+            _put_qu64(buf, ev.unmap.wire_generation)
+        else:
+            _lit(buf, "null")
+        _lit(buf, ",\"wire_identity\":")
+        if ev.unmap.has_wire_identity:
+            _put_str(buf, ev.unmap.wire_identity)
+        else:
+            _lit(buf, "null")
+    elif ev.kind == "copy":
+        _lit(buf, "{\"operation_id\":")
+        _put_str(buf, ev.copy.operation_id)
+        _lit(buf, ",\"mapping_id\":")
+        if ev.copy.has_mapping_id:
+            _put_str(buf, ev.copy.mapping_id)
+        else:
+            _lit(buf, "null")
+        _lit(buf, ",\"direction\":")
+        _put_str(buf, ev.copy.direction)
+        _lit(buf, ",\"bytes\":")
+        _put_qu64(buf, ev.copy.bytes)
+    elif ev.kind == "sync_request":
+        _lit(buf, "{\"operation_id\":")
+        _put_str(buf, ev.sync.operation_id)
+        _lit(buf, ",\"mapping_id\":")
+        if ev.sync.has_mapping_id:
+            _put_str(buf, ev.sync.mapping_id)
+        else:
+            _lit(buf, "null")
+        _lit(buf, ",\"offset_known\":")
+        _put_bool(buf, ev.sync.has_offset)
+        _lit(buf, ",\"offset\":")
+        if ev.sync.has_offset:
+            _put_qu64(buf, ev.sync.offset)
+        else:
+            _lit(buf, "null")
+        _lit(buf, ",\"length\":")
+        _put_qu64(buf, ev.sync.length)
+    elif ev.kind == "transition_result":
+        _lit(buf, "{\"region_id\":")
+        _put_str(buf, ev.transition.region_id)
+        _lit(buf, ",\"requested_state\":")
+        _put_str(buf, ev.transition.requested_state)
+        _lit(buf, ",\"success\":")
+        _put_bool(buf, ev.transition.success)
+        _lit(buf, ",\"return_code\":")
+        if ev.transition.has_return_code:
+            _put_i64(buf, ev.transition.return_code)
+        else:
+            _lit(buf, "null")
+        _lit(buf, ",\"offset\":")
+        _put_qu64(buf, ev.transition.offset)
+        _lit(buf, ",\"length\":")
+        _put_qu64(buf, ev.transition.length)
+        if ev.transition.has_address_space:
+            _lit(buf, ",\"address_space\":")
+            _put_str(buf, ev.transition.address_space)
+        if ev.transition.has_resolution:
+            _lit(buf, ",\"resolution\":")
+            _put_str(buf, ev.transition.resolution)
+        _lit(buf, ",\"generation\":")
+        _put_i64(buf, Int64(ev.transition.generation))
+    elif ev.kind == "pool_sample":
+        _lit(buf, "{\"pool_id\":")
+        _put_str(buf, ev.pool.pool_id)
+        _lit(buf, ",\"used_bytes\":")
+        if ev.pool.has_used:
+            _put_qu64(buf, ev.pool.used_bytes)
+        else:
+            _lit(buf, "null")
+        _lit(buf, ",\"capacity_bytes\":")
+        if ev.pool.has_capacity:
+            _put_qu64(buf, ev.pool.capacity_bytes)
+        else:
+            _lit(buf, "null")
+        _lit(buf, ",\"unit\":")
+        _put_str(buf, ev.pool.unit)
+        if ev.pool.allocator != "":
+            _lit(buf, ",\"allocator\":")
+            _put_str(buf, ev.pool.allocator)
+        if ev.pool.has_unit_bytes:
+            _lit(buf, ",\"unit_bytes\":")
+            _put_qu64(buf, ev.pool.unit_bytes)
+        if ev.pool.has_hiwater:
+            _lit(buf, ",\"hiwater_bytes\":")
+            _put_qu64(buf, ev.pool.hiwater_bytes)
+        if ev.pool.reason != "":
+            _lit(buf, ",\"reason\":")
+            _put_str(buf, ev.pool.reason)
+    elif ev.kind == "gap":
+        _lit(buf, "{\"channel\":")
+        _put_str(buf, ev.gap.channel)
+        _lit(buf, ",\"lost_count\":")
+        if ev.gap.has_lost_count:
+            _put_qu64(buf, ev.gap.lost_count)
+        else:
+            _lit(buf, "null")
+        _lit(buf, ",\"reason\":")
+        _put_str(buf, ev.gap.reason)
+        _lit(buf, ",\"window_start_ns\":")
+        _put_qu64(buf, ev.gap.window_start_ns)
+        _lit(buf, ",\"window_end_ns\":")
+        _put_qu64(buf, ev.gap.window_end_ns)
+    elif ev.kind == "marker":
+        _lit(buf, "{\"text\":")
+        _put_str(buf, ev.marker.text)
+    elif ev.kind == "counter_snapshot":
+        _lit(buf, "{\"counter_id\":")
+        _put_str(buf, ev.snapshot.counter_id)
+        _lit(buf, ",\"epoch\":")
+        _put_qu64(buf, ev.snapshot.epoch)
+        _lit(buf, ",\"scope\":{")
+        if ev.snapshot.has_scope_device:
+            _lit(buf, "\"device_id\":")
+            _put_str(buf, ev.snapshot.scope_device_id)
+            buf.append(UInt8(0x2C))
+        _lit(buf, "\"profile_id\":")
+        _put_str(buf, ev.snapshot.scope_profile_id)
+        _lit(buf, "},\"value\":")
+        _put_qu64(buf, ev.snapshot.value)
+        _lit(buf, ",\"unit\":")
+        _put_str(buf, ev.snapshot.unit)
+    else:
+        raise EncodeError("kind", "unknown event kind: " + ev.kind)
+    buf.append(UInt8(0x7D))
+
+
+def _put_event(mut buf: List[UInt8], ev: Event) raises EncodeError:
+    _lit(buf, "{\"schema_version\":")
+    _put_span(buf, EVENT_SCHEMA_VERSION.as_bytes())
+    _lit(buf, ",\"session_id\":")
+    _put_str(buf, ev.session_id)
+    _lit(buf, ",\"seq\":")
+    _put_qu64(buf, ev.seq)
+    _lit(buf, ",\"ts_ns\":")
+    _put_qu64(buf, ev.ts_ns)
+    _lit(buf, ",\"kind\":")
+    _put_str(buf, ev.kind)
+    _lit(buf, ",\"source\":{\"hook\":")
+    _put_str(buf, ev.source_hook)
+    _lit(buf, ",\"backend\":")
+    _put_str(buf, ev.source_backend)
+    _lit(buf, ",\"profile_id\":")
+    _put_str(buf, ev.source_profile_id)
+    _lit(buf, ",\"measurement\":")
+    _put_str(buf, ev.source_measurement)
+    _lit(buf, ",\"correlation\":")
+    _put_str(buf, ev.source_correlation)
+    buf.append(UInt8(0x7D))
+    if ev.has_observer:
+        _lit(buf, ",\"observer_context\":")
+        _put_observer(buf, ev)
+    _lit(buf, ",\"data\":")
+    _put_data(buf, ev)
+    buf.append(UInt8(0x7D))
+
+
+def encode_event(ev: Event) raises EncodeError -> String:
+    """Encode one event in canonical form (no trailing newline)."""
+    var buf = List[UInt8](capacity=_LINE_RESERVE)
+    _put_event(buf, ev)
+    # Every non-ASCII string was validated by _put_span.
+    return String(unsafe_from_utf8=Span(buf))
+
+
+def encode_event_line(ev: Event) raises EncodeError -> List[UInt8]:
+    """Encode one event plus the NDJSON trailing newline."""
+    var buf = List[UInt8](capacity=_LINE_RESERVE)
+    _put_event(buf, ev)
+    buf.append(UInt8(0x0A))
+    return buf^
 
 
 def _join(parts: List[String], sep: String) -> String:
@@ -136,365 +444,6 @@ def _jbool(v: Bool) -> String:
 
 def _jnull() -> String:
     return String("null")
-
-
-def _encode_source(ev: Event) raises EncodeError -> String:
-    var parts = List[String]()
-    parts.append(_member(String("hook"), _jstr(ev.source_hook)))
-    parts.append(_member(String("backend"), _jstr(ev.source_backend)))
-    parts.append(
-        _member(String("profile_id"), _jstr(ev.source_profile_id))
-    )
-    parts.append(
-        _member(String("measurement"), _jstr(ev.source_measurement))
-    )
-    parts.append(
-        _member(String("correlation"), _jstr(ev.source_correlation))
-    )
-    return _jobj(parts^)
-
-
-def _encode_observer(ev: Event) raises EncodeError -> String:
-    var parts = List[String]()
-    if ev.has_cpu:
-        parts.append(_member(String("cpu"), format_i64(ev.cpu)))
-    if ev.has_pid:
-        parts.append(_member(String("pid"), format_i64(ev.pid)))
-    if ev.has_tgid:
-        parts.append(_member(String("tgid"), format_i64(ev.tgid)))
-    if ev.has_comm:
-        parts.append(_member(String("comm"), _jstr(ev.comm)))
-    if ev.has_cgroup_id:
-        parts.append(_member(String("cgroup_id"), _jstr(ev.cgroup_id)))
-    parts.append(
-        _member(String("relation"), _jstr(String("execution_context_only")))
-    )
-    return _jobj(parts^)
-
-
-def _encode_data(ev: Event) raises EncodeError -> String:
-    var parts = List[String]()
-    var kind = ev.kind
-    if kind == "bounce_attempt":
-        parts.append(
-            _member(String("device_id"), _jstr(ev.bounce.device_id))
-        )
-        parts.append(
-            _member(
-                String("requested_bytes"),
-                _ju64(ev.bounce.requested_bytes),
-            )
-        )
-        parts.append(
-            _member(String("forced"), _jbool(ev.bounce.forced))
-        )
-        parts.append(
-            _member(
-                String("operation_id"), _jstr(ev.bounce.operation_id)
-            )
-        )
-    elif kind == "map_result":
-        parts.append(
-            _member(
-                String("operation_id"),
-                _jstr(ev.map_result.operation_id),
-            )
-        )
-        parts.append(
-            _member(String("success"), _jbool(ev.map_result.success))
-        )
-        if ev.map_result.has_mapping_id:
-            parts.append(
-                _member(
-                    String("mapping_id"),
-                    _jstr(ev.map_result.mapping_id),
-                )
-            )
-        else:
-            parts.append(_member(String("mapping_id"), _jnull()))
-        if ev.map_result.has_return_code:
-            parts.append(
-                _member(
-                    String("return_code"),
-                    format_i64(ev.map_result.return_code),
-                )
-            )
-        else:
-            parts.append(_member(String("return_code"), _jnull()))
-        if ev.map_result.has_mapped_bytes:
-            parts.append(
-                _member(
-                    String("mapped_bytes"),
-                    _ju64(ev.map_result.mapped_bytes),
-                )
-            )
-        else:
-            parts.append(_member(String("mapped_bytes"), _jnull()))
-        if ev.map_result.has_wire_generation:
-            parts.append(
-                _member(
-                    String("wire_generation"),
-                    _ju64(ev.map_result.wire_generation),
-                )
-            )
-        else:
-            parts.append(_member(String("wire_generation"), _jnull()))
-        if ev.map_result.has_wire_identity:
-            parts.append(
-                _member(
-                    String("wire_identity"),
-                    _jstr(ev.map_result.wire_identity),
-                )
-            )
-        else:
-            parts.append(_member(String("wire_identity"), _jnull()))
-    elif kind == "unmap":
-        if ev.unmap.has_mapping_id:
-            parts.append(
-                _member(
-                    String("mapping_id"), _jstr(ev.unmap.mapping_id)
-                )
-            )
-        else:
-            parts.append(_member(String("mapping_id"), _jnull()))
-        if ev.unmap.has_wire_generation:
-            parts.append(
-                _member(
-                    String("wire_generation"),
-                    _ju64(ev.unmap.wire_generation),
-                )
-            )
-        else:
-            parts.append(_member(String("wire_generation"), _jnull()))
-        if ev.unmap.has_wire_identity:
-            parts.append(
-                _member(
-                    String("wire_identity"),
-                    _jstr(ev.unmap.wire_identity),
-                )
-            )
-        else:
-            parts.append(_member(String("wire_identity"), _jnull()))
-    elif kind == "copy":
-        parts.append(
-            _member(
-                String("operation_id"), _jstr(ev.copy.operation_id)
-            )
-        )
-        if ev.copy.has_mapping_id:
-            parts.append(
-                _member(
-                    String("mapping_id"), _jstr(ev.copy.mapping_id)
-                )
-            )
-        else:
-            parts.append(_member(String("mapping_id"), _jnull()))
-        parts.append(
-            _member(String("direction"), _jstr(ev.copy.direction))
-        )
-        parts.append(_member(String("bytes"), _ju64(ev.copy.bytes)))
-    elif kind == "sync_request":
-        parts.append(
-            _member(
-                String("operation_id"), _jstr(ev.sync.operation_id)
-            )
-        )
-        if ev.sync.has_mapping_id:
-            parts.append(
-                _member(
-                    String("mapping_id"), _jstr(ev.sync.mapping_id)
-                )
-            )
-        else:
-            parts.append(_member(String("mapping_id"), _jnull()))
-        parts.append(
-            _member(String("offset_known"), _jbool(ev.sync.has_offset))
-        )
-        if ev.sync.has_offset:
-            parts.append(
-                _member(String("offset"), _ju64(ev.sync.offset))
-            )
-        else:
-            parts.append(_member(String("offset"), _jnull()))
-        parts.append(_member(String("length"), _ju64(ev.sync.length)))
-    elif kind == "transition_result":
-        parts.append(
-            _member(
-                String("region_id"), _jstr(ev.transition.region_id)
-            )
-        )
-        parts.append(
-            _member(
-                String("requested_state"),
-                _jstr(ev.transition.requested_state),
-            )
-        )
-        parts.append(
-            _member(String("success"), _jbool(ev.transition.success))
-        )
-        if ev.transition.has_return_code:
-            parts.append(
-                _member(
-                    String("return_code"),
-                    format_i64(ev.transition.return_code),
-                )
-            )
-        else:
-            parts.append(_member(String("return_code"), _jnull()))
-        parts.append(
-            _member(String("offset"), _ju64(ev.transition.offset))
-        )
-        parts.append(
-            _member(String("length"), _ju64(ev.transition.length))
-        )
-        if ev.transition.has_address_space:
-            parts.append(
-                _member(
-                    String("address_space"),
-                    _jstr(ev.transition.address_space),
-                )
-            )
-        if ev.transition.has_resolution:
-            parts.append(
-                _member(
-                    String("resolution"),
-                    _jstr(ev.transition.resolution),
-                )
-            )
-        parts.append(
-            _member(
-                String("generation"), String(ev.transition.generation)
-            )
-        )
-    elif kind == "pool_sample":
-        parts.append(
-            _member(String("pool_id"), _jstr(ev.pool.pool_id))
-        )
-        if ev.pool.has_used:
-            parts.append(
-                _member(
-                    String("used_bytes"), _ju64(ev.pool.used_bytes)
-                )
-            )
-        else:
-            parts.append(_member(String("used_bytes"), _jnull()))
-        if ev.pool.has_capacity:
-            parts.append(
-                _member(
-                    String("capacity_bytes"),
-                    _ju64(ev.pool.capacity_bytes),
-                )
-            )
-        else:
-            parts.append(_member(String("capacity_bytes"), _jnull()))
-        parts.append(_member(String("unit"), _jstr(ev.pool.unit)))
-        if ev.pool.allocator != "":
-            parts.append(
-                _member(String("allocator"), _jstr(ev.pool.allocator))
-            )
-        if ev.pool.has_unit_bytes:
-            parts.append(
-                _member(
-                    String("unit_bytes"),
-                    _ju64(ev.pool.unit_bytes),
-                )
-            )
-        if ev.pool.has_hiwater:
-            parts.append(
-                _member(
-                    String("hiwater_bytes"),
-                    _ju64(ev.pool.hiwater_bytes),
-                )
-            )
-        if ev.pool.reason != "":
-            parts.append(
-                _member(String("reason"), _jstr(ev.pool.reason))
-            )
-    elif kind == "gap":
-        parts.append(
-            _member(String("channel"), _jstr(ev.gap.channel))
-        )
-        if ev.gap.has_lost_count:
-            parts.append(
-                _member(
-                    String("lost_count"), _ju64(ev.gap.lost_count)
-                )
-            )
-        else:
-            parts.append(_member(String("lost_count"), _jnull()))
-        parts.append(_member(String("reason"), _jstr(ev.gap.reason)))
-        parts.append(
-            _member(
-                String("window_start_ns"),
-                _ju64(ev.gap.window_start_ns),
-            )
-        )
-        parts.append(
-            _member(
-                String("window_end_ns"), _ju64(ev.gap.window_end_ns)
-            )
-        )
-    elif kind == "marker":
-        parts.append(_member(String("text"), _jstr(ev.marker.text)))
-    elif kind == "counter_snapshot":
-        parts.append(
-            _member(
-                String("counter_id"), _jstr(ev.snapshot.counter_id)
-            )
-        )
-        parts.append(_member(String("epoch"), _ju64(ev.snapshot.epoch)))
-        var scope = List[String]()
-        if ev.snapshot.has_scope_device:
-            scope.append(
-                _member(
-                    String("device_id"),
-                    _jstr(ev.snapshot.scope_device_id),
-                )
-            )
-        scope.append(
-            _member(
-                String("profile_id"),
-                _jstr(ev.snapshot.scope_profile_id),
-            )
-        )
-        parts.append(_member(String("scope"), _jobj(scope^)))
-        parts.append(_member(String("value"), _ju64(ev.snapshot.value)))
-        parts.append(_member(String("unit"), _jstr(ev.snapshot.unit)))
-    else:
-        raise EncodeError("kind", "unknown event kind: " + kind)
-    return _jobj(parts^)
-
-
-def encode_event(ev: Event) raises EncodeError -> String:
-    """Encode one event in canonical form (no trailing newline)."""
-    var parts = List[String]()
-    parts.append(
-        _member(String("schema_version"), _jstr(EVENT_SCHEMA_VERSION))
-    )
-    parts.append(
-        _member(String("session_id"), _jstr(ev.session_id))
-    )
-    parts.append(_member(String("seq"), _ju64(ev.seq)))
-    parts.append(_member(String("ts_ns"), _ju64(ev.ts_ns)))
-    parts.append(_member(String("kind"), _jstr(ev.kind)))
-    parts.append(_member(String("source"), _encode_source(ev)))
-    if ev.has_observer:
-        parts.append(
-            _member(String("observer_context"), _encode_observer(ev))
-        )
-    parts.append(_member(String("data"), _encode_data(ev)))
-    return _jobj(parts^)
-
-
-def encode_event_line(ev: Event) raises EncodeError -> List[UInt8]:
-    """Encode one event plus the NDJSON trailing newline."""
-    var text = encode_event(ev)
-    var out = List[UInt8]()
-    var raw = text.as_bytes()
-    for i in range(len(raw)):
-        out.append(raw[i])
-    out.append(UInt8(0x0A))
-    return out^
 
 
 def _encode_capability(cap: Capability) raises EncodeError -> String:
