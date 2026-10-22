@@ -60,6 +60,10 @@ Do not silently rewrite a profile hash to make them admitted.
 - No real SNP/TDX qualification. Offline region analysis and ordinary-Linux
   conversion calls do not prove a confidential transition. No attestation
   is performed, and observations are not host-access verdicts.
+- On an AWS SEV-SNP guest the environment block reads
+  `mode=unknown detection=conflicting`: the sev-guest device is present
+  while the CPU flags lack `sev`. Detection does not yet classify such a
+  guest as confidential.
 - Pool samples are best-effort reads (start, 1 s cadence capped at
   4,096 with missed ticks skipped, close) and cannot alone diagnose
   sustained pressure. The sampler never resets high-water; equal values
