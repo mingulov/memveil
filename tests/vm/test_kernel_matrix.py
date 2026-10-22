@@ -439,16 +439,35 @@ def test_parse_committed_lock():
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "kernels.lock.json")
     doc = km.parse_lock(path)
-    assert len(doc["kernels"]) == 11
+    assert len(doc["kernels"]) == 20
     assert doc["tools"]["bpftrace"].startswith("bpftrace v")
     assert doc["tools"]["bpftool"].startswith("bpftool v")
     by_id = {e["id"]: e for e in doc["kernels"]}
     for ident in ("5.15", "6.0", "6.6", "6.10"):
         assert by_id[ident]["oracle"]["omitted"] == [
             "unmap", "syncc", "syncd"]
-    for ident in ("6.11", "6.12", "6.18", "7.0", "7.1", "7.2",
-                  "7.3-rc3"):
+    for ident in ("6.11", "6.12", "6.12.114-btf", "6.12.114-nobtf",
+                  "6.12.114-rt", "6.12.114-debug", "6.12.0",
+                  "6.18", "6.18.0", "7.0", "7.1", "7.2",
+                  "7.3-rc3", "7.3", "debian13"):
         assert by_id[ident]["oracle"]["omitted"] == []
+    assert sorted(
+        by_id["7.0.14-lockdown"]["oracle"]["omitted"]) == [
+            "copy", "map", "syncc", "syncd", "tp", "unmap"]
+
+
+def test_lock_has_every_k3a_row():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "kernels.lock.json")
+    doc = km.parse_lock(path)
+    ids = {e["id"] for e in doc["kernels"]}
+    assert ids == {
+        "5.15", "6.0", "6.6", "6.10", "6.11", "6.12",
+        "6.12.114-btf", "6.12.114-nobtf", "6.12.114-rt",
+        "6.12.114-debug", "6.12.0", "6.18", "6.18.0", "7.0",
+        "7.0.14-lockdown", "7.1", "7.2", "7.3-rc3", "7.3",
+        "debian13",
+    }
 
 
 def test_parse_rejects_vng_tag_with_suffix(tmp_path):
@@ -622,6 +641,13 @@ def test_release_dot_zero_mapping(tmp_path):
     entry["upstream"] = "6.12.1"
     with pytest.raises(km.LockError):
         km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+
+
+def test_release_agrees_debian_local_suffix():
+    assert km.release_agrees_with_upstream(
+        "6.12.107+deb13-amd64", "6.12.107")
+    assert not km.release_agrees_with_upstream(
+        "6.12.108+deb13-amd64", "6.12.107")
 
 
 def _valid_built_cache(tmp_path, monkeypatch):
@@ -1623,6 +1649,111 @@ def test_boot_identity_substring_swiotlb_fails():
     ok, _ = km.check_boot_identity(
         uname, _mods7(), "7.0.14-070014-generic", _CACHE7)
     assert not ok
+
+
+def _built_eval_entry():
+    entry = _admitted_entry()
+    entry["source"] = {"kind": "built",
+                       "config_sha256": "c" * 64}
+    return entry
+
+
+def _distro_eval_entry():
+    entry = _admitted_entry()
+    entry["source"] = {"kind": "distro",
+                       "banner": "Linux version test"}
+    return entry
+
+
+def test_boot_identity_built_config_mismatch_fails():
+    ev = _ev_pass()
+    ev["entry"] = _built_eval_entry()
+    ev["configid_text"] = "c" * 64 + "\n"
+    rec = km.evaluate_row(ev)
+    assert rec["ok"], json.dumps(rec["checks"], indent=1)
+    ev["configid_text"] = "0" * 64 + "\n"
+    rec = km.evaluate_row(ev)
+    assert not rec["ok"]
+    assert not _check(rec, "boot_config")["ok"]
+
+
+def test_boot_identity_built_no_config_fails():
+    ev = _ev_pass()
+    ev["entry"] = _built_eval_entry()
+    ev["configid_text"] = "absent\n"
+    rec = km.evaluate_row(ev)
+    assert not rec["ok"]
+    assert not _check(rec, "boot_config")["ok"]
+    ev["configid_text"] = None
+    rec = km.evaluate_row(ev)
+    assert not rec["ok"]
+    assert not _check(rec, "boot_config")["ok"]
+
+
+def test_boot_identity_distro_banner_mismatch_fails():
+    ev = _ev_pass()
+    ev["entry"] = _distro_eval_entry()
+    ev["version_text"] = "Linux version test\n"
+    rec = km.evaluate_row(ev)
+    assert rec["ok"], json.dumps(rec["checks"], indent=1)
+    ev["version_text"] = "Linux version other\n"
+    rec = km.evaluate_row(ev)
+    assert not rec["ok"]
+    assert not _check(rec, "boot_banner")["ok"]
+    ev["version_text"] = None
+    rec = km.evaluate_row(ev)
+    assert not _check(rec, "boot_banner")["ok"]
+
+
+def test_boot_append_not_in_cmdline_fails():
+    ev = _ev_pass()
+    entry = _admitted_entry()
+    entry["boot_append"] = ["lockdown=confidentiality"]
+    ev["entry"] = entry
+    rec = km.evaluate_row(ev)
+    assert not rec["ok"]
+    assert not _check(rec, "boot_append")["ok"]
+    ev["uname_text"] = _uname7("quiet swiotlb=131072,force "
+                               "lockdown=confidentiality")
+    ev["lockdown_text"] = "none integrity [confidentiality]\n"
+    rec = km.evaluate_row(ev)
+    assert rec["ok"], json.dumps(rec["checks"], indent=1)
+
+
+def test_lockdown_not_effective_fails():
+    ev = _ev_pass()
+    entry = _admitted_entry()
+    entry["boot_append"] = ["lockdown=confidentiality"]
+    ev["entry"] = entry
+    ev["uname_text"] = _uname7("quiet swiotlb=131072,force "
+                               "lockdown=confidentiality")
+    ev["lockdown_text"] = "none [integrity] confidentiality\n"
+    rec = km.evaluate_row(ev)
+    assert not rec["ok"]
+    assert not _check(rec, "lockdown_effective")["ok"]
+    assert _check(rec, "boot_append")["ok"]
+    ev["lockdown_text"] = None
+    rec = km.evaluate_row(ev)
+    assert not _check(rec, "lockdown_effective")["ok"]
+
+
+def test_lockdown_is_global_class():
+    ev = _ev_pass()
+    entry = dict(_admitted_entry())
+    entry["expected"] = {
+        "attempt-trace": {"verdict": "refused",
+                          "reason_class": "lockdown"},
+        "mapping-lifecycle": {"verdict": "refused",
+                              "reason_class": "lockdown"},
+        "copy-actual": {"verdict": "refused",
+                        "reason_class": "lockdown"},
+    }
+    ev["entry"] = entry
+    rec = km.evaluate_row(ev)
+    check = _check(rec, "refusals")
+    assert not check["ok"]
+    assert "pair cannot attribute" not in check["detail"]
+    assert "unknown reason class lockdown" in check["detail"]
 
 
 def test_record_finalized_accepts_zero_and_four():

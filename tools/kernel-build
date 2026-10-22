@@ -37,49 +37,31 @@ NICE_MAKE = ["nice", "-n", "19", "ionice", "-c3", "make",
              "-j" + MAKE_JOBS]
 
 
-class BuildError(Exception):
+class BuildError(km.HostError):
     """The recipe, host or build output is not usable."""
+
+
+def _host_gate(func, *args, **kw):
+    try:
+        return func(*args, **kw)
+    except km.HostError as exc:
+        raise BuildError(str(exc))
 
 
 def check_toolchain(want, got):
     """Refuse when a pinned toolchain line drifted, by name."""
-    bad = []
-    for name in ("gcc", "ld", "pahole"):
-        if want.get(name) != got.get(name):
-            bad.append("%s lock=%r host=%r"
-                       % (name, want.get(name),
-                          got.get(name)))
-    if bad:
-        raise BuildError("toolchain drift: "
-                         + "; ".join(bad))
+    return _host_gate(km.check_toolchain, want, got)
 
 
 def check_free_space(path, need_gb=NEED_GB, statvfs=os.statvfs):
     """Refuse when path holds less than need_gb free."""
-    try:
-        st = statvfs(path)
-        free = st.f_bavail * st.f_frsize
-    except OSError as exc:
-        raise BuildError("cannot stat %s: %s" % (path, exc))
-    if free < need_gb * 1024 ** 3:
-        raise BuildError("only %.1f GB free on %s, need %d"
-                         % (free / 1024 ** 3, path,
-                            need_gb))
+    return _host_gate(km.check_free_space, path, need_gb,
+                      statvfs)
 
 
 def remove_build_links(mods_root):
-    """Drop the kbuild build/source links before hashing.
-
-    Only symlinks are removed; a real file or dir at
-    those names refuses instead of deleting user data.
-    """
-    for name in ("build", "source"):
-        link = os.path.join(mods_root, name)
-        if os.path.islink(link):
-            os.unlink(link)
-        elif os.path.exists(link):
-            raise BuildError("%s is not a symlink, refusing "
-                             "to remove" % link)
+    """Drop the kbuild build/source links before hashing."""
+    return _host_gate(km.remove_build_links, mods_root)
 
 
 def find_vng():

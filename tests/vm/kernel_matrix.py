@@ -20,7 +20,9 @@ BOOT_APPEND_ALLOW = frozenset({"lockdown=confidentiality"})
 CAPS = ("attempt-trace", "mapping-lifecycle", "copy-actual")
 PROBES = ("tp", "map", "unmap", "copy", "syncc", "syncd")
 ADMIT_CLASS = "live-verified"
-REFUSE_CLASSES = ("floor-6.0", "floor-6.11", "no-cover", "live-refused")
+REFUSE_CLASSES = ("floor-6.0", "floor-6.11", "no-cover", "live-refused",
+                "btf-absent", "lockdown")
+GLOBAL_REFUSE_CLASSES = ("floor-6.0", "lockdown")
 
 KINDS = {
     "attempt": ("bounce_attempt", ["tp"]),
@@ -97,6 +99,10 @@ class OracleError(ValueError):
     """Oracle samples do not bracket the capture window."""
 
 
+class HostError(ValueError):
+    """The build host or its recipe inputs are not usable."""
+
+
 def _need(cond, msg):
     if not cond:
         raise LockError(msg)
@@ -112,7 +118,7 @@ def release_agrees_with_upstream(release, upstream):
     """Release carries its upstream version, rc mapped to .0."""
     if not isinstance(release, str) or not isinstance(upstream, str):
         return False
-    release_ver = release.split("-", 1)[0]
+    release_ver = release.split("-", 1)[0].split("+", 1)[0]
     if "-rc" in upstream:
         base, want_rc = upstream.split("-rc", 1)
         if release_ver not in (base, base + ".0"):
@@ -352,6 +358,8 @@ def _reason_ok(reason_class, status, reason):
                 "format", "attach")
         low = reason.lower()
         return any(k.lower() in low for k in keys)
+    if reason_class in ("btf-absent", "lockdown"):
+        return False
     return False
 
 
@@ -1043,6 +1051,52 @@ def check_boot_identity(uname_text, mods_text, want_release,
     return True, "booted %s" % want_release
 
 
+def check_boot_config(configid_text, want_sha):
+    """Guest config.gz sha matches the built row pin."""
+    if configid_text is None:
+        return False, "config id missing"
+    got = configid_text.strip()
+    if got == "absent":
+        return False, "guest has no /proc/config.gz"
+    if got != want_sha:
+        return False, "config.gz sha %s is not %s" % (got,
+                                                     want_sha)
+    return True, "config.gz matches the pin"
+
+
+def check_boot_banner(version_text, want_banner):
+    """Guest /proc/version equals the distro row banner."""
+    if version_text is None:
+        return False, "version text missing"
+    got = version_text.strip()
+    if got != want_banner:
+        return False, "/proc/version %r is not the banner" \
+            % got[:60]
+    return True, "banner matches the pin"
+
+
+def check_boot_append(uname_text, boot_append):
+    """Every boot_append argument shows in the cmdline."""
+    lines = (uname_text or "").splitlines()
+    tokens = lines[1].split() if len(lines) > 1 else []
+    for arg in boot_append or []:
+        if arg not in tokens:
+            return False, "cmdline lacks %s" % arg
+    return True, "cmdline carries %s" % ",".join(
+        boot_append or [])
+
+
+def check_lockdown_effective(lockdown_text):
+    """Lockdown reads confidentiality in the guest."""
+    if lockdown_text is None:
+        return False, "lockdown state missing"
+    if "[confidentiality]" not in lockdown_text:
+        first = lockdown_text.strip().splitlines()
+        return False, "lockdown not effective: %s" % (
+            first[0][:60] if first else "empty")
+    return True, "lockdown is confidentiality"
+
+
 def needed_probes(admitted):
     """Oracle probes one admitted set cannot run without."""
     out = []
@@ -1402,6 +1456,59 @@ def check_artifacts(artifacts, tools):
     return fails
 
 
+def fragment_lines(text):
+    """Parse kconfig lines into [(symbol, value)] pairs.
+
+    Skips comments and blanks; a "# ... is not set"
+    line parses as ("n").
+    """
+    out = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        match = re.fullmatch(
+            r"(CONFIG_[A-Za-z0-9_]+)=(.*)", line)
+        if match:
+            out.append((match.group(1),
+                        match.group(2).strip()))
+            continue
+        match = re.fullmatch(
+            r"#\s*(CONFIG_[A-Za-z0-9_]+)\s+is not set",
+            line)
+        if match:
+            out.append((match.group(1), "n"))
+    return out
+
+
+def merge_fragments(texts):
+    """Merge fragment texts, later files override earlier."""
+    merged = {}
+    for text in texts:
+        for sym, val in fragment_lines(text):
+            merged[sym] = val
+    return merged
+
+
+def dropped_fragment_lines(merged, final_config):
+    """Fragment lines olddefconfig did not keep, named.
+
+    An "=n" line is satisfied by "# ... is not set" or
+    by absence; any other value must match exactly.
+    Returns ["SYM=value", ...] for the unsatisfied ones.
+    """
+    final = {}
+    for sym, val in fragment_lines(final_config):
+        final[sym] = val
+    dropped = []
+    for sym in sorted(merged):
+        want = merged[sym]
+        if want == "n":
+            if final.get(sym, "n") != "n":
+                dropped.append("%s=n" % sym)
+        elif final.get(sym) != want:
+            dropped.append("%s=%s" % (sym, want))
+    return dropped
+
+
 def cache_base(home, vng):
     """virtme-ng cache dir for one version."""
     return os.path.join(home, ".cache", "virtme-ng", vng, "amd64")
@@ -1415,6 +1522,47 @@ def vmlinuz_for_release(base, release):
 def vng_download_cmd(vng, ver):
     """Populate one cache entry through vng itself."""
     return [vng, "--run", ver, "--dry-run"]
+
+
+def check_toolchain(want, got):
+    """Refuse when a pinned toolchain line drifted, by name."""
+    bad = []
+    for name in ("gcc", "ld", "pahole"):
+        if want.get(name) != got.get(name):
+            bad.append("%s lock=%r host=%r"
+                       % (name, want.get(name),
+                          got.get(name)))
+    if bad:
+        raise HostError("toolchain drift: "
+                        + "; ".join(bad))
+
+
+def check_free_space(path, need_gb=25, statvfs=os.statvfs):
+    """Refuse when path holds less than need_gb free."""
+    try:
+        st = statvfs(path)
+        free = st.f_bavail * st.f_frsize
+    except OSError as exc:
+        raise HostError("cannot stat %s: %s" % (path, exc))
+    if free < need_gb * 1024 ** 3:
+        raise HostError("only %.1f GB free on %s, need %d"
+                        % (free / 1024 ** 3, path,
+                           need_gb))
+
+
+def remove_build_links(mods_root):
+    """Drop the kbuild build/source links before hashing.
+
+    Only symlinks are removed; a real file or dir at
+    those names refuses instead of deleting user data.
+    """
+    for name in ("build", "source"):
+        link = os.path.join(mods_root, name)
+        if os.path.islink(link):
+            os.unlink(link)
+        elif os.path.exists(link):
+            raise HostError("%s is not a symlink, refusing "
+                            "to remove" % link)
 
 
 def kcache_base(home):
@@ -1575,6 +1723,36 @@ def evaluate_row(ev):
                                      ev.get("mods_text"), release,
                                      ev.get("cache_dir"))
     add("boot_identity", ok, detail)
+    kind = (entry.get("source") or {}).get("kind")
+    if kind == "built":
+        ok, detail = check_boot_config(
+            ev.get("configid_text"),
+            (entry["source"] or {}).get("config_sha256"))
+        add("boot_config", ok, detail)
+    else:
+        add("boot_config", True, "no built kernel",
+            skipped=True)
+    if kind == "distro":
+        ok, detail = check_boot_banner(
+            ev.get("version_text"),
+            (entry["source"] or {}).get("banner"))
+        add("boot_banner", ok, detail)
+    else:
+        add("boot_banner", True, "no distro kernel",
+            skipped=True)
+    if entry.get("boot_append"):
+        ok, detail = check_boot_append(ev.get("uname_text"),
+                                       entry["boot_append"])
+        add("boot_append", ok, detail)
+        if "lockdown=confidentiality" in entry["boot_append"]:
+            ok, detail = check_lockdown_effective(
+                ev.get("lockdown_text"))
+            add("lockdown_effective", ok, detail)
+    else:
+        add("boot_append", True, "no extra boot args",
+            skipped=True)
+        add("lockdown_effective", True, "no lockdown arg",
+            skipped=True)
     try:
         hooks = json.loads(ev.get("hooks_text") or "")
         if not isinstance(hooks, dict):
@@ -1605,7 +1783,8 @@ def evaluate_row(ev):
         fails = []
         attempt = entry["expected"].get("attempt-trace", {})
         pair_blind = attempt.get("verdict") == "refused" \
-            and attempt.get("reason_class") != "floor-6.0"
+            and attempt.get("reason_class") \
+            not in GLOBAL_REFUSE_CLASSES
         for cap, cls in refused:
             if pair_blind and cap != "attempt-trace":
                 fails.append("cap-%s: pair cannot attribute a "

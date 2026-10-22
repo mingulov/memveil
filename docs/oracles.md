@@ -112,6 +112,16 @@ Scope limits:
 Run through the `vm-kernels` lane with a built deb (see
 the boot verification recipe in `docs/support.md`).
 
+Row sources: `archive` rows boot Ubuntu mainline builds
+fetched by virtme-ng; `built` rows are compiled from a
+pinned kernel.org tarball plus tracked config fragments by
+`tools/kernel-build` and prove their identity with the
+decompressed `/proc/config.gz` hash; `distro` rows unpack
+pinned distribution packages with `tools/kernel-fetch` and
+prove theirs with the `/proc/version` banner. A row may
+carry extra boot arguments; the guest proves each one took
+effect.
+
 ## Fuzz oracle (`tests/fuzz/run.py`)
 
 Replays deterministically mutated seed captures through the

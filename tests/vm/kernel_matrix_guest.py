@@ -9,6 +9,8 @@ aborts FAIL (exit 1), never skip: the host decides pass/fail from
 the exported files.
 """
 
+import gzip
+import hashlib
 import json
 import os
 import shutil
@@ -269,6 +271,27 @@ def run(argv):
         fail("guest modules dir missing: %s" % mods_path)
     write(os.path.join(out, "mods.txt"),
           release + "\n" + mods_path + "\n")
+    try:
+        with gzip.open("/proc/config.gz", "rb") as handle:
+            raw = handle.read()
+        write(os.path.join(out, "configid.txt"),
+              hashlib.sha256(raw).hexdigest() + "\n")
+    except OSError:
+        write(os.path.join(out, "configid.txt"), "absent\n")
+    except Exception:
+        write(os.path.join(out, "configid.txt"),
+              "unreadable\n")
+    try:
+        write(os.path.join(out, "version.txt"),
+              Path("/proc/version").read_text())
+    except OSError as exc:
+        fail("cannot read /proc/version: %s" % exc)
+    try:
+        write(os.path.join(out, "lockdown.txt"),
+              Path("/sys/kernel/security/lockdown")
+              .read_text())
+    except OSError:
+        write(os.path.join(out, "lockdown.txt"), "absent\n")
     subprocess.run(["mount", "-t", "debugfs", "none",
                     "/sys/kernel/debug"],
                    capture_output=True)

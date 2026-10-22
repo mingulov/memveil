@@ -159,6 +159,12 @@ def collect_one(entry, export, tools, dd_count, elapsed, run_id,
             os.path.join(export, "uname.txt")),
         "mods_text": read_text(
             os.path.join(export, "mods.txt")),
+        "configid_text": read_text(
+            os.path.join(export, "configid.txt")),
+        "version_text": read_text(
+            os.path.join(export, "version.txt")),
+        "lockdown_text": read_text(
+            os.path.join(export, "lockdown.txt")),
         "hooks_text": read_text(
             os.path.join(export, "hooks.json")),
         "artifacts_text": read_text(
