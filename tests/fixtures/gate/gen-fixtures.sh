@@ -326,4 +326,4 @@ printf 'BOOT_IMAGE=/vmlinuz root=/dev/vda1 swiotlb=noforce\n' \
 mk swiotlb-inactive
 mkdir -p "$GATE/swiotlb-inactive/sys/kernel/debug"
 
-echo "wrote $GATE (base plus 56 variants)"
+echo "wrote $GATE (base plus 55 variants)"
