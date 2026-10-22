@@ -1542,8 +1542,9 @@ suite_rpm_journey() {
         # debug_package nil works around Ubuntu rpm, which
         # runs find-debuginfo despite the spec's
         # __os_install_post nil; it only gates the -debuginfo
-        # subpackage, never the main payload.
-        if ! rpmbuild -bb --define "_topdir $RTMP" \
+        # subpackage, never the main payload. --nodeps: apt, not
+        # the (empty or absent) rpm db, provides the BuildRequires.
+        if ! rpmbuild -bb --nodeps --define "_topdir $RTMP" \
             --define "debug_package %{nil}" "$RTMP/memveil.spec" \
             >"$RTMP/rpmbuild.log" 2>&1; then
             echo "rpm-journey: BLOCKED: rpmbuild failed" >&2

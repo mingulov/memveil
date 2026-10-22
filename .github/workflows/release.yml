@@ -38,7 +38,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             clang bpftool cmake ninja-build python3-pytest \
-            strace patchelf rpm
+            strace patchelf rpm binutils python3
       - name: Provision libbpf-mojo tarball
         run: |
           VER="$(python3 -c "import json; print(json.load(open('toolchain.lock.json'))['dependencies']['libbpf-mojo']['version'])")"
@@ -96,7 +96,8 @@ jobs:
             --version "$SPEC_VER" \
             --out "$RTOP/SOURCES/memveil-$SPEC_VER.tar.gz"
           cp "$LMB_PACKAGE" "$RTOP/SOURCES/$SRC1"
-          rpmbuild -bb --define "_topdir $RTOP" \
+          # apt, not the empty rpm db, provides the BuildRequires
+          rpmbuild -bb --nodeps --define "_topdir $RTOP" \
             --define "debug_package %{nil}" "$SPEC"
           RPM="$(find "$RTOP/RPMS" -name '*.rpm' | head -1)"
           cp "$RPM" "$GITHUB_WORKSPACE/dist/"
