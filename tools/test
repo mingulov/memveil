@@ -3153,6 +3153,28 @@ PYEOF
         failed=1
     fi
 
+    (cd "$ROOT" && "$BIN" doctor --json --load-check \
+        --capability attempt-trace >"$TMP/lc.json" 2>"$TMP/err")
+    rc=$?
+    if [ "$rc" -ne 3 ]; then
+        echo "doctor: --load-check exit $rc, want 3" >&2
+        failed=1
+    fi
+    if ! "$ROOT/tools/validate-schemas" --check-doctor \
+        "$TMP/lc.json" >/dev/null 2>&1; then
+        echo "doctor: oracle rejected --load-check JSON" >&2
+        failed=1
+    fi
+    if ! python3 - "$TMP/lc.json" <<'PYEOF'; then
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert doc["mode"] == "load-check", "mode"
+assert doc["load"][0]["state"] == "skipped", "load state"
+PYEOF
+        echo "doctor: --load-check facts mismatch" >&2
+        failed=1
+    fi
+
     # Passive doctor is bridge-independent: with
     # LMB_NATIVE_LIB aimed at a blocking stdin pipe,
     # doctor still completes promptly (regression pin

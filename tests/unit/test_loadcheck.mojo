@@ -7,8 +7,17 @@ from std.testing import TestSuite, assert_equal, assert_true
 
 from libbpf_mojo.error import LmbError
 from memveil.capture.kernel import _lmb_message
-from memveil.capture.loadcheck import errno_name, verifier_tail
-from memveil.platform.reader import bytes_to_text
+from memveil.capture.loadcheck import (
+    LoadTarget,
+    errno_name,
+    load_check,
+    verifier_tail,
+)
+from memveil.capture.run import attempt_program_names
+from memveil.cli.doctor import DoctorOptions, run_doctor_opts
+from memveil.cli.report import EXIT_INVALID
+from memveil.platform.reader import bytes_to_text, read_host_file
+from memveil.platform.runtime import live_uids
 
 
 def contains(hay: String, needle: String) -> Bool:
@@ -101,11 +110,57 @@ def test_verifier_tail_truncated() raises:
     assert_equal(clean[0], bytes_to_text(want^))
 
 
+def _attempt_target() raises -> LoadTarget:
+    """One attempt LoadTarget over the ok.o fixture object."""
+    var elf = read_host_file(
+        String("tests/fixtures/elf/ok.o"), String("object"), 67108864
+    )
+    var target = LoadTarget()
+    target.kind = String("attempt")
+    target.elf = elf^
+    target.programs = attempt_program_names()
+    return target^
+
+
+def test_load_check_eperm_unprivileged() raises:
+    assert_true(live_uids().euid != 0)
+    var targets = List[LoadTarget]()
+    targets.append(_attempt_target())
+    var results = load_check(
+        targets^, String("build/deps/lmb/lib/libbpf_mojo.so.1")
+    )
+    assert_equal(len(results), 1)
+    assert_equal(results[0].state, String("failed"))
+    assert_equal(results[0].errno, String("EPERM"))
+
+
+def test_load_check_bad_bridge() raises:
+    var targets = List[LoadTarget]()
+    targets.append(_attempt_target())
+    var results = load_check(
+        targets^, String("/nonexistent/libbpf_mojo.so.1")
+    )
+    assert_equal(len(results), 1)
+    assert_equal(results[0].state, String("failed"))
+    assert_true(contains(results[0].detail, String("bridge")))
+
+
+def test_doctor_load_check_needs_live() raises:
+    var opts = DoctorOptions()
+    opts.root = String("tests/fixtures/gate/base")
+    opts.profiles_dir = String("tests/fixtures/scan/profiles-live")
+    opts.load_check = True
+    assert_equal(run_doctor_opts(opts^), EXIT_INVALID)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_errno_names]()
     suite.test[test_lmb_message_names_errno]()
     suite.test[test_verifier_tail_truncated]()
+    suite.test[test_load_check_eperm_unprivileged]()
+    suite.test[test_load_check_bad_bridge]()
+    suite.test[test_doctor_load_check_needs_live]()
     suite^.run()
     return 0
 

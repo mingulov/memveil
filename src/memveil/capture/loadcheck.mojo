@@ -152,6 +152,121 @@ struct LoadDiag(Copyable):
         self.lines = List[String]()
 
 
+struct LoadResult(Copyable):
+    """One object load attempt: state, errno name, detail.
+
+    Passive runs leave ``load`` empty; the load-check verb
+    fills one entry per requested capability without
+    attaching. ``lines`` carries the verifier tail on
+    failure; it renders into capability evidence, never
+    into the load entry itself.
+    """
+
+    var object: String
+    var state: String
+    var errno: String
+    var detail: String
+    var lines: List[String]
+
+    def __init__(out self):
+        self.object = String("")
+        self.state = String("skipped")
+        self.errno = String("")
+        self.detail = String("")
+        self.lines = List[String]()
+
+
+struct LoadTarget(Copyable):
+    """One object to load: channel kind, ELF bytes, programs."""
+
+    var kind: String
+    var elf: List[UInt8]
+    var programs: List[String]
+
+    def __init__(out self):
+        self.kind = String("")
+        self.elf = List[UInt8]()
+        self.programs = List[String]()
+
+
+def load_check(
+    objects: List[LoadTarget], lib_path: String
+) -> List[LoadResult]:
+    """Load every object without attaching; report each.
+
+    Opens every object with log-on-failure, loads them in
+    input (record) order while keeping earlier loads open
+    so the kernel charges the same peak as record, then
+    releases all. Map sizes are the objects' declared
+    sizes; no custom BTF. A failed load tails the first
+    non-empty program log into ``lines``.
+    """
+    var out = List[LoadResult]()
+    var objs = List[Object]()
+    var handle_of = List[Int]()
+    for i in range(len(objects)):
+        var res = LoadResult()
+        res.object = objects[i].kind.copy()
+        var opts = ObjectOptions(
+            String("mv-loadcheck"),
+            List[UInt8](),
+            LOG_ON_FAILURE,
+            UInt64(_DIAG_LOG_CAP),
+        )
+        try:
+            objs.append(
+                Object.open_with_lib(
+                    Span(objects[i].elf), lib_path, opts^
+                )
+            )
+            handle_of.append(len(objs) - 1)
+            res.state = String("")
+        except e:
+            handle_of.append(-1)
+            res.state = String("failed")
+            res.errno = errno_name(e.code)
+            res.detail = _clip_line(
+                String("cannot open bridge ")
+                + lib_path
+                + String(": ")
+                + e.message,
+                512,
+            )
+        out.append(res^)
+    for i in range(len(objects)):
+        var h = handle_of[i]
+        if h < 0:
+            continue
+        try:
+            objs[h].load()
+            out[i].state = String("loaded")
+        except e:
+            out[i].state = String("failed")
+            out[i].errno = errno_name(e.code)
+            out[i].detail = _clip_line(e.message, 512)
+            var done = False
+            for p in range(len(objects[i].programs)):
+                if done:
+                    break
+                try:
+                    var view = objs[h].program(objects[i].programs[p])
+                    try:
+                        var meta = view.info(_DIAG_LOG_CAP)
+                        if len(meta.log) > 0:
+                            out[i].lines = verifier_tail(
+                                meta.log.copy(), meta.log_truncated
+                            )
+                            done = True
+                    except:
+                        pass
+                    view.close()
+                except:
+                    pass
+    for i in range(len(objs)):
+        objs[i].release()
+    return out^
+
+
 def diagnose_load(
     elf: Span[UInt8, _], lib_path: String, programs: List[String]
 ) -> LoadDiag:

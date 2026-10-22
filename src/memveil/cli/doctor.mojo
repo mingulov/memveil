@@ -2,7 +2,7 @@
 
 """memveil doctor: passive environment and capability report.
 
-``run_doctor`` implements the ``doctor [--json]`` verb against the
+``run_doctor`` implements the ``doctor`` verb against the
 live host and ``profiles/``. ``run_doctor_with`` is the same flow
 against an explicit evidence root and profiles directory, so tests
 drive fixtures through the identical code path.
@@ -18,9 +18,18 @@ the doctor-v0.1.0 schema exactly. Every interpolated evidence
 fragment is sanitized for its sink.
 """
 
+from memveil.capture.loadcheck import (
+    LoadResult,
+    LoadTarget,
+    load_check,
+)
 from memveil.capture.run import (
+    attempt_program_names,
+    copy_program_names,
     decide_record,
+    lifecycle_program_names,
     parse_requested_caps,
+    resolve_bridge,
     resolve_object,
 )
 from memveil.cli.report import (
@@ -73,6 +82,7 @@ from memveil.platform.reader import (
     read_host_file,
     readlink_self,
 )
+from memveil.platform.runtime import is_privileged, live_uids
 from memveil.render.json import escape_json
 
 
@@ -520,27 +530,6 @@ def run_doctor(args: List[String]) raises -> Int:
     return run_doctor_opts(opts^)
 
 
-struct LoadResult(Copyable):
-    """One object load attempt: state, errno name, detail.
-
-    Passive runs leave ``load`` empty; the load-check verb
-    fills one entry per requested object without attaching.
-    """
-
-    var object: String
-    var state: String
-    var errno: String
-    var detail: String
-    var lines: List[String]
-
-    def __init__(out self):
-        self.object = String("")
-        self.state = String("skipped")
-        self.errno = String("")
-        self.detail = String("")
-        self.lines = List[String]()
-
-
 struct DoctorCap(Copyable):
     """One judged capability: status, reason, code, evidence."""
 
@@ -738,6 +727,62 @@ def _precheck_line(pc: PreCheck) -> String:
     )
 
 
+def _load_kind(cap_id: String) -> String:
+    """Channel kind for one capability, else ``""``."""
+    if cap_id == String("attempt-trace"):
+        return String("attempt")
+    if cap_id == String("mapping-lifecycle"):
+        return String("lifecycle")
+    if cap_id == String("copy-actual"):
+        return String("copy")
+    return String("")
+
+
+def _load_code_for(errno: String) -> String:
+    """One machine code for a load errno name."""
+    if errno == String("EPERM"):
+        return String("load-eperm")
+    if errno == String("ENOMEM"):
+        return String("load-enomem")
+    if errno == String("EINVAL") or errno == String("EACCES"):
+        return String("verifier-rejected")
+    return String("load-failed")
+
+
+def _no_bridge_detail() -> String:
+    """Missing-bridge detail, matching the record refusal."""
+    if is_privileged(live_uids()):
+        return String(
+            "no bridge: restore the bundled bridge or pass --bridge PATH"
+        )
+    return String("no bridge: pass --bridge or set LMB_NATIVE_LIB")
+
+
+def _result_for_cap(
+    ti: Int,
+    results: List[LoadResult],
+    synth_caps: List[Int],
+    synth_res: List[LoadResult],
+    ci: Int,
+    cap_id: String,
+) -> LoadResult:
+    """One load entry: attempted result, race synthetic, or skipped."""
+    if ti >= 0:
+        return results[ti].copy()
+    for s in range(len(synth_caps)):
+        if synth_caps[s] == ci:
+            return synth_res[s].copy()
+    var sk = LoadResult()
+    var kind = _load_kind(cap_id)
+    if kind == String(""):
+        sk.object = cap_id.copy()
+    else:
+        sk.object = kind.copy()
+    sk.state = String("skipped")
+    sk.detail = String("passive checks did not pass")
+    return sk^
+
+
 def assess_doctor(opts: DoctorOptions) -> DoctorReport2:
     """Judge every requested capability through record admission.
 
@@ -748,7 +793,11 @@ def assess_doctor(opts: DoctorOptions) -> DoctorReport2:
     capability to unavailable with that check's code. Bad
     roots, profiles, or capability lists yield an
     unavailable report naming the failure; the exit-code
-    mapping lives in ``run_doctor_opts``.
+    mapping lives in ``run_doctor_opts``. Under
+    ``--load-check`` on the live host, every admitted
+    object loads without attaching: loaded objects read
+    ``available`` and the verdict is ``ready`` only when
+    every requested object loaded.
     """
     var out = DoctorReport2()
     var reader: EvidenceReader
@@ -925,20 +974,113 @@ def assess_doctor(opts: DoctorOptions) -> DoctorReport2:
             if len(entry.evidence) < 64:
                 entry.evidence.append(plines[j])
         out.caps.append(entry^)
-    var all_admitted = True
+    var loading = opts.load_check and opts.root == String("")
+    if loading:
+        out.mode = String("load-check")
+        var bridge = resolve_bridge(opts.bridge, opts.has_bridge)
+        var targets = List[LoadTarget]()
+        var target_for_cap = List[Int]()
+        for _ in range(len(out.caps)):
+            target_for_cap.append(-1)
+        var synth_caps = List[Int]()
+        var synth_res = List[LoadResult]()
+        for i in range(len(out.caps)):
+            var kind = _load_kind(out.caps[i].id)
+            if kind == String(""):
+                continue
+            if out.caps[i].status != String("available-load-unchecked"):
+                continue
+            var path = object_path.copy()
+            if kind == String("lifecycle"):
+                path = lc_path.copy()
+            elif kind == String("copy"):
+                path = cp_path.copy()
+            var elf: List[UInt8]
+            try:
+                elf = read_host_file(
+                    path, String("object"), _OBJECT_BYTES_CAP
+                )
+            except:
+                var res = LoadResult()
+                res.object = kind.copy()
+                res.state = String("failed")
+                res.detail = String("object unreadable at load")
+                synth_caps.append(i)
+                synth_res.append(res^)
+                continue
+            var target = LoadTarget()
+            target.kind = kind.copy()
+            target.elf = elf^
+            if kind == String("attempt"):
+                target.programs = attempt_program_names()
+            elif kind == String("lifecycle"):
+                target.programs = lifecycle_program_names()
+            else:
+                target.programs = copy_program_names()
+            target_for_cap[i] = len(targets)
+            targets.append(target^)
+        var results = List[LoadResult]()
+        if bridge == String(""):
+            for t in range(len(targets)):
+                var res = LoadResult()
+                res.object = targets[t].kind.copy()
+                res.state = String("failed")
+                res.detail = _no_bridge_detail()
+                results.append(res^)
+        elif len(targets) > 0:
+            results = load_check(targets^, bridge)
+        for i in range(len(out.caps)):
+            var res = _result_for_cap(
+                target_for_cap[i],
+                results,
+                synth_caps,
+                synth_res,
+                i,
+                out.caps[i].id,
+            )
+            if res.state == String("loaded"):
+                out.caps[i].status = String("available")
+            elif res.state == String("failed"):
+                out.caps[i].status = String("unavailable")
+                if res.errno == String(""):
+                    out.caps[i].reason = _clip_n(res.detail, 512)
+                else:
+                    out.caps[i].reason = _clip_n(
+                        String("load ")
+                        + res.errno
+                        + String(": ")
+                        + res.detail,
+                        512,
+                    )
+                out.caps[i].reason_code = _load_code_for(res.errno)
+                var rcode = out.caps[i].reason_code.copy()
+                out.caps[i].remedy = _clip_n(remedy_for(rcode), 512)
+                for l in range(len(res.lines)):
+                    if len(out.caps[i].evidence) < 64:
+                        out.caps[i].evidence.append(res.lines[l])
+            out.load.append(res^)
+    var want = String("available-load-unchecked")
+    if loading:
+        want = String("available")
+    var all_ok = True
     var first_refusal = String("")
     for i in range(len(out.caps)):
-        if out.caps[i].status != String("available-load-unchecked"):
-            all_admitted = False
+        if out.caps[i].status != want:
+            all_ok = False
             if first_refusal == String(""):
                 first_refusal = out.caps[i].reason.copy()
-    if all_admitted:
+    var names = String("")
+    for k in range(len(out.requested)):
+        if k != 0:
+            names += String(", ")
+        names += out.requested[k]
+    if all_ok and loading:
+        out.verdict = String("ready")
+        out.summary = String("ready: ") + names + String(" available")
+        if out.has_profile:
+            out.summary += String(" under ") + out.profile_id
+    elif all_ok:
         out.verdict = String("ready-load-unchecked")
-        var names = String("")
-        for k in range(len(out.requested)):
-            if k != 0:
-                names += String(", ")
-            names += out.requested[k]
         out.summary = (
             String("ready (load not checked): ")
             + names
