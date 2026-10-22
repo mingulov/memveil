@@ -1,0 +1,719 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Extract profile-schema 0.1.2 layouts from object CO-RE relocations.
+
+Reads each --object CAP=PATH ELF's .BTF and .BTF.ext (core_relo
+subsection, version 1), resolves every record's access string
+against the object's local BTF, strips ___flavor suffixes, and
+emits sorted, deduplicated items. Field records become target
+field items, FIELD_EXISTS marks its field optional, type records
+become target type items, and enum-value records become target
+enumerator items. Bitfield shift records refuse; TYPE_ID records
+are ignored with a note.
+
+Actions: --print writes the array to stdout; --write PROFILE
+replaces its layouts and sets schema_version 0.1.2; --check
+PROFILE fails when its layouts differ. --unrelocated adds a
+stderr list of named local structs no record targets.
+
+Exit 0 ok, 1 mismatch or unsupported record, 2 usage or
+unreadable input.
+"""
+import argparse
+import json
+import struct
+import sys
+from pathlib import Path
+
+BTF_MAGIC = 0xEB9F
+BTF_EXT_MAGIC = 0xEB9F
+BTF_VERSION = 1
+MAX_OBJECT_BYTES = 64 * 1024 * 1024
+MAX_TYPE_HOPS = 32
+
+K_INT = 1
+K_PTR = 2
+K_ARRAY = 3
+K_STRUCT = 4
+K_UNION = 5
+K_ENUM = 6
+K_FWD = 7
+K_TYPEDEF = 8
+K_VOLATILE = 9
+K_CONST = 10
+K_RESTRICT = 11
+K_FLOAT = 16
+K_TAG = 18
+K_ENUM64 = 19
+
+R_FIELD_BYTE_OFFSET = 0
+R_FIELD_BYTE_SIZE = 1
+R_FIELD_EXISTS = 2
+R_FIELD_SIGNED = 3
+R_FIELD_LSHIFT_U64 = 4
+R_FIELD_RSHIFT_U64 = 5
+R_TYPE_ID_LOCAL = 6
+R_TYPE_ID_TARGET = 7
+R_TYPE_EXISTS = 8
+R_TYPE_SIZE = 9
+R_ENUMVAL_EXISTS = 10
+R_ENUMVAL_VALUE = 11
+R_TYPE_MATCHES = 12
+
+_MODS = frozenset(
+    {K_TYPEDEF, K_VOLATILE, K_CONST, K_RESTRICT, K_TAG})
+_COMPOSITES = frozenset({K_STRUCT, K_UNION})
+_NAMED_LISTED = frozenset({K_STRUCT, K_UNION, K_FWD})
+
+
+class InputError(Exception):
+    """Unreadable or corrupt input: exit 2."""
+
+
+class UnsupportedError(Exception):
+    """Bitfield relocation: exit 1 with the pinned text."""
+
+
+def _u16(data, off):
+    return struct.unpack("<H", data[off:off + 2])[0]
+
+
+def _u32(data, off):
+    return struct.unpack("<I", data[off:off + 4])[0]
+
+
+def _read_object(path):
+    try:
+        size = Path(path).stat().st_size
+    except OSError as exc:
+        raise InputError("unreadable object %s: %s" % (path, exc))
+    if size > MAX_OBJECT_BYTES:
+        raise InputError("object %s over %d bytes" % (path, size))
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(MAX_OBJECT_BYTES + 1)
+    except OSError as exc:
+        raise InputError("unreadable object %s: %s" % (path, exc))
+
+
+def _elf_sections(data, path):
+    if len(data) < 64 or data[:4] != b"\x7fELF":
+        raise InputError("not an ELF object: %s" % path)
+    if data[4] != 2 or data[5] != 1 or data[6] != 1:
+        raise InputError("not a 64-bit LE ELF object: %s" % path)
+    shoff, = struct.unpack("<Q", data[0x28:0x30])
+    shentsize, shnum, shstrndx = struct.unpack("<HHH", data[0x3A:0x40])
+    if shentsize != 64 or shnum == 0 or shstrndx >= shnum:
+        raise InputError("bad ELF section table: %s" % path)
+    if shoff + shnum * 64 > len(data):
+        raise InputError("ELF section table out of range: %s" % path)
+    headers = []
+    for i in range(shnum):
+        off = shoff + i * 64
+        name, _, _, _, sec_off, size = struct.unpack(
+            "<IIQQQQ", data[off:off + 40])
+        if sec_off + size > len(data):
+            raise InputError("ELF section out of range: %s" % path)
+        headers.append((name, sec_off, size))
+    sname, soff, ssize = headers[shstrndx]
+    strtab = data[soff:soff + ssize]
+
+    def sec_name(off):
+        end = strtab.find(b"\x00", off)
+        if end < 0:
+            raise InputError("ELF section names corrupt: %s" % path)
+        return strtab[off:end].decode("ascii", errors="replace")
+
+    out = {}
+    for name, sec_off, size in headers:
+        out.setdefault(sec_name(name), data[sec_off:sec_off + size])
+    return out
+
+
+def _btf_strings(data, str_base, str_end, off):
+    if off == 0:
+        return ""
+    if str_base + off >= str_end:
+        raise InputError("BTF strings corrupt")
+    end = data.find(b"\x00", str_base + off, str_end)
+    if end < 0:
+        raise InputError("BTF strings corrupt")
+    try:
+        return data[str_base + off:end].decode("utf-8")
+    except UnicodeDecodeError:
+        raise InputError("BTF strings corrupt")
+
+
+class _Btf:
+    """One parsed .BTF section with 1-based type records."""
+
+    def __init__(self, data):
+        self.data = data
+        if len(data) < 24:
+            raise InputError("BTF too small")
+        if _u16(data, 0) != BTF_MAGIC or data[2] != BTF_VERSION:
+            raise InputError("bad BTF header")
+        hdr_len = _u32(data, 4)
+        type_off = _u32(data, 8)
+        type_len = _u32(data, 12)
+        str_off = _u32(data, 16)
+        str_len = _u32(data, 20)
+        if hdr_len < 24 or hdr_len > len(data):
+            raise InputError("bad BTF header")
+        for off, size in ((type_off, type_len), (str_off, str_len)):
+            if off > len(data) - hdr_len:
+                raise InputError("BTF sections out of range")
+            if size > len(data) - hdr_len - off:
+                raise InputError("BTF sections out of range")
+        tbase = hdr_len + type_off
+        tend = tbase + type_len
+        self.str_base = hdr_len + str_off
+        self.str_end = self.str_base + str_len
+        self.kinds = []
+        self.vlens = []
+        self.sizes = []
+        self.names = []
+        self.offs = []
+        pos = tbase
+        while pos < tend:
+            if pos + 12 > tend:
+                raise InputError("BTF types corrupt")
+            name_off, info, size = struct.unpack(
+                "<III", data[pos:pos + 12])
+            kind = (info >> 24) & 31
+            vlen = info & 0xFFFF
+            if kind in (K_INT, 14, 17):
+                extra = 4
+            elif kind == K_ARRAY:
+                extra = 12
+            elif kind in (K_STRUCT, K_UNION, 15):
+                extra = vlen * 12
+            elif kind in (K_ENUM, 13):
+                extra = vlen * 8
+            elif kind == K_ENUM64:
+                extra = vlen * 12
+            elif kind in (0, K_PTR, K_FWD, K_TYPEDEF, K_VOLATILE,
+                          K_CONST, K_RESTRICT, 12, K_FLOAT, K_TAG):
+                extra = 0
+            else:
+                raise InputError("unknown BTF kind %d" % kind)
+            if pos + 12 + extra > tend:
+                raise InputError("BTF types corrupt")
+            self.kinds.append(kind)
+            self.vlens.append(vlen)
+            self.sizes.append(size)
+            self.names.append(name_off)
+            self.offs.append(pos)
+            pos += 12 + extra
+        if pos != tend:
+            raise InputError("BTF types corrupt")
+
+    def valid(self, tid):
+        return 1 <= tid <= len(self.kinds)
+
+    def text(self, off):
+        return _btf_strings(
+            self.data, self.str_base, self.str_end, off)
+
+    def name(self, tid):
+        return self.text(self.names[tid - 1])
+
+    def member(self, tid, idx):
+        base = self.offs[tid - 1] + 12 + idx * 12
+        return struct.unpack(
+            "<III", self.data[base:base + 12])
+
+    def array(self, tid):
+        base = self.offs[tid - 1] + 12
+        return struct.unpack(
+            "<III", self.data[base:base + 12])
+
+    def enumerator(self, tid, idx):
+        kind = self.kinds[tid - 1]
+        base = self.offs[tid - 1] + 12
+        if kind == K_ENUM64:
+            name_off, _, _ = struct.unpack(
+                "<III", self.data[base + idx * 12:base + idx * 12 + 12])
+        else:
+            name_off, _ = struct.unpack(
+                "<II", self.data[base + idx * 8:base + idx * 8 + 8])
+        return name_off
+
+
+def _strip_flavor(name):
+    cut = name.find("___")
+    if cut >= 0:
+        return name[:cut]
+    return name
+
+
+class _Extractor:
+    """CO-RE records of one object resolved to layout items."""
+
+    def __init__(self, btf):
+        self.btf = btf
+        self.items = {}
+        self.targeted = set()
+        self.notes = []
+
+    def _resolve(self, tid, depth=0):
+        """Terminal (kind word, bit size) for one type id."""
+        if depth > MAX_TYPE_HOPS:
+            raise InputError("type chain too long")
+        if not self.btf.valid(tid):
+            raise InputError("type id out of range")
+        kind = self.btf.kinds[tid - 1]
+        size = self.btf.sizes[tid - 1]
+        if kind in _MODS:
+            return self._resolve(size, depth + 1)
+        if kind == K_PTR:
+            return ("ptr", 64)
+        if kind == K_INT:
+            return ("int", size * 8)
+        if kind == K_FLOAT:
+            return ("float", size * 8)
+        if kind == K_ARRAY:
+            elem, _index, count = self.btf.array(tid)
+            _ekind, ebits = self._resolve(elem, depth + 1)
+            return ("array", count * ebits)
+        if kind == K_STRUCT:
+            return ("struct", size * 8)
+        if kind == K_UNION:
+            return ("union", size * 8)
+        if kind in (K_ENUM, K_ENUM64):
+            return ("enum", size * 8)
+        if kind == K_FWD:
+            raise InputError("member type is a forward declaration")
+        raise InputError("unsupported member type kind %d" % kind)
+
+    def _unwrap(self, tid):
+        """Follow modifiers and one pointer to a composite id."""
+        seen = 0
+        while True:
+            seen += 1
+            if seen > MAX_TYPE_HOPS:
+                raise InputError("type chain too long")
+            if not self.btf.valid(tid):
+                raise InputError("type id out of range")
+            kind = self.btf.kinds[tid - 1]
+            if kind in _MODS:
+                tid = self.btf.sizes[tid - 1]
+                continue
+            if kind == K_PTR:
+                tid = self.btf.sizes[tid - 1]
+                continue
+            return tid
+
+    def _add(self, cap, target, struct_name, field, kind, size,
+             optional):
+        key = (cap, target, struct_name, field)
+        prev = self.items.get(key)
+        if prev is None:
+            self.items[key] = {"capability": cap, "target": target,
+                               "struct": struct_name,
+                               "type_kind": kind, "bit_size": size,
+                               "optional": optional,
+                               "field": field}
+            return
+        if prev["type_kind"] != kind or prev["bit_size"] != size:
+            self.notes.append(
+                "conflicting record for %s %s%s: keeping %s %d,"
+                " ignoring %s %d"
+                % (cap, struct_name,
+                   (".%s" % field) if field is not None else "",
+                   prev["type_kind"], prev["bit_size"], kind, size))
+        prev["optional"] = prev["optional"] or optional
+
+    def _emit_item(self, item):
+        if "field" in item and item["field"] is None:
+            del item["field"]
+        ordered = {"capability": item["capability"],
+                   "target": item["target"],
+                   "struct": item["struct"]}
+        if "field" in item:
+            ordered["field"] = item["field"]
+        ordered["type_kind"] = item["type_kind"]
+        ordered["bit_size"] = item["bit_size"]
+        ordered["optional"] = item["optional"]
+        return ordered
+
+    def _field_steps(self, tid, access):
+        """Resolve a field access to (struct, field, type) steps."""
+        try:
+            indices = [int(seg) for seg in access.split(":")]
+        except ValueError:
+            raise InputError(
+                "bad access string %r" % access)
+        if len(indices) < 2 or any(i < 0 for i in indices):
+            raise InputError(
+                "bad access string %r" % access)
+        cur = self._unwrap(tid)
+        if self.btf.kinds[cur - 1] not in _COMPOSITES:
+            raise InputError(
+                "field access root is not composite")
+        self.targeted.add(cur)
+        names = []
+
+        def composite_name(cid):
+            name = _strip_flavor(self.btf.name(cid))
+            return name if name else None
+
+        names.append(composite_name(cur))
+        steps = []
+        rest = list(indices[1:])
+        while rest:
+            if self.btf.kinds[cur - 1] not in _COMPOSITES:
+                raise InputError(
+                    "bad access string %r" % access)
+            idx = rest.pop(0)
+            if idx >= self.btf.vlens[cur - 1]:
+                raise InputError(
+                    "bad access string %r" % access)
+            name_off, member_tid, _word = self.btf.member(cur, idx)
+            member_name = self.btf.text(name_off)
+            if member_name:
+                struct_name = None
+                for cand in reversed(names):
+                    if cand is not None:
+                        struct_name = cand
+                        break
+                if struct_name is None:
+                    raise InputError("cannot name access step")
+                steps.append((struct_name,
+                              _strip_flavor(member_name), member_tid))
+            if not rest:
+                break
+            nxt = member_tid
+            while True:
+                nxt = self._unwrap_mods(nxt)
+                nk = self.btf.kinds[nxt - 1]
+                if nk == K_PTR:
+                    if not rest:
+                        raise InputError(
+                            "bad access string %r" % access)
+                    rest.pop(0)
+                    nxt = self.btf.sizes[nxt - 1]
+                    continue
+                if nk == K_ARRAY:
+                    if not rest:
+                        raise InputError(
+                            "bad access string %r" % access)
+                    rest.pop(0)
+                    elem, _index, _count = self.btf.array(nxt)
+                    nxt = elem
+                    continue
+                break
+            cur = nxt
+            self.targeted.add(cur)
+            names.append(composite_name(cur))
+        if not steps:
+            raise InputError(
+                "field access names no member")
+        return steps
+
+    def _unwrap_mods(self, tid):
+        """Follow modifiers to the first non-modifier id."""
+        seen = 0
+        while True:
+            seen += 1
+            if seen > MAX_TYPE_HOPS:
+                raise InputError("type chain too long")
+            if not self.btf.valid(tid):
+                raise InputError("type id out of range")
+            if self.btf.kinds[tid - 1] not in _MODS:
+                return tid
+            tid = self.btf.sizes[tid - 1]
+
+    def _record(self, cap, insn_off, tid, access, kind):
+        if kind in (R_TYPE_ID_LOCAL, R_TYPE_ID_TARGET):
+            try:
+                name = _strip_flavor(self.btf.name(tid))
+            except InputError:
+                name = ""
+            word = ("TYPE_ID_LOCAL" if kind == R_TYPE_ID_LOCAL
+                    else "TYPE_ID_TARGET")
+            self.notes.append("ignoring %s relocation in %s"
+                              % (word, name if name else "?"))
+            return
+        if kind in (R_FIELD_LSHIFT_U64, R_FIELD_RSHIFT_U64):
+            try:
+                steps = self._field_steps(tid, access)
+                disp = "%s.%s" % (steps[-1][0], steps[-1][1])
+            except InputError:
+                disp = "?.?"
+            raise UnsupportedError(
+                "bitfield relocation in %s unsupported" % disp)
+        if kind in (R_FIELD_BYTE_OFFSET, R_FIELD_BYTE_SIZE,
+                    R_FIELD_EXISTS, R_FIELD_SIGNED):
+            for struct_name, field, member_tid in self._field_steps(
+                    tid, access):
+                live_kind, bits = self._resolve(member_tid)
+                self._add(cap, "field", struct_name, field,
+                          live_kind, bits,
+                          kind == R_FIELD_EXISTS)
+            return
+        if kind in (R_TYPE_EXISTS, R_TYPE_SIZE, R_TYPE_MATCHES):
+            if access != "0":
+                raise InputError(
+                    "bad access string %r" % access)
+            if not self.btf.valid(tid):
+                raise InputError("type id out of range")
+            name = _strip_flavor(self.btf.name(tid))
+            if not name:
+                raise InputError("cannot name type")
+            live_kind, bits = self._resolve(tid)
+            self.targeted.add(self._unwrap(tid))
+            self._add(cap, "type", name, None, live_kind, bits, False)
+            return
+        if kind in (R_ENUMVAL_EXISTS, R_ENUMVAL_VALUE):
+            try:
+                idx = int(access)
+            except ValueError:
+                raise InputError(
+                    "bad access string %r" % access)
+            if idx < 0:
+                raise InputError(
+                    "bad access string %r" % access)
+            root = self._unwrap(tid)
+            if self.btf.kinds[root - 1] not in (K_ENUM, K_ENUM64):
+                raise InputError("enum value root is not an enum")
+            if idx >= self.btf.vlens[root - 1]:
+                raise InputError(
+                    "bad access string %r" % access)
+            enum_name = _strip_flavor(self.btf.name(root))
+            if not enum_name:
+                raise InputError("cannot name type")
+            value_name = _strip_flavor(self.btf.text(
+                self.btf.enumerator(root, idx)))
+            if not value_name:
+                raise InputError("cannot name enumerator")
+            self.targeted.add(root)
+            self._add(cap, "enumerator", enum_name, value_name,
+                      "enum", self.btf.sizes[root - 1] * 8, False)
+            return
+        raise InputError("unknown core relocation kind %d" % kind)
+
+
+def _core_relos(ext):
+    """Yield (insn_off, type_id, access_off, kind) records."""
+    if len(ext) < 32:
+        raise InputError("BTF.ext too small")
+    if _u16(ext, 0) != BTF_EXT_MAGIC:
+        raise InputError("bad BTF.ext header")
+    if ext[2] != BTF_VERSION:
+        raise InputError(
+            "unsupported BTF.ext version %d" % ext[2])
+    hdr_len = _u32(ext, 4)
+    if hdr_len < 32 or hdr_len > len(ext):
+        raise InputError("bad BTF.ext header")
+    core_off = _u32(ext, 24)
+    core_len = _u32(ext, 28)
+    base = hdr_len + core_off
+    if base + core_len > len(ext):
+        raise InputError("BTF.ext core section out of range")
+    if core_len == 0:
+        return
+    if core_len < 4:
+        raise InputError("BTF.ext core section out of range")
+    recsize = _u32(ext, base)
+    if recsize < 16:
+        raise InputError("bad core_relo record size %d" % recsize)
+    pos = base + 4
+    end = base + core_len
+    while pos < end:
+        if pos + 8 > end:
+            raise InputError("BTF.ext core section out of range")
+        _sec_name_off, num = struct.unpack(
+            "<II", ext[pos:pos + 8])
+        pos += 8
+        if pos + num * recsize > end:
+            raise InputError("BTF.ext core section out of range")
+        for _ in range(num):
+            insn_off, tid, acc, kind = struct.unpack(
+                "<IIII", ext[pos:pos + 16])
+            yield (insn_off, tid, acc, kind)
+            pos += recsize
+    if pos != end:
+        raise InputError("BTF.ext core section out of range")
+
+
+def _extract_cap(path, cap):
+    data = _read_object(path)
+    sections = _elf_sections(data, path)
+    ext = sections.get(".BTF.ext")
+    if ext is None:
+        return ([], [], [])
+    records = list(_core_relos(ext))
+    if not records:
+        return ([], [], [])
+    btf_sec = sections.get(".BTF")
+    if btf_sec is None:
+        raise InputError("missing .BTF with relocations: %s" % path)
+    btf = _Btf(btf_sec)
+    worker = _Extractor(btf)
+    for insn_off, tid, acc, kind in records:
+        access = _btf_strings(
+            btf_sec, btf.str_base, btf.str_end, acc)
+        worker._record(cap, insn_off, tid, access, kind)
+    items = [worker._emit_item(worker.items[key])
+             for key in sorted(worker.items)]
+    unrelocated = []
+    for tid in range(1, len(btf.kinds) + 1):
+        if btf.kinds[tid - 1] not in _NAMED_LISTED:
+            continue
+        if tid in worker.targeted:
+            continue
+        name = _strip_flavor(btf.name(tid))
+        if name:
+            unrelocated.append(name)
+    return (items, worker.notes, sorted(unrelocated))
+
+
+def _canon(item):
+    return json.dumps(item, sort_keys=True)
+
+
+def _load_profile(path):
+    try:
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise InputError(
+            "unreadable profile %s: %s" % (path, exc))
+    if not isinstance(doc, dict):
+        raise InputError(
+            "unreadable profile %s: not an object" % path)
+    return doc
+
+
+def _parse_objects(specs):
+    objects = []
+    for spec in specs:
+        if "=" not in spec:
+            raise InputError(
+                "bad --object (want CAP=PATH): %s" % spec)
+        cap, _, path = spec.partition("=")
+        if not cap or not path:
+            raise InputError(
+                "bad --object (want CAP=PATH): %s" % spec)
+        objects.append((cap, path))
+    return objects
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(prog="emit-core-layouts")
+    parser.add_argument("--object", dest="objects", action="append",
+                        default=[],
+                        help="CAP=PATH object to extract")
+    action = parser.add_mutually_exclusive_group(required=True)
+    action.add_argument("--print", dest="do_print",
+                        action="store_true")
+    action.add_argument("--write", metavar="PROFILE", default=None)
+    action.add_argument("--check", metavar="PROFILE", default=None)
+    parser.add_argument("--unrelocated", action="store_true")
+    args = parser.parse_args(argv[1:])
+    if not args.objects:
+        parser.error("at least one --object CAP=PATH is required")
+    try:
+        objects = _parse_objects(args.objects)
+    except InputError as exc:
+        sys.stderr.write("emit-core-layouts: %s\n" % exc)
+        return 2
+    merged = {}
+    notes = []
+    unrelocated_all = []
+    try:
+        for cap, path in objects:
+            items, obj_notes, unrelocated = _extract_cap(path, cap)
+            notes.extend(obj_notes)
+            unrelocated_all.extend(unrelocated)
+            for item in items:
+                key = (item["capability"], item["target"],
+                       item["struct"], item.get("field"))
+                prev = merged.get(key)
+                if prev is None:
+                    merged[key] = item
+                    continue
+                if (prev["type_kind"] != item["type_kind"]
+                        or prev["bit_size"] != item["bit_size"]):
+                    notes.append(
+                        "conflicting record for %s %s%s: keeping %s"
+                        " %d, ignoring %s %d"
+                        % (item["capability"], item["struct"],
+                           (".%s" % item["field"])
+                           if "field" in item else "",
+                           prev["type_kind"], prev["bit_size"],
+                           item["type_kind"], item["bit_size"]))
+                prev["optional"] = (
+                    prev["optional"] or item["optional"])
+    except UnsupportedError as exc:
+        sys.stderr.write("%s\n" % exc)
+        return 1
+    except InputError as exc:
+        sys.stderr.write("emit-core-layouts: %s\n" % exc)
+        return 2
+    items = [merged[key] for key in sorted(merged)]
+    if args.do_print:
+        sys.stdout.write(json.dumps(items, indent=2) + "\n")
+    elif args.write is not None:
+        try:
+            doc = _load_profile(args.write)
+        except InputError as exc:
+            sys.stderr.write("emit-core-layouts: %s\n" % exc)
+            return 2
+        if doc.get("schema_version") not in ("0.1.1", "0.1.2"):
+            sys.stderr.write(
+                "not a 0.1.x profile: %s\n" % args.write)
+            return 2
+        doc["layouts"] = items
+        doc["schema_version"] = "0.1.2"
+        try:
+            Path(args.write).write_text(
+                json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+        except OSError as exc:
+            sys.stderr.write(
+                "unreadable profile %s: %s\n" % (args.write, exc))
+            return 2
+    else:
+        try:
+            doc = _load_profile(args.check)
+        except InputError as exc:
+            sys.stderr.write("emit-core-layouts: %s\n" % exc)
+            return 2
+        if doc.get("schema_version") != "0.1.2":
+            sys.stderr.write(
+                "not a 0.1.2 profile: %s\n" % args.check)
+            return 1
+        layouts = doc.get("layouts", [])
+        if not isinstance(layouts, list):
+            sys.stderr.write(
+                "unreadable profile %s: layouts is not an array\n"
+                % args.check)
+            return 2
+        for item in layouts:
+            if not isinstance(item, dict):
+                sys.stderr.write(
+                    "unreadable profile %s: layout is not an object\n"
+                    % args.check)
+                return 2
+        have = set(_canon(item) for item in items)
+        want = set(_canon(item) for item in layouts)
+        failed = False
+        for canon in sorted(have - want):
+            sys.stderr.write("missing: %s\n" % canon)
+            failed = True
+        for canon in sorted(want - have):
+            sys.stderr.write("extra: %s\n" % canon)
+            failed = True
+        if failed:
+            return 1
+    for note in notes:
+        sys.stderr.write("%s\n" % note)
+    if args.unrelocated:
+        for name in unrelocated_all:
+            sys.stderr.write("unrelocated: %s\n" % name)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
+

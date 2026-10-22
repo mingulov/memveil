@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Compile the CO-RE kind fixture with the build's exact BPF flags.
+
+Default mode writes tests/fixtures/core/relo_kinds.bpf.o from
+relo_kinds.bpf.c; --check recompiles to a temp file and compares
+bytes, failing when the committed object drifts from the source.
+
+Exit 0 ok, 1 mismatch (--check only), 2 usage or compile failure.
+"""
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+SRC = ROOT / "tests" / "fixtures" / "core" / "relo_kinds.bpf.c"
+OUT = ROOT / "tests" / "fixtures" / "core" / "relo_kinds.bpf.o"
+
+
+def _clang_resource_include():
+    proc = subprocess.run(["clang", "-print-resource-dir"],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError("clang -print-resource-dir failed")
+    inc = Path(proc.stdout.strip()) / "include"
+    if not inc.is_dir():
+        raise RuntimeError("missing clang resource include dir")
+    return str(inc)
+
+
+def _compile(dst):
+    cmd = ["clang", "--target=bpf", "-O2", "-g", "-Wall", "-Wextra",
+           "-Werror", "-D__BPF__", "-nostdinc", "-isystem",
+           _clang_resource_include(),
+           "-ffile-prefix-map=%s=." % ROOT,
+           "-I", "bpf/include", "-I", "build/deps/include",
+           "-I", "bpf/include/uapi", "-c", str(SRC), "-o", str(dst)]
+    proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr)
+        raise RuntimeError("clang --target=bpf failed")
+
+
+def main(argv):
+    check = False
+    if len(argv) == 2 and argv[1] == "--check":
+        check = True
+    elif len(argv) != 1:
+        sys.stderr.write("usage: emit-core-fixtures [--check]\n")
+        return 2
+    try:
+        if not check:
+            _compile(OUT)
+            print("wrote %s" % OUT)
+            return 0
+        with tempfile.TemporaryDirectory() as tmp:
+            fresh = Path(tmp) / "relo_kinds.bpf.o"
+            _compile(fresh)
+            if not OUT.is_file():
+                sys.stderr.write("missing %s\n" % OUT)
+                return 1
+            if OUT.read_bytes() != fresh.read_bytes():
+                sys.stderr.write(
+                    "relo_kinds.bpf.o differs from a fresh compile;"
+                    " rerun tools/emit-core-fixtures\n")
+                return 1
+        print("relo_kinds.bpf.o matches a fresh compile")
+        return 0
+    except RuntimeError as exc:
+        sys.stderr.write("emit-core-fixtures: %s\n" % exc)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

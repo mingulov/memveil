@@ -993,7 +993,12 @@ suite_profiles() {
     run_unit_file tests/unit/test_narrow.mojo || return 1
     run_unit_file tests/unit/test_offsets.mojo || return 1
     run_unit_file tests/unit/test_trace_format.mojo || return 1
-    run_unit_file tests/unit/test_scan.mojo
+    run_unit_file tests/unit/test_scan.mojo || return 1
+    "$ROOT/tools/emit-core-layouts" \
+        --object "attempt-trace=$ROOT/tests/fixtures/elf/ok.o" \
+        --object "mapping-lifecycle=$ROOT/tests/fixtures/elf/lc-ok.o" \
+        --object "copy-actual=$ROOT/tests/fixtures/elf/cp-ok.o" \
+        --check "$ROOT/tests/fixtures/scan/profiles-core/core-ref.json"
 }
 
 suite_identity() {
@@ -1091,7 +1096,7 @@ suite_profile_semantics() {
         echo "profile-semantics: pytest not importable" >&2
         return 1
     fi
-    python3 -m pytest "$ROOT/tests/vm/test_profile_semantics.py" "$ROOT/tests/vm/test_harness_refusal.py" "$ROOT/tests/vm/test_workflow_results.py" "$ROOT/tests/vm/test_export_validation.py" "$ROOT/tests/vm/test_mint_record3.py" "$ROOT/tests/vm/test_oracle_kver.py" "$ROOT/tests/vm/test_guest_teardown.py" "$ROOT/tests/vm/test_gate_kernel.py" -q
+    python3 -m pytest "$ROOT/tests/vm/test_profile_semantics.py" "$ROOT/tests/vm/test_harness_refusal.py" "$ROOT/tests/vm/test_workflow_results.py" "$ROOT/tests/vm/test_export_validation.py" "$ROOT/tests/vm/test_mint_record3.py" "$ROOT/tests/vm/test_oracle_kver.py" "$ROOT/tests/vm/test_guest_teardown.py" "$ROOT/tests/vm/test_gate_kernel.py" "$ROOT/tests/vm/test_core_layouts.py" -q
 }
 
 vm_lifecycle_preflight() {
