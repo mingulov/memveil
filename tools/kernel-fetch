@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Fetch one distro matrix kernel from its pinned packages.
+
+Reads the distro row from tests/vm/kernels.lock.json,
+verifies every package against its pinned sha256, extracts
+the kernel image, config and modules, decompresses
+xz-compressed modules, indexes them with depmod, and
+installs boot/vmlinuz-<release>, lib or usr/lib modules
+and config into the row cache dir. Refuses on hash
+mismatch, low disk, and (without --print-hashes) output
+drift. Nothing here boots a guest.
+"""
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tests" / "vm"))
+
+import kernel_matrix as km
+
+FETCH_ROOT = "/var/tmp/memveil-kfetch"
+NEED_GB = 25
+
+
+class FetchError(km.HostError):
+    """The packages or the fetch output are not usable."""
+
+
+def _fetch_gate(func, *args, **kw):
+    try:
+        return func(*args, **kw)
+    except km.HostError as exc:
+        raise FetchError(str(exc))
+
+
+def check_free_space(path, need_gb=NEED_GB, statvfs=os.statvfs):
+    """Refuse when path holds less than need_gb free."""
+    return _fetch_gate(km.check_free_space, path, need_gb,
+                       statvfs)
+
+
+def remove_build_links(mods_root):
+    """Drop the kbuild build/source links before hashing."""
+    return _fetch_gate(km.remove_build_links, mods_root)
+
+
+def run_logged(cmd, cwd, timeout, label):
+    try:
+        proc = subprocess.run(cmd, cwd=cwd,
+                              capture_output=True, text=True,
+                              timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise FetchError("%s timed out after %ds"
+                         % (label, timeout))
+    sys.stderr.write(proc.stdout or "")
+    sys.stderr.write(proc.stderr or "")
+    if proc.returncode != 0:
+        raise FetchError("%s exits %d"
+                         % (label, proc.returncode))
+    return proc
+
+
+def fetch_package(url, want_sha, dest):
+    if os.path.isfile(dest):
+        if km.sha_file(dest) == want_sha:
+            return
+        os.unlink(dest)
+    run_logged(["curl", "-sSfL", "-o", dest, url],
+               str(ROOT), 900, "package fetch")
+    if km.sha_file(dest) != want_sha:
+        os.unlink(dest)
+        raise FetchError("package sha mismatch for %s" % url)
+
+
+def fresh_dir(path, what):
+    if os.path.lexists(path):
+        if not os.path.isdir(path) or os.path.islink(path):
+            raise FetchError("%s %s is not a dir, refusing "
+                             "to clear" % (what, path))
+        shutil.rmtree(path)
+    os.makedirs(path)
+
+
+def strip_member(member):
+    while member.startswith("./") or member == ".":
+        member = member[2:] if member.startswith("./") \
+            else ""
+    if not member or member.startswith("/") \
+            or ".." in member.split("/"):
+        raise FetchError("unsafe member %r" % member)
+    return member
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Fetch one distro matrix kernel into "
+                    "the row cache.")
+    parser.add_argument("--id", required=True,
+                        help="lock row id to fetch")
+    parser.add_argument("--print-hashes",
+                        action="store_true",
+                        help="print the distro source object "
+                             "with observed hashes instead "
+                             "of comparing them")
+    parser.add_argument("--root", default=FETCH_ROOT,
+                        help="scratch root (default "
+                             "/var/tmp/memveil-kfetch)")
+    args = parser.parse_args(argv)
+    try:
+        lock = km.parse_lock(
+            str(ROOT / "tests" / "vm" / "kernels.lock.json"))
+    except km.LockError as exc:
+        print("kernel-fetch: bad lock: %s" % exc,
+              file=sys.stderr)
+        return 2
+    rows = [e for e in lock["kernels"]
+            if e["id"] == args.id]
+    if not rows:
+        print("kernel-fetch: unknown row %s" % args.id,
+              file=sys.stderr)
+        return 2
+    entry = rows[0]
+    source = entry["source"]
+    if source["kind"] != "distro":
+        print("kernel-fetch: row %s is not a distro row"
+              % args.id, file=sys.stderr)
+        return 2
+    try:
+        return fetch_row(entry, source, args)
+    except FetchError as exc:
+        print("kernel-fetch: %s" % exc, file=sys.stderr)
+        return 1
+
+
+def fetch_row(entry, source, args):
+    ident = entry["id"]
+    release = entry["release"]
+    home = str(Path.home())
+    kcache = km.kcache_base(home)
+    root = os.path.abspath(args.root)
+    try:
+        os.makedirs(root, exist_ok=True)
+        os.makedirs(kcache, exist_ok=True)
+    except OSError as exc:
+        raise FetchError("cannot make work dirs: %s" % exc)
+    check_free_space(root)
+    check_free_space(kcache)
+    for tool in ("dpkg-deb", "unxz", "depmod"):
+        if not shutil.which(tool):
+            raise FetchError("need %s in PATH" % tool)
+    debs = os.path.join(kcache, "_debs")
+    os.makedirs(debs, exist_ok=True)
+    workdir = os.path.join(root, ident)
+    fresh_dir(workdir, "scratch tree")
+    paths = []
+    for num, pack in enumerate(source["packages"]):
+        dest = os.path.join(debs,
+                            pack["sha256"] + ".deb")
+        fetch_package(pack["url"], pack["sha256"], dest)
+        target = os.path.join(workdir, "pkg%d" % num)
+        os.makedirs(target)
+        run_logged(["dpkg-deb", "-x", dest, target],
+                   workdir, 600, "extract")
+        paths.append(target)
+    member = strip_member(source["vmlinuz_member"])
+    vmlinuz = None
+    for target in paths:
+        cand = os.path.join(target, member)
+        if os.path.isfile(cand):
+            vmlinuz = cand
+            break
+    if vmlinuz is None:
+        raise FetchError("member %s missing from packages"
+                         % member)
+    if km.sha_file(vmlinuz) != source["vmlinuz_sha256"] \
+            and not args.print_hashes:
+        raise FetchError("vmlinuz sha mismatch for %s"
+                         % ident)
+    config = None
+    for target in paths:
+        cand = os.path.join(target, "boot",
+                            "config-" + release)
+        if os.path.isfile(cand):
+            config = cand
+            break
+    if config is None:
+        raise FetchError("config-%s missing from packages"
+                         % release)
+    mods_src = None
+    mods_home = None
+    for target in paths:
+        cand = km.find_modules_root(target, release)
+        if cand is not None:
+            mods_src = cand
+            mods_home = target
+            break
+    if mods_src is None:
+        raise FetchError("modules for %s missing" % release)
+    rowdir = os.path.join(kcache, ident)
+    fresh_dir(rowdir, "row cache")
+    boot = os.path.join(rowdir, "boot")
+    os.makedirs(boot)
+    shutil.copyfile(vmlinuz, os.path.join(
+        boot, "vmlinuz-" + release))
+    shutil.copyfile(config, os.path.join(rowdir, "config"))
+    usrmerge = mods_src == os.path.join(
+        mods_home, "usr", "lib", "modules", release)
+    if usrmerge:
+        mods = os.path.join(rowdir, "usr", "lib",
+                            "modules", release)
+        depmod_base = os.path.join(rowdir, "usr")
+    else:
+        mods = os.path.join(rowdir, "lib", "modules",
+                            release)
+        depmod_base = rowdir
+    shutil.copytree(mods_src, mods, symlinks=True)
+    compressed = []
+    for dirpath, _, names in os.walk(mods):
+        for name in sorted(names):
+            if name.endswith(".xz"):
+                compressed.append(os.path.join(dirpath,
+                                               name))
+    for path in compressed:
+        run_logged(["unxz", path], workdir, 300, "unxz")
+    left = [p for p in compressed
+            if os.path.exists(p)]
+    if left:
+        raise FetchError("still compressed: %s" % left[0])
+    run_logged(["depmod", "-b", depmod_base, release],
+               workdir, 300, "depmod")
+    remove_build_links(mods)
+    built = {"vmlinuz_sha256": km.sha_file(
+        os.path.join(boot, "vmlinuz-" + release)),
+        "modules_manifest_sha256":
+            km.modules_manifest_sha(mods)[0],
+        "config_sha256": km.sha_file(
+            os.path.join(rowdir, "config"))}
+    for key in ("vmlinuz_sha256",
+                "modules_manifest_sha256",
+                "config_sha256"):
+        sys.stderr.write("kernel-fetch: %s=%s\n"
+                         % (key, built[key]))
+    if args.print_hashes:
+        out = dict(source)
+        out.update(built)
+        print(json.dumps(out, indent=2, sort_keys=True))
+    else:
+        for key in ("vmlinuz_sha256",
+                    "modules_manifest_sha256",
+                    "config_sha256"):
+            if built[key] != source[key]:
+                raise FetchError(
+                    "%s mismatch: lock %s built %s"
+                    % (key, source[key], built[key]))
+    shutil.rmtree(workdir)
+    sys.stderr.write("kernel-fetch: %s done\n" % ident)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
