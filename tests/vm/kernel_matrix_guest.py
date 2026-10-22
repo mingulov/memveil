@@ -542,6 +542,11 @@ def run(argv):
     write(os.path.join(out, "progs_times.json"),
           json.dumps({str(k): v for k, v in sorted(times.items())},
                      indent=2, sort_keys=True) + "\n")
+    # Settle before the busy loader starts: the oracle
+    # ticks every 500 ms and its first post-window sample
+    # must not catch busy DMA, or the window hi edge
+    # inflates and oracle_bytes fails by timing luck.
+    time.sleep(2)
     busy_dir = os.path.join(out, "busy")
     os.makedirs(busy_dir, exist_ok=True)
     busy_out = open(os.path.join(busy_dir, "busy.out"), "w")
