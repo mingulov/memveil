@@ -1457,8 +1457,7 @@ struct LmbKernel(ChannelPoller, KernelSource):
             )
             return out^
         if not fb_valid(fb.vals):
-            # read_fb returns ok only with three slots, so a
-            # failed check here is always nonzero flags.
+            # read_fb ok means three slots, so this is nonzero flags.
             var out = MissOut(
                 True, UInt64(0), String(""), ch0.count)
             out.detail_error = (
