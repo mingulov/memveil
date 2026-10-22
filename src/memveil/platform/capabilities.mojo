@@ -615,6 +615,19 @@ def cap_floor_refusal(cap_id: String, release: String) -> String:
     )
 
 
+def attempt_loss_exact(release: String) -> Bool:
+    """True when attempt loss counts are exact on this release.
+
+    Kernels before 6.7 skipped programs in trace_call_bpf
+    without counting them, so loss counts there are a
+    lower bound. Unparsable releases are not exact.
+    """
+    var triple = parse_kernel_triple(release)
+    if not triple.ok:
+        return False
+    return triple_ge(triple, 6, 7)
+
+
 def discover_capabilities(
     reader: EvidenceReader, decision: ProfileDecision
 ) -> CapabilityReport:

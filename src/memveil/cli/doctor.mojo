@@ -44,6 +44,7 @@ from memveil.platform.stdout import write_stdout
 from memveil.platform.capabilities import (
     CapEntry,
     CapabilityReport,
+    attempt_loss_exact,
     discover_capabilities,
 )
 from memveil.platform.evidence import (
@@ -973,6 +974,19 @@ def assess_doctor(opts: DoctorOptions) -> DoctorReport2:
         for j in range(len(plines)):
             if len(entry.evidence) < 64:
                 entry.evidence.append(plines[j])
+        if (
+            entry.id == String("attempt-trace")
+            and entry.status == String("available-load-unchecked")
+            and not attempt_loss_exact(env.kernel.release)
+            and len(entry.evidence) < 64
+        ):
+            entry.evidence.append(
+                String(
+                    "attempt loss counts are a lower bound before 6.7:"
+                    " trace_call_bpf skipped programs without counting"
+                    " them"
+                )
+            )
         out.caps.append(entry^)
     var loading = opts.load_check and opts.root == String("")
     if loading:

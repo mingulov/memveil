@@ -43,7 +43,11 @@ from memveil.platform.btf import (
     read_btf_maps,
     read_btf_maps_ring,
 )
-from memveil.platform.capabilities import cap_floor_ok, cap_floor_refusal
+from memveil.platform.capabilities import (
+    attempt_loss_exact,
+    cap_floor_ok,
+    cap_floor_refusal,
+)
 from memveil.platform.clock import (
     MonoClock,
     check_timens_live,
@@ -1498,6 +1502,22 @@ def _value_item(source: String, value: String) -> EvidenceItem:
     return item^
 
 
+def attempt_loss_evidence(release: String) -> List[EvidenceItem]:
+    """Attempt-loss bound item on kernels before 6.7, else empty."""
+    var out = List[EvidenceItem]()
+    if attempt_loss_exact(release):
+        return out^
+    var item = EvidenceItem()
+    item.item_type = String("attempt-loss-bound")
+    item.source = String("kernel ") + release
+    item.interpretation = String(
+        "attempt loss counts are a lower bound before 6.7:"
+        " trace_call_bpf skipped programs without counting them"
+    )
+    out.append(item^)
+    return out^
+
+
 def _append_channel_evidence(
     mut evidence: List[EvidenceItem], name: String, channel: ExtraChannel
 ):
@@ -1767,6 +1787,9 @@ def run_collector_with[W: WriterSource](
             decision.selected_caps.copy(),
         )
     )
+    var loss_bound = attempt_loss_evidence(env.kernel.release)
+    for i in range(len(loss_bound)):
+        cfg.evidence.append(loss_bound[i].copy())
     _append_channel_evidence(
         cfg.evidence, String("lc"), decision.lc
     )

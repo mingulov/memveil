@@ -5,6 +5,8 @@
 from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
 
+from memveil.capture.run import attempt_loss_evidence
+from memveil.platform.capabilities import attempt_loss_exact
 from memveil.platform.evidence import detect_environment
 from memveil.platform.kernelgate import (
     GateVerdict,
@@ -624,6 +626,30 @@ def test_cc_flags_without_node() raises:
     assert_true(found_tsm)
 
 
+def test_attempt_loss_exact() raises:
+    assert_true(not attempt_loss_exact(String("6.6.160")))
+    assert_true(attempt_loss_exact(String("6.7.0")))
+    assert_true(attempt_loss_exact(String("7.0.0-38-generic")))
+    assert_true(not attempt_loss_exact(String("6.0.19")))
+    assert_true(not attempt_loss_exact(String("bogus")))
+
+
+def test_attempt_loss_evidence() raises:
+    var bound = attempt_loss_evidence(String("6.6.160"))
+    assert_equal(len(bound), 1)
+    assert_equal(bound[0].item_type, String("attempt-loss-bound"))
+    assert_equal(bound[0].source, String("kernel 6.6.160"))
+    assert_equal(
+        bound[0].interpretation,
+        String(
+            "attempt loss counts are a lower bound before 6.7:"
+            " trace_call_bpf skipped programs without counting them"
+        ),
+    )
+    var exact = attempt_loss_evidence(String("7.0.0-38-generic"))
+    assert_equal(len(exact), 0)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_tracefs_root_order]()
@@ -641,6 +667,8 @@ def run() raises -> Int:
     suite.test[test_gate_container_views]()
     suite.test[test_remedy_per_code]()
     suite.test[test_cc_flags_without_node]()
+    suite.test[test_attempt_loss_exact]()
+    suite.test[test_attempt_loss_evidence]()
     suite^.run()
     return 0
 
