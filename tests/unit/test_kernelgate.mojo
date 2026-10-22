@@ -5,6 +5,7 @@
 from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
 
+from memveil.platform.evidence import detect_environment
 from memveil.platform.kernelgate import (
     GateVerdict,
     LockdownState,
@@ -578,6 +579,51 @@ def test_ftrace_states() raises:
     )
 
 
+def test_cc_flags_without_node() raises:
+    var snp = detect_environment(
+        open_evidence_reader(gate(String("cc-flags-nonode")))
+    )
+    assert_equal(snp.guest.tech, String("unknown"))
+    assert_equal(
+        snp.guest.conflict,
+        String(
+            "cpu flag sev_snp without guest node: confidential guest"
+            " with attestation device absent, or flags spoofed"
+        ),
+    )
+    var found_snp = False
+    for i in range(len(snp.guest.signals)):
+        if snp.guest.signals[i] == String(
+            "cc-flags:without-node:sev_snp"
+        ):
+            found_snp = True
+    assert_true(found_snp)
+    var tdx = detect_environment(
+        open_evidence_reader(gate(String("cc-tdx-nonode")))
+    )
+    assert_equal(tdx.guest.tech, String("unknown"))
+    assert_equal(
+        tdx.guest.conflict,
+        String(
+            "cpu flag tdx_guest without guest node: confidential guest"
+            " with attestation device absent, or flags spoofed"
+        ),
+    )
+    var host = detect_environment(
+        open_evidence_reader(gate(String("cc-flags-host")))
+    )
+    assert_equal(host.guest.tech, String("ordinary"))
+    assert_equal(host.guest.conflict, String(""))
+    var tsm = detect_environment(
+        open_evidence_reader(gate(String("cc-tsm")))
+    )
+    var found_tsm = False
+    for i in range(len(tsm.guest.signals)):
+        if tsm.guest.signals[i] == String("tsm:present"):
+            found_tsm = True
+    assert_true(found_tsm)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_tracefs_root_order]()
@@ -594,6 +640,7 @@ def run() raises -> Int:
     suite.test[test_gate_denied_never_absent]()
     suite.test[test_gate_container_views]()
     suite.test[test_remedy_per_code]()
+    suite.test[test_cc_flags_without_node]()
     suite^.run()
     return 0
 

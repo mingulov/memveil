@@ -41,3 +41,7 @@ tree is tracked. One line per variant:
 - container-view: debug-only tracefs, BTF hidden, config says BTF.
 - format-denied: the swiotlb_bounced format file is fixture-denied.
 - id-absent: ready-validated tree without the tracepoint id file.
+- cc-flags-nonode: SEV-SNP flags with hypervisor, no guest node.
+- cc-tdx-nonode: tdx_guest flag with hypervisor, no guest node.
+- cc-flags-host: SEV-SNP flags without hypervisor (bare metal).
+- cc-tsm: cc-flags-nonode plus a TSM report directory.

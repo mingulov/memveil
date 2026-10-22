@@ -12,7 +12,7 @@ mkdir -p "$GATE"
 
 # Every generated tree; later tasks extend this list alongside
 # their variants. Only these directories are ever removed.
-VARIANTS="base ftrace-off ftrace-denied ftrace-malformed aff-dup aff-module aff-clone aff-prefix debugfs-root debug-denied lockdown-conf lockdown-integrity lockdown-nosecfs lockdown-dashdash lockdown-config lockdown-nolsm lockdown-twobrackets lockdown-bogus lockdown-denied notracing-config notracing-bpfevents tracefs-noevents tracefs-unmounted tracefs-hidden tracefs-gone events-denied btf-absent-config btf-absent-unknown btf-not-visible btf-denied hook-absent hook-not-in-btf hook-clone hook-nokallsyms denied-all container-view format-denied id-absent"
+VARIANTS="base ftrace-off ftrace-denied ftrace-malformed aff-dup aff-module aff-clone aff-prefix debugfs-root debug-denied lockdown-conf lockdown-integrity lockdown-nosecfs lockdown-dashdash lockdown-config lockdown-nolsm lockdown-twobrackets lockdown-bogus lockdown-denied notracing-config notracing-bpfevents tracefs-noevents tracefs-unmounted tracefs-hidden tracefs-gone events-denied btf-absent-config btf-absent-unknown btf-not-visible btf-denied hook-absent hook-not-in-btf hook-clone hook-nokallsyms denied-all container-view format-denied id-absent cc-flags-nonode cc-tdx-nonode cc-flags-host cc-tsm"
 for v in $VARIANTS; do
   rm -rf "$GATE/$v"
 done
@@ -39,6 +39,19 @@ printf 'BOOT_IMAGE=/vmlinuz root=/dev/vda1\n' > "$GATE/base/proc/cmdline"
 
 mk() {
   cp -R "$GATE/base" "$GATE/$1"
+}
+
+write_gate_cpuinfo() {
+  # $1 = file, $2 = extra flag tokens (with leading blank, may be empty).
+  # Base flags carry no hypervisor/sev/tdx token; variants add them.
+  local extra="$2"
+  {
+    printf 'processor\t: 0\n'
+    printf 'vendor_id\t: GenuineIntel\n'
+    printf 'model name\t: Fixture CPU Model One\n'
+    printf 'flags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx rdtscp lm constant_tsc arch_perfmon nopl xtopology tsc_reliable nonstop_tsc cpuid pni pclmulqdq ssse3 cx16 sse4_1 sse4_2 movbe popcnt aes xsave avx rdrand lahf_lm abm invpcid_single pti fsgsbase avx2 invpcid rdseed clflushopt md_clear flush_l1d arch_capabilities%s\n' "$extra"
+    printf '\n'
+  } > "$1"
 }
 
 mk ftrace-off
@@ -238,4 +251,21 @@ printf 'denied=/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format\n' \
 cp -R "$ROOT/tests/fixtures/capabilities/ready-validated" "$GATE/id-absent"
 rm "$GATE/id-absent/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/id"
 
-echo "wrote $GATE (base plus 38 variants)"
+mk cc-flags-nonode
+write_gate_cpuinfo "$GATE/cc-flags-nonode/proc/cpuinfo" \
+  " sev sev_es sev_snp hypervisor"
+
+mk cc-tdx-nonode
+write_gate_cpuinfo "$GATE/cc-tdx-nonode/proc/cpuinfo" \
+  " tdx_guest hypervisor"
+
+mk cc-flags-host
+write_gate_cpuinfo "$GATE/cc-flags-host/proc/cpuinfo" \
+  " sev sev_es sev_snp"
+
+mk cc-tsm
+write_gate_cpuinfo "$GATE/cc-tsm/proc/cpuinfo" \
+  " sev sev_es sev_snp hypervisor"
+mkdir -p "$GATE/cc-tsm/sys/kernel/config/tsm/report"
+
+echo "wrote $GATE (base plus 42 variants)"
