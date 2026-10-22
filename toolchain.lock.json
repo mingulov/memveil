@@ -56,7 +56,8 @@
   "product_contracts": {
     "schema_version": "0.1.2",
     "note": "External record contracts live in schemas/; event, profile, doctor, report and receipt schemas are versioned independently; native bridge ABI is owned by libbpf-mojo. Each family ships its current contract plus any retained (superseded but still shipped) contracts pinned here.",
-    "event_schema_version": "0.1.1",
+    "event_schema_version": "0.1.2",
+    "event_retained_versions": ["0.1.1"],
     "profile_schema_version": "0.1.1",
     "doctor_schema_version": "0.1.0",
     "report_schema_version": "0.1.1",
