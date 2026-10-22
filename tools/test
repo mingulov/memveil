@@ -1103,7 +1103,12 @@ suite_vm_kernels() {
         return 1
     fi
     out="${MV_KERNELS_OUT:-$ROOT/build/vm/kernels}"
-    args=(python3 "$ROOT/tools/kernel-matrix" --all --out "$out")
+    if [ -n "${MV_KERNELS_IDS:-}" ]; then
+        args=(python3 "$ROOT/tools/kernel-matrix" --out "$out"
+            --kernels "$MV_KERNELS_IDS")
+    else
+        args=(python3 "$ROOT/tools/kernel-matrix" --all --out "$out")
+    fi
     if [ -n "${MV_KERNELS_BUNDLE:-}" ]; then
         args+=(--bundle "$MV_KERNELS_BUNDLE")
     fi

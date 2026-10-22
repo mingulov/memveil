@@ -3394,3 +3394,30 @@ def test_busy_stop_reason_wired():
     rec = km.evaluate_row(ev)
     assert not rec["ok"]
     assert not _check(rec, "busy_stop_reason")["ok"]
+
+
+def _ids_entries():
+    return [{"id": "6.0"}, {"id": "7.0"}, {"id": "7.2"}]
+
+
+def test_ids_selection_unknown_id_fails():
+    with pytest.raises(ValueError):
+        km.select_kernel_ids(_ids_entries(), "6.0,nope")
+
+
+def test_ids_selection_order_kept():
+    got = km.select_kernel_ids(_ids_entries(), "7.2,6.0")
+    assert [entry["id"] for entry in got] == ["7.2", "6.0"]
+
+
+def test_ids_selection_blank_entry_fails():
+    with pytest.raises(ValueError):
+        km.select_kernel_ids(_ids_entries(), "6.0,")
+    with pytest.raises(ValueError):
+        km.select_kernel_ids(_ids_entries(), "  ")
+
+
+def test_ids_selection_dedupes():
+    got = km.select_kernel_ids(_ids_entries(),
+                              "7.0,6.0,7.0")
+    assert [entry["id"] for entry in got] == ["7.0", "6.0"]

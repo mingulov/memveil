@@ -409,6 +409,8 @@ def main(argv=None):
                         help="evidence parent dir (per-kernel subdirs)")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--kernel", help="one lock id to run")
+    group.add_argument("--kernels",
+                       help="comma-separated lock ids, in order")
     group.add_argument("--all", action="store_true",
                        help="run every lock entry")
     parser.add_argument("--lock", default=str(
@@ -442,6 +444,13 @@ def main(argv=None):
         entries = [e for e in entries if e["id"] == args.kernel]
         if not entries:
             print("kernel-matrix: unknown kernel %s" % args.kernel,
+                  file=sys.stderr)
+            return 2
+    if args.kernels:
+        try:
+            entries = km.select_kernel_ids(entries, args.kernels)
+        except ValueError as exc:
+            print("kernel-matrix: bad --kernels: %s" % exc,
                   file=sys.stderr)
             return 2
     try:

@@ -1665,6 +1665,34 @@ def check_out_collisions(out, ids):
             if os.path.exists(os.path.join(out, ident))]
 
 
+def select_kernel_ids(entries, text):
+    """Lock entries for a comma-separated id list, in order.
+
+    Every id must exist in the lock; blank entries fail;
+    repeats collapse to first occurrence. Raises ValueError.
+    """
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("kernel ids list is empty")
+    by_id = {}
+    for entry in entries:
+        ident = entry.get("id") if isinstance(entry, dict) \
+            else None
+        if isinstance(ident, str):
+            by_id.setdefault(ident, entry)
+    picked = []
+    seen = set()
+    for raw in text.split(","):
+        ident = raw.strip()
+        if not ident:
+            raise ValueError("blank kernel id in %r" % text)
+        if ident not in by_id:
+            raise ValueError("unknown kernel id %r" % ident)
+        if ident not in seen:
+            seen.add(ident)
+            picked.append(by_id[ident])
+    return picked
+
+
 def check_artifacts(artifacts, tools):
     """Binary, BPF and oracle tool identities match the pins."""
     fails = []
