@@ -3171,6 +3171,152 @@ def test_count_shape_flip_zero_counters_makes_unknown() raises:
     )
 
 
+def test_shape_flip_moved_attempt_after_failed_first_read_unknown() raises:
+    # A failed first read hides the shape; a moved re-read voids loss.
+    var c = _one_copy_run(
+        _detail_failed(
+            UInt64(0),
+            String("ch2 fallback: short fallback read")),
+        _detail_misses(
+            UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+            UInt64(1),
+        ),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"partial",'
+                '"loss_count":null,'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "attempt program skips unknown "
+                "(post-snapshot activity)"
+            ),
+        )
+    )
+
+
+def test_error_close_shape_flip_moved_attempt_failed_first_read() raises:
+    var c = _error_copy_run(
+        _detail_failed(
+            UInt64(0),
+            String("ch2 fallback: short fallback read")),
+        _detail_misses(
+            UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+            UInt64(1),
+        ),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"partial",'
+                '"loss_count":null,'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "attempt program skips unknown "
+                "(post-snapshot activity)"
+            ),
+        )
+    )
+
+
+def test_detail_shape_flip_moved_attempt_voids_aggregate() raises:
+    # A detail-to-count flip with a moved attempt voids the loss.
+    var c = _one_copy_run(
+        _stable_detail(),
+        MissOut(True, UInt64(0), String(""), UInt64(1)),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"partial",'
+                '"loss_count":null,'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "attempt program skips unknown "
+                "(post-snapshot activity)"
+            ),
+        )
+    )
+
+
+def test_error_close_detail_shape_flip_moved_attempt_voids() raises:
+    var c = _error_copy_run(
+        _stable_detail(),
+        MissOut(True, UInt64(0), String(""), UInt64(1)),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(c.session, String("post-snapshot activity"))
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"aggregate":{"status":"partial",'
+                '"loss_count":null,'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "attempt program skips unknown "
+                "(post-snapshot activity)"
+            ),
+        )
+    )
+
+
 def test_lifecycle_only_detail_failure_names_lifecycle_channel() raises:
     # A lifecycle-only detail failure names its own channel.
     var c = _one_lc_run(

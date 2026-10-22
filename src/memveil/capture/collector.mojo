@@ -2028,13 +2028,13 @@ struct Collector:
                 String("recursion misses unreadable after settle")
             )
             return
+        var attempt_moved = m.attempt != self.attempt_missed
+        if attempt_moved:
+            self.attempt_post_snapshot = True
         if self.rec_has_detail != m.has_copy_detail:
             self.note_unknown(String("post-snapshot activity"))
             return
         if self.rec_has_detail:
-            var attempt_moved = m.attempt != self.attempt_missed
-            if attempt_moved:
-                self.attempt_post_snapshot = True
             if (
                 attempt_moved
                 or m.bounce != self.rec_bounce
@@ -2048,9 +2048,6 @@ struct Collector:
             ):
                 self.note_unknown(String("post-snapshot activity"))
             return
-        var attempt_moved = m.attempt != self.attempt_missed
-        if attempt_moved:
-            self.attempt_post_snapshot = True
         if attempt_moved or m.count != self.recursion_missed:
             self.note_unknown(String("post-snapshot activity"))
 
