@@ -10,8 +10,8 @@ and corpus.txt (one expectation line per record):
 lifecycle OK fields: kind=N ok=N skip=N dir=N seq=N ktime=N size=N
     gen=N (MVLC v2, 44 bytes; experimental v1 wire discontinued)
 copy OK fields: kind=N todevice=N known=N clamped=N earlyzero=N
-    dir=N reason=N seq=N ktime=N requested=N effective=N
-    (MVCP stays v1, 48 bytes)
+    offsetpast=N privatepool=N dir=N reason=N seq=N ktime=N
+    requested=N effective=N (MVCP stays v1, 48 bytes)
 effective vectors always carry verdict OK with fields:
     effective=N clamped=N earlyzero=N
 
@@ -154,35 +154,43 @@ def build_vectors():
     # --- copy valid vectors ---
     cp_vec(cp_raw(2, 3, 1, 3, 4, 4096, 1024, 0), "OK",
            kind=2, todevice=1, known=1, clamped=0, earlyzero=0,
+           offsetpast=0, privatepool=0,
            dir=1, reason=0, seq=3, ktime=4, requested=4096,
            effective=1024)
     cp_vec(cp_raw(1, 1, 2, 5, 6, 512, 0, 4), "OK",
            kind=1, todevice=1, known=0, clamped=0, earlyzero=0,
+           offsetpast=0, privatepool=0,
            dir=2, reason=4, seq=5, ktime=6, requested=512,
            effective=0)
     cp_vec(cp_raw(2, 7, 1, 21, 22, 4096, 1024, 0), "OK",
            kind=2, todevice=1, known=1, clamped=1, earlyzero=0,
+           offsetpast=0, privatepool=0,
            dir=1, reason=0, seq=21, ktime=22, requested=4096,
            effective=1024)
     cp_vec(cp_raw(2, 11, 2, 23, 24, 512, 0, 0), "OK",
            kind=2, todevice=1, known=1, clamped=0, earlyzero=1,
+           offsetpast=0, privatepool=0,
            dir=2, reason=0, seq=23, ktime=24, requested=512,
            effective=0)
     cp_vec(cp_raw(2, 2, 2, 25, 26, 2048, 2048, 0), "OK",
            kind=2, todevice=0, known=1, clamped=0, earlyzero=0,
+           offsetpast=0, privatepool=0,
            dir=2, reason=0, seq=25, ktime=26, requested=2048,
            effective=2048)
     cp_vec(cp_raw(2, 0, 1, 27, 28, 4096, 0, 1), "OK",
            kind=2, todevice=0, known=0, clamped=0, earlyzero=0,
+           offsetpast=0, privatepool=0,
            dir=1, reason=1, seq=27, ktime=28, requested=4096,
            effective=0)
     cp_vec(cp_raw(1, 0, 0, 29, 30, 0, 0, 4), "OK",
            kind=1, todevice=0, known=0, clamped=0, earlyzero=0,
+           offsetpast=0, privatepool=0,
            dir=0, reason=4, seq=29, ktime=30, requested=0,
            effective=0)
     cp_vec(cp_raw(2, 3, 1, U64MAX, U64MAX, U64MAX, U64MAX, 0),
            "OK", kind=2, todevice=1, known=1, clamped=0,
-           earlyzero=0, dir=1, reason=0, seq=U64MAX, ktime=U64MAX,
+           earlyzero=0, offsetpast=0, privatepool=0,
+           dir=1, reason=0, seq=U64MAX, ktime=U64MAX,
            requested=U64MAX, effective=U64MAX)
     # --- copy rejections ---
     good = cp_raw()
@@ -207,20 +215,58 @@ def build_vectors():
     cp_vec(cp_raw(kind=9, flags=16, dir=3, reason=5), "PAY_KIND")
     cp_vec(cp_raw(kind=2, flags=16, dir=3, reason=5), "PAY_FLAGS")
     cp_vec(cp_raw(kind=2, flags=2, dir=3, reason=5), "PAY_DIR")
+    # --- copy flag coupling and layout/shift reasons ---
+    # cp_offset_past_known
+    cp_vec(cp_raw(2, 18, 1, 31, 32, 4096, 4096, 0), "OK",
+           kind=2, todevice=0, known=1, clamped=0, earlyzero=0,
+           offsetpast=1, privatepool=0,
+           dir=1, reason=0, seq=31, ktime=32, requested=4096,
+           effective=4096)
+    # cp_offset_past_unknown
+    cp_vec(cp_raw(2, 16, 1, 33, 34, 4096, 0, 1), "PAY_FLAGS")
+    # cp_offset_past_early_zero
+    cp_vec(cp_raw(2, 26, 1, 35, 36, 4096, 0, 0), "PAY_FLAGS")
+    # cp_private_known
+    cp_vec(cp_raw(2, 34, 1, 37, 38, 4096, 4096, 0), "OK",
+           kind=2, todevice=0, known=1, clamped=0, earlyzero=0,
+           offsetpast=0, privatepool=1,
+           dir=1, reason=0, seq=37, ktime=38, requested=4096,
+           effective=4096)
+    # cp_private_sync
+    cp_vec(cp_raw(1, 33, 1, 39, 40, 512, 0, 4), "PAY_FLAGS")
+    # cp_reason_layout
+    cp_vec(cp_raw(2, 0, 1, 41, 42, 4096, 0, 5), "OK",
+           kind=2, todevice=0, known=0, clamped=0, earlyzero=0,
+           offsetpast=0, privatepool=0,
+           dir=1, reason=5, seq=41, ktime=42, requested=4096,
+           effective=0)
+    # cp_reason_shift
+    cp_vec(cp_raw(2, 0, 2, 43, 44, 4096, 0, 6), "OK",
+           kind=2, todevice=0, known=0, clamped=0, earlyzero=0,
+           offsetpast=0, privatepool=0,
+           dir=2, reason=6, seq=43, ktime=44, requested=4096,
+           effective=0)
+    # cp_reason_7
+    cp_vec(cp_raw(2, 0, 1, 45, 46, 4096, 0, 7), "PAY_REASON")
+    # cp_flag_0x40
+    cp_vec(cp_raw(2, 66, 1, 47, 48, 4096, 4096, 0), "PAY_FLAGS")
 
     # --- canonical shipping cases (valid vectors, exact numbers) ---
     # nested 4096+1024 copies -> 5120 effective.
     cp_vec(cp_raw(2, 3, 1, 101, 1001, 4096, 4096, 0), "OK",
            kind=2, todevice=1, known=1, clamped=0, earlyzero=0,
+           offsetpast=0, privatepool=0,
            dir=1, reason=0, seq=101, ktime=1001, requested=4096,
            effective=4096)
     cp_vec(cp_raw(2, 3, 1, 102, 1002, 1024, 1024, 0), "OK",
            kind=2, todevice=1, known=1, clamped=0, earlyzero=0,
+           offsetpast=0, privatepool=0,
            dir=1, reason=0, seq=102, ktime=1002, requested=1024,
            effective=1024)
     # copy before a failed mapping.
     cp_vec(cp_raw(2, 3, 1, 111, 1011, 4096, 4096, 0), "OK",
            kind=2, todevice=1, known=1, clamped=0, earlyzero=0,
+           offsetpast=0, privatepool=0,
            dir=1, reason=0, seq=111, ktime=1011, requested=4096,
            effective=4096)
     lc_vec(lc_raw(1, 0, 1, 112, 1012, 4096, 0), "OK",
@@ -267,8 +313,8 @@ def build_vectors():
 LC_FIELDS = ("kind", "ok", "skip", "dir", "seq", "ktime", "size",
              "gen")
 CP_FIELDS = ("kind", "todevice", "known", "clamped", "earlyzero",
-             "dir", "reason", "seq", "ktime", "requested",
-             "effective")
+             "offsetpast", "privatepool", "dir", "reason", "seq",
+             "ktime", "requested", "effective")
 EFF_FIELDS = ("effective", "clamped", "earlyzero")
 
 

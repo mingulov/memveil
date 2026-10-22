@@ -404,6 +404,54 @@ def test_decode_copy_flags_combo() raises:
     assert_true(d.early_zero)
 
 
+def test_decode_copy_offset_past_known_ok() raises:
+    var d = decode_copy(_cp_raw(2, 18, 1, UInt64(1), UInt64(1), UInt64(8), UInt64(8), 0))
+    assert_true(d.known)
+    assert_true(d.offset_past)
+    assert_true(not d.private_pool)
+
+
+def test_decode_copy_offset_past_requires_known() raises:
+    var bad = _cp_raw(2, 16, 1, UInt64(1), UInt64(1), UInt64(8), UInt64(0), 1)
+    _expect_cp(bad^, String("PAY_FLAGS"))
+
+
+def test_decode_copy_offset_past_rejects_early_zero() raises:
+    var bad = _cp_raw(2, 26, 1, UInt64(1), UInt64(1), UInt64(8), UInt64(0), 0)
+    _expect_cp(bad^, String("PAY_FLAGS"))
+
+
+def test_decode_copy_private_pool_known_ok() raises:
+    var d = decode_copy(_cp_raw(2, 34, 1, UInt64(1), UInt64(1), UInt64(8), UInt64(8), 0))
+    assert_true(d.known)
+    assert_true(d.private_pool)
+    assert_true(not d.offset_past)
+
+
+def test_decode_copy_private_pool_on_sync_rejected() raises:
+    var bad = _cp_raw(1, 33, 1, UInt64(1), UInt64(1), UInt64(8), UInt64(0), 4)
+    _expect_cp(bad^, String("PAY_FLAGS"))
+
+
+def test_decode_copy_reason_layout_shift_unknown_ok() raises:
+    var lay = decode_copy(_cp_raw(2, 0, 1, UInt64(1), UInt64(1), UInt64(8), UInt64(0), 5))
+    assert_true(not lay.known)
+    assert_equal(Int(lay.reason), 5)
+    var shift = decode_copy(_cp_raw(2, 0, 1, UInt64(2), UInt64(1), UInt64(8), UInt64(0), 6))
+    assert_true(not shift.known)
+    assert_equal(Int(shift.reason), 6)
+
+
+def test_decode_copy_reason_seven_rejected() raises:
+    var bad = _cp_raw(2, 0, 1, UInt64(1), UInt64(1), UInt64(8), UInt64(0), 7)
+    _expect_cp(bad^, String("PAY_REASON"))
+
+
+def test_decode_copy_flag_0x40_rejected() raises:
+    var bad = _cp_raw(2, 66, 1, UInt64(1), UInt64(1), UInt64(8), UInt64(8), 0)
+    _expect_cp(bad^, String("PAY_FLAGS"))
+
+
 def test_unknown_copy_reasons_exclude_bytes() raises:
     var ledger = LifecycleLedger()
     for reason in range(1, 4):
@@ -558,6 +606,14 @@ def run() raises -> Int:
     suite.test[test_decode_lifecycle_dir_zero_ok]()
     suite.test[test_decode_gen_max_boundary]()
     suite.test[test_decode_copy_flags_combo]()
+    suite.test[test_decode_copy_offset_past_known_ok]()
+    suite.test[test_decode_copy_offset_past_requires_known]()
+    suite.test[test_decode_copy_offset_past_rejects_early_zero]()
+    suite.test[test_decode_copy_private_pool_known_ok]()
+    suite.test[test_decode_copy_private_pool_on_sync_rejected]()
+    suite.test[test_decode_copy_reason_layout_shift_unknown_ok]()
+    suite.test[test_decode_copy_reason_seven_rejected]()
+    suite.test[test_decode_copy_flag_0x40_rejected]()
     suite.test[test_unknown_copy_reasons_exclude_bytes]()
     suite.test[test_empty_ledger]()
     suite.test[test_unmap_before_map]()

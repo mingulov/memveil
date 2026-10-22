@@ -32,14 +32,14 @@
 30 lifecycle PAY_KIND
 31 lifecycle PAY_FLAGS
 32 lifecycle PAY_DIR
-33 copy OK kind=2 todevice=1 known=1 clamped=0 earlyzero=0 dir=1 reason=0 seq=3 ktime=4 requested=4096 effective=1024
-34 copy OK kind=1 todevice=1 known=0 clamped=0 earlyzero=0 dir=2 reason=4 seq=5 ktime=6 requested=512 effective=0
-35 copy OK kind=2 todevice=1 known=1 clamped=1 earlyzero=0 dir=1 reason=0 seq=21 ktime=22 requested=4096 effective=1024
-36 copy OK kind=2 todevice=1 known=1 clamped=0 earlyzero=1 dir=2 reason=0 seq=23 ktime=24 requested=512 effective=0
-37 copy OK kind=2 todevice=0 known=1 clamped=0 earlyzero=0 dir=2 reason=0 seq=25 ktime=26 requested=2048 effective=2048
-38 copy OK kind=2 todevice=0 known=0 clamped=0 earlyzero=0 dir=1 reason=1 seq=27 ktime=28 requested=4096 effective=0
-39 copy OK kind=1 todevice=0 known=0 clamped=0 earlyzero=0 dir=0 reason=4 seq=29 ktime=30 requested=0 effective=0
-40 copy OK kind=2 todevice=1 known=1 clamped=0 earlyzero=0 dir=1 reason=0 seq=18446744073709551615 ktime=18446744073709551615 requested=18446744073709551615 effective=18446744073709551615
+33 copy OK kind=2 todevice=1 known=1 clamped=0 earlyzero=0 offsetpast=0 privatepool=0 dir=1 reason=0 seq=3 ktime=4 requested=4096 effective=1024
+34 copy OK kind=1 todevice=1 known=0 clamped=0 earlyzero=0 offsetpast=0 privatepool=0 dir=2 reason=4 seq=5 ktime=6 requested=512 effective=0
+35 copy OK kind=2 todevice=1 known=1 clamped=1 earlyzero=0 offsetpast=0 privatepool=0 dir=1 reason=0 seq=21 ktime=22 requested=4096 effective=1024
+36 copy OK kind=2 todevice=1 known=1 clamped=0 earlyzero=1 offsetpast=0 privatepool=0 dir=2 reason=0 seq=23 ktime=24 requested=512 effective=0
+37 copy OK kind=2 todevice=0 known=1 clamped=0 earlyzero=0 offsetpast=0 privatepool=0 dir=2 reason=0 seq=25 ktime=26 requested=2048 effective=2048
+38 copy OK kind=2 todevice=0 known=0 clamped=0 earlyzero=0 offsetpast=0 privatepool=0 dir=1 reason=1 seq=27 ktime=28 requested=4096 effective=0
+39 copy OK kind=1 todevice=0 known=0 clamped=0 earlyzero=0 offsetpast=0 privatepool=0 dir=0 reason=4 seq=29 ktime=30 requested=0 effective=0
+40 copy OK kind=2 todevice=1 known=1 clamped=0 earlyzero=0 offsetpast=0 privatepool=0 dir=1 reason=0 seq=18446744073709551615 ktime=18446744073709551615 requested=18446744073709551615 effective=18446744073709551615
 41 copy PAY_SHORT
 42 copy PAY_LONG
 43 copy PAY_MAGIC
@@ -56,21 +56,30 @@
 54 copy PAY_KIND
 55 copy PAY_FLAGS
 56 copy PAY_DIR
-57 copy OK kind=2 todevice=1 known=1 clamped=0 earlyzero=0 dir=1 reason=0 seq=101 ktime=1001 requested=4096 effective=4096
-58 copy OK kind=2 todevice=1 known=1 clamped=0 earlyzero=0 dir=1 reason=0 seq=102 ktime=1002 requested=1024 effective=1024
-59 copy OK kind=2 todevice=1 known=1 clamped=0 earlyzero=0 dir=1 reason=0 seq=111 ktime=1011 requested=4096 effective=4096
-60 lifecycle OK kind=1 ok=0 skip=0 dir=1 seq=112 ktime=1012 size=4096 gen=0
-61 lifecycle OK kind=1 ok=1 skip=0 dir=1 seq=121 ktime=1021 size=4096 gen=41
-62 lifecycle OK kind=2 ok=1 skip=0 dir=1 seq=122 ktime=1022 size=4096 gen=41
-63 lifecycle OK kind=1 ok=1 skip=0 dir=1 seq=123 ktime=1023 size=4096 gen=42
-64 lifecycle OK kind=2 ok=1 skip=0 dir=1 seq=124 ktime=1024 size=4096 gen=42
-65 effective OK effective=0 clamped=0 earlyzero=1
-66 effective OK effective=1024 clamped=1 earlyzero=0
-67 effective OK effective=1024 clamped=0 earlyzero=0
-68 effective OK effective=100 clamped=0 earlyzero=0
-69 effective OK effective=0 clamped=1 earlyzero=0
-70 effective OK effective=1 clamped=0 earlyzero=0
-71 effective OK effective=18446744073709551615 clamped=0 earlyzero=0
-72 effective OK effective=0 clamped=1 earlyzero=0
-73 effective OK effective=0 clamped=0 earlyzero=0
-74 effective OK effective=0 clamped=1 earlyzero=0
+57 copy OK kind=2 todevice=0 known=1 clamped=0 earlyzero=0 offsetpast=1 privatepool=0 dir=1 reason=0 seq=31 ktime=32 requested=4096 effective=4096
+58 copy PAY_FLAGS
+59 copy PAY_FLAGS
+60 copy OK kind=2 todevice=0 known=1 clamped=0 earlyzero=0 offsetpast=0 privatepool=1 dir=1 reason=0 seq=37 ktime=38 requested=4096 effective=4096
+61 copy PAY_FLAGS
+62 copy OK kind=2 todevice=0 known=0 clamped=0 earlyzero=0 offsetpast=0 privatepool=0 dir=1 reason=5 seq=41 ktime=42 requested=4096 effective=0
+63 copy OK kind=2 todevice=0 known=0 clamped=0 earlyzero=0 offsetpast=0 privatepool=0 dir=2 reason=6 seq=43 ktime=44 requested=4096 effective=0
+64 copy PAY_REASON
+65 copy PAY_FLAGS
+66 copy OK kind=2 todevice=1 known=1 clamped=0 earlyzero=0 offsetpast=0 privatepool=0 dir=1 reason=0 seq=101 ktime=1001 requested=4096 effective=4096
+67 copy OK kind=2 todevice=1 known=1 clamped=0 earlyzero=0 offsetpast=0 privatepool=0 dir=1 reason=0 seq=102 ktime=1002 requested=1024 effective=1024
+68 copy OK kind=2 todevice=1 known=1 clamped=0 earlyzero=0 offsetpast=0 privatepool=0 dir=1 reason=0 seq=111 ktime=1011 requested=4096 effective=4096
+69 lifecycle OK kind=1 ok=0 skip=0 dir=1 seq=112 ktime=1012 size=4096 gen=0
+70 lifecycle OK kind=1 ok=1 skip=0 dir=1 seq=121 ktime=1021 size=4096 gen=41
+71 lifecycle OK kind=2 ok=1 skip=0 dir=1 seq=122 ktime=1022 size=4096 gen=41
+72 lifecycle OK kind=1 ok=1 skip=0 dir=1 seq=123 ktime=1023 size=4096 gen=42
+73 lifecycle OK kind=2 ok=1 skip=0 dir=1 seq=124 ktime=1024 size=4096 gen=42
+74 effective OK effective=0 clamped=0 earlyzero=1
+75 effective OK effective=1024 clamped=1 earlyzero=0
+76 effective OK effective=1024 clamped=0 earlyzero=0
+77 effective OK effective=100 clamped=0 earlyzero=0
+78 effective OK effective=0 clamped=1 earlyzero=0
+79 effective OK effective=1 clamped=0 earlyzero=0
+80 effective OK effective=18446744073709551615 clamped=0 earlyzero=0
+81 effective OK effective=0 clamped=1 earlyzero=0
+82 effective OK effective=0 clamped=0 earlyzero=0
+83 effective OK effective=0 clamped=1 earlyzero=0

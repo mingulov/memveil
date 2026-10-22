@@ -105,6 +105,8 @@ struct cp_expectation {
     unsigned known;
     unsigned clamped;
     unsigned earlyzero;
+    unsigned offsetpast;
+    unsigned privatepool;
     unsigned dir;
     unsigned reason;
     unsigned long long seq;
@@ -272,6 +274,14 @@ static int parse_cp_line(char *line, struct cp_expectation *exp)
                     &exp->earlyzero) != 0 ||
         exp->earlyzero > 1)
         return -1;
+    if (parse_u_tok(strtok_r(NULL, " \t\r\n", &save), "offsetpast=",
+                    &exp->offsetpast) != 0 ||
+        exp->offsetpast > 1)
+        return -1;
+    if (parse_u_tok(strtok_r(NULL, " \t\r\n", &save), "privatepool=",
+                    &exp->privatepool) != 0 ||
+        exp->privatepool > 1)
+        return -1;
     if (parse_u_tok(strtok_r(NULL, " \t\r\n", &save), "dir=",
                     &exp->dir) != 0)
         return -1;
@@ -353,10 +363,12 @@ static void dump_cp_ok(FILE *dump, unsigned idx,
 {
     fprintf(dump,
             "%u copy OK kind=%u todevice=%u known=%u clamped=%u "
-            "earlyzero=%u dir=%u reason=%u seq=%llu ktime=%llu "
-            "requested=%llu effective=%llu\n",
+            "earlyzero=%u offsetpast=%u privatepool=%u dir=%u "
+            "reason=%u seq=%llu ktime=%llu requested=%llu "
+            "effective=%llu\n",
             idx, got->kind, got->to_device, got->known,
-            got->clamped, got->early_zero, got->dir, got->reason,
+            got->clamped, got->early_zero, got->offset_past,
+            got->private_pool, got->dir, got->reason,
             (unsigned long long)got->seq,
             (unsigned long long)got->ktime,
             (unsigned long long)got->requested,
@@ -427,7 +439,9 @@ static int check_cp_vector(uint32_t idx, const uint8_t *input,
     }
     if (got.kind != exp.kind || got.to_device != exp.todevice ||
         got.known != exp.known || got.clamped != exp.clamped ||
-        got.early_zero != exp.earlyzero || got.dir != exp.dir ||
+        got.early_zero != exp.earlyzero ||
+        got.offset_past != exp.offsetpast ||
+        got.private_pool != exp.privatepool || got.dir != exp.dir ||
         got.reason != exp.reason ||
         (unsigned long long)got.seq != exp.seq ||
         (unsigned long long)got.ktime != exp.ktime ||
@@ -498,6 +512,13 @@ static int check_wire_vocab(void)
     if (MV_CP_REASON_NOT_COPY != 4 ||
         MV_INVALID_PHYS != 0xFFFFFFFFFFFFFFFFULL)
         return fail("reason/sentinel drift");
+    if (MV_CP_FLAG_OFFSET_PAST_ALLOC != 0x10u ||
+        MV_CP_FLAG_PRIVATE_POOL != 0x20u)
+        return fail("copy flag drift");
+    if (MV_CP_REASON_LAYOUT != 5u || MV_CP_REASON_SHIFT != 6u)
+        return fail("copy reason drift");
+    if (MV_FLAG_ARGCNT != (1ULL << 6))
+        return fail("counter flag drift");
     return 0;
 }
 

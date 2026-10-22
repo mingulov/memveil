@@ -155,8 +155,9 @@ def decode_cp_for_dump(inp: List[UInt8]) -> CpOut:
         return CpOut("OK", got^)
     except e:
         var empty = DecodedCopy(
-            UInt16(0), False, False, False, False, UInt16(0),
-            UInt16(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+            UInt16(0), False, False, False, False, False, False,
+            UInt16(0), UInt16(0), UInt64(0), UInt64(0), UInt64(0),
+            UInt64(0),
         )
         return CpOut(e.reason, empty^)
 
@@ -218,6 +219,10 @@ def _ok_cp_line(idx: Int, d: DecodedCopy) -> String:
         + _flag(d.clamped)
         + " earlyzero="
         + _flag(d.early_zero)
+        + " offsetpast="
+        + _flag(d.offset_past)
+        + " privatepool="
+        + _flag(d.private_pool)
         + " dir="
         + String(Int(d.dir))
         + " reason="
@@ -307,21 +312,23 @@ def _check_cp_ok_fields(
 ) raises DumpError:
     """Compare one copy OK line against decoded fields."""
     var where = String(idx)
-    if len(toks) != 14:
-        raise DumpError("vector " + where + ": want 11 cp fields")
+    if len(toks) != 16:
+        raise DumpError("vector " + where + ": want 13 cp fields")
     var keys = List[String]()
     keys.append(String("kind="))
     keys.append(String("todevice="))
     keys.append(String("known="))
     keys.append(String("clamped="))
     keys.append(String("earlyzero="))
+    keys.append(String("offsetpast="))
+    keys.append(String("privatepool="))
     keys.append(String("dir="))
     keys.append(String("reason="))
     keys.append(String("seq="))
     keys.append(String("ktime="))
     keys.append(String("requested="))
     keys.append(String("effective="))
-    for k in range(11):
+    for k in range(13):
         if not has_prefix(toks[3 + k], keys[k]):
             raise DumpError(
                 "vector " + where + ": want " + keys[k]
@@ -346,28 +353,36 @@ def _check_cp_ok_fields(
         strip_prefix(toks[7], String("earlyzero=")), "earlyzero"
     ) != d.early_zero:
         raise DumpError("vector " + where + ": earlyzero mismatch")
+    if _parse_bit_here(
+        strip_prefix(toks[8], String("offsetpast=")), "offsetpast"
+    ) != d.offset_past:
+        raise DumpError("vector " + where + ": offsetpast mismatch")
+    if _parse_bit_here(
+        strip_prefix(toks[9], String("privatepool=")), "privatepool"
+    ) != d.private_pool:
+        raise DumpError("vector " + where + ": privatepool mismatch")
     var dir = Int(_parse_u64_here(
-        strip_prefix(toks[8], String("dir=")), "dir"))
+        strip_prefix(toks[10], String("dir=")), "dir"))
     if dir != Int(d.dir):
         raise DumpError("vector " + where + ": dir mismatch")
     var reason = Int(_parse_u64_here(
-        strip_prefix(toks[9], String("reason=")), "reason"))
+        strip_prefix(toks[11], String("reason=")), "reason"))
     if reason != Int(d.reason):
         raise DumpError("vector " + where + ": reason mismatch")
     if _parse_u64_here(
-        strip_prefix(toks[10], String("seq=")), "seq"
+        strip_prefix(toks[12], String("seq=")), "seq"
     ) != d.seq:
         raise DumpError("vector " + where + ": seq mismatch")
     if _parse_u64_here(
-        strip_prefix(toks[11], String("ktime=")), "ktime"
+        strip_prefix(toks[13], String("ktime=")), "ktime"
     ) != d.ktime:
         raise DumpError("vector " + where + ": ktime mismatch")
     if _parse_u64_here(
-        strip_prefix(toks[12], String("requested=")), "requested"
+        strip_prefix(toks[14], String("requested=")), "requested"
     ) != d.requested:
         raise DumpError("vector " + where + ": requested mismatch")
     if _parse_u64_here(
-        strip_prefix(toks[13], String("effective=")), "effective"
+        strip_prefix(toks[15], String("effective=")), "effective"
     ) != d.effective:
         raise DumpError("vector " + where + ": effective mismatch")
 

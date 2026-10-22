@@ -96,6 +96,7 @@ struct mv_offsets {
 #define MV_FLAG_EMITTED_BYTES_WRAP (1ULL << 3)
 #define MV_FLAG_SUBMIT_WRAP (1ULL << 4)
 #define MV_FLAG_BYTE_COVERAGE (1ULL << 5)
+#define MV_FLAG_ARGCNT (1ULL << 6)
 
 enum mv_reason {
     MV_OK = 0,
@@ -343,7 +344,11 @@ _Static_assert(MV_CNT_LEN == 6, "counter map length");
  * bytes. effective is valid only when KNOWN is set; an
  * unknown record must name its reason, and a known record
  * must carry reason NONE. Sync records always carry reason
- * NOT_COPY; copy_exec dir is 1..2 only. */
+ * NOT_COPY; copy_exec dir is 1..2 only. Flag 0x10 marks an
+ * offset past the allocation (KNOWN copy, never early-zero);
+ * flag 0x20 marks a private-pool copy (KNOWN copy only).
+ * Unknown copies name one of SLOT_READ, MASK_READ, BOUNDS,
+ * LAYOUT, or SHIFT. */
 #define MV_CP_LEN 48
 #define MV_CP_MAGIC 0x5043564Du /* "MVCP" */
 #define MV_CP_VERSION 1u
@@ -353,11 +358,15 @@ _Static_assert(MV_CNT_LEN == 6, "counter map length");
 #define MV_CP_FLAG_KNOWN 0x2u
 #define MV_CP_FLAG_CLAMPED 0x4u
 #define MV_CP_FLAG_EARLY_ZERO 0x8u
+#define MV_CP_FLAG_OFFSET_PAST_ALLOC 0x10u
+#define MV_CP_FLAG_PRIVATE_POOL 0x20u
 #define MV_CP_REASON_NONE 0u
 #define MV_CP_REASON_SLOT_READ 1u
 #define MV_CP_REASON_MASK_READ 2u
 #define MV_CP_REASON_BOUNDS 3u
 #define MV_CP_REASON_NOT_COPY 4u
+#define MV_CP_REASON_LAYOUT 5u
+#define MV_CP_REASON_SHIFT 6u
 
 #define MV_CP_OFF_MAGIC 0u
 #define MV_CP_OFF_VERSION 4u
@@ -392,6 +401,8 @@ struct mv_copy {
     __u8 known;
     __u8 clamped;
     __u8 early_zero;
+    __u8 offset_past;
+    __u8 private_pool;
     __u16 dir;
     __u16 reason;
     __u64 seq;
@@ -533,13 +544,22 @@ static __inline enum mv_reason mv_decode_copy(const __u8 *buf,
         return MV_PAY_KIND;
     flags = mv_read_le16(buf + MV_CP_OFF_FLAGS);
     if (flags & ~(__u16)(MV_CP_FLAG_TO_DEVICE | MV_CP_FLAG_KNOWN |
-                         MV_CP_FLAG_CLAMPED | MV_CP_FLAG_EARLY_ZERO))
+                         MV_CP_FLAG_CLAMPED | MV_CP_FLAG_EARLY_ZERO |
+                         MV_CP_FLAG_OFFSET_PAST_ALLOC |
+                         MV_CP_FLAG_PRIVATE_POOL))
+        return MV_PAY_FLAGS;
+    if ((flags & MV_CP_FLAG_OFFSET_PAST_ALLOC) &&
+        (kind != MV_CP_KIND_COPY || !(flags & MV_CP_FLAG_KNOWN) ||
+         (flags & MV_CP_FLAG_EARLY_ZERO)))
+        return MV_PAY_FLAGS;
+    if ((flags & MV_CP_FLAG_PRIVATE_POOL) &&
+        (kind != MV_CP_KIND_COPY || !(flags & MV_CP_FLAG_KNOWN)))
         return MV_PAY_FLAGS;
     dir = mv_read_le16(buf + MV_CP_OFF_DIR);
     if (dir > 2 || (kind == MV_CP_KIND_COPY && dir == 0))
         return MV_PAY_DIR;
     reason = mv_read_le16(buf + MV_CP_OFF_REASON);
-    if (reason > MV_CP_REASON_NOT_COPY)
+    if (reason > MV_CP_REASON_SHIFT)
         return MV_PAY_REASON;
     if (flags & MV_CP_FLAG_KNOWN) {
         if (reason != MV_CP_REASON_NONE)
@@ -556,6 +576,10 @@ static __inline enum mv_reason mv_decode_copy(const __u8 *buf,
     out->known = (__u8)((flags & MV_CP_FLAG_KNOWN) != 0);
     out->clamped = (__u8)((flags & MV_CP_FLAG_CLAMPED) != 0);
     out->early_zero = (__u8)((flags & MV_CP_FLAG_EARLY_ZERO) != 0);
+    out->offset_past =
+        (__u8)((flags & MV_CP_FLAG_OFFSET_PAST_ALLOC) != 0);
+    out->private_pool =
+        (__u8)((flags & MV_CP_FLAG_PRIVATE_POOL) != 0);
     out->dir = dir;
     out->reason = reason;
     out->seq = mv_read_le64(buf + MV_CP_OFF_SEQ);

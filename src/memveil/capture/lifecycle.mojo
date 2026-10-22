@@ -55,8 +55,14 @@ comptime _CP_FLAG_TO_DEVICE = 1
 comptime _CP_FLAG_KNOWN = 2
 comptime _CP_FLAG_CLAMPED = 4
 comptime _CP_FLAG_EARLY_ZERO = 8
+comptime _CP_FLAG_OFFSET_PAST_ALLOC = 16
+comptime _CP_FLAG_PRIVATE_POOL = 32
 comptime _CP_REASON_NONE = 0
 comptime _CP_REASON_NOT_COPY = 4
+comptime _CP_REASON_LAYOUT = 5
+comptime _CP_REASON_SHIFT = 6
+comptime CP_REASON_LAYOUT = 5
+comptime CP_REASON_SHIFT = 6
 
 comptime _OFF_MAGIC = 0
 comptime _OFF_VERSION = 4
@@ -95,6 +101,8 @@ struct DecodedCopy(Copyable, Movable):
     var known: Bool
     var clamped: Bool
     var early_zero: Bool
+    var offset_past: Bool
+    var private_pool: Bool
     var dir: UInt16
     var reason: UInt16
     var seq: UInt64
@@ -199,10 +207,11 @@ def decode_copy(raw: List[UInt8]) raises DecodeError -> DecodedCopy:
     """Decode and strictly validate one MVCP record.
 
     Check order matches mv_decode_copy: length, magic, version,
-    kind, flags, direction, then the known/reason cross rules
-    (known pins NONE; sync pins NOT_COPY; an unknown copy must
-    name a real failure reason). Raises DecodeError with the
-    shared reason vocabulary on any rejection.
+    kind, flags (mask plus offset-past/private-pool coupling),
+    direction, then the known/reason cross rules (known pins
+    NONE; sync pins NOT_COPY; an unknown copy must name one of
+    SLOT_READ, MASK_READ, BOUNDS, LAYOUT, SHIFT). Raises
+    DecodeError with the shared reason vocabulary on rejection.
     """
     if len(raw) < CP_LEN:
         raise DecodeError("PAY_SHORT", True)
@@ -217,16 +226,30 @@ def decode_copy(raw: List[UInt8]) raises DecodeError -> DecodedCopy:
         raise DecodeError("PAY_KIND", True)
     var flags = _lc_le16(raw, _OFF_FLAGS)
     if flags & ~UInt16(
-        _CP_FLAG_TO_DEVICE | _CP_FLAG_KNOWN | _CP_FLAG_CLAMPED | _CP_FLAG_EARLY_ZERO
+        _CP_FLAG_TO_DEVICE
+        | _CP_FLAG_KNOWN
+        | _CP_FLAG_CLAMPED
+        | _CP_FLAG_EARLY_ZERO
+        | _CP_FLAG_OFFSET_PAST_ALLOC
+        | _CP_FLAG_PRIVATE_POOL
     ) != UInt16(0):
+        raise DecodeError("PAY_FLAGS", True)
+    var known = flags & UInt16(_CP_FLAG_KNOWN) != UInt16(0)
+    var early_zero = flags & UInt16(_CP_FLAG_EARLY_ZERO) != UInt16(0)
+    if flags & UInt16(_CP_FLAG_OFFSET_PAST_ALLOC) != UInt16(0) and (
+        kind != UInt16(_CP_KIND_COPY) or not known or early_zero
+    ):
+        raise DecodeError("PAY_FLAGS", True)
+    if flags & UInt16(_CP_FLAG_PRIVATE_POOL) != UInt16(0) and (
+        kind != UInt16(_CP_KIND_COPY) or not known
+    ):
         raise DecodeError("PAY_FLAGS", True)
     var dir = _lc_le16(raw, _OFF_DIR)
     if dir > UInt16(2) or (kind == UInt16(_CP_KIND_COPY) and dir == UInt16(0)):
         raise DecodeError("PAY_DIR", True)
     var reason = _lc_le16(raw, _CP_OFF_REASON)
-    if reason > UInt16(_CP_REASON_NOT_COPY):
+    if reason > UInt16(_CP_REASON_SHIFT):
         raise DecodeError("PAY_REASON", True)
-    var known = flags & UInt16(_CP_FLAG_KNOWN) != UInt16(0)
     if known:
         if reason != UInt16(_CP_REASON_NONE):
             raise DecodeError("PAY_REASON", True)
@@ -240,7 +263,9 @@ def decode_copy(raw: List[UInt8]) raises DecodeError -> DecodedCopy:
         flags & UInt16(_CP_FLAG_TO_DEVICE) != UInt16(0),
         known,
         flags & UInt16(_CP_FLAG_CLAMPED) != UInt16(0),
-        flags & UInt16(_CP_FLAG_EARLY_ZERO) != UInt16(0),
+        early_zero,
+        flags & UInt16(_CP_FLAG_OFFSET_PAST_ALLOC) != UInt16(0),
+        flags & UInt16(_CP_FLAG_PRIVATE_POOL) != UInt16(0),
         dir,
         reason,
         _lc_le64(raw, _OFF_SEQ),
