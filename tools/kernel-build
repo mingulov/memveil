@@ -1,0 +1,341 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Build one matrix kernel reproducibly from its lock recipe.
+
+Reads the built row from tests/vm/kernels.lock.json, verifies
+the kernel.org tarball and the tracked config fragments,
+builds at a fixed root independent of HOME with pinned build
+identity, and installs boot/vmlinuz-<release>,
+lib/modules/<release>/ and config into the row cache dir.
+Refuses on toolchain drift, dropped fragment lines, low
+disk, and (without --print-hashes) hash mismatch. Nothing
+here boots a guest; tools/kernel-matrix does that.
+"""
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tests" / "vm"))
+
+import kernel_matrix as km
+
+BUILD_ROOT = "/var/tmp/memveil-kbuild"
+BUILD_TIMESTAMP = "2026-10-22 00:00:00 UTC"
+BUILD_USER = "memveil"
+BUILD_HOST = "kernel-matrix"
+BUILD_VERSION = "1"
+NEED_GB = 25
+MAKE_JOBS = "6"
+
+NICE_MAKE = ["nice", "-n", "19", "ionice", "-c3", "make",
+             "-j" + MAKE_JOBS]
+
+
+class BuildError(Exception):
+    """The recipe, host or build output is not usable."""
+
+
+def check_toolchain(want, got):
+    """Refuse when a pinned toolchain line drifted, by name."""
+    bad = []
+    for name in ("gcc", "ld", "pahole"):
+        if want.get(name) != got.get(name):
+            bad.append("%s lock=%r host=%r"
+                       % (name, want.get(name),
+                          got.get(name)))
+    if bad:
+        raise BuildError("toolchain drift: "
+                         + "; ".join(bad))
+
+
+def check_free_space(path, need_gb=NEED_GB, statvfs=os.statvfs):
+    """Refuse when path holds less than need_gb free."""
+    try:
+        st = statvfs(path)
+        free = st.f_bavail * st.f_frsize
+    except OSError as exc:
+        raise BuildError("cannot stat %s: %s" % (path, exc))
+    if free < need_gb * 1024 ** 3:
+        raise BuildError("only %.1f GB free on %s, need %d"
+                         % (free / 1024 ** 3, path,
+                            need_gb))
+
+
+def remove_build_links(mods_root):
+    """Drop the kbuild build/source links before hashing.
+
+    Only symlinks are removed; a real file or dir at
+    those names refuses instead of deleting user data.
+    """
+    for name in ("build", "source"):
+        link = os.path.join(mods_root, name)
+        if os.path.islink(link):
+            os.unlink(link)
+        elif os.path.exists(link):
+            raise BuildError("%s is not a symlink, refusing "
+                             "to remove" % link)
+
+
+def find_vng():
+    cand = os.environ.get("VNG")
+    if cand:
+        return cand
+    found = shutil.which("vng")
+    if found:
+        return found
+    home = Path.home() / ".local" / "bin" / "vng"
+    if home.exists():
+        return str(home)
+    return None
+
+
+def first_line(cmd):
+    try:
+        proc = subprocess.run(cmd, capture_output=True,
+                              text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise BuildError("cannot run %s: %s" % (cmd[0], exc))
+    if proc.returncode != 0:
+        raise BuildError("%s --version exits %d"
+                         % (cmd[0], proc.returncode))
+    for line in (proc.stdout or "").splitlines():
+        if line.strip():
+            return line.strip()
+    raise BuildError("%s --version is empty" % cmd[0])
+
+
+def run_logged(cmd, cwd, env, timeout, label):
+    try:
+        proc = subprocess.run(cmd, cwd=cwd, env=env,
+                              capture_output=True, text=True,
+                              timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise BuildError("%s timed out after %ds"
+                         % (label, timeout))
+    sys.stderr.write(proc.stdout or "")
+    sys.stderr.write(proc.stderr or "")
+    if proc.returncode != 0:
+        raise BuildError("%s exits %d"
+                         % (label, proc.returncode))
+    return proc
+
+
+def fetch_tarball(url, want_sha, dest):
+    if os.path.isfile(dest):
+        if km.sha_file(dest) == want_sha:
+            return
+        os.unlink(dest)
+    run_logged(["curl", "-sSfL", "-o", dest, url],
+               str(ROOT), None, 900, "tarball fetch")
+    if km.sha_file(dest) != want_sha:
+        os.unlink(dest)
+        raise BuildError("tarball sha mismatch for %s" % url)
+
+
+def fresh_dir(path, what):
+    if os.path.lexists(path):
+        if not os.path.isdir(path) or os.path.islink(path):
+            raise BuildError("%s %s is not a dir, refusing "
+                             "to clear" % (what, path))
+        shutil.rmtree(path)
+    os.makedirs(path)
+
+
+def build_env():
+    env = dict(os.environ)
+    env["KBUILD_BUILD_TIMESTAMP"] = BUILD_TIMESTAMP
+    env["KBUILD_BUILD_USER"] = BUILD_USER
+    env["KBUILD_BUILD_HOST"] = BUILD_HOST
+    env["KBUILD_BUILD_VERSION"] = BUILD_VERSION
+    return env
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Build one matrix kernel from its lock "
+                    "recipe into the row cache.")
+    parser.add_argument("--id", required=True,
+                        help="lock row id to build")
+    parser.add_argument("--print-hashes",
+                        action="store_true",
+                        help="print the built source object "
+                             "with observed hashes instead "
+                             "of comparing them")
+    parser.add_argument("--root", default=BUILD_ROOT,
+                        help="build root (default "
+                             "/var/tmp/memveil-kbuild)")
+    args = parser.parse_args(argv)
+    try:
+        lock = km.parse_lock(
+            str(ROOT / "tests" / "vm" / "kernels.lock.json"))
+    except km.LockError as exc:
+        print("kernel-build: bad lock: %s" % exc,
+              file=sys.stderr)
+        return 2
+    rows = [e for e in lock["kernels"]
+            if e["id"] == args.id]
+    if not rows:
+        print("kernel-build: unknown row %s" % args.id,
+              file=sys.stderr)
+        return 2
+    entry = rows[0]
+    source = entry["source"]
+    if source["kind"] != "built":
+        print("kernel-build: row %s is not a built row"
+              % args.id, file=sys.stderr)
+        return 2
+    try:
+        return build_row(entry, source, args)
+    except BuildError as exc:
+        print("kernel-build: %s" % exc, file=sys.stderr)
+        return 1
+
+
+def build_row(entry, source, args):
+    ident = entry["id"]
+    home = str(Path.home())
+    kcache = km.kcache_base(home)
+    root = os.path.abspath(args.root)
+    try:
+        os.makedirs(root, exist_ok=True)
+        os.makedirs(kcache, exist_ok=True)
+    except OSError as exc:
+        raise BuildError("cannot make work dirs: %s" % exc)
+    check_free_space(root)
+    check_free_space(kcache)
+    got_toolchain = {"gcc": first_line(["gcc", "--version"]),
+                     "ld": first_line(["ld", "--version"]),
+                     "pahole": first_line(
+                         ["pahole", "--version"])}
+    check_toolchain(source["toolchain"], got_toolchain)
+    frag_texts = []
+    for frag in source["fragments"]:
+        path = ROOT / frag
+        try:
+            text = path.read_text()
+        except OSError as exc:
+            raise BuildError("cannot read %s: %s"
+                             % (frag, exc))
+        if km.sha_file(str(path)) != \
+                source["fragments_sha256"][frag]:
+            raise BuildError("fragment drift: %s" % frag)
+        frag_texts.append(text)
+    tarballs = os.path.join(kcache, "_tarballs")
+    os.makedirs(tarballs, exist_ok=True)
+    tarball = os.path.join(
+        tarballs, source["tarball_sha256"] + ".tar.xz")
+    fetch_tarball(source["tarball_url"],
+                  source["tarball_sha256"], tarball)
+    workdir = os.path.join(root, ident)
+    fresh_dir(workdir, "build tree")
+    sys.stderr.write("kernel-build: unpack %s\n" % tarball)
+    run_logged(["tar", "-xJf", tarball], workdir, None,
+               300, "unpack")
+    kids = [d for d in os.listdir(workdir)
+            if os.path.isdir(os.path.join(workdir, d))]
+    if len(kids) != 1:
+        raise BuildError("tarball holds %d top dirs, want 1"
+                         % len(kids))
+    srcdir = os.path.join(workdir, kids[0])
+    vng = find_vng()
+    if not vng:
+        raise BuildError("vng not found (need virtme-ng)")
+    sys.stderr.write("kernel-build: vng --kconfig\n")
+    run_logged([vng, "--kconfig"], srcdir, None, 300,
+               "vng --kconfig")
+    dot_config = os.path.join(srcdir, ".config")
+    if not os.path.isfile(dot_config):
+        raise BuildError("vng --kconfig left no .config")
+    if not ident.replace(".", "").replace("-", "").replace(
+            "_", "").isalnum():
+        raise BuildError("row id %r unsafe for localversion"
+                         % ident)
+    with open(dot_config, "a") as handle:
+        for text in frag_texts:
+            handle.write(text)
+            if not text.endswith("\n"):
+                handle.write("\n")
+        handle.write('CONFIG_LOCALVERSION="-mv-%s"\n'
+                     % ident)
+    sys.stderr.write("kernel-build: olddefconfig\n")
+    run_logged(NICE_MAKE + ["olddefconfig"], srcdir,
+               build_env(), 300, "olddefconfig")
+    with open(dot_config) as handle:
+        final_config = handle.read()
+    merged = km.merge_fragments(frag_texts)
+    dropped = km.dropped_fragment_lines(merged,
+                                        final_config)
+    if dropped:
+        raise BuildError("olddefconfig dropped: "
+                         + ", ".join(dropped))
+    # kernelrelease reads auto.conf without syncing it.
+    run_logged(NICE_MAKE + ["syncconfig"], srcdir,
+               build_env(), 300, "syncconfig")
+    proc = run_logged(["make", "-s", "kernelrelease"],
+                      srcdir, build_env(), 120,
+                      "kernelrelease")
+    release = (proc.stdout or "").strip().splitlines()
+    if not release or release[-1] != entry["release"]:
+        raise BuildError("kernelrelease %r is not %s"
+                         % (release[-1] if release else "",
+                            entry["release"]))
+    sys.stderr.write("kernel-build: bzImage modules\n")
+    run_logged(NICE_MAKE + ["bzImage", "modules"], srcdir,
+               build_env(), 3600, "make bzImage modules")
+    rowdir = os.path.join(kcache, ident)
+    fresh_dir(rowdir, "row cache")
+    run_logged(NICE_MAKE + ["modules_install",
+                            "INSTALL_MOD_STRIP=1",
+                            "INSTALL_MOD_PATH=" + rowdir],
+               srcdir, build_env(), 600, "modules_install")
+    mods = km.find_modules_root(rowdir, entry["release"])
+    if not mods:
+        raise BuildError("modules_install left no %s tree"
+                         % entry["release"])
+    remove_build_links(mods)
+    bzimage = os.path.join(srcdir, "arch", "x86", "boot",
+                           "bzImage")
+    if not os.path.isfile(bzimage):
+        raise BuildError("no arch/x86/boot/bzImage built")
+    boot = os.path.join(rowdir, "boot")
+    os.makedirs(boot, exist_ok=True)
+    vmlinuz = os.path.join(boot,
+                           "vmlinuz-" + entry["release"])
+    shutil.copyfile(bzimage, vmlinuz)
+    shutil.copyfile(dot_config, os.path.join(rowdir,
+                                             "config"))
+    built = {"config_sha256": km.sha_file(
+        os.path.join(rowdir, "config")),
+        "bzimage_sha256": km.sha_file(vmlinuz),
+        "modules_manifest_sha256":
+            km.modules_manifest_sha(mods)[0]}
+    sys.stderr.write("kernel-build: tarball=%s\n"
+                     % source["tarball_sha256"])
+    for key in ("config_sha256", "bzimage_sha256",
+                "modules_manifest_sha256"):
+        sys.stderr.write("kernel-build: %s=%s\n"
+                         % (key, built[key]))
+    if args.print_hashes:
+        out = dict(source)
+        out.update(built)
+        print(json.dumps(out, indent=2, sort_keys=True))
+    else:
+        for key in ("config_sha256", "bzimage_sha256",
+                    "modules_manifest_sha256"):
+            if built[key] != source[key]:
+                raise BuildError(
+                    "%s mismatch: lock %s built %s"
+                    % (key, source[key], built[key]))
+    shutil.rmtree(workdir)
+    sys.stderr.write("kernel-build: %s done\n" % ident)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

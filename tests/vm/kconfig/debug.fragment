@@ -1,0 +1,5 @@
+# Matrix debug row: locking checks and KASAN
+CONFIG_PROVE_LOCKING=y
+CONFIG_DEBUG_MUTEXES=y
+CONFIG_KASAN=y
+CONFIG_KASAN_GENERIC=y
