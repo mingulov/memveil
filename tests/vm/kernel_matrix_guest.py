@@ -87,15 +87,23 @@ def write(path, data):
     Path(path).write_text(data)
 
 
-def find_nvme():
-    proc = sh(["lsblk", "-ndo", "NAME,TYPE"])
-    if proc.returncode != 0:
+def find_nvme_by_serial(serial, root="/sys/block"):
+    """NVMe device node with one serial, or None."""
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
         return None
-    for line in proc.stdout.splitlines():
-        parts = line.split()
-        if len(parts) == 2 and parts[0].startswith("nvme") \
-                and parts[1] == "disk":
-            return "/dev/" + parts[0]
+    for name in names:
+        if not name.startswith("nvme"):
+            continue
+        try:
+            with open(os.path.join(root, name, "device",
+                                   "serial")) as handle:
+                if handle.read().strip() == serial:
+                    return "/dev/" + name
+        except OSError:
+            continue
+    return None
     return None
 
 
@@ -193,12 +201,11 @@ def snapshot_progs(out, idx):
     return stamp
 
 
-def wait_ready(out, proc, timeout_s=120):
-    path = os.path.join(out, "record.out")
+def wait_ready(rec_out, proc, timeout_s=120):
     end = time.monotonic() + timeout_s
     while time.monotonic() < end:
         try:
-            if "ready session=" in Path(path).read_text():
+            if "ready session=" in Path(rec_out).read_text():
                 return True
         except OSError:
             pass
@@ -208,10 +215,38 @@ def wait_ready(out, proc, timeout_s=120):
     return None
 
 
-def run_dd(dev, dd_count):
-    return sh(["dd", "if=" + dev, "of=/dev/null", "bs=1M",
-               "count=%d" % dd_count, "iflag=direct",
-               "status=none"], timeout=300)
+def read_stat(km, base, write):
+    try:
+        text = Path("/sys/block", base, "stat").read_text()
+    except OSError as exc:
+        fail("block stat unreadable: %s" % exc)
+    try:
+        if write:
+            return km.parse_blockstat_write(text)
+        return km.parse_blockstat(text)
+    except ValueError as exc:
+        fail("block stat unreadable: %s" % exc)
+
+
+def check_base(dev):
+    base = os.path.basename(dev or "")
+    if not base or ".." in base or "/" in base:
+        fail("unexpected block device %r" % dev)
+    return base
+
+
+def run_phase(load, mode, tag, dev, count, offset,
+              dest):
+    args = [sys.executable, load, mode, "--phase", tag,
+            "--dev", dev, "--count", str(count),
+            "--offset", str(offset)]
+    with open(dest, "a") as handle:
+        proc = subprocess.run(args, stdout=handle,
+                              stderr=subprocess.PIPE,
+                              text=True, timeout=600)
+    if proc.returncode != 0:
+        fail("%s failed: %s" % (tag, (proc.stderr or "")
+                                .strip()[:200]))
 
 
 def run(argv):
@@ -334,10 +369,20 @@ def run(argv):
         print("guest: refused flow done")
         return 0
     caps = ",".join(admitted)
-    dev = find_nvme()
-    write(os.path.join(out, "dev.txt"), (dev or "none") + "\n")
+    load = os.path.join(repo, "tests", "vm",
+                        "kernel_matrix_load.py")
+    data_serial = job.get("data_serial", "mv0")
+    scratch_serial = job.get("scratch_serial", "mv1")
+    dev = find_nvme_by_serial(data_serial)
+    scratch = find_nvme_by_serial(scratch_serial)
+    write(os.path.join(out, "dev.txt"),
+          (dev or "none") + "\n" + (scratch or "none")
+          + "\n")
     if not dev:
-        fail("no nvme disk found")
+        fail("no nvme disk with serial %s" % data_serial)
+    if not scratch:
+        fail("no scratch disk with serial %s"
+             % scratch_serial)
     need = []
     if "attempt-trace" in admitted:
         need.append("tp")
@@ -375,7 +420,7 @@ def run(argv):
                              "--capability", caps],
                             stdout=record_out, stderr=record_err,
                             start_new_session=True)
-    ready = wait_ready(out, rpid)
+    ready = wait_ready(os.path.join(out, "record.out"), rpid)
     if ready is None:
         rpid.terminate()
         try:
@@ -396,59 +441,49 @@ def run(argv):
     times[1] = snapshot_progs(out, 1)
     # Settle before the workload so edge samples bracket cleanly.
     time.sleep(4)
-    base = os.path.basename(dev)
-    if not base or ".." in base or "/" in base:
-        fail("unexpected block device %r" % dev)
-    try:
-        stat_before = km.parse_blockstat(
-            Path("/sys/block", base, "stat").read_text())
-    except (OSError, ValueError) as exc:
-        opid.send_signal(signal.SIGINT)
-        rpid.terminate()
-        fail("block stat unreadable: %s" % exc)
-    workload_lines = []
-    for i in (1, 2):
-        start = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
-        workload_lines.append("dd%d start %d" % (i, start))
-        proc = run_dd(dev, dd_count)
-        end = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
-        workload_lines.append("dd%d end %d rc=%d"
-                              % (i, end, proc.returncode))
+    base = check_base(dev)
+    scratch_base = check_base(scratch)
+    data_before = read_stat(km, base, False)
+    scratch_before = read_stat(km, scratch_base, True)
+    workload_path = os.path.join(out, "workload.txt")
+    open(workload_path, "w").close()
+    run_phase(load, "read", "read0", dev, dd_count, 0,
+              workload_path)
+    run_phase(load, "read", "read512", dev, dd_count,
+              512, workload_path)
+    run_phase(load, "write", "write512", scratch, 64, 512,
+              workload_path)
+    readers = []
+    handles = []
+    for i in range(km.WORKLOAD_GROUPS):
+        dest = os.path.join(out, "workload-r%d.txt" % i)
+        handle = open(dest, "w")
+        handles.append(handle)
+        readers.append(subprocess.Popen(
+            [sys.executable, load, "read", "--phase",
+             "readers-%d" % i, "--dev", dev, "--count",
+             str(dd_count), "--offset", "0"],
+            stdout=handle,
+            stderr=subprocess.PIPE, text=True))
+    for i, proc in enumerate(readers):
+        _, err = proc.communicate(timeout=600)
+        handles[i].close()
         if proc.returncode != 0:
-            opid.send_signal(signal.SIGINT)
-            rpid.terminate()
-            fail("dd%d failed" % i)
-        time.sleep(2)
-    procs = []
-    par_start = []
-    for _ in range(4):
-        par_start.append(
-            time.clock_gettime_ns(time.CLOCK_MONOTONIC))
-        procs.append(subprocess.Popen(
-            ["dd", "if=" + dev, "of=/dev/null", "bs=1M",
-             "count=%d" % dd_count, "iflag=direct",
-             "status=none"]))
-    for i, proc in enumerate(procs):
-        proc.wait(timeout=300)
-        end = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
-        workload_lines.append("par%d start %d" % (i, par_start[i]))
-        workload_lines.append("par%d end %d rc=%d"
-                              % (i, end, proc.returncode))
-        if proc.returncode != 0:
-            opid.send_signal(signal.SIGINT)
-            rpid.terminate()
-            fail("parallel dd%d failed" % i)
-    write(os.path.join(out, "workload.txt"),
-          "\n".join(workload_lines) + "\n")
-    try:
-        stat_after = km.parse_blockstat(
-            Path("/sys/block", base, "stat").read_text())
-    except (OSError, ValueError) as exc:
-        opid.send_signal(signal.SIGINT)
-        rpid.terminate()
-        fail("block stat unreadable: %s" % exc)
+            fail("readers-%d failed: %s"
+                 % (i, (err or "").strip()[:200]))
+        with open(workload_path, "a") as handle:
+            handle.write(Path(
+                os.path.join(out,
+                             "workload-r%d.txt" % i))
+                .read_text())
+    data_after = read_stat(km, base, False)
+    scratch_after = read_stat(km, scratch_base, True)
     write(os.path.join(out, "blockstat.json"), json.dumps(
-        {"dev": base, "before": stat_before, "after": stat_after},
+        {"data": {"dev": base, "read_before": data_before,
+                  "read_after": data_after},
+         "scratch": {"dev": scratch_base,
+                     "write_before": scratch_before,
+                     "write_after": scratch_after}},
         indent=2, sort_keys=True) + "\n")
     times[2] = snapshot_progs(out, 2)
     try:
@@ -467,6 +502,75 @@ def run(argv):
     write(os.path.join(out, "progs_times.json"),
           json.dumps({str(k): v for k, v in sorted(times.items())},
                      indent=2, sort_keys=True) + "\n")
+    busy_dir = os.path.join(out, "busy")
+    os.makedirs(busy_dir, exist_ok=True)
+    busy_out = open(os.path.join(busy_dir, "busy.out"), "w")
+    busy_err = open(os.path.join(busy_dir, "busy.stderr"), "w")
+    bpid = subprocess.Popen(
+        [sys.executable, load, "busy", "--phase", "busy",
+         "--dev", dev, "--readers", "4"],
+        stdout=busy_out, stderr=busy_err,
+        start_new_session=True)
+    time.sleep(2)
+    if bpid.poll() is not None:
+        busy_out.close()
+        busy_err.close()
+        fail("busy loader exited early")
+    busy_cap = os.path.join(busy_dir, "cap")
+    busy_rec_out = open(os.path.join(busy_dir,
+                                     "record.out"), "w")
+    busy_rec_err = open(os.path.join(busy_dir,
+                                     "record.stderr"), "w")
+    spawn_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    qpid = subprocess.Popen([mv, "record", "--output",
+                             busy_cap, "--duration", "300",
+                             "--capability", caps],
+                            stdout=busy_rec_out,
+                            stderr=busy_rec_err,
+                            start_new_session=True)
+    ready = wait_ready(os.path.join(busy_dir, "record.out"),
+                       qpid)
+    if ready is None:
+        qpid.terminate()
+        bpid.send_signal(signal.SIGTERM)
+        fail("busy record not ready in 120s")
+    if ready is False:
+        write(os.path.join(busy_dir, "record.exit"),
+              str(qpid.returncode))
+        bpid.send_signal(signal.SIGTERM)
+        fail("busy record exited %d before ready"
+             % (qpid.returncode,))
+    ready_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    time.sleep(20)
+    stop_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    qpid.send_signal(signal.SIGINT)
+    try:
+        qpid.wait(timeout=120)
+    except subprocess.TimeoutExpired:
+        qpid.kill()
+        qpid.wait()
+        bpid.send_signal(signal.SIGTERM)
+        fail("busy record did not stop on SIGINT")
+    exit_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    busy_rec_out.close()
+    busy_rec_err.close()
+    write(os.path.join(busy_dir, "record.exit"),
+          str(qpid.returncode))
+    bpid.send_signal(signal.SIGTERM)
+    try:
+        bpid.wait(timeout=60)
+    except subprocess.TimeoutExpired:
+        bpid.kill()
+        bpid.wait()
+        fail("busy loader did not stop on SIGTERM")
+    busy_out.close()
+    busy_err.close()
+    if bpid.returncode != 0:
+        fail("busy loader exited %d" % bpid.returncode)
+    write(os.path.join(busy_dir, "times.json"), json.dumps(
+        {"spawn_ns": spawn_ns, "ready_ns": ready_ns,
+         "stop_ns": stop_ns, "exit_ns": exit_ns},
+        indent=2, sort_keys=True) + "\n")
     time.sleep(2)
     opid.send_signal(signal.SIGINT)
     try:

@@ -716,6 +716,75 @@ def check_recursion_reported(miss_samples, start_ns, end_ns,
     return []
 
 
+LOAD_IO_BYTES = 1048576
+
+
+def parse_workload_v2(text):
+    """Parse phased workload lines into phases and byte totals.
+
+    Requires read0, read512 and write512 once each plus
+    one readers-N block per WORKLOAD_GROUPS reader, each
+    with its buffer alignment line.
+    """
+    phases = []
+    mods = {}
+    for line in (text or "").splitlines():
+        match = re.fullmatch(
+            r"phase (\S+) start_ns (\d+) end_ns (\d+) "
+            r"bytes (\d+) ios (\d+)", line.strip())
+        if match:
+            tag, start, end, nbytes, ios = match.groups()
+            phases.append({"tag": tag,
+                           "start": int(start),
+                           "end": int(end),
+                           "bytes": int(nbytes),
+                           "ios": int(ios)})
+            continue
+        match = re.fullmatch(r"buf (\S+) mod4096=(\d+)",
+                             line.strip())
+        if match:
+            mods[match.group(1)] = int(match.group(2))
+    want = {"read0", "read512", "write512"}
+    want |= {"readers-%d" % i
+             for i in range(WORKLOAD_GROUPS)}
+    seen = [phase["tag"] for phase in phases]
+    if set(seen) != want or len(seen) != len(want):
+        raise ValueError("workload lacks phases")
+    for phase in phases:
+        tag = phase["tag"]
+        if tag not in mods:
+            raise ValueError("workload lacks buf " + tag)
+        phase["mod"] = mods[tag]
+        if phase["end"] < phase["start"]:
+            raise ValueError("workload phase ends early")
+    read = sum(phase["bytes"] for phase in phases
+               if phase["tag"] != "write512")
+    write = sum(phase["bytes"] for phase in phases
+                if phase["tag"] == "write512")
+    return {"phases": phases,
+            "first_start": min(phase["start"]
+                               for phase in phases),
+            "last_end": max(phase["end"]
+                            for phase in phases),
+            "read_bytes": read, "write_bytes": write}
+
+
+def check_workload_phases(parsed):
+    """Offsets and sizes of every workload phase."""
+    fails = []
+    for phase in parsed["phases"]:
+        tag = phase["tag"]
+        want_mod = 512 if tag in ("read512", "write512") \
+            else 0
+        if phase["mod"] != want_mod:
+            fails.append("%s buffer at %d, want %d"
+                         % (tag, phase["mod"], want_mod))
+        if phase["bytes"] != phase["ios"] * LOAD_IO_BYTES:
+            fails.append("%s bytes %d are not ios x 1 MiB"
+                         % (tag, phase["bytes"]))
+    return fails
+
+
 def parse_workload(text):
     """Parse guest workload timestamps, every dd required."""
     want = ["dd1", "dd2", "par0", "par1", "par2", "par3"]
@@ -817,8 +886,10 @@ def check_persisted_invariants(persisted, attributed):
     """Fixed workload ratios within attributed loss.
 
     Each map carries one attempt, one unmap and one sync;
-    each map copies twice. Present channels only: a row
-    with one channel has no ratio to check.
+    copies sit between once and twice the maps (reads
+    copy both ways, writes only original to bounce).
+    Present channels only: a row with one channel has
+    no ratio to check.
     """
     fails = []
     group = [k for k in ("bounce_attempt", "map_result", "unmap",
@@ -833,13 +904,14 @@ def check_persisted_invariants(persisted, attributed):
                              % (first, persisted[first],
                                 second, persisted[second], allow))
     if "copy" in persisted and "map_result" in persisted:
-        allow = attributed.get("copy", 0) \
-            + 2 * attributed.get("map", 0)
-        if abs(persisted["copy"]
-               - 2 * persisted["map_result"]) > allow:
-            fails.append("copy=%d vs 2xmap=%d beyond loss %d"
-                         % (persisted["copy"],
-                            2 * persisted["map_result"], allow))
+        copies = persisted["copy"]
+        maps = persisted["map_result"]
+        if maps > copies + attributed.get("copy", 0):
+            fails.append("copy=%d under map=%d"
+                         % (copies, maps))
+        if copies > 2 * maps + 2 * attributed.get("map", 0):
+            fails.append("copy=%d over twice map=%d"
+                         % (copies, maps))
     return fails
 
 
@@ -856,18 +928,79 @@ def check_oracle_invariants(bounds):
     if "copy" in bounds and "map" in bounds:
         clo, chi = bounds["copy"]
         mlo, mhi = bounds["map"]
-        if clo > 2 * mhi or 2 * mlo > chi:
-            fails.append("oracle copy not twice map")
+        if clo > 2 * mhi or mlo > chi:
+            fails.append("oracle copy outside once to "
+                         "twice map")
     return fails
 
 
-def check_memveil_bytes(byte_sums, block_bytes, allowance,
-                        channels):
-    """Persisted byte sums must match the block layer total.
+def busy_channel_counts(samples, start_ns, end_ns, chan):
+    """Summed oracle [lo, hi] per channel without misses."""
+    _, keys = KINDS[chan]
+    lo = hi = 0
+    for key in keys:
+        klo, khi = oracle_interval(samples, start_ns,
+                                   end_ns, key)
+        lo += klo
+        hi += khi
+    return lo, hi
 
-    Requested, mapped and sync sums plus each copy
-    direction equal the sector bytes exactly at zero loss;
-    any shortfall must fit the loss allowance. Over always
+
+def check_busy_bounds(persisted, samples, times, channels,
+                      attributed):
+    """Busy capture one-sided oracle bounds with main loss.
+
+    Each admitted non-empty channel stays under the
+    oracle over [spawn - 1 s, exit + 1 s] and above the
+    oracle over [ready + 1 s, stop - 1 s] minus the
+    main capture attribution. No byte equality.
+    """
+    try:
+        spawn = int(times["spawn_ns"])
+        ready = int(times["ready_ns"])
+        stop = int(times["stop_ns"])
+        exit_ns = int(times["exit_ns"])
+    except (KeyError, TypeError, ValueError):
+        return ["busy times unreadable"]
+    if not spawn <= ready <= stop <= exit_ns:
+        return ["busy times out of order"]
+    if stop - ready < 1000000000:
+        return ["busy window under 1s"]
+    fails = []
+    for chan in channels:
+        kind = KINDS[chan][0]
+        got = persisted.get(kind, 0)
+        if got == 0:
+            fails.append("%s empty in busy capture" % chan)
+            continue
+        try:
+            _, hi = busy_channel_counts(
+                samples, spawn - 1000000000,
+                exit_ns + 1000000000, chan)
+            lo, _ = busy_channel_counts(
+                samples, ready + 1000000000,
+                stop - 1000000000, chan)
+        except OracleError as exc:
+            return ["busy oracle: %s" % exc]
+        if got > hi:
+            fails.append("%s %d over busy oracle %d"
+                         % (chan, got, hi))
+        elif got < lo - attributed.get(chan, 0):
+            fails.append("%s %d under busy oracle %d "
+                         "beyond loss %d"
+                         % (chan, got, lo,
+                            attributed.get(chan, 0)))
+    return fails
+
+
+def check_memveil_bytes(byte_sums, read_bytes, write_bytes,
+                        allowance, channels):
+    """Persisted byte sums must match the block layer totals.
+
+    Requested, mapped, sync and original-to-bounce sums
+    equal read plus write bytes; bounce-to-original
+    equals read bytes only. Exact at zero loss, any
+    shortfall must fit the loss allowance, over always
     fails. Present channels only.
     """
     try:
@@ -878,28 +1011,31 @@ def check_memveil_bytes(byte_sums, block_bytes, allowance,
                   for direction in COPY_DIRECTIONS}
     except (KeyError, TypeError, ValueError):
         return ["byte sums unreadable"]
+    total = read_bytes + write_bytes
     fails = []
     for chan, field in (("attempt", "requested"),
                         ("map", "mapped"), ("sync", "sync")):
         if chan not in channels:
             continue
-        if sums[field] > block_bytes:
+        if sums[field] > total:
             fails.append("%s bytes %d over block %d"
-                         % (field, sums[field], block_bytes))
-        elif block_bytes - sums[field] > allowance:
+                         % (field, sums[field], total))
+        elif total - sums[field] > allowance:
             fails.append("%s bytes %d short of block %d beyond "
                          "loss %d" % (field, sums[field],
-                                      block_bytes, allowance))
+                                      total, allowance))
     if "copy" in channels:
-        for direction in COPY_DIRECTIONS:
+        for direction, want in (
+                ("original_to_bounce", total),
+                ("bounce_to_original", read_bytes)):
             got = copies[direction]
-            if got > block_bytes:
+            if got > want:
                 fails.append("copy %s bytes %d over block %d"
-                             % (direction, got, block_bytes))
-            elif block_bytes - got > allowance:
-                fails.append("copy %s bytes %d short of block %d "
-                             "beyond loss %d"
-                             % (direction, got, block_bytes,
+                             % (direction, got, want))
+            elif want - got > allowance:
+                fails.append("copy %s bytes %d short of block "
+                             "%d beyond loss %d"
+                             % (direction, got, want,
                                 allowance))
     return fails
 
@@ -936,17 +1072,56 @@ def parse_blockstat(text):
         raise ValueError("block stat line unparseable")
 
 
-def check_sectors(before, after, dd_count):
-    """Sectors read must track the fixed dd workload."""
-    expect = WORKLOAD_GROUPS * int(dd_count) * 2048
-    delta = after - before
-    if delta <= 0:
-        return False, "block sectors show no reads"
-    if delta < expect // 2 or delta > expect * 2:
-        return False, "block sectors %d far from %d expected" % (
-            delta, expect)
-    return True, "block sectors %d near %d expected" % (delta,
-                                                        expect)
+def parse_blockstat_write(text):
+    """Sectors written from one /sys/block/*/stat line."""
+    try:
+        return int((text or "").split()[6])
+    except (IndexError, ValueError):
+        raise ValueError("block stat line unparseable")
+
+
+def parse_blockstat_v2(text):
+    """Per-side sector counters from one blockstat.json."""
+    try:
+        doc = json.loads(text or "")
+        data = doc["data"]
+        scratch = doc["scratch"]
+        out = (data["dev"], int(data["read_before"]),
+               int(data["read_after"]), scratch["dev"],
+               int(scratch["write_before"]),
+               int(scratch["write_after"]))
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("blockstat sides unreadable")
+    if not out[0] or not out[3]:
+        raise ValueError("blockstat sides unreadable")
+    if out[2] < out[1] or out[5] < out[4]:
+        raise ValueError("blockstat runs backwards")
+    return out
+
+
+def check_sectors(data_before, data_after,
+                  scratch_before, scratch_after,
+                  read_bytes, write_bytes):
+    """Per-device sectors must equal the workload bytes exactly.
+
+    Data disk read sectors track read bytes, scratch write
+    sectors track write bytes; any deviation fails.
+    """
+    fails = []
+    if read_bytes % 512 or write_bytes % 512:
+        return False, "workload bytes not sector aligned"
+    data = data_after - data_before
+    if data != read_bytes // 512:
+        fails.append("data sectors %d, want %d"
+                     % (data, read_bytes // 512))
+    scratch = scratch_after - scratch_before
+    if scratch != write_bytes // 512:
+        fails.append("scratch sectors %d, want %d"
+                     % (scratch, write_bytes // 512))
+    if fails:
+        return False, "; ".join(fails)
+    return True, "sectors exact: data %d, scratch %d" % (
+        data, scratch)
 
 
 def _release_triple(release):
@@ -1244,12 +1419,9 @@ def scan_export_redaction(export):
     else the first offending file and reason.
     """
     root = str(export)
-    first = True
     for dirpath, dirnames, filenames in os.walk(root):
-        if first:
-            first = False
-            if "cap" in dirnames:
-                dirnames.remove("cap")
+        if "cap" in dirnames:
+            dirnames.remove("cap")
         for name in sorted(filenames):
             if name in REDACT_SKIP_FILES:
                 continue
@@ -1325,11 +1497,20 @@ def validate_shell_path(value, what):
                          % (what, value))
 
 
-def qemu_drive_opt(disk_img):
-    """Read-only NVMe drive options, commas doubled for QEMU."""
-    return "-drive file=%s,if=none,id=d0,format=raw," \
-        "cache=none,readonly=on -device nvme,serial=mv0,drive=d0" \
-        % disk_img.replace(",", ",,")
+def qemu_drive_opt(disk_img, drive_id="d0", serial="mv0",
+                   readonly=True):
+    """NVMe drive options, commas doubled for QEMU."""
+    mode = ",readonly=on" if readonly else ""
+    return "-drive file=%s,if=none,id=%s,format=raw," \
+        "cache=none%s -device nvme,serial=%s,drive=%s" \
+        % (disk_img.replace(",", ",,"), drive_id, mode,
+           serial, drive_id)
+
+
+def scratch_img_path(disk_img, ident):
+    """Fresh-per-run scratch image beside the data disk."""
+    parent = os.path.dirname(os.path.abspath(disk_img))
+    return os.path.join(parent, "scratch-" + ident + ".img")
 
 
 def persisted_counts(lines):
@@ -1845,10 +2026,12 @@ def evaluate_row(ev):
     if not admitted:
         for name in ("record_finalized", "report_consistent",
                      "progs_complete", "prog_presence", "window",
-                     "aggregate_quality", "floors", "ceiling",
-                     "recursion_reported", "channels",
-                     "invariants", "bytes", "oracle_bytes",
-                     "sectors", "oracle_health", "capture_valid"):
+                     "workload", "aggregate_quality", "floors",
+                     "ceiling", "recursion_reported",
+                     "channels", "invariants", "bytes",
+                     "oracle_bytes", "sectors", "oracle_health",
+                     "capture_valid", "busy_finalized",
+                     "busy_bounds"):
             add(name, True, "no admitted caps", skipped=True)
         rec["ok"] = all(c["ok"] for c in rec["checks"])
         rec["detail"] = "; ".join(c["detail"] for c in rec["checks"]
@@ -1927,14 +2110,22 @@ def evaluate_row(ev):
     except (ValueError, KeyError, TypeError) as exc:
         session = None
         add("window", False, "session.json unreadable (%s)" % exc)
+        add("workload", False, "workload needs session")
+    parsed_workload = None
     if session is not None:
         try:
-            parsed = parse_workload(ev.get("workload_text"))
-            ok, detail = check_workload_window(parsed, start,
-                                               end)
+            parsed_workload = parse_workload_v2(
+                ev.get("workload_text"))
+            ok, detail = check_workload_window(
+                parsed_workload, start, end)
             add("window", ok, detail)
+            fails = check_workload_phases(parsed_workload)
+            add("workload", not fails,
+                "; ".join(fails) or "phases exact")
         except ValueError as exc:
+            parsed_workload = None
             add("window", False, "workload: %s" % exc)
+            add("workload", False, "workload: %s" % exc)
     if session is None:
         add("aggregate_quality", False, "aggregate needs session")
     else:
@@ -1963,17 +2154,18 @@ def evaluate_row(ev):
             samples_error = ""
     else:
         samples_error = "no session window"
-    sec_before = sec_after = None
     sec_error = ""
     try:
-        sec_before, sec_after = _parse_blockstat_doc(
-            ev.get("blockstat_text"))
+        sec = parse_blockstat_v2(ev.get("blockstat_text"))
     except (ValueError, KeyError, TypeError) as exc:
+        sec = None
         sec_error = str(exc)
-    if sec_before is not None and sec_after - sec_before > 0:
-        block_bytes = (sec_after - sec_before) * SECTOR_BYTES
+    if sec is not None:
+        read_bytes = (sec[2] - sec[1]) * SECTOR_BYTES
+        write_bytes = (sec[5] - sec[4]) * SECTOR_BYTES
+        block_bytes = read_bytes + write_bytes
     else:
-        block_bytes = None
+        read_bytes = write_bytes = block_bytes = None
     bounds = None
     if samples is not None and miss_samples is not None \
             and block_bytes is not None:
@@ -2066,8 +2258,8 @@ def evaluate_row(ev):
         allowance = (transport_loss(loss)
                      + loss["recursion_missed"]) * MAX_MAP_BYTES
         fails = check_memveil_bytes(ev["persisted_bytes"],
-                                    block_bytes, allowance,
-                                    channels)
+                                    read_bytes, write_bytes,
+                                    allowance, channels)
         add("bytes", not fails,
             "; ".join(fails) or "byte sums match block total")
     else:
@@ -2084,11 +2276,17 @@ def evaluate_row(ev):
                                    end, block_bytes)
         add("oracle_bytes", not fails,
             "; ".join(fails) or "oracle bytes match block total")
-    if sec_before is None:
+    if sec is None:
         add("sectors", False, "sectors: %s" % sec_error)
+    elif parsed_workload is None:
+        add("sectors", False, "sectors need workload phases")
     else:
-        ok, detail = check_sectors(sec_before, sec_after,
-                                   ev["dd_count"])
+        ok, detail = check_sectors(sec[1], sec[2], sec[4],
+                                   sec[5],
+                                   parsed_workload[
+                                       "read_bytes"],
+                                   parsed_workload[
+                                       "write_bytes"])
         add("sectors", ok, detail)
     ok, detail = check_oracle_stderr(ev.get("oracle_stderr"))
     add("oracle_health", ok, detail)
@@ -2099,6 +2297,33 @@ def evaluate_row(ev):
         add("capture_valid", False, "validate-schemas rc=%s: %s"
             % (ev.get("validate_rc"),
                (ev.get("validate_out") or "").strip()[:200]))
+    ok, detail = check_record_finalized(
+        ev.get("busy_record_exit"))
+    if not ok:
+        detail += "; see busy/record.stderr"
+    add("busy_finalized", ok, detail)
+    if ev.get("busy_persisted") is None:
+        add("busy_bounds", False,
+            "busy counts missing (%s)"
+            % (ev.get("busy_events_error")
+               or "no events error"))
+    elif samples is None:
+        add("busy_bounds", False,
+            "busy bounds need oracle (%s)" % samples_error)
+    else:
+        try:
+            times = json.loads(
+                ev.get("busy_times_text") or "")
+        except ValueError:
+            add("busy_bounds", False,
+                "busy times unreadable")
+        else:
+            fails = check_busy_bounds(
+                ev["busy_persisted"], samples, times,
+                channels, attributed)
+            add("busy_bounds", not fails,
+                "; ".join(fails)
+                or "busy capture within oracle bounds")
     rec["ok"] = all(c["ok"] for c in rec["checks"])
     rec["detail"] = "; ".join(c["detail"] for c in rec["checks"]
                               if not c["ok"])

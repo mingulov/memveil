@@ -63,6 +63,22 @@ def ensure_disk(path, size_gb=4):
     return str(p)
 
 
+def ensure_scratch(disk_img, ident):
+    path = Path(km.scratch_img_path(disk_img, ident))
+    if path.exists():
+        if not path.is_file() or path.is_symlink():
+            raise ValueError("scratch image is not a file: %s"
+                             % path)
+        path.unlink()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run(["truncate", "-s", "64M", str(path)],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise ValueError("cannot create scratch image: %s"
+                         % proc.stderr)
+    return str(path)
+
+
 def verify_cache(entry):
     home = str(Path.home())
     ok, msg, target = km.verify_entry_cache(home, entry)
@@ -231,6 +247,14 @@ def collect_one(entry, export, tools, dd_count, elapsed, run_id,
         ev["events_error"] = events_error
         ev["blockstat_text"] = read_text(
             os.path.join(export, "blockstat.json"))
+        busy = os.path.join(export, "busy")
+        ev["busy_record_exit"] = read_text(
+            os.path.join(busy, "record.exit"))
+        ev["busy_times_text"] = read_text(
+            os.path.join(busy, "times.json"))
+        persisted, _, events_error = gather_persisted(busy)
+        ev["busy_persisted"] = persisted
+        ev["busy_events_error"] = events_error
         rc, out = run_validator(export)
         ev["validate_rc"] = rc
         ev["validate_out"] = out
@@ -262,7 +286,8 @@ def run_one(entry, args, kind, source, disk_img, tools, run_id,
     job = {"id": ident, "vng_version": km.row_boot_label(entry),
            "release": entry["release"], "admitted": admitted,
            "duration": args.duration, "dd_count": args.dd_count,
-           "run_id": run_id}
+           "run_id": run_id, "data_serial": "mv0",
+           "scratch_serial": "mv1"}
     if kind == "deb":
         job["deb"] = source
     else:
@@ -298,7 +323,11 @@ def run_one(entry, args, kind, source, disk_img, tools, run_id,
     script = str(ROOT / "tests" / "vm" / "kernel_matrix_guest.py")
     guest_cmd = "python3 %s /tmp/export %s" % (
         shlex.quote(script), shlex.quote(str(ROOT)))
-    qemu_opts = "-cpu host %s" % km.qemu_drive_opt(disk_img)
+    scratch_img = ensure_scratch(disk_img, ident)
+    qemu_opts = "-cpu host %s %s" % (
+        km.qemu_drive_opt(disk_img),
+        km.qemu_drive_opt(scratch_img, drive_id="d1",
+                          serial="mv1", readonly=False))
     append = "swiotlb=131072,force"
     for arg in entry.get("boot_append") or []:
         km.validate_shell_path(arg, "boot argument")

@@ -15,6 +15,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import kernel_matrix as km
+import kernel_matrix_guest as guest
 
 
 def _lock_entry(verdicts=None, omitted=None, vng="v6.6.160",
@@ -781,6 +782,26 @@ def _workload(first=1100, last=1900):
     return "\n".join(lines) + "\n"
 
 
+def _workload_v2(first=1100, last=1900, read_ios=128,
+                 write_ios=64, reader_ios=64):
+    tags = [("read0", read_ios, 0),
+            ("read512", read_ios, 512),
+            ("write512", write_ios, 512)]
+    tags += [("readers-%d" % i, reader_ios, 0)
+             for i in range(km.WORKLOAD_GROUPS)]
+    bounds = [first + i * (last - first) // len(tags)
+              for i in range(len(tags) + 1)]
+    lines = []
+    for (tag, ios, mod), start, end in zip(tags, bounds,
+                                           bounds[1:]):
+        lines.append("phase %s start_ns %d end_ns %d "
+                     "bytes %d ios %d"
+                     % (tag, start, end, ios * 1048576,
+                        ios))
+        lines.append("buf %s mod4096=%d" % (tag, mod))
+    return "\n".join(lines) + "\n"
+
+
 def test_workload_inside_window_passes():
     parsed = km.parse_workload(_workload(1100, 1900))
     ok, detail = km.check_workload_window(parsed, 1000, 2000)
@@ -821,6 +842,38 @@ def test_workload_garbage_fails():
         km.parse_workload("nothing here\n")
 
 
+def test_parse_workload_v2_phases():
+    parsed = km.parse_workload_v2(_workload_v2(1100, 1900))
+    assert parsed["first_start"] == 1100
+    assert parsed["last_end"] == 1900
+    assert parsed["read_bytes"] == _RBYTES
+    assert parsed["write_bytes"] == _WBYTES
+    assert len(parsed["phases"]) == 3 + km.WORKLOAD_GROUPS
+    ok, detail = km.check_workload_window(parsed, 1000, 2000)
+    assert ok, detail
+    with pytest.raises(ValueError):
+        km.parse_workload_v2("phase read0 start_ns 1 "
+                             "end_ns 2 bytes 3 ios 4\n")
+    with pytest.raises(ValueError):
+        km.parse_workload_v2("garbage\n")
+
+
+def test_buf_offset_checked_per_phase():
+    parsed = km.parse_workload_v2(_workload_v2(1100, 1900))
+    assert km.check_workload_phases(parsed) == []
+    bad = km.parse_workload_v2(
+        _workload_v2(1100, 1900).replace(
+            "buf read512 mod4096=512",
+            "buf read512 mod4096=0"))
+    fails = km.check_workload_phases(bad)
+    assert len(fails) == 1 and "read512" in fails[0]
+    bad = km.parse_workload_v2(
+        _workload_v2(1100, 1900).replace(
+            "bytes 67108864 ios 64", "bytes 1 ios 64", 1))
+    fails = km.check_workload_phases(bad)
+    assert len(fails) == 1 and "write512" in fails[0]
+
+
 def test_zero_traffic_floor_fails():
     bounds = {"attempt": (0, 0)}
     fails = km.check_channel_floors(bounds, ["attempt"],
@@ -842,6 +895,9 @@ def test_floor_above_bound_fails_one_channel():
 
 
 _BYTES768 = 805306368
+_RBYTES = 640 * 1048576
+_WBYTES = 64 * 1048576
+_TBYTES = _RBYTES + _WBYTES
 
 
 def test_count_floor_from_block_bytes():
@@ -889,40 +945,88 @@ def _byte_sums(req=_BYTES768, mapped=_BYTES768, sync=_BYTES768,
 
 def test_memveil_bytes_exact_passes():
     assert km.check_memveil_bytes(
-        _byte_sums(), _BYTES768, 0, _CHANNELS5) == []
+        _byte_sums(), _BYTES768, 0, 0, _CHANNELS5) == []
 
 
 def test_memveil_bytes_over_fails():
     sums = _byte_sums(req=_BYTES768 + 512)
     fails = km.check_memveil_bytes(
-        sums, _BYTES768, 10 * 262144, _CHANNELS5)
+        sums, _BYTES768, 0, 10 * 262144, _CHANNELS5)
     assert len(fails) == 1 and "requested" in fails[0]
 
 
 def test_memveil_bytes_short_within_allowance_passes():
     sums = _byte_sums(mapped=_BYTES768 - 262144)
     assert km.check_memveil_bytes(
-        sums, _BYTES768, 262144, _CHANNELS5) == []
+        sums, _BYTES768, 0, 262144, _CHANNELS5) == []
 
 
 def test_memveil_bytes_short_beyond_allowance_fails():
     sums = _byte_sums(mapped=_BYTES768 - 262144 - 1)
     fails = km.check_memveil_bytes(
-        sums, _BYTES768, 262144, _CHANNELS5)
+        sums, _BYTES768, 0, 262144, _CHANNELS5)
     assert len(fails) == 1 and "mapped" in fails[0]
 
 
 def test_memveil_bytes_copy_direction_short_fails():
     sums = _byte_sums(cbo=_BYTES768 - 512)
     fails = km.check_memveil_bytes(
-        sums, _BYTES768, 0, _CHANNELS5)
+        sums, _BYTES768, 0, 0, _CHANNELS5)
     assert len(fails) == 1 and "bounce_to_original" in fails[0]
 
 
 def test_memveil_bytes_absent_channel_skipped():
     sums = _byte_sums(req=0, mapped=0, sync=0, cob=0, cbo=0)
     assert km.check_memveil_bytes(
-        sums, _BYTES768, 0, ["unmap"]) == []
+        sums, _BYTES768, 0, 0, ["unmap"]) == []
+
+
+def test_write_direction_formulas():
+    # kernel/dma: the map always bounces original to
+    # bounce, the unmap path bounces back only for reads
+    # and emits one sync-for-cpu per map either way (7.3
+    # swiotlb.c:1624,1729 with direct.h:100; same shape
+    # in 6.11 swiotlb.c:1439,1544 and 6.0.19:771,834).
+    read, write = 100 * 1048576, 40 * 1048576
+    maps = 140
+    sums = {"requested": read + write,
+            "mapped": read + write, "sync": read + write,
+            "copy": {"original_to_bounce": read + write,
+                     "bounce_to_original": read}}
+    assert km.check_memveil_bytes(sums, read, write, 0,
+                                  _CHANNELS5) == []
+    short = dict(sums["copy"])
+    short["original_to_bounce"] -= 1048576
+    fails = km.check_memveil_bytes(dict(sums, copy=short),
+                                   read, write, 0,
+                                   _CHANNELS5)
+    assert len(fails) == 1
+    assert "original_to_bounce" in fails[0]
+    over = dict(sums["copy"])
+    over["bounce_to_original"] += 1048576
+    fails = km.check_memveil_bytes(dict(sums, copy=over),
+                                   read, write, 0,
+                                   _CHANNELS5)
+    assert len(fails) == 1
+    assert "bounce_to_original" in fails[0]
+    persisted = {"bounce_attempt": maps, "map_result": maps,
+                 "unmap": maps, "copy": 2 * 100 + 40,
+                 "sync_request": maps}
+    attributed = {chan: 0 for chan in _CHANNELS5}
+    assert km.check_persisted_invariants(persisted,
+                                         attributed) == []
+    persisted["copy"] = maps - 1
+    assert km.check_persisted_invariants(persisted,
+                                         attributed)
+    persisted["copy"] = 2 * maps + 1
+    assert km.check_persisted_invariants(persisted,
+                                         attributed)
+    bounds = {chan: (maps, maps) for chan in
+              ("attempt", "map", "unmap", "sync")}
+    bounds["copy"] = (2 * 100 + 40, 2 * 100 + 40)
+    assert km.check_oracle_invariants(bounds) == []
+    bounds["copy"] = (2 * maps + 1, 2 * maps + 1)
+    assert km.check_oracle_invariants(bounds)
 
 
 def _tpb_samples(final):
@@ -1424,11 +1528,21 @@ def test_persisted_invariants_skew_fails():
 
 
 def test_persisted_copy_ratio_fails():
+    # Copies sit between once and twice the maps: reads
+    # copy both ways, writes only original to bounce
+    # (7.3 swiotlb.c:1624,1729; same in 6.11 and 6.0).
+    attributed = {"attempt": 0, "map": 6, "unmap": 0,
+                  "copy": 0, "sync": 0}
     persisted = dict(_persisted7())
-    persisted["copy"] = 25000
-    attributed = {"attempt": 0, "map": 6, "unmap": 0, "copy": 0,
-                  "sync": 0}
-    assert km.check_persisted_invariants(persisted, attributed)
+    persisted["copy"] = 12000
+    assert km.check_persisted_invariants(persisted,
+                                         attributed)
+    persisted["copy"] = 2 * 12994 + 2 * 6 + 1
+    assert km.check_persisted_invariants(persisted,
+                                         attributed)
+    persisted["copy"] = 2 * 12994 + 2 * 6
+    assert km.check_persisted_invariants(persisted,
+                                         attributed) == []
 
 
 def test_oracle_invariants_overlap_pass():
@@ -1457,20 +1571,123 @@ def test_parse_blockstat_sectors():
     assert km.parse_blockstat(text) == 20736
 
 
+def test_parse_blockstat_write_sectors():
+    text = "2592 0 20736 120 5 0 44032 60 0 0 0 0 0 0 0\n"
+    assert km.parse_blockstat_write(text) == 44032
+    with pytest.raises(ValueError):
+        km.parse_blockstat_write("short")
+
+
 def test_sectors_nominal_pass():
-    before, after = 1000000, 1000000 + 6 * 128 * 2048
-    ok, detail = km.check_sectors(before, after, 128)
+    ok, detail = km.check_sectors(
+        1000000, 1000000 + 640 * 2048,
+        2000000, 2000000 + 64 * 2048,
+        640 * 1048576, 64 * 1048576)
     assert ok, detail
 
 
 def test_sectors_no_progress_fails():
-    ok, _ = km.check_sectors(1000000, 1000000, 128)
+    ok, _ = km.check_sectors(1000000, 1000000, 2000000,
+                             2000000, 640 * 1048576,
+                             64 * 1048576)
     assert not ok
 
 
 def test_sectors_far_over_expected_fails():
-    ok, _ = km.check_sectors(0, 6 * 128 * 2048 * 4, 128)
+    ok, _ = km.check_sectors(0, 640 * 2048 * 2, 2000000,
+                             2000000 + 64 * 2048,
+                             640 * 1048576, 64 * 1048576)
     assert not ok
+
+
+def test_check_sectors_exact_per_device():
+    ok, detail = km.check_sectors(0, 640 * 2048, 0,
+                                  64 * 2048, 640 * 1048576,
+                                  64 * 1048576)
+    assert ok, detail
+    ok, _ = km.check_sectors(0, 640 * 2048 + 1, 0,
+                             64 * 2048, 640 * 1048576,
+                             64 * 1048576)
+    assert not ok
+    ok, _ = km.check_sectors(0, 640 * 2048, 0,
+                             64 * 2048 - 1, 640 * 1048576,
+                             64 * 1048576)
+    assert not ok
+
+
+def test_busy_capture_bounds():
+    samples = [(2000000000, {"tp": 100, "map": 100,
+                             "unmap": 100, "copy": 200,
+                             "syncc": 100, "syncd": 0}),
+               (5000000000, {"tp": 200, "map": 200,
+                             "unmap": 200, "copy": 400,
+                             "syncc": 200, "syncd": 0}),
+               (23000000000, {"tp": 450, "map": 450,
+                              "unmap": 450, "copy": 900,
+                              "syncc": 450, "syncd": 0}),
+               (26000000000, {"tp": 450, "map": 450,
+                              "unmap": 450, "copy": 900,
+                              "syncc": 450, "syncd": 0})]
+    times = {"spawn_ns": 3000000000,
+             "ready_ns": 4000000000,
+             "stop_ns": 24000000000,
+             "exit_ns": 25000000000}
+    persisted = {"bounce_attempt": 350, "map_result": 350,
+                 "unmap": 350, "copy": 700,
+                 "sync_request": 350}
+    attributed = {chan: 0 for chan in _CHANNELS5}
+    assert km.check_busy_bounds(persisted, samples, times,
+                                _CHANNELS5,
+                                attributed) == []
+    over = dict(persisted, map_result=400)
+    fails = km.check_busy_bounds(over, samples, times,
+                                 _CHANNELS5, attributed)
+    assert len(fails) == 1 and "map" in fails[0]
+    under = dict(persisted, map_result=200)
+    fails = km.check_busy_bounds(under, samples, times,
+                                 _CHANNELS5, attributed)
+    assert len(fails) == 1 and "map" in fails[0]
+    short = dict(persisted, map_result=249)
+    allowed = dict(attributed, map=1)
+    assert km.check_busy_bounds(short, samples, times,
+                                _CHANNELS5, allowed) == []
+    empty = dict(persisted, sync_request=0)
+    fails = km.check_busy_bounds(empty, samples, times,
+                                 _CHANNELS5, attributed)
+    assert len(fails) == 1 and "empty" in fails[0]
+
+
+def test_find_nvme_by_serial(tmp_path):
+    root = tmp_path / "sys" / "block"
+    for dev, serial in (("nvme0n1", "mv1"),
+                        ("nvme1n1", "mv0")):
+        path = root / dev / "device"
+        path.mkdir(parents=True)
+        (path / "serial").write_text(serial + "\n")
+    strroot = str(root)
+    assert guest.find_nvme_by_serial(
+        "mv0", strroot) == "/dev/nvme1n1"
+    assert guest.find_nvme_by_serial(
+        "mv1", strroot) == "/dev/nvme0n1"
+    assert guest.find_nvme_by_serial("mv9", strroot) is None
+
+
+def test_scratch_image_outside_export(tmp_path):
+    disk = str(tmp_path / "build" / "vm" / "disk.img")
+    export = str(tmp_path / "out" / "7.0")
+    scratch = km.scratch_img_path(disk, "7.0")
+    assert scratch == str(tmp_path / "build" / "vm" /
+                          "scratch-7.0.img")
+    assert not scratch.startswith(export + os.sep)
+
+
+def test_qemu_drive_opt_serial_and_mode():
+    opt = km.qemu_drive_opt("/d.img", drive_id="d1",
+                            serial="mv1", readonly=False)
+    assert "serial=mv1" in opt
+    assert "id=d1" in opt
+    assert "readonly" not in opt
+    assert "cache=none" in opt
 
 
 def test_expected_record_refusal_global_floor():
@@ -2112,8 +2329,29 @@ def _oracle_text():
                      "syncd=%d tpb=%d" % (
                          t, 13000 * mult, 13000 * mult,
                          13000 * mult, 25990 * mult,
-                         13000 * mult, 0, _BYTES768 * mult))
+                         13000 * mult, 0, _TBYTES * mult))
+    for t, add in ((2000000000, 0), (5000000000, 1000),
+                   (23000000000, 3500),
+                   (26000000000, 3500)):
+        lines.append("T %d tp=%d map=%d unmap=%d copy=%d syncc=%d "
+                     "syncd=%d tpb=%d" % (
+                         t, 13000 + add, 13000 + add,
+                         13000 + add, 25990 + 2 * add,
+                         13000 + add, 0,
+                         _TBYTES + add * 65536))
     return "\n".join(lines) + "\n"
+
+
+def _busy_times():
+    return {"spawn_ns": 3000000000, "ready_ns": 4000000000,
+            "stop_ns": 24000000000,
+            "exit_ns": 25000000000}
+
+
+def _busy_persisted():
+    return {"bounce_attempt": 3500, "map_result": 3500,
+            "unmap": 3500, "copy": 7000,
+            "sync_request": 3500}
 
 
 def _miss_snaps_text():
@@ -2194,16 +2432,26 @@ def _ev_pass():
         "report_exit": "4",
         "report_json_exit": "4",
         "session_text": _session_text(),
-        "workload_text": _workload(1100, 1900),
+        "workload_text": _workload_v2(1100, 1900),
         "oracle_text": _oracle_text(),
         "oracle_stderr": "stdin:7: WARNING: Success\n",
         "miss_snaps": _miss_snaps_text(),
         "persisted": _persisted7(),
-        "persisted_bytes": _byte_sums(),
+        "persisted_bytes": _byte_sums(_TBYTES, _TBYTES,
+                                      _TBYTES, _TBYTES,
+                                      _RBYTES),
         "events_error": None,
         "blockstat_text": json.dumps(
-            {"dev": "nvme0n1", "before": 1000000,
-             "after": 1000000 + 6 * 128 * 2048}),
+            {"data": {"dev": "nvme0n1",
+                      "read_before": 1000000,
+                      "read_after": 1000000 + 640 * 2048},
+             "scratch": {"dev": "nvme1n1",
+                         "write_before": 2000000,
+                         "write_after": 2000000 + 64 * 2048}}),
+        "busy_record_exit": "4",
+        "busy_times_text": json.dumps(_busy_times()),
+        "busy_persisted": _busy_persisted(),
+        "busy_events_error": None,
         "dmesg_text": "[1.0] memveil-matrix-abc\n[2.0] nvme ready\n",
         "dmesg_scan_text": json.dumps(
             {"marker": "memveil-matrix-abc",
@@ -2361,7 +2609,7 @@ def test_evaluate_fails_omitted_drift():
 
 def test_evaluate_fails_window_escape():
     ev = _ev_pass()
-    ev["workload_text"] = _workload(100, 1900)
+    ev["workload_text"] = _workload_v2(100, 1900)
     rec = km.evaluate_row(ev)
     assert not rec["ok"]
     assert not _check(rec, "window")["ok"]
@@ -2626,7 +2874,8 @@ def test_evaluate_byte_sums_over_block_fail():
 def test_evaluate_byte_shortfall_within_loss_passes():
     ev = _ev_pass()
     ev["persisted_bytes"] = _byte_sums(
-        mapped=_BYTES768 - 100000)
+        _TBYTES, _TBYTES - 100000, _TBYTES, _TBYTES,
+        _RBYTES)
     rec = km.evaluate_row(ev)
     assert rec["ok"], json.dumps(rec["checks"], indent=1)
 
@@ -2858,6 +3107,15 @@ def test_scan_export_redaction_skips_capture_dir(tmp_path):
     cap = tmp_path / "cap"
     cap.mkdir()
     (cap / "events.ndjson").write_text("raw 0x00000001\n")
+    assert km.scan_export_redaction(str(tmp_path)) is None
+
+
+def test_scan_export_redaction_skips_nested_capture_dir(tmp_path):
+    busy = tmp_path / "busy" / "cap"
+    busy.mkdir(parents=True)
+    (busy / "session.json").write_text('{"a": "%s"}\n'
+                                       % ("e" * 64))
+    (tmp_path / "times.json").write_text('{"spawn_ns": 1}\n')
     assert km.scan_export_redaction(str(tmp_path)) is None
 
 
