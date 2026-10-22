@@ -12,10 +12,12 @@
  * consumers only over KNOWN records.
  *
  * Effective-byte replication reads the pool slot the hook
- * itself reads (start/slots/nslabs, then orig_addr and
+ * itself reads (start/end/nslabs/slots, then orig_addr and
  * alloc_size) plus dev->dma_parms->min_align_mask, and
- * applies the hook's clamp rule from memveil_events.h. Any
- * failed read degrades that event to unknown-with-reason;
+ * applies the hook's clamp rule from memveil_events.h. Every
+ * relocated width is guarded against its local view, and the
+ * pool span must be exactly nslabs slots wide. Any failed
+ * read or guard degrades that event to unknown-with-reason;
  * the request fact (size, direction) is still emitted.
  *
  * Each copy is recorded once: entry claims its frame,
@@ -289,51 +291,84 @@ static __always_inline int mv_emit_bounce(struct device *dev,
                                           enum mv_dma_data_direction dir,
                                           struct io_tlb_pool *pool)
 {
-    struct device_dma_parameters *parms;
-    struct io_tlb_slot *slots, slot;
+    /* Relocated reads go through the flavor-suffixed views. */
+    struct device___mv *mdev = (struct device___mv *)dev;
+    struct io_tlb_pool___mv *mpool = (struct io_tlb_pool___mv *)pool;
+    struct device_dma_parameters___mv *parms;
+    struct io_tlb_slot___mv *slots;
     struct mv_effective eff;
     unsigned int mask = 0;
-    __u64 start, nsl, idx, dir64 = dir;
+    __u64 start, end, nsl, idx, orig_addr, alloc_size;
+    __u64 dir64 = dir;
     __u64 effective = 0;
     __u16 flags, reason = MV_CP_REASON_NONE;
-    __s64 off;
+    __s32 off;
 
     /* The shared emit path rejects dir outside 1..2 for a
      * copy, mirroring the decoder's per-kind rule. */
     flags = dir64 == MV_DMA_TO_DEVICE ? MV_CP_FLAG_TO_DEVICE : 0;
-    /* Checked pool header reads: any failure degrades to
-     * unknown-with-reason; start/nslabs/slots are trusted
-     * only inside the else branch. */
-    if (bpf_core_read(&start, sizeof(start), &pool->start) ||
-        bpf_core_read(&nsl, sizeof(nsl), &pool->nslabs) ||
-        bpf_core_read(&slots, sizeof(slots), &pool->slots)) {
+    /* Every relocated width must match its local spelling,
+     * else the reads below would misinterpret memory. */
+    if (!mv_layout_ok(bpf_core_field_size(mpool->start), 8) ||
+        !mv_layout_ok(bpf_core_field_size(mpool->end), 8) ||
+        !mv_layout_ok(bpf_core_field_size(mpool->nslabs), 8) ||
+        !mv_layout_ok(bpf_core_field_size(mpool->slots), 8) ||
+        !mv_layout_ok(bpf_core_field_size(
+                           ((struct io_tlb_slot___mv *)0)->orig_addr),
+                      8) ||
+        !mv_layout_ok(bpf_core_field_size(
+                           ((struct io_tlb_slot___mv *)0)->alloc_size),
+                      8) ||
+        !mv_layout_ok(bpf_core_field_size(mdev->dma_parms), 8) ||
+        !mv_layout_ok(bpf_core_field_size(
+                           ((struct device_dma_parameters___mv *)0)
+                               ->min_align_mask),
+                      4)) {
+        reason = MV_CP_REASON_LAYOUT;
+    } else if (bpf_core_read(&start, sizeof(start),
+                             &mpool->start) ||
+               bpf_core_read(&end, sizeof(end), &mpool->end) ||
+               bpf_core_read(&nsl, sizeof(nsl), &mpool->nslabs) ||
+               bpf_core_read(&slots, sizeof(slots),
+                             &mpool->slots)) {
         reason = MV_CP_REASON_SLOT_READ;
-    } else if (slots == (struct io_tlb_slot *)0 || nsl == 0) {
+    } else if (slots == (struct io_tlb_slot___mv *)0 || nsl == 0) {
         reason = MV_CP_REASON_SLOT_READ;
     } else {
-        /* idx is only used on paths where start is trusted. */
-        idx = (tlb_addr - start) >> MV_IO_TLB_SHIFT;
-        if (tlb_addr < start || idx >= nsl)
-            reason = MV_CP_REASON_BOUNDS;
-        else if (bpf_probe_read_kernel(&slot, sizeof(slot), slots + idx))
-            reason = MV_CP_REASON_SLOT_READ;
-        else if (bpf_core_read(&parms, sizeof(parms), &dev->dma_parms))
-            reason = MV_CP_REASON_MASK_READ;
-        else if (parms &&
-                 bpf_core_read(&mask, sizeof(mask),
-                               &parms->min_align_mask))
-            reason = MV_CP_REASON_MASK_READ;
-        else {
-            /* The hook's tlb_offset math, verbatim signs: both
-             * terms are small, so the signed difference is exact. */
-            off = (__s64)(tlb_addr & MV_IO_TLB_MASK) -
-                  (__s64)(slot.orig_addr & mask & MV_IO_TLB_MASK);
-            eff = mv_effective_bytes(size, off, slot.alloc_size,
-                                     slot.orig_addr != MV_INVALID_PHYS);
-            flags |= MV_CP_FLAG_KNOWN |
-                     (eff.clamped ? MV_CP_FLAG_CLAMPED : 0) |
-                     (eff.early_zero ? MV_CP_FLAG_EARLY_ZERO : 0);
-            effective = eff.effective;
+        reason = mv_slot_index(start, end, nsl, tlb_addr, &idx);
+        if (reason == MV_CP_REASON_NONE) {
+            /* The stride is relocated, never a literal. */
+            __u64 slot_addr = (__u64)slots +
+                              idx * bpf_core_type_size(
+                                        struct io_tlb_slot___mv);
+
+            if (bpf_core_read(
+                    &orig_addr, sizeof(orig_addr),
+                    &((struct io_tlb_slot___mv *)slot_addr)->orig_addr) ||
+                bpf_core_read(
+                    &alloc_size, sizeof(alloc_size),
+                    &((struct io_tlb_slot___mv *)slot_addr)->alloc_size))
+                reason = MV_CP_REASON_SLOT_READ;
+            else if (bpf_core_read(&parms, sizeof(parms),
+                                   &mdev->dma_parms))
+                reason = MV_CP_REASON_MASK_READ;
+            else if (parms &&
+                     bpf_core_read(&mask, sizeof(mask),
+                                   &parms->min_align_mask))
+                reason = MV_CP_REASON_MASK_READ;
+            else {
+                off = mv_tlb_offset(tlb_addr, orig_addr, mask);
+                eff = mv_effective_bytes(size, off, alloc_size,
+                                         orig_addr !=
+                                             MV_INVALID_PHYS);
+                flags |= MV_CP_FLAG_KNOWN |
+                         (eff.clamped ? MV_CP_FLAG_CLAMPED : 0) |
+                         (eff.early_zero ? MV_CP_FLAG_EARLY_ZERO : 0) |
+                         (eff.offset_past
+                              ? MV_CP_FLAG_OFFSET_PAST_ALLOC
+                              : 0);
+                effective = eff.effective;
+            }
         }
     }
     return mv_emit_cp(MV_CP_KIND_COPY, flags, dir64, size,

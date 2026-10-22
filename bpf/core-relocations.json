@@ -12,9 +12,37 @@
         "optional": false
       },
       {
+        "type": "device",
+        "member": "dma_parms",
+        "kind": "field_byte_size",
+        "relocs": 2,
+        "optional": false
+      },
+      {
         "type": "device_dma_parameters",
         "member": "min_align_mask",
         "kind": "field_byte_offset",
+        "relocs": 2,
+        "optional": false
+      },
+      {
+        "type": "device_dma_parameters",
+        "member": "min_align_mask",
+        "kind": "field_byte_size",
+        "relocs": 2,
+        "optional": false
+      },
+      {
+        "type": "io_tlb_pool",
+        "member": "end",
+        "kind": "field_byte_offset",
+        "relocs": 2,
+        "optional": false
+      },
+      {
+        "type": "io_tlb_pool",
+        "member": "end",
+        "kind": "field_byte_size",
         "relocs": 2,
         "optional": false
       },
@@ -27,6 +55,13 @@
       },
       {
         "type": "io_tlb_pool",
+        "member": "nslabs",
+        "kind": "field_byte_size",
+        "relocs": 2,
+        "optional": false
+      },
+      {
+        "type": "io_tlb_pool",
         "member": "slots",
         "kind": "field_byte_offset",
         "relocs": 2,
@@ -34,8 +69,56 @@
       },
       {
         "type": "io_tlb_pool",
+        "member": "slots",
+        "kind": "field_byte_size",
+        "relocs": 2,
+        "optional": false
+      },
+      {
+        "type": "io_tlb_pool",
         "member": "start",
         "kind": "field_byte_offset",
+        "relocs": 2,
+        "optional": false
+      },
+      {
+        "type": "io_tlb_pool",
+        "member": "start",
+        "kind": "field_byte_size",
+        "relocs": 2,
+        "optional": false
+      },
+      {
+        "type": "io_tlb_slot",
+        "kind": "type_size",
+        "relocs": 2,
+        "optional": false
+      },
+      {
+        "type": "io_tlb_slot",
+        "member": "alloc_size",
+        "kind": "field_byte_offset",
+        "relocs": 2,
+        "optional": false
+      },
+      {
+        "type": "io_tlb_slot",
+        "member": "alloc_size",
+        "kind": "field_byte_size",
+        "relocs": 2,
+        "optional": false
+      },
+      {
+        "type": "io_tlb_slot",
+        "member": "orig_addr",
+        "kind": "field_byte_offset",
+        "relocs": 2,
+        "optional": false
+      },
+      {
+        "type": "io_tlb_slot",
+        "member": "orig_addr",
+        "kind": "field_byte_size",
         "relocs": 2,
         "optional": false
       }

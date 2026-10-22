@@ -8,10 +8,17 @@ tools/emit-core-relocations, and asserts the exact record list
 (including flavor-suffix stripping and record order). A second
 synthetic source with a bitfield member asserts the tool
 refuses bitfield relocations with exit 1.
+
+COPY LAYOUT: asserts the copy object reads every pool, slot,
+and alignment fact through relocations (byte size guards plus
+byte offset reads), and that every slot-stride multiply in the
+disassembly is backed by a slot type-size relocation at its
+own instruction offset (no raw stride remains).
 """
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -111,6 +118,102 @@ def fail(message):
     return 1
 
 
+def _rec(otype, sub, kind, count):
+    """One expected relocation record with its count."""
+    rec = {"type": otype}
+    if sub is not None:
+        rec["member"] = sub
+    rec["kind"] = kind
+    rec["relocs"] = count
+    rec["optional"] = False
+    return rec
+
+
+# Exact copy-object relocation list once every pool, slot, and
+# alignment fact is read through relocations: each size guard
+# and each offset read appears once per inlined helper copy.
+WANT_COPY_LAYOUT = [
+    _rec("device", "dma_parms", "field_byte_offset", 2),
+    _rec("device", "dma_parms", "field_byte_size", 2),
+    _rec("device_dma_parameters", "min_align_mask",
+         "field_byte_offset", 2),
+    _rec("device_dma_parameters", "min_align_mask",
+         "field_byte_size", 2),
+    _rec("io_tlb_pool", "end", "field_byte_offset", 2),
+    _rec("io_tlb_pool", "end", "field_byte_size", 2),
+    _rec("io_tlb_pool", "nslabs", "field_byte_offset", 2),
+    _rec("io_tlb_pool", "nslabs", "field_byte_size", 2),
+    _rec("io_tlb_pool", "slots", "field_byte_offset", 2),
+    _rec("io_tlb_pool", "slots", "field_byte_size", 2),
+    _rec("io_tlb_pool", "start", "field_byte_offset", 2),
+    _rec("io_tlb_pool", "start", "field_byte_size", 2),
+    _rec("io_tlb_slot", None, "type_size", 2),
+    _rec("io_tlb_slot", "alloc_size", "field_byte_offset", 2),
+    _rec("io_tlb_slot", "alloc_size", "field_byte_size", 2),
+    _rec("io_tlb_slot", "orig_addr", "field_byte_offset", 2),
+    _rec("io_tlb_slot", "orig_addr", "field_byte_size", 2),
+]
+
+# An immediate multiply by the 24-byte slot stride, in either
+# objdump spelling.
+_STRIDE_MUL = re.compile(r"^[ \t]*(\d+):\t.*\t[wr][0-9]+ \*= (0x18|24)\s*$")
+
+# Bounce helpers with the slot math inlined, and the section
+# each disassembles from.
+_BOUNCE_FUNCS = (("mv_bounce", "fentry/swiotlb_bounce"),
+                 ("mv_bounce_exit", "fexit/swiotlb_bounce"))
+
+
+def check_no_raw_slot_layout(obj):
+    """Prove no raw slot stride remains in either helper copy.
+
+    Any immediate multiply by the 24-byte stride fails: the
+    relocated stride lowers to a register multiply instead,
+    while raw pointer arithmetic on the slot type folds to an
+    immediate. The type-size record itself is pinned by the
+    exact relocation list above.
+    """
+    for func, section in _BOUNCE_FUNCS:
+        code, log = run(["llvm-objdump", "-d",
+                         "--disassemble-symbols=" + func, obj])
+        if code != 0:
+            return fail("objdump failed on %s:\n%s" % (func, log))
+        if "Disassembly of section %s:" % section not in log:
+            return fail("%s disassembled no %s" % (func, section))
+        for line in log.splitlines():
+            if _STRIDE_MUL.match(line):
+                return fail("raw stride multiply in %s: %s"
+                            % (func, line.strip()))
+    print("core-relocations: no raw stride in %d helpers"
+          % len(_BOUNCE_FUNCS))
+    return 0
+
+
+def check_copy_layout_contract(root, tool):
+    """Assert the copy object's pool/slot/alignment records."""
+    obj = os.path.join(root, "build", "bpf",
+                       "swiotlb_copy.bpf.o")
+    if not os.path.isfile(obj):
+        return fail("missing built copy object (build first)")
+    tmp = tempfile.mkdtemp(prefix="core-reloc-copy-")
+    try:
+        out_path = os.path.join(tmp, "copy.json")
+        code, log = run([tool, "--out", out_path, obj])
+        if code != 0:
+            return fail("extractor failed on copy object:\n"
+                        + log)
+        with open(out_path, "r") as handle:
+            got = json.load(handle)
+        records = got.get("objects", {}).get(
+            "swiotlb_copy.bpf.o")
+        if records != WANT_COPY_LAYOUT:
+            return fail("copy records differ:\n got %r\nwant %r"
+                        % (records, WANT_COPY_LAYOUT))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return check_no_raw_slot_layout(obj)
+
+
 def check_synthetic(root, tool):
     """Pin the extractor against the synthetic oracle probe."""
     tmp = tempfile.mkdtemp(prefix="core-reloc-")
@@ -162,6 +265,9 @@ def main():
     if check_synthetic(root, tool) != 0:
         return 1
     print("core-relocations: synthetic checks passed")
+    if check_copy_layout_contract(root, tool) != 0:
+        return 1
+    print("core-relocations: copy layout checks passed")
     return 0
 
 

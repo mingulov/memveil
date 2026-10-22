@@ -16,6 +16,7 @@
 #endif
 
 #include <linux/types.h>
+#include <stdbool.h>
 
 #include "memveil_events.h"
 
@@ -52,6 +53,35 @@ struct io_tlb_pool {
     unsigned long nslabs;
     struct io_tlb_slot *slots;
 };
+
+/* CO-RE views: the same kernel structs under a flavor
+ * suffix, so relocated reads never depend on which other
+ * view is in scope. Widths are checked live against these
+ * spellings; the suffix strips back to the kernel name. */
+struct io_tlb_slot___mv {
+    mv_phys_addr_t orig_addr;
+    mv_size_t alloc_size;
+} __attribute__((preserve_access_index));
+
+struct io_tlb_pool___mv {
+    mv_phys_addr_t start;
+    mv_phys_addr_t end;
+    unsigned long nslabs;
+    struct io_tlb_slot___mv *slots;
+} __attribute__((preserve_access_index));
+
+struct device_dma_parameters___mv {
+    unsigned int min_align_mask;
+} __attribute__((preserve_access_index));
+
+struct io_tlb_mem___mv {
+    bool cc_shared;
+} __attribute__((preserve_access_index));
+
+struct device___mv {
+    struct device_dma_parameters___mv *dma_parms;
+    struct io_tlb_mem___mv *dma_io_tlb_mem;
+} __attribute__((preserve_access_index));
 
 #define MV_IO_TLB_SHIFT MV_IO_TLB_SHIFT_WIRE
 #define MV_IO_TLB_SIZE 2048u
