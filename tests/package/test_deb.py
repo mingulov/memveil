@@ -170,7 +170,9 @@ FROZEN_FLAGS = {
             "--max-events-bytes", "--max-line-bytes",
             "--max-session-bytes", "--object", "--output",
             "--profile", "--profiles-dir", "-h"),
-    "doctor": ("--help", "--json", "--profiles-dir", "-h"),
+    "doctor": ("--bridge", "--capability", "--cp-object",
+               "--help", "--json", "--lc-object", "--load-check",
+               "--object", "--profiles-dir", "-h"),
     "qualify": ("--bridge", "--capability", "--cp-object",
                 "--help", "--lc-object", "--object",
                 "--output", "--profile", "--profiles-dir", "-h"),
@@ -179,7 +181,8 @@ FROZEN_FLAGS = {
 # capabilities stay free text because the accepted set is
 # profile-dependent, not statically closed.
 FROZEN_FORMAT_VALUES = ("text", "json", "markdown")
-FROZEN_NOVALUE_FLAGS = ("--help", "--allow-partial", "--json", "-h")
+FROZEN_NOVALUE_FLAGS = ("--help", "--allow-partial", "--json",
+                          "--load-check", "-h")
 
 SHORT_DESC = "swiotlb bounce-attempt capture and offline replay on x86-64 Linux"
 

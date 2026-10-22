@@ -3040,6 +3040,15 @@ EOF
 suite_doctor() {
     run_unit_file tests/unit/test_doctor.mojo || return 1
     run_unit_file tests/unit/test_prechecks.mojo || return 1
+    if [ ! -f "$ROOT/build/test-tmp/doctor2.json" ]; then
+        echo "doctor: missing build/test-tmp/doctor2.json" >&2
+        return 1
+    fi
+    if ! "$ROOT/tools/validate-schemas" --check-doctor \
+        "$ROOT/build/test-tmp/doctor2.json" >/dev/null 2>&1; then
+        echo "doctor: oracle rejected doctor2.json" >&2
+        return 1
+    fi
     BIN="$ROOT/build/memveil"
     if [ ! -x "$BIN" ]; then
         echo "doctor: missing $BIN (run tools/build first)" >&2
@@ -3120,6 +3129,29 @@ PYEOF
         failed=1
     fi
 
+    (cd "$ROOT" && "$BIN" doctor --json --capability all \
+        >"$TMP/all.json" 2>"$TMP/err")
+    rc=$?
+    if [ "$rc" -ne 3 ]; then
+        echo "doctor: --capability all exit $rc, want 3" >&2
+        failed=1
+    fi
+    if ! "$ROOT/tools/validate-schemas" --check-doctor \
+        "$TMP/all.json" >/dev/null 2>&1; then
+        echo "doctor: oracle rejected --capability all JSON" >&2
+        failed=1
+    fi
+    if ! python3 - "$TMP/all.json" <<'PYEOF'; then
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert doc["mode"] == "passive", "mode"
+assert all(c["status"] in ("unknown", "unavailable", "unsupported")
+           for c in doc["capabilities"]), "status"
+PYEOF
+        echo "doctor: --capability all facts mismatch" >&2
+        failed=1
+    fi
+
     # Passive doctor is bridge-independent: with
     # LMB_NATIVE_LIB aimed at a blocking stdin pipe,
     # doctor still completes promptly (regression pin
@@ -3148,6 +3180,30 @@ PYEOF
         failed=1
     else
         echo "ok doctor hostile-env (exit 3, no bridge touch)"
+    fi
+
+    # Same hostile run with an explicit capability set.
+    exec 9<>"$TMP/dstdin"
+    (cd "$ROOT" && timeout 20 strace -f -o "$TMP/dstdin-all.trace" \
+        -e trace=openat,open,openat2,access,faccessat \
+        env LMB_NATIVE_LIB=/dev/stdin "$BIN" doctor --capability all \
+        <"$TMP/dstdin" >"$TMP/dstdin-all.out" 2>"$TMP/dstdin-all.err")
+    rc=$?
+    exec 9>&-
+    if [ "$rc" -ne 3 ]; then
+        echo "doctor: hostile --capability all exit $rc, want 3" >&2
+        failed=1
+    elif [ ! -s "$TMP/dstdin-all.out" ]; then
+        echo "doctor: hostile --capability all left stdout empty" >&2
+        failed=1
+    elif grep -qE '"/dev/stdin"' "$TMP/dstdin-all.trace"; then
+        echo "doctor: trace shows env-selected stream touched" >&2
+        failed=1
+    elif grep -q "libbpf_mojo" "$TMP/dstdin-all.trace"; then
+        echo "doctor: trace shows bridge candidate touched" >&2
+        failed=1
+    else
+        echo "ok doctor hostile-env-all (exit 3, no bridge touch)"
     fi
 
     if [ "$failed" -ne 0 ]; then

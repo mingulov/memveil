@@ -57,3 +57,5 @@ tree is tracked. One line per variant:
 - memcg-empty: leaf memory.max empty.
 - memcg-v1: cgroup file with a v1 line only.
 - unpriv-bpf: unprivileged_bpf_disabled reads 2.
+- swiotlb-noforce: cmdline adds swiotlb=noforce.
+- swiotlb-inactive: sys/kernel/debug present without swiotlb.

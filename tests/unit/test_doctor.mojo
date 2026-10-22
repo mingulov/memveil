@@ -9,19 +9,27 @@ Sanitizer tests prove hostile fixture bytes cannot escape either
 sink raw. Exit tests drive run_doctor_with through fixtures.
 """
 
+from std.ffi import external_call
 from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
 
+from memveil.capture.run import decide_record
 from memveil.cli.doctor import (
     EXIT_UNAVAILABLE,
+    DoctorCap,
+    DoctorOptions,
     DoctorReport,
+    DoctorReport2,
+    assess_doctor,
     build_doctor_report,
     default_profiles_dir,
     doctor_usage,
     render_doctor_json,
+    render_doctor_json2,
     render_doctor_text,
     resolve_profiles_dir,
     run_doctor,
+    run_doctor_opts,
     run_doctor_with,
 )
 from memveil.cli.report import EXIT_INVALID, EXIT_OK
@@ -316,10 +324,13 @@ def test_text_sanitizes_hostile() raises:
 
 
 def test_exit_ready() raises:
+    # D10 (T2): doctor judges through record admission, so
+    # undiscoverable objects under mojo run read unavailable
+    # even on the ready-validated fixture (D13 approved).
     var code = run_doctor_with(
         fx("ready-validated"), fx("profiles-test"), True
     )
-    assert_equal(code, EXIT_OK)
+    assert_equal(code, EXIT_UNAVAILABLE)
 
 
 def test_exit_unavailable() raises:
@@ -405,6 +416,323 @@ def test_usage() raises:
     assert_true(contains(doctor_usage(), String("doctor [--json]")))
 
 
+def gate(name: String) -> String:
+    """Fixture directory path for one gate fixture name."""
+    return "tests/fixtures/gate/" + name
+
+
+def _doctor2_opts(
+    root: String,
+    profiles_dir: String,
+    capabilities: String,
+    obj_path: String,
+    lc_object: String,
+    cp_object: String,
+) -> DoctorOptions:
+    """One DoctorOptions with explicit objects and no bridge."""
+    var opts = DoctorOptions()
+    opts.root = root
+    opts.profiles_dir = profiles_dir
+    opts.capabilities = capabilities
+    opts.object = obj_path
+    opts.lc_object = lc_object
+    opts.cp_object = cp_object
+    return opts^
+
+
+def _live38_opts() -> DoctorOptions:
+    """gate/base against profiles-live with every object."""
+    return _doctor2_opts(
+        gate(String("base")),
+        String("tests/fixtures/scan/profiles-live"),
+        String("all"),
+        String("tests/fixtures/elf/ok.o"),
+        String("tests/fixtures/elf/lc-ok.o"),
+        String("tests/fixtures/elf/cp-ok.o"),
+    )
+
+
+def test_doctor2_validated_attempt() raises:
+    var opts = _doctor2_opts(
+        String("tests/fixtures/scan/ok"),
+        String("tests/fixtures/scan/profiles"),
+        String("attempt-trace"),
+        String("tests/fixtures/elf/ok.o"),
+        String(""),
+        String(""),
+    )
+    var drep = assess_doctor(opts)
+    assert_equal(drep.verdict, String("ready-load-unchecked"))
+    assert_equal(len(drep.caps), 1)
+    assert_equal(drep.caps[0].id, String("attempt-trace"))
+    assert_equal(
+        drep.caps[0].status, String("available-load-unchecked")
+    )
+    var code = run_doctor_opts(opts)
+    assert_equal(code, EXIT_OK)
+
+
+def test_doctor2_all_on_live38() raises:
+    var opts = _live38_opts()
+    var drep = assess_doctor(opts)
+    assert_equal(len(drep.caps), 3)
+    for i in range(len(drep.caps)):
+        assert_equal(
+            drep.caps[i].status, String("available-load-unchecked")
+        )
+    assert_equal(len(drep.requested), 3)
+    assert_equal(drep.requested[0], String("attempt-trace"))
+    assert_equal(drep.requested[1], String("mapping-lifecycle"))
+    assert_equal(drep.requested[2], String("copy-actual"))
+    assert_equal(len(drep.load), 0)
+    var js = render_doctor_json2(drep)
+    assert_true(contains(js, String('"mode": "passive"')))
+    assert_true(
+        contains(
+            js,
+            String(
+                '"lockdown": {"mode": "none", "src": "securityfs"}'
+            ),
+        )
+    )
+    assert_true(
+        contains(
+            js,
+            String(
+                '"btf": {"state": "present", "bytes": "1063",'
+                ' "config_btf": "unknown", "config_src": "proc"}'
+            ),
+        )
+    )
+
+
+def test_doctor2_agrees_with_record() raises:
+    var variants = List[String]()
+    variants.append(String("base"))
+    variants.append(String("btf-absent-config"))
+    variants.append(String("btf-absent-unknown"))
+    variants.append(String("btf-denied"))
+    variants.append(String("btf-not-visible"))
+    variants.append(String("container-view"))
+    variants.append(String("denied-all"))
+    variants.append(String("events-denied"))
+    variants.append(String("hook-absent"))
+    variants.append(String("hook-clone"))
+    variants.append(String("hook-nokallsyms"))
+    variants.append(String("hook-not-in-btf"))
+    variants.append(String("lockdown-conf"))
+    variants.append(String("notracing-bpfevents"))
+    variants.append(String("notracing-config"))
+    variants.append(String("tracefs-gone"))
+    variants.append(String("tracefs-hidden"))
+    variants.append(String("tracefs-noevents"))
+    variants.append(String("tracefs-unmounted"))
+    var profiles_dir = String("tests/fixtures/scan/profiles-live")
+    var ok_o = String("tests/fixtures/elf/ok.o")
+    var lc_o = String("tests/fixtures/elf/lc-ok.o")
+    var cp_o = String("tests/fixtures/elf/cp-ok.o")
+    for i in range(len(variants)):
+        var root = gate(variants[i].copy())
+        var r = open_evidence_reader(root.copy())
+        var env = detect_environment(r)
+        var ps = load_profiles(profiles_dir.copy())
+        var decision = decide_record(
+            root.copy(),
+            env.kernel,
+            ps^,
+            String(""),
+            False,
+            ok_o.copy(),
+            lc_o.copy(),
+            cp_o.copy(),
+            String("all"),
+            profiles_dir.copy(),
+            String(""),
+        )
+        var opts = _doctor2_opts(
+            root,
+            profiles_dir.copy(),
+            String("all"),
+            ok_o.copy(),
+            lc_o.copy(),
+            cp_o.copy(),
+        )
+        var drep = assess_doctor(opts)
+        assert_true(
+            (drep.verdict == String("unavailable"))
+            == (not decision.ok)
+        )
+        if not decision.ok:
+            assert_equal(
+                drep.summary,
+                String("unavailable: ") + decision.refusal,
+            )
+
+
+def test_doctor2_no_object() raises:
+    var opts = _doctor2_opts(
+        gate(String("base")),
+        String("tests/fixtures/scan/profiles-live"),
+        String("all"),
+        String(""),
+        String(""),
+        String(""),
+    )
+    var drep = assess_doctor(opts)
+    assert_equal(len(drep.caps), 3)
+    assert_equal(drep.caps[0].id, String("attempt-trace"))
+    assert_equal(drep.caps[0].status, String("unavailable"))
+    assert_equal(drep.caps[0].reason_code, String("object-missing"))
+    assert_equal(
+        drep.caps[0].remedy,
+        String(
+            "install the memveil BPF objects or pass --object,"
+            " --lc-object, --cp-object"
+        ),
+    )
+    var code = run_doctor_opts(opts)
+    assert_equal(code, EXIT_UNAVAILABLE)
+
+
+def test_doctor2_precheck_fail() raises:
+    var profiles_dir = String("tests/fixtures/scan/profiles-live")
+    var ok_o = String("tests/fixtures/elf/ok.o")
+    var lc_o = String("tests/fixtures/elf/lc-ok.o")
+    var cp_o = String("tests/fixtures/elf/cp-ok.o")
+    var opts = _doctor2_opts(
+        gate(String("caps-none")),
+        profiles_dir.copy(),
+        String("all"),
+        ok_o.copy(),
+        lc_o.copy(),
+        cp_o.copy(),
+    )
+    var drep = assess_doctor(opts)
+    assert_equal(len(drep.caps), 3)
+    for i in range(len(drep.caps)):
+        assert_equal(drep.caps[i].status, String("unavailable"))
+        assert_equal(
+            drep.caps[i].reason_code, String("no-bpf-privilege")
+        )
+    var mopts = _doctor2_opts(
+        gate(String("memcg-v1")),
+        profiles_dir,
+        String("all"),
+        ok_o,
+        lc_o,
+        cp_o,
+    )
+    var mdrep = assess_doctor(mopts)
+    assert_equal(len(mdrep.caps), 3)
+    for i in range(len(mdrep.caps)):
+        assert_equal(
+            mdrep.caps[i].status, String("available-load-unchecked")
+        )
+        var seen = False
+        for j in range(len(mdrep.caps[i].evidence)):
+            if mdrep.caps[i].evidence[j].startswith(
+                String("memcg: unknown")
+            ):
+                seen = True
+                break
+        assert_true(seen)
+
+
+def test_doctor2_notes() raises:
+    var profiles_dir = String("tests/fixtures/scan/profiles-live")
+    var ok_o = String("tests/fixtures/elf/ok.o")
+    var lc_o = String("tests/fixtures/elf/lc-ok.o")
+    var cp_o = String("tests/fixtures/elf/cp-ok.o")
+    var want = String("no swiotlb pool active: attempts will be 0")
+    var names = List[String]()
+    names.append(String("swiotlb-noforce"))
+    names.append(String("swiotlb-inactive"))
+    for i in range(len(names)):
+        var opts = _doctor2_opts(
+            gate(names[i].copy()),
+            profiles_dir.copy(),
+            String("all"),
+            ok_o.copy(),
+            lc_o.copy(),
+            cp_o.copy(),
+        )
+        var drep = assess_doctor(opts)
+        var seen = False
+        for j in range(len(drep.notes)):
+            if drep.notes[j] == want:
+                seen = True
+                break
+        assert_true(seen)
+    var bopts = _doctor2_opts(
+        gate(String("base")),
+        profiles_dir,
+        String("all"),
+        ok_o,
+        lc_o,
+        cp_o,
+    )
+    var bdrep = assess_doctor(bopts)
+    for j in range(len(bdrep.notes)):
+        assert_true(bdrep.notes[j] != want)
+
+
+def test_doctor2_flags() raises:
+    var bad = List[String]()
+    bad.append(String("--capability"))
+    bad.append(String("attempt-trace,nope"))
+    assert_equal(run_doctor(bad^), EXIT_INVALID)
+    var missing = List[String]()
+    missing.append(String("--capability"))
+    assert_equal(run_doctor(missing^), EXIT_INVALID)
+    assert_true(
+        contains(doctor_usage(), String("--load-check"))
+    )
+    var live = List[String]()
+    live.append(String("--load-check"))
+    live.append(String("--profiles-dir"))
+    live.append(String("profiles"))
+    assert_true(run_doctor(live^) != EXIT_INVALID)
+
+
+def _cstr_local(s: String) -> List[UInt8]:
+    """One NUL-terminated copy of a path or mode string."""
+    var b = s.as_bytes()
+    var out = List[UInt8]()
+    for i in range(len(b)):
+        out.append(b[i])
+    out.append(UInt8(0))
+    return out^
+
+
+def _write_doctor2_json(text: String) raises:
+    """Write the doctor-v0.1.1 JSON under build/test-tmp."""
+    var parent = _cstr_local(String("build/test-tmp"))
+    _ = external_call["mkdir", Int32](
+        Span(parent).unsafe_ptr(), 0o755
+    )
+    var cpath = _cstr_local(String("build/test-tmp/doctor2.json"))
+    var cmode = _cstr_local(String("w"))
+    var fp = external_call["fopen", UInt64](
+        Span(cpath).unsafe_ptr(), Span(cmode).unsafe_ptr()
+    )
+    if fp == 0:
+        raise Error(String("cannot write doctor2.json"))
+    var body = text.as_bytes()
+    var n = external_call["fwrite", Int64](
+        body.unsafe_ptr(), 1, len(body), fp
+    )
+    _ = external_call["fclose", Int32](fp)
+    if Int(n) != len(body):
+        raise Error(String("short write doctor2.json"))
+
+
+def test_doctor2_json_schema() raises:
+    var drep = assess_doctor(_live38_opts())
+    var js = render_doctor_json2(drep)
+    assert_true(contains(js, String('"schema_version": "0.1.1"')))
+    _write_doctor2_json(js)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_build_ordinary]()
@@ -434,6 +762,14 @@ def run() raises -> Int:
     suite.test[test_profiles_dir]()
     suite.test[test_resolve_shape]()
     suite.test[test_usage]()
+    suite.test[test_doctor2_validated_attempt]()
+    suite.test[test_doctor2_all_on_live38]()
+    suite.test[test_doctor2_agrees_with_record]()
+    suite.test[test_doctor2_no_object]()
+    suite.test[test_doctor2_precheck_fail]()
+    suite.test[test_doctor2_notes]()
+    suite.test[test_doctor2_flags]()
+    suite.test[test_doctor2_json_schema]()
     suite^.run()
     return 0
 

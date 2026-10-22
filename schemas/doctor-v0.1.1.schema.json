@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "doctor-v0.1.1.schema.json",
+  "title": "MemVeil doctor report",
+  "description": "Admission-judged environment and capability report from memveil doctor. Passive runs never load BPF, never change the system, and never claim attachment; load-check runs load without attaching.",
+  "type": "object",
+  "required": ["schema_version", "mode", "provenance", "kernel", "guest", "profile", "capabilities", "privilege", "requested", "prechecks", "load", "notes", "verdict", "summary"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "0.1.1"},
+    "mode": {"enum": ["passive", "load-check"]},
+    "provenance": {
+      "type": "object",
+      "description": "Evidence origin: live host evidence, or a recorded fixture tree. Fixture runs never render as live.",
+      "required": ["origin"],
+      "additionalProperties": false,
+      "properties": {
+        "origin": {"enum": ["live", "fixture"]}
+      }
+    },
+    "kernel": {
+      "type": "object",
+      "required": ["release", "arch", "eligible_floor", "floor_reason", "btf", "lockdown"],
+      "additionalProperties": false,
+      "properties": {
+        "release": {"type": "string", "maxLength": 256},
+        "arch": {"type": "string", "maxLength": 64},
+        "eligible_floor": {"type": "boolean"},
+        "floor_reason": {"type": "string", "maxLength": 512},
+        "btf": {
+          "type": "object",
+          "required": ["state", "bytes", "config_btf", "config_src"],
+          "additionalProperties": false,
+          "properties": {
+            "state": {"enum": ["present", "malformed", "denied", "absent", "not-visible", "unreadable"]},
+            "bytes": {"type": ["string", "null"], "pattern": "^[0-9]+$"},
+            "config_btf": {"enum": ["y", "n", "unknown"]},
+            "config_src": {"enum": ["none", "proc", "boot"]}
+          }
+        },
+        "lockdown": {
+          "type": "object",
+          "required": ["mode", "src"],
+          "additionalProperties": false,
+          "properties": {
+            "mode": {"type": "string", "maxLength": 32},
+            "src": {"type": "string", "maxLength": 32}
+          }
+        }
+      }
+    },
+    "guest": {
+      "type": "object",
+      "required": ["tech", "signals", "asserted", "conflict"],
+      "additionalProperties": false,
+      "properties": {
+        "tech": {"enum": ["ordinary", "snp", "tdx", "sev-classic", "unknown"]},
+        "signals": {
+          "type": "array",
+          "description": "Evidence records behind the verdict: node states (sev-node/tdx-node:present|absent|denied), cpu-flags:ok:<tokens>|absent|denied|read-error, ordinary:absent-nodes-inference, asserted:<tech>, plus info:-prefixed environment context (btf, config-gz, os, boot-config) that never feeds the verdict.",
+          "maxItems": 64,
+          "items": {"type": "string", "maxLength": 256}
+        },
+        "asserted": {"type": "boolean"},
+        "conflict": {"type": "string", "maxLength": 512}
+      }
+    },
+    "profile": {
+      "type": "object",
+      "required": ["matched", "profile_id", "status", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "matched": {"type": "boolean"},
+        "profile_id": {"type": ["string", "null"], "maxLength": 128},
+        "status": {"type": ["string", "null"], "maxLength": 32},
+        "reason": {"type": "string", "maxLength": 512}
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "required": ["id", "status", "reason", "reason_code", "evidence"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string", "minLength": 1, "maxLength": 64},
+          "status": {"enum": ["available", "available-load-unchecked", "unavailable", "unknown", "unsupported"]},
+          "reason": {"type": "string", "maxLength": 512},
+          "remedy": {"type": "string", "maxLength": 512},
+          "reason_code": {"enum": ["lockdown-confidentiality", "no-bpf-tracing", "tracefs-not-mounted", "tracefs-hidden", "tracefs-denied", "btf-denied", "no-bpf-privilege", "load-eperm", "btf-absent-config", "btf-absent-unknown", "btf-malformed", "btf-truncated", "btf-too-large", "btf-split", "btf-unreadable", "btf-hook-not-in-btf", "btf-hook-missing", "btf-not-visible", "btf-hook-absent", "hook-ambiguous", "hook-not-traceable", "ftrace-disabled", "ftrace-unknown", "layout-missing", "layout-kind", "layout-size", "layout-bitfield", "layout-ambiguous", "signature-mismatch", "signature-width", "memcg-headroom", "load-enomem", "object-missing", "verifier-rejected", "profile", "floor", "available", "unsupported"]},
+          "evidence": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {"type": "string", "maxLength": 512}
+          }
+        }
+      }
+    },
+    "privilege": {
+      "type": "object",
+      "required": ["euid", "denied_paths"],
+      "additionalProperties": false,
+      "properties": {
+        "euid": {"type": "integer", "minimum": 0},
+        "denied_paths": {
+          "type": "array",
+          "description": "Union of environment denials (at most 7) and hook denials (at most 64 over 32 hooks). The bound carries headroom over the structural maximum of 71.",
+          "maxItems": 128,
+          "items": {"type": "string", "maxLength": 256}
+        }
+      }
+    },
+    "requested": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {"type": "string", "minLength": 1, "maxLength": 64}
+    },
+    "prechecks": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "required": ["id", "state", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string", "minLength": 1, "maxLength": 64},
+          "state": {"enum": ["pass", "fail", "unknown"]},
+          "reason": {"type": "string", "maxLength": 512}
+        }
+      }
+    },
+    "load": {
+      "type": "array",
+      "description": "One entry per requested object under --load-check; empty in passive mode.",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "required": ["object", "state", "errno", "detail"],
+        "additionalProperties": false,
+        "properties": {
+          "object": {"type": "string", "maxLength": 4096},
+          "state": {"enum": ["loaded", "failed", "skipped"]},
+          "errno": {"type": ["string", "null"], "maxLength": 32},
+          "detail": {"type": "string", "maxLength": 512}
+        }
+      }
+    },
+    "notes": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {"type": "string", "maxLength": 512}
+    },
+    "verdict": {"enum": ["ready", "ready-load-unchecked", "unavailable"]},
+    "summary": {"type": "string", "maxLength": 1024}
+  }
+}
