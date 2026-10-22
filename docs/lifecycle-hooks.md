@@ -218,7 +218,7 @@ counter and compares it with the first read, which is
 never replaced. A detected move marks detail loss unknown
 with reason `post-snapshot activity`; an unreadable
 re-read marks it unknown with reason `recursion misses
-unreadable after settle`. A moved or unreadable attempt
+unreadable after settle: ...`. A moved or unreadable attempt
 count, or a skipped re-read, also marks the aggregate
 loss unknown with its own reason.
 
