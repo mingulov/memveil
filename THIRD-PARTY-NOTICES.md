@@ -88,13 +88,13 @@ entry.
   are not shipped: the bundle links them from the host at
   run time.
 
-- `bpf/include/uapi/` vendored UAPI headers (13 files,
-  byte-exact copies from linux-libc-dev:amd64 7.0.0-38.38;
-  pinned by sha256 in `bpf/include/uapi/README`).
+- `bpf/include/uapi/` vendored UAPI headers (source tree only;
+  13 files, byte-exact copies from linux-libc-dev:amd64
+  7.0.0-38.38; pinned by sha256 in `bpf/include/uapi/README`).
   GPL-2.0 WITH Linux-syscall-note; full text in
   `LICENSES/GPL-2.0.txt`. These headers are a build input:
-  they compile into MemVeil's own BPF objects and do not
-  ship as files.
+  they compile into MemVeil's own BPF objects and do not ship
+  as files in binary bundles.
 
 License texts: `LICENSE`, `LICENSES/` (MemVeil);
 `licenses/libbpf-mojo-LICENSE`,
