@@ -753,6 +753,7 @@ struct Collector:
     var attempt_missed: UInt64
     var attempt_known: Bool
     var attempt_post_snapshot: Bool
+    var attempt_void_cause: String
     var has_recursion: Bool
     var rec_has_detail: Bool
     var rec_bounce: UInt64
@@ -862,6 +863,7 @@ struct Collector:
         self.attempt_missed = UInt64(0)
         self.attempt_known = False
         self.attempt_post_snapshot = False
+        self.attempt_void_cause = String("")
         self.has_recursion = False
         self.rec_has_detail = False
         self.rec_bounce = UInt64(0)
@@ -2010,27 +2012,38 @@ struct Collector:
         self.recursion_missed = others + loss_cp
         self.has_recursion = True
 
+    def _void_attempt_aggregate(mut self, cause: String):
+        """Void exact attempt loss; the cause names move or gap."""
+        self.attempt_post_snapshot = True
+        self.attempt_void_cause = cause
+
     def _verify_misses_stable[K: KernelSource](mut self, mut kernel: K):
         """Re-read miss counters; any move past the first read is unknown."""
         if not self.attempt_known:
             return
         var m = kernel.recursion_misses()
         if not m.ok:
-            self.attempt_post_snapshot = True
+            self._void_attempt_aggregate(
+                String("recursion misses unreadable after settle")
+            )
             self.note_unknown(
                 String("recursion misses unreadable after settle")
             )
             return
         if m.detail_error != String(""):
             if m.attempt != self.attempt_missed:
-                self.attempt_post_snapshot = True
+                self._void_attempt_aggregate(
+                    String("post-snapshot activity")
+                )
             self.note_unknown(
                 String("recursion misses unreadable after settle")
             )
             return
         var attempt_moved = m.attempt != self.attempt_missed
         if attempt_moved:
-            self.attempt_post_snapshot = True
+            self._void_attempt_aggregate(
+                String("post-snapshot activity")
+            )
         if self.rec_has_detail != m.has_copy_detail:
             self.note_unknown(String("post-snapshot activity"))
             return
@@ -2061,12 +2074,16 @@ struct Collector:
             elif out.kind != String("timeout"):
                 self.note_unknown(String("error shutdown"))
                 self.result_state = String("error")
-                self.attempt_post_snapshot = True
+                self._void_attempt_aggregate(
+                    String("re-read skipped")
+                )
                 return
         var final = kernel.stats()
         if not final.ok:
             self.note_unknown(String("error shutdown"))
-            self.attempt_post_snapshot = True
+            self._void_attempt_aggregate(
+                String("re-read skipped")
+            )
             return
         self.stats_final = final.copy()
         self.has_final_stats = True
@@ -3060,8 +3077,10 @@ struct Collector:
             out.q_aggregate.status = String("partial")
             out.q_aggregate.has_loss_count = False
             out.q_aggregate.reason = aggregate_reason(True, String(""))
-            out.q_aggregate.reason += String(
-                "; attempt program skips unknown (post-snapshot activity)"
+            out.q_aggregate.reason += (
+                String("; attempt program skips unknown (")
+                + self.attempt_void_cause
+                + String(")")
             )
         elif self.snapshots_present and self.attempt_missed > 0:
             out.q_aggregate.status = String("partial")

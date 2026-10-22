@@ -2432,7 +2432,7 @@ def test_unreadable_second_read_leaves_aggregate_unknown() raises:
             c.session,
             String(
                 "attempt program skips unknown "
-                "(post-snapshot activity)"
+                "(recursion misses unreadable after settle)"
             ),
         )
     )
@@ -2459,7 +2459,7 @@ def test_error_close_unreadable_second_read_aggregate_unknown() raises:
             c.session,
             String(
                 "attempt program skips unknown "
-                "(post-snapshot activity)"
+                "(recursion misses unreadable after settle)"
             ),
         )
     )
@@ -2487,7 +2487,7 @@ def test_attempt_only_unreadable_second_read_aggregate_unknown() raises:
             c.session,
             String(
                 "attempt program skips unknown "
-                "(post-snapshot activity)"
+                "(recursion misses unreadable after settle)"
             ),
         )
     )
@@ -2514,7 +2514,7 @@ def test_error_close_attempt_only_unreadable_second_read_unknown() raises:
             c.session,
             String(
                 "attempt program skips unknown "
-                "(post-snapshot activity)"
+                "(recursion misses unreadable after settle)"
             ),
         )
     )
@@ -2549,7 +2549,7 @@ def test_confirm_poll_error_leaves_aggregate_unknown() raises:
             c.session,
             String(
                 "attempt program skips unknown "
-                "(post-snapshot activity)"
+                "(re-read skipped)"
             ),
         )
     )
@@ -2583,7 +2583,7 @@ def test_confirm_stats_error_leaves_aggregate_unknown() raises:
             c.session,
             String(
                 "attempt program skips unknown "
-                "(post-snapshot activity)"
+                "(re-read skipped)"
             ),
         )
     )
