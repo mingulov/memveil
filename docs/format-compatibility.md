@@ -2,9 +2,12 @@
 # Format compatibility
 
 Capture, event, session, and report schemas are versioned
-independently; the frozen set (events 0.1.1, profiles 0.1.1,
-session 0.1.1 and 0.1.2; report 0.1.1, doctor 0.1.0) is the
-only supported input. Session 0.1.1 adds the required terminal
+independently; the frozen set (events 0.1.1 and 0.1.2,
+profiles 0.1.1, session 0.1.1 and 0.1.2; report 0.1.1,
+doctor 0.1.0) is the only supported input. Events 0.1.2
+adds the true-only copy markers `pool_private` and
+`offset_past_allocation`; 0.1.1 stays frozen and accepted.
+Session 0.1.1 adds the required terminal
 stop object; 0.1.0 session documents are refused, never
 tolerated. Session 0.1.2 adds the optional correlation
 relations object; 0.1.1 stays frozen and accepted.
@@ -12,7 +15,7 @@ The replay path treats every capture as untrusted and stays
 offline: it never loads BPF objects, touches tracefs or
 BTF, opens the network, or requires privileges.
 
-## Reader policy (events 0.1.1, profiles 0.1.1, session 0.1.1/0.1.2, report 0.1.1, rest 0.1.0)
+## Reader policy (events 0.1.1/0.1.2, profiles 0.1.1, session 0.1.1/0.1.2, report 0.1.1, rest 0.1.0)
 
 - Unknown schema major, unknown event kind, unknown field, or
   duplicated key: refused, exit 2. There is no last-wins, no

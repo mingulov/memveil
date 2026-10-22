@@ -44,6 +44,21 @@ capture to clean up.
   takes about ten seconds. The final summary matches
   `report` on the same capture.
 
+## Hook liveness causes
+
+- `hooks silent: <equation> (<lhs> > <rhs>)` in detail
+  quality: one side of a hook pair fired with no matching
+  firings on the other side and no loss to explain the gap
+  (for example maps with no copies). Check for another
+  tracer detaching or replacing the probes, then rerun;
+  if the cause persists, the hook pair genuinely did not
+  fire together on this kernel.
+- `copy liveness unverified: lifecycle not captured` in
+  detail quality: the run captured copies without the
+  lifecycle channel, so no equation can verify them. Rerun
+  requesting lifecycle with copy
+  (`--capability attempt-trace,mapping-lifecycle,copy-actual`).
+
 ## Startup and loading failures
 
 - `memveil` prints nothing and exits 1: stdout is blocked

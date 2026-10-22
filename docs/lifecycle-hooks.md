@@ -173,6 +173,40 @@ hook signed offset math, where a negative offset widens the room.
 Any failed read degrades that event to unknown-with-reason while
 the request fact (size, direction) is still emitted.
 
+## Qualified kernel constants
+
+The probes pin these kernel constants; each carries a check,
+never a bare assumption:
+
+- `DMA_ATTR_SKIP_CPU_SYNC` is attrs bit 5
+  (`MV_DMA_ATTR_SKIP_CPU_SYNC (1UL << 5)`,
+  matching `include/linux/dma-mapping.h`). The unmap probe
+  reads it from the attrs argument, and the unmap->copy
+  liveness equations assert it on the matrix: a wrong bit
+  fires them under the reference workload.
+- `DMA_MAPPING_ERROR` is all-ones `phys_addr_t`
+  (`MV_INVALID_PHYS`). The map fexit probe reports ok only
+  when the return differs from that sentinel.
+- `phys_addr_t` and `size_t` are 8 bytes on x86-64; the
+  frozen signatures above encode that width.
+- `IO_TLB_SHIFT` is 11 (`MV_IO_TLB_SHIFT_WIRE`): one pool
+  slot covers 1 << 11 bytes. The copy probe checks each
+  pool span is exactly nslabs slots wide and degrades the
+  event to unknown with reason SHIFT otherwise.
+- Copy flags `0x10` (offset past the allocation) and
+  `0x20` (private pool) mark known copies only: the first
+  when the hook offset ran past the allocation end so the
+  full size copied unchecked, the second when the allocator
+  toggle proves the pool private. Unknown copies name one
+  of SLOT_READ, MASK_READ, BOUNDS, LAYOUT, or SHIFT, where
+  LAYOUT means a relocated size read mismatched its local
+  expectation.
+- The argument-count counter flag is xcounter flag word
+  bit 6 (`MV_FLAG_ARGCNT`, sticky). It sets when the
+  observed hook argument count differs from the frozen
+  signature; like any set flag bit it invalidates the
+  epoch and voids the liveness loss for that channel.
+
 ## Recursion fallback
 
 On x86 the kernel guards each tracing program with one per-CPU
@@ -254,6 +288,37 @@ detail unreadable: ...` without a copy channel).
   the outer DMA call may still fail afterwards, and its cleanup
   unmap arrives as its own event. Inner success is never a claim
   of final DMA success.
+
+## Hook liveness check
+
+After close, the collector judges five one-sided equations
+over two windows: forward F from attach to one second
+before detach, reverse R from readiness to one second
+before detach. Forward equations count causes in F and
+effects over the whole run; reverse equations count
+effects in R and causes over the whole run. The five are
+attempt->map, map->copy, copy->map, unmap->copy, and
+copy->unmap, each with a loss term of emitted-minus-tallied
+records per channel, so drain-stranded and rejected
+records are absorbed, never silent.
+
+Per equation, an empty window or a zero left-hand side is
+not exercised; unknown loss or a saturated counter is
+unverified; a violated inequality names silent hooks; a
+held inequality is verified. Overall precedence is silent
+over unverified over verified over not exercised, and a
+copy channel without lifecycle stays unverified
+regardless. Silent and unverified verdicts append a cause
+to detail quality (partial); a verified verdict appends
+`; liveness verified` to the lifecycle and copy
+capability reasons; an unexercised verdict changes
+nothing, so captures whose records predate attach replay
+byte-identical.
+
+Channels attach copy, then lifecycle, then attempt, and
+detach in the reverse order; inside the copy object the
+bounce entry attaches before the bounce exit and the sync
+hooks, so a sync record never precedes a live bounce hook.
 
 ## Explicitly unsupported
 

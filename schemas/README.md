@@ -124,6 +124,15 @@ allocation may therefore reference the allocation operation with
 allocation must not acquire a successful mapping ID. Never manufacture
 mappings or success from attempt events.
 
+Events `0.1.2` adds two true-only `copy` data markers,
+`pool_private` and `offset_past_allocation`: each is either
+present-and-true or absent, and an explicit false is refused.
+`pool_private` proves the allocator toggle saw a private pool;
+absent means not proven private, never proven shared.
+`offset_past_allocation` proves the hook offset ran past the
+allocation end so the full size copied unchecked. Reports
+split these markers into their own rows only when observed.
+
 Region references expose opaque session tokens, relative byte offsets,
 lengths, an address-space namespace and resolution. `physical_span`
 computations require `guest_physical` and a normalization adapter that
