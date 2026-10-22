@@ -1497,7 +1497,7 @@ def repo_identity(root):
         return "unknown", True
 
 
-BUSY_MAX_EVENTS_BYTES = 4294967296
+BUSY_MAX_EVENTS_BYTES = 8589934592
 
 
 def record_argv(mv, dest, duration, caps, max_events_bytes=None):
@@ -1506,6 +1506,8 @@ def record_argv(mv, dest, duration, caps, max_events_bytes=None):
     The busy capture runs 20 s under full read pressure and
     must not hit the default 1 GiB cap mid-window; pass
     BUSY_MAX_EVENTS_BYTES for it, None for the default.
+    8 GiB is ~5x the observed saturation capture so a
+    faster product drain cannot trip the cap either.
     """
     argv = [mv, "record", "--output", dest, "--duration",
            str(duration), "--capability", caps]

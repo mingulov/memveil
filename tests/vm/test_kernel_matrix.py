@@ -3287,7 +3287,7 @@ def test_session_end_reason():
 
 
 def test_record_argv():
-    assert km.BUSY_MAX_EVENTS_BYTES == 4294967296
+    assert km.BUSY_MAX_EVENTS_BYTES == 8589934592
     argv = km.record_argv("/usr/bin/memveil", "/tmp/cap",
                          60, "attempt-trace", None)
     assert argv == ["/usr/bin/memveil", "record",
@@ -3297,7 +3297,7 @@ def test_record_argv():
                          300, "attempt-trace",
                          km.BUSY_MAX_EVENTS_BYTES)
     assert argv[-2:] == ["--max-events-bytes",
-                        "4294967296"]
+                        "8589934592"]
 
 
 def test_guest_quiesce_udev(tmp_path):
