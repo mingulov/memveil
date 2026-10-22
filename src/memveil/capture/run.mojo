@@ -26,6 +26,7 @@ from memveil.capture.collector import (
     RunResult,
     WriterSource,
 )
+from memveil.capture.loadcheck import diagnose_load
 from memveil.capture.kernel import LmbKernel
 from memveil.capture.reader import (
     DEFAULT_MAX_EVENTS_BYTES as REPLAY_MAX_EVENTS_BYTES,
@@ -432,6 +433,38 @@ def _cp_progs() -> List[_ProgWant]:
     out.append(_ProgWant(String("mv_bounce"), String("fentry/")))
     out.append(_ProgWant(String("mv_bounce_exit"), String("fexit/")))
     return out^
+
+
+def attempt_program_names() -> List[String]:
+    """Attempt program names for load diagnostics."""
+    var out = List[String]()
+    out.append(String(_PROGRAM))
+    return out^
+
+
+def lifecycle_program_names() -> List[String]:
+    """Lifecycle program names for load diagnostics."""
+    var wants = _lc_progs()
+    var out = List[String]()
+    for i in range(len(wants)):
+        out.append(wants[i].name.copy())
+    return out^
+
+
+def copy_program_names() -> List[String]:
+    """Copy program names for load diagnostics."""
+    var wants = _cp_progs()
+    var out = List[String]()
+    for i in range(len(wants)):
+        out.append(wants[i].name.copy())
+    return out^
+
+
+def _is_load_errno_failure(diagnostic: String) -> Bool:
+    """True when a diagnostic names an EINVAL/EACCES load errno."""
+    if diagnostic.find(String("code=-22")) != -1:
+        return True
+    return diagnostic.find(String("code=-13")) != -1
 
 
 struct _ExtraOut(Copyable):
@@ -1809,9 +1842,16 @@ def run_collector_with[W: WriterSource](
     var collector = Collector(cfg^)
     var out = collector.run(kernel, clock, signal, writer)
     # Retain the bridge pin through every open_session
-    # inside the run above: this explicit last use keeps
-    # the fd open while the loader dlopens the alias.
+    # inside the run above and the load replay below:
+    # this explicit use keeps the fd open while the
+    # loader dlopens the alias.
     _ = snap.fd
+    if _is_load_errno_failure(out.diagnostic):
+        var diag = diagnose_load(
+            Span(decision.elf), snap.load_path, attempt_program_names()
+        )
+        for i in range(len(diag.lines)):
+            out.diagnostic += String("\n") + diag.lines[i]
     return out^
 
 

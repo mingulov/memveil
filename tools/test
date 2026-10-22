@@ -3040,6 +3040,7 @@ EOF
 suite_doctor() {
     run_unit_file tests/unit/test_doctor.mojo || return 1
     run_unit_file tests/unit/test_prechecks.mojo || return 1
+    run_unit_file tests/unit/test_loadcheck.mojo || return 1
     if [ ! -f "$ROOT/build/test-tmp/doctor2.json" ]; then
         echo "doctor: missing build/test-tmp/doctor2.json" >&2
         return 1
