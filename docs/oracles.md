@@ -98,8 +98,9 @@ block bytes, never from workload constants.
 `tools/validate-schemas` checks each capture, and block
 sectors tracking the reads proves the workload ran. A
 second busy capture runs 4 pre-faulted O_DIRECT readers
-for 20 s under a raised events-bytes cap (8 GiB, so the
-cap cannot end the window early), stops the record with
+for 20 s under the product-maximum events-bytes cap
+(4 GiB, so the default 1 GiB cap cannot end the window
+early), stops the record with
 SIGINT and the load with SIGTERM, and checks per-channel
 counts against the oracle over the inner window with no
 byte equality.
