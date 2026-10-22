@@ -546,6 +546,28 @@ def file_state(reader: EvidenceReader, path: String) -> Int:
     return EVIDENCE_DENIED
 
 
+def exists_f_ok(reader: EvidenceReader, path: String) -> Bool:
+    """Mirror faccessat(path, F_OK): existence with teeth.
+
+    True when the mapped path exists. A fixture strict
+    ancestor listed in denied= hides the path (a live
+    EACCES on a parent reads the same); a denied path
+    itself still exists, since denied is never absent.
+    """
+    var parts = path.split(String("/"))
+    var acc = String("")
+    for i in range(1, len(parts) - 1):
+        acc += String("/") + String(parts[i])
+        if is_denied(reader, acc):
+            return False
+    var mapped = evidence_path(reader, path)
+    var cpath = _to_cstr_local(mapped)
+    var r = external_call["access", Int32](
+        Span(cpath).unsafe_ptr(), _MODE_F_OK
+    )
+    return Int(r) == 0
+
+
 def read_evidence(
     reader: EvidenceReader, path: String, cap: Int
 ) raises EvidenceError -> List[UInt8]:

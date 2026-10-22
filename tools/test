@@ -989,6 +989,7 @@ PYEOF
 
 suite_profiles() {
     run_unit_file tests/unit/test_profiles.mojo || return 1
+    run_unit_file tests/unit/test_kernelgate.mojo || return 1
     run_unit_file tests/unit/test_narrow.mojo || return 1
     run_unit_file tests/unit/test_offsets.mojo || return 1
     run_unit_file tests/unit/test_trace_format.mojo || return 1

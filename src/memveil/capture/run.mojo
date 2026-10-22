@@ -52,6 +52,7 @@ from memveil.platform.evidence import (
     detect_environment,
 )
 from memveil.platform.hash import sha256_hex
+from memveil.platform.kernelgate import probe_tracefs, tracefs_translate
 from memveil.platform.narrow import (
     MAX_NARROW_BTF_BYTES,
     MAX_NARROW_FORMAT_BYTES,
@@ -757,9 +758,17 @@ def _read_format(
     root: String, hook: ProfileHook, mut raw: List[UInt8]
 ) -> String:
     """Read hook format bytes; "" when readable."""
+    var fpath = hook.format_path.copy()
+    try:
+        var treader = open_evidence_reader(root)
+        fpath = tracefs_translate(
+            probe_tracefs(treader), hook.format_path
+        )
+    except:
+        pass
     try:
         raw = read_host_file(
-            join_root(root, hook.format_path),
+            join_root(root, fpath),
             String("format"),
             MAX_NARROW_FORMAT_BYTES,
         )

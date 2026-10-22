@@ -47,6 +47,7 @@ unknown reasons, never to an exception.
 """
 
 from memveil.platform.evidence import parse_kernel_triple, triple_ge
+from memveil.platform.kernelgate import probe_tracefs, tracefs_translate
 from memveil.platform.narrow import probe_trace_offsets
 from memveil.platform.profiles import (
     ProfileDecision,
@@ -157,6 +158,7 @@ def _probe_hooks(
         String(""), False, String(""), String(""), False,
         String(""), False,
     )
+    var tprobe = probe_tracefs(reader)
     var n = len(decision.profile.caps[cap_index].hooks)
     for r in range(n):
         var want = decision.profile.caps[cap_index].hooks[r]
@@ -174,8 +176,12 @@ def _probe_hooks(
                 marks.bare_hook = want
             continue
         var hname = decision.profile.hooks[found].name
-        var id_path = decision.profile.hooks[found].id_path
-        var fmt_path = decision.profile.hooks[found].format_path
+        var id_path = tracefs_translate(
+            tprobe, decision.profile.hooks[found].id_path
+        )
+        var fmt_path = tracefs_translate(
+            tprobe, decision.profile.hooks[found].format_path
+        )
         # A hook with no probe path configured (fentry/fexit
         # have no tracefs id/format files) abstains from
         # that probe: an empty path is "never looked", not

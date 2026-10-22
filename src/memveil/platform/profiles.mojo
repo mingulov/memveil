@@ -40,6 +40,14 @@ from memveil.platform.btf import (
     read_btf_member,
 )
 from memveil.platform.evidence import KernelInfo, parse_kernel_triple
+from memveil.platform.kernelgate import (
+    MAX_FILTER_FUNCS_BYTES,
+    filter_line_counts,
+    probe_tracefs,
+    read_ftrace_enabled,
+    read_ftrace_text,
+    tracefs_translate,
+)
 from memveil.platform.narrow import (
     MAX_NARROW_BTF_BYTES,
     MAX_NARROW_FORMAT_BYTES,
@@ -75,7 +83,6 @@ comptime _MANIFEST_CAP = 65536
 comptime _PROFILE_CAP = 1048576
 comptime _INSTALLED_PROFILES_DIR = "/usr/share/memveil/profiles"
 comptime _INSTALLED_RECEIPTS_DIR = "/var/lib/memveil/receipts"
-comptime MAX_FILTER_FUNCS_BYTES = 8388608
 
 
 struct ProfileHook(Copyable):
@@ -1706,8 +1713,11 @@ def verify_live_cap(
     frozen signature (or any recorded alternate) must
     spell exactly the live BTF prototype, copy-actual
     also checks every recorded member layout against the
-    same BTF bytes, and every traced function must appear
-    as a full line in available_filter_functions. A
+    same BTF bytes, a present kernel.ftrace_enabled
+    must read 1 (absent draws no conclusion),
+    and every traced function must match exactly one
+    available_filter_functions first token (read under
+    the probed tracefs root; none or several refuse). A
     capability naming no tracepoint hook falls back to
     the doc's first tracepoint site only for
     attempt-trace, one with no tracing hooks skips the
@@ -1750,15 +1760,18 @@ def verify_live_cap(
                 has_site = True
                 break
     if has_site:
+        var tprobe = probe_tracefs(reader)
+        var id_probe = tracefs_translate(tprobe, site.id_path)
+        var fmt_probe = tracefs_translate(tprobe, site.format_path)
         try:
             _ = read_host_file(
-                join_root(reader.root, site.id_path),
+                join_root(reader.root, id_probe),
                 String("id"),
                 MAX_NARROW_FORMAT_BYTES,
             )
         except:
             pass
-        var fstate = file_state(reader, site.format_path)
+        var fstate = file_state(reader, fmt_probe)
         if fstate == EVIDENCE_ABSENT:
             return _live_refuse(
                 String("tracepoint ") + site.name + String(" absent")
@@ -1772,7 +1785,7 @@ def verify_live_cap(
         var form = List[UInt8]()
         try:
             form = read_host_file(
-                join_root(reader.root, site.format_path),
+                join_root(reader.root, fmt_probe),
                 String("format"),
                 MAX_NARROW_FORMAT_BYTES,
             )
@@ -1890,8 +1903,30 @@ def verify_live_cap(
                     + ")"
                 )
     if len(want_fns) > 0:
-        var fpath = String(
-            "/sys/kernel/tracing/available_filter_functions"
+        var fstate = read_ftrace_enabled(reader)
+        if fstate.value == String("0"):
+            return _live_refuse_code(
+                String(
+                    "kernel.ftrace_enabled is 0"
+                    " (function tracing disabled)"
+                ),
+                String("ftrace-disabled"),
+            )
+        if fstate.value == String("denied"):
+            return _live_unknown_code(
+                String("kernel.ftrace_enabled denied"),
+                String("ftrace-unknown"),
+            )
+        if fstate.value == String("malformed"):
+            return _live_unknown_code(
+                String("kernel.ftrace_enabled unreadable: ")
+                + read_ftrace_text(reader),
+                String("ftrace-unknown"),
+            )
+        var tprobe = probe_tracefs(reader)
+        var fpath = tracefs_translate(
+            tprobe,
+            String("/sys/kernel/tracing/available_filter_functions"),
         )
         var lstate = file_state(reader, fpath)
         if lstate == EVIDENCE_ABSENT:
@@ -1922,12 +1957,13 @@ def verify_live_cap(
         var text = bytes_to_text(listed^)
         var lines = text.split(String("\n"))
         for i in range(len(want_fns)):
-            var seen = False
+            var count = 0
             for j in range(len(lines)):
-                if String(lines[j]) == want_fns[i]:
-                    seen = True
-                    break
-            if not seen:
+                if filter_line_counts(
+                    String(lines[j]), want_fns[i].copy()
+                ):
+                    count += 1
+            if count == 0:
                 return _live_refuse(
                     want_names[i]
                     + String(": function ")
@@ -1935,6 +1971,16 @@ def verify_live_cap(
                     + String(
                         " not listed in available_filter_functions"
                     )
+                )
+            if count >= 2:
+                return _live_refuse_code(
+                    want_names[i]
+                    + String(": hook ")
+                    + want_fns[i]
+                    + String(" ambiguous (")
+                    + String(count)
+                    + String(" available_filter_functions lines)"),
+                    String("hook-ambiguous"),
                 )
     var done = LiveVerdict()
     done.ok = True

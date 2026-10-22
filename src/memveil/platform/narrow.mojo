@@ -16,7 +16,8 @@ from memveil.capture.normalize import bytes_to_hex
 from memveil.platform.btf import MAX_KERNEL_BTF_BYTES
 from memveil.platform.gzip import gunzip_member
 from memveil.platform.hash import sha256_hex
-from memveil.platform.reader import read_host_file
+from memveil.platform.kernelgate import probe_tracefs, tracefs_translate
+from memveil.platform.reader import open_evidence_reader, read_host_file
 
 comptime _ZLIB = "libz.so.1"
 comptime MAX_NARROW_CONFIG_BYTES = 8388608
@@ -424,6 +425,19 @@ def read_live_bytes(
         return _uncheckable(what + String(" unreadable"))
 
 
+def _tracefs_format_path(root: String, format_path: String) -> String:
+    """Translate one profile format path onto the live tracefs root.
+
+    An unopenable root keeps the profile path: the read
+    itself still fails closed downstream.
+    """
+    try:
+        var reader = open_evidence_reader(root)
+        return tracefs_translate(probe_tracefs(reader), format_path)
+    except:
+        return format_path
+
+
 def read_live_object(path: String) -> LiveValue:
     """Hash the BPF object file bytes (explicit path)."""
     try:
@@ -523,7 +537,10 @@ def measure_live_bindings(
     if btf.state != String("value"):
         return String("live bindings unmeasurable: btf")
     var form = read_live_bytes(
-        root, format_path, String("format"), MAX_NARROW_FORMAT_BYTES
+        root,
+        _tracefs_format_path(root, format_path),
+        String("format"),
+        MAX_NARROW_FORMAT_BYTES,
     )
     if form.state != String("value"):
         return String("live bindings unmeasurable: format")
@@ -678,7 +695,10 @@ def check_identity_bindings(
         out.key = String("btf")
         return out^
     var form = read_live_bytes(
-        root, format_path, String("format"), MAX_NARROW_FORMAT_BYTES
+        root,
+        _tracefs_format_path(root, format_path),
+        String("format"),
+        MAX_NARROW_FORMAT_BYTES,
     )
     if form.state != String("value"):
         out.state = String("uncheckable")
