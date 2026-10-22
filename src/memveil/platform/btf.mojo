@@ -1689,16 +1689,16 @@ def resolve_btf_type(
     var cands = List[Int]()
     for i in range(len(walk.offsets)):
         var k = walk.kinds[i]
-        var match = False
+        var kind_hit = False
         if want_struct and k == 4:
-            match = True
+            kind_hit = True
         if want_union and k == 5:
-            match = True
+            kind_hit = True
         if want_enum and (k == 6 or k == 19):
-            match = True
+            kind_hit = True
         if want_typedef and k == 8:
-            match = True
-        if not match:
+            kind_hit = True
+        if not kind_hit:
             continue
         var text = String("")
         if not walk.type_name(data, i, text):
