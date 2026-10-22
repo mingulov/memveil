@@ -83,7 +83,7 @@ jobs:
       - name: Build deb
         run: |
           ./tools/package-deb
-          MV_DEB=dist/memveil_*-1_amd64.deb ./tools/test deb || exit 1
+          MV_DEB="$(echo "$GITHUB_WORKSPACE"/dist/memveil_*-1_amd64.deb)" ./tools/test deb || exit 1
       - name: Build rpm
         run: |
           SPEC="$GITHUB_WORKSPACE/packaging/rpm/memveil.spec"
