@@ -67,6 +67,7 @@ from memveil.platform.reader import (
     bytes_to_text,
     file_state,
     open_evidence_reader,
+    read_evidence,
     read_host_file,
 )
 from memveil.render.json import escape_json
@@ -83,6 +84,7 @@ comptime _MANIFEST_CAP = 65536
 comptime _PROFILE_CAP = 1048576
 comptime _INSTALLED_PROFILES_DIR = "/usr/share/memveil/profiles"
 comptime _INSTALLED_RECEIPTS_DIR = "/var/lib/memveil/receipts"
+comptime MAX_KALLSYMS_BYTES = 67108864
 
 
 struct ProfileHook(Copyable):
@@ -1697,6 +1699,92 @@ def _read_live_btf(
     return done^
 
 
+def _kallsyms_clone(sym: String, function: String) -> Bool:
+    """True when sym is a dotted compiler clone of function.
+
+    Only .isra, .constprop, and .cold clones count; any
+    other dotted name is a different symbol.
+    """
+    var prefix = function + String(".")
+    if not sym.startswith(prefix):
+        return False
+    var rest = String("")
+    try:
+        var sb = sym.as_bytes()
+        rest = String(from_utf8=sb[prefix.byte_length() : len(sb)])
+    except:
+        return False
+    if rest == String("isra") or rest.startswith(String("isra.")):
+        return True
+    if rest == String("constprop") or rest.startswith(
+        String("constprop.")
+    ):
+        return True
+    if rest == String("cold") or rest.startswith(String("cold.")):
+        return True
+    return False
+
+
+def _live_kallsyms_split(
+    reader: EvidenceReader, hook: String, function: String
+) -> LiveVerdict:
+    """Split a BTF-missing FUNC by /proc/kallsyms evidence.
+
+    A symbol a readable listing exports but BTF lacks is
+    not in BTF (naming the match); a symbol a readable
+    listing lacks is absent from this kernel. Absent,
+    denied, or unreadable kallsyms cannot arbitrate, so
+    it keeps the BTF verdict with a missing code.
+    """
+    var base = (
+        hook + String(": function ") + function + String(" not found")
+    )
+    if file_state(reader, String("/proc/kallsyms")) != EVIDENCE_OK:
+        return _live_refuse_code(base.copy(), String("btf-hook-missing"))
+    var text = String("")
+    try:
+        var raw = read_evidence(
+            reader, String("/proc/kallsyms"), MAX_KALLSYMS_BYTES
+        )
+        text = bytes_to_text(raw^)
+    except:
+        return _live_refuse_code(base.copy(), String("btf-hook-missing"))
+    var clone = String("")
+    var lines = text.split(String("\n"))
+    for i in range(len(lines)):
+        var fields = String(lines[i]).split(String(" "))
+        if len(fields) < 3:
+            continue
+        var sym = String(fields[2])
+        if sym == function:
+            return _live_refuse_code(
+                hook
+                + String(": function ")
+                + function
+                + String(" present but not in BTF (")
+                + sym
+                + String(")"),
+                String("btf-hook-not-in-btf"),
+            )
+        if clone == String("") and _kallsyms_clone(sym, function):
+            clone = sym.copy()
+    if clone != String(""):
+        return _live_refuse_code(
+            hook
+            + String(": function ")
+            + function
+            + String(" present but not in BTF (")
+            + clone
+            + String(")"),
+            String("btf-hook-not-in-btf"),
+        )
+    return _live_refuse_code(
+        hook + String(": function ") + function
+        + String(" absent from this kernel"),
+        String("btf-hook-absent"),
+    )
+
+
 def verify_live_cap(
     reader: EvidenceReader, profile: Profile, cap_id: String
 ) -> LiveVerdict:
@@ -1855,6 +1943,15 @@ def verify_live_cap(
             if scode != String(""):
                 return _live_unknown_code(
                     String(t"{hook.name}: {live.message}"), scode
+                )
+            var missing = (
+                String("function ")
+                + hook.function
+                + String(" not found")
+            )
+            if live.message == missing:
+                return _live_kallsyms_split(
+                    reader, hook.name.copy(), hook.function
                 )
             return _live_refuse(
                 String(t"{hook.name}: {live.message}")

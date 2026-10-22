@@ -11,11 +11,13 @@ from memveil.capture.run import (
     RecordOptions,
     ScanDecision,
     decide_record,
+    parse_requested_caps,
     render_provenance,
     run_collector_with,
 )
 from memveil.cli.record import run_record_with
 from memveil.platform.evidence import KernelInfo
+from memveil.platform.kernelgate import remedy_for
 from memveil.platform.narrow import LiveValue
 from memveil.platform.profiles import (
     Profile,
@@ -401,6 +403,73 @@ def test_scan_live38_lc_candidate() raises:
     )
     assert_equal(d.measured_btf.state, String("value"))
     assert_equal(d.measured_btf.value.byte_length(), 64)
+
+
+def test_scan_gate_lockdown_refuses() raises:
+    var d = decide_record(
+        String("tests/fixtures/gate/lockdown-conf"),
+        _kernel_38(),
+        load_profiles(String(_PROFILES_LIVE)),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(""),
+        String("attempt-trace,mapping-lifecycle"),
+        String(""),
+        String(""),
+    )
+    assert_true(not d.ok)
+    assert_equal(d.refusal_code, String("lockdown-confidentiality"))
+    assert_equal(d.fix, remedy_for(String("lockdown-confidentiality")))
+
+
+def test_scan_caps_all() raises:
+    var all = parse_requested_caps(String("all"))
+    assert_true(all.ok)
+    assert_equal(len(all.caps), 3)
+    assert_equal(all.caps[0], String("attempt-trace"))
+    assert_equal(all.caps[1], String("mapping-lifecycle"))
+    assert_equal(all.caps[2], String("copy-actual"))
+    var mixed = parse_requested_caps(String("attempt-trace,all"))
+    assert_true(not mixed.ok)
+
+
+def test_scan_gate_passes_live38() raises:
+    var d = decide_record(
+        String("tests/fixtures/gate/base"),
+        _kernel_38(),
+        load_profiles(String(_PROFILES_LIVE)),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(""),
+        String("attempt-trace,mapping-lifecycle"),
+        String(""),
+        String(""),
+    )
+    assert_true(d.ok)
+    assert_equal(d.kind, String("candidate"))
+
+
+def test_run_carries_fix() raises:
+    var opts = _opts(String("build/scan-gate-fix"))
+    opts.capabilities = String("attempt-trace")
+    var writer = ScriptWriter()
+    var result = run_collector_with(
+        String("tests/fixtures/gate/lockdown-conf"),
+        String(_PROFILES_LIVE),
+        opts^,
+        writer,
+    )
+    assert_equal(result.exit_code, 3)
+    assert_true(
+        result.diagnostic.startswith(
+            String("kernel lockdown is confidentiality")
+        )
+    )
+    assert_equal(result.fix, remedy_for(String("lockdown-confidentiality")))
 
 
 def test_scan_live_explicit_candidate() raises:
@@ -1308,6 +1377,10 @@ def run() raises -> Int:
     suite.test[test_scan_skew_partial]()
     suite.test[test_scan_explicit_candidate]()
     suite.test[test_scan_live38_lc_candidate]()
+    suite.test[test_scan_gate_lockdown_refuses]()
+    suite.test[test_scan_caps_all]()
+    suite.test[test_scan_gate_passes_live38]()
+    suite.test[test_run_carries_fix]()
     suite.test[test_scan_live_explicit_candidate]()
     suite.test[test_scan_no_object_refuses]()
     suite.test[test_scan_explicit_mismatch_refuses]()

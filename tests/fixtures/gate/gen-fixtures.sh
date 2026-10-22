@@ -12,7 +12,7 @@ mkdir -p "$GATE"
 
 # Every generated tree; later tasks extend this list alongside
 # their variants. Only these directories are ever removed.
-VARIANTS="base ftrace-off ftrace-denied ftrace-malformed aff-dup aff-module aff-clone aff-prefix debugfs-root debug-denied lockdown-conf lockdown-integrity lockdown-nosecfs lockdown-dashdash lockdown-config lockdown-nolsm lockdown-twobrackets lockdown-bogus lockdown-denied"
+VARIANTS="base ftrace-off ftrace-denied ftrace-malformed aff-dup aff-module aff-clone aff-prefix debugfs-root debug-denied lockdown-conf lockdown-integrity lockdown-nosecfs lockdown-dashdash lockdown-config lockdown-nolsm lockdown-twobrackets lockdown-bogus lockdown-denied notracing-config notracing-bpfevents tracefs-noevents tracefs-unmounted tracefs-hidden tracefs-gone events-denied btf-absent-config btf-absent-unknown btf-not-visible btf-denied hook-absent hook-not-in-btf hook-clone hook-nokallsyms denied-all container-view"
 for v in $VARIANTS; do
   rm -rf "$GATE/$v"
 done
@@ -128,4 +128,105 @@ mk lockdown-denied
 printf 'denied=/sys/kernel/security/lockdown\n' \
   >> "$GATE/lockdown-denied/meta.txt"
 
-echo "wrote $GATE (base plus 18 variants)"
+write_boot_config() {
+  # $1 = tree, $2.. = config lines: release-named boot config
+  # with proc/config.gz deleted so the boot file decides.
+  local tree="$1"
+  shift
+  rm -f "$tree/proc/config.gz"
+  : > "$tree/boot/config-7.0.0-38-generic"
+  for line in "$@"; do
+    printf '%s\n' "$line" >> "$tree/boot/config-7.0.0-38-generic"
+  done
+}
+
+mk notracing-config
+write_boot_config "$GATE/notracing-config" '# CONFIG_FTRACE is not set'
+
+mk notracing-bpfevents
+write_boot_config "$GATE/notracing-bpfevents" 'CONFIG_FTRACE=y'
+
+mk tracefs-noevents
+rm -rf "$GATE/tracefs-noevents/sys/kernel/tracing/events"
+
+mk tracefs-unmounted
+rm -rf "$GATE/tracefs-unmounted/sys/kernel/tracing"
+mkdir -p "$GATE/tracefs-unmounted/sys/kernel/tracing"
+printf 'securityfs /sys/kernel/security securityfs rw,nosuid,nodev,noexec,relatime 0 0\n' \
+  > "$GATE/tracefs-unmounted/proc/mounts"
+
+mk tracefs-hidden
+rm -rf "$GATE/tracefs-hidden/sys/kernel/tracing/events"
+strip_securityfs "$GATE/tracefs-hidden"
+# No mounts table at all: neither mounted nor unmounted is
+# provable, so the hidden-tracefs unknown fires.
+rm "$GATE/tracefs-hidden/proc/mounts"
+
+mk tracefs-gone
+rm -rf "$GATE/tracefs-gone/sys/kernel/tracing"
+rm -rf "$GATE/tracefs-gone/sys/kernel/debug"
+
+mk events-denied
+printf 'denied=/sys/kernel/tracing/events\n' \
+  >> "$GATE/events-denied/meta.txt"
+
+mk btf-absent-config
+rm "$GATE/btf-absent-config/sys/kernel/btf/vmlinux"
+write_boot_config "$GATE/btf-absent-config" \
+  '# CONFIG_DEBUG_INFO_BTF is not set'
+
+mk btf-absent-unknown
+rm "$GATE/btf-absent-unknown/sys/kernel/btf/vmlinux"
+rm "$GATE/btf-absent-unknown/proc/config.gz"
+rm -f "$GATE/btf-absent-unknown"/boot/config-*
+
+mk btf-not-visible
+rm "$GATE/btf-not-visible/sys/kernel/btf/vmlinux"
+write_boot_config "$GATE/btf-not-visible" 'CONFIG_DEBUG_INFO_BTF=y'
+
+mk btf-denied
+printf 'denied=/sys/kernel/btf/vmlinux\n' >> "$GATE/btf-denied/meta.txt"
+
+NOMAP="$ROOT/tests/fixtures/btf/swiotlb-live-nomap.bin"
+
+mk hook-absent
+cp "$NOMAP" "$GATE/hook-absent/sys/kernel/btf/vmlinux"
+{
+  printf '0000000000000000 T noise_fn\n'
+  printf '0000000000000000 t other_fn\n'
+} > "$GATE/hook-absent/proc/kallsyms"
+
+mk hook-not-in-btf
+cp "$NOMAP" "$GATE/hook-not-in-btf/sys/kernel/btf/vmlinux"
+{
+  printf '0000000000000000 T noise_fn\n'
+  printf '0000000000000000 T swiotlb_tbl_map_single\n'
+} > "$GATE/hook-not-in-btf/proc/kallsyms"
+
+mk hook-clone
+cp "$NOMAP" "$GATE/hook-clone/sys/kernel/btf/vmlinux"
+{
+  printf '0000000000000000 T noise_fn\n'
+  printf '0000000000000000 t swiotlb_tbl_map_single.isra.0\n'
+} > "$GATE/hook-clone/proc/kallsyms"
+
+mk hook-nokallsyms
+cp "$NOMAP" "$GATE/hook-nokallsyms/sys/kernel/btf/vmlinux"
+# No kallsyms file at all: the listing cannot arbitrate,
+# so the BTF verdict stands with a missing code.
+
+mk denied-all
+printf '%s\n' \
+  'denied=/sys/kernel/security/lockdown,/sys/kernel/debug,/boot/config-7.0.0-38-generic,/proc/config.gz,/proc/kallsyms,/proc/sys/kernel/ftrace_enabled,/sys/fs/cgroup/mvt.slice/memory.max,/proc/self/status' \
+  >> "$GATE/denied-all/meta.txt"
+
+mk container-view
+rm "$GATE/container-view/sys/kernel/btf/vmlinux"
+write_boot_config "$GATE/container-view" 'CONFIG_DEBUG_INFO_BTF=y'
+strip_securityfs "$GATE/container-view"
+mkdir -p "$GATE/container-view/sys/kernel/debug"
+mv "$GATE/container-view/sys/kernel/tracing" \
+  "$GATE/container-view/sys/kernel/debug/tracing"
+mkdir -p "$GATE/container-view/sys/kernel/tracing"
+
+echo "wrote $GATE (base plus 36 variants)"

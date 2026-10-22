@@ -262,6 +262,17 @@ def run_record_with(
             )
         except:
             pass
+    if result.fix != String("") and (
+        result.exit_code == EXIT_ERROR or result.exit_code == EXIT_REFUSAL
+    ):
+        try:
+            write_stderr(
+                String("memveil record: fix: ")
+                + result.fix
+                + String("\n")
+            )
+        except:
+            pass
     if result.end_reason == String(""):
         return result.exit_code
     var done = String(

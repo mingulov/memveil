@@ -54,6 +54,9 @@ Outputs: tests/fixtures/btf/*.bin (funcproto, dupfunc, cycle, anon,
                 offsets); feeds live-verification tests.
   swiotlb-live-73: swiotlb-live with the 7.3 map shape
                 (attrs as a pointer).
+  swiotlb-live-nomap: swiotlb-live without the
+                swiotlb_tbl_map_single FUNC: the hook-absent
+                shape for kallsyms-split tests.
   members   : synthetic member-resolution shapes: anonymous
                 struct-in-union nesting, kind_flag and legacy
                 bitfields, agreeing/disagreeing/partial
@@ -341,21 +344,22 @@ def _swiotlb_types(b):
     }
 
 
-def _swiotlb_funcs(b, ids, map_attrs_ptr):
+def _swiotlb_funcs(b, ids, map_attrs_ptr, skip_map=False):
     t_dev_ptr = b.t(0, K_PTR, 0, ids["dev"])
     t_pool_ptr = b.t(0, K_PTR, 0, ids["pool"])
-    params = struct.pack("<II", b.s("dev"), t_dev_ptr)
-    params += struct.pack("<II", b.s("orig_addr"), ids["phys"])
-    params += struct.pack("<II", b.s("mapping_size"), ids["size"])
-    params += struct.pack("<II", b.s("alloc_align_mask"), ids["uint"])
-    params += struct.pack("<II", b.s("dir"), ids["dir"])
-    if map_attrs_ptr:
-        t_ap = b.t(0, K_PTR, 0, ids["ulong"])
-        params += struct.pack("<II", b.s("attrs"), t_ap)
-    else:
-        params += struct.pack("<II", b.s("attrs"), ids["ulong"])
-    t_proto = b.t(0, K_PROTO, 6, ids["phys"], params)
-    b.t(b.s("swiotlb_tbl_map_single"), K_FUNC, 0, t_proto)
+    if not skip_map:
+        params = struct.pack("<II", b.s("dev"), t_dev_ptr)
+        params += struct.pack("<II", b.s("orig_addr"), ids["phys"])
+        params += struct.pack("<II", b.s("mapping_size"), ids["size"])
+        params += struct.pack("<II", b.s("alloc_align_mask"), ids["uint"])
+        params += struct.pack("<II", b.s("dir"), ids["dir"])
+        if map_attrs_ptr:
+            t_ap = b.t(0, K_PTR, 0, ids["ulong"])
+            params += struct.pack("<II", b.s("attrs"), t_ap)
+        else:
+            params += struct.pack("<II", b.s("attrs"), ids["ulong"])
+        t_proto = b.t(0, K_PROTO, 6, ids["phys"], params)
+        b.t(b.s("swiotlb_tbl_map_single"), K_FUNC, 0, t_proto)
     params = struct.pack("<II", b.s("dev"), t_dev_ptr)
     params += struct.pack("<II", b.s("tlb_addr"), ids["phys"])
     params += struct.pack("<II", b.s("mapping_size"), ids["size"])
@@ -397,6 +401,13 @@ def swiotlb_live(map_attrs_ptr):
     b = Blob()
     ids = _swiotlb_types(b)
     _swiotlb_funcs(b, ids, map_attrs_ptr)
+    return b.build()
+
+
+def swiotlb_live_nomap():
+    b = Blob()
+    ids = _swiotlb_types(b)
+    _swiotlb_funcs(b, ids, False, skip_map=True)
     return b.build()
 
 
@@ -508,6 +519,7 @@ def main():
              "intsize-bad": intsize_bad(),
              "swiotlb-live": swiotlb_live(False),
              "swiotlb-live-73": swiotlb_live(True),
+             "swiotlb-live-nomap": swiotlb_live_nomap(),
              "members": members(), "split": split(),
              "sig-width": sig_width(), "sig-dup": sig_dup()}
     for name, data in blobs.items():

@@ -52,7 +52,12 @@ from memveil.platform.evidence import (
     detect_environment,
 )
 from memveil.platform.hash import sha256_hex
-from memveil.platform.kernelgate import probe_tracefs, tracefs_translate
+from memveil.platform.kernelgate import (
+    GateVerdict,
+    kernel_gate,
+    probe_tracefs,
+    tracefs_translate,
+)
 from memveil.platform.narrow import (
     MAX_NARROW_BTF_BYTES,
     MAX_NARROW_FORMAT_BYTES,
@@ -194,11 +199,17 @@ struct ScanDecision(Copyable):
     and bound ring size in ``lc``/``cp``, and never runs
     partial. Admitted decisions carry the probed
     load-time table offsets (``off_*``, -1 when never
-    probed).
+    probed). Refusals carry a machine ``refusal_code``
+    (``profile`` for selection refusals), whether the
+    evidence was ``refusal_unknown``, and a user ``fix``
+    line ("" when none applies).
     """
 
     var ok: Bool
     var refusal: String
+    var refusal_code: String
+    var refusal_unknown: Bool
+    var fix: String
     var kind: String
     var profile: Profile
     var hook: ProfileHook
@@ -225,6 +236,9 @@ struct ScanDecision(Copyable):
     def __init__(out self):
         self.ok = False
         self.refusal = String("")
+        self.refusal_code = String("")
+        self.refusal_unknown = False
+        self.fix = String("")
         self.kind = String("")
         self.profile = Profile()
         self.hook = ProfileHook()
@@ -253,6 +267,18 @@ def _refuse_scan(reason: String) -> ScanDecision:
     var out = ScanDecision()
     out.ok = False
     out.refusal = reason
+    out.refusal_code = String("profile")
+    return out^
+
+
+def _refuse_scan_gate(gate: GateVerdict) -> ScanDecision:
+    """One kernel-gate refusal: reason, code, unknown flag, fix."""
+    var out = ScanDecision()
+    out.ok = False
+    out.refusal = gate.reason.copy()
+    out.refusal_code = gate.code.copy()
+    out.refusal_unknown = gate.unknown
+    out.fix = gate.remedy.copy()
     return out^
 
 
@@ -293,11 +319,19 @@ def _split_caps(text: String) -> List[String]:
 def parse_requested_caps(want: String) -> CapsOut:
     """Parse requested capabilities in order, deduplicated.
 
-    Empty means attempt-trace alone. Unknown ids, empty
-    items, and requests without attempt-trace refuse: the
-    attempt channel is the mandatory base channel.
+    Empty means attempt-trace alone; the sole item "all"
+    expands to the three record channels. Unknown ids,
+    empty items, and requests without attempt-trace
+    refuse: the attempt channel is the mandatory base
+    channel.
     """
     var out = CapsOut()
+    if want == String("all"):
+        out.caps.append(String(_ATTEMPT_CAP))
+        out.caps.append(String(_LIFECYCLE_CAP))
+        out.caps.append(String(_COPY_CAP))
+        out.ok = True
+        return out^
     var items = List[String]()
     if want == String(""):
         items.append(String(_ATTEMPT_CAP))
@@ -1008,6 +1042,18 @@ def decide_record(
         )
         if not cp.ok:
             return _refuse_scan(cp.refusal.copy())
+    try:
+        var gate_reader = open_evidence_reader(root)
+        var gated = kernel_gate(
+            gate_reader,
+            kernel.release.copy(),
+            String(_ZLIB),
+            ask.caps.copy(),
+        )
+        if not gated.ok:
+            return _refuse_scan_gate(gated)
+    except:
+        pass
     var order = List[Int]()
     var order_receipt = List[Bool]()
     var order_live = List[Bool]()
@@ -1474,11 +1520,13 @@ def run_collector_with[W: WriterSource](
         return RunResult(
             EXIT_REFUSAL, String(""), String(""),
             String(t"budget {opts.max_events_bytes} below 131072"),
+            String(""),
         )
     if opts.max_events_bytes > MAX_RECORD_BYTES:
         return RunResult(
             EXIT_REFUSAL, String(""), String(""),
             String(t"budget {opts.max_events_bytes} above 4294967296"),
+            String(""),
         )
     var bridge = resolve_bridge(opts.bridge, opts.has_bridge)
     if bridge == String(""):
@@ -1496,6 +1544,7 @@ def run_collector_with[W: WriterSource](
         return RunResult(
             EXIT_REFUSAL, String(""), String(""),
             hint,
+            String(""),
         )
     # One resolution, pinned once: the snapshot's open
     # file description feeds the admission hash, the
@@ -1528,6 +1577,7 @@ def run_collector_with[W: WriterSource](
         return RunResult(
             EXIT_REFUSAL, String(""), String(""),
             String("no object: pass --object PATH"),
+            String(""),
         )
     var lc_object = resolve_object(
         String("lifecycle"), opts.lc_object, exe_path
@@ -1542,6 +1592,7 @@ def run_collector_with[W: WriterSource](
         return RunResult(
             EXIT_REFUSAL, String(""), String(""),
             String("cannot open evidence: ") + String(e),
+            String(""),
         )
     var env = detect_environment(reader)
     if not env.kernel.eligible_floor:
@@ -1550,6 +1601,7 @@ def run_collector_with[W: WriterSource](
             String("kernel ")
             + env.kernel.release
             + String(" below floor 6.0"),
+            String(""),
         )
     var profiles: List[Profile]
     try:
@@ -1558,6 +1610,7 @@ def run_collector_with[W: WriterSource](
         return RunResult(
             EXIT_REFUSAL, String(""), String(""),
             String("cannot load profiles: ") + String(e),
+            String(""),
         )
     var decision = decide_record(
         root,
@@ -1576,17 +1629,20 @@ def run_collector_with[W: WriterSource](
         return RunResult(
             EXIT_REFUSAL, String(""), String(""),
             decision.refusal.copy(),
+            decision.fix.copy(),
         )
     var timens = check_timens_live()
     if not timens.ok:
         return RunResult(
             EXIT_REFUSAL, String(""), String(""),
             String("time namespace unverifiable"),
+            String(""),
         )
     if timens.offset:
         return RunResult(
             EXIT_REFUSAL, String(""), String(""),
             String("time namespace offset present"),
+            String(""),
         )
     if (
         decision.off_loc < 0
@@ -1597,6 +1653,7 @@ def run_collector_with[W: WriterSource](
         return RunResult(
             EXIT_REFUSAL, String(""), String(""),
             String("admission did not probe offsets"),
+            String(""),
         )
     var cfg = CollectorConfig()
     cfg.duration_s = opts.duration_s

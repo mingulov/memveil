@@ -1,0 +1,4 @@
+arch=x86_64
+release=7.0.0-38-generic
+euid=0
+denied=/sys/kernel/tracing/events

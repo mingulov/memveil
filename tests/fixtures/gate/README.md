@@ -22,3 +22,20 @@ tree is tracked. One line per variant:
 - lockdown-twobrackets: lockdown file with two bracketed tokens.
 - lockdown-bogus: cmdline carries an unknown lockdown value.
 - lockdown-denied: lockdown file is fixture-denied.
+- notracing-config: boot config without CONFIG_FTRACE.
+- notracing-bpfevents: boot config with CONFIG_FTRACE=y only.
+- tracefs-noevents: events removed under a mounted tracefs.
+- tracefs-unmounted: empty tracing dir, mounts without tracefs.
+- tracefs-hidden: events removed, no securityfs, no mounts table.
+- tracefs-gone: no tracing tree anywhere.
+- events-denied: the events dir is fixture-denied.
+- btf-absent-config: no BTF, config proves a BTF-less build.
+- btf-absent-unknown: no BTF and no config source at all.
+- btf-not-visible: no BTF although the config enables it.
+- btf-denied: the BTF file is fixture-denied.
+- hook-absent: BTF without the map hook, kallsyms without it.
+- hook-not-in-btf: BTF without the map hook, kallsyms with it.
+- hook-clone: only a dotted clone of the map hook in kallsyms.
+- hook-nokallsyms: BTF without the map hook, no kallsyms file.
+- denied-all: eight gate paths fixture-denied at once.
+- container-view: debug-only tracefs, BTF hidden, config says BTF.
