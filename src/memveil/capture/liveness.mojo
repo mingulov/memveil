@@ -134,8 +134,11 @@ struct _Bucket(Copyable, Movable):
 struct LivenessTally(Movable):
     """Per-record counts plus F/R window buckets.
 
-    `all` counts every record; the ring holds the trailing
-    buckets; win_f/win_r accumulate folded buckets. A bucket
+    `all` counts every record; seen_lc/seen_cp count every
+    lifecycle/copy record the tally observed, including
+    direction-skipped ones, so emitted-minus-seen is the
+    record loss. The ring holds the trailing buckets;
+    win_f/win_r accumulate folded buckets. A bucket
     leaving the ring folds into win_f (eviction implies it
     ended over a second before any detach the drain can
     reach, so it sits wholly inside F), and into win_r when
@@ -150,6 +153,20 @@ struct LivenessTally(Movable):
     var win_f: LivenessCounts
     var win_r: LivenessCounts
     var ring: List[_Bucket]
+    var seen_lc: UInt64
+    var seen_cp: UInt64
+
+    def __init__(out self):
+        self.t_a = UInt64(0)
+        self.t_r = UInt64(0)
+        self.all = LivenessCounts()
+        self.win_f = LivenessCounts()
+        self.win_r = LivenessCounts()
+        self.ring = List[_Bucket]()
+        for _ in range(LIVENESS_BUCKETS):
+            self.ring.append(_Bucket())
+        self.seen_lc = UInt64(0)
+        self.seen_cp = UInt64(0)
 
     def __init__(out self, t_a: UInt64, t_r: UInt64):
         self.t_a = t_a
@@ -160,6 +177,26 @@ struct LivenessTally(Movable):
         self.ring = List[_Bucket]()
         for _ in range(LIVENESS_BUCKETS):
             self.ring.append(_Bucket())
+        self.seen_lc = UInt64(0)
+        self.seen_cp = UInt64(0)
+
+    def retarget(mut self, t_a: UInt64, t_r: UInt64):
+        """Bind the windows once readiness is stamped; resets.
+
+        The collector calls this exactly once, after the arm,
+        before any record is tallied; nothing is lost by the
+        reset because nothing was tallied yet.
+        """
+        self.t_a = t_a
+        self.t_r = t_r
+        self.all = LivenessCounts()
+        self.win_f = LivenessCounts()
+        self.win_r = LivenessCounts()
+        self.ring = List[_Bucket]()
+        for _ in range(LIVENESS_BUCKETS):
+            self.ring.append(_Bucket())
+        self.seen_lc = UInt64(0)
+        self.seen_cp = UInt64(0)
 
     def _slot_for(mut self, ts: UInt64) -> Int:
         """Ring slot for ts, evicting as needed; -1 is all-only."""
@@ -199,7 +236,20 @@ struct LivenessTally(Movable):
         if s >= 0:
             self.ring[s].counts.bump_attempts()
 
+    def _bump_seen_lc(mut self):
+        var r = sat_add_u64(self.seen_lc, UInt64(1))
+        self.seen_lc = r[0]
+        if r[1]:
+            self.all.saturated = True
+
+    def _bump_seen_cp(mut self):
+        var r = sat_add_u64(self.seen_cp, UInt64(1))
+        self.seen_cp = r[0]
+        if r[1]:
+            self.all.saturated = True
+
     def note_map(mut self, ts: UInt64, ok: Bool):
+        self._bump_seen_lc()
         self.all.bump_maps_all()
         if ok:
             self.all.bump_maps_ok()
@@ -210,6 +260,7 @@ struct LivenessTally(Movable):
                 self.ring[s].counts.bump_maps_ok()
 
     def note_unmap(mut self, ts: UInt64, dir: UInt16, skip_sync: Bool):
+        self._bump_seen_lc()
         if skip_sync or (dir != UInt16(2) and dir != UInt16(0)):
             return
         self.all.bump_unmaps_from()
@@ -224,6 +275,7 @@ struct LivenessTally(Movable):
         var frm = not to_device and (
             dir == UInt16(2) or dir == UInt16(0)
         )
+        self._bump_seen_cp()
         if not to and not frm:
             return
         if to:
@@ -238,6 +290,7 @@ struct LivenessTally(Movable):
                 self.ring[s].counts.bump_syncc_from()
 
     def note_copy(mut self, ts: UInt64, dir: UInt16):
+        self._bump_seen_cp()
         if dir != UInt16(1) and dir != UInt16(2):
             return
         if dir == UInt16(1):

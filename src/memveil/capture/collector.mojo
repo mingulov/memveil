@@ -30,6 +30,12 @@ from memveil.capture.lifecycle import (
     normalize_copy_event,
     normalize_lifecycle_event,
 )
+from memveil.capture.liveness import (
+    LivenessLoss,
+    LivenessTally,
+    LivenessVerdict,
+    evaluate_liveness,
+)
 from memveil.capture.normalize import (
     PAYLOAD_LEN,
     CatalogEntry,
@@ -795,6 +801,7 @@ struct Collector:
     var stop_misuse: Bool
     var stop_evidence: StopEvidence
     var has_stop_evidence: Bool
+    var live: LivenessTally
 
     def __init__(out self, cfg: CollectorConfig):
         self.cfg = cfg.copy()
@@ -969,6 +976,7 @@ struct Collector:
             0,
         )
         self.has_stop_evidence = False
+        self.live = LivenessTally()
 
     def note_unknown(mut self, cause: String):
         """First deviation wins; later ones are retained."""
@@ -1479,6 +1487,7 @@ struct Collector:
         # Readiness lands after the arm (or after attach when
         # there is nothing to arm): firing is fully live below.
         self.ready_ns = clock.now()
+        self.live.retarget(self.attach_ns, self.ready_ns)
         if self.cfg.has_pool_sample:
             # Baseline pool sample, persisted first: the file
             # stays chronological (baseline, periodic, final)
@@ -1735,6 +1744,7 @@ struct Collector:
                 return String("unfinalizable")
             self.fail(String("error"))
             return String("error-path")
+        self.live.note_attempt(attempt.ktime)
         if normalized.requested_bytes > u64_max() - self.persisted_sum:
             self.latch(String("size_limit"))
             self.omit_for_latch()
@@ -1767,6 +1777,12 @@ struct Collector:
         if gate != String(""):
             return gate
         var ev = normalize_lifecycle_event(decoded)
+        if ev.kind == String("map_result"):
+            self.live.note_map(decoded.ktime, decoded.ok)
+        elif ev.kind == String("unmap"):
+            self.live.note_unmap(
+                decoded.ktime, decoded.dir, decoded.skip_sync
+            )
         if decoded.size > u64_max() - self.persisted_sum:
             self.latch(String("size_limit"))
             self.omit_for_latch()
@@ -1820,6 +1836,12 @@ struct Collector:
             self.rejected += UInt64(1)
             self.fail(String("error"))
             return String("error-path")
+        if ev.kind == String("sync_request"):
+            self.live.note_sync(
+                decoded.ktime, decoded.to_device, decoded.dir
+            )
+        elif ev.kind == String("copy"):
+            self.live.note_copy(decoded.ktime, decoded.dir)
         var byte_count = decoded.requested
         if ev.kind == String("copy"):
             byte_count = decoded.effective
@@ -2753,6 +2775,60 @@ struct Collector:
             total += self.end_vals_cp[CNT_SUBMIT_FAIL]
         return total
 
+    def _liveness_channel_loss(
+        self, start: List[UInt64], end: List[UInt64],
+        has_cut: Bool, seen: UInt64,
+    ) -> Tuple[UInt64, Bool]:
+        """Emitted-minus-seen for one channel, with validity.
+
+        The xcounter pair must be complete and trustworthy
+        (identity holds, no wrap or argument-count flags);
+        more tallied than emitted contradicts the counters
+        and voids the loss. Drain-stranded and rejected
+        records stay inside the loss term by construction:
+        they were emitted but never tallied.
+        """
+        if not has_cut:
+            return (UInt64(0), False)
+        if len(start) != 6 or len(end) != 6:
+            return (UInt64(0), False)
+        if not count_identity(start) or not epoch_flags_clear(start):
+            return (UInt64(0), False)
+        if not count_identity(end) or not epoch_flags_clear(end):
+            return (UInt64(0), False)
+        if end[CNT_FLAGS] & FLAG_ARGCNT != UInt64(0):
+            return (UInt64(0), False)
+        if start[CNT_FLAGS] & FLAG_ARGCNT != UInt64(0):
+            return (UInt64(0), False)
+        if end[CNT_EMITTED] < start[CNT_EMITTED]:
+            return (UInt64(0), False)
+        var emitted = end[CNT_EMITTED] - start[CNT_EMITTED]
+        if seen > emitted:
+            return (UInt64(0), False)
+        return (emitted - seen, True)
+
+    def _liveness_verdict(self) -> LivenessVerdict:
+        """Judge hook liveness from the tally and end cuts."""
+        var loss_lc = (UInt64(0), True)
+        var loss_cp = (UInt64(0), True)
+        if self.cfg.has_lifecycle:
+            loss_lc = self._liveness_channel_loss(
+                self.start_vals_lc, self.end_vals_lc,
+                self.has_end_cut_lc, self.live.seen_lc,
+            )
+        if self.cfg.has_copy:
+            loss_cp = self._liveness_channel_loss(
+                self.start_vals_cp, self.end_vals_cp,
+                self.has_end_cut_cp, self.live.seen_cp,
+            )
+        var loss = LivenessLoss(
+            loss_lc[0], loss_cp[0], loss_lc[1] and loss_cp[1]
+        )
+        return evaluate_liveness(
+            self.live, self.detach_ns, True,
+            self.cfg.has_lifecycle, self.cfg.has_copy, loss,
+        )
+
     def loss_pairs(self) -> List[String]:
         """Kernel/bridge components as decimal-or-unavailable."""
         var submit = String("unavailable")
@@ -2833,6 +2909,7 @@ struct Collector:
             )
         out.baseline_complete = False
         out.baseline_region_count = 0
+        var verdict = self._liveness_verdict()
         var cap = Capability()
         cap.status = String("partial")
         cap.reason = (
@@ -2934,6 +3011,18 @@ struct Collector:
                 out.cap_sync_requests,
                 String("No sync source in this capture."),
             )
+        if verdict.state == String("verified"):
+            if self.cfg.has_lifecycle:
+                out.cap_mapping_lifecycle.reason += String(
+                    "; liveness verified"
+                )
+            if self.cfg.has_copy:
+                out.cap_copy_bytes.reason += String(
+                    "; liveness verified"
+                )
+                out.cap_sync_requests.reason += String(
+                    "; liveness verified"
+                )
         self.unavailable_cap(
             out.cap_conversion_results,
             String("No conversion source in this capture."),
@@ -3077,6 +3166,35 @@ struct Collector:
                 self.rejected,
                 self.write_failed,
             )
+        if verdict.state == String("hooks_silent"):
+            out.q_detail.status = String("partial")
+            out.q_detail.reason += (
+                String("; hooks silent: ")
+                + verdict.equation
+                + String(" (")
+                + verdict.detail
+                + String(")")
+            )
+        elif verdict.state == String("unverified"):
+            out.q_detail.status = String("partial")
+            if verdict.equation == String(
+                "copy liveness needs lifecycle"
+            ):
+                # R3: the bounce/sync hooks fire inside map,
+                # sync, and unmap paths, so copies without
+                # lifecycle stay unattributable and unverified.
+                out.q_detail.reason += String(
+                    "; copy liveness unverified:"
+                    " lifecycle not captured"
+                )
+            else:
+                out.q_detail.reason += (
+                    String("; ")
+                    + verdict.equation
+                    + String(" liveness unverified (")
+                    + verdict.detail
+                    + String(")")
+                )
         out.q_detail.scope = scope
         if self.snapshots_present and not self.attempt_known:
             # Skipped attempt runs never advance the counters.

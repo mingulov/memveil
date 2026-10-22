@@ -388,6 +388,150 @@ def _run(
     return out^
 
 
+def _live_attach(
+    clock_values: List[UInt64], has_lifecycle: Bool, has_copy: Bool
+) -> UInt64:
+    """Attach read of an explicit startup script (no pool)."""
+    var nch = 1
+    if has_lifecycle:
+        nch += 1
+    if has_copy:
+        nch += 1
+    return clock_values[1 + 2 * nch]
+
+
+def _live_clock_values(
+    base: UInt64, has_lifecycle: Bool, has_copy: Bool
+) -> List[UInt64]:
+    """Explicit startup reads through the ready stamp."""
+    var nch = 1
+    if has_lifecycle:
+        nch += 1
+    if has_copy:
+        nch += 1
+    var out = List[UInt64]()
+    for i in range(1 + 2 * nch + 1):
+        out.append(base + UInt64(i))
+    return out^
+
+
+def _run_live(
+    payloads: List[List[UInt8]],
+    clock_values: List[UInt64],
+    end0: List[UInt64],
+    end1: List[UInt64],
+    rx1: UInt64,
+    end2: List[UInt64],
+    rx2: UInt64,
+    has_lifecycle: Bool = True,
+    has_copy: Bool = True,
+    max_events_bytes: Int = 1073741824,
+    duration_s: UInt64 = UInt64(60),
+    timeouts: Int = 103,
+    read_files: Bool = True,
+) raises -> CaseOut:
+    """_run with an explicit clock script and channel flags.
+
+    Record ktimes are absolute; tests place them with
+    _live_attach plus an offset. The scripted tail steps
+    100ms per read.
+    """
+    var tmp = _mkdtemp()
+    var out_dir = tmp + String("/cap")
+    var cfg = CollectorConfig()
+    cfg.duration_s = duration_s
+    cfg.max_events_bytes = max_events_bytes
+    cfg.output = out_dir
+    cfg.profile_id = String("test-profile-1")
+    cfg.pid = 7
+    cfg.has_ring_bytes = True
+    cfg.ring_bytes = UInt32(8388608)
+    cfg.has_lifecycle = has_lifecycle
+    cfg.lifecycle_ring_bytes = UInt32(8388608)
+    cfg.has_copy = has_copy
+    cfg.copy_ring_bytes = UInt32(8388608)
+    var kernel = ScriptKernel()
+    if has_copy:
+        kernel.channels = 3
+    elif has_lifecycle:
+        kernel.channels = 2
+    kernel.add_snap(_zero_snap())
+    kernel.add_snap(_zero_snap())
+    if has_lifecycle:
+        kernel.add_snap_at(1, _zero_snap())
+        kernel.add_snap_at(1, _zero_snap())
+    if has_copy:
+        kernel.add_snap_at(2, _zero_snap())
+        kernel.add_snap_at(2, _zero_snap())
+    kernel.add_snap(SnapOut(True, end0.copy(), String("")))
+    kernel.add_snap(SnapOut(True, end0.copy(), String("")))
+    if has_lifecycle:
+        kernel.add_snap_at(1, SnapOut(True, end1.copy(), String("")))
+        kernel.add_snap_at(1, SnapOut(True, end1.copy(), String("")))
+    if has_copy:
+        kernel.add_snap_at(2, SnapOut(True, end2.copy(), String("")))
+        kernel.add_snap_at(2, SnapOut(True, end2.copy(), String("")))
+    var n = UInt64(len(payloads))
+    var total = _stats(n, n, UInt64(0), UInt64(0))
+    var ch0n = _stats(
+        n - rx1 - rx2, n - rx1 - rx2, UInt64(0), UInt64(0))
+    kernel.add_stats(_zero_stats())
+    var nch = 1
+    if has_lifecycle:
+        nch += 1
+    if has_copy:
+        nch += 1
+    if nch >= 2:
+        kernel.add_stats(_zero_stats())
+    kernel.add_stats(total.copy())
+    kernel.add_stats(total.copy())
+    kernel.add_stats(total.copy())
+    kernel.add_stats(total.copy())
+    if nch >= 2:
+        kernel.add_stats(ch0n)
+    if has_lifecycle:
+        kernel.add_stats_at(1, _zero_stats())
+        kernel.add_stats_at(1, _stats(rx1, rx1, UInt64(0), UInt64(0)))
+    if has_copy:
+        kernel.add_stats_at(2, _zero_stats())
+        kernel.add_stats_at(2, _stats(rx2, rx2, UInt64(0), UInt64(0)))
+    for i in range(len(payloads)):
+        kernel.add_poll(_batch(payloads[i]), 1)
+    kernel.add_poll(_timeout(), timeouts)
+    var signal = ScriptSignal()
+    for i in range(len(payloads) + 1):
+        signal.add(String("none"))
+    signal.add(String("pending"))
+    var clock = ScriptClock()
+    clock.step = UInt64(100000000)
+    for i in range(len(clock_values)):
+        clock.add(clock_values[i])
+    var writer = ScriptWriter()
+    var collector = Collector(cfg)
+    var result = collector.run(kernel, clock, signal, writer)
+    var events = String("")
+    var session = String("")
+    if read_files:
+        events = _read_text(cfg.output + String("/events.ndjson"))
+        session = _read_text(cfg.output + String("/session.json"))
+    var loop_polls = 0
+    for t in kernel.poll_timeouts:
+        if t != 0:
+            loop_polls += 1
+    var out = CaseOut(
+        result.exit_code,
+        result.end_reason,
+        result.outcome,
+        result.diagnostic,
+        events,
+        session,
+        signal.checks,
+        loop_polls,
+        kernel.calls.copy(),
+    )
+    return out^
+
+
 def _cut(
     observed: UInt64, observed_bytes: UInt64, emitted: UInt64,
     emitted_bytes: UInt64,
@@ -3725,6 +3869,267 @@ def test_unreadable_copy_misses_keep_attempt_count() raises:
         )
     )
 
+
+def test_collector_liveness_dead_copy_exit4() raises:
+    # 200 successful maps over 3s with no copies: the copy
+    # hooks never fired, so the session ends partial with a
+    # hooks-silent cause naming the map->copy equation.
+    var vals = _live_clock_values(UInt64(1000000000), True, True)
+    var attach = _live_attach(vals, True, True)
+    var payloads = List[List[UInt8]]()
+    for i in range(200):
+        payloads.append(
+            _lc_raw(1, 1, 1, UInt64(1000 + i),
+                    attach + UInt64(i) * UInt64(15000000),
+                    UInt64(4096), UInt64(1000 + i)))
+    var c = _run_live(
+        payloads^, vals^, _zero_cut(),
+        _cut(UInt64(200), UInt64(819200), UInt64(200),
+             UInt64(819200)), UInt64(200),
+        _zero_cut(), UInt64(0), duration_s=UInt64(3600))
+    assert_equal(c.exit_code, 4)
+    assert_true(
+        _contains(c.session, String("hooks silent: map->copy"))
+    )
+
+
+def test_collector_liveness_healthy_verified() raises:
+    # T11-DEV1: the plan names this test healthy_exit0, but
+    # exit 0 is unreachable repo-wide today (terminal
+    # settlement is open: nothing in production observes
+    # quiescence, so stop evidence stays partial). The test
+    # pins the liveness verdict instead: matching copies
+    # verify, the capability reasons carry the suffix, and
+    # detail stays complete with zero loss.
+    var vals = _live_clock_values(UInt64(1000000000), True, True)
+    var attach = _live_attach(vals, True, True)
+    var payloads = List[List[UInt8]]()
+    for i in range(200):
+        payloads.append(
+            _lc_raw(1, 1, 1, UInt64(1000 + i),
+                    attach + UInt64(i) * UInt64(15000000),
+                    UInt64(4096), UInt64(1000 + i)))
+    for i in range(200):
+        payloads.append(
+            _cp_raw(2, 3, 1, UInt64(2000 + i),
+                    attach + UInt64(i) * UInt64(15000000),
+                    UInt64(4096), UInt64(4096), 0))
+    var c = _run_live(
+        payloads^, vals^, _zero_cut(),
+        _cut(UInt64(200), UInt64(819200), UInt64(200),
+             UInt64(819200)), UInt64(200),
+        _cut(UInt64(200), UInt64(819200), UInt64(200),
+             UInt64(819200)), UInt64(200), duration_s=UInt64(3600))
+    assert_equal(c.exit_code, 4)
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"detail":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+    assert_true(
+        _contains(c.session, String("; liveness verified\""))
+    )
+
+
+def test_copy_only_session_partial() raises:
+    # R3: a copy-only session is never complete. Without
+    # lifecycle evidence the copy hooks stay unverified even
+    # though every copy persisted cleanly.
+    var vals = _live_clock_values(UInt64(1000000000), False, True)
+    var attach = _live_attach(vals, False, True)
+    var payloads = List[List[UInt8]]()
+    for i in range(50):
+        payloads.append(
+            _cp_raw(2, 3, 1, UInt64(3000 + i),
+                    attach + UInt64(i) * UInt64(20000000),
+                    UInt64(4096), UInt64(4096), 0))
+    var c = _run_live(
+        payloads^, vals^, _zero_cut(), _zero_cut(), UInt64(0),
+        _cut(UInt64(50), UInt64(204800), UInt64(50),
+             UInt64(204800)), UInt64(50),
+        has_lifecycle=False, has_copy=True)
+    assert_equal(c.exit_code, 4)
+    assert_true(
+        _contains(
+            c.session,
+            String("copy liveness unverified: lifecycle not captured"),
+        )
+    )
+
+
+def test_collector_liveness_busy_edges_clean() raises:
+    # T11-DEV1: the plan names this test busy_edges_complete
+    # (exit 0); exit 0 is unreachable (see the healthy test).
+    # Copies hug the reverse window's edges — before t_r and
+    # past detach — so the reverse equation stays
+    # unexercised: no suffix, no silent cause, detail complete.
+    # t_r is one scripted read past attach (the arm consumes
+    # no clock reads), so the early edge is attach + 50ms.
+    var vals = _live_clock_values(UInt64(1000000000), True, True)
+    var attach = _live_attach(vals, True, True)
+    var payloads = List[List[UInt8]]()
+    for i in range(12):
+        payloads.append(
+            _cp_raw(2, 3, 1, UInt64(4000 + i),
+                    attach + UInt64(50000000),
+                    UInt64(4096), UInt64(4096), 0))
+    for i in range(13):
+        payloads.append(
+            _cp_raw(2, 3, 1, UInt64(4100 + i),
+                    attach + UInt64(100000000000),
+                    UInt64(4096), UInt64(4096), 0))
+    var c = _run_live(
+        payloads^, vals^, _zero_cut(), _zero_cut(), UInt64(0),
+        _cut(UInt64(25), UInt64(102400), UInt64(25),
+             UInt64(102400)), UInt64(25))
+    assert_equal(c.exit_code, 4)
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"detail":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+    assert_true(not _contains(c.session, String("; liveness")))
+    assert_true(not _contains(c.session, String("hooks silent")))
+
+
+def test_collector_liveness_size_limit_latch() raises:
+    # The size latch strands copy batches in the drain, where
+    # they are never tallied; emitted-minus-decoded absorbs
+    # them, so the forward equation stays quiet. 200+200
+    # records (~155KiB) latch the 128KiB budget with room to
+    # drain inside the 30s close budget; 400+400 strands more
+    # batches than the drain can consume and unfinalizes.
+    var vals = _live_clock_values(UInt64(1000000000), True, True)
+    var attach = _live_attach(vals, True, True)
+    var payloads = List[List[UInt8]]()
+    for i in range(200):
+        payloads.append(
+            _lc_raw(1, 1, 1, UInt64(5000 + i),
+                    attach + UInt64(i) * UInt64(2500000),
+                    UInt64(4096), UInt64(5000 + i)))
+    for i in range(200):
+        payloads.append(
+            _cp_raw(2, 3, 1, UInt64(6000 + i),
+                    attach + UInt64(1000000000) + UInt64(i) * UInt64(2500000),
+                    UInt64(4096), UInt64(4096), 0))
+    var c = _run_live(
+        payloads^, vals^, _zero_cut(),
+        _cut(UInt64(200), UInt64(819200), UInt64(200),
+             UInt64(819200)), UInt64(200),
+        _cut(UInt64(200), UInt64(819200), UInt64(200),
+             UInt64(819200)), UInt64(200),
+        max_events_bytes=131072, duration_s=UInt64(3600))
+    assert_equal(c.end_reason, String("size_limit"))
+    assert_equal(c.exit_code, 4)
+    assert_true(not _contains(c.session, String("hooks silent")))
+
+
+def test_scripted_old_ktimes_byte_identical() raises:
+    # Pre-attach ktimes never enter a window: this nested-copy
+    # scenario replays byte-identical with liveness on. The
+    # golden below was captured before the collector change.
+    var payloads = List[List[UInt8]]()
+    payloads.append(
+        _cp_raw(2, 3, 1, UInt64(101), UInt64(1001), UInt64(4096),
+                UInt64(4096), 0))
+    payloads.append(
+        _cp_raw(2, 3, 1, UInt64(102), UInt64(1002), UInt64(1024),
+                UInt64(1024), 0))
+    var c = _run(
+        payloads^, _zero_cut(), _zero_cut(), UInt64(0),
+        _cut(UInt64(2), UInt64(5120), UInt64(2), UInt64(5120)),
+        UInt64(2), read_files=True)
+    assert_equal(c.events, _golden_events())
+    assert_equal(c.session, _golden_session())
+
+
+def _golden_events() -> String:
+    return String(
+        '{\"schema_version\":\"0.1.1\",\"session_id\":\"cap-0-7\",\"seq\":\"0\",\"ts_ns\":\"1001\",\"kind\":\"copy\",\"source\":{\"h'
+        'ook\":\"fentry:swiotlb_bounce\",\"backend\":\"tracing\",\"profile_id\":\"test-profile-1\",\"measurement\":\"observ'
+        'ed\",\"correlation\":\"unpaired\"},\"data\":{\"operation_id\":\"lc-101\",\"mapping_id\":null,\"direction\":\"origina'
+        'l_to_bounce\",\"bytes\":\"4096\"}}'
+        '\n'
+        '{\"schema_version\":\"0.1.1\",\"session_id\":\"cap-0-7\",\"seq\":\"1\",\"ts_ns\":\"1002\",\"kind\":\"copy\",\"source\":{\"h'
+        'ook\":\"fentry:swiotlb_bounce\",\"backend\":\"tracing\",\"profile_id\":\"test-profile-1\",\"measurement\":\"observ'
+        'ed\",\"correlation\":\"unpaired\"},\"data\":{\"operation_id\":\"lc-102\",\"mapping_id\":null,\"direction\":\"origina'
+        'l_to_bounce\",\"bytes\":\"1024\"}}'
+        '\n'
+        '{\"schema_version\":\"0.1.1\",\"session_id\":\"cap-0-7\",\"seq\":\"2\",\"ts_ns\":\"2000000\",\"kind\":\"counter_snapsho'
+        't\",\"source\":{\"hook\":\"swiotlb:swiotlb_bounced\",\"backend\":\"tracepoint\",\"profile_id\":\"test-profile-1\",\"'
+        'measurement\":\"observed\",\"correlation\":\"direct\"},\"data\":{\"counter_id\":\"swiotlb.bounce_attempts\",\"epoc'
+        'h\":\"0\",\"scope\":{\"profile_id\":\"test-profile-1\"},\"value\":\"0\",\"unit\":\"count\"}}'
+        '\n'
+        '{\"schema_version\":\"0.1.1\",\"session_id\":\"cap-0-7\",\"seq\":\"3\",\"ts_ns\":\"2000000\",\"kind\":\"counter_snapsho'
+        't\",\"source\":{\"hook\":\"swiotlb:swiotlb_bounced\",\"backend\":\"tracepoint\",\"profile_id\":\"test-profile-1\",\"'
+        'measurement\":\"observed\",\"correlation\":\"direct\"},\"data\":{\"counter_id\":\"swiotlb.requested_bytes\",\"epoc'
+        'h\":\"0\",\"scope\":{\"profile_id\":\"test-profile-1\"},\"value\":\"0\",\"unit\":\"bytes\"}}'
+        '\n'
+        '{\"schema_version\":\"0.1.1\",\"session_id\":\"cap-0-7\",\"seq\":\"4\",\"ts_ns\":\"120000000\",\"kind\":\"counter_snaps'
+        'hot\",\"source\":{\"hook\":\"swiotlb:swiotlb_bounced\",\"backend\":\"tracepoint\",\"profile_id\":\"test-profile-1\"'
+        ',\"measurement\":\"observed\",\"correlation\":\"direct\"},\"data\":{\"counter_id\":\"swiotlb.bounce_attempts\",\"ep'
+        'och\":\"0\",\"scope\":{\"profile_id\":\"test-profile-1\"},\"value\":\"0\",\"unit\":\"count\"}}'
+        '\n'
+        '{\"schema_version\":\"0.1.1\",\"session_id\":\"cap-0-7\",\"seq\":\"5\",\"ts_ns\":\"120000000\",\"kind\":\"counter_snaps'
+        'hot\",\"source\":{\"hook\":\"swiotlb:swiotlb_bounced\",\"backend\":\"tracepoint\",\"profile_id\":\"test-profile-1\"'
+        ',\"measurement\":\"observed\",\"correlation\":\"direct\"},\"data\":{\"counter_id\":\"swiotlb.requested_bytes\",\"ep'
+        'och\":\"0\",\"scope\":{\"profile_id\":\"test-profile-1\"},\"value\":\"0\",\"unit\":\"bytes\"}}'
+        '\n'
+    )
+
+def _golden_session() -> String:
+    return String(
+        '{\"schema_version\":\"0.1.2\",\"session_id\":\"cap-0-7\",\"synthetic\":false,\"product\":{\"name\":\"memveil\",\"vers'
+        'ion\":\"memveil-0.1.0\"},\"environment\":{\"mode\":\"unknown\",\"detection\":\"unverified\",\"attestation\":\"not_pe'
+        'rformed\",\"evidence\":[{\"type\":\"provenance\",\"source\":\"attach_ns\",\"interpretation\":\"7000000\"},{\"type\":\"'
+        'provenance\",\"source\":\"detach_ns\",\"interpretation\":\"15000000\"},{\"type\":\"provenance\",\"source\":\"drain_c'
+        'losure\",\"interpretation\":\"proven\"},{\"type\":\"provenance\",\"source\":\"measurement_scope\",\"interpretation'
+        '\":\"ordinals below observed at the end cut\"},{\"type\":\"provenance\",\"source\":\"output.fs\",\"interpretatio'
+        'n\":\"btrfs\"}]},\"capture\":{\"mode\":\"live\",\"window\":{\"start_ns\":\"7000000\",\"end_ns\":\"126000001\",\"baseline'
+        '_start_ns\":\"2000000\"},\"filters\":{},\"finalized\":true,\"end_reason\":\"signal\"},\"device_catalog\":{\"device'
+        's\":[]},\"baseline\":{\"complete\":false,\"region_observations\":[]},\"capabilities\":{\"bounce_attempts\":{\"st'
+        'atus\":\"partial\",\"reason\":\"capture ok, 0 attempts persisted; admitted under test-profile-1; device de'
+        'tail grouped by observed name scope\",\"hooks\":[\"swiotlb:swiotlb_bounced\"],\"profile_id\":\"test-profile-'
+        '1\"},\"mapping_lifecycle\":{\"status\":\"partial\",\"reason\":\"capture ok, 0 map_result/unmap events persiste'
+        'd; admitted under test-profile-1; v2 wire reports opaque mapping generations when observed\",\"hooks\":'
+        '[\"fexit:swiotlb_tbl_map_single\",\"fentry:__swiotlb_tbl_unmap_single\"],\"profile_id\":\"test-profile-1\"},'
+        '\"copy_bytes\":{\"status\":\"partial\",\"reason\":\"capture ok, 2 copy events persisted; admitted under test-'
+        'profile-1; v1 copy wire carries no mapping identity\",\"hooks\":[\"fentry:swiotlb_bounce\"],\"profile_id\":'
+        '\"test-profile-1\"},\"sync_requests\":{\"status\":\"partial\",\"reason\":\"capture ok, 0 sync_request events pe'
+        'rsisted; admitted under test-profile-1; v1 copy wire carries no mapping identity\",\"hooks\":[\"fentry:_'
+        '_swiotlb_sync_single_for_device\",\"fentry:__swiotlb_sync_single_for_cpu\"],\"profile_id\":\"test-profile-'
+        '1\"},\"conversion_results\":{\"status\":\"unavailable\",\"reason\":\"No conversion source in this capture.\",\"h'
+        'ooks\":[]},\"region_state\":{\"status\":\"unavailable\",\"reason\":\"No region source in this capture.\",\"hooks'
+        '\":[]},\"pool_stats\":{\"status\":\"unavailable\",\"reason\":\"No pool source in this capture.\",\"hooks\":[]},\"t'
+        'ask_context\":{\"status\":\"unavailable\",\"reason\":\"No observer context in this capture.\",\"hooks\":[]}},\"q'
+        'uality\":{\"detail\":{\"status\":\"complete_for_scope\",\"loss_count\":\"0\",\"scope\":\"0 bounce_attempt + 0 map_'
+        'result/unmap + 2 copy/sync_request events\",\"reason\":\"detail loss 0 (submit_fail=(0) malformed=(0) dr'
+        'opped=(0) recursion_missed=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(0) rejected=(0)'
+        ' write_failed=(0))\",\"evidence_refs\":[]},\"aggregate\":{\"status\":\"complete_for_scope\",\"loss_count\":\"0\",'
+        '\"scope\":\"counter snapshots (attempt channel)\",\"reason\":\"counter snapshots present (valid cut, identi'
+        'ty holds, coverage valid)\",\"evidence_refs\":[]},\"correlation\":{\"status\":\"partial\",\"loss_count\":null,\"'
+        'scope\":\"correlated lifecycle events\",\"reason\":\"copy_attribution partial (copy without pending operat'
+        'ion)\",\"evidence_refs\":[\"capture:seq=0\",\"capture:seq=1\"],\"relations\":{\"mapping_release\":{\"status\":\"co'
+        'mplete_for_scope\",\"loss_count\":\"0\",\"scope\":\"mapping and release pairing\",\"reason\":\"all mapping and r'
+        'elease relationships paired\",\"evidence_refs\":[]},\"copy_attribution\":{\"status\":\"partial\",\"loss_count\"'
+        ':null,\"scope\":\"copy attribution\",\"reason\":\"copy without pending operation\",\"evidence_refs\":[\"capture'
+        ':seq=0\",\"capture:seq=1\"]},\"sync_attribution\":{\"status\":\"complete_for_scope\",\"loss_count\":\"0\",\"scope\"'
+        ':\"sync attribution\",\"reason\":\"all sync attribution relationships paired\",\"evidence_refs\":[]}}},\"base'
+        'line\":{\"status\":\"not_applicable\",\"loss_count\":null,\"scope\":\"attempt metrics\",\"reason\":\"Attempt metri'
+        'cs need no baseline.\",\"evidence_refs\":[]},\"terminal\":{\"status\":\"partial\",\"loss_count\":null,\"scope\":\"'
+        'capture finalization\",\"reason\":\"stop partial: quiescence unproven\",\"evidence_refs\":[]}},\"stop\":{\"out'
+        'come\":\"partial\",\"reason\":\"quiescence unproven\",\"budget_ms\":\"5000\",\"elapsed_ms\":\"110\",\"admission_clos'
+        'ed\":true,\"quiescence_observed\":false,\"writers_settled\":\"0\",\"in_flight_at_close\":\"0\",\"late_submits_dr'
+        'ained\":\"0\",\"drained_records\":\"0\",\"busy_at_drain\":false,\"counters_valid\":true,\"open_mappings\":\"0\"}}'
+    )
 
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
