@@ -10,6 +10,7 @@ from memveil.platform.btf import (
     check_btf_health,
     read_btf_copy_fb,
     read_btf_func_proto,
+    read_btf_func_sig,
     read_btf_maps,
     read_btf_maps_ring,
     read_btf_member,
@@ -571,6 +572,21 @@ def test_btf_cap_single() raises:
     assert_equal(evidence_btf_cap(), MAX_KERNEL_BTF_BYTES)
 
 
+def test_func_sig_dups() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/sig-dup.bin"))
+    var f = read_btf_func_sig(Span(raw), String("test_fn"))
+    assert_true(f.ok)
+    assert_equal(f.ret, String("int"))
+    assert_equal(len(f.params), 2)
+    assert_equal(f.params[0], String("struct device *"))
+    assert_equal(f.params[1], String("size_t"))
+    var g = read_btf_func_sig(Span(raw), String("test_gn"))
+    assert_true(not g.ok)
+    assert_equal(
+        g.message, String("ambiguous FUNC test_gn (2 prototypes differ)")
+    )
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_btf_ok]()
@@ -620,6 +636,7 @@ def run() raises -> Int:
     suite.test[test_member_legacy_refuses_bitfield]()
     suite.test[test_btf_health_classes]()
     suite.test[test_btf_cap_single]()
+    suite.test[test_func_sig_dups]()
     suite^.run()
     return 0
 

@@ -33,8 +33,10 @@ from memveil.model.common import (
 from memveil.model.validate import ValidationError, check_bounded_text
 from memveil.platform.artifact_files import join_root
 from memveil.platform.btf import (
+    BtfFuncSig,
     classify_btf_message,
     read_btf_func_proto,
+    read_btf_func_sig,
     read_btf_member,
 )
 from memveil.platform.evidence import KernelInfo, parse_kernel_triple
@@ -244,21 +246,26 @@ struct SigVerdict(Copyable):
     """Frozen-vs-live signature verdict for one tracing hook.
 
     ``ok`` is True only when the frozen signature normalizes
-    and spells exactly the live BTF prototype. ``live`` holds
-    the live canonical spelling ("" when BTF is unreadable)
-    so callers can show both sides of a mismatch.
+    and its parameter count and typedef-level type spellings
+    equal the live BTF prototype with 64-bit address widths.
+    ``live`` holds the live canonical spelling ("" when BTF
+    is unreadable) so callers can show both sides of a
+    mismatch. ``code`` names the machine reason class, ""
+    when ok or unclassified.
     """
 
     var hook: String
     var ok: Bool
     var reason: String
     var live: String
+    var code: String
 
     def __init__(out self):
         self.hook = String("")
         self.ok = False
         self.reason = String("")
         self.live = String("")
+        self.code = String("")
 
 
 def _check_profile_id(v: String) raises:
@@ -1406,6 +1413,120 @@ def _normalize_frozen_signature(
     return out^
 
 
+struct FrozenSig(Copyable):
+    """One frozen signature split into return and type spellings."""
+
+    var has: Bool
+    var ret: String
+    var params: List[String]
+
+    def __init__(out self):
+        self.has = False
+        self.ret = String("")
+        self.params = List[String]()
+
+
+def _strip_param_name(p: String) -> String:
+    """Drop the parameter name, keeping the type spelling.
+
+    Pointer spellings cut after the last star, plain ones
+    at the last space; a single word stays whole. Anything
+    failing both cuts stays whole and mismatches loudly.
+    """
+    var b = p.as_bytes()
+    var star = -1
+    for i in range(len(b)):
+        if b[i] == UInt8(0x2A):
+            star = i
+    if star >= 0:
+        var clean = star + 1 < len(b)
+        for i in range(star + 1, len(b)):
+            if b[i] == UInt8(0x20):
+                clean = False
+                break
+        if clean:
+            try:
+                return String(from_utf8=b[0 : star + 1])
+            except:
+                pass
+        return p
+    var sp = -1
+    for i in range(len(b)):
+        if b[i] == UInt8(0x20):
+            sp = i
+    if sp >= 0:
+        try:
+            return String(from_utf8=b[0:sp])
+        except:
+            pass
+    return p
+
+
+def frozen_sig_types(sig: String, function: String) -> FrozenSig:
+    """Split a frozen signature into return and type spellings.
+
+    Built on _normalize_frozen_signature; parameter names
+    are stripped, leaving typedef-level type spellings
+    that compare directly with the live BTF reading.
+    """
+    var out = FrozenSig()
+    var norm = _normalize_frozen_signature(sig, function)
+    if not norm.has:
+        return out^
+    var parts = norm.value.split(String(" ("))
+    if len(parts) != 2:
+        return out^
+    var inner = String(parts[1])
+    if not inner.endswith(String(")")):
+        return out^
+    var ib = inner.as_bytes()
+    var body = String("")
+    try:
+        body = String(from_utf8=ib[0 : len(ib) - 1])
+    except:
+        return out^
+    out.ret = String(parts[0])
+    if body == String("void"):
+        out.has = True
+        return out^
+    var items = body.split(String(", "))
+    for i in range(len(items)):
+        out.params.append(_strip_param_name(String(items[i])))
+    out.has = True
+    return out^
+
+
+def _sig_types_equal(sig: BtfFuncSig, fs: FrozenSig) -> Bool:
+    """True when a live signature equals one frozen spelling."""
+    if sig.ret != fs.ret:
+        return False
+    if len(sig.params) != len(fs.params):
+        return False
+    for i in range(len(sig.params)):
+        if sig.params[i] != fs.params[i]:
+            return False
+    return True
+
+
+def _sig_width_refusal(hook: String, sig: BtfFuncSig) -> String:
+    """First address-typedef width refusal, else "".
+
+    Every phys_addr_t, size_t, and dma_addr_t parameter
+    must resolve to 64 bits on the supported shape.
+    """
+    for i in range(len(sig.params)):
+        if (
+            sig.params[i] == String("phys_addr_t")
+            or sig.params[i] == String("size_t")
+            or sig.params[i] == String("dma_addr_t")
+        ):
+            if sig.widths[i] != 64:
+                var w = sig.widths[i]
+                var tname = sig.params[i]
+                return String(t"{hook}: {tname} width {w} bits (want 64)")
+    return String("")
+
+
 def verify_hook_signatures(
     profile: Profile, btf: Span[UInt8, _]
 ) -> List[SigVerdict]:
@@ -1414,9 +1535,11 @@ def verify_hook_signatures(
     One verdict per tracing hook in profile order; tracepoint
     hooks are skipped (their tracefs layout is checked
     separately). A verdict is ok only when the frozen
-    signature (or any recorded alternate) normalizes and
-    spells exactly the live BTF prototype; every refusal
-    names the hook and the cause.
+    signature (or any recorded alternate) matches the live
+    BTF prototype in return spelling, parameter count, and
+    every typedef-level parameter spelling, with 64-bit
+    address widths; every refusal names the hook and the
+    cause. Parameter names never compare.
     """
     var out = List[SigVerdict]()
     for i in range(len(profile.hooks)):
@@ -1425,38 +1548,47 @@ def verify_hook_signatures(
             continue
         var v = SigVerdict()
         v.hook = h.name.copy()
-        var norm = _normalize_frozen_signature(h.signature, h.function)
-        if not norm.has:
+        var fsig = frozen_sig_types(h.signature, h.function)
+        if not fsig.has:
             v.reason = String(t"{h.name}: frozen signature malformed")
             out.append(v.copy())
             continue
-        var alts = List[String]()
+        var alts = List[FrozenSig]()
         var alt_bad = False
         for a in range(len(h.signature_alt)):
-            var an = _normalize_frozen_signature(
+            var an = frozen_sig_types(
                 h.signature_alt[a], h.function
             )
             if not an.has:
                 alt_bad = True
                 break
-            alts.append(an.value.copy())
+            alts.append(an^)
         if alt_bad:
             v.reason = String(t"{h.name}: frozen signature_alt malformed")
             out.append(v.copy())
             continue
-        var live = read_btf_func_proto(btf, h.function)
-        if not live.ok:
-            v.reason = String(t"{h.name}: {live.message}")
+        var sig = read_btf_func_sig(btf, h.function)
+        if not sig.ok:
+            v.reason = String(t"{h.name}: {sig.message}")
             out.append(v.copy())
             continue
-        v.live = live.canonical.copy()
-        var hit = live.canonical == norm.value
+        var proto = read_btf_func_proto(btf, h.function)
+        if proto.ok:
+            v.live = proto.canonical.copy()
+        var hit = _sig_types_equal(sig, fsig)
         for a in range(len(alts)):
-            if live.canonical == alts[a]:
+            if _sig_types_equal(sig, alts[a]):
                 hit = True
                 break
         if not hit:
             v.reason = String(t"{h.name}: signature mismatch")
+            v.code = String("signature-mismatch")
+            out.append(v.copy())
+            continue
+        var wref = _sig_width_refusal(h.name.copy(), sig)
+        if wref != String(""):
+            v.reason = wref.copy()
+            v.code = String("signature-width")
             out.append(v.copy())
             continue
         v.ok = True

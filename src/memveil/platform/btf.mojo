@@ -1069,6 +1069,171 @@ def read_btf_func_proto(data: Span[UInt8, _], name: String) -> BtfFuncProto:
     return out^
 
 
+struct BtfFuncSig(Copyable):
+    """One BTF function signature read: types without names."""
+
+    var ok: Bool
+    var message: String
+    var ret: String
+    var params: List[String]
+    var widths: List[Int]
+
+    def __init__(out self):
+        self.ok = False
+        self.message = String("")
+        self.ret = String("")
+        self.params = List[String]()
+        self.widths = List[Int]()
+
+
+def _typedef_width(
+    walk: _BtfWalk, data: Span[UInt8, _], tid: Int
+) -> Int:
+    """Resolved INT bit width when tid is a bare typedef, else 0.
+
+    Modifiers peel to the first named stop: a typedef
+    with no pointer level resolves below itself (through
+    nested typedefs and modifiers) to INT; pointers,
+    direct types, and broken chains carry no width.
+    """
+    var cur = tid
+    for _ in range(_MAX_SPELL_DEPTH):
+        if not walk.rec_valid(cur):
+            return 0
+        var kind = walk.kinds[cur - 1]
+        if kind == 2:
+            return 0
+        if kind == 9 or kind == 10 or kind == 11 or kind == 18:
+            cur = walk.sizes[cur - 1]
+            continue
+        if kind != 8:
+            return 0
+        cur = walk.sizes[cur - 1]
+        for _ in range(_MAX_SPELL_DEPTH):
+            if not walk.rec_valid(cur):
+                return 0
+            var sub = walk.kinds[cur - 1]
+            if sub == 1:
+                return walk.sizes[cur - 1] * 8
+            if (
+                sub != 8
+                and sub != 9
+                and sub != 10
+                and sub != 11
+                and sub != 18
+            ):
+                return 0
+            cur = walk.sizes[cur - 1]
+        return 0
+    return 0
+
+
+def _spell_proto_sig(
+    walk: _BtfWalk, data: Span[UInt8, _], proto: Int
+) -> BtfFuncSig:
+    """Spell one FUNC_PROTO record as types without names.
+
+    Parameter names are validated but never kept: only
+    typedef-level type spellings compare, so unnamed
+    parameters spell fine.
+    """
+    var out = BtfFuncSig()
+    var ret = _spell_btf_type(
+        walk, data, walk.sizes[proto - 1], _MAX_SPELL_DEPTH
+    )
+    if not ret.ok:
+        out.message = ret.message.copy()
+        return out^
+    out.ret = ret.text.copy()
+    var pbase = walk.offsets[proto - 1]
+    var pcount = walk.vlens[proto - 1]
+    for m in range(pcount):
+        var pname_off = _u32(data, pbase + 12 + m * 8)
+        var ptype = _u32(data, pbase + 12 + m * 8 + 4)
+        var pname = String("")
+        if not _table_text(
+            data, walk.str_base, walk.str_end, pname_off, pname
+        ):
+            out.message = String("BTF strings corrupt")
+            return out^
+        var ps = _spell_btf_type(walk, data, ptype, _MAX_SPELL_DEPTH)
+        if not ps.ok:
+            out.message = ps.message.copy()
+            return out^
+        out.params.append(ps.text.copy())
+        out.widths.append(_typedef_width(walk, data, ptype))
+    out.ok = True
+    return out^
+
+
+def _func_sig_same(a: BtfFuncSig, b: BtfFuncSig) -> Bool:
+    """True when two spelled signatures agree on types and widths."""
+    if a.ret != b.ret:
+        return False
+    if len(a.params) != len(b.params):
+        return False
+    for i in range(len(a.params)):
+        if a.params[i] != b.params[i]:
+            return False
+        if a.widths[i] != b.widths[i]:
+            return False
+    return True
+
+
+def read_btf_func_sig(data: Span[UInt8, _], name: String) -> BtfFuncSig:
+    """Find FUNC name in a raw BTF blob; spell types sans names.
+
+    The blob is a header-at-zero BTF image such as
+    /sys/kernel/btf/vmlinux. Parameters spell at typedef
+    level without names, each carrying its resolved INT
+    bit width when it is a bare typedef, else zero.
+    Duplicate FUNC entries are accepted only when every
+    prototype spells (and widths) identically.
+    """
+    var out = BtfFuncSig()
+    var walk = _walk_btf(data, 0, len(data))
+    if not walk.ok:
+        out.message = walk.message.copy()
+        return out^
+    var found = List[Int]()
+    for i in range(len(walk.offsets)):
+        if walk.kinds[i] != 12:
+            continue
+        var text = String("")
+        if not walk.type_name(data, i, text):
+            out.message = String("BTF strings corrupt")
+            return out^
+        if text == name:
+            found.append(i)
+    if len(found) == 0:
+        out.message = String(t"function {name} not found")
+        return out^
+    var first_proto = walk.sizes[found[0]]
+    if not walk.rec_valid(first_proto) or walk.kinds[first_proto - 1] != 13:
+        out.message = String("function has no prototype")
+        return out^
+    var first = _spell_proto_sig(walk, data, first_proto)
+    if not first.ok:
+        out.message = first.message.copy()
+        return out^
+    for f in range(1, len(found)):
+        var proto = walk.sizes[found[f]]
+        if not walk.rec_valid(proto) or walk.kinds[proto - 1] != 13:
+            out.message = String("function has no prototype")
+            return out^
+        var sp = _spell_proto_sig(walk, data, proto)
+        if not sp.ok:
+            out.message = sp.message.copy()
+            return out^
+        if not _func_sig_same(first, sp):
+            var n = len(found)
+            out.message = String(
+                t"ambiguous FUNC {name} ({n} prototypes differ)"
+            )
+            return out^
+    return first^
+
+
 struct BtfMember(Copyable, Movable):
     """One BTF struct member read (offsets valid iff ok)."""
 

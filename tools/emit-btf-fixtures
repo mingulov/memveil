@@ -62,6 +62,11 @@ Outputs: tests/fixtures/btf/*.bin (funcproto, dupfunc, cycle, anon,
   split     : funcproto with its string section's first
                 byte patched to nonzero: the split-BTF
                 shape needing a base.
+  sig-width : FUNC test_fn whose size_t typedef resolves
+                to 32 bits: the typedef-width refusal shape.
+  sig-dup   : FUNC test_fn twice over identical
+                prototypes (accepted) and FUNC test_gn
+                twice over differing prototypes (refused).
 """
 import struct
 import sys
@@ -456,6 +461,41 @@ def split():
     return bytes(data)
 
 
+def sig_width():
+    b = Blob()
+    t_int = b.t(b.s("int"), K_INT, 0, 4, int_data(32, 1))
+    t_dev = b.t(b.s("device"), K_STRUCT, 0, 64)
+    t_ptr = b.t(0, K_PTR, 0, t_dev)
+    t_u32 = b.t(b.s("unsigned int"), K_INT, 0, 4, int_data(32, 0))
+    t_size = b.t(b.s("size_t"), K_TYPEDEF, 0, t_u32)
+    params = struct.pack("<II", b.s("dev"), t_ptr)
+    params += struct.pack("<II", b.s("size"), t_size)
+    t_proto = b.t(0, K_PROTO, 2, t_int, params)
+    b.t(b.s("test_fn"), K_FUNC, 0, t_proto)
+    return b.build()
+
+
+def sig_dup():
+    b = Blob()
+    t_int = b.t(b.s("int"), K_INT, 0, 4, int_data(32, 1))
+    t_dev = b.t(b.s("device"), K_STRUCT, 0, 64)
+    t_ptr = b.t(0, K_PTR, 0, t_dev)
+    t_ulong = b.t(b.s("unsigned long"), K_INT, 0, 8, int_data(64, 0))
+    t_size = b.t(b.s("size_t"), K_TYPEDEF, 0, t_ulong)
+    t_u32 = b.t(b.s("unsigned int"), K_INT, 0, 4, int_data(32, 0))
+
+    def proto(second):
+        params = struct.pack("<II", b.s("dev"), t_ptr)
+        params += struct.pack("<II", b.s("size"), second)
+        return b.t(0, K_PROTO, 2, t_int, params)
+
+    b.t(b.s("test_fn"), K_FUNC, 0, proto(t_size))
+    b.t(b.s("test_fn"), K_FUNC, 0, proto(t_size))
+    b.t(b.s("test_gn"), K_FUNC, 0, proto(t_size))
+    b.t(b.s("test_gn"), K_FUNC, 0, proto(t_u32))
+    return b.build()
+
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     blobs = {"funcproto": funcproto(), "dupfunc": dupfunc(),
@@ -468,7 +508,8 @@ def main():
              "intsize-bad": intsize_bad(),
              "swiotlb-live": swiotlb_live(False),
              "swiotlb-live-73": swiotlb_live(True),
-             "members": members(), "split": split()}
+             "members": members(), "split": split(),
+             "sig-width": sig_width(), "sig-dup": sig_dup()}
     for name, data in blobs.items():
         (OUT / (name + ".bin")).write_bytes(data)
     print("wrote %d BTF fixtures to %s" % (len(blobs), OUT))

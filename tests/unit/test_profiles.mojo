@@ -3324,10 +3324,12 @@ def test_sig_match() raises:
 
 
 def test_sig_mismatch() raises:
+    # Type spellings compare, never parameter names: a
+    # differing return type still mismatches loudly.
     var doc = _sig_doc(
         _tracing_hook(
             String("test_fn"),
-            String("int test_fn(struct device *dev, size_t length)"),
+            String("long test_fn(struct device *dev, size_t size)"),
         ),
         String('"fentry:test_fn"'),
     )
@@ -3370,6 +3372,79 @@ def test_sig_malformed_frozen() raises:
     assert_true(not vs[0].ok)
     assert_true(
         contains(vs[0].reason, String("frozen signature malformed"))
+    )
+
+
+def test_sig_names_ignored() raises:
+    var doc = _sig_doc(
+        _tracing_hook(
+            String("test_fn"),
+            String("int test_fn(struct device *d, size_t length)"),
+        ),
+        String('"fentry:test_fn"'),
+    )
+    var p = parse_profile_bytes(bytes_of(doc))
+    var raw = _sig_btf()
+    var vs = verify_hook_signatures(p, Span(raw))
+    assert_equal(len(vs), 1)
+    assert_true(vs[0].ok)
+    assert_equal(vs[0].reason, String(""))
+
+
+def test_sig_typedef_swap() raises:
+    var doc = _sig_doc(
+        _tracing_hook(
+            String("test_fn"),
+            String("int test_fn(struct device *dev, phys_addr_t size)"),
+        ),
+        String('"fentry:test_fn"'),
+    )
+    var p = parse_profile_bytes(bytes_of(doc))
+    var raw = _sig_btf()
+    var vs = verify_hook_signatures(p, Span(raw))
+    assert_equal(len(vs), 1)
+    assert_true(not vs[0].ok)
+    assert_true(contains(vs[0].reason, String("signature mismatch")))
+
+
+def test_sig_param_count() raises:
+    var doc = _sig_doc(
+        _tracing_hook(
+            String("test_fn"),
+            String(
+                "int test_fn(struct device *dev, size_t size, int extra)"
+            ),
+        ),
+        String('"fentry:test_fn"'),
+    )
+    var p = parse_profile_bytes(bytes_of(doc))
+    var raw = _sig_btf()
+    var vs = verify_hook_signatures(p, Span(raw))
+    assert_equal(len(vs), 1)
+    assert_true(not vs[0].ok)
+    assert_true(contains(vs[0].reason, String("signature mismatch")))
+
+
+def test_sig_width() raises:
+    var doc = _sig_doc(
+        _tracing_hook(
+            String("test_fn"),
+            String("int test_fn(struct device *dev, size_t size)"),
+        ),
+        String('"fentry:test_fn"'),
+    )
+    var p = parse_profile_bytes(bytes_of(doc))
+    var raw = read_host_file(
+        String("tests/fixtures/btf/sig-width.bin"),
+        String("fixture"),
+        67108864,
+    )
+    var vs = verify_hook_signatures(p, Span(raw))
+    assert_equal(len(vs), 1)
+    assert_true(not vs[0].ok)
+    assert_equal(
+        vs[0].reason,
+        String("fentry:test_fn: size_t width 32 bits (want 64)"),
     )
 
 
@@ -3574,6 +3649,10 @@ def run() raises -> Int:
     suite.test[test_discover_tracing_gap_signature]()
     suite.test[test_sig_match]()
     suite.test[test_sig_mismatch]()
+    suite.test[test_sig_names_ignored]()
+    suite.test[test_sig_typedef_swap]()
+    suite.test[test_sig_param_count]()
+    suite.test[test_sig_width]()
     suite.test[test_sig_missing_function]()
     suite.test[test_sig_malformed_frozen]()
     suite.test[test_sig_skips_tracepoint]()
