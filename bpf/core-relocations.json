@@ -2,7 +2,29 @@
   "format": 1,
   "objects": {
     "swiotlb_attempt.bpf.o": [],
-    "swiotlb_lifecycle.bpf.o": [],
+    "swiotlb_lifecycle.bpf.o": [
+      {
+        "type": "dma_data_direction",
+        "enumerator": "DMA_BIDIRECTIONAL___mv",
+        "kind": "enumval_value",
+        "relocs": 2,
+        "optional": false
+      },
+      {
+        "type": "dma_data_direction",
+        "enumerator": "DMA_FROM_DEVICE___mv",
+        "kind": "enumval_value",
+        "relocs": 2,
+        "optional": false
+      },
+      {
+        "type": "dma_data_direction",
+        "enumerator": "DMA_TO_DEVICE___mv",
+        "kind": "enumval_value",
+        "relocs": 2,
+        "optional": false
+      }
+    ],
     "swiotlb_copy.bpf.o": [
       {
         "type": "device",
@@ -30,6 +52,27 @@
         "member": "min_align_mask",
         "kind": "field_byte_size",
         "relocs": 2,
+        "optional": false
+      },
+      {
+        "type": "dma_data_direction",
+        "enumerator": "DMA_BIDIRECTIONAL___mv",
+        "kind": "enumval_value",
+        "relocs": 4,
+        "optional": false
+      },
+      {
+        "type": "dma_data_direction",
+        "enumerator": "DMA_FROM_DEVICE___mv",
+        "kind": "enumval_value",
+        "relocs": 4,
+        "optional": false
+      },
+      {
+        "type": "dma_data_direction",
+        "enumerator": "DMA_TO_DEVICE___mv",
+        "kind": "enumval_value",
+        "relocs": 4,
         "optional": false
       },
       {

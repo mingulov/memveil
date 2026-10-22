@@ -122,6 +122,7 @@ comptime FLAG_EMITTED_WRAP = UInt64(4)
 comptime FLAG_EMITTED_BYTES_WRAP = UInt64(8)
 comptime FLAG_SUBMIT_WRAP = UInt64(16)
 comptime FLAG_BYTE_COVERAGE = UInt64(32)
+comptime FLAG_ARGCNT = UInt64(64)
 
 comptime MAP_TYPE_ARRAY = 2
 comptime MAP_TYPE_RINGBUF = 27
@@ -2594,6 +2595,9 @@ struct Collector:
         if not has_cut:
             return String("")
         var vals = vals_in.copy()
+        if len(vals) == 6 and vals[CNT_FLAGS] & FLAG_ARGCNT != UInt64(0):
+            self.note_unknown(tag + String(" argument count mismatch"))
+            return String("")
         if not epoch_flags_clear(vals):
             self.note_unknown(tag + String(" invalid epoch"))
             return String("")

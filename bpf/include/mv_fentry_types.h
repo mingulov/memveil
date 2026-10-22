@@ -2,10 +2,11 @@
 
 /* BPF-only kernel type views for the fentry/fexit adapters.
  *
- * Partial structs: only accessed fields are declared, and
- * CO-RE relocates their offsets at load. Layouts verified
- * against the 7.0.0-34-generic BTF (io_tlb_slot size 24,
- * io_tlb_pool size 104, device_dma_parameters size 16).
+ * Partial structs under a flavor suffix: only accessed
+ * fields are declared, CO-RE relocates their offsets at
+ * load, and each relocated width is guarded live against
+ * its spelling here. The direction enum resolves through
+ * relocations as well; no hook assumes a kernel value.
  * Must never be included by host code.
  */
 #ifndef MV_FENTRY_TYPES_H
@@ -23,41 +24,6 @@
 typedef __u64 mv_phys_addr_t;
 typedef __u64 mv_size_t;
 
-enum mv_dma_data_direction {
-    MV_DMA_BIDIRECTIONAL = 0,
-    MV_DMA_TO_DEVICE = 1,
-    MV_DMA_FROM_DEVICE = 2,
-    MV_DMA_NONE = 3,
-};
-
-struct device_dma_parameters {
-    unsigned int max_segment_size;
-    unsigned int min_align_mask;
-};
-
-struct device {
-    struct device_dma_parameters *dma_parms;
-};
-
-struct io_tlb_slot {
-    mv_phys_addr_t orig_addr;
-    mv_size_t alloc_size;
-    unsigned short list;
-    unsigned short pad_slots;
-};
-
-struct io_tlb_pool {
-    mv_phys_addr_t start;
-    mv_phys_addr_t end;
-    void *vaddr;
-    unsigned long nslabs;
-    struct io_tlb_slot *slots;
-};
-
-/* CO-RE views: the same kernel structs under a flavor
- * suffix, so relocated reads never depend on which other
- * view is in scope. Widths are checked live against these
- * spellings; the suffix strips back to the kernel name. */
 struct io_tlb_slot___mv {
     mv_phys_addr_t orig_addr;
     mv_size_t alloc_size;
@@ -82,6 +48,50 @@ struct device___mv {
     struct device_dma_parameters___mv *dma_parms;
     struct io_tlb_mem___mv *dma_io_tlb_mem;
 } __attribute__((preserve_access_index));
+
+/* Local direction view: values are placeholders resolved by
+ * relocation at load, never trusted as kernel values. */
+enum dma_data_direction___mv {
+    DMA_BIDIRECTIONAL___mv = 0,
+    DMA_TO_DEVICE___mv = 1,
+    DMA_FROM_DEVICE___mv = 2,
+};
+
+/* Expected hook argument counts (verified live, not assumed). */
+#define MV_ARGS_MAP_SINGLE 6
+#define MV_ARGS_UNMAP 6
+#define MV_ARGS_SYNC 5
+#define MV_ARGS_BOUNCE 5
+
+/* DMA_ATTR_SKIP_CPU_SYNC is bit 5 (dma-mapping.h). */
+#define MV_DMA_ATTR_SKIP_CPU_SYNC (1UL << 5)
+
+/* Resolve one kernel direction to the wire encoding (TO 1,
+ * FROM 2, BIDI 0); 0 when the value matches nothing. */
+static __always_inline int mv_wire_dir(int kdir, __u16 *out)
+{
+    __u64 kdir64;
+
+    if (kdir < 0)
+        return 0;
+    kdir64 = (__u64)kdir;
+    if (kdir64 == bpf_core_enum_value(enum dma_data_direction___mv,
+                                      DMA_TO_DEVICE___mv)) {
+        *out = 1;
+        return 1;
+    }
+    if (kdir64 == bpf_core_enum_value(enum dma_data_direction___mv,
+                                      DMA_FROM_DEVICE___mv)) {
+        *out = 2;
+        return 1;
+    }
+    if (kdir64 == bpf_core_enum_value(enum dma_data_direction___mv,
+                                      DMA_BIDIRECTIONAL___mv)) {
+        *out = 0;
+        return 1;
+    }
+    return 0;
+}
 
 #define MV_IO_TLB_SHIFT MV_IO_TLB_SHIFT_WIRE
 #define MV_IO_TLB_SIZE 2048u

@@ -21,6 +21,7 @@
 #include <linux/bpf.h>
 #include <linux/types.h>
 
+#include <bpf/bpf_core_read.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
@@ -206,7 +207,7 @@ static __always_inline int mv_emit_lc(__u16 kind, __u16 flags, __u64 dir,
         mv_submit_fail();
         return 0;
     }
-    /* Step 3: dir comes from the kernel enum; anything
+    /* Step 3: dir is the resolved wire encoding; anything
      * outside 0..2 is rejected, never emitted. */
     if (dir > 2) {
         mv_raise(MV_FLAG_BYTE_COVERAGE);
@@ -269,23 +270,32 @@ static __always_inline int mv_emit_lc(__u16 kind, __u16 flags, __u64 dir,
 }
 
 SEC("fexit/swiotlb_tbl_map_single")
-int BPF_PROG(mv_map_result, struct device *dev, mv_phys_addr_t orig_addr,
-             mv_size_t mapping_size, unsigned int alloc_align_mask,
-             enum mv_dma_data_direction dir, unsigned long attrs,
-             mv_phys_addr_t ret)
+int BPF_PROG(mv_map_result, struct device___mv *dev,
+             mv_phys_addr_t orig_addr, mv_size_t mapping_size,
+             unsigned int alloc_align_mask,
+             enum dma_data_direction___mv dir, unsigned long attrs)
 {
     struct mv_gen_key key;
+    __u64 ret = 0;
     __u16 flags = 0;
+    __u16 wdir = 3;
     __u64 gen = 0;
     __u64 assigned = 0;
 
-    (void)ctx;
-
+    if (bpf_get_func_arg_cnt(ctx) != MV_ARGS_MAP_SINGLE) {
+        mv_raise(MV_FLAG_ARGCNT);
+        return 0;
+    }
+    if (bpf_get_func_ret(ctx, &ret) != 0) {
+        mv_raise(MV_FLAG_ARGCNT);
+        return 0;
+    }
     (void)orig_addr;
     (void)alloc_align_mask;
     (void)attrs;
+    mv_wire_dir(dir, &wdir);
     if (ret == MV_INVALID_PHYS) {
-        mv_emit_lc(MV_LC_KIND_MAP, 0, (__u64)dir,
+        mv_emit_lc(MV_LC_KIND_MAP, 0, wdir,
                    (mv_size_t)mapping_size, 0);
         return 0;
     }
@@ -302,7 +312,7 @@ int BPF_PROG(mv_map_result, struct device *dev, mv_phys_addr_t orig_addr,
         flags |= MV_LC_FLAG_OK | MV_LC_FLAG_GEN_UNASSIGNED;
     }
     /* A lost map record deletes its generation. */
-    if (!mv_emit_lc(MV_LC_KIND_MAP, flags, (__u64)dir,
+    if (!mv_emit_lc(MV_LC_KIND_MAP, flags, wdir,
                     (mv_size_t)mapping_size, gen) && gen != 0 &&
         bpf_map_delete_elem(&mv_gen_table, &key) != 0)
         mv_escalate(&key);
@@ -310,21 +320,24 @@ int BPF_PROG(mv_map_result, struct device *dev, mv_phys_addr_t orig_addr,
 }
 
 SEC("fentry/__swiotlb_tbl_unmap_single")
-int BPF_PROG(mv_unmap, struct device *dev, mv_phys_addr_t tlb_addr,
-             mv_size_t mapping_size, enum mv_dma_data_direction dir,
-             unsigned long attrs, struct io_tlb_pool *pool)
+int BPF_PROG(mv_unmap, struct device___mv *dev, mv_phys_addr_t tlb_addr,
+             mv_size_t mapping_size, enum dma_data_direction___mv dir,
+             unsigned long attrs, struct io_tlb_pool___mv *pool)
 {
     struct mv_gen_key key;
     __u16 flags = MV_LC_FLAG_OK;
+    __u16 wdir = 3;
     __u64 gen = 0;
     __u64 *slot;
 
-    (void)ctx;
-
+    if (bpf_get_func_arg_cnt(ctx) != MV_ARGS_UNMAP) {
+        mv_raise(MV_FLAG_ARGCNT);
+        return 0;
+    }
     (void)pool;
-    /* DMA_ATTR_SKIP_CPU_SYNC is bit 5 (dma-mapping.h). */
-    if (attrs & (1UL << 5))
+    if (attrs & MV_DMA_ATTR_SKIP_CPU_SYNC)
         flags |= MV_LC_FLAG_SKIP_SYNC;
+    mv_wire_dir(dir, &wdir);
     key.dev = (__u64)dev;
     key.tlb = (__u64)tlb_addr;
     if (!mv_dark() && !mv_quarantined(&key)) {
@@ -343,7 +356,7 @@ int BPF_PROG(mv_unmap, struct device *dev, mv_phys_addr_t tlb_addr,
     } else {
         flags |= MV_LC_FLAG_GEN_MISS;
     }
-    mv_emit_lc(MV_LC_KIND_UNMAP, flags, (__u64)dir,
+    mv_emit_lc(MV_LC_KIND_UNMAP, flags, wdir,
                (mv_size_t)mapping_size, gen);
     return 0;
 }

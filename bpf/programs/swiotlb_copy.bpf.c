@@ -190,7 +190,7 @@ static __always_inline int mv_emit_cp(__u16 kind, __u16 base_flags,
         mv_submit_fail();
         return 0;
     }
-    /* Step 3: dir comes from the kernel enum; anything
+    /* Step 3: dir is the resolved wire encoding; anything
      * outside 0..2 is rejected, never emitted, and a
      * copy_exec with dir 0 (bidirectional) is impossible. */
     if (dir > 2 || (kind == MV_CP_KIND_COPY && dir == 0)) {
@@ -257,80 +257,91 @@ static __always_inline int mv_emit_cp(__u16 kind, __u16 base_flags,
 }
 
 SEC("fentry/__swiotlb_sync_single_for_device")
-int BPF_PROG(mv_sync_device, struct device *dev, mv_phys_addr_t tlb_addr,
-             mv_size_t size, enum mv_dma_data_direction dir,
-             struct io_tlb_pool *pool)
+int BPF_PROG(mv_sync_device, struct device___mv *dev,
+             mv_phys_addr_t tlb_addr, mv_size_t size,
+             enum dma_data_direction___mv dir,
+             struct io_tlb_pool___mv *pool)
 {
-    (void)ctx;
+    __u16 wdir = 3;
+
+    if (bpf_get_func_arg_cnt(ctx) != MV_ARGS_SYNC) {
+        mv_raise(MV_FLAG_ARGCNT);
+        return 0;
+    }
     (void)dev;
     (void)tlb_addr;
     (void)pool;
     /* A sync request is not a copy: KNOWN stays clear and
      * the reason says so explicitly. */
+    mv_wire_dir(dir, &wdir);
     return mv_emit_cp(MV_CP_KIND_SYNC, MV_CP_FLAG_TO_DEVICE,
-                      (__u64)dir, size, 0, MV_CP_REASON_NOT_COPY);
+                      wdir, size, 0, MV_CP_REASON_NOT_COPY);
 }
 
 SEC("fentry/__swiotlb_sync_single_for_cpu")
-int BPF_PROG(mv_sync_cpu, struct device *dev, mv_phys_addr_t tlb_addr,
-             mv_size_t size, enum mv_dma_data_direction dir,
-             struct io_tlb_pool *pool)
+int BPF_PROG(mv_sync_cpu, struct device___mv *dev, mv_phys_addr_t tlb_addr,
+             mv_size_t size, enum dma_data_direction___mv dir,
+             struct io_tlb_pool___mv *pool)
 {
-    (void)ctx;
+    __u16 wdir = 3;
+
+    if (bpf_get_func_arg_cnt(ctx) != MV_ARGS_SYNC) {
+        mv_raise(MV_FLAG_ARGCNT);
+        return 0;
+    }
     (void)dev;
     (void)tlb_addr;
     (void)pool;
-    return mv_emit_cp(MV_CP_KIND_SYNC, 0, (__u64)dir, size, 0,
+    mv_wire_dir(dir, &wdir);
+    return mv_emit_cp(MV_CP_KIND_SYNC, 0, wdir, size, 0,
                       MV_CP_REASON_NOT_COPY);
 }
 
 /* Records one executed copy (shared by the fentry and fexit paths). */
-static __always_inline int mv_emit_bounce(struct device *dev,
+static __always_inline int mv_emit_bounce(struct device___mv *dev,
                                           mv_phys_addr_t tlb_addr,
                                           mv_size_t size,
-                                          enum mv_dma_data_direction dir,
-                                          struct io_tlb_pool *pool)
+                                          enum dma_data_direction___mv dir,
+                                          struct io_tlb_pool___mv *pool)
 {
-    /* Relocated reads go through the flavor-suffixed views. */
-    struct device___mv *mdev = (struct device___mv *)dev;
-    struct io_tlb_pool___mv *mpool = (struct io_tlb_pool___mv *)pool;
     struct device_dma_parameters___mv *parms;
     struct io_tlb_slot___mv *slots;
     struct mv_effective eff;
     unsigned int mask = 0;
     __u64 start, end, nsl, idx, orig_addr, alloc_size;
-    __u64 dir64 = dir;
     __u64 effective = 0;
+    __u16 wdir = 3;
     __u16 flags, reason = MV_CP_REASON_NONE;
     __s32 off;
 
-    /* The shared emit path rejects dir outside 1..2 for a
-     * copy, mirroring the decoder's per-kind rule. */
-    flags = dir64 == MV_DMA_TO_DEVICE ? MV_CP_FLAG_TO_DEVICE : 0;
+    /* The kernel direction resolves to the wire encoding; an
+     * unmapped value rides the malformed path below. */
+    mv_wire_dir(dir, &wdir);
+    flags = wdir == 1 ? MV_CP_FLAG_TO_DEVICE : 0;
     /* Every relocated width must match its local spelling,
      * else the reads below would misinterpret memory. */
-    if (!mv_layout_ok(bpf_core_field_size(mpool->start), 8) ||
-        !mv_layout_ok(bpf_core_field_size(mpool->end), 8) ||
-        !mv_layout_ok(bpf_core_field_size(mpool->nslabs), 8) ||
-        !mv_layout_ok(bpf_core_field_size(mpool->slots), 8) ||
+    if (!mv_layout_ok(bpf_core_field_size(pool->start), 8) ||
+        !mv_layout_ok(bpf_core_field_size(pool->end), 8) ||
+        !mv_layout_ok(bpf_core_field_size(pool->nslabs), 8) ||
+        !mv_layout_ok(bpf_core_field_size(pool->slots), 8) ||
         !mv_layout_ok(bpf_core_field_size(
                            ((struct io_tlb_slot___mv *)0)->orig_addr),
                       8) ||
         !mv_layout_ok(bpf_core_field_size(
                            ((struct io_tlb_slot___mv *)0)->alloc_size),
                       8) ||
-        !mv_layout_ok(bpf_core_field_size(mdev->dma_parms), 8) ||
+        !mv_layout_ok(bpf_core_field_size(dev->dma_parms), 8) ||
         !mv_layout_ok(bpf_core_field_size(
                            ((struct device_dma_parameters___mv *)0)
                                ->min_align_mask),
                       4)) {
         reason = MV_CP_REASON_LAYOUT;
     } else if (bpf_core_read(&start, sizeof(start),
-                             &mpool->start) ||
-               bpf_core_read(&end, sizeof(end), &mpool->end) ||
-               bpf_core_read(&nsl, sizeof(nsl), &mpool->nslabs) ||
+                             &pool->start) ||
+               bpf_core_read(&end, sizeof(end), &pool->end) ||
+               bpf_core_read(&nsl, sizeof(nsl), &pool->nslabs) ||
                bpf_core_read(&slots, sizeof(slots),
-                             &mpool->slots)) {
+                             &pool->slots)) {
         reason = MV_CP_REASON_SLOT_READ;
     } else if (slots == (struct io_tlb_slot___mv *)0 || nsl == 0) {
         reason = MV_CP_REASON_SLOT_READ;
@@ -350,7 +361,7 @@ static __always_inline int mv_emit_bounce(struct device *dev,
                     &((struct io_tlb_slot___mv *)slot_addr)->alloc_size))
                 reason = MV_CP_REASON_SLOT_READ;
             else if (bpf_core_read(&parms, sizeof(parms),
-                                   &mdev->dma_parms))
+                                   &dev->dma_parms))
                 reason = MV_CP_REASON_MASK_READ;
             else if (parms &&
                      bpf_core_read(&mask, sizeof(mask),
@@ -371,7 +382,7 @@ static __always_inline int mv_emit_bounce(struct device *dev,
             }
         }
     }
-    return mv_emit_cp(MV_CP_KIND_COPY, flags, dir64, size,
+    return mv_emit_cp(MV_CP_KIND_COPY, flags, wdir, size,
                       effective, reason);
 }
 
@@ -465,12 +476,17 @@ static __always_inline int mv_release(__u64 frame, __u64 id)
 }
 
 SEC("fentry/swiotlb_bounce")
-int BPF_PROG(mv_bounce, struct device *dev, mv_phys_addr_t tlb_addr,
-             mv_size_t size, enum mv_dma_data_direction dir,
-             struct io_tlb_pool *pool)
+int BPF_PROG(mv_bounce, struct device___mv *dev, mv_phys_addr_t tlb_addr,
+             mv_size_t size, enum dma_data_direction___mv dir,
+             struct io_tlb_pool___mv *pool)
 {
-    __u64 frame = mv_frame(ctx);
+    __u64 frame;
 
+    if (bpf_get_func_arg_cnt(ctx) != MV_ARGS_BOUNCE) {
+        mv_raise(MV_FLAG_ARGCNT);
+        return 0;
+    }
+    frame = mv_frame(ctx);
     /* No frame: count the loss; a live exit may still record it unmatched. */
     if (!frame) {
         mv_fb_raise(MV_CP_FB_FLAG_FRAME_LOST);
@@ -487,14 +503,21 @@ int BPF_PROG(mv_bounce, struct device *dev, mv_phys_addr_t tlb_addr,
 
 /* Records the copy when mv_bounce skipped this call or found no free slot. */
 SEC("fexit/swiotlb_bounce")
-int BPF_PROG(mv_bounce_exit, struct device *dev, mv_phys_addr_t tlb_addr,
-             mv_size_t size, enum mv_dma_data_direction dir,
-             struct io_tlb_pool *pool)
+int BPF_PROG(mv_bounce_exit, struct device___mv *dev,
+             mv_phys_addr_t tlb_addr, mv_size_t size,
+             enum dma_data_direction___mv dir,
+             struct io_tlb_pool___mv *pool)
 {
+    __u64 frame;
+
+    if (bpf_get_func_arg_cnt(ctx) != MV_ARGS_BOUNCE) {
+        mv_raise(MV_FLAG_ARGCNT);
+        return 0;
+    }
     /* Disarmed exit stays out: its recoveries would match no entry miss. */
     if (!mv_armed())
         return 0;
-    __u64 frame = mv_frame(ctx);
+    frame = mv_frame(ctx);
 
     /* No frame: mv_bounce counted the loss, so never record twice. */
     if (!frame)

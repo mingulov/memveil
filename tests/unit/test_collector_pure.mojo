@@ -10,6 +10,12 @@ from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from memveil.capture.collector import (
+    CNT_EMITTED,
+    CNT_FLAGS,
+    Collector,
+    CollectorConfig,
+    FLAG_ARGCNT,
+    StatsOut,
     aggregate_reason,
     all_zero,
     byte_coverage_valid,
@@ -221,8 +227,76 @@ def test_env_mapping() raises:
     assert_equal(detection_for(conflicted), String("conflicting"))
 
 
+def _argcnt_vals(flags: UInt64) -> List[UInt64]:
+    var vals = List[UInt64]()
+    vals.append(UInt64(10))
+    vals.append(UInt64(100))
+    vals.append(UInt64(9))
+    vals.append(UInt64(90))
+    vals.append(UInt64(1))
+    vals.append(flags)
+    return vals^
+
+
+def _argcnt_start() -> StatsOut:
+    return StatsOut(
+        True, UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+        UInt64(0), String(""),
+    )
+
+
+def _argcnt_final() -> StatsOut:
+    return StatsOut(
+        True, UInt64(9), UInt64(9), UInt64(0), UInt64(0),
+        UInt64(0), String(""),
+    )
+
+
+def test_evaluate_channel_argcnt_noted() raises:
+    var collector = Collector(CollectorConfig())
+    var vals = _argcnt_vals(FLAG_ARGCNT)
+    assert_equal(vals[CNT_FLAGS], FLAG_ARGCNT)
+    var out = collector._evaluate_channel(
+        vals, True, _argcnt_start(), _argcnt_final(),
+        String("lc"),
+    )
+    assert_equal(out, String(""))
+    assert_equal(
+        collector.unknown_cause,
+        String("lc argument count mismatch"),
+    )
+
+
+def test_evaluate_channel_argcnt_precedes_identity() raises:
+    var collector = Collector(CollectorConfig())
+    var vals = _argcnt_vals(FLAG_ARGCNT)
+    vals[CNT_EMITTED] = UInt64(5)
+    var out = collector._evaluate_channel(
+        vals, True, _argcnt_start(), _argcnt_final(),
+        String("lc"),
+    )
+    assert_equal(out, String(""))
+    assert_equal(
+        collector.unknown_cause,
+        String("lc argument count mismatch"),
+    )
+    var plain = Collector(CollectorConfig())
+    var vals2 = _argcnt_vals(UInt64(0))
+    vals2[CNT_EMITTED] = UInt64(5)
+    var out2 = plain._evaluate_channel(
+        vals2, True, _argcnt_start(), _argcnt_final(),
+        String("lc"),
+    )
+    assert_equal(out2, String(""))
+    assert_equal(
+        plain.unknown_cause, String("lc kernel identity unproven")
+    )
+
+
 def run() raises -> Int:
     var suite = TestSuite()
+    suite.test[test_evaluate_channel_argcnt_noted]()
+    suite.test[test_evaluate_channel_argcnt_precedes_identity]()
     suite.test[test_op_guard_boundary]()
     suite.test[test_detail_known_grammar]()
     suite.test[test_detail_unknown_grammar]()
