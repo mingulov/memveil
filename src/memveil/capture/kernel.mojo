@@ -252,24 +252,11 @@ def _lifecycle_specs() -> List[AttachSpec]:
 
 
 def _copy_specs() -> List[AttachSpec]:
+    # swiotlb_bounce runs inside both sync directions, so the
+    # bounce entry/exit pair attaches before either sync hook;
+    # entry still precedes exit, and the armed slot still gates
+    # the fallback, which keeps recoveries exact.
     var out = List[AttachSpec]()
-    out.append(
-        AttachSpec(
-            String("mv_sync_device"),
-            _ATTACH_TRACING,
-            String("__swiotlb_sync_single_for_device"),
-            String(""),
-        )
-    )
-    out.append(
-        AttachSpec(
-            String("mv_sync_cpu"),
-            _ATTACH_TRACING,
-            String("__swiotlb_sync_single_for_cpu"),
-            String(""),
-        )
-    )
-    # Entry attaches first; the gate plus this order make recoveries exact.
     out.append(
         AttachSpec(
             String("mv_bounce"),
@@ -283,6 +270,22 @@ def _copy_specs() -> List[AttachSpec]:
             String("mv_bounce_exit"),
             _ATTACH_TRACING,
             String("swiotlb_bounce"),
+            String(""),
+        )
+    )
+    out.append(
+        AttachSpec(
+            String("mv_sync_device"),
+            _ATTACH_TRACING,
+            String("__swiotlb_sync_single_for_device"),
+            String(""),
+        )
+    )
+    out.append(
+        AttachSpec(
+            String("mv_sync_cpu"),
+            _ATTACH_TRACING,
+            String("__swiotlb_sync_single_for_cpu"),
             String(""),
         )
     )
@@ -1070,6 +1073,38 @@ def fb_flag_reason(flags: UInt64) -> String:
     return out^
 
 
+def channel_attach_order() -> List[Int]:
+    """Inner channels first: copy, lifecycle, attempt.
+
+    Copies execute inside map, sync, and unmap, so the copy
+    hooks are live before any outer hook can fire; an
+    observed outer event never lacks inner evidence to
+    attach racing.
+    """
+    var out = List[Int]()
+    out.append(2)
+    out.append(1)
+    out.append(0)
+    return out^
+
+
+def channel_detach_order() -> List[Int]:
+    """Outer channels first: attempt, lifecycle, copy."""
+    var out = List[Int]()
+    out.append(0)
+    out.append(1)
+    out.append(2)
+    return out^
+
+
+def rollback_order(done: List[Int]) -> List[Int]:
+    """Detach order for a failed attach: reverse of completion."""
+    var out = List[Int]()
+    for j in range(len(done)):
+        out.append(done[len(done) - 1 - j])
+    return out^
+
+
 struct LmbKernel(ChannelPoller, KernelSource):
     """KernelSource backed by up to three libbpf-mojo sessions."""
 
@@ -1244,39 +1279,40 @@ struct LmbKernel(ChannelPoller, KernelSource):
     def attach(mut self) -> OpOut:
         if not self._any_open():
             return OpOut(False, String("session not open"))
-        var first = self._ch0.attach()
-        if not first.ok:
-            return OpOut(
-                False, _channel_tag(0) + first.message
-            )
-        if self._ch1.present:
-            var second = self._ch1.attach()
-            if not second.ok:
-                var back = self._ch0.detach()
-                var msg = _channel_tag(1) + second.message
-                if not back.ok:
+        var order = channel_attach_order()
+        var done = List[Int]()
+        for k in range(len(order)):
+            var ch = order[k]
+            if not self._present(ch):
+                continue
+            var res: OpOut
+            if ch == 1:
+                res = self._ch1.attach()
+            elif ch == 2:
+                res = self._ch2.attach()
+            else:
+                res = self._ch0.attach()
+            if res.ok:
+                done.append(ch)
+                continue
+            var msg = _channel_tag(ch) + res.message
+            var back = rollback_order(done)
+            for j in range(len(back)):
+                var undone: OpOut
+                if back[j] == 1:
+                    undone = self._ch1.detach()
+                elif back[j] == 2:
+                    undone = self._ch2.detach()
+                else:
+                    undone = self._ch0.detach()
+                if not undone.ok:
                     msg += (
-                        String("; rollback ch0: ") + back.message
+                        String("; rollback ch")
+                        + String(back[j])
+                        + String(": ")
+                        + undone.message
                     )
-                return OpOut(False, msg)
-        if self._ch2.present:
-            var third = self._ch2.attach()
-            if not third.ok:
-                var back0 = self._ch0.detach()
-                var msg = _channel_tag(2) + third.message
-                if not back0.ok:
-                    msg += (
-                        String("; rollback ch0: ")
-                        + back0.message
-                    )
-                if self._ch1.present:
-                    var back1 = self._ch1.detach()
-                    if not back1.ok:
-                        msg += (
-                            String("; rollback ch1: ")
-                            + back1.message
-                        )
-                return OpOut(False, msg)
+            return OpOut(False, msg)
         return OpOut(True, String(""))
 
     def poll_channel(
@@ -1291,11 +1327,10 @@ struct LmbKernel(ChannelPoller, KernelSource):
 
     def _order(self) -> List[Int]:
         var out = List[Int]()
-        out.append(0)
-        if self._ch1.present:
-            out.append(1)
-        if self._ch2.present:
-            out.append(2)
+        var order = channel_detach_order()
+        for k in range(len(order)):
+            if self._present(order[k]):
+                out.append(order[k])
         return out^
 
     def poll(mut self, timeout_ms: Int, capacity: UInt32) -> PollOut:

@@ -3,12 +3,23 @@
 """Pure collector unit tests: predicates, grammar, identities.
 
 No sources, no writer, no clock: exact assertions on the
-pure helpers the close-out machine is built from.
+pure helpers the close-out machine is built from. The two
+close-out timestamp tests drive one scripted startup or
+shutdown each; everything else stays pure.
 """
 
+from std.ffi import external_call
 from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
+from scripted import (
+    ScriptClock,
+    ScriptKernel,
+    ScriptSignal,
+    ScriptWriter,
+    snap_ok,
+    stats_ok,
+)
 from memveil.capture.collector import (
     CNT_EMITTED,
     CNT_FLAGS,
@@ -293,8 +304,112 @@ def test_evaluate_channel_argcnt_precedes_identity() raises:
     )
 
 
+def _mkdtemp() raises -> String:
+    var template = String("/tmp/memveil-collector-ts-XXXXXX")
+    var buf = List[UInt8]()
+    for b in template.as_bytes():
+        buf.append(b)
+    buf.append(UInt8(0))
+    var p = external_call["mkdtemp", UInt64](Span(buf).unsafe_ptr())
+    if p == UInt64(0):
+        raise Error("mkdtemp failed")
+    var raw = List[UInt8]()
+    for i in range(len(buf)):
+        if buf[i] == UInt8(0):
+            break
+        raw.append(buf[i])
+    try:
+        return String(from_utf8=Span(raw))
+    except:
+        raise Error("mkdtemp gave non-UTF8")
+
+
+def _zero_snaps(mut kernel: ScriptKernel, channel: Int):
+    var z = snap_ok(
+        UInt64(0),
+        UInt64(0),
+        UInt64(0),
+        UInt64(0),
+        UInt64(0),
+        UInt64(0),
+    )
+    kernel.add_snap_at(channel, z.copy())
+    kernel.add_snap_at(channel, z.copy())
+
+
+def _zero_stats(mut kernel: ScriptKernel):
+    var s = stats_ok(
+        UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0)
+    )
+    kernel.add_stats(s.copy())
+
+
+def test_ready_after_arm() raises:
+    # Readiness lands after the copy arm: attach_ns < ready_ns
+    # over strictly increasing scripted clock reads.
+    var tmp = _mkdtemp()
+    var cfg = CollectorConfig()
+    cfg.output = tmp + String("/cap")
+    cfg.max_events_bytes = 134217728
+    cfg.profile_id = String("ts-probe")
+    cfg.pid = 4242
+    cfg.has_copy = True
+    cfg.copy_ring_bytes = UInt32(8388608)
+    var kernel = ScriptKernel()
+    kernel.channels = 3
+    _zero_snaps(kernel, 0)
+    _zero_snaps(kernel, 2)
+    _zero_stats(kernel)
+    var s = stats_ok(
+        UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0)
+    )
+    kernel.add_stats_at(0, s.copy())
+    kernel.add_stats_at(2, s.copy())
+    var clock = ScriptClock()
+    clock.step = UInt64(1000)
+    clock.add(UInt64(1000))
+    var signal = ScriptSignal()
+    var writer = ScriptWriter()
+    var collector = Collector(cfg^)
+    var refusal = collector.startup(kernel, clock, signal, writer)
+    assert_equal(refusal, String(""))
+    assert_true(collector.attach_ns < collector.ready_ns)
+    assert_equal(collector.attach_ns, UInt64(6000))
+    assert_equal(collector.ready_ns, UInt64(7000))
+
+
+def test_detach_begin_before_detach() raises:
+    # The close-out window opens before it ends:
+    # detach_begin_ns is the shutdown's first clock read and
+    # detach_ns a later one.
+    var tmp = _mkdtemp()
+    var cfg = CollectorConfig()
+    cfg.output = tmp + String("/cap")
+    cfg.max_events_bytes = 134217728
+    cfg.profile_id = String("ts-probe")
+    cfg.pid = 4242
+    var kernel = ScriptKernel()
+    _zero_snaps(kernel, 0)
+    _zero_stats(kernel)
+    var clock = ScriptClock()
+    clock.step = UInt64(1000)
+    clock.add(UInt64(1000))
+    var writer = ScriptWriter()
+    var made = writer.create(tmp + String("/cap"), 134217728)
+    assert_true(made.ok)
+    var collector = Collector(cfg^)
+    collector.stop_ctl.mark_ready()
+    var result = collector.error_close(kernel, clock, writer)
+    assert_true(collector.detach_begin_ns <= collector.detach_ns)
+    assert_equal(collector.detach_begin_ns, UInt64(1000))
+    assert_equal(collector.detach_ns, UInt64(2000))
+    assert_true(result.exit_code != 0)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
+    suite.test[test_ready_after_arm]()
+    suite.test[test_detach_begin_before_detach]()
     suite.test[test_evaluate_channel_argcnt_noted]()
     suite.test[test_evaluate_channel_argcnt_precedes_identity]()
     suite.test[test_op_guard_boundary]()

@@ -137,14 +137,17 @@ def _report(prefix: String, res: RunResult):
 
 
 def _clock(pre: Int) -> ScriptClock:
-    """Standard clock: start/stable/attach, `pre` sub-deadline
-    nows (main-loop + admit reads), the latch jump, tail."""
+    """Standard clock: start/stable/attach/ready, `pre`
+    sub-deadline nows (main-loop + admit reads), the latch
+    jump, tail. The duplicated base+4 feeds the readiness
+    stamp so the `pre` schedule stays aligned."""
     var clock = ScriptClock()
     var base = UInt64(1000000000)
     clock.add(base)
     clock.add(base + UInt64(1))
     clock.add(base + UInt64(2))
     clock.add(base + UInt64(3))
+    clock.add(base + UInt64(4))
     for i in range(pre):
         clock.add(base + UInt64(4 + i))
     var latch = base + UInt64(61000000001)
@@ -327,6 +330,9 @@ def _script_attachwin(dir: String):
     clock.add(UInt64(1001))
     clock.add(UInt64(1002))
     clock.add(UInt64(20000000000))
+    # Readiness stamps at the attach instant; the gap below
+    # keeps its 20s shape.
+    clock.add(UInt64(20000000000))
     clock.add(UInt64(20000000001))
     clock.add(UInt64(20000000002))
     clock.add(UInt64(22000000001))
@@ -439,11 +445,13 @@ def _script_pool(dir: String):
 def _script_poolcap(dir: String):
     """Nine thousand seconds of capture time stop periodic pool
     sampling at 4096 with an explicit session note. The scripted
-    clock steps one second per read past the four startup
-    values, so every iteration fires (deadline read plus
-    sample-timestamp read: two seconds per fire) until the cap
-    latches, then the remaining iterations drain the clock to
-    the deadline without sampling."""
+    clock steps one second per read past the five startup
+    values (the fifth duplicates base+3 for the readiness
+    stamp, so the stepped tail keeps its values), so every
+    iteration fires (deadline read plus sample-timestamp
+    read: two seconds per fire) until the cap latches, then
+    the remaining iterations drain the clock to the deadline
+    without sampling."""
     var kernel = ScriptKernel()
     kernel.add_poll(_timeout(), 10000)
     _zeros(kernel, 5, 4)
@@ -452,6 +460,7 @@ def _script_poolcap(dir: String):
     clock.add(base)
     clock.add(base + UInt64(1))
     clock.add(base + UInt64(2))
+    clock.add(base + UInt64(3))
     clock.add(base + UInt64(3))
     clock.step = UInt64(1000000000)
     var signal = ScriptSignal()
@@ -703,9 +712,15 @@ def _script_drainbudget(dir: String):
     clock.add(base + UInt64(1))
     clock.add(base + UInt64(2))
     clock.add(base + UInt64(3))
+    # Duplicated base+4 feeds the readiness stamp; the latch
+    # schedule below keeps its alignment.
+    clock.add(base + UInt64(4))
     clock.add(base + UInt64(4))
     var latch = base + UInt64(61000000001)
     clock.add(latch)
+    clock.add(latch + UInt64(1))
+    # Duplicated latch+1 feeds the detach-begin stamp; the
+    # engineered budget jump below keeps its alignment.
     clock.add(latch + UInt64(1))
     clock.add(latch + UInt64(2))
     clock.add(latch + UInt64(31000000002))
@@ -738,9 +753,14 @@ def _script_stopbudget(dir: String):
     clock.add(base + UInt64(1))
     clock.add(base + UInt64(2))
     clock.add(base + UInt64(3))
+    # Duplicated base+4 feeds the readiness stamp.
+    clock.add(base + UInt64(4))
     clock.add(base + UInt64(4))
     var latch = base + UInt64(61000000001)
     clock.add(latch)
+    clock.add(latch + UInt64(1))
+    # Duplicated latch+1 feeds the detach-begin stamp; the
+    # engineered six-second jump below keeps its alignment.
     clock.add(latch + UInt64(1))
     clock.add(latch + UInt64(2))
     clock.add(latch + UInt64(6000000003))
@@ -785,7 +805,12 @@ def _script_stuckdrain(dir: String):
     )
     var clock = ScriptClock()
     clock.step = UInt64(0)
-    for i in range(8):
+    for i in range(4):
+        clock.add(base + UInt64(i))
+    # Duplicated base+4 feeds the readiness stamp; the freeze
+    # value stays base+7.
+    clock.add(base + UInt64(4))
+    for i in range(4, 8):
         clock.add(base + UInt64(i))
     var signal = ScriptSignal()
     var writer = ScriptWriter()
@@ -1504,10 +1529,15 @@ def _script_clockseam(dir: String):
     clock.add(base + UInt64(1))
     clock.add(base + UInt64(2))
     clock.add(base + UInt64(3))
+    # Duplicated base+4 feeds the readiness stamp.
+    clock.add(base + UInt64(4))
     clock.add(base + UInt64(4))
     clock.add(base + UInt64(5))
     var latch = base + UInt64(61000000001)
     clock.add(latch)
+    clock.add(latch + UInt64(1))
+    # Duplicated latch+1 feeds the detach-begin stamp; the
+    # end-pair jump below keeps its alignment.
     clock.add(latch + UInt64(1))
     clock.add(latch + UInt64(2))
     clock.add(latch + UInt64(3))
@@ -1548,12 +1578,17 @@ def _script_ooo100(dir: String):
     clock.add(base + UInt64(1))
     clock.add(base + UInt64(2))
     clock.add(base + UInt64(3))
+    # Duplicated base+4 feeds the readiness stamp.
+    clock.add(base + UInt64(4))
     clock.add(base + UInt64(4))
     clock.add(base + UInt64(5))
     clock.add(base + UInt64(6))
     clock.add(base + UInt64(7))
     clock.add(latch)
     var tail = latch + UInt64(5)
+    # Duplicated latch+1 feeds the detach-begin stamp; the
+    # tail schedule below keeps its alignment.
+    clock.add(latch + UInt64(1))
     clock.add(latch + UInt64(1))
     clock.add(latch + UInt64(2))
     clock.add(latch + UInt64(3))

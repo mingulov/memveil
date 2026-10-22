@@ -776,6 +776,8 @@ struct Collector:
     var snapshots_present: Bool
     var attach_ns: UInt64
     var detach_ns: UInt64
+    var ready_ns: UInt64
+    var detach_begin_ns: UInt64
     var secondary_causes: List[String]
     var signal_error: String
     var output_fs: String
@@ -934,6 +936,8 @@ struct Collector:
         self.snapshots_present = False
         self.attach_ns = UInt64(0)
         self.detach_ns = UInt64(0)
+        self.ready_ns = UInt64(0)
+        self.detach_begin_ns = UInt64(0)
         self.secondary_causes = List[String]()
         self.signal_error = String("")
         self.output_fs = String("")
@@ -1472,6 +1476,9 @@ struct Collector:
             var armed = kernel.set_copy_armed(True)
             if not armed.ok:
                 return String("arm copy: ") + armed.message
+        # Readiness lands after the arm (or after attach when
+        # there is nothing to arm): firing is fully live below.
+        self.ready_ns = clock.now()
         if self.cfg.has_pool_sample:
             # Baseline pool sample, persisted first: the file
             # stays chronological (baseline, periodic, final)
@@ -1841,6 +1848,7 @@ struct Collector:
         mut self, mut kernel: K, mut clock: C, mut writer: W
     ):
         """DETACHING -> SETTLE -> DRAINING -> STATS -> CONFIRM."""
+        self.detach_begin_ns = clock.now()
         if self.cfg.has_copy:
             # Disarm before detach, so no late exit recovers after the end cut.
             var disarmed = kernel.set_copy_armed(False)
@@ -2124,6 +2132,7 @@ struct Collector:
         mut self, mut kernel: K, mut clock: C, mut writer: W
     ) -> RunResult:
         """ERROR_DETACH -> ERROR_STATS -> FINALIZING; no drain."""
+        self.detach_begin_ns = clock.now()
         if self.cfg.has_copy:
             # Disarm before detach, so no late exit recovers after the end cut.
             var disarmed = kernel.set_copy_armed(False)

@@ -25,6 +25,8 @@ from memveil.capture.kernel import (
     LmbKernel,
     PollRotation,
     added_fds,
+    channel_attach_order,
+    channel_detach_order,
     fb_flag_reason,
     fb_valid,
     fdinfo_u64,
@@ -36,6 +38,7 @@ from memveil.capture.kernel import (
     poll_advance,
     poll_outcome,
     prog_fds,
+    rollback_order,
     rotate_poll,
 )
 
@@ -507,16 +510,75 @@ def test_copy_armed_before_open() raises:
     assert_equal(got.message, String("session not open"))
 
 
-def test_copy_specs_attach_entry_first() raises:
-    # fentry attaches before fexit: the armed slot gates the fallback.
+def test_channel_attach_order_copy_first() raises:
+    # Inner hooks attach before the outer hooks whose flows
+    # produce their events: copies execute inside map, sync,
+    # and unmap (swiotlb_bounce is called from
+    # swiotlb_tbl_map_single, __swiotlb_sync_single_for_device,
+    # __swiotlb_sync_single_for_cpu, and
+    # __swiotlb_tbl_unmap_single), so the copy channel leads
+    # and the attempt channel trails; an observed outer event
+    # then never lacks inner evidence to attach racing.
+    var order = channel_attach_order()
+    assert_equal(len(order), 3)
+    assert_equal(order[0], 2)
+    assert_equal(order[1], 1)
+    assert_equal(order[2], 0)
+
+
+def test_channel_detach_order_attempt_first() raises:
+    # Detach runs the reverse: the outer attempt hooks leave
+    # first so no firing can outlive the inner hooks that
+    # explain it.
+    var order = channel_detach_order()
+    assert_equal(len(order), 3)
+    assert_equal(order[0], 0)
+    assert_equal(order[1], 1)
+    assert_equal(order[2], 2)
+
+
+def test_copy_specs_attach_bounce_first() raises:
+    # R2: swiotlb_bounce is the choke point both sync
+    # directions execute through (__swiotlb_sync_single_for_device
+    # and __swiotlb_sync_single_for_cpu call it), so the
+    # bounce entry/exit pair attaches before either sync hook:
+    # a sync firing while the bounce hooks are still
+    # unattached would lose its executed-copy evidence. Every
+    # entry still precedes its exit.
     var specs = _copy_specs()
     assert_equal(len(specs), 4)
-    assert_equal(specs[0].program, String("mv_sync_device"))
-    assert_equal(specs[1].program, String("mv_sync_cpu"))
-    assert_equal(specs[2].program, String("mv_bounce"))
-    assert_equal(specs[2].target_a, String("swiotlb_bounce"))
-    assert_equal(specs[3].program, String("mv_bounce_exit"))
-    assert_equal(specs[3].target_a, String("swiotlb_bounce"))
+    assert_equal(specs[0].program, String("mv_bounce"))
+    assert_equal(specs[0].target_a, String("swiotlb_bounce"))
+    assert_equal(specs[1].program, String("mv_bounce_exit"))
+    assert_equal(specs[1].target_a, String("swiotlb_bounce"))
+    assert_equal(specs[2].program, String("mv_sync_device"))
+    assert_equal(specs[3].program, String("mv_sync_cpu"))
+    var entry = -1
+    var out = -1
+    for i in range(len(specs)):
+        if specs[i].program == String("mv_bounce"):
+            entry = i
+        if specs[i].program == String("mv_bounce_exit"):
+            out = i
+    assert_true(entry >= 0)
+    assert_true(out > entry)
+
+
+def test_attach_rollback_reverse() raises:
+    # Under attach order [2, 1, 0], a channel-0 failure leaves
+    # 2 and 1 attached; LmbKernel.attach rolls them back in
+    # reverse completion order (1 then 2), matching detach
+    # order, so no inner hook outlives the outer attach it
+    # was armed under. Live attach needs privileges; this
+    # pins the order the rollback loop consumes.
+    var done = List[Int]()
+    done.append(2)
+    done.append(1)
+    var back = rollback_order(done)
+    assert_equal(len(back), 2)
+    assert_equal(back[0], 1)
+    assert_equal(back[1], 2)
+    assert_equal(len(rollback_order(List[Int]())), 0)
 
 
 def _prog_info_bytes(name: String, misses: UInt64) raises -> List[UInt8]:
@@ -738,7 +800,10 @@ def run() raises -> Int:
     suite.test[test_prog_fds_lists_without_programs]()
     suite.test[test_recursion_misses_before_open]()
     suite.test[test_copy_armed_before_open]()
-    suite.test[test_copy_specs_attach_entry_first]()
+    suite.test[test_channel_attach_order_copy_first]()
+    suite.test[test_channel_detach_order_attempt_first]()
+    suite.test[test_copy_specs_attach_bounce_first]()
+    suite.test[test_attach_rollback_reverse]()
     suite.test[test_parse_prog_name]()
     suite.test[test_parse_prog_misses]()
     suite.test[test_identify_copy_progs]()
