@@ -18,7 +18,11 @@ from memveil.model.encode import (
     encode_event_line,
     quote_json,
 )
-from memveil.model.event import EVENT_SCHEMA_VERSION, Event
+from memveil.model.event import (
+    EVENT_SCHEMA_VERSION,
+    EVENT_SCHEMA_VERSION_PREV,
+    Event,
+)
 from memveil.model.validate import format_u64
 
 
@@ -274,6 +278,20 @@ def _ref_encode_data(ev: Event) raises EncodeError -> String:
             _ref_member(String("direction"), _ref_jstr(ev.copy.direction))
         )
         parts.append(_ref_member(String("bytes"), _ref_ju64(ev.copy.bytes)))
+        if ev.copy.pool_private:
+            parts.append(
+                _ref_member(
+                    String("pool_private"),
+                    _ref_jbool(ev.copy.pool_private),
+                )
+            )
+        if ev.copy.offset_past_allocation:
+            parts.append(
+                _ref_member(
+                    String("offset_past_allocation"),
+                    _ref_jbool(ev.copy.offset_past_allocation),
+                )
+            )
     elif kind == "sync_request":
         parts.append(
             _ref_member(
@@ -449,9 +467,13 @@ def _ref_encode_data(ev: Event) raises EncodeError -> String:
 def _ref_encode_event(ev: Event) raises EncodeError -> String:
     """Encode one event in canonical form (no trailing newline)."""
     var parts = List[String]()
-    parts.append(
-        _ref_member(String("schema_version"), _ref_jstr(EVENT_SCHEMA_VERSION))
-    )
+    var version = EVENT_SCHEMA_VERSION_PREV
+    if (
+        ev.kind == String("copy")
+        and (ev.copy.pool_private or ev.copy.offset_past_allocation)
+    ):
+        version = EVENT_SCHEMA_VERSION
+    parts.append(_ref_member(String("schema_version"), _ref_jstr(version)))
     parts.append(
         _ref_member(String("session_id"), _ref_jstr(ev.session_id))
     )
@@ -710,6 +732,8 @@ def _build(kind: String, mask: Int, mut p: _Picker) -> Event:
     ev.copy.mapping_id = p.s()
     ev.copy.direction = p.s()
     ev.copy.bytes = p.u()
+    ev.copy.pool_private = _bit(mask, 1)
+    ev.copy.offset_past_allocation = _bit(mask, 2)
     ev.sync.operation_id = p.s()
     ev.sync.has_mapping_id = _bit(mask, 0)
     ev.sync.mapping_id = p.s()

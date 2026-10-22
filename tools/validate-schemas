@@ -40,6 +40,7 @@ SESSION_VERSION = "0.1.1"
 SESSION_VERSION_NEXT = "0.1.2"
 RELATIONS = ("mapping_release", "copy_attribution", "sync_attribution")
 EVENT_VERSION = "0.1.1"
+EVENT_VERSION_NEXT = "0.1.2"
 PROFILE_VERSION = "0.1.1"
 U64MAX = 18446744073709551615
 U64RE = re.compile(r"(0|[1-9][0-9]{0,19})")
@@ -548,7 +549,7 @@ def check_span(data, where):
         fail("u64-range", "%s end offset overflows" % where)
 
 
-def check_data(kind, data, where, devices):
+def check_data(kind, data, where, devices, event_next):
     if not isinstance(data, dict):
         fail("bad-type", "%s must be an object" % where)
     summary = {}
@@ -631,8 +632,11 @@ def check_data(kind, data, where, devices):
             fail("missing-mapping",
                  "%s: null mapping needs missed identity" % where)
     elif kind == "copy":
+        optional = ()
+        if event_next:
+            optional = ("pool_private", "offset_past_allocation")
         check_keys(data, ("operation_id", "mapping_id", "direction",
-                          "bytes"), (), where)
+                          "bytes"), optional, where)
         summary["op"] = check_id(data["operation_id"],
                                  "%s.operation_id" % where)
         if data["mapping_id"] is not None:
@@ -643,6 +647,12 @@ def check_data(kind, data, where, devices):
                    "%s.direction" % where)
         summary["copy_bytes"] = check_u64(data["bytes"],
                                           "%s.bytes" % where)
+        if "pool_private" in data and data["pool_private"] is not True:
+            fail("const-false", "%s.pool_private must be true" % where)
+        if ("offset_past_allocation" in data
+                and data["offset_past_allocation"] is not True):
+            fail("const-false",
+                 "%s.offset_past_allocation must be true" % where)
         summary["direction"] = data["direction"]
     elif kind == "sync_request":
         check_keys(data, ("operation_id", "mapping_id", "offset_known",
@@ -752,7 +762,8 @@ def check_event(obj, lineno, session):
                ("schema_version", "session_id", "seq", "ts_ns", "kind",
                 "source", "data"),
                ("observer_context",), where)
-    if obj["schema_version"] != EVENT_VERSION:
+    if obj["schema_version"] not in (EVENT_VERSION,
+                                      EVENT_VERSION_NEXT):
         fail("bad-version", "%s schema_version %r"
              % (where, obj["schema_version"]))
     if obj["session_id"] != session["id"]:
@@ -777,7 +788,8 @@ def check_event(obj, lineno, session):
         check_context(obj["observer_context"],
                       "%s.observer_context" % where)
     summary = check_data(kind, obj["data"], "%s.data" % where,
-                         session["devices"])
+                         session["devices"],
+                         obj["schema_version"] == EVENT_VERSION_NEXT)
     summary["kind"] = kind
     summary["seq"] = seq
     return summary
@@ -1478,7 +1490,7 @@ def run_selftest():
             results.append((True, "%s: %s" % (label, detail or "ok")))
 
     schemas = ("session-v0.1.1.schema.json", "session-v0.1.2.schema.json",
-               "event-v0.1.1.schema.json",
+               "event-v0.1.1.schema.json", "event-v0.1.2.schema.json",
                "report-v0.1.0.schema.json", "report-v0.1.1.schema.json",
                "profile-v0.1.1.schema.json",
                "doctor-v0.1.0.schema.json", "receipt-v0.1.0.schema.json")

@@ -19,6 +19,13 @@ from memveil.capture.lifecycle import (
     normalize_lifecycle_event,
 )
 from memveil.capture.normalize import NormalizeError
+from memveil.model.encode import encode_event
+from memveil.model.event import (
+    EVENT_SCHEMA_VERSION,
+    EVENT_SCHEMA_VERSION_PREV,
+    Event,
+    parse_event,
+)
 
 
 def _le16(v: Int) -> List[UInt8]:
@@ -243,6 +250,98 @@ def test_reuse_reports_distinct_event_ids() raises:
     assert_equal(evb.map_result.mapping_id, String("gen-42"))
     assert_true(
         eva.map_result.mapping_id != evb.map_result.mapping_id)
+
+
+def _utf8_bytes(text: String) -> List[UInt8]:
+    var out = List[UInt8]()
+    for b in text.as_bytes():
+        out.append(b)
+    return out^
+
+
+def _stage_line(mut ev: Event) raises -> String:
+    """Encode one event the way the capture writer stages it."""
+    ev.session_id = String("s1")
+    ev.source_profile_id = String("p1")
+    ev.source_measurement = String("observed")
+    ev.source_correlation = String("direct")
+    return encode_event(ev)
+
+
+def test_copy_event_offset_past_field() raises:
+    var d = decode_copy(
+        _cp_raw(2, 18, 1, UInt64(31), UInt64(32), UInt64(4096),
+                UInt64(4096), 0))
+    var ev = normalize_copy_event(d)
+    assert_true(ev.copy.offset_past_allocation)
+    assert_true(not ev.copy.pool_private)
+    var line = _stage_line(ev)
+    assert_equal(EVENT_SCHEMA_VERSION, String("0.1.2"))
+    var back = parse_event(_utf8_bytes(line))
+    assert_true(back.copy.offset_past_allocation)
+    assert_true(not back.copy.pool_private)
+
+
+def test_copy_event_private_field() raises:
+    var d = decode_copy(
+        _cp_raw(2, 35, 1, UInt64(49), UInt64(50), UInt64(2048),
+                UInt64(2048), 0))
+    var ev = normalize_copy_event(d)
+    assert_true(ev.copy.pool_private)
+    assert_true(not ev.copy.offset_past_allocation)
+    var line = _stage_line(ev)
+    var back = parse_event(_utf8_bytes(line))
+    assert_true(back.copy.pool_private)
+    assert_true(not back.copy.offset_past_allocation)
+
+
+def test_copy_event_plain_stays_011() raises:
+    var d = decode_copy(
+        _cp_raw(2, 3, 1, UInt64(3), UInt64(4), UInt64(4096),
+                UInt64(1024), 0))
+    var ev = normalize_copy_event(d)
+    assert_true(not ev.copy.pool_private)
+    assert_true(not ev.copy.offset_past_allocation)
+    assert_equal(EVENT_SCHEMA_VERSION_PREV, String("0.1.1"))
+    assert_equal(
+        encode_event(ev),
+        String(
+            '{"schema_version":"0.1.1","session_id":"","seq":"0",'
+            '"ts_ns":"4","kind":"copy","source":{"hook":'
+            '"fentry:swiotlb_bounce","backend":"tracing",'
+            '"profile_id":"","measurement":"","correlation":""},'
+            '"data":{"operation_id":"lc-3","mapping_id":null,'
+            '"direction":"original_to_bounce","bytes":"1024"}}'
+        ),
+    )
+
+
+def test_reader_accepts_event_012() raises:
+    var d = decode_copy(
+        _cp_raw(2, 34, 1, UInt64(37), UInt64(38), UInt64(4096),
+                UInt64(4096), 0))
+    var ev = normalize_copy_event(d)
+    var line = _stage_line(ev)
+    var back = parse_event(_utf8_bytes(line))
+    assert_equal(back.kind, String("copy"))
+    assert_true(back.copy.pool_private)
+    assert_equal(back.copy.bytes, UInt64(4096))
+
+
+def test_reader_rejects_unknown_copy_field_011() raises:
+    var d = decode_copy(
+        _cp_raw(2, 34, 1, UInt64(37), UInt64(38), UInt64(4096),
+                UInt64(4096), 0))
+    var ev = normalize_copy_event(d)
+    var line = _stage_line(ev).replace(
+        String("0.1.2"), String("0.1.1")
+    )
+    var raised = False
+    try:
+        _ = parse_event(_utf8_bytes(line))
+    except:
+        raised = True
+    assert_true(raised)
 
 
 def main() raises:

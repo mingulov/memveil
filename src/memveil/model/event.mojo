@@ -43,7 +43,8 @@ from memveil.model.validate import (
     checked_add,
 )
 
-comptime EVENT_SCHEMA_VERSION = "0.1.1"
+comptime EVENT_SCHEMA_VERSION = "0.1.2"
+comptime EVENT_SCHEMA_VERSION_PREV = "0.1.1"
 comptime MAX_CPU = Int64(1048575)
 comptime MAX_PID = Int64(4194304)
 
@@ -113,6 +114,8 @@ struct CopyPayload(ImplicitlyCopyable):
     var mapping_id: String
     var direction: String
     var bytes: UInt64
+    var pool_private: Bool
+    var offset_past_allocation: Bool
 
     def __init__(out self):
         self.operation_id = String("")
@@ -120,6 +123,8 @@ struct CopyPayload(ImplicitlyCopyable):
         self.mapping_id = String("")
         self.direction = String("")
         self.bytes = UInt64(0)
+        self.pool_private = False
+        self.offset_past_allocation = False
 
 
 struct SyncRequest(ImplicitlyCopyable):
@@ -567,12 +572,14 @@ def _parse_unmap(mut scan: Scanner, mut out: Event) raises:
         raise ValidationError("unmap", "unmap lacks mapping_id")
 
 
-def _parse_copy(mut scan: Scanner, mut out: Event) raises:
+def _parse_copy(mut scan: Scanner, mut out: Event, version: String) raises:
     scan.begin_object()
     var has_op = False
     var has_mapping = False
     var has_dir = False
     var has_bytes = False
+    var has_private = False
+    var has_past = False
     if not object_is_empty(scan):
         while True:
             scan.skip_ws()
@@ -604,6 +611,24 @@ def _parse_copy(mut scan: Scanner, mut out: Event) raises:
                     raise ValidationError("bytes", "duplicate")
                 out.copy.bytes = parse_u64_field(scan, "copy.bytes")
                 has_bytes = True
+            elif key == "pool_private":
+                if has_private:
+                    raise ValidationError("pool_private", "duplicate")
+                if version != EVENT_SCHEMA_VERSION:
+                    raise ValidationError("copy", "0.1.1 line carries 0.1.2 field")
+                if not scan.parse_bool():
+                    raise ValidationError("copy.pool_private", "must be true")
+                out.copy.pool_private = True
+                has_private = True
+            elif key == "offset_past_allocation":
+                if has_past:
+                    raise ValidationError("offset_past_allocation", "duplicate")
+                if version != EVENT_SCHEMA_VERSION:
+                    raise ValidationError("copy", "0.1.1 line carries 0.1.2 field")
+                if not scan.parse_bool():
+                    raise ValidationError("copy.offset_past_allocation", "must be true")
+                out.copy.offset_past_allocation = True
+                has_past = True
             else:
                 raise ValidationError("copy", "unknown copy field")
             if not object_next(scan, "copy"):
@@ -1208,7 +1233,7 @@ def _parse_observer(mut scan: Scanner, mut out: Event) raises:
 
 
 def _parse_data_span(
-    kind: String, span: List[UInt8], mut out: Event
+    kind: String, span: List[UInt8], version: String, mut out: Event
 ) raises:
     """Parse a deferred data object now that the kind is known."""
     var scan = Scanner(span)
@@ -1220,7 +1245,7 @@ def _parse_data_span(
     elif kind == "unmap":
         _parse_unmap(scan, out)
     elif kind == "copy":
-        _parse_copy(scan, out)
+        _parse_copy(scan, out, version)
     elif kind == "sync_request":
         _parse_sync(scan, out)
     elif kind == "transition_result":
@@ -1250,6 +1275,7 @@ def parse_event(data: List[UInt8]) raises -> Event:
     scan.skip_ws()
     scan.begin_object()
     var out = Event()
+    var line_version = String("")
     var has_version = False
     var has_session = False
     var has_seq = False
@@ -1269,8 +1295,9 @@ def parse_event(data: List[UInt8]) raises -> Event:
                 if has_version:
                     raise ValidationError("schema_version", "duplicate")
                 var v = scan.parse_string()
-                if v != EVENT_SCHEMA_VERSION:
+                if v != EVENT_SCHEMA_VERSION and v != EVENT_SCHEMA_VERSION_PREV:
                     raise ValidationError("schema_version", "bad const")
+                line_version = v
                 has_version = True
             elif key == "session_id":
                 if has_session:
@@ -1336,7 +1363,7 @@ def parse_event(data: List[UInt8]) raises -> Event:
         raise ValidationError(
             "copy.source.measurement", "executed copies require observed measurement"
         )
-    _parse_data_span(kind, span, out)
+    _parse_data_span(kind, span, line_version, out)
     return out^
 
 
@@ -1413,6 +1440,8 @@ def _data_field_known(kind: String, key: String) -> Bool:
             or key == "mapping_id"
             or key == "direction"
             or key == "bytes"
+            or key == "pool_private"
+            or key == "offset_past_allocation"
         )
     if kind == "sync_request":
         return (
@@ -1516,6 +1545,8 @@ def _type_rows() -> List[String]:
     out.append(String("data,copy,mapping_id,S"))
     out.append(String("data,copy,direction,s"))
     out.append(String("data,copy,bytes,s"))
+    out.append(String("data,copy,pool_private,b"))
+    out.append(String("data,copy,offset_past_allocation,b"))
     out.append(String("data,sync_request,operation_id,s"))
     out.append(String("data,sync_request,mapping_id,S"))
     out.append(String("data,sync_request,offset_known,b"))
@@ -1805,7 +1836,7 @@ def _parse_all_kinds(span: List[UInt8]) -> Bool:
     for i in range(len(kinds)):
         var dummy = Event()
         try:
-            _parse_data_span(kinds[i], span, dummy)
+            _parse_data_span(kinds[i], span, EVENT_SCHEMA_VERSION, dummy)
             return True
         except:
             pass
@@ -1921,7 +1952,9 @@ def partial_record_definitive(data: List[UInt8], session_id: String) -> Bool:
                 if has_kind:
                     var dummy = Event()
                     try:
-                        _parse_data_span(kind, span, dummy)
+                        _parse_data_span(
+                            kind, span, EVENT_SCHEMA_VERSION, dummy
+                        )
                     except:
                         return True
                 elif not _parse_all_kinds(span):

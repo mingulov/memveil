@@ -17,7 +17,11 @@ round-trips exactly: the parser retains every observation
 and the encoder reproduces the array in order.
 """
 
-from memveil.model.event import EVENT_SCHEMA_VERSION, Event
+from memveil.model.event import (
+    EVENT_SCHEMA_VERSION,
+    EVENT_SCHEMA_VERSION_PREV,
+    Event,
+)
 from memveil.model.regions import RegionObservation
 from memveil.model.session import (
     PRODUCT_NAME,
@@ -255,6 +259,10 @@ def _put_data(mut buf: List[UInt8], ev: Event) raises EncodeError:
         _put_str(buf, ev.copy.direction)
         _lit(buf, ",\"bytes\":")
         _put_qu64(buf, ev.copy.bytes)
+        if ev.copy.pool_private:
+            _lit(buf, ",\"pool_private\":true")
+        if ev.copy.offset_past_allocation:
+            _lit(buf, ",\"offset_past_allocation\":true")
     elif ev.kind == "sync_request":
         _lit(buf, "{\"operation_id\":")
         _put_str(buf, ev.sync.operation_id)
@@ -363,7 +371,13 @@ def _put_data(mut buf: List[UInt8], ev: Event) raises EncodeError:
 
 def _put_event(mut buf: List[UInt8], ev: Event) raises EncodeError:
     _lit(buf, "{\"schema_version\":")
-    _put_span(buf, EVENT_SCHEMA_VERSION.as_bytes())
+    if (
+        ev.kind == "copy"
+        and (ev.copy.pool_private or ev.copy.offset_past_allocation)
+    ):
+        _put_span(buf, EVENT_SCHEMA_VERSION.as_bytes())
+    else:
+        _put_span(buf, EVENT_SCHEMA_VERSION_PREV.as_bytes())
     _lit(buf, ",\"session_id\":")
     _put_str(buf, ev.session_id)
     _lit(buf, ",\"seq\":")

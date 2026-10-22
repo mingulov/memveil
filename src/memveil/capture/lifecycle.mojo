@@ -553,4 +553,6 @@ def normalize_copy_event(
     else:
         ev.copy.direction = String("bounce_to_original")
     ev.copy.bytes = d.effective
+    ev.copy.pool_private = d.private_pool
+    ev.copy.offset_past_allocation = d.offset_past
     return ev^
