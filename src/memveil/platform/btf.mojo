@@ -25,6 +25,8 @@ comptime _BTF_VERSION = 1
 comptime MAX_KERNEL_BTF_BYTES = 67108864
 comptime _MAP_ARRAY = 2
 comptime _MAP_RINGBUF = 27
+comptime _MAP_HASH = 1
+comptime _MAX_INT = 9223372036854775807
 comptime _MIN_RING_BYTES = 4096
 comptime _MAX_RING_BYTES = 2147483648
 # Total spell-depth budget: each pointer, modifier,
@@ -47,6 +49,19 @@ struct BtfMaps(ImplicitlyCopyable):
         self.ok = False
         self.message = String("")
         self.ring_bytes = 0
+
+
+struct ObjectMapBytes(Copyable):
+    """One object map-byte read: lower bound or refusal."""
+
+    var ok: Bool
+    var bytes: Int
+    var message: String
+
+    def __init__(out self):
+        self.ok = False
+        self.bytes = 0
+        self.message = String("")
 
 
 struct _BtfSection(ImplicitlyCopyable):
@@ -727,6 +742,212 @@ def _read_btf_maps(
     out.ok = True
     out.message = String("")
     out.ring_bytes = ring
+    return out^
+
+
+def _refuse_map_bytes(message: String) -> ObjectMapBytes:
+    var out = ObjectMapBytes()
+    out.message = message
+    return out^
+
+
+def _round8(v: Int) -> Int:
+    return ((v + 7) // 8) * 8
+
+
+def _checked_add(a: Int, b: Int) -> Int:
+    """a + b, or -1 on overflow (inputs non-negative)."""
+    if a > _MAX_INT - b:
+        return -1
+    return a + b
+
+
+def _checked_mul(a: Int, b: Int) -> Int:
+    """a * b, or -1 on overflow (inputs non-negative)."""
+    if a != 0 and b > _MAX_INT // a:
+        return -1
+    return a * b
+
+
+def _map_value_size(
+    walk: _BtfWalk, data: Span[UInt8, _], tid: Int
+) -> Int:
+    """Map key/value byte size: INT or STRUCT, or -1."""
+    var size = walk.int_size(data, tid)
+    if size >= 0:
+        return size
+    return walk.struct_size(data, tid)
+
+
+def read_object_map_bytes(data: Span[UInt8, _]) -> ObjectMapBytes:
+    """Lower-bound map bytes over every map in .maps.
+
+    Ringbuf counts max_entries; array counts max_entries
+    times the rounded value size; hash counts max_entries
+    times the rounded key and value sizes. Any other map
+    type refuses; an object without a maps DATASEC holds
+    zero bytes.
+    """
+    var sec = _find_section(data, String(".BTF"))
+    if not sec.found:
+        return _refuse_map_bytes(String("no BTF section"))
+    var walk = _walk_btf(data, sec.offset, sec.size)
+    if not walk.ok:
+        return _refuse_map_bytes(walk.message.copy())
+    var found = -1
+    for i in range(len(walk.offsets)):
+        if walk.kinds[i] != 15:
+            continue
+        var text = String("")
+        if not walk.type_name(data, i, text):
+            return _refuse_map_bytes(String("BTF strings corrupt"))
+        if text != String(".maps"):
+            continue
+        if found >= 0:
+            return _refuse_map_bytes(
+                String("duplicate maps DATASEC")
+            )
+        found = i
+    var out = ObjectMapBytes()
+    out.ok = True
+    if found < 0:
+        return out^
+    var base = walk.offsets[found]
+    for m in range(walk.vlens[found]):
+        var var_tid = _u32(data, base + 12 + m * 12)
+        if not walk.rec_valid(var_tid):
+            return _refuse_map_bytes(String("bad maps DATASEC"))
+        var rec = var_tid - 1
+        if walk.kinds[rec] != 14:
+            return _refuse_map_bytes(String("bad maps DATASEC"))
+        var name = String("")
+        if not walk.type_name(data, rec, name):
+            return _refuse_map_bytes(String("BTF strings corrupt"))
+        var struct_tid = walk.sizes[rec]
+        if not walk.rec_valid(struct_tid):
+            return _refuse_map_bytes(name + String(" not a struct"))
+        var srec = struct_tid - 1
+        if walk.kinds[srec] != 4:
+            return _refuse_map_bytes(name + String(" not a struct"))
+        var type_tid = walk.member_type(data, srec, String("type"))
+        if type_tid == -1:
+            return _refuse_map_bytes(name + String(" missing type"))
+        if type_tid == -2:
+            return _refuse_map_bytes(String("BTF strings corrupt"))
+        var map_n = walk.uint_value(data, type_tid)
+        if map_n < 0:
+            return _refuse_map_bytes(name + String(" bad type"))
+        var max_tid = walk.member_type(
+            data, srec, String("max_entries")
+        )
+        if max_tid == -1:
+            return _refuse_map_bytes(
+                name + String(" missing max_entries")
+            )
+        if max_tid == -2:
+            return _refuse_map_bytes(String("BTF strings corrupt"))
+        var map_m = walk.uint_value(data, max_tid)
+        if map_m < 0:
+            return _refuse_map_bytes(
+                name + String(" bad max_entries")
+            )
+        if map_n == _MAP_RINGBUF:
+            var total = _checked_add(out.bytes, map_m)
+            if total < 0:
+                return _refuse_map_bytes(
+                    name + String(" size overflows")
+                )
+            out.bytes = total
+        elif map_n == _MAP_ARRAY:
+            var key_tid = walk.member_type(data, srec, String("key"))
+            if key_tid == -1:
+                return _refuse_map_bytes(
+                    name + String(" missing key")
+                )
+            if key_tid == -2:
+                return _refuse_map_bytes(
+                    String("BTF strings corrupt")
+                )
+            var val_tid = walk.member_type(
+                data, srec, String("value")
+            )
+            if val_tid == -1:
+                return _refuse_map_bytes(
+                    name + String(" missing value")
+                )
+            if val_tid == -2:
+                return _refuse_map_bytes(
+                    String("BTF strings corrupt")
+                )
+            var val_size = _map_value_size(walk, data, val_tid)
+            if val_size < 0:
+                return _refuse_map_bytes(
+                    name + String(" bad value")
+                )
+            var add = _checked_mul(map_m, _round8(val_size))
+            if add < 0:
+                return _refuse_map_bytes(
+                    name + String(" size overflows")
+                )
+            var total = _checked_add(out.bytes, add)
+            if total < 0:
+                return _refuse_map_bytes(
+                    name + String(" size overflows")
+                )
+            out.bytes = total
+        elif map_n == _MAP_HASH:
+            var key_tid = walk.member_type(data, srec, String("key"))
+            if key_tid == -1:
+                return _refuse_map_bytes(
+                    name + String(" missing key")
+                )
+            if key_tid == -2:
+                return _refuse_map_bytes(
+                    String("BTF strings corrupt")
+                )
+            var key_size = _map_value_size(walk, data, key_tid)
+            if key_size < 0:
+                return _refuse_map_bytes(
+                    name + String(" bad key")
+                )
+            var val_tid = walk.member_type(
+                data, srec, String("value")
+            )
+            if val_tid == -1:
+                return _refuse_map_bytes(
+                    name + String(" missing value")
+                )
+            if val_tid == -2:
+                return _refuse_map_bytes(
+                    String("BTF strings corrupt")
+                )
+            var val_size = _map_value_size(walk, data, val_tid)
+            if val_size < 0:
+                return _refuse_map_bytes(
+                    name + String(" bad value")
+                )
+            var each = _checked_add(
+                _round8(key_size), _round8(val_size)
+            )
+            if each < 0:
+                return _refuse_map_bytes(
+                    name + String(" size overflows")
+                )
+            var add = _checked_mul(map_m, each)
+            if add < 0:
+                return _refuse_map_bytes(
+                    name + String(" size overflows")
+                )
+            var total = _checked_add(out.bytes, add)
+            if total < 0:
+                return _refuse_map_bytes(
+                    name + String(" size overflows")
+                )
+            out.bytes = total
+        else:
+            return _refuse_map_bytes(
+                String(t"unsupported map type {map_n} in {name}")
+            )
     return out^
 
 

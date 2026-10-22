@@ -3039,6 +3039,7 @@ EOF
 
 suite_doctor() {
     run_unit_file tests/unit/test_doctor.mojo || return 1
+    run_unit_file tests/unit/test_prechecks.mojo || return 1
     BIN="$ROOT/build/memveil"
     if [ ! -x "$BIN" ]; then
         echo "doctor: missing $BIN (run tools/build first)" >&2

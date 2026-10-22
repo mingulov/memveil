@@ -12,7 +12,7 @@ mkdir -p "$GATE"
 
 # Every generated tree; later tasks extend this list alongside
 # their variants. Only these directories are ever removed.
-VARIANTS="base ftrace-off ftrace-denied ftrace-malformed aff-dup aff-module aff-clone aff-prefix debugfs-root debug-denied lockdown-conf lockdown-integrity lockdown-nosecfs lockdown-dashdash lockdown-config lockdown-nolsm lockdown-twobrackets lockdown-bogus lockdown-denied notracing-config notracing-bpfevents tracefs-noevents tracefs-unmounted tracefs-hidden tracefs-gone events-denied btf-absent-config btf-absent-unknown btf-not-visible btf-denied hook-absent hook-not-in-btf hook-clone hook-nokallsyms denied-all container-view format-denied id-absent cc-flags-nonode cc-tdx-nonode cc-flags-host cc-tsm"
+VARIANTS="base ftrace-off ftrace-denied ftrace-malformed aff-dup aff-module aff-clone aff-prefix debugfs-root debug-denied lockdown-conf lockdown-integrity lockdown-nosecfs lockdown-dashdash lockdown-config lockdown-nolsm lockdown-twobrackets lockdown-bogus lockdown-denied notracing-config notracing-bpfevents tracefs-noevents tracefs-unmounted tracefs-hidden tracefs-gone events-denied btf-absent-config btf-absent-unknown btf-not-visible btf-denied hook-absent hook-not-in-btf hook-clone hook-nokallsyms denied-all container-view format-denied id-absent cc-flags-nonode cc-tdx-nonode cc-flags-host cc-tsm caps-none caps-bpf-perfmon caps-sysadmin caps-malformed caps-short memcg-small memcg-ancestor memcg-malformed memcg-huge memcg-empty memcg-v1 unpriv-bpf"
 for v in $VARIANTS; do
   rm -rf "$GATE/$v"
 done
@@ -268,4 +268,55 @@ write_gate_cpuinfo "$GATE/cc-tsm/proc/cpuinfo" \
   " sev sev_es sev_snp hypervisor"
 mkdir -p "$GATE/cc-tsm/sys/kernel/config/tsm/report"
 
-echo "wrote $GATE (base plus 42 variants)"
+mk caps-none
+sed -i 's/^CapEff:.*/CapEff:\t0000000000000000/' \
+  "$GATE/caps-none/proc/self/status"
+
+mk caps-bpf-perfmon
+sed -i 's/^CapEff:.*/CapEff:\t000000c000000000/' \
+  "$GATE/caps-bpf-perfmon/proc/self/status"
+
+mk caps-sysadmin
+sed -i 's/^CapEff:.*/CapEff:\t0000000000200000/' \
+  "$GATE/caps-sysadmin/proc/self/status"
+
+mk caps-malformed
+sed -i 's/^CapEff:.*/CapEff:\tzz/' \
+  "$GATE/caps-malformed/proc/self/status"
+
+mk caps-short
+sed -i 's/^CapEff:.*/CapEff:\t1ff/' \
+  "$GATE/caps-short/proc/self/status"
+
+mk memcg-small
+printf '1048576\n' \
+  > "$GATE/memcg-small/sys/fs/cgroup/mvt.slice/memory.max"
+
+mk memcg-ancestor
+printf '12:memory:/x\n0::/a/b\n' \
+  > "$GATE/memcg-ancestor/proc/self/cgroup"
+mkdir -p "$GATE/memcg-ancestor/sys/fs/cgroup/a/b"
+printf '50000000\n' > "$GATE/memcg-ancestor/sys/fs/cgroup/a/memory.max"
+printf '0\n' > "$GATE/memcg-ancestor/sys/fs/cgroup/a/memory.current"
+printf 'max\n' > "$GATE/memcg-ancestor/sys/fs/cgroup/a/b/memory.max"
+printf '0\n' > "$GATE/memcg-ancestor/sys/fs/cgroup/a/b/memory.current"
+
+mk memcg-malformed
+printf '12abc\n' \
+  > "$GATE/memcg-malformed/sys/fs/cgroup/mvt.slice/memory.max"
+
+mk memcg-huge
+printf '123456789012345678901\n' \
+  > "$GATE/memcg-huge/sys/fs/cgroup/mvt.slice/memory.max"
+
+mk memcg-empty
+: > "$GATE/memcg-empty/sys/fs/cgroup/mvt.slice/memory.max"
+
+mk memcg-v1
+printf '12:memory:/x\n' > "$GATE/memcg-v1/proc/self/cgroup"
+
+mk unpriv-bpf
+printf '2\n' \
+  > "$GATE/unpriv-bpf/proc/sys/kernel/unprivileged_bpf_disabled"
+
+echo "wrote $GATE (base plus 54 variants)"

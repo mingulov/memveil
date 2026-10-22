@@ -45,3 +45,15 @@ tree is tracked. One line per variant:
 - cc-tdx-nonode: tdx_guest flag with hypervisor, no guest node.
 - cc-flags-host: SEV-SNP flags without hypervisor (bare metal).
 - cc-tsm: cc-flags-nonode plus a TSM report directory.
+- caps-none: CapEff zero (no BPF privilege).
+- caps-bpf-perfmon: CapEff with CAP_BPF and CAP_PERFMON.
+- caps-sysadmin: CapEff with CAP_SYS_ADMIN only.
+- caps-malformed: CapEff with a non-hex value.
+- caps-short: CapEff with a short hex value.
+- memcg-small: leaf memory.max 1 MiB.
+- memcg-ancestor: tight 50 MB ancestor above an unlimited leaf.
+- memcg-malformed: leaf memory.max with non-digits.
+- memcg-huge: leaf memory.max with 21 digits.
+- memcg-empty: leaf memory.max empty.
+- memcg-v1: cgroup file with a v1 line only.
+- unpriv-bpf: unprivileged_bpf_disabled reads 2.
