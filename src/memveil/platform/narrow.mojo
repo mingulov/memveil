@@ -13,13 +13,14 @@ not parse is an unbound reference, never an error.
 """
 
 from memveil.capture.normalize import bytes_to_hex
+from memveil.platform.btf import MAX_KERNEL_BTF_BYTES
 from memveil.platform.gzip import gunzip_member
 from memveil.platform.hash import sha256_hex
 from memveil.platform.reader import read_host_file
 
 comptime _ZLIB = "libz.so.1"
 comptime MAX_NARROW_CONFIG_BYTES = 8388608
-comptime MAX_NARROW_BTF_BYTES = 67108864
+comptime MAX_NARROW_BTF_BYTES = MAX_KERNEL_BTF_BYTES
 comptime MAX_NARROW_FORMAT_BYTES = 1048576
 comptime MAX_NARROW_OBJECT_BYTES = 67108864
 comptime MAX_NARROW_IMAGE_BYTES = 268435456

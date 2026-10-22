@@ -2050,15 +2050,15 @@ def test_discover_candidate_unknown() raises:
         a.reason, String("layout: missing field common_type")
     )
     var l = find_entry(rep, String("mapping-lifecycle"))
-    # The ordinary-7.0 root carries stand-in BTF, so the live
-    # judgment fails with the reader cause, not "unproven".
-    assert_equal(l.status, String("unavailable"))
+    # The ordinary-7.0 root carries stand-in BTF: corrupt
+    # BTF is unknown evidence, never an unavailable verdict.
+    assert_equal(l.status, String("unknown"))
     assert_equal(
         l.reason,
         String("fexit:swiotlb_tbl_map_single: bad BTF header"),
     )
     var c = find_entry(rep, String("copy-actual"))
-    assert_equal(c.status, String("unavailable"))
+    assert_equal(c.status, String("unknown"))
     assert_equal(
         c.reason,
         String(
@@ -2521,6 +2521,22 @@ def test_verify_live_btf_corrupt() raises:
         fx("kernel-6.8"), doc^, caps^
     )
     assert_true(not v.ok)
+    assert_equal(
+        v.reason,
+        String("fexit:swiotlb_tbl_map_single: bad BTF header"),
+    )
+
+
+def test_verify_live_btf_corrupt_unknown() raises:
+    var doc = parse_profile_bytes(bytes_of(live_ref_doc()))
+    var caps = List[String]()
+    caps.append(String("mapping-lifecycle"))
+    var v = verify_live_interfaces(
+        fx("kernel-6.8"), doc^, caps^
+    )
+    assert_true(not v.ok)
+    assert_true(v.unknown)
+    assert_equal(v.code, String("btf-malformed"))
     assert_equal(
         v.reason,
         String("fexit:swiotlb_tbl_map_single: bad BTF header"),
@@ -3519,6 +3535,7 @@ def run() raises -> Int:
     suite.test[test_verify_live_unattachable]()
     suite.test[test_verify_live_btf_absent]()
     suite.test[test_verify_live_btf_corrupt]()
+    suite.test[test_verify_live_btf_corrupt_unknown]()
     suite.test[test_verify_live_73_sig_mismatch]()
     suite.test[test_verify_live_73_alt_ok]()
     suite.test[test_verify_live_alt_malformed]()

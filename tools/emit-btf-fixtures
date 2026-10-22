@@ -59,6 +59,9 @@ Outputs: tests/fixtures/btf/*.bin (funcproto, dupfunc, cycle, anon,
                 bitfields, agreeing/disagreeing/partial
                 duplicate structs, an ENUM64, typedef/const/
                 tag chains and an array member.
+  split     : funcproto with its string section's first
+                byte patched to nonzero: the split-BTF
+                shape needing a base.
 """
 import struct
 import sys
@@ -446,6 +449,13 @@ def members():
     return b.build()
 
 
+def split():
+    data = bytearray(funcproto())
+    type_len = struct.unpack("<I", data[12:16])[0]
+    data[24 + type_len] = ord("S")
+    return bytes(data)
+
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     blobs = {"funcproto": funcproto(), "dupfunc": dupfunc(),
@@ -458,7 +468,7 @@ def main():
              "intsize-bad": intsize_bad(),
              "swiotlb-live": swiotlb_live(False),
              "swiotlb-live-73": swiotlb_live(True),
-             "members": members()}
+             "members": members(), "split": split()}
     for name, data in blobs.items():
         (OUT / (name + ".bin")).write_bytes(data)
     print("wrote %d BTF fixtures to %s" % (len(blobs), OUT))

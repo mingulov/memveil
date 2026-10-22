@@ -32,7 +32,11 @@ from memveil.model.common import (
 )
 from memveil.model.validate import ValidationError, check_bounded_text
 from memveil.platform.artifact_files import join_root
-from memveil.platform.btf import read_btf_func_proto, read_btf_member
+from memveil.platform.btf import (
+    classify_btf_message,
+    read_btf_func_proto,
+    read_btf_member,
+)
 from memveil.platform.evidence import KernelInfo, parse_kernel_triple
 from memveil.platform.narrow import (
     MAX_NARROW_BTF_BYTES,
@@ -48,6 +52,7 @@ from memveil.platform.reader import (
     EVIDENCE_ABSENT,
     EVIDENCE_DENIED,
     EVIDENCE_OK,
+    E_TOO_BIG,
     EvidenceReader,
     bytes_to_text,
     file_state,
@@ -1465,22 +1470,26 @@ struct LiveVerdict(Copyable):
     ``unknown`` True means the evidence was unreadable, so
     the interfaces are neither verified nor refused; every
     other refusal carries ``unknown`` False. ``reason`` is
-    "" exactly when ``ok``.
+    "" exactly when ``ok``. ``code`` names the machine
+    reason class, "" when ok or unclassified.
     """
 
     var ok: Bool
     var reason: String
     var unknown: Bool
+    var code: String
 
     def __init__(out self):
         self.ok = False
         self.reason = String("")
         self.unknown = False
+        self.code = String("")
 
     def __init__(out self, ok: Bool, reason: String, unknown: Bool):
         self.ok = ok
         self.reason = reason.copy()
         self.unknown = unknown
+        self.code = String("")
 
 
 def _live_refuse(reason: String) -> LiveVerdict:
@@ -1491,6 +1500,20 @@ def _live_refuse(reason: String) -> LiveVerdict:
 def _live_unknown(reason: String) -> LiveVerdict:
     """One unknown verdict: unreadable evidence, with the reason."""
     return LiveVerdict(False, reason.copy(), True)
+
+
+def _live_refuse_code(reason: String, code: String) -> LiveVerdict:
+    """One coded refusal verdict: not ok, known, with the code."""
+    var out = LiveVerdict(False, reason.copy(), False)
+    out.code = code.copy()
+    return out^
+
+
+def _live_unknown_code(reason: String, code: String) -> LiveVerdict:
+    """One coded unknown verdict: unreadable evidence, with the code."""
+    var out = LiveVerdict(False, reason.copy(), True)
+    out.code = code.copy()
+    return out^
 
 
 def _read_live_btf(
@@ -1505,11 +1528,15 @@ def _read_live_btf(
     var done = LiveVerdict()
     var st = file_state(reader, String("/sys/kernel/btf/vmlinux"))
     if st == EVIDENCE_ABSENT:
-        return _live_refuse(
-            String("BTF absent (kernel built without BTF)")
+        return _live_refuse_code(
+            String("BTF absent (kernel built without BTF)"),
+            String("btf-absent-unknown"),
         )
     if st == EVIDENCE_DENIED:
-        return _live_unknown(String("BTF denied (privilege)"))
+        return _live_unknown_code(
+            String("BTF denied (privilege)"),
+            String("btf-denied"),
+        )
     try:
         btf = read_host_file(
             join_root(reader.root, String("/sys/kernel/btf/vmlinux")),
@@ -1517,8 +1544,15 @@ def _read_live_btf(
             MAX_NARROW_BTF_BYTES,
         )
     except e:
-        return _live_unknown(
-            String("BTF unreadable: ") + String(e)
+        if e.code == E_TOO_BIG:
+            var cap = MAX_NARROW_BTF_BYTES
+            return _live_unknown_code(
+                String(t"BTF too large (over {cap} bytes)"),
+                String("btf-too-large"),
+            )
+        return _live_unknown_code(
+            String("BTF unreadable: ") + String(e),
+            String("btf-unreadable"),
         )
     done.ok = True
     return done^
@@ -1672,6 +1706,11 @@ def verify_live_cap(
             alts.append(an.value.copy())
         var live = read_btf_func_proto(Span(btf), hook.function)
         if not live.ok:
+            var scode = classify_btf_message(live.message.copy())
+            if scode != String(""):
+                return _live_unknown_code(
+                    String(t"{hook.name}: {live.message}"), scode
+                )
             return _live_refuse(
                 String(t"{hook.name}: {live.message}")
             )
@@ -1696,9 +1735,17 @@ def verify_live_cap(
                 Span(btf), lay.struct_name, lay.field_name
             )
             if not m.ok:
-                return _live_refuse(
-                    lay.struct_name + "." + lay.field_name + ": " + m.message
+                var why = (
+                    lay.struct_name
+                    + "."
+                    + lay.field_name
+                    + ": "
+                    + m.message
                 )
+                var scode = classify_btf_message(m.message.copy())
+                if scode != String(""):
+                    return _live_unknown_code(why.copy(), scode)
+                return _live_refuse(why^)
             if m.bit_offset != lay.bit_offset or m.bit_size != lay.bit_size:
                 return _live_refuse(
                     lay.struct_name

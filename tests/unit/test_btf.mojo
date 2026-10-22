@@ -6,6 +6,8 @@ from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
 
 from memveil.platform.btf import (
+    MAX_KERNEL_BTF_BYTES,
+    check_btf_health,
     read_btf_copy_fb,
     read_btf_func_proto,
     read_btf_maps,
@@ -14,7 +16,11 @@ from memveil.platform.btf import (
     resolve_btf_enumerator,
     resolve_btf_member,
 )
-from memveil.platform.narrow import verify_object_program
+from memveil.platform.evidence import evidence_btf_cap
+from memveil.platform.narrow import (
+    MAX_NARROW_BTF_BYTES,
+    verify_object_program,
+)
 from memveil.platform.reader import read_host_file
 
 
@@ -528,6 +534,43 @@ def test_member_legacy_refuses_bitfield() raises:
     )
 
 
+def test_btf_health_classes() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/swiotlb-live.bin"))
+    var h = check_btf_health(Span(raw))
+    assert_true(h.ok)
+    var split = _read_fixture(String("tests/fixtures/btf/split.bin"))
+    var s = check_btf_health(Span(split))
+    assert_true(not s.ok)
+    assert_equal(s.code, String("btf-split"))
+    assert_equal(
+        s.message,
+        String(
+            "split BTF needs base"
+            " (string section does not start with NUL)"
+        ),
+    )
+    var cut = Span(raw)[0:600]
+    var t = check_btf_health(cut)
+    assert_true(not t.ok)
+    assert_equal(t.code, String("btf-truncated"))
+    var stand = _read_fixture(
+        String(
+            "tests/fixtures/capabilities/ordinary-7.0"
+            "/sys/kernel/btf/vmlinux"
+        )
+    )
+    var m = check_btf_health(Span(stand))
+    assert_true(not m.ok)
+    assert_equal(m.code, String("btf-malformed"))
+    assert_equal(m.message, String("bad BTF header"))
+
+
+def test_btf_cap_single() raises:
+    assert_equal(MAX_KERNEL_BTF_BYTES, 67108864)
+    assert_equal(MAX_NARROW_BTF_BYTES, MAX_KERNEL_BTF_BYTES)
+    assert_equal(evidence_btf_cap(), MAX_KERNEL_BTF_BYTES)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_btf_ok]()
@@ -575,6 +618,8 @@ def run() raises -> Int:
     suite.test[test_member_duplicates]()
     suite.test[test_member_absent]()
     suite.test[test_member_legacy_refuses_bitfield]()
+    suite.test[test_btf_health_classes]()
+    suite.test[test_btf_cap_single]()
     suite^.run()
     return 0
 

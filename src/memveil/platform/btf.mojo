@@ -22,6 +22,7 @@ to STRUCT with the size in bytes for the offsets value.
 
 comptime _BTF_MAGIC = 0xEB9F
 comptime _BTF_VERSION = 1
+comptime MAX_KERNEL_BTF_BYTES = 67108864
 comptime _MAP_ARRAY = 2
 comptime _MAP_RINGBUF = 27
 comptime _MIN_RING_BYTES = 4096
@@ -412,6 +413,64 @@ def _walk_btf(data: Span[UInt8, _], base: Int, size: Int) -> _BtfWalk:
         return _refuse_walk(String("BTF types corrupt"))
     out.ok = True
     out.message = String("")
+    return out^
+
+
+def classify_btf_message(message: String) -> String:
+    """Map one BTF reader message to a health code, else "".
+
+    Structural failures classify as truncated or
+    malformed; anything else (missing names, prototype
+    detail) is not structural and stays unclassified.
+    """
+    if message == String("BTF too small"):
+        return String("btf-truncated")
+    if message == String("BTF sections out of range"):
+        return String("btf-truncated")
+    if message == String("bad BTF header"):
+        return String("btf-malformed")
+    if message == String("BTF types corrupt"):
+        return String("btf-malformed")
+    if message == String("BTF strings corrupt"):
+        return String("btf-malformed")
+    if message.startswith(String("unknown BTF kind ")):
+        return String("btf-malformed")
+    return String("")
+
+
+struct BtfHealth(Copyable):
+    """One BTF blob health verdict: ok, or a stable code."""
+
+    var ok: Bool
+    var code: String
+    var message: String
+
+    def __init__(out self):
+        self.ok = False
+        self.code = String("")
+        self.message = String("")
+
+
+def check_btf_health(data: Span[UInt8, _]) -> BtfHealth:
+    """Classify one raw BTF blob: healthy, split, or broken.
+
+    A blob that walks but whose string section starts
+    past a NUL needs its base BTF; anything failing the
+    walk classifies as truncated or malformed, never ok.
+    """
+    var out = BtfHealth()
+    var walk = _walk_btf(data, 0, len(data))
+    if not walk.ok:
+        out.code = classify_btf_message(walk.message.copy())
+        out.message = walk.message.copy()
+        return out^
+    if walk.str_end > walk.str_base and data[walk.str_base] != UInt8(0):
+        out.code = String("btf-split")
+        out.message = String(
+            "split BTF needs base (string section does not start with NUL)"
+        )
+        return out^
+    out.ok = True
     return out^
 
 

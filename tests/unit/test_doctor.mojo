@@ -144,6 +144,9 @@ def test_build_env_denied() raises:
 
 
 def test_json_ordinary_exact() raises:
+    # Stand-in BTF is corrupt evidence: lifecycle and copy
+    # report unknown (with the unknown-status remedy), only
+    # the proven layout gap stays unavailable.
     var drep = drep_for(String("ordinary-7.0"), String("profiles"))
     var js = render_doctor_json(drep)
     var want = String(
@@ -179,17 +182,15 @@ def test_json_ordinary_exact() raises:
         ' "remedy": "refresh the profile\'s recorded signatures from'
         ' this kernel, then re-prove with memveil qualify'
         ' (see memveil qualify --help)"},'
-        ' {"id": "mapping-lifecycle", "status": "unavailable",'
+        ' {"id": "mapping-lifecycle", "status": "unknown",'
         ' "reason": "fexit:swiotlb_tbl_map_single: bad BTF header",'
-        ' "remedy": "refresh the profile\'s recorded signatures from'
-        ' this kernel, then re-prove with memveil qualify'
-        ' (see memveil qualify --help)"},'
-        ' {"id": "copy-actual", "status": "unavailable",'
+        ' "remedy": "run memveil qualify for local-auto,'
+        ' or await validated evidence"},'
+        ' {"id": "copy-actual", "status": "unknown",'
         ' "reason": "fentry:__swiotlb_sync_single_for_device:'
         ' bad BTF header",'
-        ' "remedy": "refresh the profile\'s recorded signatures from'
-        ' this kernel, then re-prove with memveil qualify'
-        ' (see memveil qualify --help)"}],\n'
+        ' "remedy": "run memveil qualify for local-auto,'
+        ' or await validated evidence"}],\n'
         '  "privilege": {\n'
         '    "euid": 1001,\n'
         '    "denied_paths": []\n'

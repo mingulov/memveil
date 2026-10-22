@@ -40,6 +40,7 @@ sources in ``signals``:
 """
 
 from memveil.model.common import MaybeString
+from memveil.platform.btf import MAX_KERNEL_BTF_BYTES
 from memveil.platform.reader import (
     EVIDENCE_ABSENT,
     EVIDENCE_DENIED,
@@ -61,9 +62,14 @@ comptime P_BOOT_CONFIG_PREFIX = "/boot/config-"
 
 comptime _CPUINFO_CAP = 1048576
 comptime _OS_RELEASE_CAP = 65536
-comptime _BTF_CAP = 33554432
+comptime _BTF_CAP = MAX_KERNEL_BTF_BYTES
 comptime _TRIPLE_BOUND = 2147483647
 comptime _OS_VALUE_KEEP = 64
+
+
+def evidence_btf_cap() -> Int:
+    """The kernel BTF read cap, one shared value."""
+    return MAX_KERNEL_BTF_BYTES
 
 
 @fieldwise_init
