@@ -1593,6 +1593,11 @@ suite_native_decode() {
     # their verdict dumps must match.
     python3 "$ROOT/tests/fixtures/lifecycle-wire/gen_corpus.py" \
         --check || return 1
+    # The CO-RE relocation set of each object is pinned: the
+    # oracle test proves the extractor, then --check proves
+    # the tracked file matches the built objects.
+    python3 "$ROOT/tests/bpf/test_core_relocations.py" || return 1
+    "$ROOT/tools/emit-core-relocations" --check || return 1
     NATIVE="$ROOT/build/native/test_lifecycle_decode"
     if [ ! -x "$NATIVE" ]; then
         echo "native-decode: missing $NATIVE (run tools/build first)" >&2

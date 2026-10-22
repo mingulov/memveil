@@ -1,0 +1,524 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Extract CO-RE relocations from BPF objects into JSON.
+
+Reads each object's ELF64 section headers, parses .BTF (type
+and string sections) and the .BTF.ext core_relo subsection,
+resolves every relocation to a (type, member or enumerator,
+kind) record, aggregates identical records with a count, and
+writes {"format": 1, "objects": {name: [...]}} with records
+sorted by (type, member or enumerator, kind). A memberless
+record sorts before member records of its type. Flavor
+suffixes (the ___flavor part) are stripped from type names.
+Only field_exists records carry optional true.
+
+Resolution mirrors the loader walk: type relocations carry
+exactly the access string "0"; enum value relocations carry
+one enumerator index; field relocations skip the base index
+and walk the rest through struct/union members and arrays.
+A relocation the tool cannot resolve to a named type and
+member or enumerator is refused, as is any bitfield
+relocation or unknown kind number: the tool exits 1 naming
+the offending record instead of guessing.
+
+Usage: emit-core-relocations [--check] [--out PATH] OBJ...
+Default objects are the three product objects under
+build/bpf; default output is bpf/core-relocations.json.
+--check exits 1 naming the first differing object when the
+tracked file differs. Usage errors exit 2.
+"""
+
+import argparse
+import json
+import os
+import struct
+import sys
+import tempfile
+
+_BTF_MAGIC = 0xEB9F
+_BTF_VERSION = 1
+_MAX_SPEC = 64
+
+# BTF type kinds from the kernel BTF format.
+_UNKN = 0
+_INT = 1
+_PTR = 2
+_ARRAY = 3
+_STRUCT = 4
+_UNION = 5
+_ENUM = 6
+_FWD = 7
+_TYPEDEF = 8
+_VOLATILE = 9
+_CONST = 10
+_RESTRICT = 11
+_FUNC = 12
+_FUNC_PROTO = 13
+_VAR = 14
+_DATASEC = 15
+_FLOAT = 16
+_DECL_TAG = 17
+_TYPE_TAG = 18
+_ENUM64 = 19
+
+_KIND_NAMES = {
+    0: "field_byte_offset",
+    1: "field_byte_size",
+    2: "field_exists",
+    3: "field_signed",
+    6: "type_id_local",
+    7: "type_id_target",
+    8: "type_exists",
+    9: "type_size",
+    10: "enumval_exists",
+    11: "enumval_value",
+    12: "type_matches",
+}
+_BITFIELD_KINDS = {4: "field_lshift_u64", 5: "field_rshift_u64"}
+_TYPE_KINDS = {6, 7, 8, 9, 12}
+_ENUM_KINDS = {10, 11}
+_FIELD_KINDS = {0, 1, 2, 3}
+_SKIP_KINDS = {_TYPEDEF, _VOLATILE, _CONST, _RESTRICT}
+
+
+class Refusal(Exception):
+    """One fatal extraction failure with its context."""
+
+
+def _u16_at(buf, off, what):
+    if off < 0 or off + 2 > len(buf):
+        raise Refusal("truncated " + what)
+    return struct.unpack_from("<H", buf, off)[0]
+
+
+def _u32_at(buf, off, what):
+    if off < 0 or off + 4 > len(buf):
+        raise Refusal("truncated " + what)
+    return struct.unpack_from("<I", buf, off)[0]
+
+
+def _u64_at(buf, off, what):
+    if off < 0 or off + 8 > len(buf):
+        raise Refusal("truncated " + what)
+    return struct.unpack_from("<Q", buf, off)[0]
+
+
+def _slice(buf, off, size, what):
+    if off < 0 or size < 0 or off + size > len(buf):
+        raise Refusal("truncated " + what)
+    return buf[off:off + size]
+
+
+def _cstr(buf, off, what):
+    if off < 0 or off >= len(buf):
+        raise Refusal("bad string offset in " + what)
+    end = buf.find(b"\0", off)
+    if end < 0:
+        raise Refusal("unterminated string in " + what)
+    try:
+        return buf[off:end].decode("ascii")
+    except UnicodeDecodeError:
+        raise Refusal("non-ascii string in " + what)
+
+
+def elf_sections(path):
+    """Map section name to bytes for one ELF64 little-endian file."""
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read()
+    except OSError as exc:
+        raise Refusal("cannot read %s: %s" % (path, exc))
+    if len(data) < 64 or data[0:4] != b"\x7fELF":
+        raise Refusal("%s: not an ELF object" % path)
+    if data[4] != 2:
+        raise Refusal("%s: not a 64-bit object" % path)
+    if data[5] != 1 or data[6] != 1:
+        raise Refusal("%s: not little-endian ELF" % path)
+    shoff = _u64_at(data, 0x28, "ELF header")
+    shentsize = _u16_at(data, 0x3A, "ELF header")
+    shnum = _u16_at(data, 0x3C, "ELF header")
+    shstrndx = _u16_at(data, 0x3E, "ELF header")
+    if shentsize != 64:
+        raise Refusal("%s: bad section entry size" % path)
+    headers = []
+    for idx in range(shnum):
+        raw = _slice(data, shoff + idx * 64, 64, "section table")
+        name, _type, _flags, _addr, off, size = struct.unpack(
+            "<IIQQQQ", raw[0:40])
+        headers.append((name, off, size))
+    if shstrndx >= len(headers):
+        raise Refusal("%s: bad string table index" % path)
+    _name, stroff, strsize = headers[shstrndx]
+    shstr = _slice(data, stroff, strsize, "section names")
+    out = {}
+    for name_off, off, size in headers:
+        out[_cstr(shstr, name_off, "section names")] = _slice(
+            data, off, size, "section contents")
+    return out
+
+
+class Btf:
+    """Parsed .BTF type and string sections with a spec walker."""
+
+    def __init__(self, data, obj):
+        self.obj = obj
+        if len(data) < 24:
+            raise Refusal("%s: truncated BTF header" % obj)
+        magic, version, _flags, hdr_len, type_off, type_len, \
+            str_off, str_len = struct.unpack("<HBBIIIII", data[0:24])
+        if magic != _BTF_MAGIC or version != _BTF_VERSION:
+            raise Refusal("%s: bad BTF header" % obj)
+        if hdr_len < 24 or hdr_len > len(data):
+            raise Refusal("%s: bad BTF header length" % obj)
+        base = hdr_len
+        self.types = _slice(data, base + type_off, type_len,
+                            "BTF types of " + obj)
+        self.strings = _slice(data, base + str_off, str_len,
+                              "BTF strings of " + obj)
+        self.parsed = []
+        pos = 0
+        while pos < len(self.types):
+            pos = self._parse_one(pos)
+        if pos != len(self.types):
+            raise Refusal("%s: trailing BTF type bytes" % obj)
+
+    def name(self, off):
+        """Resolve one string offset; 0 is the empty name."""
+        if off == 0:
+            return ""
+        return _cstr(self.strings, off, "BTF strings of " + self.obj)
+
+    @staticmethod
+    def stripped(name):
+        """Drop the ___flavor suffix from one type name."""
+        cut = name.find("___")
+        if cut >= 0:
+            return name[:cut]
+        return name
+
+    def _parse_one(self, pos):
+        raw = _slice(self.types, pos, 12, "BTF type")
+        name_off, info, size = struct.unpack("<III", raw)
+        kind = (info >> 24) & 0x1F
+        vlen = info & 0xFFFF
+        pos += 12
+        entry = {"kind": kind, "vlen": vlen, "name_off": name_off,
+                 "size": size, "members": [], "array": None,
+                 "enums": []}
+        if kind in (_STRUCT, _UNION):
+            for _ in range(vlen):
+                mbr = _slice(self.types, pos, 12, "BTF member")
+                pos += 12
+                entry["members"].append(struct.unpack("<III", mbr))
+        elif kind == _ARRAY:
+            arr = _slice(self.types, pos, 12, "BTF array")
+            pos += 12
+            entry["array"] = struct.unpack("<III", arr)
+        elif kind == _ENUM:
+            for _ in range(vlen):
+                enum = _slice(self.types, pos, 8, "BTF enum")
+                pos += 8
+                entry["enums"].append(struct.unpack("<II", enum))
+        elif kind == _ENUM64:
+            for _ in range(vlen):
+                enum = _slice(self.types, pos, 12, "BTF enum64")
+                pos += 12
+                entry["enums"].append(struct.unpack("<III", enum))
+        elif kind == _INT:
+            pos += len(_slice(self.types, pos, 4, "BTF int"))
+        elif kind == _FUNC_PROTO:
+            pos += len(_slice(self.types, pos, 8 * vlen,
+                              "BTF params"))
+        elif kind == _DATASEC:
+            pos += len(_slice(self.types, pos, 12 * vlen,
+                              "BTF section"))
+        elif kind in (_DECL_TAG, _TYPE_TAG):
+            pos += len(_slice(self.types, pos, 4, "BTF tag"))
+        elif kind == _VAR:
+            pos += len(_slice(self.types, pos, 4, "BTF var"))
+        elif kind in (_UNKN, _PTR, _FWD, _TYPEDEF, _VOLATILE,
+                      _CONST, _RESTRICT, _FUNC, _FLOAT):
+            pass
+        else:
+            raise Refusal("%s: unknown BTF kind %d" % (self.obj, kind))
+        self.parsed.append(entry)
+        return pos
+
+    def by_id(self, type_id, what):
+        """Fetch one type by 1-based id."""
+        if type_id < 1 or type_id > len(self.parsed):
+            raise Refusal("%s: bad BTF type id in %s"
+                          % (self.obj, what))
+        return self.parsed[type_id - 1]
+
+    def skip(self, type_id, what):
+        """Follow modifiers and typedefs; refuse on a cycle."""
+        seen = 0
+        while True:
+            entry = self.by_id(type_id, what)
+            if entry["kind"] not in _SKIP_KINDS:
+                return type_id
+            type_id = entry["size"]
+            seen += 1
+            if seen > 32:
+                raise Refusal("%s: BTF cycle in %s"
+                              % (self.obj, what))
+
+
+def core_relo_records(ext, btf, obj):
+    """Raw (section, insn_off, type_id, access, kind) records."""
+    if len(ext) < 24:
+        raise Refusal("%s: truncated BTF.ext header" % obj)
+    magic, version, _flags, hdr_len = struct.unpack(
+        "<HBBI", ext[0:8])
+    if magic != _BTF_MAGIC or version != _BTF_VERSION:
+        raise Refusal("%s: bad BTF.ext header" % obj)
+    if hdr_len < 24 or hdr_len > len(ext):
+        raise Refusal("%s: bad BTF.ext header length" % obj)
+    if hdr_len < 32:
+        return []
+    core_off = _u32_at(ext, 24, "BTF.ext header")
+    core_len = _u32_at(ext, 28, "BTF.ext header")
+    sub = _slice(ext, hdr_len + core_off, core_len, "core_relo")
+    if core_len == 0:
+        return []
+    rec_size = _u32_at(sub, 0, "core_relo records")
+    if rec_size < 16:
+        raise Refusal("%s: bad core_relo record size" % obj)
+    out = []
+    pos = 4
+    while pos < len(sub):
+        sec_off = _u32_at(sub, pos, "core_relo section")
+        num = _u32_at(sub, pos + 4, "core_relo section")
+        try:
+            sec = btf.name(sec_off)
+        except Refusal:
+            sec = "?"
+        pos += 8
+        for _ in range(num):
+            rec = _slice(sub, pos, rec_size, "core_relo record")
+            insn_off, type_id, access_off, kind = struct.unpack(
+                "<IIII", rec[0:16])
+            out.append((sec, insn_off, type_id, access_off, kind))
+            pos += rec_size
+    if pos != len(sub):
+        raise Refusal("%s: trailing core_relo bytes" % obj)
+    return out
+
+
+def parse_access(access, where):
+    """Split one access string into STRICT index integers."""
+    if access == "" or access.startswith(":"):
+        raise Refusal("%s: bad access string" % where)
+    parts = access.split(":")
+    if len(parts) > _MAX_SPEC:
+        raise Refusal("%s: access string too long" % where)
+    idxs = []
+    for part in parts:
+        if part == "" or not part.isdigit():
+            raise Refusal("%s: bad access string" % where)
+        idxs.append(int(part))
+    return idxs
+
+
+def resolve_record(btf, obj, sec, insn_off, type_id, access_off,
+                   kind):
+    """Resolve one record to its output shape (no count yet)."""
+    where = "%s: %s insn %d" % (obj, sec, insn_off)
+    if kind in _BITFIELD_KINDS:
+        raise Refusal("%s: bitfield relocation (kind %s)"
+                      % (where, _BITFIELD_KINDS[kind]))
+    if kind not in _KIND_NAMES:
+        raise Refusal("%s: unknown relocation kind %d"
+                      % (where, kind))
+    access = btf.name(access_off)
+    idxs = parse_access(access, where)
+    label = _KIND_NAMES[kind]
+    if kind in _TYPE_KINDS:
+        if access != "0":
+            raise Refusal("%s: type relocation with %s"
+                          % (where, access))
+        entry = btf.by_id(btf.skip(type_id, where), where)
+        name = Btf.stripped(btf.name(entry["name_off"]))
+        if name == "":
+            raise Refusal("%s: nameless type relocation" % where)
+        return {"type": name, "kind": label}
+    if kind in _ENUM_KINDS:
+        entry = btf.by_id(btf.skip(type_id, where), where)
+        if entry["kind"] not in (_ENUM, _ENUM64):
+            raise Refusal("%s: enum relocation off enum" % where)
+        if len(idxs) != 1 or idxs[0] >= len(entry["enums"]):
+            raise Refusal("%s: bad enumerator index" % where)
+        name = Btf.stripped(btf.name(entry["name_off"]))
+        tor = btf.name(entry["enums"][idxs[0]][0])
+        if name == "" or tor == "":
+            raise Refusal("%s: nameless enum relocation" % where)
+        return {"type": name, "enumerator": tor, "kind": label}
+    owner = None
+    member = None
+    cur = type_id
+    for step in idxs[1:]:
+        cur = btf.skip(cur, where)
+        entry = btf.by_id(cur, where)
+        if entry["kind"] in (_STRUCT, _UNION):
+            if step >= len(entry["members"]):
+                raise Refusal("%s: member index past %s"
+                              % (where, access))
+            name_off, next_id, _off = entry["members"][step]
+            if name_off != 0:
+                owner = Btf.stripped(
+                    btf.name(entry["name_off"]))
+                member = btf.name(name_off)
+            cur = next_id
+        elif entry["kind"] == _ARRAY:
+            _elem, _index, nelems = entry["array"]
+            if nelems != 0 and step >= nelems:
+                raise Refusal("%s: array index past %s"
+                              % (where, access))
+            cur = _elem
+        else:
+            raise Refusal("%s: walk lands on kind %d"
+                          % (where, entry["kind"]))
+    if not owner or not member:
+        raise Refusal("%s: relocation names no field" % where)
+    return {"type": owner, "member": member, "kind": label}
+
+
+def extract(path):
+    """Aggregate one object's relocation records, sorted."""
+    obj = os.path.basename(path)
+    sections = elf_sections(path)
+    ext = sections.get(".BTF.ext", b"")
+    if ext == b"":
+        return []
+    raw_btf = sections.get(".BTF", b"")
+    if raw_btf == b"":
+        raise Refusal("%s: relocations without BTF" % obj)
+    btf = Btf(raw_btf, obj)
+    counts = {}
+    for sec, insn_off, type_id, access_off, kind in \
+            core_relo_records(ext, btf, obj):
+        rec = resolve_record(btf, obj, sec, insn_off, type_id,
+                             access_off, kind)
+        sub = rec.get("member", rec.get("enumerator", ""))
+        key = (rec["type"], sub, rec["kind"])
+        if key in counts:
+            counts[key][0] += 1
+        else:
+            counts[key] = [1, rec]
+    out = []
+    for key in sorted(counts):
+        _count, rec = counts[key]
+        rec["relocs"] = _count
+        rec["optional"] = rec["kind"] == "field_exists"
+        out.append(rec)
+    return out
+
+
+def render(objects):
+    """Canonical JSON bytes for one extraction result."""
+    return json.dumps({"format": 1, "objects": objects},
+                      indent=2) + "\n"
+
+
+def main(argv):
+    """Extract, write, or check the relocation file."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.dirname(here)
+    parser = argparse.ArgumentParser(
+        prog="emit-core-relocations",
+        description="Extract CO-RE relocations into JSON.")
+    parser.add_argument("--check", action="store_true",
+                        help="fail when the output differs")
+    parser.add_argument("--out", default=None,
+                        help="output path (default: "
+                             "bpf/core-relocations.json)")
+    parser.add_argument("objs", nargs="*",
+                        help="objects (default: the three "
+                             "product objects)")
+    args = parser.parse_args(argv)
+    out = args.out or os.path.join(root, "bpf",
+                                   "core-relocations.json")
+    objs = args.objs or [os.path.join(root, "build", "bpf",
+                                      "swiotlb_%s.bpf.o" % tag)
+                         for tag in ("attempt", "lifecycle",
+                                     "copy")]
+    try:
+        objects = {}
+        for path in objs:
+            objects[os.path.basename(path)] = extract(path)
+    except Refusal as exc:
+        sys.stderr.write("core-relocations: %s\n" % exc)
+        return 1
+    want = render(objects)
+    if args.check:
+        try:
+            with open(out, "r") as handle:
+                have = handle.read()
+        except OSError as exc:
+            sys.stderr.write("core-relocations: cannot read %s: "
+                             "%s\n" % (out, exc))
+            return 1
+        if have != want:
+            try:
+                have_objects = json.loads(have).get("objects", {})
+            except ValueError:
+                have_objects = {}
+            first = None
+            for name, records in objects.items():
+                if name not in have_objects:
+                    first = (name, len(records), None)
+                    break
+                if have_objects[name] != records:
+                    first = (name, len(records),
+                             len(have_objects[name]))
+                    break
+            if first is None:
+                for name in have_objects:
+                    if name not in objects:
+                        first = (name, None,
+                                 len(have_objects[name]))
+                        break
+            if first is not None and first[2] is None:
+                sys.stderr.write(
+                    "core-relocations: %s differs in %s "
+                    "(missing; want %d records); regenerate "
+                    "with tools/emit-core-relocations\n"
+                    % (out, first[0], first[1]))
+            elif first is not None and first[1] is None:
+                sys.stderr.write(
+                    "core-relocations: %s lists dropped %s; "
+                    "regenerate with tools/emit-core-relocations\n"
+                    % (out, first[0]))
+            elif first is not None:
+                sys.stderr.write(
+                    "core-relocations: %s differs in %s "
+                    "(want %d records, have %d); regenerate "
+                    "with tools/emit-core-relocations\n"
+                    % (out, first[0], first[1], first[2]))
+            else:
+                sys.stderr.write(
+                    "core-relocations: %s differs; regenerate "
+                    "with tools/emit-core-relocations\n" % out)
+            return 1
+        print("core relocations match %s" % out)
+        return 0
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", dir=os.path.dirname(out) or ".", delete=False)
+    try:
+        tmp.write(want)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp.close()
+        os.replace(tmp.name, out)
+    except BaseException:
+        os.unlink(tmp.name)
+        raise
+    total = sum(len(records) for records in objects.values())
+    print("core relocations: %d records over %d objects -> %s"
+          % (total, len(objects), out))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

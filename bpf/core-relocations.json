@@ -1,0 +1,44 @@
+{
+  "format": 1,
+  "objects": {
+    "swiotlb_attempt.bpf.o": [],
+    "swiotlb_lifecycle.bpf.o": [],
+    "swiotlb_copy.bpf.o": [
+      {
+        "type": "device",
+        "member": "dma_parms",
+        "kind": "field_byte_offset",
+        "relocs": 2,
+        "optional": false
+      },
+      {
+        "type": "device_dma_parameters",
+        "member": "min_align_mask",
+        "kind": "field_byte_offset",
+        "relocs": 2,
+        "optional": false
+      },
+      {
+        "type": "io_tlb_pool",
+        "member": "nslabs",
+        "kind": "field_byte_offset",
+        "relocs": 2,
+        "optional": false
+      },
+      {
+        "type": "io_tlb_pool",
+        "member": "slots",
+        "kind": "field_byte_offset",
+        "relocs": 2,
+        "optional": false
+      },
+      {
+        "type": "io_tlb_pool",
+        "member": "start",
+        "kind": "field_byte_offset",
+        "relocs": 2,
+        "optional": false
+      }
+    ]
+  }
+}
