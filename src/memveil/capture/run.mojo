@@ -93,6 +93,7 @@ from memveil.platform.profiles import (
 from memveil.platform.reader import (
     EvidenceReader,
     open_evidence_reader,
+    read_evidence,
     read_host_file,
     readlink_self,
 )
@@ -795,24 +796,36 @@ def _receipt_covers(
 def _read_format(
     root: String, hook: ProfileHook, mut raw: List[UInt8]
 ) -> String:
-    """Read hook format bytes; "" when readable."""
-    var fpath = hook.format_path.copy()
+    """Read hook format bytes; "" when readable.
+
+    Failures name the translated path and the evidence
+    error, keeping the `format unreadable` prefix the
+    release gate matches.
+    """
     try:
         var treader = open_evidence_reader(root)
-        fpath = tracefs_translate(
+        var fpath = tracefs_translate(
             probe_tracefs(treader), hook.format_path
         )
-    except:
-        pass
-    try:
-        raw = read_host_file(
-            join_root(root, fpath),
-            String("format"),
-            MAX_NARROW_FORMAT_BYTES,
+        try:
+            raw = read_evidence(
+                treader, fpath, MAX_NARROW_FORMAT_BYTES
+            )
+        except e:
+            return (
+                String("format unreadable: ")
+                + fpath
+                + String(": ")
+                + e.message
+            )
+        return String("")
+    except e:
+        return (
+            String("format unreadable: ")
+            + hook.format_path
+            + String(": ")
+            + e.message
         )
-    except:
-        return String("format unreadable")
-    return String("")
 
 
 def _admit_hook(

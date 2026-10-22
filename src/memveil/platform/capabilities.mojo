@@ -67,7 +67,6 @@ from memveil.platform.reader import (
 comptime _FORMAT_CAP = 131072
 
 
-@fieldwise_init
 struct CapEntry(Copyable):
     """One judged capability: id, status, reason, remedy.
 
@@ -75,13 +74,36 @@ struct CapEntry(Copyable):
     ``unknown``, ``unsupported``. ``remedy`` names the fix
     for a non-available status (the exact next action, or
     the honest statement that none exists); it is empty
-    exactly when the status is available.
+    exactly when the status is available. ``evidence``
+    carries best-effort notes (today: ``id: <state>`` when
+    the tracepoint id file is absent or denied).
     """
 
     var id: String
     var status: String
     var reason: String
     var remedy: String
+    var evidence: List[String]
+
+    def __init__(
+        out self, id: String, status: String, reason: String,
+        remedy: String,
+    ):
+        self.id = id.copy()
+        self.status = status.copy()
+        self.reason = reason.copy()
+        self.remedy = remedy.copy()
+        self.evidence = List[String]()
+
+    def __init__(
+        out self, id: String, status: String, reason: String,
+        remedy: String, evidence: List[String],
+    ):
+        self.id = id.copy()
+        self.status = status.copy()
+        self.reason = reason.copy()
+        self.remedy = remedy.copy()
+        self.evidence = evidence.copy()
 
 
 @fieldwise_init
@@ -94,8 +116,14 @@ struct CapabilityReport(Copyable):
 
 @fieldwise_init
 struct _HookMarks(ImplicitlyCopyable):
-    """Combined per-hook probe outcome for one capability."""
+    """Combined per-hook probe outcome for one capability.
 
+    ``id_state`` is the first non-ok tracepoint id probe
+    (``absent`` or ``denied``, else ``""``): the id file is
+    best-effort evidence, never an availability gate.
+    """
+
+    var id_state: String
     var absent_path: String
     var absent_which: String
     var absent_hook: String
@@ -153,6 +181,7 @@ def _probe_hooks(
     degrade to unreadable marks, which are not privilege facts.
     """
     var marks = _HookMarks(
+        String(""),
         String(""), String(""), String(""), False,
         String(""), String(""), String(""), False,
         String(""), False, String(""), String(""), False,
@@ -189,18 +218,17 @@ def _probe_hooks(
         var id_st = EVIDENCE_OK
         if id_path != String(""):
             id_st = file_state(reader, id_path)
-        if id_st == EVIDENCE_ABSENT and not marks.has_absent:
-            marks.has_absent = True
-            marks.absent_hook = hname
-            marks.absent_which = String("id")
-            marks.absent_path = id_path
-        elif id_st == EVIDENCE_DENIED:
+        # The id file is best-effort: its first non-ok
+        # state feeds evidence, never availability. The
+        # denied path still lands in the report's
+        # privilege list.
+        if id_path != String("") and marks.id_state == String(""):
+            if id_st == EVIDENCE_ABSENT:
+                marks.id_state = String("absent")
+            elif id_st == EVIDENCE_DENIED:
+                marks.id_state = String("denied")
+        if id_st == EVIDENCE_DENIED:
             denied.append(id_path)
-            if not marks.has_denied:
-                marks.has_denied = True
-                marks.denied_hook = hname
-                marks.denied_which = String("id")
-                marks.denied_path = id_path
         var fmt_st = EVIDENCE_OK
         if fmt_path != String(""):
             fmt_st = file_state(reader, fmt_path)
@@ -253,6 +281,14 @@ def _cap_in_receipt(decision: ProfileDecision, cap_id: String) -> Bool:
         if decision.receipt_caps[i] == cap_id:
             return True
     return False
+
+
+def _id_evidence(marks: _HookMarks) -> List[String]:
+    """Best-effort id note for one judged capability."""
+    var out = List[String]()
+    if marks.id_state != String(""):
+        out.append(String("id: ") + marks.id_state)
+    return out^
 
 
 def _judge_declared(
@@ -417,6 +453,7 @@ def _judge_declared(
                         "verified under local-auto receipt "
                         + profile_id,
                         String(""),
+                        _id_evidence(marks),
                     )
                 return CapEntry(
                     cap_id,
@@ -458,6 +495,7 @@ def _judge_declared(
                     String("available"),
                     "verified under local-auto receipt " + profile_id,
                     String(""),
+                    _id_evidence(marks),
                 )
             return CapEntry(
                 cap_id,
@@ -474,6 +512,7 @@ def _judge_declared(
             String("available"),
             "verified under validated profile " + profile_id,
             String(""),
+            _id_evidence(marks),
         )
     return CapEntry(
         cap_id,

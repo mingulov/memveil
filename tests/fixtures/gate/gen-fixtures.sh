@@ -12,7 +12,7 @@ mkdir -p "$GATE"
 
 # Every generated tree; later tasks extend this list alongside
 # their variants. Only these directories are ever removed.
-VARIANTS="base ftrace-off ftrace-denied ftrace-malformed aff-dup aff-module aff-clone aff-prefix debugfs-root debug-denied lockdown-conf lockdown-integrity lockdown-nosecfs lockdown-dashdash lockdown-config lockdown-nolsm lockdown-twobrackets lockdown-bogus lockdown-denied notracing-config notracing-bpfevents tracefs-noevents tracefs-unmounted tracefs-hidden tracefs-gone events-denied btf-absent-config btf-absent-unknown btf-not-visible btf-denied hook-absent hook-not-in-btf hook-clone hook-nokallsyms denied-all container-view"
+VARIANTS="base ftrace-off ftrace-denied ftrace-malformed aff-dup aff-module aff-clone aff-prefix debugfs-root debug-denied lockdown-conf lockdown-integrity lockdown-nosecfs lockdown-dashdash lockdown-config lockdown-nolsm lockdown-twobrackets lockdown-bogus lockdown-denied notracing-config notracing-bpfevents tracefs-noevents tracefs-unmounted tracefs-hidden tracefs-gone events-denied btf-absent-config btf-absent-unknown btf-not-visible btf-denied hook-absent hook-not-in-btf hook-clone hook-nokallsyms denied-all container-view format-denied id-absent"
 for v in $VARIANTS; do
   rm -rf "$GATE/$v"
 done
@@ -229,4 +229,13 @@ mv "$GATE/container-view/sys/kernel/tracing" \
   "$GATE/container-view/sys/kernel/debug/tracing"
 mkdir -p "$GATE/container-view/sys/kernel/tracing"
 
-echo "wrote $GATE (base plus 36 variants)"
+mk format-denied
+printf 'denied=/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format\n' \
+  >> "$GATE/format-denied/meta.txt"
+
+# Validated coverage without the tracepoint id file: copied from
+# the ready-validated capabilities tree, never edited by hand.
+cp -R "$ROOT/tests/fixtures/capabilities/ready-validated" "$GATE/id-absent"
+rm "$GATE/id-absent/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/id"
+
+echo "wrote $GATE (base plus 38 variants)"

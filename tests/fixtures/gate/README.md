@@ -39,3 +39,5 @@ tree is tracked. One line per variant:
 - hook-nokallsyms: BTF without the map hook, no kallsyms file.
 - denied-all: eight gate paths fixture-denied at once.
 - container-view: debug-only tracefs, BTF hidden, config says BTF.
+- format-denied: the swiotlb_bounced format file is fixture-denied.
+- id-absent: ready-validated tree without the tracepoint id file.

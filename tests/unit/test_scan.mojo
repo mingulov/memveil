@@ -1368,6 +1368,35 @@ def test_layout_evidence_items() raises:
     )
 
 
+def contains(hay: String, needle: String) -> Bool:
+    """True when needle occurs in hay at least once."""
+    return len(hay.split(String(needle))) > 1
+
+
+def test_scan_format_error_names_path() raises:
+    # A denied format refuses with its path and the denial.
+    var d = _decide_lc(
+        String("tests/fixtures/gate/format-denied"),
+        String(_PROFILES) + String("/movedok.json"),
+        True,
+        String(_ELF_OK),
+        String(""),
+        String(""),
+        String(""),
+    )
+    assert_true(not d.ok)
+    assert_true(
+        d.refusal.startswith(
+            String(
+                "format unreadable:"
+                " /sys/kernel/tracing/events/swiotlb/swiotlb_bounced"
+                "/format: "
+            )
+        )
+    )
+    assert_true(contains(d.refusal, String("denied")))
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_scan_valid_lc_record]()
@@ -1426,6 +1455,7 @@ def run() raises -> Int:
     suite.test[test_scan_moved_layout_refuses_named_diff]()
     suite.test[test_scan_moved_reauthored_admits_offsets]()
     suite.test[test_layout_evidence_items]()
+    suite.test[test_scan_format_error_names_path]()
     suite^.run()
     return 0
 

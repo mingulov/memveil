@@ -2250,6 +2250,19 @@ def test_discover_denied_id_changed() raises:
     )
 
 
+def test_validated_id_best_effort() raises:
+    var rep = judge(
+        String("../gate/id-absent"), fx(String("profiles-test"))
+    )
+    var a = find_entry(rep, String("attempt-trace"))
+    assert_equal(a.status, String("available"))
+    var found = False
+    for i in range(len(a.evidence)):
+        if contains(a.evidence[i], String("id: absent")):
+            found = True
+    assert_true(found)
+
+
 def test_discover_validated_absent() raises:
     var rep = judge(String("missing-tracepoint"), fx("profiles-test"))
     var a = find_entry(rep, String("attempt-trace"))
@@ -4223,6 +4236,7 @@ def run() raises -> Int:
     suite.test[test_discover_changed]()
     suite.test[test_discover_unreadable_format]()
     suite.test[test_discover_denied_id_changed]()
+    suite.test[test_validated_id_best_effort]()
     suite.test[test_discover_validated_absent]()
     suite.test[test_discover_undeclared]()
     suite.test[test_discover_unsupported_terminal]()
