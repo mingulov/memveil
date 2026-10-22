@@ -81,7 +81,7 @@ writes to a scratch disk, concurrent readers), then
 compares every admitted channel against a bpftrace
 per-CPU `count()` oracle attached to the same tracepoint
 and hooks. Before measuring, the guest settles udev and
-stops its exec queue: udevd otherwise re-reads the
+shuts its daemon down: udevd otherwise re-reads the
 scratch partition table when the write phase closes the
 device, and that guest self-IO is removed rather than
 folded into the totals. A row passes only when the guest

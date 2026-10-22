@@ -82,14 +82,15 @@ def sh(args, **kw):
     return subprocess.run(args, capture_output=True, text=True, **kw)
 
 
-def quiesce_udev(sh, write, out):
-    """Settle udev then stop its exec queue before measuring.
+def quiesce_udev(sh, write, out, polls=10):
+    """Settle udev then shut its daemon down before measuring.
 
     The guest rootfs runs udevd, which synthesizes change
     events (and re-reads partition tables) when the workload
     closes the scratch device after writes. Those re-reads
-    are guest self-IO, not workload DMA; stop them so the
-    byte checks stay workload-exact. Fails on any error.
+    are guest self-IO, not workload DMA; removing the daemon
+    removes them, since --stop-exec-queue does not cover
+    synthesize-path workers here. Fails on any error.
     """
     settle = sh(["udevadm", "settle", "--timeout=60"])
     log = "$ udevadm settle --timeout=60\n%s%s" % (
@@ -100,8 +101,8 @@ def quiesce_udev(sh, write, out):
     if settle.returncode != 0:
         fail("udevadm settle failed exit %d"
              % settle.returncode)
-    stop = sh(["udevadm", "control", "--stop-exec-queue"])
-    log += "$ udevadm control --stop-exec-queue\n%s%s" % (
+    stop = sh(["udevadm", "control", "--exit"])
+    log += "$ udevadm control --exit\n%s%s" % (
         stop.stdout or "", stop.stderr or "")
     write(os.path.join(out, "udev.out"), log)
     write(os.path.join(out, "udev.exit"),
@@ -109,6 +110,16 @@ def quiesce_udev(sh, write, out):
     if stop.returncode != 0:
         fail("udevadm control failed exit %d"
              % stop.returncode)
+    for _ in range(polls):
+        gone = sh(["pgrep", "-x", "systemd-udevd"])
+        if gone.returncode != 0:
+            write(os.path.join(out, "udev.out"),
+                  log + "$ pgrep -x systemd-udevd\ndaemon gone\n")
+            write(os.path.join(out, "udev.exit"), "0")
+            return
+        time.sleep(1)
+    write(os.path.join(out, "udev.exit"), "1")
+    fail("systemd-udevd still running after control --exit")
 
 
 def write(path, data):

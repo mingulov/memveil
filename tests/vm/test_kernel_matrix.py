@@ -3312,6 +3312,8 @@ def test_guest_quiesce_udev(tmp_path):
 
     def fake_sh(args, **kw):
         calls.append(list(args))
+        if args[0] == "pgrep":
+            return Proc(1)
         return Proc(0)
 
     def fake_write(path, data):
@@ -3320,8 +3322,9 @@ def test_guest_quiesce_udev(tmp_path):
     guest.quiesce_udev(fake_sh, fake_write,
                        str(tmp_path))
     assert calls[0][:2] == ["udevadm", "settle"]
-    assert calls[1] == ["udevadm", "control",
-                        "--stop-exec-queue"]
+    assert calls[1] == ["udevadm", "control", "--exit"]
+    assert calls[2][:3] == ["pgrep", "-x",
+                            "systemd-udevd"]
     assert written[str(tmp_path / "udev.exit")] == "0"
     assert "out\n" in written[str(tmp_path / "udev.out")]
 
@@ -3343,6 +3346,29 @@ def test_guest_quiesce_udev_settle_failure(tmp_path):
     with pytest.raises(SystemExit):
         guest.quiesce_udev(fake_sh, fake_write,
                            str(tmp_path))
+    assert written[str(tmp_path / "udev.exit")] == "1"
+
+
+def test_guest_quiesce_udev_daemon_lingers(tmp_path):
+    class Proc:
+        def __init__(self, code):
+            self.returncode = code
+            self.stdout = ""
+            self.stderr = ""
+
+    def fake_sh(args, **kw):
+        if args[0] == "pgrep":
+            return Proc(0)
+        return Proc(0)
+
+    written = {}
+
+    def fake_write(path, data):
+        written[path] = data
+
+    with pytest.raises(SystemExit):
+        guest.quiesce_udev(fake_sh, fake_write,
+                           str(tmp_path), polls=2)
     assert written[str(tmp_path / "udev.exit")] == "1"
 
 
