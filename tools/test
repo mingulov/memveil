@@ -557,13 +557,17 @@ PYEOF
     # F4: the definitive-tail scan mirrors accepted event keys in
     # _top/_source/_observer/_scope/_data_field_known, plus the per-key
     # JSON value shape in _type_rows. Those mirrors must equal both
-    # the _parse_* accept lists and the frozen event schema, in both
-    # directions, or the scan drifts from the parser.
+    # the _parse_* accept lists and the current event schema, in both
+    # directions, or the scan drifts from the parser. The previous
+    # schema stays frozen: only its copy keys may lag, by exactly the
+    # markers the new version adds.
     if python3 - "$ROOT/src/memveil/model/event.mojo" \
+        "$ROOT/schemas/event-v0.1.2.schema.json" \
         "$ROOT/schemas/event-v0.1.1.schema.json" <<'PYEOF'; then
 import json, re, sys
 src = open(sys.argv[1]).read()
 schema = json.load(open(sys.argv[2]))
+old = json.load(open(sys.argv[3]))
 psrc = src.split('\ndef _top_field_known(')[0]
 names = ['parse_event', '_parse_source', '_parse_observer',
          '_parse_snapshot_scope', '_parse_bounce', '_parse_map_result',
@@ -617,6 +621,25 @@ for b in schema['allOf']:
     skeys[k] = set(dp.keys())
     if k == 'counter_snapshot':
         skeys['scope'] = set(dp['scope']['properties'].keys())
+okey = {'top': set(old['properties'].keys()),
+        'source': set(old['properties']['source']['properties'].keys()),
+        'observer': set(
+            old['properties']['observer_context']['properties'].keys())}
+for b in old['allOf']:
+    k = b['if']['properties']['kind']['const']
+    dp = b['then']['properties']['data']['properties']
+    okey[k] = set(dp.keys())
+    if k == 'counter_snapshot':
+        okey['scope'] = set(dp['scope']['properties'].keys())
+new_markers = {'pool_private', 'offset_past_allocation'}
+for ctx, keys in okey.items():
+    if ctx == 'copy':
+        if keys & new_markers or keys | new_markers != skeys['copy']:
+            raise SystemExit(
+                '0.1.1 copy keys drifted: %s' % sorted(keys))
+    elif keys != skeys.get(ctx, set()):
+        raise SystemExit(
+            '0.1.1 %s keys drifted: %s' % (ctx, sorted(keys)))
 for n, ctx in ctx_of.items():
     if pkeys[n] != mine.get(ctx, set()):
         raise SystemExit(

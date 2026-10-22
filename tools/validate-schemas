@@ -966,6 +966,8 @@ METRIC_UNITS = {
     "successful_allocations": "count",
     "copy_original_to_bounce_bytes": "bytes",
     "copy_bounce_to_original_bytes": "bytes",
+    "copy_private_pool_bytes": "bytes",
+    "copy_offset_past_allocation_count": "count",
     "live_observed_allocation_bytes": "bytes",
     "observed_mapping_lifetime_ns": "nanoseconds",
     "conversion_requests": "count",

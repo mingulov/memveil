@@ -137,6 +137,10 @@ struct MappingTracker[
     var _o2b_overflow: Bool
     var _b2o: UInt64
     var _b2o_overflow: Bool
+    var _priv: UInt64
+    var _priv_overflow: Bool
+    var _opast: UInt64
+    var _opast_overflow: Bool
     var _syncs: UInt64
     var _live_bytes: UInt64
     var _live_invalid: Bool
@@ -198,6 +202,10 @@ struct MappingTracker[
         self._o2b_overflow = False
         self._b2o = UInt64(0)
         self._b2o_overflow = False
+        self._priv = UInt64(0)
+        self._priv_overflow = False
+        self._opast = UInt64(0)
+        self._opast_overflow = False
         self._syncs = UInt64(0)
         self._live_bytes = UInt64(0)
         self._live_invalid = False
@@ -612,6 +620,29 @@ struct MappingTracker[
                     self._b2o_overflow = True
                     self._note(
                         "Bounce-to-original total exceeds u64"
+                        " range; value withheld."
+                    )
+        # Subset facts ride with the direction totals: a
+        # private-pool copy is still executed bytes in its
+        # direction, and a past-allocation copy still counts.
+        if ev.copy.pool_private:
+            try:
+                self._priv = checked_add(self._priv, n)
+            except:
+                if not self._priv_overflow:
+                    self._priv_overflow = True
+                    self._note(
+                        "Private-pool total exceeds u64"
+                        " range; value withheld."
+                    )
+        if ev.copy.offset_past_allocation:
+            try:
+                self._opast = checked_add(self._opast, UInt64(1))
+            except:
+                if not self._opast_overflow:
+                    self._opast_overflow = True
+                    self._note(
+                        "Past-allocation count exceeds u64"
                         " range; value withheld."
                     )
         if not paired:
@@ -1187,6 +1218,62 @@ struct MappingTracker[
                         String(
                             "Observed bounce-to-original copies"
                             " only; sync requests add nothing."
+                        ),
+                        overlay_detail_loss,
+                    )
+                )
+            # Subset rows appear only when nonzero; the private
+            # bytes stay inside the direction totals above.
+            if self._priv_overflow:
+                out.append(
+                    self._missing(
+                        String("copy_private_pool_bytes"),
+                        String("bytes"),
+                        scope,
+                        String("Total exceeds u64 range; withheld."),
+                    )
+                )
+            elif self._priv != UInt64(0):
+                out.append(
+                    self._valued_copy(
+                        String("copy_private_pool_bytes"),
+                        String("bytes"),
+                        self._priv,
+                        String("counter"),
+                        False,
+                        UInt64(0),
+                        scope,
+                        String(
+                            "Private-pool copies only, a subset"
+                            " of the direction totals; never"
+                            " exposure."
+                        ),
+                        overlay_detail_loss,
+                    )
+                )
+            if self._opast_overflow:
+                out.append(
+                    self._missing(
+                        String("copy_offset_past_allocation_count"),
+                        String("count"),
+                        scope,
+                        String("Total exceeds u64 range; withheld."),
+                    )
+                )
+            elif self._opast != UInt64(0):
+                out.append(
+                    self._valued_copy(
+                        String("copy_offset_past_allocation_count"),
+                        String("count"),
+                        self._opast,
+                        String("counter"),
+                        False,
+                        UInt64(0),
+                        scope,
+                        String(
+                            "Copies whose offset ran past the"
+                            " allocation; their bytes stay in"
+                            " the direction totals."
                         ),
                         overlay_detail_loss,
                     )

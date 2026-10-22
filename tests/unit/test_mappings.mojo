@@ -1258,6 +1258,88 @@ def test_snapshot_replay_equivalence() raises:
             assert_equal(a[i].value, b[i].value)
 
 
+def test_private_pool_bytes_not_exposure() raises:
+    # A private-pool copy stays inside its direction total as a
+    # subset: 4096 private + 1024 shared aggregate to 5120, the
+    # private 4096 is named as a pool subset, and no metric
+    # frames pool placement as exposure.
+    var t = MappingTracker()
+    t.consume(_attempt("op1", "d1", UInt64(1)))
+    var priv = _copy(
+        "op1", "", "original_to_bounce", UInt64(4096), UInt64(2)
+    )
+    priv.copy.pool_private = True
+    t.consume(priv^)
+    t.consume(
+        _copy("op1", "", "original_to_bounce", UInt64(1024), UInt64(3))
+    )
+    var rows = t.metrics("window [0,1000)")
+    assert_equal(
+        _global(rows, "copy_original_to_bounce_bytes").value,
+        UInt64(5120),
+    )
+    assert_equal(
+        _global(rows, "copy_private_pool_bytes").value, UInt64(4096)
+    )
+    for i in range(len(rows)):
+        assert_true(rows[i].name.find(String("exposure")) == -1)
+
+
+def test_offset_past_count() raises:
+    # Copies whose offset ran past the allocation count
+    # separately while their bytes stay in the direction
+    # totals; the private subset stays absent at zero.
+    var t = MappingTracker()
+    t.consume(_attempt("op1", "d1", UInt64(1)))
+    var first = _copy(
+        "op1", "", "original_to_bounce", UInt64(4096), UInt64(2)
+    )
+    first.copy.offset_past_allocation = True
+    t.consume(first^)
+    var second = _copy(
+        "op1", "", "bounce_to_original", UInt64(1024), UInt64(3)
+    )
+    second.copy.offset_past_allocation = True
+    t.consume(second^)
+    var rows = t.metrics("window [0,1000)")
+    assert_equal(
+        _global(rows, "copy_offset_past_allocation_count").value,
+        UInt64(2),
+    )
+    assert_equal(
+        _global(rows, "copy_original_to_bounce_bytes").value,
+        UInt64(4096),
+    )
+    assert_equal(
+        _global(rows, "copy_bounce_to_original_bytes").value,
+        UInt64(1024),
+    )
+    var raised = False
+    try:
+        _ = _global(rows, "copy_private_pool_bytes")
+    except:
+        raised = True
+    assert_true(raised)
+
+
+def test_split_metrics_absent_when_zero() raises:
+    # Plain copies emit exactly the legacy metric set: the
+    # subset rows appear only when nonzero.
+    var t = MappingTracker()
+    t.consume(_attempt("op1", "d1", UInt64(1)))
+    t.consume(
+        _copy("op1", "", "original_to_bounce", UInt64(4096), UInt64(2))
+    )
+    var rows = t.metrics("window [0,1000)")
+    assert_equal(
+        _global(rows, "copy_original_to_bounce_bytes").value,
+        UInt64(4096),
+    )
+    for i in range(len(rows)):
+        assert_true(rows[i].name.find(String("private_pool")) == -1)
+        assert_true(rows[i].name.find(String("offset_past")) == -1)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_non_observed_copy_rejected]()
@@ -1310,6 +1392,9 @@ def run() raises -> Int:
     suite.test[test_split_consumed_detail_gap_degrades_copy_and_sync]()
     suite.test[test_split_unpaired_map_withholds_occupancy]()
     suite.test[test_snapshot_replay_equivalence]()
+    suite.test[test_private_pool_bytes_not_exposure]()
+    suite.test[test_offset_past_count]()
+    suite.test[test_split_metrics_absent_when_zero]()
     suite^.run()
     return 0
 

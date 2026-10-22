@@ -627,6 +627,29 @@ def test_map_bytes_overflow_raises() raises:
     assert_equal(ledger.maps_ok_bytes, ~UInt64(0))
 
 
+def test_ledger_private_overflow_raises() raises:
+    # The private-pool subset total uses the same checked add
+    # as the direction totals: the first private note lands,
+    # the overflowing second note raises and changes nothing,
+    # and the past-allocation note counts alongside.
+    var ledger = LifecycleLedger()
+    var a = decode_copy(_cp_raw(2, 51, 1, UInt64(1), UInt64(1), ~UInt64(0), ~UInt64(0), 0))
+    var b = decode_copy(_cp_raw(2, 35, 1, UInt64(2), UInt64(2), UInt64(1), UInt64(1), 0))
+    ledger.note_copy(a)
+    assert_equal(ledger.copies_private_effective_bytes, ~UInt64(0))
+    assert_equal(ledger.copies_offset_past, UInt64(1))
+    var raised = False
+    try:
+        ledger.note_copy(b)
+    except:
+        raised = True
+    assert_true(raised)
+    assert_equal(ledger.copies_known, UInt64(1))
+    assert_equal(ledger.copies_known_effective_bytes, ~UInt64(0))
+    assert_equal(ledger.copies_private_effective_bytes, ~UInt64(0))
+    assert_equal(ledger.copies_offset_past, UInt64(1))
+
+
 def test_unmap_bytes_overflow_raises() raises:
     var ledger = LifecycleLedger()
     var u = decode_lifecycle(
@@ -691,6 +714,7 @@ def run() raises -> Int:
     suite.test[test_copy_bytes_overflow_raises]()
     suite.test[test_map_bytes_overflow_raises]()
     suite.test[test_unmap_bytes_overflow_raises]()
+    suite.test[test_ledger_private_overflow_raises]()
     suite^.run()
     return 0
 

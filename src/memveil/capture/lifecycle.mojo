@@ -344,6 +344,8 @@ struct LifecycleLedger:
     var sync_requests: UInt64
     var copies_known: UInt64
     var copies_known_effective_bytes: UInt64
+    var copies_private_effective_bytes: UInt64
+    var copies_offset_past: UInt64
     var copies_unknown: UInt64
     var saw_wire_gen: Bool
 
@@ -359,6 +361,8 @@ struct LifecycleLedger:
         self.sync_requests = UInt64(0)
         self.copies_known = UInt64(0)
         self.copies_known_effective_bytes = UInt64(0)
+        self.copies_private_effective_bytes = UInt64(0)
+        self.copies_offset_past = UInt64(0)
         self.copies_unknown = UInt64(0)
         self.saw_wire_gen = False
 
@@ -423,8 +427,16 @@ struct LifecycleLedger:
             var total = checked_add(
                 self.copies_known_effective_bytes, d.effective
             )
+            var priv = self.copies_private_effective_bytes
+            if d.private_pool:
+                priv = checked_add(priv, d.effective)
+            var past = self.copies_offset_past
+            if d.offset_past:
+                past = checked_add(past, UInt64(1))
             self.copies_known = count
             self.copies_known_effective_bytes = total
+            self.copies_private_effective_bytes = priv
+            self.copies_offset_past = past
         else:
             self.copies_unknown = checked_add(self.copies_unknown, UInt64(1))
 
