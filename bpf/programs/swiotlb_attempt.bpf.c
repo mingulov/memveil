@@ -175,6 +175,12 @@ int mv_swiotlb_attempt(void *ctx)
      * field, then check NUL placement. dlen is in 1..64
      * here, so the loop and the write stay in bounds. */
     __builtin_memset(payload, 0, sizeof(payload));
+    /* Re-check on the read's own register: clang folds the cap into loc math older verifiers cannot link to dlen. */
+    barrier_var(dlen);
+    if (dlen > MV_NAME_MAX + 1) {
+        mv_submit_fail();
+        return 0;
+    }
     if (bpf_probe_read_kernel(payload + MV_OFF_NAME, dlen,
                               (__u8 *)ctx + off) != 0) {
         mv_submit_fail();
