@@ -2021,6 +2021,82 @@ def test_error_close_unreadable_second_read_notes_unreadable() raises:
     )
 
 
+def test_unreadable_second_read_keeps_its_diagnostic() raises:
+    # A failed re-read keeps the kernel diagnostic in its reason.
+    var c = _one_copy_run(
+        _stable_detail(),
+        MissOut(False, UInt64(0), String("fdinfo gone")),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "recursion misses unreadable after settle: "
+                "fdinfo gone"
+            ),
+        )
+    )
+
+
+def test_error_close_unreadable_second_read_keeps_diagnostic() raises:
+    var c = _error_copy_run(
+        _stable_detail(),
+        MissOut(False, UInt64(0), String("fdinfo gone")),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "recursion misses unreadable after settle: "
+                "fdinfo gone"
+            ),
+        )
+    )
+
+
+def test_failed_second_detail_read_keeps_its_diagnostic() raises:
+    # A failed detail re-read keeps its diagnostic in its reason.
+    var c = _one_copy_run(
+        _stable_detail(),
+        _detail_failed(
+            UInt64(0), String("ch2 fallback counters wrapped")),
+        True,
+    )
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "recursion misses unreadable after settle: "
+                "ch2 fallback counters wrapped"
+            ),
+        )
+    )
+
+
+def test_error_close_failed_second_detail_read_keeps_diagnostic() raises:
+    var c = _error_copy_run(
+        _stable_detail(),
+        _detail_failed(
+            UInt64(0), String("ch2 fallback counters wrapped")),
+        True,
+    )
+    assert_equal(c.outcome, String("error"))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "recursion misses unreadable after settle: "
+                "ch2 fallback counters wrapped"
+            ),
+        )
+    )
+
+
 def test_attempt_only_stable_second_read_keeps_exact_loss() raises:
     # Unchanged attempt counters keep exact loss without extras.
     var c = _one_attempt_run(

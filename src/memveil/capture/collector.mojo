@@ -2027,7 +2027,8 @@ struct Collector:
                 String("recursion misses unreadable after settle")
             )
             self.note_unknown(
-                String("recursion misses unreadable after settle")
+                String("recursion misses unreadable after settle: ")
+                + m.message
             )
             return
         if m.detail_error != String(""):
@@ -2036,7 +2037,8 @@ struct Collector:
                     String("post-snapshot activity")
                 )
             self.note_unknown(
-                String("recursion misses unreadable after settle")
+                String("recursion misses unreadable after settle: ")
+                + m.detail_error
             )
             return
         var attempt_moved = m.attempt != self.attempt_missed
