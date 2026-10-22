@@ -24,7 +24,7 @@ silently evicted, and no refusal corrupts unrelated state.
 | Report metric rows | 4,096 | prefix kept in order; withheld count recorded |
 | Reader line | 64 KiB | `line too large`; capture rejected (exit 2) |
 | Reader session document | 16 MiB | `session.json too large`; capture rejected |
-| Reader events total | 1 GiB default (a 1 GiB capture replays in about 27 s at 326 MB RSS on um790) | `events.ndjson too large`; capture rejected |
+| Reader events total | 1 GiB default (a 1 GiB capture replays in about 27 s at 326 MB RSS on a 16-thread Ryzen 9 7940HS) | `events.ndjson too large`; capture rejected |
 | Reader tracked identities | 4,194,304 | operations plus mappings plus distinct copy/sync references; past budget, `too many tracked identities` and the capture is rejected |
 | Reader JSON depth | 64 | parse error; capture rejected |
 | Diagnostics findings | ≤ 8 per report | fixed code set; stateless by construction |
