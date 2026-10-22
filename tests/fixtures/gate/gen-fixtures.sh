@@ -12,7 +12,7 @@ mkdir -p "$GATE"
 
 # Every generated tree; later tasks extend this list alongside
 # their variants. Only these directories are ever removed.
-VARIANTS="base ftrace-off ftrace-denied ftrace-malformed aff-dup aff-module aff-clone aff-prefix debugfs-root debug-denied"
+VARIANTS="base ftrace-off ftrace-denied ftrace-malformed aff-dup aff-module aff-clone aff-prefix debugfs-root debug-denied lockdown-conf lockdown-integrity lockdown-nosecfs lockdown-dashdash lockdown-config lockdown-nolsm lockdown-twobrackets lockdown-bogus lockdown-denied"
 for v in $VARIANTS; do
   rm -rf "$GATE/$v"
 done
@@ -78,4 +78,54 @@ cp -R "$GATE/debug-denied/sys/kernel/tracing" \
   "$GATE/debug-denied/sys/kernel/debug/tracing"
 printf 'denied=/sys/kernel/debug\n' >> "$GATE/debug-denied/meta.txt"
 
-echo "wrote $GATE (base plus 9 variants)"
+strip_securityfs() {
+  # $1 = tree: remove the securityfs dir and its mounts line.
+  rm -rf "$1/sys/kernel/security"
+  printf 'tracefs /sys/kernel/tracing tracefs rw,nosuid,nodev,noexec,relatime 0 0\n' \
+    > "$1/proc/mounts"
+}
+
+mk lockdown-conf
+printf 'none integrity [confidentiality]\n' \
+  > "$GATE/lockdown-conf/sys/kernel/security/lockdown"
+
+mk lockdown-integrity
+printf 'none [integrity] confidentiality\n' \
+  > "$GATE/lockdown-integrity/sys/kernel/security/lockdown"
+
+mk lockdown-nosecfs
+strip_securityfs "$GATE/lockdown-nosecfs"
+printf 'BOOT_IMAGE=/vmlinuz root=/dev/vda1 lockdown=confidentiality\n' \
+  > "$GATE/lockdown-nosecfs/proc/cmdline"
+
+mk lockdown-dashdash
+strip_securityfs "$GATE/lockdown-dashdash"
+printf 'root=/dev/vda1 -- lockdown=confidentiality\n' \
+  > "$GATE/lockdown-dashdash/proc/cmdline"
+
+mk lockdown-config
+strip_securityfs "$GATE/lockdown-config"
+rm "$GATE/lockdown-config/proc/config.gz"
+printf 'CONFIG_LOCK_DOWN_KERNEL_FORCE_CONFIDENTIALITY=y\n' \
+  > "$GATE/lockdown-config/boot/config-7.0.0-38-generic"
+
+mk lockdown-nolsm
+strip_securityfs "$GATE/lockdown-nolsm"
+rm "$GATE/lockdown-nolsm/proc/config.gz"
+printf '# CONFIG_SECURITY_LOCKDOWN_LSM is not set\n' \
+  > "$GATE/lockdown-nolsm/boot/config-7.0.0-38-generic"
+
+mk lockdown-twobrackets
+printf '[none] [integrity] confidentiality\n' \
+  > "$GATE/lockdown-twobrackets/sys/kernel/security/lockdown"
+
+mk lockdown-bogus
+strip_securityfs "$GATE/lockdown-bogus"
+printf 'BOOT_IMAGE=/vmlinuz root=/dev/vda1 lockdown=bogus\n' \
+  > "$GATE/lockdown-bogus/proc/cmdline"
+
+mk lockdown-denied
+printf 'denied=/sys/kernel/security/lockdown\n' \
+  >> "$GATE/lockdown-denied/meta.txt"
+
+echo "wrote $GATE (base plus 18 variants)"

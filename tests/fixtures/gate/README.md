@@ -13,3 +13,12 @@ tree is tracked. One line per variant:
 - aff-prefix: the map hook plus a longer name, no trailing newline.
 - debugfs-root: tracefs tree moved under /sys/kernel/debug/tracing.
 - debug-denied: debugfs tree present but fixture-denied at its parent.
+- lockdown-conf: lockdown file selects confidentiality.
+- lockdown-integrity: lockdown file selects integrity.
+- lockdown-nosecfs: no securityfs, cmdline raises confidentiality.
+- lockdown-dashdash: lockdown parameter hidden after --.
+- lockdown-config: boot config forces confidentiality.
+- lockdown-nolsm: boot config has no lockdown LSM.
+- lockdown-twobrackets: lockdown file with two bracketed tokens.
+- lockdown-bogus: cmdline carries an unknown lockdown value.
+- lockdown-denied: lockdown file is fixture-denied.

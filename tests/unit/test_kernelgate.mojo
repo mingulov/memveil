@@ -6,9 +6,11 @@ from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
 
 from memveil.platform.kernelgate import (
+    LockdownState,
     count_filter_function,
     probe_tracefs,
     read_ftrace_enabled,
+    read_lockdown,
     tracefs_translate,
 )
 from memveil.platform.profiles import (
@@ -39,6 +41,17 @@ def one_cap(cap_id: String) -> List[String]:
     var caps = List[String]()
     caps.append(cap_id)
     return caps^
+
+
+def contains(hay: String, needle: String) -> Bool:
+    """True when needle occurs in hay at least once."""
+    return len(hay.split(String(needle))) > 1
+
+
+def lockdown_of(name: String) raises -> LockdownState:
+    """Read the lockdown state of one gate fixture tree."""
+    var r = open_evidence_reader(gate(name))
+    return read_lockdown(r, r.release.copy(), String("libz.so.1"))
 
 
 def test_tracefs_root_order() raises:
@@ -167,6 +180,42 @@ def test_live_debugfs_attempt() raises:
     assert_true(dbg.ok)
 
 
+def test_lockdown_sources() raises:
+    var b = lockdown_of(String("base"))
+    assert_equal(b.mode, String("none"))
+    assert_equal(b.src, String("securityfs"))
+    var c = lockdown_of(String("lockdown-conf"))
+    assert_equal(c.mode, String("confidentiality"))
+    assert_equal(c.src, String("securityfs"))
+    var i = lockdown_of(String("lockdown-integrity"))
+    assert_equal(i.mode, String("integrity"))
+    assert_equal(i.src, String("securityfs"))
+    var n = lockdown_of(String("lockdown-nosecfs"))
+    assert_equal(n.mode, String("confidentiality"))
+    assert_equal(n.src, String("cmdline"))
+    var g = lockdown_of(String("lockdown-config"))
+    assert_equal(g.mode, String("confidentiality"))
+    assert_equal(g.src, String("config"))
+    var l = lockdown_of(String("lockdown-nolsm"))
+    assert_equal(l.mode, String("none"))
+    assert_equal(l.src, String("config"))
+
+
+def test_lockdown_malformed() raises:
+    var d = lockdown_of(String("lockdown-dashdash"))
+    assert_equal(d.mode, String("unknown"))
+    assert_equal(d.src, String("none"))
+    var t = lockdown_of(String("lockdown-twobrackets"))
+    assert_equal(t.mode, String("unknown"))
+    assert_equal(t.detail, String("lockdown file malformed"))
+    var o = lockdown_of(String("lockdown-bogus"))
+    assert_equal(o.mode, String("unknown"))
+    assert_equal(o.src, String("none"))
+    assert_true(contains(o.detail, String("lockdown=bogus ignored")))
+    var x = lockdown_of(String("lockdown-denied"))
+    assert_equal(x.mode, String("unknown"))
+
+
 def test_ftrace_states() raises:
     assert_equal(
         read_ftrace_enabled(
@@ -202,6 +251,8 @@ def run() raises -> Int:
     suite.test[test_live_ftrace]()
     suite.test[test_live_debugfs_attempt]()
     suite.test[test_ftrace_states]()
+    suite.test[test_lockdown_sources]()
+    suite.test[test_lockdown_malformed]()
     suite^.run()
     return 0
 
