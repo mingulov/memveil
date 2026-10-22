@@ -7,7 +7,7 @@ scan ok/ identity tree with the BTF file replaced by the
 funcproto.bin fixture (holding FUNC test_fn), so signature
 checks run against known bytes; host-arm/ is the same tree
 reporting aarch64 for no-coverage tests, and host-old/ is
-the same tree reporting 6.8.0-test for floor tests. Profiles under
+the same tree reporting 5.15.0-test for floor tests. Profiles under
 tests/fixtures/qualify/profiles/ carry section 5 grammar
 bindings computed from the CURRENT host bytes:
   qual-ref.json      reference-unvalidated, matching note,
@@ -163,7 +163,7 @@ def main() -> int:
     if old.exists():
         shutil.rmtree(old)
     shutil.copytree(host, old)
-    (old / "meta.txt").write_text("arch=x86_64\nrelease=6.8.0-test\neuid=0\n")
+    (old / "meta.txt").write_text("arch=x86_64\nrelease=5.15.0-test\neuid=0\n")
     bind = {
         "config": hashlib.sha256(
             gunzip_first(host / "proc/config.gz")
