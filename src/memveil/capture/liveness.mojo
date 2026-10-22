@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Hook liveness over windowed record counts (A10).
+"""Hook liveness over windowed record counts.
 
 A capture is complete only if its hooks were live. The copy
-hooks attach before the lifecycle hooks (C4), so cumulative
+hooks attach before the lifecycle hooks, so cumulative
 equalities false-fire at the edges: every map in the attach
 gap leaves a TO copy with no map record. Only one-sided
 inequalities over windows away from the edges are sound:
@@ -12,7 +12,7 @@ inequalities over windows away from the edges are sound:
   the whole run); R = [T_r, T_d - GUARD] (reverse: effects in
   R, causes over the whole run).
 - E1 attempt->map, E2f map->copy, E2r copy->map, E3f
-  unmap->copy, E3r copy->unmap (plan A10 section).
+  unmap->copy, E3r copy->unmap.
 
 Bucketed counts include only whole buckets inside the
 window: every left-hand side is under-counted, which can
@@ -392,7 +392,7 @@ def evaluate_liveness(
     has_copy: Bool,
     loss: LivenessLoss,
 ) -> LivenessVerdict:
-    """Judge the A10 equations; precedence silent over unverified.
+    """Judge the hook-liveness equations; precedence silent over unverified.
 
     F = [t_a, t_d - GUARD], R = [t_r, t_d - GUARD]; a copy
     without lifecycle stays unverified regardless of the
