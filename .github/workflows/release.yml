@@ -7,8 +7,8 @@
 # tag tree, re-verifies each artifact through its own lane,
 # and uploads the set plus a sha256 file to the tag's
 # GitHub Release. Dispatch runs build everything but
-# publish nothing. Rollback is a new tag: releases are
-# immutable file sets, never mutated in place.
+# publish nothing. Rollback is a new tag; a rerun of the
+# same tag replaces its uploaded files.
 name: release
 
 on:
