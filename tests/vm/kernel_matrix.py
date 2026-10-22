@@ -15,7 +15,8 @@ import re
 import subprocess
 from pathlib import Path
 
-SCHEMA = "memveil-kernel-matrix/1"
+SCHEMA = "memveil-kernel-matrix/2"
+BOOT_APPEND_ALLOW = frozenset({"lockdown=confidentiality"})
 CAPS = ("attempt-trace", "mapping-lifecycle", "copy-actual")
 PROBES = ("tp", "map", "unmap", "copy", "syncc", "syncd")
 ADMIT_CLASS = "live-verified"
@@ -101,6 +102,12 @@ def _need(cond, msg):
         raise LockError(msg)
 
 
+def _strip_dot_zero(ver):
+    if re.fullmatch(r"\d+\.\d+\.0", ver):
+        return ver[:-2]
+    return ver
+
+
 def release_agrees_with_upstream(release, upstream):
     """Release carries its upstream version, rc mapped to .0."""
     if not isinstance(release, str) or not isinstance(upstream, str):
@@ -112,7 +119,130 @@ def release_agrees_with_upstream(release, upstream):
             return False
         got = re.search(r"rc(\d+)", release)
         return got is not None and got.group(1) == want_rc
-    return release_ver == upstream
+    return _strip_dot_zero(release_ver) == _strip_dot_zero(upstream)
+
+
+UPSTREAM_RE = re.compile(r"^(?:\d+\.\d+\.\d+|\d+\.\d+-rc\d+)$")
+
+_TOP_KEYS = frozenset({"schema", "recorded_on", "archive",
+                      "archive_queried", "tools", "note",
+                      "kernels"})
+_ENTRY_KEYS = frozenset({"id", "release", "upstream",
+                        "expected", "oracle", "boot_append",
+                        "source"})
+_ARCHIVE_KEYS = frozenset({"kind", "vng_version",
+                          "archive_date", "vmlinuz_sha256",
+                          "modules_manifest_sha256"})
+_BUILT_KEYS = frozenset({"kind", "tarball_url",
+                        "tarball_sha256", "fragments",
+                        "fragments_sha256", "toolchain",
+                        "config_sha256", "bzimage_sha256",
+                        "modules_manifest_sha256"})
+_TOOLCHAIN_KEYS = frozenset({"gcc", "ld", "pahole"})
+_DISTRO_KEYS = frozenset({"kind", "packages",
+                         "vmlinuz_member", "vmlinuz_sha256",
+                         "modules_manifest_sha256",
+                         "config_sha256", "banner"})
+_PACKAGE_KEYS = frozenset({"url", "sha256"})
+_VERDICT_KEYS = frozenset({"verdict", "reason_class"})
+
+
+def _no_extra(doc, allowed, what):
+    extra = set(doc) - allowed
+    if extra:
+        raise LockError("unknown %s key %s"
+                        % (what, sorted(extra)[0]))
+
+
+def _need_sha(val, what):
+    _need(isinstance(val, str) and _HEX64.match(val),
+          "bad %s" % what)
+
+
+def _need_archive_source(source, upstream, ident):
+    _no_extra(source, _ARCHIVE_KEYS, "source")
+    vng = source.get("vng_version")
+    _need(isinstance(vng, str) and VNG_TAG.match(vng),
+          "bad vng_version for " + ident)
+    stripped = vng[1:]
+    plain_tag = re.fullmatch(r"v\d+\.\d+", vng) is not None
+    _need(upstream == stripped or
+          (plain_tag and upstream == stripped + ".0"),
+          "upstream must strip v for " + ident)
+    _need(isinstance(source.get("archive_date"), str)
+          and source["archive_date"],
+          "bad archive_date for " + ident)
+    _need_sha(source.get("vmlinuz_sha256"),
+              "vmlinuz_sha256 for " + ident)
+    _need_sha(source.get("modules_manifest_sha256"),
+              "modules_manifest_sha256 for " + ident)
+
+
+def _need_built_source(source, ident):
+    _no_extra(source, _BUILT_KEYS, "source")
+    url = source.get("tarball_url")
+    _need(isinstance(url, str) and
+          url.startswith("https://") and url.endswith(".tar.xz"),
+          "bad tarball_url for " + ident)
+    _need_sha(source.get("tarball_sha256"),
+              "tarball_sha256 for " + ident)
+    frags = source.get("fragments")
+    _need(isinstance(frags, list) and frags
+          and all(isinstance(f, str) and f and
+                  not f.startswith("/") and ".." not in
+                  f.split("/") for f in frags),
+          "bad fragments for " + ident)
+    _need(len(set(frags)) == len(frags),
+          "duplicate fragment for " + ident)
+    fsha = source.get("fragments_sha256")
+    _need(isinstance(fsha, dict) and
+          set(fsha) == set(frags),
+          "fragments_sha256 must cover fragments for " + ident)
+    for frag in frags:
+        _need_sha(fsha[frag],
+                  "fragments_sha256 %s for %s" % (frag, ident))
+    tool = source.get("toolchain")
+    _need(isinstance(tool, dict), "bad toolchain for " + ident)
+    _no_extra(tool, _TOOLCHAIN_KEYS, "toolchain")
+    for name in ("gcc", "ld", "pahole"):
+        _need(isinstance(tool.get(name), str) and
+              tool[name], "bad toolchain %s for %s"
+              % (name, ident))
+    _need_sha(source.get("config_sha256"),
+              "config_sha256 for " + ident)
+    _need_sha(source.get("bzimage_sha256"),
+              "bzimage_sha256 for " + ident)
+    _need_sha(source.get("modules_manifest_sha256"),
+              "modules_manifest_sha256 for " + ident)
+
+
+def _need_distro_source(source, ident):
+    _no_extra(source, _DISTRO_KEYS, "source")
+    packs = source.get("packages")
+    _need(isinstance(packs, list) and packs,
+          "bad packages for " + ident)
+    for pack in packs:
+        _need(isinstance(pack, dict), "bad package for " + ident)
+        _no_extra(pack, _PACKAGE_KEYS, "package")
+        url = pack.get("url")
+        _need(isinstance(url, str) and
+              url.startswith("https://") and url,
+              "bad package url for " + ident)
+        _need_sha(pack.get("sha256"),
+                  "package sha256 for " + ident)
+    _need(isinstance(source.get("vmlinuz_member"), str)
+          and source["vmlinuz_member"],
+          "bad vmlinuz_member for " + ident)
+    _need_sha(source.get("vmlinuz_sha256"),
+              "vmlinuz_sha256 for " + ident)
+    _need_sha(source.get("modules_manifest_sha256"),
+              "modules_manifest_sha256 for " + ident)
+    _need_sha(source.get("config_sha256"),
+              "config_sha256 for " + ident)
+    banner = source.get("banner")
+    _need(isinstance(banner, str) and
+          banner.startswith("Linux version "),
+          "bad banner for " + ident)
 
 
 def parse_lock(path):
@@ -121,6 +251,8 @@ def parse_lock(path):
         doc = json.loads(Path(path).read_text())
     except (OSError, ValueError) as exc:
         raise LockError("unreadable lock: %s" % exc)
+    _need(isinstance(doc, dict), "bad lock object")
+    _no_extra(doc, _TOP_KEYS, "top level")
     _need(doc.get("schema") == SCHEMA, "bad schema")
     _need(isinstance(doc.get("recorded_on"), str)
           and doc["recorded_on"], "bad recorded_on")
@@ -130,6 +262,7 @@ def parse_lock(path):
           and doc["archive_queried"], "bad archive_queried")
     tools = doc.get("tools")
     _need(isinstance(tools, dict), "bad tools")
+    _no_extra(tools, frozenset({"bpftrace", "bpftool"}), "tools")
     for key in ("bpftrace", "bpftool"):
         _need(isinstance(tools.get(key), str)
               and tools[key].startswith(key + " v"),
@@ -139,32 +272,45 @@ def parse_lock(path):
     seen = set()
     for entry in kernels:
         _need(isinstance(entry, dict), "bad entry")
+        _no_extra(entry, _ENTRY_KEYS, "entry")
         ident = entry.get("id")
         _need(isinstance(ident, str) and ident, "bad id")
         _need(ident not in seen, "duplicate id " + ident)
         seen.add(ident)
-        vng = entry.get("vng_version")
-        _need(isinstance(vng, str) and VNG_TAG.match(vng),
-              "bad vng_version for " + ident)
-        _need(entry.get("upstream") == vng[1:],
-              "upstream must strip v for " + ident)
-        _need(isinstance(entry.get("archive_date"), str)
-              and entry["archive_date"], "bad archive_date for " + ident)
+        upstream = entry.get("upstream")
+        _need(isinstance(upstream, str)
+              and UPSTREAM_RE.match(upstream),
+              "bad upstream for " + ident)
         _need(isinstance(entry.get("release"), str)
               and entry["release"], "bad release for " + ident)
         _need(release_agrees_with_upstream(entry["release"],
-                                           entry["upstream"]),
+                                           upstream),
               "release disagrees with upstream for " + ident)
-        for field in ("vmlinuz_sha256", "modules_manifest_sha256"):
-            val = entry.get(field)
-            _need(isinstance(val, str) and _HEX64.match(val),
-                  "bad %s for %s" % (field, ident))
+        if "boot_append" in entry:
+            extra = entry["boot_append"]
+            _need(isinstance(extra, list) and extra
+                  and all(arg in BOOT_APPEND_ALLOW
+                          for arg in extra),
+                  "bad boot_append for " + ident)
+        source = entry.get("source")
+        _need(isinstance(source, dict), "bad source for " + ident)
+        kind = source.get("kind")
+        if kind == "archive":
+            _need_archive_source(source, upstream, ident)
+        elif kind == "built":
+            _need_built_source(source, ident)
+        elif kind == "distro":
+            _need_distro_source(source, ident)
+        else:
+            raise LockError("bad source kind for " + ident)
         expected = entry.get("expected")
         _need(isinstance(expected, dict), "bad expected for " + ident)
+        _no_extra(expected, frozenset(CAPS), "expected")
         for cap in CAPS:
             _need(cap in expected, "missing %s for %s" % (cap, ident))
             want = expected[cap]
             _need(isinstance(want, dict), "bad %s for %s" % (cap, ident))
+            _no_extra(want, _VERDICT_KEYS, "verdict")
             verdict = want.get("verdict")
             _need(verdict in ("admitted", "refused"),
                   "bad verdict for %s/%s" % (ident, cap))
@@ -177,6 +323,7 @@ def parse_lock(path):
                       "bad reason_class for %s/%s" % (ident, cap))
         oracle = entry.get("oracle")
         _need(isinstance(oracle, dict), "bad oracle for " + ident)
+        _no_extra(oracle, frozenset({"omitted"}), "oracle")
         omitted = oracle.get("omitted")
         _need(isinstance(omitted, list), "bad omitted for " + ident)
         for probe in omitted:
@@ -1270,6 +1417,98 @@ def vng_download_cmd(vng, ver):
     return [vng, "--run", ver, "--dry-run"]
 
 
+def kcache_base(home):
+    """Root holding one dir per built or distro row."""
+    override = os.environ.get("MV_KCACHE")
+    if override:
+        return override
+    return os.path.join(home, ".cache", "memveil-kernels")
+
+
+def entry_cache_dir(home, entry):
+    """Verified cache dir for one row, any source kind."""
+    source = entry.get("source") or {}
+    if source.get("kind") == "archive":
+        return cache_base(home, source["vng_version"])
+    return os.path.join(kcache_base(home), entry["id"])
+
+
+def row_boot_label(entry):
+    """Short boot artifact label for one row in reports."""
+    source = entry.get("source") or {}
+    if source.get("kind") == "archive":
+        return source.get("vng_version", "")
+    return entry.get("id", "")
+
+
+def _verify_archive_cache(home, entry, source, release):
+    vng = source["vng_version"]
+    base = cache_base(home, vng)
+    if not Path(base).is_dir():
+        return False, "cache missing %s" % base, None
+    vmlinuz = vmlinuz_for_release(base, release)
+    if not os.path.isfile(vmlinuz):
+        return False, "vmlinuz-%s missing in %s" % (release,
+                                                   base), None
+    if sha_file(vmlinuz) != source["vmlinuz_sha256"]:
+        return False, "vmlinuz sha drift for %s" % vng, None
+    mods = find_modules_root(base, release)
+    if not mods:
+        return False, "modules missing for %s" % release, None
+    sha, _ = modules_manifest_sha(mods)
+    if sha != source["modules_manifest_sha256"]:
+        return False, "modules manifest drift for %s" % vng, None
+    return True, "cache holds", vng
+
+
+def verify_entry_cache(home, entry):
+    """Verify one row cache against the lock hashes.
+
+    Returns (ok, why, kernel_path): the vng tag for
+    archive rows, the vmlinuz file for built and distro
+    rows. A missing built or distro cache names the tool
+    that fills it; nothing is fetched here.
+    """
+    source = entry.get("source") or {}
+    kind = source.get("kind")
+    release = entry.get("release")
+    ident = entry.get("id")
+    if kind == "archive":
+        return _verify_archive_cache(home, entry, source,
+                                     release)
+    if kind == "built":
+        want_img = source.get("bzimage_sha256")
+        tool = "tools/kernel-build"
+    elif kind == "distro":
+        want_img = source.get("vmlinuz_sha256")
+        tool = "tools/kernel-fetch"
+    else:
+        return False, "bad source kind for %s" % ident, None
+    rowdir = os.path.join(kcache_base(home), ident)
+    vmlinuz = os.path.join(rowdir, "boot",
+                           "vmlinuz-" + release)
+    if not os.path.isfile(vmlinuz):
+        return False, "cache missing %s; run %s" % (vmlinuz,
+                                                   tool), None
+    if sha_file(vmlinuz) != want_img:
+        return False, "vmlinuz sha drift for %s" % ident, None
+    mods = find_modules_root(rowdir, release)
+    if not mods:
+        return False, "modules missing for %s; run %s" % (
+            release, tool), None
+    sha, _ = modules_manifest_sha(mods)
+    if sha != source.get("modules_manifest_sha256"):
+        return False, "modules manifest drift for %s" % ident, \
+            None
+    config = os.path.join(rowdir, "config")
+    if not os.path.isfile(config):
+        return False, "config missing for %s; run %s" % (ident,
+                                                        tool), None
+    if sha_file(config) != source.get("config_sha256"):
+        return False, "config drift for %s" % ident, None
+    return True, "cache holds", vmlinuz
+
+
 def _parse_blockstat_doc(text):
     try:
         doc = json.loads(text or "")
@@ -1300,7 +1539,7 @@ def evaluate_row(ev):
     channels = []
     for cap in admitted:
         channels.extend(CAP_CHANNELS[cap])
-    rec = {"id": ident, "vng_version": entry["vng_version"],
+    rec = {"id": ident, "vng_version": row_boot_label(entry),
            "release": release, "checks": [],
            "dd_count": ev.get("dd_count"),
            "duration": ev.get("duration")}

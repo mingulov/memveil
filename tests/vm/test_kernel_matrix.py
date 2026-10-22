@@ -18,7 +18,7 @@ import kernel_matrix as km
 
 
 def _lock_entry(verdicts=None, omitted=None, vng="v6.6.160",
-                release="6.6.160-0606160-generic"):
+                release="6.6.160-0606160-generic", source=None):
     if verdicts is None:
         verdicts = {
             "attempt-trace": {"verdict": "admitted",
@@ -30,24 +30,83 @@ def _lock_entry(verdicts=None, omitted=None, vng="v6.6.160",
         }
     if omitted is None:
         omitted = []
+    if source is None:
+        source = {
+            "kind": "archive",
+            "vng_version": vng,
+            "archive_date": "2026-10-21 11:32",
+            "vmlinuz_sha256": "a" * 64,
+            "modules_manifest_sha256": "b" * 64,
+        }
     return {
         "id": "6.6",
-        "vng_version": vng,
         "upstream": vng[1:],
-        "archive_date": "2026-10-21 11:32",
         "release": release,
-        "vmlinuz_sha256": "a" * 64,
-        "modules_manifest_sha256": "b" * 64,
         "expected": verdicts,
         "oracle": {"omitted": omitted},
+        "source": source,
     }
+
+
+def _built_source():
+    frags = ["tests/vm/kconfig/base.fragment",
+             "tests/vm/kconfig/nobtf.fragment"]
+    return {
+        "kind": "built",
+        "tarball_url": "https://cdn.kernel.org/pub/linux/kernel/"
+                       "v6.x/linux-6.12.114.tar.xz",
+        "tarball_sha256": "c" * 64,
+        "fragments": frags,
+        "fragments_sha256": {frag: "d" * 64 for frag in frags},
+        "toolchain": {"gcc": "gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0",
+                      "ld": "GNU ld (GNU Binutils for Ubuntu) 2.46",
+                      "pahole": "v1.31"},
+        "config_sha256": "e" * 64,
+        "bzimage_sha256": "f" * 64,
+        "modules_manifest_sha256": "1" * 64,
+    }
+
+
+def _built_entry():
+    entry = _lock_entry()
+    entry["id"] = "6.12.114-btf"
+    entry["release"] = "6.12.114-mv-6.12.114-btf"
+    entry["upstream"] = "6.12.114"
+    entry["source"] = _built_source()
+    return entry
+
+
+def _distro_source():
+    return {
+        "kind": "distro",
+        "packages": [{"url": "https://snapshot.debian.org/debian/"
+                             "pool/main/l/linux/linux-image-6.12.57"
+                             "-amd64-unsigned_6.12.57-1_amd64.deb",
+                      "sha256": "2" * 64}],
+        "vmlinuz_member": "./boot/vmlinuz-6.12.57-amd64",
+        "vmlinuz_sha256": "3" * 64,
+        "modules_manifest_sha256": "4" * 64,
+        "config_sha256": "5" * 64,
+        "banner": "Linux version 6.12.57-amd64 (debian-kernel@"
+                  "lists.debian.org) (gcc-14 14.2.0) #1 SMP "
+                  "Debian 6.12.57-1 (2026-01-01)",
+    }
+
+
+def _distro_entry():
+    entry = _lock_entry()
+    entry["id"] = "debian13"
+    entry["release"] = "6.12.57-amd64"
+    entry["upstream"] = "6.12.57"
+    entry["source"] = _distro_source()
+    return entry
 
 
 def _lock_doc(entries=None):
     if entries is None:
         entries = [_lock_entry()]
     return {
-        "schema": "memveil-kernel-matrix/1",
+        "schema": "memveil-kernel-matrix/2",
         "recorded_on": "2026-10-22",
         "archive": "https://kernel.ubuntu.com/mainline",
         "archive_queried": "2026-10-22",
@@ -68,7 +127,7 @@ def test_parse_valid_lock(tmp_path):
 
 def test_parse_rejects_bad_schema(tmp_path):
     doc = _lock_doc()
-    doc["schema"] = "memveil-kernel-matrix/2"
+    doc["schema"] = "memveil-kernel-matrix/1"
     path = tmp_path / "kernels.lock.json"
     path.write_text(json.dumps(doc))
     with pytest.raises(km.LockError):
@@ -77,7 +136,7 @@ def test_parse_rejects_bad_schema(tmp_path):
 
 def test_parse_rejects_bad_sha(tmp_path):
     entry = _lock_entry()
-    entry["vmlinuz_sha256"] = "xyz"
+    entry["source"]["vmlinuz_sha256"] = "xyz"
     path = tmp_path / "kernels.lock.json"
     path.write_text(json.dumps(_lock_doc([entry])))
     with pytest.raises(km.LockError):
@@ -387,7 +446,8 @@ def test_parse_committed_lock():
     for ident in ("5.15", "6.0", "6.6", "6.10"):
         assert by_id[ident]["oracle"]["omitted"] == [
             "unmap", "syncc", "syncd"]
-    for ident in ("6.11", "6.12", "6.18", "7.0", "7.1", "7.2", "7.3"):
+    for ident in ("6.11", "6.12", "6.18", "7.0", "7.1", "7.2",
+                  "7.3-rc3"):
         assert by_id[ident]["oracle"]["omitted"] == []
 
 
@@ -459,6 +519,200 @@ def test_release_agrees_with_upstream():
     assert not km.release_agrees_with_upstream(
         "7.3.0-070300-generic", "7.3-rc3")
     assert not km.release_agrees_with_upstream("bogus", "6.6.160")
+
+
+def _write_lock(tmp_path, doc):
+    path = tmp_path / "kernels.lock.json"
+    path.write_text(json.dumps(doc))
+    return str(path)
+
+
+def test_lock_v2_archive_row_roundtrip(tmp_path):
+    got = km.parse_lock(_write_lock(tmp_path, _lock_doc()))
+    src = got["kernels"][0]["source"]
+    assert src["kind"] == "archive"
+    assert src["vng_version"] == "v6.6.160"
+    assert got["kernels"][0]["release"] == "6.6.160-0606160-generic"
+
+
+def test_lock_v2_built_row_requires_every_hash(tmp_path):
+    km.parse_lock(_write_lock(tmp_path, _lock_doc([_built_entry()])))
+    for field in ("tarball_sha256", "config_sha256",
+                  "bzimage_sha256", "modules_manifest_sha256"):
+        entry = _built_entry()
+        del entry["source"][field]
+        with pytest.raises(km.LockError):
+            km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+    entry = _built_entry()
+    entry["source"]["fragments_sha256"] = {}
+    with pytest.raises(km.LockError):
+        km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+    entry = _built_entry()
+    frag = entry["source"]["fragments"][0]
+    entry["source"]["fragments_sha256"][frag] = "xyz"
+    with pytest.raises(km.LockError):
+        km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+
+
+def test_lock_v2_distro_row_requires_banner_and_packages(tmp_path):
+    km.parse_lock(_write_lock(tmp_path, _lock_doc([_distro_entry()])))
+    entry = _distro_entry()
+    del entry["source"]["banner"]
+    with pytest.raises(km.LockError):
+        km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+    entry = _distro_entry()
+    entry["source"]["banner"] = "not a banner"
+    with pytest.raises(km.LockError):
+        km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+    entry = _distro_entry()
+    entry["source"]["packages"] = []
+    with pytest.raises(km.LockError):
+        km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+    entry = _distro_entry()
+    entry["source"]["packages"][0]["sha256"] = "xyz"
+    with pytest.raises(km.LockError):
+        km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+
+
+def test_lock_v2_unknown_key_fails(tmp_path):
+    km.parse_lock(_write_lock(tmp_path, _lock_doc()))
+    doc = _lock_doc()
+    doc["surprise"] = 1
+    with pytest.raises(km.LockError):
+        km.parse_lock(_write_lock(tmp_path, doc))
+    entry = _lock_entry()
+    entry["surprise"] = 1
+    with pytest.raises(km.LockError):
+        km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+    entry = _lock_entry()
+    entry["source"]["surprise"] = 1
+    with pytest.raises(km.LockError):
+        km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+
+
+def test_lock_v2_boot_append_allow_list(tmp_path):
+    entry = _lock_entry()
+    entry["boot_append"] = ["lockdown=confidentiality"]
+    km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+    entry = _lock_entry()
+    entry["boot_append"] = ["quiet"]
+    with pytest.raises(km.LockError):
+        km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+    entry = _lock_entry()
+    entry["boot_append"] = "lockdown=confidentiality"
+    with pytest.raises(km.LockError):
+        km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+
+
+def test_release_dot_zero_mapping(tmp_path):
+    assert km.release_agrees_with_upstream(
+        "6.12.0-061200-generic", "6.12.0")
+    assert km.release_agrees_with_upstream(
+        "6.12.0-061200-generic", "6.12")
+    assert km.release_agrees_with_upstream(
+        "6.12-061200-generic", "6.12.0")
+    assert not km.release_agrees_with_upstream(
+        "6.12.1-061200-generic", "6.12")
+    assert not km.release_agrees_with_upstream(
+        "6.12-061200-generic", "6.12.1")
+    entry = _lock_entry(vng="v6.12",
+                        release="6.12.0-061200-generic")
+    entry["upstream"] = "6.12.0"
+    km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+    entry["upstream"] = "6.12.1"
+    with pytest.raises(km.LockError):
+        km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+
+
+def _valid_built_cache(tmp_path, monkeypatch):
+    entry = _built_entry()
+    monkeypatch.setenv("MV_KCACHE", str(tmp_path / "kcache"))
+    rowdir = tmp_path / "kcache" / entry["id"]
+    boot = rowdir / "boot"
+    mods = rowdir / "lib" / "modules" / entry["release"] / "kernel"
+    mods.mkdir(parents=True)
+    boot.mkdir(parents=True)
+    vmlinuz = boot / ("vmlinuz-" + entry["release"])
+    vmlinuz.write_bytes(b"fake-bzimage")
+    (mods / "nvme.ko").write_bytes(b"fake-module")
+    (rowdir / "config").write_text("CONFIG_X=y\n")
+    src = entry["source"]
+    src["bzimage_sha256"] = km.sha_file(str(vmlinuz))
+    mods_root = rowdir / "lib" / "modules" / entry["release"]
+    src["modules_manifest_sha256"], _ = km.modules_manifest_sha(
+        str(mods_root))
+    src["config_sha256"] = km.sha_file(str(rowdir / "config"))
+    return entry, str(vmlinuz)
+
+
+def test_verify_entry_cache_config_drift_fails(tmp_path, monkeypatch):
+    entry, kernel = _valid_built_cache(tmp_path, monkeypatch)
+    ok, why, got = km.verify_entry_cache("/nonexistent", entry)
+    assert ok, why
+    assert got == kernel
+    rowdir = os.path.join(os.environ["MV_KCACHE"], entry["id"])
+    with open(os.path.join(rowdir, "config"), "w") as handle:
+        handle.write("CONFIG_Y=n\n")
+    ok, why, got = km.verify_entry_cache("/nonexistent", entry)
+    assert not ok
+    assert "config" in why
+    assert not got
+
+
+def test_verify_entry_cache_modules_drift_fails(tmp_path, monkeypatch):
+    entry, _ = _valid_built_cache(tmp_path, monkeypatch)
+    ok, why, _ = km.verify_entry_cache("/nonexistent", entry)
+    assert ok, why
+    rowdir = os.path.join(os.environ["MV_KCACHE"], entry["id"])
+    mod = os.path.join(rowdir, "lib", "modules", entry["release"],
+                       "kernel", "nvme.ko")
+    with open(mod, "wb") as handle:
+        handle.write(b"tampered")
+    ok, why, got = km.verify_entry_cache("/nonexistent", entry)
+    assert not ok
+    assert "modules" in why
+    assert not got
+
+
+def test_verify_entry_cache_missing_says_build(tmp_path, monkeypatch):
+    monkeypatch.setenv("MV_KCACHE", str(tmp_path / "kcache"))
+    ok, why, got = km.verify_entry_cache(
+        "/nonexistent", _built_entry())
+    assert not ok
+    assert "tools/kernel-build" in why
+    assert not got
+    ok, why, got = km.verify_entry_cache(
+        "/nonexistent", _distro_entry())
+    assert not ok
+    assert "tools/kernel-fetch" in why
+    assert not got
+
+
+def test_verify_entry_cache_archive_checks_hashes(tmp_path, monkeypatch):
+    monkeypatch.delenv("MV_KCACHE", raising=False)
+    home = tmp_path / "home"
+    entry = _lock_entry()
+    base = home / ".cache" / "virtme-ng" / "v6.6.160" / "amd64"
+    boot = base / "boot"
+    mods = base / "lib" / "modules" / entry["release"] / "kernel"
+    mods.mkdir(parents=True)
+    boot.mkdir(parents=True)
+    vmlinuz = boot / ("vmlinuz-" + entry["release"])
+    vmlinuz.write_bytes(b"fake-vmlinuz")
+    (mods / "nvme.ko").write_bytes(b"fake-module")
+    src = entry["source"]
+    src["vmlinuz_sha256"] = km.sha_file(str(vmlinuz))
+    mods_root = base / "lib" / "modules" / entry["release"]
+    src["modules_manifest_sha256"], _ = km.modules_manifest_sha(
+        str(mods_root))
+    ok, why, target = km.verify_entry_cache(str(home), entry)
+    assert ok, why
+    assert target == "v6.6.160"
+    vmlinuz.write_bytes(b"tampered")
+    ok, why, target = km.verify_entry_cache(str(home), entry)
+    assert not ok
+    assert "vmlinuz" in why
+    assert not target
 
 
 def test_omitted_mismatch_fails():
@@ -1688,8 +1942,8 @@ def test_vng_download_cmd_no_hardcoded_home():
 def _admitted_entry():
     return {
         "id": "7.0",
-        "vng_version": "v7.0.14",
         "release": "7.0.14-070014-generic",
+        "upstream": "7.0.14",
         "expected": {
             "attempt-trace": {"verdict": "admitted",
                               "reason_class": "live-verified"},
@@ -1699,6 +1953,13 @@ def _admitted_entry():
                             "reason_class": "live-verified"},
         },
         "oracle": {"omitted": []},
+        "source": {
+            "kind": "archive",
+            "vng_version": "v7.0.14",
+            "archive_date": "2026-06-27 15:46",
+            "vmlinuz_sha256": "a" * 64,
+            "modules_manifest_sha256": "b" * 64,
+        },
     }
 
 
@@ -2492,8 +2753,8 @@ def test_evaluate_export_redacted_passes():
 def test_evaluate_refused_row_passes():
     entry = {
         "id": "5.15",
-        "vng_version": "v5.15.223",
         "release": "5.15.223-0515223-generic",
+        "upstream": "5.15.223",
         "expected": {
             "attempt-trace": {"verdict": "refused",
                               "reason_class": "floor-6.0"},
@@ -2503,6 +2764,13 @@ def test_evaluate_refused_row_passes():
                             "reason_class": "no-cover"},
         },
         "oracle": {"omitted": ["unmap", "syncc", "syncd"]},
+        "source": {
+            "kind": "archive",
+            "vng_version": "v5.15.223",
+            "archive_date": "2026-10-15 23:02",
+            "vmlinuz_sha256": "a" * 64,
+            "modules_manifest_sha256": "b" * 64,
+        },
     }
     out = "memveil record: kernel 5.15.223-0515223-generic " \
         "below floor 6.0\n"

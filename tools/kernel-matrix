@@ -64,25 +64,11 @@ def ensure_disk(path, size_gb=4):
 
 
 def verify_cache(entry):
-    vng = entry["vng_version"]
-    release = entry["release"]
-    base = km.cache_base(str(Path.home()), vng)
-    if not Path(base).is_dir():
-        return False, "cache missing %s" % base, base
-    vmlinuz = km.vmlinuz_for_release(base, release)
-    if not os.path.isfile(vmlinuz):
-        return False, "vmlinuz-%s missing in %s" % (release, base), \
-            base
-    got = km.sha_file(vmlinuz)
-    if got != entry["vmlinuz_sha256"]:
-        return False, "vmlinuz sha drift for %s" % vng, base
-    mods = km.find_modules_root(base, release)
-    if not mods:
-        return False, "modules missing for %s" % release, base
-    sha, _ = km.modules_manifest_sha(mods)
-    if sha != entry["modules_manifest_sha256"]:
-        return False, "modules manifest drift for %s" % vng, base
-    return True, "cache holds", base
+    home = str(Path.home())
+    ok, msg, target = km.verify_entry_cache(home, entry)
+    if not ok:
+        return False, msg, None, None
+    return True, msg, km.entry_cache_dir(home, entry), target
 
 
 def download_cache(vng_path, ver):
@@ -267,7 +253,7 @@ def run_one(entry, args, kind, source, disk_img, tools, run_id,
     os.makedirs(export)
     admitted = [cap for cap in km.CAPS
                 if entry["expected"][cap]["verdict"] == "admitted"]
-    job = {"id": ident, "vng_version": entry["vng_version"],
+    job = {"id": ident, "vng_version": km.row_boot_label(entry),
            "release": entry["release"], "admitted": admitted,
            "duration": args.duration, "dd_count": args.dd_count,
            "run_id": run_id}
@@ -279,13 +265,14 @@ def run_one(entry, args, kind, source, disk_img, tools, run_id,
     Path(export, "job.json").write_text(json.dumps(job, indent=2)
                                         + "\n")
     t0 = time.monotonic()
-    ok, msg, cache_dir = verify_cache(entry)
-    if not ok and "missing" in msg:
-        dl_ok, dl_msg = download_cache(prefix[-1],
-                                       entry["vng_version"])
+    ok, msg, cache_dir, target = verify_cache(entry)
+    if not ok and entry["source"]["kind"] == "archive" \
+            and "missing" in msg:
+        dl_ok, dl_msg = download_cache(
+            prefix[-1], entry["source"]["vng_version"])
         Path(export, "download.txt").write_text(dl_msg + "\n")
         if dl_ok:
-            ok, msg, cache_dir = verify_cache(entry)
+            ok, msg, cache_dir, target = verify_cache(entry)
         else:
             msg = dl_msg
     if not ok:
@@ -306,9 +293,13 @@ def run_one(entry, args, kind, source, disk_img, tools, run_id,
     guest_cmd = "python3 %s /tmp/export %s" % (
         shlex.quote(script), shlex.quote(str(ROOT)))
     qemu_opts = "-cpu host %s" % km.qemu_drive_opt(disk_img)
-    vng_args = ["--run", entry["vng_version"],
+    append = "swiotlb=131072,force"
+    for arg in entry.get("boot_append") or []:
+        km.validate_shell_path(arg, "boot argument")
+        append += " " + arg
+    vng_args = ["--run", target,
                 "--cpus", str(args.cpus),
-                "-m", "4G", "--append", "swiotlb=131072,force",
+                "-m", "4G", "--append", append,
                 "--overlay-rwdir=/usr", "--overlay-rwdir=/etc",
                 "--overlay-rwdir=/var",
                 "--rwdir=/tmp/export=%s" % export,
@@ -498,7 +489,8 @@ def main(argv=None):
     try:
         for entry in entries:
             print("kernel-matrix: %s (%s)" % (entry["id"],
-                                              entry["vng_version"]))
+                                              km.row_boot_label(
+                                                  entry)))
             rec = run_one(entry, args, kind, source, disk_img,
                           lock["tools"], run_id, prefix)
             results.append(rec)
