@@ -16,3 +16,5 @@ modules.order
 !tests/fixtures/narrow/*/*.o
 # Runtime discovery markers are static readability stubs, never loaded.
 !tests/fixtures/runtime/bpf/*.bpf.o
+# CO-RE kind fixture (regenerate with tools/emit-core-fixtures).
+!tests/fixtures/core/*.bpf.o
