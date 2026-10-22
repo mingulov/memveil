@@ -1,0 +1,529 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Boot each matrix kernel and prove the generations table.
+
+For one lock entry or all: verify the cached vmlinuz and modules
+manifest against the lock, boot the kernel under virtme-ng with
+forced swiotlb and an emulated NVMe disk, install the deb from
+MV_DEB (or use an owner bundle), run doctor and compare verdicts,
+then on admitted rows run record with a fixed O_DIRECT workload
+under a per-CPU count() bpftrace oracle and compare every
+admitted channel. Refused rows must refuse record with exit 3
+and no partial capture. Writes one evidence dir per kernel plus
+a summary table merged across runs.
+
+Every verdict predicate lives in tests/vm/kernel_matrix.py;
+this tool only gathers evidence files and boots guests.
+"""
+
+import argparse
+import fcntl
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tests" / "vm"))
+
+import kernel_matrix as km
+
+CAPTURE_TIMEOUT = 300
+
+
+def find_vng():
+    cand = os.environ.get("VNG")
+    if cand:
+        return cand
+    found = shutil.which("vng")
+    if found:
+        return found
+    home = Path.home() / ".local" / "bin" / "vng"
+    if home.exists():
+        return str(home)
+    return None
+
+
+def ensure_disk(path, size_gb=4):
+    p = Path(path)
+    if p.exists():
+        if not p.is_file():
+            raise ValueError("disk image is not a file: %s" % path)
+        return str(p)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run(["truncate", "-s", "%dG" % size_gb, str(p)],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise ValueError("cannot create disk image: %s" % proc.stderr)
+    return str(p)
+
+
+def verify_cache(entry):
+    vng = entry["vng_version"]
+    release = entry["release"]
+    base = km.cache_base(str(Path.home()), vng)
+    if not Path(base).is_dir():
+        return False, "cache missing %s" % base, base
+    vmlinuz = km.vmlinuz_for_release(base, release)
+    if not os.path.isfile(vmlinuz):
+        return False, "vmlinuz-%s missing in %s" % (release, base), \
+            base
+    got = km.sha_file(vmlinuz)
+    if got != entry["vmlinuz_sha256"]:
+        return False, "vmlinuz sha drift for %s" % vng, base
+    mods = km.find_modules_root(base, release)
+    if not mods:
+        return False, "modules missing for %s" % release, base
+    sha, _ = km.modules_manifest_sha(mods)
+    if sha != entry["modules_manifest_sha256"]:
+        return False, "modules manifest drift for %s" % vng, base
+    return True, "cache holds", base
+
+
+def download_cache(vng_path, ver):
+    try:
+        proc = subprocess.run(km.vng_download_cmd(vng_path, ver),
+                              capture_output=True, text=True,
+                              timeout=900)
+    except subprocess.TimeoutExpired:
+        return False, "download timed out for %s" % ver
+    if proc.returncode != 0:
+        return False, "download failed for %s: %s" % (
+            ver, (proc.stderr or "").strip()[:300])
+    return True, "downloaded"
+
+
+def read_text(path):
+    try:
+        return Path(path).read_text()
+    except OSError:
+        return None
+
+
+def gather_miss_snaps(export):
+    try:
+        times = json.loads(Path(
+            export, "progs_times.json").read_text())
+    except (OSError, ValueError):
+        times = {}
+    snaps = []
+    for idx in range(4):
+        try:
+            nsecs = int(times[str(idx)])
+        except (KeyError, TypeError, ValueError):
+            nsecs = None
+        snaps.append((nsecs, read_text(
+            os.path.join(export, "progs%d.json" % idx))))
+    return snaps
+
+
+def run_validator(export):
+    cap = os.path.join(export, "cap")
+    if not os.path.isdir(cap):
+        return None, None
+    try:
+        proc = subprocess.run(
+            [str(ROOT / "tools" / "validate-schemas"), cap],
+            capture_output=True, text=True,
+            timeout=CAPTURE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        out = "validate-schemas timed out"
+        Path(export, "validate.txt").write_text(out + "\n")
+        return 99, out
+    out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    Path(export, "validate.txt").write_text(out + "\n")
+    return proc.returncode, out[-2000:]
+
+
+def gather_persisted(export):
+    path = os.path.join(export, "cap", "events.ndjson")
+    try:
+        with open(path) as handle:
+            counts = km.persisted_counts(handle)
+        with open(path) as handle:
+            byts = km.persisted_bytes(handle)
+        return counts, byts, None
+    except OSError:
+        return None, None, "missing events.ndjson"
+    except ValueError as exc:
+        return None, None, str(exc)
+
+
+def collect_one(entry, export, tools, dd_count, elapsed, run_id,
+                timeout, cache_dir, duration):
+    ident = entry["id"]
+    ev = {
+        "entry": entry,
+        "tools": tools,
+        "dd_count": dd_count,
+        "cache_dir": cache_dir,
+        "duration": duration,
+        "vng_exit": read_text(os.path.join(export, "vng.exit")),
+        "fail_txt": read_text(os.path.join(export, "FAIL.txt")),
+        "doctor_text": read_text(
+            os.path.join(export, "doctor.json")),
+        "doctor_exit": read_text(
+            os.path.join(export, "doctor.exit")),
+        "uname_text": read_text(
+            os.path.join(export, "uname.txt")),
+        "mods_text": read_text(
+            os.path.join(export, "mods.txt")),
+        "hooks_text": read_text(
+            os.path.join(export, "hooks.json")),
+        "artifacts_text": read_text(
+            os.path.join(export, "artifacts.json")),
+        "refusals": {},
+        "record_exit": None,
+        "report_exit": None,
+        "report_json_exit": None,
+        "session_text": None,
+        "workload_text": None,
+        "oracle_text": None,
+        "oracle_stderr": None,
+        "miss_snaps": None,
+        "persisted": None,
+        "persisted_bytes": None,
+        "events_error": None,
+        "blockstat_text": None,
+        "dmesg_text": read_text(
+            os.path.join(export, "dmesg.txt")),
+        "dmesg_scan_text": read_text(
+            os.path.join(export, "dmesg_scan.json")),
+        "validate_rc": None,
+        "validate_out": None,
+    }
+    for cap in km.CAPS:
+        label = "cap-" + cap
+        ev["refusals"][label] = {
+            "exit": read_text(os.path.join(
+                export, "record-%s.exit" % label)),
+            "out": read_text(os.path.join(
+                export, "record-%s.out" % label)),
+            "exists": read_text(os.path.join(
+                export, "record-%s.exists" % label)),
+        }
+    ev["refusals"]["combined"] = {
+        "exit": read_text(os.path.join(
+            export, "record-combined.exit")),
+        "out": read_text(os.path.join(
+            export, "record-combined.out")),
+        "exists": read_text(os.path.join(
+            export, "record-combined.exists")),
+    }
+    admitted = [cap for cap in km.CAPS
+                if entry["expected"][cap]["verdict"] == "admitted"]
+    if admitted:
+        ev["record_exit"] = read_text(
+            os.path.join(export, "record.exit"))
+        ev["report_exit"] = read_text(
+            os.path.join(export, "report.exit"))
+        ev["report_json_exit"] = read_text(
+            os.path.join(export, "report-json.exit"))
+        ev["session_text"] = read_text(
+            os.path.join(export, "cap", "session.json"))
+        ev["workload_text"] = read_text(
+            os.path.join(export, "workload.txt"))
+        ev["oracle_text"] = read_text(
+            os.path.join(export, "oracle.txt"))
+        ev["oracle_stderr"] = read_text(
+            os.path.join(export, "oracle.stderr"))
+        ev["miss_snaps"] = gather_miss_snaps(export)
+        persisted, byts, events_error = gather_persisted(export)
+        ev["persisted"] = persisted
+        ev["persisted_bytes"] = byts
+        ev["events_error"] = events_error
+        ev["blockstat_text"] = read_text(
+            os.path.join(export, "blockstat.json"))
+        rc, out = run_validator(export)
+        ev["validate_rc"] = rc
+        ev["validate_out"] = out
+    ev["export_redact_error"] = km.scan_export_redaction(export)
+    try:
+        rec = km.evaluate_row(ev)
+    except Exception as exc:
+        rec = {"id": ident, "ok": False,
+               "detail": "row decision crashed: %s" % exc,
+               "checks": [{"name": "row_decision", "ok": False,
+                           "detail": "row decision crashed",
+                           "skipped": False}]}
+    rec["elapsed"] = round(elapsed, 1)
+    rec["run_id"] = run_id
+    rec["timeout"] = bool(timeout)
+    return rec
+
+
+def run_one(entry, args, kind, source, disk_img, tools, run_id,
+            prefix):
+    ident = entry["id"]
+    export = os.path.join(args.out, ident)
+    if os.path.exists(export):
+        return {"id": ident, "ok": False, "run_id": run_id,
+                "detail": "evidence dir exists (refusing overwrite)"}
+    os.makedirs(export)
+    admitted = [cap for cap in km.CAPS
+                if entry["expected"][cap]["verdict"] == "admitted"]
+    job = {"id": ident, "vng_version": entry["vng_version"],
+           "release": entry["release"], "admitted": admitted,
+           "duration": args.duration, "dd_count": args.dd_count,
+           "run_id": run_id}
+    if kind == "deb":
+        job["deb"] = source
+    else:
+        job["bundle"] = source
+    job["repo"] = str(ROOT)
+    Path(export, "job.json").write_text(json.dumps(job, indent=2)
+                                        + "\n")
+    t0 = time.monotonic()
+    ok, msg, cache_dir = verify_cache(entry)
+    if not ok and "missing" in msg:
+        dl_ok, dl_msg = download_cache(prefix[-1],
+                                       entry["vng_version"])
+        Path(export, "download.txt").write_text(dl_msg + "\n")
+        if dl_ok:
+            ok, msg, cache_dir = verify_cache(entry)
+        else:
+            msg = dl_msg
+    if not ok:
+        Path(export, "cache-FAIL.txt").write_text(msg + "\n")
+        return {"id": ident, "ok": False, "detail": msg,
+                "run_id": run_id,
+                "elapsed": round(time.monotonic() - t0, 1)}
+    Path(export, "cache.txt").write_text(msg + " " + cache_dir
+                                         + "\n")
+    try:
+        km.validate_shell_path(export, "evidence dir")
+        km.validate_shell_path(disk_img, "disk image")
+    except ValueError as exc:
+        return {"id": ident, "ok": False, "detail": str(exc),
+                "run_id": run_id,
+                "elapsed": round(time.monotonic() - t0, 1)}
+    script = str(ROOT / "tests" / "vm" / "kernel_matrix_guest.py")
+    guest_cmd = "python3 %s /tmp/export %s" % (
+        shlex.quote(script), shlex.quote(str(ROOT)))
+    qemu_opts = "-cpu host %s" % km.qemu_drive_opt(disk_img)
+    vng_args = ["--run", entry["vng_version"],
+                "--cpus", str(args.cpus),
+                "-m", "4G", "--append", "swiotlb=131072,force",
+                "--overlay-rwdir=/usr", "--overlay-rwdir=/etc",
+                "--overlay-rwdir=/var",
+                "--rwdir=/tmp/export=%s" % export,
+                "--qemu-opts=%s" % qemu_opts,
+                "--exec", guest_cmd]
+    try:
+        cmd = km.build_vng_cmd(prefix,
+                               os.environ.get("MV_HOST_CPUS"),
+                               str(Path.home()), vng_args)
+    except ValueError as exc:
+        return {"id": ident, "ok": False, "detail": str(exc),
+                "run_id": run_id,
+                "elapsed": round(time.monotonic() - t0, 1)}
+    Path(export, "vng-cmd.txt").write_text(" ".join(cmd) + "\n")
+    from vm_process import run_owned_guest
+    timeout = False
+    try:
+        proc = run_owned_guest(cmd, timeout=args.timeout)
+        Path(export, "console.txt").write_text(
+            (proc.stdout or "") + (proc.stderr or ""))
+        Path(export, "vng.exit").write_text(str(proc.returncode))
+    except subprocess.TimeoutExpired as exc:
+        out = exc.stdout if isinstance(exc.stdout, str) else ""
+        err = exc.stderr if isinstance(exc.stderr, str) else ""
+        Path(export, "console.txt").write_text((out or "")
+                                               + (err or ""))
+        Path(export, "vng.exit").write_text("timeout")
+        timeout = True
+    elapsed = time.monotonic() - t0
+    return collect_one(entry, export, tools, args.dd_count,
+                       elapsed, run_id, timeout, cache_dir,
+                       args.duration)
+
+
+def write_summary(out, merged):
+    lines = ["kernel vng doctor record report channels "
+             "detail/aggregate verdict run"]
+    for rec in merged:
+        chans = rec.get("channels")
+        if isinstance(chans, dict):
+            chan_txt = ",".join("%s=%s" % (k, v.split()[0])
+                                for k, v in sorted(chans.items()))
+        else:
+            chan_txt = "-"
+        lines.append("%s %s doctor=%s record=%s report=%s %s %s %s "
+                     "run=%s" % (
+                         rec.get("id"), rec.get("vng_version", "?"),
+                         "ok" if rec.get("doctor_ok") else "BAD",
+                         rec.get("record_exit", "?"),
+                         rec.get("report_exit", "?"), chan_txt,
+                         (rec.get("detail_quality", "-") or "-")[:60],
+                         "PASS" if rec.get("ok") else "FAIL",
+                         rec.get("run_id", "?")))
+    Path(out, "summary.txt").write_text("\n".join(lines) + "\n")
+    Path(out, "summary.json").write_text(
+        json.dumps(merged, indent=2, sort_keys=True) + "\n")
+    print("\n".join(lines))
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Boot matrix kernels and prove the generations "
+                    "table. MV_HOST_CPUS pins the host CPU set "
+                    "through taskset; unset runs without taskset.")
+    parser.add_argument("--out", required=True,
+                        help="evidence parent dir (per-kernel subdirs)")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--kernel", help="one lock id to run")
+    group.add_argument("--all", action="store_true",
+                       help="run every lock entry")
+    parser.add_argument("--lock", default=str(
+        ROOT / "tests" / "vm" / "kernels.lock.json"),
+                        help="kernels lock path")
+    parser.add_argument("--deb", default=os.environ.get("MV_DEB"),
+                        help="memveil .deb to install (or MV_DEB)")
+    parser.add_argument("--bundle",
+                        help="owner bundle dir with bin/memveil")
+    parser.add_argument("--disk-img",
+                        help="NVMe backing image (created if missing)")
+    parser.add_argument("--duration", type=int, default=60,
+                        help="record duration seconds")
+    parser.add_argument("--dd-count", type=int, default=128,
+                        help="MB per dd read")
+    parser.add_argument("--timeout", type=int, default=900,
+                        help="per-kernel timeout seconds")
+    parser.add_argument("--cpus", type=int, default=4,
+                        help="guest vCPUs (at most 4)")
+    args = parser.parse_args(argv)
+    if args.cpus < 1 or args.cpus > 4:
+        print("kernel-matrix: --cpus must be 1..4", file=sys.stderr)
+        return 2
+    try:
+        lock = km.parse_lock(args.lock)
+    except km.LockError as exc:
+        print("kernel-matrix: bad lock: %s" % exc, file=sys.stderr)
+        return 2
+    entries = lock["kernels"]
+    if args.kernel:
+        entries = [e for e in entries if e["id"] == args.kernel]
+        if not entries:
+            print("kernel-matrix: unknown kernel %s" % args.kernel,
+                  file=sys.stderr)
+            return 2
+    try:
+        kind, source = km.resolve_inputs(args.deb, args.bundle)
+    except ValueError as exc:
+        print("kernel-matrix: %s" % exc, file=sys.stderr)
+        return 2
+    if kind == "deb":
+        if not os.path.isfile(source):
+            print("kernel-matrix: missing deb %s" % source,
+                  file=sys.stderr)
+            return 2
+        source = str(Path(source).resolve())
+    else:
+        cand = Path(source) / "bin" / "memveil"
+        if not cand.is_file():
+            print("kernel-matrix: missing %s" % cand,
+                  file=sys.stderr)
+            return 2
+        source = str(cand.resolve())
+    os.makedirs(args.out, exist_ok=True)
+    collisions = km.check_out_collisions(
+        args.out, [e["id"] for e in entries])
+    if collisions:
+        print("kernel-matrix: evidence dirs exist (refusing "
+              "overwrite): %s; use a fresh --out"
+              % ", ".join(collisions), file=sys.stderr)
+        return 2
+    disk_img = args.disk_img or str(ROOT / "build" / "vm"
+                                    / "kernel-matrix-disk.img")
+    try:
+        km.validate_shell_path(disk_img, "disk image")
+        disk_img = ensure_disk(disk_img)
+    except ValueError as exc:
+        print("kernel-matrix: %s" % exc, file=sys.stderr)
+        return 2
+    try:
+        sys.path.insert(0, str(ROOT / "tests" / "vm"))
+        from test_attempt_capture import gate_prefix
+        prefix, _ = gate_prefix()
+    except BaseException as exc:
+        print("kernel-matrix: guest unrunnable: %s" % exc,
+              file=sys.stderr)
+        return 1
+    try:
+        import harness_env
+        harness = harness_env.check_harness_versions(prefix[-1])
+    except ValueError as exc:
+        print("kernel-matrix: %s" % exc, file=sys.stderr)
+        return 1
+    for tool in ("bpftrace", "bpftool"):
+        try:
+            proc = subprocess.run([tool, "--version"],
+                                  capture_output=True, text=True,
+                                  timeout=10)
+            first = (proc.stdout or "").splitlines()
+            harness[tool] = first[0].strip() if first else ""
+        except (OSError, subprocess.TimeoutExpired):
+            harness[tool] = ""
+    harness["run_id"] = datetime.now(timezone.utc).strftime(
+        "%Y%m%dT%H%M%SZ")
+    try:
+        harness["deb_sha256"] = km.sha_file(source) \
+            if kind == "deb" else None
+    except OSError as exc:
+        print("kernel-matrix: cannot hash %s: %s" % (source, exc),
+              file=sys.stderr)
+        return 1
+    commit, dirty = km.repo_identity(ROOT)
+    harness["harness_commit"] = commit
+    harness["harness_dirty"] = dirty
+    lock_dir = ROOT / "build" / "vm"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lease = (lock_dir / "suite.lock").open("a+")
+    try:
+        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lease.close()
+        print("kernel-matrix: VM suite lease already owned",
+              file=sys.stderr)
+        return 1
+    Path(args.out, "harness.json").write_text(
+        json.dumps(harness, indent=2, sort_keys=True) + "\n")
+    run_id = harness["run_id"]
+    results = []
+    try:
+        for entry in entries:
+            print("kernel-matrix: %s (%s)" % (entry["id"],
+                                              entry["vng_version"]))
+            rec = run_one(entry, args, kind, source, disk_img,
+                          lock["tools"], run_id, prefix)
+            results.append(rec)
+            Path(args.out, entry["id"] + ".json").write_text(
+                json.dumps(rec, indent=2, sort_keys=True) + "\n")
+            status = "PASS" if rec.get("ok") else "FAIL"
+            print("kernel-matrix: %s %s (%.1fs)" % (
+                entry["id"], status, rec.get("elapsed", 0)))
+    finally:
+        lease.close()
+    summary_path = Path(args.out, "summary.json")
+    if summary_path.exists():
+        try:
+            old = json.loads(summary_path.read_text())
+            if not isinstance(old, list):
+                raise ValueError("summary is not a list")
+        except ValueError:
+            print("kernel-matrix: existing summary unparseable, "
+                  "refusing to merge", file=sys.stderr)
+            return 2
+    else:
+        old = []
+    write_summary(args.out, km.merge_summary(old, results))
+    return 0 if all(r.get("ok") for r in results) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

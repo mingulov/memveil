@@ -13,7 +13,7 @@
 # baseline, confidential-ranges, confidential-inventory,
 # confidential-real, confidential-late-attach, top,
 # oracle-ledger, vm-oracle, profile-semantics, vm-lifecycle,
-# vm-copy, vm-real-io, vm-topwalk, stop, vm-stop, budgets, quality,
+# vm-copy, vm-real-io, vm-topwalk, vm-kernels, stop, vm-stop, budgets, quality,
 # vm-saturation, reader-adversarial, fuzz-smoke, fuzz-campaign,
 # record-failures, output-paths, vm-cleanup, privacy,
 # render-escaping, offline-environment, perf-replay,
@@ -1090,7 +1090,27 @@ suite_profile_semantics() {
         echo "profile-semantics: pytest not importable" >&2
         return 1
     fi
-    python3 -m pytest "$ROOT/tests/vm/test_profile_semantics.py" "$ROOT/tests/vm/test_harness_refusal.py" "$ROOT/tests/vm/test_workflow_results.py" "$ROOT/tests/vm/test_export_validation.py" "$ROOT/tests/vm/test_mint_record3.py" "$ROOT/tests/vm/test_oracle_kver.py" "$ROOT/tests/vm/test_guest_teardown.py" "$ROOT/tests/vm/test_gate_kernel.py" -q
+    python3 -m pytest "$ROOT/tests/vm/test_profile_semantics.py" "$ROOT/tests/vm/test_harness_refusal.py" "$ROOT/tests/vm/test_workflow_results.py" "$ROOT/tests/vm/test_export_validation.py" "$ROOT/tests/vm/test_mint_record3.py" "$ROOT/tests/vm/test_oracle_kver.py" "$ROOT/tests/vm/test_guest_teardown.py" "$ROOT/tests/vm/test_gate_kernel.py" "$ROOT/tests/vm/test_kernel_matrix.py" -q
+}
+
+suite_vm_kernels() {
+    if [ "${MEMVEIL_VM_KERNELS:-0}" != "1" ]; then
+        echo "vm-kernels: SKIP: needs MEMVEIL_VM_KERNELS=1" >&2
+        return 77
+    fi
+    if [ -z "${MV_DEB:-}" ] && [ -z "${MV_KERNELS_BUNDLE:-}" ]; then
+        echo "vm-kernels: FAIL: armed but need MV_DEB or MV_KERNELS_BUNDLE" >&2
+        return 1
+    fi
+    out="${MV_KERNELS_OUT:-$ROOT/build/vm/kernels}"
+    args=(python3 "$ROOT/tools/kernel-matrix" --all --out "$out")
+    if [ -n "${MV_KERNELS_BUNDLE:-}" ]; then
+        args+=(--bundle "$MV_KERNELS_BUNDLE")
+    fi
+    if [ -n "${MV_KERNELS_DISK:-}" ]; then
+        args+=(--disk-img "$MV_KERNELS_DISK")
+    fi
+    exec "${args[@]}"
 }
 
 vm_lifecycle_preflight() {
@@ -3805,6 +3825,9 @@ case "$1" in
         ;;
     vm-topwalk)
         suite_vm_topwalk
+        ;;
+    vm-kernels)
+        suite_vm_kernels
         ;;
     stop)
         suite_stop

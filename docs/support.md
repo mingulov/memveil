@@ -88,7 +88,7 @@ no rebuild on the device.
 
 | Kernel | attempt-trace | lifecycle + copy |
 | --- | --- | --- |
-| 7.3, 7.3rc1-rc7, mainline (7.4 pre-) | full | full, both map shapes |
+| 7.3rc1-rc3, mainline (7.4 pre-) | full | full, both map shapes |
 | 7.0-7.2, any build (incl. `-aws`) | full | full |
 | 6.11 up to (not incl.) 7.0, any build | full | full |
 | 6.0-6.10 | full | refused, needs 6.11+ |
@@ -98,7 +98,7 @@ Notes:
 
 - 7.3 changes one detail: `swiotlb_tbl_map_single`
   takes `attrs` as a pointer (present since rc1,
-  verified through rc7, release, and current mainline).
+  verified through rc3, the newest 7.3 in the lock).
   The shipped probe never reads map-side `attrs`
   (`fexit` map ignores it; `unmap` still passes it by
   value), so the same object serves both shapes and the
@@ -121,6 +121,49 @@ Notes:
   builds additionally need a machine-local `local-auto`
   receipt from `memveil qualify` plus the independent
   oracle comparison before results are trusted.
+
+### Boot verification
+
+The lock `tests/vm/kernels.lock.json` pins one newest
+mainline build per generation with its expected verdicts,
+artifact hashes, and oracle tool versions. Run the lane
+and read the per-row verdicts from the summary; any row
+that disagrees with the table above keeps failing with
+its evidence attached, and the table stays unchanged
+until the product or the lock is fixed on purpose.
+
+Rerun with a built deb (the tool refuses to overwrite an
+existing evidence dir, so start from a fresh one):
+
+```sh
+./tools/build
+./tools/package-deb
+rm -rf build/vm/kernels
+MV_DEB=dist/memveil_0.1.0-1_amd64.deb \
+  MEMVEIL_VM_KERNELS=1 ./tools/test vm-kernels
+```
+
+`tools/kernel-matrix --all --out DIR` runs the same
+matrix directly (one evidence dir per kernel plus a
+summary table; sharing one `DIR` across runs merges
+rows by kernel id). Each guest boots with forced
+swiotlb and a read-only emulated NVMe disk, at most 4
+vCPUs. The run holds the VM resource lock
+(`build/vm/suite.lock`, nonblocking, one guest at a
+time) for its whole duration.
+
+Environment:
+
+- `MV_DEB` or `MV_KERNELS_BUNDLE`: binary under test
+  (exactly one; the lane needs one when armed).
+- `MV_KERNELS_OUT`: evidence parent dir
+  (default `build/vm/kernels`).
+- `MV_KERNELS_DISK`: NVMe backing image (default
+  `build/vm/kernel-matrix-disk.img`, outside the
+  evidence dir).
+- `MV_HOST_CPUS`: host CPU set for the guest
+  processes through `taskset` (for example `0-7`);
+  unset runs without `taskset`.
 
 ## Permissions
 

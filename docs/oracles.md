@@ -72,6 +72,46 @@ native return code plus the owned PFN range, and the harness
 compares that log against MemVeil's observed conversion
 records. It covers owned pages only, never real guest memory.
 
+## Kernel matrix oracle (`tools/kernel-matrix`)
+
+Boots each kernel pinned in `tests/vm/kernels.lock.json`
+under virtme-ng with forced swiotlb and a fixed O_DIRECT
+workload, then compares every admitted channel against a
+bpftrace per-CPU `count()` oracle attached to the same
+tracepoint and hooks. A row passes only when the guest
+boots the locked kernel, the workload sits inside the
+capture window, each channel shortfall fits that channel
+memveil misses plus transport loss, reported loss fits
+the oracle bounds, the fixed workload ratios hold, and
+three independent byte totals agree: memveil requested,
+mapped and sync sums plus each copy direction from the
+persisted events, the oracle `sum(args.size)` counter at
+the tracepoint, and the block layer sector delta times
+512. Count floor and ceiling derive from those measured
+block bytes, never from workload constants.
+`tools/validate-schemas` checks each capture, and block
+sectors tracking the reads proves the workload ran.
+
+Scope limits:
+
+- The oracle shares memveil attach points (one tracepoint,
+  five fentry/fexit hooks), so a blind spot common to both
+  reads exact on both sides. The workload ratios, the byte
+  equality of both sides against block accounting, and the
+  independent oracle byte counter bound that shared risk;
+  they do not remove it.
+- Only the fixed dd workload is compared. Nothing here
+  qualifies other traffic shapes, other devices, or
+  sustained pressure.
+- Correlation quality stays partial (copy and sync events
+  unattributed to mappings); the matrix compares counts
+  and bytes, never pairing.
+- A refused row proves the refusal text and exit only,
+  never collection on that kernel.
+
+Run through the `vm-kernels` lane with a built deb (see
+the boot verification recipe in `docs/support.md`).
+
 ## Fuzz oracle (`tests/fuzz/run.py`)
 
 Replays deterministically mutated seed captures through the
@@ -113,6 +153,7 @@ kernel-semantic oracle.
 | Claim | Oracle |
 |---|---|
 | A capture directory is well formed and its attempts add up | `tools/validate-schemas` |
+| Matrix kernel counts and bytes match the oracle and block layer | kernel matrix oracle |
 | Scripted laboratory counts match independent module facts | owned-DMA ledger |
 | Observed conversions match native transitions | region oracle |
 | Replay never crashes or mis-exits on corrupt input | fuzz oracle |
