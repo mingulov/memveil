@@ -434,6 +434,14 @@ def test_decode_copy_private_pool_on_sync_rejected() raises:
     _expect_cp(bad^, String("PAY_FLAGS"))
 
 
+def test_decode_copy_private_pool_to_device_ok() raises:
+    var d = decode_copy(_cp_raw(2, 35, 1, UInt64(1), UInt64(1), UInt64(8), UInt64(8), 0))
+    assert_true(d.to_device)
+    assert_true(d.known)
+    assert_true(d.private_pool)
+    assert_true(not d.offset_past)
+
+
 def test_decode_copy_reason_layout_shift_unknown_ok() raises:
     var lay = decode_copy(_cp_raw(2, 0, 1, UInt64(1), UInt64(1), UInt64(8), UInt64(0), 5))
     assert_true(not lay.known)
@@ -664,6 +672,7 @@ def run() raises -> Int:
     suite.test[test_decode_copy_offset_past_rejects_early_zero]()
     suite.test[test_decode_copy_private_pool_known_ok]()
     suite.test[test_decode_copy_private_pool_on_sync_rejected]()
+    suite.test[test_decode_copy_private_pool_to_device_ok]()
     suite.test[test_decode_copy_reason_layout_shift_unknown_ok]()
     suite.test[test_decode_copy_reason_seven_rejected]()
     suite.test[test_decode_copy_flag_0x40_rejected]()

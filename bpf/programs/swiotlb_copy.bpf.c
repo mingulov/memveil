@@ -306,8 +306,10 @@ static __always_inline int mv_emit_bounce(struct device___mv *dev,
 {
     struct device_dma_parameters___mv *parms;
     struct io_tlb_slot___mv *slots;
+    struct io_tlb_mem___mv *mem = 0;
     struct mv_effective eff;
     unsigned int mask = 0;
+    bool shared = false;
     __u64 start, end, nsl, idx, orig_addr, alloc_size;
     __u64 effective = 0;
     __u16 wdir = 3;
@@ -379,6 +381,21 @@ static __always_inline int mv_emit_bounce(struct device___mv *dev,
                               ? MV_CP_FLAG_OFFSET_PAST_ALLOC
                               : 0);
                 effective = eff.effective;
+                /* Privacy is a marker, never a verdict: the
+                 * toggle reads false on a private pool, and
+                 * anything unprovable leaves the flag clear. */
+                if (bpf_core_field_exists(dev->dma_io_tlb_mem) &&
+                    bpf_core_field_exists(
+                        ((struct io_tlb_mem___mv *)0)->cc_shared) &&
+                    bpf_core_field_size(
+                        ((struct io_tlb_mem___mv *)0)->cc_shared) == 1 &&
+                    bpf_core_read(&mem, sizeof(mem),
+                                  &dev->dma_io_tlb_mem) == 0 &&
+                    mem != 0 &&
+                    bpf_core_read(&shared, sizeof(shared),
+                                  &mem->cc_shared) == 0 &&
+                    !shared)
+                    flags |= MV_CP_FLAG_PRIVATE_POOL;
             }
         }
     }

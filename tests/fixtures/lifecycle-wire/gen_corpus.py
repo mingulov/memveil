@@ -234,6 +234,12 @@ def build_vectors():
            effective=4096)
     # cp_private_sync
     cp_vec(cp_raw(1, 33, 1, 39, 40, 512, 0, 4), "PAY_FLAGS")
+    # cp_private_to_device
+    cp_vec(cp_raw(2, 35, 1, 49, 50, 2048, 2048, 0), "OK",
+           kind=2, todevice=1, known=1, clamped=0, earlyzero=0,
+           offsetpast=0, privatepool=1,
+           dir=1, reason=0, seq=49, ktime=50, requested=2048,
+           effective=2048)
     # cp_reason_layout
     cp_vec(cp_raw(2, 0, 1, 41, 42, 4096, 0, 5), "OK",
            kind=2, todevice=0, known=0, clamped=0, earlyzero=0,

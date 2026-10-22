@@ -61,29 +61,30 @@
 59 copy PAY_FLAGS
 60 copy OK kind=2 todevice=0 known=1 clamped=0 earlyzero=0 offsetpast=0 privatepool=1 dir=1 reason=0 seq=37 ktime=38 requested=4096 effective=4096
 61 copy PAY_FLAGS
-62 copy OK kind=2 todevice=0 known=0 clamped=0 earlyzero=0 offsetpast=0 privatepool=0 dir=1 reason=5 seq=41 ktime=42 requested=4096 effective=0
-63 copy OK kind=2 todevice=0 known=0 clamped=0 earlyzero=0 offsetpast=0 privatepool=0 dir=2 reason=6 seq=43 ktime=44 requested=4096 effective=0
-64 copy PAY_REASON
-65 copy PAY_FLAGS
-66 copy OK kind=2 todevice=1 known=1 clamped=0 earlyzero=0 offsetpast=0 privatepool=0 dir=1 reason=0 seq=101 ktime=1001 requested=4096 effective=4096
-67 copy OK kind=2 todevice=1 known=1 clamped=0 earlyzero=0 offsetpast=0 privatepool=0 dir=1 reason=0 seq=102 ktime=1002 requested=1024 effective=1024
-68 copy OK kind=2 todevice=1 known=1 clamped=0 earlyzero=0 offsetpast=0 privatepool=0 dir=1 reason=0 seq=111 ktime=1011 requested=4096 effective=4096
-69 lifecycle OK kind=1 ok=0 skip=0 dir=1 seq=112 ktime=1012 size=4096 gen=0
-70 lifecycle OK kind=1 ok=1 skip=0 dir=1 seq=121 ktime=1021 size=4096 gen=41
-71 lifecycle OK kind=2 ok=1 skip=0 dir=1 seq=122 ktime=1022 size=4096 gen=41
-72 lifecycle OK kind=1 ok=1 skip=0 dir=1 seq=123 ktime=1023 size=4096 gen=42
-73 lifecycle OK kind=2 ok=1 skip=0 dir=1 seq=124 ktime=1024 size=4096 gen=42
-74 effective OK effective=0 clamped=0 earlyzero=1 offsetpast=0
-75 effective OK effective=1024 clamped=1 earlyzero=0 offsetpast=0
-76 effective OK effective=1024 clamped=0 earlyzero=0 offsetpast=0
-77 effective OK effective=100 clamped=0 earlyzero=0 offsetpast=0
-78 effective OK effective=0 clamped=1 earlyzero=0 offsetpast=0
-79 effective OK effective=1 clamped=0 earlyzero=0 offsetpast=0
-80 effective OK effective=0 clamped=1 earlyzero=0 offsetpast=0
-81 effective OK effective=8 clamped=0 earlyzero=0 offsetpast=1
-82 effective OK effective=0 clamped=0 earlyzero=0 offsetpast=0
-83 effective OK effective=0 clamped=1 earlyzero=0 offsetpast=0
-84 effective OK effective=80 clamped=1 earlyzero=0 offsetpast=0
-85 effective OK effective=64 clamped=1 earlyzero=0 offsetpast=0
-86 effective OK effective=0 clamped=1 earlyzero=0 offsetpast=0
-87 effective OK effective=1024 clamped=1 earlyzero=0 offsetpast=0
+62 copy OK kind=2 todevice=1 known=1 clamped=0 earlyzero=0 offsetpast=0 privatepool=1 dir=1 reason=0 seq=49 ktime=50 requested=2048 effective=2048
+63 copy OK kind=2 todevice=0 known=0 clamped=0 earlyzero=0 offsetpast=0 privatepool=0 dir=1 reason=5 seq=41 ktime=42 requested=4096 effective=0
+64 copy OK kind=2 todevice=0 known=0 clamped=0 earlyzero=0 offsetpast=0 privatepool=0 dir=2 reason=6 seq=43 ktime=44 requested=4096 effective=0
+65 copy PAY_REASON
+66 copy PAY_FLAGS
+67 copy OK kind=2 todevice=1 known=1 clamped=0 earlyzero=0 offsetpast=0 privatepool=0 dir=1 reason=0 seq=101 ktime=1001 requested=4096 effective=4096
+68 copy OK kind=2 todevice=1 known=1 clamped=0 earlyzero=0 offsetpast=0 privatepool=0 dir=1 reason=0 seq=102 ktime=1002 requested=1024 effective=1024
+69 copy OK kind=2 todevice=1 known=1 clamped=0 earlyzero=0 offsetpast=0 privatepool=0 dir=1 reason=0 seq=111 ktime=1011 requested=4096 effective=4096
+70 lifecycle OK kind=1 ok=0 skip=0 dir=1 seq=112 ktime=1012 size=4096 gen=0
+71 lifecycle OK kind=1 ok=1 skip=0 dir=1 seq=121 ktime=1021 size=4096 gen=41
+72 lifecycle OK kind=2 ok=1 skip=0 dir=1 seq=122 ktime=1022 size=4096 gen=41
+73 lifecycle OK kind=1 ok=1 skip=0 dir=1 seq=123 ktime=1023 size=4096 gen=42
+74 lifecycle OK kind=2 ok=1 skip=0 dir=1 seq=124 ktime=1024 size=4096 gen=42
+75 effective OK effective=0 clamped=0 earlyzero=1 offsetpast=0
+76 effective OK effective=1024 clamped=1 earlyzero=0 offsetpast=0
+77 effective OK effective=1024 clamped=0 earlyzero=0 offsetpast=0
+78 effective OK effective=100 clamped=0 earlyzero=0 offsetpast=0
+79 effective OK effective=0 clamped=1 earlyzero=0 offsetpast=0
+80 effective OK effective=1 clamped=0 earlyzero=0 offsetpast=0
+81 effective OK effective=0 clamped=1 earlyzero=0 offsetpast=0
+82 effective OK effective=8 clamped=0 earlyzero=0 offsetpast=1
+83 effective OK effective=0 clamped=0 earlyzero=0 offsetpast=0
+84 effective OK effective=0 clamped=1 earlyzero=0 offsetpast=0
+85 effective OK effective=80 clamped=1 earlyzero=0 offsetpast=0
+86 effective OK effective=64 clamped=1 earlyzero=0 offsetpast=0
+87 effective OK effective=0 clamped=1 earlyzero=0 offsetpast=0
+88 effective OK effective=1024 clamped=1 earlyzero=0 offsetpast=0

@@ -186,6 +186,28 @@ WANT_LIFECYCLE_ENUM = [
 WANT_COPY = (WANT_COPY_LAYOUT[:4] + WANT_COPY_ENUM
              + WANT_COPY_LAYOUT[4:])
 
+# Privacy records once the helper reads the allocator toggle:
+# the allocator pointer through the device view (existence
+# plus offset, no width guard on the optional path), the
+# toggle through the allocator view (both exists records are
+# optional).
+WANT_COPY_MEMPTR = [
+    _rec("device", "dma_io_tlb_mem", "field_byte_offset", 2),
+    {"type": "device", "member": "dma_io_tlb_mem",
+     "kind": "field_exists", "relocs": 2, "optional": True},
+]
+WANT_COPY_MEM = [
+    _rec("io_tlb_mem", "cc_shared", "field_byte_offset", 2),
+    _rec("io_tlb_mem", "cc_shared", "field_byte_size", 2),
+    {"type": "io_tlb_mem", "member": "cc_shared",
+     "kind": "field_exists", "relocs": 2, "optional": True},
+]
+
+# Sorted order puts the allocator pointer records first and
+# the toggle records ahead of the pool records.
+WANT_COPY = (WANT_COPY_MEMPTR + WANT_COPY[:7] + WANT_COPY_MEM
+             + WANT_COPY[7:])
+
 # An immediate multiply by the 24-byte slot stride, in either
 # objdump spelling.
 _STRIDE_MUL = re.compile(r"^[ \t]*(\d+):\t.*\t[wr][0-9]+ \*= (0x18|24)\s*$")
@@ -221,6 +243,28 @@ def check_no_raw_slot_layout(obj):
     return 0
 
 
+def check_cc_shared_from_mem(records):
+    """Assert the toggle is read off the allocator object.
+
+    The sharing toggle must relocate under io_tlb_mem, never
+    under io_tlb_pool: the pool struct carries no such member
+    on any kernel, and a pool-rooted read would misattribute
+    privacy.
+    """
+    kinds = set()
+    for rec in records:
+        if rec.get("member") != "cc_shared":
+            continue
+        if rec.get("type") != "io_tlb_mem":
+            return fail("cc_shared read off %r, want io_tlb_mem"
+                        % (rec.get("type"),))
+        kinds.add(rec["kind"])
+    if kinds != {"field_byte_offset", "field_byte_size",
+                 "field_exists"}:
+        return fail("cc_shared relocation kinds %r" % (kinds,))
+    return 0
+
+
 def check_copy_layout_contract(root, tool):
     """Assert the copy object's pool/slot/alignment records."""
     obj = os.path.join(root, "build", "bpf",
@@ -241,6 +285,8 @@ def check_copy_layout_contract(root, tool):
         if records != WANT_COPY:
             return fail("copy records differ:\n got %r\nwant %r"
                         % (records, WANT_COPY))
+        if check_cc_shared_from_mem(records) != 0:
+            return 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return check_no_raw_slot_layout(obj)

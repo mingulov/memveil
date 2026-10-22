@@ -28,6 +28,20 @@
     "swiotlb_copy.bpf.o": [
       {
         "type": "device",
+        "member": "dma_io_tlb_mem",
+        "kind": "field_byte_offset",
+        "relocs": 2,
+        "optional": false
+      },
+      {
+        "type": "device",
+        "member": "dma_io_tlb_mem",
+        "kind": "field_exists",
+        "relocs": 2,
+        "optional": true
+      },
+      {
+        "type": "device",
         "member": "dma_parms",
         "kind": "field_byte_offset",
         "relocs": 2,
@@ -74,6 +88,27 @@
         "kind": "enumval_value",
         "relocs": 4,
         "optional": false
+      },
+      {
+        "type": "io_tlb_mem",
+        "member": "cc_shared",
+        "kind": "field_byte_offset",
+        "relocs": 2,
+        "optional": false
+      },
+      {
+        "type": "io_tlb_mem",
+        "member": "cc_shared",
+        "kind": "field_byte_size",
+        "relocs": 2,
+        "optional": false
+      },
+      {
+        "type": "io_tlb_mem",
+        "member": "cc_shared",
+        "kind": "field_exists",
+        "relocs": 2,
+        "optional": true
       },
       {
         "type": "io_tlb_pool",
