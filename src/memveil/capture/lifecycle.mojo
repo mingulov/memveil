@@ -118,6 +118,7 @@ struct EffectiveOut(ImplicitlyCopyable):
     var effective: UInt64
     var clamped: Bool
     var early_zero: Bool
+    var offset_past: Bool
 
 
 def _lc_le16(raw: List[UInt8], off: Int) -> UInt16:
@@ -276,36 +277,47 @@ def decode_copy(raw: List[UInt8]) raises DecodeError -> DecodedCopy:
     return out^
 
 
+def tlb_offset(
+    tlb_addr: UInt64, orig_addr: UInt64, min_align_mask: UInt32
+) -> Int64:
+    """Replicate the hook tlb_offset math for cross-checks.
+
+    Mirrors mv_tlb_offset: both masked terms fit in s32, so
+    the signed difference is exact.
+    """
+    var lo = Int64(tlb_addr & UInt64(2047))
+    var masked = Int64(orig_addr & UInt64(min_align_mask) & UInt64(2047))
+    return lo - masked
+
+
 def effective_bytes(
     size: UInt64, tlb_offset: Int64, alloc_size: UInt64, orig_valid: Bool
 ) -> EffectiveOut:
     """Replicate the swiotlb_bounce length rule for cross-checks.
 
     Mirrors mv_effective_bytes: an invalid slot copies nothing
-    (hook early return); otherwise the request clamps to
-    alloc_size - tlb_offset with the hook's signed offset math
-    (negative offsets are valid and widen the room). Saturates
-    instead of wrapping.
+    (hook early return); otherwise the room is alloc_size -
+    tlb_offset in wrapping u64 arithmetic exactly like the
+    hook's alloc_size -= tlb_offset in size_t, including the
+    wrap when the offset runs past the allocation. A wrapped
+    room above the request copies the full size unchecked and
+    unwarned, and offset_past says so.
     """
     if not orig_valid:
-        return EffectiveOut(UInt64(0), False, True)
+        return EffectiveOut(UInt64(0), False, True, False)
     var room: UInt64
     if tlb_offset < Int64(0):
         # Same formula as mv_effective_bytes, including INT64_MIN:
         # tlb_offset + 1 cannot overflow, so its negation fits and
         # the +1 widening lands exactly at 2**63; no special case.
         var widen = UInt64(-(tlb_offset + 1)) + UInt64(1)
-        if widen > ~UInt64(0) - alloc_size:
-            room = ~UInt64(0)
-        else:
-            room = alloc_size + widen
-    elif UInt64(tlb_offset) >= alloc_size:
-        room = UInt64(0)
+        room = alloc_size + widen
     else:
         room = alloc_size - UInt64(tlb_offset)
+    var past = tlb_offset > Int64(0) and UInt64(tlb_offset) > alloc_size
     if size > room:
-        return EffectiveOut(room, True, False)
-    return EffectiveOut(size, False, False)
+        return EffectiveOut(room, True, False, past)
+    return EffectiveOut(size, False, False, past)
 
 
 struct LifecycleLedger:

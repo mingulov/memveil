@@ -26,6 +26,7 @@
 #define MAX_INPUT 65536
 #define MAX_LINE 4096
 #define EFF_INPUT_LEN 25
+#define U64MAX 0xFFFFFFFFFFFFFFFFULL
 
 static const char *reason_name(enum mv_reason reason)
 {
@@ -120,6 +121,7 @@ struct eff_expectation {
     unsigned long long effective;
     unsigned clamped;
     unsigned earlyzero;
+    unsigned offsetpast;
 };
 
 static uint32_t read_le32_file(FILE *handle, int *ok)
@@ -340,6 +342,10 @@ static int parse_eff_line(char *line, struct eff_expectation *exp)
                     &exp->earlyzero) != 0 ||
         exp->earlyzero > 1)
         return -1;
+    if (parse_u_tok(strtok_r(NULL, " \t\r\n", &save), "offsetpast=",
+                    &exp->offsetpast) != 0 ||
+        exp->offsetpast > 1)
+        return -1;
     if (strtok_r(NULL, " \t\r\n", &save) != NULL)
         return -1;
     return 0;
@@ -480,18 +486,119 @@ static int check_eff_vector(uint32_t idx, const uint8_t *input,
     got = mv_effective_bytes(size, off, alloc, valid);
     if ((unsigned long long)got.effective != exp.effective ||
         got.clamped != exp.clamped ||
-        got.early_zero != exp.earlyzero) {
+        got.early_zero != exp.earlyzero ||
+        got.offset_past != exp.offsetpast) {
         fprintf(stderr, "lifecycle-decode: effective %u mismatch: "
-                "got %llu/%u/%u want %llu/%u/%u\n",
+                "got %llu/%u/%u/%u want %llu/%u/%u/%u\n",
                 idx, (unsigned long long)got.effective,
-                got.clamped, got.early_zero, exp.effective,
-                exp.clamped, exp.earlyzero);
+                got.clamped, got.early_zero, got.offset_past,
+                exp.effective, exp.clamped, exp.earlyzero,
+                exp.offsetpast);
         return 1;
     }
     fprintf(dump, "%u effective OK effective=%llu clamped=%u "
-            "earlyzero=%u\n",
+            "earlyzero=%u offsetpast=%u\n",
             idx, (unsigned long long)got.effective, got.clamped,
-            got.early_zero);
+            got.early_zero, got.offset_past);
+    return 0;
+}
+
+/* Line-for-line transliteration of the swiotlb_bounce length
+ * rule (kernel/dma/swiotlb.c): an int tlb_offset, then
+ * alloc_size -= tlb_offset with size_t wrap, then the request
+ * clamps only when above the room. Independent oracle for
+ * mv_effective_bytes. */
+static __u64 kernel_bounce_len(__u64 tlb_addr, __u64 orig, __u32 mask,
+                              __u64 alloc, __u64 size, int *clamped)
+{
+    int tlb_offset;
+    size_t room;
+
+    tlb_offset = (int)(tlb_addr & 2047u) -
+                 (int)(orig & mask & 2047u);
+    room = (size_t)alloc;
+    room -= tlb_offset;
+    if ((size_t)size > room) {
+        *clamped = 1;
+        return (__u64)room;
+    }
+    *clamped = 0;
+    return size;
+}
+
+/* Sweep the replicated rule against the transliteration over
+ * tlb/orig low bits, align masks, allocations, and sizes. */
+static int check_kernel_bounce_sweep(void)
+{
+    static const __u64 tlb_lo[] = { 0, 1, 0x1ff, 0x200, 0x7ff };
+    static const __u64 orig_lo[] = { 0, 1, 0x1ff, 0x200, 0x7ff };
+    static const __u32 masks[] = { 0, 0x1ff, 0x7ff, 0xfff };
+    static const __u64 allocs[] = { 0, 1, 8, 0x800, 0x40000 };
+    static const __u64 sizes[] = { 0, 1, 8, 9, 0x800, 0x40000,
+                                   U64MAX };
+    unsigned long past = 0, neg = 0, total = 0;
+    size_t i, j, k, l, m;
+
+    _Static_assert(sizeof(size_t) == 8, "transliteration width");
+    for (i = 0; i < sizeof(tlb_lo) / sizeof(tlb_lo[0]); i++) {
+        for (j = 0; j < sizeof(orig_lo) / sizeof(orig_lo[0]); j++) {
+            for (k = 0; k < sizeof(masks) / sizeof(masks[0]); k++) {
+                __u64 tlb_addr = 0x1000000ULL | tlb_lo[i];
+                __u64 orig = 0x2000000ULL | orig_lo[j];
+                __s32 off =
+                    mv_tlb_offset(tlb_addr, orig, masks[k]);
+
+                for (l = 0; l < sizeof(allocs) / sizeof(allocs[0]);
+                     l++) {
+                    for (m = 0; m < sizeof(sizes) / sizeof(sizes[0]);
+                         m++) {
+                        struct mv_effective got;
+                        int want_clamped, want_past;
+                        __u64 want;
+
+                        want = kernel_bounce_len(tlb_addr, orig,
+                                                 masks[k], allocs[l],
+                                                 sizes[m],
+                                                 &want_clamped);
+                        got = mv_effective_bytes(sizes[m], off,
+                                                 allocs[l], 1);
+                        want_past =
+                            off > 0 && (__u64)off > allocs[l];
+                        if (off < 0)
+                            neg++;
+                        if (want_past)
+                            past++;
+                        total++;
+                        if (got.effective != want ||
+                            got.clamped != want_clamped ||
+                            got.early_zero != 0 ||
+                            got.offset_past != want_past) {
+                            fprintf(stderr,
+                                    "lifecycle-decode: sweep "
+                                    "tlb=%llx orig=%llx mask=%x "
+                                    "alloc=%llu size=%llu: got "
+                                    "%llu/%u/%u want %llu/%u\n",
+                                    (unsigned long long)tlb_addr,
+                                    (unsigned long long)orig,
+                                    masks[k],
+                                    (unsigned long long)allocs[l],
+                                    (unsigned long long)sizes[m],
+                                    (unsigned long long)got.effective,
+                                    got.clamped, got.offset_past,
+                                    (unsigned long long)want,
+                                    want_clamped);
+                            return 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    printf("lifecycle-decode: bounce sweep %lu cases, %lu negative, "
+           "%lu past\n",
+           total, neg, past);
+    if (past == 0 || neg == 0)
+        return fail("sweep never hit past/negative offsets");
     return 0;
 }
 
@@ -531,6 +638,8 @@ int main(int argc, char **argv)
     int ok = 1;
 
     if (check_wire_vocab() != 0)
+        return 1;
+    if (check_kernel_bounce_sweep() != 0)
         return 1;
     if (argc != 4) {
         fprintf(stderr, "usage: %s corpus.bin corpus.txt out.dump\n",

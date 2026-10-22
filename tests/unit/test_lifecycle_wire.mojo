@@ -28,6 +28,7 @@ from memveil.capture.lifecycle import (
     decode_copy,
     decode_lifecycle,
     effective_bytes,
+    tlb_offset,
 )
 from memveil.capture.normalize import DecodeError
 
@@ -527,9 +528,61 @@ def test_effective_int64_min() raises:
 
 
 def test_effective_negative_saturation() raises:
+    # Kernel swiotlb_bounce runs alloc_size -= tlb_offset in
+    # size_t arithmetic: U64MAX + 1 wraps to a zero room, so a
+    # full-size request clamps to nothing instead of saturating.
     var e = effective_bytes(~UInt64(0), Int64(-1), ~UInt64(0), True)
-    assert_equal(e.effective, ~UInt64(0))
+    assert_equal(e.effective, UInt64(0))
+    assert_true(e.clamped)
+    assert_true(not e.early_zero)
+    assert_true(not e.offset_past)
+
+
+def test_effective_offset_negative() raises:
+    var e = effective_bytes(UInt64(100), Int64(-16), UInt64(64), True)
+    assert_equal(e.effective, UInt64(80))
+    assert_true(e.clamped)
+    assert_true(not e.early_zero)
+    assert_true(not e.offset_past)
+
+
+def test_effective_offset_zero() raises:
+    var e = effective_bytes(UInt64(100), Int64(0), UInt64(64), True)
+    assert_equal(e.effective, UInt64(64))
+    assert_true(e.clamped)
+    assert_true(not e.early_zero)
+    assert_true(not e.offset_past)
+
+
+def test_effective_offset_equals_alloc() raises:
+    var e = effective_bytes(UInt64(8), Int64(64), UInt64(64), True)
+    assert_equal(e.effective, UInt64(0))
+    assert_true(e.clamped)
+    assert_true(not e.early_zero)
+    assert_true(not e.offset_past)
+
+
+def test_effective_offset_past_alloc() raises:
+    var e = effective_bytes(UInt64(8), Int64(9), UInt64(8), True)
+    assert_equal(e.effective, UInt64(8))
     assert_true(not e.clamped)
+    assert_true(not e.early_zero)
+    assert_true(e.offset_past)
+
+
+def test_effective_size_over_room() raises:
+    var e = effective_bytes(UInt64(4096), Int64(0), UInt64(1024), True)
+    assert_equal(e.effective, UInt64(1024))
+    assert_true(e.clamped)
+    assert_true(not e.early_zero)
+    assert_true(not e.offset_past)
+
+
+def test_tlb_offset_mask() raises:
+    var off = tlb_offset(UInt64(0x1200), UInt64(0x31FF), UInt32(0xFFF))
+    assert_equal(off, Int64(1))
+    off = tlb_offset(UInt64(0x1200), UInt64(0x31FF), UInt32(0))
+    assert_equal(off, Int64(0x200))
 
 
 def test_copy_bytes_overflow_raises() raises:
@@ -620,6 +673,12 @@ def run() raises -> Int:
     suite.test[test_large_values_stay_exact]()
     suite.test[test_effective_int64_min]()
     suite.test[test_effective_negative_saturation]()
+    suite.test[test_effective_offset_negative]()
+    suite.test[test_effective_offset_zero]()
+    suite.test[test_effective_offset_equals_alloc]()
+    suite.test[test_effective_offset_past_alloc]()
+    suite.test[test_effective_size_over_room]()
+    suite.test[test_tlb_offset_mask]()
     suite.test[test_copy_bytes_overflow_raises]()
     suite.test[test_map_bytes_overflow_raises]()
     suite.test[test_unmap_bytes_overflow_raises]()

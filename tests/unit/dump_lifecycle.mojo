@@ -248,6 +248,8 @@ def _ok_eff_line(idx: Int, e: EffectiveOut) -> String:
         + _flag(e.clamped)
         + " earlyzero="
         + _flag(e.early_zero)
+        + " offsetpast="
+        + _flag(e.offset_past)
         + "\n"
     )
 
@@ -392,8 +394,8 @@ def _check_eff_ok_fields(
 ) raises DumpError:
     """Compare one effective OK line against the computed rule."""
     var where = String(idx)
-    if len(toks) != 6:
-        raise DumpError("vector " + where + ": want 3 eff fields")
+    if len(toks) != 7:
+        raise DumpError("vector " + where + ": want 4 eff fields")
     if not has_prefix(toks[3], String("effective=")):
         raise DumpError("vector " + where + ": want effective=")
     if _parse_u64_here(
@@ -408,6 +410,10 @@ def _check_eff_ok_fields(
         strip_prefix(toks[5], String("earlyzero=")), "earlyzero"
     ) != e.early_zero:
         raise DumpError("vector " + where + ": earlyzero mismatch")
+    if _parse_bit_here(
+        strip_prefix(toks[6], String("offsetpast=")), "offsetpast"
+    ) != e.offset_past:
+        raise DumpError("vector " + where + ": offsetpast mismatch")
 
 
 def run(

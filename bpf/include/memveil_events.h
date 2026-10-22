@@ -34,6 +34,7 @@ typedef uint8_t __u8;
 typedef uint16_t __u16;
 typedef uint32_t __u32;
 typedef uint64_t __u64;
+typedef int32_t __s32;
 typedef int64_t __s64;
 #endif
 
@@ -411,15 +412,27 @@ struct mv_copy {
     __u64 effective;
 };
 
+/* Hook tlb_offset math: both masked terms fit in s32, so
+ * the signed difference is exact. */
+static __inline __s32 mv_tlb_offset(__u64 tlb_addr, __u64 orig_addr,
+                                   __u32 min_align_mask)
+{
+    return (__s32)(tlb_addr & 2047u) -
+           (__s32)(orig_addr & min_align_mask & 2047u);
+}
+
 /* Replicated swiotlb_bounce length rule: an invalid slot
- * copies nothing (hook early return); otherwise the request
- * is clamped to alloc_size - tlb_offset with the hook's
- * signed offset math (negative offsets are valid and widen
- * the room). Saturates instead of wrapping. */
+ * copies nothing (hook early return); otherwise the room is
+ * alloc_size - tlb_offset in u64 arithmetic exactly like the
+ * hook's alloc_size -= tlb_offset in size_t, including the
+ * wrap when the offset runs past the allocation. A wrapped
+ * room above the request copies the full size unchecked and
+ * unwarned, and offset_past says so. */
 struct mv_effective {
     __u64 effective;
     __u8 clamped;
     __u8 early_zero;
+    __u8 offset_past;
 };
 
 static __inline struct mv_effective mv_effective_bytes(__u64 size,
@@ -433,28 +446,20 @@ static __inline struct mv_effective mv_effective_bytes(__u64 size,
     out.effective = 0;
     out.clamped = 0;
     out.early_zero = 0;
+    out.offset_past = 0;
     if (!orig_valid) {
         out.early_zero = 1;
         return out;
     }
-    if (tlb_offset < 0) {
-        __u64 widen = (__u64)(-(tlb_offset + 1)) + (__u64)1;
-
-        if (widen > 0xFFFFFFFFFFFFFFFFULL - alloc_size)
-            room = 0xFFFFFFFFFFFFFFFFULL;
-        else
-            room = alloc_size + widen;
-    } else if ((__u64)tlb_offset >= alloc_size) {
-        room = 0;
-    } else {
-        room = alloc_size - (__u64)tlb_offset;
-    }
+    room = alloc_size - (__u64)tlb_offset;
     if (size > room) {
         out.effective = room;
         out.clamped = 1;
     } else {
         out.effective = size;
     }
+    if (tlb_offset > 0 && (__u64)tlb_offset > alloc_size)
+        out.offset_past = 1;
     return out;
 }
 

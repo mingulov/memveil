@@ -73,13 +73,17 @@
 71 lifecycle OK kind=2 ok=1 skip=0 dir=1 seq=122 ktime=1022 size=4096 gen=41
 72 lifecycle OK kind=1 ok=1 skip=0 dir=1 seq=123 ktime=1023 size=4096 gen=42
 73 lifecycle OK kind=2 ok=1 skip=0 dir=1 seq=124 ktime=1024 size=4096 gen=42
-74 effective OK effective=0 clamped=0 earlyzero=1
-75 effective OK effective=1024 clamped=1 earlyzero=0
-76 effective OK effective=1024 clamped=0 earlyzero=0
-77 effective OK effective=100 clamped=0 earlyzero=0
-78 effective OK effective=0 clamped=1 earlyzero=0
-79 effective OK effective=1 clamped=0 earlyzero=0
-80 effective OK effective=18446744073709551615 clamped=0 earlyzero=0
-81 effective OK effective=0 clamped=1 earlyzero=0
-82 effective OK effective=0 clamped=0 earlyzero=0
-83 effective OK effective=0 clamped=1 earlyzero=0
+74 effective OK effective=0 clamped=0 earlyzero=1 offsetpast=0
+75 effective OK effective=1024 clamped=1 earlyzero=0 offsetpast=0
+76 effective OK effective=1024 clamped=0 earlyzero=0 offsetpast=0
+77 effective OK effective=100 clamped=0 earlyzero=0 offsetpast=0
+78 effective OK effective=0 clamped=1 earlyzero=0 offsetpast=0
+79 effective OK effective=1 clamped=0 earlyzero=0 offsetpast=0
+80 effective OK effective=0 clamped=1 earlyzero=0 offsetpast=0
+81 effective OK effective=8 clamped=0 earlyzero=0 offsetpast=1
+82 effective OK effective=0 clamped=0 earlyzero=0 offsetpast=0
+83 effective OK effective=0 clamped=1 earlyzero=0 offsetpast=0
+84 effective OK effective=80 clamped=1 earlyzero=0 offsetpast=0
+85 effective OK effective=64 clamped=1 earlyzero=0 offsetpast=0
+86 effective OK effective=0 clamped=1 earlyzero=0 offsetpast=0
+87 effective OK effective=1024 clamped=1 earlyzero=0 offsetpast=0

@@ -13,7 +13,7 @@ copy OK fields: kind=N todevice=N known=N clamped=N earlyzero=N
     offsetpast=N privatepool=N dir=N reason=N seq=N ktime=N
     requested=N effective=N (MVCP stays v1, 48 bytes)
 effective vectors always carry verdict OK with fields:
-    effective=N clamped=N earlyzero=N
+    effective=N clamped=N earlyzero=N offsetpast=N
 
 The bin record for kind effective is 25 bytes: u64 size, i64
 tlb_offset, u64 alloc_size, u8 orig_valid. Verdicts are the shared
@@ -288,25 +288,33 @@ def build_vectors():
 
     # --- effective-rule vectors: (size, off, alloc, valid) -> out ---
     eff_vec(eff_raw(4096, 0, 4096, 0),
-            effective=0, clamped=0, earlyzero=1)
+            effective=0, clamped=0, earlyzero=1, offsetpast=0)
     eff_vec(eff_raw(4096, 3072, 4096, 1),
-            effective=1024, clamped=1, earlyzero=0)
+            effective=1024, clamped=1, earlyzero=0, offsetpast=0)
     eff_vec(eff_raw(1024, 0, 4096, 1),
-            effective=1024, clamped=0, earlyzero=0)
+            effective=1024, clamped=0, earlyzero=0, offsetpast=0)
     eff_vec(eff_raw(100, -50, 100, 1),
-            effective=100, clamped=0, earlyzero=0)
+            effective=100, clamped=0, earlyzero=0, offsetpast=0)
     eff_vec(eff_raw(4096, 4096, 4096, 1),
-            effective=0, clamped=1, earlyzero=0)
+            effective=0, clamped=1, earlyzero=0, offsetpast=0)
     eff_vec(eff_raw(1, I64MIN, 0, 1),
-            effective=1, clamped=0, earlyzero=0)
+            effective=1, clamped=0, earlyzero=0, offsetpast=0)
     eff_vec(eff_raw(U64MAX, -1, U64MAX, 1),
-            effective=U64MAX, clamped=0, earlyzero=0)
+            effective=0, clamped=1, earlyzero=0, offsetpast=0)
     eff_vec(eff_raw(8, 9, 8, 1),
-            effective=0, clamped=1, earlyzero=0)
+            effective=8, clamped=0, earlyzero=0, offsetpast=1)
     eff_vec(eff_raw(0, 0, 0, 1),
-            effective=0, clamped=0, earlyzero=0)
+            effective=0, clamped=0, earlyzero=0, offsetpast=0)
     eff_vec(eff_raw(7, 0, 0, 1),
-            effective=0, clamped=1, earlyzero=0)
+            effective=0, clamped=1, earlyzero=0, offsetpast=0)
+    eff_vec(eff_raw(100, -16, 64, 1),
+            effective=80, clamped=1, earlyzero=0, offsetpast=0)
+    eff_vec(eff_raw(100, 0, 64, 1),
+            effective=64, clamped=1, earlyzero=0, offsetpast=0)
+    eff_vec(eff_raw(8, 64, 64, 1),
+            effective=0, clamped=1, earlyzero=0, offsetpast=0)
+    eff_vec(eff_raw(4096, 0, 1024, 1),
+            effective=1024, clamped=1, earlyzero=0, offsetpast=0)
     return vecs
 
 
@@ -315,7 +323,7 @@ LC_FIELDS = ("kind", "ok", "skip", "dir", "seq", "ktime", "size",
 CP_FIELDS = ("kind", "todevice", "known", "clamped", "earlyzero",
              "offsetpast", "privatepool", "dir", "reason", "seq",
              "ktime", "requested", "effective")
-EFF_FIELDS = ("effective", "clamped", "earlyzero")
+EFF_FIELDS = ("effective", "clamped", "earlyzero", "offsetpast")
 
 
 def render_txt(vecs):
