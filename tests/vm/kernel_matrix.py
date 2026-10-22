@@ -1231,7 +1231,8 @@ def assert_redacted(text):
 
 REDACT_SKIP_FILES = ("artifacts.json", "progs0.json",
                      "progs1.json", "progs2.json",
-                     "progs3.json", "report.json")
+                     "progs3.json", "report.json",
+                     "configid.txt")
 
 
 def scan_export_redaction(export):

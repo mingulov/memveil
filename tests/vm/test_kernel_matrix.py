@@ -2850,6 +2850,7 @@ def test_scan_export_redaction_skips_digest_files(tmp_path):
         '[{"name": "x", "tag": "0612e9d9bb56f065"}]\n')
     (tmp_path / "report.json").write_text('{"a": "%s"}\n'
                                           % ("c" * 64))
+    (tmp_path / "configid.txt").write_text("%s\n" % ("d" * 64))
     assert km.scan_export_redaction(str(tmp_path)) is None
 
 
