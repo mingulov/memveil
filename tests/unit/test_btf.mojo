@@ -11,6 +11,8 @@ from memveil.platform.btf import (
     read_btf_maps,
     read_btf_maps_ring,
     read_btf_member,
+    resolve_btf_enumerator,
+    resolve_btf_member,
 )
 from memveil.platform.narrow import verify_object_program
 from memveil.platform.reader import read_host_file
@@ -406,6 +408,126 @@ def test_btf_copy_fallback_declared() raises:
     assert_true(x.ok)
 
 
+def test_member_anon_offsets() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/members.bin"))
+    var c = resolve_btf_member(
+        Span(raw), String("mvt_anon"), String("c")
+    )
+    assert_true(c.ok)
+    assert_true(c.found)
+    assert_equal(c.bit_offset, 128)
+    assert_equal(c.bit_size, 64)
+    assert_equal(c.kind, String("int"))
+    var m = resolve_btf_member(
+        Span(raw), String("mvt_anon"), String("mapping")
+    )
+    assert_true(m.ok)
+    assert_equal(m.bit_offset, 192)
+    assert_equal(m.bit_size, 64)
+    assert_equal(m.kind, String("ptr"))
+    var d = resolve_btf_member(
+        Span(raw), String("mvt_anon"), String("d")
+    )
+    assert_true(d.ok)
+    assert_true(d.found)
+    assert_equal(d.bit_offset, 64)
+
+
+def test_member_real_shapes() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/members.bin"))
+    var f = resolve_btf_member(
+        Span(raw), String("mvt_dev"), String("offline_disabled")
+    )
+    assert_true(f.ok)
+    assert_true(f.found)
+    assert_true(f.bitfield)
+    assert_equal(f.bit_offset, 6112)
+    assert_equal(f.bit_size, 1)
+    var o = resolve_btf_member(
+        Span(raw), String("mvt_dev_old"), String("offline_disabled")
+    )
+    assert_true(o.ok)
+    assert_true(o.found)
+    assert_true(o.bitfield)
+    var p = resolve_btf_member(
+        Span(raw), String("mvt_tag"), String("p")
+    )
+    assert_true(p.ok)
+    assert_equal(p.kind, String("ptr"))
+    assert_equal(p.bit_size, 64)
+    var q = resolve_btf_member(
+        Span(raw), String("mvt_tag"), String("q")
+    )
+    assert_true(q.ok)
+    assert_equal(q.kind, String("int"))
+    assert_equal(q.bit_size, 64)
+    var n = resolve_btf_member(
+        Span(raw), String("mvt_tag"), String("name")
+    )
+    assert_true(n.ok)
+    assert_equal(n.kind, String("array"))
+    assert_equal(n.bit_size, 128)
+    var e = resolve_btf_enumerator(
+        Span(raw), String("mvt_e64"), String("MVT_BIG")
+    )
+    assert_true(e.ok)
+    assert_true(e.found)
+    assert_equal(e.kind, String("enum"))
+    assert_equal(e.bit_size, 64)
+
+
+def test_member_duplicates() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/members.bin"))
+    var c = resolve_btf_member(
+        Span(raw), String("mvt_console"), String("flags")
+    )
+    assert_true(c.ok)
+    assert_true(c.found)
+    assert_equal(c.bit_offset, 64)
+    var d = resolve_btf_member(
+        Span(raw), String("mvt_dup"), String("flags")
+    )
+    assert_true(not d.ok)
+    assert_true(d.ambiguous)
+    assert_equal(
+        d.message,
+        String("struct mvt_dup: 2 definitions disagree on flags"),
+    )
+    var e = resolve_btf_member(
+        Span(raw), String("mvt_partial"), String("extra")
+    )
+    assert_true(e.ok)
+    assert_true(e.found)
+    assert_equal(e.bit_offset, 96)
+
+
+def test_member_absent() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/members.bin"))
+    var m = resolve_btf_member(
+        Span(raw), String("mvt_anon"), String("nope")
+    )
+    assert_true(m.ok)
+    assert_true(m.struct_found)
+    assert_true(not m.found)
+    var s = resolve_btf_member(
+        Span(raw), String("mvt_none"), String("a")
+    )
+    assert_true(s.ok)
+    assert_true(not s.struct_found)
+
+
+def test_member_legacy_refuses_bitfield() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/members.bin"))
+    var v = read_btf_member(
+        Span(raw), String("mvt_dev"), String("offline_disabled")
+    )
+    assert_true(not v.ok)
+    assert_equal(
+        v.message,
+        String("bitfield member mvt_dev.offline_disabled unsupported"),
+    )
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_btf_ok]()
@@ -448,6 +570,11 @@ def run() raises -> Int:
     suite.test[test_btf_member_device]()
     suite.test[test_btf_member_not_found]()
     suite.test[test_btf_copy_fallback_declared]()
+    suite.test[test_member_anon_offsets]()
+    suite.test[test_member_real_shapes]()
+    suite.test[test_member_duplicates]()
+    suite.test[test_member_absent]()
+    suite.test[test_member_legacy_refuses_bitfield]()
     suite^.run()
     return 0
 

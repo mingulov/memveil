@@ -1081,6 +1081,12 @@ def read_btf_member(
             t"member {field_name} not found in {struct_name}"
         )
         return out^
+    var pos = _member_pos(member_off, walk.kflags[found])
+    if pos.bitfield_size != 0:
+        out.message = String(
+            t"bitfield member {struct_name}.{field_name} unsupported"
+        )
+        return out^
     var size_bytes = -1
     var cur = member_tid
     for _ in range(_MAX_SPELL_DEPTH):
@@ -1093,6 +1099,12 @@ def read_btf_member(
             break
         if kind == 1:
             size_bytes = walk.sizes[cur - 1]
+            var enc = _u32(data, walk.offsets[cur - 1] + 12) & 0xFF
+            if enc != size_bytes * 8 or pos.bit_offset % 8 != 0:
+                out.message = String(
+                    t"bitfield member {struct_name}.{field_name} unsupported"
+                )
+                return out^
             break
         if (
             kind != 8
@@ -1109,6 +1121,469 @@ def read_btf_member(
         return out^
     out.ok = True
     out.message = String("")
-    out.bit_offset = member_off
+    out.bit_offset = pos.bit_offset
     out.bit_size = size_bytes * 8
+    return out^
+
+
+struct _MemberPos(ImplicitlyCopyable):
+    """One decoded member offset word."""
+
+    var bit_offset: Int
+    var bitfield_size: Int
+
+    def __init__(out self):
+        self.bit_offset = 0
+        self.bitfield_size = 0
+
+
+def _member_pos(word: Int, kflag: Int) -> _MemberPos:
+    """Split one member offset word by its struct kind_flag.
+
+    Flagged structs pack the bitfield size into the top
+    byte and the bit offset into the low 24 bits; plain
+    structs hold the bit offset alone.
+    """
+    var out = _MemberPos()
+    if kflag != 0:
+        out.bit_offset = word & 0xFFFFFF
+        out.bitfield_size = (word >> 24) & 0xFF
+    else:
+        out.bit_offset = word
+        out.bitfield_size = 0
+    return out^
+
+
+struct _TypeBits(ImplicitlyCopyable):
+    """One resolved member type: kind word plus bit width."""
+
+    var ok: Bool
+    var message: String
+    var kind: String
+    var bits: Int
+    var is_int: Bool
+    var int_bits: Int
+    var int_size: Int
+
+    def __init__(out self):
+        self.ok = False
+        self.message = String("")
+        self.kind = String("")
+        self.bits = 0
+        self.is_int = False
+        self.int_bits = 0
+        self.int_size = 0
+
+
+def _type_bits(
+    walk: _BtfWalk, data: Span[UInt8, _], tid: Int, budget: Int
+) -> _TypeBits:
+    """Resolve one member type id to a kind word and bit width.
+
+    Typedefs, modifiers, and tags resolve silently within
+    the hop budget; anything else spells by its own kind.
+    """
+    var out = _TypeBits()
+    var cur = tid
+    var left = budget
+    while True:
+        if left <= 0:
+            out.message = String("type chain too long")
+            return out^
+        left -= 1
+        if not walk.rec_valid(cur):
+            out.message = String("type id out of range")
+            return out^
+        var kind = walk.kinds[cur - 1]
+        if (
+            kind == 8
+            or kind == 9
+            or kind == 10
+            or kind == 11
+            or kind == 18
+        ):
+            cur = walk.sizes[cur - 1]
+            continue
+        if kind == 2:
+            out.ok = True
+            out.kind = String("ptr")
+            out.bits = 64
+            return out^
+        if kind == 1 or kind == 16:
+            out.ok = True
+            out.is_int = kind == 1
+            out.int_size = walk.sizes[cur - 1]
+            out.bits = walk.sizes[cur - 1] * 8
+            if kind == 1:
+                out.kind = String("int")
+                var enc = _u32(data, walk.offsets[cur - 1] + 12)
+                out.int_bits = enc & 0xFF
+            else:
+                out.kind = String("float")
+                out.int_bits = out.bits
+            return out^
+        if kind == 3:
+            var base = walk.offsets[cur - 1]
+            var elem = _u32(data, base + 12)
+            var count = _u32(data, base + 20)
+            var sub = _type_bits(walk, data, elem, left)
+            if not sub.ok:
+                return sub^
+            out.ok = True
+            out.kind = String("array")
+            out.bits = count * sub.bits
+            return out^
+        if kind == 4 or kind == 5 or kind == 6 or kind == 19:
+            out.ok = True
+            if kind == 4:
+                out.kind = String("struct")
+            elif kind == 5:
+                out.kind = String("union")
+            else:
+                out.kind = String("enum")
+            out.bits = walk.sizes[cur - 1] * 8
+            return out^
+        if kind == 7:
+            out.message = String("member type is a forward declaration")
+            return out^
+        out.message = String(t"unsupported member type kind {kind}")
+        return out^
+
+
+struct _MemberHit(ImplicitlyCopyable):
+    """One member search outcome inside a single struct."""
+
+    var found: Bool
+    var failed: Bool
+    var message: String
+    var bit_offset: Int
+    var member_tid: Int
+    var bitfield_size: Int
+
+    def __init__(out self):
+        self.found = False
+        self.failed = False
+        self.message = String("")
+        self.bit_offset = 0
+        self.member_tid = 0
+        self.bitfield_size = 0
+
+
+def _find_member(
+    walk: _BtfWalk,
+    data: Span[UInt8, _],
+    rec: Int,
+    field: String,
+    acc: Int,
+    depth: Int,
+) -> _MemberHit:
+    """Depth-first member search through anonymous members.
+
+    Anonymous STRUCT/UNION members recurse with
+    accumulated offsets; any other empty-named member is
+    skipped, never descended into.
+    """
+    var out = _MemberHit()
+    if depth > _MAX_SPELL_DEPTH:
+        out.failed = True
+        out.message = String("type graph too deep")
+        return out^
+    var base = walk.offsets[rec]
+    var kflag = walk.kflags[rec]
+    for m in range(walk.vlens[rec]):
+        var name_off = _u32(data, base + 12 + m * 12)
+        var tid = _u32(data, base + 12 + m * 12 + 4)
+        var word = _u32(data, base + 12 + m * 12 + 8)
+        var pos = _member_pos(word, kflag)
+        if name_off == 0:
+            if walk.rec_valid(tid):
+                var mkind = walk.kinds[tid - 1]
+                if mkind == 4 or mkind == 5:
+                    var sub = _find_member(
+                        walk,
+                        data,
+                        tid - 1,
+                        field,
+                        acc + pos.bit_offset,
+                        depth + 1,
+                    )
+                    if sub.found or sub.failed:
+                        return sub^
+            continue
+        var text = String("")
+        if not _table_text(
+            data, walk.str_base, walk.str_end, name_off, text
+        ):
+            out.failed = True
+            out.message = String("BTF strings corrupt")
+            return out^
+        if text == field:
+            out.found = True
+            out.bit_offset = acc + pos.bit_offset
+            out.member_tid = tid
+            out.bitfield_size = pos.bitfield_size
+            return out^
+    return out^
+
+
+struct BtfResolved(Copyable, Movable):
+    """One BTF member, type, or enumerator resolution."""
+
+    var ok: Bool
+    var struct_found: Bool
+    var found: Bool
+    var ambiguous: Bool
+    var bitfield: Bool
+    var bit_offset: Int
+    var bit_size: Int
+    var kind: String
+    var message: String
+
+    def __init__(out self):
+        self.ok = False
+        self.struct_found = False
+        self.found = False
+        self.ambiguous = False
+        self.bitfield = False
+        self.bit_offset = 0
+        self.bit_size = 0
+        self.kind = String("")
+        self.message = String("")
+
+
+def _refuse_resolved(message: String) -> BtfResolved:
+    var out = BtfResolved()
+    out.message = message
+    return out^
+
+
+def resolve_btf_member(
+    data: Span[UInt8, _], struct_name: String, field: String
+) -> BtfResolved:
+    """Resolve STRUCT/UNION struct_name's member field in raw BTF.
+
+    Every same-named struct or union is a candidate; the
+    search descends into anonymous members and candidates
+    lacking the member are ignored. Candidates holding it
+    must agree on offset, size, kind, and bitfield state.
+    """
+    var walk = _walk_btf(data, 0, len(data))
+    if not walk.ok:
+        return _refuse_resolved(walk.message.copy())
+    var cands = List[Int]()
+    for i in range(len(walk.offsets)):
+        if walk.kinds[i] != 4 and walk.kinds[i] != 5:
+            continue
+        var text = String("")
+        if not walk.type_name(data, i, text):
+            return _refuse_resolved(String("BTF strings corrupt"))
+        if text == struct_name:
+            cands.append(i)
+    var out = BtfResolved()
+    if len(cands) == 0:
+        out.ok = True
+        return out^
+    out.struct_found = True
+    var offs = List[Int]()
+    var sizes = List[Int]()
+    var kinds = List[String]()
+    var bfs = List[Bool]()
+    for c in range(len(cands)):
+        var hit = _find_member(
+            walk, data, cands[c], field, 0, 0
+        )
+        if hit.failed:
+            return _refuse_resolved(hit.message.copy())
+        if not hit.found:
+            continue
+        var tb = _type_bits(
+            walk, data, hit.member_tid, _MAX_SPELL_DEPTH
+        )
+        if not tb.ok:
+            return _refuse_resolved(tb.message.copy())
+        var is_bf = hit.bitfield_size != 0
+        var bsize = tb.bits
+        if is_bf:
+            bsize = hit.bitfield_size
+        elif tb.is_int and (
+            tb.int_bits != tb.int_size * 8 or hit.bit_offset % 8 != 0
+        ):
+            is_bf = True
+            bsize = tb.int_bits
+        offs.append(hit.bit_offset)
+        sizes.append(bsize)
+        kinds.append(tb.kind.copy())
+        bfs.append(is_bf)
+    if len(offs) == 0:
+        out.ok = True
+        return out^
+    for h in range(1, len(offs)):
+        if (
+            offs[h] != offs[0]
+            or sizes[h] != sizes[0]
+            or kinds[h] != kinds[0]
+            or bfs[h] != bfs[0]
+        ):
+            out.ambiguous = True
+            var ndefs = len(offs)
+            var dtext = String(" definitions disagree on ")
+            out.message = String(t"struct {struct_name}: {ndefs}")
+            out.message += dtext + field
+            return out^
+    out.ok = True
+    out.found = True
+    out.bitfield = bfs[0]
+    out.bit_offset = offs[0]
+    out.bit_size = sizes[0]
+    out.kind = kinds[0].copy()
+    out.message = String("")
+    return out^
+
+
+def resolve_btf_type(
+    data: Span[UInt8, _], name: String, kind: String
+) -> BtfResolved:
+    """Resolve one named STRUCT, UNION, ENUM, or TYPEDEF.
+
+    Same-named candidates must agree on kind and size;
+    typedefs resolve through to their terminal kind.
+    """
+    var want_struct = kind == String("struct")
+    var want_union = kind == String("union")
+    var want_enum = kind == String("enum")
+    var want_typedef = kind == String("typedef")
+    if (
+        not want_struct
+        and not want_union
+        and not want_enum
+        and not want_typedef
+    ):
+        return _refuse_resolved(String(t"unknown type kind {kind}"))
+    var walk = _walk_btf(data, 0, len(data))
+    if not walk.ok:
+        return _refuse_resolved(walk.message.copy())
+    var cands = List[Int]()
+    for i in range(len(walk.offsets)):
+        var k = walk.kinds[i]
+        var match = False
+        if want_struct and k == 4:
+            match = True
+        if want_union and k == 5:
+            match = True
+        if want_enum and (k == 6 or k == 19):
+            match = True
+        if want_typedef and k == 8:
+            match = True
+        if not match:
+            continue
+        var text = String("")
+        if not walk.type_name(data, i, text):
+            return _refuse_resolved(String("BTF strings corrupt"))
+        if text == name:
+            cands.append(i)
+    var out = BtfResolved()
+    if len(cands) == 0:
+        out.ok = True
+        return out^
+    out.struct_found = True
+    var sizes = List[Int]()
+    var kinds = List[String]()
+    for c in range(len(cands)):
+        var rec = cands[c]
+        var k = walk.kinds[rec]
+        if k == 4:
+            sizes.append(walk.sizes[rec] * 8)
+            kinds.append(String("struct"))
+        elif k == 5:
+            sizes.append(walk.sizes[rec] * 8)
+            kinds.append(String("union"))
+        elif k == 6 or k == 19:
+            sizes.append(walk.sizes[rec] * 8)
+            kinds.append(String("enum"))
+        else:
+            var tb = _type_bits(
+                walk, data, walk.sizes[rec], _MAX_SPELL_DEPTH
+            )
+            if not tb.ok:
+                return _refuse_resolved(tb.message.copy())
+            sizes.append(tb.bits)
+            kinds.append(tb.kind.copy())
+    for h in range(1, len(sizes)):
+        if sizes[h] != sizes[0] or kinds[h] != kinds[0]:
+            out.ambiguous = True
+            var ndefs = len(sizes)
+            var dtext = String(" definitions disagree")
+            out.message = String(t"type {name}: {ndefs}") + dtext
+            return out^
+    out.ok = True
+    out.found = True
+    out.bit_offset = 0
+    out.bit_size = sizes[0]
+    out.kind = kinds[0].copy()
+    out.message = String("")
+    return out^
+
+
+def resolve_btf_enumerator(
+    data: Span[UInt8, _], enum_name: String, name: String
+) -> BtfResolved:
+    """Resolve one enumerator inside a named ENUM or ENUM64.
+
+    Candidates lacking the enumerator are ignored; the
+    rest must agree on the enum width.
+    """
+    var walk = _walk_btf(data, 0, len(data))
+    if not walk.ok:
+        return _refuse_resolved(walk.message.copy())
+    var cands = List[Int]()
+    for i in range(len(walk.offsets)):
+        if walk.kinds[i] != 6 and walk.kinds[i] != 19:
+            continue
+        var text = String("")
+        if not walk.type_name(data, i, text):
+            return _refuse_resolved(String("BTF strings corrupt"))
+        if text == enum_name:
+            cands.append(i)
+    var out = BtfResolved()
+    if len(cands) == 0:
+        out.ok = True
+        return out^
+    out.struct_found = True
+    var widths = List[Int]()
+    for c in range(len(cands)):
+        var rec = cands[c]
+        var base = walk.offsets[rec]
+        var step = 8
+        if walk.kinds[rec] == 19:
+            step = 12
+        var has = False
+        for e in range(walk.vlens[rec]):
+            var name_off = _u32(data, base + 12 + e * step)
+            var text = String("")
+            if not _table_text(
+                data, walk.str_base, walk.str_end, name_off, text
+            ):
+                return _refuse_resolved(String("BTF strings corrupt"))
+            if text == name:
+                has = True
+                break
+        if has:
+            widths.append(walk.sizes[rec] * 8)
+    if len(widths) == 0:
+        out.ok = True
+        return out^
+    for h in range(1, len(widths)):
+        if widths[h] != widths[0]:
+            out.ambiguous = True
+            var ndefs = len(widths)
+            var dtext = String(" definitions disagree on ")
+            out.message = String(t"enum {enum_name}: {ndefs}")
+            out.message += dtext + name
+            return out^
+    out.ok = True
+    out.found = True
+    out.bit_offset = 0
+    out.bit_size = widths[0]
+    out.kind = String("enum")
+    out.message = String("")
     return out^
