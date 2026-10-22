@@ -2448,10 +2448,13 @@ def _ev_pass():
              "scratch": {"dev": "nvme1n1",
                          "write_before": 2000000,
                          "write_after": 2000000 + 64 * 2048}}),
+        "udev_exit": "0\n",
+        "udev_out": "$ udevadm settle --timeout=60\n",
         "busy_record_exit": "4",
         "busy_times_text": json.dumps(_busy_times()),
         "busy_persisted": _busy_persisted(),
         "busy_events_error": None,
+        "busy_end_reason": "signal\n",
         "dmesg_text": "[1.0] memveil-matrix-abc\n[2.0] nvme ready\n",
         "dmesg_scan_text": json.dumps(
             {"marker": "memveil-matrix-abc",
@@ -3254,3 +3257,114 @@ def test_evaluate_attempt_row_wrong_refusal_reason_fails():
     rec = km.evaluate_row(ev)
     assert not rec["ok"]
     assert not _check(rec, "refusals")["ok"]
+
+
+def test_udev_quiesced_check():
+    ok, detail = km.check_udev_quiesced("0\n", "settle ok\n")
+    assert ok, detail
+    ok, _ = km.check_udev_quiesced("1\n", "timed out\n")
+    assert not ok
+    ok, _ = km.check_udev_quiesced(None, None)
+    assert not ok
+
+
+def test_busy_stop_reason_check():
+    ok, detail = km.check_busy_stop_reason("signal\n")
+    assert ok, detail
+    ok, _ = km.check_busy_stop_reason("size_limit\n")
+    assert not ok
+    ok, _ = km.check_busy_stop_reason(None)
+    assert not ok
+
+
+def test_session_end_reason():
+    text = json.dumps({"capture": {"end_reason": "signal"}})
+    assert km.session_end_reason(text) == "signal"
+    with pytest.raises(ValueError):
+        km.session_end_reason(json.dumps({"capture": {}}))
+    with pytest.raises(ValueError):
+        km.session_end_reason("not json")
+
+
+def test_record_argv():
+    assert km.BUSY_MAX_EVENTS_BYTES == 4294967296
+    argv = km.record_argv("/usr/bin/memveil", "/tmp/cap",
+                         60, "attempt-trace", None)
+    assert argv == ["/usr/bin/memveil", "record",
+                   "--output", "/tmp/cap", "--duration",
+                   "60", "--capability", "attempt-trace"]
+    argv = km.record_argv("/usr/bin/memveil", "/tmp/cap",
+                         300, "attempt-trace",
+                         km.BUSY_MAX_EVENTS_BYTES)
+    assert argv[-2:] == ["--max-events-bytes",
+                        "4294967296"]
+
+
+def test_guest_quiesce_udev(tmp_path):
+    calls = []
+    written = {}
+
+    class Proc:
+        def __init__(self, code):
+            self.returncode = code
+            self.stdout = "out\n"
+            self.stderr = ""
+
+    def fake_sh(args, **kw):
+        calls.append(list(args))
+        return Proc(0)
+
+    def fake_write(path, data):
+        written[path] = data
+
+    guest.quiesce_udev(fake_sh, fake_write,
+                       str(tmp_path))
+    assert calls[0][:2] == ["udevadm", "settle"]
+    assert calls[1] == ["udevadm", "control",
+                        "--stop-exec-queue"]
+    assert written[str(tmp_path / "udev.exit")] == "0"
+    assert "out\n" in written[str(tmp_path / "udev.out")]
+
+
+def test_guest_quiesce_udev_settle_failure(tmp_path):
+    class Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "timed out\n"
+
+    def fake_sh(args, **kw):
+        return Proc()
+
+    written = {}
+
+    def fake_write(path, data):
+        written[path] = data
+
+    with pytest.raises(SystemExit):
+        guest.quiesce_udev(fake_sh, fake_write,
+                           str(tmp_path))
+    assert written[str(tmp_path / "udev.exit")] == "1"
+
+
+def test_udev_quiesced_wired():
+    ev = _ev_pass()
+    rec = km.evaluate_row(ev)
+    assert _check(rec, "udev_quiesced")["ok"], \
+        json.dumps(rec["checks"], indent=1)
+    ev = _ev_pass()
+    ev["udev_exit"] = "1\n"
+    rec = km.evaluate_row(ev)
+    assert not rec["ok"]
+    assert not _check(rec, "udev_quiesced")["ok"]
+
+
+def test_busy_stop_reason_wired():
+    ev = _ev_pass()
+    rec = km.evaluate_row(ev)
+    assert _check(rec, "busy_stop_reason")["ok"], \
+        json.dumps(rec["checks"], indent=1)
+    ev = _ev_pass()
+    ev["busy_end_reason"] = "size_limit\n"
+    rec = km.evaluate_row(ev)
+    assert not rec["ok"]
+    assert not _check(rec, "busy_stop_reason")["ok"]

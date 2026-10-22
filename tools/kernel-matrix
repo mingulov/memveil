@@ -247,11 +247,17 @@ def collect_one(entry, export, tools, dd_count, elapsed, run_id,
         ev["events_error"] = events_error
         ev["blockstat_text"] = read_text(
             os.path.join(export, "blockstat.json"))
+        ev["udev_exit"] = read_text(
+            os.path.join(export, "udev.exit"))
+        ev["udev_out"] = read_text(
+            os.path.join(export, "udev.out"))
         busy = os.path.join(export, "busy")
         ev["busy_record_exit"] = read_text(
             os.path.join(busy, "record.exit"))
         ev["busy_times_text"] = read_text(
             os.path.join(busy, "times.json"))
+        ev["busy_end_reason"] = read_text(
+            os.path.join(busy, "end_reason.txt"))
         persisted, _, events_error = gather_persisted(busy)
         ev["busy_persisted"] = persisted
         ev["busy_events_error"] = events_error

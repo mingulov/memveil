@@ -7,7 +7,9 @@ runs for real.
 """
 
 import os
+import signal
 import sys
+import threading
 
 import pytest
 
@@ -79,3 +81,31 @@ def test_buf_offset_measured(tmp_path, capsys, monkeypatch):
                      "--offset", "512")
     assert code == 0
     assert "buf read512 mod4096=512" in out
+
+
+def test_busy_releases_buffers_quietly(tmp_path, capsys,
+                                       monkeypatch):
+    target = tmp_path / "disk.img"
+    target.write_bytes(b"0" * 2097152)
+    monkeypatch.setattr(kml.os, "preadv",
+                        lambda fd, bufs, off, flags=0:
+                        1048576)
+    timer = threading.Timer(
+        0.3, lambda: os.kill(os.getpid(),
+                             signal.SIGTERM))
+    timer.start()
+    failures = []
+    old_hook = threading.excepthook
+    threading.excepthook = failures.append
+    try:
+        code, out = _run(capsys, "busy", "--phase",
+                         "busy", "--dev", str(target),
+                         "--readers", "2")
+    finally:
+        timer.cancel()
+        threading.excepthook = old_hook
+        signal.signal(signal.SIGTERM,
+                      signal.SIG_DFL)
+    assert code == 0
+    assert "phase busy start_ns " in out
+    assert failures == []

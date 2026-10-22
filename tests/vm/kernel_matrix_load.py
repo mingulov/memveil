@@ -125,10 +125,19 @@ def run_busy(dev, readers, tag, out):
     signal.signal(signal.SIGTERM, on_term)
     errors = []
     counts = [0] * readers
+    bufs = []
+    for _ in range(readers):
+        # Fault each buffer serially before the workers
+        # start so first-touch pages stay contiguous;
+        # interleaved faults scatter into ~100 segments
+        # per read and set pressure by accident.
+        mem, view, _ = aligned_buffer(0)
+        view[:] = b"\x00" * IO_BYTES
+        bufs.append((mem, view))
     start = now_ns()
 
     def worker(num):
-        mem, view, _ = aligned_buffer(0)
+        mem, view = bufs[num]
         i = 0
         try:
             while not stop.is_set():
@@ -147,6 +156,7 @@ def run_busy(dev, readers, tag, out):
                 i += 1
         finally:
             counts[num] = i
+            view.release()
             mem.close()
 
     threads = [threading.Thread(target=worker, args=(n,))

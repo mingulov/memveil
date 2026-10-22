@@ -1342,6 +1342,41 @@ def check_omitted(lock_omitted, actual_omitted, admitted):
     return fails
 
 
+def check_udev_quiesced(exit_text, out_text):
+    """Guest udev settle plus exec-queue stop both exited 0."""
+    if (exit_text or "").strip() == "0":
+        return True, "udev quiesced"
+    tail = (out_text or "").strip().splitlines()
+    tail = tail[-1][:80] if tail else "no output"
+    return False, "udev quiesce exit %r (%s)" % (
+        (exit_text or "").strip() or "missing", tail)
+
+
+def check_busy_stop_reason(text):
+    """Busy record ran the full window and stopped on SIGINT."""
+    if (text or "").strip() == "signal":
+        return True, "busy stopped on signal"
+    return False, "busy end reason %r, want signal" % (
+        (text or "").strip() or "missing")
+
+
+def session_end_reason(text):
+    """Capture end_reason from a session.json document."""
+    try:
+        doc = json.loads(text or "")
+    except ValueError:
+        raise ValueError("session is not JSON")
+    if not isinstance(doc, dict):
+        raise ValueError("session is not an object")
+    try:
+        reason = doc["capture"]["end_reason"]
+    except (KeyError, TypeError):
+        raise ValueError("session lacks capture end_reason")
+    if not isinstance(reason, str) or not reason:
+        raise ValueError("session end_reason not a string")
+    return reason
+
+
 def check_record_finalized(exit_text):
     """Finalized record exits 0 or 4 per the record contract."""
     if (exit_text or "").strip() in ("0", "4"):
@@ -1460,6 +1495,23 @@ def repo_identity(root):
         return commit or "unknown", bool(proc.stdout.strip())
     except (OSError, subprocess.TimeoutExpired):
         return "unknown", True
+
+
+BUSY_MAX_EVENTS_BYTES = 4294967296
+
+
+def record_argv(mv, dest, duration, caps, max_events_bytes=None):
+    """memveil record argv, with an optional events-bytes cap.
+
+    The busy capture runs 20 s under full read pressure and
+    must not hit the default 1 GiB cap mid-window; pass
+    BUSY_MAX_EVENTS_BYTES for it, None for the default.
+    """
+    argv = [mv, "record", "--output", dest, "--duration",
+           str(duration), "--capability", caps]
+    if max_events_bytes is not None:
+        argv += ["--max-events-bytes", str(max_events_bytes)]
+    return argv
 
 
 def build_vng_cmd(prefix, cpus, home, vng_args):
@@ -1961,6 +2013,13 @@ def evaluate_row(ev):
         add("export_redacted", False, "exports: %s" % redact_error)
     else:
         add("export_redacted", True, "exports redacted")
+    if admitted:
+        ok, detail = check_udev_quiesced(
+            ev.get("udev_exit"), ev.get("udev_out"))
+        add("udev_quiesced", ok, detail)
+    else:
+        add("udev_quiesced", True, "no admitted caps",
+            skipped=True)
     if refused:
         fails = []
         attempt = entry["expected"].get("attempt-trace", {})
@@ -2031,7 +2090,7 @@ def evaluate_row(ev):
                      "channels", "invariants", "bytes",
                      "oracle_bytes", "sectors", "oracle_health",
                      "capture_valid", "busy_finalized",
-                     "busy_bounds"):
+                     "busy_stop_reason", "busy_bounds"):
             add(name, True, "no admitted caps", skipped=True)
         rec["ok"] = all(c["ok"] for c in rec["checks"])
         rec["detail"] = "; ".join(c["detail"] for c in rec["checks"]
@@ -2302,6 +2361,9 @@ def evaluate_row(ev):
     if not ok:
         detail += "; see busy/record.stderr"
     add("busy_finalized", ok, detail)
+    ok, detail = check_busy_stop_reason(
+        ev.get("busy_end_reason"))
+    add("busy_stop_reason", ok, detail)
     if ev.get("busy_persisted") is None:
         add("busy_bounds", False,
             "busy counts missing (%s)"

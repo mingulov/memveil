@@ -82,6 +82,35 @@ def sh(args, **kw):
     return subprocess.run(args, capture_output=True, text=True, **kw)
 
 
+def quiesce_udev(sh, write, out):
+    """Settle udev then stop its exec queue before measuring.
+
+    The guest rootfs runs udevd, which synthesizes change
+    events (and re-reads partition tables) when the workload
+    closes the scratch device after writes. Those re-reads
+    are guest self-IO, not workload DMA; stop them so the
+    byte checks stay workload-exact. Fails on any error.
+    """
+    settle = sh(["udevadm", "settle", "--timeout=60"])
+    log = "$ udevadm settle --timeout=60\n%s%s" % (
+        settle.stdout or "", settle.stderr or "")
+    write(os.path.join(out, "udev.out"), log)
+    write(os.path.join(out, "udev.exit"),
+          str(settle.returncode))
+    if settle.returncode != 0:
+        fail("udevadm settle failed exit %d"
+             % settle.returncode)
+    stop = sh(["udevadm", "control", "--stop-exec-queue"])
+    log += "$ udevadm control --stop-exec-queue\n%s%s" % (
+        stop.stdout or "", stop.stderr or "")
+    write(os.path.join(out, "udev.out"), log)
+    write(os.path.join(out, "udev.exit"),
+          str(stop.returncode))
+    if stop.returncode != 0:
+        fail("udevadm control failed exit %d"
+             % stop.returncode)
+
+
 def write(path, data):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text(data)
@@ -383,6 +412,7 @@ def run(argv):
     if not scratch:
         fail("no scratch disk with serial %s"
              % scratch_serial)
+    quiesce_udev(sh, write, out)
     need = []
     if "attempt-trace" in admitted:
         need.append("tp")
@@ -415,9 +445,8 @@ def run(argv):
     cap = os.path.join(out, "cap")
     record_out = open(os.path.join(out, "record.out"), "w")
     record_err = open(os.path.join(out, "record.stderr"), "w")
-    rpid = subprocess.Popen([mv, "record", "--output", cap,
-                             "--duration", str(duration),
-                             "--capability", caps],
+    rpid = subprocess.Popen(km.record_argv(mv, cap, duration,
+                                             caps, None),
                             stdout=record_out, stderr=record_err,
                             start_new_session=True)
     ready = wait_ready(os.path.join(out, "record.out"), rpid)
@@ -522,12 +551,10 @@ def run(argv):
     busy_rec_err = open(os.path.join(busy_dir,
                                      "record.stderr"), "w")
     spawn_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
-    qpid = subprocess.Popen([mv, "record", "--output",
-                             busy_cap, "--duration", "300",
-                             "--capability", caps],
-                            stdout=busy_rec_out,
-                            stderr=busy_rec_err,
-                            start_new_session=True)
+    qpid = subprocess.Popen(km.record_argv(
+        mv, busy_cap, 300, caps, km.BUSY_MAX_EVENTS_BYTES),
+        stdout=busy_rec_out, stderr=busy_rec_err,
+        start_new_session=True)
     ready = wait_ready(os.path.join(busy_dir, "record.out"),
                        qpid)
     if ready is None:
@@ -571,6 +598,13 @@ def run(argv):
         {"spawn_ns": spawn_ns, "ready_ns": ready_ns,
          "stop_ns": stop_ns, "exit_ns": exit_ns},
         indent=2, sort_keys=True) + "\n")
+    try:
+        reason = km.session_end_reason(
+            Path(busy_cap, "session.json").read_text())
+    except (OSError, ValueError) as exc:
+        reason = "unknown (%s)" % exc
+    write(os.path.join(busy_dir, "end_reason.txt"),
+          reason + "\n")
     time.sleep(2)
     opid.send_signal(signal.SIGINT)
     try:

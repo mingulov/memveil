@@ -75,10 +75,16 @@ records. It covers owned pages only, never real guest memory.
 ## Kernel matrix oracle (`tools/kernel-matrix`)
 
 Boots each kernel pinned in `tests/vm/kernels.lock.json`
-under virtme-ng with forced swiotlb and a fixed O_DIRECT
-workload, then compares every admitted channel against a
-bpftrace per-CPU `count()` oracle attached to the same
-tracepoint and hooks. A row passes only when the guest
+under virtme-ng with forced swiotlb and a fixed phased
+O_DIRECT workload (aligned reads, misaligned reads,
+writes to a scratch disk, concurrent readers), then
+compares every admitted channel against a bpftrace
+per-CPU `count()` oracle attached to the same tracepoint
+and hooks. Before measuring, the guest settles udev and
+stops its exec queue: udevd otherwise re-reads the
+scratch partition table when the write phase closes the
+device, and that guest self-IO is removed rather than
+folded into the totals. A row passes only when the guest
 boots the locked kernel, the workload sits inside the
 capture window, each channel shortfall fits that channel
 memveil misses plus transport loss, reported loss fits
@@ -90,7 +96,13 @@ the tracepoint, and the block layer sector delta times
 512. Count floor and ceiling derive from those measured
 block bytes, never from workload constants.
 `tools/validate-schemas` checks each capture, and block
-sectors tracking the reads proves the workload ran.
+sectors tracking the reads proves the workload ran. A
+second busy capture runs 4 pre-faulted O_DIRECT readers
+for 20 s under a raised events-bytes cap (4 GiB, so the
+cap cannot end the window early), stops the record with
+SIGINT and the load with SIGTERM, and checks per-channel
+counts against the oracle over the inner window with no
+byte equality.
 
 Scope limits:
 
@@ -100,9 +112,10 @@ Scope limits:
   equality of both sides against block accounting, and the
   independent oracle byte counter bound that shared risk;
   they do not remove it.
-- Only the fixed dd workload is compared. Nothing here
-  qualifies other traffic shapes, other devices, or
-  sustained pressure.
+- Only the fixed phased workload and the 20 s busy
+  capture are compared. Nothing here qualifies other
+  traffic shapes, other devices, or longer sustained
+  pressure.
 - Correlation quality stays partial (copy and sync events
   unattributed to mappings); the matrix compares counts
   and bytes, never pairing.
