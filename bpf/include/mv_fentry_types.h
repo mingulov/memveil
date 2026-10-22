@@ -17,6 +17,8 @@
 
 #include <linux/types.h>
 
+#include "memveil_events.h"
+
 typedef __u64 mv_phys_addr_t;
 typedef __u64 mv_size_t;
 
@@ -51,7 +53,7 @@ struct io_tlb_pool {
     struct io_tlb_slot *slots;
 };
 
-#define MV_IO_TLB_SHIFT 11u
+#define MV_IO_TLB_SHIFT MV_IO_TLB_SHIFT_WIRE
 #define MV_IO_TLB_SIZE 2048u
 #define MV_IO_TLB_MASK 2047u
 

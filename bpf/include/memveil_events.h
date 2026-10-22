@@ -412,6 +412,37 @@ struct mv_copy {
     __u64 effective;
 };
 
+/* Slot width shared by the wire helpers and the BPF
+ * adapters: one pool slot covers 1 << 11 bytes. */
+#define MV_IO_TLB_SHIFT_WIRE 11u
+
+/* One relocated size read matches its local expectation. */
+static __inline int mv_layout_ok(__u32 got, __u32 want)
+{
+    return got == want;
+}
+
+/* Slot index over one pool: the span must be exactly nslabs
+ * slots wide, else SHIFT; the address must land inside, else
+ * BOUNDS. Pure and loop-free for the verifier. */
+static __inline __u16 mv_slot_index(__u64 start, __u64 end,
+                                   __u64 nslabs, __u64 tlb_addr,
+                                   __u64 *idx)
+{
+    if (end < start)
+        return MV_CP_REASON_SHIFT;
+    if (nslabs > 0xFFFFFFFFFFFFFFFFULL >> MV_IO_TLB_SHIFT_WIRE)
+        return MV_CP_REASON_SHIFT;
+    if (end - start != nslabs << MV_IO_TLB_SHIFT_WIRE)
+        return MV_CP_REASON_SHIFT;
+    if (tlb_addr < start)
+        return MV_CP_REASON_BOUNDS;
+    *idx = (tlb_addr - start) >> MV_IO_TLB_SHIFT_WIRE;
+    if (*idx >= nslabs)
+        return MV_CP_REASON_BOUNDS;
+    return MV_CP_REASON_NONE;
+}
+
 /* Hook tlb_offset math: both masked terms fit in s32, so
  * the signed difference is exact. */
 static __inline __s32 mv_tlb_offset(__u64 tlb_addr, __u64 orig_addr,

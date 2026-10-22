@@ -602,6 +602,45 @@ static int check_kernel_bounce_sweep(void)
     return 0;
 }
 
+/* Pin the pool geometry rule: idx = (tlb_addr - start) >>
+ * 11 over a span of exactly nslabs << 11, else SHIFT when
+ * the geometry disagrees and BOUNDS when the address misses. */
+static int check_slot_index(void)
+{
+    __u64 start = 0x1000000ULL, nslabs = 512, end, idx;
+    __u16 reason;
+
+    end = start + 512 * 2048;
+    idx = 0xDEADULL;
+    reason = mv_slot_index(start, end, nslabs, start, &idx);
+    if (reason != MV_CP_REASON_NONE || idx != 0)
+        return fail("slot start");
+    reason = mv_slot_index(start, end, nslabs, end - 1, &idx);
+    if (reason != MV_CP_REASON_NONE || idx != 511)
+        return fail("slot last");
+    reason = mv_slot_index(start, end, nslabs, end, &idx);
+    if (reason != MV_CP_REASON_BOUNDS)
+        return fail("slot end");
+    reason = mv_slot_index(start, end, nslabs, start - 1, &idx);
+    if (reason != MV_CP_REASON_BOUNDS)
+        return fail("slot before start");
+    reason = mv_slot_index(start, end + 2048, nslabs, start, &idx);
+    if (reason != MV_CP_REASON_SHIFT)
+        return fail("slot shift");
+    reason = mv_slot_index(start, end, (__u64)1 << 54, start, &idx);
+    if (reason != MV_CP_REASON_SHIFT)
+        return fail("slot shift overflow");
+    reason = mv_slot_index(start, start - 1, nslabs, start, &idx);
+    if (reason != MV_CP_REASON_SHIFT)
+        return fail("slot end before start");
+    if (mv_layout_ok(8, 8) != 1)
+        return fail("layout ok");
+    if (mv_layout_ok(4, 8) != 0)
+        return fail("layout mismatch");
+    printf("lifecycle-decode: slot index checks passed\n");
+    return 0;
+}
+
 /* Pin the lifecycle/copy wire vocabulary the Mojo decoder mirrors:
  * record lengths, magics, kinds, flags, reasons, and the map
  * failure sentinel. */
@@ -640,6 +679,8 @@ int main(int argc, char **argv)
     if (check_wire_vocab() != 0)
         return 1;
     if (check_kernel_bounce_sweep() != 0)
+        return 1;
+    if (check_slot_index() != 0)
         return 1;
     if (argc != 4) {
         fprintf(stderr, "usage: %s corpus.bin corpus.txt out.dump\n",
