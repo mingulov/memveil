@@ -985,7 +985,9 @@ PYEOF
         report_ok "version (memveil-0.1.0)"
     fi
 
-    if ldd "$BIN" 2>/dev/null | grep -qi bpf; then
+    # Match sonames only: resolved paths inherit the checkout
+    # directory, so a path containing "bpf" is not linkage.
+    if ldd "$BIN" 2>/dev/null | awk '{print $1}' | grep -qi bpf; then
         report_bad "isolation: binary references bpf (native bridge leak)"
     else
         report_ok "isolation (no bpf linkage)"
