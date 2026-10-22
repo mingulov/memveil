@@ -38,6 +38,7 @@ from memveil.platform.profiles import (
     select_attempt_hook,
     select_profile,
     select_profile_bound,
+    verify_core_layouts,
     verify_hook_signatures,
     verify_live_interfaces,
     verify_live_receipt,
@@ -2746,6 +2747,586 @@ def test_parse_layouts_too_many_rejects() raises:
     expect_reject(doc)
 
 
+def _v012_doc(layouts_json: String) -> String:
+    """live_ref_doc as 0.1.2 plus a layouts array from caller JSON."""
+    return _live_doc_with_layouts(layouts_json).replace(
+        String('"schema_version":"0.1.1"'),
+        String('"schema_version":"0.1.2"'),
+    )
+
+
+def test_parse_v012_layouts_ok() raises:
+    var doc = _v012_doc(
+        String(
+            '{"capability":"copy-actual","target":"field",'
+            '"struct":"io_tlb_pool","field":"start",'
+            '"type_kind":"int","bit_size":64,"optional":false},'
+            '{"capability":"mapping-lifecycle","target":"type",'
+            '"struct":"mvt_dev",'
+            '"type_kind":"struct","bit_size":6144,"optional":true},'
+            '{"capability":"attempt-trace","target":"enumerator",'
+            '"struct":"mvt_e64","field":"MVT_BIG",'
+            '"type_kind":"enum","bit_size":64,"optional":false}'
+        )
+    )
+    var p = parse_profile_bytes(bytes_of(doc))
+    assert_equal(len(p.layouts), 3)
+    assert_equal(p.schema_version, String("0.1.2"))
+    assert_equal(p.layouts[0].capability, String("copy-actual"))
+    assert_equal(p.layouts[0].target, String("field"))
+    assert_equal(p.layouts[0].type_kind, String("int"))
+    assert_equal(p.layouts[0].bit_size, 64)
+    assert_true(not p.layouts[0].optional)
+    assert_true(p.layouts[0].v012)
+    assert_equal(p.layouts[1].target, String("type"))
+    assert_equal(p.layouts[1].field_name, String(""))
+    assert_true(p.layouts[1].optional)
+    assert_true(p.layouts[1].v012)
+    assert_equal(p.layouts[2].target, String("enumerator"))
+    assert_equal(p.layouts[2].field_name, String("MVT_BIG"))
+    assert_true(p.layouts[2].v012)
+
+
+def test_parse_v012_rejects() raises:
+    # bit_offset is not a 0.1.2 layout key.
+    expect_reject(
+        _v012_doc(
+            String(
+                '{"capability":"copy-actual","target":"field",'
+                '"struct":"s","field":"f","type_kind":"int",'
+                '"bit_size":8,"bit_offset":0,"optional":false}'
+            )
+        )
+    )
+    # type_kind is required.
+    expect_reject(
+        _v012_doc(
+            String(
+                '{"capability":"copy-actual","target":"field",'
+                '"struct":"s","field":"f",'
+                '"bit_size":8,"optional":false}'
+            )
+        )
+    )
+    # At most 64 items.
+    var items = String("")
+    for i in range(65):
+        if i > 0:
+            items += String(",")
+        items += String(
+            '{"capability":"copy-actual","target":"field",'
+            '"struct":"s","field":"f'
+        )
+        items += String(i)
+        items += String(
+            '","type_kind":"int","bit_size":8,"optional":false}'
+        )
+    expect_reject(_v012_doc(items))
+    # The 0.1.1 item shape is not a 0.1.2 item.
+    expect_reject(
+        _v012_doc(
+            String(
+                '{"struct":"s","field":"f",'
+                '"bit_offset":0,"bit_size":64}'
+            )
+        )
+    )
+    # A type target omits field.
+    expect_reject(
+        _v012_doc(
+            String(
+                '{"capability":"copy-actual","target":"type",'
+                '"struct":"s","field":"f","type_kind":"struct",'
+                '"bit_size":64,"optional":false}'
+            )
+        )
+    )
+    # bit_size starts at 1.
+    expect_reject(
+        _v012_doc(
+            String(
+                '{"capability":"copy-actual","target":"field",'
+                '"struct":"s","field":"f","type_kind":"int",'
+                '"bit_size":0,"optional":false}'
+            )
+        )
+    )
+    # Duplicates name layouts and duplicate.
+    var raised = False
+    try:
+        _ = parse_profile_bytes(
+            bytes_of(
+                _v012_doc(
+                    String(
+                        '{"capability":"copy-actual","target":"field",'
+                        '"struct":"s","field":"f","type_kind":"int",'
+                        '"bit_size":8,"optional":false},'
+                        '{"capability":"copy-actual","target":"field",'
+                        '"struct":"s","field":"f","type_kind":"int",'
+                        '"bit_size":8,"optional":true}'
+                    )
+                )
+            )
+        )
+    except e:
+        raised = True
+        assert_true(contains(String(e), String("layouts")))
+        assert_true(contains(String(e), String("duplicate")))
+    assert_true(raised)
+
+
+def _v012_field(
+    cap: String,
+    sname: String,
+    fname: String,
+    kind: String,
+    size: Int,
+    optional: Bool,
+) -> String:
+    """One 0.1.2 field-target layout item as JSON."""
+    var flag = String("false")
+    if optional:
+        flag = String("true")
+    return (
+        String('{"capability":"')
+        + cap
+        + String('","target":"field","struct":"')
+        + sname
+        + String('","field":"')
+        + fname
+        + String('","type_kind":"')
+        + kind
+        + String('","bit_size":')
+        + String(size)
+        + String(',"optional":')
+        + flag
+        + String("}")
+    )
+
+
+def _v012_btf() raises -> List[UInt8]:
+    """kernel-38 vmlinux BTF bytes."""
+    return read_host_file(
+        fx("kernel-38") + String("/sys/kernel/btf/vmlinux"),
+        String("fixture"),
+        67108864,
+    )
+
+
+def test_core_layout_live_ok() raises:
+    var raw = _v012_btf()
+    var doc = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                _v012_field(
+                    String("copy-actual"),
+                    String("io_tlb_pool"),
+                    String("start"),
+                    String("int"),
+                    64,
+                    False,
+                )
+                + String(",")
+                + _v012_field(
+                    String("copy-actual"),
+                    String("io_tlb_pool"),
+                    String("slots"),
+                    String("ptr"),
+                    64,
+                    False,
+                )
+                + String(",")
+                + _v012_field(
+                    String("copy-actual"),
+                    String("device_dma_parameters"),
+                    String("min_align_mask"),
+                    String("int"),
+                    32,
+                    False,
+                )
+            )
+        )
+    )
+    var lines = List[String]()
+    var v = verify_core_layouts(
+        Span(raw), doc.layouts, String("copy-actual"), lines
+    )
+    assert_true(v.ok)
+    assert_equal(v.reason, String(""))
+    assert_equal(len(lines), 3)
+    assert_equal(
+        lines[0],
+        String("io_tlb_pool.start: offset 0 bits, size 64 bits"),
+    )
+
+
+def test_core_layout_live_refusals() raises:
+    var raw = _v012_btf()
+    # An absent member refuses with its layout code.
+    var doc = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                _v012_field(
+                    String("copy-actual"),
+                    String("io_tlb_pool"),
+                    String("cc_shared"),
+                    String("int"),
+                    8,
+                    False,
+                )
+            )
+        )
+    )
+    var lines = List[String]()
+    var v = verify_core_layouts(
+        Span(raw), doc.layouts, String("copy-actual"), lines
+    )
+    assert_true(not v.ok)
+    assert_true(not v.unknown)
+    assert_equal(v.code, String("layout-missing"))
+    assert_equal(
+        v.reason,
+        String("layout: io_tlb_pool.cc_shared absent from kernel BTF"),
+    )
+    # The same member, optional, passes with an absent note.
+    var doc_opt = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                _v012_field(
+                    String("copy-actual"),
+                    String("io_tlb_pool"),
+                    String("cc_shared"),
+                    String("int"),
+                    8,
+                    True,
+                )
+            )
+        )
+    )
+    var lines_opt = List[String]()
+    var v_opt = verify_core_layouts(
+        Span(raw), doc_opt.layouts, String("copy-actual"), lines_opt
+    )
+    assert_true(v_opt.ok)
+    assert_equal(len(lines_opt), 1)
+    assert_equal(
+        lines_opt[0],
+        String("io_tlb_pool.cc_shared: absent (optional)"),
+    )
+    # A drifted size refuses with both widths quoted.
+    var doc_size = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                _v012_field(
+                    String("copy-actual"),
+                    String("io_tlb_pool"),
+                    String("start"),
+                    String("int"),
+                    32,
+                    False,
+                )
+            )
+        )
+    )
+    var lines_size = List[String]()
+    var v_size = verify_core_layouts(
+        Span(raw), doc_size.layouts, String("copy-actual"), lines_size
+    )
+    assert_true(not v_size.ok)
+    assert_equal(v_size.code, String("layout-size"))
+    assert_equal(
+        v_size.reason,
+        String(
+            "layout: io_tlb_pool.start size 64 bits"
+            " differs from object size 32 bits"
+        ),
+    )
+    # A drifted kind refuses with both kinds quoted.
+    var doc_kind = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                _v012_field(
+                    String("copy-actual"),
+                    String("io_tlb_pool"),
+                    String("start"),
+                    String("ptr"),
+                    64,
+                    False,
+                )
+            )
+        )
+    )
+    var lines_kind = List[String]()
+    var v_kind = verify_core_layouts(
+        Span(raw), doc_kind.layouts, String("copy-actual"), lines_kind
+    )
+    assert_true(not v_kind.ok)
+    assert_equal(v_kind.code, String("layout-kind"))
+    assert_equal(
+        v_kind.reason,
+        String(
+            "layout: io_tlb_pool.start kind int"
+            " differs from object kind ptr"
+        ),
+    )
+    # A lifecycle item refuses the lifecycle cap, not copy-actual.
+    var doc_lc = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                _v012_field(
+                    String("mapping-lifecycle"),
+                    String("io_tlb_pool"),
+                    String("cc_shared"),
+                    String("int"),
+                    8,
+                    False,
+                )
+            )
+        )
+    )
+    var lines_lc = List[String]()
+    var v_lc = verify_core_layouts(
+        Span(raw), doc_lc.layouts, String("mapping-lifecycle"), lines_lc
+    )
+    assert_true(not v_lc.ok)
+    assert_equal(v_lc.code, String("layout-missing"))
+    var lines_cp = List[String]()
+    var v_cp = verify_core_layouts(
+        Span(raw), doc_lc.layouts, String("copy-actual"), lines_cp
+    )
+    assert_true(v_cp.ok)
+    assert_equal(len(lines_cp), 0)
+
+
+def test_core_layout_live_type_enum() raises:
+    var raw = read_host_file(
+        String("tests/fixtures/btf/members.bin"),
+        String("fixture"),
+        67108864,
+    )
+    # A recorded struct matches kind and size; no offset prints.
+    var doc = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                String(
+                    '{"capability":"copy-actual","target":"type",'
+                    '"struct":"mvt_dev","type_kind":"struct",'
+                    '"bit_size":6144,"optional":false}'
+                )
+            )
+        )
+    )
+    var lines = List[String]()
+    var v = verify_core_layouts(
+        Span(raw), doc.layouts, String("copy-actual"), lines
+    )
+    assert_true(v.ok)
+    assert_equal(len(lines), 1)
+    assert_equal(lines[0], String("mvt_dev: size 6144 bits"))
+    # A typedef resolves through to its terminal kind.
+    var doc_td = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                String(
+                    '{"capability":"copy-actual","target":"type",'
+                    '"struct":"mvt_phys_t","type_kind":"int",'
+                    '"bit_size":64,"optional":false}'
+                )
+            )
+        )
+    )
+    var lines_td = List[String]()
+    var v_td = verify_core_layouts(
+        Span(raw), doc_td.layouts, String("copy-actual"), lines_td
+    )
+    assert_true(v_td.ok)
+    assert_equal(len(lines_td), 1)
+    assert_equal(lines_td[0], String("mvt_phys_t: size 64 bits"))
+    # A recorded enumerator matches the enum width.
+    var doc_enum = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                String(
+                    '{"capability":"copy-actual","target":"enumerator",'
+                    '"struct":"mvt_e64","field":"MVT_BIG",'
+                    '"type_kind":"enum","bit_size":64,"optional":false}'
+                )
+            )
+        )
+    )
+    var lines_enum = List[String]()
+    var v_enum = verify_core_layouts(
+        Span(raw), doc_enum.layouts, String("copy-actual"), lines_enum
+    )
+    assert_true(v_enum.ok)
+    assert_equal(len(lines_enum), 1)
+    assert_equal(lines_enum[0], String("mvt_e64.MVT_BIG: size 64 bits"))
+    # A missing type refuses without a member suffix.
+    var doc_absent = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                String(
+                    '{"capability":"copy-actual","target":"type",'
+                    '"struct":"mvt_none","type_kind":"struct",'
+                    '"bit_size":8,"optional":false}'
+                )
+            )
+        )
+    )
+    var lines_absent = List[String]()
+    var v_absent = verify_core_layouts(
+        Span(raw), doc_absent.layouts, String("copy-actual"), lines_absent
+    )
+    assert_true(not v_absent.ok)
+    assert_equal(v_absent.code, String("layout-missing"))
+    assert_equal(
+        v_absent.reason,
+        String("layout: mvt_none absent from kernel BTF"),
+    )
+    # A drifted type kind refuses with both kinds quoted.
+    var doc_kind = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                String(
+                    '{"capability":"copy-actual","target":"type",'
+                    '"struct":"mvt_dev","type_kind":"union",'
+                    '"bit_size":6144,"optional":false}'
+                )
+            )
+        )
+    )
+    var lines_kind = List[String]()
+    var v_kind = verify_core_layouts(
+        Span(raw), doc_kind.layouts, String("copy-actual"), lines_kind
+    )
+    assert_true(not v_kind.ok)
+    assert_equal(v_kind.code, String("layout-kind"))
+    assert_equal(
+        v_kind.reason,
+        String(
+            "layout: mvt_dev kind struct differs from object kind union"
+        ),
+    )
+
+
+def test_core_layout_bitfield_ambiguous() raises:
+    var raw = read_host_file(
+        String("tests/fixtures/btf/members.bin"),
+        String("fixture"),
+        67108864,
+    )
+    # A bitfield member refuses even with a matching width.
+    var doc_bf = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                _v012_field(
+                    String("copy-actual"),
+                    String("mvt_dev"),
+                    String("offline_disabled"),
+                    String("int"),
+                    1,
+                    False,
+                )
+            )
+        )
+    )
+    var lines_bf = List[String]()
+    var v_bf = verify_core_layouts(
+        Span(raw), doc_bf.layouts, String("copy-actual"), lines_bf
+    )
+    assert_true(not v_bf.ok)
+    assert_true(not v_bf.unknown)
+    assert_equal(v_bf.code, String("layout-bitfield"))
+    assert_equal(
+        v_bf.reason,
+        String(
+            "layout: mvt_dev.offline_disabled is a bitfield (unsupported)"
+        ),
+    )
+    # Disagreeing definitions refuse with the resolver message.
+    var doc_amb = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                _v012_field(
+                    String("copy-actual"),
+                    String("mvt_dup"),
+                    String("flags"),
+                    String("int"),
+                    32,
+                    False,
+                )
+            )
+        )
+    )
+    var lines_amb = List[String]()
+    var v_amb = verify_core_layouts(
+        Span(raw), doc_amb.layouts, String("copy-actual"), lines_amb
+    )
+    assert_true(not v_amb.ok)
+    assert_equal(v_amb.code, String("layout-ambiguous"))
+    assert_equal(
+        v_amb.reason,
+        String("struct mvt_dup: 2 definitions disagree on flags"),
+    )
+
+
+def test_core_layout_reader_failure() raises:
+    # A truncated blob is unknown with the Task 2 code, never refused.
+    var raw = List[UInt8]()
+    raw.append(UInt8(0))
+    raw.append(UInt8(1))
+    var doc = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                _v012_field(
+                    String("copy-actual"),
+                    String("s"),
+                    String("f"),
+                    String("int"),
+                    8,
+                    False,
+                )
+            )
+        )
+    )
+    var lines = List[String]()
+    var v = verify_core_layouts(
+        Span(raw), doc.layouts, String("copy-actual"), lines
+    )
+    assert_true(not v.ok)
+    assert_true(v.unknown)
+    assert_equal(v.code, String("btf-truncated"))
+
+
+def test_verify_live_v012_evidence() raises:
+    var doc = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                _v012_field(
+                    String("copy-actual"),
+                    String("io_tlb_pool"),
+                    String("start"),
+                    String("int"),
+                    64,
+                    False,
+                )
+            )
+        )
+    )
+    var caps = List[String]()
+    caps.append(String("copy-actual"))
+    var v = verify_live_interfaces(
+        fx("kernel-38"), doc^, caps^
+    )
+    assert_true(v.ok)
+    assert_equal(v.reason, String(""))
+    assert_equal(len(v.evidence), 1)
+    assert_equal(
+        v.evidence[0],
+        String("io_tlb_pool.start: offset 0 bits, size 64 bits"),
+    )
+
+
 def _mint_live() raises -> String:
     """Mint a local-auto receipt over live-measured bindings."""
     var r = open_evidence_reader(fx("kernel-38"))
@@ -3624,6 +4205,14 @@ def run() raises -> Int:
     suite.test[test_parse_layouts_ok]()
     suite.test[test_parse_layouts_negative_rejects]()
     suite.test[test_parse_layouts_too_many_rejects]()
+    suite.test[test_parse_v012_layouts_ok]()
+    suite.test[test_parse_v012_rejects]()
+    suite.test[test_core_layout_live_ok]()
+    suite.test[test_core_layout_live_refusals]()
+    suite.test[test_core_layout_live_type_enum]()
+    suite.test[test_core_layout_bitfield_ambiguous]()
+    suite.test[test_core_layout_reader_failure]()
+    suite.test[test_verify_live_v012_evidence]()
     suite.test[test_discover_live38_candidate_available]()
     suite.test[test_live_receipt_roundtrip]()
     suite.test[test_live_receipt_drift_refuses]()

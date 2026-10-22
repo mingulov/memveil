@@ -34,10 +34,14 @@ from memveil.model.validate import ValidationError, check_bounded_text
 from memveil.platform.artifact_files import join_root
 from memveil.platform.btf import (
     BtfFuncSig,
+    BtfResolved,
     classify_btf_message,
     read_btf_func_proto,
     read_btf_func_sig,
     read_btf_member,
+    resolve_btf_enumerator,
+    resolve_btf_member,
+    resolve_btf_type,
 )
 from memveil.platform.evidence import KernelInfo, parse_kernel_triple
 from memveil.platform.kernelgate import (
@@ -80,6 +84,7 @@ comptime MAX_PROFILE_NOTES = 32
 comptime MAX_CAP_HOOKS = 32
 comptime MAX_HOOK_ALT = 4
 comptime MAX_PROFILE_LAYOUTS = 16
+comptime MAX_PROFILE_LAYOUTS_V012 = 64
 comptime _MANIFEST_CAP = 65536
 comptime _PROFILE_CAP = 1048576
 comptime _INSTALLED_PROFILES_DIR = "/usr/share/memveil/profiles"
@@ -178,18 +183,35 @@ struct ProfileIdentity(Copyable):
 
 
 struct ProfileLayout(Copyable):
-    """One recorded BTF member layout: struct field plus bit geometry."""
+    """One recorded BTF member layout: struct field plus bit geometry.
+
+    0.1.1 items pin an exact ``bit_offset``/``bit_size`` pair checked
+    by copy-actual only. 0.1.2 items (``v012``) carry the owning
+    ``capability``, a ``target`` (field, type, or enumerator), the
+    expected ``type_kind``, and whether the item is ``optional``;
+    the live check compares kind and size, never offsets.
+    """
 
     var struct_name: String
     var field_name: String
     var bit_offset: Int
     var bit_size: Int
+    var capability: String
+    var target: String
+    var type_kind: String
+    var optional: Bool
+    var v012: Bool
 
     def __init__(out self):
         self.struct_name = String("")
         self.field_name = String("")
         self.bit_offset = 0
         self.bit_size = 0
+        self.capability = String("")
+        self.target = String("")
+        self.type_kind = String("")
+        self.optional = False
+        self.v012 = False
 
 
 struct Profile(Copyable):
@@ -197,6 +219,7 @@ struct Profile(Copyable):
 
     var profile_id: String
     var status: String
+    var schema_version: String
     var identity: ProfileIdentity
     var hooks: List[ProfileHook]
     var caps: List[ProfileCapability]
@@ -206,6 +229,7 @@ struct Profile(Copyable):
     def __init__(out self):
         self.profile_id = String("")
         self.status = String("")
+        self.schema_version = String("")
         self.identity = ProfileIdentity()
         self.hooks = List[ProfileHook]()
         self.caps = List[ProfileCapability]()
@@ -722,6 +746,141 @@ def _parse_layout(mut scan: Scanner) raises -> ProfileLayout:
     return out^
 
 
+def _parse_layout_v012(mut scan: Scanner) raises -> ProfileLayout:
+    """Parse one 0.1.2 layouts[] item: capability, target, kind, size.
+
+    Every key is required except ``field``, which a ``type``
+    target omits. There is no ``bit_offset``: offsets are
+    evidence only, never compared.
+    """
+    scan.begin_object()
+    var out = ProfileLayout()
+    out.v012 = True
+    var has_cap = False
+    var has_target = False
+    var has_struct = False
+    var has_field = False
+    var has_kind = False
+    var has_size = False
+    var has_optional = False
+    if not object_is_empty(scan):
+        while True:
+            scan.skip_ws()
+            var key = scan.parse_string()
+            expect_colon(scan, "layout")
+            if key == "capability":
+                if has_cap:
+                    raise ValidationError(
+                        "layout.capability", "duplicate"
+                    )
+                var v = scan.parse_string()
+                if (
+                    v != "attempt-trace"
+                    and v != "mapping-lifecycle"
+                    and v != "copy-actual"
+                ):
+                    raise ValidationError(
+                        "layout.capability", "bad enum"
+                    )
+                out.capability = v
+                has_cap = True
+            elif key == "target":
+                if has_target:
+                    raise ValidationError(
+                        "layout.target", "duplicate"
+                    )
+                var v = scan.parse_string()
+                if (
+                    v != "field"
+                    and v != "type"
+                    and v != "enumerator"
+                ):
+                    raise ValidationError("layout.target", "bad enum")
+                out.target = v
+                has_target = True
+            elif key == "struct":
+                if has_struct:
+                    raise ValidationError("layout.struct", "duplicate")
+                var v = scan.parse_string()
+                try:
+                    check_bounded_text(v, 1, 128, "layout.struct")
+                except e:
+                    raise ValidationError("layout.struct", String(e))
+                out.struct_name = v
+                has_struct = True
+            elif key == "field":
+                if has_field:
+                    raise ValidationError("layout.field", "duplicate")
+                var v = scan.parse_string()
+                try:
+                    check_bounded_text(v, 1, 128, "layout.field")
+                except e:
+                    raise ValidationError("layout.field", String(e))
+                out.field_name = v
+                has_field = True
+            elif key == "type_kind":
+                if has_kind:
+                    raise ValidationError(
+                        "layout.type_kind", "duplicate"
+                    )
+                var v = scan.parse_string()
+                if (
+                    v != "int"
+                    and v != "ptr"
+                    and v != "array"
+                    and v != "struct"
+                    and v != "union"
+                    and v != "enum"
+                    and v != "float"
+                ):
+                    raise ValidationError(
+                        "layout.type_kind", "bad enum"
+                    )
+                out.type_kind = v
+                has_kind = True
+            elif key == "bit_size":
+                if has_size:
+                    raise ValidationError(
+                        "layout.bit_size", "duplicate"
+                    )
+                scan.skip_ws()
+                var v = scan.parse_int()
+                if v < Int64(1):
+                    raise ValidationError(
+                        "layout.bit_size", "out of range"
+                    )
+                out.bit_size = Int(v)
+                has_size = True
+            elif key == "optional":
+                if has_optional:
+                    raise ValidationError(
+                        "layout.optional", "duplicate"
+                    )
+                scan.skip_ws()
+                out.optional = scan.parse_bool()
+                has_optional = True
+            else:
+                raise ValidationError("layout", "unknown layout field")
+            if not object_next(scan, "layout"):
+                break
+    scan.end_object()
+    if out.target == String("type"):
+        if has_field:
+            raise ValidationError("layout", "field on type target")
+    elif not has_field:
+        raise ValidationError("layout", "missing field")
+    if (
+        not has_cap
+        or not has_target
+        or not has_struct
+        or not has_kind
+        or not has_size
+        or not has_optional
+    ):
+        raise ValidationError("layout", "missing field")
+    return out^
+
+
 def _parse_capability(mut scan: Scanner) raises -> ProfileCapability:
     """Parse one capabilities[] item: id, status, hooks, reason."""
     scan.begin_object()
@@ -807,8 +966,37 @@ def _parse_capability(mut scan: Scanner) raises -> ProfileCapability:
     return out^
 
 
+def _prescan_schema_version(data: List[UInt8]) -> String:
+    """Best-effort top-level schema_version, else "".
+
+    Layouts may precede schema_version in key order, so
+    the item shape needs the version before the main
+    parse reaches it. Only the shape decision reads this;
+    the main parse still validates the version itself.
+    """
+    try:
+        var scan = Scanner(data)
+        scan.skip_ws()
+        scan.begin_object()
+        if not object_is_empty(scan):
+            while True:
+                scan.skip_ws()
+                var key = scan.parse_string()
+                expect_colon(scan, "profile")
+                if key == String("schema_version"):
+                    scan.skip_ws()
+                    return scan.parse_string()
+                scan.skip_value()
+                if not object_next(scan, "profile"):
+                    break
+    except:
+        pass
+    return String("")
+
+
 def parse_profile_bytes(data: List[UInt8]) raises -> Profile:
     """Parse and validate one profile JSON document."""
+    var is_v012 = _prescan_schema_version(data) == String("0.1.2")
     var scan = Scanner(data)
     scan.skip_ws()
     scan.begin_object()
@@ -830,8 +1018,9 @@ def parse_profile_bytes(data: List[UInt8]) raises -> Profile:
                 if has_version:
                     raise ValidationError("schema_version", "duplicate")
                 var v = scan.parse_string()
-                if v != PROFILE_SCHEMA_VERSION:
+                if v != PROFILE_SCHEMA_VERSION and v != String("0.1.2"):
                     raise ValidationError("schema_version", "bad const")
+                out.schema_version = v
                 has_version = True
             elif key == "profile_id":
                 if has_id:
@@ -922,9 +1111,29 @@ def parse_profile_bytes(data: List[UInt8]) raises -> Profile:
                 scan.begin_array()
                 if not array_is_empty(scan):
                     while True:
-                        var l = _parse_layout(scan)
+                        var l = ProfileLayout()
+                        if is_v012:
+                            l = _parse_layout_v012(scan)
+                        else:
+                            l = _parse_layout(scan)
+                        if is_v012:
+                            for i in range(len(out.layouts)):
+                                var prior = out.layouts[i].copy()
+                                if (
+                                    prior.capability == l.capability
+                                    and prior.target == l.target
+                                    and prior.struct_name
+                                    == l.struct_name
+                                    and prior.field_name == l.field_name
+                                ):
+                                    raise ValidationError(
+                                        "layouts", "duplicate"
+                                    )
                         out.layouts.append(l^)
-                        if len(out.layouts) > MAX_PROFILE_LAYOUTS:
+                        var layout_cap = MAX_PROFILE_LAYOUTS
+                        if is_v012:
+                            layout_cap = MAX_PROFILE_LAYOUTS_V012
+                        if len(out.layouts) > layout_cap:
                             raise ValidationError(
                                 "layouts", "too many items"
                             )
@@ -1612,25 +1821,29 @@ struct LiveVerdict(Copyable):
     the interfaces are neither verified nor refused; every
     other refusal carries ``unknown`` False. ``reason`` is
     "" exactly when ``ok``. ``code`` names the machine
-    reason class, "" when ok or unclassified.
+    reason class, "" when ok or unclassified. ``evidence``
+    carries one line per checked 0.1.2 layout item.
     """
 
     var ok: Bool
     var reason: String
     var unknown: Bool
     var code: String
+    var evidence: List[String]
 
     def __init__(out self):
         self.ok = False
         self.reason = String("")
         self.unknown = False
         self.code = String("")
+        self.evidence = List[String]()
 
     def __init__(out self, ok: Bool, reason: String, unknown: Bool):
         self.ok = ok
         self.reason = reason.copy()
         self.unknown = unknown
         self.code = String("")
+        self.evidence = List[String]()
 
 
 def _live_refuse(reason: String) -> LiveVerdict:
@@ -1785,6 +1998,209 @@ def _live_kallsyms_split(
     )
 
 
+def _layout_display(item: ProfileLayout) -> String:
+    """One item's display name: S.F, or S for a type target."""
+    if item.target == String("type"):
+        return item.struct_name.copy()
+    return (
+        item.struct_name
+        + String(".")
+        + item.field_name
+    )
+
+
+def _core_reader_unknown(disp: String, message: String) -> LiveVerdict:
+    """One reader-failure verdict: unknown, coded when structural."""
+    var scode = classify_btf_message(message.copy())
+    var why = disp + String(": ") + message
+    if scode != String(""):
+        return _live_unknown_code(why^, scode^)
+    return _live_unknown(why^)
+
+
+def _core_apply_resolved(
+    disp: String,
+    r: BtfResolved,
+    want_kind: String,
+    want_size: Int,
+    optional: Bool,
+    mut evidence: List[String],
+    show_offset: Bool,
+) -> LiveVerdict:
+    """Map one 0.1.2 resolution to its verdict.
+
+    Refusals and unknowns return directly; an ok verdict
+    means the item passed (its evidence line is already
+    appended) and the caller continues. Offsets print as
+    evidence only, never compare.
+    """
+    if r.ambiguous:
+        return _live_refuse_code(
+            r.message.copy(), String("layout-ambiguous")
+        )
+    if not r.ok:
+        return _core_reader_unknown(disp.copy(), r.message.copy())
+    if not r.found:
+        if optional:
+            evidence.append(disp + String(": absent (optional)"))
+            var done = LiveVerdict()
+            done.ok = True
+            return done^
+        return _live_refuse_code(
+            String("layout: ") + disp + String(" absent from kernel BTF"),
+            String("layout-missing"),
+        )
+    if r.bitfield:
+        return _live_refuse_code(
+            String("layout: ")
+            + disp
+            + String(" is a bitfield (unsupported)"),
+            String("layout-bitfield"),
+        )
+    if r.kind != want_kind:
+        return _live_refuse_code(
+            String("layout: ")
+            + disp
+            + String(" kind ")
+            + r.kind
+            + String(" differs from object kind ")
+            + want_kind,
+            String("layout-kind"),
+        )
+    if r.bit_size != want_size:
+        return _live_refuse_code(
+            String("layout: ")
+            + disp
+            + String(" size ")
+            + String(r.bit_size)
+            + String(" bits differs from object size ")
+            + String(want_size)
+            + String(" bits"),
+            String("layout-size"),
+        )
+    if show_offset:
+        evidence.append(
+            disp
+            + String(": offset ")
+            + String(r.bit_offset)
+            + String(" bits, size ")
+            + String(r.bit_size)
+            + String(" bits")
+        )
+    else:
+        evidence.append(
+            disp
+            + String(": size ")
+            + String(r.bit_size)
+            + String(" bits")
+        )
+    var done = LiveVerdict()
+    done.ok = True
+    return done^
+
+
+def verify_core_layouts(
+    btf: Span[UInt8, _],
+    layouts: List[ProfileLayout],
+    cap_id: String,
+    mut evidence: List[String],
+) -> LiveVerdict:
+    """Check one capability's 0.1.2 layouts against raw BTF.
+
+    Every item naming ``cap_id`` resolves through the
+    Task 1 reader: missing, bitfield, kind, size, and
+    ambiguity outcomes refuse with their layout code, a
+    broken blob is unknown with its Task 2 code, and an
+    absent optional item appends a note. Success appends
+    one evidence line per item; offsets never compare.
+    """
+    for i in range(len(layouts)):
+        var item = layouts[i].copy()
+        if item.capability != cap_id:
+            continue
+        var disp = _layout_display(item.copy())
+        if item.target == String("type"):
+            var agreed = BtfResolved()
+            agreed.ok = True
+            var nfound = 0
+            var disagree = False
+            for wi in range(4):
+                var want = String("struct")
+                if wi == 1:
+                    want = String("union")
+                elif wi == 2:
+                    want = String("enum")
+                elif wi == 3:
+                    want = String("typedef")
+                var r = resolve_btf_type(
+                    btf, item.struct_name, want
+                )
+                if r.ambiguous:
+                    return _live_refuse_code(
+                        r.message.copy(), String("layout-ambiguous")
+                    )
+                if not r.ok:
+                    return _core_reader_unknown(
+                        disp^, r.message.copy()
+                    )
+                if r.found:
+                    nfound += 1
+                    if nfound == 1:
+                        agreed.struct_found = True
+                        agreed.found = True
+                        agreed.kind = r.kind.copy()
+                        agreed.bit_size = r.bit_size
+                    elif (
+                        r.kind != agreed.kind
+                        or r.bit_size != agreed.bit_size
+                    ):
+                        disagree = True
+            if disagree:
+                return _live_refuse_code(
+                    String("type ")
+                    + item.struct_name
+                    + String(": ")
+                    + String(nfound)
+                    + String(" definitions disagree"),
+                    String("layout-ambiguous"),
+                )
+            var v = _core_apply_resolved(
+                disp^,
+                agreed^,
+                item.type_kind,
+                item.bit_size,
+                item.optional,
+                evidence,
+                False,
+            )
+            if not v.ok:
+                return v^
+        else:
+            var r = BtfResolved()
+            if item.target == String("enumerator"):
+                r = resolve_btf_enumerator(
+                    btf, item.struct_name, item.field_name
+                )
+            else:
+                r = resolve_btf_member(
+                    btf, item.struct_name, item.field_name
+                )
+            var v = _core_apply_resolved(
+                disp^,
+                r^,
+                item.type_kind,
+                item.bit_size,
+                item.optional,
+                evidence,
+                item.target != String("enumerator"),
+            )
+            if not v.ok:
+                return v^
+    var done = LiveVerdict()
+    done.ok = True
+    return done^
+
+
 def verify_live_cap(
     reader: EvidenceReader, profile: Profile, cap_id: String
 ) -> LiveVerdict:
@@ -1801,7 +2217,9 @@ def verify_live_cap(
     frozen signature (or any recorded alternate) must
     spell exactly the live BTF prototype, copy-actual
     also checks every recorded member layout against the
-    same BTF bytes, a present kernel.ftrace_enabled
+    same BTF bytes (a 0.1.2 doc instead checks kind and
+    size for the items naming this capability), a present
+    kernel.ftrace_enabled
     must read 1 (absent draws no conclusion),
     and every traced function must match exactly one
     available_filter_functions first token (read under
@@ -1900,6 +2318,13 @@ def verify_live_cap(
             break
     if cap_id == String(COPY_CAP_ID) and len(profile.layouts) > 0:
         needs_btf = True
+    for i in range(len(profile.layouts)):
+        if (
+            profile.layouts[i].v012
+            and profile.layouts[i].capability == cap_id
+        ):
+            needs_btf = True
+            break
     if needs_btf:
         var bread = _read_live_btf(reader, btf)
         if not bread.ok:
@@ -1970,7 +2395,15 @@ def verify_live_cap(
             )
         want_names.append(hook.name.copy())
         want_fns.append(hook.function.copy())
-    if cap_id == String(COPY_CAP_ID):
+    var layout_lines = List[String]()
+    if profile.schema_version == String("0.1.2"):
+        var core = verify_core_layouts(
+            Span(btf), profile.layouts, cap_id, layout_lines
+        )
+        if not core.ok:
+            core.evidence = layout_lines^
+            return core^
+    elif cap_id == String(COPY_CAP_ID):
         for i in range(len(profile.layouts)):
             var lay = profile.layouts[i].copy()
             var m = read_btf_member(
@@ -2081,6 +2514,7 @@ def verify_live_cap(
                 )
     var done = LiveVerdict()
     done.ok = True
+    done.evidence = layout_lines^
     return done^
 
 
@@ -2091,14 +2525,20 @@ def verify_live_interfaces(
 
     Checks each capability in order; the first refusal or
     unknown wins. All verified yields ok with an empty
-    reason.
+    reason. Either way the returned verdict carries every
+    checked layout line so far.
     """
+    var lines = List[String]()
     for i in range(len(caps)):
         var v = verify_live_cap(reader, profile, caps[i])
+        for k in range(len(v.evidence)):
+            lines.append(v.evidence[k].copy())
         if not v.ok:
+            v.evidence = lines^
             return v^
     var done = LiveVerdict()
     done.ok = True
+    done.evidence = lines^
     return done^
 
 

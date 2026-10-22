@@ -41,6 +41,7 @@ SESSION_VERSION_NEXT = "0.1.2"
 RELATIONS = ("mapping_release", "copy_attribution", "sync_attribution")
 EVENT_VERSION = "0.1.1"
 PROFILE_VERSION = "0.1.1"
+PROFILE_VERSION_NEXT = "0.1.2"
 U64MAX = 18446744073709551615
 U64RE = re.compile(r"(0|[1-9][0-9]{0,19})")
 IDRE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
@@ -1177,8 +1178,10 @@ def check_profile(obj):
     check_keys(obj, ("schema_version", "profile_id", "status", "identity",
                      "hooks", "capabilities"), ("notes", "layouts"),
                "profile")
-    if obj["schema_version"] != PROFILE_VERSION:
+    if obj["schema_version"] not in (PROFILE_VERSION,
+                                      PROFILE_VERSION_NEXT):
         fail("bad-version", "profile.schema_version")
+    is_v012 = obj["schema_version"] == PROFILE_VERSION_NEXT
     check_id(obj["profile_id"], "profile.profile_id")
     check_enum(obj["status"], ("validated", "reference-unvalidated"),
                "profile.status")
@@ -1282,21 +1285,66 @@ def check_profile(obj):
             check_text(note, 512, "profile.notes[]", allow_empty=True)
     if "layouts" in obj:
         layouts = obj["layouts"]
-        if not isinstance(layouts, list) or len(layouts) > 16:
+        max_layouts = 64 if is_v012 else 16
+        if not isinstance(layouts, list) or len(layouts) > max_layouts:
             fail("bad-type", "profile.layouts")
-        for item in layouts:
-            check_keys(item, ("struct", "field", "bit_offset",
-                              "bit_size"), (), "profile.layouts[]")
-            check_text(item["struct"], 128, "profile.layouts[].struct")
-            check_text(item["field"], 128, "profile.layouts[].field")
-            for key in ("bit_offset", "bit_size"):
-                value = item[key]
-                if (not isinstance(value, int)
-                        or isinstance(value, bool) or value < 0):
-                    fail("bad-type",
-                         "profile.layouts[].%s must be a non-negative int"
-                         % key)
+        if is_v012:
+            check_profile_layouts_v012(layouts)
+        else:
+            for item in layouts:
+                check_keys(item, ("struct", "field", "bit_offset",
+                                  "bit_size"), (), "profile.layouts[]")
+                check_text(item["struct"], 128,
+                           "profile.layouts[].struct")
+                check_text(item["field"], 128, "profile.layouts[].field")
+                for key in ("bit_offset", "bit_size"):
+                    value = item[key]
+                    if (not isinstance(value, int)
+                            or isinstance(value, bool) or value < 0):
+                        fail("bad-type",
+                             "profile.layouts[].%s must be a non-negative"
+                             " int" % key)
     return obj
+
+
+def check_profile_layouts_v012(layouts):
+    seen = set()
+    for item in layouts:
+        check_keys(item, ("capability", "target", "struct", "type_kind",
+                          "bit_size", "optional"), ("field",),
+                   "profile.layouts[]")
+        check_enum(item["capability"], ("attempt-trace",
+                                        "mapping-lifecycle",
+                                        "copy-actual"),
+                   "profile.layouts[].capability")
+        check_enum(item["target"], ("field", "type", "enumerator"),
+                   "profile.layouts[].target")
+        check_text(item["struct"], 128, "profile.layouts[].struct")
+        check_enum(item["type_kind"], ("int", "ptr", "array", "struct",
+                                       "union", "enum", "float"),
+                   "profile.layouts[].type_kind")
+        size = item["bit_size"]
+        if (not isinstance(size, int)
+                or isinstance(size, bool) or size < 1):
+            fail("bad-type",
+                 "profile.layouts[].bit_size must be an int >= 1")
+        if not isinstance(item["optional"], bool):
+            fail("bad-type",
+                 "profile.layouts[].optional must be a boolean")
+        if item["target"] == "type":
+            if "field" in item:
+                fail("unknown-field",
+                     "profile.layouts[] has unknown fields ['field']")
+        else:
+            if "field" not in item:
+                fail("missing-required",
+                     "profile.layouts[] lacks ['field']")
+            check_text(item["field"], 128, "profile.layouts[].field")
+        key = (item["capability"], item["target"], item["struct"],
+               item.get("field"))
+        if key in seen:
+            fail("duplicate-key", "profile layouts %r" % (key,))
+        seen.add(key)
 
 
 def check_doctor(obj):
@@ -1481,6 +1529,7 @@ def run_selftest():
                "event-v0.1.1.schema.json",
                "report-v0.1.0.schema.json", "report-v0.1.1.schema.json",
                "profile-v0.1.1.schema.json",
+               "profile-v0.1.2.schema.json",
                "doctor-v0.1.0.schema.json", "receipt-v0.1.0.schema.json")
 
     def schema_files():
@@ -1634,6 +1683,67 @@ def run_selftest():
     results.append(expect_reject("profile-bad-tracing-cross",
                                  profile_reject_tracing_cross,
                                  "unknown-field"))
+
+    def _v012_profile():
+        obj = read_json_file(
+            repo_path("profiles", "linux-x86_64-7.0-reference.json"),
+            "reference profile")
+        obj["schema_version"] = PROFILE_VERSION_NEXT
+        obj["layouts"] = [
+            {"capability": "copy-actual", "target": "field",
+             "struct": "io_tlb_pool", "field": "start",
+             "type_kind": "int", "bit_size": 64, "optional": False},
+            {"capability": "mapping-lifecycle", "target": "type",
+             "struct": "mvt_dev",
+             "type_kind": "struct", "bit_size": 6144, "optional": True},
+            {"capability": "attempt-trace", "target": "enumerator",
+             "struct": "mvt_e64", "field": "MVT_BIG",
+             "type_kind": "enum", "bit_size": 64, "optional": False},
+        ]
+        return obj
+
+    def profile_v012_layouts():
+        check_profile(_v012_profile())
+        return "0.1.2 layouts accepted"
+
+    check("profile-v012-layouts", profile_v012_layouts)
+
+    def profile_reject_v012_offset():
+        obj = _v012_profile()
+        obj["layouts"][0]["bit_offset"] = 0
+        check_profile(obj)
+
+    results.append(expect_reject("profile-v012-offset",
+                                 profile_reject_v012_offset,
+                                 "unknown-field"))
+
+    def profile_reject_v012_dup():
+        obj = _v012_profile()
+        obj["layouts"].append(dict(obj["layouts"][0]))
+        check_profile(obj)
+
+    results.append(expect_reject("profile-v012-dup",
+                                 profile_reject_v012_dup,
+                                 "duplicate-key"))
+
+    def profile_reject_v012_field_on_type():
+        obj = _v012_profile()
+        obj["layouts"][1]["field"] = "f"
+        check_profile(obj)
+
+    results.append(expect_reject("profile-v012-field-on-type",
+                                 profile_reject_v012_field_on_type,
+                                 "unknown-field"))
+
+    def profile_reject_v012_old_shape():
+        obj = _v012_profile()
+        obj["layouts"][0] = {"struct": "s", "field": "f",
+                             "bit_offset": 0, "bit_size": 64}
+        check_profile(obj)
+
+    results.append(expect_reject("profile-v012-old-shape",
+                                 profile_reject_v012_old_shape,
+                                 "missing-required"))
 
     def doctor_positive():
         obj = {

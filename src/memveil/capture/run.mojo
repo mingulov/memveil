@@ -197,7 +197,9 @@ struct ScanDecision(Copyable):
     names the requested capabilities in order; a selected
     extra channel carries its verified object bytes, hash,
     and bound ring size in ``lc``/``cp``, and never runs
-    partial. Admitted decisions carry the probed
+    partial. ``layout_evidence`` carries one line per
+    checked 0.1.2 layout item. Admitted decisions carry
+    the probed
     load-time table offsets (``off_*``, -1 when never
     probed). Refusals carry a machine ``refusal_code``
     (``profile`` for selection refusals), whether the
@@ -230,6 +232,7 @@ struct ScanDecision(Copyable):
     var measured_image: LiveValue
     var measured_image_bid: LiveValue
     var selected_caps: String
+    var layout_evidence: List[String]
     var lc: ExtraChannel
     var cp: ExtraChannel
 
@@ -259,6 +262,7 @@ struct ScanDecision(Copyable):
         self.measured_image = LiveValue()
         self.measured_image_bid = LiveValue()
         self.selected_caps = String("")
+        self.layout_evidence = List[String]()
         self.lc = ExtraChannel()
         self.cp = ExtraChannel()
 
@@ -1160,6 +1164,7 @@ def decide_record(
                     String("live check failed: ") + live.reason
                 )
                 continue
+            out.layout_evidence = live.evidence.copy()
             var measured = _measure_binding(
                 root, kernel.release, hook.copy(), Span(raw)
             )
@@ -1472,6 +1477,22 @@ def _append_channel_evidence(
     )
 
 
+def _append_layout_evidence(
+    mut evidence: List[EvidenceItem], lines: List[String]
+):
+    """Append one layout item per checked CO-RE layout line.
+
+    Each line was verified against kernel BTF by the live
+    layout check; the item names that source.
+    """
+    for i in range(len(lines)):
+        var item = EvidenceItem()
+        item.item_type = String("layout")
+        item.source = String("kernel BTF")
+        item.interpretation = lines[i].copy()
+        evidence.append(item^)
+
+
 def render_provenance(source: String, v: LiveValue) -> EvidenceItem:
     """One provenance item from a measured live identity.
 
@@ -1706,6 +1727,7 @@ def run_collector_with[W: WriterSource](
     _append_channel_evidence(
         cfg.evidence, String("cp"), decision.cp
     )
+    _append_layout_evidence(cfg.evidence, decision.layout_evidence)
     if env.kernel.release == String(""):
         cfg.evidence.append(
             _value_item(

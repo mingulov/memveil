@@ -10,11 +10,13 @@ from scripted import ScriptWriter
 from memveil.capture.run import (
     RecordOptions,
     ScanDecision,
+    _append_layout_evidence,
     decide_record,
     parse_requested_caps,
     render_provenance,
     run_collector_with,
 )
+from memveil.model.session import EvidenceItem
 from memveil.cli.record import run_record_with
 from memveil.platform.evidence import KernelInfo
 from memveil.platform.kernelgate import remedy_for
@@ -1343,6 +1345,29 @@ def test_scan_moved_reauthored_admits_offsets() raises:
     assert_equal(d.off_fixed_end, 49)
 
 
+def test_layout_evidence_items() raises:
+    # One checked layout line becomes one layout item naming
+    # kernel BTF as its source.
+    var evidence = List[EvidenceItem]()
+    var lines = List[String]()
+    lines.append(
+        String("io_tlb_pool.start: offset 0 bits, size 64 bits")
+    )
+    lines.append(String("mvt_dev: size 6144 bits"))
+    _append_layout_evidence(evidence, lines)
+    assert_equal(len(evidence), 2)
+    assert_equal(evidence[0].item_type, String("layout"))
+    assert_equal(evidence[0].source, String("kernel BTF"))
+    assert_equal(
+        evidence[0].interpretation,
+        String("io_tlb_pool.start: offset 0 bits, size 64 bits"),
+    )
+    assert_equal(evidence[1].item_type, String("layout"))
+    assert_equal(
+        evidence[1].interpretation, String("mvt_dev: size 6144 bits")
+    )
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_scan_valid_lc_record]()
@@ -1400,6 +1425,7 @@ def run() raises -> Int:
     suite.test[test_scan_receipt_bridge_unknown_partial]()
     suite.test[test_scan_moved_layout_refuses_named_diff]()
     suite.test[test_scan_moved_reauthored_admits_offsets]()
+    suite.test[test_layout_evidence_items]()
     suite^.run()
     return 0
 
