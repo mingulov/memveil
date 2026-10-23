@@ -20,12 +20,14 @@ tree is tracked. One line per variant:
 - lockdown-dashdash: lockdown parameter hidden after --.
 - lockdown-config: boot config forces confidentiality.
 - lockdown-nolsm: boot config has no lockdown LSM.
+- lockdown-forcenone: boot config forces none, no securityfs.
 - lockdown-twobrackets: lockdown file with two bracketed tokens.
 - lockdown-bogus: cmdline carries an unknown lockdown value.
 - lockdown-denied: lockdown file is fixture-denied.
 - notracing-config: boot config without CONFIG_FTRACE.
 - notracing-bpfevents: boot config with CONFIG_FTRACE=y only.
 - tracefs-noevents: events removed under a mounted tracefs.
+- tracefs-noevents-nolock: events removed, lockdown unknown.
 - tracefs-unmounted: empty tracing dir, mounts without tracefs.
 - tracefs-hidden: events removed, no securityfs, no mounts table.
 - tracefs-gone: no tracing tree anywhere.
@@ -64,4 +66,7 @@ tree is tracked. One line per variant:
 - memcg-v1: cgroup file with a v1 line only.
 - unpriv-bpf: unprivileged_bpf_disabled reads 2.
 - swiotlb-noforce: cmdline adds swiotlb=noforce.
-- swiotlb-inactive: sys/kernel/debug present without swiotlb.
+- swiotlb-inactive: swiotlb dir with io_tlb_nslabs zero.
+- swiotlb-noslabs: swiotlb dir without io_tlb_nslabs.
+- swiotlb-debugonly: debug dir without swiotlb.
+- swiotlb-active: swiotlb dir with nonzero io_tlb_nslabs.

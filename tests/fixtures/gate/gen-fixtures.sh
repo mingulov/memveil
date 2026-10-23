@@ -12,7 +12,7 @@ mkdir -p "$GATE"
 
 # Every generated tree; later tasks extend this list alongside
 # their variants. Only these directories are ever removed.
-VARIANTS="base ftrace-off ftrace-denied ftrace-malformed aff-dup aff-module aff-clone aff-prefix debugfs-root debug-denied lockdown-conf lockdown-integrity lockdown-nosecfs lockdown-dashdash lockdown-config lockdown-nolsm lockdown-forcenone lockdown-twobrackets lockdown-bogus lockdown-denied notracing-config notracing-bpfevents tracefs-noevents tracefs-noevents-nolock tracefs-unmounted tracefs-hidden tracefs-gone events-denied btf-absent-config btf-absent-unknown btf-not-visible btf-denied btf-split btf-truncated sig-rename sig-swap sig-width hook-absent hook-not-in-btf hook-clone hook-nokallsyms denied-all container-view format-denied id-absent cc-flags-nonode cc-tdx-nonode cc-flags-host cc-tsm caps-none caps-bpf-perfmon caps-sysadmin caps-malformed caps-short memcg-small memcg-ancestor memcg-malformed memcg-huge memcg-empty memcg-v1 unpriv-bpf swiotlb-noforce swiotlb-inactive"
+VARIANTS="base ftrace-off ftrace-denied ftrace-malformed aff-dup aff-module aff-clone aff-prefix debugfs-root debug-denied lockdown-conf lockdown-integrity lockdown-nosecfs lockdown-dashdash lockdown-config lockdown-nolsm lockdown-forcenone lockdown-twobrackets lockdown-bogus lockdown-denied notracing-config notracing-bpfevents tracefs-noevents tracefs-noevents-nolock tracefs-unmounted tracefs-hidden tracefs-gone events-denied btf-absent-config btf-absent-unknown btf-not-visible btf-denied btf-split btf-truncated sig-rename sig-swap sig-width hook-absent hook-not-in-btf hook-clone hook-nokallsyms denied-all container-view format-denied id-absent cc-flags-nonode cc-tdx-nonode cc-flags-host cc-tsm caps-none caps-bpf-perfmon caps-sysadmin caps-malformed caps-short memcg-small memcg-ancestor memcg-malformed memcg-huge memcg-empty memcg-v1 unpriv-bpf swiotlb-noforce swiotlb-inactive swiotlb-noslabs swiotlb-debugonly swiotlb-active"
 for v in $VARIANTS; do
   rm -rf "$GATE/$v"
 done
@@ -356,6 +356,22 @@ printf 'BOOT_IMAGE=/vmlinuz root=/dev/vda1 swiotlb=noforce\n' \
   > "$GATE/swiotlb-noforce/proc/cmdline"
 
 mk swiotlb-inactive
-mkdir -p "$GATE/swiotlb-inactive/sys/kernel/debug"
+mkdir -p "$GATE/swiotlb-inactive/sys/kernel/debug/swiotlb"
+printf '0\n' \
+  > "$GATE/swiotlb-inactive/sys/kernel/debug/swiotlb/io_tlb_nslabs"
 
-echo "wrote $GATE (base plus 62 variants)"
+mk swiotlb-noslabs
+mkdir -p "$GATE/swiotlb-noslabs/sys/kernel/debug/swiotlb"
+printf '0\n' > "$GATE/swiotlb-noslabs/sys/kernel/debug/swiotlb/io_tlb_used"
+
+mk swiotlb-debugonly
+mkdir -p "$GATE/swiotlb-debugonly/sys/kernel/debug"
+printf 'wakeup_sources witness file\n' \
+  > "$GATE/swiotlb-debugonly/sys/kernel/debug/wakeup_sources"
+
+mk swiotlb-active
+mkdir -p "$GATE/swiotlb-active/sys/kernel/debug/swiotlb"
+printf '256\n' \
+  > "$GATE/swiotlb-active/sys/kernel/debug/swiotlb/io_tlb_nslabs"
+
+echo "wrote $GATE (base plus 65 variants)"

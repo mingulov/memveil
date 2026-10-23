@@ -819,6 +819,7 @@ def test_doctor2_notes() raises:
     var names = List[String]()
     names.append(String("swiotlb-noforce"))
     names.append(String("swiotlb-inactive"))
+    names.append(String("swiotlb-noslabs"))
     for i in range(len(names)):
         var opts = _doctor2_opts(
             gate(names[i].copy()),
@@ -835,17 +836,24 @@ def test_doctor2_notes() raises:
                 seen = True
                 break
         assert_true(seen)
-    var bopts = _doctor2_opts(
-        gate(String("base")),
-        profiles_dir,
-        String("all"),
-        ok_o,
-        lc_o,
-        cp_o,
-    )
-    var bdrep = assess_doctor(bopts)
-    for j in range(len(bdrep.notes)):
-        assert_true(bdrep.notes[j] != want)
+    # An absent swiotlb dir means debugfs is not mounted,
+    # not an inactive pool; a nonzero slab count is active.
+    var quiet = List[String]()
+    quiet.append(String("base"))
+    quiet.append(String("swiotlb-debugonly"))
+    quiet.append(String("swiotlb-active"))
+    for i in range(len(quiet)):
+        var qopts = _doctor2_opts(
+            gate(quiet[i].copy()),
+            profiles_dir.copy(),
+            String("all"),
+            ok_o.copy(),
+            lc_o.copy(),
+            cp_o.copy(),
+        )
+        var qdrep = assess_doctor(qopts)
+        for j in range(len(qdrep.notes)):
+            assert_true(qdrep.notes[j] != want)
 
 
 def test_doctor2_flags() raises:

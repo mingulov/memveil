@@ -92,6 +92,7 @@ comptime DOCTOR_SCHEMA_VERSION = "0.1.0"
 comptime _ZLIB = "libz.so.1"
 comptime _OBJECT_BYTES_CAP = 67108864
 comptime _CMDLINE_CAP = 65536
+comptime _NSLABS_CAP = 64
 comptime _MAX_NEED = 9223372036854775807
 
 
@@ -667,6 +668,57 @@ def _has_token(cmdline: String, token: String) -> Bool:
     return False
 
 
+def _ascii_is_zero(raw: List[UInt8]) -> Bool:
+    """True when raw is blank-padded ASCII digits of value 0."""
+    var started = False
+    var nonzero = False
+    var trailing = False
+    for i in range(len(raw)):
+        var c = raw[i]
+        if (
+            c == UInt8(0x20)
+            or c == UInt8(0x09)
+            or c == UInt8(0x0A)
+            or c == UInt8(0x0D)
+        ):
+            if started:
+                trailing = True
+            continue
+        if trailing:
+            return False
+        if c < UInt8(0x30) or c > UInt8(0x39):
+            return False
+        started = True
+        if c != UInt8(0x30):
+            nonzero = True
+    return started and not nonzero
+
+
+def _swiotlb_pool_inactive(reader: EvidenceReader) -> Bool:
+    """True when debugfs shows a swiotlb dir with no slabs.
+
+    The kernel always creates the swiotlb directory and
+    skips its files when the slab count is zero, so an
+    absent directory proves nothing about the pool.
+    """
+    if (
+        file_state(reader, String("/sys/kernel/debug/swiotlb"))
+        != EVIDENCE_OK
+    ):
+        return False
+    var npath = String("/sys/kernel/debug/swiotlb/io_tlb_nslabs")
+    var st = file_state(reader, npath.copy())
+    if st == EVIDENCE_ABSENT:
+        return True
+    if st != EVIDENCE_OK:
+        return False
+    try:
+        var raw = read_evidence(reader, npath, _NSLABS_CAP)
+        return _ascii_is_zero(raw^)
+    except:
+        return False
+
+
 def _is_object_refusal(refusal: String) -> Bool:
     """True when record refused over a channel object."""
     if refusal.startswith(String("no object:")):
@@ -1150,13 +1202,10 @@ def assess_doctor(opts: DoctorOptions) -> DoctorReport2:
         out.notes.append(
             String("no swiotlb pool active: attempts will be 0")
         )
-    elif file_state(reader, String("/sys/kernel/debug")) == EVIDENCE_OK:
-        if file_state(
-            reader, String("/sys/kernel/debug/swiotlb")
-        ) == EVIDENCE_ABSENT:
-            out.notes.append(
-                String("no swiotlb pool active: attempts will be 0")
-            )
+    elif _swiotlb_pool_inactive(reader):
+        out.notes.append(
+            String("no swiotlb pool active: attempts will be 0")
+        )
     if unp.state == String("pass"):
         out.notes.append(unp.reason.copy())
     return out^
