@@ -6,7 +6,8 @@ This recipe records bounce attempts, mapping lifecycle, and
 actual executed copies on the admitted ordinary-Linux
 kernel, with an independent oracle module checking the
 scripted slices. It qualifies attempt/lifecycle/copy
-collection on the exact profile named below. It does not
+collection on the shipped reference profile named below.
+It does not
 qualify per-device reconstruction, confidential-memory
 transitions, or sustained pool pressure; see the
 [support table](../support.md#capabilities-by-mode) and
@@ -17,20 +18,18 @@ transitions, or sustained pool pressure; see the
 ## Prerequisites
 
 - The admitted kernel files: image, config, and headers for
-  `7.0.0-34-generic` (the profile binds exact image,
-  config, BTF, tracepoint-format, and build-id bytes).
+  `7.0.0-34-generic` (the guest identity check verifies
+  exact image, config, BTF, tracepoint-format, and
+  build-id bytes).
   The headers must include a built tree at
   `/lib/modules/7.0.0-34-generic/build` with `make` on
   PATH, so the oracle module builds for the guest kernel.
 - The frozen harness: `vng` 1.41, `qemu-system-x86_64`
   10.2.1, `/dev/kvm`, and passwordless sudo for the guest
   runner.
-- Artifacts whose BPF bytes match the narrow profile
-  bindings: compare `sha256sum` of each `bpf/*.bpf.o`
-  against the `object`, `lc_object`, and `cp_object` fields
-  of `profiles/linux-x86_64-7.0.0-34-generic.json`. A
-  rebuilt object with different bytes fails admission until
-  re-qualification; building never earns collection
+- Artifacts from a single build: use one build's binary,
+  BPF objects, and bridge throughout. A rebuilt object
+  needs fresh evidence; building never earns collection
   qualification by itself.
 - The oracle module source in `tests/kernel` (module
   0.4.0), built for the kernel the guest runs (step 1).
@@ -81,8 +80,11 @@ wrapper:
     fi
     exec "$REAL_VNG" "$@"
 
-Point `VNG` at the wrapper and build the oracle module for
-the guest kernel with `MEMVEIL_ORACLE_KVER=7.0.0-34-generic`.
+Point `VNG` at the wrapper; the module in step 1 still
+builds against the guest kernel's headers through `KDIR`.
+A cross-release `MEMVEIL_ORACLE_KVER` override needs a
+validated profile pin for that release, which the 0.1.0
+bundle does not ship, so cross-release runs fail closed.
 The guest kernel identity (image, config, BTF, format,
 build-id) still verifies inside the guest on every run;
 the wrapper selects the kernel, it never bypasses a check.
@@ -107,7 +109,7 @@ guest outputs below go under `/tmp/rec/`, which step 2
 maps to the host directory `build/vm/rec-shared/` (files
 may land root-owned; that is normal). Never write
 elsewhere under guest `/tmp`: the private overlay is lost
-on exit. The shipped narrow profile is used as is; no
+on exit. The shipped reference profile is used as is; no
 substitution step is needed.
 
 1. Build the oracle module for the guest kernel and prepare
@@ -175,7 +177,7 @@ substitution step is needed.
            --lc-object "$ROOT/bpf/swiotlb_lifecycle.bpf.o" \
            --cp-object "$ROOT/bpf/swiotlb_copy.bpf.o" \
            --bridge "$ROOT/lib/libbpf_mojo.so.1" \
-           --profile "$ROOT/profiles/linux-x86_64-7.0.0-34-generic.json" \
+           --profile "$ROOT/profiles/linux-x86_64-7.0-reference.json" \
            --capability attempt-trace,mapping-lifecycle,copy-actual \
            >/tmp/rec/record.out 2>/tmp/rec/record.err &
        REC=$!
@@ -187,9 +189,10 @@ substitution step is needed.
 
    The `ready session=` line proves the window is open;
    run no workload before it appears. Without `--profile`,
-   the first validated profile passing full binding wins;
-   extra channels never run partial, so a binding mismatch
-   refuses with exit 3 instead of recording.
+   the first covering reference admits through the live
+   checks; extra channels never run partial, so an
+   interface mismatch refuses with exit 3 instead of
+   recording.
 
 5. Record the oracle phase (2 scripted operations, 4,096 +
    1,024 bytes) with its monotonic window:
@@ -401,8 +404,8 @@ worked example's README records the full agreement table.
 
 ## Expected results
 
-- Exit 4 with a `validated` profile decision naming the
-  narrow profile.
+- Exit 4 with a profile decision naming the shipped
+  reference profile.
 - Detail and aggregate quality `complete_for_scope` with
   loss 0; terminal `partial`; correlation `partial`
   wherever copies or syncs lack mapping identity (their
@@ -458,9 +461,8 @@ are different: they run the packaged or built capture
 verbs end to end, and their PASS is the shipping
 lifecycle/copy qualification, limited to the exact tested
 artifact on the admitted profile - the bundle or built
-tree whose BPF bytes match the narrow profile bindings,
-on the narrow 7.0.0-34-generic environment the profile
-names, selected in shipped mode (see
+tree admitted through the shipped reference profile on
+the tested kernel, selected in shipped mode (see
 [VM gate kernel](#vm-gate-kernel)). A PASS never qualifies
 a rebuilt object with different bytes, another kernel,
 another profile, or a minted gate profile.

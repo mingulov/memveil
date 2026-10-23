@@ -23,10 +23,10 @@ confidential-memory collection. The original lifecycle preview and
 full confidential first-release gates remain open.
 
 The [support table](docs/support.md#capabilities-by-mode) defines the
-capabilities by mode. One narrow profile,
-`linux-x86_64-7.0.0-34-generic`, has VM-gate attempt, lifecycle,
-and copy evidence; admission also requires its exact
-config/BTF/object bindings. The VM gates themselves run on any
+capabilities by mode. Two reference profiles ship; kernels are
+admitted through live interface checks, and a bound document
+additionally requires its exact config/BTF/object bindings.
+The VM gates themselves run on any
 host kernel: they mint an unvalidated gate profile for the kernel
 under test (see [VM gate kernel](docs/recipes/ordinary-linux.md#vm-gate-kernel)),
 which exercises the code but qualifies nothing.

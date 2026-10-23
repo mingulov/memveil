@@ -58,7 +58,7 @@ prints, in part:
 
     kernel: 7.0.0-38-generic x86_64 (floor 6.0: yes)
     profile: linux-x86_64-7.0-reference (reference-unvalidated)
-    profile-detail: profile linux-x86_64-7.0-reference covers this identity but is reference-unvalidated; linux-x86_64-7.0.0-34-generic identity mismatch: revision
+    profile-detail: profile linux-x86_64-7.0-reference covers this identity but is reference-unvalidated
     capabilities:
       attempt-trace: unknown - tracepoint swiotlb:swiotlb_bounced denied (privilege)
         fix: re-run with elevated privileges (root)
@@ -69,10 +69,9 @@ prints, in part:
     privilege: euid 1001, denied: /sys/kernel/tracing/events/swiotlb/swiotlb_bounced/id /sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format
     verdict: unavailable
 
-with exit 3. Read it as: the kernel clears the 6.0 floor;
-the shipped reference covers this kernel by identity but
-is unvalidated; the narrow `7.0.0-34-generic` profile does
-not cover this revision; and tracefs plus the ftrace
+with exit 3. Read it as: the kernel clears the 6.0 floor
+and the shipped reference covers this kernel by identity
+but is unvalidated, while tracefs plus the ftrace
 function list are unreadable without privilege, so every
 capability is unknown rather than refused. Re-run
 passively as root for the full picture:
@@ -318,8 +317,9 @@ document for a new host follows the same skeleton:
     }
 
 Never write `status` as `validated`: that promotion
-belongs to the evidence gates behind the shipped narrow
-profile, never to this recipe. Check the shape with the
+belongs to evidence gates behind a qualified narrow
+profile, never to this recipe. The 0.1.0 bundle ships
+reference profiles only. Check the shape with the
 independent oracle before registering:
 
     ./tools/validate-schemas --check-profile my-host.json
@@ -566,8 +566,9 @@ host.
   offset-only moves are the one tolerated drift,
   probed into the load-time table and flagged.
 - Receipts never claim `validated`, and this recipe
-  never mints that grade. The one shipped narrow
-  profile earned its status through VM-gate evidence
-  behind `tools/emit-gate-profiles`, the maintainer
-  path for that gate kernel only; new kernels follow
-  this recipe and qualify machine-locally.
+  never mints that grade. The 0.1.0 bundle ships
+  reference profiles only; a narrow profile earns
+  `validated` only through gate evidence behind
+  `tools/emit-gate-profiles`, the maintainer path for
+  one gate kernel at a time. New kernels follow this
+  recipe and qualify machine-locally.

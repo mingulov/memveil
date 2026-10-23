@@ -114,23 +114,26 @@ def sha_file_maybe_sudo(path):
     raise OSError("cannot hash %s directly or via sudo -n" % path)
 
 
-def validated_btf_pin(release):
-    """BTF pin from the shipped validated profile for a release.
+def validated_btf_pin(release, profiles_dir=None):
+    """BTF pin from the validated profile for a release.
 
-    Scans the profiles manifest for a validated document whose
-    source revision names the release. Fails closed when no
-    such document exists or its note carries no well-formed
-    pin: a guest kernel without a validated pin is not an
-    admitted module target.
+    Scans the profiles manifest (the shipped profiles dir
+    unless profiles_dir names a test dir) for a validated
+    document whose source revision names the release. Fails
+    closed when no such document exists or its note
+    carries no well-formed pin: a guest kernel without a
+    validated pin is not an admitted module target.
     """
-    manifest = Path(REPO) / "profiles" / "manifest.txt"
+    root = Path(profiles_dir) if profiles_dir \
+        else Path(REPO) / "profiles"
+    manifest = root / "manifest.txt"
     try:
         names = manifest.read_text().split()
     except OSError:
         pytest.fail("armed but profiles manifest unreadable: %s"
                     % manifest)
     for name in names:
-        doc_path = Path(REPO) / "profiles" / name
+        doc_path = root / name
         try:
             doc = json.loads(doc_path.read_text())
         except (OSError, ValueError):
@@ -151,13 +154,16 @@ def validated_btf_pin(release):
 
 def module_build_identity(host_release=None, modules_root="/lib/modules",
                           boot_root="/boot",
-                          btf_path="/sys/kernel/btf/vmlinux"):
+                          btf_path="/sys/kernel/btf/vmlinux",
+                          profiles_dir=None):
     """Identify owned source and exact guest-kernel build inputs.
 
     host_release names the running kernel (default: the live
     uname release); modules_root, boot_root, and btf_path
     name the kernel file roots (defaults: the live host
-    paths). Callers measuring the real host use the defaults;
+    paths); profiles_dir names the profiles root holding
+    the validated pin (default: the shipped profiles).
+    Callers measuring the real host use the defaults;
     tests pass a fixture tree with controlled bytes. A
     same-release override measures live bytes exactly like no
     override; only a different release uses the profile pin.
@@ -174,7 +180,7 @@ def module_build_identity(host_release=None, modules_root="/lib/modules",
         pinned = False
     kdir = Path(modules_root) / release / "build"
     if pinned:
-        btf_sha = validated_btf_pin(release)
+        btf_sha = validated_btf_pin(release, profiles_dir)
         provenance = "profile-pinned"
     else:
         btf_sha = sha(btf_path)

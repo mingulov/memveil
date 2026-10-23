@@ -12,7 +12,7 @@ has passed its gates.
 | --- | --- | --- |
 | Bounce attempts/requested bytes | `swiotlb_bounced` attempts on an admitted profile; attempts are not successful DMA or actual copies | Report and replay `top` reduce captured attempts/counters without adding alternative measurements |
 | Default-pool capacity/used/high-water | Readable debugfs samples at start, on a best-effort 1 s cadence (cap 4,096; missed ticks skipped), and close; unreadable reads persist as unavailable, never failed runs | Pool reducers require matching generation/scope; samples are opportunistic reads with possible gaps, so they cannot establish sustained pressure alone |
-| Allocation occupancy, copy, sync, lifetimes | Qualified on `linux-x86_64-7.0.0-34-generic` via `--capability` (with `--lc-object`/`--cp-object` as optional overrides), per host by a machine-local `local-auto` receipt from `memveil qualify`, or on any covered kernel through the live interface checks (see Kernel generations); exact bindings and live checks refuse anything else | Offline reducers accept corresponding records; laboratory probes and scripted DMA comparisons do not qualify packaged lifecycle collection |
+| Allocation occupancy, copy, sync, lifetimes | Qualified on any covered kernel through the live interface checks (see Kernel generations), or per host by a machine-local `local-auto` receipt from `memveil qualify`; collect with `--capability` (with `--lc-object`/`--cp-object` as optional overrides). Exact bindings and live checks refuse anything else | Offline reducers accept corresponding records; laboratory probes and scripted DMA comparisons do not qualify packaged lifecycle collection |
 | Private/shared state and physical unions | No qualified shipping source | Offline region/baseline reducers and laboratory conversion probes; ordinary-Linux APIs do not prove confidential transitions |
 | Summary | `top --output DIR [--object PATH]` observes live under the same admission as `record`, retaining the capture while printing prefix summaries (provisional; the final answer always equals a replay of the retained capture); startup/collection refusals exit 3 | `top DIR` replays prefixes of a finished capture |
 | Joint observers/two instances | No current-candidate qualification | Historical experiments only; see [coexistence](coexistence.md) |
@@ -80,14 +80,15 @@ are not provided.
 
 ## Configuration and artifact admission
 
-- One narrow profile with VM-gate attempt, lifecycle, and
-  copy evidence: `linux-x86_64-7.0.0-34-generic` (x86-64,
-  kernel floor 7.0).
-  Recording admission checks exact kernel-image hash/build ID,
-  config hash and config source, BTF, event-format, and object
-  bindings, not just the release string, and refuses when a
-  time-namespace offset is present. A rebuilt BPF object can
-  fail the shipped binding; building/packaging/offline replay does
+- Two reference profiles (x86-64, kernel floors 7.0 and
+  6.0). Recording admission checks the live interfaces
+  (BTF signatures, tracepoint format, ftrace
+  attachability), not just the release string, and refuses
+  when a time-namespace offset is present. A bound document
+  additionally checks exact kernel-image hash/build ID,
+  config hash and config source, BTF, event-format, and
+  object bindings; a rebuilt BPF object can fail those
+  bindings. Building/packaging/offline replay does
   not earn collection qualification. A machine-local receipt
   from `memveil qualify` admits a bound reference profile as
   `local-auto`: the document needs covering identity,
@@ -194,8 +195,8 @@ Notes:
   check (run `doctor` and `record` on the new kernel).
   Admission without the boot check is not a support
   claim.
-- Admission is not qualification: VM-gated `validated`
-  evidence stays on the narrow profile's kernel. Other
+- Admission is not qualification: booted matrix evidence
+  stays on the tested kernel and artifact. Other
   builds additionally need a machine-local `local-auto`
   receipt from `memveil qualify` plus the independent
   oracle comparison before results are trusted.

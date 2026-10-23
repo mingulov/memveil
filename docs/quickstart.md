@@ -8,8 +8,9 @@ from the copy channel. This bundle runs from any directory: no
 compiler, Pixi, network, or source checkout needed. The
 [capability table](support.md#capabilities-by-mode) distinguishes the
 shipping collector, offline reducers and laboratory probes.
-Lifecycle/copy collection is qualified on one narrow profile or a
-machine-local receipt from step 3; a full
+Lifecycle/copy collection is qualified through the live
+interface checks on covered kernels (see the support
+envelope) or a machine-local receipt from step 3; a full
 confidential release is not yet qualified. The host supplies libc,
 libm, libdl, and the dynamic loader for offline use, plus libelf
 and libz for recording; see the support envelope for the exact
@@ -35,10 +36,10 @@ source revisions; re-hash any file to confirm it.
 
 Doctor loads no BPF and changes nothing. It reports the kernel
 floor check, guest signals, the selected semantic profile, and
-per-capability reasons. The narrow `7.0.0-34-generic` x86-64 profile has
-VM-gate attempt, lifecycle, and copy evidence; exact
-config/BTF/event-format/object bindings must also hold. A rebuilt
-object can fail the binding even on that kernel.
+per-capability reasons. The shipped reference profiles admit
+kernels through live interface checks; a bound document
+additionally needs its exact config/BTF/event-format/object
+bindings to hold, and a rebuilt object can fail the binding.
 Each unavailable capability carries a `fix:` line naming the
 next action (`--json` renders the same report as JSON).
 Passive availability is not actual attachment or qualification. A `denied

@@ -20,8 +20,9 @@ lifecycle, copy). The tracing attaches resolve by function
 name through the bridge. Collector integration, multi-channel
 packaging, capability-requested profile selection, and live VM
 qualification of lifecycle/copy collection are complete; the
-`linux-x86_64-7.0.0-34-generic` profile declares both
-capabilities supported with the frozen hook sets below.
+shipped reference profiles declare both capabilities as
+candidates with the frozen hook sets below, and a bound
+document whose bindings hold declares them supported.
 
 | Probe program | Attach | Kernel function |
 | --- | --- | --- |

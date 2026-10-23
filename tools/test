@@ -1044,8 +1044,7 @@ suite_profiles() {
         fi
     done
     for prof in linux-x86_64-7.0-reference \
-        linux-x86_64-6plus-reference \
-        linux-x86_64-7.0.0-34-generic; do
+        linux-x86_64-6plus-reference; do
         "$ROOT/tools/emit-core-layouts" \
             --object "attempt-trace=$ROOT/build/bpf/swiotlb_attempt.bpf.o" \
             --object "mapping-lifecycle=$ROOT/build/bpf/swiotlb_lifecycle.bpf.o" \

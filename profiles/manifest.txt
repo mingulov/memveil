@@ -1,3 +1,2 @@
 linux-x86_64-7.0-reference.json
-linux-x86_64-7.0.0-34-generic.json
 linux-x86_64-6plus-reference.json

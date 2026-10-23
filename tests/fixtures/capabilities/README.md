@@ -46,6 +46,7 @@ flag tokens.
 | Directory | Shape |
 |---|---|
 | `profiles-test/` | manifest plus `test-validated.json`: validated, x86_64, min 7.0, recorded format, supported attempt-trace. Test device only, never admitted by `profiles/`. |
+| `profiles-narrow-test/` | reference copy plus tool-minted `test-narrow-validated.json`: validated narrow gate shape (frozen tracing set, recorded format, CO-RE layouts) for the ready-validated fixture identity. Test device only, never admitted by `profiles/`. |
 | `profiles-empty/` | empty manifest: no admitted profiles |
 | `profiles-bad-manifest-blank/` | manifest with a blank line |
 | `profiles-bad-manifest-dup/` | manifest with a duplicate entry |

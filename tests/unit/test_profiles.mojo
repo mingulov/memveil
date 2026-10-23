@@ -715,7 +715,7 @@ def test_parse_minimal_ok() raises:
 
 def test_parse_reference_file() raises:
     var ps = load_profiles(String("profiles"))
-    assert_equal(len(ps), 3)
+    assert_equal(len(ps), 2)
     assert_equal(ps[0].profile_id, String("linux-x86_64-7.0-reference"))
     assert_equal(ps[0].status, String("reference-unvalidated"))
     assert_equal(len(ps[0].hooks), 6)
@@ -727,34 +727,48 @@ def test_parse_reference_file() raises:
         ps[0].hooks[1].name, String("fexit:swiotlb_tbl_map_single")
     )
     assert_equal(len(ps[0].hooks[1].signature_alt), 1)
-    # Manifest order stays reference-first; the narrow gate
-    # doc appends for the two-phase collection scan. Its
-    # status is asserted by the VM gate, not pinned here.
+    # Only the two references ship; the narrow gate
+    # shape is pinned through the tool-minted test doc in
+    # test_parse_narrow_test_file.
+    # The 6plus reference reuses the same pins with a 6.0 floor.
     assert_equal(
-        ps[1].profile_id, String("linux-x86_64-7.0.0-34-generic")
+        ps[1].profile_id, String("linux-x86_64-6plus-reference")
     )
+    assert_equal(ps[1].status, String("reference-unvalidated"))
+    assert_equal(ps[1].identity.min_kernel, String("6.0"))
+    assert_equal(len(ps[1].hooks), 6)
+    assert_equal(len(ps[1].layouts), 17)
+    assert_equal(len(ps[1].hooks[1].signature_alt), 1)
+
+
+def test_parse_narrow_test_file() raises:
+    # The tool-minted narrow test doc carries the gate
+    # shape (frozen tracing set, recorded format, CO-RE
+    # layouts) with validated status, so the validated
+    # selection path stays covered without a shipped
+    # narrow profile.
+    var ps = load_profiles(fx("profiles-narrow-test"))
+    assert_equal(len(ps), 2)
+    assert_equal(
+        ps[0].profile_id, String("linux-x86_64-7.0-reference")
+    )
+    assert_equal(ps[1].profile_id, String("test-narrow-validated"))
+    assert_equal(ps[1].status, String("validated"))
     assert_equal(len(ps[1].hooks), 6)
     assert_true(ps[1].hooks[0].format_has)
     assert_equal(len(ps[1].caps), 3)
-    # The 6plus reference reuses the same pins with a 6.0 floor.
-    assert_equal(
-        ps[2].profile_id, String("linux-x86_64-6plus-reference")
-    )
-    assert_equal(ps[2].status, String("reference-unvalidated"))
-    assert_equal(ps[2].identity.min_kernel, String("6.0"))
-    assert_equal(len(ps[2].hooks), 6)
-    assert_equal(len(ps[2].layouts), 17)
-    assert_equal(len(ps[2].hooks[1].signature_alt), 1)
+    assert_equal(len(ps[1].layouts), 17)
 
 
 def test_gate_doc_tracing_caps_supported() raises:
     # The admission flip: the gate doc carries the frozen
     # tracing set with both extra caps supported. Names and
-    # membership are pinned; the freeze moves only by
-    # re-qualification of every lane together.
-    var ps = load_profiles(String("profiles"))
+    # membership are pinned through the tool-minted test
+    # doc; the freeze moves only by re-qualification of
+    # every lane together.
+    var ps = load_profiles(fx("profiles-narrow-test"))
     assert_equal(
-        ps[1].profile_id, String("linux-x86_64-7.0.0-34-generic")
+        ps[1].profile_id, String("test-narrow-validated")
     )
     var want = List[String]()
     want.append(String("fexit:swiotlb_tbl_map_single"))
@@ -3757,6 +3771,7 @@ def run() raises -> Int:
     suite.test[test_parse_source_note_700_ok]()
     suite.test[test_parse_source_note_1025_rejects]()
     suite.test[test_parse_reference_file]()
+    suite.test[test_parse_narrow_test_file]()
     suite.test[test_gate_doc_tracing_caps_supported]()
     suite.test[test_parse_validated_file]()
     suite.test[test_parse_bad_status]()

@@ -165,8 +165,79 @@ def test_doctor2_json_ordinary_exact() raises:
         '    "profile_id": "linux-x86_64-7.0-reference",\n'
         '    "status": "reference-unvalidated",\n'
         '    "reason": "profile linux-x86_64-7.0-reference covers'
+        " this identity but is reference-unvalidated\"\n"
+        "  },\n"
+        '  "capabilities": [{"id": "attempt-trace",'
+        ' "status": "unavailable",'
+        ' "reason": "layout: missing field common_type",'
+        ' "remedy": "", "reason_code": "profile", "evidence": []},'
+        ' {"id": "mapping-lifecycle", "status": "unavailable",'
+        ' "reason": "layout: missing field common_type",'
+        ' "remedy": "", "reason_code": "profile", "evidence": []},'
+        ' {"id": "copy-actual", "status": "unavailable",'
+        ' "reason": "layout: missing field common_type",'
+        ' "remedy": "", "reason_code": "profile", "evidence": []}],\n'
+        '  "privilege": {\n'
+        '    "euid": 1001,\n'
+        '    "denied_paths": []\n'
+        "  },\n"
+        '  "requested": ["attempt-trace", "mapping-lifecycle",'
+        ' "copy-actual"],\n'
+        '  "prechecks": [{"id": "privilege", "state": "unknown",'
+        ' "reason": "CapEff unreadable: absent"},'
+        ' {"id": "memcg", "state": "unknown",'
+        ' "reason": "cgroup unreadable: absent"},'
+        ' {"id": "unprivileged-bpf", "state": "unknown",'
+        ' "reason": "unprivileged_bpf_disabled unreadable: absent"}],\n'
+        '  "load": [],\n'
+        '  "notes": [],\n'
+        '  "verdict": "unavailable",\n'
+        '  "summary": "unavailable: layout: missing field common_type"\n'
+        "}\n"
+    )
+    assert_equal(js, want)
+
+
+def test_doctor2_json_narrow_test_near_miss() raises:
+    # The validated near-miss path stays covered through
+    # the tool-minted narrow test doc: same fixture, same
+    # covering reference, the uncheckable binding names the
+    # test doc.
+    var drep = drep2_for(
+        String("ordinary-7.0"), fx("profiles-narrow-test")
+    )
+    var js = render_doctor_json2(drep)
+    var want = String(
+        '{\n'
+        '  "schema_version": "0.1.1",\n'
+        '  "mode": "passive",\n'
+        '  "provenance": {"origin": "fixture"},\n'
+        '  "kernel": {\n'
+        '    "release": "7.0.0-34-generic",\n'
+        '    "arch": "x86_64",\n'
+        '    "eligible_floor": true,\n'
+        '    "floor_reason":'
+        ' "release 7.0.0-34-generic meets the 6.0 floor",\n'
+        '    "btf": {"state": "malformed", "bytes": "24",'
+        ' "config_btf": "unknown", "config_src": "none"},\n'
+        '    "lockdown": {"mode": "unknown", "src": "none"}\n'
+        "  },\n"
+        '  "guest": {\n'
+        '    "tech": "ordinary",\n'
+        '    "signals": ["sev-node:absent", "tdx-node:absent",'
+        ' "cpu-flags:ok:none", "ordinary:absent-nodes-inference",'
+        ' "info:btf:present:24B", "info:config-gz:absent",'
+        ' "info:os:ubuntu:24.04", "info:boot-config:absent"],\n'
+        '    "asserted": false,\n'
+        '    "conflict": ""\n'
+        "  },\n"
+        '  "profile": {\n'
+        '    "matched": false,\n'
+        '    "profile_id": "linux-x86_64-7.0-reference",\n'
+        '    "status": "reference-unvalidated",\n'
+        '    "reason": "profile linux-x86_64-7.0-reference covers'
         " this identity but is reference-unvalidated;"
-        " linux-x86_64-7.0.0-34-generic identity uncheckable:"
+        " test-narrow-validated identity uncheckable:"
         ' config"\n'
         "  },\n"
         '  "capabilities": [{"id": "attempt-trace",'
@@ -1009,6 +1080,7 @@ def run() raises -> Int:
     suite.test[test_doctor2_denied_merge]()
     suite.test[test_doctor2_env_denied]()
     suite.test[test_doctor2_json_ordinary_exact]()
+    suite.test[test_doctor2_json_narrow_test_near_miss]()
     suite.test[test_doctor2_text_fix_lines]()
     suite.test[test_doctor2_json_matched]()
     suite.test[test_doctor2_json_null_profile]()

@@ -226,6 +226,17 @@ printf 'linux-x86_64-7.0-reference.json\ntest-bound-validated.json\n' \
 printf 'linux-x86_64-7.0-reference.json\ntest-bound-multi.json\n' \
   > "$ROOT/profiles-bound-multi/manifest.txt"
 
+# Narrow gate-shape selection fixture. The manifest and the
+# reference copy regenerate here; test-narrow-validated.json
+# is tool-minted (gate emitter over the ready-validated
+# fixture tree) and checked in, with only its status line
+# promoted to validated.
+mkdir -p "$ROOT/profiles-narrow-test"
+cp "$ROOT/../../../profiles/linux-x86_64-7.0-reference.json" \
+  "$ROOT/profiles-narrow-test/linux-x86_64-7.0-reference.json"
+printf 'linux-x86_64-7.0-reference.json\ntest-narrow-validated.json\n' \
+  > "$ROOT/profiles-narrow-test/manifest.txt"
+
 # Empty manifest dir.
 mkdir -p "$ROOT/profiles-empty"
 : > "$ROOT/profiles-empty/manifest.txt"

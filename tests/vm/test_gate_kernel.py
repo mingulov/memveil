@@ -226,15 +226,27 @@ def test_binding_drift_names_each_field(tmp_path):
 
 
 @needs_build
-def test_shipped_34_profile_regenerates_from_its_own_bindings():
-    # The refactored transform reproduces the checked-in gate doc.
-    path = REPO / "profiles" / "linux-x86_64-7.0.0-34-generic.json"
-    shipped = json.loads(path.read_text())
-    fmt = shipped["hooks"][0]["format_text"]
-    ident = gate_kernel.shipped_identity(shipped)
-    gate, _ = gate_kernel.emitter().gate_docs(ident, fmt, shipped["profile_id"])
-    gate["status"] = shipped["status"]
-    assert gate == shipped
+def test_narrow_test_profile_regenerates_from_its_own_bindings():
+    # The checked-in narrow test doc equals the emitter
+    # output for its own bindings: minted by the repo
+    # transform from test-identity bytes, with only the
+    # status line promoted to validated. The identity
+    # bytes come from the ready-validated fixture tree
+    # (config, image, notes, format, BTF marker); the
+    # object hashes and CO-RE layouts come from the
+    # current build/bpf objects, so re-running the mint
+    # after a BPF change re-qualifies the bindings.
+    path = (REPO / "tests" / "fixtures" / "capabilities"
+            / "profiles-narrow-test" / "test-narrow-validated.json")
+    checked = json.loads(path.read_text())
+    assert checked["profile_id"] == "test-narrow-validated"
+    assert checked["status"] == "validated"
+    fmt = checked["hooks"][0]["format_text"]
+    ident = gate_kernel.shipped_identity(checked)
+    gate, _ = gate_kernel.emitter().gate_docs(
+        ident, fmt, checked["profile_id"])
+    gate["status"] = checked["status"]
+    assert gate == checked
 
 
 def comp_dirs(obj):
@@ -269,10 +281,12 @@ def test_built_objects_contain_no_checkout_path():
 
 
 @needs_build
-def test_built_objects_match_shipped_bindings():
-    # A fresh build reproduces the shipped bindings byte for byte.
+def test_built_objects_match_narrow_test_bindings():
+    # A fresh build reproduces the narrow test doc's
+    # object bindings byte for byte.
     doc = json.loads(
-        (REPO / "profiles" / "linux-x86_64-7.0.0-34-generic.json"
+        (REPO / "tests" / "fixtures" / "capabilities"
+         / "profiles-narrow-test" / "test-narrow-validated.json"
          ).read_text())
     note = dict(part.split("=", 1)
                 for part in doc["identity"]["source"]["note"].split())

@@ -5,11 +5,14 @@
 208 `bounce_attempt` details, 208 `map_result` plus 208 `unmap`
 lifecycle events, 613 `sync_request` and 412 `copy` executed-copy
 events, 151 default-pool samples, and 4 counter snapshots.
-Recorded live in a disposable guest (kernel 7.0.0-34-generic,
-validated profile `linux-x86_64-7.0.0-34-generic`) with the
-packaged `record` verb and all three channels selected
-(`attempt-trace,mapping-lifecycle,copy-actual`). The capture
-ran three workload phases: a 2-operation oracle phase
+Recorded live in a disposable guest (kernel 7.0.0-34-generic)
+with the packaged `record` verb and all three channels selected
+(`attempt-trace,mapping-lifecycle,copy-actual`). The recorded
+profile decision names the narrow profile that kernel was
+captured under; the 0.1.0 bundle ships reference profiles
+only, and this historical capture qualifies no rebuilt
+package. The capture ran three workload phases: a 2-operation
+oracle phase
 (4,096 + 1,024 bytes), a 4-operation fail phase (one failed
 outer mapping with a healthy inner allocation and no outer
 release), and a real-traffic phase (200/200 pings plus

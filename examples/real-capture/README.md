@@ -4,12 +4,13 @@
 Thirty real `swiotlb_bounced` tracepoint events plus four counter
 snapshots, captured live in a disposable virtme-ng guest (pcnet32
 NIC with a 32-bit DMA mask, 30 adaptive pings, 20 s window,
-kernel 7.0.0-34-generic, validated profile
-`linux-x86_64-7.0.0-34-generic`). The guest ftrace oracle matched
+kernel 7.0.0-34-generic). The guest ftrace oracle matched
 the persisted detail exactly (event count and byte totals), with
 zero recorded detail and aggregate loss. Terminal settlement stays partial;
 not-applicable channels do not claim a zero loss count. This is a historical
-capture and profile decision, not qualification of a rebuilt package or the
+capture and profile decision (the recorded decision names the narrow
+profile that kernel was captured under; the 0.1.0 bundle ships reference
+profiles only), not qualification of a rebuilt package or the
 current reader host.
 
 ## Files

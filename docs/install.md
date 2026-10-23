@@ -51,22 +51,20 @@ collection:
 
 
     memveil doctor
-    sudo memveil qualify --output /tmp/q1 --profile linux-x86_64-7.0.0-34-generic
     sudo memveil record --output /tmp/cap1 --duration 5
     memveil report --format text /tmp/cap1
 
 
 Expected: `doctor` prints one environment report (exit 0
-ready, 3 unavailable); `qualify` prints
-`qualify: local-auto <profile> caps=attempt-trace
-receipt=/var/lib/memveil/receipts/<profile>.json` (exit 0)
-and the receipt file appears in the state dir; `record`
-writes a capture directory; `report` replays it offline.
-Pick `--profile` by matching the installed profile whose
-recorded revision equals `uname -r` (list
+ready, 3 unavailable); `record` writes a capture directory;
+`report` replays it offline. Machine-local qualification
+(`memveil qualify`) needs a bound document authored for
+this host (see the [bound-reference recipe](profiles.md));
+the bundle ships reference profiles only.
+Pick `--profile` from the installed profiles (list
 `/usr/share/memveil/profiles/`); on a host no profile
-covers, both verbs refuse with exit 3 and the exact cause,
-leaving no capture directory and no receipt.
+covers, `record` refuses with exit 3 and the exact cause,
+leaving no capture directory.
 
 Uninstall and confirm nothing remains:
 

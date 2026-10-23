@@ -23,8 +23,14 @@ NEED_BUILDS = pytest.mark.skipif(
     reason="needs built lifecycle/copy objects")
 
 
+NARROW_TEST = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "fixtures",
+    "capabilities", "profiles-narrow-test",
+    "test-narrow-validated.json")
+
+
 def shipped():
-    return json.loads(m.DOC.read_text())
+    return json.loads(open(NARROW_TEST).read())
 
 
 def strip_to_preflip(doc):

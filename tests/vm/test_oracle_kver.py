@@ -35,7 +35,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lifecycle_env as env
 
 REPO = Path(__file__).resolve().parent.parent.parent
-NARROW_DOC = REPO / "profiles" / "linux-x86_64-7.0.0-34-generic.json"
+NARROW_PROFILES = REPO / "tests" / "fixtures" / "capabilities" \
+    / "profiles-narrow-test"
+NARROW_DOC = NARROW_PROFILES / "test-narrow-validated.json"
 TARGET = "7.0.0-34-generic"
 HOST_LABEL = "0.0.0-test-host"
 SAME_LABEL = "0.0.0-test-same"
@@ -140,7 +142,8 @@ def test_override_different_release_uses_profile_pin(monkeypatch,
     refuse_subprocess(monkeypatch)
     ident = env.module_build_identity(
         host_release=HOST_LABEL, modules_root=tree["modules_root"],
-        boot_root=tree["boot_root"], btf_path=tree["btf_path"])
+        boot_root=tree["boot_root"], btf_path=tree["btf_path"],
+        profiles_dir=str(NARROW_PROFILES))
     assert ident["release"] == TARGET
     assert ident["config_sha"] == tree["config_sha"]
     assert ident["kernel_sha"] == tree["kernel_sha"]
