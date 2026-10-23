@@ -137,15 +137,8 @@ def main():
     # Any checked-read failure degrades to unknown-with-reason.
     # Transient kernel reads never reach a record: emitted
     # bytes are sizes, directions, and outcome flags only.
-    # Reviewed 2026-10-22: the slot bulk probe-read became
-    # per-field CO-RE reads, and the probe gained CO-RE
-    # reads for the direction enum, hook argument counts,
-    # and the allocator privacy toggle. Probe reads drop
-    # two to one, CO-RE reads rise five to ten; every new
-    # site reads pool geometry, direction, arity, or toggle
-    # metadata through checked relocating reads, and no
-    # forbidden helper appears. A new probe file, or a new
-    # read in an old file, fails here until reviewed.
+    # Reviewed 2026-10-22: per-field CO-RE reads now cover end, orig_addr, alloc_size, dma_io_tlb_mem, cc_shared; sites (1,0,10).
+    # A new probe file, or a new read in an old file, fails here until reviewed.
     # Tuples are (bpf_probe_read_kernel, BPF_CORE_READ,
     # bpf_core_read) call sites.
     read_sites = {
