@@ -612,23 +612,50 @@ def channel_allowance(miss_samples, start_ns, end_ns, chan,
     return mhi + transport
 
 
+_DETAIL_FIRST_NAMES = ("SLOT_READ", "MASK_READ", "BOUNDS",
+                         "LAYOUT", "SHIFT")
+_DETAIL_EQUATIONS = ("attempt->map", "map->copy", "copy->map",
+                     "unmap->copy", "copy->unmap")
+_DETAIL_SUFFIX_RE = (
+    r"(?:; first unknown copy: (?P<first_name>"
+    r"(?:SLOT_READ|MASK_READ|BOUNDS|LAYOUT|SHIFT)))?"
+    r"(?P<live>(?:; hooks silent: "
+    r"(?:attempt->map|map->copy|copy->map|unmap->copy|"
+    r"copy->unmap) \(\d+ > \d+\)"
+    r"|; (?:attempt->map|map->copy|copy->map|unmap->copy|"
+    r"copy->unmap) liveness unverified \(\d+ vs \d+\)"
+    r"|; copy liveness unverified: lifecycle not captured))?"
+)
+
+
 def parse_detail_loss(reason):
-    """Parse the strict detail loss grammar into counters."""
+    """Parse the strict detail loss grammar into counters.
+
+    Accepts the collector suffixes only: an optional first
+    unknown copy name plus at most one hook-liveness form
+    (hooks silent, an equation unverified, or copy without
+    lifecycle). Anything else is a grammar mismatch. The
+    result carries first_unknown_copy and liveness_suffix
+    (each None when absent) beside the counters.
+    """
     match = re.fullmatch(
         r"detail loss (\d+) \(submit_fail=\((\d+)\) "
         r"malformed=\((\d+)\) dropped=\((\d+)\) "
         r"recursion_missed=\((\d+)\) size_omitted=\((\d+)\) "
         r"duration_omitted=\((\d+)\) signal_omitted=\((\d+)\) "
-        r"rejected=\((\d+)\) write_failed=\((\d+)\)\)",
+        r"rejected=\((\d+)\) write_failed=\((\d+)\)\)"
+        + _DETAIL_SUFFIX_RE,
         reason or "")
     if not match:
         raise ValueError("detail loss grammar mismatch")
-    nums = [int(v) for v in match.groups()]
+    nums = [int(match.group(i)) for i in range(1, 11)]
     keys = ["total", "submit_fail", "malformed", "dropped",
             "recursion_missed", "size_omitted",
             "duration_omitted", "signal_omitted", "rejected",
             "write_failed"]
     parsed = dict(zip(keys, nums))
+    parsed["first_unknown_copy"] = match.group("first_name")
+    parsed["liveness_suffix"] = match.group("live")
     expect = sum(parsed[k] for k in TRANSPORT_KEYS) \
         + parsed["recursion_missed"] \
         + sum(parsed[k] for k in POST_LATCH_KEYS)
@@ -676,14 +703,17 @@ def recovered_from_session(session):
 
 def decide_channels(persisted, samples, miss_samples, start_ns,
                     end_ns, channels, loss, reported_total,
-                    recovered):
+                    recovered, liveness_suffix=None):
     """Per-channel verdicts under the strict loss rules.
 
     Each shortfall must fit that channel memveil misses plus
     transport loss; the total shortfall must fit transport
     plus reported recursion misses, never post-latch omits;
     captured plus reported loss must stay inside the summed
-    oracle bounds so over-reporting fails. Returns
+    oracle bounds so over-reporting fails. A hooks-silent or
+    liveness-unverified detail suffix voids every exact
+    channel claim, since the hook cross-check is unproven;
+    covered shortfalls still pass. Returns
     (per, overall, failed, info).
     """
     per = {}
@@ -718,7 +748,11 @@ def decide_channels(persisted, samples, miss_samples, start_ns,
         shortfalls[chan] = short
         allowances[chan] = allowance
         if short == 0:
-            per[chan] = "EXACT (%d in %d..%d)" % (got, lo, hi)
+            if liveness_suffix:
+                per[chan] = "EXACT-UNPROVEN (%d in %d..%d; %s)" \
+                    % (got, lo, hi, liveness_suffix[2:])
+            else:
+                per[chan] = "EXACT (%d in %d..%d)" % (got, lo, hi)
             attributed[chan] = 0
         elif short <= allowance:
             per[chan] = "SHORT-COVERED (%d < %d..%d)" % (got, lo, hi)
@@ -741,6 +775,9 @@ def decide_channels(persisted, samples, miss_samples, start_ns,
                  "over_reported": sum_got + reported_total > sum_hi})
     if any(v.startswith("SHORT-UNCOVERED") for v in per.values()):
         return per, "SHORT-UNCOVERED", True, info
+    if any(v.startswith("EXACT-UNPROVEN")
+           for v in per.values()):
+        return per, "LIVENESS-UNPROVEN", True, info
     if total_short > allowed_total:
         return per, "SHORT-UNCOVERED", True, info
     if info["over_reported"]:
@@ -1059,7 +1096,12 @@ def check_oracle_direction_formulas(map_iv, mapd, copy_iv,
 
 
 def parse_detail_loss_unknown(reason):
-    """Parse the strict detail-unknown grammar into counters."""
+    """Parse the strict detail-unknown grammar into counters.
+
+    Takes the same collector suffixes as the exact form and
+    returns the same first_unknown_copy and liveness_suffix
+    keys beside cause and the known counters.
+    """
     parts = " ".join("%s=\\((\\d+)\\)" % key
                      for key in ("submit_fail", "malformed",
                                  "dropped", "recursion_missed",
@@ -1069,19 +1111,21 @@ def parse_detail_loss_unknown(reason):
                                  "write_failed"))
     match = re.fullmatch(
         r"detail loss unknown \(([^;()]+); known: " + parts
-        + r"\)", reason or "")
+        + r"\)" + _DETAIL_SUFFIX_RE, reason or "")
     if not match:
         raise ValueError("detail loss unknown grammar mismatch")
     cause = match.group(1)
     if not cause.strip():
         raise ValueError("detail loss unknown cause empty")
-    nums = [int(v) for v in match.groups()[1:]]
+    nums = [int(match.group(i)) for i in range(2, 11)]
     keys = ["submit_fail", "malformed", "dropped",
             "recursion_missed", "size_omitted",
             "duration_omitted", "signal_omitted", "rejected",
             "write_failed"]
     parsed = dict(zip(keys, nums))
     parsed["cause"] = cause
+    parsed["first_unknown_copy"] = match.group("first_name")
+    parsed["liveness_suffix"] = match.group("live")
     return parsed
 
 
@@ -1131,7 +1175,9 @@ def decide_busy(persisted, samples, miss_samples, start_ns,
     Captured plus known loss must fit the summed oracle
     upper in both paths, since the loss claim is global.
     A complete_for_scope aggregate claim must match its
-    counter deltas against the oracle. Returns
+    counter deltas against the oracle. A hooks-silent or
+    liveness-unverified detail suffix voids every strict
+    exact channel claim. Returns
     (per, overall, failed, info).
     """
     try:
@@ -1190,6 +1236,7 @@ def decide_busy(persisted, samples, miss_samples, start_ns,
     per = {}
     transport = transport_loss(known)
     known_total = _busy_known_loss(known)
+    liveness = known.get("liveness_suffix")
     for chan in channels:
         kind, _ = KINDS[chan]
         try:
@@ -1216,8 +1263,13 @@ def decide_busy(persisted, samples, miss_samples, start_ns,
                 per[chan] = "SHORT-UNCOVERED " \
                     "(%d < %d..%d)" % (got, lo, hi)
             elif short == 0:
-                per[chan] = "EXACT (%d in %d..%d)" \
-                    % (got, lo, hi)
+                if liveness:
+                    per[chan] = "EXACT-UNPROVEN " \
+                        "(%d in %d..%d; %s)" \
+                        % (got, lo, hi, liveness[2:])
+                else:
+                    per[chan] = "EXACT (%d in %d..%d)" \
+                        % (got, lo, hi)
             else:
                 per[chan] = "SHORT-COVERED (%d < %d..%d)" \
                     % (got, lo, hi)
@@ -1231,6 +1283,9 @@ def decide_busy(persisted, samples, miss_samples, start_ns,
     if any(v.startswith("SHORT-UNCOVERED")
            for v in per.values()):
         return per, "SHORT-UNCOVERED", True, {}
+    if any(v.startswith("EXACT-UNPROVEN")
+           for v in per.values()):
+        return per, "LIVENESS-UNPROVEN", True, {}
     sum_got = sum(persisted.get(KINDS[c][0], 0)
                   for c in channels)
     sum_hi = 0
@@ -3140,7 +3195,8 @@ def evaluate_row(ev):
                 recovered = 0
             per, overall, failed, info = decide_channels(
                 ev["persisted"], samples, miss_samples, start,
-                end, channels, loss, reported_total, recovered)
+                end, channels, loss, reported_total, recovered,
+                liveness_suffix=loss["liveness_suffix"])
             attributed = info.get("attributed", {})
             rec["channels"] = per
             rec["oracle_overall"] = overall

@@ -1644,6 +1644,101 @@ def test_parse_detail_loss_rejects_garbage():
         km.parse_detail_loss("loss unknown")
 
 
+_SUFFIX_FIRST = "; first unknown copy: LAYOUT"
+_SUFFIX_SILENT = "; hooks silent: map->copy (100 > 80)"
+_SUFFIX_UNVERIFIED = \
+    "; map->copy liveness unverified (100 vs 100)"
+_SUFFIX_COPY_NLC = \
+    "; copy liveness unverified: lifecycle not captured"
+
+
+def test_parse_detail_loss_accepts_first_unknown_copy():
+    for name in ("SLOT_READ", "MASK_READ", "BOUNDS",
+                 "LAYOUT", "SHIFT"):
+        reason = _loss_text() + \
+            "; first unknown copy: " + name
+        parsed = km.parse_detail_loss(reason)
+        assert parsed["total"] == 0
+        assert parsed["first_unknown_copy"] == name
+        assert parsed["liveness_suffix"] is None
+
+
+def test_parse_detail_loss_accepts_hooks_silent():
+    for equation in ("attempt->map", "map->copy",
+                     "copy->map", "unmap->copy",
+                     "copy->unmap"):
+        reason = _loss_text() + \
+            "; hooks silent: %s (100 > 80)" % equation
+        parsed = km.parse_detail_loss(reason)
+        assert parsed["total"] == 0
+        assert parsed["first_unknown_copy"] is None
+        assert parsed["liveness_suffix"] == \
+            "; hooks silent: %s (100 > 80)" % equation
+
+
+def test_parse_detail_loss_accepts_liveness_unverified():
+    for equation in ("attempt->map", "map->copy",
+                     "copy->map", "unmap->copy",
+                     "copy->unmap"):
+        reason = _loss_text() + \
+            "; %s liveness unverified (100 vs 100)" % equation
+        parsed = km.parse_detail_loss(reason)
+        assert parsed["total"] == 0
+        assert parsed["first_unknown_copy"] is None
+        assert parsed["liveness_suffix"] == \
+            "; %s liveness unverified (100 vs 100)" % equation
+
+
+def test_parse_detail_loss_accepts_copy_needs_lifecycle():
+    parsed = km.parse_detail_loss(_loss_text() + _SUFFIX_COPY_NLC)
+    assert parsed["total"] == 0
+    assert parsed["liveness_suffix"] == _SUFFIX_COPY_NLC
+
+
+def test_parse_detail_loss_accepts_combined_suffixes():
+    reason = _loss_text() + _SUFFIX_FIRST + _SUFFIX_UNVERIFIED
+    parsed = km.parse_detail_loss(reason)
+    assert parsed["first_unknown_copy"] == "LAYOUT"
+    assert parsed["liveness_suffix"] == _SUFFIX_UNVERIFIED
+    reason = _loss_text() + _SUFFIX_FIRST + _SUFFIX_SILENT
+    parsed = km.parse_detail_loss(reason)
+    assert parsed["first_unknown_copy"] == "LAYOUT"
+    assert parsed["liveness_suffix"] == _SUFFIX_SILENT
+
+
+def test_parse_detail_loss_accepts_matrix_shapes():
+    numeric = ("detail loss 0 (submit_fail=(0) malformed=(0) "
+               "dropped=(0) recursion_missed=(0) "
+               "size_omitted=(0) duration_omitted=(0) "
+               "signal_omitted=(0) rejected=(0) "
+               "write_failed=(0)); map->copy liveness "
+               "unverified (22464 vs 22464)")
+    parsed = km.parse_detail_loss(numeric)
+    assert parsed["total"] == 0
+    assert parsed["liveness_suffix"] == \
+        "; map->copy liveness unverified (22464 vs 22464)"
+
+
+def test_parse_detail_loss_rejects_unknown_suffix():
+    for tail in ("; something else",
+                 "; hooks silent",
+                 "; hooks silent: map->copy (100 vs 80)",
+                 "; map->copy liveness unverified (100 > 100)",
+                 "; map->bogus liveness unverified (1 vs 1)",
+                 "; hooks silent: map->bogus (2 > 1)",
+                 "; first unknown copy: REASON_7",
+                 "; first unknown copy: layout",
+                 "; first unknown copy: LAYOUT; "
+                 "first unknown copy: SHIFT",
+                 _SUFFIX_UNVERIFIED + _SUFFIX_FIRST,
+                 _SUFFIX_SILENT + _SUFFIX_UNVERIFIED,
+                 _SUFFIX_UNVERIFIED + " ",
+                 _SUFFIX_UNVERIFIED + "; map->copy "
+                 "liveness unverified (1 vs 1)"):
+        with pytest.raises(ValueError):
+            km.parse_detail_loss(_loss_text() + tail)
+
+
 def test_recovered_from_session():
     session = {"environment": {"evidence": [
         {"type": "provenance", "source": "copy.recovered",
@@ -1906,6 +2001,45 @@ def test_decide_total_shortfall_sums_split_program_misses():
         {"map_result": 95, "unmap": 95}, samples, miss, 1000,
         2000, ["map", "unmap"], loss, 10, 0)
     assert failed, per
+
+
+def test_decide_exact_voided_by_liveness_suffix():
+    persisted = {"bounce_attempt": 13000, "map_result": 13000,
+                 "unmap": 13000, "copy": 26000,
+                 "sync_request": 13000}
+    for tail in (_SUFFIX_SILENT, _SUFFIX_UNVERIFIED,
+                 _SUFFIX_COPY_NLC):
+        per, overall, failed, _ = km.decide_channels(
+            persisted, _count_samples(), _miss_snaps(),
+            1000, 2000, _CHANNELS5, _loss(), 0, 10,
+            liveness_suffix=tail)
+        assert failed, per
+        assert overall == "LIVENESS-UNPROVEN"
+        assert per["copy"].startswith("EXACT-UNPROVEN"), per
+        assert tail[2:] in per["copy"], per
+
+
+def test_decide_short_covered_stands_with_liveness_suffix():
+    loss = _loss(recursion_missed=6)
+    per, overall, failed, _ = km.decide_channels(
+        _persisted7(), _count_samples(), _miss_snaps(),
+        1000, 2000, _CHANNELS5, loss, 6, 10,
+        liveness_suffix=_SUFFIX_UNVERIFIED)
+    assert failed, per
+    assert overall == "LIVENESS-UNPROVEN"
+    assert per["map"].startswith("SHORT-COVERED"), per
+    assert per["attempt"].startswith("EXACT-UNPROVEN"), per
+
+
+def test_decide_first_unknown_copy_keeps_exact():
+    persisted = {"bounce_attempt": 13000, "map_result": 13000,
+                 "unmap": 13000, "copy": 26000,
+                 "sync_request": 13000}
+    per, overall, failed, _ = km.decide_channels(
+        persisted, _count_samples(), _miss_snaps(), 1000, 2000,
+        _CHANNELS5, _loss(), 0, 10, liveness_suffix=None)
+    assert not failed, per
+    assert overall == "EXACT"
 
 
 def test_decide_more_than_oracle_fails():
@@ -2185,8 +2319,49 @@ def test_parse_detail_loss_unknown_rejects_garbage():
             _unknown_text(cause="has; semicolon"))
     with pytest.raises(ValueError):
         km.parse_detail_loss_unknown(
-            "detail loss unknown (drain budget "
+            "Detail loss unknown (drain budget "
             "exhausted; known: submit_fail=(1))")
+
+
+def test_parse_detail_loss_unknown_accepts_suffixes():
+    for tail, first, live in (
+            (_SUFFIX_FIRST, "LAYOUT", None),
+            (_SUFFIX_SILENT, None, _SUFFIX_SILENT),
+            (_SUFFIX_UNVERIFIED, None, _SUFFIX_UNVERIFIED),
+            (_SUFFIX_COPY_NLC, None, _SUFFIX_COPY_NLC),
+            (_SUFFIX_FIRST + _SUFFIX_UNVERIFIED, "LAYOUT",
+             _SUFFIX_UNVERIFIED)):
+        parsed = km.parse_detail_loss_unknown(
+            _unknown_text() + tail)
+        assert parsed["cause"] == "drain budget exhausted"
+        assert parsed["first_unknown_copy"] == first
+        assert parsed["liveness_suffix"] == live
+
+
+def test_parse_detail_loss_unknown_accepts_matrix_shape():
+    busy = ("detail loss unknown (drain budget exhausted; "
+            "known: submit_fail=(37420370) malformed=(0) "
+            "dropped=(0) recursion_missed=(3561) "
+            "size_omitted=(0) duration_omitted=(0) "
+            "signal_omitted=(100101) rejected=(0) "
+            "write_failed=(0)); map->copy liveness "
+            "unverified (115325 vs 545807)")
+    parsed = km.parse_detail_loss_unknown(busy)
+    assert parsed["submit_fail"] == 37420370
+    assert parsed["signal_omitted"] == 100101
+    assert parsed["liveness_suffix"] == \
+        "; map->copy liveness unverified (115325 vs 545807)"
+
+
+def test_parse_detail_loss_unknown_rejects_unknown_suffix():
+    for tail in ("; something else",
+                 "; map->bogus liveness unverified (1 vs 1)",
+                 "; first unknown copy: REASON_7",
+                 _SUFFIX_UNVERIFIED + _SUFFIX_FIRST,
+                 _SUFFIX_SILENT + _SUFFIX_UNVERIFIED):
+        with pytest.raises(ValueError):
+            km.parse_detail_loss_unknown(
+                _unknown_text() + tail)
 
 
 def _busy2_samples():
@@ -2271,6 +2446,39 @@ def _busy2_decide(persisted=None, session=None,
 
 def test_decide_busy_complete_exact_passes():
     per, overall, failed, _ = _busy2_decide()
+    assert not failed, per
+    assert overall == "EXACT"
+
+
+def test_decide_busy_exact_voided_by_liveness_suffix():
+    for tail in (_SUFFIX_SILENT, _SUFFIX_UNVERIFIED,
+                 _SUFFIX_COPY_NLC):
+        session = _busy2_session(reason=_loss_text() + tail)
+        per, overall, failed, _ = _busy2_decide(
+            session=session)
+        assert failed, per
+        assert overall == "LIVENESS-UNPROVEN", per
+        assert per["map"].startswith("EXACT-UNPROVEN"), per
+
+
+def test_decide_busy_covered_stands_with_liveness_suffix():
+    persisted = _busy2_persisted()
+    persisted["map_result"] = 2494
+    session = _busy2_session(
+        loss_count="6",
+        reason=_loss_text(submit_fail=6) + _SUFFIX_UNVERIFIED)
+    per, overall, failed, _ = _busy2_decide(
+        persisted, session)
+    assert failed, per
+    assert overall == "LIVENESS-UNPROVEN", per
+    assert per["map"].startswith("SHORT-COVERED"), per
+    assert per["attempt"].startswith("EXACT-UNPROVEN"), per
+
+
+def test_decide_busy_first_unknown_copy_keeps_exact():
+    session = _busy2_session(
+        reason=_loss_text() + _SUFFIX_FIRST)
+    per, overall, failed, _ = _busy2_decide(session=session)
     assert not failed, per
     assert overall == "EXACT"
 
@@ -3586,6 +3794,19 @@ def test_evaluate_full_row_passes():
     assert _check(rec, "floors")["ok"]
     assert _check(rec, "invariants")["ok"]
     assert _check(rec, "capture_valid")["ok"]
+
+
+def test_evaluate_covered_row_stands_with_liveness_suffix():
+    ev = _ev_pass()
+    session = json.loads(ev["session_text"])
+    session["quality"]["detail"]["reason"] += _SUFFIX_UNVERIFIED
+    ev["session_text"] = json.dumps(session)
+    rec = km.evaluate_row(ev)
+    assert not rec["ok"], rec["detail"]
+    assert _check(rec, "window")["ok"]
+    assert not _check(rec, "channels")["ok"]
+    assert "EXACT-UNPROVEN" in _check(rec, "channels")["detail"]
+    assert "SHORT-COVERED" in _check(rec, "channels")["detail"]
 
 
 def test_evaluate_fails_vng_exit():
