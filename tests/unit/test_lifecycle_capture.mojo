@@ -263,6 +263,7 @@ def _run(
     timeouts: Int = 103,
     confirm_poll_err: Bool = False,
     fail_confirm_stats: Bool = False,
+    lower_bound: Bool = False,
 ) raises -> CaseOut:
     """Run one scripted multi-channel capture; return its outputs.
 
@@ -290,6 +291,7 @@ def _run(
     cfg.lifecycle_ring_bytes = UInt32(8388608)
     cfg.has_copy = channels >= 3
     cfg.copy_ring_bytes = UInt32(8388608)
+    cfg.attempt_loss_lower_bound = lower_bound
     var kernel = ScriptKernel()
     kernel.channels = channels
     kernel.misses_out = misses.copy()
@@ -982,6 +984,7 @@ def _one_copy_run(
     timeouts: Int = 103,
     confirm_poll_err: Bool = False,
     fail_confirm_stats: Bool = False,
+    lower_bound: Bool = False,
 ) raises -> CaseOut:
     var payloads = List[List[UInt8]]()
     payloads.append(
@@ -993,7 +996,8 @@ def _one_copy_run(
         UInt64(1), misses=misses, misses2=misses2,
         use_misses2=use_misses2, timeouts=timeouts,
         confirm_poll_err=confirm_poll_err,
-        fail_confirm_stats=fail_confirm_stats)
+        fail_confirm_stats=fail_confirm_stats,
+        lower_bound=lower_bound)
 
 
 def _error_copy_run(
@@ -1172,6 +1176,61 @@ def test_attempt_misses_make_aggregate_partial() raises:
         _contains(
             c.session,
             String("attempt program runs skipped 3 (recursion)"),
+        )
+    )
+
+
+def test_attempt_loss_lower_bound_labels_aggregate() raises:
+    # Kernels before 6.7 skip programs in trace_call_bpf
+    # without counting them: a claimed aggregate count is
+    # a lower bound there and the reason says so.
+    var c = _one_copy_run(
+        MissOut(True, UInt64(5), String(""), UInt64(3)),
+        lower_bound=True,
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"aggregate":{"status":"partial","loss_count":"3",'),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                "attempt loss counts are a lower bound before 6.7"
+            ),
+        )
+    )
+    var zero = _one_copy_run(
+        MissOut(True, UInt64(5), String("")), lower_bound=True
+    )
+    assert_true(
+        _contains(
+            zero.session,
+            String(
+                '"aggregate":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            zero.session,
+            String(
+                "attempt loss counts are a lower bound before 6.7"
+            ),
+        )
+    )
+    var plain = _one_copy_run(
+        MissOut(True, UInt64(5), String(""), UInt64(3))
+    )
+    assert_true(
+        not _contains(
+            plain.session,
+            String(
+                "attempt loss counts are a lower bound before 6.7"
+            ),
         )
     )
 

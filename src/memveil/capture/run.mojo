@@ -2055,6 +2055,9 @@ def run_collector_with[W: WriterSource](
     var loss_bound = attempt_loss_evidence(env.kernel.release)
     for i in range(len(loss_bound)):
         cfg.evidence.append(loss_bound[i].copy())
+    cfg.attempt_loss_lower_bound = not attempt_loss_exact(
+        env.kernel.release
+    )
     _append_channel_evidence(
         cfg.evidence, String("lc"), decision.lc
     )

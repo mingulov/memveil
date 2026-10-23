@@ -425,6 +425,9 @@ struct CollectorConfig(Copyable, Movable):
     var copy_ring_bytes: UInt32
     var has_device_filter: Bool
     var device_filter: String
+    # True when attempt loss counts are a lower bound
+    # (kernels before 6.7 skip uncounted programs).
+    var attempt_loss_lower_bound: Bool
 
     def __init__(out self):
         self.duration_s = UInt64(60)
@@ -453,6 +456,7 @@ struct CollectorConfig(Copyable, Movable):
         self.copy_ring_bytes = UInt32(0)
         self.has_device_filter = False
         self.device_filter = String("")
+        self.attempt_loss_lower_bound = False
 
 
 @fieldwise_init
@@ -3389,6 +3393,15 @@ struct Collector:
             out.q_aggregate.has_loss_count = False
             out.q_aggregate.reason = aggregate_reason(
                 False, self.snapshot_gate_cause()
+            )
+        if (
+            self.cfg.attempt_loss_lower_bound
+            and out.q_aggregate.has_loss_count
+        ):
+            # A claimed count below 6.7 is a lower bound:
+            # trace_call_bpf skipped programs uncounted.
+            out.q_aggregate.reason += String(
+                "; attempt loss counts are a lower bound before 6.7"
             )
         if self._extra_channels():
             # Lifecycle/copy counter cuts are verified at
