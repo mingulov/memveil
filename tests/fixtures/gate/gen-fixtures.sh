@@ -307,6 +307,8 @@ mk cc-tsm
 write_gate_cpuinfo "$GATE/cc-tsm/proc/cpuinfo" \
   " sev sev_es sev_snp hypervisor"
 mkdir -p "$GATE/cc-tsm/sys/kernel/config/tsm/report"
+# Git skips empty dirs; keep the TSM-present marker tracked.
+touch "$GATE/cc-tsm/sys/kernel/config/tsm/report/.keep"
 
 mk caps-none
 sed -i 's/^CapEff:.*/CapEff:\t0000000000000000/' \
