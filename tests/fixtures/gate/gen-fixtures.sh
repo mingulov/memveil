@@ -279,9 +279,9 @@ mk format-denied
 printf 'denied=/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format\n' \
   >> "$GATE/format-denied/meta.txt"
 
-# Validated coverage without the tracepoint id file: copied from
-# the ready-validated capabilities tree, never edited by hand.
-cp -R "$ROOT/tests/fixtures/capabilities/ready-validated" "$GATE/id-absent"
+# Admission never reads the tracepoint id file: base
+# without it must admit exactly like base.
+mk id-absent
 rm "$GATE/id-absent/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/id"
 
 mk cc-flags-nonode

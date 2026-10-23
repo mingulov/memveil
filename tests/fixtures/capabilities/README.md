@@ -31,14 +31,9 @@ flag tokens.
 | `user-asserted-agree/` | SNP evidence plus matching assertion |
 | `user-asserted-conflict/` | SNP evidence plus `tdx` assertion |
 | `missing-btf/` | ordinary without the BTF file |
-| `missing-tracepoint/` | ordinary without the tracepoint tree |
 | `denied-tracepoint/` | format file held but meta-denied |
 | `denied-guest-node/` | sev-guest marker held but meta-denied |
-| `changed-signature/` | format bytes differ from `profiles-test` |
-| `changed-moved/` | drifted pins, differ from `profiles-moved` (offset-only) |
-| `changed-trivial/` | pinned layout plus annotation, differ from `profiles-moved` |
 | `oversized-format/` | 131073-byte format file, past the 128 KiB read cap |
-| `denied-id-changed/` | id file held but meta-denied, format bytes differ from `profiles-test` |
 | `conflicting-flags-sev-tdx/` | sev-guest node with `sev sev_snp tdx_guest` flags |
 | `conflicting-flags-tdx-sev/` | tdx_guest node with `sev tdx_guest` flags |
 | `ready-validated/` | format bytes match `profiles-test` |
@@ -51,7 +46,6 @@ flag tokens.
 | Directory | Shape |
 |---|---|
 | `profiles-test/` | manifest plus `test-validated.json`: validated, x86_64, min 7.0, recorded format, supported attempt-trace. Test device only, never admitted by `profiles/`. |
-| `profiles-moved/` | manifest plus `moved-pinned.json`: validated, x86_64, min 7.0, pinned recorded format, supported attempt-trace. Drift fixtures differ from it. |
 | `profiles-empty/` | empty manifest: no admitted profiles |
 | `profiles-bad-manifest-blank/` | manifest with a blank line |
 | `profiles-bad-manifest-dup/` | manifest with a duplicate entry |

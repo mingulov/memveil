@@ -48,7 +48,7 @@ tree is tracked. One line per variant:
 - denied-all: eight gate paths fixture-denied at once.
 - container-view: debug-only tracefs, BTF hidden, config says BTF.
 - format-denied: the swiotlb_bounced format file is fixture-denied.
-- id-absent: ready-validated tree without the tracepoint id file.
+- id-absent: base without the tracepoint id file.
 - cc-flags-nonode: SEV-SNP flags with hypervisor, no guest node.
 - cc-tdx-nonode: tdx_guest flag with hypervisor, no guest node.
 - cc-flags-host: SEV-SNP flags without hypervisor (bare metal).

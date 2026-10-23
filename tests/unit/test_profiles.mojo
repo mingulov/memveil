@@ -13,11 +13,7 @@ from std.ffi import external_call
 from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
 
-from memveil.platform.capabilities import (
-    CapEntry,
-    CapabilityReport,
-    discover_capabilities,
-)
+from memveil.capture.run import decide_record
 from memveil.platform.evidence import detect_environment, parse_kernel_triple
 from memveil.platform.narrow import (
     NarrowBindings,
@@ -27,7 +23,6 @@ from memveil.platform.narrow import (
 from memveil.platform.profiles import (
     CapQualification,
     Profile,
-    ProfileDecision,
     TraceWant,
     cp_trace,
     default_receipts_dir,
@@ -2009,338 +2004,90 @@ def test_select_unparseable() raises:
     assert_true(contains(d.reason, String("unparseable")))
 
 
-def judge(fxname: String, profdir: String) raises -> CapabilityReport:
-    """Run discovery for one fixture against one profiles dir."""
-    var r = open_evidence_reader(fx(fxname))
+def test_decide_oversized_format_judges() raises:
+    # Oversized formats are judged on content through
+    # bounded reads, never waved through as unknown: the
+    # NUL-filled stand-in fails the layout probe.
+    var r = open_evidence_reader(fx("oversized-format"))
     var env = detect_environment(r)
-    var ps = load_profiles(profdir)
-    var d = select_profile(env.kernel, ps^)
-    return discover_capabilities(r, d^)
-
-
-def find_entry(rep: CapabilityReport, cap_id: String) -> CapEntry:
-    """Copy one entry out of a report; blank when missing."""
-    for i in range(len(rep.entries)):
-        if rep.entries[i].id == cap_id:
-            return rep.entries[i].copy()
-    return CapEntry(String(""), String(""), String(""), String(""))
-
-
-def validated_doc(cap_status: String) -> String:
-    """One validated doc declaring attempt-trace with no hooks."""
-    return (
-        String(
-            '{"schema_version":"0.1.1","profile_id":"t2",'
-            '"status":"validated",'
-            '"identity":{"arch":"x86_64","min_kernel":"7.0",'
-            '"source":{"origin":"o","revision":"r"}},"hooks":[],'
-            '"capabilities":[{"id":"attempt-trace","status":"'
-        )
-        + cap_status
-        + String('","hooks":[],"reason":"r"}]}')
+    var pdir = fx("profiles-test")
+    var d = decide_record(
+        fx("oversized-format"),
+        env.kernel,
+        load_profiles(pdir.copy()),
+        String(""),
+        False,
+        String("tests/fixtures/elf/ok.o"),
+        String(""),
+        String(""),
+        String("attempt-trace"),
+        pdir,
+        String(""),
     )
+    assert_true(not d.ok)
+    assert_true(not d.refusal_unknown)
+    assert_equal(d.refusal, String("layout: missing field common_type"))
+    assert_equal(d.refusal_code, String("profile"))
 
 
-def test_discover_candidate_unknown() raises:
-    var rep = judge(String("ordinary-7.0"), String("profiles"))
-    var a = find_entry(rep, String("attempt-trace"))
-    # Unbound candidate, so the live judgment runs: the
-    # stand-in format parses but lacks required fields, a
-    # proven-unavailable verdict, not unknown.
-    assert_equal(a.status, String("unavailable"))
-    assert_equal(
-        a.reason, String("layout: missing field common_type")
+def test_decide_hookless_refuses() raises:
+    # A supported capability with no hooks proves nothing:
+    # admission refuses instead of admitting blindly.
+    var doc = String(
+        '{"schema_version":"0.1.1","profile_id":"t",'
+        '"status":"reference-unvalidated","identity":{"arch":"x86_64",'
+        '"min_kernel":"7.0","source":{"origin":"o","revision":"r"}},'
+        '"hooks":[],"capabilities":[{"id":"attempt-trace",'
+        '"status":"supported","hooks":[],"reason":"r"}]}'
     )
-    var l = find_entry(rep, String("mapping-lifecycle"))
-    # The ordinary-7.0 root carries stand-in BTF: corrupt
-    # BTF is unknown evidence, never an unavailable verdict.
-    assert_equal(l.status, String("unknown"))
-    assert_equal(l.reason, String("bad BTF header"))
-    var c = find_entry(rep, String("copy-actual"))
-    assert_equal(c.status, String("unknown"))
-    assert_equal(c.reason, String("bad BTF header"))
-
-
-def test_discover_hook_absent() raises:
-    var rep = judge(String("missing-tracepoint"), String("profiles"))
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("unavailable"))
-    assert_equal(
-        a.reason,
-        String("tracepoint swiotlb:swiotlb_bounced absent"),
-    )
-    # The live branch sets no remedy, but the discover
-    # terminal adds the re-qualification advice for a
-    # supporting-but-unqualified profile.
-    assert_equal(
-        a.remedy,
-        String(
-            "refresh the profile's recorded signatures from this"
-            " kernel, then re-prove with memveil qualify (see"
-            " memveil qualify --help)"
-        ),
-    )
-
-
-def test_discover_remedy_qualify() raises:
-    # An unqualified capability names its fix; an available
-    # one carries no remedy.
-    var r = open_evidence_reader(fx("ordinary-7.0"))
-    var caps = List[String]()
-    caps.append(String("attempt-trace"))
-    var d = _local_auto_decision(caps^)
-    var rep = discover_capabilities(r, d^)
-    var l = find_entry(rep, String("mapping-lifecycle"))
-    assert_equal(l.status, String("unknown"))
-    assert_equal(
-        l.remedy,
-        String(
-            "run memveil qualify including mapping-lifecycle"
-            " (see memveil qualify --help)"
-        ),
-    )
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("available"))
-    assert_equal(a.remedy, String(""))
-
-
-def test_discover_hook_denied() raises:
-    var rep = judge(String("denied-tracepoint"), String("profiles"))
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("unknown"))
-    assert_equal(
-        a.reason,
-        String(
-            "tracepoint swiotlb:swiotlb_bounced denied (privilege)"
-        ),
-    )
-    assert_equal(
-        a.remedy, String("re-run with elevated privileges (root)")
-    )
-    assert_equal(len(rep.denied), 1)
-    assert_equal(
-        rep.denied[0],
-        String("/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format"),
-    )
-
-
-def test_discover_68_attempt_judged() raises:
-    # A 6.8 kernel meets the 6.0 floor and the 6plus
-    # reference covers it, so the live judgment runs:
-    # the stand-in format lacks required fields, proven
-    # unavailable, not unknown.
-    var rep = judge(String("kernel-6.8"), String("profiles"))
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("unavailable"))
-    assert_equal(
-        a.reason, String("layout: missing field common_type")
-    )
-
-
-def test_discover_515_attempt_floor() raises:
-    # Below the 6.0 floor, attempt-trace demotes to
-    # unavailable with the floor reason even with no
-    # covering profile; unknown lifecycle entries stand.
-    var r = open_evidence_reader(fx("kernel-5.15"))
-    var env = detect_environment(r)
-    var ps = List[Profile]()
-    ps.append(parse_profile_bytes(bytes_of(low_floor_doc())))
-    var d = select_profile(env.kernel, ps^)
-    assert_true(not d.matched)
-    var rep = discover_capabilities(r, d^)
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("unavailable"))
-    assert_equal(
-        a.reason,
-        String("kernel 5.15.0-test is below the 6.0 floor"),
-    )
-    var l = find_entry(rep, String("mapping-lifecycle"))
-    assert_equal(l.status, String("unknown"))
-
-
-def test_discover_no_cover() raises:
-    var rep = judge(String("arch-mismatch"), String("profiles"))
-    assert_equal(len(rep.entries), 3)
-    for i in range(len(rep.entries)):
-        assert_equal(rep.entries[i].status, String("unknown"))
-        assert_equal(
-            rep.entries[i].reason, String("no profile covers this identity")
-        )
-
-
-def test_discover_unparseable() raises:
-    var rep = judge(String("malformed-release"), String("profiles"))
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("unknown"))
-    assert_equal(
-        a.reason,
-        String("release not-a-kernel-release is unparseable; floor unknown"),
-    )
-
-
-def test_discover_available() raises:
-    var rep = judge(String("ready-validated"), fx("profiles-test"))
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("available"))
-    assert_equal(
-        a.reason, String("verified under validated profile test-validated")
-    )
-
-
-def test_discover_changed() raises:
-    var rep = judge(String("changed-signature"), fx("profiles-test"))
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("unavailable"))
-    assert_equal(
-        a.reason,
-        String(
-            "hook swiotlb:swiotlb_bounced format differs from profile"
-            " test-validated signature"
-            "; drift: missing field common_type"
-        ),
-    )
-    # Qualify cannot repair a stale recording (planning and the
-    # smoke both refuse it): the profile must be refreshed first.
-    assert_equal(
-        a.remedy,
-        String(
-            "refresh the profile's recorded format from this kernel,"
-            " then re-prove with memveil qualify"
-            " (see memveil qualify --help)"
-        ),
-    )
-
-
-def test_discover_unreadable_format() raises:
-    var rep = judge(String("oversized-format"), fx("profiles-test"))
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("unknown"))
-    assert_equal(
-        a.reason,
-        String(
-            "hook swiotlb:swiotlb_bounced format unreadable after probe"
-        ),
-    )
-    assert_equal(len(rep.denied), 0)
-
-
-def test_discover_denied_id_changed() raises:
-    var rep = judge(String("denied-id-changed"), fx("profiles-test"))
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("unavailable"))
-    assert_equal(
-        a.reason,
-        String(
-            "hook swiotlb:swiotlb_bounced format differs from profile"
-            " test-validated signature"
-            "; drift: missing field common_type"
-        ),
-    )
-    assert_equal(len(rep.denied), 1)
-    assert_equal(
-        rep.denied[0],
-        String("/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/id"),
-    )
-
-
-def test_validated_id_best_effort() raises:
-    var rep = judge(
-        String("../gate/id-absent"), fx(String("profiles-test"))
-    )
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("available"))
-    var found = False
-    for i in range(len(a.evidence)):
-        if contains(a.evidence[i], String("id: absent")):
-            found = True
-    assert_true(found)
-
-
-def test_discover_validated_absent() raises:
-    var rep = judge(String("missing-tracepoint"), fx("profiles-test"))
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("unavailable"))
-    assert_true(contains(a.reason, String("absent")))
-
-
-def test_discover_undeclared() raises:
+    var one = List[Profile]()
+    one.append(parse_profile_bytes(bytes_of(doc)))
     var r = open_evidence_reader(fx("ordinary-7.0"))
     var env = detect_environment(r)
-    var ps = List[Profile]()
-    ps.append(parse_profile_bytes(bytes_of(minimal_doc())))
-    var d = select_profile(env.kernel, ps^)
-    assert_true(d.has_profile)
-    var rep = discover_capabilities(r, d^)
-    var l = find_entry(rep, String("mapping-lifecycle"))
-    assert_equal(l.status, String("unknown"))
-    assert_equal(
-        l.reason, String("profile t does not declare mapping-lifecycle")
+    var d = decide_record(
+        fx("ordinary-7.0"),
+        env.kernel,
+        one^,
+        String(""),
+        False,
+        String("tests/fixtures/elf/ok.o"),
+        String(""),
+        String(""),
+        String("attempt-trace"),
+        String(""),
+        String(""),
     )
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("unavailable"))
-    assert_equal(
-        a.reason, String("tracepoint h absent")
-    )
+    assert_true(not d.ok)
+    assert_true(not d.refusal_unknown)
+    assert_equal(d.refusal, String("no tracepoint hook"))
+    assert_equal(d.refusal_code, String("profile"))
 
 
-def low_floor_doc() -> String:
-    """One validated doc with min_kernel 6.0 for floor interplay.
-
-    Covers a 6.8 kernel, which meets the 6.0 floor but misses
-    the 6.11 lifecycle floor, so attempt-trace judges
-    available while mapping-lifecycle demotes with the
-    lifecycle floor reason and the unsupported terminal
-    applies. The lifecycle hooks match the frozen bindings
-    exactly so the cap judges available pre-demotion, not
-    tracing-refused.
-    """
-    return (
-        String(
-            '{"schema_version":"0.1.1","profile_id":"t-low",'
-            '"status":"validated",'
-            '"identity":{"arch":"x86_64","min_kernel":"6.0",'
-            '"source":{"origin":"o","revision":"r"}},'
-            '"hooks":['
-        )
-        + _frozen_hooks_json(lc_trace())
-        + String(
-            '],"capabilities":[{"id":"attempt-trace",'
-            '"status":"supported","hooks":[],"reason":"r"},'
-            '{"id":"mapping-lifecycle","status":"supported",'
-            '"hooks":['
-        )
-        + _frozen_hook_names_json(lc_trace())
-        + String(
-            '],"reason":"r"},'
-            '{"id":"copy-actual","status":"unsupported",'
-            '"hooks":[],"reason":"never"}]}'
-        )
-    )
 
 
-def test_discover_unsupported_terminal() raises:
-    var r = open_evidence_reader(fx("kernel-6.8"))
-    var env = detect_environment(r)
-    var ps = List[Profile]()
-    ps.append(parse_profile_bytes(bytes_of(low_floor_doc())))
-    var d = select_profile(env.kernel, ps^)
-    assert_true(d.matched)
-    var rep = discover_capabilities(r, d^)
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("available"))
-    assert_equal(
-        a.reason,
-        String("verified under validated profile t-low"),
-    )
-    var l = find_entry(rep, String("mapping-lifecycle"))
-    assert_equal(l.status, String("unavailable"))
-    assert_equal(
-        l.reason,
-        String("kernel 6.8.0-41-generic is below the 6.11 floor"),
-    )
-    var c = find_entry(rep, String("copy-actual"))
-    assert_equal(c.status, String("unsupported"))
-    assert_equal(c.reason, String("never"))
+def _frozen_hooks_json(wants: List[TraceWant]) -> String:
+    """Hook array JSON rendered from frozen wants, in order."""
+    var out = String("")
+    for i in range(len(wants)):
+        if i > 0:
+            out += String(",")
+        var w = wants[i].copy()
+        out += String('{"name":"') + w.name.copy()
+        out += String('","kind":"tracing","function":"') + w.function.copy()
+        out += String('","attach":"') + w.attach.copy()
+        out += String('","signature":"') + w.signature.copy()
+        out += String('"}')
+    return out^
+
+
+def _frozen_hook_names_json(wants: List[TraceWant]) -> String:
+    """Quoted hook-name list JSON from frozen wants, in order."""
+    var out = String("")
+    for i in range(len(wants)):
+        if i > 0:
+            out += String(",")
+        out += String('"') + wants[i].name + String('"')
+    return out^
 
 
 def live_ref_doc() -> String:
@@ -3524,93 +3271,6 @@ def test_live_receipt_object_drift_refuses() raises:
     )
 
 
-def test_discover_live38_candidate_available() raises:
-    # A covering reference doc carries has_profile without
-    # matched (only validated matches); the live path
-    # judges that real decision against kernel-38 evidence.
-    var r = open_evidence_reader(fx("kernel-38"))
-    var env = detect_environment(r)
-    var ps = List[Profile]()
-    ps.append(parse_profile_bytes(bytes_of(live_ref_doc())))
-    var d = select_profile(env.kernel, ps^)
-    assert_true(not d.matched)
-    assert_true(d.has_profile)
-    var rep = discover_capabilities(r, d^)
-    var l = find_entry(rep, String("mapping-lifecycle"))
-    assert_equal(l.status, String("available"))
-    assert_equal(
-        l.reason,
-        String("live-verified under reference profile t-live"),
-    )
-
-
-def reference_recorded_doc() -> String:
-    """One reference doc recording the ready-validated format bytes."""
-    return String(
-        '{"schema_version":"0.1.1","profile_id":"t3",'
-        '"status":"reference-unvalidated",'
-        '"identity":{"arch":"x86_64","min_kernel":"7.0",'
-        '"source":{"origin":"o","revision":"r"}},'
-        '"hooks":[{"name":"swiotlb:swiotlb_bounced","kind":"tracepoint",'
-        '"id_path":"/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/id",'
-        '"format_path":"/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format",'
-        '"format_text":"name: swiotlb_bounced\\nID: 1901\\nformat:\\n'
-        '\\tfield:unsigned int test_field;\\toffset:0;\\tsize:4;'
-        '\\tsigned:0;\\n\\nprint fmt: \\"test_field=%u\\",'
-        ' REC->test_field\\n"}],'
-        '"capabilities":[{"id":"attempt-trace","status":"candidate",'
-        '"hooks":["swiotlb:swiotlb_bounced"],"reason":"r"}]}'
-    )
-
-
-def test_discover_candidate_reference_verified() raises:
-    var r = open_evidence_reader(fx("ready-validated"))
-    var env = detect_environment(r)
-    var ps = List[Profile]()
-    ps.append(parse_profile_bytes(bytes_of(reference_recorded_doc())))
-    var d = select_profile(env.kernel, ps^)
-    assert_true(not d.matched)
-    assert_true(d.has_profile)
-    var rep = discover_capabilities(r, d^)
-    var a = find_entry(rep, String("attempt-trace"))
-    # The ready-validated root carries a synthetic format the
-    # offset probe cannot parse, so the live judgment fails
-    # with the layout cause, not "unproven".
-    assert_equal(a.status, String("unavailable"))
-    assert_equal(
-        a.reason,
-        String("layout: missing field common_type"),
-    )
-
-
-def test_discover_candidate_validated() raises:
-    var r = open_evidence_reader(fx("ordinary-7.0"))
-    var env = detect_environment(r)
-    var ps = List[Profile]()
-    ps.append(parse_profile_bytes(bytes_of(validated_doc(String("candidate")))))
-    var d = select_profile(env.kernel, ps^)
-    assert_true(d.matched)
-    var rep = discover_capabilities(r, d^)
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("unknown"))
-    assert_equal(
-        a.reason,
-        String(
-            "candidate under validated profile t2:"
-            " hooks present, support unproven"
-        ),
-    )
-
-
-def test_discover_vacuous_available() raises:
-    var r = open_evidence_reader(fx("ordinary-7.0"))
-    var env = detect_environment(r)
-    var ps = List[Profile]()
-    ps.append(parse_profile_bytes(bytes_of(validated_doc(String("supported")))))
-    var d = select_profile(env.kernel, ps^)
-    var rep = discover_capabilities(r, d^)
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("available"))
 
 
 def test_select_bound_receipt_grade_caps() raises:
@@ -3730,216 +3390,6 @@ def test_select_bound_validated_grade_caps() raises:
     assert_equal(len(d.receipt_caps), 0)
 
 
-def _local_auto_doc(lc_status: String) -> String:
-    """Reference doc: supported attempt + lc_status lifecycle.
-
-    The lifecycle hooks match the frozen bindings exactly
-    so receipt-scope judgments, not tracing gaps, decide.
-    """
-    return (
-        String(
-            '{"schema_version":"0.1.1","profile_id":"la",'
-            '"status":"reference-unvalidated",'
-            '"identity":{"arch":"x86_64","min_kernel":"7.0",'
-            '"source":{"origin":"o","revision":"r"}},'
-            '"hooks":['
-        )
-        + _frozen_hooks_json(lc_trace())
-        + String(
-            '],"capabilities":[{"id":"attempt-trace",'
-            '"status":"supported","hooks":[],"reason":"r"},'
-            '{"id":"mapping-lifecycle","status":"'
-        )
-        + lc_status
-        + String('","hooks":[')
-        + _frozen_hook_names_json(lc_trace())
-        + String('],"reason":"r"}]}')
-    )
-
-
-def _local_auto_decision(caps: List[String]) raises -> ProfileDecision:
-    var p = parse_profile_bytes(bytes_of(_local_auto_doc(String("candidate"))))
-    return ProfileDecision(
-        True,
-        True,
-        p^,
-        String("profile la matched (local-auto)"),
-        String("local-auto"),
-        caps,
-    )
-
-
-def test_discover_local_auto_qualified() raises:
-    var r = open_evidence_reader(fx("ordinary-7.0"))
-    var caps = List[String]()
-    caps.append(String("attempt-trace"))
-    var d = _local_auto_decision(caps^)
-    var rep = discover_capabilities(r, d^)
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("available"))
-    assert_equal(
-        a.reason, String("verified under local-auto receipt la")
-    )
-    var l = find_entry(rep, String("mapping-lifecycle"))
-    assert_equal(l.status, String("unknown"))
-    assert_equal(
-        l.reason,
-        String(
-            "candidate under local-auto profile la"
-            ": not qualified by this receipt"
-        ),
-    )
-
-
-def test_discover_local_auto_qualified_candidate() raises:
-    var r = open_evidence_reader(fx("ordinary-7.0"))
-    var caps = List[String]()
-    caps.append(String("attempt-trace"))
-    caps.append(String("mapping-lifecycle"))
-    var d = _local_auto_decision(caps^)
-    var rep = discover_capabilities(r, d^)
-    var l = find_entry(rep, String("mapping-lifecycle"))
-    assert_equal(l.status, String("available"))
-    assert_equal(
-        l.reason, String("verified under local-auto receipt la")
-    )
-
-
-def test_discover_local_auto_unqualified_supported() raises:
-    var r = open_evidence_reader(fx("ordinary-7.0"))
-    var p = parse_profile_bytes(
-        bytes_of(_local_auto_doc(String("supported")))
-    )
-    var caps = List[String]()
-    caps.append(String("attempt-trace"))
-    var d = ProfileDecision(
-        True,
-        True,
-        p^,
-        String("profile la matched (local-auto)"),
-        String("local-auto"),
-        caps^,
-    )
-    var rep = discover_capabilities(r, d^)
-    var l = find_entry(rep, String("mapping-lifecycle"))
-    assert_equal(l.status, String("unknown"))
-    assert_equal(
-        l.reason,
-        String(
-            "supported by profile la but not qualified by this receipt"
-        ),
-    )
-
-
-def _frozen_hooks_json(wants: List[TraceWant]) -> String:
-    """Hook array JSON rendered from frozen wants, in order."""
-    var out = String("")
-    for i in range(len(wants)):
-        if i > 0:
-            out += String(",")
-        var w = wants[i].copy()
-        out += String('{"name":"') + w.name.copy()
-        out += String('","kind":"tracing","function":"') + w.function.copy()
-        out += String('","attach":"') + w.attach.copy()
-        out += String('","signature":"') + w.signature.copy()
-        out += String('"}')
-    return out^
-
-
-def _frozen_hook_names_json(wants: List[TraceWant]) -> String:
-    """Quoted hook-name list JSON from frozen wants, in order."""
-    var out = String("")
-    for i in range(len(wants)):
-        if i > 0:
-            out += String(",")
-        out += String('"') + wants[i].name + String('"')
-    return out^
-
-
-def test_discover_local_auto_pathless_hook() raises:
-    # A hook with no probe paths configured (fentry/fexit
-    # have no tracefs id/format files) abstains from the
-    # file probes instead of failing them: empty paths
-    # are "never looked", not "looked and not found". The
-    # hooks still match the frozen bindings exactly.
-    var r = open_evidence_reader(fx("ordinary-7.0"))
-    var doc = (
-        '{"schema_version":"0.1.1","profile_id":"la",'
-        '"status":"reference-unvalidated",'
-        '"identity":{"arch":"x86_64","min_kernel":"7.0",'
-        '"source":{"origin":"o","revision":"r"}},'
-        '"hooks":[' + _frozen_hooks_json(lc_trace()) + '],'
-        '"capabilities":[{"id":"mapping-lifecycle",'
-        '"status":"candidate","hooks":['
-        + _frozen_hook_names_json(lc_trace())
-        + '],"reason":"r"}]}'
-    )
-    var p = parse_profile_bytes(bytes_of(doc))
-    var caps = List[String]()
-    caps.append(String("mapping-lifecycle"))
-    var d = ProfileDecision(
-        True,
-        True,
-        p^,
-        String("profile la matched (local-auto)"),
-        String("local-auto"),
-        caps^,
-    )
-    var rep = discover_capabilities(r, d^)
-    var l = find_entry(rep, String("mapping-lifecycle"))
-    assert_equal(l.status, String("available"))
-    assert_equal(
-        l.reason, String("verified under local-auto receipt la")
-    )
-
-
-def test_discover_tracing_gap_signature() raises:
-    # A post-mint signature edit refuses in doctor with
-    # record's exact reason instead of riding the receipt
-    # to available.
-    var r = open_evidence_reader(fx("ordinary-7.0"))
-    var hooks = _frozen_hooks_json(lc_trace())
-    var bad = hooks.replace(String("attrs)"), String("attrs!)"))
-    assert_true(bad != hooks)
-    var doc = (
-        '{"schema_version":"0.1.1","profile_id":"la",'
-        '"status":"reference-unvalidated",'
-        '"identity":{"arch":"x86_64","min_kernel":"7.0",'
-        '"source":{"origin":"o","revision":"r"}},'
-        '"hooks":[' + bad + '],'
-        '"capabilities":[{"id":"mapping-lifecycle",'
-        '"status":"candidate","hooks":['
-        + _frozen_hook_names_json(lc_trace())
-        + '],"reason":"r"}]}'
-    )
-    var p = parse_profile_bytes(bytes_of(doc))
-    var caps = List[String]()
-    caps.append(String("mapping-lifecycle"))
-    var d = ProfileDecision(
-        True,
-        True,
-        p^,
-        String("profile la matched (local-auto)"),
-        String("local-auto"),
-        caps^,
-    )
-    var rep = discover_capabilities(r, d^)
-    var l = find_entry(rep, String("mapping-lifecycle"))
-    assert_equal(l.status, String("unavailable"))
-    assert_equal(
-        l.reason,
-        String(
-            "capability mapping-lifecycle hook "
-            "fexit:swiotlb_tbl_map_single signature mismatch"
-        ),
-    )
-    assert_equal(
-        l.remedy,
-        String(
-            "align the profile's mapping-lifecycle hooks with"
-            " this build's frozen bindings, then re-qualify"
-        ),
-    )
 
 
 def _sig_doc(hooks_json: String, cap_hooks_json: String) -> String:
@@ -4269,12 +3719,8 @@ def run() raises -> Int:
     suite.test[test_select_68_covers_6plus_reference]()
     suite.test[test_select_empty]()
     suite.test[test_select_unparseable]()
-    suite.test[test_discover_candidate_unknown]()
-    suite.test[test_discover_hook_absent]()
-    suite.test[test_discover_remedy_qualify]()
-    suite.test[test_discover_hook_denied]()
-    suite.test[test_discover_68_attempt_judged]()
-    suite.test[test_discover_515_attempt_floor]()
+    suite.test[test_decide_oversized_format_judges]()
+    suite.test[test_decide_hookless_refuses]()
     suite.test[test_verify_live_ok]()
     suite.test[test_verify_live_sig_mismatch]()
     suite.test[test_verify_live_unattachable]()
@@ -4307,30 +3753,11 @@ def run() raises -> Int:
     suite.test[test_core_layout_bitfield_ambiguous]()
     suite.test[test_core_layout_reader_failure]()
     suite.test[test_verify_live_v012_evidence]()
-    suite.test[test_discover_live38_candidate_available]()
     suite.test[test_live_receipt_roundtrip]()
     suite.test[test_live_receipt_drift_refuses]()
     suite.test[test_live_receipt_object_drift_refuses]()
-    suite.test[test_discover_no_cover]()
-    suite.test[test_discover_unparseable]()
-    suite.test[test_discover_available]()
-    suite.test[test_discover_changed]()
-    suite.test[test_discover_unreadable_format]()
-    suite.test[test_discover_denied_id_changed]()
-    suite.test[test_validated_id_best_effort]()
-    suite.test[test_discover_validated_absent]()
-    suite.test[test_discover_undeclared]()
-    suite.test[test_discover_unsupported_terminal]()
-    suite.test[test_discover_candidate_reference_verified]()
-    suite.test[test_discover_candidate_validated]()
-    suite.test[test_discover_vacuous_available]()
     suite.test[test_select_bound_receipt_grade_caps]()
     suite.test[test_select_bound_validated_grade_caps]()
-    suite.test[test_discover_local_auto_qualified]()
-    suite.test[test_discover_local_auto_qualified_candidate]()
-    suite.test[test_discover_local_auto_unqualified_supported]()
-    suite.test[test_discover_local_auto_pathless_hook]()
-    suite.test[test_discover_tracing_gap_signature]()
     suite.test[test_sig_match]()
     suite.test[test_sig_mismatch]()
     suite.test[test_sig_names_ignored]()

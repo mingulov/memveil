@@ -759,6 +759,21 @@ def test_scan_live_btf_truncated_unknown() raises:
     assert_equal(d.fix, remedy_for(String("btf-truncated")))
 
 
+def test_scan_id_absent_admits() raises:
+    # Admission never reads the tracepoint id file: the
+    # id-less tree admits exactly like base.
+    var d = _live_decision(String("id-absent"))
+    assert_true(d.ok)
+    assert_equal(d.kind, String("candidate"))
+    assert_equal(
+        d.reason,
+        String(
+            "candidate scan-live-ref: live interfaces verified"
+            " (profile unvalidated)"
+        ),
+    )
+
+
 def test_scan_live_ftrace_disabled_fix() raises:
     var d = _live_decision(String("ftrace-off"))
     assert_true(not d.ok)
@@ -840,6 +855,51 @@ def test_scan_sigswap_refused_code() raises:
     assert_true(not d.refusal_unknown)
     assert_equal(d.refusal_code, String("signature-mismatch"))
     assert_equal(d.fix, remedy_for(String("signature-mismatch")))
+
+
+def _live_decision_skewed_doc() raises -> ScanDecision:
+    """Record decision with a doc-side parameter type swap."""
+    var raw = read_host_file(
+        String(_PROFILES_LIVE) + String("/live-ref.json"),
+        String("profile"),
+        1048576,
+    )
+    var text = bytes_to_text(raw^)
+    var skewed = text.replace(
+        String("phys_addr_t orig_addr, size_t mapping_size"),
+        String("size_t orig_addr, phys_addr_t mapping_size"),
+    )
+    var one = List[Profile]()
+    one.append(parse_profile_bytes(_bytes_of(skewed)))
+    return decide_record(
+        String("tests/fixtures/gate/base"),
+        _kernel_38(),
+        one^,
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(""),
+        String("attempt-trace,mapping-lifecycle"),
+        String(""),
+        String(""),
+    )
+
+
+def test_scan_docskew_refuses_named_gap() raises:
+    # A doc-side type swap refuses pre-gate with the named
+    # tracing gap; the live signature never gets consulted.
+    var d = _live_decision_skewed_doc()
+    assert_true(not d.ok)
+    assert_true(not d.refusal_unknown)
+    assert_equal(
+        d.refusal,
+        String(
+            "capability mapping-lifecycle hook"
+            " fexit:swiotlb_tbl_map_single signature mismatch"
+        ),
+    )
+    assert_equal(d.refusal_code, String("profile"))
 
 
 def test_scan_sigwidth_refused_code() raises:
@@ -1845,12 +1905,14 @@ def run() raises -> Int:
     suite.test[test_scan_gate_order_denied_receipt_reaches_gate]()
     suite.test[test_scan_unknown_profile_basename]()
     suite.test[test_scan_live_btf_truncated_unknown]()
+    suite.test[test_scan_id_absent_admits]()
     suite.test[test_scan_live_ftrace_disabled_fix]()
     suite.test[test_scan_live_hook_ambiguous_code]()
     suite.test[test_scan_live_hook_absent_code]()
     suite.test[test_scan_signame_btf_accepted]()
     suite.test[test_scan_signame_doc_accepted]()
     suite.test[test_scan_sigswap_refused_code]()
+    suite.test[test_scan_docskew_refuses_named_gap]()
     suite.test[test_scan_sigwidth_refused_code]()
     suite.test[test_scan_live_explicit_candidate]()
     suite.test[test_scan_no_object_refuses]()

@@ -18,15 +18,12 @@ from memveil.cli.doctor import (
     EXIT_UNAVAILABLE,
     DoctorCap,
     DoctorOptions,
-    DoctorReport,
     DoctorReport2,
     assess_doctor,
-    build_doctor_report,
     default_profiles_dir,
     doctor_usage,
-    render_doctor_json,
     render_doctor_json2,
-    render_doctor_text,
+    render_doctor_text2,
     resolve_profiles_dir,
     run_doctor,
     run_doctor_opts,
@@ -34,10 +31,9 @@ from memveil.cli.doctor import (
 )
 from memveil.cli.report import EXIT_INVALID, EXIT_OK
 from memveil.jsonscan import Scanner
-from memveil.platform.capabilities import discover_capabilities
 from memveil.platform.evidence import detect_environment
 from memveil.platform.kernelgate import remedy_for
-from memveil.platform.profiles import load_profiles, select_profile
+from memveil.platform.profiles import load_profiles
 from memveil.platform.reader import (
     bytes_to_text,
     open_evidence_reader,
@@ -61,18 +57,22 @@ def parsed(doc: String) raises -> String:
     return s.parse_string()
 
 
-def drep_for(fxname: String, profdir: String) raises -> DoctorReport:
-    """Assemble a DoctorReport for one fixture plus profiles dir."""
-    var r = open_evidence_reader(fx(fxname))
-    var env = detect_environment(r)
-    var ps = load_profiles(profdir)
-    var d = select_profile(env.kernel, ps^)
-    var rep = discover_capabilities(r, d^)
-    return build_doctor_report(r, env, d, rep)
+def drep2_for(fxname: String, profdir: String) raises -> DoctorReport2:
+    """Assess one fixture plus profiles dir through admission."""
+    return assess_doctor(
+        _doctor2_opts(
+            fx(fxname),
+            profdir,
+            String("all"),
+            String("tests/fixtures/elf/ok.o"),
+            String("tests/fixtures/elf/lc-ok.o"),
+            String("tests/fixtures/elf/cp-ok.o"),
+        )
+    )
 
 
-def test_build_ordinary() raises:
-    var drep = drep_for(String("ordinary-7.0"), String("profiles"))
+def test_doctor2_build_ordinary() raises:
+    var drep = drep2_for(String("ordinary-7.0"), String("profiles"))
     assert_equal(drep.origin, String("fixture"))
     assert_equal(drep.verdict, String("unavailable"))
     assert_equal(
@@ -88,83 +88,56 @@ def test_build_ordinary() raises:
     assert_equal(drep.profile_status, String("reference-unvalidated"))
 
 
-def test_build_ready() raises:
-    var drep = drep_for(String("ready-validated"), fx("profiles-test"))
+def test_doctor2_build_ready() raises:
+    # The ready-validated root cannot admit: its profile
+    # leaves the extra capabilities unsupported and the
+    # stand-in format fails the layout probe.
+    var drep = drep2_for(
+        String("ready-validated"), fx("profiles-test")
+    )
     assert_equal(drep.origin, String("fixture"))
-    assert_equal(drep.verdict, String("ready"))
+    assert_equal(drep.verdict, String("unavailable"))
     assert_equal(
         drep.summary,
-        String("ready: attempt-trace available under test-validated"),
+        String(
+            "unavailable: capability mapping-lifecycle"
+            " unsupported by test-validated"
+        ),
     )
     assert_true(drep.matched)
+    assert_true(drep.has_profile)
+    assert_equal(drep.profile_id, String("test-validated"))
+    assert_equal(drep.profile_status, String("validated"))
 
 
-def _attempt_reason(drep: DoctorReport) -> String:
-    for i in range(len(drep.caps)):
-        if drep.caps[i].id == String("attempt-trace"):
-            return drep.caps[i].reason.copy()
-    return String("")
-
-
-def test_doctor_changed_names_drift_class() raises:
-    # A changed format stays unavailable, but the reason
-    # names the drift class: offset-only drift may admit
-    # after re-qualifying, anything else cannot.
-    var moved = drep_for(String("changed-moved"), fx("profiles-moved"))
-    assert_equal(moved.verdict, String("unavailable"))
-    assert_true(
-        contains(
-            _attempt_reason(moved),
-            String("; drift: offset-only (re-qualify may admit)"),
-        )
-    )
-    var trivial = drep_for(
-        String("changed-trivial"), fx("profiles-moved")
-    )
-    assert_equal(trivial.verdict, String("unavailable"))
-    assert_true(
-        contains(
-            _attempt_reason(trivial),
-            String("; drift: none (layout pinned)"),
-        )
-    )
-    var sig = drep_for(
-        String("changed-signature"), fx("profiles-test")
-    )
-    assert_equal(sig.verdict, String("unavailable"))
-    assert_true(
-        contains(
-            _attempt_reason(sig),
-            String("; drift: missing field common_type"),
-        )
-    )
-
-
-def test_build_denied_merge() raises:
-    var drep = drep_for(String("denied-tracepoint"), String("profiles"))
+def test_doctor2_denied_merge() raises:
+    # Hook denials surface per row; the top-level denied
+    # list carries environment-level denials only.
+    var drep = drep2_for(String("denied-tracepoint"), String("profiles"))
     assert_equal(drep.verdict, String("unavailable"))
-    assert_equal(len(drep.denied), 1)
-    assert_equal(
-        drep.denied[0],
-        String("/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format"),
+    assert_equal(len(drep.denied), 0)
+    var want = String(
+        "/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format"
     )
+    for i in range(len(drep.caps)):
+        assert_true(contains(drep.caps[i].reason, String("denied")))
+        assert_true(contains(drep.caps[i].reason, want.copy()))
 
 
-def test_build_env_denied() raises:
-    var drep = drep_for(String("denied-guest-node"), String("profiles"))
+def test_doctor2_env_denied() raises:
+    var drep = drep2_for(String("denied-guest-node"), String("profiles"))
     assert_equal(len(drep.denied), 1)
     assert_equal(drep.denied[0], String("/dev/sev-guest"))
 
 
-def test_json_ordinary_exact() raises:
-    # Stand-in BTF is corrupt evidence: lifecycle and copy
-    # report unknown (with the unknown-status remedy), only
-    # the proven layout gap stays unavailable.
-    var drep = drep_for(String("ordinary-7.0"), String("profiles"))
-    var js = render_doctor_json(drep)
+def test_doctor2_json_ordinary_exact() raises:
+    # Every requested set judges through record admission,
+    # so the proven layout gap refuses each row alike.
+    var drep = drep2_for(String("ordinary-7.0"), String("profiles"))
+    var js = render_doctor_json2(drep)
     var want = String(
         '{\n'
-        '  "schema_version": "0.1.0",\n'
+        '  "schema_version": "0.1.1",\n'
         '  "mode": "passive",\n'
         '  "provenance": {"origin": "fixture"},\n'
         '  "kernel": {\n'
@@ -172,7 +145,10 @@ def test_json_ordinary_exact() raises:
         '    "arch": "x86_64",\n'
         '    "eligible_floor": true,\n'
         '    "floor_reason":'
-        ' "release 7.0.0-34-generic meets the 6.0 floor"\n'
+        ' "release 7.0.0-34-generic meets the 6.0 floor",\n'
+        '    "btf": {"state": "malformed", "bytes": "24",'
+        ' "config_btf": "unknown", "config_src": "none"},\n'
+        '    "lockdown": {"mode": "unknown", "src": "none"}\n'
         "  },\n"
         '  "guest": {\n'
         '    "tech": "ordinary",\n'
@@ -188,25 +164,34 @@ def test_json_ordinary_exact() raises:
         '    "profile_id": "linux-x86_64-7.0-reference",\n'
         '    "status": "reference-unvalidated",\n'
         '    "reason": "profile linux-x86_64-7.0-reference covers'
-        " this identity but is reference-unvalidated\"\n"
+        " this identity but is reference-unvalidated;"
+        " linux-x86_64-7.0.0-34-generic identity uncheckable:"
+        ' config"\n'
         "  },\n"
-        '  "capabilities": [{"id": "attempt-trace", "status": "unavailable",'
+        '  "capabilities": [{"id": "attempt-trace",'
+        ' "status": "unavailable",'
         ' "reason": "layout: missing field common_type",'
-        ' "remedy": "refresh the profile\'s recorded signatures from'
-        ' this kernel, then re-prove with memveil qualify'
-        ' (see memveil qualify --help)"},'
-        ' {"id": "mapping-lifecycle", "status": "unknown",'
-        ' "reason": "bad BTF header",'
-        ' "remedy": "run memveil qualify for local-auto,'
-        ' or await validated evidence"},'
-        ' {"id": "copy-actual", "status": "unknown",'
-        ' "reason": "bad BTF header",'
-        ' "remedy": "run memveil qualify for local-auto,'
-        ' or await validated evidence"}],\n'
+        ' "remedy": "", "reason_code": "profile", "evidence": []},'
+        ' {"id": "mapping-lifecycle", "status": "unavailable",'
+        ' "reason": "layout: missing field common_type",'
+        ' "remedy": "", "reason_code": "profile", "evidence": []},'
+        ' {"id": "copy-actual", "status": "unavailable",'
+        ' "reason": "layout: missing field common_type",'
+        ' "remedy": "", "reason_code": "profile", "evidence": []}],\n'
         '  "privilege": {\n'
         '    "euid": 1001,\n'
         '    "denied_paths": []\n'
         "  },\n"
+        '  "requested": ["attempt-trace", "mapping-lifecycle",'
+        ' "copy-actual"],\n'
+        '  "prechecks": [{"id": "privilege", "state": "unknown",'
+        ' "reason": "CapEff unreadable: absent"},'
+        ' {"id": "memcg", "state": "unknown",'
+        ' "reason": "cgroup unreadable: absent"},'
+        ' {"id": "unprivileged-bpf", "state": "unknown",'
+        ' "reason": "unprivileged_bpf_disabled unreadable: absent"}],\n'
+        '  "load": [],\n'
+        '  "notes": [],\n'
         '  "verdict": "unavailable",\n'
         '  "summary": "unavailable: layout: missing field common_type"\n'
         "}\n"
@@ -214,63 +199,64 @@ def test_json_ordinary_exact() raises:
     assert_equal(js, want)
 
 
-def test_text_fix_lines() raises:
-    var drep = drep_for(String("ordinary-7.0"), String("profiles"))
-    var text = render_doctor_text(drep)
-    # The live judgment proves the stand-in format
-    # unusable, so the attempt reason names the layout
-    # gap instead of asking for a recorded format.
+def test_doctor2_text_fix_lines() raises:
+    var drep = drep2_for(
+        String("meta-release-hostile"), String("profiles")
+    )
+    var text = render_doctor_text2(drep)
     assert_true(
-        contains(text, String("layout: missing field common_type"))
+        contains(text, String("tracefs not found"))
     )
     assert_true(
         text.find(
-            String(
-                "    fix: refresh the profile's recorded signatures"
-                " from this kernel, then re-prove with memveil"
-                " qualify (see memveil qualify --help)\n"
-            )
+            String("    fix: ")
+            + remedy_for(String("tracefs-not-mounted"))
+            + String("\n")
         )
         != -1
     )
 
 
-def test_json_ready_verdict() raises:
-    var drep = drep_for(String("ready-validated"), fx("profiles-test"))
-    var js = render_doctor_json(drep)
-    assert_true(contains(js, String('"verdict": "ready"')))
+def test_doctor2_json_matched() raises:
+    # A matched profile still reports unavailable when
+    # admission refuses; matched never implies ready.
+    var drep = drep2_for(
+        String("ready-validated"), fx("profiles-test")
+    )
+    var js = render_doctor_json2(drep)
+    assert_true(contains(js, String('"verdict": "unavailable"')))
     assert_true(contains(js, String('"matched": true')))
 
 
-def test_json_null_profile() raises:
-    var drep = drep_for(String("arch-mismatch"), String("profiles"))
-    var js = render_doctor_json(drep)
+def test_doctor2_json_null_profile() raises:
+    var drep = drep2_for(String("arch-mismatch"), String("profiles"))
+    var js = render_doctor_json2(drep)
     assert_true(contains(js, String('"profile_id": null')))
     assert_true(contains(js, String('"status": null')))
     assert_true(contains(js, String('"matched": false')))
 
 
-def test_json_escapes_hostile() raises:
-    var drep = drep_for(String("meta-release-hostile"), String("profiles"))
-    var js = render_doctor_json(drep)
+def test_doctor2_json_escapes_hostile() raises:
+    var drep = drep2_for(
+        String("meta-release-hostile"), String("profiles")
+    )
+    var js = render_doctor_json2(drep)
     assert_true(contains(js, String("\\u001b")))
     var esc = parsed(String('"\\u001b"'))
     assert_equal(len(js.split(esc)), 1)
 
 
-def test_build_live_origin() raises:
-    var r = open_evidence_reader(String(""))
-    var env = detect_environment(r)
-    var ps = load_profiles(String("profiles"))
-    var d = select_profile(env.kernel, ps^)
-    var rep = discover_capabilities(r, d^)
-    var drep = build_doctor_report(r, env, d, rep)
+def test_doctor2_live_origin() raises:
+    var opts = DoctorOptions()
+    opts.root = String("")
+    opts.profiles_dir = String("profiles")
+    var drep = assess_doctor(opts^)
     assert_equal(drep.origin, String("live"))
 
 
-def test_text_key_lines() raises:
-    var drep = drep_for(String("ordinary-7.0"), String("profiles"))
-    var tx = render_doctor_text(drep)
+def test_doctor2_text_key_lines() raises:
+    var drep = drep2_for(String("ordinary-7.0"), String("profiles"))
+    var tx = render_doctor_text2(drep)
     assert_true(
         contains(tx, String("memveil doctor (passive, fixture evidence)"))
     )
@@ -288,9 +274,11 @@ def test_text_key_lines() raises:
     assert_true(contains(tx, String("verdict: unavailable")))
 
 
-def test_text_conflict_line() raises:
-    var drep = drep_for(String("conflicting-evidence"), String("profiles"))
-    var tx = render_doctor_text(drep)
+def test_doctor2_text_conflict_line() raises:
+    var drep = drep2_for(
+        String("conflicting-evidence"), String("profiles")
+    )
+    var tx = render_doctor_text2(drep)
     assert_true(
         contains(
             tx,
@@ -299,38 +287,38 @@ def test_text_conflict_line() raises:
     )
 
 
-def test_text_asserted_mark() raises:
-    var drep = drep_for(String("user-asserted-snp"), String("profiles"))
-    var tx = render_doctor_text(drep)
+def test_doctor2_text_asserted_mark() raises:
+    var drep = drep2_for(
+        String("user-asserted-snp"), String("profiles")
+    )
+    var tx = render_doctor_text2(drep)
     assert_true(contains(tx, String("guest: snp (user-asserted)")))
 
 
-def test_text_denied_lists() raises:
-    var drep = drep_for(String("denied-tracepoint"), String("profiles"))
-    var tx = render_doctor_text(drep)
+def test_doctor2_text_denied_lists() raises:
+    var drep = drep2_for(
+        String("denied-guest-node"), String("profiles")
+    )
+    var tx = render_doctor_text2(drep)
     assert_true(
-        contains(
-            tx,
-            String(
-                "denied:"
-                " /sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format"
-            ),
-        )
+        contains(tx, String("denied: /dev/sev-guest"))
     )
 
 
-def test_text_sanitizes_hostile() raises:
-    var drep = drep_for(String("meta-release-hostile"), String("profiles"))
-    var tx = render_doctor_text(drep)
+def test_doctor2_text_sanitizes_hostile() raises:
+    var drep = drep2_for(
+        String("meta-release-hostile"), String("profiles")
+    )
+    var tx = render_doctor_text2(drep)
     var esc = parsed(String('"\\u001b"'))
     assert_equal(len(tx.split(esc)), 1)
     assert_true(contains(tx, String("7.0/evil")))
 
 
 def test_exit_ready() raises:
-    # D10 (T2): doctor judges through record admission, so
+    # Doctor judges through record admission, so
     # undiscoverable objects under mojo run read unavailable
-    # even on the ready-validated fixture (D13 approved).
+    # even on the ready-validated fixture.
     var code = run_doctor_with(
         fx("ready-validated"), fx("profiles-test"), True
     )
@@ -1003,22 +991,21 @@ def test_doctor2_json_schema() raises:
 
 def run() raises -> Int:
     var suite = TestSuite()
-    suite.test[test_build_ordinary]()
-    suite.test[test_build_ready]()
-    suite.test[test_doctor_changed_names_drift_class]()
-    suite.test[test_build_live_origin]()
-    suite.test[test_build_denied_merge]()
-    suite.test[test_build_env_denied]()
-    suite.test[test_json_ordinary_exact]()
-    suite.test[test_text_fix_lines]()
-    suite.test[test_json_ready_verdict]()
-    suite.test[test_json_null_profile]()
-    suite.test[test_json_escapes_hostile]()
-    suite.test[test_text_key_lines]()
-    suite.test[test_text_conflict_line]()
-    suite.test[test_text_asserted_mark]()
-    suite.test[test_text_denied_lists]()
-    suite.test[test_text_sanitizes_hostile]()
+    suite.test[test_doctor2_build_ordinary]()
+    suite.test[test_doctor2_build_ready]()
+    suite.test[test_doctor2_live_origin]()
+    suite.test[test_doctor2_denied_merge]()
+    suite.test[test_doctor2_env_denied]()
+    suite.test[test_doctor2_json_ordinary_exact]()
+    suite.test[test_doctor2_text_fix_lines]()
+    suite.test[test_doctor2_json_matched]()
+    suite.test[test_doctor2_json_null_profile]()
+    suite.test[test_doctor2_json_escapes_hostile]()
+    suite.test[test_doctor2_text_key_lines]()
+    suite.test[test_doctor2_text_conflict_line]()
+    suite.test[test_doctor2_text_asserted_mark]()
+    suite.test[test_doctor2_text_denied_lists]()
+    suite.test[test_doctor2_text_sanitizes_hostile]()
     suite.test[test_exit_ready]()
     suite.test[test_exit_unavailable]()
     suite.test[test_exit_bad_root]()

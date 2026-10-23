@@ -13,8 +13,8 @@ internal errors (bad fixture header, unreadable profiles). The
 rendered report goes to stdout and nothing else does; every
 diagnostic goes to stderr. Only a broken standard error raises.
 
-Text and ``--json`` render the same DoctorReport; the JSON matches
-the doctor-v0.1.0 schema exactly. Every interpolated evidence
+Text and ``--json`` render the same DoctorReport2; the JSON matches
+the doctor-v0.1.1 schema exactly. Every interpolated evidence
 fragment is sanitized for its sink.
 """
 
@@ -42,12 +42,7 @@ from memveil.cli.report import (
 )
 from memveil.platform.btf import read_object_map_bytes
 from memveil.platform.stdout import write_stdout
-from memveil.platform.capabilities import (
-    CapEntry,
-    CapabilityReport,
-    attempt_loss_exact,
-    discover_capabilities,
-)
+from memveil.platform.capabilities import attempt_loss_exact
 from memveil.platform.evidence import (
     EnvironmentEvidence,
     GuestInfo,
@@ -89,7 +84,6 @@ from memveil.render.json import escape_json
 
 
 comptime EXIT_UNAVAILABLE = 3
-comptime DOCTOR_SCHEMA_VERSION = "0.1.0"
 comptime _ZLIB = "libz.so.1"
 comptime _OBJECT_BYTES_CAP = 67108864
 comptime _CMDLINE_CAP = 65536
@@ -97,45 +91,6 @@ comptime _NSLABS_CAP = 64
 comptime _MAX_NEED = 9223372036854775807
 
 
-struct DoctorReport(Copyable):
-    """One assembled doctor report, ready to render.
-
-    ``origin`` is ``live`` only for the live host reader;
-    every fixture root renders ``fixture``.
-    """
-
-    var origin: String
-    var kernel: KernelInfo
-    var guest: GuestInfo
-    var matched: Bool
-    var has_profile: Bool
-    var profile_id: String
-    var profile_status: String
-    var profile_reason: String
-    var caps: List[CapEntry]
-    var euid: Int
-    var denied: List[String]
-    var verdict: String
-    var summary: String
-
-    def __init__(out self):
-        self.origin = String("fixture")
-        self.kernel = KernelInfo(
-            String(""), String(""), False, String("")
-        )
-        self.guest = GuestInfo(
-            String("unknown"), List[String](), False, String("")
-        )
-        self.matched = False
-        self.has_profile = False
-        self.profile_id = String("")
-        self.profile_status = String("")
-        self.profile_reason = String("")
-        self.caps = List[CapEntry]()
-        self.euid = 0
-        self.denied = List[String]()
-        self.verdict = String("unavailable")
-        self.summary = String("")
 
 
 def doctor_usage() -> String:
@@ -218,202 +173,10 @@ def _doctor_failed(detail: String) raises -> Int:
     return EXIT_INVALID
 
 
-def build_doctor_report(
-    reader: EvidenceReader,
-    env: EnvironmentEvidence,
-    decision: ProfileDecision,
-    report: CapabilityReport,
-) -> DoctorReport:
-    """Assemble one DoctorReport from the pipeline stages.
-
-    The verdict is ready only when the attempt-trace entry is
-    available; any other outcome, including unknown, reads
-    unavailable. Denied paths merge environment and hook denials.
-    Origin derives from the reader root: only the live host ("")
-    renders ``live``.
-    """
-    var out = DoctorReport()
-    if reader.root == "":
-        out.origin = String("live")
-    out.kernel = env.kernel.copy()
-    out.guest = env.guest.copy()
-    out.matched = decision.matched
-    out.has_profile = decision.has_profile
-    if decision.has_profile:
-        out.profile_id = decision.profile.profile_id
-        out.profile_status = decision.profile.status
-    out.profile_reason = decision.reason
-    out.caps = List[CapEntry]()
-    for i in range(len(report.entries)):
-        out.caps.append(report.entries[i].copy())
-    out.euid = reader.euid
-    out.denied = List[String]()
-    for i in range(len(env.denied)):
-        out.denied.append(env.denied[i])
-    for i in range(len(report.denied)):
-        var seen = False
-        for j in range(len(out.denied)):
-            if out.denied[j] == report.denied[i]:
-                seen = True
-                break
-        if not seen:
-            out.denied.append(report.denied[i])
-    var attempt_status = String("unknown")
-    var attempt_reason = String("attempt-trace was not judged")
-    for i in range(len(out.caps)):
-        if out.caps[i].id == "attempt-trace":
-            attempt_status = out.caps[i].status
-            attempt_reason = out.caps[i].reason
-            break
-    if attempt_status == "available":
-        out.verdict = String("ready")
-        out.summary = (
-            "ready: attempt-trace available under " + out.profile_id
-        )
-    else:
-        out.verdict = String("unavailable")
-        out.summary = "unavailable: " + attempt_reason
-    return out^
 
 
-def render_doctor_json(rep: DoctorReport) raises -> String:
-    """Render one DoctorReport as doctor-v0.1.0 JSON."""
-    var out = String("{\n")
-    out += '  "schema_version": "0.1.0",\n'
-    out += '  "mode": "passive",\n'
-    out += '  "provenance": {"origin": ' + escape_json(rep.origin) + "},\n"
-    out += '  "kernel": {\n'
-    out += '    "release": ' + escape_json(rep.kernel.release) + ",\n"
-    out += '    "arch": ' + escape_json(rep.kernel.arch) + ",\n"
-    if rep.kernel.eligible_floor:
-        out += '    "eligible_floor": true,\n'
-    else:
-        out += '    "eligible_floor": false,\n'
-    out += '    "floor_reason": ' + escape_json(rep.kernel.floor_reason) + "\n"
-    out += "  },\n"
-    out += '  "guest": {\n'
-    out += '    "tech": ' + escape_json(rep.guest.tech) + ",\n"
-    out += '    "signals": ['
-    for i in range(len(rep.guest.signals)):
-        if i != 0:
-            out += ", "
-        out += escape_json(rep.guest.signals[i])
-    out += "],\n"
-    if rep.guest.asserted:
-        out += '    "asserted": true,\n'
-    else:
-        out += '    "asserted": false,\n'
-    out += '    "conflict": ' + escape_json(rep.guest.conflict) + "\n"
-    out += "  },\n"
-    out += '  "profile": {\n'
-    if rep.matched:
-        out += '    "matched": true,\n'
-    else:
-        out += '    "matched": false,\n'
-    if rep.has_profile:
-        out += '    "profile_id": ' + escape_json(rep.profile_id) + ",\n"
-        out += '    "status": ' + escape_json(rep.profile_status) + ",\n"
-    else:
-        out += '    "profile_id": null,\n'
-        out += '    "status": null,\n'
-    out += '    "reason": ' + escape_json(rep.profile_reason) + "\n"
-    out += "  },\n"
-    out += '  "capabilities": ['
-    for i in range(len(rep.caps)):
-        if i != 0:
-            out += ", "
-        out += '{"id": ' + escape_json(rep.caps[i].id)
-        out += ', "status": ' + escape_json(rep.caps[i].status)
-        out += ', "reason": ' + escape_json(rep.caps[i].reason)
-        out += ', "remedy": ' + escape_json(rep.caps[i].remedy) + "}"
-    out += "],\n"
-    out += '  "privilege": {\n'
-    out += '    "euid": ' + String(rep.euid) + ",\n"
-    out += '    "denied_paths": ['
-    for i in range(len(rep.denied)):
-        if i != 0:
-            out += ", "
-        out += escape_json(rep.denied[i])
-    out += "]\n"
-    out += "  },\n"
-    out += '  "verdict": ' + escape_json(rep.verdict) + ",\n"
-    out += '  "summary": ' + escape_json(rep.summary) + "\n"
-    out += "}\n"
-    return out
 
 
-def render_doctor_text(rep: DoctorReport) raises -> String:
-    """Render one DoctorReport as human-readable text.
-
-    Every interpolated evidence fragment passes through the
-    single-line diagnostic sanitizer, so hostile fixture bytes
-    can neither split lines nor smuggle terminal sequences.
-    """
-    var out = String(
-        "memveil doctor (passive, " + rep.origin + " evidence)\n"
-    )
-    out += (
-        "kernel: "
-        + sanitize_diagnostic(rep.kernel.release)
-        + " "
-        + sanitize_diagnostic(rep.kernel.arch)
-        + " (floor 6.0: "
-    )
-    if rep.kernel.eligible_floor:
-        out += "yes"
-    else:
-        out += "no"
-    out += ")\n"
-    out += "floor: " + sanitize_diagnostic(rep.kernel.floor_reason) + "\n"
-    out += "guest: " + sanitize_diagnostic(rep.guest.tech)
-    if rep.guest.asserted:
-        out += " (user-asserted)"
-    out += "\n"
-    for i in range(len(rep.guest.signals)):
-        out += "  signal: " + sanitize_diagnostic(rep.guest.signals[i]) + "\n"
-    if rep.guest.conflict.byte_length() != 0:
-        out += (
-            "  conflict: " + sanitize_diagnostic(rep.guest.conflict) + "\n"
-        )
-    if rep.has_profile:
-        out += (
-            "profile: "
-            + sanitize_diagnostic(rep.profile_id)
-            + " ("
-            + sanitize_diagnostic(rep.profile_status)
-            + ")\n"
-        )
-    else:
-        out += "profile: none\n"
-    out += (
-        "profile-detail: " + sanitize_diagnostic(rep.profile_reason) + "\n"
-    )
-    out += "capabilities:\n"
-    for i in range(len(rep.caps)):
-        out += (
-            "  "
-            + sanitize_diagnostic(rep.caps[i].id)
-            + ": "
-            + sanitize_diagnostic(rep.caps[i].status)
-            + " - "
-            + sanitize_diagnostic(rep.caps[i].reason)
-            + "\n"
-        )
-        if rep.caps[i].remedy != String(""):
-            out += (
-                "    fix: "
-                + sanitize_diagnostic(rep.caps[i].remedy)
-                + "\n"
-            )
-    out += "privilege: euid " + String(rep.euid)
-    if len(rep.denied) != 0:
-        out += ", denied:"
-        for i in range(len(rep.denied)):
-            out += " " + sanitize_diagnostic(rep.denied[i])
-    out += "\n"
-    out += "verdict: " + sanitize_diagnostic(rep.verdict) + "\n"
-    out += "summary: " + sanitize_diagnostic(rep.summary) + "\n"
-    return out
 
 
 def run_doctor_with(
