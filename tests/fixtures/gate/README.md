@@ -44,6 +44,7 @@ tree is tracked. One line per variant:
 - hook-absent: BTF without the map hook, kallsyms without it.
 - hook-not-in-btf: BTF without the map hook, kallsyms with it.
 - hook-clone: only a dotted clone of the map hook in kallsyms.
+- hook-module: the map hook only as a tab-suffixed module symbol.
 - hook-nokallsyms: BTF without the map hook, no kallsyms file.
 - denied-all: eight gate paths fixture-denied at once.
 - container-view: debug-only tracefs, BTF hidden, config says BTF.

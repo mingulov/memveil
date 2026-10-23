@@ -12,7 +12,7 @@ mkdir -p "$GATE"
 
 # Every generated tree; later tasks extend this list alongside
 # their variants. Only these directories are ever removed.
-VARIANTS="base ftrace-off ftrace-denied ftrace-malformed aff-dup aff-module aff-clone aff-prefix debugfs-root debug-denied lockdown-conf lockdown-integrity lockdown-nosecfs lockdown-dashdash lockdown-config lockdown-nolsm lockdown-forcenone lockdown-twobrackets lockdown-bogus lockdown-denied notracing-config notracing-bpfevents tracefs-noevents tracefs-noevents-nolock tracefs-unmounted tracefs-hidden tracefs-gone events-denied btf-absent-config btf-absent-unknown btf-not-visible btf-denied btf-split btf-truncated sig-rename sig-swap sig-width hook-absent hook-not-in-btf hook-clone hook-nokallsyms denied-all container-view format-denied id-absent cc-flags-nonode cc-tdx-nonode cc-flags-host cc-tsm caps-none caps-bpf-perfmon caps-sysadmin caps-malformed caps-short caps-userns memcg-small memcg-ancestor memcg-malformed memcg-huge memcg-empty memcg-v1 memcg-root unpriv-bpf swiotlb-noforce swiotlb-inactive swiotlb-noslabs swiotlb-debugonly swiotlb-active"
+VARIANTS="base ftrace-off ftrace-denied ftrace-malformed aff-dup aff-module aff-clone aff-prefix debugfs-root debug-denied lockdown-conf lockdown-integrity lockdown-nosecfs lockdown-dashdash lockdown-config lockdown-nolsm lockdown-forcenone lockdown-twobrackets lockdown-bogus lockdown-denied notracing-config notracing-bpfevents tracefs-noevents tracefs-noevents-nolock tracefs-unmounted tracefs-hidden tracefs-gone events-denied btf-absent-config btf-absent-unknown btf-not-visible btf-denied btf-split btf-truncated sig-rename sig-swap sig-width hook-absent hook-not-in-btf hook-clone hook-module hook-nokallsyms denied-all container-view format-denied id-absent cc-flags-nonode cc-tdx-nonode cc-flags-host cc-tsm caps-none caps-bpf-perfmon caps-sysadmin caps-malformed caps-short caps-userns memcg-small memcg-ancestor memcg-malformed memcg-huge memcg-empty memcg-v1 memcg-root unpriv-bpf swiotlb-noforce swiotlb-inactive swiotlb-noslabs swiotlb-debugonly swiotlb-active"
 for v in $VARIANTS; do
   rm -rf "$GATE/$v"
 done
@@ -255,6 +255,13 @@ cp "$NOMAP" "$GATE/hook-clone/sys/kernel/btf/vmlinux"
   printf '0000000000000000 T noise_fn\n'
   printf '0000000000000000 t swiotlb_tbl_map_single.isra.0\n'
 } > "$GATE/hook-clone/proc/kallsyms"
+
+mk hook-module
+cp "$NOMAP" "$GATE/hook-module/sys/kernel/btf/vmlinux"
+{
+  printf '0000000000000000 T noise_fn\n'
+  printf '0000000000000000 t swiotlb_tbl_map_single\t[mvt_mod]\n'
+} > "$GATE/hook-module/proc/kallsyms"
 
 mk hook-nokallsyms
 cp "$NOMAP" "$GATE/hook-nokallsyms/sys/kernel/btf/vmlinux"

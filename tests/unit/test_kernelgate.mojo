@@ -396,6 +396,21 @@ def test_gate_hook_kallsyms() raises:
     )
 
 
+def test_gate_hook_kallsyms_module() raises:
+    # Module symbols carry a tab-suffixed [owner]; the
+    # hook still counts as present but not in BTF.
+    var doc = live_ref()
+    var lc = one_cap(String("mapping-lifecycle"))
+    var v = verify_live_interfaces(
+        gate(String("hook-module")), doc.copy(), lc.copy()
+    )
+    assert_true(not v.ok)
+    assert_equal(v.code, String("btf-hook-not-in-btf"))
+    assert_true(
+        contains(v.reason, String("swiotlb_tbl_map_single"))
+    )
+
+
 def test_gate_denied_never_absent() raises:
     var g = gate_of(String("denied-all"), all_caps())
     assert_true(g.ok or g.unknown)
@@ -719,6 +734,7 @@ def run() raises -> Int:
     suite.test[test_gate_noevents_unknown_lockdown_hidden]()
     suite.test[test_gate_btf_codes]()
     suite.test[test_gate_hook_kallsyms]()
+    suite.test[test_gate_hook_kallsyms_module]()
     suite.test[test_gate_denied_never_absent]()
     suite.test[test_gate_container_views]()
     suite.test[test_remedy_per_code]()

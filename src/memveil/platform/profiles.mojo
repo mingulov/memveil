@@ -2035,6 +2035,22 @@ def _kallsyms_clone(sym: String, function: String) -> Bool:
     return False
 
 
+def _kallsyms_symbol(field: String) -> String:
+    """The kallsyms name: cut a tab-suffixed module owner.
+
+    Core symbols stand alone; module symbols append a
+    tab and [owner] that never compares with the hook.
+    """
+    var b = field.as_bytes()
+    for i in range(len(b)):
+        if b[i] == UInt8(0x09):
+            try:
+                return String(from_utf8=b[0:i])
+            except:
+                return String("")
+    return field
+
+
 def _live_kallsyms_split(
     reader: EvidenceReader, hook: String, function: String
 ) -> LiveVerdict:
@@ -2065,7 +2081,7 @@ def _live_kallsyms_split(
         var fields = String(lines[i]).split(String(" "))
         if len(fields) < 3:
             continue
-        var sym = String(fields[2])
+        var sym = _kallsyms_symbol(String(fields[2]))
         if sym == function:
             return _live_refuse_code(
                 hook
