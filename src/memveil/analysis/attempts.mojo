@@ -371,6 +371,16 @@ def _coverage(status: String) -> String:
     return String("unavailable")
 
 
+def _attempt_lower_bound(session: Session) -> Bool:
+    """True when the producer claims a pre-6.7 lower bound."""
+    var label = String(
+        "attempt loss counts are a lower bound before 6.7"
+    )
+    if session.q_detail.reason.find(label) != -1:
+        return True
+    return session.q_aggregate.reason.find(label) != -1
+
+
 def _rollup_split_relations(
     mapping: Channel, copy: Channel, sync: Channel
 ) -> Channel:
@@ -932,6 +942,14 @@ struct AttemptAnalyzer:
             ch.reason = String("Authored fixture: no loss.")
         else:
             ch.reason = String("No detail loss observed.")
+        if _attempt_lower_bound(self._session):
+            # Pre-6.7 counts are a lower bound: the report
+            # never claims complete or silent loss there.
+            if ch.status == String("complete_for_scope"):
+                ch.status = String("partial")
+            ch.reason += String(
+                "; attempt loss counts are a lower bound before 6.7"
+            )
         return ch^
 
     def _build_aggregate(
@@ -1071,6 +1089,12 @@ struct AttemptAnalyzer:
                     + cause
                     + "."
                 )
+        if _attempt_lower_bound(self._session):
+            if ch.status == String("complete_for_scope"):
+                ch.status = String("partial")
+            ch.reason += String(
+                "; attempt loss counts are a lower bound before 6.7"
+            )
         return ch^
 
     def _build_terminal(mut self, partial: Bool) -> Channel:
@@ -1810,6 +1834,17 @@ struct AttemptAnalyzer:
         self._build_metrics(
             out, window, noun, order, partial, has_pools, has_regions
         )
+        if _attempt_lower_bound(self._session):
+            # Attempt-channel measurements rest on uncounted
+            # skips there; absence claims keep high.
+            for i in range(len(out.metrics)):
+                var measurement = out.metrics[i].measurement
+                if measurement == String(
+                    "observed"
+                ) or measurement == String("derived"):
+                    var m = out.metrics[i]
+                    m.confidence = String("medium")
+                    out.metrics[i] = m^
         self._compare_counters(out)
         var causes = List[String]()
         var refs = List[String]()

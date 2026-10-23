@@ -807,6 +807,8 @@ struct Collector:
     var detach_ns: UInt64
     var ready_ns: UInt64
     var detach_begin_ns: UInt64
+    var attempt_attach_done_ns: UInt64
+    var attempt_detach_begin_ns: UInt64
     var secondary_causes: List[String]
     var signal_error: String
     var output_fs: String
@@ -974,6 +976,8 @@ struct Collector:
         self.detach_ns = UInt64(0)
         self.ready_ns = UInt64(0)
         self.detach_begin_ns = UInt64(0)
+        self.attempt_attach_done_ns = UInt64(0)
+        self.attempt_detach_begin_ns = UInt64(0)
         self.secondary_causes = List[String]()
         self.signal_error = String("")
         self.output_fs = String("")
@@ -1508,6 +1512,10 @@ struct Collector:
         var attached = kernel.attach()
         if not attached.ok:
             return String("attach: ") + attached.message
+        # Attempt attaches last, so attach completion bounds
+        # the attempt hook's live interval from below on the
+        # same clock as the window.
+        self.attempt_attach_done_ns = clock.now()
         if self.cfg.has_copy:
             # Arm only after every copy link exists, so no bare exit inflates recoveries.
             var armed = kernel.set_copy_armed(True)
@@ -1919,7 +1927,10 @@ struct Collector:
 
     def _mark_detach_begin[C: ClockSource](mut self, mut clock: C):
         # The stop edge stamps once here, before the first detach call.
+        # Attempt detaches first, so the same read bounds the
+        # attempt hook's live interval from above.
         self.detach_begin_ns = clock.now()
+        self.attempt_detach_begin_ns = self.detach_begin_ns
 
     def normal_close[K: KernelSource, C: ClockSource, W: WriterSource](
         mut self, mut kernel: K, mut clock: C, mut writer: W
@@ -2402,6 +2413,32 @@ struct Collector:
         if not count_identity(self.end_vals):
             return String("count identity unproven")
         return String("byte coverage invalid")
+
+    def _attempt_interval_known(self) -> Bool:
+        """Both attached-interval stamps present and ordered."""
+        if self.attempt_attach_done_ns == UInt64(0):
+            return False
+        if self.attempt_detach_begin_ns == UInt64(0):
+            return False
+        return (
+            self.attempt_attach_done_ns < self.attempt_detach_begin_ns
+        )
+
+    def _aggregate_scope(self) -> String:
+        """Counter scope, claimed over the attached interval."""
+        var base = String("counter snapshots")
+        if self._extra_channels():
+            base = String("counter snapshots (attempt channel)")
+        if not self._attempt_interval_known():
+            return base
+        return (
+            base
+            + String(" attached [")
+            + format_u64(self.attempt_attach_done_ns)
+            + String(",")
+            + format_u64(self.attempt_detach_begin_ns)
+            + String(")")
+        )
 
     def maybe_sample_pool[C: ClockSource, W: WriterSource](
         mut self, mut clock: C, mut writer: W, now: UInt64
@@ -3351,8 +3388,25 @@ struct Collector:
                     + verdict.detail
                     + String(")")
                 )
+        if self.cfg.attempt_loss_lower_bound:
+            # A claimed count below 6.7 is a lower bound:
+            # trace_call_bpf skipped programs uncounted, so
+            # detail never claims complete there either.
+            out.q_detail.status = String("partial")
+            out.q_detail.reason += String(
+                "; attempt loss counts are a lower bound before 6.7"
+            )
         out.q_detail.scope = scope
-        if self.snapshots_present and not self.attempt_known:
+        if self.snapshots_present and not self._attempt_interval_known():
+            # The counter delta is exact only for the attached
+            # interval; without both stamps no complete claim.
+            out.q_aggregate.status = String("partial")
+            out.q_aggregate.has_loss_count = False
+            out.q_aggregate.reason = aggregate_reason(True, String(""))
+            out.q_aggregate.reason += String(
+                "; attempt attached interval unknown (stamp missing)"
+            )
+        elif self.snapshots_present and not self.attempt_known:
             # Skipped attempt runs never advance the counters.
             out.q_aggregate.status = String("partial")
             out.q_aggregate.has_loss_count = False
@@ -3397,19 +3451,16 @@ struct Collector:
             and out.q_aggregate.has_loss_count
         ):
             # A claimed count below 6.7 is a lower bound:
-            # trace_call_bpf skipped programs uncounted.
+            # trace_call_bpf skipped programs uncounted, so
+            # the aggregate never claims complete there.
+            out.q_aggregate.status = String("partial")
             out.q_aggregate.reason += String(
                 "; attempt loss counts are a lower bound before 6.7"
             )
-        if self._extra_channels():
-            # Lifecycle/copy counter cuts are verified at
-            # close and feed q_detail loss, but only the
-            # attempt channel archives counter snapshots.
-            out.q_aggregate.scope = String(
-                "counter snapshots (attempt channel)"
-            )
-        else:
-            out.q_aggregate.scope = String("counter snapshots")
+        # Lifecycle/copy counter cuts are verified at
+        # close and feed q_detail loss, but only the
+        # attempt channel archives counter snapshots.
+        out.q_aggregate.scope = self._aggregate_scope()
         if self._extra_channels():
             var health = self.registry.health_full()
             out.q_correlation.status = health.aggregate.status

@@ -1183,7 +1183,8 @@ def test_attempt_misses_make_aggregate_partial() raises:
 def test_attempt_loss_lower_bound_labels_aggregate() raises:
     # Kernels before 6.7 skip programs in trace_call_bpf
     # without counting them: a claimed aggregate count is
-    # a lower bound there and the reason says so.
+    # a lower bound there and the reason says so. D34 caps
+    # the status at partial even with zero known misses.
     var c = _one_copy_run(
         MissOut(True, UInt64(5), String(""), UInt64(3)),
         lower_bound=True,
@@ -1209,7 +1210,7 @@ def test_attempt_loss_lower_bound_labels_aggregate() raises:
         _contains(
             zero.session,
             String(
-                '"aggregate":{"status":"complete_for_scope",'
+                '"aggregate":{"status":"partial",'
                 '"loss_count":"0",'
             ),
         )
@@ -4490,7 +4491,7 @@ def test_collector_liveness_forward_only_suffixes_copy() raises:
     var vals = _live_clock_values(UInt64(1000000000), True, True)
     var attach = _live_attach(vals, True, True)
     var ready = attach + UInt64(100000000)
-    var detach_begin = UInt64(21300000007)
+    var detach_begin = UInt64(21400000007)
     var payloads = List[List[UInt8]]()
     for i in range(50):
         payloads.append(
@@ -4522,7 +4523,7 @@ def test_collector_liveness_forward_only_suffixes_copy() raises:
         _contains(
             c.session,
             String(
-                '"source":"detach_ns","interpretation":"21400000007"'
+                '"source":"detach_ns","interpretation":"21500000007"'
             ),
         )
     )
@@ -4595,7 +4596,7 @@ def test_collector_liveness_busy_edges_clean() raises:
     var vals = _live_clock_values(UInt64(1000000000), True, True)
     var attach = _live_attach(vals, True, True)
     var ready = attach + UInt64(100000000)
-    var detach_begin = UInt64(17900000007)
+    var detach_begin = UInt64(18000000007)
     var payloads = List[List[UInt8]]()
     for i in range(20):
         payloads.append(
@@ -4633,7 +4634,7 @@ def test_collector_liveness_busy_edges_clean() raises:
         _contains(
             c.session,
             String(
-                '"source":"detach_ns","interpretation":"18000000007"'
+                '"source":"detach_ns","interpretation":"18100000007"'
             ),
         )
     )
@@ -4749,12 +4750,12 @@ def _golden_events() -> String:
         'measurement\":\"observed\",\"correlation\":\"direct\"},\"data\":{\"counter_id\":\"swiotlb.requested_bytes\",\"epoc'
         'h\":\"0\",\"scope\":{\"profile_id\":\"test-profile-1\"},\"value\":\"0\",\"unit\":\"bytes\"}}'
         '\n'
-        '{\"schema_version\":\"0.1.1\",\"session_id\":\"cap-0-7\",\"seq\":\"4\",\"ts_ns\":\"120000000\",\"kind\":\"counter_snaps'
+        '{\"schema_version\":\"0.1.1\",\"session_id\":\"cap-0-7\",\"seq\":\"4\",\"ts_ns\":\"121000000\",\"kind\":\"counter_snaps'
         'hot\",\"source\":{\"hook\":\"swiotlb:swiotlb_bounced\",\"backend\":\"tracepoint\",\"profile_id\":\"test-profile-1\"'
         ',\"measurement\":\"observed\",\"correlation\":\"direct\"},\"data\":{\"counter_id\":\"swiotlb.bounce_attempts\",\"ep'
         'och\":\"0\",\"scope\":{\"profile_id\":\"test-profile-1\"},\"value\":\"0\",\"unit\":\"count\"}}'
         '\n'
-        '{\"schema_version\":\"0.1.1\",\"session_id\":\"cap-0-7\",\"seq\":\"5\",\"ts_ns\":\"120000000\",\"kind\":\"counter_snaps'
+        '{\"schema_version\":\"0.1.1\",\"session_id\":\"cap-0-7\",\"seq\":\"5\",\"ts_ns\":\"121000000\",\"kind\":\"counter_snaps'
         'hot\",\"source\":{\"hook\":\"swiotlb:swiotlb_bounced\",\"backend\":\"tracepoint\",\"profile_id\":\"test-profile-1\"'
         ',\"measurement\":\"observed\",\"correlation\":\"direct\"},\"data\":{\"counter_id\":\"swiotlb.requested_bytes\",\"ep'
         'och\":\"0\",\"scope\":{\"profile_id\":\"test-profile-1\"},\"value\":\"0\",\"unit\":\"bytes\"}}'
@@ -4766,10 +4767,10 @@ def _golden_session() -> String:
         '{\"schema_version\":\"0.1.2\",\"session_id\":\"cap-0-7\",\"synthetic\":false,\"product\":{\"name\":\"memveil\",\"vers'
         'ion\":\"memveil-0.1.0\"},\"environment\":{\"mode\":\"unknown\",\"detection\":\"unverified\",\"attestation\":\"not_pe'
         'rformed\",\"evidence\":[{\"type\":\"provenance\",\"source\":\"attach_ns\",\"interpretation\":\"7000000\"},{\"type\":\"'
-        'provenance\",\"source\":\"detach_ns\",\"interpretation\":\"15000000\"},{\"type\":\"provenance\",\"source\":\"drain_c'
+        'provenance\",\"source\":\"detach_ns\",\"interpretation\":\"16000000\"},{\"type\":\"provenance\",\"source\":\"drain_c'
         'losure\",\"interpretation\":\"proven\"},{\"type\":\"provenance\",\"source\":\"measurement_scope\",\"interpretation'
         '\":\"ordinals below observed at the end cut\"},{\"type\":\"provenance\",\"source\":\"output.fs\",\"interpretatio'
-        'n\":\"btrfs\"}]},\"capture\":{\"mode\":\"live\",\"window\":{\"start_ns\":\"7000000\",\"end_ns\":\"126000001\",\"baseline'
+        'n\":\"btrfs\"}]},\"capture\":{\"mode\":\"live\",\"window\":{\"start_ns\":\"7000000\",\"end_ns\":\"127000001\",\"baseline'
         '_start_ns\":\"2000000\"},\"filters\":{},\"finalized\":true,\"end_reason\":\"signal\"},\"device_catalog\":{\"device'
         's\":[]},\"baseline\":{\"complete\":false,\"region_observations\":[]},\"capabilities\":{\"bounce_attempts\":{\"st'
         'atus\":\"partial\",\"reason\":\"capture ok, 0 attempts persisted; admitted under test-profile-1; device de'
@@ -4790,7 +4791,7 @@ def _golden_session() -> String:
         'result/unmap + 2 copy/sync_request events\",\"reason\":\"detail loss 0 (submit_fail=(0) malformed=(0) dr'
         'opped=(0) recursion_missed=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(0) rejected=(0)'
         ' write_failed=(0))\",\"evidence_refs\":[]},\"aggregate\":{\"status\":\"complete_for_scope\",\"loss_count\":\"0\",'
-        '\"scope\":\"counter snapshots (attempt channel)\",\"reason\":\"counter snapshots present (valid cut, identi'
+        '\"scope\":\"counter snapshots (attempt channel) attached [8000000,15000000)\",\"reason\":\"counter snapshots present (valid cut, identi'
         'ty holds, coverage valid)\",\"evidence_refs\":[]},\"correlation\":{\"status\":\"partial\",\"loss_count\":null,\"'
         'scope\":\"correlated lifecycle events\",\"reason\":\"copy_attribution partial (copy without pending operat'
         'ion)\",\"evidence_refs\":[\"capture:seq=0\",\"capture:seq=1\"],\"relations\":{\"mapping_release\":{\"status\":\"co'
@@ -4806,6 +4807,152 @@ def _golden_session() -> String:
         'ed\":true,\"quiescence_observed\":false,\"writers_settled\":\"0\",\"in_flight_at_close\":\"0\",\"late_submits_dr'
         'ained\":\"0\",\"drained_records\":\"0\",\"busy_at_drain\":false,\"counters_valid\":true,\"open_mappings\":\"0\"}}'
     )
+
+def _parse_attached_interval(scope: String) raises -> Tuple[UInt64, UInt64]:
+    """Parse the D31 attached [A,B) claim from an aggregate scope."""
+    var raw = scope.as_bytes()
+    var mark = String("attached [").as_bytes()
+    var at = -1
+    var i = 0
+    while i + len(mark) <= len(raw):
+        var j = 0
+        while j < len(mark) and raw[i + j] == mark[j]:
+            j += 1
+        if j == len(mark):
+            at = i + len(mark)
+            break
+        i += 1
+    if at < 0:
+        raise Error("scope lacks attached interval")
+    var a = UInt64(0)
+    var k = at
+    while k < len(raw) and raw[k] != UInt8(0x2C):
+        var b = raw[k]
+        if b < UInt8(0x30) or b > UInt8(0x39):
+            raise Error("attached start not decimal")
+        a = a * UInt64(10) + UInt64(Int(b) - 0x30)
+        k += 1
+    if k >= len(raw):
+        raise Error("attached interval lacks comma")
+    k += 1
+    var c = UInt64(0)
+    while k < len(raw) and raw[k] != UInt8(0x29):
+        var b = raw[k]
+        if b < UInt8(0x30) or b > UInt8(0x39):
+            raise Error("attached end not decimal")
+        c = c * UInt64(10) + UInt64(Int(b) - 0x30)
+        k += 1
+    return (a, c)
+
+
+def _last_snapshot_ts(events: String) raises -> UInt64:
+    """Max ts_ns over counter_snapshot lines."""
+    var best = UInt64(0)
+    var seen = False
+    var key = String('"ts_ns":"').as_bytes()
+    for line in _lines(events):
+        if not _contains(line, String('"kind":"counter_snapshot"')):
+            continue
+        var raw = line.as_bytes()
+        var at = -1
+        var i = 0
+        while i + len(key) <= len(raw):
+            var j = 0
+            while j < len(key) and raw[i + j] == key[j]:
+                j += 1
+            if j == len(key):
+                at = i + len(key)
+                break
+            i += 1
+        if at < 0:
+            raise Error("snapshot lacks ts_ns")
+        var ts = UInt64(0)
+        var k = at
+        while k < len(raw) and raw[k] != UInt8(0x22):
+            var b = raw[k]
+            if b < UInt8(0x30) or b > UInt8(0x39):
+                raise Error("snapshot ts not decimal")
+            ts = ts * UInt64(10) + UInt64(Int(b) - 0x30)
+            k += 1
+        if not seen or ts > best:
+            best = ts
+        seen = True
+    if not seen:
+        raise Error("no counter snapshots")
+    return best
+
+
+def test_aggregate_scope_claims_attached_interval() raises:
+    # D31: the aggregate claim is scoped to the attempt hook's
+    # attached interval, not the reading pair; the readings
+    # extend past detach while the claim does not.
+    var c = _one_copy_run(MissOut(True, UInt64(0), String("")))
+    var s = parse_session(_session_bytes(c.session))
+    var iv = _parse_attached_interval(s.q_aggregate.scope)
+    assert_true(s.window_start_ns <= iv[0])
+    assert_true(iv[0] < iv[1])
+    assert_true(iv[1] <= s.window_end_ns)
+    assert_true(iv[1] < _last_snapshot_ts(c.events))
+
+
+def test_attempt_loss_lower_bound_caps_detail_partial() raises:
+    # D34: on a pre-6.7 kernel the detail claim is capped at
+    # partial with the lower-bound label; the known count
+    # stays as the lower bound, and the aggregate matches.
+    var c = _one_copy_run(
+        MissOut(True, UInt64(0), String("")), lower_bound=True
+    )
+    var s = parse_session(_session_bytes(c.session))
+    assert_equal(s.q_detail.status, String("partial"))
+    assert_true(s.q_detail.has_loss_count)
+    assert_equal(s.q_detail.loss_count, UInt64(0))
+    assert_true(
+        _contains(
+            s.q_detail.reason,
+            String(
+                "attempt loss counts are a lower bound before 6.7"
+            ),
+        )
+    )
+    assert_equal(s.q_aggregate.status, String("partial"))
+    assert_true(s.q_aggregate.has_loss_count)
+    assert_equal(s.q_aggregate.loss_count, UInt64(0))
+    assert_true(
+        _contains(
+            s.q_aggregate.reason,
+            String(
+                "attempt loss counts are a lower bound before 6.7"
+            ),
+        )
+    )
+
+
+def test_aggregate_missing_stamp_yields_partial() raises:
+    # D31: without both attached-interval stamps the aggregate
+    # is partial, never complete_for_scope.
+    var cfg = CollectorConfig()
+    cfg.profile_id = String("test-profile-1")
+    cfg.pid = 7
+    var collector = Collector(cfg)
+    collector.snapshots_present = True
+    collector.attempt_known = True
+    var s = collector.assemble()
+    assert_equal(s.q_aggregate.status, String("partial"))
+    assert_true(not s.q_aggregate.has_loss_count)
+    assert_true(
+        _contains(s.q_aggregate.reason, String("attached interval"))
+    )
+    # Positive control: ordered stamps restore complete.
+    collector.attempt_attach_done_ns = UInt64(100)
+    collector.attempt_detach_begin_ns = UInt64(200)
+    var s2 = collector.assemble()
+    assert_equal(s2.q_aggregate.status, String("complete_for_scope"))
+    assert_true(s2.q_aggregate.has_loss_count)
+    assert_equal(s2.q_aggregate.loss_count, UInt64(0))
+    var iv = _parse_attached_interval(s2.q_aggregate.scope)
+    assert_equal(iv[0], UInt64(100))
+    assert_equal(iv[1], UInt64(200))
+
 
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

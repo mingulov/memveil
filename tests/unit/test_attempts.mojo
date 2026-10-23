@@ -1122,6 +1122,83 @@ def test_filter_scope_counts_codepoints() raises:
     assert_true(has_limitation(over, past))
 
 
+def _lower_bound_session() raises -> Session:
+    """Live session whose producer claims a pre-6.7 lower bound."""
+    var s = Session()
+    s.session_id = String("lower-bound")
+    s.synthetic = False
+    s.product_version = String("0.0.0")
+    s.env_mode = String("unknown")
+    s.env_detection = String("unverified")
+    s.env_attestation = String("not_performed")
+    s.capture_mode = String("live")
+    s.window_start_ns = UInt64(0)
+    s.window_end_ns = UInt64(1000000000)
+    s.finalized = True
+    s.q_detail.status = String("partial")
+    s.q_detail.has_loss_count = True
+    s.q_detail.loss_count = UInt64(0)
+    s.q_detail.scope = String("sc")
+    s.q_detail.reason = String(
+        "Detail loss 0 (submit_fail=(0) malformed=(0) dropped=(0)"
+        " recursion_missed=(0) size_omitted=(0)"
+        " duration_omitted=(0) signal_omitted=(0) rejected=(0)"
+        " write_failed=(0)); attempt loss counts are a lower"
+        " bound before 6.7"
+    )
+    s.q_aggregate.status = String("partial")
+    s.q_aggregate.has_loss_count = True
+    s.q_aggregate.loss_count = UInt64(0)
+    s.q_aggregate.scope = String("counter snapshots attached [1,2)")
+    s.q_aggregate.reason = String(
+        "counter snapshots present (valid cut, identity holds,"
+        " coverage valid); attempt loss counts are a lower bound"
+        " before 6.7"
+    )
+    s.q_correlation.status = String("not_applicable")
+    s.q_correlation.scope = String("sc")
+    s.q_correlation.reason = String("rs")
+    s.q_baseline.status = String("not_applicable")
+    s.q_baseline.scope = String("sc")
+    s.q_baseline.reason = String("rs")
+    s.q_terminal.status = String("partial")
+    s.q_terminal.scope = String("sc")
+    s.q_terminal.reason = String("rs")
+    return s^
+
+
+def test_lower_bound_drops_confidence_and_labels_loss() raises:
+    # D34: a pre-6.7 lower-bound producer caps the report at
+    # partial with the label in both channels, and attempt
+    # metrics drop below high confidence.
+    var s = _lower_bound_session()
+    var a = AttemptAnalyzer(s)
+    var rep = a.finish(UInt64(1000000000), False)
+    assert_equal(rep.q_detail.status, String("partial"))
+    assert_true(rep.q_detail.reason.find(String("lower bound")) != -1)
+    assert_true(
+        rep.q_detail.reason.find(String("No detail loss observed.")) == -1
+    )
+    assert_equal(rep.q_aggregate.status, String("partial"))
+    assert_true(rep.q_aggregate.reason.find(String("lower bound")) != -1)
+    var attempts = metric_by_name(rep, String("bounce_attempts"), String(""))
+    assert_equal(attempts.confidence, String("medium"))
+    var all_bytes = metric_by_name(
+        rep, String("requested_bounce_bytes"), String("")
+    )
+    assert_equal(all_bytes.confidence, String("medium"))
+    # Control: without the label the same shape stays high.
+    var plain = _lower_bound_session()
+    plain.q_detail.reason = String("Detail loss 0")
+    plain.q_aggregate.reason = String("counter snapshots present")
+    var b = AttemptAnalyzer(plain)
+    var rep2 = b.finish(UInt64(1000000000), False)
+    var attempts2 = metric_by_name(
+        rep2, String("bounce_attempts"), String("")
+    )
+    assert_equal(attempts2.confidence, String("high"))
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_format_u64]()
@@ -1163,6 +1240,7 @@ def run() raises -> Int:
     suite.test[test_long_filter_scopes_bounded]()
     suite.test[test_filter_scope_exact_fit_boundary]()
     suite.test[test_filter_scope_counts_codepoints]()
+    suite.test[test_lower_bound_drops_confidence_and_labels_loss]()
     suite^.run()
     return 0
 
