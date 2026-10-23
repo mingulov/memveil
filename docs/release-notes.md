@@ -102,7 +102,9 @@ Do not silently rewrite a profile hash to make them admitted.
   unmapped (640 then 384 across runs); the product
   reports them open and the oracle agrees on every
   channel, but the map/unmap invariant and byte checks
-  fail, so the row is not qualified.
+  fail, so the row is not qualified. This is a
+  [known kernel issue](kernel-issues.md), not capture
+  loss.
 - The rt busy aggregate falls outside the oracle after
   a slow finalization, and the 6.12, 6.18, and debian13
   busy rows fail closed on oracle sample gaps over 1 s

@@ -166,7 +166,7 @@ countonly-oracle fix in the row judge.
 | 6.12.114-nobtf | 6.12.114-mv-6.12.114-nobtf | available | refused (`btf-absent-config`) | refused (`btf-absent-config`) | PASS (counts only; busy SHORT-COVERED) |
 | 6.12.114-rt | 6.12.114-mv-6.12.114-rt | available | available | available | FAIL (busy aggregate outside the oracle after a slow finalization; main SHORT-COVERED loss 198) |
 | 6.12 | 6.12.114-0612114-generic | available | available | available | FAIL (busy oracle gap over 1 s at window start; main all EXACT) |
-| 6.18.0 | 6.18.0-061800-generic | available | available | available | FAIL (kernel leaves read maps unmapped; product reports them open; invariant and bytes fail) |
+| 6.18.0 | 6.18.0-061800-generic | available | available | available | FAIL (kernel leaves read maps unmapped; product reports them open; invariant and bytes fail; see [kernel issues](kernel-issues.md)) |
 | 6.18 | 6.18.58-061858-generic | available | available | available | FAIL (busy oracle gap over 1 s at window start; main all EXACT) |
 | 7.0.14-lockdown | 7.0.14-070014-generic | refused (`lockdown-confidentiality`) | refused (`lockdown-confidentiality`) | refused (`lockdown-confidentiality`) | PASS |
 | 7.0 | 7.0.14-070014-generic | available | available | available | PASS |
@@ -182,6 +182,10 @@ Notes:
   oracle-proven while bytes stay unproven (no hist
   triggers in the built config). Its busy verdict is a
   strict SHORT-COVERED bound with declared omits.
+- A positive `stop.open_mappings` count means the
+  kernel never released those mappings, not that the
+  product lost their unmaps; see
+  [kernel issues](kernel-issues.md).
 - 7.3 changes one detail: `swiotlb_tbl_map_single`
   takes `attrs` as a pointer (present since rc1,
   verified through rc3, the newest 7.3 in the lock).
