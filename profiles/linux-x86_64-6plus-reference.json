@@ -1,5 +1,5 @@
 {
-  "schema_version": "0.1.1",
+  "schema_version": "0.1.2",
   "profile_id": "linux-x86_64-6plus-reference",
   "status": "reference-unvalidated",
   "identity": {
@@ -101,46 +101,156 @@
   ],
   "layouts": [
     {
-      "struct": "io_tlb_pool",
-      "field": "start",
-      "bit_offset": 0,
-      "bit_size": 64
+      "capability": "copy-actual",
+      "target": "enumerator",
+      "struct": "dma_data_direction",
+      "field": "DMA_BIDIRECTIONAL",
+      "type_kind": "enum",
+      "bit_size": 32,
+      "optional": false
     },
     {
-      "struct": "io_tlb_pool",
-      "field": "nslabs",
-      "bit_offset": 192,
-      "bit_size": 64
+      "capability": "copy-actual",
+      "target": "enumerator",
+      "struct": "dma_data_direction",
+      "field": "DMA_FROM_DEVICE",
+      "type_kind": "enum",
+      "bit_size": 32,
+      "optional": false
     },
     {
-      "struct": "io_tlb_pool",
-      "field": "slots",
-      "bit_offset": 448,
-      "bit_size": 64
+      "capability": "copy-actual",
+      "target": "enumerator",
+      "struct": "dma_data_direction",
+      "field": "DMA_TO_DEVICE",
+      "type_kind": "enum",
+      "bit_size": 32,
+      "optional": false
     },
     {
-      "struct": "io_tlb_slot",
-      "field": "orig_addr",
-      "bit_offset": 0,
-      "bit_size": 64
+      "capability": "copy-actual",
+      "target": "field",
+      "struct": "device",
+      "field": "dma_io_tlb_mem",
+      "type_kind": "ptr",
+      "bit_size": 64,
+      "optional": true
     },
     {
-      "struct": "io_tlb_slot",
-      "field": "alloc_size",
-      "bit_offset": 64,
-      "bit_size": 64
-    },
-    {
-      "struct": "device_dma_parameters",
-      "field": "min_align_mask",
-      "bit_offset": 32,
-      "bit_size": 32
-    },
-    {
+      "capability": "copy-actual",
+      "target": "field",
       "struct": "device",
       "field": "dma_parms",
-      "bit_offset": 5056,
-      "bit_size": 64
+      "type_kind": "ptr",
+      "bit_size": 64,
+      "optional": false
+    },
+    {
+      "capability": "copy-actual",
+      "target": "field",
+      "struct": "device_dma_parameters",
+      "field": "min_align_mask",
+      "type_kind": "int",
+      "bit_size": 32,
+      "optional": false
+    },
+    {
+      "capability": "copy-actual",
+      "target": "field",
+      "struct": "io_tlb_mem",
+      "field": "cc_shared",
+      "type_kind": "int",
+      "bit_size": 8,
+      "optional": true
+    },
+    {
+      "capability": "copy-actual",
+      "target": "field",
+      "struct": "io_tlb_pool",
+      "field": "end",
+      "type_kind": "int",
+      "bit_size": 64,
+      "optional": false
+    },
+    {
+      "capability": "copy-actual",
+      "target": "field",
+      "struct": "io_tlb_pool",
+      "field": "nslabs",
+      "type_kind": "int",
+      "bit_size": 64,
+      "optional": false
+    },
+    {
+      "capability": "copy-actual",
+      "target": "field",
+      "struct": "io_tlb_pool",
+      "field": "slots",
+      "type_kind": "ptr",
+      "bit_size": 64,
+      "optional": false
+    },
+    {
+      "capability": "copy-actual",
+      "target": "field",
+      "struct": "io_tlb_pool",
+      "field": "start",
+      "type_kind": "int",
+      "bit_size": 64,
+      "optional": false
+    },
+    {
+      "capability": "copy-actual",
+      "target": "field",
+      "struct": "io_tlb_slot",
+      "field": "alloc_size",
+      "type_kind": "int",
+      "bit_size": 64,
+      "optional": false
+    },
+    {
+      "capability": "copy-actual",
+      "target": "field",
+      "struct": "io_tlb_slot",
+      "field": "orig_addr",
+      "type_kind": "int",
+      "bit_size": 64,
+      "optional": false
+    },
+    {
+      "capability": "copy-actual",
+      "target": "type",
+      "struct": "io_tlb_slot",
+      "type_kind": "struct",
+      "bit_size": 128,
+      "optional": false
+    },
+    {
+      "capability": "mapping-lifecycle",
+      "target": "enumerator",
+      "struct": "dma_data_direction",
+      "field": "DMA_BIDIRECTIONAL",
+      "type_kind": "enum",
+      "bit_size": 32,
+      "optional": false
+    },
+    {
+      "capability": "mapping-lifecycle",
+      "target": "enumerator",
+      "struct": "dma_data_direction",
+      "field": "DMA_FROM_DEVICE",
+      "type_kind": "enum",
+      "bit_size": 32,
+      "optional": false
+    },
+    {
+      "capability": "mapping-lifecycle",
+      "target": "enumerator",
+      "struct": "dma_data_direction",
+      "field": "DMA_TO_DEVICE",
+      "type_kind": "enum",
+      "bit_size": 32,
+      "optional": false
     }
   ]
 }
