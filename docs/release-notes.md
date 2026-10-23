@@ -32,6 +32,10 @@ contract for shipping collection, offline analysis, and laboratory work.
 
 ## Evidence scope
 
+Release bundle identities: binary sha256
+`42c4f0a44d4391b4b71cafe7df8e7f9341a17385cb535fcc14f77e26bf40437a`
+(`.deb` sha256
+`9494ee0d2a84bbe632191225b397e9749373521fe28b045c78b8ccd5ab0c885c`).
 Earlier development receipts and CI successes apply to their recorded
 revisions, binaries, BPF objects and environments. They are historical
 evidence, not a final re-gate of every later candidate. Laboratory lifecycle,
@@ -48,7 +52,7 @@ archive hashes, manifest verification, observed toolchain, binary/BPF/profile
 identities, commands, expected/actual results and cleanup. Compiler-free
 offline replay is a packaging boundary; collection additionally needs its
 exact bound profile/environment and independent live oracle. Source-export
-builds may produce different BPF bytes and fail the existing narrow binding.
+builds may produce different BPF bytes and fail recorded bindings.
 Do not silently rewrite a profile hash to make them admitted.
 
 ## Open release gates and limits
@@ -87,18 +91,23 @@ Do not silently rewrite a profile hash to make them admitted.
   6.0 floor; 6.0 through 6.10 refuse lifecycle and copy
   (need 6.11); BTF-less kernels refuse lifecycle and
   copy (`btf-absent-config`); confidentiality lockdown
-  refuses everything. The 6.11 through 7.3 rows, the
-  6.12.114 debug/rt/btf variants, and debian13 refuse
-  `record` with `layout-size`: their `io_tlb_slot` is
-  192 bits against the objects' 128, so no capture runs
-  there.
-- The 6.0, 6.6, 6.10, and nobtf rows finalize their
+  refuses everything.
+- The 6.0, 6.10, 6.11, and 6.12.0 rows finalize their
   main capture with exact oracle counts but fail the
-  busy saturation check: the saturated runs report
-  partial with a counted loss the gate leaves unproven,
-  and the 6.0/6.10 busy captures stop on the 4 GiB
-  `size_limit` instead of the signal. Attempt loss
+  busy stop check: the saturated runs stop at the
+  4,194,304-record cap with bytes below the 4 GiB cap,
+  which the gate does not accept. Attempt loss
   before 6.7 is a lower bound.
+- The 6.18.0 kernel leaves several hundred read maps
+  unmapped (640 then 384 across runs); the product
+  reports them open and the oracle agrees on every
+  channel, but the map/unmap invariant and byte checks
+  fail, so the row is not qualified.
+- The rt busy aggregate falls outside the oracle after
+  a slow finalization, and the 6.12, 6.18, and debian13
+  busy rows fail closed on oracle sample gaps over 1 s
+  at the window edge. Main captures on all four rows
+  are exact.
 - `forced` mirrors the kernel's swiotlb force bit and is
   not a confidential-guest signal; see
   [privacy](privacy.md).
@@ -107,9 +116,11 @@ Do not silently rewrite a profile hash to make them admitted.
 - Passive doctor can read `ready (load not checked)`
   while the memcg precheck reports `memcg-headroom`
   unknown; only `doctor --load-check` or a record proves
-  the load fits. The memcg scenario is not proven live
-  for this bundle: the 7.0 scenario guest refuses
-  admission, failing all 12 scenarios at precondition.
+  the load fits. Detection scenarios pass 10 of 12 on
+  the 7.0 guest: `nocaps` cannot execute under
+  `capsh --drop` in the guest, and the `memcg` limit
+  does not block the load probe, so neither gate is
+  proven live for this bundle.
 
 ## Compatibility
 

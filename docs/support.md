@@ -70,10 +70,12 @@ are not provided.
 - `forced` mirrors the kernel's swiotlb force bit and is
   not a confidential-guest signal (see
   [privacy](privacy.md)).
-- The 7.0 scenario guest refuses admission
-  (`layout-size`, see Kernel generations), so all 12
-  detection scenarios fail at their precondition and the
-  memcg limit is not proven live for this bundle.
+- The 7.0 scenario guest admits, and 10 of 12 detection
+  scenarios pass (every negative refuses correctly).
+  `nocaps` cannot execute under `capsh --drop` in the
+  guest and `memcg` misjudges its limit, so
+  capability-drop and memcg-limit behavior is not
+  proven live for this bundle.
 - `libbpf-mojo` 0.2.0 declares a 7.0 kernel minimum;
   below 7.0 this repository's booted matrix is the
   qualification.
@@ -142,39 +144,44 @@ tracepoint format, ftrace attachability), never by trusting
 the release string. One prebuilt probe set covers every row;
 no rebuild on the device.
 
-Booted 2026-10-23 with the 0.1.0 release bundle. Only
-`PASS` rows are support claims; the rest are measured
-observations recorded with their exact refusal codes.
+Booted 2026-10-23 with the 0.1.0 release bundle
+(binary sha256 `42c4f0a4...`, full hash in the
+[release notes](release-notes.md)). Only `PASS` rows are
+support claims; the rest are measured observations
+recorded with their exact refusal codes. Evidence:
+`matrix/<lock id>` per row; the nobtf PASS comes from a
+same-binary re-run (`rerun/6.12.114-nobtf`) after a
+countonly-oracle fix in the row judge.
 
 | Lock id | Booted release | attempt-trace | mapping-lifecycle | copy-actual | Row |
 | --- | --- | --- | --- | --- | --- |
 | 5.15 | 5.15.223-0515223-generic | refused (`floor`) | refused (`floor`) | refused (`floor`) | PASS |
-| 6.0 | 6.0.19-060019-generic | available | refused (`floor`) | refused (`floor`) | FAIL (busy `size_limit` stop, saturation loss unproven) |
-| 6.6 | 6.6.160-0606160-generic | available | refused (`floor`) | refused (`floor`) | FAIL (busy saturation loss unproven) |
-| 6.10 | 6.10.14-061014-generic | available | refused (`floor`) | refused (`floor`) | FAIL (busy `size_limit` stop, saturation loss unproven) |
-| 6.11 | 6.11.11-061111-generic | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
-| 6.12.0 | 6.12.0-061200-generic | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
-| 6.12.114-btf | 6.12.114-mv-6.12.114-btf | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
-| 6.12.114-debug | 6.12.114-mv-6.12.114-debug | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
-| 6.12.114-nobtf | 6.12.114-mv-6.12.114-nobtf | available | refused (`btf-absent-config`) | refused (`btf-absent-config`) | FAIL (busy saturation loss unproven; counts exact, bytes unproven) |
-| 6.12.114-rt | 6.12.114-mv-6.12.114-rt | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
-| 6.12 | 6.12.114-0612114-generic | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
-| 6.18.0 | 6.18.0-061800-generic | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
-| 6.18 | 6.18.58-061858-generic | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
+| 6.0 | 6.0.19-060019-generic | available | refused (`floor`) | refused (`floor`) | FAIL (busy stops at the 4,194,304-record cap with bytes below cap; attempts EXACT) |
+| 6.6 | 6.6.160-0606160-generic | available | refused (`floor`) | refused (`floor`) | PASS |
+| 6.10 | 6.10.14-061014-generic | available | refused (`floor`) | refused (`floor`) | FAIL (busy stops at the 4,194,304-record cap with bytes below cap; attempts EXACT) |
+| 6.11 | 6.11.11-061111-generic | available | available | available | FAIL (busy stops at the 4,194,304-record cap with bytes below cap; main all EXACT) |
+| 6.12.0 | 6.12.0-061200-generic | available | available | available | FAIL (busy stops at the 4,194,304-record cap with bytes below cap; main all EXACT) |
+| 6.12.114-btf | 6.12.114-mv-6.12.114-btf | available | available | available | PASS |
+| 6.12.114-debug | 6.12.114-mv-6.12.114-debug | available | available | available | PASS |
+| 6.12.114-nobtf | 6.12.114-mv-6.12.114-nobtf | available | refused (`btf-absent-config`) | refused (`btf-absent-config`) | PASS (counts only; busy SHORT-COVERED) |
+| 6.12.114-rt | 6.12.114-mv-6.12.114-rt | available | available | available | FAIL (busy aggregate outside the oracle after a slow finalization; main SHORT-COVERED loss 198) |
+| 6.12 | 6.12.114-0612114-generic | available | available | available | FAIL (busy oracle gap over 1 s at window start; main all EXACT) |
+| 6.18.0 | 6.18.0-061800-generic | available | available | available | FAIL (kernel leaves read maps unmapped; product reports them open; invariant and bytes fail) |
+| 6.18 | 6.18.58-061858-generic | available | available | available | FAIL (busy oracle gap over 1 s at window start; main all EXACT) |
 | 7.0.14-lockdown | 7.0.14-070014-generic | refused (`lockdown-confidentiality`) | refused (`lockdown-confidentiality`) | refused (`lockdown-confidentiality`) | PASS |
-| 7.0 | 7.0.14-070014-generic | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
-| 7.1 | 7.1.13-070113-generic | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
-| 7.2 | 7.2.6-070206-generic | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
-| 7.3-rc3 | 7.3.0-070300rc3-generic | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
-| 7.3 | 7.3.0-mv-7.3 | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
-| debian13 | 6.12.107+deb13-amd64 | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
+| 7.0 | 7.0.14-070014-generic | available | available | available | PASS |
+| 7.1 | 7.1.13-070113-generic | available | available | available | PASS |
+| 7.2 | 7.2.6-070206-generic | available | available | available | PASS (main SHORT-COVERED loss 11) |
+| 7.3-rc3 | 7.3.0-070300rc3-generic | available | available | available | PASS (main SHORT-COVERED loss 5) |
+| 7.3 | 7.3.0-mv-7.3 | available | available | available | PASS |
+| debian13 | 6.12.107+deb13-amd64 | available | available | available | FAIL (busy oracle gap over 1 s at window end; main all EXACT) |
 
 Notes:
 
 - The nobtf row asserts counts only: attempt counts are
   oracle-proven while bytes stay unproven (no hist
-  triggers in the built config), and the row fails on
-  the busy saturation check.
+  triggers in the built config). Its busy verdict is a
+  strict SHORT-COVERED bound with declared omits.
 - 7.3 changes one detail: `swiotlb_tbl_map_single`
   takes `attrs` as a pointer (present since rc1,
   verified through rc3, the newest 7.3 in the lock).
