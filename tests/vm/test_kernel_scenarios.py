@@ -405,7 +405,7 @@ def test_negative_capture_object_sha_mismatch_fails():
 
 def _memcg_ev(oom_delta=0, record_exit="3", status="ok",
               p0=20000000, p1=60000000, r0=25000000):
-    limit = (max(p0, r0) + p1) // 2
+    limit = ks.memcg_limit(p0, r0, p1)
     attempt = {"cgroup": "0::/mvt_small\n",
                "memory_max": str(limit),
                "p0": p0, "p1": p1, "r0": r0, "limit": limit,
@@ -550,6 +550,26 @@ def test_memcg_refused_voids_not_proven():
 
 def test_memcg_passive_precheck_gone():
     assert "passive_precheck" not in ks.SCENARIOS["memcg"]
+
+
+def test_memcg_limit_page_aligned():
+    assert ks.memcg_limit(20000000, 25000000, 60000000) \
+        == 42496000
+    assert ks.memcg_limit(20000000, 25000000,
+                          60000000) % 4096 == 0
+    # The live 97 MB shape rounds down to the page.
+    assert ks.memcg_limit(64987136, 20738048,
+                          129699840) == 97341440
+    ev = _memcg_ev()
+    attempt = ev["memcg"]["attempts"][0]
+    raw = (max(attempt["p0"], attempt["r0"])
+           + attempt["p1"]) // 2
+    assert raw != attempt["limit"]
+    attempt["limit"] = raw
+    attempt["memory_max"] = str(raw)
+    ok, detail = ks._memcg_attempt_ok(
+        {"attempt": attempt})
+    assert ok is None, detail
 
 
 def test_scenarios_verdict_not_proven_never_passes():

@@ -791,7 +791,11 @@ def _memcg_attempt(ctx, sdir, num):
     cal, err = _memcg_calibrate(ctx, num)
     if err is not None:
         return {"setup_err": err}
-    limit = (max(cal["p0"], cal["r0"]) + cal["p1"]) // 2
+    # The kernel stores memory.max page-aligned; round the
+    # midpoint down so the written limit reads back exactly
+    # (host memcg_limit must stay the same formula).
+    limit = ((max(cal["p0"], cal["r0"]) + cal["p1"]) // 2) \
+        // 4096 * 4096
     err = _cg_setup(MC_GROUP)
     if err is not None:
         return dict(cal, limit=limit, setup_err=err)

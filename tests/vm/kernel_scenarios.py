@@ -573,6 +573,16 @@ def check_capture(scenario, cap):
     return True, "negative capture degrades honestly"
 
 
+def memcg_limit(p0, r0, p1):
+    """Calibrated memcg limit: midpoint rounded down to a page.
+
+    The kernel stores memory.max page-aligned, so the
+    written limit is already a whole number of pages and
+    reads back exactly.
+    """
+    return ((max(p0, r0) + p1) // 2) // 4096 * 4096
+
+
 def _memcg_attempt_ok(pre):
     """Calibrated memcg attempt facts, or (None, detail)."""
     attempt = pre.get("attempt")
@@ -592,7 +602,7 @@ def _memcg_attempt_ok(pre):
         return None, "memcg record peak over load peak"
     if not r0 < limit:
         return None, "memcg record peak over limit"
-    if limit != (max(p0, r0) + p1) // 2:
+    if limit != memcg_limit(p0, r0, p1):
         return None, "memcg limit is not the midpoint"
     if "mvt_small" not in (attempt.get("cgroup") or ""):
         return None, "cgroup does not name mvt_small"
