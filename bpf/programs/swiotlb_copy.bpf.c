@@ -1,32 +1,15 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 
-/* MemVeil swiotlb copy probe.
- *
- * fentry on __swiotlb_sync_single_for_device,
- * __swiotlb_sync_single_for_cpu (sync requests: direction and
- * length, never executed bytes), plus fentry and fexit on
- * swiotlb_bounce (executed copies with replicated effective
- * bytes). Emits 48-byte MVCP v1 records on mv_copies. Byte
- * aggregates cover REQUESTED bytes (observed and emitted in
- * parallel); effective bytes live in the events, summed by
- * consumers only over KNOWN records.
- *
- * Effective-byte replication reads the pool slot the hook
- * itself reads (start/end/nslabs/slots, then orig_addr and
- * alloc_size) plus dev->dma_parms->min_align_mask, and
- * applies the hook's clamp rule from memveil_events.h. Every
- * relocated width is guarded against its local view, and the
- * pool span must be exactly nslabs slots wide. Any failed
- * read or guard degrades that event to unknown-with-reason;
- * the request fact (size, direction) is still emitted.
- *
- * Each copy is recorded once: entry claims its frame,
- * armed exit records unclaimed calls. Loss stays exact:
- * misses(mv_bounce) + deferred - recovered.
- *
- * Build: clang --target=bpf -O2 -g -D__BPF__ -nostdinc -isystem <clang-resource>/include
- *   -I bpf/include -I <libbpf-1.7.0>/src -I bpf/include/uapi
- */
+/* MemVeil swiotlb copy probe. */
+/* fentry on both sync hooks (requests: direction and length, never executed bytes) plus fentry and fexit on swiotlb_bounce (executed copies). */
+/* Emits 48-byte MVCP v1 records on mv_copies. */
+/* Byte aggregates cover REQUESTED bytes in parallel; effective bytes live in the events, summed by consumers only over KNOWN records. */
+/* Effective-byte replication reads the pool slot the hook reads (start/end/nslabs/slots, then orig_addr and alloc_size) plus dev->dma_parms->min_align_mask, and applies the hook clamp. */
+/* Every relocated width is guarded against its local view, and the pool span must be exactly nslabs slots wide. */
+/* Any failed read or guard degrades that event to unknown-with-reason; the request fact (size, direction) is still emitted. */
+/* Each copy is recorded once: entry claims its frame, armed exit records unclaimed calls. */
+/* Loss stays exact: misses(mv_bounce) + deferred - recovered. */
+/* Build: clang --target=bpf -O2 -g -D__BPF__ -nostdinc -isystem <clang-resource>/include -I bpf/include -I <libbpf-1.7.0>/src -I bpf/include/uapi */
 #include <linux/bpf.h>
 #include <linux/types.h>
 
@@ -190,9 +173,7 @@ static __always_inline int mv_emit_cp(__u16 kind, __u16 base_flags,
         mv_submit_fail();
         return 0;
     }
-    /* Step 3: dir is the resolved wire encoding; anything
-     * outside 0..2 is rejected, never emitted, and a
-     * copy_exec with dir 0 (bidirectional) is impossible. */
+    /* Step 3: dir is the resolved wire encoding; outside 0..2 is rejected, never emitted, and a copy with dir 0 is impossible. */
     if (dir > 2 || (kind == MV_CP_KIND_COPY && dir == 0)) {
         mv_raise(MV_FLAG_BYTE_COVERAGE);
         mv_submit_fail();
@@ -316,12 +297,10 @@ static __always_inline int mv_emit_bounce(struct device___mv *dev,
     __u16 flags, reason = MV_CP_REASON_NONE;
     __s32 off;
 
-    /* The kernel direction resolves to the wire encoding; an
-     * unmapped value rides the malformed path below. */
+    /* The kernel direction resolves to the wire encoding; an unmapped value rides the malformed path below. */
     mv_wire_dir(dir, &wdir);
     flags = wdir == 1 ? MV_CP_FLAG_TO_DEVICE : 0;
-    /* Every relocated width must match its local spelling,
-     * else the reads below would misinterpret memory. */
+    /* Every relocated width must match its local spelling, else the reads below would misinterpret memory. */
     if (!mv_layout_ok(bpf_core_field_size(pool->start), 8) ||
         !mv_layout_ok(bpf_core_field_size(pool->end), 8) ||
         !mv_layout_ok(bpf_core_field_size(pool->nslabs), 8) ||
@@ -381,9 +360,7 @@ static __always_inline int mv_emit_bounce(struct device___mv *dev,
                               ? MV_CP_FLAG_OFFSET_PAST_ALLOC
                               : 0);
                 effective = eff.effective;
-                /* Privacy is a marker, never a verdict: the
-                 * toggle reads false on a private pool, and
-                 * anything unprovable leaves the flag clear. */
+                /* Privacy is a marker, never a verdict: the toggle reads false on a private pool, and anything unprovable leaves the flag clear. */
                 if (bpf_core_field_exists(dev->dma_io_tlb_mem) &&
                     bpf_core_field_exists(
                         ((struct io_tlb_mem___mv *)0)->cc_shared) &&

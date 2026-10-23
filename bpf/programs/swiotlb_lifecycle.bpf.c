@@ -207,8 +207,7 @@ static __always_inline int mv_emit_lc(__u16 kind, __u16 flags, __u64 dir,
         mv_submit_fail();
         return 0;
     }
-    /* Step 3: dir is the resolved wire encoding; anything
-     * outside 0..2 is rejected, never emitted. */
+    /* Step 3: dir is the resolved wire encoding; outside 0..2 is rejected, never emitted. */
     if (dir > 2) {
         mv_raise(MV_FLAG_BYTE_COVERAGE);
         mv_submit_fail();

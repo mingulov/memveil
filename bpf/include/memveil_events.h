@@ -338,18 +338,13 @@ _Static_assert(MV_CNT_LEN == 6, "counter map length");
 #define MV_LC_OFF_SIZE 28u
 #define MV_LC_OFF_GEN 36u
 
-/* Copy v1 record: exactly 48 bytes, little-endian, packed.
- * kind 1 = sync request (carries no executed bytes by
- * definition; to_device reads as for_device), kind 2 =
- * executed swiotlb_bounce copy with replicated effective
- * bytes. effective is valid only when KNOWN is set; an
- * unknown record must name its reason, and a known record
- * must carry reason NONE. Sync records always carry reason
- * NOT_COPY; copy_exec dir is 1..2 only. Flag 0x10 marks an
- * offset past the allocation (KNOWN copy, never early-zero);
- * flag 0x20 marks a private-pool copy (KNOWN copy only).
- * Unknown copies name one of SLOT_READ, MASK_READ, BOUNDS,
- * LAYOUT, or SHIFT. */
+/* Copy v1 record: exactly 48 bytes, little-endian, packed. */
+/* kind 1 = sync request, never executed bytes (to_device reads as for_device); kind 2 = executed copy. */
+/* effective is valid only when KNOWN; unknown names its reason, known carries NONE. */
+/* Sync records always carry NOT_COPY; copy dir is 1..2 only. */
+/* Flag 0x10: offset past the allocation (KNOWN copy, never early-zero). */
+/* Flag 0x20: private-pool copy (KNOWN copy only). */
+/* Unknown copies name one of SLOT_READ, MASK_READ, BOUNDS, LAYOUT, or SHIFT. */
 #define MV_CP_LEN 48
 #define MV_CP_MAGIC 0x5043564Du /* "MVCP" */
 #define MV_CP_VERSION 1u
@@ -412,8 +407,7 @@ struct mv_copy {
     __u64 effective;
 };
 
-/* Slot width shared by the wire helpers and the BPF
- * adapters: one pool slot covers 1 << 11 bytes. */
+/* Slot width shared by the wire helpers and the BPF adapters: one pool slot covers 1 << 11 bytes. */
 #define MV_IO_TLB_SHIFT_WIRE 11u
 
 /* One relocated size read matches its local expectation. */
@@ -422,9 +416,7 @@ static __inline int mv_layout_ok(__u32 got, __u32 want)
     return got == want;
 }
 
-/* Slot index over one pool: the span must be exactly nslabs
- * slots wide, else SHIFT; the address must land inside, else
- * BOUNDS. Pure and loop-free for the verifier. */
+/* Slot index over one pool: the span must be exactly nslabs slots wide, else SHIFT; the address must land inside, else BOUNDS. Pure and loop-free. */
 static __inline __u16 mv_slot_index(__u64 start, __u64 end,
                                    __u64 nslabs, __u64 tlb_addr,
                                    __u64 *idx)
@@ -443,8 +435,7 @@ static __inline __u16 mv_slot_index(__u64 start, __u64 end,
     return MV_CP_REASON_NONE;
 }
 
-/* Hook tlb_offset math: both masked terms fit in s32, so
- * the signed difference is exact. */
+/* Hook tlb_offset math: both masked terms fit in s32, so the signed difference is exact. */
 static __inline __s32 mv_tlb_offset(__u64 tlb_addr, __u64 orig_addr,
                                    __u32 min_align_mask)
 {
@@ -452,13 +443,10 @@ static __inline __s32 mv_tlb_offset(__u64 tlb_addr, __u64 orig_addr,
            (__s32)(orig_addr & min_align_mask & 2047u);
 }
 
-/* Replicated swiotlb_bounce length rule: an invalid slot
- * copies nothing (hook early return); otherwise the room is
- * alloc_size - tlb_offset in u64 arithmetic exactly like the
- * hook's alloc_size -= tlb_offset in size_t, including the
- * wrap when the offset runs past the allocation. A wrapped
- * room above the request copies the full size unchecked and
- * unwarned, and offset_past says so. */
+/* Replicated swiotlb_bounce length rule. */
+/* An invalid slot copies nothing (hook early return). */
+/* Otherwise the room is alloc_size - tlb_offset in u64 arithmetic, exactly like the hook's size_t math, including wrap past the allocation. */
+/* A wrapped room above the request copies the full size unchecked and unwarned; offset_past says so. */
 struct mv_effective {
     __u64 effective;
     __u8 clamped;

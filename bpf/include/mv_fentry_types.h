@@ -1,14 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
-/* BPF-only kernel type views for the fentry/fexit adapters.
- *
- * Partial structs under a flavor suffix: only accessed
- * fields are declared, CO-RE relocates their offsets at
- * load, and each relocated width is guarded live against
- * its spelling here. The direction enum resolves through
- * relocations as well; no hook assumes a kernel value.
- * Must never be included by host code.
- */
+/* BPF-only kernel type views for the fentry/fexit adapters. */
+/* Partial structs under a flavor suffix: only accessed fields are declared; CO-RE relocates offsets at load and each width guards live. */
+/* The direction enum resolves through relocations too; no hook assumes a kernel value. */
+/* Must never be included by host code. */
 #ifndef MV_FENTRY_TYPES_H
 #define MV_FENTRY_TYPES_H
 
@@ -49,8 +44,7 @@ struct device___mv {
     struct io_tlb_mem___mv *dma_io_tlb_mem;
 } __attribute__((preserve_access_index));
 
-/* Local direction view: values are placeholders resolved by
- * relocation at load, never trusted as kernel values. */
+/* Local direction view: values are placeholders resolved by relocation at load, never trusted as kernel values. */
 enum dma_data_direction___mv {
     DMA_BIDIRECTIONAL___mv = 0,
     DMA_TO_DEVICE___mv = 1,
@@ -66,8 +60,7 @@ enum dma_data_direction___mv {
 /* DMA_ATTR_SKIP_CPU_SYNC is bit 5 (dma-mapping.h). */
 #define MV_DMA_ATTR_SKIP_CPU_SYNC (1UL << 5)
 
-/* Resolve one kernel direction to the wire encoding (TO 1,
- * FROM 2, BIDI 0); 0 when the value matches nothing. */
+/* Resolve one kernel direction to the wire encoding (TO 1, FROM 2, BIDI 0); 0 when the value matches nothing. */
 static __always_inline int mv_wire_dir(int kdir, __u16 *out)
 {
     __u64 kdir64;

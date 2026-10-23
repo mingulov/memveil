@@ -46,7 +46,7 @@ comptime _ELF_CP_NOFEXIT = "tests/fixtures/elf/cp-nofexit.o"
 comptime _ELF_CP_BADFB = "tests/fixtures/elf/cp-badfb.o"
 comptime _SYSTEM_BPF = "/usr/lib/memveil"
 comptime _ATTEMPT_OBJECT = "swiotlb_attempt.bpf.o"
-comptime _SCAN_BRIDGE = "a979f8ed2b8818525f92a3a5a536fb49ad9c56b1b2dbadcb026e3b29e929200f"
+comptime _SCAN_BRIDGE = "8304455b1b7b60c975c8edcf21adbb6ad2cee5b77977b1154fabd909ead21178"
 comptime _FOREIGN_BRIDGE = "0000000000000000000000000000000000000000000000000000000000000000"
 
 
@@ -655,8 +655,8 @@ def test_scan_explicit_notext() raises:
 
 
 comptime _CAPS3 = "attempt-trace,mapping-lifecycle,copy-actual"
-comptime _LC_SHA = "8a13d0ca098fbd5ed411edb827a8040e2b8c8422cff364c3444813e0ed02f37b"
-comptime _CP_SHA = "ed112e64733abc5f7fb485403728067fa47812d433aa77f4be4d4efa1770a676"
+comptime _LC_SHA = "3eec845b8e47fc34f031bfbb24cb209f06b3bece55ace67765648c570ea575c2"
+comptime _CP_SHA = "ae91c9f35676b54ef8b0c5561ebb33bcdd7f6e7c22bc76584c26605b42361154"
 
 
 def _decide_lc(
