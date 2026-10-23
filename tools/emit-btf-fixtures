@@ -503,6 +503,9 @@ def members():
     mem += struct.pack("<III", b.s("q"), t_phys, 64)
     mem += struct.pack("<III", b.s("name"), t_arr, 128)
     b.t(b.s("mvt_tag"), K_STRUCT, 3, 32, mem)
+    mem = struct.pack("<III", b.s("a"), t_ull, 0)
+    mem += struct.pack("<III", b.s("b"), t_int, 0)
+    b.t(b.s("mvt_choice"), K_UNION, 2, 8, mem)
     return b.build()
 
 

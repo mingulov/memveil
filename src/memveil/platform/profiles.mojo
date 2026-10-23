@@ -2139,13 +2139,16 @@ def _core_apply_resolved(
     optional: Bool,
     mut evidence: List[String],
     show_offset: Bool,
+    skip_size: Bool,
 ) -> LiveVerdict:
     """Map one 0.1.2 resolution to its verdict.
 
     Refusals and unknowns return directly; an ok verdict
     means the item passed (its evidence line is already
     appended) and the caller continues. Offsets print as
-    evidence only, never compare.
+    evidence only, never compare. A skipped size (a
+    struct or union type item, relocated by CO-RE)
+    prints the live size as evidence, never compares.
     """
     if r.ambiguous:
         return _live_refuse_code(
@@ -2180,7 +2183,7 @@ def _core_apply_resolved(
             + want_kind,
             String("layout-kind"),
         )
-    if r.bit_size != want_size:
+    if r.bit_size != want_size and not skip_size:
         return _live_refuse_code(
             String("layout: ")
             + disp
@@ -2224,8 +2227,11 @@ def verify_core_layouts(
     raw BTF reader: missing, bitfield, kind, size, and
     ambiguity outcomes refuse with their layout code, a
     broken blob is unknown with its health code, and an
-    absent optional item appends a note. Success appends
-    one evidence line per item; offsets never compare.
+    absent optional item appends a note. A struct or
+    union type item skips the size compare (CO-RE
+    relocates it); its live size prints as evidence.
+    Success appends one evidence line per item; offsets
+    never compare.
     """
     for i in range(len(layouts)):
         var item = layouts[i].copy()
@@ -2277,6 +2283,8 @@ def verify_core_layouts(
                     + String(" definitions disagree"),
                     String("layout-ambiguous"),
                 )
+            var skip = item.type_kind == String("struct")
+            skip = skip or item.type_kind == String("union")
             var v = _core_apply_resolved(
                 disp^,
                 agreed^,
@@ -2285,6 +2293,7 @@ def verify_core_layouts(
                 item.optional,
                 evidence,
                 False,
+                skip,
             )
             if not v.ok:
                 return v^
@@ -2306,6 +2315,7 @@ def verify_core_layouts(
                 item.optional,
                 evidence,
                 item.target != String("enumerator"),
+                False,
             )
             if not v.ok:
                 return v^
@@ -2331,7 +2341,8 @@ def verify_live_cap(
     spell exactly the live BTF prototype, copy-actual
     also checks every recorded member layout against the
     same BTF bytes (a 0.1.2 doc instead checks kind and
-    size for the items naming this capability), a present
+    size for the items naming this capability, except a
+    struct or union type size, which CO-RE relocates), a present
     kernel.ftrace_enabled
     must read 1 (absent draws no conclusion),
     and every traced function must match exactly one

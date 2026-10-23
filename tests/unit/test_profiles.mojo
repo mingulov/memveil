@@ -3045,6 +3045,126 @@ def test_core_layout_live_type_enum() raises:
     )
 
 
+def test_core_layout_struct_union_size_relocated() raises:
+    var raw = read_host_file(
+        String("tests/fixtures/btf/members.bin"),
+        String("fixture"),
+        67108864,
+    )
+    # A struct type item smaller than live passes with
+    # the live size as evidence; CO-RE relocates it.
+    var doc_small = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                String(
+                    '{"capability":"copy-actual","target":"type",'
+                    '"struct":"mvt_dev","type_kind":"struct",'
+                    '"bit_size":128,"optional":false}'
+                )
+            )
+        )
+    )
+    var lines_small = List[String]()
+    var v_small = verify_core_layouts(
+        Span(raw), doc_small.layouts, String("copy-actual"), lines_small
+    )
+    assert_true(v_small.ok)
+    assert_equal(len(lines_small), 1)
+    assert_equal(lines_small[0], String("mvt_dev: size 6144 bits"))
+    # A larger recorded struct size passes too: struct
+    # sizes never compare.
+    var doc_big = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                String(
+                    '{"capability":"copy-actual","target":"type",'
+                    '"struct":"mvt_dev","type_kind":"struct",'
+                    '"bit_size":8192,"optional":false}'
+                )
+            )
+        )
+    )
+    var lines_big = List[String]()
+    var v_big = verify_core_layouts(
+        Span(raw), doc_big.layouts, String("copy-actual"), lines_big
+    )
+    assert_true(v_big.ok)
+    assert_equal(len(lines_big), 1)
+    assert_equal(lines_big[0], String("mvt_dev: size 6144 bits"))
+    # A union type item smaller than live passes likewise.
+    var doc_union = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                String(
+                    '{"capability":"copy-actual","target":"type",'
+                    '"struct":"mvt_choice","type_kind":"union",'
+                    '"bit_size":32,"optional":false}'
+                )
+            )
+        )
+    )
+    var lines_union = List[String]()
+    var v_union = verify_core_layouts(
+        Span(raw), doc_union.layouts, String("copy-actual"), lines_union
+    )
+    assert_true(v_union.ok)
+    assert_equal(len(lines_union), 1)
+    assert_equal(lines_union[0], String("mvt_choice: size 64 bits"))
+    # A scalar type item with a drifted size refuses.
+    var doc_scalar = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                String(
+                    '{"capability":"copy-actual","target":"type",'
+                    '"struct":"mvt_phys_t","type_kind":"int",'
+                    '"bit_size":32,"optional":false}'
+                )
+            )
+        )
+    )
+    var lines_scalar = List[String]()
+    var v_scalar = verify_core_layouts(
+        Span(raw), doc_scalar.layouts, String("copy-actual"), lines_scalar
+    )
+    assert_true(not v_scalar.ok)
+    assert_equal(v_scalar.code, String("layout-size"))
+    assert_equal(
+        v_scalar.reason,
+        String(
+            "layout: mvt_phys_t size 64 bits"
+            " differs from object size 32 bits"
+        ),
+    )
+    # A field width mismatch refuses.
+    var doc_field = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                _v012_field(
+                    String("copy-actual"),
+                    String("mvt_tag"),
+                    String("q"),
+                    String("int"),
+                    32,
+                    False,
+                )
+            )
+        )
+    )
+    var lines_field = List[String]()
+    var v_field = verify_core_layouts(
+        Span(raw), doc_field.layouts, String("copy-actual"), lines_field
+    )
+    assert_true(not v_field.ok)
+    assert_equal(v_field.code, String("layout-size"))
+    assert_equal(
+        v_field.reason,
+        String(
+            "layout: mvt_tag.q size 64 bits"
+            " differs from object size 32 bits"
+        ),
+    )
+
+
 def test_core_layout_bitfield_ambiguous() raises:
     var raw = read_host_file(
         String("tests/fixtures/btf/members.bin"),
@@ -3750,6 +3870,7 @@ def run() raises -> Int:
     suite.test[test_core_layout_live_ok]()
     suite.test[test_core_layout_live_refusals]()
     suite.test[test_core_layout_live_type_enum]()
+    suite.test[test_core_layout_struct_union_size_relocated]()
     suite.test[test_core_layout_bitfield_ambiguous]()
     suite.test[test_core_layout_reader_failure]()
     suite.test[test_verify_live_v012_evidence]()
