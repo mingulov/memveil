@@ -60,10 +60,10 @@ Do not silently rewrite a profile hash to make them admitted.
 - No real SNP/TDX qualification. Offline region analysis and ordinary-Linux
   conversion calls do not prove a confidential transition. No attestation
   is performed, and observations are not host-access verdicts.
-- On an AWS SEV-SNP guest the environment block reads
-  `mode=unknown detection=conflicting`: the sev-guest device is present
-  while the CPU flags lack `sev`. Detection does not yet classify such a
-  guest as confidential.
+- SEV-SNP guests are detected through the `vmpl` node
+  (`/sys/devices/system/cpu/sev/vmpl` beside the sev-guest
+  node), fixture-proven; live-proven only after the
+  controller's AWS run with this build.
 - Pool samples are best-effort reads (start, 1 s cadence capped at
   4,096 with missed ticks skipped, close) and cannot alone diagnose
   sustained pressure. The sampler never resets high-water; equal values
@@ -79,6 +79,37 @@ Do not silently rewrite a profile hash to make them admitted.
   only with complete terminal evidence.
 - CPU targets and ELF linkage minima are compatibility prerequisites,
   not tests of every claimed platform. See [support](support.md).
+- Sustained saturation drains about 153,000 records/s
+  (3,118,447 records in 20.33 s on a 4-vCPU guest). A
+  busy capture above the 1 GiB default needs
+  `report --max-events-bytes` to replay.
+- Rows that refuse, with their codes: 5.15 is below the
+  6.0 floor; 6.0 through 6.10 refuse lifecycle and copy
+  (need 6.11); BTF-less kernels refuse lifecycle and
+  copy (`btf-absent-config`); confidentiality lockdown
+  refuses everything. The 6.11 through 7.3 rows, the
+  6.12.114 debug/rt/btf variants, and debian13 refuse
+  `record` with `layout-size`: their `io_tlb_slot` is
+  192 bits against the objects' 128, so no capture runs
+  there.
+- The 6.0, 6.6, 6.10, and nobtf rows finalize their
+  main capture with exact oracle counts but fail the
+  busy saturation check: the saturated runs report
+  partial with a counted loss the gate leaves unproven,
+  and the 6.0/6.10 busy captures stop on the 4 GiB
+  `size_limit` instead of the signal. Attempt loss
+  before 6.7 is a lower bound.
+- `forced` mirrors the kernel's swiotlb force bit and is
+  not a confidential-guest signal; see
+  [privacy](privacy.md).
+- The BTF-less row proves attempt counts only; bytes
+  stay unproven.
+- Passive doctor can read `ready (load not checked)`
+  while the memcg precheck reports `memcg-headroom`
+  unknown; only `doctor --load-check` or a record proves
+  the load fits. The memcg scenario is not proven live
+  for this bundle: the 7.0 scenario guest refuses
+  admission, failing all 12 scenarios at precondition.
 
 ## Compatibility
 

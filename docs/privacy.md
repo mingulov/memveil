@@ -20,6 +20,12 @@ free-form payload channel.
 - Hook identity (`swiotlb:swiotlb_bounced`), backend, profile,
   measurement mode.
 
+`forced` mirrors the kernel's swiotlb force bit for that
+bounce; on confidential guests it depends on the kernel
+version (6.11 sets it for encrypted-memory guests, 7.3
+does not, while streaming DMA still bounces), so it is
+not a confidential-guest signal.
+
 ## Persisted per capture
 
 - Session id, window bounds, end reason, finalized flag.

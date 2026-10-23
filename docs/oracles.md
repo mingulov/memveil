@@ -151,6 +151,20 @@ prove theirs with the `/proc/version` banner. A row may
 carry extra boot arguments; the guest proves each one took
 effect.
 
+The scenario lane (`tools/kernel-matrix --scenarios`)
+reuses the matrix guest to prove detection behavior:
+twelve scenarios on the 7.0 row check that readiness,
+refusal codes, and remedies come out exactly (base
+readiness, four negative copy objects, unprivileged and
+unconfigured hosts, empty/truncated BTF, and a memcg
+ceiling). Each scenario judges passive doctor,
+`--load-check` doctor, and record exits against its
+expected codes; negatives additionally check degraded
+capture markers. A scenario proves only its own refusal
+path on an admitted kernel: when the guest itself
+refuses admission, every scenario fails at its
+precondition and the lane proves nothing live.
+
 ## Fuzz oracle (`tests/fuzz/run.py`)
 
 Replays deterministically mutated seed captures through the

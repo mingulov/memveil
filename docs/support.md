@@ -23,6 +23,61 @@ release reduces observed occupancy, not persistent sharing state;
 allocation byte-time is not a measured sharing lifetime. Absence of a
 pressure finding is not evidence of absent pressure.
 
+## Requirements
+
+Collection needs all of these on the recording host; `memveil
+doctor --load-check` is the authoritative check, and passive
+doctor leaves the load verdict at `ready (load not checked)`.
+
+- Kernel BTF: built with `CONFIG_DEBUG_INFO_BTF=y` and
+  readable at `/sys/kernel/btf/vmlinux`. Check with
+  `test -r /sys/kernel/btf/vmlinux` and the running config
+  (`/proc/config.gz` or the matching `/boot/config-*`).
+- Tracing support: `CONFIG_FTRACE=y` and
+  `CONFIG_BPF_EVENTS=y` in the running config.
+- ftrace enabled: `kernel.ftrace_enabled=1`
+  (`cat /proc/sys/kernel/ftrace_enabled`).
+- tracefs mounted at `/sys/kernel/tracing`
+  (`mount | grep tracefs`).
+- Lockdown below `confidentiality`
+  (`cat /sys/kernel/security/lockdown`); `integrity` is fine.
+- Privilege: `CAP_BPF` plus `CAP_PERFMON`, or
+  `CAP_SYS_ADMIN` (root in the initial user namespace).
+- Memory-cgroup headroom for the BPF maps (see the map
+  sizes under Resource defaults); the memcg precheck
+  reports `unknown` when outer limits are not visible.
+- glibc 2.38 or later for the native bridge.
+
+Known out of reach: Kata, CoCo, Contrast, and AKS
+kernel-uvm guests (no BTF; some also lack `FTRACE` or
+`KPROBES`), RHEL 9 (kernel 5.14, below the 6.0 floor),
+and Debian 12, AL2023, and RHEL 9 userlands below the
+glibc floor. External BTF files and a kprobe fallback
+are not provided.
+
+## Limits
+
+- Passive doctor can read `ready (load not checked)`
+  while the memcg precheck reports `memcg-headroom`
+  unknown; only `doctor --load-check` or a record proves
+  the load fits.
+- Sustained saturation drains about 153,000 records/s
+  (3,118,447 records in 20.33 s on a 4-vCPU guest);
+  beyond it detail loss reads unknown and quality
+  partial, never complete. On 6.0 through 6.10 the
+  saturated runs instead report partial with a counted
+  loss; see the release notes.
+- `forced` mirrors the kernel's swiotlb force bit and is
+  not a confidential-guest signal (see
+  [privacy](privacy.md)).
+- The 7.0 scenario guest refuses admission
+  (`layout-size`, see Kernel generations), so all 12
+  detection scenarios fail at their precondition and the
+  memcg limit is not proven live for this bundle.
+- `libbpf-mojo` 0.2.0 declares a 7.0 kernel minimum;
+  below 7.0 this repository's booted matrix is the
+  qualification.
+
 ## Configuration and artifact admission
 
 - One narrow profile with VM-gate attempt, lifecycle, and
@@ -86,16 +141,39 @@ tracepoint format, ftrace attachability), never by trusting
 the release string. One prebuilt probe set covers every row;
 no rebuild on the device.
 
-| Kernel | attempt-trace | lifecycle + copy |
-| --- | --- | --- |
-| 7.3rc1-rc3, mainline (7.4 pre-) | full | full, both map shapes |
-| 7.0-7.2, any build (incl. `-aws`) | full | full |
-| 6.11 up to (not incl.) 7.0, any build | full | full |
-| 6.0-6.10 | full | refused, needs 6.11+ |
-| below 6.0 | refused | refused |
+Booted 2026-10-23 with the 0.1.0 release bundle. Only
+`PASS` rows are support claims; the rest are measured
+observations recorded with their exact refusal codes.
+
+| Lock id | Booted release | attempt-trace | mapping-lifecycle | copy-actual | Row |
+| --- | --- | --- | --- | --- | --- |
+| 5.15 | 5.15.223-0515223-generic | refused (`floor`) | refused (`floor`) | refused (`floor`) | PASS |
+| 6.0 | 6.0.19-060019-generic | available | refused (`floor`) | refused (`floor`) | FAIL (busy `size_limit` stop, saturation loss unproven) |
+| 6.6 | 6.6.160-0606160-generic | available | refused (`floor`) | refused (`floor`) | FAIL (busy saturation loss unproven) |
+| 6.10 | 6.10.14-061014-generic | available | refused (`floor`) | refused (`floor`) | FAIL (busy `size_limit` stop, saturation loss unproven) |
+| 6.11 | 6.11.11-061111-generic | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
+| 6.12.0 | 6.12.0-061200-generic | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
+| 6.12.114-btf | 6.12.114-mv-6.12.114-btf | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
+| 6.12.114-debug | 6.12.114-mv-6.12.114-debug | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
+| 6.12.114-nobtf | 6.12.114-mv-6.12.114-nobtf | available | refused (`btf-absent-config`) | refused (`btf-absent-config`) | FAIL (busy saturation loss unproven; counts exact, bytes unproven) |
+| 6.12.114-rt | 6.12.114-mv-6.12.114-rt | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
+| 6.12 | 6.12.114-0612114-generic | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
+| 6.18.0 | 6.18.0-061800-generic | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
+| 6.18 | 6.18.58-061858-generic | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
+| 7.0.14-lockdown | 7.0.14-070014-generic | refused (`lockdown-confidentiality`) | refused (`lockdown-confidentiality`) | refused (`lockdown-confidentiality`) | PASS |
+| 7.0 | 7.0.14-070014-generic | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
+| 7.1 | 7.1.13-070113-generic | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
+| 7.2 | 7.2.6-070206-generic | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
+| 7.3-rc3 | 7.3.0-070300rc3-generic | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
+| 7.3 | 7.3.0-mv-7.3 | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
+| debian13 | 6.12.107+deb13-amd64 | available | available | refused (`layout-size`) | FAIL (`record` exit 3, no capture) |
 
 Notes:
 
+- The nobtf row asserts counts only: attempt counts are
+  oracle-proven while bytes stay unproven (no hist
+  triggers in the built config), and the row fails on
+  the busy saturation check.
 - 7.3 changes one detail: `swiotlb_tbl_map_single`
   takes `attrs` as a pointer (present since rc1,
   verified through rc3, the newest 7.3 in the lock).
@@ -164,6 +242,30 @@ Environment:
 - `MV_HOST_CPUS`: host CPU set for the guest
   processes through `taskset` (for example `0-7`);
   unset runs without `taskset`.
+
+`tools/kernel-matrix --scenarios --kernels 7.0 --out DIR`
+runs the detection-scenario lane on the 7.0 row: twelve
+scenarios that prove refusal codes and remedies
+(`MEMVEIL_VM_SCENARIOS` arms the `vm-scenarios` lane with
+`MV_DEB` pointing at the deb). Lockdown and BTF absence
+are covered by their matrix rows instead of scenarios.
+In the 0.1.0 matrix the 7.0 scenario guest refuses
+admission, so the lane is unproven live for this bundle.
+
+| Scenario | Record outcome | Remedy family |
+| --- | --- | --- |
+| base | finalizes (exit 4) | none, ready path |
+| neg-renamed | `verifier-rejected` (exit 3) | verifier lines |
+| neg-layout | finalizes with `copy.unknown_layout` | object binding |
+| neg-shift | finalizes with `copy.unknown_shift` | object binding |
+| neg-argcnt | finalizes with an argument count mismatch | object binding |
+| nonroot | `tracefs-denied` (exit 3) | privilege |
+| nocaps | `load-eperm` (exit 3) | privilege |
+| ftrace-off | `ftrace-disabled` (exit 3) | ftrace enablement |
+| tracefs-unmounted | `tracefs-not-mounted` (exit 3) | tracefs mount |
+| btf-empty | `btf-truncated` (exit 3) | kernel BTF build |
+| btf-truncated | `btf-truncated` (exit 3) | kernel BTF build |
+| memcg | `load-enomem` (exit 3) | memcg headroom |
 
 ## Permissions
 
