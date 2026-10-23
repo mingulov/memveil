@@ -43,6 +43,8 @@ comptime E_UNAME = UInt32(7)
 
 comptime _MODE_F_OK = 0
 comptime _MODE_R_OK = 4
+comptime _AT_FDCWD = -100
+comptime _AT_EACCESS = 512
 comptime _ENOENT = 2
 comptime _FS_TMPFS = 0x01021994
 comptime _FS_EXT = 0xEF53
@@ -567,12 +569,14 @@ def host_file_denied(path: String) -> Bool:
 
 
 def exists_f_ok(reader: EvidenceReader, path: String) -> Bool:
-    """Mirror faccessat(path, F_OK): existence with teeth.
+    """Mirror faccessat(path, F_OK, AT_EACCESS): existence with teeth.
 
     True when the mapped path exists. A fixture strict
     ancestor listed in denied= hides the path (a live
     EACCES on a parent reads the same); a denied path
     itself still exists, since denied is never absent.
+    Effective ids match the loader, so a capability-held
+    caller sees the same tracefs root libbpf opens.
     """
     var parts = path.split(String("/"))
     var acc = String("")
@@ -582,8 +586,11 @@ def exists_f_ok(reader: EvidenceReader, path: String) -> Bool:
             return False
     var mapped = evidence_path(reader, path)
     var cpath = _to_cstr_local(mapped)
-    var r = external_call["access", Int32](
-        Span(cpath).unsafe_ptr(), _MODE_F_OK
+    var r = external_call["faccessat", Int32](
+        Int32(_AT_FDCWD),
+        Span(cpath).unsafe_ptr(),
+        Int32(_MODE_F_OK),
+        Int32(_AT_EACCESS),
     )
     return Int(r) == 0
 

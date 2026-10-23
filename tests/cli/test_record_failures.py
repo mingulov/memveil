@@ -25,6 +25,10 @@ TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
 BIN = os.path.join(REPO, "build", "memveil")
 SHIM = os.path.join(REPO, "build", "shim", "mvshim.so")
+BRIDGE = os.path.join(REPO, "build", "deps", "lmb", "lib",
+                      "libbpf_mojo.so.1")
+ATTEMPT_O = os.path.join(REPO, "build", "bpf",
+                         "swiotlb_attempt.bpf.o")
 ATTEMPTS = os.path.join(REPO, "tests", "fixtures", "attempts")
 ELF = os.path.join(REPO, "tests", "fixtures", "elf", "ok.o")
 
@@ -140,6 +144,48 @@ def main():
           "stderr %r" % p.stderr[:120])
     leaked = os.path.isfile(decoy) and os.path.getsize(decoy) > 0
     check("stderr-fd-decoy", not leaked, decoy)
+
+    # Tracefs root probes use effective access: with plain
+    # access() denied on both roots, record must refuse
+    # exactly as without the shim (faccessat passes
+    # through). The precondition keeps this non-vacuous:
+    # a root must exist, and the base refusal must depend
+    # on the root probe (lockdown and config refusals fire
+    # before it, so they would compare equal either way).
+    for path, name in ((BRIDGE, "bridge"), (ATTEMPT_O, "object")):
+        if not os.path.isfile(path):
+            print("FAIL record-failures: missing %s %s "
+                  "(run tools/build first)" % (name, path))
+            sys.exit(1)
+    roots = ["/sys/kernel/debug/tracing", "/sys/kernel/tracing"]
+    check("eaccess-root-present",
+          any(os.path.exists(r) for r in roots),
+          "no tracefs root on this host")
+    gd = tempfile.mkdtemp(prefix="mveaccess")
+    gate_env = dict(os.environ)
+    gate_env.pop("LMB_NATIVE_LIB", None)
+    gate_argv = [BIN, "record", "--output", os.path.join(gd, "cap"),
+                 "--object", ATTEMPT_O, "--bridge", BRIDGE]
+    base = subprocess.run(gate_argv, capture_output=True, text=True,
+                          env=gate_env)
+    check("eaccess-base-exit", base.returncode == 3,
+          "exit %d" % base.returncode)
+    independent = ("kernel lockdown is confidentiality" in base.stderr
+                   or "kernel has no BPF tracing support (config"
+                   in base.stderr)
+    check("eaccess-base-rooted", not independent,
+          "stderr %r" % base.stderr[:160])
+    shim_env = dict(gate_env)
+    shim_env["LD_PRELOAD"] = SHIM
+    shim_env["MVSHIM"] = "deny_access:%s,deny_access:%s" % (
+        roots[0], roots[1])
+    shimmed = subprocess.run(gate_argv, capture_output=True, text=True,
+                             env=shim_env)
+    check("eaccess-shim-exit", shimmed.returncode == 3,
+          "exit %d" % shimmed.returncode)
+    check("eaccess-shim-same", shimmed.stderr == base.stderr,
+          "base %r shimmed %r"
+          % (base.stderr[:160], shimmed.stderr[:160]))
 
 
 if __name__ == "__main__":

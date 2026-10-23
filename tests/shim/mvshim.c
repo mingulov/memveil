@@ -46,6 +46,9 @@
  *   fstat_fail_session
  *                    fstat on fds resolving to a session.json path
  *                    fails EIO (the published session, not the tmp).
+ *   deny_access:P    access(P) fails EACCES (exact match, up to
+ *                    two paths): proves the caller probes with
+ *                    faccessat, which passes through untouched.
  *
  * Torn records arise from composition: short:N with
  * enospc_after:N+1 makes loop iteration N short and the
@@ -75,6 +78,9 @@ static ssize_t (*real_read)(int, void *, size_t);
 static int (*real_fstat)(int, struct stat *);
 static int (*real_unlinkat)(int, const char *, int);
 static int (*real_mkdirat)(int, const char *, mode_t);
+static int (*real_access)(const char *, int);
+static char opt_deny_access_a[1024];
+static char opt_deny_access_b[1024];
 static int read_eintr_fired = 0;
 
 static long opt_short_at = 0;
@@ -189,6 +195,18 @@ static void parse_opts(void) {
         }
         else if (strcmp(tok, "fstat_fail_session") == 0)
             opt_fstat_fail_session = 1;
+        else if (strncmp(tok, "deny_access:", 12) == 0) {
+            char *slot = opt_deny_access_a[0] ? opt_deny_access_b
+                                              : opt_deny_access_a;
+            size_t cap = slot == opt_deny_access_b
+                ? sizeof(opt_deny_access_b)
+                : sizeof(opt_deny_access_a);
+            size_t pl = strlen(tok + 12);
+            if (pl >= cap)
+                pl = cap - 1;
+            memcpy(slot, tok + 12, pl);
+            slot[pl] = '\0';
+        }
     }
 }
 
@@ -207,6 +225,7 @@ static void ensure_init(void) {
     real_fstat = dlsym(RTLD_NEXT, "fstat");
     real_unlinkat = dlsym(RTLD_NEXT, "unlinkat");
     real_mkdirat = dlsym(RTLD_NEXT, "mkdirat");
+    real_access = dlsym(RTLD_NEXT, "access");
     parse_opts();
 }
 
@@ -440,6 +459,16 @@ int mkdirat(int dirfd, const char *path, mode_t mode) {
         return r;
     }
     return r;
+}
+
+int access(const char *path, int mode) {
+    ensure_init();
+    if ((opt_deny_access_a[0] && strcmp(path, opt_deny_access_a) == 0) ||
+        (opt_deny_access_b[0] && strcmp(path, opt_deny_access_b) == 0)) {
+        errno = EACCES;
+        return -1;
+    }
+    return real_access(path, mode);
 }
 
 /* MVSHIM_COUNT=path: write the total pwrite call count at
