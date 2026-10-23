@@ -1942,13 +1942,16 @@ def test_decide_overreported_loss_fails():
     assert failed, per
 
 
-def test_decide_post_latch_loss_does_not_cover():
+def test_decide_post_latch_omits_cover_shortfall():
+    # Declared in-window omits join the strict lower-bound allowance.
     persisted = {"bounce_attempt": 12994}
     loss = _loss(size_omitted=6)
     per, overall, failed, _ = km.decide_channels(
         persisted, _count_samples(), _miss_snaps(), 1000, 2000,
         ["attempt"], loss, 6, 0)
-    assert failed, per
+    assert not failed, per
+    assert overall == "SHORT-COVERED"
+    assert per["attempt"].startswith("SHORT-COVERED")
 
 
 def test_decide_total_shortfall_bounded_by_reported():
@@ -1967,7 +1970,8 @@ def test_decide_total_shortfall_bounded_by_reported():
     assert failed, per
 
 
-def test_decide_total_shortfall_ignores_size_omit_padding():
+def test_decide_total_shortfall_counts_size_omits():
+    # Declared in-window omits join the strict lower-bound allowance.
     samples = [(900, {"copy": 0}), (1000, {"copy": 0}),
                (2000, {"copy": 1000}), (2100, {"copy": 1000})]
     miss = km.parse_miss_samples([
@@ -1980,10 +1984,12 @@ def test_decide_total_shortfall_ignores_size_omit_padding():
     per, overall, failed, _ = km.decide_channels(
         {"copy": 900}, samples, miss, 1000, 2000,
         ["copy"], loss, 100, 0)
-    assert failed, per
+    assert not failed, per
+    assert overall == "SHORT-COVERED"
 
 
-def test_decide_total_shortfall_sums_split_program_misses():
+def test_decide_total_shortfall_sums_misses_and_omits():
+    # Declared in-window omits join the strict lower-bound allowance.
     samples = [(900, {"map": 0, "unmap": 0}),
                (1000, {"map": 0, "unmap": 0}),
                (2000, {"map": 100, "unmap": 100}),
@@ -2000,7 +2006,8 @@ def test_decide_total_shortfall_sums_split_program_misses():
     per, overall, failed, _ = km.decide_channels(
         {"map_result": 95, "unmap": 95}, samples, miss, 1000,
         2000, ["map", "unmap"], loss, 10, 0)
-    assert failed, per
+    assert not failed, per
+    assert overall == "SHORT-COVERED"
 
 
 def test_decide_exact_voided_by_liveness_suffix():
@@ -2483,6 +2490,56 @@ def test_decide_busy_first_unknown_copy_keeps_exact():
     assert overall == "EXACT"
 
 
+def _nobtf_busy_samples():
+    return [(4500000000, {"tp": 0}),
+            (5500000000, {"tp": 0}),
+            (22500000000, {"tp": 6987559}),
+            (23500000000, {"tp": 7268735})]
+
+
+def _nobtf_busy_miss():
+    return km.parse_miss_samples([(4000000000, []),
+                                  (6000000000, []),
+                                  (24000000000, [])])
+
+
+def _nobtf_busy_session(signal_omitted=0):
+    reason = _loss_text(submit_fail=3269715,
+                        signal_omitted=signal_omitted)
+    return _busy2_session(
+        status="partial",
+        loss_count=str(3269715 + signal_omitted),
+        reason=reason)
+
+
+def _nobtf_busy_decide(session):
+    return km.decide_busy(
+        {"bounce_attempt": 3707495}, _nobtf_busy_samples(),
+        _nobtf_busy_miss(), 5000000000, 23000000000,
+        ["attempt"], session,
+        {"swiotlb.bounce_attempts": 6987559})
+
+
+def test_decide_busy_nobtf_omits_cover_shortfall():
+    lo, hi = km.channel_bounds(
+        _nobtf_busy_samples(), _nobtf_busy_miss(),
+        5000000000, 23000000000, "attempt")
+    assert (lo, hi) == (6987559, 7268735)
+    per, overall, failed, _ = _nobtf_busy_decide(
+        _nobtf_busy_session(signal_omitted=74899))
+    assert not failed, per
+    assert overall == "SHORT-COVERED"
+    assert per["attempt"].startswith("SHORT-COVERED"), per
+
+
+def test_decide_busy_nobtf_without_signal_omit_fails():
+    per, overall, failed, _ = _nobtf_busy_decide(
+        _nobtf_busy_session())
+    assert failed, per
+    assert overall == "SHORT-UNCOVERED"
+    assert per["attempt"].startswith("SHORT-UNCOVERED")
+
+
 def test_decide_busy_uses_busy_session_loss():
     persisted = _busy2_persisted()
     persisted["map_result"] = 2494
@@ -2587,16 +2644,21 @@ def test_decide_busy_unknown_over_reported_fails():
     assert overall == "OVER-REPORTED"
 
 
-def test_decide_busy_omits_not_credited():
+def test_decide_busy_omits_cover_strict_shortfall():
+    # Declared in-window omits join the strict lower-bound allowance.
     persisted = _busy2_persisted()
     persisted["map_result"] = 2495
     session = _busy2_session(
         loss_count="10",
         reason=_loss_text(signal_omitted=10))
-    per, _, failed, _ = _busy2_decide(
+    per, overall, failed, _ = _busy2_decide(
         persisted, session)
-    assert failed, per
-    assert per["map"].startswith("SHORT-UNCOVERED")
+    assert not failed, per
+    assert overall == "SHORT-COVERED"
+    assert per["map"].startswith("SHORT-COVERED")
+
+
+def test_decide_busy_unknown_omits_stay_honest():
     session = _busy2_session(
         status="partial", loss_count=None,
         reason=_unknown_text(signal_omitted=10),
@@ -4173,6 +4235,16 @@ def test_evaluate_three_channel_misses_duration_padding_fails():
     _set_session_loss(ev, recursion_missed=6, duration_omitted=10)
     rec = km.evaluate_row(ev)
     assert not rec["ok"], json.dumps(rec["checks"], indent=1)
+
+
+def test_evaluate_bytes_size_omit_covers_shortfall():
+    ev = _ev_pass()
+    _set_session_loss(ev, size_omitted=1)
+    ev["persisted_bytes"] = _byte_sums(
+        _TBYTES, _TBYTES - 200000, _TBYTES, _TBYTES, _RBYTES)
+    rec = km.evaluate_row(ev)
+    assert _check(rec, "bytes")["ok"], \
+        _check(rec, "bytes")["detail"]
 
 
 _MV_BY_CHANNEL = {

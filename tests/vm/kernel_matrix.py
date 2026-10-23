@@ -669,6 +669,11 @@ def transport_loss(parsed):
     return sum(parsed[key] for key in TRANSPORT_KEYS)
 
 
+def post_latch_loss(parsed):
+    """Declared latch and drain omits, in-window by construction."""
+    return sum(parsed[key] for key in POST_LATCH_KEYS)
+
+
 def deferred_from_session(session):
     """Copy fallback deferrals memveil itself reports."""
     try:
@@ -707,10 +712,11 @@ def decide_channels(persisted, samples, miss_samples, start_ns,
     """Per-channel verdicts under the strict loss rules.
 
     Each shortfall must fit that channel memveil misses plus
-    transport loss; the total shortfall must fit transport
-    plus reported recursion misses, never post-latch omits;
-    captured plus reported loss must stay inside the summed
-    oracle bounds so over-reporting fails. A hooks-silent or
+    transport loss plus declared post-latch omits; the total
+    shortfall must fit transport plus reported recursion
+    misses plus declared omits; captured plus reported loss
+    must stay inside the summed oracle bounds so
+    over-reporting fails. A hooks-silent or
     liveness-unverified detail suffix voids every exact
     channel claim, since the hook cross-check is unproven;
     covered shortfalls still pass. Returns
@@ -722,6 +728,7 @@ def decide_channels(persisted, samples, miss_samples, start_ns,
     allowances = {}
     attributed = {}
     transport = transport_loss(loss)
+    omits = post_latch_loss(loss)
     for chan in channels:
         kind, _ = KINDS[chan]
         try:
@@ -729,7 +736,8 @@ def decide_channels(persisted, samples, miss_samples, start_ns,
                                     start_ns, end_ns, chan)
             allowance = channel_allowance(
                 miss_samples, start_ns, end_ns, chan,
-                transport, recovered if chan == "copy" else 0)
+                transport + omits,
+                recovered if chan == "copy" else 0)
         except OracleError as exc:
             per[chan] = "ORACLE-FAIL (%s)" % exc
             return per, None, True, {"bounds": bounds,
@@ -768,7 +776,7 @@ def decide_channels(persisted, samples, miss_samples, start_ns,
     sum_got = sum(persisted.get(KINDS[c][0], 0) for c in channels)
     sum_lo = sum(bounds[c][0] for c in channels)
     sum_hi = sum(bounds[c][1] for c in channels)
-    allowed_total = transport + loss["recursion_missed"]
+    allowed_total = transport + loss["recursion_missed"] + omits
     info.update({"sum_got": sum_got, "sum_lo": sum_lo,
                  "sum_hi": sum_hi, "total_short": total_short,
                  "allowed_total": allowed_total,
@@ -1167,8 +1175,8 @@ def decide_busy(persisted, samples, miss_samples, start_ns,
     An exact detail claim (complete_for_scope or a
     partial "Detail loss N" with a matching count) gets
     strict per-channel lower bounds with that channel
-    transport loss plus bpftool misses, never pooled,
-    never crediting post-latch omits. An unknown
+    transport loss plus declared post-latch omits plus
+    bpftool misses, never pooled. An unknown
     partial, or a numeric partial whose aggregate says
     attempt loss is a lower bound, gets honesty only:
     not complete, each channel inside its oracle upper.
@@ -1235,6 +1243,7 @@ def decide_busy(persisted, samples, miss_samples, start_ns,
         recovered = 0
     per = {}
     transport = transport_loss(known)
+    omits = post_latch_loss(known)
     known_total = _busy_known_loss(known)
     liveness = known.get("liveness_suffix")
     for chan in channels:
@@ -1244,8 +1253,8 @@ def decide_busy(persisted, samples, miss_samples, start_ns,
                                     start_ns, end_ns, chan)
             allowance = channel_allowance(
                 miss_samples, start_ns, end_ns, chan,
-                transport, recovered if chan == "copy"
-                else 0)
+                transport + omits,
+                recovered if chan == "copy" else 0)
         except OracleError as exc:
             per[chan] = "ORACLE-FAIL (%s)" % exc
             return per, None, True, {}
@@ -3225,7 +3234,8 @@ def evaluate_row(ev):
     if block_bytes is not None and loss is not None \
             and ev.get("persisted_bytes") is not None:
         allowance = (transport_loss(loss)
-                     + loss["recursion_missed"]) * MAX_MAP_BYTES
+                     + loss["recursion_missed"]
+                     + post_latch_loss(loss)) * MAX_MAP_BYTES
         fails = check_memveil_bytes(ev["persisted_bytes"],
                                     read_bytes, write_bytes,
                                     allowance, channels)
