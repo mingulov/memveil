@@ -425,7 +425,9 @@ def run_one(entry, args, kind, source, disk_img, tools, run_id,
         km.qemu_drive_opt(disk_img),
         km.qemu_drive_opt(scratch_img, drive_id="d1",
                           serial="mv1", readonly=False))
-    append = "swiotlb=131072,force"
+    # tsc=nowatchdog stops the clocksource watchdog, whose remote-CPU
+    # read timeouts under host vCPU preemption are guest noise.
+    append = "swiotlb=131072,force tsc=nowatchdog"
     for arg in entry.get("boot_append") or []:
         km.validate_shell_path(arg, "boot argument")
         append += " " + arg
