@@ -344,6 +344,18 @@ def test_plan_bad_signature() raises:
     )
 
 
+def test_plan_name_only_signature_accepted() raises:
+    # Parameter names never compare: the frozen size_t
+    # length matches the live size_t size.
+    var opts = _opts()
+    opts.profile = String(_PDIR) + String("/qual-namesig.json")
+    opts.has_profile = True
+    var plan = plan_qualification(
+        String(_HOST), String(_PDIR), opts^
+    )
+    assert_true(plan.ok)
+
+
 def test_plan_missing_function() raises:
     var opts = _opts()
     opts.profile = String(_PDIR) + String("/qual-nofunc.json")
@@ -1063,6 +1075,7 @@ def run() raises -> Int:
     suite.test[test_plan_unknown_profile]()
     suite.test[test_plan_unbound_note]()
     suite.test[test_plan_bad_signature]()
+    suite.test[test_plan_name_only_signature_accepted]()
     suite.test[test_plan_missing_function]()
     suite.test[test_plan_binding_mismatch]()
     suite.test[test_plan_no_cover]()

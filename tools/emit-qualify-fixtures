@@ -13,7 +13,8 @@ bindings computed from the CURRENT host bytes:
   qual-ref.json      reference-unvalidated, matching note,
                      tracing hook fentry:test_fn.
   qual-unbound.json  reference-unvalidated, free-text note.
-  qual-badsig.json   same note, one-byte signature skew.
+  qual-badsig.json   same note, pointer-vs-scalar skew.
+  qual-namesig.json  same note, name-only skew (accepted).
   qual-nofunc.json   same note, unknown function nope.
   qual-nohook.json   same note, no hooks at all.
 Manifest lists qual-ref.json only; tests address the rest
@@ -208,6 +209,23 @@ def main() -> int:
         json.dumps(
             profile_doc(
                 "qual-badsig",
+                note,
+                [
+                    hook,
+                    tracing_hook(
+                        "test_fn",
+                        "int test_fn(struct device *dev, size_t *length)",
+                    ),
+                ],
+            ),
+            indent=2,
+        )
+        + "\n"
+    )
+    (prof / "qual-namesig.json").write_text(
+        json.dumps(
+            profile_doc(
+                "qual-namesig",
                 note,
                 [
                     hook,
