@@ -1447,6 +1447,29 @@ def test_oracle_direction_formulas():
         0, 0)
 
 
+def test_oracle_direction_formulas_open_leak():
+    # Leaked reads never bounce back: FROM_DEVICE copies
+    # may fall short of read maps by the open count.
+    args = _dir_iv(10000, 3000)
+    short = dict(args[3])
+    short[2] = (9360, 9360)
+    args = (args[0], args[1],
+            (args[2][0] - 640, args[2][1] - 640), short)
+    assert km.check_oracle_direction_formulas(
+        *args, 0, 0) != []
+    assert km.check_oracle_direction_formulas(
+        *args, 0, 0, open_leak=640) == []
+    assert km.check_oracle_direction_formulas(
+        *args, 0, 0, open_leak=639) != []
+    # Over still fails with slack.
+    args = _dir_iv(10000, 3000)
+    over = dict(args[3])
+    over[2] = (10001, 10001)
+    args = (args[0], args[1], args[2], over)
+    assert km.check_oracle_direction_formulas(
+        *args, 0, 0, open_leak=640) != []
+
+
 def test_oracle_direction_miss_slack_exact():
     args = _dir_iv(10000, 3000)
     bad = dict(args[3])

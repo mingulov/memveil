@@ -1099,14 +1099,18 @@ def check_oracle_invariants(bounds, open_leak=0):
 
 def check_oracle_direction_formulas(map_iv, mapd, copy_iv,
                                     copyd, map_miss_hi,
-                                    copy_miss_hi):
+                                    copy_miss_hi,
+                                    open_leak=0):
     """Exact oracle direction formulas with miss slack.
 
     TO_DEVICE bounces equal maps, FROM_DEVICE bounces
     equal read maps, and each direction split sums to
     its total; directions 0 and 3 must stay empty. True
     counts may exceed observed highs by that probe
-    misses; anything else disjoint fails.
+    misses; anything else disjoint fails. Mappings the
+    kernel never released miss their bounce-back, so
+    FROM_DEVICE bounces may fall short of read maps by
+    the open count.
     """
     try:
         mlo, mhi = map_iv
@@ -1131,7 +1135,7 @@ def check_oracle_direction_formulas(map_iv, mapd, copy_iv,
     c2lo, c2hi = cids[DMA_FROM_DEVICE]
     m2lo, m2hi = mids[DMA_FROM_DEVICE]
     if c2lo > m2hi + map_miss_hi \
-            or m2lo > c2hi + copy_miss_hi:
+            or m2lo > c2hi + copy_miss_hi + open_leak:
         fails.append("oracle FROM_DEVICE copies disjoint "
                      "from read maps")
     if mids[1][0] + mids[2][0] > mhi or mlo > mids[1][1] \
@@ -2995,7 +2999,7 @@ def _direction_fails(ev, samples, miss_samples, start,
         open_leak)
     fails.extend(check_oracle_direction_formulas(
         map_iv, mapd, copy_iv, copyd, map_miss_hi,
-        copy_miss_hi))
+        copy_miss_hi, open_leak))
     return fails
 
 
