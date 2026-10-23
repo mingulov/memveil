@@ -3891,6 +3891,12 @@ def test_collector_liveness_dead_copy_exit4() raises:
     assert_true(
         _contains(c.session, String("hooks silent: map->copy"))
     )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
 
 
 def test_collector_liveness_healthy_verified() raises:
@@ -3974,6 +3980,12 @@ def test_copy_only_zero_records_unverified() raises:
         _contains(
             c.session,
             String("copy liveness unverified: lifecycle not captured"),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
         )
     )
 

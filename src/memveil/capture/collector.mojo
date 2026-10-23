@@ -3168,6 +3168,7 @@ struct Collector:
             )
         if verdict.state == String("hooks_silent"):
             out.q_detail.status = String("partial")
+            out.q_detail.has_loss_count = False
             out.q_detail.reason += (
                 String("; hooks silent: ")
                 + verdict.equation
@@ -3180,9 +3181,8 @@ struct Collector:
             if verdict.equation == String(
                 "copy liveness needs lifecycle"
             ):
-                # R3: the bounce/sync hooks fire inside map,
-                # sync, and unmap paths, so copies without
-                # lifecycle stay unattributable and unverified.
+                # Bounce hooks fire inside map/sync/unmap paths, so lone copies stay unattributable.
+                out.q_detail.has_loss_count = False
                 out.q_detail.reason += String(
                     "; copy liveness unverified:"
                     " lifecycle not captured"
