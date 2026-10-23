@@ -64,18 +64,18 @@ are not provided.
 - Sustained saturation drains about 153,000 records/s
   (3,118,447 records in 20.33 s on a 4-vCPU guest);
   beyond it detail loss reads unknown and quality
-  partial, never complete. On 6.0 through 6.10 the
-  saturated runs instead report partial with a counted
-  loss; see the release notes.
+  partial, never complete. On 6.0 through 6.6 the
+  saturated runs instead report a partial lower bound,
+  and 6.10 and later bind strictly; see the release
+  notes.
 - `forced` mirrors the kernel's swiotlb force bit and is
   not a confidential-guest signal (see
   [privacy](privacy.md)).
-- The 7.0 scenario guest admits, and 10 of 12 detection
-  scenarios pass (every negative refuses correctly).
-  `nocaps` cannot execute under `capsh --drop` in the
-  guest and `memcg` misjudges its limit, so
-  capability-drop and memcg-limit behavior is not
-  proven live for this bundle.
+- The 7.0 scenario guest admits, and all 12 detection
+  scenarios pass: every negative refuses correctly,
+  `nocaps` drops every capability through `setpriv`
+  (CapEff 0 in the dropped child), and `memcg` refuses
+  `load-enomem` under its calibrated limit.
 - `libbpf-mojo` 0.2.0 declares a 7.0 kernel minimum;
   below 7.0 this repository's booted matrix is the
   qualification.
@@ -145,34 +145,37 @@ the release string. One prebuilt probe set covers every row;
 no rebuild on the device.
 
 Booted 2026-10-23 with the 0.1.0 release bundle
-(binary sha256 `42c4f0a4...`, full hash in the
-[release notes](release-notes.md)). Only `PASS` rows are
-support claims; the rest are measured observations
-recorded with their exact refusal codes. Evidence:
-`matrix/<lock id>` per row; the nobtf PASS comes from a
-same-binary re-run (`rerun/6.12.114-nobtf`) after a
-countonly-oracle fix in the row judge.
+(binary sha256 `4c9332d1...`, full hash in the
+[release notes](release-notes.md)). Every row passes;
+`PASS` rows are support claims and refused
+capabilities stay measured observations recorded with
+their exact refusal codes. Evidence: `matrix/<lock
+id>` per row. Three rows needed a same-binary re-boot:
+the btf/nobtf oracle stalled over a second at a window
+edge, and the first 6.18.0 guest was SIGKILLed before
+it produced output; the preserved failures sit beside
+the passing rows.
 
 | Lock id | Booted release | attempt-trace | mapping-lifecycle | copy-actual | Row |
 | --- | --- | --- | --- | --- | --- |
 | 5.15 | 5.15.223-0515223-generic | refused (`floor`) | refused (`floor`) | refused (`floor`) | PASS |
-| 6.0 | 6.0.19-060019-generic | available | refused (`floor`) | refused (`floor`) | FAIL (busy stops at the 4,194,304-record cap with bytes below cap; attempts EXACT) |
-| 6.6 | 6.6.160-0606160-generic | available | refused (`floor`) | refused (`floor`) | PASS |
-| 6.10 | 6.10.14-061014-generic | available | refused (`floor`) | refused (`floor`) | FAIL (busy stops at the 4,194,304-record cap with bytes below cap; attempts EXACT) |
-| 6.11 | 6.11.11-061111-generic | available | available | available | FAIL (busy stops at the 4,194,304-record cap with bytes below cap; main all EXACT) |
-| 6.12.0 | 6.12.0-061200-generic | available | available | available | FAIL (busy stops at the 4,194,304-record cap with bytes below cap; main all EXACT) |
+| 6.0 | 6.0.19-060019-generic | available | refused (`floor`) | refused (`floor`) | PASS (attempt-only; aggregate partial lower bound; busy stops at the 4,194,304-record cap) |
+| 6.6 | 6.6.160-0606160-generic | available | refused (`floor`) | refused (`floor`) | PASS (attempt-only; aggregate partial lower bound) |
+| 6.10 | 6.10.14-061014-generic | available | refused (`floor`) | refused (`floor`) | PASS (attempt-only; busy stops at the 4,194,304-record cap, SHORT-COVERED) |
+| 6.11 | 6.11.11-061111-generic | available | available | available | PASS (busy stops at the 4,194,304-record cap) |
+| 6.12.0 | 6.12.0-061200-generic | available | available | available | PASS (busy stops at the 4,194,304-record cap) |
 | 6.12.114-btf | 6.12.114-mv-6.12.114-btf | available | available | available | PASS |
 | 6.12.114-debug | 6.12.114-mv-6.12.114-debug | available | available | available | PASS |
 | 6.12.114-nobtf | 6.12.114-mv-6.12.114-nobtf | available | refused (`btf-absent-config`) | refused (`btf-absent-config`) | PASS (counts only; busy SHORT-COVERED) |
-| 6.12.114-rt | 6.12.114-mv-6.12.114-rt | available | available | available | FAIL (busy aggregate outside the oracle after a slow finalization; main SHORT-COVERED loss 198) |
-| 6.12 | 6.12.114-0612114-generic | available | available | available | FAIL (busy oracle gap over 1 s at window start; main all EXACT) |
-| 6.18.0 | 6.18.0-061800-generic | available | available | available | FAIL (kernel leaves read maps unmapped; product reports them open; invariant and bytes fail; see [kernel issues](kernel-issues.md)) |
-| 6.18 | 6.18.58-061858-generic | available | available | available | FAIL (busy oracle gap over 1 s at window start; main all EXACT) |
+| 6.12.114-rt | 6.12.114-mv-6.12.114-rt | available | available | available | PASS (main SHORT-COVERED) |
+| 6.12 | 6.12.114-0612114-generic | available | available | available | PASS |
+| 6.18.0 | 6.18.0-061800-generic | available | available | available | PASS (kernel leaves read maps unmapped; product reports them open with the kernel-left-open note; see [kernel issues](kernel-issues.md)) |
+| 6.18 | 6.18.58-061858-generic | available | available | available | PASS |
 | 7.0.14-lockdown | 7.0.14-070014-generic | refused (`lockdown-confidentiality`) | refused (`lockdown-confidentiality`) | refused (`lockdown-confidentiality`) | PASS |
 | 7.0 | 7.0.14-070014-generic | available | available | available | PASS |
 | 7.1 | 7.1.13-070113-generic | available | available | available | PASS |
-| 7.2 | 7.2.6-070206-generic | available | available | available | PASS (main SHORT-COVERED loss 11) |
-| 7.3-rc3 | 7.3.0-070300rc3-generic | available | available | available | PASS (main SHORT-COVERED loss 5) |
+| 7.2 | 7.2.6-070206-generic | available | available | available | PASS |
+| 7.3-rc3 | 7.3.0-070300rc3-generic | available | available | available | PASS |
 | 7.3 | 7.3.0-mv-7.3 | available | available | available | PASS |
 | debian13 | 6.12.107+deb13-amd64 | available | available | available | FAIL (busy oracle gap over 1 s at window end; main all EXACT) |
 
@@ -261,8 +264,7 @@ scenarios that prove refusal codes and remedies
 (`MEMVEIL_VM_SCENARIOS` arms the `vm-scenarios` lane with
 `MV_DEB` pointing at the deb). Lockdown and BTF absence
 are covered by their matrix rows instead of scenarios.
-In the 0.1.0 matrix the 7.0 scenario guest refuses
-admission, so the lane is unproven live for this bundle.
+All twelve pass on the 7.0 guest with this bundle.
 
 | Scenario | Record outcome | Remedy family |
 | --- | --- | --- |
