@@ -24,6 +24,26 @@ def contains(hay: String, needle: String) -> Bool:
     return len(hay.split(String(needle))) > 1
 
 
+def _has_hex_run(s: String, width: Int) -> Bool:
+    """True when s holds width straight hex digits."""
+    var raw = s.as_bytes()
+    var run = 0
+    for i in range(len(raw)):
+        var b = raw[i]
+        var hex = (
+            (b >= UInt8(48) and b <= UInt8(57))
+            or (b >= UInt8(65) and b <= UInt8(70))
+            or (b >= UInt8(97) and b <= UInt8(102))
+        )
+        if hex:
+            run += 1
+            if run >= width:
+                return True
+        else:
+            run = 0
+    return False
+
+
 def test_object_map_bytes() raises:
     # 8388608 ring + 6*8 counts + 1*24 offsets.
     var ok_raw = read_host_file(
@@ -55,7 +75,7 @@ def test_privilege() raises:
     assert_equal(base.code, String(""))
     assert_equal(
         base.reason,
-        String("CapEff 000001ffffffffff has CAP_BPF+CAP_PERFMON"),
+        String("CapEff has CAP_BPF+CAP_PERFMON"),
     )
     var both = check_privilege(
         open_evidence_reader(gate(String("caps-bpf-perfmon")))
@@ -63,7 +83,7 @@ def test_privilege() raises:
     assert_equal(both.state, String("pass"))
     assert_equal(
         both.reason,
-        String("CapEff 000000c000000000 has CAP_BPF+CAP_PERFMON"),
+        String("CapEff has CAP_BPF+CAP_PERFMON"),
     )
     var admin = check_privilege(
         open_evidence_reader(gate(String("caps-sysadmin")))
@@ -71,7 +91,7 @@ def test_privilege() raises:
     assert_equal(admin.state, String("pass"))
     assert_equal(
         admin.reason,
-        String("CapEff 0000000000200000 has CAP_SYS_ADMIN"),
+        String("CapEff has CAP_SYS_ADMIN"),
     )
     var none = check_privilege(
         open_evidence_reader(gate(String("caps-none")))
@@ -80,11 +100,24 @@ def test_privilege() raises:
     assert_equal(none.code, String("no-bpf-privilege"))
     assert_equal(
         none.reason,
-        String(
-            "CapEff 0000000000000000 lacks CAP_BPF+CAP_PERFMON and"
-            " CAP_SYS_ADMIN"
-        ),
+        String("CapEff lacks CAP_BPF+CAP_PERFMON and CAP_SYS_ADMIN"),
     )
+
+
+def test_privilege_reason_has_no_raw_mask() raises:
+    """Privilege reasons name the grant, never the raw mask.
+
+    A raw 16-hex mask is indistinguishable from a kernel
+    address to the export redaction gate.
+    """
+    var base = check_privilege(open_evidence_reader(gate(String("base"))))
+    assert_true(not _has_hex_run(base.reason, 16))
+    assert_true(contains(base.reason, String("CAP_BPF+CAP_PERFMON")))
+    var none = check_privilege(
+        open_evidence_reader(gate(String("caps-none")))
+    )
+    assert_true(not _has_hex_run(none.reason, 16))
+    assert_true(contains(none.reason, String("lacks")))
 
 
 def test_capeff_malformed() raises:
@@ -202,6 +235,7 @@ def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_object_map_bytes]()
     suite.test[test_privilege]()
+    suite.test[test_privilege_reason_has_no_raw_mask]()
     suite.test[test_capeff_malformed]()
     suite.test[test_memcg_ancestor_min]()
     suite.test[test_memcg_shortfall_unknown]()

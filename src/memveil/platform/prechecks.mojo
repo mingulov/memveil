@@ -163,7 +163,6 @@ def check_privilege(reader: EvidenceReader) -> PreCheck:
     var seen = False
     var bad = True
     var cap = UInt64(0)
-    var shown = String("")
     for line in text.split(String("\n")):
         if not line.startswith(String("CapEff:")):
             continue
@@ -182,18 +181,15 @@ def check_privilege(reader: EvidenceReader) -> PreCheck:
             rest += 1
         if rest != len(lb) or vend - vstart != 16:
             break
-        var digits = List[UInt8]()
         var v = UInt64(0)
         var ok = True
         for k in range(vstart, vend):
             if not _is_hex(lb[k]):
                 ok = False
                 break
-            digits.append(lb[k])
             v = v * UInt64(16) + _hex_val(lb[k])
         if not ok:
             break
-        shown = bytes_to_text(digits^)
         cap = v
         bad = False
         break
@@ -214,15 +210,13 @@ def check_privilege(reader: EvidenceReader) -> PreCheck:
         return PreCheck(
             String("privilege"),
             String("pass"),
-            String("CapEff ") + shown + String(" has ") + grant,
+            String("CapEff has ") + grant,
             String(""),
         )
     return PreCheck(
         String("privilege"),
         String("fail"),
-        String("CapEff ")
-        + shown
-        + String(" lacks CAP_BPF+CAP_PERFMON and CAP_SYS_ADMIN"),
+        String("CapEff lacks CAP_BPF+CAP_PERFMON and CAP_SYS_ADMIN"),
         String("no-bpf-privilege"),
     )
 
