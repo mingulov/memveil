@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Mint the ephemeral 3-channel test profile for the record3 lane.
 
-Derives from --base (default the shipped narrow doc): keeps its base
+Derives from an explicit --base doc: keeps its base
 bindings (config/btf/format/object/image build the same
 kernel the attempt lane qualifies), appends lc/cp object and
 ring bindings from the current builds, adds the frozen
@@ -22,7 +22,6 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-DOC = ROOT / "profiles" / "linux-x86_64-7.0.0-34-generic.json"
 LC_OBJ = ROOT / "build" / "bpf" / "swiotlb_lifecycle.bpf.o"
 CP_OBJ = ROOT / "build" / "bpf" / "swiotlb_copy.bpf.o"
 OUT = ROOT / "build" / "vm" / "record3-profile.json"
@@ -266,16 +265,20 @@ def apply_tracing(doc, lc_obj, cp_obj, lc_reason,
 
 def main():
     out = OUT
-    base = DOC
+    base = None
     args = sys.argv[1:]
     while args:
         if args[0] not in ("--out", "--base") or len(args) < 2:
-            fail("usage: mint_record3_profile.py [--base DOC] [--out PATH]")
+            fail("usage: mint_record3_profile.py --base DOC "
+                 "[--out PATH]")
         if args[0] == "--out":
             out = Path(args[1])
         else:
             base = Path(args[1])
         args = args[2:]
+    if base is None:
+        fail("usage: mint_record3_profile.py --base DOC "
+             "[--out PATH]")
     doc = json.loads(base.read_text())
     if doc.get("schema_version") != "0.1.1":
         fail("shipped doc is not profile 0.1.1")

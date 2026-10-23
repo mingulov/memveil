@@ -205,9 +205,9 @@ def wrap_nonroot(argv):
 
 
 def wrap_nocaps(argv):
-    return ["capsh",
-            "--drop=cap_sys_admin,cap_bpf,cap_perfmon",
-            "--"] + argv
+    return ["setpriv", "--bounding-set=-all",
+            "--inh-caps=-all", "--ambient-caps=-all",
+            "--no-new-privs"] + argv
 
 
 def wrap_cgroup(group, argv):
@@ -716,18 +716,19 @@ def scenario_memcg(ctx):
         attempts.append(attempt)
         if attempt.get("setup_err") is not None:
             break
-        if attempt.get("invalid") is None:
+        if attempt.get("invalid") is None \
+                and attempt.get("refused"):
             chosen = num
             break
-    if chosen is None and len(attempts) == 2 and all(
-            a.get("setup_err") is None
-            and a.get("invalid") is not None
-            for a in attempts):
-        status = "not_proven"
-    elif chosen is None:
+    if chosen is not None:
+        status = "ok"
+    elif any(a.get("setup_err") is not None
+             for a in attempts):
         status = "fail"
     else:
-        status = "ok"
+        # Every run was validly set up but none refused:
+        # the limit never bit, so nothing is proven.
+        status = "not_proven"
     write(os.path.join(sdir, "memcg.json"),
           json.dumps({"attempts": attempts,
                       "chosen": chosen, "status": status},
@@ -826,7 +827,8 @@ def _memcg_attempt(ctx, sdir, num):
             exits.append(None)
     attempt = dict(cal, limit=limit, cgroup=cgroup,
                    memory_max=mem_max, oom_before=oom_before,
-                   oom_after=oom_after, exits=exits)
+                   oom_after=oom_after, exits=exits,
+                   refused=(exits[2] or "").strip() == "3")
     invalid = None
     if oom_before is not None and oom_after is not None \
             and oom_after - oom_before > 0:
@@ -853,7 +855,7 @@ def run(argv):
     _OUT = out
     shutil.rmtree(out, ignore_errors=True)
     os.makedirs(out, exist_ok=True)
-    for tool in ("setpriv", "capsh", "sysctl", "mount",
+    for tool in ("setpriv", "sysctl", "mount",
                  "umount"):
         if shutil.which(tool) is None:
             fail("guest tool missing: %s" % tool)

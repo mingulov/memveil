@@ -1245,6 +1245,61 @@ def test_memveil_bytes_absent_channel_skipped():
         sums, _BYTES768, 0, 0, ["unmap"]) == []
 
 
+def test_memveil_bytes_open_mapping_shortfall():
+    total = 1140850688
+    leaked = 82313216
+    sums = {"requested": total, "mapped": total,
+            "sync": total - leaked,
+            "copy": {"original_to_bounce": total,
+                     "bounce_to_original": 1073741824
+                     - leaked}}
+    assert km.check_memveil_bytes(
+        sums, 1073741824, total - 1073741824, 0,
+        _CHANNELS5, unpaired_bytes=leaked) == []
+    assert km.check_memveil_bytes(
+        sums, 1073741824, total - 1073741824, 0,
+        _CHANNELS5) != []
+    wrong = dict(sums)
+    wrong["sync"] = total - leaked + 4096
+    assert km.check_memveil_bytes(
+        wrong, 1073741824, total - 1073741824, 0,
+        _CHANNELS5, unpaired_bytes=leaked) != []
+
+
+def _leak_lines():
+    lines = []
+    lines.append(json.dumps(
+        {"kind": "map_result",
+         "data": {"operation_id": "lc-0", "success": True,
+                  "mapping_id": "gen-1",
+                  "mapped_bytes": "4096"}}))
+    lines.append(json.dumps(
+        {"kind": "map_result",
+         "data": {"operation_id": "lc-1", "success": True,
+                  "mapping_id": "gen-2",
+                  "mapped_bytes": "8192"}}))
+    lines.append(json.dumps(
+        {"kind": "map_result",
+         "data": {"operation_id": "lc-2", "success": False,
+                  "mapping_id": "gen-3",
+                  "mapped_bytes": "4096"}}))
+    lines.append(json.dumps(
+        {"kind": "unmap",
+         "data": {"mapping_id": "gen-1"}}))
+    lines.append(json.dumps(
+        {"kind": "unmap", "data": {"mapping_id": "gen-9"}}))
+    lines.append(json.dumps({"kind": "bounce_attempt",
+                             "data": {}}))
+    return [line + "\n" for line in lines]
+
+
+def test_unpaired_maps_pairs_by_mapping_id():
+    count, nbytes = km.unpaired_maps(_leak_lines())
+    assert (count, nbytes) == (1, 8192)
+    with pytest.raises(ValueError):
+        km.unpaired_maps(["not json\n"])
+
+
 def test_write_direction_formulas():
     # kernel/dma: every map bounces original to bounce
     # on the map path; reads bounce back on unmap/sync
@@ -1739,6 +1794,38 @@ def test_parse_detail_loss_rejects_unknown_suffix():
             km.parse_detail_loss(_loss_text() + tail)
 
 
+_SUFFIX_LOWER = "; attempt loss counts are a lower bound before 6.7"
+
+
+def test_parse_detail_loss_accepts_lower_bound_suffix():
+    parsed = km.parse_detail_loss(_loss_text() + _SUFFIX_LOWER)
+    assert parsed["total"] == 0
+    assert parsed["liveness_suffix"] is None
+    assert parsed["lower_bound"] is True
+    parsed = km.parse_detail_loss(
+        _loss_text() + _SUFFIX_FIRST + _SUFFIX_UNVERIFIED
+        + _SUFFIX_LOWER)
+    assert parsed["first_unknown_copy"] == "LAYOUT"
+    assert parsed["liveness_suffix"] == _SUFFIX_UNVERIFIED
+    assert parsed["lower_bound"] is True
+    parsed = km.parse_detail_loss(_loss_text())
+    assert parsed["lower_bound"] is False
+    parsed = km.parse_detail_loss_unknown(
+        _BUSY_UNKNOWN + _SUFFIX_LOWER)
+    assert parsed["lower_bound"] is True
+
+
+def test_parse_detail_loss_rejects_misplaced_lower_bound():
+    for tail in (_SUFFIX_LOWER + _SUFFIX_FIRST,
+                 _SUFFIX_LOWER + _SUFFIX_UNVERIFIED,
+                 _SUFFIX_LOWER + _SUFFIX_LOWER,
+                 "; attempt loss counts are a lower bound",
+                 "; Attempt loss counts are a lower bound "
+                 "before 6.7"):
+        with pytest.raises(ValueError):
+            km.parse_detail_loss(_loss_text() + tail)
+
+
 def test_recovered_from_session():
     session = {"environment": {"evidence": [
         {"type": "provenance", "source": "copy.recovered",
@@ -2166,6 +2253,72 @@ def test_persisted_invariants_skew_fails():
     assert km.check_persisted_invariants(persisted, attributed)
 
 
+def _leak618_persisted():
+    return {"bounce_attempt": 54592, "map_result": 54592,
+            "unmap": 53952, "copy": 145792,
+            "sync_request": 53952}
+
+
+def _leak618_attributed():
+    return {"attempt": 0, "map": 0, "unmap": 0, "copy": 0,
+            "sync": 0}
+
+
+def test_persisted_invariants_open_mapping_pass():
+    assert km.check_persisted_invariants(
+        _leak618_persisted(), _leak618_attributed(),
+        open_leak=640) == []
+    assert km.check_persisted_invariants(
+        _leak618_persisted(), _leak618_attributed())
+    assert km.check_persisted_invariants(
+        _leak618_persisted(), _leak618_attributed(),
+        open_leak=639)
+
+
+def test_oracle_counts_equal_gate():
+    bounds = {"attempt": (54592, 54592), "map": (54592, 54592),
+              "unmap": (53952, 53952), "sync": (53952, 53952)}
+    assert km.oracle_counts_equal(bounds, _leak618_persisted())
+    short = dict(bounds)
+    short["unmap"] = (53950, 53951)
+    assert not km.oracle_counts_equal(short,
+                                      _leak618_persisted())
+    short = dict(bounds)
+    short["sync"] = (53953, 53960)
+    assert not km.oracle_counts_equal(short,
+                                      _leak618_persisted())
+    assert not km.oracle_counts_equal(
+        {"attempt": (54592, 54592)}, _leak618_persisted())
+
+
+def test_oracle_invariants_open_slack():
+    bounds = {"attempt": (54592, 54592), "map": (54592, 54592),
+              "unmap": (53952, 53952), "sync": (53952, 53952)}
+    assert km.check_oracle_invariants(bounds) != []
+    assert km.check_oracle_invariants(bounds,
+                                      open_leak=640) == []
+    assert km.check_oracle_invariants(bounds,
+                                      open_leak=639) != []
+
+
+def test_copy_direction_open_shortfall():
+    # 6.18.0 shape: o2b exact, b2o short by the leak.
+    assert km.check_copy_direction_counts(
+        {"original_to_bounce": 54592,
+         "bounce_to_original": 53952},
+        108544, 54592, 54592, 54592, 0, 0,
+        open_leak=640) == []
+    assert km.check_copy_direction_counts(
+        {"original_to_bounce": 54592,
+         "bounce_to_original": 53951},
+        108543, 54592, 54592, 54592, 0, 0,
+        open_leak=640) != []
+    assert km.check_copy_direction_counts(
+        {"original_to_bounce": 54592,
+         "bounce_to_original": 53952},
+        108544, 54592, 54592, 54592, 0, 0) != []
+
+
 def test_persisted_copy_ratio_fails():
     # Exact direction split: 12994 read maps need
     # 12994 + 12994 copies (7.3 swiotlb.c:1625,1729).
@@ -2413,7 +2566,12 @@ def _busy2_session(status="complete_for_scope",
                            "loss_count": loss_count,
                            "reason": reason},
                 "aggregate": {"status": agg[0],
-                              "loss_count": agg[1]}},
+                              "loss_count": agg[1],
+                              "scope": "counter snapshots "
+                                       "(attempt channel) "
+                                       "attached "
+                                       "[5000000000,"
+                                       "23000000000)"}},
             "environment": {"evidence": [
                 {"type": "provenance",
                  "source": "copy.deferred",
@@ -2433,6 +2591,8 @@ def _busy2_lower_bound(session):
         "counter snapshots present (valid cut, identity "
         "holds, coverage valid); attempt loss counts are "
         "a lower bound before 6.7")
+    session["quality"]["detail"]["reason"] += (
+        "; attempt loss counts are a lower bound before 6.7")
     return session
 
 
@@ -2442,9 +2602,48 @@ def _busy2_samples_countonly():
             for stamp, snap in _busy2_samples()]
 
 
+def _busy2_gap_samples(gap_ns):
+    rows = []
+    for stamp, add in ((2000000000, 0), (4500000000, 1000),
+                       (4500000000 + gap_ns, 1000),
+                       (23000000000, 3500),
+                       (26000000000, 3500)):
+        rows.append((stamp, {
+            "tp": 13000 + add, "map": 13000 + add,
+            "unmap": 13000 + add,
+            "copy": 25990 + 2 * add,
+            "syncc": 13000 + add, "syncd": 0,
+            "tpb": _TBYTES + add * 65536}))
+    return rows
+
+
+def test_decide_busy_edge_gap_over_1s_passes():
+    assert km.BUSY_MAX_EDGE_GAP_NS == 2 * 10 ** 9
+    per, overall, failed, _ = _busy2_decide(
+        samples=_busy2_gap_samples(1000011000))
+    assert not failed, per
+    assert overall == "EXACT"
+
+
+def test_decide_busy_edge_gap_over_2s_fails():
+    per, _, failed, _ = _busy2_decide(
+        samples=_busy2_gap_samples(2100000000))
+    assert failed
+    assert per["attempt"].startswith("ORACLE-FAIL"), per
+
+
+def test_decide_main_edge_gap_over_1s_fails():
+    per, _, failed, _ = km.decide_channels(
+        _busy2_persisted(), _busy2_gap_samples(1000011000),
+        _busy2_miss(), 5000000000, 23000000000,
+        _CHANNELS5, _loss(), 0, 0)
+    assert failed
+    assert per["attempt"].startswith("ORACLE-FAIL"), per
+
+
 def _busy2_decide(persisted=None, session=None,
                   counters="dflt", miss=None,
-                  samples=None):
+                  samples=None, loss_exact=True):
     if persisted is None:
         persisted = _busy2_persisted()
     if session is None:
@@ -2457,7 +2656,8 @@ def _busy2_decide(persisted=None, session=None,
         samples = _busy2_samples()
     return km.decide_busy(persisted, samples,
                           miss, 5000000000, 23000000000,
-                          _CHANNELS5, session, counters)
+                          _CHANNELS5, session, counters,
+                          loss_exact)
 
 
 def test_decide_busy_complete_exact_passes():
@@ -2740,7 +2940,7 @@ def test_decide_busy_lower_bound_honesty_passes():
         status="partial", loss_count="6",
         reason=_loss_text(submit_fail=6)))
     per, overall, failed, _ = _busy2_decide(
-        persisted, session)
+        persisted, session, loss_exact=False)
     assert not failed, per
     assert overall == "HONEST-LOWER-BOUND"
 
@@ -2752,7 +2952,7 @@ def test_decide_busy_lower_bound_over_fails():
         status="partial", loss_count="6",
         reason=_loss_text(submit_fail=6)))
     per, overall, failed, _ = _busy2_decide(
-        persisted, session)
+        persisted, session, loss_exact=False)
     assert failed, per
     assert per["map"].startswith("MORE THAN ORACLE")
 
@@ -2762,7 +2962,7 @@ def test_decide_busy_lower_bound_over_reported_fails():
         status="partial", loss_count="100",
         reason=_loss_text(submit_fail=100)))
     per, overall, failed, _ = _busy2_decide(
-        session=session)
+        session=session, loss_exact=False)
     assert failed, per
     assert overall == "OVER-REPORTED"
 
@@ -2773,9 +2973,113 @@ def test_decide_busy_lower_bound_complete_label_fails():
     session = _busy2_lower_bound(_busy2_session(
         loss_count="6", reason=_loss_text(submit_fail=6)))
     per, overall, failed, _ = _busy2_decide(
-        persisted, session)
+        persisted, session, loss_exact=False)
     assert failed, per
     assert overall == "CLAIM-UNPROVEN"
+
+
+def test_decide_busy_below_67_needs_partial_and_labels():
+    # Complete with no label on a pre-6.7 kernel: unproven.
+    per, overall, failed, _ = _busy2_decide(
+        loss_exact=False)
+    assert failed, per
+    assert overall == "CLAIM-UNPROVEN", per
+    # Aggregate label without the detail label: unproven.
+    session = _busy2_lower_bound(_busy2_session(
+        status="partial", loss_count="6",
+        reason=_loss_text(submit_fail=6)))
+    session["quality"]["detail"]["reason"] = _loss_text(
+        submit_fail=6)
+    per, overall, failed, _ = _busy2_decide(
+        session=session, loss_exact=False)
+    assert failed, per
+    assert overall == "CLAIM-UNPROVEN", per
+
+
+def test_decide_busy_exact_kernel_rejects_lower_bound_label():
+    session = _busy2_lower_bound(_busy2_session(
+        status="partial", loss_count="6",
+        reason=_loss_text(submit_fail=6)))
+    per, overall, failed, _ = _busy2_decide(
+        session=session, loss_exact=True)
+    assert failed, per
+    assert overall == "CLAIM-UNPROVEN", per
+
+
+def test_parse_attached_interval():
+    start, end = km.parse_attached_interval(
+        "counter snapshots (attempt channel) attached [8,15)")
+    assert (start, end) == (8, 15)
+    start, end = km.parse_attached_interval(
+        "counter snapshots attached [0,1)")
+    assert (start, end) == (0, 1)
+    for scope in ("counter snapshots (attempt channel)",
+                  "counter snapshots",
+                  "counter snapshots attached [15,8)",
+                  "counter snapshots attached [8,8)",
+                  "counter snapshots attached [8,15",
+                  "counter snapshots attached [8,15) tail",
+                  None, ""):
+        with pytest.raises(ValueError):
+            km.parse_attached_interval(scope)
+
+
+def _busy2_dense_samples():
+    rows = []
+    for stamp, add in ((2000000000, 0), (5000000000, 1000),
+                       (10000000000, 1500),
+                       (20000000000, 2500),
+                       (23000000000, 3500),
+                       (26000000000, 3500)):
+        rows.append((stamp, {
+            "tp": 13000 + add, "map": 13000 + add,
+            "unmap": 13000 + add,
+            "copy": 25990 + 2 * add,
+            "syncc": 13000 + add, "syncd": 0,
+            "tpb": _TBYTES + add * 65536}))
+    return rows
+
+
+def _busy2_attached_session(start_ns, end_ns):
+    session = _busy2_session()
+    session["quality"]["aggregate"]["scope"] = (
+        "counter snapshots (attempt channel) attached "
+        "[%d,%d)" % (start_ns, end_ns))
+    return session
+
+
+def test_decide_busy_aggregate_uses_attached_interval():
+    # Attached [10s,20s): oracle 1000..1000 there, while the
+    # window [5s,23s] holds 2500. A counter matching the
+    # attached interval passes; a window-sized one fails.
+    samples = _busy2_dense_samples()
+    session = _busy2_attached_session(10000000000,
+                                      20000000000)
+    counters = {"swiotlb.bounce_attempts": 1000,
+                "swiotlb.requested_bytes": 1000 * 65536}
+    per, overall, failed, _ = _busy2_decide(
+        counters=counters, samples=samples, session=session)
+    assert not failed, per
+    assert overall == "EXACT", per
+    counters = {"swiotlb.bounce_attempts": 2500,
+                "swiotlb.requested_bytes": 2500 * 65536}
+    per, overall, failed, info = _busy2_decide(
+        counters=counters, samples=samples, session=session)
+    assert failed, per
+    assert overall == "AGGREGATE-MISMATCH", per
+    assert "1000..1000" in info["aggregate"], info
+
+
+def test_decide_busy_aggregate_oracle_error_is_oracle_fail():
+    # Attached [10s,20s] with no interior samples: the
+    # window brackets but the attached interval does not.
+    session = _busy2_attached_session(10000000000,
+                                      20000000000)
+    per, overall, failed, _ = _busy2_decide(session=session)
+    assert failed, per
+    assert overall is None, per
+    assert per["attempt"].startswith("ORACLE-FAIL"), per
+    assert "oracle gap" in per["attempt"], per
 
 
 def test_decide_busy_aggregate_mismatch_fails():
@@ -2825,6 +3129,146 @@ def test_decide_busy_aggregate_countonly_checks_attempts():
         samples=_busy2_samples_countonly())
     assert failed, per
     assert overall == "AGGREGATE-MISMATCH"
+
+
+def _busy2_partial_agg_session(loss_count):
+    session = _busy2_session(
+        status="partial", loss_count="0",
+        reason=_loss_text())
+    session["quality"]["aggregate"] = {
+        "status": "partial", "loss_count": str(loss_count),
+        "scope": "counter snapshots (attempt channel) "
+                 "attached [5000000000,23000000000)",
+        "reason": "counter snapshots present (valid cut, "
+                  "identity holds, coverage valid); attempt "
+                  "program runs skipped %d (recursion)"
+                  % loss_count}
+    return session
+
+
+def test_decide_busy_aggregate_loss_count_checked():
+    # Attempts 2400 + loss 100 land inside 2500..2500.
+    session = _busy2_partial_agg_session(100)
+    counters = {"swiotlb.bounce_attempts": 2400,
+                "swiotlb.requested_bytes": 2400 * 65536}
+    per, overall, failed, _ = _busy2_decide(
+        counters=counters, session=session)
+    assert not failed, per
+    assert overall == "EXACT", per
+    # Attempts 2000 + loss 100 stay short: mismatch.
+    counters = {"swiotlb.bounce_attempts": 2000,
+                "swiotlb.requested_bytes": 2000 * 65536}
+    per, overall, failed, info = _busy2_decide(
+        counters=counters, session=session)
+    assert failed, per
+    assert overall == "AGGREGATE-MISMATCH", per
+    assert "2100" in info["aggregate"], info
+
+
+def test_decide_busy_aggregate_loss_bytes_checked():
+    # Attempts bind but bytes over-claim beyond miss slack.
+    session = _busy2_partial_agg_session(100)
+    counters = {"swiotlb.bounce_attempts": 2400,
+                "swiotlb.requested_bytes": 2500 * 65536 + 1}
+    per, overall, failed, _ = _busy2_decide(
+        counters=counters, session=session)
+    assert failed, per
+    assert overall == "AGGREGATE-MISMATCH", per
+
+
+def test_decide_busy_aggregate_loss_below_67_skipped():
+    # Below 6.7 the loss count is a lower bound: no
+    # aggregate bounds check, honesty verdict stands.
+    session = _busy2_partial_agg_session(100)
+    session["quality"]["detail"]["reason"] += _SUFFIX_LOWER
+    session["quality"]["aggregate"]["reason"] += _SUFFIX_LOWER
+    session["quality"]["detail"]["status"] = "partial"
+    counters = {"swiotlb.bounce_attempts": 1,
+                "swiotlb.requested_bytes": 65536}
+    per, overall, failed, _ = _busy2_decide(
+        counters=counters, session=session, loss_exact=False)
+    assert not failed, per
+    assert overall == "HONEST-LOWER-BOUND", per
+
+
+def _main_agg(loss_count, scope=True):
+    agg = {"status": "partial", "loss_count": loss_count,
+           "reason": "counter snapshots present"}
+    if scope:
+        agg["scope"] = (
+            "counter snapshots (attempt channel) attached "
+            "[5000000000,23000000000)")
+    return agg
+
+
+def test_decide_main_aggregate_binds_loss_count():
+    agg = _main_agg("100")
+    ok, detail = km.decide_main_aggregate(
+        agg, {"swiotlb.bounce_attempts": 2400,
+              "swiotlb.requested_bytes": 2400 * 65536},
+        _busy2_samples(), _busy2_miss(), True)
+    assert ok, detail
+    ok, detail = km.decide_main_aggregate(
+        agg, {"swiotlb.bounce_attempts": 2000,
+              "swiotlb.requested_bytes": 2000 * 65536},
+        _busy2_samples(), _busy2_miss(), True)
+    assert not ok, detail
+    assert "2100" in detail
+
+
+def test_decide_main_aggregate_complete_zero_checked():
+    agg = _main_agg("0")
+    agg["status"] = "complete_for_scope"
+    ok, detail = km.decide_main_aggregate(
+        agg, _busy2_counters(), _busy2_samples(),
+        _busy2_miss(), True)
+    assert ok, detail
+    ok, _ = km.decide_main_aggregate(
+        agg, {"swiotlb.bounce_attempts": 100,
+              "swiotlb.requested_bytes": 100 * 65536},
+        _busy2_samples(), _busy2_miss(), True)
+    assert not ok
+
+
+def test_decide_main_aggregate_below_67_skips():
+    agg = _main_agg("100")
+    ok, detail = km.decide_main_aggregate(
+        agg, {"swiotlb.bounce_attempts": 1,
+              "swiotlb.requested_bytes": 65536},
+        _busy2_samples(), _busy2_miss(), False)
+    assert ok, detail
+
+
+def test_decide_main_aggregate_unknown_loss_skips():
+    agg = _main_agg(None)
+    ok, detail = km.decide_main_aggregate(
+        agg, {"swiotlb.bounce_attempts": 1,
+              "swiotlb.requested_bytes": 65536},
+        _busy2_samples(), _busy2_miss(), True)
+    assert ok, detail
+
+
+def test_decide_main_aggregate_scope_missing_fails():
+    agg = _main_agg("100", scope=False)
+    ok, detail = km.decide_main_aggregate(
+        agg, _busy2_counters(), _busy2_samples(),
+        _busy2_miss(), True)
+    assert not ok, detail
+    assert "attached interval" in detail
+
+
+def test_decide_main_aggregate_main_gap_applies():
+    # A 1.000011 s attached edge gap fails on the main
+    # path even though the busy path allows 2 s.
+    agg = {"status": "complete_for_scope", "loss_count": "0",
+           "scope": "counter snapshots attached "
+                    "[5000000000,23000000000)",
+           "reason": "counter snapshots present"}
+    ok, detail = km.decide_main_aggregate(
+        agg, _busy2_counters(), _busy2_gap_samples(1000011000),
+        _busy2_miss(), True)
+    assert not ok, detail
+    assert "ORACLE-FAIL" in detail
 
 
 def test_parse_busy_span():
@@ -3407,6 +3851,17 @@ def test_assert_redacted_rejects_raw_address():
         km.assert_redacted("[mem 0x00000000f8000000-0xfbffffff]")
 
 
+def test_assert_redacted_needs_hex_letter():
+    # A 16-digit decimal integral is not an address.
+    km.assert_redacted(
+        "allocation_byte_microseconds = 4548589687495168")
+    km.assert_redacted("counter 1234567890123456 done")
+    with pytest.raises(ValueError):
+        km.assert_redacted("leak ffff888123456789 here")
+    with pytest.raises(ValueError):
+        km.assert_redacted("leak 12345abcdef12345 here")
+
+
 def test_build_vng_cmd_plain_with_cpus():
     cmd = km.build_vng_cmd(["vng"], "0-7", "/home/u",
                            ["--run", "v7.0.14"])
@@ -3783,7 +4238,9 @@ def _session_text(recovered=0):
                                "reason": _loss_text(
                                    recursion_missed=12)},
                     "aggregate": {"status": "complete_for_scope",
-                                  "loss_count": "0"}},
+                                  "loss_count": "0",
+                                  "scope": "counter snapshots "
+                                           "attached [1000,2000)"}},
         "environment": {"evidence": [
             {"type": "provenance", "source": "copy.deferred",
              "interpretation": "0"},
@@ -3832,6 +4289,9 @@ def _ev_pass():
                                       _TBYTES, _TBYTES,
                                       _RBYTES),
         "events_error": None,
+        "counters": {"swiotlb.bounce_attempts": 13000,
+                     "swiotlb.requested_bytes": _TBYTES},
+        "counters_error": None,
         "blockstat_text": json.dumps(
             {"data": {"dev": "nvme0n1",
                       "read_before": 1000000,
@@ -4984,6 +5444,41 @@ def test_busy_stop_reason_size_limit_needs_bytes_at_cap():
     ok, _ = km.check_busy_stop_reason(
         "duration\n", cap, cap)
     assert not ok
+
+
+def test_busy_stop_reason_size_limit_accepts_op_cap():
+    cap = km.BUSY_MAX_EVENTS_BYTES
+    max_ops = km.product_max_ops()
+    assert max_ops == 4194304
+    # 6.0 numbers: bytes below the cap, ops exactly at it.
+    ok, detail = km.check_busy_stop_reason(
+        "size_limit\n", 1597734508, cap, 4194304, max_ops)
+    assert ok, detail
+    # Cap read from the product by default.
+    ok, detail = km.check_busy_stop_reason(
+        "size_limit\n", 1597734508, cap, 4194304)
+    assert ok, detail
+    ok, _ = km.check_busy_stop_reason(
+        "size_limit\n", 1597734508, cap, 4194303, max_ops)
+    assert not ok
+    ok, _ = km.check_busy_stop_reason(
+        "size_limit\n", 1597734508, cap, 4194305, max_ops)
+    assert not ok
+    ok, _ = km.check_busy_stop_reason(
+        "size_limit\n", 1597734508, cap, None, max_ops)
+    assert not ok
+    # Bytes at the cap still pass without an op count.
+    ok, detail = km.check_busy_stop_reason(
+        "size_limit\n", cap, cap, 100, max_ops)
+    assert ok, detail
+
+
+def test_detail_op_count_sums_detail_kinds():
+    persisted = {"bounce_attempt": 4194304, "map_result": 0,
+                 "counter_snapshot": 4, "gap": 1,
+                 "pool_sample": 3}
+    assert km.detail_op_count(persisted) == 4194304
+    assert km.detail_op_count({}) == 0
 
 
 def test_busy_events_file_bytes(tmp_path):

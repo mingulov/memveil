@@ -86,6 +86,7 @@ LOWER_BOUND_LABEL = \
     "attempt loss counts are a lower bound before 6.7"
 
 MAX_EDGE_GAP_NS = 10 ** 9
+BUSY_MAX_EDGE_GAP_NS = 2 * 10 ** 9
 BUSY_SETTLE_NS = 2 * MAX_EDGE_GAP_NS
 DMA_TO_DEVICE = 1
 DMA_FROM_DEVICE = 2
@@ -519,10 +520,11 @@ def bracket_oracle(samples, start_ns, end_ns,
             before_end[1], after_end[1])
 
 
-def oracle_interval(samples, start_ns, end_ns, key):
+def oracle_interval(samples, start_ns, end_ns, key,
+                    max_gap_ns=MAX_EDGE_GAP_NS):
     """Conservative [lo, hi] oracle count for key over [start, end)."""
     before_start, after_start, before_end, after_end = bracket_oracle(
-        samples, start_ns, end_ns)
+        samples, start_ns, end_ns, max_gap_ns)
     for name, snap in (("before_start", before_start),
                        ("after_start", after_start),
                        ("before_end", before_end),
@@ -580,13 +582,15 @@ def miss_interval(miss_samples, start_ns, end_ns, names):
     return lo, hi
 
 
-def channel_bounds(samples, miss_samples, start_ns, end_ns, chan):
+def channel_bounds(samples, miss_samples, start_ns, end_ns, chan,
+                   max_gap_ns=MAX_EDGE_GAP_NS):
     """Oracle [lo, hi] for one channel, misses bracketed in."""
     kind, keys = KINDS[chan]
     del kind
     lo = hi = 0
     for key in keys:
-        klo, khi = oracle_interval(samples, start_ns, end_ns, key)
+        klo, khi = oracle_interval(samples, start_ns, end_ns, key,
+                                   max_gap_ns)
         mlo, mhi = miss_interval(miss_samples, start_ns, end_ns,
                                  ORACLE_PROGS[key])
         lo += klo + mlo
@@ -625,6 +629,8 @@ _DETAIL_SUFFIX_RE = (
     r"|; (?:attempt->map|map->copy|copy->map|unmap->copy|"
     r"copy->unmap) liveness unverified \(\d+ vs \d+\)"
     r"|; copy liveness unverified: lifecycle not captured))?"
+    r"(?P<lower>; attempt loss counts are a lower bound "
+    r"before 6\.7)?"
 )
 
 
@@ -634,9 +640,10 @@ def parse_detail_loss(reason):
     Accepts the collector suffixes only: an optional first
     unknown copy name plus at most one hook-liveness form
     (hooks silent, an equation unverified, or copy without
-    lifecycle). Anything else is a grammar mismatch. The
-    result carries first_unknown_copy and liveness_suffix
-    (each None when absent) beside the counters.
+    lifecycle) plus the optional pre-6.7 lower-bound label.
+    Anything else is a grammar mismatch. The result carries
+    first_unknown_copy and liveness_suffix (each None when
+    absent) and lower_bound beside the counters.
     """
     match = re.fullmatch(
         r"detail loss (\d+) \(submit_fail=\((\d+)\) "
@@ -656,6 +663,7 @@ def parse_detail_loss(reason):
     parsed = dict(zip(keys, nums))
     parsed["first_unknown_copy"] = match.group("first_name")
     parsed["liveness_suffix"] = match.group("live")
+    parsed["lower_bound"] = match.group("lower") is not None
     expect = sum(parsed[k] for k in TRANSPORT_KEYS) \
         + parsed["recursion_missed"] \
         + sum(parsed[k] for k in POST_LATCH_KEYS)
@@ -987,39 +995,71 @@ def _kind_channel(kind):
     return None
 
 
-def check_persisted_invariants(persisted, attributed):
+def check_persisted_invariants(persisted, attributed,
+                               open_leak=0):
     """Fixed workload ratios within attributed loss.
 
     Each map carries one attempt, one unmap and one sync.
     Copy direction counts are checked exactly by
     check_copy_direction_counts, not here. Present
     channels only: a row with one channel has no ratio
-    to check.
+    to check. Mappings the kernel never released keep
+    map and attempt above unmap and sync by exactly the
+    open count.
     """
     fails = []
     group = [k for k in ("bounce_attempt", "map_result", "unmap",
                          "sync_request") if k in persisted]
+    upper = ("bounce_attempt", "map_result")
+    lower = ("unmap", "sync_request")
     for i in range(len(group)):
         for j in range(i + 1, len(group)):
             first, second = group[i], group[j]
             allow = attributed.get(_kind_channel(first), 0) \
                 + attributed.get(_kind_channel(second), 0)
-            if abs(persisted[first] - persisted[second]) > allow:
+            if first in upper and second in lower:
+                gap = persisted[first] - persisted[second]
+                if abs(gap - open_leak) > allow:
+                    fails.append(
+                        "%s=%d vs %s=%d beyond loss %d "
+                        "and %d open" % (
+                            first, persisted[first],
+                            second, persisted[second],
+                            allow, open_leak))
+            elif abs(persisted[first] - persisted[second]) \
+                    > allow:
                 fails.append("%s=%d vs %s=%d beyond loss %d"
                              % (first, persisted[first],
                                 second, persisted[second], allow))
     return fails
 
 
+def oracle_counts_equal(bounds, persisted):
+    """True when unmap and sync agree with the oracle."""
+    for chan, kind in (("unmap", "unmap"),
+                       ("sync", "sync_request")):
+        if chan not in bounds or kind not in persisted:
+            return False
+        try:
+            lo, hi = bounds[chan]
+        except (TypeError, ValueError):
+            return False
+        if not lo <= persisted[kind] <= hi:
+            return False
+    return True
+
+
 def check_copy_direction_counts(copy_dirs, copy_total, maps,
                                 read_lo, read_hi, att_copy,
-                                att_map):
+                                att_map, open_leak=0):
     """Exact per-direction copy counts within loss.
 
     Original-to-bounce equals maps (one map-path bounce
     each); bounce-to-original equals read maps (one
     bounce-back each). Shortfalls fit the copy plus map
-    attribution; over always fails.
+    attribution; over always fails. Mappings the kernel
+    never released miss their bounce-back, so the
+    bounce-back shortfall may reach the open count.
     """
     try:
         o2b = int(copy_dirs["original_to_bounce"])
@@ -1037,14 +1077,14 @@ def check_copy_direction_counts(copy_dirs, copy_total, maps,
     if b2o > read_hi:
         fails.append("bounce_to_original=%d over read "
                      "maps %d" % (b2o, read_hi))
-    elif b2o < read_lo - allow:
+    elif b2o < read_lo - allow - open_leak:
         fails.append("bounce_to_original=%d under read "
-                     "maps %d beyond loss %d"
-                     % (b2o, read_lo, allow))
+                     "maps %d beyond loss %d and %d open"
+                     % (b2o, read_lo, allow, open_leak))
     return fails
 
 
-def check_oracle_invariants(bounds):
+def check_oracle_invariants(bounds, open_leak=0):
     """Oracle intervals must share the workload ratios."""
     fails = []
     group = [c for c in ("attempt", "map", "unmap", "sync")
@@ -1052,7 +1092,7 @@ def check_oracle_invariants(bounds):
     if len(group) >= 2:
         top = max(bounds[c][0] for c in group)
         bottom = min(bounds[c][1] for c in group)
-        if top > bottom:
+        if top - bottom > open_leak:
             fails.append("oracle attempt/map/unmap/sync disjoint")
     return fails
 
@@ -1134,6 +1174,7 @@ def parse_detail_loss_unknown(reason):
     parsed["cause"] = cause
     parsed["first_unknown_copy"] = match.group("first_name")
     parsed["liveness_suffix"] = match.group("live")
+    parsed["lower_bound"] = match.group("lower") is not None
     return parsed
 
 
@@ -1169,7 +1210,8 @@ def _busy_known_loss(known):
 
 
 def decide_busy(persisted, samples, miss_samples, start_ns,
-                end_ns, channels, session, counters):
+                end_ns, channels, session, counters,
+                loss_exact=True):
     """Busy capture verdicts from its own session evidence.
 
     An exact detail claim (complete_for_scope or a
@@ -1182,11 +1224,14 @@ def decide_busy(persisted, samples, miss_samples, start_ns,
     not complete, each channel inside its oracle upper.
     Captured plus known loss must fit the summed oracle
     upper in both paths, since the loss claim is global.
-    A complete_for_scope aggregate claim must match its
-    counter deltas against the oracle. A hooks-silent or
+    On an exact-loss kernel a carried aggregate loss
+    count must match attempts plus loss against the
+    oracle over the attached interval. A hooks-silent or
     liveness-unverified detail suffix voids every strict
-    exact channel claim. Returns
-    (per, overall, failed, info).
+    exact channel claim. Below 6.7 the claim must be
+    partial with the lower-bound label in detail and
+    aggregate; on 6.7 and later the label must be
+    absent. Returns (per, overall, failed, info).
     """
     try:
         detail = session["quality"]["detail"]
@@ -1196,6 +1241,21 @@ def decide_busy(persisted, samples, miss_samples, start_ns,
         agg = session["quality"].get("aggregate", {})
     except (KeyError, TypeError, AttributeError):
         per = {c: "CLAIM-UNPROVEN (session unreadable)"
+               for c in channels}
+        return per, "CLAIM-UNPROVEN", True, {}
+    agg_reason = (agg or {}).get("reason") or ""
+    detail_lower = LOWER_BOUND_LABEL in (reason or "")
+    agg_lower = LOWER_BOUND_LABEL in agg_reason
+    if loss_exact:
+        if detail_lower or agg_lower:
+            per = {c: "CLAIM-UNPROVEN (lower-bound label on "
+                      "exact-loss kernel)"
+                   for c in channels}
+            return per, "CLAIM-UNPROVEN", True, {}
+    elif status != "partial" or not detail_lower \
+            or not agg_lower:
+        per = {c: "CLAIM-UNPROVEN (pre-6.7 needs partial "
+                  "plus label in detail and aggregate)"
                for c in channels}
         return per, "CLAIM-UNPROVEN", True, {}
     numeric = unknown = None
@@ -1211,8 +1271,7 @@ def decide_busy(persisted, samples, miss_samples, start_ns,
         and loss_count is not None \
         and str(loss_count) == str(numeric["total"])
     unknown_ok = unknown is not None and loss_count is None
-    lower_bound = LOWER_BOUND_LABEL in ((agg or {}).get("reason")
-                                        or "")
+    lower_bound = agg_lower
     if numeric_ok and not lower_bound and status in (
             "complete_for_scope", "partial"):
         known = numeric
@@ -1250,7 +1309,8 @@ def decide_busy(persisted, samples, miss_samples, start_ns,
         kind, _ = KINDS[chan]
         try:
             lo, hi = channel_bounds(samples, miss_samples,
-                                    start_ns, end_ns, chan)
+                                    start_ns, end_ns, chan,
+                                    BUSY_MAX_EDGE_GAP_NS)
             allowance = channel_allowance(
                 miss_samples, start_ns, end_ns, chan,
                 transport + omits,
@@ -1300,18 +1360,31 @@ def decide_busy(persisted, samples, miss_samples, start_ns,
     sum_hi = 0
     for chan in channels:
         _, hi = channel_bounds(samples, miss_samples,
-                               start_ns, end_ns, chan)
+                               start_ns, end_ns, chan,
+                               BUSY_MAX_EDGE_GAP_NS)
         sum_hi += hi
     if sum_got + known_total > sum_hi:
         return per, "OVER-REPORTED", True, {}
-    if agg.get("status") == "complete_for_scope" \
-            and str(agg.get("loss_count")) == "0":
+    if loss_exact and (agg or {}).get("loss_count") is not None:
         try:
-            ok, detail = _check_busy_aggregate(
-                counters, samples, miss_samples, start_ns,
-                end_ns)
-        except OracleError:
-            return per, "AGGREGATE-MISMATCH", True, {}
+            loss_n = int(agg["loss_count"])
+        except (TypeError, ValueError):
+            return per, "AGGREGATE-MISMATCH", True, \
+                {"aggregate": "aggregate loss count unparseable"}
+        try:
+            agg_start, agg_end = parse_attached_interval(
+                (agg or {}).get("scope"))
+        except ValueError as exc:
+            return per, "AGGREGATE-MISMATCH", True, \
+                {"aggregate": str(exc)}
+        try:
+            ok, detail = _check_aggregate(
+                counters, loss_n, samples, miss_samples,
+                agg_start, agg_end, BUSY_MAX_EDGE_GAP_NS)
+        except OracleError as exc:
+            failed_all = {
+                c: "ORACLE-FAIL (%s)" % exc for c in channels}
+            return failed_all, None, True, {}
         if not ok:
             return per, "AGGREGATE-MISMATCH", True, \
                 {"aggregate": detail}
@@ -1325,9 +1398,28 @@ def decide_busy(persisted, samples, miss_samples, start_ns,
     return per, "HONEST", False, {}
 
 
-def _check_busy_aggregate(counters, samples, miss_samples,
-                          start_ns, end_ns):
-    """Aggregate complete claim against oracle counter bounds."""
+def parse_attached_interval(scope):
+    """D31 attached [start, end) claim from an aggregate scope."""
+    match = re.search(r" attached \[(\d+),(\d+)\)$",
+                      scope or "")
+    if not match:
+        raise ValueError(
+            "aggregate scope lacks attached interval")
+    start, end = int(match.group(1)), int(match.group(2))
+    if not start < end:
+        raise ValueError("attached interval not ordered")
+    return start, end
+
+
+def _check_aggregate(counters, loss_n, samples, miss_samples,
+                     start_ns, end_ns, max_gap_ns):
+    """Aggregate counter claim against oracle bounds.
+
+    Attempts plus the declared loss must fall inside the
+    oracle bounds over the attached interval; bytes bind
+    the same way where the oracle sums them, with each
+    lost run worth at most MAX_MAP_BYTES.
+    """
     if not isinstance(counters, dict):
         return False, "aggregate claims complete with " \
             "no counters"
@@ -1336,10 +1428,12 @@ def _check_busy_aggregate(counters, samples, miss_samples,
     except (KeyError, TypeError, ValueError):
         return False, "aggregate lacks attempt counters"
     lo, hi = channel_bounds(samples, miss_samples, start_ns,
-                            end_ns, "attempt")
-    if attempts < lo or attempts > hi:
-        return False, "aggregate attempts %d outside " \
-            "oracle %d..%d" % (attempts, lo, hi)
+                            end_ns, "attempt", max_gap_ns)
+    total = attempts + loss_n
+    if total < lo or total > hi:
+        return False, "aggregate attempts %d + loss %d = " \
+            "%d outside oracle %d..%d" % (
+                attempts, loss_n, total, lo, hi)
     if "swiotlb.requested_bytes" in counters:
         if not any("tpb" in snap for _, snap in samples):
             return True, "aggregate counts match the oracle; " \
@@ -1349,25 +1443,62 @@ def _check_busy_aggregate(counters, samples, miss_samples,
         except (TypeError, ValueError):
             return False, "aggregate byte counter unparseable"
         blo, bhi = oracle_interval(samples, start_ns, end_ns,
-                                   "tpb")
+                                   "tpb", max_gap_ns)
         _, miss_hi = miss_interval(miss_samples, start_ns,
                                    end_ns, ORACLE_PROGS["tp"])
-        if nbytes < blo \
+        if nbytes + loss_n * MAX_MAP_BYTES < blo \
                 or nbytes > bhi + miss_hi * MAX_MAP_BYTES:
             return False, "aggregate bytes %d outside " \
                 "oracle %d..%d" % (nbytes, blo, bhi)
     return True, "aggregate counters match the oracle"
 
 
+def decide_main_aggregate(agg, counters, samples,
+                          miss_samples, loss_exact,
+                          max_gap_ns=MAX_EDGE_GAP_NS):
+    """Main-path aggregate loss count against the oracle.
+
+    Below 6.7 only honesty applies; otherwise a carried
+    loss count binds attempts plus loss (and bytes where
+    the oracle has them) over the attached interval.
+    """
+    if not loss_exact:
+        return True, "aggregate honesty only below 6.7"
+    if not isinstance(agg, dict):
+        return False, "aggregate quality unreadable"
+    if agg.get("loss_count") is None:
+        return True, "aggregate loss unknown; honesty only"
+    try:
+        loss_n = int(agg["loss_count"])
+    except (TypeError, ValueError):
+        return False, "aggregate loss count unparseable"
+    try:
+        start_ns, end_ns = parse_attached_interval(
+            agg.get("scope"))
+    except ValueError as exc:
+        return False, str(exc)
+    try:
+        return _check_aggregate(
+            counters, loss_n, samples, miss_samples,
+            start_ns, end_ns, max_gap_ns)
+    except OracleError as exc:
+        return False, "ORACLE-FAIL (%s)" % exc
+
+
 def check_memveil_bytes(byte_sums, read_bytes, write_bytes,
-                        allowance, channels):
+                        allowance, channels,
+                        unpaired_bytes=0):
     """Persisted byte sums must match the block layer totals.
 
     Requested, mapped, sync and original-to-bounce sums
     equal read plus write bytes; bounce-to-original
     equals read bytes only. Exact at zero loss, any
     shortfall must fit the loss allowance, over always
-    fails. Present channels only.
+    fails. Present channels only. Mappings the kernel
+    never released keep their bytes out of sync, so the
+    sync shortfall must equal the unpaired map bytes;
+    the bounce-back shortfall only reaches that high
+    when the leaked maps are reads.
     """
     try:
         sums = {"requested": int(byte_sums["requested"]),
@@ -1380,7 +1511,7 @@ def check_memveil_bytes(byte_sums, read_bytes, write_bytes,
     total = read_bytes + write_bytes
     fails = []
     for chan, field in (("attempt", "requested"),
-                        ("map", "mapped"), ("sync", "sync")):
+                        ("map", "mapped")):
         if chan not in channels:
             continue
         if sums[field] > total:
@@ -1390,19 +1521,32 @@ def check_memveil_bytes(byte_sums, read_bytes, write_bytes,
             fails.append("%s bytes %d short of block %d beyond "
                          "loss %d" % (field, sums[field],
                                       total, allowance))
+    if "sync" in channels:
+        if sums["sync"] > total:
+            fails.append("sync bytes %d over block %d"
+                         % (sums["sync"], total))
+        elif abs(total - sums["sync"] - unpaired_bytes) \
+                > allowance:
+            fails.append("sync bytes %d short of block %d "
+                         "beyond loss %d and %d unpaired"
+                         % (sums["sync"], total, allowance,
+                            unpaired_bytes))
     if "copy" in channels:
         for direction, want in (
                 ("original_to_bounce", total),
                 ("bounce_to_original", read_bytes)):
             got = copies[direction]
+            leak = 0
+            if direction == "bounce_to_original":
+                leak = unpaired_bytes
             if got > want:
                 fails.append("copy %s bytes %d over block %d"
                              % (direction, got, want))
-            elif want - got > allowance:
+            elif want - got > allowance + leak:
                 fails.append("copy %s bytes %d short of block "
-                             "%d beyond loss %d"
+                             "%d beyond loss %d and %d unpaired"
                              % (direction, got, want,
-                                allowance))
+                                allowance, leak))
     return fails
 
 
@@ -1975,13 +2119,40 @@ def events_file_bytes(path):
         return None
 
 
-def check_busy_stop_reason(text, events_bytes=None, cap=None):
+def product_max_ops():
+    """Attempt-record cap read from the product source."""
+    root = os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))))
+    path = os.path.join(root, "src", "memveil", "capture",
+                        "collector.mojo")
+    try:
+        with open(path) as handle:
+            text = handle.read()
+    except OSError as exc:
+        raise ValueError("product MAX_OPS unreadable: %s" % exc)
+    match = re.search(r"^comptime MAX_OPS = (\d+)\s*$", text,
+                      re.M)
+    if not match:
+        raise ValueError("product MAX_OPS not found")
+    return int(match.group(1))
+
+
+def detail_op_count(persisted):
+    """Bridge-delivered detail events behind the op cap."""
+    return sum(int(persisted.get(kind, 0)) for kind in (
+        "bounce_attempt", "map_result", "unmap", "copy",
+        "sync_request"))
+
+
+def check_busy_stop_reason(text, events_bytes=None, cap=None,
+                           op_count=None, max_ops=None):
     """Busy record stopped on signal or filled its budget.
 
-    A size_limit stop is accepted only with the events
-    bytes at the configured cap: within BUSY_SIZE_SLACK
-    below it, never above it. Any other stop mismatch
-    fails.
+    A size_limit stop is accepted with the events bytes at
+    the configured cap (within BUSY_SIZE_SLACK below it,
+    never above it) or with the persisted operation count
+    at exactly MAX_OPS (read from the product). Any other
+    stop mismatch fails.
     """
     if cap is None:
         cap = BUSY_MAX_EVENTS_BYTES
@@ -1996,11 +2167,20 @@ def check_busy_stop_reason(text, events_bytes=None, cap=None):
     if events_bytes > cap:
         return False, "busy size_limit bytes %d over cap %d" % (
             events_bytes, cap)
-    if events_bytes < cap - BUSY_SIZE_SLACK:
-        return False, "busy size_limit with %d/%d bytes, " \
-            "want bytes at the cap" % (events_bytes, cap)
-    return True, "busy size_limit with %d/%d bytes" % (
-        events_bytes, cap)
+    if events_bytes >= cap - BUSY_SIZE_SLACK:
+        return True, "busy size_limit with %d/%d bytes" % (
+            events_bytes, cap)
+    if max_ops is None:
+        try:
+            max_ops = product_max_ops()
+        except ValueError as exc:
+            return False, "busy size_limit with %d/%d bytes, %s" % (
+                events_bytes, cap, exc)
+    if op_count == max_ops:
+        return True, "busy size_limit with %d ops at the cap" % (
+            op_count)
+    return False, "busy size_limit with %d/%d bytes, " \
+        "want bytes at the cap" % (events_bytes, cap)
 
 
 def session_end_reason(text):
@@ -2075,10 +2255,16 @@ def redact_dmesg(text):
 
 
 def assert_redacted(text):
-    """Fail when a raw address survived redaction."""
+    """Fail when a raw address survived redaction.
+
+    A bare hex run counts only with a hex letter, so a
+    long decimal integral is not mistaken for an
+    address.
+    """
     if re.search(r"0x[0-9a-fA-F]", text or ""):
         raise ValueError("redacted text keeps 0x address")
-    if re.search(r"[0-9a-fA-F]{16,}", text or ""):
+    if re.search(r"\b(?=[0-9]*[a-fA-F])[0-9a-fA-F]{16,}\b",
+                 text or ""):
         raise ValueError("redacted text keeps long hex run")
 
 
@@ -2347,6 +2533,51 @@ def persisted_copy_dirs(lines):
                              % num)
         dirs[direction] += 1
     return dirs
+
+
+def unpaired_maps(lines):
+    """Successful maps without an unmap, count and bytes.
+
+    Pairs by mapping_id; failed maps never open and
+    unmaps without a map are ignored. Other kinds are
+    skipped, malformed rows fail.
+    """
+    mapped = {}
+    unmapped = set()
+    for num, line in enumerate(lines, 1):
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            event = json.loads(text)
+        except ValueError:
+            raise ValueError("malformed events line %d" % num)
+        if not isinstance(event, dict):
+            raise ValueError("malformed events line %d" % num)
+        kind = event.get("kind")
+        if kind not in ("map_result", "unmap"):
+            continue
+        data = event.get("data")
+        if not isinstance(data, dict):
+            raise ValueError("events line %d lacks data" % num)
+        if kind == "unmap":
+            if data.get("mapping_id") is not None:
+                unmapped.add(data["mapping_id"])
+            continue
+        if data.get("success") is not True:
+            continue
+        ident = data.get("mapping_id")
+        if not isinstance(ident, str) or not ident:
+            raise ValueError("events line %d lacks mapping_id"
+                             % num)
+        mapped[ident] = _byte_field(data, "mapped_bytes", num)
+    count = 0
+    nbytes = 0
+    for ident, size in mapped.items():
+        if ident not in unmapped:
+            count += 1
+            nbytes += size
+    return count, nbytes
 
 
 def counter_deltas(lines):
@@ -2733,7 +2964,7 @@ def _add_hist_bytes(add, ev, samples, start, end,
 
 
 def _direction_fails(ev, samples, miss_samples, start,
-                     end, attributed):
+                     end, attributed, open_leak=0):
     if samples is None or miss_samples is None:
         return ["directions need oracle and progs"]
     if ev.get("persisted_copy_dirs") is None:
@@ -2760,7 +2991,8 @@ def _direction_fails(ev, samples, miss_samples, start,
         mapd[DMA_FROM_DEVICE][0],
         mapd[DMA_FROM_DEVICE][1] + map_miss_hi,
         attributed.get("copy", 0),
-        attributed.get("map", 0))
+        attributed.get("map", 0),
+        open_leak)
     fails.extend(check_oracle_direction_formulas(
         map_iv, mapd, copy_iv, copyd, map_miss_hi,
         copy_miss_hi))
@@ -2789,6 +3021,10 @@ def evaluate_row(ev):
     entry = ev["entry"]
     ident = entry["id"]
     release = entry["release"]
+    try:
+        loss_exact = _release_triple(release) >= (6, 7)
+    except ValueError:
+        loss_exact = False
     admitted = [cap for cap in CAPS
                 if entry["expected"][cap]["verdict"] == "admitted"]
     refused = [(cap, entry["expected"][cap]["reason_class"])
@@ -3000,7 +3236,8 @@ def evaluate_row(ev):
     if not admitted:
         for name in ("record_finalized", "report_consistent",
                      "progs_complete", "prog_presence", "window",
-                     "workload", "aggregate_quality", "floors",
+                     "workload", "aggregate_quality",
+                     "aggregate_bounds", "floors",
                      "ceiling", "recursion_reported",
                      "channels", "invariants", "bytes",
                      "oracle_bytes", "sectors", "sectors_idle",
@@ -3106,9 +3343,28 @@ def evaluate_row(ev):
         add("aggregate_quality", False, "aggregate needs session")
     else:
         agg = session["quality"].get("aggregate")
+        detail_q = session["quality"].get("detail", {})
         if not isinstance(agg, dict):
             add("aggregate_quality", False,
                 "aggregate quality unreadable")
+        elif not loss_exact:
+            if agg.get("status") == "partial" \
+                    and LOWER_BOUND_LABEL in (
+                        agg.get("reason") or "") \
+                    and detail_q.get("status") == "partial" \
+                    and LOWER_BOUND_LABEL in (
+                        detail_q.get("reason") or ""):
+                add("aggregate_quality", True,
+                    "aggregate partial lower bound")
+            else:
+                add("aggregate_quality", False,
+                    "pre-6.7 needs partial plus label in "
+                    "detail and aggregate")
+        elif LOWER_BOUND_LABEL in (agg.get("reason") or "") \
+                or LOWER_BOUND_LABEL in (
+                    detail_q.get("reason") or ""):
+            add("aggregate_quality", False,
+                "lower-bound label on exact-loss kernel")
         elif agg.get("status") == "complete_for_scope" \
                 and agg.get("loss_count") == "0":
             add("aggregate_quality", True, "aggregate complete")
@@ -3221,17 +3477,63 @@ def evaluate_row(ev):
                     "oracle comparison failed")
             else:
                 add("channels", True, overall)
+    if not loss_exact:
+        add("aggregate_bounds", True,
+            "aggregate honesty only below 6.7")
+    elif session is None:
+        add("aggregate_bounds", False,
+            "aggregate bounds need session")
+    elif samples is None or miss_samples is None:
+        add("aggregate_bounds", False,
+            "aggregate bounds need oracle/progs (%s)"
+            % samples_error)
+    elif ev.get("counters") is None:
+        add("aggregate_bounds", False,
+            "main counters missing (%s)"
+            % (ev.get("counters_error") or "no events error"))
+    else:
+        agg = session["quality"].get("aggregate")
+        ok, detail = decide_main_aggregate(
+            agg, ev["counters"], samples, miss_samples,
+            loss_exact)
+        add("aggregate_bounds", ok, detail)
+    leak_open = 0
+    leak_bytes = 0
+    leak_note = ""
+    if session is not None and bounds is not None \
+            and ev.get("persisted") is not None:
+        try:
+            stop_open = int(
+                session["stop"]["open_mappings"])
+        except (KeyError, TypeError, ValueError):
+            stop_open = 0
+        unpaired_n = ev.get("unpaired_count")
+        unpaired_b = ev.get("unpaired_bytes")
+        if stop_open > 0 and unpaired_n == stop_open \
+                and isinstance(unpaired_b, int) \
+                and oracle_counts_equal(bounds,
+                                        ev["persisted"]):
+            leak_open = stop_open
+            leak_bytes = unpaired_b
+            leak_note = "; kernel left %d mappings open" % (
+                stop_open)
     if bounds is not None and attributed is not None \
             and ev.get("persisted") is not None:
         fails = check_persisted_invariants(ev["persisted"],
-                                           attributed)
-        fails.extend(check_oracle_invariants(bounds))
+                                           attributed,
+                                           leak_open)
+        fails.extend(check_oracle_invariants(bounds,
+                                             leak_open))
         if "copy" in channels:
             fails.extend(_direction_fails(
                 ev, samples, miss_samples, start, end,
-                attributed))
-        add("invariants", not fails,
-            "; ".join(fails) or "workload ratios hold")
+                attributed, leak_open))
+        if leak_open and not fails:
+            add("invariants", True,
+                "workload ratios hold" + leak_note)
+        else:
+            add("invariants", not fails,
+                "; ".join(fails) or "workload ratios hold")
     else:
         add("invariants", False, "invariants need channels")
     if block_bytes is not None and loss is not None \
@@ -3241,9 +3543,15 @@ def evaluate_row(ev):
                      + post_latch_loss(loss)) * MAX_MAP_BYTES
         fails = check_memveil_bytes(ev["persisted_bytes"],
                                     read_bytes, write_bytes,
-                                    allowance, channels)
-        add("bytes", not fails,
-            "; ".join(fails) or "byte sums match block total")
+                                    allowance, channels,
+                                    leak_bytes)
+        if leak_open and not fails:
+            add("bytes", True,
+                "byte sums match block total" + leak_note)
+        else:
+            add("bytes", not fails,
+                "; ".join(fails)
+                or "byte sums match block total")
     else:
         add("bytes", False, "bytes need session, events, blockstat")
     if "attempt" not in channels:
@@ -3310,8 +3618,12 @@ def evaluate_row(ev):
     if not ok:
         detail += "; see busy/record.stderr"
     add("busy_finalized", ok, detail)
+    busy_ops = None
+    if isinstance(ev.get("busy_persisted"), dict):
+        busy_ops = detail_op_count(ev["busy_persisted"])
     ok, detail = check_busy_stop_reason(
-        ev.get("busy_end_reason"), ev.get("busy_events_bytes"))
+        ev.get("busy_end_reason"), ev.get("busy_events_bytes"),
+        op_count=busy_ops)
     add("busy_stop_reason", ok, detail)
     try:
         times = json.loads(ev.get("busy_times_text") or "")
@@ -3377,7 +3689,8 @@ def evaluate_row(ev):
             per, overall, failed, info = decide_busy(
                 ev["busy_persisted"], samples, busy_miss,
                 busy_start, busy_end, channels,
-                busy_session, ev.get("busy_counters"))
+                busy_session, ev.get("busy_counters"),
+                loss_exact)
             rec["busy_channels"] = per
             rec["busy_overall"] = overall
             if failed:

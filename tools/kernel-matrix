@@ -187,8 +187,8 @@ def gather_persisted(export):
         return None, None, None, str(exc)
 
 
-def gather_busy_counters(busy):
-    path = os.path.join(busy, "cap", "events.ndjson")
+def gather_counters(export):
+    path = os.path.join(export, "cap", "events.ndjson")
     try:
         with open(path) as handle:
             return km.counter_deltas(handle), None
@@ -196,6 +196,18 @@ def gather_busy_counters(busy):
         return None, "missing events.ndjson"
     except ValueError as exc:
         return None, str(exc)
+
+
+def gather_unpaired(export):
+    path = os.path.join(export, "cap", "events.ndjson")
+    try:
+        with open(path) as handle:
+            count, nbytes = km.unpaired_maps(handle)
+        return (count, nbytes), None
+    except OSError:
+        return (None, None), "missing events.ndjson"
+    except ValueError as exc:
+        return (None, None), str(exc)
 
 
 def collect_one(entry, export, tools, dd_count, elapsed, run_id,
@@ -295,6 +307,14 @@ def collect_one(entry, export, tools, dd_count, elapsed, run_id,
         ev["persisted_bytes"] = byts
         ev["persisted_copy_dirs"] = dirs
         ev["events_error"] = events_error
+        counters, counters_error = gather_counters(export)
+        ev["counters"] = counters
+        ev["counters_error"] = counters_error
+        (unpaired_n, unpaired_b), unpaired_error = \
+            gather_unpaired(export)
+        ev["unpaired_count"] = unpaired_n
+        ev["unpaired_bytes"] = unpaired_b
+        ev["unpaired_error"] = unpaired_error
         mode = read_text(os.path.join(export, "oracle.mode"))
         ev["oracle_mode"] = (mode or "").strip() or None
         ev["hist_status_text"] = read_text(
@@ -331,7 +351,7 @@ def collect_one(entry, export, tools, dd_count, elapsed, run_id,
             os.path.join(busy, "cap", "session.json"))
         ev["busy_miss_snaps"] = gather_miss_snaps(busy, 3)
         counters, counters_error = \
-            gather_busy_counters(busy)
+            gather_counters(busy)
         ev["busy_counters"] = counters
         ev["busy_counters_error"] = counters_error
         ev["busy_report_exit"] = read_text(
@@ -668,15 +688,7 @@ def collect_scenarios(entry, export, tools, elapsed, run_id,
                 "detail": "run decision crashed: %s" % exc,
                 "elapsed": round(elapsed, 1),
                 "scenarios": [rec for _, rec in named]}
-    ok_count = sum(1 for res in results
-                   if res["status"] == "ok")
-    np_count = sum(1 for res in results
-                   if res["status"] == "not_proven")
-    fail_count = sum(1 for res in results
-                     if res["status"] == "fail")
-    ok = fail_count == 0
-    detail = "scenarios ok=%d fail=%d not_proven=%d" % (
-        ok_count, fail_count, np_count)
+    ok, detail = ks.scenarios_verdict(results)
     fail_txt = read_text(os.path.join(export, "FAIL.txt"))
     if fail_txt is not None:
         ok = False

@@ -112,6 +112,51 @@ def test_scenario_precondition_missing_fails():
     assert not _check(rec, "precondition")["ok"]
 
 
+def test_nocaps_precondition_needs_zero():
+    ok, _ = ks.check_precondition(
+        "nocaps", {"capeff": "0", "probe_exit": "0"})
+    assert ok
+    ok, _ = ks.check_precondition(
+        "nocaps", {"capeff": "0000000000000000",
+                   "probe_exit": "0"})
+    assert ok
+    for capeff in ("1", "1ffffffffff", "xyz", None):
+        ok, _ = ks.check_precondition(
+            "nocaps", {"capeff": capeff, "probe_exit": "0"})
+        assert not ok
+
+
+def _nocaps_ev(capeff, probe_exit="0"):
+    ev = _ev("nocaps")
+    ev["precondition"] = {"capeff": capeff,
+                          "probe_exit": probe_exit}
+    return ev
+
+
+def test_nocaps_capeff_nonzero_not_proven():
+    rec = ks.evaluate_scenario(
+        "nocaps", _nocaps_ev("1ffffffffff"))
+    assert not rec["ok"]
+    assert rec["status"] == "not_proven"
+    assert _check(rec, "precondition")["ok"]
+    for name in ("doctor_passive", "doctor_passive_exit",
+                 "doctor_load", "doctor_load_exit",
+                 "record", "agreement", "capture",
+                 "teardown"):
+        check = _check(rec, name)
+        assert check["skipped"], name
+
+
+def test_nocaps_broken_evidence_fails():
+    rec = ks.evaluate_scenario("nocaps", _nocaps_ev("xyz"))
+    assert not rec["ok"]
+    assert rec["status"] == "fail"
+    rec = ks.evaluate_scenario(
+        "nocaps", _nocaps_ev("0", probe_exit="1"))
+    assert not rec["ok"]
+    assert rec["status"] == "fail"
+
+
 def test_scenario_teardown_not_restored_fails():
     ev = _ev("base")
     ev["teardown"] = {"verdict": "unavailable"}
@@ -435,6 +480,90 @@ def test_memcg_not_proven_needs_two_invalid():
     ev["memcg"]["attempts"] = [dict(attempt)]
     rec = ks.evaluate_scenario("memcg", ev)
     assert rec["status"] == "fail"
+
+
+def _memcg_mixed_load():
+    reason = "load ENOMEM: memcg or memlock limit"
+    caps = [("attempt-trace", "available", "available",
+             "attempt-trace: live interfaces verified")]
+    for cap in ks.CAPS[1:]:
+        caps.append((cap, "unavailable", "load-enomem",
+                     reason))
+    return _doc(caps, mode="load-check",
+                verdict="unavailable")
+
+
+def test_memcg_load_mixed_passes():
+    ev = _memcg_ev()
+    ev["load"] = {"text": json.dumps(_memcg_mixed_load()),
+                  "exit": "3"}
+    rec = ks.evaluate_scenario("memcg", ev)
+    assert rec["ok"], json.dumps(rec["checks"], indent=1)
+
+
+def test_memcg_load_false_ready_fails():
+    # Load-check admits all while record refuses in the
+    # same cgroup: a false ready, never not_proven.
+    ev = _memcg_ev()
+    ev["load"] = {"text": json.dumps(
+        _load_all_available()), "exit": "0"}
+    rec = ks.evaluate_scenario("memcg", ev)
+    assert not rec["ok"]
+    assert rec["status"] == "fail"
+    assert not _check(rec, "doctor_load")["ok"]
+    assert not _check(rec, "doctor_load_exit")["ok"]
+
+
+def test_memcg_load_exit_zero_with_refusal_fails():
+    ev = _memcg_ev()
+    ev["load"]["exit"] = "0"
+    rec = ks.evaluate_scenario("memcg", ev)
+    assert not rec["ok"]
+    assert rec["status"] == "fail"
+
+
+def test_memcg_unrefused_not_proven():
+    ev = _memcg_ev()
+    attempt = ev["memcg"]["attempts"][0]
+    attempt["exits"] = ["0", "3", "4"]
+    ev["memcg"]["attempts"] = [dict(attempt),
+                               dict(attempt)]
+    ev["memcg"]["chosen"] = None
+    ev["memcg"]["status"] = "not_proven"
+    rec = ks.evaluate_scenario("memcg", ev)
+    assert rec["status"] == "not_proven"
+    assert not rec["ok"]
+    ok, _ = ks._memcg_not_proven(ev["memcg"])
+    assert ok
+
+
+def test_memcg_refused_voids_not_proven():
+    ev = _memcg_ev()
+    attempt = ev["memcg"]["attempts"][0]
+    ev["memcg"]["attempts"] = [dict(attempt),
+                               dict(attempt)]
+    ev["memcg"]["chosen"] = None
+    ev["memcg"]["status"] = "not_proven"
+    rec = ks.evaluate_scenario("memcg", ev)
+    assert rec["status"] == "fail"
+
+
+def test_memcg_passive_precheck_gone():
+    assert "passive_precheck" not in ks.SCENARIOS["memcg"]
+
+
+def test_scenarios_verdict_not_proven_never_passes():
+    ok, detail = ks.scenarios_verdict(
+        [{"name": "base", "status": "ok"},
+         {"name": "memcg", "status": "not_proven"}])
+    assert not ok
+    assert "not_proven=1" in detail
+    ok, _ = ks.scenarios_verdict(
+        [{"name": "base", "status": "ok"}])
+    assert ok
+    ok, _ = ks.scenarios_verdict(
+        [{"name": "base", "status": "fail"}])
+    assert not ok
 
 
 def test_scenario_exit_mismatch_fails():

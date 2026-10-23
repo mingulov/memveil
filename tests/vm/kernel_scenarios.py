@@ -203,9 +203,7 @@ SCENARIOS = {
     "memcg": {
         "passive": {"all": _alu()},
         "passive_verdict": "ready-load-unchecked",
-        "passive_precheck": ("memcg", "unknown",
-                             "memcg-headroom"),
-        "load": {"all": ("unavailable", "load-enomem")},
+        "load": {"any_enomem": True},
         "load_verdict": "unavailable",
         "record": {"refuse": "load-enomem"},
         "exits": ("0", "3", "3"),
@@ -243,6 +241,8 @@ def check_expectation_table():
         for side in ("passive", "load"):
             exp = spec.get(side, {})
             if "all" in exp:
+                continue
+            if side == "load" and exp.get("any_enomem"):
                 continue
             caps = exp.get("caps", {})
             for cap in CAPS:
@@ -325,6 +325,42 @@ def check_doctor_caps(doc, expectation, mode, verdict,
         else:
             return False, "precheck %s missing" % want_id
     return True, "doctor matches"
+
+
+def check_memcg_load(doc, verdict):
+    """Load-check under a memory limit: ENOMEM somewhere.
+
+    At least one component refuses load-enomem; every
+    other component is either available or refuses the
+    same way. Any other code is not the memcg effect.
+    """
+    if not isinstance(doc, dict):
+        return False, "doctor is not an object"
+    if doc.get("mode") != "load-check":
+        return False, "mode %r want load-check" % (
+            doc.get("mode"),)
+    if doc.get("verdict") != verdict:
+        return False, "verdict %r want %s" % (
+            doc.get("verdict"), verdict)
+    got = _caps_of(doc)
+    refused = 0
+    for cap in CAPS:
+        if cap not in got:
+            return False, "%s missing from doctor" % cap
+        status = got[cap].get("status")
+        code = got[cap].get("reason_code")
+        if status == "available" and code == "available":
+            continue
+        if status in REFUSED_STATUSES \
+                and code == "load-enomem":
+            refused += 1
+            continue
+        return False, "%s is %s/%s, want available or " \
+            "load-enomem" % (cap, status, code)
+    if refused < 1:
+        return False, "no component refuses load-enomem"
+    return True, "load refuses load-enomem (%d of %d)" % (
+        refused, len(CAPS))
 
 
 def first_refused_code(load_doc):
@@ -613,10 +649,10 @@ def check_precondition(scenario, pre, job=None):
         except ValueError:
             return False, "CapEff %r unparseable" % (
                 pre.get("capeff"),)
-        for bit in (21, 38, 39):
-            if eff & (1 << bit):
-                return False, "CapEff keeps bit %d" % bit
-        return True, "CapEff lacks 21, 38, 39"
+        if eff != 0:
+            return False, "CapEff %s, want 0" % (
+                (pre.get("capeff") or "").strip(),)
+        return True, "CapEff 0 in the dropped child"
     if scenario == "ftrace-off":
         if (pre.get("ftrace_enabled") or "").strip() != "0":
             return False, "ftrace_enabled %r" % (
@@ -682,19 +718,45 @@ def _memcg_not_proven(memcg):
         if cal is None:
             return False, "attempt uncalibrated: %s" % detail
         invalid = _memcg_invalid(attempt)
-        if invalid is None:
-            return False, "attempt valid, not_proven void"
-    return True, "two calibrated runs, both invalid"
+        exits = attempt.get("exits") or []
+        if len(exits) > 2 and isinstance(exits[2], str):
+            record_exit = exits[2].strip()
+        else:
+            record_exit = None
+        if record_exit is None:
+            return False, "record exit missing"
+        if invalid is None and record_exit == "3":
+            return False, "attempt valid and refused, " \
+                "not_proven void"
+    return True, "two calibrated runs, none valid and refused"
+
+
+def _nocaps_not_proven(pre):
+    """Not-proven verification over the drop proof."""
+    if not isinstance(pre, dict):
+        return False, "precondition missing"
+    if (pre.get("probe_exit") or "").strip() != "0":
+        return False, "drop probe exit %r" % (
+            pre.get("probe_exit"),)
+    try:
+        eff = int((pre.get("capeff") or "").strip(), 16)
+    except ValueError:
+        return False, "CapEff %r unparseable" % (
+            pre.get("capeff"),)
+    if eff == 0:
+        return False, "CapEff 0, not_proven void"
+    return True, "CapEff %s, want 0" % (
+        (pre.get("capeff") or "").strip(),)
 
 
 def evaluate_scenario(name, ev):
     """Judge one scenario; return a status record.
 
-    Status is ok, fail, or (memcg only) not_proven. Checks
-    are precondition, doctor_passive, doctor_passive_exit,
-    doctor_load, doctor_load_exit, record, agreement,
-    capture, teardown; capture runs only where the table
-    gives a capture rule.
+    Status is ok, fail, or (memcg/nocaps) not_proven.
+    Checks are precondition, doctor_passive,
+    doctor_passive_exit, doctor_load, doctor_load_exit,
+    record, agreement, capture, teardown; capture runs
+    only where the table gives a capture rule.
     """
     spec = SCENARIOS.get(name)
     checks = []
@@ -723,6 +785,25 @@ def evaluate_scenario(name, ev):
         return {"name": name, "ok": False,
                 "status": "not_proven" if ok else "fail",
                 "checks": checks}
+    if name == "nocaps":
+        pre_ok, _ = check_precondition(
+            name, ev.get("precondition"),
+            ev.get("job_negatives"))
+        if not pre_ok:
+            ok, detail = _nocaps_not_proven(
+                ev.get("precondition"))
+            add("precondition", ok, detail)
+            for check_name in ("doctor_passive",
+                               "doctor_passive_exit",
+                               "doctor_load",
+                               "doctor_load_exit",
+                               "record", "agreement",
+                               "capture", "teardown"):
+                add(check_name, ok, detail,
+                    skipped=True)
+            return {"name": name, "ok": False,
+                    "status": "not_proven" if ok else "fail",
+                    "checks": checks}
     ok, detail = check_precondition(
         name, ev.get("precondition"), ev.get("job_negatives"))
     add("precondition", ok, detail)
@@ -753,6 +834,12 @@ def evaluate_scenario(name, ev):
         load = None
     if load is None:
         add("doctor_load", False, "load doctor bad")
+    elif spec["load"].get("any_enomem"):
+        ok, detail = check_memcg_load(load,
+                                      spec["load_verdict"])
+        if ok and not ev.get("load_schema"):
+            ok, detail = False, "load doctor fails schema"
+        add("doctor_load", ok, detail)
     else:
         ok, detail = check_doctor_caps(
             load, spec["load"], "load-check",
@@ -851,3 +938,20 @@ def evaluate_run(named):
                     "ok": status == "ok", "status": status,
                     "checks": checks})
     return out
+
+
+def scenarios_verdict(results):
+    """Row verdict over scenario statuses.
+
+    A row passes only with zero failures and zero
+    not-proven scenarios; not_proven never passes.
+    """
+    ok_count = sum(1 for res in results
+                   if res.get("status") == "ok")
+    np_count = sum(1 for res in results
+                   if res.get("status") == "not_proven")
+    fail_count = sum(1 for res in results
+                     if res.get("status") == "fail")
+    ok = fail_count == 0 and np_count == 0
+    return ok, "scenarios ok=%d fail=%d not_proven=%d" % (
+        ok_count, fail_count, np_count)

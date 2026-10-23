@@ -162,3 +162,11 @@ def test_kept_hook_drift_refused(field, value):
     with pytest.raises(SystemExit):
         m.apply_tracing(doc, m.LC_OBJ, m.CP_OBJ,
                         "lr", "cr", "n")
+
+
+def test_main_requires_explicit_base(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["mint_record3_profile.py"])
+    with pytest.raises(SystemExit) as exc:
+        m.main()
+    assert exc.value.code == 1
+    assert "--base DOC" in capsys.readouterr().err

@@ -324,3 +324,17 @@ def test_live_gaps_require_available_and_live_verified():
         "attempt-trace (live-verified earlier)",
         "mapping-lifecycle (profile claims support)",
         "absent-cap (absent)"]
+
+
+def test_emit_gate_profiles_requires_explicit_out(monkeypatch):
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+    path = REPO / "tools" / "emit-gate-profiles"
+    loader = SourceFileLoader("emit_gate_profiles_cli", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    monkeypatch.setattr(sys, "argv", ["emit-gate-profiles",
+                                      "ident.json",
+                                      "format.txt"])
+    assert module.main() == 2
