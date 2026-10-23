@@ -28,8 +28,8 @@ A bare carriage return before a newline is tolerated because it is
 JSON whitespace; anything else strict fails.
 
 The open FILE* closes when the stream exhausts, when the tail is
-recovered, or when the reader is destroyed, so every path — including
-error paths — releases the descriptor.
+recovered, or when the reader is destroyed, so every path - including
+error paths - releases the descriptor.
 """
 
 from std.ffi import external_call

@@ -2,8 +2,8 @@
 # Bound-reference authoring: from doctor to qualify
 
 A bound reference is a semantic profile document that names
-one exact host identity — kernel image, config, BTF,
-tracepoint format, BPF objects, and hook semantics — so
+one exact host identity - kernel image, config, BTF,
+tracepoint format, BPF objects, and hook semantics - so
 `memveil qualify` can prove that host and mint a
 machine-local `local-auto` receipt. Hosts covered by a
 shipped reference need no authoring: an unbound reference
@@ -94,7 +94,7 @@ running kernel. Recording works here with no authoring.
 The rest of this recipe covers the harder case:
 capturing evidence, computing narrow bindings, and
 authoring a bound reference for a host the shipped
-references do not cover — plus the `memveil qualify`
+references do not cover - plus the `memveil qualify`
 step that mints a machine-local `local-auto` receipt
 pinning a document to one host.
 
@@ -467,8 +467,8 @@ After `memveil qualify` mints the receipt, re-running
 `doctor` against the same profiles directory keeps
 reporting the document as explicitly bridge-unchecked
 with exit 3: the passive path performs no bridge
-binding, so only `record` and live `top` — which
-verify bridge admission at every start — admit the
+binding, so only `record` and live `top` - which
+verify bridge admission at every start - admit the
 receipt as `local-auto`. With the bound reference
 registered, privileged `doctor` now reports the
 candidate state and the next action:
@@ -513,7 +513,7 @@ bindings at every start). The refresh procedure is
 always the same: recompute the bindings from the
 new host (step 3), update the document (step 5),
 re-check its shape, and re-run `memveil qualify`
-with a new unused `--output` directory (step 7) —
+with a new unused `--output` directory (step 7) -
 never reuse the previous smoke directory. Reusing
 an output directory refuses with `output exists:
 output exists` (exit 3) before attaching, so the

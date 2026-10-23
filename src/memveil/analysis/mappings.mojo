@@ -622,9 +622,7 @@ struct MappingTracker[
                         "Bounce-to-original total exceeds u64"
                         " range; value withheld."
                     )
-        # Subset facts ride with the direction totals: a
-        # private-pool copy is still executed bytes in its
-        # direction, and a past-allocation copy still counts.
+        # Subset facts ride the direction totals: marked copies still count as executed bytes.
         if ev.copy.pool_private:
             try:
                 self._priv = checked_add(self._priv, n)
@@ -1222,8 +1220,7 @@ struct MappingTracker[
                         overlay_detail_loss,
                     )
                 )
-            # Subset rows appear only when nonzero; the private
-            # bytes stay inside the direction totals above.
+            # Subset rows appear only when nonzero, inside the direction totals.
             if self._priv_overflow:
                 out.append(
                     self._missing(

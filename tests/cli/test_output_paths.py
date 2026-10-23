@@ -5,7 +5,7 @@
 Drives the built record verb over existing dirs/files,
 symlinks, traversal spellings, absolute paths, file-parents,
 and read-only parents. Every case must refuse (exit 2 or 3)
-while the scratch tree — including a sentinel file — stays
+while the scratch tree - including a sentinel file - stays
 byte-identical: refusal happens before any filesystem
 mutation. Exits nonzero on the first failure.
 """

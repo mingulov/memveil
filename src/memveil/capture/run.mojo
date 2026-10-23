@@ -832,8 +832,8 @@ def _live_doc(doc: Profile) -> Bool:
     """True when the doc can only take the live path.
 
     Reference docs (any status but validated) whose
-    narrow note is unusable — the source carries no
-    note or the note fails to parse — never bind
+    narrow note is unusable - the source carries no
+    note or the note fails to parse - never bind
     exactly; they verify live interfaces instead.
     Docs with a parseable note never take the live
     path.

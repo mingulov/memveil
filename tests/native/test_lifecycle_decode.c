@@ -602,9 +602,7 @@ static int check_kernel_bounce_sweep(void)
     return 0;
 }
 
-/* Pin the pool geometry rule: idx = (tlb_addr - start) >>
- * 11 over a span of exactly nslabs << 11, else SHIFT when
- * the geometry disagrees and BOUNDS when the address misses. */
+/* Pin the pool geometry rule: exact nslabs span else SHIFT, address inside else BOUNDS. */
 static int check_slot_index(void)
 {
     __u64 start = 0x1000000ULL, nslabs = 512, end, idx;

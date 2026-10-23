@@ -206,8 +206,7 @@ struct LivenessTally(Movable):
         if span > _MAX_SPAN_NS:
             return -1
         var b = Int(span // LIVENESS_BUCKET_NS)
-        # start <= ts cannot wrap (b * BUCKET <= span); the
-        # end can, and a wrapped end stays out of the ring.
+        # b * BUCKET <= span cannot wrap but the end can; a wrapped end stays out of the ring.
         var start = self.t_a + UInt64(b) * LIVENESS_BUCKET_NS
         var end = start + LIVENESS_BUCKET_NS
         if end < start:

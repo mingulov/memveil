@@ -91,8 +91,8 @@ one profile document, and the exact artifacts and
 workload that produced it. Re-running `doctor` still
 reports the receipt as explicitly bridge-unchecked
 with exit 3: the passive path performs no bridge
-binding, so only `record` and live `top` — which verify
-bridge admission at every start — admit the receipt as
+binding, so only `record` and live `top` - which verify
+bridge admission at every start - admit the receipt as
 `local-auto`. Exit 3 names the exact cause (planning
 or smoke refusal, or the unchecked receipt); exit 2
 is a usage error; exit 1 is an internal failure
@@ -124,8 +124,8 @@ names receipt mismatches its passive checks can see
 only when those preceding checks pass does the receipt
 stay bridge-unchecked (doctor performs no bridge
 binding, so it cannot confirm or deny bridge drift).
-`record` re-verifies the receipt — including bridge
-admission — at every start and names the drift there,
+`record` re-verifies the receipt - including bridge
+admission - at every start and names the drift there,
 with a stale receipt losing `local-auto` admission and
 attempt-only recording falling back to partial diagnostics.
 

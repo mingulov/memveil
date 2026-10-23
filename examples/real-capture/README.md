@@ -14,9 +14,9 @@ current reader host.
 
 ## Files
 
-- `events.ndjson` — 30 `bounce_attempt` detail events and 4
+- `events.ndjson` - 30 `bounce_attempt` detail events and 4
   `counter_snapshot` aggregates (never added together).
-- `session.json` — capture envelope: window, provenance,
+- `session.json` - capture envelope: window, provenance,
   device catalog, quality. `detail` and `aggregate` are
   `complete_for_scope` with `loss_count` 0; `terminal` stays
   `partial` because settlement after detach is unproven.

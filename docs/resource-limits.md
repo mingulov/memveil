@@ -71,7 +71,7 @@ never additive totals. The `quality` lane proves each cell:
 |---|---|---|
 | loss (known count) | intact pair | detail partial with loss count; counter delta valued |
 | intact | reset/decrease | detail complete; aggregate partial, no delta |
-| loss (unknown count) | — | detail partial without loss count; counts are lower bounds |
+| loss (unknown count) | - | detail partial without loss count; counts are lower bounds |
 | gap | mapping open | live bytes withheld; completed lifetimes exclude open |
 | clean | mapping open | live bytes valued as observed; completed lifetimes null, never a leak |
 

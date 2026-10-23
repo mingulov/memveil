@@ -252,10 +252,7 @@ def _lifecycle_specs() -> List[AttachSpec]:
 
 
 def _copy_specs() -> List[AttachSpec]:
-    # swiotlb_bounce runs inside both sync directions, so the
-    # bounce entry/exit pair attaches before either sync hook;
-    # entry still precedes exit, and the armed slot still gates
-    # the fallback, which keeps recoveries exact.
+    # Both sync directions run through swiotlb_bounce, so bounce entry/exit attach first; entry precedes exit, armed slot gates recovery.
     var out = List[AttachSpec]()
     out.append(
         AttachSpec(

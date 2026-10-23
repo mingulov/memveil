@@ -53,9 +53,7 @@ int mvb_probe(void *ctx)
 char MV_LICENSE[] SEC("license") = "GPL";
 """
 
-# Exact extractor output for core_reloc_probe.bpf.c, in the
-# tool's record order (type, member or enumerator, kind; a
-# memberless record sorts before member records of its type).
+# Exact extractor output for core_reloc_probe.bpf.c, in record order; a memberless record sorts before member records of its type.
 WANT_PROBE = [
     {"type": "mvt", "kind": "type_size", "relocs": 1,
      "optional": False},
@@ -135,9 +133,7 @@ def _rec(otype, sub, kind, count):
     return rec
 
 
-# Exact copy-object relocation list once every pool, slot, and
-# alignment fact is read through relocations: each size guard
-# and each offset read appears once per inlined helper copy.
+# Exact copy-object relocation list: each size guard and offset read appears once per inlined helper copy.
 WANT_COPY_LAYOUT = [
     _rec("device", "dma_parms", "field_byte_offset", 2),
     _rec("device", "dma_parms", "field_byte_size", 2),
@@ -167,9 +163,7 @@ def _erec(tor, count):
             "optional": False}
 
 
-# Direction records once trampolines resolve the kernel enum:
-# the copy helper runs at four sites (both bounce copies plus
-# both syncs), the lifecycle hooks at two (map plus unmap).
+# Direction records: the copy helper runs at four sites (both bounce copies plus both syncs), the lifecycle hooks at two.
 WANT_COPY_ENUM = [
     _erec("DMA_BIDIRECTIONAL___mv", 4),
     _erec("DMA_FROM_DEVICE___mv", 4),
@@ -181,16 +175,11 @@ WANT_LIFECYCLE_ENUM = [
     _erec("DMA_TO_DEVICE___mv", 2),
 ]
 
-# Full copy list: sorted order puts the direction records
-# between the alignment and pool records.
+# Full copy list: sorted order puts the direction records between the alignment and pool records.
 WANT_COPY = (WANT_COPY_LAYOUT[:4] + WANT_COPY_ENUM
              + WANT_COPY_LAYOUT[4:])
 
-# Privacy records once the helper reads the allocator toggle:
-# the allocator pointer through the device view (existence
-# plus offset, no width guard on the optional path), the
-# toggle through the allocator view (both exists records are
-# optional).
+# Privacy records: the allocator pointer through the device view plus the toggle through the allocator view, no width guard on the optional path.
 WANT_COPY_MEMPTR = [
     _rec("device", "dma_io_tlb_mem", "field_byte_offset", 2),
     {"type": "device", "member": "dma_io_tlb_mem",
@@ -203,17 +192,14 @@ WANT_COPY_MEM = [
      "kind": "field_exists", "relocs": 2, "optional": True},
 ]
 
-# Sorted order puts the allocator pointer records first and
-# the toggle records ahead of the pool records.
+# Sorted order puts the allocator pointer records first and the toggle records ahead of the pool records.
 WANT_COPY = (WANT_COPY_MEMPTR + WANT_COPY[:7] + WANT_COPY_MEM
              + WANT_COPY[7:])
 
-# An immediate multiply by the 24-byte slot stride, in either
-# objdump spelling.
+# An immediate multiply by the 24-byte slot stride, in either objdump spelling.
 _STRIDE_MUL = re.compile(r"^[ \t]*(\d+):\t.*\t[wr][0-9]+ \*= (0x18|24)\s*$")
 
-# Bounce helpers with the slot math inlined, and the section
-# each disassembles from.
+# Bounce helpers with the slot math inlined, and the section each disassembles from.
 _BOUNCE_FUNCS = (("mv_bounce", "fentry/swiotlb_bounce"),
                  ("mv_bounce_exit", "fexit/swiotlb_bounce"))
 
@@ -318,8 +304,7 @@ def check_lifecycle_enum_contract(root, tool):
     return 0
 
 
-# Every trampoline program: object, symbol, section, and whether
-# it must also read its return value through the helper.
+# Every trampoline program: object, symbol, section, and whether it must also read its return value through the helper.
 _ARGCNT_PROGRAMS = (
     ("swiotlb_lifecycle.bpf.o", "mv_map_result",
      "fexit/swiotlb_tbl_map_single", True),

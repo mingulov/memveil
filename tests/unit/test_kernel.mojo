@@ -511,14 +511,7 @@ def test_copy_armed_before_open() raises:
 
 
 def test_channel_attach_order_copy_first() raises:
-    # Inner hooks attach before the outer hooks whose flows
-    # produce their events: copies execute inside map, sync,
-    # and unmap (swiotlb_bounce is called from
-    # swiotlb_tbl_map_single, __swiotlb_sync_single_for_device,
-    # __swiotlb_sync_single_for_cpu, and
-    # __swiotlb_tbl_unmap_single), so the copy channel leads
-    # and the attempt channel trails; an observed outer event
-    # then never lacks inner evidence to attach racing.
+    # Inner hooks attach before the outer hooks whose flows produce their events: copies execute inside map, sync, and unmap, so copy leads and attempt trails.
     var order = channel_attach_order()
     assert_equal(len(order), 3)
     assert_equal(order[0], 2)
@@ -527,9 +520,7 @@ def test_channel_attach_order_copy_first() raises:
 
 
 def test_channel_detach_order_attempt_first() raises:
-    # Detach runs the reverse: the outer attempt hooks leave
-    # first so no firing can outlive the inner hooks that
-    # explain it.
+    # Detach runs the reverse: outer attempt hooks leave first so no firing outlives its inner hooks.
     var order = channel_detach_order()
     assert_equal(len(order), 3)
     assert_equal(order[0], 0)
@@ -538,13 +529,7 @@ def test_channel_detach_order_attempt_first() raises:
 
 
 def test_copy_specs_attach_bounce_first() raises:
-    # R2: swiotlb_bounce is the choke point both sync
-    # directions execute through (__swiotlb_sync_single_for_device
-    # and __swiotlb_sync_single_for_cpu call it), so the
-    # bounce entry/exit pair attaches before either sync hook:
-    # a sync firing while the bounce hooks are still
-    # unattached would lose its executed-copy evidence. Every
-    # entry still precedes its exit.
+    # Bounce hooks attach before sync hooks: both sync directions run through swiotlb_bounce.
     var specs = _copy_specs()
     assert_equal(len(specs), 4)
     assert_equal(specs[0].program, String("mv_bounce"))
@@ -565,12 +550,7 @@ def test_copy_specs_attach_bounce_first() raises:
 
 
 def test_attach_rollback_reverse() raises:
-    # Under attach order [2, 1, 0], a channel-0 failure leaves
-    # 2 and 1 attached; LmbKernel.attach rolls them back in
-    # reverse completion order (1 then 2), matching detach
-    # order, so no inner hook outlives the outer attach it
-    # was armed under. Live attach needs privileges; this
-    # pins the order the rollback loop consumes.
+    # A channel-0 failure under order [2, 1, 0] rolls back 1 then 2, matching detach order; this pins the order the rollback loop consumes.
     var done = List[Int]()
     done.append(2)
     done.append(1)

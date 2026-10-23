@@ -12,7 +12,7 @@ package). Later `record` runs re-verify
 the receipt at collection start and admit grade local-auto.
 Qualify never mints grade validated and never rewrites the
 shipped profiles: selection, binding, signature, smoke,
-mint, publish — any refusal names its exact cause.
+mint, publish - any refusal names its exact cause.
 """
 
 from std.ffi import external_call

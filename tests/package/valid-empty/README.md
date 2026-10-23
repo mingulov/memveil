@@ -8,5 +8,5 @@ detail. Only the `boot_id` was replaced (host value removed);
 all other bytes are the writer's original output.
 
 Expected replay: exit 4 (terminal partial by design), detail
-`complete_for_scope` loss 0, every attempt metric `0` — visibly
+`complete_for_scope` loss 0, every attempt metric `0` - visibly
 distinct from unavailable (`null`) metrics.

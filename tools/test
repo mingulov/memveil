@@ -554,13 +554,7 @@ PYEOF
     expect_error "f4-truncated-scope-profile-partial" 2 \
         report --allow-partial \
         "$ROOT/tests/fixtures/reader/f4-truncated-scope-profile"
-    # F4: the definitive-tail scan mirrors accepted event keys in
-    # _top/_source/_observer/_scope/_data_field_known, plus the per-key
-    # JSON value shape in _type_rows. Those mirrors must equal both
-    # the _parse_* accept lists and the current event schema, in both
-    # directions, or the scan drifts from the parser. The previous
-    # schema stays frozen: only its copy keys may lag, by exactly the
-    # markers the new version adds.
+    # F4: the definitive-tail scan mirrors accepted event keys in shapes that must equal the _parse_* accept lists and the current event schema in both directions; the previous schema stays frozen except its lagging copy keys.
     if python3 - "$ROOT/src/memveil/model/event.mojo" \
         "$ROOT/schemas/event-v0.1.2.schema.json" \
         "$ROOT/schemas/event-v0.1.1.schema.json" <<'PYEOF'; then
@@ -985,8 +979,7 @@ PYEOF
         report_ok "version (memveil-0.1.0)"
     fi
 
-    # Match sonames only: resolved paths inherit the checkout
-    # directory, so a path containing "bpf" is not linkage.
+    # Match sonames only: resolved paths inherit the checkout directory, so a path containing "bpf" is not linkage.
     if ldd "$BIN" 2>/dev/null | awk '{print $1}' | grep -qi bpf; then
         report_bad "isolation: binary references bpf (native bridge leak)"
     else
@@ -1619,9 +1612,7 @@ suite_native_decode() {
     # their verdict dumps must match.
     python3 "$ROOT/tests/fixtures/lifecycle-wire/gen_corpus.py" \
         --check || return 1
-    # The CO-RE relocation set of each object is pinned: the
-    # oracle test proves the extractor, then --check proves
-    # the tracked file matches the built objects.
+    # The CO-RE relocation set of each object is pinned: the oracle test proves the extractor, then --check proves the tracked file matches the built objects.
     python3 "$ROOT/tests/bpf/test_core_relocations.py" || return 1
     "$ROOT/tools/emit-core-relocations" --check || return 1
     NATIVE="$ROOT/build/native/test_lifecycle_decode"

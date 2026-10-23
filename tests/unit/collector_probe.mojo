@@ -330,8 +330,7 @@ def _script_attachwin(dir: String):
     clock.add(UInt64(1001))
     clock.add(UInt64(1002))
     clock.add(UInt64(20000000000))
-    # Readiness stamps at the attach instant; the gap below
-    # keeps its 20s shape.
+    # Readiness stamps at the attach instant; the gap below keeps its 20s shape.
     clock.add(UInt64(20000000000))
     clock.add(UInt64(20000000001))
     clock.add(UInt64(20000000002))
@@ -712,15 +711,13 @@ def _script_drainbudget(dir: String):
     clock.add(base + UInt64(1))
     clock.add(base + UInt64(2))
     clock.add(base + UInt64(3))
-    # Duplicated base+4 feeds the readiness stamp; the latch
-    # schedule below keeps its alignment.
+    # Duplicated base+4 feeds the readiness stamp; the latch schedule below keeps its alignment.
     clock.add(base + UInt64(4))
     clock.add(base + UInt64(4))
     var latch = base + UInt64(61000000001)
     clock.add(latch)
     clock.add(latch + UInt64(1))
-    # Duplicated latch+1 feeds the detach-begin stamp; the
-    # engineered budget jump below keeps its alignment.
+    # Duplicated latch+1 feeds the detach-begin stamp; the engineered budget jump below keeps its alignment.
     clock.add(latch + UInt64(1))
     clock.add(latch + UInt64(2))
     clock.add(latch + UInt64(31000000002))
@@ -759,8 +756,7 @@ def _script_stopbudget(dir: String):
     var latch = base + UInt64(61000000001)
     clock.add(latch)
     clock.add(latch + UInt64(1))
-    # Duplicated latch+1 feeds the detach-begin stamp; the
-    # engineered six-second jump below keeps its alignment.
+    # Duplicated latch+1 feeds the detach-begin stamp; the engineered six-second jump below keeps its alignment.
     clock.add(latch + UInt64(1))
     clock.add(latch + UInt64(2))
     clock.add(latch + UInt64(6000000003))
@@ -807,8 +803,7 @@ def _script_stuckdrain(dir: String):
     clock.step = UInt64(0)
     for i in range(4):
         clock.add(base + UInt64(i))
-    # Duplicated base+4 feeds the readiness stamp; the freeze
-    # value stays base+7.
+    # Duplicated base+4 feeds the readiness stamp; the freeze value stays base+7.
     clock.add(base + UInt64(4))
     for i in range(4, 8):
         clock.add(base + UInt64(i))
@@ -1536,8 +1531,7 @@ def _script_clockseam(dir: String):
     var latch = base + UInt64(61000000001)
     clock.add(latch)
     clock.add(latch + UInt64(1))
-    # Duplicated latch+1 feeds the detach-begin stamp; the
-    # end-pair jump below keeps its alignment.
+    # Duplicated latch+1 feeds the detach-begin stamp; the end-pair jump below keeps its alignment.
     clock.add(latch + UInt64(1))
     clock.add(latch + UInt64(2))
     clock.add(latch + UInt64(3))
@@ -1586,8 +1580,7 @@ def _script_ooo100(dir: String):
     clock.add(base + UInt64(7))
     clock.add(latch)
     var tail = latch + UInt64(5)
-    # Duplicated latch+1 feeds the detach-begin stamp; the
-    # tail schedule below keeps its alignment.
+    # Duplicated latch+1 feeds the detach-begin stamp; the tail schedule below keeps its alignment.
     clock.add(latch + UInt64(1))
     clock.add(latch + UInt64(1))
     clock.add(latch + UInt64(2))

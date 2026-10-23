@@ -457,7 +457,7 @@ The shipped three-channel record and shipped-bundle rows
 are different: they run the packaged or built capture
 verbs end to end, and their PASS is the shipping
 lifecycle/copy qualification, limited to the exact tested
-artifact on the admitted profile — the bundle or built
+artifact on the admitted profile - the bundle or built
 tree whose BPF bytes match the narrow profile bindings,
 on the narrow 7.0.0-34-generic environment the profile
 names, selected in shipped mode (see

@@ -92,9 +92,7 @@ def test_orphan_copies_fire_reverse() raises:
 
 
 def test_skip_sync_unmaps_excluded() raises:
-    # Skip-sync unmaps never enter the unmap cause count: with
-    # nothing else recorded every equation stays unexercised
-    # instead of firing on the 40 excluded unmaps.
+    # Skip-sync unmaps never enter the unmap cause count: every equation stays unexercised instead of firing.
     var tally = _tally()
     for _ in range(40):
         tally.note_unmap(UInt64(4000000000), UInt16(2), True)
@@ -195,9 +193,7 @@ def test_loss_known_per_channel() raises:
 
 
 def test_edge_excess_inside_guard_never_fires() raises:
-    # Copies before R and inside the detach guard carry no
-    # reverse-equation weight: no maps exist for them, yet
-    # nothing fires.
+    # Copies before R and inside the detach guard carry no reverse-equation weight: nothing fires.
     var tally = _tally()
     for _ in range(1000):
         tally.note_copy(UInt64(2000000000), UInt16(1))
@@ -212,8 +208,7 @@ def test_edge_excess_inside_guard_never_fires() raises:
 
 
 def test_records_before_attach_ignored() raises:
-    # Scripted ktimes near 1001 precede attach: every window
-    # stays empty.
+    # Scripted ktimes near 1001 precede attach: every window stays empty.
     var tally = _tally()
     for i in range(10):
         var ts = UInt64(1001) + UInt64(i)
@@ -278,9 +273,7 @@ def test_copy_only_cpu_syncs_without_copies_silent() raises:
 
 
 def test_omitted_records_counted_as_loss() raises:
-    # Drain- and latch-omitted records are emitted but not
-    # decoded, so they arrive inside the loss terms and absorb
-    # the deficit exactly.
+    # Drain- and latch-omitted records arrive inside the loss terms and absorb the deficit exactly.
     var tally = _tally()
     for _ in range(100):
         tally.note_map(UInt64(4000000000), True)
@@ -295,8 +288,7 @@ def test_omitted_records_counted_as_loss() raises:
 
 
 def test_short_run_not_exercised() raises:
-    # t_d - GUARD <= t_r empties R: the reverse equations stay
-    # out while E1/E2f still evaluate over F.
+    # t_d - GUARD <= t_r empties R: the reverse equations stay out while E1/E2f still evaluate over F.
     var tally = _tally()
     for _ in range(5):
         tally.note_attempt(UInt64(2000000000))
@@ -318,8 +310,7 @@ def test_short_run_not_exercised() raises:
 
 
 def test_bucket_boundary_conservative() raises:
-    # The bucket straddling t_d - GUARD stays out of F: 100
-    # maps with no copies would fire if it counted.
+    # The bucket straddling t_d - GUARD stays out of F: 100 maps with no copies would fire if it counted.
     var tally = _tally()
     for _ in range(100):
         tally.note_map(UInt64(9050000000), True)
@@ -356,8 +347,7 @@ def test_counter_saturation_unverified() raises:
 
 
 def test_precedence_silent_over_unverified() raises:
-    # E1 fires on exact counters while E2r stays unverified on
-    # a saturated reverse window: silence wins.
+    # E1 fires on exact counters while E2r stays unverified on a saturated reverse window: silence wins.
     var tally = _tally()
     for _ in range(50):
         tally.note_attempt(UInt64(4000000000))

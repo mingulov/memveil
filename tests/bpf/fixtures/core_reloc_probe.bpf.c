@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
-/* Synthetic CO-RE oracle for the relocation extractor test.
- * Never loaded; compiled only to pin the extractor output
- * against one record of every relocated kind the product
- * objects use, plus a flavor-suffixed type name. */
+/* Synthetic CO-RE oracle for the extractor test: never loaded, compiled only. */
 
 #include <linux/bpf.h>
 #include <linux/types.h>

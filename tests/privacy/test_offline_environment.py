@@ -70,7 +70,7 @@ def main():
     # The dev binary links its Mojo runtime from the checkout's
     # .pixi tree; that toolchain linkage is out of scope here
     # (the packaged binary is audited separately). Everything
-    # else — network, BPF, BTF, tracefs, source opens — must
+    # else - network, BPF, BTF, tracefs, source opens - must
     # stay clean.
     scoped = [v for v in violations if "/.pixi/" not in v]
     check("trace-clean", scoped == [], "; ".join(scoped[:5]))

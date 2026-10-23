@@ -3959,9 +3959,7 @@ def test_unreadable_copy_misses_keep_attempt_count() raises:
 
 
 def test_collector_liveness_dead_copy_exit4() raises:
-    # 200 successful maps over 3s with no copies: the copy
-    # hooks never fired, so the session ends partial with a
-    # hooks-silent cause naming the map->copy equation.
+    # 200 maps over 3s with no copies: the session ends partial naming map->copy as silent.
     var vals = _live_clock_values(UInt64(1000000000), True, True)
     var attach = _live_attach(vals, True, True)
     var payloads = List[List[UInt8]]()
@@ -4023,13 +4021,7 @@ def test_collector_liveness_dead_copy_exit4() raises:
 
 
 def test_collector_liveness_healthy_verified() raises:
-    # T11-DEV1: the plan names this test healthy_exit0, but
-    # exit 0 is unreachable repo-wide today (terminal
-    # settlement is open: nothing in production observes
-    # quiescence, so stop evidence stays partial). The test
-    # pins the liveness verdict instead: matching copies
-    # verify, the capability reasons carry the suffix, and
-    # detail stays complete with zero loss.
+    # Matched copies verify with zero loss; exit stays 4 while terminal settlement is open.
     var vals = _live_clock_values(UInt64(1000000000), True, True)
     var attach = _live_attach(vals, True, True)
     var payloads = List[List[UInt8]]()
@@ -4065,9 +4057,7 @@ def test_collector_liveness_healthy_verified() raises:
 
 
 def test_copy_only_session_partial() raises:
-    # R3: a copy-only session is never complete. Without
-    # lifecycle evidence the copy hooks stay unverified even
-    # though every copy persisted cleanly.
+    # A copy-only session is never complete: lone copies stay unverified.
     var vals = _live_clock_values(UInt64(1000000000), False, True)
     var attach = _live_attach(vals, False, True)
     var payloads = List[List[UInt8]]()
@@ -4518,12 +4508,7 @@ def test_collector_liveness_busy_edges_clean() raises:
 
 
 def test_collector_liveness_size_limit_latch() raises:
-    # The size latch strands copy batches in the drain, where
-    # they are never tallied; emitted-minus-decoded absorbs
-    # them, so the forward equation stays quiet. 200+200
-    # records (~155KiB) latch the 128KiB budget with room to
-    # drain inside the 30s close budget; 400+400 strands more
-    # batches than the drain can consume and unfinalizes.
+    # 200+200 records latch the 128KiB budget with room to drain; stranded batches stay inside the loss so the forward equation stays quiet.
     var vals = _live_clock_values(UInt64(1000000000), True, True)
     var attach = _live_attach(vals, True, True)
     var payloads = List[List[UInt8]]()
@@ -4550,9 +4535,7 @@ def test_collector_liveness_size_limit_latch() raises:
 
 
 def test_scripted_old_ktimes_byte_identical() raises:
-    # Pre-attach ktimes never enter a window: this nested-copy
-    # scenario replays byte-identical with liveness on. The
-    # golden below was captured before the collector change.
+    # Pre-attach ktimes never enter a window: this nested-copy scenario replays byte-identical with liveness on.
     var payloads = List[List[UInt8]]()
     payloads.append(
         _cp_raw(2, 3, 1, UInt64(101), UInt64(1001), UInt64(4096),

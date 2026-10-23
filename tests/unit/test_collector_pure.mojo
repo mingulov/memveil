@@ -345,8 +345,7 @@ def _zero_stats(mut kernel: ScriptKernel):
 
 
 def test_ready_after_arm() raises:
-    # Readiness lands after the copy arm: attach_ns < ready_ns
-    # over strictly increasing scripted clock reads.
+    # Readiness lands after the copy arm: attach_ns < ready_ns over strictly increasing scripted clock reads.
     var tmp = _mkdtemp()
     var cfg = CollectorConfig()
     cfg.output = tmp + String("/cap")
@@ -379,9 +378,7 @@ def test_ready_after_arm() raises:
 
 
 def test_detach_begin_before_detach() raises:
-    # The close-out window opens before it ends:
-    # detach_begin_ns is the shutdown's first clock read and
-    # detach_ns a later one.
+    # The close-out window opens before it ends: detach_begin_ns is the shutdown's first clock read and detach_ns a later one.
     var tmp = _mkdtemp()
     var cfg = CollectorConfig()
     cfg.output = tmp + String("/cap")

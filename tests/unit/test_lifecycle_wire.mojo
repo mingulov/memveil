@@ -536,9 +536,7 @@ def test_effective_int64_min() raises:
 
 
 def test_effective_negative_saturation() raises:
-    # Kernel swiotlb_bounce runs alloc_size -= tlb_offset in
-    # size_t arithmetic: U64MAX + 1 wraps to a zero room, so a
-    # full-size request clamps to nothing instead of saturating.
+    # The kernel runs alloc_size -= tlb_offset in size_t arithmetic: a wrapped zero room clamps a full-size request to nothing.
     var e = effective_bytes(~UInt64(0), Int64(-1), ~UInt64(0), True)
     assert_equal(e.effective, UInt64(0))
     assert_true(e.clamped)
@@ -628,10 +626,7 @@ def test_map_bytes_overflow_raises() raises:
 
 
 def test_ledger_private_overflow_raises() raises:
-    # The private-pool subset total uses the same checked add
-    # as the direction totals: the first private note lands,
-    # the overflowing second note raises and changes nothing,
-    # and the past-allocation note counts alongside.
+    # The private-pool subset total uses the same checked add as the direction totals: overflow raises and changes nothing.
     var ledger = LifecycleLedger()
     var a = decode_copy(_cp_raw(2, 51, 1, UInt64(1), UInt64(1), ~UInt64(0), ~UInt64(0), 0))
     var b = decode_copy(_cp_raw(2, 35, 1, UInt64(2), UInt64(2), UInt64(1), UInt64(1), 0))

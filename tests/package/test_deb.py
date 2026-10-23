@@ -772,7 +772,7 @@ def _uninstall_after_failure(receipts, qcap, preexisting=frozenset(),
     Mirrors the journey's inner-finally cleanup (each
     receipt published by this run, then the qcap capture
     dir when this run created it) but ignores every error
-    — the original exception is already in flight — so a
+    - the original exception is already in flight - so a
     failed `sudo rm` cannot strand root-owned residue or
     skip `dpkg -r`. Preexisting receipts are never
     removed: install.md documents them as surviving
@@ -1168,7 +1168,7 @@ def test_install_doctor_uninstall_smoke(engine_version, tmp_path):
             # Installed discovery with zero env/flags: record
             # must resolve the system bridge and objects, then
             # refuse at a later gate (or capture on a qualified
-            # host) — never fail discovery itself.
+            # host) - never fail discovery itself.
             cap = tmp_path / "cap"
             record = run("/usr/bin/memveil", "record",
                          "--output", str(cap),

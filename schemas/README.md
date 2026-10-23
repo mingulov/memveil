@@ -183,8 +183,8 @@ work, and each is tested separately:
 1. These schema files state the contract in standard Draft 2020-12 for any
    compliant validator and for human review.
 2. `tools/validate-schemas` (Python standard library only) enforces the
-   critical subset — canonical integers with range checks, required fields,
-   size/depth bounds, session/sequence/window/identity cross-record rules —
+   critical subset - canonical integers with range checks, required fields,
+   size/depth bounds, session/sequence/window/identity cross-record rules -
    and independently recomputes the fixture's expected report. It validates
    local files only.
 3. The product reader (Mojo) strictly parses and cross-validates untrusted

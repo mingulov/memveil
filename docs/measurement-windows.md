@@ -20,14 +20,14 @@ are not part of the window and never appear in the capture.
 Stopping runs six stages in order, implemented and
 unit-tested by `src/memveil/capture/stop.mojo`:
 
-1. `readiness` — measurement ran under a proved session epoch.
-2. `admission-close` — no new writer may begin.
-3. `quiescence` — every admitted writer settled (exited its
+1. `readiness` - measurement ran under a proved session epoch.
+2. `admission-close` - no new writer may begin.
+3. `quiescence` - every admitted writer settled (exited its
    callback). This waits for BPF callbacks only.
-4. `bounded-drain` — records move to a proved transport
+4. `bounded-drain` - records move to a proved transport
    boundary within the poll budget.
-5. `counter-sample` — the final counter cut is read.
-6. `finalize` — terminal evidence is written.
+5. `counter-sample` - the final counter cut is read.
+6. `finalize` - terminal evidence is written.
 
 The scripted stop budget is 5000 ms of monotonic time,
 recorded in the evidence beside the elapsed time. The budget
@@ -49,8 +49,8 @@ carries quiescence unproven.
 `complete` requires every stage proved: admission closed,
 quiescence observed, drain reached its boundary with no BUSY
 record outstanding, and the final counter sample valid. Any
-gap — unsettled writers, a missing drain, BUSY at the
-boundary, a failed sample, or budget exhaustion — yields
+gap - unsettled writers, a missing drain, BUSY at the
+boundary, a failed sample, or budget exhaustion - yields
 `partial` with a named reason and exit 4, never a silent
 complete. A submit landing after the drain recorded its
 boundary claim is one such gap ("late submit past drain"):
@@ -117,21 +117,21 @@ budget needs an accepted contract change first.
 A partial outcome carries the first unproven
 stage, in stop order:
 
-1. `admission close failed` — the detach failed,
+1. `admission close failed` - the detach failed,
    so the close is not claimed.
-2. `quiescence unproven` — an admitted writer may
+2. `quiescence unproven` - an admitted writer may
    still be in flight.
-3. `drain missing` — no drain reached a boundary.
-4. `transport BUSY at drain` — the boundary was
+3. `drain missing` - no drain reached a boundary.
+4. `transport BUSY at drain` - the boundary was
    missed (exhausted budget, drain error,
    unreadable stats, or records still staged).
-5. `late submit past drain` — a submit landed
+5. `late submit past drain` - a submit landed
    after the boundary claim; only a later drain
    re-proves it.
-6. `final counter sample failed` — the end cut is
+6. `final counter sample failed` - the end cut is
    missing or unusable, or a re-drain invalidated
    an earlier sample.
-7. `stop budget exhausted` — close-out exceeded
+7. `stop budget exhausted` - close-out exceeded
    5000 ms with every earlier stage proved.
 
 Later stages still record their own evidence

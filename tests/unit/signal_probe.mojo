@@ -187,8 +187,7 @@ def _report_stop(coll: Collector):
 
 
 def _lclock(iters: Int) -> ScriptClock:
-    # Duplicated base+4 feeds the readiness stamp so the
-    # iteration schedule stays aligned.
+    # Duplicated base+4 feeds the readiness stamp so the iteration schedule stays aligned.
     var clock = ScriptClock()
     var base = UInt64(1000000000)
     clock.add(base)
@@ -311,8 +310,7 @@ def _mode_sigterm_run(dir: String):
     clock.add(base + UInt64(1))
     clock.add(base + UInt64(2))
     clock.add(base + UInt64(3))
-    # Duplicated base+3 feeds the readiness stamp; the freeze
-    # value is unchanged.
+    # Duplicated base+3 feeds the readiness stamp; the freeze value is unchanged.
     clock.add(base + UInt64(3))
     var signal = LiveSignalSource()
     var writer = ScriptWriter()

@@ -1259,10 +1259,7 @@ def test_snapshot_replay_equivalence() raises:
 
 
 def test_private_pool_bytes_not_exposure() raises:
-    # A private-pool copy stays inside its direction total as a
-    # subset: 4096 private + 1024 shared aggregate to 5120, the
-    # private 4096 is named as a pool subset, and no metric
-    # frames pool placement as exposure.
+    # A private-pool copy stays inside its direction total as a named subset; no metric frames pool placement as exposure.
     var t = MappingTracker()
     t.consume(_attempt("op1", "d1", UInt64(1)))
     var priv = _copy(
@@ -1286,9 +1283,7 @@ def test_private_pool_bytes_not_exposure() raises:
 
 
 def test_offset_past_count() raises:
-    # Copies whose offset ran past the allocation count
-    # separately while their bytes stay in the direction
-    # totals; the private subset stays absent at zero.
+    # Past-allocation copies count separately while their bytes stay in the direction totals; the private subset stays absent at zero.
     var t = MappingTracker()
     t.consume(_attempt("op1", "d1", UInt64(1)))
     var first = _copy(
@@ -1323,8 +1318,7 @@ def test_offset_past_count() raises:
 
 
 def test_split_metrics_absent_when_zero() raises:
-    # Plain copies emit exactly the legacy metric set: the
-    # subset rows appear only when nonzero.
+    # Plain copies emit exactly the legacy metric set: subset rows appear only when nonzero.
     var t = MappingTracker()
     t.consume(_attempt("op1", "d1", UInt64(1)))
     t.consume(
