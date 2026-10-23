@@ -137,11 +137,36 @@ def run_validator(export):
             timeout=CAPTURE_TIMEOUT)
     except subprocess.TimeoutExpired:
         out = "validate-schemas timed out"
-        Path(export, "validate.txt").write_text(out + "\n")
-        return 99, out
+        return 99, out + _write_transcript(export, out)
     out = ((proc.stdout or "") + (proc.stderr or "")).strip()
-    Path(export, "validate.txt").write_text(out + "\n")
-    return proc.returncode, out[-2000:]
+    return proc.returncode, \
+        out[-2000:] + _write_transcript(export, out)
+
+
+def _write_transcript(export, out):
+    try:
+        Path(export, "validate.txt").write_text(out + "\n")
+    except OSError as exc:
+        return "\n[transcript unwritten: %s]" % exc
+    return ""
+
+
+def chown_guest_tree(path):
+    """Chown one guest-written tree to us, or an error.
+
+    Guest files land root-owned through sudo vng; the
+    host must own the busy tree before it writes the
+    validate transcript, the events summary, and the
+    post-evaluation unlink.
+    """
+    proc = subprocess.run(
+        ["sudo", "-n", "chown", "-R",
+         "%d:%d" % (os.getuid(), os.getgid()), path],
+        capture_output=True, text=True)
+    if proc.returncode != 0:
+        return (proc.stderr or "").strip() or \
+            "chown rc=%d" % proc.returncode
+    return None
 
 
 def gather_persisted(export):
@@ -277,6 +302,9 @@ def collect_one(entry, export, tools, dd_count, elapsed, run_id,
         ev["udev_out"] = read_text(
             os.path.join(export, "udev.out"))
         busy = os.path.join(export, "busy")
+        busy_chown_error = None
+        if os.path.isdir(busy):
+            busy_chown_error = chown_guest_tree(busy)
         ev["busy_record_exit"] = read_text(
             os.path.join(busy, "record.exit"))
         ev["busy_times_text"] = read_text(
@@ -320,6 +348,8 @@ def collect_one(entry, export, tools, dd_count, elapsed, run_id,
             os.path.join(export, "busy"))
         rec["busy_events"] = summary if summary is not None \
             else {"error": error}
+        if busy_chown_error:
+            rec["busy_chown_error"] = busy_chown_error
     rec["elapsed"] = round(elapsed, 1)
     rec["run_id"] = run_id
     rec["timeout"] = bool(timeout)

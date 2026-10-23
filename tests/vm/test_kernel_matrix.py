@@ -3676,6 +3676,23 @@ def test_collect_one_crash_fails_row_closed(tmp_path,
     assert "crash" in rec["detail"]
 
 
+def test_run_validator_transcript_unwritable(tmp_path,
+                                              monkeypatch):
+    tool = _tool_module()
+    export = tmp_path / "row"
+    cap = export / "cap"
+    cap.mkdir(parents=True)
+    (cap / "session.json").write_text("{}")
+    (cap / "events.ndjson").write_text("")
+
+    def boom(self, *args, **kwargs):
+        raise OSError("synthetic unwritable")
+
+    monkeypatch.setattr(tool.Path, "write_text", boom)
+    rc, out = tool.run_validator(str(export))
+    assert "transcript unwritten" in out
+
+
 def test_release_agrees_rejects_rc_mismatch():
     assert not km.release_agrees_with_upstream(
         "7.3.0-070300rc5-generic", "7.3-rc3")
