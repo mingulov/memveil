@@ -2862,8 +2862,13 @@ struct Collector:
         if self.rec_has_detail:
             var parts = List[UInt64]()
             if is_copy:
-                # Exit-only misses lose no record; unrecovered deferrals charge below.
-                parts.append(self.rec_bounce)
+                # Entry misses and deferrals lose a record unless the exit recovered it.
+                if self.rec_bounce > top - self.rec_deferred:
+                    return (UInt64(0), False)
+                var have = self.rec_bounce + self.rec_deferred
+                if self.rec_recovered > have:
+                    return (UInt64(0), False)
+                parts.append(have - self.rec_recovered)
                 parts.append(self.rec_sync_device)
                 parts.append(self.rec_sync_cpu)
             else:
@@ -2902,8 +2907,8 @@ struct Collector:
         stay inside the observed term by construction: they
         were observed but never tallied. Skipped program runs
         never observe, so per-channel misses join the loss;
-        the copy channel also charges deferred-minus-recovered
-        entries, which neither path ever observed.
+        the copy channel nets entry misses plus deferrals
+        minus exit recoveries, which neither path observed.
         """
         if not has_cut:
             return (UInt64(0), False)
@@ -2932,13 +2937,6 @@ struct Collector:
         if base > top - misses[0]:
             return (UInt64(0), False)
         var loss = base + misses[0]
-        if is_copy:
-            if self.rec_recovered > self.rec_deferred:
-                return (UInt64(0), False)
-            var fb = self.rec_deferred - self.rec_recovered
-            if loss > top - fb:
-                return (UInt64(0), False)
-            loss += fb
         return (loss, True)
 
     def _liveness_verdict(self) -> LivenessVerdict:

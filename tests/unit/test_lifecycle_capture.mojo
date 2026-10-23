@@ -4342,6 +4342,101 @@ def test_collector_liveness_fallback_exact() raises:
     )
 
 
+def _run_copy_liveness(
+    n_cp: Int, cut_cp: UInt64, misses: MissOut
+) raises -> CaseOut:
+    # 100 lifecycle maps plus n_cp copies against a cut_cp copy cut.
+    var vals = _live_clock_values(UInt64(1000000000), True, True)
+    var attach = _live_attach(vals, True, True)
+    var payloads = List[List[UInt8]]()
+    for i in range(100):
+        payloads.append(
+            _lc_raw(1, 1, 1, UInt64(9100 + i),
+                    attach + UInt64(i) * UInt64(30000000),
+                    UInt64(4096), UInt64(9100 + i)))
+    for i in range(n_cp):
+        payloads.append(
+            _cp_raw(2, 3, 1, UInt64(9300 + i),
+                    attach + UInt64(i) * UInt64(30000000),
+                    UInt64(4096), UInt64(4096), 0))
+    return _run_live(
+        payloads^, vals^, _zero_cut(),
+        _cut(UInt64(100), UInt64(409600), UInt64(100),
+             UInt64(409600)), UInt64(100),
+        _cut(cut_cp, cut_cp * UInt64(4096), cut_cp,
+             cut_cp * UInt64(4096)), cut_cp,
+        duration_s=UInt64(3600),
+        misses=misses.copy())
+
+
+def test_collector_liveness_exit_recovered_misses_verify() raises:
+    # E=10 D=0 R=10 with every copy emitted: the exit recovered
+    # the entry-probe misses, so the copy loss is provably zero.
+    var c = _run_copy_liveness(
+        100, UInt64(100),
+        _detail_misses(UInt64(10), UInt64(0), UInt64(10)))
+    assert_equal(c.exit_code, 4)
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"detail":{"status":"complete_for_scope",'
+                '"loss_count":"0",'
+            ),
+        )
+    )
+    assert_true(
+        _contains(c.session, String("; liveness verified"))
+    )
+    assert_true(
+        not _contains(c.session, String("liveness unverified"))
+    )
+    assert_true(not _contains(c.session, String("hooks silent")))
+
+
+def test_collector_liveness_exit_recovered_misses_expose_gap() raises:
+    # E=10 D=0 R=10 with 20 copies missing: the counters explain
+    # nothing, so map->copy reads hooks silent with unknown loss.
+    var c = _run_copy_liveness(
+        80, UInt64(80),
+        _detail_misses(UInt64(10), UInt64(0), UInt64(10)))
+    assert_equal(c.exit_code, 4)
+    assert_true(
+        _contains(
+            c.session, String("hooks silent: map->copy (100 > 80)")
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":null,'),
+        )
+    )
+
+
+def test_collector_liveness_partial_exit_recovery_charges_loss() raises:
+    # E=10 D=0 R=6: four copies truly lost, charged as known loss.
+    var c = _run_copy_liveness(
+        96, UInt64(96),
+        _detail_misses(UInt64(10), UInt64(0), UInt64(6)))
+    assert_equal(c.exit_code, 4)
+    assert_true(
+        _contains(
+            c.session,
+            String('"detail":{"status":"partial","loss_count":"4",'),
+        )
+    )
+    assert_true(
+        _contains(c.session, String("recursion_missed=(4)"))
+    )
+    assert_true(
+        _contains(c.session, String("; liveness verified"))
+    )
+    assert_true(
+        not _contains(c.session, String("liveness unverified"))
+    )
+
+
 def test_collector_liveness_unreadable_misses_unverified() raises:
     # Without the miss counters the gap is unprovable: unverified, not silent.
     var vals = _live_clock_values(UInt64(1000000000), True, True)
