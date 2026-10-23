@@ -12,7 +12,7 @@ mkdir -p "$GATE"
 
 # Every generated tree; later tasks extend this list alongside
 # their variants. Only these directories are ever removed.
-VARIANTS="base ftrace-off ftrace-denied ftrace-malformed aff-dup aff-module aff-clone aff-prefix debugfs-root debug-denied lockdown-conf lockdown-integrity lockdown-nosecfs lockdown-dashdash lockdown-config lockdown-nolsm lockdown-forcenone lockdown-twobrackets lockdown-bogus lockdown-denied notracing-config notracing-bpfevents tracefs-noevents tracefs-noevents-nolock tracefs-unmounted tracefs-hidden tracefs-gone events-denied btf-absent-config btf-absent-unknown btf-not-visible btf-denied btf-split btf-truncated sig-rename sig-swap sig-width hook-absent hook-not-in-btf hook-clone hook-module hook-nokallsyms denied-all container-view format-denied id-absent cc-flags-nonode cc-tdx-nonode cc-flags-host cc-tsm caps-none caps-bpf-perfmon caps-sysadmin caps-malformed caps-short caps-userns memcg-small memcg-ancestor memcg-malformed memcg-huge memcg-empty memcg-v1 memcg-root unpriv-bpf swiotlb-noforce swiotlb-inactive swiotlb-noslabs swiotlb-debugonly swiotlb-active"
+VARIANTS="base ftrace-off ftrace-denied ftrace-malformed aff-dup aff-module aff-clone aff-prefix debugfs-root debug-denied lockdown-conf lockdown-integrity lockdown-nosecfs lockdown-dashdash lockdown-config lockdown-nolsm lockdown-forcenone lockdown-twobrackets lockdown-bogus lockdown-denied notracing-config notracing-bpfevents tracefs-noevents tracefs-noevents-nolock tracefs-unmounted tracefs-hidden tracefs-gone events-denied btf-absent-config btf-absent-unknown btf-not-visible btf-denied btf-split btf-truncated sig-rename sig-swap sig-width hook-absent hook-not-in-btf hook-clone hook-module hook-nokallsyms denied-all container-view format-denied id-absent cc-flags-nonode cc-tdx-nonode cc-flags-host cc-tsm cc-snp-vmpl cc-snp-vmpl-tdx cc-snp-vmpl-bad cc-vmpl-nonode cc-vmpl-denied-nonode caps-none caps-bpf-perfmon caps-sysadmin caps-malformed caps-short caps-userns memcg-small memcg-ancestor memcg-malformed memcg-huge memcg-empty memcg-v1 memcg-root unpriv-bpf swiotlb-noforce swiotlb-inactive swiotlb-noslabs swiotlb-debugonly swiotlb-active"
 for v in $VARIANTS; do
   rm -rf "$GATE/$v"
 done
@@ -310,6 +310,45 @@ mkdir -p "$GATE/cc-tsm/sys/kernel/config/tsm/report"
 # Git skips empty dirs; keep the TSM-present marker tracked.
 touch "$GATE/cc-tsm/sys/kernel/config/tsm/report/.keep"
 
+mk cc-snp-vmpl
+write_gate_cpuinfo "$GATE/cc-snp-vmpl/proc/cpuinfo" \
+  " hypervisor"
+mkdir -p "$GATE/cc-snp-vmpl/dev" \
+  "$GATE/cc-snp-vmpl/sys/devices/system/cpu/sev"
+printf '' > "$GATE/cc-snp-vmpl/dev/sev-guest"
+printf '0\n' > "$GATE/cc-snp-vmpl/sys/devices/system/cpu/sev/vmpl"
+
+mk cc-snp-vmpl-tdx
+write_gate_cpuinfo "$GATE/cc-snp-vmpl-tdx/proc/cpuinfo" \
+  " tdx_guest hypervisor"
+mkdir -p "$GATE/cc-snp-vmpl-tdx/dev" \
+  "$GATE/cc-snp-vmpl-tdx/sys/devices/system/cpu/sev"
+printf '' > "$GATE/cc-snp-vmpl-tdx/dev/sev-guest"
+printf '0\n' > "$GATE/cc-snp-vmpl-tdx/sys/devices/system/cpu/sev/vmpl"
+
+mk cc-snp-vmpl-bad
+write_gate_cpuinfo "$GATE/cc-snp-vmpl-bad/proc/cpuinfo" \
+  " hypervisor"
+mkdir -p "$GATE/cc-snp-vmpl-bad/dev" \
+  "$GATE/cc-snp-vmpl-bad/sys/devices/system/cpu/sev"
+printf '' > "$GATE/cc-snp-vmpl-bad/dev/sev-guest"
+printf 'x\n' > "$GATE/cc-snp-vmpl-bad/sys/devices/system/cpu/sev/vmpl"
+
+mk cc-vmpl-nonode
+write_gate_cpuinfo "$GATE/cc-vmpl-nonode/proc/cpuinfo" \
+  " hypervisor"
+mkdir -p "$GATE/cc-vmpl-nonode/sys/devices/system/cpu/sev"
+printf '0\n' > "$GATE/cc-vmpl-nonode/sys/devices/system/cpu/sev/vmpl"
+
+mk cc-vmpl-denied-nonode
+write_gate_cpuinfo "$GATE/cc-vmpl-denied-nonode/proc/cpuinfo" \
+  " hypervisor"
+mkdir -p "$GATE/cc-vmpl-denied-nonode/sys/devices/system/cpu/sev"
+printf '0\n' > "$GATE/cc-vmpl-denied-nonode/sys/devices/system/cpu/sev/vmpl"
+chmod 0000 "$GATE/cc-vmpl-denied-nonode/sys/devices/system/cpu/sev/vmpl"
+printf 'denied=/sys/devices/system/cpu/sev/vmpl\n' \
+  >> "$GATE/cc-vmpl-denied-nonode/meta.txt"
+
 mk caps-none
 sed -i 's/^CapEff:.*/CapEff:\t0000000000000000/' \
   "$GATE/caps-none/proc/self/status"
@@ -391,4 +430,4 @@ mkdir -p "$GATE/swiotlb-active/sys/kernel/debug/swiotlb"
 printf '256\n' \
   > "$GATE/swiotlb-active/sys/kernel/debug/swiotlb/io_tlb_nslabs"
 
-echo "wrote $GATE (base plus 67 variants)"
+echo "wrote $GATE (base plus 73 variants)"

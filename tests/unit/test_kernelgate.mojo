@@ -695,6 +695,84 @@ def test_cc_flags_without_node() raises:
     assert_true(found_tsm)
 
 
+def test_cc_sev_vmpl_affirms_snp() raises:
+    var vmpl = detect_environment(
+        open_evidence_reader(gate(String("cc-snp-vmpl")))
+    )
+    assert_equal(vmpl.guest.tech, String("snp"))
+    assert_equal(vmpl.guest.conflict, String(""))
+    var found_vmpl = False
+    for i in range(len(vmpl.guest.signals)):
+        if vmpl.guest.signals[i] == String("sev-vmpl:0"):
+            found_vmpl = True
+    assert_true(found_vmpl)
+    var tdx = detect_environment(
+        open_evidence_reader(gate(String("cc-snp-vmpl-tdx")))
+    )
+    assert_equal(tdx.guest.tech, String("unknown"))
+    assert_equal(
+        tdx.guest.conflict,
+        String(
+            "sev-guest node present with tdx_guest cpu flag"
+        ),
+    )
+    var bad = detect_environment(
+        open_evidence_reader(gate(String("cc-snp-vmpl-bad")))
+    )
+    assert_equal(bad.guest.tech, String("unknown"))
+    assert_equal(
+        bad.guest.conflict,
+        String(
+            "sev-guest node present but cpu flags lack sev"
+        ),
+    )
+    var found_bad = False
+    for i in range(len(bad.guest.signals)):
+        if bad.guest.signals[i] == String(
+            "sev-vmpl:malformed"
+        ):
+            found_bad = True
+    assert_true(found_bad)
+    var nonode = detect_environment(
+        open_evidence_reader(gate(String("cc-vmpl-nonode")))
+    )
+    assert_equal(nonode.guest.tech, String("unknown"))
+    assert_true(nonode.guest.tech != String("ordinary"))
+    assert_equal(
+        nonode.guest.conflict,
+        String(
+            "sev vmpl node present without sev-guest node:"
+            " SNP guest with attestation device absent"
+        ),
+    )
+    var found_nonode = False
+    for i in range(len(nonode.guest.signals)):
+        if nonode.guest.signals[i] == String("sev-vmpl:0"):
+            found_nonode = True
+    assert_true(found_nonode)
+    var denied = detect_environment(
+        open_evidence_reader(
+            gate(String("cc-vmpl-denied-nonode"))
+        )
+    )
+    assert_equal(denied.guest.tech, String("unknown"))
+    assert_true(denied.guest.tech != String("ordinary"))
+    assert_equal(
+        denied.guest.conflict,
+        String(
+            "sev vmpl node present without sev-guest node:"
+            " SNP guest with attestation device absent"
+        ),
+    )
+    var found_denied = False
+    for i in range(len(denied.guest.signals)):
+        if denied.guest.signals[i] == String(
+            "sev-vmpl:denied"
+        ):
+            found_denied = True
+    assert_true(found_denied)
+
+
 def test_attempt_loss_exact() raises:
     assert_true(not attempt_loss_exact(String("6.6.160")))
     assert_true(attempt_loss_exact(String("6.7.0")))
@@ -740,6 +818,7 @@ def run() raises -> Int:
     suite.test[test_remedy_per_code]()
     suite.test[test_remedy_hook_btf_split]()
     suite.test[test_cc_flags_without_node]()
+    suite.test[test_cc_sev_vmpl_affirms_snp]()
     suite.test[test_attempt_loss_exact]()
     suite.test[test_attempt_loss_evidence]()
     suite^.run()

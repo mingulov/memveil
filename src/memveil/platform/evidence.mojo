@@ -28,6 +28,12 @@ sources in ``signals``:
   technology tokens without any node do not contradict the
   absence inference: CPUID feature bits are leakable by the
   hypervisor, so flags alone never assert.
+- The SNP-only ``sev/vmpl`` sysfs node is the kernel's own SNP
+  proof: with a sev-guest node but flags that lack ``sev``,
+  vmpl content ``0``..``3`` affirms snp, while denied or
+  malformed content keeps the conflict. With no guest node at
+  all, a readable or denied vmpl node means unknown plus a
+  conflict, never ordinary.
 - Denied nodes or cpuinfo mean unknown, and the path lands in
   ``denied_paths`` so a privilege restriction reads differently
   from an absent kernel feature.
@@ -59,9 +65,11 @@ comptime P_CONFIG_GZ = "/proc/config.gz"
 comptime P_SEV_NODE = "/dev/sev-guest"
 comptime P_TDX_NODE = "/dev/tdx_guest"
 comptime P_TSM_REPORT = "/sys/kernel/config/tsm/report"
+comptime P_SEV_VMPL = "/sys/devices/system/cpu/sev/vmpl"
 comptime P_BOOT_CONFIG_PREFIX = "/boot/config-"
 
 comptime _CPUINFO_CAP = 1048576
+comptime _VMPL_CAP = 64
 comptime _OS_RELEASE_CAP = 65536
 comptime _BTF_CAP = MAX_KERNEL_BTF_BYTES
 comptime _TRIPLE_BOUND = 2147483647
@@ -399,6 +407,63 @@ def _release_path_safe(release: String) -> Bool:
     return True
 
 
+def _is_vmpl_space(b: UInt8) -> Bool:
+    """True for ASCII whitespace around the vmpl level."""
+    return (
+        b == UInt8(0x20)
+        or b == UInt8(0x09)
+        or b == UInt8(0x0A)
+        or b == UInt8(0x0D)
+    )
+
+
+def _vmpl_signal(reader: EvidenceReader) -> String:
+    """One vmpl evidence signal, or ``""`` when absent.
+
+    The kernel prints one decimal level plus a newline; the
+    trimmed content must be exactly ``0``..``3`` within 8
+    bytes, else ``sev-vmpl:malformed``. Denied stays
+    explicit; a read error is malformed, never absent.
+    """
+    var st = file_state(reader, P_SEV_VMPL)
+    if st == EVIDENCE_ABSENT:
+        return String("")
+    if st == EVIDENCE_DENIED:
+        return String("sev-vmpl:denied")
+    var raw: List[UInt8]
+    try:
+        raw = read_evidence(reader, P_SEV_VMPL, _VMPL_CAP)
+    except:
+        return String("sev-vmpl:malformed")
+    if len(raw) == 0 or len(raw) > 8:
+        return String("sev-vmpl:malformed")
+    var lo = 0
+    var hi = len(raw)
+    while lo < hi and _is_vmpl_space(raw[lo]):
+        lo += 1
+    while hi > lo and _is_vmpl_space(raw[hi - 1]):
+        hi -= 1
+    if hi - lo != 1:
+        return String("sev-vmpl:malformed")
+    var d = raw[lo]
+    if d == UInt8(48):
+        return String("sev-vmpl:0")
+    if d == UInt8(49):
+        return String("sev-vmpl:1")
+    if d == UInt8(50):
+        return String("sev-vmpl:2")
+    if d == UInt8(51):
+        return String("sev-vmpl:3")
+    return String("sev-vmpl:malformed")
+
+
+def _vmpl_is_level(sig: String) -> Bool:
+    """True for a ``sev-vmpl:<n>`` level signal."""
+    return sig.startswith(String("sev-vmpl:")) and (
+        sig.byte_length() == 10
+    )
+
+
 def _detect_guest(reader: EvidenceReader) -> GuestInfo:
     """Decide the guest technology from nodes, flags, and assertion.
 
@@ -425,6 +490,7 @@ def _detect_guest(reader: EvidenceReader) -> GuestInfo:
     var tsm = file_state(reader, P_TSM_REPORT)
     if tsm != EVIDENCE_ABSENT:
         signals.append(String("tsm:present"))
+    var vmpl_sig = _vmpl_signal(reader)
     var cpu = file_state(reader, P_CPUINFO)
     var flags_ok = False
     var has_sev = False
@@ -479,8 +545,13 @@ def _detect_guest(reader: EvidenceReader) -> GuestInfo:
             tech = "snp"
         elif has_sev:
             tech = "sev-classic"
+        elif _vmpl_is_level(vmpl_sig):
+            tech = "snp"
+            signals.append(vmpl_sig.copy())
         else:
             conflict = "sev-guest node present but cpu flags lack sev"
+            if vmpl_sig != String(""):
+                signals.append(vmpl_sig.copy())
     elif tdx == EVIDENCE_OK:
         if not flags_ok:
             conflict = ""
@@ -493,7 +564,14 @@ def _detect_guest(reader: EvidenceReader) -> GuestInfo:
                 "tdx-guest node present but cpu flags lack tdx_guest"
             )
     else:
-        if flags_ok:
+        if vmpl_sig != String(""):
+            tech = "unknown"
+            conflict = (
+                "sev vmpl node present without sev-guest node:"
+                " SNP guest with attestation device absent"
+            )
+            signals.append(vmpl_sig.copy())
+        elif flags_ok:
             if has_hypervisor and has_snp:
                 tech = "unknown"
                 conflict = (
