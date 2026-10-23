@@ -1520,6 +1520,9 @@ def check_doctor_v011(obj):
         seen.add(cap["id"])
         check_enum(cap["status"], DOCTOR_STATUSES_V011,
                    "doctor.cap[].status")
+        if obj["mode"] == "passive" and cap["status"] == "available":
+            fail("bad-status",
+                 "passive doctor must not report available")
         check_text(cap["reason"], 512, "doctor.cap[].reason",
                    allow_empty=True)
         if "remedy" in cap:
@@ -1581,6 +1584,8 @@ def check_doctor_v011(obj):
     check_enum(obj["verdict"],
                ("ready", "ready-load-unchecked", "unavailable"),
                "doctor.verdict")
+    if obj["mode"] == "passive" and obj["verdict"] == "ready":
+        fail("bad-status", "passive doctor must not report ready")
     check_text(obj["summary"], 1024, "doctor.summary", allow_empty=True)
 
 
@@ -2010,6 +2015,35 @@ def run_selftest():
     results.append(expect_reject("doctor-v011-bad-reason-code",
                                  doctor_v011_reject_code,
                                  "bad-enum"))
+
+    def doctor_v011_reject_passive_available():
+        obj = _doctor_v011_ok()
+        obj["capabilities"][0]["status"] = "available"
+        check_doctor_v011(obj)
+
+    results.append(expect_reject("doctor-v011-passive-available",
+                                 doctor_v011_reject_passive_available,
+                                 "bad-status"))
+
+    def doctor_v011_reject_passive_ready():
+        obj = _doctor_v011_ok()
+        obj["verdict"] = "ready"
+        check_doctor_v011(obj)
+
+    results.append(expect_reject("doctor-v011-passive-ready",
+                                 doctor_v011_reject_passive_ready,
+                                 "bad-status"))
+
+    def doctor_v011_loadcheck_available():
+        obj = _doctor_v011_ok()
+        obj["mode"] = "load-check"
+        obj["capabilities"][0]["status"] = "available"
+        obj["verdict"] = "ready"
+        check_doctor_v011(obj)
+        return "load-check may report available/ready"
+
+    check("doctor-v011-loadcheck-available",
+          doctor_v011_loadcheck_available)
 
     def _receipt_ok():
         digest = "sha256:" + "ab" * 32
