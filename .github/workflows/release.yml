@@ -6,9 +6,10 @@
 # the owner bundle, the .deb, and the .rpm from the clean
 # tag tree, re-verifies each artifact through its own lane,
 # and uploads the set plus a sha256 file to the tag's
-# GitHub Release. Dispatch runs build everything but
-# publish nothing. Rollback is a new tag; a rerun of the
-# same tag replaces its uploaded files.
+# GitHub Release. Dispatch runs build everything, keep the
+# set as a workflow artifact and publish nothing; both refuse
+# a packaged binary other than the tested one. Rollback is a
+# new tag; a rerun of the same tag replaces its uploaded files.
 name: release
 
 on:
@@ -113,6 +114,33 @@ jobs:
           sha256sum memveil-*.tar.gz memveil_*.deb memveil-*.rpm \
             > SHA256SUMS.txt
           cat SHA256SUMS.txt
+      - name: Packaged binary identity
+        run: |
+          X="$(mktemp -d)"
+          dpkg-deb -x dist/memveil_*-1_amd64.deb "$X"
+          (cd "$X" && sha256sum usr/bin/memveil usr/lib/memveil/*.bpf.o) \
+            | tee dist/PACKAGED-SHA256.txt
+      - name: Upload dry-run artifacts
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: release-dry-run
+          path: |
+            dist/memveil-*.tar.gz
+            dist/memveil_*.deb
+            dist/memveil-*.rpm
+            dist/SHA256SUMS.txt
+            dist/PACKAGED-SHA256.txt
+          if-no-files-found: error
+      # Only the binary the kernel matrix ran may ship; its hash is pinned in the release notes.
+      - name: Packaged binary is the tested one
+        run: |
+          WANT="$(python3 -c "import re; print(re.search(r'binary sha256\s+\x60([0-9a-f]{64})\x60', open('docs/release-notes.md').read()).group(1))")"
+          GOT="$(awk '$2 == "usr/bin/memveil" {print $1}' dist/PACKAGED-SHA256.txt)"
+          if [ "$GOT" != "$WANT" ]; then
+            echo "packaged binary $GOT is not the tested binary $WANT" >&2
+            exit 1
+          fi
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         env:
