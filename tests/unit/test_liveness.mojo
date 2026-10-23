@@ -145,6 +145,35 @@ def test_unknown_loss_unverified() raises:
     assert_equal(v.detail, String("100 > 100"))
 
 
+def test_channel_rollup_forward_only() raises:
+    # Maps in F with copies outside R verify the copy channel alone.
+    var tally = _tally()
+    for _ in range(50):
+        tally.note_map(UInt64(4000000000), True)
+    for _ in range(50):
+        tally.note_copy(UInt64(2000000000), UInt16(1))
+    var v = evaluate_liveness(
+        tally, _td(), True, True, True, _loss(UInt64(0), UInt64(0))
+    )
+    assert_equal(v.state, String("verified"))
+    assert_equal(v.lc, String("not_exercised"))
+    assert_equal(v.cp, String("verified"))
+
+
+def test_channel_rollup_silent_copy() raises:
+    # Maps with no copies silence only the copy channel.
+    var tally = _tally()
+    for _ in range(50):
+        tally.note_map(UInt64(4000000000), True)
+    var v = evaluate_liveness(
+        tally, _td(), True, True, True, _loss(UInt64(0), UInt64(0))
+    )
+    assert_equal(v.state, String("hooks_silent"))
+    assert_equal(v.equation, String("map->copy"))
+    assert_equal(v.lc, String("not_exercised"))
+    assert_equal(v.cp, String("hooks_silent"))
+
+
 def test_loss_known_per_channel() raises:
     # Lifecycle known with copy unknown: E1 verifies while E2f stays out.
     var tally = _tally()
@@ -359,6 +388,8 @@ def run() raises -> Int:
     suite.test[test_loss_absorbs_deficit]()
     suite.test[test_unknown_loss_unverified]()
     suite.test[test_loss_known_per_channel]()
+    suite.test[test_channel_rollup_forward_only]()
+    suite.test[test_channel_rollup_silent_copy]()
     suite.test[test_edge_excess_inside_guard_never_fires]()
     suite.test[test_records_before_attach_ignored]()
     suite.test[test_copy_without_lifecycle_unverified]()

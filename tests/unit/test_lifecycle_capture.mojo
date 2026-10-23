@@ -3904,6 +3904,41 @@ def test_collector_liveness_dead_copy_exit4() raises:
             String('"detail":{"status":"partial","loss_count":null,'),
         )
     )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"copy_bytes":{"status":"partial",'
+                '"reason":"capture ok, 0 copy events persisted; '
+                'admitted under test-profile-1; v1 copy wire '
+                'carries no mapping identity; liveness hooks silent"'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"sync_requests":{"status":"partial",'
+                '"reason":"capture ok, 0 sync_request events '
+                'persisted; admitted under test-profile-1; v1 copy '
+                'wire carries no mapping identity; '
+                'liveness hooks silent"'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"mapping_lifecycle":{"status":"partial",'
+                '"reason":"capture ok, 200 map_result/unmap '
+                'events persisted; admitted under '
+                'test-profile-1; v2 wire reports opaque mapping '
+                'generations when observed"'
+            ),
+        )
+    )
 
 
 def test_collector_liveness_healthy_verified() raises:
@@ -4222,6 +4257,85 @@ def test_collector_liveness_detail_error_unverified() raises:
     assert_true(not _contains(c.session, String("hooks silent")))
     assert_true(
         _contains(c.session, String("liveness unverified"))
+    )
+
+
+def test_collector_liveness_forward_only_suffixes_copy() raises:
+    # Copies outside R verify only the copy channel; lifecycle stays bare.
+    var vals = _live_clock_values(UInt64(1000000000), True, True)
+    var attach = _live_attach(vals, True, True)
+    var ready = attach + UInt64(100000000)
+    var detach_begin = UInt64(21300000007)
+    var payloads = List[List[UInt8]]()
+    for i in range(50):
+        payloads.append(
+            _lc_raw(1, 1, 1, UInt64(9400 + i),
+                    attach + UInt64(2000000000)
+                    + UInt64(i) * UInt64(40000000),
+                    UInt64(4096), UInt64(9400 + i)))
+    for i in range(25):
+        payloads.append(
+            _cp_raw(2, 3, 1, UInt64(9500 + i),
+                    ready + UInt64(25000000)
+                    + UInt64(i) * UInt64(35000000),
+                    UInt64(4096), UInt64(4096), 0))
+    for i in range(25):
+        payloads.append(
+            _cp_raw(2, 3, 1, UInt64(9600 + i),
+                    detach_begin - UInt64(25000000)
+                    - UInt64(i) * UInt64(35000000),
+                    UInt64(4096), UInt64(4096), 0))
+    var c = _run_live(
+        payloads^, vals^, _zero_cut(),
+        _cut(UInt64(50), UInt64(204800), UInt64(50),
+             UInt64(204800)), UInt64(50),
+        _cut(UInt64(50), UInt64(204800), UInt64(50),
+             UInt64(204800)), UInt64(50),
+        duration_s=UInt64(3600))
+    assert_equal(c.exit_code, 4)
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"source":"detach_ns","interpretation":"21400000007"'
+            ),
+        )
+    )
+    assert_true(not _contains(c.session, String("hooks silent")))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"copy_bytes":{"status":"partial",'
+                '"reason":"capture ok, 50 copy events persisted; '
+                'admitted under test-profile-1; v1 copy wire '
+                'carries no mapping identity; liveness verified"'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"sync_requests":{"status":"partial",'
+                '"reason":"capture ok, 0 sync_request events '
+                'persisted; admitted under test-profile-1; v1 copy '
+                'wire carries no mapping identity; '
+                'liveness verified"'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"mapping_lifecycle":{"status":"partial",'
+                '"reason":"capture ok, 50 map_result/unmap '
+                'events persisted; admitted under '
+                'test-profile-1; v2 wire reports opaque mapping '
+                'generations when observed"'
+            ),
+        )
     )
 
 

@@ -323,12 +323,18 @@ struct LivenessVerdict(Copyable, Movable):
     (attempt->map, map->copy, copy->map, unmap->copy,
     copy->unmap), or the copy-without-lifecycle marker; detail
     carries "<lhs> > <rhs>" with numbers. Both stay empty when
-    nothing fired and nothing stayed unverified.
+    nothing fired and nothing stayed unverified. lc rolls up
+    the lifecycle equations (attempt->map, copy->map,
+    copy->unmap) and cp the copy equations (map->copy,
+    unmap->copy), each silent over unverified over verified
+    over not exercised.
     """
 
     var state: String
     var equation: String
     var detail: String
+    var lc: String
+    var cp: String
 
 
 def _sat_sum2(a: UInt64, b: UInt64) -> UInt64:
@@ -383,6 +389,29 @@ def _judge(
     if lhs > rhs:
         return String("hooks_silent")
     return String("verified")
+
+
+def _rollup_channel(a: String, b: String, c: String) -> String:
+    # One channel over its equations: silent over unverified over verified.
+    if (
+        a == String("hooks_silent")
+        or b == String("hooks_silent")
+        or c == String("hooks_silent")
+    ):
+        return String("hooks_silent")
+    if (
+        a == String("unverified")
+        or b == String("unverified")
+        or c == String("unverified")
+    ):
+        return String("unverified")
+    if (
+        a == String("verified")
+        or b == String("verified")
+        or c == String("verified")
+    ):
+        return String("verified")
+    return String("not_exercised")
 
 
 def evaluate_liveness(
@@ -501,6 +530,13 @@ def evaluate_liveness(
     )
     lhs_s.append(lhs)
     rhs_s.append(rhs)
+    var lc = _rollup_channel(
+        states[0].copy(), states[2].copy(), states[4].copy()
+    )
+    var cp = _rollup_channel(
+        states[1].copy(), states[3].copy(),
+        String("not_exercised"),
+    )
     for i in range(len(names)):
         if states[i] == String("hooks_silent"):
             return LivenessVerdict(
@@ -509,12 +545,17 @@ def evaluate_liveness(
                 format_u64(lhs_s[i])
                 + String(" > ")
                 + format_u64(rhs_s[i]),
+                lc.copy(),
+                cp.copy(),
             )
     if has_copy and not has_lifecycle:
+        # Copies without lifecycle stay unattributable even when held.
         return LivenessVerdict(
             String("unverified"),
             String("copy liveness needs lifecycle"),
             String(""),
+            lc.copy(),
+            String("unverified"),
         )
     for i in range(len(names)):
         if states[i] == String("unverified"):
@@ -524,12 +565,16 @@ def evaluate_liveness(
                 format_u64(lhs_s[i])
                 + String(" > ")
                 + format_u64(rhs_s[i]),
+                lc.copy(),
+                cp.copy(),
             )
     for i in range(len(names)):
         if states[i] == String("verified"):
             return LivenessVerdict(
-                String("verified"), String(""), String("")
+                String("verified"), String(""), String(""),
+                lc.copy(), cp.copy(),
             )
     return LivenessVerdict(
-        String("not_exercised"), String(""), String("")
+        String("not_exercised"), String(""), String(""),
+        lc.copy(), cp.copy(),
     )

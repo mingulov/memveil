@@ -3072,17 +3072,30 @@ struct Collector:
                 out.cap_sync_requests,
                 String("No sync source in this capture."),
             )
-        if verdict.state == String("verified"):
-            if self.cfg.has_lifecycle:
+        # Each suffix names only what its own channel proved or lost.
+        if self.cfg.has_lifecycle:
+            if verdict.lc == String("verified"):
                 out.cap_mapping_lifecycle.reason += String(
                     "; liveness verified"
                 )
-            if self.cfg.has_copy:
+            elif verdict.lc == String("hooks_silent"):
+                out.cap_mapping_lifecycle.reason += String(
+                    "; liveness hooks silent"
+                )
+        if self.cfg.has_copy:
+            if verdict.cp == String("verified"):
                 out.cap_copy_bytes.reason += String(
                     "; liveness verified"
                 )
                 out.cap_sync_requests.reason += String(
                     "; liveness verified"
+                )
+            elif verdict.cp == String("hooks_silent"):
+                out.cap_copy_bytes.reason += String(
+                    "; liveness hooks silent"
+                )
+                out.cap_sync_requests.reason += String(
+                    "; liveness hooks silent"
                 )
         self.unavailable_cap(
             out.cap_conversion_results,
