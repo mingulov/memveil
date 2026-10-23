@@ -18,6 +18,7 @@ this tool only gathers evidence files and boots guests.
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import shlex
@@ -32,6 +33,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests" / "vm"))
 
 import kernel_matrix as km
+import kernel_scenarios as ks
 
 CAPTURE_TIMEOUT = 300
 
@@ -363,7 +365,8 @@ def collect_one(entry, export, tools, dd_count, elapsed, run_id,
 
 
 def run_one(entry, args, kind, source, disk_img, tools, run_id,
-            prefix):
+            prefix, guest_script=None, collect=None,
+            stage=None):
     ident = entry["id"]
     export = os.path.join(args.out, ident)
     if os.path.exists(export):
@@ -382,6 +385,8 @@ def run_one(entry, args, kind, source, disk_img, tools, run_id,
     else:
         job["bundle"] = source
     job["repo"] = str(ROOT)
+    if stage is not None:
+        stage(export, job)
     Path(export, "job.json").write_text(json.dumps(job, indent=2)
                                         + "\n")
     t0 = time.monotonic()
@@ -409,7 +414,8 @@ def run_one(entry, args, kind, source, disk_img, tools, run_id,
         return {"id": ident, "ok": False, "detail": str(exc),
                 "run_id": run_id,
                 "elapsed": round(time.monotonic() - t0, 1)}
-    script = str(ROOT / "tests" / "vm" / "kernel_matrix_guest.py")
+    script = guest_script or str(
+        ROOT / "tests" / "vm" / "kernel_matrix_guest.py")
     guest_cmd = "python3 %s /tmp/export %s" % (
         shlex.quote(script), shlex.quote(str(ROOT)))
     scratch_img = ensure_scratch(disk_img, ident)
@@ -453,9 +459,269 @@ def run_one(entry, args, kind, source, disk_img, tools, run_id,
         Path(export, "vng.exit").write_text("timeout")
         timeout = True
     elapsed = time.monotonic() - t0
-    return collect_one(entry, export, tools, args.dd_count,
-                       elapsed, run_id, timeout, cache_dir,
-                       args.duration)
+    if collect is None:
+        return collect_one(entry, export, tools,
+                           args.dd_count, elapsed, run_id,
+                           timeout, cache_dir, args.duration)
+    return collect(entry, export, tools, elapsed, run_id,
+                   timeout, cache_dir)
+
+
+NEGATIVE_NAMES = ("renamed_field", "widened_layout",
+                  "wrong_shift", "wrong_argcnt")
+
+
+def scenario_negatives():
+    """Name to sha256 for the four negative objects.
+
+    Raises ValueError when the negative build is missing.
+    """
+    shas = {}
+    for name in NEGATIVE_NAMES:
+        path = ROOT / "build" / "bpf-negative" / (
+            "swiotlb_copy-%s.bpf.o" % name)
+        if not path.is_file():
+            raise ValueError(
+                "missing negative object %s (run tools/build)"
+                % path)
+        shas[name] = km.sha_file(str(path))
+    return shas
+
+
+def deb_copy_object_sha(deb):
+    """Sha256 of the deb's copy object, or raise ValueError."""
+    try:
+        fsys = subprocess.run(
+            ["dpkg-deb", "--fsys-tarfile", deb],
+            capture_output=True, timeout=120)
+        if fsys.returncode != 0:
+            raise ValueError("cannot list deb %s" % deb)
+        tar = subprocess.run(
+            ["tar", "-xO",
+             "./usr/lib/memveil/swiotlb_copy.bpf.o"],
+            input=fsys.stdout, capture_output=True,
+            timeout=120)
+        if tar.returncode != 0 or not tar.stdout:
+            raise ValueError(
+                "deb %s has no copy object" % deb)
+        return hashlib.sha256(tar.stdout).hexdigest()
+    except subprocess.TimeoutExpired:
+        raise ValueError("deb read timed out: %s" % deb)
+
+
+def check_scenario_inputs(deb):
+    """Negative shas after the deb matches the build.
+
+    Raises ValueError when negatives are missing or the
+    deb's copy object differs from the built one.
+    """
+    shas = scenario_negatives()
+    built = ROOT / "build" / "bpf" / "swiotlb_copy.bpf.o"
+    if not built.is_file():
+        raise ValueError("missing built copy object %s "
+                         "(run tools/build)" % built)
+    if deb_copy_object_sha(deb) != km.sha_file(str(built)):
+        raise ValueError(
+            "deb copy object differs from %s" % built)
+    return shas
+
+
+def stage_scenario_files(export, job, neg_shas):
+    """Copy negative objects into the export; extend the job."""
+    neg_dir = os.path.join(export, "neg")
+    os.makedirs(neg_dir, exist_ok=True)
+    for name in NEGATIVE_NAMES:
+        src = ROOT / "build" / "bpf-negative" / (
+            "swiotlb_copy-%s.bpf.o" % name)
+        shutil.copy2(str(src), os.path.join(
+            neg_dir, "swiotlb_copy-%s.bpf.o" % name))
+    job["negatives"] = dict(neg_shas)
+
+
+def run_check_doctor(path):
+    """True when validate-schemas accepts one doctor document."""
+    if not os.path.isfile(path):
+        return False
+    try:
+        proc = subprocess.run(
+            [str(ROOT / "tools" / "validate-schemas"),
+             "--check-doctor", path],
+            capture_output=True, text=True,
+            timeout=CAPTURE_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
+
+
+def validate_capture_dir(capdir):
+    """Validator exit for one capture dir, None when missing."""
+    if not os.path.isdir(capdir):
+        return None
+    try:
+        proc = subprocess.run(
+            [str(ROOT / "tools" / "validate-schemas"),
+             capdir],
+            capture_output=True, text=True,
+            timeout=CAPTURE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return 99
+    except OSError:
+        return 99
+    return proc.returncode
+
+
+def gather_scenario_ev(export, name, negs, base_verdict):
+    """Evidence dict for one scenario directory."""
+    sdir = os.path.join(export, "scn-" + name)
+
+    def read(leaf):
+        return read_text(os.path.join(sdir, leaf))
+
+    def load_json(leaf):
+        try:
+            return json.loads(read(leaf) or "")
+        except ValueError:
+            return None
+
+    spec = ks.SCENARIOS[name]
+    capture = None
+    if spec.get("capture") is not None:
+        capdir = os.path.join(sdir, "cap")
+        capture = {
+            "events_text": read_text(os.path.join(
+                capdir, "events.ndjson")),
+            "session_text": read_text(os.path.join(
+                capdir, "session.json")),
+            "report_json_text": read("report.json"),
+            "report_text": read("report.txt"),
+            "workload_out": read("workload.out"),
+            "workload_exit": read("workload.exit"),
+            "validate_rc": validate_capture_dir(capdir),
+            "object_sha": negs.get(spec.get("negative")),
+        }
+    memcg = None
+    if name == "memcg":
+        memcg = load_json("memcg.json")
+    return {
+        "passive": {"text": read("doctor-passive.json"),
+                    "exit": read("doctor-passive.exit")},
+        "load": {"text": read("doctor-load.json"),
+                 "exit": read("doctor-load.exit")},
+        "record": {"out": read("record.out"),
+                   "exit": read("record.exit"),
+                   "exists": read("record.exists")},
+        "passive_schema": run_check_doctor(os.path.join(
+            sdir, "doctor-passive.json")),
+        "load_schema": run_check_doctor(os.path.join(
+            sdir, "doctor-load.json")),
+        "precondition": load_json("precondition.json"),
+        "teardown": load_json("teardown.json"),
+        "base_verdict": base_verdict,
+        "capture": capture,
+        "memcg": memcg,
+        "job_negatives": dict(negs),
+    }
+
+
+def collect_scenarios(entry, export, tools, elapsed, run_id,
+                      timeout, cache_dir):
+    """Judge every scenario of one booted row."""
+    ident = entry["id"]
+    try:
+        job = json.loads(Path(export, "job.json")
+                         .read_text())
+    except (OSError, ValueError):
+        job = {}
+    negs = job.get("negatives", {})
+    base_verdict = None
+    try:
+        base_pre = json.loads(Path(
+            export, "scn-base",
+            "precondition.json").read_text())
+        base_verdict = base_pre.get("verdict")
+    except (OSError, ValueError, AttributeError):
+        base_verdict = None
+    named = []
+    for name in ks.SCENARIO_ORDER:
+        try:
+            ev = gather_scenario_ev(export, name, negs,
+                                    base_verdict)
+            rec = ks.evaluate_scenario(name, ev)
+        except Exception as exc:
+            rec = {"name": name, "ok": False,
+                   "status": "fail",
+                   "checks": [{"name": "precondition",
+                               "ok": False,
+                               "detail": "scenario decision "
+                                         "crashed: %s" % exc,
+                               "skipped": False}]}
+        named.append((name, rec))
+    try:
+        results = ks.evaluate_run(named)
+    except Exception as exc:
+        return {"id": ident, "mode": "scenarios", "ok": False,
+                "run_id": run_id,
+                "detail": "run decision crashed: %s" % exc,
+                "elapsed": round(elapsed, 1),
+                "scenarios": [rec for _, rec in named]}
+    ok_count = sum(1 for res in results
+                   if res["status"] == "ok")
+    np_count = sum(1 for res in results
+                   if res["status"] == "not_proven")
+    fail_count = sum(1 for res in results
+                     if res["status"] == "fail")
+    ok = fail_count == 0
+    detail = "scenarios ok=%d fail=%d not_proven=%d" % (
+        ok_count, fail_count, np_count)
+    fail_txt = read_text(os.path.join(export, "FAIL.txt"))
+    if fail_txt is not None:
+        ok = False
+        detail += "; guest FAIL: %s" % fail_txt.strip()[:200]
+    if timeout:
+        ok = False
+        detail += "; vng timeout"
+    binary_sha = None
+    try:
+        artifacts = json.loads(Path(
+            export, "artifacts.json").read_text())
+        binary_sha = artifacts["binary"]["sha256"]
+    except (OSError, ValueError, KeyError, TypeError):
+        binary_sha = None
+    return {"id": ident, "mode": "scenarios", "ok": ok,
+            "detail": detail, "run_id": run_id,
+            "vng_version": km.row_boot_label(entry),
+            "release": entry["release"],
+            "elapsed": round(elapsed, 1),
+            "binary_sha256": binary_sha,
+            "negatives": dict(negs),
+            "scenarios": results}
+
+
+def write_scenario_summary(out, merged):
+    lines = ["kernel vng scenarios verdict run"]
+    for rec in merged:
+        results = rec.get("scenarios", [])
+        ok_count = sum(1 for res in results
+                       if res.get("status") == "ok")
+        fail_count = sum(1 for res in results
+                         if res.get("status") == "fail")
+        np_count = sum(1 for res in results
+                       if res.get("status") == "not_proven")
+        lines.append("%s %s ok=%d fail=%d not_proven=%d %s "
+                     "run=%s" % (
+                         rec.get("id"),
+                         rec.get("vng_version", "?"),
+                         ok_count, fail_count, np_count,
+                         "PASS" if rec.get("ok") else "FAIL",
+                         rec.get("run_id", "?")))
+        for res in results:
+            lines.append("  %s: %s" % (
+                res.get("name"), res.get("status")))
+    Path(out, "summary.txt").write_text("\n".join(lines)
+                                       + "\n")
+    Path(out, "summary.json").write_text(
+        json.dumps(merged, indent=2, sort_keys=True) + "\n")
+    print("\n".join(lines))
 
 
 def write_summary(out, merged):
@@ -513,6 +779,9 @@ def main(argv=None):
                         help="per-kernel timeout seconds")
     parser.add_argument("--cpus", type=int, default=4,
                         help="guest vCPUs (at most 4)")
+    parser.add_argument("--scenarios", action="store_true",
+                        help="run detection scenarios, not the "
+                             "matrix")
     args = parser.parse_args(argv)
     if args.cpus < 1 or args.cpus > 4:
         print("kernel-matrix: --cpus must be 1..4", file=sys.stderr)
@@ -541,6 +810,10 @@ def main(argv=None):
     except ValueError as exc:
         print("kernel-matrix: %s" % exc, file=sys.stderr)
         return 2
+    if args.scenarios and kind != "deb":
+        print("kernel-matrix: --scenarios needs --deb",
+              file=sys.stderr)
+        return 2
     if kind == "deb":
         if not os.path.isfile(source):
             print("kernel-matrix: missing deb %s" % source,
@@ -554,6 +827,19 @@ def main(argv=None):
                   file=sys.stderr)
             return 2
         source = str(cand.resolve())
+    neg_shas = {}
+    if args.scenarios:
+        try:
+            neg_shas = check_scenario_inputs(source)
+        except ValueError as exc:
+            print("kernel-matrix: %s" % exc, file=sys.stderr)
+            return 2
+        for entry in entries:
+            if not ks.scenarios_row_admitted(entry):
+                print("kernel-matrix: --scenarios needs an "
+                      "all-admitted row, refusing %s"
+                      % entry["id"], file=sys.stderr)
+                return 2
     os.makedirs(args.out, exist_ok=True)
     collisions = km.check_out_collisions(
         args.out, [e["id"] for e in entries])
@@ -624,8 +910,20 @@ def main(argv=None):
             print("kernel-matrix: %s (%s)" % (entry["id"],
                                               km.row_boot_label(
                                                   entry)))
-            rec = run_one(entry, args, kind, source, disk_img,
-                          lock["tools"], run_id, prefix)
+            if args.scenarios:
+                rec = run_one(
+                    entry, args, kind, source, disk_img,
+                    lock["tools"], run_id, prefix,
+                    guest_script=str(
+                        ROOT / "tests" / "vm"
+                        / "kernel_scenarios_guest.py"),
+                    collect=collect_scenarios,
+                    stage=lambda export, job, shas=neg_shas:
+                    stage_scenario_files(export, job, shas))
+            else:
+                rec = run_one(entry, args, kind, source,
+                              disk_img, lock["tools"], run_id,
+                              prefix)
             results.append(rec)
             Path(args.out, entry["id"] + ".json").write_text(
                 json.dumps(rec, indent=2, sort_keys=True) + "\n")
@@ -646,7 +944,11 @@ def main(argv=None):
             return 2
     else:
         old = []
-    write_summary(args.out, km.merge_summary(old, results))
+    merged = km.merge_summary(old, results)
+    if args.scenarios:
+        write_scenario_summary(args.out, merged)
+    else:
+        write_summary(args.out, merged)
     return 0 if all(r.get("ok") for r in results) else 1
 
 
