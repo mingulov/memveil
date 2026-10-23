@@ -38,7 +38,11 @@ from memveil.platform.capabilities import discover_capabilities
 from memveil.platform.evidence import detect_environment
 from memveil.platform.kernelgate import remedy_for
 from memveil.platform.profiles import load_profiles, select_profile
-from memveil.platform.reader import open_evidence_reader
+from memveil.platform.reader import (
+    bytes_to_text,
+    open_evidence_reader,
+    read_host_file,
+)
 
 
 def fx(name: String) -> String:
@@ -616,6 +620,127 @@ def test_doctor2_live_hook_absent_code() raises:
     assert_equal(lc.remedy, remedy_for(String("btf-hook-absent")))
 
 
+def _write_tmp_bytes(path: String, data: List[UInt8]) raises:
+    """Write bytes to a test-temporary path, truncating."""
+    var cp = _cstr_local(path)
+    var cm = _cstr_local(String("wb"))
+    var fp = external_call["fopen", UInt64](
+        Span(cp).unsafe_ptr(), Span(cm).unsafe_ptr()
+    )
+    if fp == 0:
+        raise Error(String("cannot write tmp file"))
+    var n = external_call["fwrite", Int64](
+        Span(data).unsafe_ptr(), 1, len(data), fp
+    )
+    _ = external_call["fclose", Int32](fp)
+    if Int(n) != len(data):
+        raise Error(String("short tmp write"))
+
+
+def _mkdir_tmp(path: String) raises:
+    """Create one test-temporary directory, ignoring EEXIST."""
+    var cp = _cstr_local(path)
+    _ = external_call["mkdir", Int32](
+        Span(cp).unsafe_ptr(), 0o755
+    )
+
+
+def _two_profile_dir() raises -> String:
+    """Profiles dir where no one profile covers everything."""
+    var tmpdir = String("build/test-tmp/c3-profiles")
+    _mkdir_tmp(String("build/test-tmp"))
+    _mkdir_tmp(tmpdir)
+    var raw = read_host_file(
+        String("tests/fixtures/scan/profiles-live/live-ref.json"),
+        String("profile"),
+        1048576,
+    )
+    var text = bytes_to_text(raw^)
+    var base = text.replace(
+        String('"profile_id": "scan-live-ref"'),
+        String('"profile_id": "rv-a"'),
+    )
+    var rva = base.replace(
+        String(
+            '"id": "copy-actual",\n      "status": "candidate"'
+        ),
+        String(
+            '"id": "copy-actual",\n      "status": "unsupported"'
+        ),
+    )
+    var rvb = text.replace(
+        String('"profile_id": "scan-live-ref"'),
+        String('"profile_id": "rv-b"'),
+    ).replace(
+        String('"id": "mapping-lifecycle",\n      "status": "candidate"'),
+        String('"id": "mapping-lifecycle",\n      "status": "unsupported"'),
+    )
+    var mark = String('"status": "unsupported"')
+    assert_true(rva.find(mark) >= 0)
+    assert_true(rvb.find(mark.copy()) >= 0)
+    var ba = List[UInt8]()
+    for b in rva.as_bytes():
+        ba.append(b)
+    _write_tmp_bytes(tmpdir + String("/rv-a.json"), ba^)
+    var bb = List[UInt8]()
+    for b in rvb.as_bytes():
+        bb.append(b)
+    _write_tmp_bytes(tmpdir + String("/rv-b.json"), bb^)
+    var man = List[UInt8]()
+    for b in String("rv-a.json\nrv-b.json\n").as_bytes():
+        man.append(b)
+    _write_tmp_bytes(tmpdir + String("/manifest.txt"), man^)
+    return tmpdir
+
+
+def test_doctor2_two_profile_verdict() raises:
+    # Each extra capability admits alone under its own
+    # profile, but no one profile covers the request, so
+    # the rows stay display-only and the verdict refuses.
+    var pdir = _two_profile_dir()
+    var root = gate(String("base"))
+    var opts = _doctor2_opts(
+        root,
+        pdir,
+        String("all"),
+        String("tests/fixtures/elf/ok.o"),
+        String("tests/fixtures/elf/lc-ok.o"),
+        String("tests/fixtures/elf/cp-ok.o"),
+    )
+    var drep = assess_doctor(opts)
+    assert_equal(drep.verdict, String("unavailable"))
+    assert_equal(
+        drep.summary,
+        String(
+            "unavailable: capability mapping-lifecycle"
+            " unsupported by rv-b"
+        ),
+    )
+    for i in range(len(drep.caps)):
+        assert_equal(
+            drep.caps[i].status, String("available-load-unchecked")
+        )
+    var reader = open_evidence_reader(root)
+    var env = detect_environment(reader)
+    var whole = decide_record(
+        root,
+        env.kernel,
+        load_profiles(pdir),
+        String(""),
+        False,
+        String("tests/fixtures/elf/ok.o"),
+        String("tests/fixtures/elf/lc-ok.o"),
+        String("tests/fixtures/elf/cp-ok.o"),
+        String("attempt-trace,mapping-lifecycle,copy-actual"),
+        pdir,
+        String(""),
+    )
+    assert_true(not whole.ok)
+    assert_equal(
+        drep.summary, String("unavailable: ") + whole.refusal
+    )
+
+
 def test_doctor2_no_object() raises:
     var opts = _doctor2_opts(
         gate(String("base")),
@@ -816,6 +941,7 @@ def run() raises -> Int:
     suite.test[test_doctor2_live_ftrace_disabled_fix]()
     suite.test[test_doctor2_live_hook_ambiguous_code]()
     suite.test[test_doctor2_live_hook_absent_code]()
+    suite.test[test_doctor2_two_profile_verdict]()
     suite.test[test_doctor2_no_object]()
     suite.test[test_doctor2_precheck_fail]()
     suite.test[test_doctor2_notes]()

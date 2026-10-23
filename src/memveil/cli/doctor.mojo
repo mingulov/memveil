@@ -789,16 +789,18 @@ def assess_doctor(opts: DoctorOptions) -> DoctorReport2:
 
     Passive: no BPF load, no attach, no bridge access. Each
     of the three record capabilities runs ``decide_record``
-    over its own set; conversion-observe has no record
-    channel. A failed passive pre-check demotes an admitted
-    capability to unavailable with that check's code. Bad
-    roots, profiles, or capability lists yield an
-    unavailable report naming the failure; the exit-code
-    mapping lives in ``run_doctor_opts``. Under
-    ``--load-check`` on the live host, every admitted
-    object loads without attaching: loaded objects read
-    ``available`` and the verdict is ``ready`` only when
-    every requested object loaded.
+    over its own set for its display row, and the verdict
+    judges the requested set through one more call;
+    conversion-observe has no record channel. A failed
+    passive pre-check demotes an admitted capability to
+    unavailable with that check's code. Bad roots,
+    profiles, or capability lists yield an unavailable
+    report naming the failure; the exit-code mapping lives
+    in ``run_doctor_opts``. Under ``--load-check`` on the
+    live host, every admitted object loads without
+    attaching: loaded objects read ``available`` and the
+    verdict is ``ready`` only when every requested object
+    loaded.
     """
     var out = DoctorReport2()
     var reader: EvidenceReader
@@ -903,6 +905,7 @@ def assess_doctor(opts: DoctorOptions) -> DoctorReport2:
     elif mem.state == String("fail"):
         fail_code = mem.code.copy()
         fail_reason = mem.reason.copy()
+    var bridge_sha = String("")
     var plines = List[String]()
     if priv.state != String("pass") and len(plines) < 64:
         plines.append(_clip_n(_precheck_line(priv), 512))
@@ -936,7 +939,7 @@ def assess_doctor(opts: DoctorOptions) -> DoctorReport2:
             cp_path,
             want,
             opts.profiles_dir,
-            String(""),
+            bridge_sha,
         )
         if not pick.ok:
             if _is_unsupported_declaration(pick.refusal, cap):
@@ -988,6 +991,26 @@ def assess_doctor(opts: DoctorOptions) -> DoctorReport2:
                 )
             )
         out.caps.append(entry^)
+    # The verdict judges the requested set as one record
+    # admission; per-capability rows are display only.
+    var whole_want = String("")
+    for i in range(len(ask.caps)):
+        if i != 0:
+            whole_want += String(",")
+        whole_want += ask.caps[i]
+    var whole = decide_record(
+        opts.root,
+        env.kernel,
+        profiles,
+        String(""),
+        False,
+        object_path,
+        lc_path,
+        cp_path,
+        whole_want,
+        opts.profiles_dir,
+        bridge_sha,
+    )
     var loading = opts.load_check and opts.root == String("")
     if loading:
         out.mode = String("load-check")
@@ -1088,7 +1111,12 @@ def assess_doctor(opts: DoctorOptions) -> DoctorReport2:
         if k != 0:
             names += String(", ")
         names += out.requested[k]
-    if all_ok and loading:
+    if not whole.ok:
+        out.verdict = String("unavailable")
+        out.summary = _clip_n(
+            String("unavailable: ") + whole.refusal, 1024
+        )
+    elif all_ok and loading:
         out.verdict = String("ready")
         out.summary = String("ready: ") + names + String(" available")
         if out.has_profile:
