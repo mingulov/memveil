@@ -1341,6 +1341,9 @@ def _check_busy_aggregate(counters, samples, miss_samples,
         return False, "aggregate attempts %d outside " \
             "oracle %d..%d" % (attempts, lo, hi)
     if "swiotlb.requested_bytes" in counters:
+        if not any("tpb" in snap for _, snap in samples):
+            return True, "aggregate counts match the oracle; " \
+                "bytes unproven on a countonly oracle"
         try:
             nbytes = int(counters["swiotlb.requested_bytes"])
         except (TypeError, ValueError):

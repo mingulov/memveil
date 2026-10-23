@@ -2436,8 +2436,15 @@ def _busy2_lower_bound(session):
     return session
 
 
+def _busy2_samples_countonly():
+    return [(stamp, {k: v for k, v in snap.items()
+                     if k != "tpb"})
+            for stamp, snap in _busy2_samples()]
+
+
 def _busy2_decide(persisted=None, session=None,
-                  counters="dflt", miss=None):
+                  counters="dflt", miss=None,
+                  samples=None):
     if persisted is None:
         persisted = _busy2_persisted()
     if session is None:
@@ -2446,7 +2453,9 @@ def _busy2_decide(persisted=None, session=None,
         counters = _busy2_counters()
     if miss is None:
         miss = _busy2_miss()
-    return km.decide_busy(persisted, _busy2_samples(),
+    if samples is None:
+        samples = _busy2_samples()
+    return km.decide_busy(persisted, samples,
                           miss, 5000000000, 23000000000,
                           _CHANNELS5, session, counters)
 
@@ -2790,6 +2799,30 @@ def test_decide_busy_aggregate_bytes_mismatch_fails():
                 "swiotlb.requested_bytes": 1}
     per, overall, failed, _ = _busy2_decide(
         counters=counters)
+    assert failed, per
+    assert overall == "AGGREGATE-MISMATCH"
+
+
+def test_decide_busy_aggregate_countonly_skips_bytes():
+    # A countonly oracle carries no tpb, so the byte
+    # counter stays unproven by design while the attempt
+    # counter still binds. The byte value here would fail
+    # a full oracle on purpose.
+    counters = {"swiotlb.bounce_attempts": 2500,
+                "swiotlb.requested_bytes": 1}
+    per, overall, failed, _ = _busy2_decide(
+        counters=counters,
+        samples=_busy2_samples_countonly())
+    assert not failed, per
+    assert overall == "EXACT"
+
+
+def test_decide_busy_aggregate_countonly_checks_attempts():
+    counters = {"swiotlb.bounce_attempts": 100,
+                "swiotlb.requested_bytes": 1}
+    per, overall, failed, _ = _busy2_decide(
+        counters=counters,
+        samples=_busy2_samples_countonly())
     assert failed, per
     assert overall == "AGGREGATE-MISMATCH"
 
