@@ -3961,6 +3961,44 @@ def test_copy_only_session_partial() raises:
     )
 
 
+def test_copy_only_zero_records_unverified() raises:
+    # No records at all still leaves the copy hooks unattributable.
+    var vals = _live_clock_values(UInt64(1000000000), False, True)
+    var payloads = List[List[UInt8]]()
+    var c = _run_live(
+        payloads^, vals^, _zero_cut(), _zero_cut(), UInt64(0),
+        _zero_cut(), UInt64(0),
+        has_lifecycle=False, has_copy=True)
+    assert_equal(c.exit_code, 4)
+    assert_true(
+        _contains(
+            c.session,
+            String("copy liveness unverified: lifecycle not captured"),
+        )
+    )
+
+
+def test_copy_only_syncs_without_copies_silent() raises:
+    # Syncs with no copies prove the bounce hook dead, no lifecycle needed.
+    var vals = _live_clock_values(UInt64(1000000000), False, True)
+    var attach = _live_attach(vals, False, True)
+    var payloads = List[List[UInt8]]()
+    for i in range(30):
+        payloads.append(
+            _cp_raw(1, 1, 1, UInt64(3100 + i),
+                    attach + UInt64(i) * UInt64(20000000),
+                    UInt64(4096), UInt64(0), 4))
+    var c = _run_live(
+        payloads^, vals^, _zero_cut(), _zero_cut(), UInt64(0),
+        _cut(UInt64(30), UInt64(122880), UInt64(30),
+             UInt64(122880)), UInt64(30),
+        has_lifecycle=False, has_copy=True)
+    assert_equal(c.exit_code, 4)
+    assert_true(
+        _contains(c.session, String("hooks silent: map->copy"))
+    )
+
+
 def test_collector_liveness_busy_edges_clean() raises:
     # T11-DEV1: the plan names this test busy_edges_complete
     # (exit 0); exit 0 is unreachable (see the healthy test).

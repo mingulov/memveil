@@ -185,6 +185,43 @@ def test_copy_without_lifecycle_unverified() raises:
     assert_equal(v.detail, String(""))
 
 
+def test_copy_only_empty_unverified() raises:
+    # Zero records prove no hook fired; the run stays unverified.
+    var tally = _tally()
+    var v = evaluate_liveness(
+        tally, _td(), True, False, True, _loss(UInt64(0), UInt64(0))
+    )
+    assert_equal(v.state, String("unverified"))
+    assert_equal(v.equation, String("copy liveness needs lifecycle"))
+    assert_equal(v.detail, String(""))
+
+
+def test_copy_only_syncs_without_copies_silent() raises:
+    # Syncs with no copies prove the bounce hook dead, no lifecycle needed.
+    var tally = _tally()
+    for _ in range(30):
+        tally.note_sync(UInt64(4000000000), True, UInt16(1))
+    var v = evaluate_liveness(
+        tally, _td(), True, False, True, _loss(UInt64(0), UInt64(0))
+    )
+    assert_equal(v.state, String("hooks_silent"))
+    assert_equal(v.equation, String("map->copy"))
+    assert_equal(v.detail, String("30 > 0"))
+
+
+def test_copy_only_cpu_syncs_without_copies_silent() raises:
+    # The sync-for-cpu forward term fires the same way on its own.
+    var tally = _tally()
+    for _ in range(20):
+        tally.note_sync(UInt64(4000000000), False, UInt16(2))
+    var v = evaluate_liveness(
+        tally, _td(), True, False, True, _loss(UInt64(0), UInt64(0))
+    )
+    assert_equal(v.state, String("hooks_silent"))
+    assert_equal(v.equation, String("unmap->copy"))
+    assert_equal(v.detail, String("20 > 0"))
+
+
 def test_omitted_records_counted_as_loss() raises:
     # Drain- and latch-omitted records are emitted but not
     # decoded, so they arrive inside the loss terms and absorb
@@ -298,6 +335,9 @@ def run() raises -> Int:
     suite.test[test_edge_excess_inside_guard_never_fires]()
     suite.test[test_records_before_attach_ignored]()
     suite.test[test_copy_without_lifecycle_unverified]()
+    suite.test[test_copy_only_empty_unverified]()
+    suite.test[test_copy_only_syncs_without_copies_silent]()
+    suite.test[test_copy_only_cpu_syncs_without_copies_silent]()
     suite.test[test_omitted_records_counted_as_loss]()
     suite.test[test_short_run_not_exercised]()
     suite.test[test_bucket_boundary_conservative]()

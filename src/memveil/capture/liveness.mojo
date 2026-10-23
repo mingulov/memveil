@@ -429,13 +429,13 @@ def evaluate_liveness(
     )
     lhs_s.append(lhs)
     rhs_s.append(rhs)
-    # E2f map->copy.
+    # E2f map->copy; copy-only runs judge the sync-only terms.
     lhs = _sat_sum2(win_f.maps_ok, win_f.syncd_to)
     rhs = _sat_sum2(tally.all.copies_to, loss.cp)
     names.append(String("map->copy"))
     states.append(
         _judge(
-            has_lifecycle and has_copy,
+            has_copy,
             f_empty,
             lhs,
             rhs,
@@ -463,13 +463,13 @@ def evaluate_liveness(
     )
     lhs_s.append(lhs)
     rhs_s.append(rhs)
-    # E3f unmap->copy.
+    # E3f unmap->copy; copy-only runs judge the sync-only terms.
     lhs = _sat_sum2(win_f.unmaps_from, win_f.syncc_from)
     rhs = _sat_sum2(tally.all.copies_from, loss.cp)
     names.append(String("unmap->copy"))
     states.append(
         _judge(
-            has_lifecycle and has_copy,
+            has_copy,
             f_empty,
             lhs,
             rhs,
@@ -509,10 +509,7 @@ def evaluate_liveness(
                 + String(" > ")
                 + format_u64(rhs_s[i]),
             )
-    var copies_seen = tally.all.copies_to != UInt64(
-        0
-    ) or tally.all.copies_from != UInt64(0)
-    if has_copy and not has_lifecycle and copies_seen:
+    if has_copy and not has_lifecycle:
         return LivenessVerdict(
             String("unverified"),
             String("copy liveness needs lifecycle"),
