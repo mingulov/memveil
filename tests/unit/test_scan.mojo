@@ -14,6 +14,7 @@ from memveil.capture.run import (
     _append_layout_evidence,
     _load_fail_channel,
     decide_record,
+    loadcheck_bridge_sha,
     parse_requested_caps,
     render_provenance,
     run_collector_with,
@@ -28,6 +29,7 @@ from memveil.platform.profiles import (
     load_profiles,
     parse_profile_bytes,
 )
+from memveil.platform.hash import sha256_hex
 from memveil.platform.reader import (
     _geteuid_live,
     bytes_to_text,
@@ -536,6 +538,20 @@ def test_load_fail_channel() raises:
         2,
     )
     assert_equal(_load_fail_channel(String("")), 0)
+
+
+def test_loadcheck_bridge_sha() raises:
+    # Load-check admission binds receipts to the resolved
+    # bridge's bytes; an unreadable bridge hashes to "".
+    var lib = String("tests/fixtures/elf/ok.o")
+    var raw = read_host_file(lib.copy(), String("bridge"), 67108864)
+    assert_equal(
+        loadcheck_bridge_sha(lib, True), sha256_hex(Span(raw))
+    )
+    assert_equal(
+        loadcheck_bridge_sha(String("no-such-bridge.so"), True),
+        String(""),
+    )
 
 
 def test_scan_gate_order_explicit_gap_first() raises:
@@ -1632,6 +1648,30 @@ def test_scan_receipt_bridge_unknown_partial() raises:
     )
 
 
+def test_scan_receipt_bridge_unchecked_unknown() raises:
+    # Extras cannot ride a receipt past an unchecked
+    # bridge, but the receipt is otherwise valid: the
+    # refusal is unknown, not "no profile satisfies".
+    var d = decide_record(
+        String(_OK),
+        _kernel(),
+        _ref_profiles(String("ref-lc.json")),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(_ELF_CP),
+        String(_CAPS3),
+        String(_PROFILES),
+        String(""),
+    )
+    assert_true(not d.ok)
+    assert_true(d.refusal_unknown)
+    assert_equal(d.refusal_code, String("bridge-unchecked"))
+    assert_true(contains(d.refusal, String("bridge unchecked")))
+    assert_equal(d.fix, remedy_for(String("bridge-unchecked")))
+
+
 def test_scan_moved_layout_refuses_named_diff() raises:
     # The moved/ root carries a format whose size field
     # drifted. The hook probe admits offset-only drift,
@@ -1798,6 +1838,7 @@ def run() raises -> Int:
     suite.test[test_run_carries_live_code]()
     suite.test[test_run_infra_refusal_untrusted]()
     suite.test[test_load_fail_channel]()
+    suite.test[test_loadcheck_bridge_sha]()
     suite.test[test_scan_gate_order_explicit_gap_first]()
     suite.test[test_scan_gate_order_empty_order_first]()
     suite.test[test_scan_gate_unreadable_refuses]()
@@ -1827,6 +1868,7 @@ def run() raises -> Int:
     suite.test[test_scan_receipt_disabled_partial]()
     suite.test[test_scan_receipt_stale_bindings_partial]()
     suite.test[test_scan_receipt_bridge_mismatch_partial]()
+    suite.test[test_scan_receipt_bridge_unchecked_unknown]()
     suite.test[test_scan_receipt_bridge_unknown_partial]()
     suite.test[test_scan_moved_layout_refuses_named_diff]()
     suite.test[test_scan_moved_reauthored_admits_offsets]()

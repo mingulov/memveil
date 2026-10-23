@@ -28,6 +28,7 @@ from memveil.capture.run import (
     copy_program_names,
     decide_record,
     lifecycle_program_names,
+    loadcheck_bridge_sha,
     parse_requested_caps,
     resolve_bridge,
     resolve_object,
@@ -957,7 +958,14 @@ def assess_doctor(opts: DoctorOptions) -> DoctorReport2:
     elif mem.state == String("fail"):
         fail_code = mem.code.copy()
         fail_reason = mem.reason.copy()
+    var loading = opts.load_check and opts.root == String("")
+    var bridge = String("")
     var bridge_sha = String("")
+    if loading:
+        bridge = resolve_bridge(opts.bridge, opts.has_bridge)
+        bridge_sha = loadcheck_bridge_sha(
+            opts.bridge, opts.has_bridge
+        )
     var plines = List[String]()
     if priv.state != String("pass") and len(plines) < 64:
         plines.append(_clip_n(_precheck_line(priv), 512))
@@ -1063,10 +1071,8 @@ def assess_doctor(opts: DoctorOptions) -> DoctorReport2:
         opts.profiles_dir,
         bridge_sha,
     )
-    var loading = opts.load_check and opts.root == String("")
     if loading:
         out.mode = String("load-check")
-        var bridge = resolve_bridge(opts.bridge, opts.has_bridge)
         var targets = List[LoadTarget]()
         var target_for_cap = List[Int]()
         for _ in range(len(out.caps)):

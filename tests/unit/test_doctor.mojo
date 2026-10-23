@@ -834,6 +834,70 @@ def test_doctor2_precheck_fail() raises:
         assert_true(sseen)
 
 
+def _receipt_profiles_dir() raises -> String:
+    """Tmp profiles dir with only the ref-lc receipt profile."""
+    var tmpdir = String("build/test-tmp/i8-profiles")
+    _mkdir_tmp(String("build/test-tmp"))
+    _mkdir_tmp(tmpdir)
+    _mkdir_tmp(tmpdir + String("/receipts"))
+    var doc = read_host_file(
+        String("tests/fixtures/scan/profiles/ref-lc.json"),
+        String("profile"),
+        1048576,
+    )
+    _write_tmp_bytes(tmpdir + String("/ref-lc.json"), doc^)
+    var man = List[UInt8]()
+    for b in String("ref-lc.json\n").as_bytes():
+        man.append(b)
+    _write_tmp_bytes(tmpdir + String("/manifest.txt"), man^)
+    var rec = read_host_file(
+        String(
+            "tests/fixtures/scan/profiles/receipts/scan-ref-lc.json"
+        ),
+        String("receipt"),
+        1048576,
+    )
+    _write_tmp_bytes(
+        tmpdir + String("/receipts/scan-ref-lc.json"), rec^
+    )
+    return tmpdir
+
+
+def test_doctor2_bridge_unchecked_unknown() raises:
+    # Passive doctor never resolves the bridge, so
+    # receipt-bound extras report unknown, not refused;
+    # the attempt row still admits without the receipt.
+    var pdir = _receipt_profiles_dir()
+    var opts = _doctor2_opts(
+        String("tests/fixtures/scan/ok"),
+        pdir,
+        String("all"),
+        String("tests/fixtures/elf/ok.o"),
+        String("tests/fixtures/elf/lc-ok.o"),
+        String("tests/fixtures/elf/cp-ok.o"),
+    )
+    var drep = assess_doctor(opts)
+    for i in range(len(drep.caps)):
+        if drep.caps[i].id == String("conversion-observe"):
+            continue
+        if drep.caps[i].id == String("attempt-trace"):
+            assert_equal(
+                drep.caps[i].status, String("available-load-unchecked")
+            )
+        else:
+            assert_equal(drep.caps[i].status, String("unknown"))
+            assert_equal(
+                drep.caps[i].reason_code, String("bridge-unchecked")
+            )
+            assert_true(
+                contains(
+                    drep.caps[i].reason, String("bridge unchecked")
+                )
+            )
+    assert_equal(drep.verdict, String("unavailable"))
+    assert_true(contains(drep.summary, String("bridge unchecked")))
+
+
 def test_doctor2_notes() raises:
     var profiles_dir = String("tests/fixtures/scan/profiles-live")
     var ok_o = String("tests/fixtures/elf/ok.o")
@@ -976,6 +1040,7 @@ def run() raises -> Int:
     suite.test[test_doctor2_two_profile_verdict]()
     suite.test[test_doctor2_no_object]()
     suite.test[test_doctor2_precheck_fail]()
+    suite.test[test_doctor2_bridge_unchecked_unknown]()
     suite.test[test_doctor2_notes]()
     suite.test[test_doctor2_flags]()
     suite.test[test_doctor2_json_schema]()

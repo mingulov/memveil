@@ -570,6 +570,11 @@ def remedy_for(code: String) -> String:
             "the kernel verifier rejected the object;"
             " see the verifier lines above"
         )
+    if code == String("bridge-unchecked"):
+        return String(
+            "run memveil doctor --load-check or memveil record"
+            " to check the bridge"
+        )
     return String("")
 
 

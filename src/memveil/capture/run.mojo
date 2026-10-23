@@ -1009,21 +1009,26 @@ def _static_receipt_ok(
     pdir: String,
     bridge_sha: String,
     mut denied_drop: Bool,
+    mut bridge_drop: Bool,
 ) -> Bool:
     """True when a noted-doc receipt routes without privilege.
 
     Reuses receipt coverage for noted docs only; callers
     must never pass a live doc here, whose receipt check
     reads fresh live measurements behind the gate. Sets
-    denied_drop when the receipt file itself is denied.
+    denied_drop when the receipt file itself is denied,
+    bridge_drop when the receipt is blocked only by the
+    bridge.
     """
     denied_drop = False
+    bridge_drop = False
     var mism = False
     if _receipt_covers(
         doc, kernel, want, pdir, bridge_sha, mism,
         String(""), String(""), String(""), String(""),
     ):
         return True
+    bridge_drop = mism
     if pdir != String(""):
         var path = (
             default_receipts_dir(pdir)
@@ -1089,7 +1094,9 @@ def decide_record(
     falls back to the first covering doc as partial. A
     receipt blocked only by the bridge falls through to
     partial with a reason naming the bridge mismatch,
-    never local-auto. Static object failures refuse
+    never local-auto; requested extras with an unchecked
+    bridge ("") refuse unknown as bridge-unchecked
+    instead. Static object failures refuse
     everywhere; identity failures fall through in scan
     mode only. Requested extra capabilities need a
     supported declaration, a resolvable object path, and
@@ -1233,6 +1240,7 @@ def decide_record(
     elif want_extra:
         var pool = List[Int]()
         var denied_drop = False
+        var bridge_drop = False
         for i in range(len(candidates)):
             if candidates[i].status == String("validated"):
                 pool.append(i)
@@ -1240,14 +1248,18 @@ def decide_record(
                 pool.append(i)
             elif _noted_doc(candidates[i]):
                 var dd = False
+                var bd = False
                 var ok_static = _static_receipt_ok(
                     candidates[i], kernel, ask.caps, profiles_dir,
-                    bridge_sha, dd,
+                    bridge_sha, dd, bd,
                 )
                 if ok_static:
                     pool.append(i)
                 elif dd:
                     denied_drop = True
+                elif bd:
+                    bridge_drop = True
+        var bridge_open = bridge_drop and bridge_sha == String("")
         if len(pool) > 0:
             var last_gap = String("")
             var all_gapped = True
@@ -1260,8 +1272,22 @@ def decide_record(
                     break
                 last_gap = g.copy()
             if all_gapped:
+                if bridge_open:
+                    return _refuse_scan_live(
+                        String(
+                            "bridge unchecked: cannot verify receipts"
+                        ),
+                        String("bridge-unchecked"),
+                        True,
+                    )
                 return _refuse_scan(last_gap)
         elif not denied_drop:
+            if bridge_open:
+                return _refuse_scan_live(
+                    String("bridge unchecked: cannot verify receipts"),
+                    String("bridge-unchecked"),
+                    True,
+                )
             return _refuse_scan(
                 String("no profile satisfies requested capabilities")
             )
@@ -1280,6 +1306,7 @@ def decide_record(
     var order_receipt = List[Bool]()
     var order_live = List[Bool]()
     var saw_bridge_mismatch = False
+    var saw_noted_bridge_mismatch = False
     if want_explicit:
         order.append(0)
         order_receipt.append(False)
@@ -1311,6 +1338,8 @@ def decide_record(
                 order_live.append(False)
             elif mism:
                 saw_bridge_mismatch = True
+                if not _live_doc(candidates[i]):
+                    saw_noted_bridge_mismatch = True
         for i in range(len(candidates)):
             if candidates[i].status == String("validated"):
                 continue
@@ -1547,6 +1576,12 @@ def decide_record(
         return out^
     # Scan mode only: explicit always returns inside the loop.
     if want_extra:
+        if bridge_sha == String("") and saw_noted_bridge_mismatch:
+            return _refuse_scan_live(
+                String("bridge unchecked: cannot verify receipts"),
+                String("bridge-unchecked"),
+                True,
+            )
         if skip_reason == String(""):
             return _refuse_scan(
                 String("no profile satisfies requested capabilities")
@@ -1603,6 +1638,18 @@ def decide_record(
     out.tp_event = pevt.copy()
     out.selected_caps = selected.copy()
     return out^
+
+
+def loadcheck_bridge_sha(bridge: String, has_bridge: Bool) -> String:
+    """Sha256 of the resolved bridge, else "" when unreadable.
+
+    Load-check admission binds receipts to the resolved
+    bridge bytes; an unresolvable bridge leaves every
+    receipt unchecked.
+    """
+    var path = resolve_bridge(bridge, has_bridge)
+    var snap = open_bridge_snapshot(path)
+    return snap.sha.copy()
 
 
 def resolve_bridge(bridge: String, has_bridge: Bool) -> String:

@@ -554,6 +554,13 @@ def test_remedy_per_code() raises:
             " --lc-object, --cp-object"
         )
     )
+    codes.append(String("bridge-unchecked"))
+    wants.append(
+        String(
+            "run memveil doctor --load-check or memveil record"
+            " to check the bridge"
+        )
+    )
     codes.append(String("verifier-rejected"))
     wants.append(
         String(
