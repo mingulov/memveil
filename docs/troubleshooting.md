@@ -50,12 +50,14 @@ capture to clean up.
   quality: one side of a hook pair fired with no matching
   firings on the other side and no loss to explain the gap
   (for example maps with no copies). Check for another
-  tracer detaching or replacing the probes, then rerun;
-  if the cause persists, the hook pair genuinely did not
-  fire together on this kernel.
+  tracer detaching or replacing the probes, a disabled
+  tracer (`kernel.ftrace_enabled=0` silences the attempt
+  channel), and ring-full or recursion loss beyond the
+  reported terms; then rerun. If the cause persists, the
+  hook pair genuinely did not fire together on this kernel.
 - `copy liveness unverified: lifecycle not captured` in
-  detail quality: the run captured copies without the
-  lifecycle channel, so no equation can verify them. Rerun
+  detail quality: the run captured the copy channel without
+  lifecycle, so no equation can verify it. Rerun
   requesting lifecycle with copy
   (`--capability attempt-trace,mapping-lifecycle,copy-actual`).
 

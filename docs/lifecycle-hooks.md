@@ -8,8 +8,8 @@ bindings match the kernel source, config, BTF, and object
 bytes exactly, or an unbound reference document whose
 tracing interfaces verify against the running kernel (live
 tracepoint format, BTF hook signatures, ftrace
-attachability). Object statics — program set, map layout,
-ring sizes — verify in both lanes; anything else refuses.
+attachability). Object statics (program set, map layout,
+ring sizes) verify in both lanes; anything else refuses.
 
 ## Attach points
 
@@ -123,15 +123,18 @@ with `slots` at byte 56; `io_tlb_slot` size 24
 `pad_slots`@18); `device_dma_parameters` size 16
 (`max_segment_size`@0, `min_align_mask`@4);
 `device.dma_parms` at byte 632. The probes declare partial
-views of these structs. CO-RE relocates only the member
-accesses spelled with bpf_core_read (pool start, nslabs,
-slots, dev->dma_parms, min_align_mask); the bulk
-io_tlb_slot read keeps its compile-time stride and member
-offsets, and enum values, shift/mask constants, and hook
-signatures stay frozen. Layout identity therefore rides
-the whole-BTF narrow binding, which refuses admission on
-any BTF change before load; CO-RE success alone never
-establishes it.
+views of these structs and read every field through CO-RE:
+pool start, end, nslabs, and slots, then orig_addr and
+alloc_size over a relocated stride, plus dev->dma_parms and
+min_align_mask, each relocated width guarded against its
+local spelling. The direction enum resolves through BTF
+relocations (an unmapped value rides the malformed path,
+never a guessed direction); the pool span must be exactly
+nslabs slots wide or the event degrades with reason SHIFT;
+hook argument counts verify live against the frozen
+signatures. Layout identity still rides the whole-BTF
+narrow binding, which refuses admission on any BTF change
+before load; CO-RE success alone never establishes it.
 
 Argument lists are the kernel function signatures as the probes
 read them. Map and unmap probes use the (device, tlb address)
@@ -164,14 +167,19 @@ directions, flags, and reasons only.
 ## Effective-byte rule
 
 `mv_bounce` replicates the bytes the hook itself copies: it reads
-the pool slot the hook reads (`start`, `slots`, `nslabs`, then
-`orig_addr` and `alloc_size`) plus `dev->dma_parms->min_align_mask`,
-and applies the hook clamp from `bpf/include/memveil_events.h`.
-An invalid slot copies nothing (hook early return, effective 0);
-otherwise the request clamps to `alloc_size - tlb_offset` with the
-hook signed offset math, where a negative offset widens the room.
-Any failed read degrades that event to unknown-with-reason while
-the request fact (size, direction) is still emitted.
+the pool slot the hook reads (`start`, `end`, `nslabs`, `slots`,
+then `orig_addr` and `alloc_size`) plus
+`dev->dma_parms->min_align_mask`, and applies the hook clamp
+from `bpf/include/memveil_events.h`. An invalid slot copies
+nothing (hook early return, effective 0); otherwise the room
+is `alloc_size - tlb_offset` in wrapping size_t arithmetic,
+exactly like the hook: a negative offset widens the room, and
+an offset past the allocation wraps the room huge so the full
+size copies unchecked and unwarned (the event then carries the
+offset-past flag; only a request above even the wrapped room
+clamps). Any failed read degrades that event to
+unknown-with-reason while the request fact (size, direction)
+is still emitted.
 
 ## Qualified kernel constants
 
@@ -200,7 +208,15 @@ never a bare assumption:
   toggle proves the pool private. Unknown copies name one
   of SLOT_READ, MASK_READ, BOUNDS, LAYOUT, or SHIFT, where
   LAYOUT means a relocated size read mismatched its local
-  expectation.
+  expectation. Reports surface both markers as subset rows
+  (`copy_private_pool_bytes` in bytes,
+  `copy_offset_past_allocation_count` in counts), each
+  emitted only when nonzero. On 7.3 the toggle exists but
+  the default pool reads false (swiotlb.c:365-368), so
+  every default-pool copy there carries the private marker
+  on confidential and ordinary hosts alike; on 6.11 the
+  field is absent and the marker never sets. The marker is
+  a pool fact, never a confidentiality claim.
 - The argument-count counter flag is xcounter flag word
   bit 6 (`MV_FLAG_ARGCNT`, sticky). It sets when the
   observed hook argument count differs from the frozen
@@ -293,27 +309,36 @@ detail unreadable: ...` without a copy channel).
 
 After close, the collector judges five one-sided equations
 over two windows: forward F from attach to one second
-before detach, reverse R from readiness to one second
-before detach. Forward equations count causes in F and
-effects over the whole run; reverse equations count
-effects in R and causes over the whole run. The five are
-attempt->map, map->copy, copy->map, unmap->copy, and
-copy->unmap, each with a loss term of emitted-minus-tallied
-records per channel, so drain-stranded and rejected
-records are absorbed, never silent.
+before detach begins, reverse R from one second after
+readiness to one second before detach begins. Forward
+equations count causes in F and effects over the whole run;
+reverse equations count effects in R and causes over the
+whole run. The five are attempt->map, map->copy, copy->map,
+unmap->copy, and copy->unmap. Each channel carries its own
+loss term of observed-minus-read records plus its program
+recursion misses, with deferred-minus-recovered entries for
+copy, so ring-full drops, skipped runs, drain-stranded, and
+rejected records are absorbed, never silent. The term is
+known only when the miss and fallback counters are
+readable; otherwise its equations stay unverified.
 
 Per equation, an empty window or a zero left-hand side is
 not exercised; unknown loss or a saturated counter is
 unverified; a violated inequality names silent hooks; a
-held inequality is verified. Overall precedence is silent
-over unverified over verified over not exercised, and a
-copy channel without lifecycle stays unverified
-regardless. Silent and unverified verdicts append a cause
-to detail quality (partial); a verified verdict appends
-`; liveness verified` to the lifecycle and copy
-capability reasons; an unexercised verdict changes
-nothing, so captures whose records predate attach replay
-byte-identical.
+held inequality is verified. The map->copy and unmap->copy
+equations also evaluate on copy-only runs over their sync
+terms, so syncs without copies still name the dead bounce
+hook. Overall precedence is silent over unverified over
+verified over not exercised, and a copy channel without
+lifecycle stays unverified regardless. Silent and
+unverified verdicts append a cause to detail quality
+(partial); silent hooks and copies without lifecycle also
+clear the numeric loss count. Each capability reason
+carries only its own channel rollup: `; liveness verified`
+when its equations held, `; liveness hooks silent` when
+they fired. An unexercised verdict changes nothing, so
+captures whose records predate attach replay
+byte-identical. Error paths never judge liveness.
 
 Channels attach copy, then lifecycle, then attempt, and
 detach in the reverse order; inside the copy object the
