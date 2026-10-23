@@ -39,6 +39,7 @@ from memveil.cli.report import (
     refusal_stderr_lines,
     sanitize_diagnostic,
     write_stderr,
+    write_stderr_trusted,
 )
 from memveil.platform.stdout import write_stdout
 
@@ -262,8 +263,13 @@ def run_record_with(
                 result.code.copy(),
                 result.fix.copy(),
             )
+            # lines[0] is the diagnostic; only it can embed
+            # caller paths, so only it honors the scrub flag.
             for i in range(len(lines)):
-                write_stderr(lines[i].copy())
+                if result.trusted or i > 0:
+                    write_stderr_trusted(lines[i].copy())
+                else:
+                    write_stderr(lines[i].copy())
         except:
             pass
     if result.end_reason == String(""):

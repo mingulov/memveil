@@ -150,7 +150,7 @@ def scrub_paths(text: String) raises -> String:
     arguments cannot smuggle home directories or machine layout
     into logs. Basenames survive as operational identifiers. The
     rule is deliberately total: any slash token loses its head,
-    so diagnostics must not rely on slashes in prose.
+    so scrubbed lines must not rely on slashes in prose.
     """
     var raw = text.as_bytes()
     var out = List[UInt8]()
@@ -219,23 +219,13 @@ def refusal_stderr_lines(
     return out^
 
 
-def write_stderr(text: String) raises:
-    """Write text to standard error.
-
-    Raw write(2) on fd 2 with an EINTR retry loop: the
-    diagnostic follows the inherited descriptor, never the
-    /dev/stderr path, so environments that rebind that path
-    away from fd 2 cannot swallow it. Control bytes are
-    neutralized and directory components scrubbed at this
-    boundary so no present or future diagnostic can emit raw
-    terminal sequences or filesystem layout.
-    """
-    var raw = neutralize_controls(scrub_paths(text)).as_bytes()
+def _write_fd2(raw: Span[UInt8, _]) raises:
+    """Raw write(2) on fd 2 with an EINTR retry loop."""
     var total = len(raw)
     var off = 0
     while off < total:
         var n = external_call["write", Int](
-            2, Span(raw).unsafe_ptr().unsafe_offset(off), total - off
+            2, raw.unsafe_ptr().unsafe_offset(off), total - off
         )
         if n < 0:
             var p = external_call[
@@ -248,6 +238,31 @@ def write_stderr(text: String) raises:
         if n == 0:
             raise Error("stderr write returned 0")
         off += n
+
+
+def write_stderr(text: String) raises:
+    """Write text to standard error.
+
+    The diagnostic follows the inherited descriptor, never
+    the /dev/stderr path, so environments that rebind that
+    path away from fd 2 cannot swallow it. Control bytes
+    are neutralized and directory components scrubbed at
+    this boundary so no present or future diagnostic can
+    emit raw terminal sequences or filesystem layout. Use
+    it for lines that may embed caller-supplied paths.
+    """
+    _write_fd2(neutralize_controls(scrub_paths(text)).as_bytes())
+
+
+def write_stderr_trusted(text: String) raises:
+    """Write fixed text to standard error, keeping paths.
+
+    Same fd-2 write, but only control bytes are
+    neutralized: fixed reason, code, and remedy lines
+    keep their paths and commands intact. Callers must
+    never pass caller-supplied paths here.
+    """
+    _write_fd2(neutralize_controls(text).as_bytes())
 
 
 def _is_option(text: String) -> Bool:

@@ -68,6 +68,7 @@ from memveil.cli.report import (
     refusal_stderr_lines,
     sanitize_diagnostic,
     write_stderr,
+    write_stderr_trusted,
 )
 from memveil.model.event import Event
 from memveil.model.report import ENGINE_VERSION, Report
@@ -694,10 +695,15 @@ def run_top_live(opts: TopOptions) raises -> Int:
                 String("top"),
                 result.diagnostic.copy(),
                 result.code.copy(),
-                String(""),
+                result.fix.copy(),
             )
+            # lines[0] is the diagnostic; only it can embed
+            # caller paths, so only it honors the scrub flag.
             for i in range(len(lines)):
-                write_stderr(lines[i].copy())
+                if result.trusted or i > 0:
+                    write_stderr_trusted(lines[i].copy())
+                else:
+                    write_stderr(lines[i].copy())
         except:
             pass
         return result.exit_code

@@ -313,6 +313,21 @@ def _refuse_scan_live(
     return out^
 
 
+def _refusal_basename(path: String) -> String:
+    """Last path component: refusal reasons leak no layout."""
+    var b = path.as_bytes()
+    var cut = 0
+    for i in range(len(b)):
+        if b[i] == UInt8(0x2F):
+            cut = i + 1
+    if cut >= len(b):
+        return path
+    try:
+        return String(from_utf8=b[cut : len(b)])
+    except:
+        return path
+
+
 struct CapsOut(Copyable):
     """Parsed capability request: caps in order, or err."""
 
@@ -1056,7 +1071,8 @@ def decide_record(
                     break
             if not found:
                 return _refuse_scan(
-                    String("unknown --profile: ") + explicit
+                    String("unknown --profile: ")
+                    + _refusal_basename(explicit.copy())
                 )
         if not _covers(kernel, candidates[0]):
             return _refuse_scan(
@@ -1649,6 +1665,7 @@ def run_collector_with[W: WriterSource](
             String(""),
             String(""),
             False,
+            True,
         )
     if opts.max_events_bytes > MAX_RECORD_BYTES:
         return RunResult(
@@ -1657,6 +1674,7 @@ def run_collector_with[W: WriterSource](
             String(""),
             String(""),
             False,
+            True,
         )
     var bridge = resolve_bridge(opts.bridge, opts.has_bridge)
     if bridge == String(""):
@@ -1677,6 +1695,7 @@ def run_collector_with[W: WriterSource](
             String(""),
             String(""),
             False,
+            True,
         )
     # One resolution, pinned once: the snapshot's open
     # file description feeds the admission hash, the
@@ -1712,6 +1731,7 @@ def run_collector_with[W: WriterSource](
             String(""),
             String(""),
             False,
+            True,
         )
     var lc_object = resolve_object(
         String("lifecycle"), opts.lc_object, exe_path
@@ -1729,6 +1749,7 @@ def run_collector_with[W: WriterSource](
             String(""),
             String(""),
             False,
+            False,
         )
     var env = detect_environment(reader)
     if not env.kernel.eligible_floor:
@@ -1740,6 +1761,7 @@ def run_collector_with[W: WriterSource](
             String(""),
             String(""),
             False,
+            True,
         )
     var profiles: List[Profile]
     try:
@@ -1750,6 +1772,7 @@ def run_collector_with[W: WriterSource](
             String("cannot load profiles: ") + String(e),
             String(""),
             String(""),
+            False,
             False,
         )
     var decision = decide_record(
@@ -1772,6 +1795,7 @@ def run_collector_with[W: WriterSource](
             decision.fix.copy(),
             decision.refusal_code.copy(),
             decision.refusal_unknown,
+            True,
         )
     var timens = check_timens_live()
     if not timens.ok:
@@ -1781,6 +1805,7 @@ def run_collector_with[W: WriterSource](
             String(""),
             String(""),
             False,
+            True,
         )
     if timens.offset:
         return RunResult(
@@ -1789,6 +1814,7 @@ def run_collector_with[W: WriterSource](
             String(""),
             String(""),
             False,
+            True,
         )
     if (
         decision.off_loc < 0
@@ -1802,6 +1828,7 @@ def run_collector_with[W: WriterSource](
             String(""),
             String(""),
             False,
+            True,
         )
     var cfg = CollectorConfig()
     cfg.duration_s = opts.duration_s

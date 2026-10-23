@@ -474,6 +474,7 @@ def test_run_carries_fix() raises:
     assert_equal(result.fix, remedy_for(String("lockdown-confidentiality")))
     assert_equal(result.code, String("lockdown-confidentiality"))
     assert_true(not result.unknown)
+    assert_true(result.trusted)
 
 
 def test_run_carries_live_code() raises:
@@ -491,6 +492,45 @@ def test_run_carries_live_code() raises:
     assert_equal(result.code, String("ftrace-disabled"))
     assert_true(not result.unknown)
     assert_equal(result.fix, remedy_for(String("ftrace-disabled")))
+
+
+def test_run_infra_refusal_untrusted() raises:
+    # Infrastructure errors embed caller paths, so their
+    # diagnostic stays on the scrubbing write path.
+    var opts = _opts(String("build/scan-infra"))
+    var writer = ScriptWriter()
+    var result = run_collector_with(
+        String("tests/fixtures/gate/base"),
+        String("no-such-profiles-dir"),
+        opts^,
+        writer,
+    )
+    assert_equal(result.exit_code, 3)
+    assert_true(
+        result.diagnostic.startswith(String("cannot load profiles"))
+    )
+    assert_true(not result.trusted)
+
+
+def test_scan_unknown_profile_basename() raises:
+    # Refusal reasons never embed caller directory layout.
+    var d = decide_record(
+        String("tests/fixtures/gate/base"),
+        _kernel_38(),
+        load_profiles(String(_PROFILES_LIVE)),
+        String("some/dir/nonexistent.json"),
+        True,
+        String(_ELF_OK),
+        String(""),
+        String(""),
+        String("attempt-trace"),
+        String(""),
+        String(""),
+    )
+    assert_true(not d.ok)
+    assert_equal(
+        d.refusal, String("unknown --profile: nonexistent.json")
+    )
 
 
 def _live_decision(fxname: String) raises -> ScanDecision:
@@ -1505,6 +1545,8 @@ def run() raises -> Int:
     suite.test[test_scan_gate_passes_live38]()
     suite.test[test_run_carries_fix]()
     suite.test[test_run_carries_live_code]()
+    suite.test[test_run_infra_refusal_untrusted]()
+    suite.test[test_scan_unknown_profile_basename]()
     suite.test[test_scan_live_btf_truncated_unknown]()
     suite.test[test_scan_live_ftrace_disabled_fix]()
     suite.test[test_scan_live_hook_ambiguous_code]()
