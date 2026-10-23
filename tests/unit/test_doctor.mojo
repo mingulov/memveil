@@ -22,6 +22,7 @@ from memveil.cli.doctor import (
     assess_doctor,
     default_profiles_dir,
     doctor_usage,
+    precheck_demotes,
     render_doctor_json2,
     render_doctor_text2,
     resolve_profiles_dir,
@@ -822,6 +823,17 @@ def test_doctor2_precheck_fail() raises:
         assert_true(sseen)
 
 
+def test_precheck_demotes_passive_only() raises:
+    assert_true(
+        precheck_demotes(String("no-bpf-privilege"), False)
+    )
+    assert_true(
+        not precheck_demotes(String("no-bpf-privilege"), True)
+    )
+    assert_true(not precheck_demotes(String(""), False))
+    assert_true(not precheck_demotes(String(""), True))
+
+
 def _receipt_profiles_dir() raises -> String:
     """Tmp profiles dir with only the ref-lc receipt profile."""
     var tmpdir = String("build/test-tmp/i8-profiles")
@@ -1027,6 +1039,7 @@ def run() raises -> Int:
     suite.test[test_doctor2_two_profile_verdict]()
     suite.test[test_doctor2_no_object]()
     suite.test[test_doctor2_precheck_fail]()
+    suite.test[test_precheck_demotes_passive_only]()
     suite.test[test_doctor2_bridge_unchecked_unknown]()
     suite.test[test_doctor2_notes]()
     suite.test[test_doctor2_flags]()

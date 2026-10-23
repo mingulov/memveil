@@ -556,6 +556,15 @@ def _load_kind(cap_id: String) -> String:
     return String("")
 
 
+def precheck_demotes(fail_code: String, loading: Bool) -> Bool:
+    """True when a failed pre-check demotes an admitted row.
+
+    Passive only: under ``--load-check`` the load itself
+    decides, so the row stays admitted into the load phase.
+    """
+    return fail_code != String("") and not loading
+
+
 def _no_bridge_detail() -> String:
     """Missing-bridge detail, matching the record refusal."""
     if is_privileged(live_uids()):
@@ -777,7 +786,7 @@ def assess_doctor(opts: DoctorOptions) -> DoctorReport2:
                 )
             out.caps.append(entry^)
             continue
-        if fail_code != String(""):
+        if precheck_demotes(fail_code, loading):
             entry.status = String("unavailable")
             entry.reason = _clip_n(fail_reason, 512)
             entry.reason_code = fail_code.copy()
