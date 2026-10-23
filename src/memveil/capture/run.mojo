@@ -60,9 +60,7 @@ from memveil.platform.hash import sha256_hex
 from memveil.platform.kernelgate import (
     GateVerdict,
     kernel_gate,
-    probe_tracefs,
     remedy_for,
-    tracefs_translate,
 )
 from memveil.platform.narrow import (
     MAX_NARROW_BTF_BYTES,
@@ -111,6 +109,7 @@ from memveil.platform.runtime import (
     live_uids,
 )
 from memveil.platform.signal import LiveSignalSource
+from memveil.platform.tracefs import probe_tracefs, tracefs_translate
 
 comptime DEFAULT_DURATION_S = UInt64(60)
 # A default capture always replays under the default report cap.

@@ -16,7 +16,6 @@ from memveil.capture.normalize import bytes_to_hex
 from memveil.platform.btf import MAX_KERNEL_BTF_BYTES
 from memveil.platform.gzip import gunzip_member
 from memveil.platform.hash import sha256_hex
-from memveil.platform.kernelgate import probe_tracefs, tracefs_translate
 from memveil.platform.reader import (
     EVIDENCE_DENIED,
     EVIDENCE_OK,
@@ -27,6 +26,7 @@ from memveil.platform.reader import (
     read_evidence,
     read_host_file,
 )
+from memveil.platform.tracefs import probe_tracefs, tracefs_translate
 
 comptime _ZLIB = "libz.so.1"
 comptime MAX_NARROW_CONFIG_BYTES = 8388608

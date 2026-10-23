@@ -988,6 +988,20 @@ PYEOF
 }
 
 suite_profiles() {
+    # Platform layering: the tracefs probe is a leaf
+    # module, so narrow never imports the gate and the
+    # leaf imports only the evidence reader.
+    if grep -q "from memveil.platform.kernelgate import" \
+        "$ROOT/src/memveil/platform/narrow.mojo"; then
+        echo "profiles: narrow imports kernelgate (cycle)" >&2
+        return 1
+    fi
+    if grep "^from memveil" \
+        "$ROOT/src/memveil/platform/tracefs.mojo" \
+        | grep -qv "memveil.platform.reader"; then
+        echo "profiles: tracefs leaf imports past reader" >&2
+        return 1
+    fi
     run_unit_file tests/unit/test_profiles.mojo || return 1
     run_unit_file tests/unit/test_kernelgate.mojo || return 1
     run_unit_file tests/unit/test_narrow.mojo || return 1

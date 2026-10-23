@@ -13,11 +13,9 @@ from memveil.platform.kernelgate import (
     LockdownState,
     count_filter_function,
     kernel_gate,
-    probe_tracefs,
     read_ftrace_enabled,
     read_lockdown,
     remedy_for,
-    tracefs_translate,
 )
 from memveil.platform.profiles import (
     Profile,
@@ -25,6 +23,7 @@ from memveil.platform.profiles import (
     verify_live_interfaces,
 )
 from memveil.platform.reader import open_evidence_reader, read_host_file
+from memveil.platform.tracefs import probe_tracefs, tracefs_translate
 
 
 def gate(name: String) -> String:

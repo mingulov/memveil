@@ -24,10 +24,14 @@ from memveil.platform.reader import (
     file_state,
     read_evidence,
 )
+from memveil.platform.tracefs import (
+    TRACEFS_SYS,
+    TracefsProbe,
+    probe_tracefs,
+    tracefs_translate,
+)
 
 
-comptime TRACEFS_DEBUG = "/sys/kernel/debug/tracing"
-comptime TRACEFS_SYS = "/sys/kernel/tracing"
 comptime MAX_FILTER_FUNCS_BYTES = 8388608
 comptime HOOK_STATE_UNREADABLE = 3
 
@@ -36,94 +40,6 @@ comptime _FTRACE_CAP = 1024
 comptime _FTRACE_TEXT_KEEP = 64
 comptime _LOCKDOWN_CAP = 4096
 comptime _CMDLINE_CAP = 65536
-
-
-struct TracefsProbe(Copyable):
-    """One tracefs location probe: root, events state, mount word."""
-
-    var root: String
-    var has_root: Bool
-    var events: Int
-    var mounted: String
-
-    def __init__(out self):
-        self.root = String("")
-        self.has_root = False
-        self.events = EVIDENCE_ABSENT
-        self.mounted = String("unknown")
-
-
-def probe_tracefs(reader: EvidenceReader) -> TracefsProbe:
-    """Locate the tracefs root in libbpf's probe order.
-
-    The debugfs tree wins when it exists, else the sys
-    tree; the events state and the mount word (yes, no,
-    or unknown) come from the live tree and /proc/mounts.
-    """
-    var out = TracefsProbe()
-    if exists_f_ok(reader, TRACEFS_DEBUG):
-        out.root = TRACEFS_DEBUG
-        out.has_root = True
-    elif exists_f_ok(reader, TRACEFS_SYS):
-        out.root = TRACEFS_SYS
-        out.has_root = True
-    if out.has_root:
-        out.events = file_state(reader, out.root + String("/events"))
-    var mounts = List[UInt8]()
-    try:
-        mounts = read_evidence(reader, String("/proc/mounts"), _MOUNTS_CAP)
-    except:
-        out.mounted = String("unknown")
-        return out^
-    var text = bytes_to_text(mounts^)
-    var lines = text.split(String("\n"))
-    var yes = False
-    for i in range(len(lines)):
-        var fields = String(lines[i]).split(String(" "))
-        if len(fields) < 3:
-            continue
-        var where = String(fields[1])
-        var fstype = String(fields[2])
-        if out.has_root and where == out.root and fstype == String(
-            "tracefs"
-        ):
-            yes = True
-            break
-        if (
-            out.has_root
-            and out.root == TRACEFS_DEBUG
-            and where == String("/sys/kernel/debug")
-            and fstype == String("debugfs")
-        ):
-            yes = True
-            break
-    if yes:
-        out.mounted = String("yes")
-    else:
-        out.mounted = String("no")
-    return out^
-
-
-def tracefs_translate(probe: TracefsProbe, path: String) -> String:
-    """Map a /sys/kernel/tracing profile path onto the live root.
-
-    Paths outside the sys tracefs prefix, and every path
-    without a probed root, pass through unchanged.
-    """
-    if not probe.has_root:
-        return path
-    if path == TRACEFS_SYS:
-        return probe.root.copy()
-    var prefix = String(TRACEFS_SYS) + String("/")
-    if not path.startswith(prefix):
-        return path
-    var pb = path.as_bytes()
-    var rest = String("")
-    try:
-        rest = String(from_utf8=pb[prefix.byte_length() : len(pb)])
-    except:
-        return path
-    return probe.root + String("/") + rest
 
 
 struct HookCount(Copyable):

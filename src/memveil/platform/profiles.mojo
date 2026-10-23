@@ -48,10 +48,8 @@ from memveil.platform.evidence import KernelInfo, parse_kernel_triple
 from memveil.platform.kernelgate import (
     MAX_FILTER_FUNCS_BYTES,
     filter_line_counts,
-    probe_tracefs,
     read_ftrace_enabled,
     read_ftrace_text,
-    tracefs_translate,
 )
 from memveil.platform.narrow import (
     MAX_NARROW_BTF_BYTES,
@@ -75,6 +73,7 @@ from memveil.platform.reader import (
     read_evidence,
     read_host_file,
 )
+from memveil.platform.tracefs import probe_tracefs, tracefs_translate
 from memveil.render.json import escape_json
 
 
