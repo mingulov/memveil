@@ -503,19 +503,17 @@ static int check_eff_vector(uint32_t idx, const uint8_t *input,
     return 0;
 }
 
-/* Line-for-line transliteration of the swiotlb_bounce length
- * rule (kernel/dma/swiotlb.c): an int tlb_offset, then
- * alloc_size -= tlb_offset with size_t wrap, then the request
- * clamps only when above the room. Independent oracle for
- * mv_effective_bytes. */
+/* Kernel-body transliteration yielding length, clamp, and the kernel's own offset. */
 static __u64 kernel_bounce_len(__u64 tlb_addr, __u64 orig, __u32 mask,
-                              __u64 alloc, __u64 size, int *clamped)
+                              __u64 alloc, __u64 size, int *clamped,
+                              int *koff)
 {
     int tlb_offset;
     size_t room;
 
     tlb_offset = (int)(tlb_addr & 2047u) -
                  (int)(orig & mask & 2047u);
+    *koff = tlb_offset;
     room = (size_t)alloc;
     room -= tlb_offset;
     if ((size_t)size > room) {
@@ -526,8 +524,7 @@ static __u64 kernel_bounce_len(__u64 tlb_addr, __u64 orig, __u32 mask,
     return size;
 }
 
-/* Sweep the replicated rule against the transliteration over
- * tlb/orig low bits, align masks, allocations, and sizes. */
+/* Sweep sizes, masks, allocations, and low bits against the transliteration. */
 static int check_kernel_bounce_sweep(void)
 {
     static const __u64 tlb_lo[] = { 0, 1, 0x1ff, 0x200, 0x7ff };
@@ -553,17 +550,20 @@ static int check_kernel_bounce_sweep(void)
                     for (m = 0; m < sizeof(sizes) / sizeof(sizes[0]);
                          m++) {
                         struct mv_effective got;
-                        int want_clamped, want_past;
+                        int want_clamped, want_past, koff;
                         __u64 want;
 
                         want = kernel_bounce_len(tlb_addr, orig,
                                                  masks[k], allocs[l],
                                                  sizes[m],
-                                                 &want_clamped);
+                                                 &want_clamped,
+                                                 &koff);
+                        if (off != koff)
+                            return fail("tld offset diverges");
                         got = mv_effective_bytes(sizes[m], off,
                                                  allocs[l], 1);
                         want_past =
-                            off > 0 && (__u64)off > allocs[l];
+                            koff > 0 && (__u64)koff > allocs[l];
                         if (off < 0)
                             neg++;
                         if (want_past)
