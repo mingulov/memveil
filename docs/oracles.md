@@ -75,10 +75,16 @@ records. It covers owned pages only, never real guest memory.
 ## Kernel matrix oracle (`tools/kernel-matrix`)
 
 Boots each kernel pinned in `tests/vm/kernels.lock.json`
-under virtme-ng with forced swiotlb and a fixed O_DIRECT
-workload, then compares every admitted channel against a
-bpftrace per-CPU `count()` oracle attached to the same
-tracepoint and hooks. A row passes only when the guest
+under virtme-ng with forced swiotlb and a fixed phased
+O_DIRECT workload (aligned reads, misaligned reads,
+writes to a scratch disk, concurrent readers), then
+compares every admitted channel against a bpftrace
+per-CPU `count()` oracle attached to the same tracepoint
+and hooks. Before measuring, the guest settles udev and
+shuts its daemon down: udevd otherwise re-reads the
+scratch partition table when the write phase closes the
+device, and that guest self-IO is removed rather than
+folded into the totals. A row passes only when the guest
 boots the locked kernel, the workload sits inside the
 capture window, each channel shortfall fits that channel
 memveil misses plus transport loss, reported loss fits
@@ -90,7 +96,29 @@ the tracepoint, and the block layer sector delta times
 512. Count floor and ceiling derive from those measured
 block bytes, never from workload constants.
 `tools/validate-schemas` checks each capture, and block
-sectors tracking the reads proves the workload ran.
+sectors tracking the reads proves the workload ran. The
+map and copy oracle probes also split counts by DMA
+direction, so original-to-bounce copies must equal maps
+and bounce-to-original copies must equal read maps
+exactly, within attributed loss. On rows without BTF the
+oracle runs count-only (no tracepoint arguments) and a
+tracefs `hist:key=size` trigger supplies the independent
+byte total instead; when no byte source works the row
+asserts counts only with bytes recorded unproven. A
+second busy capture runs 4 pre-faulted O_DIRECT readers
+for 20 s under the product-maximum events-bytes cap
+(4 GiB, so the default 1 GiB cap cannot end the window
+early), stops the record with
+SIGINT and the load with SIGTERM. Its verdict comes from
+its own session window and loss counters, never the main
+capture: a numeric claim gets strict per-channel lower
+bounds, an unknown partial gets honesty only, and a
+complete aggregate claim must match its counter deltas
+against the oracle. The busy load must span record
+spawn to exit, the busy capture is schema-validated and
+reported with an explicit read cap, and its 1 GB events
+file is replaced by per-kind counts plus a sha256 after
+evaluation.
 
 Scope limits:
 
@@ -100,9 +128,10 @@ Scope limits:
   equality of both sides against block accounting, and the
   independent oracle byte counter bound that shared risk;
   they do not remove it.
-- Only the fixed dd workload is compared. Nothing here
-  qualifies other traffic shapes, other devices, or
-  sustained pressure.
+- Only the fixed phased workload and the 20 s busy
+  capture are compared. Nothing here qualifies other
+  traffic shapes, other devices, or longer sustained
+  pressure.
 - Correlation quality stays partial (copy and sync events
   unattributed to mappings); the matrix compares counts
   and bytes, never pairing.
@@ -111,6 +140,16 @@ Scope limits:
 
 Run through the `vm-kernels` lane with a built deb (see
 the boot verification recipe in `docs/support.md`).
+
+Row sources: `archive` rows boot Ubuntu mainline builds
+fetched by virtme-ng; `built` rows are compiled from a
+pinned kernel.org tarball plus tracked config fragments by
+`tools/kernel-build` and prove their identity with the
+decompressed `/proc/config.gz` hash; `distro` rows unpack
+pinned distribution packages with `tools/kernel-fetch` and
+prove theirs with the `/proc/version` banner. A row may
+carry extra boot arguments; the guest proves each one took
+effect.
 
 ## Fuzz oracle (`tests/fuzz/run.py`)
 

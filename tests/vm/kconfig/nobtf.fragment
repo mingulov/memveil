@@ -1,0 +1,2 @@
+# Matrix BTF-less row: same config as the BTF twin, BTF off
+CONFIG_DEBUG_INFO_BTF=n

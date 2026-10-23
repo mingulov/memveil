@@ -8,6 +8,7 @@ controlled fixture bytes.
 
 import json
 import os
+import re
 import sys
 
 import pytest
@@ -15,10 +16,11 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import kernel_matrix as km
+import kernel_matrix_guest as guest
 
 
 def _lock_entry(verdicts=None, omitted=None, vng="v6.6.160",
-                release="6.6.160-0606160-generic"):
+                release="6.6.160-0606160-generic", source=None):
     if verdicts is None:
         verdicts = {
             "attempt-trace": {"verdict": "admitted",
@@ -30,24 +32,84 @@ def _lock_entry(verdicts=None, omitted=None, vng="v6.6.160",
         }
     if omitted is None:
         omitted = []
+    if source is None:
+        source = {
+            "kind": "archive",
+            "vng_version": vng,
+            "archive_date": "2026-10-21 11:32",
+            "vmlinuz_sha256": "a" * 64,
+            "modules_manifest_sha256": "b" * 64,
+        }
     return {
         "id": "6.6",
-        "vng_version": vng,
         "upstream": vng[1:],
-        "archive_date": "2026-10-21 11:32",
         "release": release,
-        "vmlinuz_sha256": "a" * 64,
-        "modules_manifest_sha256": "b" * 64,
         "expected": verdicts,
         "oracle": {"omitted": omitted},
+        "source": source,
     }
+
+
+def _built_source():
+    frags = ["tests/vm/kconfig/base.fragment",
+             "tests/vm/kconfig/nobtf.fragment"]
+    return {
+        "kind": "built",
+        "tarball_url": "https://cdn.kernel.org/pub/linux/kernel/"
+                       "v6.x/linux-6.12.114.tar.xz",
+        "tarball_sha256": "c" * 64,
+        "fragments": frags,
+        "fragments_sha256": {frag: "d" * 64 for frag in frags},
+        "toolchain": {"gcc": "gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0",
+                      "ld": "GNU ld (GNU Binutils for Ubuntu) 2.46",
+                      "pahole": "v1.31", "gzip": "gzip 1.14",
+                      "vng": "virtme-ng 1.41"},
+        "config_sha256": "e" * 64,
+        "bzimage_sha256": "f" * 64,
+        "modules_manifest_sha256": "1" * 64,
+    }
+
+
+def _built_entry():
+    entry = _lock_entry()
+    entry["id"] = "6.12.114-btf"
+    entry["release"] = "6.12.114-mv-6.12.114-btf"
+    entry["upstream"] = "6.12.114"
+    entry["source"] = _built_source()
+    return entry
+
+
+def _distro_source():
+    return {
+        "kind": "distro",
+        "packages": [{"url": "https://snapshot.debian.org/debian/"
+                             "pool/main/l/linux/linux-image-6.12.57"
+                             "-amd64-unsigned_6.12.57-1_amd64.deb",
+                      "sha256": "2" * 64}],
+        "vmlinuz_member": "./boot/vmlinuz-6.12.57-amd64",
+        "vmlinuz_sha256": "3" * 64,
+        "modules_manifest_sha256": "4" * 64,
+        "config_sha256": "5" * 64,
+        "banner": "Linux version 6.12.57-amd64 (debian-kernel@"
+                  "lists.debian.org) (gcc-14 14.2.0) #1 SMP "
+                  "Debian 6.12.57-1 (2026-01-01)",
+    }
+
+
+def _distro_entry():
+    entry = _lock_entry()
+    entry["id"] = "debian13"
+    entry["release"] = "6.12.57-amd64"
+    entry["upstream"] = "6.12.57"
+    entry["source"] = _distro_source()
+    return entry
 
 
 def _lock_doc(entries=None):
     if entries is None:
         entries = [_lock_entry()]
     return {
-        "schema": "memveil-kernel-matrix/1",
+        "schema": "memveil-kernel-matrix/2",
         "recorded_on": "2026-10-22",
         "archive": "https://kernel.ubuntu.com/mainline",
         "archive_queried": "2026-10-22",
@@ -68,7 +130,7 @@ def test_parse_valid_lock(tmp_path):
 
 def test_parse_rejects_bad_schema(tmp_path):
     doc = _lock_doc()
-    doc["schema"] = "memveil-kernel-matrix/2"
+    doc["schema"] = "memveil-kernel-matrix/1"
     path = tmp_path / "kernels.lock.json"
     path.write_text(json.dumps(doc))
     with pytest.raises(km.LockError):
@@ -77,7 +139,7 @@ def test_parse_rejects_bad_schema(tmp_path):
 
 def test_parse_rejects_bad_sha(tmp_path):
     entry = _lock_entry()
-    entry["vmlinuz_sha256"] = "xyz"
+    entry["source"]["vmlinuz_sha256"] = "xyz"
     path = tmp_path / "kernels.lock.json"
     path.write_text(json.dumps(_lock_doc([entry])))
     with pytest.raises(km.LockError):
@@ -380,15 +442,35 @@ def test_parse_committed_lock():
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "kernels.lock.json")
     doc = km.parse_lock(path)
-    assert len(doc["kernels"]) == 11
+    assert len(doc["kernels"]) == 20
     assert doc["tools"]["bpftrace"].startswith("bpftrace v")
     assert doc["tools"]["bpftool"].startswith("bpftool v")
     by_id = {e["id"]: e for e in doc["kernels"]}
     for ident in ("5.15", "6.0", "6.6", "6.10"):
         assert by_id[ident]["oracle"]["omitted"] == [
             "unmap", "syncc", "syncd"]
-    for ident in ("6.11", "6.12", "6.18", "7.0", "7.1", "7.2", "7.3"):
+    for ident in ("6.11", "6.12", "6.12.114-btf", "6.12.114-nobtf",
+                  "6.12.114-rt", "6.12.114-debug", "6.12.0",
+                  "6.18", "6.18.0", "7.0", "7.1", "7.2",
+                  "7.3-rc3", "7.3", "debian13"):
         assert by_id[ident]["oracle"]["omitted"] == []
+    assert sorted(
+        by_id["7.0.14-lockdown"]["oracle"]["omitted"]) == [
+            "copy", "map", "syncc", "syncd", "tp", "unmap"]
+
+
+def test_lock_has_every_matrix_row():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "kernels.lock.json")
+    doc = km.parse_lock(path)
+    ids = {e["id"] for e in doc["kernels"]}
+    assert ids == {
+        "5.15", "6.0", "6.6", "6.10", "6.11", "6.12",
+        "6.12.114-btf", "6.12.114-nobtf", "6.12.114-rt",
+        "6.12.114-debug", "6.12.0", "6.18", "6.18.0", "7.0",
+        "7.0.14-lockdown", "7.1", "7.2", "7.3-rc3", "7.3",
+        "debian13",
+    }
 
 
 def test_parse_rejects_vng_tag_with_suffix(tmp_path):
@@ -461,6 +543,207 @@ def test_release_agrees_with_upstream():
     assert not km.release_agrees_with_upstream("bogus", "6.6.160")
 
 
+def _write_lock(tmp_path, doc):
+    path = tmp_path / "kernels.lock.json"
+    path.write_text(json.dumps(doc))
+    return str(path)
+
+
+def test_lock_v2_archive_row_roundtrip(tmp_path):
+    got = km.parse_lock(_write_lock(tmp_path, _lock_doc()))
+    src = got["kernels"][0]["source"]
+    assert src["kind"] == "archive"
+    assert src["vng_version"] == "v6.6.160"
+    assert got["kernels"][0]["release"] == "6.6.160-0606160-generic"
+
+
+def test_lock_v2_built_row_requires_every_hash(tmp_path):
+    km.parse_lock(_write_lock(tmp_path, _lock_doc([_built_entry()])))
+    for field in ("tarball_sha256", "config_sha256",
+                  "bzimage_sha256", "modules_manifest_sha256"):
+        entry = _built_entry()
+        del entry["source"][field]
+        with pytest.raises(km.LockError):
+            km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+    entry = _built_entry()
+    entry["source"]["fragments_sha256"] = {}
+    with pytest.raises(km.LockError):
+        km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+    entry = _built_entry()
+    frag = entry["source"]["fragments"][0]
+    entry["source"]["fragments_sha256"][frag] = "xyz"
+    with pytest.raises(km.LockError):
+        km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+
+
+def test_lock_v2_distro_row_requires_banner_and_packages(tmp_path):
+    km.parse_lock(_write_lock(tmp_path, _lock_doc([_distro_entry()])))
+    entry = _distro_entry()
+    del entry["source"]["banner"]
+    with pytest.raises(km.LockError):
+        km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+    entry = _distro_entry()
+    entry["source"]["banner"] = "not a banner"
+    with pytest.raises(km.LockError):
+        km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+    entry = _distro_entry()
+    entry["source"]["packages"] = []
+    with pytest.raises(km.LockError):
+        km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+    entry = _distro_entry()
+    entry["source"]["packages"][0]["sha256"] = "xyz"
+    with pytest.raises(km.LockError):
+        km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+
+
+def test_lock_v2_unknown_key_fails(tmp_path):
+    km.parse_lock(_write_lock(tmp_path, _lock_doc()))
+    doc = _lock_doc()
+    doc["surprise"] = 1
+    with pytest.raises(km.LockError):
+        km.parse_lock(_write_lock(tmp_path, doc))
+    entry = _lock_entry()
+    entry["surprise"] = 1
+    with pytest.raises(km.LockError):
+        km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+    entry = _lock_entry()
+    entry["source"]["surprise"] = 1
+    with pytest.raises(km.LockError):
+        km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+
+
+def test_lock_v2_boot_append_allow_list(tmp_path):
+    entry = _lock_entry()
+    entry["boot_append"] = ["lockdown=confidentiality"]
+    km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+    entry = _lock_entry()
+    entry["boot_append"] = ["quiet"]
+    with pytest.raises(km.LockError):
+        km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+    entry = _lock_entry()
+    entry["boot_append"] = "lockdown=confidentiality"
+    with pytest.raises(km.LockError):
+        km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+
+
+def test_release_dot_zero_mapping(tmp_path):
+    assert km.release_agrees_with_upstream(
+        "6.12.0-061200-generic", "6.12.0")
+    assert km.release_agrees_with_upstream(
+        "6.12.0-061200-generic", "6.12")
+    assert km.release_agrees_with_upstream(
+        "6.12-061200-generic", "6.12.0")
+    assert not km.release_agrees_with_upstream(
+        "6.12.1-061200-generic", "6.12")
+    assert not km.release_agrees_with_upstream(
+        "6.12-061200-generic", "6.12.1")
+    entry = _lock_entry(vng="v6.12",
+                        release="6.12.0-061200-generic")
+    entry["upstream"] = "6.12.0"
+    km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+    entry["upstream"] = "6.12.1"
+    with pytest.raises(km.LockError):
+        km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+
+
+def test_release_agrees_debian_local_suffix():
+    assert km.release_agrees_with_upstream(
+        "6.12.107+deb13-amd64", "6.12.107")
+    assert not km.release_agrees_with_upstream(
+        "6.12.108+deb13-amd64", "6.12.107")
+
+
+def _valid_built_cache(tmp_path, monkeypatch):
+    entry = _built_entry()
+    monkeypatch.setenv("MV_KCACHE", str(tmp_path / "kcache"))
+    rowdir = tmp_path / "kcache" / entry["id"]
+    boot = rowdir / "boot"
+    mods = rowdir / "lib" / "modules" / entry["release"] / "kernel"
+    mods.mkdir(parents=True)
+    boot.mkdir(parents=True)
+    vmlinuz = boot / ("vmlinuz-" + entry["release"])
+    vmlinuz.write_bytes(b"fake-bzimage")
+    (mods / "nvme.ko").write_bytes(b"fake-module")
+    (rowdir / "config").write_text("CONFIG_X=y\n")
+    src = entry["source"]
+    src["bzimage_sha256"] = km.sha_file(str(vmlinuz))
+    mods_root = rowdir / "lib" / "modules" / entry["release"]
+    src["modules_manifest_sha256"], _ = km.modules_manifest_sha(
+        str(mods_root))
+    src["config_sha256"] = km.sha_file(str(rowdir / "config"))
+    return entry, str(vmlinuz)
+
+
+def test_verify_entry_cache_config_drift_fails(tmp_path, monkeypatch):
+    entry, kernel = _valid_built_cache(tmp_path, monkeypatch)
+    ok, why, got = km.verify_entry_cache("/nonexistent", entry)
+    assert ok, why
+    assert got == kernel
+    rowdir = os.path.join(os.environ["MV_KCACHE"], entry["id"])
+    with open(os.path.join(rowdir, "config"), "w") as handle:
+        handle.write("CONFIG_Y=n\n")
+    ok, why, got = km.verify_entry_cache("/nonexistent", entry)
+    assert not ok
+    assert "config" in why
+    assert not got
+
+
+def test_verify_entry_cache_modules_drift_fails(tmp_path, monkeypatch):
+    entry, _ = _valid_built_cache(tmp_path, monkeypatch)
+    ok, why, _ = km.verify_entry_cache("/nonexistent", entry)
+    assert ok, why
+    rowdir = os.path.join(os.environ["MV_KCACHE"], entry["id"])
+    mod = os.path.join(rowdir, "lib", "modules", entry["release"],
+                       "kernel", "nvme.ko")
+    with open(mod, "wb") as handle:
+        handle.write(b"tampered")
+    ok, why, got = km.verify_entry_cache("/nonexistent", entry)
+    assert not ok
+    assert "modules" in why
+    assert not got
+
+
+def test_verify_entry_cache_missing_says_build(tmp_path, monkeypatch):
+    monkeypatch.setenv("MV_KCACHE", str(tmp_path / "kcache"))
+    ok, why, got = km.verify_entry_cache(
+        "/nonexistent", _built_entry())
+    assert not ok
+    assert "tools/kernel-build" in why
+    assert not got
+    ok, why, got = km.verify_entry_cache(
+        "/nonexistent", _distro_entry())
+    assert not ok
+    assert "tools/kernel-fetch" in why
+    assert not got
+
+
+def test_verify_entry_cache_archive_checks_hashes(tmp_path, monkeypatch):
+    monkeypatch.delenv("MV_KCACHE", raising=False)
+    home = tmp_path / "home"
+    entry = _lock_entry()
+    base = home / ".cache" / "virtme-ng" / "v6.6.160" / "amd64"
+    boot = base / "boot"
+    mods = base / "lib" / "modules" / entry["release"] / "kernel"
+    mods.mkdir(parents=True)
+    boot.mkdir(parents=True)
+    vmlinuz = boot / ("vmlinuz-" + entry["release"])
+    vmlinuz.write_bytes(b"fake-vmlinuz")
+    (mods / "nvme.ko").write_bytes(b"fake-module")
+    src = entry["source"]
+    src["vmlinuz_sha256"] = km.sha_file(str(vmlinuz))
+    mods_root = base / "lib" / "modules" / entry["release"]
+    src["modules_manifest_sha256"], _ = km.modules_manifest_sha(
+        str(mods_root))
+    ok, why, target = km.verify_entry_cache(str(home), entry)
+    assert ok, why
+    assert target == "v6.6.160"
+    vmlinuz.write_bytes(b"tampered")
+    ok, why, target = km.verify_entry_cache(str(home), entry)
+    assert not ok
+    assert "vmlinuz" in why
+    assert not target
+
+
 def test_omitted_mismatch_fails():
     fails = km.check_omitted([], ["copy"], ["attempt-trace"])
     assert fails
@@ -498,6 +781,26 @@ def _workload(first=1100, last=1900):
     for i in range(4):
         lines.append("par%d start %d" % (i, first + 40 + i))
         lines.append("par%d end %d rc=%d" % (i, last, 0))
+    return "\n".join(lines) + "\n"
+
+
+def _workload_v2(first=1100, last=1900, read_ios=128,
+                 write_ios=64, reader_ios=64):
+    tags = [("read0", read_ios, 0),
+            ("read512", read_ios, 512),
+            ("write512", write_ios, 512)]
+    tags += [("readers-%d" % i, reader_ios, 0)
+             for i in range(km.WORKLOAD_GROUPS)]
+    bounds = [first + i * (last - first) // len(tags)
+              for i in range(len(tags) + 1)]
+    lines = []
+    for (tag, ios, mod), start, end in zip(tags, bounds,
+                                           bounds[1:]):
+        lines.append("phase %s start_ns %d end_ns %d "
+                     "bytes %d ios %d"
+                     % (tag, start, end, ios * 1048576,
+                        ios))
+        lines.append("buf %s mod4096=%d" % (tag, mod))
     return "\n".join(lines) + "\n"
 
 
@@ -541,6 +844,38 @@ def test_workload_garbage_fails():
         km.parse_workload("nothing here\n")
 
 
+def test_parse_workload_v2_phases():
+    parsed = km.parse_workload_v2(_workload_v2(1100, 1900))
+    assert parsed["first_start"] == 1100
+    assert parsed["last_end"] == 1900
+    assert parsed["read_bytes"] == _RBYTES
+    assert parsed["write_bytes"] == _WBYTES
+    assert len(parsed["phases"]) == 3 + km.WORKLOAD_GROUPS
+    ok, detail = km.check_workload_window(parsed, 1000, 2000)
+    assert ok, detail
+    with pytest.raises(ValueError):
+        km.parse_workload_v2("phase read0 start_ns 1 "
+                             "end_ns 2 bytes 3 ios 4\n")
+    with pytest.raises(ValueError):
+        km.parse_workload_v2("garbage\n")
+
+
+def test_buf_offset_checked_per_phase():
+    parsed = km.parse_workload_v2(_workload_v2(1100, 1900))
+    assert km.check_workload_phases(parsed) == []
+    bad = km.parse_workload_v2(
+        _workload_v2(1100, 1900).replace(
+            "buf read512 mod4096=512",
+            "buf read512 mod4096=0"))
+    fails = km.check_workload_phases(bad)
+    assert len(fails) == 1 and "read512" in fails[0]
+    bad = km.parse_workload_v2(
+        _workload_v2(1100, 1900).replace(
+            "bytes 67108864 ios 64", "bytes 1 ios 64", 1))
+    fails = km.check_workload_phases(bad)
+    assert len(fails) == 1 and "write512" in fails[0]
+
+
 def test_zero_traffic_floor_fails():
     bounds = {"attempt": (0, 0)}
     fails = km.check_channel_floors(bounds, ["attempt"],
@@ -562,6 +897,9 @@ def test_floor_above_bound_fails_one_channel():
 
 
 _BYTES768 = 805306368
+_RBYTES = 640 * 1048576
+_WBYTES = 64 * 1048576
+_TBYTES = _RBYTES + _WBYTES
 
 
 def test_count_floor_from_block_bytes():
@@ -609,40 +947,216 @@ def _byte_sums(req=_BYTES768, mapped=_BYTES768, sync=_BYTES768,
 
 def test_memveil_bytes_exact_passes():
     assert km.check_memveil_bytes(
-        _byte_sums(), _BYTES768, 0, _CHANNELS5) == []
+        _byte_sums(), _BYTES768, 0, 0, _CHANNELS5) == []
 
 
 def test_memveil_bytes_over_fails():
     sums = _byte_sums(req=_BYTES768 + 512)
     fails = km.check_memveil_bytes(
-        sums, _BYTES768, 10 * 262144, _CHANNELS5)
+        sums, _BYTES768, 0, 10 * 262144, _CHANNELS5)
     assert len(fails) == 1 and "requested" in fails[0]
 
 
 def test_memveil_bytes_short_within_allowance_passes():
     sums = _byte_sums(mapped=_BYTES768 - 262144)
     assert km.check_memveil_bytes(
-        sums, _BYTES768, 262144, _CHANNELS5) == []
+        sums, _BYTES768, 0, 262144, _CHANNELS5) == []
 
 
 def test_memveil_bytes_short_beyond_allowance_fails():
     sums = _byte_sums(mapped=_BYTES768 - 262144 - 1)
     fails = km.check_memveil_bytes(
-        sums, _BYTES768, 262144, _CHANNELS5)
+        sums, _BYTES768, 0, 262144, _CHANNELS5)
     assert len(fails) == 1 and "mapped" in fails[0]
 
 
 def test_memveil_bytes_copy_direction_short_fails():
     sums = _byte_sums(cbo=_BYTES768 - 512)
     fails = km.check_memveil_bytes(
-        sums, _BYTES768, 0, _CHANNELS5)
+        sums, _BYTES768, 0, 0, _CHANNELS5)
     assert len(fails) == 1 and "bounce_to_original" in fails[0]
 
 
 def test_memveil_bytes_absent_channel_skipped():
     sums = _byte_sums(req=0, mapped=0, sync=0, cob=0, cbo=0)
     assert km.check_memveil_bytes(
-        sums, _BYTES768, 0, ["unmap"]) == []
+        sums, _BYTES768, 0, 0, ["unmap"]) == []
+
+
+def test_write_direction_formulas():
+    # kernel/dma: every map bounces original to bounce
+    # on the map path; reads bounce back on unmap/sync
+    # (7.3 swiotlb.c:1625,1729; block writes map
+    # TO_DEVICE and reads FROM_DEVICE, blk-mq.h:248).
+    read, write = 100 * 1048576, 40 * 1048576
+    maps = 140
+    sums = {"requested": read + write,
+            "mapped": read + write, "sync": read + write,
+            "copy": {"original_to_bounce": read + write,
+                     "bounce_to_original": read}}
+    assert km.check_memveil_bytes(sums, read, write, 0,
+                                  _CHANNELS5) == []
+    short = dict(sums["copy"])
+    short["original_to_bounce"] -= 1048576
+    fails = km.check_memveil_bytes(dict(sums, copy=short),
+                                   read, write, 0,
+                                   _CHANNELS5)
+    assert len(fails) == 1
+    assert "original_to_bounce" in fails[0]
+    over = dict(sums["copy"])
+    over["bounce_to_original"] += 1048576
+    fails = km.check_memveil_bytes(dict(sums, copy=over),
+                                   read, write, 0,
+                                   _CHANNELS5)
+    assert len(fails) == 1
+    assert "bounce_to_original" in fails[0]
+    read_maps = 100
+    dirs = {"original_to_bounce": maps,
+            "bounce_to_original": read_maps}
+    assert km.check_copy_direction_counts(
+        dirs, maps + read_maps, maps, read_maps,
+        read_maps, 0, 0) == []
+    under = dict(dirs, original_to_bounce=maps - 1)
+    assert km.check_copy_direction_counts(
+        under, maps + read_maps - 1, maps, read_maps,
+        read_maps, 0, 0)
+    over = dict(dirs, original_to_bounce=maps + 1)
+    assert km.check_copy_direction_counts(
+        over, maps + read_maps + 1, maps, read_maps,
+        read_maps, 0, 0)
+    under = dict(dirs, bounce_to_original=read_maps - 1)
+    assert km.check_copy_direction_counts(
+        under, maps + read_maps - 1, maps, read_maps,
+        read_maps, 0, 0)
+    over = dict(dirs, bounce_to_original=read_maps + 1)
+    assert km.check_copy_direction_counts(
+        over, maps + read_maps + 1, maps, read_maps,
+        read_maps, 0, 0)
+    assert km.check_copy_direction_counts(
+        dirs, maps + read_maps + 1, maps, read_maps,
+        read_maps, 0, 0)
+
+
+def test_copy_direction_short_within_loss_passes():
+    dirs = {"original_to_bounce": 139,
+            "bounce_to_original": 97}
+    assert km.check_copy_direction_counts(
+        dirs, 236, 140, 100, 100, 2, 1) == []
+    short = dict(dirs, bounce_to_original=96)
+    assert km.check_copy_direction_counts(
+        short, 235, 140, 100, 100, 2, 1)
+
+
+def _dir_lines(o2b, b2o):
+    lines = []
+    for _ in range(o2b):
+        lines.append(_event_line(
+            "copy", {"direction": "original_to_bounce",
+                     "bytes": "8"}))
+    for _ in range(b2o):
+        lines.append(_event_line(
+            "copy", {"direction": "bounce_to_original",
+                     "bytes": "8"}))
+    lines.append(_event_line("map_result",
+                             {"mapped_bytes": "8"}))
+    return lines
+
+
+def test_persisted_copy_dirs_counts_per_direction():
+    dirs = km.persisted_copy_dirs(_dir_lines(3, 2))
+    assert dirs == {"original_to_bounce": 3,
+                    "bounce_to_original": 2}
+
+
+def test_persisted_copy_dirs_rejects_bad_direction():
+    with pytest.raises(ValueError):
+        km.persisted_copy_dirs([_event_line(
+            "copy", {"direction": "sideways",
+                     "bytes": "8"})])
+
+
+def _dir_iv(read, write):
+    maps = read + write
+    mapd = {0: (0, 0), 1: (write, write),
+            2: (read, read), 3: (0, 0)}
+    copyd = {0: (0, 0), 1: (maps, maps),
+             2: (read, read), 3: (0, 0)}
+    return (maps, maps), mapd, (maps + read, maps + read), \
+        copyd
+
+
+def test_oracle_direction_formulas():
+    args = _dir_iv(10000, 3000)
+    assert km.check_oracle_direction_formulas(
+        *args, 0, 0) == []
+    args = _dir_iv(10000, 3000)
+    bad = dict(args[3])
+    bad[1] = (13001, 13001)
+    assert km.check_oracle_direction_formulas(
+        args[0], args[1], args[2], bad, 0, 0)
+    args = _dir_iv(10000, 3000)
+    bad = dict(args[3])
+    bad[1] = (12999, 12999)
+    assert km.check_oracle_direction_formulas(
+        args[0], args[1], args[2], bad, 0, 0)
+    args = _dir_iv(10000, 3000)
+    bad = dict(args[3])
+    bad[2] = (10001, 10001)
+    assert km.check_oracle_direction_formulas(
+        args[0], args[1], args[2], bad, 0, 0)
+    args = _dir_iv(10000, 3000)
+    bad = dict(args[3])
+    bad[2] = (9999, 9999)
+    assert km.check_oracle_direction_formulas(
+        args[0], args[1], args[2], bad, 0, 0)
+    args = _dir_iv(10000, 3000)
+    bad = dict(args[1])
+    bad[1] = (3001, 3001)
+    assert km.check_oracle_direction_formulas(
+        args[0], bad, args[2], args[3], 0, 0)
+    args = _dir_iv(10000, 3000)
+    bad = dict(args[1])
+    bad[0] = (0, 1)
+    assert km.check_oracle_direction_formulas(
+        args[0], bad, args[2], args[3], 0, 0)
+    args = _dir_iv(10000, 3000)
+    bad = dict(args[3])
+    bad[3] = (0, 1)
+    assert km.check_oracle_direction_formulas(
+        args[0], args[1], args[2], bad, 0, 0)
+    args = _dir_iv(10000, 3000)
+    assert km.check_oracle_direction_formulas(
+        args[0], args[1], (22999, 22999), args[3],
+        0, 0)
+
+
+def test_oracle_direction_miss_slack_exact():
+    args = _dir_iv(10000, 3000)
+    bad = dict(args[3])
+    bad[1] = (12995, 12995)
+    total = (22995, 22995)
+    assert km.check_oracle_direction_formulas(
+        args[0], args[1], total, bad, 0, 5) == []
+    assert km.check_oracle_direction_formulas(
+        args[0], args[1], total, bad, 0, 4)
+
+
+def test_oracle_program_reports_copy_directions():
+    prog = km.build_oracle_program()
+    assert "@mapd[args.dir] = count()" in prog
+    assert "@copyd[args.dir] = count()" in prog
+    for key in ("mapd0", "mapd1", "mapd2", "mapd3",
+                "copyd0", "copyd1", "copyd2",
+                "copyd3"):
+        assert "%s=%%llu" % key in prog
+    prog = km.build_oracle_program(omitted=["map"])
+    assert "@mapd" not in prog
+    assert "mapd0" not in prog
+    assert "copyd0" in prog
+    prog = km.build_oracle_program(omitted=["copy"])
+    assert "@copyd" not in prog
+    assert "copyd0" not in prog
+    assert "mapd0" in prog
 
 
 def _tpb_samples(final):
@@ -691,6 +1205,112 @@ def test_oracle_bytes_missing_key_fails():
                (2000, {"tp": 100}), (2100, {"tp": 100})]
     assert km.check_oracle_bytes(
         samples, _no_miss(), 1000, 2000, _BYTES768)
+
+
+def _hist_text(buckets, dropped=0):
+    lines = ["# event histogram",
+             "Totals:", "    Hits: %d" % sum(
+                 count for _, count in buckets),
+             "    Entries: %d" % len(buckets),
+             "    Dropped: %d" % dropped]
+    for size, count in buckets:
+        lines.append("{ size: %d } hitcount: %d"
+                     % (size, count))
+    return "\n".join(lines) + "\n"
+
+
+def test_parse_hist_totals_sums_buckets():
+    assert km.parse_hist_totals(_hist_text([])) == (0, 0)
+    assert km.parse_hist_totals(
+        _hist_text([(262144, 2816), (4096, 2)])) == (
+            2818, 262144 * 2816 + 8192)
+
+
+def test_parse_hist_totals_rejects_drops_and_garbage():
+    with pytest.raises(ValueError):
+        km.parse_hist_totals(_hist_text([], dropped=1))
+    with pytest.raises(ValueError):
+        km.parse_hist_totals("no totals here\n")
+    with pytest.raises(ValueError):
+        km.parse_hist_totals(
+            _hist_text([(262144, 1)]) + "junk {{{ \n")
+
+
+def test_check_hist_bytes_exact_passes():
+    before = _hist_text([])
+    after = _hist_text([(262144, 2816)])
+    assert km.check_hist_bytes(before, after,
+                               262144 * 2816, 2816,
+                               2816) == []
+
+
+def test_check_hist_bytes_mismatch_fails():
+    before = _hist_text([])
+    after = _hist_text([(262144, 2816)])
+    assert km.check_hist_bytes(before, after,
+                               262144 * 2816 + 1, 2816,
+                               2816)
+    assert km.check_hist_bytes(before, after,
+                               262144 * 2816 - 1, 2816,
+                               2816)
+    assert km.check_hist_bytes(before, after,
+                               262144 * 2816, 2817,
+                               2817)
+    assert km.check_hist_bytes(before, before,
+                               262144 * 2816, 2816,
+                               2816)
+    assert km.check_hist_bytes(after, before,
+                               262144 * 2816, 2816,
+                               2816)
+
+
+def test_oracle_program_count_only_drops_args():
+    prog = km.build_oracle_program(count_only=True)
+    assert "@tp = count()" in prog
+    assert "sum(args.size)" not in prog
+    assert "tpb" not in prog
+    prog = km.build_oracle_program(
+        omitted=["map", "unmap", "copy", "syncc", "syncd"],
+        count_only=True)
+    assert "@tp = count()" in prog
+    assert "args" not in prog
+    prog = km.build_oracle_program(omitted=["tp"],
+                                   count_only=True)
+    assert "swiotlb_bounced" not in prog
+    assert "@tp = count()" not in prog
+
+
+def test_select_oracle_mode():
+    assert guest.select_oracle_mode(True, ["tp"]) == "full"
+    assert guest.select_oracle_mode(
+        True, ["tp", "map"]) == "full"
+    assert guest.select_oracle_mode(
+        False, ["tp"]) == "countonly"
+    with pytest.raises(ValueError):
+        guest.select_oracle_mode(False, ["tp", "map"])
+
+
+def _fake_tracefs(path):
+    event = path / "events" / "swiotlb" / "swiotlb_bounced"
+    event.mkdir(parents=True)
+    (event / "trigger").write_text("")
+    (event / "enable").write_text("0\n")
+    (event / "hist").write_text(_hist_text([]))
+    return event
+
+
+def test_guest_hist_install_and_snapshot(tmp_path):
+    event = _fake_tracefs(tmp_path)
+    guest.hist_install(str(event))
+    assert (event / "trigger").read_text() == \
+        "hist:key=size\n"
+    assert (event / "enable").read_text() == "1\n"
+    assert guest.hist_snapshot(str(event)) == \
+        (event / "hist").read_text()
+    guest.hist_remove(str(event))
+    assert (event / "trigger").read_text() == \
+        "!hist:key=size\n"
+    guest.hist_remove(str(tmp_path / "missing"))
 
 
 _LOSS7 = ("detail loss 6 (submit_fail=(0) malformed=(0) dropped=(0) "
@@ -1144,11 +1764,17 @@ def test_persisted_invariants_skew_fails():
 
 
 def test_persisted_copy_ratio_fails():
-    persisted = dict(_persisted7())
-    persisted["copy"] = 25000
-    attributed = {"attempt": 0, "map": 6, "unmap": 0, "copy": 0,
-                  "sync": 0}
-    assert km.check_persisted_invariants(persisted, attributed)
+    # Exact direction split: 12994 read maps need
+    # 12994 + 12994 copies (7.3 swiotlb.c:1625,1729).
+    maps = 12994
+    dirs = {"original_to_bounce": maps,
+            "bounce_to_original": maps}
+    assert km.check_copy_direction_counts(
+        dirs, 2 * maps, maps, maps, maps, 0, 6) == []
+    short = {"original_to_bounce": maps,
+             "bounce_to_original": 25000 - maps}
+    assert km.check_copy_direction_counts(
+        short, 25000, maps, maps, maps, 0, 6)
 
 
 def test_oracle_invariants_overlap_pass():
@@ -1166,10 +1792,14 @@ def test_oracle_invariants_disjoint_fails():
 
 
 def test_oracle_copy_ratio_fails():
-    bounds = {"attempt": (12800, 13000), "map": (12800, 13000),
-              "unmap": (12800, 13000), "copy": (100, 200),
-              "sync": (12800, 13000)}
-    assert km.check_oracle_invariants(bounds)
+    args = _dir_iv(10000, 3000)
+    bad = dict(args[3])
+    bad[2] = (100, 200)
+    assert km.check_oracle_direction_formulas(
+        args[0], args[1], args[2], bad, 0, 0)
+    args = _dir_iv(10000, 3000)
+    assert km.check_oracle_direction_formulas(
+        *args, 0, 0) == []
 
 
 def test_parse_blockstat_sectors():
@@ -1177,20 +1807,546 @@ def test_parse_blockstat_sectors():
     assert km.parse_blockstat(text) == 20736
 
 
+def test_parse_blockstat_write_sectors():
+    text = "2592 0 20736 120 5 0 44032 60 0 0 0 0 0 0 0\n"
+    assert km.parse_blockstat_write(text) == 44032
+    with pytest.raises(ValueError):
+        km.parse_blockstat_write("short")
+
+
 def test_sectors_nominal_pass():
-    before, after = 1000000, 1000000 + 6 * 128 * 2048
-    ok, detail = km.check_sectors(before, after, 128)
+    ok, detail = km.check_sectors(
+        1000000, 1000000 + 640 * 2048,
+        2000000, 2000000 + 64 * 2048,
+        640 * 1048576, 64 * 1048576)
     assert ok, detail
 
 
 def test_sectors_no_progress_fails():
-    ok, _ = km.check_sectors(1000000, 1000000, 128)
+    ok, _ = km.check_sectors(1000000, 1000000, 2000000,
+                             2000000, 640 * 1048576,
+                             64 * 1048576)
     assert not ok
 
 
 def test_sectors_far_over_expected_fails():
-    ok, _ = km.check_sectors(0, 6 * 128 * 2048 * 4, 128)
+    ok, _ = km.check_sectors(0, 640 * 2048 * 2, 2000000,
+                             2000000 + 64 * 2048,
+                             640 * 1048576, 64 * 1048576)
     assert not ok
+
+
+def test_check_sectors_exact_per_device():
+    ok, detail = km.check_sectors(0, 640 * 2048, 0,
+                                  64 * 2048, 640 * 1048576,
+                                  64 * 1048576)
+    assert ok, detail
+    ok, _ = km.check_sectors(0, 640 * 2048 + 1, 0,
+                             64 * 2048, 640 * 1048576,
+                             64 * 1048576)
+    assert not ok
+    ok, _ = km.check_sectors(0, 640 * 2048, 0,
+                             64 * 2048 - 1, 640 * 1048576,
+                             64 * 1048576)
+    assert not ok
+
+
+def test_check_idle_sides_zeros_pass():
+    assert km.check_idle_sides(50, 50, 70, 70) == []
+
+
+def test_check_idle_sides_activity_fails():
+    assert km.check_idle_sides(50, 51, 70, 70)
+    assert km.check_idle_sides(50, 50, 70, 71)
+    assert km.check_idle_sides(51, 50, 70, 70)
+
+
+def test_check_idle_sides_unrecorded_fails():
+    assert km.check_idle_sides(None, None, None, None)
+    assert km.check_idle_sides(50, 50, None, None)
+
+
+def test_parse_blockstat_v2_idle_sides_optional():
+    old = json.dumps(
+        {"data": {"dev": "nvme0n1", "read_before": 1,
+                  "read_after": 2},
+         "scratch": {"dev": "nvme1n1",
+                     "write_before": 3,
+                     "write_after": 4}})
+    assert km.parse_blockstat_v2(old) == (
+        "nvme0n1", 1, 2, "nvme1n1", 3, 4,
+        None, None, None, None)
+    new = json.dumps(
+        {"data": {"dev": "nvme0n1", "read_before": 1,
+                  "read_after": 2, "write_before": 5,
+                  "write_after": 6},
+         "scratch": {"dev": "nvme1n1",
+                     "write_before": 3,
+                     "write_after": 4, "read_before": 7,
+                     "read_after": 8}})
+    assert km.parse_blockstat_v2(new) == (
+        "nvme0n1", 1, 2, "nvme1n1", 3, 4, 5, 6, 7, 8)
+
+
+_BUSY_UNKNOWN = ("detail loss unknown (drain budget "
+                  "exhausted; known: submit_fail=(11478752) "
+                  "malformed=(0) dropped=(0) "
+                  "recursion_missed=(3218) size_omitted=(0) "
+                  "duration_omitted=(0) signal_omitted=(100101) "
+                  "rejected=(0) write_failed=(0))")
+
+
+def _unknown_text(cause="drain budget exhausted", **over):
+    vals = {key: over.get(key, 0) for key in _LOSS_KEYS}
+    parts = " ".join("%s=(%d)" % (key, vals[key])
+                     for key in _LOSS_KEYS)
+    return "detail loss unknown (%s; known: %s)" % (
+        cause, parts)
+
+
+def test_parse_detail_loss_unknown_shape():
+    parsed = km.parse_detail_loss_unknown(_BUSY_UNKNOWN)
+    assert parsed["cause"] == "drain budget exhausted"
+    assert parsed["submit_fail"] == 11478752
+    assert parsed["recursion_missed"] == 3218
+    assert parsed["signal_omitted"] == 100101
+    assert parsed["malformed"] == 0
+
+
+def test_parse_detail_loss_unknown_rejects_garbage():
+    with pytest.raises(ValueError):
+        km.parse_detail_loss_unknown("loss unknown")
+    with pytest.raises(ValueError):
+        km.parse_detail_loss_unknown(_LOSS7)
+    with pytest.raises(ValueError):
+        km.parse_detail_loss_unknown(
+            _unknown_text(cause="has; semicolon"))
+    with pytest.raises(ValueError):
+        km.parse_detail_loss_unknown(
+            "detail loss unknown (drain budget "
+            "exhausted; known: submit_fail=(1))")
+
+
+def _busy2_samples():
+    rows = []
+    for stamp, add in ((2000000000, 0), (5000000000, 1000),
+                       (23000000000, 3500),
+                       (26000000000, 3500)):
+        rows.append((stamp, {
+            "tp": 13000 + add, "map": 13000 + add,
+            "unmap": 13000 + add,
+            "copy": 25990 + 2 * add,
+            "syncc": 13000 + add, "syncd": 0,
+            "tpb": _TBYTES + add * 65536}))
+    return rows
+
+
+def _busy2_miss(extra=None):
+    snaps = [(4000000000, []), (6000000000, []),
+             (24000000000, [])]
+    if extra:
+        stamp, progs = snaps[1]
+        snaps[1] = (stamp, progs + extra)
+    return km.parse_miss_samples(snaps)
+
+
+def _busy2_persisted(scale=2500):
+    return {"bounce_attempt": scale, "map_result": scale,
+            "unmap": scale, "copy": 2 * scale,
+            "sync_request": scale}
+
+
+def _busy2_session(status="complete_for_scope",
+                   loss_count="0", reason=None,
+                   agg=("complete_for_scope", "0"),
+                   recovered="0"):
+    if reason is None:
+        reason = _loss_text()
+    return {"capture": {"window": {"start_ns": "5000000000",
+                                   "end_ns": "23000000000"}},
+            "quality": {
+                "detail": {"status": status,
+                           "loss_count": loss_count,
+                           "reason": reason},
+                "aggregate": {"status": agg[0],
+                              "loss_count": agg[1]}},
+            "environment": {"evidence": [
+                {"type": "provenance",
+                 "source": "copy.deferred",
+                 "interpretation": "0"},
+                {"type": "provenance",
+                 "source": "copy.recovered",
+                 "interpretation": recovered}]}}
+
+
+def _busy2_counters(scale=2500):
+    return {"swiotlb.bounce_attempts": scale,
+            "swiotlb.requested_bytes": scale * 65536}
+
+
+def _busy2_decide(persisted=None, session=None,
+                  counters="dflt", miss=None):
+    if persisted is None:
+        persisted = _busy2_persisted()
+    if session is None:
+        session = _busy2_session()
+    if counters == "dflt":
+        counters = _busy2_counters()
+    if miss is None:
+        miss = _busy2_miss()
+    return km.decide_busy(persisted, _busy2_samples(),
+                          miss, 5000000000, 23000000000,
+                          _CHANNELS5, session, counters)
+
+
+def test_decide_busy_complete_exact_passes():
+    per, overall, failed, _ = _busy2_decide()
+    assert not failed, per
+    assert overall == "EXACT"
+
+
+def test_decide_busy_uses_busy_session_loss():
+    persisted = _busy2_persisted()
+    persisted["map_result"] = 2494
+    session = _busy2_session(
+        loss_count="6",
+        reason=_loss_text(submit_fail=6))
+    per, overall, failed, _ = _busy2_decide(
+        persisted, session)
+    assert not failed, per
+    assert overall == "SHORT-COVERED"
+    session = _busy2_session()
+    per, overall, failed, _ = _busy2_decide(
+        persisted, session)
+    assert failed, per
+    assert overall == "SHORT-UNCOVERED"
+
+
+def test_decide_busy_complete_short_beyond_fails():
+    persisted = _busy2_persisted()
+    persisted["map_result"] = 2493
+    session = _busy2_session(
+        loss_count="6",
+        reason=_loss_text(submit_fail=6))
+    per, overall, failed, _ = _busy2_decide(
+        persisted, session)
+    assert failed, per
+    assert per["map"].startswith("SHORT-UNCOVERED")
+
+
+def test_decide_busy_complete_over_fails():
+    persisted = _busy2_persisted()
+    persisted["map_result"] = 2501
+    per, overall, failed, _ = _busy2_decide(persisted)
+    assert failed, per
+    assert per["map"].startswith("MORE THAN ORACLE")
+
+
+def test_decide_busy_complete_empty_fails():
+    persisted = _busy2_persisted()
+    persisted["sync_request"] = 0
+    per, overall, failed, _ = _busy2_decide(persisted)
+    assert failed, per
+    assert "empty" in per["sync"]
+
+
+def test_decide_busy_complete_over_reported_fails():
+    session = _busy2_session(
+        loss_count="100",
+        reason=_loss_text(submit_fail=100))
+    per, overall, failed, _ = _busy2_decide(
+        session=session)
+    assert failed, per
+    assert overall == "OVER-REPORTED"
+
+
+def test_decide_busy_unknown_honesty_passes():
+    persisted = _busy2_persisted(scale=1000)
+    session = _busy2_session(
+        status="partial", loss_count=None,
+        reason=_unknown_text(submit_fail=10),
+        agg=("partial", None))
+    per, overall, failed, _ = _busy2_decide(
+        persisted, session, counters=None)
+    assert not failed, per
+    assert overall == "HONEST"
+
+
+def test_decide_busy_unknown_empty_fails():
+    persisted = _busy2_persisted(scale=1000)
+    persisted["sync_request"] = 0
+    session = _busy2_session(
+        status="partial", loss_count=None,
+        reason=_unknown_text(submit_fail=10),
+        agg=("partial", None))
+    per, overall, failed, _ = _busy2_decide(
+        persisted, session, counters=None)
+    assert failed, per
+    assert "empty" in per["sync"]
+
+
+def test_decide_busy_unknown_over_fails():
+    persisted = _busy2_persisted()
+    persisted["map_result"] = 2501
+    session = _busy2_session(
+        status="partial", loss_count=None,
+        reason=_unknown_text(submit_fail=10),
+        agg=("partial", None))
+    per, overall, failed, _ = _busy2_decide(
+        persisted, session, counters=None)
+    assert failed, per
+    assert per["map"].startswith("MORE THAN ORACLE")
+
+
+def test_decide_busy_unknown_over_reported_fails():
+    session = _busy2_session(
+        status="partial", loss_count=None,
+        reason=_unknown_text(submit_fail=100),
+        agg=("partial", None))
+    per, overall, failed, _ = _busy2_decide(
+        session=session, counters=None)
+    assert failed, per
+    assert overall == "OVER-REPORTED"
+
+
+def test_decide_busy_omits_not_credited():
+    persisted = _busy2_persisted()
+    persisted["map_result"] = 2495
+    session = _busy2_session(
+        loss_count="10",
+        reason=_loss_text(signal_omitted=10))
+    per, _, failed, _ = _busy2_decide(
+        persisted, session)
+    assert failed, per
+    assert per["map"].startswith("SHORT-UNCOVERED")
+    session = _busy2_session(
+        status="partial", loss_count=None,
+        reason=_unknown_text(signal_omitted=10),
+        agg=("partial", None))
+    per, _, failed, _ = _busy2_decide(
+        session=session, counters=None)
+    assert not failed, per
+
+
+def test_decide_busy_allowance_not_pooled():
+    persisted = _busy2_persisted()
+    persisted["map_result"] = 2490
+    persisted["bounce_attempt"] = 2490
+    session = _busy2_session(
+        loss_count="10",
+        reason=_loss_text(submit_fail=10))
+    per, overall, failed, _ = _busy2_decide(
+        persisted, session)
+    assert not failed, per
+    assert overall == "SHORT-COVERED"
+
+
+def test_decide_busy_claim_unproven_fails():
+    per, overall, failed, _ = _busy2_decide(
+        session=_busy2_session(loss_count=None))
+    assert failed
+    assert overall == "CLAIM-UNPROVEN"
+    per, overall, failed, _ = _busy2_decide(
+        session=_busy2_session(
+            status="partial", loss_count="5",
+            reason=_loss_text()))
+    assert failed
+    assert overall == "CLAIM-UNPROVEN"
+    per, overall, failed, _ = _busy2_decide(
+        session=_busy2_session(
+            reason=_unknown_text()))
+    assert failed
+    assert overall == "CLAIM-UNPROVEN"
+
+
+def test_decide_busy_aggregate_mismatch_fails():
+    counters = {"swiotlb.bounce_attempts": 100,
+                "swiotlb.requested_bytes": 100 * 65536}
+    per, overall, failed, _ = _busy2_decide(
+        counters=counters)
+    assert failed, per
+    assert overall == "AGGREGATE-MISMATCH"
+
+
+def test_decide_busy_aggregate_missing_fails():
+    per, overall, failed, _ = _busy2_decide(
+        counters=None)
+    assert failed, per
+    assert overall == "AGGREGATE-MISMATCH"
+
+
+def test_decide_busy_aggregate_bytes_mismatch_fails():
+    counters = {"swiotlb.bounce_attempts": 2500,
+                "swiotlb.requested_bytes": 1}
+    per, overall, failed, _ = _busy2_decide(
+        counters=counters)
+    assert failed, per
+    assert overall == "AGGREGATE-MISMATCH"
+
+
+def test_parse_busy_span():
+    parsed = km.parse_busy_span(
+        "phase busy start_ns 100 end_ns 200 bytes 300 "
+        "ios 3\nbuf busy mod4096=0\n")
+    assert parsed == {"start": 100, "end": 200, "ios": 3}
+    with pytest.raises(ValueError):
+        km.parse_busy_span("no phase here\n")
+
+
+def test_check_busy_span():
+    span = {"start": 100, "end": 300, "ios": 5}
+    assert km.check_busy_span(span, 200, 250) == []
+    assert km.check_busy_span(span, 100, 250)
+    assert km.check_busy_span(span, 200, 300)
+    assert km.check_busy_span(dict(span, ios=0), 200,
+                              250)
+
+
+def test_busy_settle_tied_to_edge_gap():
+    assert km.BUSY_SETTLE_NS == 2 * km.MAX_EDGE_GAP_NS
+
+
+def test_check_toolchain_names_gzip_and_vng_drift():
+    want = {"gcc": "g", "ld": "l", "pahole": "p",
+            "gzip": "z", "vng": "v"}
+    km.check_toolchain(dict(want), dict(want))
+    got = dict(want, gzip="other")
+    with pytest.raises(km.HostError) as err:
+        km.check_toolchain(want, got)
+    assert "gzip" in str(err.value)
+    got = dict(want, vng="other")
+    with pytest.raises(km.HostError) as err:
+        km.check_toolchain(want, got)
+    assert "vng" in str(err.value)
+
+
+def test_lock_v2_built_row_requires_toolchain_inputs(
+        tmp_path):
+    entry = _built_entry()
+    entry["source"]["toolchain"]["gzip"] = "gzip 1.14"
+    entry["source"]["toolchain"]["vng"] = "virtme-ng 1.41"
+    km.parse_lock(_write_lock(tmp_path, _lock_doc([entry])))
+    for name in ("gzip", "vng"):
+        bad = _built_entry()
+        bad["source"]["toolchain"]["gzip"] = "gzip 1.14"
+        bad["source"]["toolchain"]["vng"] = "virtme-ng 1.41"
+        del bad["source"]["toolchain"][name]
+        with pytest.raises(km.LockError):
+            km.parse_lock(
+                _write_lock(tmp_path, _lock_doc([bad])))
+
+
+def test_shrink_busy_events_replaces_with_summary(
+        tmp_path):
+    cap = tmp_path / "busy" / "cap"
+    cap.mkdir(parents=True)
+    text = '{"kind": "bounce_attempt"}\n{"kind": "copy"}\n'
+    events = cap / "events.ndjson"
+    events.write_text(text)
+    want_sha = km.sha_file(str(events))
+    summary, error = km.shrink_busy_events(
+        str(tmp_path / "busy"))
+    assert error is None
+    assert summary["counts"] == {"bounce_attempt": 1,
+                                 "copy": 1}
+    assert summary["sha256"] == want_sha
+    assert summary["bytes"] == len(text.encode())
+    assert not events.exists()
+    assert (tmp_path / "busy" /
+            "events_summary.json").is_file()
+
+
+def test_shrink_busy_events_keeps_unparseable(tmp_path):
+    cap = tmp_path / "busy" / "cap"
+    cap.mkdir(parents=True)
+    events = cap / "events.ndjson"
+    events.write_text("not json\n")
+    summary, error = km.shrink_busy_events(
+        str(tmp_path / "busy"))
+    assert summary is None
+    assert error
+    assert events.is_file()
+    assert not (tmp_path / "busy" /
+                "events_summary.json").exists()
+
+
+def test_shrink_busy_events_missing_file(tmp_path):
+    (tmp_path / "busy" / "cap").mkdir(parents=True)
+    summary, error = km.shrink_busy_events(
+        str(tmp_path / "busy"))
+    assert summary is None
+    assert error
+
+
+def _counter_lines(pairs):
+    lines = []
+    for seq, (ident, epoch, value) in enumerate(pairs):
+        lines.append(_event_line(
+            "counter_snapshot",
+            {"counter_id": ident, "epoch": str(epoch),
+             "value": str(value), "unit": "count"}))
+    lines.append(_event_line("map_result",
+                             {"mapped_bytes": "8"}))
+    return lines
+
+
+def test_counter_deltas_sums_epochs():
+    lines = _counter_lines(
+        [("swiotlb.bounce_attempts", 0, 0),
+         ("swiotlb.bounce_attempts", 0, 2500),
+         ("swiotlb.bounce_attempts", 1, 10),
+         ("swiotlb.bounce_attempts", 1, 20)])
+    assert km.counter_deltas(lines) == \
+        {"swiotlb.bounce_attempts": 2510}
+
+
+def test_counter_deltas_rejects_backwards():
+    lines = _counter_lines(
+        [("swiotlb.bounce_attempts", 0, 100),
+         ("swiotlb.bounce_attempts", 0, 50)])
+    with pytest.raises(ValueError):
+        km.counter_deltas(lines)
+
+
+def test_counter_deltas_rejects_malformed():
+    with pytest.raises(ValueError):
+        km.counter_deltas(["not json\n"])
+    with pytest.raises(ValueError):
+        km.counter_deltas([_event_line(
+            "counter_snapshot", {"counter_id": "x"})])
+
+
+def test_find_nvme_by_serial(tmp_path):
+    root = tmp_path / "sys" / "block"
+    for dev, serial in (("nvme0n1", "mv1"),
+                        ("nvme1n1", "mv0")):
+        path = root / dev / "device"
+        path.mkdir(parents=True)
+        (path / "serial").write_text(serial + "\n")
+    strroot = str(root)
+    assert guest.find_nvme_by_serial(
+        "mv0", strroot) == "/dev/nvme1n1"
+    assert guest.find_nvme_by_serial(
+        "mv1", strroot) == "/dev/nvme0n1"
+    assert guest.find_nvme_by_serial("mv9", strroot) is None
+
+
+def test_scratch_image_outside_export(tmp_path):
+    disk = str(tmp_path / "build" / "vm" / "disk.img")
+    export = str(tmp_path / "out" / "7.0")
+    scratch = km.scratch_img_path(disk, "7.0")
+    assert scratch == str(tmp_path / "build" / "vm" /
+                          "scratch-7.0.img")
+    assert not scratch.startswith(export + os.sep)
+
+
+def test_qemu_drive_opt_serial_and_mode():
+    opt = km.qemu_drive_opt("/d.img", drive_id="d1",
+                            serial="mv1", readonly=False)
+    assert "serial=mv1" in opt
+    assert "id=d1" in opt
+    assert "readonly" not in opt
+    assert "cache=none" in opt
 
 
 def test_expected_record_refusal_global_floor():
@@ -1369,6 +2525,111 @@ def test_boot_identity_substring_swiotlb_fails():
     ok, _ = km.check_boot_identity(
         uname, _mods7(), "7.0.14-070014-generic", _CACHE7)
     assert not ok
+
+
+def _built_eval_entry():
+    entry = _admitted_entry()
+    entry["source"] = {"kind": "built",
+                       "config_sha256": "c" * 64}
+    return entry
+
+
+def _distro_eval_entry():
+    entry = _admitted_entry()
+    entry["source"] = {"kind": "distro",
+                       "banner": "Linux version test"}
+    return entry
+
+
+def test_boot_identity_built_config_mismatch_fails():
+    ev = _ev_pass()
+    ev["entry"] = _built_eval_entry()
+    ev["configid_text"] = "c" * 64 + "\n"
+    rec = km.evaluate_row(ev)
+    assert rec["ok"], json.dumps(rec["checks"], indent=1)
+    ev["configid_text"] = "0" * 64 + "\n"
+    rec = km.evaluate_row(ev)
+    assert not rec["ok"]
+    assert not _check(rec, "boot_config")["ok"]
+
+
+def test_boot_identity_built_no_config_fails():
+    ev = _ev_pass()
+    ev["entry"] = _built_eval_entry()
+    ev["configid_text"] = "absent\n"
+    rec = km.evaluate_row(ev)
+    assert not rec["ok"]
+    assert not _check(rec, "boot_config")["ok"]
+    ev["configid_text"] = None
+    rec = km.evaluate_row(ev)
+    assert not rec["ok"]
+    assert not _check(rec, "boot_config")["ok"]
+
+
+def test_boot_identity_distro_banner_mismatch_fails():
+    ev = _ev_pass()
+    ev["entry"] = _distro_eval_entry()
+    ev["version_text"] = "Linux version test\n"
+    rec = km.evaluate_row(ev)
+    assert rec["ok"], json.dumps(rec["checks"], indent=1)
+    ev["version_text"] = "Linux version other\n"
+    rec = km.evaluate_row(ev)
+    assert not rec["ok"]
+    assert not _check(rec, "boot_banner")["ok"]
+    ev["version_text"] = None
+    rec = km.evaluate_row(ev)
+    assert not _check(rec, "boot_banner")["ok"]
+
+
+def test_boot_append_not_in_cmdline_fails():
+    ev = _ev_pass()
+    entry = _admitted_entry()
+    entry["boot_append"] = ["lockdown=confidentiality"]
+    ev["entry"] = entry
+    rec = km.evaluate_row(ev)
+    assert not rec["ok"]
+    assert not _check(rec, "boot_append")["ok"]
+    ev["uname_text"] = _uname7("quiet swiotlb=131072,force "
+                               "lockdown=confidentiality")
+    ev["lockdown_text"] = "none integrity [confidentiality]\n"
+    rec = km.evaluate_row(ev)
+    assert rec["ok"], json.dumps(rec["checks"], indent=1)
+
+
+def test_lockdown_not_effective_fails():
+    ev = _ev_pass()
+    entry = _admitted_entry()
+    entry["boot_append"] = ["lockdown=confidentiality"]
+    ev["entry"] = entry
+    ev["uname_text"] = _uname7("quiet swiotlb=131072,force "
+                               "lockdown=confidentiality")
+    ev["lockdown_text"] = "none [integrity] confidentiality\n"
+    rec = km.evaluate_row(ev)
+    assert not rec["ok"]
+    assert not _check(rec, "lockdown_effective")["ok"]
+    assert _check(rec, "boot_append")["ok"]
+    ev["lockdown_text"] = None
+    rec = km.evaluate_row(ev)
+    assert not _check(rec, "lockdown_effective")["ok"]
+
+
+def test_lockdown_is_global_class():
+    ev = _ev_pass()
+    entry = dict(_admitted_entry())
+    entry["expected"] = {
+        "attempt-trace": {"verdict": "refused",
+                          "reason_class": "lockdown"},
+        "mapping-lifecycle": {"verdict": "refused",
+                              "reason_class": "lockdown"},
+        "copy-actual": {"verdict": "refused",
+                        "reason_class": "lockdown"},
+    }
+    ev["entry"] = entry
+    rec = km.evaluate_row(ev)
+    check = _check(rec, "refusals")
+    assert not check["ok"]
+    assert "pair cannot attribute" not in check["detail"]
+    assert "unknown reason class lockdown" in check["detail"]
 
 
 def test_record_finalized_accepts_zero_and_four():
@@ -1688,8 +2949,8 @@ def test_vng_download_cmd_no_hardcoded_home():
 def _admitted_entry():
     return {
         "id": "7.0",
-        "vng_version": "v7.0.14",
         "release": "7.0.14-070014-generic",
+        "upstream": "7.0.14",
         "expected": {
             "attempt-trace": {"verdict": "admitted",
                               "reason_class": "live-verified"},
@@ -1699,6 +2960,13 @@ def _admitted_entry():
                             "reason_class": "live-verified"},
         },
         "oracle": {"omitted": []},
+        "source": {
+            "kind": "archive",
+            "vng_version": "v7.0.14",
+            "archive_date": "2026-06-27 15:46",
+            "vmlinuz_sha256": "a" * 64,
+            "modules_manifest_sha256": "b" * 64,
+        },
     }
 
 
@@ -1717,11 +2985,60 @@ def _oracle_text():
     lines = []
     for t, mult in ((900, 0), (1000, 0), (2000, 1), (2100, 1)):
         lines.append("T %d tp=%d map=%d unmap=%d copy=%d syncc=%d "
-                     "syncd=%d tpb=%d" % (
+                     "syncd=%d tpb=%d mapd0=0 mapd1=%d mapd2=%d "
+                     "mapd3=0 copyd0=0 copyd1=%d copyd2=%d "
+                     "copyd3=0" % (
                          t, 13000 * mult, 13000 * mult,
-                         13000 * mult, 25990 * mult,
-                         13000 * mult, 0, _BYTES768 * mult))
+                         13000 * mult, 16000 * mult,
+                         13000 * mult, 0, _TBYTES * mult,
+                         10000 * mult, 3000 * mult,
+                         13000 * mult, 3000 * mult))
+    for t, add in ((2000000000, 0), (5000000000, 1000),
+                   (23000000000, 3500),
+                   (26000000000, 3500)):
+        lines.append("T %d tp=%d map=%d unmap=%d copy=%d syncc=%d "
+                     "syncd=%d tpb=%d mapd0=0 mapd1=10000 "
+                     "mapd2=%d mapd3=0 copyd0=0 copyd1=%d "
+                     "copyd2=%d copyd3=0" % (
+                         t, 13000 + add, 13000 + add,
+                         13000 + add, 25990 + 2 * add,
+                         13000 + add, 0,
+                         _TBYTES + add * 65536, 3000 + add,
+                         13000 + add, 3000 + add))
     return "\n".join(lines) + "\n"
+
+
+def _busy_times():
+    return {"spawn_ns": 3000000000, "ready_ns": 4000000000,
+            "stop_ns": 24000000000,
+            "exit_ns": 25000000000}
+
+
+def _busy_persisted():
+    return {"bounce_attempt": 2500, "map_result": 2500,
+            "unmap": 2500, "copy": 5000,
+            "sync_request": 2500}
+
+
+def _busy_miss_snaps_text():
+    oracle = ["tracepoint_swiotlb_swiotlb_bounced_1",
+              "fexit_vmlinux_swiotlb_tbl_map_single_2",
+              "fentry_vmlinux___swiotlb_tbl_unmap_single_3",
+              "fentry_vmlinux_swiotlb_bounce_4",
+              "fentry_vmlinux___swiotlb_sync_single_for_cpu_5",
+              "fentry_vmlinux___swiotlb_sync_single_for_device_6",
+              "interval_ms_500_7"]
+    mv = ["mv_swiotlb_attempt", "mv_map_result", "mv_unmap",
+          "mv_bounce", "mv_sync"]
+
+    def progs(names):
+        return [{"name": name, "recursion_misses": 0}
+                for name in names]
+
+    return [(4000000000, json.dumps(progs(oracle))),
+            (6000000000,
+             json.dumps(progs(oracle + mv))),
+            (24000000000, json.dumps(progs(oracle)))]
 
 
 def _miss_snaps_text():
@@ -1748,27 +3065,28 @@ def _miss_snaps_text():
     snaps = [
         (500, progs(oracle, {})),
         (1200, progs(oracle + mv, {
-            "fentry_vmlinux_swiotlb_bounce_4": 2,
+            "fentry_vmlinux_swiotlb_bounce_4": 0,
             "mv_map_result": 1,
             "mv_bounce": 3})),
         (1800, progs(oracle + mv, {
-            "fentry_vmlinux_swiotlb_bounce_4": 8,
+            "fentry_vmlinux_swiotlb_bounce_4": 0,
             "mv_map_result": 6,
-            "mv_bounce": 10})),
+            "mv_bounce": 6})),
         (2200, progs(oracle, {
-            "fentry_vmlinux_swiotlb_bounce_4": 10})),
+            "fentry_vmlinux_swiotlb_bounce_4": 0})),
     ]
     return [(t, json.dumps(p)) for t, p in snaps]
 
 
-def _session_text(recovered=10):
+def _session_text(recovered=0):
     return json.dumps({
         "product": {"name": "memveil", "version": "memveil-0.1.0"},
         "capture": {"window": {"start_ns": "1000",
                                "end_ns": "2000"}},
         "quality": {"detail": {"status": "partial",
-                               "loss_count": "6",
-                               "reason": _LOSS7},
+                               "loss_count": "12",
+                               "reason": _loss_text(
+                                   recursion_missed=12)},
                     "aggregate": {"status": "complete_for_scope",
                                   "loss_count": "0"}},
         "environment": {"evidence": [
@@ -1802,16 +3120,51 @@ def _ev_pass():
         "report_exit": "4",
         "report_json_exit": "4",
         "session_text": _session_text(),
-        "workload_text": _workload(1100, 1900),
+        "workload_text": _workload_v2(1100, 1900),
         "oracle_text": _oracle_text(),
         "oracle_stderr": "stdin:7: WARNING: Success\n",
         "miss_snaps": _miss_snaps_text(),
-        "persisted": _persisted7(),
-        "persisted_bytes": _byte_sums(),
+        "persisted": {"bounce_attempt": 13000,
+                      "map_result": 12994, "unmap": 13000,
+                      "copy": 15994,
+                      "sync_request": 13000},
+        "persisted_copy_dirs": {"original_to_bounce": 12994,
+                                "bounce_to_original": 3000},
+        "persisted_bytes": _byte_sums(_TBYTES, _TBYTES,
+                                      _TBYTES, _TBYTES,
+                                      _RBYTES),
         "events_error": None,
         "blockstat_text": json.dumps(
-            {"dev": "nvme0n1", "before": 1000000,
-             "after": 1000000 + 6 * 128 * 2048}),
+            {"data": {"dev": "nvme0n1",
+                      "read_before": 1000000,
+                      "read_after": 1000000 + 640 * 2048,
+                      "write_before": 3000000,
+                      "write_after": 3000000},
+             "scratch": {"dev": "nvme1n1",
+                         "write_before": 2000000,
+                         "write_after": 2000000 + 64 * 2048,
+                         "read_before": 4000000,
+                         "read_after": 4000000}}),
+        "udev_exit": "0\n",
+        "udev_out": "$ udevadm settle --timeout=60\n",
+        "busy_record_exit": "0",
+        "busy_times_text": json.dumps(_busy_times()),
+        "busy_persisted": _busy_persisted(),
+        "busy_events_error": None,
+        "busy_end_reason": "signal\n",
+        "busy_out_text": "phase busy start_ns 2500000000 "
+                         "end_ns 25500000000 bytes 104857600 "
+                         "ios 100\nbuf busy mod4096=0\n",
+        "busy_session_text": json.dumps(_busy2_session()),
+        "busy_miss_snaps": _busy_miss_snaps_text(),
+        "busy_counters": {"swiotlb.bounce_attempts": 2500,
+                          "swiotlb.requested_bytes":
+                          2500 * 65536},
+        "busy_counters_error": None,
+        "busy_validate_rc": 0,
+        "busy_validate_out": "capture OK: 1 events\n",
+        "busy_report_exit": "0",
+        "busy_report_json_exit": "0",
         "dmesg_text": "[1.0] memveil-matrix-abc\n[2.0] nvme ready\n",
         "dmesg_scan_text": json.dumps(
             {"marker": "memveil-matrix-abc",
@@ -1969,7 +3322,7 @@ def test_evaluate_fails_omitted_drift():
 
 def test_evaluate_fails_window_escape():
     ev = _ev_pass()
-    ev["workload_text"] = _workload(100, 1900)
+    ev["workload_text"] = _workload_v2(100, 1900)
     rec = km.evaluate_row(ev)
     assert not rec["ok"]
     assert not _check(rec, "window")["ok"]
@@ -2234,7 +3587,8 @@ def test_evaluate_byte_sums_over_block_fail():
 def test_evaluate_byte_shortfall_within_loss_passes():
     ev = _ev_pass()
     ev["persisted_bytes"] = _byte_sums(
-        mapped=_BYTES768 - 100000)
+        _TBYTES, _TBYTES - 100000, _TBYTES, _TBYTES,
+        _RBYTES)
     rec = km.evaluate_row(ev)
     assert rec["ok"], json.dumps(rec["checks"], indent=1)
 
@@ -2320,6 +3674,23 @@ def test_collect_one_crash_fails_row_closed(tmp_path,
                            1.0, "run1", False, "/cache", 60)
     assert not rec["ok"]
     assert "crash" in rec["detail"]
+
+
+def test_run_validator_transcript_unwritable(tmp_path,
+                                              monkeypatch):
+    tool = _tool_module()
+    export = tmp_path / "row"
+    cap = export / "cap"
+    cap.mkdir(parents=True)
+    (cap / "session.json").write_text("{}")
+    (cap / "events.ndjson").write_text("")
+
+    def boom(self, *args, **kwargs):
+        raise OSError("synthetic unwritable")
+
+    monkeypatch.setattr(tool.Path, "write_text", boom)
+    rc, out = tool.run_validator(str(export))
+    assert "transcript unwritten" in out
 
 
 def test_release_agrees_rejects_rc_mismatch():
@@ -2458,6 +3829,7 @@ def test_scan_export_redaction_skips_digest_files(tmp_path):
         '[{"name": "x", "tag": "0612e9d9bb56f065"}]\n')
     (tmp_path / "report.json").write_text('{"a": "%s"}\n'
                                           % ("c" * 64))
+    (tmp_path / "configid.txt").write_text("%s\n" % ("d" * 64))
     assert km.scan_export_redaction(str(tmp_path)) is None
 
 
@@ -2466,6 +3838,24 @@ def test_scan_export_redaction_skips_capture_dir(tmp_path):
     cap.mkdir()
     (cap / "events.ndjson").write_text("raw 0x00000001\n")
     assert km.scan_export_redaction(str(tmp_path)) is None
+
+
+def test_scan_export_redaction_skips_nested_capture_dir(tmp_path):
+    busy = tmp_path / "busy" / "cap"
+    busy.mkdir(parents=True)
+    (busy / "session.json").write_text('{"a": "%s"}\n'
+                                       % ("e" * 64))
+    (tmp_path / "times.json").write_text('{"spawn_ns": 1}\n')
+    assert km.scan_export_redaction(str(tmp_path)) is None
+
+
+def test_scan_export_redaction_scans_other_nested_cap_dirs(
+        tmp_path):
+    deep = tmp_path / "other" / "cap"
+    deep.mkdir(parents=True)
+    (deep / "events.ndjson").write_text("raw 0x00000001\n")
+    error = km.scan_export_redaction(str(tmp_path))
+    assert error is not None and "events.ndjson" in error
 
 
 def test_scan_export_redaction_rejects_undecodable(tmp_path):
@@ -2492,8 +3882,8 @@ def test_evaluate_export_redacted_passes():
 def test_evaluate_refused_row_passes():
     entry = {
         "id": "5.15",
-        "vng_version": "v5.15.223",
         "release": "5.15.223-0515223-generic",
+        "upstream": "5.15.223",
         "expected": {
             "attempt-trace": {"verdict": "refused",
                               "reason_class": "floor-6.0"},
@@ -2503,6 +3893,13 @@ def test_evaluate_refused_row_passes():
                             "reason_class": "no-cover"},
         },
         "oracle": {"omitted": ["unmap", "syncc", "syncd"]},
+        "source": {
+            "kind": "archive",
+            "vng_version": "v5.15.223",
+            "archive_date": "2026-10-15 23:02",
+            "vmlinuz_sha256": "a" * 64,
+            "modules_manifest_sha256": "b" * 64,
+        },
     }
     out = "memveil record: kernel 5.15.223-0515223-generic " \
         "below floor 6.0\n"
@@ -2596,3 +3993,346 @@ def test_evaluate_attempt_row_wrong_refusal_reason_fails():
     rec = km.evaluate_row(ev)
     assert not rec["ok"]
     assert not _check(rec, "refusals")["ok"]
+
+
+def test_udev_quiesced_check():
+    ok, detail = km.check_udev_quiesced("0\n", "settle ok\n")
+    assert ok, detail
+    ok, _ = km.check_udev_quiesced("1\n", "timed out\n")
+    assert not ok
+    ok, _ = km.check_udev_quiesced(None, None)
+    assert not ok
+
+
+def test_busy_stop_reason_check():
+    ok, detail = km.check_busy_stop_reason("signal\n")
+    assert ok, detail
+    ok, _ = km.check_busy_stop_reason("size_limit\n")
+    assert not ok
+    ok, _ = km.check_busy_stop_reason(None)
+    assert not ok
+
+
+def test_session_end_reason():
+    text = json.dumps({"capture": {"end_reason": "signal"}})
+    assert km.session_end_reason(text) == "signal"
+    with pytest.raises(ValueError):
+        km.session_end_reason(json.dumps({"capture": {}}))
+    with pytest.raises(ValueError):
+        km.session_end_reason("not json")
+
+
+def test_record_argv():
+    assert km.BUSY_MAX_EVENTS_BYTES == 4294967296
+    argv = km.record_argv("/usr/bin/memveil", "/tmp/cap",
+                         60, "attempt-trace", None)
+    assert argv == ["/usr/bin/memveil", "record",
+                   "--output", "/tmp/cap", "--duration",
+                   "60", "--capability", "attempt-trace"]
+    argv = km.record_argv("/usr/bin/memveil", "/tmp/cap",
+                         300, "attempt-trace",
+                         km.BUSY_MAX_EVENTS_BYTES)
+    assert argv[-2:] == ["--max-events-bytes",
+                        "4294967296"]
+
+
+def test_guest_quiesce_udev(tmp_path):
+    calls = []
+    written = {}
+
+    class Proc:
+        def __init__(self, code):
+            self.returncode = code
+            self.stdout = "out\n"
+            self.stderr = ""
+
+    def fake_sh(args, **kw):
+        calls.append(list(args))
+        if args[0] == "pgrep":
+            return Proc(1)
+        return Proc(0)
+
+    def fake_write(path, data):
+        written[path] = data
+
+    guest.quiesce_udev(fake_sh, fake_write,
+                       str(tmp_path))
+    assert calls[0][:2] == ["udevadm", "settle"]
+    assert calls[1] == ["udevadm", "control", "--exit"]
+    assert calls[2][:3] == ["pgrep", "-x",
+                            "systemd-udevd"]
+    assert written[str(tmp_path / "udev.exit")] == "0"
+    assert "out\n" in written[str(tmp_path / "udev.out")]
+
+
+def test_guest_quiesce_udev_settle_failure(tmp_path):
+    class Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "timed out\n"
+
+    def fake_sh(args, **kw):
+        return Proc()
+
+    written = {}
+
+    def fake_write(path, data):
+        written[path] = data
+
+    with pytest.raises(SystemExit):
+        guest.quiesce_udev(fake_sh, fake_write,
+                           str(tmp_path))
+    assert written[str(tmp_path / "udev.exit")] == "1"
+
+
+def test_guest_quiesce_udev_daemon_lingers(tmp_path):
+    class Proc:
+        def __init__(self, code):
+            self.returncode = code
+            self.stdout = ""
+            self.stderr = ""
+
+    def fake_sh(args, **kw):
+        if args[0] == "pgrep":
+            return Proc(0)
+        return Proc(0)
+
+    written = {}
+
+    def fake_write(path, data):
+        written[path] = data
+
+    with pytest.raises(SystemExit):
+        guest.quiesce_udev(fake_sh, fake_write,
+                           str(tmp_path), polls=2)
+    assert written[str(tmp_path / "udev.exit")] == "1"
+
+
+def test_guest_quiesce_udev_worker_lingers(tmp_path):
+    class Proc:
+        def __init__(self, code):
+            self.returncode = code
+            self.stdout = ""
+            self.stderr = ""
+
+    def fake_sh(args, **kw):
+        if args[:3] == ["pgrep", "-x", "systemd-udevd"]:
+            return Proc(1)
+        if args[0] == "pgrep":
+            return Proc(0)
+        return Proc(0)
+
+    written = {}
+
+    def fake_write(path, data):
+        written[path] = data
+
+    with pytest.raises(SystemExit):
+        guest.quiesce_udev(fake_sh, fake_write,
+                           str(tmp_path), polls=2)
+    assert written[str(tmp_path / "udev.exit")] == "1"
+
+
+def test_udev_quiesced_wired():
+    ev = _ev_pass()
+    rec = km.evaluate_row(ev)
+    assert _check(rec, "udev_quiesced")["ok"], \
+        json.dumps(rec["checks"], indent=1)
+    ev = _ev_pass()
+    ev["udev_exit"] = "1\n"
+    rec = km.evaluate_row(ev)
+    assert not rec["ok"]
+    assert not _check(rec, "udev_quiesced")["ok"]
+
+
+def test_busy_stop_reason_wired():
+    ev = _ev_pass()
+    rec = km.evaluate_row(ev)
+    assert _check(rec, "busy_stop_reason")["ok"], \
+        json.dumps(rec["checks"], indent=1)
+    ev = _ev_pass()
+    ev["busy_end_reason"] = "size_limit\n"
+    rec = km.evaluate_row(ev)
+    assert not rec["ok"]
+    assert not _check(rec, "busy_stop_reason")["ok"]
+
+
+def test_evaluate_sectors_idle_wired():
+    ev = _ev_pass()
+    rec = km.evaluate_row(ev)
+    assert _check(rec, "sectors_idle")["ok"], \
+        json.dumps(rec["checks"], indent=1)
+    doc = json.loads(ev["blockstat_text"])
+    doc["scratch"]["read_after"] += 1
+    ev["blockstat_text"] = json.dumps(doc)
+    rec = km.evaluate_row(ev)
+    assert not rec["ok"]
+    assert not _check(rec, "sectors_idle")["ok"]
+
+
+def _countonly_ev():
+    ev = _ev_pass()
+    lines = []
+    for stamp, mult in ((900, 0), (1000, 0), (2000, 1),
+                        (2100, 1)):
+        lines.append("T %d tp=%d map=%d unmap=%d copy=%d "
+                     "syncc=%d syncd=%d" % (
+                         stamp, 2816 * mult, 2816 * mult,
+                         2816 * mult, 2 * 2816 * mult,
+                         2816 * mult, 0))
+    for line in _oracle_text().splitlines()[4:]:
+        lines.append(re.sub(r" tpb=\d+", "", line))
+    ev["oracle_text"] = "\n".join(lines) + "\n"
+    ev["oracle_mode"] = "countonly"
+    ev["hist_status_text"] = "ok\n"
+    ev["hist_before_text"] = _hist_text([])
+    ev["hist_after_text"] = _hist_text([(262144, 2816)])
+    return ev
+
+
+def test_evaluate_countonly_hist_wired():
+    ev = _countonly_ev()
+    rec = km.evaluate_row(ev)
+    assert _check(rec, "oracle_bytes")["ok"], \
+        json.dumps(rec["checks"], indent=1)
+
+
+def test_evaluate_countonly_hist_mismatch_fails():
+    ev = _countonly_ev()
+    ev["hist_after_text"] = _hist_text([(262144, 2815)])
+    rec = km.evaluate_row(ev)
+    assert not rec["ok"]
+    assert not _check(rec, "oracle_bytes")["ok"]
+
+
+def test_evaluate_countonly_unsupported_skips_bytes():
+    ev = _countonly_ev()
+    ev["hist_status_text"] = "unsupported: no hist triggers\n"
+    ev["hist_before_text"] = None
+    ev["hist_after_text"] = None
+    rec = km.evaluate_row(ev)
+    assert _check(rec, "oracle_bytes")["skipped"]
+
+
+def test_evaluate_countonly_missing_hist_fails():
+    ev = _countonly_ev()
+    ev["hist_status_text"] = None
+    rec = km.evaluate_row(ev)
+    assert not rec["ok"]
+    assert not _check(rec, "oracle_bytes")["ok"]
+
+
+def test_evaluate_busy_valid_wired():
+    ev = _ev_pass()
+    ev["busy_validate_rc"] = 0
+    ev["busy_validate_out"] = "capture OK\n"
+    rec = km.evaluate_row(ev)
+    assert _check(rec, "busy_valid")["ok"], \
+        json.dumps(rec["checks"], indent=1)
+    ev["busy_validate_rc"] = 1
+    ev["busy_validate_out"] = "schema mismatch"
+    rec = km.evaluate_row(ev)
+    assert not rec["ok"]
+    assert not _check(rec, "busy_valid")["ok"]
+
+
+def test_evaluate_busy_report_wired():
+    ev = _ev_pass()
+    ev["busy_record_exit"] = "0"
+    ev["busy_report_exit"] = "0"
+    ev["busy_report_json_exit"] = "0"
+    rec = km.evaluate_row(ev)
+    assert _check(rec, "busy_report")["ok"], \
+        json.dumps(rec["checks"], indent=1)
+    ev["busy_report_exit"] = "1"
+    rec = km.evaluate_row(ev)
+    assert not rec["ok"]
+    assert not _check(rec, "busy_report")["ok"]
+
+
+def test_evaluate_busy_span_wired():
+    ev = _ev_pass()
+    ev["busy_out_text"] = (
+        "phase busy start_ns 2500000000 "
+        "end_ns 25500000000 bytes 104857600 ios 100\n")
+    rec = km.evaluate_row(ev)
+    assert _check(rec, "busy_span")["ok"], \
+        json.dumps(rec["checks"], indent=1)
+    ev["busy_out_text"] = (
+        "phase busy start_ns 2500000000 "
+        "end_ns 25500000000 bytes 0 ios 0\n")
+    rec = km.evaluate_row(ev)
+    assert not rec["ok"]
+    assert not _check(rec, "busy_span")["ok"]
+
+
+def test_evaluate_busy_bounds_unknown_overreport_fails():
+    ev = _ev_pass()
+    ev["busy_session_text"] = json.dumps(_busy2_session(
+        status="partial", loss_count=None,
+        reason=_unknown_text(submit_fail=100000),
+        agg=("partial", None)))
+    ev["busy_counters"] = None
+    ev["busy_counters_error"] = None
+    rec = km.evaluate_row(ev)
+    assert not rec["ok"], json.dumps(rec["checks"],
+                                     indent=1)
+    assert not _check(rec, "busy_bounds")["ok"]
+
+
+def _ids_entries():
+    return [{"id": "6.0"}, {"id": "7.0"}, {"id": "7.2"}]
+
+
+def test_ids_selection_unknown_id_fails():
+    with pytest.raises(ValueError):
+        km.select_kernel_ids(_ids_entries(), "6.0,nope")
+
+
+def test_ids_selection_order_kept():
+    got = km.select_kernel_ids(_ids_entries(), "7.2,6.0")
+    assert [entry["id"] for entry in got] == ["7.2", "6.0"]
+
+
+def test_ids_selection_blank_entry_fails():
+    with pytest.raises(ValueError):
+        km.select_kernel_ids(_ids_entries(), "6.0,")
+    with pytest.raises(ValueError):
+        km.select_kernel_ids(_ids_entries(), "  ")
+
+
+def test_ids_selection_repeats_rejected():
+    with pytest.raises(ValueError):
+        km.select_kernel_ids(_ids_entries(),
+                              "7.0,6.0,7.0")
+
+
+def test_workflow_subset_ids_exist_in_lock():
+    here = os.path.dirname(os.path.abspath(__file__))
+    yml = os.path.join(here, "..", "..", ".github",
+                       "workflows", "kernels.yml")
+    with open(yml) as handle:
+        ids = km.workflow_subset_ids(handle.read())
+    assert ids
+    lock = km.parse_lock(
+        os.path.join(here, "kernels.lock.json"))
+    picked = km.select_kernel_ids(lock["kernels"],
+                                  ",".join(ids))
+    assert [entry["id"] for entry in picked] == ids
+
+
+def test_parse_lock_rejects_duplicate_keys(tmp_path):
+    raw = json.dumps(_lock_doc())
+    dup = raw.replace(
+        '"recorded_on"',
+        '"schema": "%s", "recorded_on"' % km.SCHEMA, 1)
+    path = tmp_path / "kernels.lock.json"
+    path.write_text(dup)
+    with pytest.raises(km.LockError):
+        km.parse_lock(str(path))
+    dup = raw.replace('"vng_version"',
+                      '"kind": "archive", "vng_version"',
+                      1)
+    path.write_text(dup)
+    with pytest.raises(km.LockError):
+        km.parse_lock(str(path))

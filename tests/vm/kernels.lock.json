@@ -1,175 +1,408 @@
 {
-  "schema": "memveil-kernel-matrix/1",
+  "schema": "memveil-kernel-matrix/2",
   "recorded_on": "2026-10-22",
   "archive": "https://kernel.ubuntu.com/mainline",
   "archive_queried": "2026-10-22",
   "tools": {"bpftrace": "bpftrace v0.25.0", "bpftool": "bpftool v7.7.0"},
-  "note": "Newest point release per generation on 2026-10-22. 7.3 has no release, newest rc is v7.3-rc3. No 7.4 rc exists. Expectations from docs/support.md Kernel generations.",
+  "note": "Newest point release per generation on 2026-10-22. 7.3-rc3 is the newest 7.3 rc from the archive; built 7.3 release takes id 7.3. No 7.4 rc exists. Expectations from docs/support.md Kernel generations. CentOS Stream 10 is not a row: its kernel leaves CONFIG_NET_9P unset and guests mount root over 9p. No separate SWIOTLB_DYNAMIC=n row: every built row sets it =n. debian13 kept after a boot spike. nobtf oracle bytes unproven: the kernel lacks hist triggers (EINVAL on install) and product record cannot load BPF without BTF (exit 3), so the row asserts counts only once the product runs there.",
   "kernels": [
     {
       "id": "5.15",
-      "vng_version": "v5.15.223",
-      "upstream": "5.15.223",
-      "archive_date": "2026-10-15 23:02",
       "release": "5.15.223-0515223-generic",
-      "vmlinuz_sha256": "969497f74d035d0be6549fa358ebc75f63cb429fd6d4a73e7300ffc896822baa",
-      "modules_manifest_sha256": "807d295984d4e2efd163ab67f38f993dc211f80a8614d7e033b4cfe2b99e3a25",
+      "upstream": "5.15.223",
       "expected": {
         "attempt-trace": {"verdict": "refused", "reason_class": "floor-6.0"},
         "mapping-lifecycle": {"verdict": "refused", "reason_class": "no-cover"},
         "copy-actual": {"verdict": "refused", "reason_class": "no-cover"}
       },
-      "oracle": {"omitted": ["unmap", "syncc", "syncd"]}
+      "oracle": {"omitted": ["unmap", "syncc", "syncd"]},
+      "source": {
+        "kind": "archive",
+        "vng_version": "v5.15.223",
+        "archive_date": "2026-10-15 23:02",
+        "vmlinuz_sha256": "969497f74d035d0be6549fa358ebc75f63cb429fd6d4a73e7300ffc896822baa",
+        "modules_manifest_sha256": "807d295984d4e2efd163ab67f38f993dc211f80a8614d7e033b4cfe2b99e3a25"
+      }
     },
     {
       "id": "6.0",
-      "vng_version": "v6.0.19",
-      "upstream": "6.0.19",
-      "archive_date": "2025-02-11 10:52",
       "release": "6.0.19-060019-generic",
-      "vmlinuz_sha256": "8c324f006ae405cebc65582e134b625821b404604e199ee767a659b454fb284f",
-      "modules_manifest_sha256": "9fb0b54319941e94a75626af6afc6aff7b58230c576f2a15c9e576ee3887566a",
+      "upstream": "6.0.19",
       "expected": {
         "attempt-trace": {"verdict": "admitted", "reason_class": "live-verified"},
         "mapping-lifecycle": {"verdict": "refused", "reason_class": "floor-6.11"},
         "copy-actual": {"verdict": "refused", "reason_class": "floor-6.11"}
       },
-      "oracle": {"omitted": ["unmap", "syncc", "syncd"]}
+      "oracle": {"omitted": ["unmap", "syncc", "syncd"]},
+      "source": {
+        "kind": "archive",
+        "vng_version": "v6.0.19",
+        "archive_date": "2025-02-11 10:52",
+        "vmlinuz_sha256": "8c324f006ae405cebc65582e134b625821b404604e199ee767a659b454fb284f",
+        "modules_manifest_sha256": "9fb0b54319941e94a75626af6afc6aff7b58230c576f2a15c9e576ee3887566a"
+      }
     },
     {
       "id": "6.6",
-      "vng_version": "v6.6.160",
-      "upstream": "6.6.160",
-      "archive_date": "2026-10-21 11:32",
       "release": "6.6.160-0606160-generic",
-      "vmlinuz_sha256": "0405206bf9ce1c603f1015153b6c26bf34a0345ce5d18caf15d75487c5015046",
-      "modules_manifest_sha256": "b10b8348afd5c059f98eeba7f21bc197db0e66c8ce2e49220e36fe0d72252550",
+      "upstream": "6.6.160",
       "expected": {
         "attempt-trace": {"verdict": "admitted", "reason_class": "live-verified"},
         "mapping-lifecycle": {"verdict": "refused", "reason_class": "floor-6.11"},
         "copy-actual": {"verdict": "refused", "reason_class": "floor-6.11"}
       },
-      "oracle": {"omitted": ["unmap", "syncc", "syncd"]}
+      "oracle": {"omitted": ["unmap", "syncc", "syncd"]},
+      "source": {
+        "kind": "archive",
+        "vng_version": "v6.6.160",
+        "archive_date": "2026-10-21 11:32",
+        "vmlinuz_sha256": "0405206bf9ce1c603f1015153b6c26bf34a0345ce5d18caf15d75487c5015046",
+        "modules_manifest_sha256": "b10b8348afd5c059f98eeba7f21bc197db0e66c8ce2e49220e36fe0d72252550"
+      }
     },
     {
       "id": "6.10",
-      "vng_version": "v6.10.14",
-      "upstream": "6.10.14",
-      "archive_date": "2025-02-11 10:52",
       "release": "6.10.14-061014-generic",
-      "vmlinuz_sha256": "fec5426159ae1653b69759ce8fee742bc7ae86891313e7dce1007e0cba4b52ce",
-      "modules_manifest_sha256": "170812e44bd5b542157fca62507a8459cf103b62df163883f6726d1bcbcd0119",
+      "upstream": "6.10.14",
       "expected": {
         "attempt-trace": {"verdict": "admitted", "reason_class": "live-verified"},
         "mapping-lifecycle": {"verdict": "refused", "reason_class": "floor-6.11"},
         "copy-actual": {"verdict": "refused", "reason_class": "floor-6.11"}
       },
-      "oracle": {"omitted": ["unmap", "syncc", "syncd"]}
+      "oracle": {"omitted": ["unmap", "syncc", "syncd"]},
+      "source": {
+        "kind": "archive",
+        "vng_version": "v6.10.14",
+        "archive_date": "2025-02-11 10:52",
+        "vmlinuz_sha256": "fec5426159ae1653b69759ce8fee742bc7ae86891313e7dce1007e0cba4b52ce",
+        "modules_manifest_sha256": "170812e44bd5b542157fca62507a8459cf103b62df163883f6726d1bcbcd0119"
+      }
     },
     {
       "id": "6.11",
-      "vng_version": "v6.11.11",
-      "upstream": "6.11.11",
-      "archive_date": "2025-02-11 10:52",
       "release": "6.11.11-061111-generic",
-      "vmlinuz_sha256": "9374c13bea2910d8526bfc9719cd30bec96e1fbb1724fdc349eea3a2b252f432",
-      "modules_manifest_sha256": "4bc9dbcb04ec2c044a742cd97f6750c8aa4b1b2c0009b5d3ad5f47bacfa205d2",
+      "upstream": "6.11.11",
       "expected": {
         "attempt-trace": {"verdict": "admitted", "reason_class": "live-verified"},
         "mapping-lifecycle": {"verdict": "admitted", "reason_class": "live-verified"},
         "copy-actual": {"verdict": "admitted", "reason_class": "live-verified"}
       },
-      "oracle": {"omitted": []}
+      "oracle": {"omitted": []},
+      "source": {
+        "kind": "archive",
+        "vng_version": "v6.11.11",
+        "archive_date": "2025-02-11 10:52",
+        "vmlinuz_sha256": "9374c13bea2910d8526bfc9719cd30bec96e1fbb1724fdc349eea3a2b252f432",
+        "modules_manifest_sha256": "4bc9dbcb04ec2c044a742cd97f6750c8aa4b1b2c0009b5d3ad5f47bacfa205d2"
+      }
     },
     {
       "id": "6.12",
-      "vng_version": "v6.12.114",
-      "upstream": "6.12.114",
-      "archive_date": "2026-10-21 17:02",
       "release": "6.12.114-0612114-generic",
-      "vmlinuz_sha256": "83d12f32f650386ca05ee93bc4881d3e5f6ac928d1e7d12fb9a3231edfce00ff",
-      "modules_manifest_sha256": "0873d0443ba4b1d2132d83897cda5dc7368cfffea6b4ba5aa74a773ea392b202",
+      "upstream": "6.12.114",
       "expected": {
         "attempt-trace": {"verdict": "admitted", "reason_class": "live-verified"},
         "mapping-lifecycle": {"verdict": "admitted", "reason_class": "live-verified"},
         "copy-actual": {"verdict": "admitted", "reason_class": "live-verified"}
       },
-      "oracle": {"omitted": []}
+      "oracle": {"omitted": []},
+      "source": {
+        "kind": "archive",
+        "vng_version": "v6.12.114",
+        "archive_date": "2026-10-21 17:02",
+        "vmlinuz_sha256": "83d12f32f650386ca05ee93bc4881d3e5f6ac928d1e7d12fb9a3231edfce00ff",
+        "modules_manifest_sha256": "0873d0443ba4b1d2132d83897cda5dc7368cfffea6b4ba5aa74a773ea392b202"
+      }
+    },
+    {
+      "id": "6.12.0",
+      "release": "6.12.0-061200-generic",
+      "upstream": "6.12.0",
+      "expected": {
+        "attempt-trace": {"verdict": "admitted", "reason_class": "live-verified"},
+        "mapping-lifecycle": {"verdict": "admitted", "reason_class": "live-verified"},
+        "copy-actual": {"verdict": "admitted", "reason_class": "live-verified"}
+      },
+      "oracle": {"omitted": []},
+      "source": {
+        "kind": "archive",
+        "vng_version": "v6.12",
+        "archive_date": "2024-11-26 14:10",
+        "vmlinuz_sha256": "144439e925a02129b01c74a37a73466494cac3876d65bc3850e3b9f1b260d44c",
+        "modules_manifest_sha256": "f3cc3ca26cb669cfd545287eb8580a76c4ebefe273789f243241b4f4d7dbdb9f"
+      }
+    },
+    {
+      "id": "6.12.114-btf",
+      "release": "6.12.114-mv-6.12.114-btf",
+      "upstream": "6.12.114",
+      "expected": {
+        "attempt-trace": {"verdict": "admitted", "reason_class": "live-verified"},
+        "mapping-lifecycle": {"verdict": "admitted", "reason_class": "live-verified"},
+        "copy-actual": {"verdict": "admitted", "reason_class": "live-verified"}
+      },
+      "oracle": {"omitted": []},
+      "source": {
+        "kind": "built",
+        "tarball_url": "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.114.tar.xz",
+        "tarball_sha256": "7a8589912bd7a8adb07fed074283652cf482a35facef8954554654f0154b4af3",
+        "fragments": ["tests/vm/kconfig/base.fragment"],
+        "fragments_sha256": {
+          "tests/vm/kconfig/base.fragment": "2bbff63922a7f99383927403f54b64ae98e75d0acb66a07fb892aa7db252e5bd"
+        },
+        "toolchain": {"gcc": "gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0", "ld": "GNU ld (GNU Binutils for Ubuntu) 2.46", "pahole": "v1.31", "gzip": "gzip 1.14", "vng": "virtme-ng 1.41"},
+        "config_sha256": "d396534fdbc81a3956a85a8fdbba43e4403933ea191013e6f5e301d00a150171",
+        "bzimage_sha256": "bc4e43520c508a7f60af98b634768e176df1cc28636c7afb249f3858fe49821f",
+        "modules_manifest_sha256": "83127eb694df2d79175d3b7d4c94fa246c95b86f56d2baf6a83007be14c677d7"
+      }
+    },
+    {
+      "id": "6.12.114-nobtf",
+      "release": "6.12.114-mv-6.12.114-nobtf",
+      "upstream": "6.12.114",
+      "expected": {
+        "attempt-trace": {"verdict": "admitted", "reason_class": "live-verified"},
+        "mapping-lifecycle": {"verdict": "refused", "reason_class": "btf-absent"},
+        "copy-actual": {"verdict": "refused", "reason_class": "btf-absent"}
+      },
+      "oracle": {"omitted": []},
+      "source": {
+        "kind": "built",
+        "tarball_url": "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.114.tar.xz",
+        "tarball_sha256": "7a8589912bd7a8adb07fed074283652cf482a35facef8954554654f0154b4af3",
+        "fragments": ["tests/vm/kconfig/base.fragment", "tests/vm/kconfig/nobtf.fragment"],
+        "fragments_sha256": {
+          "tests/vm/kconfig/base.fragment": "2bbff63922a7f99383927403f54b64ae98e75d0acb66a07fb892aa7db252e5bd",
+          "tests/vm/kconfig/nobtf.fragment": "52a43be8526a79696c002d125d1b89ad719a7fd4de75cf61c44dd930c855f716"
+        },
+        "toolchain": {"gcc": "gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0", "ld": "GNU ld (GNU Binutils for Ubuntu) 2.46", "pahole": "v1.31", "gzip": "gzip 1.14", "vng": "virtme-ng 1.41"},
+        "config_sha256": "ef2bebcef1fe26941a1f1e1648b1ff4f7fa7d8055dc6c60b89362f4c434cb947",
+        "bzimage_sha256": "6900b96b1a3d83f764b81cb376248c4a0bcfb8c8068387d12dda9f1491a43371",
+        "modules_manifest_sha256": "12d3fe8631a204fbe9d4f7f0461806059bf108cc7e2faf0d58e8301096a722ec"
+      }
+    },
+    {
+      "id": "6.12.114-rt",
+      "release": "6.12.114-mv-6.12.114-rt",
+      "upstream": "6.12.114",
+      "expected": {
+        "attempt-trace": {"verdict": "admitted", "reason_class": "live-verified"},
+        "mapping-lifecycle": {"verdict": "admitted", "reason_class": "live-verified"},
+        "copy-actual": {"verdict": "admitted", "reason_class": "live-verified"}
+      },
+      "oracle": {"omitted": []},
+      "source": {
+        "kind": "built",
+        "tarball_url": "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.114.tar.xz",
+        "tarball_sha256": "7a8589912bd7a8adb07fed074283652cf482a35facef8954554654f0154b4af3",
+        "fragments": ["tests/vm/kconfig/base.fragment", "tests/vm/kconfig/rt.fragment"],
+        "fragments_sha256": {
+          "tests/vm/kconfig/base.fragment": "2bbff63922a7f99383927403f54b64ae98e75d0acb66a07fb892aa7db252e5bd",
+          "tests/vm/kconfig/rt.fragment": "4ffe1c3cd4ce172b9b89f3492e62188b184c176229a30d9d2bfbc89d9e40f58d"
+        },
+        "toolchain": {"gcc": "gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0", "ld": "GNU ld (GNU Binutils for Ubuntu) 2.46", "pahole": "v1.31", "gzip": "gzip 1.14", "vng": "virtme-ng 1.41"},
+        "config_sha256": "f7d8e02488a40bf0bb2cc7fea626b2254572bf356d0b913b2fa82b233a5c22ad",
+        "bzimage_sha256": "7711e63399dc39fcaff8f4f4039d5718045c26c5a59a84bd486717672fccc8b0",
+        "modules_manifest_sha256": "b8454e7358c5c91d82c4db5d96dd2b452b85e13ec6fe447cf5cd3093a3aa4a16"
+      }
+    },
+    {
+      "id": "6.12.114-debug",
+      "release": "6.12.114-mv-6.12.114-debug",
+      "upstream": "6.12.114",
+      "expected": {
+        "attempt-trace": {"verdict": "admitted", "reason_class": "live-verified"},
+        "mapping-lifecycle": {"verdict": "admitted", "reason_class": "live-verified"},
+        "copy-actual": {"verdict": "admitted", "reason_class": "live-verified"}
+      },
+      "oracle": {"omitted": []},
+      "source": {
+        "kind": "built",
+        "tarball_url": "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.114.tar.xz",
+        "tarball_sha256": "7a8589912bd7a8adb07fed074283652cf482a35facef8954554654f0154b4af3",
+        "fragments": ["tests/vm/kconfig/base.fragment", "tests/vm/kconfig/debug.fragment"],
+        "fragments_sha256": {
+          "tests/vm/kconfig/base.fragment": "2bbff63922a7f99383927403f54b64ae98e75d0acb66a07fb892aa7db252e5bd",
+          "tests/vm/kconfig/debug.fragment": "80244b864c5ac85541543e82c6e02906b20f8f090a4edbae0b2cbd734c25e81c"
+        },
+        "toolchain": {"gcc": "gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0", "ld": "GNU ld (GNU Binutils for Ubuntu) 2.46", "pahole": "v1.31", "gzip": "gzip 1.14", "vng": "virtme-ng 1.41"},
+        "config_sha256": "27aebcc63a7cb16e5d3430269293d9f003dc12f111b42ebe69d6cb8901d5bfb8",
+        "bzimage_sha256": "da5764e16bacc74f9412af89391b6f0d79ba8f53f02c10802ab73734563319f1",
+        "modules_manifest_sha256": "4b15181c6e8c92d2387db5472d474e37b36d3b4a8219fed135d4c81917a10e76"
+      }
     },
     {
       "id": "6.18",
-      "vng_version": "v6.18.58",
-      "upstream": "6.18.58",
-      "archive_date": "2026-10-21 13:56",
       "release": "6.18.58-061858-generic",
-      "vmlinuz_sha256": "ff5845a25f2ec19efeaaaa8a444f0d1856a45e5d15976cf65c0f04d5a9f3897c",
-      "modules_manifest_sha256": "d897cbdfff7e62af2d00a32780cb0d7c8e062271fcacd9141c4ba9915b66cea2",
+      "upstream": "6.18.58",
       "expected": {
         "attempt-trace": {"verdict": "admitted", "reason_class": "live-verified"},
         "mapping-lifecycle": {"verdict": "admitted", "reason_class": "live-verified"},
         "copy-actual": {"verdict": "admitted", "reason_class": "live-verified"}
       },
-      "oracle": {"omitted": []}
+      "oracle": {"omitted": []},
+      "source": {
+        "kind": "archive",
+        "vng_version": "v6.18.58",
+        "archive_date": "2026-10-21 13:56",
+        "vmlinuz_sha256": "ff5845a25f2ec19efeaaaa8a444f0d1856a45e5d15976cf65c0f04d5a9f3897c",
+        "modules_manifest_sha256": "d897cbdfff7e62af2d00a32780cb0d7c8e062271fcacd9141c4ba9915b66cea2"
+      }
+    },
+    {
+      "id": "6.18.0",
+      "release": "6.18.0-061800-generic",
+      "upstream": "6.18.0",
+      "expected": {
+        "attempt-trace": {"verdict": "admitted", "reason_class": "live-verified"},
+        "mapping-lifecycle": {"verdict": "admitted", "reason_class": "live-verified"},
+        "copy-actual": {"verdict": "admitted", "reason_class": "live-verified"}
+      },
+      "oracle": {"omitted": []},
+      "source": {
+        "kind": "archive",
+        "vng_version": "v6.18",
+        "archive_date": "2025-12-01 00:19",
+        "vmlinuz_sha256": "71a5ca17b44613743097bc710181339b1c35a80724a6c2dac9f74b5df1298ff5",
+        "modules_manifest_sha256": "e114c3401c9abfb0ca53187050240a80d74ff3fb5f9cde8c3a3c682bd91f4c88"
+      }
     },
     {
       "id": "7.0",
-      "vng_version": "v7.0.14",
-      "upstream": "7.0.14",
-      "archive_date": "2026-06-27 15:46",
       "release": "7.0.14-070014-generic",
-      "vmlinuz_sha256": "3d3d50d77364ff616ddeae0508c68f74501afdee9679682ce3bf59edba5b4aca",
-      "modules_manifest_sha256": "921ffc5864bff7d52b128f907d8f4399e422f773f4f66e7798297b6f9bf5ffdb",
+      "upstream": "7.0.14",
       "expected": {
         "attempt-trace": {"verdict": "admitted", "reason_class": "live-verified"},
         "mapping-lifecycle": {"verdict": "admitted", "reason_class": "live-verified"},
         "copy-actual": {"verdict": "admitted", "reason_class": "live-verified"}
       },
-      "oracle": {"omitted": []}
+      "oracle": {"omitted": []},
+      "source": {
+        "kind": "archive",
+        "vng_version": "v7.0.14",
+        "archive_date": "2026-06-27 15:46",
+        "vmlinuz_sha256": "3d3d50d77364ff616ddeae0508c68f74501afdee9679682ce3bf59edba5b4aca",
+        "modules_manifest_sha256": "921ffc5864bff7d52b128f907d8f4399e422f773f4f66e7798297b6f9bf5ffdb"
+      }
+    },
+    {
+      "id": "7.0.14-lockdown",
+      "release": "7.0.14-070014-generic",
+      "upstream": "7.0.14",
+      "expected": {
+        "attempt-trace": {"verdict": "refused", "reason_class": "lockdown"},
+        "mapping-lifecycle": {"verdict": "refused", "reason_class": "lockdown"},
+        "copy-actual": {"verdict": "refused", "reason_class": "lockdown"}
+      },
+      "oracle": {"omitted": ["tp", "map", "unmap", "copy", "syncc", "syncd"]},
+      "boot_append": ["lockdown=confidentiality"],
+      "source": {
+        "kind": "archive",
+        "vng_version": "v7.0.14",
+        "archive_date": "2026-06-27 15:46",
+        "vmlinuz_sha256": "3d3d50d77364ff616ddeae0508c68f74501afdee9679682ce3bf59edba5b4aca",
+        "modules_manifest_sha256": "921ffc5864bff7d52b128f907d8f4399e422f773f4f66e7798297b6f9bf5ffdb"
+      }
     },
     {
       "id": "7.1",
-      "vng_version": "v7.1.13",
-      "upstream": "7.1.13",
-      "archive_date": "2026-09-04 00:47",
       "release": "7.1.13-070113-generic",
-      "vmlinuz_sha256": "dd76625d650ece96d4c3870d34e5d22a0297a3a558bd44f8c1b7f10181f8ae40",
-      "modules_manifest_sha256": "c8eabbf0e01a737831f405f3731cfc3f3fa3d8798c59d6f1b536d2627227ab55",
+      "upstream": "7.1.13",
       "expected": {
         "attempt-trace": {"verdict": "admitted", "reason_class": "live-verified"},
         "mapping-lifecycle": {"verdict": "admitted", "reason_class": "live-verified"},
         "copy-actual": {"verdict": "admitted", "reason_class": "live-verified"}
       },
-      "oracle": {"omitted": []}
+      "oracle": {"omitted": []},
+      "source": {
+        "kind": "archive",
+        "vng_version": "v7.1.13",
+        "archive_date": "2026-09-04 00:47",
+        "vmlinuz_sha256": "dd76625d650ece96d4c3870d34e5d22a0297a3a558bd44f8c1b7f10181f8ae40",
+        "modules_manifest_sha256": "c8eabbf0e01a737831f405f3731cfc3f3fa3d8798c59d6f1b536d2627227ab55"
+      }
     },
     {
       "id": "7.2",
-      "vng_version": "v7.2.6",
-      "upstream": "7.2.6",
-      "archive_date": "2026-09-14 17:53",
       "release": "7.2.6-070206-generic",
-      "vmlinuz_sha256": "e9c0d5ad717f0173d6722b9e24a9cc773306a52729f103cccd36e9724713084b",
-      "modules_manifest_sha256": "87726dfe69574d90ac0a6bda37dc61ffb5b876df257c9490b1e481fc7555a42c",
+      "upstream": "7.2.6",
       "expected": {
         "attempt-trace": {"verdict": "admitted", "reason_class": "live-verified"},
         "mapping-lifecycle": {"verdict": "admitted", "reason_class": "live-verified"},
         "copy-actual": {"verdict": "admitted", "reason_class": "live-verified"}
       },
-      "oracle": {"omitted": []}
+      "oracle": {"omitted": []},
+      "source": {
+        "kind": "archive",
+        "vng_version": "v7.2.6",
+        "archive_date": "2026-09-14 17:53",
+        "vmlinuz_sha256": "e9c0d5ad717f0173d6722b9e24a9cc773306a52729f103cccd36e9724713084b",
+        "modules_manifest_sha256": "87726dfe69574d90ac0a6bda37dc61ffb5b876df257c9490b1e481fc7555a42c"
+      }
+    },
+    {
+      "id": "7.3-rc3",
+      "release": "7.3.0-070300rc3-generic",
+      "upstream": "7.3-rc3",
+      "expected": {
+        "attempt-trace": {"verdict": "admitted", "reason_class": "live-verified"},
+        "mapping-lifecycle": {"verdict": "admitted", "reason_class": "live-verified"},
+        "copy-actual": {"verdict": "admitted", "reason_class": "live-verified"}
+      },
+      "oracle": {"omitted": []},
+      "source": {
+        "kind": "archive",
+        "vng_version": "v7.3-rc3",
+        "archive_date": "2026-09-14 01:53",
+        "vmlinuz_sha256": "ee26ba7676c399f9c29628b98bb1ad1a3e0d29b149670171dda2b1c8ac2f1e70",
+        "modules_manifest_sha256": "3aa9803c1c2711dd0f62032f732444c143a6e21ddd21157f5eede877c544eda2"
+      }
     },
     {
       "id": "7.3",
-      "vng_version": "v7.3-rc3",
-      "upstream": "7.3-rc3",
-      "archive_date": "2026-09-14 01:53",
-      "release": "7.3.0-070300rc3-generic",
-      "vmlinuz_sha256": "ee26ba7676c399f9c29628b98bb1ad1a3e0d29b149670171dda2b1c8ac2f1e70",
-      "modules_manifest_sha256": "3aa9803c1c2711dd0f62032f732444c143a6e21ddd21157f5eede877c544eda2",
+      "release": "7.3.0-mv-7.3",
+      "upstream": "7.3.0",
       "expected": {
         "attempt-trace": {"verdict": "admitted", "reason_class": "live-verified"},
         "mapping-lifecycle": {"verdict": "admitted", "reason_class": "live-verified"},
         "copy-actual": {"verdict": "admitted", "reason_class": "live-verified"}
       },
-      "oracle": {"omitted": []}
+      "oracle": {"omitted": []},
+      "source": {
+        "kind": "built",
+        "tarball_url": "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.3.tar.xz",
+        "tarball_sha256": "87363c24f10e06321eb362765521094e94471f6bff8bce2d6b3e40f39f004953",
+        "fragments": ["tests/vm/kconfig/base.fragment"],
+        "fragments_sha256": {
+          "tests/vm/kconfig/base.fragment": "2bbff63922a7f99383927403f54b64ae98e75d0acb66a07fb892aa7db252e5bd"
+        },
+        "toolchain": {"gcc": "gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0", "ld": "GNU ld (GNU Binutils for Ubuntu) 2.46", "pahole": "v1.31", "gzip": "gzip 1.14", "vng": "virtme-ng 1.41"},
+        "config_sha256": "782cf49f5e43950b3dedb516598b06fbdb668008b18b91c484ce4841ed04649a",
+        "bzimage_sha256": "70ec3d533e46fd855e651fb5c837855aa6b926c2902b56616c33f8342973f16b",
+        "modules_manifest_sha256": "197375a266a0c4015fa7b95084c28dbf91c1e122b984bbf520b78b3212101c36"
+      }
+    },
+    {
+      "id": "debian13",
+      "release": "6.12.107+deb13-amd64",
+      "upstream": "6.12.107",
+      "expected": {
+        "attempt-trace": {"verdict": "admitted", "reason_class": "live-verified"},
+        "mapping-lifecycle": {"verdict": "admitted", "reason_class": "live-verified"},
+        "copy-actual": {"verdict": "admitted", "reason_class": "live-verified"}
+      },
+      "oracle": {"omitted": []},
+      "source": {
+        "kind": "distro",
+        "packages": [
+          {"url": "https://snapshot.debian.org/archive/debian/20260907T023910Z/pool/main/l/linux/linux-image-6.12.107+deb13-amd64-unsigned_6.12.107-1_amd64.deb", "sha256": "7d13cd82a1d377e40826c313f5dbbdb2edf1b48c713a375e4cfe5e207749cb4e"}
+        ],
+        "vmlinuz_member": "./boot/vmlinuz-6.12.107+deb13-amd64",
+        "vmlinuz_sha256": "c32ad94952b48fc054bec12b6bf1ebe894b15ffefbec14cc04863a677d592d51",
+        "modules_manifest_sha256": "f0e0e63c4bd6aba839079d16c4ab7942365fb43fc3d521099930121209764a2e",
+        "config_sha256": "9b460f1003db4d417288e9c14caecfa14245dab07186df948fef0f3661e38ceb",
+        "banner": "Linux version 6.12.107+deb13-amd64 (debian-kernel@lists.debian.org) (x86_64-linux-gnu-gcc-14 (Debian 14.2.0-19) 14.2.0, GNU ld (GNU Binutils for Debian) 2.44) #1 SMP PREEMPT_DYNAMIC Debian 6.12.107-1 (2026-08-29)"
+      }
     }
   ]
 }

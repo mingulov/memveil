@@ -1,0 +1,148 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Kernel matrix on hosted KVM runners. Dispatch runs the
+# archive subset by default (--kernels 6.0,6.11,6.12,7.0,
+# 7.2,7.3-rc3) or every row with full=true; the nightly
+# schedule always runs every row. No push trigger until
+# the follow-up lane maps the remaining refusal reasons:
+# most archive rows still FAIL for known product causes.
+# The controller dispatches; do not push to test.
+name: kernels
+on:
+  workflow_dispatch:
+    inputs:
+      full:
+        description: 'Run every locked row instead of the subset'
+        type: boolean
+        required: false
+        default: false
+  schedule:
+    - cron: '23 2 * * *'
+jobs:
+  kernels:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - name: Install pixi
+        run: |
+          python3 tools/install-pixi --prefix "$HOME/.pixi"
+          echo "$HOME/.pixi/bin" >> "$GITHUB_PATH"
+      - name: Enable /dev/kvm
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm.rules >/dev/null
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+          python3 -c "open('/dev/kvm','rb').close()" \
+            || { echo '/dev/kvm does not open' >&2; exit 1; }
+      - name: Install system toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang bpftool cmake ninja-build python3-pytest \
+            strace patchelf python3 \
+            qemu-system-x86 busybox-static bpftrace \
+            gcc make flex bison libelf-dev libssl-dev bc \
+            dwarves rsync python3-pip
+      - name: Install pinned virtme-ng
+        run: |
+          python3 -m pip install --user --break-system-packages \
+            'virtme-ng==1.41'
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Refuse tool drift
+        run: |
+          test "$(vng --version | head -1)" = 'virtme-ng 1.41'
+          case "$(qemu-system-x86_64 --version | head -1)" in
+            'QEMU emulator version 10.2.1'*) ;;
+            *) echo 'qemu drift' >&2; exit 1 ;;
+          esac
+          WANT_BT="$(python3 -c "import json; print(json.load(open('tests/vm/kernels.lock.json'))['tools']['bpftrace'])")"
+          WANT_BTOOL="$(python3 -c "import json; print(json.load(open('tests/vm/kernels.lock.json'))['tools']['bpftool'])")"
+          test "$(bpftrace --version 2>/dev/null | head -1)" = "$WANT_BT"
+          test "$(bpftool --version 2>/dev/null | head -1)" = "$WANT_BTOOL"
+      - name: Provision libbpf-mojo tarball
+        run: |
+          VER="$(python3 -c "import json; print(json.load(open('toolchain.lock.json'))['dependencies']['libbpf-mojo']['version'])")"
+          TARBALL="third_party/libbpf-mojo-$VER.tar.gz"
+          WANT="$(python3 -c "import json; print(json.load(open('toolchain.lock.json'))['dependencies']['libbpf-mojo']['tarball_sha256'])")"
+          echo "$WANT  $TARBALL" | sha256sum --check -
+          echo "LMB_PACKAGE=$GITHUB_WORKSPACE/$TARBALL" >> "$GITHUB_ENV"
+      - name: Build
+        run: ./tools/build
+      - name: Build deb
+        run: |
+          ./tools/package-deb
+          echo "MV_DEB=$(echo "$GITHUB_WORKSPACE"/dist/memveil_*-1_amd64.deb)" \
+            >> "$GITHUB_ENV"
+      - name: Select kernel subset
+        run: |
+          if [ '${{ github.event_name }}' = 'schedule' ] \
+              || [ '${{ inputs.full }}' = 'true' ]; then
+            echo 'full set: every locked row'
+          else
+            echo 'MV_KERNELS_IDS=6.0,6.11,6.12,7.0,7.2,7.3-rc3' \
+              >> "$GITHUB_ENV"
+          fi
+      - name: Prepare kernel build dirs
+        run: |
+          sudo install -d -o "$USER" /mnt/memveil-kernels \
+            /mnt/memveil-kbuild /mnt/kernels \
+            /var/tmp/memveil-kbuild
+          sudo mount --bind /mnt/memveil-kbuild \
+            /var/tmp/memveil-kbuild
+      - name: Build locked kernels for built rows
+        env:
+          MV_KCACHE: /mnt/memveil-kernels
+        run: |
+          IDS="${MV_KERNELS_IDS:-}"
+          python3 - "$IDS" <<'EOF'
+          import json
+          import subprocess
+          import sys
+          want = sys.argv[1].split(',') if sys.argv[1] else None
+          lock = json.load(open('tests/vm/kernels.lock.json'))
+          for row in lock['kernels']:
+              if row['source']['kind'] != 'built':
+                  continue
+              if want is not None and row['id'] not in want:
+                  continue
+              proc = subprocess.run(
+                  ['tools/kernel-build', '--id', row['id']])
+              if proc.returncode != 0:
+                  sys.exit(proc.returncode)
+          EOF
+      - name: Fetch locked distro kernels
+        env:
+          MV_KCACHE: /mnt/memveil-kernels
+        run: |
+          IDS="${MV_KERNELS_IDS:-}"
+          python3 - "$IDS" <<'EOF'
+          import json
+          import subprocess
+          import sys
+          want = sys.argv[1].split(',') if sys.argv[1] else None
+          lock = json.load(open('tests/vm/kernels.lock.json'))
+          for row in lock['kernels']:
+              if row['source']['kind'] != 'distro':
+                  continue
+              if want is not None and row['id'] not in want:
+                  continue
+              proc = subprocess.run(
+                  ['tools/kernel-fetch', '--id', row['id']])
+              if proc.returncode != 0:
+                  sys.exit(proc.returncode)
+          EOF
+      - name: Run kernel matrix
+        env:
+          MEMVEIL_VM_KERNELS: '1'
+          MV_KCACHE: /mnt/memveil-kernels
+          MV_KERNELS_OUT: /mnt/kernels
+          MV_KERNELS_DISK: /mnt/memveil-kernels/disk.img
+        run: ./tools/test vm-kernels
+      - name: Upload kernel matrix evidence on every outcome
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: kernels-evidence
+          path: /mnt/kernels
+          retention-days: 7
+          if-no-files-found: warn

@@ -63,26 +63,28 @@ def ensure_disk(path, size_gb=4):
     return str(p)
 
 
+def ensure_scratch(disk_img, ident):
+    path = Path(km.scratch_img_path(disk_img, ident))
+    if path.exists():
+        if not path.is_file() or path.is_symlink():
+            raise ValueError("scratch image is not a file: %s"
+                             % path)
+        path.unlink()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run(["truncate", "-s", "64M", str(path)],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise ValueError("cannot create scratch image: %s"
+                         % proc.stderr)
+    return str(path)
+
+
 def verify_cache(entry):
-    vng = entry["vng_version"]
-    release = entry["release"]
-    base = km.cache_base(str(Path.home()), vng)
-    if not Path(base).is_dir():
-        return False, "cache missing %s" % base, base
-    vmlinuz = km.vmlinuz_for_release(base, release)
-    if not os.path.isfile(vmlinuz):
-        return False, "vmlinuz-%s missing in %s" % (release, base), \
-            base
-    got = km.sha_file(vmlinuz)
-    if got != entry["vmlinuz_sha256"]:
-        return False, "vmlinuz sha drift for %s" % vng, base
-    mods = km.find_modules_root(base, release)
-    if not mods:
-        return False, "modules missing for %s" % release, base
-    sha, _ = km.modules_manifest_sha(mods)
-    if sha != entry["modules_manifest_sha256"]:
-        return False, "modules manifest drift for %s" % vng, base
-    return True, "cache holds", base
+    home = str(Path.home())
+    ok, msg, target = km.verify_entry_cache(home, entry)
+    if not ok:
+        return False, msg, None, None
+    return True, msg, km.entry_cache_dir(home, entry), target
 
 
 def download_cache(vng_path, ver):
@@ -105,14 +107,16 @@ def read_text(path):
         return None
 
 
-def gather_miss_snaps(export):
+def gather_miss_snaps(export, count=4):
+    if not os.path.isdir(export):
+        return None
     try:
         times = json.loads(Path(
             export, "progs_times.json").read_text())
     except (OSError, ValueError):
         times = {}
     snaps = []
-    for idx in range(4):
+    for idx in range(count):
         try:
             nsecs = int(times[str(idx)])
         except (KeyError, TypeError, ValueError):
@@ -133,11 +137,36 @@ def run_validator(export):
             timeout=CAPTURE_TIMEOUT)
     except subprocess.TimeoutExpired:
         out = "validate-schemas timed out"
-        Path(export, "validate.txt").write_text(out + "\n")
-        return 99, out
+        return 99, out + _write_transcript(export, out)
     out = ((proc.stdout or "") + (proc.stderr or "")).strip()
-    Path(export, "validate.txt").write_text(out + "\n")
-    return proc.returncode, out[-2000:]
+    return proc.returncode, \
+        out[-2000:] + _write_transcript(export, out)
+
+
+def _write_transcript(export, out):
+    try:
+        Path(export, "validate.txt").write_text(out + "\n")
+    except OSError as exc:
+        return "\n[transcript unwritten: %s]" % exc
+    return ""
+
+
+def chown_guest_tree(path):
+    """Chown one guest-written tree to us, or an error.
+
+    Guest files land root-owned through sudo vng; the
+    host must own the busy tree before it writes the
+    validate transcript, the events summary, and the
+    post-evaluation unlink.
+    """
+    proc = subprocess.run(
+        ["sudo", "-n", "chown", "-R",
+         "%d:%d" % (os.getuid(), os.getgid()), path],
+        capture_output=True, text=True)
+    if proc.returncode != 0:
+        return (proc.stderr or "").strip() or \
+            "chown rc=%d" % proc.returncode
+    return None
 
 
 def gather_persisted(export):
@@ -147,11 +176,24 @@ def gather_persisted(export):
             counts = km.persisted_counts(handle)
         with open(path) as handle:
             byts = km.persisted_bytes(handle)
-        return counts, byts, None
+        with open(path) as handle:
+            dirs = km.persisted_copy_dirs(handle)
+        return counts, byts, dirs, None
     except OSError:
-        return None, None, "missing events.ndjson"
+        return None, None, None, "missing events.ndjson"
     except ValueError as exc:
-        return None, None, str(exc)
+        return None, None, None, str(exc)
+
+
+def gather_busy_counters(busy):
+    path = os.path.join(busy, "cap", "events.ndjson")
+    try:
+        with open(path) as handle:
+            return km.counter_deltas(handle), None
+    except OSError:
+        return None, "missing events.ndjson"
+    except ValueError as exc:
+        return None, str(exc)
 
 
 def collect_one(entry, export, tools, dd_count, elapsed, run_id,
@@ -173,6 +215,12 @@ def collect_one(entry, export, tools, dd_count, elapsed, run_id,
             os.path.join(export, "uname.txt")),
         "mods_text": read_text(
             os.path.join(export, "mods.txt")),
+        "configid_text": read_text(
+            os.path.join(export, "configid.txt")),
+        "version_text": read_text(
+            os.path.join(export, "version.txt")),
+        "lockdown_text": read_text(
+            os.path.join(export, "lockdown.txt")),
         "hooks_text": read_text(
             os.path.join(export, "hooks.json")),
         "artifacts_text": read_text(
@@ -233,15 +281,59 @@ def collect_one(entry, export, tools, dd_count, elapsed, run_id,
         ev["oracle_stderr"] = read_text(
             os.path.join(export, "oracle.stderr"))
         ev["miss_snaps"] = gather_miss_snaps(export)
-        persisted, byts, events_error = gather_persisted(export)
+        persisted, byts, dirs, events_error = \
+            gather_persisted(export)
         ev["persisted"] = persisted
         ev["persisted_bytes"] = byts
+        ev["persisted_copy_dirs"] = dirs
         ev["events_error"] = events_error
+        mode = read_text(os.path.join(export, "oracle.mode"))
+        ev["oracle_mode"] = (mode or "").strip() or None
+        ev["hist_status_text"] = read_text(
+            os.path.join(export, "hist.status"))
+        ev["hist_before_text"] = read_text(
+            os.path.join(export, "hist_before.txt"))
+        ev["hist_after_text"] = read_text(
+            os.path.join(export, "hist_after.txt"))
         ev["blockstat_text"] = read_text(
             os.path.join(export, "blockstat.json"))
+        ev["udev_exit"] = read_text(
+            os.path.join(export, "udev.exit"))
+        ev["udev_out"] = read_text(
+            os.path.join(export, "udev.out"))
+        busy = os.path.join(export, "busy")
+        busy_chown_error = None
+        if os.path.isdir(busy):
+            busy_chown_error = chown_guest_tree(busy)
+        ev["busy_record_exit"] = read_text(
+            os.path.join(busy, "record.exit"))
+        ev["busy_times_text"] = read_text(
+            os.path.join(busy, "times.json"))
+        ev["busy_end_reason"] = read_text(
+            os.path.join(busy, "end_reason.txt"))
+        ev["busy_out_text"] = read_text(
+            os.path.join(busy, "busy.out"))
+        persisted, _, _, events_error = \
+            gather_persisted(busy)
+        ev["busy_persisted"] = persisted
+        ev["busy_events_error"] = events_error
+        ev["busy_session_text"] = read_text(
+            os.path.join(busy, "cap", "session.json"))
+        ev["busy_miss_snaps"] = gather_miss_snaps(busy, 3)
+        counters, counters_error = \
+            gather_busy_counters(busy)
+        ev["busy_counters"] = counters
+        ev["busy_counters_error"] = counters_error
+        ev["busy_report_exit"] = read_text(
+            os.path.join(busy, "report.exit"))
+        ev["busy_report_json_exit"] = read_text(
+            os.path.join(busy, "report-json.exit"))
         rc, out = run_validator(export)
         ev["validate_rc"] = rc
         ev["validate_out"] = out
+        rc, out = run_validator(busy)
+        ev["busy_validate_rc"] = rc
+        ev["busy_validate_out"] = out
     ev["export_redact_error"] = km.scan_export_redaction(export)
     try:
         rec = km.evaluate_row(ev)
@@ -251,6 +343,13 @@ def collect_one(entry, export, tools, dd_count, elapsed, run_id,
                "checks": [{"name": "row_decision", "ok": False,
                            "detail": "row decision crashed",
                            "skipped": False}]}
+    if admitted and os.path.isdir(os.path.join(export, "busy")):
+        summary, error = km.shrink_busy_events(
+            os.path.join(export, "busy"))
+        rec["busy_events"] = summary if summary is not None \
+            else {"error": error}
+        if busy_chown_error:
+            rec["busy_chown_error"] = busy_chown_error
     rec["elapsed"] = round(elapsed, 1)
     rec["run_id"] = run_id
     rec["timeout"] = bool(timeout)
@@ -267,10 +366,11 @@ def run_one(entry, args, kind, source, disk_img, tools, run_id,
     os.makedirs(export)
     admitted = [cap for cap in km.CAPS
                 if entry["expected"][cap]["verdict"] == "admitted"]
-    job = {"id": ident, "vng_version": entry["vng_version"],
+    job = {"id": ident, "vng_version": km.row_boot_label(entry),
            "release": entry["release"], "admitted": admitted,
            "duration": args.duration, "dd_count": args.dd_count,
-           "run_id": run_id}
+           "run_id": run_id, "data_serial": "mv0",
+           "scratch_serial": "mv1"}
     if kind == "deb":
         job["deb"] = source
     else:
@@ -279,13 +379,14 @@ def run_one(entry, args, kind, source, disk_img, tools, run_id,
     Path(export, "job.json").write_text(json.dumps(job, indent=2)
                                         + "\n")
     t0 = time.monotonic()
-    ok, msg, cache_dir = verify_cache(entry)
-    if not ok and "missing" in msg:
-        dl_ok, dl_msg = download_cache(prefix[-1],
-                                       entry["vng_version"])
+    ok, msg, cache_dir, target = verify_cache(entry)
+    if not ok and entry["source"]["kind"] == "archive" \
+            and "missing" in msg:
+        dl_ok, dl_msg = download_cache(
+            prefix[-1], entry["source"]["vng_version"])
         Path(export, "download.txt").write_text(dl_msg + "\n")
         if dl_ok:
-            ok, msg, cache_dir = verify_cache(entry)
+            ok, msg, cache_dir, target = verify_cache(entry)
         else:
             msg = dl_msg
     if not ok:
@@ -305,10 +406,18 @@ def run_one(entry, args, kind, source, disk_img, tools, run_id,
     script = str(ROOT / "tests" / "vm" / "kernel_matrix_guest.py")
     guest_cmd = "python3 %s /tmp/export %s" % (
         shlex.quote(script), shlex.quote(str(ROOT)))
-    qemu_opts = "-cpu host %s" % km.qemu_drive_opt(disk_img)
-    vng_args = ["--run", entry["vng_version"],
+    scratch_img = ensure_scratch(disk_img, ident)
+    qemu_opts = "-cpu host %s %s" % (
+        km.qemu_drive_opt(disk_img),
+        km.qemu_drive_opt(scratch_img, drive_id="d1",
+                          serial="mv1", readonly=False))
+    append = "swiotlb=131072,force"
+    for arg in entry.get("boot_append") or []:
+        km.validate_shell_path(arg, "boot argument")
+        append += " " + arg
+    vng_args = ["--run", target,
                 "--cpus", str(args.cpus),
-                "-m", "4G", "--append", "swiotlb=131072,force",
+                "-m", "4G", "--append", append,
                 "--overlay-rwdir=/usr", "--overlay-rwdir=/etc",
                 "--overlay-rwdir=/var",
                 "--rwdir=/tmp/export=%s" % export,
@@ -377,6 +486,8 @@ def main(argv=None):
                         help="evidence parent dir (per-kernel subdirs)")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--kernel", help="one lock id to run")
+    group.add_argument("--kernels",
+                       help="comma-separated lock ids, in order")
     group.add_argument("--all", action="store_true",
                        help="run every lock entry")
     parser.add_argument("--lock", default=str(
@@ -410,6 +521,13 @@ def main(argv=None):
         entries = [e for e in entries if e["id"] == args.kernel]
         if not entries:
             print("kernel-matrix: unknown kernel %s" % args.kernel,
+                  file=sys.stderr)
+            return 2
+    if args.kernels:
+        try:
+            entries = km.select_kernel_ids(entries, args.kernels)
+        except ValueError as exc:
+            print("kernel-matrix: bad --kernels: %s" % exc,
                   file=sys.stderr)
             return 2
     try:
@@ -498,7 +616,8 @@ def main(argv=None):
     try:
         for entry in entries:
             print("kernel-matrix: %s (%s)" % (entry["id"],
-                                              entry["vng_version"]))
+                                              km.row_boot_label(
+                                                  entry)))
             rec = run_one(entry, args, kind, source, disk_img,
                           lock["tools"], run_id, prefix)
             results.append(rec)
