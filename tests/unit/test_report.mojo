@@ -17,6 +17,7 @@ from memveil.cli.report import (
     check_rendered_size,
     exit_for_report,
     neutralize_controls,
+    refusal_stderr_lines,
     sanitize_diagnostic,
     scrub_paths,
 )
@@ -100,6 +101,38 @@ def test_scrub_paths() raises:
     # Fail-closed direction: any slash token loses its head, even
     # prose like and/or. Diagnostics must not rely on slashes.
     assert_equal(scrub_paths(String("reads/writes")), String("writes"))
+
+
+def test_refusal_stderr_lines() raises:
+    var full = refusal_stderr_lines(
+        String("record"),
+        String("tracefs denied (privilege): /sys/kernel/tracing/events"),
+        String("tracefs-denied"),
+        String("run as root"),
+    )
+    assert_equal(len(full), 3)
+    assert_equal(
+        full[0],
+        String(
+            "memveil record: tracefs denied (privilege):"
+            " /sys/kernel/tracing/events\n"
+        ),
+    )
+    assert_equal(full[1], String("memveil record: code: tracefs-denied\n"))
+    assert_equal(full[2], String("memveil record: fix: run as root\n"))
+    var legacy = refusal_stderr_lines(
+        String("top"), String("no profile satisfies"), String("profile"),
+        String(""),
+    )
+    assert_equal(len(legacy), 1)
+    assert_equal(
+        legacy[0], String("memveil top: no profile satisfies\n")
+    )
+    var plain = refusal_stderr_lines(
+        String("record"), String("budget 1 below 131072"), String(""),
+        String(""),
+    )
+    assert_equal(len(plain), 1)
 
 
 def test_escape_json_roundtrip() raises:
@@ -469,6 +502,7 @@ def run() raises -> Int:
     suite.test[test_escape_text]()
     suite.test[test_escape_text_clean_passthrough]()
     suite.test[test_scrub_paths]()
+    suite.test[test_refusal_stderr_lines]()
     suite.test[test_escape_json_roundtrip]()
     suite.test[test_escape_markdown]()
     suite.test[test_render_text_attempts]()

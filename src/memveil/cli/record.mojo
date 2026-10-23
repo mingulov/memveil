@@ -36,6 +36,7 @@ from memveil.cli.doctor import resolve_profiles_dir
 from memveil.cli.report import (
     EXIT_OK,
     CliError,
+    refusal_stderr_lines,
     sanitize_diagnostic,
     write_stderr,
 )
@@ -255,22 +256,14 @@ def run_record_with(
                 pass
     if result.exit_code == EXIT_ERROR or result.exit_code == EXIT_REFUSAL:
         try:
-            write_stderr(
-                String("memveil record: ")
-                + sanitize_diagnostic(result.diagnostic)
-                + String("\n")
+            var lines = refusal_stderr_lines(
+                String("record"),
+                result.diagnostic.copy(),
+                result.code.copy(),
+                result.fix.copy(),
             )
-        except:
-            pass
-    if result.fix != String("") and (
-        result.exit_code == EXIT_ERROR or result.exit_code == EXIT_REFUSAL
-    ):
-        try:
-            write_stderr(
-                String("memveil record: fix: ")
-                + result.fix
-                + String("\n")
-            )
+            for i in range(len(lines)):
+                write_stderr(lines[i].copy())
         except:
             pass
     if result.end_reason == String(""):

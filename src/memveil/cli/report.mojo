@@ -187,6 +187,38 @@ def scrub_paths(text: String) raises -> String:
     return String(from_utf8=Span(out))
 
 
+def refusal_stderr_lines(
+    verb: String, diagnostic: String, code: String, fix: String
+) raises -> List[String]:
+    """Refusal stderr lines: diagnostic, reason code, fix.
+
+    Every line carries its verb prefix and newline; the
+    code line appears only for a classified refusal, so
+    legacy selection diagnostics keep one line, and the
+    fix line only when a remedy applies. Fragments are
+    escaped; the write boundary decides scrubbing.
+    """
+    var out = List[String]()
+    out.append(
+        String("memveil ") + verb + String(": ")
+        + sanitize_diagnostic(diagnostic.copy())
+        + String("\n")
+    )
+    if code != String("") and code != String("profile"):
+        out.append(
+            String("memveil ") + verb + String(": code: ")
+            + sanitize_diagnostic(code.copy())
+            + String("\n")
+        )
+    if fix != String(""):
+        out.append(
+            String("memveil ") + verb + String(": fix: ")
+            + sanitize_diagnostic(fix.copy())
+            + String("\n")
+        )
+    return out^
+
+
 def write_stderr(text: String) raises:
     """Write text to standard error.
 

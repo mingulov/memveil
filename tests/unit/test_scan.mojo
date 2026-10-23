@@ -472,6 +472,75 @@ def test_run_carries_fix() raises:
         )
     )
     assert_equal(result.fix, remedy_for(String("lockdown-confidentiality")))
+    assert_equal(result.code, String("lockdown-confidentiality"))
+    assert_true(not result.unknown)
+
+
+def test_run_carries_live_code() raises:
+    var opts = _opts(String("build/scan-live-code"))
+    opts.capabilities = String("attempt-trace,mapping-lifecycle")
+    opts.lc_object = String(_ELF_LC)
+    var writer = ScriptWriter()
+    var result = run_collector_with(
+        String("tests/fixtures/gate/ftrace-off"),
+        String(_PROFILES_LIVE),
+        opts^,
+        writer,
+    )
+    assert_equal(result.exit_code, 3)
+    assert_equal(result.code, String("ftrace-disabled"))
+    assert_true(not result.unknown)
+    assert_equal(result.fix, remedy_for(String("ftrace-disabled")))
+
+
+def _live_decision(fxname: String) raises -> ScanDecision:
+    """Refuse attempt plus lifecycle on one gate fixture."""
+    return decide_record(
+        String("tests/fixtures/gate/") + fxname,
+        _kernel_38(),
+        load_profiles(String(_PROFILES_LIVE)),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(""),
+        String("attempt-trace,mapping-lifecycle"),
+        String(""),
+        String(""),
+    )
+
+
+def test_scan_live_btf_truncated_unknown() raises:
+    var d = _live_decision(String("btf-truncated"))
+    assert_true(not d.ok)
+    assert_true(d.refusal_unknown)
+    assert_equal(d.refusal_code, String("btf-truncated"))
+    assert_equal(d.fix, remedy_for(String("btf-truncated")))
+
+
+def test_scan_live_ftrace_disabled_fix() raises:
+    var d = _live_decision(String("ftrace-off"))
+    assert_true(not d.ok)
+    assert_true(not d.refusal_unknown)
+    assert_equal(d.refusal_code, String("ftrace-disabled"))
+    assert_equal(d.fix, remedy_for(String("ftrace-disabled")))
+    assert_true(d.refusal.startswith(String("live check failed: ")))
+
+
+def test_scan_live_hook_ambiguous_code() raises:
+    var d = _live_decision(String("aff-dup"))
+    assert_true(not d.ok)
+    assert_true(not d.refusal_unknown)
+    assert_equal(d.refusal_code, String("hook-ambiguous"))
+    assert_equal(d.fix, remedy_for(String("hook-ambiguous")))
+
+
+def test_scan_live_hook_absent_code() raises:
+    var d = _live_decision(String("hook-absent"))
+    assert_true(not d.ok)
+    assert_true(not d.refusal_unknown)
+    assert_equal(d.refusal_code, String("btf-hook-absent"))
+    assert_equal(d.fix, remedy_for(String("btf-hook-absent")))
 
 
 def test_scan_live_explicit_candidate() raises:
@@ -1435,6 +1504,11 @@ def run() raises -> Int:
     suite.test[test_scan_caps_all]()
     suite.test[test_scan_gate_passes_live38]()
     suite.test[test_run_carries_fix]()
+    suite.test[test_run_carries_live_code]()
+    suite.test[test_scan_live_btf_truncated_unknown]()
+    suite.test[test_scan_live_ftrace_disabled_fix]()
+    suite.test[test_scan_live_hook_ambiguous_code]()
+    suite.test[test_scan_live_hook_absent_code]()
     suite.test[test_scan_live_explicit_candidate]()
     suite.test[test_scan_no_object_refuses]()
     suite.test[test_scan_explicit_mismatch_refuses]()

@@ -36,6 +36,7 @@ from memveil.cli.report import EXIT_INVALID, EXIT_OK
 from memveil.jsonscan import Scanner
 from memveil.platform.capabilities import discover_capabilities
 from memveil.platform.evidence import detect_environment
+from memveil.platform.kernelgate import remedy_for
 from memveil.platform.profiles import load_profiles, select_profile
 from memveil.platform.reader import open_evidence_reader
 
@@ -568,6 +569,53 @@ def test_doctor2_agrees_with_record() raises:
             )
 
 
+def _live_cap(fxname: String, cap_id: String) raises -> DoctorCap:
+    """Judge one capability on one gate fixture, all objects."""
+    var opts = _doctor2_opts(
+        gate(fxname),
+        String("tests/fixtures/scan/profiles-live"),
+        String("all"),
+        String("tests/fixtures/elf/ok.o"),
+        String("tests/fixtures/elf/lc-ok.o"),
+        String("tests/fixtures/elf/cp-ok.o"),
+    )
+    var drep = assess_doctor(opts)
+    for i in range(len(drep.caps)):
+        if drep.caps[i].id == cap_id:
+            return drep.caps[i].copy()
+    return DoctorCap()
+
+
+def test_doctor2_live_btf_truncated_unknown() raises:
+    var lc = _live_cap(String("btf-truncated"), String("mapping-lifecycle"))
+    assert_equal(lc.status, String("unknown"))
+    assert_equal(lc.reason_code, String("btf-truncated"))
+    assert_equal(lc.remedy, remedy_for(String("btf-truncated")))
+    var at = _live_cap(String("btf-truncated"), String("attempt-trace"))
+    assert_equal(at.status, String("available-load-unchecked"))
+
+
+def test_doctor2_live_ftrace_disabled_fix() raises:
+    var lc = _live_cap(String("ftrace-off"), String("mapping-lifecycle"))
+    assert_equal(lc.status, String("unavailable"))
+    assert_equal(lc.reason_code, String("ftrace-disabled"))
+    assert_equal(lc.remedy, remedy_for(String("ftrace-disabled")))
+
+
+def test_doctor2_live_hook_ambiguous_code() raises:
+    var lc = _live_cap(String("aff-dup"), String("mapping-lifecycle"))
+    assert_equal(lc.status, String("unavailable"))
+    assert_equal(lc.reason_code, String("hook-ambiguous"))
+    assert_equal(lc.remedy, remedy_for(String("hook-ambiguous")))
+
+
+def test_doctor2_live_hook_absent_code() raises:
+    var lc = _live_cap(String("hook-absent"), String("mapping-lifecycle"))
+    assert_equal(lc.status, String("unavailable"))
+    assert_equal(lc.reason_code, String("btf-hook-absent"))
+    assert_equal(lc.remedy, remedy_for(String("btf-hook-absent")))
+
+
 def test_doctor2_no_object() raises:
     var opts = _doctor2_opts(
         gate(String("base")),
@@ -764,6 +812,10 @@ def run() raises -> Int:
     suite.test[test_doctor2_validated_attempt]()
     suite.test[test_doctor2_all_on_live38]()
     suite.test[test_doctor2_agrees_with_record]()
+    suite.test[test_doctor2_live_btf_truncated_unknown]()
+    suite.test[test_doctor2_live_ftrace_disabled_fix]()
+    suite.test[test_doctor2_live_hook_ambiguous_code]()
+    suite.test[test_doctor2_live_hook_absent_code]()
     suite.test[test_doctor2_no_object]()
     suite.test[test_doctor2_precheck_fail]()
     suite.test[test_doctor2_notes]()

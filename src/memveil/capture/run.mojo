@@ -61,6 +61,7 @@ from memveil.platform.kernelgate import (
     GateVerdict,
     kernel_gate,
     probe_tracefs,
+    remedy_for,
     tracefs_translate,
 )
 from memveil.platform.narrow import (
@@ -289,6 +290,26 @@ def _refuse_scan_gate(gate: GateVerdict) -> ScanDecision:
     out.refusal_code = gate.code.copy()
     out.refusal_unknown = gate.unknown
     out.fix = gate.remedy.copy()
+    return out^
+
+
+def _live_skip_code(code: String) -> String:
+    """One live refusal code, defaulting to the selection class."""
+    if code == String(""):
+        return String("profile")
+    return code.copy()
+
+
+def _refuse_scan_live(
+    reason: String, code: String, unknown: Bool
+) -> ScanDecision:
+    """One live-check refusal: reason, code, unknown flag, fix."""
+    var out = ScanDecision()
+    out.ok = False
+    out.refusal = reason
+    out.refusal_code = _live_skip_code(code.copy())
+    out.refusal_unknown = unknown
+    out.fix = remedy_for(out.refusal_code.copy())
     return out^
 
 
@@ -1151,6 +1172,8 @@ def decide_record(
                 order_receipt.append(False)
                 order_live.append(True)
     var skip_reason = String("")
+    var skip_code = String("profile")
+    var skip_unknown = False
     for oi in range(len(order)):
         var doc = candidates[order[oi]].copy()
         var gap = _selection_gap(doc, ask.caps)
@@ -1158,12 +1181,16 @@ def decide_record(
             if want_explicit:
                 return _refuse_scan(gap)
             skip_reason = gap.copy()
+            skip_code = String("profile")
+            skip_unknown = False
             continue
         var tgap = tracing_gap(doc, ask.caps)
         if tgap != String(""):
             if want_explicit:
                 return _refuse_scan(tgap)
             skip_reason = tgap.copy()
+            skip_code = String("profile")
+            skip_unknown = False
             continue
         var hook = ProfileHook()
         var raw = List[UInt8]()
@@ -1177,6 +1204,8 @@ def decide_record(
             if want_explicit:
                 return _refuse_scan(herr)
             skip_reason = herr.copy()
+            skip_code = String("profile")
+            skip_unknown = False
             continue
         if order_live[oi]:
             var live = verify_live_interfaces(
@@ -1185,8 +1214,10 @@ def decide_record(
             if not live.ok:
                 if want_explicit:
                     if want_extra:
-                        return _refuse_scan(
-                            String("live check failed: ") + live.reason
+                        return _refuse_scan_live(
+                            String("live check failed: ") + live.reason,
+                            live.code.copy(),
+                            live.unknown,
                         )
                     out.ok = True
                     out.kind = String("partial")
@@ -1213,6 +1244,8 @@ def decide_record(
                 skip_reason = (
                     String("live check failed: ") + live.reason
                 )
+                skip_code = _live_skip_code(live.code.copy())
+                skip_unknown = live.unknown
                 continue
             out.layout_evidence = live.evidence.copy()
             var measured = _measure_binding(
@@ -1287,6 +1320,8 @@ def decide_record(
                 out.selected_caps = selected.copy()
                 return out^
             skip_reason = String("binding failed: ") + parsed.message
+            skip_code = String("profile")
+            skip_unknown = False
             continue
         var bound = _check_binding(
             root,
@@ -1309,6 +1344,8 @@ def decide_record(
                     String("binding failed: ") + bound.reason
                 )
             skip_reason = String("binding failed: ") + bound.reason
+            skip_code = String("profile")
+            skip_unknown = False
             continue
         out.ok = True
         if doc.status == String("validated"):
@@ -1367,7 +1404,9 @@ def decide_record(
             return _refuse_scan(
                 String("no profile satisfies requested capabilities")
             )
-        return _refuse_scan(skip_reason.copy())
+        return _refuse_scan_live(
+            skip_reason.copy(), skip_code.copy(), skip_unknown
+        )
     var first = candidates[0].copy()
     var phook = ProfileHook()
     var praw = List[UInt8]()
@@ -1608,12 +1647,16 @@ def run_collector_with[W: WriterSource](
             EXIT_REFUSAL, String(""), String(""),
             String(t"budget {opts.max_events_bytes} below 131072"),
             String(""),
+            String(""),
+            False,
         )
     if opts.max_events_bytes > MAX_RECORD_BYTES:
         return RunResult(
             EXIT_REFUSAL, String(""), String(""),
             String(t"budget {opts.max_events_bytes} above 4294967296"),
             String(""),
+            String(""),
+            False,
         )
     var bridge = resolve_bridge(opts.bridge, opts.has_bridge)
     if bridge == String(""):
@@ -1632,6 +1675,8 @@ def run_collector_with[W: WriterSource](
             EXIT_REFUSAL, String(""), String(""),
             hint,
             String(""),
+            String(""),
+            False,
         )
     # One resolution, pinned once: the snapshot's open
     # file description feeds the admission hash, the
@@ -1665,6 +1710,8 @@ def run_collector_with[W: WriterSource](
             EXIT_REFUSAL, String(""), String(""),
             String("no object: pass --object PATH"),
             String(""),
+            String(""),
+            False,
         )
     var lc_object = resolve_object(
         String("lifecycle"), opts.lc_object, exe_path
@@ -1680,6 +1727,8 @@ def run_collector_with[W: WriterSource](
             EXIT_REFUSAL, String(""), String(""),
             String("cannot open evidence: ") + String(e),
             String(""),
+            String(""),
+            False,
         )
     var env = detect_environment(reader)
     if not env.kernel.eligible_floor:
@@ -1689,6 +1738,8 @@ def run_collector_with[W: WriterSource](
             + env.kernel.release
             + String(" below floor 6.0"),
             String(""),
+            String(""),
+            False,
         )
     var profiles: List[Profile]
     try:
@@ -1698,6 +1749,8 @@ def run_collector_with[W: WriterSource](
             EXIT_REFUSAL, String(""), String(""),
             String("cannot load profiles: ") + String(e),
             String(""),
+            String(""),
+            False,
         )
     var decision = decide_record(
         root,
@@ -1717,6 +1770,8 @@ def run_collector_with[W: WriterSource](
             EXIT_REFUSAL, String(""), String(""),
             decision.refusal.copy(),
             decision.fix.copy(),
+            decision.refusal_code.copy(),
+            decision.refusal_unknown,
         )
     var timens = check_timens_live()
     if not timens.ok:
@@ -1724,12 +1779,16 @@ def run_collector_with[W: WriterSource](
             EXIT_REFUSAL, String(""), String(""),
             String("time namespace unverifiable"),
             String(""),
+            String(""),
+            False,
         )
     if timens.offset:
         return RunResult(
             EXIT_REFUSAL, String(""), String(""),
             String("time namespace offset present"),
             String(""),
+            String(""),
+            False,
         )
     if (
         decision.off_loc < 0
@@ -1741,6 +1800,8 @@ def run_collector_with[W: WriterSource](
             EXIT_REFUSAL, String(""), String(""),
             String("admission did not probe offsets"),
             String(""),
+            String(""),
+            False,
         )
     var cfg = CollectorConfig()
     cfg.duration_s = opts.duration_s
