@@ -7,7 +7,8 @@ format/image shas, image bid) plus the live format text, plus
 the current production, saturation, lifecycle, and copy
 object builds.
 Outputs:
-  profiles/linux-x86_64-7.0.0-34-generic.json (reference-
+  profiles/linux-x86_64-7.0.0-34-generic.json (schema 0.1.2
+    with the built objects' CO-RE layouts; reference-
     unvalidated until the promotion commit flips ONLY the
     status line; tracing caps supported with frozen hooks
     and current lc/cp bindings)
@@ -23,6 +24,7 @@ itself enforces the checked-in values.
 import hashlib
 import importlib.util
 import json
+import subprocess
 import sys
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
@@ -33,6 +35,7 @@ PROD_OBJ = ROOT / "build/bpf/swiotlb_attempt.bpf.o"
 SAT_OBJ = ROOT / "build/bpf/swiotlb_attempt-test.bpf.o"
 LC_OBJ = ROOT / "build/bpf/swiotlb_lifecycle.bpf.o"
 CP_OBJ = ROOT / "build/bpf/swiotlb_copy.bpf.o"
+LAYOUTS_TOOL = ROOT / "tools/emit-core-layouts"
 MINTER = ROOT / "tests/vm/mint_record3_profile.py"
 FMT_PATH = "/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format"
 LC_REASON = (
@@ -140,6 +143,21 @@ def doc_for(
     }
 
 
+def core_layouts() -> list:
+    """0.1.2 layouts from the built objects' CO-RE set."""
+    proc = subprocess.run(
+        [sys.executable, str(LAYOUTS_TOOL),
+         "--object", "attempt-trace=%s" % PROD_OBJ,
+         "--object", "mapping-lifecycle=%s" % LC_OBJ,
+         "--object", "copy-actual=%s" % CP_OBJ,
+         "--print"],
+        capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise ValueError(
+            "layout extraction failed: %s" % proc.stderr.strip())
+    return json.loads(proc.stdout)
+
+
 def gate_docs(ident: dict, fmt_text: str, gate_id: str) -> tuple:
     """Gate and saturation docs for one measured identity."""
     for key in (
@@ -176,6 +194,10 @@ def gate_docs(ident: dict, fmt_text: str, gate_id: str) -> tuple:
     minter().apply_tracing(
         gate, LC_OBJ, CP_OBJ, LC_REASON, CP_REASON, HOOK_NOTE
     )
+    # The gate doc carries the objects' CO-RE layouts, so a
+    # re-emit reproduces the shipped narrow profile exactly.
+    gate["layouts"] = core_layouts()
+    gate["schema_version"] = "0.1.2"
     sat = doc_for(
         "saturation-candidate",
         "reference-unvalidated",

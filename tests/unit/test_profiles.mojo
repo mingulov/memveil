@@ -721,7 +721,7 @@ def test_parse_reference_file() raises:
     assert_equal(len(ps[0].hooks), 6)
     assert_equal(len(ps[0].caps), 3)
     assert_equal(len(ps[0].notes), 3)
-    assert_equal(len(ps[0].layouts), 7)
+    assert_equal(len(ps[0].layouts), 17)
     assert_equal(ps[0].hooks[0].kind, String("tracepoint"))
     assert_equal(
         ps[0].hooks[1].name, String("fexit:swiotlb_tbl_map_single")
@@ -743,7 +743,7 @@ def test_parse_reference_file() raises:
     assert_equal(ps[2].status, String("reference-unvalidated"))
     assert_equal(ps[2].identity.min_kernel, String("6.0"))
     assert_equal(len(ps[2].hooks), 6)
-    assert_equal(len(ps[2].layouts), 7)
+    assert_equal(len(ps[2].layouts), 17)
     assert_equal(len(ps[2].hooks[1].signature_alt), 1)
 
 
