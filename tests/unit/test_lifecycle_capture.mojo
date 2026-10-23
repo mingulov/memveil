@@ -429,6 +429,9 @@ def _run_live(
     duration_s: UInt64 = UInt64(60),
     timeouts: Int = 103,
     read_files: Bool = True,
+    misses: MissOut = MissOut(True, UInt64(0), String("")),
+    misses2: MissOut = MissOut(True, UInt64(0), String("")),
+    use_misses2: Bool = False,
 ) raises -> CaseOut:
     """_run with an explicit clock script and channel flags.
 
@@ -455,6 +458,9 @@ def _run_live(
         kernel.channels = 3
     elif has_lifecycle:
         kernel.channels = 2
+    kernel.misses_out = misses.copy()
+    kernel.misses_out2 = misses2.copy()
+    kernel.use_misses2 = use_misses2
     kernel.add_snap(_zero_snap())
     kernel.add_snap(_zero_snap())
     if has_lifecycle:
@@ -535,13 +541,14 @@ def _run_live(
 def _cut(
     observed: UInt64, observed_bytes: UInt64, emitted: UInt64,
     emitted_bytes: UInt64,
+    submit_fail: UInt64 = UInt64(0),
 ) -> List[UInt64]:
     var vals = List[UInt64]()
     vals.append(observed)
     vals.append(observed_bytes)
     vals.append(emitted)
     vals.append(emitted_bytes)
-    vals.append(UInt64(0))
+    vals.append(submit_fail)
     vals.append(UInt64(0))
     return vals^
 
@@ -4008,6 +4015,213 @@ def test_copy_only_syncs_without_copies_silent() raises:
     assert_equal(c.exit_code, 4)
     assert_true(
         _contains(c.session, String("hooks silent: map->copy"))
+    )
+
+
+def _detail_misses(
+    bounce: UInt64, deferred: UInt64, recovered: UInt64
+) -> MissOut:
+    return MissOut(
+        True, UInt64(0), String(""), UInt64(0), True, bounce,
+        UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+        deferred, recovered)
+
+
+def test_collector_liveness_submit_fail_absorbs_gap() raises:
+    # Ring-full drops never emit, so they join the copy loss, never silence.
+    var vals = _live_clock_values(UInt64(1000000000), True, True)
+    var attach = _live_attach(vals, True, True)
+    var payloads = List[List[UInt8]]()
+    for i in range(100):
+        payloads.append(
+            _lc_raw(1, 1, 1, UInt64(7000 + i),
+                    attach + UInt64(i) * UInt64(30000000),
+                    UInt64(4096), UInt64(7000 + i)))
+    for i in range(60):
+        payloads.append(
+            _cp_raw(2, 3, 1, UInt64(7100 + i),
+                    attach + UInt64(i) * UInt64(50000000),
+                    UInt64(4096), UInt64(4096), 0))
+    var c = _run_live(
+        payloads^, vals^, _zero_cut(),
+        _cut(UInt64(100), UInt64(409600), UInt64(100),
+             UInt64(409600)), UInt64(100),
+        _cut(UInt64(100), UInt64(409600), UInt64(60),
+             UInt64(245760), submit_fail=UInt64(40)),
+        UInt64(60), duration_s=UInt64(3600))
+    assert_equal(c.exit_code, 4)
+    assert_true(not _contains(c.session, String("hooks silent")))
+    assert_true(
+        _contains(c.session, String("; liveness verified"))
+    )
+
+
+def test_collector_liveness_recursion_misses_absorb_gap() raises:
+    # Skipped bounce runs never observe, so they join the copy loss too.
+    var vals = _live_clock_values(UInt64(1000000000), True, True)
+    var attach = _live_attach(vals, True, True)
+    var payloads = List[List[UInt8]]()
+    for i in range(100):
+        payloads.append(
+            _lc_raw(1, 1, 1, UInt64(7200 + i),
+                    attach + UInt64(i) * UInt64(30000000),
+                    UInt64(4096), UInt64(7200 + i)))
+    for i in range(90):
+        payloads.append(
+            _cp_raw(2, 3, 1, UInt64(7300 + i),
+                    attach + UInt64(i) * UInt64(33000000),
+                    UInt64(4096), UInt64(4096), 0))
+    var c = _run_live(
+        payloads^, vals^, _zero_cut(),
+        _cut(UInt64(100), UInt64(409600), UInt64(100),
+             UInt64(409600)), UInt64(100),
+        _cut(UInt64(90), UInt64(368640), UInt64(90),
+             UInt64(368640)), UInt64(90),
+        duration_s=UInt64(3600),
+        misses=_detail_misses(
+            UInt64(10), UInt64(0), UInt64(0)))
+    assert_equal(c.exit_code, 4)
+    assert_true(not _contains(c.session, String("hooks silent")))
+    assert_true(
+        _contains(c.session, String("; liveness verified"))
+    )
+
+
+def test_collector_liveness_deferred_absorbs_gap() raises:
+    # Deferred-but-unrecovered entries never observe, so they join the loss.
+    var vals = _live_clock_values(UInt64(1000000000), True, True)
+    var attach = _live_attach(vals, True, True)
+    var payloads = List[List[UInt8]]()
+    for i in range(100):
+        payloads.append(
+            _lc_raw(1, 1, 1, UInt64(7400 + i),
+                    attach + UInt64(i) * UInt64(30000000),
+                    UInt64(4096), UInt64(7400 + i)))
+    for i in range(90):
+        payloads.append(
+            _cp_raw(2, 3, 1, UInt64(7500 + i),
+                    attach + UInt64(i) * UInt64(33000000),
+                    UInt64(4096), UInt64(4096), 0))
+    var c = _run_live(
+        payloads^, vals^, _zero_cut(),
+        _cut(UInt64(100), UInt64(409600), UInt64(100),
+             UInt64(409600)), UInt64(100),
+        _cut(UInt64(90), UInt64(368640), UInt64(90),
+             UInt64(368640)), UInt64(90),
+        duration_s=UInt64(3600),
+        misses=_detail_misses(
+            UInt64(0), UInt64(10), UInt64(0)))
+    assert_equal(c.exit_code, 4)
+    assert_true(not _contains(c.session, String("hooks silent")))
+    assert_true(
+        _contains(c.session, String("; liveness verified"))
+    )
+
+
+def test_collector_liveness_fallback_exact() raises:
+    # Recovered entries never inflate the loss; over-recovery voids it.
+    var vals = _live_clock_values(UInt64(1000000000), True, True)
+    var attach = _live_attach(vals, True, True)
+    var payloads = List[List[UInt8]]()
+    for i in range(100):
+        payloads.append(
+            _lc_raw(1, 1, 1, UInt64(7600 + i),
+                    attach + UInt64(i) * UInt64(30000000),
+                    UInt64(4096), UInt64(7600 + i)))
+    for i in range(90):
+        payloads.append(
+            _cp_raw(2, 3, 1, UInt64(7700 + i),
+                    attach + UInt64(i) * UInt64(33000000),
+                    UInt64(4096), UInt64(4096), 0))
+    var even = _run_live(
+        payloads^, vals^, _zero_cut(),
+        _cut(UInt64(100), UInt64(409600), UInt64(100),
+             UInt64(409600)), UInt64(100),
+        _cut(UInt64(90), UInt64(368640), UInt64(90),
+             UInt64(368640)), UInt64(90),
+        duration_s=UInt64(3600),
+        misses=_detail_misses(
+            UInt64(0), UInt64(10), UInt64(10)))
+    assert_equal(even.exit_code, 4)
+    assert_true(
+        _contains(even.session, String("hooks silent: map->copy"))
+    )
+    var vals2 = _live_clock_values(UInt64(1000000000), True, True)
+    var attach2 = _live_attach(vals2, True, True)
+    var payloads2 = List[List[UInt8]]()
+    for i in range(100):
+        payloads2.append(
+            _lc_raw(1, 1, 1, UInt64(7800 + i),
+                    attach2 + UInt64(i) * UInt64(30000000),
+                    UInt64(4096), UInt64(7800 + i)))
+    for i in range(90):
+        payloads2.append(
+            _cp_raw(2, 3, 1, UInt64(7900 + i),
+                    attach2 + UInt64(i) * UInt64(33000000),
+                    UInt64(4096), UInt64(4096), 0))
+    var contradict = _run_live(
+        payloads2^, vals2^, _zero_cut(),
+        _cut(UInt64(100), UInt64(409600), UInt64(100),
+             UInt64(409600)), UInt64(100),
+        _cut(UInt64(90), UInt64(368640), UInt64(90),
+             UInt64(368640)), UInt64(90),
+        duration_s=UInt64(3600),
+        misses=_detail_misses(
+            UInt64(0), UInt64(0), UInt64(5)))
+    assert_equal(contradict.exit_code, 4)
+    assert_true(
+        not _contains(contradict.session, String("hooks silent"))
+    )
+    assert_true(
+        _contains(contradict.session, String("liveness unverified"))
+    )
+
+
+def test_collector_liveness_unreadable_misses_unverified() raises:
+    # Without the miss counters the gap is unprovable: unverified, not silent.
+    var vals = _live_clock_values(UInt64(1000000000), True, True)
+    var attach = _live_attach(vals, True, True)
+    var payloads = List[List[UInt8]]()
+    for i in range(200):
+        payloads.append(
+            _lc_raw(1, 1, 1, UInt64(8000 + i),
+                    attach + UInt64(i) * UInt64(15000000),
+                    UInt64(4096), UInt64(8000 + i)))
+    var c = _run_live(
+        payloads^, vals^, _zero_cut(),
+        _cut(UInt64(200), UInt64(819200), UInt64(200),
+             UInt64(819200)), UInt64(200),
+        _zero_cut(), UInt64(0), duration_s=UInt64(3600),
+        misses=MissOut(False, UInt64(0), String("fdinfo gone")))
+    assert_equal(c.exit_code, 4)
+    assert_true(not _contains(c.session, String("hooks silent")))
+    assert_true(
+        _contains(c.session, String("liveness unverified"))
+    )
+
+
+def test_collector_liveness_detail_error_unverified() raises:
+    # A partial miss read splits no channel, so the gap stays unverified too.
+    var vals = _live_clock_values(UInt64(1000000000), True, True)
+    var attach = _live_attach(vals, True, True)
+    var payloads = List[List[UInt8]]()
+    for i in range(200):
+        payloads.append(
+            _lc_raw(1, 1, 1, UInt64(8100 + i),
+                    attach + UInt64(i) * UInt64(15000000),
+                    UInt64(4096), UInt64(8100 + i)))
+    var bad = MissOut(True, UInt64(0), String(""))
+    bad.detail_error = String("ch2 copy program count")
+    var c = _run_live(
+        payloads^, vals^, _zero_cut(),
+        _cut(UInt64(200), UInt64(819200), UInt64(200),
+             UInt64(819200)), UInt64(200),
+        _zero_cut(), UInt64(0), duration_s=UInt64(3600),
+        misses=bad.copy())
+    assert_equal(c.exit_code, 4)
+    assert_true(not _contains(c.session, String("hooks silent")))
+    assert_true(
+        _contains(c.session, String("liveness unverified"))
     )
 
 

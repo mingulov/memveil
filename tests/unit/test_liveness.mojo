@@ -30,7 +30,13 @@ def _tally() -> LivenessTally:
 
 
 def _loss(lc: UInt64, cp: UInt64) -> LivenessLoss:
-    return LivenessLoss(lc, cp, True)
+    return LivenessLoss(lc, cp, True, True)
+
+
+def _loss_split(
+    lc: UInt64, cp: UInt64, known_lc: Bool, known_cp: Bool
+) -> LivenessLoss:
+    return LivenessLoss(lc, cp, known_lc, known_cp)
 
 
 def _td() -> UInt64:
@@ -132,11 +138,31 @@ def test_unknown_loss_unverified() raises:
         True,
         True,
         True,
-        LivenessLoss(UInt64(0), UInt64(10), False),
+        LivenessLoss(UInt64(0), UInt64(10), False, False),
     )
     assert_equal(v.state, String("unverified"))
     assert_equal(v.equation, String("map->copy"))
     assert_equal(v.detail, String("100 > 100"))
+
+
+def test_loss_known_per_channel() raises:
+    # Lifecycle known with copy unknown: E1 verifies while E2f stays out.
+    var tally = _tally()
+    for _ in range(50):
+        tally.note_attempt(UInt64(4000000000))
+    for _ in range(50):
+        tally.note_map(UInt64(4000000000), True)
+    var v = evaluate_liveness(
+        tally,
+        _td(),
+        True,
+        True,
+        True,
+        _loss_split(UInt64(0), UInt64(0), True, False),
+    )
+    assert_equal(v.state, String("unverified"))
+    assert_equal(v.equation, String("map->copy"))
+    assert_equal(v.detail, String("50 > 0"))
 
 
 def test_edge_excess_inside_guard_never_fires() raises:
@@ -332,6 +358,7 @@ def run() raises -> Int:
     suite.test[test_skip_sync_unmaps_excluded]()
     suite.test[test_loss_absorbs_deficit]()
     suite.test[test_unknown_loss_unverified]()
+    suite.test[test_loss_known_per_channel]()
     suite.test[test_edge_excess_inside_guard_never_fires]()
     suite.test[test_records_before_attach_ignored]()
     suite.test[test_copy_without_lifecycle_unverified]()

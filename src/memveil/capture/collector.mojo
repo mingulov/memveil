@@ -1998,6 +1998,8 @@ struct Collector:
         if not m.has_copy_detail:
             self.recursion_missed = m.count
             self.has_recursion = True
+            self.rec_deferred = m.deferred
+            self.rec_recovered = m.recovered
             return
         self.rec_has_detail = True
         self.rec_bounce = m.bounce
@@ -2775,18 +2777,54 @@ struct Collector:
             total += self.end_vals_cp[CNT_SUBMIT_FAIL]
         return total
 
+    def _liveness_misses(self, is_copy: Bool) -> Tuple[UInt64, Bool]:
+        """Per-channel program misses; unknown unless exactly provable."""
+        var top = ~UInt64(0)
+        if self.rec_has_detail:
+            var parts = List[UInt64]()
+            if is_copy:
+                # Exit-only misses lose no record; unrecovered deferrals charge below.
+                parts.append(self.rec_bounce)
+                parts.append(self.rec_sync_device)
+                parts.append(self.rec_sync_cpu)
+            else:
+                parts.append(self.rec_lc_map)
+                parts.append(self.rec_lc_unmap)
+            var total = UInt64(0)
+            for i in range(len(parts)):
+                if total > top - parts[i]:
+                    return (UInt64(0), False)
+                total += parts[i]
+            return (total, True)
+        if not self.has_recursion or not self.attempt_known:
+            return (UInt64(0), False)
+        if self.attempt_missed > self.recursion_missed:
+            return (UInt64(0), False)
+        if not self.cfg.has_copy:
+            # Lifecycle-only runs split the aggregate exactly: total minus attempt.
+            if is_copy:
+                return (UInt64(0), False)
+            return (self.recursion_missed - self.attempt_missed, True)
+        # An aggregate sum of zero proves every channel missed nothing.
+        if self.recursion_missed == UInt64(0):
+            return (UInt64(0), True)
+        return (UInt64(0), False)
+
     def _liveness_channel_loss(
         self, start: List[UInt64], end: List[UInt64],
-        has_cut: Bool, seen: UInt64,
+        has_cut: Bool, seen: UInt64, is_copy: Bool,
     ) -> Tuple[UInt64, Bool]:
-        """Emitted-minus-seen for one channel, with validity.
+        """Observed-minus-read plus channel misses, with validity.
 
         The xcounter pair must be complete and trustworthy
         (identity holds, no wrap or argument-count flags);
-        more tallied than emitted contradicts the counters
-        and voids the loss. Drain-stranded and rejected
-        records stay inside the loss term by construction:
-        they were emitted but never tallied.
+        more read than observed contradicts the counters and
+        voids the loss. Drain-stranded and rejected records
+        stay inside the observed term by construction: they
+        were observed but never tallied. Skipped program runs
+        never observe, so per-channel misses join the loss;
+        the copy channel also charges deferred-minus-recovered
+        entries, which neither path ever observed.
         """
         if not has_cut:
             return (UInt64(0), False)
@@ -2802,10 +2840,27 @@ struct Collector:
             return (UInt64(0), False)
         if end[CNT_EMITTED] < start[CNT_EMITTED]:
             return (UInt64(0), False)
-        var emitted = end[CNT_EMITTED] - start[CNT_EMITTED]
-        if seen > emitted:
+        if end[CNT_OBSERVED] < start[CNT_OBSERVED]:
             return (UInt64(0), False)
-        return (emitted - seen, True)
+        var delta = end[CNT_OBSERVED] - start[CNT_OBSERVED]
+        if seen > delta:
+            return (UInt64(0), False)
+        var misses = self._liveness_misses(is_copy)
+        if not misses[1]:
+            return (UInt64(0), False)
+        var top = ~UInt64(0)
+        var base = delta - seen
+        if base > top - misses[0]:
+            return (UInt64(0), False)
+        var loss = base + misses[0]
+        if is_copy:
+            if self.rec_recovered > self.rec_deferred:
+                return (UInt64(0), False)
+            var fb = self.rec_deferred - self.rec_recovered
+            if loss > top - fb:
+                return (UInt64(0), False)
+            loss += fb
+        return (loss, True)
 
     def _liveness_verdict(self) -> LivenessVerdict:
         """Judge hook liveness from the tally and end cuts."""
@@ -2814,15 +2869,15 @@ struct Collector:
         if self.cfg.has_lifecycle:
             loss_lc = self._liveness_channel_loss(
                 self.start_vals_lc, self.end_vals_lc,
-                self.has_end_cut_lc, self.live.seen_lc,
+                self.has_end_cut_lc, self.live.seen_lc, False,
             )
         if self.cfg.has_copy:
             loss_cp = self._liveness_channel_loss(
                 self.start_vals_cp, self.end_vals_cp,
-                self.has_end_cut_cp, self.live.seen_cp,
+                self.has_end_cut_cp, self.live.seen_cp, True,
             )
         var loss = LivenessLoss(
-            loss_lc[0], loss_cp[0], loss_lc[1] and loss_cp[1]
+            loss_lc[0], loss_cp[0], loss_lc[1], loss_cp[1]
         )
         return evaluate_liveness(
             self.live, self.detach_ns, True,

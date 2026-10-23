@@ -307,11 +307,12 @@ struct LivenessTally(Movable):
 
 @fieldwise_init
 struct LivenessLoss(ImplicitlyCopyable):
-    """Lifecycle/copy record loss; known pins both terms."""
+    """Lifecycle/copy record loss; each known pins its own term."""
 
     var lc: UInt64
     var cp: UInt64
-    var known: Bool
+    var known_lc: Bool
+    var known_cp: Bool
 
 
 @fieldwise_init
@@ -423,7 +424,7 @@ def evaluate_liveness(
             f_empty,
             lhs,
             rhs,
-            loss.known,
+            loss.known_lc,
             sat_f,
         )
     )
@@ -439,7 +440,7 @@ def evaluate_liveness(
             f_empty,
             lhs,
             rhs,
-            loss.known,
+            loss.known_cp,
             sat_f,
         )
     )
@@ -457,7 +458,7 @@ def evaluate_liveness(
             r_empty,
             lhs,
             rhs,
-            loss.known,
+            loss.known_lc and loss.known_cp,
             sat_r,
         )
     )
@@ -473,7 +474,7 @@ def evaluate_liveness(
             f_empty,
             lhs,
             rhs,
-            loss.known,
+            loss.known_cp,
             sat_f,
         )
     )
@@ -494,7 +495,7 @@ def evaluate_liveness(
             r_empty,
             lhs,
             rhs,
-            loss.known,
+            loss.known_lc and loss.known_cp,
             sat_r,
         )
     )
