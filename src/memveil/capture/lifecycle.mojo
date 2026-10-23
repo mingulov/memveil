@@ -61,6 +61,10 @@ comptime _CP_REASON_NONE = 0
 comptime _CP_REASON_NOT_COPY = 4
 comptime _CP_REASON_LAYOUT = 5
 comptime _CP_REASON_SHIFT = 6
+comptime CP_KIND_COPY = 2
+comptime CP_REASON_SLOT_READ = 1
+comptime CP_REASON_MASK_READ = 2
+comptime CP_REASON_BOUNDS = 3
 comptime CP_REASON_LAYOUT = 5
 comptime CP_REASON_SHIFT = 6
 
@@ -275,6 +279,21 @@ def decode_copy(raw: List[UInt8]) raises DecodeError -> DecodedCopy:
         _lc_le64(raw, _CP_OFF_EFFECTIVE),
     )
     return out^
+
+
+def copy_unknown_reason_name(reason: UInt16) -> String:
+    """Wire reason of an unknown copy, for quality reporting."""
+    if reason == UInt16(CP_REASON_SLOT_READ):
+        return String("SLOT_READ")
+    if reason == UInt16(CP_REASON_MASK_READ):
+        return String("MASK_READ")
+    if reason == UInt16(CP_REASON_BOUNDS):
+        return String("BOUNDS")
+    if reason == UInt16(CP_REASON_LAYOUT):
+        return String("LAYOUT")
+    if reason == UInt16(CP_REASON_SHIFT):
+        return String("SHIFT")
+    return String("REASON_") + format_u64(UInt64(reason))
 
 
 def tlb_offset(

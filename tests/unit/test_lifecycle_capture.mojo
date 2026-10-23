@@ -888,7 +888,88 @@ def test_unknown_copy_drops_as_rejected() raises:
                 'malformed=(0) dropped=(0) recursion_missed=(0) '
                 'size_omitted=(0) '
                 'duration_omitted=(0) signal_omitted=(0) '
-                'rejected=(1) write_failed=(0))"'
+                'rejected=(1) write_failed=(0)); '
+                'first unknown copy: SLOT_READ"'
+            ),
+        )
+    )
+
+
+def test_unknown_copies_counted_per_reason() raises:
+    # Each unknown copy charges its wire reason; the detail names the first.
+    var payloads = List[List[UInt8]]()
+    var reasons = List[Int]()
+    reasons.append(5)
+    reasons.append(6)
+    reasons.append(5)
+    reasons.append(1)
+    reasons.append(2)
+    reasons.append(3)
+    for i in range(len(reasons)):
+        payloads.append(
+            _cp_raw(2, 0, 2, UInt64(240 + i), UInt64(2040 + i),
+                    UInt64(4096), UInt64(0), reasons[i]))
+    var c = _run(
+        payloads^, _zero_cut(), _zero_cut(), UInt64(0),
+        _cut(UInt64(6), UInt64(24576), UInt64(6), UInt64(24576)),
+        UInt64(6))
+    assert_equal(c.exit_code, EXIT_PARTIAL)
+    assert_true(not _contains(c.events, String('"kind":"copy"')))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"reason":"detail loss 6 (submit_fail=(0) '
+                'malformed=(0) dropped=(0) recursion_missed=(0) '
+                'size_omitted=(0) '
+                'duration_omitted=(0) signal_omitted=(0) '
+                'rejected=(6) write_failed=(0)); '
+                'first unknown copy: LAYOUT"'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"source":"copy.unknown_layout",'
+                '"interpretation":"2"'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"source":"copy.unknown_shift",'
+                '"interpretation":"1"'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"source":"copy.unknown_slot_read",'
+                '"interpretation":"1"'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"source":"copy.unknown_mask_read",'
+                '"interpretation":"1"'
+            ),
+        )
+    )
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"source":"copy.unknown_bounds",'
+                '"interpretation":"1"'
             ),
         )
     )

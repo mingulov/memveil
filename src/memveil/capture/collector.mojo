@@ -16,7 +16,13 @@ from libbpf_mojo.batch import decode_frame
 from libbpf_mojo.error import LmbError
 from memveil.capture.correlation import CorrelationRegistry
 from memveil.capture.lifecycle import (
+    CP_KIND_COPY,
     CP_LEN,
+    CP_REASON_BOUNDS,
+    CP_REASON_LAYOUT,
+    CP_REASON_MASK_READ,
+    CP_REASON_SHIFT,
+    CP_REASON_SLOT_READ,
     HOOK_BOUNCE,
     HOOK_MAP_RESULT,
     HOOK_SYNC_CPU,
@@ -25,6 +31,7 @@ from memveil.capture.lifecycle import (
     LC_LEN,
     DecodedCopy,
     DecodedLifecycle,
+    copy_unknown_reason_name,
     decode_copy,
     decode_lifecycle,
     normalize_copy_event,
@@ -733,6 +740,12 @@ struct Collector:
     var duration_omitted: UInt64
     var signal_omitted: UInt64
     var rejected: UInt64
+    var unknown_copy_first: String
+    var unknown_copy_slot_read: UInt64
+    var unknown_copy_mask_read: UInt64
+    var unknown_copy_bounds: UInt64
+    var unknown_copy_layout: UInt64
+    var unknown_copy_shift: UInt64
     var filtered: UInt64
     var write_failed: UInt64
     var max_persisted_ts: UInt64
@@ -822,6 +835,12 @@ struct Collector:
         self.duration_omitted = UInt64(0)
         self.signal_omitted = UInt64(0)
         self.rejected = UInt64(0)
+        self.unknown_copy_first = String("")
+        self.unknown_copy_slot_read = UInt64(0)
+        self.unknown_copy_mask_read = UInt64(0)
+        self.unknown_copy_bounds = UInt64(0)
+        self.unknown_copy_layout = UInt64(0)
+        self.unknown_copy_shift = UInt64(0)
         self.filtered = UInt64(0)
         self.write_failed = UInt64(0)
         self.max_persisted_ts = UInt64(0)
@@ -1812,6 +1831,27 @@ struct Collector:
             self.persisted_map_ok += UInt64(1)
         return res
 
+    def _note_unknown_copy(mut self, decoded: DecodedCopy):
+        # Unknown copies charge their wire reason; the first names the detail.
+        if decoded.kind != UInt16(CP_KIND_COPY) or decoded.known:
+            return
+        if decoded.reason == UInt16(CP_REASON_SLOT_READ):
+            self.unknown_copy_slot_read += UInt64(1)
+        elif decoded.reason == UInt16(CP_REASON_MASK_READ):
+            self.unknown_copy_mask_read += UInt64(1)
+        elif decoded.reason == UInt16(CP_REASON_BOUNDS):
+            self.unknown_copy_bounds += UInt64(1)
+        elif decoded.reason == UInt16(CP_REASON_LAYOUT):
+            self.unknown_copy_layout += UInt64(1)
+        elif decoded.reason == UInt16(CP_REASON_SHIFT):
+            self.unknown_copy_shift += UInt64(1)
+        else:
+            return
+        if self.unknown_copy_first == String(""):
+            self.unknown_copy_first = copy_unknown_reason_name(
+                decoded.reason
+            )
+
     def _admit_copy[
         C: ClockSource, G: SignalSource, W: WriterSource
     ](
@@ -1834,6 +1874,7 @@ struct Collector:
         except e:
             if not e.fatal:
                 self.rejected += UInt64(1)
+                self._note_unknown_copy(decoded)
                 return String("")
             self.rejected += UInt64(1)
             self.fail(String("error"))
@@ -3240,6 +3281,11 @@ struct Collector:
                 self.rejected,
                 self.write_failed,
             )
+        if self.unknown_copy_first != String(""):
+            out.q_detail.reason += (
+                String("; first unknown copy: ")
+                + self.unknown_copy_first
+            )
         if verdict.state == String("hooks_silent"):
             out.q_detail.status = String("partial")
             out.q_detail.has_loss_count = False
@@ -3487,6 +3533,31 @@ struct Collector:
             self.provenance(
                 out, String("copy.recovered"),
                 format_u64(self.rec_recovered),
+            )
+        if self.unknown_copy_slot_read != UInt64(0):
+            self.provenance(
+                out, String("copy.unknown_slot_read"),
+                format_u64(self.unknown_copy_slot_read),
+            )
+        if self.unknown_copy_mask_read != UInt64(0):
+            self.provenance(
+                out, String("copy.unknown_mask_read"),
+                format_u64(self.unknown_copy_mask_read),
+            )
+        if self.unknown_copy_bounds != UInt64(0):
+            self.provenance(
+                out, String("copy.unknown_bounds"),
+                format_u64(self.unknown_copy_bounds),
+            )
+        if self.unknown_copy_layout != UInt64(0):
+            self.provenance(
+                out, String("copy.unknown_layout"),
+                format_u64(self.unknown_copy_layout),
+            )
+        if self.unknown_copy_shift != UInt64(0):
+            self.provenance(
+                out, String("copy.unknown_shift"),
+                format_u64(self.unknown_copy_shift),
             )
         while len(out.evidence) > 64:
             _ = out.evidence.pop()
