@@ -8,6 +8,7 @@ from std.testing import TestSuite, assert_equal, assert_true
 from memveil.platform.btf import (
     MAX_KERNEL_BTF_BYTES,
     check_btf_health,
+    classify_btf_message,
     read_btf_copy_fb,
     read_btf_func_proto,
     read_btf_func_sig,
@@ -572,6 +573,22 @@ def test_btf_cap_single() raises:
     assert_equal(evidence_btf_cap(), MAX_KERNEL_BTF_BYTES)
 
 
+def test_classify_reader_messages() raises:
+    # A dangling type id is corrupt BTF, never a known refusal.
+    assert_equal(
+        classify_btf_message(String("type id out of range")),
+        String("btf-malformed"),
+    )
+    assert_equal(
+        classify_btf_message(String("BTF too small")),
+        String("btf-truncated"),
+    )
+    assert_equal(
+        classify_btf_message(String("function nope not found")),
+        String(""),
+    )
+
+
 def test_func_sig_dups() raises:
     var raw = _read_fixture(String("tests/fixtures/btf/sig-dup.bin"))
     var f = read_btf_func_sig(Span(raw), String("test_fn"))
@@ -636,6 +653,7 @@ def run() raises -> Int:
     suite.test[test_member_legacy_refuses_bitfield]()
     suite.test[test_btf_health_classes]()
     suite.test[test_btf_cap_single]()
+    suite.test[test_classify_reader_messages]()
     suite.test[test_func_sig_dups]()
     suite^.run()
     return 0

@@ -35,6 +35,7 @@ from memveil.platform.artifact_files import join_root
 from memveil.platform.btf import (
     BtfFuncSig,
     BtfResolved,
+    check_btf_health,
     classify_btf_message,
     read_btf_func_proto,
     read_btf_func_sig,
@@ -1877,7 +1878,9 @@ def _read_live_btf(
 
     Ok verdict carries the bytes in btf; anything else
     carries the failure verdict. Absence refuses (a BTF-less
-    kernel cannot serve tracing), denial reports unknown.
+    kernel cannot serve tracing), denial reports unknown,
+    and bytes failing the health check report unknown
+    with the health code.
     """
     var done = LiveVerdict()
     var st = file_state(reader, String("/sys/kernel/btf/vmlinux"))
@@ -1907,6 +1910,11 @@ def _read_live_btf(
         return _live_unknown_code(
             String("BTF unreadable: ") + String(e),
             String("btf-unreadable"),
+        )
+    var health = check_btf_health(Span(btf))
+    if not health.ok:
+        return _live_unknown_code(
+            health.message.copy(), health.code.copy()
         )
     done.ok = True
     return done^

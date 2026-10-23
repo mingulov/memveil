@@ -448,6 +448,8 @@ def classify_btf_message(message: String) -> String:
         return String("btf-malformed")
     if message == String("BTF strings corrupt"):
         return String("btf-malformed")
+    if message == String("type id out of range"):
+        return String("btf-malformed")
     if message.startswith(String("unknown BTF kind ")):
         return String("btf-malformed")
     return String("")

@@ -2054,18 +2054,10 @@ def test_discover_candidate_unknown() raises:
     # The ordinary-7.0 root carries stand-in BTF: corrupt
     # BTF is unknown evidence, never an unavailable verdict.
     assert_equal(l.status, String("unknown"))
-    assert_equal(
-        l.reason,
-        String("fexit:swiotlb_tbl_map_single: bad BTF header"),
-    )
+    assert_equal(l.reason, String("bad BTF header"))
     var c = find_entry(rep, String("copy-actual"))
     assert_equal(c.status, String("unknown"))
-    assert_equal(
-        c.reason,
-        String(
-            "fentry:__swiotlb_sync_single_for_device: bad BTF header"
-        ),
-    )
+    assert_equal(c.reason, String("bad BTF header"))
 
 
 def test_discover_hook_absent() raises:
@@ -2535,10 +2527,7 @@ def test_verify_live_btf_corrupt() raises:
         fx("kernel-6.8"), doc^, caps^
     )
     assert_true(not v.ok)
-    assert_equal(
-        v.reason,
-        String("fexit:swiotlb_tbl_map_single: bad BTF header"),
-    )
+    assert_equal(v.reason, String("bad BTF header"))
 
 
 def test_verify_live_btf_corrupt_unknown() raises:
@@ -2551,10 +2540,20 @@ def test_verify_live_btf_corrupt_unknown() raises:
     assert_true(not v.ok)
     assert_true(v.unknown)
     assert_equal(v.code, String("btf-malformed"))
-    assert_equal(
-        v.reason,
-        String("fexit:swiotlb_tbl_map_single: bad BTF header"),
+    assert_equal(v.reason, String("bad BTF header"))
+
+
+def test_verify_live_btf_split_unknown() raises:
+    # Split BTF needs its base blob: unknown, never admitted.
+    var doc = parse_profile_bytes(bytes_of(live_ref_doc()))
+    var caps = List[String]()
+    caps.append(String("mapping-lifecycle"))
+    var v = verify_live_interfaces(
+        fx("../gate/btf-split"), doc^, caps^
     )
+    assert_true(not v.ok)
+    assert_true(v.unknown)
+    assert_equal(v.code, String("btf-split"))
 
 
 def test_verify_live_73_sig_mismatch() raises:
@@ -4205,6 +4204,7 @@ def run() raises -> Int:
     suite.test[test_verify_live_btf_absent]()
     suite.test[test_verify_live_btf_corrupt]()
     suite.test[test_verify_live_btf_corrupt_unknown]()
+    suite.test[test_verify_live_btf_split_unknown]()
     suite.test[test_verify_live_73_sig_mismatch]()
     suite.test[test_verify_live_73_alt_ok]()
     suite.test[test_verify_live_alt_malformed]()

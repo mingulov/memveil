@@ -34,6 +34,7 @@ tree is tracked. One line per variant:
 - btf-absent-unknown: no BTF and no config source at all.
 - btf-not-visible: no BTF although the config enables it.
 - btf-denied: the BTF file is fixture-denied.
+- btf-split: BTF whose strings need a base blob.
 - hook-absent: BTF without the map hook, kallsyms without it.
 - hook-not-in-btf: BTF without the map hook, kallsyms with it.
 - hook-clone: only a dotted clone of the map hook in kallsyms.
