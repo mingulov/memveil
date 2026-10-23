@@ -3636,7 +3636,13 @@ suite_record() {
             --output "$TMP/r-badcap" \
             --object "$ROOT/tests/fixtures/elf/ok.o" \
             --bridge "$TMP/nolib.so" --capability attempt-trace,nope
-        if [ ! -f /sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format ]; then
+        # The kernel gate refuses denied tracefs before any format read.
+        if [ ! -r /sys/kernel/tracing/events ] || [ ! -x /sys/kernel/tracing/events ]; then
+            rexpect tracefs-denied 3 "code: tracefs-denied" "$TMP/r-nofmt" -- \
+                --output "$TMP/r-nofmt" \
+                --object "$ROOT/tests/fixtures/elf/ok.o" \
+                --bridge "$TMP/nolib.so"
+        elif [ ! -f /sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format ]; then
             rexpect no-format 3 "format unreadable" "$TMP/r-nofmt" -- \
                 --output "$TMP/r-nofmt" \
                 --object "$ROOT/tests/fixtures/elf/ok.o" \
