@@ -348,8 +348,10 @@ def read_lockdown(
     The securityfs file wins when it parses under a
     mounted securityfs; otherwise the cmdline level and
     the config level combine by taking the higher one
-    (an absent lockdown LSM still forces none), and
-    silence everywhere reports unknown. Never mounts.
+    (an absent lockdown LSM still forces none).
+    CONFIG_FORCE_NONE without securityfs reports
+    unknown: root may have raised the level since boot.
+    Silence everywhere reports unknown. Never mounts.
     """
     var out = LockdownState()
     var notes = List[String]()
@@ -450,7 +452,9 @@ def read_lockdown(
             out.mode = _lockdown_mode(force_level)
             out.src = String("config")
     elif force_none:
-        out.mode = String("none")
+        # Forced none is only the boot default; without
+        # the securityfs file the runtime level is open.
+        out.mode = String("unknown")
         out.src = String("config")
     if len(notes) > 0:
         out.detail = notes[0].copy()
@@ -725,6 +729,7 @@ def kernel_gate(
     elif (
         out.tracefs.mounted == String("yes")
         and out.tracefs.events == EVIDENCE_ABSENT
+        and out.lockdown.mode != String("unknown")
     ):
         code = String("no-bpf-tracing")
         reason = (

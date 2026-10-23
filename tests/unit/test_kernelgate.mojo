@@ -259,6 +259,14 @@ def test_lockdown_malformed() raises:
     assert_equal(x.mode, String("unknown"))
 
 
+def test_lockdown_forcenone_unknown() raises:
+    # FORCE_NONE without securityfs cannot settle the
+    # runtime level: root may have raised it since boot.
+    var f = lockdown_of(String("lockdown-forcenone"))
+    assert_equal(f.mode, String("unknown"))
+    assert_equal(f.src, String("config"))
+
+
 def test_gate_order() raises:
     var lc = gate_of(String("lockdown-conf"), attempt_only())
     assert_true(not lc.ok)
@@ -302,6 +310,16 @@ def test_gate_order() raises:
     assert_equal(ed.code, String("tracefs-denied"))
     var b = gate_of(String("base"), all_caps())
     assert_true(b.ok)
+
+
+def test_gate_noevents_unknown_lockdown_hidden() raises:
+    # Mounted tracefs without events/ is only a definite
+    # no-bpf-tracing verdict when lockdown is known;
+    # otherwise lockdown may be hiding the mount.
+    var g = gate_of(String("tracefs-noevents-nolock"), attempt_only())
+    assert_true(not g.ok)
+    assert_true(g.unknown)
+    assert_equal(g.code, String("tracefs-hidden"))
 
 
 def test_gate_btf_codes() raises:
@@ -660,7 +678,9 @@ def run() raises -> Int:
     suite.test[test_ftrace_states]()
     suite.test[test_lockdown_sources]()
     suite.test[test_lockdown_malformed]()
+    suite.test[test_lockdown_forcenone_unknown]()
     suite.test[test_gate_order]()
+    suite.test[test_gate_noevents_unknown_lockdown_hidden]()
     suite.test[test_gate_btf_codes]()
     suite.test[test_gate_hook_kallsyms]()
     suite.test[test_gate_denied_never_absent]()
