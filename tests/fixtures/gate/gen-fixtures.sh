@@ -12,7 +12,7 @@ mkdir -p "$GATE"
 
 # Every generated tree; later tasks extend this list alongside
 # their variants. Only these directories are ever removed.
-VARIANTS="base ftrace-off ftrace-denied ftrace-malformed aff-dup aff-module aff-clone aff-prefix debugfs-root debug-denied lockdown-conf lockdown-integrity lockdown-nosecfs lockdown-dashdash lockdown-config lockdown-nolsm lockdown-forcenone lockdown-twobrackets lockdown-bogus lockdown-denied notracing-config notracing-bpfevents tracefs-noevents tracefs-noevents-nolock tracefs-unmounted tracefs-hidden tracefs-gone events-denied btf-absent-config btf-absent-unknown btf-not-visible btf-denied btf-split btf-truncated sig-rename sig-swap sig-width hook-absent hook-not-in-btf hook-clone hook-nokallsyms denied-all container-view format-denied id-absent cc-flags-nonode cc-tdx-nonode cc-flags-host cc-tsm caps-none caps-bpf-perfmon caps-sysadmin caps-malformed caps-short memcg-small memcg-ancestor memcg-malformed memcg-huge memcg-empty memcg-v1 unpriv-bpf swiotlb-noforce swiotlb-inactive swiotlb-noslabs swiotlb-debugonly swiotlb-active"
+VARIANTS="base ftrace-off ftrace-denied ftrace-malformed aff-dup aff-module aff-clone aff-prefix debugfs-root debug-denied lockdown-conf lockdown-integrity lockdown-nosecfs lockdown-dashdash lockdown-config lockdown-nolsm lockdown-forcenone lockdown-twobrackets lockdown-bogus lockdown-denied notracing-config notracing-bpfevents tracefs-noevents tracefs-noevents-nolock tracefs-unmounted tracefs-hidden tracefs-gone events-denied btf-absent-config btf-absent-unknown btf-not-visible btf-denied btf-split btf-truncated sig-rename sig-swap sig-width hook-absent hook-not-in-btf hook-clone hook-nokallsyms denied-all container-view format-denied id-absent cc-flags-nonode cc-tdx-nonode cc-flags-host cc-tsm caps-none caps-bpf-perfmon caps-sysadmin caps-malformed caps-short caps-userns memcg-small memcg-ancestor memcg-malformed memcg-huge memcg-empty memcg-v1 memcg-root unpriv-bpf swiotlb-noforce swiotlb-inactive swiotlb-noslabs swiotlb-debugonly swiotlb-active"
 for v in $VARIANTS; do
   rm -rf "$GATE/$v"
 done
@@ -26,6 +26,7 @@ printf '1\n' > "$GATE/base/proc/sys/kernel/ftrace_enabled"
   printf 'State:\tR (running)\n'
   printf 'CapEff:\t000001ffffffffff\n'
 } > "$GATE/base/proc/self/status"
+printf '         0          0 4294967295\n' > "$GATE/base/proc/self/uid_map"
 printf '0::/mvt.slice\n' > "$GATE/base/proc/self/cgroup"
 printf 'max\n' > "$GATE/base/sys/fs/cgroup/mvt.slice/memory.max"
 printf '0\n' > "$GATE/base/sys/fs/cgroup/mvt.slice/memory.current"
@@ -320,6 +321,10 @@ mk caps-short
 sed -i 's/^CapEff:.*/CapEff:\t1ff/' \
   "$GATE/caps-short/proc/self/status"
 
+mk caps-userns
+printf '         0       1000          1\n' \
+  > "$GATE/caps-userns/proc/self/uid_map"
+
 mk memcg-small
 printf '1048576\n' \
   > "$GATE/memcg-small/sys/fs/cgroup/mvt.slice/memory.max"
@@ -346,6 +351,9 @@ mk memcg-empty
 
 mk memcg-v1
 printf '12:memory:/x\n' > "$GATE/memcg-v1/proc/self/cgroup"
+
+mk memcg-root
+printf '0::/\n' > "$GATE/memcg-root/proc/self/cgroup"
 
 mk unpriv-bpf
 printf '2\n' \
@@ -374,4 +382,4 @@ mkdir -p "$GATE/swiotlb-active/sys/kernel/debug/swiotlb"
 printf '256\n' \
   > "$GATE/swiotlb-active/sys/kernel/debug/swiotlb/io_tlb_nslabs"
 
-echo "wrote $GATE (base plus 65 variants)"
+echo "wrote $GATE (base plus 67 variants)"

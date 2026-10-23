@@ -107,14 +107,49 @@ def test_memcg_ancestor_min() raises:
     var big = check_memcg(
         open_evidence_reader(gate(String("memcg-ancestor"))), 76374232
     )
-    assert_equal(big.state, String("fail"))
+    assert_equal(big.state, String("unknown"))
     assert_equal(big.code, String("memcg-headroom"))
     assert_true(contains(big.reason, String("50000000")))
     assert_true(contains(big.reason, String("/a")))
     var leaf = check_memcg(
         open_evidence_reader(gate(String("memcg-small"))), 8388680
     )
-    assert_equal(leaf.state, String("fail"))
+    assert_equal(leaf.state, String("unknown"))
+
+
+def test_memcg_shortfall_unknown() raises:
+    # memory.current counts reclaimable page cache and map
+    # allocation reclaims, so a shortfall is not conclusive.
+    var leaf = check_memcg(
+        open_evidence_reader(gate(String("memcg-small"))), 8388680
+    )
+    assert_equal(leaf.state, String("unknown"))
+    assert_equal(leaf.code, String("memcg-headroom"))
+    var big = check_memcg(
+        open_evidence_reader(gate(String("memcg-ancestor"))), 76374232
+    )
+    assert_equal(big.state, String("unknown"))
+    assert_equal(big.code, String("memcg-headroom"))
+
+
+def test_memcg_root_unknown() raises:
+    # 0::/ is the namespace root or the host root; outer
+    # limits may apply that this view cannot see.
+    var root = check_memcg(
+        open_evidence_reader(gate(String("memcg-root"))), 8388680
+    )
+    assert_equal(root.state, String("unknown"))
+    assert_true(contains(root.reason, String("namespace")))
+
+
+def test_privilege_userns_unknown() raises:
+    # capable() checks the init namespace, so a namespaced
+    # CapEff cannot pass the privilege check.
+    var ns = check_privilege(
+        open_evidence_reader(gate(String("caps-userns")))
+    )
+    assert_equal(ns.state, String("unknown"))
+    assert_true(contains(ns.reason, String("user namespace")))
 
 
 def test_memcg_malformed() raises:
@@ -169,6 +204,9 @@ def run() raises -> Int:
     suite.test[test_privilege]()
     suite.test[test_capeff_malformed]()
     suite.test[test_memcg_ancestor_min]()
+    suite.test[test_memcg_shortfall_unknown]()
+    suite.test[test_memcg_root_unknown]()
+    suite.test[test_privilege_userns_unknown]()
     suite.test[test_memcg_malformed]()
     suite.test[test_prechecks_denied_unknown]()
     suite.test[test_unprivileged_bpf]()

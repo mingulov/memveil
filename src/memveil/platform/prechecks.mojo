@@ -20,10 +20,12 @@ from memveil.platform.reader import (
 comptime P_STATUS = "/proc/self/status"
 comptime P_CGROUP_SELF = "/proc/self/cgroup"
 comptime P_CGROUP_ROOT = "/sys/fs/cgroup"
+comptime P_UID_MAP = "/proc/self/uid_map"
 comptime P_UNPRIV_BPF = "/proc/sys/kernel/unprivileged_bpf_disabled"
 comptime _STATUS_CAP = 65536
 comptime _CGROUP_CAP = 65536
 comptime _MEMCG_CAP = 4096
+comptime _UIDMAP_CAP = 4096
 comptime _UNPRIV_CAP = 4096
 
 
@@ -76,8 +78,35 @@ def _strip_token(raw: List[UInt8]) -> List[UInt8]:
     return out^
 
 
+def _is_init_uidmap(raw: List[UInt8]) -> Bool:
+    """True when raw holds exactly 0, 0, 4294967295 as tokens."""
+    var toks = List[String]()
+    var cur = List[UInt8]()
+    for b in raw:
+        if _is_blank(b):
+            if len(cur) > 0:
+                toks.append(bytes_to_text(cur^))
+                cur = List[UInt8]()
+            continue
+        cur.append(b)
+    if len(cur) > 0:
+        toks.append(bytes_to_text(cur^))
+    if len(toks) != 3:
+        return False
+    return (
+        toks[0] == String("0")
+        and toks[1] == String("0")
+        and toks[2] == String("4294967295")
+    )
+
+
 def check_privilege(reader: EvidenceReader) -> PreCheck:
-    """Pass iff CapEff grants BPF capability or sysadmin."""
+    """Pass iff init-namespace CapEff grants BPF or sysadmin.
+
+    capable() checks the init user namespace, so a
+    namespaced CapEff cannot pass. An absent uid_map
+    means the kernel has no user namespaces at all.
+    """
     var st = file_state(reader, String(P_STATUS))
     if st == EVIDENCE_ABSENT:
         return PreCheck(
@@ -93,6 +122,32 @@ def check_privilege(reader: EvidenceReader) -> PreCheck:
             String("CapEff unreadable: denied"),
             String(""),
         )
+    var ust = file_state(reader, String(P_UID_MAP))
+    if ust == EVIDENCE_DENIED:
+        return PreCheck(
+            String("privilege"),
+            String("unknown"),
+            String("user namespace unreadable: denied"),
+            String(""),
+        )
+    if ust != EVIDENCE_ABSENT:
+        var umap = List[UInt8]()
+        try:
+            umap = read_evidence(reader, String(P_UID_MAP), _UIDMAP_CAP)
+        except e:
+            return PreCheck(
+                String("privilege"),
+                String("unknown"),
+                String("user namespace unreadable: ") + e.message,
+                String(""),
+            )
+        if not _is_init_uidmap(umap^):
+            return PreCheck(
+                String("privilege"),
+                String("unknown"),
+                String("non-init user namespace: CapEff is namespaced"),
+                String(""),
+            )
     var text = String("")
     try:
         text = bytes_to_text(
@@ -233,7 +288,13 @@ def _read_mem_val(
 
 
 def check_memcg(reader: EvidenceReader, need: Int) -> PreCheck:
-    """Pass iff every ancestor cgroup fits need bytes."""
+    """Pass iff every ancestor cgroup fits need bytes.
+
+    A shortfall is unknown, not fail: memory.current
+    counts reclaimable page cache and map allocation
+    reclaims. A root path is unknown too: it may be a
+    cgroup-namespace root with invisible outer limits.
+    """
     var st = file_state(reader, String(P_CGROUP_SELF))
     if st == EVIDENCE_ABSENT:
         return PreCheck(
@@ -301,6 +362,16 @@ def check_memcg(reader: EvidenceReader, need: Int) -> PreCheck:
             cur.append(b)
     if len(cur) > 0:
         comps.append(bytes_to_text(cur^))
+    if len(comps) == 0:
+        return PreCheck(
+            String("memcg"),
+            String("unknown"),
+            String(
+                "cgroup at /: possible cgroup namespace,"
+                " outer limits unknown"
+            ),
+            String(""),
+        )
     for c in comps:
         if c == String(".") or c == String(".."):
             return PreCheck(
@@ -362,7 +433,7 @@ def check_memcg(reader: EvidenceReader, need: Int) -> PreCheck:
     if best < want:
         return PreCheck(
             String("memcg"),
-            String("fail"),
+            String("unknown"),
             String("memcg headroom ")
             + format_u64(best)
             + String(" bytes below the objects' ")

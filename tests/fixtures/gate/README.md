@@ -58,12 +58,14 @@ tree is tracked. One line per variant:
 - caps-sysadmin: CapEff with CAP_SYS_ADMIN only.
 - caps-malformed: CapEff with a non-hex value.
 - caps-short: CapEff with a short hex value.
+- caps-userns: full CapEff under a non-init uid_map.
 - memcg-small: leaf memory.max 1 MiB.
 - memcg-ancestor: tight 50 MB ancestor above an unlimited leaf.
 - memcg-malformed: leaf memory.max with non-digits.
 - memcg-huge: leaf memory.max with 21 digits.
 - memcg-empty: leaf memory.max empty.
 - memcg-v1: cgroup file with a v1 line only.
+- memcg-root: cgroup file with 0::/ only.
 - unpriv-bpf: unprivileged_bpf_disabled reads 2.
 - swiotlb-noforce: cmdline adds swiotlb=noforce.
 - swiotlb-inactive: swiotlb dir with io_tlb_nslabs zero.

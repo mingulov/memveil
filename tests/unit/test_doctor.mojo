@@ -808,6 +808,30 @@ def test_doctor2_precheck_fail() raises:
                 seen = True
                 break
         assert_true(seen)
+    # A memcg shortfall is inconclusive evidence, never a
+    # refusal: the rows stay admitted like record admits.
+    var sopts = _doctor2_opts(
+        gate(String("memcg-small")),
+        profiles_dir.copy(),
+        String("all"),
+        ok_o.copy(),
+        lc_o.copy(),
+        cp_o.copy(),
+    )
+    var sdrep = assess_doctor(sopts)
+    assert_equal(len(sdrep.caps), 3)
+    for i in range(len(sdrep.caps)):
+        assert_equal(
+            sdrep.caps[i].status, String("available-load-unchecked")
+        )
+        var sseen = False
+        for j in range(len(sdrep.caps[i].evidence)):
+            if sdrep.caps[i].evidence[j].startswith(
+                String("memcg: unknown")
+            ):
+                sseen = True
+                break
+        assert_true(sseen)
 
 
 def test_doctor2_notes() raises:
