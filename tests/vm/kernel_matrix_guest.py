@@ -405,10 +405,30 @@ def run(argv):
     subprocess.run(["mount", "-t", "debugfs", "none",
                     "/sys/kernel/debug"],
                    capture_output=True)
-    proc = sh([mv, "doctor", "--json"])
+    proc = sh([mv, "doctor", "--json", "--capability", "all"])
+    write(os.path.join(out, "doctor-passive.json"),
+          proc.stdout or "")
+    write(os.path.join(out, "doctor-passive.stderr"),
+          proc.stderr or "")
+    write(os.path.join(out, "doctor-passive.exit"),
+          str(proc.returncode))
+    proc = sh([mv, "doctor", "--json", "--capability", "all",
+               "--load-check"])
     write(os.path.join(out, "doctor.json"), proc.stdout or "")
     write(os.path.join(out, "doctor.stderr"), proc.stderr or "")
     write(os.path.join(out, "doctor.exit"), str(proc.returncode))
+    sev = "/sys/devices/system/cpu/sev"
+    if not os.path.exists(sev):
+        write(os.path.join(out, "sev-sysfs.txt"), "absent")
+    else:
+        try:
+            names = sorted(os.listdir(sev))
+        except OSError as exc:
+            write(os.path.join(out, "sev-sysfs.txt"),
+                  "unreadable: %s" % exc)
+        else:
+            write(os.path.join(out, "sev-sysfs.txt"),
+                  "\n".join(names) + ("\n" if names else ""))
     present, omitted = detect_hooks()
     btf_present = os.path.isfile("/sys/kernel/btf/vmlinux")
     write(os.path.join(out, "hooks.json"),

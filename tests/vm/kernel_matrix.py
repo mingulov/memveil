@@ -23,6 +23,26 @@ ADMIT_CLASS = "live-verified"
 REFUSE_CLASSES = ("floor-6.0", "floor-6.11", "no-cover", "live-refused",
                 "btf-absent", "lockdown")
 GLOBAL_REFUSE_CLASSES = ("floor-6.0", "lockdown")
+CLASS_CODES = {
+    "live-verified": ("available",),
+    "btf-absent": ("btf-absent-config",),
+    "lockdown": ("lockdown-confidentiality",),
+    "floor-6.0": ("floor",),
+    "floor-6.11": ("floor",),
+    "live-refused": (
+        "layout-missing", "layout-kind", "layout-size",
+        "layout-bitfield", "layout-ambiguous",
+        "signature-mismatch", "signature-width",
+        "btf-hook-absent", "btf-hook-not-in-btf",
+        "btf-hook-missing", "hook-ambiguous",
+        "hook-not-traceable",
+    ),
+}
+LIVE_CODES = frozenset(CLASS_CODES["live-refused"])
+LOAD_CODES = frozenset(("load-eperm", "load-enomem",
+                        "verifier-rejected", "load-failed"))
+_VERIFIED_ROUTES = ("live interfaces verified", "bindings hold",
+                    "receipt verified")
 
 KINDS = {
     "attempt": ("bounce_attempt", ["tp"]),
@@ -360,40 +380,55 @@ def parse_lock(path):
     return doc
 
 
-def _reason_ok(reason_class, status, reason):
+def _below_floor(release):
+    try:
+        return _release_triple(release) < (6, 0)
+    except ValueError:
+        return False
+
+
+def _reason_ok(reason_class, status, reason, code, release):
+    """One capability matches its lock class by code and reason."""
+    reason = reason or ""
     if reason_class == "live-verified":
-        return status == "available" and (
-            reason.startswith("live-verified")
-            or "verified under" in reason)
-    if status == "available":
+        return status == "available" \
+            and code in CLASS_CODES["live-verified"] \
+            and not reason.startswith("partial ") \
+            and any(route in reason
+                    for route in _VERIFIED_ROUTES)
+    if status not in ("unavailable", "unknown"):
+        return False
+    if reason_class == "no-cover":
+        if code is None:
+            return False
+        if _below_floor(release):
+            return code == "floor" and \
+                "capability attempt-trace needs kernel 6.0+" \
+                in reason
+        return code != "available" \
+            and "no profile covers" in reason
+    if code not in CLASS_CODES.get(reason_class, ()):
         return False
     if reason_class == "floor-6.0":
-        return "below the 6.0 floor" in reason
+        return "needs kernel 6.0+" in reason
     if reason_class == "floor-6.11":
-        return "below the 6.11 floor" in reason
-    if reason_class == "no-cover":
-        return "no profile covers" in reason
-    if reason_class == "live-refused":
-        if status != "unavailable":
-            return False
-        keys = ("not listed", "absent", "differs", "live", "BTF",
-                "layout", "signature", "filter", "unreadable",
-                "format", "attach")
-        low = reason.lower()
-        return any(k.lower() in low for k in keys)
-    return False
+        return "needs kernel 6.11+" in reason
+    return True
 
 
-def compare_doctor(expected, doctor):
-    """Compare lock expectations with one doctor --json document.
+def compare_doctor(expected, doctor, release):
+    """Compare lock expectations with one load-check doctor document.
 
-    Admitted needs available plus a verified reason. Refused
-    needs a non-available status plus its reason class. Returns
-    (ok, detail) with one line per capability.
+    Admitted needs load-check available with code available
+    plus a verified-route reason. Refused needs a refused
+    status plus its class code (and floor text for floors).
+    Returns (ok, detail) with one line per capability.
     """
     got = {}
     for cap in doctor.get("capabilities", []):
-        got[cap.get("id")] = (cap.get("status"), cap.get("reason", ""))
+        got[cap.get("id")] = (cap.get("status"),
+                              cap.get("reason", ""),
+                              cap.get("reason_code"))
     lines = []
     ok = True
     for cap in CAPS:
@@ -406,13 +441,15 @@ def compare_doctor(expected, doctor):
             lines.append("%s: missing from doctor" % cap)
             ok = False
             continue
-        status, reason = got[cap]
-        if _reason_ok(want["reason_class"], status, reason):
-            lines.append("%s: match (%s)" % (cap, status))
+        status, reason, code = got[cap]
+        if _reason_ok(want["reason_class"], status, reason,
+                      code, release):
+            lines.append("%s: match (%s/%s)" % (cap, status, code))
         else:
-            lines.append("%s: want %s/%s got %s (%s)"
-                         % (cap, want["verdict"], want["reason_class"],
-                            status, reason))
+            lines.append("%s: want %s/%s got %s/%s (%s)"
+                         % (cap, want["verdict"],
+                            want["reason_class"], status, code,
+                            reason))
             ok = False
     return ok, "; ".join(lines)
 
@@ -1503,6 +1540,10 @@ def expected_record_refusal(release, cap, reason_class):
         return "no profile covers this kernel"
     if reason_class == "live-refused":
         return "live check failed"
+    if reason_class == "btf-absent":
+        return "BTF absent (kernel built without BTF)"
+    if reason_class == "lockdown":
+        return "kernel lockdown is confidentiality"
     if reason_class == "floor-6.0":
         return "below floor 6.0"
     raise ValueError("unknown reason class " + reason_class)
@@ -1530,22 +1571,152 @@ def expected_combined_refusal(release, refused):
     return expected_record_refusal(release, cap, cls)
 
 
-def check_refusal(exit_text, out_text, exists_text, want_reason):
-    """One refusal probe: exit 3, reason, no output dir."""
+_RECORD_CODE_PREFIX = "memveil record: code: "
+
+
+def record_code(out_text):
+    """Record code line value, None when absent.
+
+    More than one code line is corrupt evidence and raises.
+    """
+    found = []
+    for line in (out_text or "").splitlines():
+        if line.startswith(_RECORD_CODE_PREFIX):
+            found.append(line[len(_RECORD_CODE_PREFIX):].strip())
+    if len(found) > 1:
+        raise ValueError("more than one record code line")
+    if not found:
+        return None
+    return found[0]
+
+
+def expected_record_code(reason_class, cap, doctor_codes):
+    """Record code line value for one refused cap, or None.
+
+    Gate classes pin their code; live-refused agrees with
+    the load-check doctor code of that capability; floors
+    and no-cover print no code line.
+    """
+    if reason_class == "btf-absent":
+        return "btf-absent-config"
+    if reason_class == "lockdown":
+        return "lockdown-confidentiality"
+    if reason_class == "live-refused":
+        if cap not in doctor_codes:
+            raise ValueError("doctor has no %s code" % cap)
+        return doctor_codes[cap]
+    if reason_class in ("floor-6.0", "floor-6.11", "no-cover"):
+        return None
+    raise ValueError("unknown reason class " + reason_class)
+
+
+def expected_combined_code(refused, doctor_codes):
+    """Combined probe code follows the first refusal in record order."""
+    if not refused:
+        raise ValueError("combined code needs a refused cap")
+    cap, cls = refused[0]
+    return expected_record_code(cls, cap, doctor_codes)
+
+
+def check_refusal(exit_text, out_text, exists_text, want_reason,
+                  want_code):
+    """One refusal probe: exit 3, reason, code, no output dir.
+
+    A None want_code means no code line may appear.
+    """
     if (exit_text or "").strip() != "3":
         return False, "exit %r want 3" % (exit_text or "")
     if want_reason not in (out_text or ""):
         return False, "reason lacks %r" % want_reason
+    try:
+        got_code = record_code(out_text)
+    except ValueError as exc:
+        return False, "record code: %s" % exc
+    if got_code != want_code:
+        if want_code is None:
+            return False, "unexpected record code line %r" % (
+                got_code,)
+        return False, "record code %r want %r" % (got_code,
+                                                 want_code)
     if (exists_text or "").strip() != "no":
         return False, "left partial capture"
     return True, "refused exit 3 (%s)" % want_reason
 
 
 def expected_doctor_exit(entry):
-    """Doctor exits 3 exactly when attempt-trace is refused."""
-    if entry["expected"]["attempt-trace"]["verdict"] == "admitted":
-        return "0"
-    return "3"
+    """Doctor exits 0 only when all three capabilities are admitted."""
+    for cap in CAPS:
+        if entry["expected"][cap]["verdict"] != "admitted":
+            return "3"
+    return "0"
+
+
+def check_passive_doctor(passive, loadcheck):
+    """Passive doctor agrees with the load-check document.
+
+    Passive never reads available or ready; an admitted
+    capability is available-load-unchecked there, and a
+    refusal with a non-load code carries the same code.
+    """
+    if not isinstance(passive, dict) \
+            or not isinstance(loadcheck, dict):
+        return False, "a doctor document is not an object"
+    if passive.get("mode") != "passive":
+        return False, "passive mode %r" % (passive.get("mode"),)
+    if passive.get("verdict") == "ready":
+        return False, "passive verdict ready"
+    got = {}
+    for cap in passive.get("capabilities", []):
+        if isinstance(cap, dict):
+            if cap.get("status") == "available":
+                return False, "%s passive available" % (
+                    cap.get("id"),)
+            got[cap.get("id")] = cap
+    want = {}
+    for cap in loadcheck.get("capabilities", []):
+        if isinstance(cap, dict):
+            want[cap.get("id")] = cap
+    for cap in CAPS:
+        pcap = got.get(cap)
+        lcap = want.get(cap)
+        if pcap is None or lcap is None:
+            return False, "%s missing from a doctor document" % cap
+        if lcap.get("status") == "available":
+            if pcap.get("status") != "available-load-unchecked":
+                return False, "%s passive %s want " \
+                    "available-load-unchecked" % (
+                        cap, pcap.get("status"))
+        else:
+            lcode = lcap.get("reason_code")
+            if lcode not in LOAD_CODES \
+                    and pcap.get("reason_code") != lcode:
+                return False, "%s passive code %r differs " \
+                    "from %r" % (cap, pcap.get("reason_code"),
+                                 lcode)
+    return True, "passive matches load-check"
+
+
+def check_guest_ordinary(loadcheck, sev_sysfs_text):
+    """Load-check guest reads ordinary with no SNP evidence."""
+    if not isinstance(loadcheck, dict):
+        return False, "load-check doctor is not an object"
+    guest = loadcheck.get("guest")
+    if not isinstance(guest, dict):
+        return False, "guest block missing"
+    if guest.get("tech") != "ordinary":
+        return False, "guest tech %r" % (guest.get("tech"),)
+    if guest.get("conflict") != "":
+        return False, "guest conflict %r" % (
+            guest.get("conflict"),)
+    signals = guest.get("signals")
+    if not isinstance(signals, list):
+        return False, "guest signals missing"
+    for sig in signals:
+        if isinstance(sig, str) and sig.startswith("sev-vmpl:"):
+            return False, "guest signal %s" % sig
+    if (sev_sysfs_text or "") != "absent":
+        return False, "sev sysfs present"
+    return True, "guest ordinary, no sev sysfs"
 
 
 def check_boot_identity(uname_text, mods_text, want_release,
@@ -2529,8 +2700,9 @@ def evaluate_row(ev):
         if not isinstance(doctor, dict):
             raise ValueError("doctor.json is not an object")
         doctor_ok, doctor_detail = compare_doctor(
-            entry["expected"], doctor)
+            entry["expected"], doctor, release)
     except ValueError as exc:
+        doctor = None
         doctor_ok, doctor_detail = False, "doctor.json bad: %s" % exc
     rec["doctor_ok"] = doctor_ok
     rec["doctor_detail"] = doctor_detail
@@ -2539,6 +2711,30 @@ def evaluate_row(ev):
     want_exit = expected_doctor_exit(entry)
     add("doctor_exit", doctor_exit == want_exit,
         "doctor exit %s want %s" % (doctor_exit, want_exit))
+    try:
+        passive = json.loads(ev.get("doctor_passive_text") or "")
+        if not isinstance(passive, dict):
+            raise ValueError("passive doctor is not an object")
+        if doctor is None:
+            passive_ok, passive_detail = \
+                False, "no load-check doctor"
+        else:
+            passive_ok, passive_detail = check_passive_doctor(
+                passive, doctor)
+    except ValueError as exc:
+        passive_ok, passive_detail = \
+            False, "passive doctor.json bad: %s" % exc
+    add("doctor_passive", passive_ok, passive_detail)
+    passive_exit = (ev.get("doctor_passive_exit") or "").strip()
+    add("doctor_passive_exit", passive_exit == want_exit,
+        "passive doctor exit %s want %s" % (passive_exit,
+                                            want_exit))
+    if doctor is None:
+        add("guest_ordinary", False, "no load-check doctor")
+    else:
+        ok, detail = check_guest_ordinary(
+            doctor, ev.get("sev_sysfs_text"))
+        add("guest_ordinary", ok, detail)
     ok, detail = check_boot_identity(ev.get("uname_text"),
                                      ev.get("mods_text"), release,
                                      ev.get("cache_dir"))
@@ -2614,6 +2810,12 @@ def evaluate_row(ev):
         pair_blind = attempt.get("verdict") == "refused" \
             and attempt.get("reason_class") \
             not in GLOBAL_REFUSE_CLASSES
+        doctor_codes = {}
+        if isinstance(doctor, dict):
+            for cap in doctor.get("capabilities", []):
+                if isinstance(cap, dict) and cap.get("id") in CAPS:
+                    doctor_codes[cap["id"]] = cap.get(
+                        "reason_code")
         for cap, cls in refused:
             if pair_blind and cap != "attempt-trace":
                 fails.append("cap-%s: pair cannot attribute a "
@@ -2623,21 +2825,27 @@ def evaluate_row(ev):
                 continue
             try:
                 want = expected_record_refusal(release, cap, cls)
+                want_code = expected_record_code(
+                    cls, cap, doctor_codes)
             except ValueError as exc:
                 fails.append("cap-%s: %s" % (cap, exc))
                 continue
             probe = (ev.get("refusals") or {}).get("cap-" + cap, {})
             ok, detail = check_refusal(probe.get("exit"),
                                        probe.get("out"),
-                                       probe.get("exists"), want)
+                                       probe.get("exists"), want,
+                                       want_code)
             if not ok:
                 fails.append("cap-%s: %s" % (cap, detail))
         try:
             want = expected_combined_refusal(release, refused)
+            want_code = expected_combined_code(refused,
+                                               doctor_codes)
             probe = (ev.get("refusals") or {}).get("combined", {})
             ok, detail = check_refusal(probe.get("exit"),
                                        probe.get("out"),
-                                       probe.get("exists"), want)
+                                       probe.get("exists"), want,
+                                       want_code)
             if not ok:
                 fails.append("combined: %s" % detail)
         except ValueError as exc:

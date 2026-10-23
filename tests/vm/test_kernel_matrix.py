@@ -190,36 +190,45 @@ def test_parse_rejects_bad_omitted_probe(tmp_path):
         km.parse_lock(str(path))
 
 
+def _verified_reason(cap):
+    return "%s: live interfaces verified (profile unvalidated)" % cap
+
+
 def _doctor(caps):
     return {"capabilities": [
-        {"id": cap, "status": status, "reason": reason}
-        for cap, status, reason in caps]}
+        {"id": cap, "status": status, "reason_code": code,
+         "reason": reason}
+        for cap, status, code, reason in caps]}
 
 
 def test_verdict_admitted_matches_available():
     expected = _lock_entry()["expected"]
     doctor = _doctor([
-        ("attempt-trace", "available",
-         "live-verified under reference profile x"),
-        ("mapping-lifecycle", "available",
-         "live-verified under reference profile x"),
-        ("copy-actual", "available",
-         "live-verified under reference profile x"),
+        ("attempt-trace", "available", "available",
+         _verified_reason("attempt-trace")),
+        ("mapping-lifecycle", "available", "available",
+         _verified_reason("mapping-lifecycle")),
+        ("copy-actual", "available", "available",
+         _verified_reason("copy-actual")),
     ])
-    ok, detail = km.compare_doctor(expected, doctor)
+    ok, detail = km.compare_doctor(
+        expected, doctor, "6.6.160-0606160-generic")
     assert ok, detail
 
 
 def test_verdict_admitted_rejects_unavailable():
     expected = _lock_entry()["expected"]
     doctor = _doctor([
-        ("attempt-trace", "unavailable", "kernel 1.0 below the 6.0 floor"),
-        ("mapping-lifecycle", "available",
-         "live-verified under reference profile x"),
-        ("copy-actual", "available",
-         "live-verified under reference profile x"),
+        ("attempt-trace", "unavailable", "floor",
+         "capability attempt-trace needs kernel 6.0+ "
+         "(this kernel: 1.0-test)"),
+        ("mapping-lifecycle", "available", "available",
+         _verified_reason("mapping-lifecycle")),
+        ("copy-actual", "available", "available",
+         _verified_reason("copy-actual")),
     ])
-    ok, _ = km.compare_doctor(expected, doctor)
+    ok, _ = km.compare_doctor(
+        expected, doctor, "6.6.160-0606160-generic")
     assert not ok
 
 
@@ -232,15 +241,15 @@ def test_verdict_floor_60_matches():
         "copy-actual": {"verdict": "refused",
                         "reason_class": "no-cover"},
     }
+    floor = "capability attempt-trace needs kernel 6.0+ " \
+        "(this kernel: 5.15.0-test)"
     doctor = _doctor([
-        ("attempt-trace", "unavailable",
-         "kernel 5.15.0-test is below the 6.0 floor"),
-        ("mapping-lifecycle", "unknown",
-         "no profile covers this identity"),
-        ("copy-actual", "unknown",
-         "no profile covers this identity"),
+        ("attempt-trace", "unavailable", "floor", floor),
+        ("mapping-lifecycle", "unavailable", "floor", floor),
+        ("copy-actual", "unavailable", "floor", floor),
     ])
-    ok, detail = km.compare_doctor(expected, doctor)
+    ok, detail = km.compare_doctor(
+        expected, doctor, "5.15.0-test")
     assert ok, detail
 
 
@@ -254,14 +263,17 @@ def test_verdict_floor_611_matches():
                         "reason_class": "floor-6.11"},
     }
     doctor = _doctor([
-        ("attempt-trace", "available",
-         "live-verified under reference profile x"),
-        ("mapping-lifecycle", "unavailable",
-         "kernel 6.6.0-test is below the 6.11 floor"),
-        ("copy-actual", "unavailable",
-         "kernel 6.6.0-test is below the 6.11 floor"),
+        ("attempt-trace", "available", "available",
+         _verified_reason("attempt-trace")),
+        ("mapping-lifecycle", "unavailable", "floor",
+         "capability mapping-lifecycle needs kernel 6.11+ "
+         "(this kernel: 6.6.0-test)"),
+        ("copy-actual", "unavailable", "floor",
+         "capability copy-actual needs kernel 6.11+ "
+         "(this kernel: 6.6.0-test)"),
     ])
-    ok, detail = km.compare_doctor(expected, doctor)
+    ok, detail = km.compare_doctor(
+        expected, doctor, "6.6.0-test")
     assert ok, detail
 
 
@@ -275,14 +287,15 @@ def test_verdict_refused_rejects_available():
                         "reason_class": "floor-6.11"},
     }
     doctor = _doctor([
-        ("attempt-trace", "available",
-         "live-verified under reference profile x"),
-        ("mapping-lifecycle", "available",
-         "live-verified under reference profile x"),
-        ("copy-actual", "available",
-         "live-verified under reference profile x"),
+        ("attempt-trace", "available", "available",
+         _verified_reason("attempt-trace")),
+        ("mapping-lifecycle", "available", "available",
+         _verified_reason("mapping-lifecycle")),
+        ("copy-actual", "available", "available",
+         _verified_reason("copy-actual")),
     ])
-    ok, _ = km.compare_doctor(expected, doctor)
+    ok, _ = km.compare_doctor(
+        expected, doctor, "6.6.160-0606160-generic")
     assert not ok
 
 
@@ -296,15 +309,264 @@ def test_verdict_wrong_reason_class_fails():
                         "reason_class": "floor-6.11"},
     }
     doctor = _doctor([
-        ("attempt-trace", "available",
-         "live-verified under reference profile x"),
-        ("mapping-lifecycle", "unavailable",
-         "kernel 6.6.0-test is below the 6.0 floor"),
-        ("copy-actual", "unavailable",
-         "kernel 6.6.0-test is below the 6.11 floor"),
+        ("attempt-trace", "available", "available",
+         _verified_reason("attempt-trace")),
+        ("mapping-lifecycle", "unavailable", "floor",
+         "capability mapping-lifecycle needs kernel 6.0+ "
+         "(this kernel: 6.6.0-test)"),
+        ("copy-actual", "unavailable", "floor",
+         "capability copy-actual needs kernel 6.11+ "
+         "(this kernel: 6.6.0-test)"),
     ])
-    ok, _ = km.compare_doctor(expected, doctor)
+    ok, _ = km.compare_doctor(
+        expected, doctor, "6.6.160-0606160-generic")
     assert not ok
+
+
+def _refused_expected(cls):
+    return {
+        cap: {"verdict": "refused", "reason_class": cls}
+        for cap in km.CAPS
+    }
+
+
+def test_class_codes_btf_absent():
+    expected = _refused_expected("btf-absent")
+    doctor = _doctor([
+        (cap, "unavailable", "btf-absent-config",
+         "BTF absent (kernel built without BTF)")
+        for cap in km.CAPS
+    ])
+    ok, detail = km.compare_doctor(
+        expected, doctor, "6.12.114-mv-6.12.114-nobtf")
+    assert ok, detail
+
+
+def test_class_codes_lockdown():
+    expected = _refused_expected("lockdown")
+    doctor = _doctor([
+        (cap, "unavailable", "lockdown-confidentiality",
+         "kernel lockdown is confidentiality (cmdline): "
+         "tracefs is hidden and bpf_probe_read_kernel is denied")
+        for cap in km.CAPS
+    ])
+    ok, detail = km.compare_doctor(
+        expected, doctor, "7.0.14-070014-generic")
+    assert ok, detail
+
+
+def test_class_code_wrong_fails():
+    expected = _refused_expected("lockdown")
+    doctor = _doctor([
+        (cap, "unknown", "tracefs-hidden",
+         "tracepoint absent or tracefs hidden by lockdown "
+         "(lockdown state unknown)")
+        for cap in km.CAPS
+    ])
+    ok, _ = km.compare_doctor(
+        expected, doctor, "7.0.14-070014-generic")
+    assert not ok
+
+
+def test_live_verified_needs_load_check_available():
+    expected = _lock_entry()["expected"]
+    doctor = _doctor([
+        ("attempt-trace", "available-load-unchecked",
+         "available", _verified_reason("attempt-trace")),
+        ("mapping-lifecycle", "available", "available",
+         _verified_reason("mapping-lifecycle")),
+        ("copy-actual", "available", "available",
+         _verified_reason("copy-actual")),
+    ])
+    ok, _ = km.compare_doctor(
+        expected, doctor, "6.6.160-0606160-generic")
+    assert not ok
+
+
+def test_live_verified_partial_reason_fails():
+    expected = _lock_entry()["expected"]
+    doctor = _doctor([
+        ("attempt-trace", "available", "available",
+         "partial attempt-trace: no validated profile"),
+        ("mapping-lifecycle", "available", "available",
+         _verified_reason("mapping-lifecycle")),
+        ("copy-actual", "available", "available",
+         _verified_reason("copy-actual")),
+    ])
+    ok, _ = km.compare_doctor(
+        expected, doctor, "6.6.160-0606160-generic")
+    assert not ok
+
+
+def test_live_verified_needs_verified_route():
+    expected = _lock_entry()["expected"]
+    doctor = _doctor([
+        ("attempt-trace", "available", "available",
+         "live-verified under reference profile x"),
+        ("mapping-lifecycle", "available", "available",
+         _verified_reason("mapping-lifecycle")),
+        ("copy-actual", "available", "available",
+         _verified_reason("copy-actual")),
+    ])
+    ok, _ = km.compare_doctor(
+        expected, doctor, "6.6.160-0606160-generic")
+    assert not ok
+
+
+def test_live_refused_codes():
+    expected = _refused_expected("live-refused")
+    doctor = _doctor([
+        ("attempt-trace", "unavailable", "layout-missing",
+         "live check failed: layout missing for io_tlb_pool"),
+        ("mapping-lifecycle", "unavailable", "hook-ambiguous",
+         "live check failed: hook matches twice"),
+        ("copy-actual", "unavailable", "signature-width",
+         "live check failed: signature width differs"),
+    ])
+    ok, detail = km.compare_doctor(
+        expected, doctor, "7.0.14-070014-generic")
+    assert ok, detail
+    for bad in ("available", "floor", "profile"):
+        wrong = _doctor([
+            ("attempt-trace", "unavailable", bad,
+             "live check failed: layout missing"),
+            ("mapping-lifecycle", "unavailable",
+             "hook-ambiguous", "live check failed"),
+            ("copy-actual", "unavailable", "signature-width",
+             "live check failed"),
+        ])
+        ok, _ = km.compare_doctor(
+            expected, wrong, "7.0.14-070014-generic")
+        assert not ok
+
+
+def test_floor_codes_and_text():
+    release = "6.6.160-0606160-generic"
+    expected = {
+        "attempt-trace": {"verdict": "admitted",
+                          "reason_class": "live-verified"},
+        "mapping-lifecycle": {"verdict": "refused",
+                              "reason_class": "floor-6.11"},
+        "copy-actual": {"verdict": "refused",
+                        "reason_class": "floor-6.11"},
+    }
+    doctor = _doctor([
+        ("attempt-trace", "available", "available",
+         _verified_reason("attempt-trace")),
+        ("mapping-lifecycle", "unavailable", "floor",
+         "capability mapping-lifecycle needs kernel 6.11+ "
+         "(this kernel: %s)" % release),
+        ("copy-actual", "unavailable", "floor",
+         "capability copy-actual needs kernel 6.11+ "
+         "(this kernel: %s)" % release),
+    ])
+    ok, detail = km.compare_doctor(expected, doctor, release)
+    assert ok, detail
+    floor60 = "capability attempt-trace needs kernel 6.0+ " \
+        "(this kernel: 5.15.223-0515223-generic)"
+    low = _doctor([
+        ("attempt-trace", "unavailable", "floor", floor60),
+        ("mapping-lifecycle", "unavailable", "floor", floor60),
+        ("copy-actual", "unavailable", "floor", floor60),
+    ])
+    low_expected = {
+        "attempt-trace": {"verdict": "refused",
+                          "reason_class": "floor-6.0"},
+        "mapping-lifecycle": {"verdict": "refused",
+                              "reason_class": "no-cover"},
+        "copy-actual": {"verdict": "refused",
+                        "reason_class": "no-cover"},
+    }
+    ok, detail = km.compare_doctor(
+        low_expected, low, "5.15.223-0515223-generic")
+    assert ok, detail
+
+
+def test_no_cover_above_floor_needs_code():
+    expected = {
+        "attempt-trace": {"verdict": "admitted",
+                          "reason_class": "live-verified"},
+        "mapping-lifecycle": {"verdict": "refused",
+                              "reason_class": "no-cover"},
+        "copy-actual": {"verdict": "refused",
+                        "reason_class": "no-cover"},
+    }
+    doctor = _doctor([
+        ("attempt-trace", "available", "available",
+         _verified_reason("attempt-trace")),
+        ("mapping-lifecycle", "unavailable", "profile",
+         "no profile covers this kernel"),
+        ("copy-actual", "unavailable", "profile",
+         "no profile covers this kernel"),
+    ])
+    ok, detail = km.compare_doctor(
+        expected, doctor, "6.6.160-0606160-generic")
+    assert ok, detail
+    coded = _doctor([
+        ("attempt-trace", "available", "available",
+         _verified_reason("attempt-trace")),
+        ("mapping-lifecycle", "available", "available",
+         "no profile covers this kernel"),
+        ("copy-actual", "unavailable", "profile",
+         "no profile covers this kernel"),
+    ])
+    ok, _ = km.compare_doctor(
+        expected, coded, "6.6.160-0606160-generic")
+    assert not ok
+
+
+def test_record_code_parse():
+    assert km.record_code("memveil record: refused\n") is None
+    assert km.record_code(
+        "memveil record: kernel lockdown is confidentiality\n"
+        "memveil record: code: lockdown-confidentiality\n"
+        "memveil record: fix: boot without lockdown\n"
+    ) == "lockdown-confidentiality"
+    with pytest.raises(ValueError):
+        km.record_code(
+            "memveil record: code: a\n"
+            "memveil record: code: b\n")
+
+
+def test_refusal_code_mismatch_fails():
+    out = "memveil record: kernel lockdown is confidentiality\n" \
+        "memveil record: code: tracefs-denied\n"
+    ok, _ = km.check_refusal(
+        "3", out, "no", "kernel lockdown is confidentiality",
+        "lockdown-confidentiality")
+    assert not ok
+
+
+def test_refusal_unexpected_code_line_fails():
+    out = "memveil record: capability copy-actual needs kernel " \
+        "6.11+\nmemveil record: code: floor\n"
+    ok, _ = km.check_refusal(
+        "3", out, "no", "needs kernel 6.11+", None)
+    assert not ok
+
+
+def test_record_code_matches_first_refused_cap():
+    codes = {"attempt-trace": "available",
+             "mapping-lifecycle": "layout-missing",
+             "copy-actual": "available"}
+    assert km.expected_record_code(
+        "live-refused", "mapping-lifecycle", codes) == \
+        "layout-missing"
+    assert km.expected_record_code(
+        "floor-6.11", "copy-actual", codes) is None
+    refused = [("mapping-lifecycle", "live-refused"),
+               ("copy-actual", "floor-6.11")]
+    assert km.expected_combined_code(refused, codes) == \
+        "layout-missing"
+
+
+def test_expected_record_refusal_btf_absent_and_lockdown():
+    assert km.expected_record_refusal(
+        "6.12.114-mv-6.12.114-nobtf", "mapping-lifecycle",
+        "btf-absent") == "BTF absent (kernel built without BTF)"
+    assert km.expected_record_refusal(
+        "7.0.14-070014-generic", "attempt-trace",
+        "lockdown") == "kernel lockdown is confidentiality"
 
 
 def test_oracle_samples_parse():
@@ -2405,24 +2667,33 @@ def test_expected_combined_refusal():
 
 def test_check_refusal_pass_and_fail_modes():
     out = "memveil record: kernel 6.6.160-0606160-generic needs kernel 6.11+"
-    ok, _ = km.check_refusal("3", out, "no", "needs kernel 6.11+")
+    ok, _ = km.check_refusal("3", out, "no", "needs kernel 6.11+",
+                             None)
     assert ok
-    ok, _ = km.check_refusal("4", out, "no", "needs kernel 6.11+")
+    ok, _ = km.check_refusal("4", out, "no", "needs kernel 6.11+",
+                             None)
     assert not ok
     ok, _ = km.check_refusal("3", "other reason", "no",
-                             "needs kernel 6.11+")
+                             "needs kernel 6.11+", None)
     assert not ok
-    ok, _ = km.check_refusal("3", out, "yes", "needs kernel 6.11+")
+    ok, _ = km.check_refusal("3", out, "yes", "needs kernel 6.11+",
+                             None)
     assert not ok
 
 
 def test_expected_doctor_exit():
-    admitted = {"attempt-trace": {"verdict": "admitted",
-                                 "reason_class": "live-verified"}}
-    refused = {"attempt-trace": {"verdict": "refused",
-                                "reason_class": "floor-6.0"}}
-    assert km.expected_doctor_exit({"expected": admitted}) == "0"
-    assert km.expected_doctor_exit({"expected": refused}) == "3"
+    def entry(*verdicts):
+        return {"expected": {
+            cap: {"verdict": verdict,
+                  "reason_class": "live-verified"
+                  if verdict == "admitted" else "floor-6.11"}
+            for cap, verdict in zip(km.CAPS, verdicts)}}
+    assert km.expected_doctor_exit(
+        entry("admitted", "admitted", "admitted")) == "0"
+    assert km.expected_doctor_exit(
+        entry("refused", "refused", "refused")) == "3"
+    assert km.expected_doctor_exit(
+        entry("admitted", "refused", "refused")) == "3"
 
 
 def test_boot_identity_match_passes():
@@ -2625,11 +2896,22 @@ def test_lockdown_is_global_class():
                         "reason_class": "lockdown"},
     }
     ev["entry"] = entry
+    out = "memveil record: kernel lockdown is confidentiality " \
+        "(cmdline): tracefs is hidden\n" \
+        "memveil record: code: lockdown-confidentiality\n"
+    ev["refusals"] = {
+        "cap-attempt-trace": {"exit": "3", "out": out,
+                              "exists": "no"},
+        "cap-mapping-lifecycle": {"exit": "3", "out": out,
+                                  "exists": "no"},
+        "cap-copy-actual": {"exit": "3", "out": out,
+                            "exists": "no"},
+        "combined": {"exit": "3", "out": out, "exists": "no"},
+    }
     rec = km.evaluate_row(ev)
     check = _check(rec, "refusals")
-    assert not check["ok"]
+    assert check["ok"], check["detail"]
     assert "pair cannot attribute" not in check["detail"]
-    assert "unknown reason class lockdown" in check["detail"]
 
 
 def test_record_finalized_accepts_zero_and_four():
@@ -2971,14 +3253,46 @@ def _admitted_entry():
 
 
 def _doctor_all_available():
-    return {"capabilities": [
-        {"id": "attempt-trace", "status": "available",
-         "reason": "live-verified under reference profile x"},
-        {"id": "mapping-lifecycle", "status": "available",
-         "reason": "live-verified under reference profile x"},
-        {"id": "copy-actual", "status": "available",
-         "reason": "live-verified under reference profile x"},
-    ]}
+    return {
+        "mode": "load-check",
+        "verdict": "ready",
+        "guest": {"tech": "ordinary", "signals": [],
+                  "conflict": ""},
+        "capabilities": [
+            {"id": "attempt-trace", "status": "available",
+             "reason_code": "available",
+             "reason": _verified_reason("attempt-trace")},
+            {"id": "mapping-lifecycle", "status": "available",
+             "reason_code": "available",
+             "reason": _verified_reason("mapping-lifecycle")},
+            {"id": "copy-actual", "status": "available",
+             "reason_code": "available",
+             "reason": _verified_reason("copy-actual")},
+        ],
+    }
+
+
+def _doctor_all_passive():
+    return {
+        "mode": "passive",
+        "verdict": "ready-load-unchecked",
+        "guest": {"tech": "ordinary", "signals": [],
+                  "conflict": ""},
+        "capabilities": [
+            {"id": "attempt-trace",
+             "status": "available-load-unchecked",
+             "reason_code": "available",
+             "reason": _verified_reason("attempt-trace")},
+            {"id": "mapping-lifecycle",
+             "status": "available-load-unchecked",
+             "reason_code": "available",
+             "reason": _verified_reason("mapping-lifecycle")},
+            {"id": "copy-actual",
+             "status": "available-load-unchecked",
+             "reason_code": "available",
+             "reason": _verified_reason("copy-actual")},
+        ],
+    }
 
 
 def _oracle_text():
@@ -3106,6 +3420,9 @@ def _ev_pass():
         "fail_txt": None,
         "doctor_text": json.dumps(_doctor_all_available()),
         "doctor_exit": "0",
+        "doctor_passive_text": json.dumps(_doctor_all_passive()),
+        "doctor_passive_exit": "0",
+        "sev_sysfs_text": "absent",
         "uname_text": _uname7(),
         "mods_text": _mods7(),
         "cache_dir": _CACHE7,
@@ -3306,6 +3623,205 @@ def test_evaluate_fails_doctor_exit():
     rec = km.evaluate_row(ev)
     assert not rec["ok"]
     assert not _check(rec, "doctor_exit")["ok"]
+
+
+def test_passive_doctor_available_fails():
+    loadcheck = _doctor_all_available()
+    passive = _doctor_all_passive()
+    passive["capabilities"][0]["status"] = "available"
+    ok, _ = km.check_passive_doctor(passive, loadcheck)
+    assert not ok
+
+
+def test_passive_doctor_ready_fails():
+    loadcheck = _doctor_all_available()
+    passive = _doctor_all_passive()
+    passive["verdict"] = "ready"
+    ok, _ = km.check_passive_doctor(passive, loadcheck)
+    assert not ok
+
+
+def test_passive_doctor_code_drift_fails():
+    loadcheck = {
+        "mode": "load-check",
+        "verdict": "unavailable",
+        "capabilities": [
+            {"id": "attempt-trace", "status": "available",
+             "reason_code": "available",
+             "reason": _verified_reason("attempt-trace")},
+            {"id": "mapping-lifecycle", "status": "unavailable",
+             "reason_code": "floor",
+             "reason": "capability mapping-lifecycle needs kernel "
+                       "6.11+ (this kernel: 6.6-test)"},
+            {"id": "copy-actual", "status": "unavailable",
+             "reason_code": "floor",
+             "reason": "capability copy-actual needs kernel 6.11+ "
+                       "(this kernel: 6.6-test)"},
+        ],
+    }
+    passive = {
+        "mode": "passive",
+        "verdict": "unavailable",
+        "capabilities": [
+            {"id": "attempt-trace",
+             "status": "available-load-unchecked",
+             "reason_code": "available",
+             "reason": _verified_reason("attempt-trace")},
+            {"id": "mapping-lifecycle", "status": "unavailable",
+             "reason_code": "tracefs-denied",
+             "reason": "tracefs denied (privilege)"},
+            {"id": "copy-actual", "status": "unavailable",
+             "reason_code": "floor",
+             "reason": "capability copy-actual needs kernel 6.11+ "
+                       "(this kernel: 6.6-test)"},
+        ],
+    }
+    ok, _ = km.check_passive_doctor(passive, loadcheck)
+    assert not ok
+    passive["capabilities"][1]["reason_code"] = "floor"
+    ok, detail = km.check_passive_doctor(passive, loadcheck)
+    assert ok, detail
+
+
+def test_sev_sysfs_present_fails():
+    loadcheck = _doctor_all_available()
+    ok, _ = km.check_guest_ordinary(loadcheck, "vmpl\n")
+    assert not ok
+    ok, detail = km.check_guest_ordinary(loadcheck, "absent")
+    assert ok, detail
+
+
+def test_guest_not_ordinary_fails():
+    loadcheck = _doctor_all_available()
+    loadcheck["guest"]["tech"] = "unknown"
+    ok, _ = km.check_guest_ordinary(loadcheck, "absent")
+    assert not ok
+    loadcheck["guest"]["tech"] = "ordinary"
+    loadcheck["guest"]["conflict"] = "sev-guest node present " \
+        "but cpu flags lack sev"
+    ok, _ = km.check_guest_ordinary(loadcheck, "absent")
+    assert not ok
+    loadcheck["guest"]["conflict"] = ""
+    loadcheck["guest"]["signals"] = ["sev-vmpl:0"]
+    ok, _ = km.check_guest_ordinary(loadcheck, "absent")
+    assert not ok
+
+
+def _btf_refused_caps(status_available):
+    caps = []
+    reason = "BTF absent (kernel built without BTF)"
+    for cap in km.CAPS:
+        if cap == "attempt-trace" and status_available:
+            caps.append(
+                {"id": cap, "status": "available",
+                 "reason_code": "available",
+                 "reason": _verified_reason(cap)})
+        else:
+            caps.append(
+                {"id": cap, "status": "unavailable",
+                 "reason_code": "btf-absent-config",
+                 "reason": reason})
+    return caps
+
+
+def test_evaluate_nobtf_row_passes_with_codes():
+    ev = _ev_pass()
+    entry = _admitted_entry()
+    entry["expected"] = {
+        "attempt-trace": {"verdict": "admitted",
+                          "reason_class": "live-verified"},
+        "mapping-lifecycle": {"verdict": "refused",
+                              "reason_class": "btf-absent"},
+        "copy-actual": {"verdict": "refused",
+                        "reason_class": "btf-absent"},
+    }
+    ev["entry"] = entry
+    ev["persisted"] = {"bounce_attempt": 13000}
+    _set_session_loss(ev)
+    snaps = []
+    for stamp, text in ev["miss_snaps"]:
+        progs = [prog for prog in json.loads(text)
+                 if not prog.get("name", "").startswith("mv_")
+                 or prog.get("name") == "mv_swiotlb_attempt"]
+        snaps.append((stamp, json.dumps(progs)))
+    ev["miss_snaps"] = snaps
+    ev["doctor_text"] = json.dumps({
+        "mode": "load-check",
+        "verdict": "unavailable",
+        "guest": {"tech": "ordinary", "signals": [],
+                  "conflict": ""},
+        "capabilities": _btf_refused_caps(True)})
+    ev["doctor_exit"] = "3"
+    passive = _btf_refused_caps(True)
+    passive[0]["status"] = "available-load-unchecked"
+    ev["doctor_passive_text"] = json.dumps({
+        "mode": "passive",
+        "verdict": "unavailable",
+        "capabilities": passive})
+    ev["doctor_passive_exit"] = "3"
+    out = "memveil record: BTF absent (kernel built without " \
+        "BTF)\nmemveil record: code: btf-absent-config\n"
+    ev["refusals"] = {
+        "cap-mapping-lifecycle": {"exit": "3", "out": out,
+                                  "exists": "no"},
+        "cap-copy-actual": {"exit": "3", "out": out,
+                            "exists": "no"},
+        "combined": {"exit": "3", "out": out, "exists": "no"},
+    }
+    rec = km.evaluate_row(ev)
+    assert rec["ok"], json.dumps(rec["checks"], indent=1)
+    assert _check(rec, "doctor_passive")["ok"]
+    assert _check(rec, "doctor_passive_exit")["ok"]
+    assert _check(rec, "guest_ordinary")["ok"]
+    assert _check(rec, "refusals")["ok"]
+
+
+def test_evaluate_lockdown_row_passes_with_codes():
+    ev = _ev_pass()
+    entry = _admitted_entry()
+    entry["boot_append"] = ["lockdown=confidentiality"]
+    entry["expected"] = {
+        cap: {"verdict": "refused",
+              "reason_class": "lockdown"}
+        for cap in km.CAPS
+    }
+    ev["entry"] = entry
+    ev["uname_text"] = _uname7("quiet swiotlb=131072,force "
+                               "lockdown=confidentiality")
+    ev["lockdown_text"] = "none integrity [confidentiality]\n"
+    reason = "kernel lockdown is confidentiality (cmdline): " \
+        "tracefs is hidden and bpf_probe_read_kernel is denied"
+    caps = [{"id": cap, "status": "unavailable",
+             "reason_code": "lockdown-confidentiality",
+             "reason": reason} for cap in km.CAPS]
+    ev["doctor_text"] = json.dumps({
+        "mode": "load-check",
+        "verdict": "unavailable",
+        "guest": {"tech": "ordinary", "signals": [],
+                  "conflict": ""},
+        "capabilities": caps})
+    ev["doctor_exit"] = "3"
+    ev["doctor_passive_text"] = json.dumps({
+        "mode": "passive",
+        "verdict": "unavailable",
+        "capabilities": caps})
+    ev["doctor_passive_exit"] = "3"
+    out = "memveil record: %s\n" % reason + \
+        "memveil record: code: lockdown-confidentiality\n"
+    ev["refusals"] = {
+        "cap-attempt-trace": {"exit": "3", "out": out,
+                              "exists": "no"},
+        "cap-mapping-lifecycle": {"exit": "3", "out": out,
+                                  "exists": "no"},
+        "cap-copy-actual": {"exit": "3", "out": out,
+                            "exists": "no"},
+        "combined": {"exit": "3", "out": out, "exists": "no"},
+    }
+    rec = km.evaluate_row(ev)
+    assert rec["ok"], json.dumps(rec["checks"], indent=1)
+    assert _check(rec, "lockdown_effective")["ok"]
+    assert _check(rec, "guest_ordinary")["ok"]
+    assert _check(rec, "refusals")["ok"]
 
 
 def test_evaluate_fails_omitted_drift():
@@ -3710,14 +4226,24 @@ def test_evaluate_paired_refusal_unattributable_fails():
                         "reason_class": "live-verified"},
     }
     ev["entry"] = entry
-    ev["doctor_text"] = json.dumps({"capabilities": [
-        {"id": "attempt-trace", "status": "unavailable",
-         "reason": "live layout differs"},
-        {"id": "mapping-lifecycle", "status": "unavailable",
-         "reason": "release 7.0 is below the 6.11 floor"},
-        {"id": "copy-actual", "status": "available",
-         "reason": "live-verified under reference profile x"},
-    ]})
+    ev["doctor_text"] = json.dumps({
+        "mode": "load-check",
+        "verdict": "unavailable",
+        "guest": {"tech": "ordinary", "signals": [],
+                  "conflict": ""},
+        "capabilities": [
+            {"id": "attempt-trace", "status": "unavailable",
+             "reason_code": "layout-missing",
+             "reason": "live check failed: layout missing"},
+            {"id": "mapping-lifecycle", "status": "unavailable",
+             "reason_code": "floor",
+             "reason": "capability mapping-lifecycle needs kernel "
+                       "6.11+ (this kernel: 7.0.14-070014-generic)"},
+            {"id": "copy-actual", "status": "available",
+             "reason_code": "available",
+             "reason": _verified_reason("copy-actual")},
+        ],
+    })
     ev["doctor_exit"] = "3"
     ev["persisted"] = dict(ev["persisted"])
     ev["persisted"]["map_result"] = 13000
@@ -3903,21 +4429,35 @@ def test_evaluate_refused_row_passes():
     }
     out = "memveil record: kernel 5.15.223-0515223-generic " \
         "below floor 6.0\n"
+    floor = "capability attempt-trace needs kernel 6.0+ " \
+        "(this kernel: 5.15.223-0515223-generic)"
+    caps = [
+        {"id": "attempt-trace", "status": "unavailable",
+         "reason_code": "floor", "reason": floor},
+        {"id": "mapping-lifecycle", "status": "unavailable",
+         "reason_code": "floor", "reason": floor},
+        {"id": "copy-actual", "status": "unavailable",
+         "reason_code": "floor", "reason": floor},
+    ]
     ev = {
         "entry": entry,
         "tools": _tools(),
         "dd_count": 128,
         "vng_exit": "0",
         "fail_txt": None,
-        "doctor_text": json.dumps({"capabilities": [
-            {"id": "attempt-trace", "status": "unavailable",
-             "reason": "release 5.15 is below the 6.0 floor"},
-            {"id": "mapping-lifecycle", "status": "unknown",
-             "reason": "no profile covers this identity"},
-            {"id": "copy-actual", "status": "unknown",
-             "reason": "no profile covers this identity"},
-        ]}),
+        "doctor_text": json.dumps({
+            "mode": "load-check",
+            "verdict": "unavailable",
+            "guest": {"tech": "ordinary", "signals": [],
+                      "conflict": ""},
+            "capabilities": caps}),
         "doctor_exit": "3",
+        "doctor_passive_text": json.dumps({
+            "mode": "passive",
+            "verdict": "unavailable",
+            "capabilities": caps}),
+        "doctor_passive_exit": "3",
+        "sev_sysfs_text": "absent",
         "uname_text": "5.15.223-0515223-generic\n"
                       "quiet swiotlb=131072,force "
                       "virtme_link_mods=/home/u/.cache/virtme-ng/"

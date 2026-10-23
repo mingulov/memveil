@@ -211,6 +211,12 @@ def collect_one(entry, export, tools, dd_count, elapsed, run_id,
             os.path.join(export, "doctor.json")),
         "doctor_exit": read_text(
             os.path.join(export, "doctor.exit")),
+        "doctor_passive_text": read_text(
+            os.path.join(export, "doctor-passive.json")),
+        "doctor_passive_exit": read_text(
+            os.path.join(export, "doctor-passive.exit")),
+        "sev_sysfs_text": read_text(
+            os.path.join(export, "sev-sysfs.txt")),
         "uname_text": read_text(
             os.path.join(export, "uname.txt")),
         "mods_text": read_text(
