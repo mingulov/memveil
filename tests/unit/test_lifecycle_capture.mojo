@@ -4226,31 +4226,52 @@ def test_collector_liveness_detail_error_unverified() raises:
 
 
 def test_collector_liveness_busy_edges_clean() raises:
-    # T11-DEV1: the plan names this test busy_edges_complete
-    # (exit 0); exit 0 is unreachable (see the healthy test).
-    # Copies hug the reverse window's edges — before t_r and
-    # past detach — so the reverse equation stays
-    # unexercised: no suffix, no silent cause, detail complete.
-    # t_r is one scripted read past attach (the arm consumes
-    # no clock reads), so the early edge is attach + 50ms.
+    # Guard-edge copies stay out of R while matched middle traffic verifies.
     var vals = _live_clock_values(UInt64(1000000000), True, True)
     var attach = _live_attach(vals, True, True)
+    var ready = attach + UInt64(100000000)
+    var detach_begin = UInt64(17900000007)
     var payloads = List[List[UInt8]]()
-    for i in range(12):
+    for i in range(20):
         payloads.append(
-            _cp_raw(2, 3, 1, UInt64(4000 + i),
-                    attach + UInt64(50000000),
-                    UInt64(4096), UInt64(4096), 0))
-    for i in range(13):
+            _lc_raw(1, 1, 1, UInt64(4000 + i),
+                    attach + UInt64(2000000000)
+                    + UInt64(i) * UInt64(100000000),
+                    UInt64(4096), UInt64(4000 + i)))
+    for i in range(20):
         payloads.append(
             _cp_raw(2, 3, 1, UInt64(4100 + i),
-                    attach + UInt64(100000000000),
+                    attach + UInt64(2000000000)
+                    + UInt64(i) * UInt64(100000000),
+                    UInt64(4096), UInt64(4096), 0))
+    for i in range(20):
+        payloads.append(
+            _cp_raw(2, 3, 1, UInt64(4200 + i),
+                    ready + UInt64(25000000)
+                    + UInt64(i) * UInt64(50000000),
+                    UInt64(4096), UInt64(4096), 0))
+    for i in range(23):
+        payloads.append(
+            _cp_raw(2, 3, 1, UInt64(4300 + i),
+                    detach_begin - UInt64(25000000)
+                    - UInt64(i) * UInt64(42000000),
                     UInt64(4096), UInt64(4096), 0))
     var c = _run_live(
-        payloads^, vals^, _zero_cut(), _zero_cut(), UInt64(0),
-        _cut(UInt64(25), UInt64(102400), UInt64(25),
-             UInt64(102400)), UInt64(25))
+        payloads^, vals^, _zero_cut(),
+        _cut(UInt64(20), UInt64(81920), UInt64(20),
+             UInt64(81920)), UInt64(20),
+        _cut(UInt64(63), UInt64(257856), UInt64(63),
+             UInt64(257856)), UInt64(63),
+        duration_s=UInt64(3600))
     assert_equal(c.exit_code, 4)
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"source":"detach_ns","interpretation":"18000000007"'
+            ),
+        )
+    )
     assert_true(
         _contains(
             c.session,
@@ -4260,8 +4281,19 @@ def test_collector_liveness_busy_edges_clean() raises:
             ),
         )
     )
-    assert_true(not _contains(c.session, String("; liveness")))
     assert_true(not _contains(c.session, String("hooks silent")))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"mapping_lifecycle":{"status":"partial",'
+                '"reason":"capture ok, 20 map_result/unmap '
+                'events persisted; admitted under '
+                'test-profile-1; v2 wire reports opaque mapping '
+                'generations when observed; liveness verified"'
+            ),
+        )
+    )
 
 
 def test_collector_liveness_size_limit_latch() raises:

@@ -31,10 +31,12 @@ from memveil.capture.lifecycle import (
     normalize_lifecycle_event,
 )
 from memveil.capture.liveness import (
+    LIVENESS_GUARD_NS,
     LivenessLoss,
     LivenessTally,
     LivenessVerdict,
     evaluate_liveness,
+    sat_add_u64,
 )
 from memveil.capture.normalize import (
     PAYLOAD_LEN,
@@ -1484,10 +1486,10 @@ struct Collector:
             var armed = kernel.set_copy_armed(True)
             if not armed.ok:
                 return String("arm copy: ") + armed.message
-        # Readiness lands after the arm (or after attach when
-        # there is nothing to arm): firing is fully live below.
+        # Ready means firing is live; R starts a guard later, past in-flight maps.
         self.ready_ns = clock.now()
-        self.live.retarget(self.attach_ns, self.ready_ns)
+        var t_r = sat_add_u64(self.ready_ns, LIVENESS_GUARD_NS)[0]
+        self.live.retarget(self.attach_ns, t_r)
         if self.cfg.has_pool_sample:
             # Baseline pool sample, persisted first: the file
             # stays chronological (baseline, periodic, final)
@@ -1866,11 +1868,15 @@ struct Collector:
             writer, line^, byte_count, decoded.ktime, ev.kind
         )
 
+    def _mark_detach_begin[C: ClockSource](mut self, mut clock: C):
+        # The stop edge stamps once here, before the first detach call.
+        self.detach_begin_ns = clock.now()
+
     def normal_close[K: KernelSource, C: ClockSource, W: WriterSource](
         mut self, mut kernel: K, mut clock: C, mut writer: W
     ):
         """DETACHING -> SETTLE -> DRAINING -> STATS -> CONFIRM."""
-        self.detach_begin_ns = clock.now()
+        self._mark_detach_begin(clock)
         if self.cfg.has_copy:
             # Disarm before detach, so no late exit recovers after the end cut.
             var disarmed = kernel.set_copy_armed(False)
@@ -2156,7 +2162,7 @@ struct Collector:
         mut self, mut kernel: K, mut clock: C, mut writer: W
     ) -> RunResult:
         """ERROR_DETACH -> ERROR_STATS -> FINALIZING; no drain."""
-        self.detach_begin_ns = clock.now()
+        self._mark_detach_begin(clock)
         if self.cfg.has_copy:
             # Disarm before detach, so no late exit recovers after the end cut.
             var disarmed = kernel.set_copy_armed(False)
@@ -2880,7 +2886,7 @@ struct Collector:
             loss_lc[0], loss_cp[0], loss_lc[1], loss_cp[1]
         )
         return evaluate_liveness(
-            self.live, self.detach_ns, True,
+            self.live, self.detach_begin_ns, True,
             self.cfg.has_lifecycle, self.cfg.has_copy, loss,
         )
 
