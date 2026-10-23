@@ -4,7 +4,7 @@
   "archive": "https://kernel.ubuntu.com/mainline",
   "archive_queried": "2026-10-22",
   "tools": {"bpftrace": "bpftrace v0.25.0", "bpftool": "bpftool v7.7.0"},
-  "note": "Newest point release per generation on 2026-10-22. 7.3-rc3 is the newest 7.3 rc from the archive; built 7.3 release takes id 7.3. No 7.4 rc exists. Expectations from docs/support.md Kernel generations. CentOS Stream 10 is not a row: its kernel leaves CONFIG_NET_9P unset and guests mount root over 9p. No separate SWIOTLB_DYNAMIC=n row: every built row sets it =n. debian13 kept after a boot spike. nobtf oracle bytes unproven: the kernel lacks hist triggers (EINVAL on install) and product record cannot load BPF without BTF (exit 3), so the row asserts counts only once the product runs there.",
+  "note": "Newest point release per generation on 2026-10-22. 7.3-rc3 is the newest 7.3 rc from the archive; built 7.3 release takes id 7.3. No 7.4 rc exists. Expectations from docs/support.md Kernel generations. CentOS Stream 10 is not a row: its kernel leaves CONFIG_NET_9P unset and guests mount root over 9p. No separate SWIOTLB_DYNAMIC=n row: every built row sets it =n. debian13 kept after a boot spike. nobtf oracle bytes unproven: the kernel lacks hist triggers (EINVAL on install) so bytes stay unproven; the attempt object loads without BTF and the row asserts oracle-proven counts.",
   "kernels": [
     {
       "id": "5.15",

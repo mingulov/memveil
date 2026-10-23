@@ -82,6 +82,8 @@ TRANSPORT_KEYS = ("submit_fail", "malformed", "dropped",
                   "rejected", "write_failed")
 POST_LATCH_KEYS = ("size_omitted", "duration_omitted",
                    "signal_omitted")
+LOWER_BOUND_LABEL = \
+    "attempt loss counts are a lower bound before 6.7"
 
 MAX_EDGE_GAP_NS = 10 ** 9
 BUSY_SETTLE_NS = 2 * MAX_EDGE_GAP_NS
@@ -1118,15 +1120,18 @@ def decide_busy(persisted, samples, miss_samples, start_ns,
                 end_ns, channels, session, counters):
     """Busy capture verdicts from its own session evidence.
 
-    A numeric detail claim gets strict per-channel lower
-    bounds with that channel transport loss plus bpftool
-    misses, never pooled, never crediting post-latch
-    omits. An unknown partial gets honesty only: not
-    complete, null loss, each channel inside its oracle
-    upper. Captured plus known loss must fit the summed
-    oracle upper in both paths, since the loss claim is
-    global. A complete_for_scope aggregate claim must
-    match its counter deltas against the oracle. Returns
+    An exact detail claim (complete_for_scope or a
+    partial "Detail loss N" with a matching count) gets
+    strict per-channel lower bounds with that channel
+    transport loss plus bpftool misses, never pooled,
+    never crediting post-latch omits. An unknown
+    partial, or a numeric partial whose aggregate says
+    attempt loss is a lower bound, gets honesty only:
+    not complete, each channel inside its oracle upper.
+    Captured plus known loss must fit the summed oracle
+    upper in both paths, since the loss claim is global.
+    A complete_for_scope aggregate claim must match its
+    counter deltas against the oracle. Returns
     (per, overall, failed, info).
     """
     try:
@@ -1148,15 +1153,27 @@ def decide_busy(persisted, samples, miss_samples, start_ns,
         unknown = parse_detail_loss_unknown(reason)
     except ValueError:
         unknown = None
-    if status == "complete_for_scope" and numeric is not None \
-            and loss_count is not None \
-            and str(loss_count) == str(numeric["total"]):
+    numeric_ok = numeric is not None \
+        and loss_count is not None \
+        and str(loss_count) == str(numeric["total"])
+    unknown_ok = unknown is not None and loss_count is None
+    lower_bound = LOWER_BOUND_LABEL in ((agg or {}).get("reason")
+                                        or "")
+    if numeric_ok and not lower_bound and status in (
+            "complete_for_scope", "partial"):
         known = numeric
         strict = True
-    elif status == "partial" and loss_count is None \
-            and unknown is not None:
+        honest_lower = False
+    elif status == "partial" and unknown_ok \
+            and not lower_bound:
         known = unknown
         strict = False
+        honest_lower = False
+    elif status == "partial" and lower_bound \
+            and (numeric_ok or unknown_ok):
+        known = numeric if numeric_ok else unknown
+        strict = False
+        honest_lower = True
     else:
         per = {c: "CLAIM-UNPROVEN (%s loss=%s)"
                % (status, loss_count) for c in channels}
@@ -1239,6 +1256,8 @@ def decide_busy(persisted, samples, miss_samples, start_ns,
                for v in per.values()):
             return per, "SHORT-COVERED", False, {}
         return per, "EXACT", False, {}
+    if honest_lower:
+        return per, "HONEST-LOWER-BOUND", False, {}
     return per, "HONEST", False, {}
 
 
@@ -1881,12 +1900,40 @@ def check_udev_quiesced(exit_text, out_text):
         (exit_text or "").strip() or "missing", tail)
 
 
-def check_busy_stop_reason(text):
-    """Busy record ran the full window and stopped on SIGINT."""
-    if (text or "").strip() == "signal":
+def events_file_bytes(path):
+    """Size of one events file, or None when unreadable."""
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return None
+
+
+def check_busy_stop_reason(text, events_bytes=None, cap=None):
+    """Busy record stopped on signal or filled its budget.
+
+    A size_limit stop is accepted only with the events
+    bytes at the configured cap: within BUSY_SIZE_SLACK
+    below it, never above it. Any other stop mismatch
+    fails.
+    """
+    if cap is None:
+        cap = BUSY_MAX_EVENTS_BYTES
+    reason = (text or "").strip()
+    if reason == "signal":
         return True, "busy stopped on signal"
-    return False, "busy end reason %r, want signal" % (
-        (text or "").strip() or "missing")
+    if reason != "size_limit":
+        return False, "busy end reason %r, want signal" % (
+            reason or "missing")
+    if not isinstance(events_bytes, int):
+        return False, "busy size_limit without events bytes"
+    if events_bytes > cap:
+        return False, "busy size_limit bytes %d over cap %d" % (
+            events_bytes, cap)
+    if events_bytes < cap - BUSY_SIZE_SLACK:
+        return False, "busy size_limit with %d/%d bytes, " \
+            "want bytes at the cap" % (events_bytes, cap)
+    return True, "busy size_limit with %d/%d bytes" % (
+        events_bytes, cap)
 
 
 def session_end_reason(text):
@@ -2068,6 +2115,11 @@ def repo_identity(root):
 
 
 BUSY_MAX_EVENTS_BYTES = 4294967296
+# A genuine byte-budget stop lands within one 64 KiB
+# closing reserve plus one max 64 KiB event line below
+# the cap: the writer refuses the line that would cross
+# the reserve, and committed bytes never exceed the cap.
+BUSY_SIZE_SLACK = 131072
 
 
 def record_argv(mv, dest, duration, caps, max_events_bytes=None):
@@ -3190,7 +3242,7 @@ def evaluate_row(ev):
         detail += "; see busy/record.stderr"
     add("busy_finalized", ok, detail)
     ok, detail = check_busy_stop_reason(
-        ev.get("busy_end_reason"))
+        ev.get("busy_end_reason"), ev.get("busy_events_bytes"))
     add("busy_stop_reason", ok, detail)
     try:
         times = json.loads(ev.get("busy_times_text") or "")

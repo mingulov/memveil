@@ -2246,6 +2246,14 @@ def _busy2_counters(scale=2500):
             "swiotlb.requested_bytes": scale * 65536}
 
 
+def _busy2_lower_bound(session):
+    session["quality"]["aggregate"]["reason"] = (
+        "counter snapshots present (valid cut, identity "
+        "holds, coverage valid); attempt loss counts are "
+        "a lower bound before 6.7")
+    return session
+
+
 def _busy2_decide(persisted=None, session=None,
                   counters="dflt", miss=None):
     if persisted is None:
@@ -2418,6 +2426,76 @@ def test_decide_busy_claim_unproven_fails():
         session=_busy2_session(
             reason=_unknown_text()))
     assert failed
+    assert overall == "CLAIM-UNPROVEN"
+
+
+def test_decide_busy_partial_numeric_inside_passes():
+    persisted = _busy2_persisted()
+    persisted["map_result"] = 2494
+    session = _busy2_session(
+        status="partial", loss_count="6",
+        reason=_loss_text(submit_fail=6))
+    per, overall, failed, _ = _busy2_decide(
+        persisted, session)
+    assert not failed, per
+    assert overall == "SHORT-COVERED"
+
+
+def test_decide_busy_partial_numeric_outside_fails():
+    persisted = _busy2_persisted()
+    persisted["map_result"] = 2493
+    session = _busy2_session(
+        status="partial", loss_count="6",
+        reason=_loss_text(submit_fail=6))
+    per, overall, failed, _ = _busy2_decide(
+        persisted, session)
+    assert failed, per
+    assert overall == "SHORT-UNCOVERED"
+    assert per["map"].startswith("SHORT-UNCOVERED")
+
+
+def test_decide_busy_lower_bound_honesty_passes():
+    persisted = _busy2_persisted()
+    persisted["map_result"] = 2493
+    session = _busy2_lower_bound(_busy2_session(
+        status="partial", loss_count="6",
+        reason=_loss_text(submit_fail=6)))
+    per, overall, failed, _ = _busy2_decide(
+        persisted, session)
+    assert not failed, per
+    assert overall == "HONEST-LOWER-BOUND"
+
+
+def test_decide_busy_lower_bound_over_fails():
+    persisted = _busy2_persisted()
+    persisted["map_result"] = 2501
+    session = _busy2_lower_bound(_busy2_session(
+        status="partial", loss_count="6",
+        reason=_loss_text(submit_fail=6)))
+    per, overall, failed, _ = _busy2_decide(
+        persisted, session)
+    assert failed, per
+    assert per["map"].startswith("MORE THAN ORACLE")
+
+
+def test_decide_busy_lower_bound_over_reported_fails():
+    session = _busy2_lower_bound(_busy2_session(
+        status="partial", loss_count="100",
+        reason=_loss_text(submit_fail=100)))
+    per, overall, failed, _ = _busy2_decide(
+        session=session)
+    assert failed, per
+    assert overall == "OVER-REPORTED"
+
+
+def test_decide_busy_lower_bound_complete_label_fails():
+    persisted = _busy2_persisted()
+    persisted["map_result"] = 2494
+    session = _busy2_lower_bound(_busy2_session(
+        loss_count="6", reason=_loss_text(submit_fail=6)))
+    per, overall, failed, _ = _busy2_decide(
+        persisted, session)
+    assert failed, per
     assert overall == "CLAIM-UNPROVEN"
 
 
@@ -4553,6 +4631,43 @@ def test_busy_stop_reason_check():
     assert not ok
 
 
+def test_busy_stop_reason_size_limit_needs_bytes_at_cap():
+    cap = km.BUSY_MAX_EVENTS_BYTES
+    assert km.BUSY_SIZE_SLACK == 131072
+    ok, detail = km.check_busy_stop_reason(
+        "size_limit\n", cap, cap)
+    assert ok, detail
+    ok, detail = km.check_busy_stop_reason(
+        "size_limit\n", cap - 131072, cap)
+    assert ok, detail
+    ok, _ = km.check_busy_stop_reason(
+        "size_limit\n", cap - 131073, cap)
+    assert not ok
+    ok, _ = km.check_busy_stop_reason(
+        "size_limit\n", cap // 2, cap)
+    assert not ok
+    ok, _ = km.check_busy_stop_reason(
+        "size_limit\n", None, cap)
+    assert not ok
+    ok, _ = km.check_busy_stop_reason(
+        "size_limit\n", cap + 1, cap)
+    assert not ok
+    ok, detail = km.check_busy_stop_reason(
+        "signal\n", None, cap)
+    assert ok, detail
+    ok, _ = km.check_busy_stop_reason(
+        "duration\n", cap, cap)
+    assert not ok
+
+
+def test_busy_events_file_bytes(tmp_path):
+    path = tmp_path / "events.ndjson"
+    path.write_bytes(b'{"kind":"x"}\n')
+    assert km.events_file_bytes(str(path)) == 13
+    assert km.events_file_bytes(
+        str(tmp_path / "missing.ndjson")) is None
+
+
 def test_session_end_reason():
     text = json.dumps({"capture": {"end_reason": "signal"}})
     assert km.session_end_reason(text) == "signal"
@@ -4692,6 +4807,21 @@ def test_busy_stop_reason_wired():
         json.dumps(rec["checks"], indent=1)
     ev = _ev_pass()
     ev["busy_end_reason"] = "size_limit\n"
+    rec = km.evaluate_row(ev)
+    assert not rec["ok"]
+    assert not _check(rec, "busy_stop_reason")["ok"]
+
+
+def test_busy_stop_reason_size_limit_wired():
+    ev = _ev_pass()
+    ev["busy_end_reason"] = "size_limit\n"
+    ev["busy_events_bytes"] = km.BUSY_MAX_EVENTS_BYTES
+    rec = km.evaluate_row(ev)
+    assert _check(rec, "busy_stop_reason")["ok"], \
+        json.dumps(rec["checks"], indent=1)
+    ev = _ev_pass()
+    ev["busy_end_reason"] = "size_limit\n"
+    ev["busy_events_bytes"] = km.BUSY_MAX_EVENTS_BYTES // 2
     rec = km.evaluate_row(ev)
     assert not rec["ok"]
     assert not _check(rec, "busy_stop_reason")["ok"]

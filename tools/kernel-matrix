@@ -325,6 +325,8 @@ def collect_one(entry, export, tools, dd_count, elapsed, run_id,
             gather_persisted(busy)
         ev["busy_persisted"] = persisted
         ev["busy_events_error"] = events_error
+        ev["busy_events_bytes"] = km.events_file_bytes(
+            os.path.join(busy, "cap", "events.ndjson"))
         ev["busy_session_text"] = read_text(
             os.path.join(busy, "cap", "session.json"))
         ev["busy_miss_snaps"] = gather_miss_snaps(busy, 3)
