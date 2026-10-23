@@ -150,7 +150,7 @@
         "fragments_sha256": {
           "tests/vm/kconfig/base.fragment": "2bbff63922a7f99383927403f54b64ae98e75d0acb66a07fb892aa7db252e5bd"
         },
-        "toolchain": {"gcc": "gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0", "ld": "GNU ld (GNU Binutils for Ubuntu) 2.46", "pahole": "v1.31"},
+        "toolchain": {"gcc": "gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0", "ld": "GNU ld (GNU Binutils for Ubuntu) 2.46", "pahole": "v1.31", "gzip": "gzip 1.14", "vng": "virtme-ng 1.41"},
         "config_sha256": "d396534fdbc81a3956a85a8fdbba43e4403933ea191013e6f5e301d00a150171",
         "bzimage_sha256": "bc4e43520c508a7f60af98b634768e176df1cc28636c7afb249f3858fe49821f",
         "modules_manifest_sha256": "83127eb694df2d79175d3b7d4c94fa246c95b86f56d2baf6a83007be14c677d7"
@@ -175,7 +175,7 @@
           "tests/vm/kconfig/base.fragment": "2bbff63922a7f99383927403f54b64ae98e75d0acb66a07fb892aa7db252e5bd",
           "tests/vm/kconfig/nobtf.fragment": "52a43be8526a79696c002d125d1b89ad719a7fd4de75cf61c44dd930c855f716"
         },
-        "toolchain": {"gcc": "gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0", "ld": "GNU ld (GNU Binutils for Ubuntu) 2.46", "pahole": "v1.31"},
+        "toolchain": {"gcc": "gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0", "ld": "GNU ld (GNU Binutils for Ubuntu) 2.46", "pahole": "v1.31", "gzip": "gzip 1.14", "vng": "virtme-ng 1.41"},
         "config_sha256": "ef2bebcef1fe26941a1f1e1648b1ff4f7fa7d8055dc6c60b89362f4c434cb947",
         "bzimage_sha256": "6900b96b1a3d83f764b81cb376248c4a0bcfb8c8068387d12dda9f1491a43371",
         "modules_manifest_sha256": "12d3fe8631a204fbe9d4f7f0461806059bf108cc7e2faf0d58e8301096a722ec"
@@ -200,7 +200,7 @@
           "tests/vm/kconfig/base.fragment": "2bbff63922a7f99383927403f54b64ae98e75d0acb66a07fb892aa7db252e5bd",
           "tests/vm/kconfig/rt.fragment": "4ffe1c3cd4ce172b9b89f3492e62188b184c176229a30d9d2bfbc89d9e40f58d"
         },
-        "toolchain": {"gcc": "gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0", "ld": "GNU ld (GNU Binutils for Ubuntu) 2.46", "pahole": "v1.31"},
+        "toolchain": {"gcc": "gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0", "ld": "GNU ld (GNU Binutils for Ubuntu) 2.46", "pahole": "v1.31", "gzip": "gzip 1.14", "vng": "virtme-ng 1.41"},
         "config_sha256": "f7d8e02488a40bf0bb2cc7fea626b2254572bf356d0b913b2fa82b233a5c22ad",
         "bzimage_sha256": "7711e63399dc39fcaff8f4f4039d5718045c26c5a59a84bd486717672fccc8b0",
         "modules_manifest_sha256": "b8454e7358c5c91d82c4db5d96dd2b452b85e13ec6fe447cf5cd3093a3aa4a16"
@@ -225,7 +225,7 @@
           "tests/vm/kconfig/base.fragment": "2bbff63922a7f99383927403f54b64ae98e75d0acb66a07fb892aa7db252e5bd",
           "tests/vm/kconfig/debug.fragment": "80244b864c5ac85541543e82c6e02906b20f8f090a4edbae0b2cbd734c25e81c"
         },
-        "toolchain": {"gcc": "gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0", "ld": "GNU ld (GNU Binutils for Ubuntu) 2.46", "pahole": "v1.31"},
+        "toolchain": {"gcc": "gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0", "ld": "GNU ld (GNU Binutils for Ubuntu) 2.46", "pahole": "v1.31", "gzip": "gzip 1.14", "vng": "virtme-ng 1.41"},
         "config_sha256": "27aebcc63a7cb16e5d3430269293d9f003dc12f111b42ebe69d6cb8901d5bfb8",
         "bzimage_sha256": "da5764e16bacc74f9412af89391b6f0d79ba8f53f02c10802ab73734563319f1",
         "modules_manifest_sha256": "4b15181c6e8c92d2387db5472d474e37b36d3b4a8219fed135d4c81917a10e76"
@@ -376,7 +376,7 @@
         "fragments_sha256": {
           "tests/vm/kconfig/base.fragment": "2bbff63922a7f99383927403f54b64ae98e75d0acb66a07fb892aa7db252e5bd"
         },
-        "toolchain": {"gcc": "gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0", "ld": "GNU ld (GNU Binutils for Ubuntu) 2.46", "pahole": "v1.31"},
+        "toolchain": {"gcc": "gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0", "ld": "GNU ld (GNU Binutils for Ubuntu) 2.46", "pahole": "v1.31", "gzip": "gzip 1.14", "vng": "virtme-ng 1.41"},
         "config_sha256": "782cf49f5e43950b3dedb516598b06fbdb668008b18b91c484ce4841ed04649a",
         "bzimage_sha256": "70ec3d533e46fd855e651fb5c837855aa6b926c2902b56616c33f8342973f16b",
         "modules_manifest_sha256": "197375a266a0c4015fa7b95084c28dbf91c1e122b984bbf520b78b3212101c36"

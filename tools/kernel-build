@@ -129,7 +129,17 @@ def fresh_dir(path, what):
     os.makedirs(path)
 
 
+REFUSE_ENV = ("LLVM", "KCFLAGS", "KAFLAGS", "KCPPFLAGS",
+              "CROSS_COMPILE", "CC", "HOSTCC", "HOSTCXX",
+              "ARCH")
+
+
 def build_env():
+    for name in REFUSE_ENV:
+        if os.environ.get(name):
+            raise BuildError("unpinned %s=%r in environment, "
+                             "refusing" % (name,
+                                           os.environ[name]))
     env = dict(os.environ)
     env["KBUILD_BUILD_TIMESTAMP"] = BUILD_TIMESTAMP
     env["KBUILD_BUILD_USER"] = BUILD_USER
@@ -151,8 +161,16 @@ def main(argv=None):
                              "of comparing them")
     parser.add_argument("--root", default=BUILD_ROOT,
                         help="build root (default "
-                             "/var/tmp/memveil-kbuild)")
+                             "/var/tmp/memveil-kbuild; "
+                             "compare mode refuses any "
+                             "other root)")
     args = parser.parse_args(argv)
+    if os.path.abspath(args.root) != BUILD_ROOT \
+            and not args.print_hashes:
+        print("kernel-build: refuses --root %s without "
+              "--print-hashes (pinned root %s)"
+              % (args.root, BUILD_ROOT), file=sys.stderr)
+        return 2
     try:
         lock = km.parse_lock(
             str(ROOT / "tests" / "vm" / "kernels.lock.json"))
@@ -191,10 +209,15 @@ def build_row(entry, source, args):
         raise BuildError("cannot make work dirs: %s" % exc)
     check_free_space(root)
     check_free_space(kcache)
+    vng = find_vng()
+    if not vng:
+        raise BuildError("vng not found (need virtme-ng)")
     got_toolchain = {"gcc": first_line(["gcc", "--version"]),
                      "ld": first_line(["ld", "--version"]),
                      "pahole": first_line(
-                         ["pahole", "--version"])}
+                         ["pahole", "--version"]),
+                     "gzip": first_line(["gzip", "--version"]),
+                     "vng": first_line([vng, "--version"])}
     check_toolchain(source["toolchain"], got_toolchain)
     frag_texts = []
     for frag in source["fragments"]:
@@ -225,9 +248,6 @@ def build_row(entry, source, args):
         raise BuildError("tarball holds %d top dirs, want 1"
                          % len(kids))
     srcdir = os.path.join(workdir, kids[0])
-    vng = find_vng()
-    if not vng:
-        raise BuildError("vng not found (need virtme-ng)")
     sys.stderr.write("kernel-build: vng --kconfig\n")
     run_logged([vng, "--kconfig"], srcdir, None, 300,
                "vng --kconfig")

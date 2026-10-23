@@ -107,14 +107,16 @@ def read_text(path):
         return None
 
 
-def gather_miss_snaps(export):
+def gather_miss_snaps(export, count=4):
+    if not os.path.isdir(export):
+        return None
     try:
         times = json.loads(Path(
             export, "progs_times.json").read_text())
     except (OSError, ValueError):
         times = {}
     snaps = []
-    for idx in range(4):
+    for idx in range(count):
         try:
             nsecs = int(times[str(idx)])
         except (KeyError, TypeError, ValueError):
@@ -149,11 +151,24 @@ def gather_persisted(export):
             counts = km.persisted_counts(handle)
         with open(path) as handle:
             byts = km.persisted_bytes(handle)
-        return counts, byts, None
+        with open(path) as handle:
+            dirs = km.persisted_copy_dirs(handle)
+        return counts, byts, dirs, None
     except OSError:
-        return None, None, "missing events.ndjson"
+        return None, None, None, "missing events.ndjson"
     except ValueError as exc:
-        return None, None, str(exc)
+        return None, None, None, str(exc)
+
+
+def gather_busy_counters(busy):
+    path = os.path.join(busy, "cap", "events.ndjson")
+    try:
+        with open(path) as handle:
+            return km.counter_deltas(handle), None
+    except OSError:
+        return None, "missing events.ndjson"
+    except ValueError as exc:
+        return None, str(exc)
 
 
 def collect_one(entry, export, tools, dd_count, elapsed, run_id,
@@ -241,10 +256,20 @@ def collect_one(entry, export, tools, dd_count, elapsed, run_id,
         ev["oracle_stderr"] = read_text(
             os.path.join(export, "oracle.stderr"))
         ev["miss_snaps"] = gather_miss_snaps(export)
-        persisted, byts, events_error = gather_persisted(export)
+        persisted, byts, dirs, events_error = \
+            gather_persisted(export)
         ev["persisted"] = persisted
         ev["persisted_bytes"] = byts
+        ev["persisted_copy_dirs"] = dirs
         ev["events_error"] = events_error
+        mode = read_text(os.path.join(export, "oracle.mode"))
+        ev["oracle_mode"] = (mode or "").strip() or None
+        ev["hist_status_text"] = read_text(
+            os.path.join(export, "hist.status"))
+        ev["hist_before_text"] = read_text(
+            os.path.join(export, "hist_before.txt"))
+        ev["hist_after_text"] = read_text(
+            os.path.join(export, "hist_after.txt"))
         ev["blockstat_text"] = read_text(
             os.path.join(export, "blockstat.json"))
         ev["udev_exit"] = read_text(
@@ -258,12 +283,29 @@ def collect_one(entry, export, tools, dd_count, elapsed, run_id,
             os.path.join(busy, "times.json"))
         ev["busy_end_reason"] = read_text(
             os.path.join(busy, "end_reason.txt"))
-        persisted, _, events_error = gather_persisted(busy)
+        ev["busy_out_text"] = read_text(
+            os.path.join(busy, "busy.out"))
+        persisted, _, _, events_error = \
+            gather_persisted(busy)
         ev["busy_persisted"] = persisted
         ev["busy_events_error"] = events_error
+        ev["busy_session_text"] = read_text(
+            os.path.join(busy, "cap", "session.json"))
+        ev["busy_miss_snaps"] = gather_miss_snaps(busy, 3)
+        counters, counters_error = \
+            gather_busy_counters(busy)
+        ev["busy_counters"] = counters
+        ev["busy_counters_error"] = counters_error
+        ev["busy_report_exit"] = read_text(
+            os.path.join(busy, "report.exit"))
+        ev["busy_report_json_exit"] = read_text(
+            os.path.join(busy, "report-json.exit"))
         rc, out = run_validator(export)
         ev["validate_rc"] = rc
         ev["validate_out"] = out
+        rc, out = run_validator(busy)
+        ev["busy_validate_rc"] = rc
+        ev["busy_validate_out"] = out
     ev["export_redact_error"] = km.scan_export_redaction(export)
     try:
         rec = km.evaluate_row(ev)
@@ -273,6 +315,11 @@ def collect_one(entry, export, tools, dd_count, elapsed, run_id,
                "checks": [{"name": "row_decision", "ok": False,
                            "detail": "row decision crashed",
                            "skipped": False}]}
+    if admitted and os.path.isdir(os.path.join(export, "busy")):
+        summary, error = km.shrink_busy_events(
+            os.path.join(export, "busy"))
+        rec["busy_events"] = summary if summary is not None \
+            else {"error": error}
     rec["elapsed"] = round(elapsed, 1)
     rec["run_id"] = run_id
     rec["timeout"] = bool(timeout)

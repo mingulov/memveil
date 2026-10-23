@@ -64,6 +64,9 @@ POST_LATCH_KEYS = ("size_omitted", "duration_omitted",
                    "signal_omitted")
 
 MAX_EDGE_GAP_NS = 10 ** 9
+BUSY_SETTLE_NS = 2 * MAX_EDGE_GAP_NS
+DMA_TO_DEVICE = 1
+DMA_FROM_DEVICE = 2
 DMESG_MARKER = "memveil-matrix-start"
 DMESG_SUSPICIOUS = re.compile(
     r"warn|(?<!de)bug|oops|error|general protection fault|"
@@ -78,15 +81,21 @@ VNG_TAG = re.compile(r"^v\d+(\.\d+)*(-rc\d+)?$")
 _PROBE_SNIPPET = {
     "tp": "tracepoint:swiotlb:swiotlb_bounced "
           "{ @tp = count(); @tpb = sum(args.size); }",
-    "map": "fexit:vmlinux:swiotlb_tbl_map_single { @map = count(); }",
+    "tp_countonly": "tracepoint:swiotlb:swiotlb_bounced "
+                    "{ @tp = count(); }",
+    "map": "fexit:vmlinux:swiotlb_tbl_map_single "
+           "{ @map = count(); @mapd[args.dir] = count(); }",
     "unmap": ("fentry:vmlinux:__swiotlb_tbl_unmap_single"
               " { @unmap = count(); }"),
-    "copy": "fentry:vmlinux:swiotlb_bounce { @copy = count(); }",
+    "copy": "fentry:vmlinux:swiotlb_bounce "
+            "{ @copy = count(); @copyd[args.dir] = count(); }",
     "syncc": ("fentry:vmlinux:__swiotlb_sync_single_for_cpu"
               " { @syncc = count(); }"),
     "syncd": ("fentry:vmlinux:__swiotlb_sync_single_for_device"
               " { @syncd = count(); }"),
 }
+
+_DIR_MAPS = {"map": "mapd", "copy": "copyd"}
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -144,7 +153,9 @@ _BUILT_KEYS = frozenset({"kind", "tarball_url",
                         "fragments_sha256", "toolchain",
                         "config_sha256", "bzimage_sha256",
                         "modules_manifest_sha256"})
-_TOOLCHAIN_KEYS = frozenset({"gcc", "ld", "pahole"})
+_TOOLCHAIN_KEYS = frozenset({"gcc", "ld", "pahole", "gzip",
+                           "vng"})
+TOOLCHAIN_NAMES = ("gcc", "ld", "pahole", "gzip", "vng")
 _DISTRO_KEYS = frozenset({"kind", "packages",
                          "vmlinuz_member", "vmlinuz_sha256",
                          "modules_manifest_sha256",
@@ -210,7 +221,7 @@ def _need_built_source(source, ident):
     tool = source.get("toolchain")
     _need(isinstance(tool, dict), "bad toolchain for " + ident)
     _no_extra(tool, _TOOLCHAIN_KEYS, "toolchain")
-    for name in ("gcc", "ld", "pahole"):
+    for name in TOOLCHAIN_NAMES:
         _need(isinstance(tool.get(name), str) and
               tool[name], "bad toolchain %s for %s"
               % (name, ident))
@@ -251,10 +262,22 @@ def _need_distro_source(source, ident):
           "bad banner for " + ident)
 
 
+def _unique_object(pairs):
+    obj = {}
+    for key, val in pairs:
+        if key in obj:
+            raise LockError("duplicate key %r" % key)
+        obj[key] = val
+    return obj
+
+
 def parse_lock(path):
     """Parse and validate one kernels.lock.json file."""
     try:
-        doc = json.loads(Path(path).read_text())
+        doc = json.loads(Path(path).read_text(),
+                         object_pairs_hook=_unique_object)
+    except LockError:
+        raise
     except (OSError, ValueError) as exc:
         raise LockError("unreadable lock: %s" % exc)
     _need(isinstance(doc, dict), "bad lock object")
@@ -358,8 +381,6 @@ def _reason_ok(reason_class, status, reason):
                 "format", "attach")
         low = reason.lower()
         return any(k.lower() in low for k in keys)
-    if reason_class in ("btf-absent", "lockdown"):
-        return False
     return False
 
 
@@ -885,11 +906,11 @@ def _kind_channel(kind):
 def check_persisted_invariants(persisted, attributed):
     """Fixed workload ratios within attributed loss.
 
-    Each map carries one attempt, one unmap and one sync;
-    copies sit between once and twice the maps (reads
-    copy both ways, writes only original to bounce).
-    Present channels only: a row with one channel has
-    no ratio to check.
+    Each map carries one attempt, one unmap and one sync.
+    Copy direction counts are checked exactly by
+    check_copy_direction_counts, not here. Present
+    channels only: a row with one channel has no ratio
+    to check.
     """
     fails = []
     group = [k for k in ("bounce_attempt", "map_result", "unmap",
@@ -903,15 +924,39 @@ def check_persisted_invariants(persisted, attributed):
                 fails.append("%s=%d vs %s=%d beyond loss %d"
                              % (first, persisted[first],
                                 second, persisted[second], allow))
-    if "copy" in persisted and "map_result" in persisted:
-        copies = persisted["copy"]
-        maps = persisted["map_result"]
-        if maps > copies + attributed.get("copy", 0):
-            fails.append("copy=%d under map=%d"
-                         % (copies, maps))
-        if copies > 2 * maps + 2 * attributed.get("map", 0):
-            fails.append("copy=%d over twice map=%d"
-                         % (copies, maps))
+    return fails
+
+
+def check_copy_direction_counts(copy_dirs, copy_total, maps,
+                                read_lo, read_hi, att_copy,
+                                att_map):
+    """Exact per-direction copy counts within loss.
+
+    Original-to-bounce equals maps (one map-path bounce
+    each); bounce-to-original equals read maps (one
+    bounce-back each). Shortfalls fit the copy plus map
+    attribution; over always fails.
+    """
+    try:
+        o2b = int(copy_dirs["original_to_bounce"])
+        b2o = int(copy_dirs["bounce_to_original"])
+    except (KeyError, TypeError, ValueError):
+        return ["copy direction counts unreadable"]
+    fails = []
+    if o2b + b2o != copy_total:
+        fails.append("copy dirs %d + %d disagree with "
+                     "total %d" % (o2b, b2o, copy_total))
+    allow = att_copy + att_map
+    if abs(o2b - maps) > allow:
+        fails.append("original_to_bounce=%d vs maps=%d "
+                     "beyond loss %d" % (o2b, maps, allow))
+    if b2o > read_hi:
+        fails.append("bounce_to_original=%d over read "
+                     "maps %d" % (b2o, read_hi))
+    elif b2o < read_lo - allow:
+        fails.append("bounce_to_original=%d under read "
+                     "maps %d beyond loss %d"
+                     % (b2o, read_lo, allow))
     return fails
 
 
@@ -925,72 +970,270 @@ def check_oracle_invariants(bounds):
         bottom = min(bounds[c][1] for c in group)
         if top > bottom:
             fails.append("oracle attempt/map/unmap/sync disjoint")
-    if "copy" in bounds and "map" in bounds:
-        clo, chi = bounds["copy"]
-        mlo, mhi = bounds["map"]
-        if clo > 2 * mhi or mlo > chi:
-            fails.append("oracle copy outside once to "
-                         "twice map")
     return fails
 
 
-def busy_channel_counts(samples, start_ns, end_ns, chan):
-    """Summed oracle [lo, hi] per channel without misses."""
-    _, keys = KINDS[chan]
-    lo = hi = 0
-    for key in keys:
-        klo, khi = oracle_interval(samples, start_ns,
-                                   end_ns, key)
-        lo += klo
-        hi += khi
-    return lo, hi
+def check_oracle_direction_formulas(map_iv, mapd, copy_iv,
+                                    copyd, map_miss_hi,
+                                    copy_miss_hi):
+    """Exact oracle direction formulas with miss slack.
 
-
-def check_busy_bounds(persisted, samples, times, channels,
-                      attributed):
-    """Busy capture one-sided oracle bounds with main loss.
-
-    Each admitted non-empty channel stays under the
-    oracle over [spawn - 1 s, exit + 1 s] and above the
-    oracle over [ready + 1 s, stop - 1 s] minus the
-    main capture attribution. No byte equality.
+    TO_DEVICE bounces equal maps, FROM_DEVICE bounces
+    equal read maps, and each direction split sums to
+    its total; directions 0 and 3 must stay empty. True
+    counts may exceed observed highs by that probe
+    misses; anything else disjoint fails.
     """
     try:
-        spawn = int(times["spawn_ns"])
-        ready = int(times["ready_ns"])
-        stop = int(times["stop_ns"])
-        exit_ns = int(times["exit_ns"])
+        mlo, mhi = map_iv
+        clo, chi = copy_iv
+        mids = {d: tuple(mapd[d]) for d in range(4)}
+        cids = {d: tuple(copyd[d]) for d in range(4)}
     except (KeyError, TypeError, ValueError):
-        return ["busy times unreadable"]
-    if not spawn <= ready <= stop <= exit_ns:
-        return ["busy times out of order"]
-    if stop - ready < 1000000000:
-        return ["busy window under 1s"]
+        return ["oracle direction bounds unreadable"]
     fails = []
+    for direction in (0, 3):
+        if mids[direction][1] != 0:
+            fails.append("oracle map dir %d not empty"
+                         % direction)
+        if cids[direction][1] != 0:
+            fails.append("oracle copy dir %d not empty"
+                         % direction)
+    c1lo, c1hi = cids[DMA_TO_DEVICE]
+    if c1lo > mhi + map_miss_hi \
+            or mlo > c1hi + copy_miss_hi:
+        fails.append("oracle TO_DEVICE copies disjoint "
+                     "from maps")
+    c2lo, c2hi = cids[DMA_FROM_DEVICE]
+    m2lo, m2hi = mids[DMA_FROM_DEVICE]
+    if c2lo > m2hi + map_miss_hi \
+            or m2lo > c2hi + copy_miss_hi:
+        fails.append("oracle FROM_DEVICE copies disjoint "
+                     "from read maps")
+    if mids[1][0] + mids[2][0] > mhi or mlo > mids[1][1] \
+            + mids[2][1]:
+        fails.append("oracle map dirs do not sum to maps")
+    if cids[1][0] + cids[2][0] > chi or clo > cids[1][1] \
+            + cids[2][1]:
+        fails.append("oracle copy dirs do not sum to copies")
+    return fails
+
+
+def parse_detail_loss_unknown(reason):
+    """Parse the strict detail-unknown grammar into counters."""
+    parts = " ".join("%s=\\((\\d+)\\)" % key
+                     for key in ("submit_fail", "malformed",
+                                 "dropped", "recursion_missed",
+                                 "size_omitted",
+                                 "duration_omitted",
+                                 "signal_omitted", "rejected",
+                                 "write_failed"))
+    match = re.fullmatch(
+        r"detail loss unknown \(([^;()]+); known: " + parts
+        + r"\)", reason or "")
+    if not match:
+        raise ValueError("detail loss unknown grammar mismatch")
+    cause = match.group(1)
+    if not cause.strip():
+        raise ValueError("detail loss unknown cause empty")
+    nums = [int(v) for v in match.groups()[1:]]
+    keys = ["submit_fail", "malformed", "dropped",
+            "recursion_missed", "size_omitted",
+            "duration_omitted", "signal_omitted", "rejected",
+            "write_failed"]
+    parsed = dict(zip(keys, nums))
+    parsed["cause"] = cause
+    return parsed
+
+
+def parse_busy_span(text):
+    """Busy loader phase line into start, end and ios."""
+    for line in (text or "").splitlines():
+        match = re.fullmatch(
+            r"phase busy start_ns (\d+) end_ns (\d+) "
+            r"bytes (\d+) ios (\d+)", line.strip())
+        if match:
+            start, end, _, ios = (int(v) for v in
+                                  match.groups())
+            return {"start": start, "end": end, "ios": ios}
+    raise ValueError("busy phase line missing")
+
+
+def check_busy_span(span, spawn_ns, exit_ns):
+    """Busy load must span record spawn to exit with IO."""
+    fails = []
+    if span["start"] >= spawn_ns:
+        fails.append("busy load starts %d at or after "
+                     "spawn %d" % (span["start"], spawn_ns))
+    if span["end"] <= exit_ns:
+        fails.append("busy load ends %d at or before "
+                     "exit %d" % (span["end"], exit_ns))
+    if span["ios"] == 0:
+        fails.append("busy load ran no IO")
+    return fails
+
+
+def _busy_known_loss(known):
+    return transport_loss(known) + known["recursion_missed"]
+
+
+def decide_busy(persisted, samples, miss_samples, start_ns,
+                end_ns, channels, session, counters):
+    """Busy capture verdicts from its own session evidence.
+
+    A numeric detail claim gets strict per-channel lower
+    bounds with that channel transport loss plus bpftool
+    misses, never pooled, never crediting post-latch
+    omits. An unknown partial gets honesty only: not
+    complete, null loss, each channel inside its oracle
+    upper. Captured plus known loss must fit the summed
+    oracle upper in both paths, since the loss claim is
+    global. A complete_for_scope aggregate claim must
+    match its counter deltas against the oracle. Returns
+    (per, overall, failed, info).
+    """
+    try:
+        detail = session["quality"]["detail"]
+        status = detail["status"]
+        loss_count = detail.get("loss_count")
+        reason = detail.get("reason")
+        agg = session["quality"].get("aggregate", {})
+    except (KeyError, TypeError, AttributeError):
+        per = {c: "CLAIM-UNPROVEN (session unreadable)"
+               for c in channels}
+        return per, "CLAIM-UNPROVEN", True, {}
+    numeric = unknown = None
+    try:
+        numeric = parse_detail_loss(reason)
+    except ValueError:
+        numeric = None
+    try:
+        unknown = parse_detail_loss_unknown(reason)
+    except ValueError:
+        unknown = None
+    if status == "complete_for_scope" and numeric is not None \
+            and loss_count is not None \
+            and str(loss_count) == str(numeric["total"]):
+        known = numeric
+        strict = True
+    elif status == "partial" and loss_count is None \
+            and unknown is not None:
+        known = unknown
+        strict = False
+    else:
+        per = {c: "CLAIM-UNPROVEN (%s loss=%s)"
+               % (status, loss_count) for c in channels}
+        return per, "CLAIM-UNPROVEN", True, {}
+    if "copy" in channels:
+        try:
+            recovered = recovered_from_session(session)
+        except ValueError as exc:
+            per = {c: "CLAIM-UNPROVEN (%s)" % exc
+                   for c in channels}
+            return per, "CLAIM-UNPROVEN", True, {}
+    else:
+        recovered = 0
+    per = {}
+    transport = transport_loss(known)
+    known_total = _busy_known_loss(known)
     for chan in channels:
-        kind = KINDS[chan][0]
+        kind, _ = KINDS[chan]
+        try:
+            lo, hi = channel_bounds(samples, miss_samples,
+                                    start_ns, end_ns, chan)
+            allowance = channel_allowance(
+                miss_samples, start_ns, end_ns, chan,
+                transport, recovered if chan == "copy"
+                else 0)
+        except OracleError as exc:
+            per[chan] = "ORACLE-FAIL (%s)" % exc
+            return per, None, True, {}
         got = persisted.get(kind, 0)
         if got == 0:
-            fails.append("%s empty in busy capture" % chan)
+            per[chan] = "EMPTY (empty in busy capture)"
             continue
-        try:
-            _, hi = busy_channel_counts(
-                samples, spawn - 1000000000,
-                exit_ns + 1000000000, chan)
-            lo, _ = busy_channel_counts(
-                samples, ready + 1000000000,
-                stop - 1000000000, chan)
-        except OracleError as exc:
-            return ["busy oracle: %s" % exc]
         if got > hi:
-            fails.append("%s %d over busy oracle %d"
-                         % (chan, got, hi))
-        elif got < lo - attributed.get(chan, 0):
-            fails.append("%s %d under busy oracle %d "
-                         "beyond loss %d"
-                         % (chan, got, lo,
-                            attributed.get(chan, 0)))
-    return fails
+            per[chan] = "MORE THAN ORACLE (%d > %d..%d)" \
+                % (got, lo, hi)
+            continue
+        if strict:
+            short = lo - got if got < lo else 0
+            if short > allowance:
+                per[chan] = "SHORT-UNCOVERED " \
+                    "(%d < %d..%d)" % (got, lo, hi)
+            elif short == 0:
+                per[chan] = "EXACT (%d in %d..%d)" \
+                    % (got, lo, hi)
+            else:
+                per[chan] = "SHORT-COVERED (%d < %d..%d)" \
+                    % (got, lo, hi)
+        else:
+            per[chan] = "HONEST (%d <= %d)" % (got, hi)
+    if any(v.startswith("MORE THAN ORACLE")
+           for v in per.values()):
+        return per, "MORE THAN ORACLE", True, {}
+    if any(v.startswith("EMPTY") for v in per.values()):
+        return per, "EMPTY", True, {}
+    if any(v.startswith("SHORT-UNCOVERED")
+           for v in per.values()):
+        return per, "SHORT-UNCOVERED", True, {}
+    sum_got = sum(persisted.get(KINDS[c][0], 0)
+                  for c in channels)
+    sum_hi = 0
+    for chan in channels:
+        _, hi = channel_bounds(samples, miss_samples,
+                               start_ns, end_ns, chan)
+        sum_hi += hi
+    if sum_got + known_total > sum_hi:
+        return per, "OVER-REPORTED", True, {}
+    if agg.get("status") == "complete_for_scope" \
+            and str(agg.get("loss_count")) == "0":
+        try:
+            ok, detail = _check_busy_aggregate(
+                counters, samples, miss_samples, start_ns,
+                end_ns)
+        except OracleError:
+            return per, "AGGREGATE-MISMATCH", True, {}
+        if not ok:
+            return per, "AGGREGATE-MISMATCH", True, \
+                {"aggregate": detail}
+    if strict:
+        if any(v.startswith("SHORT-COVERED")
+               for v in per.values()):
+            return per, "SHORT-COVERED", False, {}
+        return per, "EXACT", False, {}
+    return per, "HONEST", False, {}
+
+
+def _check_busy_aggregate(counters, samples, miss_samples,
+                          start_ns, end_ns):
+    """Aggregate complete claim against oracle counter bounds."""
+    if not isinstance(counters, dict):
+        return False, "aggregate claims complete with " \
+            "no counters"
+    try:
+        attempts = int(counters["swiotlb.bounce_attempts"])
+    except (KeyError, TypeError, ValueError):
+        return False, "aggregate lacks attempt counters"
+    lo, hi = channel_bounds(samples, miss_samples, start_ns,
+                            end_ns, "attempt")
+    if attempts < lo or attempts > hi:
+        return False, "aggregate attempts %d outside " \
+            "oracle %d..%d" % (attempts, lo, hi)
+    if "swiotlb.requested_bytes" in counters:
+        try:
+            nbytes = int(counters["swiotlb.requested_bytes"])
+        except (TypeError, ValueError):
+            return False, "aggregate byte counter unparseable"
+        blo, bhi = oracle_interval(samples, start_ns, end_ns,
+                                   "tpb")
+        _, miss_hi = miss_interval(miss_samples, start_ns,
+                                   end_ns, ORACLE_PROGS["tp"])
+        if nbytes < blo \
+                or nbytes > bhi + miss_hi * MAX_MAP_BYTES:
+            return False, "aggregate bytes %d outside " \
+                "oracle %d..%d" % (nbytes, blo, bhi)
+    return True, "aggregate counters match the oracle"
 
 
 def check_memveil_bytes(byte_sums, read_bytes, write_bytes,
@@ -1064,6 +1307,81 @@ def check_oracle_bytes(samples, miss_samples, start_ns, end_ns,
     return []
 
 
+_HIST_BUCKET = re.compile(
+    r"\{\s*size:\s*(\d+)\s*\}\s*hitcount:\s*(\d+)")
+_HIST_TOTAL = re.compile(r"(Hits|Entries|Dropped):\s*(\d+)")
+
+
+def parse_hist_totals(text):
+    """Tracefs hist file into (count, bytes) totals.
+
+    Every bucket contributes its size times hitcount.
+    Dropped must read 0 with its line present, and any
+    line outside the Totals block, buckets and comments
+    fails so format drift never parses silently.
+    """
+    dropped = None
+    seen_totals = False
+    count = nbytes = 0
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped == "Totals:":
+            seen_totals = True
+            continue
+        match = _HIST_TOTAL.fullmatch(stripped)
+        if match:
+            if match.group(1) == "Dropped":
+                dropped = int(match.group(2))
+            continue
+        match = _HIST_BUCKET.fullmatch(stripped)
+        if match:
+            size, hits = int(match.group(1)), \
+                int(match.group(2))
+            count += hits
+            nbytes += size * hits
+            continue
+        raise ValueError("hist line unparseable: %r"
+                         % stripped[:40])
+    if not seen_totals or dropped is None:
+        raise ValueError("hist totals missing")
+    if dropped != 0:
+        raise ValueError("hist dropped %d" % dropped)
+    return count, nbytes
+
+
+def check_hist_bytes(before_text, after_text, block_bytes,
+                     tp_lo, tp_hi):
+    """Hist byte delta must equal the block total exactly.
+
+    Both snapshots bracket the workload like blockstat,
+    so no oracle slack applies; the count delta must sit
+    inside the tracepoint oracle bounds over the window.
+    """
+    try:
+        before_count, before_bytes = parse_hist_totals(
+            before_text)
+        after_count, after_bytes = parse_hist_totals(
+            after_text)
+    except ValueError as exc:
+        return ["hist: %s" % exc]
+    if after_count < before_count \
+            or after_bytes < before_bytes:
+        return ["hist runs backwards"]
+    count = after_count - before_count
+    nbytes = after_bytes - before_bytes
+    if count == 0:
+        return ["hist counted nothing"]
+    if nbytes != block_bytes:
+        return ["hist bytes %d are not block %d"
+                % (nbytes, block_bytes)]
+    if count < tp_lo or count > tp_hi:
+        return ["hist count %d outside oracle %d..%d"
+                % (count, tp_lo, tp_hi)]
+    return []
+
+
 def parse_blockstat(text):
     """Sectors read from one /sys/block/*/stat line."""
     try:
@@ -1080,8 +1398,22 @@ def parse_blockstat_write(text):
         raise ValueError("block stat line unparseable")
 
 
+def _opt_sector(side, key):
+    if key not in side:
+        return None
+    try:
+        return int(side[key])
+    except (TypeError, ValueError):
+        raise ValueError("blockstat sides unreadable")
+
+
 def parse_blockstat_v2(text):
-    """Per-side sector counters from one blockstat.json."""
+    """Per-side sector counters from one blockstat.json.
+
+    Returns data dev, data reads, scratch dev, scratch
+    writes, then the idle sides (data writes, scratch
+    reads), each None when the guest did not record it.
+    """
     try:
         doc = json.loads(text or "")
         data = doc["data"]
@@ -1089,14 +1421,40 @@ def parse_blockstat_v2(text):
         out = (data["dev"], int(data["read_before"]),
                int(data["read_after"]), scratch["dev"],
                int(scratch["write_before"]),
-               int(scratch["write_after"]))
+               int(scratch["write_after"]),
+               _opt_sector(data, "write_before"),
+               _opt_sector(data, "write_after"),
+               _opt_sector(scratch, "read_before"),
+               _opt_sector(scratch, "read_after"))
     except (KeyError, TypeError, ValueError):
         raise ValueError("blockstat sides unreadable")
     if not out[0] or not out[3]:
         raise ValueError("blockstat sides unreadable")
     if out[2] < out[1] or out[5] < out[4]:
         raise ValueError("blockstat runs backwards")
+    for before, after in ((out[6], out[7]), (out[8], out[9])):
+        if before is not None and after is not None \
+                and after < before:
+            raise ValueError("blockstat runs backwards")
     return out
+
+
+def check_idle_sides(data_write_before, data_write_after,
+                     scratch_read_before, scratch_read_after):
+    """Idle sides stay silent: no data writes or scratch reads."""
+    sides = (data_write_before, data_write_after,
+             scratch_read_before, scratch_read_after)
+    if any(val is None for val in sides):
+        return ["idle sides unrecorded"]
+    fails = []
+    if data_write_after != data_write_before:
+        fails.append("data disk wrote %d sectors"
+                     % (data_write_after - data_write_before))
+    if scratch_read_after != scratch_read_before:
+        fails.append("scratch disk read %d sectors"
+                     % (scratch_read_after
+                        - scratch_read_before))
+    return fails
 
 
 def check_sectors(data_before, data_after,
@@ -1448,14 +1806,18 @@ REDACT_SKIP_FILES = ("artifacts.json", "progs0.json",
 def scan_export_redaction(export):
     """Assert every guest text export is redacted.
 
-    Skips the capture dir (product output, covered by the
-    product privacy suites) and the files that carry hashes
-    and bpftool tags by design. Returns None when clean,
-    else the first offending file and reason.
+    Skips exactly the capture dirs (product output,
+    covered by the product privacy suites) and the files
+    that carry hashes and bpftool tags by design. Returns
+    None when clean, else the first offending file and
+    reason.
     """
     root = str(export)
     for dirpath, dirnames, filenames in os.walk(root):
-        if "cap" in dirnames:
+        rel = os.path.relpath(dirpath, root)
+        if rel == "." and "cap" in dirnames:
+            dirnames.remove("cap")
+        if rel == "busy" and "cap" in dirnames:
             dirnames.remove("cap")
         for name in sorted(filenames):
             if name in REDACT_SKIP_FILES:
@@ -1473,6 +1835,43 @@ def scan_export_redaction(export):
                 return "%s: %s" % (os.path.relpath(path, root),
                                    exc)
     return None
+
+
+def shrink_busy_events(busy_dir):
+    """Replace busy events with counts plus sha256, or an error.
+
+    Writes events_summary.json beside the capture and only
+    then unlinks the 1 GB events file; on any read or
+    parse failure the file is kept and the error returned.
+    """
+    path = os.path.join(str(busy_dir), "cap", "events.ndjson")
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+    except OSError as exc:
+        return None, "busy events unreadable: %s" % exc
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        return None, "busy events undecodable: %s" % exc
+    try:
+        counts = persisted_counts(text.splitlines(keepends=True))
+    except ValueError as exc:
+        return None, "busy events: %s" % exc
+    summary = {"sha256": hashlib.sha256(raw).hexdigest(),
+               "bytes": len(raw), "counts": counts}
+    dest = os.path.join(str(busy_dir), "events_summary.json")
+    try:
+        with open(dest, "w") as handle:
+            json.dump(summary, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+    except OSError as exc:
+        return None, "busy summary unwritable: %s" % exc
+    try:
+        os.unlink(path)
+    except OSError as exc:
+        return None, "busy events kept: %s" % exc
+    return summary, None
 
 
 def repo_identity(root):
@@ -1634,6 +2033,80 @@ def persisted_bytes(lines):
     return sums
 
 
+def persisted_copy_dirs(lines):
+    """Count copy events per direction, failing on bad rows."""
+    dirs = {direction: 0 for direction in COPY_DIRECTIONS}
+    for num, line in enumerate(lines, 1):
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            event = json.loads(text)
+        except ValueError:
+            raise ValueError("malformed events line %d" % num)
+        if not isinstance(event, dict):
+            raise ValueError("malformed events line %d" % num)
+        if event.get("kind") != "copy":
+            continue
+        data = event.get("data")
+        if not isinstance(data, dict):
+            raise ValueError("events line %d lacks data" % num)
+        direction = data.get("direction")
+        if direction not in COPY_DIRECTIONS:
+            raise ValueError("events line %d bad direction"
+                             % num)
+        dirs[direction] += 1
+    return dirs
+
+
+def counter_deltas(lines):
+    """Attempt counter deltas per id, summed over epochs.
+
+    Values must not move backwards inside an epoch;
+    other kinds are skipped, malformed rows fail.
+    """
+    first = {}
+    last = {}
+    for num, line in enumerate(lines, 1):
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            event = json.loads(text)
+        except ValueError:
+            raise ValueError("malformed events line %d" % num)
+        if not isinstance(event, dict):
+            raise ValueError("malformed events line %d" % num)
+        if event.get("kind") != "counter_snapshot":
+            continue
+        data = event.get("data")
+        if not isinstance(data, dict):
+            raise ValueError("events line %d lacks data" % num)
+        try:
+            ident = data["counter_id"]
+            epoch = str(data["epoch"])
+            value = int(data["value"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("events line %d bad counter"
+                             % num)
+        if not isinstance(ident, str) or not ident \
+                or value < 0 or value > 2 ** 64 - 1:
+            raise ValueError("events line %d bad counter"
+                             % num)
+        key = (ident, epoch)
+        if key not in first:
+            first[key] = value
+        if value < last.get(key, value):
+            raise ValueError("counter %s runs backwards"
+                             % ident)
+        last[key] = value
+    out = {}
+    for ident, epoch in first:
+        out[ident] = out.get(ident, 0) + last[(ident, epoch)] \
+            - first[(ident, epoch)]
+    return out
+
+
 def resolve_inputs(deb, bundle):
     """One binary source: deb and bundle conflict."""
     if deb and bundle:
@@ -1668,8 +2141,8 @@ def check_out_collisions(out, ids):
 def select_kernel_ids(entries, text):
     """Lock entries for a comma-separated id list, in order.
 
-    Every id must exist in the lock; blank entries fail;
-    repeats collapse to first occurrence. Raises ValueError.
+    Every id must exist in the lock exactly once; blank
+    entries and repeats fail. Raises ValueError.
     """
     if not isinstance(text, str) or not text.strip():
         raise ValueError("kernel ids list is empty")
@@ -1687,10 +2160,20 @@ def select_kernel_ids(entries, text):
             raise ValueError("blank kernel id in %r" % text)
         if ident not in by_id:
             raise ValueError("unknown kernel id %r" % ident)
-        if ident not in seen:
-            seen.add(ident)
-            picked.append(by_id[ident])
+        if ident in seen:
+            raise ValueError("repeated kernel id %r" % ident)
+        seen.add(ident)
+        picked.append(by_id[ident])
     return picked
+
+
+def workflow_subset_ids(yml_text):
+    """Kernel ids from the workflow MV_KERNELS_IDS line."""
+    match = re.search(r"MV_KERNELS_IDS=([0-9A-Za-z.,\-]+)",
+                      yml_text or "")
+    if not match:
+        raise ValueError("workflow subset line missing")
+    return match.group(1).split(",")
 
 
 def check_artifacts(artifacts, tools):
@@ -1791,7 +2274,7 @@ def vng_download_cmd(vng, ver):
 def check_toolchain(want, got):
     """Refuse when a pinned toolchain line drifted, by name."""
     bad = []
-    for name in ("gcc", "ld", "pahole"):
+    for name in TOOLCHAIN_NAMES:
         if want.get(name) != got.get(name):
             bad.append("%s lock=%r host=%r"
                        % (name, want.get(name),
@@ -1921,6 +2404,79 @@ def verify_entry_cache(home, entry):
     return True, "cache holds", vmlinuz
 
 
+def _add_hist_bytes(add, ev, samples, start, end,
+                    block_bytes):
+    if any("tpb" in snap for _, snap in samples):
+        add("oracle_bytes", False,
+            "countonly oracle carries tpb")
+        return
+    status = (ev.get("hist_status_text") or "").strip()
+    if not status:
+        add("oracle_bytes", False, "hist evidence missing")
+        return
+    if status.startswith("unsupported:"):
+        if status[len("unsupported:"):].strip():
+            add("oracle_bytes", True,
+                "bytes unproven (%s)" % status, skipped=True)
+        else:
+            add("oracle_bytes", False,
+                "hist status unreadable")
+        return
+    if status != "ok":
+        add("oracle_bytes", False, "hist status unreadable")
+        return
+    before = ev.get("hist_before_text")
+    after = ev.get("hist_after_text")
+    if before is None or after is None:
+        add("oracle_bytes", False, "hist snapshots missing")
+        return
+    try:
+        tp_lo, tp_hi = oracle_interval(samples, start, end,
+                                       "tp")
+    except OracleError as exc:
+        add("oracle_bytes", False, "hist tp bounds: %s" % exc)
+        return
+    fails = check_hist_bytes(before, after, block_bytes,
+                             tp_lo, tp_hi)
+    add("oracle_bytes", not fails,
+        "; ".join(fails) or "hist bytes match block total")
+
+
+def _direction_fails(ev, samples, miss_samples, start,
+                     end, attributed):
+    if samples is None or miss_samples is None:
+        return ["directions need oracle and progs"]
+    if ev.get("persisted_copy_dirs") is None:
+        return ["copy direction counts missing"]
+    try:
+        map_iv = oracle_interval(samples, start, end, "map")
+        copy_iv = oracle_interval(samples, start, end, "copy")
+        mapd = {d: oracle_interval(samples, start, end,
+                                   "mapd%d" % d)
+                for d in range(4)}
+        copyd = {d: oracle_interval(samples, start, end,
+                                    "copyd%d" % d)
+                 for d in range(4)}
+        _, map_miss_hi = miss_interval(
+            miss_samples, start, end, ORACLE_PROGS["map"])
+        _, copy_miss_hi = miss_interval(
+            miss_samples, start, end, ORACLE_PROGS["copy"])
+    except OracleError as exc:
+        return ["direction oracle: %s" % exc]
+    fails = check_copy_direction_counts(
+        ev["persisted_copy_dirs"],
+        ev["persisted"].get("copy", 0),
+        ev["persisted"].get("map_result", 0),
+        mapd[DMA_FROM_DEVICE][0],
+        mapd[DMA_FROM_DEVICE][1] + map_miss_hi,
+        attributed.get("copy", 0),
+        attributed.get("map", 0))
+    fails.extend(check_oracle_direction_formulas(
+        map_iv, mapd, copy_iv, copyd, map_miss_hi,
+        copy_miss_hi))
+    return fails
+
+
 def _parse_blockstat_doc(text):
     try:
         doc = json.loads(text or "")
@@ -2022,8 +2578,10 @@ def evaluate_row(ev):
         if not isinstance(hooks, dict):
             raise ValueError("hooks.json is not an object")
         actual_omitted = hooks.get("omitted")
+        hooks_btf = hooks.get("btf")
     except ValueError:
         actual_omitted = None
+        hooks_btf = None
     rec["omitted_lock"] = entry["oracle"]["omitted"]
     rec["omitted_actual"] = actual_omitted
     fails = check_omitted(entry["oracle"]["omitted"],
@@ -2118,9 +2676,11 @@ def evaluate_row(ev):
                      "workload", "aggregate_quality", "floors",
                      "ceiling", "recursion_reported",
                      "channels", "invariants", "bytes",
-                     "oracle_bytes", "sectors", "oracle_health",
-                     "capture_valid", "busy_finalized",
-                     "busy_stop_reason", "busy_bounds"):
+                     "oracle_bytes", "sectors", "sectors_idle",
+                     "oracle_health", "capture_valid",
+                     "busy_finalized", "busy_stop_reason",
+                     "busy_span", "busy_bounds", "busy_valid",
+                     "busy_report"):
             add(name, True, "no admitted caps", skipped=True)
         rec["ok"] = all(c["ok"] for c in rec["checks"])
         rec["detail"] = "; ".join(c["detail"] for c in rec["checks"]
@@ -2338,6 +2898,10 @@ def evaluate_row(ev):
         fails = check_persisted_invariants(ev["persisted"],
                                            attributed)
         fails.extend(check_oracle_invariants(bounds))
+        if "copy" in channels:
+            fails.extend(_direction_fails(
+                ev, samples, miss_samples, start, end,
+                attributed))
         add("invariants", not fails,
             "; ".join(fails) or "workload ratios hold")
     else:
@@ -2361,14 +2925,36 @@ def evaluate_row(ev):
         add("oracle_bytes", False,
             "oracle bytes need oracle, progs, blockstat")
     else:
-        fails = check_oracle_bytes(samples, miss_samples, start,
-                                   end, block_bytes)
-        add("oracle_bytes", not fails,
-            "; ".join(fails) or "oracle bytes match block total")
+        mode = ev.get("oracle_mode")
+        if mode is None:
+            if any("tpb" in snap for _, snap in samples):
+                mode = "full"
+            else:
+                mode = "countonly"
+        if mode == "full" and hooks_btf is False:
+            add("oracle_bytes", False,
+                "full oracle needs BTF")
+        elif mode == "countonly" and hooks_btf is True:
+            add("oracle_bytes", False,
+                "countonly oracle with BTF present")
+        elif mode == "full":
+            fails = check_oracle_bytes(samples, miss_samples,
+                                       start, end, block_bytes)
+            add("oracle_bytes", not fails,
+                "; ".join(fails)
+                or "oracle bytes match block total")
+        elif mode == "countonly":
+            _add_hist_bytes(add, ev, samples, start, end,
+                            block_bytes)
+        else:
+            add("oracle_bytes", False,
+                "oracle mode unreadable")
     if sec is None:
         add("sectors", False, "sectors: %s" % sec_error)
+        add("sectors_idle", False, "idle sides need blockstat")
     elif parsed_workload is None:
         add("sectors", False, "sectors need workload phases")
+        add("sectors_idle", False, "idle sides need workload")
     else:
         ok, detail = check_sectors(sec[1], sec[2], sec[4],
                                    sec[5],
@@ -2377,6 +2963,10 @@ def evaluate_row(ev):
                                    parsed_workload[
                                        "write_bytes"])
         add("sectors", ok, detail)
+        fails = check_idle_sides(sec[6], sec[7], sec[8],
+                                 sec[9])
+        add("sectors_idle", not fails,
+            "; ".join(fails) or "idle sides silent")
     ok, detail = check_oracle_stderr(ev.get("oracle_stderr"))
     add("oracle_health", ok, detail)
     if ev.get("validate_rc") == 0:
@@ -2394,6 +2984,22 @@ def evaluate_row(ev):
     ok, detail = check_busy_stop_reason(
         ev.get("busy_end_reason"))
     add("busy_stop_reason", ok, detail)
+    try:
+        times = json.loads(ev.get("busy_times_text") or "")
+        spawn_ns = int(times["spawn_ns"])
+        exit_ns = int(times["exit_ns"])
+    except (ValueError, KeyError, TypeError):
+        add("busy_span", False, "busy times unreadable")
+    else:
+        try:
+            span = parse_busy_span(ev.get("busy_out_text"))
+        except ValueError as exc:
+            add("busy_span", False, "busy span: %s" % exc)
+        else:
+            fails = check_busy_span(span, spawn_ns, exit_ns)
+            add("busy_span", not fails,
+                "; ".join(fails)
+                or "busy load spans the record")
     if ev.get("busy_persisted") is None:
         add("busy_bounds", False,
             "busy counts missing (%s)"
@@ -2402,32 +3008,89 @@ def evaluate_row(ev):
     elif samples is None:
         add("busy_bounds", False,
             "busy bounds need oracle (%s)" % samples_error)
+    elif ev.get("busy_miss_snaps") is None:
+        add("busy_bounds", False,
+            "busy bounds need bpftool snapshots")
     else:
         try:
-            times = json.loads(
-                ev.get("busy_times_text") or "")
-        except ValueError:
-            add("busy_bounds", False,
-                "busy times unreadable")
+            busy_session = json.loads(
+                ev.get("busy_session_text") or "")
+            if not isinstance(busy_session, dict):
+                raise ValueError("busy session not an object")
+            busy_start = int(busy_session["capture"]["window"]
+                             ["start_ns"])
+            busy_end = int(busy_session["capture"]["window"]
+                           ["end_ns"])
+            busy_snaps = ev["busy_miss_snaps"]
+            if not isinstance(busy_snaps, list) \
+                    or len(busy_snaps) != 3:
+                raise ValueError("want 3 busy snapshots")
+            parsed_busy = []
+            for idx, (nsecs, text) in enumerate(busy_snaps):
+                if nsecs is None or text is None:
+                    raise ValueError("busy snapshot %d "
+                                     "unreadable" % idx)
+                progs = json.loads(text or "")
+                if not isinstance(progs, list):
+                    raise ValueError("busy snapshot not a list")
+                parsed_busy.append((int(nsecs), progs))
+            busy_miss = parse_miss_samples(parsed_busy)
+            busy_ok = True
+        except (ValueError, KeyError, TypeError) as exc:
+            add("busy_bounds", False, "busy session: %s" % exc)
+            busy_ok = False
+        if not busy_ok:
+            pass
+        elif ev.get("busy_counters_error"):
+            add("busy_bounds", False, "busy counters: %s"
+                % ev["busy_counters_error"])
         else:
-            fails = check_busy_bounds(
-                ev["busy_persisted"], samples, times,
-                channels, attributed)
-            add("busy_bounds", not fails,
-                "; ".join(fails)
-                or "busy capture within oracle bounds")
+            per, overall, failed, info = decide_busy(
+                ev["busy_persisted"], samples, busy_miss,
+                busy_start, busy_end, channels,
+                busy_session, ev.get("busy_counters"))
+            rec["busy_channels"] = per
+            rec["busy_overall"] = overall
+            if failed:
+                detail = "; ".join(
+                    "%s %s" % pair for pair in sorted(per.items()))
+                if overall in ("OVER-REPORTED",
+                               "AGGREGATE-MISMATCH",
+                               "CLAIM-UNPROVEN", "EMPTY"):
+                    detail += "; busy %s" % overall.lower()
+                if info.get("aggregate"):
+                    detail += "; %s" % info["aggregate"]
+                add("busy_bounds", False, detail or
+                    "busy oracle comparison failed")
+            else:
+                add("busy_bounds", True, overall)
+    if ev.get("busy_validate_rc") == 0:
+        add("busy_valid", True,
+            (ev.get("busy_validate_out") or "").strip()[:120])
+    else:
+        add("busy_valid", False, "busy validate-schemas rc=%s: %s"
+            % (ev.get("busy_validate_rc"),
+               (ev.get("busy_validate_out") or "").strip()[:200]))
+    ok, detail = check_report_consistent(
+        ev.get("busy_record_exit"),
+        [ev.get("busy_report_exit"),
+         ev.get("busy_report_json_exit")])
+    add("busy_report", ok, detail)
     rec["ok"] = all(c["ok"] for c in rec["checks"])
     rec["detail"] = "; ".join(c["detail"] for c in rec["checks"]
                               if not c["ok"])
     return rec
 
 
-def build_oracle_program(omitted=None):
+def build_oracle_program(omitted=None, count_only=False):
     """Build the per-CPU count() oracle program text.
 
     Omitted probes (missing hooks) leave both the probe and
     their interval fields out so bpftrace still attaches.
-    The tracepoint probe also sums bounced bytes into tpb.
+    The tracepoint probe also sums bounced bytes into tpb,
+    unless count_only drops args for a BTF-less kernel. Map
+    and copy probes split counts by args.dir into mapd and
+    copyd keys 0..3 for the direction formulas.
     """
     omitted = set(omitted or [])
     for probe in omitted:
@@ -2436,15 +3099,26 @@ def build_oracle_program(omitted=None):
     keep = [key for key in PROBES if key not in omitted]
     if not keep:
         raise ValueError("oracle needs at least one probe")
-    lines = [_PROBE_SNIPPET[key] for key in keep]
+    lines = []
+    for key in keep:
+        if key == "tp" and count_only:
+            lines.append(_PROBE_SNIPPET["tp_countonly"])
+        else:
+            lines.append(_PROBE_SNIPPET[key])
     fields = []
     reads = []
     for key in keep:
         fields.append("%s=%%llu" % key)
         reads.append("(uint64)@%s" % key)
-        if key == "tp":
+        if key == "tp" and not count_only:
             fields.append("tpb=%llu")
             reads.append("(uint64)@tpb")
+        if key in _DIR_MAPS:
+            for direction in range(4):
+                fields.append("%s%d=%%llu"
+                              % (_DIR_MAPS[key], direction))
+                reads.append("(uint64)@%s[%d]"
+                             % (_DIR_MAPS[key], direction))
     lines.append('interval:ms:500 { printf("T %%llu %s\\n", nsecs, %s); }'
                  % (" ".join(fields), ", ".join(reads)))
     return "\n".join(lines) + "\n"

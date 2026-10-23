@@ -88,6 +88,39 @@ def test_build_refuses_low_disk():
     tool.check_free_space("/var/tmp", statvfs=room)
 
 
+def test_kernel_build_refuses_non_default_root(capsys):
+    tool = _tool_module()
+    code = tool.main(["--id", "no-such-row", "--root",
+                      "/tmp/other-root"])
+    assert code == 2
+    assert "root" in capsys.readouterr().err
+
+
+def test_kernel_build_allows_default_root_and_print_hashes(
+        capsys):
+    tool = _tool_module()
+    code = tool.main(["--id", "no-such-row", "--root",
+                      tool.BUILD_ROOT])
+    assert code == 2
+    assert "unknown row" in capsys.readouterr().err
+    code = tool.main(["--id", "no-such-row", "--root",
+                      "/tmp/other-root", "--print-hashes"])
+    assert code == 2
+    assert "unknown row" in capsys.readouterr().err
+
+
+def test_build_env_refuses_unpinned_influencers(monkeypatch):
+    tool = _tool_module()
+    for var in ("LLVM", "KCFLAGS", "KAFLAGS",
+                "CROSS_COMPILE", "CC", "HOSTCC", "ARCH"):
+        monkeypatch.setenv(var, "x")
+        with pytest.raises(tool.BuildError):
+            tool.build_env()
+        monkeypatch.delenv(var)
+    env = tool.build_env()
+    assert env["KBUILD_BUILD_USER"] == "memveil"
+
+
 def test_build_links_removed_before_hash(tmp_path):
     tool = _tool_module()
     mods = tmp_path / "lib" / "modules" / "6.12.114-test"

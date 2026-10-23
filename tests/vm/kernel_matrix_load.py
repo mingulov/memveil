@@ -27,6 +27,13 @@ def now_ns():
     return time.clock_gettime_ns(time.CLOCK_MONOTONIC)
 
 
+def view_mod(view):
+    """Page offset of the view address handed to preadv."""
+    addr = ctypes.addressof(
+        ctypes.c_char.from_buffer(view))
+    return addr % PAGE
+
+
 def aligned_buffer(offset):
     """1 MiB view at offset inside a page, measured mod."""
     if offset not in (0, 512):
@@ -38,8 +45,7 @@ def aligned_buffer(offset):
     start = -base % PAGE
     view = memoryview(mem)[start + offset:
                            start + offset + IO_BYTES]
-    mod = (base + start + offset) % PAGE
-    return mem, view, mod
+    return mem, view, view_mod(view)
 
 
 def fail(msg):
@@ -126,14 +132,13 @@ def run_busy(dev, readers, tag, out):
     errors = []
     counts = [0] * readers
     bufs = []
+    mods = []
     for _ in range(readers):
-        # Fault each buffer serially before the workers
-        # start so first-touch pages stay contiguous;
-        # interleaved faults scatter into ~100 segments
-        # per read and set pressure by accident.
-        mem, view, _ = aligned_buffer(0)
+        # Fault buffers serially so first-touch pages stay contiguous.
+        mem, view, mod = aligned_buffer(0)
         view[:] = b"\x00" * IO_BYTES
         bufs.append((mem, view))
+        mods.append(mod)
     start = now_ns()
 
     def worker(num):
@@ -173,7 +178,7 @@ def run_busy(dev, readers, tag, out):
     out.write("phase %s start_ns %d end_ns %d bytes %d "
               "ios %d\n" % (tag, start, end,
                             ios * IO_BYTES, ios))
-    out.write("buf %s mod4096=0\n" % tag)
+    out.write("buf %s mod4096=%d\n" % (tag, max(mods)))
     out.flush()
     return 0
 

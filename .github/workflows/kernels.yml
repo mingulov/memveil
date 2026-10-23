@@ -3,8 +3,9 @@
 # archive subset by default (--kernels 6.0,6.11,6.12,7.0,
 # 7.2,7.3-rc3) or every row with full=true; the nightly
 # schedule always runs every row. No push trigger until
-# K3b: most archive rows still FAIL for known product
-# causes. The controller dispatches; do not push to test.
+# the follow-up lane maps the remaining refusal reasons:
+# most archive rows still FAIL for known product causes.
+# The controller dispatches; do not push to test.
 name: kernels
 on:
   workflow_dispatch:
@@ -81,11 +82,17 @@ jobs:
             echo 'MV_KERNELS_IDS=6.0,6.11,6.12,7.0,7.2,7.3-rc3' \
               >> "$GITHUB_ENV"
           fi
+      - name: Prepare kernel build dirs
+        run: |
+          sudo install -d -o "$USER" /mnt/memveil-kernels \
+            /mnt/memveil-kbuild /mnt/kernels \
+            /var/tmp/memveil-kbuild
+          sudo mount --bind /mnt/memveil-kbuild \
+            /var/tmp/memveil-kbuild
       - name: Build locked kernels for built rows
         env:
           MV_KCACHE: /mnt/memveil-kernels
         run: |
-          mkdir -p /mnt/memveil-kernels
           IDS="${MV_KERNELS_IDS:-}"
           python3 - "$IDS" <<'EOF'
           import json
@@ -99,8 +106,7 @@ jobs:
               if want is not None and row['id'] not in want:
                   continue
               proc = subprocess.run(
-                  ['tools/kernel-build', '--id', row['id'],
-                   '--root', '/mnt/memveil-kbuild'])
+                  ['tools/kernel-build', '--id', row['id']])
               if proc.returncode != 0:
                   sys.exit(proc.returncode)
           EOF
@@ -130,7 +136,7 @@ jobs:
           MEMVEIL_VM_KERNELS: '1'
           MV_KCACHE: /mnt/memveil-kernels
           MV_KERNELS_OUT: /mnt/kernels
-          MV_KERNELS_DISK: /mnt/kernel-matrix-disk.img
+          MV_KERNELS_DISK: /mnt/memveil-kernels/disk.img
         run: ./tools/test vm-kernels
       - name: Upload kernel matrix evidence on every outcome
         if: always()

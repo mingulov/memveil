@@ -6,6 +6,7 @@ No device IO: preadv/pwritev are stubbed, the buffer math
 runs for real.
 """
 
+import ctypes
 import os
 import signal
 import sys
@@ -81,6 +82,37 @@ def test_buf_offset_measured(tmp_path, capsys, monkeypatch):
                      "--offset", "512")
     assert code == 0
     assert "buf read512 mod4096=512" in out
+
+
+def test_view_mod_measured_from_view():
+    mem, view, _ = kml.aligned_buffer(0)
+    try:
+        assert kml.view_mod(view) == 0
+        raw = memoryview(mem)
+        try:
+            base = ctypes.addressof(
+                ctypes.c_char.from_buffer(mem))
+            for off in (1, 512, 4095):
+                shifted = raw[off:off + 1024]
+                try:
+                    assert kml.view_mod(shifted) == \
+                        (base + off) % 4096
+                finally:
+                    shifted.release()
+        finally:
+            raw.release()
+    finally:
+        view.release()
+        mem.close()
+
+
+def test_aligned_buffer_mod_matches_view():
+    mem, view, mod = kml.aligned_buffer(512)
+    try:
+        assert mod == kml.view_mod(view)
+    finally:
+        view.release()
+        mem.close()
 
 
 def test_busy_releases_buffers_quietly(tmp_path, capsys,

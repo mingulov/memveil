@@ -96,14 +96,29 @@ the tracepoint, and the block layer sector delta times
 512. Count floor and ceiling derive from those measured
 block bytes, never from workload constants.
 `tools/validate-schemas` checks each capture, and block
-sectors tracking the reads proves the workload ran. A
+sectors tracking the reads proves the workload ran. The
+map and copy oracle probes also split counts by DMA
+direction, so original-to-bounce copies must equal maps
+and bounce-to-original copies must equal read maps
+exactly, within attributed loss. On rows without BTF the
+oracle runs count-only (no tracepoint arguments) and a
+tracefs `hist:key=size` trigger supplies the independent
+byte total instead; when no byte source works the row
+asserts counts only with bytes recorded unproven. A
 second busy capture runs 4 pre-faulted O_DIRECT readers
 for 20 s under the product-maximum events-bytes cap
 (4 GiB, so the default 1 GiB cap cannot end the window
 early), stops the record with
-SIGINT and the load with SIGTERM, and checks per-channel
-counts against the oracle over the inner window with no
-byte equality.
+SIGINT and the load with SIGTERM. Its verdict comes from
+its own session window and loss counters, never the main
+capture: a numeric claim gets strict per-channel lower
+bounds, an unknown partial gets honesty only, and a
+complete aggregate claim must match its counter deltas
+against the oracle. The busy load must span record
+spawn to exit, the busy capture is schema-validated and
+reported with an explicit read cap, and its 1 GB events
+file is replaced by per-kind counts plus a sha256 after
+evaluation.
 
 Scope limits:
 

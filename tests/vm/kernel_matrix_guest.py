@@ -83,15 +83,7 @@ def sh(args, **kw):
 
 
 def quiesce_udev(sh, write, out, polls=10):
-    """Settle udev then shut its daemon down before measuring.
-
-    The guest rootfs runs udevd, which synthesizes change
-    events (and re-reads partition tables) when the workload
-    closes the scratch device after writes. Those re-reads
-    are guest self-IO, not workload DMA; removing the daemon
-    removes them, since --stop-exec-queue does not cover
-    synthesize-path workers here. Fails on any error.
-    """
+    """Settle udev then shut its daemon down before measuring."""
     settle = sh(["udevadm", "settle", "--timeout=60"])
     log = "$ udevadm settle --timeout=60\n%s%s" % (
         settle.stdout or "", settle.stderr or "")
@@ -111,13 +103,20 @@ def quiesce_udev(sh, write, out, polls=10):
         fail("udevadm control failed exit %d"
              % stop.returncode)
     for _ in range(polls):
-        gone = sh(["pgrep", "-x", "systemd-udevd"])
-        if gone.returncode != 0:
+        daemon = sh(["pgrep", "-x", "systemd-udevd"])
+        workers = sh(["pgrep", "udev"])
+        if daemon.returncode != 0 \
+                and workers.returncode != 0:
             write(os.path.join(out, "udev.out"),
-                  log + "$ pgrep -x systemd-udevd\ndaemon gone\n")
+                  log + "$ pgrep -x systemd-udevd\ndaemon "
+                  "and workers gone\n")
             write(os.path.join(out, "udev.exit"), "0")
             return
         time.sleep(1)
+    listing = sh(["pgrep", "-a", "udev"])
+    write(os.path.join(out, "udev.out"),
+          log + "$ pgrep -a udev\n%s"
+          % (listing.stdout or ""))
     write(os.path.join(out, "udev.exit"), "1")
     fail("systemd-udevd still running after control --exit")
 
@@ -144,7 +143,43 @@ def find_nvme_by_serial(serial, root="/sys/block"):
         except OSError:
             continue
     return None
-    return None
+
+
+HIST_EVENT = TR + "/events/swiotlb/swiotlb_bounced"
+
+
+def select_oracle_mode(btf_present, keep):
+    """Full oracle, or count-only when BTF is absent for tp."""
+    if btf_present:
+        return "full"
+    if set(keep) == {"tp"}:
+        return "countonly"
+    raise ValueError("BTF absent but non-tp probes needed: %s"
+                     % sorted(keep))
+
+
+def hist_install(event_dir):
+    """Enable a key=size hist trigger, raising OSError."""
+    Path(event_dir, "trigger").write_text("hist:key=size\n")
+    Path(event_dir, "enable").write_text("1\n")
+
+
+def hist_snapshot(event_dir):
+    """Current hist text, raising OSError."""
+    return Path(event_dir, "hist").read_text()
+
+
+def hist_remove(event_dir):
+    """Best-effort trigger removal, never raises."""
+    try:
+        Path(event_dir, "trigger").write_text(
+            "!hist:key=size\n")
+    except OSError:
+        pass
+    try:
+        Path(event_dir, "enable").write_text("0\n")
+    except OSError:
+        pass
 
 
 def detect_hooks():
@@ -375,12 +410,13 @@ def run(argv):
     write(os.path.join(out, "doctor.stderr"), proc.stderr or "")
     write(os.path.join(out, "doctor.exit"), str(proc.returncode))
     present, omitted = detect_hooks()
+    btf_present = os.path.isfile("/sys/kernel/btf/vmlinux")
     write(os.path.join(out, "hooks.json"),
-          json.dumps({"present": present, "omitted": omitted},
+          json.dumps({"present": present, "omitted": omitted,
+                      "btf": btf_present},
                      indent=2, sort_keys=True) + "\n")
     refused = [cap for cap in km.CAPS if cap not in admitted]
-    # Mark before the refusal probes so their dmesg output is
-    # scanned; the oracle automount notice matches no pattern.
+    # Mark before refusal probes so their dmesg is scanned.
     mark_dmesg(km)
     for cap in refused:
         dest = os.path.join(out, "cap-" + cap)
@@ -437,10 +473,18 @@ def run(argv):
              % (admitted, omitted))
     omit_for_oracle = [p for p in ("tp", "map", "unmap", "copy",
                                    "syncc", "syncd") if p not in keep]
-    prog = km.build_oracle_program(omitted=omit_for_oracle)
+    try:
+        oracle_mode = select_oracle_mode(btf_present, keep)
+    except ValueError as exc:
+        fail(str(exc))
+    prog = km.build_oracle_program(
+        omitted=omit_for_oracle,
+        count_only=(oracle_mode == "countonly"))
     write(os.path.join(out, "oracle.bt"), prog)
     write(os.path.join(out, "oracle.keep"),
           ",".join(keep) + "\n")
+    write(os.path.join(out, "oracle.mode"),
+          oracle_mode + "\n")
     oracle_out = open(os.path.join(out, "oracle.txt"), "w")
     oracle_err = open(os.path.join(out, "oracle.stderr"), "w")
     opid = subprocess.Popen(["bpftrace", "-q", "-e", prog],
@@ -451,6 +495,15 @@ def run(argv):
         oracle_out.close()
         oracle_err.close()
         fail("oracle exited early (missing hook not omitted?)")
+    hist_status = None
+    if oracle_mode == "countonly":
+        try:
+            hist_install(HIST_EVENT)
+            hist_status = "ok"
+        except OSError as exc:
+            hist_status = "unsupported: %s" % exc
+        write(os.path.join(out, "hist.status"),
+              hist_status + "\n")
     times = {}
     times[0] = snapshot_progs(out, 0)
     cap = os.path.join(out, "cap")
@@ -484,7 +537,15 @@ def run(argv):
     base = check_base(dev)
     scratch_base = check_base(scratch)
     data_before = read_stat(km, base, False)
+    data_write_before = read_stat(km, base, True)
     scratch_before = read_stat(km, scratch_base, True)
+    scratch_read_before = read_stat(km, scratch_base, False)
+    if hist_status == "ok":
+        try:
+            write(os.path.join(out, "hist_before.txt"),
+                  hist_snapshot(HIST_EVENT))
+        except OSError as exc:
+            fail("hist snapshot before phases failed: %s" % exc)
     workload_path = os.path.join(out, "workload.txt")
     open(workload_path, "w").close()
     run_phase(load, "read", "read0", dev, dd_count, 0,
@@ -517,14 +578,27 @@ def run(argv):
                              "workload-r%d.txt" % i))
                 .read_text())
     data_after = read_stat(km, base, False)
+    data_write_after = read_stat(km, base, True)
     scratch_after = read_stat(km, scratch_base, True)
+    scratch_read_after = read_stat(km, scratch_base, False)
     write(os.path.join(out, "blockstat.json"), json.dumps(
         {"data": {"dev": base, "read_before": data_before,
-                  "read_after": data_after},
+                  "read_after": data_after,
+                  "write_before": data_write_before,
+                  "write_after": data_write_after},
          "scratch": {"dev": scratch_base,
                      "write_before": scratch_before,
-                     "write_after": scratch_after}},
+                     "write_after": scratch_after,
+                     "read_before": scratch_read_before,
+                     "read_after": scratch_read_after}},
         indent=2, sort_keys=True) + "\n")
+    if hist_status == "ok":
+        try:
+            write(os.path.join(out, "hist_after.txt"),
+                  hist_snapshot(HIST_EVENT))
+        except OSError as exc:
+            fail("hist snapshot after phases failed: %s" % exc)
+        hist_remove(HIST_EVENT)
     times[2] = snapshot_progs(out, 2)
     try:
         rpid.wait(timeout=duration + 120)
@@ -542,11 +616,9 @@ def run(argv):
     write(os.path.join(out, "progs_times.json"),
           json.dumps({str(k): v for k, v in sorted(times.items())},
                      indent=2, sort_keys=True) + "\n")
-    # Settle before the busy loader starts: the oracle
-    # ticks every 500 ms and its first post-window sample
-    # must not catch busy DMA, or the window hi edge
-    # inflates and oracle_bytes fails by timing luck.
-    time.sleep(2)
+    # Settle two edge gaps before the busy loader starts.
+    assert km.BUSY_SETTLE_NS >= 2 * km.MAX_EDGE_GAP_NS
+    time.sleep(km.BUSY_SETTLE_NS / 10 ** 9)
     busy_dir = os.path.join(out, "busy")
     os.makedirs(busy_dir, exist_ok=True)
     busy_out = open(os.path.join(busy_dir, "busy.out"), "w")
@@ -561,6 +633,8 @@ def run(argv):
         busy_out.close()
         busy_err.close()
         fail("busy loader exited early")
+    busy_times = {}
+    busy_times[0] = snapshot_progs(busy_dir, 0)
     busy_cap = os.path.join(busy_dir, "cap")
     busy_rec_out = open(os.path.join(busy_dir,
                                      "record.out"), "w")
@@ -585,6 +659,7 @@ def run(argv):
              % (qpid.returncode,))
     ready_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
     time.sleep(20)
+    busy_times[1] = snapshot_progs(busy_dir, 1)
     stop_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
     qpid.send_signal(signal.SIGINT)
     try:
@@ -595,6 +670,11 @@ def run(argv):
         bpid.send_signal(signal.SIGTERM)
         fail("busy record did not stop on SIGINT")
     exit_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    busy_times[2] = snapshot_progs(busy_dir, 2)
+    write(os.path.join(busy_dir, "progs_times.json"),
+          json.dumps({str(k): v
+                      for k, v in sorted(busy_times.items())},
+                     indent=2, sort_keys=True) + "\n")
     busy_rec_out.close()
     busy_rec_err.close()
     write(os.path.join(busy_dir, "record.exit"),
@@ -640,6 +720,23 @@ def run(argv):
     write(os.path.join(out, "report.json"), proc.stdout or "")
     write(os.path.join(out, "report-json.stderr"), proc.stderr or "")
     write(os.path.join(out, "report-json.exit"), str(proc.returncode))
+    proc = sh([mv, "report", "--max-events-bytes", "4294967296",
+               busy_cap], timeout=120)
+    write(os.path.join(busy_dir, "report.out"),
+          proc.stdout or "")
+    write(os.path.join(busy_dir, "report.stderr"),
+          proc.stderr or "")
+    write(os.path.join(busy_dir, "report.exit"),
+          str(proc.returncode))
+    proc = sh([mv, "report", "--format", "json",
+               "--max-events-bytes", "4294967296", busy_cap],
+              timeout=120)
+    write(os.path.join(busy_dir, "report.json"),
+          proc.stdout or "")
+    write(os.path.join(busy_dir, "report-json.stderr"),
+          proc.stderr or "")
+    write(os.path.join(busy_dir, "report-json.exit"),
+          str(proc.returncode))
     export_dmesg(km, out)
     print("guest: admitted flow done caps=%s" % caps)
     return 0
