@@ -4607,7 +4607,29 @@ def test_scripted_old_ktimes_byte_identical() raises:
         _cut(UInt64(2), UInt64(5120), UInt64(2), UInt64(5120)),
         UInt64(2), read_files=True)
     assert_equal(c.events, _golden_events())
-    assert_equal(c.session, _golden_session())
+    assert_equal(_mask_output_fs(c.session), _mask_output_fs(_golden_session()))
+
+
+def _mask_output_fs(session: String) raises -> String:
+    # The output filesystem is the test host's, not part of the replay.
+    var key = String('\"source\":\"output.fs\",\"interpretation\":\"').as_bytes()
+    var b = session.as_bytes()
+    var i = 0
+    while i + len(key) <= len(b):
+        var j = 0
+        while j < len(key) and b[i + j] == key[j]:
+            j += 1
+        if j == len(key):
+            var end = i + len(key)
+            while end < len(b) and b[end] != UInt8(0x22):
+                end += 1
+            return (
+                String(from_utf8=b[0 : i + len(key)])
+                + String("FS")
+                + String(from_utf8=b[end : len(b)])
+            )
+        i += 1
+    raise Error("session has no output.fs provenance")
 
 
 def _golden_events() -> String:
