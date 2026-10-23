@@ -1187,21 +1187,23 @@ def _prefix_zeros(mut kernel: ScriptKernel):
 
 
 def _prefix_clock_vals() -> List[UInt64]:
-    """Five queued startup values plus the pool baseline read
-    (startup consumes six with pool sampling: the readiness
-    stamp eats one value after attach, then the baseline
-    sample timestamp eats the first dwell value), three
-    firing iterations, four quiet iterations, then the latch
-    and tail (never reached: the scripted stop latches
-    first). The next-fire deadline keys off the iteration
-    timestamp, so every iteration at least one second past
-    the last fire emits a sample."""
+    """Six queued startup values plus the pool baseline read
+    (startup consumes seven with pool sampling: the
+    attach-completion and readiness stamps eat two values
+    after attach, then the baseline sample timestamp eats
+    the first dwell value), three firing iterations, four
+    quiet iterations, then the latch and tail (never
+    reached: the scripted stop latches first). The
+    next-fire deadline keys off the iteration timestamp,
+    so every iteration at least one second past the last
+    fire emits a sample."""
     var base = UInt64(1000000000)
     var out = List[UInt64]()
     out.append(base)
     out.append(base + UInt64(1))
     out.append(base + UInt64(2))
     out.append(base + UInt64(3))
+    out.append(base + UInt64(4))
     out.append(base + UInt64(4))
     out.append(base + UInt64(1500000000))
     out.append(base + UInt64(1500000000))

@@ -139,14 +139,16 @@ def _report(prefix: String, res: RunResult):
 def _clock(pre: Int) -> ScriptClock:
     """Standard clock: start/stable/attach/ready, `pre`
     sub-deadline nows (main-loop + admit reads), the latch
-    jump, tail. The duplicated base+4 feeds the readiness
-    stamp so the `pre` schedule stays aligned."""
+    jump, tail. The duplicated base+4 feeds the
+    attach-completion and readiness stamps so the `pre`
+    schedule stays aligned."""
     var clock = ScriptClock()
     var base = UInt64(1000000000)
     clock.add(base)
     clock.add(base + UInt64(1))
     clock.add(base + UInt64(2))
     clock.add(base + UInt64(3))
+    clock.add(base + UInt64(4))
     clock.add(base + UInt64(4))
     for i in range(pre):
         clock.add(base + UInt64(4 + i))
@@ -330,7 +332,9 @@ def _script_attachwin(dir: String):
     clock.add(UInt64(1001))
     clock.add(UInt64(1002))
     clock.add(UInt64(20000000000))
-    # Readiness stamps at the attach instant; the gap below keeps its 20s shape.
+    # Attach-completion and readiness stamp at the attach
+    # instant; the gap below keeps its 20s shape.
+    clock.add(UInt64(20000000000))
     clock.add(UInt64(20000000000))
     clock.add(UInt64(20000000001))
     clock.add(UInt64(20000000002))
@@ -459,6 +463,7 @@ def _script_poolcap(dir: String):
     clock.add(base)
     clock.add(base + UInt64(1))
     clock.add(base + UInt64(2))
+    clock.add(base + UInt64(3))
     clock.add(base + UInt64(3))
     clock.add(base + UInt64(3))
     clock.step = UInt64(1000000000)
@@ -711,7 +716,10 @@ def _script_drainbudget(dir: String):
     clock.add(base + UInt64(1))
     clock.add(base + UInt64(2))
     clock.add(base + UInt64(3))
-    # Duplicated base+4 feeds the readiness stamp; the latch schedule below keeps its alignment.
+    # Triplicated base+4 feeds the attach-completion and
+    # readiness stamps; the latch schedule below keeps
+    # its alignment.
+    clock.add(base + UInt64(4))
     clock.add(base + UInt64(4))
     clock.add(base + UInt64(4))
     var latch = base + UInt64(61000000001)
@@ -750,7 +758,9 @@ def _script_stopbudget(dir: String):
     clock.add(base + UInt64(1))
     clock.add(base + UInt64(2))
     clock.add(base + UInt64(3))
-    # Duplicated base+4 feeds the readiness stamp.
+    # Triplicated base+4 feeds the attach-completion and
+    # readiness stamps.
+    clock.add(base + UInt64(4))
     clock.add(base + UInt64(4))
     clock.add(base + UInt64(4))
     var latch = base + UInt64(61000000001)
@@ -803,7 +813,9 @@ def _script_stuckdrain(dir: String):
     clock.step = UInt64(0)
     for i in range(4):
         clock.add(base + UInt64(i))
-    # Duplicated base+4 feeds the readiness stamp; the freeze value stays base+7.
+    # Duplicated base+4 feeds the attach-completion and
+    # readiness stamps; the freeze value stays base+7.
+    clock.add(base + UInt64(4))
     clock.add(base + UInt64(4))
     for i in range(4, 8):
         clock.add(base + UInt64(i))
@@ -1524,7 +1536,10 @@ def _script_clockseam(dir: String):
     clock.add(base + UInt64(1))
     clock.add(base + UInt64(2))
     clock.add(base + UInt64(3))
-    # Duplicated base+4 feeds the readiness stamp.
+    # Triplicated base+4 feeds the attach-completion and
+    # readiness stamps; the seam schedule below keeps its
+    # alignment.
+    clock.add(base + UInt64(4))
     clock.add(base + UInt64(4))
     clock.add(base + UInt64(4))
     clock.add(base + UInt64(5))
@@ -1572,7 +1587,10 @@ def _script_ooo100(dir: String):
     clock.add(base + UInt64(1))
     clock.add(base + UInt64(2))
     clock.add(base + UInt64(3))
-    # Duplicated base+4 feeds the readiness stamp.
+    # Triplicated base+4 feeds the attach-completion and
+    # readiness stamps; the cut schedule below keeps its
+    # alignment.
+    clock.add(base + UInt64(4))
     clock.add(base + UInt64(4))
     clock.add(base + UInt64(4))
     clock.add(base + UInt64(5))

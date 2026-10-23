@@ -175,7 +175,8 @@ def _clock_vals(dwells: List[UInt64]) -> List[UInt64]:
     Every dwell iteration fires, so each dwell timestamp
     appears twice: once for the loop's deadline read and
     once for the sample's own timestamp read. The fifth
-    startup value feeds the readiness stamp; without it the
+    startup value feeds the attach-completion stamp and
+    the sixth the readiness stamp; without them the
     dwell pairs would shift by one.
     """
     var base = UInt64(1000000000)
@@ -184,6 +185,7 @@ def _clock_vals(dwells: List[UInt64]) -> List[UInt64]:
     out.append(base + UInt64(1))
     out.append(base + UInt64(2))
     out.append(base + UInt64(3))
+    out.append(base + UInt64(4))
     out.append(base + UInt64(4))
     for i in range(len(dwells)):
         out.append(dwells[i])
