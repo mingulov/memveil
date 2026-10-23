@@ -3,8 +3,9 @@
 
 The extractor reads an object's .BTF/.BTF.ext core relocations and
 emits profile-schema 0.1.2 layout items; --check gates that a profile
-carries exactly the extracted set. Oracles: the five bpf_core_read
-sites in bpf/programs/swiotlb_copy.bpf.c, the local types in
+carries exactly the extracted set. Oracles: the bpf_core field,
+enum, and type sites in bpf/programs/swiotlb_copy.bpf.c and
+swiotlb_lifecycle.bpf.c, the local types in
 bpf/include/mv_fentry_types.h, and the relo_kinds.bpf.c source.
 """
 import json
@@ -25,12 +26,30 @@ CORE_REF = CORE_DIR / "core-ref.json"
 LIVE_REF = FIXTURES / "scan" / "profiles-live" / "live-ref.json"
 
 EXPECTED_CP = [
+    {"capability": "copy-actual", "target": "enumerator",
+     "struct": "dma_data_direction", "field": "DMA_BIDIRECTIONAL",
+     "type_kind": "enum", "bit_size": 32, "optional": False},
+    {"capability": "copy-actual", "target": "enumerator",
+     "struct": "dma_data_direction", "field": "DMA_FROM_DEVICE",
+     "type_kind": "enum", "bit_size": 32, "optional": False},
+    {"capability": "copy-actual", "target": "enumerator",
+     "struct": "dma_data_direction", "field": "DMA_TO_DEVICE",
+     "type_kind": "enum", "bit_size": 32, "optional": False},
+    {"capability": "copy-actual", "target": "field",
+     "struct": "device", "field": "dma_io_tlb_mem",
+     "type_kind": "ptr", "bit_size": 64, "optional": True},
     {"capability": "copy-actual", "target": "field",
      "struct": "device", "field": "dma_parms",
      "type_kind": "ptr", "bit_size": 64, "optional": False},
     {"capability": "copy-actual", "target": "field",
      "struct": "device_dma_parameters", "field": "min_align_mask",
      "type_kind": "int", "bit_size": 32, "optional": False},
+    {"capability": "copy-actual", "target": "field",
+     "struct": "io_tlb_mem", "field": "cc_shared",
+     "type_kind": "int", "bit_size": 8, "optional": True},
+    {"capability": "copy-actual", "target": "field",
+     "struct": "io_tlb_pool", "field": "end",
+     "type_kind": "int", "bit_size": 64, "optional": False},
     {"capability": "copy-actual", "target": "field",
      "struct": "io_tlb_pool", "field": "nslabs",
      "type_kind": "int", "bit_size": 64, "optional": False},
@@ -40,7 +59,30 @@ EXPECTED_CP = [
     {"capability": "copy-actual", "target": "field",
      "struct": "io_tlb_pool", "field": "start",
      "type_kind": "int", "bit_size": 64, "optional": False},
+    {"capability": "copy-actual", "target": "field",
+     "struct": "io_tlb_slot", "field": "alloc_size",
+     "type_kind": "int", "bit_size": 64, "optional": False},
+    {"capability": "copy-actual", "target": "field",
+     "struct": "io_tlb_slot", "field": "orig_addr",
+     "type_kind": "int", "bit_size": 64, "optional": False},
+    {"capability": "copy-actual", "target": "type",
+     "struct": "io_tlb_slot",
+     "type_kind": "struct", "bit_size": 128, "optional": False},
 ]
+
+EXPECTED_LC = [
+    {"capability": "mapping-lifecycle", "target": "enumerator",
+     "struct": "dma_data_direction", "field": "DMA_BIDIRECTIONAL",
+     "type_kind": "enum", "bit_size": 32, "optional": False},
+    {"capability": "mapping-lifecycle", "target": "enumerator",
+     "struct": "dma_data_direction", "field": "DMA_FROM_DEVICE",
+     "type_kind": "enum", "bit_size": 32, "optional": False},
+    {"capability": "mapping-lifecycle", "target": "enumerator",
+     "struct": "dma_data_direction", "field": "DMA_TO_DEVICE",
+     "type_kind": "enum", "bit_size": 32, "optional": False},
+]
+
+EXPECTED_ALL = EXPECTED_CP + EXPECTED_LC
 
 EXPECTED_KINDS = [
     {"capability": "copy-actual", "target": "enumerator",
@@ -131,18 +173,17 @@ def test_extract_current_copy_object():
     assert _print("--object", "copy-actual=%s" % CP_OK) == EXPECTED_CP
 
 
-def test_extract_no_core_objects():
+def test_extract_attempt_empty_lifecycle_enums():
     assert _print("--object", "attempt-trace=%s" % OK) == []
-    assert _print("--object", "mapping-lifecycle=%s" % LC_OK) == []
+    assert _print("--object", "mapping-lifecycle=%s" % LC_OK) == EXPECTED_LC
 
 
-def test_unrelocated_lists_slot():
+def test_unrelocated_lists_claim_only():
     proc = _run("--object", "copy-actual=%s" % CP_OK,
                 "--print", "--unrelocated")
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == EXPECTED_CP
-    assert proc.stderr == ("unrelocated: io_tlb_slot\n"
-                           "unrelocated: mv_claim\n")
+    assert proc.stderr == "unrelocated: mv_claim\n"
 
 
 def test_extract_all_kinds():
@@ -162,14 +203,17 @@ def test_bitfield_record_refused(tmp_path):
 def test_check_gate(tmp_path):
     doc = json.loads(CORE_REF.read_text())
     assert doc["schema_version"] == "0.1.2"
-    assert doc["layouts"] == EXPECTED_CP
+    assert doc["layouts"] == EXPECTED_ALL
     gate = ["--object", "attempt-trace=%s" % OK,
             "--object", "mapping-lifecycle=%s" % LC_OK,
             "--object", "copy-actual=%s" % CP_OK]
     proc = _run(*gate, "--check", str(CORE_REF))
     assert proc.returncode == 0, proc.stderr
     missing = tmp_path / "missing.json"
-    doc["layouts"] = doc["layouts"][1:]
+    layouts = doc["layouts"]
+    idx = next(i for i, item in enumerate(layouts)
+               if item.get("field") == "dma_parms")
+    doc["layouts"] = layouts[:idx] + layouts[idx + 1:]
     missing.write_text(json.dumps(doc))
     proc = _run(*gate, "--check", str(missing))
     assert proc.returncode == 1
@@ -193,7 +237,7 @@ def test_write_roundtrip(tmp_path):
     assert proc.returncode == 0, proc.stderr
     doc = json.loads(first.read_text())
     assert doc["schema_version"] == "0.1.2"
-    assert doc["layouts"] == EXPECTED_CP
+    assert doc["layouts"] == EXPECTED_ALL
     before = first.read_bytes()
     assert before.endswith(b"\n")
     proc = _run(*gate, "--write", str(first))
@@ -208,13 +252,13 @@ def test_type_id_ignored(tmp_path):
         proc = _run("--object", "copy-actual=%s" % patched, "--print")
         assert proc.returncode == 0, proc.stderr
         assert word in proc.stderr
-        assert "io_tlb_pool" in proc.stderr
+        assert "dma_data_direction" in proc.stderr
         assert json.loads(proc.stdout) == EXPECTED_CP
 
 
 def test_signed_maps_to_field(tmp_path):
     patched = tmp_path / "signed.o"
-    patched.write_bytes(_patch_relo_kind(CP_OK.read_bytes(), 3))
+    patched.write_bytes(_patch_relo_kind(CP_OK.read_bytes(), 3, from_kind=0))
     proc = _run("--object", "copy-actual=%s" % patched, "--print")
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == EXPECTED_CP
