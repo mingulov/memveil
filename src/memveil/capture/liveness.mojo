@@ -322,7 +322,8 @@ struct LivenessVerdict(Copyable, Movable):
     equation names the first violated or unverified equation
     (attempt->map, map->copy, copy->map, unmap->copy,
     copy->unmap), or the copy-without-lifecycle marker; detail
-    carries "<lhs> > <rhs>" with numbers. Both stay empty when
+    carries "<lhs> > <rhs>" when silent and "<lhs> vs <rhs>"
+    when unverified. Both stay empty when
     nothing fired and nothing stayed unverified. lc rolls up
     the lifecycle equations (attempt->map, copy->map,
     copy->unmap) and cp the copy equations (map->copy,
@@ -563,7 +564,7 @@ def evaluate_liveness(
                 String("unverified"),
                 names[i].copy(),
                 format_u64(lhs_s[i])
-                + String(" > ")
+                + String(" vs ")
                 + format_u64(rhs_s[i]),
                 lc.copy(),
                 cp.copy(),

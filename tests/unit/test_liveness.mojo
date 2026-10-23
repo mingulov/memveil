@@ -142,7 +142,7 @@ def test_unknown_loss_unverified() raises:
     )
     assert_equal(v.state, String("unverified"))
     assert_equal(v.equation, String("map->copy"))
-    assert_equal(v.detail, String("100 > 100"))
+    assert_equal(v.detail, String("100 vs 100"))
 
 
 def test_channel_rollup_forward_only() raises:
@@ -191,7 +191,7 @@ def test_loss_known_per_channel() raises:
     )
     assert_equal(v.state, String("unverified"))
     assert_equal(v.equation, String("map->copy"))
-    assert_equal(v.detail, String("50 > 0"))
+    assert_equal(v.detail, String("50 vs 0"))
 
 
 def test_edge_excess_inside_guard_never_fires() raises:
@@ -352,7 +352,7 @@ def test_counter_saturation_unverified() raises:
     )
     assert_equal(v.state, String("unverified"))
     assert_equal(v.equation, String("attempt->map"))
-    assert_equal(v.detail, String("50 > 0"))
+    assert_equal(v.detail, String("50 vs 0"))
 
 
 def test_precedence_silent_over_unverified() raises:
