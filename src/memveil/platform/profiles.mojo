@@ -1455,14 +1455,15 @@ def tracing_gap(doc: Profile, caps: List[String]) -> String:
 
     Every hook named by a requested extra capability must
     be a tracing hook whose (function, attach) pair is a
-    frozen member of that capability with the exact frozen
-    signature text, and every frozen member must be named:
-    no vacuous, partial, or substituted bindings. Live
-    signature identity rides the whole-BTF binding checked
-    later; this gate pins the document side exactly.
-    Record admission and doctor availability share this
-    one predicate so the two verbs cannot disagree about
-    a document's tracing bindings.
+    frozen member of that capability with matching frozen
+    parameter types, and every frozen member must be
+    named: no vacuous, partial, or substituted bindings.
+    Parameter names never compare. Live signature
+    identity rides the whole-BTF binding checked later;
+    this gate pins the document side. Record admission
+    and doctor availability share this one predicate so
+    the two verbs cannot disagree about a document's
+    tracing bindings.
     """
     for i in range(len(caps)):
         if caps[i] == String(ATTEMPT_TRACE_ID):
@@ -1519,7 +1520,17 @@ def tracing_gap(doc: Profile, caps: List[String]) -> String:
                     + caps[i]
                     + String(" hook")
                 )
-            if hook.signature != wants[member].signature:
+            var have = frozen_sig_types(
+                hook.signature, hook.function
+            )
+            var want = frozen_sig_types(
+                wants[member].signature, wants[member].function
+            )
+            if (
+                not have.has
+                or not want.has
+                or not _frozen_types_equal(have, want)
+            ):
                 return (
                     String("capability ")
                     + caps[i]
@@ -1645,12 +1656,59 @@ struct FrozenSig(Copyable):
         self.params = List[String]()
 
 
+def _is_type_keyword(word: String) -> Bool:
+    """True for C type keywords that name no parameter."""
+    return (
+        word == String("void")
+        or word == String("char")
+        or word == String("short")
+        or word == String("int")
+        or word == String("long")
+        or word == String("float")
+        or word == String("double")
+        or word == String("signed")
+        or word == String("unsigned")
+        or word == String("_Bool")
+        or word == String("const")
+        or word == String("volatile")
+    )
+
+
+def _is_identifier(word: String) -> Bool:
+    """True for well-formed C identifiers."""
+    var b = word.as_bytes()
+    if len(b) == 0:
+        return False
+    var c0 = b[0]
+    var head = (
+        c0 == UInt8(0x5F)
+        or (c0 >= UInt8(0x41) and c0 <= UInt8(0x5A))
+        or (c0 >= UInt8(0x61) and c0 <= UInt8(0x7A))
+    )
+    if not head:
+        return False
+    for i in range(1, len(b)):
+        var c = b[i]
+        var tail = (
+            c == UInt8(0x5F)
+            or (c >= UInt8(0x30) and c <= UInt8(0x39))
+            or (c >= UInt8(0x41) and c <= UInt8(0x5A))
+            or (c >= UInt8(0x61) and c <= UInt8(0x7A))
+        )
+        if not tail:
+            return False
+    return True
+
+
 def _strip_param_name(p: String) -> String:
     """Drop the parameter name, keeping the type spelling.
 
-    Pointer spellings cut after the last star, plain ones
-    at the last space; a single word stays whole. Anything
-    failing both cuts stays whole and mismatches loudly.
+    Pointer spellings cut after the last star. Plain
+    spellings drop a well-formed trailing name only when
+    the leading words form a complete type: a single
+    word, a keyword run, or tag plus name. Unnamed
+    multi-word types keep every word, and malformed
+    trailing words stay whole and mismatch loudly.
     """
     var b = p.as_bytes()
     var star = -1
@@ -1669,6 +1727,26 @@ def _strip_param_name(p: String) -> String:
             except:
                 pass
         return p
+    var words = p.split(String(" "))
+    if len(words) < 2:
+        return p
+    var last = String(words[len(words) - 1])
+    if _is_type_keyword(last):
+        return p
+    if not _is_identifier(last):
+        return p
+    var first = String(words[0])
+    if (
+        first == String("struct")
+        or first == String("union")
+        or first == String("enum")
+    ):
+        if len(words) != 3:
+            return p
+    elif len(words) > 2:
+        for i in range(len(words) - 1):
+            if not _is_type_keyword(String(words[i])):
+                return p
     var sp = -1
     for i in range(len(b)):
         if b[i] == UInt8(0x20):
@@ -1723,6 +1801,18 @@ def _sig_types_equal(sig: BtfFuncSig, fs: FrozenSig) -> Bool:
         return False
     for i in range(len(sig.params)):
         if sig.params[i] != fs.params[i]:
+            return False
+    return True
+
+
+def _frozen_types_equal(left: FrozenSig, right: FrozenSig) -> Bool:
+    """True when two frozen spellings name the same types."""
+    if left.ret != right.ret:
+        return False
+    if len(left.params) != len(right.params):
+        return False
+    for i in range(len(left.params)):
+        if left.params[i] != right.params[i]:
             return False
     return True
 
@@ -2353,53 +2443,58 @@ def verify_live_cap(
             )
         if hook.kind != String("tracing"):
             continue
-        var norm = _normalize_frozen_signature(
-            hook.signature, hook.function
-        )
-        if not norm.has:
+        var fsig = frozen_sig_types(hook.signature, hook.function)
+        if not fsig.has:
             return _live_refuse(
                 String(t"{hook.name}: frozen signature malformed")
             )
-        var alts = List[String]()
+        var alts = List[FrozenSig]()
         for a in range(len(hook.signature_alt)):
-            var an = _normalize_frozen_signature(
+            var an = frozen_sig_types(
                 hook.signature_alt[a], hook.function
             )
             if not an.has:
                 return _live_refuse(
                     String(t"{hook.name}: frozen signature_alt malformed")
                 )
-            alts.append(an.value.copy())
-        var live = read_btf_func_proto(Span(btf), hook.function)
-        if not live.ok:
-            var scode = classify_btf_message(live.message.copy())
+            alts.append(an^)
+        var sig = read_btf_func_sig(Span(btf), hook.function)
+        if not sig.ok:
+            var scode = classify_btf_message(sig.message.copy())
             if scode != String(""):
                 return _live_unknown_code(
-                    String(t"{hook.name}: {live.message}"), scode
+                    String(t"{hook.name}: {sig.message}"), scode
                 )
             var missing = (
                 String("function ")
                 + hook.function
                 + String(" not found")
             )
-            if live.message == missing:
+            if sig.message == missing:
                 return _live_kallsyms_split(
                     reader, hook.name.copy(), hook.function
                 )
             return _live_refuse(
-                String(t"{hook.name}: {live.message}")
+                String(t"{hook.name}: {sig.message}")
             )
-        var hit = live.canonical == norm.value
+        var wref = _sig_width_refusal(hook.name.copy(), sig)
+        if wref != String(""):
+            return _live_refuse_code(wref, String("signature-width"))
+        var hit = _sig_types_equal(sig, fsig)
         for a in range(len(alts)):
-            if live.canonical == alts[a]:
+            if _sig_types_equal(sig, alts[a]):
                 hit = True
                 break
         if not hit:
-            return _live_refuse(
-                hook.name
-                + String(": signature mismatch (live: ")
-                + live.canonical
-                + String(")")
+            var suffix = String("")
+            var plive = read_btf_func_proto(Span(btf), hook.function)
+            if plive.ok:
+                suffix = (
+                    String(" (live: ") + plive.canonical + String(")")
+                )
+            return _live_refuse_code(
+                hook.name + String(": signature mismatch") + suffix,
+                String("signature-mismatch"),
             )
         want_names.append(hook.name.copy())
         want_fns.append(hook.function.copy())

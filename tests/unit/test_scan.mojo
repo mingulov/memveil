@@ -29,6 +29,7 @@ from memveil.platform.profiles import (
 )
 from memveil.platform.reader import (
     _geteuid_live,
+    bytes_to_text,
     fs_type_name,
     read_host_file,
     readlink_self,
@@ -742,6 +743,72 @@ def test_scan_live_hook_absent_code() raises:
     assert_true(not d.refusal_unknown)
     assert_equal(d.refusal_code, String("btf-hook-absent"))
     assert_equal(d.fix, remedy_for(String("btf-hook-absent")))
+
+
+def test_scan_signame_btf_accepted() raises:
+    # A BTF-side rename is not a signature change.
+    var d = _live_decision(String("sig-rename"))
+    assert_true(d.ok)
+    assert_equal(d.kind, String("candidate"))
+
+
+def _bytes_of(s: String) -> List[UInt8]:
+    """Copy a String into a byte list for the document parser."""
+    var out = List[UInt8]()
+    for b in s.as_bytes():
+        out.append(b)
+    return out^
+
+
+def _live_decision_renamed_doc() raises -> ScanDecision:
+    """Record decision with a doc-side parameter rename."""
+    var raw = read_host_file(
+        String(_PROFILES_LIVE) + String("/live-ref.json"),
+        String("profile"),
+        1048576,
+    )
+    var text = bytes_to_text(raw^)
+    var renamed = text.replace(
+        String("size_t mapping_size"), String("size_t mapping_sizX")
+    )
+    var one = List[Profile]()
+    one.append(parse_profile_bytes(_bytes_of(renamed)))
+    return decide_record(
+        String("tests/fixtures/gate/base"),
+        _kernel_38(),
+        one^,
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(""),
+        String("attempt-trace,mapping-lifecycle"),
+        String(""),
+        String(""),
+    )
+
+
+def test_scan_signame_doc_accepted() raises:
+    # A doc-side rename binds: names never compare.
+    var d = _live_decision_renamed_doc()
+    assert_true(d.ok)
+    assert_equal(d.kind, String("candidate"))
+
+
+def test_scan_sigswap_refused_code() raises:
+    var d = _live_decision(String("sig-swap"))
+    assert_true(not d.ok)
+    assert_true(not d.refusal_unknown)
+    assert_equal(d.refusal_code, String("signature-mismatch"))
+    assert_equal(d.fix, remedy_for(String("signature-mismatch")))
+
+
+def test_scan_sigwidth_refused_code() raises:
+    var d = _live_decision(String("sig-width"))
+    assert_true(not d.ok)
+    assert_true(not d.refusal_unknown)
+    assert_equal(d.refusal_code, String("signature-width"))
+    assert_equal(d.fix, remedy_for(String("signature-width")))
 
 
 def test_scan_live_explicit_candidate() raises:
@@ -1716,6 +1783,10 @@ def run() raises -> Int:
     suite.test[test_scan_live_ftrace_disabled_fix]()
     suite.test[test_scan_live_hook_ambiguous_code]()
     suite.test[test_scan_live_hook_absent_code]()
+    suite.test[test_scan_signame_btf_accepted]()
+    suite.test[test_scan_signame_doc_accepted]()
+    suite.test[test_scan_sigswap_refused_code]()
+    suite.test[test_scan_sigwidth_refused_code]()
     suite.test[test_scan_live_explicit_candidate]()
     suite.test[test_scan_no_object_refuses]()
     suite.test[test_scan_explicit_mismatch_refuses]()

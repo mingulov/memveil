@@ -57,6 +57,13 @@ Outputs: tests/fixtures/btf/*.bin (funcproto, dupfunc, cycle, anon,
   swiotlb-live-nomap: swiotlb-live without the
                 swiotlb_tbl_map_single FUNC: the hook-absent
                 shape for kallsyms-split tests.
+  swiotlb-live-signame: swiotlb-live with mapping_size
+                renamed mapping_sizX: name-only variance
+                the type comparison accepts.
+  swiotlb-live-sigswap: swiotlb-live with mapping_size
+                retyped phys_addr_t: real type variance.
+  swiotlb-live-size32: swiotlb-live with size_t over a
+                32-bit INT: the typedef-width refusal shape.
   members   : synthetic member-resolution shapes: anonymous
                 struct-in-union nesting, kind_flag and legacy
                 bitfields, agreeing/disagreeing/partial
@@ -310,19 +317,21 @@ def intsize_bad():
     return b.build()
 
 
-def _swiotlb_types(b):
+def _swiotlb_types(b, size_bits=64):
     """Shared swiotlb types; returns ids the live blobs reuse.
 
     Struct members carry the real 7.0.0-38-generic BTF
     (bit_offset, bit_size) pairs, verified against
     /sys/kernel/btf/vmlinux with bpftool plus an
     independent BTF walk: the copy probe reads exactly
-    these members through CO-RE.
+    these members through CO-RE. size_bits=32 retypes
+    size_t over the 32-bit INT for width tests.
     """
     t_uint = b.t(b.s("unsigned int"), K_INT, 0, 4, int_data(32, 0))
     t_ulong = b.t(b.s("unsigned long"), K_INT, 0, 8, int_data(64, 0))
     t_phys = b.t(b.s("phys_addr_t"), K_TYPEDEF, 0, t_ulong)
-    t_size = b.t(b.s("size_t"), K_TYPEDEF, 0, t_ulong)
+    t_sizet = t_ulong if size_bits == 64 else t_uint
+    t_size = b.t(b.s("size_t"), K_TYPEDEF, 0, t_sizet)
     t_dir = b.t(b.s("dma_data_direction"), K_ENUM, 0, 4)
     mem = struct.pack("<III", b.s("min_align_mask"), t_uint, 32)
     t_parms = b.t(b.s("device_dma_parameters"), K_STRUCT, 1, 16, mem)
@@ -344,13 +353,15 @@ def _swiotlb_types(b):
     }
 
 
-def _swiotlb_funcs(b, ids, map_attrs_ptr, skip_map=False):
+def _swiotlb_funcs(b, ids, map_attrs_ptr, skip_map=False,
+                   size_swap=False):
     t_dev_ptr = b.t(0, K_PTR, 0, ids["dev"])
     t_pool_ptr = b.t(0, K_PTR, 0, ids["pool"])
+    t_mapsize = ids["phys"] if size_swap else ids["size"]
     if not skip_map:
         params = struct.pack("<II", b.s("dev"), t_dev_ptr)
         params += struct.pack("<II", b.s("orig_addr"), ids["phys"])
-        params += struct.pack("<II", b.s("mapping_size"), ids["size"])
+        params += struct.pack("<II", b.s("mapping_size"), t_mapsize)
         params += struct.pack("<II", b.s("alloc_align_mask"), ids["uint"])
         params += struct.pack("<II", b.s("dir"), ids["dir"])
         if map_attrs_ptr:
@@ -362,7 +373,7 @@ def _swiotlb_funcs(b, ids, map_attrs_ptr, skip_map=False):
         b.t(b.s("swiotlb_tbl_map_single"), K_FUNC, 0, t_proto)
     params = struct.pack("<II", b.s("dev"), t_dev_ptr)
     params += struct.pack("<II", b.s("tlb_addr"), ids["phys"])
-    params += struct.pack("<II", b.s("mapping_size"), ids["size"])
+    params += struct.pack("<II", b.s("mapping_size"), t_mapsize)
     params += struct.pack("<II", b.s("dir"), ids["dir"])
     params += struct.pack("<II", b.s("attrs"), ids["ulong"])
     params += struct.pack("<II", b.s("pool"), t_pool_ptr)
@@ -408,6 +419,27 @@ def swiotlb_live_nomap():
     b = Blob()
     ids = _swiotlb_types(b)
     _swiotlb_funcs(b, ids, False, skip_map=True)
+    return b.build()
+
+
+def swiotlb_live_signame():
+    data = bytearray(swiotlb_live(False))
+    old, new = b"mapping_size", b"mapping_sizX"
+    assert data.count(old) == 1
+    return bytes(data).replace(old, new)
+
+
+def swiotlb_live_sigswap():
+    b = Blob()
+    ids = _swiotlb_types(b)
+    _swiotlb_funcs(b, ids, False, size_swap=True)
+    return b.build()
+
+
+def swiotlb_live_size32():
+    b = Blob()
+    ids = _swiotlb_types(b, size_bits=32)
+    _swiotlb_funcs(b, ids, False)
     return b.build()
 
 
@@ -520,6 +552,9 @@ def main():
              "swiotlb-live": swiotlb_live(False),
              "swiotlb-live-73": swiotlb_live(True),
              "swiotlb-live-nomap": swiotlb_live_nomap(),
+             "swiotlb-live-signame": swiotlb_live_signame(),
+             "swiotlb-live-sigswap": swiotlb_live_sigswap(),
+             "swiotlb-live-size32": swiotlb_live_size32(),
              "members": members(), "split": split(),
              "sig-width": sig_width(), "sig-dup": sig_dup()}
     for name, data in blobs.items():

@@ -31,6 +31,7 @@ from memveil.platform.profiles import (
     TraceWant,
     cp_trace,
     default_receipts_dir,
+    frozen_sig_types,
     lc_trace,
     load_profiles,
     mint_qualification_receipt,
@@ -2556,6 +2557,82 @@ def test_verify_live_btf_split_unknown() raises:
     assert_equal(v.code, String("btf-split"))
 
 
+def test_verify_live_signame_accepted() raises:
+    # Parameter names never compare on the live path.
+    var doc = parse_profile_bytes(bytes_of(live_ref_doc()))
+    var caps = List[String]()
+    caps.append(String("mapping-lifecycle"))
+    var v = verify_live_interfaces(
+        fx("../gate/sig-rename"), doc^, caps^
+    )
+    assert_true(v.ok)
+
+
+def test_verify_live_sigswap_mismatch() raises:
+    var doc = parse_profile_bytes(bytes_of(live_ref_doc()))
+    var caps = List[String]()
+    caps.append(String("mapping-lifecycle"))
+    var v = verify_live_interfaces(
+        fx("../gate/sig-swap"), doc^, caps^
+    )
+    assert_true(not v.ok)
+    assert_true(not v.unknown)
+    assert_equal(v.code, String("signature-mismatch"))
+    assert_true(
+        v.reason.startswith(
+            String("fexit:swiotlb_tbl_map_single: signature mismatch")
+        )
+    )
+
+
+def test_verify_live_sigwidth_refused() raises:
+    var doc = parse_profile_bytes(bytes_of(live_ref_doc()))
+    var caps = List[String]()
+    caps.append(String("mapping-lifecycle"))
+    var v = verify_live_interfaces(
+        fx("../gate/sig-width"), doc^, caps^
+    )
+    assert_true(not v.ok)
+    assert_true(not v.unknown)
+    assert_equal(v.code, String("signature-width"))
+    assert_equal(
+        v.reason,
+        String(
+            "fexit:swiotlb_tbl_map_single:"
+            " size_t width 32 bits (want 64)"
+        ),
+    )
+
+
+def test_frozen_sig_unnamed_params() raises:
+    # Unnamed multi-word types keep every word; only a
+    # well-formed trailing name strips, and malformed
+    # trailing words stay whole and mismatch loudly.
+    var u = frozen_sig_types(
+        String("void f(unsigned long, size_t)"), String("f")
+    )
+    assert_true(u.has)
+    assert_equal(len(u.params), 2)
+    assert_equal(u.params[0], String("unsigned long"))
+    assert_equal(u.params[1], String("size_t"))
+    var n = frozen_sig_types(
+        String("void f(unsigned long x, size_t y)"), String("f")
+    )
+    assert_true(n.has)
+    assert_equal(n.params[0], String("unsigned long"))
+    assert_equal(n.params[1], String("size_t"))
+    var e = frozen_sig_types(
+        String("void f(enum dma_data_direction)"), String("f")
+    )
+    assert_true(e.has)
+    assert_equal(e.params[0], String("enum dma_data_direction"))
+    var m = frozen_sig_types(
+        String("void f(unsigned long attrs!)"), String("f")
+    )
+    assert_true(m.has)
+    assert_equal(m.params[0], String("unsigned long attrs!"))
+
+
 def test_verify_live_73_sig_mismatch() raises:
     # The 7.3 map shape passes attrs as a pointer; without
     # an alt the frozen 7.0 spelling mismatches loudly.
@@ -4205,6 +4282,10 @@ def run() raises -> Int:
     suite.test[test_verify_live_btf_corrupt]()
     suite.test[test_verify_live_btf_corrupt_unknown]()
     suite.test[test_verify_live_btf_split_unknown]()
+    suite.test[test_verify_live_signame_accepted]()
+    suite.test[test_verify_live_sigswap_mismatch]()
+    suite.test[test_verify_live_sigwidth_refused]()
+    suite.test[test_frozen_sig_unnamed_params]()
     suite.test[test_verify_live_73_sig_mismatch]()
     suite.test[test_verify_live_73_alt_ok]()
     suite.test[test_verify_live_alt_malformed]()

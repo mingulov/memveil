@@ -12,7 +12,7 @@ mkdir -p "$GATE"
 
 # Every generated tree; later tasks extend this list alongside
 # their variants. Only these directories are ever removed.
-VARIANTS="base ftrace-off ftrace-denied ftrace-malformed aff-dup aff-module aff-clone aff-prefix debugfs-root debug-denied lockdown-conf lockdown-integrity lockdown-nosecfs lockdown-dashdash lockdown-config lockdown-nolsm lockdown-twobrackets lockdown-bogus lockdown-denied notracing-config notracing-bpfevents tracefs-noevents tracefs-unmounted tracefs-hidden tracefs-gone events-denied btf-absent-config btf-absent-unknown btf-not-visible btf-denied btf-split btf-truncated hook-absent hook-not-in-btf hook-clone hook-nokallsyms denied-all container-view format-denied id-absent cc-flags-nonode cc-tdx-nonode cc-flags-host cc-tsm caps-none caps-bpf-perfmon caps-sysadmin caps-malformed caps-short memcg-small memcg-ancestor memcg-malformed memcg-huge memcg-empty memcg-v1 unpriv-bpf swiotlb-noforce swiotlb-inactive"
+VARIANTS="base ftrace-off ftrace-denied ftrace-malformed aff-dup aff-module aff-clone aff-prefix debugfs-root debug-denied lockdown-conf lockdown-integrity lockdown-nosecfs lockdown-dashdash lockdown-config lockdown-nolsm lockdown-twobrackets lockdown-bogus lockdown-denied notracing-config notracing-bpfevents tracefs-noevents tracefs-unmounted tracefs-hidden tracefs-gone events-denied btf-absent-config btf-absent-unknown btf-not-visible btf-denied btf-split btf-truncated sig-rename sig-swap sig-width hook-absent hook-not-in-btf hook-clone hook-nokallsyms denied-all container-view format-denied id-absent cc-flags-nonode cc-tdx-nonode cc-flags-host cc-tsm caps-none caps-bpf-perfmon caps-sysadmin caps-malformed caps-short memcg-small memcg-ancestor memcg-malformed memcg-huge memcg-empty memcg-v1 unpriv-bpf swiotlb-noforce swiotlb-inactive"
 for v in $VARIANTS; do
   rm -rf "$GATE/$v"
 done
@@ -210,6 +210,18 @@ head -c 600 "$GATE/btf-truncated/sys/kernel/btf/vmlinux" \
 mv "$GATE/btf-truncated/sys/kernel/btf/vmlinux.cut" \
   "$GATE/btf-truncated/sys/kernel/btf/vmlinux"
 
+mk sig-rename
+cp "$ROOT/tests/fixtures/btf/swiotlb-live-signame.bin" \
+  "$GATE/sig-rename/sys/kernel/btf/vmlinux"
+
+mk sig-swap
+cp "$ROOT/tests/fixtures/btf/swiotlb-live-sigswap.bin" \
+  "$GATE/sig-swap/sys/kernel/btf/vmlinux"
+
+mk sig-width
+cp "$ROOT/tests/fixtures/btf/swiotlb-live-size32.bin" \
+  "$GATE/sig-width/sys/kernel/btf/vmlinux"
+
 NOMAP="$ROOT/tests/fixtures/btf/swiotlb-live-nomap.bin"
 
 mk hook-absent
@@ -336,4 +348,4 @@ printf 'BOOT_IMAGE=/vmlinuz root=/dev/vda1 swiotlb=noforce\n' \
 mk swiotlb-inactive
 mkdir -p "$GATE/swiotlb-inactive/sys/kernel/debug"
 
-echo "wrote $GATE (base plus 57 variants)"
+echo "wrote $GATE (base plus 60 variants)"
