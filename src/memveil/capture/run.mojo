@@ -98,6 +98,7 @@ from memveil.platform.profiles import (
 )
 from memveil.platform.reader import (
     EvidenceReader,
+    host_file_denied,
     open_evidence_reader,
     read_evidence,
     read_host_file,
@@ -961,6 +962,65 @@ def _selection_gap(doc: Profile, caps: List[String]) -> String:
     return String("")
 
 
+def _static_gap(doc: Profile, caps: List[String]) -> String:
+    """First privilege-independent selection gap, else ""."""
+    var gap = _selection_gap(doc, caps)
+    if gap != String(""):
+        return gap
+    return tracing_gap(doc, caps)
+
+
+def _noted_doc(doc: Profile) -> Bool:
+    """True when the doc carries a parseable narrow note."""
+    if not doc.identity.source.has_note:
+        return False
+    var parsed = parse_narrow_note(doc.identity.source.note)
+    return parsed.ok
+
+
+def _static_receipt_ok(
+    doc: Profile,
+    kernel: KernelInfo,
+    want: List[String],
+    pdir: String,
+    bridge_sha: String,
+    mut denied_drop: Bool,
+) -> Bool:
+    """True when a noted-doc receipt routes without privilege.
+
+    Reuses receipt coverage for noted docs only; callers
+    must never pass a live doc here, whose receipt check
+    reads fresh live measurements behind the gate. Sets
+    denied_drop when the receipt file itself is denied.
+    """
+    denied_drop = False
+    var mism = False
+    if _receipt_covers(
+        doc, kernel, want, pdir, bridge_sha, mism,
+        String(""), String(""), String(""), String(""),
+    ):
+        return True
+    if pdir != String(""):
+        var path = (
+            default_receipts_dir(pdir)
+            + String("/")
+            + doc.profile_id
+            + String(".json")
+        )
+        if host_file_denied(path):
+            denied_drop = True
+    return False
+
+
+def _refuse_gate_unreadable(detail: String) -> ScanDecision:
+    """One unreadable-gate refusal: unknown, never admitted."""
+    var out = _refuse_scan(
+        String("kernel gate unreadable: ") + detail
+    )
+    out.refusal_unknown = True
+    return out^
+
+
 def _live_doc(doc: Profile) -> Bool:
     """True when the doc can only take the live path.
 
@@ -1133,8 +1193,55 @@ def decide_record(
         )
         if not cp.ok:
             return _refuse_scan(cp.refusal.copy())
+    var gate_reader: EvidenceReader
     try:
-        var gate_reader = open_evidence_reader(root)
+        gate_reader = open_evidence_reader(root)
+    except e:
+        return _refuse_gate_unreadable(String(e))
+    # Privilege-independent selection refuses before the
+    # kernel gate. Receipt checks against fresh live
+    # measurements, hook format reads, live checks, and
+    # bindings all run after it.
+    if want_explicit:
+        var egap = _static_gap(candidates[0], ask.caps)
+        if egap != String(""):
+            return _refuse_scan(egap)
+    elif want_extra:
+        var pool = List[Int]()
+        var denied_drop = False
+        for i in range(len(candidates)):
+            if candidates[i].status == String("validated"):
+                pool.append(i)
+            elif _live_doc(candidates[i]):
+                pool.append(i)
+            elif _noted_doc(candidates[i]):
+                var dd = False
+                var ok_static = _static_receipt_ok(
+                    candidates[i], kernel, ask.caps, profiles_dir,
+                    bridge_sha, dd,
+                )
+                if ok_static:
+                    pool.append(i)
+                elif dd:
+                    denied_drop = True
+        if len(pool) > 0:
+            var last_gap = String("")
+            var all_gapped = True
+            for r in range(len(pool)):
+                var g = _static_gap(
+                    candidates[pool[r]], ask.caps
+                )
+                if g == String(""):
+                    all_gapped = False
+                    break
+                last_gap = g.copy()
+            if all_gapped:
+                return _refuse_scan(last_gap)
+        elif not denied_drop:
+            return _refuse_scan(
+                String("no profile satisfies requested capabilities")
+            )
+    try:
         var gated = kernel_gate(
             gate_reader,
             kernel.release.copy(),
@@ -1143,8 +1250,8 @@ def decide_record(
         )
         if not gated.ok:
             return _refuse_scan_gate(gated)
-    except:
-        pass
+    except e:
+        return _refuse_gate_unreadable(String(e))
     var order = List[Int]()
     var order_receipt = List[Bool]()
     var order_live = List[Bool]()

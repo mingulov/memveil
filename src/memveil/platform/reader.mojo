@@ -546,6 +546,26 @@ def file_state(reader: EvidenceReader, path: String) -> Int:
     return EVIDENCE_DENIED
 
 
+def host_file_denied(path: String) -> Bool:
+    """True when a host path exists but reads as denied.
+
+    Host paths (profiles, receipts) are never
+    fixture-mapped: access() decides, with errno telling
+    absence from refusal, mirroring file_state.
+    """
+    var cpath = _to_cstr_local(path)
+    var r = external_call["access", Int32](
+        Span(cpath).unsafe_ptr(), _MODE_F_OK
+    )
+    if Int(r) == 0:
+        var cpath2 = _to_cstr_local(path)
+        var r2 = external_call["access", Int32](
+            Span(cpath2).unsafe_ptr(), _MODE_R_OK
+        )
+        return Int(r2) != 0
+    return _errno_now() != _ENOENT
+
+
 def exists_f_ok(reader: EvidenceReader, path: String) -> Bool:
     """Mirror faccessat(path, F_OK): existence with teeth.
 

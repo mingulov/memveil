@@ -2,6 +2,7 @@
 
 """Admission-scan decisions over fixture roots and bound docs."""
 
+from std.ffi import external_call
 from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
 
@@ -27,6 +28,7 @@ from memveil.platform.profiles import (
     parse_profile_bytes,
 )
 from memveil.platform.reader import (
+    _geteuid_live,
     fs_type_name,
     read_host_file,
     readlink_self,
@@ -510,6 +512,165 @@ def test_run_infra_refusal_untrusted() raises:
         result.diagnostic.startswith(String("cannot load profiles"))
     )
     assert_true(not result.trusted)
+
+
+def test_scan_gate_order_explicit_gap_first() raises:
+    # A declared-unsupported capability refuses before the
+    # privilege gate: privilege cannot satisfy it.
+    var d = decide_record(
+        String("tests/fixtures/gate/lockdown-conf"),
+        _kernel_38(),
+        load_profiles(String(_PROFILES)),
+        String(_PROFILES) + String("/ref.json"),
+        True,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(""),
+        String("attempt-trace,mapping-lifecycle"),
+        String(""),
+        String(""),
+    )
+    assert_true(not d.ok)
+    assert_equal(
+        d.refusal,
+        String("capability mapping-lifecycle unsupported by scan-ref"),
+    )
+
+
+def test_scan_gate_order_empty_order_first() raises:
+    # No receipt routes a noted-only profile, and no live
+    # path exists, so the routing refusal precedes the gate.
+    var d = decide_record(
+        String("tests/fixtures/gate/lockdown-conf"),
+        _kernel_38(),
+        load_profiles(String("tests/fixtures/scan/profiles-noted")),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(""),
+        String("attempt-trace,mapping-lifecycle"),
+        String("tests/fixtures/scan/profiles-noted"),
+        String(""),
+    )
+    assert_true(not d.ok)
+    assert_equal(
+        d.refusal, String("no profile satisfies requested capabilities")
+    )
+
+
+def _write_tmp_file(path: String, data: List[UInt8]) raises:
+    """Write bytes to a test-temporary path, truncating."""
+    var cb = List[UInt8]()
+    for b in path.as_bytes():
+        cb.append(b)
+    cb.append(UInt8(0))
+    var cm = List[UInt8]()
+    for b in String("wb").as_bytes():
+        cm.append(b)
+    cm.append(UInt8(0))
+    var fp = external_call["fopen", UInt64](
+        Span(cb).unsafe_ptr(), Span(cm).unsafe_ptr()
+    )
+    if fp == 0:
+        raise Error(String("cannot write tmp file"))
+    var n = external_call["fwrite", Int64](
+        Span(data).unsafe_ptr(), 1, len(data), fp
+    )
+    _ = external_call["fclose", Int32](fp)
+    if Int(n) != len(data):
+        raise Error(String("short tmp write"))
+
+
+def _mkdir_tmp(path: String) raises:
+    """Create one test-temporary directory, ignoring EEXIST."""
+    var cb = List[UInt8]()
+    for b in path.as_bytes():
+        cb.append(b)
+    cb.append(UInt8(0))
+    _ = external_call["mkdir", Int32](
+        Span(cb).unsafe_ptr(), 0o755
+    )
+
+
+def test_scan_gate_unreadable_refuses() raises:
+    # An unreadable evidence root refuses unknown; the
+    # gate never silently skips.
+    var d = decide_record(
+        String("tests/fixtures/gate/no-such-dir"),
+        _kernel_38(),
+        load_profiles(String(_PROFILES_LIVE)),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(""),
+        String("attempt-trace,mapping-lifecycle"),
+        String(""),
+        String(""),
+    )
+    assert_true(not d.ok)
+    assert_true(
+        d.refusal.startswith(String("kernel gate unreadable: "))
+    )
+    assert_true(d.refusal_unknown)
+
+
+def test_scan_gate_order_denied_receipt_reaches_gate() raises:
+    # A receipt dropped for denied evidence keeps the empty
+    # order behind the gate. Root skips: chmod cannot deny
+    # root, so the setup cannot model denial there.
+    if _geteuid_live() == 0:
+        return
+    var tmpdir = String("build/test-tmp/gate-order")
+    _mkdir_tmp(String("build/test-tmp"))
+    _mkdir_tmp(tmpdir)
+    _mkdir_tmp(tmpdir + String("/receipts"))
+    var srcdir = String("tests/fixtures/scan/profiles-noted")
+    var doc = read_host_file(
+        srcdir + String("/noted.json"), String("profile"), 1048576
+    )
+    _write_tmp_file(tmpdir + String("/noted.json"), doc^)
+    var man = read_host_file(
+        srcdir + String("/manifest.txt"), String("manifest"), 1048576
+    )
+    _write_tmp_file(tmpdir + String("/manifest.txt"), man^)
+    var bogus = List[UInt8]()
+    for b in String("{\"bogus\": true}\n").as_bytes():
+        bogus.append(b)
+    var rpath = tmpdir + String("/receipts/scan-noted.json")
+    var cr = List[UInt8]()
+    for b in rpath.as_bytes():
+        cr.append(b)
+    cr.append(UInt8(0))
+    # A previous run leaves the receipt unreadable; reopen it.
+    _ = external_call["chmod", Int32](
+        Span(cr).unsafe_ptr(), Int32(0o644)
+    )
+    _write_tmp_file(rpath, bogus^)
+    _ = external_call["chmod", Int32](
+        Span(cr).unsafe_ptr(), Int32(0)
+    )
+    var d = decide_record(
+        String("tests/fixtures/gate/lockdown-conf"),
+        _kernel_38(),
+        load_profiles(tmpdir),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(""),
+        String("attempt-trace,mapping-lifecycle"),
+        tmpdir,
+        String(""),
+    )
+    assert_true(not d.ok)
+    assert_true(
+        d.refusal.startswith(
+            String("kernel lockdown is confidentiality")
+        )
+    )
+    assert_equal(d.refusal_code, String("lockdown-confidentiality"))
 
 
 def test_scan_unknown_profile_basename() raises:
@@ -1546,6 +1707,10 @@ def run() raises -> Int:
     suite.test[test_run_carries_fix]()
     suite.test[test_run_carries_live_code]()
     suite.test[test_run_infra_refusal_untrusted]()
+    suite.test[test_scan_gate_order_explicit_gap_first]()
+    suite.test[test_scan_gate_order_empty_order_first]()
+    suite.test[test_scan_gate_unreadable_refuses]()
+    suite.test[test_scan_gate_order_denied_receipt_reaches_gate]()
     suite.test[test_scan_unknown_profile_basename]()
     suite.test[test_scan_live_btf_truncated_unknown]()
     suite.test[test_scan_live_ftrace_disabled_fix]()
