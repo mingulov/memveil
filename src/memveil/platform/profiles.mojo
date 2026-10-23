@@ -2206,9 +2206,9 @@ def verify_core_layouts(
     """Check one capability's 0.1.2 layouts against raw BTF.
 
     Every item naming ``cap_id`` resolves through the
-    Task 1 reader: missing, bitfield, kind, size, and
+    raw BTF reader: missing, bitfield, kind, size, and
     ambiguity outcomes refuse with their layout code, a
-    broken blob is unknown with its Task 2 code, and an
+    broken blob is unknown with its health code, and an
     absent optional item appends a note. Success appends
     one evidence line per item; offsets never compare.
     """

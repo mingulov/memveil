@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Raw-BTF corpus probe (K2 verification tool, not shipped).
+"""Raw-BTF corpus probe (verification tool, not shipped).
 
 Usage: btf_corpus_probe <btf-file>
 
 Reads one raw BTF blob (header at zero, as in
 /sys/kernel/btf/vmlinux) and prints machine-readable lines
 for health, the seven reference layout fields, three extra
-members, and the five hook signatures. The K2 report
-compares these lines against the independent truth table.
+members, and the five hook signatures. Callers compare
+these lines against the independent truth table.
 """
 
 from std.sys import argv, exit

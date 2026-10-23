@@ -3107,7 +3107,7 @@ def test_core_layout_bitfield_ambiguous() raises:
 
 
 def test_core_layout_reader_failure() raises:
-    # A truncated blob is unknown with the Task 2 code, never refused.
+    # A truncated blob is unknown with the health code, never refused.
     var raw = List[UInt8]()
     raw.append(UInt8(0))
     raw.append(UInt8(1))
