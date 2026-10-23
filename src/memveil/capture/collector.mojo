@@ -3011,7 +3011,13 @@ struct Collector:
             )
         out.baseline_complete = False
         out.baseline_region_count = 0
-        var verdict = self._liveness_verdict()
+        # Error paths never judge liveness: the windows never closed cleanly.
+        var verdict = LivenessVerdict(
+            String("not_exercised"), String(""), String(""),
+            String("not_exercised"), String("not_exercised"),
+        )
+        if self.result_state != String("error"):
+            verdict = self._liveness_verdict()
         var cap = Capability()
         cap.status = String("partial")
         cap.reason = (

@@ -4420,6 +4420,32 @@ def test_collector_liveness_forward_only_suffixes_copy() raises:
     )
 
 
+def test_collector_liveness_skipped_on_error_path() raises:
+    # A torn run judges nothing: exercised windows stay out of the verdict.
+    var vals = _live_clock_values(UInt64(1000000000), True, True)
+    var attach = _live_attach(vals, True, True)
+    var payloads = List[List[UInt8]]()
+    for i in range(10):
+        payloads.append(
+            _lc_raw(1, 1, 1, UInt64(9700 + i),
+                    attach + UInt64(i) * UInt64(10000000),
+                    UInt64(4096), UInt64(9700 + i)))
+    var bad = List[UInt8]()
+    for i in range(37):
+        bad.append(UInt8(0))
+    payloads.append(bad^)
+    var c = _run_live(
+        payloads^, vals^, _zero_cut(),
+        _cut(UInt64(10), UInt64(40960), UInt64(10),
+             UInt64(40960)), UInt64(10),
+        _zero_cut(), UInt64(0), duration_s=UInt64(3600))
+    assert_equal(c.exit_code, EXIT_ERROR)
+    assert_equal(c.end_reason, String("error"))
+    assert_equal(c.outcome, String("error"))
+    assert_true(not _contains(c.session, String("hooks silent")))
+    assert_true(not _contains(c.session, String("liveness")))
+
+
 def test_collector_liveness_busy_edges_clean() raises:
     # Guard-edge copies stay out of R while matched middle traffic verifies.
     var vals = _live_clock_values(UInt64(1000000000), True, True)
