@@ -26,7 +26,7 @@ from memveil.capture.collector import (
     RunResult,
     WriterSource,
 )
-from memveil.capture.loadcheck import diagnose_load
+from memveil.capture.loadcheck import LoadDiag, diagnose_load
 from memveil.capture.kernel import LmbKernel
 from memveil.capture.reader import (
     DEFAULT_MAX_EVENTS_BYTES as REPLAY_MAX_EVENTS_BYTES,
@@ -506,6 +506,30 @@ def _is_load_errno_failure(diagnostic: String) -> Bool:
     if diagnostic.find(String("code=-22")) != -1:
         return True
     return diagnostic.find(String("code=-13")) != -1
+
+
+def _has_channel(diagnostic: String, channel: Int) -> Bool:
+    """True when the diagnostic tags one load channel."""
+    var tag = String("ch") + String(channel) + String(" ")
+    if diagnostic.startswith(tag.copy()):
+        return True
+    var joined = String("; ") + tag
+    return diagnostic.find(joined^) != -1
+
+
+def _load_fail_channel(diagnostic: String) -> Int:
+    """0/1/2 for the load channel a diagnostic blames, else 0.
+
+    Session and load errors carry a ch0/ch1/ch2 tag from
+    the kernel layer; the verifier replay diagnoses the
+    blamed object's load. Untagged diagnostics replay
+    the attempt object.
+    """
+    if _has_channel(diagnostic.copy(), 1):
+        return 1
+    if _has_channel(diagnostic, 2):
+        return 2
+    return 0
 
 
 struct _ExtraOut(Copyable):
@@ -2065,9 +2089,26 @@ def run_collector_with[W: WriterSource](
     # loader dlopens the alias.
     _ = snap.fd
     if _is_load_errno_failure(out.diagnostic):
-        var diag = diagnose_load(
-            Span(decision.elf), snap.load_path, attempt_program_names()
-        )
+        var fail_ch = _load_fail_channel(out.diagnostic)
+        var diag: LoadDiag
+        if fail_ch == 1:
+            diag = diagnose_load(
+                Span(decision.lc.elf),
+                snap.load_path,
+                lifecycle_program_names(),
+            )
+        elif fail_ch == 2:
+            diag = diagnose_load(
+                Span(decision.cp.elf),
+                snap.load_path,
+                copy_program_names(),
+            )
+        else:
+            diag = diagnose_load(
+                Span(decision.elf),
+                snap.load_path,
+                attempt_program_names(),
+            )
         for i in range(len(diag.lines)):
             out.diagnostic += String("\n") + diag.lines[i]
     return out^

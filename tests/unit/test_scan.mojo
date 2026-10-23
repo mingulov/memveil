@@ -12,6 +12,7 @@ from memveil.capture.run import (
     RecordOptions,
     ScanDecision,
     _append_layout_evidence,
+    _load_fail_channel,
     decide_record,
     parse_requested_caps,
     render_provenance,
@@ -513,6 +514,28 @@ def test_run_infra_refusal_untrusted() raises:
         result.diagnostic.startswith(String("cannot load profiles"))
     )
     assert_true(not result.trusted)
+
+
+def test_load_fail_channel() raises:
+    # The verifier replay diagnoses the blamed object's
+    # load; untagged diagnostics replay the attempt load.
+    assert_equal(
+        _load_fail_channel(String("ch0 op=load code=-22")), 0
+    )
+    assert_equal(
+        _load_fail_channel(String("ch1 op=load code=-22")), 1
+    )
+    assert_equal(
+        _load_fail_channel(String("ch2 op=load code=-13")), 2
+    )
+    assert_equal(_load_fail_channel(String("op=load code=-22")), 0)
+    assert_equal(
+        _load_fail_channel(
+            String("signal: stop; ch2 op=load code=-13")
+        ),
+        2,
+    )
+    assert_equal(_load_fail_channel(String("")), 0)
 
 
 def test_scan_gate_order_explicit_gap_first() raises:
@@ -1774,6 +1797,7 @@ def run() raises -> Int:
     suite.test[test_run_carries_fix]()
     suite.test[test_run_carries_live_code]()
     suite.test[test_run_infra_refusal_untrusted]()
+    suite.test[test_load_fail_channel]()
     suite.test[test_scan_gate_order_explicit_gap_first]()
     suite.test[test_scan_gate_order_empty_order_first]()
     suite.test[test_scan_gate_unreadable_refuses]()
