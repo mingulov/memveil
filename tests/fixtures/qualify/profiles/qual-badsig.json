@@ -26,7 +26,7 @@
       "kind": "tracing",
       "function": "test_fn",
       "attach": "fentry",
-      "signature": "int test_fn(struct device *dev, size_t length)",
+      "signature": "int test_fn(struct device *dev, size_t *length)",
       "note": "Qualify-fixture hook."
     }
   ],

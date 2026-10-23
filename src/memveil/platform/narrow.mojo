@@ -13,13 +13,24 @@ not parse is an unbound reference, never an error.
 """
 
 from memveil.capture.normalize import bytes_to_hex
+from memveil.platform.btf import MAX_KERNEL_BTF_BYTES
 from memveil.platform.gzip import gunzip_member
 from memveil.platform.hash import sha256_hex
-from memveil.platform.reader import read_host_file
+from memveil.platform.reader import (
+    EVIDENCE_DENIED,
+    EVIDENCE_OK,
+    EvidenceReader,
+    bytes_to_text,
+    file_state,
+    open_evidence_reader,
+    read_evidence,
+    read_host_file,
+)
+from memveil.platform.tracefs import probe_tracefs, tracefs_translate
 
 comptime _ZLIB = "libz.so.1"
 comptime MAX_NARROW_CONFIG_BYTES = 8388608
-comptime MAX_NARROW_BTF_BYTES = 67108864
+comptime MAX_NARROW_BTF_BYTES = MAX_KERNEL_BTF_BYTES
 comptime MAX_NARROW_FORMAT_BYTES = 1048576
 comptime MAX_NARROW_OBJECT_BYTES = 67108864
 comptime MAX_NARROW_IMAGE_BYTES = 268435456
@@ -412,6 +423,82 @@ def read_live_config(
     return out^
 
 
+struct ConfigText(Copyable):
+    """One kernel config text read: text, denied, none, unreadable."""
+
+    var state: String
+    var src: String
+    var text: String
+
+    def __init__(out self):
+        self.state = String("none")
+        self.src = String("")
+        self.text = String("")
+
+
+def read_live_config_text(
+    reader: EvidenceReader, release: String, zlib: String
+) -> ConfigText:
+    """First available config source, decoded to text.
+
+    Mirrors read_live_config source order (/proc/config.gz
+    then /boot/config-<release>) but stays denied-aware:
+    denied evidence is never read through, and a denied
+    source with no readable fallback reports denied.
+    """
+    var out = ConfigText()
+    var gz_path = String("/proc/config.gz")
+    var boot_path = String("/boot/config-") + release
+    var gz_st = file_state(reader, gz_path)
+    var boot_st = file_state(reader, boot_path)
+    if gz_st == EVIDENCE_OK:
+        try:
+            var gz = read_evidence(
+                reader, gz_path, MAX_NARROW_CONFIG_BYTES
+            )
+            out.src = String("gz")
+            var is_gz = (
+                len(gz) >= 2
+                and gz[0] == UInt8(0x1F)
+                and gz[1] == UInt8(0x8B)
+            )
+            if is_gz:
+                var inflated = gunzip_member(Span(gz), zlib)
+                if not inflated.ok:
+                    out.state = String("unreadable")
+                    return out^
+                out.text = bytes_to_text(inflated.data^)
+                out.state = String("text")
+                return out^
+            out.text = bytes_to_text(gz^)
+            out.state = String("text")
+            return out^
+        except:
+            pass
+    if boot_st == EVIDENCE_OK:
+        try:
+            var raw = read_evidence(
+                reader, boot_path, MAX_NARROW_CONFIG_BYTES
+            )
+            out.src = String("file")
+            out.text = bytes_to_text(raw^)
+            out.state = String("text")
+            return out^
+        except:
+            out.src = String("file")
+            out.state = String("unreadable")
+            return out^
+    if gz_st == EVIDENCE_DENIED or boot_st == EVIDENCE_DENIED:
+        out.state = String("denied")
+        if gz_st == EVIDENCE_DENIED:
+            out.src = String("gz")
+        else:
+            out.src = String("file")
+        return out^
+    out.state = String("none")
+    return out^
+
+
 def read_live_bytes(
     root: String, path: String, what: String, cap: Int
 ) -> LiveValue:
@@ -421,6 +508,19 @@ def read_live_bytes(
         return _valued(sha256_hex(Span(raw)))
     except:
         return _uncheckable(what + String(" unreadable"))
+
+
+def _tracefs_format_path(root: String, format_path: String) -> String:
+    """Translate one profile format path onto the live tracefs root.
+
+    An unopenable root keeps the profile path: the read
+    itself still fails closed downstream.
+    """
+    try:
+        var reader = open_evidence_reader(root)
+        return tracefs_translate(probe_tracefs(reader), format_path)
+    except:
+        return format_path
 
 
 def read_live_object(path: String) -> LiveValue:
@@ -522,7 +622,10 @@ def measure_live_bindings(
     if btf.state != String("value"):
         return String("live bindings unmeasurable: btf")
     var form = read_live_bytes(
-        root, format_path, String("format"), MAX_NARROW_FORMAT_BYTES
+        root,
+        _tracefs_format_path(root, format_path),
+        String("format"),
+        MAX_NARROW_FORMAT_BYTES,
     )
     if form.state != String("value"):
         return String("live bindings unmeasurable: format")
@@ -677,7 +780,10 @@ def check_identity_bindings(
         out.key = String("btf")
         return out^
     var form = read_live_bytes(
-        root, format_path, String("format"), MAX_NARROW_FORMAT_BYTES
+        root,
+        _tracefs_format_path(root, format_path),
+        String("format"),
+        MAX_NARROW_FORMAT_BYTES,
     )
     if form.state != String("value"):
         out.state = String("uncheckable")

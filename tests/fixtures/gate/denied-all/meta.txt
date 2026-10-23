@@ -1,0 +1,4 @@
+arch=x86_64
+release=7.0.0-38-generic
+euid=0
+denied=/sys/kernel/security/lockdown,/sys/kernel/debug,/boot/config-7.0.0-38-generic,/proc/config.gz,/proc/kallsyms,/proc/sys/kernel/ftrace_enabled,/sys/fs/cgroup/mvt.slice/memory.max,/proc/self/status

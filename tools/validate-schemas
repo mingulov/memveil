@@ -42,6 +42,7 @@ RELATIONS = ("mapping_release", "copy_attribution", "sync_attribution")
 EVENT_VERSION = "0.1.1"
 EVENT_VERSION_NEXT = "0.1.2"
 PROFILE_VERSION = "0.1.1"
+PROFILE_VERSION_NEXT = "0.1.2"
 U64MAX = 18446744073709551615
 U64RE = re.compile(r"(0|[1-9][0-9]{0,19})")
 IDRE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
@@ -1179,6 +1180,25 @@ def compare_report_obj(obj, session, summary):
 PROFILE_CAPABILITIES = ("attempt-trace", "mapping-lifecycle", "copy-actual",
                             "conversion-observe")
 DOCTOR_STATUSES = ("available", "unavailable", "unknown", "unsupported")
+DOCTOR_STATUSES_V011 = ("available", "available-load-unchecked",
+                        "unavailable", "unknown", "unsupported")
+DOCTOR_REASON_CODES = ("lockdown-confidentiality", "no-bpf-tracing",
+                       "tracefs-not-mounted", "tracefs-hidden",
+                       "tracefs-denied", "btf-denied",
+                       "no-bpf-privilege", "load-eperm",
+                       "btf-absent-config", "btf-absent-unknown",
+                       "btf-malformed", "btf-truncated", "btf-too-large",
+                       "btf-split", "btf-unreadable",
+                       "btf-hook-not-in-btf", "btf-hook-missing",
+                       "btf-not-visible", "btf-hook-absent",
+                       "hook-ambiguous", "hook-not-traceable",
+                       "ftrace-disabled", "ftrace-unknown",
+                       "layout-missing", "layout-kind", "layout-size",
+                       "layout-bitfield", "layout-ambiguous",
+                       "signature-mismatch", "signature-width",
+                       "memcg-headroom", "load-enomem", "object-missing",
+                       "verifier-rejected", "profile", "floor",
+                       "available", "unsupported")
 MIN_KERNEL_RE = re.compile(r"[0-9]+\.[0-9]+(\.[0-9]+)?")
 _HOOK_SEG = r"([^\x00/.][^\x00/]*|\.[^\x00/.][^\x00/]*|\.\.[^\x00/]+)"
 HOOK_PATH_RE = re.compile(r"/" + _HOOK_SEG + r"(/" + _HOOK_SEG + r")*")
@@ -1191,8 +1211,10 @@ def check_profile(obj):
     check_keys(obj, ("schema_version", "profile_id", "status", "identity",
                      "hooks", "capabilities"), ("notes", "layouts"),
                "profile")
-    if obj["schema_version"] != PROFILE_VERSION:
+    if obj["schema_version"] not in (PROFILE_VERSION,
+                                      PROFILE_VERSION_NEXT):
         fail("bad-version", "profile.schema_version")
+    is_v012 = obj["schema_version"] == PROFILE_VERSION_NEXT
     check_id(obj["profile_id"], "profile.profile_id")
     check_enum(obj["status"], ("validated", "reference-unvalidated"),
                "profile.status")
@@ -1296,21 +1318,66 @@ def check_profile(obj):
             check_text(note, 512, "profile.notes[]", allow_empty=True)
     if "layouts" in obj:
         layouts = obj["layouts"]
-        if not isinstance(layouts, list) or len(layouts) > 16:
+        max_layouts = 64 if is_v012 else 16
+        if not isinstance(layouts, list) or len(layouts) > max_layouts:
             fail("bad-type", "profile.layouts")
-        for item in layouts:
-            check_keys(item, ("struct", "field", "bit_offset",
-                              "bit_size"), (), "profile.layouts[]")
-            check_text(item["struct"], 128, "profile.layouts[].struct")
-            check_text(item["field"], 128, "profile.layouts[].field")
-            for key in ("bit_offset", "bit_size"):
-                value = item[key]
-                if (not isinstance(value, int)
-                        or isinstance(value, bool) or value < 0):
-                    fail("bad-type",
-                         "profile.layouts[].%s must be a non-negative int"
-                         % key)
+        if is_v012:
+            check_profile_layouts_v012(layouts)
+        else:
+            for item in layouts:
+                check_keys(item, ("struct", "field", "bit_offset",
+                                  "bit_size"), (), "profile.layouts[]")
+                check_text(item["struct"], 128,
+                           "profile.layouts[].struct")
+                check_text(item["field"], 128, "profile.layouts[].field")
+                for key in ("bit_offset", "bit_size"):
+                    value = item[key]
+                    if (not isinstance(value, int)
+                            or isinstance(value, bool) or value < 0):
+                        fail("bad-type",
+                             "profile.layouts[].%s must be a non-negative"
+                             " int" % key)
     return obj
+
+
+def check_profile_layouts_v012(layouts):
+    seen = set()
+    for item in layouts:
+        check_keys(item, ("capability", "target", "struct", "type_kind",
+                          "bit_size", "optional"), ("field",),
+                   "profile.layouts[]")
+        check_enum(item["capability"], ("attempt-trace",
+                                        "mapping-lifecycle",
+                                        "copy-actual"),
+                   "profile.layouts[].capability")
+        check_enum(item["target"], ("field", "type", "enumerator"),
+                   "profile.layouts[].target")
+        check_text(item["struct"], 128, "profile.layouts[].struct")
+        check_enum(item["type_kind"], ("int", "ptr", "array", "struct",
+                                       "union", "enum", "float"),
+                   "profile.layouts[].type_kind")
+        size = item["bit_size"]
+        if (not isinstance(size, int)
+                or isinstance(size, bool) or size < 1):
+            fail("bad-type",
+                 "profile.layouts[].bit_size must be an int >= 1")
+        if not isinstance(item["optional"], bool):
+            fail("bad-type",
+                 "profile.layouts[].optional must be a boolean")
+        if item["target"] == "type":
+            if "field" in item:
+                fail("unknown-field",
+                     "profile.layouts[] has unknown fields ['field']")
+        else:
+            if "field" not in item:
+                fail("missing-required",
+                     "profile.layouts[] lacks ['field']")
+            check_text(item["field"], 128, "profile.layouts[].field")
+        key = (item["capability"], item["target"], item["struct"],
+               item.get("field"))
+        if key in seen:
+            fail("duplicate-key", "profile layouts %r" % (key,))
+        seen.add(key)
 
 
 def check_doctor(obj):
@@ -1386,6 +1453,153 @@ def check_doctor(obj):
     for path in denied:
         check_text(path, 256, "doctor.privilege.denied_paths[]")
     check_enum(obj["verdict"], ("ready", "unavailable"), "doctor.verdict")
+    check_text(obj["summary"], 1024, "doctor.summary", allow_empty=True)
+
+
+def check_doctor_v011(obj):
+    check_keys(obj, ("schema_version", "mode", "provenance", "kernel",
+                     "guest", "profile", "capabilities", "privilege",
+                     "requested", "prechecks", "load", "notes",
+                     "verdict", "summary"), (), "doctor")
+    if obj["schema_version"] != "0.1.1":
+        fail("bad-version", "doctor.schema_version")
+    check_enum(obj["mode"], ("passive", "load-check"), "doctor.mode")
+    check_keys(obj["provenance"], ("origin",), (), "doctor.provenance")
+    check_enum(obj["provenance"]["origin"], ("live", "fixture"),
+               "doctor.provenance.origin")
+    kernel = obj["kernel"]
+    check_keys(kernel, ("release", "arch", "eligible_floor",
+                        "floor_reason", "btf", "lockdown"),
+               (), "doctor.kernel")
+    check_text(kernel["release"], 256, "doctor.kernel.release",
+               allow_empty=True)
+    check_text(kernel["arch"], 64, "doctor.kernel.arch",
+               allow_empty=True)
+    if not isinstance(kernel["eligible_floor"], bool):
+        fail("bad-type", "doctor.kernel.eligible_floor")
+    check_text(kernel["floor_reason"], 512, "doctor.kernel.floor_reason",
+               allow_empty=True)
+    btf = kernel["btf"]
+    check_keys(btf, ("state", "bytes", "config_btf", "config_src"),
+               (), "doctor.kernel.btf")
+    check_enum(btf["state"], ("present", "malformed", "denied",
+                               "absent", "not-visible", "unreadable"),
+               "doctor.kernel.btf.state")
+    if btf["bytes"] is not None:
+        check_u64(btf["bytes"], "doctor.kernel.btf.bytes")
+    check_enum(btf["config_btf"], ("y", "n", "unknown"),
+               "doctor.kernel.btf.config_btf")
+    check_enum(btf["config_src"], ("none", "proc", "boot"),
+               "doctor.kernel.btf.config_src")
+    lockdown = kernel["lockdown"]
+    check_keys(lockdown, ("mode", "src"), (), "doctor.kernel.lockdown")
+    check_text(lockdown["mode"], 32, "doctor.kernel.lockdown.mode",
+               allow_empty=True)
+    check_text(lockdown["src"], 32, "doctor.kernel.lockdown.src",
+               allow_empty=True)
+    guest = obj["guest"]
+    check_keys(guest, ("tech", "signals", "asserted", "conflict"),
+               (), "doctor.guest")
+    check_enum(guest["tech"], ("ordinary", "snp", "tdx", "sev-classic",
+                               "unknown"), "doctor.guest.tech")
+    if not isinstance(guest["signals"], list) or len(guest["signals"]) > 64:
+        fail("bad-type", "doctor.guest.signals")
+    for signal in guest["signals"]:
+        check_text(signal, 256, "doctor.guest.signals[]")
+    if not isinstance(guest["asserted"], bool):
+        fail("bad-type", "doctor.guest.asserted")
+    check_text(guest["conflict"], 512, "doctor.guest.conflict",
+               allow_empty=True)
+    profile = obj["profile"]
+    check_keys(profile, ("matched", "profile_id", "status", "reason"),
+               (), "doctor.profile")
+    if not isinstance(profile["matched"], bool):
+        fail("bad-type", "doctor.profile.matched")
+    if profile["profile_id"] is not None:
+        check_text(profile["profile_id"], 128, "doctor.profile.profile_id")
+    if profile["status"] is not None:
+        check_text(profile["status"], 32, "doctor.profile.status")
+    check_text(profile["reason"], 512, "doctor.profile.reason",
+               allow_empty=True)
+    caps = obj["capabilities"]
+    if not isinstance(caps, list) or len(caps) > 16:
+        fail("bad-type", "doctor.capabilities")
+    seen = set()
+    for cap in caps:
+        check_keys(cap, ("id", "status", "reason", "reason_code",
+                         "evidence"), ("remedy",), "doctor.cap[]")
+        check_text(cap["id"], 64, "doctor.cap[].id")
+        if cap["id"] in seen:
+            fail("duplicate-key", "doctor capability %r" % cap["id"])
+        seen.add(cap["id"])
+        check_enum(cap["status"], DOCTOR_STATUSES_V011,
+                   "doctor.cap[].status")
+        if obj["mode"] == "passive" and cap["status"] == "available":
+            fail("bad-status",
+                 "passive doctor must not report available")
+        check_text(cap["reason"], 512, "doctor.cap[].reason",
+                   allow_empty=True)
+        if "remedy" in cap:
+            check_text(cap["remedy"], 512, "doctor.cap[].remedy",
+                       allow_empty=True)
+        check_enum(cap["reason_code"], DOCTOR_REASON_CODES,
+                   "doctor.cap[].reason_code")
+        evidence = cap["evidence"]
+        if not isinstance(evidence, list) or len(evidence) > 64:
+            fail("bad-type", "doctor.cap[].evidence")
+        for line in evidence:
+            check_text(line, 512, "doctor.cap[].evidence[]",
+                       allow_empty=True)
+    priv = obj["privilege"]
+    check_keys(priv, ("euid", "denied_paths"), (), "doctor.privilege")
+    if (not isinstance(priv["euid"], int)
+            or isinstance(priv["euid"], bool) or priv["euid"] < 0):
+        fail("bad-type", "doctor.privilege.euid")
+    denied = priv["denied_paths"]
+    if not isinstance(denied, list) or len(denied) > 128:
+        fail("bad-type", "doctor.privilege.denied_paths")
+    for path in denied:
+        check_text(path, 256, "doctor.privilege.denied_paths[]")
+    requested = obj["requested"]
+    if not isinstance(requested, list) or len(requested) > 16:
+        fail("bad-type", "doctor.requested")
+    for cap_id in requested:
+        check_text(cap_id, 64, "doctor.requested[]")
+    prechecks = obj["prechecks"]
+    if not isinstance(prechecks, list) or len(prechecks) > 16:
+        fail("bad-type", "doctor.prechecks")
+    for pre in prechecks:
+        check_keys(pre, ("id", "state", "reason"), (),
+                   "doctor.prechecks[]")
+        check_text(pre["id"], 64, "doctor.prechecks[].id")
+        check_enum(pre["state"], ("pass", "fail", "unknown"),
+                   "doctor.prechecks[].state")
+        check_text(pre["reason"], 512, "doctor.prechecks[].reason",
+                   allow_empty=True)
+    load = obj["load"]
+    if not isinstance(load, list) or len(load) > 16:
+        fail("bad-type", "doctor.load")
+    for entry in load:
+        check_keys(entry, ("object", "state", "errno", "detail"),
+                   (), "doctor.load[]")
+        check_text(entry["object"], 4096, "doctor.load[].object",
+                   allow_empty=True)
+        check_enum(entry["state"], ("loaded", "failed", "skipped"),
+                   "doctor.load[].state")
+        if entry["errno"] is not None:
+            check_text(entry["errno"], 32, "doctor.load[].errno")
+        check_text(entry["detail"], 512, "doctor.load[].detail",
+                   allow_empty=True)
+    notes = obj["notes"]
+    if not isinstance(notes, list) or len(notes) > 16:
+        fail("bad-type", "doctor.notes")
+    for note in notes:
+        check_text(note, 512, "doctor.notes[]", allow_empty=True)
+    check_enum(obj["verdict"],
+               ("ready", "ready-load-unchecked", "unavailable"),
+               "doctor.verdict")
+    if obj["mode"] == "passive" and obj["verdict"] == "ready":
+        fail("bad-status", "passive doctor must not report ready")
     check_text(obj["summary"], 1024, "doctor.summary", allow_empty=True)
 
 
@@ -1495,7 +1709,9 @@ def run_selftest():
                "event-v0.1.1.schema.json", "event-v0.1.2.schema.json",
                "report-v0.1.0.schema.json", "report-v0.1.1.schema.json",
                "profile-v0.1.1.schema.json",
-               "doctor-v0.1.0.schema.json", "receipt-v0.1.0.schema.json")
+               "profile-v0.1.2.schema.json",
+               "doctor-v0.1.0.schema.json", "doctor-v0.1.1.schema.json",
+               "receipt-v0.1.0.schema.json")
 
     def schema_files():
         for name in schemas:
@@ -1649,6 +1865,67 @@ def run_selftest():
                                  profile_reject_tracing_cross,
                                  "unknown-field"))
 
+    def _v012_profile():
+        obj = read_json_file(
+            repo_path("profiles", "linux-x86_64-7.0-reference.json"),
+            "reference profile")
+        obj["schema_version"] = PROFILE_VERSION_NEXT
+        obj["layouts"] = [
+            {"capability": "copy-actual", "target": "field",
+             "struct": "io_tlb_pool", "field": "start",
+             "type_kind": "int", "bit_size": 64, "optional": False},
+            {"capability": "mapping-lifecycle", "target": "type",
+             "struct": "mvt_dev",
+             "type_kind": "struct", "bit_size": 6144, "optional": True},
+            {"capability": "attempt-trace", "target": "enumerator",
+             "struct": "mvt_e64", "field": "MVT_BIG",
+             "type_kind": "enum", "bit_size": 64, "optional": False},
+        ]
+        return obj
+
+    def profile_v012_layouts():
+        check_profile(_v012_profile())
+        return "0.1.2 layouts accepted"
+
+    check("profile-v012-layouts", profile_v012_layouts)
+
+    def profile_reject_v012_offset():
+        obj = _v012_profile()
+        obj["layouts"][0]["bit_offset"] = 0
+        check_profile(obj)
+
+    results.append(expect_reject("profile-v012-offset",
+                                 profile_reject_v012_offset,
+                                 "unknown-field"))
+
+    def profile_reject_v012_dup():
+        obj = _v012_profile()
+        obj["layouts"].append(dict(obj["layouts"][0]))
+        check_profile(obj)
+
+    results.append(expect_reject("profile-v012-dup",
+                                 profile_reject_v012_dup,
+                                 "duplicate-key"))
+
+    def profile_reject_v012_field_on_type():
+        obj = _v012_profile()
+        obj["layouts"][1]["field"] = "f"
+        check_profile(obj)
+
+    results.append(expect_reject("profile-v012-field-on-type",
+                                 profile_reject_v012_field_on_type,
+                                 "unknown-field"))
+
+    def profile_reject_v012_old_shape():
+        obj = _v012_profile()
+        obj["layouts"][0] = {"struct": "s", "field": "f",
+                             "bit_offset": 0, "bit_size": 64}
+        check_profile(obj)
+
+    results.append(expect_reject("profile-v012-old-shape",
+                                 profile_reject_v012_old_shape,
+                                 "missing-required"))
+
     def doctor_positive():
         obj = {
             "schema_version": "0.1.0", "mode": "passive",
@@ -1695,6 +1972,92 @@ def run_selftest():
 
     results.append(expect_reject("doctor-bad-status", doctor_reject_status,
                                  "bad-enum"))
+
+    def _doctor_v011_ok():
+        return {
+            "schema_version": "0.1.1", "mode": "passive",
+            "provenance": {"origin": "live"},
+            "kernel": {"release": "", "arch": "",
+                       "eligible_floor": False, "floor_reason": "",
+                       "btf": {"state": "present", "bytes": "1063",
+                               "config_btf": "unknown",
+                               "config_src": "proc"},
+                       "lockdown": {"mode": "none",
+                                    "src": "securityfs"}},
+            "guest": {"tech": "ordinary", "signals": [],
+                      "asserted": False, "conflict": ""},
+            "profile": {"matched": False, "profile_id": None,
+                        "status": None, "reason": ""},
+            "capabilities": [
+                {"id": "attempt-trace",
+                 "status": "available-load-unchecked",
+                 "reason": "candidate scan-live-ref: bindings hold",
+                 "remedy": "", "reason_code": "available",
+                 "evidence": ["memcg: unknown: no 0:: cgroup line"]}],
+            "privilege": {"euid": 0, "denied_paths": []},
+            "requested": ["attempt-trace", "mapping-lifecycle",
+                          "copy-actual"],
+            "prechecks": [
+                {"id": "privilege", "state": "pass",
+                 "reason": "CapEff 000001ffffffffff has CAP_BPF"}],
+            "load": [],
+            "notes": [],
+            "verdict": "ready-load-unchecked",
+            "summary": "ready (load not checked): all available",
+        }
+
+    def doctor_v011_positive():
+        check_doctor_v011(_doctor_v011_ok())
+        return "report shape accepted"
+
+    check("doctor-v011-positive", doctor_v011_positive)
+
+    def doctor_v011_reject_status():
+        obj = _doctor_v011_ok()
+        obj["capabilities"][0]["status"] = "ready-ish"
+        check_doctor_v011(obj)
+
+    results.append(expect_reject("doctor-v011-bad-status",
+                                 doctor_v011_reject_status,
+                                 "bad-enum"))
+
+    def doctor_v011_reject_code():
+        obj = _doctor_v011_ok()
+        obj["capabilities"][0]["reason_code"] = "no-such-code"
+        check_doctor_v011(obj)
+
+    results.append(expect_reject("doctor-v011-bad-reason-code",
+                                 doctor_v011_reject_code,
+                                 "bad-enum"))
+
+    def doctor_v011_reject_passive_available():
+        obj = _doctor_v011_ok()
+        obj["capabilities"][0]["status"] = "available"
+        check_doctor_v011(obj)
+
+    results.append(expect_reject("doctor-v011-passive-available",
+                                 doctor_v011_reject_passive_available,
+                                 "bad-status"))
+
+    def doctor_v011_reject_passive_ready():
+        obj = _doctor_v011_ok()
+        obj["verdict"] = "ready"
+        check_doctor_v011(obj)
+
+    results.append(expect_reject("doctor-v011-passive-ready",
+                                 doctor_v011_reject_passive_ready,
+                                 "bad-status"))
+
+    def doctor_v011_loadcheck_available():
+        obj = _doctor_v011_ok()
+        obj["mode"] = "load-check"
+        obj["capabilities"][0]["status"] = "available"
+        obj["verdict"] = "ready"
+        check_doctor_v011(obj)
+        return "load-check may report available/ready"
+
+    check("doctor-v011-loadcheck-available",
+          doctor_v011_loadcheck_available)
 
     def _receipt_ok():
         digest = "sha256:" + "ab" * 32
@@ -2470,7 +2833,15 @@ def main(argv):
         return 0
     if len(argv) == 3 and argv[1] == "--check-doctor":
         try:
-            check_doctor(read_json_file(argv[2], argv[2]))
+            obj = read_json_file(argv[2], argv[2])
+            version = obj.get("schema_version") if isinstance(
+                obj, dict) else None
+            if version == "0.1.1":
+                check_doctor_v011(obj)
+            elif version == "0.1.0":
+                check_doctor(obj)
+            else:
+                fail("bad-version", "doctor.schema_version")
         except Error as exc:
             print("invalid: %s" % exc)
             return 1

@@ -1,0 +1,8 @@
+swiotlb_tbl_map_single
+__swiotlb_tbl_unmap_single
+noise_fn
+swiotlb_bounce
+__swiotlb_sync_single_for_cpu
+__swiotlb_sync_single_for_device
+other
+swiotlb_tbl_map_single

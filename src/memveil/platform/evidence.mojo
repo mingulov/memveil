@@ -40,6 +40,7 @@ sources in ``signals``:
 """
 
 from memveil.model.common import MaybeString
+from memveil.platform.btf import MAX_KERNEL_BTF_BYTES
 from memveil.platform.reader import (
     EVIDENCE_ABSENT,
     EVIDENCE_DENIED,
@@ -57,13 +58,19 @@ comptime P_BTF = "/sys/kernel/btf/vmlinux"
 comptime P_CONFIG_GZ = "/proc/config.gz"
 comptime P_SEV_NODE = "/dev/sev-guest"
 comptime P_TDX_NODE = "/dev/tdx_guest"
+comptime P_TSM_REPORT = "/sys/kernel/config/tsm/report"
 comptime P_BOOT_CONFIG_PREFIX = "/boot/config-"
 
 comptime _CPUINFO_CAP = 1048576
 comptime _OS_RELEASE_CAP = 65536
-comptime _BTF_CAP = 33554432
+comptime _BTF_CAP = MAX_KERNEL_BTF_BYTES
 comptime _TRIPLE_BOUND = 2147483647
 comptime _OS_VALUE_KEEP = 64
+
+
+def evidence_btf_cap() -> Int:
+    """The kernel BTF read cap, one shared value."""
+    return MAX_KERNEL_BTF_BYTES
 
 
 @fieldwise_init
@@ -205,6 +212,7 @@ struct _FlagHits(ImplicitlyCopyable):
     var sev: Bool
     var snp: Bool
     var tdx: Bool
+    var has_hypervisor: Bool
 
 
 def _scan_flags(view: Span[UInt8, ...]) -> _FlagHits:
@@ -213,19 +221,22 @@ def _scan_flags(view: Span[UInt8, ...]) -> _FlagHits:
     Only lines starting with ``flags`` followed by blanks and a
     colon are scanned; tokens split on blanks. Matches are whole
     tokens only: ``sev`` never matches inside ``sev_snp``. One
-    pass serves all three tokens.
+    pass serves all four tokens.
     """
     var label = String("flags")
     var sev_t = String("sev")
     var snp_t = String("sev_snp")
     var tdx_t = String("tdx_guest")
+    var hyp_t = String("hypervisor")
     var want = label.as_bytes()
     var b_sev = sev_t.as_bytes()
     var b_snp = snp_t.as_bytes()
     var b_tdx = tdx_t.as_bytes()
+    var b_hyp = hyp_t.as_bytes()
     var hit_sev = False
     var hit_snp = False
     var hit_tdx = False
+    var hit_hyp = False
     var i = 0
     var n = len(view)
     while i < n:
@@ -279,9 +290,17 @@ def _scan_flags(view: Span[UInt8, ...]) -> _FlagHits:
                                     break
                             if same:
                                 hit_tdx = True
+                        if tlen == len(b_hyp):
+                            var same = True
+                            for k in range(tlen):
+                                if view[t + k] != b_hyp[k]:
+                                    same = False
+                                    break
+                            if same:
+                                hit_hyp = True
                     t = tend + 1
         i = line_end + 1
-    return _FlagHits(hit_sev, hit_snp, hit_tdx)
+    return _FlagHits(hit_sev, hit_snp, hit_tdx, hit_hyp)
 
 
 @fieldwise_init
@@ -403,11 +422,15 @@ def _detect_guest(reader: EvidenceReader) -> GuestInfo:
         signals.append(String("tdx-node:denied"))
     else:
         signals.append(String("tdx-node:absent"))
+    var tsm = file_state(reader, P_TSM_REPORT)
+    if tsm != EVIDENCE_ABSENT:
+        signals.append(String("tsm:present"))
     var cpu = file_state(reader, P_CPUINFO)
     var flags_ok = False
     var has_sev = False
     var has_snp = False
     var has_tdx = False
+    var has_hypervisor = False
     if cpu == EVIDENCE_DENIED:
         signals.append(String("cpu-flags:denied"))
     elif cpu == EVIDENCE_ABSENT:
@@ -419,6 +442,7 @@ def _detect_guest(reader: EvidenceReader) -> GuestInfo:
             has_sev = hits.sev
             has_snp = hits.snp
             has_tdx = hits.tdx
+            has_hypervisor = hits.has_hypervisor
             flags_ok = True
             var summary = String("cpu-flags:ok:")
             var first = True
@@ -470,8 +494,31 @@ def _detect_guest(reader: EvidenceReader) -> GuestInfo:
             )
     else:
         if flags_ok:
-            tech = "ordinary"
-            signals.append(String("ordinary:absent-nodes-inference"))
+            if has_hypervisor and has_snp:
+                tech = "unknown"
+                conflict = (
+                    "cpu flag sev_snp without guest node:"
+                    " confidential guest with attestation device"
+                    " absent, or flags spoofed"
+                )
+                signals.append(
+                    String("cc-flags:without-node:sev_snp")
+                )
+            elif has_hypervisor and has_tdx:
+                tech = "unknown"
+                conflict = (
+                    "cpu flag tdx_guest without guest node:"
+                    " confidential guest with attestation device"
+                    " absent, or flags spoofed"
+                )
+                signals.append(
+                    String("cc-flags:without-node:tdx_guest")
+                )
+            else:
+                tech = "ordinary"
+                signals.append(
+                    String("ordinary:absent-nodes-inference")
+                )
     var used_assertion = False
     if asserted.byte_length() != 0:
         signals.append("asserted:" + asserted)

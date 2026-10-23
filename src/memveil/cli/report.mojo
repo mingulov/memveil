@@ -150,7 +150,7 @@ def scrub_paths(text: String) raises -> String:
     arguments cannot smuggle home directories or machine layout
     into logs. Basenames survive as operational identifiers. The
     rule is deliberately total: any slash token loses its head,
-    so diagnostics must not rely on slashes in prose.
+    so scrubbed lines must not rely on slashes in prose.
     """
     var raw = text.as_bytes()
     var out = List[UInt8]()
@@ -187,23 +187,45 @@ def scrub_paths(text: String) raises -> String:
     return String(from_utf8=Span(out))
 
 
-def write_stderr(text: String) raises:
-    """Write text to standard error.
+def refusal_stderr_lines(
+    verb: String, diagnostic: String, code: String, fix: String
+) raises -> List[String]:
+    """Refusal stderr lines: diagnostic, reason code, fix.
 
-    Raw write(2) on fd 2 with an EINTR retry loop: the
-    diagnostic follows the inherited descriptor, never the
-    /dev/stderr path, so environments that rebind that path
-    away from fd 2 cannot swallow it. Control bytes are
-    neutralized and directory components scrubbed at this
-    boundary so no present or future diagnostic can emit raw
-    terminal sequences or filesystem layout.
+    Every line carries its verb prefix and newline; the
+    code line appears only for a classified refusal, so
+    legacy selection diagnostics keep one line, and the
+    fix line only when a remedy applies. Fragments are
+    escaped; the write boundary decides scrubbing.
     """
-    var raw = neutralize_controls(scrub_paths(text)).as_bytes()
+    var out = List[String]()
+    out.append(
+        String("memveil ") + verb + String(": ")
+        + sanitize_diagnostic(diagnostic.copy())
+        + String("\n")
+    )
+    if code != String("") and code != String("profile"):
+        out.append(
+            String("memveil ") + verb + String(": code: ")
+            + sanitize_diagnostic(code.copy())
+            + String("\n")
+        )
+    if fix != String(""):
+        out.append(
+            String("memveil ") + verb + String(": fix: ")
+            + sanitize_diagnostic(fix.copy())
+            + String("\n")
+        )
+    return out^
+
+
+def _write_fd2(raw: Span[UInt8, _]) raises:
+    """Raw write(2) on fd 2 with an EINTR retry loop."""
     var total = len(raw)
     var off = 0
     while off < total:
         var n = external_call["write", Int](
-            2, Span(raw).unsafe_ptr().unsafe_offset(off), total - off
+            2, raw.unsafe_ptr().unsafe_offset(off), total - off
         )
         if n < 0:
             var p = external_call[
@@ -216,6 +238,31 @@ def write_stderr(text: String) raises:
         if n == 0:
             raise Error("stderr write returned 0")
         off += n
+
+
+def write_stderr(text: String) raises:
+    """Write text to standard error.
+
+    The diagnostic follows the inherited descriptor, never
+    the /dev/stderr path, so environments that rebind that
+    path away from fd 2 cannot swallow it. Control bytes
+    are neutralized and directory components scrubbed at
+    this boundary so no present or future diagnostic can
+    emit raw terminal sequences or filesystem layout. Use
+    it for lines that may embed caller-supplied paths.
+    """
+    _write_fd2(neutralize_controls(scrub_paths(text)).as_bytes())
+
+
+def write_stderr_trusted(text: String) raises:
+    """Write fixed text to standard error, keeping paths.
+
+    Same fd-2 write, but only control bytes are
+    neutralized: fixed reason, code, and remedy lines
+    keep their paths and commands intact. Callers must
+    never pass caller-supplied paths here.
+    """
+    _write_fd2(neutralize_controls(text).as_bytes())
 
 
 def _is_option(text: String) -> Bool:

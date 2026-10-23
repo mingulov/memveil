@@ -65,8 +65,10 @@ from memveil.cli.report import (
     CliError,
     check_rendered_size,
     exit_for_report,
+    refusal_stderr_lines,
     sanitize_diagnostic,
     write_stderr,
+    write_stderr_trusted,
 )
 from memveil.model.event import Event
 from memveil.model.report import ENGINE_VERSION, Report
@@ -689,11 +691,19 @@ def run_top_live(opts: TopOptions) raises -> Int:
                 pass
     if result.exit_code == EXIT_ERROR or result.exit_code == EXIT_REFUSAL:
         try:
-            write_stderr(
-                String("memveil top: ")
-                + sanitize_diagnostic(result.diagnostic)
-                + String("\n")
+            var lines = refusal_stderr_lines(
+                String("top"),
+                result.diagnostic.copy(),
+                result.code.copy(),
+                result.fix.copy(),
             )
+            # lines[0] is the diagnostic; only it can embed
+            # caller paths, so only it honors the scrub flag.
+            for i in range(len(lines)):
+                if result.trusted or i > 0:
+                    write_stderr_trusted(lines[i].copy())
+                else:
+                    write_stderr(lines[i].copy())
         except:
             pass
         return result.exit_code

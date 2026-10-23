@@ -8,7 +8,8 @@ consume them as raw vmlinux-style blobs (header at offset 0).
 
 Outputs: tests/fixtures/btf/*.bin (funcproto, dupfunc, cycle, anon,
   unnamed, voidptr, array, badref, fnptr, chain31, chain32, kflag,
-  intsizes, intsize-bad, swiotlb-live, swiotlb-live-73).
+  intsizes, intsize-bad, swiotlb-live, swiotlb-live-73, dag32,
+  fan8, wide).
 
   funcproto : FUNC test_fn -> PROTO (int, [dev: PTR STRUCT device,
                 size: TYPEDEF size_t]); canonical
@@ -54,6 +55,37 @@ Outputs: tests/fixtures/btf/*.bin (funcproto, dupfunc, cycle, anon,
                 offsets); feeds live-verification tests.
   swiotlb-live-73: swiotlb-live with the 7.3 map shape
                 (attrs as a pointer).
+  swiotlb-live-nomap: swiotlb-live without the
+                swiotlb_tbl_map_single FUNC: the hook-absent
+                shape for kallsyms-split tests.
+  swiotlb-live-signame: swiotlb-live with mapping_size
+                renamed mapping_sizX: name-only variance
+                the type comparison accepts.
+  swiotlb-live-sigswap: swiotlb-live with mapping_size
+                retyped phys_addr_t: real type variance.
+  swiotlb-live-size32: swiotlb-live with size_t over a
+                32-bit INT: the typedef-width refusal shape.
+  members   : synthetic member-resolution shapes: anonymous
+                struct-in-union nesting, kind_flag and legacy
+                bitfields, agreeing/disagreeing/partial
+                duplicate structs, an ENUM64, typedef/const/
+                tag chains and an array member.
+  split     : funcproto with its string section's first
+                byte patched to nonzero: the split-BTF
+                shape needing a base.
+  sig-width : FUNC test_fn whose size_t typedef resolves
+                to 32 bits: the typedef-width refusal shape.
+  sig-dup   : FUNC test_fn twice over identical
+                prototypes (accepted) and FUNC test_gn
+                twice over differing prototypes (refused).
+  dag32     : 32 levels of two anonymous members, every
+                member to the next struct: the member
+                search fans out 2**32 without memoization.
+  fan8      : 12 levels of eight anonymous members to the
+                next struct: 8**12 paths unmemoized.
+  wide      : root with 4096 anonymous members to
+                distinct empty structs: 4097 expansions
+                trip the visit budget.
 """
 import struct
 import sys
@@ -63,9 +95,11 @@ ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "tests" / "fixtures" / "btf"
 
 K_INT, K_PTR, K_ARRAY, K_STRUCT = 1, 2, 3, 4
+K_UNION = 5
 K_ENUM = 6
 K_TYPEDEF, K_VOLATILE, K_CONST = 8, 9, 10
 K_FUNC, K_PROTO = 12, 13
+K_TAG = 18
 K_ENUM64 = 19
 
 
@@ -292,19 +326,21 @@ def intsize_bad():
     return b.build()
 
 
-def _swiotlb_types(b):
+def _swiotlb_types(b, size_bits=64):
     """Shared swiotlb types; returns ids the live blobs reuse.
 
     Struct members carry the real 7.0.0-38-generic BTF
     (bit_offset, bit_size) pairs, verified against
     /sys/kernel/btf/vmlinux with bpftool plus an
     independent BTF walk: the copy probe reads exactly
-    these members through CO-RE.
+    these members through CO-RE. size_bits=32 retypes
+    size_t over the 32-bit INT for width tests.
     """
     t_uint = b.t(b.s("unsigned int"), K_INT, 0, 4, int_data(32, 0))
     t_ulong = b.t(b.s("unsigned long"), K_INT, 0, 8, int_data(64, 0))
     t_phys = b.t(b.s("phys_addr_t"), K_TYPEDEF, 0, t_ulong)
-    t_size = b.t(b.s("size_t"), K_TYPEDEF, 0, t_ulong)
+    t_sizet = t_ulong if size_bits == 64 else t_uint
+    t_size = b.t(b.s("size_t"), K_TYPEDEF, 0, t_sizet)
     t_dir = b.t(b.s("dma_data_direction"), K_ENUM, 0, 4)
     mem = struct.pack("<III", b.s("min_align_mask"), t_uint, 32)
     t_parms = b.t(b.s("device_dma_parameters"), K_STRUCT, 1, 16, mem)
@@ -326,24 +362,27 @@ def _swiotlb_types(b):
     }
 
 
-def _swiotlb_funcs(b, ids, map_attrs_ptr):
+def _swiotlb_funcs(b, ids, map_attrs_ptr, skip_map=False,
+                   size_swap=False):
     t_dev_ptr = b.t(0, K_PTR, 0, ids["dev"])
     t_pool_ptr = b.t(0, K_PTR, 0, ids["pool"])
-    params = struct.pack("<II", b.s("dev"), t_dev_ptr)
-    params += struct.pack("<II", b.s("orig_addr"), ids["phys"])
-    params += struct.pack("<II", b.s("mapping_size"), ids["size"])
-    params += struct.pack("<II", b.s("alloc_align_mask"), ids["uint"])
-    params += struct.pack("<II", b.s("dir"), ids["dir"])
-    if map_attrs_ptr:
-        t_ap = b.t(0, K_PTR, 0, ids["ulong"])
-        params += struct.pack("<II", b.s("attrs"), t_ap)
-    else:
-        params += struct.pack("<II", b.s("attrs"), ids["ulong"])
-    t_proto = b.t(0, K_PROTO, 6, ids["phys"], params)
-    b.t(b.s("swiotlb_tbl_map_single"), K_FUNC, 0, t_proto)
+    t_mapsize = ids["phys"] if size_swap else ids["size"]
+    if not skip_map:
+        params = struct.pack("<II", b.s("dev"), t_dev_ptr)
+        params += struct.pack("<II", b.s("orig_addr"), ids["phys"])
+        params += struct.pack("<II", b.s("mapping_size"), t_mapsize)
+        params += struct.pack("<II", b.s("alloc_align_mask"), ids["uint"])
+        params += struct.pack("<II", b.s("dir"), ids["dir"])
+        if map_attrs_ptr:
+            t_ap = b.t(0, K_PTR, 0, ids["ulong"])
+            params += struct.pack("<II", b.s("attrs"), t_ap)
+        else:
+            params += struct.pack("<II", b.s("attrs"), ids["ulong"])
+        t_proto = b.t(0, K_PROTO, 6, ids["phys"], params)
+        b.t(b.s("swiotlb_tbl_map_single"), K_FUNC, 0, t_proto)
     params = struct.pack("<II", b.s("dev"), t_dev_ptr)
     params += struct.pack("<II", b.s("tlb_addr"), ids["phys"])
-    params += struct.pack("<II", b.s("mapping_size"), ids["size"])
+    params += struct.pack("<II", b.s("mapping_size"), t_mapsize)
     params += struct.pack("<II", b.s("dir"), ids["dir"])
     params += struct.pack("<II", b.s("attrs"), ids["ulong"])
     params += struct.pack("<II", b.s("pool"), t_pool_ptr)
@@ -385,6 +424,154 @@ def swiotlb_live(map_attrs_ptr):
     return b.build()
 
 
+def swiotlb_live_nomap():
+    b = Blob()
+    ids = _swiotlb_types(b)
+    _swiotlb_funcs(b, ids, False, skip_map=True)
+    return b.build()
+
+
+def swiotlb_live_signame():
+    data = bytearray(swiotlb_live(False))
+    old, new = b"mapping_size", b"mapping_sizX"
+    assert data.count(old) == 1
+    return bytes(data).replace(old, new)
+
+
+def swiotlb_live_sigswap():
+    b = Blob()
+    ids = _swiotlb_types(b)
+    _swiotlb_funcs(b, ids, False, size_swap=True)
+    return b.build()
+
+
+def swiotlb_live_size32():
+    b = Blob()
+    ids = _swiotlb_types(b, size_bits=32)
+    _swiotlb_funcs(b, ids, False)
+    return b.build()
+
+
+def members():
+    b = Blob()
+    t_long = b.t(b.s("long"), K_INT, 0, 8, int_data(64, 1))
+    t_int = b.t(b.s("int"), K_INT, 0, 4, int_data(32, 1))
+    t_uint = b.t(b.s("unsigned int"), K_INT, 0, 4, int_data(32, 0))
+    t_short = b.t(b.s("short"), K_INT, 0, 2, int_data(16, 1))
+    t_ull = b.t(b.s("unsigned long long"), K_INT, 0, 8,
+               int_data(64, 0))
+    t_char = b.t(b.s("char"), K_INT, 0, 1, int_data(8, 1))
+    mem = struct.pack("<III", b.s("b"), t_long, 0)
+    mem += struct.pack("<III", b.s("c"), t_long, 64)
+    t_inner = b.t(0, K_STRUCT, 2, 16, mem)
+    t_ptr_void = b.t(0, K_PTR, 0, 0)
+    mem = struct.pack("<III", 0, t_inner, 0)
+    mem += struct.pack("<III", b.s("d"), t_long, 0)
+    t_union = b.t(0, K_UNION, 2, 16, mem)
+    mem = struct.pack("<III", b.s("a"), t_long, 0)
+    mem += struct.pack("<III", 0, t_union, 64)
+    mem += struct.pack("<III", b.s("mapping"), t_ptr_void, 192)
+    b.t(b.s("mvt_anon"), K_STRUCT, 3, 32, mem)
+    mem = struct.pack("<III", b.s("x"), t_uint, 0)
+    mem += struct.pack("<III", b.s("offline_disabled"), t_uint,
+                       (1 << 24) | 6112)
+    b.t(b.s("mvt_dev"), K_STRUCT, 2, 768, mem, kflag=1)
+    t_bf1 = b.t(b.s("unsigned int"), K_INT, 0, 4, int_data(1, 0))
+    mem = struct.pack("<III", b.s("offline_disabled"), t_bf1, 6112)
+    b.t(b.s("mvt_dev_old"), K_STRUCT, 1, 768, mem)
+    mem = struct.pack("<III", b.s("flags"), t_short, 64)
+    b.t(b.s("mvt_console"), K_STRUCT, 1, 12, mem)
+    b.t(b.s("mvt_console"), K_STRUCT, 1, 12, mem)
+    mem = struct.pack("<III", b.s("flags"), t_int, 0)
+    b.t(b.s("mvt_dup"), K_STRUCT, 1, 8, mem)
+    mem = struct.pack("<III", b.s("flags"), t_int, 32)
+    b.t(b.s("mvt_dup"), K_STRUCT, 1, 8, mem)
+    mem = struct.pack("<III", b.s("other"), t_int, 0)
+    b.t(b.s("mvt_partial"), K_STRUCT, 1, 4, mem)
+    mem = struct.pack("<III", b.s("other"), t_int, 0)
+    mem += struct.pack("<III", b.s("extra"), t_int, 96)
+    b.t(b.s("mvt_partial"), K_STRUCT, 2, 16, mem)
+    ent = struct.pack("<III", b.s("MVT_BIG"), 0, 0x100)
+    b.t(b.s("mvt_e64"), K_ENUM64, 1, 8, ent)
+    t_phys = b.t(b.s("mvt_phys_t"), K_TYPEDEF, 0, t_ull)
+    t_const = b.t(0, K_CONST, 0, t_phys)
+    t_tag = b.t(b.s("__tag"), K_TAG, 0, t_const)
+    t_p = b.t(0, K_PTR, 0, t_tag)
+    extra = struct.pack("<III", t_char, t_int, 16)
+    t_arr = b.t(0, K_ARRAY, 0, 0, extra)
+    mem = struct.pack("<III", b.s("p"), t_p, 0)
+    mem += struct.pack("<III", b.s("q"), t_phys, 64)
+    mem += struct.pack("<III", b.s("name"), t_arr, 128)
+    b.t(b.s("mvt_tag"), K_STRUCT, 3, 32, mem)
+    return b.build()
+
+
+def split():
+    data = bytearray(funcproto())
+    type_len = struct.unpack("<I", data[12:16])[0]
+    data[24 + type_len] = ord("S")
+    return bytes(data)
+
+
+def sig_width():
+    b = Blob()
+    t_int = b.t(b.s("int"), K_INT, 0, 4, int_data(32, 1))
+    t_dev = b.t(b.s("device"), K_STRUCT, 0, 64)
+    t_ptr = b.t(0, K_PTR, 0, t_dev)
+    t_u32 = b.t(b.s("unsigned int"), K_INT, 0, 4, int_data(32, 0))
+    t_size = b.t(b.s("size_t"), K_TYPEDEF, 0, t_u32)
+    params = struct.pack("<II", b.s("dev"), t_ptr)
+    params += struct.pack("<II", b.s("size"), t_size)
+    t_proto = b.t(0, K_PROTO, 2, t_int, params)
+    b.t(b.s("test_fn"), K_FUNC, 0, t_proto)
+    return b.build()
+
+
+def sig_dup():
+    b = Blob()
+    t_int = b.t(b.s("int"), K_INT, 0, 4, int_data(32, 1))
+    t_dev = b.t(b.s("device"), K_STRUCT, 0, 64)
+    t_ptr = b.t(0, K_PTR, 0, t_dev)
+    t_ulong = b.t(b.s("unsigned long"), K_INT, 0, 8, int_data(64, 0))
+    t_size = b.t(b.s("size_t"), K_TYPEDEF, 0, t_ulong)
+    t_u32 = b.t(b.s("unsigned int"), K_INT, 0, 4, int_data(32, 0))
+
+    def proto(second):
+        params = struct.pack("<II", b.s("dev"), t_ptr)
+        params += struct.pack("<II", b.s("size"), second)
+        return b.t(0, K_PROTO, 2, t_int, params)
+
+    b.t(b.s("test_fn"), K_FUNC, 0, proto(t_size))
+    b.t(b.s("test_fn"), K_FUNC, 0, proto(t_size))
+    b.t(b.s("test_gn"), K_FUNC, 0, proto(t_size))
+    b.t(b.s("test_gn"), K_FUNC, 0, proto(t_u32))
+    return b.build()
+
+
+def dag(depth, fan):
+    b = Blob()
+    names = [b.s("t%d" % i) for i in range(depth + 1)]
+    for i in range(depth + 1):
+        extra = b""
+        if i < depth:
+            for _ in range(fan):
+                extra += struct.pack("<III", 0, i + 2, 0)
+        b.t(names[i], K_STRUCT, fan if i < depth else 0, 8, extra)
+    return b.build()
+
+
+def wide():
+    b = Blob()
+    name = b.s("wide0")
+    extra = b""
+    for i in range(4096):
+        extra += struct.pack("<III", 0, i + 2, 0)
+    b.t(name, K_STRUCT, 4096, 8, extra)
+    for _ in range(4096):
+        b.t(0, K_STRUCT, 0, 8)
+    return b.build()
+
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     blobs = {"funcproto": funcproto(), "dupfunc": dupfunc(),
@@ -396,7 +583,15 @@ def main():
              "kflag": kflag(), "intsizes": intsizes(),
              "intsize-bad": intsize_bad(),
              "swiotlb-live": swiotlb_live(False),
-             "swiotlb-live-73": swiotlb_live(True)}
+             "swiotlb-live-73": swiotlb_live(True),
+             "swiotlb-live-nomap": swiotlb_live_nomap(),
+             "swiotlb-live-signame": swiotlb_live_signame(),
+             "swiotlb-live-sigswap": swiotlb_live_sigswap(),
+             "swiotlb-live-size32": swiotlb_live_size32(),
+             "members": members(), "split": split(),
+             "sig-width": sig_width(), "sig-dup": sig_dup(),
+             "dag32": dag(32, 2), "fan8": dag(12, 8),
+             "wide": wide()}
     for name, data in blobs.items():
         (OUT / (name + ".bin")).write_bytes(data)
     print("wrote %d BTF fixtures to %s" % (len(blobs), OUT))

@@ -26,6 +26,7 @@ from memveil.capture.collector import (
     RunResult,
     WriterSource,
 )
+from memveil.capture.loadcheck import LoadDiag, diagnose_load
 from memveil.capture.kernel import LmbKernel
 from memveil.capture.reader import (
     DEFAULT_MAX_EVENTS_BYTES as REPLAY_MAX_EVENTS_BYTES,
@@ -42,7 +43,11 @@ from memveil.platform.btf import (
     read_btf_maps,
     read_btf_maps_ring,
 )
-from memveil.platform.capabilities import cap_floor_ok, cap_floor_refusal
+from memveil.platform.capabilities import (
+    attempt_loss_exact,
+    cap_floor_ok,
+    cap_floor_refusal,
+)
 from memveil.platform.clock import (
     MonoClock,
     check_timens_live,
@@ -52,6 +57,11 @@ from memveil.platform.evidence import (
     detect_environment,
 )
 from memveil.platform.hash import sha256_hex
+from memveil.platform.kernelgate import (
+    GateVerdict,
+    kernel_gate,
+    remedy_for,
+)
 from memveil.platform.narrow import (
     MAX_NARROW_BTF_BYTES,
     MAX_NARROW_FORMAT_BYTES,
@@ -86,7 +96,9 @@ from memveil.platform.profiles import (
 )
 from memveil.platform.reader import (
     EvidenceReader,
+    host_file_denied,
     open_evidence_reader,
+    read_evidence,
     read_host_file,
     readlink_self,
 )
@@ -97,6 +109,7 @@ from memveil.platform.runtime import (
     live_uids,
 )
 from memveil.platform.signal import LiveSignalSource
+from memveil.platform.tracefs import probe_tracefs, tracefs_translate
 
 comptime DEFAULT_DURATION_S = UInt64(60)
 # A default capture always replays under the default report cap.
@@ -191,13 +204,21 @@ struct ScanDecision(Copyable):
     names the requested capabilities in order; a selected
     extra channel carries its verified object bytes, hash,
     and bound ring size in ``lc``/``cp``, and never runs
-    partial. Admitted decisions carry the probed
+    partial. ``layout_evidence`` carries one line per
+    checked 0.1.2 layout item. Admitted decisions carry
+    the probed
     load-time table offsets (``off_*``, -1 when never
-    probed).
+    probed). Refusals carry a machine ``refusal_code``
+    (``profile`` for selection refusals), whether the
+    evidence was ``refusal_unknown``, and a user ``fix``
+    line ("" when none applies).
     """
 
     var ok: Bool
     var refusal: String
+    var refusal_code: String
+    var refusal_unknown: Bool
+    var fix: String
     var kind: String
     var profile: Profile
     var hook: ProfileHook
@@ -218,12 +239,16 @@ struct ScanDecision(Copyable):
     var measured_image: LiveValue
     var measured_image_bid: LiveValue
     var selected_caps: String
+    var layout_evidence: List[String]
     var lc: ExtraChannel
     var cp: ExtraChannel
 
     def __init__(out self):
         self.ok = False
         self.refusal = String("")
+        self.refusal_code = String("")
+        self.refusal_unknown = False
+        self.fix = String("")
         self.kind = String("")
         self.profile = Profile()
         self.hook = ProfileHook()
@@ -244,6 +269,7 @@ struct ScanDecision(Copyable):
         self.measured_image = LiveValue()
         self.measured_image_bid = LiveValue()
         self.selected_caps = String("")
+        self.layout_evidence = List[String]()
         self.lc = ExtraChannel()
         self.cp = ExtraChannel()
 
@@ -252,7 +278,54 @@ def _refuse_scan(reason: String) -> ScanDecision:
     var out = ScanDecision()
     out.ok = False
     out.refusal = reason
+    out.refusal_code = String("profile")
     return out^
+
+
+def _refuse_scan_gate(gate: GateVerdict) -> ScanDecision:
+    """One kernel-gate refusal: reason, code, unknown flag, fix."""
+    var out = ScanDecision()
+    out.ok = False
+    out.refusal = gate.reason.copy()
+    out.refusal_code = gate.code.copy()
+    out.refusal_unknown = gate.unknown
+    out.fix = gate.remedy.copy()
+    return out^
+
+
+def _live_skip_code(code: String) -> String:
+    """One live refusal code, defaulting to the selection class."""
+    if code == String(""):
+        return String("profile")
+    return code.copy()
+
+
+def _refuse_scan_live(
+    reason: String, code: String, unknown: Bool
+) -> ScanDecision:
+    """One live-check refusal: reason, code, unknown flag, fix."""
+    var out = ScanDecision()
+    out.ok = False
+    out.refusal = reason
+    out.refusal_code = _live_skip_code(code.copy())
+    out.refusal_unknown = unknown
+    out.fix = remedy_for(out.refusal_code.copy())
+    return out^
+
+
+def _refusal_basename(path: String) -> String:
+    """Last path component: refusal reasons leak no layout."""
+    var b = path.as_bytes()
+    var cut = 0
+    for i in range(len(b)):
+        if b[i] == UInt8(0x2F):
+            cut = i + 1
+    if cut >= len(b):
+        return path
+    try:
+        return String(from_utf8=b[cut : len(b)])
+    except:
+        return path
 
 
 struct CapsOut(Copyable):
@@ -292,11 +365,19 @@ def _split_caps(text: String) -> List[String]:
 def parse_requested_caps(want: String) -> CapsOut:
     """Parse requested capabilities in order, deduplicated.
 
-    Empty means attempt-trace alone. Unknown ids, empty
-    items, and requests without attempt-trace refuse: the
-    attempt channel is the mandatory base channel.
+    Empty means attempt-trace alone; the sole item "all"
+    expands to the three record channels. Unknown ids,
+    empty items, and requests without attempt-trace
+    refuse: the attempt channel is the mandatory base
+    channel.
     """
     var out = CapsOut()
+    if want == String("all"):
+        out.caps.append(String(_ATTEMPT_CAP))
+        out.caps.append(String(_LIFECYCLE_CAP))
+        out.caps.append(String(_COPY_CAP))
+        out.ok = True
+        return out^
     var items = List[String]()
     if want == String(""):
         items.append(String(_ATTEMPT_CAP))
@@ -392,6 +473,62 @@ def _cp_progs() -> List[_ProgWant]:
     out.append(_ProgWant(String("mv_bounce"), String("fentry/")))
     out.append(_ProgWant(String("mv_bounce_exit"), String("fexit/")))
     return out^
+
+
+def attempt_program_names() -> List[String]:
+    """Attempt program names for load diagnostics."""
+    var out = List[String]()
+    out.append(String(_PROGRAM))
+    return out^
+
+
+def lifecycle_program_names() -> List[String]:
+    """Lifecycle program names for load diagnostics."""
+    var wants = _lc_progs()
+    var out = List[String]()
+    for i in range(len(wants)):
+        out.append(wants[i].name.copy())
+    return out^
+
+
+def copy_program_names() -> List[String]:
+    """Copy program names for load diagnostics."""
+    var wants = _cp_progs()
+    var out = List[String]()
+    for i in range(len(wants)):
+        out.append(wants[i].name.copy())
+    return out^
+
+
+def _is_load_errno_failure(diagnostic: String) -> Bool:
+    """True when a diagnostic names an EINVAL/EACCES load errno."""
+    if diagnostic.find(String("code=-22")) != -1:
+        return True
+    return diagnostic.find(String("code=-13")) != -1
+
+
+def _has_channel(diagnostic: String, channel: Int) -> Bool:
+    """True when the diagnostic tags one load channel."""
+    var tag = String("ch") + String(channel) + String(" ")
+    if diagnostic.startswith(tag.copy()):
+        return True
+    var joined = String("; ") + tag
+    return diagnostic.find(joined^) != -1
+
+
+def _load_fail_channel(diagnostic: String) -> Int:
+    """0/1/2 for the load channel a diagnostic blames, else 0.
+
+    Session and load errors carry a ch0/ch1/ch2 tag from
+    the kernel layer; the verifier replay diagnoses the
+    blamed object's load. Untagged diagnostics replay
+    the attempt object.
+    """
+    if _has_channel(diagnostic.copy(), 1):
+        return 1
+    if _has_channel(diagnostic, 2):
+        return 2
+    return 0
 
 
 struct _ExtraOut(Copyable):
@@ -756,16 +893,36 @@ def _receipt_covers(
 def _read_format(
     root: String, hook: ProfileHook, mut raw: List[UInt8]
 ) -> String:
-    """Read hook format bytes; "" when readable."""
+    """Read hook format bytes; "" when readable.
+
+    Failures name the translated path and the evidence
+    error, keeping the `format unreadable` prefix the
+    release gate matches.
+    """
     try:
-        raw = read_host_file(
-            join_root(root, hook.format_path),
-            String("format"),
-            MAX_NARROW_FORMAT_BYTES,
+        var treader = open_evidence_reader(root)
+        var fpath = tracefs_translate(
+            probe_tracefs(treader), hook.format_path
         )
-    except:
-        return String("format unreadable")
-    return String("")
+        try:
+            raw = read_evidence(
+                treader, fpath, MAX_NARROW_FORMAT_BYTES
+            )
+        except e:
+            return (
+                String("format unreadable: ")
+                + fpath
+                + String(": ")
+                + e.message
+            )
+        return String("")
+    except e:
+        return (
+            String("format unreadable: ")
+            + hook.format_path
+            + String(": ")
+            + e.message
+        )
 
 
 def _admit_hook(
@@ -828,6 +985,70 @@ def _selection_gap(doc: Profile, caps: List[String]) -> String:
     return String("")
 
 
+def _static_gap(doc: Profile, caps: List[String]) -> String:
+    """First privilege-independent selection gap, else ""."""
+    var gap = _selection_gap(doc, caps)
+    if gap != String(""):
+        return gap
+    return tracing_gap(doc, caps)
+
+
+def _noted_doc(doc: Profile) -> Bool:
+    """True when the doc carries a parseable narrow note."""
+    if not doc.identity.source.has_note:
+        return False
+    var parsed = parse_narrow_note(doc.identity.source.note)
+    return parsed.ok
+
+
+def _static_receipt_ok(
+    doc: Profile,
+    kernel: KernelInfo,
+    want: List[String],
+    pdir: String,
+    bridge_sha: String,
+    mut denied_drop: Bool,
+    mut bridge_drop: Bool,
+) -> Bool:
+    """True when a noted-doc receipt routes without privilege.
+
+    Reuses receipt coverage for noted docs only; callers
+    must never pass a live doc here, whose receipt check
+    reads fresh live measurements behind the gate. Sets
+    denied_drop when the receipt file itself is denied,
+    bridge_drop when the receipt is blocked only by the
+    bridge.
+    """
+    denied_drop = False
+    bridge_drop = False
+    var mism = False
+    if _receipt_covers(
+        doc, kernel, want, pdir, bridge_sha, mism,
+        String(""), String(""), String(""), String(""),
+    ):
+        return True
+    bridge_drop = mism
+    if pdir != String(""):
+        var path = (
+            default_receipts_dir(pdir)
+            + String("/")
+            + doc.profile_id
+            + String(".json")
+        )
+        if host_file_denied(path):
+            denied_drop = True
+    return False
+
+
+def _refuse_gate_unreadable(detail: String) -> ScanDecision:
+    """One unreadable-gate refusal: unknown, never admitted."""
+    var out = _refuse_scan(
+        String("kernel gate unreadable: ") + detail
+    )
+    out.refusal_unknown = True
+    return out^
+
+
 def _live_doc(doc: Profile) -> Bool:
     """True when the doc can only take the live path.
 
@@ -872,7 +1093,9 @@ def decide_record(
     falls back to the first covering doc as partial. A
     receipt blocked only by the bridge falls through to
     partial with a reason naming the bridge mismatch,
-    never local-auto. Static object failures refuse
+    never local-auto; requested extras with an unchecked
+    bridge ("") refuse unknown as bridge-unchecked
+    instead. Static object failures refuse
     everywhere; identity failures fall through in scan
     mode only. Requested extra capabilities need a
     supported declaration, a resolvable object path, and
@@ -938,7 +1161,8 @@ def decide_record(
                     break
             if not found:
                 return _refuse_scan(
-                    String("unknown --profile: ") + explicit
+                    String("unknown --profile: ")
+                    + _refusal_basename(explicit.copy())
                 )
         if not _covers(kernel, candidates[0]):
             return _refuse_scan(
@@ -999,10 +1223,89 @@ def decide_record(
         )
         if not cp.ok:
             return _refuse_scan(cp.refusal.copy())
+    var gate_reader: EvidenceReader
+    try:
+        gate_reader = open_evidence_reader(root)
+    except e:
+        return _refuse_gate_unreadable(String(e))
+    # Privilege-independent selection refuses before the
+    # kernel gate. Receipt checks against fresh live
+    # measurements, hook format reads, live checks, and
+    # bindings all run after it.
+    if want_explicit:
+        var egap = _static_gap(candidates[0], ask.caps)
+        if egap != String(""):
+            return _refuse_scan(egap)
+    elif want_extra:
+        var pool = List[Int]()
+        var denied_drop = False
+        var bridge_drop = False
+        for i in range(len(candidates)):
+            if candidates[i].status == String("validated"):
+                pool.append(i)
+            elif _live_doc(candidates[i]):
+                pool.append(i)
+            elif _noted_doc(candidates[i]):
+                var dd = False
+                var bd = False
+                var ok_static = _static_receipt_ok(
+                    candidates[i], kernel, ask.caps, profiles_dir,
+                    bridge_sha, dd, bd,
+                )
+                if ok_static:
+                    pool.append(i)
+                elif dd:
+                    denied_drop = True
+                elif bd:
+                    bridge_drop = True
+        var bridge_open = bridge_drop and bridge_sha == String("")
+        if len(pool) > 0:
+            var last_gap = String("")
+            var all_gapped = True
+            for r in range(len(pool)):
+                var g = _static_gap(
+                    candidates[pool[r]], ask.caps
+                )
+                if g == String(""):
+                    all_gapped = False
+                    break
+                last_gap = g.copy()
+            if all_gapped:
+                if bridge_open:
+                    return _refuse_scan_live(
+                        String(
+                            "bridge unchecked: cannot verify receipts"
+                        ),
+                        String("bridge-unchecked"),
+                        True,
+                    )
+                return _refuse_scan(last_gap)
+        elif not denied_drop:
+            if bridge_open:
+                return _refuse_scan_live(
+                    String("bridge unchecked: cannot verify receipts"),
+                    String("bridge-unchecked"),
+                    True,
+                )
+            return _refuse_scan(
+                String("no profile satisfies requested capabilities")
+            )
+    try:
+        var gated = kernel_gate(
+            gate_reader,
+            kernel.release.copy(),
+            String(_ZLIB),
+            ask.caps.copy(),
+        )
+        if not gated.ok:
+            return _refuse_scan_gate(gated)
+    except e:
+        return _refuse_gate_unreadable(String(e))
     var order = List[Int]()
     var order_receipt = List[Bool]()
     var order_live = List[Bool]()
     var saw_bridge_mismatch = False
+    var saw_noted_bridge_mismatch = False
     if want_explicit:
         order.append(0)
         order_receipt.append(False)
@@ -1034,6 +1337,8 @@ def decide_record(
                 order_live.append(False)
             elif mism:
                 saw_bridge_mismatch = True
+                if not _live_doc(candidates[i]):
+                    saw_noted_bridge_mismatch = True
         for i in range(len(candidates)):
             if candidates[i].status == String("validated"):
                 continue
@@ -1042,6 +1347,8 @@ def decide_record(
                 order_receipt.append(False)
                 order_live.append(True)
     var skip_reason = String("")
+    var skip_code = String("profile")
+    var skip_unknown = False
     for oi in range(len(order)):
         var doc = candidates[order[oi]].copy()
         var gap = _selection_gap(doc, ask.caps)
@@ -1049,12 +1356,16 @@ def decide_record(
             if want_explicit:
                 return _refuse_scan(gap)
             skip_reason = gap.copy()
+            skip_code = String("profile")
+            skip_unknown = False
             continue
         var tgap = tracing_gap(doc, ask.caps)
         if tgap != String(""):
             if want_explicit:
                 return _refuse_scan(tgap)
             skip_reason = tgap.copy()
+            skip_code = String("profile")
+            skip_unknown = False
             continue
         var hook = ProfileHook()
         var raw = List[UInt8]()
@@ -1068,6 +1379,8 @@ def decide_record(
             if want_explicit:
                 return _refuse_scan(herr)
             skip_reason = herr.copy()
+            skip_code = String("profile")
+            skip_unknown = False
             continue
         if order_live[oi]:
             var live = verify_live_interfaces(
@@ -1076,8 +1389,10 @@ def decide_record(
             if not live.ok:
                 if want_explicit:
                     if want_extra:
-                        return _refuse_scan(
-                            String("live check failed: ") + live.reason
+                        return _refuse_scan_live(
+                            String("live check failed: ") + live.reason,
+                            live.code.copy(),
+                            live.unknown,
                         )
                     out.ok = True
                     out.kind = String("partial")
@@ -1104,7 +1419,10 @@ def decide_record(
                 skip_reason = (
                     String("live check failed: ") + live.reason
                 )
+                skip_code = _live_skip_code(live.code.copy())
+                skip_unknown = live.unknown
                 continue
+            out.layout_evidence = live.evidence.copy()
             var measured = _measure_binding(
                 root, kernel.release, hook.copy(), Span(raw)
             )
@@ -1177,6 +1495,8 @@ def decide_record(
                 out.selected_caps = selected.copy()
                 return out^
             skip_reason = String("binding failed: ") + parsed.message
+            skip_code = String("profile")
+            skip_unknown = False
             continue
         var bound = _check_binding(
             root,
@@ -1199,6 +1519,8 @@ def decide_record(
                     String("binding failed: ") + bound.reason
                 )
             skip_reason = String("binding failed: ") + bound.reason
+            skip_code = String("profile")
+            skip_unknown = False
             continue
         out.ok = True
         if doc.status == String("validated"):
@@ -1253,11 +1575,19 @@ def decide_record(
         return out^
     # Scan mode only: explicit always returns inside the loop.
     if want_extra:
+        if bridge_sha == String("") and saw_noted_bridge_mismatch:
+            return _refuse_scan_live(
+                String("bridge unchecked: cannot verify receipts"),
+                String("bridge-unchecked"),
+                True,
+            )
         if skip_reason == String(""):
             return _refuse_scan(
                 String("no profile satisfies requested capabilities")
             )
-        return _refuse_scan(skip_reason.copy())
+        return _refuse_scan_live(
+            skip_reason.copy(), skip_code.copy(), skip_unknown
+        )
     var first = candidates[0].copy()
     var phook = ProfileHook()
     var praw = List[UInt8]()
@@ -1307,6 +1637,18 @@ def decide_record(
     out.tp_event = pevt.copy()
     out.selected_caps = selected.copy()
     return out^
+
+
+def loadcheck_bridge_sha(bridge: String, has_bridge: Bool) -> String:
+    """Sha256 of the resolved bridge, else "" when unreadable.
+
+    Load-check admission binds receipts to the resolved
+    bridge bytes; an unresolvable bridge leaves every
+    receipt unchecked.
+    """
+    var path = resolve_bridge(bridge, has_bridge)
+    var snap = open_bridge_snapshot(path)
+    return snap.sha.copy()
 
 
 def resolve_bridge(bridge: String, has_bridge: Bool) -> String:
@@ -1392,6 +1734,22 @@ def _value_item(source: String, value: String) -> EvidenceItem:
     return item^
 
 
+def attempt_loss_evidence(release: String) -> List[EvidenceItem]:
+    """Attempt-loss bound item on kernels before 6.7, else empty."""
+    var out = List[EvidenceItem]()
+    if attempt_loss_exact(release):
+        return out^
+    var item = EvidenceItem()
+    item.item_type = String("attempt-loss-bound")
+    item.source = String("kernel ") + release
+    item.interpretation = String(
+        "attempt loss counts are a lower bound before 6.7:"
+        " trace_call_bpf skipped programs without counting them"
+    )
+    out.append(item^)
+    return out^
+
+
 def _append_channel_evidence(
     mut evidence: List[EvidenceItem], name: String, channel: ExtraChannel
 ):
@@ -1415,6 +1773,22 @@ def _append_channel_evidence(
             String(channel.ring_bytes),
         )
     )
+
+
+def _append_layout_evidence(
+    mut evidence: List[EvidenceItem], lines: List[String]
+):
+    """Append one layout item per checked CO-RE layout line.
+
+    Each line was verified against kernel BTF by the live
+    layout check; the item names that source.
+    """
+    for i in range(len(lines)):
+        var item = EvidenceItem()
+        item.item_type = String("layout")
+        item.source = String("kernel BTF")
+        item.interpretation = lines[i].copy()
+        evidence.append(item^)
 
 
 def render_provenance(source: String, v: LiveValue) -> EvidenceItem:
@@ -1465,11 +1839,19 @@ def run_collector_with[W: WriterSource](
         return RunResult(
             EXIT_REFUSAL, String(""), String(""),
             String(t"budget {opts.max_events_bytes} below 131072"),
+            String(""),
+            String(""),
+            False,
+            True,
         )
     if opts.max_events_bytes > MAX_RECORD_BYTES:
         return RunResult(
             EXIT_REFUSAL, String(""), String(""),
             String(t"budget {opts.max_events_bytes} above 4294967296"),
+            String(""),
+            String(""),
+            False,
+            True,
         )
     var bridge = resolve_bridge(opts.bridge, opts.has_bridge)
     if bridge == String(""):
@@ -1487,6 +1869,10 @@ def run_collector_with[W: WriterSource](
         return RunResult(
             EXIT_REFUSAL, String(""), String(""),
             hint,
+            String(""),
+            String(""),
+            False,
+            True,
         )
     # One resolution, pinned once: the snapshot's open
     # file description feeds the admission hash, the
@@ -1519,6 +1905,10 @@ def run_collector_with[W: WriterSource](
         return RunResult(
             EXIT_REFUSAL, String(""), String(""),
             String("no object: pass --object PATH"),
+            String(""),
+            String(""),
+            False,
+            True,
         )
     var lc_object = resolve_object(
         String("lifecycle"), opts.lc_object, exe_path
@@ -1533,6 +1923,10 @@ def run_collector_with[W: WriterSource](
         return RunResult(
             EXIT_REFUSAL, String(""), String(""),
             String("cannot open evidence: ") + String(e),
+            String(""),
+            String(""),
+            False,
+            False,
         )
     var env = detect_environment(reader)
     if not env.kernel.eligible_floor:
@@ -1541,6 +1935,10 @@ def run_collector_with[W: WriterSource](
             String("kernel ")
             + env.kernel.release
             + String(" below floor 6.0"),
+            String(""),
+            String(""),
+            False,
+            True,
         )
     var profiles: List[Profile]
     try:
@@ -1549,6 +1947,10 @@ def run_collector_with[W: WriterSource](
         return RunResult(
             EXIT_REFUSAL, String(""), String(""),
             String("cannot load profiles: ") + String(e),
+            String(""),
+            String(""),
+            False,
+            False,
         )
     var decision = decide_record(
         root,
@@ -1567,17 +1969,29 @@ def run_collector_with[W: WriterSource](
         return RunResult(
             EXIT_REFUSAL, String(""), String(""),
             decision.refusal.copy(),
+            decision.fix.copy(),
+            decision.refusal_code.copy(),
+            decision.refusal_unknown,
+            True,
         )
     var timens = check_timens_live()
     if not timens.ok:
         return RunResult(
             EXIT_REFUSAL, String(""), String(""),
             String("time namespace unverifiable"),
+            String(""),
+            String(""),
+            False,
+            True,
         )
     if timens.offset:
         return RunResult(
             EXIT_REFUSAL, String(""), String(""),
             String("time namespace offset present"),
+            String(""),
+            String(""),
+            False,
+            True,
         )
     if (
         decision.off_loc < 0
@@ -1588,6 +2002,10 @@ def run_collector_with[W: WriterSource](
         return RunResult(
             EXIT_REFUSAL, String(""), String(""),
             String("admission did not probe offsets"),
+            String(""),
+            String(""),
+            False,
+            True,
         )
     var cfg = CollectorConfig()
     cfg.duration_s = opts.duration_s
@@ -1634,12 +2052,16 @@ def run_collector_with[W: WriterSource](
             decision.selected_caps.copy(),
         )
     )
+    var loss_bound = attempt_loss_evidence(env.kernel.release)
+    for i in range(len(loss_bound)):
+        cfg.evidence.append(loss_bound[i].copy())
     _append_channel_evidence(
         cfg.evidence, String("lc"), decision.lc
     )
     _append_channel_evidence(
         cfg.evidence, String("cp"), decision.cp
     )
+    _append_layout_evidence(cfg.evidence, decision.layout_evidence)
     if env.kernel.release == String(""):
         cfg.evidence.append(
             _value_item(
@@ -1708,9 +2130,33 @@ def run_collector_with[W: WriterSource](
     var collector = Collector(cfg^)
     var out = collector.run(kernel, clock, signal, writer)
     # Retain the bridge pin through every open_session
-    # inside the run above: this explicit last use keeps
-    # the fd open while the loader dlopens the alias.
+    # inside the run above and the load replay below:
+    # this explicit use keeps the fd open while the
+    # loader dlopens the alias.
     _ = snap.fd
+    if _is_load_errno_failure(out.diagnostic):
+        var fail_ch = _load_fail_channel(out.diagnostic)
+        var diag: LoadDiag
+        if fail_ch == 1:
+            diag = diagnose_load(
+                Span(decision.lc.elf),
+                snap.load_path,
+                lifecycle_program_names(),
+            )
+        elif fail_ch == 2:
+            diag = diagnose_load(
+                Span(decision.cp.elf),
+                snap.load_path,
+                copy_program_names(),
+            )
+        else:
+            diag = diagnose_load(
+                Span(decision.elf),
+                snap.load_path,
+                attempt_program_names(),
+            )
+        for i in range(len(diag.lines)):
+            out.diagnostic += String("\n") + diag.lines[i]
     return out^
 
 

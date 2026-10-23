@@ -463,6 +463,10 @@ struct RunResult(Copyable, Movable):
     var end_reason: String
     var outcome: String
     var diagnostic: String
+    var fix: String
+    var code: String
+    var unknown: Bool
+    var trusted: Bool
 
 
 def u64_max() -> UInt64:
@@ -1252,8 +1256,8 @@ struct Collector:
                 diag += String("; writer residual: ") + residual
             if not closed.ok:
                 diag += String("; close: ") + closed.message
-            return RunResult(EXIT_ERROR, String("unknown"), String("refusal-rollback-failed"), diag)
-        return RunResult(EXIT_REFUSAL, String("unknown"), String("refused"), reason)
+            return RunResult(EXIT_ERROR, String("unknown"), String("refusal-rollback-failed"), diag, String(""), String(""), False, False)
+        return RunResult(EXIT_REFUSAL, String("unknown"), String("refused"), reason, String(""), String(""), False, False)
 
     def _extra_channels(self) -> Bool:
         return self.cfg.has_lifecycle or self.cfg.has_copy
@@ -2714,6 +2718,10 @@ struct Collector:
             self.diagnostic(
                 String("local accounting unusable; events kept, no session")
             ),
+            String(""),
+            String(""),
+            False,
+            False,
         )
 
     def finish[C: ClockSource, W: WriterSource](
@@ -2758,25 +2766,45 @@ struct Collector:
                 return RunResult(
                     EXIT_ERROR, reason, String("error"),
                     self.diagnostic(done.note),
+                    String(""),
+                    String(""),
+                    False,
+                    False,
                 )
             var code = self._final_exit_code(assembled)
             return RunResult(
                 code, reason, String("finalized"),
                 self.diagnostic(String("")),
+                String(""),
+                String(""),
+                False,
+                False,
             )
         if done.status == String("present_unsynced"):
             return RunResult(
                 EXIT_ERROR, reason, String("present_unsynced"),
                 self.diagnostic(done.note),
+                String(""),
+                String(""),
+                False,
+                False,
             )
         if done.status == String("misuse"):
             return RunResult(
                 EXIT_ERROR, reason, String("unfinalizable"),
                 self.diagnostic(String("finalize after close")),
+                String(""),
+                String(""),
+                False,
+                False,
             )
         return RunResult(
             EXIT_ERROR, reason, String("unfinalized"),
             self.diagnostic(done.note),
+            String(""),
+            String(""),
+            False,
+            False,
         )
 
     def contained(self) -> Bool:

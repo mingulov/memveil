@@ -42,7 +42,7 @@ FORBIDDEN_PROPS = {
 ALLOWED_FLAGS = {
     "--allow-partial", "--bridge", "--capability", "--cp-object",
     "--device", "--duration", "--format", "--help", "--interval",
-    "--json", "--lc-object", "--long-lived-after",
+    "--json", "--lc-object", "--load-check", "--long-lived-after",
     "--max-events-bytes", "--max-line-bytes", "--max-session-bytes",
     "--object", "--output", "--profile", "--profiles-dir",
 }

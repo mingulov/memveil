@@ -4,15 +4,26 @@
 
 from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
+from std.time import perf_counter_ns
 
 from memveil.platform.btf import (
+    MAX_KERNEL_BTF_BYTES,
+    check_btf_health,
+    classify_btf_message,
     read_btf_copy_fb,
     read_btf_func_proto,
+    read_btf_func_sig,
     read_btf_maps,
     read_btf_maps_ring,
     read_btf_member,
+    resolve_btf_enumerator,
+    resolve_btf_member,
 )
-from memveil.platform.narrow import verify_object_program
+from memveil.platform.evidence import evidence_btf_cap
+from memveil.platform.narrow import (
+    MAX_NARROW_BTF_BYTES,
+    verify_object_program,
+)
 from memveil.platform.reader import read_host_file
 
 
@@ -406,6 +417,226 @@ def test_btf_copy_fallback_declared() raises:
     assert_true(x.ok)
 
 
+def test_member_anon_offsets() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/members.bin"))
+    var c = resolve_btf_member(
+        Span(raw), String("mvt_anon"), String("c")
+    )
+    assert_true(c.ok)
+    assert_true(c.found)
+    assert_equal(c.bit_offset, 128)
+    assert_equal(c.bit_size, 64)
+    assert_equal(c.kind, String("int"))
+    var m = resolve_btf_member(
+        Span(raw), String("mvt_anon"), String("mapping")
+    )
+    assert_true(m.ok)
+    assert_equal(m.bit_offset, 192)
+    assert_equal(m.bit_size, 64)
+    assert_equal(m.kind, String("ptr"))
+    var d = resolve_btf_member(
+        Span(raw), String("mvt_anon"), String("d")
+    )
+    assert_true(d.ok)
+    assert_true(d.found)
+    assert_equal(d.bit_offset, 64)
+
+
+def test_member_real_shapes() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/members.bin"))
+    var f = resolve_btf_member(
+        Span(raw), String("mvt_dev"), String("offline_disabled")
+    )
+    assert_true(f.ok)
+    assert_true(f.found)
+    assert_true(f.bitfield)
+    assert_equal(f.bit_offset, 6112)
+    assert_equal(f.bit_size, 1)
+    var o = resolve_btf_member(
+        Span(raw), String("mvt_dev_old"), String("offline_disabled")
+    )
+    assert_true(o.ok)
+    assert_true(o.found)
+    assert_true(o.bitfield)
+    var p = resolve_btf_member(
+        Span(raw), String("mvt_tag"), String("p")
+    )
+    assert_true(p.ok)
+    assert_equal(p.kind, String("ptr"))
+    assert_equal(p.bit_size, 64)
+    var q = resolve_btf_member(
+        Span(raw), String("mvt_tag"), String("q")
+    )
+    assert_true(q.ok)
+    assert_equal(q.kind, String("int"))
+    assert_equal(q.bit_size, 64)
+    var n = resolve_btf_member(
+        Span(raw), String("mvt_tag"), String("name")
+    )
+    assert_true(n.ok)
+    assert_equal(n.kind, String("array"))
+    assert_equal(n.bit_size, 128)
+    var e = resolve_btf_enumerator(
+        Span(raw), String("mvt_e64"), String("MVT_BIG")
+    )
+    assert_true(e.ok)
+    assert_true(e.found)
+    assert_equal(e.kind, String("enum"))
+    assert_equal(e.bit_size, 64)
+
+
+def test_member_duplicates() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/members.bin"))
+    var c = resolve_btf_member(
+        Span(raw), String("mvt_console"), String("flags")
+    )
+    assert_true(c.ok)
+    assert_true(c.found)
+    assert_equal(c.bit_offset, 64)
+    var d = resolve_btf_member(
+        Span(raw), String("mvt_dup"), String("flags")
+    )
+    assert_true(not d.ok)
+    assert_true(d.ambiguous)
+    assert_equal(
+        d.message,
+        String("struct mvt_dup: 2 definitions disagree on flags"),
+    )
+    var e = resolve_btf_member(
+        Span(raw), String("mvt_partial"), String("extra")
+    )
+    assert_true(e.ok)
+    assert_true(e.found)
+    assert_equal(e.bit_offset, 96)
+
+
+def test_member_absent() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/members.bin"))
+    var m = resolve_btf_member(
+        Span(raw), String("mvt_anon"), String("nope")
+    )
+    assert_true(m.ok)
+    assert_true(m.struct_found)
+    assert_true(not m.found)
+    var s = resolve_btf_member(
+        Span(raw), String("mvt_none"), String("a")
+    )
+    assert_true(s.ok)
+    assert_true(not s.struct_found)
+
+
+def test_member_legacy_refuses_bitfield() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/members.bin"))
+    var v = read_btf_member(
+        Span(raw), String("mvt_dev"), String("offline_disabled")
+    )
+    assert_true(not v.ok)
+    assert_equal(
+        v.message,
+        String("bitfield member mvt_dev.offline_disabled unsupported"),
+    )
+
+
+def _assert_dag_not_found(path: String) raises:
+    """Resolve a missing member fast on one shared-subtype blob."""
+    var raw = _read_fixture(path)
+    var h = check_btf_health(Span(raw))
+    assert_true(h.ok)
+    var start = perf_counter_ns()
+    var r = resolve_btf_member(Span(raw), String("t0"), String("zz"))
+    var ms = (perf_counter_ns() - start) // 1000000
+    assert_true(r.ok)
+    assert_true(r.struct_found)
+    assert_true(not r.found)
+    assert_true(ms < 10000)
+
+
+def test_member_dag_fast() raises:
+    # Shared anonymous subtypes fan the search out 2**32
+    # and 8**12 paths; memoization answers in milliseconds.
+    _assert_dag_not_found(String("tests/fixtures/btf/dag32.bin"))
+    _assert_dag_not_found(String("tests/fixtures/btf/fan8.bin"))
+
+
+def test_member_wide_refuses() raises:
+    # 4097 expansions exceed the visit budget: the search
+    # refuses instead of walking an adversarial graph.
+    var raw = _read_fixture(String("tests/fixtures/btf/wide.bin"))
+    var h = check_btf_health(Span(raw))
+    assert_true(h.ok)
+    var r = resolve_btf_member(Span(raw), String("wide0"), String("zz"))
+    assert_true(not r.ok)
+    assert_equal(r.message, String("type graph too large"))
+
+
+def test_btf_health_classes() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/swiotlb-live.bin"))
+    var h = check_btf_health(Span(raw))
+    assert_true(h.ok)
+    var split = _read_fixture(String("tests/fixtures/btf/split.bin"))
+    var s = check_btf_health(Span(split))
+    assert_true(not s.ok)
+    assert_equal(s.code, String("btf-split"))
+    assert_equal(
+        s.message,
+        String(
+            "split BTF needs base"
+            " (string section does not start with NUL)"
+        ),
+    )
+    var cut = Span(raw)[0:600]
+    var t = check_btf_health(cut)
+    assert_true(not t.ok)
+    assert_equal(t.code, String("btf-truncated"))
+    var stand = _read_fixture(
+        String(
+            "tests/fixtures/capabilities/ordinary-7.0"
+            "/sys/kernel/btf/vmlinux"
+        )
+    )
+    var m = check_btf_health(Span(stand))
+    assert_true(not m.ok)
+    assert_equal(m.code, String("btf-malformed"))
+    assert_equal(m.message, String("bad BTF header"))
+
+
+def test_btf_cap_single() raises:
+    assert_equal(MAX_KERNEL_BTF_BYTES, 67108864)
+    assert_equal(MAX_NARROW_BTF_BYTES, MAX_KERNEL_BTF_BYTES)
+    assert_equal(evidence_btf_cap(), MAX_KERNEL_BTF_BYTES)
+
+
+def test_classify_reader_messages() raises:
+    # A dangling type id is corrupt BTF, never a known refusal.
+    assert_equal(
+        classify_btf_message(String("type id out of range")),
+        String("btf-malformed"),
+    )
+    assert_equal(
+        classify_btf_message(String("BTF too small")),
+        String("btf-truncated"),
+    )
+    assert_equal(
+        classify_btf_message(String("function nope not found")),
+        String(""),
+    )
+
+
+def test_func_sig_dups() raises:
+    var raw = _read_fixture(String("tests/fixtures/btf/sig-dup.bin"))
+    var f = read_btf_func_sig(Span(raw), String("test_fn"))
+    assert_true(f.ok)
+    assert_equal(f.ret, String("int"))
+    assert_equal(len(f.params), 2)
+    assert_equal(f.params[0], String("struct device *"))
+    assert_equal(f.params[1], String("size_t"))
+    var g = read_btf_func_sig(Span(raw), String("test_gn"))
+    assert_true(not g.ok)
+    assert_equal(
+        g.message, String("ambiguous FUNC test_gn (2 prototypes differ)")
+    )
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_btf_ok]()
@@ -448,6 +679,17 @@ def run() raises -> Int:
     suite.test[test_btf_member_device]()
     suite.test[test_btf_member_not_found]()
     suite.test[test_btf_copy_fallback_declared]()
+    suite.test[test_member_anon_offsets]()
+    suite.test[test_member_real_shapes]()
+    suite.test[test_member_duplicates]()
+    suite.test[test_member_absent]()
+    suite.test[test_member_legacy_refuses_bitfield]()
+    suite.test[test_member_dag_fast]()
+    suite.test[test_member_wide_refuses]()
+    suite.test[test_btf_health_classes]()
+    suite.test[test_btf_cap_single]()
+    suite.test[test_classify_reader_messages]()
+    suite.test[test_func_sig_dups]()
     suite^.run()
     return 0
 

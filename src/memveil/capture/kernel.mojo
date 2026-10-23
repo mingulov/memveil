@@ -46,6 +46,7 @@ from libbpf_mojo.session import AttachSpec, Session
 from std.ffi import external_call
 from std.os import listdir
 
+from memveil.capture.loadcheck import errno_cause, errno_name
 from memveil.capture.collector import (
     GeomOut,
     KernelSource,
@@ -110,16 +111,21 @@ def poll_outcome(kind: UInt32, code: Int32) -> String:
 
 
 def _lmb_message(e: LmbError) -> String:
-    return (
+    var head = (
         String("op=")
         + String(e.operation)
         + String(" domain=")
         + String(e.domain)
         + String(" code=")
         + String(e.code)
-        + String(": ")
-        + e.message
     )
+    if e.code >= Int32(0):
+        return head + String(": ") + e.message
+    var out = head + String(" ") + errno_name(e.code)
+    var cause = errno_cause(e.code)
+    if cause != String(""):
+        out += String(": ") + cause
+    return out + String(": ") + e.message
 
 
 def _channel_tag(channel: Int) -> String:

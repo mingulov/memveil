@@ -76,12 +76,14 @@ def run(*argv, **kwargs):
 
 
 def test_replaced_bridge_reaches_named_refusal_boundary(bundle, tmp_path):
-    # record validates in gate order (object, profile, hook
-    # format, binding) before the bridge loads, so on a host
-    # without readable tracefs this fails at the format gate,
-    # not at bridge load. The stable contract is fail-closed:
-    # exit 3, a stderr reason, no capture directory. Exact
-    # per-gate messages stay in the record lane.
+    # record validates in gate order (object statics,
+    # privilege-independent selection, kernel gate, then
+    # hook format and binding) before the bridge loads, so
+    # on a host without readable tracefs this fails at the
+    # kernel gate, not at bridge load. The stable contract
+    # is fail-closed: exit 3, a stderr reason, no capture
+    # directory. Exact per-gate messages stay in the
+    # record lane.
     root, _ = bundle
     trial = tmp_path / "wrongabi"
     shutil.copytree(root, trial)
@@ -101,7 +103,8 @@ def test_replaced_bridge_reaches_named_refusal_boundary(bundle, tmp_path):
     # This lane names the gate it actually reached. ABI rejection itself
     # requires a qualified live environment that passes all preceding gates.
     boundaries = ("requires x86_64", "requires Linux", "below floor 6.0", "format unreadable",
-                  "binding failed", "setup failed", "bridge", "time namespace")
+                  "binding failed", "setup failed", "bridge", "time namespace",
+                  "denied (privilege)")
     assert any(reason in proc.stderr for reason in boundaries), proc.stderr
     print("replaced-bridge refusal boundary: " + proc.stderr.strip())
     assert not cap.exists(), "refused record left a capture dir"

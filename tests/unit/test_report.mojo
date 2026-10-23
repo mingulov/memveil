@@ -7,6 +7,7 @@ renderer is pinned here for well-formedness and escaping, and in the
 reports lane against the schema oracle plus the fixture expected counts.
 """
 
+from std.ffi import external_call
 from std.pathlib import Path
 from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
@@ -17,13 +18,17 @@ from memveil.cli.report import (
     check_rendered_size,
     exit_for_report,
     neutralize_controls,
+    refusal_stderr_lines,
     sanitize_diagnostic,
     scrub_paths,
+    write_stderr,
+    write_stderr_trusted,
 )
 from memveil.jsonscan import Scanner
 from memveil.model.metric import Metric
 from memveil.model.report import Report, ReportCap
 from memveil.model.session import DeviceEntry
+from memveil.platform.reader import bytes_to_text, read_host_file
 from memveil.render.render import RenderError, render
 from memveil.render.text import escape_text, render_text
 from memveil.render.json import escape_json, render_json
@@ -100,6 +105,105 @@ def test_scrub_paths() raises:
     # Fail-closed direction: any slash token loses its head, even
     # prose like and/or. Diagnostics must not rely on slashes.
     assert_equal(scrub_paths(String("reads/writes")), String("writes"))
+
+
+def test_refusal_stderr_lines() raises:
+    var full = refusal_stderr_lines(
+        String("record"),
+        String("tracefs denied (privilege): /sys/kernel/tracing/events"),
+        String("tracefs-denied"),
+        String("run as root"),
+    )
+    assert_equal(len(full), 3)
+    assert_equal(
+        full[0],
+        String(
+            "memveil record: tracefs denied (privilege):"
+            " /sys/kernel/tracing/events\n"
+        ),
+    )
+    assert_equal(full[1], String("memveil record: code: tracefs-denied\n"))
+    assert_equal(full[2], String("memveil record: fix: run as root\n"))
+    var legacy = refusal_stderr_lines(
+        String("top"), String("no profile satisfies"), String("profile"),
+        String(""),
+    )
+    assert_equal(len(legacy), 1)
+    assert_equal(
+        legacy[0], String("memveil top: no profile satisfies\n")
+    )
+    var plain = refusal_stderr_lines(
+        String("record"), String("budget 1 below 131072"), String(""),
+        String(""),
+    )
+    assert_equal(len(plain), 1)
+
+
+def _cstr_local(s: String) -> List[UInt8]:
+    """One NUL-terminated copy of a path string."""
+    var b = s.as_bytes()
+    var out = List[UInt8]()
+    for i in range(len(b)):
+        out.append(b[i])
+    out.append(UInt8(0))
+    return out^
+
+
+def _capture_stderr(body: String, trusted: Bool) raises -> String:
+    """Write body to fd 2 under a temp file; return what landed."""
+    var parent = _cstr_local(String("build/test-tmp"))
+    _ = external_call["mkdir", Int32](
+        Span(parent).unsafe_ptr(), 0o755
+    )
+    var cpath = _cstr_local(String("build/test-tmp/stderr-cap.txt"))
+    var cmode = _cstr_local(String("w"))
+    var fp = external_call["fopen", UInt64](
+        Span(cpath).unsafe_ptr(), Span(cmode).unsafe_ptr()
+    )
+    if fp == 0:
+        raise Error(String("cannot open stderr capture"))
+    var fd = external_call["fileno", Int32](fp)
+    var saved = external_call["dup", Int32](Int32(2))
+    if saved < 0:
+        raise Error(String("cannot dup stderr"))
+    _ = external_call["dup2", Int32](fd, Int32(2))
+    var failed = False
+    try:
+        if trusted:
+            write_stderr_trusted(body)
+        else:
+            write_stderr(body)
+    except:
+        failed = True
+    _ = external_call["dup2", Int32](saved, Int32(2))
+    _ = external_call["fclose", Int32](fp)
+    # Duped fds stay open: the test process exits right away.
+    if failed:
+        raise Error(String("captured write failed"))
+    var raw = read_host_file(
+        String("build/test-tmp/stderr-cap.txt"), String("capture"), 65536
+    )
+    return bytes_to_text(raw^)
+
+
+def test_write_stderr_trusted_keeps_paths() raises:
+    var body = String(
+        "memveil record: fix: read access to tracefs"
+        " and /sys/kernel/btf/vmlinux\n"
+    )
+    assert_equal(_capture_stderr(body, True), body)
+    var scrubbed = _capture_stderr(body, False)
+    assert_equal(
+        scrubbed,
+        String(
+            "memveil record: fix: read access to tracefs and vmlinux\n"
+        ),
+    )
+    var ctrl = _capture_stderr(String("a\x1bb\nc"), True)
+    var cb = ctrl.as_bytes()
+    for i in range(len(cb)):
+        assert_true(cb[i] != UInt8(0x1B))
+    assert_true(ctrl.find(String("\n")) != -1)
 
 
 def test_escape_json_roundtrip() raises:
@@ -469,6 +573,8 @@ def run() raises -> Int:
     suite.test[test_escape_text]()
     suite.test[test_escape_text_clean_passthrough]()
     suite.test[test_scrub_paths]()
+    suite.test[test_refusal_stderr_lines]()
+    suite.test[test_write_stderr_trusted_keeps_paths]()
     suite.test[test_escape_json_roundtrip]()
     suite.test[test_escape_markdown]()
     suite.test[test_render_text_attempts]()

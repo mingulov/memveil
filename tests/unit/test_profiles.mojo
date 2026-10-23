@@ -13,11 +13,7 @@ from std.ffi import external_call
 from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
 
-from memveil.platform.capabilities import (
-    CapEntry,
-    CapabilityReport,
-    discover_capabilities,
-)
+from memveil.capture.run import decide_record
 from memveil.platform.evidence import detect_environment, parse_kernel_triple
 from memveil.platform.narrow import (
     NarrowBindings,
@@ -27,10 +23,10 @@ from memveil.platform.narrow import (
 from memveil.platform.profiles import (
     CapQualification,
     Profile,
-    ProfileDecision,
     TraceWant,
     cp_trace,
     default_receipts_dir,
+    frozen_sig_types,
     lc_trace,
     load_profiles,
     mint_qualification_receipt,
@@ -38,6 +34,7 @@ from memveil.platform.profiles import (
     select_attempt_hook,
     select_profile,
     select_profile_bound,
+    verify_core_layouts,
     verify_hook_signatures,
     verify_live_interfaces,
     verify_live_receipt,
@@ -2007,333 +2004,90 @@ def test_select_unparseable() raises:
     assert_true(contains(d.reason, String("unparseable")))
 
 
-def judge(fxname: String, profdir: String) raises -> CapabilityReport:
-    """Run discovery for one fixture against one profiles dir."""
-    var r = open_evidence_reader(fx(fxname))
+def test_decide_oversized_format_judges() raises:
+    # Oversized formats are judged on content through
+    # bounded reads, never waved through as unknown: the
+    # NUL-filled stand-in fails the layout probe.
+    var r = open_evidence_reader(fx("oversized-format"))
     var env = detect_environment(r)
-    var ps = load_profiles(profdir)
-    var d = select_profile(env.kernel, ps^)
-    return discover_capabilities(r, d^)
-
-
-def find_entry(rep: CapabilityReport, cap_id: String) -> CapEntry:
-    """Copy one entry out of a report; blank when missing."""
-    for i in range(len(rep.entries)):
-        if rep.entries[i].id == cap_id:
-            return rep.entries[i].copy()
-    return CapEntry(String(""), String(""), String(""), String(""))
-
-
-def validated_doc(cap_status: String) -> String:
-    """One validated doc declaring attempt-trace with no hooks."""
-    return (
-        String(
-            '{"schema_version":"0.1.1","profile_id":"t2",'
-            '"status":"validated",'
-            '"identity":{"arch":"x86_64","min_kernel":"7.0",'
-            '"source":{"origin":"o","revision":"r"}},"hooks":[],'
-            '"capabilities":[{"id":"attempt-trace","status":"'
-        )
-        + cap_status
-        + String('","hooks":[],"reason":"r"}]}')
+    var pdir = fx("profiles-test")
+    var d = decide_record(
+        fx("oversized-format"),
+        env.kernel,
+        load_profiles(pdir.copy()),
+        String(""),
+        False,
+        String("tests/fixtures/elf/ok.o"),
+        String(""),
+        String(""),
+        String("attempt-trace"),
+        pdir,
+        String(""),
     )
+    assert_true(not d.ok)
+    assert_true(not d.refusal_unknown)
+    assert_equal(d.refusal, String("layout: missing field common_type"))
+    assert_equal(d.refusal_code, String("profile"))
 
 
-def test_discover_candidate_unknown() raises:
-    var rep = judge(String("ordinary-7.0"), String("profiles"))
-    var a = find_entry(rep, String("attempt-trace"))
-    # Unbound candidate, so the live judgment runs: the
-    # stand-in format parses but lacks required fields, a
-    # proven-unavailable verdict, not unknown.
-    assert_equal(a.status, String("unavailable"))
-    assert_equal(
-        a.reason, String("layout: missing field common_type")
+def test_decide_hookless_refuses() raises:
+    # A supported capability with no hooks proves nothing:
+    # admission refuses instead of admitting blindly.
+    var doc = String(
+        '{"schema_version":"0.1.1","profile_id":"t",'
+        '"status":"reference-unvalidated","identity":{"arch":"x86_64",'
+        '"min_kernel":"7.0","source":{"origin":"o","revision":"r"}},'
+        '"hooks":[],"capabilities":[{"id":"attempt-trace",'
+        '"status":"supported","hooks":[],"reason":"r"}]}'
     )
-    var l = find_entry(rep, String("mapping-lifecycle"))
-    # The ordinary-7.0 root carries stand-in BTF, so the live
-    # judgment fails with the reader cause, not "unproven".
-    assert_equal(l.status, String("unavailable"))
-    assert_equal(
-        l.reason,
-        String("fexit:swiotlb_tbl_map_single: bad BTF header"),
-    )
-    var c = find_entry(rep, String("copy-actual"))
-    assert_equal(c.status, String("unavailable"))
-    assert_equal(
-        c.reason,
-        String(
-            "fentry:__swiotlb_sync_single_for_device: bad BTF header"
-        ),
-    )
-
-
-def test_discover_hook_absent() raises:
-    var rep = judge(String("missing-tracepoint"), String("profiles"))
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("unavailable"))
-    assert_equal(
-        a.reason,
-        String("tracepoint swiotlb:swiotlb_bounced absent"),
-    )
-    # The live branch sets no remedy, but the discover
-    # terminal adds the re-qualification advice for a
-    # supporting-but-unqualified profile.
-    assert_equal(
-        a.remedy,
-        String(
-            "refresh the profile's recorded signatures from this"
-            " kernel, then re-prove with memveil qualify (see"
-            " memveil qualify --help)"
-        ),
-    )
-
-
-def test_discover_remedy_qualify() raises:
-    # An unqualified capability names its fix; an available
-    # one carries no remedy.
-    var r = open_evidence_reader(fx("ordinary-7.0"))
-    var caps = List[String]()
-    caps.append(String("attempt-trace"))
-    var d = _local_auto_decision(caps^)
-    var rep = discover_capabilities(r, d^)
-    var l = find_entry(rep, String("mapping-lifecycle"))
-    assert_equal(l.status, String("unknown"))
-    assert_equal(
-        l.remedy,
-        String(
-            "run memveil qualify including mapping-lifecycle"
-            " (see memveil qualify --help)"
-        ),
-    )
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("available"))
-    assert_equal(a.remedy, String(""))
-
-
-def test_discover_hook_denied() raises:
-    var rep = judge(String("denied-tracepoint"), String("profiles"))
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("unknown"))
-    assert_equal(
-        a.reason,
-        String(
-            "tracepoint swiotlb:swiotlb_bounced denied (privilege)"
-        ),
-    )
-    assert_equal(
-        a.remedy, String("re-run with elevated privileges (root)")
-    )
-    assert_equal(len(rep.denied), 1)
-    assert_equal(
-        rep.denied[0],
-        String("/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format"),
-    )
-
-
-def test_discover_68_attempt_judged() raises:
-    # A 6.8 kernel meets the 6.0 floor and the 6plus
-    # reference covers it, so the live judgment runs:
-    # the stand-in format lacks required fields, proven
-    # unavailable, not unknown.
-    var rep = judge(String("kernel-6.8"), String("profiles"))
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("unavailable"))
-    assert_equal(
-        a.reason, String("layout: missing field common_type")
-    )
-
-
-def test_discover_515_attempt_floor() raises:
-    # Below the 6.0 floor, attempt-trace demotes to
-    # unavailable with the floor reason even with no
-    # covering profile; unknown lifecycle entries stand.
-    var r = open_evidence_reader(fx("kernel-5.15"))
-    var env = detect_environment(r)
-    var ps = List[Profile]()
-    ps.append(parse_profile_bytes(bytes_of(low_floor_doc())))
-    var d = select_profile(env.kernel, ps^)
-    assert_true(not d.matched)
-    var rep = discover_capabilities(r, d^)
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("unavailable"))
-    assert_equal(
-        a.reason,
-        String("kernel 5.15.0-test is below the 6.0 floor"),
-    )
-    var l = find_entry(rep, String("mapping-lifecycle"))
-    assert_equal(l.status, String("unknown"))
-
-
-def test_discover_no_cover() raises:
-    var rep = judge(String("arch-mismatch"), String("profiles"))
-    assert_equal(len(rep.entries), 3)
-    for i in range(len(rep.entries)):
-        assert_equal(rep.entries[i].status, String("unknown"))
-        assert_equal(
-            rep.entries[i].reason, String("no profile covers this identity")
-        )
-
-
-def test_discover_unparseable() raises:
-    var rep = judge(String("malformed-release"), String("profiles"))
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("unknown"))
-    assert_equal(
-        a.reason,
-        String("release not-a-kernel-release is unparseable; floor unknown"),
-    )
-
-
-def test_discover_available() raises:
-    var rep = judge(String("ready-validated"), fx("profiles-test"))
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("available"))
-    assert_equal(
-        a.reason, String("verified under validated profile test-validated")
-    )
-
-
-def test_discover_changed() raises:
-    var rep = judge(String("changed-signature"), fx("profiles-test"))
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("unavailable"))
-    assert_equal(
-        a.reason,
-        String(
-            "hook swiotlb:swiotlb_bounced format differs from profile"
-            " test-validated signature"
-            "; drift: missing field common_type"
-        ),
-    )
-    # Qualify cannot repair a stale recording (planning and the
-    # smoke both refuse it): the profile must be refreshed first.
-    assert_equal(
-        a.remedy,
-        String(
-            "refresh the profile's recorded format from this kernel,"
-            " then re-prove with memveil qualify"
-            " (see memveil qualify --help)"
-        ),
-    )
-
-
-def test_discover_unreadable_format() raises:
-    var rep = judge(String("oversized-format"), fx("profiles-test"))
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("unknown"))
-    assert_equal(
-        a.reason,
-        String(
-            "hook swiotlb:swiotlb_bounced format unreadable after probe"
-        ),
-    )
-    assert_equal(len(rep.denied), 0)
-
-
-def test_discover_denied_id_changed() raises:
-    var rep = judge(String("denied-id-changed"), fx("profiles-test"))
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("unavailable"))
-    assert_equal(
-        a.reason,
-        String(
-            "hook swiotlb:swiotlb_bounced format differs from profile"
-            " test-validated signature"
-            "; drift: missing field common_type"
-        ),
-    )
-    assert_equal(len(rep.denied), 1)
-    assert_equal(
-        rep.denied[0],
-        String("/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/id"),
-    )
-
-
-def test_discover_validated_absent() raises:
-    var rep = judge(String("missing-tracepoint"), fx("profiles-test"))
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("unavailable"))
-    assert_true(contains(a.reason, String("absent")))
-
-
-def test_discover_undeclared() raises:
+    var one = List[Profile]()
+    one.append(parse_profile_bytes(bytes_of(doc)))
     var r = open_evidence_reader(fx("ordinary-7.0"))
     var env = detect_environment(r)
-    var ps = List[Profile]()
-    ps.append(parse_profile_bytes(bytes_of(minimal_doc())))
-    var d = select_profile(env.kernel, ps^)
-    assert_true(d.has_profile)
-    var rep = discover_capabilities(r, d^)
-    var l = find_entry(rep, String("mapping-lifecycle"))
-    assert_equal(l.status, String("unknown"))
-    assert_equal(
-        l.reason, String("profile t does not declare mapping-lifecycle")
+    var d = decide_record(
+        fx("ordinary-7.0"),
+        env.kernel,
+        one^,
+        String(""),
+        False,
+        String("tests/fixtures/elf/ok.o"),
+        String(""),
+        String(""),
+        String("attempt-trace"),
+        String(""),
+        String(""),
     )
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("unavailable"))
-    assert_equal(
-        a.reason, String("tracepoint h absent")
-    )
+    assert_true(not d.ok)
+    assert_true(not d.refusal_unknown)
+    assert_equal(d.refusal, String("no tracepoint hook"))
+    assert_equal(d.refusal_code, String("profile"))
 
 
-def low_floor_doc() -> String:
-    """One validated doc with min_kernel 6.0 for floor interplay.
-
-    Covers a 6.8 kernel, which meets the 6.0 floor but misses
-    the 6.11 lifecycle floor, so attempt-trace judges
-    available while mapping-lifecycle demotes with the
-    lifecycle floor reason and the unsupported terminal
-    applies. The lifecycle hooks match the frozen bindings
-    exactly so the cap judges available pre-demotion, not
-    tracing-refused.
-    """
-    return (
-        String(
-            '{"schema_version":"0.1.1","profile_id":"t-low",'
-            '"status":"validated",'
-            '"identity":{"arch":"x86_64","min_kernel":"6.0",'
-            '"source":{"origin":"o","revision":"r"}},'
-            '"hooks":['
-        )
-        + _frozen_hooks_json(lc_trace())
-        + String(
-            '],"capabilities":[{"id":"attempt-trace",'
-            '"status":"supported","hooks":[],"reason":"r"},'
-            '{"id":"mapping-lifecycle","status":"supported",'
-            '"hooks":['
-        )
-        + _frozen_hook_names_json(lc_trace())
-        + String(
-            '],"reason":"r"},'
-            '{"id":"copy-actual","status":"unsupported",'
-            '"hooks":[],"reason":"never"}]}'
-        )
-    )
 
 
-def test_discover_unsupported_terminal() raises:
-    var r = open_evidence_reader(fx("kernel-6.8"))
-    var env = detect_environment(r)
-    var ps = List[Profile]()
-    ps.append(parse_profile_bytes(bytes_of(low_floor_doc())))
-    var d = select_profile(env.kernel, ps^)
-    assert_true(d.matched)
-    var rep = discover_capabilities(r, d^)
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("available"))
-    assert_equal(
-        a.reason,
-        String("verified under validated profile t-low"),
-    )
-    var l = find_entry(rep, String("mapping-lifecycle"))
-    assert_equal(l.status, String("unavailable"))
-    assert_equal(
-        l.reason,
-        String("kernel 6.8.0-41-generic is below the 6.11 floor"),
-    )
-    var c = find_entry(rep, String("copy-actual"))
-    assert_equal(c.status, String("unsupported"))
-    assert_equal(c.reason, String("never"))
+def _frozen_hooks_json(wants: List[TraceWant]) -> String:
+    """Hook array JSON rendered from frozen wants, in order."""
+    var out = String("")
+    for i in range(len(wants)):
+        if i > 0:
+            out += String(",")
+        var w = wants[i].copy()
+        out += String('{"name":"') + w.name.copy()
+        out += String('","kind":"tracing","function":"') + w.function.copy()
+        out += String('","attach":"') + w.attach.copy()
+        out += String('","signature":"') + w.signature.copy()
+        out += String('"}')
+    return out^
+
+
+def _frozen_hook_names_json(wants: List[TraceWant]) -> String:
+    """Quoted hook-name list JSON from frozen wants, in order."""
+    var out = String("")
+    for i in range(len(wants)):
+        if i > 0:
+            out += String(",")
+        out += String('"') + wants[i].name + String('"')
+    return out^
 
 
 def live_ref_doc() -> String:
@@ -2521,10 +2275,109 @@ def test_verify_live_btf_corrupt() raises:
         fx("kernel-6.8"), doc^, caps^
     )
     assert_true(not v.ok)
+    assert_equal(v.reason, String("bad BTF header"))
+
+
+def test_verify_live_btf_corrupt_unknown() raises:
+    var doc = parse_profile_bytes(bytes_of(live_ref_doc()))
+    var caps = List[String]()
+    caps.append(String("mapping-lifecycle"))
+    var v = verify_live_interfaces(
+        fx("kernel-6.8"), doc^, caps^
+    )
+    assert_true(not v.ok)
+    assert_true(v.unknown)
+    assert_equal(v.code, String("btf-malformed"))
+    assert_equal(v.reason, String("bad BTF header"))
+
+
+def test_verify_live_btf_split_unknown() raises:
+    # Split BTF needs its base blob: unknown, never admitted.
+    var doc = parse_profile_bytes(bytes_of(live_ref_doc()))
+    var caps = List[String]()
+    caps.append(String("mapping-lifecycle"))
+    var v = verify_live_interfaces(
+        fx("../gate/btf-split"), doc^, caps^
+    )
+    assert_true(not v.ok)
+    assert_true(v.unknown)
+    assert_equal(v.code, String("btf-split"))
+
+
+def test_verify_live_signame_accepted() raises:
+    # Parameter names never compare on the live path.
+    var doc = parse_profile_bytes(bytes_of(live_ref_doc()))
+    var caps = List[String]()
+    caps.append(String("mapping-lifecycle"))
+    var v = verify_live_interfaces(
+        fx("../gate/sig-rename"), doc^, caps^
+    )
+    assert_true(v.ok)
+
+
+def test_verify_live_sigswap_mismatch() raises:
+    var doc = parse_profile_bytes(bytes_of(live_ref_doc()))
+    var caps = List[String]()
+    caps.append(String("mapping-lifecycle"))
+    var v = verify_live_interfaces(
+        fx("../gate/sig-swap"), doc^, caps^
+    )
+    assert_true(not v.ok)
+    assert_true(not v.unknown)
+    assert_equal(v.code, String("signature-mismatch"))
+    assert_true(
+        v.reason.startswith(
+            String("fexit:swiotlb_tbl_map_single: signature mismatch")
+        )
+    )
+
+
+def test_verify_live_sigwidth_refused() raises:
+    var doc = parse_profile_bytes(bytes_of(live_ref_doc()))
+    var caps = List[String]()
+    caps.append(String("mapping-lifecycle"))
+    var v = verify_live_interfaces(
+        fx("../gate/sig-width"), doc^, caps^
+    )
+    assert_true(not v.ok)
+    assert_true(not v.unknown)
+    assert_equal(v.code, String("signature-width"))
     assert_equal(
         v.reason,
-        String("fexit:swiotlb_tbl_map_single: bad BTF header"),
+        String(
+            "fexit:swiotlb_tbl_map_single:"
+            " size_t width 32 bits (want 64)"
+        ),
     )
+
+
+def test_frozen_sig_unnamed_params() raises:
+    # Unnamed multi-word types keep every word; only a
+    # well-formed trailing name strips, and malformed
+    # trailing words stay whole and mismatch loudly.
+    var u = frozen_sig_types(
+        String("void f(unsigned long, size_t)"), String("f")
+    )
+    assert_true(u.has)
+    assert_equal(len(u.params), 2)
+    assert_equal(u.params[0], String("unsigned long"))
+    assert_equal(u.params[1], String("size_t"))
+    var n = frozen_sig_types(
+        String("void f(unsigned long x, size_t y)"), String("f")
+    )
+    assert_true(n.has)
+    assert_equal(n.params[0], String("unsigned long"))
+    assert_equal(n.params[1], String("size_t"))
+    var e = frozen_sig_types(
+        String("void f(enum dma_data_direction)"), String("f")
+    )
+    assert_true(e.has)
+    assert_equal(e.params[0], String("enum dma_data_direction"))
+    var m = frozen_sig_types(
+        String("void f(unsigned long attrs!)"), String("f")
+    )
+    assert_true(m.has)
+    assert_equal(m.params[0], String("unsigned long attrs!"))
 
 
 def test_verify_live_73_sig_mismatch() raises:
@@ -2730,6 +2583,586 @@ def test_parse_layouts_too_many_rejects() raises:
     expect_reject(doc)
 
 
+def _v012_doc(layouts_json: String) -> String:
+    """live_ref_doc as 0.1.2 plus a layouts array from caller JSON."""
+    return _live_doc_with_layouts(layouts_json).replace(
+        String('"schema_version":"0.1.1"'),
+        String('"schema_version":"0.1.2"'),
+    )
+
+
+def test_parse_v012_layouts_ok() raises:
+    var doc = _v012_doc(
+        String(
+            '{"capability":"copy-actual","target":"field",'
+            '"struct":"io_tlb_pool","field":"start",'
+            '"type_kind":"int","bit_size":64,"optional":false},'
+            '{"capability":"mapping-lifecycle","target":"type",'
+            '"struct":"mvt_dev",'
+            '"type_kind":"struct","bit_size":6144,"optional":true},'
+            '{"capability":"attempt-trace","target":"enumerator",'
+            '"struct":"mvt_e64","field":"MVT_BIG",'
+            '"type_kind":"enum","bit_size":64,"optional":false}'
+        )
+    )
+    var p = parse_profile_bytes(bytes_of(doc))
+    assert_equal(len(p.layouts), 3)
+    assert_equal(p.schema_version, String("0.1.2"))
+    assert_equal(p.layouts[0].capability, String("copy-actual"))
+    assert_equal(p.layouts[0].target, String("field"))
+    assert_equal(p.layouts[0].type_kind, String("int"))
+    assert_equal(p.layouts[0].bit_size, 64)
+    assert_true(not p.layouts[0].optional)
+    assert_true(p.layouts[0].v012)
+    assert_equal(p.layouts[1].target, String("type"))
+    assert_equal(p.layouts[1].field_name, String(""))
+    assert_true(p.layouts[1].optional)
+    assert_true(p.layouts[1].v012)
+    assert_equal(p.layouts[2].target, String("enumerator"))
+    assert_equal(p.layouts[2].field_name, String("MVT_BIG"))
+    assert_true(p.layouts[2].v012)
+
+
+def test_parse_v012_rejects() raises:
+    # bit_offset is not a 0.1.2 layout key.
+    expect_reject(
+        _v012_doc(
+            String(
+                '{"capability":"copy-actual","target":"field",'
+                '"struct":"s","field":"f","type_kind":"int",'
+                '"bit_size":8,"bit_offset":0,"optional":false}'
+            )
+        )
+    )
+    # type_kind is required.
+    expect_reject(
+        _v012_doc(
+            String(
+                '{"capability":"copy-actual","target":"field",'
+                '"struct":"s","field":"f",'
+                '"bit_size":8,"optional":false}'
+            )
+        )
+    )
+    # At most 64 items.
+    var items = String("")
+    for i in range(65):
+        if i > 0:
+            items += String(",")
+        items += String(
+            '{"capability":"copy-actual","target":"field",'
+            '"struct":"s","field":"f'
+        )
+        items += String(i)
+        items += String(
+            '","type_kind":"int","bit_size":8,"optional":false}'
+        )
+    expect_reject(_v012_doc(items))
+    # The 0.1.1 item shape is not a 0.1.2 item.
+    expect_reject(
+        _v012_doc(
+            String(
+                '{"struct":"s","field":"f",'
+                '"bit_offset":0,"bit_size":64}'
+            )
+        )
+    )
+    # A type target omits field.
+    expect_reject(
+        _v012_doc(
+            String(
+                '{"capability":"copy-actual","target":"type",'
+                '"struct":"s","field":"f","type_kind":"struct",'
+                '"bit_size":64,"optional":false}'
+            )
+        )
+    )
+    # bit_size starts at 1.
+    expect_reject(
+        _v012_doc(
+            String(
+                '{"capability":"copy-actual","target":"field",'
+                '"struct":"s","field":"f","type_kind":"int",'
+                '"bit_size":0,"optional":false}'
+            )
+        )
+    )
+    # Duplicates name layouts and duplicate.
+    var raised = False
+    try:
+        _ = parse_profile_bytes(
+            bytes_of(
+                _v012_doc(
+                    String(
+                        '{"capability":"copy-actual","target":"field",'
+                        '"struct":"s","field":"f","type_kind":"int",'
+                        '"bit_size":8,"optional":false},'
+                        '{"capability":"copy-actual","target":"field",'
+                        '"struct":"s","field":"f","type_kind":"int",'
+                        '"bit_size":8,"optional":true}'
+                    )
+                )
+            )
+        )
+    except e:
+        raised = True
+        assert_true(contains(String(e), String("layouts")))
+        assert_true(contains(String(e), String("duplicate")))
+    assert_true(raised)
+
+
+def _v012_field(
+    cap: String,
+    sname: String,
+    fname: String,
+    kind: String,
+    size: Int,
+    optional: Bool,
+) -> String:
+    """One 0.1.2 field-target layout item as JSON."""
+    var flag = String("false")
+    if optional:
+        flag = String("true")
+    return (
+        String('{"capability":"')
+        + cap
+        + String('","target":"field","struct":"')
+        + sname
+        + String('","field":"')
+        + fname
+        + String('","type_kind":"')
+        + kind
+        + String('","bit_size":')
+        + String(size)
+        + String(',"optional":')
+        + flag
+        + String("}")
+    )
+
+
+def _v012_btf() raises -> List[UInt8]:
+    """kernel-38 vmlinux BTF bytes."""
+    return read_host_file(
+        fx("kernel-38") + String("/sys/kernel/btf/vmlinux"),
+        String("fixture"),
+        67108864,
+    )
+
+
+def test_core_layout_live_ok() raises:
+    var raw = _v012_btf()
+    var doc = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                _v012_field(
+                    String("copy-actual"),
+                    String("io_tlb_pool"),
+                    String("start"),
+                    String("int"),
+                    64,
+                    False,
+                )
+                + String(",")
+                + _v012_field(
+                    String("copy-actual"),
+                    String("io_tlb_pool"),
+                    String("slots"),
+                    String("ptr"),
+                    64,
+                    False,
+                )
+                + String(",")
+                + _v012_field(
+                    String("copy-actual"),
+                    String("device_dma_parameters"),
+                    String("min_align_mask"),
+                    String("int"),
+                    32,
+                    False,
+                )
+            )
+        )
+    )
+    var lines = List[String]()
+    var v = verify_core_layouts(
+        Span(raw), doc.layouts, String("copy-actual"), lines
+    )
+    assert_true(v.ok)
+    assert_equal(v.reason, String(""))
+    assert_equal(len(lines), 3)
+    assert_equal(
+        lines[0],
+        String("io_tlb_pool.start: offset 0 bits, size 64 bits"),
+    )
+
+
+def test_core_layout_live_refusals() raises:
+    var raw = _v012_btf()
+    # An absent member refuses with its layout code.
+    var doc = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                _v012_field(
+                    String("copy-actual"),
+                    String("io_tlb_pool"),
+                    String("cc_shared"),
+                    String("int"),
+                    8,
+                    False,
+                )
+            )
+        )
+    )
+    var lines = List[String]()
+    var v = verify_core_layouts(
+        Span(raw), doc.layouts, String("copy-actual"), lines
+    )
+    assert_true(not v.ok)
+    assert_true(not v.unknown)
+    assert_equal(v.code, String("layout-missing"))
+    assert_equal(
+        v.reason,
+        String("layout: io_tlb_pool.cc_shared absent from kernel BTF"),
+    )
+    # The same member, optional, passes with an absent note.
+    var doc_opt = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                _v012_field(
+                    String("copy-actual"),
+                    String("io_tlb_pool"),
+                    String("cc_shared"),
+                    String("int"),
+                    8,
+                    True,
+                )
+            )
+        )
+    )
+    var lines_opt = List[String]()
+    var v_opt = verify_core_layouts(
+        Span(raw), doc_opt.layouts, String("copy-actual"), lines_opt
+    )
+    assert_true(v_opt.ok)
+    assert_equal(len(lines_opt), 1)
+    assert_equal(
+        lines_opt[0],
+        String("io_tlb_pool.cc_shared: absent (optional)"),
+    )
+    # A drifted size refuses with both widths quoted.
+    var doc_size = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                _v012_field(
+                    String("copy-actual"),
+                    String("io_tlb_pool"),
+                    String("start"),
+                    String("int"),
+                    32,
+                    False,
+                )
+            )
+        )
+    )
+    var lines_size = List[String]()
+    var v_size = verify_core_layouts(
+        Span(raw), doc_size.layouts, String("copy-actual"), lines_size
+    )
+    assert_true(not v_size.ok)
+    assert_equal(v_size.code, String("layout-size"))
+    assert_equal(
+        v_size.reason,
+        String(
+            "layout: io_tlb_pool.start size 64 bits"
+            " differs from object size 32 bits"
+        ),
+    )
+    # A drifted kind refuses with both kinds quoted.
+    var doc_kind = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                _v012_field(
+                    String("copy-actual"),
+                    String("io_tlb_pool"),
+                    String("start"),
+                    String("ptr"),
+                    64,
+                    False,
+                )
+            )
+        )
+    )
+    var lines_kind = List[String]()
+    var v_kind = verify_core_layouts(
+        Span(raw), doc_kind.layouts, String("copy-actual"), lines_kind
+    )
+    assert_true(not v_kind.ok)
+    assert_equal(v_kind.code, String("layout-kind"))
+    assert_equal(
+        v_kind.reason,
+        String(
+            "layout: io_tlb_pool.start kind int"
+            " differs from object kind ptr"
+        ),
+    )
+    # A lifecycle item refuses the lifecycle cap, not copy-actual.
+    var doc_lc = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                _v012_field(
+                    String("mapping-lifecycle"),
+                    String("io_tlb_pool"),
+                    String("cc_shared"),
+                    String("int"),
+                    8,
+                    False,
+                )
+            )
+        )
+    )
+    var lines_lc = List[String]()
+    var v_lc = verify_core_layouts(
+        Span(raw), doc_lc.layouts, String("mapping-lifecycle"), lines_lc
+    )
+    assert_true(not v_lc.ok)
+    assert_equal(v_lc.code, String("layout-missing"))
+    var lines_cp = List[String]()
+    var v_cp = verify_core_layouts(
+        Span(raw), doc_lc.layouts, String("copy-actual"), lines_cp
+    )
+    assert_true(v_cp.ok)
+    assert_equal(len(lines_cp), 0)
+
+
+def test_core_layout_live_type_enum() raises:
+    var raw = read_host_file(
+        String("tests/fixtures/btf/members.bin"),
+        String("fixture"),
+        67108864,
+    )
+    # A recorded struct matches kind and size; no offset prints.
+    var doc = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                String(
+                    '{"capability":"copy-actual","target":"type",'
+                    '"struct":"mvt_dev","type_kind":"struct",'
+                    '"bit_size":6144,"optional":false}'
+                )
+            )
+        )
+    )
+    var lines = List[String]()
+    var v = verify_core_layouts(
+        Span(raw), doc.layouts, String("copy-actual"), lines
+    )
+    assert_true(v.ok)
+    assert_equal(len(lines), 1)
+    assert_equal(lines[0], String("mvt_dev: size 6144 bits"))
+    # A typedef resolves through to its terminal kind.
+    var doc_td = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                String(
+                    '{"capability":"copy-actual","target":"type",'
+                    '"struct":"mvt_phys_t","type_kind":"int",'
+                    '"bit_size":64,"optional":false}'
+                )
+            )
+        )
+    )
+    var lines_td = List[String]()
+    var v_td = verify_core_layouts(
+        Span(raw), doc_td.layouts, String("copy-actual"), lines_td
+    )
+    assert_true(v_td.ok)
+    assert_equal(len(lines_td), 1)
+    assert_equal(lines_td[0], String("mvt_phys_t: size 64 bits"))
+    # A recorded enumerator matches the enum width.
+    var doc_enum = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                String(
+                    '{"capability":"copy-actual","target":"enumerator",'
+                    '"struct":"mvt_e64","field":"MVT_BIG",'
+                    '"type_kind":"enum","bit_size":64,"optional":false}'
+                )
+            )
+        )
+    )
+    var lines_enum = List[String]()
+    var v_enum = verify_core_layouts(
+        Span(raw), doc_enum.layouts, String("copy-actual"), lines_enum
+    )
+    assert_true(v_enum.ok)
+    assert_equal(len(lines_enum), 1)
+    assert_equal(lines_enum[0], String("mvt_e64.MVT_BIG: size 64 bits"))
+    # A missing type refuses without a member suffix.
+    var doc_absent = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                String(
+                    '{"capability":"copy-actual","target":"type",'
+                    '"struct":"mvt_none","type_kind":"struct",'
+                    '"bit_size":8,"optional":false}'
+                )
+            )
+        )
+    )
+    var lines_absent = List[String]()
+    var v_absent = verify_core_layouts(
+        Span(raw), doc_absent.layouts, String("copy-actual"), lines_absent
+    )
+    assert_true(not v_absent.ok)
+    assert_equal(v_absent.code, String("layout-missing"))
+    assert_equal(
+        v_absent.reason,
+        String("layout: mvt_none absent from kernel BTF"),
+    )
+    # A drifted type kind refuses with both kinds quoted.
+    var doc_kind = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                String(
+                    '{"capability":"copy-actual","target":"type",'
+                    '"struct":"mvt_dev","type_kind":"union",'
+                    '"bit_size":6144,"optional":false}'
+                )
+            )
+        )
+    )
+    var lines_kind = List[String]()
+    var v_kind = verify_core_layouts(
+        Span(raw), doc_kind.layouts, String("copy-actual"), lines_kind
+    )
+    assert_true(not v_kind.ok)
+    assert_equal(v_kind.code, String("layout-kind"))
+    assert_equal(
+        v_kind.reason,
+        String(
+            "layout: mvt_dev kind struct differs from object kind union"
+        ),
+    )
+
+
+def test_core_layout_bitfield_ambiguous() raises:
+    var raw = read_host_file(
+        String("tests/fixtures/btf/members.bin"),
+        String("fixture"),
+        67108864,
+    )
+    # A bitfield member refuses even with a matching width.
+    var doc_bf = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                _v012_field(
+                    String("copy-actual"),
+                    String("mvt_dev"),
+                    String("offline_disabled"),
+                    String("int"),
+                    1,
+                    False,
+                )
+            )
+        )
+    )
+    var lines_bf = List[String]()
+    var v_bf = verify_core_layouts(
+        Span(raw), doc_bf.layouts, String("copy-actual"), lines_bf
+    )
+    assert_true(not v_bf.ok)
+    assert_true(not v_bf.unknown)
+    assert_equal(v_bf.code, String("layout-bitfield"))
+    assert_equal(
+        v_bf.reason,
+        String(
+            "layout: mvt_dev.offline_disabled is a bitfield (unsupported)"
+        ),
+    )
+    # Disagreeing definitions refuse with the resolver message.
+    var doc_amb = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                _v012_field(
+                    String("copy-actual"),
+                    String("mvt_dup"),
+                    String("flags"),
+                    String("int"),
+                    32,
+                    False,
+                )
+            )
+        )
+    )
+    var lines_amb = List[String]()
+    var v_amb = verify_core_layouts(
+        Span(raw), doc_amb.layouts, String("copy-actual"), lines_amb
+    )
+    assert_true(not v_amb.ok)
+    assert_equal(v_amb.code, String("layout-ambiguous"))
+    assert_equal(
+        v_amb.reason,
+        String("struct mvt_dup: 2 definitions disagree on flags"),
+    )
+
+
+def test_core_layout_reader_failure() raises:
+    # A truncated blob is unknown with the health code, never refused.
+    var raw = List[UInt8]()
+    raw.append(UInt8(0))
+    raw.append(UInt8(1))
+    var doc = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                _v012_field(
+                    String("copy-actual"),
+                    String("s"),
+                    String("f"),
+                    String("int"),
+                    8,
+                    False,
+                )
+            )
+        )
+    )
+    var lines = List[String]()
+    var v = verify_core_layouts(
+        Span(raw), doc.layouts, String("copy-actual"), lines
+    )
+    assert_true(not v.ok)
+    assert_true(v.unknown)
+    assert_equal(v.code, String("btf-truncated"))
+
+
+def test_verify_live_v012_evidence() raises:
+    var doc = parse_profile_bytes(
+        bytes_of(
+            _v012_doc(
+                _v012_field(
+                    String("copy-actual"),
+                    String("io_tlb_pool"),
+                    String("start"),
+                    String("int"),
+                    64,
+                    False,
+                )
+            )
+        )
+    )
+    var caps = List[String]()
+    caps.append(String("copy-actual"))
+    var v = verify_live_interfaces(
+        fx("kernel-38"), doc^, caps^
+    )
+    assert_true(v.ok)
+    assert_equal(v.reason, String(""))
+    assert_equal(len(v.evidence), 1)
+    assert_equal(
+        v.evidence[0],
+        String("io_tlb_pool.start: offset 0 bits, size 64 bits"),
+    )
+
+
 def _mint_live() raises -> String:
     """Mint a local-auto receipt over live-measured bindings."""
     var r = open_evidence_reader(fx("kernel-38"))
@@ -2838,93 +3271,6 @@ def test_live_receipt_object_drift_refuses() raises:
     )
 
 
-def test_discover_live38_candidate_available() raises:
-    # A covering reference doc carries has_profile without
-    # matched (only validated matches); the live path
-    # judges that real decision against kernel-38 evidence.
-    var r = open_evidence_reader(fx("kernel-38"))
-    var env = detect_environment(r)
-    var ps = List[Profile]()
-    ps.append(parse_profile_bytes(bytes_of(live_ref_doc())))
-    var d = select_profile(env.kernel, ps^)
-    assert_true(not d.matched)
-    assert_true(d.has_profile)
-    var rep = discover_capabilities(r, d^)
-    var l = find_entry(rep, String("mapping-lifecycle"))
-    assert_equal(l.status, String("available"))
-    assert_equal(
-        l.reason,
-        String("live-verified under reference profile t-live"),
-    )
-
-
-def reference_recorded_doc() -> String:
-    """One reference doc recording the ready-validated format bytes."""
-    return String(
-        '{"schema_version":"0.1.1","profile_id":"t3",'
-        '"status":"reference-unvalidated",'
-        '"identity":{"arch":"x86_64","min_kernel":"7.0",'
-        '"source":{"origin":"o","revision":"r"}},'
-        '"hooks":[{"name":"swiotlb:swiotlb_bounced","kind":"tracepoint",'
-        '"id_path":"/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/id",'
-        '"format_path":"/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format",'
-        '"format_text":"name: swiotlb_bounced\\nID: 1901\\nformat:\\n'
-        '\\tfield:unsigned int test_field;\\toffset:0;\\tsize:4;'
-        '\\tsigned:0;\\n\\nprint fmt: \\"test_field=%u\\",'
-        ' REC->test_field\\n"}],'
-        '"capabilities":[{"id":"attempt-trace","status":"candidate",'
-        '"hooks":["swiotlb:swiotlb_bounced"],"reason":"r"}]}'
-    )
-
-
-def test_discover_candidate_reference_verified() raises:
-    var r = open_evidence_reader(fx("ready-validated"))
-    var env = detect_environment(r)
-    var ps = List[Profile]()
-    ps.append(parse_profile_bytes(bytes_of(reference_recorded_doc())))
-    var d = select_profile(env.kernel, ps^)
-    assert_true(not d.matched)
-    assert_true(d.has_profile)
-    var rep = discover_capabilities(r, d^)
-    var a = find_entry(rep, String("attempt-trace"))
-    # The ready-validated root carries a synthetic format the
-    # offset probe cannot parse, so the live judgment fails
-    # with the layout cause, not "unproven".
-    assert_equal(a.status, String("unavailable"))
-    assert_equal(
-        a.reason,
-        String("layout: missing field common_type"),
-    )
-
-
-def test_discover_candidate_validated() raises:
-    var r = open_evidence_reader(fx("ordinary-7.0"))
-    var env = detect_environment(r)
-    var ps = List[Profile]()
-    ps.append(parse_profile_bytes(bytes_of(validated_doc(String("candidate")))))
-    var d = select_profile(env.kernel, ps^)
-    assert_true(d.matched)
-    var rep = discover_capabilities(r, d^)
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("unknown"))
-    assert_equal(
-        a.reason,
-        String(
-            "candidate under validated profile t2:"
-            " hooks present, support unproven"
-        ),
-    )
-
-
-def test_discover_vacuous_available() raises:
-    var r = open_evidence_reader(fx("ordinary-7.0"))
-    var env = detect_environment(r)
-    var ps = List[Profile]()
-    ps.append(parse_profile_bytes(bytes_of(validated_doc(String("supported")))))
-    var d = select_profile(env.kernel, ps^)
-    var rep = discover_capabilities(r, d^)
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("available"))
 
 
 def test_select_bound_receipt_grade_caps() raises:
@@ -3044,216 +3390,6 @@ def test_select_bound_validated_grade_caps() raises:
     assert_equal(len(d.receipt_caps), 0)
 
 
-def _local_auto_doc(lc_status: String) -> String:
-    """Reference doc: supported attempt + lc_status lifecycle.
-
-    The lifecycle hooks match the frozen bindings exactly
-    so receipt-scope judgments, not tracing gaps, decide.
-    """
-    return (
-        String(
-            '{"schema_version":"0.1.1","profile_id":"la",'
-            '"status":"reference-unvalidated",'
-            '"identity":{"arch":"x86_64","min_kernel":"7.0",'
-            '"source":{"origin":"o","revision":"r"}},'
-            '"hooks":['
-        )
-        + _frozen_hooks_json(lc_trace())
-        + String(
-            '],"capabilities":[{"id":"attempt-trace",'
-            '"status":"supported","hooks":[],"reason":"r"},'
-            '{"id":"mapping-lifecycle","status":"'
-        )
-        + lc_status
-        + String('","hooks":[')
-        + _frozen_hook_names_json(lc_trace())
-        + String('],"reason":"r"}]}')
-    )
-
-
-def _local_auto_decision(caps: List[String]) raises -> ProfileDecision:
-    var p = parse_profile_bytes(bytes_of(_local_auto_doc(String("candidate"))))
-    return ProfileDecision(
-        True,
-        True,
-        p^,
-        String("profile la matched (local-auto)"),
-        String("local-auto"),
-        caps,
-    )
-
-
-def test_discover_local_auto_qualified() raises:
-    var r = open_evidence_reader(fx("ordinary-7.0"))
-    var caps = List[String]()
-    caps.append(String("attempt-trace"))
-    var d = _local_auto_decision(caps^)
-    var rep = discover_capabilities(r, d^)
-    var a = find_entry(rep, String("attempt-trace"))
-    assert_equal(a.status, String("available"))
-    assert_equal(
-        a.reason, String("verified under local-auto receipt la")
-    )
-    var l = find_entry(rep, String("mapping-lifecycle"))
-    assert_equal(l.status, String("unknown"))
-    assert_equal(
-        l.reason,
-        String(
-            "candidate under local-auto profile la"
-            ": not qualified by this receipt"
-        ),
-    )
-
-
-def test_discover_local_auto_qualified_candidate() raises:
-    var r = open_evidence_reader(fx("ordinary-7.0"))
-    var caps = List[String]()
-    caps.append(String("attempt-trace"))
-    caps.append(String("mapping-lifecycle"))
-    var d = _local_auto_decision(caps^)
-    var rep = discover_capabilities(r, d^)
-    var l = find_entry(rep, String("mapping-lifecycle"))
-    assert_equal(l.status, String("available"))
-    assert_equal(
-        l.reason, String("verified under local-auto receipt la")
-    )
-
-
-def test_discover_local_auto_unqualified_supported() raises:
-    var r = open_evidence_reader(fx("ordinary-7.0"))
-    var p = parse_profile_bytes(
-        bytes_of(_local_auto_doc(String("supported")))
-    )
-    var caps = List[String]()
-    caps.append(String("attempt-trace"))
-    var d = ProfileDecision(
-        True,
-        True,
-        p^,
-        String("profile la matched (local-auto)"),
-        String("local-auto"),
-        caps^,
-    )
-    var rep = discover_capabilities(r, d^)
-    var l = find_entry(rep, String("mapping-lifecycle"))
-    assert_equal(l.status, String("unknown"))
-    assert_equal(
-        l.reason,
-        String(
-            "supported by profile la but not qualified by this receipt"
-        ),
-    )
-
-
-def _frozen_hooks_json(wants: List[TraceWant]) -> String:
-    """Hook array JSON rendered from frozen wants, in order."""
-    var out = String("")
-    for i in range(len(wants)):
-        if i > 0:
-            out += String(",")
-        var w = wants[i].copy()
-        out += String('{"name":"') + w.name.copy()
-        out += String('","kind":"tracing","function":"') + w.function.copy()
-        out += String('","attach":"') + w.attach.copy()
-        out += String('","signature":"') + w.signature.copy()
-        out += String('"}')
-    return out^
-
-
-def _frozen_hook_names_json(wants: List[TraceWant]) -> String:
-    """Quoted hook-name list JSON from frozen wants, in order."""
-    var out = String("")
-    for i in range(len(wants)):
-        if i > 0:
-            out += String(",")
-        out += String('"') + wants[i].name + String('"')
-    return out^
-
-
-def test_discover_local_auto_pathless_hook() raises:
-    # A hook with no probe paths configured (fentry/fexit
-    # have no tracefs id/format files) abstains from the
-    # file probes instead of failing them: empty paths
-    # are "never looked", not "looked and not found". The
-    # hooks still match the frozen bindings exactly.
-    var r = open_evidence_reader(fx("ordinary-7.0"))
-    var doc = (
-        '{"schema_version":"0.1.1","profile_id":"la",'
-        '"status":"reference-unvalidated",'
-        '"identity":{"arch":"x86_64","min_kernel":"7.0",'
-        '"source":{"origin":"o","revision":"r"}},'
-        '"hooks":[' + _frozen_hooks_json(lc_trace()) + '],'
-        '"capabilities":[{"id":"mapping-lifecycle",'
-        '"status":"candidate","hooks":['
-        + _frozen_hook_names_json(lc_trace())
-        + '],"reason":"r"}]}'
-    )
-    var p = parse_profile_bytes(bytes_of(doc))
-    var caps = List[String]()
-    caps.append(String("mapping-lifecycle"))
-    var d = ProfileDecision(
-        True,
-        True,
-        p^,
-        String("profile la matched (local-auto)"),
-        String("local-auto"),
-        caps^,
-    )
-    var rep = discover_capabilities(r, d^)
-    var l = find_entry(rep, String("mapping-lifecycle"))
-    assert_equal(l.status, String("available"))
-    assert_equal(
-        l.reason, String("verified under local-auto receipt la")
-    )
-
-
-def test_discover_tracing_gap_signature() raises:
-    # A post-mint signature edit refuses in doctor with
-    # record's exact reason instead of riding the receipt
-    # to available.
-    var r = open_evidence_reader(fx("ordinary-7.0"))
-    var hooks = _frozen_hooks_json(lc_trace())
-    var bad = hooks.replace(String("attrs)"), String("attrs!)"))
-    assert_true(bad != hooks)
-    var doc = (
-        '{"schema_version":"0.1.1","profile_id":"la",'
-        '"status":"reference-unvalidated",'
-        '"identity":{"arch":"x86_64","min_kernel":"7.0",'
-        '"source":{"origin":"o","revision":"r"}},'
-        '"hooks":[' + bad + '],'
-        '"capabilities":[{"id":"mapping-lifecycle",'
-        '"status":"candidate","hooks":['
-        + _frozen_hook_names_json(lc_trace())
-        + '],"reason":"r"}]}'
-    )
-    var p = parse_profile_bytes(bytes_of(doc))
-    var caps = List[String]()
-    caps.append(String("mapping-lifecycle"))
-    var d = ProfileDecision(
-        True,
-        True,
-        p^,
-        String("profile la matched (local-auto)"),
-        String("local-auto"),
-        caps^,
-    )
-    var rep = discover_capabilities(r, d^)
-    var l = find_entry(rep, String("mapping-lifecycle"))
-    assert_equal(l.status, String("unavailable"))
-    assert_equal(
-        l.reason,
-        String(
-            "capability mapping-lifecycle hook "
-            "fexit:swiotlb_tbl_map_single signature mismatch"
-        ),
-    )
-    assert_equal(
-        l.remedy,
-        String(
-            "align the profile's mapping-lifecycle hooks with"
-            " this build's frozen bindings, then re-qualify"
-        ),
-    )
 
 
 def _sig_doc(hooks_json: String, cap_hooks_json: String) -> String:
@@ -3308,10 +3444,12 @@ def test_sig_match() raises:
 
 
 def test_sig_mismatch() raises:
+    # Type spellings compare, never parameter names: a
+    # differing return type still mismatches loudly.
     var doc = _sig_doc(
         _tracing_hook(
             String("test_fn"),
-            String("int test_fn(struct device *dev, size_t length)"),
+            String("long test_fn(struct device *dev, size_t size)"),
         ),
         String('"fentry:test_fn"'),
     )
@@ -3354,6 +3492,79 @@ def test_sig_malformed_frozen() raises:
     assert_true(not vs[0].ok)
     assert_true(
         contains(vs[0].reason, String("frozen signature malformed"))
+    )
+
+
+def test_sig_names_ignored() raises:
+    var doc = _sig_doc(
+        _tracing_hook(
+            String("test_fn"),
+            String("int test_fn(struct device *d, size_t length)"),
+        ),
+        String('"fentry:test_fn"'),
+    )
+    var p = parse_profile_bytes(bytes_of(doc))
+    var raw = _sig_btf()
+    var vs = verify_hook_signatures(p, Span(raw))
+    assert_equal(len(vs), 1)
+    assert_true(vs[0].ok)
+    assert_equal(vs[0].reason, String(""))
+
+
+def test_sig_typedef_swap() raises:
+    var doc = _sig_doc(
+        _tracing_hook(
+            String("test_fn"),
+            String("int test_fn(struct device *dev, phys_addr_t size)"),
+        ),
+        String('"fentry:test_fn"'),
+    )
+    var p = parse_profile_bytes(bytes_of(doc))
+    var raw = _sig_btf()
+    var vs = verify_hook_signatures(p, Span(raw))
+    assert_equal(len(vs), 1)
+    assert_true(not vs[0].ok)
+    assert_true(contains(vs[0].reason, String("signature mismatch")))
+
+
+def test_sig_param_count() raises:
+    var doc = _sig_doc(
+        _tracing_hook(
+            String("test_fn"),
+            String(
+                "int test_fn(struct device *dev, size_t size, int extra)"
+            ),
+        ),
+        String('"fentry:test_fn"'),
+    )
+    var p = parse_profile_bytes(bytes_of(doc))
+    var raw = _sig_btf()
+    var vs = verify_hook_signatures(p, Span(raw))
+    assert_equal(len(vs), 1)
+    assert_true(not vs[0].ok)
+    assert_true(contains(vs[0].reason, String("signature mismatch")))
+
+
+def test_sig_width() raises:
+    var doc = _sig_doc(
+        _tracing_hook(
+            String("test_fn"),
+            String("int test_fn(struct device *dev, size_t size)"),
+        ),
+        String('"fentry:test_fn"'),
+    )
+    var p = parse_profile_bytes(bytes_of(doc))
+    var raw = read_host_file(
+        String("tests/fixtures/btf/sig-width.bin"),
+        String("fixture"),
+        67108864,
+    )
+    var vs = verify_hook_signatures(p, Span(raw))
+    assert_equal(len(vs), 1)
+    assert_true(not vs[0].ok)
+    assert_equal(
+        vs[0].reason,
+        String("fentry:test_fn: size_t width 32 bits (want 64)"),
     )
 
 
@@ -3508,17 +3719,19 @@ def run() raises -> Int:
     suite.test[test_select_68_covers_6plus_reference]()
     suite.test[test_select_empty]()
     suite.test[test_select_unparseable]()
-    suite.test[test_discover_candidate_unknown]()
-    suite.test[test_discover_hook_absent]()
-    suite.test[test_discover_remedy_qualify]()
-    suite.test[test_discover_hook_denied]()
-    suite.test[test_discover_68_attempt_judged]()
-    suite.test[test_discover_515_attempt_floor]()
+    suite.test[test_decide_oversized_format_judges]()
+    suite.test[test_decide_hookless_refuses]()
     suite.test[test_verify_live_ok]()
     suite.test[test_verify_live_sig_mismatch]()
     suite.test[test_verify_live_unattachable]()
     suite.test[test_verify_live_btf_absent]()
     suite.test[test_verify_live_btf_corrupt]()
+    suite.test[test_verify_live_btf_corrupt_unknown]()
+    suite.test[test_verify_live_btf_split_unknown]()
+    suite.test[test_verify_live_signame_accepted]()
+    suite.test[test_verify_live_sigswap_mismatch]()
+    suite.test[test_verify_live_sigwidth_refused]()
+    suite.test[test_frozen_sig_unnamed_params]()
     suite.test[test_verify_live_73_sig_mismatch]()
     suite.test[test_verify_live_73_alt_ok]()
     suite.test[test_verify_live_alt_malformed]()
@@ -3532,31 +3745,25 @@ def run() raises -> Int:
     suite.test[test_parse_layouts_ok]()
     suite.test[test_parse_layouts_negative_rejects]()
     suite.test[test_parse_layouts_too_many_rejects]()
-    suite.test[test_discover_live38_candidate_available]()
+    suite.test[test_parse_v012_layouts_ok]()
+    suite.test[test_parse_v012_rejects]()
+    suite.test[test_core_layout_live_ok]()
+    suite.test[test_core_layout_live_refusals]()
+    suite.test[test_core_layout_live_type_enum]()
+    suite.test[test_core_layout_bitfield_ambiguous]()
+    suite.test[test_core_layout_reader_failure]()
+    suite.test[test_verify_live_v012_evidence]()
     suite.test[test_live_receipt_roundtrip]()
     suite.test[test_live_receipt_drift_refuses]()
     suite.test[test_live_receipt_object_drift_refuses]()
-    suite.test[test_discover_no_cover]()
-    suite.test[test_discover_unparseable]()
-    suite.test[test_discover_available]()
-    suite.test[test_discover_changed]()
-    suite.test[test_discover_unreadable_format]()
-    suite.test[test_discover_denied_id_changed]()
-    suite.test[test_discover_validated_absent]()
-    suite.test[test_discover_undeclared]()
-    suite.test[test_discover_unsupported_terminal]()
-    suite.test[test_discover_candidate_reference_verified]()
-    suite.test[test_discover_candidate_validated]()
-    suite.test[test_discover_vacuous_available]()
     suite.test[test_select_bound_receipt_grade_caps]()
     suite.test[test_select_bound_validated_grade_caps]()
-    suite.test[test_discover_local_auto_qualified]()
-    suite.test[test_discover_local_auto_qualified_candidate]()
-    suite.test[test_discover_local_auto_unqualified_supported]()
-    suite.test[test_discover_local_auto_pathless_hook]()
-    suite.test[test_discover_tracing_gap_signature]()
     suite.test[test_sig_match]()
     suite.test[test_sig_mismatch]()
+    suite.test[test_sig_names_ignored]()
+    suite.test[test_sig_typedef_swap]()
+    suite.test[test_sig_param_count]()
+    suite.test[test_sig_width]()
     suite.test[test_sig_missing_function]()
     suite.test[test_sig_malformed_frozen]()
     suite.test[test_sig_skips_tracepoint]()

@@ -1,0 +1,1 @@
+BOOT_IMAGE=/vmlinuz root=/dev/vda1 lockdown=confidentiality

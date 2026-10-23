@@ -153,9 +153,6 @@ base_fixture missing-btf
 rm "$ROOT/missing-btf/sys/kernel/btf/vmlinux"
 rmdir "$ROOT/missing-btf/sys/kernel/btf"
 
-base_fixture missing-tracepoint
-rm -rf "$ROOT/missing-tracepoint/sys/kernel/tracing"
-
 # 13-14. denied evidence (content held to prove denied-wins)
 base_fixture denied-tracepoint
 write_meta "$ROOT/denied-tracepoint/meta.txt" "x86_64" "7.0.0-34-generic" \
@@ -168,30 +165,10 @@ write_cpuinfo "$ROOT/denied-guest-node/proc/cpuinfo" " sme sev"
 write_meta "$ROOT/denied-guest-node/meta.txt" "x86_64" "7.0.0-34-generic" \
   "1001" "denied=/dev/sev-guest"
 
-# 15-16. signature fixtures (consumed with profiles-test/)
-base_fixture changed-signature
-write_format "$ROOT/changed-signature/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format" 8
-
-# 16b-16c. drift-class fixtures (consumed with profiles-moved/,
-# whose recorded format is the pinned layout): live formats
-# that differ from the recording.
-base_fixture changed-moved
-cp "$ROOT/../layout/moved.format" \
-  "$ROOT/changed-moved/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format"
-base_fixture changed-trivial
-cp "$ROOT/../layout/ok.format" \
-  "$ROOT/changed-trivial/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format"
-printf '# local annotation, outside the layout\n' \
-  >> "$ROOT/changed-trivial/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format"
-
+# 15-16. oversized format (judged on content, never unknown).
 base_fixture oversized-format
 head -c 131073 /dev/zero \
   > "$ROOT/oversized-format/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format"
-
-base_fixture denied-id-changed
-write_format "$ROOT/denied-id-changed/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/format" 8
-write_meta "$ROOT/denied-id-changed/meta.txt" "x86_64" "7.0.0-34-generic" \
-  "1001" "denied=/sys/kernel/tracing/events/swiotlb/swiotlb_bounced/id"
 
 base_fixture conflicting-flags-sev-tdx
 mkdir -p "$ROOT/conflicting-flags-sev-tdx/dev"
@@ -221,11 +198,6 @@ write_meta "$ROOT/malformed-release/meta.txt" "x86_64" "not-a-kernel-release" \
 # Shared validated profiles dir for signature/ready tests.
 mkdir -p "$ROOT/profiles-test"
 printf 'test-validated.json\n' > "$ROOT/profiles-test/manifest.txt"
-
-# Drift-class profiles dir (hand-maintained moved-pinned.json
-# records the pinned layout; live fixtures above differ).
-mkdir -p "$ROOT/profiles-moved"
-printf 'moved-pinned.json\n' > "$ROOT/profiles-moved/manifest.txt"
 
 # Binding-selection fixtures. bound-host replays the narrow/ok
 # identity tree (single source of truth) under release 7.0.0-test;

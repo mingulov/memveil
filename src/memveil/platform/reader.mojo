@@ -43,6 +43,8 @@ comptime E_UNAME = UInt32(7)
 
 comptime _MODE_F_OK = 0
 comptime _MODE_R_OK = 4
+comptime _AT_FDCWD = -100
+comptime _AT_EACCESS = 512
 comptime _ENOENT = 2
 comptime _FS_TMPFS = 0x01021994
 comptime _FS_EXT = 0xEF53
@@ -544,6 +546,53 @@ def file_state(reader: EvidenceReader, path: String) -> Int:
     if _errno_now() == _ENOENT:
         return EVIDENCE_ABSENT
     return EVIDENCE_DENIED
+
+
+def host_file_denied(path: String) -> Bool:
+    """True when a host path exists but reads as denied.
+
+    Host paths (profiles, receipts) are never
+    fixture-mapped: access() decides, with errno telling
+    absence from refusal, mirroring file_state.
+    """
+    var cpath = _to_cstr_local(path)
+    var r = external_call["access", Int32](
+        Span(cpath).unsafe_ptr(), _MODE_F_OK
+    )
+    if Int(r) == 0:
+        var cpath2 = _to_cstr_local(path)
+        var r2 = external_call["access", Int32](
+            Span(cpath2).unsafe_ptr(), _MODE_R_OK
+        )
+        return Int(r2) != 0
+    return _errno_now() != _ENOENT
+
+
+def exists_f_ok(reader: EvidenceReader, path: String) -> Bool:
+    """Mirror faccessat(path, F_OK, AT_EACCESS): existence with teeth.
+
+    True when the mapped path exists. A fixture strict
+    ancestor listed in denied= hides the path (a live
+    EACCES on a parent reads the same); a denied path
+    itself still exists, since denied is never absent.
+    Effective ids match the loader, so a capability-held
+    caller sees the same tracefs root libbpf opens.
+    """
+    var parts = path.split(String("/"))
+    var acc = String("")
+    for i in range(1, len(parts) - 1):
+        acc += String("/") + String(parts[i])
+        if is_denied(reader, acc):
+            return False
+    var mapped = evidence_path(reader, path)
+    var cpath = _to_cstr_local(mapped)
+    var r = external_call["faccessat", Int32](
+        Int32(_AT_FDCWD),
+        Span(cpath).unsafe_ptr(),
+        Int32(_MODE_F_OK),
+        Int32(_AT_EACCESS),
+    )
+    return Int(r) == 0
 
 
 def read_evidence(

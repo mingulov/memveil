@@ -2,6 +2,7 @@
 
 """Admission-scan decisions over fixture roots and bound docs."""
 
+from std.ffi import external_call
 from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
 
@@ -10,19 +11,28 @@ from scripted import ScriptWriter
 from memveil.capture.run import (
     RecordOptions,
     ScanDecision,
+    _append_layout_evidence,
+    _load_fail_channel,
     decide_record,
+    loadcheck_bridge_sha,
+    parse_requested_caps,
     render_provenance,
     run_collector_with,
 )
+from memveil.model.session import EvidenceItem
 from memveil.cli.record import run_record_with
 from memveil.platform.evidence import KernelInfo
+from memveil.platform.kernelgate import remedy_for
 from memveil.platform.narrow import LiveValue
 from memveil.platform.profiles import (
     Profile,
     load_profiles,
     parse_profile_bytes,
 )
+from memveil.platform.hash import sha256_hex
 from memveil.platform.reader import (
+    _geteuid_live,
+    bytes_to_text,
     fs_type_name,
     read_host_file,
     readlink_self,
@@ -401,6 +411,503 @@ def test_scan_live38_lc_candidate() raises:
     )
     assert_equal(d.measured_btf.state, String("value"))
     assert_equal(d.measured_btf.value.byte_length(), 64)
+
+
+def test_scan_gate_lockdown_refuses() raises:
+    var d = decide_record(
+        String("tests/fixtures/gate/lockdown-conf"),
+        _kernel_38(),
+        load_profiles(String(_PROFILES_LIVE)),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(""),
+        String("attempt-trace,mapping-lifecycle"),
+        String(""),
+        String(""),
+    )
+    assert_true(not d.ok)
+    assert_equal(d.refusal_code, String("lockdown-confidentiality"))
+    assert_equal(d.fix, remedy_for(String("lockdown-confidentiality")))
+
+
+def test_scan_caps_all() raises:
+    var all = parse_requested_caps(String("all"))
+    assert_true(all.ok)
+    assert_equal(len(all.caps), 3)
+    assert_equal(all.caps[0], String("attempt-trace"))
+    assert_equal(all.caps[1], String("mapping-lifecycle"))
+    assert_equal(all.caps[2], String("copy-actual"))
+    var mixed = parse_requested_caps(String("attempt-trace,all"))
+    assert_true(not mixed.ok)
+
+
+def test_scan_gate_passes_live38() raises:
+    var d = decide_record(
+        String("tests/fixtures/gate/base"),
+        _kernel_38(),
+        load_profiles(String(_PROFILES_LIVE)),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(""),
+        String("attempt-trace,mapping-lifecycle"),
+        String(""),
+        String(""),
+    )
+    assert_true(d.ok)
+    assert_equal(d.kind, String("candidate"))
+
+
+def test_run_carries_fix() raises:
+    var opts = _opts(String("build/scan-gate-fix"))
+    opts.capabilities = String("attempt-trace")
+    var writer = ScriptWriter()
+    var result = run_collector_with(
+        String("tests/fixtures/gate/lockdown-conf"),
+        String(_PROFILES_LIVE),
+        opts^,
+        writer,
+    )
+    assert_equal(result.exit_code, 3)
+    assert_true(
+        result.diagnostic.startswith(
+            String("kernel lockdown is confidentiality")
+        )
+    )
+    assert_equal(result.fix, remedy_for(String("lockdown-confidentiality")))
+    assert_equal(result.code, String("lockdown-confidentiality"))
+    assert_true(not result.unknown)
+    assert_true(result.trusted)
+
+
+def test_run_carries_live_code() raises:
+    var opts = _opts(String("build/scan-live-code"))
+    opts.capabilities = String("attempt-trace,mapping-lifecycle")
+    opts.lc_object = String(_ELF_LC)
+    var writer = ScriptWriter()
+    var result = run_collector_with(
+        String("tests/fixtures/gate/ftrace-off"),
+        String(_PROFILES_LIVE),
+        opts^,
+        writer,
+    )
+    assert_equal(result.exit_code, 3)
+    assert_equal(result.code, String("ftrace-disabled"))
+    assert_true(not result.unknown)
+    assert_equal(result.fix, remedy_for(String("ftrace-disabled")))
+
+
+def test_run_infra_refusal_untrusted() raises:
+    # Infrastructure errors embed caller paths, so their
+    # diagnostic stays on the scrubbing write path.
+    var opts = _opts(String("build/scan-infra"))
+    var writer = ScriptWriter()
+    var result = run_collector_with(
+        String("tests/fixtures/gate/base"),
+        String("no-such-profiles-dir"),
+        opts^,
+        writer,
+    )
+    assert_equal(result.exit_code, 3)
+    assert_true(
+        result.diagnostic.startswith(String("cannot load profiles"))
+    )
+    assert_true(not result.trusted)
+
+
+def test_load_fail_channel() raises:
+    # The verifier replay diagnoses the blamed object's
+    # load; untagged diagnostics replay the attempt load.
+    assert_equal(
+        _load_fail_channel(String("ch0 op=load code=-22")), 0
+    )
+    assert_equal(
+        _load_fail_channel(String("ch1 op=load code=-22")), 1
+    )
+    assert_equal(
+        _load_fail_channel(String("ch2 op=load code=-13")), 2
+    )
+    assert_equal(_load_fail_channel(String("op=load code=-22")), 0)
+    assert_equal(
+        _load_fail_channel(
+            String("signal: stop; ch2 op=load code=-13")
+        ),
+        2,
+    )
+    assert_equal(_load_fail_channel(String("")), 0)
+
+
+def test_loadcheck_bridge_sha() raises:
+    # Load-check admission binds receipts to the resolved
+    # bridge's bytes; an unreadable bridge hashes to "".
+    var lib = String("tests/fixtures/elf/ok.o")
+    var raw = read_host_file(lib.copy(), String("bridge"), 67108864)
+    assert_equal(
+        loadcheck_bridge_sha(lib, True), sha256_hex(Span(raw))
+    )
+    assert_equal(
+        loadcheck_bridge_sha(String("no-such-bridge.so"), True),
+        String(""),
+    )
+
+
+def test_scan_gate_order_explicit_gap_first() raises:
+    # A declared-unsupported capability refuses before the
+    # privilege gate: privilege cannot satisfy it.
+    var d = decide_record(
+        String("tests/fixtures/gate/lockdown-conf"),
+        _kernel_38(),
+        load_profiles(String(_PROFILES)),
+        String(_PROFILES) + String("/ref.json"),
+        True,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(""),
+        String("attempt-trace,mapping-lifecycle"),
+        String(""),
+        String(""),
+    )
+    assert_true(not d.ok)
+    assert_equal(
+        d.refusal,
+        String("capability mapping-lifecycle unsupported by scan-ref"),
+    )
+
+
+def test_scan_gate_order_empty_order_first() raises:
+    # No receipt routes a noted-only profile, and no live
+    # path exists, so the routing refusal precedes the gate.
+    var d = decide_record(
+        String("tests/fixtures/gate/lockdown-conf"),
+        _kernel_38(),
+        load_profiles(String("tests/fixtures/scan/profiles-noted")),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(""),
+        String("attempt-trace,mapping-lifecycle"),
+        String("tests/fixtures/scan/profiles-noted"),
+        String(""),
+    )
+    assert_true(not d.ok)
+    assert_equal(
+        d.refusal, String("no profile satisfies requested capabilities")
+    )
+
+
+def _write_tmp_file(path: String, data: List[UInt8]) raises:
+    """Write bytes to a test-temporary path, truncating."""
+    var cb = List[UInt8]()
+    for b in path.as_bytes():
+        cb.append(b)
+    cb.append(UInt8(0))
+    var cm = List[UInt8]()
+    for b in String("wb").as_bytes():
+        cm.append(b)
+    cm.append(UInt8(0))
+    var fp = external_call["fopen", UInt64](
+        Span(cb).unsafe_ptr(), Span(cm).unsafe_ptr()
+    )
+    if fp == 0:
+        raise Error(String("cannot write tmp file"))
+    var n = external_call["fwrite", Int64](
+        Span(data).unsafe_ptr(), 1, len(data), fp
+    )
+    _ = external_call["fclose", Int32](fp)
+    if Int(n) != len(data):
+        raise Error(String("short tmp write"))
+
+
+def _mkdir_tmp(path: String) raises:
+    """Create one test-temporary directory, ignoring EEXIST."""
+    var cb = List[UInt8]()
+    for b in path.as_bytes():
+        cb.append(b)
+    cb.append(UInt8(0))
+    _ = external_call["mkdir", Int32](
+        Span(cb).unsafe_ptr(), 0o755
+    )
+
+
+def test_scan_gate_unreadable_refuses() raises:
+    # An unreadable evidence root refuses unknown; the
+    # gate never silently skips.
+    var d = decide_record(
+        String("tests/fixtures/gate/no-such-dir"),
+        _kernel_38(),
+        load_profiles(String(_PROFILES_LIVE)),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(""),
+        String("attempt-trace,mapping-lifecycle"),
+        String(""),
+        String(""),
+    )
+    assert_true(not d.ok)
+    assert_true(
+        d.refusal.startswith(String("kernel gate unreadable: "))
+    )
+    assert_true(d.refusal_unknown)
+
+
+def test_scan_gate_order_denied_receipt_reaches_gate() raises:
+    # A receipt dropped for denied evidence keeps the empty
+    # order behind the gate. Root skips: chmod cannot deny
+    # root, so the setup cannot model denial there.
+    if _geteuid_live() == 0:
+        return
+    var tmpdir = String("build/test-tmp/gate-order")
+    _mkdir_tmp(String("build/test-tmp"))
+    _mkdir_tmp(tmpdir)
+    _mkdir_tmp(tmpdir + String("/receipts"))
+    var srcdir = String("tests/fixtures/scan/profiles-noted")
+    var doc = read_host_file(
+        srcdir + String("/noted.json"), String("profile"), 1048576
+    )
+    _write_tmp_file(tmpdir + String("/noted.json"), doc^)
+    var man = read_host_file(
+        srcdir + String("/manifest.txt"), String("manifest"), 1048576
+    )
+    _write_tmp_file(tmpdir + String("/manifest.txt"), man^)
+    var bogus = List[UInt8]()
+    for b in String("{\"bogus\": true}\n").as_bytes():
+        bogus.append(b)
+    var rpath = tmpdir + String("/receipts/scan-noted.json")
+    var cr = List[UInt8]()
+    for b in rpath.as_bytes():
+        cr.append(b)
+    cr.append(UInt8(0))
+    # A previous run leaves the receipt unreadable; reopen it.
+    _ = external_call["chmod", Int32](
+        Span(cr).unsafe_ptr(), Int32(0o644)
+    )
+    _write_tmp_file(rpath, bogus^)
+    _ = external_call["chmod", Int32](
+        Span(cr).unsafe_ptr(), Int32(0)
+    )
+    var d = decide_record(
+        String("tests/fixtures/gate/lockdown-conf"),
+        _kernel_38(),
+        load_profiles(tmpdir),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(""),
+        String("attempt-trace,mapping-lifecycle"),
+        tmpdir,
+        String(""),
+    )
+    assert_true(not d.ok)
+    assert_true(
+        d.refusal.startswith(
+            String("kernel lockdown is confidentiality")
+        )
+    )
+    assert_equal(d.refusal_code, String("lockdown-confidentiality"))
+
+
+def test_scan_unknown_profile_basename() raises:
+    # Refusal reasons never embed caller directory layout.
+    var d = decide_record(
+        String("tests/fixtures/gate/base"),
+        _kernel_38(),
+        load_profiles(String(_PROFILES_LIVE)),
+        String("some/dir/nonexistent.json"),
+        True,
+        String(_ELF_OK),
+        String(""),
+        String(""),
+        String("attempt-trace"),
+        String(""),
+        String(""),
+    )
+    assert_true(not d.ok)
+    assert_equal(
+        d.refusal, String("unknown --profile: nonexistent.json")
+    )
+
+
+def _live_decision(fxname: String) raises -> ScanDecision:
+    """Refuse attempt plus lifecycle on one gate fixture."""
+    return decide_record(
+        String("tests/fixtures/gate/") + fxname,
+        _kernel_38(),
+        load_profiles(String(_PROFILES_LIVE)),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(""),
+        String("attempt-trace,mapping-lifecycle"),
+        String(""),
+        String(""),
+    )
+
+
+def test_scan_live_btf_truncated_unknown() raises:
+    var d = _live_decision(String("btf-truncated"))
+    assert_true(not d.ok)
+    assert_true(d.refusal_unknown)
+    assert_equal(d.refusal_code, String("btf-truncated"))
+    assert_equal(d.fix, remedy_for(String("btf-truncated")))
+
+
+def test_scan_id_absent_admits() raises:
+    # Admission never reads the tracepoint id file: the
+    # id-less tree admits exactly like base.
+    var d = _live_decision(String("id-absent"))
+    assert_true(d.ok)
+    assert_equal(d.kind, String("candidate"))
+    assert_equal(
+        d.reason,
+        String(
+            "candidate scan-live-ref: live interfaces verified"
+            " (profile unvalidated)"
+        ),
+    )
+
+
+def test_scan_live_ftrace_disabled_fix() raises:
+    var d = _live_decision(String("ftrace-off"))
+    assert_true(not d.ok)
+    assert_true(not d.refusal_unknown)
+    assert_equal(d.refusal_code, String("ftrace-disabled"))
+    assert_equal(d.fix, remedy_for(String("ftrace-disabled")))
+    assert_true(d.refusal.startswith(String("live check failed: ")))
+
+
+def test_scan_live_hook_ambiguous_code() raises:
+    var d = _live_decision(String("aff-dup"))
+    assert_true(not d.ok)
+    assert_true(not d.refusal_unknown)
+    assert_equal(d.refusal_code, String("hook-ambiguous"))
+    assert_equal(d.fix, remedy_for(String("hook-ambiguous")))
+
+
+def test_scan_live_hook_absent_code() raises:
+    var d = _live_decision(String("hook-absent"))
+    assert_true(not d.ok)
+    assert_true(not d.refusal_unknown)
+    assert_equal(d.refusal_code, String("btf-hook-absent"))
+    assert_equal(d.fix, remedy_for(String("btf-hook-absent")))
+
+
+def test_scan_signame_btf_accepted() raises:
+    # A BTF-side rename is not a signature change.
+    var d = _live_decision(String("sig-rename"))
+    assert_true(d.ok)
+    assert_equal(d.kind, String("candidate"))
+
+
+def _bytes_of(s: String) -> List[UInt8]:
+    """Copy a String into a byte list for the document parser."""
+    var out = List[UInt8]()
+    for b in s.as_bytes():
+        out.append(b)
+    return out^
+
+
+def _live_decision_renamed_doc() raises -> ScanDecision:
+    """Record decision with a doc-side parameter rename."""
+    var raw = read_host_file(
+        String(_PROFILES_LIVE) + String("/live-ref.json"),
+        String("profile"),
+        1048576,
+    )
+    var text = bytes_to_text(raw^)
+    var renamed = text.replace(
+        String("size_t mapping_size"), String("size_t mapping_sizX")
+    )
+    var one = List[Profile]()
+    one.append(parse_profile_bytes(_bytes_of(renamed)))
+    return decide_record(
+        String("tests/fixtures/gate/base"),
+        _kernel_38(),
+        one^,
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(""),
+        String("attempt-trace,mapping-lifecycle"),
+        String(""),
+        String(""),
+    )
+
+
+def test_scan_signame_doc_accepted() raises:
+    # A doc-side rename binds: names never compare.
+    var d = _live_decision_renamed_doc()
+    assert_true(d.ok)
+    assert_equal(d.kind, String("candidate"))
+
+
+def test_scan_sigswap_refused_code() raises:
+    var d = _live_decision(String("sig-swap"))
+    assert_true(not d.ok)
+    assert_true(not d.refusal_unknown)
+    assert_equal(d.refusal_code, String("signature-mismatch"))
+    assert_equal(d.fix, remedy_for(String("signature-mismatch")))
+
+
+def _live_decision_skewed_doc() raises -> ScanDecision:
+    """Record decision with a doc-side parameter type swap."""
+    var raw = read_host_file(
+        String(_PROFILES_LIVE) + String("/live-ref.json"),
+        String("profile"),
+        1048576,
+    )
+    var text = bytes_to_text(raw^)
+    var skewed = text.replace(
+        String("phys_addr_t orig_addr, size_t mapping_size"),
+        String("size_t orig_addr, phys_addr_t mapping_size"),
+    )
+    var one = List[Profile]()
+    one.append(parse_profile_bytes(_bytes_of(skewed)))
+    return decide_record(
+        String("tests/fixtures/gate/base"),
+        _kernel_38(),
+        one^,
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(""),
+        String("attempt-trace,mapping-lifecycle"),
+        String(""),
+        String(""),
+    )
+
+
+def test_scan_docskew_refuses_named_gap() raises:
+    # A doc-side type swap refuses pre-gate with the named
+    # tracing gap; the live signature never gets consulted.
+    var d = _live_decision_skewed_doc()
+    assert_true(not d.ok)
+    assert_true(not d.refusal_unknown)
+    assert_equal(
+        d.refusal,
+        String(
+            "capability mapping-lifecycle hook"
+            " fexit:swiotlb_tbl_map_single signature mismatch"
+        ),
+    )
+    assert_equal(d.refusal_code, String("profile"))
+
+
+def test_scan_sigwidth_refused_code() raises:
+    var d = _live_decision(String("sig-width"))
+    assert_true(not d.ok)
+    assert_true(not d.refusal_unknown)
+    assert_equal(d.refusal_code, String("signature-width"))
+    assert_equal(d.fix, remedy_for(String("signature-width")))
 
 
 def test_scan_live_explicit_candidate() raises:
@@ -1201,6 +1708,30 @@ def test_scan_receipt_bridge_unknown_partial() raises:
     )
 
 
+def test_scan_receipt_bridge_unchecked_unknown() raises:
+    # Extras cannot ride a receipt past an unchecked
+    # bridge, but the receipt is otherwise valid: the
+    # refusal is unknown, not "no profile satisfies".
+    var d = decide_record(
+        String(_OK),
+        _kernel(),
+        _ref_profiles(String("ref-lc.json")),
+        String(""),
+        False,
+        String(_ELF_OK),
+        String(_ELF_LC),
+        String(_ELF_CP),
+        String(_CAPS3),
+        String(_PROFILES),
+        String(""),
+    )
+    assert_true(not d.ok)
+    assert_true(d.refusal_unknown)
+    assert_equal(d.refusal_code, String("bridge-unchecked"))
+    assert_true(contains(d.refusal, String("bridge unchecked")))
+    assert_equal(d.fix, remedy_for(String("bridge-unchecked")))
+
+
 def test_scan_moved_layout_refuses_named_diff() raises:
     # The moved/ root carries a format whose size field
     # drifted. The hook probe admits offset-only drift,
@@ -1274,6 +1805,58 @@ def test_scan_moved_reauthored_admits_offsets() raises:
     assert_equal(d.off_fixed_end, 49)
 
 
+def test_layout_evidence_items() raises:
+    # One checked layout line becomes one layout item naming
+    # kernel BTF as its source.
+    var evidence = List[EvidenceItem]()
+    var lines = List[String]()
+    lines.append(
+        String("io_tlb_pool.start: offset 0 bits, size 64 bits")
+    )
+    lines.append(String("mvt_dev: size 6144 bits"))
+    _append_layout_evidence(evidence, lines)
+    assert_equal(len(evidence), 2)
+    assert_equal(evidence[0].item_type, String("layout"))
+    assert_equal(evidence[0].source, String("kernel BTF"))
+    assert_equal(
+        evidence[0].interpretation,
+        String("io_tlb_pool.start: offset 0 bits, size 64 bits"),
+    )
+    assert_equal(evidence[1].item_type, String("layout"))
+    assert_equal(
+        evidence[1].interpretation, String("mvt_dev: size 6144 bits")
+    )
+
+
+def contains(hay: String, needle: String) -> Bool:
+    """True when needle occurs in hay at least once."""
+    return len(hay.split(String(needle))) > 1
+
+
+def test_scan_format_error_names_path() raises:
+    # A denied format refuses with its path and the denial.
+    var d = _decide_lc(
+        String("tests/fixtures/gate/format-denied"),
+        String(_PROFILES) + String("/movedok.json"),
+        True,
+        String(_ELF_OK),
+        String(""),
+        String(""),
+        String(""),
+    )
+    assert_true(not d.ok)
+    assert_true(
+        d.refusal.startswith(
+            String(
+                "format unreadable:"
+                " /sys/kernel/tracing/events/swiotlb/swiotlb_bounced"
+                "/format: "
+            )
+        )
+    )
+    assert_true(contains(d.refusal, String("denied")))
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_scan_valid_lc_record]()
@@ -1308,6 +1891,29 @@ def run() raises -> Int:
     suite.test[test_scan_skew_partial]()
     suite.test[test_scan_explicit_candidate]()
     suite.test[test_scan_live38_lc_candidate]()
+    suite.test[test_scan_gate_lockdown_refuses]()
+    suite.test[test_scan_caps_all]()
+    suite.test[test_scan_gate_passes_live38]()
+    suite.test[test_run_carries_fix]()
+    suite.test[test_run_carries_live_code]()
+    suite.test[test_run_infra_refusal_untrusted]()
+    suite.test[test_load_fail_channel]()
+    suite.test[test_loadcheck_bridge_sha]()
+    suite.test[test_scan_gate_order_explicit_gap_first]()
+    suite.test[test_scan_gate_order_empty_order_first]()
+    suite.test[test_scan_gate_unreadable_refuses]()
+    suite.test[test_scan_gate_order_denied_receipt_reaches_gate]()
+    suite.test[test_scan_unknown_profile_basename]()
+    suite.test[test_scan_live_btf_truncated_unknown]()
+    suite.test[test_scan_id_absent_admits]()
+    suite.test[test_scan_live_ftrace_disabled_fix]()
+    suite.test[test_scan_live_hook_ambiguous_code]()
+    suite.test[test_scan_live_hook_absent_code]()
+    suite.test[test_scan_signame_btf_accepted]()
+    suite.test[test_scan_signame_doc_accepted]()
+    suite.test[test_scan_sigswap_refused_code]()
+    suite.test[test_scan_docskew_refuses_named_gap]()
+    suite.test[test_scan_sigwidth_refused_code]()
     suite.test[test_scan_live_explicit_candidate]()
     suite.test[test_scan_no_object_refuses]()
     suite.test[test_scan_explicit_mismatch_refuses]()
@@ -1324,9 +1930,12 @@ def run() raises -> Int:
     suite.test[test_scan_receipt_disabled_partial]()
     suite.test[test_scan_receipt_stale_bindings_partial]()
     suite.test[test_scan_receipt_bridge_mismatch_partial]()
+    suite.test[test_scan_receipt_bridge_unchecked_unknown]()
     suite.test[test_scan_receipt_bridge_unknown_partial]()
     suite.test[test_scan_moved_layout_refuses_named_diff]()
     suite.test[test_scan_moved_reauthored_admits_offsets]()
+    suite.test[test_layout_evidence_items]()
+    suite.test[test_scan_format_error_names_path]()
     suite^.run()
     return 0
 

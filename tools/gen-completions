@@ -39,13 +39,16 @@ FROZEN_FLAGS = {
             "--max-events-bytes", "--max-line-bytes",
             "--max-session-bytes", "--object", "--output",
             "--profile", "--profiles-dir", "-h"),
-    "doctor": ("--help", "--json", "--profiles-dir", "-h"),
+    "doctor": ("--bridge", "--capability", "--cp-object",
+               "--help", "--json", "--lc-object", "--load-check",
+               "--object", "--profiles-dir", "-h"),
     "qualify": ("--bridge", "--capability", "--cp-object",
                 "--help", "--lc-object", "--object",
                 "--output", "--profile", "--profiles-dir", "-h"),
 }
 FROZEN_FORMAT_VALUES = ("text", "json", "markdown")
-FROZEN_NOVALUE_FLAGS = ("--help", "--allow-partial", "--json", "-h")
+FROZEN_NOVALUE_FLAGS = ("--help", "--allow-partial", "--json",
+                          "--load-check", "-h")
 
 # One-line zsh descriptions; flag presence (not these words)
 # is what the drift guard pins.
@@ -62,6 +65,7 @@ _ZSH_DESC = {
     "--interval": "refresh interval",
     "--json": "print the JSON report",
     "--lc-object": "lifecycle channel object",
+    "--load-check": "load objects without attaching",
     "--long-lived-after": "long-lived finding age",
     "--max-events-bytes": "total work cap",
     "--max-line-bytes": "per-record cap",

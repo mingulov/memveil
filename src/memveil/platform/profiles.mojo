@@ -32,8 +32,25 @@ from memveil.model.common import (
 )
 from memveil.model.validate import ValidationError, check_bounded_text
 from memveil.platform.artifact_files import join_root
-from memveil.platform.btf import read_btf_func_proto, read_btf_member
+from memveil.platform.btf import (
+    BtfFuncSig,
+    BtfResolved,
+    check_btf_health,
+    classify_btf_message,
+    read_btf_func_proto,
+    read_btf_func_sig,
+    read_btf_member,
+    resolve_btf_enumerator,
+    resolve_btf_member,
+    resolve_btf_type,
+)
 from memveil.platform.evidence import KernelInfo, parse_kernel_triple
+from memveil.platform.kernelgate import (
+    MAX_FILTER_FUNCS_BYTES,
+    filter_line_counts,
+    read_ftrace_enabled,
+    read_ftrace_text,
+)
 from memveil.platform.narrow import (
     MAX_NARROW_BTF_BYTES,
     MAX_NARROW_FORMAT_BYTES,
@@ -48,12 +65,15 @@ from memveil.platform.reader import (
     EVIDENCE_ABSENT,
     EVIDENCE_DENIED,
     EVIDENCE_OK,
+    E_TOO_BIG,
     EvidenceReader,
     bytes_to_text,
     file_state,
     open_evidence_reader,
+    read_evidence,
     read_host_file,
 )
+from memveil.platform.tracefs import probe_tracefs, tracefs_translate
 from memveil.render.json import escape_json
 
 
@@ -64,11 +84,12 @@ comptime MAX_PROFILE_NOTES = 32
 comptime MAX_CAP_HOOKS = 32
 comptime MAX_HOOK_ALT = 4
 comptime MAX_PROFILE_LAYOUTS = 16
+comptime MAX_PROFILE_LAYOUTS_V012 = 64
 comptime _MANIFEST_CAP = 65536
 comptime _PROFILE_CAP = 1048576
 comptime _INSTALLED_PROFILES_DIR = "/usr/share/memveil/profiles"
 comptime _INSTALLED_RECEIPTS_DIR = "/var/lib/memveil/receipts"
-comptime MAX_FILTER_FUNCS_BYTES = 8388608
+comptime MAX_KALLSYMS_BYTES = 67108864
 
 
 struct ProfileHook(Copyable):
@@ -162,18 +183,35 @@ struct ProfileIdentity(Copyable):
 
 
 struct ProfileLayout(Copyable):
-    """One recorded BTF member layout: struct field plus bit geometry."""
+    """One recorded BTF member layout: struct field plus bit geometry.
+
+    0.1.1 items pin an exact ``bit_offset``/``bit_size`` pair checked
+    by copy-actual only. 0.1.2 items (``v012``) carry the owning
+    ``capability``, a ``target`` (field, type, or enumerator), the
+    expected ``type_kind``, and whether the item is ``optional``;
+    the live check compares kind and size, never offsets.
+    """
 
     var struct_name: String
     var field_name: String
     var bit_offset: Int
     var bit_size: Int
+    var capability: String
+    var target: String
+    var type_kind: String
+    var optional: Bool
+    var v012: Bool
 
     def __init__(out self):
         self.struct_name = String("")
         self.field_name = String("")
         self.bit_offset = 0
         self.bit_size = 0
+        self.capability = String("")
+        self.target = String("")
+        self.type_kind = String("")
+        self.optional = False
+        self.v012 = False
 
 
 struct Profile(Copyable):
@@ -181,6 +219,7 @@ struct Profile(Copyable):
 
     var profile_id: String
     var status: String
+    var schema_version: String
     var identity: ProfileIdentity
     var hooks: List[ProfileHook]
     var caps: List[ProfileCapability]
@@ -190,6 +229,7 @@ struct Profile(Copyable):
     def __init__(out self):
         self.profile_id = String("")
         self.status = String("")
+        self.schema_version = String("")
         self.identity = ProfileIdentity()
         self.hooks = List[ProfileHook]()
         self.caps = List[ProfileCapability]()
@@ -239,21 +279,26 @@ struct SigVerdict(Copyable):
     """Frozen-vs-live signature verdict for one tracing hook.
 
     ``ok`` is True only when the frozen signature normalizes
-    and spells exactly the live BTF prototype. ``live`` holds
-    the live canonical spelling ("" when BTF is unreadable)
-    so callers can show both sides of a mismatch.
+    and its parameter count and typedef-level type spellings
+    equal the live BTF prototype with 64-bit address widths.
+    ``live`` holds the live canonical spelling ("" when BTF
+    is unreadable) so callers can show both sides of a
+    mismatch. ``code`` names the machine reason class, ""
+    when ok or unclassified.
     """
 
     var hook: String
     var ok: Bool
     var reason: String
     var live: String
+    var code: String
 
     def __init__(out self):
         self.hook = String("")
         self.ok = False
         self.reason = String("")
         self.live = String("")
+        self.code = String("")
 
 
 def _check_profile_id(v: String) raises:
@@ -701,6 +746,141 @@ def _parse_layout(mut scan: Scanner) raises -> ProfileLayout:
     return out^
 
 
+def _parse_layout_v012(mut scan: Scanner) raises -> ProfileLayout:
+    """Parse one 0.1.2 layouts[] item: capability, target, kind, size.
+
+    Every key is required except ``field``, which a ``type``
+    target omits. There is no ``bit_offset``: offsets are
+    evidence only, never compared.
+    """
+    scan.begin_object()
+    var out = ProfileLayout()
+    out.v012 = True
+    var has_cap = False
+    var has_target = False
+    var has_struct = False
+    var has_field = False
+    var has_kind = False
+    var has_size = False
+    var has_optional = False
+    if not object_is_empty(scan):
+        while True:
+            scan.skip_ws()
+            var key = scan.parse_string()
+            expect_colon(scan, "layout")
+            if key == "capability":
+                if has_cap:
+                    raise ValidationError(
+                        "layout.capability", "duplicate"
+                    )
+                var v = scan.parse_string()
+                if (
+                    v != "attempt-trace"
+                    and v != "mapping-lifecycle"
+                    and v != "copy-actual"
+                ):
+                    raise ValidationError(
+                        "layout.capability", "bad enum"
+                    )
+                out.capability = v
+                has_cap = True
+            elif key == "target":
+                if has_target:
+                    raise ValidationError(
+                        "layout.target", "duplicate"
+                    )
+                var v = scan.parse_string()
+                if (
+                    v != "field"
+                    and v != "type"
+                    and v != "enumerator"
+                ):
+                    raise ValidationError("layout.target", "bad enum")
+                out.target = v
+                has_target = True
+            elif key == "struct":
+                if has_struct:
+                    raise ValidationError("layout.struct", "duplicate")
+                var v = scan.parse_string()
+                try:
+                    check_bounded_text(v, 1, 128, "layout.struct")
+                except e:
+                    raise ValidationError("layout.struct", String(e))
+                out.struct_name = v
+                has_struct = True
+            elif key == "field":
+                if has_field:
+                    raise ValidationError("layout.field", "duplicate")
+                var v = scan.parse_string()
+                try:
+                    check_bounded_text(v, 1, 128, "layout.field")
+                except e:
+                    raise ValidationError("layout.field", String(e))
+                out.field_name = v
+                has_field = True
+            elif key == "type_kind":
+                if has_kind:
+                    raise ValidationError(
+                        "layout.type_kind", "duplicate"
+                    )
+                var v = scan.parse_string()
+                if (
+                    v != "int"
+                    and v != "ptr"
+                    and v != "array"
+                    and v != "struct"
+                    and v != "union"
+                    and v != "enum"
+                    and v != "float"
+                ):
+                    raise ValidationError(
+                        "layout.type_kind", "bad enum"
+                    )
+                out.type_kind = v
+                has_kind = True
+            elif key == "bit_size":
+                if has_size:
+                    raise ValidationError(
+                        "layout.bit_size", "duplicate"
+                    )
+                scan.skip_ws()
+                var v = scan.parse_int()
+                if v < Int64(1):
+                    raise ValidationError(
+                        "layout.bit_size", "out of range"
+                    )
+                out.bit_size = Int(v)
+                has_size = True
+            elif key == "optional":
+                if has_optional:
+                    raise ValidationError(
+                        "layout.optional", "duplicate"
+                    )
+                scan.skip_ws()
+                out.optional = scan.parse_bool()
+                has_optional = True
+            else:
+                raise ValidationError("layout", "unknown layout field")
+            if not object_next(scan, "layout"):
+                break
+    scan.end_object()
+    if out.target == String("type"):
+        if has_field:
+            raise ValidationError("layout", "field on type target")
+    elif not has_field:
+        raise ValidationError("layout", "missing field")
+    if (
+        not has_cap
+        or not has_target
+        or not has_struct
+        or not has_kind
+        or not has_size
+        or not has_optional
+    ):
+        raise ValidationError("layout", "missing field")
+    return out^
+
+
 def _parse_capability(mut scan: Scanner) raises -> ProfileCapability:
     """Parse one capabilities[] item: id, status, hooks, reason."""
     scan.begin_object()
@@ -786,8 +966,37 @@ def _parse_capability(mut scan: Scanner) raises -> ProfileCapability:
     return out^
 
 
+def _prescan_schema_version(data: List[UInt8]) -> String:
+    """Best-effort top-level schema_version, else "".
+
+    Layouts may precede schema_version in key order, so
+    the item shape needs the version before the main
+    parse reaches it. Only the shape decision reads this;
+    the main parse still validates the version itself.
+    """
+    try:
+        var scan = Scanner(data)
+        scan.skip_ws()
+        scan.begin_object()
+        if not object_is_empty(scan):
+            while True:
+                scan.skip_ws()
+                var key = scan.parse_string()
+                expect_colon(scan, "profile")
+                if key == String("schema_version"):
+                    scan.skip_ws()
+                    return scan.parse_string()
+                scan.skip_value()
+                if not object_next(scan, "profile"):
+                    break
+    except:
+        pass
+    return String("")
+
+
 def parse_profile_bytes(data: List[UInt8]) raises -> Profile:
     """Parse and validate one profile JSON document."""
+    var is_v012 = _prescan_schema_version(data) == String("0.1.2")
     var scan = Scanner(data)
     scan.skip_ws()
     scan.begin_object()
@@ -809,8 +1018,9 @@ def parse_profile_bytes(data: List[UInt8]) raises -> Profile:
                 if has_version:
                     raise ValidationError("schema_version", "duplicate")
                 var v = scan.parse_string()
-                if v != PROFILE_SCHEMA_VERSION:
+                if v != PROFILE_SCHEMA_VERSION and v != String("0.1.2"):
                     raise ValidationError("schema_version", "bad const")
+                out.schema_version = v
                 has_version = True
             elif key == "profile_id":
                 if has_id:
@@ -901,9 +1111,29 @@ def parse_profile_bytes(data: List[UInt8]) raises -> Profile:
                 scan.begin_array()
                 if not array_is_empty(scan):
                     while True:
-                        var l = _parse_layout(scan)
+                        var l = ProfileLayout()
+                        if is_v012:
+                            l = _parse_layout_v012(scan)
+                        else:
+                            l = _parse_layout(scan)
+                        if is_v012:
+                            for i in range(len(out.layouts)):
+                                var prior = out.layouts[i].copy()
+                                if (
+                                    prior.capability == l.capability
+                                    and prior.target == l.target
+                                    and prior.struct_name
+                                    == l.struct_name
+                                    and prior.field_name == l.field_name
+                                ):
+                                    raise ValidationError(
+                                        "layouts", "duplicate"
+                                    )
                         out.layouts.append(l^)
-                        if len(out.layouts) > MAX_PROFILE_LAYOUTS:
+                        var layout_cap = MAX_PROFILE_LAYOUTS
+                        if is_v012:
+                            layout_cap = MAX_PROFILE_LAYOUTS_V012
+                        if len(out.layouts) > layout_cap:
                             raise ValidationError(
                                 "layouts", "too many items"
                             )
@@ -1224,14 +1454,15 @@ def tracing_gap(doc: Profile, caps: List[String]) -> String:
 
     Every hook named by a requested extra capability must
     be a tracing hook whose (function, attach) pair is a
-    frozen member of that capability with the exact frozen
-    signature text, and every frozen member must be named:
-    no vacuous, partial, or substituted bindings. Live
-    signature identity rides the whole-BTF binding checked
-    later; this gate pins the document side exactly.
-    Record admission and doctor availability share this
-    one predicate so the two verbs cannot disagree about
-    a document's tracing bindings.
+    frozen member of that capability with matching frozen
+    parameter types, and every frozen member must be
+    named: no vacuous, partial, or substituted bindings.
+    Parameter names never compare. Live signature
+    identity rides the whole-BTF binding checked later;
+    this gate pins the document side. Record admission
+    and doctor availability share this one predicate so
+    the two verbs cannot disagree about a document's
+    tracing bindings.
     """
     for i in range(len(caps)):
         if caps[i] == String(ATTEMPT_TRACE_ID):
@@ -1288,7 +1519,17 @@ def tracing_gap(doc: Profile, caps: List[String]) -> String:
                     + caps[i]
                     + String(" hook")
                 )
-            if hook.signature != wants[member].signature:
+            var have = frozen_sig_types(
+                hook.signature, hook.function
+            )
+            var want = frozen_sig_types(
+                wants[member].signature, wants[member].function
+            )
+            if (
+                not have.has
+                or not want.has
+                or not _frozen_types_equal(have, want)
+            ):
                 return (
                     String("capability ")
                     + caps[i]
@@ -1401,6 +1642,199 @@ def _normalize_frozen_signature(
     return out^
 
 
+struct FrozenSig(Copyable):
+    """One frozen signature split into return and type spellings."""
+
+    var has: Bool
+    var ret: String
+    var params: List[String]
+
+    def __init__(out self):
+        self.has = False
+        self.ret = String("")
+        self.params = List[String]()
+
+
+def _is_type_keyword(word: String) -> Bool:
+    """True for C type keywords that name no parameter."""
+    return (
+        word == String("void")
+        or word == String("char")
+        or word == String("short")
+        or word == String("int")
+        or word == String("long")
+        or word == String("float")
+        or word == String("double")
+        or word == String("signed")
+        or word == String("unsigned")
+        or word == String("_Bool")
+        or word == String("const")
+        or word == String("volatile")
+    )
+
+
+def _is_identifier(word: String) -> Bool:
+    """True for well-formed C identifiers."""
+    var b = word.as_bytes()
+    if len(b) == 0:
+        return False
+    var c0 = b[0]
+    var head = (
+        c0 == UInt8(0x5F)
+        or (c0 >= UInt8(0x41) and c0 <= UInt8(0x5A))
+        or (c0 >= UInt8(0x61) and c0 <= UInt8(0x7A))
+    )
+    if not head:
+        return False
+    for i in range(1, len(b)):
+        var c = b[i]
+        var tail = (
+            c == UInt8(0x5F)
+            or (c >= UInt8(0x30) and c <= UInt8(0x39))
+            or (c >= UInt8(0x41) and c <= UInt8(0x5A))
+            or (c >= UInt8(0x61) and c <= UInt8(0x7A))
+        )
+        if not tail:
+            return False
+    return True
+
+
+def _strip_param_name(p: String) -> String:
+    """Drop the parameter name, keeping the type spelling.
+
+    Pointer spellings cut after the last star. Plain
+    spellings drop a well-formed trailing name only when
+    the leading words form a complete type: a single
+    word, a keyword run, or tag plus name. Unnamed
+    multi-word types keep every word, and malformed
+    trailing words stay whole and mismatch loudly.
+    """
+    var b = p.as_bytes()
+    var star = -1
+    for i in range(len(b)):
+        if b[i] == UInt8(0x2A):
+            star = i
+    if star >= 0:
+        var clean = star + 1 < len(b)
+        for i in range(star + 1, len(b)):
+            if b[i] == UInt8(0x20):
+                clean = False
+                break
+        if clean:
+            try:
+                return String(from_utf8=b[0 : star + 1])
+            except:
+                pass
+        return p
+    var words = p.split(String(" "))
+    if len(words) < 2:
+        return p
+    var last = String(words[len(words) - 1])
+    if _is_type_keyword(last):
+        return p
+    if not _is_identifier(last):
+        return p
+    var first = String(words[0])
+    if (
+        first == String("struct")
+        or first == String("union")
+        or first == String("enum")
+    ):
+        if len(words) != 3:
+            return p
+    elif len(words) > 2:
+        for i in range(len(words) - 1):
+            if not _is_type_keyword(String(words[i])):
+                return p
+    var sp = -1
+    for i in range(len(b)):
+        if b[i] == UInt8(0x20):
+            sp = i
+    if sp >= 0:
+        try:
+            return String(from_utf8=b[0:sp])
+        except:
+            pass
+    return p
+
+
+def frozen_sig_types(sig: String, function: String) -> FrozenSig:
+    """Split a frozen signature into return and type spellings.
+
+    Built on _normalize_frozen_signature; parameter names
+    are stripped, leaving typedef-level type spellings
+    that compare directly with the live BTF reading.
+    """
+    var out = FrozenSig()
+    var norm = _normalize_frozen_signature(sig, function)
+    if not norm.has:
+        return out^
+    var parts = norm.value.split(String(" ("))
+    if len(parts) != 2:
+        return out^
+    var inner = String(parts[1])
+    if not inner.endswith(String(")")):
+        return out^
+    var ib = inner.as_bytes()
+    var body = String("")
+    try:
+        body = String(from_utf8=ib[0 : len(ib) - 1])
+    except:
+        return out^
+    out.ret = String(parts[0])
+    if body == String("void"):
+        out.has = True
+        return out^
+    var items = body.split(String(", "))
+    for i in range(len(items)):
+        out.params.append(_strip_param_name(String(items[i])))
+    out.has = True
+    return out^
+
+
+def _sig_types_equal(sig: BtfFuncSig, fs: FrozenSig) -> Bool:
+    """True when a live signature equals one frozen spelling."""
+    if sig.ret != fs.ret:
+        return False
+    if len(sig.params) != len(fs.params):
+        return False
+    for i in range(len(sig.params)):
+        if sig.params[i] != fs.params[i]:
+            return False
+    return True
+
+
+def _frozen_types_equal(left: FrozenSig, right: FrozenSig) -> Bool:
+    """True when two frozen spellings name the same types."""
+    if left.ret != right.ret:
+        return False
+    if len(left.params) != len(right.params):
+        return False
+    for i in range(len(left.params)):
+        if left.params[i] != right.params[i]:
+            return False
+    return True
+
+
+def _sig_width_refusal(hook: String, sig: BtfFuncSig) -> String:
+    """First address-typedef width refusal, else "".
+
+    Every phys_addr_t, size_t, and dma_addr_t parameter
+    must resolve to 64 bits on the supported shape.
+    """
+    for i in range(len(sig.params)):
+        if (
+            sig.params[i] == String("phys_addr_t")
+            or sig.params[i] == String("size_t")
+            or sig.params[i] == String("dma_addr_t")
+        ):
+            if sig.widths[i] != 64:
+                var w = sig.widths[i]
+                var tname = sig.params[i]
+                return String(t"{hook}: {tname} width {w} bits (want 64)")
+    return String("")
+
+
 def verify_hook_signatures(
     profile: Profile, btf: Span[UInt8, _]
 ) -> List[SigVerdict]:
@@ -1409,9 +1843,11 @@ def verify_hook_signatures(
     One verdict per tracing hook in profile order; tracepoint
     hooks are skipped (their tracefs layout is checked
     separately). A verdict is ok only when the frozen
-    signature (or any recorded alternate) normalizes and
-    spells exactly the live BTF prototype; every refusal
-    names the hook and the cause.
+    signature (or any recorded alternate) matches the live
+    BTF prototype in return spelling, parameter count, and
+    every typedef-level parameter spelling, with 64-bit
+    address widths; every refusal names the hook and the
+    cause. Parameter names never compare.
     """
     var out = List[SigVerdict]()
     for i in range(len(profile.hooks)):
@@ -1420,38 +1856,47 @@ def verify_hook_signatures(
             continue
         var v = SigVerdict()
         v.hook = h.name.copy()
-        var norm = _normalize_frozen_signature(h.signature, h.function)
-        if not norm.has:
+        var fsig = frozen_sig_types(h.signature, h.function)
+        if not fsig.has:
             v.reason = String(t"{h.name}: frozen signature malformed")
             out.append(v.copy())
             continue
-        var alts = List[String]()
+        var alts = List[FrozenSig]()
         var alt_bad = False
         for a in range(len(h.signature_alt)):
-            var an = _normalize_frozen_signature(
+            var an = frozen_sig_types(
                 h.signature_alt[a], h.function
             )
             if not an.has:
                 alt_bad = True
                 break
-            alts.append(an.value.copy())
+            alts.append(an^)
         if alt_bad:
             v.reason = String(t"{h.name}: frozen signature_alt malformed")
             out.append(v.copy())
             continue
-        var live = read_btf_func_proto(btf, h.function)
-        if not live.ok:
-            v.reason = String(t"{h.name}: {live.message}")
+        var sig = read_btf_func_sig(btf, h.function)
+        if not sig.ok:
+            v.reason = String(t"{h.name}: {sig.message}")
             out.append(v.copy())
             continue
-        v.live = live.canonical.copy()
-        var hit = live.canonical == norm.value
+        var proto = read_btf_func_proto(btf, h.function)
+        if proto.ok:
+            v.live = proto.canonical.copy()
+        var hit = _sig_types_equal(sig, fsig)
         for a in range(len(alts)):
-            if live.canonical == alts[a]:
+            if _sig_types_equal(sig, alts[a]):
                 hit = True
                 break
         if not hit:
             v.reason = String(t"{h.name}: signature mismatch")
+            v.code = String("signature-mismatch")
+            out.append(v.copy())
+            continue
+        var wref = _sig_width_refusal(h.name.copy(), sig)
+        if wref != String(""):
+            v.reason = wref.copy()
+            v.code = String("signature-width")
             out.append(v.copy())
             continue
         v.ok = True
@@ -1465,22 +1910,30 @@ struct LiveVerdict(Copyable):
     ``unknown`` True means the evidence was unreadable, so
     the interfaces are neither verified nor refused; every
     other refusal carries ``unknown`` False. ``reason`` is
-    "" exactly when ``ok``.
+    "" exactly when ``ok``. ``code`` names the machine
+    reason class, "" when ok or unclassified. ``evidence``
+    carries one line per checked 0.1.2 layout item.
     """
 
     var ok: Bool
     var reason: String
     var unknown: Bool
+    var code: String
+    var evidence: List[String]
 
     def __init__(out self):
         self.ok = False
         self.reason = String("")
         self.unknown = False
+        self.code = String("")
+        self.evidence = List[String]()
 
     def __init__(out self, ok: Bool, reason: String, unknown: Bool):
         self.ok = ok
         self.reason = reason.copy()
         self.unknown = unknown
+        self.code = String("")
+        self.evidence = List[String]()
 
 
 def _live_refuse(reason: String) -> LiveVerdict:
@@ -1493,6 +1946,20 @@ def _live_unknown(reason: String) -> LiveVerdict:
     return LiveVerdict(False, reason.copy(), True)
 
 
+def _live_refuse_code(reason: String, code: String) -> LiveVerdict:
+    """One coded refusal verdict: not ok, known, with the code."""
+    var out = LiveVerdict(False, reason.copy(), False)
+    out.code = code.copy()
+    return out^
+
+
+def _live_unknown_code(reason: String, code: String) -> LiveVerdict:
+    """One coded unknown verdict: unreadable evidence, with the code."""
+    var out = LiveVerdict(False, reason.copy(), True)
+    out.code = code.copy()
+    return out^
+
+
 def _read_live_btf(
     reader: EvidenceReader, mut btf: List[UInt8]
 ) -> LiveVerdict:
@@ -1500,16 +1967,22 @@ def _read_live_btf(
 
     Ok verdict carries the bytes in btf; anything else
     carries the failure verdict. Absence refuses (a BTF-less
-    kernel cannot serve tracing), denial reports unknown.
+    kernel cannot serve tracing), denial reports unknown,
+    and bytes failing the health check report unknown
+    with the health code.
     """
     var done = LiveVerdict()
     var st = file_state(reader, String("/sys/kernel/btf/vmlinux"))
     if st == EVIDENCE_ABSENT:
-        return _live_refuse(
-            String("BTF absent (kernel built without BTF)")
+        return _live_refuse_code(
+            String("BTF absent (kernel built without BTF)"),
+            String("btf-absent-unknown"),
         )
     if st == EVIDENCE_DENIED:
-        return _live_unknown(String("BTF denied (privilege)"))
+        return _live_unknown_code(
+            String("BTF denied (privilege)"),
+            String("btf-denied"),
+        )
     try:
         btf = read_host_file(
             join_root(reader.root, String("/sys/kernel/btf/vmlinux")),
@@ -1517,9 +1990,326 @@ def _read_live_btf(
             MAX_NARROW_BTF_BYTES,
         )
     except e:
-        return _live_unknown(
-            String("BTF unreadable: ") + String(e)
+        if e.code == E_TOO_BIG:
+            var cap = MAX_NARROW_BTF_BYTES
+            return _live_unknown_code(
+                String(t"BTF too large (over {cap} bytes)"),
+                String("btf-too-large"),
+            )
+        return _live_unknown_code(
+            String("BTF unreadable: ") + String(e),
+            String("btf-unreadable"),
         )
+    var health = check_btf_health(Span(btf))
+    if not health.ok:
+        return _live_unknown_code(
+            health.message.copy(), health.code.copy()
+        )
+    done.ok = True
+    return done^
+
+
+def _kallsyms_clone(sym: String, function: String) -> Bool:
+    """True when sym is a dotted compiler clone of function.
+
+    Only .isra, .constprop, and .cold clones count; any
+    other dotted name is a different symbol.
+    """
+    var prefix = function + String(".")
+    if not sym.startswith(prefix):
+        return False
+    var rest = String("")
+    try:
+        var sb = sym.as_bytes()
+        rest = String(from_utf8=sb[prefix.byte_length() : len(sb)])
+    except:
+        return False
+    if rest == String("isra") or rest.startswith(String("isra.")):
+        return True
+    if rest == String("constprop") or rest.startswith(
+        String("constprop.")
+    ):
+        return True
+    if rest == String("cold") or rest.startswith(String("cold.")):
+        return True
+    return False
+
+
+def _kallsyms_symbol(field: String) -> String:
+    """The kallsyms name: cut a tab-suffixed module owner.
+
+    Core symbols stand alone; module symbols append a
+    tab and [owner] that never compares with the hook.
+    """
+    var b = field.as_bytes()
+    for i in range(len(b)):
+        if b[i] == UInt8(0x09):
+            try:
+                return String(from_utf8=b[0:i])
+            except:
+                return String("")
+    return field
+
+
+def _live_kallsyms_split(
+    reader: EvidenceReader, hook: String, function: String
+) -> LiveVerdict:
+    """Split a BTF-missing FUNC by /proc/kallsyms evidence.
+
+    A symbol a readable listing exports but BTF lacks is
+    not in BTF (naming the match); a symbol a readable
+    listing lacks is absent from this kernel. Absent,
+    denied, or unreadable kallsyms cannot arbitrate, so
+    it keeps the BTF verdict with a missing code.
+    """
+    var base = (
+        hook + String(": function ") + function + String(" not found")
+    )
+    if file_state(reader, String("/proc/kallsyms")) != EVIDENCE_OK:
+        return _live_refuse_code(base.copy(), String("btf-hook-missing"))
+    var text = String("")
+    try:
+        var raw = read_evidence(
+            reader, String("/proc/kallsyms"), MAX_KALLSYMS_BYTES
+        )
+        text = bytes_to_text(raw^)
+    except:
+        return _live_refuse_code(base.copy(), String("btf-hook-missing"))
+    var clone = String("")
+    var lines = text.split(String("\n"))
+    for i in range(len(lines)):
+        var fields = String(lines[i]).split(String(" "))
+        if len(fields) < 3:
+            continue
+        var sym = _kallsyms_symbol(String(fields[2]))
+        if sym == function:
+            return _live_refuse_code(
+                hook
+                + String(": function ")
+                + function
+                + String(" present but not in BTF (")
+                + sym
+                + String(")"),
+                String("btf-hook-not-in-btf"),
+            )
+        if clone == String("") and _kallsyms_clone(sym, function):
+            clone = sym.copy()
+    if clone != String(""):
+        return _live_refuse_code(
+            hook
+            + String(": function ")
+            + function
+            + String(" present but not in BTF (")
+            + clone
+            + String(")"),
+            String("btf-hook-not-in-btf"),
+        )
+    return _live_refuse_code(
+        hook + String(": function ") + function
+        + String(" absent from this kernel"),
+        String("btf-hook-absent"),
+    )
+
+
+def _layout_display(item: ProfileLayout) -> String:
+    """One item's display name: S.F, or S for a type target."""
+    if item.target == String("type"):
+        return item.struct_name.copy()
+    return (
+        item.struct_name
+        + String(".")
+        + item.field_name
+    )
+
+
+def _core_reader_unknown(disp: String, message: String) -> LiveVerdict:
+    """One reader-failure verdict: unknown, coded when structural."""
+    var scode = classify_btf_message(message.copy())
+    var why = disp + String(": ") + message
+    if scode != String(""):
+        return _live_unknown_code(why^, scode^)
+    return _live_unknown(why^)
+
+
+def _core_apply_resolved(
+    disp: String,
+    r: BtfResolved,
+    want_kind: String,
+    want_size: Int,
+    optional: Bool,
+    mut evidence: List[String],
+    show_offset: Bool,
+) -> LiveVerdict:
+    """Map one 0.1.2 resolution to its verdict.
+
+    Refusals and unknowns return directly; an ok verdict
+    means the item passed (its evidence line is already
+    appended) and the caller continues. Offsets print as
+    evidence only, never compare.
+    """
+    if r.ambiguous:
+        return _live_refuse_code(
+            r.message.copy(), String("layout-ambiguous")
+        )
+    if not r.ok:
+        return _core_reader_unknown(disp.copy(), r.message.copy())
+    if not r.found:
+        if optional:
+            evidence.append(disp + String(": absent (optional)"))
+            var done = LiveVerdict()
+            done.ok = True
+            return done^
+        return _live_refuse_code(
+            String("layout: ") + disp + String(" absent from kernel BTF"),
+            String("layout-missing"),
+        )
+    if r.bitfield:
+        return _live_refuse_code(
+            String("layout: ")
+            + disp
+            + String(" is a bitfield (unsupported)"),
+            String("layout-bitfield"),
+        )
+    if r.kind != want_kind:
+        return _live_refuse_code(
+            String("layout: ")
+            + disp
+            + String(" kind ")
+            + r.kind
+            + String(" differs from object kind ")
+            + want_kind,
+            String("layout-kind"),
+        )
+    if r.bit_size != want_size:
+        return _live_refuse_code(
+            String("layout: ")
+            + disp
+            + String(" size ")
+            + String(r.bit_size)
+            + String(" bits differs from object size ")
+            + String(want_size)
+            + String(" bits"),
+            String("layout-size"),
+        )
+    if show_offset:
+        evidence.append(
+            disp
+            + String(": offset ")
+            + String(r.bit_offset)
+            + String(" bits, size ")
+            + String(r.bit_size)
+            + String(" bits")
+        )
+    else:
+        evidence.append(
+            disp
+            + String(": size ")
+            + String(r.bit_size)
+            + String(" bits")
+        )
+    var done = LiveVerdict()
+    done.ok = True
+    return done^
+
+
+def verify_core_layouts(
+    btf: Span[UInt8, _],
+    layouts: List[ProfileLayout],
+    cap_id: String,
+    mut evidence: List[String],
+) -> LiveVerdict:
+    """Check one capability's 0.1.2 layouts against raw BTF.
+
+    Every item naming ``cap_id`` resolves through the
+    raw BTF reader: missing, bitfield, kind, size, and
+    ambiguity outcomes refuse with their layout code, a
+    broken blob is unknown with its health code, and an
+    absent optional item appends a note. Success appends
+    one evidence line per item; offsets never compare.
+    """
+    for i in range(len(layouts)):
+        var item = layouts[i].copy()
+        if item.capability != cap_id:
+            continue
+        var disp = _layout_display(item.copy())
+        if item.target == String("type"):
+            var agreed = BtfResolved()
+            agreed.ok = True
+            var nfound = 0
+            var disagree = False
+            for wi in range(4):
+                var want = String("struct")
+                if wi == 1:
+                    want = String("union")
+                elif wi == 2:
+                    want = String("enum")
+                elif wi == 3:
+                    want = String("typedef")
+                var r = resolve_btf_type(
+                    btf, item.struct_name, want
+                )
+                if r.ambiguous:
+                    return _live_refuse_code(
+                        r.message.copy(), String("layout-ambiguous")
+                    )
+                if not r.ok:
+                    return _core_reader_unknown(
+                        disp^, r.message.copy()
+                    )
+                if r.found:
+                    nfound += 1
+                    if nfound == 1:
+                        agreed.struct_found = True
+                        agreed.found = True
+                        agreed.kind = r.kind.copy()
+                        agreed.bit_size = r.bit_size
+                    elif (
+                        r.kind != agreed.kind
+                        or r.bit_size != agreed.bit_size
+                    ):
+                        disagree = True
+            if disagree:
+                return _live_refuse_code(
+                    String("type ")
+                    + item.struct_name
+                    + String(": ")
+                    + String(nfound)
+                    + String(" definitions disagree"),
+                    String("layout-ambiguous"),
+                )
+            var v = _core_apply_resolved(
+                disp^,
+                agreed^,
+                item.type_kind,
+                item.bit_size,
+                item.optional,
+                evidence,
+                False,
+            )
+            if not v.ok:
+                return v^
+        else:
+            var r = BtfResolved()
+            if item.target == String("enumerator"):
+                r = resolve_btf_enumerator(
+                    btf, item.struct_name, item.field_name
+                )
+            else:
+                r = resolve_btf_member(
+                    btf, item.struct_name, item.field_name
+                )
+            var v = _core_apply_resolved(
+                disp^,
+                r^,
+                item.type_kind,
+                item.bit_size,
+                item.optional,
+                evidence,
+                item.target != String("enumerator"),
+            )
+            if not v.ok:
+                return v^
+    var done = LiveVerdict()
     done.ok = True
     return done^
 
@@ -1540,8 +2330,13 @@ def verify_live_cap(
     frozen signature (or any recorded alternate) must
     spell exactly the live BTF prototype, copy-actual
     also checks every recorded member layout against the
-    same BTF bytes, and every traced function must appear
-    as a full line in available_filter_functions. A
+    same BTF bytes (a 0.1.2 doc instead checks kind and
+    size for the items naming this capability), a present
+    kernel.ftrace_enabled
+    must read 1 (absent draws no conclusion),
+    and every traced function must match exactly one
+    available_filter_functions first token (read under
+    the probed tracefs root; none or several refuse). A
     capability naming no tracepoint hook falls back to
     the doc's first tracepoint site only for
     attempt-trace, one with no tracing hooks skips the
@@ -1584,15 +2379,18 @@ def verify_live_cap(
                 has_site = True
                 break
     if has_site:
+        var tprobe = probe_tracefs(reader)
+        var id_probe = tracefs_translate(tprobe, site.id_path)
+        var fmt_probe = tracefs_translate(tprobe, site.format_path)
         try:
             _ = read_host_file(
-                join_root(reader.root, site.id_path),
+                join_root(reader.root, id_probe),
                 String("id"),
                 MAX_NARROW_FORMAT_BYTES,
             )
         except:
             pass
-        var fstate = file_state(reader, site.format_path)
+        var fstate = file_state(reader, fmt_probe)
         if fstate == EVIDENCE_ABSENT:
             return _live_refuse(
                 String("tracepoint ") + site.name + String(" absent")
@@ -1606,7 +2404,7 @@ def verify_live_cap(
         var form = List[UInt8]()
         try:
             form = read_host_file(
-                join_root(reader.root, site.format_path),
+                join_root(reader.root, fmt_probe),
                 String("format"),
                 MAX_NARROW_FORMAT_BYTES,
             )
@@ -1633,6 +2431,13 @@ def verify_live_cap(
             break
     if cap_id == String(COPY_CAP_ID) and len(profile.layouts) > 0:
         needs_btf = True
+    for i in range(len(profile.layouts)):
+        if (
+            profile.layouts[i].v012
+            and profile.layouts[i].capability == cap_id
+        ):
+            needs_btf = True
+            break
     if needs_btf:
         var bread = _read_live_btf(reader, btf)
         if not bread.ok:
@@ -1653,52 +2458,87 @@ def verify_live_cap(
             )
         if hook.kind != String("tracing"):
             continue
-        var norm = _normalize_frozen_signature(
-            hook.signature, hook.function
-        )
-        if not norm.has:
+        var fsig = frozen_sig_types(hook.signature, hook.function)
+        if not fsig.has:
             return _live_refuse(
                 String(t"{hook.name}: frozen signature malformed")
             )
-        var alts = List[String]()
+        var alts = List[FrozenSig]()
         for a in range(len(hook.signature_alt)):
-            var an = _normalize_frozen_signature(
+            var an = frozen_sig_types(
                 hook.signature_alt[a], hook.function
             )
             if not an.has:
                 return _live_refuse(
                     String(t"{hook.name}: frozen signature_alt malformed")
                 )
-            alts.append(an.value.copy())
-        var live = read_btf_func_proto(Span(btf), hook.function)
-        if not live.ok:
-            return _live_refuse(
-                String(t"{hook.name}: {live.message}")
+            alts.append(an^)
+        var sig = read_btf_func_sig(Span(btf), hook.function)
+        if not sig.ok:
+            var scode = classify_btf_message(sig.message.copy())
+            if scode != String(""):
+                return _live_unknown_code(
+                    String(t"{hook.name}: {sig.message}"), scode
+                )
+            var missing = (
+                String("function ")
+                + hook.function
+                + String(" not found")
             )
-        var hit = live.canonical == norm.value
+            if sig.message == missing:
+                return _live_kallsyms_split(
+                    reader, hook.name.copy(), hook.function
+                )
+            return _live_refuse(
+                String(t"{hook.name}: {sig.message}")
+            )
+        var wref = _sig_width_refusal(hook.name.copy(), sig)
+        if wref != String(""):
+            return _live_refuse_code(wref, String("signature-width"))
+        var hit = _sig_types_equal(sig, fsig)
         for a in range(len(alts)):
-            if live.canonical == alts[a]:
+            if _sig_types_equal(sig, alts[a]):
                 hit = True
                 break
         if not hit:
-            return _live_refuse(
-                hook.name
-                + String(": signature mismatch (live: ")
-                + live.canonical
-                + String(")")
+            var suffix = String("")
+            var plive = read_btf_func_proto(Span(btf), hook.function)
+            if plive.ok:
+                suffix = (
+                    String(" (live: ") + plive.canonical + String(")")
+                )
+            return _live_refuse_code(
+                hook.name + String(": signature mismatch") + suffix,
+                String("signature-mismatch"),
             )
         want_names.append(hook.name.copy())
         want_fns.append(hook.function.copy())
-    if cap_id == String(COPY_CAP_ID):
+    var layout_lines = List[String]()
+    if profile.schema_version == String("0.1.2"):
+        var core = verify_core_layouts(
+            Span(btf), profile.layouts, cap_id, layout_lines
+        )
+        if not core.ok:
+            core.evidence = layout_lines^
+            return core^
+    elif cap_id == String(COPY_CAP_ID):
         for i in range(len(profile.layouts)):
             var lay = profile.layouts[i].copy()
             var m = read_btf_member(
                 Span(btf), lay.struct_name, lay.field_name
             )
             if not m.ok:
-                return _live_refuse(
-                    lay.struct_name + "." + lay.field_name + ": " + m.message
+                var why = (
+                    lay.struct_name
+                    + "."
+                    + lay.field_name
+                    + ": "
+                    + m.message
                 )
+                var scode = classify_btf_message(m.message.copy())
+                if scode != String(""):
+                    return _live_unknown_code(why.copy(), scode)
+                return _live_refuse(why^)
             if m.bit_offset != lay.bit_offset or m.bit_size != lay.bit_size:
                 return _live_refuse(
                     lay.struct_name
@@ -1711,8 +2551,30 @@ def verify_live_cap(
                     + ")"
                 )
     if len(want_fns) > 0:
-        var fpath = String(
-            "/sys/kernel/tracing/available_filter_functions"
+        var fstate = read_ftrace_enabled(reader)
+        if fstate.value == String("0"):
+            return _live_refuse_code(
+                String(
+                    "kernel.ftrace_enabled is 0"
+                    " (function tracing disabled)"
+                ),
+                String("ftrace-disabled"),
+            )
+        if fstate.value == String("denied"):
+            return _live_unknown_code(
+                String("kernel.ftrace_enabled denied"),
+                String("ftrace-unknown"),
+            )
+        if fstate.value == String("malformed"):
+            return _live_unknown_code(
+                String("kernel.ftrace_enabled unreadable: ")
+                + read_ftrace_text(reader),
+                String("ftrace-unknown"),
+            )
+        var tprobe = probe_tracefs(reader)
+        var fpath = tracefs_translate(
+            tprobe,
+            String("/sys/kernel/tracing/available_filter_functions"),
         )
         var lstate = file_state(reader, fpath)
         if lstate == EVIDENCE_ABSENT:
@@ -1743,12 +2605,13 @@ def verify_live_cap(
         var text = bytes_to_text(listed^)
         var lines = text.split(String("\n"))
         for i in range(len(want_fns)):
-            var seen = False
+            var count = 0
             for j in range(len(lines)):
-                if String(lines[j]) == want_fns[i]:
-                    seen = True
-                    break
-            if not seen:
+                if filter_line_counts(
+                    String(lines[j]), want_fns[i].copy()
+                ):
+                    count += 1
+            if count == 0:
                 return _live_refuse(
                     want_names[i]
                     + String(": function ")
@@ -1757,8 +2620,19 @@ def verify_live_cap(
                         " not listed in available_filter_functions"
                     )
                 )
+            if count >= 2:
+                return _live_refuse_code(
+                    want_names[i]
+                    + String(": hook ")
+                    + want_fns[i]
+                    + String(" ambiguous (")
+                    + String(count)
+                    + String(" available_filter_functions lines)"),
+                    String("hook-ambiguous"),
+                )
     var done = LiveVerdict()
     done.ok = True
+    done.evidence = layout_lines^
     return done^
 
 
@@ -1769,14 +2643,20 @@ def verify_live_interfaces(
 
     Checks each capability in order; the first refusal or
     unknown wins. All verified yields ok with an empty
-    reason.
+    reason. Either way the returned verdict carries every
+    checked layout line so far.
     """
+    var lines = List[String]()
     for i in range(len(caps)):
         var v = verify_live_cap(reader, profile, caps[i])
+        for k in range(len(v.evidence)):
+            lines.append(v.evidence[k].copy())
         if not v.ok:
+            v.evidence = lines^
             return v^
     var done = LiveVerdict()
     done.ok = True
+    done.evidence = lines^
     return done^
 
 
