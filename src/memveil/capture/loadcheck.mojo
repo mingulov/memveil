@@ -8,7 +8,7 @@ program log; ``diagnose_load`` replays one object load with
 log-on-failure to recover those lines. Nothing here attaches.
 """
 
-from libbpf_mojo._ffi import LOG_ON_FAILURE
+from libbpf_mojo._ffi import LOG_ON_FAILURE, OP_LOAD
 from libbpf_mojo.object import Object, ObjectOptions
 from memveil.platform.reader import bytes_to_text
 
@@ -55,6 +55,83 @@ def errno_cause(code: Int32) -> String:
     if code == Int32(-7):
         return String("program too large")
     return String("")
+
+
+def load_code_for(errno: String) -> String:
+    """One machine code for a load errno name."""
+    if errno == String("EPERM"):
+        return String("load-eperm")
+    if errno == String("ENOMEM"):
+        return String("load-enomem")
+    if errno == String("EINVAL") or errno == String("EACCES"):
+        return String("verifier-rejected")
+    return String("load-failed")
+
+
+def _find_from(raw: Span[UInt8, ...], word: String, start: Int) -> Int:
+    """First offset of word at or after start, else -1."""
+    var wb = word.as_bytes()
+    if len(wb) == 0 or start < 0:
+        return -1
+    var i = start
+    while i + len(wb) <= len(raw):
+        var hit = True
+        for j in range(len(wb)):
+            if raw[i + j] != wb[j]:
+                hit = False
+                break
+        if hit:
+            return i
+        i += 1
+    return -1
+
+
+def load_refusal_code(diagnostic: String) -> String:
+    """Machine code for a load refusal diagnostic, else ``""``.
+
+    Reads the first load segment as ``_lmb_message`` writes
+    it (``op=<OP_LOAD>`` then ``code=-<n>`` ended by a space
+    or a colon); other operations, positive codes, and
+    out-of-range magnitudes stay unclassified.
+    """
+    var raw = diagnostic.as_bytes()
+    var op_key = String("op=") + String(OP_LOAD) + String(" ")
+    var code_key = String(" code=-")
+    var op_word = String("op=")
+    var key_len = len(code_key.as_bytes())
+    var pos = 0
+    while True:
+        var hit = _find_from(raw, op_key, pos)
+        if hit < 0:
+            return String("")
+        var seg_end = _find_from(raw, op_word, hit + 1)
+        if seg_end < 0:
+            seg_end = len(raw)
+        var mark = _find_from(raw, code_key, hit)
+        if mark >= 0 and mark < seg_end:
+            var n = 0
+            var digits = 0
+            var j = mark + key_len
+            while (
+                j < len(raw)
+                and raw[j] >= UInt8(48)
+                and raw[j] <= UInt8(57)
+            ):
+                n = n * 10 + (Int(raw[j]) - 48)
+                digits += 1
+                j += 1
+            if (
+                digits > 0
+                and digits <= 6
+                and n >= 1
+                and n <= 4095
+                and j < len(raw)
+                and (
+                    raw[j] == UInt8(0x20) or raw[j] == UInt8(0x3A)
+                )
+            ):
+                return load_code_for(errno_name(Int32(0 - n)))
+        pos = hit + 1
 
 
 def _escape_line(s: String) -> String:

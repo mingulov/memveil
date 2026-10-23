@@ -22,6 +22,7 @@ from memveil.capture.loadcheck import (
     LoadResult,
     LoadTarget,
     load_check,
+    load_code_for,
 )
 from memveil.capture.run import (
     attempt_program_names,
@@ -555,17 +556,6 @@ def _load_kind(cap_id: String) -> String:
     return String("")
 
 
-def _load_code_for(errno: String) -> String:
-    """One machine code for a load errno name."""
-    if errno == String("EPERM"):
-        return String("load-eperm")
-    if errno == String("ENOMEM"):
-        return String("load-enomem")
-    if errno == String("EINVAL") or errno == String("EACCES"):
-        return String("verifier-rejected")
-    return String("load-failed")
-
-
 def _no_bridge_detail() -> String:
     """Missing-bridge detail, matching the record refusal."""
     if is_privileged(live_uids()):
@@ -910,7 +900,7 @@ def assess_doctor(opts: DoctorOptions) -> DoctorReport2:
                         + res.detail,
                         512,
                     )
-                out.caps[i].reason_code = _load_code_for(res.errno)
+                out.caps[i].reason_code = load_code_for(res.errno)
                 var rcode = out.caps[i].reason_code.copy()
                 out.caps[i].remedy = _clip_n(remedy_for(rcode), 512)
                 for l in range(len(res.lines)):

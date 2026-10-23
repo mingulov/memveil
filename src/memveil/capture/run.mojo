@@ -26,7 +26,11 @@ from memveil.capture.collector import (
     RunResult,
     WriterSource,
 )
-from memveil.capture.loadcheck import LoadDiag, diagnose_load
+from memveil.capture.loadcheck import (
+    LoadDiag,
+    diagnose_load,
+    load_refusal_code,
+)
 from memveil.capture.kernel import LmbKernel
 from memveil.capture.reader import (
     DEFAULT_MAX_EVENTS_BYTES as REPLAY_MAX_EVENTS_BYTES,
@@ -2160,6 +2164,11 @@ def run_collector_with[W: WriterSource](
             )
         for i in range(len(diag.lines)):
             out.diagnostic += String("\n") + diag.lines[i]
+    if out.exit_code == EXIT_REFUSAL and out.code == String(""):
+        var lcode = load_refusal_code(out.diagnostic)
+        if lcode != String(""):
+            out.code = lcode^
+            out.fix = remedy_for(out.code.copy())
     return out^
 
 

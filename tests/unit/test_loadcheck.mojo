@@ -5,12 +5,15 @@
 from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
 
+from libbpf_mojo._ffi import DOMAIN_LIBBPF, OP_ATTACH, OP_LOAD
 from libbpf_mojo.error import LmbError
-from memveil.capture.kernel import _lmb_message
+from memveil.capture.kernel import _lmb_message, join_op_message
 from memveil.capture.loadcheck import (
     LoadTarget,
     errno_name,
     load_check,
+    load_code_for,
+    load_refusal_code,
     verifier_tail,
 )
 from memveil.capture.run import attempt_program_names
@@ -153,10 +156,81 @@ def test_doctor_load_check_needs_live() raises:
     assert_equal(run_doctor_opts(opts^), EXIT_INVALID)
 
 
+def _load_msg(code: Int32) -> String:
+    """One producer-built load failure message."""
+    var e = LmbError(
+        OP_LOAD,
+        DOMAIN_LIBBPF,
+        code,
+        String("lmb_load: object load failed"),
+    )
+    return _lmb_message(e^)
+
+
+def test_load_refusal_code() raises:
+    assert_equal(load_refusal_code(_load_msg(Int32(-1))), String("load-eperm"))
+    assert_equal(load_refusal_code(_load_msg(Int32(-12))), String("load-enomem"))
+    assert_equal(
+        load_refusal_code(_load_msg(Int32(-22))),
+        String("verifier-rejected"),
+    )
+    assert_equal(
+        load_refusal_code(_load_msg(Int32(-13))),
+        String("verifier-rejected"),
+    )
+    assert_equal(load_refusal_code(_load_msg(Int32(-95))), String("load-failed"))
+    var attach = LmbError(
+        OP_ATTACH,
+        DOMAIN_LIBBPF,
+        Int32(-1),
+        String("lmb_load: object load failed"),
+    )
+    assert_equal(load_refusal_code(_lmb_message(attach^)), String(""))
+    assert_equal(load_refusal_code(_load_msg(Int32(3))), String(""))
+    assert_equal(
+        load_refusal_code(String("lmb_load: object load failed")),
+        String(""),
+    )
+    var first = join_op_message(
+        String(""),
+        0,
+        _lmb_message(
+            LmbError(
+                OP_ATTACH,
+                DOMAIN_LIBBPF,
+                Int32(-1),
+                String("lmb_load: object load failed"),
+            )
+        ),
+    )
+    var both = join_op_message(first^, 1, _load_msg(Int32(-1)))
+    assert_equal(load_refusal_code(both^), String("load-eperm"))
+    assert_equal(
+        load_refusal_code(
+            String(
+                "ch0 op=2 domain=2 code=-22:"
+                " lmb_load: object load failed"
+            )
+        ),
+        String("verifier-rejected"),
+    )
+
+
+def test_load_code_for_table() raises:
+    assert_equal(load_code_for(String("EPERM")), String("load-eperm"))
+    assert_equal(load_code_for(String("ENOMEM")), String("load-enomem"))
+    assert_equal(load_code_for(String("EINVAL")), String("verifier-rejected"))
+    assert_equal(load_code_for(String("EACCES")), String("verifier-rejected"))
+    assert_equal(load_code_for(String("EOPNOTSUPP")), String("load-failed"))
+    assert_equal(load_code_for(String("")), String("load-failed"))
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_errno_names]()
     suite.test[test_lmb_message_names_errno]()
+    suite.test[test_load_refusal_code]()
+    suite.test[test_load_code_for_table]()
     suite.test[test_verifier_tail_truncated]()
     suite.test[test_load_check_eperm_unprivileged]()
     suite.test[test_load_check_bad_bridge]()
