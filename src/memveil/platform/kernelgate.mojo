@@ -424,12 +424,20 @@ def remedy_for(code: String) -> String:
         or code == String("btf-too-large")
         or code == String("btf-split")
         or code == String("btf-unreadable")
-        or code == String("btf-hook-not-in-btf")
-        or code == String("btf-hook-missing")
     ):
         return String(
             "use a kernel built with CONFIG_DEBUG_INFO_BTF=y;"
             " memveil qualify cannot help"
+        )
+    if code == String("btf-hook-not-in-btf"):
+        return String(
+            "this kernel's BTF does not describe the hook function;"
+            " use a kernel whose BTF includes it"
+        )
+    if code == String("btf-hook-missing"):
+        return String(
+            "check that /proc/kallsyms exists and is readable, so"
+            " the hook can be verified against the live kernel"
         )
     if code == String("btf-not-visible"):
         return String(

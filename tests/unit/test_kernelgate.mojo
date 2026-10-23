@@ -487,9 +487,19 @@ def test_remedy_per_code() raises:
     codes.append(String("btf-unreadable"))
     wants.append(btfbuild.copy())
     codes.append(String("btf-hook-not-in-btf"))
-    wants.append(btfbuild.copy())
+    wants.append(
+        String(
+            "this kernel's BTF does not describe the hook function;"
+            " use a kernel whose BTF includes it"
+        )
+    )
     codes.append(String("btf-hook-missing"))
-    wants.append(btfbuild.copy())
+    wants.append(
+        String(
+            "check that /proc/kallsyms exists and is readable, so"
+            " the hook can be verified against the live kernel"
+        )
+    )
     codes.append(String("btf-not-visible"))
     wants.append(
         String(
@@ -576,6 +586,26 @@ def test_remedy_per_code() raises:
         if remedy_for(codes[i].copy()) == sig:
             shared += 1
     assert_equal(shared, 2)
+
+
+def test_remedy_hook_btf_split() raises:
+    # Both hook codes fire on kernels that have BTF, so
+    # neither may ask for a BTF-built kernel: one names
+    # the undescribed hook, the other the unreadable list.
+    assert_equal(
+        remedy_for(String("btf-hook-not-in-btf")),
+        String(
+            "this kernel's BTF does not describe the hook function;"
+            " use a kernel whose BTF includes it"
+        ),
+    )
+    assert_equal(
+        remedy_for(String("btf-hook-missing")),
+        String(
+            "check that /proc/kallsyms exists and is readable, so"
+            " the hook can be verified against the live kernel"
+        ),
+    )
 
 
 def test_ftrace_states() raises:
@@ -692,6 +722,7 @@ def run() raises -> Int:
     suite.test[test_gate_denied_never_absent]()
     suite.test[test_gate_container_views]()
     suite.test[test_remedy_per_code]()
+    suite.test[test_remedy_hook_btf_split]()
     suite.test[test_cc_flags_without_node]()
     suite.test[test_attempt_loss_exact]()
     suite.test[test_attempt_loss_evidence]()
