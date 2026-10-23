@@ -4,6 +4,7 @@
 
 from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
+from std.time import perf_counter_ns
 
 from memveil.platform.btf import (
     MAX_KERNEL_BTF_BYTES,
@@ -536,6 +537,38 @@ def test_member_legacy_refuses_bitfield() raises:
     )
 
 
+def _assert_dag_not_found(path: String) raises:
+    """Resolve a missing member fast on one shared-subtype blob."""
+    var raw = _read_fixture(path)
+    var h = check_btf_health(Span(raw))
+    assert_true(h.ok)
+    var start = perf_counter_ns()
+    var r = resolve_btf_member(Span(raw), String("t0"), String("zz"))
+    var ms = (perf_counter_ns() - start) // 1000000
+    assert_true(r.ok)
+    assert_true(r.struct_found)
+    assert_true(not r.found)
+    assert_true(ms < 10000)
+
+
+def test_member_dag_fast() raises:
+    # Shared anonymous subtypes fan the search out 2**32
+    # and 8**12 paths; memoization answers in milliseconds.
+    _assert_dag_not_found(String("tests/fixtures/btf/dag32.bin"))
+    _assert_dag_not_found(String("tests/fixtures/btf/fan8.bin"))
+
+
+def test_member_wide_refuses() raises:
+    # 4097 expansions exceed the visit budget: the search
+    # refuses instead of walking an adversarial graph.
+    var raw = _read_fixture(String("tests/fixtures/btf/wide.bin"))
+    var h = check_btf_health(Span(raw))
+    assert_true(h.ok)
+    var r = resolve_btf_member(Span(raw), String("wide0"), String("zz"))
+    assert_true(not r.ok)
+    assert_equal(r.message, String("type graph too large"))
+
+
 def test_btf_health_classes() raises:
     var raw = _read_fixture(String("tests/fixtures/btf/swiotlb-live.bin"))
     var h = check_btf_health(Span(raw))
@@ -651,6 +684,8 @@ def run() raises -> Int:
     suite.test[test_member_duplicates]()
     suite.test[test_member_absent]()
     suite.test[test_member_legacy_refuses_bitfield]()
+    suite.test[test_member_dag_fast]()
+    suite.test[test_member_wide_refuses]()
     suite.test[test_btf_health_classes]()
     suite.test[test_btf_cap_single]()
     suite.test[test_classify_reader_messages]()

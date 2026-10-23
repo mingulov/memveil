@@ -36,6 +36,14 @@ comptime _MAX_RING_BYTES = 2147483648
 # 32 is generous and cycle-safe (cycles refuse via
 # this budget). Pinned by the chain31/chain32 tests.
 comptime _MAX_SPELL_DEPTH = 32
+# Total member-search budget: _find_member expands each
+# reached record once per resolve call and memoizes the
+# relative hit, so legit searches visit a handful of
+# records; past this many expansions the graph is
+# adversarial and the search refuses. Pinned by the
+# dag32/fan8 tests (33 and 13 visits pass) and the wide
+# test (4097 visits refuse).
+comptime _MAX_FIND_VISITS = 4096
 
 
 struct BtfMaps(ImplicitlyCopyable):
@@ -1716,6 +1724,29 @@ struct _MemberHit(ImplicitlyCopyable):
         self.bitfield_size = 0
 
 
+struct _FindMemo(Copyable):
+    """One memoized member search: relative hit per record.
+
+    ``rel[rec]`` holds the hit relative to that record's
+    own start, so callers add their accumulated offset;
+    only found and not-found outcomes are stored, never
+    path-dependent failures. ``visits`` counts record
+    expansions against _MAX_FIND_VISITS.
+    """
+
+    var done: List[Bool]
+    var rel: List[_MemberHit]
+    var visits: Int
+
+    def __init__(out self, n: Int):
+        self.done = List[Bool]()
+        self.rel = List[_MemberHit]()
+        for _ in range(n):
+            self.done.append(False)
+            self.rel.append(_MemberHit())
+        self.visits = 0
+
+
 def _find_member(
     walk: _BtfWalk,
     data: Span[UInt8, _],
@@ -1723,17 +1754,30 @@ def _find_member(
     field: String,
     acc: Int,
     depth: Int,
+    mut memo: _FindMemo,
 ) -> _MemberHit:
     """Depth-first member search through anonymous members.
 
     Anonymous STRUCT/UNION members recurse with
     accumulated offsets; any other empty-named member is
-    skipped, never descended into.
+    skipped, never descended into. Each reached record
+    expands once: the relative hit is memoized per type
+    id, so shared subtypes cost one expansion, and the
+    visit budget refuses adversarial graphs.
     """
     var out = _MemberHit()
     if depth > _MAX_SPELL_DEPTH:
         out.failed = True
         out.message = String("type graph too deep")
+        return out^
+    if memo.done[rec]:
+        var hit = memo.rel[rec].copy()
+        hit.bit_offset += acc
+        return hit^
+    memo.visits += 1
+    if memo.visits > _MAX_FIND_VISITS:
+        out.failed = True
+        out.message = String("type graph too large")
         return out^
     var base = walk.offsets[rec]
     var kflag = walk.kflags[rec]
@@ -1753,8 +1797,20 @@ def _find_member(
                         field,
                         acc + pos.bit_offset,
                         depth + 1,
+                        memo,
                     )
-                    if sub.found or sub.failed:
+                    if sub.failed:
+                        return sub^
+                    if sub.found:
+                        var held = _MemberHit()
+                        held.found = True
+                        held.bit_offset = (
+                            sub.bit_offset - acc
+                        )
+                        held.member_tid = sub.member_tid
+                        held.bitfield_size = sub.bitfield_size
+                        memo.done[rec] = True
+                        memo.rel[rec] = held^
                         return sub^
             continue
         var text = String("")
@@ -1769,7 +1825,16 @@ def _find_member(
             out.bit_offset = acc + pos.bit_offset
             out.member_tid = tid
             out.bitfield_size = pos.bitfield_size
+            var direct = _MemberHit()
+            direct.found = True
+            direct.bit_offset = pos.bit_offset
+            direct.member_tid = tid
+            direct.bitfield_size = pos.bitfield_size
+            memo.done[rec] = True
+            memo.rel[rec] = direct^
             return out^
+    memo.done[rec] = True
+    memo.rel[rec] = _MemberHit()
     return out^
 
 
@@ -1835,9 +1900,10 @@ def resolve_btf_member(
     var sizes = List[Int]()
     var kinds = List[String]()
     var bfs = List[Bool]()
+    var memo = _FindMemo(len(walk.offsets))
     for c in range(len(cands)):
         var hit = _find_member(
-            walk, data, cands[c], field, 0, 0
+            walk, data, cands[c], field, 0, 0, memo
         )
         if hit.failed:
             return _refuse_resolved(hit.message.copy())

@@ -8,7 +8,8 @@ consume them as raw vmlinux-style blobs (header at offset 0).
 
 Outputs: tests/fixtures/btf/*.bin (funcproto, dupfunc, cycle, anon,
   unnamed, voidptr, array, badref, fnptr, chain31, chain32, kflag,
-  intsizes, intsize-bad, swiotlb-live, swiotlb-live-73).
+  intsizes, intsize-bad, swiotlb-live, swiotlb-live-73, dag32,
+  fan8, wide).
 
   funcproto : FUNC test_fn -> PROTO (int, [dev: PTR STRUCT device,
                 size: TYPEDEF size_t]); canonical
@@ -77,6 +78,14 @@ Outputs: tests/fixtures/btf/*.bin (funcproto, dupfunc, cycle, anon,
   sig-dup   : FUNC test_fn twice over identical
                 prototypes (accepted) and FUNC test_gn
                 twice over differing prototypes (refused).
+  dag32     : 32 levels of two anonymous members, every
+                member to the next struct: the member
+                search fans out 2**32 without memoization.
+  fan8      : 12 levels of eight anonymous members to the
+                next struct: 8**12 paths unmemoized.
+  wide      : root with 4096 anonymous members to
+                distinct empty structs: 4097 expansions
+                trip the visit budget.
 """
 import struct
 import sys
@@ -539,6 +548,30 @@ def sig_dup():
     return b.build()
 
 
+def dag(depth, fan):
+    b = Blob()
+    names = [b.s("t%d" % i) for i in range(depth + 1)]
+    for i in range(depth + 1):
+        extra = b""
+        if i < depth:
+            for _ in range(fan):
+                extra += struct.pack("<III", 0, i + 2, 0)
+        b.t(names[i], K_STRUCT, fan if i < depth else 0, 8, extra)
+    return b.build()
+
+
+def wide():
+    b = Blob()
+    name = b.s("wide0")
+    extra = b""
+    for i in range(4096):
+        extra += struct.pack("<III", 0, i + 2, 0)
+    b.t(name, K_STRUCT, 4096, 8, extra)
+    for _ in range(4096):
+        b.t(0, K_STRUCT, 0, 8)
+    return b.build()
+
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     blobs = {"funcproto": funcproto(), "dupfunc": dupfunc(),
@@ -556,7 +589,9 @@ def main():
              "swiotlb-live-sigswap": swiotlb_live_sigswap(),
              "swiotlb-live-size32": swiotlb_live_size32(),
              "members": members(), "split": split(),
-             "sig-width": sig_width(), "sig-dup": sig_dup()}
+             "sig-width": sig_width(), "sig-dup": sig_dup(),
+             "dag32": dag(32, 2), "fan8": dag(12, 8),
+             "wide": wide()}
     for name, data in blobs.items():
         (OUT / (name + ".bin")).write_bytes(data)
     print("wrote %d BTF fixtures to %s" % (len(blobs), OUT))
