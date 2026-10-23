@@ -8,7 +8,7 @@ program log; ``diagnose_load`` replays one object load with
 log-on-failure to recover those lines. Nothing here attaches.
 """
 
-from libbpf_mojo._ffi import LOG_ON_FAILURE, OP_LOAD
+from libbpf_mojo._ffi import LOG_DISCARD, LOG_ON_FAILURE, OP_LOAD
 from libbpf_mojo.object import Object, ObjectOptions
 from memveil.platform.reader import bytes_to_text
 
@@ -271,12 +271,14 @@ def load_check(
 ) -> List[LoadResult]:
     """Load every object without attaching; report each.
 
-    Opens every object with log-on-failure, loads them in
-    input (record) order while keeping earlier loads open
-    so the kernel charges the same peak as record, then
-    releases all. Map sizes are the objects' declared
-    sizes; no custom BTF. A failed load tails the first
-    non-empty program log into ``lines``.
+    Probes every verdict with the log discarded, the
+    way record's session load runs, keeping earlier
+    loads open in input (record) order so the kernel
+    charges the same peak as record, then releases all.
+    A failed verdict replays once with log-on-failure
+    for the tail in ``lines``; the verdict errno stays
+    authoritative. Map sizes are the objects' declared
+    sizes; no custom BTF. Nothing attaches.
     """
     var out = List[LoadResult]()
     var objs = List[Object]()
@@ -287,8 +289,8 @@ def load_check(
         var opts = ObjectOptions(
             String("mv-loadcheck"),
             List[UInt8](),
-            LOG_ON_FAILURE,
-            UInt64(_DIAG_LOG_CAP),
+            LOG_DISCARD,
+            UInt64(0),
         )
         try:
             objs.append(
@@ -321,24 +323,17 @@ def load_check(
             out[i].state = String("failed")
             out[i].errno = errno_name(e.code)
             out[i].detail = _clip_line(e.message, 512)
-            var done = False
-            for p in range(len(objects[i].programs)):
-                if done:
-                    break
-                try:
-                    var view = objs[h].program(objects[i].programs[p])
-                    try:
-                        var meta = view.info(_DIAG_LOG_CAP)
-                        if len(meta.log) > 0:
-                            out[i].lines = verifier_tail(
-                                meta.log.copy(), meta.log_truncated
-                            )
-                            done = True
-                    except:
-                        pass
-                    view.close()
-                except:
-                    pass
+            var diag = diagnose_load(
+                Span(objects[i].elf),
+                lib_path,
+                objects[i].programs.copy(),
+            )
+            out[i].lines = diag.lines.copy()
+            if diag.errno == String(""):
+                out[i].detail = _clip_line(
+                    out[i].detail + String("; diagnostic replay loaded"),
+                    512,
+                )
     for i in range(len(objs)):
         objs[i].release()
     return out^
