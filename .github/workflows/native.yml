@@ -40,7 +40,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang bpftool cmake ninja-build
+            clang llvm bpftool cmake ninja-build
       - name: Provision libbpf-mojo tarball
         run: |
           VER="$(python3 -c "import json; print(json.load(open('toolchain.lock.json'))['dependencies']['libbpf-mojo']['version'])")"
