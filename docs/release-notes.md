@@ -32,10 +32,16 @@ contract for shipping collection, offline analysis, and laboratory work.
 
 ## Evidence scope
 
-Release bundle identities: binary sha256
-`4c9332d17f42d2db22fe62049777c49843669cc0cc9e3ac67d33a3fa070b39b6`
-(`.deb` sha256
-`4ac0206aabd370a95c56648f2d926ad0bb5689469b75a4c8f760224f7e44569a`).
+Tested binary sha256
+`ae2d3c13ddad4c093317b90b0e2975cc388ff8566ae8bd4d0c13b7e9ecb2ae5e`:
+`/usr/bin/memveil` in the `.deb`. The kernel matrix and the AWS SEV-SNP
+run installed that package, and the release workflow refuses to publish
+a `.deb` carrying any other binary. The runtime tarball and the `.rpm`
+are built from the same tree and pass their own install lanes, but
+their binaries are linked separately (other hashes) and were not run on
+the kernel matrix. Package hashes change with every build (the `.deb`
+changelog records the commit and build date); the release lists them in
+`SHA256SUMS.txt`.
 Earlier development receipts and CI successes apply to their recorded
 revisions, binaries, BPF objects and environments. They are historical
 evidence, not a final re-gate of every later candidate. Laboratory lifecycle,
@@ -61,13 +67,15 @@ Do not silently rewrite a profile hash to make them admitted.
   and their independent operational qualification remain open. The
   original lifecycle-qualified preview and full confidential first
   release are not complete.
-- No real SNP/TDX qualification. Offline region analysis and ordinary-Linux
+- No TDX guest was run, and one SEV-SNP guest only (AWS c6a.large,
+  Ubuntu 7.0.0-1014-aws, where every channel matched the oracle
+  exactly). Offline region analysis and ordinary-Linux
   conversion calls do not prove a confidential transition. No attestation
   is performed, and observations are not host-access verdicts.
 - SEV-SNP guests are detected through the `vmpl` node
   (`/sys/devices/system/cpu/sev/vmpl` beside the sev-guest
-  node), fixture-proven; live-proven only after the
-  controller's AWS run with this build.
+  node), fixture-proven and live-proven on that AWS guest: doctor
+  reports `sev-vmpl:0`, matching the kernel's "SNP running at VMPL0".
 - Pool samples are best-effort reads (start, 1 s cadence capped at
   4,096 with missed ticks skipped, close) and cannot alone diagnose
   sustained pressure. The sampler never resets high-water; equal values
@@ -92,10 +100,14 @@ Do not silently rewrite a profile hash to make them admitted.
   (need 6.11); BTF-less kernels refuse lifecycle and
   copy (`btf-absent-config`); confidentiality lockdown
   refuses everything.
-- The 6.0, 6.10, 6.11, and 6.12.0 saturated runs
-  stop at the 4,194,304-record cap with bytes below the
-  4 GiB cap, which the gate accepts as a filled
-  budget. Attempt loss before 6.7 is a lower bound:
+- Saturated busy runs can stop at the 4,194,304-record
+  cap with bytes below the 4 GiB cap (6.11 in the
+  release run; 6.0, 6.10, and 6.12.0 in earlier runs),
+  which the gate accepts as a filled budget. Main-window
+  captures can lose a few map or copy events to BPF
+  trampoline recursion; memveil counts them as
+  `recursion_missed` and reports detail partial (5 to 222
+  events on five rows of the release run). Attempt loss before 6.7 is a lower bound:
   the 6.0 and 6.6 rows report partial with the
   lower-bound label in detail and aggregate.
 - The 6.18.0 kernel leaves read maps unmapped (640,

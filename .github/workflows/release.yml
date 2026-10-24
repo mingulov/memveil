@@ -8,7 +8,7 @@
 # and uploads the set plus a sha256 file to the tag's
 # GitHub Release. Dispatch runs build everything, keep the
 # set as a workflow artifact and publish nothing; both refuse
-# a packaged binary other than the tested one. Rollback is a
+# a .deb whose binary is not the tested one. Rollback is a
 # new tag; a rerun of the same tag replaces its uploaded files.
 name: release
 
@@ -132,7 +132,7 @@ jobs:
             dist/SHA256SUMS.txt
             dist/PACKAGED-SHA256.txt
           if-no-files-found: error
-      # Only the binary the kernel matrix ran may ship; its hash is pinned in the release notes.
+      # The .deb must carry the binary the kernel matrix ran; its hash is pinned in the release notes.
       - name: Packaged binary is the tested one
         run: |
           WANT="$(python3 -c "import re; print(re.search(r'binary sha256\s+\x60([0-9a-f]{64})\x60', open('docs/release-notes.md').read()).group(1))")"

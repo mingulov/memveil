@@ -66,4 +66,4 @@ Kernels known to show this signature (kept current as the matrix grows):
 
 | Kernel | Device | Cause | memveil row |
 | --- | --- | --- | --- |
-| v6.18 (and v6.18.1 to v6.18.39 by source) | NVMe with SGL support | f0887e2a52d4, fixed by a54afbc8a213 / bbf04810b2a0 | 6.18.0: 640 open mappings, 82313216 bytes held |
+| v6.18 (and v6.18.1 to v6.18.39 by source) | NVMe with SGL support | f0887e2a52d4, fixed by a54afbc8a213 / bbf04810b2a0 | 6.18.0: 640 open mappings, 82313216 bytes held (384 on a later run; the count varies run to run) |

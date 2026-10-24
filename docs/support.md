@@ -144,40 +144,40 @@ tracepoint format, ftrace attachability), never by trusting
 the release string. One prebuilt probe set covers every row;
 no rebuild on the device.
 
-Booted 2026-10-23 with the 0.1.0 release bundle
-(binary sha256 `4c9332d1...`, full hash in the
-[release notes](release-notes.md)). Every row passes;
-`PASS` rows are support claims and refused
-capabilities stay measured observations recorded with
-their exact refusal codes. Evidence: `matrix/<lock
-id>` per row. Three rows needed a same-binary re-boot:
-the btf/nobtf oracle stalled over a second at a window
-edge, and the first 6.18.0 guest was SIGKILLed before
-it produced output; the preserved failures sit beside
-the passing rows.
+Booted 2026-10-24 with the CI-built 0.1.0 `.deb`
+(binary sha256 `ae2d3c13...`, full hash in the
+[release notes](release-notes.md)), all rows in one
+run with no re-boot. Every row passes; `PASS` rows are
+support claims and refused capabilities stay measured
+observations recorded with their exact refusal codes.
+Evidence: `matrix/<lock id>` per row. `SHORT-COVERED`
+means memveil persisted fewer events than the oracle
+saw and declared the difference as loss (here always
+trampoline recursion misses); the row fails if the
+declared loss does not cover the gap.
 
 | Lock id | Booted release | attempt-trace | mapping-lifecycle | copy-actual | Row |
 | --- | --- | --- | --- | --- | --- |
 | 5.15 | 5.15.223-0515223-generic | refused (`floor`) | refused (`floor`) | refused (`floor`) | PASS |
-| 6.0 | 6.0.19-060019-generic | available | refused (`floor`) | refused (`floor`) | PASS (attempt-only; aggregate partial lower bound; busy stops at the 4,194,304-record cap) |
+| 6.0 | 6.0.19-060019-generic | available | refused (`floor`) | refused (`floor`) | PASS (attempt-only; aggregate partial lower bound) |
 | 6.6 | 6.6.160-0606160-generic | available | refused (`floor`) | refused (`floor`) | PASS (attempt-only; aggregate partial lower bound) |
-| 6.10 | 6.10.14-061014-generic | available | refused (`floor`) | refused (`floor`) | PASS (attempt-only; busy stops at the 4,194,304-record cap, SHORT-COVERED) |
+| 6.10 | 6.10.14-061014-generic | available | refused (`floor`) | refused (`floor`) | PASS (attempt-only; busy SHORT-COVERED) |
 | 6.11 | 6.11.11-061111-generic | available | available | available | PASS (busy stops at the 4,194,304-record cap) |
-| 6.12.0 | 6.12.0-061200-generic | available | available | available | PASS (busy stops at the 4,194,304-record cap) |
+| 6.12.0 | 6.12.0-061200-generic | available | available | available | PASS |
 | 6.12.114-btf | 6.12.114-mv-6.12.114-btf | available | available | available | PASS |
 | 6.12.114-debug | 6.12.114-mv-6.12.114-debug | available | available | available | PASS |
 | 6.12.114-nobtf | 6.12.114-mv-6.12.114-nobtf | available | refused (`btf-absent-config`) | refused (`btf-absent-config`) | PASS (counts only; busy SHORT-COVERED) |
-| 6.12.114-rt | 6.12.114-mv-6.12.114-rt | available | available | available | PASS (main SHORT-COVERED) |
+| 6.12.114-rt | 6.12.114-mv-6.12.114-rt | available | available | available | PASS (main SHORT-COVERED: 222 recursion misses) |
 | 6.12 | 6.12.114-0612114-generic | available | available | available | PASS |
-| 6.18.0 | 6.18.0-061800-generic | available | available | available | PASS (kernel leaves read maps unmapped; product reports them open with the kernel-left-open note; see [kernel issues](kernel-issues.md)) |
+| 6.18.0 | 6.18.0-061800-generic | available | available | available | PASS (kernel leaves read maps unmapped, 384 this run; product reports them open with the kernel-left-open note; see [kernel issues](kernel-issues.md)) |
 | 6.18 | 6.18.58-061858-generic | available | available | available | PASS |
 | 7.0.14-lockdown | 7.0.14-070014-generic | refused (`lockdown-confidentiality`) | refused (`lockdown-confidentiality`) | refused (`lockdown-confidentiality`) | PASS |
-| 7.0 | 7.0.14-070014-generic | available | available | available | PASS |
-| 7.1 | 7.1.13-070113-generic | available | available | available | PASS |
+| 7.0 | 7.0.14-070014-generic | available | available | available | PASS (main SHORT-COVERED: 8 recursion misses) |
+| 7.1 | 7.1.13-070113-generic | available | available | available | PASS (main SHORT-COVERED: 6 recursion misses) |
 | 7.2 | 7.2.6-070206-generic | available | available | available | PASS |
-| 7.3-rc3 | 7.3.0-070300rc3-generic | available | available | available | PASS |
-| 7.3 | 7.3.0-mv-7.3 | available | available | available | PASS |
-| debian13 | 6.12.107+deb13-amd64 | available | available | available | FAIL (busy oracle gap over 1 s at window end; main all EXACT) |
+| 7.3-rc3 | 7.3.0-070300rc3-generic | available | available | available | PASS (main SHORT-COVERED: 5 recursion misses) |
+| 7.3 | 7.3.0-mv-7.3 | available | available | available | PASS (main SHORT-COVERED: 21 recursion misses) |
+| debian13 | 6.12.107+deb13-amd64 | available | available | available | PASS |
 
 Notes:
 
