@@ -36,6 +36,7 @@ comptime EXIT_OK = 0
 comptime EXIT_INTERNAL = 1
 comptime EXIT_INVALID = 2
 comptime _STDERR_EINTR = 4
+comptime _SYS_WRITE = 1  # raw syscall: std.ffi already declares "write"
 comptime EXIT_INCOMPLETE = 4
 comptime MAX_RENDERED_BYTES = 16777216
 
@@ -224,10 +225,13 @@ def _write_fd2(raw: Span[UInt8, _]) raises:
     var total = len(raw)
     var off = 0
     while off < total:
-        var n = external_call["write", Int](
-            2, raw.unsafe_ptr().unsafe_offset(off), total - off
+        var sn = external_call["syscall", Int64](
+            Int64(_SYS_WRITE),
+            Int64(2),
+            raw.unsafe_ptr().unsafe_offset(off),
+            Int64(total - off),
         )
-        if n < 0:
+        if sn < Int64(0):
             var p = external_call[
                 "__errno_location", Pointer[Int32, MutAnyOrigin]
             ]()
@@ -235,9 +239,9 @@ def _write_fd2(raw: Span[UInt8, _]) raises:
             if no == _STDERR_EINTR:
                 continue
             raise Error("stderr write failed: errno " + String(no))
-        if n == 0:
+        if sn == Int64(0):
             raise Error("stderr write returned 0")
-        off += n
+        off += Int(sn)
 
 
 def write_stderr(text: String) raises:

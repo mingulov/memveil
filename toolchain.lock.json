@@ -1,21 +1,21 @@
 {
   "lock_version": "1.0.0",
-  "recorded_on": "2026-10-07",
-  "note": "Pinned build inputs: exact versions, except cmake which carries a minimum floor. Verify with: pixi install && tools/build --check-toolchain. The pixi.lock file carries authoritative conda package hashes; this file records the selected versions and their provenance.",
+  "recorded_on": "2026-10-30",
+  "note": "Pinned build inputs: pixi, Mojo, and ninja are exact; system clang, bpftool, cmake, and dev-only Python carry minimum floors (default install per environment). Verify with: pixi install && tools/build --check-toolchain. The pixi.lock file carries authoritative conda package hashes; this file records the selected versions and their provenance.",
   "toolchain": {
     "mojo": {
-      "version": "1.1.0",
+      "version": "1.2.0",
       "build": "release",
       "distribution": "pixi/conda",
       "channel": "https://conda.modular.com/max",
-      "compiler_commit": "8189361e",
+      "compiler_commit": "2016d0cd",
       "verify": "pixi run mojo --version"
     },
     "pixi": {
-      "version": "0.81.0",
+      "version": "0.83.0",
       "release_asset": "pixi-x86_64-unknown-linux-musl.tar.gz",
-      "release_url": "https://github.com/prefix-dev/pixi/releases/download/v0.81.0/pixi-x86_64-unknown-linux-musl.tar.gz",
-      "release_sha256": "7aa3ec39aecceff9062fa2ed4d42cbaa0bdc25ddea727d048e061cf188d434f6",
+      "release_url": "https://github.com/prefix-dev/pixi/releases/download/v0.83.0/pixi-x86_64-unknown-linux-musl.tar.gz",
+      "release_sha256": "064f371e692aaa3400ac581c89da2843c91437f20c2d9155395a5d0037f33551",
       "verify": "pixi --version"
     },
     "libbpf_source": {
@@ -27,16 +27,17 @@
       "note": "Consumed through the libbpf-mojo bridge; MemVeil never links libbpf directly."
     },
     "clang": {
-      "version": "21.1.8",
-      "build_string": "6ubuntu1",
+      "minimum_version": "21.1.8",
       "origin": "system",
       "role": "C eBPF program compilation",
-      "verify": "clang --version"
+      "verify": "clang --version",
+      "note": "Floor; verified with Ubuntu 26.04 clang 21.1.8 and Fedora 44 clang 22.1.8."
     },
     "bpftool": {
-      "version": "7.7.0",
+      "minimum_version": "7.6.0",
       "origin": "system",
-      "verify": "bpftool --version"
+      "verify": "bpftool --version",
+      "note": "Floor; verified with Ubuntu 26.04 bpftool 7.7.0 and Fedora 44 bpftool 7.6.0."
     },
     "cmake": {
       "minimum_version": "4.2.3",
@@ -48,7 +49,7 @@
       "verify": "ninja --version"
     },
     "python": {
-      "version": "3.14.4",
+      "minimum_version": "3.14.4",
       "role": "development validation only; never runtime collection or replay",
       "verify": "python3 --version"
     }
@@ -79,15 +80,15 @@
     }
   },
   "expected_first_lines": {
-    "pixi": "pixi 0.81.0",
-    "mojo": "Mojo 1.1.0 (8189361e)",
-    "clang": "Ubuntu clang version 21.1.8 (6ubuntu1)",
-    "bpftool": "bpftool v7.7.0",
-    "ninja": "1.13.2",
-    "python": "Python 3.14.4"
+    "pixi": "pixi 0.83.0",
+    "mojo": "Mojo 1.2.0 (2016d0cd)",
+    "ninja": "1.13.2"
   },
   "minimum_versions": {
-    "cmake": "4.2.3"
+    "cmake": "4.2.3",
+    "clang": "21.1.8",
+    "bpftool": "7.6.0",
+    "python": "3.14.4"
   },
   "platform_floor": {
     "arch": "x86-64",
@@ -96,11 +97,11 @@
   },
   "decisions": [
     "D1: pixi (pixi.toml + pixi.lock) is the Mojo project manifest; one manifest per repository.",
-    "D2: Mojo 1.1.0 stable from the public max channel; nightly builds are not used.",
+    "D2: Mojo 1.2.0 stable from the public max channel; nightly builds are not used.",
     "D3: libbpf is consumed only through the pinned libbpf-mojo bridge, never linked directly.",
-    "D4: System clang 21.1.8 pinned by exact version string for C eBPF compilation. Revisit on BPF codegen issues.",
+    "D4: System clang carries a minimum floor (21.1.8) for C eBPF compilation: vendors ship different builds of nearby versions, so an exact string would single-distro the build. Bit-reproducibility is claimed only for CI-built artifacts; a local build is not the CI binary. Revisit on BPF codegen issues.",
     "D5: Validation tooling uses Python standard library only; no third-party Python dependencies.",
     "D6: External schema version 0.1.0 is independent of product, bridge ABI, and BPF wire versions.",
-    "D7: cmake is a build driver, not a codegen input: the check enforces a minimum version (default install per environment), not an exact pin. Tools that affect output bits stay exact."
+    "D7: cmake is a build driver, not a codegen input: the check enforces a minimum version (default install per environment), not an exact pin. System clang, bpftool, and dev-only Python carry floors for the same multi-distro reason; pixi, Mojo, and ninja stay exact."
   ]
 }

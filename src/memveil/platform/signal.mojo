@@ -103,7 +103,7 @@ def _has_sigblk_sentinel() -> Bool:
 def ensure_inherited_signal_block(args: List[String]) -> String:
     """Re-exec once so runtime threads inherit blocked signals.
 
-    Every Mojo 1.1.0 binary spawns runtime worker threads
+    Every Mojo 1.2.0 binary spawns runtime worker threads
     before main with the parent's (unblocked) mask; a
     process-directed SIGINT/SIGTERM would land in a
     worker and never reach signalfd. Blocking here and

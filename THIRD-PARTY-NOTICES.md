@@ -56,9 +56,9 @@ entry.
 - `lib/libAsyncRTRuntimeGlobals.so`,
   `lib/libKGENCompilerRTShared.so`,
   `lib/libMSupportGlobals.so` from this bundle's own pixi
-  environment: conda package mojo-compiler 1.1.0 (release).
-  Binary: https://conda.modular.com/max/linux-64/mojo-compiler-1.1.0-release.conda
-  sha256: 1ff52b39a0d2a1bedb8c4705aadc460205ca62fc19f63426bc545e4b60a31aa0
+  environment: conda package mojo-compiler 1.2.0 (release).
+  Binary: https://conda.modular.com/max/linux-64/mojo-compiler-1.2.0-release.conda
+  sha256: a746d7db173a9882e7073ae6d905acfe383a754faecb4a53710b7b90db377e6b
   These ship under the Modular MAX SDK license staged as
   `licenses/LICENSE.mojo-compiler` with
   `licenses/Third-Party-Notices.mojo-compiler`; provenance
@@ -70,7 +70,7 @@ entry.
   Notice and the staged attribution the license requires.
   Caveat: Modular's texts do not enumerate these three
   library files by name, and no static-link option was
-  found in Mojo 1.1.0, so the libraries ship as shared
+  found in Mojo 1.2.0, so the libraries ship as shared
   objects. Confirm the redistribution reading with the
   staged license texts before republishing beyond this
   owner handoff.

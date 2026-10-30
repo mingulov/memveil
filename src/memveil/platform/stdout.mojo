@@ -15,6 +15,7 @@ bytes land in call order.
 from std.ffi import external_call
 
 comptime _EINTR = 4
+comptime _SYS_WRITE = 1  # raw syscall: std.ffi already declares "write"
 
 
 @fieldwise_init
@@ -35,14 +36,17 @@ def write_stdout(text: String) raises:
     var total = len(raw)
     var off = 0
     while off < total:
-        var n = external_call["write", Int](
-            1, Span(raw).unsafe_ptr().unsafe_offset(off), total - off
+        var sn = external_call["syscall", Int64](
+            Int64(_SYS_WRITE),
+            Int64(1),
+            Span(raw).unsafe_ptr().unsafe_offset(off),
+            Int64(total - off),
         )
-        if n < 0:
+        if sn < Int64(0):
             var no = _errno_now()
             if no == _EINTR:
                 continue
             raise StdoutError("stdout write failed: errno " + String(no))
-        if n == 0:
+        if sn == Int64(0):
             raise StdoutError("stdout write returned 0")
-        off += n
+        off += Int(sn)

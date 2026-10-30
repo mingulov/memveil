@@ -101,6 +101,7 @@ comptime _O_DIRECTORY = 65536
 comptime _O_NOFOLLOW = 131072
 comptime _AT_FDCWD = -100
 comptime _EINTR = 4
+comptime _SYS_WRITE = 1  # raw syscall: std.ffi already declares "write"
 comptime _EEXIST = 17
 
 
@@ -574,21 +575,22 @@ def _write_all(fd: Int32, raw: Span[UInt8, _]) raises PublishError:
     var total = len(raw)
     var off = 0
     while off < total:
-        var n = external_call["write", Int](
-            Int(fd),
+        var sn = external_call["syscall", Int64](
+            Int64(_SYS_WRITE),
+            Int64(fd),
             Span(raw).unsafe_ptr().unsafe_offset(off),
-            total - off,
+            Int64(total - off),
         )
-        if n < 0:
+        if sn < Int64(0):
             var no = _errno_now()
             if no == _EINTR:
                 continue
             raise PublishError(
                 String("receipt write failed: errno ") + String(no)
             )
-        if n == 0:
+        if sn == Int64(0):
             raise PublishError("receipt write returned 0")
-        off += n
+        off += Int(sn)
 
 
 def _unlink_at_quiet(dir_fd: Int32, name: List[UInt8]):

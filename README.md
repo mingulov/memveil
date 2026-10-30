@@ -56,7 +56,7 @@ expected outputs.
 
 ## Build and test (from source)
 
-Pinned Mojo 1.1.0 toolchain via pixi; see `docs/build.md` and
+Pinned Mojo 1.2.0 toolchain via pixi; see `docs/build.md` and
 `toolchain.lock.json`. The native bridge comes from the pinned
 vendored `libbpf-mojo` library bundle (`third_party/`): bridge
 library, Mojo wrappers, and C header, never a sibling checkout;

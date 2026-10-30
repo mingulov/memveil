@@ -1576,7 +1576,7 @@ class TestPackagingSeal:
                 if line.startswith("- conda:"):
                     filename = line.rsplit("/", 1)[-1].strip()
                     skip = (filename ==
-                            "mojo-compiler-1.1.0-release.conda")
+                            "mojo-compiler-1.2.0-release.conda")
                     if skip:
                         lines.append(
                             "- conda: file://%s\n" % evil)
@@ -1796,10 +1796,10 @@ class TestRuntimeProvenance:
             text = handle.read()
         packages, problems = provenance.read_lock_packages(text)
         assert problems == [], problems
-        mojo = packages["mojo-compiler-1.1.0-release.conda"]
-        assert mojo["version"] == "1.1.0"
+        mojo = packages["mojo-compiler-1.2.0-release.conda"]
+        assert mojo["version"] == "1.2.0"
         assert mojo["sha256"] == \
-            "1ff52b39a0d2a1bedb8c4705aadc460205ca62fc19f63426bc545e4b60a31aa0"
+            "a746d7db173a9882e7073ae6d905acfe383a754faecb4a53710b7b90db377e6b"
         assert packages["libgcc-16.2.0-ha9f2e26_7.conda"][
             "sha256"] == \
             "e031634c3a928f9594eba868bc46ef5230d6571a364a0c63215b06c4563bfcea"

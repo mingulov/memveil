@@ -31,6 +31,8 @@ from scripted import (
     stats_ok,
 )
 
+comptime _SYS_WRITE = 1  # raw syscall: std.ffi already declares "write"
+
 
 def _mkdtemp() raises -> String:
     var template = String("/tmp/memveil-live-XXXXXX")
@@ -227,13 +229,14 @@ def _append_text(path: String, text: String) -> Bool:
     var total = len(raw)
     var off = 0
     while off < total:
-        var n = external_call["write", Int](
-            Int(fd),
+        var sn = external_call["syscall", Int64](
+            Int64(_SYS_WRITE),
+            Int64(fd),
             Span(raw).unsafe_ptr().unsafe_offset(off),
-            total - off,
+            Int64(total - off),
         )
-        if n <= 0:
-            if n < 0:
+        if sn <= Int64(0):
+            if sn < Int64(0):
                 var p = external_call[
                     "__errno_location", Pointer[Int32, MutAnyOrigin]
                 ]()
@@ -241,7 +244,7 @@ def _append_text(path: String, text: String) -> Bool:
                     continue
             _ = external_call["close", Int32](fd)
             return False
-        off += n
+        off += Int(sn)
     _ = external_call["close", Int32](fd)
     return True
 
