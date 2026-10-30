@@ -23,6 +23,9 @@ without it is rejected rather than half-read.
 
 Reads are capped; unreadable evidence is distinguished as absent (path
 missing) versus denied (permission refused), never silently skipped.
+Fixture reads open root-relative without following symlinks and
+refuse dotdot escapes; the open itself classifies, with no
+access-then-open race.
 """
 
 from std.ffi import external_call
@@ -46,6 +49,10 @@ comptime _MODE_R_OK = 4
 comptime _AT_FDCWD = -100
 comptime _AT_EACCESS = 512
 comptime _ENOENT = 2
+comptime _O_RDONLY = 0
+comptime _O_DIRECTORY = 65536
+comptime _O_NOFOLLOW = 131072
+comptime _O_CLOEXEC = 524288
 comptime _FS_TMPFS = 0x01021994
 comptime _FS_EXT = 0xEF53
 comptime _FS_OVERLAY = 0x794C7630
@@ -382,6 +389,23 @@ def _read_bounded_local(path: String, what: String, cap: Int) raises EvidenceErr
     )
     if fp == 0:
         raise EvidenceError(E_IO, what + ": cannot open")
+    return _drain_fp(fp, what, cap)
+
+
+def _close_quiet_local(fd: Int32):
+    """Close when open; best effort, no error."""
+    if fd >= Int32(0):
+        _ = external_call["close", Int32](fd)
+
+
+def _drain_fp(
+    fp: UInt64, what: String, cap: Int
+) raises EvidenceError -> List[UInt8]:
+    """Drain one open stream with the shared chunk/cap rules.
+
+    E_IO on read failure, E_TOO_BIG past the cap; the stream
+    closes on every path.
+    """
     var chunk = List[UInt8]()
     for _ in range(_CHUNK_BYTES):
         chunk.append(UInt8(0))
@@ -402,6 +426,128 @@ def _read_bounded_local(path: String, what: String, cap: Int) raises EvidenceErr
             raise EvidenceError(E_TOO_BIG, what + " too large")
         for i in range(n):
             out.append(chunk[i])
+
+
+def _lexical_parts(path: String) raises EvidenceError -> List[String]:
+    """Split a fixture path into contained components.
+
+    Empty parts and ``.`` collapse; ``..`` pops one part and
+    refuses past the root: a hostile fixture cannot spell an
+    escape.
+    """
+    var out = List[String]()
+    var parts = path.split(String("/"))
+    for i in range(len(parts)):
+        var part = String(parts[i])
+        if part == String("") or part == String("."):
+            continue
+        if part == String(".."):
+            if len(out) == 0:
+                raise EvidenceError(
+                    E_DENIED, path + ": escapes fixture root"
+                )
+            _ = out.pop()
+            continue
+        out.append(part.copy())
+    return out^
+
+
+def _open_errno_error(path: String) -> EvidenceError:
+    """Classify a failed open: only ENOENT is absent."""
+    if _errno_now() == _ENOENT:
+        return EvidenceError(E_ABSENT, path + ": absent")
+    return EvidenceError(E_DENIED, path + ": denied")
+
+
+def _contained_fd(root: String, path: String) raises EvidenceError -> Int32:
+    """Open one fixture path with no symlink following.
+
+    Walks root-relative with O_NOFOLLOW on every component,
+    so neither the final name nor an intermediate directory
+    can be a symlink escape. The root itself is
+    operator-supplied and opened plainly.
+    """
+    var parts = _lexical_parts(path)
+    var open_flags = _O_RDONLY | _O_CLOEXEC
+    var croot = _to_cstr_local(root)
+    if len(parts) == 0:
+        var fd0 = external_call["open", Int32](
+            Span(croot).unsafe_ptr(),
+            Int32(open_flags),
+            UInt32(0),
+        )
+        if fd0 < Int32(0):
+            raise _open_errno_error(path)
+        return fd0
+    var dir_flags = _O_RDONLY | _O_DIRECTORY | _O_CLOEXEC
+    var dfd = external_call["open", Int32](
+        Span(croot).unsafe_ptr(), Int32(dir_flags), UInt32(0)
+    )
+    if dfd < Int32(0):
+        raise _open_errno_error(path)
+    var step_flags = _O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC
+    for i in range(len(parts) - 1):
+        var cp = _to_cstr_local(String(parts[i]))
+        var nfd = external_call["openat", Int32](
+            dfd,
+            Span(cp).unsafe_ptr(),
+            Int32(step_flags),
+            UInt32(0),
+        )
+        _close_quiet_local(dfd)
+        if nfd < Int32(0):
+            raise _open_errno_error(path)
+        dfd = nfd
+    var last = _to_cstr_local(String(parts[len(parts) - 1]))
+    var fd = external_call["openat", Int32](
+        dfd,
+        Span(last).unsafe_ptr(),
+        Int32(_O_RDONLY | _O_NOFOLLOW | _O_CLOEXEC),
+        UInt32(0),
+    )
+    _close_quiet_local(dfd)
+    if fd < Int32(0):
+        raise _open_errno_error(path)
+    return fd
+
+
+def _read_bounded_contained(
+    root: String, path: String, what: String, cap: Int
+) raises EvidenceError -> List[UInt8]:
+    """Read one fixture file, contained, without following links.
+
+    Raises E_ABSENT when the contained path is missing, E_DENIED
+    when it is unreadable, a symlink, or an escape, E_TOO_BIG
+    past the cap, E_IO on read failure.
+    """
+    var fd = _contained_fd(root, path)
+    var mode = _to_cstr_local("rb")
+    var fp = external_call["fdopen", UInt64](
+        fd, Span(mode).unsafe_ptr()
+    )
+    if fp == 0:
+        _close_quiet_local(fd)
+        raise EvidenceError(E_IO, what + ": cannot open")
+    return _drain_fp(fp, what, cap)
+
+
+def _read_bounded_mapped(
+    path: String, what: String, cap: Int
+) raises EvidenceError -> List[UInt8]:
+    """Read one live path, opening first, symlinks followed.
+
+    Live system paths legitimately contain links; the open
+    errno classifies absent versus denied with no access()
+    probe, so no race sits between check and use.
+    """
+    var cpath = _to_cstr_local(path)
+    var mode = _to_cstr_local("rb")
+    var fp = external_call["fopen", UInt64](
+        Span(cpath).unsafe_ptr(), Span(mode).unsafe_ptr()
+    )
+    if fp == 0:
+        raise _open_errno_error(what)
+    return _drain_fp(fp, what, cap)
 
 
 trait LineSink:
@@ -488,11 +634,14 @@ def open_evidence_reader(root: String) raises EvidenceError -> EvidenceReader:
             String(""), _uname_machine(), _uname_release(),
             _geteuid_live(), List[String](), String("")
         )
-    var meta_path = root + "/meta.txt"
     var raw: List[UInt8]
     try:
-        raw = _read_bounded_local(meta_path, "meta.txt", _CHUNK_BYTES)
+        raw = _read_bounded_contained(
+            root, String("/meta.txt"), "meta.txt", _CHUNK_BYTES
+        )
     except e:
+        if e.code == E_DENIED:
+            raise EvidenceError(E_META_BAD, String(e))
         raise EvidenceError(E_META_MISSING, String(e))
     if not is_valid_utf8(raw):
         raise EvidenceError(E_META_BAD, "meta not UTF-8")
@@ -600,16 +749,20 @@ def read_evidence(
 ) raises EvidenceError -> List[UInt8]:
     """Read one evidence file, capped at cap bytes.
 
-    Raises E_ABSENT when the path is missing, E_DENIED when it is
-    unreadable, E_TOO_BIG past the cap, E_IO on open/read failure.
-    Bytes are returned raw; text decoding is the caller's choice.
+    Opens first and classifies from the open: no access()
+    probe sits between check and use. Fixture reads stay
+    inside the root and refuse symlinks; live reads follow
+    links as before. Raises E_ABSENT when the path is
+    missing, E_DENIED when it is unreadable, a link, or an
+    escape, E_TOO_BIG past the cap, E_IO on read failure.
+    Bytes are returned raw; text decoding is the caller's
+    choice.
     """
-    var st = file_state(reader, path)
-    if st == EVIDENCE_ABSENT:
-        raise EvidenceError(E_ABSENT, path + ": absent")
-    if st == EVIDENCE_DENIED:
+    if is_denied(reader, path):
         raise EvidenceError(E_DENIED, path + ": denied")
-    return _read_bounded_local(evidence_path(reader, path), path, cap)
+    if reader.root == "":
+        return _read_bounded_mapped(path, path, cap)
+    return _read_bounded_contained(reader.root, path, path, cap)
 
 
 def read_host_file(path: String, what: String, cap: Int) raises EvidenceError -> List[UInt8]:

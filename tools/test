@@ -81,7 +81,8 @@ suite_unit() {
     for t in tests/unit/test_reader.mojo \
              tests/unit/test_attempts.mojo \
              tests/unit/test_report.mojo \
-             tests/unit/test_runtime.mojo; do
+             tests/unit/test_runtime.mojo \
+             tests/unit/test_evidence_containment.mojo; do
         run_unit_file "$t" || failed=1
     done
     if [ "$failed" -ne 0 ]; then

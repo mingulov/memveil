@@ -182,13 +182,92 @@ def _clip_line(s: String, cap: Int) -> String:
         return bytes_to_text(cut^)
 
 
+def _is_hex_digit(b: UInt8) -> Bool:
+    return (
+        (b >= UInt8(0x30) and b <= UInt8(0x39))
+        or (b >= UInt8(0x41) and b <= UInt8(0x46))
+        or (b >= UInt8(0x61) and b <= UInt8(0x66))
+    )
+
+
+def _is_f_nibble(b: UInt8) -> Bool:
+    return b == UInt8(0x46) or b == UInt8(0x66)
+
+
+def _redact_pointers(s: String) -> String:
+    """Replace kernel-address patterns with ``0xADDR``.
+
+    Redacts ``0x``/``0X`` runs of 8-16 hex digits and bare
+    16-hex-digit runs starting with ``ffff`` (bounded on both
+    sides); shorter values, longer runs, and other hex stay,
+    so offsets, counts, and hashes survive.
+    """
+    var raw = s.as_bytes()
+    var out = List[UInt8]()
+    var marker = String("0xADDR").as_bytes()
+    var i = 0
+    while i < len(raw):
+        var b = raw[i]
+        if (
+            b == UInt8(0x30)
+            and i + 1 < len(raw)
+            and (
+                raw[i + 1] == UInt8(0x78)
+                or raw[i + 1] == UInt8(0x58)
+            )
+        ):
+            var j = i + 2
+            while j < len(raw) and _is_hex_digit(raw[j]):
+                j += 1
+            if j - (i + 2) >= 8 and j - (i + 2) <= 16:
+                for k in range(len(marker)):
+                    out.append(marker[k])
+                i = j
+                continue
+            out.append(b)
+            i += 1
+            continue
+        if _is_f_nibble(b) and (
+            i == 0 or not _is_hex_digit(raw[i - 1])
+        ):
+            var k = i
+            while k < len(raw) and k < i + 4 and _is_f_nibble(
+                raw[k]
+            ):
+                k += 1
+            if k == i + 4:
+                var m = k
+                while (
+                    m < len(raw)
+                    and m < i + 16
+                    and _is_hex_digit(raw[m])
+                ):
+                    m += 1
+                if m == i + 16 and (
+                    m == len(raw) or not _is_hex_digit(raw[m])
+                ):
+                    for t in range(len(marker)):
+                        out.append(marker[t])
+                    i = m
+                    continue
+        out.append(b)
+        i += 1
+    try:
+        return String(from_utf8=Span(out))
+    except:
+        return bytes_to_text(out^)
+
+
 def _clean_verifier_line(raw: List[UInt8]) -> String:
-    """Sanitize one verifier line, then cap at 256 bytes."""
-    return _clip_line(_escape_line(bytes_to_text(raw)), _TAIL_LINE_CAP)
+    """Escape, redact addresses, then cap one line at 256 bytes."""
+    return _clip_line(
+        _redact_pointers(_escape_line(bytes_to_text(raw))),
+        _TAIL_LINE_CAP,
+    )
 
 
 def verifier_tail(log: List[UInt8], truncated: Bool) -> List[String]:
-    """Last 4 non-empty verifier lines, sanitized, capped.
+    """Last 4 non-empty verifier lines, redacted, capped.
 
     A truncated log gains the fixed first line naming the
     64 KiB cut; each kept line holds at most 256 bytes.
