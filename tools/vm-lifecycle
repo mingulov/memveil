@@ -1,8 +1,9 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Lifecycle VM gates: low-rate matrix, copy semantics, real I/O, witness.
+# Lifecycle VM gates: low-rate matrix, copy semantics, real I/O,
+# witness, identity races.
 #
-# Runs the four gate files. Each skips fast (no boot) unless
+# Runs the five gate files. Each skips fast (no boot) unless
 # MEMVEIL_VM_LIFECYCLE=1 with qualified lifecycle probes and a
 # working virtme-ng harness; an armed gate with missing pieces
 # fails instead of skipping.
@@ -28,4 +29,5 @@ fi
 cd "$ROOT" || exit 1
 exec python3 -m pytest tests/vm/test_lifecycle.py \
     tests/vm/test_copy_semantics.py tests/vm/test_real_io.py \
-    tests/vm/test_witness.py -v "$@"
+    tests/vm/test_witness.py tests/vm/test_identity_races.py \
+    -v "$@"

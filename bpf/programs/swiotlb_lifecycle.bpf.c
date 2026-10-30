@@ -68,56 +68,38 @@ struct {
     __uint(max_entries, 1);
 } mv_gen_next SEC(".maps");
 
-/* Append-only quarantine: keys whose cleanup failed. Entries
- * are never removed; quarantined keys emit unknown identity
- * until capture end. */
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __type(key, struct mv_gen_key);
-    __type(value, __u8);
-    __uint(max_entries, 1024);
-} mv_gen_quarantine SEC(".maps");
-
-/* Global quarantine: set by direct store (no helper, so the
- * escalation step cannot fail) when even quarantine insert
- * fails. While set, every map diverts and every unmap misses. */
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __type(key, __u32);
-    __type(value, __u8);
-    __uint(max_entries, 1);
-} mv_gen_dark SEC(".maps");
+/* No quarantine tiers: compare-and-swap tombstones plus reclaim
+ * in mv_claim_gen make a failed delete self-healing, so there
+ * is no cleanup failure left to escalate. */
 
 #define MV_CAS_RETRIES 8
 
-static __always_inline int mv_dark(void)
+/* Exist-only claim with tombstone reclaim: returns 1 with the
+ * key holding gen. A live entry means a concurrent owner, so
+ * the caller diverts honest; on EEXIST a zero tombstone is
+ * ours to take back with an exist-only update (reclaim keeps
+ * failed deletes from stranding keys). A key deleted between
+ * the calls retries once; anything else diverts. */
+static __always_inline int mv_claim_gen(const struct mv_gen_key *key,
+                                        __u64 gen)
 {
-    __u32 zero = 0;
-    __u8 *slot = bpf_map_lookup_elem(&mv_gen_dark, &zero);
+    __u64 *slot;
+    int i;
 
-    return slot && *slot;
-}
-
-static __always_inline int mv_quarantined(const struct mv_gen_key *key)
-{
-    return bpf_map_lookup_elem(&mv_gen_quarantine, key) != NULL;
-}
-
-/* Failed delete escalates through tombstone, quarantine, dark. */
-static __always_inline void mv_escalate(const struct mv_gen_key *key)
-{
-    __u64 zero = 0;
-    __u8 one = 1;
-    __u32 z = 0;
-    __u8 *dark;
-
-    if (bpf_map_update_elem(&mv_gen_table, key, &zero, BPF_EXIST) == 0)
-        return;
-    if (bpf_map_update_elem(&mv_gen_quarantine, key, &one, BPF_ANY) == 0)
-        return;
-    dark = bpf_map_lookup_elem(&mv_gen_dark, &z);
-    if (dark)
-        *dark = 1;
+    for (i = 0; i < 2; i++) {
+        if (bpf_map_update_elem(&mv_gen_table, key, &gen,
+                                BPF_NOEXIST) == 0)
+            return 1;
+        slot = bpf_map_lookup_elem(&mv_gen_table, key);
+        if (!slot)
+            continue;
+        if (*slot != 0)
+            return 0;
+        if (bpf_map_update_elem(&mv_gen_table, key, &gen,
+                                BPF_EXIST) == 0)
+            return 1;
+    }
+    return 0;
 }
 
 /* Allocate one generation without wrapping: returns 1 with
@@ -300,21 +282,26 @@ int BPF_PROG(mv_map_result, struct device___mv *dev,
     }
     key.dev = (__u64)dev;
     key.tlb = (__u64)ret;
-    /* Divert without claiming when dark, quarantined, or insert fails. */
-    if (!mv_dark() && !mv_quarantined(&key) &&
-        mv_alloc_gen(&assigned) &&
-        bpf_map_update_elem(&mv_gen_table, &key, &assigned,
-                            BPF_ANY) == 0) {
+    /* Divert without claiming when allocation or insert fails. */
+    if (mv_alloc_gen(&assigned) &&
+        mv_claim_gen(&key, assigned)) {
         gen = assigned;
         flags |= MV_LC_FLAG_OK;
     } else {
         flags |= MV_LC_FLAG_OK | MV_LC_FLAG_GEN_UNASSIGNED;
     }
-    /* A lost map record deletes its generation. */
+    /* A lost map record cleans only its own generation: a key another
+     * owner holds is none of this record's business, and a tombstone
+     * left by a failed delete stays reclaimable. */
     if (!mv_emit_lc(MV_LC_KIND_MAP, flags, wdir,
-                    (mv_size_t)mapping_size, gen) && gen != 0 &&
-        bpf_map_delete_elem(&mv_gen_table, &key) != 0)
-        mv_escalate(&key);
+                    (mv_size_t)mapping_size, gen) && gen != 0) {
+        __u64 *slot;
+
+        slot = bpf_map_lookup_elem(&mv_gen_table, &key);
+        if (slot &&
+            __sync_val_compare_and_swap(slot, gen, 0) == gen)
+            bpf_map_delete_elem(&mv_gen_table, &key);
+    }
     return 0;
 }
 
@@ -339,18 +326,18 @@ int BPF_PROG(mv_unmap, struct device___mv *dev, mv_phys_addr_t tlb_addr,
     mv_wire_dir(dir, &wdir);
     key.dev = (__u64)dev;
     key.tlb = (__u64)tlb_addr;
-    if (!mv_dark() && !mv_quarantined(&key)) {
-        slot = bpf_map_lookup_elem(&mv_gen_table, &key);
-        if (slot && *slot != 0) {
-            gen = *slot;
-            if (bpf_map_delete_elem(&mv_gen_table, &key) != 0) {
-                /* Every tier emits miss, never the stale value. */
-                mv_escalate(&key);
-                gen = 0;
-                flags |= MV_LC_FLAG_GEN_MISS;
-            }
-        } else {
+    slot = bpf_map_lookup_elem(&mv_gen_table, &key);
+    if (slot && *slot != 0) {
+        gen = *slot;
+        if (__sync_val_compare_and_swap(slot, gen, 0) != gen) {
+            /* Lost to a concurrent owner: miss without
+             * escalation, the key stays live-owned. */
+            gen = 0;
             flags |= MV_LC_FLAG_GEN_MISS;
+        } else {
+            /* Owned: a failed delete leaves a functional
+             * tombstone the next map reclaims. */
+            bpf_map_delete_elem(&mv_gen_table, &key);
         }
     } else {
         flags |= MV_LC_FLAG_GEN_MISS;

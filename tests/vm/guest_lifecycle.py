@@ -729,6 +729,29 @@ def dd_leg(dev, size_mb=32):
     return int(copied.group(1)), elapsed
 
 
+def dd_flood_leg(dev, size_mb):
+    """One concurrent flood leg: {bytes, seconds} or FAIL."""
+    count = size_mb * 16
+    start = mono_ns()
+    rd = sh(["dd", f"if={dev}", "of=/dev/null", "bs=64k",
+             f"count={count}", "iflag=direct"])
+    elapsed = (mono_ns() - start) / 1e9
+    if rd.returncode != 0:
+        fail(f"dd flood leg failed: {rd.stderr.strip()[-200:]}")
+    copied = re.search(r"(\d+) bytes .* copied", rd.stderr)
+    if copied is None or int(copied.group(1)) != count * 65536:
+        fail("dd flood leg short: %s" % rd.stderr.strip()[-200:])
+    return {"bytes": int(copied.group(1)), "seconds": elapsed}
+
+
+def block_stat(short):
+    """Whole-disk counters proving DMA flowed (no addresses)."""
+    with open(os.path.join("/sys/block", short, "stat")) as fh:
+        vals = [int(x) for x in fh.read().split()]
+    return {"read_ios": vals[0], "read_sectors": vals[2],
+            "write_ios": vals[4], "write_sectors": vals[6]}
+
+
 def run_perf(gate):
     """Paired off/observed workload legs: ping + dd."""
     iface = find_pcnet()
@@ -1715,8 +1738,127 @@ def run_overhead_probe(gate):
     return impl(gate)
 
 
+def run_races(gate):
+    """Concurrent map/unmap flood: pairing honesty under reuse.
+
+    Phase 1 runs scripted oracle ops alone (exact host-side
+    expectations). Phase 2 overlaps paced oracle ops with one
+    direct-read dd leg per vCPU on an owned scsi_debug disk
+    while bpftrace counts the attach points and block stats
+    prove the load flowed. Needs 2+ vCPUs: single-CPU guests
+    cannot race the generation table.
+    """
+    import concurrent.futures
+
+    ncpu = os.cpu_count() or 0
+    if ncpu < 2:
+        fail("races gate needs 2+ vCPUs, have %d" % ncpu)
+    if shutil.which("bpftrace") is None:
+        fail("bpftrace not available")
+    gate.write_json("identity.json", gate.identity())
+    gate.clear_dmesg()
+    lc1 = os.path.join(gate.work, "p1-lc.txt")
+    cp1 = os.path.join(gate.work, "p1-cp.txt")
+    plc = gate.start_consumer(
+        gate.lc_obj, "mv_lifecycle", LC_SITES, 120, lc1)
+    pcp = gate.start_consumer(
+        gate.cp_obj, "mv_copies", CP_SITES, 120, cp1)
+    gate.wait_ready(("mv_map_result", "mv_bounce"))
+    gate.insmod(["mv_oracle_ops=200"])
+    time.sleep(5)
+    gate.rmmod()
+    gate.wait_consumer(plc, "races-p1-lc")
+    gate.wait_consumer(pcp, "races-p1-cp")
+    gate.oracle_log("p1-oracle.log")
+    before_disks = scsi_disks()
+    if os.path.exists("/sys/module/scsi_debug"):
+        fail("scsi_debug already exists; no fixture ownership")
+    r = sh(["modprobe", "scsi_debug", "dev_size_mb=256"])
+    if r.returncode != 0:
+        fail("scsi_debug failed: %s" % r.stderr.strip())
+    disk = None
+    for _ in range(30):
+        extra = scsi_disks() - before_disks
+        if extra:
+            disk = "/dev/%s" % sorted(extra)[0]
+            break
+        time.sleep(0.5)
+    if disk is None:
+        fail("scsi_debug disk never appeared")
+    short = disk.rsplit("/", 1)[1]
+    with open(os.path.join("/sys/block", short, "device",
+                           "model")) as fh:
+        if "scsi_debug" not in fh.read():
+            fail("new races disk is not owned scsi_debug")
+    try:
+        lc2 = os.path.join(gate.work, "p2-lc.txt")
+        cp2 = os.path.join(gate.work, "p2-cp.txt")
+        plc = gate.start_consumer(
+            gate.lc_obj, "mv_lifecycle", LC_SITES, 300, lc2)
+        pcp = gate.start_consumer(
+            gate.cp_obj, "mv_copies", CP_SITES, 300, cp2)
+        gate.wait_ready(("mv_map_result", "mv_bounce"))
+        bpf_out = open(os.path.join(gate.work, "bpftrace.txt"),
+                       "w")
+        bpf_err = open(os.path.join(gate.work, "bpftrace.stderr"),
+                       "w")
+        bprog = ("fentry:swiotlb_tbl_map_single "
+                 "{ @maps = count(); } "
+                 "fentry:__swiotlb_tbl_unmap_single "
+                 "{ @unmaps = count(); } "
+                 "fentry:swiotlb_bounce { @bounces = count(); }")
+        bpf = subprocess.Popen(
+            ["bpftrace", "-q", "-e", bprog],
+            stdout=bpf_out, stderr=bpf_err,
+            start_new_session=True)
+        time.sleep(3)
+        if bpf.poll() is not None:
+            bpf_out.close()
+            bpf_err.close()
+            fail("bpftrace exited early; attach points unavailable?")
+        stats0 = block_stat(short)
+        # Legs first: insmod blocks for its paced ops, so the
+        # flood is already in flight when oracle traffic starts.
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=ncpu) as pool:
+            futs = {pool.submit(dd_flood_leg, disk, 128): i
+                    for i in range(ncpu)}
+            gate.insmod(["mv_oracle_ops=2000",
+                         "mv_oracle_delay_ms=10"])
+            legs = {}
+            for fut in concurrent.futures.as_completed(futs):
+                legs["cpu%d" % futs[fut]] = fut.result()
+        stats1 = block_stat(short)
+        bpf.send_signal(signal.SIGINT)
+        try:
+            bpf.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            bpf.kill()
+            bpf.wait()
+        bpf_out.close()
+        bpf_err.close()
+        if stats1["read_ios"] <= stats0["read_ios"]:
+            fail("flood produced no block reads")
+        gate.rmmod()
+        gate.wait_consumer(plc, "races-p2-lc", timeout=300)
+        gate.wait_consumer(pcp, "races-p2-cp", timeout=300)
+        gate.oracle_log("p2-oracle.log")
+        gate.write_json("dd.json", legs)
+        gate.write_json("blockstats.json",
+                        {"before": stats0, "after": stats1})
+    finally:
+        remove_scsi_debug(short)
+    gate.export(["identity.json", "p1-lc.txt", "p1-cp.txt",
+                 "p1-oracle.log", "p2-lc.txt", "p2-cp.txt",
+                 "p2-oracle.log", "bpftrace.txt",
+                 "bpftrace.stderr", "dd.json",
+                 "blockstats.json"])
+    print("guest_lifecycle: races exported")
+
+
 SUBS = {
     "matrix": run_matrix,
+    "races": run_races,
     "copy": run_copy,
     "realio": run_realio,
     "stop": run_stop,
