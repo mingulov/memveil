@@ -24,9 +24,9 @@
   },
   "artifacts": {
     "memveil": "0.1.0",
-    "bridge": "sha256:8304455b1b7b60c975c8edcf21adbb6ad2cee5b77977b1154fabd909ead21178",
+    "bridge": "sha256:1b47870d0164f2d714ed004e68ba705931ba5043458aa8ae91b5e0d941ba92cc",
     "objects": {
-      "attempt": "sha256:8304455b1b7b60c975c8edcf21adbb6ad2cee5b77977b1154fabd909ead21178"
+      "attempt": "sha256:1b47870d0164f2d714ed004e68ba705931ba5043458aa8ae91b5e0d941ba92cc"
     }
   },
   "workload": {

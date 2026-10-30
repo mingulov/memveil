@@ -52,14 +52,15 @@ def test_object_map_bytes() raises:
     var ok = read_object_map_bytes(Span(ok_raw))
     assert_true(ok.ok)
     assert_equal(ok.bytes, 8388680)
-    # 33554432 ring + 6*8 counts + 32768*24 gen_table + 8 gen_next
-    # + 1024*24 quarantine + 8 dark.
+    # 33554432 ring + 6*8 counts + 32768*24 gen_table + 8 gen_next.
+    # (Q25-C6 removed the quarantine and dark tiers; failed deletes
+    # self-heal through reclaim instead of escalating.)
     var lc_raw = read_host_file(
         String("tests/fixtures/elf/lc-ok.o"), String("object"), 67108864
     )
     var lc = read_object_map_bytes(Span(lc_raw))
     assert_true(lc.ok)
-    assert_equal(lc.bytes, 34365504)
+    assert_equal(lc.bytes, 34340920)
     # 33554432 ring + 6*8 counts + 4096*16 claims + 4*8 copy_fb.
     var cp_raw = read_host_file(
         String("tests/fixtures/elf/cp-ok.o"), String("object"), 67108864

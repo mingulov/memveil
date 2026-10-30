@@ -404,11 +404,19 @@ static __always_inline __u64 mv_frame(void *ctx)
     return v;
 }
 
-/* Call id: arguments distinguish successive calls in one frame. */
+/* Call id: arguments distinguish successive calls in one frame.
+ * A plain XOR collides systematically (addresses and sizes
+ * share structure); the splitmix64 finalizer avalanches all
+ * three inputs so only birthday collisions remain. */
 static __always_inline __u64 mv_call_id(mv_phys_addr_t tlb_addr,
                                         mv_size_t size, __u64 dir)
 {
-    return tlb_addr ^ (size * 0x9E3779B97F4A7C15ULL) ^ dir;
+    __u64 x = tlb_addr + size * 0x9E3779B97F4A7C15ULL +
+              dir * 0xBF58476D1CE4E5B9ULL + 0x9E3779B97F4A7C15ULL;
+
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+    return x ^ (x >> 31);
 }
 
 static __always_inline __u32 mv_claim_index(__u64 frame, __u32 i)
