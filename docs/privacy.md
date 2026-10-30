@@ -29,6 +29,13 @@ not a confidential-guest signal.
 ## Persisted per capture
 
 - Session id, window bounds, end reason, finalized flag.
+- Boot identity (`boot_id`) when the capture is tied to one
+  boot: the live `/proc/sys/kernel/random/boot_id` value,
+  validated as an opaque id and persisted in `session.json`.
+  An unreadable or malformed id persists as absent (the field
+  is omitted), never as a zero. A boot id names one boot of
+  the recording machine; it scopes a capture with the
+  session id but attests nothing else.
 - Counter snapshots (bounded u64 attempt/byte counters).
 - Default-pool allocator counters (`io_tlb_used`,
   `io_tlb_nslabs`, `io_tlb_used_hiwater`) sampled at

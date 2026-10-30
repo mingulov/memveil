@@ -36,9 +36,15 @@ capture to clean up.
   pool samples; lifecycle/copy/conversion need their opt-in
   channels), or a recorded loss may have invalidated the
   accounting.
-- Truncated input: `report` exits 2 on a torn final record;
+- Truncated input: `report` exits 2 on a torn final line;
   rerun with `--allow-partial` to drop the torn tail and
-  report the loss instead (`format-compatibility.md`).
+  report the loss instead (`format-compatibility.md`). But
+  removed whole lines still read as complete: `report`
+  checks only that `seq` increases, so a capture with lines
+  cut from the middle or the end reports
+  `detail: complete_for_scope loss=0` with lower counts.
+  Do not treat a copied or stored capture as verified
+  evidence (see Known issues in `release-notes.md`).
 - `top` is slow on long windows: it sleeps `--interval`
   (minimum `1s`) between refreshes, so a ten-second window
   takes about ten seconds. The final summary matches

@@ -6,6 +6,29 @@ development bytes and schema compatibility, not a qualified full release.
 The [capability table](support.md#capabilities-by-mode) is the support
 contract for shipping collection, offline analysis, and laboratory work.
 
+## Known issues
+
+Two defects are known and will be fixed in 0.1.1:
+
+- A truncated or edited capture can read as complete. `report`
+  checks only that event `seq` values increase, and
+  `session.json` records no event count or digest. If lines are
+  removed from the end or the middle of `events.ndjson`, the
+  capture can still report `detail: complete_for_scope loss=0`
+  with lower counts. Do not treat a copied or stored capture
+  as verified evidence.
+- An abnormal stop leaves a capture that cannot be read.
+  `session.json` is written only when record finishes normally.
+  SIGPIPE (for example `memveil record ... | head`), SIGHUP,
+  SIGKILL or a full disk leave only `events.ndjson`, and
+  `report` (also with `--allow-partial`) exits 2. Run record
+  with stdout to a file or terminal, stop it with SIGINT or
+  SIGTERM, and keep free space beyond the size cap.
+
+Also note: the `.rpm` and the runtime tarball carry builds of
+the same source as the `.deb` but not byte-identical binaries;
+only the `.deb` binary was run on the kernel matrix.
+
 ## What this bundle contains
 
 - `record`: SWIOTLB bounce-attempt capture, requested bytes, attach-anchored
@@ -67,11 +90,13 @@ Do not silently rewrite a profile hash to make them admitted.
   and their independent operational qualification remain open. The
   original lifecycle-qualified preview and full confidential first
   release are not complete.
-- No TDX guest was run, and one SEV-SNP guest only (AWS c6a.large,
-  Ubuntu 7.0.0-1014-aws, where every channel matched the oracle
-  exactly). Offline region analysis and ordinary-Linux
-  conversion calls do not prove a confidential transition. No attestation
-  is performed, and observations are not host-access verdicts.
+- Confidential scope is one exact run, not a qualification: a
+  single SEV-SNP guest run exists (AWS c6a.large, Ubuntu
+  7.0.0-1014-aws) and no TDX guest was run. The confidential
+  gates are incomplete, no attestation is performed, offline
+  region analysis and ordinary-Linux conversion calls do not
+  prove a confidential transition, and observations are not
+  host-access verdicts.
 - SEV-SNP guests are detected through the `vmpl` node
   (`/sys/devices/system/cpu/sev/vmpl` beside the sev-guest
   node), fixture-proven and live-proven on that AWS guest: doctor

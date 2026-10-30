@@ -222,9 +222,12 @@ input.
 Empty is not unavailable: an idle capture reports
 `bounce_attempts = 0` with complete detail quality, while rows
 without their event source render `unavailable` with a reason.
-A torn final record exits 2; rerun with `--allow-partial` to
-drop the torn tail and report the loss instead (exit 4). See
-`troubleshooting.md` for both recoveries.
+A torn final line exits 2; rerun with `--allow-partial` to
+drop the torn tail and report the loss instead (exit 4).
+Removed whole lines are different: they still report
+`detail: complete_for_scope loss=0` with lower counts (see
+Known issues in `release-notes.md`). See
+`troubleshooting.md` for the recovery.
 
 ## 6. Worked example
 

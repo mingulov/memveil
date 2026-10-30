@@ -32,7 +32,20 @@ under test (see [VM gate kernel](docs/recipes/ordinary-linux.md#vm-gate-kernel))
 which exercises the code but qualifies nothing.
 A rebuilt package or matching kernel name alone earns no qualification.
 
-## Use (from the bundle)
+## Use (tested .deb first)
+
+Only the `.deb` binary ran on the kernel matrix; the tarball
+and the `.rpm` carry builds of the same source with
+separately linked binaries that were not matrix-run (see
+[Known issues](docs/release-notes.md#known-issues) and
+[installed packages](docs/install.md)).
+
+    sudo dpkg -i memveil_0.1.0-1_amd64.deb
+    memveil doctor                            # passive host check
+    sudo memveil record --output /tmp/cap1 --duration 10
+    memveil report --format text /tmp/cap1   # unprivileged replay
+
+## Use (from the tarball)
 
     tar -xzf memveil-0.1.0.tar.gz && cd memveil-0.1.0
     ./bin/memveil doctor                            # passive host check
