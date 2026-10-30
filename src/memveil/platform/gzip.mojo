@@ -47,6 +47,82 @@ def _fail(message: String) -> GunzipOut:
     return GunzipOut(False, List[UInt8](), message)
 
 
+def _zlib_abi_ok(mut lib: OwnedDLHandle) -> Bool:
+    """Probe the hand-built z_stream layout against this zlib.
+
+    Inflates a fixed raw-deflate vector through freshly
+    hand-poked offsets and checks the bytes, total_out, and
+    the crc32 check value. Any deviation (field layout,
+    endianness, signature) fails closed before real input
+    runs. Every FFI lookup sits inside the try: a missing
+    symbol refuses.
+    """
+    try:
+        var crc32f = lib.get_function[UInt64](String("crc32"))
+        var nine_text = String("123456789")
+        var nine = nine_text.as_bytes()
+        var check = crc32f(
+            UInt64(0), nine.unsafe_ptr(), UInt64(len(nine))
+        )
+        if check != UInt64(0xCBF43926):
+            return False
+        var probe_in = List[UInt8]([
+            UInt8(203), UInt8(77), UInt8(205), UInt8(45),
+            UInt8(75), UInt8(205), UInt8(204), UInt8(209),
+            UInt8(173), UInt8(202), UInt8(201), UInt8(76),
+            UInt8(210), UInt8(77), UInt8(76), UInt8(202),
+            UInt8(212), UInt8(45), UInt8(40), UInt8(202),
+            UInt8(79), UInt8(74), UInt8(213), UInt8(45),
+            UInt8(51), UInt8(4), UInt8(0),
+        ])
+        var want_text = String("memveil-zlib-abi-probe-v1")
+        var want = want_text.as_bytes()
+        var probe_out = List[UInt8](length=64, fill=UInt8(0))
+        var in_span = Span(probe_in)
+        var out_span = Span(probe_out)
+        var zs = List[UInt8](length=_ZSTREAM_BYTES, fill=UInt8(0))
+        _poke_u64(zs, 0, UInt64(in_span.unsafe_ptr()))
+        _poke_u32(zs, 8, UInt32(len(in_span)))
+        _poke_u64(zs, 24, UInt64(out_span.unsafe_ptr()))
+        _poke_u32(zs, 32, UInt32(64))
+        var versa = _cstr_bytes(String("1.2.0"))
+        var zs_span = Span(zs)
+        var init = lib.get_function[Int32](String("inflateInit2_"))
+        var irc = init(
+            zs_span.unsafe_ptr(),
+            Int32(-15),
+            Span(versa).unsafe_ptr(),
+            Int32(_ZSTREAM_BYTES),
+        )
+        if Int(irc) != 0:
+            return False
+        var inflate = lib.get_function[Int32](String("inflate"))
+        var frc = inflate(zs_span.unsafe_ptr(), Int32(_Z_FINISH))
+        var endf = lib.get_function[Int32](String("inflateEnd"))
+        _ = endf(zs_span.unsafe_ptr())
+        if Int(frc) != _Z_STREAM_END:
+            return False
+        if _read_u64(zs_span, 40) != UInt64(len(want)):
+            return False
+        for i in range(len(want)):
+            if out_span[i] != want[i]:
+                return False
+        # All input consumed, none mutated: inflate reads its
+        # input exactly once. These reads also keep the input
+        # buffer alive across the FFI calls above (the raw
+        # pointers in z_stream are invisible to the lifetime
+        # checker, so an otherwise unread span ends early and
+        # its buffer is reused before inflate runs).
+        if _read_u32(zs_span, 8) != UInt32(0):
+            return False
+        for i in range(len(in_span)):
+            if in_span[i] != probe_in[i]:
+                return False
+        return True
+    except:
+        return False
+
+
 def _cstr_bytes(text: String) -> List[UInt8]:
     var out = List[UInt8]()
     for b in text.as_bytes():
@@ -69,6 +145,13 @@ def _read_u64(buf: Span[UInt8, _], at: Int) -> UInt64:
     var v = UInt64(0)
     for i in range(8):
         v |= UInt64(buf[at + i]) << UInt64(8 * i)
+    return v
+
+
+def _read_u32(buf: Span[UInt8, _], at: Int) -> UInt32:
+    var v = UInt32(0)
+    for i in range(4):
+        v |= UInt32(buf[at + i]) << UInt32(8 * i)
     return v
 
 
@@ -134,6 +217,8 @@ def gunzip_member(data: Span[UInt8, _], lib_name: String) -> GunzipOut:
         lib = OwnedDLHandle(lib_name)
     except:
         return _fail(String("zlib unavailable"))
+    if not _zlib_abi_ok(lib):
+        return _fail(String("zlib ABI mismatch"))
     try:
         var crc32f = lib.get_function[UInt64](String("crc32"))
         if flg & 0x02 != 0:
@@ -147,9 +232,11 @@ def gunzip_member(data: Span[UInt8, _], lib_name: String) -> GunzipOut:
         # Raw inflate through a hand-built z_stream (LP64
         # layout, 112 bytes; next_in@0, avail_in@8,
         # next_out@24, avail_out@32, total_out@40, the rest
-        # zero for default allocation). Only inflateInit2_'s
-        # version[0] ('1') and the struct size are checked
-        # by zlib, so this holds across zlib 1.x.
+        # zero for default allocation). inflateInit2_ checks
+        # only version[0] ('1') and the struct size, so the
+        # _zlib_abi_ok probe above guards the field layout,
+        # endianness, and signatures behaviorally on every
+        # call before real input runs.
         var out = List[UInt8](length=isize, fill=UInt8(0))
         var out_span = Span(out)
         var zs = List[UInt8](length=_ZSTREAM_BYTES, fill=UInt8(0))

@@ -129,6 +129,15 @@ def test_missing_library_uncheckable() raises:
     assert_equal(out.message, String("zlib unavailable"))
 
 
+def test_abi_guard_refuses_fake_zlib() raises:
+    var blob = _basic()
+    var out = gunzip_member(
+        Span(blob), String("build/native/libmemveil_fakez.so")
+    )
+    assert_true(not out.ok)
+    assert_equal(out.message, String("zlib ABI mismatch"))
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_basic_roundtrip]()
@@ -139,6 +148,7 @@ def run() raises -> Int:
     suite.test[test_corrupt]()
     suite.test[test_huge_isize_refused]()
     suite.test[test_missing_library_uncheckable]()
+    suite.test[test_abi_guard_refuses_fake_zlib]()
     suite^.run()
     return 0
 
