@@ -33,6 +33,24 @@ ATTEMPTS = os.path.join(REPO, "tests", "fixtures", "attempts")
 ELF = os.path.join(REPO, "tests", "fixtures", "elf", "ok.o")
 
 
+def _preload(shim):
+    # Sanitizer lane: the ASan runtime must come first in
+    # LD_PRELOAD or its init aborts; interposition still
+    # chains through RTLD_NEXT. Plain mode: shim alone.
+    if os.environ.get("LMB_SANITIZE") != "1":
+        return shim
+    try:
+        out = subprocess.run(
+            ["ldd", BIN], capture_output=True, text=True,
+            check=False).stdout
+    except OSError:
+        return shim
+    for line in out.splitlines():
+        if "libasan" in line and "=>" in line:
+            return line.split("=>")[1].split()[0] + ":" + shim
+    return shim
+
+
 def check(name, cond, detail=""):
     if not cond:
         print("FAIL %s %s" % (name, detail))
@@ -132,7 +150,7 @@ def main():
     decoy = os.path.join(fd, "decoy.log")
     env = dict(os.environ)
     env.pop("LMB_NATIVE_LIB", None)
-    env["LD_PRELOAD"] = SHIM
+    env["LD_PRELOAD"] = _preload(SHIM)
     env["MVSHIM"] = "stderr_decoy:%s" % decoy
     p = subprocess.run(
         [BIN, "record", "--output", os.path.join(fd, "cap"),
@@ -176,7 +194,7 @@ def main():
     check("eaccess-base-rooted", not independent,
           "stderr %r" % base.stderr[:160])
     shim_env = dict(gate_env)
-    shim_env["LD_PRELOAD"] = SHIM
+    shim_env["LD_PRELOAD"] = _preload(SHIM)
     shim_env["MVSHIM"] = "deny_access:%s,deny_access:%s" % (
         roots[0], roots[1])
     shimmed = subprocess.run(gate_argv, capture_output=True, text=True,

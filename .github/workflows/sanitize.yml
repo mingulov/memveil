@@ -1,0 +1,76 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Sanitizer lane: the Tier 1 (offline) and Tier 2 (native)
+# suite sets run against a tools/build --sanitize tree with
+# LMB_SANITIZE=1. C targets carry address+UB sanitizers,
+# Mojo targets carry the address sanitizer; BPF objects are
+# unaffected. Unprivileged; safe for pull requests.
+#
+# Provisioning mirrors the offline and native workflows:
+# the locked ubuntu-26.04 toolchain generations, apt system
+# tools (llvm keeps the sanitizer symbolizer on PATH), and
+# the vendored pinned libbpf-mojo tarball via LMB_PACKAGE
+# (hash-checked here and re-verified by the build).
+# Tier 3 confidential gates, the vm-*, perf-workload, and
+# soak suites, and deb, rpm-journey, and
+# extracted-robustness keep their existing homes and are
+# not scheduled here.
+name: sanitize
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  sanitize:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - name: Install pixi
+        run: |
+          python3 tools/install-pixi --prefix "$HOME/.pixi"
+          echo "$HOME/.pixi/bin" >> "$GITHUB_PATH"
+      - name: Install system toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang llvm bpftool cmake ninja-build python3-pytest \
+            strace patchelf
+      - name: Provision libbpf-mojo tarball
+        run: |
+          VER="$(python3 -c "import json; print(json.load(open('toolchain.lock.json'))['dependencies']['libbpf-mojo']['version'])")"
+          TARBALL="third_party/libbpf-mojo-$VER.tar.gz"
+          WANT="$(python3 -c "import json; print(json.load(open('toolchain.lock.json'))['dependencies']['libbpf-mojo']['tarball_sha256'])")"
+          echo "$WANT  $TARBALL" | sha256sum --check -
+          echo "LMB_PACKAGE=$GITHUB_WORKSPACE/$TARBALL" >> "$GITHUB_ENV"
+      - name: Build (sanitizers)
+        run: ./tools/build --sanitize
+      - name: Tier 1 suites (sanitized)
+        env:
+          LMB_SANITIZE: "1"
+        run: |
+          for suite in schemas unit reports profiles doctor qualify \
+              identity correlation mappings lifetimes pools \
+              regions conversion-normalize confidential-hooks \
+              region-resolution baseline confidential-inventory \
+              diagnostics top oracle-ledger profile-semantics \
+              stop budgets quality reader-adversarial \
+              fuzz-smoke fuzz-campaign record-failures \
+              output-paths privacy render-escaping \
+              offline-environment perf-replay preview-package \
+              provenance docs examples package source-export \
+              release-runtime; do
+            ./tools/test "$suite" || exit 1
+          done
+      # tools/package rebuilds the tree plain as a side effect
+      # (the Tier 1 loop runs package, source-export, and
+      # release-runtime last), so re-instrument before Tier 2.
+      - name: Rebuild (sanitizers)
+        run: ./tools/build --sanitize
+      - name: Tier 2 suites (sanitized)
+        env:
+          LMB_SANITIZE: "1"
+        run: |
+          for suite in attempts native-decode writer signals record buildcache; do
+            ./tools/test "$suite" || exit 1
+          done

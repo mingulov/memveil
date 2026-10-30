@@ -27,9 +27,12 @@
 # Exit 0 only when the suite passes; 1 on test failure; 2 on
 # invalid usage; 77 when a suite with unmet inputs skips.
 # One suite per invocation; extra arguments are rejected.
+# LMB_SANITIZE=1 runs Mojo test targets with the address
+# sanitizer (pair with a tools/build --sanitize tree).
 #
 # The unit suite runs core unit files (test_reader.mojo,
-# test_attempts.mojo, test_report.mojo, test_runtime.mojo)
+# test_attempts.mojo, test_report.mojo, test_runtime.mojo,
+# test_evidence_containment.mojo)
 # through the pinned toolchain; other suites describe their
 # own checks below.
 # The reports suite drives the built report binary end to end: golden
@@ -48,6 +51,14 @@ set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
+if [ "${LMB_SANITIZE:-0}" = 1 ]; then
+    # UBSan prints and recovers by default, which would let a
+    # report exit 0 and pass the suite; halt instead so the
+    # lane tolerates zero reports (docs/build.md). ASan aborts
+    # by default already. Plain binaries ignore this.
+    export UBSAN_OPTIONS="halt_on_error=1${UBSAN_OPTIONS:+:$UBSAN_OPTIONS}"
+fi
+
 usage() {
     sed -n '2,/^$/p' "$0" | sed 's/^# //; s/^#//'
 }
@@ -60,11 +71,62 @@ mojo_inc_flags() {
     fi
 }
 
+asan_preload() {
+    # Under LMB_SANITIZE=1, print the ASan runtime path plus ':'
+    # so LD_PRELOAD puts the runtime first: a preloaded
+    # interposer otherwise aborts ASan init ("runtime does not
+    # come first"). Interposition still chains through
+    # RTLD_NEXT. Empty in plain mode.
+    if [ "${LMB_SANITIZE:-0}" = 1 ]; then
+        rt=$(ldd "$ROOT/build/memveil" 2>/dev/null | \
+            sed -n 's/.*libasan[^ ]* => \([^ ]*\).*/\1/p' | head -1)
+        if [ -n "$rt" ]; then
+            printf '%s:' "$rt"
+        fi
+    fi
+}
+
+mojo_san_flags() {
+    # Address-sanitizer flag, one per line, when the sanitizer
+    # lane is active (LMB_SANITIZE=1 with a tools/build
+    # --sanitize tree); empty otherwise. Only for mojo build:
+    # mojo run cannot JIT sanitized code.
+    if [ "${LMB_SANITIZE:-0}" = 1 ]; then
+        printf '%s\n' "--sanitize" "address"
+    fi
+}
+
+mojo_exec() {
+    # Run one Mojo file with arguments. Under LMB_SANITIZE=1
+    # builds it with the address sanitizer first (mojo run
+    # cannot JIT sanitized code: ASan runtime symbols fail to
+    # materialize), else runs it directly.
+    file=$1
+    shift
+    # shellcheck disable=SC2046
+    if [ "${LMB_SANITIZE:-0}" = 1 ]; then
+        tmpdir=$(mktemp -d)
+        if ! (cd "$ROOT" && pixi run --frozen mojo build \
+                --sanitize address -I src \
+                $(mojo_inc_flags) \
+                -o "$tmpdir/probe" "$file"); then
+            rm -rf "$tmpdir"
+            return 1
+        fi
+        "$tmpdir/probe" "$@"
+        rc=$?
+        rm -rf "$tmpdir"
+        return $rc
+    fi
+    # shellcheck disable=SC2046
+    (cd "$ROOT" && pixi run --frozen mojo run -I src \
+        $(mojo_inc_flags) "$file" "$@")
+}
+
 run_unit_file() {
     file=$1
     # shellcheck disable=SC2046
-    out=$(cd "$ROOT" && pixi run --frozen mojo run -I src \
-        $(mojo_inc_flags) "$file" 2>&1)
+    out=$(mojo_exec "$file" 2>&1)
     rc=$?
     summary=$(printf '%s\n' "$out" | grep -E '[0-9]+ tests run' | tail -1)
     if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q '0 failed'; then
@@ -213,6 +275,13 @@ suite_reports() {
     trap 'rm -rf "$TMP"' EXIT
     report_pass=0
     report_fail=0
+    # ASan shadow, redzones, and quarantine inflate RSS several-fold
+    # without changing behavior; the lane scales the budgets but still
+    # catches unbounded growth.
+    rss_mult=1
+    if [ "${LMB_SANITIZE:-0}" = 1 ]; then
+        rss_mult=10
+    fi
 
     expect_stdout "attempts-text" tests/golden/report-attempts.txt 0 \
         report "$ROOT/tests/fixtures/attempts"
@@ -759,8 +828,8 @@ PYEOF
         report_bad "streaming-reject: stdout must be empty on exit 2"
     elif [ ! -s "$TMP/sparse.err" ]; then
         report_bad "streaming-reject: stderr must explain exit 2"
-    elif [ "$rss" -gt 200000 ]; then
-        report_bad "streaming-reject: RSS ${rss}KiB exceeds 200000KiB"
+    elif [ "$rss" -gt $((200000 * rss_mult)) ]; then
+        report_bad "streaming-reject: RSS ${rss}KiB exceeds $((200000 * rss_mult))KiB"
     else
         report_ok "streaming-reject (exit 2, ${rss}KiB RSS)"
     fi
@@ -784,8 +853,8 @@ PYEOF
     elif ! grep -q -F 'requested_bounce_bytes = 671744000 bytes' \
         "$TMP/large.out"; then
         report_bad "streaming-large: report lacks 671744000 bytes"
-    elif [ "$rss" -gt 100000 ]; then
-        report_bad "streaming-large: RSS ${rss}KiB exceeds 100000KiB"
+    elif [ "$rss" -gt $((100000 * rss_mult)) ]; then
+        report_bad "streaming-large: RSS ${rss}KiB exceeds $((100000 * rss_mult))KiB"
     else
         report_ok "streaming-large (exit 0, 164000 attempts, ${rss}KiB RSS)"
     fi
@@ -808,8 +877,8 @@ PYEOF
         report_bad "session-reject: stdout must be empty on exit 2"
     elif ! grep -q -F 'session.json too large' "$TMP/bigsession.err"; then
         report_bad "session-reject: stderr lacks size diagnostic"
-    elif [ "$rss" -gt 100000 ]; then
-        report_bad "session-reject: RSS ${rss}KiB exceeds 100000KiB"
+    elif [ "$rss" -gt $((100000 * rss_mult)) ]; then
+        report_bad "session-reject: RSS ${rss}KiB exceeds $((100000 * rss_mult))KiB"
     else
         report_ok "session-reject (exit 2, ${rss}KiB RSS)"
     fi
@@ -1687,13 +1756,10 @@ suite_native_decode() {
         tests/fixtures/lifecycle-wire/corpus.bin \
         tests/fixtures/lifecycle-wire/corpus.txt \
         "$TMP/c.dump") || return 1
-    # shellcheck disable=SC2046
-    (cd "$ROOT" && pixi run --frozen mojo run -I src \
-        $(mojo_inc_flags) \
-        tests/unit/dump_lifecycle.mojo \
+    mojo_exec tests/unit/dump_lifecycle.mojo \
         tests/fixtures/lifecycle-wire/corpus.bin \
         tests/fixtures/lifecycle-wire/corpus.txt \
-        "$TMP/mojo.dump") || return 1
+        "$TMP/mojo.dump" || return 1
     if ! cmp -s "$TMP/c.dump" "$TMP/mojo.dump"; then
         echo "native-decode: C/Mojo verdict dumps differ" >&2
         diff "$TMP/c.dump" "$TMP/mojo.dump" | head -20 >&2
@@ -1720,13 +1786,10 @@ suite_attempts() {
         tests/fixtures/attempts/corpus.txt \
         "$TMP/c.dump") || return 1
     run_unit_file tests/unit/test_normalize.mojo || return 1
-    # shellcheck disable=SC2046
-    (cd "$ROOT" && pixi run --frozen mojo run -I src \
-        $(mojo_inc_flags) \
-        tests/unit/dump_normalize.mojo \
+    mojo_exec tests/unit/dump_normalize.mojo \
         tests/fixtures/attempts/corpus.bin \
         tests/fixtures/attempts/corpus.txt \
-        "$TMP/mojo.dump") || return 1
+        "$TMP/mojo.dump" || return 1
     if ! cmp -s "$TMP/c.dump" "$TMP/mojo.dump"; then
         echo "attempts: C/Mojo verdict dumps differ" >&2
         diff "$TMP/c.dump" "$TMP/mojo.dump" | head -20 >&2
@@ -1755,7 +1818,7 @@ suite_attempts() {
     # metric values.
     mkdir -p "$ROOT/build/probe"
     # shellcheck disable=SC2046
-    (cd "$ROOT" && pixi run --frozen mojo build -I src \
+    (cd "$ROOT" && pixi run --frozen mojo build $(mojo_san_flags) -I src \
         $(mojo_inc_flags) -I tests/unit \
         --target-cpu x86-64-v2 \
         -o "$ROOT/build/probe/collector_probe" \
@@ -2367,7 +2430,7 @@ suite_attempts() {
     # end refusal-rollback-failed (exit 1) with the
     # construction residuals in the diagnostic.
     MVSHIM="fstat_fail_events,fail_unlink_events" \
-        LD_PRELOAD="$ROOT/build/shim/mvshim.so" \
+        LD_PRELOAD="$(asan_preload)$ROOT/build/shim/mvshim.so" \
         "$CPROBE" live-create-residual "$TMP/live-stuck" \
         >"$TMP/live-stuck.log" 2>&1
     awant live-stuck "exit=1"
@@ -2607,7 +2670,8 @@ suite_writer() {
     # Baseline region detail round-trips exactly since the parser
     # retains every observation. Exit 1 (mismatch) always fails.
     ROUNDTRIP="$ROOT/build/roundtrip_check"
-    (cd "$ROOT" && pixi run --frozen mojo build -I src \
+    # shellcheck disable=SC2046
+    (cd "$ROOT" && pixi run --frozen mojo build $(mojo_san_flags) -I src \
         --target-cpu x86-64-v2 \
         -o "$ROUNDTRIP" tests/unit/roundtrip_check.mojo) || return 1
     failed=0
@@ -2681,7 +2745,8 @@ EOF
         return 1
     fi
     mkdir -p "$ROOT/build/probe"
-    (cd "$ROOT" && pixi run --frozen mojo build -I src \
+    # shellcheck disable=SC2046
+    (cd "$ROOT" && pixi run --frozen mojo build $(mojo_san_flags) -I src \
         --target-cpu x86-64-v2 \
         -o "$ROOT/build/probe/shim_probe" \
         tests/unit/shim_probe.mojo) || return 1
@@ -2692,7 +2757,7 @@ EOF
     run_script() { # <case> [<modes>]
         if [ $# -ge 2 ]; then
             MVSHIM="$2" MVSHIM_COUNT="$WTMP/$1.count" \
-                LD_PRELOAD="$SHIM" \
+                LD_PRELOAD="$(asan_preload)$SHIM" \
                 "$PROBE" script "$WTMP/$1" >"$WTMP/$1.log" 2>&1
         else
             "$PROBE" script "$WTMP/$1" >"$WTMP/$1.log" 2>&1
@@ -2839,7 +2904,7 @@ EOF
     want_file parfsync session.json "$WTMP/cS49"
     run_createonly() { # <case> <modes>
         MVSHIM="$2" MVSHIM_COUNT="$WTMP/$1.count" \
-            LD_PRELOAD="$SHIM" \
+            LD_PRELOAD="$(asan_preload)$SHIM" \
             "$PROBE" createonly "$WTMP/$1" >"$WTMP/$1.log" 2>&1
         rc=$?
         if [ "$rc" -ne 0 ]; then
@@ -2908,7 +2973,7 @@ EOF
     want swapclean "createonly ok status=finalized committed=2"
     run_pincheck() { # <case> <modes>
         MVSHIM="$2" MVSHIM_COUNT="$WTMP/$1.count" \
-            LD_PRELOAD="$SHIM" \
+            LD_PRELOAD="$(asan_preload)$SHIM" \
             "$PROBE" pincheck "$WTMP/$1" >"$WTMP/$1.log" 2>&1
         rc=$?
         if [ "$rc" -ne 0 ]; then
@@ -2945,7 +3010,7 @@ EOF
     want s1unavail "pincheck status=unfinalized note=tmp pin failed; tmp left in place pin=0"
     run_fdleak() { # <case> <modes>
         MVSHIM="$2" MVSHIM_COUNT="$WTMP/$1.count" \
-            LD_PRELOAD="$SHIM" \
+            LD_PRELOAD="$(asan_preload)$SHIM" \
             "$PROBE" fdleak "$WTMP/$1" >"$WTMP/$1.log" 2>&1
         rc=$?
         if [ "$rc" -ne 0 ]; then
@@ -2977,7 +3042,7 @@ EOF
     check_fd_delta sessleak 3
     run_livecreate() { # <case> <modes>
         MVSHIM="$2" MVSHIM_COUNT="$WTMP/$1.count" \
-            LD_PRELOAD="$SHIM" \
+            LD_PRELOAD="$(asan_preload)$SHIM" \
             "$PROBE" live-create "$WTMP/$1" >"$WTMP/$1.log" 2>&1
         rc=$?
         if [ "$rc" -ne 0 ]; then
@@ -3286,9 +3351,13 @@ PYEOF
     # bridge candidate.
     mkfifo "$TMP/dstdin"
     exec 9<>"$TMP/dstdin"
+    # LeakSanitizer cannot run under ptrace; the audit keeps ASan/UBSan
+    # while leak checking stays covered by the unstrace'd runs.
+    # (Plain binaries ignore LSAN_OPTIONS.)
     (cd "$ROOT" && timeout 20 strace -f -o "$TMP/dstdin.trace" \
         -e trace=openat,open,openat2,access,faccessat \
-        env LMB_NATIVE_LIB=/dev/stdin "$BIN" doctor \
+        env LSAN_OPTIONS=detect_leaks=0 LMB_NATIVE_LIB=/dev/stdin \
+        "$BIN" doctor \
         <"$TMP/dstdin" >"$TMP/dstdin.out" 2>"$TMP/dstdin.err")
     rc=$?
     exec 9>&-
@@ -3312,7 +3381,8 @@ PYEOF
     exec 9<>"$TMP/dstdin"
     (cd "$ROOT" && timeout 20 strace -f -o "$TMP/dstdin-all.trace" \
         -e trace=openat,open,openat2,access,faccessat \
-        env LMB_NATIVE_LIB=/dev/stdin "$BIN" doctor --capability all \
+        env LSAN_OPTIONS=detect_leaks=0 LMB_NATIVE_LIB=/dev/stdin \
+        "$BIN" doctor --capability all \
         <"$TMP/dstdin" >"$TMP/dstdin-all.out" 2>"$TMP/dstdin-all.err")
     rc=$?
     exec 9>&-
@@ -3344,7 +3414,7 @@ suite_signals() {
     run_unit_file tests/unit/test_signal.mojo || return 1
     mkdir -p "$ROOT/build/probe"
     # shellcheck disable=SC2046
-    (cd "$ROOT" && pixi run --frozen mojo build -I src \
+    (cd "$ROOT" && pixi run --frozen mojo build $(mojo_san_flags) -I src \
         $(mojo_inc_flags) -I tests/unit \
         --target-cpu x86-64-v2 \
         -o "$ROOT/build/probe/signal_probe" \
