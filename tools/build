@@ -518,6 +518,14 @@ main() {
                     -I bpf/include \
                     -o build/native/test_lifecycle_decode \
                     tests/native/test_lifecycle_decode.c || return 1
+                log clang -std=c11 -O2 -Wall -Wextra -Werror \
+                    -shared -fPIC \
+                    -o build/native/libmemveil_fakez.so \
+                    tests/native/fake_zlib.c
+                clang -std=c11 -O2 -Wall -Wextra -Werror \
+                    -shared -fPIC \
+                    -o build/native/libmemveil_fakez.so \
+                    tests/native/fake_zlib.c || return 1
             else
                 echo "build: no native targets registered yet" >&2
             fi
