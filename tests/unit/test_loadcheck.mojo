@@ -5,7 +5,7 @@
 from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
 
-from libbpf_mojo._ffi import DOMAIN_LIBBPF, OP_ATTACH, OP_LOAD
+from libbpf_mojo import DOMAIN_LIBBPF, OP_ATTACH, OP_LOAD
 from libbpf_mojo.error import LmbError
 from memveil.capture.kernel import _lmb_message, join_op_message
 from memveil.capture.loadcheck import (

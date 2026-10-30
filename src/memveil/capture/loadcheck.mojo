@@ -8,7 +8,7 @@ program log; ``diagnose_load`` replays one object load with
 log-on-failure to recover those lines. Nothing here attaches.
 """
 
-from libbpf_mojo._ffi import LOG_DISCARD, LOG_ON_FAILURE, OP_LOAD
+from libbpf_mojo import LOG_DISCARD, LOG_ON_FAILURE, OP_LOAD
 from libbpf_mojo.object import Object, ObjectOptions
 from memveil.platform.reader import bytes_to_text
 
