@@ -113,6 +113,47 @@ def test_verifier_tail_truncated() raises:
     assert_equal(clean[0], bytes_to_text(want^))
 
 
+def test_verifier_tail_redacts_pointers() raises:
+    var lines = List[String]()
+    lines.append(String("1: R2_w=0xffff888012345678"))
+    lines.append(String("2: imm=0xFFFFFFFF81234567 off=0x1234"))
+    lines.append(String("3: bare ffff888012345678 and hash deadbeef01"))
+    lines.append(
+        String(
+            "4: short 0x1234567 kept, long"
+            " 0x123456789abcdef01 kept"
+        )
+    )
+    var tail = verifier_tail(_log_bytes(lines), False)
+    assert_equal(len(tail), 4)
+    assert_equal(tail[0], String("1: R2_w=0xADDR"))
+    assert_equal(tail[1], String("2: imm=0xADDR off=0x1234"))
+    assert_equal(
+        tail[2], String("3: bare 0xADDR and hash deadbeef01")
+    )
+    assert_equal(
+        tail[3],
+        String(
+            "4: short 0x1234567 kept, long"
+            " 0x123456789abcdef01 kept"
+        ),
+    )
+    for i in range(len(tail)):
+        assert_true(not contains(tail[i], String("ffff8880")))
+        assert_true(not contains(tail[i], String("FFFFFFFF")))
+    var wide = List[UInt8]()
+    for b in String("x=0xffff888012345678 pad:").as_bytes():
+        wide.append(b)
+    for _ in range(300):
+        wide.append(UInt8(0x41))
+    wide.append(UInt8(0x0A))
+    var cut = verifier_tail(wide, False)
+    assert_equal(len(cut), 1)
+    assert_equal(len(cut[0].as_bytes()), 256)
+    assert_true(not contains(cut[0], String("ffff8880")))
+    assert_true(contains(cut[0], String("0xADDR")))
+
+
 def _attempt_target() raises -> LoadTarget:
     """One attempt LoadTarget over the ok.o fixture object."""
     var elf = read_host_file(
@@ -232,6 +273,7 @@ def run() raises -> Int:
     suite.test[test_load_refusal_code]()
     suite.test[test_load_code_for_table]()
     suite.test[test_verifier_tail_truncated]()
+    suite.test[test_verifier_tail_redacts_pointers]()
     suite.test[test_load_check_eperm_unprivileged]()
     suite.test[test_load_check_bad_bridge]()
     suite.test[test_doctor_load_check_needs_live]()

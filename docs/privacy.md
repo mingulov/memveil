@@ -57,6 +57,10 @@ not a confidential-guest signal.
 Payload bytes, encryption keys, PINs, hashes of captured
 content, raw virtual or DMA addresses, full command lines,
 environment dumps, hostnames, usernames, or IP/MAC addresses.
+Verifier tails keep this promise by construction: kernel
+address patterns (`0x` + 8-16 hex digits, bare `ffff` +
+12 hex) are redacted to `0xADDR` before the tail is capped
+or persisted, while offsets, counts, and hashes survive.
 Diagnostics on stderr are sanitized the same way, and every
 slash-bearing token keeps only its final path component, so
 loader messages, refused paths, and echoed arguments cannot
