@@ -230,6 +230,21 @@ def test_ftrace_cardinality_healthy_control():
     assert doc['header_lines']==1 and doc['blank_lines']==1 and doc['lost_lines']==1
 
 
+def test_ftrace_lost_events_sums_per_cpu_drops():
+    from guest_flow import parse_ftrace
+    doc=parse_ftrace(b'CPU:0 [LOST 2 EVENTS]\nCPU:1 [LOST 3 EVENTS]\n')
+    assert doc['lost_lines']==2
+    assert doc['lost_events']==5
+    assert doc['schema']=='memveil-vm-oracle/2'
+
+
+def test_ftrace_lost_events_zero_when_clean():
+    from guest_flow import parse_ftrace
+    doc=parse_ftrace(b'# header\n\nx [001] .... 1.000001: swiotlb_bounced: size=12 NORMAL\n')
+    assert doc['lost_events']==0
+    assert doc['schema']=='memveil-vm-oracle/2'
+
+
 @pytest.mark.parametrize('rc',[0,1,-9])
 def test_victim_other_exit_is_not_sigterm(rc):
     from guest_lifecycle import validate_victim

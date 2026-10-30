@@ -51,6 +51,8 @@ A rebuilt package or matching kernel name alone earns no qualification.
 record refusal gates; `docs/troubleshooting.md` is the
 symptom-to-fix index; `docs/profiles.md` walks
 bound-reference authoring from `doctor` to `qualify`.
+`docs/evidence-retention.md` states what gate and matrix
+evidence is kept and how a receipt re-derives its verdict.
 `examples/real-capture` is a reviewed 30-event capture with
 expected outputs.
 

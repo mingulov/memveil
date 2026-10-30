@@ -325,3 +325,83 @@ def test_owned_directory_holds_lane_and_gate_receipts(tmp_path):
     assert json.loads((out / 'gates/rest/'
                              'receipt.json').read_text())[
         'disposition'] == 'skipped'
+
+
+def run_with_build(tmp_path, exits, build):
+    import os
+    repo = tmp_path / 'repo'
+    (repo / 'tools').mkdir(parents=True)
+    (repo / 'build').mkdir(exist_ok=True)
+    cases = '\n'.join(
+        f'{suite}) exit {rc};;' for suite, rc in exits.items())
+    fake_tool(repo, '#!/bin/sh\ncase "$1" in\n' + cases
+              + '\nesac\n')
+    (repo / 'build/build-receipt.json').write_text(
+        json.dumps(build))
+    out = tmp_path / 'out'
+    rc = load().run_suites(repo, out, list(exits))
+    return rc, json.loads((out / 'results.json').read_text())
+
+
+def test_results_carry_build_linkage(tmp_path):
+    import os
+    build = {'git_descriptive': 'abc123',
+             'inventory': {'digest': 'd' * 64},
+             'toolchain_observed': {'mojo': 'mojo 1.2.0'},
+             'outputs': {'memveil': {'sha256': 'e' * 64}}}
+    rc, doc = run_with_build(tmp_path, dict(a=0), build)
+    assert rc == 0
+    assert doc['schema'] == 'qualification-results/2'
+    assert doc['source']['commit'] == 'unknown'
+    assert doc['source']['dirty'] is True
+    assert doc['build']['present'] is True
+    assert doc['build']['git'] == 'abc123'
+    assert doc['build']['sources_digest'] == 'd' * 64
+    assert doc['build']['artifacts'] == {'memveil': 'e' * 64}
+    assert doc['toolchain'] == {'mojo': 'mojo 1.2.0'}
+    assert doc['kernel'] == os.uname().release
+    assert doc['command'] == {
+        'tool': 'tools/qualification-results', 'suites': ['a']}
+    assert doc['required'] == ['a']
+    load().validate_results(doc)
+
+
+def test_results_without_build_record_absence(tmp_path):
+    rc, doc = run(tmp_path, dict(a=0))
+    assert rc == 0
+    assert doc['schema'] == 'qualification-results/2'
+    assert doc['build'] == {'present': False}
+    assert doc['toolchain'] is None
+    load().validate_results(doc)
+
+
+def test_validate_results_refuses_drift(tmp_path):
+    import pytest
+    good = {'schema': 'qualification-results/2',
+            'status': 'PASS', 'required': ['a'],
+            'kernel': '7.2.13',
+            'command': {'tool': 'tools/qualification-results',
+                        'suites': ['a']},
+            'source': {'commit': 'unknown', 'dirty': True},
+            'build': {'present': False}, 'toolchain': None,
+            'lanes': [{'suite': 'a', 'native_exit': 0,
+                       'status': 'PASS', 'timed_out': False,
+                       'timeout_seconds': 1800,
+                       'cleanup': None,
+                       'leaked_processes': False,
+                       'raw_log_sha256': 'f' * 64}]}
+    load().validate_results(good)
+    for key in ('schema', 'status', 'required', 'kernel',
+                'command', 'source', 'build', 'toolchain',
+                'lanes'):
+        bad = dict(good)
+        del bad[key]
+        with pytest.raises(ValueError):
+            load().validate_results(bad)
+    bad = dict(good, schema='qualification-results/1')
+    with pytest.raises(ValueError):
+        load().validate_results(bad)
+    lane = dict(good['lanes'][0], status='FAIL')
+    bad = dict(good, lanes=[lane])
+    with pytest.raises(ValueError):
+        load().validate_results(bad)

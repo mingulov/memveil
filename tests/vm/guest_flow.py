@@ -47,7 +47,7 @@ def parse_ftrace(blob):
     if blob and not blob.endswith(b"\n"):
         raise ValueError("truncated ftrace final line")
     events = []
-    headers = blanks = lost = 0
+    headers = blanks = lost = lost_events = 0
     for raw in blob.splitlines():
         line = raw.decode("utf-8", "strict")
         if not line.strip():
@@ -56,6 +56,8 @@ def parse_ftrace(blob):
             headers += 1
         elif re.fullmatch(r"\s*CPU:\d+ \[LOST \d+ EVENTS\]\s*", line):
             lost += 1
+            lost_events += int(re.search(r"\[LOST (\d+) EVENTS\]",
+                                         line).group(1))
         else:
             m = FTRACE_RE.fullmatch(line)
             if not m:
@@ -69,7 +71,8 @@ def parse_ftrace(blob):
                 raise ValueError("unexpected ftrace timestamp precision")
             events.append(dict(ts_ns=int(m.group(2))*1000000000+int(fraction)*1000,
                                size=int(sm.group(1)), forced=fm.group(1)=="FORCE"))
-    return dict(schema="memveil-vm-oracle/1", lost_lines=lost, pipe_bytes=len(blob),
+    return dict(schema="memveil-vm-oracle/2", lost_lines=lost,
+                lost_events=lost_events, pipe_bytes=len(blob),
                 pipe_lines=blob.count(b"\n"), header_lines=headers,
                 blank_lines=blanks, events=events)
 

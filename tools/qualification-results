@@ -11,12 +11,15 @@ import hashlib
 import ctypes
 import os
 import math
+import re
 import signal
 import time
 import json
 import subprocess
 import sys
 from pathlib import Path
+
+SCHEMA='qualification-results/2'
 
 
 def suite_timeout(suite):
@@ -237,9 +240,145 @@ def run_suites(repo,out,suites,timeouts=None):
         print('%s %s native_exit=%s' % (suite,status,rc),flush=True)
     status=('FAIL' if any(r['status']=='FAIL' for r in lanes) else
             'BLOCKED' if not lanes or any(r['status'] in ('SKIP','BLOCKED') for r in lanes) else 'PASS')
-    (out/'results.json').write_text(json.dumps(dict(schema='qualification-results/1',
-        status=status,lanes=lanes),indent=2,sort_keys=True)+'\n')
+    build,toolchain=build_linkage(repo)
+    doc=dict(schema=SCHEMA,status=status,required=list(suites),
+        kernel=os.uname().release,
+        command=dict(tool='tools/qualification-results',suites=list(suites)),
+        source=source_identity(repo),build=build,toolchain=toolchain,lanes=lanes)
+    validate_results(doc)
+    (out/'results.json').write_text(json.dumps(doc,indent=2,sort_keys=True)+'\n')
     return 0 if status=='PASS' else 1
+
+
+def source_identity(repo):
+    """Owning commit and dirty flag, muted to unknown and dirty."""
+    try:
+        proc=subprocess.run(['git','rev-parse','HEAD'],cwd=str(repo),
+                            capture_output=True,text=True,timeout=10)
+        sha=proc.stdout.strip() if proc.returncode==0 else ''
+    except (OSError,subprocess.TimeoutExpired):
+        sha=''
+    if not sha:
+        return dict(commit='unknown',dirty=True)
+    try:
+        proc=subprocess.run(['git','status','--porcelain'],cwd=str(repo),
+                            capture_output=True,text=True,timeout=10)
+    except (OSError,subprocess.TimeoutExpired):
+        return dict(commit=sha,dirty=True)
+    if proc.returncode!=0:
+        return dict(commit=sha,dirty=True)
+    return dict(commit=sha,dirty=bool(proc.stdout.strip()))
+
+
+def build_linkage(repo):
+    """(build, toolchain) from the build receipt, or absence.
+
+    Lanes test the build tree as-is; the linkage names the
+    exact sealed inventory digest, observed toolchain, and
+    output hashes when tools/build receipted them. A missing
+    or malformed receipt records absence instead of failing
+    the lanes.
+    """
+    try:
+        doc=json.loads((Path(repo)/'build/build-receipt.json').read_bytes().decode('utf-8'))
+        git=doc['git_descriptive'];digest=doc['inventory']['digest']
+        toolchain=doc['toolchain_observed'];outputs=doc['outputs']
+    except (OSError,ValueError,KeyError,TypeError):
+        return dict(present=False),None
+    if not isinstance(git,str) or not git or not isinstance(digest,str) \
+            or not isinstance(toolchain,dict) or not isinstance(outputs,dict) or not outputs:
+        return dict(present=False),None
+    artifacts={}
+    for rel,entry in outputs.items():
+        if not isinstance(rel,str) or not isinstance(entry,dict):
+            return dict(present=False),None
+        sha=entry.get('sha256')
+        if not isinstance(sha,str) or not sha:
+            return dict(present=False),None
+        artifacts[rel]=sha
+    for name,value in toolchain.items():
+        if not isinstance(name,str) or not isinstance(value,str) or not value:
+            return dict(present=False),None
+    return dict(present=True,git=git,sources_digest=digest,artifacts=artifacts),dict(toolchain)
+
+
+def validate_results(doc):
+    """Strict grammar plus recomputed overall status."""
+    if not isinstance(doc,dict) or set(doc)!={'schema','status','required','kernel','command','source','build','toolchain','lanes'}:
+        raise ValueError('bad results shape')
+    if doc['schema']!=SCHEMA:
+        raise ValueError('bad results schema')
+    if doc['status'] not in ('PASS','FAIL','SKIP','BLOCKED'):
+        raise ValueError('bad results status')
+    required=doc['required']
+    if not isinstance(required,list) or any(not isinstance(s,str) or not re.fullmatch(r'[a-z0-9-]+',s) for s in required):
+        raise ValueError('bad required lanes')
+    if not isinstance(doc['kernel'],str) or not doc['kernel']:
+        raise ValueError('bad kernel identity')
+    command=doc['command']
+    if not isinstance(command,dict) or command.get('tool')!='tools/qualification-results' or command.get('suites')!=required:
+        raise ValueError('bad command record')
+    source=doc['source']
+    if not isinstance(source,dict) or set(source)!={'commit','dirty'}:
+        raise ValueError('bad source record')
+    if source['commit']!='unknown' and not re.fullmatch(r'[0-9a-f]{40}',source['commit']):
+        raise ValueError('bad source commit')
+    if source['dirty'] is not True and source['dirty'] is not False:
+        raise ValueError('bad source dirty flag')
+    if source['commit']=='unknown' and source['dirty'] is not True:
+        raise ValueError('bad source dirty flag')
+    build=doc['build']
+    if not isinstance(build,dict) or 'present' not in build:
+        raise ValueError('bad build linkage')
+    if build['present'] is False:
+        if set(build)!={'present'}:
+            raise ValueError('bad build linkage')
+    elif build['present'] is True:
+        if set(build)!={'present','git','sources_digest','artifacts'}:
+            raise ValueError('bad build linkage')
+        if not isinstance(build['git'],str) or not build['git']:
+            raise ValueError('bad build linkage')
+        if not re.fullmatch(r'[0-9a-f]{64}',build['sources_digest'] or ''):
+            raise ValueError('bad build linkage')
+        if not isinstance(build['artifacts'],dict) or not build['artifacts']:
+            raise ValueError('bad build linkage')
+        for digest in build['artifacts'].values():
+            if not re.fullmatch(r'[0-9a-f]{64}',digest or ''):
+                raise ValueError('bad build linkage')
+    else:
+        raise ValueError('bad build linkage')
+    toolchain=doc['toolchain']
+    if toolchain is not None and (not isinstance(toolchain,dict) or any(not isinstance(k,str) or not isinstance(v,str) for k,v in toolchain.items())):
+        raise ValueError('bad toolchain record')
+    if (toolchain is None)==bool(build.get('present')):
+        raise ValueError('bad toolchain record')
+    lanes=doc['lanes']
+    if not isinstance(lanes,list):
+        raise ValueError('bad lanes')
+    for lane in lanes:
+        if not isinstance(lane,dict) or set(lane)!={'suite','native_exit','status','timed_out','timeout_seconds','cleanup','leaked_processes','raw_log_sha256'}:
+            raise ValueError('bad lane record')
+        if not re.fullmatch(r'[a-z0-9-]+',lane['suite'] or ''):
+            raise ValueError('bad lane record')
+        if lane['native_exit'] is not None and (not isinstance(lane['native_exit'],int) or isinstance(lane['native_exit'],bool)):
+            raise ValueError('bad lane record')
+        if lane['status'] not in ('PASS','FAIL','SKIP','BLOCKED'):
+            raise ValueError('bad lane record')
+        if lane['timed_out'] is not True and lane['timed_out'] is not False:
+            raise ValueError('bad lane record')
+        if not isinstance(lane['timeout_seconds'],(int,float)) or isinstance(lane['timeout_seconds'],bool) or lane['timeout_seconds']<=0:
+            raise ValueError('bad lane record')
+        cleanup=lane['cleanup']
+        if cleanup is not None and (not isinstance(cleanup,dict) or set(cleanup)!={'owned_processes','reaped_descendants','remaining_owned','signal_errors'}):
+            raise ValueError('bad lane record')
+        if lane['leaked_processes'] is not True and lane['leaked_processes'] is not False:
+            raise ValueError('bad lane record')
+        if not re.fullmatch(r'[0-9a-f]{64}',lane['raw_log_sha256'] or ''):
+            raise ValueError('bad lane record')
+    want='FAIL' if any(r['status']=='FAIL' for r in lanes) else 'BLOCKED' if not lanes or any(r['status'] in ('SKIP','BLOCKED') for r in lanes) else 'PASS'
+    if doc['status']!=want:
+        raise ValueError('results status drifts from its lanes')
+    return doc
 
 
 def main():

@@ -6,10 +6,12 @@ No boot, no network, no privileged reads. Every case runs from
 controlled fixture bytes.
 """
 
+import hashlib
 import json
 import os
 import re
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -3796,6 +3798,25 @@ def test_oracle_stderr_benign_passes():
     assert ok
 
 
+def test_oracle_losses_sums_hits():
+    present, total = km.parse_oracle_losses(
+        "WARNING: Lost 5 events\nLost 3 events\n")
+    assert present
+    assert total == 8
+
+
+def test_oracle_losses_zero_when_clean():
+    present, total = km.parse_oracle_losses("Lost 0 events\n")
+    assert present
+    assert total == 0
+
+
+def test_oracle_losses_missing_is_unknown():
+    present, total = km.parse_oracle_losses(None)
+    assert not present
+    assert total == 0
+
+
 def test_dmesg_scan_clean_passes():
     text = "[1.0] memveil-matrix-abc\n[2.0] nvme ready\n"
     present, count = km.scan_dmesg(text, "memveil-matrix-abc")
@@ -3883,6 +3904,18 @@ def test_assert_redacted_needs_hex_letter():
         km.assert_redacted("leak ffff888123456789 here")
     with pytest.raises(ValueError):
         km.assert_redacted("leak 12345abcdef12345 here")
+
+
+def test_scan_export_redaction_skips_hash_files(tmp_path):
+    export = tmp_path / "export"
+    export.mkdir()
+    (export / "btf-sha.txt").write_text("ab12" * 16 + "\n")
+    (export / "configid.txt").write_text("cd34" * 16 + "\n")
+    assert km.scan_export_redaction(str(export)) is None
+    (export / "uname.txt").write_text(
+        "leak ffff888123456789 here\n")
+    assert km.scan_export_redaction(
+        str(export)) == "uname.txt: redacted text keeps long hex run"
 
 
 def test_build_vng_cmd_plain_with_cpus():
@@ -5850,3 +5883,649 @@ def test_parse_lock_rejects_duplicate_keys(tmp_path):
     path.write_text(dup)
     with pytest.raises(km.LockError):
         km.parse_lock(str(path))
+
+
+def _row_ctx(**over):
+    ctx = {
+        "mode": "matrix",
+        "kind": "deb",
+        "source_sha256": "d" * 64,
+        "kernel_selector": "--kernel 6.6",
+        "duration_s": 60,
+        "dd_count": 128,
+        "timeout_s": 900,
+        "cpus": 4,
+        "timeout": False,
+        "source": {
+            "memveil": {"commit": "e" * 40, "dirty": False},
+            "libbpf_mojo": {"version": "0.2.2",
+                            "tarball_sha256": "f" * 64,
+                            "status": "pinned"},
+        },
+        "toolchain": {
+            "lock_version": "1.0.0",
+            "recorded_on": "2026-10-30",
+            "lock_sha256": "a" * 64,
+            "toolchain": {"pixi": {"version": "0.83.0"},
+                          "mojo": {"version": "1.2.0"}},
+        },
+        "lock_tools": {"bpftrace": "bpftrace v0.25.0",
+                       "bpftool": "bpftool v7.7.0"},
+        "shipped_profile_id": None,
+    }
+    ctx.update(over)
+    return ctx
+
+
+def _row_losses():
+    return {
+        "main": {
+            "channels": ["attempt"],
+            "overall": "EXACT",
+            "bounds": {"attempt": [10, 10]},
+            "shortfalls": {"attempt": 0},
+            "allowances": {"attempt": 0},
+            "attributed": {"attempt": 0},
+            "sum_got": 10,
+            "sum_lo": 10,
+            "sum_hi": 10,
+            "total_short": 0,
+            "allowed_total": 0,
+            "over_reported": False,
+        },
+        "busy": None,
+    }
+
+
+def _row_rec(losses=None, checks=None, ok=True, **over):
+    if checks is None:
+        checks = [
+            {"name": "vng_exit", "ok": True,
+             "detail": "vng exit 0", "skipped": False},
+            {"name": "channels", "ok": True,
+             "detail": "EXACT", "skipped": False},
+        ]
+    rec = {
+        "id": "6.6",
+        "vng_version": "v6.6.160",
+        "release": "6.6.160-0606160-generic",
+        "checks": checks,
+        "channels": {"attempt": "EXACT (10 in 10..10)"},
+        "losses": _row_losses() if losses is None else losses,
+        "ok": ok,
+        "elapsed": 1.0,
+        "run_id": "20261030T000000Z",
+        "timeout": False,
+    }
+    rec.update(over)
+    return rec
+
+
+def _write_row(tmp_path, files):
+    row = tmp_path / "6.6"
+    row.mkdir()
+    for name, text in files.items():
+        path = row / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    return row
+
+
+def _row_job():
+    return {
+        "id": "6.6",
+        "vng_version": "v6.6.160",
+        "release": "6.6.160-0606160-generic",
+        "admitted": ["attempt-trace", "mapping-lifecycle",
+                     "copy-actual"],
+        "duration": 60,
+        "dd_count": 128,
+        "run_id": "20261030T000000Z",
+        "data_serial": "mv0",
+        "scratch_serial": "mv1",
+        "deb": "/work/x/memveil.deb",
+        "repo": "/work/memveil",
+    }
+
+
+def _row_artifacts():
+    return {
+        "mode": "deb",
+        "binary": {"path": "/usr/bin/memveil",
+                   "sha256": "b" * 64},
+        "dpkg_version": "0.1.0-1",
+        "bpf": {"attempt": "c" * 64},
+        "bpftrace": "bpftrace v0.25.0",
+        "bpftool": "bpftool v7.7.0",
+    }
+
+
+def _admitted_row(tmp_path, **files):
+    base = {
+        "job.json": json.dumps(_row_job()),
+        "cache.txt": "hit /cache\n",
+        "console.txt": "boot\n",
+        "vng.exit": "0",
+        "vng-cmd.txt": "sudo -n vng --run /secret/path\n",
+        "artifacts.json": json.dumps(_row_artifacts()),
+        "configid.txt": "1" * 64 + "\n",
+        "btf-sha.txt": "2" * 64 + "\n",
+        "uname.txt": "Linux guest 6.6.160\n",
+        "mods.txt": "6.6.160\nguest\n",
+        "version.txt": "#1 SMP\n",
+        "lockdown.txt": "none\n",
+        "hooks.json": json.dumps({"present": {"tp": True},
+                                  "omitted": [],
+                                  "btf": True}),
+        "oracle.txt": "@count: 10\n",
+        "oracle.stderr": "",
+        "oracle.mode": "full\n",
+        "cap/session.json": json.dumps({"session": "x"}),
+    }
+    base.update(files)
+    return _write_row(tmp_path, base)
+
+
+def test_row_receipt_roundtrip_admitted_pass(tmp_path):
+    row = _admitted_row(tmp_path)
+    doc = km.write_row_receipt(row, _row_rec(), _lock_entry(),
+                               _row_ctx())
+    assert doc["schema"] == "memveil-matrix-row/1"
+    assert doc["actual"]["ok"] is True
+    assert doc["smoke"] is False
+    assert doc["losses"]["present"] is True
+    assert doc["oracle"]["lost_events"] == 0
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row)
+    assert ok, detail
+
+
+def test_row_receipt_excludes_raw_command(tmp_path):
+    row = _admitted_row(tmp_path)
+    doc = km.write_row_receipt(row, _row_rec(), _lock_entry(),
+                               _row_ctx())
+    names = [entry["name"] for entry in doc["files"]]
+    assert "vng-cmd.txt" not in names
+    assert "secret" not in json.dumps(doc)
+    assert doc["command"]["selector"] == "--kernel 6.6"
+
+
+def test_row_receipt_refuses_unknown_files(tmp_path):
+    row = _admitted_row(tmp_path, **{"mystery.bin": "x"})
+    with pytest.raises(ValueError):
+        km.write_row_receipt(row, _row_rec(), _lock_entry(),
+                             _row_ctx())
+
+
+def test_row_receipt_refuses_overwrite(tmp_path):
+    row = _admitted_row(tmp_path)
+    km.write_row_receipt(row, _row_rec(), _lock_entry(),
+                         _row_ctx())
+    with pytest.raises(ValueError):
+        km.write_row_receipt(row, _row_rec(), _lock_entry(),
+                             _row_ctx())
+
+
+def test_row_receipt_detects_tampered_sibling(tmp_path):
+    row = _admitted_row(tmp_path)
+    km.write_row_receipt(row, _row_rec(), _lock_entry(),
+                         _row_ctx())
+    (row / "artifacts.json").write_text(json.dumps(
+        {"mode": "deb", "binary": {"path": "/usr/bin/memveil",
+                                  "sha256": "9" * 64},
+         "dpkg_version": "0.1.0-1", "bpf": {},
+         "bpftrace": "x", "bpftool": "y"}))
+    ok, _ = km.rederive_row(row)
+    assert ok is False
+
+
+def test_row_receipt_detects_added_file(tmp_path):
+    row = _admitted_row(tmp_path)
+    km.write_row_receipt(row, _row_rec(), _lock_entry(),
+                         _row_ctx())
+    (row / "late.bin").write_text("x")
+    ok, _ = km.rederive_row(row)
+    assert ok is False
+
+
+def test_row_receipt_recomputes_verdict(tmp_path):
+    row = _admitted_row(tmp_path)
+    km.write_row_receipt(row, _row_rec(), _lock_entry(),
+                         _row_ctx())
+    doc = json.loads((row / "receipt.json").read_text())
+    doc["actual"]["checks"][1]["ok"] = False
+    (row / "receipt.json").write_text(json.dumps(doc))
+    ok, _ = km.rederive_row(row)
+    assert ok is False
+
+
+def test_row_receipt_refused_row_has_no_oracle(tmp_path):
+    verdicts = {
+        cap: {"verdict": "refused", "reason_class": "floor-6.0"}
+        for cap in km.CAPS}
+    entry = _lock_entry(verdicts=verdicts)
+    files = {
+        "job.json": json.dumps(dict(
+            _row_job(), admitted=[])),
+        "cache.txt": "hit /cache\n",
+        "vng.exit": "0",
+        "artifacts.json": json.dumps(_row_artifacts()),
+        "configid.txt": "1" * 64 + "\n",
+        "btf-sha.txt": "2" * 64 + "\n",
+        "uname.txt": "Linux guest 5.15.0\n",
+        "mods.txt": "5.15.0\nguest\n",
+        "version.txt": "#1 SMP\n",
+        "lockdown.txt": "none\n",
+        "hooks.json": json.dumps({"present": {"tp": False},
+                                  "omitted": ["tp"],
+                                  "btf": True}),
+    }
+    row = _write_row(tmp_path, files)
+    rec = _row_rec(
+        losses={"main": None, "busy": None},
+        checks=[{"name": "vng_exit", "ok": True,
+                 "detail": "vng exit 0", "skipped": False}],
+        channels=None)
+    doc = km.write_row_receipt(row, rec, entry, _row_ctx())
+    assert doc["oracle"] == {"present": False}
+    assert doc["losses"] == {"present": False}
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row)
+    assert ok, detail
+
+
+def test_row_receipt_early_failure(tmp_path):
+    row = _write_row(tmp_path, {
+        "job.json": json.dumps(_row_job()),
+        "cache-FAIL.txt": "missing vmlinuz\n",
+    })
+    rec = {"id": "6.6", "ok": False, "run_id": "20261030T000000Z",
+           "elapsed": 0.1,
+           "checks": [{"name": "cache", "ok": False,
+                       "detail": "cache-unverified",
+                       "skipped": False}]}
+    doc = km.write_row_receipt(row, rec, _lock_entry(),
+                               _row_ctx())
+    assert doc["actual"]["ok"] is False
+    assert doc["artifacts"]["status"] == "no-guest"
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row)
+    assert ok is False
+    assert detail
+
+
+def test_row_receipt_smoke_labels_reduced_workload(tmp_path):
+    job = dict(_row_job(), duration=10, dd_count=16)
+    row = _admitted_row(tmp_path,
+                        **{"job.json": json.dumps(job)})
+    ctx = _row_ctx(duration_s=10, dd_count=16)
+    doc = km.write_row_receipt(row, _row_rec(), _lock_entry(),
+                               ctx)
+    assert doc["smoke"] is True
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row)
+    assert ok, detail
+
+
+def test_row_receipt_pass_without_artifacts_refused(tmp_path):
+    row = _write_row(tmp_path, {
+        "job.json": json.dumps(_row_job()),
+        "cache.txt": "hit /cache\n",
+        "vng.exit": "0",
+    })
+    with pytest.raises(ValueError):
+        km.write_row_receipt(row, _row_rec(), _lock_entry(),
+                             _row_ctx())
+
+
+def test_row_receipt_cleanup_errors_are_tokens(tmp_path):
+    row = _admitted_row(tmp_path)
+    rec = _row_rec(busy_events={"error":
+        "busy events unreadable: [Errno 13] /row/busy/cap/x"},
+        busy_chown_error="chown: /row/busy: denied")
+    doc = km.write_row_receipt(row, rec, _lock_entry(),
+                               _row_ctx())
+    assert doc["cleanup"]["busy_events_error"] == \
+        "busy-events-unreadable"
+    assert doc["cleanup"]["busy_chown_error"] == \
+        "busy-chown-failed"
+    assert "/row/busy" not in json.dumps(doc)
+    km.validate_row_receipt(doc)
+
+
+def test_row_receipt_oracle_loss_recorded(tmp_path):
+    row = _admitted_row(
+        tmp_path, **{"oracle.stderr": "lost 3 events\n"})
+    checks = [
+        {"name": "vng_exit", "ok": True,
+         "detail": "vng exit 0", "skipped": False},
+        {"name": "oracle_stderr", "ok": False,
+         "detail": "oracle lost 3 events", "skipped": False},
+    ]
+    rec = _row_rec(checks=checks, ok=False)
+    doc = km.write_row_receipt(row, rec, _lock_entry(),
+                               _row_ctx())
+    assert doc["oracle"]["lost_events"] == 3
+    km.validate_row_receipt(doc)
+    ok, _ = km.rederive_row(row)
+    assert ok is False
+
+
+def test_row_receipt_btf_hook_mismatch_refused(tmp_path):
+    row = _admitted_row(
+        tmp_path,
+        **{"hooks.json": json.dumps({"present": {"tp": True},
+                                     "omitted": [],
+                                     "btf": False})})
+    with pytest.raises(ValueError):
+        km.write_row_receipt(row, _row_rec(), _lock_entry(),
+                             _row_ctx())
+
+
+def test_row_receipt_scenarios_roundtrip(tmp_path):
+    entry = _lock_entry()
+    neg_sha = hashlib.sha256(b"obj").hexdigest()
+    row = _write_row(tmp_path, {
+        "job.json": json.dumps(dict(
+            _row_job(),
+            negatives={"renamed_field": neg_sha})),
+        "cache.txt": "hit /cache\n",
+        "vng.exit": "0",
+        "artifacts.json": json.dumps(_row_artifacts()),
+        "configid.txt": "1" * 64 + "\n",
+        "btf-sha.txt": "2" * 64 + "\n",
+        "uname.txt": "Linux guest 6.6.160\n",
+        "mods.txt": "6.6.160\nguest\n",
+        "version.txt": "#1 SMP\n",
+        "lockdown.txt": "none\n",
+        "hooks.json": json.dumps({"present": {"tp": True},
+                                  "omitted": [],
+                                  "btf": True}),
+        "neg/swiotlb_copy-renamed_field.bpf.o": "obj",
+        "scn-base/precondition.json": json.dumps(
+            {"verdict": "ready"}),
+        "scn-base/record.stdout": "",
+        "scn-base/record.stderr": "",
+        "scn-base/att0/doctor-load.json": "{}",
+        "scn-base/att0/record.stdout": "",
+        "scn-base/att0/cap/session.json": "{}",
+    })
+    rec = {"id": "6.6", "mode": "scenarios", "ok": True,
+           "detail": "all ok", "run_id": "20261030T000000Z",
+           "vng_version": "v6.6.160",
+           "release": "6.6.160-0606160-generic",
+           "elapsed": 1.0, "binary_sha256": "b" * 64,
+           "negatives": {"renamed_field": neg_sha},
+           "scenarios": [{"name": "base", "status": "ok",
+                          "checks": []}]}
+    doc = km.write_row_receipt(
+        row, rec, entry, _row_ctx(mode="scenarios"))
+    assert doc["mode"] == "scenarios"
+    assert doc["actual"]["scenarios"][0]["status"] == "ok"
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row)
+    assert ok, detail
+
+
+def test_row_source_identity_reports_commit(tmp_path):
+    ident = km.row_source_identity(
+        os.path.dirname(os.path.abspath(__file__))
+        + "/../..")
+    assert re.fullmatch(r"[0-9a-f]{40}|unknown",
+                        ident["memveil"]["commit"])
+    assert ident["memveil"]["dirty"] in (True, False)
+    assert ident["libbpf_mojo"]["status"] == "pinned"
+
+
+def test_row_toolchain_lock_reports_pins(tmp_path):
+    lock = km.read_toolchain_lock(
+        os.path.dirname(os.path.abspath(__file__))
+        + "/../..")
+    assert re.fullmatch(r"[0-9a-f]{64}",
+                        lock["lock_sha256"])
+    assert lock["toolchain"]["mojo"]["version"]
+
+
+def test_guest_write_btf_sha(tmp_path):
+    src = tmp_path / "vmlinux"
+    src.write_bytes(b"btf-bytes")
+    out = tmp_path / "out"
+    out.mkdir()
+    guest.write_btf_sha(str(out), str(src))
+    assert (out / "btf-sha.txt").read_text() == \
+        hashlib.sha256(b"btf-bytes").hexdigest() + "\n"
+    guest.write_btf_sha(str(out),
+                        str(tmp_path / "missing"))
+    assert (out / "btf-sha.txt").read_text() == "absent\n"
+
+
+def _row_args(tmp_path):
+    return SimpleNamespace(out=str(tmp_path), duration=60,
+                           dd_count=128, timeout=900, cpus=4)
+
+
+def test_run_one_cache_failure_writes_receipt(tmp_path,
+                                              monkeypatch):
+    tool = _tool_module()
+    entry = _lock_entry()
+    monkeypatch.setattr(
+        tool, "verify_cache",
+        lambda entry: (False, "vmlinuz sha drift", None,
+                        None))
+    rec = tool.run_one(
+        entry, _row_args(tmp_path), "deb", "dummy.deb",
+        str(tmp_path / "disk.img"),
+        {"bpftrace": "bpftrace v0.25.0",
+         "bpftool": "bpftool v7.7.0"},
+        "20261030T000000Z", ["vng"], _row_ctx())
+    assert rec["ok"] is False
+    assert rec["checks"][0]["name"] == "cache"
+    row = tmp_path / "6.6"
+    doc = json.loads((row / "receipt.json").read_text())
+    km.validate_row_receipt(doc)
+    assert doc["artifacts"]["status"] == "no-guest"
+    ok, detail = km.rederive_row(row)
+    assert ok is False
+    assert detail
+
+
+def test_run_one_collect_path_writes_receipt(tmp_path,
+                                             monkeypatch):
+    tool = _tool_module()
+    verdicts = {
+        cap: {"verdict": "refused", "reason_class": "floor-6.0"}
+        for cap in km.CAPS}
+    entry = _lock_entry(verdicts=verdicts)
+    monkeypatch.setattr(
+        tool, "verify_cache",
+        lambda entry: (True, "cache holds", "/cache",
+                        "tgt"))
+    proc = SimpleNamespace(returncode=0, stdout="",
+                           stderr="")
+    monkeypatch.setitem(sys.modules, "vm_process",
+                        SimpleNamespace(
+                            run_owned_guest=lambda *a,
+                            **k: proc))
+
+    def fake_collect(entry, export, tools, elapsed, run_id,
+                     timeout, cache_dir):
+        files = {
+            "artifacts.json": json.dumps(_row_artifacts()),
+            "configid.txt": "1" * 64 + "\n",
+            "btf-sha.txt": "2" * 64 + "\n",
+            "uname.txt": "Linux guest 5.15.0\n",
+            "mods.txt": "5.15.0\nguest\n",
+            "version.txt": "#1 SMP\n",
+            "lockdown.txt": "none\n",
+            "hooks.json": json.dumps({"present": {"tp": False},
+                                      "omitted": ["tp"],
+                                      "btf": True}),
+        }
+        for name, text in files.items():
+            (tmp_path / "6.6" / name).write_text(text)
+        return _row_rec(
+            losses={"main": None, "busy": None},
+            checks=[{"name": "vng_exit", "ok": True,
+                     "detail": "vng exit 0",
+                     "skipped": False}],
+            channels=None)
+
+    monkeypatch.setattr(tool.km, "build_vng_cmd",
+                        lambda *a, **k: ["true"])
+    rec = tool.run_one(
+        entry, _row_args(tmp_path), "deb", "dummy.deb",
+        str(tmp_path / "disk.img"),
+        {"bpftrace": "bpftrace v0.25.0",
+         "bpftool": "bpftool v7.7.0"},
+        "20261030T000000Z", ["vng"], _row_ctx(),
+        collect=fake_collect)
+    assert rec["ok"] is True
+    row = tmp_path / "6.6"
+    km.validate_row_receipt(
+        json.loads((row / "receipt.json").read_text()))
+    ok, detail = km.rederive_row(row, rec)
+    assert ok, detail
+
+
+def _matrix_out(tmp_path, rec=None, entry=None, ctx=None):
+    out = tmp_path / "out"
+    out.mkdir()
+    row = _admitted_row(out)
+    rec = _row_rec() if rec is None else rec
+    entry = _lock_entry() if entry is None else entry
+    ctx = _row_ctx() if ctx is None else ctx
+    km.write_row_receipt(row, rec, entry, ctx)
+    (out / "6.6.json").write_text(json.dumps(rec))
+    (out / "summary.json").write_text(json.dumps([rec]))
+    return out
+
+
+def test_row_receipt_allows_record_streams(tmp_path):
+    row = _admitted_row(tmp_path, **{
+        "record.out": "", "record.stderr": "",
+        "busy/busy.stderr": "", "busy/record.out": "",
+        "busy/record.stderr": "",
+        "busy/report.json": "{}", "busy/report.out": "",
+        "busy/report.stderr": "",
+        "busy/report-json.stderr": "",
+        "busy/cap/events.ndjson": ""})
+    doc = km.write_row_receipt(row, _row_rec(), _lock_entry(),
+                               _row_ctx())
+    names = [entry["name"] for entry in doc["files"]]
+    for name in ("record.out", "record.stderr",
+                 "busy/busy.stderr", "busy/record.out",
+                 "busy/record.stderr", "busy/report.json",
+                 "busy/report.out", "busy/report.stderr",
+                 "busy/report-json.stderr",
+                 "busy/cap/events.ndjson"):
+        assert name in names
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row)
+    assert ok, detail
+
+
+def test_verify_matrix_out_pass(tmp_path):
+    report = km.verify_matrix_out(
+        str(_matrix_out(tmp_path)))
+    assert report["ok"] is True
+    assert report["problems"] == []
+    assert report["rows"] == [
+        {"id": "6.6", "ok": True,
+         "detail": "row re-derived PASS from the receipt"}]
+
+
+def test_verify_matrix_out_refuses_tampered_row(tmp_path):
+    out = _matrix_out(tmp_path)
+    (out / "6.6" / "uname.txt").write_text("forged\n")
+    report = km.verify_matrix_out(str(out))
+    assert report["ok"] is False
+    assert report["rows"][0]["ok"] is False
+
+
+def test_verify_matrix_out_refuses_stale_summary(tmp_path):
+    out = _matrix_out(tmp_path)
+    rows = json.loads((out / "summary.json").read_text())
+    ghost = dict(rows[0], id="9.9")
+    (out / "summary.json").write_text(
+        json.dumps(rows + [ghost]))
+    report = km.verify_matrix_out(str(out))
+    assert report["ok"] is False
+    assert any("9.9" in problem
+               for problem in report["problems"])
+
+
+def test_verify_matrix_out_refuses_unmerged_row(tmp_path):
+    out = _matrix_out(tmp_path)
+    extra = out / "7.0"
+    extra.mkdir()
+    (extra / "job.json").write_text(json.dumps(
+        dict(_row_job(), id="7.0")))
+    report = km.verify_matrix_out(str(out))
+    assert report["ok"] is False
+    assert any("7.0" in problem
+               for problem in report["problems"])
+
+
+def test_verify_matrix_out_needs_summary(tmp_path):
+    out = _matrix_out(tmp_path)
+    (out / "summary.json").unlink()
+    report = km.verify_matrix_out(str(out))
+    assert report["ok"] is False
+
+
+def test_verify_matrix_out_needs_rec(tmp_path):
+    out = _matrix_out(tmp_path)
+    (out / "6.6.json").unlink()
+    report = km.verify_matrix_out(str(out))
+    assert report["ok"] is False
+
+
+def test_verify_matrix_out_rejects_empty(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    report = km.verify_matrix_out(str(out))
+    assert report["ok"] is False
+
+
+def test_verify_matrix_out_rec_drift(tmp_path):
+    out = _matrix_out(tmp_path)
+    rec = json.loads((out / "6.6.json").read_text())
+    rec["checks"][1]["detail"] = "EDITED"
+    (out / "6.6.json").write_text(json.dumps(rec))
+    report = km.verify_matrix_out(str(out))
+    assert report["ok"] is False
+
+
+def test_verify_out_main_pass(tmp_path, capsys):
+    tool = _tool_module()
+    out = _matrix_out(tmp_path)
+    assert tool.main(["--out", str(out),
+                      "--verify-out"]) == 0
+    assert "6.6" in capsys.readouterr().out
+
+
+def test_verify_out_main_fail(tmp_path):
+    tool = _tool_module()
+    out = _matrix_out(tmp_path)
+    (out / "6.6" / "uname.txt").write_text("forged\n")
+    assert tool.main(["--out", str(out),
+                      "--verify-out"]) == 1
+
+
+def test_load_old_summary_refuses_stale(tmp_path):
+    tool = _tool_module()
+    out = _matrix_out(tmp_path)
+    rows = json.loads((out / "summary.json").read_text())
+    ghost = dict(rows[0], id="9.9")
+    (out / "summary.json").write_text(
+        json.dumps(rows + [ghost]))
+    old, error = tool.load_old_summary(str(out))
+    assert old is None
+    assert "9.9" in error
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    assert tool.load_old_summary(str(fresh)) == ([], None)
+    (fresh / "summary.json").write_text("not json")
+    old, error = tool.load_old_summary(str(fresh))
+    assert old is None
+    assert error
