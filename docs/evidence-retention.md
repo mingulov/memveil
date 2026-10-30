@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Evidence retention and row receipts
 
 Gate runs and matrix runs prove themselves with retained evidence
