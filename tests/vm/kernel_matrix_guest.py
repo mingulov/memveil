@@ -126,6 +126,20 @@ def write(path, data):
     Path(path).write_text(data)
 
 
+def write_btf_sha(out, src="/sys/kernel/btf/vmlinux"):
+    """Sha256 of the guest BTF, or absent/unreadable sentinel."""
+    try:
+        with open(src, "rb") as handle:
+            raw = handle.read()
+        write(os.path.join(out, "btf-sha.txt"),
+              hashlib.sha256(raw).hexdigest() + "\n")
+    except OSError:
+        write(os.path.join(out, "btf-sha.txt"), "absent\n")
+    except Exception:
+        write(os.path.join(out, "btf-sha.txt"),
+              "unreadable\n")
+
+
 def find_nvme_by_serial(serial, root="/sys/block"):
     """NVMe device node with one serial, or None."""
     try:
@@ -391,6 +405,7 @@ def run(argv):
     except Exception:
         write(os.path.join(out, "configid.txt"),
               "unreadable\n")
+    write_btf_sha(out)
     try:
         write(os.path.join(out, "version.txt"),
               Path("/proc/version").read_text())

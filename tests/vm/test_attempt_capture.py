@@ -205,13 +205,14 @@ def parse_oracle(path):
     """(events, lost_lines) from the guest oracle (strict schema)."""
     doc = json.loads(path.read_text())
     assert set(doc) == {
-        "schema", "lost_lines", "pipe_bytes", "pipe_lines", "header_lines", "blank_lines", "events",
+        "schema", "lost_lines", "lost_events", "pipe_bytes", "pipe_lines", "header_lines", "blank_lines", "events",
     }, set(doc)
-    assert doc["schema"] == "memveil-vm-oracle/1", doc["schema"]
+    assert doc["schema"] == "memveil-vm-oracle/2", doc["schema"]
     assert _is_int(doc["lost_lines"]), doc["lost_lines"]
+    assert _is_int(doc["lost_events"]), doc["lost_events"]
     assert _is_int(doc["pipe_bytes"]), doc["pipe_bytes"]
     assert _is_int(doc["pipe_lines"]), doc["pipe_lines"]
-    for key in ("lost_lines", "pipe_bytes", "pipe_lines", "header_lines", "blank_lines"):
+    for key in ("lost_lines", "lost_events", "pipe_bytes", "pipe_lines", "header_lines", "blank_lines"):
         assert _is_int(doc[key]) and doc[key] >= 0, key
     assert doc["pipe_lines"] == len(doc["events"]) + doc["lost_lines"] + doc["header_lines"] + doc["blank_lines"]
     events = []

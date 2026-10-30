@@ -730,9 +730,9 @@ def validate_attempt_exports(got, mode=None):
     for i,line in enumerate(got['events.ndjson'].read_text().splitlines(),1):
         validator.check_event(strict_json(line),i,session)
     doc=strict_json(got['oracle.json'].read_text())
-    keys(doc,('schema','lost_lines','pipe_bytes','pipe_lines','header_lines','blank_lines','events'))
-    if doc['schema'] != 'memveil-vm-oracle/1':raise ValueError('invalid oracle schema')
-    for k in ('lost_lines','pipe_bytes','pipe_lines','header_lines','blank_lines'):integer(doc[k])
+    keys(doc,('schema','lost_lines','lost_events','pipe_bytes','pipe_lines','header_lines','blank_lines','events'))
+    if doc['schema'] != 'memveil-vm-oracle/2':raise ValueError('invalid oracle schema')
+    for k in ('lost_lines','lost_events','pipe_bytes','pipe_lines','header_lines','blank_lines'):integer(doc[k])
     if type(doc['events']) is not list:raise ValueError('invalid oracle event inventory')
     if doc['pipe_lines'] != len(doc['events'])+doc['header_lines']+doc['blank_lines']+doc['lost_lines']:
         raise ValueError('oracle line cardinality drift')

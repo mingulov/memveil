@@ -2222,14 +2222,27 @@ def check_report_consistent(record_exit, exits):
         got, want)
 
 
+def parse_oracle_losses(text):
+    """(present, total) lost perf events from bpftrace stderr.
+
+    Missing text is unknown, not zero: present is False and the
+    total is meaningless. Callers must refuse on unknown.
+    """
+    if text is None:
+        return False, 0
+    total = sum(int(hit) for hit in
+                re.findall(r"lost (\d+) events", text,
+                           re.IGNORECASE))
+    return True, total
+
+
 def check_oracle_stderr(text):
     """bpftrace must not report lost perf events."""
-    if text is None:
+    present, total = parse_oracle_losses(text)
+    if not present:
         return False, "missing oracle.stderr"
-    for hit in re.findall(r"lost (\d+) events", text,
-                           re.IGNORECASE):
-        if int(hit) > 0:
-            return False, "oracle lost %s events" % hit
+    if total > 0:
+        return False, "oracle lost %d events" % total
     return True, "oracle lost no events"
 
 
@@ -2275,7 +2288,7 @@ def assert_redacted(text):
 REDACT_SKIP_FILES = ("artifacts.json", "progs0.json",
                      "progs1.json", "progs2.json",
                      "progs3.json", "report.json",
-                     "configid.txt")
+                     "configid.txt", "btf-sha.txt")
 
 
 def scan_export_redaction(export):
@@ -3040,7 +3053,8 @@ def evaluate_row(ev):
     rec = {"id": ident, "vng_version": row_boot_label(entry),
            "release": release, "checks": [],
            "dd_count": ev.get("dd_count"),
-           "duration": ev.get("duration")}
+           "duration": ev.get("duration"),
+           "losses": {"main": None, "busy": None}}
 
     def add(name, ok, detail, skipped=False):
         rec["checks"].append({"name": name, "ok": bool(ok),
@@ -3472,6 +3486,20 @@ def evaluate_row(ev):
             attributed = info.get("attributed", {})
             rec["channels"] = per
             rec["oracle_overall"] = overall
+            rec["losses"]["main"] = {
+                "channels": list(channels),
+                "overall": overall,
+                "bounds": dict(info.get("bounds", {})),
+                "shortfalls": dict(info.get("shortfalls", {})),
+                "allowances": dict(info.get("allowances", {})),
+                "attributed": dict(attributed),
+                "sum_got": info.get("sum_got"),
+                "sum_lo": info.get("sum_lo"),
+                "sum_hi": info.get("sum_hi"),
+                "total_short": info.get("total_short"),
+                "allowed_total": info.get("allowed_total"),
+                "over_reported": info.get("over_reported"),
+            }
             if failed:
                 detail = "; ".join(
                     "%s %s" % pair for pair in sorted(per.items()))
@@ -3697,6 +3725,11 @@ def evaluate_row(ev):
                 loss_exact)
             rec["busy_channels"] = per
             rec["busy_overall"] = overall
+            rec["losses"]["busy"] = {
+                "overall": overall,
+                "per": dict(per),
+                "aggregate": info.get("aggregate"),
+            }
             if failed:
                 detail = "; ".join(
                     "%s %s" % pair for pair in sorted(per.items()))
@@ -3858,3 +3891,1502 @@ def prog_misses(progs, names):
             except (TypeError, ValueError):
                 continue
     return total
+
+
+ROW_RECEIPT_SCHEMA = "memveil-matrix-row/1"
+QUAL_DURATION_S = 60
+QUAL_DD_COUNT = 128
+PROFILE_REASON = ("matrix rows assert lock expectations and "
+                  "doctor verdicts, not shipped profiles")
+
+_ROW_TOP_FILES = frozenset({
+    "job.json", "cache.txt", "cache-FAIL.txt", "download.txt",
+    "console.txt", "vng.exit", "FAIL.txt", "validate.txt",
+    "artifacts.json", "blockstat.json", "configid.txt",
+    "btf-sha.txt", "dev.txt", "dmesg.txt", "dmesg_scan.json",
+    "doctor.exit", "doctor.json", "doctor.stderr",
+    "doctor-passive.exit", "doctor-passive.json",
+    "doctor-passive.stderr", "dpkg.exit", "dpkg.out",
+    "hist.status", "hist_before.txt", "hist_after.txt",
+    "hooks.json", "lockdown.txt", "mods.txt", "oracle.bt",
+    "oracle.keep", "oracle.mode", "oracle.txt", "oracle.stderr",
+    "progs_times.json", "record.exit", "record.out",
+    "record.stderr",
+    "record-combined.exists", "record-combined.exit",
+    "record-combined.out", "report.exit", "report-json.exit",
+    "report.json", "report-json.stderr", "report.out",
+    "report.stderr", "sev-sysfs.txt", "udev.exit", "udev.out",
+    "uname.txt", "version.txt", "workload.txt",
+})
+_ROW_TOP_RES = (
+    re.compile(r"progs[0-9]+\.json"),
+    re.compile(r"record-cap-[a-z]+(-[a-z]+)?\."
+               r"(exists|exit|out)"),
+    re.compile(r"workload-r[0-9]+\.txt"),
+)
+_ROW_CAP_FILES = frozenset({"session.json", "events.ndjson"})
+_ROW_BUSY_FILES = frozenset({
+    "record.exit", "record.out", "record.stderr",
+    "times.json", "end_reason.txt", "busy.out",
+    "busy.stderr", "events_summary.json", "report.exit",
+    "report.json", "report.out", "report.stderr",
+    "report-json.exit", "report-json.stderr",
+    "progs_times.json", "validate.txt",
+})
+_ROW_BUSY_RES = (re.compile(r"progs[0-9]+\.json"),)
+_ROW_NEG_RE = re.compile(
+    r"swiotlb_copy-(renamed_field|widened_layout|wrong_shift"
+    r"|wrong_argcnt)\.bpf\.o")
+_ROW_SCN_DIR_RE = re.compile(r"scn-[a-z][a-z0-9-]{0,31}")
+_ROW_SCN_FILES = frozenset({
+    "doctor-passive.json", "doctor-passive.exit",
+    "doctor-passive.stderr", "doctor-load.json",
+    "doctor-load.exit", "doctor-load.stderr", "record.out",
+    "record.stdout", "record.stderr",
+    "record.exit", "record.exists", "precondition.json",
+    "teardown.json", "report.json", "report.txt",
+    "report-json.exit", "report-json.stderr",
+    "report-txt.exit", "report-txt.stderr", "workload.out",
+    "workload.exit", "memcg.json", "mounts.before.json",
+    "TIMEOUT.txt",
+})
+_ROW_RECEIPT_SELF = "receipt.json"
+_ROW_RAW_COMMAND = "vng-cmd.txt"
+
+_BUSY_EVENTS_TOKENS = (
+    ("busy events unreadable", "busy-events-unreadable"),
+    ("busy events undecodable", "busy-events-undecodable"),
+    ("busy events kept", "busy-events-kept"),
+    ("busy summary unwritable", "busy-summary-unwritable"),
+    ("busy events", "busy-events-unparseable"),
+)
+_BUSY_EVENTS_TOKEN_SET = frozenset(
+    token for _, token in _BUSY_EVENTS_TOKENS) | frozenset({
+        "busy-events-unclassified"})
+_CHOWN_TOKEN = "busy-chown-failed"
+
+
+def _row_rel_known(rel):
+    """True when a row-relative path is allowlisted evidence."""
+    if rel in _ROW_TOP_FILES:
+        return True
+    for expr in _ROW_TOP_RES:
+        if expr.fullmatch(rel):
+            return True
+    if "/" not in rel:
+        return False
+    head, rest = rel.split("/", 1)
+    if head == "cap":
+        return rest in _ROW_CAP_FILES
+    if head == "busy":
+        if rest in _ROW_BUSY_FILES:
+            return True
+        if rest.startswith("cap/"):
+            return rest[len("cap/"):] in _ROW_CAP_FILES
+        return any(expr.fullmatch(rest)
+                   for expr in _ROW_BUSY_RES)
+    if head == "neg":
+        return _ROW_NEG_RE.fullmatch(rest) is not None
+    if _ROW_SCN_DIR_RE.fullmatch(head):
+        if rest in _ROW_SCN_FILES:
+            return True
+        if rest.startswith("cap/"):
+            return rest[len("cap/"):] in _ROW_CAP_FILES
+        if "/" in rest:
+            sub, leaf = rest.split("/", 1)
+            if re.fullmatch(r"att[0-9]+", sub):
+                if leaf in _ROW_SCN_FILES:
+                    return True
+                if leaf.startswith("cap/"):
+                    return leaf[len("cap/"):] \
+                        in _ROW_CAP_FILES
+    return False
+
+
+def row_receipt_files(row_dir):
+    """Hashed inventory of one row dir, in receipt order.
+
+    Every regular file must be allowlisted evidence; the
+    receipt itself and the raw boot command line are known
+    but never inventoried. Raises ValueError on symlinks,
+    unreadable files, or unknown evidence.
+    """
+    root = Path(row_dir)
+    found = []
+    for dirpath, _, filenames in os.walk(root):
+        for name in filenames:
+            path = Path(dirpath) / name
+            rel = path.relative_to(root).as_posix()
+            if rel in (_ROW_RECEIPT_SELF, _ROW_RAW_COMMAND):
+                continue
+            if path.is_symlink() or not path.is_file():
+                raise ValueError(
+                    "row receipt refuses non-file %s" % rel)
+            if not _row_rel_known(rel):
+                raise ValueError(
+                    "row receipt refuses unknown file %s"
+                    % rel)
+            try:
+                digest = sha_file(str(path))
+                size = path.stat().st_size
+            except OSError:
+                raise ValueError(
+                    "row receipt cannot hash %s" % rel)
+            found.append({"name": rel, "sha256": digest,
+                          "bytes": size})
+    found.sort(key=lambda entry: entry["name"])
+    return found
+
+
+def row_source_identity(repo_root):
+    """Memveil commit plus the pinned libbpf-mojo pin.
+
+    Mute git answers unknown and dirty so callers never
+    mistake missing identity for a clean tree. Raises
+    ValueError when the libbpf-mojo pin is not pinned.
+    """
+    root = Path(repo_root)
+    commit, dirty = repo_identity(root)
+    try:
+        lock = json.loads(
+            (root / "toolchain.lock.json").read_text())
+        pin = lock["dependencies"]["libbpf-mojo"]
+    except (OSError, ValueError, KeyError, TypeError):
+        raise ValueError(
+            "row source identity needs the pinned lock")
+    if not isinstance(pin, dict) \
+            or pin.get("status") != "pinned":
+        raise ValueError("libbpf-mojo is not pinned")
+    return {"memveil": {"commit": commit, "dirty": dirty},
+            "libbpf_mojo": {
+                "version": pin.get("version"),
+                "tarball_sha256": pin.get("tarball_sha256"),
+                "status": pin.get("status")}}
+
+
+def read_toolchain_lock(repo_root):
+    """Toolchain pins plus the lock hash for one receipt."""
+    root = Path(repo_root)
+    try:
+        raw = (root / "toolchain.lock.json").read_bytes()
+        lock = json.loads(raw.decode("utf-8"))
+    except (OSError, ValueError):
+        raise ValueError("toolchain lock unreadable")
+    try:
+        pins = lock["toolchain"]
+        if not pins["mojo"]["version"] \
+                or not pins["pixi"]["version"]:
+            raise KeyError("pins")
+    except (KeyError, TypeError):
+        raise ValueError("toolchain lock has no mojo/pixi")
+    return {"lock_version": lock.get("lock_version"),
+            "recorded_on": lock.get("recorded_on"),
+            "lock_sha256": hashlib.sha256(raw).hexdigest(),
+            "toolchain": pins}
+
+
+def sanitize_cleanup_error(text, kind):
+    """Fixed token for one cleanup error, or None.
+
+    Guest/host error text can carry paths and errno
+    detail; the receipt records only the reason class.
+    """
+    if text is None:
+        return None
+    if kind == "chown":
+        return _CHOWN_TOKEN
+    if kind != "busy_events":
+        raise ValueError("unknown cleanup error kind")
+    for prefix, token in _BUSY_EVENTS_TOKENS:
+        if text.startswith(prefix):
+            return token
+    return "busy-events-unclassified"
+
+
+def _row_text(row, name):
+    """Sibling text, None when the sibling is absent."""
+    path = Path(row) / name
+    if not path.is_file() or path.is_symlink():
+        return None
+    try:
+        return path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        raise ValueError("row receipt cannot read %s" % name)
+
+
+def _row_json(row, name):
+    """Sibling JSON, None when the sibling is absent."""
+    text = _row_text(row, name)
+    if text is None:
+        return None
+    try:
+        return json.loads(text)
+    except ValueError:
+        raise ValueError("row receipt cannot parse %s" % name)
+
+
+def _row_sha_status(row, name):
+    """(sha-or-None, status) for one guest sha file."""
+    text = _row_text(row, name)
+    if text is None:
+        return None, "missing"
+    stripped = text.strip()
+    if re.fullmatch(r"[0-9a-f]{64}", stripped):
+        return stripped, "measured"
+    if stripped in ("absent", "unreadable"):
+        return None, stripped
+    raise ValueError("row receipt rejects %s" % name)
+
+
+def _check_hex(value, bits, what):
+    if not isinstance(value, str) or not re.fullmatch(
+            r"[0-9a-f]{%d}" % bits, value):
+        raise ValueError("row receipt rejects %s" % what)
+    return value
+
+
+def _check_int(value, what, low=0, high=None):
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError("row receipt rejects %s" % what)
+    if value < low or (high is not None and value > high):
+        raise ValueError("row receipt rejects %s" % what)
+    return value
+
+
+def _check_verdict_map(expected):
+    """Admitted caps from one expected-verdicts map."""
+    if not isinstance(expected, dict):
+        raise ValueError("row receipt rejects expectations")
+    admitted = []
+    for cap in CAPS:
+        want = expected.get(cap)
+        if not isinstance(want, dict) \
+                or set(want) != {"verdict", "reason_class"}:
+            raise ValueError(
+                "row receipt rejects expectations")
+        if want["verdict"] == "admitted":
+            admitted.append(cap)
+        elif want["verdict"] != "refused":
+            raise ValueError(
+                "row receipt rejects expectations")
+        if not isinstance(want["reason_class"], str) \
+                or not want["reason_class"]:
+            raise ValueError(
+                "row receipt rejects expectations")
+    if set(expected) != set(CAPS):
+        raise ValueError("row receipt rejects expectations")
+    return admitted
+
+
+def _check_row_checks(checks):
+    if not isinstance(checks, list) or not checks:
+        raise ValueError("row receipt needs verdict checks")
+    for check in checks:
+        if not isinstance(check, dict) \
+                or set(check) != {"name", "ok", "detail",
+                                  "skipped"}:
+            raise ValueError("row receipt rejects a check")
+        if not isinstance(check["name"], str) \
+                or not re.fullmatch(r"[a-z0-9_]+",
+                                     check["name"]):
+            raise ValueError("row receipt rejects a check")
+        if check["ok"] is not True and check["ok"] is not False:
+            raise ValueError("row receipt rejects a check")
+        if not isinstance(check["detail"], str) \
+                or len(check["detail"]) > 8192:
+            raise ValueError("row receipt rejects a check")
+        if check["skipped"] is not True \
+                and check["skipped"] is not False:
+            raise ValueError("row receipt rejects a check")
+    return checks
+
+
+def _check_row_source(source):
+    if not isinstance(source, dict) \
+            or set(source) != {"memveil", "libbpf_mojo"}:
+        raise ValueError("row receipt rejects source")
+    memveil = source["memveil"]
+    if not isinstance(memveil, dict) \
+            or set(memveil) != {"commit", "dirty"}:
+        raise ValueError("row receipt rejects source")
+    if memveil["commit"] != "unknown":
+        _check_hex(memveil["commit"], 40, "source commit")
+    if memveil["dirty"] is not True \
+            and memveil["dirty"] is not False:
+        raise ValueError("row receipt rejects source")
+    if memveil["commit"] == "unknown" \
+            and memveil["dirty"] is not True:
+        raise ValueError("row receipt rejects source")
+    pin = source["libbpf_mojo"]
+    if not isinstance(pin, dict) \
+            or set(pin) != {"version", "tarball_sha256",
+                            "status"}:
+        raise ValueError("row receipt rejects source")
+    if not isinstance(pin["version"], str) \
+            or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+",
+                                 pin["version"]):
+        raise ValueError("row receipt rejects source")
+    _check_hex(pin["tarball_sha256"], 64, "source tarball")
+    if pin["status"] != "pinned":
+        raise ValueError("row receipt rejects source")
+    return source
+
+
+def _check_row_toolchain(toolchain):
+    if not isinstance(toolchain, dict) \
+            or set(toolchain) != {"lock_version",
+                                  "recorded_on",
+                                  "lock_sha256",
+                                  "toolchain"}:
+        raise ValueError("row receipt rejects toolchain")
+    for key in ("lock_version", "recorded_on"):
+        if not isinstance(toolchain[key], str) \
+                or not toolchain[key]:
+            raise ValueError("row receipt rejects toolchain")
+    _check_hex(toolchain["lock_sha256"], 64,
+               "toolchain lock hash")
+    pins = toolchain["toolchain"]
+    if not isinstance(pins, dict):
+        raise ValueError("row receipt rejects toolchain")
+    try:
+        if not pins["mojo"]["version"] \
+                or not pins["pixi"]["version"]:
+            raise KeyError("pins")
+    except (KeyError, TypeError):
+        raise ValueError("row receipt rejects toolchain")
+    return toolchain
+
+
+def _check_row_ctx(ctx):
+    if not isinstance(ctx, dict) \
+            or set(ctx) != {"mode", "kind", "source_sha256",
+                            "kernel_selector", "duration_s",
+                            "dd_count", "timeout_s", "cpus",
+                            "timeout", "source", "toolchain",
+                            "lock_tools", "shipped_profile_id"}:
+        raise ValueError("row receipt rejects its context")
+    if ctx["mode"] not in ("matrix", "scenarios"):
+        raise ValueError("row receipt rejects its context")
+    if ctx["kind"] not in ("deb", "bundle"):
+        raise ValueError("row receipt rejects its context")
+    _check_hex(ctx["source_sha256"], 64, "context source")
+    if not isinstance(ctx["kernel_selector"], str) \
+            or not re.fullmatch(
+                r"--kernel [A-Za-z0-9_.-]+"
+                r"|--kernels [A-Za-z0-9_.,-]+"
+                r"|--all", ctx["kernel_selector"]):
+        raise ValueError("row receipt rejects its context")
+    _check_int(ctx["duration_s"], "context duration",
+               1, 3600)
+    _check_int(ctx["dd_count"], "context dd count", 1, 4096)
+    _check_int(ctx["timeout_s"], "context timeout", 1, 7200)
+    _check_int(ctx["cpus"], "context cpus", 1, 4)
+    if ctx["timeout"] is not True \
+            and ctx["timeout"] is not False:
+        raise ValueError("row receipt rejects its context")
+    _check_row_source(ctx["source"])
+    _check_row_toolchain(ctx["toolchain"])
+    tools = ctx["lock_tools"]
+    if not isinstance(tools, dict) \
+            or set(tools) != {"bpftrace", "bpftool"} \
+            or not tools["bpftrace"] \
+            or not tools["bpftool"]:
+        raise ValueError("row receipt rejects its context")
+    shipped = ctx["shipped_profile_id"]
+    if shipped is not None and (
+            not isinstance(shipped, str)
+            or not re.fullmatch(r"[A-Za-z0-9_.-]+", shipped)):
+        raise ValueError("row receipt rejects its context")
+    return ctx
+
+
+def _check_losses_block(block, busy):
+    keys = {"overall", "per", "aggregate"} if busy else {
+        "channels", "overall", "bounds", "shortfalls",
+        "allowances", "attributed", "sum_got", "sum_lo",
+        "sum_hi", "total_short", "allowed_total",
+        "over_reported"}
+    if not isinstance(block, dict) or set(block) != keys:
+        raise ValueError("row receipt rejects losses")
+    if block["overall"] is not None \
+            and not isinstance(block["overall"], str):
+        raise ValueError("row receipt rejects losses")
+    if busy:
+        if not isinstance(block["per"], dict):
+            raise ValueError("row receipt rejects losses")
+        for name, text in block["per"].items():
+            if not isinstance(name, str) \
+                    or not isinstance(text, str):
+                raise ValueError("row receipt rejects losses")
+        if block["aggregate"] is not None \
+                and not isinstance(block["aggregate"], str):
+            raise ValueError("row receipt rejects losses")
+        return block
+    channels = block["channels"]
+    if not isinstance(channels, list) or not channels \
+            or any(not isinstance(chan, str)
+                   for chan in channels):
+        raise ValueError("row receipt rejects losses")
+    bounds = block["bounds"]
+    if not isinstance(bounds, dict) \
+            or set(bounds) != set(channels):
+        raise ValueError("row receipt rejects losses")
+    for bound in bounds.values():
+        if not isinstance(bound, list) or len(bound) != 2 \
+                or any(not isinstance(end, int)
+                       or isinstance(end, bool) or end < 0
+                       for end in bound):
+            raise ValueError("row receipt rejects losses")
+    for key in ("shortfalls", "allowances", "attributed"):
+        counts = block[key]
+        if not isinstance(counts, dict) \
+                or set(counts) != set(channels):
+            raise ValueError("row receipt rejects losses")
+        for count in counts.values():
+            _check_int(count, "loss counts")
+    for key in ("sum_got", "sum_lo", "sum_hi", "total_short",
+                "allowed_total"):
+        if block[key] is not None:
+            _check_int(block[key], "loss sums")
+    if block["over_reported"] is not None \
+            and block["over_reported"] is not True \
+            and block["over_reported"] is not False:
+        raise ValueError("row receipt rejects losses")
+    return block
+
+
+def _losses_jsonable(block, busy):
+    """Loss block with tuples converted for the receipt."""
+    if not isinstance(block, dict):
+        raise ValueError("row receipt rejects losses")
+    clean = dict(block)
+    if not busy:
+        try:
+            bounds = block["bounds"]
+            clean["bounds"] = {
+                chan: [bound[0], bound[1]]
+                for chan, bound in bounds.items()}
+        except (KeyError, TypeError, IndexError,
+                AttributeError):
+            raise ValueError("row receipt rejects losses")
+    return clean
+
+
+def write_row_receipt(row_dir, rec, entry, ctx):
+    """Write receipt.json proving one matrix row, return it.
+
+    The receipt carries the full qualification fields (source,
+    toolchain, binary and BPF hashes, kernel, config, BTF and
+    profile, workload, command, expected and actual results,
+    oracle, losses, cleanup, artifact hashes) plus a hashed
+    inventory of the sibling evidence. Raw command lines and
+    paths never cross: the command is a sanitized selector
+    and cleanup errors become fixed tokens.
+
+    Raises ValueError when the row cannot be proven: unknown
+    sibling files, incoherent job/rec/entry/ctx, inconsistent
+    guest measurements, or a pass without measured evidence.
+    """
+    ctx = _check_row_ctx(dict(ctx))
+    row = Path(row_dir)
+    if (row / _ROW_RECEIPT_SELF).exists():
+        raise ValueError(
+            "row receipt exists (refusing overwrite)")
+    if not isinstance(rec, dict) or not isinstance(entry, dict):
+        raise ValueError("row receipt needs a rec and entry")
+    files = row_receipt_files(row)
+    job = _row_json(row, "job.json")
+    if not isinstance(job, dict):
+        raise ValueError("row receipt needs job.json")
+    ident = entry.get("id")
+    if not isinstance(ident, str) or not ident \
+            or job.get("id") != ident \
+            or rec.get("id") != ident:
+        raise ValueError("row receipt rejects row identity")
+    release = entry.get("release")
+    if not isinstance(release, str) or not release \
+            or job.get("release") != release:
+        raise ValueError("row receipt rejects row identity")
+    if rec.get("release") is not None \
+            and rec.get("release") != release:
+        raise ValueError("row receipt rejects row identity")
+    run_id = rec.get("run_id")
+    if not isinstance(run_id, str) or not run_id \
+            or job.get("run_id") != run_id:
+        raise ValueError("row receipt rejects run identity")
+    if job.get("duration") != ctx["duration_s"] \
+            or job.get("dd_count") != ctx["dd_count"]:
+        raise ValueError("row receipt rejects workload")
+    if ("deb" in job) == ("bundle" in job) \
+            or ("deb" in job) != (ctx["kind"] == "deb"):
+        raise ValueError("row receipt rejects source kind")
+    mode = ctx["mode"]
+    if mode == "matrix":
+        admitted = _check_verdict_map(entry.get("expected"))
+        expected = entry["expected"]
+    else:
+        expected_caps = (entry.get("expected"))
+        admitted = _check_verdict_map(expected_caps)
+        expected = {"caps": entry["expected"]}
+    if sorted(job.get("admitted") or []) != sorted(admitted):
+        raise ValueError("row receipt rejects admission")
+    actual_ok = rec.get("ok")
+    if actual_ok is not True and actual_ok is not False:
+        raise ValueError("row receipt rejects the verdict")
+    guest_ran = (row / "artifacts.json").is_file()
+    if actual_ok and not guest_ran:
+        raise ValueError(
+            "row receipt refuses a pass without artifacts")
+    if guest_ran:
+        raw_artifacts = _row_json(row, "artifacts.json")
+        try:
+            binary_sha = raw_artifacts["binary"]["sha256"]
+            bpf = raw_artifacts["bpf"]
+            artifacts = {
+                "status": "measured",
+                "mode": raw_artifacts["mode"],
+                "binary_sha256": binary_sha,
+                "dpkg_version": raw_artifacts["dpkg_version"],
+                "bpf": dict(bpf),
+                "bpftrace": raw_artifacts["bpftrace"],
+                "bpftool": raw_artifacts["bpftool"],
+            }
+        except (TypeError, KeyError, AttributeError):
+            raise ValueError(
+                "row receipt rejects artifacts.json")
+        if artifacts["mode"] not in ("deb", "bundle"):
+            raise ValueError(
+                "row receipt rejects artifacts.json")
+        _check_hex(binary_sha, 64, "binary hash")
+        if not isinstance(artifacts["dpkg_version"], str):
+            raise ValueError(
+                "row receipt rejects artifacts.json")
+        if not bpf or any(
+                name not in ("attempt", "lifecycle", "copy")
+                for name in bpf):
+            raise ValueError(
+                "row receipt rejects artifacts.json")
+        for name, digest in bpf.items():
+            _check_hex(digest, 64, "bpf hash " + name)
+        for key in ("bpftrace", "bpftool"):
+            if not isinstance(artifacts[key], str) \
+                    or not artifacts[key]:
+                raise ValueError(
+                    "row receipt rejects artifacts.json")
+    else:
+        artifacts = {"status": "no-guest"}
+    uname = _row_text(row, "uname.txt")
+    mods = _row_text(row, "mods.txt")
+    version = _row_text(row, "version.txt")
+    lockdown = _row_text(row, "lockdown.txt")
+    config_sha, config_status = _row_sha_status(
+        row, "configid.txt")
+    btf_sha, btf_status = _row_sha_status(row, "btf-sha.txt")
+    hooks = _row_json(row, "hooks.json")
+    if guest_ran:
+        if hooks is None:
+            hooks = None
+        elif not isinstance(hooks, dict) \
+                or set(hooks) != {"present", "omitted",
+                                  "btf"} \
+                or not isinstance(hooks["present"], dict) \
+                or not hooks["present"] \
+                or any(not isinstance(probe, str)
+                       or hooks["present"][probe] is not True
+                       and hooks["present"][probe] is not False
+                       for probe in hooks["present"]) \
+                or not isinstance(hooks["omitted"], list) \
+                or any(not isinstance(probe, str)
+                       for probe in hooks["omitted"]) \
+                or set(hooks["omitted"]) != {
+                    probe for probe, ok
+                    in hooks["present"].items()
+                    if ok is False} \
+                or hooks["btf"] is not True \
+                and hooks["btf"] is not False:
+            raise ValueError(
+                "row receipt rejects hooks.json")
+        if hooks is not None and (
+                (hooks["btf"] is True
+                 and btf_status != "measured")
+                or (hooks["btf"] is False
+                    and btf_status == "measured")):
+            raise ValueError(
+                "row receipt rejects btf evidence")
+        if actual_ok and (uname is None or hooks is None):
+            raise ValueError(
+                "row receipt refuses a pass without "
+                "guest identity")
+    elif hooks is not None or uname is not None:
+        raise ValueError("row receipt rejects guest traces")
+    kernel = {
+        "release": release,
+        "boot_label": row_boot_label(
+            {"source": entry.get("source"), "id": ident}),
+        "uname": uname.strip() if uname is not None else None,
+        "modules": mods.strip() if mods is not None else None,
+        "version": version.strip()
+        if version is not None else None,
+        "lockdown": lockdown.strip()
+        if lockdown is not None else None,
+        "config_sha256": config_sha,
+        "config_status": config_status,
+        "btf_sha256": btf_sha,
+        "btf_status": btf_status,
+        "hooks": hooks,
+        "lock_source": entry.get("source"),
+        "tools_expected": dict(ctx["lock_tools"]),
+    }
+    if rec.get("vng_version") is not None \
+            and rec["vng_version"] != kernel["boot_label"]:
+        raise ValueError("row receipt rejects boot label")
+    if not isinstance(kernel["lock_source"], dict) \
+            or kernel["lock_source"].get("kind") not in (
+                "archive", "built"):
+        raise ValueError("row receipt rejects lock source")
+    if mode == "matrix":
+        checks = _check_row_checks(rec.get("checks"))
+        if actual_ok != all(check["ok"] for check in checks):
+            raise ValueError(
+                "row receipt rejects the verdict")
+        channels = rec.get("channels")
+        if channels is not None and (
+                not isinstance(channels, dict)
+                or any(not isinstance(name, str)
+                       or not isinstance(text, str)
+                       for name, text in channels.items())):
+            raise ValueError("row receipt rejects channels")
+        if actual_ok and admitted and channels is None:
+            raise ValueError(
+                "row receipt refuses a pass without channels")
+        actual = {"ok": actual_ok, "checks": checks,
+                  "channels": channels}
+    else:
+        results = rec.get("scenarios")
+        if not isinstance(results, list) or (
+                not results and guest_ran):
+            raise ValueError(
+                "row receipt needs scenario results")
+        for result in results:
+            if not isinstance(result, dict) \
+                    or set(result) != {"name", "status",
+                                       "checks"}:
+                raise ValueError(
+                    "row receipt rejects a scenario")
+            if not isinstance(result["name"], str) \
+                    or not re.fullmatch(
+                        r"[a-z][a-z0-9-]{0,31}",
+                        result["name"]):
+                raise ValueError(
+                    "row receipt rejects a scenario")
+            if result["status"] not in ("ok", "fail",
+                                        "not_proven"):
+                raise ValueError(
+                    "row receipt rejects a scenario")
+            if not isinstance(result["checks"], list):
+                raise ValueError(
+                    "row receipt rejects a scenario")
+            for check in result["checks"]:
+                _check_row_checks([check])
+        if any(result["status"] != "ok" for result in results) \
+                and actual_ok:
+            raise ValueError(
+                "row receipt rejects the verdict")
+        binary_sha = rec.get("binary_sha256")
+        if binary_sha is not None:
+            _check_hex(binary_sha, 64, "scenario binary")
+        negatives = rec.get("negatives")
+        if guest_ran:
+            if not isinstance(negatives, dict) \
+                    or not negatives:
+                raise ValueError(
+                    "row receipt needs negatives")
+            for name, digest in negatives.items():
+                _check_hex(digest, 64, "negative hash")
+            if job.get("negatives") != negatives:
+                raise ValueError(
+                    "row receipt rejects negatives")
+            staged = {entry["name"]: entry["sha256"]
+                      for entry in files
+                      if entry["name"].startswith("neg/")}
+            for name, digest in negatives.items():
+                leaf = "neg/swiotlb_copy-%s.bpf.o" % name
+                if staged.get(leaf) != digest:
+                    raise ValueError(
+                        "row receipt rejects negatives")
+        elif negatives:
+            raise ValueError(
+                "row receipt rejects negatives")
+        actual = {"ok": actual_ok, "scenarios": results,
+                  "binary_sha256": binary_sha,
+                  "negatives": negatives if guest_ran else {}}
+    if mode == "matrix" and admitted and guest_ran:
+        oracle_text = _row_text(row, "oracle.txt")
+        oracle_mode = _row_text(row, "oracle.mode")
+        if oracle_text is None or oracle_mode is None:
+            raise ValueError(
+                "row receipt needs oracle evidence")
+        oracle_mode = oracle_mode.strip()
+        if oracle_mode not in ("full", "countonly"):
+            raise ValueError(
+                "row receipt rejects oracle mode")
+        stderr = _row_text(row, "oracle.stderr")
+        if stderr is None:
+            if actual_ok:
+                raise ValueError(
+                    "row receipt refuses a pass without "
+                    "oracle stderr")
+            oracle = {"present": True, "mode": oracle_mode,
+                      "text_sha256": hashlib.sha256(
+                          oracle_text.encode("utf-8")
+                      ).hexdigest(),
+                      "stderr_present": False,
+                      "lost_events": None}
+        else:
+            _, lost = parse_oracle_losses(stderr)
+            if actual_ok and lost:
+                raise ValueError(
+                    "row receipt refuses a pass with oracle "
+                    "loss")
+            oracle = {"present": True, "mode": oracle_mode,
+                      "text_sha256": hashlib.sha256(
+                          oracle_text.encode("utf-8")
+                      ).hexdigest(),
+                      "stderr_present": True,
+                      "lost_events": lost}
+    else:
+        oracle = {"present": False}
+    raw_losses = rec.get("losses") or {"main": None,
+                                       "busy": None}
+    if not isinstance(raw_losses, dict) \
+            or set(raw_losses) != {"main", "busy"}:
+        raise ValueError("row receipt rejects losses")
+    main = raw_losses["main"]
+    busy = raw_losses["busy"]
+    if main is not None:
+        main = _losses_jsonable(main, False)
+        _check_losses_block(main, False)
+    if busy is not None:
+        _check_losses_block(busy, True)
+    if mode == "matrix" and guest_ran:
+        losses = {"present": main is not None
+                  or busy is not None}
+        if losses["present"]:
+            losses["main"] = main
+            losses["busy"] = busy
+        if actual_ok and admitted and main is None:
+            raise ValueError(
+                "row receipt refuses a pass without losses")
+    else:
+        losses = {"present": False}
+    if rec.get("timeout") is not None \
+            and rec["timeout"] != ctx["timeout"]:
+        raise ValueError("row receipt rejects timeout")
+    busy_events = rec.get("busy_events")
+    if busy_events is None:
+        busy_error = None
+    elif isinstance(busy_events, dict) \
+            and isinstance(busy_events.get("error"), str):
+        busy_error = sanitize_cleanup_error(
+            busy_events["error"], "busy_events")
+    elif isinstance(busy_events, dict):
+        busy_error = None
+    else:
+        raise ValueError("row receipt rejects cleanup")
+    chown_error = rec.get("busy_chown_error")
+    if chown_error is not None:
+        if not isinstance(chown_error, str):
+            raise ValueError("row receipt rejects cleanup")
+        chown_error = sanitize_cleanup_error(
+            chown_error, "chown")
+    cleanup = {"timeout": ctx["timeout"],
+               "busy_events_error": busy_error,
+               "busy_chown_error": chown_error}
+    doc = {
+        "schema": ROW_RECEIPT_SCHEMA,
+        "id": ident,
+        "release": release,
+        "run_id": run_id,
+        "mode": mode,
+        "smoke": ctx["duration_s"] != QUAL_DURATION_S
+        or ctx["dd_count"] != QUAL_DD_COUNT,
+        "command": {
+            "tool": "tools/kernel-matrix",
+            "selector": ctx["kernel_selector"],
+            "duration_s": ctx["duration_s"],
+            "dd_count": ctx["dd_count"],
+            "timeout_s": ctx["timeout_s"],
+            "cpus": ctx["cpus"],
+            "kind": ctx["kind"],
+            "source_sha256": ctx["source_sha256"],
+        },
+        "source": ctx["source"],
+        "toolchain": ctx["toolchain"],
+        "artifacts": artifacts,
+        "kernel": kernel,
+        "profile": {"consumed": False,
+                    "shipped_id": ctx["shipped_profile_id"],
+                    "reason": PROFILE_REASON},
+        "workload": {"duration_s": ctx["duration_s"],
+                     "dd_count": ctx["dd_count"],
+                     "kind": ctx["kind"]},
+        "expected": expected,
+        "actual": actual,
+        "oracle": oracle,
+        "losses": losses,
+        "cleanup": cleanup,
+        "negatives": actual.get("negatives")
+        if mode == "scenarios" else None,
+        "files": files,
+    }
+    validate_row_receipt(doc)
+    (row / _ROW_RECEIPT_SELF).write_text(
+        json.dumps(doc, indent=2, sort_keys=True) + "\n")
+    return doc
+
+
+def validate_row_receipt(doc):
+    """Strict grammar for one matrix row receipt.
+
+    Beyond shapes, the verdict conjunction, the smoke
+    label, the boot label, and the pass-evidence rules
+    are recomputed: a pass with admitted caps needs
+    measured guest artifacts, a clean oracle, and
+    structured channel losses.
+    """
+    if not isinstance(doc, dict) or set(doc) != {
+            "schema", "id", "release", "run_id", "mode",
+            "smoke", "command", "source", "toolchain",
+            "artifacts", "kernel", "profile", "workload",
+            "expected", "actual", "oracle", "losses",
+            "cleanup", "negatives", "files"}:
+        raise ValueError("row receipt has a bad shape")
+    if doc["schema"] != ROW_RECEIPT_SCHEMA:
+        raise ValueError("row receipt has a bad schema")
+    if not isinstance(doc["id"], str) or not re.fullmatch(
+            r"[A-Za-z0-9_.-]+", doc["id"]):
+        raise ValueError("row receipt rejects its id")
+    if not isinstance(doc["release"], str) \
+            or not doc["release"] or len(doc["release"]) > 128:
+        raise ValueError("row receipt rejects its release")
+    if not isinstance(doc["run_id"], str) or not re.fullmatch(
+            r"[0-9]{8}T[0-9]{6}Z", doc["run_id"]):
+        raise ValueError("row receipt rejects its run id")
+    mode = doc["mode"]
+    if mode not in ("matrix", "scenarios"):
+        raise ValueError("row receipt rejects its mode")
+    if doc["smoke"] is not True and doc["smoke"] is not False:
+        raise ValueError("row receipt rejects its smoke flag")
+    command = doc["command"]
+    if not isinstance(command, dict) or set(command) != {
+            "tool", "selector", "duration_s", "dd_count",
+            "timeout_s", "cpus", "kind", "source_sha256"}:
+        raise ValueError("row receipt rejects its command")
+    if command["tool"] != "tools/kernel-matrix":
+        raise ValueError("row receipt rejects its command")
+    if not isinstance(command["selector"], str) \
+            or not re.fullmatch(
+                r"--kernel [A-Za-z0-9_.-]+"
+                r"|--kernels [A-Za-z0-9_.,-]+"
+                r"|--all", command["selector"]):
+        raise ValueError("row receipt rejects its command")
+    _check_int(command["duration_s"], "command duration",
+               1, 3600)
+    _check_int(command["dd_count"], "command dd count",
+               1, 4096)
+    _check_int(command["timeout_s"], "command timeout",
+               1, 7200)
+    _check_int(command["cpus"], "command cpus", 1, 4)
+    if command["kind"] not in ("deb", "bundle"):
+        raise ValueError("row receipt rejects its command")
+    _check_hex(command["source_sha256"], 64, "command source")
+    _check_row_source(doc["source"])
+    _check_row_toolchain(doc["toolchain"])
+    artifacts = doc["artifacts"]
+    if not isinstance(artifacts, dict) \
+            or artifacts.get("status") not in ("measured",
+                                               "no-guest"):
+        raise ValueError("row receipt rejects artifacts")
+    measured = artifacts["status"] == "measured"
+    if measured:
+        if set(artifacts) != {"status", "mode",
+                              "binary_sha256",
+                              "dpkg_version", "bpf",
+                              "bpftrace", "bpftool"}:
+            raise ValueError("row receipt rejects artifacts")
+        if artifacts["mode"] not in ("deb", "bundle"):
+            raise ValueError("row receipt rejects artifacts")
+        _check_hex(artifacts["binary_sha256"], 64,
+                   "binary hash")
+        if not isinstance(artifacts["dpkg_version"], str):
+            raise ValueError("row receipt rejects artifacts")
+        bpf = artifacts["bpf"]
+        if not isinstance(bpf, dict) or not bpf or any(
+                name not in ("attempt", "lifecycle", "copy")
+                for name in bpf):
+            raise ValueError("row receipt rejects artifacts")
+        for digest in bpf.values():
+            _check_hex(digest, 64, "bpf hash")
+        for key in ("bpftrace", "bpftool"):
+            if not isinstance(artifacts[key], str) \
+                    or not artifacts[key]:
+                raise ValueError(
+                    "row receipt rejects artifacts")
+    elif set(artifacts) != {"status"}:
+        raise ValueError("row receipt rejects artifacts")
+    kernel = doc["kernel"]
+    if not isinstance(kernel, dict) or set(kernel) != {
+            "release", "boot_label", "uname", "modules",
+            "version", "lockdown", "config_sha256",
+            "config_status", "btf_sha256", "btf_status",
+            "hooks", "lock_source", "tools_expected"}:
+        raise ValueError("row receipt rejects its kernel")
+    if kernel["release"] != doc["release"]:
+        raise ValueError("row receipt rejects its kernel")
+    lock_source = kernel["lock_source"]
+    if not isinstance(lock_source, dict) \
+            or lock_source.get("kind") not in ("archive",
+                                               "built"):
+        raise ValueError("row receipt rejects its kernel")
+    if kernel["boot_label"] != row_boot_label(
+            {"source": lock_source, "id": doc["id"]}):
+        raise ValueError("row receipt rejects its kernel")
+    for key in ("uname", "modules", "version", "lockdown"):
+        if kernel[key] is not None and (
+                not isinstance(kernel[key], str)
+                or not kernel[key]):
+            raise ValueError("row receipt rejects its kernel")
+    for sha_key, status_key in (
+            ("config_sha256", "config_status"),
+            ("btf_sha256", "btf_status")):
+        status = kernel[status_key]
+        if status not in ("measured", "absent", "unreadable",
+                          "missing"):
+            raise ValueError("row receipt rejects its kernel")
+        if status == "measured":
+            _check_hex(kernel[sha_key], 64, "kernel hash")
+        elif kernel[sha_key] is not None:
+            raise ValueError("row receipt rejects its kernel")
+    hooks = kernel["hooks"]
+    if hooks is not None:
+        if not isinstance(hooks, dict) \
+                or set(hooks) != {"present", "omitted",
+                                  "btf"} \
+                or not isinstance(hooks["present"], dict) \
+                or not hooks["present"] \
+                or any(not isinstance(probe, str)
+                       or hooks["present"][probe] is not True
+                       and hooks["present"][probe] is not False
+                       for probe in hooks["present"]) \
+                or not isinstance(hooks["omitted"], list) \
+                or any(not isinstance(probe, str)
+                       for probe in hooks["omitted"]) \
+                or set(hooks["omitted"]) != {
+                    probe for probe, ok
+                    in hooks["present"].items()
+                    if ok is False} \
+                or hooks["btf"] is not True \
+                and hooks["btf"] is not False:
+            raise ValueError("row receipt rejects its kernel")
+        if (hooks["btf"] is True
+                and kernel["btf_status"] != "measured") \
+                or (hooks["btf"] is False
+                    and kernel["btf_status"] == "measured"):
+            raise ValueError("row receipt rejects its kernel")
+    tools = kernel["tools_expected"]
+    if not isinstance(tools, dict) \
+            or set(tools) != {"bpftrace", "bpftool"} \
+            or not tools["bpftrace"] \
+            or not tools["bpftool"]:
+        raise ValueError("row receipt rejects its kernel")
+    profile = doc["profile"]
+    if not isinstance(profile, dict) \
+            or set(profile) != {"consumed", "shipped_id",
+                                "reason"}:
+        raise ValueError("row receipt rejects its profile")
+    if profile["consumed"] is not False:
+        raise ValueError("row receipt rejects its profile")
+    if profile["shipped_id"] is not None and (
+            not isinstance(profile["shipped_id"], str)
+            or not re.fullmatch(r"[A-Za-z0-9_.-]+",
+                                 profile["shipped_id"])):
+        raise ValueError("row receipt rejects its profile")
+    if profile["reason"] != PROFILE_REASON:
+        raise ValueError("row receipt rejects its profile")
+    workload = doc["workload"]
+    if not isinstance(workload, dict) \
+            or set(workload) != {"duration_s", "dd_count",
+                                 "kind"}:
+        raise ValueError("row receipt rejects its workload")
+    if workload["duration_s"] != command["duration_s"] \
+            or workload["dd_count"] != command["dd_count"] \
+            or workload["kind"] != command["kind"]:
+        raise ValueError("row receipt rejects its workload")
+    if doc["smoke"] != (workload["duration_s"]
+                        != QUAL_DURATION_S
+                        or workload["dd_count"]
+                        != QUAL_DD_COUNT):
+        raise ValueError("row receipt rejects its smoke flag")
+    if mode == "matrix":
+        admitted = _check_verdict_map(doc["expected"])
+    else:
+        if not isinstance(doc["expected"], dict) \
+                or set(doc["expected"]) != {"caps"}:
+            raise ValueError(
+                "row receipt rejects expectations")
+        admitted = _check_verdict_map(doc["expected"]["caps"])
+    actual = doc["actual"]
+    if not isinstance(actual, dict):
+        raise ValueError("row receipt rejects its verdict")
+    actual_ok = actual.get("ok")
+    if actual_ok is not True and actual_ok is not False:
+        raise ValueError("row receipt rejects its verdict")
+    if mode == "matrix":
+        if set(actual) != {"ok", "checks", "channels"}:
+            raise ValueError("row receipt rejects its verdict")
+        _check_row_checks(actual["checks"])
+        if actual_ok != all(check["ok"]
+                            for check in actual["checks"]):
+            raise ValueError("row receipt rejects its verdict")
+        channels = actual["channels"]
+        if channels is not None and (
+                not isinstance(channels, dict)
+                or any(not isinstance(name, str)
+                       or not isinstance(text, str)
+                       for name, text in channels.items())):
+            raise ValueError("row receipt rejects channels")
+    else:
+        if set(actual) != {"ok", "scenarios",
+                           "binary_sha256", "negatives"}:
+            raise ValueError("row receipt rejects its verdict")
+        results = actual["scenarios"]
+        if not isinstance(results, list):
+            raise ValueError("row receipt rejects its verdict")
+        if not results and (actual_ok or measured):
+            raise ValueError("row receipt rejects its verdict")
+        for result in results:
+            if not isinstance(result, dict) \
+                    or set(result) != {"name", "status",
+                                       "checks"}:
+                raise ValueError(
+                    "row receipt rejects a scenario")
+            if not isinstance(result["name"], str) \
+                    or not re.fullmatch(
+                        r"[a-z][a-z0-9-]{0,31}",
+                        result["name"]):
+                raise ValueError(
+                    "row receipt rejects a scenario")
+            if result["status"] not in ("ok", "fail",
+                                        "not_proven"):
+                raise ValueError(
+                    "row receipt rejects a scenario")
+            if not isinstance(result["checks"], list):
+                raise ValueError(
+                    "row receipt rejects a scenario")
+            for check in result["checks"]:
+                _check_row_checks([check])
+        if any(result["status"] != "ok"
+               for result in results) and actual_ok:
+            raise ValueError("row receipt rejects the verdict")
+        if actual["binary_sha256"] is not None:
+            _check_hex(actual["binary_sha256"], 64,
+                       "scenario binary")
+        negatives = actual["negatives"]
+        if not isinstance(negatives, dict):
+            raise ValueError("row receipt rejects negatives")
+        for digest in negatives.values():
+            _check_hex(digest, 64, "negative hash")
+        if bool(negatives) != (mode == "scenarios"
+                               and measured):
+            raise ValueError("row receipt rejects negatives")
+    oracle = doc["oracle"]
+    if not isinstance(oracle, dict) \
+            or "present" not in oracle:
+        raise ValueError("row receipt rejects its oracle")
+    if oracle["present"] is False:
+        if set(oracle) != {"present"}:
+            raise ValueError("row receipt rejects its oracle")
+    elif oracle["present"] is True:
+        if set(oracle) != {"present", "mode", "text_sha256",
+                           "stderr_present", "lost_events"}:
+            raise ValueError("row receipt rejects its oracle")
+        if oracle["mode"] not in ("full", "countonly"):
+            raise ValueError("row receipt rejects its oracle")
+        _check_hex(oracle["text_sha256"], 64, "oracle text")
+        if oracle["stderr_present"] is not True \
+                and oracle["stderr_present"] is not False:
+            raise ValueError("row receipt rejects its oracle")
+        if oracle["stderr_present"]:
+            _check_int(oracle["lost_events"], "oracle loss")
+        elif oracle["lost_events"] is not None:
+            raise ValueError("row receipt rejects its oracle")
+    else:
+        raise ValueError("row receipt rejects its oracle")
+    losses = doc["losses"]
+    if not isinstance(losses, dict) \
+            or "present" not in losses:
+        raise ValueError("row receipt rejects losses")
+    if losses["present"] is False:
+        if set(losses) != {"present"}:
+            raise ValueError("row receipt rejects losses")
+    elif losses["present"] is True:
+        if set(losses) != {"present", "main", "busy"}:
+            raise ValueError("row receipt rejects losses")
+        if losses["main"] is None and losses["busy"] is None:
+            raise ValueError("row receipt rejects losses")
+        if losses["main"] is not None:
+            _check_losses_block(losses["main"], False)
+        if losses["busy"] is not None:
+            _check_losses_block(losses["busy"], True)
+    else:
+        raise ValueError("row receipt rejects losses")
+    if admitted and measured and actual_ok:
+        if mode == "matrix":
+            if not oracle.get("present") \
+                    or not oracle.get("stderr_present") \
+                    or oracle.get("lost_events"):
+                raise ValueError(
+                    "row receipt refuses a pass with oracle "
+                    "loss")
+            if not losses.get("present") \
+                    or losses.get("main") is None:
+                raise ValueError(
+                    "row receipt refuses a pass without "
+                    "losses")
+            if actual["channels"] is None:
+                raise ValueError(
+                    "row receipt refuses a pass without "
+                    "channels")
+        if kernel["uname"] is None or hooks is None:
+            raise ValueError(
+                "row receipt refuses a pass without guest "
+                "identity")
+    cleanup = doc["cleanup"]
+    if not isinstance(cleanup, dict) \
+            or set(cleanup) != {"timeout",
+                                "busy_events_error",
+                                "busy_chown_error"}:
+        raise ValueError("row receipt rejects cleanup")
+    if cleanup["timeout"] is not True \
+            and cleanup["timeout"] is not False:
+        raise ValueError("row receipt rejects cleanup")
+    if cleanup["busy_events_error"] is not None \
+            and cleanup["busy_events_error"] \
+            not in _BUSY_EVENTS_TOKEN_SET:
+        raise ValueError("row receipt rejects cleanup")
+    if cleanup["busy_chown_error"] is not None \
+            and cleanup["busy_chown_error"] != _CHOWN_TOKEN:
+        raise ValueError("row receipt rejects cleanup")
+    negatives = doc["negatives"]
+    if mode == "scenarios":
+        if not isinstance(negatives, dict):
+            raise ValueError("row receipt rejects negatives")
+        for digest in negatives.values():
+            _check_hex(digest, 64, "negative hash")
+        if bool(negatives) != measured:
+            raise ValueError("row receipt rejects negatives")
+        if negatives != actual["negatives"]:
+            raise ValueError("row receipt rejects negatives")
+    elif negatives is not None:
+        raise ValueError("row receipt rejects negatives")
+    files = doc["files"]
+    if not isinstance(files, list) or not files:
+        raise ValueError("row receipt needs its files")
+    seen = set()
+    previous = None
+    for entry in files:
+        if not isinstance(entry, dict) \
+                or set(entry) != {"name", "sha256",
+                                  "bytes"}:
+            raise ValueError("row receipt rejects its files")
+        if entry["name"] in seen \
+                or previous is not None \
+                and entry["name"] <= previous:
+            raise ValueError("row receipt rejects its files")
+        seen.add(entry["name"])
+        previous = entry["name"]
+        _check_hex(entry["sha256"], 64, "file hash")
+        _check_int(entry["bytes"], "file size")
+    return doc
+
+
+def _rederive_cross_check(row, doc):
+    """Receipt claims against the sibling bytes, or a reason."""
+    row = Path(row)
+    files = {entry["name"]: entry for entry in doc["files"]}
+    mode = doc["mode"]
+    expected = doc["expected"] if mode == "matrix" \
+        else doc["expected"]["caps"]
+    admitted = [cap for cap in CAPS
+                if expected[cap]["verdict"] == "admitted"]
+    job = _row_json(row, "job.json")
+    if not isinstance(job, dict):
+        return "job.json unreadable"
+    if job.get("id") != doc["id"] \
+            or job.get("release") != doc["release"] \
+            or job.get("run_id") != doc["run_id"]:
+        return "job.json drifts from the receipt"
+    if job.get("duration") != doc["workload"]["duration_s"] \
+            or job.get("dd_count") \
+            != doc["workload"]["dd_count"]:
+        return "job.json drifts from the receipt"
+    if ("deb" in job) != (doc["workload"]["kind"] == "deb"):
+        return "job.json drifts from the receipt"
+    if sorted(job.get("admitted") or []) != sorted(admitted):
+        return "job.json drifts from the receipt"
+    measured = doc["artifacts"]["status"] == "measured"
+    if measured != ("artifacts.json" in files):
+        return "artifacts presence drifts from the receipt"
+    if measured:
+        raw = _row_json(row, "artifacts.json")
+        got = doc["artifacts"]
+        if not isinstance(raw, dict) \
+                or raw.get("mode") != got["mode"] \
+                or raw.get("binary", {}).get("sha256") \
+                != got["binary_sha256"] \
+                or raw.get("dpkg_version") \
+                != got["dpkg_version"] \
+                or raw.get("bpf") != got["bpf"] \
+                or raw.get("bpftrace") != got["bpftrace"] \
+                or raw.get("bpftool") != got["bpftool"]:
+            return "artifacts.json drifts from the receipt"
+    kernel = doc["kernel"]
+    for name, key in (("uname.txt", "uname"),
+                      ("mods.txt", "modules"),
+                      ("version.txt", "version"),
+                      ("lockdown.txt", "lockdown")):
+        text = _row_text(row, name)
+        want = kernel[key]
+        if (text is None) != (want is None):
+            return "%s drifts from the receipt" % name
+        if text is not None and text.strip() != want:
+            return "%s drifts from the receipt" % name
+    for name, sha_key, status_key in (
+            ("configid.txt", "config_sha256",
+             "config_status"),
+            ("btf-sha.txt", "btf_sha256", "btf_status")):
+        try:
+            sha, status = _row_sha_status(row, name)
+        except ValueError:
+            return "%s is malformed" % name
+        if sha != kernel[sha_key] \
+                or status != kernel[status_key]:
+            return "%s drifts from the receipt" % name
+    hooks = _row_json(row, "hooks.json")
+    if (hooks is None) != (kernel["hooks"] is None):
+        return "hooks.json drifts from the receipt"
+    if hooks is not None and hooks != kernel["hooks"]:
+        return "hooks.json drifts from the receipt"
+    oracle = doc["oracle"]
+    if oracle["present"]:
+        text = _row_text(row, "oracle.txt")
+        if text is None or hashlib.sha256(
+                text.encode("utf-8")).hexdigest() \
+                != oracle["text_sha256"]:
+            return "oracle.txt drifts from the receipt"
+        mode_text = _row_text(row, "oracle.mode")
+        if mode_text is None \
+                or mode_text.strip() != oracle["mode"]:
+            return "oracle.mode drifts from the receipt"
+        stderr = _row_text(row, "oracle.stderr")
+        if (stderr is None) == oracle["stderr_present"]:
+            return "oracle.stderr drifts from the receipt"
+        if stderr is not None:
+            _, lost = parse_oracle_losses(stderr)
+            if lost != oracle["lost_events"]:
+                return "oracle.stderr drifts from the receipt"
+    if mode == "scenarios" and measured:
+        if job.get("negatives") != doc["negatives"]:
+            return "job.json drifts from the receipt"
+        for name, digest in doc["negatives"].items():
+            leaf = "neg/swiotlb_copy-%s.bpf.o" % name
+            if files.get(leaf, {}).get("sha256") != digest:
+                return "staged negatives drift from the receipt"
+        got_dirs = {name.split("/", 1)[0] for name in files
+                    if name.startswith("scn-")}
+        want_dirs = {"scn-" + result["name"]
+                     for result in doc["actual"]["scenarios"]}
+        if got_dirs != want_dirs:
+            return "scenario dirs drift from the receipt"
+    vng_exit = _row_text(row, "vng.exit")
+    if (vng_exit is not None
+            and vng_exit.strip() == "timeout") \
+            != doc["cleanup"]["timeout"]:
+        return "vng.exit drifts from the receipt"
+    return None
+
+
+def _rederive_compare_rec(doc, rec):
+    """Receipt verdict fields against the tool rec, or a reason."""
+    if rec.get("ok") != doc["actual"]["ok"]:
+        return "rec verdict drifts from the receipt"
+    if doc["mode"] == "matrix":
+        if rec.get("checks") != doc["actual"]["checks"]:
+            return "rec checks drift from the receipt"
+        if rec.get("channels") != doc["actual"]["channels"]:
+            return "rec channels drift from the receipt"
+        raw = rec.get("losses") or {"main": None,
+                                    "busy": None}
+        want_main = doc["losses"].get("main") \
+            if doc["losses"]["present"] else None
+        want_busy = doc["losses"].get("busy") \
+            if doc["losses"]["present"] else None
+        got_main = raw.get("main")
+        if got_main is not None:
+            got_main = _losses_jsonable(got_main, False)
+        if got_main != want_main or raw.get("busy") != want_busy:
+            return "rec losses drift from the receipt"
+    else:
+        if rec.get("scenarios") != doc["actual"]["scenarios"]:
+            return "rec scenarios drift from the receipt"
+        if rec.get("binary_sha256") != \
+                doc["actual"]["binary_sha256"]:
+            return "rec binary drifts from the receipt"
+        if (rec.get("negatives") or {}) != \
+                doc["actual"]["negatives"]:
+            return "rec negatives drift from the receipt"
+    return None
+
+
+def rederive_row(row_dir, rec=None):
+    """Re-derive one row verdict from its receipt and siblings.
+
+    Validates receipt.json, verifies every inventoried hash,
+    cross-checks each transcribed claim against the sibling
+    bytes, optionally compares against the tool rec (the
+    <id>.json beside the row dir), and recomputes the verdict
+    from the receipt instead of trusting it. Returns
+    (ok, detail). A pass needs the recomputed verdict plus
+    every cross-check; anything else fails with its reason.
+
+    This re-proves transcription, provenance, evidence
+    integrity, and consistency. It does not re-execute the
+    verdict predicates: their host-transient inputs (live
+    validator runs, pre-shrink captures) no longer exist.
+    """
+    from export_validation import strict_json
+    row = Path(row_dir)
+    try:
+        text = (row / _ROW_RECEIPT_SELF).read_text()
+    except OSError:
+        return False, "no receipt.json in the row dir"
+    try:
+        doc = strict_json(text)
+    except ValueError as exc:
+        return False, "receipt.json unreadable: %s" % exc
+    try:
+        validate_row_receipt(doc)
+    except ValueError as exc:
+        return False, "receipt invalid: %s" % exc
+    try:
+        found = row_receipt_files(row)
+    except ValueError as exc:
+        return False, "row evidence refused: %s" % exc
+    want = {entry["name"]: (entry["sha256"], entry["bytes"])
+            for entry in doc["files"]}
+    got = {entry["name"]: (entry["sha256"], entry["bytes"])
+           for entry in found}
+    if got != want:
+        return False, "row files drift from the receipt"
+    try:
+        reason = _rederive_cross_check(row, doc)
+    except ValueError as exc:
+        return False, "row evidence unreadable: %s" % exc
+    if reason is not None:
+        return False, reason
+    if rec is not None:
+        if not isinstance(rec, dict):
+            return False, "rec is not an object"
+        try:
+            reason = _rederive_compare_rec(doc, rec)
+        except ValueError as exc:
+            return False, "rec losses malformed: %s" % exc
+        if reason is not None:
+            return False, reason
+    if doc["mode"] == "matrix":
+        verdict = all(check["ok"]
+                      for check in doc["actual"]["checks"])
+    else:
+        results = doc["actual"]["scenarios"]
+        fail_txt = _row_text(row, "FAIL.txt")
+        vng_exit = _row_text(row, "vng.exit")
+        verdict = bool(results) and all(
+            result["status"] == "ok" for result in results) \
+            and (fail_txt is None or not fail_txt.strip()) \
+            and vng_exit is not None \
+            and vng_exit.strip() == "0"
+    if verdict:
+        return True, "row re-derived PASS from the receipt"
+    return False, "row re-derived FAIL from the receipt"
+
+
+def verify_matrix_out(out_dir):
+    """Re-derive every row under one matrix out dir.
+
+    Each row subdir must re-derive from its receipt, match
+    its <id>.json rec, and appear in summary.json; every
+    summary row must have its row dir. Returns {"ok", "rows",
+    "problems"}: ok only when every row re-derives PASS and
+    nothing is stale, unmerged, or missing.
+    """
+    out = Path(out_dir)
+    rows = []
+    problems = []
+    if not out.is_dir():
+        return {"ok": False, "rows": rows,
+                "problems": ["no such out dir"]}
+    try:
+        names = sorted(path.name for path in out.iterdir()
+                       if path.is_dir()
+                       and not path.is_symlink())
+    except OSError:
+        return {"ok": False, "rows": rows,
+                "problems": ["out dir unreadable"]}
+    if not names:
+        problems.append("no row dirs under the out dir")
+    summary_path = out / "summary.json"
+    summary_ids = None
+    if not summary_path.is_file():
+        problems.append("no summary.json in the out dir")
+    else:
+        try:
+            summary = json.loads(summary_path.read_text())
+        except (OSError, ValueError):
+            summary = None
+        if not isinstance(summary, list):
+            problems.append("summary.json is not a list")
+        else:
+            summary_ids = set()
+            for row in summary:
+                ident = row.get("id") \
+                    if isinstance(row, dict) else None
+                if not isinstance(ident, str) or not ident:
+                    problems.append(
+                        "summary.json holds a row without id")
+                else:
+                    summary_ids.add(ident)
+            for ident in sorted(summary_ids - set(names)):
+                problems.append(
+                    "summary row without evidence dir: %s"
+                    % ident)
+            for ident in sorted(set(names) - summary_ids):
+                problems.append(
+                    "row dir without summary row: %s" % ident)
+    for ident in names:
+        rec = None
+        rec_path = out / (ident + ".json")
+        if not rec_path.is_file():
+            problems.append("no %s.json beside the row dir"
+                            % ident)
+        else:
+            try:
+                rec = json.loads(rec_path.read_text())
+            except (OSError, ValueError):
+                rec = None
+                problems.append("%s.json unreadable" % ident)
+        row_ok, detail = rederive_row(out / ident, rec)
+        rows.append({"id": ident, "ok": row_ok,
+                     "detail": detail})
+    ok = not problems and bool(rows) \
+        and all(row["ok"] for row in rows)
+    return {"ok": ok, "rows": rows, "problems": problems}

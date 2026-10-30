@@ -34,6 +34,7 @@ sys.path.insert(0, str(ROOT / "tests" / "vm"))
 
 import kernel_matrix as km
 import kernel_scenarios as ks
+import gate_kernel as gk
 
 CAPTURE_TIMEOUT = 300
 
@@ -386,15 +387,59 @@ def collect_one(entry, export, tools, dd_count, elapsed, run_id,
     return rec
 
 
+def shipped_id(entry):
+    """Validated profile id naming this row release, or None."""
+    try:
+        found = gk.shipped_profile(entry.get("release", ""))
+        if found is None:
+            return None
+        return json.loads(Path(found).read_text())["profile_id"]
+    except (OSError, ValueError, KeyError):
+        return None
+
+
 def run_one(entry, args, kind, source, disk_img, tools, run_id,
-            prefix, guest_script=None, collect=None,
-            stage=None):
+            prefix, receipt_base, guest_script=None,
+            collect=None, stage=None):
     ident = entry["id"]
     export = os.path.join(args.out, ident)
     if os.path.exists(export):
         return {"id": ident, "ok": False, "run_id": run_id,
                 "detail": "evidence dir exists (refusing overwrite)"}
     os.makedirs(export)
+
+    def finish(rec, timeout=False):
+        ctx = dict(receipt_base)
+        ctx["timeout"] = bool(timeout)
+        ctx["shipped_profile_id"] = shipped_id(entry)
+        try:
+            km.write_row_receipt(export, rec, entry, ctx)
+        except (ValueError, OSError) as exc:
+            print("kernel-matrix: %s: row receipt refused: %s"
+                  % (ident, exc), file=sys.stderr)
+            failed = [check.get("name")
+                      for check in rec.get("checks", [])
+                      if not check.get("ok")]
+            print("kernel-matrix: %s: underlying verdict ok=%s"
+                  " failed=%s" % (ident, rec.get("ok"), failed),
+                  file=sys.stderr)
+            return {"id": ident, "ok": False,
+                    "run_id": run_id,
+                    "elapsed": rec.get("elapsed", 0),
+                    "detail": "row receipt refused",
+                    "checks": [{"name": "receipt", "ok": False,
+                                "detail": "row-receipt-refused",
+                                "skipped": False}]}
+        return rec
+
+    def stage_fail(name, token, detail, t0):
+        return finish(
+            {"id": ident, "ok": False, "detail": detail,
+             "run_id": run_id,
+             "elapsed": round(time.monotonic() - t0, 1),
+             "checks": [{"name": name, "ok": False,
+                         "detail": token,
+                         "skipped": False}]})
     admitted = [cap for cap in km.CAPS
                 if entry["expected"][cap]["verdict"] == "admitted"]
     job = {"id": ident, "vng_version": km.row_boot_label(entry),
@@ -407,11 +452,18 @@ def run_one(entry, args, kind, source, disk_img, tools, run_id,
     else:
         job["bundle"] = source
     job["repo"] = str(ROOT)
+    t0 = time.monotonic()
     if stage is not None:
-        stage(export, job)
+        try:
+            stage(export, job)
+        except (OSError, ValueError) as exc:
+            Path(export, "job.json").write_text(
+                json.dumps(job, indent=2) + "\n")
+            return stage_fail("stage", "stage-failed",
+                              str(exc), t0)
     Path(export, "job.json").write_text(json.dumps(job, indent=2)
                                         + "\n")
-    t0 = time.monotonic()
+    dl_failed = False
     ok, msg, cache_dir, target = verify_cache(entry)
     if not ok and entry["source"]["kind"] == "archive" \
             and "missing" in msg:
@@ -422,25 +474,33 @@ def run_one(entry, args, kind, source, disk_img, tools, run_id,
             ok, msg, cache_dir, target = verify_cache(entry)
         else:
             msg = dl_msg
+            dl_failed = True
     if not ok:
         Path(export, "cache-FAIL.txt").write_text(msg + "\n")
-        return {"id": ident, "ok": False, "detail": msg,
-                "run_id": run_id,
-                "elapsed": round(time.monotonic() - t0, 1)}
+        if dl_failed:
+            return stage_fail("download", "download-failed",
+                              msg, t0)
+        return stage_fail("cache", "cache-unverified", msg,
+                          t0)
     Path(export, "cache.txt").write_text(msg + " " + cache_dir
                                          + "\n")
-    try:
-        km.validate_shell_path(export, "evidence dir")
-        km.validate_shell_path(disk_img, "disk image")
-    except ValueError as exc:
-        return {"id": ident, "ok": False, "detail": str(exc),
-                "run_id": run_id,
-                "elapsed": round(time.monotonic() - t0, 1)}
+    for label, value, name in (
+            ("evidence dir", export, "evidence_path"),
+            ("disk image", disk_img, "disk_path")):
+        try:
+            km.validate_shell_path(value, label)
+        except ValueError as exc:
+            return stage_fail(name, "path-rejected",
+                              str(exc), t0)
     script = guest_script or str(
         ROOT / "tests" / "vm" / "kernel_matrix_guest.py")
     guest_cmd = "python3 %s /tmp/export %s" % (
         shlex.quote(script), shlex.quote(str(ROOT)))
-    scratch_img = ensure_scratch(disk_img, ident)
+    try:
+        scratch_img = ensure_scratch(disk_img, ident)
+    except ValueError as exc:
+        return stage_fail("scratch", "scratch-failed",
+                          str(exc), t0)
     qemu_opts = "-cpu host %s %s" % (
         km.qemu_drive_opt(disk_img),
         km.qemu_drive_opt(scratch_img, drive_id="d1",
@@ -448,9 +508,13 @@ def run_one(entry, args, kind, source, disk_img, tools, run_id,
     # tsc=nowatchdog stops the clocksource watchdog, whose remote-CPU
     # read timeouts under host vCPU preemption are guest noise.
     append = "swiotlb=131072,force tsc=nowatchdog"
-    for arg in entry.get("boot_append") or []:
-        km.validate_shell_path(arg, "boot argument")
-        append += " " + arg
+    try:
+        for arg in entry.get("boot_append") or []:
+            km.validate_shell_path(arg, "boot argument")
+            append += " " + arg
+    except (ValueError, TypeError) as exc:
+        return stage_fail("boot_args", "boot-argument-rejected",
+                          str(exc), t0)
     vng_args = ["--run", target,
                 "--cpus", str(args.cpus),
                 "-m", "4G", "--append", append,
@@ -464,9 +528,8 @@ def run_one(entry, args, kind, source, disk_img, tools, run_id,
                                os.environ.get("MV_HOST_CPUS"),
                                str(Path.home()), vng_args)
     except ValueError as exc:
-        return {"id": ident, "ok": False, "detail": str(exc),
-                "run_id": run_id,
-                "elapsed": round(time.monotonic() - t0, 1)}
+        return stage_fail("vng_cmd", "vng-command-rejected",
+                          str(exc), t0)
     Path(export, "vng-cmd.txt").write_text(" ".join(cmd) + "\n")
     from vm_process import run_owned_guest
     timeout = False
@@ -484,11 +547,13 @@ def run_one(entry, args, kind, source, disk_img, tools, run_id,
         timeout = True
     elapsed = time.monotonic() - t0
     if collect is None:
-        return collect_one(entry, export, tools,
-                           args.dd_count, elapsed, run_id,
-                           timeout, cache_dir, args.duration)
-    return collect(entry, export, tools, elapsed, run_id,
-                   timeout, cache_dir)
+        return finish(collect_one(entry, export, tools,
+                                  args.dd_count, elapsed,
+                                  run_id, timeout, cache_dir,
+                                  args.duration), timeout)
+    return finish(collect(entry, export, tools, elapsed,
+                          run_id, timeout, cache_dir),
+                  timeout)
 
 
 NEGATIVE_NAMES = ("renamed_field", "widened_layout",
@@ -765,6 +830,40 @@ def write_summary(out, merged):
     print("\n".join(lines))
 
 
+def load_old_summary(out):
+    """Prior summary rows, refusing stale or corrupt state.
+
+    Returns (rows, None); a missing summary is ([], None).
+    An unparseable summary or a summary row without its
+    evidence dir returns (None, reason): merges never carry
+    verdicts whose evidence is gone.
+    """
+    summary_path = Path(out, "summary.json")
+    if not summary_path.exists():
+        return [], None
+    try:
+        old = json.loads(summary_path.read_text())
+        if not isinstance(old, list):
+            raise ValueError("summary is not a list")
+    except ValueError:
+        return None, "existing summary unparseable, " \
+            "refusing to merge"
+    stale = []
+    for row in old:
+        ident = row.get("id") if isinstance(row, dict) \
+            else None
+        if not isinstance(ident, str) or not ident \
+                or not os.path.isdir(
+                    os.path.join(out, ident)):
+            stale.append(ident)
+    if stale:
+        return None, \
+            "summary rows without evidence dirs (%s), " \
+            "refusing to merge" % ", ".join(
+                sorted(str(ident) for ident in stale))
+    return old, None
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Boot matrix kernels and prove the generations "
@@ -778,6 +877,9 @@ def main(argv=None):
                        help="comma-separated lock ids, in order")
     group.add_argument("--all", action="store_true",
                        help="run every lock entry")
+    group.add_argument("--verify-out", action="store_true",
+                       help="re-derive every row receipt under "
+                            "--out instead of booting")
     parser.add_argument("--lock", default=str(
         ROOT / "tests" / "vm" / "kernels.lock.json"),
                         help="kernels lock path")
@@ -799,6 +901,19 @@ def main(argv=None):
                         help="run detection scenarios, not the "
                              "matrix")
     args = parser.parse_args(argv)
+    if args.verify_out:
+        report = km.verify_matrix_out(args.out)
+        for row in report["rows"]:
+            print("kernel-matrix: verify %s %s: %s" % (
+                row["id"], "PASS" if row["ok"] else "FAIL",
+                row["detail"]))
+        for problem in report["problems"]:
+            print("kernel-matrix: verify refused: %s" % problem,
+                  file=sys.stderr)
+        if report["ok"]:
+            print("kernel-matrix: verify %d rows re-derived"
+                  % len(report["rows"]))
+        return 0 if report["ok"] else 1
     if args.cpus < 1 or args.cpus > 4:
         print("kernel-matrix: --cpus must be 1..4", file=sys.stderr)
         return 2
@@ -898,11 +1013,18 @@ def main(argv=None):
     harness["run_id"] = datetime.now(timezone.utc).strftime(
         "%Y%m%dT%H%M%SZ")
     try:
-        harness["deb_sha256"] = km.sha_file(source) \
+        source_sha256 = km.sha_file(source)
+        harness["deb_sha256"] = source_sha256 \
             if kind == "deb" else None
     except OSError as exc:
         print("kernel-matrix: cannot hash %s: %s" % (source, exc),
               file=sys.stderr)
+        return 1
+    try:
+        receipt_source = km.row_source_identity(ROOT)
+        receipt_toolchain = km.read_toolchain_lock(ROOT)
+    except ValueError as exc:
+        print("kernel-matrix: %s" % exc, file=sys.stderr)
         return 1
     commit, dirty = km.repo_identity(ROOT)
     harness["harness_commit"] = commit
@@ -920,6 +1042,27 @@ def main(argv=None):
     Path(args.out, "harness.json").write_text(
         json.dumps(harness, indent=2, sort_keys=True) + "\n")
     run_id = harness["run_id"]
+    if args.kernel:
+        kernel_selector = "--kernel %s" % args.kernel
+    elif args.kernels:
+        kernel_selector = "--kernels %s" % args.kernels
+    else:
+        kernel_selector = "--all"
+    receipt_base = {
+        "mode": "scenarios" if args.scenarios else "matrix",
+        "kind": kind,
+        "source_sha256": source_sha256,
+        "kernel_selector": kernel_selector,
+        "duration_s": args.duration,
+        "dd_count": args.dd_count,
+        "timeout_s": args.timeout,
+        "cpus": args.cpus,
+        "timeout": False,
+        "source": receipt_source,
+        "toolchain": receipt_toolchain,
+        "lock_tools": dict(lock["tools"]),
+        "shipped_profile_id": None,
+    }
     results = []
     try:
         for entry in entries:
@@ -930,6 +1073,7 @@ def main(argv=None):
                 rec = run_one(
                     entry, args, kind, source, disk_img,
                     lock["tools"], run_id, prefix,
+                    receipt_base,
                     guest_script=str(
                         ROOT / "tests" / "vm"
                         / "kernel_scenarios_guest.py"),
@@ -939,7 +1083,7 @@ def main(argv=None):
             else:
                 rec = run_one(entry, args, kind, source,
                               disk_img, lock["tools"], run_id,
-                              prefix)
+                              prefix, receipt_base)
             results.append(rec)
             Path(args.out, entry["id"] + ".json").write_text(
                 json.dumps(rec, indent=2, sort_keys=True) + "\n")
@@ -948,18 +1092,11 @@ def main(argv=None):
                 entry["id"], status, rec.get("elapsed", 0)))
     finally:
         lease.close()
-    summary_path = Path(args.out, "summary.json")
-    if summary_path.exists():
-        try:
-            old = json.loads(summary_path.read_text())
-            if not isinstance(old, list):
-                raise ValueError("summary is not a list")
-        except ValueError:
-            print("kernel-matrix: existing summary unparseable, "
-                  "refusing to merge", file=sys.stderr)
-            return 2
-    else:
-        old = []
+    old, error = load_old_summary(args.out)
+    if error is not None:
+        print("kernel-matrix: %s; use a fresh --out" % error,
+              file=sys.stderr)
+        return 2
     merged = km.merge_summary(old, results)
     if args.scenarios:
         write_scenario_summary(args.out, merged)
