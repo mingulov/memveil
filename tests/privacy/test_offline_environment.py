@@ -41,6 +41,15 @@ def main():
         sys.exit(1)
 
     scrub = {"PATH": "/usr/bin:/bin"}
+    if os.environ.get("LMB_SANITIZE") == "1":
+        # LeakSanitizer cannot suspend threads under ptrace; strace
+        # would abort the audited binary with an LSan fatal error.
+        # Leak detection stays off on this traced spawn only; the
+        # address and UB sanitizers remain active.
+        scrub["LSAN_OPTIONS"] = "detect_leaks=0"
+        # The scrubbed spawn does not inherit the runner's lane
+        # export; keep undefined-behavior reports fatal here too.
+        scrub["UBSAN_OPTIONS"] = "halt_on_error=1"
     for fmt in ("text", "json"):
         normal = subprocess.run([BIN, "report", "--format", fmt, CAP],
                                 capture_output=True)

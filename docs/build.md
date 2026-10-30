@@ -82,18 +82,27 @@ Implemented in `src/memveil/` with owning tests per feature:
 - Signal handling through centralized FFI: `record` re-execs once under
   an inherited mask and consumes signals via signalfd; teardown runs in
   normal control flow.
-- Sanitizer evidence is recorded per task; `mojo build --sanitize`
-  needs a root-owned compiler cache outside unprivileged containers.
+- Sanitizer evidence is recorded per task. `mojo run` cannot JIT
+  sanitized code (ASan runtime symbols fail to materialize), so
+  the sanitizer lane builds each Mojo test target first, then
+  executes the binary.
 
 ## Compiler settings
 
 - Shipped builds keep the compiler's normal safety checks enabled.
   Explicit input validation never depends on debug assertions.
 - Optimization and debug info use `-O` and `-g` levels recorded in the
-  build log. Test builds add `mojo --sanitize address` where supported.
-- The Mojo driver offers address and thread sanitizers only; native C
-  additionally builds with address/undefined-behavior sanitizers. Each
-  result is separate evidence.
+  build log.
+- `tools/build --sanitize` builds host C targets with
+  `-fsanitize=address,undefined` and Mojo targets with
+  `--sanitize address` (BPF objects unaffected) and records
+  `sanitize=address` in `build/build-receipt.json`;
+  `LMB_SANITIZE=1` runs the test runner's Mojo targets the
+  same way. The Mojo driver offers address and thread
+  sanitizers only (the lane uses address); native C is the
+  only UBSan coverage. The sanitize CI workflow runs the
+  offline suites plus the native suites in this mode with
+  zero tolerated reports. Each result is separate evidence.
 - No compiler internals, unfinished async, or unstable APIs are used.
   `mojo format` keeps sources canonical.
 

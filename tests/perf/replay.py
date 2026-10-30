@@ -126,8 +126,20 @@ def main():
               == str(want_bytes))
         print("perf: full replay %.1fs, rss %d KiB (%.1f MiB)"
               % (wall, rss, rss / 1024.0))
-        check("full-wall", wall <= 60.0, "%.1fs" % wall)
-        check("full-rss", rss <= 256 * 1024, "%d KiB" % rss)
+        # Sanitizer instrumentation slows CPU-bound replay
+        # several-fold (up to ~7x observed); the sanitize lane
+        # proves completion and memory safety, not wall
+        # performance (plain-lane budgets are the perf
+        # qualification). Uniform lane factor; a hang fails.
+        wall_budget = 60.0 * (10.0 if os.environ.get("LMB_SANITIZE")
+                              == "1" else 1.0)
+        check("full-wall", wall <= wall_budget, "%.1fs" % wall)
+        # ASan redzones roughly triple replay RSS; footprint
+        # qualification stays on the plain lane (same x10 lane
+        # multiplier as the runner's rss_mult precedent).
+        rss_budget = 256 * 1024 * (10 if os.environ.get("LMB_SANITIZE")
+                                   == "1" else 1)
+        check("full-rss", rss <= rss_budget, "%d KiB" % rss)
         rate = COUNT / wall if wall > 0 else 0.0
         print("perf: rate %.0f records/s" % rate)
 

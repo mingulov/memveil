@@ -220,7 +220,7 @@ def cmd_seal(root, out, build_dir="build"):
     return 0
 
 
-def cmd_finalize(root, build_dir, pre, probes):
+def cmd_finalize(root, build_dir, pre, probes, sanitize="off"):
     full_build = os.path.join(root, build_dir)
     if not os.path.isdir(full_build):
         print("receipt: no such build dir: %s" % build_dir,
@@ -276,6 +276,7 @@ def cmd_finalize(root, build_dir, pre, probes):
         "inventory": sealed,
         "toolchain_observed": observed,
         "mojo_target_cpu": "x86-64-v2",
+        "sanitize": sanitize,
         "dependencies": identities,
         "outputs": output_entries(full_build),
     }
@@ -349,6 +350,7 @@ def main(argv):
     build_dir = "build"
     pre = None
     receipt = None
+    sanitize = "off"
     while args:
         opt = args.pop(0)
         if opt == "--root" and args:
@@ -366,6 +368,9 @@ def main(argv):
         if opt == "--receipt" and args:
             receipt = args.pop(0)
             continue
+        if opt == "--sanitize" and args:
+            sanitize = args.pop(0)
+            continue
         usage()
         return 2
     if root is None or not os.path.isdir(root):
@@ -380,7 +385,11 @@ def main(argv):
         if pre is None:
             usage()
             return 2
-        return cmd_finalize(root, build_dir, pre, PROBES)
+        if sanitize not in ("off", "address"):
+            print("receipt: --sanitize wants off or address",
+                  file=sys.stderr)
+            return 2
+        return cmd_finalize(root, build_dir, pre, PROBES, sanitize)
     if command == "verify":
         if receipt is None:
             usage()

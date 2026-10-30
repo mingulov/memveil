@@ -70,8 +70,14 @@ REGION_MAX = 4096
 ACTIVE_MAX = 65536
 
 # Declared envelope (docs/performance.md replay targets).
-WALL_BUDGET_S = 60.0
-RSS_BUDGET_KIB = 256 * 1024
+# The sanitize lane proves completion and memory safety,
+# not wall performance or footprint (plain-lane budgets are
+# the qualification): instrumentation slows CPU-bound replay
+# several-fold (up to ~7x observed), so both budgets scale
+# by the uniform lane factor; a true hang still fails.
+_SAN = os.environ.get("LMB_SANITIZE") == "1"
+WALL_BUDGET_S = 60.0 * (10.0 if _SAN else 1.0)
+RSS_BUDGET_KIB = 256 * 1024 * (10 if _SAN else 1)
 RATE_TARGET = 10000
 
 WINDOW_START = 1000000000
