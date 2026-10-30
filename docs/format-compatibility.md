@@ -15,6 +15,8 @@ Session 0.1.1 adds the required terminal
 stop object; 0.1.0 session documents are refused, never
 tolerated. Session 0.1.2 adds the optional correlation
 relations object; 0.1.1 stays frozen and accepted.
+Session 0.1.1 and 0.1.2 carry the optional `boot_id`
+opaque id when the capture is tied to one boot.
 The replay path treats every capture as untrusted and stays
 offline: it never loads BPF objects, touches tracefs or
 BTF, opens the network, or requires privileges.
