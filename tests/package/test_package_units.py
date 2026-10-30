@@ -825,7 +825,7 @@ class TestPackagingSeal:
             "build/bpf/swiotlb_attempt.bpf.o",
             "build/deps/lmb/lib/libbpf_mojo.so.1",
             "build/deps/lmb/THIRD-PARTY-NOTICES.md",
-            "third_party/libbpf-mojo-0.2.0.tar.gz",
+            "third_party/libbpf-mojo-0.2.2.tar.gz",
         )
         missing = [rel for rel in sentinels
                    if not os.path.isfile(os.path.join(REPO, rel))]
@@ -915,7 +915,7 @@ class TestPackagingSeal:
             monkeypatch.setenv(
                 "LMB_PACKAGE",
                 os.path.join(
-                    REPO, "third_party", "libbpf-mojo-0.2.0.tar.gz"))
+                    REPO, "third_party", "libbpf-mojo-0.2.2.tar.gz"))
         elif lmb == "unset":
             monkeypatch.delenv("LMB_PACKAGE", raising=False)
         else:

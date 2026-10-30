@@ -76,7 +76,7 @@ are not provided.
   `nocaps` drops every capability through `setpriv`
   (CapEff 0 in the dropped child), and `memcg` refuses
   `load-enomem` under its calibrated limit.
-- `libbpf-mojo` 0.2.0 declares a 7.0 kernel minimum;
+- `libbpf-mojo` 0.2.2 declares a 7.0 kernel minimum;
   below 7.0 this repository's booted matrix is the
   qualification.
 
