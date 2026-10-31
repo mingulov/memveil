@@ -139,6 +139,7 @@ memveil: uncompressed-manual-page [usr/share/man/man1/memveil-report.1]
 memveil: uncompressed-manual-page [usr/share/man/man1/memveil-top.1]
 memveil: uncompressed-manual-page [usr/share/man/man1/memveil-doctor.1]
 memveil: uncompressed-manual-page [usr/share/man/man1/memveil-qualify.1]
+memveil: uncompressed-manual-page [usr/share/man/man1/memveil-bind-profile.1]
 """
 
 BIN_RUNPATH = "$ORIGIN/../lib/memveil"
