@@ -51,6 +51,10 @@ comptime DEFAULT_MAX_EVENTS_BYTES = 1073741824
 
 comptime _CHUNK_BYTES = 65536
 
+# Tracked-identity cap shared with the writer's identity
+# budget (collector MAX_OPS): the writer stops while the
+# next record still fits, so its finalized captures always
+# pass this admission; only hand-built captures can trip it.
 comptime _MAX_TRACKED_IDS = 4194304
 
 

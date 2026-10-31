@@ -331,6 +331,38 @@ def test_split_producer_mapping_loss_withholds_occupancy() raises:
     assert_equal(rep.q_corr_copy.status, "complete_for_scope")
 
 
+def test_split_pre_window_release_keeps_live_withholds_peak() raises:
+    # Producer mapping_release partial explained by an
+    # observed paired release of an unknown mapping: the
+    # expected pre-window class keeps in-window live state
+    # valued with partial coverage; only the peak (whose
+    # pre-window occupancy is unknown) is withheld.
+    var a = Analyzer(_split_mapping_session())
+    a.consume(_attempt("op1", UInt64(1)))
+    a.consume(_map("op1", "m1", UInt64(1300000000), UInt64(2)))
+    a.consume(_unmap("ghost", UInt64(1400000000), UInt64(3)))
+    var rep = a.finish(UInt64(2300000000), False)
+    var live = _find(rep.metrics, "live_observed_allocation_bytes")
+    assert_true(live.has_value)
+    assert_equal(live.value, UInt64(4096))
+    assert_equal(live.coverage, "partial")
+    var opened = _find(rep.metrics, "open_mappings")
+    assert_true(opened.has_value)
+    assert_equal(opened.value, UInt64(1))
+    var peak = _find(rep.metrics, "peak_live_observed_allocation_bytes")
+    assert_true(not peak.has_value)
+    assert_true(
+        peak.notes.find(String("without an observed map")) != -1,
+        peak.notes,
+    )
+    assert_equal(rep.q_corr_mapping.status, "partial")
+    var noted = False
+    for i in range(len(rep.limitations)):
+        if rep.limitations[i].find(String("pre-window")) != -1:
+            noted = True
+    assert_true(noted)
+
+
 def test_split_detail_loss_degrades_copy_and_sync_rows() raises:
     # Replay probe: split relations with complete pairing
     # claims plus producer-declared detail loss labels copy
@@ -1036,6 +1068,7 @@ def run() raises -> Int:
     suite.test[test_paired_events_emit_no_unpaired_metric]()
     suite.test[test_split_producer_copy_loss_preserves_occupancy]()
     suite.test[test_split_producer_mapping_loss_withholds_occupancy]()
+    suite.test[test_split_pre_window_release_keeps_live_withholds_peak]()
     suite.test[test_split_detail_loss_degrades_copy_and_sync_rows]()
     suite.test[test_split_observed_mapping_loss_withholds_occupancy]()
     suite.test[test_split_contradictory_aggregate_recomputed]()

@@ -412,9 +412,11 @@ def remedy_for(code: String) -> String:
         or code == String("load-eperm")
     ):
         return String(
-            "run as root, or grant CAP_BPF and CAP_PERFMON"
-            " (or CAP_SYS_ADMIN) and read access to tracefs"
-            " and /sys/kernel/btf/vmlinux"
+            "run as root: BPF load needs CAP_BPF+CAP_PERFMON"
+            " (or CAP_SYS_ADMIN), and tracefs reads follow"
+            " libbpf's existence-order tree, which needs root"
+            " while /sys/kernel/debug/tracing exists; there is"
+            " no supported capabilities-only setup"
         )
     if (
         code == String("btf-absent-config")

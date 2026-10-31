@@ -75,17 +75,19 @@ def main():
     check("denial-stderr", p.stderr != "")
 
     p = run(["report", EMPTY])
-    check("empty", p.returncode == 4, "exit %d" % p.returncode)
+    check("empty", p.returncode == 0, "exit %d" % p.returncode)
     check("empty-zeros", "bounce_attempts = 0 count" in p.stdout)
     check("empty-null", "successful_allocations = unavailable"
           in p.stdout)
     p = run(["report", ATTEMPTS])
-    check("report", p.returncode in (0, 4), "exit %d" % p.returncode)
+    check("report", p.returncode == 0, "exit %d" % p.returncode)
+    p = run(["report", "--strict", ATTEMPTS])
+    check("report-strict", p.returncode == 4, "exit %d" % p.returncode)
     p = run(["top", "--interval", "60s", ATTEMPTS])
-    check("top", p.returncode in (0, 4), "exit %d" % p.returncode)
+    check("top", p.returncode == 0, "exit %d" % p.returncode)
     p = run(["report", "--allow-partial",
              os.path.join(READER, "partial-tail")])
-    check("partial", p.returncode == 4, "exit %d" % p.returncode)
+    check("partial", p.returncode == 0, "exit %d" % p.returncode)
 
     # Boundary negatives, repeated on this optimized binary.
     for name in ("compat-major", "badkind", "size-over",

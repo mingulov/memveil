@@ -38,6 +38,7 @@ from memveil.capture.collector import (
     detail_reason_unknown,
     detection_for,
     env_mode_for,
+    identity_estimate,
     op_limited,
     stable_cut,
     submit_valid,
@@ -52,6 +53,35 @@ def test_op_guard_boundary() raises:
     assert_true(op_limited(UInt64(4194304)))
     assert_true(op_limited(UInt64(4194305)))
     assert_true(op_limited(u64_max()))
+
+
+def test_identity_estimate_sums_kinds() raises:
+    # Every persisted map contributes its operation plus,
+    # when successful, its mapping; repeats never add.
+    assert_equal(
+        identity_estimate(
+            UInt64(10), UInt64(5), UInt64(3), UInt64(2),
+            UInt64(1), UInt64(1),
+        ),
+        UInt64(22),
+    )
+    assert_equal(
+        identity_estimate(
+            UInt64(0), UInt64(0), UInt64(0), UInt64(0),
+            UInt64(0), UInt64(0),
+        ),
+        UInt64(0),
+    )
+    # A capture of pure maps costs two identities per map:
+    # the old event-count budget would have admitted twice
+    # the reader's cap.
+    assert_equal(
+        identity_estimate(
+            UInt64(0), UInt64(2097152), UInt64(2097152),
+            UInt64(0), UInt64(0), UInt64(0),
+        ),
+        UInt64(4194304),
+    )
 
 
 def test_detail_known_grammar() raises:
@@ -374,7 +404,8 @@ def test_ready_after_arm() raises:
     assert_equal(refusal, String(""))
     assert_true(collector.attach_ns < collector.ready_ns)
     assert_equal(collector.attach_ns, UInt64(6000))
-    assert_equal(collector.ready_ns, UInt64(7000))
+    assert_equal(collector.attempt_attach_done_ns, UInt64(7000))
+    assert_equal(collector.ready_ns, UInt64(8000))
 
 
 def test_detach_begin_before_detach() raises:
@@ -400,7 +431,9 @@ def test_detach_begin_before_detach() raises:
     assert_true(collector.detach_begin_ns <= collector.detach_ns)
     assert_equal(collector.detach_begin_ns, UInt64(1000))
     assert_equal(collector.detach_ns, UInt64(2000))
-    assert_true(result.exit_code != 0)
+    # An error shutdown that still finalizes a valid session
+    # exits 0; the unknown cause rides in the session verdict.
+    assert_equal(result.exit_code, 0)
 
 
 def run() raises -> Int:
@@ -410,6 +443,7 @@ def run() raises -> Int:
     suite.test[test_evaluate_channel_argcnt_noted]()
     suite.test[test_evaluate_channel_argcnt_precedes_identity]()
     suite.test[test_op_guard_boundary]()
+    suite.test[test_identity_estimate_sums_kinds]()
     suite.test[test_detail_known_grammar]()
     suite.test[test_detail_unknown_grammar]()
     suite.test[test_aggregate_grammar]()

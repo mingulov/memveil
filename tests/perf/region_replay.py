@@ -668,9 +668,10 @@ def main():
                   % (tag, closed["events"], size, gen_s))
             p, wall, cpu, rss = replay(path)
             peak_rss = max(peak_rss, rss)
-            # Exit 4: the designed unknown interval keeps the
-            # state unions partial, output still complete.
-            check("%s-exit" % tag, p.returncode == 4,
+            # Exit 0: the designed unknown interval keeps the
+            # state unions partial, output still complete and
+            # valid (exit 4 needs --strict).
+            check("%s-exit" % tag, p.returncode == 0,
                   "exit %d: %s" % (p.returncode, p.stderr[:200]))
             doc = json.loads(p.stdout.decode("utf-8"))
             check("%s-bounce" % tag,

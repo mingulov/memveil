@@ -58,6 +58,15 @@ def _any_valued(metrics: List[Metric], name: String) -> Bool:
     return False
 
 
+def _row_notes(metrics: List[Metric], name: String) -> String:
+    """Notes of the first row with this name, valued or not."""
+    for i in range(len(metrics)):
+        var m = metrics[i]
+        if m.name == name and not m.has_device_id and not m.has_pool_id:
+            return m.notes.copy()
+    return String("no oldest_open_mapping_age_ns row")
+
+
 def diagnose_report(
     mut rep: Report,
     has_long_lived_after: Bool,
@@ -104,6 +113,8 @@ struct DiagnosisEngine:
             self._pressure(report, window, out)
         if not _has_code(
             report.findings, String("LONG_LIVED_ALLOCATION")
+        ) and not _has_code(
+            report.findings, String("LONG_LIVED_NOT_EVALUATED")
         ):
             self._long_lived(report, policy, window, out)
         if not _has_code(report.findings, String("PROBE_UNAVAILABLE")):
@@ -245,6 +256,7 @@ struct DiagnosisEngine:
             String(""),
         )
         if not row.has_value:
+            self._long_lived_unknown(report, policy, window, out)
             return
         if row.value < policy.long_lived_after_ns:
             return
@@ -265,6 +277,38 @@ struct DiagnosisEngine:
         f.limitations = String(
             "Open is not a leak; the mapping may still be in"
             " legitimate use."
+        )
+        out.append(f^)
+
+    def _long_lived_unknown(
+        self,
+        report: Report,
+        policy: DiagnosticPolicy,
+        window: String,
+        mut out: List[Finding],
+    ):
+        # The threshold was configured but the age input is
+        # missing: say so explicitly instead of vanishing.
+        # The missing row's notes name the cause.
+        var why = _row_notes(
+            report.metrics, String("oldest_open_mapping_age_ns")
+        )
+        var f = Finding()
+        f.code = String("LONG_LIVED_NOT_EVALUATED")
+        f.severity = String("informational")
+        f.explanation = (
+            String("Long-lived check not evaluated: age input")
+            + String(" unavailable (")
+            + why
+            + String(").")
+        )
+        f.evidence_refs.append(
+            String("metric:oldest_open_mapping_age_ns")
+        )
+        f.scope = window
+        f.limitations = String(
+            "No long-lived verdict either way; rerun with the"
+            " mapping state that produced the age row."
         )
         out.append(f^)
 

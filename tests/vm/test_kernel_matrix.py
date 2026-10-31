@@ -1730,6 +1730,10 @@ _SUFFIX_UNVERIFIED = \
     "; map->copy liveness unverified (100 vs 100)"
 _SUFFIX_COPY_NLC = \
     "; copy liveness unverified: lifecycle not captured"
+_SUFFIX_CHANNELS = ("; channels attempt:(submit_fail=0 malformed=0 "
+                    "dropped=0) lifecycle:(submit_fail=1 malformed=0 "
+                    "dropped=2) copy:(submit_fail=3 malformed=4 "
+                    "dropped=5)")
 
 
 def test_parse_detail_loss_accepts_first_unknown_copy():
@@ -1784,6 +1788,25 @@ def test_parse_detail_loss_accepts_combined_suffixes():
     parsed = km.parse_detail_loss(reason)
     assert parsed["first_unknown_copy"] == "LAYOUT"
     assert parsed["liveness_suffix"] == _SUFFIX_SILENT
+
+
+def test_parse_detail_loss_accepts_channels():
+    reason = _loss_text() + _SUFFIX_CHANNELS
+    parsed = km.parse_detail_loss(reason)
+    assert parsed["channels"] == {
+        "attempt": {"submit_fail": 0, "malformed": 0,
+                    "dropped": 0},
+        "lifecycle": {"submit_fail": 1, "malformed": 0,
+                      "dropped": 2},
+        "copy": {"submit_fail": 3, "malformed": 4,
+                 "dropped": 5},
+    }
+    reason = _loss_text() + _SUFFIX_CHANNELS + _SUFFIX_FIRST
+    parsed = km.parse_detail_loss(reason)
+    assert parsed["channels"]["copy"]["dropped"] == 5
+    assert parsed["first_unknown_copy"] == "LAYOUT"
+    reason = _loss_text()
+    assert km.parse_detail_loss(reason)["channels"] is None
 
 
 def test_parse_detail_loss_accepts_matrix_shapes():

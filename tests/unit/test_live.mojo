@@ -1312,7 +1312,7 @@ def test_tee_signal_stop_prefixes_match_offline() raises:
     signal.add(String("pending"))
     var coll = Collector(cfg^)
     var res = coll.run(kernel, clock, signal, tee)
-    assert_equal(res.exit_code, 4)
+    assert_equal(res.exit_code, 0)
     assert_equal(res.end_reason, String("signal"))
     assert_equal(tee.emission_count(), 5)
     # The pool baseline read shifts the dwell pairs by one,

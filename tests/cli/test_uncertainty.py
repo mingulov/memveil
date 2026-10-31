@@ -524,6 +524,21 @@ class Uncertainty(unittest.TestCase):
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.incomplete(json.loads(proc.stdout))
 
+    def test_pre_window_release_keeps_live(self):
+        self.load('lifecycle/pre-window-releases')
+        r = self.report()
+        live = self.metric(r, 'live_observed_allocation_bytes')
+        self.assertEqual(live['value'], '4096')
+        self.assertEqual(live['coverage'], 'partial')
+        opened = self.metric(r, 'open_mappings')
+        self.assertEqual(opened['value'], '1')
+        peak = self.metric(r, 'peak_live_observed_allocation_bytes')
+        self.assertIsNone(peak['value'])
+        self.assertIn('without an observed map', peak['notes'])
+        self.assertEqual(r['quality']['correlation']['relations']['mapping_release']['status'], 'partial')
+        self.assertTrue(any('pre-window' in lim for lim in r['limitations']))
+        self.incomplete(r)
+
     def test_real_example_terminal(self):
         path = ROOT / 'examples/real-capture'
         self.session = json.loads((path / 'session.json').read_text())
