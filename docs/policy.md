@@ -14,7 +14,7 @@ Each schema family versions independently; the frozen
 set in [format compatibility](format-compatibility.md)
 is the only supported input (events 0.1.1/0.1.2,
 profiles 0.1.1/0.1.2, session 0.1.1/0.1.2/0.1.3,
-report output-only current, doctor 0.1.0/0.1.1,
+report output-only 0.1.3, doctor output-only 0.1.1 (0.1.0 retained),
 receipt 0.1.0). A shipped version stays accepted
 until a later release removes it; removal is
 announced in the release notes one minor version
@@ -22,7 +22,13 @@ ahead and never lands silently. The reader never
 drops a version without that notice, and unknown
 versions keep refusing with exit 2.
 
-Reader compatibility per capture generation:
+Session/report 0.1.4 are reserved for integrity with event 0.1.2 unchanged;
+session/event/report 0.2.0 are reserved for the conversion journal. They are
+not implemented, accepted inputs or produced outputs yet. See the planned
+[integrity/recovery contract](capture-integrity.md) for the normal/strict
+exit table and legacy quality demotion. No schema number may be reused.
+
+Current reader compatibility per capture generation:
 
 - 0.1.1 captures (session 0.1.1, events 0.1.1):
   read green; relations expand
@@ -44,12 +50,24 @@ independently.
 Receipts carry no time expiry: `created_ns` records
 when qualification ran, and nothing reads it as a
 deadline. A receipt admits `local-auto` only while
-every recorded binding still holds; `record`
-re-verifies the receipt at every start, so a kernel,
-object, bridge, or profile change loses admission
-until `qualify` re-approves the host and publishes
-a fresh receipt (renewal atomically replaces the
-old file). Revocation is deletion: remove the
+every checked binding still holds. Current receipt 0.1.0 records kernel
+architecture/release; config hash and source, BTF hash, trace-format hash,
+kernel-image hash/build ID; profile ID; per-capability results; bridge and
+requested BPF object hashes; product version and smoke workload. `record`
+rechecks the applicable bindings at every start, with actual object/bridge
+resolution rather than a passive load claim. The smoke workload does not
+require traffic, so a receipt does not supply an independent activity oracle,
+confidential-guest evidence or release qualification.
+
+The product field is a version string, not an executable hash; profile ID
+and parsed identity bindings are not a hash of the entire document. A
+same-version executable rebuild or unrelated profile prose edit is therefore
+not guaranteed to invalidate a receipt. Changes to checked kernel, object,
+bridge or profile bindings lose admission until those bindings are refreshed
+and `qualify` publishes a fresh receipt (renewal atomically replaces the
+old file). Re-run qualification after every artifact upgrade regardless of
+whether the old receipt would still verify. Exact packaged-artifact release
+evidence is a separate requirement. Revocation is deletion: remove the
 receipt from `<profiles-dir>/receipts`
 (`/var/lib/memveil/receipts` for an installed
 package) and the host falls back to candidate or
@@ -77,10 +95,8 @@ matter their version.
 
 - Upgrade installs the newer package with the
   same commands as a fresh install (see
-  [install](install.md)) and re-runs
-  `qualify`: new binary, bridge, and object
-  bytes invalidate the old receipt's bindings
-  by design.
+  [install](install.md)) and re-runs `qualify`. Checked bridge/object and
+  kernel bindings detect drift; receipt 0.1.0 does not bind executable bytes.
 - Rollback reinstalls the older package and
   re-runs `qualify` for the same reason; a
   rerun of a release tag never replaces
