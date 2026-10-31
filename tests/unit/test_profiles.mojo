@@ -14,6 +14,10 @@ from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
 
 from memveil.capture.run import decide_record
+from memveil.platform.capabilities import (
+    cap_floor_ok,
+    cap_floor_refusal,
+)
 from memveil.platform.evidence import detect_environment, parse_kernel_triple
 from memveil.platform.narrow import (
     NarrowBindings,
@@ -481,6 +485,74 @@ def test_floor_unparseable() raises:
     assert_equal(
         env.kernel.floor_reason,
         String("release not-a-kernel-release is unparseable; floor unknown"),
+    )
+
+
+def test_floor_exact_60_pass() raises:
+    var r = open_evidence_reader(fx("kernel-6.0"))
+    var env = detect_environment(r)
+    assert_true(env.kernel.eligible_floor)
+    assert_equal(
+        env.kernel.floor_reason,
+        String("release 6.0.19-060019-generic meets the 6.0 floor"),
+    )
+
+
+def test_floor_611_pass() raises:
+    var r = open_evidence_reader(fx("kernel-6.11"))
+    var env = detect_environment(r)
+    assert_true(env.kernel.eligible_floor)
+    assert_equal(
+        env.kernel.floor_reason,
+        String("release 6.11.11-061111-generic meets the 6.0 floor"),
+    )
+
+
+def test_floor_73_pass() raises:
+    var r = open_evidence_reader(fx("kernel-7.3"))
+    var env = detect_environment(r)
+    assert_true(env.kernel.eligible_floor)
+    assert_equal(
+        env.kernel.floor_reason,
+        String("release 7.3.0-mv-7.3 meets the 6.0 floor"),
+    )
+
+
+def test_cap_floor_attempt_60() raises:
+    assert_true(cap_floor_ok(String("attempt-trace"), String("6.0.19")))
+    assert_true(
+        not cap_floor_ok(String("attempt-trace"), String("5.15.0"))
+    )
+
+
+def test_cap_floor_lifecycle_611() raises:
+    assert_true(
+        cap_floor_ok(String("mapping-lifecycle"), String("6.11.0"))
+    )
+    assert_true(
+        not cap_floor_ok(String("mapping-lifecycle"), String("6.10.14"))
+    )
+    assert_equal(
+        cap_floor_refusal(
+            String("mapping-lifecycle"), String("6.10.14-061014-generic")
+        ),
+        String("capability mapping-lifecycle needs kernel 6.11+")
+        + String(" (this kernel: 6.10.14-061014-generic)"),
+    )
+
+
+def test_cap_floor_copy_611() raises:
+    assert_true(cap_floor_ok(String("copy-actual"), String("6.11.0")))
+    assert_true(
+        not cap_floor_ok(String("copy-actual"), String("6.10.14"))
+    )
+
+
+def test_cap_floor_unknown_id() raises:
+    assert_true(not cap_floor_ok(String("no-such-cap"), String("7.3.0")))
+    assert_equal(
+        cap_floor_refusal(String("no-such-cap"), String("nope")),
+        String("release nope is unparseable; floor unknown"),
     )
 
 
@@ -3750,6 +3822,13 @@ def run() raises -> Int:
     suite.test[test_floor_68_pass]()
     suite.test[test_floor_515_fail]()
     suite.test[test_floor_unparseable]()
+    suite.test[test_floor_exact_60_pass]()
+    suite.test[test_floor_611_pass]()
+    suite.test[test_floor_73_pass]()
+    suite.test[test_cap_floor_attempt_60]()
+    suite.test[test_cap_floor_lifecycle_611]()
+    suite.test[test_cap_floor_copy_611]()
+    suite.test[test_cap_floor_unknown_id]()
     suite.test[test_guest_ordinary]()
     suite.test[test_guest_snp]()
     suite.test[test_guest_tdx]()

@@ -1,0 +1,3 @@
+arch=x86_64
+release=7.3.0-mv-7.3
+euid=1001

@@ -5,8 +5,10 @@
 Every local link in user-facing Markdown resolves to a file and,
 for anchored links, a heading; every documented `memveil <verb>`
 names a verb from the usage line in main.mojo and every flag
-beside it exists in that verb's built --help; and no document
-carries placeholder markers. The unit-suite file list in
+beside it exists in that verb's built --help; no document
+carries placeholder markers; and the support envelope and
+the agent instructions carry the identical ratified floor
+sentence. The unit-suite file list in
 tools/test is mirrored against that file's header comment.
 The claim-vs-receipt audit stays
 in the preview-package lane; this lane does not duplicate it.
@@ -43,6 +45,16 @@ STALE_ABSENCE = (
 
 STALE_PROXIMITY_RE = re.compile(
     r"lifecycle.{0,80}separate from shipping")
+
+# The ratified floor sentence, normalized form (see
+# normalize): support.md and AGENTS.md must carry the
+# identical statement so the two audiences cannot drift.
+FLOOR_SENTENCE = (
+    "supported collection (ratified 2026-10-31): "
+    "attempt-trace from linux 6.0, mapping-lifecycle "
+    "and copy-actual from 6.11, qualification ceiling "
+    "7.3, btf required."
+)
 
 
 def normalize(text):
@@ -443,6 +455,11 @@ def main():
     check("flags-exist", not bad_flags, "; ".join(bad_flags[:5]))
     check("no-private-refs", not bad_refs, "; ".join(bad_refs[:5]))
     check("no-stale-absence", not stale, "; ".join(stale[:5]))
+    for rel in ("docs/support.md", "AGENTS.md"):
+        with open(os.path.join(ROOT, rel),
+                  encoding="utf-8") as handle:
+            found = FLOOR_SENTENCE in normalize(handle.read())
+        check("floor-sentence-%s" % slug(rel), found, rel)
     help_norm = normalize(dash_help + "\n" + verb_help)
     help_stale = [phrase for phrase in STALE_ABSENCE
                   if phrase in help_norm]
