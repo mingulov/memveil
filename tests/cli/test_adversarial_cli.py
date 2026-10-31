@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Adversarial CLI checks: compat exits and partial-mode edges.
+"""Adversarial CLI checks: compat exits, accepted versions, partial edges.
 
 Drives the built memveil binary: unknown schema major and
-unsupported event kinds exit 2 with empty stdout; a truncated
+unsupported event kinds exit 2 with empty stdout; the
+accepted frozen versions read green (session 0.1.3 plus
+event 0.1.2 with both true-only copy markers); a truncated
 final record exits 2 without the flag and 4 with it; a
 corrupt tail is never repaired, even with the flag. Exits
 nonzero on the first failure.
@@ -45,6 +47,23 @@ def main():
     check("kind-exit", p.returncode == 2, "exit %d" % p.returncode)
     check("kind-stdout", p.stdout == "")
     check("kind-stderr", p.stderr != "")
+
+    p = run(["report", os.path.join(READER, "ev012")])
+    check("ev012-exit", p.returncode == 0, "exit %d" % p.returncode)
+    check("ev012-stdout", p.stdout != "")
+
+    p = run(["report", os.path.join(READER, "complete-stop")])
+    check("sess013-exit", p.returncode == 0, "exit %d" % p.returncode)
+    check("sess013-stdout", p.stdout != "")
+
+    p = run(["report",
+             os.path.join(READER, "f2-dangling-split-copy-ok")])
+    check("sess012-exit", p.returncode == 0, "exit %d" % p.returncode)
+    check("sess012-stdout", p.stdout != "")
+
+    p = run(["report", os.path.join(READER, "counters-single")])
+    check("sess011-exit", p.returncode == 0, "exit %d" % p.returncode)
+    check("sess011-stdout", p.stdout != "")
 
     p = run(["report", os.path.join(READER, "partial-tail")])
     check("tail-strict", p.returncode == 2, "exit %d" % p.returncode)
