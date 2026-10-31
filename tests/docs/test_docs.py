@@ -343,7 +343,8 @@ def main():
     check("verbs-from-source", bool(match))
     verbs = set(match.group(1).split("|"))
     check("verbs-known", verbs == {
-        "record", "report", "top", "doctor", "qualify", "help", "version"},
+        "record", "report", "top", "doctor", "qualify", "bind-profile",
+        "help", "version"},
         " ".join(sorted(verbs)))
 
     if not os.path.isfile(BIN):

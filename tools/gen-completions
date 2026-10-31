@@ -23,7 +23,7 @@ import os
 import sys
 
 FROZEN_VERBS = ("record", "report", "top", "doctor", "qualify",
-                "help", "version")
+                "bind-profile", "help", "version")
 FROZEN_TOP_FLAGS = ("--help", "--version", "-h")
 FROZEN_FLAGS = {
     "record": ("--bridge", "--capability", "--cp-object",
@@ -46,6 +46,10 @@ FROZEN_FLAGS = {
     "qualify": ("--bridge", "--capability", "--cp-object",
                 "--help", "--lc-object", "--object",
                 "--output", "--profile", "--profiles-dir", "-h"),
+    "bind-profile": ("--capability", "--cp-object", "--help",
+                     "--lc-object", "--object", "--output",
+                     "--profile", "--profile-id", "--profiles-dir",
+                     "-h"),
 }
 FROZEN_FORMAT_VALUES = ("text", "json", "markdown")
 FROZEN_NOVALUE_FLAGS = ("--help", "--allow-partial", "--compact", "--json",
@@ -75,6 +79,7 @@ _ZSH_DESC = {
     "--object": "attempt channel object",
     "--output": "capture directory",
     "--profile": "profile id or path",
+    "--profile-id": "minted profile id",
     "--profiles-dir": "profiles directory",
     "--strict": "exit 4 unless complete",
 }

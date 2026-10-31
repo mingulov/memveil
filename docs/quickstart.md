@@ -10,7 +10,7 @@ compiler, Pixi, network, or source checkout needed. The
 shipping collector, offline reducers and laboratory probes.
 Lifecycle/copy collection is qualified through the live
 interface checks on covered kernels (see the support
-envelope) or a machine-local receipt from step 3; a full
+envelope) or a machine-local receipt (advanced, step 6); a full
 confidential release is not yet qualified. The host supplies libc,
 libm, libdl, and the dynamic loader for offline use, plus libelf
 and libz for recording; see the support envelope for the exact
@@ -19,6 +19,12 @@ floor and tested OS.
 System packages install the same layout instead: see
 [installed packages](install.md) for the `.deb`/`.rpm`
 install, use, and uninstall flow.
+
+The first run needs no qualification: inspect the host
+(step 2), record attempts (step 3), and replay offline
+(step 4). Qualification (step 6) is advanced setup for
+hosts whose capabilities report `unknown` or for the
+extra lifecycle/copy channels.
 
 ## 1. Extract and check the version
 
@@ -44,37 +50,155 @@ Each unavailable capability carries a `fix:` line naming the
 next action (`--json` renders the same report as JSON).
 Passive availability is not actual attachment or qualification. A `denied
 (privilege)` hook means: re-run under `sudo` for collection, or
-stay unprivileged and replay the shipped example (step 6); step 5
+stay unprivileged and replay the shipped example (step 5); step 4
 needs a capture of your own.
 
-## 3. Qualify this machine (privileged, once per kernel and objects)
+## 3. Record one capture (privileged, attempt-only)
+
+Recording needs root (BPF load plus tracefs). The bridge
+and BPF object are discovered from the bundle beside the
+executable, so no flags or environment setup are needed
+and plain `sudo` works:
+
+    sudo ./bin/memveil record --output /tmp/cap1 --duration 10
+
+Expected: `ready session=...`, then `end=duration
+outcome=finalized exit=4`.
+Exit 4 indicates finalized output with incomplete terminal evidence,
+including zero-event and signal stops. Exit 3 names the refusal reason (profile, bridge,
+privilege); exit 2 is a usage error; exit 1 is an error.
+When no object is found anywhere, the refusal is `no
+object: pass --object PATH`. `--object` and `--bridge`
+are optional overrides for non-bundled artifacts;
+without them the bridge resolves from `LMB_NATIVE_LIB`
+when unprivileged (ignored under `sudo`), then beside
+the executable, then the system path, and each BPF
+object resolves beside the executable or under the
+system directory.
+
+Attempt-only recording needs no qualification: without a
+receipt it reports partial diagnostics instead of refusing.
+Anything but the exact bound kernel and objects refuses with
+exit 3 instead of recording an unverified channel. On a
+qualified host the receipt admits the channel as `local-auto`
+(see step 6); a stale receipt loses that admission until
+qualification is re-run, with attempt-only recording falling
+back to partial.
+
+To narrow one capture to a single device, pass its exact
+observed name:
+
+    sudo ./bin/memveil record --output /tmp/cap4 --device 0000:00:1f.2 \
+        --duration 10
+
+Only matching bounce attempts are kept; lifecycle/copy
+records and global counters, pool samples, and
+conversions are always retained. See
+[recording selection](recording-selection.md) for the
+full scope contract.
+
+Captures are written mode 0700/0600. A capture recorded
+under `sudo` is handed back to the invoking user
+automatically, so replay it in place. Only when the
+restore cannot run (a root shell without sudo's
+identity variables, or a `cannot restore capture
+ownership` warning on stderr), hand the capture to your
+user before the unprivileged replay below:
+
+    sudo cp -r /tmp/cap1 ~/cap1 && sudo chown -R $USER ~/cap1
+    chmod 700 ~/cap1 && chmod 600 ~/cap1/*
+
+An idle machine usually records zero attempts with complete
+counter snapshots: a valid-empty capture, visibly different
+from an unavailable one. See `examples/real-capture/README.md`
+for a capture with 30 real events.
+
+## 4. Replay offline (unprivileged)
+
+    ./bin/memveil report --format text /tmp/cap1
+    ./bin/memveil report --format json /tmp/cap1
+    ./bin/memveil report --format markdown /tmp/cap1
+
+(If step 3 handed the capture off to `~/cap1`, replay that
+path instead.)
+
+Report reads local files only: no BPF, no BTF, no libbpf, no
+network. Copy the capture directory to another machine (or
+another user) and the same commands reproduce the same report.
+Exit 0 means the report rendered and is valid; completeness
+rides in the `verdict:` header line (the worked example exits
+0 with a partial verdict because terminal settlement is
+unproven by design). Exit 4 appears only under `--strict`,
+which demands a `complete` verdict; exit 2 is invalid input.
+
+Empty is not unavailable: an idle capture reports
+`bounce_attempts = 0` with complete detail quality, while rows
+without their event source render `unavailable` with a reason.
+A torn final line exits 2; rerun with `--allow-partial` to
+drop the torn tail and report the loss instead (exit 0 with a
+partial verdict, exit 4 only under `--strict`).
+Removed whole lines are different: they still report
+`detail: complete_for_scope loss=0` with lower counts (see
+Known issues in `release-notes.md`). See
+`troubleshooting.md` for the recovery.
+
+## 5. Worked example
+
+    ./bin/memveil report --format text examples/real-capture
+
+Thirty real bounce attempts, fully lossless detail, with the
+provenance and limitations each rendered beside the numbers.
+The captured kernel/profile decision and measured scope are historical
+claims about that capture, not admission of the current reader host.
+Duration uses the recorded window with exact integer arithmetic; JSON
+retains full provenance hashes. Missing or conflicting values remain explicit.
+
+    ./bin/memveil top --interval 1s examples/real-capture
+    ./bin/memveil top --compact --interval 1s examples/real-capture
+
+This replays a finished capture in periodic prefixes; it does not follow a
+new workload live. Each summary shows its own measured prefix duration.
+`--compact` prints the short verdict-plus-headlines block per refresh
+instead of the full report; it cannot combine with `--device`.
+
+## 6. Advanced: qualify this machine (privileged)
 
 When `doctor` selects the reference profile with `unknown` or
-`unavailable` capabilities, prove this host directly.
+`unavailable` capabilities, or before using the extra
+lifecycle/copy channels, prove this host directly.
 Qualification needs a reference profile *bound* to this
 host: covering identity, an identity note whose
 config/BTF/format/image bindings match the live machine,
-and the recorded hook format text. The shipped reference
-document is an unbound inspection record, so automatic
-selection refuses it with the exact cause:
+and the recorded hook format text. Mint it from the bundle
+alone - no source checkout - with `bind-profile`:
 
-    memveil qualify: profile linux-x86_64-7.0-reference bindings unparseable: narrow note: want 8 or 12 fields
+    sudo ./bin/memveil bind-profile --output profiles/my-host.json
 
-Preparing the bound document is a one-per-kernel task
-done from a source checkout; follow the
-[bound-reference recipe](profiles.md)
-for the exact authoring steps, then run everything below
-from the bundle, selecting that document explicitly.
-Register it once in the active profiles directory's
-`manifest.txt` (one file name per line, no blank lines
-or duplicates), including under a `--profiles-dir`
-override: only manifest-listed documents are visible to
-`doctor` and automatic `record`, so an unlisted receipt
-stays invisible. No environment setup is needed: the
-bridge and BPF objects are discovered from the bundle
-beside the executable, so plain `sudo` works:
+Expected: `bind-profile: local-<release>
+caps=attempt-trace path=profiles/my-host.json`, exit 0.
+Each refusal names its exact cause with exit 3; exit 2 is
+a usage error. For the extra channels, bind all three at
+once (extra channels bind together):
 
-    echo my-host.json >> "$PWD/profiles/manifest.txt"
+    sudo ./bin/memveil bind-profile --output profiles/my-host.json \
+        --capability attempt-trace,mapping-lifecycle,copy-actual
+
+See the [bound-reference recipe](profiles.md) for what the
+minted bytes mean and how to audit them by hand.
+
+Register the minted file first in the active profiles
+directory's `manifest.txt` (one file name per line, no
+blank lines or duplicates), including under a
+`--profiles-dir` override: only manifest-listed documents
+are visible to `doctor` and automatic `record`, so an
+unlisted document stays invisible, and the first covering
+document wins, so appends lose to the shipped reference.
+No environment setup is needed: the bridge and BPF objects
+are discovered from the bundle beside the executable, so
+plain `sudo` works:
+
+    { echo my-host.json; cat "$PWD/profiles/manifest.txt"; } > /tmp/manifest.new \
+        && mv /tmp/manifest.new "$PWD/profiles/manifest.txt"
     sudo ./bin/memveil qualify --output /tmp/q1 \
         --profile "$PWD/profiles/my-host.json"
 
@@ -115,11 +239,19 @@ discovered from the bundle:
         --profile "$PWD/profiles/my-host.json"
 
 (`--lc-object` and `--cp-object` override discovery
-for non-bundled objects.)
+for non-bundled objects.) Then record them per run:
+
+    sudo ./bin/memveil record --output /tmp/cap3 \
+        --capability attempt-trace,mapping-lifecycle,copy-actual \
+        --duration 10
+
+For the opt-in capture, replay `/tmp/cap3` in place with
+the step 4 commands, or hand off `~/cap3` the same way
+as step 3 and replay that.
 
 After any kernel, object, bridge, or profile change the receipt
-goes stale: refresh the profile's recorded bindings from
-the new host first, then re-run `qualify`. `doctor` still
+goes stale: re-mint the bound document with `bind-profile`
+first, then re-run `qualify`. `doctor` still
 names receipt mismatches its passive checks can see
 (another kernel, profile, note, or artifact binding);
 only when those preceding checks pass does the receipt
@@ -129,126 +261,6 @@ binding, so it cannot confirm or deny bridge drift).
 admission - at every start and names the drift there,
 with a stale receipt losing `local-auto` admission and
 attempt-only recording falling back to partial diagnostics.
-
-## 4. Record one capture (privileged)
-
-Recording needs root (BPF load plus tracefs). The bridge
-and BPF object are discovered from the bundle beside the
-executable, so no flags or environment setup are needed
-and plain `sudo` works:
-
-    sudo ./bin/memveil record --output /tmp/cap1 --duration 10
-
-Expected: `ready session=...`, then `end=duration
-outcome=finalized exit=4`.
-Exit 4 indicates finalized output with incomplete terminal evidence,
-including zero-event and signal stops. Exit 3 names the refusal reason (profile, bridge,
-privilege); exit 2 is a usage error; exit 1 is an error.
-When no object is found anywhere, the refusal is `no
-object: pass --object PATH`. `--object` and `--bridge`
-are optional overrides for non-bundled artifacts;
-without them the bridge resolves from `LMB_NATIVE_LIB`
-when unprivileged (ignored under `sudo`), then beside
-the executable, then the system path, and each BPF
-object resolves beside the executable or under the
-system directory.
-
-On the admitted profile, the lifecycle and copy channels are
-opt-in per run, with their objects discovered from the
-bundle:
-
-    sudo ./bin/memveil record --output /tmp/cap3 \
-        --capability attempt-trace,mapping-lifecycle,copy-actual \
-        --duration 10
-
-(`--lc-object` and `--cp-object` override discovery
-for non-bundled objects.)
-
-To narrow one capture to a single device, pass its exact
-observed name:
-
-    sudo ./bin/memveil record --output /tmp/cap4 --device 0000:00:1f.2 \
-        --duration 10
-
-Only matching bounce attempts are kept; lifecycle/copy
-records and global counters, pool samples, and
-conversions are always retained. See
-[recording selection](recording-selection.md) for the
-full scope contract.
-
-Anything but the exact bound kernel and objects refuses with
-exit 3 instead of recording an unverified channel. On a
-qualified host the receipt admits the channel as `local-auto`;
-a stale receipt loses that admission until step 3 is re-run,
-with attempt-only recording falling back to partial.
-
-Captures are written mode 0700/0600. A capture recorded
-under `sudo` is handed back to the invoking user
-automatically, so replay it in place. Only when the
-restore cannot run (a root shell without sudo's
-identity variables, or a `cannot restore capture
-ownership` warning on stderr), hand the capture to your
-user before the unprivileged replay below:
-
-    sudo cp -r /tmp/cap1 ~/cap1 && sudo chown -R $USER ~/cap1
-    chmod 700 ~/cap1 && chmod 600 ~/cap1/*
-
-For the opt-in capture, replay `/tmp/cap3` in place, or
-hand off `~/cap3` the same way and replay that with the
-step 5 commands.
-
-An idle machine usually records zero attempts with complete
-counter snapshots: a valid-empty capture, visibly different
-from an unavailable one. See `examples/real-capture/README.md`
-for a capture with 30 real events.
-
-## 5. Replay offline (unprivileged)
-
-    ./bin/memveil report --format text /tmp/cap1
-    ./bin/memveil report --format json /tmp/cap1
-    ./bin/memveil report --format markdown /tmp/cap1
-
-(If step 4 handed the capture off to `~/cap1`, replay that
-path instead.)
-
-Report reads local files only: no BPF, no BTF, no libbpf, no
-network. Copy the capture directory to another machine (or
-another user) and the same commands reproduce the same report.
-Exit 0 means the report rendered and is valid; completeness
-rides in the `verdict:` header line (the worked example exits
-0 with a partial verdict because terminal settlement is
-unproven by design). Exit 4 appears only under `--strict`,
-which demands a `complete` verdict; exit 2 is invalid input.
-
-Empty is not unavailable: an idle capture reports
-`bounce_attempts = 0` with complete detail quality, while rows
-without their event source render `unavailable` with a reason.
-A torn final line exits 2; rerun with `--allow-partial` to
-drop the torn tail and report the loss instead (exit 0 with a
-partial verdict, exit 4 only under `--strict`).
-Removed whole lines are different: they still report
-`detail: complete_for_scope loss=0` with lower counts (see
-Known issues in `release-notes.md`). See
-`troubleshooting.md` for the recovery.
-
-## 6. Worked example
-
-    ./bin/memveil report --format text examples/real-capture
-
-Thirty real bounce attempts, fully lossless detail, with the
-provenance and limitations each rendered beside the numbers.
-The captured kernel/profile decision and measured scope are historical
-claims about that capture, not admission of the current reader host.
-Duration uses the recorded window with exact integer arithmetic; JSON
-retains full provenance hashes. Missing or conflicting values remain explicit.
-
-    ./bin/memveil top --interval 1s examples/real-capture
-    ./bin/memveil top --compact --interval 1s examples/real-capture
-
-This replays a finished capture in periodic prefixes; it does not follow a
-new workload live. Each summary shows its own measured prefix duration.
-`--compact` prints the short verdict-plus-headlines block per refresh
-instead of the full report; it cannot combine with `--device`.
 
 ## Limits in one paragraph
 

@@ -47,6 +47,42 @@ artifact and its test evidence
 - Root for reading tracefs format files and the kernel
   image, and for running `memveil qualify`.
 
+## 0. Mint with bind-profile (recommended)
+
+`memveil bind-profile` performs steps 2 through 5 in one
+command from the bundle alone - no source checkout, no
+hand-computed hashes. Hook definitions come from the
+covering reference (or an explicit `--profile`), identity
+bindings and tracepoint format text are measured live,
+and the minted `0.1.1` document is `reference-unvalidated`
+with `candidate` capabilities:
+
+    sudo ./bin/memveil bind-profile --output profiles/my-host.json
+
+Expected: `bind-profile: local-<release>
+caps=attempt-trace path=profiles/my-host.json`, exit 0.
+The default profile id derives from the kernel release;
+`--profile-id` overrides it. Extra channels bind together
+with the canonical ring sizes, verified live again at
+qualify:
+
+    sudo ./bin/memveil bind-profile --output profiles/my-host.json \
+        --capability attempt-trace,mapping-lifecycle,copy-actual
+
+Each refusal names its exact cause with exit 3
+(unreadable evidence, no covering reference, undiscoverable
+object); exit 2 is a usage error. A custom `--object`
+still mints the canonical attempt ring: a nonstandard ring
+refuses with a mismatch at qualify, never silently.
+
+Minted documents carry no BTF layouts: signature and
+smoke checks still apply, layout pins do not. After
+minting, register the file first in the manifest (step 6)
+and qualify (step 7). The manual recipe below stays the
+checkable definition of every minted byte: the qualify
+suite proves the helper reproduces the checked-in
+reference note exactly.
+
 ## 1. Inspect the fresh host
 
 Start unprivileged and passive. On an x86-64 host running
@@ -163,7 +199,7 @@ commands. With `H=tests/fixtures/qualify/host`:
     sha256sum $H/boot/vmlinuz-7.0.0-test
 
 yield, in order, `a5af36b0...`, `6c7ff9b3...`,
-`43b8d6d5...`, `8304455b...`, and `11a663ae...`, each
+`43b8d6d5...`, `1b47870d...`, and `11a663ae...`, each
 matching the corresponding `sha256:` value in the
 `identity.source.note` of
 `tests/fixtures/qualify/profiles/qual-ref.json`
@@ -533,7 +569,7 @@ host.
 
 | Refusal | Meaning | Fix |
 |---|---|---|
-| `bindings unparseable: narrow note: ...` | note is not the 8/12-field grammar | author the note (step 3) |
+| `bindings unparseable: narrow note: ...` | note is not the 8/12-field grammar | mint with bind-profile (step 0) or author the note (step 3) |
 | `binding failed: <key> mismatch` | live value differs from the binding | refresh bindings, re-qualify |
 | `binding failed: <key> uncheckable` | live source unreadable here | privilege or path fix |
 | `<hook>: signature mismatch` | frozen text is not live BTF | record this kernel's prototype |
