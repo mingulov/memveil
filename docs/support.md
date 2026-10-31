@@ -12,7 +12,7 @@ has passed its gates.
 | --- | --- | --- |
 | Bounce attempts/requested bytes | `swiotlb_bounced` attempts on an admitted profile; attempts are not successful DMA or actual copies | Report and replay `top` reduce captured attempts/counters without adding alternative measurements |
 | Default-pool capacity/used/high-water | Readable debugfs samples at start, on a best-effort 1 s cadence (cap 4,096; missed ticks skipped), and close; unreadable reads persist as unavailable, never failed runs | Pool reducers require matching generation/scope; samples are opportunistic reads with possible gaps, so they cannot establish sustained pressure alone |
-| Allocation occupancy, copy, sync, lifetimes | Qualified on any covered kernel through the live interface checks (see Kernel generations), or per host by a machine-local `local-auto` receipt from `memveil qualify`; collect with `--capability` (with `--lc-object`/`--cp-object` as optional overrides). Exact bindings and live checks refuse anything else | Offline reducers accept corresponding records; laboratory probes and scripted DMA comparisons do not qualify packaged lifecycle collection |
+| Allocation occupancy, copy, sync, lifetimes | Eligible only on source-admitted profiles, with runtime attachment plus exact-artifact evidence (see Kernel generations); a machine-local `local-auto` receipt from `memveil qualify` supplies bounded local admission; collect with `--capability` (with `--lc-object`/`--cp-object` as optional overrides). Exact bindings and live checks refuse anything else | Offline reducers accept corresponding records; laboratory probes and scripted DMA comparisons do not qualify packaged lifecycle collection |
 | Private/shared state and physical unions | No qualified shipping source | Offline region/baseline reducers and laboratory conversion probes; ordinary-Linux APIs do not prove confidential transitions |
 | Summary | `top --output DIR [--object PATH]` observes live under the same admission as `record`, retaining the capture while printing prefix summaries (provisional; the final answer always equals a replay of the retained capture); startup/collection refusals exit 3 | `top DIR` replays prefixes of a finished capture |
 | Joint observers/two instances | No current-candidate qualification | Historical experiments only; see [coexistence](coexistence.md) |
@@ -22,6 +22,34 @@ Rows without evidence remain unavailable with reasons. Allocation
 release reduces observed occupancy, not persistent sharing state;
 allocation byte-time is not a measured sharing lifetime. Absence of a
 pressure finding is not evidence of absent pressure.
+
+## Confidence and device scope
+
+Metric confidence is independent of measurement, coverage and loss. `high`
+means directly observed without platform interpretation; `medium` means
+interpreted through an admitted profile; `proxy` means an ordinary-guest
+stand-in for an exposure question. These are evidence classes, never
+calibrated probabilities. High confidence cannot repair incomplete evidence
+or prove whole-guest confidentiality.
+
+A device name persists verbatim only for the canonical 12-byte PCI scope
+`DDDD:BB:DD.F` (ASCII hexadecimal groups). Other names retain separate opaque
+session IDs with label `unresolved`; driver identity can remain unresolved.
+A scope label identifies observed device context, not causal application
+origin. Exact literal device filtering applies to device-scoped ordinary
+channels; the planned conversion journal has global scope.
+
+## Trace-offset admission
+
+The attempt source requires `common_type` as `unsigned short`, width 2 at
+offset 0. `dev_name` (`__data_loc char[]`, width 4), `size` (`size_t`, width
+8), and `force` (`bool`, width 1) may move offsets only when the live format
+is parsed and probed from the same bytes used for its binding. The load-time
+offset table must remain bounded and nonoverlapping (fixed-region cap 128
+bytes). Extra fields do not excuse missing, duplicate, retyped, resized,
+malformed, overlapping or out-of-bound fields; those refuse with reasons.
+Offset-only admission is not semantic qualification. The full recipe and
+exact binding checks live in [profiles](profiles.md#4-record-hook-evidence).
 
 ## Requirements
 
@@ -99,29 +127,30 @@ are not provided.
   object bindings; a rebuilt BPF object can fail those
   bindings. Building/packaging/offline replay does
   not earn collection qualification. A machine-local receipt
-  from `memveil qualify` admits a bound reference profile as
-  `local-auto`: the document needs covering identity,
-  grammar bindings matching the live host, and recorded
-  format text (see the
-  [bound-reference recipe](profiles.md)); the shipped
-  reference is an unbound
-  inspection record and planning refuses it. A receipt
-  binds one kernel, one profile document, and the exact
-  artifacts and workload that produced it, and never
-  claims `validated`. Only manifest-listed documents are
+  from `memveil qualify` admits a covering reference profile as
+  `local-auto`. A document with a usable narrow note must match its recorded
+  identity, format and object bindings. A nonvalidated reference without a
+  usable narrow note instead plans against live interfaces and measures its
+  bindings from that host; this does not make its semantics release-qualified.
+  See the [bound-reference recipe](profiles.md). A receipt
+  binds kernel identity and the admitted profile bindings, bridge and
+  requested object hashes, and records the product version and smoke workload.
+  It does not hash the executable or the entire profile document, and never
+  claims `validated`. See [receipt limits](policy.md#qualify-receipts-no-expiry-date-binding-bound-life).
+  Only manifest-listed documents are
   visible: register a new reference file in the active
   profiles directory's `manifest.txt` first. Without
   `--profile`, the first validated profile passing full
   binding wins, then the first reference profile whose
   receipt verifies, else the first covering profile
   records with partial diagnostics; an explicit `--profile` that fails binding
-  refuses, as do requested extra channels without full
-  narrow binding. `record` re-verifies the receipt at
-  every start; a kernel, object, bridge, or profile change loses
-  `local-auto` admission until the profile's recorded
-  bindings are refreshed and `qualify` re-proves the
-  host, with attempt-only recording falling back to
-  partial diagnostics.
+  refuses; requested extra channels must pass their own recorded or live
+  signature, layout, attachment and artifact checks. `record` re-verifies the receipt at
+  every start; a change to a checked kernel, object, bridge or profile binding
+  loses `local-auto` admission until the bindings are refreshed and `qualify`
+  re-proves the host. A same-version executable rebuild or unrelated profile
+  text change is not automatically detected by the receipt. Attempt-only
+  recording can fall back to partial diagnostics.
 - x86-64-v2 baseline. The binary carries its runtime closure
   plus the native bridge in `lib/`. Offline verbs (help,
   version, doctor, report, replay `top`) need libc, libm,
@@ -155,21 +184,25 @@ never by trusting the release string. One prebuilt probe
 set covers every row; no rebuild on the device.
 
 On 6.0 through 6.10 a default `record` is attempt-only
-(attempt-trace is the default capability and always
-required); requesting lifecycle or copy extras there
+(attempt-trace is the default capability and required for
+the current ordinary capability selections); requesting lifecycle or copy
+extras there
 refuses naming the 6.11 floor. Attempt loss counts bind
 strictly from 6.7 and read a partial lower bound on 6.0
-through 6.6. Above the 7.3 ceiling, kernels are servable
-only through the live checks plus a machine-local
-`local-auto` receipt, and never become support claims
-without booted evidence.
+through 6.6. 7.3 is a qualification ceiling, not a code refusal ceiling.
+Kernels above
+it still need live semantic admission and a machine-local `local-auto`
+receipt, and never become support claims without exact-artifact booted
+evidence. The planned conversion journal starts at 6.11 with BTF required;
+it is not implemented or admitted by an ordinary-channel receipt.
 
 Booted 2026-10-24 with the CI-built 0.1.0 `.deb`
 (binary sha256 `ae2d3c13...`, full hash in the
 [release notes](release-notes.md)), all rows in one
-run with no re-boot. Every row passes; `PASS` rows are
-support claims and refused capabilities stay measured
-observations recorded with their exact refusal codes.
+run with no re-boot. Every recorded row passed for those exact historical
+bytes; these rows
+do not qualify current development rebuilds. Refused capabilities stay
+measured observations recorded with their exact refusal codes.
 Evidence: `matrix/<lock id>` per row. `SHORT-COVERED`
 means memveil persisted fewer events than the oracle
 saw and declared the difference as loss (here always
@@ -201,7 +234,9 @@ declared loss does not cover the gap.
 
 Notes:
 
-- The nobtf row asserts counts only: attempt counts are
+- The historical nobtf row is outside the current BTF-required support
+  envelope and cannot qualify a new BTF-less artifact. It asserts counts
+  only: attempt counts are
   oracle-proven while bytes stay unproven (no hist
   triggers in the built config). Its busy verdict is a
   strict SHORT-COVERED bound with declared omits.
@@ -355,34 +390,35 @@ details live in `permissions.md`; surprises go to
 - Wired close-out: detach, a 100 ms settle sleep, a bounded
   drain (30 s / 100,000 polls, unsettled exits marked busy),
   100 confirmation polls, a counter sample, and finalize,
-  stamping session 0.1.1 `stop` evidence. The 5,000 ms budget
+  stamping session 0.1.3 `stop` evidence. The 5,000 ms budget
   is a completeness threshold, not a shutdown deadline:
   overrunning it finalizes partial. Quiescence is never
   observed on the live path (no kernel protocol proves
   writers settled), so live terminal quality stays partial
-  with the stop-linked reason; exit 0 additionally requires
-  complete terminal evidence. A failed stdout write exits 1,
+  with the stop-linked reason; normal exit 0 records the partial verdict,
+  and `--strict` returns 4 unless the verdict is complete. A failed stdout
+  write exits 1,
   never silent success; a blocked pipe may wait without a
   timeout.
 
 ## Exit codes
 
-- `record`: 4 finalized (including zero-event and signal
-  stops), 3 cannot start, 2 usage error, 1 error/unfinalizable.
-- `report`: 0 sufficient (complete terminal evidence plus
-  every other gate), 4 materially incomplete, 2 invalid,
-  1 internal failure (rendering, oversize output, stdout
-  write).
-- `top` replay: same as `report`, judged on the final
-  summary. Live `top` adds 3 for startup/collection refusal
-  (admission, bridge/profile/privilege, signal preparation)
-  and 1 for runtime failures; printed prefixes stand when
-  the run fails.
-- `doctor`: 0 attempt-trace available, 3 unavailable/unknown,
-  2 usage/internal error, 1 stdout write failed.
-- `qualify`: 0 minted, 3 cannot-qualify (planning or smoke
-  refusal), 2 usage error, 1 internal failure (unreadable
-  objects, mint/publish failure).
+The following describes current commands; forthcoming integrity/checkpoint
+cases are defined separately in [capture integrity](capture-integrity.md).
+
+- `record`: 0 valid finalized capture (including partial or zero-event and
+  signal stops); 4 under `--strict` unless complete; 3 cannot start;
+  2 usage error; 1 runtime/output error or unfinalizable capture.
+- `report`: 0 successfully rendered valid report, including partial evidence;
+  4 under `--strict` unless complete; 2 invalid input or usage;
+  1 internal/render/output failure.
+- `top`: same normal/strict verdict policy as `report`, judged on the final
+  summary. Live `top` adds 3 for startup/collection refusal and 1 for runtime
+  failures; printed prefixes remain provisional when the run fails.
+- `doctor`: 0 attempt-trace available; 3 unavailable/unknown;
+  2 usage/internal error; 1 stdout write failure.
+- `qualify`: 0 receipt minted; 3 planning/smoke refusal; 2 usage error;
+  1 internal, mint or publish failure.
 
 Exit codes never stand alone: every non-zero outcome carries a
 structured reason (stderr diagnostic, JSON field, or both).

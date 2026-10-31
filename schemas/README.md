@@ -1,21 +1,37 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # External schema notes
 
-These are **producer contracts**, not a generated description of existing
-software. The schemas are self-contained JSON Schema Draft 2020-12 files;
-validation never fetches references from the network. Each family is
-versioned independently of the product version, the native bridge
-ABI, and the BPF wire version: events are at `0.1.2`
-(true-only copy `pool_private` and `offset_past_allocation` markers;
-`0.1.1` with wire generations and unknown sync offsets stays frozen
-and accepted); profiles are at `0.1.1`
-(tracing-hook bindings); session is at `0.1.3` (optional
-record verdict plus optional `drain_completed` and
-`submit_after_drain` stop keys; `0.1.1` and `0.1.2` stay
-frozen and accepted); report is at `0.1.3` (required
-verdict object plus the `LONG_LIVED_NOT_EVALUATED`
-finding code; `0.1.2` stays frozen); doctor stays at
-`0.1.0`.
+These are self-contained JSON Schema Draft 2020-12 **producer contracts**;
+validation never fetches references from the network. The product implements
+only the exact reader versions listed in [format compatibility](../docs/format-compatibility.md).
+Schema availability alone does not imply a shipping event source or a runtime
+reader. Families version independently of the product, native bridge ABI and
+BPF wire version.
+
+| Family | Current output | Retained contracts | Reserved, not implemented |
+| --- | --- | --- | --- |
+| Session | 0.1.3 | 0.1.1, 0.1.2 (both accepted inputs) | 0.1.4 integrity; 0.2.0 journal |
+| Event | 0.1.2 | 0.1.1 (accepted input) | 0.2.0 journal |
+| Report | 0.1.3 | 0.1.0, 0.1.1, 0.1.2 (output reference only) | 0.1.4 integrity; 0.2.0 journal |
+| Profile | 0.1.2 | 0.1.1 (accepted input) | None |
+| Doctor | 0.1.1 | 0.1.0 (retained schema; no report-input reader) | None |
+| Receipt | 0.1.0 | None | None |
+
+Never reuse a frozen schema number or modify old schemas to carry new fields.
+The reserved versions have no schema files yet and current readers refuse
+them. Integrity keeps event 0.1.2 unchanged. Session/report 0.1.4 add the
+committed-byte integrity record, verification result and checkpoint contract
+in [capture integrity](../docs/capture-integrity.md). The journal's
+session/event/report 0.2.0 contract is reserved separately; it must preserve
+integrity and distinguish request/results from region state. Later 0.3.0
+security capabilities do not change these reservations.
+
+Events 0.1.2 adds true-only copy `pool_private` and
+`offset_past_allocation` markers. Session 0.1.2 adds optional correlation
+relations; 0.1.3 adds an optional record verdict and optional
+`drain_completed`/`submit_after_drain` stop keys. Report 0.1.2 adds a required
+verdict; 0.1.3 adds `LONG_LIVED_NOT_EVALUATED`. Profile 0.1.2 adds
+CO-RE-derived layouts. Doctor 0.1.1 adds the typed platform findings.
 
 ## Files and integer representation
 

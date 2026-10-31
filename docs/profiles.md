@@ -13,7 +13,7 @@ running kernel instead of comparing recorded hashes
 eligible host: passive `doctor` output, evidence capture,
 binding computation, document authoring, manifest
 registration, qualify, reuse, and stale-input refusal. Every command below was checked
-against its wrapper help. The qualify planning
+against its wrapper help. The bound-note planning
 refusals in step 7 were observed live; the receipt
 diagnostics in steps 8 and 9 were observed through
 hand-written receipts exercising the verify path,
@@ -441,20 +441,22 @@ On success the receipt lands under
 prints `qualify: local-auto <profile> caps=...` with
 exit 0. That success line is quoted from the
 implementation; the successful smoke still awaits
-confirmation on an admitted host. Every planning
-refusal below was observed; each exits 3 with no
-receipt written and nothing attached.
+confirmation on an admitted host.
 
-An unbound document refuses on its note. The shipped
-reference and any free-text note fail the grammar:
+Current planning has two paths. A usable narrow note selects exact recorded
+bindings. A nonvalidated profile without a usable note, including the shipped
+reference or a free-text note, instead checks live interfaces and measures
+the host bindings. Absence of the narrow grammar alone is not a refusal on
+that path. A validated profile with an unusable note refuses; live-interface,
+identity or requested-hook failures also refuse with exit 3. Author the note
+in step 3 when exact recorded binding is required. Earlier grammar-only
+refusals do not describe current unbound-reference planning.
 
-    memveil qualify: profile linux-x86_64-7.0-reference bindings unparseable: narrow note: want 8 or 12 fields
-
-meaning: the note is not 8 or 12 grammar fields, so
-there are no bindings to check. Fix by authoring the
-note in step 3. Other grammar failures name the field
-(`narrow note: bad btf`, `narrow note: bad image_bid`,
-and so on).
+Receipt 0.1.0 records the product version, not an executable hash, and checks
+profile identity/bindings rather than all document bytes. A same-version
+rebuild or unrelated prose edit may leave the receipt valid. The complete
+[current receipt boundary](policy.md#qualify-receipts-no-expiry-date-binding-bound-life)
+states what reuse proves and why release qualification remains separate.
 
 A stale document refuses on the first drifted binding
 in grammar order. A document bound to other bytes than

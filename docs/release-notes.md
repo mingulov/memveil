@@ -8,7 +8,9 @@ contract for shipping collection, offline analysis, and laboratory work.
 
 ## Known issues
 
-Two defects are known and will be fixed in 0.1.1:
+Two defects remain open. Their planned 0.1.1 repair is specified in
+[capture integrity](capture-integrity.md); this documentation does not
+implement or qualify that repair:
 
 - A truncated or edited capture can read as complete. `report`
   checks only that event `seq` values increase, and
@@ -174,12 +176,26 @@ Do not silently rewrite a profile hash to make them admitted.
 
 ## Compatibility
 
-Current output versions are report `v0.1.1` and
-session `v0.1.2`; events stay at `v0.1.1`. Readers still
-accept the retained session `v0.1.1` contract (frozen;
-without correlation relations), while report readers
-require `v0.1.1` - the `v0.1.0` report schema file stays
-for reference only. Full reader rules live in
-[format compatibility](format-compatibility.md). Captures are self-describing
-and replay without the recording host or native bridge. JSON metric meanings,
-integer values and exit policy are unchanged by the human-context correction.
+Current output versions are report `0.1.3`, session `0.1.3`, and event
+`0.1.2`. Readers accept frozen session `0.1.1`/`0.1.2`/`0.1.3` and event
+`0.1.1`/`0.1.2`. Reports are output only; there is no report-input reader.
+Retained report schemas are reference contracts. Doctor emits `0.1.1`,
+profiles accept `0.1.1`/`0.1.2`, and receipts remain `0.1.0`.
+
+Session/report `0.1.4` are reserved for integrity with event `0.1.2`
+unchanged. Session/event/report `0.2.0` are reserved for a conversion
+request/result journal. Those versions and checkpoint recovery are planned,
+not implemented or admitted. The planned hardened 0.1.1 ordinary-Linux
+preview does not qualify confidential collection; 0.2.0 must earn real SNP
+I/O and owned conversion/reversion evidence for its exact packaged bytes.
+The broader 0.3.0 security milestone remains separate.
+
+Normal successful `record`, `report` and `top` output returns 0 even with
+partial evidence; `--strict` returns 4 unless complete. Current legacy tail
+recovery follows that rule, while planned unfinalized checkpoint recovery
+will always return 4. Corrupt finalized integrity input will return 2 even
+with the partial flag. Full current and planned reader rules live in
+[format compatibility](format-compatibility.md) and the
+[integrity exit table](capture-integrity.md#reader-and-report-behavior-planned).
+Captures replay offline without the recording host or native bridge. Current
+legacy data has no integrity verification; arithmetic is not authenticity.
