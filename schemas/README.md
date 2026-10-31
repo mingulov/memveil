@@ -9,10 +9,11 @@ ABI, and the BPF wire version: events are at `0.1.2`
 (true-only copy `pool_private` and `offset_past_allocation` markers;
 `0.1.1` with wire generations and unknown sync offsets stays frozen
 and accepted); profiles are at `0.1.1`
-(tracing-hook bindings); session is at `0.1.2` (optional
-correlation relations; `0.1.1` stays frozen and accepted);
-report is at `0.1.1` (optional correlation relations);
-doctor stays at `0.1.0`.
+(tracing-hook bindings); session is at `0.1.3` (optional
+record verdict plus optional `drain_completed` and
+`submit_after_drain` stop keys; `0.1.1` and `0.1.2` stay
+frozen and accepted); report is at `0.1.2` (required
+verdict object); doctor stays at `0.1.0`.
 
 ## Files and integer representation
 

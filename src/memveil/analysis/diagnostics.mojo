@@ -209,7 +209,9 @@ struct DiagnosisEngine:
                 continue
             var f = Finding()
             f.code = String("POOL_PRESSURE")
-            f.severity = String("warning")
+            # Measured allocator states are notes, not alarms:
+            # pressure never gated the exit and never will.
+            f.severity = String("informational")
             f.explanation = (
                 String("Pool ")
                 + m.pool_id

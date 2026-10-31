@@ -146,6 +146,16 @@ def test_reducer_attempts_fixture() raises:
     )
 
 
+def test_report_verdict_wiring() raises:
+    # 3 bounce events consumed; the fixture terminal claims complete
+    # but carries no proving stop evidence, so the verdict fails
+    # closed to unknown with zero known loss.
+    var rep = analyze(String("tests/fixtures/attempts"), False)
+    assert_equal(rep.detail_delivered, UInt64(3))
+    assert_equal(rep.verdict.name, String("partial_unknown_loss"))
+    assert_equal(rep.verdict.loss_ratio_bps, 0)
+
+
 def test_reducer_device_dimensions() raises:
     var rep = analyze(String("tests/fixtures/reader/multidev"), False)
     var all_m = metric_by_name(rep, String("bounce_attempts"), String(""))
@@ -1204,6 +1214,7 @@ def run() raises -> Int:
     suite.test[test_format_u64]()
     suite.test[test_checked_add]()
     suite.test[test_reducer_attempts_fixture]()
+    suite.test[test_report_verdict_wiring]()
     suite.test[test_reducer_device_dimensions]()
     suite.test[test_counter_deltas]()
     suite.test[test_counter_unusable]()

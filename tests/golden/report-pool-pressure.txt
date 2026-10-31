@@ -1,3 +1,4 @@
+verdict: partial_unknown_loss (loss >=0.00%, 1 delivered)
 memveil report pool-pressure-session (synthetic, engine memveil-0.1.0)
 window: [1000000000,2000000000)
 duration: 1.000000000 s (1000000000 ns)
@@ -79,7 +80,7 @@ metrics (15):
     scope: window [1000000000,2000000000); pool pool-0; allocator lifetime, reset epoch unproved
     notes: No high-water sample for this pool.
 findings (1):
-  [warning] POOL_PRESSURE: Pool pool-0 at or above 90% for 3 consecutive valid samples.
+  [informational] POOL_PRESSURE: Pool pool-0 at or above 90% for 3 consecutive valid samples.
     scope: window [1000000000,2000000000); pool pool-0
     limitations: Pressure is a measured allocator state, not a defect verdict.
     refs: metric:pool_pressure_samples, pool:pool-0

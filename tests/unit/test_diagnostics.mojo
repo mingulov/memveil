@@ -158,7 +158,7 @@ def test_pool_pressure() raises:
     r.metrics.append(_metric("pool_pressure_samples", UInt64(2), "p2"))
     var out = eng.evaluate(r^, DiagnosticPolicy())
     assert_equal(_codes(out, "POOL_PRESSURE"), 1)
-    assert_equal(out[0].severity, String("warning"))
+    assert_equal(out[0].severity, String("informational"))
     assert_true(out[0].scope.find("p1") != -1)
 
 

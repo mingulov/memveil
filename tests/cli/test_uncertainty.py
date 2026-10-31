@@ -37,7 +37,7 @@ class Uncertainty(unittest.TestCase):
             ev['seq'] = str(i)
         (self.cap / 'events.ndjson').write_text(''.join(json.dumps(ev) + '\n' for ev in self.events))
 
-    def report(self, want=4, fmt='json'):
+    def report(self, want=0, fmt='json'):
         self.write()
         proc = subprocess.run([str(ROOT / 'build/memveil'), 'report', '--format', fmt, str(self.cap)],
                               capture_output=True, text=True)
@@ -341,7 +341,7 @@ class Uncertainty(unittest.TestCase):
                 ('small', small, 1), ('large', large, 2050),
                 ('ceiling', ceiling, 4096)):
             with self.subTest(tag=tag):
-                self.assertEqual(rc, 4)
+                self.assertEqual(rc, 0)
                 self.assertEqual(
                     sorted(f['code'] for f in report['findings']),
                     ['CONVERSION_FAILED', 'POOL_PRESSURE', 'UNPAIRED_LIFECYCLE'])
@@ -356,7 +356,7 @@ class Uncertainty(unittest.TestCase):
     def test_high_cardinality_multi_pool_and_quiet(self):
         rc, report = self.report_json(
             self.diagnostic_capture(2050, pools=('p1', 'p2')))
-        self.assertEqual(rc, 4)
+        self.assertEqual(rc, 0)
         pressure = [f for f in report['findings'] if f['code'] == 'POOL_PRESSURE']
         self.assertEqual(len(pressure), 1)
         self.assertIn('p1', pressure[0]['scope'])
@@ -458,7 +458,7 @@ class Uncertainty(unittest.TestCase):
                             cmd.append('--allow-partial')
                         cmd.append(str(self.cap))
                         proc = subprocess.run(cmd, capture_output=True, text=True)
-                        want = 4 if partial and strength == 'observed' else 2
+                        want = 0 if partial and strength == 'observed' else 2
                         self.assertEqual(proc.returncode, want, proc.stderr)
                         if want == 2:
                             self.assertEqual(proc.stdout, '')
@@ -479,7 +479,7 @@ class Uncertainty(unittest.TestCase):
                     stream.write(prefix)
                 proc = subprocess.run([str(ROOT / 'build/memveil'), 'report', '--format', 'json',
                                        '--allow-partial', str(self.cap)], capture_output=True, text=True)
-                want = 4 if strength == 'observed' else 2
+                want = 0 if strength == 'observed' else 2
                 self.assertEqual(proc.returncode, want, proc.stderr)
                 if want == 2:
                     self.assertEqual(proc.stdout, '')
@@ -499,7 +499,7 @@ class Uncertainty(unittest.TestCase):
                 (self.cap / 'events.ndjson').write_text(prefix)
                 proc = subprocess.run([str(ROOT / 'build/memveil'), 'report', '--format', 'json',
                                        '--allow-partial', str(self.cap)], capture_output=True, text=True)
-                self.assertEqual(proc.returncode, 4, proc.stderr)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.incomplete(json.loads(proc.stdout))
 
     def test_partial_unknown_copy_constraint_is_inconclusive(self):
@@ -521,7 +521,7 @@ class Uncertainty(unittest.TestCase):
                     stream.write(prefix)
                 proc = subprocess.run([str(ROOT / 'build/memveil'), 'report', '--format', 'json',
                                        '--allow-partial', str(self.cap)], capture_output=True, text=True)
-                self.assertEqual(proc.returncode, 4, proc.stderr)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.incomplete(json.loads(proc.stdout))
 
     def test_real_example_terminal(self):

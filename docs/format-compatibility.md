@@ -3,8 +3,8 @@
 
 Capture, event, session, and report schemas are versioned
 independently; the frozen set (events 0.1.1 and 0.1.2,
-profiles 0.1.1 and 0.1.2, session 0.1.1 and 0.1.2;
-report 0.1.1, doctor 0.1.0) is the only supported input.
+profiles 0.1.1 and 0.1.2, session 0.1.1, 0.1.2, and 0.1.3;
+report 0.1.2, doctor 0.1.0) is the only supported input.
 Events 0.1.2
 adds the true-only copy markers `pool_private` and
 `offset_past_allocation`; 0.1.1 stays frozen and accepted.
@@ -15,13 +15,20 @@ Session 0.1.1 adds the required terminal
 stop object; 0.1.0 session documents are refused, never
 tolerated. Session 0.1.2 adds the optional correlation
 relations object; 0.1.1 stays frozen and accepted.
-Session 0.1.1 and 0.1.2 carry the optional `boot_id`
+Session 0.1.3 adds the optional record verdict object plus
+the optional `drain_completed` and `submit_after_drain`
+stop keys; 0.1.1 and 0.1.2 stay frozen and accepted, and
+older documents carrying 0.1.3-only fields are refused.
+Session 0.1.1, 0.1.2, and 0.1.3 carry the optional `boot_id`
 opaque id when the capture is tied to one boot.
+Report 0.1.2 adds the required verdict object; 0.1.1
+stays frozen. Reports are output only: the renderer emits
+the current version and no reader parses older ones back.
 The replay path treats every capture as untrusted and stays
 offline: it never loads BPF objects, touches tracefs or
 BTF, opens the network, or requires privileges.
 
-## Reader policy (events 0.1.1/0.1.2, profiles 0.1.1/0.1.2, session 0.1.1/0.1.2, report 0.1.1, rest 0.1.0)
+## Reader policy (events 0.1.1/0.1.2, profiles 0.1.1/0.1.2, session 0.1.1/0.1.2/0.1.3, report 0.1.2, rest 0.1.0)
 
 - Unknown schema major, unknown event kind, unknown field, or
   duplicated key: refused, exit 2. There is no last-wins, no
@@ -68,8 +75,9 @@ sync reference.
 `report --allow-partial` recovers exactly one shape: a final
 record that is a clean truncation (the tail classifier says
 incomplete and no complete byte already proves it invalid).
-Recovery drops the tail, reports through exit 4, and never
-repairs JSON. A final record that parses but lacks its
+Recovery drops the tail, reports through exit 0 with a
+partial verdict, and never repairs JSON. A final record
+that parses but lacks its
 newline, an unterminated tail that is corrupt rather than
 truncated, and any interior corruption exit 2 in both modes.
 
@@ -77,8 +85,9 @@ truncated, and any interior corruption exit 2 in both modes.
 
 `tests/fuzz/run.py` mutates seed captures deterministically
 and replays each case through the built binary: exits stay in
-{0, 2, 4}, exit 2 keeps stdout empty with a stderr reason,
-exit 0 JSON parses, and no crash marker appears. The smoke
+{0, 2} (the harness never passes --strict), exit 2 keeps
+stdout empty with a stderr reason, exit 0 JSON parses, and
+no crash marker appears. The smoke
 lane runs 200 seeds; the campaign lane runs 10,000 seeds
 (`MEMVEIL_FUZZ_SEEDS` overrides) and records the binary hash.
 Violations retain their seed and input; promoted regressions

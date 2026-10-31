@@ -79,6 +79,7 @@ from memveil.platform.clock import MonoClock
 from memveil.platform.signal import LiveSignalSource, SignalOut
 from memveil.render.filter import device_filter_resolves
 from memveil.render.render import render
+from memveil.render.text import render_compact
 
 comptime DEFAULT_INTERVAL_NS = UInt64(1000000000)
 
@@ -89,6 +90,8 @@ struct TopOptions:
     var interval_ns: UInt64
     var has_device: Bool
     var device: String
+    var strict: Bool
+    var compact: Bool
     var has_long_lived_after: Bool
     var long_lived_after_ns: UInt64
     var dir: String
@@ -102,6 +105,8 @@ struct TopOptions:
         self.interval_ns = DEFAULT_INTERVAL_NS
         self.has_device = False
         self.device = String("")
+        self.strict = False
+        self.compact = False
         self.has_long_lived_after = False
         self.long_lived_after_ns = UInt64(0)
         self.dir = String("")
@@ -116,7 +121,8 @@ def top_usage() -> String:
     """Usage text for the top verb."""
     return (
         "usage: memveil top [--interval DURATION] [--device NAME]\n"
-        "       [--long-lived-after DURATION] [--max-line-bytes N]\n"
+        "       [--strict] [--compact] [--long-lived-after DURATION]\n"
+        "       [--max-line-bytes N]\n"
         "       [--max-session-bytes N] [--max-events-bytes N] DIR\n"
         "   or: memveil top --output DIR [--object PATH]\n"
         "       [--duration SEC] [--max-events-bytes N]\n"
@@ -124,7 +130,7 @@ def top_usage() -> String:
         "       [--profiles-dir DIR] [--capability IDS]\n"
         "       [--lc-object PATH] [--cp-object PATH]\n"
         "       [--interval DURATION] [--device NAME]\n"
-        "       [--long-lived-after DURATION]\n"
+        "       [--strict] [--compact] [--long-lived-after DURATION]\n"
         "\n"
         "Replay the capture in DIR, printing one text summary per\n"
         "interval of capture time plus a final full-window report.\n"
@@ -147,12 +153,19 @@ def top_usage() -> String:
         "  --long-lived-after DURATION\n"
         "                    enable the informational long-lived\n"
         "                    finding past this open age.\n"
+        "  --strict          exit 4 unless the final verdict is\n"
+        "                    complete (live mode also runs the\n"
+        "                    collection strictly).\n"
+        "  --compact         print the short verdict-plus-headlines\n"
+        "                    block instead of the full report per\n"
+        "                    refresh; cannot combine with --device.\n"
         "\n"
         "DURATION is a decimal count with optional unit s, m, or h\n"
         "(bare digits mean seconds); zero and overflow are refused.\n"
         "\n"
-        "Exit 0 for sufficient evidence, 4 for a usable but materially\n"
-        "incomplete report, 2 for invalid input or usage. Live mode\n"
+        "Exit 0 for printed summaries (completeness rides in the\n"
+        "verdict field), 4 under --strict unless the verdict is\n"
+        "complete, 2 for invalid input or usage. Live mode\n"
         "adds 3 for unavailable collection and 1 for errors.\n"
     )
 
@@ -308,6 +321,12 @@ def parse_top_args(args: List[String]) raises CliError -> TopOptions:
             stashed_max_events = args[i + 1]
             has_stash = True
             i += 2
+        elif tok == "--strict":
+            opts.strict = True
+            i += 1
+        elif tok == "--compact":
+            opts.compact = True
+            i += 1
         elif _is_live_flag(tok):
             if tok == "--output":
                 opts.has_output = True
@@ -326,6 +345,8 @@ def parse_top_args(args: List[String]) raises CliError -> TopOptions:
             i += 1
     if opts.dir != "" and opts.has_output:
         raise CliError("cannot combine replay DIR with live --output")
+    if opts.compact and opts.has_device:
+        raise CliError("--compact does not take --device")
     if opts.dir == "" and not opts.has_output:
         raise CliError("missing capture directory")
     if not opts.has_output and len(live_args) > 0:
@@ -335,6 +356,7 @@ def parse_top_args(args: List[String]) raises CliError -> TopOptions:
             live_args.append(String("--max-events-bytes"))
             live_args.append(stashed_max_events)
         opts.live = parse_record_args(live_args)
+        opts.live.strict = opts.strict
     elif has_stash:
         opts.max_events_bytes = _parse_limit(
             stashed_max_events, "--max-events-bytes", 4294967296
@@ -447,6 +469,18 @@ def _diagnose(
     diagnose_report(rep, has_long_lived_after, long_lived_after_ns)
 
 
+def _render_block(rep: Report, compact: Bool, filt: String) raises -> String:
+    """Render one refresh body: compact headlines or full text.
+
+    Compact headlines are global-only; the caller refuses
+    --compact with --device, so filt is always empty here
+    in compact mode.
+    """
+    if compact:
+        return render_compact(rep)
+    return render(rep, String("text"), filt)
+
+
 def _emit_report(
     var rep: Report,
     filt: String,
@@ -454,6 +488,7 @@ def _emit_report(
     long_lived_after_ns: UInt64,
     seq: Int,
     horizon_ns: UInt64,
+    compact: Bool,
 ) raises -> Int:
     """Diagnose, render, and print one refresh block.
 
@@ -462,7 +497,7 @@ def _emit_report(
     failures raise; an oversized block is a clean refusal.
     """
     _diagnose(rep, has_long_lived_after, long_lived_after_ns)
-    var text = render(rep, String("text"), filt)
+    var text = _render_block(rep, compact, filt)
     try:
         check_rendered_size(text, MAX_RENDERED_BYTES)
     except e:
@@ -498,6 +533,7 @@ def _snapshot_block(
         opts.long_lived_after_ns,
         seq,
         horizon_ns,
+        opts.compact,
     )
 
 
@@ -516,12 +552,14 @@ struct StdoutSink(RefreshSink):
     var _watch: FilterWatch
     var _has_long_lived_after: Bool
     var _long_lived_after_ns: UInt64
+    var _compact: Bool
     var _seq: Int
 
     def __init__(out self, opts: TopOptions):
         self._watch = FilterWatch(opts)
         self._has_long_lived_after = opts.has_long_lived_after
         self._long_lived_after_ns = opts.long_lived_after_ns
+        self._compact = opts.compact
         self._seq = 0
 
     def emit(mut self, var rep: Report, horizon_ns: UInt64) -> Bool:
@@ -541,6 +579,7 @@ struct StdoutSink(RefreshSink):
                 self._long_lived_after_ns,
                 self._seq,
                 horizon_ns,
+                self._compact,
             )
         except:
             return False
@@ -930,7 +969,7 @@ def _drain(
     _diagnose(rep, opts.has_long_lived_after, opts.long_lived_after_ns)
     var text: String
     try:
-        text = render(rep, String("text"), watch.filt)
+        text = _render_block(rep, opts.compact, watch.filt)
     except e:
         write_stderr(
             "memveil top: internal error: cannot render report\n"
@@ -941,7 +980,7 @@ def _drain(
     except e:
         return _top_failed("memveil top: ", e.message)
     _print_block(text, seq, reader.session.window_end_ns, watch.filt)
-    return exit_for_report(rep)
+    return exit_for_report(rep, opts.strict)
 
 
 def _poll_signal(
@@ -1006,11 +1045,11 @@ def _finish_after_signal(
     _diagnose(rep, opts.has_long_lived_after, opts.long_lived_after_ns)
     var text: String
     try:
-        text = render(rep, String("text"), watch.filt)
+        text = _render_block(rep, opts.compact, watch.filt)
     except e:
         write_stderr(
             "memveil top: internal error: cannot render report\n"
         )
         return EXIT_INTERNAL
     _print_block(text, seq + 1, reader.session.window_end_ns, watch.filt)
-    return exit_for_report(rep)
+    return exit_for_report(rep, opts.strict)

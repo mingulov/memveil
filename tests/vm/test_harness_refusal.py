@@ -298,13 +298,13 @@ def test_report_exact_probe_lifetime_rejects_lower_values():
     assert compare_live(report,ledger,probes)
 
 
-def test_translate_report_is_partial_exit4(tmp_path):
+def test_translate_report_is_partial_exit0(tmp_path):
     import subprocess
     from test_oracle_live import MEMVEIL_BIN
     translate_session([lc(ktime=100),lc(1,kind=2,skip=1,ktime=200)], [cp(ktime=90)],
                       {0:dict(requested=512,success=True)},tmp_path,'fixture','test-profile')
     proc=subprocess.run([MEMVEIL_BIN,'report','--format','json',str(tmp_path)],capture_output=True,text=True)
-    assert proc.returncode==4,proc.stderr
+    assert proc.returncode==0,proc.stderr
     report=json.loads(proc.stdout)
     assert report['quality']['terminal']['status']=='partial'
 
@@ -407,7 +407,7 @@ def test_authored_projection_has_exact_nonzero_metrics_and_preserves_unpaired_ca
     assert all(e['source']['hook'].startswith('fixture:') for e in events)
     assert next(e for e in events if e['kind']=='bounce_attempt')['source']['measurement']=='derived'
     proc=subprocess.run([MEMVEIL_BIN,'report','--format','json',str(fixture)],capture_output=True,text=True)
-    assert proc.returncode==4,proc.stderr
+    assert proc.returncode==0,proc.stderr
     report=json.loads(proc.stdout)
     ledger=OracleLedger();ledger.record_attempt(0,'dev-1',512,False)
     ledger.record_outcome(0,True,mapping=0,mapped_bytes=512)

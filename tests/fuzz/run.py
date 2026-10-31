@@ -4,9 +4,10 @@
 
 Mutates seed captures with a seeded RNG and replays each case
 through the built report verb. The oracle is strict and
-independent of the mutator: every case must exit 0, 2, or 4
-within the timeout; exit 2 must leave stdout empty with a
-non-empty stderr; exit 0 and exit 4 JSON output must parse;
+independent of the mutator: every case must exit 0 or 2
+within the timeout (exit 4 needs --strict, which the harness
+never passes); exit 2 must leave stdout empty with a
+non-empty stderr; exit 0 JSON output must parse;
 no case may print a crash marker. Violations retain their
 seed and input under tests/fuzz/regressions/ and fail the
 run.
@@ -92,8 +93,8 @@ def run_case(binary, path, timeout):
 def check(case, code, out, err):
     if code == "timeout":
         return "replay timed out"
-    if code not in (0, 2, 4):
-        return "exit %r not in {0, 2, 4}" % (code,)
+    if code not in (0, 2):
+        return "exit %r not in {0, 2}" % (code,)
     for marker in CRASH_MARKERS:
         if marker in out or marker in err:
             return "crash marker %r in output" % (marker,)
@@ -107,15 +108,6 @@ def check(case, code, out, err):
             json.loads(out.decode("utf-8"))
         except Exception as exc:
             return "exit 0 with invalid JSON: %s" % (exc,)
-    if code == 4:
-        if out == b"":
-            return "exit 4 with empty stdout"
-        # run_case always requests --format json, so a usable
-        # incomplete report must still parse as JSON.
-        try:
-            json.loads(out.decode("utf-8"))
-        except Exception as exc:
-            return "exit 4 with invalid JSON: %s" % (exc,)
     return None
 
 

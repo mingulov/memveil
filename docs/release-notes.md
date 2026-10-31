@@ -112,8 +112,9 @@ Do not silently rewrite a profile hash to make them admitted.
   counter sample, finalize) stamps `stop` evidence with the 5,000 ms
   budget as a completeness threshold; live runs stay partial with
   `quiescence unproven` because no kernel protocol proves settlement.
-  `record` exits 4 for a finalized capture, and `report`/`top` exit 0
-  only with complete terminal evidence.
+  `record`, `report`, and `top` exit 0 for a finalized capture with
+  that partial verdict; `--strict` exits 4 unless the verdict is
+  `complete`.
 - CPU targets and ELF linkage minima are compatibility prerequisites,
   not tests of every claimed platform. See [support](support.md).
 - Sustained saturation drains about 153,000 records/s

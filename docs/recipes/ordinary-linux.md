@@ -289,10 +289,10 @@ substitution step is needed.
        "$ROOT/bin/memveil" top /tmp/rec/cap \
            >/tmp/rec/top.txt
 
-   Expect record exit 4: the capture finalizes with
-   materially incomplete terminal evidence (quiescence
-   after detach stays unproven), which the report states
-   explicitly.
+   Expect record exit 0 with a partial verdict: the capture
+   finalizes with materially incomplete terminal evidence
+   (quiescence after detach stays unproven), which the
+   report states explicitly.
 
 ## Compare against the oracle
 

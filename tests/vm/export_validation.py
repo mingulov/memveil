@@ -784,7 +784,7 @@ def validate_attempt_exports(got, mode=None):
         keys(stats,('values',));keys(stats['values'],('overrun','commit overrun','dropped events'))
         numbers(stats['values'])
     for line in got['record.stdout'].read_text().splitlines():
-        if not re.fullmatch(r'ready session=[A-Za-z0-9_.-]+ start_ns=\d+|record: end=(duration|signal) outcome=finalized exit=4',line):
+        if not re.fullmatch(r'ready session=[A-Za-z0-9_.-]+ start_ns=\d+|record: end=(duration|signal) outcome=finalized exit=0',line):
             raise ValueError('unexpected record stdout')
     if got['record.stderr'].read_text().strip():raise ValueError('record diagnostics must remain guest-local')
     for line in got['ping.txt'].read_text().splitlines():

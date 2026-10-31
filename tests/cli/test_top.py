@@ -61,6 +61,12 @@ def main():
     check("unknown-flag", p.returncode == 2, "exit %d" % p.returncode)
     p = run(["top", "--long-lived-after", "0s", NESTED])
     check("zero-long-lived", p.returncode == 2, "exit %d" % p.returncode)
+    p = run(["top", "--compact", "--device", "dev-1", NESTED])
+    check("compact-device-refused", p.returncode == 2,
+          "exit %d" % p.returncode)
+    check("compact-device-message",
+          "--compact does not take --device" in p.stderr,
+          repr(p.stderr))
 
     p = run(["top", "--interval", "1s", NESTED])
     check("nested-exit", p.returncode == 0, "exit %d: %s"
@@ -82,6 +88,20 @@ def main():
     final_body = blocks[-1].split("\n", 1)[1]
     check("replay-equivalence", final_body == rep.stdout,
           "final top block differs from report output")
+
+    p = run(["top", "--compact", "--interval", "1s", NESTED])
+    check("compact-exit", p.returncode == 0, "exit %d: %s"
+          % (p.returncode, p.stderr))
+    cblocks = [b for b in p.stdout.split("--- refresh ") if b.strip()]
+    check("compact-blocks", len(cblocks) == 2,
+          "%d blocks" % len(cblocks))
+    check("compact-verdict", "verdict: " in cblocks[-1])
+    check("compact-headlines", "attempts: " in cblocks[-1]
+          and "detail: " in cblocks[-1]
+          and "terminal: " in cblocks[-1]
+          and "findings: " in cblocks[-1])
+    check("compact-short", "memveil report " not in p.stdout
+          and "metrics (" not in p.stdout)
 
     p = run(["top", "--interval", "1s", "--device", "dev-1", NESTED])
     check("device-exit", p.returncode == 0)

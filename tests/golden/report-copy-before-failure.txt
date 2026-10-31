@@ -1,3 +1,4 @@
+verdict: partial_unknown_loss (loss >=0.00%, 1 delivered)
 memveil report copy-before-failure-session (synthetic, engine memveil-0.1.0)
 window: [1000000000,2000000000)
 duration: 1.000000000 s (1000000000 ns)

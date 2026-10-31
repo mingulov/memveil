@@ -30,7 +30,12 @@ from memveil.model.report import Report, ReportCap
 from memveil.model.session import DeviceEntry
 from memveil.platform.reader import bytes_to_text, read_host_file
 from memveil.render.render import RenderError, render
-from memveil.render.text import escape_text, render_text
+from memveil.render.text import (
+    escape_text,
+    render_compact,
+    render_text,
+    verdict_line,
+)
 from memveil.render.json import escape_json, render_json
 from memveil.render.markdown import escape_markdown, render_markdown
 
@@ -376,7 +381,95 @@ def test_render_json_report_version() raises:
     var rep = analyze(String("tests/fixtures/attempts"))
     var doc = render_json(rep)
     assert_true(
-        doc.find(String('"schema_version": "0.1.1"')) != -1
+        doc.find(String('"schema_version": "0.1.2"')) != -1
+    )
+
+
+def test_render_json_verdict() raises:
+    var rep = analyze(String("tests/fixtures/attempts"))
+    var doc = render_json(rep)
+    assert_true(doc.find(String('"verdict": {')) != -1)
+    assert_true(doc.find(String('"name": "partial_unknown_loss"')) != -1)
+    assert_true(doc.find(String('"loss_ratio_bps": "0"')) != -1)
+    assert_true(doc.find(String('"delivered": "3"')) != -1)
+
+
+def test_verdict_line_shapes() raises:
+    var rep = analyze(String("tests/fixtures/attempts"))
+    assert_equal(
+        verdict_line(rep),
+        String(
+            "verdict: partial_unknown_loss (loss >=0.00%, 3 delivered)"
+        ),
+    )
+    var gap = analyze(String("tests/fixtures/reader/detail-gap"))
+    assert_equal(
+        verdict_line(gap),
+        String("verdict: partial_unknown_loss (loss >=50.00%, 2 delivered)"),
+    )
+    var done = analyze(String("tests/fixtures/reader/complete-stop"))
+    assert_equal(
+        verdict_line(done),
+        String("verdict: complete (loss 0.00%, 3 delivered)"),
+    )
+    var unset = Report()
+    assert_equal(
+        verdict_line(unset), String("verdict: unavailable (not computed)")
+    )
+
+
+def test_render_text_verdict_header() raises:
+    var rep = analyze(String("tests/fixtures/attempts"))
+    var doc = render_text(rep)
+    assert_true(
+        doc.find(
+            String(
+                "verdict: partial_unknown_loss (loss >=0.00%, 3 delivered)\n"
+                "memveil report "
+            )
+        )
+        == 0
+    )
+
+
+def test_render_markdown_verdict_header() raises:
+    var rep = analyze(String("tests/fixtures/attempts"))
+    var doc = render_markdown(rep)
+    assert_true(
+        doc.find(
+            String(
+                "- verdict: partial_unknown_loss (loss >=0.00%, 3 delivered)\n"
+            )
+        )
+        != -1
+    )
+
+
+def test_render_compact_attempts() raises:
+    var rep = analyze(String("tests/fixtures/attempts"))
+    assert_equal(
+        render_compact(rep),
+        String(
+            "verdict: partial_unknown_loss (loss >=0.00%, 3 delivered)\n"
+            "attempts: 3  bytes: 9216\n"
+            "detail: complete_for_scope, loss 0\n"
+            "terminal: complete_for_scope\n"
+            "findings: none\n"
+        ),
+    )
+
+
+def test_render_compact_detail_gap() raises:
+    var rep = analyze(String("tests/fixtures/reader/detail-gap"))
+    assert_equal(
+        render_compact(rep),
+        String(
+            "verdict: partial_unknown_loss (loss >=50.00%, 2 delivered)\n"
+            "attempts: 2  bytes: 5120\n"
+            "detail: partial, loss 2\n"
+            "terminal: complete_for_scope\n"
+            "findings: 1: CAPTURE_INCOMPLETE(warning)\n"
+        ),
     )
 
 
@@ -512,23 +605,44 @@ def test_f12_sanitize_diagnostic() raises:
 
 
 def test_f10_optional_correlation_exit() raises:
+    # OD25-2: a rendered report always exits 0; completeness rides
+    # in the verdict field, never in the exit code.
     var clean = analyze(String("tests/fixtures/attempts"))
-    assert_equal(exit_for_report(clean), 0)
+    assert_equal(exit_for_report(clean, False), 0)
     var unrequested = analyze(
         String("tests/fixtures/reader/optional-correlation")
     )
     assert_equal(unrequested.q_correlation.status, "partial")
-    assert_equal(exit_for_report(unrequested), 0)
+    assert_equal(exit_for_report(unrequested, False), 0)
     var gapped = analyze(
         String("tests/fixtures/reader/f8-correlation-gap")
     )
     assert_equal(gapped.q_correlation.status, "partial")
-    assert_equal(exit_for_report(gapped), 0)
+    assert_equal(exit_for_report(gapped, False), 0)
     var disagree = analyze(
         String("tests/fixtures/reader/f9-mismatch")
     )
     assert_true(disagree.counter_disagreement)
-    assert_equal(exit_for_report(disagree), 4)
+    assert_equal(exit_for_report(disagree, False), 0)
+
+
+def test_f10_strict_exit() raises:
+    # Strict exits 4 unless the verdict is complete; an unset
+    # verdict fails closed to 4.
+    var disagree = analyze(
+        String("tests/fixtures/reader/f9-mismatch")
+    )
+    assert_true(disagree.counter_disagreement)
+    assert_equal(disagree.verdict.name, String("partial_unknown_loss"))
+    assert_equal(exit_for_report(disagree, True), 4)
+    var complete = Report()
+    complete.verdict.name = String("complete")
+    assert_equal(exit_for_report(complete, True), 0)
+    assert_equal(exit_for_report(complete, False), 0)
+    var unset = Report()
+    assert_equal(unset.verdict.name, String(""))
+    assert_equal(exit_for_report(unset, True), 4)
+    assert_equal(exit_for_report(unset, False), 0)
 
 
 def test_device_name_filter_resolves() raises:
@@ -584,6 +698,12 @@ def run() raises -> Int:
     suite.test[test_render_markdown_escape]()
     suite.test[test_render_json_wellformed]()
     suite.test[test_render_json_report_version]()
+    suite.test[test_render_json_verdict]()
+    suite.test[test_verdict_line_shapes]()
+    suite.test[test_render_text_verdict_header]()
+    suite.test[test_render_markdown_verdict_header]()
+    suite.test[test_render_compact_attempts]()
+    suite.test[test_render_compact_detail_gap]()
     suite.test[test_render_json_relations_present_when_split]()
     suite.test[test_render_json_relations_absent_when_legacy]()
     suite.test[test_render_json_escapes]()
@@ -594,6 +714,7 @@ def run() raises -> Int:
     suite.test[test_device_name_filter_resolves]()
     suite.test[test_render_dispatch]()
     suite.test[test_f10_optional_correlation_exit]()
+    suite.test[test_f10_strict_exit]()
     suite.test[test_f12_sanitize_diagnostic]()
     suite^.run()
     return 0

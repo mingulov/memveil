@@ -22,9 +22,9 @@ import test_attempt_capture
 
 def attempt_export(tmp_path,change=None):
     export=tmp_path/'export';export.mkdir()
-    ledger=dict(mode='correctness',fs_type='tracefs',identity=dict(release='7.0.9',config_src='gz',config_sha='a'*64,btf_sha='b'*64,format_sha='c'*64,image_sha='d'*64,image_bid='e'*40),hiwater_before='1',iface='eth0',dma_mask_bits=32,link_ok=True,trace_clock='mono',ready='ready session=test start_ns=1',workload_start_ns=1,workload_end_ns=2,ping_transmitted=1,ping_received=1,record_exit=4,drained_bytes=0,percpu={},hiwater_after='2',pipe_bytes=0,pipe_lines=0,lost_markers=0)
+    ledger=dict(mode='correctness',fs_type='tracefs',identity=dict(release='7.0.9',config_src='gz',config_sha='a'*64,btf_sha='b'*64,format_sha='c'*64,image_sha='d'*64,image_bid='e'*40),hiwater_before='1',iface='eth0',dma_mask_bits=32,link_ok=True,trace_clock='mono',ready='ready session=test start_ns=1',workload_start_ns=1,workload_end_ns=2,ping_transmitted=1,ping_received=1,record_exit=0,drained_bytes=0,percpu={},hiwater_after='2',pipe_bytes=0,pipe_lines=0,lost_markers=0)
     if change:change(ledger)
-    contents={'ledger.json':json.dumps(ledger),'oracle.json':json.dumps(dict(schema='memveil-vm-oracle/2',lost_lines=0,lost_events=0,pipe_bytes=0,pipe_lines=0,header_lines=0,blank_lines=0,events=[])),'session.json':(REPO/'tests/fixtures/baseline/session.json').read_text(),'events.ndjson':'','ping.txt':'','record.stdout':'ready session=test start_ns=1\nrecord: end=duration outcome=finalized exit=4\n','record.stderr':''}
+    contents={'ledger.json':json.dumps(ledger),'oracle.json':json.dumps(dict(schema='memveil-vm-oracle/2',lost_lines=0,lost_events=0,pipe_bytes=0,pipe_lines=0,header_lines=0,blank_lines=0,events=[])),'session.json':(REPO/'tests/fixtures/baseline/session.json').read_text(),'events.ndjson':'','ping.txt':'','record.stdout':'ready session=test start_ns=1\nrecord: end=duration outcome=finalized exit=0\n','record.stderr':''}
     for name,text in contents.items():
         path=export/('correctness-'+name);path.write_text(text)
         Path(str(path)+'.sha256').write_text(hashlib.sha256(path.read_bytes()).hexdigest()+'\n')
@@ -691,7 +691,7 @@ def receipt_doc(**override):
         files=[dict(name='bundle-identity.json',
                     sha256='a' * 64, bytes=3)],
         file_errors=[],
-        detail=dict(report_exit=4, files_verified=1))
+        detail=dict(report_exit=0, files_verified=1))
     doc.update(override)
     return doc
 
@@ -725,7 +725,7 @@ def test_evidence_receipt_complete_requires_passed(disposition):
         name='other-identity.json', sha256='a' * 64, bytes=3)),
     lambda doc: doc.update(file_errors=[dict(
         name='bundle-identity.json', error='exploded loudly')]),
-    lambda doc: doc.update(detail=dict(report_exit=4),
+    lambda doc: doc.update(detail=dict(report_exit=0),
                            files=[]),
 ])
 def test_evidence_receipt_grammar_refused(change):
@@ -761,7 +761,7 @@ def test_evidence_receipt_detail_tokens_control():
         detail=dict(status='BLOCKED', native_exit=None,
                     timed_out=False, remaining_owned=1,
                     owned_processes=2, reaped_descendants=2,
-                    signal_errors=0, report_exit=4,
+                    signal_errors=0, report_exit=0,
                     files_verified=3, cycles=100,
                     suspicious=0)))
 

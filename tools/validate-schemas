@@ -35,9 +35,11 @@ import sys
 import tempfile
 
 VERSION = "0.1.0"
-REPORT_VERSION = "0.1.1"
+REPORT_VERSION = "0.1.2"
 SESSION_VERSION = "0.1.1"
 SESSION_VERSION_NEXT = "0.1.2"
+SESSION_VERSION_LATEST = "0.1.3"
+VERDICTS = ("complete", "partial_known_loss", "partial_unknown_loss")
 RELATIONS = ("mapping_release", "copy_attribution", "sync_attribution")
 EVENT_VERSION = "0.1.1"
 EVENT_VERSION_NEXT = "0.1.2"
@@ -45,6 +47,7 @@ PROFILE_VERSION = "0.1.1"
 PROFILE_VERSION_NEXT = "0.1.2"
 U64MAX = 18446744073709551615
 U64RE = re.compile(r"(0|[1-9][0-9]{0,19})")
+BPSRE = re.compile(r"(0|[1-9][0-9]{0,3}|10000)")
 IDRE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
 SHA256RE = re.compile(r"sha256:[0-9a-f]{64}")
 BIDRE = re.compile(r"[0-9a-f]{32,64}")
@@ -329,14 +332,17 @@ def check_environment(environment, where):
                    allow_empty=True)
 
 
-def check_stop(stop):
+def check_stop(stop, allow_013=False):
+    optional = ()
+    if allow_013:
+        optional = ("drain_completed", "submit_after_drain")
     check_keys(stop,
                ("outcome", "reason", "budget_ms", "elapsed_ms",
                 "admission_closed", "quiescence_observed",
                 "writers_settled", "in_flight_at_close",
                 "late_submits_drained", "drained_records",
                 "busy_at_drain", "counters_valid", "open_mappings"),
-               (), "stop")
+               optional, "stop")
     check_enum(stop["outcome"], ("complete", "partial"), "stop.outcome")
     check_text(stop["reason"], 512, "stop.reason", allow_empty=True)
     if stop["outcome"] == "complete" and stop["reason"] != "":
@@ -351,6 +357,78 @@ def check_stop(stop):
                 "busy_at_drain", "counters_valid"):
         if not isinstance(stop[key], bool):
             fail("bad-type", "stop.%s must be a boolean" % key)
+    for key in ("drain_completed", "submit_after_drain"):
+        if key in stop and not isinstance(stop[key], bool):
+            fail("bad-type", "stop.%s must be a boolean" % key)
+
+
+def check_verdict(obj, where):
+    check_keys(obj, ("name", "loss_ratio_bps", "delivered"), (), where)
+    name = check_enum(obj["name"], VERDICTS, where + ".name")
+    bps_raw = obj["loss_ratio_bps"]
+    if not isinstance(bps_raw, str) or not BPSRE.fullmatch(bps_raw):
+        fail("bad-bps", "%s.loss_ratio_bps is not canonical 0..10000: %r"
+             % (where, bps_raw))
+    bps = int(bps_raw)
+    delivered = check_u64(obj["delivered"], where + ".delivered")
+    return name, bps, delivered
+
+
+def quiescence_only(stop):
+    if stop["outcome"] != "partial":
+        return False
+    if not stop["admission_closed"]:
+        return False
+    if stop["quiescence_observed"]:
+        return False
+    if not stop.get("drain_completed", False):
+        return False
+    if stop.get("submit_after_drain", False):
+        return False
+    if stop["busy_at_drain"]:
+        return False
+    if not stop["counters_valid"]:
+        return False
+    if int(stop["elapsed_ms"]) > int(stop["budget_ms"]):
+        return False
+    return (int(stop["late_submits_drained"])
+            == int(stop["in_flight_at_close"]))
+
+
+def audit_session_verdict(obj):
+    name, bps, delivered = check_verdict(obj["verdict"],
+                                         "session.verdict")
+    detail = obj["quality"]["detail"]
+    terminal = obj["quality"]["terminal"]
+    stop = obj["stop"]
+    d_known = detail["loss_count"] is not None
+    d_lost = int(detail["loss_count"]) if d_known else 0
+    d_partial = detail["status"] != "complete_for_scope"
+    if terminal["status"] == "complete_for_scope":
+        t_partial = False
+        t_known = stop["outcome"] == "complete"
+    elif terminal["status"] == "partial" and quiescence_only(stop):
+        t_partial, t_known = True, True
+    else:
+        t_partial, t_known = True, False
+    known_lost = (d_lost if d_known else 0)
+    total = known_lost + delivered
+    if total == 0:
+        exp_bps = 0
+    else:
+        exp_bps = ((known_lost // total) * 10000
+                   + ((known_lost % total) * 10000) // total)
+    all_known = d_known and t_known
+    if all_known and known_lost == 0 and not (d_partial or t_partial):
+        exp_name = "complete"
+    elif all_known:
+        exp_name = "partial_known_loss"
+    else:
+        exp_name = "partial_unknown_loss"
+    if name != exp_name or bps != exp_bps:
+        fail("bad-verdict",
+             "session.verdict %s/%d disagrees with recomputed %s/%d"
+             % (name, bps, exp_name, exp_bps))
 
 
 def check_session(obj):
@@ -358,9 +436,10 @@ def check_session(obj):
                ("schema_version", "session_id", "synthetic", "product",
                 "environment", "capture", "device_catalog", "baseline",
                 "capabilities", "quality", "stop"),
-               ("boot_id",), "session")
+               ("boot_id", "verdict"), "session")
     if obj["schema_version"] not in (SESSION_VERSION,
-                                      SESSION_VERSION_NEXT):
+                                      SESSION_VERSION_NEXT,
+                                      SESSION_VERSION_LATEST):
         fail("bad-version", "session schema_version %r"
              % (obj["schema_version"],))
     session_id = check_id(obj["session_id"], "session_id")
@@ -455,8 +534,17 @@ def check_session(obj):
                        "capability.%s.grade" % name)
     check_quality(obj["quality"], "quality",
                     relations_allowed=(obj["schema_version"]
-                                        == SESSION_VERSION_NEXT))
-    check_stop(obj["stop"])
+                                        != SESSION_VERSION))
+    is_latest = obj["schema_version"] == SESSION_VERSION_LATEST
+    check_stop(obj["stop"], allow_013=is_latest)
+    if "verdict" in obj:
+        if not is_latest:
+            fail("bad-version", "session verdict needs schema 0.1.3")
+        audit_session_verdict(obj)
+    stop = obj["stop"]
+    if (not is_latest and ("drain_completed" in stop
+                            or "submit_after_drain" in stop)):
+        fail("bad-version", "session drain keys need schema 0.1.3")
     return {"id": session_id, "synthetic": obj["synthetic"],
             "start": start, "end": end,
             "window_baseline": window_baseline,
@@ -992,7 +1080,8 @@ def compare_report_obj(obj, session, summary):
     check_keys(obj,
                ("schema_version", "session_id", "synthetic",
                 "engine_version", "environment", "device_catalog",
-                "quality", "metrics", "findings", "limitations"),
+                "quality", "verdict", "metrics", "findings",
+                "limitations"),
                ("capabilities",),
                "report")
     if obj["schema_version"] != REPORT_VERSION:
@@ -1016,6 +1105,22 @@ def compare_report_obj(obj, session, summary):
         check_report_capabilities(obj["capabilities"], session)
     check_quality(obj["quality"], "report.quality",
                     relations_allowed=True)
+    name, bps, _ = check_verdict(obj["verdict"], "report.verdict")
+    detail = obj["quality"]["detail"]
+    terminal = obj["quality"]["terminal"]
+    if name == "complete":
+        if (detail["status"] != "complete_for_scope"
+                or terminal["status"] != "complete_for_scope"
+                or detail["loss_count"] != "0"):
+            fail("bad-verdict",
+                 "complete report verdict contradicts its channels")
+    if name == "partial_known_loss":
+        if detail["loss_count"] is None:
+            fail("bad-verdict",
+                 "known-loss report verdict with unknown detail loss")
+        if bps == 0 and detail["loss_count"] != "0":
+            fail("bad-verdict",
+                 "zero-ratio known verdict with nonzero detail loss")
     metrics = obj["metrics"]
     if not isinstance(metrics, list) or len(metrics) > 4096:
         fail("bad-type", "report.metrics")
@@ -1706,8 +1811,10 @@ def run_selftest():
             results.append((True, "%s: %s" % (label, detail or "ok")))
 
     schemas = ("session-v0.1.1.schema.json", "session-v0.1.2.schema.json",
+               "session-v0.1.3.schema.json",
                "event-v0.1.1.schema.json", "event-v0.1.2.schema.json",
                "report-v0.1.0.schema.json", "report-v0.1.1.schema.json",
+               "report-v0.1.2.schema.json",
                "profile-v0.1.1.schema.json",
                "profile-v0.1.2.schema.json",
                "doctor-v0.1.0.schema.json", "doctor-v0.1.1.schema.json",
@@ -2437,19 +2544,18 @@ def run_selftest():
                                  session_012_relations_shape_denied,
                                  "missing-required"))
 
-    def report_011_relations_ok():
+    def report_012_relations_ok():
         session, summary = validate_capture(fixture)
         obj = read_json_file(
             os.path.join(fixture, "expected-report.json"),
             "expected report")
-        obj["schema_version"] = "0.1.1"
         obj["quality"]["correlation"]["relations"] = _relations_selftest(
             "complete_for_scope", "complete_for_scope",
             "complete_for_scope")
         compare_report_obj(obj, session, summary)
-        return "0.1.1 report relations accepted"
+        return "0.1.2 report relations accepted"
 
-    check("report-011-relations", report_011_relations_ok)
+    check("report-012-relations", report_012_relations_ok)
 
     def report_010_denied():
         session, summary = validate_capture(fixture)

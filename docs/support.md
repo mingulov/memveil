@@ -268,7 +268,7 @@ All twelve pass on the 7.0 guest with this bundle.
 
 | Scenario | Record outcome | Remedy family |
 | --- | --- | --- |
-| base | finalizes (exit 4) | none, ready path |
+| base | finalizes (exit 0, partial verdict) | none, ready path |
 | neg-renamed | `verifier-rejected` (exit 3) | verifier lines |
 | neg-layout | finalizes with `copy.unknown_layout` | object binding |
 | neg-shift | finalizes with `copy.unknown_shift` | object binding |

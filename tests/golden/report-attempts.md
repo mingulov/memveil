@@ -2,6 +2,7 @@
 
 - synthetic: yes
 - engine: memveil-0.1.0
+- verdict: partial_unknown_loss (loss >=0.00%, 3 delivered)
 - window: [1000000000,4000000000)
 - duration: 3.000000000 s (3000000000 ns)
 - environment: mode=unknown detection=unverified attestation=not_performed evidence=0

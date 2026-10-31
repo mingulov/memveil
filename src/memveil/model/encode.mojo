@@ -737,6 +737,21 @@ def encode_session(s: Session) raises EncodeError -> String:
     )
     parts.append(_member(String("quality"), _jobj(quality^)))
     parts.append(_member(String("stop"), _encode_stop(s.stop)))
+    if s.has_verdict:
+        if s.verdict_loss_bps < 0 or s.verdict_loss_bps > 10000:
+            raise EncodeError("verdict.loss_ratio_bps", "out of range")
+        var verdict = List[String]()
+        verdict.append(_member(String("name"), _jstr(s.verdict_name)))
+        verdict.append(
+            _member(
+                String("loss_ratio_bps"),
+                _ju64(UInt64(s.verdict_loss_bps)),
+            )
+        )
+        verdict.append(
+            _member(String("delivered"), _ju64(s.verdict_delivered))
+        )
+        parts.append(_member(String("verdict"), _jobj(verdict^)))
     return _jobj(parts^)
 
 
@@ -768,6 +783,19 @@ def _encode_stop(st: StopState) raises EncodeError -> String:
     parts.append(
         _member(String("drained_records"), _ju64(st.drained_records))
     )
+    if st.has_drain_completed:
+        parts.append(
+            _member(
+                String("drain_completed"), _jbool(st.drain_completed)
+            )
+        )
+    if st.has_submit_after_drain:
+        parts.append(
+            _member(
+                String("submit_after_drain"),
+                _jbool(st.submit_after_drain),
+            )
+        )
     parts.append(
         _member(String("busy_at_drain"), _jbool(st.busy_at_drain))
     )
