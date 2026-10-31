@@ -20,6 +20,7 @@ silently evicted, and no refusal corrupts unrelated state.
 | Device identities | 4,096 | `device table exhausted`; event unpaired |
 | Pool table | 1,024 | sample refused; `pool table exhausted` note |
 | Pool detail rows | 256 | extra pools withheld from per-pool rows, counted |
+| Periodic pool samples | 4,096 routine + 64 pressurized | past the routine cap only pressurized samples persist; quiet ticks persist nothing, named in the session note |
 | Mapping devices (detail) | 512 | extra devices folded out of per-device rows |
 | Report metric rows | 4,096 | prefix kept in order; withheld count recorded |
 | Reader line | 64 KiB | `line too large`; capture rejected (exit 2) |

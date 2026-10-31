@@ -2469,17 +2469,34 @@ suite_attempts() {
         0 data.allocator swiotlb || afailed=1
     python3 "$JASSERT" eventfield "$TMP/pool/events.ndjson" \
         0 data.unit_bytes 2048 || afailed=1
-    # Periodic pool sampling stops at 4096 with a session
+    # Routine pool sampling stops at 4096 with a session
     # note: every iteration fires (deadline read plus
     # sample-timestamp read: two scripted seconds per fire)
     # until the cap latches, then the remaining iterations
-    # drain the clock to the deadline without sampling.
+    # drain the clock to the deadline, reading each tick
+    # but persisting pressurized samples only.
     poolcap_kinds=$(python3 -c "print(','.join(['pool_sample'] + ['pool_sample'] * 4096 + ['counter_snapshot'] * 4 + ['pool_sample']))")
-    mcase poolcap 0 5004 5 4 9016 1692322 "$poolcap_kinds"
+    # Post-cap ticks read the clock for their sample stamp
+    # (the read is what keeps the cadence honest), so the
+    # scripted clock drains to the deadline in fewer loop
+    # turns: polls 5004 -> 4601. Events, reads, and
+    # committed bytes are unchanged.
+    mcase poolcap 0 4601 5 4 9016 1692322 "$poolcap_kinds"
     mqual poolcap complete_for_scope 0 complete_for_scope 0 proven
     mreplay poolcap 0 0 0 0
+    # Past the routine cap the cadence keeps reading but
+    # persists pressurized samples only (up to 64); quiet
+    # ticks persist nothing. The poolcap run stays quiet,
+    # so its counts hold and only the note grows.
     python3 "$JASSERT" field "$TMP/poolcap/session.json" \
-        capabilities.pool_stats.reason "default-pool debugfs samples at capture start and close plus 4096 periodic samples (1s cadence); periodic sampling stopped at 4096 (count cap)" \
+        capabilities.pool_stats.reason "default-pool debugfs samples at capture start and close plus 4096 periodic samples (1s cadence); routine sampling stopped at 4096 (count cap); quiet ticks past the cap persist nothing" \
+        || afailed=1
+    poolpressure_kinds=$(python3 -c "print(','.join(['pool_sample'] + ['pool_sample'] * 4160 + ['counter_snapshot'] * 4 + ['pool_sample']))")
+    mcase poolpressure 0 4601 5 4 9016 1739564 "$poolpressure_kinds"
+    mqual poolpressure complete_for_scope 0 complete_for_scope 0 proven
+    mreplay poolpressure 0 0 0 0
+    python3 "$JASSERT" field "$TMP/poolpressure/session.json" \
+        capabilities.pool_stats.reason "default-pool debugfs samples at capture start and close plus 4096 periodic samples (1s cadence); routine sampling stopped at 4096 (count cap); 64 pressurized samples persisted past the cap; post-cap budget exhausted" \
         || afailed=1
     # Live-adapter refusal contract: the real kernel (bad
     # bridge) plus a real fresh writer must end refused
@@ -2523,7 +2540,7 @@ suite_attempts() {
         echo "attempts: close-out matrix FAILED" >&2
         return 1
     fi
-    echo "attempts: close-out matrix passed (46 cases)"
+    echo "attempts: close-out matrix passed (47 cases)"
     return 0
 }
 

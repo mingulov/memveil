@@ -305,3 +305,25 @@ def normalize_pool_sample(
         )
         out.has_hiwater_bytes = True
     return out^
+
+
+def pool_sample_pressured(sample: NormalizedPoolSample) -> Bool:
+    """True when a sample shows pool pressure (collect-side).
+
+    Same predicate the analysis streak uses (used at or
+    above 90% of capacity, both halves present, nonzero
+    capacity): the collector gates post-cap persists on it
+    so a pressure finding can still form past the routine
+    cap. Kept beside the analysis twin by the pool-timer
+    edge vectors.
+    """
+    if not sample.has_used_bytes:
+        return False
+    if not sample.has_capacity_bytes:
+        return False
+    if sample.capacity_bytes == UInt64(0):
+        return False
+    var threshold = sample.capacity_bytes - sample.capacity_bytes // UInt64(
+        10
+    )
+    return sample.used_bytes >= threshold
