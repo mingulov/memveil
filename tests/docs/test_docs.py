@@ -6,9 +6,10 @@ Every local link in user-facing Markdown resolves to a file and,
 for anchored links, a heading; every documented `memveil <verb>`
 names a verb from the usage line in main.mojo and every flag
 beside it exists in that verb's built --help; no document
-carries placeholder markers; and the support envelope and
+carries placeholder markers; the support envelope and
 the agent instructions carry the identical ratified floor
-sentence. The unit-suite file list in
+sentence; and every released version the policy names
+resolves to a git tag. The unit-suite file list in
 tools/test is mirrored against that file's header comment.
 The claim-vs-receipt audit stays
 in the preview-package lane; this lane does not duplicate it.
@@ -335,6 +336,34 @@ def slug(text):
     return text.replace(" ", "-")
 
 
+def git_tags():
+    """Tag set, or None when ROOT owns no git tree.
+
+    A foreign parent repository's tags must never
+    satisfy the policy check: ownership is by top
+    level, with symlinks resolved on both sides.
+    """
+    try:
+        top = subprocess.run(
+            ["git", "-C", ROOT, "rev-parse", "--show-toplevel"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True)
+        if top.returncode != 0:
+            return None
+        if os.path.realpath(top.stdout.strip()) != \
+                os.path.realpath(ROOT):
+            return None
+        proc = subprocess.run(
+            ["git", "-C", ROOT, "tag", "--list"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True)
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    return set(proc.stdout.split())
+
+
 def headings_of(path):
     slugs = set()
     for line in open(path, encoding="utf-8"):
@@ -460,6 +489,20 @@ def main():
                   encoding="utf-8") as handle:
             found = FLOOR_SENTENCE in normalize(handle.read())
         check("floor-sentence-%s" % slug(rel), found, rel)
+    policy = os.path.join(ROOT, "docs", "policy.md")
+    with open(policy, encoding="utf-8") as handle:
+        versions = sorted(set(re.findall(r"v\d+\.\d+\.\d+",
+                                         handle.read())))
+    check("policy-names-versions", len(versions) >= 1,
+          "no vX.Y.Z named")
+    tags = git_tags()
+    if tags is None:
+        print("ok policy-tags-resolve "
+              "(not an owning checkout; skipped)")
+    else:
+        missing = [v for v in versions if v not in tags]
+        check("policy-tags-resolve", not missing,
+              "; ".join(missing))
     help_norm = normalize(dash_help + "\n" + verb_help)
     help_stale = [phrase for phrase in STALE_ABSENCE
                   if phrase in help_norm]
