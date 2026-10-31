@@ -33,7 +33,8 @@ only the `.deb` binary was run on the kernel matrix.
 
 - `record`: SWIOTLB bounce-attempt capture, requested bytes, attach-anchored
   window/deadline, and readable default-pool capacity/used/high-water
-  samples at start, on a best-effort 1 s cadence (cap 4,096), and close,
+  samples at start, on a best-effort 1 s cadence (4,096 routine,
+  then pressurized-only up to 64), and close,
   plus opt-in mapping-lifecycle and copy-actual channels on the admitted
   profile. Admission checks profile bindings, bridge, and privilege.
   Attempts are not outer DMA successes or actual copies.
@@ -101,8 +102,9 @@ Do not silently rewrite a profile hash to make them admitted.
   (`/sys/devices/system/cpu/sev/vmpl` beside the sev-guest
   node), fixture-proven and live-proven on that AWS guest: doctor
   reports `sev-vmpl:0`, matching the kernel's "SNP running at VMPL0".
-- Pool samples are best-effort reads (start, 1 s cadence capped at
-  4,096 with missed ticks skipped, close) and cannot alone diagnose
+- Pool samples are best-effort reads (start, 1 s cadence with
+  4,096 routine samples then pressurized-only persists up to 64,
+  missed ticks skipped, close) and cannot alone diagnose
   sustained pressure. The sampler never resets high-water; equal values
   share an allocator lifetime only if no reset occurred. Dynamic pools
   are outside the reader's scope; see [privacy](privacy.md).

@@ -39,11 +39,13 @@ not a confidential-guest signal.
 - Counter snapshots (bounded u64 attempt/byte counters).
 - Default-pool allocator counters (`io_tlb_used`,
   `io_tlb_nslabs`, `io_tlb_used_hiwater`) sampled at
-  capture start, on a best-effort 1 s cadence (cap 4,096
-  samples), and close: aggregate slot counts only, no
-  addresses or device state. Unreadable counters persist
-  as unavailable halves with a reason, never as zeros.
-  Transient and dynamic pools are not sampled.
+  capture start, on a best-effort 1 s cadence (4,096
+  routine samples, then pressurized samples only up to
+  64 while quiet ticks persist nothing), and close:
+  aggregate slot counts only, no addresses or device
+  state. Unreadable counters persist as unavailable
+  halves with a reason, never as zeros. Transient and
+  dynamic pools are not sampled.
 - Quality per channel (detail, aggregate, correlation,
   baseline, terminal) with loss counts and reasons.
 - Provenance: identity hashes of the admission inputs (BPF

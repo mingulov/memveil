@@ -265,7 +265,8 @@ attempt-only recording falling back to partial diagnostics.
 ## Limits in one paragraph
 
 Attempt collection with default-pool samples at start, on a
-best-effort 1 s cadence (cap 4,096), and close when debugfs
+best-effort 1 s cadence (4,096 routine samples, then
+pressurized-only persists up to 64), and close when debugfs
 is readable. Opportunistic samples with possible gaps cannot
 diagnose sustained pressure alone; no pressure finding does
 not mean no pressure. Lifecycle and executed copies are

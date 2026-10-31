@@ -454,7 +454,8 @@ def _script_poolcap(dir: String):
     iteration fires (deadline read plus sample-timestamp
     read: two seconds per fire) until the cap latches, then
     the remaining iterations drain the clock to the deadline
-    without sampling."""
+    reading each tick but persisting pressurized samples
+    only (none here: the fixture stays quiet)."""
     var kernel = ScriptKernel()
     kernel.add_poll(_timeout(), 10000)
     _zeros(kernel, 5, 4)
@@ -473,6 +474,41 @@ def _script_poolcap(dir: String):
     cfg.duration_s = UInt64(9000)
     cfg.has_pool_sample = True
     cfg.pool_root = String("tests/fixtures/pools/debugfs-ok")
+    var coll = Collector(cfg^)
+    var res = coll.run(kernel, clock, signal, writer)
+    _report(String(""), res)
+    print(String("polls=") + String(kernel.polls_done))
+    print(String("stats=") + String(kernel.stats_done))
+    print(String("snaps=") + String(kernel.snaps_done))
+    print(String("reads=") + String(clock.reads))
+    print(String("committed=") + String(writer.committed_len()))
+
+
+def _script_poolpressure(dir: String):
+    """Nine thousand pressurized seconds: 4096 routine pool
+    samples, then pressurized persists to the 64 post-cap
+    budget with exhaustion latched; further pressurized
+    ticks read but persist nothing. Same clock shape as
+    poolcap; the debugfs-pressure root reads 30000 of
+    32768 slabs used on every tick."""
+    var kernel = ScriptKernel()
+    kernel.add_poll(_timeout(), 10000)
+    _zeros(kernel, 5, 4)
+    var clock = ScriptClock()
+    var base = UInt64(1000000000)
+    clock.add(base)
+    clock.add(base + UInt64(1))
+    clock.add(base + UInt64(2))
+    clock.add(base + UInt64(3))
+    clock.add(base + UInt64(3))
+    clock.add(base + UInt64(3))
+    clock.step = UInt64(1000000000)
+    var signal = ScriptSignal()
+    var writer = ScriptWriter()
+    var cfg = _base_config(dir)
+    cfg.duration_s = UInt64(9000)
+    cfg.has_pool_sample = True
+    cfg.pool_root = String("tests/fixtures/pools/debugfs-pressure")
     var coll = Collector(cfg^)
     var res = coll.run(kernel, clock, signal, writer)
     _report(String(""), res)
@@ -1844,6 +1880,8 @@ def main() raises:
         _script_pool(args[2])
     elif args[1] == String("poolcap"):
         _script_poolcap(args[2])
+    elif args[1] == String("poolpressure"):
+        _script_poolpressure(args[2])
     elif args[1] == String("detfail"):
         _script_detfail(args[2])
     elif args[1] == String("stablen"):

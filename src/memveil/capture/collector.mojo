@@ -61,6 +61,7 @@ from memveil.capture.pools import (
     POOL_SWIOTLB_POOL_ID,
     POOL_SWIOTLB_UNIT,
     NormalizedPoolSample,
+    pool_sample_pressured,
     sample_default_pool,
 )
 from memveil.capture.stop import (
@@ -126,6 +127,7 @@ comptime POLL_QUANTUM_MS = 100
 comptime SETTLE_MS = 100
 comptime POOL_SAMPLE_INTERVAL_NS = UInt64(1000000000)
 comptime POOL_PERIODIC_MAX = 4096
+comptime POOL_POSTCAP_MAX = 64
 
 comptime CNT_OBSERVED = 0
 comptime CNT_OBSERVED_BYTES = 1
@@ -862,6 +864,8 @@ struct Collector:
     var pool_next_ts: UInt64
     var pool_periodic: Int
     var pool_periodic_capped: Bool
+    var pool_postcap: Int
+    var pool_postcap_capped: Bool
     var stop_ctl: StopController
     var stop_drained: Int
     var stop_drain_busy: Bool
@@ -1031,6 +1035,8 @@ struct Collector:
         self.pool_next_ts = UInt64(0)
         self.pool_periodic = 0
         self.pool_periodic_capped = False
+        self.pool_postcap = 0
+        self.pool_postcap_capped = False
         self.stop_ctl = StopController()
         self.stop_drained = 0
         self.stop_drain_busy = False
@@ -2507,21 +2513,21 @@ struct Collector:
         """Persist one periodic pool sample when due; "" otherwise.
 
         Fires at most once per loop iteration on the 1s
-        cadence and stops at 4096 samples with a session
-        note; the resync skips missed ticks without
+        cadence; the resync skips missed ticks without
         backfill bursts. Unavailable reads persist as
-        unavailable samples, never as failed runs.
+        unavailable samples, never as failed runs. Past
+        4096 routine samples the cadence keeps reading
+        but persists pressurized samples only (up to 64),
+        with a session note naming the thinning.
         """
         if not self.cfg.has_pool_sample:
-            return String("")
-        if self.pool_periodic_capped:
             return String("")
         if now < self.pool_next_ts:
             return String("")
         self.pool_next_ts = checked_add(now, POOL_SAMPLE_INTERVAL_NS)
         if self.pool_periodic >= POOL_PERIODIC_MAX:
             self.pool_periodic_capped = True
-            return String("")
+            return self._maybe_sample_pool_postcap(clock, writer)
         var fired = self._sample_pool_now(clock)
         var line: List[UInt8]
         try:
@@ -2540,6 +2546,43 @@ struct Collector:
             if sample.reason != String(""):
                 self.pool_reason = sample.reason
         self.pool_periodic += 1
+        return String("")
+
+    def _maybe_sample_pool_postcap[C: ClockSource, W: WriterSource](
+        mut self, mut clock: C, mut writer: W
+    ) -> String:
+        """Persist one pressurized sample past the routine cap.
+
+        Past 4096 routine samples the cadence keeps reading
+        but persists only pressurized samples (the same 90%
+        predicate the analysis streak uses), up to 64, so a
+        pressure finding can still form on long captures
+        while the capture stays bounded. Quiet ticks persist
+        nothing; the session note names the thinning.
+        """
+        var fired = self._sample_pool_now(clock)
+        if not pool_sample_pressured(fired[0]):
+            return String("")
+        if self.pool_postcap >= POOL_POSTCAP_MAX:
+            self.pool_postcap_capped = True
+            return String("")
+        var line: List[UInt8]
+        try:
+            line = self.pool_sample_event(fired[0], fired[1])
+        except:
+            self.next_seq -= UInt64(1)
+            self.fail(String("error"))
+            return String("error-path")
+        var verdict = self._persist_pool_mid(writer, line, fired[1])
+        if verdict != String(""):
+            return verdict
+        var sample = fired[0]
+        if sample.has_used_bytes or sample.has_capacity_bytes:
+            self.pool_ok = True
+        if self.pool_reason == String(""):
+            if sample.reason != String(""):
+                self.pool_reason = sample.reason
+        self.pool_postcap += 1
         return String("")
 
     def _persist_pool_mid[W: WriterSource](
@@ -3362,10 +3405,26 @@ struct Collector:
             )
             if self.pool_periodic_capped:
                 cadence += (
-                    String("; periodic sampling stopped at ")
+                    String("; routine sampling stopped at ")
                     + format_u64(UInt64(POOL_PERIODIC_MAX))
                     + String(" (count cap)")
                 )
+                if self.pool_postcap > 0:
+                    cadence += (
+                        String("; ")
+                        + format_u64(UInt64(self.pool_postcap))
+                        + String(
+                            " pressurized samples persisted past the cap"
+                        )
+                    )
+                else:
+                    cadence += (
+                        String(
+                            "; quiet ticks past the cap persist nothing"
+                        )
+                    )
+                if self.pool_postcap_capped:
+                    cadence += String("; post-cap budget exhausted")
             if self.pool_reason != String(""):
                 cadence += (
                     String("; first read failure: ") + self.pool_reason
