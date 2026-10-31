@@ -38,7 +38,7 @@ Analysis and replay must not import collection, libbpf, or live environment read
 
 ## Kernel and probe rules
 
-- Initial collection targets x86-64 Linux ≥ 7.0. Older-kernel collection is deferred. Help, version, passive diagnostics, and offline reporting do not require that kernel or collection privileges.
+- Supported collection (ratified 2026-10-31): attempt-trace from Linux 6.0, mapping-lifecycle and copy-actual from 6.11, qualification ceiling 7.3, BTF required. Help, version, passive diagnostics, and offline reporting do not require that kernel or collection privileges.
 - A release string does not prove support. Record exact source/config/BTF/event layout, hook signatures, parameter/return semantics, successful attachment, and validation evidence. Keep availability, attachment, and semantic qualification distinct.
 - Prefer semantic tracepoints for attempts and validated fentry/fexit or other justified kernel hooks for lifecycle data. `uprobe_multi` is a userspace-function attachment mechanism, not a DMA probe substitute.
 - Use bounded maps, explicit exhaustion/loss accounting, bounded records and loops, and allowlisted metadata reads. Do not silently evict correctness state with an LRU map.

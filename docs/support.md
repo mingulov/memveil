@@ -81,9 +81,11 @@ are not provided.
   `nocaps` drops every capability through `setpriv`
   (CapEff 0 in the dropped child), and `memcg` refuses
   `load-enomem` under its calibrated limit.
-- `libbpf-mojo` 0.2.2 declares a 7.0 kernel minimum;
-  below 7.0 this repository's booted matrix is the
-  qualification.
+- `libbpf-mojo` 0.2.2 qualifies bridge primitives
+  from Linux 6.0: its own privileged suite runs on
+  7.0.0-38-generic, and this repository's booted
+  matrix qualifies the 6.0 through 6.10 attempt
+  rows below 7.0.
 
 ## Configuration and artifact admission
 
@@ -144,10 +146,23 @@ are not provided.
 
 ## Kernel generations
 
-Admission is by live interface checks (BTF signatures,
-tracepoint format, ftrace attachability), never by trusting
-the release string. One prebuilt probe set covers every row;
-no rebuild on the device.
+Supported collection (ratified 2026-10-31):
+attempt-trace from Linux 6.0, mapping-lifecycle and
+copy-actual from 6.11, qualification ceiling 7.3, BTF
+required. Admission is by live interface checks (BTF
+signatures, tracepoint format, ftrace attachability),
+never by trusting the release string. One prebuilt probe
+set covers every row; no rebuild on the device.
+
+On 6.0 through 6.10 a default `record` is attempt-only
+(attempt-trace is the default capability and always
+required); requesting lifecycle or copy extras there
+refuses naming the 6.11 floor. Attempt loss counts bind
+strictly from 6.7 and read a partial lower bound on 6.0
+through 6.6. Above the 7.3 ceiling, kernels are servable
+only through the live checks plus a machine-local
+`local-auto` receipt, and never become support claims
+without booted evidence.
 
 Booted 2026-10-24 with the CI-built 0.1.0 `.deb`
 (binary sha256 `ae2d3c13...`, full hash in the
@@ -207,13 +222,13 @@ Notes:
   by the same live checks. They are moving targets: a
   newer rc that changes a shape is refused fail-closed
   with the exact diff, never silently admitted.
-- Trying a 7.4 pre-alpha means two checks: the source
-  check above (re-fetch mainline
-  `kernel/dma/swiotlb.c` and the trace header, diff the
-  five hooks plus the tracepoint fields), then a boot
-  check (run `doctor` and `record` on the new kernel).
-  Admission without the boot check is not a support
-  claim.
+- Trying a 7.4 pre-alpha above the ceiling means
+  two checks: a source check (re-fetch
+  mainline `kernel/dma/swiotlb.c` and the trace
+  header, diff the five hooks plus the tracepoint
+  fields), then a boot check (run `doctor` and
+  `record` on the new kernel). Admission without
+  the boot check is not a support claim.
 - Admission is not qualification: booted matrix evidence
   stays on the tested kernel and artifact. Other
   builds additionally need a machine-local `local-auto`
