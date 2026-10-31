@@ -41,7 +41,7 @@ report against the sealed ledger with any mismatch failing
 its comparison. Inner allocations and outer outcomes remain distinct.
 The laboratory translator reconstructs operation identity by unique size;
 its capture is synthetic, attempts are derived, correlation is unpaired,
-and terminal quality stays partial (report exit 4). A separate authored synthetic projection uses the synthetic backend and
+and terminal quality stays partial (report exit 0 with a partial verdict). A separate authored synthetic projection uses the synthetic backend and
 profile identity, with direct relations only within its authored model;
 that is reducer consistency evidence, not observational pairing.
 Report lifetimes in that projection are compared exactly to independently extracted probe intervals; the separate
@@ -168,14 +168,14 @@ precondition and the lane proves nothing live.
 ## Fuzz oracle (`tests/fuzz/run.py`)
 
 Replays deterministically mutated seed captures through the
-built report verb. Every case must exit 0, 2, or 4 with no
+built report verb. Every case must exit 0 or 2 with no
 crash marker on either stream; exit 2 must leave stdout empty
-and stderr non-empty; exit 0 and exit 4 must emit valid
-JSON.
+and stderr non-empty; exit 0 must emit valid
+JSON. (Exit 4 needs `--strict`, which the harness never
+passes.)
 
 Scope limits:
 
-- Exit 4 output must parse as JSON but is not schema-checked.
 - Mutation covers replay robustness, not kernel semantics.
 
 ## Soak gate (`tests/perf/soak.py`)

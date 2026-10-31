@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""A dropped map's release exits degraded, or refuses under complete."""
+"""A dropped map's release renders degraded, or refuses under complete."""
 
 import json
 import subprocess
@@ -20,8 +20,8 @@ def mapping_status(fixture):
 
 
 class DanglingUnmapExit(unittest.TestCase):
-    def report(self, fixture):
-        return subprocess.run([BIN, "report", ROOT / fixture],
+    def report(self, fixture, *flags):
+        return subprocess.run([BIN, "report", *flags, ROOT / fixture],
                               capture_output=True, text=True)
 
     def test_release_exit_follows_mapping_class(self):
@@ -32,8 +32,11 @@ class DanglingUnmapExit(unittest.TestCase):
         self.assertEqual(mapping_status(DENY), "complete_for_scope")
         with self.subTest(mapping_release="partial"):
             proc = self.report(OK)
-            self.assertEqual(proc.returncode, 4, proc.stderr)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertNotEqual(proc.stdout, "")
+            strict = self.report(OK, "--strict")
+            self.assertEqual(strict.returncode, 4, strict.stderr)
+            self.assertNotEqual(strict.stdout, "")
         with self.subTest(mapping_release="complete_for_scope"):
             proc = self.report(DENY)
             self.assertEqual(proc.returncode, 2, proc.stderr)

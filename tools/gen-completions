@@ -29,16 +29,17 @@ FROZEN_FLAGS = {
     "record": ("--bridge", "--capability", "--cp-object",
                "--device", "--duration", "--help", "--lc-object",
                "--max-events-bytes", "--object", "--output",
-               "--profile", "--profiles-dir", "-h"),
+               "--profile", "--profiles-dir", "--strict", "-h"),
     "report": ("--allow-partial", "--format", "--help",
                "--long-lived-after", "--max-events-bytes",
-               "--max-line-bytes", "--max-session-bytes", "-h"),
-    "top": ("--bridge", "--capability", "--cp-object",
+               "--max-line-bytes", "--max-session-bytes",
+               "--strict", "-h"),
+    "top": ("--bridge", "--capability", "--compact", "--cp-object",
             "--device", "--duration", "--help", "--interval",
             "--lc-object", "--long-lived-after",
             "--max-events-bytes", "--max-line-bytes",
             "--max-session-bytes", "--object", "--output",
-            "--profile", "--profiles-dir", "-h"),
+            "--profile", "--profiles-dir", "--strict", "-h"),
     "doctor": ("--bridge", "--capability", "--cp-object",
                "--help", "--json", "--lc-object", "--load-check",
                "--object", "--profiles-dir", "-h"),
@@ -47,8 +48,8 @@ FROZEN_FLAGS = {
                 "--output", "--profile", "--profiles-dir", "-h"),
 }
 FROZEN_FORMAT_VALUES = ("text", "json", "markdown")
-FROZEN_NOVALUE_FLAGS = ("--help", "--allow-partial", "--json",
-                          "--load-check", "-h")
+FROZEN_NOVALUE_FLAGS = ("--help", "--allow-partial", "--compact", "--json",
+                          "--load-check", "--strict", "-h")
 
 # One-line zsh descriptions; flag presence (not these words)
 # is what the drift guard pins.
@@ -57,6 +58,7 @@ _ZSH_DESC = {
     "--allow-partial": "drop a truncated final record",
     "--bridge": "explicit bridge path",
     "--capability": "extra channel ids",
+    "--compact": "short verdict headlines",
     "--cp-object": "copy channel object",
     "--device": "device rows to show",
     "--duration": "capture seconds",
@@ -74,6 +76,7 @@ _ZSH_DESC = {
     "--output": "capture directory",
     "--profile": "profile id or path",
     "--profiles-dir": "profiles directory",
+    "--strict": "exit 4 unless complete",
 }
 
 

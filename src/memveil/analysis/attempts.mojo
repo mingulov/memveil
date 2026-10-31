@@ -23,12 +23,19 @@ rules:
 
 from memveil.model.event import Event
 from memveil.model.metric import Finding, Metric
-from memveil.model.report import ENGINE_VERSION, Report, ReportCap
+from memveil.model.report import (
+    ENGINE_VERSION,
+    Report,
+    ReportCap,
+    incomplete_finding_severity,
+    verdict_for_counts,
+)
 from memveil.model.session import (
     Capability,
     Channel,
     Session,
     rollup_correlation,
+    terminal_loss_leg,
     truncate_codepoints,
 )
 from memveil.model.validate import checked_add, format_u64
@@ -1846,6 +1853,28 @@ struct AttemptAnalyzer:
                     m.confidence = String("medium")
                     out.metrics[i] = m^
         self._compare_counters(out)
+        # The verdict judges the detail measurement: delivered counts
+        # bounce_attempt records only, matching the collector's
+        # persisted_attempt on intact loads (gap markers and closing
+        # records belong to neither side). The counters leg is the
+        # cross-check above; the terminal leg reuses the record-side
+        # stop predicate, so the report verdict is never better than
+        # the record verdict. It is computed before the finding so
+        # bounded zero-loss incompleteness demotes to a note.
+        var term = terminal_loss_leg(
+            out.q_terminal.status, self._session.stop
+        )
+        out.detail_delivered = UInt64(self._total_count)
+        out.verdict = verdict_for_counts(
+            not out.counter_disagreement,
+            out.q_detail.has_loss_count,
+            out.q_detail.loss_count,
+            out.q_detail.status != String("complete_for_scope"),
+            term[0],
+            term[1],
+            term[2],
+            UInt64(self._total_count),
+        )
         var causes = List[String]()
         var refs = List[String]()
         if self._detail_gaps > 0:
@@ -1896,7 +1925,9 @@ struct AttemptAnalyzer:
         if len(causes) > 0:
             var f = Finding()
             f.code = String("CAPTURE_INCOMPLETE")
-            f.severity = String("warning")
+            f.severity = incomplete_finding_severity(
+                out.verdict.name, out.verdict.loss_ratio_bps
+            )
             var expl = String("Capture incomplete: ")
             for i in range(len(causes)):
                 if i > 0:

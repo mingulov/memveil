@@ -1,5 +1,5 @@
 {
-  "schema_version": "0.1.1",
+  "schema_version": "0.1.2",
   "session_id": "attempts-3-session",
   "synthetic": true,
   "engine_version": "authored-fixture",
@@ -61,6 +61,11 @@
       "scope": "authored fixture finalization",
       "reason": "Authored fixture: finalized."
     }
+  },
+  "verdict": {
+    "name": "partial_unknown_loss",
+    "loss_ratio_bps": "0",
+    "delivered": "3"
   },
   "metrics": [
     {

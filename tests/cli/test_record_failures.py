@@ -94,9 +94,13 @@ def main():
     shutil.copytree(ATTEMPTS, cap)
     before = tree_hash(cap)
     r1 = subprocess.run([BIN, "report", cap], capture_output=True, text=True)
-    check("pure-report", r1.returncode in (0, 4), "exit %d" % r1.returncode)
+    check("pure-report", r1.returncode == 0, "exit %d" % r1.returncode)
     r2 = subprocess.run([BIN, "top", cap], capture_output=True, text=True)
-    check("pure-top", r2.returncode in (0, 4), "exit %d" % r2.returncode)
+    check("pure-top", r2.returncode == 0, "exit %d" % r2.returncode)
+    r3 = subprocess.run([BIN, "report", "--strict", cap],
+                        capture_output=True, text=True)
+    check("pure-report-strict", r3.returncode == 4,
+          "exit %d" % r3.returncode)
     check("pure-identical", tree_hash(cap) == before)
 
     # 100 denied-record plus replay cycles: stable exits, no residue.
@@ -112,7 +116,7 @@ def main():
                   % (p.returncode, os.path.exists(out)))
         q = subprocess.run([BIN, "report", ATTEMPTS],
                            capture_output=True, text=True)
-        if q.returncode not in (0, 4):
+        if q.returncode != 0:
             check("cycle-report-%d" % i, False,
                   "exit %d" % q.returncode)
     check("cycles-clean", os.listdir(cyc) == [])

@@ -80,7 +80,7 @@ from memveil.model.event import (
     Gap,
     PoolSample,
 )
-from memveil.model.report import ENGINE_VERSION
+from memveil.model.report import ENGINE_VERSION, verdict_for_session
 from memveil.model.session import (
     CORR_SCOPE_COPY,
     CORR_SCOPE_MAPPING,
@@ -428,6 +428,9 @@ struct CollectorConfig(Copyable, Movable):
     # True when attempt loss counts are a lower bound
     # (kernels before 6.7 skip uncounted programs).
     var attempt_loss_lower_bound: Bool
+    # True when the run must exit 4 unless the record
+    # verdict is complete (--strict).
+    var strict: Bool
 
     def __init__(out self):
         self.duration_s = UInt64(60)
@@ -457,6 +460,7 @@ struct CollectorConfig(Copyable, Movable):
         self.has_device_filter = False
         self.device_filter = String("")
         self.attempt_loss_lower_bound = False
+        self.strict = False
 
 
 @fieldwise_init
@@ -1006,6 +1010,8 @@ struct Collector:
             0,
             False,
             False,
+            False,
+            False,
             0,
         )
         self.has_stop_evidence = False
@@ -1090,16 +1096,17 @@ struct Collector:
         )
 
     def _final_exit_code(self, session: Session) -> Int:
-        """Exit 0 needs settled termination and sufficient detail.
+        """Exit 0 for a finalized capture; strict needs completeness.
 
-        Complete stop evidence alone is not enough: a
-        partial or unavailable detail channel keeps exit 4.
-        Aggregate-only gaps keep the sufficient exit, as in
-        replay.
+        A finalized session is valid no matter what it records, so
+        the normal exit is 0 and completeness rides in the session
+        verdict. Under --strict only a complete record verdict keeps
+        0; anything else exits 4.
         """
-        if self._stop_complete() and (
-            session.q_detail.status == String("complete_for_scope")
-        ):
+        if not self.cfg.strict:
+            return EXIT_OK
+        var verdict = verdict_for_session(session, self.persisted_attempt)
+        if verdict.name == String("complete"):
             return EXIT_OK
         return EXIT_PARTIAL
 
@@ -1151,6 +1158,8 @@ struct Collector:
                 0,
                 False,
                 False,
+                False,
+                False,
                 0,
             )
         else:
@@ -1175,6 +1184,8 @@ struct Collector:
                     0,
                     0,
                     0,
+                    False,
+                    False,
                     False,
                     False,
                     0,
@@ -3524,6 +3535,10 @@ struct Collector:
         out.stop.in_flight_at_close = UInt64(stop.in_flight_at_close)
         out.stop.late_submits_drained = UInt64(stop.late_submits_drained)
         out.stop.drained_records = UInt64(stop.drained_records)
+        out.stop.drain_completed = stop.has_drained
+        out.stop.submit_after_drain = stop.submit_after_drain
+        out.stop.has_drain_completed = True
+        out.stop.has_submit_after_drain = True
         out.stop.busy_at_drain = stop.busy_at_drain
         out.stop.counters_valid = stop.counters_valid
         out.stop.open_mappings = UInt64(stop.open_mappings)
@@ -3544,6 +3559,11 @@ struct Collector:
                 + String(": ")
                 + stop.reason
             )
+        var record_verdict = verdict_for_session(out, self.persisted_attempt)
+        out.has_verdict = True
+        out.verdict_name = record_verdict.name
+        out.verdict_loss_bps = record_verdict.loss_ratio_bps
+        out.verdict_delivered = self.persisted_attempt
         for i in range(len(self.cfg.evidence)):
             var item = self.cfg.evidence[i]
             var kept = EvidenceItem()

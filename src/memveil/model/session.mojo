@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Typed capture session: session.json, formats 0.1.1 and 0.1.2.
+"""Typed capture session: session.json, formats 0.1.1 to 0.1.3.
 
 The parser validates the whole document against the frozen session
 schemas: required fields, version membership, enum membership, string
 lengths, array item caps, and no unknown or duplicated keys. Format
 0.1.2 adds the optional correlation relations object; 0.1.1
-documents carrying relations are refused. The observation window
-must satisfy start <= end; an empty window is valid and simply
-matches no event. Device IDs must be unique within the catalog.
+documents carrying relations are refused. Format 0.1.3 adds the
+optional record verdict object plus the optional drain_completed
+and submit_after_drain stop keys; older documents carrying any of
+them are refused. The observation window must satisfy start <= end;
+an empty window is valid and simply matches no event. Device IDs
+must be unique within the catalog.
 """
 
 from memveil.jsonscan import Scanner
@@ -39,8 +42,9 @@ comptime MAX_DEVICES = 4096
 comptime MAX_REGION_OBSERVATIONS = 4096
 comptime MAX_HOOKS = 32
 comptime MAX_EVIDENCE_REFS = 32
-comptime SESSION_SCHEMA_VERSION = "0.1.2"
-comptime SESSION_SCHEMA_VERSION_PREV = "0.1.1"
+comptime SESSION_SCHEMA_VERSION = "0.1.3"
+comptime SESSION_SCHEMA_VERSION_PREV = "0.1.2"
+comptime SESSION_SCHEMA_VERSION_PREV2 = "0.1.1"
 comptime PRODUCT_NAME = "memveil"
 
 comptime CORR_RELATION_MAPPING = "mapping_release"
@@ -404,6 +408,10 @@ struct StopState(Copyable):
     var in_flight_at_close: UInt64
     var late_submits_drained: UInt64
     var drained_records: UInt64
+    var drain_completed: Bool
+    var submit_after_drain: Bool
+    var has_drain_completed: Bool
+    var has_submit_after_drain: Bool
     var busy_at_drain: Bool
     var counters_valid: Bool
     var open_mappings: UInt64
@@ -419,9 +427,60 @@ struct StopState(Copyable):
         self.in_flight_at_close = UInt64(0)
         self.late_submits_drained = UInt64(0)
         self.drained_records = UInt64(0)
+        self.drain_completed = False
+        self.submit_after_drain = False
+        self.has_drain_completed = False
+        self.has_submit_after_drain = False
         self.busy_at_drain = False
         self.counters_valid = False
         self.open_mappings = UInt64(0)
+
+
+def quiescence_only_spillover(stop: StopState) -> Bool:
+    """True when quiescence is the only unproven stop stage.
+
+    Every other stage must carry its proof: admission closed, drain
+    ran, no busy ring, no submit past the drain, counters sampled,
+    budget met, and every in-flight submission drained. Writer settle
+    counts and open mappings are not record evidence and do not gate.
+    Sessions without stop proof (default fields) fail closed.
+    """
+    if stop.outcome != String("partial"):
+        return False
+    if not stop.admission_closed:
+        return False
+    if stop.quiescence_observed:
+        return False
+    if not stop.drain_completed:
+        return False
+    if stop.submit_after_drain:
+        return False
+    if stop.busy_at_drain:
+        return False
+    if not stop.counters_valid:
+        return False
+    if stop.elapsed_ms > stop.budget_ms:
+        return False
+    return stop.late_submits_drained == stop.in_flight_at_close
+
+
+def terminal_loss_leg(
+    status: String, stop: StopState
+) -> Tuple[Bool, Bool, UInt64]:
+    """Terminal verdict leg: (partial, loss known, lost count).
+
+    A complete label counts only with a proving complete outcome; a
+    bare label with no stop evidence stays unknown. Partial counts as
+    known-zero only through the quiescence-only spillover rule. Any
+    other status fails closed to unknown with zero claimed loss.
+    """
+    if status == String("complete_for_scope"):
+        if stop.outcome == String("complete"):
+            return (False, True, UInt64(0))
+        return (False, False, UInt64(0))
+    if status == String("partial") and quiescence_only_spillover(stop):
+        return (True, True, UInt64(0))
+    return (True, False, UInt64(0))
 
 
 def _check_env_mode(v: String) raises:
@@ -1388,6 +1447,10 @@ struct Session(Copyable):
     var q_baseline: Channel
     var q_terminal: Channel
     var stop: StopState
+    var has_verdict: Bool
+    var verdict_name: String
+    var verdict_loss_bps: Int
+    var verdict_delivered: UInt64
 
     def __init__(out self):
         self.session_id = String("")
@@ -1437,6 +1500,10 @@ struct Session(Copyable):
         self.q_baseline = Channel()
         self.q_terminal = Channel()
         self.stop = StopState()
+        self.has_verdict = False
+        self.verdict_name = String("")
+        self.verdict_loss_bps = 0
+        self.verdict_delivered = UInt64(0)
 
     def __copyinit__(mut self, existing: Self):
         self.session_id = existing.session_id
@@ -1486,6 +1553,10 @@ struct Session(Copyable):
         self.q_baseline = existing.q_baseline.copy()
         self.q_terminal = existing.q_terminal.copy()
         self.stop = existing.stop.copy()
+        self.has_verdict = existing.has_verdict
+        self.verdict_name = existing.verdict_name
+        self.verdict_loss_bps = existing.verdict_loss_bps
+        self.verdict_delivered = existing.verdict_delivered
 
 
 def _parse_product(mut scan: Scanner, mut out: Session) raises:
@@ -1621,6 +1692,70 @@ def _check_stop_outcome(v: String) raises:
     raise ValidationError("stop.outcome", "bad enum")
 
 
+def _check_verdict_name(v: String) raises:
+    if (
+        v == "complete"
+        or v == "partial_known_loss"
+        or v == "partial_unknown_loss"
+    ):
+        return
+    raise ValidationError("verdict.name", "bad enum")
+
+
+def _parse_verdict(mut scan: Scanner, mut out: Session) raises:
+    """Parse the optional 0.1.3 record verdict object.
+
+    Both fields are required when present. The version gate
+    lives in parse_session, so refusing a verdict in a legacy
+    document never depends on key order.
+    """
+    scan.begin_object()
+    var has_name = False
+    var has_bps = False
+    var has_delivered = False
+    if not object_is_empty(scan):
+        while True:
+            scan.skip_ws()
+            var key = scan.parse_string()
+            expect_colon(scan, "verdict")
+            if key == "name":
+                if has_name:
+                    raise ValidationError("verdict.name", "duplicate")
+                var v = scan.parse_string()
+                _check_verdict_name(v)
+                out.verdict_name = v
+                has_name = True
+            elif key == "loss_ratio_bps":
+                if has_bps:
+                    raise ValidationError(
+                        "verdict.loss_ratio_bps", "duplicate"
+                    )
+                var v = parse_u64_field(scan, "verdict.loss_ratio_bps")
+                if v > UInt64(10000):
+                    raise ValidationError(
+                        "verdict.loss_ratio_bps", "out of range"
+                    )
+                out.verdict_loss_bps = Int(v)
+                has_bps = True
+            elif key == "delivered":
+                if has_delivered:
+                    raise ValidationError(
+                        "verdict.delivered", "duplicate"
+                    )
+                out.verdict_delivered = parse_u64_field(
+                    scan, "verdict.delivered"
+                )
+                has_delivered = True
+            else:
+                raise ValidationError("verdict", "unknown verdict field")
+            if not object_next(scan, "verdict"):
+                break
+    scan.end_object()
+    if not has_name or not has_bps or not has_delivered:
+        raise ValidationError("verdict", "missing field")
+    out.has_verdict = True
+
+
 def _parse_stop(mut scan: Scanner) raises -> StopState:
     scan.begin_object()
     var out = StopState()
@@ -1718,6 +1853,22 @@ def _parse_stop(mut scan: Scanner) raises -> StopState:
                     scan, "stop.drained_records"
                 )
                 has_drained = True
+            elif key == "drain_completed":
+                if out.has_drain_completed:
+                    raise ValidationError(
+                        "stop.drain_completed", "duplicate"
+                    )
+                scan.skip_ws()
+                out.drain_completed = scan.parse_bool()
+                out.has_drain_completed = True
+            elif key == "submit_after_drain":
+                if out.has_submit_after_drain:
+                    raise ValidationError(
+                        "stop.submit_after_drain", "duplicate"
+                    )
+                scan.skip_ws()
+                out.submit_after_drain = scan.parse_bool()
+                out.has_submit_after_drain = True
             elif key == "busy_at_drain":
                 if has_busy:
                     raise ValidationError("stop.busy_at_drain", "duplicate")
@@ -1786,6 +1937,7 @@ def parse_session(data: List[UInt8]) raises -> Session:
     var has_caps = False
     var has_quality = False
     var has_stop = False
+    var has_verdict_key = False
     if not object_is_empty(scan):
         while True:
             scan.skip_ws()
@@ -1798,6 +1950,7 @@ def parse_session(data: List[UInt8]) raises -> Session:
                 if (
                     v != SESSION_SCHEMA_VERSION
                     and v != SESSION_SCHEMA_VERSION_PREV
+                    and v != SESSION_SCHEMA_VERSION_PREV2
                 ):
                     raise ValidationError("schema_version", "bad const")
                 out_version = v
@@ -1882,6 +2035,11 @@ def parse_session(data: List[UInt8]) raises -> Session:
                     raise ValidationError("stop", "duplicate")
                 out.stop = _parse_stop(scan)
                 has_stop = True
+            elif key == "verdict":
+                if has_verdict_key:
+                    raise ValidationError("verdict", "duplicate")
+                _parse_verdict(scan, out)
+                has_verdict_key = True
             else:
                 raise ValidationError("session", "unknown session field")
             if not object_next(scan, "session"):
@@ -1903,11 +2061,25 @@ def parse_session(data: List[UInt8]) raises -> Session:
         raise ValidationError("session", "missing field")
     if out.synthetic != (out.capture_mode == "synthetic"):
         raise ValidationError("synthetic", "contradicts capture mode")
-    if out_version == SESSION_SCHEMA_VERSION_PREV:
+    if out_version == SESSION_SCHEMA_VERSION_PREV2:
         if out.has_corr_relations:
             raise ValidationError(
                 "quality.correlation.relations",
                 "relations need schema 0.1.2",
+            )
+    if out_version != SESSION_SCHEMA_VERSION:
+        if out.has_verdict:
+            raise ValidationError(
+                "verdict",
+                "verdict needs schema 0.1.3",
+            )
+        if (
+            out.stop.has_drain_completed
+            or out.stop.has_submit_after_drain
+        ):
+            raise ValidationError(
+                "stop",
+                "drain keys need schema 0.1.3",
             )
     scan.skip_ws()
     if not scan.at_end():

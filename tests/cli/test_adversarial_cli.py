@@ -52,8 +52,14 @@ def main():
 
     p = run(["report", "--allow-partial",
              os.path.join(READER, "partial-tail")])
-    check("tail-partial", p.returncode == 4, "exit %d" % p.returncode)
+    check("tail-partial", p.returncode == 0, "exit %d" % p.returncode)
     check("tail-partial-stdout", p.stdout != "")
+
+    p = run(["report", "--strict", "--allow-partial",
+             os.path.join(READER, "partial-tail")])
+    check("tail-partial-strict", p.returncode == 4,
+          "exit %d" % p.returncode)
+    check("tail-partial-strict-stdout", p.stdout != "")
 
     p = run(["report", "--allow-partial",
              os.path.join(READER, "corrupt-tail")])

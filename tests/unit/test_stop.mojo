@@ -229,11 +229,11 @@ def test_failed_admission_close_partial() raises:
     assert_true(not ev.admission_closed)
 
 
-def test_closeout_records_stop_evidence() raises:
-    # A scripted full run records exact terminal stop
-    # evidence: admission closed, quiescence unproven (no
-    # kernel protocol observes it), three drained batches,
-    # valid end counters, exit 4.
+def _stop_run_evidence(strict: Bool) raises -> Tuple[Int, String]:
+    # The scripted quiescence-unproven run: admission closed,
+    # quiescence unproven (no kernel protocol observes it),
+    # three drained batches, valid end counters. Returns the
+    # exit code plus the scratch root for session parsing.
     var tmp = _stop_mkdtemp()
     var cfg = CollectorConfig()
     cfg.duration_s = UInt64(0)
@@ -241,6 +241,7 @@ def test_closeout_records_stop_evidence() raises:
     cfg.output = tmp + String("/cap")
     cfg.profile_id = String("stop-evidence-probe")
     cfg.pid = 4242
+    cfg.strict = strict
     var kernel = ScriptKernel()
     kernel.add_poll(_stop_batch(), 3)
     kernel.add_poll(_stop_timeout(), 300)
@@ -261,8 +262,19 @@ def test_closeout_records_stop_evidence() raises:
     var writer = ScriptWriter()
     var collector = Collector(cfg^)
     var result = collector.run(kernel, clock, signal, writer)
-    assert_equal(result.exit_code, 4)
     assert_equal(result.end_reason, String("duration"))
+    return (result.exit_code, tmp)
+
+
+def test_closeout_records_stop_evidence() raises:
+    # A scripted full run records exact terminal stop
+    # evidence: admission closed, quiescence unproven (no
+    # kernel protocol observes it), three drained batches,
+    # valid end counters. OD25-2: a finalized capture exits
+    # 0; completeness rides in the session verdict.
+    var res = _stop_run_evidence(False)
+    assert_equal(res[0], 0)
+    var tmp = res[1].copy()
     var parsed = False
     var s = Session()
     try:
@@ -286,6 +298,13 @@ def test_closeout_records_stop_evidence() raises:
     assert_equal(s.stop.open_mappings, UInt64(0))
 
 
+def test_closeout_strict_partial() raises:
+    # The same quiescence-unproven run under --strict exits 4:
+    # the record verdict is not complete.
+    var res = _stop_run_evidence(True)
+    assert_equal(res[0], 4)
+
+
 def test_closeout_detach_failure_partial() raises:
     # A failed detach finalizes partial with the admission
     # reason; the close is not claimed.
@@ -306,7 +325,8 @@ def test_closeout_detach_failure_partial() raises:
     var writer = ScriptWriter()
     var collector = Collector(cfg^)
     var result = collector.run(kernel, clock, signal, writer)
-    assert_equal(result.exit_code, 4)
+    # OD25-2: finalized exits 0.
+    assert_equal(result.exit_code, 0)
     var parsed = False
     var s = Session()
     try:
@@ -505,26 +525,34 @@ def test_barrier_in_flight_snapshot_at_close() raises:
     assert_equal(ev.in_flight_at_close, 1)
 
 
-def test_final_exit_requires_detail_sufficiency() raises:
-    # Exit 0 needs both settled termination and
-    # sufficient requested detail: complete stop evidence
-    # with a partial or unavailable detail channel stays
-    # exit 4, judged on the assembled session.
+def test_final_exit_normal_zero_strict_verdict() raises:
+    # OD25-2: a finalized session exits 0 no matter what it
+    # records; strict exits 4 unless the record verdict computed
+    # from the assembled session is complete.
     var tmp = _stop_mkdtemp()
     var cfg = CollectorConfig()
     cfg.output = tmp + String("/cap")
     var collector = Collector(cfg^)
-    collector.has_stop_evidence = True
-    collector.stop_evidence.outcome = String("complete")
     var s = Session()
     s.q_detail.status = String("partial")
-    assert_equal(collector._final_exit_code(s), EXIT_PARTIAL)
+    assert_equal(collector._final_exit_code(s), EXIT_OK)
     s.q_detail.status = String("unavailable")
-    assert_equal(collector._final_exit_code(s), EXIT_PARTIAL)
+    assert_equal(collector._final_exit_code(s), EXIT_OK)
     s.q_detail.status = String("complete_for_scope")
     assert_equal(collector._final_exit_code(s), EXIT_OK)
-    collector.stop_evidence.outcome = String("partial")
-    assert_equal(collector._final_exit_code(s), EXIT_PARTIAL)
+    var scfg = CollectorConfig()
+    scfg.output = tmp + String("/cap-strict")
+    scfg.strict = True
+    var strict_collector = Collector(scfg^)
+    var clean = Session()
+    clean.q_detail.status = String("complete_for_scope")
+    clean.q_detail.has_loss_count = True
+    clean.q_detail.loss_count = UInt64(0)
+    clean.q_terminal.status = String("complete_for_scope")
+    clean.stop.outcome = String("complete")
+    assert_equal(strict_collector._final_exit_code(clean), EXIT_OK)
+    clean.q_detail.status = String("partial")
+    assert_equal(strict_collector._final_exit_code(clean), EXIT_PARTIAL)
 
 
 def test_stop_counters_require_usable_cuts() raises:
@@ -620,7 +648,8 @@ def test_signal_storm_first_latch_stands() raises:
     var writer = ScriptWriter()
     var collector = Collector(cfg^)
     var result = collector.run(kernel, clock, signal, writer)
-    assert_equal(result.exit_code, 4)
+    # OD25-2: finalized exits 0.
+    assert_equal(result.exit_code, 0)
     assert_equal(result.end_reason, String("signal"))
     assert_equal(signal.checks, 4)
     assert_equal(signal.idx, 4)
@@ -742,11 +771,12 @@ def run() raises -> Int:
     suite.test[test_barrier_redrain_invalidates_sample]()
     suite.test[test_barrier_in_flight_snapshot_at_close]()
     suite.test[test_stop_complete_gate]()
-    suite.test[test_final_exit_requires_detail_sufficiency]()
+    suite.test[test_final_exit_normal_zero_strict_verdict]()
     suite.test[test_stop_counters_require_usable_cuts]()
     suite.test[test_stop_finalize_elapsed_honest]()
     suite.test[test_failed_admission_close_partial]()
     suite.test[test_closeout_records_stop_evidence]()
+    suite.test[test_closeout_strict_partial]()
     suite.test[test_closeout_detach_failure_partial]()
     suite.test[test_signal_storm_first_latch_stands]()
     suite.test[test_refusal_closes_session_once]()

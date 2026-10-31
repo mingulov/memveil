@@ -5,7 +5,7 @@
 ``run_record`` implements ``record --duration SEC --max-events-bytes
 N --output DIR [--object PATH] [--bridge PATH] [--profile ID]
 [--capability IDS] [--lc-object PATH] [--cp-object PATH]
-[--device NAME]`` against
+[--device NAME] [--strict]`` against
 the live host. ``run_record_with`` is the same flow against an
 explicit evidence root and profiles directory (plus an
 optional literal ``--device NAME`` attempt selector), so
@@ -14,8 +14,10 @@ collection run through the shared collection service; this
 module owns only record argument parsing, usage, dispatch, and
 rendering.
 
-Exit codes: 4 = finalized (NORMAL including zero-event runs,
-signal stops, and known-loss runs); 3 = cannot start
+Exit codes: 0 = finalized (NORMAL including zero-event runs,
+signal stops, and known-loss runs; completeness rides in the
+session verdict); 4 = --strict run whose record verdict is not
+complete; 3 = cannot start
 (diagnostic, no residual directory); 2 = usage (fixable via
 argv); 1 = error or unfinalizable. Only a broken standard
 error raises.
@@ -51,7 +53,7 @@ def record_usage() -> String:
         "       [--bridge PATH] [--profile ID|PATH]\n"
         "       [--profiles-dir DIR] [--capability IDS]\n"
         "       [--lc-object PATH] [--cp-object PATH]\n"
-        "       [--device NAME]\n"
+        "       [--device NAME] [--strict]\n"
         "\n"
         "Capture swiotlb bounce attempts into DIR. SEC defaults\n"
         "to 60; N defaults to 1073741824 (1 GiB, the replay\n"
@@ -90,8 +92,12 @@ def record_usage() -> String:
         "the selector is recorded in the session capture\n"
         "filters with its dropped-attempt count.\n"
         "\n"
-        "Exit 4 for a finalized capture (including zero-event\n"
-        "and signal stops), 3 when the run cannot start, 2 on\n"
+        "--strict exits 4 unless the record verdict is complete.\n"
+        "\n"
+        "Exit 0 for a finalized capture (including zero-event\n"
+        "and signal stops; completeness rides in the session\n"
+        "verdict), 4 under --strict unless the verdict is\n"
+        "complete, 3 when the run cannot start, 2 on\n"
         "usage errors, 1 on error or unfinalizable output.\n"
     )
 
@@ -208,6 +214,9 @@ def parse_record_args(args: List[String]) raises CliError -> RecordOptions:
             opts.device = args[i + 1]
             opts.has_device = True
             i += 2
+        elif tok == "--strict":
+            opts.strict = True
+            i += 1
         elif _is_option(tok):
             raise CliError("unknown option: " + tok)
         else:

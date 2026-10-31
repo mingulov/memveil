@@ -1,3 +1,4 @@
+verdict: partial_unknown_loss (loss >=0.00%, 1 delivered)
 memveil report gen-lineage-session (synthetic, engine memveil-0.1.0)
 window: [1000000000,2500000000)
 duration: 1.500000000 s (1500000000 ns)

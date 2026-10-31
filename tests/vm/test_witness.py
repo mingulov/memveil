@@ -181,7 +181,7 @@ def test_witness_windows(tmp_path):
             [MEMVEIL_BIN, "report", "--format", "json",
              str(authored)],
             capture_output=True, text=True, timeout=300)
-        assert rep.returncode == 4, rep.stderr[-1000:]
+        assert rep.returncode == 0, rep.stderr[-1000:]
         report = json.loads(rep.stdout)
         ledger = replay_oracle_witness_ledger(w_ops, w_rel)
         mismatches = compare_live(report, ledger,

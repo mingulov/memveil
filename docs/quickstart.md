@@ -214,16 +214,18 @@ path instead.)
 Report reads local files only: no BPF, no BTF, no libbpf, no
 network. Copy the capture directory to another machine (or
 another user) and the same commands reproduce the same report.
-Exit 0 means sufficient evidence; exit 4 means usable but
-materially incomplete (the worked example exits 4 because
-terminal settlement is unproven by design); exit 2 is invalid
-input.
+Exit 0 means the report rendered and is valid; completeness
+rides in the `verdict:` header line (the worked example exits
+0 with a partial verdict because terminal settlement is
+unproven by design). Exit 4 appears only under `--strict`,
+which demands a `complete` verdict; exit 2 is invalid input.
 
 Empty is not unavailable: an idle capture reports
 `bounce_attempts = 0` with complete detail quality, while rows
 without their event source render `unavailable` with a reason.
 A torn final line exits 2; rerun with `--allow-partial` to
-drop the torn tail and report the loss instead (exit 4).
+drop the torn tail and report the loss instead (exit 0 with a
+partial verdict, exit 4 only under `--strict`).
 Removed whole lines are different: they still report
 `detail: complete_for_scope loss=0` with lower counts (see
 Known issues in `release-notes.md`). See
@@ -241,9 +243,12 @@ Duration uses the recorded window with exact integer arithmetic; JSON
 retains full provenance hashes. Missing or conflicting values remain explicit.
 
     ./bin/memveil top --interval 1s examples/real-capture
+    ./bin/memveil top --compact --interval 1s examples/real-capture
 
 This replays a finished capture in periodic prefixes; it does not follow a
 new workload live. Each summary shows its own measured prefix duration.
+`--compact` prints the short verdict-plus-headlines block per refresh
+instead of the full report; it cannot combine with `--device`.
 
 ## Limits in one paragraph
 

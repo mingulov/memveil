@@ -32,13 +32,14 @@
 #
 # The unit suite runs core unit files (test_reader.mojo,
 # test_attempts.mojo, test_report.mojo, test_runtime.mojo,
-# test_evidence_containment.mojo)
+# test_evidence_containment.mojo, test_verdict.mojo)
 # through the pinned toolchain; other suites describe their
 # own checks below.
 # The reports suite drives the built report binary end to end: golden
-# stdout bytes, exact exit codes (0 sufficient, 4 materially
-# incomplete, 2 invalid input), and independently recomputed counts
-# from tools/validate-schemas over generated JSON reports.
+# stdout bytes, exact exit codes (0 rendered, 4 only under --strict
+# without a complete verdict, 2 invalid input), and independently
+# recomputed counts from tools/validate-schemas over generated
+# JSON reports.
 # The profiles suite runs the reader/evidence/profile/discovery unit
 # tests. The doctor suite runs the doctor unit tests, then the built
 # doctor verb live: oracle-checked JSON, identity cross-checks against
@@ -143,6 +144,7 @@ suite_unit() {
     for t in tests/unit/test_reader.mojo \
              tests/unit/test_attempts.mojo \
              tests/unit/test_report.mojo \
+             tests/unit/test_verdict.mojo \
              tests/unit/test_runtime.mojo \
              tests/unit/test_evidence_containment.mojo; do
         run_unit_file "$t" || failed=1
@@ -305,7 +307,7 @@ suite_reports() {
         tests/golden/report-gen-lineage.txt 0 \
         report "$ROOT/tests/fixtures/regions/gen-lineage"
     expect_stdout "conversion-uncertain-text" \
-        tests/golden/report-conversion-uncertain.txt 4 \
+        tests/golden/report-conversion-uncertain.txt 0 \
         report "$ROOT/tests/fixtures/regions/conversion-uncertain"
     expect_stdout "escape-markdown" tests/golden/report-escape.md 0 \
         report --format markdown "$ROOT/tests/fixtures/reader/escape"
@@ -331,25 +333,37 @@ suite_reports() {
         tests/fixtures/lifecycle/copy-before-failure 0 \
         "capture OK: 3 events, 1 attempts, 4096 requested bytes"
     expect_json "unpaired-json" \
-        tests/fixtures/lifecycle/unpaired 4 \
+        tests/fixtures/lifecycle/unpaired 0 \
         "capture OK: 2 events, 1 attempts, 4096 requested bytes"
+    expect_text_exit "unpaired-json-strict" \
+        tests/fixtures/lifecycle/unpaired 4 --strict
     expect_json "relations-copy-only-json" \
-        tests/fixtures/lifecycle/relations-copy-only 4 \
+        tests/fixtures/lifecycle/relations-copy-only 0 \
         "capture OK: 5 events, 1 attempts, 4096 requested bytes"
+    expect_text_exit "relations-copy-only-json-strict" \
+        tests/fixtures/lifecycle/relations-copy-only 4 --strict
     expect_json "relations-lost-release-json" \
-        tests/fixtures/lifecycle/relations-lost-release 4 \
+        tests/fixtures/lifecycle/relations-lost-release 0 \
         "capture OK: 6 events, 1 attempts, 4096 requested bytes"
+    expect_text_exit "relations-lost-release-json-strict" \
+        tests/fixtures/lifecycle/relations-lost-release 4 --strict
     expect_json "dangling-unmap-json" \
-        tests/fixtures/reader/f2-dangling-unmap-expected 4 \
+        tests/fixtures/reader/f2-dangling-unmap-expected 0 \
         "capture OK: 8 events, 2 attempts, 5120 requested bytes"
+    expect_text_exit "dangling-unmap-json-strict" \
+        tests/fixtures/reader/f2-dangling-unmap-expected 4 --strict
     expect_error "dangling-unmap-denied" 2 \
         report "$ROOT/tests/fixtures/reader/f2-dangling-unmap-denied"
     expect_json "relations-legacy-copy-json" \
-        tests/fixtures/lifecycle/relations-legacy-copy 4 \
+        tests/fixtures/lifecycle/relations-legacy-copy 0 \
         "capture OK: 6 events, 1 attempts, 4096 requested bytes"
+    expect_text_exit "relations-legacy-copy-json-strict" \
+        tests/fixtures/lifecycle/relations-legacy-copy 4 --strict
     expect_json "relations-legacy-sync-json" \
-        tests/fixtures/lifecycle/relations-legacy-sync 4 \
+        tests/fixtures/lifecycle/relations-legacy-sync 0 \
         "capture OK: 6 events, 1 attempts, 4096 requested bytes"
+    expect_text_exit "relations-legacy-sync-json-strict" \
+        tests/fixtures/lifecycle/relations-legacy-sync 4 --strict
     expect_json "correlation-loss-attempts-json" \
         tests/fixtures/reader/correlation-loss-attempts 0 \
         "capture OK: 3 events, 3 attempts, 9216 requested bytes"
@@ -360,8 +374,10 @@ suite_reports() {
     expect_json "gen-lineage-json" tests/fixtures/regions/gen-lineage 0 \
         "capture OK: 2 events, 1 attempts, 4096 requested bytes"
     expect_json "conversion-uncertain-json" \
-        tests/fixtures/regions/conversion-uncertain 4 \
+        tests/fixtures/regions/conversion-uncertain 0 \
         "capture OK: 3 events, 1 attempts, 4096 requested bytes"
+    expect_text_exit "conversion-uncertain-json-strict" \
+        tests/fixtures/regions/conversion-uncertain 4 --strict
     expect_json "ordinary-noop-json" tests/fixtures/regions/ordinary-noop 0 \
         "capture OK: 2 events, 1 attempts, 4096 requested bytes"
     expect_json "late-attach-json" tests/fixtures/regions/late-attach 0 \
@@ -370,15 +386,21 @@ suite_reports() {
         "capture OK: 3 events, 3 attempts, 7168 requested bytes"
     expect_json "counters-json" tests/fixtures/reader/counters 0 \
         "capture OK: 7 events, 3 attempts, 9216 requested bytes"
-    expect_json "detail-gap-json" tests/fixtures/reader/detail-gap 4 \
+    expect_json "detail-gap-json" tests/fixtures/reader/detail-gap 0 \
         "capture OK: 3 events, 2 attempts, 5120 requested bytes"
+    expect_text_exit "detail-gap-json-strict" \
+        tests/fixtures/reader/detail-gap 4 --strict
     expect_json "empty-json" tests/fixtures/reader/empty-events 0 \
         "capture OK: 0 events, 0 attempts, 0 requested bytes"
-    expect_json "unfinalized-json" tests/fixtures/reader/unfinalized 4 \
+    expect_json "unfinalized-json" tests/fixtures/reader/unfinalized 0 \
         "capture OK: 3 events, 3 attempts, 9216 requested bytes"
+    expect_text_exit "unfinalized-json-strict" \
+        tests/fixtures/reader/unfinalized 4 --strict
     expect_json "unavailable-detail-json" \
-        tests/fixtures/reader/unavailable-detail 4 \
+        tests/fixtures/reader/unavailable-detail 0 \
         "capture OK: 0 events, 0 attempts, 0 requested bytes"
+    expect_text_exit "unavailable-detail-json-strict" \
+        tests/fixtures/reader/unavailable-detail 4 --strict
     expect_json "f6-absent-asserted-json" \
         tests/fixtures/reader/f6-absent-asserted 0 \
         "capture OK: 3 events, 3 attempts, 9216 requested bytes"
@@ -386,8 +408,10 @@ suite_reports() {
         tests/fixtures/reader/f6-absent-driver 0 \
         "capture OK: 3 events, 3 attempts, 9216 requested bytes"
     expect_json "f8-terminal-gap-json" \
-        tests/fixtures/reader/f8-terminal-gap 4 \
+        tests/fixtures/reader/f8-terminal-gap 0 \
         "capture OK: 4 events, 3 attempts, 9216 requested bytes"
+    expect_text_exit "f8-terminal-gap-json-strict" \
+        tests/fixtures/reader/f8-terminal-gap 4 --strict
     expect_json "f8-aggregate-gap-json" \
         tests/fixtures/reader/f8-aggregate-gap 0 \
         "capture OK: 4 events, 3 attempts, 9216 requested bytes"
@@ -398,8 +422,10 @@ suite_reports() {
         tests/fixtures/reader/f8-baseline-gap 0 \
         "capture OK: 4 events, 3 attempts, 9216 requested bytes"
     expect_json "f9-mismatch-json" \
-        tests/fixtures/reader/f9-mismatch 4 \
+        tests/fixtures/reader/f9-mismatch 0 \
         "capture OK: 5 events, 3 attempts, 9216 requested bytes"
+    expect_text_exit "f9-mismatch-json-strict" \
+        tests/fixtures/reader/f9-mismatch 4 --strict
     expect_json "f9-agree-json" \
         tests/fixtures/reader/f9-agree 0 \
         "capture OK: 5 events, 3 attempts, 9216 requested bytes"
@@ -410,11 +436,20 @@ suite_reports() {
         tests/fixtures/reader/f9-unit 0 \
         "capture OK: 5 events, 3 attempts, 9216 requested bytes"
     expect_json "f9-inconclusive-loss-json" \
-        tests/fixtures/reader/f9-inconclusive-loss 4 \
+        tests/fixtures/reader/f9-inconclusive-loss 0 \
         "capture OK: 5 events, 2 attempts, 5120 requested bytes"
+    expect_text_exit "f9-inconclusive-loss-json-strict" \
+        tests/fixtures/reader/f9-inconclusive-loss 4 --strict
     expect_json "f9-partial-detail-json" \
-        tests/fixtures/reader/f9-partial-detail 4 \
+        tests/fixtures/reader/f9-partial-detail 0 \
         "capture OK: 5 events, 3 attempts, 9216 requested bytes"
+    expect_text_exit "f9-partial-detail-json-strict" \
+        tests/fixtures/reader/f9-partial-detail 4 --strict
+    expect_json "complete-stop-json" \
+        tests/fixtures/reader/complete-stop 0 \
+        "capture OK: 3 events, 3 attempts, 9216 requested bytes"
+    expect_text_exit "complete-stop-json-strict" \
+        tests/fixtures/reader/complete-stop 0 --strict
     expect_json "f9-profile-change-json" \
         tests/fixtures/reader/f9-profile-change 0 \
         "capture OK: 5 events, 3 attempts, 9216 requested bytes"
@@ -584,7 +619,9 @@ PYEOF
     fi
 
     expect_text_exit "partial-tail-recovered" \
-        tests/fixtures/reader/partial-tail 4 --allow-partial
+        tests/fixtures/reader/partial-tail 0 --allow-partial
+    expect_text_exit "partial-tail-recovered-strict" \
+        tests/fixtures/reader/partial-tail 4 --strict --allow-partial
     expect_error "f4-definitive-version-strict" 2 \
         report "$ROOT/tests/fixtures/reader/f4-definitive-version"
     expect_error "f4-definitive-version-partial" 2 \
@@ -1841,7 +1878,7 @@ suite_attempts() {
     }
     "$CPROBE" zero "$TMP/zero" >"$TMP/zero.log" 2>&1
     awant zero "ready session=cap-1000000000-4242 start_ns=1000000000"
-    awant zero "exit=4"
+    awant zero "exit=0"
     awant zero "end=duration"
     awant zero "outcome=finalized"
     awant zero "polls=104"
@@ -1876,11 +1913,20 @@ suite_attempts() {
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot" \
         || afailed=1
     areport zero
-    # Replay exits 4: terminal is partial by design
-    # (settlement unproven); metrics still assert exactly.
-    if [ "$(cat "$TMP/zero.report.rc")" != "4" ]; then
+    # Replay exits 0: terminal is partial by design
+    # (settlement unproven) but the report is valid; strict
+    # exits 4 and metrics still assert exactly.
+    if [ "$(cat "$TMP/zero.report.rc")" != "0" ]; then
         echo "attempts: zero replay exits $(cat "$TMP/zero.report.rc")" >&2
         cat "$TMP/zero.report.err" >&2
+        afailed=1
+    fi
+    "$ROOT/build/memveil" report --strict --format json \
+        "$TMP/zero" >"$TMP/zero.strict.json" 2>"$TMP/zero.strict.err"
+    rc=$?
+    if [ "$rc" != "4" ]; then
+        echo "attempts: zero strict replay exits $rc" >&2
+        cat "$TMP/zero.strict.err" >&2
         afailed=1
     fi
     python3 "$JASSERT" metric "$TMP/zero.report.json" \
@@ -1896,7 +1942,7 @@ suite_attempts() {
         || afailed=1
     "$CPROBE" attachwin "$TMP/attachwin" >"$TMP/attachwin.log" 2>&1
     awant attachwin "ready session=cap-1000-4242 start_ns=1000"
-    awant attachwin "exit=4"
+    awant attachwin "exit=0"
     awant attachwin "end=duration"
     awant attachwin "outcome=finalized"
     awant attachwin "polls=104"
@@ -1953,11 +1999,21 @@ suite_attempts() {
             measurement_scope \
             "ordinals below observed at the end cut" || afailed=1
     }
-    mreplay4() { # <case> <bounce> <bytes> <cbounce> <cbytes>
+    mreplay() { # <case> <bounce> <bytes> <cbounce> <cbytes>
         areport "$1"
-        if [ "$(cat "$TMP/$1.report.rc")" != "4" ]; then
+        if [ "$(cat "$TMP/$1.report.rc")" != "0" ]; then
             echo "attempts: $1 replay exits $(cat "$TMP/$1.report.rc")" >&2
             cat "$TMP/$1.report.err" >&2
+            afailed=1
+        fi
+        # Scripted stops never observe quiescence, so no replayed
+        # verdict is complete and strict always exits 4.
+        "$ROOT/build/memveil" report --strict --format json \
+            "$TMP/$1" >"$TMP/$1.strict.json" 2>"$TMP/$1.strict.err"
+        rc=$?
+        if [ "$rc" != "4" ]; then
+            echo "attempts: $1 strict replay exits $rc" >&2
+            cat "$TMP/$1.strict.err" >&2
             afailed=1
         fi
         python3 "$JASSERT" metric "$TMP/$1.report.json" \
@@ -1982,7 +2038,7 @@ suite_attempts() {
         python3 "$JASSERT" eventfield "$TMP/$1/events.ndjson" "$2" \
             data.lost_count null || afailed=1
     }
-    mcase canary 4 109 5 4 28 3211 \
+    mcase canary 0 109 5 4 28 3211 \
         "bounce_attempt,bounce_attempt,bounce_attempt,bounce_attempt,bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     mqual canary complete_for_scope 0 complete_for_scope 0 proven
     python3 "$JASSERT" devices "$TMP/canary/session.json" \
@@ -1999,8 +2055,16 @@ suite_attempts() {
         "$ROOT/build/memveil" report --format "$fmt" "$TMP/canary" \
             >"$TMP/canary.$fmt" 2>"$TMP/canary.$fmt.err"
         rc=$?
+        if [ "$rc" != "0" ]; then
+            echo "attempts: canary $fmt replay exits $rc, want 0" >&2
+            afailed=1
+        fi
+        "$ROOT/build/memveil" report --strict --format "$fmt" \
+            "$TMP/canary" >"$TMP/canary.$fmt.strict" \
+            2>"$TMP/canary.$fmt.strict.err"
+        rc=$?
         if [ "$rc" != "4" ]; then
-            echo "attempts: canary $fmt replay exits $rc, want 4" >&2
+            echo "attempts: canary $fmt strict replay exits $rc, want 4" >&2
             afailed=1
         fi
         for can in canary-alice ffff888012345000 AAAAAAAA eth0; do
@@ -2010,45 +2074,45 @@ suite_attempts() {
             fi
         done
     done
-    mcase detfail 4 104 5 4 18 1924 \
+    mcase detfail 0 104 5 4 18 1924 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
     mqual detfail partial null complete_for_scope 0 \
         "unknown: detach failed; shutdown evidence unresolved" \
         "admission close failed"
     mgap detfail 4 "detail closure unproven: detach failed; shutdown evidence unresolved"
-    mreplay4 detfail 0 0 0 0
-    mcase stablen 4 103 5 6 20 1838 \
+    mreplay detfail 0 0 0 0
+    mcase stablen 0 103 5 6 20 1838 \
         "bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     mqual stablen complete_for_scope 0 complete_for_scope 0 proven
-    mreplay4 stablen 1 64 1 64
-    mcase neverstable 4 104 5 22 36 406 "gap"
+    mreplay stablen 1 64 1 64
+    mcase neverstable 0 104 5 22 36 406 "gap"
     mqual neverstable partial null unavailable null \
         "unknown: snapshot unresolved"
     mgap neverstable 0 "detail closure unproven: snapshot unresolved"
-    mreplay4 neverstable 0 0 absent absent
-    mcase tornretry 4 103 5 5 18 1838 \
+    mreplay neverstable 0 0 absent absent
+    mcase tornretry 0 103 5 5 18 1838 \
         "bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     mqual tornretry complete_for_scope 0 complete_for_scope 0 proven
-    mreplay4 tornretry 1 64 1 64
-    mcase recvgt 4 104 5 4 20 2588 \
+    mreplay tornretry 1 64 1 64
+    mcase recvgt 0 104 5 4 20 2588 \
         "bounce_attempt,bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
     mqual recvgt partial null complete_for_scope 0 \
         "unknown: ring count unproven"
     mgap recvgt 6 "detail closure unproven: ring count unproven"
-    mreplay4 recvgt 2 128 2 128
-    mcase confirmact 4 104 5 4 18 1903 \
+    mreplay recvgt 2 128 2 128
+    mcase confirmact 0 104 5 4 18 1903 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
     mqual confirmact partial null complete_for_scope 0 \
         "unknown: post-snapshot activity"
     mgap confirmact 4 "detail closure unproven: post-snapshot activity"
-    mreplay4 confirmact 0 0 1 0
-    mcase drainbudget 4 101 3 4 16 1903 \
+    mreplay confirmact 0 0 1 0
+    mcase drainbudget 0 101 3 4 16 1903 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
     mqual drainbudget partial null complete_for_scope 0 \
         "unknown: drain budget exhausted"
     mgap drainbudget 4 "detail closure unproven: drain budget exhausted"
-    mreplay4 drainbudget 0 0 0 0
-    mcase stopbudget 4 103 5 4 17 1494 \
+    mreplay drainbudget 0 0 0 0
+    mcase stopbudget 0 103 5 4 17 1494 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     mqual stopbudget complete_for_scope 0 complete_for_scope 0 proven
     python3 "$JASSERT" field "$TMP/stopbudget/session.json" \
@@ -2059,8 +2123,8 @@ suite_attempts() {
         stop.busy_at_drain false || afailed=1
     python3 "$JASSERT" field "$TMP/stopbudget/session.json" \
         stop.drained_records 0 || afailed=1
-    mreplay4 stopbudget 0 0 0 0
-    mcase stuckdrain 4 100100 3 4 100014 1904 \
+    mreplay stopbudget 0 0 0 0
+    mcase stuckdrain 0 100100 3 4 100014 1904 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
     mqual stuckdrain partial null complete_for_scope 0 \
         "unknown: drain budget exhausted"
@@ -2071,8 +2135,8 @@ suite_attempts() {
         stop.busy_at_drain true || afailed=1
     python3 "$JASSERT" field "$TMP/stuckdrain/session.json" \
         stop.drained_records 100000 || afailed=1
-    mreplay4 stuckdrain 0 0 100000 0
-    mcase stageddrain 4 104 5 4 18 1895 \
+    mreplay stuckdrain 0 0 100000 0
+    mcase stageddrain 0 104 5 4 18 1895 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
     mqual stageddrain partial null complete_for_scope 0 \
         "unknown: error shutdown"
@@ -2081,7 +2145,7 @@ suite_attempts() {
         stop.busy_at_drain true || afailed=1
     python3 "$JASSERT" field "$TMP/stageddrain/session.json" \
         stop.drained_records 0 || afailed=1
-    mreplay4 stageddrain 0 0 0 0
+    mreplay stageddrain 0 0 0 0
     mreason() { # <case> <reason>
         python3 "$JASSERT" field "$TMP/$1/session.json" \
             quality.detail.reason "$2" || afailed=1
@@ -2095,57 +2159,57 @@ suite_attempts() {
             data.operation_id "$5" || afailed=1
     }
     mattempt stablen 0 d000001 64 op0
-    mcase delaysubmit 4 104 5 6 20 1495 \
+    mcase delaysubmit 0 104 5 6 20 1495 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     mqual delaysubmit partial 1 complete_for_scope 0 proven
     mreason delaysubmit "detail loss 1 (submit_fail=(1) malformed=(0) dropped=(0) recursion_missed=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
-    mreplay4 delaysubmit 0 0 1 64
-    mcase latesubmit 4 103 5 4 18 754 "bounce_attempt,gap"
+    mreplay delaysubmit 0 0 1 64
+    mcase latesubmit 0 103 5 4 18 754 "bounce_attempt,gap"
     mqual latesubmit partial null unavailable null \
         "unknown: kernel identity unproven"
     mgap latesubmit 1 "detail closure unproven: kernel identity unproven"
     mattempt latesubmit 0 d000001 64 op0
-    mreplay4 latesubmit 1 64 absent absent
-    mcase lateemit 4 104 5 4 20 1097 "bounce_attempt,bounce_attempt,gap"
+    mreplay latesubmit 1 64 absent absent
+    mcase lateemit 0 104 5 4 20 1097 "bounce_attempt,bounce_attempt,gap"
     mqual lateemit partial null unavailable null \
         "unknown: kernel identity unproven"
     mgap lateemit 2 "detail closure unproven: kernel identity unproven"
     mattempt lateemit 1 d000001 64 op1
-    mreplay4 lateemit 2 128 absent absent
-    mcase wrapobs 4 104 5 4 18 400 "gap"
+    mreplay lateemit 2 128 absent absent
+    mcase wrapobs 0 104 5 4 18 400 "gap"
     mqual wrapobs partial null unavailable null "unknown: invalid epoch"
     python3 "$JASSERT" field "$TMP/wrapobs/session.json" \
         stop.counters_valid false || afailed=1
     mgap wrapobs 0 "detail closure unproven: invalid epoch"
-    mreplay4 wrapobs 0 0 absent absent
-    mcase wrapemit 4 104 5 4 18 400 "gap"
+    mreplay wrapobs 0 0 absent absent
+    mcase wrapemit 0 104 5 4 18 400 "gap"
     mqual wrapemit partial null unavailable null "unknown: invalid epoch"
     python3 "$JASSERT" field "$TMP/wrapemit/session.json" \
         stop.counters_valid false || afailed=1
     mgap wrapemit 0 "detail closure unproven: invalid epoch"
-    mreplay4 wrapemit 0 0 absent absent
-    mcase wrapsubmit 4 104 5 4 18 400 "gap"
+    mreplay wrapemit 0 0 absent absent
+    mcase wrapsubmit 0 104 5 4 18 400 "gap"
     mqual wrapsubmit partial null unavailable null "unknown: invalid epoch"
     python3 "$JASSERT" field "$TMP/wrapsubmit/session.json" \
         stop.counters_valid false || afailed=1
     mgap wrapsubmit 0 "detail closure unproven: invalid epoch"
     mreason wrapsubmit "detail loss unknown (invalid epoch; known: submit_fail=(unavailable) malformed=(0) dropped=(0) recursion_missed=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
-    mreplay4 wrapsubmit 0 0 absent absent
-    mcase wrapobsbytes 4 104 5 4 18 0 ""
+    mreplay wrapsubmit 0 0 absent absent
+    mcase wrapobsbytes 0 104 5 4 18 0 ""
     mqual wrapobsbytes partial 1 unavailable null proven
-    mreplay4 wrapobsbytes 0 0 absent absent
-    mcase wrapemitbytes 4 104 5 4 18 0 ""
+    mreplay wrapobsbytes 0 0 absent absent
+    mcase wrapemitbytes 0 104 5 4 18 0 ""
     mqual wrapemitbytes partial 1 unavailable null proven
-    mreplay4 wrapemitbytes 0 0 absent absent
-    mcase bytecov 4 104 5 4 18 0 ""
+    mreplay wrapemitbytes 0 0 absent absent
+    mcase bytecov 0 104 5 4 18 0 ""
     mqual bytecov partial 1 unavailable null proven
-    mreplay4 bytecov 0 0 absent absent
-    mcase recoverable 4 106 5 4 22 1839 \
+    mreplay bytecov 0 0 absent absent
+    mcase recoverable 0 106 5 4 22 1839 \
         "bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     mqual recoverable partial 4 complete_for_scope 0 proven
     mreason recoverable "detail loss 4 (submit_fail=(0) malformed=(1) dropped=(1) recursion_missed=(0) size_omitted=(0) duration_omitted=(1) signal_omitted=(0) rejected=(1) write_failed=(0))"
     mattempt recoverable 0 d000001 64 op0
-    mreplay4 recoverable 1 64 5 144
+    mreplay recoverable 1 64 5 144
     merrcase() { # <case> <polls> <stats> <snaps> <reads> <committed> <events>
         "$CPROBE" "$1" "$TMP/$1" >"$TMP/$1.log" 2>&1
         awant "$1" "ready session=cap-1000000000-4242 start_ns=1000000000"
@@ -2188,58 +2252,58 @@ suite_attempts() {
     mquale appendfail0 partial null complete_for_scope 0 \
         "unknown: error shutdown"
     mgap appendfail0 4 "detail closure unproven: error shutdown"
-    mreplay4 appendfail0 0 0 1 64
+    mreplay appendfail0 0 0 1 64
     merrcase appendtorn 2 2 4 16 2240 \
         "bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
     mquale appendtorn partial null complete_for_scope 0 \
         "unknown: error shutdown"
     mgap appendtorn 5 "detail closure unproven: error shutdown"
     mattempt appendtorn 0 d000001 64 op0
-    mreplay4 appendtorn 1 64 2 128
+    mreplay appendtorn 1 64 2 128
     CATALOG_EVENTS=$(python3 -c "print(','.join(['bounce_attempt']*4096 + ['counter_snapshot']*4 + ['gap']))")
     merrcase catalogfull 4097 2 4 8206 1429202 "$CATALOG_EVENTS"
     mquale catalogfull partial null complete_for_scope 0 \
         "unknown: error shutdown"
     mgap catalogfull 4100 "detail closure unproven: error shutdown"
     mattempt catalogfull 4095 d004096 64 op4095
-    mreplay4 catalogfull 4096 262144 4097 262208
+    mreplay catalogfull 4096 262144 4097 262208
     merrcase hardpoll 2 2 4 15 2240 \
         "bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
     mquale hardpoll partial null complete_for_scope 0 \
         "unknown: error shutdown"
     mgap hardpoll 5 "detail closure unproven: error shutdown"
-    mreplay4 hardpoll 1 64 2 128
+    mreplay hardpoll 1 64 2 128
     merrcase structfault 1 2 4 13 1896 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
     mquale structfault partial null complete_for_scope 0 \
         "unknown: error shutdown"
     mgap structfault 4 "detail closure unproven: error shutdown"
-    mreplay4 structfault 0 0 1 64
+    mreplay structfault 0 0 1 64
     merrcase structfaultq 1 2 4 13 1896 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
     mquale structfaultq partial null complete_for_scope 0 \
         "unknown: error shutdown"
     mgap structfaultq 4 "detail closure unproven: error shutdown"
-    mreplay4 structfaultq 0 0 1 64
+    mreplay structfaultq 0 0 1 64
     merrcase durhard 104 3 4 18 1895 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
     mquale durhard partial null complete_for_scope 0 \
         "unknown: error shutdown"
     mgap durhard 4 "detail closure unproven: error shutdown"
-    mreplay4 durhard 0 0 1 0
+    mreplay durhard 0 0 1 0
     merrcase sigclose 102 3 4 15 1895 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
     mquale sigclose partial null complete_for_scope 0 \
         "unknown: error shutdown"
     mgap sigclose 4 "detail closure unproven: error shutdown"
-    mreplay4 sigclose 0 0 1 0
+    mreplay sigclose 0 0 1 0
     merrcase errdetfail 1 2 4 13 1925 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
     mquale errdetfail partial null complete_for_scope 0 \
         "unknown: detach failed; shutdown evidence unresolved" \
         "admission close failed"
     mgap errdetfail 4 "detail closure unproven: detach failed; shutdown evidence unresolved"
-    mreplay4 errdetfail 0 0 1 64
+    mreplay errdetfail 0 0 1 64
     merrcase combinederr 1 2 22 31 430 "gap"
     mquale combinederr partial null unavailable null \
         "unknown: detach failed; shutdown evidence unresolved" \
@@ -2247,7 +2311,7 @@ suite_attempts() {
     mgap combinederr 0 "detail closure unproven: detach failed; shutdown evidence unresolved"
     python3 "$JASSERT" evidence "$TMP/combinederr/session.json" \
         shutdown.secondary_causes "snapshot unresolved" || afailed=1
-    mreplay4 combinederr 0 0 absent absent
+    mreplay combinederr 0 0 absent absent
     mecase() { # <case> <exit> <end> <outcome> <polls> <stats> <snaps> <reads> <committed> <events>
         "$CPROBE" "$1" "$TMP/$1" >"$TMP/$1.log" 2>&1
         awant "$1" "exit=$2"
@@ -2296,28 +2360,28 @@ suite_attempts() {
         awant "$1" "reads=$8"
         python3 "$JASSERT" nofile "$TMP/$1" || afailed=1
     }
-    mecase siginhand 4 signal finalized 103 5 4 16 1495 \
+    mecase siginhand 0 signal finalized 103 5 4 16 1495 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     mqualE siginhand signal partial 1 complete_for_scope 0 proven
     mreason siginhand "detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) recursion_missed=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(1) rejected=(0) write_failed=(0))"
-    mreplay4 siginhand 0 0 1 64
+    mreplay siginhand 0 0 1 64
     mecase sigreaderr 1 error error 103 5 4 16 1495 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     awant sigreaderr "diag=signal: scripted EIO"
     mqualE sigreaderr error partial 1 complete_for_scope 0 proven
-    mreplay4 sigreaderr 0 0 1 64
+    mreplay sigreaderr 0 0 1 64
     mecase sigreaderr0 1 error error 102 5 4 15 1494 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     awant sigreaderr0 "diag=signal: scripted EIO"
     mqualE sigreaderr0 error complete_for_scope 0 complete_for_scope 0 proven
-    mreplay4 sigreaderr0 0 0 0 0
+    mreplay sigreaderr0 0 0 0 0
     mrefuse sigsetupfail 3 refused "signal setup: scripted mask failure" 0 0 0 0
     mrefuse sigsetuprollback 1 refusal-rollback-failed "signal setup: scripted mask failure; close: scripted close failure" 0 0 0 0
     # Attach-path reads include the pre-activation window floor.
     mrefuse attachfail 3 refused "attach: scripted attach failure" 0 1 2 4
     mrefuse rollbackfail 1 refusal-rollback-failed "attach: scripted attach failure; close: scripted close failure" 0 1 2 4
     mrefuse nonzerostart 3 refused "start snapshot nonzero" 0 0 2 3
-    mcase clockseam 4 104 5 4 18 1494 \
+    mcase clockseam 0 104 5 4 18 1494 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     mqual clockseam complete_for_scope 0 complete_for_scope 0 proven
     python3 "$JASSERT" field "$TMP/clockseam/session.json" \
@@ -2326,8 +2390,8 @@ suite_attempts() {
         ts_ns 67100000001 || afailed=1
     python3 "$JASSERT" eventfield "$TMP/clockseam/events.ndjson" 3 \
         ts_ns 67100000001 || afailed=1
-    mreplay4 clockseam 0 0 0 0
-    mcase ooo100 4 104 5 4 22 2184 \
+    mreplay clockseam 0 0 0 0
+    mcase ooo100 0 104 5 4 22 2184 \
         "bounce_attempt,bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     mqual ooo100 complete_for_scope 0 complete_for_scope 0 proven
     python3 "$JASSERT" field "$TMP/ooo100/session.json" \
@@ -2336,15 +2400,15 @@ suite_attempts() {
         ts_ns 62100000057 || afailed=1
     python3 "$JASSERT" eventfield "$TMP/ooo100/events.ndjson" 1 \
         ts_ns 62100000017 || afailed=1
-    mreplay4 ooo100 2 128 2 128
+    mreplay ooo100 2 128 2 128
     SIZEREF_EVENTS=$(python3 -c "print(','.join(['bounce_attempt']*189 + ['counter_snapshot']*4))")
-    mecase sizerefused 4 size_limit finalized 292 5 4 395 66871 "$SIZEREF_EVENTS"
+    mecase sizerefused 0 size_limit finalized 292 5 4 395 66871 "$SIZEREF_EVENTS"
     mqualE sizerefused size_limit partial 1 complete_for_scope 0 proven
     mreason sizerefused "detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) recursion_missed=(0) size_omitted=(1) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
-    mreplay4 sizerefused 189 12096 190 12160
+    mreplay sizerefused 189 12096 190 12160
     "$CPROBE" opcount "$TMP/opcount" >"$TMP/opcount.log" 2>&1
     awant opcount "ready session=cap-1000000000-4242 start_ns=1000000000"
-    awant opcount "exit=4"
+    awant opcount "exit=0"
     awant opcount "end=size_limit"
     awant opcount "outcome=finalized"
     awant opcount "polls=4194407"
@@ -2360,30 +2424,30 @@ suite_attempts() {
     mqualE opcount size_limit partial 1 partial null proven
     mreason opcount "detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) recursion_missed=(0) size_omitted=(1) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
     python3 "$JASSERT" nofile "$TMP/opcount/events.ndjson" || afailed=1
-    mcase pausedbytes 4 103 5 4 18 753 "bounce_attempt,gap"
+    mcase pausedbytes 0 103 5 4 18 753 "bounce_attempt,gap"
     mqual pausedbytes partial null unavailable null \
         "unknown: kernel identity unproven"
     mgap pausedbytes 1 "detail closure unproven: kernel identity unproven"
     mattempt pausedbytes 0 d000001 6 op0
-    mreplay4 pausedbytes 1 6 absent absent
-    mecase u64sum 4 size_limit finalized 104 5 4 19 1874 \
+    mreplay pausedbytes 1 6 absent absent
+    mecase u64sum 0 size_limit finalized 104 5 4 19 1874 \
         "bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     mqualE u64sum size_limit partial 1 complete_for_scope 0 proven
     mreason u64sum "detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) recursion_missed=(0) size_omitted=(1) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
     mattempt u64sum 0 d000001 18446744073709551615 op0
-    mreplay4 u64sum 1 18446744073709551615 2 18446744073709551615
-    mcase flowinject 4 104 5 4 18 0 ""
+    mreplay u64sum 1 18446744073709551615 2 18446744073709551615
+    mcase flowinject 0 104 5 4 18 0 ""
     mqual flowinject partial 2 unavailable null proven
     mreason flowinject "detail loss 2 (submit_fail=(2) malformed=(0) dropped=(0) recursion_missed=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
-    mreplay4 flowinject 0 0 absent absent
+    mreplay flowinject 0 0 absent absent
     mecase unsynced 1 duration present_unsynced 104 5 4 18 1494 \
         "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
     mqual unsynced complete_for_scope 0 complete_for_scope 0 proven
-    mreplay4 unsynced 0 0 0 0
-    mcase pool 4 103 5 4 19 2309 \
+    mreplay unsynced 0 0 0 0
+    mcase pool 0 103 5 4 19 2309 \
         "pool_sample,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,pool_sample"
     mqual pool complete_for_scope 0 complete_for_scope 0 proven
-    mreplay4 pool 0 0 0 0
+    mreplay pool 0 0 0 0
     python3 "$JASSERT" field "$TMP/pool/session.json" \
         capabilities.pool_stats.status partial || afailed=1
     python3 "$JASSERT" metric "$TMP/pool.report.json" \
@@ -2402,9 +2466,9 @@ suite_attempts() {
     # until the cap latches, then the remaining iterations
     # drain the clock to the deadline without sampling.
     poolcap_kinds=$(python3 -c "print(','.join(['pool_sample'] + ['pool_sample'] * 4096 + ['counter_snapshot'] * 4 + ['pool_sample']))")
-    mcase poolcap 4 5004 5 4 9016 1692322 "$poolcap_kinds"
+    mcase poolcap 0 5004 5 4 9016 1692322 "$poolcap_kinds"
     mqual poolcap complete_for_scope 0 complete_for_scope 0 proven
-    mreplay4 poolcap 0 0 0 0
+    mreplay poolcap 0 0 0 0
     python3 "$JASSERT" field "$TMP/poolcap/session.json" \
         capabilities.pool_stats.reason "default-pool debugfs samples at capture start and close plus 4096 periodic samples (1s cadence); periodic sampling stopped at 4096 (count cap)" \
         || afailed=1

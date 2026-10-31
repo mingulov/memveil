@@ -36,8 +36,9 @@ From the bundle root (or a source checkout, with
     bin/memveil report --format json examples/real-capture
     bin/memveil report --format markdown examples/real-capture
 
-Expected: exit 4 (materially incomplete: terminal quality is
-partial by design), `bounce_attempts = 30`, detail loss 0.
+Expected: exit 0 (terminal quality is partial by design;
+completeness rides in the report verdict field),
+`bounce_attempts = 30`, detail loss 0.
 Lifecycle, copy bytes, and sharing transitions render as
 unavailable: this capture proves attempts only.
 

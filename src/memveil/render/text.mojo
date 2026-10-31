@@ -84,10 +84,78 @@ def _shown(m: Metric, device_filter: String) -> Bool:
     return m.device_id == device_filter
 
 
+def _bps_percent(bps: Int) -> String:
+    """Format basis points as an exact two-place percent."""
+    var whole = UInt64(bps // 100)
+    var frac = UInt64(bps % 100)
+    var out = format_u64(whole) + String(".")
+    if frac < UInt64(10):
+        out += String("0")
+    out += format_u64(frac) + String("%")
+    return out^
+
+
+def verdict_line(rep: Report) -> String:
+    """One-line verdict header, no trailing newline.
+
+    Unknown verdicts carry a lower-bound marker: the ratio bounds
+    known loss from below and never claims a total.
+    """
+    if rep.verdict.name == String(""):
+        return String("verdict: unavailable (not computed)")
+    var out = String("verdict: ") + rep.verdict.name + String(" (loss ")
+    if rep.verdict.name == String("partial_unknown_loss"):
+        out += String(">=")
+    out += _bps_percent(rep.verdict.loss_ratio_bps)
+    out += String(", ")
+    out += format_u64(rep.detail_delivered)
+    out += String(" delivered)")
+    return out^
+
+
+def _global_metric_text(rep: Report, name: String) -> String:
+    for i in range(len(rep.metrics)):
+        var m = rep.metrics[i]
+        if m.name == name and not m.has_device_id and not m.has_pool_id:
+            if m.has_value:
+                return format_u64(m.value)
+            return String("withheld")
+    return String("withheld")
+
+
+def render_compact(rep: Report) -> String:
+    """Render the per-refresh summary: verdict plus headlines."""
+    var out = verdict_line(rep) + String("\n")
+    out += String("attempts: ")
+    out += _global_metric_text(rep, String("bounce_attempts"))
+    out += String("  bytes: ")
+    out += _global_metric_text(rep, String("requested_bounce_bytes"))
+    out += String("\n")
+    out += String("detail: ") + rep.q_detail.status
+    if rep.q_detail.has_loss_count:
+        out += String(", loss ") + format_u64(rep.q_detail.loss_count)
+    else:
+        out += String(", loss unknown")
+    out += String("\n")
+    out += String("terminal: ") + rep.q_terminal.status + String("\n")
+    if len(rep.findings) == 0:
+        out += String("findings: none\n")
+    else:
+        out += String("findings: ") + String(len(rep.findings)) + String(": ")
+        for i in range(len(rep.findings)):
+            if i > 0:
+                out += String(", ")
+            out += rep.findings[i].code + String("(")
+            out += rep.findings[i].severity + String(")")
+        out += String("\n")
+    return out^
+
+
 def render_text(rep: Report, device_filter: String = "") raises -> String:
     """Render the report as plain text, one trailing newline."""
     var filt = resolve_device_filter(rep.devices, device_filter)
-    var out = String("memveil report ")
+    var out = verdict_line(rep) + String("\n")
+    out += String("memveil report ")
     out += escape_text(rep.session_id)
     if rep.synthetic:
         out += " (synthetic, engine "

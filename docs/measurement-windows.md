@@ -51,7 +51,7 @@ quiescence observed, drain reached its boundary with no BUSY
 record outstanding, and the final counter sample valid. Any
 gap - unsettled writers, a missing drain, BUSY at the
 boundary, a failed sample, or budget exhaustion - yields
-`partial` with a named reason and exit 4, never a silent
+`partial` with a named reason, never a silent
 complete. A submit landing after the drain recorded its
 boundary claim is one such gap ("late submit past drain"):
 the drain cannot have covered that record, so only a later
@@ -64,8 +64,9 @@ Two separations are load-bearing:
   partial, not complete. The live collector's drain uses
   exactly this quiet-ring signal, which is why live terminal
   quality stays `partial` ("stop partial: quiescence
-  unproven", wire reason "quiescence unproven") and live
-  captures exit 4.
+  unproven", wire reason "quiescence unproven"); live
+  captures still exit 0 with that partial verdict, and exit
+  4 only under `--strict`.
 - Open logical DMA mappings never block quiescence. The
   controller waits for callbacks, not for logical mappings to
   end; the count of mappings still open travels beside the

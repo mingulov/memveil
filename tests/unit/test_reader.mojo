@@ -639,6 +639,185 @@ def test_session_011_relations_refused_version_first() raises:
     assert_true(raised)
 
 
+def _bump013(base: String) raises -> String:
+    var out = base.replace(
+        String('"schema_version": "0.1.1"'),
+        String('"schema_version": "0.1.3"'),
+    )
+    assert_true(out != base)
+    return out
+
+
+def _with_verdict(base: String) raises -> String:
+    var needle = String('"schema_version": "0.1.3",')
+    assert_true(base.find(needle) != -1)
+    return base.replace(
+        needle,
+        needle
+        + String(
+            '\n  "verdict": {'
+            '\n    "name": "partial_known_loss",'
+            '\n    "loss_ratio_bps": "500",'
+            '\n    "delivered": "95"'
+            "\n  },"
+        ),
+    )
+
+
+def _with_stop013(base: String) raises -> String:
+    var needle = String('"drained_records": "0",')
+    assert_true(base.find(needle) != -1)
+    return base.replace(
+        needle,
+        needle
+        + String(
+            '\n    "drain_completed": true,'
+            '\n    "submit_after_drain": false,'
+        ),
+    )
+
+
+def test_session_legacy_011_has_no_verdict() raises:
+    var s = parse_session(fixture_bytes(ATTEMPTS_SESSION))
+    assert_true(not s.has_verdict)
+    assert_true(not s.stop.has_drain_completed)
+    assert_true(not s.stop.has_submit_after_drain)
+
+
+def test_session_013_verdict_parse() raises:
+    var doc = _with_verdict(_bump013(fixture_text(ATTEMPTS_SESSION)))
+    var s = parse_session(utf8_bytes(doc))
+    assert_true(s.has_verdict)
+    assert_equal(s.verdict_name, "partial_known_loss")
+    assert_equal(s.verdict_loss_bps, 500)
+    assert_equal(s.verdict_delivered, UInt64(95))
+
+
+def test_session_013_stop_keys_parse() raises:
+    var doc = _with_stop013(_bump013(fixture_text(ATTEMPTS_SESSION)))
+    var s = parse_session(utf8_bytes(doc))
+    assert_true(s.stop.has_drain_completed)
+    assert_true(s.stop.drain_completed)
+    assert_true(s.stop.has_submit_after_drain)
+    assert_true(not s.stop.submit_after_drain)
+
+
+def test_session_013_verdict_encode_roundtrip() raises:
+    var doc = _with_verdict(
+        _with_stop013(_bump013(fixture_text(ATTEMPTS_SESSION)))
+    )
+    var s = parse_session(utf8_bytes(doc))
+    var text = encode_session(s)
+    assert_true(text.find(String('"schema_version":"0.1.3"')) != -1)
+    var again = parse_session(utf8_bytes(text))
+    assert_true(again.has_verdict)
+    assert_equal(again.verdict_name, "partial_known_loss")
+    assert_equal(again.verdict_loss_bps, 500)
+    assert_equal(again.verdict_delivered, UInt64(95))
+    assert_true(again.stop.has_drain_completed)
+    assert_true(again.stop.drain_completed)
+    assert_true(again.stop.has_submit_after_drain)
+    assert_true(not again.stop.submit_after_drain)
+
+
+def test_session_012_verdict_refused() raises:
+    var base = fixture_text(ATTEMPTS_SESSION).replace(
+        String('"schema_version": "0.1.1"'),
+        String('"schema_version": "0.1.2"'),
+    )
+    var needle = String('"schema_version": "0.1.2",')
+    var doc = base.replace(
+        needle,
+        needle
+        + String(
+            '\n  "verdict": {'
+            '\n    "name": "complete",'
+            '\n    "loss_ratio_bps": "0",'
+            '\n    "delivered": "50"'
+            "\n  },"
+        ),
+    )
+    var raised = False
+    try:
+        _ = parse_session(utf8_bytes(doc))
+    except:
+        raised = True
+    assert_true(raised)
+
+
+def test_session_011_verdict_refused() raises:
+    var base = fixture_text(ATTEMPTS_SESSION)
+    var needle = String('"schema_version": "0.1.1",')
+    var doc = base.replace(
+        needle,
+        needle
+        + String(
+            '\n  "verdict": {'
+            '\n    "name": "complete",'
+            '\n    "loss_ratio_bps": "0",'
+            '\n    "delivered": "50"'
+            "\n  },"
+        ),
+    )
+    var raised = False
+    try:
+        _ = parse_session(utf8_bytes(doc))
+    except:
+        raised = True
+    assert_true(raised)
+
+
+def test_session_012_stop013_refused() raises:
+    var base = fixture_text(ATTEMPTS_SESSION).replace(
+        String('"schema_version": "0.1.1"'),
+        String('"schema_version": "0.1.2"'),
+    )
+    var doc = _with_stop013(base)
+    var raised = False
+    try:
+        _ = parse_session(utf8_bytes(doc))
+    except:
+        raised = True
+    assert_true(raised)
+
+
+def test_session_013_bad_verdict_refused() raises:
+    var good = _with_verdict(_bump013(fixture_text(ATTEMPTS_SESSION)))
+    var bads = List[String]()
+    bads.append(
+        good.replace(
+            String('"name": "partial_known_loss"'),
+            String('"name": "bogus"'),
+        )
+    )
+    bads.append(
+        good.replace(
+            String('"loss_ratio_bps": "500"'),
+            String('"loss_ratio_bps": "10001"'),
+        )
+    )
+    bads.append(
+        good.replace(
+            String('"loss_ratio_bps": "500"'),
+            String('"loss_ratio_bps": "-1"'),
+        )
+    )
+    bads.append(
+        good.replace(
+            String('"loss_ratio_bps": "500"'),
+            String('"loss_ratio_bps": "many"'),
+        )
+    )
+    for i in range(len(bads)):
+        assert_true(bads[i] != good)
+        var raised = False
+        try:
+            _ = parse_session(utf8_bytes(bads[i]))
+        except:
+            raised = True
+        assert_true(raised)
+
+
 def _version_last(base: String) raises -> String:
     var headless = base.replace(
         String('{\n  "schema_version": "0.1.1",\n'),
@@ -673,11 +852,11 @@ def test_session_011_relations_refused_version_last() raises:
     assert_true(raised)
 
 
-def test_session_013_refused() raises:
+def test_session_014_refused() raises:
     var base = fixture_text(ATTEMPTS_SESSION)
     var bad = base.replace(
         String('"schema_version": "0.1.1"'),
-        String('"schema_version": "0.1.3"'),
+        String('"schema_version": "0.1.4"'),
     )
     var raised = False
     try:
@@ -2396,9 +2575,17 @@ def run() raises -> Int:
     suite.test[test_session_012_relations_parse]()
     suite.test[test_session_012_relations_encode_roundtrip]()
     suite.test[test_session_011_relations_refused_version_first]()
+    suite.test[test_session_legacy_011_has_no_verdict]()
+    suite.test[test_session_013_verdict_parse]()
+    suite.test[test_session_013_stop_keys_parse]()
+    suite.test[test_session_013_verdict_encode_roundtrip]()
+    suite.test[test_session_012_verdict_refused]()
+    suite.test[test_session_011_verdict_refused]()
+    suite.test[test_session_012_stop013_refused]()
+    suite.test[test_session_013_bad_verdict_refused]()
     suite.test[test_session_key_order_free_without_relations]()
     suite.test[test_session_011_relations_refused_version_last]()
-    suite.test[test_session_013_refused]()
+    suite.test[test_session_014_refused]()
     suite.test[test_session_012_relations_shape_strict]()
     suite.test[test_session_missing_synthetic]()
     suite.test[test_session_rejects_shape]()

@@ -82,7 +82,7 @@ def test_topwalk_live_top_walkthrough():
         ident = json.loads(got["identity.json"].read_text())
         assert ident["release"] == gate_kernel.selected().release, ident
         ledger = json.loads(got["walk.json"].read_text())
-        assert ledger["memveil_rc"] == 4, ledger
+        assert ledger["memveil_rc"] == 0, ledger
         assert ledger["end_reason"] == "duration", ledger
         for cap in ("bounce_attempts", "mapping_lifecycle",
                     "copy_bytes"):

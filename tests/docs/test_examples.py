@@ -4,7 +4,7 @@
 
 Runs the built binary over examples/real-capture in all three
 formats and asserts the numbers the example README promises
-(exit 4, 30 bounce attempts, zero detail loss, lifecycle/copy/
+(exit 0, 30 bounce attempts, zero detail loss, lifecycle/copy/
 conversion/region rows unavailable). Fails when the example or
 its documentation drifts from the product.
 """
@@ -39,7 +39,7 @@ def check_three_channel():
     check("3ch-readme-exists",
           os.path.isfile(os.path.join(EXAMPLE3, "README.md")))
     readme = open(os.path.join(EXAMPLE3, "README.md")).read()
-    check("3ch-readme-exit", "exit 4" in readme)
+    check("3ch-readme-exit", "exit 0" in readme)
     for token in ("bounce_attempts = 208",
                   "copy_original_to_bounce_bytes = 35002",
                   "copy_bounce_to_original_bytes = 24784",
@@ -52,7 +52,7 @@ def check_three_channel():
               and "mv-oracle:" in open(path).read())
 
     proc = report("text", EXAMPLE3)
-    check("3ch-text-exit", proc.returncode == 4,
+    check("3ch-text-exit", proc.returncode == 0,
           "exit %d: %s" % (proc.returncode, proc.stderr.strip()))
     for row in ("bounce_attempts = 208",
                 "copy_original_to_bounce_bytes = 35002",
@@ -65,7 +65,7 @@ def check_three_channel():
               row in proc.stdout)
 
     proc = report("json", EXAMPLE3)
-    check("3ch-json-exit", proc.returncode == 4,
+    check("3ch-json-exit", proc.returncode == 0,
           "exit %d: %s" % (proc.returncode, proc.stderr.strip()))
     try:
         doc = json.loads(proc.stdout)
@@ -92,7 +92,7 @@ def check_three_channel():
           and bool(incomplete[0]["evidence_refs"]))
 
     proc = report("markdown", EXAMPLE3)
-    check("3ch-markdown-exit", proc.returncode == 4,
+    check("3ch-markdown-exit", proc.returncode == 0,
           "exit %d: %s" % (proc.returncode, proc.stderr.strip()))
     check("3ch-markdown-count", "bounce\\_attempts" in proc.stdout
           and "| 208 |" in proc.stdout)
@@ -102,7 +102,7 @@ def check_three_channel():
     proc = subprocess.run(
         [BIN, "top", "--interval", "60s", EXAMPLE3],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    check("3ch-top-exit", proc.returncode == 4,
+    check("3ch-top-exit", proc.returncode == 0,
           "exit %d: %s" % (proc.returncode, proc.stderr.strip()))
     check("3ch-top-count", "bounce_attempts = 208" in proc.stdout)
 
@@ -113,11 +113,11 @@ def main():
               % BIN)
         sys.exit(1)
     readme = open(os.path.join(EXAMPLE, "README.md")).read()
-    check("readme-states-exit", "exit 4" in readme)
+    check("readme-states-exit", "exit 0" in readme)
     check("readme-states-count", "bounce_attempts = 30" in readme)
 
     proc = report("text")
-    check("text-exit", proc.returncode == 4,
+    check("text-exit", proc.returncode == 0,
           "exit %d: %s" % (proc.returncode, proc.stderr.strip()))
     check("text-count", "bounce_attempts = 30" in proc.stdout)
     check("text-detail-loss",
@@ -131,7 +131,7 @@ def main():
           "terminal: partial" in proc.stdout)
 
     proc = report("json")
-    check("json-exit", proc.returncode == 4,
+    check("json-exit", proc.returncode == 0,
           "exit %d: %s" % (proc.returncode, proc.stderr.strip()))
     try:
         doc = json.loads(proc.stdout)
@@ -153,7 +153,7 @@ def main():
           and bool(incomplete[0]["evidence_refs"]))
 
     proc = report("markdown")
-    check("markdown-exit", proc.returncode == 4,
+    check("markdown-exit", proc.returncode == 0,
           "exit %d: %s" % (proc.returncode, proc.stderr.strip()))
     check("markdown-count", "bounce\\_attempts" in proc.stdout
           and "| 30 |" in proc.stdout)

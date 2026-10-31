@@ -59,6 +59,7 @@ struct ReportOptions:
 
     var format: String
     var allow_partial: Bool
+    var strict: Bool
     var has_long_lived_after: Bool
     var long_lived_after_ns: UInt64
     var dir: String
@@ -69,6 +70,7 @@ struct ReportOptions:
     def __init__(out self):
         self.format = String("text")
         self.allow_partial = False
+        self.strict = False
         self.has_long_lived_after = False
         self.long_lived_after_ns = UInt64(0)
         self.dir = String("")
@@ -82,7 +84,7 @@ def report_usage() -> String:
     return (
         "usage: memveil report [--format text|json|markdown]"
         " [--allow-partial]\n"
-        "       [--long-lived-after DURATION]"
+        "       [--strict] [--long-lived-after DURATION]"
         " [--max-line-bytes N]\n"
         "       [--max-session-bytes N] [--max-events-bytes N] DIR\n"
         "\n"
@@ -93,6 +95,8 @@ def report_usage() -> String:
         "  --format NAME     text (default), json, or markdown.\n"
         "  --allow-partial   drop a truncated final record and report\n"
         "                    the loss instead of failing.\n"
+        "  --strict          exit 4 unless the report verdict is\n"
+        "                    complete.\n"
         "  --long-lived-after DURATION\n"
         "                    enable the informational long-lived\n"
         "                    finding past this open age. DURATION is\n"
@@ -105,8 +109,9 @@ def report_usage() -> String:
         "  --max-events-bytes N\n"
         "                    total work cap, at most 4294967296.\n"
         "\n"
-        "Exit 0 for sufficient evidence, 4 for a usable but materially\n"
-        "incomplete report, 2 for invalid input or usage.\n"
+        "Exit 0 for a rendered report (completeness rides in the\n"
+        "verdict field), 4 under --strict unless the verdict is\n"
+        "complete, 2 for invalid input or usage.\n"
     )
 
 
@@ -310,6 +315,9 @@ def parse_report_args(args: List[String]) raises CliError -> ReportOptions:
         elif tok == "--allow-partial":
             opts.allow_partial = True
             i += 1
+        elif tok == "--strict":
+            opts.strict = True
+            i += 1
         elif tok == "--long-lived-after":
             if i + 1 >= len(args):
                 raise CliError("--long-lived-after needs a value")
@@ -354,45 +362,20 @@ def parse_report_args(args: List[String]) raises CliError -> ReportOptions:
     return opts^
 
 
-def exit_for_report(rep: Report) -> Int:
-    """Map report quality to the process exit code.
+def exit_for_report(rep: Report, strict: Bool) -> Int:
+    """Map the report verdict to the process exit code.
 
-    A report that never settled (terminal unsettled), lost detail
-    events, disagrees with its counter cross-check, withholds a
-    headline attempt metric, or carries a warning finding (other
-    than measured pool pressure, which is a system state rather
-    than an evidence gap) is usable but materially incomplete.
-    Aggregate-only gaps leave the detail counts standing, so they
-    keep the sufficient-evidence exit. Correlation and baseline
-    quality render for audit; materially incomplete lifecycle
-    correlation gates through its evidence-linked warning finding.
-    Optional unrequested correlation remains harmless.
+    A rendered report is valid no matter what it records, so the
+    normal exit is 0 and completeness rides in the verdict field.
+    Findings and withheld aggregates stay advisory: they never gate
+    the exit. Under --strict only a complete verdict keeps 0; any
+    other verdict (or an unset one) exits 4.
     """
-    if rep.q_terminal.status != "complete_for_scope":
-        return EXIT_INCOMPLETE
-    if rep.q_detail.status == "partial":
-        return EXIT_INCOMPLETE
-    if rep.q_detail.status == "unavailable":
-        return EXIT_INCOMPLETE
-    if rep.counter_disagreement:
-        return EXIT_INCOMPLETE
-    var f = 0
-    while f < len(rep.findings):
-        if rep.findings[f].severity == "warning":
-            if rep.findings[f].code != "POOL_PRESSURE":
-                return EXIT_INCOMPLETE
-        f += 1
-    var i = 0
-    while i < len(rep.metrics):
-        var m = rep.metrics[i]
-        if not m.has_device_id and not m.has_pool_id:
-            if not m.has_value and (
-                m.name == "bounce_attempts"
-                or m.name == "requested_bounce_bytes"
-            ):
-                return EXIT_INCOMPLETE
-        i += 1
-    return EXIT_OK
+    if not strict:
+        return EXIT_OK
+    if rep.verdict.name == String("complete"):
+        return EXIT_OK
+    return EXIT_INCOMPLETE
 
 
 def _report_failed(prefix: String, detail: String) raises -> Int:
@@ -489,4 +472,4 @@ def run_report(args: List[String]) raises -> Int:
     except:
         write_stderr("memveil report: cannot write stdout\n")
         return EXIT_INTERNAL
-    return exit_for_report(rep)
+    return exit_for_report(rep, opts.strict)

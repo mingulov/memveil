@@ -352,7 +352,7 @@ def check_correctness(tmp, sel):
     expected = expected_from_verified(got, "correctness")
     ledger = json.loads(got["ledger.json"].read_text())
     session = json.loads(got["session.json"].read_text())
-    assert ledger["record_exit"] == 4
+    assert ledger["record_exit"] == 0
     assert session["capture"]["end_reason"] == "duration"
     assert (
         evidence(session, "profile.decision")
@@ -409,7 +409,7 @@ def check_correctness(tmp, sel):
     shutil.copy(got["session.json"], cap_dir / "session.json")
     shutil.copy(got["events.ndjson"], cap_dir / "events.ndjson")
     rep = run_report(cap_dir)
-    assert rep.returncode == 4, rep.stderr[-1000:]
+    assert rep.returncode == 0, rep.stderr[-1000:]
     report = json.loads(rep.stdout)
     assert report["quality"]["detail"]["status"] == "complete_for_scope"
     assert report["quality"]["detail"]["loss_count"] == "0"
@@ -452,7 +452,7 @@ def check_saturation(tmp, sel):
     expected = expected_from_verified(got, "saturation")
     ledger = json.loads(got["ledger.json"].read_text())
     session = json.loads(got["session.json"].read_text())
-    assert ledger["record_exit"] == 4
+    assert ledger["record_exit"] == 0
     assert session["capture"]["end_reason"] == "signal"
     assert (
         evidence(session, "profile.decision")
@@ -502,7 +502,7 @@ def check_saturation(tmp, sel):
     shutil.copy(got["session.json"], cap_dir / "session.json")
     shutil.copy(got["events.ndjson"], cap_dir / "events.ndjson")
     rep = run_report(cap_dir)
-    assert rep.returncode == 4, rep.stderr[-1000:]
+    assert rep.returncode == 0, rep.stderr[-1000:]
     report = json.loads(rep.stdout)
     assert report["quality"]["detail"]["status"] == "partial"
     assert int(report["quality"]["detail"]["loss_count"]) == loss

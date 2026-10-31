@@ -16,7 +16,7 @@ from memveil.model.session import Channel
 from memveil.model.validate import format_u64
 from memveil.render.filter import resolve_device_filter
 
-comptime REPORT_SCHEMA_VERSION = "0.1.1"
+comptime REPORT_SCHEMA_VERSION = "0.1.2"
 
 
 def _hex_nibble(v: Int) -> UInt8:
@@ -135,7 +135,7 @@ def _correlation_json(rep: Report, level: Int) raises -> String:
 
 
 def render_json(rep: Report, device_filter: String = "") raises -> String:
-    """Render the report as pretty JSON per report-v0.1.1.schema.json."""
+    """Render the report as pretty JSON per report-v0.1.2.schema.json."""
     var filt = resolve_device_filter(rep.devices, device_filter)
     var out = String("{\n")
     out += '  "schema_version": "' + REPORT_SCHEMA_VERSION + '",\n'
@@ -213,6 +213,19 @@ def render_json(rep: Report, device_filter: String = "") raises -> String:
     out += _correlation_json(rep, 2) + ",\n"
     out += _channel_json(String("baseline"), rep.q_baseline, 2) + ",\n"
     out += _channel_json(String("terminal"), rep.q_terminal, 2) + "\n"
+    out += "  },\n"
+    out += '  "verdict": {\n'
+    out += '    "name": ' + escape_json(rep.verdict.name) + ",\n"
+    out += (
+        '    "loss_ratio_bps": "'
+        + format_u64(UInt64(rep.verdict.loss_ratio_bps))
+        + '",\n'
+    )
+    out += (
+        '    "delivered": "'
+        + format_u64(rep.detail_delivered)
+        + '"\n'
+    )
     out += "  },\n"
     var shown = 0
     for i in range(len(rep.metrics)):

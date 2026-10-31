@@ -150,6 +150,7 @@ struct RecordOptions:
     var capabilities: String
     var device: String
     var has_device: Bool
+    var strict: Bool
 
     def __init__(out self):
         self.duration_s = DEFAULT_DURATION_S
@@ -167,6 +168,7 @@ struct RecordOptions:
         self.capabilities = String("")
         self.device = String("")
         self.has_device = False
+        self.strict = False
 
 
 struct ExtraChannel(Copyable):
@@ -2034,6 +2036,7 @@ def run_collector_with[W: WriterSource](
     cfg.copy_ring_bytes = UInt32(decision.cp.ring_bytes)
     cfg.has_device_filter = opts.has_device
     cfg.device_filter = opts.device
+    cfg.strict = opts.strict
     var boot_id = String("")
     if _read_boot_id(root, boot_id):
         cfg.has_boot_id = True

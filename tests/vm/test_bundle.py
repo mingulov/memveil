@@ -170,8 +170,8 @@ def check_report(report, events, bundle, tag, drained=True):
     only require the report to match the latest sample.
     """
     bad = []
-    if bundle["report_exit"] != 4:
-        bad.append("%s: report exit %r != 4 (partial)" % (
+    if bundle["report_exit"] != 0:
+        bad.append("%s: report exit %r != 0 (rendered)" % (
             tag, bundle["report_exit"]))
     kinds = {}
     for event in events:
@@ -365,7 +365,7 @@ def test_bundle_three_phase_capture():
         assert f_tocpu == witness["f"]["witnessed"][
             "bounce_to_original"], (f_tocpu, witness["f"])
         print("b: oracle %d + fail %d + io %d + ambient %d "
-              "events, report exit 4 ok"
+              "events, report exit 0 ok"
               % (len(o_slice), len(f_slice), len(io_slice),
                  len(ambient)))
     except Exception:

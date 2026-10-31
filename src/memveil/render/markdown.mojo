@@ -19,7 +19,7 @@ from memveil.model.session import Channel
 from memveil.model.validate import format_u64
 from memveil.render.filter import resolve_device_filter
 from memveil.render.context import measured_duration, recorded_value
-from memveil.render.text import escape_text
+from memveil.render.text import escape_text, verdict_line
 
 
 def _append_entity(mut out: List[UInt8], word: String):
@@ -102,6 +102,8 @@ def render_markdown(rep: Report, device_filter: String = "") raises -> String:
         out += "- synthetic: no\n"
     out += "- engine: "
     out += escape_text(rep.engine_version)
+    out += "\n- "
+    out += verdict_line(rep)
     out += "\n- window: ["
     out += format_u64(rep.window_start_ns)
     out += ","

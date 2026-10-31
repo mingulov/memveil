@@ -160,16 +160,17 @@ FROZEN_FLAGS = {
     "record": ("--bridge", "--capability", "--cp-object",
                "--device", "--duration", "--help", "--lc-object",
                "--max-events-bytes", "--object", "--output",
-               "--profile", "--profiles-dir", "-h"),
+               "--profile", "--profiles-dir", "--strict", "-h"),
     "report": ("--allow-partial", "--format", "--help",
                "--long-lived-after", "--max-events-bytes",
-               "--max-line-bytes", "--max-session-bytes", "-h"),
-    "top": ("--bridge", "--capability", "--cp-object",
+               "--max-line-bytes", "--max-session-bytes",
+               "--strict", "-h"),
+    "top": ("--bridge", "--capability", "--compact", "--cp-object",
             "--device", "--duration", "--help", "--interval",
             "--lc-object", "--long-lived-after",
             "--max-events-bytes", "--max-line-bytes",
             "--max-session-bytes", "--object", "--output",
-            "--profile", "--profiles-dir", "-h"),
+            "--profile", "--profiles-dir", "--strict", "-h"),
     "doctor": ("--bridge", "--capability", "--cp-object",
                "--help", "--json", "--lc-object", "--load-check",
                "--object", "--profiles-dir", "-h"),
@@ -181,8 +182,8 @@ FROZEN_FLAGS = {
 # capabilities stay free text because the accepted set is
 # profile-dependent, not statically closed.
 FROZEN_FORMAT_VALUES = ("text", "json", "markdown")
-FROZEN_NOVALUE_FLAGS = ("--help", "--allow-partial", "--json",
-                          "--load-check", "-h")
+FROZEN_NOVALUE_FLAGS = ("--help", "--allow-partial", "--compact", "--json",
+                          "--load-check", "--strict", "-h")
 
 SHORT_DESC = "swiotlb bounce-attempt capture and offline replay on x86-64 Linux"
 

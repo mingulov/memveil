@@ -107,7 +107,7 @@ def test_guest_comparison(tmp_path):
             [MEMVEIL_BIN, "report", "--format", "json",
              str(authored)],
             capture_output=True, text=True, timeout=300)
-        assert rep.returncode == 4, rep.stderr[-1000:]
+        assert rep.returncode == 0, rep.stderr[-1000:]
         report = json.loads(rep.stdout)
         ledger = replay_oracle_ledger(ops_log, releases)
         mismatches = compare_live(report, ledger, probe_lifetimes)

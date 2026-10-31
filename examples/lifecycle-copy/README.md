@@ -77,7 +77,8 @@ mappings.
   loss 0. Terminal quality stays `partial` (quiescence
   unproven after detach); correlation stays `partial`
   (unpaired copies and syncs excluded from attribution while
-  their facts persist). Reports exit 4 by design.
+  their facts persist). Reports exit 0 by design; completeness
+  rides in the report verdict field.
 - This is a historical capture and profile decision, not
   qualification of a rebuilt package or the current reader
   host.
@@ -97,7 +98,7 @@ From the bundle root (or a source checkout, with
     bin/memveil report --format markdown examples/lifecycle-copy
     bin/memveil top examples/lifecycle-copy
 
-Expected: exit 4, `bounce_attempts = 208`,
+Expected: exit 0, `bounce_attempts = 208`,
 `copy_original_to_bounce_bytes = 35002`,
 `copy_bounce_to_original_bytes = 24784`,
 `completed_lifetime_count = 208`, detail loss 0. Text and

@@ -62,6 +62,8 @@ struct StopEvidence(ImplicitlyCopyable):
     var in_flight_at_close: Int
     var late_submits_drained: Int
     var drained_records: Int
+    var has_drained: Bool
+    var submit_after_drain: Bool
     var busy_at_drain: Bool
     var counters_valid: Bool
     var open_mappings: Int
@@ -248,6 +250,8 @@ struct StopController:
             self._in_flight_at_close,
             self._late_covered,
             self._drained,
+            self._has_drained,
+            self._submit_after_drain,
             self._busy,
             self._sampled and self._counters_ok,
             open_mappings,

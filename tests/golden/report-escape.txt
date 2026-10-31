@@ -1,3 +1,4 @@
+verdict: partial_unknown_loss (loss >=0.00%, 1 delivered)
 memveil report attempts-3-session (synthetic, engine memveil-0.1.0)
 window: [1000000000,4000000000)
 duration: 3.000000000 s (3000000000 ns)
