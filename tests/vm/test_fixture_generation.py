@@ -204,3 +204,52 @@ def test_compiler_identity_uses_executing_driver_not_program_lookup(tmp_path):
     baseline = module.input_identity('clang')
     assert identity['compiler']['sha256'] == baseline['compiler']['sha256']
     assert identity['compiler']['shared_libraries'] == baseline['compiler']['shared_libraries']
+
+
+def configured_compiler(tmp_path):
+    import shlex
+    import shutil
+    config_dir = tmp_path / 'configs'
+    config_dir.mkdir()
+    wrapper = tmp_path / 'clang-configured'
+    wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(shutil.which('clang')) +
+                       ' --config-user-dir=' + shlex.quote(str(config_dir)) +
+                       ' --config-system-dir=' + shlex.quote(str(config_dir)) +
+                       ' "$@"\n')
+    wrapper.chmod(0o755)
+    return wrapper, config_dir
+
+
+@pytest.mark.parametrize('change', ['unused-macro', 'comment-only'])
+def test_loaded_target_config_drift_refused_with_identical_objects(tmp_path, change):
+    wrapper, configs = configured_compiler(tmp_path)
+    config = configs / 'bpf-clang.cfg'
+    config.write_text('-DMV_CONFIG_PROVENANCE=1\n')
+    before, after = tmp_path / 'before', tmp_path / 'after'
+    proc = run('--clang', wrapper, '--out', before)
+    assert proc.returncode == 0, proc.stderr
+    config.write_text('-DMV_CONFIG_PROVENANCE=2\n' if change == 'unused-macro'
+                      else '-DMV_CONFIG_PROVENANCE=1\n# changed config bytes\n')
+    proc = run('--clang', wrapper, '--out', after)
+    assert proc.returncode == 0, proc.stderr
+    for path in before.glob('*.o'):
+        assert path.read_bytes() == (after / path.name).read_bytes()
+    proc = run('--clang', wrapper, '--out', before, '--check')
+    assert proc.returncode == 1
+    assert 'input identity drift' in proc.stderr
+    import hashlib
+    recorded = json.loads((after / 'manifest.json').read_text())['inputs']['compiler']
+    assert recorded['configs'][str(config)] == hashlib.sha256(config.read_bytes()).hexdigest()
+    macro = 'MV_CONFIG_PROVENANCE=2' if change == 'unused-macro' else 'MV_CONFIG_PROVENANCE=1'
+    for command in recorded['effective_commands'].values():
+        assert macro in command
+
+
+@pytest.mark.parametrize("directive", ["@nested.cfg", "--config=nested.cfg"])
+def test_nested_target_config_refused_explicitly(tmp_path, directive):
+    wrapper, configs = configured_compiler(tmp_path)
+    (configs / 'bpf-clang.cfg').write_text(directive + '\n')
+    (configs / 'nested.cfg').write_text('-DMV_NESTED_CONFIG=1\n')
+    proc = run('--clang', wrapper, '--out', tmp_path / 'out')
+    assert proc.returncode == 1
+    assert 'nested compiler configuration is unsupported' in proc.stderr

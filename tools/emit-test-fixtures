@@ -58,18 +58,42 @@ def input_identity(clang):
         'toolchain']['clang']['minimum_version']
     if not match or tuple(map(int, match.groups())) < tuple(map(int, floor.split('.'))):
         raise ValueError('clang below locked minimum ' + floor)
-    probe = subprocess.run([clang, '-###', '--target=bpf', '-x', 'c',
-                            '-c', '/dev/null'], capture_output=True, text=True)
-    drivers = [shlex.split(line)[0] for line in probe.stderr.splitlines()
-               if '"-cc1"' in line]
-    if probe.returncode or len(drivers) != 1:
-        raise ValueError('cannot identify executing clang driver')
-    driver = Path(drivers[0])
-    if not driver.is_absolute():
-        driver = Path(shutil.which(str(driver)) or str(driver))
     resources = Path(command([clang, '-print-resource-dir'])) / 'include'
     if not resources.is_dir():
         raise ValueError('missing compiler resource headers')
+    configs = set()
+    diagnostics = [version]
+    effective = {}
+    drivers = set()
+    probe_out = ROOT / 'build/fixtures/.identity'
+    for name in SOURCES:
+        argv = object_command(clang, name, probe_out, str(resources))
+        probe = subprocess.run([argv[0], '-###', *argv[1:]], cwd=ROOT,
+                               capture_output=True, text=True)
+        commands = [shlex.split(line) for line in probe.stderr.splitlines()
+                    if '"-cc1"' in line]
+        if probe.returncode or len(commands) != 1:
+            raise ValueError('cannot identify executing clang command: ' + name)
+        drivers.add(commands[0][0])
+        effective[name] = [arg.replace(str(probe_out), '<fixture-output>')
+                          .replace(str(ROOT), '<source-root>')
+                          for arg in commands[0]]
+        diagnostics.append(probe.stderr)
+    if len(drivers) != 1:
+        raise ValueError('fixture commands select different clang drivers')
+    driver = Path(drivers.pop())
+    if not driver.is_absolute():
+        driver = Path(shutil.which(str(driver)) or str(driver))
+    for diagnostic in diagnostics:
+        for line in diagnostic.splitlines():
+            if line.startswith('Configuration file: '):
+                path = Path(line.split(': ', 1)[1])
+                configs.add(path if path.is_absolute() else ROOT / path)
+    for config in configs:
+        # Bound custody to flat configs; clang hides nested file identities.
+        contents = config.read_text()
+        if '@' in contents or '--config' in contents:
+            raise ValueError('nested compiler configuration is unsupported: ' + str(config))
     linked = subprocess.run(['ldd', str(driver.resolve())],
                             capture_output=True, text=True)
     # Static toolchains have no shared-library inputs. Other lookup errors
@@ -83,8 +107,6 @@ def input_identity(clang):
         if match:
             lib = Path(match.group(1))
             libraries[str(lib)] = sha(lib)
-    configs = [Path(line.split(': ', 1)[1]) for line in version.splitlines()
-               if line.startswith('Configuration file: ')]
     sources = {source for source, _ in SOURCES.values()}
     sources.update(['toolchain.lock.json', REFERENCE, 'tools/emit-test-fixtures',
                     'tools/emit-gate-profiles', 'tools/emit-core-layouts', 'tools/emit-core-fixtures',
@@ -96,7 +118,8 @@ def input_identity(clang):
     return {
         'compiler': {'version': version, 'sha256': sha(driver.resolve()),
                      'invoker_sha256': sha(Path(shutil.which(clang) or clang).resolve()),
-                     'configs': {str(p): sha(p) for p in configs},
+                     'configs': {str(p): sha(p) for p in sorted(configs)},
+                     'effective_commands': effective,
                      'shared_libraries': libraries},
         'sources': {s: sha(ROOT / s) for s in sorted(sources)},
         'headers': {str(p.relative_to(ROOT)): sha(p) for p in sorted(headers)},
@@ -120,14 +143,18 @@ def compile_flags(name, resources):
             '-I', 'bpf/include/uapi' if core else str(ROOT / 'bpf/include/uapi')]
 
 
+def object_command(clang, name, out, resources):
+    source, _ = SOURCES[name]
+    # Preserve include and source spelling used by each supported generator.
+    src = str(ROOT / source) if name == 'relo_kinds.bpf.o' else source
+    return [clang, *compile_flags(name, resources), '-c', src,
+            '-o', str(out / name)]
+
+
 def compile_objects(out, clang):
     resources = command([clang, '-print-resource-dir']) + '/include'
-    for name, (source, _) in SOURCES.items():
-        # Preserve each supported generator's include spelling as it is
-        # observable in DWARF even after mapping the checkout prefix.
-        src = str(ROOT / source) if name == 'relo_kinds.bpf.o' else source
-        command([clang, *compile_flags(name, resources), '-c', src,
-                 '-o', str(out / name)])
+    for name in SOURCES:
+        command(object_command(clang, name, out, resources))
 
 
 def profile(out):
