@@ -8,6 +8,8 @@ enum, and type sites in bpf/programs/swiotlb_copy.bpf.c and
 swiotlb_lifecycle.bpf.c, the local types in
 bpf/include/mv_fentry_types.h, and the relo_kinds.bpf.c source.
 """
+from test_fixture_generation import generated  # noqa: F401
+
 import json
 import struct
 import subprocess
@@ -281,7 +283,29 @@ def test_usage_errors():
     assert proc.returncode == 2
 
 
-def test_fixture_matches_source():
-    proc = subprocess.run([str(REPO / "tools" / "emit-core-fixtures"),
-                           "--check"], capture_output=True, text=True)
-    assert proc.returncode == 0, proc.stderr
+def test_fixture_matches_source(generated, tmp_path):
+    # Exact bytes are checked under their recorded compiler, not against
+    # a historical object produced by a different supported compiler.
+    local = tmp_path / "relo_kinds.bpf.o"
+    tool = str(REPO / "tools/emit-core-fixtures")
+    for flags in (("--output", str(local)), ("--output", str(local), "--check")):
+        proc = subprocess.run([tool, *flags], capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+    assert local.read_bytes() == (generated / local.name).read_bytes()
+    assert _print("--object", "copy-actual=%s" % local) == EXPECTED_KINDS
+
+
+def test_fresh_objects_have_independent_expected_relocations(generated):
+    assert _print("--object", "copy-actual=%s" %
+                  (generated / "swiotlb_copy.bpf.o")) == EXPECTED_CP
+    assert _print("--object", "mapping-lifecycle=%s" %
+                  (generated / "swiotlb_lifecycle.bpf.o")) == EXPECTED_LC
+
+
+def test_changed_fresh_relocation_refused(generated, tmp_path):
+    patched = tmp_path / "changed.o"
+    patched.write_bytes(_patch_relo_kind(
+        (generated / "relo_kinds.bpf.o").read_bytes(), 4))
+    proc = _run("--object", "copy-actual=%s" % patched, "--print")
+    assert proc.returncode == 1
+    assert "bitfield relocation" in proc.stderr

@@ -40,6 +40,9 @@ nonzero on failure. A skipped privileged test is reported as skipped, never
 as success evidence. Public build/test suites work from a standalone clone
 using only this repository.
 
+See [offline fixture generation](fixture-generation.md) for compiler-bound
+provisional fixtures and the complete isolated-runner preflight.
+
 ## Verified toolchain probes
 
 The following was verified against Mojo 1.1.0 by compiling and running

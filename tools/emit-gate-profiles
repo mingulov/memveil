@@ -18,8 +18,9 @@ implementation, so re-mints cannot drift from the qualified
 lanes. gate_docs is also the transform tests/vm/gate_kernel.py
 uses to mint the gate and saturation-candidate profiles for
 the running kernel on every armed VM run. Re-running after a
-kernel/producer change re-qualifies the bindings; the gate
-itself enforces the checked-in values.
+kernel/producer change produces provisional bindings requiring new live
+qualification; generation itself never qualifies them. The gate enforces
+the checked-in values.
 """
 import hashlib
 import importlib.util

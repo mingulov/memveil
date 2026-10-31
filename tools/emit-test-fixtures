@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Generate or verify compiler-bound, synthetic-only offline BPF fixtures.
+
+Historical fixtures and qualified profiles are never overwritten. --check
+requires the recorded input identities, fresh object bytes, and profile to
+match; neither generation nor verification earns kernel qualification.
+"""
+import argparse
+from contextlib import contextmanager
+import fcntl
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import shlex
+import stat
+import uuid
+import shutil
+import subprocess
+import sys
+import tempfile
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+BASE = ['--target=bpf', '-O2', '-g', '-Wall', '-Wextra', '-Werror',
+        '-D__BPF__', '-nostdinc']
+SOURCES = {
+    'swiotlb_attempt.bpf.o': ('bpf/programs/swiotlb_attempt.bpf.c', []),
+    'swiotlb_attempt-test.bpf.o': ('bpf/programs/swiotlb_attempt.bpf.c',
+                                  ['-DMV_RING_BYTES=4096']),
+    'swiotlb_lifecycle.bpf.o': ('bpf/programs/swiotlb_lifecycle.bpf.c', []),
+    'swiotlb_copy.bpf.o': ('bpf/programs/swiotlb_copy.bpf.c', []),
+    'relo_kinds.bpf.o': ('tests/fixtures/core/relo_kinds.bpf.c', []),
+}
+REFERENCE = ('tests/fixtures/capabilities/profiles-narrow-test/'
+             'test-narrow-validated.json')
+
+
+def sha(path):
+    with path.open('rb') as handle:
+        return hashlib.file_digest(handle, 'sha256').hexdigest()
+
+
+def command(args):
+    proc = subprocess.run(args, cwd=ROOT, capture_output=True, text=True)
+    if proc.returncode:
+        raise ValueError('command failed: %s\n%s' % (args[0], proc.stderr))
+    return proc.stdout.strip()
+
+
+def input_identity(clang):
+    version = command([clang, '--version'])
+    match = re.search(r'clang version (\d+)\.(\d+)\.(\d+)', version)
+    floor = json.loads((ROOT / 'toolchain.lock.json').read_text())[
+        'toolchain']['clang']['minimum_version']
+    if not match or tuple(map(int, match.groups())) < tuple(map(int, floor.split('.'))):
+        raise ValueError('clang below locked minimum ' + floor)
+    probe = subprocess.run([clang, '-###', '--target=bpf', '-x', 'c',
+                            '-c', '/dev/null'], capture_output=True, text=True)
+    drivers = [shlex.split(line)[0] for line in probe.stderr.splitlines()
+               if '"-cc1"' in line]
+    if probe.returncode or len(drivers) != 1:
+        raise ValueError('cannot identify executing clang driver')
+    driver = Path(drivers[0])
+    if not driver.is_absolute():
+        driver = Path(shutil.which(str(driver)) or str(driver))
+    resources = Path(command([clang, '-print-resource-dir'])) / 'include'
+    if not resources.is_dir():
+        raise ValueError('missing compiler resource headers')
+    linked = subprocess.run(['ldd', str(driver.resolve())],
+                            capture_output=True, text=True)
+    # Static toolchains have no shared-library inputs. Other lookup errors
+    # must not silently turn a dynamic compiler into a static identity.
+    if linked.returncode and not any(word in linked.stdout + linked.stderr
+                                    for word in ('not a dynamic executable', 'statically linked')):
+        raise ValueError('cannot identify compiler shared libraries')
+    libraries = {}
+    for line in linked.stdout.splitlines():
+        match = re.search(r'(?:=>\s+)?(/\S+)\s+\(', line)
+        if match:
+            lib = Path(match.group(1))
+            libraries[str(lib)] = sha(lib)
+    configs = [Path(line.split(': ', 1)[1]) for line in version.splitlines()
+               if line.startswith('Configuration file: ')]
+    sources = {source for source, _ in SOURCES.values()}
+    sources.update(['toolchain.lock.json', REFERENCE, 'tools/emit-test-fixtures',
+                    'tools/emit-gate-profiles', 'tools/emit-core-layouts', 'tools/emit-core-fixtures',
+                    'tests/vm/mint_record3_profile.py'])
+    headers = [p for base in ('bpf/include', 'build/deps/include/bpf')
+               for p in (ROOT / base).rglob('*.h')]
+    if not (ROOT / 'build/deps/include/bpf/bpf_core_read.h').is_file():
+        raise ValueError('missing libbpf headers; run tools/build first')
+    return {
+        'compiler': {'version': version, 'sha256': sha(driver.resolve()),
+                     'invoker_sha256': sha(Path(shutil.which(clang) or clang).resolve()),
+                     'configs': {str(p): sha(p) for p in configs},
+                     'shared_libraries': libraries},
+        'sources': {s: sha(ROOT / s) for s in sorted(sources)},
+        'headers': {str(p.relative_to(ROOT)): sha(p) for p in sorted(headers)},
+        'resource_headers': {str(p.relative_to(resources)): sha(p)
+                             for p in sorted(resources.rglob('*')) if p.is_file()},
+        'flags': {name: [flag.replace(str(ROOT), '<source-root>')
+                         for flag in compile_flags(name, '<clang-resource>/include')]
+                  for name in SOURCES},
+        'objects': {name: {'source': src, 'extra_flags': flags}
+                    for name, (src, flags) in SOURCES.items()},
+    }
+
+
+def compile_flags(name, resources):
+    core = name == 'relo_kinds.bpf.o'
+    _, extra = SOURCES[name]
+    return [*BASE, '-isystem', resources,
+            '-ffile-prefix-map=%s=.' % ROOT, *extra,
+            '-I', 'bpf/include',
+            '-I', 'build/deps/include' if core else str(ROOT / 'build/deps/include'),
+            '-I', 'bpf/include/uapi' if core else str(ROOT / 'bpf/include/uapi')]
+
+
+def compile_objects(out, clang):
+    resources = command([clang, '-print-resource-dir']) + '/include'
+    for name, (source, _) in SOURCES.items():
+        # Preserve each supported generator's include spelling as it is
+        # observable in DWARF even after mapping the checkout prefix.
+        src = str(ROOT / source) if name == 'relo_kinds.bpf.o' else source
+        command([clang, *compile_flags(name, resources), '-c', src,
+                 '-o', str(out / name)])
+
+
+def profile(out):
+    loader = SourceFileLoader('test_fixture_emitter', str(ROOT / 'tools/emit-gate-profiles'))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    emitter = importlib.util.module_from_spec(spec)
+    loader.exec_module(emitter)
+    emitter.PROD_OBJ = out / 'swiotlb_attempt.bpf.o'
+    emitter.SAT_OBJ = out / 'swiotlb_attempt-test.bpf.o'
+    emitter.LC_OBJ = out / 'swiotlb_lifecycle.bpf.o'
+    emitter.CP_OBJ = out / 'swiotlb_copy.bpf.o'
+    ref = json.loads((ROOT / REFERENCE).read_text())
+    source = ref['identity']['source']
+    note = dict(part.split('=', 1) for part in source['note'].split())
+    ident = {'release': source['revision'], 'config_src': note['config_src'],
+             'image_bid': note['image_bid']}
+    for key in ('config', 'btf', 'format', 'image'):
+        ident[key + '_sha'] = note[key].removeprefix('sha256:')
+    doc, _ = emitter.gate_docs(ident, ref['hooks'][0]['format_text'],
+                               'test-narrow-provisional')
+    # gate_docs deliberately retains reference-unvalidated status.
+    doc["notes"].append("Synthetic offline fixture; no live kernel qualification.")
+    return doc
+
+
+@contextmanager
+def output_directory(out, create):
+    if create:
+        out.mkdir(parents=True, exist_ok=True)
+    fd = os.open(out, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ValueError('fixture directory is busy') from exc
+        for name in [*SOURCES, 'profile.json', 'manifest.json']:
+            try:
+                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError('non-regular fixture output: ' + name)
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def publish(fd, name, data):
+    # Atomic replacement never writes through an old symlink or hard link.
+    temporary = '.' + name + '.' + uuid.uuid4().hex
+    writer = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600, dir_fd=fd)
+    try:
+        with os.fdopen(writer, 'wb') as handle:
+            handle.write(data)
+        os.replace(temporary, name, src_dir_fd=fd, dst_dir_fd=fd)
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=fd)
+        except FileNotFoundError:
+            pass
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--out', type=Path, default=ROOT / 'build/fixtures/provisional')
+    parser.add_argument('--clang', default='clang')
+    parser.add_argument('--check', action='store_true')
+    args = parser.parse_args()
+    out = args.out.resolve()
+    # Never allow this command to replace tracked reference material.
+    if out == ROOT or ROOT / 'build' not in out.parents and ROOT in out.parents:
+        parser.error('output inside repository must be under build/')
+    try:
+        with output_directory(out, create=not args.check) as fd:
+            inputs = input_identity(args.clang)
+            if args.check:
+                saved = json.loads((out / 'manifest.json').read_text())
+                if saved.get('inputs') != inputs:
+                    raise ValueError('input identity drift; regenerate provisional fixtures explicitly')
+            with tempfile.TemporaryDirectory() as tmp:
+                fresh = Path(tmp)
+                compile_objects(fresh, args.clang)
+                (fresh / 'profile.json').write_text(json.dumps(profile(fresh), indent=2) + '\n')
+                if input_identity(args.clang) != inputs:
+                    raise ValueError('input identity drift during generation')
+                outputs = {p.name: sha(p) for p in sorted(fresh.iterdir())}
+                manifest = {'schema': 'memveil-test-fixtures/1',
+                            'qualification': 'synthetic-only', 'inputs': inputs,
+                            'outputs': outputs}
+                if args.check:
+                    for name in outputs:
+                        if not (out / name).is_file() or (out / name).read_bytes() != (fresh / name).read_bytes():
+                            raise ValueError('fresh compile differs: ' + name)
+                    if saved != manifest:
+                        raise ValueError('fixture manifest drift')
+                else:
+                    for name in outputs:
+                        publish(fd, name, (fresh / name).read_bytes())
+                    publish(fd, 'manifest.json', (json.dumps(manifest, indent=2, sort_keys=True) + '\n').encode())
+        print('provisional fixtures ' + ('verified' if args.check else 'written') + ': ' + str(out))
+        return 0
+    except (OSError, ValueError, KeyError) as exc:
+        print('emit-test-fixtures: ' + str(exc), file=sys.stderr)
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
