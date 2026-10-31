@@ -41,8 +41,13 @@ doctor leaves the load verdict at `ready (load not checked)`.
   (`mount | grep tracefs`).
 - Lockdown below `confidentiality`
   (`cat /sys/kernel/security/lockdown`); `integrity` is fine.
-- Privilege: `CAP_BPF` plus `CAP_PERFMON`, or
-  `CAP_SYS_ADMIN` (root in the initial user namespace).
+- Privilege: root in the initial user namespace
+  (`CAP_SYS_ADMIN`). `CAP_BPF` plus `CAP_PERFMON` loads BPF
+  but cannot reach tracefs whenever
+  `/sys/kernel/debug/tracing` exists: libbpf resolves the
+  tree by existence (debugfs first), so a capabilities-only
+  setup refuses at hook admission. There is no supported
+  capabilities-only recipe.
 - Memory-cgroup headroom for the BPF maps (see the map
   sizes under Resource defaults); the memcg precheck
   reports `unknown` when outer limits are not visible.

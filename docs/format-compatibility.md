@@ -4,7 +4,7 @@
 Capture, event, session, and report schemas are versioned
 independently; the frozen set (events 0.1.1 and 0.1.2,
 profiles 0.1.1 and 0.1.2, session 0.1.1, 0.1.2, and 0.1.3;
-report 0.1.2, doctor 0.1.0) is the only supported input.
+report 0.1.3, doctor 0.1.0) is the only supported input.
 Events 0.1.2
 adds the true-only copy markers `pool_private` and
 `offset_past_allocation`; 0.1.1 stays frozen and accepted.
@@ -22,13 +22,15 @@ older documents carrying 0.1.3-only fields are refused.
 Session 0.1.1, 0.1.2, and 0.1.3 carry the optional `boot_id`
 opaque id when the capture is tied to one boot.
 Report 0.1.2 adds the required verdict object; 0.1.1
-stays frozen. Reports are output only: the renderer emits
+stays frozen. Report 0.1.3 adds the
+`LONG_LIVED_NOT_EVALUATED` finding code; 0.1.2 stays
+frozen. Reports are output only: the renderer emits
 the current version and no reader parses older ones back.
 The replay path treats every capture as untrusted and stays
 offline: it never loads BPF objects, touches tracefs or
 BTF, opens the network, or requires privileges.
 
-## Reader policy (events 0.1.1/0.1.2, profiles 0.1.1/0.1.2, session 0.1.1/0.1.2/0.1.3, report 0.1.2, rest 0.1.0)
+## Reader policy (events 0.1.1/0.1.2, profiles 0.1.1/0.1.2, session 0.1.1/0.1.2/0.1.3, report 0.1.3, rest 0.1.0)
 
 - Unknown schema major, unknown event kind, unknown field, or
   duplicated key: refused, exit 2. There is no last-wins, no

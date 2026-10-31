@@ -303,7 +303,13 @@ struct Analyzer:
         if self._mappings.sees_lifecycle():
             if self._session.has_corr_relations:
                 if rep.q_corr_mapping.status != "complete_for_scope":
-                    self._mappings.note_correlation_loss()
+                    # A mapping_release partial fully explained
+                    # by observed pre-window releases keeps
+                    # in-window live state; only the peak (whose
+                    # pre-window occupancy is unknown) is
+                    # withheld by the tracker.
+                    if not self._mappings.pre_window_explains_mapping_release():
+                        self._mappings.note_correlation_loss()
                 if rep.q_corr_copy.status != "complete_for_scope":
                     self._mappings.note_copy_attribution_loss()
                 if rep.q_corr_sync.status != "complete_for_scope":

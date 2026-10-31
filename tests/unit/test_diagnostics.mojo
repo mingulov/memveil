@@ -151,6 +151,67 @@ def test_long_lived_threshold() raises:
     assert_equal(_codes(out2, "LONG_LIVED_ALLOCATION"), 0)
 
 
+def _missing_metric(name: String, notes: String) -> Metric:
+    var m = Metric()
+    m.name = name
+    m.has_value = False
+    m.unit = String("nanoseconds")
+    m.measurement = String("unavailable")
+    m.coverage = String("unavailable")
+    m.scope = String("window [0,1000)")
+    m.notes = notes
+    return m^
+
+
+def test_long_lived_not_evaluated() raises:
+    var eng = DiagnosisEngine()
+    var p = DiagnosticPolicy()
+    p.has_long_lived_after = True
+    p.long_lived_after_ns = UInt64(500)
+    var r = _report()
+    r.metrics.append(
+        _missing_metric(
+            String("oldest_open_mapping_age_ns"),
+            String("Release without open mapping; age withheld."),
+        )
+    )
+    var out = eng.evaluate(r^, p)
+    assert_equal(_codes(out, String("LONG_LIVED_NOT_EVALUATED")), 1)
+    assert_equal(_codes(out, String("LONG_LIVED_ALLOCATION")), 0)
+    assert_equal(out[0].severity, String("informational"))
+    assert_true(
+        out[0].explanation.find(String("not evaluated")) != -1,
+        out[0].explanation,
+    )
+    assert_true(
+        out[0].explanation.find(String("Release without open mapping"))
+        != -1,
+        out[0].explanation,
+    )
+    assert_equal(len(out[0].evidence_refs), 1)
+    assert_equal(
+        out[0].evidence_refs[0],
+        String("metric:oldest_open_mapping_age_ns"),
+    )
+    # Disabled policy stays silent even with the age missing.
+    var r2 = _report()
+    r2.metrics.append(
+        _missing_metric(
+            String("oldest_open_mapping_age_ns"), String("withheld")
+        )
+    )
+    var out2 = eng.evaluate(r2^, DiagnosticPolicy())
+    assert_equal(_codes(out2, String("LONG_LIVED_NOT_EVALUATED")), 0)
+    # A valued row below threshold stays silent too: evaluated,
+    # not missing.
+    var r3 = _report()
+    r3.metrics.append(
+        _metric(String("oldest_open_mapping_age_ns"), UInt64(100), String(""))
+    )
+    var out3 = eng.evaluate(r3^, p)
+    assert_equal(_codes(out3, String("LONG_LIVED_NOT_EVALUATED")), 0)
+
+
 def test_pool_pressure() raises:
     var eng = DiagnosisEngine()
     var r = _report()
@@ -227,6 +288,7 @@ def run() raises -> Int:
     suite.test[test_no_duplicate_codes]()
     suite.test[test_long_lived_disabled_by_default]()
     suite.test[test_long_lived_threshold]()
+    suite.test[test_long_lived_not_evaluated]()
     suite.test[test_pool_pressure]()
     suite.test[test_conversion_failures]()
     suite.test[test_requested_scope_missing]()

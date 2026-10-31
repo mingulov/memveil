@@ -342,6 +342,11 @@ suite_reports() {
         "capture OK: 5 events, 1 attempts, 4096 requested bytes"
     expect_text_exit "relations-copy-only-json-strict" \
         tests/fixtures/lifecycle/relations-copy-only 4 --strict
+    expect_json "pre-window-releases-json" \
+        tests/fixtures/lifecycle/pre-window-releases 0 \
+        "capture OK: 4 events, 1 attempts, 4096 requested bytes"
+    expect_text_exit "pre-window-releases-strict" \
+        tests/fixtures/lifecycle/pre-window-releases 4 --strict
     expect_json "relations-lost-release-json" \
         tests/fixtures/lifecycle/relations-lost-release 0 \
         "capture OK: 6 events, 1 attempts, 4096 requested bytes"
@@ -2414,15 +2419,19 @@ suite_attempts() {
     awant opcount "polls=4194407"
     awant opcount "stats=5"
     awant opcount "snaps=4"
-    awant opcount "reads=8388625"
-    awant opcount "appends=4194308"
-    awant opcount "committed=1462702516"
+    awant opcount "reads=8388623"
+    awant opcount "appends=4194306"
+    awant opcount "committed=1462701818"
     # Frozen scripted clock: attach and detach stamps tie, so
     # the attached interval is unproven and the aggregate is
-    # partial (D31 unordered-stamp path); the op-cap boundary
-    # proof below is unaffected.
-    mqualE opcount size_limit partial 1 partial null proven
-    mreason opcount "detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) recursion_missed=(0) size_omitted=(1) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
+    # partial (D31 unordered-stamp path); the identity-budget
+    # boundary proof below is unaffected.
+    # The identity gate stops while the costliest next record
+    # (map plus mapping, +2 headroom) still fits, so the
+    # attempt-only script omits 3: the boundary record plus
+    # 2 headroom (Q25-D2 item 6).
+    mqualE opcount size_limit partial 3 partial null proven
+    mreason opcount "detail loss 3 (submit_fail=(0) malformed=(0) dropped=(0) recursion_missed=(0) size_omitted=(3) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
     python3 "$JASSERT" nofile "$TMP/opcount/events.ndjson" || afailed=1
     mcase pausedbytes 0 103 5 4 18 753 "bounce_attempt,gap"
     mqual pausedbytes partial null unavailable null \
@@ -3741,6 +3750,7 @@ suite_record() {
     run_unit_file tests/unit/test_clock.mojo || return 1
     run_unit_file tests/unit/test_kernel.mojo || return 1
     run_unit_file tests/unit/test_live.mojo || return 1
+    run_unit_file tests/unit/test_collector_pure.mojo || return 1
     run_unit_file tests/unit/test_btf.mojo || return 1
     run_unit_file tests/unit/test_record_args.mojo || return 1
     run_unit_file tests/unit/test_bridge_snapshot.mojo || return 1

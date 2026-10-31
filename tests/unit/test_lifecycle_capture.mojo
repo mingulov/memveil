@@ -23,6 +23,7 @@ from std.testing import TestSuite, assert_equal, assert_true
 from memveil.analysis.engine import Analyzer
 from memveil.capture.collector import (
     EXIT_ERROR,
+    EXIT_OK,
     EXIT_PARTIAL,
     EXIT_REFUSAL,
     Collector,
@@ -264,6 +265,11 @@ def _run(
     confirm_poll_err: Bool = False,
     fail_confirm_stats: Bool = False,
     lower_bound: Bool = False,
+    ch1mal: UInt64 = UInt64(0),
+    ch1drop: UInt64 = UInt64(0),
+    ch2mal: UInt64 = UInt64(0),
+    ch2drop: UInt64 = UInt64(0),
+    strict: Bool = False,
 ) raises -> CaseOut:
     """Run one scripted multi-channel capture; return its outputs.
 
@@ -292,6 +298,7 @@ def _run(
     cfg.has_copy = channels >= 3
     cfg.copy_ring_bytes = UInt32(8388608)
     cfg.attempt_loss_lower_bound = lower_bound
+    cfg.strict = strict
     var kernel = ScriptKernel()
     kernel.channels = channels
     kernel.misses_out = misses.copy()
@@ -319,7 +326,13 @@ def _run(
     # Shared stats queue in read order: sum baseline, ch0
     # baseline, drain pair, drain cut, final sum, ch0 final.
     # Attempt-only skips both ch0 entries (no _at reads).
-    var total = _stats(n, n, UInt64(0), UInt64(0))
+    # The pooled final carries the per-channel loss sums, so
+    # pooled pairs and the channel breakdown agree. Received
+    # covers delivered plus malformed plus dropped on every
+    # ring (the close-out bridge identity).
+    var total = _stats(
+        n + ch1mal + ch2mal + ch1drop + ch2drop, n,
+        ch1mal + ch2mal, ch1drop + ch2drop)
     var ch0n = _stats(
         n - rx1 - rx2, n - rx1 - rx2, UInt64(0), UInt64(0))
     kernel.add_stats(_zero_stats())
@@ -341,10 +354,14 @@ def _run(
     if channels >= 2:
         kernel.add_stats(ch0n)
         kernel.add_stats_at(1, _zero_stats())
-        kernel.add_stats_at(1, _stats(rx1, rx1, UInt64(0), UInt64(0)))
+        kernel.add_stats_at(
+            1, _stats(rx1 + ch1mal + ch1drop, rx1, ch1mal, ch1drop)
+        )
     if channels >= 3:
         kernel.add_stats_at(2, _zero_stats())
-        kernel.add_stats_at(2, _stats(rx2, rx2, UInt64(0), UInt64(0)))
+        kernel.add_stats_at(
+            2, _stats(rx2 + ch2mal + ch2drop, rx2, ch2mal, ch2drop)
+        )
     for i in range(len(payloads)):
         kernel.add_poll(_batch(payloads[i]), 1)
     kernel.add_poll(_timeout(), timeouts)
@@ -571,7 +588,7 @@ def test_nested_copies() raises:
         payloads^, _zero_cut(), _zero_cut(), UInt64(0),
         _cut(UInt64(2), UInt64(5120), UInt64(2), UInt64(5120)),
         UInt64(2))
-    assert_equal(c.exit_code, EXIT_PARTIAL)
+    assert_equal(c.exit_code, EXIT_OK)
     assert_equal(c.end_reason, String("signal"))
     assert_equal(c.outcome, String("finalized"))
     var lines = _lines(c.events)
@@ -666,7 +683,7 @@ def test_copy_before_failed_map() raises:
         UInt64(1),
         _cut(UInt64(1), UInt64(4096), UInt64(1), UInt64(4096)),
         UInt64(1))
-    assert_equal(c.exit_code, EXIT_PARTIAL)
+    assert_equal(c.exit_code, EXIT_OK)
     assert_equal(c.outcome, String("finalized"))
     var lines = _lines(c.events)
     assert_equal(len(lines), 6)
@@ -715,7 +732,7 @@ def test_sync_invents_nothing() raises:
         payloads^, _zero_cut(), _zero_cut(), UInt64(0),
         _cut(UInt64(1), UInt64(4096), UInt64(1), UInt64(4096)),
         UInt64(1))
-    assert_equal(c.exit_code, EXIT_PARTIAL)
+    assert_equal(c.exit_code, EXIT_OK)
     var lines = _lines(c.events)
     assert_equal(len(lines), 5)
     assert_equal(
@@ -798,7 +815,7 @@ def test_clamped_copy_keeps_effective() raises:
         payloads^, _zero_cut(), _zero_cut(), UInt64(0),
         _cut(UInt64(1), UInt64(4096), UInt64(1), UInt64(4096)),
         UInt64(1))
-    assert_equal(c.exit_code, EXIT_PARTIAL)
+    assert_equal(c.exit_code, EXIT_OK)
     var lines = _lines(c.events)
     assert_equal(len(lines), 5)
     # Requested bytes stay in the aggregate counters only;
@@ -816,7 +833,7 @@ def test_early_zero_persists_proved_zero() raises:
         payloads^, _zero_cut(), _zero_cut(), UInt64(0),
         _cut(UInt64(1), UInt64(512), UInt64(1), UInt64(512)),
         UInt64(1))
-    assert_equal(c.exit_code, EXIT_PARTIAL)
+    assert_equal(c.exit_code, EXIT_OK)
     var lines = _lines(c.events)
     assert_equal(len(lines), 5)
     assert_true(_contains(lines[0], String('"kind":"copy"')))
@@ -838,7 +855,7 @@ def test_reuse_reports_distinct_ids() raises:
         payloads^, _zero_cut(),
         _cut(UInt64(2), UInt64(8192), UInt64(2), UInt64(8192)),
         UInt64(2), _zero_cut(), UInt64(0))
-    assert_equal(c.exit_code, EXIT_PARTIAL)
+    assert_equal(c.exit_code, EXIT_OK)
     var lines = _lines(c.events)
     assert_equal(len(lines), 6)
     assert_true(
@@ -877,7 +894,7 @@ def test_unknown_copy_drops_as_rejected() raises:
         UInt64(1))
     # Known loss: the delivered record is counted, never
     # persisted, and the capture still finalizes.
-    assert_equal(c.exit_code, EXIT_PARTIAL)
+    assert_equal(c.exit_code, EXIT_OK)
     assert_equal(c.outcome, String("finalized"))
     var lines = _lines(c.events)
     assert_equal(len(lines), 4)
@@ -890,7 +907,10 @@ def test_unknown_copy_drops_as_rejected() raises:
                 'malformed=(0) dropped=(0) recursion_missed=(0) '
                 'size_omitted=(0) '
                 'duration_omitted=(0) signal_omitted=(0) '
-                'rejected=(1) write_failed=(0)); '
+                'rejected=(1) write_failed=(0)); channels '
+                'attempt:(submit_fail=0 malformed=0 dropped=0) '
+                'lifecycle:(submit_fail=0 malformed=0 dropped=0) '
+                'copy:(submit_fail=0 malformed=0 dropped=0); '
                 'first unknown copy: SLOT_READ"'
             ),
         )
@@ -915,7 +935,7 @@ def test_unknown_copies_counted_per_reason() raises:
         payloads^, _zero_cut(), _zero_cut(), UInt64(0),
         _cut(UInt64(6), UInt64(24576), UInt64(6), UInt64(24576)),
         UInt64(6))
-    assert_equal(c.exit_code, EXIT_PARTIAL)
+    assert_equal(c.exit_code, EXIT_OK)
     assert_true(not _contains(c.events, String('"kind":"copy"')))
     assert_true(
         _contains(
@@ -925,7 +945,10 @@ def test_unknown_copies_counted_per_reason() raises:
                 'malformed=(0) dropped=(0) recursion_missed=(0) '
                 'size_omitted=(0) '
                 'duration_omitted=(0) signal_omitted=(0) '
-                'rejected=(6) write_failed=(0)); '
+                'rejected=(6) write_failed=(0)); channels '
+                'attempt:(submit_fail=0 malformed=0 dropped=0) '
+                'lifecycle:(submit_fail=0 malformed=0 dropped=0) '
+                'copy:(submit_fail=0 malformed=0 dropped=0); '
                 'first unknown copy: LAYOUT"'
             ),
         )
@@ -1096,7 +1119,11 @@ def test_recursion_misses_are_detail_loss() raises:
                 '"reason":"detail loss 5 (submit_fail=(0) '
                 'malformed=(0) dropped=(0) recursion_missed=(5) '
                 'size_omitted=(0) duration_omitted=(0) '
-                'signal_omitted=(0) rejected=(0) write_failed=(0))"'
+                'signal_omitted=(0) rejected=(0) write_failed=(0)); '
+                'channels attempt:(submit_fail=0 malformed=0 '
+                'dropped=0) lifecycle:(submit_fail=0 malformed=0 '
+                'dropped=0) copy:(submit_fail=0 malformed=0 '
+                'dropped=0)"'
             ),
         )
     )
@@ -1105,6 +1132,95 @@ def test_recursion_misses_are_detail_loss() raises:
             c.session,
             String('"detail":{"status":"partial","loss_count":"5",'),
         )
+    )
+
+
+def test_detail_loss_names_its_channel() raises:
+    # Per-channel transport loss rides in a channels suffix
+    # after the pooled pairs; the pooled totals stay first.
+    var payloads = List[List[UInt8]]()
+    payloads.append(
+        _cp_raw(2, 3, 1, UInt64(101), UInt64(1001), UInt64(4096),
+                UInt64(4096), 0))
+    var c = _run(
+        payloads^, _zero_cut(), _zero_cut(), UInt64(0),
+        _cut(UInt64(7), UInt64(28672), UInt64(4), UInt64(16384),
+             UInt64(3)),
+        UInt64(1), ch2mal=UInt64(1), ch2drop=UInt64(2))
+    assert_equal(c.outcome, String("finalized"))
+    assert_true(
+        _contains(
+            c.session,
+            String(
+                '"reason":"detail loss 6 (submit_fail=(3) '
+                'malformed=(1) dropped=(2) recursion_missed=(0) '
+                'size_omitted=(0) duration_omitted=(0) '
+                'signal_omitted=(0) rejected=(0) write_failed=(0)); '
+                'channels attempt:(submit_fail=0 malformed=0 '
+                'dropped=0) lifecycle:(submit_fail=0 malformed=0 '
+                'dropped=0) copy:(submit_fail=3 malformed=1 '
+                'dropped=2)"'
+            ),
+        )
+    )
+
+
+def test_strict_close_out_exits_partial() raises:
+    # Finalized partial verdicts exit 0 normally; strict
+    # restores exit 4 for the same close-out.
+    var payloads = List[List[UInt8]]()
+    payloads.append(
+        _cp_raw(2, 3, 1, UInt64(101), UInt64(1001), UInt64(4096),
+                UInt64(4096), 0))
+    var plain = _run(
+        payloads^, _zero_cut(), _zero_cut(), UInt64(0),
+        _cut(UInt64(1), UInt64(4096), UInt64(1), UInt64(4096)),
+        UInt64(1))
+    assert_equal(plain.exit_code, EXIT_OK)
+    var payloads2 = List[List[UInt8]]()
+    payloads2.append(
+        _cp_raw(2, 3, 1, UInt64(101), UInt64(1001), UInt64(4096),
+                UInt64(4096), 0))
+    var strict = _run(
+        payloads2^, _zero_cut(), _zero_cut(), UInt64(0),
+        _cut(UInt64(1), UInt64(4096), UInt64(1), UInt64(4096)),
+        UInt64(1), strict=True)
+    assert_equal(strict.exit_code, EXIT_PARTIAL)
+
+
+def test_identity_budget_latches_gate() raises:
+    # The gate stops while the costliest next record (a map
+    # plus its mapping, cost 2) still fits under the
+    # reader-mirroring identity budget.
+    var tmp = _mkdtemp()
+    var cfg = CollectorConfig()
+    cfg.duration_s = UInt64(60)
+    cfg.max_events_bytes = 1073741824
+    cfg.output = tmp + String("/cap")
+    cfg.profile_id = String("test-profile-1")
+    cfg.grade = String("")
+    cfg.pid = 7
+    var collector = Collector(cfg)
+    collector.persisted_attempt = UInt64(4194302)
+    var clock = ScriptClock()
+    clock.add(UInt64(0))
+    var signal = ScriptSignal()
+    signal.add(String("none"))
+    assert_equal(
+        collector._gate(clock, signal, UInt64(60000000000)),
+        String("closed"),
+    )
+    assert_equal(collector.stop_reason, String("size_limit"))
+    var collector2 = Collector(cfg)
+    collector2.persisted_map = UInt64(2097150)
+    collector2.persisted_map_ok = UInt64(2097150)
+    var clock2 = ScriptClock()
+    clock2.add(UInt64(0))
+    var signal2 = ScriptSignal()
+    signal2.add(String("none"))
+    assert_equal(
+        collector2._gate(clock2, signal2, UInt64(60000000000)),
+        String(""),
     )
 
 
@@ -1342,7 +1458,7 @@ def test_stop_open_mappings_exact() raises:
         payloads^, _zero_cut(),
         _cut(UInt64(4), UInt64(16384), UInt64(4), UInt64(16384)),
         UInt64(4), _zero_cut(), UInt64(0))
-    assert_equal(c.exit_code, EXIT_PARTIAL)
+    assert_equal(c.exit_code, EXIT_OK)
     assert_equal(c.outcome, String("finalized"))
     assert_true(
         _contains(c.session, String('"open_mappings":"1"')))
@@ -1365,7 +1481,7 @@ def test_stop_open_mappings_saturate() raises:
         payloads^, _zero_cut(),
         _cut(UInt64(2), UInt64(8192), UInt64(2), UInt64(8192)),
         UInt64(2), _zero_cut(), UInt64(0))
-    assert_equal(c.exit_code, EXIT_PARTIAL)
+    assert_equal(c.exit_code, EXIT_OK)
     assert_equal(c.outcome, String("finalized"))
     assert_true(
         _contains(c.session, String('"open_mappings":"0"')))
@@ -1387,7 +1503,7 @@ def test_stop_open_mappings_balance_limit() raises:
         payloads^, _zero_cut(),
         _cut(UInt64(2), UInt64(8192), UInt64(2), UInt64(8192)),
         UInt64(2), _zero_cut(), UInt64(0))
-    assert_equal(c.exit_code, EXIT_PARTIAL)
+    assert_equal(c.exit_code, EXIT_OK)
     assert_equal(c.outcome, String("finalized"))
     assert_true(
         _contains(c.session, String('"open_mappings":"0"')))
@@ -1416,7 +1532,7 @@ def test_stop_open_mappings_churn() raises:
         _cut(UInt64(1000), UInt64(4096000),
              UInt64(1000), UInt64(4096000)),
         UInt64(1000), _zero_cut(), UInt64(0))
-    assert_equal(c.exit_code, EXIT_PARTIAL)
+    assert_equal(c.exit_code, EXIT_OK)
     assert_equal(c.outcome, String("finalized"))
     var lines = _lines(c.events)
     assert_equal(len(lines), 1004)
@@ -1526,7 +1642,7 @@ def test_dropped_map_unmap_still_reports() raises:
     var writer = ScriptWriter()
     var collector = Collector(cfg)
     var result = collector.run(kernel, clock, signal, writer)
-    assert_equal(result.exit_code, EXIT_PARTIAL)
+    assert_equal(result.exit_code, EXIT_OK)
     assert_equal(result.outcome, String("finalized"))
     var events = _read_text(out_dir + String("/events.ndjson"))
     var session = _read_text(out_dir + String("/session.json"))
@@ -4033,7 +4149,7 @@ def test_collector_liveness_dead_copy_exit4() raises:
         _cut(UInt64(200), UInt64(819200), UInt64(200),
              UInt64(819200)), UInt64(200),
         _zero_cut(), UInt64(0), duration_s=UInt64(3600))
-    assert_equal(c.exit_code, 4)
+    assert_equal(c.exit_code, 0)
     assert_true(
         _contains(c.session, String("hooks silent: map->copy"))
     )
@@ -4101,7 +4217,7 @@ def test_collector_liveness_healthy_verified() raises:
              UInt64(819200)), UInt64(200),
         _cut(UInt64(200), UInt64(819200), UInt64(200),
              UInt64(819200)), UInt64(200), duration_s=UInt64(3600))
-    assert_equal(c.exit_code, 4)
+    assert_equal(c.exit_code, 0)
     assert_true(
         _contains(
             c.session,
@@ -4131,7 +4247,7 @@ def test_copy_only_session_partial() raises:
         _cut(UInt64(50), UInt64(204800), UInt64(50),
              UInt64(204800)), UInt64(50),
         has_lifecycle=False, has_copy=True)
-    assert_equal(c.exit_code, 4)
+    assert_equal(c.exit_code, 0)
     assert_true(
         _contains(
             c.session,
@@ -4148,7 +4264,7 @@ def test_copy_only_zero_records_unverified() raises:
         payloads^, vals^, _zero_cut(), _zero_cut(), UInt64(0),
         _zero_cut(), UInt64(0),
         has_lifecycle=False, has_copy=True)
-    assert_equal(c.exit_code, 4)
+    assert_equal(c.exit_code, 0)
     assert_true(
         _contains(
             c.session,
@@ -4178,7 +4294,7 @@ def test_copy_only_syncs_without_copies_silent() raises:
         _cut(UInt64(30), UInt64(122880), UInt64(30),
              UInt64(122880)), UInt64(30),
         has_lifecycle=False, has_copy=True)
-    assert_equal(c.exit_code, 4)
+    assert_equal(c.exit_code, 0)
     assert_true(
         _contains(c.session, String("hooks silent: map->copy"))
     )
@@ -4215,7 +4331,7 @@ def test_collector_liveness_submit_fail_absorbs_gap() raises:
         _cut(UInt64(100), UInt64(409600), UInt64(60),
              UInt64(245760), submit_fail=UInt64(40)),
         UInt64(60), duration_s=UInt64(3600))
-    assert_equal(c.exit_code, 4)
+    assert_equal(c.exit_code, 0)
     assert_true(not _contains(c.session, String("hooks silent")))
     assert_true(
         _contains(c.session, String("; liveness verified"))
@@ -4246,7 +4362,7 @@ def test_collector_liveness_recursion_misses_absorb_gap() raises:
         duration_s=UInt64(3600),
         misses=_detail_misses(
             UInt64(10), UInt64(0), UInt64(0)))
-    assert_equal(c.exit_code, 4)
+    assert_equal(c.exit_code, 0)
     assert_true(not _contains(c.session, String("hooks silent")))
     assert_true(
         _contains(c.session, String("; liveness verified"))
@@ -4277,7 +4393,7 @@ def test_collector_liveness_deferred_absorbs_gap() raises:
         duration_s=UInt64(3600),
         misses=_detail_misses(
             UInt64(0), UInt64(10), UInt64(0)))
-    assert_equal(c.exit_code, 4)
+    assert_equal(c.exit_code, 0)
     assert_true(not _contains(c.session, String("hooks silent")))
     assert_true(
         _contains(c.session, String("; liveness verified"))
@@ -4308,7 +4424,7 @@ def test_collector_liveness_fallback_exact() raises:
         duration_s=UInt64(3600),
         misses=_detail_misses(
             UInt64(0), UInt64(10), UInt64(10)))
-    assert_equal(even.exit_code, 4)
+    assert_equal(even.exit_code, 0)
     assert_true(
         _contains(even.session, String("hooks silent: map->copy"))
     )
@@ -4334,7 +4450,7 @@ def test_collector_liveness_fallback_exact() raises:
         duration_s=UInt64(3600),
         misses=_detail_misses(
             UInt64(0), UInt64(0), UInt64(5)))
-    assert_equal(contradict.exit_code, 4)
+    assert_equal(contradict.exit_code, 0)
     assert_true(
         not _contains(contradict.session, String("hooks silent"))
     )
@@ -4376,7 +4492,7 @@ def test_collector_liveness_exit_recovered_misses_verify() raises:
     var c = _run_copy_liveness(
         100, UInt64(100),
         _detail_misses(UInt64(10), UInt64(0), UInt64(10)))
-    assert_equal(c.exit_code, 4)
+    assert_equal(c.exit_code, 0)
     assert_true(
         _contains(
             c.session,
@@ -4401,7 +4517,7 @@ def test_collector_liveness_exit_recovered_misses_expose_gap() raises:
     var c = _run_copy_liveness(
         80, UInt64(80),
         _detail_misses(UInt64(10), UInt64(0), UInt64(10)))
-    assert_equal(c.exit_code, 4)
+    assert_equal(c.exit_code, 0)
     assert_true(
         _contains(
             c.session, String("hooks silent: map->copy (100 > 80)")
@@ -4420,7 +4536,7 @@ def test_collector_liveness_partial_exit_recovery_charges_loss() raises:
     var c = _run_copy_liveness(
         96, UInt64(96),
         _detail_misses(UInt64(10), UInt64(0), UInt64(6)))
-    assert_equal(c.exit_code, 4)
+    assert_equal(c.exit_code, 0)
     assert_true(
         _contains(
             c.session,
@@ -4454,7 +4570,7 @@ def test_collector_liveness_unreadable_misses_unverified() raises:
              UInt64(819200)), UInt64(200),
         _zero_cut(), UInt64(0), duration_s=UInt64(3600),
         misses=MissOut(False, UInt64(0), String("fdinfo gone")))
-    assert_equal(c.exit_code, 4)
+    assert_equal(c.exit_code, 0)
     assert_true(not _contains(c.session, String("hooks silent")))
     assert_true(
         _contains(c.session, String("liveness unverified"))
@@ -4479,7 +4595,7 @@ def test_collector_liveness_detail_error_unverified() raises:
              UInt64(819200)), UInt64(200),
         _zero_cut(), UInt64(0), duration_s=UInt64(3600),
         misses=bad.copy())
-    assert_equal(c.exit_code, 4)
+    assert_equal(c.exit_code, 0)
     assert_true(not _contains(c.session, String("hooks silent")))
     assert_true(
         _contains(c.session, String("liveness unverified"))
@@ -4518,7 +4634,7 @@ def test_collector_liveness_forward_only_suffixes_copy() raises:
         _cut(UInt64(50), UInt64(204800), UInt64(50),
              UInt64(204800)), UInt64(50),
         duration_s=UInt64(3600))
-    assert_equal(c.exit_code, 4)
+    assert_equal(c.exit_code, 0)
     assert_true(
         _contains(
             c.session,
@@ -4629,7 +4745,7 @@ def test_collector_liveness_busy_edges_clean() raises:
         _cut(UInt64(63), UInt64(257856), UInt64(63),
              UInt64(257856)), UInt64(63),
         duration_s=UInt64(3600))
-    assert_equal(c.exit_code, 4)
+    assert_equal(c.exit_code, 0)
     assert_true(
         _contains(
             c.session,
@@ -4685,7 +4801,7 @@ def test_collector_liveness_size_limit_latch() raises:
              UInt64(819200)), UInt64(200),
         max_events_bytes=131072, duration_s=UInt64(3600))
     assert_equal(c.end_reason, String("size_limit"))
-    assert_equal(c.exit_code, 4)
+    assert_equal(c.exit_code, 0)
     assert_true(not _contains(c.session, String("hooks silent")))
 
 
@@ -4764,48 +4880,56 @@ def _golden_events() -> String:
 
 def _golden_session() -> String:
     return String(
-        '{\"schema_version\":\"0.1.2\",\"session_id\":\"cap-0-7\",\"synthetic\":false,\"product\":{\"name\":\"memveil\",\"vers'
-        'ion\":\"memveil-0.1.0\"},\"environment\":{\"mode\":\"unknown\",\"detection\":\"unverified\",\"attestation\":\"not_pe'
-        'rformed\",\"evidence\":[{\"type\":\"provenance\",\"source\":\"attach_ns\",\"interpretation\":\"7000000\"},{\"type\":\"'
-        'provenance\",\"source\":\"detach_ns\",\"interpretation\":\"16000000\"},{\"type\":\"provenance\",\"source\":\"drain_c'
-        'losure\",\"interpretation\":\"proven\"},{\"type\":\"provenance\",\"source\":\"measurement_scope\",\"interpretation'
-        '\":\"ordinals below observed at the end cut\"},{\"type\":\"provenance\",\"source\":\"output.fs\",\"interpretatio'
-        'n\":\"btrfs\"}]},\"capture\":{\"mode\":\"live\",\"window\":{\"start_ns\":\"7000000\",\"end_ns\":\"127000001\",\"baseline'
-        '_start_ns\":\"2000000\"},\"filters\":{},\"finalized\":true,\"end_reason\":\"signal\"},\"device_catalog\":{\"device'
-        's\":[]},\"baseline\":{\"complete\":false,\"region_observations\":[]},\"capabilities\":{\"bounce_attempts\":{\"st'
-        'atus\":\"partial\",\"reason\":\"capture ok, 0 attempts persisted; admitted under test-profile-1; device de'
-        'tail grouped by observed name scope\",\"hooks\":[\"swiotlb:swiotlb_bounced\"],\"profile_id\":\"test-profile-'
-        '1\"},\"mapping_lifecycle\":{\"status\":\"partial\",\"reason\":\"capture ok, 0 map_result/unmap events persiste'
-        'd; admitted under test-profile-1; v2 wire reports opaque mapping generations when observed\",\"hooks\":'
-        '[\"fexit:swiotlb_tbl_map_single\",\"fentry:__swiotlb_tbl_unmap_single\"],\"profile_id\":\"test-profile-1\"},'
-        '\"copy_bytes\":{\"status\":\"partial\",\"reason\":\"capture ok, 2 copy events persisted; admitted under test-'
-        'profile-1; v1 copy wire carries no mapping identity\",\"hooks\":[\"fentry:swiotlb_bounce\"],\"profile_id\":'
-        '\"test-profile-1\"},\"sync_requests\":{\"status\":\"partial\",\"reason\":\"capture ok, 0 sync_request events pe'
-        'rsisted; admitted under test-profile-1; v1 copy wire carries no mapping identity\",\"hooks\":[\"fentry:_'
-        '_swiotlb_sync_single_for_device\",\"fentry:__swiotlb_sync_single_for_cpu\"],\"profile_id\":\"test-profile-'
-        '1\"},\"conversion_results\":{\"status\":\"unavailable\",\"reason\":\"No conversion source in this capture.\",\"h'
-        'ooks\":[]},\"region_state\":{\"status\":\"unavailable\",\"reason\":\"No region source in this capture.\",\"hooks'
-        '\":[]},\"pool_stats\":{\"status\":\"unavailable\",\"reason\":\"No pool source in this capture.\",\"hooks\":[]},\"t'
-        'ask_context\":{\"status\":\"unavailable\",\"reason\":\"No observer context in this capture.\",\"hooks\":[]}},\"q'
-        'uality\":{\"detail\":{\"status\":\"complete_for_scope\",\"loss_count\":\"0\",\"scope\":\"0 bounce_attempt + 0 map_'
-        'result/unmap + 2 copy/sync_request events\",\"reason\":\"detail loss 0 (submit_fail=(0) malformed=(0) dr'
-        'opped=(0) recursion_missed=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(0) rejected=(0)'
-        ' write_failed=(0))\",\"evidence_refs\":[]},\"aggregate\":{\"status\":\"complete_for_scope\",\"loss_count\":\"0\",'
-        '\"scope\":\"counter snapshots (attempt channel) attached [8000000,15000000)\",\"reason\":\"counter snapshots present (valid cut, identi'
-        'ty holds, coverage valid)\",\"evidence_refs\":[]},\"correlation\":{\"status\":\"partial\",\"loss_count\":null,\"'
-        'scope\":\"correlated lifecycle events\",\"reason\":\"copy_attribution partial (copy without pending operat'
-        'ion)\",\"evidence_refs\":[\"capture:seq=0\",\"capture:seq=1\"],\"relations\":{\"mapping_release\":{\"status\":\"co'
-        'mplete_for_scope\",\"loss_count\":\"0\",\"scope\":\"mapping and release pairing\",\"reason\":\"all mapping and r'
-        'elease relationships paired\",\"evidence_refs\":[]},\"copy_attribution\":{\"status\":\"partial\",\"loss_count\"'
-        ':null,\"scope\":\"copy attribution\",\"reason\":\"copy without pending operation\",\"evidence_refs\":[\"capture'
-        ':seq=0\",\"capture:seq=1\"]},\"sync_attribution\":{\"status\":\"complete_for_scope\",\"loss_count\":\"0\",\"scope\"'
-        ':\"sync attribution\",\"reason\":\"all sync attribution relationships paired\",\"evidence_refs\":[]}}},\"base'
-        'line\":{\"status\":\"not_applicable\",\"loss_count\":null,\"scope\":\"attempt metrics\",\"reason\":\"Attempt metri'
-        'cs need no baseline.\",\"evidence_refs\":[]},\"terminal\":{\"status\":\"partial\",\"loss_count\":null,\"scope\":\"'
-        'capture finalization\",\"reason\":\"stop partial: quiescence unproven\",\"evidence_refs\":[]}},\"stop\":{\"out'
-        'come\":\"partial\",\"reason\":\"quiescence unproven\",\"budget_ms\":\"5000\",\"elapsed_ms\":\"110\",\"admission_clos'
-        'ed\":true,\"quiescence_observed\":false,\"writers_settled\":\"0\",\"in_flight_at_close\":\"0\",\"late_submits_dr'
-        'ained\":\"0\",\"drained_records\":\"0\",\"busy_at_drain\":false,\"counters_valid\":true,\"open_mappings\":\"0\"}}'
+        '{\"schema_version\":\"0.1.3\",\"session_id\":\"cap-0-7\",\"synthetic\":false,\"product\":{\"name\":'
+        '\"memveil\",\"version\":\"memveil-0.1.0\"},\"environment\":{\"mode\":\"unknown\",\"detection\":\"unv'
+        'erified\",\"attestation\":\"not_performed\",\"evidence\":[{\"type\":\"provenance\",\"source\":\"atta'
+        'ch_ns\",\"interpretation\":\"7000000\"},{\"type\":\"provenance\",\"source\":\"detach_ns\",\"interpre'
+        'tation\":\"16000000\"},{\"type\":\"provenance\",\"source\":\"drain_closure\",\"interpretation\":\"pr'
+        'oven\"},{\"type\":\"provenance\",\"source\":\"measurement_scope\",\"interpretation\":\"ordinals belo'
+        'w observed at the end cut\"},{\"type\":\"provenance\",\"source\":\"output.fs\",\"interpretation\":\"'
+        'btrfs\"}]},\"capture\":{\"mode\":\"live\",\"window\":{\"start_ns\":\"7000000\",\"end_ns\":\"12700000'
+        '1\",\"baseline_start_ns\":\"2000000\"},\"filters\":{},\"finalized\":true,\"end_reason\":\"signal\"},'
+        '\"device_catalog\":{\"devices\":[]},\"baseline\":{\"complete\":false,\"region_observations\":[]},\"c'
+        'apabilities\":{\"bounce_attempts\":{\"status\":\"partial\",\"reason\":\"capture ok, 0 attempts persi'
+        'sted; admitted under test-profile-1; device detail grouped by observed name scope\",\"hooks\":[\"swi'
+        'otlb:swiotlb_bounced\"],\"profile_id\":\"test-profile-1\"},\"mapping_lifecycle\":{\"status\":\"parti'
+        'al\",\"reason\":\"capture ok, 0 map_result/unmap events persisted; admitted under test-profile-1; v2'
+        ' wire reports opaque mapping generations when observed\",\"hooks\":[\"fexit:swiotlb_tbl_map_single\"'
+        ',\"fentry:__swiotlb_tbl_unmap_single\"],\"profile_id\":\"test-profile-1\"},\"copy_bytes\":{\"status'
+        '\":\"partial\",\"reason\":\"capture ok, 2 copy events persisted; admitted under test-profile-1; v1 c'
+        'opy wire carries no mapping identity\",\"hooks\":[\"fentry:swiotlb_bounce\"],\"profile_id\":\"test-p'
+        'rofile-1\"},\"sync_requests\":{\"status\":\"partial\",\"reason\":\"capture ok, 0 sync_request events'
+        ' persisted; admitted under test-profile-1; v1 copy wire carries no mapping identity\",\"hooks\":[\"f'
+        'entry:__swiotlb_sync_single_for_device\",\"fentry:__swiotlb_sync_single_for_cpu\"],\"profile_id\":\"'
+        'test-profile-1\"},\"conversion_results\":{\"status\":\"unavailable\",\"reason\":\"No conversion sour'
+        'ce in this capture.\",\"hooks\":[]},\"region_state\":{\"status\":\"unavailable\",\"reason\":\"No reg'
+        'ion source in this capture.\",\"hooks\":[]},\"pool_stats\":{\"status\":\"unavailable\",\"reason\":\"'
+        'No pool source in this capture.\",\"hooks\":[]},\"task_context\":{\"status\":\"unavailable\",\"reaso'
+        'n\":\"No observer context in this capture.\",\"hooks\":[]}},\"quality\":{\"detail\":{\"status\":\"co'
+        'mplete_for_scope\",\"loss_count\":\"0\",\"scope\":\"0 bounce_attempt + 0 map_result/unmap + 2 copy/s'
+        'ync_request events\",\"reason\":\"detail loss 0 (submit_fail=(0) malformed=(0) dropped=(0) recursion'
+        '_missed=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0));'
+        ' channels attempt:(submit_fail=0 malformed=0 dropped=0) lifecycle:(submit_fail=0 malformed=0 dropped'
+        '=0) copy:(submit_fail=0 malformed=0 dropped=0)\",\"evidence_refs\":[]},\"aggregate\":{\"status\":\"c'
+        'omplete_for_scope\",\"loss_count\":\"0\",\"scope\":\"counter snapshots (attempt channel) attached [8'
+        '000000,15000000)\",\"reason\":\"counter snapshots present (valid cut, identity holds, coverage valid'
+        ')\",\"evidence_refs\":[]},\"correlation\":{\"status\":\"partial\",\"loss_count\":null,\"scope\":\"co'
+        'rrelated lifecycle events\",\"reason\":\"copy_attribution partial (copy without pending operation)\"'
+        ',\"evidence_refs\":[\"capture:seq=0\",\"capture:seq=1\"],\"relations\":{\"mapping_release\":{\"statu'
+        's\":\"complete_for_scope\",\"loss_count\":\"0\",\"scope\":\"mapping and release pairing\",\"reason\"'
+        ':\"all mapping and release relationships paired\",\"evidence_refs\":[]},\"copy_attribution\":{\"stat'
+        'us\":\"partial\",\"loss_count\":null,\"scope\":\"copy attribution\",\"reason\":\"copy without pendin'
+        'g operation\",\"evidence_refs\":[\"capture:seq=0\",\"capture:seq=1\"]},\"sync_attribution\":{\"statu'
+        's\":\"complete_for_scope\",\"loss_count\":\"0\",\"scope\":\"sync attribution\",\"reason\":\"all sync'
+        ' attribution relationships paired\",\"evidence_refs\":[]}}},\"baseline\":{\"status\":\"not_applicabl'
+        'e\",\"loss_count\":null,\"scope\":\"attempt metrics\",\"reason\":\"Attempt metrics need no baseline.'
+        '\",\"evidence_refs\":[]},\"terminal\":{\"status\":\"partial\",\"loss_count\":null,\"scope\":\"captur'
+        'e finalization\",\"reason\":\"stop partial: quiescence unproven\",\"evidence_refs\":[]}},\"stop\":{'
+        '\"outcome\":\"partial\",\"reason\":\"quiescence unproven\",\"budget_ms\":\"5000\",\"elapsed_ms\":\"1'
+        '10\",\"admission_closed\":true,\"quiescence_observed\":false,\"writers_settled\":\"0\",\"in_flight_a'
+        't_close\":\"0\",\"late_submits_drained\":\"0\",\"drained_records\":\"0\",\"drain_completed\":true,\"'
+        'submit_after_drain\":false,\"busy_at_drain\":false,\"counters_valid\":true,\"open_mappings\":\"0\"},'
+        '\"verdict\":{\"name\":\"partial_known_loss\",\"loss_ratio_bps\":\"0\",\"delivered\":\"0\"}}'
     )
 
 def _parse_attached_interval(scope: String) raises -> Tuple[UInt64, UInt64]:
@@ -4952,6 +5076,7 @@ def test_aggregate_missing_stamp_yields_partial() raises:
     var iv = _parse_attached_interval(s2.q_aggregate.scope)
     assert_equal(iv[0], UInt64(100))
     assert_equal(iv[1], UInt64(200))
+
 
 
 def main() raises:

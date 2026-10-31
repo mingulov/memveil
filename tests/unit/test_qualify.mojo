@@ -549,7 +549,7 @@ def test_smoke_shutdown_closed() raises:
     var writer = ScriptWriter()
     var collector = Collector(_smoke_config(out))
     var result = collector.run(kernel, clock, signal, writer)
-    assert_equal(result.exit_code, 4)
+    assert_equal(result.exit_code, 0)
     assert_true(smoke_shutdown_ok(out))
 
 
@@ -566,7 +566,7 @@ def test_smoke_shutdown_detach_failed() raises:
     var writer = ScriptWriter()
     var collector = Collector(_smoke_config(out))
     var result = collector.run(kernel, clock, signal, writer)
-    assert_equal(result.exit_code, 4)
+    assert_equal(result.exit_code, 0)
     assert_equal(result.end_reason, String("duration"))
     assert_true(not smoke_shutdown_ok(out))
 

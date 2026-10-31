@@ -192,6 +192,17 @@ def main():
     check("long-lived-found", "LONG_LIVED_ALLOCATION" in p.stdout)
     check("long-lived-note", "not a leak" in p.stdout)
 
+    # No opens at the horizon: the configured check must explain
+    # itself instead of vanishing.
+    p = run(["top", "--interval", "1s", "--long-lived-after", "1s",
+             NESTED])
+    check("long-lived-unknown-exit", p.returncode == 0,
+          "exit %d" % p.returncode)
+    check("long-lived-unknown-found",
+          "LONG_LIVED_NOT_EVALUATED" in p.stdout, p.stdout[-500:])
+    check("long-lived-unknown-cause",
+          "No open mappings at the horizon" in p.stdout)
+
     p = run(["top", "--interval", "1s", ESCAPE])
     check("escape-exit", p.returncode == 0, "exit %d: %s"
           % (p.returncode, p.stderr))

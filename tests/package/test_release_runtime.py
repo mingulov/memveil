@@ -145,7 +145,7 @@ def test_top_replays_valid_empty(bundle):
     root, _ = bundle
     proc = run(str(root / "bin" / "memveil"), "top",
                "--interval", "1s", VALID_EMPTY)
-    assert proc.returncode == 4, proc.stderr
+    assert proc.returncode == 0, proc.stderr
     assert "--- refresh" in proc.stdout
     assert "bounce_attempts = 0" in proc.stdout
 

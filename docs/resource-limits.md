@@ -26,6 +26,7 @@ silently evicted, and no refusal corrupts unrelated state.
 | Reader session document | 16 MiB | `session.json too large`; capture rejected |
 | Reader events total | 1 GiB default (a 1 GiB capture replays in about 27 s at 326 MB RSS on a 16-thread Ryzen 9 7940HS) | `events.ndjson too large`; capture rejected |
 | Reader tracked identities | 4,194,304 | operations plus mappings plus distinct copy/sync references; past budget, `too many tracked identities` and the capture is rejected |
+| Writer tracked identities | 4,194,304 estimate, +2 headroom | `size_limit` latch while the costliest next record (a map plus its mapping) still fits; a finalized capture passes reader admission |
 | Reader JSON depth | 64 | parse error; capture rejected |
 | Diagnostics findings | ≤ 8 per report | fixed code set; stateless by construction |
 | Region table | 4,096 | `region table exhausted`; observation refused, counted |
@@ -75,9 +76,23 @@ never additive totals. The `quality` lane proves each cell:
 | gap | mapping open | live bytes withheld; completed lifetimes exclude open |
 | clean | mapping open | live bytes valued as observed; completed lifetimes null, never a leak |
 
-A refused mapping, an orphan release, or an unpaired event
-withholds the affected live totals and records a limitation;
-it never quietly lowers a sum.
+A refused mapping or an unpaired event withholds the
+affected live totals and records a limitation; it never
+quietly lowers a sum. A release without an observed map is
+the expected pre-window class: the end-state live total
+stands with partial coverage (the observed release proves
+its mapping closed) while only the peak is withheld.
+
+On multi-channel runs (lifecycle and/or copy armed), the
+detail-loss reason carries a per-channel suffix after the
+pooled pairs, so one pooled number never hides which ring
+lost what:
+
+`; channels attempt:(submit_fail=A malformed=B dropped=C) lifecycle:(...) copy:(...)`
+
+Only armed channels appear; a channel whose evidence is
+invalid reports `unavailable` per component. Attempt-only
+captures keep byte-identical reasons with no suffix.
 
 ## Live saturation
 

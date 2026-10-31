@@ -203,15 +203,51 @@ def test_request_is_not_copy() raises:
     assert_equal(_global(rows, "sync_requests").value, UInt64(1))
 
 
-def test_orphan_release_invalidates_live() raises:
+def test_orphan_release_keeps_live_withholds_peak() raises:
+    # A release without an observed map proves its mapping is
+    # closed, so the end-state live answers stand with partial
+    # coverage; only the peak (pre-window occupancy unknown)
+    # is withheld, with the class named in limitations.
     var t = MappingTracker()
     t.consume(_attempt("op1", "d1", UInt64(1)))
     t.consume(_map("op1", True, "m1", UInt64(4096), UInt64(100), UInt64(2)))
     t.consume(_unmap("ghost", UInt64(200), UInt64(3)))
     var rows = t.metrics("window [0,1000)")
     var live = _global(rows, "live_observed_allocation_bytes")
+    assert_true(live.has_value)
+    assert_equal(live.value, UInt64(4096))
+    assert_equal(live.coverage, String("partial"))
+    var opened = _global(rows, "open_mappings")
+    assert_true(opened.has_value)
+    assert_equal(opened.value, UInt64(1))
+    var peak = _global(rows, "peak_live_observed_allocation_bytes")
+    assert_true(not peak.has_value)
+    assert_true(
+        peak.notes.find(String("without an observed map")) != -1,
+        peak.notes,
+    )
+    var noted = False
+    for i in range(len(t.limitations())):
+        if t.limitations()[i].find(String("pre-window")) != -1:
+            noted = True
+    assert_true(noted)
+
+
+def test_orphan_release_plus_correlation_gap_withholds_live() raises:
+    # Fail-closed twin: an observed correlation gap defeats
+    # the pre-window explanation, so live state is withheld
+    # even though an orphan release was observed.
+    var t = MappingTracker()
+    t.consume(_attempt("op1", "d1", UInt64(1)))
+    t.consume(_map("op1", True, "m1", UInt64(4096), UInt64(100), UInt64(2)))
+    t.consume(_unmap("ghost", UInt64(200), UInt64(3)))
+    var g = _gap(UInt64(4))
+    g.gap.channel = String("correlation")
+    t.consume(g^)
+    assert_true(not t.pre_window_explains_mapping_release())
+    var rows = t.metrics("window [0,1000)")
+    var live = _global(rows, "live_observed_allocation_bytes")
     assert_true(not live.has_value)
-    assert_equal(live.measurement, String("unavailable"))
 
 
 def test_producer_loss_invalidates_live_keeps_aggregates() raises:
@@ -1340,7 +1376,8 @@ def run() raises -> Int:
     suite.test[test_lifecycle_nested]()
     suite.test[test_copy_before_failure]()
     suite.test[test_request_is_not_copy]()
-    suite.test[test_orphan_release_invalidates_live]()
+    suite.test[test_orphan_release_keeps_live_withholds_peak]()
+    suite.test[test_orphan_release_plus_correlation_gap_withholds_live]()
     suite.test[test_producer_loss_invalidates_live_keeps_aggregates]()
     suite.test[test_peak_and_byte_time]()
     suite.test[test_peak_and_byte_time_withheld_when_live_invalid]()

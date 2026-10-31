@@ -1,5 +1,5 @@
 {
-  "schema_version": "0.1.2",
+  "schema_version": "0.1.3",
   "session_id": "attempts-3-session",
   "synthetic": true,
   "engine_version": "authored-fixture",

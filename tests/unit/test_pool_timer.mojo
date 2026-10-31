@@ -258,7 +258,7 @@ def test_periodic_cadence() raises:
         UInt64(60),
         120,
     )
-    assert_equal(c.exit_code, 4)
+    assert_equal(c.exit_code, 0)
     assert_equal(c.end_reason, String("duration"))
     var want = List[String]()
     want.append(String("pool_sample"))
@@ -301,7 +301,7 @@ def test_no_dwell_no_periodic() raises:
         UInt64(60),
         120,
     )
-    assert_equal(c.exit_code, 4)
+    assert_equal(c.exit_code, 0)
     assert_equal(c.end_reason, String("duration"))
     var want = List[String]()
     want.append(String("pool_sample"))
@@ -330,7 +330,7 @@ def test_denied_periodic_unavailable() raises:
         UInt64(60),
         120,
     )
-    assert_equal(c.exit_code, 4)
+    assert_equal(c.exit_code, 0)
     assert_equal(c.end_reason, String("duration"))
     assert_equal(
         _count(c.events, String("\"kind\":\"pool_sample\"")), 4
@@ -366,7 +366,7 @@ def test_no_pool_config_no_timer() raises:
         UInt64(60),
         120,
     )
-    assert_equal(c.exit_code, 4)
+    assert_equal(c.exit_code, 0)
     assert_equal(c.end_reason, String("duration"))
     var want = List[String]()
     want.append(String("counter_snapshot"))

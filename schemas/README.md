@@ -12,8 +12,10 @@ and accepted); profiles are at `0.1.1`
 (tracing-hook bindings); session is at `0.1.3` (optional
 record verdict plus optional `drain_completed` and
 `submit_after_drain` stop keys; `0.1.1` and `0.1.2` stay
-frozen and accepted); report is at `0.1.2` (required
-verdict object); doctor stays at `0.1.0`.
+frozen and accepted); report is at `0.1.3` (required
+verdict object plus the `LONG_LIVED_NOT_EVALUATED`
+finding code; `0.1.2` stays frozen); doctor stays at
+`0.1.0`.
 
 ## Files and integer representation
 

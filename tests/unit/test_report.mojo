@@ -94,12 +94,24 @@ def test_scrub_paths() raises:
         scrub_paths(String("~/lib/x.so failed")),
         String("x.so failed"),
     )
-    # Spaced paths split into tokens; every token still loses
-    # everything through its last slash, so middle components
-    # (including home directories) never survive.
+    # Spaced paths split into tokens; adjacent slash tokens
+    # merge, so middle components (including home directories
+    # and usernames) never survive.
     assert_equal(
         scrub_paths(String("/opt/my dir/x.so: bad")),
-        String("my x.so: bad"),
+        String("x.so: bad"),
+    )
+    assert_equal(
+        scrub_paths(String("/home/user name/x.so: bad")),
+        String("x.so: bad"),
+    )
+    # Fail-closed merge: even prose-like adjacent slash
+    # tokens collapse to the last basename.
+    assert_equal(scrub_paths(String("a/b c/d")), String("d"))
+    # Non-adjacent slash tokens scrub independently.
+    assert_equal(
+        scrub_paths(String("open /a/b then /c/d")),
+        String("open b then d"),
     )
     assert_equal(
         scrub_paths(String("op=open domain=bridge code=2: ok")),
@@ -381,7 +393,7 @@ def test_render_json_report_version() raises:
     var rep = analyze(String("tests/fixtures/attempts"))
     var doc = render_json(rep)
     assert_true(
-        doc.find(String('"schema_version": "0.1.2"')) != -1
+        doc.find(String('"schema_version": "0.1.3"')) != -1
     )
 
 

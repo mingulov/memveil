@@ -148,45 +148,63 @@ def neutralize_controls(text: String) raises -> String:
     return String(from_utf8=Span(out))
 
 
+def _is_scrub_sep(b: UInt8) -> Bool:
+    return (
+        b == UInt8(0x20)
+        or b == UInt8(0x09)
+        or b == UInt8(0x0A)
+        or b == UInt8(0x0D)
+    )
+
+
 def scrub_paths(text: String) raises -> String:
     """Drop directory components from stderr diagnostics.
 
     Every whitespace-delimited token keeps only the bytes after
     its last slash, so loader messages, refused paths, and echoed
     arguments cannot smuggle home directories or machine layout
-    into logs. Basenames survive as operational identifiers. The
-    rule is deliberately total: any slash token loses its head,
-    so scrubbed lines must not rely on slashes in prose.
+    into logs. Basenames survive as operational identifiers.
+    Adjacent slash tokens merge: a slash token followed past
+    whitespace by another slash token is dropped whole, so
+    middle components of spaced paths (including usernames)
+    never survive as bare words. The rule is deliberately
+    total: any slash token loses its head, so scrubbed lines
+    must not rely on slashes in prose.
     """
     var raw = text.as_bytes()
     var out = List[UInt8]()
     var i = 0
     while i < len(raw):
-        var b = raw[i]
-        if (
-            b == UInt8(0x20)
-            or b == UInt8(0x09)
-            or b == UInt8(0x0A)
-            or b == UInt8(0x0D)
-        ):
-            out.append(b)
+        if _is_scrub_sep(raw[i]):
+            out.append(raw[i])
             i += 1
             continue
         var start = i
-        while i < len(raw):
-            var c = raw[i]
-            if (
-                c == UInt8(0x20)
-                or c == UInt8(0x09)
-                or c == UInt8(0x0A)
-                or c == UInt8(0x0D)
-            ):
-                break
+        while i < len(raw) and not _is_scrub_sep(raw[i]):
             i += 1
+        var has_slash = False
         var cut = start
         for j in range(start, i):
             if raw[j] == UInt8(0x2F):
+                has_slash = True
                 cut = j + 1
+        if has_slash:
+            # Peek past whitespace: a slash token there means
+            # this token is a spaced path's head; drop it with
+            # the gap so no middle component survives.
+            var k = i
+            while k < len(raw) and _is_scrub_sep(raw[k]):
+                k += 1
+            var m = k
+            var next_slash = False
+            while m < len(raw) and not _is_scrub_sep(raw[m]):
+                if raw[m] == UInt8(0x2F):
+                    next_slash = True
+                    break
+                m += 1
+            if next_slash:
+                i = k
+                continue
         for j in range(cut, i):
             out.append(raw[j])
     # Cuts land only after ASCII slashes, so no codepoint splits.

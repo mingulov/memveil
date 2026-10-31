@@ -239,9 +239,9 @@ def test_report_example_all_formats(bundle):
     text = run(binary, "report", "--format", "text", cap)
     js = run(binary, "report", "--format", "json", cap)
     md = run(binary, "report", "--format", "markdown", cap)
-    assert text.returncode == 4, text.stderr
-    assert js.returncode == 4, js.stderr
-    assert md.returncode == 4, md.stderr
+    assert text.returncode == 0, text.stderr
+    assert js.returncode == 0, js.stderr
+    assert md.returncode == 0, md.stderr
     report = json.loads(js.stdout)
     assert report["quality"]["detail"]["status"] == "complete_for_scope"
     assert report["quality"]["detail"]["loss_count"] == "0"
@@ -256,7 +256,7 @@ def test_valid_empty_replays_zero(bundle):
     root, _ = bundle
     binary = str(root / "bin" / "memveil")
     proc = run(binary, "report", "--format", "json", VALID_EMPTY)
-    assert proc.returncode == 4, proc.stderr
+    assert proc.returncode == 0, proc.stderr
     report = json.loads(proc.stdout)
     assert report["quality"]["detail"]["status"] == \
         "complete_for_scope"
@@ -318,7 +318,7 @@ class TestCleanRoom:
                    "sendto,bpf,execve,chdir,fchdir",
                    binary, "report", "--format", "json", cap,
                    env=env, cwd="/")
-        assert proc.returncode == 4, proc.stderr
+        assert proc.returncode == 0, proc.stderr
         report = json.loads(proc.stdout)
         assert metric(report, "bounce_attempts")["value"] == "30"
         text = open(trace, encoding="utf-8",

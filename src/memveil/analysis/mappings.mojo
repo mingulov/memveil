@@ -8,11 +8,15 @@ actual-copy, live-byte, and completed-lifetime metrics:
 - Successful allocations count map successes; failures never
   create mappings. Copies observed before a later outer failure
   stay counted; a sync request alone copies nothing.
-- Live bytes sum only tracked open mappings. Any orphan release,
-  duplicate result, detail gap, active-table refusal, or unpaired
-  release invalidates the total instead of lowering it. Refused
-  observations still count in observed event totals; only the
-  state they would join is withheld.
+- Live bytes sum only tracked open mappings. Any duplicate
+  result, detail gap, active-table refusal, or unpaired
+  release invalidates the total instead of lowering it. A
+  release without an observed map is the expected pre-window
+  class: the observed release proves its mapping closed, so
+  the end-state total stands with partial coverage while
+  only the peak (pre-window occupancy unknown) is withheld.
+  Refused observations still count in observed event totals;
+  only the state they would join is withheld.
 - Completed lifetimes cover releases with provable durations.
   Open, uncertain, and refused mappings are censored from the
   statistics, never labeled leaks and never completed samples.
@@ -158,6 +162,7 @@ struct MappingTracker[
     var _degraded_sync: Bool
     var _degrade_sync_cause: String
     var _detail_lost: Bool
+    var _saw_correlation_gap: Bool
     var _split_relations: Bool
     var _completed: UInt64
     var _lifetime_total: UInt64
@@ -223,6 +228,7 @@ struct MappingTracker[
         self._degraded_sync = False
         self._degrade_sync_cause = String("")
         self._detail_lost = False
+        self._saw_correlation_gap = False
         self._split_relations = False
         self._completed = UInt64(0)
         self._lifetime_total = UInt64(0)
@@ -289,6 +295,22 @@ struct MappingTracker[
         self._invalidate_live(
             "Correlation loss may hide a release relationship"
         )
+
+    def pre_window_explains_mapping_release(self) -> Bool:
+        """True when observed orphan releases explain the class.
+
+        A producer mapping_release partial claim with no
+        observed correlation gap, no unpaired mapping, and at
+        least one paired release of an unknown mapping is
+        explained by the expected pre-window class: those
+        releases prove closure without touching observed
+        live accounting. Anything else stays fail-closed.
+        """
+        if self._saw_correlation_gap:
+            return False
+        if self._unpaired_map != 0:
+            return False
+        return self._orphan_releases > 0
 
     def note_copy_attribution_loss(mut self):
         """Lost copy attribution degrades copy rows only.
@@ -455,6 +477,7 @@ struct MappingTracker[
             self._apply_unmap(ev, paired)
             return
         if kind == "gap" and ev.gap.channel == "correlation":
+            self._saw_correlation_gap = True
             self.note_correlation_loss()
             return
         if kind == "gap" and ev.gap.channel == "detail":
@@ -701,8 +724,13 @@ struct MappingTracker[
         self._note_peak_order(False, ev.ts_ns)
         var mapping = ev.unmap.mapping_id
         if mapping not in self._live:
+            # Expected pre-window class: the observed release
+            # proves its mapping is closed, so end-state live
+            # answers stand; only the peak (pre-window
+            # occupancy unknown) is withheld. Coverage still
+            # degrades to partial.
             self._orphan_releases += 1
-            self._invalidate_live("Release without open mapping")
+            self._degrade("Release without open mapping")
             return
         var rec = self._live.get(mapping, _LiveMapping())
         _ = self._live.pop(mapping)
@@ -750,13 +778,17 @@ struct MappingTracker[
         for i in range(len(self._notes)):
             out.append(self._notes[i])
         if self._orphan_releases > 0:
+            var origin = String("mapped before observation began")
+            if self._detail_lost:
+                origin = String("map record unobserved")
             out.append(
                 _plural(
                     self._orphan_releases,
-                    "release without open mapping;",
-                    "releases without open mappings;",
+                    "pre-window release (" + origin + ");",
+                    "pre-window releases (" + origin + ");",
                 )
-                + " live totals withheld."
+                + " closed mappings excluded correctly, peak"
+                " withheld."
             )
         if self._uncertain_closes > 0:
             out.append(
@@ -1373,6 +1405,21 @@ struct MappingTracker[
                             "Mapping/release delivery order does not"
                             " prove timestamp order; peak withheld."
                         ),
+                    )
+                )
+            elif self._orphan_releases > 0:
+                out.append(
+                    self._missing(
+                        String("peak_live_observed_allocation_bytes"),
+                        String("bytes"),
+                        scope,
+                        _plural(
+                            self._orphan_releases,
+                            "release without an observed map;",
+                            "releases without an observed map;",
+                        )
+                        + " pre-window occupancy unknown;"
+                        " peak withheld.",
                     )
                 )
             else:

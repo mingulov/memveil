@@ -545,7 +545,7 @@ def _script_stablen(dir: String):
 
 
 def _script_neverstable(dir: String):
-    """End reads never agree: unresolved, unknown, exit 4."""
+    """End reads never agree: unresolved, unknown, exit 0."""
     var kernel = ScriptKernel()
     kernel.add_poll(_timeout(), 104)
     _zeros(kernel, 5, 2)
@@ -1378,7 +1378,7 @@ def _script_combinederr(dir: String):
 
 
 def _script_siginhand(dir: String):
-    """Signal trips with a record in hand: omitted, exit 4."""
+    """Signal trips with a record in hand: omitted, exit 0."""
     var kernel = ScriptKernel()
     var base = UInt64(1000000000)
     kernel.add_poll(
@@ -1615,7 +1615,7 @@ def _script_ooo100(dir: String):
 
 
 def _script_opcount(dir: String):
-    """Cross the 4194304 op cap: size latch, exact session.
+    """Cross the identity budget: size latch, exact session.
 
     Null writer: event bytes are dropped (a true
     crossing needs 1.4 GiB of events, past the frozen

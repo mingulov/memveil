@@ -620,8 +620,17 @@ _DETAIL_FIRST_NAMES = ("SLOT_READ", "MASK_READ", "BOUNDS",
                          "LAYOUT", "SHIFT")
 _DETAIL_EQUATIONS = ("attempt->map", "map->copy", "copy->map",
                      "unmap->copy", "copy->unmap")
+_DETAIL_CHANNEL_RE = (
+    r"(?:submit_fail=(?:\d+|unavailable) "
+    r"malformed=(?:\d+|unavailable) "
+    r"dropped=(?:\d+|unavailable))"
+)
 _DETAIL_SUFFIX_RE = (
-    r"(?:; first unknown copy: (?P<first_name>"
+    r"(?P<channels>; channels attempt:\("
+    + _DETAIL_CHANNEL_RE
+    + r"\)( lifecycle:\(" + _DETAIL_CHANNEL_RE + r"\))?"
+    + r"( copy:\(" + _DETAIL_CHANNEL_RE + r"\))?)?"
+    + r"(?:; first unknown copy: (?P<first_name>"
     r"(?:SLOT_READ|MASK_READ|BOUNDS|LAYOUT|SHIFT)))?"
     r"(?P<live>(?:; hooks silent: "
     r"(?:attempt->map|map->copy|copy->map|unmap->copy|"
@@ -634,16 +643,41 @@ _DETAIL_SUFFIX_RE = (
 )
 
 
+def parse_channels(suffix):
+    """Per-channel triples from a channels suffix, None if absent.
+
+    The caller guarantees the suffix matched _DETAIL_SUFFIX_RE,
+    so this splits structure without re-validating it. Each
+    channel maps submit_fail/malformed/dropped to ints, None
+    for unavailable components.
+    """
+    if suffix is None:
+        return None
+    out = {}
+    for chunk in suffix.split("; channels ", 1)[1].split(") "):
+        name, _, triple = chunk.partition(":(")
+        triple = triple[:-1] if triple.endswith(")") else triple
+        vals = {}
+        for pair in triple.split(" "):
+            key, _, num = pair.partition("=")
+            vals[key] = None if num == "unavailable" else int(num)
+        out[name] = vals
+    return out
+
+
 def parse_detail_loss(reason):
     """Parse the strict detail loss grammar into counters.
 
-    Accepts the collector suffixes only: an optional first
-    unknown copy name plus at most one hook-liveness form
-    (hooks silent, an equation unverified, or copy without
-    lifecycle) plus the optional pre-6.7 lower-bound label.
-    Anything else is a grammar mismatch. The result carries
-    first_unknown_copy and liveness_suffix (each None when
-    absent) and lower_bound beside the counters.
+    Accepts the collector suffixes only: an optional
+    per-channel breakdown, an optional first unknown copy
+    name plus at most one hook-liveness form (hooks silent,
+    an equation unverified, or copy without lifecycle) plus
+    the optional pre-6.7 lower-bound label. Anything else is
+    a grammar mismatch. The result carries channels
+    (per-channel triples, None values for unavailable, None
+    when the breakdown is absent), first_unknown_copy and
+    liveness_suffix (each None when absent) and lower_bound
+    beside the counters.
     """
     match = re.fullmatch(
         r"detail loss (\d+) \(submit_fail=\((\d+)\) "
@@ -661,6 +695,7 @@ def parse_detail_loss(reason):
             "duration_omitted", "signal_omitted", "rejected",
             "write_failed"]
     parsed = dict(zip(keys, nums))
+    parsed["channels"] = parse_channels(match.group("channels"))
     parsed["first_unknown_copy"] = match.group("first_name")
     parsed["liveness_suffix"] = match.group("live")
     parsed["lower_bound"] = match.group("lower") is not None
@@ -1176,6 +1211,7 @@ def parse_detail_loss_unknown(reason):
             "write_failed"]
     parsed = dict(zip(keys, nums))
     parsed["cause"] = cause
+    parsed["channels"] = parse_channels(match.group("channels"))
     parsed["first_unknown_copy"] = match.group("first_name")
     parsed["liveness_suffix"] = match.group("live")
     parsed["lower_bound"] = match.group("lower") is not None

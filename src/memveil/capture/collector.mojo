@@ -113,6 +113,9 @@ comptime EXIT_INVALID = 2
 comptime EXIT_REFUSAL = 3
 comptime EXIT_PARTIAL = 4
 
+# Identity budget shared with the reader's tracked-id cap
+# (reader.mojo): the writer stops while the next record
+# still fits, so finalized captures always pass admission.
 comptime MAX_OPS = 4194304
 comptime DRAIN_MAX_POLLS = 100000
 comptime DRAIN_MAX_S = 30
@@ -481,9 +484,44 @@ def u64_max() -> UInt64:
     return ~UInt64(0)
 
 
-def op_limited(persisted: UInt64) -> Bool:
-    """True once the 4194304-attempt cap is reached."""
-    return persisted >= UInt64(MAX_OPS)
+def identity_estimate(
+    persisted_attempt: UInt64,
+    persisted_map: UInt64,
+    persisted_map_ok: UInt64,
+    persisted_unmap: UInt64,
+    persisted_copy: UInt64,
+    persisted_sync: UInt64,
+) -> UInt64:
+    """Upper bound on the reader's tracked identities.
+
+    The reader counts distinct operation, mapping, excused,
+    and copy/sync reference ids; every counted id first
+    appears in one of these persisted events (copies and
+    syncs reference already-seen operations by construction
+    of the reader's checks), and each map contributes at most
+    its operation plus its mapping. Repeats only lower the
+    true count, so this sum never under-counts. Counters stop
+    growing once the gate latches, so the sum cannot overflow.
+    """
+    return (
+        persisted_attempt
+        + persisted_map
+        + persisted_map_ok
+        + persisted_unmap
+        + persisted_copy
+        + persisted_sync
+    )
+
+
+def op_limited(identity_room: UInt64) -> Bool:
+    """True once the 4194304 identity budget is reached.
+
+    The argument is the estimate plus headroom for the next
+    record; the budget mirrors the reader's tracked-identity
+    cap, so a capture the writer finalizes is one the reader
+    accepts.
+    """
+    return identity_room >= UInt64(MAX_OPS)
 
 
 def checked_add(a: UInt64, b: UInt64) -> UInt64:
@@ -1711,7 +1749,19 @@ struct Collector:
             self.latch(String("duration"))
             self.omit_for_latch()
             return String("closed")
-        if op_limited(self.persisted):
+        # Identity budget, aligned with the reader's tracked-id
+        # cap: stop while the costliest next record (a map plus
+        # its mapping) still fits, so the finalized capture is
+        # one the reader accepts. Counter events add no ids.
+        var room = identity_estimate(
+            self.persisted_attempt,
+            self.persisted_map,
+            self.persisted_map_ok,
+            self.persisted_unmap,
+            self.persisted_copy,
+            self.persisted_sync,
+        )
+        if op_limited(room + UInt64(2)):
             self.latch(String("size_limit"))
             self.omit_for_latch()
             return String("closed")
@@ -3009,6 +3059,73 @@ struct Collector:
             self.cfg.has_lifecycle, self.cfg.has_copy, loss,
         )
 
+    def _channel_triple(
+        self,
+        has_cut: Bool,
+        end_vals: List[UInt64],
+        stats_start: StatsOut,
+        stats_final: StatsOut,
+    ) -> String:
+        """One channel's transport triple, decimal-or-unavailable."""
+        var submit = String("unavailable")
+        var malformed = String("unavailable")
+        var dropped = String("unavailable")
+        if has_cut and submit_valid(end_vals):
+            submit = format_u64(end_vals[CNT_SUBMIT_FAIL])
+        if stats_start.ok and stats_final.ok:
+            malformed = format_u64(
+                stats_final.malformed - stats_start.malformed
+            )
+            dropped = format_u64(
+                stats_final.dropped - stats_start.dropped
+            )
+        return (
+            String("submit_fail=")
+            + submit
+            + String(" malformed=")
+            + malformed
+            + String(" dropped=")
+            + dropped
+        )
+
+    def _channel_loss_suffix(self) -> String:
+        """Per-channel transport breakdown for multi-channel runs.
+
+        The pooled pairs stay first; this suffix names which
+        ring lost what. Attempt-only captures keep byte-identical
+        reasons. A channel whose evidence is invalid reports
+        unavailable per component, mirroring loss_pairs.
+        """
+        if not self._extra_channels():
+            return String("")
+        var out = String("; channels attempt:(")
+        out += self._channel_triple(
+            self.has_end_cut,
+            self.end_vals,
+            self.stats_start_ch0,
+            self.stats_final_ch0,
+        )
+        out += String(")")
+        if self.cfg.has_lifecycle:
+            out += String(" lifecycle:(")
+            out += self._channel_triple(
+                self.has_end_cut_lc,
+                self.end_vals_lc,
+                self.stats_start_lc,
+                self.stats_final_lc,
+            )
+            out += String(")")
+        if self.cfg.has_copy:
+            out += String(" copy:(")
+            out += self._channel_triple(
+                self.has_end_cut_cp,
+                self.end_vals_cp,
+                self.stats_start_cp,
+                self.stats_final_cp,
+            )
+            out += String(")")
+        return out^
+
     def loss_pairs(self) -> List[String]:
         """Kernel/bridge components as decimal-or-unavailable."""
         var submit = String("unavailable")
@@ -3365,6 +3482,7 @@ struct Collector:
                 self.rejected,
                 self.write_failed,
             )
+        out.q_detail.reason += self._channel_loss_suffix()
         if self.unknown_copy_first != String(""):
             out.q_detail.reason += (
                 String("; first unknown copy: ")
