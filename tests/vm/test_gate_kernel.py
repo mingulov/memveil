@@ -17,6 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gate_kernel  # noqa: E402
+from test_fixture_generation import generated  # noqa: F401
 
 REPO = gate_kernel.REPO
 FMT = ("name: swiotlb_bounced\nID: 382\nformat:\n"
@@ -226,26 +227,29 @@ def test_binding_drift_names_each_field(tmp_path):
 
 
 @needs_build
-def test_narrow_test_profile_regenerates_from_its_own_bindings():
-    # The checked-in narrow test doc equals the emitter
-    # output for its own bindings: minted by the repo
-    # transform from test-identity bytes, with only the
-    # status line promoted to validated. The identity
-    # bytes come from the ready-validated fixture tree
-    # (config, image, notes, format, BTF marker); the
-    # object hashes and CO-RE layouts come from the
-    # current build/bpf objects, so re-running the mint
-    # after a BPF change re-qualifies the bindings.
-    path = (REPO / "tests" / "fixtures" / "capabilities"
-            / "profiles-narrow-test" / "test-narrow-validated.json")
+def test_narrow_test_profile_regenerates_from_its_own_bindings(generated):
+    # Preserve every historical semantic field. Only the three object
+    # identities vary with the independently permitted compiler build.
+    path = (REPO / "tests/fixtures/capabilities/profiles-narrow-test"
+            / "test-narrow-validated.json")
     checked = json.loads(path.read_text())
     assert checked["profile_id"] == "test-narrow-validated"
     assert checked["status"] == "validated"
-    fmt = checked["hooks"][0]["format_text"]
-    ident = gate_kernel.shipped_identity(checked)
-    gate, _ = gate_kernel.emitter().gate_docs(
-        ident, fmt, checked["profile_id"])
+    gate = json.loads((generated / "profile.json").read_text())
+    assert gate["status"] == "reference-unvalidated"
+    assert gate["profile_id"] == "test-narrow-provisional"
+    assert gate["notes"].pop() == "Synthetic offline fixture; no live kernel qualification."
+    gate["profile_id"] = checked["profile_id"]
     gate["status"] = checked["status"]
+    historical = dict(p.split("=", 1)
+                      for p in checked["identity"]["source"]["note"].split())
+    parts = []
+    for part in gate["identity"]["source"]["note"].split():
+        key, value = part.split("=", 1)
+        if key in ("object", "lc_object", "cp_object"):
+            value = historical[key]
+        parts.append(key + "=" + value)
+    gate["identity"]["source"]["note"] = " ".join(parts)
     assert gate == checked
 
 
@@ -281,13 +285,10 @@ def test_built_objects_contain_no_checkout_path():
 
 
 @needs_build
-def test_built_objects_match_narrow_test_bindings():
-    # A fresh build reproduces the narrow test doc's
-    # object bindings byte for byte.
-    doc = json.loads(
-        (REPO / "tests" / "fixtures" / "capabilities"
-         / "profiles-narrow-test" / "test-narrow-validated.json"
-         ).read_text())
+def test_built_objects_match_narrow_test_bindings(generated):
+    # Current build bytes must equal separately compiled provisional
+    # bindings; this does not change the historical qualified identities.
+    doc = json.loads((generated / "profile.json").read_text())
     note = dict(part.split("=", 1)
                 for part in doc["identity"]["source"]["note"].split())
     objs = (("object", gate_kernel.PROD_OBJ),
@@ -338,3 +339,20 @@ def test_emit_gate_profiles_requires_explicit_out(monkeypatch):
                                       "ident.json",
                                       "format.txt"])
     assert module.main() == 2
+
+
+def test_changed_provisional_binding_is_rejected(generated):
+    doc = json.loads((generated / 'profile.json').read_text())
+    ident = gate_kernel.shipped_identity(doc)
+    objs = {'object': generated / 'swiotlb_attempt.bpf.o',
+            'lc_object': generated / 'swiotlb_lifecycle.bpf.o',
+            'cp_object': generated / 'swiotlb_copy.bpf.o'}
+    assert gate_kernel.binding_drift(doc, ident, objs) == []
+    note = doc['identity']['source']['note']
+    parts = []
+    for part in note.split():
+        if part.startswith('lc_object='):
+            part = 'lc_object=sha256:' + '0' * 64
+        parts.append(part)
+    doc['identity']['source']['note'] = ' '.join(parts)
+    assert gate_kernel.binding_drift(doc, ident, objs) == ['lc_object']

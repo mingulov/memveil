@@ -66,10 +66,12 @@ def gate_prefix():
     if r.returncode != 0:
         refuse("vng needs root and no passwordless sudo")
     env = dict(os.environ)
-    env["PATH"] = (
-        str(Path(vng).parent)
-        + ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-    )
+    # Keep the exact tool search order that passed preflight across sudo.
+    selected_path = env.get("PATH", os.defpath)
+    helper_dir = str(Path(vng).parent)
+    env["PATH"] = selected_path
+    if helper_dir not in selected_path.split(os.pathsep):
+        env["PATH"] += os.pathsep + helper_dir
     return ["sudo", "-n", "env", f"PATH={env['PATH']}", vng], env
 
 
