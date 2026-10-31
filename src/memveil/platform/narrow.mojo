@@ -400,6 +400,43 @@ def format_narrow_note(bind: NarrowBindings, extra: Bool) raises -> String:
     return out^
 
 
+def rebind_note_object(note: String, binding: String, sha: String) raises -> String:
+    """Return the note with exactly one object binding replaced.
+
+    ``binding`` names one grammar key: ``object`` for the
+    attempt channel, ``lc_object`` for mapping-lifecycle,
+    ``cp_object`` for copy-actual. ``sha`` is the bare-hex
+    replacement. The note must parse, the binding must be
+    known, the sha must be 64 lowercase hex, and the
+    lifecycle/copy bindings require a 12-field note; anything
+    else raises and no note is returned. Siblings are never
+    touched: a stale object hash rebinds only its own
+    binding, so one rebuilt object cannot silently drift
+    another channel's qualification. The result always
+    re-parses (it round-trips through parse and format).
+    """
+    var parsed = parse_narrow_note(note)
+    if not parsed.ok:
+        raise Error(String("rebind: ") + parsed.message)
+    if not is_sha256_value(String("sha256:") + sha):
+        raise Error("rebind: sha must be 64 lowercase hex digits")
+    var bind = parsed.bindings
+    if binding == String("object"):
+        bind.object = sha.copy()
+    elif binding == String("lc_object"):
+        if bind.lc_object == String(""):
+            raise Error("rebind: lc_object needs a 12-field note")
+        bind.lc_object = sha.copy()
+    elif binding == String("cp_object"):
+        if bind.cp_object == String(""):
+            raise Error("rebind: cp_object needs a 12-field note")
+        bind.cp_object = sha.copy()
+    else:
+        raise Error(String("rebind: unknown binding ") + binding)
+    var extra = bind.lc_object != String("")
+    return format_narrow_note(bind, extra)
+
+
 def _join(root: String, path: String) -> String:
     if root == String("/") or root == String(""):
         return path

@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Docs gate: links resolve, commands exist, text stays public.
 
-Every local link in user-facing Markdown resolves to a file and,
-for anchored links, a heading; every documented `memveil <verb>`
+Scans README.md, AGENTS.md, the root governance files,
+docs/**, and examples/**. Every local link in user-facing
+Markdown resolves to a file and, for anchored links, a heading; every documented `memveil <verb>`
 names a verb from the usage line in main.mojo and every flag
 beside it exists in that verb's built --help; no document
 carries placeholder markers; the support envelope and
@@ -322,7 +323,11 @@ def check(name, cond, detail=""):
 
 def doc_files():
     found = [os.path.join(ROOT, "README.md"),
-             os.path.join(ROOT, "AGENTS.md")]
+             os.path.join(ROOT, "AGENTS.md"),
+             os.path.join(ROOT, "SECURITY.md"),
+             os.path.join(ROOT, "CONTRIBUTING.md"),
+             os.path.join(ROOT, "RELEASING.md"),
+             os.path.join(ROOT, "CHANGELOG.md")]
     found += sorted(glob.glob(os.path.join(ROOT, "docs", "**", "*.md"),
                               recursive=True))
     found += sorted(glob.glob(os.path.join(ROOT, "examples", "**",
@@ -489,10 +494,13 @@ def main():
                   encoding="utf-8") as handle:
             found = FLOOR_SENTENCE in normalize(handle.read())
         check("floor-sentence-%s" % slug(rel), found, rel)
-    policy = os.path.join(ROOT, "docs", "policy.md")
-    with open(policy, encoding="utf-8") as handle:
-        versions = sorted(set(re.findall(r"v\d+\.\d+\.\d+",
-                                         handle.read())))
+    versions = set()
+    for rel in ("docs/policy.md", "CHANGELOG.md"):
+        with open(os.path.join(ROOT, rel),
+                  encoding="utf-8") as handle:
+            versions.update(re.findall(r"v\d+\.\d+\.\d+",
+                                       handle.read()))
+    versions = sorted(versions)
     check("policy-names-versions", len(versions) >= 1,
           "no vX.Y.Z named")
     tags = git_tags()

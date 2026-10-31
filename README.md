@@ -66,8 +66,12 @@ symptom-to-fix index; `docs/profiles.md` walks
 bound-reference authoring from `doctor` to `qualify`.
 `docs/evidence-retention.md` states what gate and matrix
 evidence is kept and how a receipt re-derives its verdict.
+`docs/policy.md` states the evolution and support policy.
 `examples/real-capture` is a reviewed 30-event capture with
-expected outputs.
+expected outputs. `CONTRIBUTING.md` is the contributor
+workflow, `RELEASING.md` the release process,
+`SECURITY.md` the vulnerability route, and
+`CHANGELOG.md` the version history.
 
 ## Build and test (from source)
 

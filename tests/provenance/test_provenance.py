@@ -542,6 +542,14 @@ def main(argv):
     else:
         print("ok engine-version-matches-pixi (no built binary; skipped)")
 
+    with open(os.path.join(ROOT, "packaging", "rpm",
+                           "memveil.spec")) as handle:
+        spec = handle.read()
+    mspec = re.search(r"^Version:\s*(\S+)", spec, re.M)
+    check("spec-version-matches-pixi",
+          bool(mspec) and mspec.group(1) == product_version,
+          mspec.group(1) if mspec else "no Version line")
+
     missing = [rel for rel in STATIC_INPUTS
                if not os.path.isfile(os.path.join(ROOT, rel))]
     check("package-static-inputs", not missing, "; ".join(missing))
