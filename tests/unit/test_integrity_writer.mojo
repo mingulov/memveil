@@ -5,7 +5,13 @@
 from std.testing import TestSuite, assert_equal, assert_true
 from memveil.capture.collector import Collector, CollectorConfig
 from memveil.capture.pools import NormalizedPoolSample
-from memveil.model.integrity import EMPTY_SHA256
+from memveil.capture.correlation import CorrelationRegistry
+from memveil.capture.lifecycle import (
+    decode_lifecycle, decode_copy,
+    normalize_lifecycle_event, normalize_copy_event,
+)
+from memveil.model.integrity import EMPTY_SHA256, Integrity, INTEGRITY_KIND_COUNT
+from memveil.platform.reader import read_host_file
 from scripted import AppendFault, ScriptWriter, ScriptClock, ScriptSignal
 from test_lifecycle_capture import _lc_raw, _cp_raw
 from test_normalize import make_payload
@@ -14,6 +20,40 @@ from test_writer import _mkdtemp
 
 def _raw() -> List[UInt8]:
     return [UInt8(123), UInt8(125), UInt8(10)]
+
+
+def _seed_prefix(
+    mut collector: Collector, mut writer: ScriptWriter,
+    mut clock: ScriptClock, mut signal: ScriptSignal, path: String,
+) raises -> List[UInt8]:
+    assert_true(writer.create(path, 131072).ok)
+    assert_equal(collector._admit_attempt(
+        make_payload(UInt64(1), False, UInt64(1), [UInt8(100)]),
+        clock, signal, writer, UInt64(1000),
+    ), String(""))
+    assert_equal(collector.next_seq, UInt64(1))
+    return read_host_file(path + "/events.ndjson", "events", 131072)
+
+
+def _assert_prefix(
+    collector: Collector, writer: ScriptWriter, path: String,
+    prefix: List[UInt8], before: Integrity,
+) raises:
+    assert_true(len(prefix) > 0)
+    assert_equal(collector.next_seq, before.line_count)
+    assert_equal(writer.appends, 1)
+    assert_equal(writer.committed_len(), len(prefix))
+    assert_equal(
+        read_host_file(path + "/events.ndjson", "events", 131072), prefix
+    )
+    var after = collector.committed_stream.snapshot()
+    assert_equal(after.events_bytes, before.events_bytes)
+    assert_equal(after.line_count, before.line_count)
+    assert_equal(after.first_seq, before.first_seq)
+    assert_equal(after.last_seq, before.last_seq)
+    assert_equal(after.events_sha256, before.events_sha256)
+    for i in range(INTEGRITY_KIND_COUNT):
+        assert_equal(after.kinds[i], before.kinds[i])
 
 
 def test_detail_append_failure_does_not_consume_sequence() raises:
@@ -198,11 +238,14 @@ def test_detail_encoding_failure_consumes_no_sequence() raises:
         _cp_raw(1, 1, 1, UInt64(4), UInt64(4), UInt64(1), UInt64(0), 4)
     )
     for i in range(len(payloads)):
-        var collector = Collector(cfg)
+        var collector = Collector(CollectorConfig())
         var writer = ScriptWriter()
-        assert_true(writer.create(_mkdtemp() + "/capture", 131072).ok)
         var clock = ScriptClock()
         var signal = ScriptSignal()
+        var path = _mkdtemp() + "/capture"
+        var prefix = _seed_prefix(collector, writer, clock, signal, path)
+        var before = collector.committed_stream.snapshot()
+        collector.cfg.profile_id = cfg.profile_id
         var result = String("")
         if i == 0:
             result = collector._admit_attempt(
@@ -217,13 +260,82 @@ def test_detail_encoding_failure_consumes_no_sequence() raises:
                 payloads[i], clock, signal, writer, UInt64(1000)
             )
         assert_equal(result, String("unfinalizable"))
-        assert_equal(collector.next_seq, UInt64(0))
         assert_equal(collector.rejected, UInt64(0))
-        assert_equal(writer.appends, 0)
-        assert_equal(
-            collector.committed_stream.snapshot().line_count, UInt64(0)
-        )
+        _assert_prefix(collector, writer, path, prefix, before)
         writer.discard()
+
+
+def test_unknown_copy_normalization_preserves_committed_prefix() raises:
+    for reason in [1, 2, 3, 5, 6]:
+        var collector = Collector(CollectorConfig())
+        var writer = ScriptWriter()
+        var clock = ScriptClock()
+        var signal = ScriptSignal()
+        var path = _mkdtemp() + "/capture"
+        var prefix = _seed_prefix(collector, writer, clock, signal, path)
+        var before = collector.committed_stream.snapshot()
+        var payload = _cp_raw(
+            2, 0, 1, UInt64(2), UInt64(2), UInt64(1), UInt64(0), reason
+        )
+        # Decoding succeeds; UNKNOWN_COPY is a normalization refusal before
+        # fill_source_hook. It is not a registry-normalization exception.
+        var decoded = decode_copy(payload)
+        var refused = False
+        try:
+            _ = normalize_copy_event(decoded)
+        except e:
+            assert_equal(e.reason, String("UNKNOWN_COPY"))
+            assert_true(not e.fatal)
+            refused = True
+        assert_true(refused)
+        assert_equal(collector._admit_copy(
+            payload, clock, signal, writer, UInt64(1000)
+        ), String(""))
+        assert_equal(collector.rejected, UInt64(1))
+        assert_true(collector.unknown_copy_first != "")
+        _assert_prefix(collector, writer, path, prefix, before)
+        writer.discard()
+
+
+def test_wire_normalizers_satisfy_registry_input_contract() raises:
+    # Wire normalizers construct every field checked by registry exceptions.
+    # Exercise admitted hooks so a missing hook cannot bypass those checks.
+    for seq in [UInt64(0), UInt64(18446744073709551615)]:
+        for flags in [0, 1, 9]:
+            var gen = UInt64(18446744073709551614) if flags == 1 else UInt64(0)
+            var ev = normalize_lifecycle_event(decode_lifecycle(
+                _lc_raw(1, flags, 1, seq, UInt64(1), UInt64(1), gen)
+            ))
+            assert_true(ev.map_result.operation_id != "")
+            assert_true(ev.map_result.has_wire_generation)
+            var registry = CorrelationRegistry()
+            registry.admit_hook(ev.source_hook, "iova")
+            _ = registry.normalize(ev^, "capture")
+        for flags in range(8):
+            var gen = UInt64(0) if flags & 4 else UInt64(1)
+            var ev = normalize_lifecycle_event(decode_lifecycle(
+                _lc_raw(2, flags, 1, seq, UInt64(1), UInt64(1), gen)
+            ))
+            assert_true(ev.unmap.has_wire_generation)
+            assert_true(ev.unmap.has_wire_identity)
+            var registry = CorrelationRegistry()
+            registry.admit_hook(ev.source_hook, "iova")
+            _ = registry.normalize(ev^, "capture")
+        for kind in [1, 2]:
+            for to_device in [0, 1]:
+                var flags = to_device + (2 if kind == 2 else 0)
+                var reason = 0 if kind == 2 else 4
+                var ev = normalize_copy_event(decode_copy(_cp_raw(
+                    kind, flags, 1, seq, UInt64(1), UInt64(1), UInt64(1), reason
+                )))
+                if kind == 1:
+                    assert_true(ev.sync.operation_id != "")
+                    assert_true(ev.sync.has_mapping_id)
+                else:
+                    assert_true(ev.copy.operation_id != "")
+                var registry = CorrelationRegistry()
+                registry.admit_hook(ev.source_hook, "iova")
+                _ = registry.normalize(ev^, "capture")
 
 
 def test_admission_rejections_consume_no_sequence() raises:

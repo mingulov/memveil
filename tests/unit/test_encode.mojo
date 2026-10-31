@@ -518,6 +518,50 @@ def test_integrity_session_rejects_bad_metadata() raises:
         assert_true(rejected)
 
 
+def test_integrity_session_rejects_malformed_digest() raises:
+    var s = _base_session()
+    s.has_integrity = True
+    s.integrity.events_bytes = UInt64(1)
+    s.integrity.line_count = UInt64(1)
+    s.integrity.has_seq = True
+    s.integrity.kinds[0] = UInt64(1)
+    var digest = String("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+    s.integrity.events_sha256 = digest
+    var text = encode_session(s)
+    _ = parse_session(_bytes(text))
+    for bad in [
+        String(""), digest + "0",
+        digest.replace("a", "A"), digest.replace("a", "g"),
+    ]:
+        var rejected = False
+        try:
+            _ = parse_session(_bytes(text.replace(digest, bad)))
+        except e:
+            assert_true(String(e).find("capture.integrity.events_sha256") != -1)
+            rejected = True
+        assert_true(rejected)
+
+
+def test_integrity_session_rejects_overflowed_kind_sum() raises:
+    var s = _base_session()
+    s.has_integrity = True
+    s.integrity.events_bytes = UInt64(18446744073709551615)
+    s.integrity.line_count = UInt64(18446744073709551615)
+    s.integrity.has_seq = True
+    s.integrity.last_seq = UInt64(18446744073709551614)
+    s.integrity.kinds[0] = UInt64(18446744073709551615)
+    var text = encode_session(s)
+    _ = parse_session(_bytes(text))
+    # Both counts parse as u64; only their sum is out of range.
+    var rejected = False
+    try:
+        _ = parse_session(_bytes(text.replace('"marker":"0"', '"marker":"1"')))
+    except e:
+        assert_true(String(e).find("overflow") != -1)
+        rejected = True
+    assert_true(rejected)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_quote_ascii]()
@@ -536,6 +580,8 @@ def run() raises -> Int:
     suite.test[test_unknown_kind]()
     suite.test[test_integrity_session_roundtrip_boundaries]()
     suite.test[test_integrity_session_rejects_bad_metadata]()
+    suite.test[test_integrity_session_rejects_malformed_digest]()
+    suite.test[test_integrity_session_rejects_overflowed_kind_sum]()
     suite.test[test_session_roundtrip]()
     suite.test[test_session_capability_grade_roundtrip]()
     suite.test[test_session_capability_grade_bad_enum]()
