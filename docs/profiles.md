@@ -472,6 +472,23 @@ unreadable live source reports `binding failed: <key>
 uncheckable` instead, which asks for privilege or a
 fixed path rather than a rebind.
 
+A rebuilt object rebinds only its own binding. Each
+channel carries its own artifact hash (`object` for the
+attempt channel, `lc_object` for mapping-lifecycle,
+`cp_object` for copy-actual), and a rebind replaces
+exactly one of them: sibling bindings, rings, and
+identity values are never touched, so one rebuilt
+object cannot silently drift another channel's
+qualification. The old receipt then fails against the
+rebound note with `receipt artifacts differ from note`
+until the channel re-qualifies. The
+`rebind_note_object` helper in
+`src/memveil/platform/narrow.mojo` performs exactly
+this single-binding replacement (refusing unknown
+bindings, malformed hashes, and lifecycle/copy
+rebinds on 8-field notes); prefer it over editing
+notes by hand.
+
 Unproven hook semantics refuse on the signature. A
 document whose bindings match the live host but whose
 frozen signature differs from live BTF reports:
