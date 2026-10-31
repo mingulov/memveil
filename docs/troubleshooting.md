@@ -23,11 +23,12 @@ capture to clean up.
 
 ## Reports look wrong
 
-- Exit 4 on a healthy capture is normal: terminal quality is
-  partial by design while quiescence stays unproven (no kernel
-  protocol; `measurement-windows.md`). Exit 0 means sufficient
-  evidence including complete terminal evidence, exit 2 means
-  invalid input.
+- Normal exit 0 means a valid capture/report was produced; inspect the
+  verdict for completeness. Terminal quality stays partial while quiescence
+  is unproven (no kernel protocol; `measurement-windows.md`), so `--strict`
+  returns 4 on that healthy partial capture. Exit 2 means invalid input.
+  Future checkpoint recovery will return 4 even without strict mode; it is
+  not implemented yet (see [capture integrity](capture-integrity.md)).
 - Zeros versus unavailable: a valid empty capture replays
   `bounce_attempts = 0`; rows without usable evidence
   render `unavailable` with a reason, never zero. If a row
