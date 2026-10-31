@@ -28,6 +28,7 @@ Python standard library only.
 """
 
 import copy
+import hashlib
 import json
 import os
 import re
@@ -39,6 +40,7 @@ REPORT_VERSION = "0.1.3"
 SESSION_VERSION = "0.1.1"
 SESSION_VERSION_NEXT = "0.1.2"
 SESSION_VERSION_LATEST = "0.1.3"
+SESSION_VERSION_INTEGRITY = "0.1.4"
 VERDICTS = ("complete", "partial_known_loss", "partial_unknown_loss")
 RELATIONS = ("mapping_release", "copy_attribution", "sync_attribution")
 EVENT_VERSION = "0.1.1"
@@ -431,6 +433,31 @@ def audit_session_verdict(obj):
              % (name, bps, exp_name, exp_bps))
 
 
+INTEGRITY_KINDS = ("bounce_attempt", "map_result", "unmap", "copy", "sync_request",
+                   "transition_result", "pool_sample", "gap", "marker", "counter_snapshot")
+
+
+def check_integrity(value):
+    check_keys(value, ("algorithm", "events_bytes", "line_count", "first_seq",
+                       "last_seq", "events_sha256", "kinds"), (), "capture.integrity")
+    if value["algorithm"] != "sha256":
+        fail("bad-algorithm", "capture.integrity.algorithm")
+    size = check_u64(value["events_bytes"], "integrity.events_bytes")
+    count = check_u64(value["line_count"], "integrity.line_count")
+    check_keys(value["kinds"], INTEGRITY_KINDS, (), "integrity.kinds")
+    if sum(check_u64(value["kinds"][k], "integrity.kinds." + k) for k in INTEGRITY_KINDS) != count:
+        fail("bad-count", "integrity kinds do not sum to line_count")
+    digest = value["events_sha256"]
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        fail("bad-digest", "integrity.events_sha256")
+    if count == 0:
+        if size != 0 or value["first_seq"] is not None or value["last_seq"] is not None or digest != hashlib.sha256(b"").hexdigest():
+            fail("bad-empty", "integrity empty stream")
+    elif (check_u64(value["first_seq"], "integrity.first_seq") != 0 or
+          check_u64(value["last_seq"], "integrity.last_seq") != count - 1 or size < count):
+        fail("bad-sequence", "integrity sequence bounds")
+
+
 def check_session(obj):
     check_keys(obj,
                ("schema_version", "session_id", "synthetic", "product",
@@ -439,7 +466,8 @@ def check_session(obj):
                ("boot_id", "verdict"), "session")
     if obj["schema_version"] not in (SESSION_VERSION,
                                       SESSION_VERSION_NEXT,
-                                      SESSION_VERSION_LATEST):
+                                      SESSION_VERSION_LATEST,
+                                      SESSION_VERSION_INTEGRITY):
         fail("bad-version", "session schema_version %r"
              % (obj["schema_version"],))
     session_id = check_id(obj["session_id"], "session_id")
@@ -457,7 +485,11 @@ def check_session(obj):
     check_environment(obj["environment"], "environment")
     capture = obj["capture"]
     check_keys(capture, ("mode", "window", "filters", "finalized"),
-               ("end_reason",), "capture")
+               ("end_reason", "integrity") if obj["schema_version"] == SESSION_VERSION_INTEGRITY else ("end_reason",), "capture")
+    if obj["schema_version"] == SESSION_VERSION_INTEGRITY:
+        if "integrity" not in capture:
+            fail("missing-key", "capture.integrity")
+        check_integrity(capture["integrity"])
     check_enum(capture["mode"], ("live", "synthetic"), "capture.mode")
     window = capture["window"]
     check_keys(window, ("start_ns", "end_ns"), ("baseline_start_ns",),
@@ -535,7 +567,7 @@ def check_session(obj):
     check_quality(obj["quality"], "quality",
                     relations_allowed=(obj["schema_version"]
                                         != SESSION_VERSION))
-    is_latest = obj["schema_version"] == SESSION_VERSION_LATEST
+    is_latest = obj["schema_version"] in (SESSION_VERSION_LATEST, SESSION_VERSION_INTEGRITY)
     check_stop(obj["stop"], allow_013=is_latest)
     if "verdict" in obj:
         if not is_latest:
@@ -1812,7 +1844,7 @@ def run_selftest():
             results.append((True, "%s: %s" % (label, detail or "ok")))
 
     schemas = ("session-v0.1.1.schema.json", "session-v0.1.2.schema.json",
-               "session-v0.1.3.schema.json",
+               "session-v0.1.3.schema.json", "session-v0.1.4.schema.json",
                "event-v0.1.1.schema.json", "event-v0.1.2.schema.json",
                "report-v0.1.0.schema.json", "report-v0.1.1.schema.json",
                "report-v0.1.2.schema.json", "report-v0.1.3.schema.json",

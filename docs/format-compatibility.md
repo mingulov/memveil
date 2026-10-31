@@ -6,7 +6,7 @@ external schema family are independent. The current exact contracts are:
 
 | Family | Accepted runtime input | Current output | Other versions / retained contracts |
 | --- | --- | --- | --- |
-| Session | 0.1.1, 0.1.2, 0.1.3 | 0.1.3 | 0.1.0 refused (not shipped) |
+| Session | 0.1.1, 0.1.2, 0.1.3 | 0.1.4 | 0.1.0 refused (not shipped) |
 | Event | 0.1.1, 0.1.2 | 0.1.2 | 0.1.0 refused (not shipped) |
 | Profile | 0.1.1, 0.1.2 | Authored profile documents | 0.1.0 refused (not shipped) |
 | Report | None (output only) | 0.1.3 | 0.1.0, 0.1.1, 0.1.2 |
@@ -28,14 +28,21 @@ Fields introduced in a later version are refused in older documents. Session
 verdict, and 0.1.3 adds `LONG_LIVED_NOT_EVALUATED`. Reports are output only;
 the renderer emits the current version and does not read older reports.
 
+## Integrity implementation boundary
+
+Session 0.1.4 is emitted by the collector and accepted by the structural
+parser. Offline readers refuse it until event-file verification is available.
+Legacy re-encoding keeps session 0.1.3. This intermediate writer-only support
+is not a release candidate.
+
 ## Reserved versions (planned, unavailable)
 
-- Session 0.1.4 and report 0.1.4 are reserved for capture integrity and
-  durable recovery. Event 0.1.2 stays unchanged; no event 0.1.4 is reserved.
+- Report 0.1.4 and durable recovery remain planned. Session 0.1.4 writing
+  is implemented as described above. Event 0.1.2 stays unchanged.
 - Session, event and report 0.2.0 are reserved for the opt-in conversion
   request/result journal. It must retain integrity and recovery guarantees;
   successful API results cannot establish physical state or range lifetimes.
-- These versions are not accepted or produced by the current code and have
+- The reserved report/journal versions are not accepted or produced and have
   no schema files yet. Old schema files remain immutable. Product 0.1.1 is
   the planned hardened ordinary-Linux preview; product 0.2.0 is the planned
   journal and real-SNP qualification target. Neither name is a qualification

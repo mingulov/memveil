@@ -614,6 +614,8 @@ def read_capture(
         session = parse_session(session_bytes^)
     except e:
         raise ReadError(READ_PARSE, 0, "session.json: " + String(e))
+    if session.has_integrity:
+        raise ReadError(READ_INVALID, 0, "capture integrity verification unavailable")
     var out = CaptureReader()
     out.session = session^
     out._allow_partial = allow_partial

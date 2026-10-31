@@ -38,6 +38,9 @@ from memveil.capture.collector import (
 )
 from memveil.capture.reader import default_limits, read_capture
 from memveil.model.session import parse_session
+from memveil.model.event import parse_event
+from memveil.model.integrity import INTEGRITY_KIND_COUNT, integrity_kind_index
+from memveil.platform.hash import sha256_hex
 from memveil.render.json import render_json
 from memveil.render.markdown import render_markdown
 from memveil.render.text import render_text
@@ -53,6 +56,25 @@ from scripted import (
     ScriptSignal,
     ScriptWriter,
 )
+
+
+def _check_integrity(events: String, session: String) raises:
+    if session == "":
+        return
+    var s = parse_session(_session_bytes(session))
+    assert_true(s.has_integrity)
+    var raw = _session_bytes(events)
+    assert_equal(s.integrity.events_bytes, UInt64(len(raw)))
+    assert_equal(s.integrity.events_sha256, sha256_hex(Span(raw)))
+    var lines = _lines(events)
+    assert_equal(s.integrity.line_count, UInt64(len(lines)))
+    var counts = Array[UInt64, INTEGRITY_KIND_COUNT](fill=UInt64(0))
+    for i in range(len(lines)):
+        var event = parse_event(_session_bytes(lines[i]))
+        assert_equal(event.seq, UInt64(i))
+        counts[integrity_kind_index(event.kind)] += UInt64(1)
+    for i in range(INTEGRITY_KIND_COUNT):
+        assert_equal(s.integrity.kinds[i], counts[i])
 
 
 def _mkdtemp() raises -> String:
@@ -393,6 +415,7 @@ def _run(
     for t in kernel.poll_timeouts:
         if t != 0:
             loop_polls += 1
+    _check_integrity(events, session)
     var out = CaseOut(
         result.exit_code,
         result.end_reason,
@@ -543,6 +566,7 @@ def _run_live(
     for t in kernel.poll_timeouts:
         if t != 0:
             loop_polls += 1
+    _check_integrity(events, session)
     var out = CaseOut(
         result.exit_code,
         result.end_reason,
@@ -1383,6 +1407,7 @@ def test_foreign_payload_aborts() raises:
         payloads^,
         _cut(UInt64(1), UInt64(37), UInt64(1), UInt64(37)),
         _zero_cut(), UInt64(0), _zero_cut(), UInt64(0))
+    assert_true(_contains(c.session, String('"integrity":{"algorithm":"sha256"')))
     assert_equal(c.exit_code, EXIT_ERROR)
     assert_equal(c.end_reason, String("error"))
     assert_equal(c.outcome, String("error"))
@@ -4819,7 +4844,24 @@ def test_scripted_old_ktimes_byte_identical() raises:
         _cut(UInt64(2), UInt64(5120), UInt64(2), UInt64(5120)),
         UInt64(2), read_files=True)
     assert_equal(c.events, _golden_events())
-    assert_equal(_mask_output_fs(c.session), _mask_output_fs(_golden_session()))
+    # Keep the legacy golden byte-exact; add independently derived metadata.
+    var integrity = String(
+        ',"integrity":{"algorithm":"sha256","events_bytes":"2168","line_count":"6","fir'
+        'st_seq":"0","last_seq":"5","events_sha256":"7e4f612a4f54e91938d3e5850d243a8ab4'
+        '0945a88ab0deb283b82c8257d3a24e","kinds":{"bounce_attempt":"0","map_result":"0"'
+        ',"unmap":"0","copy":"2","sync_request":"0","transition_result":"0","pool_sampl'
+        'e":"0","gap":"0","marker":"0","counter_snapshot":"4"}}'
+    )
+    assert_true(_contains(c.session, integrity))
+    assert_true(_contains(c.session, String('"schema_version":"0.1.4"')))
+    var legacy = c.session.replace(integrity, String(""))
+    legacy = legacy.replace(
+        String('"schema_version":"0.1.4"'),
+        String('"schema_version":"0.1.3"'),
+    )
+    assert_equal(_mask_output_fs(legacy), _mask_output_fs(_golden_session()))
+    var old = parse_session(_session_bytes(_golden_session()))
+    assert_true(not old.has_integrity)
 
 
 def _mask_output_fs(session: String) raises -> String:

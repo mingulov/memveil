@@ -26,6 +26,7 @@ from memveil.model.regions import RegionObservation
 from memveil.model.session import (
     PRODUCT_NAME,
     SESSION_SCHEMA_VERSION,
+    SESSION_SCHEMA_VERSION_INTEGRITY,
     Capability,
     Channel,
     DeviceEntry,
@@ -33,6 +34,7 @@ from memveil.model.session import (
     Session,
     StopState,
 )
+from memveil.model.integrity import Integrity, INTEGRITY_KIND_COUNT, integrity_kind
 from memveil.model.validate import format_u64
 
 
@@ -409,6 +411,8 @@ def encode_event(ev: Event) raises EncodeError -> String:
     """Encode one event in canonical form (no trailing newline)."""
     var buf = List[UInt8](capacity=_LINE_RESERVE)
     _put_event(buf, ev)
+    if len(buf) + 1 > 65536:
+        raise EncodeError("event", "line exceeds 64 KiB including newline")
     # Every non-ASCII string was validated by _put_span.
     return String(unsafe_from_utf8=Span(buf))
 
@@ -418,6 +422,8 @@ def encode_event_line(ev: Event) raises EncodeError -> List[UInt8]:
     var buf = List[UInt8](capacity=_LINE_RESERVE)
     _put_event(buf, ev)
     buf.append(UInt8(0x0A))
+    if len(buf) > 65536:
+        raise EncodeError("event", "line exceeds 64 KiB including newline")
     return buf^
 
 
@@ -584,11 +590,35 @@ def _encode_region_observation(o: RegionObservation) raises EncodeError -> Strin
     return _jobj(parts^)
 
 
+def encode_integrity(value: Integrity) raises EncodeError -> String:
+    try:
+        value.validate()
+    except e:
+        raise EncodeError("capture.integrity", String(e))
+    var parts = List[String]()
+    parts.append(_member("algorithm", _jstr("sha256")))
+    parts.append(_member("events_bytes", _ju64(value.events_bytes)))
+    parts.append(_member("line_count", _ju64(value.line_count)))
+    var first = String("null")
+    var last = String("null")
+    if value.has_seq:
+        first = _ju64(value.first_seq)
+        last = _ju64(value.last_seq)
+    parts.append(_member("first_seq", first))
+    parts.append(_member("last_seq", last))
+    parts.append(_member("events_sha256", _jstr(value.events_sha256)))
+    var kinds = List[String]()
+    for i in range(INTEGRITY_KIND_COUNT):
+        kinds.append(_member(integrity_kind(i), _ju64(value.kinds[i])))
+    parts.append(_member("kinds", _jobj(kinds^)))
+    return _jobj(parts^)
+
+
 def encode_session(s: Session) raises EncodeError -> String:
     """Encode one session in canonical form (no trailing newline)."""
     var parts = List[String]()
     parts.append(
-        _member(String("schema_version"), _jstr(SESSION_SCHEMA_VERSION))
+        _member(String("schema_version"), _jstr(String(SESSION_SCHEMA_VERSION_INTEGRITY) if s.has_integrity else String(SESSION_SCHEMA_VERSION)))
     )
     parts.append(_member(String("session_id"), _jstr(s.session_id)))
     if s.has_boot_id:
@@ -653,6 +683,8 @@ def encode_session(s: Session) raises EncodeError -> String:
         capture.append(
             _member(String("end_reason"), _jstr(s.end_reason))
         )
+    if s.has_integrity:
+        capture.append(_member("integrity", encode_integrity(s.integrity)))
     parts.append(_member(String("capture"), _jobj(capture^)))
     var devices = List[String]()
     for i in range(len(s.devices)):
