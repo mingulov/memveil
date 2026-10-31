@@ -42,9 +42,19 @@ without replacing its historical object:
 
 The provisional manifest records SHA-256 identities for sources, generator
 implementations, product/UAPI/libbpf headers, compiler resource headers,
-compiler driver and invoker, default compiler configuration, and loaded
-compiler shared libraries. It also records the compiler version, per-object
-flags, and output hashes. `ldd` identifies the compiler's shared-library
+compiler driver and invoker, loaded compiler configuration, and loaded
+compiler shared libraries. Configuration paths and effective compiler commands
+come from dry-runs of each actual BPF compilation, including its target and flags;
+the untargeted version query alone cannot identify target-specific configurations.
+Checkout and output locations are normalized in those recorded commands. It also
+records the compiler version, per-object flags, and output hashes.
+
+Configuration support is deliberately bounded to flat files: text containing
+`@` or `--config` is refused, including ambiguous occurrences in comments or
+literals. Flatten nested configuration before using this generator. Clang can
+expand nested response/configuration files without reporting each filename;
+this tool does not claim to inventory such hidden inputs. Ordinary flat default
+configurations remain enabled. `ldd` identifies the compiler's shared-library
 inputs; a static compiler records an empty set. Include-path spelling is
 preserved because it affects DWARF bytes even with checkout prefix mapping.
 No claim is made that these metadata constitute a hermetic compiler sandbox
