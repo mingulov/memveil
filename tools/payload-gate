@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Bind the release packages to the tested payload bytes.
+
+The release ships three packages (the .deb, the .rpm, and the
+owner bundle) whose payloads must be exactly the bytes the
+qualifying lanes ran: the engine binary, the libbpf-mojo
+bridge, and the three BPF objects in each. The committed
+packaging/tested-payload.sha256 pins those fifteen hashes;
+--collect hashes a candidate package set into the same
+manifest format and --check compares the two.
+
+Usage:
+  tools/payload-gate --collect --deb DEB --rpm RPM \\
+      --bundle TARBALL --out MANIFEST
+  tools/payload-gate --check --packaged MANIFEST --tested TESTED
+Exit 0 when every payload hash matches, 1 when the gate
+fails (placeholder, missing or extra entry, hash mismatch),
+2 on invalid usage, a missing extractor, or a malformed or
+unreadable manifest. Standard library only.
+"""
+
+import hashlib
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+ZEROS = "0" * 64
+
+BPF = ("swiotlb_attempt.bpf.o", "swiotlb_copy.bpf.o",
+       "swiotlb_lifecycle.bpf.o")
+
+# Logical manifest path -> member path inside the package.
+SPEC = {}
+for _pkg, _bin, _lib, _bpf in (
+        ("deb", "usr/bin/memveil", "usr/lib/memveil",
+         "usr/lib/memveil"),
+        ("rpm", "usr/bin/memveil", "usr/lib/memveil",
+         "usr/lib/memveil"),
+        ("bundle", "bin/memveil", "lib", "bpf")):
+    SPEC["%s/%s" % (_pkg, _bin)] = (_pkg, _bin)
+    SPEC["%s/%s/libbpf_mojo.so.1" % (_pkg, _lib)] = (
+        _pkg, "%s/libbpf_mojo.so.1" % _lib)
+    for _obj in BPF:
+        SPEC["%s/%s/%s" % (_pkg, _bpf, _obj)] = (
+            _pkg, "%s/%s" % (_bpf, _obj))
+
+
+def fail(msg):
+    sys.stderr.write("payload-gate: %s\n" % msg)
+    return 2
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def parse_manifest(path, label):
+    """Manifest text -> {logical path: hash}; None when malformed."""
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except OSError as exc:
+        sys.stderr.write("payload-gate: %s %s unreadable: %s\n"
+                         % (label, path, exc))
+        return None
+    entries = {}
+    for lineno, line in enumerate(lines, 1):
+        if not line.strip() or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) != 2 or not HEX64.match(parts[0]):
+            sys.stderr.write(
+                "payload-gate: %s %s line %d malformed\n"
+                % (label, path, lineno))
+            return None
+        if parts[1] in entries:
+            sys.stderr.write(
+                "payload-gate: %s %s line %d duplicates %s\n"
+                % (label, path, lineno, parts[1]))
+            return None
+        entries[parts[1]] = parts[0]
+    return entries
+
+
+def extract_deb(deb, tmpdir):
+    if shutil.which("dpkg-deb") is None:
+        sys.stderr.write("payload-gate: dpkg-deb not found\n")
+        return None
+    dest = os.path.join(tmpdir, "deb")
+    os.makedirs(dest)
+    proc = subprocess.run(["dpkg-deb", "-x", deb, dest],
+                          stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE)
+    if proc.returncode != 0:
+        sys.stderr.write("payload-gate: dpkg-deb -x failed: %s\n"
+                         % proc.stderr.decode("utf-8", "replace"))
+        return None
+    return dest
+
+
+def extract_rpm(rpm, tmpdir):
+    if shutil.which("rpm2cpio") is None:
+        sys.stderr.write("payload-gate: rpm2cpio not found\n")
+        return None
+    if shutil.which("cpio") is None:
+        sys.stderr.write("payload-gate: cpio not found\n")
+        return None
+    dest = os.path.join(tmpdir, "rpm")
+    os.makedirs(dest)
+    dump = subprocess.run(["rpm2cpio", rpm],
+                          stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE)
+    if dump.returncode != 0:
+        sys.stderr.write("payload-gate: rpm2cpio failed: %s\n"
+                         % dump.stderr.decode("utf-8", "replace"))
+        return None
+    unpack = subprocess.run(["cpio", "-idm", "--quiet"],
+                            input=dump.stdout,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            cwd=dest)
+    if unpack.returncode != 0:
+        sys.stderr.write("payload-gate: cpio failed: %s\n"
+                         % unpack.stderr.decode("utf-8", "replace"))
+        return None
+    return dest
+
+
+def extract_bundle(tarball, tmpdir):
+    dest = os.path.join(tmpdir, "bundle")
+    os.makedirs(dest)
+    try:
+        with tarfile.open(tarball, "r:gz") as archive:
+            archive.extractall(dest)
+    except (OSError, tarfile.TarError) as exc:
+        sys.stderr.write("payload-gate: bundle extract failed: %s\n"
+                         % exc)
+        return None
+    tops = sorted(os.listdir(dest))
+    if len(tops) != 1 or not os.path.isdir(
+            os.path.join(dest, tops[0])):
+        sys.stderr.write("payload-gate: bundle has no single top dir\n")
+        return None
+    return os.path.join(dest, tops[0])
+
+
+def do_collect(deb, rpm, bundle, out):
+    for path, label in ((deb, "--deb"), (rpm, "--rpm"),
+                        (bundle, "--bundle")):
+        if not path or not os.path.isfile(path):
+            return fail("%s is not a file: %r" % (label, path))
+    tmpdir = tempfile.mkdtemp(prefix="payload-gate-")
+    try:
+        roots = {}
+        roots["deb"] = extract_deb(deb, tmpdir)
+        roots["rpm"] = extract_rpm(rpm, tmpdir)
+        roots["bundle"] = extract_bundle(bundle, tmpdir)
+        if any(root is None for root in roots.values()):
+            return 2
+        lines = []
+        for logical in sorted(SPEC):
+            pkg, member = SPEC[logical]
+            path = os.path.join(roots[pkg], member)
+            if not os.path.isfile(path):
+                sys.stderr.write(
+                    "payload-gate: %s lacks payload member %s\n"
+                    % (pkg, member))
+                return 2
+            lines.append("%s  %s\n" % (sha256_file(path), logical))
+        try:
+            with open(out, "w", encoding="utf-8") as handle:
+                handle.writelines(lines)
+        except OSError as exc:
+            return fail("cannot write %s: %s" % (out, exc))
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    return 0
+
+
+def do_check(packaged, tested):
+    packed = parse_manifest(packaged, "packaged manifest")
+    want = parse_manifest(tested, "tested manifest")
+    if packed is None or want is None:
+        return 2
+    failed = False
+    for logical in sorted(set(packed) | set(want) | set(SPEC)):
+        if logical not in SPEC:
+            sys.stderr.write("payload-gate: unexpected entry %s\n"
+                             % logical)
+            failed = True
+        elif logical not in want:
+            sys.stderr.write("payload-gate: tested manifest lacks %s\n"
+                             % logical)
+            failed = True
+        elif logical not in packed:
+            sys.stderr.write("payload-gate: packaged manifest lacks %s\n"
+                             % logical)
+            failed = True
+        elif want[logical] == ZEROS:
+            sys.stderr.write(
+                "payload-gate: %s has no qualified hash "
+                "(placeholder)\n" % logical)
+            failed = True
+        elif packed[logical] != want[logical]:
+            sys.stderr.write(
+                "payload-gate: %s mismatch: packaged %s != tested %s\n"
+                % (logical, packed[logical], want[logical]))
+            failed = True
+    return 1 if failed else 0
+
+
+def main(argv):
+    args = list(argv)
+    if not args or args[0] not in ("--collect", "--check"):
+        sys.stderr.write("payload-gate: want --collect or --check\n")
+        return 2
+    mode = args.pop(0)
+    opts = {}
+    while args:
+        opt = args.pop(0)
+        if opt not in ("--deb", "--rpm", "--bundle", "--out",
+                       "--packaged", "--tested") or not args:
+            sys.stderr.write("payload-gate: bad option %s\n" % opt)
+            return 2
+        opts[opt] = args.pop(0)
+    if mode == "--collect":
+        for opt in ("--deb", "--rpm", "--bundle", "--out"):
+            if opt not in opts:
+                return fail("%s requires %s" % (mode, opt))
+        return do_collect(opts["--deb"], opts["--rpm"],
+                          opts["--bundle"], opts["--out"])
+    for opt in ("--packaged", "--tested"):
+        if opt not in opts:
+            return fail("%s requires %s" % (mode, opt))
+    return do_check(opts["--packaged"], opts["--tested"])
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -5,11 +5,15 @@
 # workflows, runs the Tier 1 + Tier 2 gate suites, builds
 # the owner bundle, the .deb, and the .rpm from the clean
 # tag tree, re-verifies each artifact through its own lane,
-# and uploads the set plus a sha256 file to the tag's
-# GitHub Release. Dispatch runs build everything, keep the
-# set as a workflow artifact and publish nothing; both refuse
-# a .deb whose binary is not the tested one. Rollback is a
-# new tag; a rerun of the same tag replaces its uploaded files.
+# and uploads the set plus the SBOM and a sha256 file to
+# the tag's GitHub Release. Dispatch runs build everything,
+# keep the set as a workflow artifact and publish nothing;
+# both refuse a package set whose payload (binary, bridge,
+# BPF objects) is not the committed tested one, and both
+# attest build provenance for the published files. Rollback
+# is a new tag; a rerun of the same tag fails instead of
+# replacing uploaded files. v0.* and hyphenated tags
+# publish as prereleases with the committed release notes.
 name: release
 
 on:
@@ -20,6 +24,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -39,7 +45,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             clang llvm bpftool cmake ninja-build python3-pytest \
-            strace patchelf rpm binutils python3
+            strace patchelf rpm binutils cpio python3
       - name: Provision libbpf-mojo tarball
         run: |
           VER="$(python3 -c "import json; print(json.load(open('toolchain.lock.json'))['dependencies']['libbpf-mojo']['version'])")"
@@ -70,8 +76,8 @@ jobs:
               fuzz-smoke fuzz-campaign record-failures \
               output-paths privacy render-escaping \
               offline-environment perf-replay preview-package \
-              provenance docs examples package source-export \
-              release-runtime; do
+              provenance docs examples package payload-gate sbom \
+              source-export release-runtime; do
             ./tools/test "$suite" || exit 1
           done
       - name: Gate suites (Tier 2)
@@ -87,39 +93,51 @@ jobs:
           MV_DEB="$(echo "$GITHUB_WORKSPACE"/dist/memveil_*-1_amd64.deb)" ./tools/test deb || exit 1
       - name: Build rpm
         run: |
-          SPEC="$GITHUB_WORKSPACE/packaging/rpm/memveil.spec"
-          SPEC_VER="$(sed -n 's/^Version: *//p' "$SPEC")"
-          SRC1="$(sed -n 's/^Source1: *//p' "$SPEC")"
-          RTOP="$GITHUB_WORKSPACE/dist/rpmbuild"
-          mkdir -p "$RTOP/SOURCES" "$RTOP/BUILD" "$RTOP/RPMS" \
-            "$RTOP/SRPMS" "$RTOP/BUILDROOT"
-          ./tools/rpm-source0 --root "$GITHUB_WORKSPACE" \
-            --version "$SPEC_VER" \
-            --out "$RTOP/SOURCES/memveil-$SPEC_VER.tar.gz"
-          cp "$LMB_PACKAGE" "$RTOP/SOURCES/$SRC1"
-          # apt, not the empty rpm db, provides the BuildRequires
-          rpmbuild -bb --nodeps --define "_topdir $RTOP" \
-            --define "debug_package %{nil}" "$SPEC"
-          RPM="$(find "$RTOP/RPMS" -name '*.rpm' | head -1)"
-          cp "$RPM" "$GITHUB_WORKSPACE/dist/"
-          MV_RPM="$GITHUB_WORKSPACE/dist/$(basename "$RPM")" \
+          ./tools/build-rpm --work "$GITHUB_WORKSPACE/dist" \
+            --out "$GITHUB_WORKSPACE/dist" || exit 1
+          MV_RPM="$(echo "$GITHUB_WORKSPACE"/dist/memveil-*.rpm)" \
             ./tools/test rpm-journey || exit 1
       - name: Verify bundle runtime
         run: |
           MV_BUNDLE_TARBALL="$(echo dist/memveil-*.tar.gz)" \
             ./tools/test release-runtime || exit 1
+      # Every package must carry the payload the qualifying
+      # lanes ran; the committed receipt pins all three sets.
+      - name: Packaged payload is the tested one
+        run: |
+          ./tools/payload-gate --collect \
+            --deb "$(echo dist/memveil_*-1_amd64.deb)" \
+            --rpm "$(echo dist/memveil-*.rpm)" \
+            --bundle "$(echo dist/memveil-*.tar.gz)" \
+            --out dist/PACKAGED-SHA256.txt || exit 1
+          ./tools/payload-gate --check \
+            --packaged dist/PACKAGED-SHA256.txt \
+            --tested packaging/tested-payload.sha256 || exit 1
+      - name: SBOM
+        run: |
+          ./tools/sbom \
+            --bundle "$(echo dist/memveil-*.tar.gz)" \
+            --deb "$(echo dist/memveil_*-1_amd64.deb)" \
+            --rpm "$(echo dist/memveil-*.rpm)" \
+            --lock toolchain.lock.json \
+            --out dist/memveil.spdx.json || exit 1
       - name: Checksums
         run: |
           cd dist
           sha256sum memveil-*.tar.gz memveil_*.deb memveil-*.rpm \
+            memveil.spdx.json PACKAGED-SHA256.txt \
             > SHA256SUMS.txt
           cat SHA256SUMS.txt
-      - name: Packaged binary identity
-        run: |
-          X="$(mktemp -d)"
-          dpkg-deb -x dist/memveil_*-1_amd64.deb "$X"
-          (cd "$X" && sha256sum usr/bin/memveil usr/lib/memveil/*.bpf.o) \
-            | tee dist/PACKAGED-SHA256.txt
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f  # v3.2.0
+        with:
+          subject-path: |
+            dist/memveil-*.tar.gz
+            dist/memveil_*.deb
+            dist/memveil-*.rpm
+            dist/memveil.spdx.json
+            dist/SHA256SUMS.txt
+            dist/PACKAGED-SHA256.txt
       - name: Upload dry-run artifacts
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
@@ -129,28 +147,33 @@ jobs:
             dist/memveil-*.tar.gz
             dist/memveil_*.deb
             dist/memveil-*.rpm
+            dist/memveil.spdx.json
             dist/SHA256SUMS.txt
             dist/PACKAGED-SHA256.txt
           if-no-files-found: error
-      # The .deb must carry the binary the kernel matrix ran; its hash is pinned in the release notes.
-      - name: Packaged binary is the tested one
-        run: |
-          WANT="$(python3 -c "import re; print(re.search(r'binary sha256\s+\x60([0-9a-f]{64})\x60', open('docs/release-notes.md').read()).group(1))")"
-          GOT="$(awk '$2 == "usr/bin/memveil" {print $1}' dist/PACKAGED-SHA256.txt)"
-          if [ "$GOT" != "$WANT" ]; then
-            echo "packaged binary $GOT is not the tested binary $WANT" >&2
-            exit 1
-          fi
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --title "$TAG" \
-              --generate-notes
+          PRE=""
+          case "$TAG" in
+            v0.*|*-*) PRE="--prerelease";;
+          esac
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            HAVE="$(gh release view "$TAG" --json assets \
+              --jq '.assets | length')"
+            if [ "$HAVE" != "0" ]; then
+              echo "refusing to overwrite $HAVE published assets" >&2
+              exit 1
+            fi
+          else
+            # shellcheck disable=SC2086
+            gh release create "$TAG" --title "$TAG" $PRE \
+              --notes-file docs/release-notes.md
           fi
-          gh release upload "$TAG" --clobber \
+          gh release upload "$TAG" \
             dist/memveil-*.tar.gz dist/memveil_*.deb \
-            dist/memveil-*.rpm dist/SHA256SUMS.txt
+            dist/memveil-*.rpm dist/memveil.spdx.json \
+            dist/SHA256SUMS.txt dist/PACKAGED-SHA256.txt

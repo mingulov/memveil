@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# memveil .rpm build path.
+#
+# Usage: tools/build-rpm --work DIR --out DIR
+#
+# Builds the memveil .rpm from this tree: Source0 is the tree's
+# own file set (tools/rpm-source0 owns the selection), Source1
+# is the pinned libbpf-mojo tarball from $LMB_PACKAGE, and the
+# spec rebuilds the owner bundle inside rpmbuild. Prints
+# "build-rpm: <path>" with the built .rpm on success.
+# Exit 0 on success; exit 1 when the build fails; exit 2 on
+# invalid usage or a missing prerequisite. One action per
+# invocation; extra arguments are rejected.
+
+set -u
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+usage() {
+    sed -n '2,/^$/p' "$0" | sed 's/^# //; s/^#//'
+}
+
+WORK=""
+OUT=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --work)
+            [ $# -ge 2 ] || { usage >&2; exit 2; }
+            WORK="$2"; shift 2;;
+        --out)
+            [ $# -ge 2 ] || { usage >&2; exit 2; }
+            OUT="$2"; shift 2;;
+        --help|-h)
+            usage; exit 0;;
+        *)
+            usage >&2; exit 2;;
+    esac
+done
+if [ -z "$WORK" ] || [ -z "$OUT" ]; then
+    usage >&2; exit 2
+fi
+
+if ! command -v rpmbuild >/dev/null 2>&1; then
+    echo "build-rpm: BLOCKED: rpmbuild is not installed" >&2
+    exit 2
+fi
+if [ -z "${LMB_PACKAGE:-}" ]; then
+    echo "build-rpm: BLOCKED: LMB_PACKAGE is not set (the spec" \
+        "build needs the pinned bridge tarball)" >&2
+    exit 2
+fi
+if [ ! -f "${LMB_PACKAGE:-}" ]; then
+    echo "build-rpm: LMB_PACKAGE is not a file: $LMB_PACKAGE" >&2
+    exit 2
+fi
+
+SPEC="$ROOT/packaging/rpm/memveil.spec"
+SPEC_VER=$(sed -n 's/^Version: *//p' "$SPEC")
+SRC1=$(sed -n 's/^Source1: *//p' "$SPEC")
+if [ -z "$SPEC_VER" ] || [ -z "$SRC1" ]; then
+    echo "build-rpm: spec has no Version/Source1" >&2
+    exit 1
+fi
+RTOP="$WORK/rpmbuild"
+mkdir -p "$RTOP/SOURCES" "$RTOP/BUILD" "$RTOP/RPMS" \
+    "$RTOP/SRPMS" "$RTOP/BUILDROOT" "$OUT"
+# Source0 is the tree's own file set (tools/rpm-source0
+# owns the selection: an owning checkout contributes
+# exactly its tracked plus unignored-untracked files,
+# while a plain tree under an unrelated parent
+# repository never inherits that parent's files).
+if ! "$ROOT/tools/rpm-source0" --root "$ROOT" \
+    --version "$SPEC_VER" \
+    --out "$RTOP/SOURCES/memveil-$SPEC_VER.tar.gz" \
+    >"$WORK/rpm-source0.log" 2>&1; then
+    echo "build-rpm: Source0 tar failed" >&2
+    cat "$WORK/rpm-source0.log" >&2
+    exit 1
+fi
+cp "$LMB_PACKAGE" "$RTOP/SOURCES/$SRC1" || {
+    echo "build-rpm: Source1 copy failed" >&2
+    exit 1
+}
+cp "$SPEC" "$WORK/" || {
+    echo "build-rpm: spec copy failed" >&2
+    exit 1
+}
+# debug_package nil works around Ubuntu rpm, which
+# runs find-debuginfo despite the spec's
+# __os_install_post nil; it only gates the -debuginfo
+# subpackage, never the main payload. --nodeps: apt, not
+# the (empty or absent) rpm db, provides the BuildRequires.
+if ! rpmbuild -bb --nodeps --define "_topdir $RTOP" \
+    --define "debug_package %{nil}" "$WORK/memveil.spec" \
+    >"$WORK/rpmbuild.log" 2>&1; then
+    echo "build-rpm: BLOCKED: rpmbuild failed" >&2
+    cat "$WORK/rpmbuild.log" >&2
+    exit 1
+fi
+RPM=$(find "$RTOP/RPMS" -name '*.rpm' | head -1)
+if [ -z "$RPM" ] || [ ! -f "$RPM" ]; then
+    echo "build-rpm: no .rpm built" >&2
+    cat "$WORK/rpmbuild.log" >&2
+    exit 1
+fi
+cp "$RPM" "$OUT/" || {
+    echo "build-rpm: copy to $OUT failed" >&2
+    exit 1
+}
+echo "build-rpm: $OUT/$(basename "$RPM")"

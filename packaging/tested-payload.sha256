@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Matrix-tested release payload pins (sha256sum format).
+#
+# Each entry is the sha256 of one payload file inside one of
+# the three release packages: the engine binary, the
+# libbpf-mojo bridge, and the three BPF objects. The release
+# gate (tools/payload-gate --check) refuses to publish unless
+# every package carries exactly these bytes.
+#
+# The .deb entry set is the kernel-matrix-tested one; the
+# .rpm and owner-bundle entry sets are the bytes their own
+# install lanes (rpm-journey, clean-room replay) ran, built
+# from the same tree. The three binaries differ by necessity
+# (each install layout needs its own RUNPATH), so each
+# package pins its own binary hash.
+#
+# All-zero hashes are an UNQUALIFIED placeholder: the gate
+# fails while any entry is zeros. A qualifying run refills
+# this file with tools/payload-gate --collect over the three
+# packages its lanes ran, and commits the result.
+0000000000000000000000000000000000000000000000000000000000000000  deb/usr/bin/memveil
+0000000000000000000000000000000000000000000000000000000000000000  deb/usr/lib/memveil/libbpf_mojo.so.1
+0000000000000000000000000000000000000000000000000000000000000000  deb/usr/lib/memveil/swiotlb_attempt.bpf.o
+0000000000000000000000000000000000000000000000000000000000000000  deb/usr/lib/memveil/swiotlb_copy.bpf.o
+0000000000000000000000000000000000000000000000000000000000000000  deb/usr/lib/memveil/swiotlb_lifecycle.bpf.o
+0000000000000000000000000000000000000000000000000000000000000000  rpm/usr/bin/memveil
+0000000000000000000000000000000000000000000000000000000000000000  rpm/usr/lib/memveil/libbpf_mojo.so.1
+0000000000000000000000000000000000000000000000000000000000000000  rpm/usr/lib/memveil/swiotlb_attempt.bpf.o
+0000000000000000000000000000000000000000000000000000000000000000  rpm/usr/lib/memveil/swiotlb_copy.bpf.o
+0000000000000000000000000000000000000000000000000000000000000000  rpm/usr/lib/memveil/swiotlb_lifecycle.bpf.o
+0000000000000000000000000000000000000000000000000000000000000000  bundle/bin/memveil
+0000000000000000000000000000000000000000000000000000000000000000  bundle/lib/libbpf_mojo.so.1
+0000000000000000000000000000000000000000000000000000000000000000  bundle/bpf/swiotlb_attempt.bpf.o
+0000000000000000000000000000000000000000000000000000000000000000  bundle/bpf/swiotlb_copy.bpf.o
+0000000000000000000000000000000000000000000000000000000000000000  bundle/bpf/swiotlb_lifecycle.bpf.o
