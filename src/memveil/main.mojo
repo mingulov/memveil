@@ -5,6 +5,7 @@
 from std.sys import argv, exit
 
 from memveil.capture.collector import EXIT_REFUSAL
+from memveil.cli.bind import run_bind
 from memveil.cli.doctor import run_doctor
 from memveil.cli.qualify import run_qualify
 from memveil.cli.record import run_record
@@ -24,8 +25,7 @@ from memveil.platform.stdout import write_stdout
 def top_usage() -> String:
     """Usage text for the memveil program."""
     return (
-        "usage: memveil <record|report|top|doctor|qualify|help|version>"
-        " [args]\n"
+        "usage: memveil <record|report|top|doctor|qualify|bind-profile|help|version> [args]\n"
         "\n"
         "Attempt/lifecycle/copy capture, live and offline summaries,"
         " passive host check. Verbs:\n"
@@ -36,6 +36,7 @@ def top_usage() -> String:
         " summaries.\n"
         "  doctor    inspect the host passively and print capability.\n"
         "  qualify   prove this host and mint a local-auto receipt.\n"
+        "  bind-profile mint a bound profile document for this host.\n"
         "  help      print this text.\n"
         "  version   print the engine version.\n"
         "\n"
@@ -44,6 +45,7 @@ def top_usage() -> String:
         "Run 'memveil top --help' for top options.\n"
         "Run 'memveil doctor --help' for doctor options.\n"
         "Run 'memveil qualify --help' for qualify options.\n"
+        "Run 'memveil bind-profile --help' for bind options.\n"
     )
 
 
@@ -80,6 +82,7 @@ def main() raises:
         and verb != "record"
         and verb != "top"
         and verb != "qualify"
+        and verb != "bind-profile"
     ):
         write_stderr(top_usage())
         exit(EXIT_INVALID)
@@ -113,6 +116,8 @@ def main() raises:
             code = run_top(rest^)
         elif verb == "qualify":
             code = run_qualify(rest^)
+        elif verb == "bind-profile":
+            code = run_bind(rest^)
         else:
             code = run_report(rest^)
     except:

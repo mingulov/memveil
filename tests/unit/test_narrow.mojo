@@ -11,6 +11,7 @@ from memveil.platform.narrow import (
     check_narrow,
     check_narrow_extra,
     check_trace_layout,
+    format_narrow_note,
     parse_narrow_note,
     parse_notes_bid,
     read_live_bid,
@@ -66,6 +67,46 @@ def test_grammar_valid() raises:
     assert_equal(p.bindings.image, String(_IMAGE))
     assert_equal(p.bindings.image_bid, String(_BID))
     assert_equal(p.bindings.ring, String("8388608"))
+
+
+def test_format_round_trip_eight() raises:
+    # Parse then format is the identity on 8-field notes.
+    var note = _join(_fields(String("gz"), String("8388608")))
+    var parsed = parse_narrow_note(note)
+    assert_true(parsed.ok)
+    assert_equal(format_narrow_note(parsed.bindings, False), note)
+
+
+def test_format_round_trip_twelve() raises:
+    # Parse then format is the identity on 12-field notes.
+    var fields = _fields(String("file"), String("8388608"))
+    fields.append(
+        String("lc_object=sha256:") + String(_LC_OBJECT)
+    )
+    fields.append(String("lc_ring_bytes=33554432"))
+    fields.append(
+        String("cp_object=sha256:") + String(_CP_OBJECT)
+    )
+    fields.append(String("cp_ring_bytes=33554432"))
+    var note = _join(fields^)
+    var parsed = parse_narrow_note(note)
+    assert_true(parsed.ok)
+    assert_equal(format_narrow_note(parsed.bindings, True), note)
+
+
+def test_format_extra_incomplete_raises() raises:
+    # Extra with a missing extended binding raises instead
+    # of minting an unparseable 10-field note.
+    var parsed = parse_narrow_note(
+        _join(_fields(String("gz"), String("8388608")))
+    )
+    assert_true(parsed.ok)
+    var raised = False
+    try:
+        _ = format_narrow_note(parsed.bindings, True)
+    except:
+        raised = True
+    assert_true(raised)
 
 
 def test_grammar_lengths() raises:
@@ -855,6 +896,9 @@ def test_object_kind_mismatch() raises:
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_grammar_valid]()
+    suite.test[test_format_round_trip_eight]()
+    suite.test[test_format_round_trip_twelve]()
+    suite.test[test_format_extra_incomplete_raises]()
     suite.test[test_grammar_lengths]()
     suite.test[test_grammar_field_count]()
     suite.test[test_grammar_spacing]()

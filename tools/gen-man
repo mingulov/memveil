@@ -25,7 +25,7 @@ import re
 import subprocess
 import sys
 
-VERBS = ("record", "report", "top", "doctor", "qualify")
+VERBS = ("record", "report", "top", "doctor", "qualify", "bind-profile")
 
 
 def fail(message):

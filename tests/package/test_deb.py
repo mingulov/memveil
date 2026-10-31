@@ -97,6 +97,7 @@ MAN_FILES = {
     "usr/share/man/man1/memveil-top.1",
     "usr/share/man/man1/memveil-doctor.1",
     "usr/share/man/man1/memveil-qualify.1",
+    "usr/share/man/man1/memveil-bind-profile.1",
 }
 
 COMPLETION_FILES = {
@@ -140,6 +141,8 @@ EXPECTED_OVERRIDE_LINES = {
     "[usr/share/man/man1/memveil-doctor.1]",
     "memveil: uncompressed-manual-page "
     "[usr/share/man/man1/memveil-qualify.1]",
+    "memveil: uncompressed-manual-page "
+    "[usr/share/man/man1/memveil-bind-profile.1]",
 }
 
 BPF_OBJECTS = (
@@ -154,7 +157,7 @@ BPF_OBJECTS = (
 # --help text, so the live -h guard below (not the text
 # drift guards) binds it.
 FROZEN_VERBS = ("record", "report", "top", "doctor", "qualify",
-                "help", "version")
+                "bind-profile", "help", "version")
 FROZEN_TOP_FLAGS = ("--help", "--version", "-h")
 FROZEN_FLAGS = {
     "record": ("--bridge", "--capability", "--cp-object",
@@ -177,6 +180,10 @@ FROZEN_FLAGS = {
     "qualify": ("--bridge", "--capability", "--cp-object",
                 "--help", "--lc-object", "--object",
                 "--output", "--profile", "--profiles-dir", "-h"),
+    "bind-profile": ("--capability", "--cp-object", "--help",
+                     "--lc-object", "--object", "--output",
+                     "--profile", "--profile-id", "--profiles-dir",
+                     "-h"),
 }
 # --format's enum is closed in the parser (report.mojo);
 # capabilities stay free text because the accepted set is

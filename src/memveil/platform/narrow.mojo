@@ -364,6 +364,42 @@ def parse_narrow_note(note: String) -> NarrowParse:
     return out^
 
 
+def format_narrow_note(bind: NarrowBindings, extra: Bool) raises -> String:
+    """Assemble the section 5 grammar note from bindings.
+
+    Fixed order, exact keys, single spaces: the 8 base
+    fields, plus the lc/cp pairs when extra is True. The
+    grammar admits 8 or 12 fields only, so extra channels
+    bind together: extra with any extended binding empty
+    raises instead of minting an unparseable note.
+    """
+    var parts = List[String]()
+    parts.append(String("config=sha256:") + bind.config)
+    parts.append(String("config_src=") + bind.config_src)
+    parts.append(String("btf=sha256:") + bind.btf)
+    parts.append(String("format=sha256:") + bind.format)
+    parts.append(String("object=sha256:") + bind.object)
+    parts.append(String("image=sha256:") + bind.image)
+    parts.append(String("image_bid=") + bind.image_bid)
+    parts.append(String("ring_bytes=") + bind.ring)
+    if extra:
+        if (
+            bind.lc_object == String("")
+            or bind.lc_ring == String("")
+            or bind.cp_object == String("")
+            or bind.cp_ring == String("")
+        ):
+            raise Error("extended bindings incomplete")
+        parts.append(String("lc_object=sha256:") + bind.lc_object)
+        parts.append(String("lc_ring_bytes=") + bind.lc_ring)
+        parts.append(String("cp_object=sha256:") + bind.cp_object)
+        parts.append(String("cp_ring_bytes=") + bind.cp_ring)
+    var out = parts[0]
+    for i in range(1, len(parts)):
+        out += String(" ") + parts[i]
+    return out^
+
+
 def _join(root: String, path: String) -> String:
     if root == String("/") or root == String(""):
         return path
@@ -510,7 +546,7 @@ def read_live_bytes(
         return _uncheckable(what + String(" unreadable"))
 
 
-def _tracefs_format_path(root: String, format_path: String) -> String:
+def tracefs_format_path(root: String, format_path: String) -> String:
     """Translate one profile format path onto the live tracefs root.
 
     An unopenable root keeps the profile path: the read
@@ -623,7 +659,7 @@ def measure_live_bindings(
         return String("live bindings unmeasurable: btf")
     var form = read_live_bytes(
         root,
-        _tracefs_format_path(root, format_path),
+        tracefs_format_path(root, format_path),
         String("format"),
         MAX_NARROW_FORMAT_BYTES,
     )
@@ -781,7 +817,7 @@ def check_identity_bindings(
         return out^
     var form = read_live_bytes(
         root,
-        _tracefs_format_path(root, format_path),
+        tracefs_format_path(root, format_path),
         String("format"),
         MAX_NARROW_FORMAT_BYTES,
     )
