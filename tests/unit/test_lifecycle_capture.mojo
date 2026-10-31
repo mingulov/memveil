@@ -1299,7 +1299,7 @@ def test_attempt_misses_make_aggregate_partial() raises:
 def test_attempt_loss_lower_bound_labels_aggregate() raises:
     # Kernels before 6.7 skip programs in trace_call_bpf
     # without counting them: a claimed aggregate count is
-    # a lower bound there and the reason says so. D34 caps
+    # a lower bound there and the reason says so. The kernel profile caps
     # the status at partial even with zero known misses.
     var c = _one_copy_run(
         MissOut(True, UInt64(5), String(""), UInt64(3)),
@@ -4933,7 +4933,7 @@ def _golden_session() -> String:
     )
 
 def _parse_attached_interval(scope: String) raises -> Tuple[UInt64, UInt64]:
-    """Parse the D31 attached [A,B) claim from an aggregate scope."""
+    """Parse the attached [A,B) claim from an aggregate scope."""
     var raw = scope.as_bytes()
     var mark = String("attached [").as_bytes()
     var at = -1
@@ -5007,7 +5007,7 @@ def _last_snapshot_ts(events: String) raises -> UInt64:
 
 
 def test_aggregate_scope_claims_attached_interval() raises:
-    # D31: the aggregate claim is scoped to the attempt hook's
+    # The aggregate claim is scoped to the attempt hook's
     # attached interval, not the reading pair; the readings
     # extend past detach while the claim does not.
     var c = _one_copy_run(MissOut(True, UInt64(0), String("")))
@@ -5020,7 +5020,7 @@ def test_aggregate_scope_claims_attached_interval() raises:
 
 
 def test_attempt_loss_lower_bound_caps_detail_partial() raises:
-    # D34: on a pre-6.7 kernel the detail claim is capped at
+    # On a pre-6.7 kernel the detail claim is capped at
     # partial with the lower-bound label; the known count
     # stays as the lower bound, and the aggregate matches.
     var c = _one_copy_run(
@@ -5052,7 +5052,7 @@ def test_attempt_loss_lower_bound_caps_detail_partial() raises:
 
 
 def test_aggregate_missing_stamp_yields_partial() raises:
-    # D31: without both attached-interval stamps the aggregate
+    # Without both attached-interval stamps the aggregate
     # is partial, never complete_for_scope.
     var cfg = CollectorConfig()
     cfg.profile_id = String("test-profile-1")

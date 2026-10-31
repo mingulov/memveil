@@ -617,7 +617,7 @@ def test_f12_sanitize_diagnostic() raises:
 
 
 def test_f10_optional_correlation_exit() raises:
-    # OD25-2: a rendered report always exits 0; completeness rides
+    # A rendered report always exits 0; completeness rides
     # in the verdict field, never in the exit code.
     var clean = analyze(String("tests/fixtures/attempts"))
     assert_equal(exit_for_report(clean, False), 0)

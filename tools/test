@@ -1975,7 +1975,7 @@ suite_attempts() {
     awant zero "polls=104"
     awant zero "stats=5"
     awant zero "snaps=4"
-    # Reads grew by one: startup stamps attach-completion (D31)
+    # Reads grew by one: startup stamps attach-completion
     # before readiness.
     awant zero "reads=18"
     python3 "$JASSERT" field "$TMP/zero/session.json" \
@@ -2510,12 +2510,12 @@ suite_attempts() {
     awant opcount "committed=1462701818"
     # Frozen scripted clock: attach and detach stamps tie, so
     # the attached interval is unproven and the aggregate is
-    # partial (D31 unordered-stamp path); the identity-budget
+    # partial (unordered-stamp path); the identity-budget
     # boundary proof below is unaffected.
     # The identity gate stops while the costliest next record
     # (map plus mapping, +2 headroom) still fits, so the
     # attempt-only script omits 3: the boundary record plus
-    # 2 headroom (Q25-D2 item 6).
+    # 2 headroom.
     mqualE opcount size_limit partial 3 partial null proven
     mreason opcount "detail loss 3 (submit_fail=(0) malformed=(0) dropped=(0) recursion_missed=(0) size_omitted=(3) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
     python3 "$JASSERT" nofile "$TMP/opcount/events.ndjson" || afailed=1
@@ -3722,7 +3722,7 @@ PYEOF
     expect_line "$STMP/latch15.log" "polls=105"
     expect_line "$STMP/latch15.log" "stats=5"
     expect_line "$STMP/latch15.log" "snaps=4"
-    # Reads grew by one: startup stamps attach-completion (D31)
+    # Reads grew by one: startup stamps attach-completion
     # before readiness.
     expect_line "$STMP/latch15.log" "reads=18"
     expect_line "$STMP/latch15.log" "committed=1494"

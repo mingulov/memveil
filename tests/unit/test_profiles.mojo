@@ -764,7 +764,7 @@ def test_parse_source_note_1025_rejects() raises:
 
 def test_admitted_profiles_lack_conversion() raises:
     # Guard: no shipped profile declares conversion hooks
-    # until kernel-source evidence admits them (E02 blocked).
+    # until kernel-source evidence admits them.
     var ps = load_profiles(String("profiles"))
     for i in range(len(ps)):
         for j in range(len(ps[i].caps)):

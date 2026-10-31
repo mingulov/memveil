@@ -1178,7 +1178,7 @@ def _lower_bound_session() raises -> Session:
 
 
 def test_lower_bound_drops_confidence_and_labels_loss() raises:
-    # D34: a pre-6.7 lower-bound producer caps the report at
+    # A pre-6.7 lower-bound producer caps the report at
     # partial with the label in both channels, and attempt
     # metrics drop below high confidence.
     var s = _lower_bound_session()

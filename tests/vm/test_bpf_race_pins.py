@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Host-side pins for the Q25-C6 identity-race fixes.
+"""Host-side pins for the identity-race fixes.
 
 The lifecycle and copy probes' race behavior is qualified
 by the multi-CPU VM stress gate
