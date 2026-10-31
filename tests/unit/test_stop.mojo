@@ -270,7 +270,7 @@ def test_closeout_records_stop_evidence() raises:
     # A scripted full run records exact terminal stop
     # evidence: admission closed, quiescence unproven (no
     # kernel protocol observes it), three drained batches,
-    # valid end counters. OD25-2: a finalized capture exits
+    # valid end counters. A finalized capture exits
     # 0; completeness rides in the session verdict.
     var res = _stop_run_evidence(False)
     assert_equal(res[0], 0)
@@ -325,7 +325,7 @@ def test_closeout_detach_failure_partial() raises:
     var writer = ScriptWriter()
     var collector = Collector(cfg^)
     var result = collector.run(kernel, clock, signal, writer)
-    # OD25-2: finalized exits 0.
+    # Finalized exits 0.
     assert_equal(result.exit_code, 0)
     var parsed = False
     var s = Session()
@@ -526,7 +526,7 @@ def test_barrier_in_flight_snapshot_at_close() raises:
 
 
 def test_final_exit_normal_zero_strict_verdict() raises:
-    # OD25-2: a finalized session exits 0 no matter what it
+    # A finalized session exits 0 no matter what it
     # records; strict exits 4 unless the record verdict computed
     # from the assembled session is complete.
     var tmp = _stop_mkdtemp()
@@ -648,7 +648,7 @@ def test_signal_storm_first_latch_stands() raises:
     var writer = ScriptWriter()
     var collector = Collector(cfg^)
     var result = collector.run(kernel, clock, signal, writer)
-    # OD25-2: finalized exits 0.
+    # Finalized exits 0.
     assert_equal(result.exit_code, 0)
     assert_equal(result.end_reason, String("signal"))
     assert_equal(signal.checks, 4)

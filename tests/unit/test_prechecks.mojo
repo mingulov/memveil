@@ -53,7 +53,7 @@ def test_object_map_bytes() raises:
     assert_true(ok.ok)
     assert_equal(ok.bytes, 8388680)
     # 33554432 ring + 6*8 counts + 32768*24 gen_table + 8 gen_next.
-    # (Q25-C6 removed the quarantine and dark tiers; failed deletes
+    # (The identity fix removed quarantine and dark tiers; failed deletes
     # self-heal through reclaim instead of escalating.)
     var lc_raw = read_host_file(
         String("tests/fixtures/elf/lc-ok.o"), String("object"), 67108864

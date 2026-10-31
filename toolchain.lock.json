@@ -76,7 +76,7 @@
       "tarball_sha256": "d4dbf7fdfd7a407339958aed3e12699ca24557c71cfa9763046c5d5ff7aa126e",
       "mojo_tree": "mojo/libbpf_mojo",
       "native_lib": "lib/libbpf_mojo.so.1",
-      "note": "DEV bytes, not the v0.2.2 release: built from 49bb052ab2011e125017c21031bd81118f9c4fd4 plus the uncommitted remediation worktree (Q25-C1 privilege/allocation boundaries, Q25-C2 public surface and error-contract alignment) for consumer cleanup and conformance; version and SONAME unchanged. Consumed by path (LMB_PACKAGE) plus this exact hash or the vendored tarball. Standalone builds use only declared dependencies. This pin does not establish environment qualification."
+      "note": "DEV bytes, not the v0.2.2 release: built from 49bb052ab2011e125017c21031bd81118f9c4fd4 plus the uncommitted remediation worktree (privilege/allocation boundaries, public surface and error-contract alignment) for consumer cleanup and conformance; version and SONAME unchanged. Consumed by path (LMB_PACKAGE) plus this exact hash or the vendored tarball. Standalone builds use only declared dependencies. This pin does not establish environment qualification."
     }
   },
   "expected_first_lines": {

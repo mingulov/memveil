@@ -1439,7 +1439,7 @@ def decide_busy(persisted, samples, miss_samples, start_ns,
 
 
 def parse_attached_interval(scope):
-    """D31 attached [start, end) claim from an aggregate scope."""
+    """Attached [start, end) claim from an aggregate scope."""
     match = re.search(r" attached \[(\d+),(\d+)\)$",
                       scope or "")
     if not match:

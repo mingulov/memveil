@@ -8,7 +8,7 @@ with one direct-read dd leg per vCPU on an owned scsi_debug
 disk while bpftrace counts the attach points and block stats
 prove the load flowed.
 
-Exit criteria (Q25-C6): no fabricated pairing (identity
+Exit criteria: no fabricated pairing (identity
 closure is exact), the emitted-plus-loss identity holds on
 both rings, probe counts agree with bpftrace within quiet-
 guest slack, and the miss fraction stays under a
