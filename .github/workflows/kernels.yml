@@ -2,10 +2,11 @@
 # Kernel matrix on hosted KVM runners. Dispatch runs the
 # archive subset by default (--kernels 6.0,6.11,6.12,7.0,
 # 7.2,7.3-rc3) or every row with full=true; the nightly
-# schedule always runs every row. No push trigger until
-# the follow-up lane maps the remaining refusal reasons:
-# most archive rows still FAIL for known product causes.
-# The controller dispatches; do not push to test.
+# schedule always runs every row. Pull requests touching
+# the BPF programs or the capture stage run the subset as
+# a required check; most archive rows outside the subset
+# still FAIL for known product causes, so the subset stays
+# the push-gate scope until those are mapped.
 name: kernels
 on:
   workflow_dispatch:
@@ -17,6 +18,10 @@ on:
         default: false
   schedule:
     - cron: '23 2 * * *'
+  pull_request:
+    paths:
+      - 'bpf/**'
+      - 'src/memveil/capture/**'
 jobs:
   kernels:
     runs-on: ubuntu-26.04

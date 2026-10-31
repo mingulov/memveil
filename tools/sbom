@@ -1,0 +1,430 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Emit the release SBOM (SPDX 2.3 JSON) from recorded inputs.
+
+Every fact in the document comes from an artifact the build
+already recorded: the owner bundle's MANIFEST.json (payload
+hashes, bridge pin, toolchain pins, runtime provenance),
+the repository toolchain lock, and the payload hashes
+tools/payload-gate collects from the three release
+packages. Nothing is probed from the network and nothing is
+guessed; unknown origins stay NOASSERTION. The only
+non-reproducible field is the document creation timestamp.
+
+Usage: tools/sbom --bundle TARBALL --deb DEB --rpm RPM \\
+    --lock toolchain.lock.json --out FILE.spdx.json
+Exit 0 on success, 1 when an input disagrees with another,
+2 on invalid usage, a missing input, or an extraction
+failure. Standard library only.
+"""
+
+import datetime
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+PAYLOAD_GATE = os.path.join(HERE, "payload-gate")
+
+SPDX_VERSION = "SPDX-2.3"
+
+
+def fail(msg):
+    sys.stderr.write("sbom: %s\n" % msg)
+    return 2
+
+
+def disagree(msg):
+    sys.stderr.write("sbom: input disagreement: %s\n" % msg)
+    return 1
+
+
+def load_json(path, label):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError) as exc:
+        sys.stderr.write("sbom: %s %s unreadable: %s\n"
+                         % (label, path, exc))
+        return None
+
+
+def manifest_from_bundle(tarball):
+    try:
+        archive = tarfile.open(tarball, "r:gz")
+    except (OSError, tarfile.TarError) as exc:
+        sys.stderr.write("sbom: bundle unreadable: %s\n" % exc)
+        return None
+    try:
+        names = archive.getnames()
+        tops = sorted({n.split("/")[0] for n in names if "/" in n})
+        if len(tops) != 1:
+            sys.stderr.write("sbom: bundle has no single top dir\n")
+            return None
+        member = "%s/MANIFEST.json" % tops[0]
+        try:
+            handle = archive.extractfile(member)
+        except KeyError:
+            handle = None
+        if handle is None:
+            sys.stderr.write("sbom: bundle lacks MANIFEST.json\n")
+            return None
+        try:
+            return json.load(handle)
+        except ValueError as exc:
+            sys.stderr.write("sbom: MANIFEST.json corrupt: %s\n"
+                             % exc)
+            return None
+    finally:
+        archive.close()
+
+
+def collect_payload(deb, rpm, bundle):
+    tmpdir = tempfile.mkdtemp(prefix="sbom-payload-")
+    out = os.path.join(tmpdir, "PACKAGED-SHA256.txt")
+    proc = subprocess.run(
+        [sys.executable, PAYLOAD_GATE, "--collect",
+         "--deb", deb, "--rpm", rpm, "--bundle", bundle,
+         "--out", out],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.returncode != 0:
+        sys.stderr.write("sbom: payload-gate --collect failed: %s\n"
+                         % proc.stderr.decode("utf-8", "replace"))
+        return None
+    entries = {}
+    with open(out, "r", encoding="utf-8") as handle:
+        for line in handle.read().splitlines():
+            if not line.strip():
+                continue
+            parts = line.split()
+            entries[parts[1]] = parts[0]
+    return entries
+
+
+def sha256_of(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def checksum(sha):
+    return [{"algorithm": "SHA256", "checksumValue": sha}]
+
+
+def spdx_id(*parts):
+    clean = []
+    for part in parts:
+        clean.append("".join(c if c.isalnum() or c in ".-" else "-"
+                             for c in str(part)))
+    return "SPDXRef-" + "-".join(clean)
+
+
+def build_document(manifest, lock, payload, inputs):
+    engine = manifest.get("engine_version")
+    revision = manifest.get("memveil_revision")
+    bundle_name = manifest.get("bundle")
+    if not engine or not revision or not bundle_name:
+        sys.stderr.write("sbom: MANIFEST.json lacks identity\n")
+        return None
+    bridge = manifest.get("libbpf_mojo") or {}
+    toolchain = manifest.get("toolchain") or {}
+    runtime_prov = manifest.get("runtime_provenance") or {}
+    system_libs = manifest.get("system_libraries") or []
+    files = manifest.get("files") or {}
+
+    lock_toolchain = (lock.get("toolchain") or {})
+    lock_mojo = (lock_toolchain.get("mojo") or {}).get("version")
+    lock_pixi = (lock_toolchain.get("pixi") or {}).get("version")
+
+    # The bundle must name the same bridge tarball the lock pins.
+    lock_bridge = ((lock.get("dependencies") or {})
+                   .get("libbpf-mojo") or {})
+    if lock_bridge.get("tarball_sha256") != \
+            bridge.get("tarball_used_sha256"):
+        sys.stderr.write(
+            "sbom: input disagreement: MANIFEST bridge tarball %r "
+            "!= lock %r\n"
+            % (bridge.get("tarball_used_sha256"),
+               lock_bridge.get("tarball_sha256")))
+        return "DISAGREE"
+
+    doc_id = spdx_id("DOCUMENT")
+    root_id = spdx_id("Package", "memveil", engine)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    created = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    doc = {
+        "spdxVersion": SPDX_VERSION,
+        "dataLicense": "CC0-1.0",
+        "SPDXID": doc_id,
+        "name": "memveil-%s" % engine,
+        "documentNamespace":
+            "urn:memveil:%s:%s" % (engine, revision),
+        "creationInfo": {
+            "created": created,
+            "creators": ["Tool: memveil-tools/sbom"],
+            "licenseListVersion": "3.27",
+        },
+        "packages": [],
+        "files": [],
+        "relationships": [
+            {"spdxElementId": doc_id,
+             "relationshipType": "DESCRIBES",
+             "relatedSpdxElement": root_id},
+        ],
+    }
+
+    doc["packages"].append({
+        "SPDXID": root_id,
+        "name": "memveil",
+        "versionInfo": engine,
+        "supplier": "NOASSERTION",
+        "downloadLocation": "NOASSERTION",
+        "filesAnalyzed": False,
+        "verificationCode": None,
+        "licenseConcluded": "GPL-3.0-or-later",
+        "licenseDeclared": "GPL-3.0-or-later",
+        "copyrightText": "NOASSERTION",
+        "externalRefs": [{
+            "referenceCategory": "OTHER",
+            "referenceType": "memveil-revision",
+            "referenceLocator": revision,
+        }],
+    })
+    doc["packages"][-1].pop("verificationCode")
+
+    def add_file(spdxid, name, sha, concluded):
+        doc["files"].append({
+            "SPDXID": spdxid,
+            "fileName": name,
+            "checksums": checksum(sha),
+            "licenseConcluded": concluded,
+            "licenseInfoInFiles": [concluded],
+            "copyrightText": "NOASSERTION",
+        })
+        doc["relationships"].append(
+            {"spdxElementId": root_id,
+             "relationshipType": "CONTAINS",
+             "relatedSpdxElement": spdxid})
+
+    # Pinned payload bytes in each release package.
+    for logical in sorted(payload):
+        add_file(spdx_id("File", "payload", logical),
+                 "payload/%s" % logical, payload[logical],
+                 "GPL-3.0-or-later")
+
+    # Bundle manifest entries not already covered above
+    # (docs, profiles, completions, licenses).
+    for name in sorted(files):
+        if name in ("bin/memveil", "lib/libbpf_mojo.so.1",
+                    "bpf/swiotlb_attempt.bpf.o",
+                    "bpf/swiotlb_copy.bpf.o",
+                    "bpf/swiotlb_lifecycle.bpf.o"):
+            continue
+        concluded = "GPL-3.0-or-later"
+        if name.startswith("LICENSES/") or name == "LICENSE":
+            concluded = "NOASSERTION"
+        add_file(spdx_id("File", "bundle", name),
+                 "bundle/%s/%s" % (bundle_name, name),
+                 files[name], concluded)
+
+    # The staged runtime closure with its conda provenance.
+    for staged in sorted(runtime_prov):
+        prov = runtime_prov[staged] or {}
+        pkg_id = spdx_id("Package", "runtime", staged)
+        doc["packages"].append({
+            "SPDXID": pkg_id,
+            "name": prov.get("package") or staged,
+            "versionInfo": prov.get("version") or "NOASSERTION",
+            "supplier": "NOASSERTION",
+            "downloadLocation": "NOASSERTION",
+            "filesAnalyzed": False,
+            "licenseConcluded": "NOASSERTION",
+            "licenseDeclared": "NOASSERTION",
+            "copyrightText": "NOASSERTION",
+            "externalRefs": [{
+                "referenceCategory": "OTHER",
+                "referenceType": "conda-member",
+                "referenceLocator": "%s#%s" % (
+                    prov.get("archive") or "NOASSERTION",
+                    prov.get("member") or "NOASSERTION"),
+            }],
+        })
+        doc["relationships"].append(
+            {"spdxElementId": root_id,
+             "relationshipType": "DEPENDS_ON",
+             "relatedSpdxElement": pkg_id})
+
+    # The bridge every payload links against.
+    bridge_id = spdx_id("Package", "libbpf-mojo",
+                        bridge.get("version") or "unknown")
+    doc["packages"].append({
+        "SPDXID": bridge_id,
+        "name": "libbpf-mojo",
+        "versionInfo": bridge.get("version") or "NOASSERTION",
+        "supplier": "NOASSERTION",
+        "downloadLocation": "NOASSERTION",
+        "filesAnalyzed": False,
+        "licenseConcluded": "NOASSERTION",
+        "licenseDeclared": "NOASSERTION",
+        "copyrightText": "NOASSERTION",
+        "checksums": checksum(
+            bridge.get("tarball_sha256") or "0" * 64),
+        "externalRefs": [{
+            "referenceCategory": "OTHER",
+            "referenceType": "source-commit",
+            "referenceLocator":
+                bridge.get("source_commit") or "NOASSERTION",
+        }],
+    })
+    doc["relationships"].append(
+        {"spdxElementId": root_id,
+         "relationshipType": "DEPENDS_ON",
+         "relatedSpdxElement": bridge_id})
+
+    # Build toolchain pins from the lock.
+    for tool_name, version in (
+            ("mojo", lock_mojo), ("pixi", lock_pixi)):
+        tool_id = spdx_id("Package", "toolchain", tool_name)
+        entry = {
+            "SPDXID": tool_id,
+            "name": tool_name,
+            "versionInfo": version or "NOASSERTION",
+            "supplier": "NOASSERTION",
+            "downloadLocation": "NOASSERTION",
+            "filesAnalyzed": False,
+            "licenseConcluded": "NOASSERTION",
+            "licenseDeclared": "NOASSERTION",
+            "copyrightText": "NOASSERTION",
+        }
+        if tool_name == "mojo":
+            entry["externalRefs"] = [{
+                "referenceCategory": "OTHER",
+                "referenceType": "conda-channel",
+                "referenceLocator":
+                    lock_toolchain.get("mojo", {}).get("channel")
+                    or "NOASSERTION",
+            }]
+        doc["packages"].append(entry)
+        doc["relationships"].append(
+            {"spdxElementId": root_id,
+             "relationshipType": "BUILD_TOOL_OF",
+             "relatedSpdxElement": tool_id})
+    for tool_name in ("clang", "bpftool"):
+        pin = toolchain.get(tool_name) or {}
+        tool_id = spdx_id("Package", "toolchain", tool_name)
+        doc["packages"].append({
+            "SPDXID": tool_id,
+            "name": tool_name,
+            "versionInfo": "floor %s" % (
+                pin.get("minimum_version") or "NOASSERTION"),
+            "supplier": "NOASSERTION",
+            "downloadLocation": "NOASSERTION",
+            "filesAnalyzed": False,
+            "licenseConcluded": "NOASSERTION",
+            "licenseDeclared": "NOASSERTION",
+            "copyrightText": "NOASSERTION",
+        })
+        doc["relationships"].append(
+            {"spdxElementId": root_id,
+             "relationshipType": "BUILD_TOOL_OF",
+             "relatedSpdxElement": tool_id})
+
+    # Host dynamic libraries stay external and unversioned:
+    # the manifest records names only.
+    if system_libs:
+        sys_id = spdx_id("Package", "system-libraries")
+        doc["packages"].append({
+            "SPDXID": sys_id,
+            "name": "system-libraries",
+            "versionInfo": "NOASSERTION",
+            "supplier": "NOASSERTION",
+            "downloadLocation": "NOASSERTION",
+            "filesAnalyzed": False,
+            "licenseConcluded": "NOASSERTION",
+            "licenseDeclared": "NOASSERTION",
+            "copyrightText": "NOASSERTION",
+            "externalRefs": [{
+                "referenceCategory": "OTHER",
+                "referenceType": "soname",
+                "referenceLocator": name,
+            } for name in sorted(system_libs)],
+        })
+        doc["relationships"].append(
+            {"spdxElementId": root_id,
+             "relationshipType": "DEPENDS_ON",
+             "relatedSpdxElement": sys_id})
+
+    # Release containers themselves, hashed as shipped.
+    for kind, path in (("bundle", inputs["bundle"]),
+                       ("deb", inputs["deb"]),
+                       ("rpm", inputs["rpm"])):
+        cont_id = spdx_id("Package", "container", kind)
+        doc["packages"].append({
+            "SPDXID": cont_id,
+            "name": os.path.basename(path),
+            "versionInfo": engine,
+            "supplier": "NOASSERTION",
+            "downloadLocation": "NOASSERTION",
+            "filesAnalyzed": False,
+            "licenseConcluded": "NOASSERTION",
+            "licenseDeclared": "NOASSERTION",
+            "copyrightText": "NOASSERTION",
+            "checksums": checksum(sha256_of(path)),
+        })
+        doc["relationships"].append(
+            {"spdxElementId": cont_id,
+             "relationshipType": "CONTAINS",
+             "relatedSpdxElement": root_id})
+    return doc
+
+
+def main(argv):
+    args = list(argv)
+    opts = {}
+    while args:
+        opt = args.pop(0)
+        if opt not in ("--bundle", "--deb", "--rpm", "--lock",
+                       "--out") or not args:
+            sys.stderr.write("sbom: bad option %s\n" % opt)
+            return 2
+        opts[opt] = args.pop(0)
+    for opt in ("--bundle", "--deb", "--rpm", "--lock", "--out"):
+        if opt not in opts:
+            return fail("missing %s" % opt)
+    for opt in ("--bundle", "--deb", "--rpm", "--lock"):
+        if not os.path.isfile(opts[opt]):
+            return fail("%s is not a file: %r" % (opt, opts[opt]))
+    manifest = manifest_from_bundle(opts["--bundle"])
+    if manifest is None:
+        return 2
+    lock = load_json(opts["--lock"], "lock")
+    if lock is None:
+        return 2
+    payload = collect_payload(opts["--deb"], opts["--rpm"],
+                              opts["--bundle"])
+    if payload is None:
+        return 2
+    doc = build_document(manifest, lock, payload, {
+        "bundle": opts["--bundle"], "deb": opts["--deb"],
+        "rpm": opts["--rpm"]})
+    if doc is None:
+        return 2
+    if doc == "DISAGREE":
+        return 1
+    try:
+        with open(opts["--out"], "w", encoding="utf-8") as handle:
+            json.dump(doc, handle, indent=1, sort_keys=True)
+            handle.write("\n")
+    except OSError as exc:
+        return fail("cannot write %s: %s" % (opts["--out"], exc))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

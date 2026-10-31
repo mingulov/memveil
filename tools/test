@@ -21,7 +21,7 @@
 # perf-region, perf-workload, perf-overhead, soak, preview-package, provenance,
 # source-export,
 # release-runtime, docs, examples, extracted-robustness, deb,
-# rpm-journey.
+# rpm-journey, payload-gate, sbom.
 #
 # A skipped suite is reported as skipped, never as success.
 # Exit 0 only when the suite passes; 1 on test failure; 2 on
@@ -1700,71 +1700,26 @@ suite_rpm_journey() {
     fi
     RPM="${MV_RPM:-}"
     if [ -z "$RPM" ]; then
-        if ! command -v rpmbuild >/dev/null 2>&1; then
-            echo "rpm-journey: BLOCKED: MV_RPM is not set and" \
-                "rpmbuild is not installed (apt install rpm on" \
-                "this host, or preset MV_RPM at a built .rpm)" >&2
-            return 1
-        fi
         if [ -z "${LMB_PACKAGE:-}" ]; then
             echo "rpm-journey: BLOCKED: MV_RPM is not set and" \
                 "LMB_PACKAGE is not set (the spec build needs" \
                 "the pinned bridge tarball)" >&2
             return 1
         fi
-        if [ ! -f "${LMB_PACKAGE:-}" ]; then
-            echo "rpm-journey: LMB_PACKAGE is not a file:" \
-                "$LMB_PACKAGE" >&2
-            return 1
-        fi
-        SPEC="$ROOT/packaging/rpm/memveil.spec"
-        SPEC_VER=$(sed -n 's/^Version: *//p' "$SPEC")
-        SRC1=$(sed -n 's/^Source1: *//p' "$SPEC")
-        if [ -z "$SPEC_VER" ] || [ -z "$SRC1" ]; then
-            echo "rpm-journey: spec has no Version/Source1" >&2
-            return 1
-        fi
         RTMP=$(mktemp -d)
         trap 'rm -rf "$RTMP"' EXIT
-        mkdir -p "$RTMP/SOURCES" "$RTMP/BUILD" "$RTMP/RPMS" \
-            "$RTMP/SRPMS" "$RTMP/BUILDROOT"
-        # Source0 is the tree's own file set (tools/rpm-source0
-        # owns the selection: an owning checkout contributes
-        # exactly its tracked plus unignored-untracked files,
-        # while a plain tree under an unrelated parent
-        # repository never inherits that parent's files).
-        if ! "$ROOT/tools/rpm-source0" --root "$ROOT" \
-            --version "$SPEC_VER" \
-            --out "$RTMP/SOURCES/memveil-$SPEC_VER.tar.gz" \
-            >"$RTMP/rpm-source0.log" 2>&1; then
-            echo "rpm-journey: Source0 tar failed" >&2
-            cat "$RTMP/rpm-source0.log" >&2
+        if ! LMB_PACKAGE="$LMB_PACKAGE" "$ROOT/tools/build-rpm" \
+            --work "$RTMP" --out "$RTMP" \
+            >"$RTMP/build-rpm.log" 2>&1; then
+            echo "rpm-journey: BLOCKED: tools/build-rpm failed" >&2
+            cat "$RTMP/build-rpm.log" >&2
             return 1
         fi
-        cp "$LMB_PACKAGE" "$RTMP/SOURCES/$SRC1" || {
-            echo "rpm-journey: Source1 copy failed" >&2
-            return 1
-        }
-        cp "$SPEC" "$RTMP/" || {
-            echo "rpm-journey: spec copy failed" >&2
-            return 1
-        }
-        # debug_package nil works around Ubuntu rpm, which
-        # runs find-debuginfo despite the spec's
-        # __os_install_post nil; it only gates the -debuginfo
-        # subpackage, never the main payload. --nodeps: apt, not
-        # the (empty or absent) rpm db, provides the BuildRequires.
-        if ! rpmbuild -bb --nodeps --define "_topdir $RTMP" \
-            --define "debug_package %{nil}" "$RTMP/memveil.spec" \
-            >"$RTMP/rpmbuild.log" 2>&1; then
-            echo "rpm-journey: BLOCKED: rpmbuild failed" >&2
-            cat "$RTMP/rpmbuild.log" >&2
-            return 1
-        fi
-        RPM=$(find "$RTMP/RPMS" -name '*.rpm' | head -1)
+        RPM=$(sed -n 's/^build-rpm: \(.*\.rpm\)$/\1/p' \
+            "$RTMP/build-rpm.log" | tail -1)
         if [ -z "$RPM" ] || [ ! -f "$RPM" ]; then
-            echo "rpm-journey: no .rpm built" >&2
-            cat "$RTMP/rpmbuild.log" >&2
+            echo "rpm-journey: no .rpm in build-rpm log" >&2
+            cat "$RTMP/build-rpm.log" >&2
             return 1
         fi
     fi
@@ -1774,6 +1729,136 @@ suite_rpm_journey() {
     fi
     (cd "$ROOT" && MV_RPM="$RPM" MV_REPO="$ROOT" \
         python3 -m pytest -ra tests/package/test_rpm_journey.py)
+}
+
+# Sets RELEASE_BUNDLE/RELEASE_DEB/RELEASE_RPM from the MV_*
+# presets when set, else builds all three release packages
+# from this tree (needs LMB_PACKAGE). $1 is a scratch dir
+# the caller owns. Prints nothing on success.
+ensure_release_packages() {
+    SCRATCH="$1"
+    RELEASE_BUNDLE="${MV_BUNDLE_TARBALL:-}"
+    RELEASE_DEB="${MV_DEB:-}"
+    RELEASE_RPM="${MV_RPM:-}"
+    if [ -n "$RELEASE_BUNDLE" ] && [ -n "$RELEASE_DEB" ] \
+        && [ -n "$RELEASE_RPM" ]; then
+        for preset in "$RELEASE_BUNDLE" "$RELEASE_DEB" \
+            "$RELEASE_RPM"; do
+            if [ ! -f "$preset" ]; then
+                echo "packages: preset is not a file: $preset" >&2
+                return 1
+            fi
+        done
+        return 0
+    fi
+    if [ -z "${LMB_PACKAGE:-}" ]; then
+        echo "packages: BLOCKED: MV_BUNDLE_TARBALL/MV_DEB/MV_RPM" \
+            "are not all set and LMB_PACKAGE is not set" \
+            "(build the candidates first)" >&2
+        return 1
+    fi
+    mkdir -p "$SCRATCH/bundle" "$SCRATCH/deb" "$SCRATCH/rpm"
+    if [ -z "$RELEASE_BUNDLE" ]; then
+        if ! LMB_PACKAGE="$LMB_PACKAGE" "$ROOT/tools/package" \
+            --out "$SCRATCH/bundle" \
+            >"$SCRATCH/bundle/package.log" 2>&1; then
+            echo "packages: tools/package failed" >&2
+            cat "$SCRATCH/bundle/package.log" >&2
+            return 1
+        fi
+        RELEASE_BUNDLE=$(sed -n \
+            's/^package: \(.*\.tar\.gz\)$/\1/p' \
+            "$SCRATCH/bundle/package.log" | tail -1)
+        if [ -z "$RELEASE_BUNDLE" ] \
+            || [ ! -f "$RELEASE_BUNDLE" ]; then
+            echo "packages: no tarball in package log" >&2
+            cat "$SCRATCH/bundle/package.log" >&2
+            return 1
+        fi
+    fi
+    if [ -z "$RELEASE_DEB" ]; then
+        if ! LMB_PACKAGE="$LMB_PACKAGE" "$ROOT/tools/package-deb" \
+            --out "$SCRATCH/deb" \
+            >"$SCRATCH/deb/package-deb.log" 2>&1; then
+            echo "packages: tools/package-deb failed" >&2
+            cat "$SCRATCH/deb/package-deb.log" >&2
+            return 1
+        fi
+        RELEASE_DEB=$(sed -n \
+            's/^package-deb: \(.*\.deb\)$/\1/p' \
+            "$SCRATCH/deb/package-deb.log" | tail -1)
+        if [ -z "$RELEASE_DEB" ] || [ ! -f "$RELEASE_DEB" ]; then
+            echo "packages: no .deb in package-deb log" >&2
+            cat "$SCRATCH/deb/package-deb.log" >&2
+            return 1
+        fi
+    fi
+    if [ -z "$RELEASE_RPM" ]; then
+        if ! LMB_PACKAGE="$LMB_PACKAGE" "$ROOT/tools/build-rpm" \
+            --work "$SCRATCH/rpm" --out "$SCRATCH/rpm" \
+            >"$SCRATCH/rpm/build-rpm.log" 2>&1; then
+            echo "packages: tools/build-rpm failed" >&2
+            cat "$SCRATCH/rpm/build-rpm.log" >&2
+            return 1
+        fi
+        RELEASE_RPM=$(sed -n \
+            's/^build-rpm: \(.*\.rpm\)$/\1/p' \
+            "$SCRATCH/rpm/build-rpm.log" | tail -1)
+        if [ -z "$RELEASE_RPM" ] || [ ! -f "$RELEASE_RPM" ]; then
+            echo "packages: no .rpm in build-rpm log" >&2
+            cat "$SCRATCH/rpm/build-rpm.log" >&2
+            return 1
+        fi
+    fi
+    return 0
+}
+
+suite_payload_gate() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "payload-gate: python3 not found" >&2
+        return 1
+    fi
+    if ! python3 -m pytest --version >/dev/null 2>&1; then
+        echo "payload-gate: pytest not importable" >&2
+        return 1
+    fi
+    for tool in dpkg-deb rpm2cpio cpio; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            echo "payload-gate: $tool not found" >&2
+            return 1
+        fi
+    done
+    PTMP=$(mktemp -d)
+    trap 'rm -rf "$PTMP"' EXIT
+    ensure_release_packages "$PTMP" || return 1
+    (cd "$ROOT" && MV_BUNDLE_TARBALL="$RELEASE_BUNDLE" \
+        MV_DEB="$RELEASE_DEB" MV_RPM="$RELEASE_RPM" \
+        MV_REPO="$ROOT" \
+        python3 -m pytest -ra tests/package/test_payload_gate.py)
+}
+
+suite_sbom() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "sbom: python3 not found" >&2
+        return 1
+    fi
+    if ! python3 -m pytest --version >/dev/null 2>&1; then
+        echo "sbom: pytest not importable" >&2
+        return 1
+    fi
+    for tool in dpkg-deb rpm2cpio cpio; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            echo "sbom: $tool not found" >&2
+            return 1
+        fi
+    done
+    PTMP=$(mktemp -d)
+    trap 'rm -rf "$PTMP"' EXIT
+    ensure_release_packages "$PTMP" || return 1
+    (cd "$ROOT" && MV_BUNDLE_TARBALL="$RELEASE_BUNDLE" \
+        MV_DEB="$RELEASE_DEB" MV_RPM="$RELEASE_RPM" \
+        MV_REPO="$ROOT" \
+        python3 -m pytest -ra tests/package/test_sbom.py)
 }
 
 suite_native_decode() {
@@ -4317,6 +4402,12 @@ case "$1" in
         ;;
     rpm-journey)
         suite_rpm_journey
+        ;;
+    payload-gate)
+        suite_payload_gate
+        ;;
+    sbom)
+        suite_sbom
         ;;
     docs)
         suite_docs

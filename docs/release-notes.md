@@ -56,16 +56,27 @@ only the `.deb` binary was run on the kernel matrix.
 
 ## Evidence scope
 
-Tested binary sha256
-`ae2d3c13ddad4c093317b90b0e2975cc388ff8566ae8bd4d0c13b7e9ecb2ae5e`:
-`/usr/bin/memveil` in the `.deb`. The kernel matrix and the AWS SEV-SNP
-run installed that package, and the release workflow refuses to publish
-a `.deb` carrying any other binary. The runtime tarball and the `.rpm`
-are built from the same tree and pass their own install lanes, but
-their binaries are linked separately (other hashes) and were not run on
-the kernel matrix. Package hashes change with every build (the `.deb`
-changelog records the commit and build date); the release lists them in
-`SHA256SUMS.txt`.
+The release payload is pinned per package in
+`packaging/tested-payload.sha256`: the engine binary, the
+libbpf-mojo bridge, and the three BPF objects of the
+`.deb`, the `.rpm`, and the runtime tarball. The release
+workflow refuses to publish unless every package carries
+exactly its pinned bytes, and publishes the collected
+manifest (`PACKAGED-SHA256.txt`), the SBOM
+(`memveil.spdx.json`), and the checksums (`SHA256SUMS.txt`)
+with signed build provenance for the set.
+
+The `.deb` entry set is the kernel-matrix-tested one. The
+matrix and the AWS SEV-SNP run installed the 0.1.0 `.deb`
+whose `/usr/bin/memveil` is sha256
+`ae2d3c13ddad4c093317b90b0e2975cc388ff8566ae8bd4d0c13b7e9ecb2ae5e`.
+The `.rpm` and the runtime tarball are built from the same
+tree and pass their own install lanes, but each install
+layout needs its own RUNPATH, so their binaries carry
+different hashes and were not run on the kernel matrix.
+Package hashes change with every build (the `.deb`
+changelog records the commit and build date); the release
+lists them in `SHA256SUMS.txt`.
 Earlier development receipts and CI successes apply to their recorded
 revisions, binaries, BPF objects and environments. They are historical
 evidence, not a final re-gate of every later candidate. Laboratory lifecycle,
