@@ -63,10 +63,11 @@ and plain `sudo` works:
     sudo ./bin/memveil record --output /tmp/cap1 --duration 10
 
 Expected: `ready session=...`, then `end=duration
-outcome=finalized exit=4`.
-Exit 4 indicates finalized output with incomplete terminal evidence,
-including zero-event and signal stops. Exit 3 names the refusal reason (profile, bridge,
-privilege); exit 2 is a usage error; exit 1 is an error.
+outcome=finalized exit=0`.
+Normal exit 0 includes finalized output with partial terminal evidence,
+including zero-event and signal stops; inspect the recorded verdict. With
+`--strict`, partial evidence returns 4. Exit 3 names the refusal reason
+(profile, bridge, privilege); exit 2 is a usage error; exit 1 is an error.
 When no object is found anywhere, the refusal is `no
 object: pass --object PATH`. `--object` and `--bridge`
 are optional overrides for non-bundled artifacts;

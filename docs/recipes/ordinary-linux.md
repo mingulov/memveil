@@ -404,8 +404,8 @@ worked example's README records the full agreement table.
 
 ## Expected results
 
-- Exit 4 with a profile decision naming the shipped
-  reference profile.
+- Normal exit 0 with a partial verdict and a profile decision naming the
+  shipped reference profile; `--strict` returns 4 for that verdict.
 - Detail and aggregate quality `complete_for_scope` with
   loss 0; terminal `partial`; correlation `partial`
   wherever copies or syncs lack mapping identity (their
