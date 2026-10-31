@@ -182,6 +182,7 @@ chmod 0755 "%{buildroot}/usr/bin/memveil"
 /usr/share/man/man1/memveil-top.1
 /usr/share/man/man1/memveil-doctor.1
 /usr/share/man/man1/memveil-qualify.1
+/usr/share/man/man1/memveil-bind-profile.1
 /usr/share/bash-completion/completions/memveil
 /usr/share/zsh/vendor-completions/_memveil
 %dir /var/lib/memveil
