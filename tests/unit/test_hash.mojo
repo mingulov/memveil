@@ -5,7 +5,7 @@
 from std.sys import exit
 from std.testing import TestSuite, assert_equal
 
-from memveil.platform.hash import sha256_hex
+from memveil.platform.hash import Sha256, sha256_hex
 
 
 def _bytes(text: String) -> List[UInt8]:
@@ -81,8 +81,33 @@ def test_million_a() raises:
     )
 
 
+def test_incremental_snapshots() raises:
+    var state = Sha256()
+    assert_equal(state.copy_finish(), sha256_hex(Span(List[UInt8]())))
+    var all_bytes = List[UInt8]()
+    var expected = [
+        String("29af2686fd53374a36b0846694cc342177e428d1647515f078784d69cdb9e488"),
+        String("85c3bb135868f1433c5ec5f878d8b697acd27f3ed0c9f79af206ea416bca0d38"),
+        String("9ee5f9064bf5ad41d0c1daea1b5218cff51e99e29b6052e36089ac4b9fee10ad"),
+        String("a5ca14441f7f93913610bec51b63dc7f3c215ce8c7b23f8eb8761047ebfa6f4f"),
+        String("9114e2764fd7046bf8673bbdb07260abf1e6682dbdbeb19905edb0dd1148fbee")
+    ]
+    var step = 0
+    for size in [63, 64, 65, 1, 127]:
+        var chunk = List[UInt8]()
+        for i in range(size):
+            chunk.append(UInt8(i % 251))
+            all_bytes.append(UInt8(i % 251))
+        state.update(Span(chunk))
+        assert_equal(state.copy_finish(), expected[step])
+        step += 1
+        assert_equal(state.copy_finish(), sha256_hex(Span(all_bytes)))
+        assert_equal(state.copy_finish(), sha256_hex(Span(all_bytes)))
+
+
 def run() raises -> Int:
     var suite = TestSuite()
+    suite.test[test_incremental_snapshots]()
     suite.test[test_empty]()
     suite.test[test_abc]()
     suite.test[test_56_bytes]()

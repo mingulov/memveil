@@ -1,20 +1,24 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Capture integrity and recovery
 
-This is a **planned contract, not implemented behavior**. Current writers
-emit session 0.1.3 and event 0.1.2; current reports emit 0.1.3. They do not
-seal event bytes, publish recovery checkpoints, or reserve finalization
-space. Edited or truncated legacy captures can still look complete, and a
-missing final `session.json` is unreadable even with `--allow-partial`.
-See the [current release limitations](release-notes.md#known-issues).
+Committed-byte writing is implemented: new captures emit session 0.1.4
+with literal event-byte SHA-256, contiguous sequences, and exact kind counts.
+The session parser validates this metadata structurally. File verification
+and report 0.1.4 are not yet implemented; offline readers refuse new 0.1.4
+captures with `capture integrity verification unavailable`. This intermediate
+state is not a usable release candidate.
 
-Session/report 0.1.4 are reserved for this contract; event 0.1.2 is unchanged.
+Checkpoint recovery and finalization reserves remain planned. Legacy session
+0.1.1/0.1.2/0.1.3 inputs remain readable, with their existing limitations.
+Edited or truncated legacy captures can still look complete. Event 0.1.2 is
+unchanged. See the [current release limitations](release-notes.md#known-issues).
+
 The later session/event/report 0.2.0 journal must preserve these guarantees.
 Legacy session 0.1.1/0.1.2/0.1.3 and event 0.1.1/0.1.2 remain accepted, without
 inventing integrity evidence. Versions are independent of the product,
 BPF wire and bridge ABI; see [format compatibility](format-compatibility.md).
 
-## Committed-byte record (planned)
+## Committed-byte record
 
 Session 0.1.4 requires `capture.integrity` with:
 

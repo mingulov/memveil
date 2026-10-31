@@ -471,6 +471,53 @@ def test_generation_sweep() raises:
         assert_equal(encode_session(bs), text)
 
 
+def test_integrity_session_roundtrip_boundaries() raises:
+    var s = _base_session()
+    s.has_integrity = True
+    var empty = encode_session(s)
+    assert_true(empty.find('"schema_version":"0.1.4"') != -1)
+    var back = parse_session(_bytes(empty))
+    assert_true(back.has_integrity)
+    assert_true(not back.integrity.has_seq)
+    assert_equal(encode_session(back), empty)
+    for size in [UInt64(9007199254740993), UInt64(18446744073709551615)]:
+        s.integrity.events_bytes = size
+        s.integrity.line_count = size
+        s.integrity.has_seq = True
+        s.integrity.last_seq = size - UInt64(1)
+        s.integrity.kinds[0] = size
+        s.integrity.events_sha256 = String("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        var encoded = encode_session(s)
+        var parsed = parse_session(_bytes(encoded))
+        assert_equal(parsed.integrity.events_bytes, size)
+        assert_equal(parsed.integrity.line_count, size)
+        assert_equal(parsed.integrity.kinds[0], size)
+        assert_equal(encode_session(parsed), encoded)
+
+
+def test_integrity_session_rejects_bad_metadata() raises:
+    var s = _base_session()
+    s.has_integrity = True
+    var text = encode_session(s)
+    var corruptions = [
+        text.replace('"algorithm":"sha256"', '"algorithm":"sha512"'),
+        text.replace('"line_count":"0"', '"line_count":"00"'),
+        text.replace('"events_bytes":"0"', '"events_bytes":"18446744073709551616"'),
+        text.replace('"first_seq":null', '"first_seq":"0"'),
+        text.replace('"marker":"0",', ''),
+        text.replace('"marker":"0"', '"marker":"1"'),
+        text.replace('"marker":"0"', '"marker":"0","marker":"0"'),
+        text.replace('"schema_version":"0.1.4"', '"schema_version":"0.1.3"'),
+    ]
+    for encoded in corruptions:
+        var rejected = False
+        try:
+            _ = parse_session(_bytes(encoded))
+        except:
+            rejected = True
+        assert_true(rejected)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_quote_ascii]()
@@ -487,6 +534,8 @@ def run() raises -> Int:
     suite.test[test_transition_exact]()
     suite.test[test_generation_sweep]()
     suite.test[test_unknown_kind]()
+    suite.test[test_integrity_session_roundtrip_boundaries]()
+    suite.test[test_integrity_session_rejects_bad_metadata]()
     suite.test[test_session_roundtrip]()
     suite.test[test_session_capability_grade_roundtrip]()
     suite.test[test_session_capability_grade_bad_enum]()

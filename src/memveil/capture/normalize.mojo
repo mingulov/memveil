@@ -14,6 +14,7 @@ and both decoders together.
 """
 
 from memveil.model.validate import format_u64
+from memveil.platform.hash import bytes_to_hex
 from memveil.platform.reader import is_valid_utf8
 
 
@@ -138,17 +139,6 @@ def decode_payload(raw: List[UInt8]) raises DecodeError -> DecodedAttempt:
         flags & UInt16(_FLAG_FORCE) != UInt16(0),
         name^,
     )
-    return out^
-
-
-def bytes_to_hex(data: List[UInt8]) -> String:
-    """Render bytes as lowercase hex with no separator."""
-    var digits = String("0123456789abcdef")
-    var out = String("")
-    for i in range(len(data)):
-        var b = Int(data[i])
-        out += String(digits[byte=b >> 4])
-        out += String(digits[byte=b & 0xF])
     return out^
 
 

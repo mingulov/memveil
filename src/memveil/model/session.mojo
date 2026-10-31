@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Typed capture session: session.json, formats 0.1.1 to 0.1.3.
+"""Typed capture session: session.json, formats 0.1.1 to 0.1.4.
 
 The parser validates the whole document against the frozen session
 schemas: required fields, version membership, enum membership, string
@@ -9,12 +9,14 @@ lengths, array item caps, and no unknown or duplicated keys. Format
 documents carrying relations are refused. Format 0.1.3 adds the
 optional record verdict object plus the optional drain_completed
 and submit_after_drain stop keys; older documents carrying any of
-them are refused. The observation window must satisfy start <= end;
+them are refused. Format 0.1.4 requires committed-byte integrity metadata;
+structural parsing does not verify the event file. The observation window must satisfy start <= end;
 an empty window is valid and simply matches no event. Device IDs
 must be unique within the catalog.
 """
 
 from memveil.jsonscan import Scanner
+from memveil.model.integrity import Integrity, parse_integrity
 from memveil.model.common import (
     MaybeString,
     array_is_empty,
@@ -42,6 +44,7 @@ comptime MAX_DEVICES = 4096
 comptime MAX_REGION_OBSERVATIONS = 4096
 comptime MAX_HOOKS = 32
 comptime MAX_EVIDENCE_REFS = 32
+comptime SESSION_SCHEMA_VERSION_INTEGRITY = "0.1.4"
 comptime SESSION_SCHEMA_VERSION = "0.1.3"
 comptime SESSION_SCHEMA_VERSION_PREV = "0.1.2"
 comptime SESSION_SCHEMA_VERSION_PREV2 = "0.1.1"
@@ -1135,7 +1138,7 @@ def _parse_environment(mut scan: Scanner, mut out: Session) raises:
         raise ValidationError("environment", "missing field")
 
 
-struct _Capture(ImplicitlyCopyable):
+struct _Capture(Copyable):
     var mode: String
     var window_start_ns: UInt64
     var window_end_ns: UInt64
@@ -1144,6 +1147,8 @@ struct _Capture(ImplicitlyCopyable):
     var has_filter_device: Bool
     var filter_device: String
     var finalized: Bool
+    var has_integrity: Bool
+    var integrity: Integrity
     var has_end_reason: Bool
     var end_reason: String
 
@@ -1156,6 +1161,8 @@ struct _Capture(ImplicitlyCopyable):
         self.has_filter_device = False
         self.filter_device = String("")
         self.finalized = False
+        self.has_integrity = False
+        self.integrity = Integrity()
         self.has_end_reason = False
         self.end_reason = String("")
 
@@ -1270,6 +1277,11 @@ def _parse_capture(mut scan: Scanner) raises -> _Capture:
                 scan.skip_ws()
                 out.finalized = scan.parse_bool()
                 has_finalized = True
+            elif key == "integrity":
+                if out.has_integrity:
+                    raise ValidationError("capture.integrity", "duplicate")
+                out.integrity = parse_integrity(scan)
+                out.has_integrity = True
             elif key == "end_reason":
                 if has_reason:
                     raise ValidationError("capture.end_reason", "duplicate")
@@ -1423,6 +1435,8 @@ struct Session(Copyable):
     var has_filter_device: Bool
     var filter_device: String
     var finalized: Bool
+    var has_integrity: Bool
+    var integrity: Integrity
     var has_end_reason: Bool
     var end_reason: String
     var devices: List[DeviceEntry]
@@ -1476,6 +1490,8 @@ struct Session(Copyable):
         self.has_filter_device = False
         self.filter_device = String("")
         self.finalized = False
+        self.has_integrity = False
+        self.integrity = Integrity()
         self.has_end_reason = False
         self.end_reason = String("")
         self.devices = List[DeviceEntry]()
@@ -1529,6 +1545,8 @@ struct Session(Copyable):
         self.has_filter_device = existing.has_filter_device
         self.filter_device = existing.filter_device
         self.finalized = existing.finalized
+        self.has_integrity = existing.has_integrity
+        self.integrity = existing.integrity.copy()
         self.has_end_reason = existing.has_end_reason
         self.end_reason = existing.end_reason
         self.devices = existing.devices.copy()
@@ -1948,7 +1966,8 @@ def parse_session(data: List[UInt8]) raises -> Session:
                     raise ValidationError("schema_version", "duplicate")
                 var v = scan.parse_string()
                 if (
-                    v != SESSION_SCHEMA_VERSION
+                    v != SESSION_SCHEMA_VERSION_INTEGRITY
+                    and v != SESSION_SCHEMA_VERSION
                     and v != SESSION_SCHEMA_VERSION_PREV
                     and v != SESSION_SCHEMA_VERSION_PREV2
                 ):
@@ -2004,6 +2023,8 @@ def parse_session(data: List[UInt8]) raises -> Session:
                 out.has_filter_device = c.has_filter_device
                 out.filter_device = c.filter_device
                 out.finalized = c.finalized
+                out.has_integrity = c.has_integrity
+                out.integrity = c.integrity.copy()
                 out.has_end_reason = c.has_end_reason
                 out.end_reason = c.end_reason
                 has_capture = True
@@ -2067,7 +2088,9 @@ def parse_session(data: List[UInt8]) raises -> Session:
                 "quality.correlation.relations",
                 "relations need schema 0.1.2",
             )
-    if out_version != SESSION_SCHEMA_VERSION:
+    if (out_version == SESSION_SCHEMA_VERSION_INTEGRITY) != out.has_integrity:
+        raise ValidationError("capture.integrity", "required only by schema 0.1.4")
+    if out_version != SESSION_SCHEMA_VERSION and out_version != SESSION_SCHEMA_VERSION_INTEGRITY:
         if out.has_verdict:
             raise ValidationError(
                 "verdict",
