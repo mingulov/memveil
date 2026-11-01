@@ -129,7 +129,7 @@ confidential-platform support follows from this source update.
 
 The source distribution includes the matching first-party source,
 exact pinned libbpf source, upstream notices, build receipt and source
-map. See [vendored dependency inputs](../third_party/README.md) for
+map. See `third_party/README.md` in the source distribution for
 hashes, rebuild instructions and runtime-source/license limits.
 
 ## Source sealing
