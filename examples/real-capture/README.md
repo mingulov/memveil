@@ -47,3 +47,9 @@ Text and Markdown show captured `kernel.release`, `profile.decision`,
 The validated decision belongs to the recorded evidence; full binding hashes
 remain in `session.json` and JSON reports. `top` replays this finished capture,
 showing a duration for each prefix; no live summary mode is supplied.
+
+Current readers retain these original legacy capture bytes and arithmetic.
+Integrity is `legacy_unverified`; formerly complete quality and metric coverage
+are now `partial`, with the original loss counts retained. Normal report exit
+is 0 and strict exit is 4. Historical output in this example describes its original
+producer and does not imply current file integrity verification.

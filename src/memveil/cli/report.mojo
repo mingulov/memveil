@@ -27,7 +27,7 @@ from memveil.capture.reader import (
 )
 from memveil.cli.durations import parse_duration_ns
 from memveil.model.event import Event
-from memveil.model.report import Report
+from memveil.model.report import Report, apply_integrity
 from memveil.platform.stdout import write_stdout
 from memveil.render.render import render
 from memveil.render.text import escape_text
@@ -465,6 +465,7 @@ def run_report(args: List[String]) raises -> Int:
     var rep: Report
     try:
         rep = analyzer.finish(reader.session.window_end_ns, reader.partial)
+        apply_integrity(rep, reader.integrity_verified, reader.session.integrity.events_bytes, reader.session.integrity.line_count)
     except e:
         return _report_failed("memveil report: ", String(e))
     diagnose_report(

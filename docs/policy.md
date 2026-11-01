@@ -13,8 +13,8 @@ are named without the `v` prefix until they are tagged.
 Each schema family versions independently; the frozen
 set in [format compatibility](format-compatibility.md)
 is the only supported input (events 0.1.1/0.1.2,
-profiles 0.1.1/0.1.2, session 0.1.1/0.1.2/0.1.3,
-report output-only 0.1.3, doctor output-only 0.1.1 (0.1.0 retained),
+profiles 0.1.1/0.1.2, session 0.1.1/0.1.2/0.1.3/0.1.4,
+report output-only 0.1.4, doctor output-only 0.1.1 (0.1.0 retained),
 receipt 0.1.0). A shipped version stays accepted
 until a later release removes it; removal is
 announced in the release notes one minor version
@@ -22,8 +22,8 @@ ahead and never lands silently. The reader never
 drops a version without that notice, and unknown
 versions keep refusing with exit 2.
 
-Session/report 0.1.4 are reserved for integrity with event 0.1.2 unchanged;
-session/event/report 0.2.0 are reserved for the conversion journal. They are
+Session/report 0.1.4 implement integrity with event 0.1.2 unchanged;
+session/event/report 0.2.0 are reserved for the conversion journal. Journal versions are
 not implemented, accepted inputs or produced outputs yet. See the planned
 [integrity/recovery contract](capture-integrity.md) for the normal/strict
 exit table and legacy quality demotion. No schema number may be reused.

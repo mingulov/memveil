@@ -71,7 +71,7 @@ from memveil.cli.report import (
     write_stderr_trusted,
 )
 from memveil.model.event import Event
-from memveil.model.report import ENGINE_VERSION, Report
+from memveil.model.report import ENGINE_VERSION, Report, apply_integrity
 from memveil.model.session import Session
 from memveil.model.validate import format_u64
 from memveil.platform.stdout import write_stdout
@@ -520,6 +520,8 @@ def _snapshot_block(
     filter warns once per run.
     """
     var rep = analyzer.snapshot(horizon_ns, False)
+    apply_integrity(rep, False, UInt64(0), UInt64(0))
+    rep.integrity_context = String("replay prefix")
     var line = watch.warn_for(rep)
     if line != String(""):
         try:
@@ -563,6 +565,8 @@ struct StdoutSink(RefreshSink):
         self._seq = 0
 
     def emit(mut self, var rep: Report, horizon_ns: UInt64) -> Bool:
+        apply_integrity(rep, False, UInt64(0), UInt64(0))
+        rep.integrity_context = String("live stream")
         self._seq += 1
         var line = self._watch.warn_for(rep)
         if line != String(""):
@@ -958,6 +962,7 @@ def _drain(
     var rep: Report
     try:
         rep = analyzer.finish(reader.session.window_end_ns, False)
+        apply_integrity(rep, reader.integrity_verified, reader.session.integrity.events_bytes, reader.session.integrity.line_count)
     except e:
         return _top_failed("memveil top: ", String(e))
     var line = watch.warn_for(rep)
@@ -1034,6 +1039,7 @@ def _finish_after_signal(
     var rep: Report
     try:
         rep = analyzer.finish(reader.session.window_end_ns, False)
+        apply_integrity(rep, reader.integrity_verified, reader.session.integrity.events_bytes, reader.session.integrity.line_count)
     except e:
         return _top_failed("memveil top: ", String(e))
     var line = watch.warn_for(rep)

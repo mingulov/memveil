@@ -38,6 +38,8 @@ def main():
               % BIN)
         sys.exit(1)
 
+    subprocess.run([sys.executable, os.path.join(TESTS, "cli", "test_capture_integrity.py")], check=True)
+
     p = run(["report", os.path.join(READER, "compat-major")])
     check("major-exit", p.returncode == 2, "exit %d" % p.returncode)
     check("major-stdout", p.stdout == "")

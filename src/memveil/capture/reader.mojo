@@ -15,7 +15,7 @@ Lines parse lazily in order; every event must match the session ID,
 carry a strictly increasing sequence number, and land inside the
 half-open session window.
 
-Only an explicit allow_partial recovers a truncated tail, and only
+Legacy input alone permits allow_partial to recover a truncated tail, and only
 for the final record when the file lacks a trailing newline: a tail
 that is a clean truncation (the classifier says incomplete) is
 dropped, reported via partial, and never silently repaired. A final
@@ -26,6 +26,9 @@ terminated final line that fails to parse.
 
 A bare carriage return before a newline is tolerated because it is
 JSON whitespace; anything else strict fails.
+
+Integrity-bearing streams bind literal bytes, counts, kinds and contiguous
+sequences before integrity_verified becomes true at checked EOF.
 
 The open FILE* closes when the stream exhausts, when the tail is
 recovered, or when the reader is destroyed, so every path - including
@@ -39,6 +42,8 @@ from memveil.jsonscan import TAIL_INCOMPLETE, classify_tail
 from memveil.model.event import Event, parse_event, partial_record_definitive
 from memveil.model.session import Session, parse_session
 from memveil.model.validate import checked_add
+from memveil.model.integrity import Integrity, INTEGRITY_KIND_COUNT, integrity_kind, integrity_kind_index
+from memveil.platform.hash import Sha256
 
 comptime READ_IO = UInt32(1)
 comptime READ_TOO_BIG = UInt32(2)
@@ -99,6 +104,9 @@ struct CaptureReader:
 
     var session: Session
     var partial: Bool
+    var integrity_verified: Bool
+    var _integrity: Integrity
+    var _hash: Sha256
     var _fp: UInt64
     var _chunk: List[UInt8]
     var _pos: Int
@@ -131,6 +139,9 @@ struct CaptureReader:
     def __init__(out self):
         self.session = Session()
         self.partial = False
+        self.integrity_verified = False
+        self._integrity = Integrity()
+        self._hash = Sha256()
         self._fp = UInt64(0)
         self._chunk = List[UInt8]()
         self._pos = 0
@@ -205,6 +216,12 @@ struct CaptureReader:
                 + String(lineno)
                 + ": final record lacks trailing newline",
             )
+        if self.session.has_integrity:
+            if ev.seq != self._integrity.line_count:
+                raise ReadError(READ_INVALID, lineno, "capture integrity: sequence mismatch")
+            var kind = integrity_kind_index(ev.kind)
+            self._integrity.kinds[kind] += UInt64(1)
+            self._integrity.line_count += UInt64(1)
         self._prev_seq = ev.seq
         self._has_prev = True
         self._pending = List[UInt8]()
@@ -219,6 +236,8 @@ struct CaptureReader:
         modes.
         """
         var lineno = self._lineno
+        if self.session.has_integrity:
+            raise ReadError(READ_INVALID, lineno, "capture integrity: missing trailing newline")
         var verdict = classify_tail(self._pending)
         var probe: Event
         try:
@@ -319,6 +338,8 @@ struct CaptureReader:
             return
         self._pos = 0
         self._end = Int(got)
+        if self.session.has_integrity:
+            self._hash.update(Span(self._chunk)[:Int(got)])
 
     def _close_now(mut self):
         """Close the stream exactly once; safe to repeat."""
@@ -522,7 +543,7 @@ struct CaptureReader:
             "unavailable"
         )
 
-    def _finish_checks(self) raises ReadError:
+    def _finish_checks(mut self) raises ReadError:
         """Resolve deferred copy/sync mapping references at end.
 
         References the session's correlation evidence declares
@@ -536,6 +557,17 @@ struct CaptureReader:
         while the session claims complete correlation
         contradicts the capture and refuses.
         """
+        if self.session.has_integrity:
+            var expected = self.session.integrity.copy()
+            if UInt64(self._total) != expected.events_bytes:
+                raise ReadError(READ_INVALID, 0, "capture integrity: events_bytes mismatch")
+            if self._integrity.line_count != expected.line_count:
+                raise ReadError(READ_INVALID, 0, "capture integrity: line_count mismatch")
+            for i in range(INTEGRITY_KIND_COUNT):
+                if self._integrity.kinds[i] != expected.kinds[i]:
+                    raise ReadError(READ_INVALID, 0, "capture integrity: kind count mismatch: " + integrity_kind(i))
+            if self._hash.copy_finish() != expected.events_sha256:
+                raise ReadError(READ_INVALID, 0, "capture integrity: events_sha256 mismatch")
         var copy_ok = self._class_expected(
             self.session.q_corr_copy.status
         )
@@ -562,6 +594,8 @@ struct CaptureReader:
                     lineno,
                     "line " + String(lineno) + ": unknown mapping",
                 )
+
+        self.integrity_verified = self.session.has_integrity
 
 
 def _read_bounded(
@@ -614,8 +648,8 @@ def read_capture(
         session = parse_session(session_bytes^)
     except e:
         raise ReadError(READ_PARSE, 0, "session.json: " + String(e))
-    if session.has_integrity:
-        raise ReadError(READ_INVALID, 0, "capture integrity verification unavailable")
+    if session.has_integrity and not session.finalized:
+        raise ReadError(READ_INVALID, 0, "unfinalized session requires checkpoint recovery")
     var out = CaptureReader()
     out.session = session^
     out._allow_partial = allow_partial

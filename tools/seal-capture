@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Create a new synthetic integrity fixture without changing its legacy source."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import stat
+
+ROOT = Path(__file__).resolve().parents[1]
+KINDS = ('bounce_attempt', 'map_result', 'unmap', 'copy', 'sync_request',
+         'transition_result', 'pool_sample', 'gap', 'marker', 'counter_snapshot')
+
+
+def regular(path, limit=1073741824):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            raise ValueError('source must be a bounded regular file without symlinks')
+        data = stream.read(limit + 1)
+        if len(data) > limit:
+            raise ValueError('source too large')
+        return data
+
+
+def seal(source, target):
+    source, target = Path(os.path.abspath(source)), Path(os.path.abspath(target))
+    for path in (source, target.parent):
+        if path.resolve() != path:
+            raise ValueError('symlink path refused')
+    if target.parent != ROOT / 'tests/fixtures/reader' or not target.name.startswith('sealed-'):
+        raise ValueError('target must be a new tests/fixtures/reader/sealed-* directory')
+    original = regular(source / 'session.json', 16777216)
+    events = regular(source / 'events.ndjson')
+    session = json.loads(original)
+    if session.get('synthetic') is not True or not session['capture']['finalized']:
+        raise ValueError('only finalized synthetic fixtures can be sealed')
+    if 'integrity' in session['capture']:
+        raise ValueError('already sealed source refused')
+    if events and not events.endswith(b'\n'):
+        raise ValueError('event stream must end with newline')
+    counts = dict.fromkeys(KINDS, 0)
+    lines = events.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        if len(line) > 65536:
+            raise ValueError('event line too large')
+        event = json.loads(line)
+        if event['session_id'] != session['session_id']:
+            raise ValueError('session identity mismatch')
+        event['seq'] = str(index)
+        lines[index] = (json.dumps(event) + '\n').encode()
+        counts[event['kind']] += 1
+    events = b''.join(lines)
+    session['schema_version'] = '0.1.4'
+    session['capture']['integrity'] = {
+        'algorithm': 'sha256', 'events_bytes': str(len(events)),
+        'line_count': str(len(lines)), 'first_seq': '0' if lines else None,
+        'last_seq': str(len(lines) - 1) if lines else None,
+        'events_sha256': hashlib.sha256(events).hexdigest(),
+        'kinds': {kind: str(count) for kind, count in counts.items()}}
+    encoded = (json.dumps(session, indent=2) + '\n').encode()
+    if len(encoded) > 16777216:
+        raise ValueError('session too large')
+    provenance = {
+        'synthetic': True, 'method': 'Contiguous zero-based fixture sequences; Python hashlib SHA-256 over literal emitted bytes',
+        'source_session_sha256': hashlib.sha256(original).hexdigest(),
+        'source_events_sha256': hashlib.sha256(regular(source / 'events.ndjson')).hexdigest(),
+        'sealed_events_sha256': hashlib.sha256(events).hexdigest(),
+        'sealed_session_sha256': hashlib.sha256(encoded).hexdigest(),
+        'tool_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+    target.mkdir(mode=0o700)
+    directory = os.open(target, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        identity = os.fstat(directory)
+        for name, data in [('events.ndjson', events), ('session.json', encoded),
+                           ('provenance.json', (json.dumps(provenance, indent=2) + '\n').encode())]:
+            entry = target.lstat()
+            if (entry.st_dev, entry.st_ino) != (identity.st_dev, identity.st_ino):
+                raise ValueError('target directory identity changed')
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o600, dir_fd=directory)
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(data)
+    finally:
+        os.close(directory)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('source')
+    parser.add_argument('target')
+    args = parser.parse_args()
+    try:
+        seal(args.source, args.target)
+    except (OSError, ValueError, KeyError) as error:
+        parser.exit(2, f'seal-capture: {error}\n')
+
+
+if __name__ == '__main__':
+    main()

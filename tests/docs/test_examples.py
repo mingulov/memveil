@@ -58,7 +58,7 @@ def check_three_channel():
                 "copy_original_to_bounce_bytes = 35002",
                 "copy_bounce_to_original_bytes = 24784",
                 "completed_lifetime_count = 208",
-                "detail: complete_for_scope loss=0",
+                "detail: partial loss=0",
                 "terminal: partial",
                 "correlation: partial"):
         check("3ch-text-%s" % row.split(" ")[0].replace(":", ""),
@@ -121,7 +121,7 @@ def main():
           "exit %d: %s" % (proc.returncode, proc.stderr.strip()))
     check("text-count", "bounce_attempts = 30" in proc.stdout)
     check("text-detail-loss",
-          "detail: complete_for_scope loss=0" in proc.stdout)
+          "detail: partial loss=0" in proc.stdout)
     for row in ("successful_allocations = unavailable",
                 "copy_original_to_bounce_bytes = unavailable",
                 "conversion_request_bytes = unavailable",

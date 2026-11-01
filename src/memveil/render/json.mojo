@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""JSON report renderer: schema-valid report v0.1.1 output.
+"""JSON report renderer: report v0.1.4 output.
 
 Every string passes through escape_json, which emits the quoted JSON
 literal with short escapes for quote, backslash, and common controls
@@ -16,7 +16,7 @@ from memveil.model.session import Channel
 from memveil.model.validate import format_u64
 from memveil.render.filter import resolve_device_filter
 
-comptime REPORT_SCHEMA_VERSION = "0.1.3"
+comptime REPORT_SCHEMA_VERSION = "0.1.4"
 
 
 def _hex_nibble(v: Int) -> UInt8:
@@ -135,10 +135,13 @@ def _correlation_json(rep: Report, level: Int) raises -> String:
 
 
 def render_json(rep: Report, device_filter: String = "") raises -> String:
-    """Render the report as pretty JSON per report-v0.1.3.schema.json."""
+    """Render the report as pretty JSON per report-v0.1.4.schema.json."""
     var filt = resolve_device_filter(rep.devices, device_filter)
     var out = String("{\n")
     out += '  "schema_version": "' + REPORT_SCHEMA_VERSION + '",\n'
+    out += '  "integrity": {"status": ' + escape_json(rep.integrity_status)
+    out += ', "verified_bytes": "' + format_u64(rep.verified_bytes)
+    out += '", "verified_events": "' + format_u64(rep.verified_events) + '"},\n'
     out += "  \"session_id\": " + escape_json(rep.session_id) + ",\n"
     if rep.synthetic:
         out += "  \"synthetic\": true,\n"

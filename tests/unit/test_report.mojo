@@ -26,7 +26,7 @@ from memveil.cli.report import (
 )
 from memveil.jsonscan import Scanner
 from memveil.model.metric import Metric
-from memveil.model.report import Report, ReportCap
+from memveil.model.report import Report, ReportCap, apply_integrity
 from memveil.model.session import DeviceEntry
 from memveil.platform.reader import bytes_to_text, read_host_file
 from memveil.render.render import RenderError, render
@@ -45,7 +45,9 @@ def analyze(dir: String) raises -> Report:
     var a = AttemptAnalyzer(r.session)
     while r.has_more():
         a.consume(r.next_event())
-    return a.finish(r.session.window_end_ns, r.partial)
+    var rep = a.finish(r.session.window_end_ns, r.partial)
+    apply_integrity(rep, r.integrity_verified, r.session.integrity.events_bytes, r.session.integrity.line_count)
+    return rep^
 
 
 def parsed(doc: String) raises -> String:
@@ -393,7 +395,7 @@ def test_render_json_report_version() raises:
     var rep = analyze(String("tests/fixtures/attempts"))
     var doc = render_json(rep)
     assert_true(
-        doc.find(String('"schema_version": "0.1.3"')) != -1
+        doc.find(String('"schema_version": "0.1.4"')) != -1
     )
 
 
@@ -422,7 +424,7 @@ def test_verdict_line_shapes() raises:
     var done = analyze(String("tests/fixtures/reader/complete-stop"))
     assert_equal(
         verdict_line(done),
-        String("verdict: complete (loss 0.00%, 3 delivered)"),
+        String("verdict: partial_unknown_loss (loss >=0.00%, 3 delivered)"),
     )
     var unset = Report()
     assert_equal(
@@ -437,6 +439,7 @@ def test_render_text_verdict_header() raises:
         doc.find(
             String(
                 "verdict: partial_unknown_loss (loss >=0.00%, 3 delivered)\n"
+                "integrity: legacy_unverified (verified bytes=0, events=0); arithmetic is unverified; completeness withheld\n"
                 "memveil report "
             )
         )
@@ -463,9 +466,10 @@ def test_render_compact_attempts() raises:
         render_compact(rep),
         String(
             "verdict: partial_unknown_loss (loss >=0.00%, 3 delivered)\n"
+            "integrity: legacy_unverified (verified bytes=0, events=0); arithmetic is unverified; completeness withheld\n"
             "attempts: 3  bytes: 9216\n"
-            "detail: complete_for_scope, loss 0\n"
-            "terminal: complete_for_scope\n"
+            "detail: partial, loss 0\n"
+            "terminal: partial\n"
             "findings: none\n"
         ),
     )
@@ -477,9 +481,10 @@ def test_render_compact_detail_gap() raises:
         render_compact(rep),
         String(
             "verdict: partial_unknown_loss (loss >=50.00%, 2 delivered)\n"
+            "integrity: legacy_unverified (verified bytes=0, events=0); arithmetic is unverified; completeness withheld\n"
             "attempts: 2  bytes: 5120\n"
             "detail: partial, loss 2\n"
-            "terminal: complete_for_scope\n"
+            "terminal: partial\n"
             "findings: 1: CAPTURE_INCOMPLETE(warning)\n"
         ),
     )
@@ -694,6 +699,18 @@ def test_render_dispatch() raises:
     assert_true(raised)
 
 
+def test_unfinalized_stream_presentation() raises:
+    var rep = analyze("tests/fixtures/reader/complete-stop")
+    rep.integrity_context = String("live stream")
+    var text = render_compact(rep)
+    assert_true(text.find("integrity: unverified live stream") != -1)
+    assert_equal(text.find("legacy_unverified"), -1)
+    assert_equal(text.find("checkpoint_prefix"), -1)
+    assert_equal(text.find("complete_for_scope"), -1)
+    rep.integrity_context = String("replay prefix")
+    assert_true(render_text(rep).find("integrity: unverified replay prefix") != -1)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
     suite.test[test_escape_text]()
@@ -722,6 +739,7 @@ def run() raises -> Int:
     suite.test[test_render_missing_identity]()
     suite.test[test_render_json_exact_u64]()
     suite.test[test_render_json_tristate_echo]()
+    suite.test[test_unfinalized_stream_presentation]()
     suite.test[test_rendered_size_limit]()
     suite.test[test_device_name_filter_resolves]()
     suite.test[test_render_dispatch]()

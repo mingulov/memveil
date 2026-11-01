@@ -36,7 +36,7 @@ import sys
 import tempfile
 
 VERSION = "0.1.0"
-REPORT_VERSION = "0.1.3"
+REPORT_VERSION = "0.1.4"
 SESSION_VERSION = "0.1.1"
 SESSION_VERSION_NEXT = "0.1.2"
 SESSION_VERSION_LATEST = "0.1.3"
@@ -579,6 +579,7 @@ def check_session(obj):
         fail("bad-version", "session drain keys need schema 0.1.3")
     return {"id": session_id, "synthetic": obj["synthetic"],
             "start": start, "end": end,
+            "integrity": capture.get("integrity"),
             "window_baseline": window_baseline,
             "devices": devices,
             "quality": obj["quality"],
@@ -935,6 +936,9 @@ def validate_stream(session, events_path):
     kinds = set()
     pools = set()
     previous_seq = None
+    digest = hashlib.sha256()
+    byte_count = 0
+    kind_counts = dict.fromkeys(INTEGRITY_KINDS, 0)
     operations = set()
     mappings = {}
     excused = set()
@@ -947,6 +951,8 @@ def validate_stream(session, events_path):
         unmap_expected = relations.get("mapping_release", {}).get(
             "status") in ("partial", "unavailable")
     for lineno, raw in iter_lines(events_path):
+        digest.update(raw + b"\n")
+        byte_count += len(raw) + 1
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
@@ -1015,6 +1021,9 @@ def validate_stream(session, events_path):
             if dev_total > U64MAX:
                 fail("u64-range", "per-device bytes sum overflows")
             per_device[device] = (dev_count + 1, dev_total)
+        if session.get("integrity") and event["seq"] != count:
+            fail("integrity-sequence", "capture integrity sequence mismatch")
+        kind_counts[event["kind"]] += 1
         kinds.add(event["kind"])
         if event["kind"] == "pool_sample":
             pools.add(event["pool"])
@@ -1043,6 +1052,14 @@ def validate_stream(session, events_path):
         if not expected:
             fail("unknown-mapping",
                  "seq %d references unknown mapping %s" % (seq, ref))
+    integrity = session.get("integrity")
+    if integrity:
+        actual = {"events_bytes": str(byte_count), "line_count": str(count),
+                  "events_sha256": digest.hexdigest(),
+                  "kinds": {kind: str(n) for kind, n in kind_counts.items()}}
+        for field, value in actual.items():
+            if integrity[field] != value:
+                fail("integrity-mismatch", "capture integrity " + field + " mismatch")
     return {"count": count, "attempts": attempts, "requested": requested,
             "per_device": per_device, "kinds": kinds, "pools": pools}
 
@@ -1114,10 +1131,34 @@ def compare_report_obj(obj, session, summary):
                 "engine_version", "environment", "device_catalog",
                 "quality", "verdict", "metrics", "findings",
                 "limitations"),
-               ("capabilities",),
+               ("capabilities", "integrity") if obj.get("schema_version") == REPORT_VERSION else ("capabilities",),
                "report")
-    if obj["schema_version"] != REPORT_VERSION:
+    if obj["schema_version"] not in (REPORT_VERSION, "0.1.3"):
         fail("bad-version", "report schema_version")
+    if obj["schema_version"] == REPORT_VERSION:
+        integrity = obj.get("integrity")
+        if not isinstance(integrity, dict):
+            fail("missing-key", "report.integrity")
+        check_keys(integrity, ("status", "verified_bytes", "verified_events"), (), "report.integrity")
+        sealed = session.get("integrity")
+        expected = {"status": "verified" if sealed else "legacy_unverified",
+                    "verified_bytes": sealed["events_bytes"] if sealed else "0",
+                    "verified_events": sealed["line_count"] if sealed else "0"}
+        if integrity != expected:
+            fail("integrity-mismatch", "report integrity differs from verified capture")
+        if not sealed:
+            def no_complete(value):
+                if isinstance(value, dict):
+                    for key, item in value.items():
+                        if key in ("status", "coverage", "name") and item in ("complete", "complete_for_scope"):
+                            fail("integrity-unverified", "unverified report claims complete evidence")
+                        no_complete(item)
+                elif isinstance(value, list):
+                    for item in value:
+                        no_complete(item)
+            no_complete(obj["quality"])
+            no_complete(obj["metrics"])
+            no_complete(obj["verdict"])
     if obj["session_id"] != session["id"]:
         fail("session-mismatch", "report session reference")
     if not isinstance(obj["synthetic"], bool):
@@ -1848,6 +1889,7 @@ def run_selftest():
                "event-v0.1.1.schema.json", "event-v0.1.2.schema.json",
                "report-v0.1.0.schema.json", "report-v0.1.1.schema.json",
                "report-v0.1.2.schema.json", "report-v0.1.3.schema.json",
+               "report-v0.1.4.schema.json",
                "profile-v0.1.1.schema.json",
                "profile-v0.1.2.schema.json",
                "doctor-v0.1.0.schema.json", "doctor-v0.1.1.schema.json",
@@ -1866,6 +1908,20 @@ def run_selftest():
         return "%d schema files declare draft 2020-12" % len(schemas)
 
     check("schema-files", schema_files)
+
+    def retained_report_erratum():
+        old = read_json_file(repo_path("schemas", "report-v0.1.3.schema.json"), "retained report schema")
+        current = read_json_file(repo_path("schemas", "report-v0.1.4.schema.json"), "current report schema")
+        fixture = read_json_file(repo_path("tests", "fixtures", "attempts", "expected-report.json"), "retained report fixture")
+        if old["$id"] != "report-v0.1.3.schema.json" or old["properties"]["schema_version"]["const"] != "0.1.2":
+            fail("legacy-erratum", "frozen report schema artifact changed")
+        if fixture["schema_version"] != "0.1.3":
+            fail("legacy-erratum", "historical report must not be relabeled")
+        if current["properties"]["schema_version"]["const"] != REPORT_VERSION:
+            fail("bad-schema", "current report schema version constant")
+        return "known 0.1.3 artifact mismatch retained; legacy fixture checks use independent rules, not that JSON Schema"
+
+    check("retained-report-schema-erratum", retained_report_erratum)
 
     def schema_stop_outcome_reason():
         path = repo_path("schemas", "session-v0.1.1.schema.json")

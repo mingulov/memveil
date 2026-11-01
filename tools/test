@@ -454,7 +454,7 @@ suite_reports() {
         tests/fixtures/reader/complete-stop 0 \
         "capture OK: 3 events, 3 attempts, 9216 requested bytes"
     expect_text_exit "complete-stop-json-strict" \
-        tests/fixtures/reader/complete-stop 0 --strict
+        tests/fixtures/reader/complete-stop 4 --strict
     expect_json "f9-profile-change-json" \
         tests/fixtures/reader/f9-profile-change 0 \
         "capture OK: 5 events, 3 attempts, 9216 requested bytes"
