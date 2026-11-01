@@ -1,0 +1,46 @@
+# Third-party notices (libbpf-mojo 0.2.3)
+
+This package redistributes the following third-party components.
+
+- libbpf 1.7.0, statically linked into
+  `lib/libbpf_mojo.so.1`. BSD 2-Clause; full text in
+  `licenses/LICENSE.BSD-2-Clause.libbpf`. Upstream:
+  https://github.com/libbpf/libbpf (tag v1.7.0; the exact
+  source is the libbpf subtree of the build tree named in
+  `MANIFEST.json`).
+
+- `lib/libgcc_s.so.1` from conda package libgcc 16.2.0 (ha9f2e26_7).
+  GPL-3.0-only WITH GCC-exception-3.1; full texts in `licenses/` (see below).
+  Binary: https://conda.anaconda.org/conda-forge/linux-64/libgcc-16.2.0-ha9f2e26_7.conda
+  sha256: e031634c3a928f9594eba868bc46ef5230d6571a364a0c63215b06c4563bfcea
+  Source: GCC 16.2.0 source
+  https://ftp.gnu.org/gnu/gcc/gcc-16.2.0/gcc-16.2.0.tar.xz
+  Build recipe: https://github.com/conda-forge/ctng-compilers-feedstock
+
+- `lib/libstdc++.so.6` from conda package libstdcxx 16.2.0 (h934c35e_7).
+  GPL-3.0-only WITH GCC-exception-3.1; full texts in `licenses/` (see below).
+  Binary: https://conda.anaconda.org/conda-forge/linux-64/libstdcxx-16.2.0-h934c35e_7.conda
+  sha256: fa7018298629fc429971fffd6ecba3d27a7b02e4e890d6a93ea01ffebe8cb745
+  Source: GCC 16.2.0 source
+  https://ftp.gnu.org/gnu/gcc/gcc-16.2.0/gcc-16.2.0.tar.xz
+  Build recipe: https://github.com/conda-forge/ctng-compilers-feedstock
+
+- `lib/libz.so.1` from conda package libzlib 1.3.2 (h25fd6f3_3).
+  Zlib; full texts in `licenses/` (see below).
+  Binary: https://conda.anaconda.org/conda-forge/linux-64/libzlib-1.3.2-h25fd6f3_3.conda
+  sha256: eb8a0db0aa570124f7d2a93d7c7f596e3390df5e047818d873baad32985fc736
+  Source: zlib 1.3.2 upstream releases
+  https://zlib.net/
+
+- `lib/libAsyncRTRuntimeGlobals.so`, `lib/libKGENCompilerRTShared.so`, `lib/libMSupportGlobals.so` from conda package mojo-compiler 1.2.0 (release).
+  LicenseRef-Modular-Proprietary; provider license texts in `licenses/LICENSE.mojo-compiler`, `licenses/Third-Party-Notices.mojo-compiler`;
+  provenance and the redistribution warning in
+  `licenses/NOTICE.mojo-runtime.md`.
+  Binary: https://conda.modular.com/max/linux-64/mojo-compiler-1.2.0-release.conda
+  sha256: a746d7db173a9882e7073ae6d905acfe383a754faecb4a53710b7b90db377e6b
+
+License texts: `licenses/LICENSE.BSD-2-Clause.libbpf`
+(libbpf), `licenses/GPL-3.0.txt` plus
+`licenses/RUNTIME.LIBRARY.EXCEPTION` (GCC runtimes),
+`licenses/LICENSE.zlib` (zlib),
+`licenses/LICENSE.mojo-compiler`, `licenses/Third-Party-Notices.mojo-compiler` (Mojo runtimes).

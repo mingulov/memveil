@@ -1,0 +1,165 @@
+{
+  "artifacts": {
+    "build_receipt": {
+      "bytes": 33116,
+      "name": "libbpf-mojo-0.2.3-build-receipt.json",
+      "sha256": "c740f1054ce8548ea2d1e5a8d66712fd5c1f3b9aacc6edba78f343fb9f8d2bf6"
+    },
+    "libbpf_source": {
+      "bytes": 1063399,
+      "name": "libbpf-1.7.0-source.tar.gz",
+      "sha256": "7ab5feffbf78557f626f2e3e3204788528394494715a30fc2070fcddc2051b7b"
+    },
+    "notices": {
+      "bytes": 2480,
+      "name": "libbpf-mojo-0.2.3-THIRD-PARTY-NOTICES.txt",
+      "sha256": "9d706ef8642dff2ae85e5585b6715959638949993db0c8bb4b643240d4272d57"
+    },
+    "project_source": {
+      "bytes": 1586390,
+      "name": "libbpf-mojo-0.2.3-source.tar.gz",
+      "sha256": "eb5909d90ac890f7a51aff1620ed2e3b9354d5989bed15da154304154b310618"
+    },
+    "runtime": {
+      "bytes": 11280394,
+      "name": "libbpf-mojo-0.2.3.tar.gz",
+      "sha256": "c69e65d43b27fa7fbbbcf0ec827535f9193dbbbcbfc1e6604530fd01e66dd3cf"
+    },
+    "runtime_manifest": {
+      "bytes": 46360,
+      "name": "libbpf-mojo-0.2.3-MANIFEST.json",
+      "sha256": "c15f1c69e229d97ef2cd3826e22763326082984935f151c76fbf0c31ff1121fd"
+    }
+  },
+  "bridge": {
+    "file": "lib/libbpf_mojo.so.1",
+    "sha256": "4cc5a596067dc4e9eab8aa86d92f018ac56ab281eb83bf8475fa3377720787af"
+  },
+  "build_source_digest": "d5ba7824c41f6555721af7f13e7ad520c85c200e4423ac60fd8f3210b86557b9",
+  "first_party": {
+    "license_default": "Apache-2.0 WITH LLVM-exception",
+    "licenses": {
+      "Apache-2.0 WITH LLVM-exception": [
+        "LICENSE",
+        "LICENSES/LLVM-exception.txt"
+      ],
+      "GPL-2.0-only": [
+        "LICENSES/GPL-2.0-only.txt"
+      ]
+    },
+    "paths": {
+      "examples/probe.bpf.o": "GPL-2.0-only"
+    }
+  },
+  "format": "libbpf-mojo-source-map/1",
+  "license_files_sha256": {
+    "LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "LICENSES/GPL-2.0-only.txt": "edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6",
+    "LICENSES/LLVM-exception.txt": "ddabf2be4dbf3d983bce354836ed5b72221aba21e807e308948f182423c79306",
+    "licenses/GPL-3.0.txt": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+    "licenses/LICENSE.BSD-2-Clause.libbpf": "e1638b9a0c68ca90fad3df1d6b4e430804d2fbdc15e58d02cffddfae38953bbf",
+    "licenses/LICENSE.mojo-compiler": "f35ac2dfeb4a3e9482468874a50ce4dfb16fc11c3aefd2a1b4d51c44515ed02d",
+    "licenses/LICENSE.zlib": "ee1e64c3fcad42e638318e43217d89791e1e61a50a1a2fa516ccee8725909d1e",
+    "licenses/NOTICE.mojo-runtime.md": "92d32979037e2b2c3cc4f5f1ee929002c1224ad71d156d7847b64c60bdab8293",
+    "licenses/RUNTIME.LIBRARY.EXCEPTION": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74",
+    "licenses/Third-Party-Notices.mojo-compiler": "c12337f144b96ee908c4c32cd0be3fe151eb186931836c7e155481e101420446"
+  },
+  "limits": [
+    "Host contract checks do not qualify live kernel attachment or confidential platforms.",
+    "GCC and zlib source origins are in THIRD-PARTY-NOTICES.md; their source archives are not included here.",
+    "The Modular provider license and runtime redistribution warning are retained; no publication is performed."
+  ],
+  "runtime_libraries": {
+    "bundled_libs": [
+      "lib/libAsyncRTRuntimeGlobals.so",
+      "lib/libKGENCompilerRTShared.so",
+      "lib/libMSupportGlobals.so",
+      "lib/libgcc_s.so.1",
+      "lib/libstdc++.so.6",
+      "lib/libz.so.1"
+    ],
+    "needs": [
+      "glibc",
+      "libelf",
+      "zlib",
+      "bpf-privilege"
+    ],
+    "system_libraries": [
+      "ld-linux-x86-64.so.2",
+      "libc.so.6",
+      "libdl.so.2",
+      "libelf.so.1",
+      "libm.so.6"
+    ],
+    "verified": {
+      "libAsyncRTRuntimeGlobals.so": {
+        "package": "mojo-compiler 1.2.0 (release)",
+        "relocated": false,
+        "sha256": "a27c591c97b7066377a6c5a12ecc1fecf2f600d9ccf869a371c441c8a1946648"
+      },
+      "libKGENCompilerRTShared.so": {
+        "package": "mojo-compiler 1.2.0 (release)",
+        "relocated": false,
+        "sha256": "c9e0abb7a7f74b0dc5b07e7875a87b4dc4f8c02af3ba473c5e4bd0fab89b6c0e"
+      },
+      "libMSupportGlobals.so": {
+        "package": "mojo-compiler 1.2.0 (release)",
+        "relocated": false,
+        "sha256": "5cec8730d291375941f235604dcf9778ac9508cf6e41bd5f308572d7bc8c65db"
+      },
+      "libgcc_s.so.1": {
+        "package": "libgcc 16.2.0 (ha9f2e26_7)",
+        "relocated": false,
+        "sha256": "5444fbe71e8cfe3bd05cdf2b44bd8c2e553e6e7e276977089b5e4e1a1ceed531"
+      },
+      "libstdc++.so.6": {
+        "package": "libstdcxx 16.2.0 (h934c35e_7)",
+        "relocated": false,
+        "sha256": "10f0d3c46c070acd4abea2ccf2500ff0ec77e9b90154b82ea2720dba05510cb9"
+      },
+      "libz.so.1": {
+        "package": "libzlib 1.3.2 (h25fd6f3_3)",
+        "relocated": false,
+        "sha256": "3c6fd78e248a60e45081bcc77031204a7cb64a88ff2e27fc786ef12ae7e91fca"
+      }
+    }
+  },
+  "runtime_license_mapping": {
+    "lib/libAsyncRTRuntimeGlobals.so": [
+      "licenses/LICENSE.mojo-compiler",
+      "licenses/NOTICE.mojo-runtime.md",
+      "licenses/Third-Party-Notices.mojo-compiler"
+    ],
+    "lib/libKGENCompilerRTShared.so": [
+      "licenses/LICENSE.mojo-compiler",
+      "licenses/NOTICE.mojo-runtime.md",
+      "licenses/Third-Party-Notices.mojo-compiler"
+    ],
+    "lib/libMSupportGlobals.so": [
+      "licenses/LICENSE.mojo-compiler",
+      "licenses/NOTICE.mojo-runtime.md",
+      "licenses/Third-Party-Notices.mojo-compiler"
+    ],
+    "lib/libgcc_s.so.1": [
+      "licenses/GPL-3.0.txt",
+      "licenses/RUNTIME.LIBRARY.EXCEPTION"
+    ],
+    "lib/libstdc++.so.6": [
+      "licenses/GPL-3.0.txt",
+      "licenses/RUNTIME.LIBRARY.EXCEPTION"
+    ],
+    "lib/libz.so.1": [
+      "licenses/LICENSE.zlib"
+    ]
+  },
+  "source_commit": "4a22288a397dec5158766fdfcd7a2a6691d1a9fb",
+  "source_inventory": {
+    "libbpf_commit": "f5dcbae736e5d7f83a35718e01be1a8e3010fa39",
+    "libbpf_url": "https://github.com/libbpf/libbpf/archive/refs/tags/v1.7.0.tar.gz",
+    "project_archive_matches_committed_files": true,
+    "project_files": 194
+  },
+  "source_tree": "2ef224edd32f3a81c6b40236b62dee0a202443bc",
+  "status": "local candidate; untagged",
+  "version": "0.2.3"
+}

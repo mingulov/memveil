@@ -1,0 +1,1140 @@
+{
+  "abi": "lmb-v1",
+  "bpf": {
+    "file": "examples/probe.bpf.o",
+    "sha256": "923d3cc3a387e5ee01fbfc19a559519926b69c2134b581ab189c702c61c03c95"
+  },
+  "bridge": {
+    "file": "lib/libbpf_mojo.so.1",
+    "sha256": "4cc5a596067dc4e9eab8aa86d92f018ac56ab281eb83bf8475fa3377720787af"
+  },
+  "build": {
+    "arch": "x86_64",
+    "cpu_baseline": "x86-64-v2",
+    "glibc_min": "2.38",
+    "kernel_min": "7.0",
+    "receipt": {
+      "artifacts": {
+        "examples/fault_driver": "10091dc867d664e4ebcd5e51fd6aba2231f001fb8355c09b1dc22ddf1c4f1060",
+        "examples/probe.bpf.o": "923d3cc3a387e5ee01fbfc19a559519926b69c2134b581ab189c702c61c03c95",
+        "examples/reference_consumer": "f04ac3f640ee60f74d89b318f657b4ae7b996a8391215b264d0cd5832c148f1a",
+        "examples/tracepoint_main": "0d16e73a86a00ec56af11a6cf543ded1c1a2f4850b38f27c3d5996f5594eac35",
+        "examples/tracepoint_trigger": "e2fe5873d73b078c58aa819c25b4183f9ace90549f7e0cd6488ca538e7247eca",
+        "libbpf_mojo.so.1": "4cc5a596067dc4e9eab8aa86d92f018ac56ab281eb83bf8475fa3377720787af"
+      },
+      "c_compiler": "clang",
+      "cmake_cache_sha256": "1f8eaefe0b18da4915f548fd23e4d17bec4f0317024ac998cbd7c0d3a9931d06",
+      "dependencies": {
+        "libbpf_tarball_sha256": "7ab5feffbf78557f626f2e3e3204788528394494715a30fc2070fcddc2051b7b"
+      },
+      "git": "4a22288a397dec5158766fdfcd7a2a6691d1a9fb",
+      "mojo_target_cpu": "x86-64-v2",
+      "sanitize": "-DLMB_SANITIZE=OFF",
+      "sources": {
+        "digest": "d5ba7824c41f6555721af7f13e7ad520c85c200e4423ac60fd8f3210b86557b9",
+        "files": {
+          ".github/workflows/offline.yml": {
+            "mode": "000644",
+            "sha256": "190d586a4de9af5ed1ad7bd3c1da538eb1735f2de8ced5d034748ec59cc568eb"
+          },
+          ".github/workflows/package.yml": {
+            "mode": "000644",
+            "sha256": "0e6adb636b11b7a64ff1bbd51d4c77ba3e2d7fab18dbb7eaec9061468f02f912"
+          },
+          ".github/workflows/privileged.yml": {
+            "mode": "000644",
+            "sha256": "e1a00a2007a25f9f89ea41a9f4306d582256d1a4b42a9f1fa0fcb1125529e591"
+          },
+          ".github/workflows/release.yml": {
+            "mode": "000644",
+            "sha256": "ad0ace7dc794ef2a03b4f6e1285db47a31d767d1da9b1510afcd1842e5d61dd0"
+          },
+          ".gitignore": {
+            "mode": "000644",
+            "sha256": "fa5b4a8536e46af7ed4883d1afa723dd4d17e249775cadb97344946a5c6bab2c"
+          },
+          "AGENTS.md": {
+            "mode": "000644",
+            "sha256": "bcddde51357fb83143ffcd5556f9b5af48279886cd65cbad29b7b988804bb9a5"
+          },
+          "CHANGELOG.md": {
+            "mode": "000644",
+            "sha256": "f769cfc307e96719f4cee3d1ff01a7a4a697a9302e260a92ecaa6484fdf23696"
+          },
+          "CONTRIBUTING.md": {
+            "mode": "000644",
+            "sha256": "601cf1725c18236cbd452a3d72752c12fa198fd2abd2776048668f9d88b272e0"
+          },
+          "LICENSE": {
+            "mode": "000644",
+            "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+          },
+          "LICENSES/GPL-2.0-only.txt": {
+            "mode": "000644",
+            "sha256": "edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6"
+          },
+          "LICENSES/LLVM-exception.txt": {
+            "mode": "000644",
+            "sha256": "ddabf2be4dbf3d983bce354836ed5b72221aba21e807e308948f182423c79306"
+          },
+          "README.md": {
+            "mode": "000644",
+            "sha256": "956305a372ee8f99b3c0c385024e678178dbf40e71a8a68fca76be32d467e0f3"
+          },
+          "RELEASING.md": {
+            "mode": "000644",
+            "sha256": "f1ba351f196b64ad97b625ae09d15ca3f56b0fdf4783707eff8fb0e78f8488d4"
+          },
+          "SECURITY.md": {
+            "mode": "000644",
+            "sha256": "5017501cfdb223cc8f37a415c55b1d9ccfbe4a4355dc1943bf72e96f9e8b53e3"
+          },
+          "docs/abi-v1.md": {
+            "mode": "000644",
+            "sha256": "341eca55d1abf758fccf4cf8a5e57d071a9f05f285cb15f3d4f819fbd29f8217"
+          },
+          "docs/api-coverage.json": {
+            "mode": "000644",
+            "sha256": "54cdc98cd2a1e251c8a0faffc20adb011848aa78d0776440c2e2eb8d0295993c"
+          },
+          "docs/build.md": {
+            "mode": "000644",
+            "sha256": "11d2a5f2354c145c3a8db42ee6a1acfd0fcfdc210cf7bf8ffc6606cd962eec2d"
+          },
+          "docs/generic-abi-v1.md": {
+            "mode": "000644",
+            "sha256": "19df0acdbf01e3e8ad8c73b9a75d103406e2489e8d040c2223f54d6668857595"
+          },
+          "docs/links-and-ring.md": {
+            "mode": "000644",
+            "sha256": "eda7d8ca305171c72325e3f838811c6403f78a127bf079365c1f2da9198b05c5"
+          },
+          "docs/maps-and-test-run.md": {
+            "mode": "000644",
+            "sha256": "4c6d2d7f616eda88d673b66a142bb9b0f7ba2712f205231917eb9dd3662c3c2f"
+          },
+          "docs/mojo-unsafe-inventory.md": {
+            "mode": "000644",
+            "sha256": "ebe664ece6f9bd8e2ec531a3732fcc991f55838eb63265612cfeee9a737b2c0c"
+          },
+          "docs/ownership.md": {
+            "mode": "000644",
+            "sha256": "a7d18191702cbf05bf70fef91178cb8fee02bb254b88642fae5f2df5e1bd3ca0"
+          },
+          "docs/policy.md": {
+            "mode": "000644",
+            "sha256": "a2d3e142a762ca54a83ab2471d954a5e80c12b52d69b69b763f16371cee07c37"
+          },
+          "docs/support.md": {
+            "mode": "000644",
+            "sha256": "67624e83bd2c9285dd811b2a0effe107b690b177a3bd3cb9a148972b98b42019"
+          },
+          "examples/tracepoint/README.md": {
+            "mode": "000644",
+            "sha256": "1903b3f551a5f2fbd55c26e15cd931d5aef836df145bf88903f2bad6698a69b4"
+          },
+          "examples/tracepoint/event.h": {
+            "mode": "000644",
+            "sha256": "b3ea679e84790dc085041618f5a0754179bbaf9187e676ad5578ac6b77739320"
+          },
+          "examples/tracepoint/main.mojo": {
+            "mode": "000644",
+            "sha256": "ca4f4636071ff39617fa997330931e688e26bb832265d16be12f7c0c38ca7989"
+          },
+          "examples/tracepoint/probe.bpf.c": {
+            "mode": "000644",
+            "sha256": "9dc39e27aa473abb379b39c5b6ef6062081fd2e9e29b0deb352eeb6f6cf67156"
+          },
+          "examples/tracepoint/run-tracepoint.sh": {
+            "mode": "000755",
+            "sha256": "08ee35ac5ffcb047d785190f3ddc0ed88f5fa0494345950f2b524a97db9b7309"
+          },
+          "examples/tracepoint/trigger.c": {
+            "mode": "000644",
+            "sha256": "f19d343ddd5cc4b64dcf4c0d17496edfc6259971a97620c7fb423437bcaf52c2"
+          },
+          "native/CMakeLists.txt": {
+            "mode": "000644",
+            "sha256": "a4c3e4789a41b83151c04f7364bbd64b349c3b82f86765df23e9693e1ff0ada2"
+          },
+          "native/include/libbpf_mojo.h": {
+            "mode": "000644",
+            "sha256": "b1cbc4910da644a31535fb665939511be9196d22bbe771492a2c654de1d9ec7e"
+          },
+          "native/include/libbpf_mojo_generic.h": {
+            "mode": "000644",
+            "sha256": "be068425785ce7349f2dafb0a908a126462850a5285db4ec7a1dda6c224c888c"
+          },
+          "native/libbpf_mojo.map": {
+            "mode": "000644",
+            "sha256": "047640c474b7723060bfc54fbbd4610d12a6f1cc11ef043403b8eb68b5787bb7"
+          },
+          "native/src/attach.c": {
+            "mode": "000644",
+            "sha256": "c75a8cd98632ef2c8bc7a3681e8cd9a254b353c514a2891ad63a5104057f0949"
+          },
+          "native/src/errors.c": {
+            "mode": "000644",
+            "sha256": "a11c8f13b38a65476eba8b28b3ffffa465cf87bd54b6d924d809f5d6da8c6ca4"
+          },
+          "native/src/generic_attach.c": {
+            "mode": "000644",
+            "sha256": "91e1e97fc8caf726ac3ba1fee247600f1d470deecb7a9c270f30f6c4f284a934"
+          },
+          "native/src/generic_internal.h": {
+            "mode": "000644",
+            "sha256": "5d2667bab96fef0c12c5ba7b92404158a40a9b0acb6e3334d24059cc774a93d4"
+          },
+          "native/src/generic_ring.c": {
+            "mode": "000644",
+            "sha256": "3e69d6c6edb4e78d8e0c85684d27af92edf3c447c09e18cc9c4f1b7a7b820981"
+          },
+          "native/src/internal.h": {
+            "mode": "000644",
+            "sha256": "1593e7c6ed11359a71676305d1cfb439ba49b8951efe0b440d2d88c77a4bb904"
+          },
+          "native/src/object.c": {
+            "mode": "000644",
+            "sha256": "9ca7805f585c6038e560a9ad734021a8fa949b06cfe25a3898ec8c06eb6ad367"
+          },
+          "native/src/object_maps.c": {
+            "mode": "000644",
+            "sha256": "249b31c254636257b4367bc23aa2fa588c788d7ab5f95ba66b109a0738835ea1"
+          },
+          "native/src/program_test.c": {
+            "mode": "000644",
+            "sha256": "67192c34678fa6283efc43f3f6de9ed4522aee75b82ff7a453b3286cb0ee6b6b"
+          },
+          "native/src/ring.c": {
+            "mode": "000644",
+            "sha256": "09e79e3c9aec987dbd32b0d79ee5587829ea8c827eed9ef35f5f6f8dfb0580a3"
+          },
+          "native/src/ring_stage.h": {
+            "mode": "000644",
+            "sha256": "93afa30ae54224e3fa7e3e73f118d271a17b8b278da865d751acdc77ab6c30f5"
+          },
+          "native/src/session.c": {
+            "mode": "000644",
+            "sha256": "d76991afca41ff32b9d98140679a2b39cf9afb05709936d7b64a6df9273fdf3c"
+          },
+          "pixi.lock": {
+            "mode": "000644",
+            "sha256": "86e7dcb4723d0d2d69419f8dff83ea673ca060893dffd59d24265457df6c5816"
+          },
+          "pixi.toml": {
+            "mode": "000644",
+            "sha256": "b7c761a93f5731c8914b969beacb37d3e906f861ae5fb6acdfa658788d4b9097"
+          },
+          "schemas/api-coverage.schema.json": {
+            "mode": "000644",
+            "sha256": "e771dc4ba2d3a8f42776e1002c8786d978026446cefaaa84209f780fe10e8ee0"
+          },
+          "src/libbpf_mojo/__init__.mojo": {
+            "mode": "000644",
+            "sha256": "f392392a583c2f79dec9c9247144924baa29517838b4ab6be4a75015fe72474a"
+          },
+          "src/libbpf_mojo/_ffi.mojo": {
+            "mode": "000644",
+            "sha256": "884e253eb26282566255da8cab0679c840e6c1ec744d4f273216a0a60abe9deb"
+          },
+          "src/libbpf_mojo/batch.mojo": {
+            "mode": "000644",
+            "sha256": "9aca31c4aece034498916ae5baf97a5f50f2cdd80bbc4bab95fcd84fec4a8eb4"
+          },
+          "src/libbpf_mojo/buffer.mojo": {
+            "mode": "000644",
+            "sha256": "e16c4a22f2d742c6d7e9550e3256837879d9fe79e505bdcaa801c0ebb4865cef"
+          },
+          "src/libbpf_mojo/error.mojo": {
+            "mode": "000644",
+            "sha256": "31d6ff7d2d03d7ae185e4a331235e3e31281f620973a2e7eb7604742ffc76583"
+          },
+          "src/libbpf_mojo/link.mojo": {
+            "mode": "000644",
+            "sha256": "36b443a261d4fc3ce7b05699ad6e0d20a9378493e7c3eec99680b283c2b7586d"
+          },
+          "src/libbpf_mojo/maps.mojo": {
+            "mode": "000644",
+            "sha256": "3749714daa5a90f53acb03beb91704fc8483d4608fad0b6b54f461ffdbfa28e4"
+          },
+          "src/libbpf_mojo/object.mojo": {
+            "mode": "000644",
+            "sha256": "0846aa51f9472ee96b40ad19bf2a4a5916bfba472014e97de638917f8d0c996f"
+          },
+          "src/libbpf_mojo/program.mojo": {
+            "mode": "000644",
+            "sha256": "305db982f9ff6d6a8fc763fae91322f09f9510d666d8e3ac360b6f8568187b27"
+          },
+          "src/libbpf_mojo/session.mojo": {
+            "mode": "000644",
+            "sha256": "8735a90c7a24fea291345caad44c674de4bf6ed2397fea4b995aafd0f1293cf9"
+          },
+          "tests/contracts/README.md": {
+            "mode": "000644",
+            "sha256": "a2396d769232a4e1dd95efb1b35bf32357e57ae66bc2fbe448bdc3f49a8cfcad"
+          },
+          "tests/contracts/bundle-lock.json": {
+            "mode": "000644",
+            "sha256": "e6e0560793affaa1658b4e77a1b3efbe612312852a655ff83aa5d944a69fe757"
+          },
+          "tests/contracts/schema_bundle.py": {
+            "mode": "000644",
+            "sha256": "822791e82ceae01df0f511520214f9d6cf055e5e93c9868f3044bfc0f3557088"
+          },
+          "tests/contracts/test_schema_bundle.py": {
+            "mode": "000644",
+            "sha256": "4a424e02de8f8fa418c3983a6f93a5b8877998cbfcadbaf02fb04e9302b1ca25"
+          },
+          "tests/docs/test_docs.py": {
+            "mode": "000644",
+            "sha256": "8a3795754e906434e01cd6c481a8e985e1da8d2f680ef1c5c30745df16a7753f"
+          },
+          "tests/fixtures/api_inventory/libbpf-1.7.0.json": {
+            "mode": "000644",
+            "sha256": "0b9a37cda49679d94bb9161393afa38bf14f9cd55b71415e849740fad00e1c88"
+          },
+          "tests/fixtures/bpf/README.md": {
+            "mode": "000644",
+            "sha256": "6b40ed6f47e9009b1e0de500f814ca5ca50df2d2a85948e127b991ad32f99701"
+          },
+          "tests/fixtures/bpf/generic_events.bpf.c": {
+            "mode": "000644",
+            "sha256": "f98c23e585247b01e334dff53a4821dab9f210cba2b80b046c575767d4e00951"
+          },
+          "tests/fixtures/bpf/generic_events.h": {
+            "mode": "000644",
+            "sha256": "dc7d5b9a7a5cf1528a5893aa40027d2dfe9df8112844926ed8d1ab342e4691f4"
+          },
+          "tests/fixtures/bpf/generic_maps.bpf.c": {
+            "mode": "000644",
+            "sha256": "a3d39a319f2033ff7ad6bb971a1f2433ed2edb858134a2d2c93f0ed9b032b471"
+          },
+          "tests/fixtures/bpf/generic_object.bpf.c": {
+            "mode": "000644",
+            "sha256": "823b3f82103832ceb193ae7b0e04a2bc13302afb4d4edc8178278e2d48a831f8"
+          },
+          "tests/fixtures/bpf/ring_test.bpf.c": {
+            "mode": "000644",
+            "sha256": "a8296ea07c6203631fa4460b49dfa6f4fadbf2aee5a23c54717f9333c2313a0b"
+          },
+          "tests/live/fault_driver.mojo": {
+            "mode": "000644",
+            "sha256": "5aa370b281fbc041be039fe2bfd51b3c55c8addad5b9bd2ac6860c138df1ed11"
+          },
+          "tests/live/liveutil.py": {
+            "mode": "000644",
+            "sha256": "b83c670962ca0f186ec9abb32f9f23fae6067810d4179f2b23e8fb588b4aa30b"
+          },
+          "tests/live/test_cleanup.py": {
+            "mode": "000755",
+            "sha256": "4e802297d96c3f72651e255435c4ddcee05cc786444fec8b233b22c13917af5b"
+          },
+          "tests/live/test_tracepoint.py": {
+            "mode": "000755",
+            "sha256": "e8f5ca47d74797e56608644be18ff04fe51f22d5c5314877c0b73bfb336e6af7"
+          },
+          "tests/mojo/compile_fail/diagnostic_excerpt_unrelated_syntax.mojo": {
+            "mode": "000644",
+            "sha256": "09e25681164a7ea183c395ef90b2bfd4ee04780a8fbd60d083f5d2acf9a15a34"
+          },
+          "tests/mojo/compile_fail/explicit_copy_buffer.mojo": {
+            "mode": "000644",
+            "sha256": "2dbebaf767f3bd3d495677ed1d97a278df82627bd3692c6f1e830daefe2def30"
+          },
+          "tests/mojo/compile_fail/explicit_copy_link.mojo": {
+            "mode": "000644",
+            "sha256": "ab24ee2e226bba0d14cc43082c9248e78c95d371957f2954846a29079857f220"
+          },
+          "tests/mojo/compile_fail/explicit_copy_object.mojo": {
+            "mode": "000644",
+            "sha256": "c00b1222634a1a40c4fc5702ce60a1ae9b9f666738dbb2d41776f67588d1ba63"
+          },
+          "tests/mojo/compile_fail/explicit_copy_session.mojo": {
+            "mode": "000644",
+            "sha256": "38605fc01dbea94883c0a7f97f061d98c520539b28b4f8b7d3714446fa6653c7"
+          },
+          "tests/mojo/compile_fail/immutable_buffer_poll_dst.mojo": {
+            "mode": "000644",
+            "sha256": "a6aacac613fcb56357097f763647ff920b9ec84c57356c23461d593275c5023d"
+          },
+          "tests/mojo/compile_fail/immutable_poll_dst.mojo": {
+            "mode": "000644",
+            "sha256": "7dbcedbd39ee9ee4d341e3475397a28eaa896a9b162509a9f0f1f4a1e264a54a"
+          },
+          "tests/mojo/compile_fail/implicit_copy_buffer.mojo": {
+            "mode": "000644",
+            "sha256": "9c053140ac1467b3e47456e527e1beda00bb64f9d85fa4aab1d29940ffa4d2f6"
+          },
+          "tests/mojo/compile_fail/implicit_copy_link.mojo": {
+            "mode": "000644",
+            "sha256": "983a26be66c41a324e069b162f01209661cb25c9217eb9347628b24fb2b0b7b9"
+          },
+          "tests/mojo/compile_fail/implicit_copy_object.mojo": {
+            "mode": "000644",
+            "sha256": "dcd361c9a487fb6233dd7a257e497388f2d451ef0d3347c52b5a13adf54248fd"
+          },
+          "tests/mojo/compile_fail/implicit_copy_session.mojo": {
+            "mode": "000644",
+            "sha256": "2201ef087fc71ae3f7b454e13bcf0004ecb0c47ccc979de65a58fd21bc1e88fe"
+          },
+          "tests/mojo/compile_fail/mutable_unrelated_syntax.mojo": {
+            "mode": "000644",
+            "sha256": "625d172a692e8aebbb8289d6768f85be765473bfe6408bd0ef502ec60fcc6411"
+          },
+          "tests/mojo/compile_fail/use_after_transfer.mojo": {
+            "mode": "000644",
+            "sha256": "3c10de78bdc9b512fd0258f54bf826895590b70d35b99793b0732122df6436ab"
+          },
+          "tests/mojo/compile_fail/use_after_transfer_buffer.mojo": {
+            "mode": "000644",
+            "sha256": "160d37bf9b3be8685439c81386e01755cabf8e4f1c0b66c1395e454642e11f51"
+          },
+          "tests/mojo/compile_fail/use_after_transfer_link.mojo": {
+            "mode": "000644",
+            "sha256": "5d43ac559fc65d705c9ab1138f8b53a6dbb15be1cf911f315b4fc93557da202a"
+          },
+          "tests/mojo/compile_fail/use_after_transfer_object.mojo": {
+            "mode": "000644",
+            "sha256": "6ea73a59ebb61e8e4cdad9e7659b90fb15a037333ae4cd8f6650fe5ad16f7fe4"
+          },
+          "tests/mojo/compile_pass/public_surface_imports.mojo": {
+            "mode": "000644",
+            "sha256": "b0ac433f2fe9d5ddb17e57cf3011193e4047445a2e4929a1ed09b9f610c2e610"
+          },
+          "tests/mojo/compile_pass/transfer_buffer.mojo": {
+            "mode": "000644",
+            "sha256": "61d15a92a138acf7cab12e8194b2b1d0b77a7f07325d3799771e95fdb7312d30"
+          },
+          "tests/mojo/compile_pass/transfer_link.mojo": {
+            "mode": "000644",
+            "sha256": "d04f0fc5885628ef5a625d5685ea68598ccf97eff874bb5701e1e6174c1c7de5"
+          },
+          "tests/mojo/compile_pass/transfer_object.mojo": {
+            "mode": "000644",
+            "sha256": "ec572c3a3320e29fecd82a0edb764801e0ae6ce4c06ac0ae9b8af7390cf53363"
+          },
+          "tests/mojo/compile_pass/transfer_session.mojo": {
+            "mode": "000644",
+            "sha256": "82e30a2b8dc61d2d6b44b1b38435019e72276782018babc82bc563aa2d367cba"
+          },
+          "tests/mojo/test_batch.mojo": {
+            "mode": "000644",
+            "sha256": "cebbb91d60e25c1e3947c7c89f7597799bab99ac6f3554a868c04da0d0954d46"
+          },
+          "tests/mojo/test_error.mojo": {
+            "mode": "000644",
+            "sha256": "2a379632f5f2ffc740ec3809b47ef25ca6dea4dae5ad033e046373e91c5b9038"
+          },
+          "tests/mojo/test_generic_abi.mojo": {
+            "mode": "000644",
+            "sha256": "edfa6c9d80d6bcfe25c4f95234125e6b8f6b4ac83ddbcfa06879c497b7c8dd89"
+          },
+          "tests/mojo/test_generic_buffer.mojo": {
+            "mode": "000644",
+            "sha256": "fda4d9c6f2eb5629edaee4db9d118fc3a96aa35c65682d3ca8207f240267dbfd"
+          },
+          "tests/mojo/test_generic_layout.mojo": {
+            "mode": "000644",
+            "sha256": "c3fb43b84463cb6a14925bab3a07ce97a96a55d06c20a304c98f137d1c97f357"
+          },
+          "tests/mojo/test_generic_link.mojo": {
+            "mode": "000644",
+            "sha256": "08a075aee5016847de451135382e89c4d16888965eaba59694c1c3aa5872622f"
+          },
+          "tests/mojo/test_generic_map_keys.mojo": {
+            "mode": "000644",
+            "sha256": "3743bbd464a1266852ff6d4a73ac69c2968780ea1a5ab47295ee7bc848a8f26e"
+          },
+          "tests/mojo/test_generic_maps.mojo": {
+            "mode": "000644",
+            "sha256": "26b2a136ad62d910f07915ef3470713207eecda68b93f587531f0e231964913c"
+          },
+          "tests/mojo/test_generic_object.mojo": {
+            "mode": "000644",
+            "sha256": "cb616f75fdc09542a53304d99d8611d93a8c3a5202bb0f454f6635b7943dbfa8"
+          },
+          "tests/mojo/test_generic_testrun.mojo": {
+            "mode": "000644",
+            "sha256": "775e802887524b7bdf33fffe467ec723b0bf13a2e21e480298271c630009bfca"
+          },
+          "tests/mojo/test_layout.mojo": {
+            "mode": "000644",
+            "sha256": "5cb671065cd8cb8341a090f826d27856fdf3b6929606dff2f55982cf23c4b8c8"
+          },
+          "tests/mojo/test_public_surface.mojo": {
+            "mode": "000644",
+            "sha256": "003e8a270252470a397c7e31e57d8aac4f3d43064a728c1d011a81c841cb7183"
+          },
+          "tests/mojo/test_release_discipline.mojo": {
+            "mode": "000644",
+            "sha256": "8281a754852380dc92e6e8c7c504ab825b258d87fd91df71ccd0f7321f1b5543"
+          },
+          "tests/mojo/test_session.mojo": {
+            "mode": "000644",
+            "sha256": "919170e9fcc1156de519c1ba8f0f9b419e3c52cd6986bb925aef2168ef9cdaa4"
+          },
+          "tests/mojo/testutil.mojo": {
+            "mode": "000644",
+            "sha256": "4fa345ed3955485cbc9277c24c12b4e8b7ad4519bcf7751aba959c5f5f060964"
+          },
+          "tests/native/abi_v1_frozen.h": {
+            "mode": "000644",
+            "sha256": "28353d7a21d14516d70b92fa2e845112cceac4670c89e08625d69a8047a75951"
+          },
+          "tests/native/attach_rollback.c": {
+            "mode": "000644",
+            "sha256": "225cd67e56dd6f1c15555e98a1dad72dc2897e5324ecb7575cd3b999d5f34d99"
+          },
+          "tests/native/check_exports.sh": {
+            "mode": "000755",
+            "sha256": "adb93ba0f7ef16c7a44187dc556ed8773940ca4f6fda464b44426b93873650fc"
+          },
+          "tests/native/fake_source.c": {
+            "mode": "000644",
+            "sha256": "066f4f90a2104b77d6a0e5b4d3f3192851a0afb36508a29733e7f83830638bcf"
+          },
+          "tests/native/generic_abi_probe.c": {
+            "mode": "000644",
+            "sha256": "05f7800866a122dcd1a73fd198308be5be54c40c3c6ce607f7b9e1380940edfb"
+          },
+          "tests/native/generic_attach.c": {
+            "mode": "000644",
+            "sha256": "362390884e6616abf481ad64961ce030a80462a1c0a086d9e3d02346d5dcd604"
+          },
+          "tests/native/generic_map_keys.c": {
+            "mode": "000644",
+            "sha256": "ed894c7d8727110b5750bbf1d0891724645fca1440b329d36d47b6ce279bc8d0"
+          },
+          "tests/native/generic_maps.c": {
+            "mode": "000644",
+            "sha256": "55f7238627f65f6779088b7b26474417f2c66bbf173bdac8e4bd586fcc50608a"
+          },
+          "tests/native/generic_object.c": {
+            "mode": "000644",
+            "sha256": "f8414becb55ec011061d5c2d6538204af41df7b4fff112ada8dd236511c4f3ac"
+          },
+          "tests/native/generic_ring.c": {
+            "mode": "000644",
+            "sha256": "16bc7242844156e92b002c2064ac71de5586515fed28abd78fee069b2bacd768"
+          },
+          "tests/native/generic_testrun.c": {
+            "mode": "000644",
+            "sha256": "fd5ae1415835cba2645ba2e1fbed1e680dc20e3cd25a93f8e22e64f0a0cd4877"
+          },
+          "tests/native/map_access.c": {
+            "mode": "000644",
+            "sha256": "250ce29e55e0ac6fc25cd2d88e7ddc83dcbd6ce30ad60bbf98a9d01b3f5f9fc1"
+          },
+          "tests/native/old_consumer_v1.c": {
+            "mode": "000644",
+            "sha256": "3197fa0ca8f4ef4166ffbabf8b891b2b993f5e7aa9b8eb919cfb66566a4757b2"
+          },
+          "tests/native/poll_semantics.c": {
+            "mode": "000644",
+            "sha256": "55f476d186aab5a5dfa56a9755290a4cb41349cd2790227777807e22a2a8fd69"
+          },
+          "tests/native/reference_consumer.c": {
+            "mode": "000644",
+            "sha256": "097ff55264cfa4001439ae4bf52c033cec0893c0ee49be1f3f1095cb655de124"
+          },
+          "tests/native/ring_conformance.c": {
+            "mode": "000644",
+            "sha256": "08d30f51697f5eba46552c3b28d4322d995bf799997aa56081effdd1ed3ef4e1"
+          },
+          "tests/native/ring_framing.c": {
+            "mode": "000644",
+            "sha256": "267b4239ca7f7b4173b32e729b4fff0a816dbf13c9285718a6d09315d0dc5a5b"
+          },
+          "tests/native/test_generic_host_guard.c": {
+            "mode": "000644",
+            "sha256": "3b41ed0f24210367d763781131e9e6b1a911eb64581d1b0b002092e43551dfd3"
+          },
+          "tests/native/testutil.h": {
+            "mode": "000644",
+            "sha256": "77d8b783abd796580bfb6df677d9f1505c31b974430882cef5a3b94451484b2e"
+          },
+          "tests/package/Dockerfile.clean": {
+            "mode": "000644",
+            "sha256": "35f2d2bf36266ced3d4a4b59ea8f53ad4ae850c263a16c4593294515cdb7b9cf"
+          },
+          "tests/package/clean-check.sh": {
+            "mode": "000755",
+            "sha256": "f0f55d9148eecf58743e08ac4996c11416ea27bc0dc6ea84eac7a500d83c38a2"
+          },
+          "tests/package/consumer_buffer.mojo": {
+            "mode": "000644",
+            "sha256": "73a15c2070082c73977287f63d58cfb872cc7999b5f27516217f4acc2bac17d7"
+          },
+          "tests/package/consumer_link.mojo": {
+            "mode": "000644",
+            "sha256": "1573b76e6d49017861301f42707dd2fba90c19061267a3687b9a961226532c7a"
+          },
+          "tests/package/consumer_main.mojo": {
+            "mode": "000644",
+            "sha256": "f30f755eda652852758ecef53cefa888643dabe69c8a807f61eff23dbcd56333"
+          },
+          "tests/package/consumer_map_keys.mojo": {
+            "mode": "000644",
+            "sha256": "068a2dde5ce3c739e7c5ff6bbaf616ff20a0cf2f885f4c6f383b76064ec89183"
+          },
+          "tests/package/consumer_maps.mojo": {
+            "mode": "000644",
+            "sha256": "343c60b402151b05861f587cbe192f51a6a0caf002631b82f90f8db416bc6965"
+          },
+          "tests/package/consumer_object.mojo": {
+            "mode": "000644",
+            "sha256": "fc6e23a385d96fb5ff9c698e2bdf962dba9514aad43102343f72a1523b8c310a"
+          },
+          "tests/package/consumer_testrun.mojo": {
+            "mode": "000644",
+            "sha256": "e060de3af05ae032c9c4af0944ddbec79a71b436494aa8b99208ada519426d98"
+          },
+          "tests/package/test_consumer_lane.py": {
+            "mode": "000644",
+            "sha256": "f02fd285b1c2c71f96e7cc9fe122000ddf25a9404589ab08c0518ca8ee50bb34"
+          },
+          "tests/package/test_development_loader.py": {
+            "mode": "000644",
+            "sha256": "8e4b01f7e6bdd5170934965de175dea7ad6895340cd8d54a1fa9f6e50a980d60"
+          },
+          "tests/package/test_loader.py": {
+            "mode": "000644",
+            "sha256": "4ac6acc7e1dcfa885a5c5c57cf08fa763c4598158314e546197e09b87d530a32"
+          },
+          "tests/package/test_package.py": {
+            "mode": "000755",
+            "sha256": "84ec64f97a3e1ae5fcff4e068729696fb0fc9724ef992df93c5f9bccd1022b08"
+          },
+          "tests/package/test_source_export.py": {
+            "mode": "000644",
+            "sha256": "1b4297da5a4b86f2418016ee0a5f816d788f74d2cd625c6bd724a9a8640775d3"
+          },
+          "tests/provenance/test_input_pins.py": {
+            "mode": "000644",
+            "sha256": "f0281e5489d8cb064a778a9557ee702bead9048437d8597bacb2690f845d9d21"
+          },
+          "tests/provenance/test_provenance.py": {
+            "mode": "000644",
+            "sha256": "b759117512464b9bd12428d133dec8ad65d8a72b0b063d3991da72527593ee82"
+          },
+          "tests/runner/test_runner.sh": {
+            "mode": "000755",
+            "sha256": "af9a3b04272a467d0ec8d0f9fea159cd6b92a7eb3aac7f16c76fabc171d22d34"
+          },
+          "tests/selftest/test_api_coverage.py": {
+            "mode": "000644",
+            "sha256": "2dbdd3d49dd50cb8b795ecdff8c32e4b86caa5dc7daef62e509603255941bfb4"
+          },
+          "tests/selftest/test_api_seal_refresh.py": {
+            "mode": "000644",
+            "sha256": "6c49a67da9f7cff1268dd5c8654ff515efd99c2715c3f8764deb7dff0395f7dc"
+          },
+          "tests/selftest/test_archive_seal.py": {
+            "mode": "000644",
+            "sha256": "06007df1bad4a09d3ba10744dc2164cd6e25b52a34111a179c1273ef36924a0b"
+          },
+          "tests/selftest/test_build_runtime.py": {
+            "mode": "000644",
+            "sha256": "aa833220690861365e3f7ed1cb5d8ceb9a61ad8d0f42eab5a399f357c55268d8"
+          },
+          "tests/selftest/test_clean_base.py": {
+            "mode": "000644",
+            "sha256": "65436c56e438477edabe0c6f3125ead5dd6572882f58cc7784acf91ba3706691"
+          },
+          "tests/selftest/test_compile_fail_matcher.py": {
+            "mode": "000644",
+            "sha256": "1ca4992a3ee3e74f06f27df013477d8bf0c6f45968101e2647fb23851e6a9b56"
+          },
+          "tests/selftest/test_offline_scope.py": {
+            "mode": "000644",
+            "sha256": "acc80a486fa096ae20f5cca66c8143806eb6009845f3309ce52029de0e0e1684"
+          },
+          "tests/selftest/test_package_libs_checks.py": {
+            "mode": "000644",
+            "sha256": "aa50ca555367541991ac147249d5ebca2b58981fcaeeed565d0d5e786d0844c8"
+          },
+          "tests/selftest/test_package_transaction.py": {
+            "mode": "000644",
+            "sha256": "1314c321074644f564cd1b3b481ac8ccc2bd2664e9d2849685f6e949b99666e9"
+          },
+          "tests/selftest/test_provenance_gate.py": {
+            "mode": "000644",
+            "sha256": "30830afbcef687596a7fdf5459955de9fe116200a3f94c1923348a7cab45ade9"
+          },
+          "tests/selftest/test_public_surface.py": {
+            "mode": "000644",
+            "sha256": "4af6769ec54e68cb7b2836ab9d368e486ab60e95c5b4b56cc4b4785c19a53f3f"
+          },
+          "tests/selftest/test_qualification_results.py": {
+            "mode": "000644",
+            "sha256": "9363b7ccbce1f1a07f5c0ecc980b440765b9fe10fa1f88dd9bf064b646198930"
+          },
+          "tests/selftest/test_runtime_binding.py": {
+            "mode": "000644",
+            "sha256": "79703d33c8d111a2ebf1406d5f6a7c6a5e6be3e50cc842582d21f3f0cd5b3e11"
+          },
+          "tests/selftest/test_source_identity.py": {
+            "mode": "000644",
+            "sha256": "7bfdde00b0da341243e07998fc69ab5946b4d1fdbb1689ded671358c7ce785b6"
+          },
+          "tests/selftest/test_toolchain_receipt.py": {
+            "mode": "000644",
+            "sha256": "bb99d3d6eb4716dd3b160dcc96bbe1902828786ef5dd9560eeb127c2e2629761"
+          },
+          "tests/selftest/test_writer_wait.py": {
+            "mode": "000644",
+            "sha256": "e0eb669fca46becffdf9631578c039df2229ff2d0d84f14ac68faf33aa310803"
+          },
+          "tests/support/check_events_testfake_exports.sh": {
+            "mode": "000644",
+            "sha256": "baf7a36d79bb9fca632784e4577ce472a1c57db41dfdd335123398dc1332f379"
+          },
+          "tests/support/check_generic_testfake_exports.sh": {
+            "mode": "000644",
+            "sha256": "458112464dc1d3ba66d8ed5b19e7290e40a812ef1b1cadb1d74d87736458d9d2"
+          },
+          "tests/support/check_testfake_exports.sh": {
+            "mode": "000755",
+            "sha256": "5a4c387b467bec313e33cd10801d53e57132c052aa974b718d32947ef23c4202"
+          },
+          "tests/support/fake_generic.c": {
+            "mode": "000644",
+            "sha256": "bd02046966fd5ed8aacf01f0a99fc29d314ac370ec8cbe04697857c90b954b7a"
+          },
+          "tests/support/fake_session.c": {
+            "mode": "000644",
+            "sha256": "2509742674c3e644bcc9d9122f2b32f5fc15b96ce15238157fb08a7d7a574b17"
+          },
+          "tests/support/generic_events_host.c": {
+            "mode": "000644",
+            "sha256": "d1d68f0ee96b2dbab8a97d75ef60e3fd6a6e3bb159d9174fd94f9ce57128fda3"
+          },
+          "tests/support/generic_events_host.h": {
+            "mode": "000644",
+            "sha256": "0e6244de78873ffdd9edc46d48cf0fb2375851c6689ed868147a5a7a985199c3"
+          },
+          "tests/support/generic_host_guard.c": {
+            "mode": "000644",
+            "sha256": "67eb188b8c8ee725a82829d2bf12e2b15f752b75b4e6a2843b1b07945e205937"
+          },
+          "tests/support/lmb_events_testfake.map": {
+            "mode": "000644",
+            "sha256": "85455855a4e5284e89e6121bc89e6067f3cbc45bb6c15ceb10e8533dddb16103"
+          },
+          "tests/support/lmb_generic_testfake.map": {
+            "mode": "000644",
+            "sha256": "e19b598b6bba7f7765f2a174c9f5949af686421a5bfdcb00504ca9415c305317"
+          },
+          "tests/support/lmb_testfake.map": {
+            "mode": "000644",
+            "sha256": "633bdf57fb171eebe4304284c7b719c8ebc42d991e320856a34843f9bcaf75c6"
+          },
+          "tests/support/stub_partial.c": {
+            "mode": "000644",
+            "sha256": "efc899c62564a14b4485ae09d40621e83cb69802d82e4cdb3be860ddc84a5a16"
+          },
+          "toolchain.lock.json": {
+            "mode": "000644",
+            "sha256": "248af7df437442ba5e9ec2b0cda3a143d901ce7acbf8ba27fa465b13e0b14663"
+          },
+          "tools/build": {
+            "mode": "000755",
+            "sha256": "8a5e4515511b8fe0f3ea0c7473c5a88d6cbece21ff0c9776af2d1888d0651e0a"
+          },
+          "tools/build_receipt.py": {
+            "mode": "000644",
+            "sha256": "3121a92362f10fa06f7cecc1d4146c31787bbcc5def2cb7418db176690f06bb9"
+          },
+          "tools/build_runtime.py": {
+            "mode": "000644",
+            "sha256": "24b6149c1c92b8cf1a0634e41f193d82b87d0ca9187927e24b39bc6ce3a3bcdb"
+          },
+          "tools/compile_fail_diagnostics.py": {
+            "mode": "000644",
+            "sha256": "8c297c4176581a2b43b1b8fb3a47f9133ad0a5c219a70de475d6026812395ae2"
+          },
+          "tools/install-pixi": {
+            "mode": "000755",
+            "sha256": "cfac13baaf085256c6954b52323153e62c62ccfb3a68419d5a2bbe041ee073f1"
+          },
+          "tools/notices/GCC-RUNTIME-LIBRARY-EXCEPTION-3.1.txt": {
+            "mode": "000644",
+            "sha256": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74"
+          },
+          "tools/notices/GPL-3.0.txt": {
+            "mode": "000644",
+            "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+          },
+          "tools/notices/README.md": {
+            "mode": "000644",
+            "sha256": "e61bb4acf8038f6e67244258dad22f48141ef6a78b0ee9274f1be4070022396c"
+          },
+          "tools/notices/ZLIB.txt": {
+            "mode": "000644",
+            "sha256": "ee1e64c3fcad42e638318e43217d89791e1e61a50a1a2fa516ccee8725909d1e"
+          },
+          "tools/package": {
+            "mode": "000755",
+            "sha256": "15e79746dad3ff3cdc620e37f8d850e51e1aab145d91bb13afbe38dff46d7012"
+          },
+          "tools/package_libs.py": {
+            "mode": "000644",
+            "sha256": "dc33449d11e87abbcbe241606a1337995cfe249addf0298febece3588e622c3a"
+          },
+          "tools/package_manifest.py": {
+            "mode": "000644",
+            "sha256": "111c47c5f52101a2a9e50fb5c3ca360ed6b133ac27c4bb4284a2423820d4da2d"
+          },
+          "tools/package_notices.py": {
+            "mode": "000644",
+            "sha256": "598dce176c1b5346fc7e2872dd26394e42be72e841918b0b2e3dc0776d3103d0"
+          },
+          "tools/package_runtime.py": {
+            "mode": "000644",
+            "sha256": "45e42c365ca4951db1ff50bbadfbef5075bfbb894450840efb331d4fc3873dd1"
+          },
+          "tools/provenance.py": {
+            "mode": "000644",
+            "sha256": "88a205478bc9e9b086f242ee694276714f650ef576107217178784dc4dc6bc28"
+          },
+          "tools/qualification-results": {
+            "mode": "000755",
+            "sha256": "2bca009d3dabce13ae7f176cf420f48bd9460925c1890c48387dc7d25ec9d6d7"
+          },
+          "tools/refresh-api-seals": {
+            "mode": "000755",
+            "sha256": "eb88d174792f92c08e4dffa31f0ad7eade87a5d6afa979fc82fdad3dd924c16c"
+          },
+          "tools/test": {
+            "mode": "000755",
+            "sha256": "97bacb5c43a57738027ae05eaf2f9824a040da1b6b837b0b798a8be56620b59e"
+          }
+        },
+        "mode": "git"
+      },
+      "toolchain_observed": {
+        "bpftool": "bpftool v7.6.0",
+        "clang": "clang version 22.1.8 (Fedora 22.1.8-4.fc44)",
+        "cmake": "cmake version 4.3.0",
+        "gcc": "gcc (GCC) 16.2.1 20260819 (Red Hat 16.2.1-2)",
+        "make": "GNU Make 4.4.1",
+        "mojo": "Mojo 1.2.0 (2016d0cd)",
+        "ninja": "1.13.2",
+        "patchelf": "patchelf 0.18.0",
+        "pixi": "pixi 0.83.0",
+        "pkg-config": "2.5.1",
+        "python": "Python 3.14.8",
+        "zlib": "1.3.1.zlib-ng"
+      }
+    },
+    "toolchain_expected": {
+      "make": "GNU Make 4.4.1",
+      "mojo": "Mojo 1.2.0 (2016d0cd)",
+      "ninja": "1.13.2",
+      "pixi": "pixi 0.83.0",
+      "pkg-config": "2.5.1"
+    }
+  },
+  "files": [
+    {
+      "bytes": 11358,
+      "path": "LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "bytes": 17984,
+      "path": "LICENSES/GPL-2.0-only.txt",
+      "sha256": "edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6"
+    },
+    {
+      "bytes": 883,
+      "path": "LICENSES/LLVM-exception.txt",
+      "sha256": "ddabf2be4dbf3d983bce354836ed5b72221aba21e807e308948f182423c79306"
+    },
+    {
+      "bytes": 4022,
+      "path": "README.md",
+      "sha256": "c592a161184c4aac3d33e065b95c86adc6bba2014abb9e4f4e63e2addb69e2b9"
+    },
+    {
+      "bytes": 2480,
+      "path": "THIRD-PARTY-NOTICES.md",
+      "sha256": "9d706ef8642dff2ae85e5585b6715959638949993db0c8bb4b643240d4272d57"
+    },
+    {
+      "bytes": 43727,
+      "path": "docs/generic-abi-v1.md",
+      "sha256": "19df0acdbf01e3e8ad8c73b9a75d103406e2489e8d040c2223f54d6668857595"
+    },
+    {
+      "bytes": 5890,
+      "path": "docs/links-and-ring.md",
+      "sha256": "eda7d8ca305171c72325e3f838811c6403f78a127bf079365c1f2da9198b05c5"
+    },
+    {
+      "bytes": 7839,
+      "path": "docs/maps-and-test-run.md",
+      "sha256": "4c6d2d7f616eda88d673b66a142bb9b0f7ba2712f205231917eb9dd3662c3c2f"
+    },
+    {
+      "bytes": 14247,
+      "path": "docs/ownership.md",
+      "sha256": "a7d18191702cbf05bf70fef91178cb8fee02bb254b88642fae5f2df5e1bd3ca0"
+    },
+    {
+      "bytes": 9520,
+      "path": "examples/probe.bpf.o",
+      "sha256": "923d3cc3a387e5ee01fbfc19a559519926b69c2134b581ab189c702c61c03c95"
+    },
+    {
+      "bytes": 1540448,
+      "path": "examples/reference_consumer",
+      "sha256": "f04ac3f640ee60f74d89b318f657b4ae7b996a8391215b264d0cd5832c148f1a"
+    },
+    {
+      "bytes": 134632,
+      "path": "examples/tracepoint_main",
+      "sha256": "0d16e73a86a00ec56af11a6cf543ded1c1a2f4850b38f27c3d5996f5594eac35"
+    },
+    {
+      "bytes": 13312,
+      "path": "examples/tracepoint_trigger",
+      "sha256": "e2fe5873d73b078c58aa819c25b4183f9ace90549f7e0cd6488ca538e7247eca"
+    },
+    {
+      "bytes": 7125,
+      "path": "include/libbpf_mojo.h",
+      "sha256": "b1cbc4910da644a31535fb665939511be9196d22bbe771492a2c654de1d9ec7e"
+    },
+    {
+      "bytes": 16529,
+      "path": "include/libbpf_mojo_generic.h",
+      "sha256": "be068425785ce7349f2dafb0a908a126462850a5285db4ec7a1dda6c224c888c"
+    },
+    {
+      "bytes": 687096,
+      "path": "lib/libAsyncRTRuntimeGlobals.so",
+      "sha256": "a27c591c97b7066377a6c5a12ecc1fecf2f600d9ccf869a371c441c8a1946648"
+    },
+    {
+      "bytes": 1315400,
+      "path": "lib/libKGENCompilerRTShared.so",
+      "sha256": "c9e0abb7a7f74b0dc5b07e7875a87b4dc4f8c02af3ba473c5e4bd0fab89b6c0e"
+    },
+    {
+      "bytes": 53200,
+      "path": "lib/libMSupportGlobals.so",
+      "sha256": "5cec8730d291375941f235604dcf9778ac9508cf6e41bd5f308572d7bc8c65db"
+    },
+    {
+      "bytes": 1560072,
+      "path": "lib/libbpf_mojo.so.1",
+      "sha256": "4cc5a596067dc4e9eab8aa86d92f018ac56ab281eb83bf8475fa3377720787af"
+    },
+    {
+      "bytes": 922624,
+      "path": "lib/libgcc_s.so.1",
+      "sha256": "5444fbe71e8cfe3bd05cdf2b44bd8c2e553e6e7e276977089b5e4e1a1ceed531"
+    },
+    {
+      "bytes": 23874544,
+      "path": "lib/libstdc++.so.6",
+      "sha256": "10f0d3c46c070acd4abea2ccf2500ff0ec77e9b90154b82ea2720dba05510cb9"
+    },
+    {
+      "bytes": 117168,
+      "path": "lib/libz.so.1",
+      "sha256": "3c6fd78e248a60e45081bcc77031204a7cb64a88ff2e27fc786ef12ae7e91fca"
+    },
+    {
+      "bytes": 35149,
+      "path": "licenses/GPL-3.0.txt",
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    {
+      "bytes": 1649,
+      "path": "licenses/LICENSE.BSD-2-Clause.libbpf",
+      "sha256": "e1638b9a0c68ca90fad3df1d6b4e430804d2fbdc15e58d02cffddfae38953bbf"
+    },
+    {
+      "bytes": 13342,
+      "path": "licenses/LICENSE.mojo-compiler",
+      "sha256": "f35ac2dfeb4a3e9482468874a50ce4dfb16fc11c3aefd2a1b4d51c44515ed02d"
+    },
+    {
+      "bytes": 962,
+      "path": "licenses/LICENSE.zlib",
+      "sha256": "ee1e64c3fcad42e638318e43217d89791e1e61a50a1a2fa516ccee8725909d1e"
+    },
+    {
+      "bytes": 633,
+      "path": "licenses/NOTICE.mojo-runtime.md",
+      "sha256": "92d32979037e2b2c3cc4f5f1ee929002c1224ad71d156d7847b64c60bdab8293"
+    },
+    {
+      "bytes": 3324,
+      "path": "licenses/RUNTIME.LIBRARY.EXCEPTION",
+      "sha256": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74"
+    },
+    {
+      "bytes": 59601,
+      "path": "licenses/Third-Party-Notices.mojo-compiler",
+      "sha256": "c12337f144b96ee908c4c32cd0be3fe151eb186931836c7e155481e101420446"
+    },
+    {
+      "bytes": 2210,
+      "path": "mojo/libbpf_mojo/__init__.mojo",
+      "sha256": "f392392a583c2f79dec9c9247144924baa29517838b4ab6be4a75015fe72474a"
+    },
+    {
+      "bytes": 33689,
+      "path": "mojo/libbpf_mojo/_ffi.mojo",
+      "sha256": "884e253eb26282566255da8cab0679c840e6c1ec744d4f273216a0a60abe9deb"
+    },
+    {
+      "bytes": 3151,
+      "path": "mojo/libbpf_mojo/batch.mojo",
+      "sha256": "9aca31c4aece034498916ae5baf97a5f50f2cdd80bbc4bab95fcd84fec4a8eb4"
+    },
+    {
+      "bytes": 6890,
+      "path": "mojo/libbpf_mojo/buffer.mojo",
+      "sha256": "e16c4a22f2d742c6d7e9550e3256837879d9fe79e505bdcaa801c0ebb4865cef"
+    },
+    {
+      "bytes": 1100,
+      "path": "mojo/libbpf_mojo/error.mojo",
+      "sha256": "31d6ff7d2d03d7ae185e4a331235e3e31281f620973a2e7eb7604742ffc76583"
+    },
+    {
+      "bytes": 3088,
+      "path": "mojo/libbpf_mojo/link.mojo",
+      "sha256": "36b443a261d4fc3ce7b05699ad6e0d20a9378493e7c3eec99680b283c2b7586d"
+    },
+    {
+      "bytes": 7894,
+      "path": "mojo/libbpf_mojo/maps.mojo",
+      "sha256": "3749714daa5a90f53acb03beb91704fc8483d4608fad0b6b54f461ffdbfa28e4"
+    },
+    {
+      "bytes": 12898,
+      "path": "mojo/libbpf_mojo/object.mojo",
+      "sha256": "0846aa51f9472ee96b40ad19bf2a4a5916bfba472014e97de638917f8d0c996f"
+    },
+    {
+      "bytes": 2151,
+      "path": "mojo/libbpf_mojo/program.mojo",
+      "sha256": "305db982f9ff6d6a8fc763fae91322f09f9510d666d8e3ac360b6f8568187b27"
+    },
+    {
+      "bytes": 17398,
+      "path": "mojo/libbpf_mojo/session.mojo",
+      "sha256": "8735a90c7a24fea291345caad44c674de4bf6ed2397fea4b995aafd0f1293cf9"
+    },
+    {
+      "bytes": 11029,
+      "path": "run-tracepoint.sh",
+      "sha256": "08ee35ac5ffcb047d785190f3ddc0ed88f5fa0494345950f2b524a97db9b7309"
+    }
+  ],
+  "first_party": {
+    "license_default": "Apache-2.0 WITH LLVM-exception",
+    "licenses": {
+      "Apache-2.0 WITH LLVM-exception": [
+        "LICENSE",
+        "LICENSES/LLVM-exception.txt"
+      ],
+      "GPL-2.0-only": [
+        "LICENSES/GPL-2.0-only.txt"
+      ]
+    },
+    "paths": {
+      "examples/probe.bpf.o": "GPL-2.0-only"
+    }
+  },
+  "licenses": {
+    "lib/libAsyncRTRuntimeGlobals.so": [
+      "licenses/LICENSE.mojo-compiler",
+      "licenses/NOTICE.mojo-runtime.md",
+      "licenses/Third-Party-Notices.mojo-compiler"
+    ],
+    "lib/libKGENCompilerRTShared.so": [
+      "licenses/LICENSE.mojo-compiler",
+      "licenses/NOTICE.mojo-runtime.md",
+      "licenses/Third-Party-Notices.mojo-compiler"
+    ],
+    "lib/libMSupportGlobals.so": [
+      "licenses/LICENSE.mojo-compiler",
+      "licenses/NOTICE.mojo-runtime.md",
+      "licenses/Third-Party-Notices.mojo-compiler"
+    ],
+    "lib/libgcc_s.so.1": [
+      "licenses/GPL-3.0.txt",
+      "licenses/RUNTIME.LIBRARY.EXCEPTION"
+    ],
+    "lib/libstdc++.so.6": [
+      "licenses/GPL-3.0.txt",
+      "licenses/RUNTIME.LIBRARY.EXCEPTION"
+    ],
+    "lib/libz.so.1": [
+      "licenses/LICENSE.zlib"
+    ]
+  },
+  "package": "libbpf-mojo",
+  "runtime": {
+    "bundled_libs": [
+      "lib/libAsyncRTRuntimeGlobals.so",
+      "lib/libKGENCompilerRTShared.so",
+      "lib/libMSupportGlobals.so",
+      "lib/libgcc_s.so.1",
+      "lib/libstdc++.so.6",
+      "lib/libz.so.1"
+    ],
+    "needs": [
+      "glibc",
+      "libelf",
+      "zlib",
+      "bpf-privilege"
+    ],
+    "system_libraries": [
+      "ld-linux-x86-64.so.2",
+      "libc.so.6",
+      "libdl.so.2",
+      "libelf.so.1",
+      "libm.so.6"
+    ],
+    "verified": {
+      "libAsyncRTRuntimeGlobals.so": {
+        "package": "mojo-compiler 1.2.0 (release)",
+        "relocated": false,
+        "sha256": "a27c591c97b7066377a6c5a12ecc1fecf2f600d9ccf869a371c441c8a1946648"
+      },
+      "libKGENCompilerRTShared.so": {
+        "package": "mojo-compiler 1.2.0 (release)",
+        "relocated": false,
+        "sha256": "c9e0abb7a7f74b0dc5b07e7875a87b4dc4f8c02af3ba473c5e4bd0fab89b6c0e"
+      },
+      "libMSupportGlobals.so": {
+        "package": "mojo-compiler 1.2.0 (release)",
+        "relocated": false,
+        "sha256": "5cec8730d291375941f235604dcf9778ac9508cf6e41bd5f308572d7bc8c65db"
+      },
+      "libgcc_s.so.1": {
+        "package": "libgcc 16.2.0 (ha9f2e26_7)",
+        "relocated": false,
+        "sha256": "5444fbe71e8cfe3bd05cdf2b44bd8c2e553e6e7e276977089b5e4e1a1ceed531"
+      },
+      "libstdc++.so.6": {
+        "package": "libstdcxx 16.2.0 (h934c35e_7)",
+        "relocated": false,
+        "sha256": "10f0d3c46c070acd4abea2ccf2500ff0ec77e9b90154b82ea2720dba05510cb9"
+      },
+      "libz.so.1": {
+        "package": "libzlib 1.3.2 (h25fd6f3_3)",
+        "relocated": false,
+        "sha256": "3c6fd78e248a60e45081bcc77031204a7cb64a88ff2e27fc786ef12ae7e91fca"
+      }
+    }
+  },
+  "version": "0.2.3"
+}

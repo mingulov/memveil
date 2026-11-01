@@ -71,12 +71,15 @@
   "dependencies": {
     "libbpf-mojo": {
       "status": "pinned",
-      "version": "0.2.2",
-      "source_commit": "49bb052ab2011e125017c21031bd81118f9c4fd4",
-      "tarball_sha256": "d4dbf7fdfd7a407339958aed3e12699ca24557c71cfa9763046c5d5ff7aa126e",
+      "version": "0.2.3",
+      "source_commit": "4a22288a397dec5158766fdfcd7a2a6691d1a9fb",
+      "tarball_sha256": "c69e65d43b27fa7fbbbcf0ec827535f9193dbbbcbfc1e6604530fd01e66dd3cf",
       "mojo_tree": "mojo/libbpf_mojo",
       "native_lib": "lib/libbpf_mojo.so.1",
-      "note": "DEV bytes, not the v0.2.2 release: built from 49bb052ab2011e125017c21031bd81118f9c4fd4 plus the uncommitted remediation worktree (privilege/allocation boundaries, public surface and error-contract alignment) for consumer cleanup and conformance; version and SONAME unchanged. Consumed by path (LMB_PACKAGE) plus this exact hash or the vendored tarball. Standalone builds use only declared dependencies. This pin does not establish environment qualification."
+      "source_archive": "third_party/libbpf-mojo-0.2.3-source.tar.gz",
+      "source_archive_sha256": "eb5909d90ac890f7a51aff1620ed2e3b9354d5989bed15da154304154b310618",
+      "source_index": "third_party/libbpf-mojo-0.2.3-source-map.json",
+      "note": "Clean, untagged 0.2.3 development candidate from the exact committed source above; not a published v0.2.3 release or a live-qualified artifact. ABI 1 and SONAME are unchanged. Consumed by path (LMB_PACKAGE) plus this exact hash or the vendored tarball. Corresponding first-party and pinned libbpf source, notices and provenance are included under third_party/. Ordinary live and compiler-free clean-room gates remain pending; confidential-platform qualification is separate."
     }
   },
   "expected_first_lines": {
@@ -92,7 +95,7 @@
   },
   "platform_floor": {
     "arch": "x86-64",
-    "kernel": ">= 7.0 for collection; doctor, help, version, and offline report have no kernel floor",
+    "kernel": "attempt-trace >= 6.0; mapping-lifecycle and copy-actual >= 6.11; BTF required; qualification ceiling 7.3 (not a refusal ceiling); doctor, help, version, and offline report have no kernel floor",
     "note": "A version string is eligibility only. Each capability needs its own profile and live evidence."
   },
   "decisions": [

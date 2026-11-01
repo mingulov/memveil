@@ -119,7 +119,18 @@ prebuilt native bridge plus Mojo wrapper sources and the C
 interface header (no native implementation sources); the build
 links the prebuilt bridge, it never compiles it. `LMB_PACKAGE`
 overrides the vendored bytes with another tarball, which must
-match the same pin before the build accepts it.
+match the same pin before the build accepts it. The current pin is the
+clean, untagged libbpf-mojo 0.2.3 development candidate at
+`4a22288a397dec5158766fdfcd7a2a6691d1a9fb`, with ABI 1 and the
+existing SONAME. It replaces the previous dirty 0.2.2 development
+bundle; it is not a published v0.2.3 release. Ordinary live collection
+and compiler-free clean-room qualification remain pending, and no
+confidential-platform support follows from this source update.
+
+The source distribution includes the matching first-party source,
+exact pinned libbpf source, upstream notices, build receipt and source
+map. See [vendored dependency inputs](../third_party/README.md) for
+hashes, rebuild instructions and runtime-source/license limits.
 
 ## Source sealing
 

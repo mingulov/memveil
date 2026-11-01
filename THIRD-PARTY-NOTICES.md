@@ -14,8 +14,8 @@ remaining `lib/*.so*`, resolved by the NEEDED closure walk
 in `tools/package`). The two origins are told apart in each
 entry.
 
-- `lib/libbpf_mojo.so.1` from libbpf-mojo 0.2.2 (release v0.2.2,
-  source commit `49bb052ab2011e125017c21031bd81118f9c4fd4`, an independent project; the exact
+- `lib/libbpf_mojo.so.1` from libbpf-mojo 0.2.3 (untagged development candidate,
+  source commit `4a22288a397dec5158766fdfcd7a2a6691d1a9fb`, an independent project; the exact
   tarball is named by sha256 in `MANIFEST.json` under
   `libbpf_mojo`).
   The bridge is Apache-2.0 WITH LLVM-exception; its first-party
@@ -25,6 +25,9 @@ entry.
   staged verbatim as `THIRD-PARTY-NOTICES.libbpf-mojo.md`.
   MemVeil consumes libbpf-mojo only through the pinned
   tarball named above, never through a sibling checkout.
+  The source distribution includes the exact first-party and libbpf
+  source archives, notices and source map under `third_party/`.
+  This candidate is not a published or live-qualified library release.
 
 - `lib/libbpf_mojo.so.1` statically links libbpf 1.7.0.
   BSD-2-Clause; full text in

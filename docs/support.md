@@ -115,6 +115,12 @@ are not provided.
   matrix qualifies the 6.0 through 6.10 attempt
   rows below 7.0.
 
+The current source pin uses a clean, untagged libbpf-mojo 0.2.3
+development candidate. The historical 0.2.2 rows above retain their
+original artifact scope. Ordinary live and compiler-free clean-room
+gates for the new candidate remain pending; its source integration
+does not qualify any kernel or confidential platform.
+
 ## Configuration and artifact admission
 
 - Two reference profiles (x86-64, kernel floors 7.0 and
