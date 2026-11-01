@@ -39,7 +39,7 @@ def _contains(hay: String, needle: String) -> Bool:
     return len(hay.split(String(needle))) > 1
 from memveil.model.event import Event
 from memveil.model.metric import Finding, Metric
-from memveil.model.report import Report
+from memveil.model.report import Report, apply_integrity
 from memveil.model.session import DeviceEntry, Session
 from memveil.model.validate import format_u64
 from memveil.platform.clock import MonoClock
@@ -434,6 +434,8 @@ def _sink_text(data: List[UInt8]) raises -> String:
 def _block_want(seq: Int, horizon: UInt64, filt: String) raises -> String:
     """Oracle block: diagnosed render plus the numbered header."""
     var oracle = _sink_report(horizon)
+    apply_integrity(oracle, False, UInt64(0), UInt64(0))
+    oracle.integrity_context = String("live stream")
     _diagnose(oracle, False, UInt64(0))
     var text = render(oracle, String("text"), filt)
     var head = (
@@ -507,7 +509,7 @@ def test_sink_seq_increments() raises:
 def test_sink_filter_matches_replay_render() raises:
     # The live sink and the replay block printer share the
     # diagnose-plus-render path: the same analyzer state
-    # with --device renders byte-identical blocks.
+    # with --device retains identical facts; stream labels differ.
     var scratch = _mkdtemp()
     var live_out = scratch + String("/live.txt")
     var replay_out = scratch + String("/replay.txt")
@@ -538,7 +540,15 @@ def test_sink_filter_matches_replay_render() raises:
     var replay_raw = read_host_file(
         replay_out, String("replay"), 1048576
     )
-    assert_equal(_sink_text(live_raw), _sink_text(replay_raw))
+    var live_text = _sink_text(live_raw)
+    var replay_text = _sink_text(replay_raw)
+    assert_true(_contains(live_text, "integrity: unverified live stream"))
+    assert_true(_contains(replay_text, "integrity: unverified replay prefix"))
+    assert_true(not _contains(live_text, "legacy_unverified"))
+    assert_true(not _contains(live_text, "checkpoint_prefix"))
+    assert_true(not _contains(live_text, ": complete_for_scope loss="))
+    assert_true(not _contains(live_text, ", complete_for_scope,"))
+    assert_equal(live_text.replace("unverified live stream", "unverified replay prefix"), replay_text)
 
 
 def _live_prefix_report() raises -> Report:

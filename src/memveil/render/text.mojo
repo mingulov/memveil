@@ -126,6 +126,7 @@ def _global_metric_text(rep: Report, name: String) -> String:
 def render_compact(rep: Report) -> String:
     """Render the per-refresh summary: verdict plus headlines."""
     var out = verdict_line(rep) + String("\n")
+    out += integrity_line(rep) + String("\n")
     out += String("attempts: ")
     out += _global_metric_text(rep, String("bounce_attempts"))
     out += String("  bytes: ")
@@ -155,6 +156,7 @@ def render_text(rep: Report, device_filter: String = "") raises -> String:
     """Render the report as plain text, one trailing newline."""
     var filt = resolve_device_filter(rep.devices, device_filter)
     var out = verdict_line(rep) + String("\n")
+    out += integrity_line(rep) + String("\n")
     out += String("memveil report ")
     out += escape_text(rep.session_id)
     if rep.synthetic:
@@ -294,3 +296,16 @@ def render_text(rep: Report, device_filter: String = "") raises -> String:
         out += escape_text(rep.limitations[i])
         out += "\n"
     return out
+
+
+def integrity_line(rep: Report) -> String:
+    if rep.integrity_context != "capture":
+        return String("integrity: unverified ") + rep.integrity_context + String("; finalized file verification pending; completeness withheld")
+    var out = String("integrity: ") + rep.integrity_status
+    out += " (verified bytes=" + format_u64(rep.verified_bytes)
+    out += ", events=" + format_u64(rep.verified_events) + ")"
+    if rep.integrity_status == "verified":
+        out += "; literal capture bytes match SHA-256; no authenticity claim"
+    else:
+        out += "; arithmetic is unverified; completeness withheld"
+    return out^

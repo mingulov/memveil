@@ -6,10 +6,10 @@ external schema family are independent. The current exact contracts are:
 
 | Family | Accepted runtime input | Current output | Other versions / retained contracts |
 | --- | --- | --- | --- |
-| Session | 0.1.1, 0.1.2, 0.1.3 | 0.1.3 | 0.1.0 refused (not shipped) |
+| Session | 0.1.1, 0.1.2, 0.1.3, 0.1.4 | 0.1.4 | 0.1.0 refused (not shipped) |
 | Event | 0.1.1, 0.1.2 | 0.1.2 | 0.1.0 refused (not shipped) |
 | Profile | 0.1.1, 0.1.2 | Authored profile documents | 0.1.0 refused (not shipped) |
-| Report | None (output only) | 0.1.3 | 0.1.0, 0.1.1, 0.1.2 |
+| Report | None (output only) | 0.1.4 | 0.1.0, 0.1.1, 0.1.2, 0.1.3 |
 | Doctor | None (output only) | 0.1.1 | 0.1.0 |
 | Receipt | 0.1.0 | 0.1.0 | None |
 
@@ -28,14 +28,36 @@ Fields introduced in a later version are refused in older documents. Session
 verdict, and 0.1.3 adds `LONG_LIVED_NOT_EVALUATED`. Reports are output only;
 the renderer emits the current version and does not read older reports.
 
+## Retained report schema erratum
+
+The frozen `schemas/report-v0.1.3.schema.json` has the 0.1.3 filename and
+`$id`, but its `schema_version` constant is `0.1.2`. It therefore cannot
+establish JSON Schema conformance for a report labeled `0.1.3`. The artifact
+and historical report labels remain unchanged; do not relabel 0.1.3 data as
+0.1.2 to satisfy that incorrect constant.
+
+MemVeil does not read report documents. Legacy compatibility means replaying
+accepted session/event captures into current report 0.1.4, whose schema uses
+the correct constant. The development validator independently checks the
+retained 0.1.3 fixture's structure and arithmetic; those checks are not
+validation against the inconsistent JSON Schema artifact. No alternate
+legacy schema or new format version is introduced for this erratum.
+
+## Integrity implementation boundary
+
+Session 0.1.4 binds literal event bytes, counts, kinds and contiguous
+sequences. Offline readers verify the whole stream before reporting it as
+`verified`. Report 0.1.4 includes integrity status and verified byte/event
+counts. Legacy input remains readable as `legacy_unverified`; normal reports
+return 0 and strict reports return 4, with no complete evidence channels.
+
 ## Reserved versions (planned, unavailable)
 
-- Session 0.1.4 and report 0.1.4 are reserved for capture integrity and
-  durable recovery. Event 0.1.2 stays unchanged; no event 0.1.4 is reserved.
+- Durable checkpoint recovery remains planned. Event 0.1.2 stays unchanged.
 - Session, event and report 0.2.0 are reserved for the opt-in conversion
   request/result journal. It must retain integrity and recovery guarantees;
   successful API results cannot establish physical state or range lifetimes.
-- These versions are not accepted or produced by the current code and have
+- The reserved journal versions are not accepted or produced and have
   no schema files yet. Old schema files remain immutable. Product 0.1.1 is
   the planned hardened ordinary-Linux preview; product 0.2.0 is the planned
   journal and real-SNP qualification target. Neither name is a qualification
@@ -43,7 +65,7 @@ the renderer emits the current version and does not read older reports.
 
 The [integrity and recovery contract](capture-integrity.md) specifies the
 required fields, literal-byte verification, quality demotion, durable
-publication ordering and authoritative exit table for those planned readers.
+publication ordering and authoritative exit table for readers and planned recovery.
 
 The replay path treats every capture as untrusted and stays
 offline: it never loads BPF objects, touches tracefs or

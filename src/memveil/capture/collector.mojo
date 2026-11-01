@@ -12,6 +12,8 @@ session bytes without a kernel; live adapters wrap
 libbpf-mojo Session/bridge calls.
 """
 
+from memveil.capture.writer import CommittedStream
+
 from libbpf_mojo.batch import decode_frame
 from libbpf_mojo.error import LmbError
 from memveil.capture.correlation import CorrelationRegistry
@@ -804,6 +806,7 @@ struct Collector:
     var start_ns: UInt64
     var max_snap_ts: UInt64
     var next_seq: UInt64
+    var committed_stream: CommittedStream
     var table: DeviceTable
     var session_id: String
     var t_close: UInt64
@@ -903,6 +906,7 @@ struct Collector:
         self.start_ns = UInt64(0)
         self.max_snap_ts = UInt64(0)
         self.next_seq = UInt64(0)
+        self.committed_stream = CommittedStream()
         self.table = DeviceTable()
         self.session_id = String("")
         self.t_close = UInt64(0)
@@ -1603,6 +1607,7 @@ struct Collector:
                     + String(": ")
                     + wrote.message
                 )
+            self._account_line(line, String("pool_sample"))
             if base[0].has_used_bytes or base[0].has_capacity_bytes:
                 self.pool_ok = True
             if base[1] > self.max_persisted_ts:
@@ -1773,6 +1778,13 @@ struct Collector:
             return String("closed")
         return String("")
 
+    def _account_line(mut self, line: List[UInt8], kind: String):
+        try:
+            self.committed_stream.commit(line, kind)
+        except:
+            # Internal accounting failure cannot authorize a final session.
+            self.result_state = String("unfinalizable")
+
     def _persist_line[W: WriterSource](
         mut self, mut writer: W, line: List[UInt8], byte_count: UInt64,
         ts_ns: UInt64, kind: String,
@@ -1780,6 +1792,7 @@ struct Collector:
         """Append one encoded event; "" persisted, else closed/error."""
         var wrote = writer.append(line)
         if wrote.ok:
+            self._account_line(line, kind)
             self.persisted += UInt64(1)
             self.persisted_sum += byte_count
             if ts_ns > self.max_persisted_ts:
@@ -1857,6 +1870,7 @@ struct Collector:
         try:
             line = self.encode_attempt(normalized)
         except:
+            self.next_seq -= UInt64(1)
             self.result_state = String("unfinalizable")
             return String("unfinalizable")
         return self._persist_line(
@@ -1895,6 +1909,7 @@ struct Collector:
         try:
             ev = self.registry.normalize(ev^, String("capture"))
         except:
+            self.next_seq -= UInt64(1)
             self.rejected += UInt64(1)
             self.fail(String("error"))
             return String("error-path")
@@ -1902,6 +1917,7 @@ struct Collector:
         try:
             line = encode_event_line(ev)
         except:
+            self.next_seq -= UInt64(1)
             self.result_state = String("unfinalizable")
             return String("unfinalizable")
         var ok_map = (
@@ -1979,6 +1995,7 @@ struct Collector:
         try:
             ev = self.registry.normalize(ev^, String("capture"))
         except:
+            self.next_seq -= UInt64(1)
             self.rejected += UInt64(1)
             self.fail(String("error"))
             return String("error-path")
@@ -1986,6 +2003,7 @@ struct Collector:
         try:
             line = encode_event_line(ev)
         except:
+            self.next_seq -= UInt64(1)
             self.result_state = String("unfinalizable")
             return String("unfinalizable")
         return self._persist_line(
@@ -2599,6 +2617,7 @@ struct Collector:
         """
         var wrote = writer.append(line)
         if wrote.ok:
+            self._account_line(line, String("pool_sample"))
             if ts_ns > self.max_persisted_ts:
                 self.max_persisted_ts = ts_ns
             return String("")
@@ -2635,6 +2654,7 @@ struct Collector:
             return
         var wrote = writer.append_closing(line)
         if wrote.ok:
+            self._account_line(line, String("pool_sample"))
             if sample.has_used_bytes or sample.has_capacity_bytes:
                 self.pool_ok = True
             if ts_ns > self.max_persisted_ts:
@@ -2646,6 +2666,8 @@ struct Collector:
         self.next_seq -= UInt64(1)
         self.closing_error = True
         self.result_state = String("error")
+        if wrote.kind == "fatal" or wrote.kind == "misuse":
+            self.result_state = String("unfinalizable")
 
     def closing_records[W: WriterSource](mut self, mut writer: W) -> String:
         """Append snapshots (rollback group) + pool + gap; "" or fatal."""
@@ -2656,6 +2678,7 @@ struct Collector:
                 return String("unfinalizable")
             var mark = begun.mark
             var seq_mark = self.next_seq
+            var stream_mark = self.committed_stream.copy()
             var failed = False
             try:
                 var lines = List[List[UInt8]]()
@@ -2694,8 +2717,12 @@ struct Collector:
                 for i in range(4):
                     var wrote = writer.append_closing(lines[i])
                     if not wrote.ok:
+                        if wrote.kind == "fatal" or wrote.kind == "misuse":
+                            self.result_state = String("unfinalizable")
+                            return String("unfinalizable")
                         failed = True
                         break
+                    self._account_line(lines[i], String("counter_snapshot"))
             except:
                 failed = True
             if failed:
@@ -2704,6 +2731,7 @@ struct Collector:
                     self.result_state = String("unfinalizable")
                     return String("unfinalizable")
                 self.next_seq = seq_mark
+                self.committed_stream = stream_mark^
                 self.snapshots_present = False
                 self.closing_error = True
                 self.result_state = String("error")
@@ -2713,14 +2741,21 @@ struct Collector:
             var fin = self.pool_final
             var fin_ts = self.pool_final_ts
             self.persist_pool_sample(writer, fin, fin_ts)
+            if self.result_state == "unfinalizable":
+                return String("unfinalizable")
         if self.unknown_cause != String(""):
             try:
                 var gap = self.gap_event()
                 var wrote = writer.append_closing(gap)
+                if wrote.ok:
+                    self._account_line(gap, String("gap"))
                 if not wrote.ok:
                     self.next_seq -= UInt64(1)
                     self.closing_error = True
                     self.result_state = String("error")
+                    if wrote.kind == "fatal" or wrote.kind == "misuse":
+                        self.result_state = String("unfinalizable")
+                        return String("unfinalizable")
             except:
                 self.next_seq -= UInt64(1)
                 self.closing_error = True
@@ -2892,10 +2927,15 @@ struct Collector:
             return self.drop_unfinalizable(writer)
         if not self.contained():
             return self.drop_unfinalizable(writer)
+        var integrity = self.committed_stream.snapshot()
+        if integrity.events_bytes != UInt64(writer.committed_len()) or integrity.line_count != self.next_seq:
+            return self.drop_unfinalizable(writer)
         var session_text: String
         var assembled = Session()
         try:
             assembled = self.assemble()
+            assembled.has_integrity = True
+            assembled.integrity = integrity^
             session_text = encode_session(assembled)
         except:
             return self.drop_unfinalizable(writer)

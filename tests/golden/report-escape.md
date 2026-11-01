@@ -2,6 +2,7 @@
 
 - synthetic: yes
 - engine: memveil-0.1.0
+- integrity: legacy_unverified (verified bytes=0, events=0); arithmetic is unverified; completeness withheld
 - verdict: partial_unknown_loss (loss >=0.00%, 1 delivered)
 - window: [1000000000,4000000000)
 - duration: 3.000000000 s (3000000000 ns)
@@ -34,20 +35,20 @@
 
 | channel | status | loss | scope | reason |
 | --- | --- | --- | --- | --- |
-| detail | complete_for_scope | 0 | 1 bounce\_attempt event | Authored fixture: no loss. |
-| aggregate | unavailable | unknown | counter snapshots | No counter snapshots in this fixture. |
-| correlation | complete_for_scope | 0 | attempt counting | Attempt counting needs no cross-event correlation. |
-| baseline | not_applicable | unknown | attempt metrics | Attempt metrics need no baseline. |
-| terminal | complete_for_scope | 0 | authored fixture finalization | Authored fixture: finalized. |
+| detail | partial | 0 | 1 bounce\_attempt event | Capture integrity unverified; Authored fixture: no loss. |
+| aggregate | unavailable | unknown | counter snapshots | Capture integrity unverified; No counter snapshots in this fixture. |
+| correlation | partial | 0 | attempt counting | Capture integrity unverified; Attempt counting needs no cross-event correlation. |
+| baseline | not_applicable | unknown | attempt metrics | Capture integrity unverified; Attempt metrics need no baseline. |
+| terminal | partial | 0 | authored fixture finalization | Capture integrity unverified; Authored fixture: finalized. |
 
 ## Metrics
 
 | name | dimensions | value | unit | measurement | coverage | confidence | scope | notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| bounce\_attempts | all | 1 | count | observed | complete_for_scope | high | window \[1000000000,4000000000), all devices, detail channel | 1 detail event; no counter snapshots to compare. |
-| bounce\_attempts | device=dev-1 | 1 | count | observed | complete_for_scope | high | window \[1000000000,4000000000), device dev-1, detail channel | All 1 attempt observed device dev-1. |
-| requested\_bounce\_bytes | all | 100 | bytes | observed | complete_for_scope | high | window \[1000000000,4000000000), all devices, detail channel | 100 requested bytes across 1 attempt; allocation outcomes are unavailable in this fixture. |
-| requested\_bounce\_bytes | device=dev-1 | 100 | bytes | observed | complete_for_scope | high | window \[1000000000,4000000000), device dev-1, detail channel | 100 requested bytes on device dev-1. |
+| bounce\_attempts | all | 1 | count | observed | partial | high | window \[1000000000,4000000000), all devices, detail channel | 1 detail event; no counter snapshots to compare. |
+| bounce\_attempts | device=dev-1 | 1 | count | observed | partial | high | window \[1000000000,4000000000), device dev-1, detail channel | All 1 attempt observed device dev-1. |
+| requested\_bounce\_bytes | all | 100 | bytes | observed | partial | high | window \[1000000000,4000000000), all devices, detail channel | 100 requested bytes across 1 attempt; allocation outcomes are unavailable in this fixture. |
+| requested\_bounce\_bytes | device=dev-1 | 100 | bytes | observed | partial | high | window \[1000000000,4000000000), device dev-1, detail channel | 100 requested bytes on device dev-1. |
 | successful\_allocations | all | unavailable | count | unavailable | unavailable | high | window \[1000000000,4000000000), all devices | No map\_result source in this fixture; attempts are not successes. |
 | copy\_original\_to\_bounce\_bytes | all | unavailable | bytes | unavailable | unavailable | high | window \[1000000000,4000000000), all devices | No copy source in this fixture. |
 | copy\_bounce\_to\_original\_bytes | all | unavailable | bytes | unavailable | unavailable | high | window \[1000000000,4000000000), all devices | No copy source in this fixture. |

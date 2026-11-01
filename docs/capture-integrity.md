@@ -1,20 +1,22 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Capture integrity and recovery
 
-This is a **planned contract, not implemented behavior**. Current writers
-emit session 0.1.3 and event 0.1.2; current reports emit 0.1.3. They do not
-seal event bytes, publish recovery checkpoints, or reserve finalization
-space. Edited or truncated legacy captures can still look complete, and a
-missing final `session.json` is unreadable even with `--allow-partial`.
-See the [current release limitations](release-notes.md#known-issues).
+New captures emit session 0.1.4 with literal event-byte SHA-256, contiguous
+sequences, and exact kind counts. Offline readers verify these bindings while
+streaming and emit report 0.1.4. Verification detects accidental changes; it
+does not authenticate a capture against an actor who can rewrite its digest.
 
-Session/report 0.1.4 are reserved for this contract; event 0.1.2 is unchanged.
+Checkpoint recovery and finalization reserves remain planned. Legacy session
+0.1.1/0.1.2/0.1.3 inputs remain readable, but reports label their arithmetic
+`legacy_unverified`, withhold completeness, and return 4 under `--strict`.
+Event 0.1.2 is unchanged. See the [current release limitations](release-notes.md#known-issues).
+
 The later session/event/report 0.2.0 journal must preserve these guarantees.
 Legacy session 0.1.1/0.1.2/0.1.3 and event 0.1.1/0.1.2 remain accepted, without
 inventing integrity evidence. Versions are independent of the product,
 BPF wire and bridge ABI; see [format compatibility](format-compatibility.md).
 
-## Committed-byte record (planned)
+## Committed-byte record
 
 Session 0.1.4 requires `capture.integrity` with:
 
@@ -48,7 +50,7 @@ not observed memory contents. It detects accidental edits and truncation;
 an actor able to rewrite both stream and digest defeats it. It supplies no
 authenticity, attestation or host-access verdict.
 
-## Reader and report behavior (planned)
+## Reader and report behavior
 
 Verify streams incrementally with bounded memory. A finalized 0.1.4 byte,
 line, sequence, kind count or digest mismatch is `READ_INVALID` (exit 2),
@@ -57,16 +59,17 @@ falls back from a corrupt finalized session. A valid final session takes
 precedence over a checkpoint; a present but corrupt final session fails.
 
 Report 0.1.4 exposes integrity status `verified`, `legacy_unverified`, or
-`checkpoint_prefix`, plus verified bytes/events. Text, Markdown and JSON
-renderers must explain the status. Unverified integrity prevents
+`checkpoint_prefix`, plus canonical `verified_bytes` and `verified_events` strings. Legacy inputs
+have zero verified bytes/events. Text, Markdown and JSON explain the status.
+`checkpoint_prefix` is reserved for recovery and is not emitted yet. Unverified integrity prevents
 `complete`/`complete_for_scope` in every evidence channel. Legacy arithmetic
 may still be displayed explicitly unverified, and legacy examples remain
 readable. Verified integrity is necessary but never sufficient for complete
 evidence: detail, aggregate, correlation, baseline and terminal quality stay
 independent. Unknown is not zero, and finalized is not settled.
 
-The following is the authoritative planned report exit table. It is not a
-claim that current 0.1.3 readers perform verification or recovery.
+The finalized-capture rows below are implemented. Checkpoint rows describe
+planned recovery and remain unavailable.
 
 | Input | Normal report | Strict report | Evidence rule |
 | --- | --- | --- | --- |
@@ -86,6 +89,19 @@ invalid usage/input/schema returns 2, and explicitly requested unavailable
 collection returns 3. Findings do not by themselves change the exit code.
 The planned checkpoint-recovery exit 4 is unconditional, including normal
 mode. Invalid finalized evidence remains exit 2 in both modes.
+
+Interim live `top` blocks say `unverified live stream`; replay refreshes say
+`unverified replay prefix`. These text-only views withhold completeness and
+do not claim a finalized file or durable checkpoint. Final blocks use the
+fully consumed reader's verified or legacy status. Arithmetic is calculated
+before the integrity quality overlay, preserving independent channel facts.
+
+`tools/seal-capture SOURCE TARGET` is a development fixture tool, excluded from
+runtime packages. It accepts only finalized synthetic sources and creates a
+new `tests/fixtures/reader/sealed-*` directory. It refuses existing targets,
+symlink paths and special source files, records source/output/tool hashes,
+and explicitly renumbers the derivative from zero. Legacy originals remain
+unchanged. Never seal observed data to manufacture qualification evidence.
 
 ## Checkpoint publication and locking (planned)
 

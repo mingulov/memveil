@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Derived report document (report v0.1.0 shape).
+"""Derived report document (report v0.1.4 shape).
 
 The analyzer builds this from one session plus its event stream;
 renderers serialize it. Environment and device catalog echo the
@@ -60,6 +60,10 @@ struct ReportCap(Copyable):
 struct Report:
     """One deterministic offline analysis result."""
 
+    var integrity_context: String
+    var integrity_status: String
+    var verified_bytes: UInt64
+    var verified_events: UInt64
     var session_id: String
     var synthetic: Bool
     var engine_version: String
@@ -85,6 +89,10 @@ struct Report:
     var verdict: Verdict
 
     def __init__(out self):
+        self.integrity_context = String("capture")
+        self.integrity_status = String("legacy_unverified")
+        self.verified_bytes = UInt64(0)
+        self.verified_events = UInt64(0)
         self.session_id = String("")
         self.synthetic = False
         self.engine_version = String(ENGINE_VERSION)
@@ -222,3 +230,41 @@ def incomplete_finding_severity(
     ):
         return String("informational")
     return String("warning")
+
+
+def _unverified_channel(mut channel: Channel):
+    if channel.status == "complete_for_scope":
+        channel.status = String("partial")
+    var note = String("Capture integrity unverified; ")
+    var reason = channel.reason
+    channel.reason = note
+    var count = note.count_codepoints()
+    for cp in reason.codepoint_slices():
+        if count >= 1024:
+            break
+        channel.reason += String(cp)
+        count += 1
+
+
+def apply_integrity(mut rep: Report, verified: Bool, bytes: UInt64, events: UInt64):
+    """Bind file verification after reduction without changing its arithmetic."""
+    if verified:
+        rep.integrity_status = String("verified")
+        rep.verified_bytes = bytes
+        rep.verified_events = events
+        return
+    rep.integrity_status = String("legacy_unverified")
+    rep.verified_bytes = UInt64(0)
+    rep.verified_events = UInt64(0)
+    _unverified_channel(rep.q_detail)
+    _unverified_channel(rep.q_aggregate)
+    _unverified_channel(rep.q_correlation)
+    _unverified_channel(rep.q_corr_mapping)
+    _unverified_channel(rep.q_corr_copy)
+    _unverified_channel(rep.q_corr_sync)
+    _unverified_channel(rep.q_baseline)
+    _unverified_channel(rep.q_terminal)
+    rep.verdict.name = String("partial_unknown_loss")
+    for i in range(len(rep.metrics)):
+        if rep.metrics[i].coverage == "complete_for_scope":
+            rep.metrics[i].coverage = String("partial")

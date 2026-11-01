@@ -1,0 +1,9 @@
+{
+  "synthetic": true,
+  "method": "Contiguous zero-based fixture sequences; Python hashlib SHA-256 over literal emitted bytes",
+  "source_session_sha256": "77bc1cfd5b5c474d873566a7cdb80a3adfa20bd8033c4e56ede5763a10c53b2b",
+  "source_events_sha256": "f1bd78555a56c88fb7180b10bf16612b1f0c5a3cdfb7d5ef15df476082543ec8",
+  "sealed_events_sha256": "8ae8e11a69f9a51ae5371c6264953d13029d5857d56519b23464c3c46a8438ef",
+  "sealed_session_sha256": "207d83b4ebc5d1f5084ac3e53ff50b90e058fcce526f71dd7df16a5b33246349",
+  "tool_sha256": "fee1c75be832d07f473e4bc52300a3d121547be3eaddd2c1681a401dd3ca67b8"
+}

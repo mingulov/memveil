@@ -167,8 +167,19 @@ def test_duplicate_operation_refused() raises:
     )
 
 
+def test_sealed_capture_reads() raises:
+    var r = read_capture(
+        "tests/fixtures/reader/sealed-complete", False, default_limits()
+    )
+    assert_equal(r.integrity_verified, False)
+    var events = drain_events(r)
+    assert_equal(r.integrity_verified, True)
+    assert_equal(UInt64(len(events)), r.session.integrity.line_count)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
+    suite.test[test_sealed_capture_reads]()
     suite.test[test_exact_line_boundary]()
     suite.test[test_malformed_utf8_refused]()
     suite.test[test_nul_byte_refused]()

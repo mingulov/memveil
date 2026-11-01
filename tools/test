@@ -454,7 +454,7 @@ suite_reports() {
         tests/fixtures/reader/complete-stop 0 \
         "capture OK: 3 events, 3 attempts, 9216 requested bytes"
     expect_text_exit "complete-stop-json-strict" \
-        tests/fixtures/reader/complete-stop 0 --strict
+        tests/fixtures/reader/complete-stop 4 --strict
     expect_json "f9-profile-change-json" \
         tests/fixtures/reader/f9-profile-change 0 \
         "capture OK: 5 events, 3 attempts, 9216 requested bytes"
@@ -1962,6 +1962,7 @@ suite_attempts() {
         }
     }
     areport() { # <case> : replay the capture, keep JSON
+        python3 "$ROOT/tests/attempts/check_integrity.py" "$TMP/$1" || afailed=1
         "$ROOT/build/memveil" report --format json \
             "$TMP/$1" >"$TMP/$1.report.json" 2>"$TMP/$1.report.err"
         rc=$?
@@ -2915,6 +2916,7 @@ EOF
     # pwrite count is asserted so the short:N modes stay
     # anchored to a verified op->call mapping.
     run_unit_file tests/unit/test_writer.mojo || return 1
+    run_unit_file tests/unit/test_integrity_writer.mojo || return 1
     SHIM="$ROOT/build/shim/mvshim.so"
     if [ ! -f "$SHIM" ]; then
         echo "writer: missing $SHIM (run tools/build first)" >&2

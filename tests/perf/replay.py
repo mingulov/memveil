@@ -11,6 +11,7 @@ for steady-state bounds. Prints CSV/JSON measurements to
 stdout. Exits nonzero on the first failure.
 """
 
+import hashlib
 import json
 import os
 import resource
@@ -76,6 +77,37 @@ def generate(path, sid, count):
             fh.write(event_line(sid, i + 1, ts, size, i % 2 == 0,
                                 "op%06d" % i) + "\n")
     return total
+
+
+def generate_sealed(path, sid, count):
+    """Generate a separate zero-based integrity case using hashlib as oracle."""
+    os.mkdir(path)
+    digest = hashlib.sha256()
+    size = 0
+    total = 0
+    with open(os.path.join(path, "events.ndjson"), "xb") as stream:
+        for i in range(count):
+            requested = SIZES[i % len(SIZES)]
+            total += requested
+            timestamp = WINDOW_START + i * (WINDOW_END - WINDOW_START) // count
+            line = (event_line(sid, i, timestamp, requested, i % 2 == 0,
+                               "op%06d" % i) + "\n").encode()
+            stream.write(line)
+            digest.update(line)
+            size += len(line)
+    doc = session_doc(sid)
+    doc["schema_version"] = "0.1.4"
+    kinds = dict.fromkeys(("bounce_attempt", "map_result", "unmap", "copy",
+                           "sync_request", "transition_result", "pool_sample",
+                           "gap", "marker", "counter_snapshot"), "0")
+    kinds["bounce_attempt"] = str(count)
+    doc["capture"]["integrity"] = {
+        "algorithm": "sha256", "events_bytes": str(size),
+        "line_count": str(count), "first_seq": "0", "last_seq": str(count - 1),
+        "events_sha256": digest.hexdigest(), "kinds": kinds}
+    with open(os.path.join(path, "session.json"), "x") as stream:
+        json.dump(doc, stream)
+    return total, size
 
 
 def replay(path, fmt="json"):
@@ -209,6 +241,19 @@ def main():
               == str(paced_lines))
         print("perf: paced %d lines over %ds, rss %d KiB"
               % (paced_lines, paced_seconds, rss))
+        sealed = os.path.join(tmp, "sealed")
+        sealed_total, sealed_size = generate_sealed(sealed, "sealed-600k", COUNT)
+        p, wall, rss = replay(sealed)
+        check("sealed-exit", p.returncode == 0, p.stderr[:200])
+        doc = json.loads(p.stdout)
+        check("sealed-count", metric(doc, "bounce_attempts")["value"] == str(COUNT))
+        check("sealed-bytes", metric(doc, "requested_bounce_bytes")["value"] == str(sealed_total))
+        check("sealed-integrity", doc["integrity"] == {
+            "status": "verified", "verified_bytes": str(sealed_size),
+            "verified_events": str(COUNT)})
+        check("sealed-wall", wall <= wall_budget, "%.1fs" % wall)
+        check("sealed-rss", rss <= rss_budget, "%d KiB" % rss)
+        print("perf: sealed replay %.1fs, rss %d KiB (upper bound)" % (wall, rss))
         print(json.dumps({"records": COUNT, "bytes": size,
                           "want_bytes": want_bytes}))
     finally:

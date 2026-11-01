@@ -75,6 +75,8 @@ def main():
     # Window [1e9, 2.5e9) with 1s interval: boundary 2e9 + final.
     check("nested-blocks", len(blocks) == 2, "%d blocks" % len(blocks))
     check("nested-final", "successful_allocations = 1" in blocks[-1])
+    check("prefix-integrity-pending", "integrity: unverified replay prefix" in blocks[0])
+    check("final-integrity-legacy", "integrity: legacy_unverified" in blocks[-1])
     # The 2.0s refresh must exclude the unmap at 2.3s: the mapping
     # is still open at the first boundary.
     check("nested-interim-open", "open_mappings = 1" in blocks[0])

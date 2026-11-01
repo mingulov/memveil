@@ -8,17 +8,15 @@ contract for shipping collection, offline analysis, and laboratory work.
 
 ## Known issues
 
-Two defects remain open. Their planned 0.1.1 repair is specified in
-[capture integrity](capture-integrity.md); this documentation does not
-implement or qualify that repair:
+Finalized session 0.1.4 captures now bind and verify literal event bytes,
+counts, kinds and contiguous sequences. Report 0.1.4 exposes verified
+bytes/events. Finalized corruption returns 2 with or without partial mode.
+Legacy input remains readable with unverified arithmetic and no complete
+channels; normal mode returns 0 and strict mode returns 4. This source change
+does not qualify older packaged artifacts. See [capture integrity](capture-integrity.md).
 
-- A truncated or edited capture can read as complete. `report`
-  checks only that event `seq` values increase, and
-  `session.json` records no event count or digest. If lines are
-  removed from the end or the middle of `events.ndjson`, the
-  capture can still report `detail: complete_for_scope loss=0`
-  with lower counts. Do not treat a copied or stored capture
-  as verified evidence.
+Crash recovery remains open:
+
 - An abnormal stop leaves a capture that cannot be read.
   `session.json` is written only when record finishes normally.
   SIGPIPE (for example `memveil record ... | head`), SIGHUP,
@@ -176,15 +174,15 @@ Do not silently rewrite a profile hash to make them admitted.
 
 ## Compatibility
 
-Current output versions are report `0.1.3`, session `0.1.3`, and event
-`0.1.2`. Readers accept frozen session `0.1.1`/`0.1.2`/`0.1.3` and event
+Current output versions are report `0.1.4`, session `0.1.4`, and event
+`0.1.2`. Readers accept frozen session `0.1.1`/`0.1.2`/`0.1.3`/`0.1.4` and event
 `0.1.1`/`0.1.2`. Reports are output only; there is no report-input reader.
 Retained report schemas are reference contracts. Doctor emits `0.1.1`,
 profiles accept `0.1.1`/`0.1.2`, and receipts remain `0.1.0`.
 
-Session/report `0.1.4` are reserved for integrity with event `0.1.2`
+Session/report `0.1.4` implement integrity with event `0.1.2`
 unchanged. Session/event/report `0.2.0` are reserved for a conversion
-request/result journal. Those versions and checkpoint recovery are planned,
+request/result journal. Journal versions and checkpoint recovery are planned,
 not implemented or admitted. The planned hardened 0.1.1 ordinary-Linux
 preview does not qualify confidential collection; 0.2.0 must earn real SNP
 I/O and owned conversion/reversion evidence for its exact packaged bytes.
@@ -193,9 +191,9 @@ The broader 0.3.0 security milestone remains separate.
 Normal successful `record`, `report` and `top` output returns 0 even with
 partial evidence; `--strict` returns 4 unless complete. Current legacy tail
 recovery follows that rule, while planned unfinalized checkpoint recovery
-will always return 4. Corrupt finalized integrity input will return 2 even
+will always return 4. Corrupt finalized integrity input returns 2 even
 with the partial flag. Full current and planned reader rules live in
 [format compatibility](format-compatibility.md) and the
-[integrity exit table](capture-integrity.md#reader-and-report-behavior-planned).
+[integrity exit table](capture-integrity.md#reader-and-report-behavior).
 Captures replay offline without the recording host or native bridge. Current
 legacy data has no integrity verification; arithmetic is not authenticity.

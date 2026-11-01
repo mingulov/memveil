@@ -105,3 +105,9 @@ Expected: exit 0, `bounce_attempts = 208`,
 Markdown show captured `kernel.release`,
 `profile.decision`, `measurement_scope`, and duration
 `150.175546150 s (150175546150 ns)`.
+
+Current readers retain these original legacy capture bytes and arithmetic.
+Integrity is `legacy_unverified`; formerly complete quality and metric coverage
+are now `partial`, with the original loss counts retained. Normal report exit
+is 0 and strict exit is 4. Historical output in this example describes its original
+producer and does not imply current file integrity verification.

@@ -2,14 +2,22 @@
 
 """SHA-256 over bytes (narrow identity bindings).
 
-Pure Mojo, no dependencies: the standard FIPS 180-4
+Pure Mojo, no project dependencies: the standard FIPS 180-4
 compression function with wrapping UInt32 arithmetic.
 Used to hash kernel config bytes, BTF, hook format
 text, the BPF object, and the boot image for narrow
-identity binding checks.
+identity binding checks and committed capture event bytes.
 """
 
-from memveil.capture.normalize import bytes_to_hex
+def bytes_to_hex(data: List[UInt8]) -> String:
+    """Render bytes as lowercase hex with no separator."""
+    var digits = String("0123456789abcdef")
+    var out = String("")
+    for i in range(len(data)):
+        var b = Int(data[i])
+        out += String(digits[byte=b >> 4])
+        out += String(digits[byte=b & 0xF])
+    return out^
 
 
 def _rotr(x: UInt32, n: UInt32) -> UInt32:
@@ -106,37 +114,58 @@ def _sha256_block(mut h: Array[UInt32, 8], data: Span[UInt8, _], base: Int):
 
 def sha256_hex(data: Span[UInt8, _]) -> String:
     """SHA-256 digest of data as 64 lowercase hex chars."""
-    var h = Array[UInt32, 8](fill=UInt32(0))
-    h[0] = UInt32(0x6A09E667)
-    h[1] = UInt32(0xBB67AE85)
-    h[2] = UInt32(0x3C6EF372)
-    h[3] = UInt32(0xA54FF53A)
-    h[4] = UInt32(0x510E527F)
-    h[5] = UInt32(0x9B05688C)
-    h[6] = UInt32(0x1F83D9AB)
-    h[7] = UInt32(0x5BE0CD19)
-    var total = len(data)
-    var full = total // 64
-    for bi in range(full):
-        _sha256_block(h, data, bi * 64)
-    var tail = List[UInt8]()
-    for i in range(full * 64, total):
-        tail.append(data[i])
-    tail.append(UInt8(0x80))
-    while len(tail) % 64 != 56:
-        tail.append(UInt8(0))
-    var bits = UInt64(total) * UInt64(8)
-    for i in range(8):
-        var shift = UInt64(8 * (7 - i))
-        tail.append(UInt8((bits >> shift) & UInt64(0xFF)))
-    var padded = Span(tail)
-    var nblocks = len(tail) // 64
-    for bi in range(nblocks):
-        _sha256_block(h, padded, bi * 64)
-    var digest = List[UInt8]()
-    for i in range(8):
-        digest.append(UInt8((h[i] >> 24) & UInt32(0xFF)))
-        digest.append(UInt8((h[i] >> 16) & UInt32(0xFF)))
-        digest.append(UInt8((h[i] >> 8) & UInt32(0xFF)))
-        digest.append(UInt8(h[i] & UInt32(0xFF)))
-    return bytes_to_hex(digest)
+    var state = Sha256()
+    state.update(data)
+    return state.copy_finish()
+
+
+struct Sha256(Copyable):
+    """Incremental SHA-256; snapshots never consume the running state."""
+
+    var _h: Array[UInt32, 8]
+    var _tail: List[UInt8]
+    var _bytes: UInt64
+
+    def __init__(out self):
+        self._h = [
+            UInt32(0x6A09E667), UInt32(0xBB67AE85),
+            UInt32(0x3C6EF372), UInt32(0xA54FF53A),
+            UInt32(0x510E527F), UInt32(0x9B05688C),
+            UInt32(0x1F83D9AB), UInt32(0x5BE0CD19),
+        ]
+        self._tail = List[UInt8]()
+        self._bytes = UInt64(0)
+
+    def update(mut self, data: Span[UInt8, _]):
+        self._bytes += UInt64(len(data))
+        var offset = 0
+        if len(self._tail) != 0:
+            while offset < len(data) and len(self._tail) < 64:
+                self._tail.append(data[offset])
+                offset += 1
+            if len(self._tail) == 64:
+                _sha256_block(self._h, Span(self._tail), 0)
+                self._tail.clear()
+        while offset + 64 <= len(data):
+            _sha256_block(self._h, data, offset)
+            offset += 64
+        while offset < len(data):
+            self._tail.append(data[offset])
+            offset += 1
+
+    def copy_finish(self) -> String:
+        var h = self._h.copy()
+        var tail = self._tail.copy()
+        tail.append(UInt8(0x80))
+        while len(tail) % 64 != 56:
+            tail.append(UInt8(0))
+        var bits = self._bytes * UInt64(8)
+        for i in range(8):
+            tail.append(UInt8((bits >> UInt64(8 * (7 - i))) & UInt64(255)))
+        for offset in range(0, len(tail), 64):
+            _sha256_block(h, Span(tail), offset)
+        var digest = List[UInt8]()
+        for i in range(8):
+            for shift in [24, 16, 8, 0]:
+                digest.append(UInt8((h[i] >> UInt32(shift)) & UInt32(255)))
+        return bytes_to_hex(digest)

@@ -14,6 +14,7 @@ from std.testing import TestSuite, assert_equal, assert_true
 
 from memveil.capture.writer import (
     CLOSING_RESERVE,
+    CommittedStream,
     MAX_EVENTS_BUDGET,
     MIN_EVENTS_BUDGET,
     RESIDUAL_DIR,
@@ -23,6 +24,8 @@ from memveil.capture.writer import (
     _require_private_empty_dir,
     residual_text,
 )
+from memveil.model.integrity import INTEGRITY_KIND_COUNT, integrity_kind
+from memveil.platform.hash import sha256_hex
 from memveil.platform.reader import (
     _geteuid_live,
     read_host_file,
@@ -59,6 +62,45 @@ def _line(byte: UInt8, n: Int) -> List[UInt8]:
 
 def _read(path: String) raises -> List[UInt8]:
     return read_host_file(path, "writer test read", 67108864)
+
+
+def test_committed_stream_all_kinds_and_rollback() raises:
+    var scratch = _mkdtemp()
+    var target = scratch + String("/cap")
+    var writer = EventWriter(target, MIN_EVENTS_BUDGET)
+    var stream = CommittedStream()
+    var empty = stream.snapshot()
+    assert_equal(empty.line_count, UInt64(0))
+    assert_true(not empty.has_seq)
+    for i in range(INTEGRITY_KIND_COUNT):
+        var line = _line(UInt8(65 + i), i + 2)
+        writer.append(line)
+        stream.commit(line, integrity_kind(i))
+    var before = stream.copy()
+    var mark = writer.group_begin()
+    var extra = _line(UInt8(65), 5)
+    writer.append_closing(extra)
+    stream.commit(extra, String("gap"))
+    writer.group_abort(mark)
+    stream = before^
+    var snapshot = stream.snapshot()
+    var bytes = _read(target + String("/events.ndjson"))
+    assert_equal(snapshot.events_bytes, UInt64(len(bytes)))
+    assert_equal(snapshot.line_count, UInt64(INTEGRITY_KIND_COUNT))
+    assert_equal(snapshot.first_seq, UInt64(0))
+    assert_equal(snapshot.last_seq, UInt64(INTEGRITY_KIND_COUNT - 1))
+    assert_equal(snapshot.events_sha256, sha256_hex(Span(bytes)))
+    for i in range(INTEGRITY_KIND_COUNT):
+        assert_equal(snapshot.kinds[i], UInt64(1))
+    var refused = False
+    try:
+        writer.append(_line(UInt8(65), MIN_EVENTS_BUDGET))
+    except:
+        refused = True
+    assert_true(refused)
+    assert_equal(stream.snapshot().events_sha256, snapshot.events_sha256)
+    assert_equal(writer.committed_len(), len(bytes))
+    writer.discard()
 
 
 def test_create_append_finalize() raises:
@@ -678,6 +720,7 @@ def run() raises -> Int:
     suite.test[test_write_error_residual_bits_render]()
     suite.test[test_write_error_ignores_prose_residuals]()
     suite.test[test_write_error_residuals_bounded]()
+    suite.test[test_committed_stream_all_kinds_and_rollback]()
     suite.test[test_create_append_finalize]()
     suite.test[test_exists_variants]()
     suite.test[test_budget_range]()

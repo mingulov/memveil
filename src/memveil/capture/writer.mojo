@@ -13,6 +13,10 @@ result_state, and exits. Disposition buckets live in the
 collector, never here.
 """
 
+from memveil.platform.hash import Sha256
+from memveil.model.integrity import Integrity, integrity_kind_index
+from memveil.model.validate import checked_add
+
 from std.ffi import external_call
 
 
@@ -348,6 +352,41 @@ def _split_parent(path: String) raises WriteError -> List[String]:
     except:
         raise WriteError("io", "output path not UTF-8")
     return out^
+
+
+struct CommittedStream(Copyable):
+    """Bounded accounting advanced only after a successful atomic append.
+
+    Copy before a write group; restore that copy only after successful
+    file rollback. A poisoned file must never publish this snapshot.
+    """
+
+    var _hash: Sha256
+    var _integrity: Integrity
+
+    def __init__(out self):
+        self._hash = Sha256()
+        self._integrity = Integrity()
+
+    def commit(mut self, line: List[UInt8], kind: String) raises:
+        var index = integrity_kind_index(kind)
+        if index < 0 or len(line) == 0 or len(line) > 65536:
+            raise Error("invalid committed event kind or length")
+        if line[len(line) - 1] != UInt8(10):
+            raise Error("committed event lacks newline")
+        var byte_count = checked_add(self._integrity.events_bytes, UInt64(len(line)))
+        var line_count = checked_add(self._integrity.line_count, UInt64(1))
+        self._hash.update(Span(line))
+        self._integrity.events_bytes = byte_count
+        self._integrity.line_count = line_count
+        self._integrity.has_seq = True
+        self._integrity.last_seq = line_count - UInt64(1)
+        self._integrity.kinds[index] += UInt64(1)
+
+    def snapshot(self) -> Integrity:
+        var out = self._integrity.copy()
+        out.events_sha256 = self._hash.copy_finish()
+        return out^
 
 
 struct EventWriter(Movable):
