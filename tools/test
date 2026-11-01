@@ -3379,7 +3379,18 @@ EOF
         echo "writer: EventWriter FAILED" >&2
         return 1
     fi
-    echo "writer: EventWriter primitive passed (unit + 25 shim cases + race)"
+    (cd "$ROOT" && pixi run --frozen mojo build $(mojo_san_flags) -I src \
+        --target-cpu x86-64-v2 -o build/probe/checkpoint_probe \
+        tests/unit/checkpoint_probe.mojo) || return 1
+    (cd "$ROOT" && pixi run --frozen mojo build $(mojo_san_flags) -I src \
+        --target-cpu x86-64-v2 -o build/probe/group_checkpoint_probe \
+        tests/unit/group_checkpoint_probe.mojo) || return 1
+    clang -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+        "$ROOT/tests/native/test_capture_layout.c" -o "$ROOT/build/native/test_capture_layout" || return 1
+    ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 "$ROOT/build/native/test_capture_layout" || return 1
+    python3 "$ROOT/tests/cli/test_checkpoint_writer.py" || return 1
+    python3 "$ROOT/tests/cli/test_checkpoint_recovery.py" || return 1
+    echo "writer: EventWriter primitive and durable checkpoint boundaries passed"
     return 0
 }
 
@@ -3616,7 +3627,7 @@ suite_signals() {
     expect_line "$STMP/none.log" "setup=ok"
     expect_line "$STMP/none.log" "check1=none"
     expect_line "$STMP/none.log" "check2=none"
-    expect_line "$STMP/none.log" "sigblk_armed=0000000000004002"
+    expect_line "$STMP/none.log" "sigblk_armed=0000000000004003"
     expect_line "$STMP/none.log" "sigblk_restored=0000000000000000"
     expect_line "$STMP/none.log" "post_teardown=error"
     "$PROBE" repeat >"$STMP/repeat.log" 2>&1 || {
@@ -3646,7 +3657,7 @@ suite_signals() {
         hex=${line##*=}
         last4=$(printf '%s' "$hex" | tail -c 4)
         v=$((0x$last4))
-        if [ $((v & 0x4002)) -ne $((0x4002)) ]; then
+        if [ $((v & 0x4003)) -ne $((0x4003)) ]; then
             echo "signals: thread mask missing bits: $line" >&2
             bad=1
         fi
@@ -3666,7 +3677,7 @@ EOF
         echo "signals: spoofed sentinel exits $rc, want 3" >&2
         failed=1
     fi
-    expect_line "$STMP/spoof.log" "reexec_refused=signal mask not inherited (MEMVEIL_SIGBLK set, SIGINT/SIGTERM unblocked); refusing"
+    expect_line "$STMP/spoof.log" "reexec_refused=signal mask not inherited (MEMVEIL_SIGBLK set, SIGHUP/SIGINT/SIGTERM unblocked); refusing"
     # Big environment: ~1.2 MiB across 20 variables must
     # still re-exec exactly once (getenv lookup, no read
     # cap). timeout -s KILL bounds a re-exec loop: SIGTERM
@@ -3694,7 +3705,7 @@ PYEOF
             sigblk\[*\]=*)
                 mask=${line#*=}
                 dec=$((16#$mask))
-                if [ $((dec & 0x4002)) -ne $((0x4002)) ]; then
+                if [ $((dec & 0x4003)) -ne $((0x4003)) ]; then
                     echo "signals: big-env unblocked: $line" >&2
                     bad=1
                 fi
@@ -3713,12 +3724,13 @@ PYEOF
             failed=1
             return
         fi
-        expect_line "$STMP/$1.log" "exit=4"
+        expect_line "$STMP/$1.log" "exit=0"
         expect_line "$STMP/$1.log" "end=signal"
         expect_line "$STMP/$1.log" "outcome=finalized"
         expect_line "$STMP/$1.log" "stop_outcome=partial"
         expect_line "$STMP/$1.log" "stop_reason=quiescence unproven"
     }
+    run_collector_case latch1 latch 1
     run_collector_case latch15 latch 15
     run_collector_case latch2 latch 2
     expect_line "$STMP/latch15.log" "polls=105"
@@ -3748,9 +3760,9 @@ PYEOF
         expect_line "$STMP/fail-$which.log" \
             "diag=signal setup: test $which failure"
         expect_line "$STMP/fail-$which.log" \
-            "sigblk_initial=0000000000004002"
+            "sigblk_initial=0000000000004003"
         expect_line "$STMP/fail-$which.log" \
-            "sigblk_restored=0000000000004002"
+            "sigblk_restored=0000000000004003"
     done
     # External process-directed signals: the probe runs to
     # ready (printed after signalfd setup), then the lane
@@ -3794,6 +3806,7 @@ PYEOF
         expect_line "$STMP/$1.log" "stop_outcome=partial"
         expect_line "$STMP/$1.log" "stop_reason=quiescence unproven"
     }
+    run_kill_case killhup HUP
     run_kill_case killterm TERM
     run_kill_case killint INT
     if [ "$failed" -ne 0 ]; then

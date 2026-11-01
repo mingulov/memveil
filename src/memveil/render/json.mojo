@@ -141,7 +141,10 @@ def render_json(rep: Report, device_filter: String = "") raises -> String:
     out += '  "schema_version": "' + REPORT_SCHEMA_VERSION + '",\n'
     out += '  "integrity": {"status": ' + escape_json(rep.integrity_status)
     out += ', "verified_bytes": "' + format_u64(rep.verified_bytes)
-    out += '", "verified_events": "' + format_u64(rep.verified_events) + '"},\n'
+    out += '", "verified_events": "' + format_u64(rep.verified_events) + '"'
+    if rep.integrity_status == "checkpoint_prefix":
+        out += ', "unverified_bytes": "' + format_u64(rep.unverified_bytes) + '"'
+    out += '},\n'
     out += "  \"session_id\": " + escape_json(rep.session_id) + ",\n"
     if rep.synthetic:
         out += "  \"synthetic\": true,\n"

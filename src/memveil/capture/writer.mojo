@@ -14,6 +14,7 @@ collector, never here.
 """
 
 from memveil.platform.hash import Sha256
+from memveil.platform.capturefiles import file_stat, open_directory
 from memveil.model.integrity import Integrity, integrity_kind_index
 from memveil.model.validate import checked_add
 
@@ -290,7 +291,12 @@ def _name_matches(
         )
         if probe < Int32(0):
             return False
-        var ids = _fstat_ids(probe)
+        var ids: List[UInt64]
+        try:
+            ids = _fstat_ids(probe)
+        except:
+            _close_quiet(probe)
+            return False
         _close_quiet(probe)
         return ids[0] == want[0] and ids[1] == want[1]
     except:
@@ -405,7 +411,14 @@ struct EventWriter(Movable):
     var _ev_fd: Int32
     var _dir_ids: List[UInt64]
     var _ev_ids: List[UInt64]
+    var _reserve_fd: Int32
+    var _stage_fd: Int32
+    var _reserve_ids: List[UInt64]
+    var _stage_ids: List[UInt64]
+    var _checkpoint_ids: List[UInt64]
+    var _prepared: Bool
     var _sess_ids: List[UInt64]
+    var _group_mark: Int
     var _committed: Int
     var _max: Int
     var _finalized: Bool
@@ -427,18 +440,11 @@ struct EventWriter(Movable):
         var parts = _split_parent(dir_path)
         var parent_path = parts[0]
         var base_name = parts[1]
-        var parent_cstr = _cstr(parent_path)
-        var parent_fd = external_call["openat", Int32](
-            Int32(_AT_FDCWD),
-            Span(parent_cstr).unsafe_ptr(),
-            Int32(_O_DIRECTORY | _O_NOFOLLOW),
-            UInt32(0),
-        )
-        if parent_fd < Int32(0):
-            raise WriteError(
-                "io",
-                "parent open failed: errno " + String(_errno_now()),
-            )
+        var parent_fd: Int32
+        try:
+            parent_fd = open_directory(parent_path)
+        except e:
+            raise WriteError("io", String(e))
         var base_cstr = _cstr(base_name)
         # NOTE: mode as Int (not UInt32) to match the stdlib's own C
         # "mkdirat" declaration exactly; a differing signature fails
@@ -458,7 +464,7 @@ struct EventWriter(Movable):
         var dir_fd = external_call["openat", Int32](
             parent_fd,
             Span(base_cstr).unsafe_ptr(),
-            Int32(_O_DIRECTORY | _O_NOFOLLOW),
+            Int32(_O_DIRECTORY | _O_NOFOLLOW | 524288),
             UInt32(0),
         )
         if dir_fd < Int32(0):
@@ -489,11 +495,15 @@ struct EventWriter(Movable):
             _close_quiet(dir_fd)
             _close_quiet(parent_fd)
             raise e^
+        if external_call["flock", Int32](dir_fd, Int32(2 | 4)) != 0:
+            _close_quiet(dir_fd)
+            _close_quiet(parent_fd)
+            raise WriteError("io", "capture directory lock unavailable")
         var ev_name = _cstr("events.ndjson")
         var ev_fd = external_call["openat", Int32](
             dir_fd,
             Span(ev_name).unsafe_ptr(),
-            Int32(_O_WRONLY | _O_CREAT | _O_EXCL | _O_NOFOLLOW),
+            Int32(_O_WRONLY | _O_CREAT | _O_EXCL | _O_NOFOLLOW | 524288),
             UInt32(0o600),
         )
         if ev_fd < Int32(0):
@@ -564,16 +574,175 @@ struct EventWriter(Movable):
         self._ev_fd = ev_fd
         self._dir_ids = dir_ids^
         self._ev_ids = ev_ids^
+        self._reserve_fd = Int32(-1)
+        self._stage_fd = Int32(-1)
+        self._reserve_ids = List[UInt64]()
+        self._stage_ids = List[UInt64]()
+        self._checkpoint_ids = List[UInt64]()
+        self._prepared = False
         self._sess_ids = List[UInt64]()
+        self._group_mark = -1
         self._committed = 0
         self._max = max_events_bytes
         self._finalized = False
         self._closed = False
 
     def __deinit__(deinit self):
+        _close_quiet(self._reserve_fd)
+        _close_quiet(self._stage_fd)
         _close_quiet(self._ev_fd)
         _close_quiet(self._dir_fd)
         _close_quiet(self._parent_fd)
+
+    def _create_owned(mut self, name: String, mut ids: List[UInt64]) raises WriteError -> Int32:
+        var key = _cstr(name)
+        var fd = external_call["openat", Int32](self._dir_fd, Span(key).unsafe_ptr(), Int32(_O_WRONLY | _O_CREAT | _O_EXCL | _O_NOFOLLOW | 524288), UInt32(0o600))
+        if fd < 0:
+            raise WriteError("io", name + ": exclusive create failed")
+        try:
+            ids = _fstat_ids(fd)
+        except e:
+            _close_quiet(fd)
+            raise e^
+        return fd
+
+    def _ready_files_ok(self) -> Bool:
+        if not _name_matches(self._dir_fd, "session.finalizing", self._stage_ids) or not _name_matches(self._dir_fd, ".finalization-reserve", self._reserve_ids):
+            return False
+        try:
+            var stage = file_stat(self._stage_fd)
+            var reserve = file_stat(self._reserve_fd)
+            var owner = UInt64(external_call["geteuid", UInt32]())
+            if stage[2] != 1 or reserve[2] != 1 or stage[4] != owner or reserve[4] != owner:
+                return False
+            if stage[3] & UInt64(0o170000) != UInt64(0o100000) or reserve[3] & UInt64(0o170000) != UInt64(0o100000):
+                return False
+            return stage[5] == 0 and reserve[5] == UInt64(17 * 1024 * 1024) and reserve[6] >= UInt64(17 * 1024 * 1024 // 512)
+        except:
+            return False
+
+    def prepare(mut self) raises WriteError:
+        """Allocate and sync actual finalization space before recording."""
+        self._check_open()
+        if self._prepared:
+            if not self._ready_files_ok():
+                raise WriteError("io", "reserve or finalization staging identity changed")
+            return
+        if not self._identity_ok() or self._namespace_ok() != "":
+            raise WriteError("io", "capture identity changed before reserve")
+        var stage_ids = List[UInt64]()
+        self._stage_fd = self._create_owned("session.finalizing", stage_ids)
+        self._stage_ids = stage_ids^
+        var reserve_ids = List[UInt64]()
+        self._reserve_fd = self._create_owned(".finalization-reserve", reserve_ids)
+        self._reserve_ids = reserve_ids^
+        var size = Int64(17 * 1024 * 1024)
+        var allocated = external_call["posix_fallocate", Int32](self._reserve_fd, Int64(0), size)
+        if allocated != 0:
+            if allocated != 95 and allocated != 38 and allocated != 22:
+                raise WriteError("io", "reserve allocation failed: errno " + String(allocated))
+            var block = List[UInt8](length=65536, fill=UInt8(0))
+            var offset = Int64(0)
+            while offset < size:
+                var n = external_call["pwrite", Int64](self._reserve_fd, Span(block).unsafe_ptr(), min(Int64(len(block)), size - offset), offset)
+                if n < 0 and _errno_now() == _EINTR:
+                    continue
+                if n <= 0:
+                    raise WriteError("io", "reserve allocation write failed")
+                offset += n
+        try:
+            var stat = file_stat(self._reserve_fd)
+            if stat[5] != UInt64(size) or stat[6] < UInt64(size // 512):
+                raise WriteError("io", "reserve is not fully allocated")
+        except:
+            raise WriteError("io", "cannot verify allocated reserve")
+        if external_call["fsync", Int32](self._reserve_fd) != 0 or external_call["fsync", Int32](self._stage_fd) != 0:
+            raise WriteError("io", "reserve or finalization staging sync failed")
+        self._prepared = True
+
+    def checkpoint(mut self, session: List[UInt8]) raises WriteError:
+        """Publish by exchange, retaining the prior owned checkpoint until synced."""
+        self._check_open()
+        if self._group_mark >= 0:
+            raise WriteError("misuse", "checkpoint inside rollback group")
+        if len(session) > 16777216:
+            raise WriteError("io", "checkpoint document too large")
+        self.prepare()
+        if not self._identity_ok() or self._namespace_ok() != "":
+            raise WriteError("io", "capture identity changed before checkpoint")
+        if external_call["fsync", Int32](self._ev_fd) != 0:
+            raise WriteError("io", "checkpoint events sync failed")
+        var pin = List[UInt64]()
+        var tmp = self._write_tmp("checkpoint.json.tmp", session, pin)
+        _close_quiet(tmp)
+        var old = _cstr("checkpoint.json.tmp")
+        var dest = _cstr("checkpoint.json")
+        var previous_ids = self._checkpoint_ids.copy()
+        var had_previous = len(previous_ids) != 0
+        if had_previous and not _name_matches(self._dir_fd, "checkpoint.json", previous_ids):
+            _ = self._remove_tmp_if_owned("checkpoint.json.tmp", pin)
+            raise WriteError("io", "checkpoint replaced")
+        if not _name_matches(self._dir_fd, "checkpoint.json.tmp", pin):
+            raise WriteError("io", "checkpoint staging replaced")
+        var flags = UInt32(2) if had_previous else UInt32(_RENAME_NOREPLACE)
+        if external_call["renameat2", Int32](self._dir_fd, Span(old).unsafe_ptr(), self._dir_fd, Span(dest).unsafe_ptr(), flags) != 0:
+            _ = self._remove_tmp_if_owned("checkpoint.json.tmp", pin)
+            raise WriteError("io", "checkpoint rename failed")
+        var expected_swap = not had_previous or _name_matches(self._dir_fd, "checkpoint.json.tmp", previous_ids)
+        var ours = _name_matches(self._dir_fd, "checkpoint.json", pin)
+        var synced = False
+        if expected_swap and ours:
+            synced = external_call["fsync", Int32](self._dir_fd) == 0 and external_call["fsync", Int32](self._parent_fd) == 0
+        if not synced:
+            var restored = False
+            if ours:
+                if had_previous:
+                    restored = external_call["renameat2", Int32](self._dir_fd, Span(old).unsafe_ptr(), self._dir_fd, Span(dest).unsafe_ptr(), UInt32(2)) == 0
+                else:
+                    restored = self._remove_tmp_if_owned("checkpoint.json", pin)
+                if restored:
+                    restored = external_call["fsync", Int32](self._dir_fd) == 0 and external_call["fsync", Int32](self._parent_fd) == 0
+            if restored and had_previous:
+                _ = self._remove_tmp_if_owned("checkpoint.json.tmp", pin)
+            if not restored or not expected_swap or not ours:
+                self._close_all()
+                raise WriteError("fatal", "checkpoint exchange, rollback or sync failed; writer poisoned")
+            raise WriteError("io", "checkpoint directory sync failed")
+        self._checkpoint_ids = pin^
+        if had_previous:
+            if not self._remove_tmp_if_owned("checkpoint.json.tmp", previous_ids) or external_call["fsync", Int32](self._dir_fd) != 0:
+                raise WriteError("io", "previous checkpoint cleanup sync failed")
+        if not self._identity_ok() or self._namespace_ok() != "" or not _name_matches(self._dir_fd, "checkpoint.json", self._checkpoint_ids):
+            self._close_all()
+            raise WriteError("fatal", "checkpoint namespace changed")
+
+    def _release_reserve(mut self) raises WriteError:
+        if not self._ready_files_ok():
+            raise WriteError("io", "reserve or finalization staging identity changed")
+        if not _name_matches(self._dir_fd, ".finalization-reserve", self._reserve_ids):
+            raise WriteError("io", "finalization reserve replaced")
+        if external_call["ftruncate", Int32](self._reserve_fd, Int64(0)) != 0:
+            raise WriteError("io", "reserve release failed")
+        if not self._remove_tmp_if_owned(".finalization-reserve", self._reserve_ids):
+            raise WriteError("io", "reserve removal failed")
+
+    def _fill_stage(mut self, data: List[UInt8]) raises WriteError:
+        if len(data) > 16777216:
+            raise WriteError("io", "session document too large")
+        if not _name_matches(self._dir_fd, "session.finalizing", self._stage_ids):
+            raise WriteError("io", "finalization staging replaced")
+        if external_call["ftruncate", Int32](self._stage_fd, Int64(0)) != 0:
+            raise WriteError("io", "finalization staging truncate failed")
+        var done = 0
+        while done < len(data):
+            var n = external_call["pwrite", Int64](self._stage_fd, Span(data).unsafe_ptr().unsafe_offset(done), Int64(len(data) - done), Int64(done))
+            if n < 0 and _errno_now() == _EINTR:
+                continue
+            if n <= 0:
+                raise WriteError("io", "finalization staging write failed")
+            done += Int(n)
+        if external_call["fsync", Int32](self._stage_fd) != 0:
+            raise WriteError("io", "finalization staging sync failed")
 
     def committed_len(self) -> Int:
         return self._committed
@@ -695,6 +864,9 @@ struct EventWriter(Movable):
     def group_begin(mut self) raises WriteError -> Int:
         """Mark the pre-group offset for rollback."""
         self._check_open()
+        if self._group_mark >= 0:
+            raise WriteError("misuse", "nested rollback group")
+        self._group_mark = self._committed
         return self._committed
 
     def group_abort(mut self, mark: Int) raises WriteError:
@@ -717,6 +889,8 @@ struct EventWriter(Movable):
                 "group rollback failed: errno " + String(_errno_now()),
             )
         self._committed = mark
+        if self._group_mark >= 0 and mark <= self._group_mark:
+            self._group_mark = -1
 
     def _identity_ok(mut self) -> Bool:
         """Re-verify both fds still name the created files.
@@ -784,12 +958,26 @@ struct EventWriter(Movable):
                 or ev_ids[1] != self._ev_ids[1]
             ):
                 return String("namespace: events file replaced")
+            var path_probe: Int32
+            try:
+                path_probe = open_directory(self._dir_path)
+            except:
+                return String("namespace: capture path lookup failed")
+            var path_ids: List[UInt64]
+            try:
+                path_ids = _fstat_ids(path_probe)
+            except:
+                _close_quiet(path_probe)
+                return String("namespace: path stat failed")
+            _close_quiet(path_probe)
+            if path_ids[0] != self._dir_ids[0] or path_ids[1] != self._dir_ids[1]:
+                return String("namespace: capture path replaced")
             return String("")
         except:
             return String("namespace: check failed")
 
     def _remove_tmp_if_owned(
-        mut self, name: String, want: List[UInt64]
+        self, name: String, want: List[UInt64]
     ) -> Bool:
         """Unlink a tmp name only if it still resolves to want.
 
@@ -826,7 +1014,7 @@ struct EventWriter(Movable):
         var fd = external_call["openat", Int32](
             self._dir_fd,
             Span(cname).unsafe_ptr(),
-            Int32(_O_WRONLY | _O_CREAT | _O_EXCL | _O_NOFOLLOW),
+            Int32(_O_WRONLY | _O_CREAT | _O_EXCL | _O_NOFOLLOW | 524288),
             UInt32(0o600),
         )
         if fd < Int32(0):
@@ -902,6 +1090,12 @@ struct EventWriter(Movable):
         if ns_note != String(""):
             self._close_all()
             return FinalOutcome("unfinalized", ns_note)
+        if self._prepared:
+            try:
+                self._release_reserve()
+            except e:
+                self._close_all()
+                return FinalOutcome("unfinalized", e.message)
         if Int(external_call["fsync", Int32](self._ev_fd)) != 0:
             var no = _errno_now()
             self._close_all()
@@ -911,9 +1105,12 @@ struct EventWriter(Movable):
         var tmp: Int32
         var tmp_ids = List[UInt64]()
         try:
-            tmp = self._write_tmp(
-                "session.json.tmp", session, tmp_ids
-            )
+            if self._prepared:
+                self._fill_stage(session)
+                tmp = Int32(-1)
+                tmp_ids = self._stage_ids.copy()
+            else:
+                tmp = self._write_tmp("session.json.tmp", session, tmp_ids)
         except e:
             # _write_tmp cleans its own tmp on write/sync
             # failures and never unlinks on create failure
@@ -924,7 +1121,11 @@ struct EventWriter(Movable):
             self._close_all()
             return FinalOutcome("unfinalized", e.message)
         _close_quiet(tmp)
-        var old_name = _cstr("session.json.tmp")
+        var stage_name = String("session.finalizing") if self._prepared else String("session.json.tmp")
+        if self._prepared and not _name_matches(self._dir_fd, stage_name, tmp_ids):
+            self._close_all()
+            return FinalOutcome("unfinalized", "finalization staging replaced")
+        var old_name = _cstr(stage_name)
         var new_name = _cstr("session.json")
         var rn = external_call["renameat2", Int32](
             self._dir_fd,
@@ -939,7 +1140,7 @@ struct EventWriter(Movable):
                 String("rename failed: errno ") + String(no)
             )
             if not self._remove_tmp_if_owned(
-                String("session.json.tmp"), tmp_ids
+                stage_name, tmp_ids
             ):
                 msg = (
                     msg + String("; tmp replacement left in place")
@@ -955,7 +1156,9 @@ struct EventWriter(Movable):
             var sess_fd = external_call["openat", Int32](
                 self._dir_fd,
                 Span(sess_name).unsafe_ptr(),
-                Int32(_O_NOFOLLOW),
+                # Metadata-only: a substituted FIFO must never block the pin.
+                # Data was synced through the owned staging descriptor above.
+                Int32(_O_PATH | _O_NOFOLLOW | 524288),
                 UInt32(0),
             )
             if sess_fd < Int32(0):
@@ -1006,13 +1209,24 @@ struct EventWriter(Movable):
                 + ": errno "
                 + String(no),
             )
+        if not self._identity_ok() or self._namespace_ok() != "" or not _name_matches(self._dir_fd, "session.json", self._sess_ids):
+            self._close_all()
+            return FinalOutcome("present_unsynced", "namespace changed after publication")
+        if len(self._checkpoint_ids) != 0:
+            if not self._remove_tmp_if_owned("checkpoint.json", self._checkpoint_ids) or external_call["fsync", Int32](self._dir_fd) != 0:
+                self._close_all()
+                return FinalOutcome("present_unsynced", "checkpoint cleanup failed after final publication")
         self._close_all()
         return FinalOutcome("finalized", "")
 
     def _close_all(mut self):
+        _close_quiet(self._reserve_fd)
+        _close_quiet(self._stage_fd)
         _close_quiet(self._ev_fd)
         _close_quiet(self._dir_fd)
         _close_quiet(self._parent_fd)
+        self._reserve_fd = Int32(-1)
+        self._stage_fd = Int32(-1)
         self._ev_fd = Int32(-1)
         self._dir_fd = Int32(-1)
         self._parent_fd = Int32(-1)
@@ -1050,6 +1264,15 @@ struct EventWriter(Movable):
                 "output dir replaced or missing; left in place"
             )
         var leftovers = String("")
+        if len(self._reserve_ids) != 0:
+            if not self._remove_tmp_if_owned(".finalization-reserve", self._reserve_ids):
+                leftovers += "reserve replacement left in place; "
+        if len(self._stage_ids) != 0:
+            if not self._remove_tmp_if_owned("session.finalizing", self._stage_ids):
+                leftovers += "staging replacement left in place; "
+        if len(self._checkpoint_ids) != 0:
+            if not self._remove_tmp_if_owned("checkpoint.json", self._checkpoint_ids):
+                leftovers += "checkpoint replacement left in place; "
         if _name_matches(
             self._dir_fd, String("events.ndjson"), self._ev_ids
         ):

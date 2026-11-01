@@ -43,6 +43,7 @@ from memveil.cli.report import (
     write_stderr,
     write_stderr_trusted,
 )
+from memveil.cli.report import final_capture_summary
 from memveil.platform.stdout import write_stdout
 
 def record_usage() -> String:
@@ -286,6 +287,9 @@ def run_record_with(
     var done = String(
         t"record: end={result.end_reason} outcome={result.outcome} exit={result.exit_code}"
     )
+    # Both outcomes have durably published the final session.
+    if result.outcome == "finalized" or result.outcome == "error":
+        return final_capture_summary(done + "\n", opts.output, result.exit_code)
     try:
         write_stdout(done + String("\n"))
     except:

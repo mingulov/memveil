@@ -15,15 +15,14 @@ Legacy input remains readable with unverified arithmetic and no complete
 channels; normal mode returns 0 and strict mode returns 4. This source change
 does not qualify older packaged artifacts. See [capture integrity](capture-integrity.md).
 
-Crash recovery remains open:
-
-- An abnormal stop leaves a capture that cannot be read.
-  `session.json` is written only when record finishes normally.
-  SIGPIPE (for example `memveil record ... | head`), SIGHUP,
-  SIGKILL or a full disk leave only `events.ndjson`, and
-  `report` (also with `--allow-partial`) exits 2. Run record
-  with stdout to a file or terminal, stop it with SIGINT or
-  SIGTERM, and keep free space beyond the size cap.
+New captures allocate a synced 17 MiB finalization reserve and publish a durable
+empty checkpoint before readiness, then checkpoint every 10 seconds or 1,000
+committed events. With no final session, `report --allow-partial DIR` verifies
+and reports only the checkpoint prefix, returning 4. Final evidence always wins;
+a corrupt final session never falls back. SIGHUP stops orderly and a lost final
+stdout summary preserves the durable capture's exit and reports its path on
+stderr. Full-filesystem and hard-power-cut qualification remain open; these
+source changes do not qualify older packages.
 
 Also note: the `.rpm` and the runtime tarball carry builds of
 the same source as the `.deb` but not byte-identical binaries;
@@ -182,7 +181,7 @@ profiles accept `0.1.1`/`0.1.2`, and receipts remain `0.1.0`.
 
 Session/report `0.1.4` implement integrity with event `0.1.2`
 unchanged. Session/event/report `0.2.0` are reserved for a conversion
-request/result journal. Journal versions and checkpoint recovery are planned,
+request/result journal. Journal versions are planned,
 not implemented or admitted. The planned hardened 0.1.1 ordinary-Linux
 preview does not qualify confidential collection; 0.2.0 must earn real SNP
 I/O and owned conversion/reversion evidence for its exact packaged bytes.
@@ -190,8 +189,8 @@ The broader 0.3.0 security milestone remains separate.
 
 Normal successful `record`, `report` and `top` output returns 0 even with
 partial evidence; `--strict` returns 4 unless complete. Current legacy tail
-recovery follows that rule, while planned unfinalized checkpoint recovery
-will always return 4. Corrupt finalized integrity input returns 2 even
+recovery follows that rule, while unfinalized checkpoint recovery
+always returns 4. Corrupt finalized integrity input returns 2 even
 with the partial flag. Full current and planned reader rules live in
 [format compatibility](format-compatibility.md) and the
 [integrity exit table](capture-integrity.md#reader-and-report-behavior).

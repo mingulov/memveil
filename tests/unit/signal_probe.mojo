@@ -103,7 +103,7 @@ def _mode_threads(arglist: List[String]) raises:
 
     Prints sentinel_before (1 in the re-execed child),
     the thread count, and one sigblk line per thread.
-    The lane asserts bits 0x4002 (SIGINT+SIGTERM) on
+    The lane asserts bits 0x4003 (SIGHUP+SIGINT+SIGTERM) on
     every line: no worker may receive a stop signal.
     """
     var pre = _has_sigblk_sentinel()

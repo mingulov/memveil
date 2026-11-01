@@ -37,6 +37,7 @@ stream quietly, prints the final summary, and exits with the
 final report's code.
 """
 
+from memveil.model.report import apply_checkpoint
 from memveil.analysis.diagnostics import diagnose_report
 from memveil.analysis.engine import Analyzer
 from memveil.capture.reader import (
@@ -67,6 +68,7 @@ from memveil.cli.report import (
     exit_for_report,
     refusal_stderr_lines,
     sanitize_diagnostic,
+    write_capture_location,
     write_stderr,
     write_stderr_trusted,
 )
@@ -90,6 +92,7 @@ struct TopOptions:
     var interval_ns: UInt64
     var has_device: Bool
     var device: String
+    var allow_partial: Bool
     var strict: Bool
     var compact: Bool
     var has_long_lived_after: Bool
@@ -105,6 +108,7 @@ struct TopOptions:
         self.interval_ns = DEFAULT_INTERVAL_NS
         self.has_device = False
         self.device = String("")
+        self.allow_partial = False
         self.strict = False
         self.compact = False
         self.has_long_lived_after = False
@@ -122,7 +126,7 @@ def top_usage() -> String:
     return (
         "usage: memveil top [--interval DURATION] [--device NAME]\n"
         "       [--strict] [--compact] [--long-lived-after DURATION]\n"
-        "       [--max-line-bytes N]\n"
+        "       [--allow-partial] [--max-line-bytes N]\n"
         "       [--max-session-bytes N] [--max-events-bytes N] DIR\n"
         "   or: memveil top --output DIR [--object PATH]\n"
         "       [--duration SEC] [--max-events-bytes N]\n"
@@ -321,6 +325,9 @@ def parse_top_args(args: List[String]) raises CliError -> TopOptions:
             stashed_max_events = args[i + 1]
             has_stash = True
             i += 2
+        elif tok == "--allow-partial":
+            opts.allow_partial = True
+            i += 1
         elif tok == "--strict":
             opts.strict = True
             i += 1
@@ -343,6 +350,8 @@ def parse_top_args(args: List[String]) raises CliError -> TopOptions:
                 raise CliError("too many arguments")
             opts.dir = tok
             i += 1
+    if opts.allow_partial and opts.has_output:
+        raise CliError("--allow-partial requires replay DIR")
     if opts.dir != "" and opts.has_output:
         raise CliError("cannot combine replay DIR with live --output")
     if opts.compact and opts.has_device:
@@ -649,7 +658,7 @@ def _live_template() -> Session:
 
 
 def _finish_live(
-    dir: String, opts: TopOptions, shown: Int
+    dir: String, opts: TopOptions, shown: Int, capture_exit: Int = 0
 ) raises -> Int:
     """Replay the retained capture as the final live block.
 
@@ -687,7 +696,7 @@ def _finish_live(
         # warns twice. Only a prefix-less run can reach its
         # final block with the filter still unevaluated.
         watch.warned = True
-    return _finish_after_signal(reader, analyzer, opts, shown, watch)
+    return _finish_after_signal(reader, analyzer, opts, shown, watch, capture_exit, dir)
 
 
 def run_top_live(opts: TopOptions) raises -> Int:
@@ -751,7 +760,7 @@ def run_top_live(opts: TopOptions) raises -> Int:
             pass
         return result.exit_code
     return _finish_live(
-        opts.live.output, opts, writer.emission_count()
+        opts.live.output, opts, writer.emission_count(), result.exit_code
     )
 
 
@@ -783,7 +792,7 @@ def run_top(args: List[String]) raises -> Int:
     try:
         reader = read_capture(
             opts.dir,
-            False,
+            opts.allow_partial,
             ReaderLimits(
                 opts.max_session_bytes,
                 opts.max_line_bytes,
@@ -963,6 +972,8 @@ def _drain(
     try:
         rep = analyzer.finish(reader.session.window_end_ns, False)
         apply_integrity(rep, reader.integrity_verified, reader.session.integrity.events_bytes, reader.session.integrity.line_count)
+        if reader.checkpoint_prefix:
+            apply_checkpoint(rep, reader.session.integrity.events_bytes, reader.session.integrity.line_count, reader.unverified_bytes)
     except e:
         return _top_failed("memveil top: ", String(e))
     var line = watch.warn_for(rep)
@@ -985,6 +996,8 @@ def _drain(
     except e:
         return _top_failed("memveil top: ", e.message)
     _print_block(text, seq, reader.session.window_end_ns, watch.filt)
+    if reader.checkpoint_prefix:
+        return 4
     return exit_for_report(rep, opts.strict)
 
 
@@ -1011,6 +1024,8 @@ def _finish_after_signal(
     opts: TopOptions,
     seq: Int,
     mut watch: FilterWatch,
+    capture_exit: Int = -1,
+    retained_path: String = "",
 ) raises -> Int:
     """Drain the rest quietly, print the final summary and code."""
     while True:
@@ -1040,6 +1055,8 @@ def _finish_after_signal(
     try:
         rep = analyzer.finish(reader.session.window_end_ns, False)
         apply_integrity(rep, reader.integrity_verified, reader.session.integrity.events_bytes, reader.session.integrity.line_count)
+        if reader.checkpoint_prefix:
+            apply_checkpoint(rep, reader.session.integrity.events_bytes, reader.session.integrity.line_count, reader.unverified_bytes)
     except e:
         return _top_failed("memveil top: ", String(e))
     var line = watch.warn_for(rep)
@@ -1057,5 +1074,16 @@ def _finish_after_signal(
             "memveil top: internal error: cannot render report\n"
         )
         return EXIT_INTERNAL
-    _print_block(text, seq + 1, reader.session.window_end_ns, watch.filt)
+    try:
+        _print_block(text, seq + 1, reader.session.window_end_ns, watch.filt)
+    except:
+        if capture_exit >= 0:
+            try:
+                write_capture_location(retained_path, String(""))
+            except:
+                pass
+            return capture_exit
+        return EXIT_INTERNAL
+    if reader.checkpoint_prefix:
+        return 4
     return exit_for_report(rep, opts.strict)

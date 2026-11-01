@@ -334,10 +334,14 @@ def check_environment(environment, where):
                    allow_empty=True)
 
 
-def check_stop(stop, allow_013=False):
+def check_stop(stop, allow_013=False, allow_014=False):
     optional = ()
     if allow_013:
         optional = ("drain_completed", "submit_after_drain")
+    if allow_014:
+        optional += ("checkpoint_failures",)
+    if "checkpoint_failures" in stop:
+        check_u64(stop["checkpoint_failures"], "stop.checkpoint_failures")
     check_keys(stop,
                ("outcome", "reason", "budget_ms", "elapsed_ms",
                 "admission_closed", "quiescence_observed",
@@ -485,7 +489,7 @@ def check_session(obj):
     check_environment(obj["environment"], "environment")
     capture = obj["capture"]
     check_keys(capture, ("mode", "window", "filters", "finalized"),
-               ("end_reason", "integrity") if obj["schema_version"] == SESSION_VERSION_INTEGRITY else ("end_reason",), "capture")
+               ("end_reason", "integrity", "checkpoint_generation") if obj["schema_version"] == SESSION_VERSION_INTEGRITY else ("end_reason",), "capture")
     if obj["schema_version"] == SESSION_VERSION_INTEGRITY:
         if "integrity" not in capture:
             fail("missing-key", "capture.integrity")
@@ -512,8 +516,14 @@ def check_session(obj):
         fail("bad-type", "capture.finalized must be a boolean")
     if capture.get("end_reason") is not None:
         check_enum(capture["end_reason"],
-                   ("duration", "size_limit", "signal", "error", "unknown"),
+                   (("duration", "size_limit", "signal", "error", "unknown", "checkpoint")
+                    if obj["schema_version"] == SESSION_VERSION_INTEGRITY else
+                    ("duration", "size_limit", "signal", "error", "unknown")),
                    "capture.end_reason")
+    if "checkpoint_generation" in capture or capture.get("end_reason") == "checkpoint":
+        generation = check_u64(capture.get("checkpoint_generation"), "capture.checkpoint_generation")
+        if generation == 0 or capture["finalized"] or capture.get("end_reason") != "checkpoint":
+            fail("bad-checkpoint", "invalid checkpoint generation or finalization")
     if obj["synthetic"] != (capture["mode"] == "synthetic"):
         fail("contradictory-provenance",
              "synthetic flag disagrees with capture mode")
@@ -568,7 +578,7 @@ def check_session(obj):
                     relations_allowed=(obj["schema_version"]
                                         != SESSION_VERSION))
     is_latest = obj["schema_version"] in (SESSION_VERSION_LATEST, SESSION_VERSION_INTEGRITY)
-    check_stop(obj["stop"], allow_013=is_latest)
+    check_stop(obj["stop"], allow_013=is_latest, allow_014=obj["schema_version"] == SESSION_VERSION_INTEGRITY)
     if "verdict" in obj:
         if not is_latest:
             fail("bad-version", "session verdict needs schema 0.1.3")

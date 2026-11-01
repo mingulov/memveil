@@ -413,8 +413,34 @@
         },
         "verified_events": {
           "$ref": "#/$defs/u64"
+        },
+        "unverified_bytes": {
+          "$ref": "#/$defs/u64"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "checkpoint_prefix"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "unverified_bytes"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "unverified_bytes"
+              ]
+            }
+          }
+        }
+      ]
     }
   },
   "$defs": {
@@ -707,6 +733,123 @@
               }
             }
           },
+          "quality": {
+            "properties": {
+              "detail": {
+                "properties": {
+                  "status": {
+                    "not": {
+                      "const": "complete_for_scope"
+                    }
+                  }
+                }
+              },
+              "aggregate": {
+                "properties": {
+                  "status": {
+                    "not": {
+                      "const": "complete_for_scope"
+                    }
+                  }
+                }
+              },
+              "correlation": {
+                "properties": {
+                  "status": {
+                    "not": {
+                      "const": "complete_for_scope"
+                    }
+                  },
+                  "relations": {
+                    "properties": {
+                      "mapping_release": {
+                        "properties": {
+                          "status": {
+                            "not": {
+                              "const": "complete_for_scope"
+                            }
+                          }
+                        }
+                      },
+                      "copy_attribution": {
+                        "properties": {
+                          "status": {
+                            "not": {
+                              "const": "complete_for_scope"
+                            }
+                          }
+                        }
+                      },
+                      "sync_attribution": {
+                        "properties": {
+                          "status": {
+                            "not": {
+                              "const": "complete_for_scope"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "baseline": {
+                "properties": {
+                  "status": {
+                    "not": {
+                      "const": "complete_for_scope"
+                    }
+                  }
+                }
+              },
+              "terminal": {
+                "properties": {
+                  "status": {
+                    "not": {
+                      "const": "complete_for_scope"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "verdict": {
+            "properties": {
+              "name": {
+                "not": {
+                  "const": "complete"
+                }
+              }
+            }
+          },
+          "metrics": {
+            "items": {
+              "properties": {
+                "coverage": {
+                  "not": {
+                    "const": "complete_for_scope"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "integrity": {
+            "properties": {
+              "status": {
+                "const": "checkpoint_prefix"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
           "quality": {
             "properties": {
               "detail": {

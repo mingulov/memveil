@@ -6,7 +6,7 @@ sequences, and exact kind counts. Offline readers verify these bindings while
 streaming and emit report 0.1.4. Verification detects accidental changes; it
 does not authenticate a capture against an actor who can rewrite its digest.
 
-Checkpoint recovery and finalization reserves remain planned. Legacy session
+Checkpoint recovery and finalization reserves are implemented. Legacy session
 0.1.1/0.1.2/0.1.3 inputs remain readable, but reports label their arithmetic
 `legacy_unverified`, withhold completeness, and return 4 under `--strict`.
 Event 0.1.2 is unchanged. See the [current release limitations](release-notes.md#known-issues).
@@ -47,8 +47,8 @@ the writer and prevents a finalized-valid claim. Incremental
 an `Integrity` snapshot includes only committed bytes. Check arithmetic
 before updating any field. A capture-file digest hashes allowlisted metadata,
 not observed memory contents. It detects accidental edits and truncation;
-an actor able to rewrite both stream and digest defeats it. It supplies no
-authenticity, attestation or host-access verdict.
+an actor able to rewrite both stream and digest defeats it.
+It supplies no authenticity, attestation or host-access verdict.
 
 ## Reader and report behavior
 
@@ -61,15 +61,14 @@ precedence over a checkpoint; a present but corrupt final session fails.
 Report 0.1.4 exposes integrity status `verified`, `legacy_unverified`, or
 `checkpoint_prefix`, plus canonical `verified_bytes` and `verified_events` strings. Legacy inputs
 have zero verified bytes/events. Text, Markdown and JSON explain the status.
-`checkpoint_prefix` is reserved for recovery and is not emitted yet. Unverified integrity prevents
+Recovery emits `checkpoint_prefix` and `unverified_bytes` for the excluded suffix. Unverified integrity prevents
 `complete`/`complete_for_scope` in every evidence channel. Legacy arithmetic
 may still be displayed explicitly unverified, and legacy examples remain
 readable. Verified integrity is necessary but never sufficient for complete
 evidence: detail, aggregate, correlation, baseline and terminal quality stay
 independent. Unknown is not zero, and finalized is not settled.
 
-The finalized-capture rows below are implemented. Checkpoint rows describe
-planned recovery and remain unavailable.
+The following table applies to implemented report behavior.
 
 | Input | Normal report | Strict report | Evidence rule |
 | --- | --- | --- | --- |
@@ -87,7 +86,7 @@ the verdict is complete. Current legacy tail recovery can return 0 normally
 and 4 under strict mode. Runtime/internal or output failures return 1,
 invalid usage/input/schema returns 2, and explicitly requested unavailable
 collection returns 3. Findings do not by themselves change the exit code.
-The planned checkpoint-recovery exit 4 is unconditional, including normal
+The checkpoint-recovery exit 4 is unconditional, including normal
 mode. Invalid finalized evidence remains exit 2 in both modes.
 
 Interim live `top` blocks say `unverified live stream`; replay refreshes say
@@ -103,10 +102,10 @@ symlink paths and special source files, records source/output/tool hashes,
 and explicitly renumbers the derivative from zero. Legacy originals remain
 unchanged. Never seal observed data to manufacture qualification evidence.
 
-## Checkpoint publication and locking (planned)
+## Checkpoint publication and locking
 
 Before readiness, durably publish a zero-or-more-event checkpoint. Publish
-another every 10 seconds of a progressing poll loop. A checkpoint is a
+another every 10 seconds or 1,000 committed events of a progressing poll loop. A checkpoint is a
 session-shaped 0.1.4 snapshot with `finalized=false`,
 `end_reason="checkpoint"`, prefix integrity, a monotonic checkpoint
 generation and partial quality. It does not claim a closed measurement
@@ -136,7 +135,7 @@ their byte extent as unverified. Never extend the stored digest to bless a
 suffix. Invalid checkpoints, identity mismatches and missing evidence fail
 rather than trigger raw suffix salvage.
 
-## Reserve, finalization and signals (planned)
+## Reserve, finalization and signals
 
 Allocate a real non-sparse **17 MiB reserve** before readiness: 16 MiB for
 the maximum session plus 1 MiB margin. Establish an owned finalization
@@ -160,8 +159,7 @@ SIGHUP must follow SIGINT/SIGTERM's orderly stop latch. Ignore SIGPIPE before
 the existing re-exec boundary. After durable capture publication, a failed
 final stdout summary reports the capture path on stderr and preserves the
 capture exit. Failure to create a requested report output remains an output
-error. These are future changes; the current record summary write failure
-returns 1.
+error. A lost final summary preserves the capture exit; standalone report output failures still return 1.
 
 ## Bounds and evidence
 
@@ -180,3 +178,7 @@ and successive checkpoints, stale temporary files, active writers, symlink
 and directory swaps, unverified suffixes, SIGKILL, storage exhaustion and
 hard power-cut. Synthetic tests prove their own boundaries; live filesystem
 and exact packaged-artifact receipts remain separate requirements.
+
+Checkpoint generations are positive canonical u64 values and increase on every attempted checkpoint, so failures may leave gaps. Checkpoints carry `finalized=false`, `end_reason="checkpoint"`, and partial terminal evidence. New final sessions and checkpoints record `stop.checkpoint_failures`; older 0.1.4 documents without that field remain readable. Recovery requires owned regular files and refuses symlinks, active writers, and replaced directory entries. Storage admission still requires separate full-filesystem and power-cut tests.
+
+Replacement uses an atomic exchange and checks the displaced checkpoint identity before retiring it. Checkpoints are forbidden inside a rollback group; final publication commits a successfully completed closing group. Reserve release precedes the final events sync. A failed checkpoint rollback or rollback sync poisons the writer and prevents a finalized-success claim.

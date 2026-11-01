@@ -59,6 +59,11 @@ struct LiveWriter(WriterSource):
             return CreateOut(False, String("misuse"), String("create twice"))
         try:
             var w = EventWriter(path, budget)
+            try:
+                w.prepare()
+            except e:
+                self._writer = Optional(w^)
+                return CreateOut(False, e.kind.copy(), e.message.copy())
             self._writer = Optional(w^)
         except e:
             if e.residuals != UInt8(0):
@@ -119,6 +124,18 @@ struct LiveWriter(WriterSource):
             return AppendOut(False, e.kind.copy(), e.message.copy())
         self._writer = Optional(w^)
         return AppendOut(True, String(""), String(""))
+
+    def checkpoint(mut self, session: List[UInt8]) -> AppendOut:
+        if not self._writer:
+            return AppendOut(False, "misuse", "checkpoint before create")
+        var w = self._writer.take()
+        try:
+            w.checkpoint(session)
+        except e:
+            self._writer = Optional(w^)
+            return AppendOut(False, e.kind.copy(), e.message.copy())
+        self._writer = Optional(w^)
+        return AppendOut(True, "", "")
 
     def finalize(mut self, session: List[UInt8]) -> FinalOut:
         if not self._writer:

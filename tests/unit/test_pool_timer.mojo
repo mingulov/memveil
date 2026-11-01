@@ -18,6 +18,7 @@ from std.ffi import external_call
 from std.sys import exit
 from std.testing import TestSuite, assert_equal, assert_true
 
+from collector_probe import _record_batch, _err_poll
 from scripted import (
     ScriptClock,
     ScriptKernel,
@@ -36,6 +37,7 @@ from memveil.capture.pools import (
     pool_sample_pressured,
 )
 from memveil.platform.reader import read_host_file
+from memveil.model.session import parse_session
 
 
 def _mkdtemp() raises -> String:
@@ -526,8 +528,79 @@ def test_postcap_session_note() raises:
     )
 
 
+def test_checkpoint_after_one_thousand_committed_events() raises:
+    var tmp = _mkdtemp()
+    var cfg = CollectorConfig()
+    cfg.output = tmp + "/checkpoint-count"
+    cfg.profile_id = String("checkpoint-count-probe")
+    cfg.pid = 4242
+    var kernel = ScriptKernel()
+    var base = UInt64(1000000000)
+    for i in range(1000):
+        kernel.add_poll(_record_batch(UInt64(i + 1), base + UInt64(4), UInt64(64)), 1)
+    kernel.add_poll(_err_poll(), 1)
+    _zeros(kernel, 5, 4)
+    var clock = ScriptClock()
+    for offset in [0, 1, 2, 3, 4, 4]:
+        clock.add(base + UInt64(offset))
+    clock.step = UInt64(1)
+    var signal = ScriptSignal()
+    var writer = ScriptWriter()
+    var collector = Collector(cfg^)
+    assert_equal(collector.startup(kernel, clock, signal, writer), String(""))
+    assert_equal(collector.poll_loop(kernel, clock, signal, writer), String("error-path"))
+    assert_equal(writer.checkpoint_calls, 2)
+    var first = parse_session(writer.first_checkpoint)
+    var last = parse_session(writer.last_checkpoint)
+    assert_equal(first.integrity.line_count, UInt64(0))
+    assert_equal(last.integrity.line_count, UInt64(1000))
+    assert_equal(last.checkpoint_generation, UInt64(2))
+    assert_true(last.window_end_ns - first.window_end_ns < UInt64(10000000000))
+    assert_equal(_count(_read_text(tmp + "/checkpoint-count/events.ndjson"), String("\n")), 1000)
+    assert_equal(last.integrity.events_bytes, UInt64(writer.committed_len()))
+    assert_equal(writer.abandon(), String(""))
+
+
+def test_checkpoint_cadence_and_failure_counter() raises:
+    var tmp = _mkdtemp()
+    var cfg = CollectorConfig()
+    cfg.duration_s = UInt64(35)
+    cfg.output = tmp + "/checkpoint-cadence"
+    cfg.profile_id = String("checkpoint-timer-probe")
+    cfg.pid = 4242
+    var kernel = ScriptKernel()
+    # 34 collecting polls, two draining polls, and 100 confirmation polls.
+    kernel.add_poll(_timeout(), 136)
+    _zeros(kernel, 5, 4)
+    var clock = ScriptClock()
+    var base = UInt64(1000000000)
+    for offset in [0, 1, 2, 3, 4, 4]:
+        clock.add(base + UInt64(offset))
+    for tick in range(1, 36):
+        clock.add(base + UInt64(4) + UInt64(tick) * UInt64(1000000000))
+    clock.step = UInt64(1)
+    var signal = ScriptSignal()
+    var writer = ScriptWriter()
+    writer.checkpoint_fail_at = 2
+    var collector = Collector(cfg^)
+    var result = collector.run(kernel, clock, signal, writer)
+    assert_equal(result.outcome, String("finalized"))
+    assert_equal(writer.checkpoint_calls, 4)
+    var first = parse_session(writer.first_checkpoint)
+    var last = parse_session(writer.last_checkpoint)
+    assert_equal(first.integrity.line_count, UInt64(0))
+    assert_equal(first.checkpoint_generation, UInt64(1))
+    assert_equal(last.checkpoint_generation, UInt64(4))
+    assert_equal(last.window_end_ns - first.window_end_ns, UInt64(30000000000))
+    assert_equal(last.stop.checkpoint_failures, UInt64(1))
+    var final = parse_session(read_host_file(tmp + "/checkpoint-cadence/session.json", "session", 16777216))
+    assert_equal(final.stop.checkpoint_failures, UInt64(1))
+
+
 def run() raises -> Int:
     var suite = TestSuite()
+    suite.test[test_checkpoint_after_one_thousand_committed_events]()
+    suite.test[test_checkpoint_cadence_and_failure_counter]()
     suite.test[test_periodic_cadence]()
     suite.test[test_no_dwell_no_periodic]()
     suite.test[test_denied_periodic_unavailable]()

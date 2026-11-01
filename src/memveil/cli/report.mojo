@@ -6,13 +6,13 @@ The report verb wires the reader, the composed analyzer, and the
 renderers into one offline pipeline. It never collects: no kernel,
 device, or native-bridge import is needed to use it.
 
-Exit codes are exact: 0 means the evidence suffices for the
-requested scope, 4 means the report is usable but materially
-incomplete (unfinalized capture, detail loss, or a detail/counter
-disagreement), and 2 means invalid input or usage. A rendering
+Exit codes are exact: 0 means a valid finalized report was rendered,
+4 means checkpoint recovery or incomplete evidence under --strict,
+and 2 means invalid input or usage. A rendering
 failure on an accepted report is an internal error and exits 1.
 """
 
+from memveil.model.report import apply_checkpoint
 from std.ffi import external_call
 
 from memveil.analysis.diagnostics import diagnose_report
@@ -79,6 +79,26 @@ struct ReportOptions:
         self.max_events_bytes = DEFAULT_MAX_EVENTS_BYTES
 
 
+def write_capture_location(path: String, receipt: String) raises:
+    """Name only successfully retained output paths, escaping their control bytes."""
+    var note = "memveil: cannot write stdout; capture retained at " + escape_text(path)
+    if receipt != "":
+        note += "; receipt=" + escape_text(receipt)
+    _write_fd2((note + "\n").as_bytes())
+
+
+def final_capture_summary(text: String, path: String, capture_exit: Int) -> Int:
+    """A lost summary cannot undo a durable capture publication."""
+    try:
+        write_stdout(text)
+    except:
+        try:
+            write_capture_location(path, String(""))
+        except:
+            pass
+    return capture_exit
+
+
 def report_usage() -> String:
     """Usage text for the report verb."""
     return (
@@ -93,8 +113,8 @@ def report_usage() -> String:
         "Counts always cover the whole capture window.\n"
         "\n"
         "  --format NAME     text (default), json, or markdown.\n"
-        "  --allow-partial   drop a truncated final record and report\n"
-        "                    the loss instead of failing.\n"
+        "  --allow-partial   recover a verified checkpoint prefix, or\n"
+        "                    allow a truncated legacy final record.\n"
         "  --strict          exit 4 unless the report verdict is\n"
         "                    complete.\n"
         "  --long-lived-after DURATION\n"
@@ -111,7 +131,8 @@ def report_usage() -> String:
         "\n"
         "Exit 0 for a rendered report (completeness rides in the\n"
         "verdict field), 4 under --strict unless the verdict is\n"
-        "complete, 2 for invalid input or usage.\n"
+        "complete, and 4 for checkpoint recovery. Invalid input or\n"
+        "usage exits 2; corrupt final captures are never recovered.\n"
     )
 
 
@@ -466,6 +487,8 @@ def run_report(args: List[String]) raises -> Int:
     try:
         rep = analyzer.finish(reader.session.window_end_ns, reader.partial)
         apply_integrity(rep, reader.integrity_verified, reader.session.integrity.events_bytes, reader.session.integrity.line_count)
+        if reader.checkpoint_prefix:
+            apply_checkpoint(rep, reader.session.integrity.events_bytes, reader.session.integrity.line_count, reader.unverified_bytes)
     except e:
         return _report_failed("memveil report: ", String(e))
     diagnose_report(
@@ -491,4 +514,6 @@ def run_report(args: List[String]) raises -> Int:
     except:
         write_stderr("memveil report: cannot write stdout\n")
         return EXIT_INTERNAL
+    if reader.checkpoint_prefix:
+        return 4
     return exit_for_report(rep, opts.strict)

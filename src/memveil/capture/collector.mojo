@@ -382,6 +382,9 @@ trait WriterSource:
     def group_abort(mut self, mark: Int) -> AppendOut:
         ...
 
+    def checkpoint(mut self, session: List[UInt8]) -> AppendOut:
+        ...
+
     def finalize(mut self, session: List[UInt8]) -> FinalOut:
         ...
 
@@ -806,6 +809,10 @@ struct Collector:
     var start_ns: UInt64
     var max_snap_ts: UInt64
     var next_seq: UInt64
+    var checkpoint_generation: UInt64
+    var checkpoint_failures: UInt64
+    var checkpoint_next_ns: UInt64
+    var checkpoint_next_seq: UInt64
     var committed_stream: CommittedStream
     var table: DeviceTable
     var session_id: String
@@ -906,6 +913,10 @@ struct Collector:
         self.start_ns = UInt64(0)
         self.max_snap_ts = UInt64(0)
         self.next_seq = UInt64(0)
+        self.checkpoint_generation = UInt64(0)
+        self.checkpoint_failures = UInt64(0)
+        self.checkpoint_next_ns = UInt64(0)
+        self.checkpoint_next_seq = UInt64(0)
         self.committed_stream = CommittedStream()
         self.table = DeviceTable()
         self.session_id = String("")
@@ -1584,6 +1595,9 @@ struct Collector:
         self.ready_ns = clock.now()
         var t_r = sat_add_u64(self.ready_ns, LIVENESS_GUARD_NS)[0]
         self.live.retarget(self.attach_ns, t_r)
+        var checkpoint_note = self.checkpoint(writer, self.ready_ns)
+        if checkpoint_note != "":
+            return "output readiness checkpoint: " + checkpoint_note
         if self.cfg.has_pool_sample:
             # Baseline pool sample, persisted first: the file
             # stays chronological (baseline, periodic, final)
@@ -1625,6 +1639,55 @@ struct Collector:
         )
         self.stop_ctl.mark_ready()
         return String("")
+
+    def checkpoint[W: WriterSource](mut self, mut writer: W, now: UInt64) -> String:
+        """Snapshot committed metadata without claiming terminal settlement."""
+        self.checkpoint_next_ns = sat_add_u64(now, UInt64(10000000000))[0]
+        self.checkpoint_next_seq = sat_add_u64(self.next_seq, UInt64(1000))[0]
+        if self.checkpoint_generation == u64_max():
+            self.checkpoint_failures = sat_add_u64(self.checkpoint_failures, UInt64(1))[0]
+            return String("checkpoint generation exhausted")
+        self.checkpoint_generation += UInt64(1)
+        var note = String("")
+        try:
+            var snapshot = self.assemble()
+            snapshot.finalized = False
+            snapshot.end_reason = String("checkpoint")
+            snapshot.has_end_reason = True
+            snapshot.has_checkpoint_generation = True
+            snapshot.checkpoint_generation = self.checkpoint_generation
+            var horizon = max(now, self.max_persisted_ts)
+            if horizon == u64_max():
+                raise EncodeError("checkpoint", "window end overflow")
+            snapshot.window_end_ns = horizon + UInt64(1)
+            snapshot.has_integrity = True
+            snapshot.integrity = self.committed_stream.snapshot()
+            if snapshot.integrity.events_bytes != UInt64(writer.committed_len()) or snapshot.integrity.line_count != self.next_seq:
+                raise EncodeError("checkpoint", "committed prefix mismatch")
+            snapshot.stop.outcome = String("partial")
+            snapshot.stop.reason = String("checkpoint: measurement window remains open")
+            snapshot.stop.admission_closed = False
+            snapshot.stop.quiescence_observed = False
+            snapshot.stop.drain_completed = False
+            snapshot.stop.counters_valid = False
+            snapshot.q_terminal.status = String("partial")
+            snapshot.q_terminal.reason = snapshot.stop.reason
+            snapshot.q_detail.status = String("partial")
+            snapshot.q_detail.has_loss_count = False
+            snapshot.q_detail.reason = snapshot.stop.reason
+            snapshot.has_verdict = False
+            var text = encode_session(snapshot)
+            var raw = List[UInt8]()
+            for b in text.as_bytes():
+                raw.append(b)
+            var result = writer.checkpoint(raw)
+            if result.ok:
+                return String("")
+            note = result.message
+        except e:
+            note = String(e)
+        self.checkpoint_failures = sat_add_u64(self.checkpoint_failures, UInt64(1))[0]
+        return note
 
     def poll_one[K: KernelSource](
         mut self, mut kernel: K, timeout_ms: Int
@@ -1689,6 +1752,8 @@ struct Collector:
             if now >= deadline:
                 self.latch(String("duration"))
                 return String("closed")
+            if now >= self.checkpoint_next_ns or self.next_seq >= self.checkpoint_next_seq:
+                _ = self.checkpoint(writer, now)
             var ptick = self.maybe_sample_pool(clock, writer, now)
             if ptick != String(""):
                 return ptick
@@ -3626,14 +3691,18 @@ struct Collector:
             )
         out.q_detail.scope = scope
         if self.snapshots_present and not self._attempt_interval_known():
-            # The counter delta is exact only for the attached
-            # interval; without both stamps no complete claim.
+            # Both attached-interval stamps must be present and ordered.
             out.q_aggregate.status = String("partial")
             out.q_aggregate.has_loss_count = False
             out.q_aggregate.reason = aggregate_reason(True, String(""))
-            out.q_aggregate.reason += String(
-                "; attempt attached interval unknown (stamp missing)"
-            )
+            if self.attempt_attach_done_ns == 0 or self.attempt_detach_begin_ns == 0:
+                out.q_aggregate.reason += String(
+                    "; attempt attached interval unknown (stamp missing)"
+                )
+            else:
+                out.q_aggregate.reason += String(
+                    "; attempt attached interval unknown (stamps not increasing)"
+                )
         elif self.snapshots_present and not self.attempt_known:
             # Skipped attempt runs never advance the counters.
             out.q_aggregate.status = String("partial")
@@ -3742,6 +3811,8 @@ struct Collector:
         out.q_baseline.scope = String("attempt metrics")
         out.q_baseline.reason = String("Attempt metrics need no baseline.")
         var stop = self.stop_evidence
+        out.stop.has_checkpoint_failures = True
+        out.stop.checkpoint_failures = self.checkpoint_failures
         out.stop.outcome = stop.outcome
         out.stop.reason = stop.reason
         out.stop.budget_ms = UInt64(stop.stop_budget_ms)
