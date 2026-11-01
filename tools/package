@@ -955,6 +955,7 @@ def main(argv):
         if rerun.returncode != 0 or rerun.stdout.strip() != "memveil-" + version:
             fail("canonical executable failed version check: " + rerun.stderr)
         try:
+            canonical_runtime.runtime_cpu.verify_engine(binary)
             runtime_entries = canonical_runtime.inventory(staged)
         except (OSError, ValueError) as error:
             fail("canonical runtime seal failed: " + str(error))
@@ -964,7 +965,9 @@ def main(argv):
         manifest = {
             "bundle": tag,
             "qualification": "unqualified-local-build",
-            "canonical_runtime": {"format": canonical_runtime.FORMAT, "entries": runtime_entries},
+            "canonical_runtime": {"format": canonical_runtime.FORMAT,
+                                  "cpu": canonical_runtime.runtime_cpu.CONTRACT,
+                                  "entries": runtime_entries},
             "normalization": transformations,
             "packaging_tools": packaging_tools,
             "host_linker": receipt.get("host_linker", {}),

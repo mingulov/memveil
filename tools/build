@@ -52,6 +52,7 @@ checks = [
     ("python", ["python3", "--version"]),
     ("cc", ["cc", "--version"]),
     ("ld", ["ld", "--version"]),
+    ("readelf", ["readelf", "--version"]),
 ]
 
 failed = 0
@@ -87,8 +88,8 @@ for name, cmd in checks:
         else:
             print("ok %s: %s (>= %s)"
                   % (name, first.strip(), floors[name]))
-    elif name in ("cc", "ld"):
-        print("ok %s: %s (host linker identity recorded in receipt)" % (name, first.strip()))
+    elif name in ("cc", "ld", "readelf"):
+        print("ok %s: %s (observed identity recorded in receipt)" % (name, first.strip()))
     elif first.strip() != want_lines[name]:
         print("FAIL %s: want exactly %r, got %r"
               % (name, want_lines[name], first.strip()))
@@ -511,11 +512,14 @@ main() {
             if [ -f "$ROOT/src/memveil/main.mojo" ]; then
                 log pixi run --frozen python3 tools/mojo_link.py "${MOJO_INCS[@]}" "${MOJO_SAN[@]}" \
                     --target-cpu x86-64-v2 -strip-file-prefix="$ROOT/" \
+                    -Xlinker -z -Xlinker x86-64-v3 \
                     -o build/memveil src/memveil/main.mojo
                 mkdir -p build
                 pixi run --frozen python3 tools/mojo_link.py "${MOJO_INCS[@]}" "${MOJO_SAN[@]}" \
                     --target-cpu x86-64-v2 -strip-file-prefix="$ROOT/" \
+                    -Xlinker -z -Xlinker x86-64-v3 \
                     -o build/memveil src/memveil/main.mojo || return 1
+                python3 "$ROOT/tools/runtime_cpu.py" build/memveil || return 1
             else
                 echo "build: no Mojo targets registered yet" >&2
             fi

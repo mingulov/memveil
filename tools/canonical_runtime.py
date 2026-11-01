@@ -8,6 +8,7 @@ import os
 import re
 from pathlib import Path
 import stat
+import runtime_cpu
 
 FORMAT = 'memveil-runtime/1'
 
@@ -113,7 +114,10 @@ def verify_bundle(root):
     runtime = manifest['canonical_runtime']
     if runtime['format'] != FORMAT:
         raise ValueError('unsupported canonical runtime format')
+    if runtime.get('cpu') != runtime_cpu.CONTRACT:
+        raise ValueError('unsupported canonical runtime CPU contract')
     verify(root, runtime['entries'])
+    runtime_cpu.verify_engine(root / 'bin/memveil')
     actual = {}
     for current, dirs, files in os.walk(root):
         for name in dirs + files:

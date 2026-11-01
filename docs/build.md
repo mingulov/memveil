@@ -15,6 +15,7 @@ the `pixi.lock` file carries authoritative conda package hashes.
 - System `clang` and `bpftool` at or above the locked floors, for C eBPF programs.
 - A native `cc` driver and `ld` for Mojo executable linking; their observed
   versions, executable hashes and any ccache launcher are recorded in the build receipt.
+- `readelf` from `binutils` verifies the engine's loadable CPU requirement after linking.
 - `python3` for development-only validation tooling.
 - `python3-pytest` (`apt install python3-pytest`): the pytest-driven suites fail loudly without it.
 - `strace` for the package clean-room audit (`apt install strace`).
@@ -287,6 +288,24 @@ JSON string: `"0"` or digits beginning with `1` through `9`, up to
 non-ASCII digits and overflow are rejected. Verification compares the validated
 integer with the file's actual byte length. Existing build and source receipt
 formats retain their own integer fields.
+
+The minimum runtime CPU eligibility is **x86-64-v3**, as required by the
+[selected Mojo 1.2.0 runtime](https://mojolang.org/docs/requirements/).
+The engine keeps x86-64-v2 code generation; that does not lower the requirements
+of its prebuilt libraries. Its single link adds the
+`GNU_PROPERTY_X86_ISA_1_NEEDED` v3 declaration with `-z x86-64-v3`.
+The build and bundle verifier inspect the actual loadable property and refuse
+an absent, weaker or stronger declaration. Provider libraries are not rewritten.
+
+The build receipt and `canonical_runtime.cpu` record separate `code_generation`
+(`x86-64-v2`), `runtime_required` (`x86-64-v3`), and `enforcement`
+(`gnu-property-x86-isa-needed`) fields. A compatible glibc loader checks the
+declaration before library constructors or Mojo execute. An incompatible CPU
+produces `CPU ISA level is lower than required` and exits 127 on the verified
+loaders. This is a pre-CLI loader refusal, separate from MemVeil command exits.
+CPU eligibility and recorded tool identities do not qualify an artifact or
+environment. The artifact's libc floor is derived from its complete ELF closure;
+the vendor's development-system minimum alone is insufficient.
 
 `--bundle DIR` is the package-adapter interface for a retained canonical tree.
 Adapters verify its complete file manifest before copying and compare the
