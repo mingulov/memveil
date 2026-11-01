@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import shlex
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -29,6 +30,9 @@ GUEST_FLOW = REPO / "tests" / "vm" / "guest_lifecycle.py"
 
 def run_guest(sub, timeout=900, network=False):
     """Boot the guest, run one lifecycle subcommand, return dir+proc."""
+    sys.path.insert(0, str(REPO / 'tests'))
+    from support.candidate_input import load
+    selected = load()
     prefix, env = gate_prefix()
     from lifecycle_env import ensure_oracle_module
     from harness_env import check_harness_versions
@@ -61,10 +65,15 @@ def run_guest(sub, timeout=900, network=False):
             "--qemu-opts=-device pcnet,netdev=pcnet0"
             " -netdev user,id=pcnet0,net=10.0.3.0/24",
         ]
+    guest_command = ['python3', str(GUEST_FLOW), sub, work, '/tmp/export', str(REPO)]
+    if selected:
+        guest_command = ['env', 'MV_CANDIDATE_MANIFEST=' + str(selected.manifest_path),
+                         'MV_BUNDLE_TARBALL=' + str(selected.bundle),
+                         'MV_CANDIDATE_DIGEST=' + selected.digest, *guest_command]
     cmd += [
         f"--rwdir=/tmp/export={export}",
         "--exec",
-        f"python3 {GUEST_FLOW} {sub} {work} /tmp/export {REPO}",
+        shlex.join(guest_command),
     ]
     try:
         from vm_process import run_owned_guest
@@ -99,6 +108,9 @@ def verify_exports(tmp, sub, names):
     from export_validation import validate_lifecycle_exports
     validate_lifecycle_exports(got, sub)
     if "identity.json" in got:
+        sys.path.insert(0, str(REPO / 'tests'))
+        from support.candidate_input import load
+        selected = load()
         from lifecycle_env import ORACLE_KO, module_build_identity
         expected = module_build_identity()
         identity = json.loads(got["identity.json"].read_text())
@@ -109,6 +121,10 @@ def verify_exports(tmp, sub, names):
                           ("cp_sha",REPO/("build/bpf/swiotlb_copy-test.bpf.o" if sub=="saturation" else "build/bpf/swiotlb_copy.bpf.o")),
                           ("bridge_sha",REPO/"build/deps/lmb/lib/libbpf_mojo.so.1"),
                           ("ko_sha",Path(ORACLE_KO))):
+            if selected and key in ('lc_sha', 'cp_sha', 'bridge_sha'):
+                rel = {'lc_sha': 'bpf/swiotlb_lifecycle.bpf.o', 'cp_sha': 'bpf/swiotlb_copy.bpf.o',
+                       'bridge_sha': 'lib/memveil/libbpf_mojo.so.1'}[key]
+                path = selected.path(rel)
             assert identity[key] == sha_file(path), "guest artifact mismatch: " + key
     return VerifiedExports(got, verified)
 

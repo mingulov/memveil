@@ -43,15 +43,20 @@ import stat
 import subprocess
 
 import pytest
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from support.candidate_input import load, binary
+_selected = load()
 
-DEB = os.environ.get("MV_DEB", "")
+DEB = str(_selected.artifact("deb")) if _selected else os.environ.get("MV_DEB", "")
 REPO = os.environ.get("MV_REPO", os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
 needs_deb = pytest.mark.skipif(
     not DEB, reason="MV_DEB is not set (run tools/test deb)")
 
-BIN = os.path.join(REPO, "build", "memveil")
+BIN = binary(os.path.join(REPO, "build", "memveil"))
 needs_bin = pytest.mark.skipif(
     not os.path.isfile(BIN),
     reason="build/memveil is absent (run tools/build first)")

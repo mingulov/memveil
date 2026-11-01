@@ -20,8 +20,9 @@ import tempfile
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
-BIN = os.environ.get(
-    "MEMVEIL_BIN", os.path.join(REPO, "build", "memveil"))
+sys.path.insert(0, os.path.join(REPO, "tests"))
+from support.candidate_input import binary
+BIN = binary(os.path.join(REPO, "build", "memveil"))
 CANARY = os.path.join(REPO, "tests", "fixtures", "reader", "privacy-canary")
 
 

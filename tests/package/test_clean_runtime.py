@@ -32,13 +32,16 @@ import shutil
 import subprocess
 import sys
 import tarfile
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from support.candidate_input import load
 
 import pytest
 
 from cleanroom import audit_trace, check_manifest
 
 TARBALL = os.environ.get("MV_BUNDLE_TARBALL", "")
-REPO = os.environ.get("MV_REPO", "")
+REPO = os.environ.get("MV_REPO", str(Path(__file__).resolve().parents[2]))
 VALID_EMPTY = os.environ.get("MV_VALID_EMPTY", "")
 
 REQUIRED = (
@@ -106,6 +109,10 @@ def bundle(tmp_path_factory):
     assert REPO and os.path.isdir(REPO), "MV_REPO must name the checkout"
     assert VALID_EMPTY and os.path.isdir(VALID_EMPTY), \
         "MV_VALID_EMPTY must name the valid-empty fixture"
+    selected = load()
+    if selected:
+        root = selected.root
+        return root, json.loads((root / "MANIFEST.json").read_text())
     dest = tmp_path_factory.mktemp("bundle")
     with tarfile.open(TARBALL, "r:gz") as tar:
         members = tar.getnames()

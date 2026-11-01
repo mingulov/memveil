@@ -117,6 +117,13 @@ class Gate:
             repo, "build", "bpf", "swiotlb_copy.bpf.o")
         self.lc_test_obj = os.path.join(
             repo, "build", "bpf", "swiotlb_lifecycle-test.bpf.o")
+        sys.path.insert(0, os.path.join(repo, 'tests'))
+        from support.candidate_input import load
+        self.candidate = load()
+        if self.candidate:
+            self.bridge = str(self.candidate.path('lib/memveil/libbpf_mojo.so.1'))
+            self.lc_obj = str(self.candidate.path('bpf/swiotlb_lifecycle.bpf.o'))
+            self.cp_obj = str(self.candidate.path('bpf/swiotlb_copy.bpf.o'))
         self.consumers = []
         self.oracle_loaded = False
         self.cp_test_obj = os.path.join(

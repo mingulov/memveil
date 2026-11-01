@@ -874,6 +874,11 @@ def run_flow():
 
 
 def main():
+    sys.path.insert(0, os.path.join(REPO, "tests"))
+    from support.candidate_input import load
+    if load():
+        from candidate_live import host
+        return host('overhead')
     if os.environ.get("MEMVEIL_VM_PERF", "0") != "1":
         print("perf-overhead: SKIP: needs MEMVEIL_VM_PERF=1 "
               "with qualified probes")

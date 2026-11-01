@@ -118,3 +118,62 @@ and replay `top`, checking exact counts and child RSS.
 no always-on-service claim and does not exercise real collection, writer
 settlement or confidential guests. Retain binary and input hashes, the
 command, duration, cycle count, RSS, counts, quality and cleanup for each run.
+
+## Exact packaged qualification
+
+Set both `MV_BUNDLE_TARBALL` and `MV_CANDIDATE_MANIFEST` to retained immutable
+candidate files, optionally pinning `MV_CANDIDATE_DIGEST`. The qualification
+loader verifies the canonical manifest, archive hash, full file closure and
+runtime CPU identity before executing anything. Each process extracts into
+its own exclusive temporary directory. It never rebuilds the product. Artifact
+roles such as deb and rpm resolve beside the candidate manifest and must match
+its hashes. Existing `MEMVEIL_BIN`, `MV_DEB`, `MV_RPM`, library injection and
+similar product overrides are refused. A fuzz `--binary` may only name the
+loader's verified executable. Development runs without these inputs retain
+their existing scope; unsupported qualification suites fail closed.
+
+`tools/test perf-replay`, `perf-region`, `soak`, `fuzz-smoke`, `fuzz-campaign`,
+`privacy`, `extracted-robustness`, `package`, `release-runtime`, `deb` and
+`rpm-journey` consume the selected bytes. The extracted robustness suite reuses
+the supplied archive. Pacing remains 600,000 records over 60 seconds and the
+region ceiling remains 65,536 segments. Native pacing/oracle helpers retain
+separate identities; they do not replace candidate product bytes.
+
+`MEMVEIL_VM_PERF=1 tools/test perf-overhead` in candidate mode installs the
+verified deb in an ephemeral guest and runs five separately paired baseline
+runs for each of `attempt-record-summary`, actual `live-top-1s`, no-stack
+`journal-summary`, and `journal-callers-detail`. Summary targets remain at
+most 5% throughput decrease and 10% p99 increase. Caller-enabled journal detail
+is reported separately. Missing or unadmitted requested journal support fails
+its row; an attach refusal is never a performance pass. The existing
+`perf-workload` remains a laboratory consumer measurement, with candidate BPF
+and bridge inputs when selected; it does not become a product-summary receipt.
+
+Installed campaign workload units are a 16 MiB direct scratch read and 32
+paced packets to the guest's emulated peer, run concurrently. Each leg warms
+for ten seconds and measures for at least sixty. Throughput counts completed
+bytes/packets over wall time. p99 is the nearest-rank latency of those complete
+operations, including helper process overhead; it is not per-request device or
+per-packet latency. The exact same protocol runs in each paired baseline.
+
+`MEMVEIL_VM_LIVE_SOAK=1 tools/test vm-live-soak` requires the same candidate
+inputs. It runs repeated one-minute captures with concurrent scratch block and
+peer-network traffic for at least thirty minutes, then one 4,260-second live
+capture whose pool samples must span more than seventy minutes. The pool case
+uses one 16 KiB direct read and one peer packet per second so it exercises the
+full sampling duration within the default event-byte budget; it is not an
+overhead measurement. The repeated-capture case retains the mixed workload
+specified above. It records
+all quality channels, stop facts, process RSS/FD samples, BPF program/map/link
+inventories, installed byte identities, capture hashes and cleanup. Userspace
+RSS remains bounded by 256 MiB; map memory is reported separately and unknown
+map memory stays null. Captures and progress remain in the exported evidence
+directory. This is distinct from the offline replay `soak` suite.
+
+Live campaigns require the pinned VM tool versions, KVM, root in the isolated
+guest, and the exclusive suite lease. The host root remains read-only; package
+installation uses guest overlays, the scratch NVMe image is created for that
+one run, and cleanup addresses only the owned guest process group and scratch
+image. Unarmed live soak exits 77. Armed missing prerequisites, capture refusal,
+quality/loss failures or cleanup failures fail the campaign. An ordinary guest
+receipt makes no confidential-platform qualification claim.

@@ -23,6 +23,10 @@ import shutil
 import stat
 import subprocess
 import tarfile
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from support.candidate_input import load
 from importlib.machinery import SourceFileLoader
 
 import pytest
@@ -51,6 +55,10 @@ def bundle(tmp_path_factory):
         "MV_BUNDLE_TARBALL must name the built tarball"
     assert VALID_EMPTY and os.path.isdir(VALID_EMPTY), \
         "MV_VALID_EMPTY must name the valid-empty fixture"
+    selected = load()
+    if selected:
+        root = selected.root
+        return root, json.loads((root / "MANIFEST.json").read_text())
     dest = tmp_path_factory.mktemp("release")
     with tarfile.open(TARBALL, "r:gz") as tar:
         members = tar.getnames()

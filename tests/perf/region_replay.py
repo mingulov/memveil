@@ -47,7 +47,9 @@ import time
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
-BIN = os.path.join(REPO, "build", "memveil")
+sys.path.insert(0, os.path.join(REPO, "tests"))
+from support.candidate_input import binary
+BIN = binary(os.path.join(REPO, "build", "memveil"))
 
 # Declared workload: doubling hole counts up to the admitted
 # segment ceiling (2*32766+3 = 65535 of 65536 segments).

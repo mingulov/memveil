@@ -19,7 +19,7 @@
 # record-failures, output-paths, vm-cleanup, privacy,
 # render-escaping, offline-environment, perf-replay,
 # perf-region, perf-workload, perf-overhead, soak, preview-package, provenance,
-# source-export,
+# source-export, candidate-inputs, vm-live-soak,
 # release-runtime, docs, examples, extracted-robustness, deb,
 # rpm-journey, payload-gate, sbom.
 #
@@ -51,6 +51,17 @@
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+if [ "$#" = 1 ] && [ "$1" != --help ] && [ "$1" != -h ] && \
+   { [ "${MV_BUNDLE_TARBALL+x}" = x ] || [ "${MV_CANDIDATE_MANIFEST+x}" = x ]; }; then
+    exec python3 "$ROOT/tests/support/candidate_suite.py" "$1"
+fi
+if [ "$#" = 1 ] && [ "$1" = vm-live-soak ]; then
+    exec python3 "$ROOT/tests/vm/candidate_live.py" soak
+fi
+if [ "$#" = 1 ] && [ "$1" = candidate-inputs ]; then
+    exec python3 -m pytest "$ROOT/tests/support/test_candidate_input.py" "$ROOT/tests/support/test_candidate_suites.py" "$ROOT/tests/vm/test_live_soak.py" -q
+fi
 
 if [ "${LMB_SANITIZE:-0}" = 1 ]; then
     # UBSan prints and recovers by default, which would let a

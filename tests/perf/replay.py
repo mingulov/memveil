@@ -26,7 +26,9 @@ sys.path.insert(0, TESTS)
 from preload_env import preload_env
 
 REPO = os.path.dirname(TESTS)
-BIN = os.path.join(REPO, "build", "memveil")
+sys.path.insert(0, os.path.join(REPO, "tests"))
+from support.candidate_input import binary, load
+BIN = binary(os.path.join(REPO, "build", "memveil"))
 
 COUNT = 600000
 WINDOW_START = 1000000000
@@ -153,6 +155,8 @@ def paced_errors(receipt, source_stat, count, size, duration_ns, wall):
 
 
 def main():
+    if load() and int(os.environ.get('MEMVEIL_PACED_SECONDS', '60')) != 60:
+        raise ValueError('qualification pacing requires the full 60-second workload')
     if not os.path.isfile(BIN):
         print("FAIL perf-replay: missing %s (run tools/build first)"
               % BIN)
@@ -237,6 +241,10 @@ def main():
         subprocess.run(['clang', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
                         '-shared', '-fPIC', os.path.join(TESTS, 'perf', 'paced_reads.c'),
                         '-o', adapter], check=True)
+        print('paced helper: ' + json.dumps({
+            'source_sha256': hashlib.sha256(open(os.path.join(TESTS, 'perf', 'paced_reads.c'), 'rb').read()).hexdigest(),
+            'binary_sha256': hashlib.sha256(open(adapter, 'rb').read()).hexdigest(),
+            'scope': 'synthetic delayed offline reads; no live admission'}, sort_keys=True))
         subprocess.run([sys.executable, os.path.join(TESTS, 'perf', 'test_paced_reads.py')], check=True)
         receipt_path = os.path.join(tmp, 'paced-reads.json')
         env = paced_environment(paced_file, receipt_path, paced_lines, paced_seconds * 1000000000, adapter)

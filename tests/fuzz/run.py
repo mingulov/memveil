@@ -132,12 +132,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", type=int, required=True)
     ap.add_argument("--start", type=int, default=0)
-    ap.add_argument("--binary", default=os.path.join(REPO, "build", "memveil"))
+    ap.add_argument("--binary")
     ap.add_argument("--regress",
                     default=os.path.join(REPO, "build", "fuzz-regressions"))
     ap.add_argument("--timeout", type=int, default=10)
     ap.add_argument("--receipt", type=Path)
     args = ap.parse_args()
+    sys.path.insert(0, os.path.join(REPO, "tests"))
+    from support.candidate_input import binary
+    args.binary = binary(os.path.join(REPO, "build", "memveil"), args.binary)
     if args.seeds is None or args.seeds <= 0:
         print("FAIL fuzz: --seeds must be positive, got %r"
               % (args.seeds,))

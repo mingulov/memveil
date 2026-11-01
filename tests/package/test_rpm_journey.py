@@ -35,8 +35,13 @@ import shutil
 import subprocess
 
 import pytest
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from support.candidate_input import load
+_selected = load()
 
-RPM = os.environ.get("MV_RPM", "")
+RPM = str(_selected.artifact("rpm")) if _selected else os.environ.get("MV_RPM", "")
 REPO = os.environ.get("MV_REPO", os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
