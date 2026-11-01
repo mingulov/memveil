@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Synthetic transport/privacy tests; these never attach a kernel probe."""
 import importlib.util
+import ctypes
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
+import signal
 import tempfile
+import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -29,12 +34,14 @@ class SpikeTests(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(kit, 'runnable spike implementation is missing')
 
-    def stream(self, hook='fentry', callers=False):
-        parser = kit.Trace(hook, callers, owned=True)
+    def stream(self, hook='fentry', callers=False, caller_stacks=None, owned=True):
+        parser = kit.Trace(hook, callers, owned=owned)
         parser.feed(ATTACHED)
         parser.feed(record('MVJ1|ready\n'))
         for direction in ('shared', 'private'):
             stack = '\n  mv_command_set+19 [memveil_region_oracle]\n' if callers else 'disabled'
+            if caller_stacks is not None:
+                stack = caller_stacks.get(direction, stack)
             parser.feed(record(f'MVJ1|entry|{direction}|3|{stack}\n'))
             pages = '3' if hook == 'fentry' else '-'
             parser.feed(record(f'MVJ1|exit|{direction}|{pages}|0\n'))
@@ -65,6 +72,31 @@ class SpikeTests(unittest.TestCase):
         parser.feed(record('MVJ1|counts|1|0|0|0\n'))
         with self.assertRaisesRegex(ValueError, 'owned'):
             kit.compare_owned(parser, [['shared', '3', 0], ['private', '3', 0]])
+
+    def test_owned_join_requires_each_enabled_caller_identity(self):
+        samples = {
+            'unresolved': '\n unknown_caller+1\n',
+            'foreign_class': '\n dma_direct_alloc+1\n',
+            'foreign_module': '\n mv_command_set+1 [other]\n',
+            'ambiguous': '\n mv_command_set+1 [memveil_region_oracle]\n swiotlb_free_tlb+1\n',
+            'truncated': '\n mv_command_set+1 [memveil_region_oracle]\n' * 16,
+        }
+        rows = [['shared', '3', 0], ['private', '3', 0]]
+        for hook in ('fentry', 'kprobe'):
+            for direction in ('shared', 'private'):
+                for condition, stack in samples.items():
+                    with self.subTest(hook=hook, direction=direction, condition=condition):
+                        trace = self.stream(hook, True, {direction: stack})
+                        self.assertEqual(trace.finish()['counts'], dict.fromkeys(kit.COUNTERS, '1'))
+                        with self.assertRaisesRegex(ValueError, 'owned caller'):
+                            kit.compare_owned(trace, rows)
+            good = self.stream(hook, True, {'private': '\n mv_restore+7 [memveil_region_oracle]\n'})
+            kit.compare_owned(good, rows)
+            kit.compare_owned(self.stream(hook, False), rows)
+            global_trace = self.stream(hook, True, dict.fromkeys(('shared', 'private'), samples['unresolved']), owned=False)
+            quality = global_trace.finish()['caller_quality']
+            self.assertEqual(quality['classes']['unresolved'], '2')
+            self.assertFalse(quality['target_met'])
 
     def test_strict_protocol_negative_controls(self):
         bad = [b'{"type":"lost_events","data":1}\n',
@@ -231,6 +263,133 @@ class SpikeTests(unittest.TestCase):
         with self.assertRaises(ProcessLookupError):
             os.killpg(parser.child_pid, 0)
 
+    def descendant_case(self, leader_exits_first, close_pipes=False):
+        libc = ctypes.CDLL(None, use_errno=True)
+        previous = ctypes.c_int()
+        self.assertEqual(libc.prctl(37, ctypes.byref(previous), 0, 0, 0), 0)
+        self.assertEqual(libc.prctl(36, 1, 0, 0, 0), 0)
+        trace = kit.Trace('fentry', False)
+        stopped, reaped = threading.Event(), threading.Event()
+        try:
+            with tempfile.TemporaryDirectory() as name:
+                marker = Path(name)/'descendant'
+                code = '''import os, pathlib, signal, sys, time
+marker = pathlib.Path(sys.argv[1])
+worker = os.fork()
+if worker == 0:
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    marker.write_text(str(os.getpid()))
+    if sys.argv[3] == 'close':
+        os.close(1)
+        os.close(2)
+    time.sleep(30)
+    os._exit(0)
+signal.signal(signal.SIGINT, lambda *_: os._exit(0))
+while not marker.exists():
+    time.sleep(0.005)
+if sys.argv[2] == 'first':
+    os._exit(0)
+time.sleep(30)
+'''
+
+                def reap_descendant():
+                    while not stopped.wait(0.005):
+                        if not marker.exists():
+                            continue
+                        try:
+                            pid = int(marker.read_text())
+                            waited, _ = os.waitpid(pid, os.WNOHANG)
+                        except (ChildProcessError, ValueError):
+                            continue
+                        if waited == pid:
+                            reaped.set()
+                            return
+
+                reaper = threading.Thread(target=reap_descendant)
+                reaper.start()
+                try:
+                    with patch.object(kit, 'GROUP_GRACE_SECONDS', 0.1, create=True), patch.object(kit, 'GROUP_KILL_SECONDS', 1, create=True):
+                        argv = [sys.executable, '-c', code, str(marker),
+                                'first' if leader_exits_first else 'interrupt', 'close' if close_pipes else 'keep']
+                        if close_pipes:
+                            self.assertEqual(kit.pipe(argv, trace, 0.3), (0, 'none'))
+                        else:
+                            with self.assertRaisesRegex(ValueError, 'trace deadline exceeded'):
+                                kit.pipe(argv, trace, 0.3)
+                    self.assertTrue(marker.exists(), 'descendant must reach its installed signal handler')
+                    with self.assertRaises(ProcessLookupError):
+                        os.killpg(trace.child_pid, 0)
+                    with self.assertRaises(ChildProcessError):
+                        os.waitpid(trace.child_pid, os.WNOHANG)
+                    self.assertEqual(trace.process_cleanup, 'verified')
+                    self.assertTrue(reaped.wait(1), 'synthetic adopted descendant must be reaped')
+                finally:
+                    if hasattr(trace, 'child_pid'):
+                        try:
+                            os.killpg(trace.child_pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    reaped.wait(2)
+                    stopped.set()
+                    reaper.join(timeout=2)
+        finally:
+            self.assertEqual(libc.prctl(36, previous.value, 0, 0, 0), 0)
+
+    def test_group_cleanup_when_leader_exits_first(self):
+        self.descendant_case(True)
+
+    def test_group_cleanup_when_leader_exits_on_interrupt(self):
+        self.descendant_case(False)
+
+    def test_group_cleanup_after_successful_leader_and_pipe_eof(self):
+        self.descendant_case(True, close_pipes=True)
+
+    def test_primary_failure_survives_cleanup_interruption(self):
+        trace = kit.Trace('fentry', False)
+        real_killpg = os.killpg
+
+        def interrupt_cleanup(pgid, signum):
+            if signum == signal.SIGINT:
+                raise KeyboardInterrupt
+            return real_killpg(pgid, signum)
+
+        with patch.object(kit, 'GROUP_GRACE_SECONDS', 0.1), patch.object(kit.os, 'killpg', side_effect=interrupt_cleanup):
+            with self.assertRaisesRegex(ValueError, 'trace deadline exceeded') as error:
+                kit.pipe([sys.executable, '-c', 'import time; time.sleep(30)'], trace, 0.05)
+        self.assertEqual(error.exception.__notes__, ['owned process-group cleanup unproved'])
+        self.assertEqual(trace.process_cleanup, 'unproved')
+        with self.assertRaises(ProcessLookupError):
+            real_killpg(trace.child_pid, 0)
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(trace.child_pid, os.WNOHANG)
+
+    def test_selector_setup_failure_still_reaps_owned_group(self):
+        trace = kit.Trace('fentry', False)
+        with patch.object(kit.selectors, 'DefaultSelector', side_effect=OSError('synthetic selector failure')):
+            with self.assertRaisesRegex(OSError, 'synthetic selector failure'):
+                kit.pipe([sys.executable, '-c', 'import time; time.sleep(30)'], trace, 3)
+        self.assertEqual(trace.process_cleanup, 'verified')
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(trace.child_pid, 0)
+
+    def test_cleanup_signal_is_latched_until_group_is_gone(self):
+        trace = kit.Trace('fentry', False)
+        original = kit._cleanup_group
+        prior_handler = signal.getsignal(signal.SIGINT)
+
+        def signal_during_cleanup(child):
+            os.kill(os.getpid(), signal.SIGINT)
+            return original(child)
+
+        with patch.object(kit, '_cleanup_group', side_effect=signal_during_cleanup):
+            with self.assertRaisesRegex(ValueError, 'trace deadline exceeded') as error:
+                kit.pipe([sys.executable, '-c', 'import time; time.sleep(30)'], trace, 0.05)
+        self.assertEqual(signal.getsignal(signal.SIGINT), prior_handler)
+        self.assertEqual(error.exception.__notes__, ['owned process-group cleanup unproved'])
+        self.assertEqual(trace.process_cleanup, 'unproved')
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(trace.child_pid, 0)
+
     def run_synthetic(self, root, mode, payload, snapshots=None):
         tool = root/'synthetic-tracer'
         tool.write_text('#!' + sys.executable + '\n' + payload)
@@ -282,6 +441,23 @@ sys.stdout.write(''' + repr(text) + ')\n'
                 self.assertEqual(receipt['status'], status)
                 self.assertEqual(receipt['tracer_exit'], 1)
                 self.assertNotIn('private_name', json.dumps(receipt))
+
+    def test_resource_absence_cannot_hide_unproved_process_cleanup(self):
+        real_cleanup = kit.cleanup_group
+
+        def unproved(child):
+            self.assertTrue(real_cleanup(child))
+            return False
+
+        payload = 'import sys; sys.stderr.write("failed to attach probe: Operation not permitted\\n"); sys.exit(1)\n'
+        with tempfile.TemporaryDirectory() as name, patch.object(kit, 'cleanup_group', side_effect=unproved):
+            rc, receipt = self.run_synthetic(Path(name), 'refusal', payload)
+        self.assertEqual(rc, 1)
+        self.assertEqual(receipt['status'], 'FAIL')
+        self.assertEqual(receipt['process_cleanup'], 'unproved')
+        self.assertEqual(receipt['cleanup'], 'unproved_reboot_required')
+        self.assertEqual(receipt['tracer_exit'], 1)
+        self.assertIn('failure', receipt)
 
     def test_armed_missing_prerequisites_refuses_without_output(self):
         with tempfile.TemporaryDirectory() as name:

@@ -23,6 +23,8 @@ from owned_qualification import verify_transport
 
 COUNTERS = ('shared_entry', 'private_entry', 'shared_exit', 'private_exit')
 LIMIT = 65536
+GROUP_GRACE_SECONDS = 10
+GROUP_KILL_SECONDS = 5
 DIGESTS = {'btf_sha256', 'config_sha256', 'source_evidence_sha256', 'source_review_sha256',
            'bpftrace_sha256', 'bpftool_sha256'}
 OWNED_DIGESTS = {'module_sha256', 'oracle_source_sha256', 'safety_review_sha256', 'transport_sha256'}
@@ -191,9 +193,11 @@ class Trace:
                 raise ValueError('nonpositive request pages')
         key = direction + '_' + kind
         self.counts[key] += 1
+        caller = None
         if kind == 'entry':
             if self.callers:
                 quality, labels = classify(payload, self.resolver() if self.resolver else None)
+                caller = (quality, tuple(labels))
                 self.classes[quality] += 1
                 for label in labels:
                     self.labels[label] += 1
@@ -209,7 +213,7 @@ class Trace:
         if self.owned:
             if len(self.rows) >= 4:
                 raise ValueError('owned observation bound exceeded')
-            self.rows.append((kind, direction, count, result))
+            self.rows.append((kind, direction, count, result, caller))
 
     def finish(self):
         if not self.ready or self.terminal is None or self.counts != self.terminal:
@@ -239,8 +243,14 @@ def compare_owned(trace, rows):
             raise ValueError('owned native sequence failed')
         expected.extend([('entry', direction, int(pages), None),
                          ('exit', direction, int(pages) if trace.hook == 'fentry' else None, result)])
-    if len(rows) != 2 or trace.rows != expected:
+    if len(rows) != 2 or [row[:4] for row in trace.rows] != expected:
         raise ValueError('owned observation/ledger mismatch')
+    if trace.callers:
+        for entry in trace.rows[::2]:
+            caller = entry[4]
+            if (caller is None or caller[0] != 'owned' or not caller[1] or
+                    any(LABELS.get(label) != 'owned' for label in caller[1])):
+                raise ValueError('owned caller identity missing or unproved')
 
 
 def program(hook, callers=False, owned=False):
@@ -264,19 +274,77 @@ BEGIN { printf("MVJ1|ready\\n"); }
     return source
 
 
+def group_absent(pgid):
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
+def _cleanup_group(child):
+    """Own descendants until the group is absent, independently of leader exit."""
+    failed = False
+    for signum, seconds in ((signal.SIGINT, GROUP_GRACE_SECONDS),
+                            (signal.SIGKILL, GROUP_KILL_SECONDS)):
+        try:
+            child.poll()
+            if group_absent(child.pid):
+                break
+            os.killpg(child.pid, signum)
+        except ProcessLookupError:
+            pass
+        except (OSError, KeyboardInterrupt):
+            failed = True
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            try:
+                child.poll()
+                if group_absent(child.pid):
+                    break
+                time.sleep(0.02)
+            except (OSError, KeyboardInterrupt):
+                failed = True
+    try:
+        child.wait(timeout=0)
+        return group_absent(child.pid) and not failed
+    except (OSError, KeyboardInterrupt, subprocess.TimeoutExpired):
+        return False
+
+
+def cleanup_group(child):
+    interrupted = False
+    previous = {}
+
+    def latch(_signum, _frame):
+        nonlocal interrupted
+        interrupted = True
+
+    try:
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            previous[signum] = signal.signal(signum, latch)
+        clean = _cleanup_group(child)
+        return clean and not interrupted
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
 def pipe(argv, trace, timeout):
     """Never pass diagnostic bytes to files, exceptions, or the parent terminal."""
     environment = {k: v for k, v in os.environ.items() if not k.startswith(('BPFTRACE_', '__BPFTRACE_', 'PYTHON'))}
     child = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, env=environment)
     trace.child_pid = child.pid
-    poll = selectors.DefaultSelector()
-    poll.register(child.stdout, selectors.EVENT_READ, 'stdout')
-    poll.register(child.stderr, selectors.EVENT_READ, 'stderr')
+    trace.process_cleanup = 'unproved'
+    poll = None
     pending = bytearray()
     diagnostic = bytearray()
     total = 0
     deadline = time.monotonic() + timeout
     try:
+        poll = selectors.DefaultSelector()
+        poll.register(child.stdout, selectors.EVENT_READ, 'stdout')
+        poll.register(child.stderr, selectors.EVENT_READ, 'stderr')
         while poll.get_map():
             if time.monotonic() >= deadline:
                 raise ValueError('trace deadline exceeded')
@@ -312,16 +380,23 @@ def pipe(argv, trace, timeout):
                   else 'diagnostic')
         return rc, reason
     finally:
-        if child.poll() is None:
-            os.killpg(child.pid, signal.SIGINT)
-            try:
-                child.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                os.killpg(child.pid, signal.SIGKILL)
-                child.wait(timeout=5)
-        poll.close()
-        child.stdout.close()
-        child.stderr.close()
+        primary = sys.exception()
+        try:
+            clean = cleanup_group(child)
+        except (OSError, KeyboardInterrupt):
+            clean = False
+        finally:
+            if poll is not None:
+                poll.close()
+            child.stdout.close()
+            child.stderr.close()
+        trace.process_cleanup = 'verified' if clean else 'unproved'
+        trace.process_exit = child.returncode
+        if not clean:
+            if primary is not None:
+                primary.add_note('owned process-group cleanup unproved')
+            else:
+                raise ValueError('owned process-group cleanup unproved')
 
 
 def save(path, value):
@@ -496,12 +571,7 @@ def run(args):
         rc, diagnostic = pipe([tracer, '-f', 'json', '-e', source, '-c', shlex.join(child)], trace, args.seconds + 45)
         receipt['tracer_exit'], receipt['diagnostic'] = rc, diagnostic
         after = resources(bpftool)
-        group_gone = True
-        try:
-            os.killpg(trace.child_pid, 0)
-            group_gone = False
-        except ProcessLookupError:
-            pass
+        group_gone = trace.process_cleanup == 'verified' and group_absent(trace.child_pid)
         clean = before == after and not owned_region.PARAMS.parent.exists() and group_gone
         receipt['cleanup'] = 'verified' if clean else 'unproved'
         receipt['status'] = verdict(args.mode, rc, diagnostic, trace.ready, clean)
@@ -521,10 +591,15 @@ def run(args):
         receipt['status'] = 'FAIL'
         receipt['failure'] = 'prerequisite_transport_native_or_cleanup_unproved'
     finally:
+        receipt['process_cleanup'] = getattr(trace, 'process_cleanup', 'not_started')
+        if receipt['tracer_exit'] is None:
+            receipt['tracer_exit'] = getattr(trace, 'process_exit', None)
         if failed:
             try:
                 receipt['cleanup'] = ('verified_resources_only' if resources(bpftool) == before and
-                                      not owned_region.PARAMS.parent.exists() else 'unproved_reboot_required')
+                                      not owned_region.PARAMS.parent.exists() and
+                                      receipt['process_cleanup'] == 'verified' and group_absent(trace.child_pid)
+                                      else 'unproved_reboot_required')
             except (OSError, ValueError, subprocess.SubprocessError):
                 receipt['cleanup'] = 'unproved_reboot_required'
         receipt['maxrss_kib'] = str(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)

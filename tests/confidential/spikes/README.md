@@ -158,6 +158,11 @@ three independent cycles and fresh directories. Each accepted case must have
 exactly one successful shared and one private native request and four matching
 probe records. A module left present fails cleanup and requires controller
 recovery/reboot according to the safety review.
+With `--callers`, each owned entry must also carry class `owned` and a nonempty
+allowed owned-module label. Unresolved, foreign, ambiguous or truncated entries
+fail this controlled join, even when pages/results match. Caller-disabled
+transport and global caller-quality measurements remain separate; this check
+does not grant real caller admission or force the global 95% metric to pass.
 
 After a genuine fentry refusal, run `--mode refusal --hook fentry` to capture a
 bounded refusal receipt. Then explicitly try `--mode observe --hook kprobe`;
@@ -183,9 +188,15 @@ memory. A changed inventory, remaining child process group, or surviving owned
 module fails cleanup. Exclusive guest ownership is required because unrelated
 BPF changes also fail this check. On failure, the receipt can distinguish only
 resource absence from complete owned cleanup; it never declares a quiet ring
-settled. Interrupts use SIGINT, allow 10 seconds for child cleanup, and only then
-kill the owned process group after a timeout. Killing a worker cannot authorize
-freeing a quarantined allocation. No module force-unload occurs.
+settled. Every pipe outcome checks the group independently of tracer-leader
+exit, allows 10 seconds after SIGINT, then escalates remaining descendants to
+SIGKILL with a five-second bound. The direct child is reaped and group absence
+is checked. Cleanup signals are latched during this bounded operation, then
+the original handlers are restored. A primary transport failure is preserved
+alongside any process-cleanup failure. The separate `process_cleanup` receipt
+field must be verified before absent BPF resources can satisfy cleanup.
+Killing a worker cannot authorize freeing a quarantined allocation. No module
+force-unload occurs.
 
 `maxrss_kib` is this Python helper's peak; `children_maxrss_kib` is the highest
 child peak across tools, not their simultaneous sum. Actual BPF charge remains
