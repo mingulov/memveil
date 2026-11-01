@@ -65,7 +65,8 @@ if [ -z "$BUNDLE" ]; then
     BUNDLE="$WORK/canonical/bundle"
 fi
 BUNDLE="$(cd "$BUNDLE" && pwd)" || exit 1
-python3 "$ROOT/tools/canonical_runtime.py" --bundle "$BUNDLE" || exit 1
+python3 "$ROOT/tools/canonical_runtime.py" --bundle "$BUNDLE" \
+    --source-tree "$ROOT" --bridge-archive "$LMB_PACKAGE" || exit 1
 SPEC="$ROOT/packaging/rpm/memveil.spec"
 SPEC_VER=$(sed -n 's/^Version: *//p' "$SPEC")
 SRC1=$(sed -n 's/^Source1: *//p' "$SPEC")

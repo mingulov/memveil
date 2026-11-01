@@ -340,7 +340,7 @@ def test_staging_covers_both_examples():
 
 
 def test_manifest_exact_match_passes(tmp_path):
-    names = ("bin/memveil", "lib/libbpf_mojo.so.1",
+    names = ("bin/memveil", "lib/memveil/libbpf_mojo.so.1",
              "bpf/swiotlb_attempt.bpf.o",
              "bpf/swiotlb_lifecycle.bpf.o",
              "bpf/swiotlb_copy.bpf.o", "profiles/manifest.txt",
@@ -352,13 +352,13 @@ def test_manifest_exact_match_passes(tmp_path):
 
 
 def test_manifest_flags_omitted_critical_and_extras(tmp_path):
-    names = ("bin/memveil", "lib/libbpf_mojo.so.1",
+    names = ("bin/memveil", "lib/memveil/libbpf_mojo.so.1",
              "bpf/swiotlb_attempt.bpf.o",
              "bpf/swiotlb_lifecycle.bpf.o",
              "bpf/swiotlb_copy.bpf.o", "profiles/manifest.txt",
              "LICENSE", "THIRD-PARTY-NOTICES.md")
     root = _tree(tmp_path, names + ("stowaway", "MANIFEST.json"))
-    manifest = {"files": {"lib/libbpf_mojo.so.1": "h",
+    manifest = {"files": {"lib/memveil/libbpf_mojo.so.1": "h",
                           "bpf/swiotlb_attempt.bpf.o": "h",
                           "bpf/swiotlb_lifecycle.bpf.o": "h",
                           "bpf/swiotlb_copy.bpf.o": "h",
@@ -1348,7 +1348,9 @@ class TestPackagingSeal:
         proc = subprocess.run(
             [os.path.join(probe, "build", "memveil"), "version"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, cwd=probe)
+            text=True, cwd=probe,
+            env=dict(os.environ, LD_LIBRARY_PATH=os.path.join(
+                REPO, ".pixi", "envs", "default", "lib")))
         assert proc.returncode == 0, proc.stderr
         tag = "memveil-" + proc.stdout.strip().split("-", 1)[1]
         out = os.path.join(probe, "dist-seal")

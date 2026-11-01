@@ -97,13 +97,41 @@ def verify_bundle(root):
     return manifest
 
 
+def verify_sources(root, manifest, bridge_archive):
+    """Bind RPM source inputs without rebuilding or granting qualification."""
+    import source_inventory
+    root = Path(root)
+    lock = json.loads((root / 'toolchain.lock.json').read_text())
+    pinned = lock['dependencies']['libbpf-mojo']
+    if digest(bridge_archive) != pinned['tarball_sha256']:
+        raise ValueError('bridge archive differs from the source lock')
+    for key in ('version', 'source_commit', 'tarball_sha256'):
+        if manifest['libbpf_mojo'][key] != pinned[key]:
+            raise ValueError('bundle library identity differs from the source lock')
+    current = source_inventory.take_inventory(root)
+    def portable(entries):
+        return [{key: value for key, value in entry.items()
+                 if key not in ('mtime_ns', 'ctime_ns')} for entry in entries]
+    if any(entry['kind'] not in ('file', 'dir') for entry in current['files']):
+        raise ValueError('unsupported source inventory entry')
+    if (current['digest'] != manifest['source_inventory_digest'] or
+            portable(current['files']) != portable(manifest['source_inventory'])):
+        raise ValueError('source inventory differs from the canonical build')
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--bundle', required=True)
     parser.add_argument('--installed')
+    parser.add_argument('--source-tree')
+    parser.add_argument('--bridge-archive')
     args = parser.parse_args()
+    if bool(args.source_tree) != bool(args.bridge_archive):
+        parser.error('--source-tree and --bridge-archive must be supplied together')
     try:
         manifest = verify_bundle(args.bundle)
+        if args.source_tree:
+            verify_sources(args.source_tree, manifest, args.bridge_archive)
         if args.installed:
             verify(args.installed, manifest['canonical_runtime']['entries'], installed=True)
     except (OSError, ValueError, KeyError) as error:

@@ -298,3 +298,9 @@ The source-export gate builds two Git-free copies with separate frozen SDK
 installations and unequal source/SDK path lengths, then compares every canonical
 runtime entry. Set `MV_CANONICAL_BUNDLE_DIR` to additionally compare a retained
 checkout bundle. Archive headers and descriptive provenance may differ.
+
+RPM assembly also binds its supplied bridge archive to the source lock and
+compares the current source inventory (content, membership and modes) with the
+bundle's sealed build inputs before constructing Source0 or invoking rpmbuild.
+File timestamps may differ across identical exports. Foreign or changed source
+inputs refuse; no build fallback or qualification inference is permitted.

@@ -243,13 +243,14 @@ def test_report_example_all_formats(bundle):
     assert js.returncode == 0, js.stderr
     assert md.returncode == 0, md.stderr
     report = json.loads(js.stdout)
-    assert report["quality"]["detail"]["status"] == "complete_for_scope"
+    assert report["integrity"]["status"] == "legacy_unverified"
+    assert report["quality"]["detail"]["status"] == "partial"
     assert report["quality"]["detail"]["loss_count"] == "0"
     assert report["quality"]["terminal"]["status"] == "partial"
     assert metric(report, "bounce_attempts")["value"] == "30"
     assert "bounce_attempts = 30" in text.stdout
     assert "loss=0" in text.stdout
-    assert "| detail | complete_for_scope | 0 |" in md.stdout
+    assert "| detail | partial | 0 |" in md.stdout
 
 
 def test_valid_empty_replays_zero(bundle):
@@ -258,8 +259,8 @@ def test_valid_empty_replays_zero(bundle):
     proc = run(binary, "report", "--format", "json", VALID_EMPTY)
     assert proc.returncode == 0, proc.stderr
     report = json.loads(proc.stdout)
-    assert report["quality"]["detail"]["status"] == \
-        "complete_for_scope"
+    assert report["integrity"]["status"] == "legacy_unverified"
+    assert report["quality"]["detail"]["status"] == "partial"
     assert report["quality"]["detail"]["loss_count"] == "0"
     assert metric(report, "bounce_attempts")["value"] == "0"
     assert metric(report, "counter_bounce_attempts")["value"] == "0"

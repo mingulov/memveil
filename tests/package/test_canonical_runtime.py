@@ -147,3 +147,46 @@ def test_explicit_bundle_input_never_rebuilds(tmp_path):
                             capture_output=True, text=True)
     assert result.returncode != 0
     assert not (tools / 'rebuilt').exists(), 'explicit bundle caused a product rebuild'
+
+
+@pytest.mark.parametrize('change', ['none', 'content', 'mode', 'missing', 'extra', 'archive', 'identity'])
+def test_rpm_source_attribution_is_bound_before_assembly(tmp_path, change):
+    import copy
+    import json
+    import os
+    import source_inventory
+    api = helper()
+    source = tmp_path / 'source'
+    (source / 'src').mkdir(parents=True)
+    code = source / 'src/main.mojo'
+    code.write_text('source bytes')
+    archive = tmp_path / 'bridge.tar.gz'
+    archive.write_bytes(b'pinned bridge bytes')
+    identity = {'version': '1.0', 'source_commit': 'a' * 40,
+                'tarball_sha256': api.digest(archive)}
+    (source / 'toolchain.lock.json').write_text(json.dumps({'dependencies': {'libbpf-mojo': identity}}))
+    inventory = source_inventory.take_inventory(source)
+    manifest = {'source_inventory_digest': inventory['digest'],
+                'source_inventory': inventory['files'], 'libbpf_mojo': copy.deepcopy(identity)}
+    clone = tmp_path / 'unrelated-longer-source'
+    shutil.copytree(source, clone)
+    code = clone / 'src/main.mojo'
+    if change == 'content':
+        code.write_text('different bytes')
+    elif change == 'mode':
+        code.chmod(0o755)
+    elif change == 'missing':
+        code.unlink()
+    elif change == 'extra':
+        (clone / 'src/extra.mojo').write_text('extra')
+    elif change == 'archive':
+        archive.write_bytes(b'foreign archive')
+    elif change == 'identity':
+        manifest['libbpf_mojo']['source_commit'] = 'b' * 40
+    else:
+        os.utime(code, (1, 1))
+    if change == 'none':
+        api.verify_sources(clone, manifest, archive)
+    else:
+        with pytest.raises(ValueError):
+            api.verify_sources(clone, manifest, archive)

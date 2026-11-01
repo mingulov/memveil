@@ -83,7 +83,8 @@ installed share dir and qualify receipts land under
 
 %build
 B="${MEMVEIL_CANONICAL_BUNDLE:?Supply a canonical bundle with tools/build-rpm --bundle}"
-python3 tools/canonical_runtime.py --bundle "$B"
+python3 tools/canonical_runtime.py --bundle "$B" \
+    --source-tree . --bridge-archive "%{SOURCE1}"
 
 %install
 B="${MEMVEIL_CANONICAL_BUNDLE:?Canonical bundle directory is required}"
