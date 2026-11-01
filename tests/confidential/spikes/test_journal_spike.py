@@ -8,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import signal
@@ -30,6 +31,23 @@ def record(data):
 
 
 ATTACHED = b'{"type":"attached_probes","count":6,"data":{"probes":6}}\n'
+
+
+def count_terminal(source, values):
+    """Model only the pinned aggregate printf contract, without compiling BPF."""
+    end = re.search(r'END \{ printf\(("[^"\n]*"), ([^;]+)\); \}', source)
+    if end is None:
+        raise ValueError('terminal printf missing')
+    fmt, arguments = json.loads(end[1]), end[2].split(', ')
+    count_maps = set(re.findall(r'(@[a-z_]+) = count\(\);', source))
+    tokens = re.findall(r'%[^|\n]+', fmt)
+    if len(arguments) != len(tokens) or any(token != '%s' for token in tokens):
+        raise ValueError('unsupported count aggregate conversion')
+    if any(name not in count_maps or name not in values for name in arguments):
+        raise ValueError('terminal argument is not a known count aggregate')
+    for name in arguments:
+        fmt = fmt.replace('%s', str(values[name]), 1)
+    return record(fmt)
 
 
 class SpikeTests(unittest.TestCase):
@@ -161,6 +179,64 @@ class SpikeTests(unittest.TestCase):
                 self.assertNotIn('system(', source)
         with self.assertRaises(ValueError):
             kit.program('tracepoint', False, False)
+
+    def test_generated_count_formatter_matches_independent_detail_counts(self):
+        values = {'@shared_entry': 3, '@private_entry': 2, '@shared_exit': 1, '@private_exit': 0}
+        for hook in ('fentry', 'kprobe'):
+            for callers in (False, True):
+                for owned in (False, True):
+                    with self.subTest(hook=hook, callers=callers, owned=owned):
+                        parser = kit.Trace(hook, callers)
+                        parser.feed(ATTACHED)
+                        parser.feed(record('MVJ1|ready\n'))
+                        caller = '\n swiotlb_free_tlb\n' if callers else 'disabled'
+                        for direction in ('shared', 'shared', 'shared', 'private', 'private'):
+                            parser.feed(record(f'MVJ1|entry|{direction}|1|{caller}\n'))
+                        pages = '1' if hook == 'fentry' else '-'
+                        parser.feed(record(f'MVJ1|exit|shared|{pages}|0\n'))
+                        try:
+                            terminal = count_terminal(kit.program(hook, callers, owned), values)
+                        except ValueError as error:
+                            self.fail(str(error))
+                        parser.feed(terminal)
+                        self.assertEqual(parser.finish()['counts'],
+                                         {'shared_entry': '3', 'private_entry': '2',
+                                          'shared_exit': '1', 'private_exit': '0'})
+
+    def test_authored_large_terminal_values_remain_exact_but_do_not_prove_counts(self):
+        values = {'@shared_entry': 9007199254740993, '@private_entry': 9223372036854775808,
+                  '@shared_exit': 18446744073709551615, '@private_exit': 0}
+        for hook in ('fentry', 'kprobe'):
+            for callers in (False, True):
+                for owned in (False, True):
+                    with self.subTest(hook=hook, callers=callers, owned=owned):
+                        parser = kit.Trace(hook, callers)
+                        parser.feed(ATTACHED)
+                        parser.feed(record('MVJ1|ready\n'))
+                        try:
+                            terminal = count_terminal(kit.program(hook, callers, owned), values)
+                        except ValueError as error:
+                            self.fail(str(error))
+                        self.assertEqual(json.loads(terminal)['data'],
+                                         'MVJ1|counts|9007199254740993|9223372036854775808|18446744073709551615|0\n')
+                        parser.feed(terminal)
+                        self.assertEqual(parser.terminal,
+                                         {'shared_entry': 9007199254740993, 'private_entry': 9223372036854775808,
+                                          'shared_exit': 18446744073709551615, 'private_exit': 0})
+                        with self.assertRaisesRegex(ValueError, 'independent count mismatch'):
+                            parser.finish()
+
+    def test_terminal_count_rejects_signed_overflow_and_noncanonical_values(self):
+        for bad in ('-1', '18446744073709551616', '01', '+1', '1.0'):
+            for index in range(4):
+                with self.subTest(value=bad, index=index):
+                    values = ['0', '0', '0', '0']
+                    values[index] = bad
+                    parser = kit.Trace('fentry', False)
+                    parser.feed(ATTACHED)
+                    parser.feed(record('MVJ1|ready\n'))
+                    with self.assertRaises(ValueError):
+                        parser.feed(record('MVJ1|counts|' + '|'.join(values) + '\n'))
 
     def test_output_exclusive_and_symlink_preservation(self):
         with tempfile.TemporaryDirectory() as name:

@@ -275,7 +275,7 @@ BEGIN { printf("MVJ1|ready\\n"); }
         fmt = '%d' if hook == 'fentry' else '-'
         argument = 'args.numpages, ' if hook == 'fentry' else ''
         source += f'{end}:{symbol} {predicate} {{ @{direction}_exit = count(); printf("MVJ1|exit|{direction}|{fmt}|%d\\n", {argument}(int32)retval); }}\n'
-    source += 'END { printf("MVJ1|counts|%llu|%llu|%llu|%llu\\n", ' + ', '.join('@' + k for k in COUNTERS) + '); }\n'
+    source += 'END { printf("MVJ1|counts|%s|%s|%s|%s\\n", ' + ', '.join('@' + k for k in COUNTERS) + '); }\n'
     return source
 
 
