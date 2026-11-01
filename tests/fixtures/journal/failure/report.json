@@ -64,7 +64,11 @@
     }
   ],
   "limitations": [
-    "Synthetic request/results only; no persistent region identity, baseline or global closure."
+    "Synthetic request/results only; no persistent region identity, baseline or global closure.",
+    "Boot and pre-attach conversions are excluded.",
+    "MMIO conversions are excluded.",
+    "Kexec and accept paths are excluded.",
+    "Unobserved conversion paths are excluded."
   ],
   "integrity": {
     "status": "verified",

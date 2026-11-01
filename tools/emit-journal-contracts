@@ -4,6 +4,7 @@
 import copy
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +28,8 @@ def obj(properties):
 
 def emit(path, value):
     path = ROOT / path
+    if sys.argv[1:] == ['--reports-only'] and (path.name != 'report.json' or 'journal' not in path.parts):
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2) + '\n')
 
@@ -193,7 +196,8 @@ def main():
         raw = ''.join(json.dumps(row, separators=(',', ':')) + '\n' for row in rows)
         folder = ROOT / 'tests/fixtures/journal' / name
         folder.mkdir(parents=True, exist_ok=True)
-        (folder / 'events.ndjson').write_text(raw)
+        if sys.argv[1:] != ['--reports-only']:
+            (folder / 'events.ndjson').write_text(raw)
         s = copy.deepcopy(base)
         s['schema_version'] = '0.2.0'
         s['session_id'] = 'journal-' + name
@@ -237,7 +241,9 @@ def main():
                 schema_version='0.2.0', session_id=s['session_id'], synthetic=True, engine_version='contract-fixture',
                 environment=s['environment'], device_catalog=s['device_catalog'], quality=s['quality'],
                 verdict=dict(name='partial_unknown_loss', loss_ratio_bps='0', delivered='0'), metrics=[], findings=findings,
-                limitations=['Synthetic request/results only; no persistent region identity, baseline or global closure.'],
+                limitations=['Synthetic request/results only; no persistent region identity, baseline or global closure.',
+                             'Boot and pre-attach conversions are excluded.', 'MMIO conversions are excluded.',
+                             'Kexec and accept paths are excluded.', 'Unobserved conversion paths are excluded.'],
                 integrity=integrity,
                 journal=dict(requests=str(count), successes=str(count-failures), failures=str(failures), unmatched_exits='0', censored=s['journal']['counters']['censored'], censored_reason=s['journal']['counter_reasons']['censored'],
                              requested_bytes=None if name == 'invalid-pages' else str(count * 4096), requested_bytes_reason='invalid_native_pages' if name == 'invalid-pages' else None, shared_bytes=None, unreverted_ranges=None, state_reason='request_only_source')))
@@ -276,4 +282,6 @@ def main():
 
 
 if __name__ == '__main__':
+    if sys.argv[1:] not in ([], ['--reports-only']):
+        raise SystemExit('usage: tools/emit-journal-contracts [--reports-only]')
     main()

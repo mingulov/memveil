@@ -283,8 +283,27 @@ synthetic success, failure, orphan encrypt, overlap, duplicate-token rejection,
 pre-attach, unresolved/disabled caller, persistent, invalid-page, initial/open
 checkpoint and censored-final cases. Checkpoint fixtures use `checkpoint.json`,
 checkpoint-prefix integrity and expected recovery exit 4.
-`tools/validate-journal-contracts` independently checks arithmetic, literal-byte
-integrity, sequence/token uniqueness and request-only boundaries. The legacy
+`tools/emit-journal-contracts --reports-only` updates only the new report examples.
+Every report retains explicit boot/pre-attach, MMIO, kexec/accept and unobserved
+path exclusions alongside synthetic request-only/state-unavailable limits.
+`tools/validate-journal-contracts` applies all vocabulary used by the new session,
+checkpoint, event, report and harness-manifest schemas with a standard-library
+validator. Unsupported schema keywords or external references are refused.
+Document, line, nesting and replay-history bounds remain enforced. This is a
+development fixture validator; production parsing and replay remain separate.
+
+The independent report oracle derives matched successes/failures, unmatched
+results and requested-byte sums from the validated event stream. It preserves
+censored counter values and their unavailable reasons without adding counters
+to their detail alternatives. It checks literal-byte integrity, source
+provenance, all five quality channels, failure evidence references and the
+required exclusions. An optional capability summary projects the source status,
+grade and reason; an absent grade remains null. The journal-only examples have
+no ordinary-channel metrics. Neither their empty metrics nor their zero
+ordinary delivered count states that journal activity or unknown evidence is
+zero. Tests reject structurally valid arithmetic changes, stronger quality,
+invented provenance and unknown-to-zero substitutions independently of the
+fixture emitter. The legacy
 synthetic region tracker continues testing actual synthetic overlap/reuse/state
 rules; these fixtures do not upgrade a production state capability. Future
 lifetimes/census/exposure formats need separately versioned and admitted sources.

@@ -6,7 +6,9 @@ Development validator only; does not enable live collection or qualify profiles.
 Uses only Python's standard library. tools/validate-journal-contracts [FIXTURE_ROOT]
 """
 import hashlib
+from functools import lru_cache
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -44,7 +46,134 @@ def i32(value):
     return value
 
 
+SCHEMA_NAMES = ('session-v0.2.0', 'event-v0.2.0', 'report-v0.2.0',
+                'confidential-range-manifest-v1', 'confidential-guest-manifest-v1')
+SCHEMA_WORDS = frozenset(('$schema', '$id', '$defs', '$ref', 'title', 'description',
+    'type', 'properties', 'required', 'additionalProperties', 'items', 'enum', 'const',
+    'minimum', 'maximum', 'minLength', 'maxLength', 'pattern', 'minItems', 'maxItems',
+    'uniqueItems', 'allOf', 'anyOf', 'not', 'if', 'then', 'else'))
+EXCLUSIONS = (
+    'Boot and pre-attach conversions are excluded.',
+    'MMIO conversions are excluded.',
+    'Kexec and accept paths are excluded.',
+    'Unobserved conversion paths are excluded.',
+)
+REQUEST_ONLY_LIMITATION = 'Synthetic request/results only; no persistent region identity, baseline or global closure.'
+
+
+def schema_reference(root, ref):
+    need(type(ref) is str and ref.startswith('#/$defs/') and ref.count('/') == 2,
+         'schema unsupported reference')
+    name = ref.split('/')[-1]
+    need(name in root.get('$defs', {}), 'schema missing reference')
+    return root['$defs'][name]
+
+
+def audit_schema(schema, root):
+    if type(schema) is bool:
+        return
+    need(type(schema) is dict and not set(schema) - SCHEMA_WORDS, 'schema unsupported vocabulary')
+    if '$ref' in schema:
+        schema_reference(root, schema['$ref'])
+    for keyword in ('properties', '$defs'):
+        for child in schema.get(keyword, {}).values():
+            audit_schema(child, root)
+    for keyword in ('allOf', 'anyOf'):
+        for child in schema.get(keyword, []):
+            audit_schema(child, root)
+    for keyword in ('additionalProperties', 'items', 'not', 'if', 'then', 'else'):
+        if keyword in schema:
+            audit_schema(schema[keyword], root)
+
+
+@lru_cache(maxsize=5)
+def document_schema(name):
+    need(name in SCHEMA_NAMES, 'schema unsupported document')
+    schema = load_json(ROOT / 'schemas' / (name + '.schema.json'))
+    audit_schema(schema, schema)
+    return schema
+
+
+def json_equal(a, b):
+    if type(a) is bool or type(b) is bool:
+        return type(a) is type(b) and a == b
+    if type(a) is dict and type(b) is dict:
+        return a.keys() == b.keys() and all(json_equal(a[k], b[k]) for k in a)
+    if type(a) is list and type(b) is list:
+        return len(a) == len(b) and all(json_equal(x, y) for x, y in zip(a, b))
+    return a == b
+
+
+def check_schema(value, schema, root, path='$', depth=0):
+    need(depth <= 128, 'schema evaluation depth')
+    def check(child, item=value, where=path):
+        check_schema(item, child, root, where, depth + 1)
+    def accepts(child):
+        try:
+            check(child)
+        except ValueError:
+            return False
+        return True
+    def require(condition, keyword):
+        need(condition, 'schema ' + path + ' ' + keyword)
+    if type(schema) is bool:
+        require(schema, 'false')
+        return
+    if '$ref' in schema:
+        check(schema_reference(root, schema['$ref']))
+        if schema['$ref'] == '#/$defs/u64':
+            try:
+                u64(value)
+            except ValueError as error:
+                raise ValueError('schema ' + path + ' u64: ' + str(error)) from error
+    if 'type' in schema:
+        types = schema['type'] if type(schema['type']) is list else [schema['type']]
+        matched = {'object': type(value) is dict, 'array': type(value) is list,
+                   'string': type(value) is str, 'boolean': type(value) is bool,
+                   'null': value is None, 'number': type(value) in (int, float),
+                   'integer': type(value) is int or (type(value) is float and value.is_integer())}
+        require(any(matched.get(kind, False) for kind in types), 'type')
+    if 'const' in schema:
+        require(json_equal(value, schema['const']), 'const')
+    if 'enum' in schema:
+        require(any(json_equal(value, item) for item in schema['enum']), 'enum')
+    if type(value) is dict:
+        require(set(schema.get('required', [])) <= value.keys(), 'required')
+        properties = schema.get('properties', {})
+        for name, item in value.items():
+            check(properties.get(name, schema.get('additionalProperties', True)), item, path + '.' + name)
+    if type(value) is list:
+        require(len(value) >= schema.get('minItems', 0), 'minItems')
+        require(len(value) <= schema.get('maxItems', len(value)), 'maxItems')
+        if schema.get('uniqueItems', False):
+            require(all(not json_equal(value[i], value[j]) for i in range(len(value)) for j in range(i)), 'uniqueItems')
+        for i, item in enumerate(value):
+            check(schema.get('items', True), item, path + '[' + str(i) + ']')
+    if type(value) is str:
+        require(len(value) >= schema.get('minLength', 0), 'minLength')
+        require(len(value) <= schema.get('maxLength', len(value)), 'maxLength')
+        if 'pattern' in schema:
+            require(re.search(schema['pattern'], value) is not None, 'pattern')
+    if type(value) in (int, float):
+        require(value >= schema.get('minimum', value), 'minimum')
+        require(value <= schema.get('maximum', value), 'maximum')
+    for child in schema.get('allOf', []):
+        check(child)
+    if 'anyOf' in schema:
+        require(any(accepts(child) for child in schema['anyOf']), 'anyOf')
+    if 'not' in schema:
+        require(not accepts(schema['not']), 'not')
+    if 'if' in schema:
+        check(schema.get('then' if accepts(schema['if']) else 'else', True))
+
+
+def validate_document(value, name):
+    schema = document_schema(name)
+    check_schema(value, schema, schema)
+
+
 def validate_event(e):
+    validate_document(e, 'event-v0.2.0')
     keys(e, ['schema_version', 'session_id', 'seq', 'ts_ns', 'kind', 'source', 'data'])
     need(e['schema_version'] == '0.2.0' and e['kind'] == 'transition_result', 'journal version/kind')
     need(type(e['session_id']) is str and re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}', e['session_id']) is not None, 'session id')
@@ -82,6 +211,7 @@ def validate_event(e):
 
 def validate_manifest(m, suite, candidate_digest, profile_id, *, qualification=False):
     guest = suite == 'confidential-real'
+    validate_document(m, 'confidential-' + ('guest' if guest else 'range') + '-manifest-v1')
     need(suite in ('confidential-ranges', 'confidential-real', 'confidential-late-attach'), 'suite')
     fields = ['contract', 'candidate_manifest_sha256', 'profile_id', 'required_cases', 'synthetic', 'source_commit',
               'config_sha256', 'btf_sha256', 'oracle_source_commit', 'oracle_module_sha256', 'ordinary_transport_receipt_sha256']
@@ -112,7 +242,14 @@ def pairs(items):
 
 def read_json(raw):
     need(len(raw) <= 16777216, 'document limit')
-    value = json.loads(raw, object_pairs_hook=pairs)
+    def finite_number(token):
+        value = float(token)
+        need(math.isfinite(value), 'nonfinite JSON number')
+        return value
+    try:
+        value = json.loads(raw, object_pairs_hook=pairs, parse_float=finite_number, parse_constant=finite_number)
+    except RecursionError as error:
+        raise ValueError('nesting limit') from error
     def depth(v, n):
         need(n <= 64, 'nesting limit')
         if isinstance(v, dict):
@@ -128,9 +265,10 @@ def load_json(path):
         return read_json(stream.read(16777217))
 
 
-def validate_capture(folder):
+def capture_evidence(folder):
     final = (folder / 'session.json').exists()
     session = load_json(folder / ('session.json' if final else 'checkpoint.json'))
+    validate_document(session, 'session-v0.2.0')
     need(session['capture']['finalized'] is final, 'session/checkpoint finalization')
     if not final:
         need(session['capture']['end_reason'] == 'checkpoint' and u64(session['capture']['checkpoint_generation']) > 0, 'checkpoint generation')
@@ -166,12 +304,14 @@ def validate_capture(folder):
         else:
             need(j['admission_end_reason'] is None and start <= cutoff <= end, 'admission end')
     counts = {k: 0 for k in KINDS}; tokens = set(); failures = 0; requests = 0
+    unmatched = 0; requested_bytes = 0; size_reason = None; failed_refs = []
     digest = hashlib.sha256(); byte_count = 0; line_count = 0
     with (folder / 'events.ndjson').open('rb') as stream:
         for line in iter(lambda: stream.readline(65537), b''):
             need(len(line) <= 65536 and line.endswith(b'\n'), 'line limit/framing')
             e = read_json(line); validate_event(e)
             need(j['admission_start_reason'] != 'not_opened', 'result before readiness')
+            need(e['source']['backend'] == 'synthetic' and e['source']['profile_id'] == j['profile_id'], 'event provenance')
             need(e['session_id'] == session['session_id'] and u64(e['seq']) == line_count, 'identity/sequence')
             need(capture_start <= u64(e['ts_ns']) < end and e['data']['epoch'] == j['epoch'], 'timestamp/epoch')
             token = e['data']['operation_token']
@@ -181,6 +321,16 @@ def validate_capture(folder):
                 tokens.add(token)
                 need(start is not None and start <= u64(e['data']['entry_ns']) < (end if cutoff is None else cutoff), 'entry admission window')
                 requests += 1; failures += e['data']['native_result'] != 0
+                if e['data']['native_result'] != 0:
+                    failed_refs.append('event:' + e['seq'])
+                if e['data']['requested_bytes'] is None:
+                    size_reason = 'invalid_native_pages'
+                else:
+                    requested_bytes += u64(e['data']['requested_bytes'])
+                    if requested_bytes > 2**64 - 1 and size_reason is None:
+                        size_reason = 'overflow'
+            else:
+                unmatched += 1
             counts[e['kind']] += 1
             digest.update(line); byte_count += len(line); line_count += 1
     integ = session['capture']['integrity']
@@ -188,7 +338,49 @@ def validate_capture(folder):
                     first_seq='0' if line_count else None, last_seq=str(line_count-1) if line_count else None,
                     events_sha256=digest.hexdigest(), kinds={k: str(v) for k, v in counts.items()})
     need(integ == expected, 'literal integrity')
-    return requests, failures
+    summary = dict(requests=str(requests), successes=str(requests - failures), failures=str(failures),
+                   unmatched_exits=str(unmatched), censored=j['counters']['censored'],
+                   censored_reason=j['counter_reasons']['censored'],
+                   requested_bytes=str(requested_bytes) if size_reason is None else None,
+                   requested_bytes_reason=size_reason, shared_bytes=None, unreverted_ranges=None,
+                   state_reason='request_only_source')
+    integrity = dict(status='verified' if final else 'checkpoint_prefix',
+                     verified_bytes=str(byte_count), verified_events=str(line_count))
+    if not final:
+        integrity['unverified_bytes'] = '0'
+    return dict(session=session, journal=summary, integrity=integrity, failed_refs=failed_refs)
+
+
+def validate_capture(folder):
+    evidence = capture_evidence(folder)
+    return int(evidence['journal']['requests']), int(evidence['journal']['failures'])
+
+
+def validate_report(report, evidence):
+    session = evidence['session']
+    for key in ('session_id', 'synthetic', 'environment', 'device_catalog'):
+        need(report[key] == session[key], 'report provenance ' + key)
+    need(report['engine_version'] == 'contract-fixture', 'report provenance engine')
+    if 'capabilities' in report:
+        capabilities = {key: dict(status=value['status'], grade=value.get('grade'), reason=value['reason'])
+                        for key, value in session['capabilities'].items()}
+        need(report['capabilities'] == capabilities, 'report provenance capabilities')
+    need(report['journal'] == evidence['journal'], 'report journal measurements/reasons')
+    need(report['integrity'] == evidence['integrity'], 'report integrity')
+    need(report['quality'] == session['quality'], 'report quality')
+    need(report['metrics'] == [], 'report metrics without ordinary-channel evidence')
+    need(report['verdict'] == dict(name='partial_unknown_loss', loss_ratio_bps='0', delivered='0'),
+         'report verdict for journal-only evidence with unavailable baseline/terminal')
+    findings = report['findings']
+    need(len(findings) == len(evidence['failed_refs']), 'report findings count')
+    for finding, ref in zip(findings, evidence['failed_refs']):
+        need(finding['code'] == 'CONVERSION_FAILED' and finding['severity'] == 'warning'
+             and finding['evidence_refs'] == [ref] and finding['scope'] == 'global conversion journal',
+             'report findings source link')
+        need(finding['explanation'] == 'Observed native wrapper failure; resulting state unknown.'
+             and finding['limitations'] == 'Synthetic request-only fixture.', 'report findings meaning')
+    need(all(item in report['limitations'] for item in EXCLUSIONS), 'report exclusions')
+    need(REQUEST_ONLY_LIMITATION in report['limitations'], 'report request-only limitation')
 
 
 def validate_fixtures(root):
@@ -197,24 +389,19 @@ def validate_fixtures(root):
         if not folder.is_dir(): continue
         expected = load_json(folder / 'expected.json')
         try:
-            requests, failures = validate_capture(folder)
+            evidence = capture_evidence(folder)
         except ValueError as e:
             need(not expected['valid'] and str(e) == 'duplicate operation token', 'unexpected refusal: ' + str(e))
         else:
-            need(expected['valid'] and str(requests) == expected['requests'] and str(failures) == expected['failures'], 'independent counts')
+            summary = evidence['journal']
+            need(expected['valid'] and summary['requests'] == expected['requests'] and summary['failures'] == expected['failures'], 'independent counts')
             report = load_json(folder / 'report.json')
-            need(report['schema_version'] == '0.2.0' and report['synthetic'] is True and report['session_id'] == 'journal-' + folder.name, 'report provenance')
-            need(report['journal']['requests'] == str(requests) and report['journal']['failures'] == str(failures), 'report counts')
-            for key in ('censored', 'requested_bytes'):
-                value = report['journal'][key]; reason = report['journal'][key + '_reason']
-                if value is None:
-                    need(reason is not None, 'report unavailable reason')
-                else:
-                    u64(value); need(reason is None, 'report known reason')
-            need(report['journal']['shared_bytes'] is None and report['journal']['unreverted_ranges'] is None, 'report state')
-            findings = report['findings']
-            need([f['code'] for f in findings] == (['CONVERSION_FAILED'] if failures else []), 'report findings')
+            validate_document(report, 'report-v0.2.0')
+            validate_report(report, evidence)
         count += 1
+    for file, suite in [('range-manifest.json', 'confidential-ranges'), ('guest-manifest.json', 'confidential-real'), ('late-manifest.json', 'confidential-late-attach')]:
+        if (root / file).exists():
+            validate_manifest(load_json(root / file), suite, 'a' * 64, 'linux-7.0.14-x86-journal-provisional')
     return count
 
 if __name__ == '__main__':
