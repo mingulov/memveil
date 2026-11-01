@@ -2,6 +2,8 @@
 """Synthetic transport/privacy tests; these never attach a kernel probe."""
 import importlib.util
 import ctypes
+import errno
+import itertools
 import io
 import json
 import os
@@ -401,7 +403,9 @@ time.sleep(30)
                                manifest=manifest, module=root/'synthetic-module')
         empty = dict.fromkeys(('prog', 'map', 'link'), set())
         with patch.object(kit, 'preflight', return_value=(self.manifest(), str(tool), 'synthetic-bpftool')):
-            with patch.object(kit, 'resources', side_effect=snapshots or [empty, empty, empty]):
+            states = snapshots or [empty, empty, empty]
+            with patch.object(kit, 'resources', side_effect=itertools.chain(states, itertools.repeat(states[-1]))), \
+                    patch.object(kit, 'RESOURCE_SETTLE_ATTEMPTS', 3):
                 result = kit.run(args)
         return result, json.loads((args.output/'receipt.json').read_text())
 
@@ -459,6 +463,34 @@ sys.stdout.write(''' + repr(text) + ')\n'
         self.assertEqual(receipt['tracer_exit'], 1)
         self.assertIn('failure', receipt)
 
+    def test_synthetic_settlement_preserves_errors_and_expired_deadlines(self):
+        payload = 'import sys; sys.stderr.write("failed to attach probe: Operation not permitted\\n"); sys.exit(1)\n'
+        empty = {'prog': set(), 'map': set(), 'link': set()}
+        occupied = dict(empty, link={42})
+        cases = [([empty, occupied, empty], 0, 'verified', 'verified'),
+                 ([empty, ValueError('resource inventory unavailable'), empty], 1, 'unproved', 'verified_resources_only'),
+                 ([empty, occupied, occupied, occupied, empty], 1, 'timeout', 'verified_resources_only')]
+        for snapshots, expected_exit, settlement, cleanup in cases:
+            with self.subTest(settlement=settlement), tempfile.TemporaryDirectory() as name:
+                rc, receipt = self.run_synthetic(Path(name), 'refusal', payload, snapshots)
+                self.assertEqual(rc, expected_exit)
+                self.assertEqual(receipt['resource_settlement'], settlement)
+                self.assertEqual(receipt['cleanup'], cleanup)
+                self.assertEqual(receipt['tracer_exit'], 1)
+                self.assertEqual(receipt['status'], 'FAIL' if expected_exit else 'REFUSAL_OBSERVED')
+
+    def test_transport_failure_still_settles_resources_without_erasing_failure(self):
+        empty = {'prog': set(), 'map': set(), 'link': set()}
+        occupied = dict(empty, prog={42})
+        payload = 'print("invalid synthetic protocol")\n'
+        with tempfile.TemporaryDirectory() as name:
+            rc, receipt = self.run_synthetic(Path(name), 'observe', payload, [empty, occupied, empty])
+        self.assertEqual(rc, 1)
+        self.assertEqual(receipt['status'], 'FAIL')
+        self.assertIn('failure', receipt)
+        self.assertEqual(receipt['resource_settlement'], 'verified')
+        self.assertEqual(receipt['cleanup'], 'verified_resources_only')
+
     def test_armed_missing_prerequisites_refuses_without_output(self):
         with tempfile.TemporaryDirectory() as name:
             target = Path(name)/'output'
@@ -467,6 +499,135 @@ sys.stdout.write(''' + repr(text) + ')\n'
             self.assertEqual(result.returncode, 1)
             self.assertIn('prerequisites unmet', result.stderr)
             self.assertFalse(target.exists())
+
+
+class InventoryTests(unittest.TestCase):
+    def inventory(self, responses, machine='x86_64', system='Linux'):
+        cursors = {11: 0, 12: 0, 31: 0}
+        streams = {cmd: iter(rows) for cmd, rows in responses.items()}
+
+        def syscall(number, command, pointer, size):
+            self.assertEqual(number, 321)
+            self.assertIn(command, (11, 12, 31))
+            self.assertEqual(size, 12)
+            attr = ctypes.cast(pointer, ctypes.POINTER(ctypes.c_uint32 * 3)).contents
+            self.assertEqual(list(attr), [cursors[command], 0, 0])
+            value = next(streams[command], OSError(errno.ENOENT, 'end'))
+            if isinstance(value, OSError):
+                ctypes.set_errno(value.errno)
+                return -1
+            if isinstance(value, tuple):
+                result, value = value
+            else:
+                result = 0
+            attr[1] = value
+            cursors[command] = value
+            return result
+
+        library = SimpleNamespace(syscall=unittest.mock.Mock(side_effect=syscall))
+        identity = SimpleNamespace(machine=machine, sysname=system)
+        with patch.object(ctypes, 'CDLL', return_value=library), patch.object(kit.os, 'uname', return_value=identity):
+            with patch.object(kit, 'metadata', side_effect=AssertionError('inventory launched an observer')):
+                try:
+                    return kit.resources()
+                except TypeError as error:
+                    self.fail('read-only inventory entry point missing: ' + str(error))
+
+    def test_direct_inventory_keeps_every_id_without_observer(self):
+        self.assertEqual(self.inventory({11: [2, 19], 12: [1, 4294967295], 31: [8]}),
+                         {'prog': {2, 19}, 'map': {1, 4294967295}, 'link': {8}})
+        self.assertEqual(self.inventory({11: [], 12: [], 31: []}),
+                         {'prog': set(), 'map': set(), 'link': set()})
+
+    def test_inventory_errors_never_become_empty(self):
+        for command in (11, 12, 31):
+            for error in (errno.EPERM, errno.EACCES, errno.EINVAL, errno.ENOSYS, errno.EIO, errno.EINTR):
+                with self.subTest(command=command, error=error):
+                    rows = {11: [], 12: [], 31: []}
+                    rows[command] = [7, OSError(error, 'private diagnostic')]
+                    with self.assertRaisesRegex(ValueError, '^resource inventory unavailable$'):
+                        self.inventory(rows)
+
+    def test_inventory_rejects_zero_repeated_decreasing_and_malformed_success(self):
+        for command in (11, 12, 31):
+            for rows in ([0], [5, 5], [5, 4], [(1, 7)], [(-2, 7)]):
+                with self.subTest(command=command, rows=rows):
+                    responses = {11: [], 12: [], 31: []}
+                    responses[command] = rows
+                    with self.assertRaisesRegex(ValueError, 'invalid resource'):
+                        self.inventory(responses)
+
+    def test_inventory_accepts_bound_and_refuses_overflow(self):
+        for command in (11, 12, 31):
+            with self.subTest(command=command):
+                rows = {11: [], 12: [], 31: []}
+                rows[command] = range(1, 4097)
+                snapshot = self.inventory(rows)
+                self.assertEqual(sum(map(len, snapshot.values())), 4096)
+                rows[command] = range(1, 4098)
+                with self.assertRaisesRegex(ValueError, 'resource inventory outside bound'):
+                    self.inventory(rows)
+
+    def test_inventory_refuses_other_syscall_abis(self):
+        for system, machine in [('FreeBSD', 'x86_64'), ('Linux', 'aarch64'), ('Linux', 'i686')]:
+            with self.subTest(system=system, machine=machine):
+                with self.assertRaisesRegex(ValueError, 'Linux x86-64'):
+                    self.inventory({}, machine, system)
+        original_sizeof = ctypes.sizeof
+        for narrow in (ctypes.c_void_p, ctypes.c_long):
+            with self.subTest(narrow=narrow), patch.object(ctypes, 'sizeof',
+                    side_effect=lambda kind: 4 if kind is narrow else original_sizeof(kind)):
+                with self.assertRaisesRegex(ValueError, 'Linux x86-64'):
+                    self.inventory({})
+
+
+class SettlementTests(unittest.TestCase):
+    def settle(self, snapshots, groups=None, module=False, process='verified', clock=None):
+        baseline = {'prog': {7}, 'map': {8}, 'link': {9}}
+        trace = SimpleNamespace(process_cleanup=process, child_pid=17)
+        states = itertools.chain(snapshots, itertools.repeat(snapshots[-1]))
+        group_states = groups or [True]
+        absent = itertools.chain(group_states, itertools.repeat(group_states[-1]))
+        with patch.object(kit, 'resources', side_effect=states), patch.object(kit, 'group_absent', side_effect=absent):
+            with patch.object(Path, 'exists', return_value=module), patch.object(kit.time, 'sleep') as sleep:
+                with patch.object(kit.time, 'monotonic', side_effect=clock or itertools.repeat(0)):
+                    self.assertTrue(hasattr(kit, 'settle_resources'), 'bounded resource settlement missing')
+                    result = kit.settle_resources(baseline, trace)
+                self.assertLessEqual(sleep.call_count, 20)
+                return result
+
+    def test_settlement_waits_for_all_resources_and_group(self):
+        baseline = {'prog': {7}, 'map': {8}, 'link': {9}}
+        for kind in baseline:
+            with self.subTest(kind=kind):
+                pending = dict(baseline, **{kind: baseline[kind] | {42}})
+                self.assertEqual(self.settle([pending, baseline]), 'verified')
+        self.assertEqual(self.settle([baseline], groups=[False, True]), 'verified')
+
+    def test_settlement_refuses_extra_missing_and_replaced_ids(self):
+        baseline = {'prog': {7}, 'map': {8}, 'link': {9}}
+        for kind in baseline:
+            for ids in (set(), {42}, baseline[kind] | {42}):
+                with self.subTest(kind=kind, ids=ids):
+                    pending = dict(baseline, **{kind: ids})
+                    self.assertEqual(self.settle([pending]), 'timeout')
+
+    def test_settlement_requires_module_and_process_absence(self):
+        baseline = {'prog': {7}, 'map': {8}, 'link': {9}}
+        self.assertEqual(self.settle([baseline], module=True), 'timeout')
+        self.assertEqual(self.settle([baseline], groups=[False]), 'timeout')
+        self.assertEqual(self.settle([baseline], process='unproved'), 'process_unproved')
+
+    def test_settlement_stops_at_deadline_and_preserves_inventory_error(self):
+        baseline = {'prog': {7}, 'map': {8}, 'link': {9}}
+        pending = dict(baseline, map={42})
+        self.assertEqual(self.settle([pending, baseline], clock=[0, 1]), 'timeout')
+        with self.assertRaisesRegex(ValueError, 'resource inventory unavailable'):
+            self.settle([ValueError('resource inventory unavailable'), baseline])
+
+    def test_settlement_cannot_succeed_after_deadline(self):
+        baseline = {'prog': {7}, 'map': {8}, 'link': {9}}
+        self.assertEqual(self.settle([baseline], clock=[0, 2]), 'timeout')
 
 
 if __name__ == '__main__':

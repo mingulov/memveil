@@ -183,10 +183,27 @@ these are experiment settings, not product ring changes. Raw child output is
 never included in exceptions. Core dumps are disabled for armed runs and their
 children; inherited bpftrace debugging/config environment is removed.
 
-`bpftool` program/map/link IDs are compared before and after execution in
-memory. A changed inventory, remaining child process group, or surviving owned
-module fails cleanup. Exclusive guest ownership is required because unrelated
-BPF changes also fail this check. On failure, the receipt can distinguish only
+Program/map/link IDs are enumerated directly with read-only `BPF_*_GET_NEXT_ID`
+syscalls and compared before and after execution in memory. The enumerator
+requires Linux x86-64 with 64-bit userspace, uses syscall 321 and commands
+11/12/31 with a three-u32 attribute, and loads no observer programs or maps.
+Each resource type permits at most 4096 strictly increasing IDs; only `ENOENT`
+ends a successful walk. Permission errors, unsupported commands, malformed
+results and larger inventories fail closed. No object names or IDs are ignored.
+The pinned `bpftool` remains an input/tool-version prerequisite; its `show`
+commands are not used because they can create transient iterator resources.
+
+After producer/process-group cleanup, the checker allows at most one second
+and 21 snapshots, polling at 50 ms intervals, for exact equality of all three
+inventories plus process-group and owned-module absence. A changed final
+inventory, remaining child process group, or surviving owned module fails
+cleanup. Exclusive guest ownership is required because unrelated BPF changes
+also fail this check. The receipt's `resource_settlement` records `verified`,
+`timeout`, `process_unproved`, `unproved` on observation error, or `not_started`.
+An inventory error or expired settlement remains a failed run even if a later
+final snapshot proves resource absence. Transport failures also receive bounded
+settlement checks without changing their failed status.
+On failure, the receipt can distinguish only
 resource absence from complete owned cleanup; it never declares a quiet ring
 settled. Every pipe outcome checks the group independently of tracer-leader
 exit, allows 10 seconds after SIGINT, then escalates remaining descendants to
@@ -215,6 +232,9 @@ python3 tests/confidential/spikes/test_journal_spike.py
 
 The synthetic process tests cover both positive and refusal transports, native
 joins, count mismatch, malformed input, privacy, timeouts and cleanup failure.
+Mocked syscall tests cover all resource types, ABI refusal, enumeration errors
+and bounds. Settlement tests cover delayed release, persistent added/missing/
+replaced IDs, group/module presence and failures retained after later absence.
 All actual fentry/fexit/kprobe attachment, native caller resolution, I/O stimuli,
 ordinary transport integration and real SNP admission still require operator
 execution. No persistent state, byte netting, leak verdict or host-read claim

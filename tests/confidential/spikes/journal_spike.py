@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Armed test-only conversion-hook feasibility, with memory-only trace sanitization."""
 import argparse
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -25,6 +27,9 @@ COUNTERS = ('shared_entry', 'private_entry', 'shared_exit', 'private_exit')
 LIMIT = 65536
 GROUP_GRACE_SECONDS = 10
 GROUP_KILL_SECONDS = 5
+RESOURCE_SETTLE_SECONDS = 1
+RESOURCE_SETTLE_ATTEMPTS = 21
+RESOURCE_POLL_SECONDS = 0.05
 DIGESTS = {'btf_sha256', 'config_sha256', 'source_evidence_sha256', 'source_review_sha256',
            'bpftrace_sha256', 'bpftool_sha256'}
 OWNED_DIGESTS = {'module_sha256', 'oracle_source_sha256', 'safety_review_sha256', 'transport_sha256'}
@@ -464,23 +469,51 @@ def metadata(argv):
     return bytes(sink.data)
 
 
-def resources(bpftool):
+def resources():
+    identity = os.uname()
+    if (identity.sysname != 'Linux' or identity.machine != 'x86_64' or
+            ctypes.sizeof(ctypes.c_void_p) != 8 or ctypes.sizeof(ctypes.c_long) != 8):
+        raise ValueError('resource inventory requires Linux x86-64 userspace')
+    syscall = ctypes.CDLL(None, use_errno=True).syscall
+    syscall.restype = ctypes.c_long
+    syscall.argtypes = (ctypes.c_long, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint)
     snapshot = {}
-    for kind in ('prog', 'map', 'link'):
-        raw = metadata([bpftool, '-j', kind, 'show'])
-        try:
-            rows = decode(raw, 1024 * 1024)
-        except (ValueError, RecursionError):
-            raise ValueError('invalid resource inventory') from None
-        if not isinstance(rows, list) or len(rows) > 4096:
-            raise ValueError('resource inventory outside bound')
+    for kind, command in (('prog', 11), ('map', 12), ('link', 31)):
         ids = set()
-        for row in rows:
-            if not isinstance(row, dict) or type(row.get('id')) is not int or not 0 < row['id'] < 2**32 or row['id'] in ids:
+        start = 0
+        for _ in range(4097):
+            attr = (ctypes.c_uint32 * 3)(start, 0, 0)
+            ctypes.set_errno(0)
+            result = syscall(321, command, ctypes.byref(attr), ctypes.sizeof(attr))
+            if result == -1:
+                if ctypes.get_errno() == errno.ENOENT:
+                    break
+                raise ValueError('resource inventory unavailable')
+            if result != 0 or attr[1] <= start:
                 raise ValueError('invalid resource identifier')
-            ids.add(row['id'])
+            if len(ids) == 4096:
+                raise ValueError('resource inventory outside bound')
+            start = attr[1]
+            ids.add(start)
         snapshot[kind] = ids
     return snapshot
+
+
+def settle_resources(before, trace):
+    if getattr(trace, 'process_cleanup', None) != 'verified':
+        return 'process_unproved'
+    deadline = time.monotonic() + RESOURCE_SETTLE_SECONDS
+    for attempt in range(RESOURCE_SETTLE_ATTEMPTS):
+        after = resources()
+        remaining = deadline - time.monotonic()
+        if remaining < 0:
+            break
+        if before == after and group_absent(trace.child_pid) and not owned_region.PARAMS.parent.exists():
+            return 'verified'
+        if remaining <= 0 or attempt + 1 == RESOURCE_SETTLE_ATTEMPTS:
+            break
+        time.sleep(min(RESOURCE_POLL_SECONDS, remaining))
+    return 'timeout'
 
 
 def verdict(mode, rc, diagnostic, ready, cleanup):
@@ -544,8 +577,8 @@ def preflight(args):
 
 
 def run(args):
-    manifest, tracer, bpftool = preflight(args)
-    before = resources(bpftool)
+    manifest, tracer, _bpftool = preflight(args)
+    before = resources()
     args.output.mkdir(mode=0o700, parents=False, exist_ok=False)
     trace = Trace(args.hook, args.callers, args.mode == 'owned', current_identities if args.callers else None, True)
     source = program(args.hook, args.callers, args.mode == 'owned')
@@ -562,7 +595,8 @@ def run(args):
                'runner_sha256': owned_region.digest(__file__),
                'probe_sha256': hashlib.sha256(source.encode()).hexdigest(),
                'seconds': str(args.seconds), 'callers': args.callers,
-               'cleanup': 'unproved', 'tracer_exit': None, 'diagnostic': 'none',
+               'cleanup': 'unproved', 'resource_settlement': 'not_started',
+               'tracer_exit': None, 'diagnostic': 'none',
                'baseline': 'unknown', 'state_claim': 'unavailable'}
     failed = True
     started = time.monotonic_ns()
@@ -570,9 +604,9 @@ def run(args):
         os.environ['MEMVEIL_OWNED_REGION_GUEST'] = '1'
         rc, diagnostic = pipe([tracer, '-f', 'json', '-e', source, '-c', shlex.join(child)], trace, args.seconds + 45)
         receipt['tracer_exit'], receipt['diagnostic'] = rc, diagnostic
-        after = resources(bpftool)
-        group_gone = trace.process_cleanup == 'verified' and group_absent(trace.child_pid)
-        clean = before == after and not owned_region.PARAMS.parent.exists() and group_gone
+        receipt['resource_settlement'] = 'unproved'
+        receipt['resource_settlement'] = settle_resources(before, trace)
+        clean = receipt['resource_settlement'] == 'verified'
         receipt['cleanup'] = 'verified' if clean else 'unproved'
         receipt['status'] = verdict(args.mode, rc, diagnostic, trace.ready, clean)
         if args.mode != 'refusal':
@@ -596,7 +630,10 @@ def run(args):
             receipt['tracer_exit'] = getattr(trace, 'process_exit', None)
         if failed:
             try:
-                receipt['cleanup'] = ('verified_resources_only' if resources(bpftool) == before and
+                if receipt['resource_settlement'] == 'not_started':
+                    receipt['resource_settlement'] = 'unproved'
+                    receipt['resource_settlement'] = settle_resources(before, trace)
+                receipt['cleanup'] = ('verified_resources_only' if resources() == before and
                                       not owned_region.PARAMS.parent.exists() and
                                       receipt['process_cleanup'] == 'verified' and group_absent(trace.child_pid)
                                       else 'unproved_reboot_required')
