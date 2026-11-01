@@ -304,7 +304,10 @@ def integrity_line(rep: Report) -> String:
     var out = String("integrity: ") + rep.integrity_status
     out += " (verified bytes=" + format_u64(rep.verified_bytes)
     out += ", events=" + format_u64(rep.verified_events) + ")"
-    if rep.integrity_status == "verified":
+    if rep.integrity_status == "checkpoint_prefix":
+        out += "; unverified suffix bytes=" + format_u64(rep.unverified_bytes)
+        out += "; verified prefix only; measurement window remains open; no authenticity claim"
+    elif rep.integrity_status == "verified":
         out += "; literal capture bytes match SHA-256; no authenticity claim"
     else:
         out += "; arithmetic is unverified; completeness withheld"

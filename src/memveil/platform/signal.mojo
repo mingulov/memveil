@@ -2,7 +2,7 @@
 
 """Live signal source: signalfd(2) behind SignalSource.
 
-Setup blocks SIGINT/SIGTERM in the calling thread and
+Setup blocks SIGHUP/SIGINT/SIGTERM in the calling thread and
 opens a nonblocking signalfd; check() reports none,
 pending, or error. Masks are restored when signalfd
 creation fails and at teardown. Read diagnostics carry
@@ -24,7 +24,7 @@ struct SignalOut(Copyable, Movable):
 
 
 trait SignalSource:
-    """Tristate SIGINT/SIGTERM source (signalfd live)."""
+    """Tristate SIGHUP/SIGINT/SIGTERM source (signalfd live)."""
 
     def setup(mut self) -> OpOut:
         ...
@@ -73,11 +73,11 @@ def classify_signal_read(n: Int, errno_no: Int) -> Int:
 
 
 def blocked_mask() -> List[UInt8]:
-    """128-byte sigset with SIGINT (bit 1) + SIGTERM (bit 14)."""
+    """128-byte sigset with SIGHUP (bit 0), SIGINT (bit 1), SIGTERM (bit 14)."""
     var mask = List[UInt8]()
     for _ in range(_SIGSET_BYTES):
         mask.append(UInt8(0))
-    mask[0] = UInt8(0x02)
+    mask[0] = UInt8(0x03)
     mask[1] = UInt8(0x40)
     return mask^
 
@@ -100,12 +100,17 @@ def _has_sigblk_sentinel() -> Bool:
     return getenv(String("MEMVEIL_SIGBLK")) == String("1")
 
 
+def ignore_sigpipe() -> Bool:
+    """Ignored dispositions survive exec and apply to every runtime thread."""
+    return external_call["signal", UInt64](Int32(13), UInt64(1)) != UInt64(18446744073709551615)
+
+
 def ensure_inherited_signal_block(args: List[String]) -> String:
     """Re-exec once so runtime threads inherit blocked signals.
 
     Every Mojo 1.2.0 binary spawns runtime worker threads
     before main with the parent's (unblocked) mask; a
-    process-directed SIGINT/SIGTERM would land in a
+    process-directed SIGHUP/SIGINT/SIGTERM would land in a
     worker and never reach signalfd. Blocking here and
     re-executing makes the runtime init inherit the
     block, so NO thread is eligible and every stop
@@ -121,6 +126,8 @@ def ensure_inherited_signal_block(args: List[String]) -> String:
     inherited), else a refusal note (re-exec failed or
     impossible). A successful re-exec never returns.
     """
+    if not ignore_sigpipe():
+        return String("cannot ignore SIGPIPE before re-exec")
     var sentinel = _cstr_bytes(_SIGBLK_SENTINEL)
     if _has_sigblk_sentinel():
         var probe_mask = blocked_mask()
@@ -134,12 +141,12 @@ def ensure_inherited_signal_block(args: List[String]) -> String:
         )
         if Int(probed) != 0:
             return String("cannot verify inherited signal mask")
-        var need0 = UInt8(0x02)
+        var need0 = UInt8(0x03)
         var need1 = UInt8(0x40)
         if (old[0] & need0) != need0 or (old[1] & need1) != need1:
             return String(
                 "signal mask not inherited (MEMVEIL_SIGBLK set,"
-                " SIGINT/SIGTERM unblocked); refusing"
+                " SIGHUP/SIGINT/SIGTERM unblocked); refusing"
             )
         return String("")
     var mask = blocked_mask()
@@ -203,7 +210,7 @@ def ensure_inherited_signal_block(args: List[String]) -> String:
 
 
 struct LiveSignalSource(SignalSource):
-    """signalfd SIGINT/SIGTERM source for one thread.
+    """signalfd SIGHUP/SIGINT/SIGTERM source for one thread.
 
     Single-threaded use only: sigprocmask covers the
     calling thread, and record spawns no threads.

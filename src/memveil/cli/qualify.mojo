@@ -35,6 +35,7 @@ from memveil.cli.report import (
     EXIT_OK,
     CliError,
     sanitize_diagnostic,
+    write_capture_location,
     write_stderr,
 )
 from memveil.model.report import ENGINE_VERSION
@@ -1020,7 +1021,11 @@ def run_qualify_with(
             + String("\n")
         )
     except:
-        return _qualify_broken(String("cannot write stdout"))
+        try:
+            write_capture_location(output, path)
+        except:
+            pass
+        return EXIT_OK
     return EXIT_OK
 
 

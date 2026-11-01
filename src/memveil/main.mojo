@@ -9,7 +9,7 @@ from memveil.cli.bind import run_bind
 from memveil.cli.doctor import run_doctor
 from memveil.cli.qualify import run_qualify
 from memveil.cli.record import run_record
-from memveil.platform.signal import ensure_inherited_signal_block
+from memveil.platform.signal import ensure_inherited_signal_block, ignore_sigpipe
 from memveil.cli.report import (
     EXIT_INTERNAL,
     EXIT_INVALID,
@@ -59,6 +59,9 @@ def _stdout_failed() raises:
 
 
 def main() raises:
+    if not ignore_sigpipe():
+        write_stderr("memveil: cannot ignore SIGPIPE\n")
+        exit(EXIT_INTERNAL)
     var args = argv()
     if len(args) < 2:
         write_stderr(top_usage())

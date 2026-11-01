@@ -103,6 +103,18 @@ def test_committed_stream_all_kinds_and_rollback() raises:
     writer.discard()
 
 
+def test_live_writer_reserves_before_append() raises:
+    from memveil.capture.live import LiveWriter
+    var scratch = _mkdtemp()
+    var target = scratch + String("/cap")
+    var writer = LiveWriter()
+    assert_true(writer.create(target, MIN_EVENTS_BUDGET).ok)
+    var reserve = _read(target + String("/.finalization-reserve"))
+    assert_equal(len(reserve), 17 * 1024 * 1024)
+    assert_equal(len(_read(target + String("/session.finalizing"))), 0)
+    assert_equal(writer.abandon(), String(""))
+
+
 def test_create_append_finalize() raises:
     var scratch = _mkdtemp()
     var target = scratch + String("/cap")
@@ -721,6 +733,7 @@ def run() raises -> Int:
     suite.test[test_write_error_ignores_prose_residuals]()
     suite.test[test_write_error_residuals_bounded]()
     suite.test[test_committed_stream_all_kinds_and_rollback]()
+    suite.test[test_live_writer_reserves_before_append]()
     suite.test[test_create_append_finalize]()
     suite.test[test_exists_variants]()
     suite.test[test_budget_range]()

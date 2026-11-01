@@ -228,6 +228,9 @@ struct TeeWriter[S: RefreshSink & Movable & Deinitable](WriterSource):
             return out^
         return self._rebuild()
 
+    def checkpoint(mut self, session: List[UInt8]) -> AppendOut:
+        return self._inner.checkpoint(session)
+
     def finalize(mut self, session: List[UInt8]) -> FinalOut:
         return self._inner.finalize(session)
 

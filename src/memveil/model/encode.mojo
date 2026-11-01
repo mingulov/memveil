@@ -683,6 +683,8 @@ def encode_session(s: Session) raises EncodeError -> String:
         capture.append(
             _member(String("end_reason"), _jstr(s.end_reason))
         )
+    if s.has_checkpoint_generation:
+        capture.append(_member("checkpoint_generation", _ju64(s.checkpoint_generation)))
     if s.has_integrity:
         capture.append(_member("integrity", encode_integrity(s.integrity)))
     parts.append(_member(String("capture"), _jobj(capture^)))
@@ -789,6 +791,8 @@ def encode_session(s: Session) raises EncodeError -> String:
 
 def _encode_stop(st: StopState) raises EncodeError -> String:
     var parts = List[String]()
+    if st.has_checkpoint_failures:
+        parts.append(_member("checkpoint_failures", _ju64(st.checkpoint_failures)))
     parts.append(_member(String("outcome"), _jstr(st.outcome)))
     parts.append(_member(String("reason"), _jstr(st.reason)))
     parts.append(_member(String("budget_ms"), _ju64(st.budget_ms)))

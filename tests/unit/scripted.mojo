@@ -489,6 +489,10 @@ struct ScriptWriter(WriterSource):
     var append_faults: List[AppendFault]
     var abort_fault: Bool
     var finalize_status: String
+    var checkpoint_calls: Int
+    var checkpoint_fail_at: Int
+    var first_checkpoint: List[UInt8]
+    var last_checkpoint: List[UInt8]
     var appends: Int
     var creates: Int
     var discards: Int
@@ -498,6 +502,10 @@ struct ScriptWriter(WriterSource):
         self.append_faults = List[AppendFault]()
         self.abort_fault = False
         self.finalize_status = String("")
+        self.checkpoint_calls = 0
+        self.checkpoint_fail_at = 0
+        self.first_checkpoint = List[UInt8]()
+        self.last_checkpoint = List[UInt8]()
         self.appends = 0
         self.creates = 0
         self.discards = 0
@@ -553,6 +561,19 @@ struct ScriptWriter(WriterSource):
         except e:
             return AppendOut(False, e.kind, e.message)
         return AppendOut(True, String(""), String(""))
+
+    def checkpoint(mut self, session: List[UInt8]) -> AppendOut:
+        self.checkpoint_calls += 1
+        if self.checkpoint_calls == 1:
+            self.first_checkpoint = session.copy()
+        if self.checkpoint_calls == self.checkpoint_fail_at:
+            return AppendOut(False, "io", "scripted checkpoint failure")
+        self.last_checkpoint = session.copy()
+        try:
+            self.slots[0].checkpoint(session)
+        except e:
+            return AppendOut(False, e.kind, e.message)
+        return AppendOut(True, "", "")
 
     def finalize(mut self, session: List[UInt8]) -> FinalOut:
         try:
@@ -629,6 +650,9 @@ struct NullWriter(WriterSource):
             self.committed -= n
             _ = self.lines.pop()
         return AppendOut(True, String(""), String(""))
+
+    def checkpoint(mut self, session: List[UInt8]) -> AppendOut:
+        return AppendOut(True, "", "")
 
     def finalize(mut self, session: List[UInt8]) -> FinalOut:
         self.session_bytes = session.copy()
@@ -749,6 +773,9 @@ struct DropWriter(WriterSource):
         self.appends = self.mark_appends
         self.bytes = self.mark_bytes
         return AppendOut(True, String(""), String(""))
+
+    def checkpoint(mut self, session: List[UInt8]) -> AppendOut:
+        return AppendOut(True, "", "")
 
     def finalize(mut self, session: List[UInt8]) -> FinalOut:
         var cstr = _d_cstr(self.dir_path + String("/session.json"))

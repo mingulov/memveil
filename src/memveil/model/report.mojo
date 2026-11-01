@@ -62,6 +62,7 @@ struct Report:
 
     var integrity_context: String
     var integrity_status: String
+    var unverified_bytes: UInt64
     var verified_bytes: UInt64
     var verified_events: UInt64
     var session_id: String
@@ -91,6 +92,7 @@ struct Report:
     def __init__(out self):
         self.integrity_context = String("capture")
         self.integrity_status = String("legacy_unverified")
+        self.unverified_bytes = UInt64(0)
         self.verified_bytes = UInt64(0)
         self.verified_events = UInt64(0)
         self.session_id = String("")
@@ -232,10 +234,9 @@ def incomplete_finding_severity(
     return String("warning")
 
 
-def _unverified_channel(mut channel: Channel):
+def _unverified_channel(mut channel: Channel, note: String):
     if channel.status == "complete_for_scope":
         channel.status = String("partial")
-    var note = String("Capture integrity unverified; ")
     var reason = channel.reason
     channel.reason = note
     var count = note.count_codepoints()
@@ -256,15 +257,28 @@ def apply_integrity(mut rep: Report, verified: Bool, bytes: UInt64, events: UInt
     rep.integrity_status = String("legacy_unverified")
     rep.verified_bytes = UInt64(0)
     rep.verified_events = UInt64(0)
-    _unverified_channel(rep.q_detail)
-    _unverified_channel(rep.q_aggregate)
-    _unverified_channel(rep.q_correlation)
-    _unverified_channel(rep.q_corr_mapping)
-    _unverified_channel(rep.q_corr_copy)
-    _unverified_channel(rep.q_corr_sync)
-    _unverified_channel(rep.q_baseline)
-    _unverified_channel(rep.q_terminal)
+    _demote_integrity(rep, String("Capture integrity unverified; "))
+
+
+def _demote_integrity(mut rep: Report, note: String):
+    _unverified_channel(rep.q_detail, note)
+    _unverified_channel(rep.q_aggregate, note)
+    _unverified_channel(rep.q_correlation, note)
+    _unverified_channel(rep.q_corr_mapping, note)
+    _unverified_channel(rep.q_corr_copy, note)
+    _unverified_channel(rep.q_corr_sync, note)
+    _unverified_channel(rep.q_baseline, note)
+    _unverified_channel(rep.q_terminal, note)
     rep.verdict.name = String("partial_unknown_loss")
     for i in range(len(rep.metrics)):
         if rep.metrics[i].coverage == "complete_for_scope":
             rep.metrics[i].coverage = String("partial")
+
+
+def apply_checkpoint(mut rep: Report, bytes: UInt64, events: UInt64, suffix: UInt64):
+    """Keep open-window uncertainty alongside verified prefix arithmetic."""
+    _demote_integrity(rep, String("Checkpoint prefix only; measurement window remains open; "))
+    rep.integrity_status = String("checkpoint_prefix")
+    rep.verified_bytes = bytes
+    rep.verified_events = events
+    rep.unverified_bytes = suffix

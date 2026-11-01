@@ -44,6 +44,7 @@ from memveil.model.session import Session, parse_session
 from memveil.model.validate import checked_add
 from memveil.model.integrity import Integrity, INTEGRITY_KIND_COUNT, integrity_kind, integrity_kind_index
 from memveil.platform.hash import Sha256
+from memveil.platform.capturefiles import RecoveryFiles, file_stat
 
 comptime READ_IO = UInt32(1)
 comptime READ_TOO_BIG = UInt32(2)
@@ -104,6 +105,9 @@ struct CaptureReader:
 
     var session: Session
     var partial: Bool
+    var checkpoint_prefix: Bool
+    var unverified_bytes: UInt64
+    var _recovery: RecoveryFiles
     var integrity_verified: Bool
     var _integrity: Integrity
     var _hash: Sha256
@@ -139,6 +143,9 @@ struct CaptureReader:
     def __init__(out self):
         self.session = Session()
         self.partial = False
+        self.checkpoint_prefix = False
+        self.unverified_bytes = UInt64(0)
+        self._recovery = RecoveryFiles()
         self.integrity_verified = False
         self._integrity = Integrity()
         self._hash = Sha256()
@@ -325,11 +332,31 @@ struct CaptureReader:
 
     def _refill(mut self) raises ReadError:
         """Read the next chunk; set _stream_eof at clean EOF."""
-        var got = external_call["fread", Int64](
-            Span(self._chunk).unsafe_ptr(), 1, _CHUNK_BYTES, self._fp
-        )
+        var want = _CHUNK_BYTES
+        if self.checkpoint_prefix:
+            var left = self.session.integrity.events_bytes - UInt64(self._total)
+            want = min(want, Int(left))
+            if want == 0:
+                self._stream_eof = True
+                self._pos = 0
+                self._end = 0
+                return
+        var got: Int64
+        if self.checkpoint_prefix:
+            got = external_call["pread", Int64](
+                self._recovery.events, Span(self._chunk).unsafe_ptr(),
+                Int64(want), Int64(self._total)
+            )
+            if got < 0:
+                raise ReadError(READ_IO, 0, "cannot read checkpoint events prefix")
+        else:
+            got = external_call["fread", Int64](
+                Span(self._chunk).unsafe_ptr(), 1, want, self._fp
+            )
         if got == 0:
-            var ferr = external_call["ferror", Int32](self._fp)
+            var ferr = Int32(0)
+            if not self.checkpoint_prefix:
+                ferr = external_call["ferror", Int32](self._fp)
             if ferr != 0:
                 raise ReadError(READ_IO, 0, "cannot read events.ndjson")
             self._stream_eof = True
@@ -595,6 +622,11 @@ struct CaptureReader:
                     "line " + String(lineno) + ": unknown mapping",
                 )
 
+        if self.checkpoint_prefix:
+            try:
+                self._recovery.verify()
+            except e:
+                raise ReadError(READ_INVALID, 0, String(e))
         self.integrity_verified = self.session.has_integrity
 
 
@@ -609,9 +641,19 @@ def _read_bounded(
     """
     var cpath = _to_cstr(path)
     var mode = _to_cstr("rb")
-    var fp = external_call["fopen", UInt64](
-        Span(cpath).unsafe_ptr(), Span(mode).unsafe_ptr()
-    )
+    var fd = external_call["openat", Int32](Int32(-100), Span(cpath).unsafe_ptr(), Int32(2048 | 524288), UInt32(0))
+    if fd < 0:
+        raise ReadError(READ_IO, 0, what + ": cannot open")
+    try:
+        var ids = file_stat(fd)
+        if ids[3] & UInt64(0o170000) != UInt64(0o100000):
+            raise Error("session is not a regular file")
+    except e:
+        _ = external_call["close", Int32](fd)
+        raise ReadError(READ_INVALID, 0, what + ": " + String(e))
+    var fp = external_call["fdopen", UInt64](fd, Span(mode).unsafe_ptr())
+    if fp == 0:
+        _ = external_call["close", Int32](fd)
     if fp == 0:
         raise ReadError(READ_IO, 0, what + ": cannot open")
     var chunk = List[UInt8]()
@@ -640,30 +682,59 @@ def read_capture(
     dir: String, allow_partial: Bool, limits: ReaderLimits
 ) raises ReadError -> CaptureReader:
     """Open the capture in dir: validate session, stream events."""
-    var session_bytes = _read_bounded(
-        dir + "/session.json", "session.json", limits.max_session_bytes
-    )
+    var final_path = _to_cstr(dir + "/session.json")
+    var probe = external_call["openat", Int32](Int32(-100), Span(final_path).unsafe_ptr(), Int32(2097152 | 131072 | 524288), UInt32(0))
+    var recover = False
+    if probe >= 0:
+        _ = external_call["close", Int32](probe)
+    else:
+        var errno_ptr = external_call["__errno_location", Pointer[Int32, MutAnyOrigin]]()
+        if errno_ptr.unsafe_load() != 2:
+            raise ReadError(READ_IO, 0, "cannot establish final session absence")
+        recover = True
+    var files = RecoveryFiles()
+    var session_bytes: List[UInt8]
+    if recover:
+        try:
+            files.open(dir)
+            session_bytes = files.read_checkpoint(limits.max_session_bytes)
+        except e:
+            raise ReadError(READ_INVALID, 0, String(e))
+    else:
+        session_bytes = _read_bounded(dir + "/session.json", "session.json", limits.max_session_bytes)
     var session: Session
     try:
         session = parse_session(session_bytes^)
     except e:
         raise ReadError(READ_PARSE, 0, "session.json: " + String(e))
-    if session.has_integrity and not session.finalized:
+    if recover:
+        if not session.has_integrity or session.finalized or not session.has_checkpoint_generation or session.end_reason != "checkpoint":
+            raise ReadError(READ_INVALID, 0, "invalid checkpoint session")
+        if session.integrity.events_bytes > files.events_ids[5]:
+            raise ReadError(READ_INVALID, 0, "checkpoint prefix exceeds events file")
+    elif session.has_integrity and not session.finalized:
         raise ReadError(READ_INVALID, 0, "unfinalized session requires checkpoint recovery")
     var out = CaptureReader()
     out.session = session^
+    if recover:
+        out.checkpoint_prefix = True
+        out.partial = True
+        out.unverified_bytes = files.events_ids[5] - out.session.integrity.events_bytes
+        out._recovery = files^
     out._allow_partial = allow_partial
     out._limits = limits.copy()
     for i in range(len(out.session.devices)):
         out._devices[out.session.devices[i].device_id] = True
     for _ in range(_CHUNK_BYTES):
         out._chunk.append(UInt8(0))
-    var path = _to_cstr(dir + "/events.ndjson")
-    var mode = _to_cstr("rb")
-    var fp = external_call["fopen", UInt64](
-        Span(path).unsafe_ptr(), Span(mode).unsafe_ptr()
-    )
-    if fp == 0:
-        raise ReadError(READ_IO, 0, "cannot open events.ndjson")
-    out._fp = fp
+    if not recover:
+        var path = _to_cstr(dir + "/events.ndjson")
+        var mode = _to_cstr("rb")
+        out._fp = external_call["fopen", UInt64](Span(path).unsafe_ptr(), Span(mode).unsafe_ptr())
+        if out._fp == 0:
+            raise ReadError(READ_IO, 0, "cannot open events.ndjson")
+    if recover and not allow_partial:
+        while out.has_more():
+            _ = out.next_event()
+        raise ReadError(READ_INVALID, 0, "no final session; verified checkpoint prefix " + String(out.session.integrity.events_bytes) + " bytes; use --allow-partial to recover")
     return out^

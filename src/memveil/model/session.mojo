@@ -418,6 +418,8 @@ struct StopState(Copyable):
     var busy_at_drain: Bool
     var counters_valid: Bool
     var open_mappings: UInt64
+    var checkpoint_failures: UInt64
+    var has_checkpoint_failures: Bool
 
     def __init__(out self):
         self.outcome = String("")
@@ -437,6 +439,8 @@ struct StopState(Copyable):
         self.busy_at_drain = False
         self.counters_valid = False
         self.open_mappings = UInt64(0)
+        self.checkpoint_failures = UInt64(0)
+        self.has_checkpoint_failures = False
 
 
 def quiescence_only_spillover(stop: StopState) -> Bool:
@@ -531,6 +535,8 @@ def _check_capture_mode(v: String) raises:
 
 
 def _check_end_reason(v: String) raises:
+    if v == "checkpoint":
+        return
     if (
         v == "duration"
         or v == "size_limit"
@@ -1147,6 +1153,8 @@ struct _Capture(Copyable):
     var has_filter_device: Bool
     var filter_device: String
     var finalized: Bool
+    var checkpoint_generation: UInt64
+    var has_checkpoint_generation: Bool
     var has_integrity: Bool
     var integrity: Integrity
     var has_end_reason: Bool
@@ -1161,6 +1169,8 @@ struct _Capture(Copyable):
         self.has_filter_device = False
         self.filter_device = String("")
         self.finalized = False
+        self.checkpoint_generation = UInt64(0)
+        self.has_checkpoint_generation = False
         self.has_integrity = False
         self.integrity = Integrity()
         self.has_end_reason = False
@@ -1277,6 +1287,11 @@ def _parse_capture(mut scan: Scanner) raises -> _Capture:
                 scan.skip_ws()
                 out.finalized = scan.parse_bool()
                 has_finalized = True
+            elif key == "checkpoint_generation":
+                if out.has_checkpoint_generation:
+                    raise ValidationError("capture.checkpoint_generation", "duplicate")
+                out.checkpoint_generation = parse_u64_field(scan, "capture.checkpoint_generation")
+                out.has_checkpoint_generation = True
             elif key == "integrity":
                 if out.has_integrity:
                     raise ValidationError("capture.integrity", "duplicate")
@@ -1435,6 +1450,8 @@ struct Session(Copyable):
     var has_filter_device: Bool
     var filter_device: String
     var finalized: Bool
+    var checkpoint_generation: UInt64
+    var has_checkpoint_generation: Bool
     var has_integrity: Bool
     var integrity: Integrity
     var has_end_reason: Bool
@@ -1490,6 +1507,8 @@ struct Session(Copyable):
         self.has_filter_device = False
         self.filter_device = String("")
         self.finalized = False
+        self.checkpoint_generation = UInt64(0)
+        self.has_checkpoint_generation = False
         self.has_integrity = False
         self.integrity = Integrity()
         self.has_end_reason = False
@@ -1545,6 +1564,8 @@ struct Session(Copyable):
         self.has_filter_device = existing.has_filter_device
         self.filter_device = existing.filter_device
         self.finalized = existing.finalized
+        self.checkpoint_generation = existing.checkpoint_generation
+        self.has_checkpoint_generation = existing.has_checkpoint_generation
         self.has_integrity = existing.has_integrity
         self.integrity = existing.integrity.copy()
         self.has_end_reason = existing.has_end_reason
@@ -1901,6 +1922,11 @@ def _parse_stop(mut scan: Scanner) raises -> StopState:
                 scan.skip_ws()
                 out.counters_valid = scan.parse_bool()
                 has_counters = True
+            elif key == "checkpoint_failures":
+                if out.has_checkpoint_failures:
+                    raise ValidationError("stop.checkpoint_failures", "duplicate")
+                out.checkpoint_failures = parse_u64_field(scan, "stop.checkpoint_failures")
+                out.has_checkpoint_failures = True
             elif key == "open_mappings":
                 if has_open:
                     raise ValidationError("stop.open_mappings", "duplicate")
@@ -2023,6 +2049,8 @@ def parse_session(data: List[UInt8]) raises -> Session:
                 out.has_filter_device = c.has_filter_device
                 out.filter_device = c.filter_device
                 out.finalized = c.finalized
+                out.checkpoint_generation = c.checkpoint_generation
+                out.has_checkpoint_generation = c.has_checkpoint_generation
                 out.has_integrity = c.has_integrity
                 out.integrity = c.integrity.copy()
                 out.has_end_reason = c.has_end_reason
@@ -2090,6 +2118,13 @@ def parse_session(data: List[UInt8]) raises -> Session:
             )
     if (out_version == SESSION_SCHEMA_VERSION_INTEGRITY) != out.has_integrity:
         raise ValidationError("capture.integrity", "required only by schema 0.1.4")
+    if out.has_checkpoint_generation:
+        if not out.has_integrity or out.finalized or out.end_reason != "checkpoint" or out.checkpoint_generation == 0:
+            raise ValidationError("capture.checkpoint_generation", "invalid checkpoint")
+    if out.end_reason == "checkpoint" and not out.has_checkpoint_generation:
+        raise ValidationError("capture.checkpoint_generation", "required for checkpoint")
+    if out.stop.has_checkpoint_failures and not out.has_integrity:
+        raise ValidationError("stop.checkpoint_failures", "requires schema 0.1.4")
     if out_version != SESSION_SCHEMA_VERSION and out_version != SESSION_SCHEMA_VERSION_INTEGRITY:
         if out.has_verdict:
             raise ValidationError(

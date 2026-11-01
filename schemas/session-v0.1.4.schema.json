@@ -173,6 +173,7 @@
         },
         "end_reason": {
           "enum": [
+            "checkpoint",
             "duration",
             "size_limit",
             "signal",
@@ -276,8 +277,63 @@
               }
             }
           }
+        },
+        "checkpoint_generation": {
+          "$ref": "#/$defs/u64",
+          "description": "Positive monotonic checkpoint attempt generation; present only in an unfinalized checkpoint."
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "checkpoint_generation"
+            ]
+          },
+          "then": {
+            "required": [
+              "end_reason"
+            ],
+            "properties": {
+              "finalized": {
+                "const": false
+              },
+              "end_reason": {
+                "const": "checkpoint"
+              },
+              "checkpoint_generation": {
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/u64"
+                  },
+                  {
+                    "not": {
+                      "const": "0"
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "end_reason"
+            ],
+            "properties": {
+              "end_reason": {
+                "const": "checkpoint"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "checkpoint_generation"
+            ]
+          }
+        }
+      ]
     },
     "device_catalog": {
       "$ref": "#/$defs/device_catalog"
@@ -786,6 +842,9 @@
           "type": "boolean"
         },
         "open_mappings": {
+          "$ref": "#/$defs/u64"
+        },
+        "checkpoint_failures": {
           "$ref": "#/$defs/u64"
         }
       }

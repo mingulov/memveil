@@ -51,9 +51,10 @@ sequences. Offline readers verify the whole stream before reporting it as
 counts. Legacy input remains readable as `legacy_unverified`; normal reports
 return 0 and strict reports return 4, with no complete evidence channels.
 
+A missing final session can be recovered with `--allow-partial` from an owned, locked `checkpoint.json`. Only its verified prefix contributes metrics; report 0.1.4 includes `unverified_bytes` for the excluded suffix. Recovery always returns 4. Session 0.1.4 adds checkpoint-only `capture.checkpoint_generation` and optional `stop.checkpoint_failures`, without changing event 0.1.2.
+
 ## Reserved versions (planned, unavailable)
 
-- Durable checkpoint recovery remains planned. Event 0.1.2 stays unchanged.
 - Session, event and report 0.2.0 are reserved for the opt-in conversion
   request/result journal. It must retain integrity and recovery guarantees;
   successful API results cannot establish physical state or range lifetimes.
@@ -65,7 +66,7 @@ return 0 and strict reports return 4, with no complete evidence channels.
 
 The [integrity and recovery contract](capture-integrity.md) specifies the
 required fields, literal-byte verification, quality demotion, durable
-publication ordering and authoritative exit table for readers and planned recovery.
+publication ordering and authoritative exit table for readers and recovery.
 
 The replay path treats every capture as untrusted and stays
 offline: it never loads BPF objects, touches tracefs or
@@ -126,7 +127,7 @@ truncated, and any interior corruption exit 2 in both modes.
 
 This tail behavior does not verify capture-file integrity. It will not apply
 to an altered finalized 0.1.4 capture: that input must fail with exit 2, even
-with the partial flag. Planned unfinalized recovery uses only a verified
+with the partial flag. Unfinalized recovery uses only a verified
 checkpoint prefix and returns 4 in normal and strict modes.
 
 ## Planned conversion-journal boundary

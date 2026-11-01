@@ -64,10 +64,9 @@ def main():
     child = subprocess.Popen([BIN, "report", ATTEMPTS], stdout=w,
                              stderr=subprocess.PIPE)
     os.close(w)
-    _, _ = child.communicate()
-    # SIGPIPE death (-13) or a loud exit 1 both count: the run
-    # must not report success for bytes nobody received.
-    check("report-closed-pipe", child.returncode != 0,
+    _, err = child.communicate()
+    # SIGPIPE is ignored; checked delivery reports the output error.
+    check("report-closed-pipe", child.returncode == 1 and b"cannot write stdout" in err,
           "exit %d" % child.returncode)
 
 

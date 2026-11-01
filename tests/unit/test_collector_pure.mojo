@@ -436,8 +436,28 @@ def test_detach_begin_before_detach() raises:
     assert_equal(result.exit_code, 0)
 
 
+def test_attached_interval_reason_distinguishes_missing_and_unordered() raises:
+    var collector = Collector(CollectorConfig())
+    collector.snapshots_present = True
+    var missing = collector.assemble()
+    assert_true(missing.q_aggregate.reason.find("stamp missing") >= 0)
+    for end in [UInt64(10), UInt64(9)]:
+        collector.attempt_attach_done_ns = UInt64(10)
+        collector.attempt_detach_begin_ns = end
+        var unordered = collector.assemble()
+        assert_true(unordered.q_aggregate.reason.find("stamps not increasing") >= 0)
+        assert_true(unordered.q_aggregate.reason.find("stamp missing") == -1)
+        assert_equal(unordered.q_aggregate.status, missing.q_aggregate.status)
+        assert_equal(unordered.q_aggregate.scope, missing.q_aggregate.scope)
+        assert_equal(unordered.q_aggregate.has_loss_count, missing.q_aggregate.has_loss_count)
+        assert_equal(unordered.q_detail.status, missing.q_detail.status)
+        assert_equal(unordered.integrity.events_bytes, missing.integrity.events_bytes)
+        assert_equal(unordered.integrity.line_count, missing.integrity.line_count)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
+    suite.test[test_attached_interval_reason_distinguishes_missing_and_unordered]()
     suite.test[test_ready_after_arm]()
     suite.test[test_detach_begin_before_detach]()
     suite.test[test_evaluate_channel_argcnt_noted]()

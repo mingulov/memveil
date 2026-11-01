@@ -32,14 +32,20 @@ def test_classify() raises:
 def test_mask_bits() raises:
     var mask = blocked_mask()
     assert_equal(len(mask), 128)
-    assert_equal(Int(mask[0]), 0x02)
+    assert_equal(Int(mask[0]), 0x03)
     assert_equal(Int(mask[1]), 0x40)
     for i in range(2, len(mask)):
         assert_equal(Int(mask[i]), 0)
 
 
+def test_hangup_is_in_orderly_mask() raises:
+    var mask = blocked_mask()
+    assert_equal(Int(mask[0]) & 1, 1)
+
+
 def run() raises -> Int:
     var suite = TestSuite()
+    suite.test[test_hangup_is_in_orderly_mask]()
     suite.test[test_classify]()
     suite.test[test_mask_bits]()
     suite^.run()
