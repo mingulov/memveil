@@ -21,7 +21,9 @@ def normalize(argv, sdk_library, runpath):
     for i, arg in enumerate(argv):
         if i == start + 1:
             continue
-        if 'rpath' in arg.lower() or arg == '-R' or arg.startswith('-R/'):
+        tokens = arg[4:].split(',') if arg.startswith('-Wl,') else [arg]
+        if any(token.startswith('-') and
+               ('rpath' in token.lower() or token.startswith('-R')) for token in tokens):
             raise ValueError('unexpected linker search-path option')
     result = list(argv)
     result[start + 3] = runpath

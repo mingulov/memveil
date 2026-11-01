@@ -30,7 +30,7 @@ def test_only_driver_sdk_rpath_changes():
     assert args == invocation('/sdk/lib')
 
 
-@pytest.mark.parametrize('kind', ['missing', 'foreign', 'duplicate', 'unexpected', 'joined'])
+@pytest.mark.parametrize('kind', ['missing', 'foreign', 'duplicate', 'unexpected', 'joined', 'short', 'short_joined'])
 def test_unexpected_linker_search_paths_refuse(kind):
     args = invocation('/sdk/lib')
     if kind == 'missing':
@@ -41,10 +41,24 @@ def test_unexpected_linker_search_paths_refuse(kind):
         args += args[2:6]
     elif kind == 'unexpected':
         args += ['-Xlinker', '-rpath', '-Xlinker', '/foreign/lib']
-    else:
+    elif kind == 'joined':
         args += ['-Wl,-rpath,/foreign/lib']
+    elif kind == 'short':
+        args += ['-Xlinker', '-Rrelative-path']
+    else:
+        args += ['-Wl,-R,/foreign/lib']
     with pytest.raises(ValueError):
         adapter().normalize(args, '/sdk/lib', '$ORIGIN/../.pixi/envs/default/lib')
+
+
+def test_search_path_words_in_filenames_are_preserved():
+    sdk = '/checkout-containing-rpath/.pixi/lib'
+    args = invocation(sdk)
+    args[0] = '/object-containing-rpath.o'
+    args[7] = '/output-containing-rpath/memveil'
+    expected = list(args)
+    expected[5] = '$ORIGIN/../.pixi/lib'
+    assert adapter().normalize(args, sdk, expected[5]) == expected
 
 
 def test_adapter_restores_path_and_preserves_every_other_argument(tmp_path):
