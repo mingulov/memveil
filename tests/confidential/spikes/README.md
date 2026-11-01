@@ -50,6 +50,16 @@ same wrapper-hook blind spot. Owned mode separately compares all four ordered
 entry/return records to the native worker's two rows. Natural zero counts are
 valid observations; zero samples do not pass the 95% caller criterion.
 
+The terminal `printf` uses `%s` for each `count()` aggregate. In the pinned
+bpftrace source, the [formatter type check](https://github.com/bpftrace/bpftrace/blob/18a5ccb8c6a5c6c5dc21c818a58b797ee60df163/src/format_string.cpp)
+accepts printable aggregate values with `%s`; numeric specifiers such as `%llu`
+and `%d` reject `count_t`. The [count formatter](https://github.com/bpftrace/bpftrace/blob/18a5ccb8c6a5c6c5dc21c818a58b797ee60df163/src/types_format.cpp)
+retains an unsigned 64-bit value, and `%s` emits its decimal text without a
+signed cast. The parser requires canonical nonnegative u64 decimal strings;
+negative values, overflow and noncanonical text fail. This does not prove that
+a live counter cannot wrap. The bounded run still requires exact independent
+detail/count agreement and rejects unavailable or lost observations.
+
 ## Caller policy
 
 Caller processing is disabled unless `--callers` is supplied. Enabled probes
@@ -235,6 +245,13 @@ joins, count mismatch, malformed input, privacy, timeouts and cleanup failure.
 Mocked syscall tests cover all resource types, ABI refusal, enumeration errors
 and bounds. Settlement tests cover delayed release, persistent added/missing/
 replaced IDs, group/module presence and failures retained after later absence.
+A narrow authored model of the pinned aggregate formatter consumes each of the
+eight generated terminal formats and checks agreement with independently
+authored detail streams. Large authored values check text/parser precision,
+not live counter capacity; they cannot pass without matching detail evidence.
+These local source-contract tests do not execute the bpftrace compiler or
+validate attachment. Every generated variant still needs the exact pinned
+compiler and assigned guest execution before its syntax/transport is admitted.
 All actual fentry/fexit/kprobe attachment, native caller resolution, I/O stimuli,
 ordinary transport integration and real SNP admission still require operator
 execution. No persistent state, byte netting, leak verdict or host-read claim
