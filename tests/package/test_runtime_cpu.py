@@ -52,6 +52,33 @@ def test_nonloadable_note_refuses(tmp_path):
         runtime_cpu.verify_engine(path)
 
 
+@pytest.mark.parametrize('damage', ['redirected', 'unmapped', 'empty'])
+def test_property_header_must_map_the_actual_isa_note(tmp_path, damage):
+    import runtime_cpu
+    path = engine(tmp_path, 'v3')
+    data = bytearray(path.read_bytes())
+    offset = struct.unpack_from('<Q', data, 32)[0]
+    width, count = struct.unpack_from('<HH', data, 54)
+    for i in range(count):
+        at = offset + i * width
+        if struct.unpack_from('<I', data, at)[0] != 0x6474e553:
+            continue
+        if damage == 'redirected':
+            for field in (8, 16):
+                value = struct.unpack_from('<Q', data, at + field)[0]
+                struct.pack_into('<Q', data, at + field, value + 8)
+        elif damage == 'unmapped':
+            struct.pack_into('<Q', data, at + 16, 0)
+        else:
+            struct.pack_into('<Q', data, at + 32, 0)
+        break
+    else:
+        pytest.fail('setup: missing property header')
+    path.write_bytes(data)
+    with pytest.raises(ValueError, match='ISA'):
+        runtime_cpu.verify_engine(path)
+
+
 def test_missing_inspection_tool_refuses(tmp_path, monkeypatch):
     import runtime_cpu
     path = engine(tmp_path, 'v3')
