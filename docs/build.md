@@ -281,6 +281,13 @@ installed package, compare it with the bundle using:
 python3 tools/canonical_runtime.py --bundle dist/bundle --installed extracted-root
 ```
 
+In `memveil-runtime/1`, every entry's `size` is an unsigned 64-bit decimal
+JSON string: `"0"` or digits beginning with `1` through `9`, up to
+`"18446744073709551615"`. JSON numbers, signs, leading zeros, whitespace,
+non-ASCII digits and overflow are rejected. Verification compares the validated
+integer with the file's actual byte length. Existing build and source receipt
+formats retain their own integer fields.
+
 `--bundle DIR` is the package-adapter interface for a retained canonical tree.
 Adapters verify its complete file manifest before copying and compare the
 installed runtime inventory afterward. They never mark matching bytes as

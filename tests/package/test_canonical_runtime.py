@@ -51,6 +51,49 @@ def test_all_runtime_entries_equal_across_layouts(tmp_path):
             path.write_bytes(original)
 
 
+def test_inventory_sizes_are_canonical_unsigned_decimal_strings(tmp_path):
+    api = helper()
+    files = payload(tmp_path)
+    (tmp_path / 'profiles/empty').write_bytes(b'')
+    files['profiles/empty'] = b''
+    for entry in api.inventory(tmp_path):
+        assert entry['size'] == str(len(files[entry['path']]))
+
+
+@pytest.mark.parametrize('size', [0, 6, True, False, None, -1, 6.0,
+    '', '00', '06', '-1', '+6', ' 6', '6 ', '6\n', '6.0', '6e0',
+    '\u0666', '18446744073709551616', '9' * 100])
+def test_manifest_size_refuses_noncanonical_values(tmp_path, size):
+    api = helper()
+    payload(tmp_path)
+    expected = api.inventory(tmp_path)
+    expected[0]['size'] = size
+    with pytest.raises(ValueError, match='size'):
+        api.verify(tmp_path, expected)
+
+
+@pytest.mark.parametrize('size', ['0', '9007199254740993', '18446744073709551615'])
+def test_manifest_size_parses_exact_unsigned_bounds(size):
+    assert helper().parse_size(size) == int(size)
+
+
+def test_nested_installed_bpf_path_is_not_flattened(tmp_path):
+    api = helper()
+    bundle = tmp_path / 'bundle'
+    files = payload(bundle)
+    installed = tmp_path / 'installed'
+    for name, data in files.items():
+        path = installed / api.installed_path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    original = installed / 'usr/lib/memveil/attempt.bpf.o'
+    moved = original.parent / 'unexpected/attempt.bpf.o'
+    moved.parent.mkdir()
+    original.rename(moved)
+    with pytest.raises(ValueError, match='differs'):
+        api.verify(installed, api.inventory(bundle), installed=True)
+
+
 @pytest.mark.parametrize('change', ['extra', 'missing', 'escape', 'directory_escape'])
 def test_inventory_refuses_incomplete_or_escaped_payload(tmp_path, change):
     api = helper()

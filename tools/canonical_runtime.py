@@ -12,6 +12,16 @@ import stat
 FORMAT = 'memveil-runtime/1'
 
 
+def parse_size(value):
+    if (not isinstance(value, str) or len(value) > 20 or
+            re.fullmatch(r'0|[1-9][0-9]*', value) is None):
+        raise ValueError('runtime size must be a canonical unsigned decimal string')
+    size = int(value)
+    if size > 18446744073709551615:
+        raise ValueError('runtime size exceeds unsigned 64-bit range')
+    return size
+
+
 def digest(path):
     h = hashlib.sha256()
     with open(path, 'rb') as stream:
@@ -60,14 +70,16 @@ def inventory(root, installed=False):
                 runtime_files.add(name)
                 if installed:
                     if name.startswith('usr/lib/memveil/') and name.endswith('.bpf.o'):
-                        name = 'bpf/' + path.name
+                        name = 'bpf/' + name[len('usr/lib/memveil/'):]
                     elif name.startswith('usr/share/memveil/'):
                         name = name[len('usr/share/memveil/'):]
                     else:
                         name = name[4:]
                 if name.startswith('lib/') and not name.startswith('lib/memveil/'):
                     raise ValueError('noncanonical library path: ' + name)
-                entries.append({'type': 'file', 'path': name, 'sha256': digest(path), 'size': path.stat().st_size})
+                size = str(path.stat().st_size)
+                parse_size(size)
+                entries.append({'type': 'file', 'path': name, 'sha256': digest(path), 'size': size})
     # An exclusive extracted package must not hide runtime objects elsewhere.
     for current, dirs, files in os.walk(root, onerror=walk_error):
         for leaf in dirs + files:
@@ -88,8 +100,9 @@ def inventory(root, installed=False):
 
 
 def verify(root, expected, installed=False):
+    expected_sizes = [parse_size(entry['size']) for entry in expected]
     actual = inventory(root, installed)
-    if actual != expected:
+    if actual != expected or [parse_size(entry['size']) for entry in actual] != expected_sizes:
         raise ValueError('runtime inventory differs from canonical manifest')
     return actual
 
