@@ -84,7 +84,8 @@ installed share dir and qualify receipts land under
 %build
 B="${MEMVEIL_CANONICAL_BUNDLE:?Supply a canonical bundle with tools/build-rpm --bundle}"
 python3 tools/canonical_runtime.py --bundle "$B" \
-    --source-tree . --bridge-archive "%{SOURCE1}"
+    --source-tree . --bridge-archive "%{SOURCE1}" \
+    --save-manifest canonical-manifest.json
 
 %install
 B="${MEMVEIL_CANONICAL_BUNDLE:?Canonical bundle directory is required}"
@@ -130,6 +131,7 @@ for text in LICENSE THIRD-PARTY-NOTICES.md \
 done
 cp -rp "$B/LICENSES" "$B/licenses" \
     "%{buildroot}/usr/share/doc/memveil/"
+python3 tools/canonical_runtime.py --manifest canonical-manifest.json --installed "%{buildroot}"
 ./tools/gen-man --binary "%{buildroot}/usr/bin/memveil" \
     --out man-pages
 mkdir -p "%{buildroot}/usr/share/man/man1"
@@ -145,7 +147,7 @@ find "%{buildroot}" -type d -exec chmod 00755 {} +
 find "%{buildroot}" -type f -exec chmod 0644 {} +
 chmod 0755 "%{buildroot}/usr/bin/memveil"
 
-python3 tools/canonical_runtime.py --bundle "$B" --installed "%{buildroot}"
+python3 tools/canonical_runtime.py --manifest canonical-manifest.json --installed "%{buildroot}"
 
 %files
 %defattr(-,root,root,-)

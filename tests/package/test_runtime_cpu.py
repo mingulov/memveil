@@ -115,3 +115,60 @@ def test_bundle_requires_matching_cpu_metadata_and_actual_note(tmp_path, level, 
     else:
         with pytest.raises(ValueError):
             canonical_runtime.verify_bundle(root)
+
+
+@pytest.mark.parametrize('damage', ['order', 'feature_size', 'needed_size', 'duplicate'])
+def test_preceding_property_cannot_disable_loader_isa_check(tmp_path, damage):
+    import runtime_cpu
+    source = tmp_path / 'property.c'
+    source.write_text('int main(void) { return 0; }\n')
+    path = tmp_path / 'property'
+    subprocess.run(['cc', '-march=x86-64', '-Wl,-z,x86-64-v3', '-Wl,-z,ibt',
+                    str(source), '-o', str(path)], check=True, capture_output=True)
+    runtime_cpu.verify_engine(path)
+    data = bytearray(path.read_bytes())
+    offset = struct.unpack_from('<Q', data, 32)[0]
+    width, count = struct.unpack_from('<HH', data, 54)
+    for i in range(count):
+        at = offset + i * width
+        if struct.unpack_from('<I', data, at)[0] == 0x6474e553:
+            note = struct.unpack_from('<Q', data, at + 8)[0]
+            break
+    else:
+        pytest.fail('setup: missing property header')
+    assert struct.unpack_from('<II', data, note + 16) == (0xc0000002, 4)
+    assert struct.unpack_from('<I', data, note + 32)[0] == 0xc0008002
+    if damage == 'order':
+        struct.pack_into('<I', data, note + 16, 0xc0010000)
+    elif damage == 'feature_size':
+        struct.pack_into('<I', data, note + 20, 8)
+    elif damage == 'needed_size':
+        struct.pack_into('<II', data, note + 16, 0xb0008000, 8)
+    else:
+        struct.pack_into('<I', data, note + 16, 0xc0008002)
+    path.write_bytes(data)
+    with pytest.raises(ValueError, match='ISA'):
+        runtime_cpu.verify_engine(path)
+
+
+@pytest.mark.parametrize('damage', ['memory_extent', 'note_precedence'])
+def test_loader_reads_only_the_verified_property_segment(tmp_path, damage):
+    import runtime_cpu
+    path = engine(tmp_path, 'v3')
+    data = bytearray(path.read_bytes())
+    offset = struct.unpack_from('<Q', data, 32)[0]
+    width, count = struct.unpack_from('<HH', data, 54)
+    property_at = next(offset + i * width for i in range(count)
+                       if struct.unpack_from('<I', data, offset + i * width)[0] == 0x6474e553)
+    if damage == 'memory_extent':
+        size = struct.unpack_from('<Q', data, property_at + 40)[0]
+        struct.pack_into('<Q', data, property_at + 40, size + 8)
+    else:
+        note_at = next(offset + i * width for i in range(count)
+                       if struct.unpack_from('<I', data, offset + i * width)[0] == 4)
+        prop = bytes(data[property_at:property_at + width])
+        data[property_at:property_at + width] = data[note_at:note_at + width]
+        data[note_at:note_at + width] = prop
+    path.write_bytes(data)
+    with pytest.raises(ValueError, match='ISA'):
+        runtime_cpu.verify_engine(path)

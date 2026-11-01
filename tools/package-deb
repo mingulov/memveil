@@ -477,11 +477,6 @@ def main(argv):
 
         binary = os.path.join(bindir, "memveil")
         shutil.copy2(os.path.join(bundle, "bin", "memveil"), binary)
-        rerun = run([binary, "version"])
-        if rerun.returncode != 0 \
-                or rerun.stdout.strip() != "memveil-" + upstream:
-            fail("FHS binary fails to start after canonical "
-                 "copy: %r" % rerun.stdout)
 
         for name in BPF_OBJECTS:
             src = os.path.join(bundle, "bpf", name)
@@ -516,6 +511,12 @@ def main(argv):
         for name in ("LICENSES", "licenses"):
             shutil.copytree(os.path.join(bundle, name),
                             os.path.join(licdir, name))
+        canonical_runtime.verify_installed(root, manifest)
+        rerun = run([binary, "version"])
+        if rerun.returncode != 0 \
+                or rerun.stdout.strip() != "memveil-" + upstream:
+            fail("FHS binary fails to start after canonical "
+                 "copy: %r" % rerun.stdout)
         write_changelog(licdir, upstream, memveil_rev)
 
         mandir = os.path.join(root, "usr", "share", "man", "man1")
@@ -563,7 +564,7 @@ def main(argv):
                                       lmb_sha, depends,
                                       build_tools))
 
-        canonical_runtime.verify(root, manifest["canonical_runtime"]["entries"], installed=True)
+        canonical_runtime.verify_installed(root, manifest)
         write_md5sums(root)
         fix_modes(root)
         out = os.path.join(out_dir, stem + ".deb")

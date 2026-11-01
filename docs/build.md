@@ -308,9 +308,11 @@ environment. The artifact's libc floor is derived from its complete ELF closure;
 the vendor's development-system minimum alone is insufficient.
 
 `--bundle DIR` is the package-adapter interface for a retained canonical tree.
-Adapters verify its complete file manifest before copying and compare the
-installed runtime inventory afterward. They never mark matching bytes as
-qualified. Keep the matching source export, including the dependency sources
+Adapters retain its verified complete file manifest before copying. They
+compare every copied runtime, license, notice, manual and example at its
+installed destination before executing the staged engine and again before
+assembly. Generated package metadata, man pages and completions are separate
+outputs. Matching bytes do not grant qualification. Keep the matching source export, including the dependency sources
 and attribution under `third_party`, alongside distributable archives.
 
 For package-only verification of a retained bundle, set

@@ -129,6 +129,7 @@ def test_retained_packages_match_canonical_payload():
     assert any(entry['path'].startswith('profiles/') for entry in expected)
     for root in (deb, rpm):
         assert api.verify(root, expected, installed=True) == expected
+        api.verify_installed(root, manifest)
 
 
 def test_transformed_dependencies_preserve_runtime_sections():

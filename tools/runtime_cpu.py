@@ -43,7 +43,12 @@ def mapped_isa(path):
         if len(properties) != 1:
             invalid()
         prop = properties[0]
-        if (not 16 <= prop[5] <= 65536 or prop[6] < prop[5] or prop[7] != 8 or
+        # Main-executable loaders visit note headers backwards. Require the
+        # canonical property to be visited first, and validate its full memory
+        # extent rather than leaving a trailing note outside the checked bytes.
+        if any(entry[0] == 4 for entry in headers[headers.index(prop) + 1:]):
+            invalid()
+        if (not 16 <= prop[5] <= 65536 or prop[6] != prop[5] or prop[7] != 8 or
                 not any(load[0] == 1 and load[1] & 4 and
                         load[2] <= prop[2] and prop[2] + prop[5] <= load[2] + load[5] and
                         prop[3] == load[3] + prop[2] - load[2] and
@@ -56,10 +61,17 @@ def mapped_isa(path):
         invalid()
     cursor = 16
     needed = []
+    previous = -1
     while cursor < len(note):
         if cursor + 8 > len(note):
             invalid()
         kind, size = struct.unpack_from('<II', note, cursor)
+        # The loader stops scanning on out-of-order types and abandons an
+        # ill-formed recognized property, even if readelf displays a later ISA.
+        if kind <= previous or (kind in (0xb0008000, 0xc0000002, 0xc0008002)
+                                and size != 4):
+            invalid()
+        previous = kind
         start = cursor + 8
         cursor = (start + size + 7) & ~7
         if cursor > len(note):
