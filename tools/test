@@ -1386,7 +1386,8 @@ suite_reader_adversarial() {
             "(run tools/build first)" >&2
         return 1
     fi
-    python3 "$ROOT/tests/cli/test_adversarial_cli.py"
+    python3 "$ROOT/tests/cli/test_adversarial_cli.py" || return 1
+    python3 "$ROOT/tests/cli/test_checkpoint_recovery.py"
 }
 
 suite_fuzz_smoke() {
@@ -1395,7 +1396,8 @@ suite_fuzz_smoke() {
             "(run tools/build first)" >&2
         return 1
     fi
-    if ! python3 "$ROOT/tests/fuzz/run.py" --seeds 200; then
+    python3 "$ROOT/tests/fuzz/test_oracle.py" || return 1
+    if ! python3 "$ROOT/tests/fuzz/run.py" --seeds 200 --regress "$ROOT/build/fuzz-regressions" --receipt "$ROOT/build/fuzz-smoke.json"; then
         return 1
     fi
     if python3 "$ROOT/tests/fuzz/run.py" --seeds 0 \
@@ -1418,7 +1420,8 @@ suite_fuzz_campaign() {
         return 1
     fi
     seeds=${MEMVEIL_FUZZ_SEEDS:-10000}
-    python3 "$ROOT/tests/fuzz/run.py" --seeds "$seeds"
+    python3 "$ROOT/tests/fuzz/test_oracle.py" || return 1
+    python3 "$ROOT/tests/fuzz/run.py" --seeds "$seeds" --regress "$ROOT/build/fuzz-regressions" --receipt "$ROOT/build/fuzz-campaign.json"
 }
 
 suite_record_failures() {
@@ -1429,7 +1432,12 @@ suite_record_failures() {
         return 1
     fi
     python3 "$ROOT/tests/cli/test_stdout_errors.py" || return 1
-    python3 "$ROOT/tests/cli/test_record_failures.py"
+    python3 "$ROOT/tests/cli/prepare_capture_failures.py" || return 1
+    MEMVEIL_TEST_NO_BPF=1 LD_PRELOAD="$(asan_preload)$ROOT/build/shim/capture_faults.so" \
+        python3 "$ROOT/tests/cli/test_record_failures.py" || return 1
+    python3 "$ROOT/tests/vm/test_capture_durability_oracle.py" || return 1
+    MEMVEIL_TEST_NO_BPF=1 LD_PRELOAD="$(asan_preload)$ROOT/build/shim/capture_faults.so" \
+        python3 "$ROOT/tests/cli/test_capture_failures.py"
 }
 
 suite_output_paths() {
@@ -1438,7 +1446,11 @@ suite_output_paths() {
             "(run tools/build first)" >&2
         return 1
     fi
-    python3 "$ROOT/tests/cli/test_output_paths.py"
+    python3 "$ROOT/tests/cli/prepare_capture_failures.py" || return 1
+    MEMVEIL_TEST_NO_BPF=1 LD_PRELOAD="$(asan_preload)$ROOT/build/shim/capture_faults.so" \
+        python3 "$ROOT/tests/cli/test_output_paths.py" || return 1
+    python3 "$ROOT/tests/cli/test_capture_failures.py" \
+        CaptureFailureTests.test_symlink_and_fifo_swaps_after_readiness_preserve_foreign_entries
 }
 
 suite_vm_cleanup() {

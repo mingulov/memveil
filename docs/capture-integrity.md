@@ -52,6 +52,15 @@ It supplies no authenticity, attestation or host-access verdict.
 
 ## Reader and report behavior
 
+Replay inputs are regular files: this applies to session metadata and event
+streams in every supported format version. Open nonblocking, validate the type
+on the same descriptor used for reading, and reject FIFOs, devices and directories
+with exit 2. Finalized legacy/current regular symlinks and hardlinks remain
+readable; checkpoint recovery keeps its stricter ownership and no-symlink rules.
+A finalized capture is not an ongoing producer stream. The performance harness's
+former FIFO pacing transport is replaced by bounded, test-only regular-file read
+pacing; see [the performance protocol](performance.md#replay-protocol-and-targets).
+
 Verify streams incrementally with bounded memory. A finalized 0.1.4 byte,
 line, sequence, kind count or digest mismatch is `READ_INVALID` (exit 2),
 with the discrepancy named. `--allow-partial` never repairs, bypasses or
