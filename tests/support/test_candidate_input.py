@@ -54,8 +54,14 @@ def sealed(tmp_path):
     rt = {'format': 'memveil-runtime/1', 'cpu': candidate.runtime.runtime_cpu.CONTRACT,
           'entries': candidate.runtime.inventory(root)}
     files = {p.relative_to(root).as_posix(): candidate.runtime.digest(p) for p in root.rglob('*') if p.is_file()}
-    bm = {'canonical_runtime': rt, 'files': files, 'memveil_revision': 'a' * 40,
-          'source_inventory_digest': 'b' * 64, 'build_receipt_sha256': 'c' * 64}
+    inventory = [dict(path=name, kind='file', mode='0o644', size=1, sha256=digest,
+                      mtime_ns=1, ctime_ns=1) for name, digest in
+                 (('pixi.lock', 'f' * 64), ('toolchain.lock.json', 'e' * 64))]
+    portable = b''.join((json.dumps({k: v for k, v in entry.items() if k not in ('mtime_ns', 'ctime_ns')},
+                                    sort_keys=True, separators=(',', ':')) + '\n').encode() for entry in inventory)
+    source_digest = candidate.digest_bytes(portable)
+    bm = {'source_inventory': inventory, 'canonical_runtime': rt, 'files': files, 'memveil_revision': 'a' * 40,
+          'source_inventory_digest': source_digest, 'build_receipt_sha256': 'c' * 64}
     (root / 'MANIFEST.json').write_bytes(candidate.canonical(bm))
     archive = tmp_path / 'bundle.tar.gz'
     with tarfile.open(archive, 'w:gz') as tar:
@@ -67,7 +73,7 @@ def sealed(tmp_path):
         artifacts.append({'role': role, 'name': path.name, 'size': str(path.stat().st_size),
                           'sha256': candidate.runtime.digest(path)})
     doc = {'schema': candidate.SCHEMA, 'origin': 'local-build',
-           'source': {'commit': 'a' * 40, 'tree': 'd' * 40, 'inventory_sha256': 'b' * 64},
+           'source': {'commit': 'a' * 40, 'tree': 'd' * 40, 'inventory_sha256': source_digest},
            'toolchain': {'lock_sha256': 'e' * 64, 'pixi_lock_sha256': 'f' * 64},
            'build_receipt_sha256': 'c' * 64, 'bundle_manifest_sha256': candidate.runtime.digest(root / 'MANIFEST.json'),
            'policy_sha256': '1' * 64, 'canonical_runtime': rt, 'files': files,
@@ -127,3 +133,21 @@ def test_conflicting_binary_argument_is_rejected(sealed, monkeypatch):
         api().binary('development', explicit='development')
     api()._cached.close()
     api()._cached = None
+
+
+def test_cleanup_preserves_replacement_directory(sealed):
+    import shutil
+    selected = api().load(env=sealed)
+    owned = selected.root.parent.parent
+    moved = owned.with_name(owned.name + '-moved')
+    owned.rename(moved)
+    owned.mkdir()
+    sentinel = owned / 'foreign'
+    sentinel.write_bytes(b'preserve')
+    try:
+        with pytest.raises(ValueError, match='ownership'):
+            selected.close()
+        assert sentinel.read_bytes() == b'preserve'
+    finally:
+        shutil.rmtree(moved)
+        if owned.exists(): shutil.rmtree(owned)
