@@ -77,6 +77,48 @@ def schema_check(value, rule, root=SCHEMA, where='report'):
                 schema_check(item, rule['additionalProperties'], root, where + '.' + key)
 
 
+def source_quality(session, events_path, doc, *, checkpoint=False):
+    """Check loss provenance, not report-to-report consistency.
+
+    Nonoverlapping gap counts refine an explicitly lossless producer. With
+    unknown counts, overlapping intervals, or possibly overlapping producer
+    losses the total is unknown. Counter snapshots cannot establish known
+    zero loss by themselves. This checks these measurement invariants without
+    claiming to recompute lifecycle/region metrics or every counter status.
+    """
+    gaps = {'detail': [], 'aggregate': []}
+    snapshots = 0
+    for _, raw in V['iter_lines'](events_path):
+        event = V['parse_json'](raw.decode('utf-8'), 'quality source event')
+        if event['kind'] == 'counter_snapshot':
+            snapshots += 1
+        elif event['kind'] == 'gap' and event['data']['channel'] in gaps:
+            gaps[event['data']['channel']].append(event['data'])
+    for name, observed in gaps.items():
+        producer = session['quality'][name]
+        expected = producer['loss_count']
+        if observed:
+            intervals = sorted((int(g['window_start_ns']), int(g['window_end_ns'])) for g in observed)
+            disjoint = all(max(a[0], b[0]) >= min(a[1], b[1])
+                           for i, a in enumerate(intervals) for b in intervals[i + 1:])
+            known = all(g['lost_count'] is not None for g in observed)
+            total = sum(int(g['lost_count']) for g in observed) if known else 0
+            expected = (str(total) if producer['status'] == 'complete_for_scope'
+                        and expected == '0' and known and disjoint and total <= 2**64 - 1 else None)
+            require(doc['quality'][name]['status'] == 'partial', name + ': observed gap must remain partial')
+        if checkpoint and name == 'detail':
+            # The selected prefix is verified, but the observation window is open.
+            expected = None
+        require(doc['quality'][name]['loss_count'] == expected,
+                name + ': loss count differs from source evidence')
+    if not snapshots and not gaps['aggregate']:
+        status = session['quality']['aggregate']['status']
+        if status == 'complete_for_scope' and (checkpoint or session['integrity'] is None):
+            status = 'partial'
+        require(doc['quality']['aggregate']['status'] == status,
+                'aggregate: no snapshots justify changing producer coverage')
+
+
 def accepted_report(path, out, code, *, strict=False, allow_partial=False):
     path = Path(path)
     require(len(out) <= 16777216, 'report exceeds document bound')
@@ -89,6 +131,7 @@ def accepted_report(path, out, code, *, strict=False, allow_partial=False):
     if not checkpoint:
         session, summary = V['validate_capture'](path)
         V['compare_report_obj'](doc, session, summary)
+        source_quality(session, path / 'events.ndjson', doc)
     else:
         require(allow_partial and code == 4, 'checkpoint recovery needs partial flag and exit 4')
         metadata = V['read_json_file'](str(path / 'checkpoint.json'), 'checkpoint')
@@ -109,6 +152,7 @@ def accepted_report(path, out, code, *, strict=False, allow_partial=False):
             stream.write(prefix)
             stream.flush()
             summary = V['validate_stream'](session, stream.name)
+            source_quality(session, stream.name, doc, checkpoint=True)
         projected = copy.deepcopy(doc)
         projected['integrity'] = dict(status='verified', verified_bytes=str(extent), verified_events=sealed['line_count'])
         V['compare_report_obj'](projected, session, summary)

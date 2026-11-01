@@ -78,6 +78,77 @@ def wait_marker(child, marker, deadline):
     raise ValueError('durable checkpoint boundary not reached')
 
 
+def require_stopped_unfinalized(child, capture):
+    state = Path('/proc') / str(child.pid) / 'status'
+    if child.poll() is not None or not state.exists() or '\nState:\tT' not in state.read_text():
+        raise ValueError('writer is not held at the exhaustion boundary')
+    if (capture / 'session.json').exists():
+        raise ValueError('writer finalized before exhaustion')
+    doc = independent(capture)
+    if doc['capture']['finalized'] or not (capture / 'checkpoint.json').is_file():
+        raise ValueError('active unfinalized checkpoint absent')
+    return doc
+
+
+def finalize_after_fullness(child, capture, fill):
+    """Hold the writer across exhaustion; queue shutdown before releasing it."""
+    child.send_signal(signal.SIGSTOP)
+    deadline = time.monotonic() + 5
+    while True:
+        if child.poll() is not None:
+            raise ValueError('writer exited before exhaustion')
+        state = Path('/proc') / str(child.pid) / 'status'
+        if state.exists() and '\nState:\tT' in state.read_text():
+            break
+        if time.monotonic() >= deadline:
+            raise ValueError('writer did not stop before exhaustion')
+        time.sleep(.01)
+    before = require_stopped_unfinalized(child, capture)
+    fullness, filler = fill()
+    if fullness.get('reached_errno') != 'ENOSPC' or not filler.is_dir():
+        raise ValueError('exhaustion evidence or retained filler absent')
+    identity = (filler.stat().st_dev, filler.stat().st_ino)
+    if require_stopped_unfinalized(child, capture) != before:
+        raise ValueError('checkpoint changed while writer was held')
+    # A pending SIGHUP is handled only after the stopped writer resumes.
+    # It cannot complete naturally between a liveness check and this signal.
+    child.send_signal(signal.SIGHUP)
+    child.send_signal(signal.SIGCONT)
+    child.communicate(timeout=30)
+    if child.returncode != 0:
+        raise ValueError('full-filesystem finalization failed: ' + str(child.returncode))
+    if not filler.is_dir() or (filler.stat().st_dev, filler.stat().st_ino) != identity:
+        raise ValueError('filler disappeared before final publication')
+    final = independent(capture)
+    if not final['capture']['finalized'] or (capture / 'checkpoint.json').exists():
+        raise ValueError('full-filesystem capture did not finalize durably')
+    return before, final, fullness
+
+
+def fill_owned_image(mount, scenario):
+    filler = mount / 'filler'
+    filler.mkdir()
+    files, filled = 0, 0
+    try:
+        if scenario == 'bytes-full':
+            with (filler / 'bytes').open('wb', buffering=0) as stream:
+                while filled <= 128 * 1048576:
+                    filled += stream.write(b'\0' * 65536)
+            raise ValueError('bounded disk did not fill')
+        while files <= 4096:
+            (filler / str(files)).touch(exist_ok=False)
+            files += 1
+        raise ValueError('bounded inode table did not fill')
+    except OSError as exc:
+        if exc.errno != errno.ENOSPC:
+            raise
+    state = os.statvfs(mount)
+    if scenario == 'inodes-full' and state.f_favail != 0:
+        raise ValueError('inode exhaustion boundary absent')
+    return (dict(reached_errno='ENOSPC', filler_bytes=filled, filler_files=files,
+                 free_blocks=state.f_bavail, free_inodes=state.f_favail), filler)
+
+
 def main():
     config = json.loads(Path(sys.argv[1]).read_text())
     phase, scenario, nonce = sys.argv[2:5]
@@ -153,39 +224,13 @@ def main():
             ready = child.stdout.readline()
             if not ready.startswith(b'ready session='):
                 raise ValueError('collector refused before readiness')
-            before = independent(capture)
-            filler = mount / 'filler'
-            filler.mkdir()
-            files, filled = 0, 0
-            try:
-                if scenario == 'bytes-full':
-                    with (filler / 'bytes').open('wb', buffering=0) as stream:
-                        while filled <= 128 * 1048576:
-                            filled += stream.write(b'\0' * 65536)
-                    raise ValueError('bounded disk did not fill')
-                while files <= 4096:
-                    (filler / str(files)).touch(exist_ok=False)
-                    files += 1
-                raise ValueError('bounded inode table did not fill')
-            except OSError as exc:
-                if exc.errno != errno.ENOSPC:
-                    raise
-            state = os.statvfs(mount)
-            if scenario == 'inodes-full' and state.f_favail != 0:
-                raise ValueError('inode exhaustion boundary absent')
-            child.send_signal(signal.SIGHUP)
-            child.communicate(timeout=30)
-            if child.returncode != 0:
-                raise ValueError('full-filesystem finalization failed: ' + str(child.returncode))
-            final = independent(capture)
-            if not final['capture']['finalized'] or (capture / 'checkpoint.json').exists():
-                raise ValueError('full-filesystem capture did not finalize durably')
+            before, final, fullness = finalize_after_fullness(
+                child, capture, lambda: fill_owned_image(mount, scenario))
             proc = subprocess.run([config['binary'], 'report', '--format', 'json', str(capture)], capture_output=True)
             accepted_report(capture, proc.stdout, proc.returncode)
             emit(export / 'result.json', dict(status='PASS', scenario=scenario, nonce=nonce,
                  fs_uuid=uuid, identity=ident, product_exit=child.returncode, replay_exit=proc.returncode,
-                 reached_errno='ENOSPC', filler_bytes=filled, filler_files=files,
-                 free_blocks=state.f_bavail, free_inodes=state.f_favail,
+                 **fullness,
                  readiness_integrity=before['capture']['integrity'], integrity=final['capture']['integrity']))
     finally:
         if child is not None and child.poll() is None:

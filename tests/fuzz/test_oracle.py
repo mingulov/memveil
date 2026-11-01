@@ -14,6 +14,25 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class OracleTests(unittest.TestCase):
+    def test_source_quality_cannot_erase_loss_or_invent_coverage(self):
+        cases = [
+            ('quality-detail-counters', 'detail', {'loss_count': '0'}),
+            ('quality-detail-counters', 'aggregate', {'loss_count': '0'}),
+            ('sealed-complete', 'aggregate', {'status': 'complete_for_scope', 'loss_count': '0'}),
+            ('sealed-complete', 'aggregate', {'status': 'complete_for_scope'}),
+        ]
+        for fixture, channel, change in cases:
+            with self.subTest(fixture=fixture, channel=channel):
+                path = ROOT / 'tests/fixtures/reader' / fixture
+                for flags, code in [((), 0), (('--strict',), 4 if fixture == 'quality-detail-counters' else 0)]:
+                    proc = subprocess.run([str(ROOT / 'build/memveil'), 'report', '--format', 'json',
+                                           *flags, str(path)], capture_output=True)
+                    self.assertEqual(proc.returncode, code, proc.stderr)
+                    self.assertIsNone(run.check(path, code, proc.stdout, b'', strict=bool(flags)))
+                    doc = json.loads(proc.stdout)
+                    doc['quality'][channel].update(change)
+                    self.assertIsNotNone(run.check(path, code, json.dumps(doc).encode(), b'', strict=bool(flags)))
+
     def test_rejects_parseable_but_false_reports(self):
         path = ROOT / 'tests/fixtures/reader/sealed-complete'
         proc = subprocess.run([str(ROOT / 'build/memveil'), 'report', '--format', 'json', str(path)], capture_output=True)

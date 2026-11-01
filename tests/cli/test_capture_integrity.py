@@ -9,10 +9,14 @@ from pathlib import Path
 import runpy
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'tests'))
+from preload_env import preload_env
+
 FIXTURES = ROOT / 'tests/fixtures/reader'
 BIN = ROOT / 'build/memveil'
 VALIDATOR = runpy.run_path(str(ROOT / 'tools/validate-schemas'))
@@ -75,7 +79,7 @@ class IntegrityTests(unittest.TestCase):
         for verb in ('report', 'top'):
             with self.subTest(verb=verb), tempfile.TemporaryDirectory() as tmp:
                 marker = Path(tmp) / 'reached'
-                env = dict(os.environ, LD_PRELOAD=str(ROOT / 'build/shim/capture_faults.so'),
+                env = dict(preload_env(BIN, ROOT / 'build/shim/capture_faults.so'),
                            MEMVEIL_TEST_NO_BPF='1', MV_FAIL_FDOPEN_EVENTS='1', MV_FAULT_MARKER=str(marker))
                 proc = subprocess.run([str(BIN), verb, str(FIXTURES / 'sealed-complete')],
                                       env=env, capture_output=True, timeout=3)
@@ -92,7 +96,7 @@ class IntegrityTests(unittest.TestCase):
                     for name in ('session.json', 'events.ndjson'):
                         shutil.copy(FIXTURES / 'sealed-complete' / name, path)
                     marker = path / 'reached'
-                    env = dict(os.environ, LD_PRELOAD=str(ROOT / 'build/shim/capture_faults.so'),
+                    env = dict(preload_env(BIN, ROOT / 'build/shim/capture_faults.so'),
                                MEMVEIL_TEST_NO_BPF='1', MV_FINAL_OPEN_SWAP=str(path / 'events.ndjson'),
                                MV_FAULT_MARKER=str(marker))
                     proc = subprocess.run([str(BIN), verb, *flags, str(path)], env=env,

@@ -22,6 +22,9 @@ import tempfile
 import time
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, TESTS)
+from preload_env import preload_env
+
 REPO = os.path.dirname(TESTS)
 BIN = os.path.join(REPO, "build", "memveil")
 
@@ -109,13 +112,13 @@ def generate_sealed(path, sid, count):
     return total, size
 
 
-def replay(path, fmt="json", env=None):
+def replay(path, fmt="json", env=None, timeout=None):
     # ru_maxrss is the waited-children high-water mark: exact
     # for the first replayed child, an upper bound after that.
     # The envelope assertion runs on the first replay only.
     start = time.monotonic()
     p = subprocess.run([BIN, "report", "--format", fmt, path],
-                       capture_output=True, env=env)
+                       capture_output=True, env=env, timeout=timeout)
     wall = time.monotonic() - start
     rss_kb = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
     return p, wall, rss_kb
@@ -126,6 +129,12 @@ def metric(doc, name):
         if m["name"] == name and "device_id" not in m:
             return m
     raise KeyError(name)
+
+
+def paced_environment(path, receipt, lines, duration_ns, adapter):
+    return dict(preload_env(BIN, adapter), MEMVEIL_PACED_FILE=str(path),
+                MEMVEIL_PACED_RECEIPT=str(receipt), MEMVEIL_PACED_LINES=str(lines),
+                MEMVEIL_PACED_NS=str(duration_ns))
 
 
 def paced_errors(receipt, source_stat, count, size, duration_ns, wall):
@@ -230,9 +239,7 @@ def main():
                         '-o', adapter], check=True)
         subprocess.run([sys.executable, os.path.join(TESTS, 'perf', 'test_paced_reads.py')], check=True)
         receipt_path = os.path.join(tmp, 'paced-reads.json')
-        env = dict(os.environ, MEMVEIL_PACED_FILE=paced_file, MEMVEIL_PACED_RECEIPT=receipt_path,
-                   MEMVEIL_PACED_LINES=str(paced_lines), MEMVEIL_PACED_NS=str(paced_seconds * 1000000000))
-        env['LD_PRELOAD'] = adapter + (':' + env['LD_PRELOAD'] if env.get('LD_PRELOAD') else '')
+        env = paced_environment(paced_file, receipt_path, paced_lines, paced_seconds * 1000000000, adapter)
         p, wall, rss = replay(paced_dir, env=env)
         receipt = json.load(open(receipt_path)) if os.path.isfile(receipt_path) else {}
         errors = paced_errors(receipt, os.stat(paced_file), paced_lines, os.path.getsize(paced_file),

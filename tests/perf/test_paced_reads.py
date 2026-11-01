@@ -33,14 +33,14 @@ class PacedReadsTests(unittest.TestCase):
         shim = ROOT / 'build/perf/paced_reads.so'
         with tempfile.TemporaryDirectory() as tmp:
             receipt = Path(tmp) / 'reads.json'
-            env = dict(os.environ, MEMVEIL_PACED_FILE=str(source / 'events.ndjson'),
-                       MEMVEIL_PACED_RECEIPT=str(receipt), MEMVEIL_PACED_LINES='3',
-                       MEMVEIL_PACED_NS='60000000')
-            if shim.exists():
-                env['LD_PRELOAD'] = str(shim) + (':' + env['LD_PRELOAD'] if env.get('LD_PRELOAD') else '')
+            from replay import paced_environment, replay
+            env = paced_environment(source / 'events.ndjson', receipt, 3, 60000000, shim)
+            for inherited in os.environ.get('LD_PRELOAD', '').replace(':', ' ').split():
+                self.assertIn(os.path.realpath(inherited), [os.path.realpath(p) for p in env['LD_PRELOAD'].split(':')])
+            if os.environ.get('LMB_SANITIZE') == '1':
+                self.assertIn('libasan', env['LD_PRELOAD'].split(':')[0])
             start = time.monotonic()
-            proc = subprocess.run([str(ROOT / 'build/memveil'), 'report', '--format', 'json', str(source)],
-                                  env=env, capture_output=True, timeout=5)
+            proc, _, _ = replay(source, env=env, timeout=5)
             elapsed = time.monotonic() - start
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertTrue(receipt.exists(), 'actual product read boundary was not instrumented')

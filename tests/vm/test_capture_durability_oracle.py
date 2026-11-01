@@ -8,6 +8,8 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import signal
+import select
 import unittest
 from unittest.mock import patch
 
@@ -15,6 +17,57 @@ from capture_durability import validate_barrier
 
 
 class BarrierTests(unittest.TestCase):
+    def test_earlier_success_cannot_pass_the_fullness_boundary(self):
+        from capture_durability_guest import finalize_after_fullness, ROOT
+        child = subprocess.Popen([sys.executable, '-c', 'print("ready session=already-finalized",flush=True)'],
+                                 stdout=subprocess.PIPE)
+        child.wait(timeout=5)
+        try:
+            with self.assertRaisesRegex(ValueError, 'exited before exhaustion'):
+                finalize_after_fullness(child, ROOT / 'tests/fixtures/reader/sealed-complete',
+                                        lambda: self.fail('early success reached filler'))
+        finally:
+            child.stdout.close()
+
+    def test_real_writer_publishes_only_after_the_mock_exhaustion_barrier(self):
+        from capture_durability_guest import finalize_after_fullness, require_stopped_unfinalized, ROOT
+        from test_capture_failures import environment
+        from report_oracle import accepted_report
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            capture = path / 'capture'
+            filler = path / 'filler'
+            # The real EventWriter probe releases on stdin. Ignore SIGHUP only
+            # in this child so the guest's stop protocol can release the probe.
+            child = subprocess.Popen([str(ROOT / 'build/probe/checkpoint_probe'), 'hold', str(capture),
+                                      str(ROOT / 'tests/fixtures/reader/sealed-partial')],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=environment(path, 'none'),
+                preexec_fn=lambda: signal.signal(signal.SIGHUP, signal.SIG_IGN))
+            try:
+                self.assertTrue(select.select([child.stdout], [], [], 5)[0])
+                self.assertEqual(child.stdout.readline(), b'ready\n')
+                def reached():
+                    self.assertFalse(require_stopped_unfinalized(child, capture)['capture']['finalized'])
+                    filler.mkdir()
+                    (filler / 'sentinel').write_bytes(b'retained mock exhaustion evidence')
+                    child.stdin.write(b'continue\n')
+                    child.stdin.flush()
+                    return dict(reached_errno='ENOSPC'), filler
+                before, final, evidence = finalize_after_fullness(child, capture, reached)
+                self.assertFalse(before['capture']['finalized'])
+                self.assertTrue(final['capture']['finalized'])
+                self.assertEqual(evidence['reached_errno'], 'ENOSPC')
+                self.assertEqual((filler / 'sentinel').read_bytes(), b'retained mock exhaustion evidence')
+                proc = subprocess.run([str(ROOT / 'build/memveil'), 'report', '--format', 'json', str(capture)],
+                                      capture_output=True)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                accepted_report(capture, proc.stdout, proc.returncode)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.communicate(timeout=5)
+
     def test_missing_or_false_reached_boundary_fails(self):
         inputs = {'binary': 'a' * 64}
         good = dict(nonce='b' * 32, scenario='readiness', stopped=True,

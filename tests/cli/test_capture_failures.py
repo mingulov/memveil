@@ -14,6 +14,9 @@ import time
 import unittest
 
 from test_checkpoint_writer import independent, ROOT, PROBE, BIN
+sys.path.insert(0, str(ROOT / 'tests'))
+from preload_env import preload_env
+
 FIXTURE = ROOT / 'tests/fixtures/reader/sealed-partial'
 sys.path.insert(0, str(ROOT / 'tests/fuzz'))
 from report_oracle import accepted_report
@@ -22,7 +25,7 @@ SHIM = ROOT / 'build/shim/capture_faults.so'
 
 
 def environment(root, mode):
-    return dict(os.environ, LD_PRELOAD=str(SHIM), MEMVEIL_TEST_NO_BPF='1',
+    return dict(preload_env(PROBE, SHIM), MEMVEIL_TEST_NO_BPF='1',
                 MV_CAPTURE_FAULT=mode, MV_FAULT_MARKER=str(Path(root) / 'reached'))
 
 
@@ -40,8 +43,7 @@ def wait_for(predicate, child, seconds=5):
 class CaptureFailureTests(unittest.TestCase):
     def test_guard_denies_bpf_before_native_kernel_work(self):
         code = 'import ctypes,errno; c=ctypes.CDLL(None,use_errno=True); assert c.syscall(321,0,0,0)==-1; assert ctypes.get_errno()==errno.ENOSYS'
-        proc = subprocess.run([sys.executable, '-c', code], env=dict(os.environ,
-                              LD_PRELOAD=str(SHIM), MEMVEIL_TEST_NO_BPF='1'), capture_output=True)
+        proc = subprocess.run([sys.executable, '-c', code], env=dict(preload_env(PROBE, SHIM), MEMVEIL_TEST_NO_BPF='1'), capture_output=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)
 
     def test_kill_after_observed_readiness_preserves_empty_checkpoint(self):

@@ -11,8 +11,8 @@ allowlisted environment names (LMB_NATIVE_LIB and
 MEMVEIL_SIGBLK for artifact selection, SUDO_UID and
 SUDO_GID ownership-only for sudo capture hand-back, never
 persisted or attested) and no /proc cmdline or
-environ file; and the CLI flag set is exactly the frozen
-nineteen (any new flag fails here until reviewed). Exits
+environ file; and the CLI flag set exactly matches the frozen
+inventory (any new flag fails here until reviewed). Exits
 nonzero on the first violation.
 """
 

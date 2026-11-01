@@ -40,9 +40,11 @@ failure reason, commands, available logs, and images.
 Evidence binds executable/object/bridge/profile/test-adapter hashes, kernel
 image/config/BTF, boot IDs, filesystem UUID, reached boundary, allocated reserve,
 checkpoint digest/counts, product exits, and independent report validation.
-The full-filesystem cases fill only the owned guest image after actual collector
-readiness and require ENOSPC before stopping. They require successful durable
-finalization while the filler remains present. The power-cut cases require a
+The full-filesystem cases stop the ready writer and verify its unfinalized
+checkpoint before filling only the owned guest image. The writer stays stopped
+through ENOSPC; the runner rechecks that checkpoint, queues shutdown, then
+resumes the writer. Earlier successful finalization fails the gate. They require
+successful durable finalization while the same filler remains present. The power-cut cases require a
 fresh boot, the exact promised prefix, and recovered-report exit 4. These
 results admit only that exact artifact and filesystem/environment; they make
 no confidential-platform, authenticity, or other-filesystem claim.
@@ -50,3 +52,5 @@ no confidential-platform, authenticity, or other-filesystem claim.
 Host-only negative controls run in `tools/test record-failures`. They do not
 boot a guest or establish physical filesystem durability. A runner that has
 only passed those controls is ready for live execution, not qualified.
+The nonempty checkpoint case also needs a reproducible owned I/O workload
+arranged and recorded by the operator; an idle guest does not establish it.
