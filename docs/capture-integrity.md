@@ -47,8 +47,8 @@ the writer and prevents a finalized-valid claim. Incremental
 an `Integrity` snapshot includes only committed bytes. Check arithmetic
 before updating any field. A capture-file digest hashes allowlisted metadata,
 not observed memory contents. It detects accidental edits and truncation;
-an actor able to rewrite both stream and digest defeats it. It supplies no
-authenticity, attestation or host-access verdict.
+an actor able to rewrite both stream and digest defeats it.
+It supplies no authenticity, attestation or host-access verdict.
 
 ## Reader and report behavior
 
