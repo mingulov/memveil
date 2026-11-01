@@ -50,6 +50,7 @@ INPUT_DIRS = (
     "tests/vm",
     "third_party",
     "tools",
+    "packaging",
     "LICENSES",
 )
 
@@ -157,6 +158,10 @@ def take_inventory(root, dirs=INPUT_DIRS, files=INPUT_FILES,
     entries = {}
 
     def record(rel):
+        # Only the finite versioned evidence names can vary after a build.
+        from candidate import evidence_path
+        if dirs != TREE_DIRS and evidence_path(rel.replace(os.sep, "/")):
+            return None
         entry = describe(
             root, rel, exclude_top=exclude_top,
             exclude_any=exclude_any,
