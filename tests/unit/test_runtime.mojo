@@ -17,9 +17,9 @@ from memveil.platform.runtime import (
 )
 
 comptime _EXE = "tests/fixtures/runtime/bin/memveil"
-comptime _BUNDLED_BRIDGE = "tests/fixtures/runtime/lib/libbpf_mojo.so.1"
+comptime _BUNDLED_BRIDGE = "tests/fixtures/runtime/lib/memveil/libbpf_mojo.so.1"
 comptime _ENV_BRIDGE = "tests/fixtures/runtime/env-bridge.so"
-comptime _ABSENT = "tests/fixtures/runtime/lib/absent.so"
+comptime _ABSENT = "tests/fixtures/runtime/lib/memveil/absent.so"
 comptime _SYSTEM_BRIDGE = "/usr/lib/memveil/libbpf_mojo.so.1"
 comptime _SYSTEM_BPF = "/usr/lib/memveil"
 

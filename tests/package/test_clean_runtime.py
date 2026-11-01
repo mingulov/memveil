@@ -43,7 +43,7 @@ VALID_EMPTY = os.environ.get("MV_VALID_EMPTY", "")
 
 REQUIRED = (
     "bin/memveil",
-    "lib/libbpf_mojo.so.1",
+    "lib/memveil/libbpf_mojo.so.1",
     "bpf/swiotlb_attempt.bpf.o",
     "bpf/swiotlb_lifecycle.bpf.o",
     "bpf/swiotlb_copy.bpf.o",
@@ -150,7 +150,7 @@ def test_runtime_provenance_matches_payload(bundle):
     root, manifest = bundle
     prov = manifest["runtime_provenance"]
     libs = sorted(
-        "lib/%s" % name for name in os.listdir(root / "lib")
+        "lib/memveil/%s" % name for name in os.listdir(root / "lib" / "memveil")
         if name != "libbpf_mojo.so.1")
     assert sorted(prov) == libs, prov
     for rel in libs:
@@ -177,7 +177,7 @@ def test_license_texts_and_first_party(bundle):
     assert manifest["libbpf_mojo"]["version"] in own
     assert manifest["libbpf_mojo"]["source_commit"] in own
     assert "licenses/LICENSE.mojo-compiler" in own
-    assert "not shipped in `lib/`" in own
+    assert "not shipped in `lib/memveil/`" in own
     lmb = (root / "THIRD-PARTY-NOTICES.libbpf-mojo.md").read_text()
     assert "BSD 2-Clause" in lmb
 
@@ -243,13 +243,14 @@ def test_report_example_all_formats(bundle):
     assert js.returncode == 0, js.stderr
     assert md.returncode == 0, md.stderr
     report = json.loads(js.stdout)
-    assert report["quality"]["detail"]["status"] == "complete_for_scope"
+    assert report["integrity"]["status"] == "legacy_unverified"
+    assert report["quality"]["detail"]["status"] == "partial"
     assert report["quality"]["detail"]["loss_count"] == "0"
     assert report["quality"]["terminal"]["status"] == "partial"
     assert metric(report, "bounce_attempts")["value"] == "30"
     assert "bounce_attempts = 30" in text.stdout
     assert "loss=0" in text.stdout
-    assert "| detail | complete_for_scope | 0 |" in md.stdout
+    assert "| detail | partial | 0 |" in md.stdout
 
 
 def test_valid_empty_replays_zero(bundle):
@@ -258,8 +259,8 @@ def test_valid_empty_replays_zero(bundle):
     proc = run(binary, "report", "--format", "json", VALID_EMPTY)
     assert proc.returncode == 0, proc.stderr
     report = json.loads(proc.stdout)
-    assert report["quality"]["detail"]["status"] == \
-        "complete_for_scope"
+    assert report["integrity"]["status"] == "legacy_unverified"
+    assert report["quality"]["detail"]["status"] == "partial"
     assert report["quality"]["detail"]["loss_count"] == "0"
     assert metric(report, "bounce_attempts")["value"] == "0"
     assert metric(report, "counter_bounce_attempts")["value"] == "0"
@@ -354,7 +355,7 @@ def test_denied_bad_object(bundle, tmp_path):
     out = tmp_path / "cap-badobj"
     proc = run(binary, "record", "--output", str(out),
                "--object", str(junk),
-               "--bridge", str(root / "lib" / "libbpf_mojo.so.1"),
+               "--bridge", str(root / "lib" / "memveil" / "libbpf_mojo.so.1"),
                "--duration", "2",
                env={"PATH": "/usr/bin:/bin"})
     assert proc.returncode == 3, (proc.returncode, proc.stderr)
@@ -375,7 +376,7 @@ def test_denied_missing_bridge(bundle, tmp_path):
     root, _ = bundle
     trial = tmp_path / "nobridge"
     shutil.copytree(root, trial)
-    (trial / "lib" / "libbpf_mojo.so.1").unlink()
+    (trial / "lib" / "memveil" / "libbpf_mojo.so.1").unlink()
     binary = str(trial / "bin" / "memveil")
     out = tmp_path / "cap-nobridge"
     env = {"PATH": "/usr/bin:/bin"}
@@ -397,7 +398,7 @@ def test_denied_unprivileged_live(bundle, tmp_path):
     proc = run(binary, "record", "--output", str(out),
                "--object",
                str(root / "bpf" / "swiotlb_attempt.bpf.o"),
-               "--bridge", str(root / "lib" / "libbpf_mojo.so.1"),
+               "--bridge", str(root / "lib" / "memveil" / "libbpf_mojo.so.1"),
                "--duration", "2",
                env={"PATH": "/usr/bin:/bin"})
     assert proc.returncode == 3, (proc.returncode, proc.stderr)

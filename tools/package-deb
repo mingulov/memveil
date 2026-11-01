@@ -43,8 +43,8 @@ lib needs no ldconfig, no collection runs at install);
 DEBIAN/md5sums is generated over the payload for dpkg --verify;
 no setuid bits or file capabilities. X-Memveil-Revision and
 X-LMB-Tarball-SHA256 record the exact source and bridge bytes;
-X-Memveil-Build-Tools records the exact dpkg-deb and patchelf
-versions that assembled the package.
+X-Memveil-Build-Tools records the assembly dpkg-deb version and
+the canonical payload normalizer patchelf version.
 
 Third-party origin: the conda/pixi Mojo toolchain cannot enter
 Debian, so this package is built outside the archive for a
@@ -56,13 +56,15 @@ Man pages are generated at build time from the --help texts
 sets (tools/gen-completions); the same generators feed the
 .rpm, so both formats ship identical pages.
 
-Usage: tools/package-deb [--out DIR] [--tag STEM]
+Usage: tools/package-deb [--out DIR] [--tag STEM] [--bundle DIR]
+  --bundle DIR  consume an existing verified canonical bundle without building
   --out DIR   output directory (default: dist/)
   --tag STEM  .deb file stem (default: memveil_<version>-1_amd64)
 
 Requires LMB_PACKAGE (pinned libbpf-mojo tarball, checked by
 tools/package against the lock), a clean tree (enforced by
-tools/package), patchelf, and dpkg-deb.
+tools/package) when --bundle is omitted. Consuming --bundle requires
+only Python, readelf and dpkg-deb; no compiler or ELF rewrite runs.
 """
 
 import json
@@ -206,31 +208,6 @@ def glibc_floor(paths):
         fail("no GLIBC version need in staged ELF: %s"
              % sorted(paths))
     return "%d.%d" % floor
-
-
-def strip_staged(binary, libdir):
-    """Strip the staged release ELF, never the BPF objects.
-
-    The binary is stripped fully and each staged .so with
-    --strip-unneeded (lintian
-    unstripped-binary-or-object); the dynamic section
-    (NEEDED, RUNPATH, version needs) is untouched, so the
-    Depends floor derivation still reads the staged bytes.
-    Runs before the BPF objects are staged, so their
-    symtabs cannot pass through here.
-    """
-    proc = run(["strip", binary])
-    if proc.returncode != 0:
-        fail("strip failed on %s:\n%s" % (binary, proc.stderr))
-    for name in sorted(os.listdir(libdir)):
-        if not re.fullmatch(r"[^/]+\.so(\..*)?", name):
-            continue
-        path = os.path.join(libdir, name)
-        if not os.path.isfile(path):
-            continue
-        proc = run(["strip", "--strip-unneeded", path])
-        if proc.returncode != 0:
-            fail("strip failed on %s:\n%s" % (path, proc.stderr))
 
 
 def sha256_file(path):
@@ -415,6 +392,7 @@ def control_text(upstream, memveil_rev, lmb_sha, depends,
 
 
 def main(argv):
+    canonical_bundle = None
     out_dir = os.path.join(ROOT, "dist")
     stem = None
     args = list(argv)
@@ -423,6 +401,9 @@ def main(argv):
         if opt in ("--help", "-h"):
             print(__doc__)
             return 0
+        if opt == "--bundle" and args:
+            canonical_bundle = os.path.abspath(args.pop(0))
+            continue
         if opt == "--out" and args:
             out_dir = args.pop(0)
             continue
@@ -430,42 +411,40 @@ def main(argv):
             stem = args.pop(0)
             continue
         fail("unknown option: %s" % opt)
-    if not os.environ.get("LMB_PACKAGE"):
+    if canonical_bundle is None and not os.environ.get("LMB_PACKAGE"):
         fail("LMB_PACKAGE is not set; refusing an unpinned bridge")
-    if not os.path.isfile(os.environ["LMB_PACKAGE"]):
+    if canonical_bundle is None and not os.path.isfile(os.environ["LMB_PACKAGE"]):
         fail("LMB_PACKAGE is not a file: %s" % os.environ["LMB_PACKAGE"])
     if shutil.which("dpkg-deb") is None:
         fail("dpkg-deb is required to assemble the .deb")
-    if shutil.which("patchelf") is None:
-        fail("patchelf is required to retarget the FHS RUNPATH "
-             "(apt install patchelf)")
     if shutil.which("readelf") is None:
         fail("readelf is required to verify the FHS binary")
-    if shutil.which("strip") is None:
-        fail("strip is required to strip the staged release ELF "
-             "(apt install binutils)")
-    build_tools = "dpkg-deb=%s; patchelf=%s" % (
-        tool_line(["dpkg-deb", "--version"]),
-        tool_line(["patchelf", "--version"]))
+    build_tools = "dpkg-deb=%s" % tool_line(["dpkg-deb", "--version"])
 
     work = tempfile.mkdtemp(prefix="memveil-deb-")
     try:
-        bundle_parent = os.path.join(work, "bundle-build")
-        os.makedirs(bundle_parent)
-        build = run([os.path.join(ROOT, "tools", "package"),
-                     "--out", bundle_parent, "--tag", "bundle"])
-        if build.returncode != 0:
-            print(build.stdout)
-            print(build.stderr, file=sys.stderr)
-            fail("tools/package failed")
-        bundle = os.path.join(bundle_parent, "bundle")
-        manifest = json.load(open(
-            os.path.join(bundle, "MANIFEST.json")))
+        bundle = canonical_bundle
+        if bundle is None:
+            bundle_parent = os.path.join(work, "bundle-build")
+            os.makedirs(bundle_parent)
+            build = run([os.path.join(ROOT, "tools", "package"),
+                         "--out", bundle_parent, "--tag", "bundle"])
+            if build.returncode != 0:
+                print(build.stdout)
+                print(build.stderr, file=sys.stderr)
+                fail("tools/package failed")
+            bundle = os.path.join(bundle_parent, "bundle")
+        import canonical_runtime
+        try:
+            manifest = canonical_runtime.verify_bundle(bundle)
+        except (OSError, ValueError, KeyError) as error:
+            fail("canonical bundle invalid: " + str(error))
         try:
             upstream = validate_upstream(
                 manifest["engine_version"])
         except ValueError as err:
             fail(str(err))
+        build_tools += "; patchelf=" + manifest["packaging_tools"]["patchelf"]["version"]
         memveil_rev = manifest["memveil_revision"]
         lmb_sha = manifest["libbpf_mojo"]["tarball_used_sha256"]
         if stem is None:
@@ -489,8 +468,8 @@ def main(argv):
                      receipts, debdir):
             os.makedirs(path)
 
-        for name in sorted(os.listdir(os.path.join(bundle, "lib"))):
-            shutil.copy2(os.path.join(bundle, "lib", name),
+        for name in sorted(os.listdir(os.path.join(bundle, "lib", "memveil"))):
+            shutil.copy2(os.path.join(bundle, "lib", "memveil", name),
                          os.path.join(libdir, name))
         if not os.path.isfile(os.path.join(
                 libdir, "libbpf_mojo.so.1")):
@@ -498,36 +477,6 @@ def main(argv):
 
         binary = os.path.join(bindir, "memveil")
         shutil.copy2(os.path.join(bundle, "bin", "memveil"), binary)
-        before = needed(binary)
-        rewrite = run(["patchelf", "--set-rpath", BIN_RUNPATH,
-                       binary])
-        if rewrite.returncode != 0:
-            fail("patchelf RUNPATH rewrite failed:\n%s"
-                 % rewrite.stderr)
-        if needed(binary) != before:
-            fail("RUNPATH rewrite changed NEEDED: %r -> %r"
-                 % (before, needed(binary)))
-        dyn = run(["readelf", "-d", binary])
-        if dyn.returncode != 0:
-            fail("readelf failed on FHS binary:\n%s" % dyn.stderr)
-        if BIN_RUNPATH not in dyn.stdout:
-            fail("FHS binary lacks RUNPATH %s:\n%s"
-                 % (BIN_RUNPATH, dyn.stdout))
-        for line in dyn.stdout.splitlines():
-            match = re.search(
-                r"Library (?:runpath|rpath): \[(.*)\]", line)
-            if not match:
-                continue
-            for entry in match.group(1).split(":"):
-                if entry and not entry.startswith("$ORIGIN"):
-                    fail("FHS binary keeps absolute RUNPATH entry "
-                         "%r:\n%s" % (entry, dyn.stdout))
-        strip_staged(binary, libdir)
-        rerun = run([binary, "version"])
-        if rerun.returncode != 0 \
-                or rerun.stdout.strip() != "memveil-" + upstream:
-            fail("FHS binary fails to start after RUNPATH "
-                 "rewrite: %r" % rerun.stdout)
 
         for name in BPF_OBJECTS:
             src = os.path.join(bundle, "bpf", name)
@@ -562,6 +511,12 @@ def main(argv):
         for name in ("LICENSES", "licenses"):
             shutil.copytree(os.path.join(bundle, name),
                             os.path.join(licdir, name))
+        canonical_runtime.verify_installed(root, manifest)
+        rerun = run([binary, "version"])
+        if rerun.returncode != 0 \
+                or rerun.stdout.strip() != "memveil-" + upstream:
+            fail("FHS binary fails to start after canonical "
+                 "copy: %r" % rerun.stdout)
         write_changelog(licdir, upstream, memveil_rev)
 
         mandir = os.path.join(root, "usr", "share", "man", "man1")
@@ -609,6 +564,7 @@ def main(argv):
                                       lmb_sha, depends,
                                       build_tools))
 
+        canonical_runtime.verify_installed(root, manifest)
         write_md5sums(root)
         fix_modes(root)
         out = os.path.join(out_dir, stem + ".deb")

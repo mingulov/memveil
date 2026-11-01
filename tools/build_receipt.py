@@ -24,7 +24,9 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import source_inventory  # noqa: E402
+import source_inventory
+import mojo_link  # noqa: E402
+import runtime_cpu  # noqa: E402
 
 FORMAT = "memveil-build-receipt"
 VERSION = 1
@@ -40,6 +42,8 @@ PROBES = [
     ("cmake", ["cmake", "--version"]),
     ("ninja", ["ninja", "--version"]),
     ("python", ["python3", "--version"]),
+    ("cc", ["cc", "--version"]),
+    ("ld", ["ld", "--version"]),
 ]
 
 # Build outputs bound by the receipt, relative to the build
@@ -278,6 +282,9 @@ def cmd_finalize(root, build_dir, pre, probes, sanitize="off"):
         "mojo_target_cpu": "x86-64-v2",
         "sanitize": sanitize,
         "dependencies": identities,
+        "host_linker": mojo_link.identities(),
+        "cpu": runtime_cpu.CONTRACT,
+        "cpu_verifier": runtime_cpu.verifier_identity(),
         "outputs": output_entries(full_build),
     }
     path = os.path.join(full_build, "build-receipt.json")

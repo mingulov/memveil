@@ -246,7 +246,7 @@ def check_manifest(root, manifest):
     want = manifest.get("files", {})
     critical = (
         "bin/memveil",
-        "lib/libbpf_mojo.so.1",
+        "lib/memveil/libbpf_mojo.so.1",
         "bpf/swiotlb_attempt.bpf.o",
         "bpf/swiotlb_lifecycle.bpf.o",
         "bpf/swiotlb_copy.bpf.o",

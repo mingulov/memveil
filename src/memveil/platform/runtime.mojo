@@ -138,7 +138,7 @@ def discover_bridge(
             return env_value
     var root = exe_root(exe_path)
     if root != String(""):
-        var bundled = _under(root, String("lib/libbpf_mojo.so.1"))
+        var bundled = _under(root, String("lib/memveil/libbpf_mojo.so.1"))
         if _is_readable(bundled):
             return bundled^
     if _is_readable(String(_SYSTEM_BRIDGE)):

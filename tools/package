@@ -11,17 +11,18 @@ git revision stays descriptive next to the inventory digest.
 Every archived file binds to its verified bytes as consumed,
 and the tarball hashes before publication and again after the
 rename, so bytes changed after verification fail the package.
-Every shipped runtime file except the natively built bridge
+Every original runtime input except the natively built bridge
 traces to pinned package bytes: the packager fetches the locked
 archives, verifies them against pixi.lock, and compares staged
 bytes against archive members with explicit relocation
 handling, recording owner, member, digests, and license texts
-in the manifest.
+in the manifest. Canonical staging records separate input/output
+hashes for the engine and three libraries requiring stripping.
 
 Layout of ``dist/memveil-<version>/``::
 
-    bin/memveil            relocatable binary (RUNPATH $ORIGIN/../lib)
-    lib/*.so*              Mojo runtime closure + libbpf_mojo.so.1
+    bin/memveil            relocatable binary (RUNPATH $ORIGIN/../lib/memveil)
+    lib/memveil/*.so*              Mojo runtime closure + libbpf_mojo.so.1
     bpf/*.bpf.o            production BPF objects (attempt,
                            lifecycle, copy)
     profiles/              manifest plus shipped semantic profiles
@@ -63,6 +64,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 import build_receipt  # noqa: E402
 import runtime_provenance  # noqa: E402
+import canonical_runtime  # noqa: E402
 
 # NEEDED entries the bundle binary and bridge may name that must
 # resolve to the host C library set. Anything else must ship in
@@ -150,9 +152,10 @@ def fail(message):
 
 
 def run(argv, **kwargs):
+    kwargs.setdefault("cwd", ROOT)
     proc = subprocess.run(
         argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, cwd=ROOT, **kwargs,
+        text=True, **kwargs,
     )
     return proc
 
@@ -586,6 +589,16 @@ def main(argv):
             validate_tag(tag)
         except ValueError as err:
             fail(str(err))
+    packaging_tools = {}
+    for name in ("patchelf", "strip", "readelf", "zstd"):
+        tool = shutil.which(name)
+        if tool is None:
+            fail("required packaging tool missing: " + name)
+        result = run([tool, "--version"])
+        if result.returncode != 0:
+            fail("packaging tool version failed: " + name)
+        packaging_tools[name] = {"version": result.stdout.splitlines()[0],
+                                 "sha256": sha256_file(tool)}
     staged = None
     # A failed run leaves no staging directory and no
     # apparently successful final candidate: every failure
@@ -673,20 +686,12 @@ def main(argv):
             os.makedirs(libdir)
         except OSError as exc:
             fail("staging setup failed: %s" % exc)
-        link = run([
-            "pixi", "run", "--frozen", "mojo", "build",
-            "-I", "src", "-I", "build/deps/lmb/mojo",
-            "--target-cpu", "x86-64-v2",
-            "-Xlinker", "-rpath", "-Xlinker", "$ORIGIN/../lib",
-            "-o", os.path.join(bindir, "memveil"),
-            "src/memveil/main.mojo",
-        ])
-        if link.returncode != 0:
-            print(link.stdout)
-            print(link.stderr, file=sys.stderr)
-            fail("relocatable link failed")
         binary = os.path.join(bindir, "memveil")
-        proc = run([binary, "version"])
+        shutil.copy2(os.path.join(ROOT, "build", "memveil"), binary)
+        if sha256_file(binary) != receipt["outputs"]["memveil"]["sha256"]:
+            fail("staged executable differs from sealed build output")
+        proc = run([binary, "version"],
+                   env=dict(os.environ, LD_LIBRARY_PATH=RUNTIME_LIB_DIR))
         if proc.returncode != 0 or not proc.stdout.startswith("memveil-"):
             fail("bundle binary version check failed: %r" % proc.stdout)
         version = proc.stdout.strip().split("-", 1)[1]
@@ -697,16 +702,14 @@ def main(argv):
         except ValueError as err:
             fail(str(err))
 
-        # The relocatable link compiled sealed sources; refuse any
-        # input drift across it before staging reads the tree, against
-        # the same pinned baseline as every other phase.
+        # Refuse input drift across the sealed executable copy.
         seal_problems = build_receipt.verify_loaded(
             receipt, ROOT, "build")
         if seal_problems:
             for problem in seal_problems[:10]:
                 print("package: %s" % problem, file=sys.stderr)
             fail("sources changed under the build seal during the "
-                 "relocatable link")
+                 "canonical executable copy")
 
         # A failed run must leave no apparently successful final
         # candidate: drop any previous bundle and tarball for this
@@ -752,45 +755,6 @@ def main(argv):
                 if dep in SYSTEM_ALLOW or dep in ship:
                     continue
                 fail("shipped %s needs %s: outside closure" % (name, dep))
-        # The Mojo driver prepends its own pixi RUNPATH entry ahead of
-        # ours; now that lib/ is populated, rewrite to exactly
-        # $ORIGIN/../lib so the bundle carries no absolute build-host
-        # paths, then prove the binary still starts.
-        if shutil.which("patchelf") is None:
-            fail("patchelf is required to stage a relocatable binary "
-                 "(apt install patchelf)")
-        rewrite = None
-        for attempt in range(6):
-            rewrite = run(["patchelf", "--set-rpath", "$ORIGIN/../lib",
-                           binary])
-            if rewrite.returncode == 0:
-                break
-            # ETXTBSY is transient (a just-reaped exec image still
-            # clearing); retry bounded, then fail with holder evidence.
-            if "Text file busy" not in rewrite.stderr or attempt == 5:
-                holders = ""
-                if shutil.which("fuser") is not None:
-                    seen = run(["fuser", binary])
-                    holders = (seen.stdout + seen.stderr).strip()
-                fail("patchelf RUNPATH rewrite failed "
-                     "(attempt %d; holders: %s):\n%s"
-                     % (attempt + 1, holders or "none observed",
-                        rewrite.stderr))
-            time.sleep(2)
-        dyn = run(["readelf", "-d", binary])
-        if dyn.returncode != 0:
-            fail("readelf failed on staged binary:\n%s" % dyn.stderr)
-        abspaths = runpath_abspaths(dyn.stdout)
-        if abspaths:
-            fail("staged binary keeps absolute RUNPATH entries %s:\n%s"
-                 % (", ".join(abspaths), dyn.stdout))
-        rerun = run([binary, "version"])
-        if rerun.returncode != 0 \
-                or rerun.stdout.strip() != "memveil-" + version:
-            fail("bundle binary fails to start after RUNPATH rewrite: %r"
-                 % rerun.stdout)
-        print("package: lib closure: %s" % ", ".join(sorted(ship)))
-
         for sub in ("bpf", "profiles", "docs", "examples"):
             os.makedirs(os.path.join(staged, sub))
         for bpf_obj in bpf_objs:
@@ -925,10 +889,88 @@ def main(argv):
             fail("staged tree differs from its seals")
         print("package: staged tree matches its seals")
 
+        # Refuse path substitutions before any tool can mutate a staged input.
+        if os.path.islink(staged):
+            fail("staged root broke seal before normalization")
+        for base, dirs, files in os.walk(staged):
+            for name in dirs + files:
+                path = os.path.join(base, name)
+                mode = os.lstat(path).st_mode
+                if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                    fail("staged path broke seal before normalization: " +
+                         os.path.relpath(path, staged))
+        for relative, digest in observed.items():
+            path = os.path.join(staged, relative)
+            if not os.path.isfile(path) or sha256_file(path) != digest:
+                fail("staged file broke seal before normalization: " + relative)
+
+        # Provider verification above binds original bytes; transformations bind both sides.
+        transformations = {}
+        canonical_libdir = os.path.join(libdir, "memveil")
+        os.makedirs(canonical_libdir)
+        for name in sorted(ship):
+            old = os.path.join(libdir, name)
+            os.rename(old, os.path.join(canonical_libdir, name))
+        for relative in ["bin/memveil"] + ["lib/memveil/" + name for name in sorted(ship)]:
+            path = os.path.join(staged, relative)
+            original = sha256_file(path)
+            source_relative = relative.replace("lib/memveil/", "lib/", 1)
+            if original != observed[source_relative] or (relative == "bin/memveil" and original != receipt["outputs"]["memveil"]["sha256"]):
+                fail("staged input changed before normalization: " + relative)
+            before = needed(path)
+            operations = []
+            if relative == "bin/memveil":
+                operations = [["patchelf", "--set-rpath", "$ORIGIN/../lib/memveil", relative],
+                              ["strip", "--strip-unneeded", relative]]
+            elif os.path.basename(relative) in {"libbpf_mojo.so.1", "libgcc_s.so.1", "libstdc++.so.6"}:
+                operations = [["strip", "--strip-unneeded", relative]]
+            for command in operations:
+                result = run(command, cwd=staged)
+                if result.returncode != 0:
+                    fail("canonical normalization failed: %s\n%s" % (relative, result.stderr))
+            if needed(path) != before:
+                fail("canonical normalization changed dependencies: " + relative)
+            if operations:
+                transformations[relative] = {"source_sha256": original,
+                    "output_sha256": sha256_file(path),
+                    "operations": operations, "working_directory": "bundle-root",
+                    "source_root": "source-tree",
+                    "source_path": ("build/memveil" if relative == "bin/memveil" else
+                                    "build/deps/lmb/lib/" + os.path.basename(relative)
+                                    if os.path.basename(relative) == "libbpf_mojo.so.1" else
+                                    ".pixi/envs/default/lib/" + os.path.basename(relative)),
+                    "staged_input_path": source_relative}
+        for relative in list(observed):
+            if relative.startswith("lib/"):
+                observed["lib/memveil/" + relative[4:]] = observed.pop(relative)
+        for relative, transformation in transformations.items():
+            observed[relative] = transformation["output_sha256"]
+        prov_records = {"lib/memveil/" + key[4:]: value
+                        for key, value in prov_records.items()}
+        for relative, record in prov_records.items():
+            if relative in transformations:
+                record["pre_normalization_sha256"] = record["staged_sha256"]
+                record["staged_sha256"] = transformations[relative]["output_sha256"]
+        rerun = run([binary, "version"])
+        if rerun.returncode != 0 or rerun.stdout.strip() != "memveil-" + version:
+            fail("canonical executable failed version check: " + rerun.stderr)
+        try:
+            canonical_runtime.runtime_cpu.verify_engine(binary)
+            runtime_entries = canonical_runtime.inventory(staged)
+        except (OSError, ValueError) as error:
+            fail("canonical runtime seal failed: " + str(error))
+
         lock = sealed_lock_bytes(ROOT, receipt["inventory"]["files"])
         lmb_pin = lock["dependencies"]["libbpf-mojo"]
         manifest = {
             "bundle": tag,
+            "qualification": "unqualified-local-build",
+            "canonical_runtime": {"format": canonical_runtime.FORMAT,
+                                  "cpu": canonical_runtime.runtime_cpu.CONTRACT,
+                                  "entries": runtime_entries},
+            "normalization": transformations,
+            "packaging_tools": packaging_tools,
+            "host_linker": receipt.get("host_linker", {}),
             "engine_version": version,
             "memveil_revision": memveil_rev,
             "source_inventory_digest": receipt["inventory"]["digest"],
@@ -1114,7 +1156,10 @@ def main(argv):
         raise
     finally:
         if staged is not None:
-            shutil.rmtree(staged, ignore_errors=True)
+            if os.path.islink(staged):
+                os.unlink(staged)
+            else:
+                shutil.rmtree(staged, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -3830,7 +3830,7 @@ PYEOF
 }
 
 suite_package() {
-    if [ -z "${LMB_PACKAGE:-}" ]; then
+    if [ -z "${MV_BUNDLE_TARBALL:-}" ] && [ -z "${LMB_PACKAGE:-}" ]; then
         echo "package: LMB_PACKAGE is not set" >&2
         return 1
     fi
@@ -3848,17 +3848,19 @@ suite_package() {
     fi
     PTMP=$(mktemp -d)
     trap 'rm -rf "$PTMP"' EXIT
-    if ! LMB_PACKAGE="$LMB_PACKAGE" "$ROOT/tools/package" \
-        >"$PTMP/package.log" 2>&1; then
-        echo "package: tools/package failed" >&2
-        cat "$PTMP/package.log" >&2
-        return 1
+    TARBALL="${MV_BUNDLE_TARBALL:-}"
+    if [ -z "$TARBALL" ]; then
+        if ! LMB_PACKAGE="$LMB_PACKAGE" "$ROOT/tools/package" \
+            >"$PTMP/package.log" 2>&1; then
+            echo "package: tools/package failed" >&2
+            cat "$PTMP/package.log" >&2
+            return 1
+        fi
+        TARBALL=$(sed -n 's/^package: \(.*\.tar\.gz\)$/\1/p' \
+            "$PTMP/package.log" | tail -1)
     fi
-    TARBALL=$(sed -n 's/^package: \(.*\.tar\.gz\)$/\1/p' \
-        "$PTMP/package.log" | tail -1)
     if [ -z "$TARBALL" ] || [ ! -f "$TARBALL" ]; then
-        echo "package: no tarball in package log" >&2
-        cat "$PTMP/package.log" >&2
+        echo "package: bundle tarball is missing: $TARBALL" >&2
         return 1
     fi
     if ! MV_BUNDLE_TARBALL="$TARBALL" MV_REPO="$ROOT" \

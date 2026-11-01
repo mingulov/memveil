@@ -13,11 +13,15 @@ the `pixi.lock` file carries authoritative conda package hashes.
   (`python3 tools/install-pixi` installs the locked release
   after verifying its digest; see below).
 - System `clang` and `bpftool` at or above the locked floors, for C eBPF programs.
+- A native `cc` driver and `ld` for Mojo executable linking; their observed
+  versions, executable hashes and any ccache launcher are recorded in the build receipt.
+- `readelf` from `binutils` verifies the engine's loadable CPU requirement after linking.
 - `python3` for development-only validation tooling.
 - `python3-pytest` (`apt install python3-pytest`): the pytest-driven suites fail loudly without it.
 - `strace` for the package clean-room audit (`apt install strace`).
-- `patchelf` for `tools/package` RUNPATH normalization (`apt install patchelf`).
-- On Fedora the same set comes from `dnf` (`clang llvm bpftool python3-pytest strace patchelf`).
+- `patchelf`, `binutils` (`strip`, `readelf`) and `zstd` for canonical runtime packaging.
+  The packager checks availability and records their versions and executable hashes.
+- On Fedora the same set comes from `dnf` (`clang llvm bpftool python3-pytest strace patchelf binutils zstd`).
 
 Run `pixi install` once after cloning. Every Mojo command below runs inside
 that environment; the `tools/` wrappers do this for you.
@@ -188,29 +192,20 @@ patchelf.
 
 ## Pinned executable inputs
 
-Every executable input that enters a build or automation
-lane is either pinned to an immutable identity verified
-before use, or an ambient OS-generation input verified
-fail-closed against exact versions and retained in
-receipts. Pinning every ambient OS byte is out of scope:
-drift there is detected, not silently accepted, because
-the build refuses unexpected tool versions.
+Build and automation inputs have explicit admission rules. Immutable pins
+are verified before use; selected system tools are checked against exact
+versions or minimum floors in the lock. The native `cc`/linker chain and
+packaging helpers are availability-checked ambient inputs whose observed
+identities are retained. Their recorded hashes expose changes but do not
+automatically refuse version drift or qualify a resulting artifact.
 
-Packaging-only helpers stay outside that claim as
-documented ambient exceptions: `tools/package` runs
-`patchelf` (RUNPATH normalization) after an availability
-check without recording its version; `tools/package-deb`
-additionally runs `strip` (release ELF), `readelf`
-(dependency floor derivation), and `dpkg-deb` (assembly)
-the same way; and the runtime provenance check shells
-out to `zstd` (archive decompression) after an
-availability check only. The `.deb` control records the
-observed `dpkg-deb` and `patchelf` versions
-(`X-Memveil-Build-Tools`); the bundle manifest and the
-build receipt carry no packaging-helper identities.
-These helpers can change while every build-tool check
-passes, so reproducing a byte-identical package needs
-the same host toolset.
+Packaging helpers remain ambient tools, but `tools/package` checks
+`patchelf`, `strip`, `readelf` and `zstd` before building and records their
+versions and executable SHA-256 values in `MANIFEST.json`. The canonical
+normalization records input and output hashes and the exact operations.
+Debian records its `dpkg-deb` assembly version and the canonical normalizer's
+`patchelf` version. Package formats copy runtime bytes without recompilation,
+RUNPATH rewrites or stripping. Archive metadata can differ.
 
 | Input | Immutable identity | Verified by |
 |---|---|---|
@@ -221,7 +216,8 @@ the same host toolset.
 | libbpf-mojo bridge | `tarball_sha256` in `toolchain.lock.json` | `tools/build`, build receipt, packager |
 | rpm Source0 | Owned selection: an owning checkout contributes tracked plus unignored-untracked files, never a parent's set | `tools/rpm-source0`, Source0 tests |
 | apt tools, runner image | Verified ambient: exact versions in `toolchain.lock.json`, floors where noted | `tools/build` refusal, receipts |
-| Packaging helpers (`patchelf`, `strip`, `zstd`, `dpkg-deb`, `readelf`) | Ambient exception: availability-checked at packaging time, no admission pin | `.deb` control records `dpkg-deb`/`patchelf` versions only |
+| Native `cc`, cache launcher, `collect2` and linker | Ambient, availability and selected chain checked | Build receipt records observed versions and executable hashes |
+| Packaging helpers (`patchelf`, `strip`, `zstd`, `dpkg-deb`, `readelf`) | Ambient, availability checked | Canonical manifest records normalizer versions and executable hashes; `.deb` records assembly version |
 
 Refresh routes, one input at a time with the affected lanes
 re-run:
@@ -247,3 +243,92 @@ and the consumed dependency digests for the build; the bundle
 dependency identities, and the `.deb` control fields (`X-`
 entries) carry the revision, bridge digest, and observed
 `dpkg-deb`/`patchelf` versions into the artifacts.
+
+## Canonical runtime packages
+
+Build the canonical bundle once from clean source, then pass its directory to
+both package adapters:
+
+```sh
+export LMB_PACKAGE="$PWD/third_party/libbpf-mojo-0.2.3.tar.gz"
+./tools/package --out dist --tag bundle
+./tools/package-deb --bundle "$PWD/dist/bundle" --out dist
+./tools/build-rpm --bundle "$PWD/dist/bundle" --work "$PWD/build/rpm" --out "$PWD/dist"
+python3 tools/canonical_runtime.py --bundle dist/bundle
+```
+
+These commands prepare local, unqualified artifacts and do not publish them.
+They do not update `packaging/tested-payload.sha256` or supply qualification
+receipts. Missing qualification still blocks release. Candidate custody and
+release promotion require their separately documented evidence.
+
+The pinned Mojo build uses `-strip-file-prefix` for checkout-independent
+source diagnostics. `tools/mojo_link.py` preserves the selected native `cc`
+driver, cache chain and arguments while replacing its one SDK RUNPATH with
+a relative development path. Missing, duplicated or unexpected RPATH options
+refuse the build. This prevents SDK-prefix length from changing linked ELF
+layout before canonical staging; the normalizer does not recompile or relink. This does not imply archive-byte identity or admission on
+a different CPU/libc environment.
+
+The runtime uses `bin/memveil`, `lib/memveil/*.so*`, `bpf/`, and `profiles/`.
+The executable RUNPATH is `$ORIGIN/../lib/memveil`. Debian and RPM map the
+same bytes to `/usr/bin`, `/usr/lib/memveil` and
+`/usr/share/memveil/profiles`. The manifest's `canonical_runtime` contains
+all runtime entries with normalized path, type, size and SHA-256. Verification
+rejects missing, added, changed and escaping entries. Given an extracted
+installed package, compare it with the bundle using:
+
+```sh
+python3 tools/canonical_runtime.py --bundle dist/bundle --installed extracted-root
+```
+
+In `memveil-runtime/1`, every entry's `size` is an unsigned 64-bit decimal
+JSON string: `"0"` or digits beginning with `1` through `9`, up to
+`"18446744073709551615"`. JSON numbers, signs, leading zeros, whitespace,
+non-ASCII digits and overflow are rejected. Verification compares the validated
+integer with the file's actual byte length. Existing build and source receipt
+formats retain their own integer fields.
+
+The minimum runtime CPU eligibility is **x86-64-v3**, as required by the
+[selected Mojo 1.2.0 runtime](https://mojolang.org/docs/requirements/).
+The engine keeps x86-64-v2 code generation; that does not lower the requirements
+of its prebuilt libraries. Its single link adds the
+`GNU_PROPERTY_X86_ISA_1_NEEDED` v3 declaration with `-z x86-64-v3`.
+The build and bundle verifier inspect the actual loadable property and refuse
+an absent, weaker or stronger declaration. Provider libraries are not rewritten.
+
+The build receipt and `canonical_runtime.cpu` record separate `code_generation`
+(`x86-64-v2`), `runtime_required` (`x86-64-v3`), and `enforcement`
+(`gnu-property-x86-isa-needed`) fields. A compatible glibc loader checks the
+declaration before library constructors or Mojo execute. An incompatible CPU
+produces `CPU ISA level is lower than required` and exits 127 on the verified
+loaders. This is a pre-CLI loader refusal, separate from MemVeil command exits.
+CPU eligibility and recorded tool identities do not qualify an artifact or
+environment. The artifact's libc floor is derived from its complete ELF closure;
+the vendor's development-system minimum alone is insufficient.
+
+`--bundle DIR` is the package-adapter interface for a retained canonical tree.
+Adapters retain its verified complete file manifest before copying. They
+compare every copied runtime, license, notice, manual and example at its
+installed destination before executing the staged engine and again before
+assembly. Generated package metadata, man pages and completions are separate
+outputs. Matching bytes do not grant qualification. Keep the matching source export, including the dependency sources
+and attribution under `third_party`, alongside distributable archives.
+
+For package-only verification of a retained bundle, set
+`MV_BUNDLE_TARBALL=/absolute/path/bundle.tar.gz` and run `./tools/test package`.
+An explicit bundle input never triggers a product rebuild. `release-runtime`
+also accepts that input. Debian and RPM install/collection journeys require
+their designated isolated environments; offline extraction equality does not
+satisfy those live gates.
+
+The source-export gate builds two Git-free copies with separate frozen SDK
+installations and unequal source/SDK path lengths, then compares every canonical
+runtime entry. Set `MV_CANONICAL_BUNDLE_DIR` to additionally compare a retained
+checkout bundle. Archive headers and descriptive provenance may differ.
+
+RPM assembly also binds its supplied bridge archive to the source lock and
+compares the current source inventory (content, membership and modes) with the
+bundle's sealed build inputs before constructing Source0 or invoking rpmbuild.
+File timestamps may differ across identical exports. Foreign or changed source
+inputs refuse; no build fallback or qualification inference is permitted.

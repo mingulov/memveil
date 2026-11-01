@@ -10,11 +10,21 @@ paths below are bundle-relative.
 Shipped libraries come from two origins: the pinned
 libbpf-mojo bundle (the bridge plus its upstream inventory
 below) and this bundle's own pixi build environment (the
-remaining `lib/*.so*`, resolved by the NEEDED closure walk
+remaining `lib/memveil/*.so*`, resolved by the NEEDED closure walk
 in `tools/package`). The two origins are told apart in each
 entry.
 
-- `lib/libbpf_mojo.so.1` from libbpf-mojo 0.2.3 (untagged development candidate,
+Canonical staging verifies the original provider bytes first. It removes
+unneeded symbol/debug sections from `libbpf_mojo.so.1`, `libgcc_s.so.1` and
+`libstdc++.so.6` once with `strip --strip-unneeded`; their existing loader
+paths remain unchanged. `MANIFEST.json` records the tool identity, arguments,
+original SHA-256 and resulting SHA-256 under `normalization`. Other runtime
+libraries retain the verified provider bytes. These normalized artifacts need
+their own qualification; matching source attribution is not runtime admission.
+The existing corresponding-source and redistribution limits in the source
+distribution's `third_party/README.md` remain applicable.
+
+- `lib/memveil/libbpf_mojo.so.1` from libbpf-mojo 0.2.3 (untagged development candidate,
   source commit `4a22288a397dec5158766fdfcd7a2a6691d1a9fb`, an independent project; the exact
   tarball is named by sha256 in `MANIFEST.json` under
   `libbpf_mojo`).
@@ -29,12 +39,12 @@ entry.
   source archives, notices and source map under `third_party/`.
   This candidate is not a published or live-qualified library release.
 
-- `lib/libbpf_mojo.so.1` statically links libbpf 1.7.0.
+- `lib/memveil/libbpf_mojo.so.1` statically links libbpf 1.7.0.
   BSD-2-Clause; full text in
   `licenses/LICENSE.BSD-2-Clause.libbpf`. Upstream:
   https://github.com/libbpf/libbpf (tag v1.7.0).
 
-- `lib/libgcc_s.so.1` from this bundle's own pixi
+- `lib/memveil/libgcc_s.so.1` from this bundle's own pixi
   environment: conda-forge package libgcc 16.2.0
   (ha9f2e26_7).
   GPL-3.0-only WITH GCC-exception-3.1; full texts in
@@ -47,7 +57,7 @@ entry.
   same frozen builds -- see
   `THIRD-PARTY-NOTICES.libbpf-mojo.md` for its own copy.)
 
-- `lib/libstdc++.so.6` from this bundle's own pixi
+- `lib/memveil/libstdc++.so.6` from this bundle's own pixi
   environment: conda-forge package libstdcxx 16.2.0
   (h934c35e_7).
   GPL-3.0-only WITH GCC-exception-3.1; full texts in
@@ -56,9 +66,9 @@ entry.
   Binary: https://conda.anaconda.org/conda-forge/linux-64/libstdcxx-16.2.0-h934c35e_7.conda
   sha256: fa7018298629fc429971fffd6ecba3d27a7b02e4e890d6a93ea01ffebe8cb745
 
-- `lib/libAsyncRTRuntimeGlobals.so`,
-  `lib/libKGENCompilerRTShared.so`,
-  `lib/libMSupportGlobals.so` from this bundle's own pixi
+- `lib/memveil/libAsyncRTRuntimeGlobals.so`,
+  `lib/memveil/libKGENCompilerRTShared.so`,
+  `lib/memveil/libMSupportGlobals.so` from this bundle's own pixi
   environment: conda package mojo-compiler 1.2.0 (release).
   Binary: https://conda.modular.com/max/linux-64/mojo-compiler-1.2.0-release.conda
   sha256: a746d7db173a9882e7073ae6d905acfe383a754faecb4a53710b7b90db377e6b
@@ -79,7 +89,7 @@ entry.
   owner handoff.
 
 - zlib (`libz.so.1`) is a host-provided system library,
-  not shipped in `lib/` (it is in `MANIFEST.json` under
+  not shipped in `lib/memveil/` (it is in `MANIFEST.json` under
   `system_libraries`). `licenses/LICENSE.zlib` is staged
   only because the upstream libbpf-mojo bundle -- whose
   notices are staged verbatim -- ships its own copy; it

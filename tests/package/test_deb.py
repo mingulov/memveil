@@ -1707,11 +1707,17 @@ def test_spec_build_spells_pinned_inputs():
                      text, re.M), "Source0 must be the source export"
     assert "libbpf-mojo" in text, "bridge tarball source missing"
     body = _spec_section(text, "build")
-    assert "tools/package" in body, \
-        "%build never runs tools/package"
-    body = _spec_section(text, "install")
+    assert "MEMVEIL_CANONICAL_BUNDLE" in body
+    assert "tools/canonical_runtime.py" in body
+    install = _spec_section(text, "install")
+    for section in (body, install):
+        assert "MEMVEIL_CANONICAL_BUNDLE" in section
+        assert "tools/canonical_runtime.py" in section
+        for forbidden in ("tools/package", "mojo build", "patchelf", "strip "):
+            assert forbidden not in section, "package assembly must only copy canonical bytes"
+    body = install
     for token in ("tools/gen-man", "tools/gen-completions",
-                  "patchelf", "libbpf_mojo.so.1"):
+                  "libbpf_mojo.so.1"):
         assert token in body, \
             "%%install never references %s" % token
     for name in BPF_OBJECTS:

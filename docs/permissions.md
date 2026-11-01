@@ -19,7 +19,7 @@ Summary table in `support.md`; this page gives the details.
 `record` discovers its bridge and BPF object: explicit
 `--bridge`/`--object` win verbatim, then `LMB_NATIVE_LIB`
 for the bridge when unprivileged (ignored under `sudo`),
-then the executable-relative bundle path (`<root>/lib`,
+then the executable-relative bundle path (`<root>/lib/memveil`,
 `<root>/bpf`), then the system path. `--profile`
 optionally pins one semantic profile.
 Profiles resolve from the executable location
@@ -55,7 +55,7 @@ directory must not exist, and a refused run creates nothing.
 
 No environment setup is needed: the bridge and BPF object
 are discovered beside the executable
-(`<root>/lib/libbpf_mojo.so.1`, `<root>/bpf`), so plain
+(`<root>/lib/memveil/libbpf_mojo.so.1`, `<root>/bpf`), so plain
 `sudo` works. `LMB_NATIVE_LIB` is honored only for
 unprivileged runs (ignored under `sudo`); `--bridge` and
 `--object` are optional overrides for non-bundled

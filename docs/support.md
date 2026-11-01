@@ -157,8 +157,10 @@ does not qualify any kernel or confidential platform.
   re-proves the host. A same-version executable rebuild or unrelated profile
   text change is not automatically detected by the receipt. Attempt-only
   recording can fall back to partial diagnostics.
-- x86-64-v2 baseline. The binary carries its runtime closure
-  plus the native bridge in `lib/`. Offline verbs (help,
+- Minimum CPU eligibility is x86-64-v3. The engine's code-generation target
+  remains x86-64-v2, which does not lower its prebuilt libraries' requirements.
+  The binary carries its runtime closure
+  plus the native bridge in `lib/memveil/`. Offline verbs (help,
   version, doctor, report, replay `top`) need libc, libm,
   libdl, and the dynamic loader from the host; `record` and
   live `top` additionally load the bridge, which needs libelf
@@ -171,11 +173,19 @@ does not qualify any kernel or confidential platform.
   Observed linkage minima are glibc 2.35 for the offline closure and
   glibc 2.38 for the bridge. These minima and the CPU build target
   do not qualify Ubuntu 22.04/24.04, every later userland, or every
-  x86-64-v2 CPU; each advertised environment needs an exact-artifact test.
+  eligible CPU; each advertised environment needs an exact-artifact test.
+  The [Mojo 1.2.0 runtime requirements](https://mojolang.org/docs/requirements/)
+  specify x86-64-v3. The earlier unmarked closure failed under Nehalem and
+  SandyBridge emulation with illegal instructions in a pinned runtime library.
+  The engine now declares its required ISA for the glibc loader to check before
+  library constructors or Mojo execute. On the verified loaders, an incompatible
+  CPU exits 127 with `CPU ISA level is lower than required`; this is a pre-CLI
+  loader refusal, separate from the command exits below. Emulated basic probes
+  do not qualify every x86-64-v3 platform or a confidential guest.
 - Profiles resolve from the executable location
   (`<root>/bin/memveil` reads `<root>/profiles`), never from
   the caller's working directory. The bridge and BPF
-  objects resolve the same way (`<root>/lib`,
+  objects resolve the same way (`<root>/lib/memveil`,
   `<root>/bpf`) before the system paths, so no
   environment setup is needed and plain `sudo` works.
 
@@ -406,6 +416,8 @@ details live in `permissions.md`; surprises go to
   write exits 1,
   never silent success; a blocked pipe may wait without a
   timeout.
+
+A finalized capture does not by itself provide complete terminal evidence.
 
 ## Exit codes
 
