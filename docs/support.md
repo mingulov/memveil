@@ -407,6 +407,8 @@ details live in `permissions.md`; surprises go to
   never silent success; a blocked pipe may wait without a
   timeout.
 
+A finalized capture does not by itself provide complete terminal evidence.
+
 ## Exit codes
 
 The following describes current commands; forthcoming integrity/checkpoint
