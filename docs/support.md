@@ -157,8 +157,8 @@ does not qualify any kernel or confidential platform.
   re-proves the host. A same-version executable rebuild or unrelated profile
   text change is not automatically detected by the receipt. Attempt-only
   recording can fall back to partial diagnostics.
-- x86-64-v2 baseline. The binary carries its runtime closure
-  plus the native bridge in `lib/`. Offline verbs (help,
+- The engine build targets x86-64-v2. The binary carries its runtime closure
+  plus the native bridge in `lib/memveil/`. Offline verbs (help,
   version, doctor, report, replay `top`) need libc, libm,
   libdl, and the dynamic loader from the host; `record` and
   live `top` additionally load the bridge, which needs libelf
@@ -172,10 +172,14 @@ does not qualify any kernel or confidential platform.
   glibc 2.38 for the bridge. These minima and the CPU build target
   do not qualify Ubuntu 22.04/24.04, every later userland, or every
   x86-64-v2 CPU; each advertised environment needs an exact-artifact test.
+  The current pinned runtime closure fails the version/replay probes under
+  Nehalem and SandyBridge CPU emulation with an illegal instruction. Haswell
+  emulation passes those probes; this does not establish a portable CPU floor.
+  The engine target does not lower the ISA requirements of prebuilt runtime libraries.
 - Profiles resolve from the executable location
   (`<root>/bin/memveil` reads `<root>/profiles`), never from
   the caller's working directory. The bridge and BPF
-  objects resolve the same way (`<root>/lib`,
+  objects resolve the same way (`<root>/lib/memveil`,
   `<root>/bpf`) before the system paths, so no
   environment setup is needed and plain `sudo` works.
 

@@ -176,7 +176,7 @@ substitution step is needed.
            --object "$ROOT/bpf/swiotlb_attempt.bpf.o" \
            --lc-object "$ROOT/bpf/swiotlb_lifecycle.bpf.o" \
            --cp-object "$ROOT/bpf/swiotlb_copy.bpf.o" \
-           --bridge "$ROOT/lib/libbpf_mojo.so.1" \
+           --bridge "$ROOT/lib/memveil/libbpf_mojo.so.1" \
            --profile "$ROOT/profiles/linux-x86_64-7.0-reference.json" \
            --capability attempt-trace,mapping-lifecycle,copy-actual \
            >/tmp/rec/record.out 2>/tmp/rec/record.err &

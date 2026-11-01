@@ -191,13 +191,12 @@ patchelf.
 
 ## Pinned executable inputs
 
-Every executable input that enters a build or automation
-lane is either pinned to an immutable identity verified
-before use, or an ambient OS-generation input verified
-fail-closed against exact versions and retained in
-receipts. Pinning every ambient OS byte is out of scope:
-drift there is detected, not silently accepted, because
-the build refuses unexpected tool versions.
+Build and automation inputs have explicit admission rules. Immutable pins
+are verified before use; selected system tools are checked against exact
+versions or minimum floors in the lock. The native `cc`/linker chain and
+packaging helpers are availability-checked ambient inputs whose observed
+identities are retained. Their recorded hashes expose changes but do not
+automatically refuse version drift or qualify a resulting artifact.
 
 Packaging helpers remain ambient tools, but `tools/package` checks
 `patchelf`, `strip`, `readelf` and `zstd` before building and records their
@@ -216,6 +215,7 @@ RUNPATH rewrites or stripping. Archive metadata can differ.
 | libbpf-mojo bridge | `tarball_sha256` in `toolchain.lock.json` | `tools/build`, build receipt, packager |
 | rpm Source0 | Owned selection: an owning checkout contributes tracked plus unignored-untracked files, never a parent's set | `tools/rpm-source0`, Source0 tests |
 | apt tools, runner image | Verified ambient: exact versions in `toolchain.lock.json`, floors where noted | `tools/build` refusal, receipts |
+| Native `cc`, cache launcher, `collect2` and linker | Ambient, availability and selected chain checked | Build receipt records observed versions and executable hashes |
 | Packaging helpers (`patchelf`, `strip`, `zstd`, `dpkg-deb`, `readelf`) | Ambient, availability checked | Canonical manifest records normalizer versions and executable hashes; `.deb` records assembly version |
 
 Refresh routes, one input at a time with the affected lanes
