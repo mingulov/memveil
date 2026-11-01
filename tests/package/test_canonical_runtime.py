@@ -190,3 +190,28 @@ def test_rpm_source_attribution_is_bound_before_assembly(tmp_path, change):
     else:
         with pytest.raises(ValueError):
             api.verify_sources(clone, manifest, archive)
+
+
+@pytest.mark.parametrize('installed', [False, True])
+@pytest.mark.parametrize('entry', ['library', 'object', 'elf'])
+def test_extra_runtime_outside_canonical_directories_refuses(tmp_path, installed, entry):
+    api = helper()
+    bundle = tmp_path / 'bundle'
+    files = payload(bundle)
+    root = tmp_path / 'installed' if installed else bundle
+    if installed:
+        for name, data in files.items():
+            path = root / api.installed_path(name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+    expected = api.inventory(root, installed)
+    name, data = {
+        'library': ('usr/lib64/libextra.so.1', b'extra library'),
+        'object': ('usr/share/memveil/extra.bpf.o', b'extra object'),
+        'elf': ('usr/share/doc/memveil/unlisted', b'\x7fELFextra executable'),
+    }[entry]
+    extra = root / name
+    extra.parent.mkdir(parents=True, exist_ok=True)
+    extra.write_bytes(data)
+    with pytest.raises(ValueError):
+        api.verify(root, expected, installed)

@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import stat
 
@@ -35,6 +36,9 @@ def inventory(root, installed=False):
         raise ValueError('runtime root is a symlink')
     prefixes = ('usr/bin', 'usr/lib/memveil', 'usr/share/memveil/profiles') if installed else ('bin', 'lib', 'bpf', 'profiles')
     entries = []
+    runtime_files = set()
+    def walk_error(error):
+        raise error
     for prefix in prefixes:
         base = root / prefix
         for parent in (base, *base.parents):
@@ -44,7 +48,7 @@ def inventory(root, installed=False):
                 raise ValueError('runtime directory is a symlink: ' + str(parent))
         if not base.is_dir():
             raise ValueError('missing runtime directory: ' + prefix)
-        for current, dirs, files in os.walk(base):
+        for current, dirs, files in os.walk(base, onerror=walk_error):
             for leaf in dirs + files:
                 path = Path(current) / leaf
                 mode = path.lstat().st_mode
@@ -53,6 +57,7 @@ def inventory(root, installed=False):
             for leaf in sorted(files):
                 path = Path(current) / leaf
                 name = path.relative_to(root).as_posix()
+                runtime_files.add(name)
                 if installed:
                     if name.startswith('usr/lib/memveil/') and name.endswith('.bpf.o'):
                         name = 'bpf/' + path.name
@@ -63,6 +68,22 @@ def inventory(root, installed=False):
                 if name.startswith('lib/') and not name.startswith('lib/memveil/'):
                     raise ValueError('noncanonical library path: ' + name)
                 entries.append({'type': 'file', 'path': name, 'sha256': digest(path), 'size': path.stat().st_size})
+    # An exclusive extracted package must not hide runtime objects elsewhere.
+    for current, dirs, files in os.walk(root, onerror=walk_error):
+        for leaf in dirs + files:
+            path = Path(current) / leaf
+            mode = path.lstat().st_mode
+            if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                raise ValueError('unsupported package entry: ' + str(path))
+        for leaf in files:
+            path = Path(current) / leaf
+            name = path.relative_to(root).as_posix()
+            if name in runtime_files:
+                continue
+            with path.open('rb') as stream:
+                elf = stream.read(4) == b'\x7fELF'
+            if elf or re.search(r'\.so(?:\.|$)', leaf) or leaf.endswith('.bpf.o'):
+                raise ValueError('runtime entry outside canonical layout: ' + name)
     return sorted(entries, key=lambda entry: entry['path'])
 
 
