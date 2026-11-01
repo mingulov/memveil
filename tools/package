@@ -253,7 +253,9 @@ def _keep_doc(rest):
 
 
 def _keep_profile(rest):
-    """Profiles stager: top-level manifest and JSON only."""
+    """Profiles stager: ordinary profiles plus one declared journal candidate."""
+    if rest == "journal-candidates/linux-7.0.14-x86-journal-provisional.json":
+        return True
     return "/" not in rest and (
         rest == "manifest.txt" or rest.endswith(".json"))
 
@@ -671,6 +673,7 @@ def main(argv):
                 ROOT, "build", "bpf", "swiotlb_copy.bpf.o"
             ),
         ]
+        bpf_objs.append(os.path.join(ROOT, "build", "bpf", "conversion_journal.bpf.o"))
         for bpf_obj in bpf_objs:
             if not os.path.isfile(bpf_obj):
                 fail("BPF object missing: %s" % bpf_obj)
@@ -764,6 +767,10 @@ def main(argv):
             if name == "manifest.txt" or name.endswith(".json"):
                 shutil.copy2(os.path.join(ROOT, "profiles", name),
                              os.path.join(staged, "profiles", name))
+        journal_profile = "journal-candidates/linux-7.0.14-x86-journal-provisional.json"
+        os.makedirs(os.path.join(staged, "profiles", "journal-candidates"))
+        shutil.copy2(os.path.join(ROOT, "profiles", journal_profile),
+                     os.path.join(staged, "profiles", journal_profile))
         # Ship the whole manuals tree: quickstart and support
         # reference troubleshooting, performance, resource-limits,
         # and permissions, so staging a subset would ship dangling
@@ -997,6 +1004,7 @@ def main(argv):
                     "bpf/swiotlb_attempt.bpf.o": "GPL-2.0-only",
                     "bpf/swiotlb_lifecycle.bpf.o": "GPL-2.0-only",
                     "bpf/swiotlb_copy.bpf.o": "GPL-2.0-only",
+                    "bpf/conversion_journal.bpf.o": "GPL-2.0-only",
                 },
             },
             "files": {},

@@ -122,8 +122,10 @@ def test_service_caps_reject_unknown() raises:
 
 def test_service_caps_require_attempt() raises:
     var ask = parse_requested_caps(String("mapping-lifecycle"))
-    assert_true(not ask.ok)
-    assert_equal(ask.err, String("attempt-trace is required"))
+    assert_true(ask.ok)
+    assert_equal(len(ask.caps), 2)
+    assert_equal(ask.caps[0], String("attempt-trace"))
+    assert_equal(ask.caps[1], String("mapping-lifecycle"))
 
 
 def test_service_run_budget_low_refuses() raises:

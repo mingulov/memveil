@@ -15,6 +15,8 @@ shipped profiles: selection, binding, signature, smoke,
 mint, publish - any refusal names its exact cause.
 """
 
+from memveil.capture.run import collection_selection
+from memveil.platform.journal_profile import journal_profile_reason
 from std.ffi import external_call
 
 from memveil.capture.collector import EXIT_REFUSAL
@@ -119,6 +121,8 @@ struct QualifyOptions:
     var has_profiles_dir: Bool
     var lc_object: String
     var cp_object: String
+    var journal_object: String
+    var journal_callers: Bool
     var capabilities: String
 
     def __init__(out self):
@@ -132,6 +136,8 @@ struct QualifyOptions:
         self.has_profiles_dir = False
         self.lc_object = String("")
         self.cp_object = String("")
+        self.journal_object = String("")
+        self.journal_callers = False
         self.capabilities = String("")
 
 
@@ -198,6 +204,14 @@ def parse_qualify_args(args: List[String]) raises CliError -> QualifyOptions:
                 raise CliError("--cp-object needs a value")
             opts.cp_object = args[i + 1]
             i += 2
+        elif tok == "--journal-object":
+            if i + 1 >= len(args) or args[i + 1] == "":
+                raise CliError("--journal-object needs a value")
+            opts.journal_object = args[i + 1]
+            i += 2
+        elif tok == "--journal-callers":
+            opts.journal_callers = True
+            i += 1
         elif tok == "--capability":
             if i + 1 >= len(args):
                 raise CliError("--capability needs a value")
@@ -209,6 +223,10 @@ def parse_qualify_args(args: List[String]) raises CliError -> QualifyOptions:
             raise CliError("unknown option: " + tok)
         else:
             raise CliError("unexpected argument: " + tok)
+    try:
+        _ = collection_selection(opts.capabilities, opts.journal_callers, False, opts.journal_object != "")
+    except e:
+        raise CliError(String(e))
     if opts.output == "":
         raise CliError("missing --output")
     return opts^
@@ -221,6 +239,11 @@ def qualify_usage() -> String:
         "       [--bridge PATH] [--profile ID|PATH]\n"
         "       [--profiles-dir DIR] [--capability IDS]\n"
         "       [--lc-object PATH] [--cp-object PATH]\n"
+        "       [--journal-object PATH] [--journal-callers]\n"
+        "\n"
+        "conversion-journal selects only global wrapper requests/results.\n"
+        "Mixed lists also select attempts. Journal callers are off by default.\n"
+        "Provisional journal profiles refuse with exit 3; no unsafe override.\n"
         "\n"
         "Run a short smoke capture into DIR and, when it\n"
         "proves the requested channels, publish a\n"
@@ -427,6 +450,8 @@ def plan_qualification(
     if not ask.ok:
         return _refuse_plan(ask.err.copy())
     for i in range(len(ask.caps)):
+        if ask.caps[i] == "conversion-journal":
+            return _refuse_plan(String("journal_profile_not_admitted"))
         if ask.caps[i] == String(_CONVERT):
             return _refuse_plan(
                 String(
@@ -819,6 +844,9 @@ def run_qualify_with(
     print one diagnostic and exit 3 before any receipt
     exists.
     """
+    var selection = collection_selection(opts.capabilities, opts.journal_callers, False, opts.journal_object != "")
+    if selection.journal:
+        return _qualify_failed(journal_profile_reason(profiles_dir, opts.profile, opts.has_profile))
     var output = opts.output.copy()
     var bridge = resolve_bridge(opts.bridge, opts.has_bridge)
     # Pin the bridge before the smoke: the smoke loads

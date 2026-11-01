@@ -58,6 +58,7 @@ from memveil.capture.run import (
     run_collector_with,
 )
 from memveil.cli.record import parse_record_args
+from memveil.capture.run import collection_selection
 from memveil.cli.report import (
     EXIT_INTERNAL,
     EXIT_INVALID,
@@ -133,8 +134,13 @@ def top_usage() -> String:
         "       [--bridge PATH] [--profile ID|PATH]\n"
         "       [--profiles-dir DIR] [--capability IDS]\n"
         "       [--lc-object PATH] [--cp-object PATH]\n"
+        "       [--journal-object PATH] [--journal-callers]\n"
         "       [--interval DURATION] [--device NAME]\n"
         "       [--strict] [--compact] [--long-lived-after DURATION]\n"
+        "\n"
+        "Ordinary live channels implicitly include attempt-trace.\n"
+        "Journal-only uses no attempts and rejects --device.\n"
+        "Journal callers are off by default; provisional profiles refuse.\n"
         "\n"
         "Replay the capture in DIR, printing one text summary per\n"
         "interval of capture time plus a final full-window report.\n"
@@ -243,6 +249,7 @@ def _is_live_flag(tok: String) -> Bool:
         or tok == "--capability"
         or tok == "--lc-object"
         or tok == "--cp-object"
+        or tok == "--journal-object"
         or tok == "--duration"
         or tok == "--max-events-bytes"
     )
@@ -334,6 +341,9 @@ def parse_top_args(args: List[String]) raises CliError -> TopOptions:
         elif tok == "--compact":
             opts.compact = True
             i += 1
+        elif tok == "--journal-callers":
+            live_args.append(tok)
+            i += 1
         elif _is_live_flag(tok):
             if tok == "--output":
                 opts.has_output = True
@@ -366,6 +376,10 @@ def parse_top_args(args: List[String]) raises CliError -> TopOptions:
             live_args.append(stashed_max_events)
         opts.live = parse_record_args(live_args)
         opts.live.strict = opts.strict
+        try:
+            _ = collection_selection(opts.live.capabilities, opts.live.journal_callers, opts.has_device, opts.live.journal_object != "")
+        except e:
+            raise CliError(String(e))
     elif has_stash:
         opts.max_events_bytes = _parse_limit(
             stashed_max_events, "--max-events-bytes", 4294967296

@@ -13,6 +13,9 @@ libbpf-mojo Session/bridge calls.
 """
 
 from memveil.capture.writer import CommittedStream
+from memveil.capture.conversions import JournalCapture, encode_journal_control, JOURNAL_STOP_NS
+from memveil.capture.journal_kernel import JournalSource, JournalKernel
+
 
 from libbpf_mojo.batch import decode_frame
 from libbpf_mojo.error import LmbError
@@ -411,6 +414,10 @@ trait WriterSource:
 struct CollectorConfig(Copyable, Movable):
     """Everything run() needs beyond the sources."""
 
+    var has_journal: Bool
+    var journal_only: Bool
+    var journal_callers: Bool
+    var journal_profile: String
     var duration_s: UInt64
     var max_events_bytes: Int
     var output: String
@@ -443,6 +450,10 @@ struct CollectorConfig(Copyable, Movable):
     var strict: Bool
 
     def __init__(out self):
+        self.has_journal = False
+        self.journal_only = False
+        self.journal_callers = False
+        self.journal_profile = String("")
         self.duration_s = UInt64(60)
         self.max_events_bytes = 1073741824
         self.output = String("")
@@ -884,7 +895,16 @@ struct Collector:
     var has_stop_evidence: Bool
     var live: LivenessTally
 
+    var journal_data: JournalCapture
+    var journal_counts: List[UInt64]
+    var journal_readable: Bool
+    var journal_done: Bool
+
     def __init__(out self, cfg: CollectorConfig):
+        self.journal_data = JournalCapture()
+        self.journal_counts = List[UInt64]()
+        self.journal_readable = False
+        self.journal_done = False
         self.cfg = cfg.copy()
         self.stop_reason = String("")
         self.result_state = String("ok")
@@ -1305,22 +1325,131 @@ struct Collector:
             self.has_end_cut = True
 
     def run[K: KernelSource, C: ClockSource, G: SignalSource, W: WriterSource](
-        mut self, mut kernel: K, mut clock: C, mut signal: G,
-        mut writer: W,
+        mut self, mut kernel: K, mut clock: C, mut signal: G, mut writer: W,
     ) -> RunResult:
-        """Full run: start, collect, close, finalize."""
-        var refusal = self.startup(kernel, clock, signal, writer)
-        if refusal != String(""):
+        var journal = JournalKernel()
+        return self.run_with_journal(kernel, journal, clock, signal, writer)
+
+    def run_with_journal[K: KernelSource, J: JournalSource, C: ClockSource, G: SignalSource, W: WriterSource](
+        mut self, mut kernel: K, mut journal: J, mut clock: C, mut signal: G, mut writer: W,
+    ) -> RunResult:
+        var refusal = self.startup_with_journal(kernel, journal, clock, signal, writer)
+        if refusal != "":
+            if self.cfg.has_journal:
+                _ = journal.close()
+            if self.cfg.journal_only:
+                var residual = writer.abandon()
+                return RunResult(3 if residual == "" else 1, String("unknown"), String("refused"), refusal, String(""), String(""), True, False)
             return self.refuse(kernel, writer, refusal)
-        var stop = self.poll_loop(kernel, clock, signal, writer)
-        if stop == String("error-path"):
-            return self.error_close(kernel, clock, writer)
-        if stop == String("unfinalizable"):
+        var stop = self.poll_loop_with_journal(kernel, journal, clock, signal, writer)
+        if self.cfg.has_journal:
+            self.close_journal(journal, clock, writer)
+        if stop == "unfinalizable" or self.result_state == "unfinalizable":
             return self.drop_unfinalizable(writer)
+        if self.cfg.journal_only:
+            return self.finish(clock, writer)
+        if stop == "error-path":
+            return self.error_close(kernel, clock, writer)
         self.normal_close(kernel, clock, writer)
-        if self.result_state == String("unfinalizable"):
+        if self.result_state == "unfinalizable":
             return self.drop_unfinalizable(writer)
         return self.finish(clock, writer)
+
+    def journal_poll[J: JournalSource, C: ClockSource, W: WriterSource](
+        mut self, mut journal: J, mut clock: C, mut writer: W, wait_ms: Int,
+    ) -> String:
+        var polled = journal.poll(wait_ms)
+        if not polled.ok:
+            self.fail(String("error"))
+            return String("error-path")
+        if len(polled.data) == 0:
+            return String("")
+        var event: Event
+        var line: List[UInt8]
+        try:
+            var now = clock.now()
+            if now == u64_max():
+                raise Error("clock exhausted")
+            event = self.journal_data.consume(polled.data, self.session_id, now + 1)
+            event.seq = self.next_seq
+            line = encode_event_line(event)
+        except:
+            self.fail(String("error"))
+            return String("error-path")
+        var wrote = writer.append(line)
+        if not wrote.ok:
+            if wrote.kind == "refused":
+                self.latch(String("size_limit"))
+                return String("closed")
+            if wrote.kind == "fatal" or wrote.kind == "misuse":
+                self.result_state = String("unfinalizable")
+                return String("unfinalizable")
+            self.fail(String("error"))
+            return String("error-path")
+        self.next_seq += 1
+        self._account_line(line, String("transition_result"))
+        self.max_persisted_ts = max(self.max_persisted_ts, event.ts_ns)
+        return String("")
+
+    def close_journal[J: JournalSource, C: ClockSource, W: WriterSource](
+        mut self, mut journal: J, mut clock: C, mut writer: W,
+    ):
+        var close_ns = clock.now()
+        var start = self.journal_data.session.admission_start_ns.value
+        var epoch = self.journal_data.session.epoch
+        var control = encode_journal_control(epoch, start, close_ns, False, True, self.cfg.journal_callers)
+        var closed = journal.control(control)
+        # Bound admitted callbacks by the completed write/readback, not by
+        # the earlier request instant: callbacks can race the map update.
+        close_ns = clock.now()
+        try:
+            self.journal_data.closed(close_ns, closed.ok)
+        except:
+            self.fail(String("error"))
+        var deadline = sat_add_u64(close_ns, JOURNAL_STOP_NS)[0]
+        for _ in range(10000):
+            if clock.now() >= deadline:
+                break
+            var result = self.journal_poll(journal, clock, writer, 10)
+            if result != "":
+                break
+            var counters = journal.counters()
+            if counters.ok and len(counters.values) == 15 and counters.values[12] == 0:
+                break
+        var disabled = journal.control(encode_journal_control(epoch, start, close_ns, False, False, self.cfg.journal_callers))
+        var detached = journal.detach()
+        # Detached/quiet is only a bounded observation cut, never closure proof.
+        for _ in range(10000):
+            if clock.now() >= deadline:
+                break
+            var polled = journal.poll(0)
+            if not polled.ok or len(polled.data) == 0:
+                break
+            try:
+                var event = self.journal_data.consume(polled.data, self.session_id, clock.now())
+                event.seq = self.next_seq
+                var line = encode_event_line(event)
+                var wrote = writer.append(line)
+                if not wrote.ok:
+                    if wrote.kind == "fatal" or wrote.kind == "misuse":
+                        self.result_state = String("unfinalizable")
+                    elif wrote.kind == "refused":
+                        self.latch(String("size_limit"))
+                    else:
+                        self.fail(String("error"))
+                    break
+                self.next_seq += 1
+                self._account_line(line, String("transition_result"))
+                self.max_persisted_ts = max(self.max_persisted_ts, event.ts_ns)
+            except:
+                self.fail(String("error"))
+                break
+        var final = journal.counters()
+        self.journal_counts = final.values.copy()
+        self.journal_readable = final.ok and disabled.ok and detached.ok
+        self.journal_done = True
+        if not journal.close().ok:
+            self.fail(String("error"))
 
     def refuse[
         K: KernelSource, W: WriterSource
@@ -1422,10 +1551,16 @@ struct Collector:
             return String("hook admission failed")
         return String("")
 
-    def startup[
-        K: KernelSource, C: ClockSource, G: SignalSource, W: WriterSource
+    def startup[K: KernelSource, C: ClockSource, G: SignalSource, W: WriterSource](
+        mut self, mut kernel: K, mut clock: C, mut signal: G, mut writer: W,
+    ) -> String:
+        var journal = JournalKernel()
+        return self.startup_with_journal(kernel, journal, clock, signal, writer)
+
+    def startup_with_journal[
+        K: KernelSource, J: JournalSource, C: ClockSource, G: SignalSource, W: WriterSource
     ](
-        mut self, mut kernel: K, mut clock: C, mut signal: G,
+        mut self, mut kernel: K, mut journal: J, mut clock: C, mut signal: G,
         mut writer: W,
     ) -> String:
         """Transactional start; "" means ready, else the reason."""
@@ -1440,6 +1575,24 @@ struct Collector:
             + String("-")
             + String(self.cfg.pid)
         )
+        if self.cfg.has_journal:
+            self.journal_data = JournalCapture(max(self.start_ns, UInt64(1)), self.start_ns, self.cfg.journal_profile, self.cfg.journal_callers)
+            var prepared = journal.prepare(encode_journal_control(self.journal_data.session.epoch, 0, 0, False, False, self.cfg.journal_callers))
+            if not prepared.ok:
+                return prepared.message
+            if self.cfg.journal_only:
+                var made = writer.create(self.cfg.output, self.cfg.max_events_bytes)
+                if not made.ok:
+                    return String("journal output create failed")
+                self.attach_ns = clock.now()
+                self.journal_data.capture_start = self.attach_ns
+                if not journal.attach().ok:
+                    return String("journal attach failed")
+                self.ready_ns = clock.now()
+                var checkpoint_note = self.checkpoint(writer, self.ready_ns)
+                if checkpoint_note != "":
+                    return checkpoint_note
+                return self.open_journal(journal, clock)
         var opened = kernel.open_session()
         if not opened.ok:
             return String("open: ") + opened.message
@@ -1595,9 +1748,17 @@ struct Collector:
         self.ready_ns = clock.now()
         var t_r = sat_add_u64(self.ready_ns, LIVENESS_GUARD_NS)[0]
         self.live.retarget(self.attach_ns, t_r)
+        if self.cfg.has_journal:
+            self.journal_data.capture_start = self.attach_ns
+            if not journal.attach().ok:
+                return String("journal attach failed")
         var checkpoint_note = self.checkpoint(writer, self.ready_ns)
         if checkpoint_note != "":
             return "output readiness checkpoint: " + checkpoint_note
+        if self.cfg.has_journal:
+            var note = self.open_journal(journal, clock)
+            if note != "":
+                return note
         if self.cfg.has_pool_sample:
             # Baseline pool sample, persisted first: the file
             # stays chronological (baseline, periodic, final)
@@ -1640,6 +1801,17 @@ struct Collector:
         self.stop_ctl.mark_ready()
         return String("")
 
+    def open_journal[J: JournalSource, C: ClockSource](mut self, mut journal: J, mut clock: C) -> String:
+        var start = clock.now()
+        var control = encode_journal_control(self.journal_data.session.epoch, start, 0, True, True, self.cfg.journal_callers)
+        if not journal.control(control).ok:
+            return String("journal readiness control failed")
+        try:
+            self.journal_data.opened(start)
+        except:
+            return String("journal readiness clock invalid")
+        return String("")
+
     def checkpoint[W: WriterSource](mut self, mut writer: W, now: UInt64) -> String:
         """Snapshot committed metadata without claiming terminal settlement."""
         self.checkpoint_next_ns = sat_add_u64(now, UInt64(10000000000))[0]
@@ -1660,6 +1832,11 @@ struct Collector:
             if horizon == u64_max():
                 raise EncodeError("checkpoint", "window end overflow")
             snapshot.window_end_ns = horizon + UInt64(1)
+            if self.cfg.has_journal:
+                try:
+                    snapshot.journal = self.journal_data.snapshot(snapshot.window_end_ns, False, self.journal_counts, self.journal_readable)
+                except:
+                    raise EncodeError("journal", "checkpoint snapshot invalid")
             snapshot.has_integrity = True
             snapshot.integrity = self.committed_stream.snapshot()
             if snapshot.integrity.events_bytes != UInt64(writer.committed_len()) or snapshot.integrity.line_count != self.next_seq:
@@ -1721,10 +1898,16 @@ struct Collector:
             )
         return retry^
 
-    def poll_loop[
-        K: KernelSource, C: ClockSource, G: SignalSource, W: WriterSource
+    def poll_loop[K: KernelSource, C: ClockSource, G: SignalSource, W: WriterSource](
+        mut self, mut kernel: K, mut clock: C, mut signal: G, mut writer: W,
+    ) -> String:
+        var journal = JournalKernel()
+        return self.poll_loop_with_journal(kernel, journal, clock, signal, writer)
+
+    def poll_loop_with_journal[
+        K: KernelSource, J: JournalSource, C: ClockSource, G: SignalSource, W: WriterSource
     ](
-        mut self, mut kernel: K, mut clock: C, mut signal: G,
+        mut self, mut kernel: K, mut journal: J, mut clock: C, mut signal: G,
         mut writer: W,
     ) -> String:
         """Collect until a latch; error-path/unfinalizable/closed."""
@@ -1754,6 +1937,12 @@ struct Collector:
                 return String("closed")
             if now >= self.checkpoint_next_ns or self.next_seq >= self.checkpoint_next_seq:
                 _ = self.checkpoint(writer, now)
+            if self.cfg.has_journal:
+                var journal_tick = self.journal_poll(journal, clock, writer, 10 if self.cfg.journal_only else 0)
+                if journal_tick != "":
+                    return journal_tick
+                if self.cfg.journal_only:
+                    continue
             var ptick = self.maybe_sample_pool(clock, writer, now)
             if ptick != String(""):
                 return ptick
@@ -2418,6 +2607,7 @@ struct Collector:
 
     def fill_source(mut self, mut ev: Event):
         """Stamp the explicit source block on one event."""
+        ev.journal_version = self.cfg.has_journal
         ev.session_id = self.session_id
         ev.seq = self.next_seq
         self.next_seq += UInt64(1)
@@ -2434,6 +2624,7 @@ struct Collector:
         and backend; the registry sets correlation after
         this stamp, so evidence refs carry real seqs.
         """
+        ev.journal_version = self.cfg.has_journal
         ev.session_id = self.session_id
         ev.seq = self.next_seq
         self.next_seq += UInt64(1)
@@ -2484,6 +2675,7 @@ struct Collector:
         mut self, sample: NormalizedPoolSample, ts_ns: UInt64
     ) raises EncodeError -> List[UInt8]:
         var ev = Event()
+        ev.journal_version = self.cfg.has_journal
         ev.session_id = self.session_id
         ev.seq = self.next_seq
         self.next_seq += UInt64(1)
@@ -2986,9 +3178,9 @@ struct Collector:
         if top == u64_max():
             return self.drop_unfinalizable(writer)
         self.end_ns = top + UInt64(1)
-        if self.evaluate() != String(""):
+        if not self.cfg.journal_only and self.evaluate() != String(""):
             return self.drop_unfinalizable(writer)
-        if self.closing_records(writer) != String(""):
+        if not self.cfg.journal_only and self.closing_records(writer) != String(""):
             return self.drop_unfinalizable(writer)
         if not self.contained():
             return self.drop_unfinalizable(writer)
@@ -3963,6 +4155,47 @@ struct Collector:
                 out, String("copy.unknown_shift"),
                 format_u64(self.unknown_copy_shift),
             )
+        if self.cfg.has_journal:
+            out.has_journal = True
+            out.finalized = self.journal_done
+            var cut = max(self.end_ns, max(self.attach_ns, self.max_persisted_ts) + 1)
+            out.window_end_ns = cut
+            try:
+                out.journal = self.journal_data.snapshot(cut, self.journal_done, self.journal_counts, self.journal_readable)
+            except:
+                raise EncodeError("journal", "snapshot invalid")
+            out.cap_conversion_results.status = String("partial")
+            out.cap_conversion_results.reason = String("Native wrapper requests/results; callback completeness unproved.")
+            out.cap_conversion_results.profile_id = self.cfg.journal_profile
+            out.cap_conversion_results.has_profile_id = True
+            out.cap_conversion_results.hooks = [String("set_memory_decrypted"), String("set_memory_encrypted")]
+            out.q_terminal.status = String("partial")
+            out.q_terminal.reason = String("Journal closure unproved; quiet transport is not synchronization.")
+            out.q_terminal.has_loss_count = False
+            out.stop.outcome = String("partial")
+            out.stop.reason = out.q_terminal.reason
+            out.stop.admission_closed = out.journal.admission_end_ns.has
+            out.stop.quiescence_observed = False
+            out.has_verdict = False
+            if self.cfg.journal_only:
+                self.unavailable_cap(out.cap_bounce_attempts, String("Attempt source not selected."))
+                out.has_baseline_start_ns = False
+                out.q_detail.status = String("partial")
+                out.q_detail.reason = String("Journal observed results; missed callbacks not observable.")
+                out.q_detail.scope = String("conversion journal")
+                out.q_detail.has_loss_count = False
+                out.q_aggregate.status = String("partial")
+                out.q_aggregate.scope = String("journal counters")
+                out.q_aggregate.reason = String("Non-atomic snapshots; counter and detail alternatives are separate.")
+                out.q_aggregate.has_loss_count = False
+                out.q_correlation.status = String("unavailable")
+                out.q_correlation.scope = String("journal operation membership")
+                out.q_correlation.reason = String("Matching tokens do not prove callback completeness.")
+                out.q_correlation.has_loss_count = False
+                out.q_baseline.status = String("unavailable")
+                out.q_baseline.scope = String("journal baseline")
+                out.q_baseline.reason = String("Boot/pre-attach, MMIO, kexec/accept and unobserved paths excluded.")
+                out.q_baseline.has_loss_count = False
         while len(out.evidence) > 64:
             _ = out.evidence.pop()
         return out^

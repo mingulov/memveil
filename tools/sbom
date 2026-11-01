@@ -227,6 +227,8 @@ def build_document(manifest, lock, payload, inputs):
                     "bpf/swiotlb_lifecycle.bpf.o"):
             continue
         concluded = "GPL-3.0-or-later"
+        if name == "bpf/conversion_journal.bpf.o":
+            concluded = "GPL-2.0-only"
         if name.startswith("LICENSES/") or name == "LICENSE":
             concluded = "NOASSERTION"
         add_file(spdx_id("File", "bundle", name),

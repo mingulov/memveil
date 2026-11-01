@@ -16,6 +16,8 @@ stays with the calling command. Argument parsing and
 presentation stay in the commands.
 """
 
+from memveil.model.journal import select_journal, JournalSelection
+from memveil.platform.journal_profile import journal_profile_reason
 from std.ffi import external_call
 from std.os import getenv
 
@@ -147,6 +149,8 @@ struct RecordOptions:
     var has_profiles_dir: Bool
     var lc_object: String
     var cp_object: String
+    var journal_object: String
+    var journal_callers: Bool
     var capabilities: String
     var device: String
     var has_device: Bool
@@ -165,6 +169,8 @@ struct RecordOptions:
         self.has_profiles_dir = False
         self.lc_object = String("")
         self.cp_object = String("")
+        self.journal_object = String("")
+        self.journal_callers = False
         self.capabilities = String("")
         self.device = String("")
         self.has_device = False
@@ -368,55 +374,44 @@ def _split_caps(text: String) -> List[String]:
     return out^
 
 
-def parse_requested_caps(want: String) -> CapsOut:
-    """Parse requested capabilities in order, deduplicated.
+def collection_selection(capabilities: String, callers: Bool, device: Bool, journal_object: Bool = False) raises -> JournalSelection:
+    var selected = capabilities
+    if selected == "all":
+        selected = String("attempt-trace,mapping-lifecycle,copy-actual")
+    return select_journal(selected, callers, device, journal_object)
 
-    Empty means attempt-trace alone; the sole item "all"
-    expands to the three record channels. Unknown ids,
-    empty items, and requests without attempt-trace
-    refuse: the attempt channel is the mandatory base
-    channel.
-    """
+
+def parse_requested_caps(want: String) -> CapsOut:
+    """Resolve explicit channels, retaining the ordinary attempt dependency."""
     var out = CapsOut()
-    if want == String("all"):
-        out.caps.append(String(_ATTEMPT_CAP))
-        out.caps.append(String(_LIFECYCLE_CAP))
-        out.caps.append(String(_COPY_CAP))
-        out.ok = True
-        return out^
-    var items = List[String]()
-    if want == String(""):
-        items.append(String(_ATTEMPT_CAP))
-    else:
-        items = _split_caps(want)
-    for i in range(len(items)):
-        var item = items[i].copy()
-        if item == String(""):
+    var selected = want
+    if selected == "all":
+        selected = String("attempt-trace,mapping-lifecycle,copy-actual")
+    if selected == "":
+        selected = String("attempt-trace")
+    var ordinary = False
+    var attempts = False
+    for item_slice in selected.split(","):
+        var item = String(item_slice)
+        if item == "":
             out.err = String("bad capability list")
             return out^
-        if (
-            item != String(_ATTEMPT_CAP)
-            and item != String(_LIFECYCLE_CAP)
-            and item != String(_COPY_CAP)
-            and item != String(_CONVERT_CAP)
-        ):
+        if item != "conversion-journal" and item != _ATTEMPT_CAP and item != _LIFECYCLE_CAP and item != _COPY_CAP and item != _CONVERT_CAP:
             out.err = String("unknown capability: ") + item
             return out^
-        var seen = False
-        for j in range(len(out.caps)):
-            if out.caps[j] == item:
-                seen = True
-                break
-        if not seen:
-            out.caps.append(item.copy())
-    var has_attempt = False
-    for i in range(len(out.caps)):
-        if out.caps[i] == String(_ATTEMPT_CAP):
-            has_attempt = True
-            break
-    if not has_attempt:
-        out.err = String("attempt-trace is required")
-        return out^
+        for previous in out.caps:
+            if previous == item:
+                out.err = String("duplicate capability: ") + item
+                return out^
+        out.caps.append(item)
+        ordinary = ordinary or item != "conversion-journal"
+        attempts = attempts or item == _ATTEMPT_CAP
+    if ordinary and not attempts:
+        var caps = List[String]()
+        caps.append(String(_ATTEMPT_CAP))
+        for item in out.caps:
+            caps.append(item)
+        out.caps = caps^
     out.ok = True
     return out^
 
@@ -1123,6 +1118,8 @@ def decide_record(
             want_lc = True
         if ask.caps[i] == String(_COPY_CAP):
             want_cp = True
+        if ask.caps[i] == "conversion-journal":
+            return _refuse_scan(String("journal_profile_not_admitted"))
         if ask.caps[i] == String(_CONVERT_CAP):
             return _refuse_scan(
                 String(
@@ -1841,6 +1838,14 @@ def run_collector_with[W: WriterSource](
     prefix. The collector runs only on approval, so
     refusals create no BPF or output resource.
     """
+    var selection: JournalSelection
+    try:
+        selection = collection_selection(opts.capabilities, opts.journal_callers, opts.has_device, opts.journal_object != "")
+    except:
+        return RunResult(2, String(""), String(""), String("invalid capability/journal selector"), String(""), String(""), True, False)
+    if selection.journal:
+        var reason = journal_profile_reason(profiles_dir, opts.profile, opts.has_profile)
+        return RunResult(EXIT_REFUSAL, String(""), String(""), reason, String(""), String(""), True, False)
     if opts.max_events_bytes < MIN_RECORD_BYTES:
         return RunResult(
             EXIT_REFUSAL, String(""), String(""),

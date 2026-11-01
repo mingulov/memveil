@@ -117,6 +117,7 @@ BPF_OBJECTS = (
     "swiotlb_attempt.bpf.o",
     "swiotlb_lifecycle.bpf.o",
     "swiotlb_copy.bpf.o",
+    "conversion_journal.bpf.o",
 )
 
 # /usr/share/lintian/overrides/memveil: exactly two
@@ -133,6 +134,7 @@ OVERRIDES = """\
 memveil: binary-from-other-architecture [usr/lib/memveil/swiotlb_attempt.bpf.o]
 memveil: binary-from-other-architecture [usr/lib/memveil/swiotlb_copy.bpf.o]
 memveil: binary-from-other-architecture [usr/lib/memveil/swiotlb_lifecycle.bpf.o]
+memveil: binary-from-other-architecture [usr/lib/memveil/conversion_journal.bpf.o]
 # Both formats ship identical pages from the same generators;
 # compressing only the .deb side would break that identity.
 memveil: uncompressed-manual-page [usr/share/man/man1/memveil.1]
@@ -483,10 +485,7 @@ def main(argv):
             if not os.path.isfile(src):
                 fail("bundle lacks BPF object %s" % name)
             shutil.copy2(src, os.path.join(libdir, name))
-        for name in sorted(os.listdir(
-                os.path.join(bundle, "profiles"))):
-            shutil.copy2(os.path.join(bundle, "profiles", name),
-                         os.path.join(profdir, name))
+        shutil.copytree(os.path.join(bundle, "profiles"), profdir, dirs_exist_ok=True)
         if not os.path.isfile(os.path.join(profdir, "manifest.txt")):
             fail("staged profiles/ lacks manifest.txt")
         for base, dirs, files in os.walk(

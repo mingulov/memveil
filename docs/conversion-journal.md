@@ -339,3 +339,39 @@ never PASS. A required positive product refusal is FAIL. Expected-negative rows
 pass only with their declared boundary, exit, reason and cleanup independently
 checked. These manifests freeze interfaces; actual live runner integration and
 real SNP runs remain separate qualification work.
+
+
+### Producer implementation status
+
+The separate `conversion_journal.bpf.o` contains four typed fentry/fexit
+programs. Its nested candidate profile is shipped at
+`profiles/journal-candidates/linux-7.0.14-x86-journal-provisional.json`.
+The profile remains source provisional: it admits no live kernel. Public
+`record`, `top`, and `qualify` selections requesting the journal return refusal
+(exit 3) until an exact runtime binding is admitted. There is no public bypass.
+
+The producer keeps task identity and `start_boottime` in ephemeral maps. Its
+only CO-RE read copies the eight-byte birth timestamp. The optional stack
+helper reads at most sixteen frames (128 bytes); finite symbol ranges are
+transient and only allowlisted class/label codes reach the ring. Read failures
+make pairing unavailable for the remaining object lifetime. Missing callbacks
+remain unknown even when observed tokens match. No raw native diagnostics or
+verifier text are exported by the journal adapter.
+
+`--journal-object` selects the separate object and `--journal-callers` enables
+bounded caller classification; both require `conversion-journal`. Caller
+classification defaults off. Unresolved symbols remain unknown, overlapping
+aliases are ambiguous, and a full sixteen-frame result is truncated.
+
+The 0.2 capability parser includes `attempt-trace` implicitly when an ordinary
+channel is requested. A pure journal selection attaches no attempt hooks.
+Duplicate capability names now produce usage errors, including duplicates
+previously deduplicated for ordinary channels. The no-option ordinary default
+and 0.1 capture encoding remain separate from this 0.2 selection change.
+Pure journal collection rejects device filtering; mixed collection filters only
+ordinary events and retains global journal completions.
+
+Host helper simulations and offline typed collector checks are development
+evidence. Actual verifier loading, attachment, callback counts, compiler-free
+runtime checks, and confidential-machine qualification remain required before
+live admission. A quiet or detached ring does not prove settled conversions.

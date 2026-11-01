@@ -4,6 +4,8 @@ from libbpf_mojo.session import Session, AttachSpec
 from libbpf_mojo.batch import decode_frame, POLL_BATCH, POLL_TIMEOUT, POLL_SHORT
 from memveil.capture.conversions import decode_journal_counters, JOURNAL_NATIVE_COUNTERS
 from memveil.platform.outcome import OpOut
+from memveil.platform.reader import read_host_file
+from memveil.capture.journal_callers import resolve_caller_ranges, encode_caller_range, CallerRange
 
 
 @fieldwise_init
@@ -46,15 +48,18 @@ struct JournalKernel(JournalSource):
     var elf: List[UInt8]
     var bridge: String
     var session: Optional[Session]
+    var stable_owned_module: Bool
 
     def __init__(out self):
         self.elf = List[UInt8]()
         self.bridge = String("")
         self.session = None
+        self.stable_owned_module = False
 
-    def setup(mut self, elf: List[UInt8], bridge: String):
+    def setup(mut self, elf: List[UInt8], bridge: String, stable_owned_module: Bool = False):
         self.elf = elf.copy()
         self.bridge = bridge
+        self.stable_owned_module = stable_owned_module
 
     def prepare(mut self, control: List[UInt8]) -> OpOut:
         if self.session:
@@ -68,7 +73,7 @@ struct JournalKernel(JournalSource):
                 (String("mv_jr_sequence"), 6, 4, 8, 1),
                 (String("mv_jr_tasks"), 1, 32, 16, 4096),
                 (String("mv_jr_ops"), 1, 32, 24, 4096),
-                (String("mv_jr_symbols"), 2, 4, 16, 10),
+                (String("mv_jr_symbols"), 2, 4, 24, 10),
                 (String("mv_journal"), 27, 0, 0, 8388608),
             ]:
                 var geom = s.map_info(name)
@@ -85,7 +90,37 @@ struct JournalKernel(JournalSource):
             if value != 0:
                 _ = self.close()
                 return OpOut(False, String("journal initial counters nonzero"))
+        if len(control) == 48 and control[40] != 0:
+            if not self.install_callers():
+                _ = self.close()
+                return OpOut(False, String("journal caller map unavailable"))
         return self.control(control)
+
+    def install_callers(mut self) -> Bool:
+        if not self.session:
+            return True
+        var data = List[UInt8]()
+        try:
+            data = read_host_file(String("/proc/kallsyms"), String("caller symbol source"), 16777216)
+        except:
+            return True
+        var ranges: List[CallerRange]
+        try:
+            ranges = resolve_caller_ranges(String(from_utf8=Span(data)), self.stable_owned_module)
+        except:
+            return True
+        var s = self.session.take()
+        var ok = True
+        try:
+            for i in range(10):
+                var key = List[UInt8](length=4, fill=UInt8(0))
+                key[0] = UInt8(i)
+                var value = encode_caller_range(ranges[i])
+                s.map_write(String("mv_jr_symbols"), Span(key), Span(value))
+        except:
+            ok = False
+        self.session = Optional(s^)
+        return ok
 
     def attach(mut self) -> OpOut:
         if not self.session:
@@ -108,7 +143,7 @@ struct JournalKernel(JournalSource):
         try:
             s.map_write(String("mv_jr_control"), Span(key), Span(value))
             var actual = s.map_read(String("mv_jr_control"), Span(key), UInt32(48))
-            if actual.required != 48 or actual.data != value:
+            if actual.required != 0 or actual.data != value:
                 ok = False
         except:
             ok = False
@@ -153,7 +188,7 @@ struct JournalKernel(JournalSource):
                 var key = List[UInt8](length=4, fill=UInt8(0))
                 key[0] = UInt8(index)
                 var got = s.map_read(String("mv_jr_counts"), Span(key), UInt32(8))
-                if got.required != 8 or len(got.data) != 8:
+                if got.required != 0 or len(got.data) != 8:
                     ok = False
                     break
                 raw.extend(Span(got.data))

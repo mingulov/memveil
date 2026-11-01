@@ -5,7 +5,7 @@
 # Usage: tools/test <suite> | tools/test --help
 #
 # Implemented suites: schemas, unit, reports, profiles, doctor, attempts,
-# native-decode,
+# native-decode, journal-producer,
 # writer, signals, record, qualify, vm-attempts, buildcache, package,
 # identity,
 # correlation, mappings, lifetimes, pools, regions, diagnostics,
@@ -4243,6 +4243,15 @@ fi
 case "$1" in
     --help|-h)
         usage
+        ;;
+    journal-producer)
+        python3 "$ROOT/tests/journal/test_producer.py" || exit 1
+        python3 "$ROOT/tests/journal/test_wire.py" || exit 1
+        run_unit_file tests/unit/test_journal_producer.mojo || exit 1
+        run_unit_file tests/unit/test_journal_collection.mojo || exit 1
+        run_unit_file tests/unit/test_journal_callers.mojo || exit 1
+        python3 "$ROOT/tests/journal/test_packaging.py" || exit 1
+        python3 "$ROOT/tests/journal/test_cli.py"
         ;;
     schemas)
         "$ROOT/tools/validate-schemas" || exit 1

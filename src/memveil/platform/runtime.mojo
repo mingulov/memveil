@@ -154,6 +154,8 @@ def _object_file(kind: String) -> String:
         return String("swiotlb_lifecycle.bpf.o")
     if kind == String("copy"):
         return String("swiotlb_copy.bpf.o")
+    if kind == String("journal"):
+        return String("conversion_journal.bpf.o")
     return String("")
 
 

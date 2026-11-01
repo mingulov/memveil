@@ -52,6 +52,7 @@ ALLOWED_FLAGS = {
     "--max-events-bytes", "--max-line-bytes", "--max-session-bytes",
     "--object", "--output", "--profile", "--profiles-dir",
     "--compact", "--strict", "--profile-id",
+    "--journal-object", "--journal-callers",
 }
 
 # SUDO_UID/SUDO_GID reviewed 2026-10-11: read once by
@@ -132,6 +133,27 @@ def self_check_flag_audit():
         check('flags-sensitivity', rejected, 'flag inventory mutation was accepted')
 
 
+def journal_inventory(code):
+    helpers = set(re.findall(r"\b(bpf_[a-z0-9_]+)\s*\(", code))
+    expected = {"bpf_map_lookup_elem", "bpf_map_update_elem", "bpf_map_delete_elem",
+                "bpf_get_current_task_btf", "bpf_ktime_get_ns", "bpf_get_stack",
+                "bpf_get_smp_processor_id", "bpf_ringbuf_reserve", "bpf_ringbuf_submit"}
+    reads = re.findall(r"BPF_CORE_READ_INTO\s*\(([^)]*)\)", code)
+    return (helpers == expected and reads == ["&key->start_boottime, task, start_boottime"]
+            and code.count("bpf_get_stack(") == 1
+            and "bpf_get_stack(ctx, frames, sizeof(frames), 0)" in code
+            and "__u64 frames[MV_JR_CALLER_FRAME_CAPACITY] = {}" in code
+            and "if (control->callers) mv_jr_callers" in code)
+
+
+def audit_journal_inventory(code):
+    check("journal-helper-field-inventory", journal_inventory(code))
+    for mutant in (code + "\nbpf_unknown_helper();", code.replace("task, start_boottime)", "task, other_field)"),
+                   code.replace("frames, sizeof(frames), 0", "frames, 8192, 0"),
+                   code + "\nBPF_CORE_READ_INTO(&out, task, start_boottime);"):
+        check("journal-inventory-sensitivity", not journal_inventory(mutant))
+
+
 def main():
     self_check_extractor()
     self_check_flag_audit()
@@ -170,6 +192,7 @@ def main():
         "swiotlb_attempt.bpf.c": (4, 0, 0),
         "swiotlb_copy.bpf.c": (1, 0, 10),
         "swiotlb_lifecycle.bpf.c": (0, 0, 0),
+        "conversion_journal.bpf.c": (0, 1, 0),
     }
     check("bpf-files-frozen",
           sorted(os.path.basename(p) for p in progs) ==
@@ -178,6 +201,8 @@ def main():
     for path in progs:
         base = os.path.basename(path)
         text = open(path).read()
+        if base == "conversion_journal.bpf.c":
+            audit_journal_inventory(text)
         for token in FORBIDDEN_BPF:
             check("bpf-no-%s" % token.replace("bpf_", ""),
                   token not in text, base)
