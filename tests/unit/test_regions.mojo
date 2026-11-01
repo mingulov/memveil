@@ -727,8 +727,74 @@ def test_unrelated_gap_keeps_regions_complete() raises:
     )
 
 
+def test_pointwise_overlap_and_reused_generations() raises:
+    # A byte-cell oracle has no interval splitting or merging algorithm.
+    var t = RegionTracker()
+    var cells = List[Int]()
+    for _ in range(3 * 257):
+        cells.append(-1)
+    var requested = UInt64(0)
+    for step in range(513):
+        var generation = step % 3
+        var start = (step * 73) % 257
+        var length = min(257 - start, 1 + (step * 19) % 67)
+        var shared = step % 5 < 2
+        var ok = step % 11 != 0
+        var state = String("private")
+        var cell = 2
+        if shared:
+            state = String("shared")
+            cell = 1
+        if not ok:
+            cell = 3
+        var ev = _transition(
+            "reused", state, ok, UInt64(start), UInt64(length),
+            UInt64(step),
+        )
+        ev.transition.generation = generation
+        t.consume(ev)
+        requested += UInt64(length)
+        for offset in range(start, start + length):
+            cells[generation * 257 + offset] = cell
+        var want = List[UInt64](length=4, fill=UInt64(0))
+        for value in cells:
+            if value > 0:
+                want[value] += UInt64(1)
+        var rows = t.metrics("pointwise")
+        assert_equal(_find(rows, "known_shared_region_bytes").value, want[1])
+        assert_equal(_find(rows, "known_private_region_bytes").value, want[2])
+        assert_equal(_find(rows, "unknown_region_bytes").value, want[3])
+        assert_equal(_find(rows, "conversion_requests").value, UInt64(step + 1))
+        assert_equal(_find(rows, "conversion_request_bytes").value, requested)
+    assert_equal(len(t.limitations()), 0)
+
+
+def test_merge_at_global_budget_and_reuse_freed_capacity() raises:
+    var t = RegionTracker[SEG_N=5]()
+    t.consume(_transition("a", "shared", True, 0, 100, 0))
+    t.consume(_transition("a", "private", True, 40, 20, 1))
+    t.consume(_transition("b", "private", True, 0, 100, 2))
+    t.consume(_transition("c", "shared", True, 0, 100, 3))
+    # Merging at capacity must be admitted before testing the new size.
+    t.consume(_transition("a", "shared", True, 40, 20, 4))
+    t.consume(_transition("b", "shared", True, 40, 20, 5))
+    assert_equal(len(t.limitations()), 0)
+    # The extra split invalidates b only, freeing all three of its segments.
+    t.consume(_transition("b", "private", True, 45, 10, 6))
+    t.consume(_transition("c", "private", True, 40, 20, 7))
+    # An invalidated lineage cannot resurrect on a later full assignment.
+    t.consume(_transition("b", "shared", True, 0, 100, 8))
+    var rows = t.metrics("budget")
+    assert_equal(_find(rows, "known_shared_region_bytes").value, UInt64(180))
+    assert_equal(_find(rows, "known_private_region_bytes").value, UInt64(20))
+    assert_equal(_find(rows, "known_shared_region_bytes").coverage, String("partial"))
+    assert_equal(_find(rows, "conversion_requests").value, UInt64(9))
+
+
 def run() raises -> Int:
     var suite = TestSuite()
+    suite.test[test_pointwise_overlap_and_reused_generations]()
+    suite.test[test_merge_at_global_budget_and_reuse_freed_capacity]()
     suite.test[test_reference_key]()
     suite.test[test_region_checks]()
     suite.test[test_region_union_shared]()

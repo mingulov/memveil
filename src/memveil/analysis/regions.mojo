@@ -30,17 +30,103 @@ from memveil.model.validate import format_u64
 comptime SEGMENTS_MAX = 65536
 
 
+comptime _UNKNOWN = 0
+comptime _SHARED = 1
+comptime _PRIVATE = 2
+
+
 struct _Segment(ImplicitlyCopyable):
-    var region: Int
     var start: UInt64
     var end: UInt64
-    var state: String
+    var state: Int
 
-    def __init__(out self):
-        self.region = -1
-        self.start = UInt64(0)
-        self.end = UInt64(0)
-        self.state = String("")
+    def __init__(
+        out self, start: UInt64 = 0, end: UInt64 = 0, state: Int = _UNKNOWN
+    ):
+        self.start = start
+        self.end = end
+        self.state = state
+
+
+def _append_merged(mut segments: List[_Segment], segment: _Segment):
+    var n = len(segments)
+    if (
+        n > 0
+        and segments[n - 1].end == segment.start
+        and segments[n - 1].state == segment.state
+    ):
+        segments[n - 1].end = segment.end
+    else:
+        segments.append(segment)
+
+
+def _assign(
+    mut segments: List[_Segment], start: UInt64, end: UInt64,
+    state: Int, capacity: Int,
+) -> Bool:
+    # Sorted disjoint intervals permit a bounded splice without rebuilding.
+    var n = len(segments)
+    var lo = 0
+    var hi = n
+    while lo < hi:
+        var mid = lo + (hi - lo) // 2
+        if segments[mid].end <= start:
+            lo = mid + 1
+        else:
+            hi = mid
+    var first = lo
+    hi = n
+    while lo < hi:
+        var mid = lo + (hi - lo) // 2
+        if segments[mid].start < end:
+            lo = mid + 1
+        else:
+            hi = mid
+    var last = lo
+    var replacement = List[_Segment](capacity=3)
+    if first < last and segments[first].start < start:
+        _append_merged(replacement, _Segment(
+            segments[first].start, start, segments[first].state
+        ))
+    _append_merged(replacement, _Segment(start, end, state))
+    if first < last and segments[last - 1].end > end:
+        _append_merged(replacement, _Segment(
+            end, segments[last - 1].end, segments[last - 1].state
+        ))
+    if (
+        first > 0
+        and segments[first - 1].end == replacement[0].start
+        and segments[first - 1].state == replacement[0].state
+    ):
+        first -= 1
+        replacement[0].start = segments[first].start
+    var tail = len(replacement) - 1
+    if (
+        last < n
+        and replacement[tail].end == segments[last].start
+        and replacement[tail].state == segments[last].state
+    ):
+        replacement[tail].end = segments[last].end
+        last += 1
+    var size = n - (last - first) + len(replacement)
+    if size > capacity:
+        return False
+    var delta = size - n
+    if delta > 0:
+        for _ in range(delta):
+            segments.append(_Segment())
+        var i = n - 1
+        while i >= last:
+            segments[i + delta] = segments[i]
+            i -= 1
+    elif delta < 0:
+        for i in range(last, n):
+            segments[i + delta] = segments[i]
+        for _ in range(-delta):
+            _ = segments.pop()
+    for i in range(len(replacement)):
+        segments[first + i] = replacement[i]
+    return True
 
 
 def _u64max() -> UInt64:
@@ -56,7 +142,9 @@ struct RegionTracker[REGION_N: Int = REGION_MAX, SEG_N: Int = SEGMENTS_MAX]:
     var _claimed: Dict[String, String]
     var _namespaces: List[String]
     var _invalid: List[Bool]
-    var _segments: List[_Segment]
+    var _segments: List[List[_Segment]]
+    var _segment_count: Int
+    var _storage_peaks: List[Int]
     var _requests: Int
     var _failures: Int
     var _request_bytes: UInt64
@@ -82,7 +170,9 @@ struct RegionTracker[REGION_N: Int = REGION_MAX, SEG_N: Int = SEGMENTS_MAX]:
         self._claimed = Dict[String, String]()
         self._namespaces = List[String]()
         self._invalid = List[Bool]()
-        self._segments = List[_Segment]()
+        self._segments = List[List[_Segment]]()
+        self._segment_count = 0
+        self._storage_peaks = List[Int]()
         self._requests = 0
         self._failures = 0
         self._request_bytes = UInt64(0)
@@ -356,28 +446,27 @@ struct RegionTracker[REGION_N: Int = REGION_MAX, SEG_N: Int = SEGMENTS_MAX]:
         var private = UInt64(0)
         var unknown = UInt64(0)
         var overflow = False
-        for i in range(len(self._segments)):
-            var s = self._segments[i]
-            if self._invalid[s.region]:
+        for idx in range(len(self._segments)):
+            if self._invalid[idx] or self._namespaces[idx] != "guest_physical":
                 continue
-            if self._namespaces[s.region] != "guest_physical":
-                continue
-            var n = s.end - s.start
-            if s.state == "shared":
-                if n > _u64max() - shared:
-                    overflow = True
+            for i in range(len(self._segments[idx])):
+                var s = self._segments[idx][i]
+                var n = s.end - s.start
+                if s.state == _SHARED:
+                    if n > _u64max() - shared:
+                        overflow = True
+                    else:
+                        shared += n
+                elif s.state == _PRIVATE:
+                    if n > _u64max() - private:
+                        overflow = True
+                    else:
+                        private += n
                 else:
-                    shared += n
-            elif s.state == "private":
-                if n > _u64max() - private:
-                    overflow = True
-                else:
-                    private += n
-            else:
-                if n > _u64max() - unknown:
-                    overflow = True
-                else:
-                    unknown += n
+                    if n > _u64max() - unknown:
+                        overflow = True
+                    else:
+                        unknown += n
         var partial = (
             unknown > UInt64(0)
             or self._refused > 0
@@ -527,6 +616,8 @@ struct RegionTracker[REGION_N: Int = REGION_MAX, SEG_N: Int = SEGMENTS_MAX]:
         var idx = len(self._namespaces)
         self._namespaces.append(namespace)
         self._invalid.append(False)
+        self._segments.append(List[_Segment]())
+        self._storage_peaks.append(0)
         self._index[key] = idx
         if claim not in self._claimed:
             self._claimed[claim] = namespace
@@ -535,98 +626,33 @@ struct RegionTracker[REGION_N: Int = REGION_MAX, SEG_N: Int = SEGMENTS_MAX]:
     def _apply(
         mut self, idx: Int, start: UInt64, end: UInt64, state: String
     ):
-        if self._invalid[idx]:
+        if self._invalid[idx] or start >= end:
             return
-        if start >= end:
-            return
-        var starts = List[UInt64]()
-        var ends = List[UInt64]()
-        var states = List[String]()
-        for i in range(len(self._segments)):
-            var s = self._segments[i]
-            if s.region != idx:
-                continue
-            if s.end <= start or s.start >= end:
-                starts.append(s.start)
-                ends.append(s.end)
-                states.append(s.state)
-                continue
-            if s.start < start:
-                starts.append(s.start)
-                ends.append(start)
-                states.append(s.state)
-            if s.end > end:
-                starts.append(end)
-                ends.append(s.end)
-                states.append(s.state)
-        starts.append(start)
-        ends.append(end)
-        states.append(state)
-        self._sort_by_start(starts, ends, states)
-        var total = len(self._segments)
-        for i in range(len(self._segments)):
-            if self._segments[i].region == idx:
-                total -= 1
-        var merged_starts = List[UInt64]()
-        var merged_ends = List[UInt64]()
-        var merged_states = List[String]()
-        for i in range(len(starts)):
-            var n = len(merged_starts)
-            if (
-                n > 0
-                and merged_states[n - 1] == states[i]
-                and merged_ends[n - 1] == starts[i]
-            ):
-                merged_ends[n - 1] = ends[i]
-            else:
-                merged_starts.append(starts[i])
-                merged_ends.append(ends[i])
-                merged_states.append(states[i])
-        if total + len(merged_starts) > Self.SEG_N:
+        var tag = _UNKNOWN
+        if state == "shared":
+            tag = _SHARED
+        elif state == "private":
+            tag = _PRIVATE
+        var old_size = len(self._segments[idx])
+        var available = Self.SEG_N - self._segment_count + old_size
+        if not _assign(self._segments[idx], start, end, tag, available):
             self._invalid[idx] = True
             self._invalidated += 1
             self._note_once(
                 "interval budget exceeded; affected region excluded"
             )
-            var kept = List[_Segment]()
-            for i in range(len(self._segments)):
-                if self._segments[i].region != idx:
-                    kept.append(self._segments[i])
-            self._segments = kept^
+            self._segments[idx] = List[_Segment]()
+            self._segment_count -= old_size
+            self._storage_peaks[idx] = 0
             return
-        var next = List[_Segment]()
-        for i in range(len(self._segments)):
-            if self._segments[i].region != idx:
-                next.append(self._segments[i])
-        for i in range(len(merged_starts)):
-            var s = _Segment()
-            s.region = idx
-            s.start = merged_starts[i]
-            s.end = merged_ends[i]
-            s.state = merged_states[i]
-            next.append(s^)
-        self._segments = next^
-
-    def _sort_by_start(
-        mut self,
-        mut starts: List[UInt64],
-        mut ends: List[UInt64],
-        mut states: List[String],
-    ):
-        # Insertion sort over one region's fragments, in place.
-        var n = len(starts)
-        var i = 1
-        while i < n:
-            var ks = starts[i]
-            var ke = ends[i]
-            var kt = states[i]
-            var j = i - 1
-            while j >= 0 and starts[j] > ks:
-                starts[j + 1] = starts[j]
-                ends[j + 1] = ends[j]
-                states[j + 1] = states[j]
-                j -= 1
-            starts[j + 1] = ks
-            ends[j + 1] = ke
-            states[j + 1] = kt
-            i += 1
+        var size = len(self._segments[idx])
+        self._segment_count += size - old_size
+        if size < self._storage_peaks[idx] // 2:
+            # Release old capacity after shrinkage across many lineages.
+            var compact = List[_Segment](capacity=size)
+            for segment in self._segments[idx]:
+                compact.append(segment)
+            self._segments[idx] = compact^
+            self._storage_peaks[idx] = size
+        else:
+            self._storage_peaks[idx] = max(self._storage_peaks[idx], size)

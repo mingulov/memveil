@@ -2262,11 +2262,10 @@ def test_bracket_gap_at_start_fails():
         km.bracket_oracle(samples, 3 * 10 ** 9, 6 * 10 ** 9)
 
 
-def test_bracket_gap_at_end_fails():
+def test_bracket_idle_gap_at_end_passes():
     samples = [(0, {"tp": 0}), (10 ** 9, {"tp": 100}),
                (6 * 10 ** 9, {"tp": 100})]
-    with pytest.raises(km.OracleError):
-        km.bracket_oracle(samples, 0, 3 * 10 ** 9)
+    assert km.oracle_interval(samples, 0, 3 * 10 ** 9, "tp") == (100, 100)
 
 
 def test_bracket_half_second_gaps_pass():
@@ -2673,20 +2672,20 @@ def test_decide_busy_edge_gap_over_1s_passes():
     assert overall == "EXACT"
 
 
-def test_decide_busy_edge_gap_over_2s_fails():
-    per, _, failed, _ = _busy2_decide(
+def test_decide_busy_idle_edge_gap_over_2s_passes():
+    per, overall, failed, _ = _busy2_decide(
         samples=_busy2_gap_samples(2100000000))
-    assert failed
-    assert per["attempt"].startswith("ORACLE-FAIL"), per
+    assert not failed, per
+    assert overall == "EXACT"
 
 
-def test_decide_main_edge_gap_over_1s_fails():
-    per, _, failed, _ = km.decide_channels(
+def test_decide_main_idle_edge_gap_over_1s_passes():
+    per, overall, failed, _ = km.decide_channels(
         _busy2_persisted(), _busy2_gap_samples(1000011000),
         _busy2_miss(), 5000000000, 23000000000,
         _CHANNELS5, _loss(), 0, 0)
-    assert failed
-    assert per["attempt"].startswith("ORACLE-FAIL"), per
+    assert not failed, per
+    assert overall == "EXACT"
 
 
 def _busy2_decide(persisted=None, session=None,
@@ -3305,9 +3304,8 @@ def test_decide_main_aggregate_scope_missing_fails():
     assert "attached interval" in detail
 
 
-def test_decide_main_aggregate_main_gap_applies():
-    # A 1.000011 s attached edge gap fails on the main
-    # path even though the busy path allows 2 s.
+def test_decide_main_aggregate_idle_gap_passes():
+    # Identical complete counters prove the attached edge was idle.
     agg = {"status": "complete_for_scope", "loss_count": "0",
            "scope": "counter snapshots attached "
                     "[5000000000,23000000000)",
@@ -3315,8 +3313,8 @@ def test_decide_main_aggregate_main_gap_applies():
     ok, detail = km.decide_main_aggregate(
         agg, _busy2_counters(), _busy2_gap_samples(1000011000),
         _busy2_miss(), True)
-    assert not ok, detail
-    assert "ORACLE-FAIL" in detail
+    assert ok, detail
+    assert "match the oracle" in detail
 
 
 def test_parse_busy_span():
@@ -6552,3 +6550,68 @@ def test_load_old_summary_refuses_stale(tmp_path):
     old, error = tool.load_old_summary(str(fresh))
     assert old is None
     assert error
+
+
+@pytest.mark.parametrize("edge", ["start", "end"])
+def test_complete_idle_edge_gap_has_exact_bounds(edge):
+    counts = {"tp": 21632, "tpb": 1140850688, "map": 21632,
+              "unmap": 21632, "copy": 43264, "syncc": 0, "syncd": 0}
+    samples = [(0, dict(counts)), (10 ** 9, dict(counts)),
+               (10 ** 12, dict(counts))]
+    start, end = (5 * 10 ** 11, 10 ** 12) if edge == "start" else (0, 5 * 10 ** 11)
+    for key in counts:
+        assert km.oracle_interval(samples, start, end, key) == (0, 0)
+
+
+@pytest.mark.parametrize("changed", ["tp", "tpb", "map", "unmap", "copy", "syncc", "syncd", "mapd0", "copyd3"])
+def test_idle_edge_requires_every_counter_unchanged(changed):
+    counts = {key: 7 for key in ("tp", "tpb", "map", "unmap", "copy", "syncc", "syncd", "mapd0", "copyd3")}
+    later = dict(counts)
+    later[changed] += 1
+    with pytest.raises(km.OracleError, match="gap"):
+        km.bracket_oracle([(0, counts), (10 ** 12, later)], 1, 10 ** 12)
+
+
+@pytest.mark.parametrize("missing", ["empty", "edge", "both"])
+def test_idle_gap_does_not_bless_missing_counter_sources(missing):
+    first = {"tp": 0, "tpb": 0}
+    before = dict(first)
+    after = dict(first)
+    if missing == "empty":
+        first, before, after = {}, {}, {}
+    elif missing == "edge":
+        del after["tpb"]
+    else:
+        del before["tpb"]
+        del after["tpb"]
+    samples = [(0, first), (1, before), (10 ** 12, after)]
+    with pytest.raises(km.OracleError):
+        km.bracket_oracle(samples, 2, 10 ** 12)
+
+
+def test_idle_countonly_source_does_not_supply_missing_bytes():
+    samples = [(0, {"tp": 0}), (10 ** 12, {"tp": 0})]
+    assert km.oracle_interval(samples, 1, 10 ** 12, "tp") == (0, 0)
+    with pytest.raises(km.OracleError, match="key tpb missing"):
+        km.oracle_interval(samples, 1, 10 ** 12, "tpb")
+
+
+@pytest.mark.parametrize("busy,gap", [(False, 1000011000), (True, 2100000000)])
+def test_active_edge_gaps_keep_main_and_busy_limits(busy, gap):
+    samples = _busy2_gap_samples(gap)
+    samples[2][1]["tp"] += 1
+    if busy:
+        per, _, failed, _ = _busy2_decide(samples=samples)
+    else:
+        per, _, failed, _ = km.decide_channels(
+            _busy2_persisted(), samples, _busy2_miss(),
+            5000000000, 23000000000, _CHANNELS5, _loss(), 0, 0)
+    assert failed
+    assert per["attempt"].startswith("ORACLE-FAIL"), per
+
+
+@pytest.mark.parametrize("value", [-1, None, True])
+def test_idle_edge_rejects_unknown_or_invalid_counts(value):
+    samples = [(0, {"tp": value}), (10 ** 12, {"tp": value})]
+    with pytest.raises(km.OracleError):
+        km.bracket_oracle(samples, 1, 10 ** 12)

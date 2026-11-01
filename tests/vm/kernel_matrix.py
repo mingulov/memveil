@@ -505,15 +505,25 @@ def bracket_oracle(samples, start_ns, end_ns,
 
     Raises OracleError when the first sample is after start,
     the last is before end, or either edge gap exceeds the
-    limit. Returns (before_start, after_start, before_end,
+    limit without identical complete observed counters. Returns
+    (before_start, after_start, before_end,
     after_end) count dicts.
     """
     before_start, after_start, before_end, after_end = _bracket_core(
         samples, start_ns, end_ns)
-    if after_start[0] - before_start[0] > max_gap_ns:
+    keys = set().union(*(snap.keys() for _, snap in samples))
+
+    def idle(before, after):
+        return bool(keys) and set(before) == keys and before == after \
+            and all(type(value) is int and value >= 0
+                    for value in before.values())
+
+    if after_start[0] - before_start[0] > max_gap_ns \
+            and not idle(before_start[1], after_start[1]):
         raise OracleError("oracle gap over %dns at window start"
                           % max_gap_ns)
-    if after_end[0] - before_end[0] > max_gap_ns:
+    if after_end[0] - before_end[0] > max_gap_ns \
+            and not idle(before_end[1], after_end[1]):
         raise OracleError("oracle gap over %dns at window end"
                           % max_gap_ns)
     return (before_start[1], after_start[1],

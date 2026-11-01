@@ -40,6 +40,19 @@ envelope are declared at the top of
 `tests/perf/region_replay.py`; historical development
 measurements do not qualify a rebuilt package.
 
+The region reducer keeps sorted, disjoint intervals separately for each
+proved lineage. An update finds its overlap with two binary searches,
+replaces that span, and merges adjacent equal states. Only the affected
+lineage's tail moves; unrelated lineages are never rebuilt or sorted.
+The global segment budget is checked on the merged result before mutation.
+Exhaustion still invalidates the affected lineage and excludes its state.
+Storage is compacted after a lineage shrinks below half its retained high
+water mark, so cycling large lineages cannot accumulate retained capacity.
+Arbitrary insertion order can still require a linear tail move; the fixed
+scale rows and independent interval/lifetime oracles remain the acceptance
+checks. The historical 95.1-second largest-row miss remains a failed
+measurement; a new implementation needs fresh exact-artifact evidence.
+
 ## Live workload protocol
 
 The laboratory protocol uses 10 seconds warmup, a 60-second measured window
