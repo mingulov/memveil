@@ -3946,7 +3946,7 @@ PROFILE_REASON = ("matrix rows assert lock expectations and "
                   "doctor verdicts, not shipped profiles")
 
 _ROW_TOP_FILES = frozenset({
-    "job.json", "cache.txt", "cache-FAIL.txt", "download.txt",
+    "oracle-inputs.json", "job.json", "cache.txt", "cache-FAIL.txt", "download.txt",
     "console.txt", "vng.exit", "FAIL.txt", "validate.txt",
     "artifacts.json", "blockstat.json", "configid.txt",
     "btf-sha.txt", "dev.txt", "dmesg.txt", "dmesg_scan.json",
@@ -5436,3 +5436,49 @@ def verify_matrix_out(out_dir):
     ok = not problems and bool(rows) \
         and all(row["ok"] for row in rows)
     return {"ok": ok, "rows": rows, "problems": problems}
+
+
+def rederive_inputs(inputs):
+    """Execute the oracle predicates again, without accepting recorded statuses."""
+    if not isinstance(inputs, dict):
+        raise ValueError('matrix oracle inputs must be an object')
+    return evaluate_row(inputs)
+
+
+def export_tested_candidate(out_dir, lock, manifest, destination):
+    """Export complete payload expectations only after every locked row proves itself."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools'))
+    import candidate
+    candidate.validate_manifest(manifest)
+    rows = lock.get('kernels')
+    candidate.require(isinstance(rows, list) and rows, 'required matrix rows are empty')
+    wanted = {row['id']: row for row in rows}
+    candidate.require(len(wanted) == len(rows), 'duplicate required matrix row')
+    report = verify_matrix_out(out_dir)
+    candidate.require(report['ok'] and {row['id'] for row in report['rows']} == set(wanted), 'required matrix rows did not pass')
+    expected_engine = next(e['sha256'] for e in manifest['canonical_runtime']['entries'] if e['path'] == 'bin/memveil')
+    for ident, entry in wanted.items():
+        row = Path(out_dir) / ident
+        receipt = candidate.read_json(row / 'receipt.json')
+        candidate.require(receipt['mode'] == 'matrix' and not receipt['smoke'], 'required matrix row was skipped or smoke-only')
+        candidate.require(receipt['source']['memveil'] == {'commit': manifest['source']['commit'], 'dirty': False}, 'matrix product source differs')
+        candidate.require(receipt['toolchain']['lock_sha256'] == manifest['toolchain']['lock_sha256'], 'matrix toolchain differs')
+        inputs = candidate.read_json(row / 'oracle-inputs.json')
+        candidate.require(inputs['entry'] == entry, 'matrix expectations differ from pinned lock')
+        candidate.require(inputs.get('candidate_sha256') == candidate.digest_bytes(candidate.canonical(manifest)), 'matrix candidate differs')
+        result = rederive_inputs(inputs)
+        candidate.require(result['ok'], 'matrix oracle predicates failed: ' + ident)
+        candidate.require(result['checks'] == receipt['actual']['checks'], 'matrix recorded checks differ from re-derived predicates')
+        candidate.require(receipt['artifacts']['binary_sha256'] == expected_engine, 'matrix executable differs from candidate')
+        expected_source = (candidate.artifact(manifest, 'deb')['sha256']
+                           if receipt['command']['kind'] == 'deb' else expected_engine)
+        candidate.require(receipt['command']['source_sha256'] == expected_source, 'matrix selected artifact differs')
+        aliases = {'attempt': 'swiotlb_attempt.bpf.o', 'lifecycle': 'swiotlb_lifecycle.bpf.o', 'copy': 'swiotlb_copy.bpf.o'}
+        for name, digest in receipt['artifacts']['bpf'].items():
+            filename = aliases.get(name, name if name.endswith('.bpf.o') else name + '.bpf.o')
+            candidate.require(manifest['files'].get('bpf/' + filename) == digest, 'matrix BPF object differs')
+        candidate.require(inputs.get('canonical_runtime') == manifest['canonical_runtime'], 'matrix runtime/profile closure differs')
+    expected = candidate.expected_payload(manifest)
+    candidate.write_once(destination, ''.join(value + '  ' + name + '\n' for name, value in sorted(expected.items())).encode())
+    return expected

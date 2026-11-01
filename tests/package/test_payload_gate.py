@@ -92,10 +92,26 @@ def write_manifest(tmp_path, name, entries):
 
 
 @needs_packages
-def test_collect_covers_fifteen_payload_files(tmp_path):
+def test_collect_covers_complete_canonical_payload(tmp_path):
     _, lines = collect(tmp_path)
     entries = parse(lines)
-    assert sorted(entries) == EXPECTED
+    with tarfile.open(BUNDLE, 'r:gz') as archive:
+        members = archive.getmembers()
+        top = next(m.name.split('/')[0] for m in members if '/' in m.name)
+        import json
+        manifest = json.load(archive.extractfile(top + '/MANIFEST.json'))
+        copied = {}
+        import hashlib
+        for name in manifest['files']:
+            copied[name] = hashlib.sha256(archive.extractfile(top + '/' + name).read()).hexdigest()
+        assert copied == manifest['files']
+    import sys
+    sys.path.insert(0, os.path.join(REPO, 'tools'))
+    from canonical_runtime import installed_file_path
+    expected = {'bundle/' + name: digest for name, digest in copied.items()}
+    for kind in ('deb', 'rpm'):
+        expected.update({kind + '/' + installed_file_path(name): digest for name, digest in copied.items()})
+    assert entries == expected
     for logical, digest in entries.items():
         assert HEX64.match(digest), logical
         assert digest != "0" * 64, logical
@@ -224,11 +240,10 @@ def test_tampered_deb_fails_against_untampered(tmp_path):
     tainted = str(tmp_path / "tainted.txt")
     proc = run_gate("--collect", "--deb", tampered, "--rpm", RPM,
                     "--bundle", BUNDLE, "--out", tainted)
-    assert proc.returncode == 0, proc.stderr.decode()
-    proc = run_gate("--check", "--packaged", tainted,
-                    "--tested", manifest)
-    assert proc.returncode == 1
-    assert "deb/usr/bin/memveil mismatch" in proc.stderr.decode()
+    assert proc.returncode == 2
+    assert "runtime inventory differs" in proc.stderr.decode()
+    assert not os.path.exists(tainted)
+
 
 
 @needs_packages
@@ -243,7 +258,8 @@ def test_bundle_missing_member_fails_collect(tmp_path):
     proc = run_gate("--collect", "--deb", DEB, "--rpm", RPM,
                     "--bundle", hollow, "--out", out)
     assert proc.returncode == 2
-    assert "lacks payload member" in proc.stderr.decode()
+    assert "archive requires one root" in proc.stderr.decode()
+    assert not os.path.exists(out)
 
 
 def test_usage_errors_exit_2():

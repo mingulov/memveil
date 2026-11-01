@@ -485,7 +485,10 @@ def main(argv):
               and "pixi.sh/install.sh" not in text,
               piped_shell.group(0).strip() if piped_shell else "")
         check("ci-pixi-bootstrap-%s" % base,
-              "tools/install-pixi" in text)
+              ("tools/install-pixi" in text if base != "release.yml" else
+               "tools/candidate-custody" in text and "workflow_dispatch:" in text
+               and "ARM-" in text and "tools/build" not in text
+               and "tools/package" not in text and "\n  push:" not in text))
         runners = re.findall(r"^\s*runs-on:\s*(.+?)\s*$",
                              text, re.M)
         check("ci-runners-known-%s" % base,

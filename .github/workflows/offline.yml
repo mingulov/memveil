@@ -64,7 +64,7 @@ jobs:
               output-paths privacy render-escaping \
               offline-environment perf-replay preview-package \
               provenance docs examples package source-export \
-              release-runtime; do
+              release-runtime candidate-custody; do
             ./tools/test "$suite" || exit 1
           done
       - name: Retain fuzz corpus receipts on every outcome

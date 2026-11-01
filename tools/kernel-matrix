@@ -39,6 +39,34 @@ import gate_kernel as gk
 CAPTURE_TIMEOUT = 300
 
 
+def select_candidate_inputs(args):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support import candidate_input
+    if not candidate_input.requested():
+        return None
+    selected = candidate_input.load(required=True)
+    if args.deb and args.bundle:
+        raise ValueError('candidate qualification forbids competing package overrides')
+    if args.deb:
+        expected = selected.artifact('deb')
+        if Path(args.deb).resolve() != expected.resolve():
+            raise ValueError('candidate qualification forbids foreign --deb override')
+        candidate_input.candidate.verify_file(args.deb, candidate_input.candidate.artifact(selected.manifest, 'deb'))
+    if args.bundle:
+        root = Path(args.bundle)
+        candidate = candidate_input.candidate
+        bundled = candidate.runtime.verify_bundle(root)
+        if (candidate.runtime.digest(root / 'MANIFEST.json') != selected.manifest['bundle_manifest_sha256'] or
+                bundled['canonical_runtime'] != selected.manifest['canonical_runtime'] or
+                bundled['files'] != selected.manifest['files']):
+            raise ValueError('candidate qualification forbids foreign --bundle override')
+    if args.scenarios or args.deb:
+        args.deb, args.bundle = str(selected.artifact('deb')), None
+    else:
+        args.bundle = str(selected.root)
+    return selected
+
+
 def find_vng():
     cand = os.environ.get("VNG")
     if cand:
@@ -366,6 +394,17 @@ def collect_one(entry, export, tools, dd_count, elapsed, run_id,
         ev["busy_validate_rc"] = rc
         ev["busy_validate_out"] = out
     ev["export_redact_error"] = km.scan_export_redaction(export)
+    manifest_path = os.environ.get("MV_CANDIDATE_MANIFEST")
+    if manifest_path:
+        sys.path.insert(0, str(ROOT / "tools"))
+        import candidate
+        manifest = candidate.load_manifest(manifest_path)
+        ev["runner_source"] = km.row_source_identity(ROOT)
+        ev["candidate_sha256"] = candidate.runtime.digest(manifest_path)
+        ev["canonical_runtime"] = manifest["canonical_runtime"]
+    with open(Path(export, "oracle-inputs.json"), "x") as stream:
+        json.dump(ev, stream, sort_keys=True)
+        stream.write("\n")
     try:
         rec = km.evaluate_row(ev)
     except Exception as exc:
@@ -900,8 +939,23 @@ def main(argv=None):
     parser.add_argument("--scenarios", action="store_true",
                         help="run detection scenarios, not the "
                              "matrix")
+    parser.add_argument("--export-tested", help="write tested payload after every locked row re-derives")
     args = parser.parse_args(argv)
+    if args.export_tested and not args.verify_out:
+        parser.error("--export-tested requires --verify-out")
     if args.verify_out:
+        if args.export_tested:
+            sys.path.insert(0, str(ROOT / "tools"))
+            import candidate
+            try:
+                manifest = candidate.load_manifest(os.environ["MV_CANDIDATE_MANIFEST"])
+                lock = candidate.read_json(args.lock)
+                km.parse_lock(args.lock)
+                km.export_tested_candidate(args.out, lock, manifest, args.export_tested)
+            except (OSError, ValueError, KeyError) as error:
+                print("kernel-matrix: tested export refused: " + str(error), file=sys.stderr)
+                return 1
+            return 0
         report = km.verify_matrix_out(args.out)
         for row in report["rows"]:
             print("kernel-matrix: verify %s %s: %s" % (
@@ -914,6 +968,11 @@ def main(argv=None):
             print("kernel-matrix: verify %d rows re-derived"
                   % len(report["rows"]))
         return 0 if report["ok"] else 1
+    try:
+        selected_candidate = select_candidate_inputs(args)
+    except (OSError, ValueError) as error:
+        print('kernel-matrix: candidate refused: ' + str(error), file=sys.stderr)
+        return 2
     if args.cpus < 1 or args.cpus > 4:
         print("kernel-matrix: --cpus must be 1..4", file=sys.stderr)
         return 2
@@ -1022,6 +1081,8 @@ def main(argv=None):
         return 1
     try:
         receipt_source = km.row_source_identity(ROOT)
+        if selected_candidate:
+            receipt_source["memveil"] = {"commit": selected_candidate.manifest["source"]["commit"], "dirty": False}
         receipt_toolchain = km.read_toolchain_lock(ROOT)
     except ValueError as exc:
         print("kernel-matrix: %s" % exc, file=sys.stderr)

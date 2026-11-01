@@ -1,0 +1,161 @@
+{
+  "schema": "memveil-candidate-policy/1",
+  "claim": "ordinary-preview",
+  "retention_days": "90",
+  "trusted_keys": [],
+  "required_gates": {
+    "canonical-packages/1": {
+      "environment": "offline",
+      "predicates": {
+        "files": "equal",
+        "mismatches": "zero"
+      }
+    },
+    "compiler-free-runtime/1": {
+      "environment": "ordinary-linux",
+      "predicates": {
+        "commands": "equal",
+        "failures": "zero"
+      }
+    },
+    "kernel-matrix/2": {
+      "environment": "ordinary-linux",
+      "predicates": {
+        "required_rows": "equal",
+        "failed_rows": "zero",
+        "skipped_rows": "zero"
+      }
+    },
+    "capture-recovery/1": {
+      "environment": "ordinary-linux",
+      "predicates": {
+        "recovered_prefixes": "equal",
+        "lost_prefixes": "zero",
+        "process_cases": "equal",
+        "filesystem_cases": "equal",
+        "enospc_cases": "equal"
+      }
+    },
+    "cpu-runtime/1": {
+      "environment": "ordinary-linux",
+      "predicates": {
+        "admitted_cells": "equal",
+        "refused_cells": "equal",
+        "failures": "zero"
+      }
+    },
+    "offline-replay/1": {
+      "environment": "offline",
+      "predicates": {
+        "events": "equal",
+        "rss_bytes": "at-most",
+        "failures": "zero",
+        "read_bytes": "equal",
+        "read_calls": "at-least",
+        "device": "equal",
+        "inode": "equal",
+        "eof": "equal",
+        "max_request_bytes": "at-most",
+        "duration_ns": "at-least",
+        "wall_ns": "at-least"
+      },
+      "limits": {
+        "events": "600000",
+        "rss_bytes": "268435456",
+        "eof": "1",
+        "max_request_bytes": "65536",
+        "duration_ns": "60000000000",
+        "wall_ns": "60000000000"
+      },
+      "adapter": "paced-replay/1"
+    },
+    "live-soak/1": {
+      "environment": "ordinary-linux",
+      "predicates": {
+        "duration_seconds": "at-least",
+        "operations": "equal",
+        "lost_events": "zero",
+        "cleanup_failures": "zero",
+        "mixed_duration_seconds": "at-least"
+      },
+      "limits": {
+        "duration_seconds": "4201",
+        "mixed_duration_seconds": "1800"
+      }
+    },
+    "live-top/1": {
+      "environment": "ordinary-linux",
+      "predicates": {
+        "intervals": "equal",
+        "lost_events": "zero"
+      }
+    },
+    "summary-overhead/1": {
+      "environment": "ordinary-linux",
+      "predicates": {
+        "throughput_decrease_ppm": "at-most",
+        "p99_increase_ppm": "at-most",
+        "paired_block_runs": "at-least",
+        "paired_network_runs": "at-least",
+        "warmup_seconds": "at-least",
+        "measurement_seconds": "at-least",
+        "rss_bytes": "at-most",
+        "lost_events": "zero"
+      },
+      "limits": {
+        "throughput_decrease_ppm": "50000",
+        "p99_increase_ppm": "100000",
+        "paired_block_runs": "5",
+        "paired_network_runs": "5",
+        "warmup_seconds": "10",
+        "measurement_seconds": "60",
+        "rss_bytes": "268435456"
+      }
+    },
+    "region-replay/1": {
+      "environment": "offline",
+      "predicates": {
+        "segments": "equal",
+        "duration_milliseconds": "at-most",
+        "failures": "zero"
+      },
+      "limits": {
+        "segments": "65536",
+        "duration_milliseconds": "60000"
+      }
+    },
+    "source-and-licenses/1": {
+      "environment": "offline",
+      "predicates": {
+        "reviewed_files": "equal",
+        "missing_sources": "zero",
+        "missing_notices": "zero"
+      }
+    },
+    "offline-soak/1": {
+      "environment": "offline",
+      "predicates": {
+        "duration_seconds": "at-least",
+        "cycles": "equal",
+        "failures": "zero"
+      },
+      "limits": {
+        "duration_seconds": "1800"
+      }
+    },
+    "install-journey/1": {
+      "environment": "ordinary-linux",
+      "predicates": {
+        "install_cases": "equal",
+        "upgrade_cases": "equal",
+        "rollback_cases": "equal",
+        "removal_cases": "equal",
+        "duration_milliseconds": "at-most",
+        "failures": "zero"
+      },
+      "limits": {
+        "duration_milliseconds": "300000"
+      }
+    }
+  }
+}

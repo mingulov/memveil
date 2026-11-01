@@ -113,7 +113,19 @@ def test_spdx_envelope(tmp_path):
 def test_payload_hashes_match_collect(tmp_path):
     doc = emit(tmp_path)
     payload = collect_payload(tmp_path)
-    assert len(payload) == 15
+    with tarfile.open(BUNDLE, 'r:gz') as archive:
+        top = next(name.split('/')[0] for name in archive.getnames() if '/' in name)
+        manifest = json.load(archive.extractfile(top + '/MANIFEST.json'))
+        copied = {name: hashlib.sha256(archive.extractfile(top + '/' + name).read()).hexdigest()
+                  for name in manifest['files']}
+    assert copied == manifest['files']
+    import sys
+    sys.path.insert(0, os.path.join(REPO, 'tools'))
+    from canonical_runtime import installed_file_path
+    expected = {'bundle/' + name: value for name, value in copied.items()}
+    for kind in ('deb', 'rpm'):
+        expected.update({kind + '/' + installed_file_path(name): value for name, value in copied.items()})
+    assert payload == expected
     files = files_by_name(doc)
     for logical, digest in payload.items():
         entry = files.get("payload/%s" % logical)

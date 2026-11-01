@@ -168,3 +168,192 @@ def test_signed_inputs_need_pinned_trust_and_exact_subject(tmp_path):
 def test_cli_help_is_available(args):
     result = subprocess.run([str(ROOT / 'tools/candidate'), *args, '--help'], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_candidate_payload_uses_full_closure_and_installed_paths():
+    doc = manifest()
+    assert len(api().expected_payload(doc)) == 3 * len(doc['files'])
+    assert api().expected_payload(doc)['bundle/lib/memveil/libx.so.1'] == '3' * 64
+    assert api().expected_payload(doc)['deb/usr/share/doc/memveil/LICENSE'] == '3' * 64
+
+
+def test_payload_check_candidate_refuses_matching_but_incomplete_manifests(tmp_path):
+    m = api(); doc = manifest()
+    candidate = tmp_path / 'candidate.json'; m.seal_manifest(doc, candidate)
+    payload = tmp_path / 'payload.txt'
+    entries = m.expected_payload(doc)
+    entries.pop('bundle/LICENSE')
+    payload.write_text(''.join(v + '  ' + k + '\n' for k, v in sorted(entries.items())))
+    result = subprocess.run([str(ROOT / 'tools/payload-gate'), '--check', '--candidate', str(candidate),
+        '--packaged', str(payload), '--tested', str(payload)], capture_output=True, text=True)
+    assert result.returncode == 1 and 'candidate' in result.stderr, result.stderr
+
+
+def qualification_fixture(tmp_path):
+    m = api()
+    key = tmp_path / 'key'
+    subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(key)], check=True)
+    policy = {'schema': 'memveil-candidate-policy/1', 'claim': 'ordinary-preview', 'retention_days': '90',
+              'trusted_keys': [sha((tmp_path / 'key.pub').read_bytes())],
+              'required_gates': {'synthetic-counts/1': {'environment': 'offline', 'predicates': {'events': 'equal', 'losses': 'zero'}}}}
+    policy_path = tmp_path / 'policy.json'; policy_path.write_bytes(m.canonical(policy))
+    doc = manifest(); doc['policy_sha256'] = sha(policy_path.read_bytes())
+    candidate_path = tmp_path / 'candidate.json'; candidate_id = m.seal_manifest(doc, candidate_path)
+    inputs = {'schema': 'memveil-gate-input/1', 'environment': 'offline',
+              'product': {'events': '12', 'losses': '0'}, 'oracle': {'events': '12', 'losses': '0'}}
+    inputs['sources'] = {}
+    for side in ('product', 'oracle'):
+        raw = tmp_path / (side + '.json'); raw.write_bytes(m.canonical(inputs[side]))
+        inputs['sources'][side] = {name: {'file': raw.name, 'sha256': sha(raw.read_bytes()), 'path': [name], 'encoding': 'u64'}
+                                  for name in inputs[side]}
+    input_path = tmp_path / 'input.json'; input_path.write_bytes(m.canonical(inputs))
+    receipt = {'schema': 'memveil-gate-receipt/1', 'gate': 'synthetic-counts/1', 'candidate_sha256': candidate_id,
+               'source_commit': doc['source']['commit'], 'inputs': 'input.json', 'inputs_sha256': sha(input_path.read_bytes())}
+    receipt_path = tmp_path / 'receipt.json'; receipt_path.write_bytes(m.canonical(receipt))
+    subprocess.run(['ssh-keygen', '-Y', 'sign', '-f', str(key), '-n', 'memveil-candidate', str(receipt_path)], check=True, capture_output=True)
+    q = {'schema': 'memveil-qualification/1', 'candidate_sha256': candidate_id, 'source_commit': doc['source']['commit'],
+         'claim': 'ordinary-preview', 'evidence_archive': {'name': 'qualification-evidence.tar.gz', 'size': '1', 'sha256': '5' * 64},
+         'gates': {'synthetic-counts/1': {'receipt': 'receipt.json', 'receipt_sha256': sha(receipt_path.read_bytes()),
+                   'signature': 'receipt.json.sig', 'public_key': 'key.pub'}}}
+    q_path = tmp_path / 'qualification.json'; q_path.write_bytes(m.canonical(q))
+    return candidate_path, q_path, policy_path, q, inputs
+
+
+def test_qualification_requires_signed_exact_inputs_with_no_remote_ids(tmp_path):
+    m = api(); manifest_path, q_path, policy, q, inputs = qualification_fixture(tmp_path)
+    assert m.verify_qualification(manifest_path, q_path, policy, tmp_path) == q
+    assert not any('remote' in key for key in q)
+    inputs['oracle']['events'] = '13'
+    (tmp_path / 'input.json').write_bytes(m.canonical(inputs))
+    with pytest.raises(ValueError, match='inputs changed'): m.verify_qualification(manifest_path, q_path, policy, tmp_path)
+
+
+@pytest.mark.parametrize('damage', ['skip', 'source', 'candidate', 'extra', 'signature'])
+def test_qualification_fails_closed(tmp_path, damage):
+    m = api(); manifest_path, q_path, policy, q, _ = qualification_fixture(tmp_path)
+    if damage == 'skip': q['gates'] = {}
+    if damage == 'source': q['source_commit'] = '9' * 40
+    if damage == 'candidate': q['candidate_sha256'] = '9' * 64
+    if damage == 'extra': q['status'] = 'PASS'
+    if damage == 'signature': (tmp_path / 'receipt.json.sig').write_text('invalid')
+    q_path.write_bytes(m.canonical(q))
+    with pytest.raises(ValueError): m.verify_qualification(manifest_path, q_path, policy, tmp_path)
+
+
+def test_bundle_inventory_digest_and_toolchain_are_rederived():
+    import source_inventory
+    assert hasattr(api(), 'verify_source_inventory'), 'bundle source inventory is only self-declared'
+    entries = [{'path': name, 'kind': 'file', 'mode': '0o644', 'size': 1, 'sha256': value,
+                'mtime_ns': 1, 'ctime_ns': 1} for name, value in [('pixi.lock', 'e'*64), ('toolchain.lock.json', 'd'*64)]]
+    serialized = b''.join((json.dumps({k: v for k, v in entry.items() if k not in ('mtime_ns', 'ctime_ns')}, sort_keys=True, separators=(',', ':')) + '\n').encode() for entry in entries)
+    doc = manifest(); doc['source']['inventory_sha256'] = sha(serialized)
+    bundled = {'source_inventory': entries, 'source_inventory_digest': sha(serialized)}
+    api().verify_source_inventory(doc, bundled)
+    for damage in ('hash', 'lock', 'missing', 'duplicate'):
+        bad = copy.deepcopy(bundled)
+        if damage == 'hash': bad['source_inventory_digest'] = '8'*64
+        if damage == 'lock': bad['source_inventory'][1]['sha256'] = '9'*64
+        if damage == 'missing': bad.pop('source_inventory')
+        if damage == 'duplicate': bad['source_inventory'].append(bad['source_inventory'][0])
+        with pytest.raises(ValueError): api().verify_source_inventory(doc, bad)
+
+
+def test_paced_read_oracle_cannot_pass_event_counts_alone():
+    m = api()
+    requirement = {'environment': 'offline', 'adapter': 'paced-replay/1',
+        'predicates': {'events': 'equal', 'read_bytes': 'equal', 'read_calls': 'at-least',
+            'device': 'equal', 'inode': 'equal', 'eof': 'equal', 'max_request_bytes': 'at-most',
+            'duration_ns': 'at-least', 'wall_ns': 'at-least', 'rss_bytes': 'at-most', 'failures': 'zero'},
+        'limits': {'events': '600000', 'eof': '1', 'max_request_bytes': '65536',
+                   'duration_ns': '60000000000', 'wall_ns': '60000000000', 'rss_bytes': '268435456'}}
+    actual = {'events': '600000', 'read_bytes': '65537', 'read_calls': '3', 'device': '1', 'inode': '42',
+              'eof': '1', 'max_request_bytes': '65536', 'duration_ns': '60000000000',
+              'wall_ns': '60000000000', 'rss_bytes': '1024', 'failures': '0'}
+    expected = dict(actual, rss_bytes='268435456')
+    record = {'schema': 'memveil-gate-input/1', 'environment': 'offline', 'product': actual, 'oracle': expected}
+    assert m.rederive_measurements(record, requirement)
+    bad = copy.deepcopy(record); bad['product']['read_calls'] = bad['oracle']['read_calls'] = '1'
+    with pytest.raises(ValueError, match='read'): m.rederive_measurements(bad, requirement)
+    bad = copy.deepcopy(record); bad['product']['rss_bytes'] = '0'
+    with pytest.raises(ValueError, match='RSS'): m.rederive_measurements(bad, requirement)
+    for name in ('events', 'duration_ns', 'wall_ns'):
+        bad = copy.deepcopy(record); bad['product'][name] = bad['oracle'][name] = '1'
+        with pytest.raises(ValueError): m.rederive_measurements(bad, requirement)
+
+
+@pytest.mark.parametrize('field', ['lock_sha256', 'pixi_lock_sha256'])
+def test_changed_candidate_toolchain_refuses_actual_bundle(tmp_path, field):
+    # The independent loader fixture uses real ELF bytes and a sealed source inventory.
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.test_candidate_input import sealed
+    env = sealed.__wrapped__(tmp_path)
+    m = api(); doc = m.load_manifest(env['MV_CANDIDATE_MANIFEST'])
+    doc['toolchain'][field] = '9' * 64
+    with pytest.raises(ValueError, match='toolchain differs'):
+        m.verify_bundle(doc, env['MV_BUNDLE_TARBALL'], tmp_path / 'changed-toolchain')
+
+
+def test_default_policy_preserves_qualification_budgets_and_missing_trust():
+    m = api(); policy = m.validate_policy(m.read_json(ROOT / 'packaging/candidate-policy.json'))
+    gates = policy['required_gates']
+    assert gates['offline-replay/1']['limits']['events'] == '600000'
+    assert gates['offline-replay/1']['limits']['duration_ns'] == '60000000000'
+    assert gates['offline-replay/1']['limits']['rss_bytes'] == '268435456'
+    assert gates['live-soak/1']['limits'] == {'duration_seconds': '4201', 'mixed_duration_seconds': '1800'}
+    assert gates['region-replay/1']['limits'] == {'segments': '65536', 'duration_milliseconds': '60000'}
+    assert gates['summary-overhead/1']['limits']['throughput_decrease_ppm'] == '50000'
+    assert gates['summary-overhead/1']['limits']['p99_increase_ppm'] == '100000'
+    assert m.EVIDENCE_VERSION == 'memveil-evidence-exclusions/1'
+
+
+def test_signed_measurements_must_match_retained_raw_sources(tmp_path):
+    m = api()
+    assert hasattr(m, 'verify_measurement_sources'), 'raw measurements are not re-derived'
+    raw = tmp_path / 'raw.json'; raw.write_text('{"events":12,"eof":true}\n')
+    inputs = {'schema': 'memveil-gate-input/1', 'environment': 'offline',
+              'product': {'events': '12', 'eof': '1'}, 'oracle': {'events': '12', 'eof': '1'}, 'sources': {}}
+    for side in ('product', 'oracle'):
+        side_raw = tmp_path / (side + '.json'); side_raw.write_bytes(raw.read_bytes())
+        inputs['sources'][side] = {key: {'file': side_raw.name, 'sha256': sha(side_raw.read_bytes()),
+            'path': [key], 'encoding': 'boolean' if key == 'eof' else 'u64'} for key in inputs[side]}
+    m.verify_measurement_sources(inputs, tmp_path)
+    inputs['product']['events'] = '13'
+    with pytest.raises(ValueError, match='retained measurement'):
+        m.verify_measurement_sources(inputs, tmp_path)
+
+
+def test_qualified_export_requires_the_actual_archives(tmp_path):
+    m = api(); manifest_path, q_path, policy, _, _ = qualification_fixture(tmp_path)
+    assert hasattr(m, 'qualify_candidate'), 'tested export does not verify actual artifacts'
+    output = tmp_path / 'tested.txt'
+    with pytest.raises(ValueError, match='artifact must be a regular file'):
+        m.qualify_candidate(tmp_path, manifest_path, q_path, policy, tmp_path / 'missing-evidence.tar.gz', tmp_path / 'lock', output)
+    assert not output.exists()
+
+
+def test_q_tested_payload_cannot_keep_placeholders_or_omit_files(tmp_path):
+    m = api(); doc = manifest()
+    assert hasattr(m, 'verify_tested_payload'), 'Q tested payload is not enforced'
+    with pytest.raises(ValueError, match='placeholder'):
+        m.verify_tested_payload(doc, ROOT / 'packaging/tested-payload.sha256')
+    entries = m.expected_payload(doc)
+    path = tmp_path / 'tested'
+    path.write_text(''.join(value + '  ' + name + '\n' for name, value in sorted(entries.items())))
+    m.verify_tested_payload(doc, path)
+    path.write_text(path.read_text().split('\n', 1)[1])
+    with pytest.raises(ValueError, match='closure'): m.verify_tested_payload(doc, path)
+
+
+def test_signed_checksums_bind_every_candidate_artifact(tmp_path):
+    m = api(); doc = manifest()
+    key = tmp_path / 'key'
+    subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(key)], check=True)
+    (tmp_path / 'signer.pub').write_bytes((tmp_path / 'key.pub').read_bytes())
+    sums = tmp_path / 'SHA256SUMS.txt'
+    sums.write_text(''.join(e['sha256'] + '  ' + e['name'] + '\n' for e in sorted(doc['artifacts'], key=lambda x: x['name'])))
+    subprocess.run(['ssh-keygen', '-Y', 'sign', '-f', str(key), '-n', 'memveil-candidate', str(sums)], check=True, capture_output=True)
+    trusted = [sha((tmp_path / 'signer.pub').read_bytes())]
+    assert hasattr(m, 'verify_signed_checksums'), 'local qualification lacks signed checksums'
+    assert m.verify_signed_checksums(doc, tmp_path, trusted) == sums.read_text()
+    doc['artifacts'][0]['sha256'] = '9' * 64
+    with pytest.raises(ValueError, match='checksums differ'): m.verify_signed_checksums(doc, tmp_path, trusted)

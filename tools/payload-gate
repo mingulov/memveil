@@ -1,23 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Bind the release packages to the tested payload bytes.
+"""Compare complete canonical payload bytes across bundle, deb and rpm.
 
-The release ships three packages (the .deb, the .rpm, and the
-owner bundle) whose payloads must be exactly the bytes the
-qualifying lanes ran: the engine binary, the libbpf-mojo
-bridge, and the three BPF objects in each. The committed
-packaging/tested-payload.sha256 pins those fifteen hashes;
---collect hashes a candidate package set into the same
-manifest format and --check compares the two.
-
-Usage:
-  tools/payload-gate --collect --deb DEB --rpm RPM \\
-      --bundle TARBALL --out MANIFEST
-  tools/payload-gate --check --packaged MANIFEST --tested TESTED
-Exit 0 when every payload hash matches, 1 when the gate
-fails (placeholder, missing or extra entry, hash mismatch),
-2 on invalid usage, a missing extractor, or a malformed or
-unreadable manifest. Standard library only.
+--collect --deb DEB --rpm RPM --bundle TARBALL --out MANIFEST
+--check --packaged MANIFEST --tested TESTED [--candidate CANDIDATE]
+Release admission requires --candidate; legacy checks grant no qualification.
 """
 
 import hashlib
@@ -28,6 +15,8 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import candidate
+import canonical_runtime
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 ZEROS = "0" * 64
@@ -137,21 +126,11 @@ def extract_rpm(rpm, tmpdir):
 
 
 def extract_bundle(tarball, tmpdir):
-    dest = os.path.join(tmpdir, "bundle")
-    os.makedirs(dest)
     try:
-        with tarfile.open(tarball, "r:gz") as archive:
-            archive.extractall(dest)
-    except (OSError, tarfile.TarError) as exc:
-        sys.stderr.write("payload-gate: bundle extract failed: %s\n"
-                         % exc)
+        return str(candidate.extract_bundle(tarball, os.path.join(tmpdir, "bundle")))
+    except (OSError, ValueError, tarfile.TarError) as exc:
+        sys.stderr.write("payload-gate: bundle extract failed: %s\n" % exc)
         return None
-    tops = sorted(os.listdir(dest))
-    if len(tops) != 1 or not os.path.isdir(
-            os.path.join(dest, tops[0])):
-        sys.stderr.write("payload-gate: bundle has no single top dir\n")
-        return None
-    return os.path.join(dest, tops[0])
 
 
 def do_collect(deb, rpm, bundle, out):
@@ -167,18 +146,16 @@ def do_collect(deb, rpm, bundle, out):
         roots["bundle"] = extract_bundle(bundle, tmpdir)
         if any(root is None for root in roots.values()):
             return 2
-        lines = []
-        for logical in sorted(SPEC):
-            pkg, member = SPEC[logical]
-            path = os.path.join(roots[pkg], member)
-            if not os.path.isfile(path):
-                sys.stderr.write(
-                    "payload-gate: %s lacks payload member %s\n"
-                    % (pkg, member))
-                return 2
-            lines.append("%s  %s\n" % (sha256_file(path), logical))
         try:
-            with open(out, "w", encoding="utf-8") as handle:
+            manifest = canonical_runtime.verify_bundle(roots["bundle"])
+            for pkg in ("deb", "rpm"):
+                canonical_runtime.verify_installed(roots[pkg], manifest)
+            expected = candidate.expected_payload(manifest)
+            lines = ["%s  %s\n" % (value, name) for name, value in sorted(expected.items())]
+        except (OSError, ValueError, KeyError) as error:
+            return fail(str(error))
+        try:
+            with open(out, "x", encoding="utf-8") as handle:
                 handle.writelines(lines)
         except OSError as exc:
             return fail("cannot write %s: %s" % (out, exc))
@@ -187,14 +164,24 @@ def do_collect(deb, rpm, bundle, out):
     return 0
 
 
-def do_check(packaged, tested):
+def do_check(packaged, tested, candidate_path=None):
     packed = parse_manifest(packaged, "packaged manifest")
     want = parse_manifest(tested, "tested manifest")
     if packed is None or want is None:
         return 2
-    failed = False
-    for logical in sorted(set(packed) | set(want) | set(SPEC)):
-        if logical not in SPEC:
+    spec = set(SPEC) if set(want) == set(SPEC) else set(want)
+    if candidate_path:
+        try:
+            expected = candidate.expected_payload(candidate.load_manifest(candidate_path))
+        except (OSError, ValueError, KeyError) as error:
+            return fail(str(error))
+        if want != expected:
+            sys.stderr.write("payload-gate: tested payload differs from candidate closure\n")
+            return 1
+        spec = set(expected)
+    failed = not bool(spec)
+    for logical in sorted(set(packed) | set(want) | spec):
+        if logical not in spec:
             sys.stderr.write("payload-gate: unexpected entry %s\n"
                              % logical)
             failed = True
@@ -220,6 +207,9 @@ def do_check(packaged, tested):
 
 
 def main(argv):
+    if argv in (["--help"], ["-h"]):
+        print(__doc__)
+        return 0
     args = list(argv)
     if not args or args[0] not in ("--collect", "--check"):
         sys.stderr.write("payload-gate: want --collect or --check\n")
@@ -229,7 +219,7 @@ def main(argv):
     while args:
         opt = args.pop(0)
         if opt not in ("--deb", "--rpm", "--bundle", "--out",
-                       "--packaged", "--tested") or not args:
+                       "--packaged", "--tested", "--candidate") or not args:
             sys.stderr.write("payload-gate: bad option %s\n" % opt)
             return 2
         opts[opt] = args.pop(0)
@@ -242,7 +232,7 @@ def main(argv):
     for opt in ("--packaged", "--tested"):
         if opt not in opts:
             return fail("%s requires %s" % (mode, opt))
-    return do_check(opts["--packaged"], opts["--tested"])
+    return do_check(opts["--packaged"], opts["--tested"], opts.get("--candidate"))
 
 
 if __name__ == "__main__":

@@ -246,19 +246,24 @@ def take_inventory(root, dirs=INPUT_DIRS, files=INPUT_FILES,
         if os.path.lexists(os.path.join(root, rel)):
             record(rel)
     ordered = [entries[path] for path in sorted(entries)]
+    return {
+        "format": label,
+        "version": VERSION,
+        "files": ordered,
+        "digest": inventory_digest(ordered),
+    }
+
+
+def inventory_digest(entries):
+    """Version-one portable source identity, excluding filesystem timestamps."""
     digest = hashlib.sha256()
-    for entry in ordered:
+    for entry in entries:
         digest.update(json.dumps(
             {key: entry[key] for key in sorted(entry)
              if key not in ("mtime_ns", "ctime_ns")},
             sort_keys=True, separators=(",", ":")).encode("utf-8"))
         digest.update(b"\n")
-    return {
-        "format": label,
-        "version": VERSION,
-        "files": ordered,
-        "digest": digest.hexdigest(),
-    }
+    return digest.hexdigest()
 
 
 def take_tree_inventory(root):

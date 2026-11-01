@@ -21,7 +21,7 @@
 # perf-region, perf-workload, perf-overhead, soak, preview-package, provenance,
 # source-export,
 # release-runtime, docs, examples, extracted-robustness, deb,
-# rpm-journey, payload-gate, sbom.
+# rpm-journey, payload-gate, sbom, candidate-custody.
 #
 # A skipped suite is reported as skipped, never as success.
 # Exit 0 only when the suite passes; 1 on test failure; 2 on
@@ -4432,6 +4432,9 @@ case "$1" in
         ;;
     rpm-journey)
         suite_rpm_journey
+        ;;
+    candidate-custody)
+        (cd "$ROOT" && python3 -m pytest -q tests/package/test_candidate.py tests/package/test_candidate_custody.py tests/package/test_candidate_matrix.py)
         ;;
     payload-gate)
         suite_payload_gate
