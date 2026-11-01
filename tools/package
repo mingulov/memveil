@@ -890,6 +890,8 @@ def main(argv):
         print("package: staged tree matches its seals")
 
         # Refuse path substitutions before any tool can mutate a staged input.
+        if os.path.islink(staged):
+            fail("staged root broke seal before normalization")
         for base, dirs, files in os.walk(staged):
             for name in dirs + files:
                 path = os.path.join(base, name)
@@ -932,7 +934,12 @@ def main(argv):
                 transformations[relative] = {"source_sha256": original,
                     "output_sha256": sha256_file(path),
                     "operations": operations, "working_directory": "bundle-root",
-                    "source_path": "build/memveil" if relative == "bin/memveil" else source_relative}
+                    "source_root": "source-tree",
+                    "source_path": ("build/memveil" if relative == "bin/memveil" else
+                                    "build/deps/lmb/lib/" + os.path.basename(relative)
+                                    if os.path.basename(relative) == "libbpf_mojo.so.1" else
+                                    ".pixi/envs/default/lib/" + os.path.basename(relative)),
+                    "staged_input_path": source_relative}
         for relative in list(observed):
             if relative.startswith("lib/"):
                 observed["lib/memveil/" + relative[4:]] = observed.pop(relative)
@@ -1146,7 +1153,10 @@ def main(argv):
         raise
     finally:
         if staged is not None:
-            shutil.rmtree(staged, ignore_errors=True)
+            if os.path.islink(staged):
+                os.unlink(staged)
+            else:
+                shutil.rmtree(staged, ignore_errors=True)
 
 
 if __name__ == "__main__":

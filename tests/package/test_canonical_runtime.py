@@ -121,6 +121,8 @@ def test_transformed_dependencies_preserve_runtime_sections():
             assert source.read_bytes() == target.read_bytes()
             continue
         record = manifest['normalization'][relative]
+        assert record['source_root'] == 'source-tree'
+        assert record['source_path'] == source.relative_to(ROOT).as_posix()
         assert record['source_sha256'] == api.digest(source)
         assert record['output_sha256'] == api.digest(target)
         assert record['operations'] == [['strip', '--strip-unneeded', relative]]

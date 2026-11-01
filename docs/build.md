@@ -20,7 +20,7 @@ the `pixi.lock` file carries authoritative conda package hashes.
 - `strace` for the package clean-room audit (`apt install strace`).
 - `patchelf`, `binutils` (`strip`, `readelf`) and `zstd` for canonical runtime packaging.
   The packager checks availability and records their versions and executable hashes.
-- On Fedora the same set comes from `dnf` (`clang llvm bpftool python3-pytest strace patchelf`).
+- On Fedora the same set comes from `dnf` (`clang llvm bpftool python3-pytest strace patchelf binutils zstd`).
 
 Run `pixi install` once after cloning. Every Mojo command below runs inside
 that environment; the `tools/` wrappers do this for you.

@@ -1205,12 +1205,12 @@ class TestPackagingSeal:
             post_verify_hook=mutate,
             expect="swiotlb_attempt.bpf.o")
 
-    @pytest.mark.parametrize("directory", [False, True])
+    @pytest.mark.parametrize("entry", ["file", "directory", "root"])
     def test_normalization_refuses_symlink_before_transform(
-            self, package, receipt, probe, monkeypatch, capsys, directory):
+            self, package, receipt, probe, monkeypatch, capsys, entry):
         def replace(staged):
-            source = os.path.join(staged, "lib")
-            if not directory:
+            source = staged if entry == "root" else os.path.join(staged, "lib")
+            if entry == "file":
                 source = os.path.join(source, "libbpf_mojo.so.1")
             outside = os.path.join(probe, "outside-normalization")
             os.rename(source, outside)
