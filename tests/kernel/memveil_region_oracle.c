@@ -1,124 +1,136 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-
-/* MemVeil owned-region oracle: test-only kernel module.
- *
- * The module allocates two of its own contiguous pages, runs one
- * shared->private->shared conversion sequence on them with the
- * native set_memory_decrypted/set_memory_encrypted APIs, and logs
- * every native outcome plus the owned PFN range to the kernel log
- * with an "mv-region-oracle:" prefix. The confidential-guest
- * harness replays that log as the independent ledger and compares
- * it against MemVeil's observed conversion records over the same
- * window.
- *
- * The module never imports MemVeil code and never applies reducer
- * math: it is ground truth, not a second implementation. It
- * refuses to load without the explicit mv_region_oracle_arm=1
- * parameter, converts only its own pages, restores them before
- * freeing, and never touches host memory. On ordinary kernels
- * both calls are no-ops returning 0, which the log records
- * honestly. Disposable test VMs only.
- */
-
+/* Test-only owned allocation; never load outside an authorized disposable guest. */
 #include <linux/gfp.h>
 #include <linux/init.h>
-#include <linux/ktime.h>
 #include <linux/mm.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/set_memory.h>
+#include <linux/string.h>
 
-#define MV_REGION_ORDER 1
-#define MV_REGION_PAGES (1U << MV_REGION_ORDER)
+#define MV_REGION_MAX_PAGES 256U
 
 static bool mv_region_oracle_arm;
+static unsigned int mv_region_oracle_pages = 2;
+static unsigned long long mv_region_oracle_epoch;
 module_param(mv_region_oracle_arm, bool, 0444);
-MODULE_PARM_DESC(mv_region_oracle_arm,
-		 "Arm the oracle conversion script (test-only, default off)");
+module_param(mv_region_oracle_pages, uint, 0444);
+module_param(mv_region_oracle_epoch, ullong, 0444);
+MODULE_PARM_DESC(mv_region_oracle_arm, "Arm owned allocation (disposable guests only)");
+MODULE_PARM_DESC(mv_region_oracle_pages, "Owned page count, 1..256");
+MODULE_PARM_DESC(mv_region_oracle_epoch, "Nonzero test epoch token, unique per load");
 
-static unsigned long mv_addr;
-static unsigned int mv_pages;
-static bool mv_decrypted;
+static DEFINE_MUTEX(mv_lock);
+static void *mv_owned;
+static bool mv_ready;
+static bool mv_started;
+static bool mv_uncertain;
+static unsigned int mv_count;
+static int mv_results[2];
 
-static void mv_log(const char *fmt, ...)
+/* The caller holds mv_lock; the entire allocation needs a successful restore. */
+static int mv_restore(void)
 {
-	va_list args;
+	int rc = set_memory_encrypted((unsigned long)mv_owned,
+				      mv_region_oracle_pages);
 
-	va_start(args, fmt);
-	pr_info("mv-region-oracle: %pV", &(struct va_format){ fmt, &args });
-	va_end(args);
+	mv_results[mv_count++] = rc;
+	if (!rc) {
+		mv_uncertain = false;
+		module_put(THIS_MODULE);
+	}
+	return rc;
 }
+
+static int mv_command_set(const char *value, const struct kernel_param *kp)
+{
+	int rc = -EINVAL;
+
+	(void)kp;
+	mutex_lock(&mv_lock);
+	if (!mv_ready) {
+		rc = -EAGAIN;
+		goto out;
+	}
+	if (sysfs_streq(value, "share") && !mv_started) {
+		if (!try_module_get(THIS_MODULE)) {
+			rc = -EBUSY;
+			goto out;
+		}
+		mv_started = true;
+		mv_uncertain = true;
+		rc = set_memory_decrypted((unsigned long)mv_owned,
+					  mv_region_oracle_pages);
+		mv_results[mv_count++] = rc;
+		/* Even a failed decrypt can have changed part of the allocation. */
+		if (rc)
+			mv_restore();
+	} else if (sysfs_streq(value, "restore") && mv_count == 1) {
+		rc = mv_restore();
+	}
+out:
+	mutex_unlock(&mv_lock);
+	return rc;
+}
+
+static int mv_ledger_get(char *buffer, const struct kernel_param *kp)
+{
+	unsigned int i;
+	int used = 0;
+
+	(void)kp;
+	mutex_lock(&mv_lock);
+	for (i = 0; i < mv_count; i++)
+		used += scnprintf(buffer + used, PAGE_SIZE - used,
+			"epoch=%llu ordinal=%u direction=%s pages=%u result=%d\n",
+			mv_region_oracle_epoch, i + 1,
+			i ? "private" : "shared", mv_region_oracle_pages,
+			mv_results[i]);
+	mutex_unlock(&mv_lock);
+	return used;
+}
+
+static const struct kernel_param_ops mv_command_ops = { .set = mv_command_set };
+static const struct kernel_param_ops mv_ledger_ops = { .get = mv_ledger_get };
+module_param_cb(command, &mv_command_ops, NULL, 0200);
+module_param_cb(ledger, &mv_ledger_ops, NULL, 0400);
 
 static int __init mv_region_oracle_init(void)
 {
-	unsigned long addr;
-	unsigned long pfn;
-	u64 start_ns;
-	int rc;
-
-	if (!mv_region_oracle_arm) {
-		pr_err("mv-region-oracle: refusing to load without mv_region_oracle_arm=1\n");
+	if (!mv_region_oracle_arm)
 		return -EPERM;
-	}
-	addr = __get_free_pages(GFP_KERNEL | __GFP_ZERO, MV_REGION_ORDER);
-	if (!addr) {
-		mv_log("outcome=failure phase=alloc rc=-ENOMEM");
+	if (!mv_region_oracle_epoch || !mv_region_oracle_pages ||
+	    mv_region_oracle_pages > MV_REGION_MAX_PAGES)
+		return -EINVAL;
+	mutex_lock(&mv_lock);
+	mv_owned = alloc_pages_exact((size_t)mv_region_oracle_pages * PAGE_SIZE,
+				    GFP_KERNEL | __GFP_ZERO);
+	if (!mv_owned) {
+		mutex_unlock(&mv_lock);
 		return -ENOMEM;
 	}
-	pfn = page_to_pfn(virt_to_page((void *)addr));
-	mv_log("region pages=%u pfn=0x%lx outcome=allocated",
-	       MV_REGION_PAGES, pfn);
-	start_ns = ktime_get_ns();
-	rc = set_memory_decrypted(addr, MV_REGION_PAGES);
-	mv_log("region pages=%u pfn=0x%lx target=shared rc=%d elapsed_ns=%llu",
-	       MV_REGION_PAGES, pfn, rc, ktime_get_ns() - start_ns);
-	if (rc) {
-		mv_log("outcome=failure phase=decrypt rc=%d", rc);
-		free_pages(addr, MV_REGION_ORDER);
-		return rc;
-	}
-	mv_decrypted = true;
-	mv_addr = addr;
-	mv_pages = MV_REGION_PAGES;
-	start_ns = ktime_get_ns();
-	rc = set_memory_encrypted(addr, MV_REGION_PAGES);
-	mv_log("region pages=%u pfn=0x%lx target=private rc=%d elapsed_ns=%llu",
-	       MV_REGION_PAGES, pfn, rc, ktime_get_ns() - start_ns);
-	if (rc) {
-		mv_log("outcome=failure phase=encrypt rc=%d", rc);
-		mv_log("outcome=restored-after-failure pages=%u", MV_REGION_PAGES);
-		free_pages(addr, MV_REGION_ORDER);
-		mv_addr = 0;
-		mv_pages = 0;
-		mv_decrypted = false;
-		return rc;
-	}
-	mv_decrypted = false;
-	mv_log("script complete pages=%u", MV_REGION_PAGES);
+	/* No conversion or fallible initialization follows allocation. */
+	mv_ready = true;
+	mutex_unlock(&mv_lock);
 	return 0;
 }
 
 static void __exit mv_region_oracle_exit(void)
 {
-	int rc;
-
-	if (!mv_addr)
-		goto out;
-	if (mv_decrypted) {
-		rc = set_memory_encrypted(mv_addr, mv_pages);
-		mv_log("exit-restore pages=%u rc=%d", mv_pages, rc);
-		mv_decrypted = false;
+	mutex_lock(&mv_lock);
+	mv_ready = false;
+	/* The retained module reference prevents normal unload while uncertain. */
+	if (mv_owned && !mv_uncertain) {
+		free_pages_exact(mv_owned,
+				 (size_t)mv_region_oracle_pages * PAGE_SIZE);
+		mv_owned = NULL;
 	}
-	free_pages(mv_addr, MV_REGION_ORDER);
-	mv_addr = 0;
-	mv_pages = 0;
-out:
-	mv_log("unloaded");
+	mutex_unlock(&mv_lock);
 }
 
 module_init(mv_region_oracle_init);
 module_exit(mv_region_oracle_exit);
-
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("MemVeil test fixtures");
-MODULE_DESCRIPTION("Test-only owned-region conversion oracle");
-MODULE_VERSION("0.1.0");
+MODULE_DESCRIPTION("Test-only bounded owned-region native request oracle");
+MODULE_VERSION("0.2.0");

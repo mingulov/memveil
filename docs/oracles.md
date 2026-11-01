@@ -64,13 +64,27 @@ Scope limits:
   devices, and refuses to load without `mv_oracle_arm=1`.
   Loading happens only inside the disposable VM gate.
 
-The region oracle (`tests/kernel/memveil_region_oracle.c`)
-plays the same role for shared/private conversions: it
-converts two of its own contiguous pages with the native
-`set_memory_decrypted`/`set_memory_encrypted` APIs, logs every
-native return code plus the owned PFN range, and the harness
-compares that log against MemVeil's observed conversion
-records. It covers owned pages only, never real guest memory.
+The region oracle (`tests/kernel/memveil_region_oracle.c`) allocates and
+zeros 1 to 256 owned contiguous pages. An explicit `share` command retains
+the allocation; `restore` requests encryption of the entire range before
+normal unload can release it. Failed decryption also requests a full-range
+restore. A failed restore keeps the allocation and its module reference
+until the disposable guest is rebooted. Forced unload is prohibited.
+
+The independent native ledger contains only test epoch, native ordinal,
+direction, requested pages and native result, in a bounded sysfs file.
+There are no PFNs, addresses, payloads or kernel-log artifacts. The product
+never consumes this ledger. The qualification validator compares ordered
+request tuples against a separately extracted, caller-labelled product
+projection under an admitted profile. The live projection adapter remains
+unimplemented; a validator pass on authored fixtures is not guest admission.
+See [owned-region operation and safety](../tests/kernel/README.md#test-only-region-oracle-module)
+and the [confidential recipe](recipes/confidential-guest.md).
+
+Ordinary per-CPU bpftrace counts, zero-retention control and repeated
+load/unload prove transport only. Native success on an ordinary guest can
+be a no-op; even a real confidential request result alone does not establish
+persistent region identity, hardware state or host visibility.
 
 ## Kernel matrix oracle (`tools/kernel-matrix`)
 
@@ -208,7 +222,7 @@ kernel-semantic oracle.
 | A capture directory is well formed and its attempts add up | `tools/validate-schemas` |
 | Matrix kernel counts and bytes match the oracle and block layer | kernel matrix oracle |
 | Scripted laboratory counts match independent module facts | owned-DMA ledger |
-| Observed conversions match native transitions | region oracle |
+| Controlled observed request tuples match independent native results | region oracle |
 | Replay never crashes or mis-exits on corrupt input | fuzz oracle |
 | Long replays hold counts and memory | soak gate |
 | Wire bytes survive the ring intact | native reference extractor |
