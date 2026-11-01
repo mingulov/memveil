@@ -283,14 +283,17 @@ class TestCleanRoom:
         libdir = os.path.join(REPO, ".pixi", "envs", "default", "lib")
         missing = [n for n in HIDE_LIBS
                    if not os.path.isfile(os.path.join(libdir, n))]
-        assert not missing, "pixi libs missing: %s" % missing
+        if not load():
+            assert not missing, 'pixi libs missing: %s' % missing
         moved = []
         try:
             for name in HIDE_LIBS:
+                if name in missing: continue
                 shutil.move(os.path.join(libdir, name),
                             str(hide / name))
                 moved.append(name)
-            yield
+            assert all(not os.path.exists(os.path.join(libdir, name)) for name in HIDE_LIBS)
+            yield {'initial_state': 'hidden' if moved else 'absent'}
         finally:
             errors = []
             for name in moved:
@@ -331,6 +334,9 @@ class TestCleanRoom:
         assert metric(report, "bounce_attempts")["value"] == "30"
         text = open(trace, encoding="utf-8",
                     errors="replace").read()
+        if load():
+            assert '.pixi' not in text, 'candidate replay attempted a development runtime path'
+            assert os.path.realpath(REPO) not in text, 'candidate replay attempted a checkout path'
         violations = audit_trace(
             text, "/", os.path.realpath(REPO))
         assert violations == [], violations

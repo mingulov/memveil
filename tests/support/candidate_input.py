@@ -115,3 +115,27 @@ def binary(development, explicit=None, env=None):
             raise ValueError('qualification forbids conflicting --binary override')
         return str(selected.path('bin/memveil'))
     return str(explicit or (os.environ if env is None else env).get('MEMVEIL_BIN') or development)
+
+
+def verify_installed(manifest, root=Path('/')):
+    if root.is_symlink(): raise ValueError('installed root is an alias')
+    with tempfile.TemporaryDirectory(prefix='memveil-installed-check-') as tmp:
+        snapshot = Path(tmp)
+        expected = {candidate.runtime.installed_file_path(name) for name in manifest['files']}
+        for relative in expected:
+            source = root / relative
+            for parent in (source, *source.parents):
+                if parent == root: break
+                if parent.is_symlink(): raise ValueError('installed candidate contains an alias')
+            if not source.is_file(): raise ValueError('installed candidate file absent')
+            target = snapshot / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+        generated = {'usr/share/doc/memveil/copyright', 'usr/share/doc/memveil/changelog.Debian.gz'}
+        for prefix in ('usr/lib/memveil', 'usr/share/memveil', 'usr/share/doc/memveil'):
+            if (root / prefix).is_symlink(): raise ValueError('installed prefix is an alias')
+            for source in (root / prefix).rglob('*'):
+                if source.is_symlink(): raise ValueError('installed candidate contains an alias')
+                if source.is_file() and source.relative_to(root).as_posix() not in expected | generated:
+                    raise ValueError('extra installed candidate runtime file')
+        candidate.runtime.verify_installed(snapshot, manifest)

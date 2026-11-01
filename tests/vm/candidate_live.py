@@ -24,12 +24,15 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tests'))
 sys.path.insert(0, str(ROOT / 'tests/perf'))
 sys.path.insert(0, str(ROOT / 'tests/confidential/spikes'))
-from support.candidate_input import load, CandidateInput
+from support.candidate_input import load, CandidateInput, verify_installed
 from compare import compare, assess
 from journal_spike import resources
+from pool_read_oracle import PoolReadOracle, validate_pool
 
 SOAK_SECONDS = 1800
 POOL_SECONDS = 4260
+TOP_INTERVAL_NS = 10**9
+TOP_GAP_TOLERANCE_NS = 500000000
 MODES = ('attempt-record-summary', 'live-top-1s', 'journal-summary', 'journal-callers-detail')
 
 
@@ -129,13 +132,15 @@ def operation(disk, kind, pool=False):
     return count, (time.monotonic_ns() - started) / 1e9
 
 
-def workload(disk, seconds, proc=None, pool_case=False):
-    started = time.monotonic()
+def workload(disk, seconds, proc=None, pool_case=False, oracle=None):
+    started_ns = time.monotonic_ns()
+    started = started_ns / 10**9
     amounts = {'block': 0, 'network': 0}
     latencies = {'block': [], 'network': []}
     samples = []
     with ThreadPoolExecutor(max_workers=2) as pool:
         while time.monotonic() - started < seconds:
+            if oracle is not None: oracle.check()
             if proc is not None:
                 if proc.poll() is not None: raise ProductExit(proc.returncode, 'collector exited during workload: exit')
                 samples.append(sample(proc.pid))
@@ -145,7 +150,8 @@ def workload(disk, seconds, proc=None, pool_case=False):
                 amounts[kind] += count
                 latencies[kind].append(elapsed)
             if pool_case: time.sleep(1)
-    elapsed = time.monotonic() - started
+    ended_ns = time.monotonic_ns()
+    elapsed = (ended_ns - started_ns) / 10**9
     validate_duration(seconds, elapsed, amounts['block'], amounts['network'])
     metrics = {}
     for kind in amounts:
@@ -153,10 +159,43 @@ def workload(disk, seconds, proc=None, pool_case=False):
         metrics[kind] = {'valid': True, 'counts_ok': True, 'throughput': amounts[kind] / elapsed,
                          'p99': ordered[math.ceil(.99 * len(ordered)) - 1],
                          'completed_units': str(amounts[kind]), 'operation_seconds': latencies[kind]}
-    return {'elapsed_seconds': elapsed, 'metrics': metrics, 'samples': samples}
+    return {'elapsed_seconds': elapsed, 'window': {'start_ns': str(started_ns), 'end_ns': str(ended_ns)},
+            'metrics': metrics, 'samples': samples}
 
 
-def capture_facts(binary, capture, pool=False):
+def run_soak(one, result):
+    started = time.monotonic()
+    measured_ns = 0
+    count = 0
+    while measured_ns < SOAK_SECONDS * 10**9:
+        observation = one('attempt-record-summary', 60)
+        work = observation['workload']
+        duration = int(work['window']['end_ns']) - int(work['window']['start_ns'])
+        validate_duration(60, duration / 10**9,
+                          int(work['metrics']['block']['completed_units']),
+                          int(work['metrics']['network']['completed_units']))
+        measured_ns += duration
+        count += 1
+    if count < 2: raise ValueError('soak lacks repeated capture/stop')
+    result['measured_mixed_seconds'] = measured_ns / 10**9
+    result['campaign_seconds_before_pool'] = time.monotonic() - started
+    one('attempt-record-summary', POOL_SECONDS, True)
+
+
+def validate_top_refreshes(refreshes, window):
+    start, end = int(window['start_ns']), int(window['end_ns'])
+    ticks = [int(tick) for tick in refreshes if start <= int(tick) < end]
+    if end - start < 60 * 10**9 or len(ticks) < (end - start) // TOP_INTERVAL_NS - 1:
+        raise ValueError('live top refresh count does not cover measured window')
+    maximum = TOP_INTERVAL_NS + TOP_GAP_TOLERANCE_NS
+    if not ticks or ticks[0] - start > maximum or end - ticks[-1] > maximum:
+        raise ValueError('live top refresh window edges are uncovered')
+    if any(not TOP_INTERVAL_NS - TOP_GAP_TOLERANCE_NS <= b - a <= maximum
+           for a, b in zip(ticks, ticks[1:])):
+        raise ValueError('live top refresh burst or cadence gap')
+
+
+def capture_facts(binary, capture, pool=False, oracle=None, window=None, stop_ns=None):
     from support.candidate_input import candidate
     session = candidate.read_json(capture / 'session.json')
     rendered = subprocess.run([str(binary), 'report', '--strict', '--format', 'json', str(capture)],
@@ -172,7 +211,7 @@ def capture_facts(binary, capture, pool=False):
         if value.get('loss_count') not in ('0', None): raise ValueError('capture channel loss: ' + channel)
         if value.get('status') not in ('complete_for_scope', 'not_applicable', 'unavailable'):
             raise ValueError('capture channel incomplete: ' + channel)
-    kinds, first_pool, last_pool = {}, None, None
+    kinds, pool_samples = {}, []
     with (capture / 'events.ndjson').open('rb') as stream:
         while True:
             line = stream.readline(65537)
@@ -182,13 +221,14 @@ def capture_facts(binary, capture, pool=False):
             kind = event['kind']
             kinds[kind] = kinds.get(kind, 0) + 1
             if kind == 'pool_sample':
-                timestamp = int(event['ts_ns'])
-                first_pool = timestamp if first_pool is None else first_pool
-                last_pool = timestamp
+                if len(pool_samples) >= 4096 + 64 + 2:
+                    raise ValueError('pool sample inventory exceeds source bound')
+                pool_samples.append(event['ts_ns'])
     if not kinds.get('bounce_attempt', 0) and not kinds.get('transition_result', 0):
         raise ValueError('capture has no workload observations')
-    if pool and (first_pool is None or last_pool - first_pool <= 4200 * 10**9):
-        raise ValueError('pool samples do not span more than 70 minutes')
+    if pool:
+        if window is None or stop_ns is None: raise ValueError('pool measurement boundaries absent')
+        validate_pool(pool_samples, window, oracle, stop_ns)
     return {'quality': quality, 'stop': session['stop'], 'kinds': {k: str(v) for k,v in kinds.items()},
             'session_sha256': candidate.runtime.digest(capture / 'session.json'),
             'events_sha256': candidate.runtime.digest(capture / 'events.ndjson')}
@@ -209,69 +249,155 @@ def observe_output(stream, observed):
             observed['refresh_ns'].append(str(time.monotonic_ns()))
 
 
-def leg(binary, disk, mode, work, seconds, pool=False):
+def leg(binary, disk, mode, work, seconds, pool=False, observation=None, nonce=None):
+    state = {} if observation is None else observation
     before = inventory()
+    state.update(mode=mode, bpf_before=before, product_exit=None, cleanup_errors=[])
     capture = work / 'capture'
-    proc = None
-    facts = None
+    proc, primary, reader, pool_oracle = None, None, None, None
     try:
         if mode != 'off':
             observed = {'ready': False, 'refresh_ns': [], 'error': None}
+            state['output'] = observed
             proc = subprocess.Popen(product_command(binary, mode, capture, seconds + 120),
                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             reader = threading.Thread(target=observe_output, args=(proc.stdout, observed), daemon=True)
             reader.start()
             deadline = time.monotonic() + 60
             while True:
-                if proc.poll() is not None: require_product_exit(proc.returncode); raise ValueError('no collector readiness')
+                if proc.poll() is not None:
+                    state['product_exit'] = proc.returncode
+                    raise ProductExit(proc.returncode, 'collector exited before readiness: exit')
                 if observed['error']: raise ValueError(observed['error'])
                 if observed['ready']: break
                 if time.monotonic() >= deadline: raise ValueError('collector readiness timed out')
                 time.sleep(.1)
-        workload(disk, 10, proc)
-        measured = workload(disk, seconds, proc, pool_case=pool)
+        if pool:
+            pool_oracle = PoolReadOracle(proc, binary, nonce)
+            state['pool_oracle'] = pool_oracle.observation
+        state['warmup'] = workload(disk, 10, proc, oracle=pool_oracle)
+        state['workload'] = workload(disk, seconds, proc, pool_case=pool, oracle=pool_oracle)
+        if pool_oracle is not None:
+            pool_oracle.check()
+            pool_oracle.close()
         if proc is not None:
+            state['stop_signal_ns'] = str(time.monotonic_ns())
             proc.send_signal(signal.SIGTERM)
-            require_product_exit(proc.wait(timeout=30))
+            state['product_exit'] = proc.wait(timeout=30)
+            require_product_exit(state['product_exit'])
             reader.join(timeout=5)
             if reader.is_alive() or observed['error']: raise ValueError('collector output inventory incomplete')
-            if mode == 'live-top-1s' and len(observed['refresh_ns']) < 2:
-                raise ValueError('live top produced no repeated refreshes')
-            facts = capture_facts(binary, capture, pool)
-        after = settled(before)
-        return {'mode': mode, 'workload': measured, 'capture': facts, 'bpf_before': before, 'bpf_after': after,
-                'output': observed if proc is not None else None}
+            if mode == 'live-top-1s':
+                validate_top_refreshes(observed['refresh_ns'], state['workload']['window'])
+            state['capture'] = capture_facts(binary, capture, pool, state.get('pool_oracle'),
+                                             state['workload']['window'], state['stop_signal_ns'])
+        else:
+            state['capture'] = None
+        state['bpf_after'] = settled(before)
+        return state
+    except BaseException as exc:
+        primary = exc
+        if isinstance(exc, ProductExit): state['product_exit'] = exc.product_exit
+        raise
     finally:
-        if proc is not None and proc.poll() is None:
-            proc.terminate()
-            try: proc.wait(timeout=10)
-            except subprocess.TimeoutExpired: proc.kill(); proc.wait(timeout=10)
-        settled(before)
+        cleanup_failure = None
+        def cleanup(action):
+            nonlocal cleanup_failure
+            try: action()
+            except BaseException as exc:
+                state['cleanup_errors'].append(type(exc).__name__)
+                if cleanup_failure is None: cleanup_failure = exc
+        if pool_oracle is not None: cleanup(pool_oracle.close)
+        def stop_product():
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
+                try: proc.wait(timeout=10)
+                except subprocess.TimeoutExpired: proc.kill(); proc.wait(timeout=10)
+        cleanup(stop_product)
+        def stop_reader():
+            if reader is not None:
+                reader.join(timeout=5)
+                if reader.is_alive(): raise ValueError('collector output reader cleanup incomplete')
+                proc.stdout.close()
+        cleanup(stop_reader)
+        def settle(): state['bpf_after'] = settled(before)
+        cleanup(settle)
+        if primary is None and cleanup_failure is not None: raise cleanup_failure
 
 
-def verify_installed(manifest, root=Path('/')):
-    from support.candidate_input import candidate
-    if root.is_symlink(): raise ValueError('installed root is an alias')
-    with tempfile.TemporaryDirectory(prefix='memveil-installed-check-') as tmp:
-        snapshot = Path(tmp)
-        expected = {candidate.runtime.installed_file_path(name) for name in manifest['files']}
-        for relative in expected:
-            source = root / relative
-            for parent in (source, *source.parents):
-                if parent == root: break
-                if parent.is_symlink(): raise ValueError('installed candidate contains an alias')
-            if not source.is_file(): raise ValueError('installed candidate file absent')
-            target = snapshot / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, target)
-        generated = {'usr/share/doc/memveil/copyright', 'usr/share/doc/memveil/changelog.Debian.gz'}
-        for prefix in ('usr/lib/memveil', 'usr/share/memveil', 'usr/share/doc/memveil'):
-            if (root / prefix).is_symlink(): raise ValueError('installed prefix is an alias')
-            for source in (root / prefix).rglob('*'):
-                if source.is_symlink(): raise ValueError('installed candidate contains an alias')
-                if source.is_file() and source.relative_to(root).as_posix() not in expected | generated:
-                    raise ValueError('extra installed candidate runtime file')
-        candidate.runtime.verify_installed(snapshot, manifest)
+CAPTURE_LIMITS = {'events.ndjson': 1024**3, 'session.json': 16 * 1024**2,
+                  'checkpoint.json': 16 * 1024**2, 'checkpoint.json.tmp': 16 * 1024**2,
+                  'session.finalizing': 16 * 1024**2}
+
+
+def retain_capture(work, destination):
+    destination.mkdir(mode=0o700)
+    copied = {}
+    work_fd = os.open(work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    dest_fd = os.open(destination, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    capture_fd = None
+    try:
+        try: capture_fd = os.open('capture', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=work_fd)
+        except FileNotFoundError: return copied
+        for name, limit in CAPTURE_LIMITS.items():
+            try: source_fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=capture_fd)
+            except FileNotFoundError: continue
+            with os.fdopen(source_fd, 'rb') as source:
+                info = os.fstat(source.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    raise ValueError('failure evidence is not an owned regular file')
+                target_fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dest_fd)
+                digest, count = hashlib.sha256(), 0
+                with os.fdopen(target_fd, 'wb') as target:
+                    while count < limit:
+                        data = source.read(min(65536, limit - count))
+                        if not data: break
+                        target.write(data); digest.update(data); count += len(data)
+                copied[name] = {'bytes': str(count), 'sha256': digest.hexdigest(), 'truncated': info.st_size > limit}
+        return copied
+    finally:
+        if capture_fd is not None: os.close(capture_fd)
+        os.close(work_fd); os.close(dest_fd)
+
+
+def write_observations(path, state):
+    data = (json.dumps(state, sort_keys=True) + '\n').encode()
+    if len(data) > 16 * 1024**2: raise ValueError('observations exceed document bound')
+    with path.open('xb') as stream: stream.write(data)
+
+
+def record_leg(binary, disk, mode, seconds, pool, local, export, ordinal, nonce=None):
+    work = local / ('leg-' + str(ordinal))
+    work.mkdir(mode=0o700)
+    state = {'ordinal': str(ordinal), 'mode': mode, 'status': 'RUNNING'}
+    primary = None
+    try:
+        leg(binary, disk, mode, work, seconds, pool, observation=state, nonce=nonce)
+        state['status'] = 'PASS'
+    except BaseException as exc:
+        primary = exc
+        state.update(status='FAIL', exception=type(exc).__name__)
+        if isinstance(exc, ProductExit): state['product_exit'] = exc.product_exit
+    destination = export / (('failed-' if primary else 'completed-') + str(ordinal))
+    try:
+        destination.mkdir(mode=0o700)
+        state['retained_capture'] = retain_capture(work, destination / 'capture')
+        if primary is None and any(row['truncated'] for row in state['retained_capture'].values()):
+            raise ValueError('verified capture export exceeds evidence bound')
+        state['retained_verification'] = 'unverified-failure' if primary else 'verified-capture'
+        write_observations(destination / 'observations.json', state)
+    except BaseException as exc:
+        state['export_error'] = type(exc).__name__
+        state['status'] = 'FAIL'
+        if primary is None: primary = exc
+    try: write_observations(work / 'observations.json', state)
+    except BaseException as exc:
+        state['local_receipt_error'] = type(exc).__name__
+        if primary is None: primary = exc
+    if primary is not None:
+        primary.observation = state
+        raise primary
+    return state
 
 
 def guest_mac(token):
@@ -286,7 +412,7 @@ def validate_guest_identity(token, cmdline, guest_boot, host_boot, serial, secto
         raise ValueError('owned isolated guest scratch/network identity unproved')
 
 
-def guest(kind, manifest, bundle, deb, token, export, host_boot, digest):
+def guest(kind, manifest, bundle, deb, token, export, host_boot, digest, local_evidence):
     cmdline = Path('/proc/cmdline').read_text().split()
     if os.geteuid() != 0 or 'memveil_candidate_guest=' + token not in cmdline or 'swiotlb=force' not in cmdline:
         raise ValueError('owned isolated guest identity missing')
@@ -332,48 +458,33 @@ def guest(kind, manifest, bundle, deb, token, export, host_boot, digest):
                   'inventory_source': ROOT / 'tests/confidential/spikes/journal_spike.py',
                   'dd': Path(shutil.which('dd')), 'ping': Path(shutil.which('ping'))}.items()},
               'runtime': selected.manifest['canonical_runtime'], 'legs': [], 'comparisons': []}
-    with tempfile.TemporaryDirectory(prefix='memveil-live-') as tmp:
-        def one(mode, seconds, pool=False):
-            verify_installed(installed)
-            work = Path(tmp) / ('leg-' + str(len(result['legs'])))
-            work.mkdir()
-            try:
-                observation = leg(binary, disk, mode, work, seconds, pool)
-            except BaseException as exc:
-                result['failure'] = {'mode': mode, 'exception': type(exc).__name__, 'status': 'FAIL',
-                                     'product_exit': getattr(exc, 'product_exit', None), 'reason': str(exc)[:256]}
-                with (Path(export) / 'failure.json').open('x') as stream: json.dump(result, stream, sort_keys=True)
-                raise
-            observation['ordinal'] = str(len(result['legs']))
-            result['legs'].append(observation)
-            if observation['capture'] is not None:
-                shutil.copytree(work / 'capture', Path(export) / ('capture-' + observation['ordinal']))
-            with (Path(export) / ('progress-' + observation['ordinal'] + '.json')).open('x') as stream:
-                json.dump(result, stream, sort_keys=True)
-            return observation
-        if kind == 'soak':
-            start = time.monotonic()
-            while time.monotonic() - start < SOAK_SECONDS:
-                one('attempt-record-summary', 60)
-            result['mixed_seconds'] = time.monotonic() - start
-            if len(result['legs']) < 2: raise ValueError('soak lacks repeated capture/stop')
-            one('attempt-record-summary', POOL_SECONDS, True)
-        else:
-            pairs = {mode: ([], []) for mode in MODES}
-            for mode, pair in schedule():
-                order = ('off', mode) if pair % 2 == 0 else (mode, 'off')
-                observations = {label: one(label, 60) for label in order}
-                pairs[mode][0].append(observations['off'])
-                pairs[mode][1].append(observations[mode])
-            for mode, (baselines, observers) in pairs.items():
-                for metric in ('block', 'network'):
-                    comparison = compare(mode + '/' + metric,
-                        [row['workload']['metrics'][metric] for row in baselines],
-                        [row['workload']['metrics'][metric] for row in observers])
-                    status, reason = assess(comparison)
-                    result['comparisons'].append({'mode': mode, 'metric': metric, 'status': status,
-                        'reason': reason, 'measurement': comparison,
-                        'target_required': mode != 'journal-callers-detail'})
+    if local_evidence != '/tmp/memveil-local-evidence' or export != '/tmp/export':
+        raise ValueError('owned evidence mount identity differs')
+    local = Path(tempfile.mkdtemp(prefix='campaign-', dir=local_evidence))
+    def one(mode, seconds, pool=False):
+        verify_installed(installed)
+        observation = record_leg(binary, disk, mode, seconds, pool, local, Path(export), len(result['legs']), token)
+        result['legs'].append(observation)
+        write_observations(Path(export) / ('progress-' + observation['ordinal'] + '.json'), result)
+        return observation
+    if kind == 'soak':
+        run_soak(one, result)
+    else:
+        pairs = {mode: ([], []) for mode in MODES}
+        for mode, pair in schedule():
+            order = ('off', mode) if pair % 2 == 0 else (mode, 'off')
+            observations = {label: one(label, 60) for label in order}
+            pairs[mode][0].append(observations['off'])
+            pairs[mode][1].append(observations[mode])
+        for mode, (baselines, observers) in pairs.items():
+            for metric in ('block', 'network'):
+                comparison = compare(mode + '/' + metric,
+                    [row['workload']['metrics'][metric] for row in baselines],
+                    [row['workload']['metrics'][metric] for row in observers])
+                status, reason = assess(comparison)
+                result['comparisons'].append({'mode': mode, 'metric': metric, 'status': status,
+                    'reason': reason, 'measurement': comparison,
+                    'target_required': mode != 'journal-callers-detail'})
     result['cleanup'] = {'before': before, 'after': settled(before)}
     verify_installed(installed)
     with (Path(export) / 'campaign.json').open('x') as stream: json.dump(result, stream, sort_keys=True)
@@ -399,16 +510,20 @@ def host(kind):
         out = Path(tempfile.mkdtemp(prefix='memveil-candidate-live-'))
         export = out / 'export'
         export.mkdir()
+        local_evidence = out / 'local-evidence'
+        local_evidence.mkdir()
         disk = out / 'scratch.raw'
         with disk.open('xb') as stream: stream.truncate(64 * 1024 * 1024)
         token = os.urandom(8).hex()
         guest_command = shlex.join([sys.executable, str(Path(__file__).resolve()), kind, '--guest',
             '--manifest', str(selected.manifest_path), '--bundle', str(selected.bundle), '--deb', str(deb),
             '--token', token, '--export', '/tmp/export', '--digest', selected.digest,
+            '--local-evidence', '/tmp/memveil-local-evidence',
             '--host-boot', Path('/proc/sys/kernel/random/boot_id').read_text().strip()])
         args = ['--run', '-m', '6G', '--append', 'swiotlb=force memveil_candidate_guest=' + token,
                 '--overlay-rwdir=/usr', '--overlay-rwdir=/etc', '--overlay-rwdir=/var',
-                '--rwdir=/tmp/export=' + str(export), '--network', 'user',
+                '--rwdir=/tmp/export=' + str(export),
+                '--rwdir=/tmp/memveil-local-evidence=' + str(local_evidence), '--network', 'user',
                 '--qemu-opts=-cpu host -device pcnet,netdev=pcnet0,mac=' + guest_mac(token) + ' -netdev user,id=pcnet0,net=10.0.3.0/24 '
                 '-drive file=' + str(disk) + ',format=raw,if=none,id=mvowned '
                 '-device nvme,drive=mvowned,serial=mv-' + token,
@@ -431,11 +546,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('kind', choices=('soak', 'overhead'))
     parser.add_argument('--guest', action='store_true')
-    for key in ('manifest', 'bundle', 'deb', 'token', 'export', 'host-boot', 'digest'): parser.add_argument('--' + key)
+    for key in ('manifest', 'bundle', 'deb', 'token', 'export', 'host-boot', 'digest', 'local-evidence'): parser.add_argument('--' + key)
     args = parser.parse_args()
     try:
         if args.guest:
-            guest(args.kind, args.manifest, args.bundle, args.deb, args.token, args.export, args.host_boot, args.digest)
+            guest(args.kind, args.manifest, args.bundle, args.deb, args.token, args.export, args.host_boot, args.digest, args.local_evidence)
             return 0
         return host(args.kind)
     except (ValueError, OSError, KeyError, subprocess.SubprocessError) as exc:

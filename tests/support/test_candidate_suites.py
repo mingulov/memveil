@@ -46,5 +46,3 @@ def test_fuzz_conflict_refuses_before_executable(sealed, tmp_path):
     assert result.returncode != 0
     assert '--binary override' in result.stderr
     assert 'packaged-synthetic' not in result.stdout
-
-

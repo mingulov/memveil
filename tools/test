@@ -60,7 +60,7 @@ if [ "$#" = 1 ] && [ "$1" = vm-live-soak ]; then
     exec python3 "$ROOT/tests/vm/candidate_live.py" soak
 fi
 if [ "$#" = 1 ] && [ "$1" = candidate-inputs ]; then
-    exec python3 -m pytest "$ROOT/tests/support/test_candidate_input.py" "$ROOT/tests/support/test_candidate_suites.py" "$ROOT/tests/vm/test_live_soak.py" -q
+    exec python3 -m pytest "$ROOT/tests/support/test_candidate_input.py" "$ROOT/tests/support/test_candidate_suites.py" "$ROOT/tests/support/test_candidate_package_adapters.py" "$ROOT/tests/vm/test_live_soak.py" "$ROOT/tests/vm/test_pool_read_oracle.py" -q
 fi
 
 if [ "${LMB_SANITIZE:-0}" = 1 ]; then

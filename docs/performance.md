@@ -144,7 +144,10 @@ verified deb in an ephemeral guest and runs five separately paired baseline
 runs for each of `attempt-record-summary`, actual `live-top-1s`, no-stack
 `journal-summary`, and `journal-callers-detail`. Summary targets remain at
 most 5% throughput decrease and 10% p99 increase. Caller-enabled journal detail
-is reported separately. Missing or unadmitted requested journal support fails
+is reported separately. Live top must cover the measured window with one-second
+refreshes: adjacent refreshes must remain within 0.5–1.5 seconds, both window
+edges within 1.5 seconds, and at least 59 refreshes for a sixty-second window.
+Missing middle intervals or startup bursts fail. Missing or unadmitted requested journal support fails
 its row; an attach refusal is never a performance pass. The existing
 `perf-workload` remains a laboratory consumer measurement, with candidate BPF
 and bridge inputs when selected; it does not become a product-summary receipt.
@@ -158,17 +161,35 @@ per-packet latency. The exact same protocol runs in each paired baseline.
 
 `MEMVEIL_VM_LIVE_SOAK=1 tools/test vm-live-soak` requires the same candidate
 inputs. It runs repeated one-minute captures with concurrent scratch block and
-peer-network traffic for at least thirty minutes, then one 4,260-second live
-capture whose pool samples must span more than seventy minutes. The pool case
+peer-network traffic for at least thirty measured active minutes, then one
+4,260-second live capture whose pool samples must span more than seventy
+minutes. Readiness, warmup, reporting and cleanup time never count toward
+the thirty-minute total; campaign wall time is reported separately. The pool case
 uses one 16 KiB direct read and one peer packet per second so it exercises the
 full sampling duration within the default event-byte budget; it is not an
-overhead measurement. The repeated-capture case retains the mixed workload
+overhead measurement. The first 4,096 periodic pool samples must demonstrate
+timed coverage. After that routine cap, quiet sampling legitimately stops
+persisting records. A separately identified intrusive pool-only `strace`
+oracle therefore checks positive reads of the exact used/capacity debugfs
+paths through the measured post-cap interval, excluding finalization. Each
+label needs at least 4,096 reads; gaps above three seconds or bursts below
+half a second fail. Trace delivery must remain within 250 ms. The tracer,
+parser, candidate executable, process start identity and guest nonce are
+bound in the receipt. Raw trace lines remain in bounded memory; only labels,
+positive byte counts and monotonic receive timestamps are retained. The
+oracle is never attached on overhead legs and proves read cadence, not
+pressure behavior. The repeated-capture case retains the mixed workload
 specified above. It records
 all quality channels, stop facts, process RSS/FD samples, BPF program/map/link
 inventories, installed byte identities, capture hashes and cleanup. Userspace
 RSS remains bounded by 256 MiB; map memory is reported separately and unknown
 map memory stays null. Captures and progress remain in the exported evidence
-directory. This is distinct from the offline replay `soak` suite.
+directory. Failed captures and checkpoints are retained with bounded,
+allowlisted exports and failure observations. Independent cleanup/export
+failures do not replace the original product exit; export failure leaves the
+owned local evidence in a second host-backed evidence directory. Failure
+exports are explicitly unverified. This is distinct from the offline replay
+`soak` suite.
 
 Live campaigns require the pinned VM tool versions, KVM, root in the isolated
 guest, and the exclusive suite lease. The host root remains read-only; package

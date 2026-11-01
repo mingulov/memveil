@@ -46,7 +46,7 @@ import pytest
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from support.candidate_input import load, binary
+from support.candidate_input import load, binary, verify_installed
 _selected = load()
 
 DEB = str(_selected.artifact("deb")) if _selected else os.environ.get("MV_DEB", "")
@@ -251,6 +251,8 @@ def extracted(tmp_path_factory):
     dest = tmp_path_factory.mktemp("debroot")
     proc = run("dpkg-deb", "-x", DEB, str(dest))
     assert proc.returncode == 0, proc.stderr
+    if _selected:
+        verify_installed(_selected.manifest, dest)
     return dest
 
 
@@ -473,18 +475,16 @@ def test_shipped_elf_stripped(extracted):
 def test_bpf_objects_match_build(extracted):
     import hashlib
 
-    for name in BPF_OBJECTS:
-        staged = os.path.join(REPO, "build", "bpf", name)
-        if not os.path.isfile(staged):
-            pytest.skip("build/bpf/%s absent: rerun with a built tree "
-                        "to prove installed bytes equal built bytes"
-                        % name)
-    for name in BPF_OBJECTS:
-        staged = os.path.join(REPO, "build", "bpf", name)
-        installed = extracted / "usr" / "lib" / "memveil" / name
-        assert (hashlib.sha256(installed.read_bytes()).hexdigest()
-                == hashlib.sha256(
-                    open(staged, "rb").read()).hexdigest()), name
+    if _selected:
+        expected = {name: _selected.path('bpf/' + name) for name in BPF_OBJECTS}
+    else:
+        expected = {name: Path(REPO) / 'build/bpf' / name for name in BPF_OBJECTS}
+        for name, staged in expected.items():
+            if not staged.is_file():
+                pytest.skip('build/bpf/%s absent: rerun with a built tree to prove installed bytes equal built bytes' % name)
+    for name, staged in expected.items():
+        installed = extracted / 'usr/lib/memveil' / name
+        assert hashlib.sha256(installed.read_bytes()).digest() == hashlib.sha256(staged.read_bytes()).digest(), name
 
 
 @needs_deb

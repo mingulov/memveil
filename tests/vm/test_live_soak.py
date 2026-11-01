@@ -132,3 +132,151 @@ def test_workload_oracle_rejects_short_io_and_packet_loss():
     for kind, out, err in [('block', b'', b'1024 bytes (1 KB) copied, 1 s'),
                             ('network', b'32 packets transmitted, 1 received, 97% packet loss', b'')]:
         with pytest.raises(ValueError): m.completed_units(kind, out, err, False)
+
+
+def measured(seconds=60, start=0):
+    return {'workload': {'elapsed_seconds': seconds,
+            'window': {'start_ns': str(start * 10**9), 'end_ns': str((start + seconds) * 10**9)},
+            'metrics': {kind: {'completed_units': '1'} for kind in ('block', 'network')}}}
+
+
+def test_soak_counts_only_measured_work_when_other_stages_are_slow(monkeypatch):
+    m = api()
+    clock = [0]
+    result = {'legs': []}
+    def one(mode, seconds, pool=False):
+        before = clock[0]
+        clock[0] += seconds + 60
+        observation = measured(seconds, before)
+        result['legs'].append(observation)
+        return observation
+    monkeypatch.setattr(m.time, 'monotonic', lambda: clock[0])
+    m.run_soak(one, result)
+    assert len(result['legs']) == 31
+    assert result['measured_mixed_seconds'] == 1800
+    assert result['campaign_seconds_before_pool'] == 3600
+
+
+@pytest.mark.parametrize('ticks', [[0, .000001], list(range(-60, 0)),
+                                  list(range(1, 20)) + list(range(40, 60)),
+                                  [i / 1000 for i in range(60)]])
+def test_top_rejects_bursts_missing_middle_and_outside_window(ticks):
+    with pytest.raises(ValueError, match='refresh'):
+        api().validate_top_refreshes([str(int(v * 10**9)) for v in ticks], measured()['workload']['window'])
+
+
+def test_top_accepts_one_second_refreshes_with_declared_jitter():
+    api().validate_top_refreshes([str(int((i + (.1 if i % 2 else -.1)) * 10**9))
+                                 for i in range(1, 60)], measured()['workload']['window'])
+
+
+@pytest.mark.parametrize('failure', ['product', 'report', 'cleanup'])
+def test_failed_leg_retains_checkpoint_and_observations(tmp_path, monkeypatch, failure):
+    import json
+    m = api()
+    local, export = tmp_path / 'local', tmp_path / 'export'
+    local.mkdir(); export.mkdir()
+    error = m.ProductExit(3) if failure == 'product' else ValueError(failure + ' failed')
+    def fail(binary, disk, mode, work, seconds, pool=False, observation=None, **kwargs):
+        capture = work / 'capture'
+        capture.mkdir()
+        (capture / 'checkpoint.json').write_text('{"synthetic":true}')
+        (capture / 'events.ndjson').write_text('')
+        observation['product_exit'] = 3 if failure == 'product' else 0
+        observation['output'] = {'ready': True}
+        raise error
+    monkeypatch.setattr(m, 'leg', fail)
+    with pytest.raises(type(error)) as caught:
+        m.record_leg('/unused', '/unused', 'attempt-record-summary', 60, False, local, export, 0)
+    assert caught.value is error
+    assert (local / 'leg-0/capture/checkpoint.json').exists()
+    assert (export / 'failed-0/capture/checkpoint.json').exists()
+    receipt = json.loads((local / 'leg-0/observations.json').read_text())
+    assert receipt['status'] == 'FAIL' and receipt['output']['ready']
+    assert receipt['product_exit'] == (3 if failure == 'product' else 0)
+
+
+def test_export_failure_keeps_original_product_exit_and_local_capture(tmp_path, monkeypatch):
+    import json
+    m = api()
+    local, export = tmp_path / 'local', tmp_path / 'export'
+    local.mkdir(); export.mkdir()
+    def fail(binary, disk, mode, work, seconds, pool=False, observation=None, **kwargs):
+        (work / 'capture').mkdir()
+        (work / 'capture/checkpoint.json').write_text('{"synthetic":true}')
+        observation['product_exit'] = 3
+        raise m.ProductExit(3)
+    monkeypatch.setattr(m, 'leg', fail)
+    monkeypatch.setattr(m, 'retain_capture', lambda *a: (_ for _ in ()).throw(OSError('export failed')))
+    with pytest.raises(m.ProductExit) as caught:
+        m.record_leg('/unused', '/unused', 'attempt-record-summary', 60, False, local, export, 0)
+    assert caught.value.product_exit == 3
+    assert (local / 'leg-0/capture/checkpoint.json').exists()
+    receipt = json.loads((local / 'leg-0/observations.json').read_text())
+    assert receipt['product_exit'] == 3 and receipt['export_error']
+
+
+def test_cleanup_failure_does_not_replace_primary_product_failure(tmp_path, monkeypatch):
+    m = api()
+    monkeypatch.setattr(m, 'inventory', lambda: {})
+    monkeypatch.setattr(m, 'workload', lambda *a, **k: (_ for _ in ()).throw(m.ProductExit(3)))
+    monkeypatch.setattr(m, 'settled', lambda *a: (_ for _ in ()).throw(ValueError('cleanup failed')))
+    observation = {}
+    with pytest.raises(m.ProductExit) as caught:
+        m.leg('/unused', '/unused', 'off', tmp_path, 60, observation=observation)
+    assert caught.value.product_exit == 3
+    assert observation['cleanup_errors']
+
+
+def test_failure_export_refuses_alias_without_deleting_foreign_file(tmp_path):
+    m = api()
+    work = tmp_path / 'work'; work.mkdir()
+    (work / 'capture').mkdir()
+    foreign = tmp_path / 'foreign'; foreign.write_text('preserve')
+    (work / 'capture/checkpoint.json').symlink_to(foreign)
+    with pytest.raises((ValueError, OSError)):
+        m.retain_capture(work, tmp_path / 'export')
+    assert foreign.read_text() == 'preserve'
+
+
+@pytest.mark.parametrize('refreshes,accept', [([1, 1.000001], False), (list(range(1, 60)), True)])
+def test_real_leg_applies_measured_top_cadence_guard(tmp_path, monkeypatch, refreshes, accept):
+    import io
+    m = api()
+    class Process:
+        pid = 123
+        stdout = io.BytesIO()
+        returncode = None
+        def poll(self): return self.returncode
+        def send_signal(self, signal): self.returncode = 0
+        def wait(self, timeout): return self.returncode
+    process = Process()
+    def output(stream, observed):
+        observed.update(ready=True, refresh_ns=[str(int(tick * 10**9)) for tick in refreshes])
+    monkeypatch.setattr(m, 'inventory', lambda: {})
+    monkeypatch.setattr(m, 'settled', lambda before: {})
+    monkeypatch.setattr(m, 'observe_output', output)
+    monkeypatch.setattr(m, 'workload', lambda *args, **kwargs: measured()['workload'])
+    monkeypatch.setattr(m, 'capture_facts', lambda *args: {})
+    monkeypatch.setattr(m.subprocess, 'Popen', lambda *args, **kwargs: process)
+    if accept:
+        assert m.leg('/unused', '/unused', 'live-top-1s', tmp_path, 60)['product_exit'] == 0
+    else:
+        with pytest.raises(ValueError, match='refresh'):
+            m.leg('/unused', '/unused', 'live-top-1s', tmp_path, 60)
+
+
+def test_capture_facts_rejects_baseline_and_final_pool_only(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    m = api()
+    quality = {key: {'status': 'complete_for_scope', 'loss_count': '0'}
+               for key in ('detail', 'aggregate', 'correlation', 'baseline', 'terminal')}
+    (tmp_path / 'session.json').write_text(json.dumps({'quality': quality, 'stop': {}}))
+    events = [{'kind': 'pool_sample', 'ts_ns': '0'}, {'kind': 'bounce_attempt', 'ts_ns': '1'},
+              {'kind': 'pool_sample', 'ts_ns': str(4260 * 10**9)}]
+    (tmp_path / 'events.ndjson').write_text(''.join(json.dumps(event) + '\n' for event in events))
+    monkeypatch.setattr(m.subprocess, 'run', lambda *a, **k: SimpleNamespace(returncode=0, stdout=b'{"integrity":{"status":"verified"}}'))
+    with pytest.raises(ValueError, match='pool'):
+        m.capture_facts('/unused', tmp_path, True, {'records': [], 'errors': [], 'cleanup': 'detached'},
+                        measured(4260)['workload']['window'], str(4261 * 10**9))
