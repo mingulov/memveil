@@ -140,7 +140,8 @@ install -D -m0644 completions/memveil \
 install -D -m0644 completions/_memveil \
     "%{buildroot}/usr/share/zsh/vendor-completions/_memveil"
 mkdir -p "%{buildroot}/var/lib/memveil/receipts"
-find "%{buildroot}" -type d -exec chmod 0755 {} +
+# Five octal digits clear inherited directory setgid bits.
+find "%{buildroot}" -type d -exec chmod 00755 {} +
 find "%{buildroot}" -type f -exec chmod 0644 {} +
 chmod 0755 "%{buildroot}/usr/bin/memveil"
 
