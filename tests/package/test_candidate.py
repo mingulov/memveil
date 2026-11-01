@@ -162,3 +162,9 @@ def test_signed_inputs_need_pinned_trust_and_exact_subject(tmp_path):
     with pytest.raises(ValueError, match='trust'): m.verify_signature(subject, signature, public, [])
     subject.write_bytes(b'substituted input\n')
     with pytest.raises(ValueError, match='signature'): m.verify_signature(subject, signature, public, trusted)
+
+
+@pytest.mark.parametrize('args', [[], ['seal'], ['verify-bundle']])
+def test_cli_help_is_available(args):
+    result = subprocess.run([str(ROOT / 'tools/candidate'), *args, '--help'], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

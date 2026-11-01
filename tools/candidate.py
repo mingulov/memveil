@@ -369,7 +369,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
     seal = commands.add_parser('seal', help='seal existing local outputs, without building')
-    seal.add_argument('--source', default='.')
+    seal.add_argument('--source-tree', default='.')
     for role in sorted(ROLES): seal.add_argument('--' + role, required=True)
     seal.add_argument('--out', required=True)
     verify = commands.add_parser('verify-bundle', help='verify and exclusively extract exact runtime')
@@ -380,7 +380,7 @@ def main():
     args = parser.parse_args()
     try:
         if args.command == 'seal':
-            print(create_manifest(args.source, args.bundle, vars(args), args.out))
+            print(create_manifest(args.source_tree, args.bundle, vars(args), args.out))
         else:
             print(verify_bundle(load_manifest(args.manifest, args.digest), args.bundle, args.destination))
     except (OSError, ValueError, KeyError, StopIteration, subprocess.CalledProcessError, tarfile.TarError) as error:
