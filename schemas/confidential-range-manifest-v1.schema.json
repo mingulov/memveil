@@ -1,0 +1,70 @@
+{
+  "type": "object",
+  "required": [
+    "contract",
+    "candidate_manifest_sha256",
+    "profile_id",
+    "required_cases",
+    "synthetic",
+    "source_commit",
+    "config_sha256",
+    "btf_sha256",
+    "oracle_source_commit",
+    "oracle_module_sha256",
+    "ordinary_transport_receipt_sha256"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "contract": {
+      "const": "memveil-confidential-range/1"
+    },
+    "candidate_manifest_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "profile_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "required_cases": {
+      "type": "array",
+      "uniqueItems": true,
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {
+        "type": "string",
+        "maxLength": 64
+      }
+    },
+    "synthetic": {
+      "type": "boolean"
+    },
+    "source_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "config_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "btf_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "oracle_source_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "oracle_module_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "ordinary_transport_receipt_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "confidential-range-manifest-v1.schema.json"
+}

@@ -1,0 +1,88 @@
+{
+  "contract": "memveil-journal-profile/1",
+  "profile_id": "linux-7.0.14-x86-journal-provisional",
+  "status": "unadmitted",
+  "evidence_class": "source_reviewed_provisional",
+  "linux_commit": "458c6079fc1d41d564c37679c8ace02cd83ee817",
+  "architecture": "x86_64",
+  "page_size": "4096",
+  "transient_key": {
+    "fields": [
+      "current_task_pointer",
+      "start_boottime",
+      "window_epoch",
+      "nesting_depth"
+    ],
+    "helper": "bpf_get_current_task_btf",
+    "btf_field": "task_struct.start_boottime:u64",
+    "read": "bounded CO-RE u64 read; error refuses pairing",
+    "persistence": "none; bounded BPF memory only",
+    "loss_rule": "matching tokens do not prove correlation when callback detection is unproved"
+  },
+  "source_files": [
+    {
+      "path": "include/linux/sched.h",
+      "sha256": "aee5c39f6114cf358e28e64e7ce53c8358f0f90d70467f2c2e643d4128bfea2d"
+    },
+    {
+      "path": "kernel/dma/swiotlb.c",
+      "sha256": "8297f87e0b55c5336f0a5d2d4d44542983daf5dd6823ab110cfb348ff4c9bd67"
+    },
+    {
+      "path": "kernel/dma/direct.c",
+      "sha256": "ac4fd8d4d02a3f349970516942fa89af78612eae3a60e07bc88fddbd11b4ca59"
+    },
+    {
+      "path": "arch/x86/mm/pat/set_memory.c",
+      "sha256": "2c72c815dc9a4dbb29afa5cda38095668ad0fb14ffafb7d161219e89a551fd4b"
+    },
+    {
+      "path": "arch/x86/mm/mem_encrypt_amd.c",
+      "sha256": "72a49dea865a5dcc6e4a65832ec73d1205a1884334ac71294918e0f1c8d57743"
+    },
+    {
+      "path": "arch/x86/include/asm/set_memory.h",
+      "sha256": "0df103000cbd097570553f53dff9418926eaeebd60d18fe2b68b00be7f117519"
+    }
+  ],
+  "config_sha256": null,
+  "btf_sha256": null,
+  "object_sha256": null,
+  "required_config": [
+    "CONFIG_X86_64=y",
+    "CONFIG_BPF=y",
+    "CONFIG_BPF_SYSCALL=y",
+    "CONFIG_DEBUG_INFO_BTF=y",
+    "CONFIG_FTRACE=y",
+    "CONFIG_DYNAMIC_FTRACE_WITH_ARGS=y"
+  ],
+  "required_btf": "Both wrappers: int (unsigned long addr, int numpages); x86-64 unsigned long=64, int=32; task_struct.start_boottime is u64 with an admitted CO-RE read and current-task helper.",
+  "hooks": [
+    "fentry/set_memory_decrypted",
+    "fexit/set_memory_decrypted",
+    "fentry/set_memory_encrypted",
+    "fexit/set_memory_encrypted"
+  ],
+  "native_result": "Signed int, zero succeeds at the wrapper; any nonzero result fails with unknown rollback. Ordinary no-op zero is not a transition.",
+  "effect": "request_only",
+  "caller_labels": {
+    "mv_command_set [memveil_region_oracle]": "owned",
+    "mv_restore [memveil_region_oracle]": "owned",
+    "swiotlb_init_late": "swiotlb",
+    "swiotlb_alloc_tlb": "swiotlb",
+    "swiotlb_free_tlb": "swiotlb",
+    "swiotlb_exit": "swiotlb",
+    "dma_set_decrypted": "direct_dma",
+    "dma_set_encrypted": "direct_dma",
+    "dma_direct_alloc": "direct_dma",
+    "dma_direct_free": "direct_dma"
+  },
+  "admission_required": [
+    "exact_config_btf_object",
+    "enabled_snp",
+    "actual_attach",
+    "independent_owned_tuples",
+    "window_and_loss",
+    "caller_quality_when_requested"
+  ]
+}

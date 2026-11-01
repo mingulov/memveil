@@ -1,0 +1,27 @@
+{
+  "contract": "memveil-confidential-guest/1",
+  "candidate_manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "profile_id": "linux-7.0.14-x86-journal-provisional",
+  "required_cases": [
+    "owned-success",
+    "owned-retained",
+    "owned-restored",
+    "request-only-state",
+    "native-tuple-agreement",
+    "enabled-snp",
+    "real-io",
+    "independent-tuples",
+    "loss-and-cleanup"
+  ],
+  "synthetic": true,
+  "source_commit": "0000000000000000000000000000000000000000",
+  "config_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "btf_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "oracle_source_commit": "0a269b1a4230720dbd05077351624ff5ba0965e0",
+  "oracle_module_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "ordinary_transport_receipt_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "range_manifest_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "enabled_snp_evidence_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "io_receipt_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "tuple_ledger_sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+}

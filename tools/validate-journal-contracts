@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Validate synthetic journal contract fixtures with independent arithmetic.
+
+Development validator only; does not enable live collection or qualify profiles.
+Uses only Python's standard library. tools/validate-journal-contracts [FIXTURE_ROOT]
+"""
+import hashlib
+import json
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+LABELS = {
+    'mv_command_set [memveil_region_oracle]': 'owned', 'mv_restore [memveil_region_oracle]': 'owned',
+    'swiotlb_init_late': 'swiotlb', 'swiotlb_alloc_tlb': 'swiotlb', 'swiotlb_free_tlb': 'swiotlb', 'swiotlb_exit': 'swiotlb',
+    'dma_set_decrypted': 'direct_dma', 'dma_set_encrypted': 'direct_dma', 'dma_direct_alloc': 'direct_dma', 'dma_direct_free': 'direct_dma',
+}
+KINDS = ('bounce_attempt', 'map_result', 'unmap', 'copy', 'sync_request', 'transition_result', 'pool_sample', 'gap', 'marker', 'counter_snapshot')
+RANGE_CASES = ['owned-success', 'owned-retained', 'owned-restored', 'request-only-state', 'native-tuple-agreement']
+GUEST_CASES = RANGE_CASES + ['enabled-snp', 'real-io', 'independent-tuples', 'loss-and-cleanup']
+LATE_CASES = ['pre-window-absent', 'baseline-unknown', 'late-owned-tuples', 'request-only-state']
+
+
+def need(condition, reason):
+    if not condition:
+        raise ValueError(reason)
+
+
+def keys(value, names):
+    need(type(value) is dict and set(value) == set(names), 'fields: ' + str(names))
+
+
+def u64(value):
+    need(type(value) is str and re.fullmatch(r'0|[1-9][0-9]{0,19}', value) is not None, 'canonical u64')
+    n = int(value)
+    need(n <= 2**64 - 1, 'u64 overflow')
+    return n
+
+
+def i32(value):
+    need(type(value) is int and -(2**31) <= value < 2**31, 'signed native int')
+    return value
+
+
+def validate_event(e):
+    keys(e, ['schema_version', 'session_id', 'seq', 'ts_ns', 'kind', 'source', 'data'])
+    need(e['schema_version'] == '0.2.0' and e['kind'] == 'transition_result', 'journal version/kind')
+    need(type(e['session_id']) is str and re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}', e['session_id']) is not None, 'session id')
+    u64(e['seq']); end = u64(e['ts_ns'])
+    s = e['source']
+    keys(s, ['hook', 'backend', 'profile_id', 'measurement', 'correlation'])
+    need(s['backend'] in ('synthetic', 'fentry_fexit') and s['measurement'] == 'observed', 'source')
+    need(s['correlation'] in ('direct', 'unpaired'), 'correlation')
+    need(type(s['profile_id']) is str and 0 < len(s['profile_id']) <= 128, 'profile')
+    d = e['data']
+    keys(d, ['direction', 'requested_state', 'requested_native_pages', 'requested_pages', 'requested_bytes',
+             'size_reason', 'page_size', 'native_result', 'operation_token', 'entry_ns', 'epoch',
+             'membership', 'region', 'region_reason', 'effect', 'caller'])
+    need(d['direction'] in ('decrypt', 'encrypt'), 'direction')
+    need(d['requested_state'] == ('shared' if d['direction'] == 'decrypt' else 'private'), 'target')
+    need(s['hook'] == 'set_memory_' + ('decrypted' if d['direction'] == 'decrypt' else 'encrypted'), 'hook')
+    n = i32(d['requested_native_pages']); i32(d['native_result'])
+    need(d['page_size'] == '4096', 'profile page size')
+    if n < 0:
+        need(d['requested_pages'] is None and d['requested_bytes'] is None and d['size_reason'] == 'invalid_native_pages', 'invalid pages')
+    else:
+        need(u64(d['requested_pages']) == n and u64(d['requested_bytes']) == n * 4096 and d['size_reason'] is None, 'requested size')
+    need(u64(d['epoch']) > 0, 'zero epoch')
+    if d['membership'] == 'admitted':
+        need(0 < u64(d['operation_token']) < 2**64 - 1 and u64(d['entry_ns']) <= end and s['correlation'] == 'direct', 'operation token/entry')
+    else:
+        need(d['membership'] == 'unmatched_exit' and d['operation_token'] is None and d['entry_ns'] is None and s['correlation'] == 'unpaired', 'unmatched exit')
+    need(d['region'] is None and d['region_reason'] == 'request_only_source' and d['effect'] == 'request_only', 'request-only boundary')
+    c = d['caller']; keys(c, ['status', 'class', 'label'])
+    if c['status'] == 'resolved':
+        need(c['label'] in LABELS and c['class'] == LABELS[c['label']], 'caller label/class')
+    else:
+        need(c['status'] in ('disabled', 'unresolved', 'ambiguous', 'truncated') and c['class'] is None and c['label'] is None, 'caller status')
+
+
+def validate_manifest(m, suite, candidate_digest, profile_id, *, qualification=False):
+    guest = suite == 'confidential-real'
+    need(suite in ('confidential-ranges', 'confidential-real', 'confidential-late-attach'), 'suite')
+    fields = ['contract', 'candidate_manifest_sha256', 'profile_id', 'required_cases', 'synthetic', 'source_commit',
+              'config_sha256', 'btf_sha256', 'oracle_source_commit', 'oracle_module_sha256', 'ordinary_transport_receipt_sha256']
+    if guest:
+        fields += ['range_manifest_sha256', 'enabled_snp_evidence_sha256', 'io_receipt_sha256', 'tuple_ledger_sha256']
+    keys(m, fields)
+    need(m['contract'] == ('memveil-confidential-guest/1' if guest else 'memveil-confidential-range/1'), 'manifest version')
+    need(m['candidate_manifest_sha256'] == candidate_digest and m['profile_id'] == profile_id, 'candidate/profile binding')
+    need(type(m['synthetic']) is bool, 'synthetic provenance')
+    if qualification:
+        need(not m['synthetic'], 'synthetic input cannot qualify a real candidate')
+    required = GUEST_CASES if guest else (LATE_CASES if suite == 'confidential-late-attach' else RANGE_CASES)
+    need(type(m['required_cases']) is list and len(m['required_cases']) == len(set(m['required_cases'])) and set(m['required_cases']) == set(required), 'required case set')
+    for key in fields:
+        if key.endswith('_sha256'):
+            need(type(m[key]) is str and re.fullmatch('[0-9a-f]{64}', m[key]) is not None, 'digest')
+        if key.endswith('_commit'):
+            need(type(m[key]) is str and re.fullmatch('[0-9a-f]{40}', m[key]) is not None, 'source commit')
+
+
+def pairs(items):
+    out = {}
+    for k, v in items:
+        need(k not in out, 'duplicate JSON key')
+        out[k] = v
+    return out
+
+
+def read_json(raw):
+    need(len(raw) <= 16777216, 'document limit')
+    value = json.loads(raw, object_pairs_hook=pairs)
+    def depth(v, n):
+        need(n <= 64, 'nesting limit')
+        if isinstance(v, dict):
+            for item in v.values(): depth(item, n + 1)
+        elif isinstance(v, list):
+            for item in v: depth(item, n + 1)
+    depth(value, 0)
+    return value
+
+
+def load_json(path):
+    with path.open('rb') as stream:
+        return read_json(stream.read(16777217))
+
+
+def validate_capture(folder):
+    final = (folder / 'session.json').exists()
+    session = load_json(folder / ('session.json' if final else 'checkpoint.json'))
+    need(session['capture']['finalized'] is final, 'session/checkpoint finalization')
+    if not final:
+        need(session['capture']['end_reason'] == 'checkpoint' and u64(session['capture']['checkpoint_generation']) > 0, 'checkpoint generation')
+    need(session['schema_version'] == '0.2.0' and session['synthetic'] is True, 'synthetic contract fixture')
+    need(session['quality']['baseline']['status'] == 'unavailable' and session['quality']['terminal']['status'] == 'unavailable', 'unproved baseline/closure')
+    need(session['baseline'] == {'complete': False, 'region_observations': []}, 'unknown baseline')
+    j = session['journal']
+    need(u64(j['epoch']) > 0, 'zero epoch')
+    need(j['region_identity'] is None and j['region_state'] is None and j['state_reason'] == 'request_only_source', 'session state')
+    counter_keys = ['entries', 'exits', 'matched_results', 'unmatched_exits', 'censored', 'operation_exhaustion', 'nesting_exhaustion', 'token_exhaustion', 'ring_drops', 'invalid_records', 'missed_callbacks']
+    keys(j['counters'], counter_keys); keys(j['counter_reasons'], counter_keys)
+    for key in counter_keys:
+        value = j['counters'][key]; reason = j['counter_reasons'][key]
+        if value is None:
+            need(reason in ('not_observable', 'read_failed', 'overflow'), 'unknown counter reason')
+        else:
+            u64(value); need(reason is None, 'known counter reason')
+    if j['admission_start_reason'] == 'not_opened':
+        need(all(v is None or v == '0' for v in j['counters'].values()), 'nonzero counter before readiness')
+    need(j['closure'] == 'unproved' and j['closure_evidence'] is None, 'provisional closure')
+    end = u64(j['observation_end_ns'])
+    capture_start = u64(session['capture']['window']['start_ns'])
+    need(capture_start <= end and end == u64(session['capture']['window']['end_ns']), 'observation prefix')
+    start = None if j['admission_start_ns'] is None else u64(j['admission_start_ns'])
+    cutoff = None if j['admission_end_ns'] is None else u64(j['admission_end_ns'])
+    if start is None:
+        need(j['admission_start_reason'] in ('not_opened', 'readiness_unproved') and cutoff is None, 'unknown admission start')
+        need(j['admission_end_reason'] == ('not_opened' if j['admission_start_reason'] == 'not_opened' else 'close_unproved'), 'unknown admission end')
+    else:
+        need(j['admission_start_reason'] is None and capture_start <= start <= end, 'admission start')
+        if cutoff is None:
+            need(j['admission_end_reason'] == ('close_unproved' if final else 'admission_open'), 'admission end reason')
+        else:
+            need(j['admission_end_reason'] is None and start <= cutoff <= end, 'admission end')
+    counts = {k: 0 for k in KINDS}; tokens = set(); failures = 0; requests = 0
+    digest = hashlib.sha256(); byte_count = 0; line_count = 0
+    with (folder / 'events.ndjson').open('rb') as stream:
+        for line in iter(lambda: stream.readline(65537), b''):
+            need(len(line) <= 65536 and line.endswith(b'\n'), 'line limit/framing')
+            e = read_json(line); validate_event(e)
+            need(j['admission_start_reason'] != 'not_opened', 'result before readiness')
+            need(e['session_id'] == session['session_id'] and u64(e['seq']) == line_count, 'identity/sequence')
+            need(capture_start <= u64(e['ts_ns']) < end and e['data']['epoch'] == j['epoch'], 'timestamp/epoch')
+            token = e['data']['operation_token']
+            if token is not None:
+                need(token not in tokens, 'duplicate operation token')
+                need(len(tokens) < 65536, 'development fixture token budget')
+                tokens.add(token)
+                need(start is not None and start <= u64(e['data']['entry_ns']) < (end if cutoff is None else cutoff), 'entry admission window')
+                requests += 1; failures += e['data']['native_result'] != 0
+            counts[e['kind']] += 1
+            digest.update(line); byte_count += len(line); line_count += 1
+    integ = session['capture']['integrity']
+    expected = dict(algorithm='sha256', events_bytes=str(byte_count), line_count=str(line_count),
+                    first_seq='0' if line_count else None, last_seq=str(line_count-1) if line_count else None,
+                    events_sha256=digest.hexdigest(), kinds={k: str(v) for k, v in counts.items()})
+    need(integ == expected, 'literal integrity')
+    return requests, failures
+
+
+def validate_fixtures(root):
+    count = 0
+    for folder in sorted(root.iterdir()):
+        if not folder.is_dir(): continue
+        expected = load_json(folder / 'expected.json')
+        try:
+            requests, failures = validate_capture(folder)
+        except ValueError as e:
+            need(not expected['valid'] and str(e) == 'duplicate operation token', 'unexpected refusal: ' + str(e))
+        else:
+            need(expected['valid'] and str(requests) == expected['requests'] and str(failures) == expected['failures'], 'independent counts')
+            report = load_json(folder / 'report.json')
+            need(report['schema_version'] == '0.2.0' and report['synthetic'] is True and report['session_id'] == 'journal-' + folder.name, 'report provenance')
+            need(report['journal']['requests'] == str(requests) and report['journal']['failures'] == str(failures), 'report counts')
+            for key in ('censored', 'requested_bytes'):
+                value = report['journal'][key]; reason = report['journal'][key + '_reason']
+                if value is None:
+                    need(reason is not None, 'report unavailable reason')
+                else:
+                    u64(value); need(reason is None, 'report known reason')
+            need(report['journal']['shared_bytes'] is None and report['journal']['unreverted_ranges'] is None, 'report state')
+            findings = report['findings']
+            need([f['code'] for f in findings] == (['CONVERSION_FAILED'] if failures else []), 'report findings')
+        count += 1
+    return count
+
+if __name__ == '__main__':
+    if len(sys.argv) > 2:
+        raise SystemExit('usage: tools/validate-journal-contracts [FIXTURE_ROOT]')
+    print('journal contract fixtures:', validate_fixtures(Path(sys.argv[1]) if len(sys.argv) == 2 else ROOT / 'tests/fixtures/journal'))

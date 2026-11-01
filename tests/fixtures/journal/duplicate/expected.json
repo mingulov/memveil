@@ -1,0 +1,12 @@
+{
+  "valid": false,
+  "requests": "2",
+  "failures": "0",
+  "shared_bytes": null,
+  "unreverted_ranges": null,
+  "baseline": "unknown",
+  "terminal": "unproved",
+  "report_exit": 0,
+  "finding": null,
+  "note": "Synthetic requests only; overlap and persistent labels describe independent fixture scenarios, not observed range identity."
+}

@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Reproduce provisional schemas, profile and synthetic journal fixtures."""
+import copy
+import hashlib
+import json
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+PROFILE = 'linux-7.0.14-x86-journal-provisional'
+LABELS = {
+    'mv_command_set [memveil_region_oracle]': 'owned',
+    'mv_restore [memveil_region_oracle]': 'owned',
+    'swiotlb_init_late': 'swiotlb', 'swiotlb_alloc_tlb': 'swiotlb',
+    'swiotlb_free_tlb': 'swiotlb', 'swiotlb_exit': 'swiotlb',
+    'dma_set_decrypted': 'direct_dma', 'dma_set_encrypted': 'direct_dma',
+    'dma_direct_alloc': 'direct_dma', 'dma_direct_free': 'direct_dma',
+}
+CASES = ['success', 'failure', 'orphan-encrypt', 'overlap', 'duplicate',
+         'pre-attach', 'unresolved', 'disabled', 'persistent', 'invalid-pages',
+         'initial-checkpoint', 'open-checkpoint', 'censored']
+U64 = {'$ref': '#/$defs/u64'}
+NULL_U64 = {'anyOf': [U64, {'type': 'null'}]}
+
+def obj(properties):
+    return {'type': 'object', 'required': list(properties), 'additionalProperties': False, 'properties': properties}
+
+def emit(path, value):
+    path = ROOT / path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2) + '\n')
+
+def schema(name, old):
+    value = json.loads((ROOT / ('schemas/' + name + '-v' + old + '.schema.json')).read_text())
+    value['$id'] = name + '-v0.2.0.schema.json'
+    value['properties']['schema_version'] = {'const': '0.2.0'}
+    value['description'] = 'Provisional conversion request/result contract. No persistent region identity or state is established.'
+    return value
+
+def main():
+    event = schema('event', '0.1.2')
+    caller = obj({'status': {'enum': ['disabled', 'resolved', 'unresolved', 'ambiguous', 'truncated']},
+                  'class': {'enum': [None, 'owned', 'swiotlb', 'direct_dma']},
+                  'label': {'enum': [None] + list(LABELS)}})
+    caller['allOf'] = [{'if': {'properties': {'status': {'const': 'resolved'}}},
+                        'then': {'properties': {'class': {'type': 'string'}, 'label': {'type': 'string'}}},
+                        'else': {'properties': {'class': {'type': 'null'}, 'label': {'type': 'null'}}}}]
+    data = obj({
+        'direction': {'enum': ['decrypt', 'encrypt']},
+        'requested_state': {'enum': ['shared', 'private']},
+        'requested_native_pages': {'type': 'integer', 'minimum': -2147483648, 'maximum': 2147483647},
+        'requested_pages': NULL_U64, 'requested_bytes': NULL_U64,
+        'size_reason': {'enum': [None, 'invalid_native_pages']},
+        'page_size': {'const': '4096'},
+        'native_result': {'type': 'integer', 'minimum': -2147483648, 'maximum': 2147483647},
+        'operation_token': NULL_U64, 'entry_ns': NULL_U64, 'epoch': {'allOf': [U64, {'not': {'const': '0'}}]},
+        'membership': {'enum': ['admitted', 'unmatched_exit']},
+        'region': {'type': 'null'}, 'region_reason': {'const': 'request_only_source'},
+        'effect': {'const': 'request_only'}, 'caller': caller,
+    })
+    for branch in event['allOf']:
+        if branch['if']['properties']['kind']['const'] == 'transition_result':
+            branch['then']['properties']['data'] = data
+            branch['then']['properties']['observer_context'] = False
+    data['allOf'] = [
+        {'if': {'properties': {'direction': {'const': 'decrypt'}}},
+         'then': {'properties': {'requested_state': {'const': 'shared'}}},
+         'else': {'properties': {'requested_state': {'const': 'private'}}}},
+        {'if': {'properties': {'requested_native_pages': {'minimum': 0}}},
+         'then': {'properties': {'requested_pages': U64, 'requested_bytes': U64, 'size_reason': {'type': 'null'}}},
+         'else': {'properties': {'requested_pages': {'type': 'null'}, 'requested_bytes': {'type': 'null'}, 'size_reason': {'const': 'invalid_native_pages'}}}},
+        {'if': {'properties': {'membership': {'const': 'admitted'}}},
+         'then': {'properties': {'operation_token': {'allOf': [U64, {'not': {'enum': ['0', '18446744073709551615']}}]}, 'entry_ns': U64}},
+         'else': {'properties': {'operation_token': {'type': 'null'}, 'entry_ns': {'type': 'null'}}}},
+    ]
+    for label, cls in LABELS.items():
+        caller['allOf'].append({'if': {'properties': {'label': {'const': label}}}, 'then': {'properties': {'class': {'const': cls}}}})
+    emit('schemas/event-v0.2.0.schema.json', event)
+    session = schema('session', '0.1.4')
+    journal = obj({
+        'profile_id': {'type': 'string', 'minLength': 1, 'maxLength': 128}, 'evidence_class': {'enum': ['synthetic', 'source_reviewed_provisional', 'admitted']},
+        'epoch': {'allOf': [U64, {'not': {'const': '0'}}]}, 'admission_start_ns': NULL_U64, 'admission_end_ns': NULL_U64,
+        'admission_start_reason': {'enum': [None, 'not_opened', 'readiness_unproved']},
+        'admission_end_reason': {'enum': [None, 'not_opened', 'admission_open', 'close_unproved']},
+        'observation_end_ns': U64, 'callers': {'type': 'boolean'},
+        'operation_capacity': {'const': '4096'}, 'nesting_capacity': {'const': '8'},
+        'caller_frame_capacity': {'const': '16'}, 'ring_bytes': {'const': '8388608'},
+        'closure': {'enum': ['unproved', 'proved']},
+        'closure_evidence': {'anyOf': [{'type': 'null'}, {'type': 'string', 'minLength': 1, 'maxLength': 128}]},
+        'counters': obj({k: NULL_U64 for k in ['entries', 'exits', 'matched_results', 'unmatched_exits', 'censored',
+                        'operation_exhaustion', 'nesting_exhaustion', 'token_exhaustion', 'ring_drops',
+                        'invalid_records', 'missed_callbacks']}),
+        'region_identity': {'type': 'null'}, 'region_state': {'type': 'null'},
+        'state_reason': {'const': 'request_only_source'},
+    })
+    counter_keys = journal['properties']['counters']['required']
+    journal['properties']['counter_reasons'] = obj({k: {'enum': [None, 'not_observable', 'read_failed', 'overflow']} for k in counter_keys})
+    journal['required'].append('counter_reasons')
+    journal['allOf'] = [
+        {'if': {'properties': {'closure': {'const': 'unproved'}}},
+         'then': {'properties': {'closure_evidence': {'type': 'null'}}},
+         'else': {'properties': {'closure_evidence': {'type': 'string', 'minLength': 1}}}},
+    ]
+    for field in ('admission_start', 'admission_end'):
+        journal['allOf'].append({
+            'if': {'properties': {field + '_ns': {'type': 'null'}}},
+            'then': {'properties': {field + '_reason': {'type': 'string'}}},
+            'else': {'properties': {field + '_reason': {'type': 'null'}}},
+        })
+    for key in counter_keys:
+        journal['allOf'].append({
+            'if': {'properties': {'counters': {'properties': {key: {'type': 'null'}}}}},
+            'then': {'properties': {'counter_reasons': {'properties': {key: {'type': 'string'}}}}},
+            'else': {'properties': {'counter_reasons': {'properties': {key: {'type': 'null'}}}}},
+        })
+    session['required'].append('journal')
+    session['properties']['journal'] = journal
+    session.setdefault('allOf', []).append({
+        'if': {'properties': {'journal': {'properties': {'admission_start_reason': {'const': 'not_opened'}}}}},
+        'then': {'properties': {
+            'capture': {'properties': {'integrity': {'properties': {'line_count': {'const': '0'}}}}},
+            'journal': {'properties': {'counters': {'properties': {k: {'enum': [None, '0']} for k in counter_keys}}}},
+        }},
+    })
+    session['properties']['baseline']['properties']['complete'] = {'const': False}
+    session['properties']['baseline']['properties']['region_observations']['maxItems'] = 0
+    emit('schemas/session-v0.2.0.schema.json', session)
+    report = schema('report', '0.1.4')
+    report['required'].append('journal')
+    report['properties']['journal'] = obj({
+        'requests': U64, 'successes': U64, 'failures': U64, 'unmatched_exits': U64,
+        'censored': NULL_U64, 'requested_bytes': NULL_U64,
+        'censored_reason': {'enum': [None, 'not_observable', 'read_failed', 'overflow']},
+        'requested_bytes_reason': {'enum': [None, 'invalid_native_pages', 'overflow', 'incomplete_evidence']},
+        'shared_bytes': {'type': 'null'}, 'unreverted_ranges': {'type': 'null'},
+        'state_reason': {'const': 'request_only_source'},
+    })
+    report['properties']['journal']['allOf'] = []
+    for field in ('censored', 'requested_bytes'):
+        report['properties']['journal']['allOf'].append({
+            'if': {'properties': {field: {'type': 'null'}}},
+            'then': {'properties': {field + '_reason': {'type': 'string'}}},
+            'else': {'properties': {field + '_reason': {'type': 'null'}}},
+        })
+    emit('schemas/report-v0.2.0.schema.json', report)
+    source = '458c6079fc1d41d564c37679c8ace02cd83ee817'
+    emit('profiles/journal-candidates/' + PROFILE + '.json', {
+        'contract': 'memveil-journal-profile/1', 'profile_id': PROFILE,
+        'status': 'unadmitted', 'evidence_class': 'source_reviewed_provisional',
+        'linux_commit': source, 'architecture': 'x86_64', 'page_size': '4096',
+        'transient_key': {
+            'fields': ['current_task_pointer', 'start_boottime', 'window_epoch', 'nesting_depth'],
+            'helper': 'bpf_get_current_task_btf', 'btf_field': 'task_struct.start_boottime:u64',
+            'read': 'bounded CO-RE u64 read; error refuses pairing',
+            'persistence': 'none; bounded BPF memory only',
+            'loss_rule': 'matching tokens do not prove correlation when callback detection is unproved',
+        },
+        'source_files': [
+            {'path': 'include/linux/sched.h', 'sha256': 'aee5c39f6114cf358e28e64e7ce53c8358f0f90d70467f2c2e643d4128bfea2d'},
+            {'path': 'kernel/dma/swiotlb.c', 'sha256': '8297f87e0b55c5336f0a5d2d4d44542983daf5dd6823ab110cfb348ff4c9bd67'},
+            {'path': 'kernel/dma/direct.c', 'sha256': 'ac4fd8d4d02a3f349970516942fa89af78612eae3a60e07bc88fddbd11b4ca59'},
+            {'path': 'arch/x86/mm/pat/set_memory.c', 'sha256': '2c72c815dc9a4dbb29afa5cda38095668ad0fb14ffafb7d161219e89a551fd4b'},
+            {'path': 'arch/x86/mm/mem_encrypt_amd.c', 'sha256': '72a49dea865a5dcc6e4a65832ec73d1205a1884334ac71294918e0f1c8d57743'},
+            {'path': 'arch/x86/include/asm/set_memory.h', 'sha256': '0df103000cbd097570553f53dff9418926eaeebd60d18fe2b68b00be7f117519'},
+        ],
+        'config_sha256': None, 'btf_sha256': None, 'object_sha256': None,
+        'required_config': ['CONFIG_X86_64=y', 'CONFIG_BPF=y', 'CONFIG_BPF_SYSCALL=y', 'CONFIG_DEBUG_INFO_BTF=y', 'CONFIG_FTRACE=y', 'CONFIG_DYNAMIC_FTRACE_WITH_ARGS=y'],
+        'required_btf': 'Both wrappers: int (unsigned long addr, int numpages); x86-64 unsigned long=64, int=32; task_struct.start_boottime is u64 with an admitted CO-RE read and current-task helper.',
+        'hooks': ['fentry/set_memory_decrypted', 'fexit/set_memory_decrypted', 'fentry/set_memory_encrypted', 'fexit/set_memory_encrypted'],
+        'native_result': 'Signed int, zero succeeds at the wrapper; any nonzero result fails with unknown rollback. Ordinary no-op zero is not a transition.',
+        'effect': 'request_only', 'caller_labels': LABELS,
+        'admission_required': ['exact_config_btf_object', 'enabled_snp', 'actual_attach', 'independent_owned_tuples', 'window_and_loss', 'caller_quality_when_requested'],
+    })
+    base = json.loads((ROOT / 'tests/fixtures/regions/ordinary-noop/session.json').read_text())
+    kinds = event['properties']['kind']['enum']
+    for name in CASES:
+        rows = []
+        count = 2 if name in ('overlap', 'duplicate') else (0 if name in ('pre-attach', 'initial-checkpoint') else 1)
+        for ordinal in range(count):
+            direction = 'encrypt' if name == 'orphan-encrypt' else 'decrypt'
+            pages = -1 if name == 'invalid-pages' else 1
+            d = dict(direction=direction, requested_state='private' if direction == 'encrypt' else 'shared',
+                     requested_native_pages=pages, requested_pages=None if pages < 0 else '1',
+                     requested_bytes=None if pages < 0 else '4096', size_reason='invalid_native_pages' if pages < 0 else None,
+                     page_size='4096', native_result=-5 if name == 'failure' else 0,
+                     operation_token=str(1 if name == 'duplicate' else ordinal + 1), entry_ns=str(1000000010 + ordinal),
+                     epoch='1', membership='admitted', region=None, region_reason='request_only_source', effect='request_only',
+                     caller={'status': 'unresolved' if name == 'unresolved' else 'disabled', 'class': None, 'label': None})
+            rows.append(dict(schema_version='0.2.0', session_id='journal-' + name, seq=str(ordinal),
+                             ts_ns=str(1000000100 + ordinal), kind='transition_result',
+                             source=dict(hook='set_memory_' + ('encrypted' if direction == 'encrypt' else 'decrypted'),
+                                         backend='synthetic', profile_id=PROFILE, measurement='observed', correlation='direct'), data=d))
+        raw = ''.join(json.dumps(row, separators=(',', ':')) + '\n' for row in rows)
+        folder = ROOT / 'tests/fixtures/journal' / name
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / 'events.ndjson').write_text(raw)
+        s = copy.deepcopy(base)
+        s['schema_version'] = '0.2.0'
+        s['session_id'] = 'journal-' + name
+        s['device_catalog']['devices'] = []
+        s['capture']['integrity'] = dict(algorithm='sha256', events_bytes=str(len(raw.encode())), line_count=str(count),
+                                       first_seq='0' if count else None, last_seq=str(count - 1) if count else None,
+                                       events_sha256=hashlib.sha256(raw.encode()).hexdigest(), kinds={k: str(count if k == 'transition_result' else 0) for k in kinds})
+        s['journal'] = dict(profile_id=PROFILE, evidence_class='synthetic', epoch='1', admission_start_ns='1000000000',
+                            admission_end_ns='2000000000', admission_start_reason=None, admission_end_reason=None, observation_end_ns='2500000000', callers=name == 'unresolved',
+                            operation_capacity='4096', nesting_capacity='8', caller_frame_capacity='16', ring_bytes='8388608',
+                            closure='unproved', closure_evidence=None, counter_reasons={k: None for k in counter_keys}, counters={k: str(count if k in ('entries','exits','matched_results') else 0) for k in journal['properties']['counters']['required']},
+                            region_identity=None, region_state=None, state_reason='request_only_source')
+        for capability in s['capabilities'].values():
+            capability.update(status='unavailable', reason='No source for this channel in this synthetic request-only fixture.', hooks=[], profile_id=None)
+        s['capabilities']['conversion_results'].update(status='verified', reason='Synthetic contract fixture only.', hooks=['set_memory_decrypted', 'set_memory_encrypted'], profile_id=PROFILE)
+        for channel in ('baseline', 'terminal'):
+            s['quality'][channel].update(status='unavailable', loss_count=None, scope='global journal ' + channel, reason='Request-only source; pre-window state and global closure are unproved.')
+        s['quality']['correlation'].update(status='unavailable', loss_count=None, scope='region lifetimes', reason='No region lifetime source.')
+        s['quality']['detail'].update(scope='synthetic journal results', reason='Authored metadata; never a real-platform admission.')
+        checkpoint = name in ('initial-checkpoint', 'open-checkpoint')
+        if checkpoint:
+            s['quality']['detail'].update(status='partial', loss_count=None, reason='Checkpoint prefix only; unfinalized evidence.')
+            s['capture'].update(finalized=False, end_reason='checkpoint', checkpoint_generation='1')
+            s['journal'].update(admission_end_ns=None, admission_end_reason='admission_open')
+            s['journal']['counters']['censored'] = None
+            s['journal']['counter_reasons']['censored'] = 'not_observable'
+        if name == 'initial-checkpoint':
+            s['journal'].update(admission_start_ns=None, admission_start_reason='not_opened', admission_end_reason='not_opened')
+        if name == 'censored':
+            s['journal']['counters'].update(entries='2', censored='1')
+        emit(folder / ('checkpoint.json' if checkpoint else 'session.json'), s)
+        if name != 'duplicate':
+            findings = []
+            if name == 'failure':
+                findings.append(dict(code='CONVERSION_FAILED', severity='warning', explanation='Observed native wrapper failure; resulting state unknown.', evidence_refs=['event:0'], scope='global conversion journal', limitations='Synthetic request-only fixture.'))
+            failures = 1 if name == 'failure' else 0
+            integrity = dict(status='verified', verified_bytes=str(len(raw.encode())), verified_events=str(count))
+            if checkpoint:
+                integrity.update(status='checkpoint_prefix', unverified_bytes='0')
+            emit(folder / 'report.json', dict(
+                schema_version='0.2.0', session_id=s['session_id'], synthetic=True, engine_version='contract-fixture',
+                environment=s['environment'], device_catalog=s['device_catalog'], quality=s['quality'],
+                verdict=dict(name='partial_unknown_loss', loss_ratio_bps='0', delivered='0'), metrics=[], findings=findings,
+                limitations=['Synthetic request/results only; no persistent region identity, baseline or global closure.'],
+                integrity=integrity,
+                journal=dict(requests=str(count), successes=str(count-failures), failures=str(failures), unmatched_exits='0', censored=s['journal']['counters']['censored'], censored_reason=s['journal']['counter_reasons']['censored'],
+                             requested_bytes=None if name == 'invalid-pages' else str(count * 4096), requested_bytes_reason='invalid_native_pages' if name == 'invalid-pages' else None, shared_bytes=None, unreverted_ranges=None, state_reason='request_only_source')))
+
+        emit(folder / 'expected.json', dict(valid=name != 'duplicate', requests=str(count), failures='1' if name == 'failure' else '0',
+            shared_bytes=None, unreverted_ranges=None, baseline='unknown', terminal='unproved', report_exit=4 if checkpoint else 0,
+            finding='CONVERSION_FAILED' if name == 'failure' else None,
+            note='Synthetic requests only; overlap and persistent labels describe independent fixture scenarios, not observed range identity.'))
+    range_manifest = dict(
+        contract='memveil-confidential-range/1', candidate_manifest_sha256='a' * 64, profile_id=PROFILE,
+        required_cases=['owned-success', 'owned-retained', 'owned-restored', 'request-only-state', 'native-tuple-agreement'],
+        synthetic=True, source_commit='0' * 40, config_sha256='b' * 64, btf_sha256='c' * 64,
+        oracle_source_commit='0a269b1a4230720dbd05077351624ff5ba0965e0', oracle_module_sha256='d' * 64,
+        ordinary_transport_receipt_sha256='e' * 64)
+    emit('tests/fixtures/journal/range-manifest.json', range_manifest)
+    late_manifest = copy.deepcopy(range_manifest)
+    late_manifest['required_cases'] = ['pre-window-absent', 'baseline-unknown', 'late-owned-tuples', 'request-only-state']
+    emit('tests/fixtures/journal/late-manifest.json', late_manifest)
+    guest_manifest = copy.deepcopy(range_manifest)
+    guest_manifest.update(contract='memveil-confidential-guest/1', range_manifest_sha256='f' * 64,
+                          enabled_snp_evidence_sha256='1' * 64, io_receipt_sha256='2' * 64, tuple_ledger_sha256='3' * 64)
+    guest_manifest['required_cases'] += ['enabled-snp', 'real-io', 'independent-tuples', 'loss-and-cleanup']
+    emit('tests/fixtures/journal/guest-manifest.json', guest_manifest)
+    for name, example in [('range', range_manifest), ('guest', guest_manifest)]:
+        fields = {}
+        for key, value in example.items():
+            if key == 'contract': fields[key] = {'const': value}
+            elif key == 'synthetic': fields[key] = {'type': 'boolean'}
+            elif key == 'required_cases': fields[key] = {'type': 'array', 'uniqueItems': True, 'minItems': 1, 'maxItems': 16, 'items': {'type': 'string', 'maxLength': 64}}
+            elif key.endswith('_sha256'): fields[key] = {'type': 'string', 'pattern': '^[0-9a-f]{64}$'}
+            elif key.endswith('_commit'): fields[key] = {'type': 'string', 'pattern': '^[0-9a-f]{40}$'}
+            else: fields[key] = {'type': 'string', 'minLength': 1, 'maxLength': 128}
+        manifest_schema = obj(fields)
+        manifest_schema.update({'$schema': 'https://json-schema.org/draft/2020-12/schema', '$id': 'confidential-' + name + '-manifest-v1.schema.json'})
+        emit('schemas/confidential-' + name + '-manifest-v1.schema.json', manifest_schema)
+
+
+if __name__ == '__main__':
+    main()
