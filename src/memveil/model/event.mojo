@@ -13,6 +13,8 @@ JSON integers are accepted within the int64 domain; schema maxima
 for observer cpu/pid/tgid are enforced exactly.
 """
 
+from memveil.model.journal_event import JournalEvent, parse_journal_event
+
 from memveil.jsonscan import (
     MAX_DEPTH_DEFAULT,
     TAIL_COMPLETE,
@@ -322,6 +324,9 @@ struct Event:
     var unmap: Unmap
     var copy: CopyPayload
     var sync: SyncRequest
+    var journal_version: Bool
+    var has_journal: Bool
+    var journal: JournalEvent
     var transition: TransitionResult
     var pool: PoolSample
     var gap: Gap
@@ -354,6 +359,9 @@ struct Event:
         self.unmap = Unmap()
         self.copy = CopyPayload()
         self.sync = SyncRequest()
+        self.journal_version = False
+        self.has_journal = False
+        self.journal = JournalEvent()
         self.transition = TransitionResult()
         self.pool = PoolSample()
         self.gap = Gap()
@@ -1249,7 +1257,11 @@ def _parse_data_span(
     elif kind == "sync_request":
         _parse_sync(scan, out)
     elif kind == "transition_result":
-        _parse_transition(scan, out)
+        if version == "0.2.0":
+            out.journal = parse_journal_event(scan)
+            out.has_journal = True
+        else:
+            _parse_transition(scan, out)
     elif kind == "pool_sample":
         _parse_pool(scan, out)
     elif kind == "gap":
@@ -1295,7 +1307,7 @@ def parse_event(data: List[UInt8]) raises -> Event:
                 if has_version:
                     raise ValidationError("schema_version", "duplicate")
                 var v = scan.parse_string()
-                if v != EVENT_SCHEMA_VERSION and v != EVENT_SCHEMA_VERSION_PREV:
+                if v != EVENT_SCHEMA_VERSION and v != EVENT_SCHEMA_VERSION_PREV and v != "0.2.0":
                     raise ValidationError("schema_version", "bad const")
                 line_version = v
                 has_version = True
@@ -1363,7 +1375,12 @@ def parse_event(data: List[UInt8]) raises -> Event:
         raise ValidationError(
             "copy.source.measurement", "executed copies require observed measurement"
         )
+    out.journal_version = line_version == "0.2.0"
     _parse_data_span(kind, span, line_version, out)
+    if out.has_journal:
+        if out.has_observer:
+            raise ValidationError("journal", "observer identity forbidden")
+        _ = out.journal.to_result(out.ts_ns)
     return out^
 
 

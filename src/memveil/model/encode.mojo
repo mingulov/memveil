@@ -17,6 +17,8 @@ round-trips exactly: the parser retains every observation
 and the encoder reproduces the array in order.
 """
 
+from memveil.model.journal_event import encode_journal_event
+from memveil.model.journal_session import encode_journal_session
 from memveil.model.event import (
     EVENT_SCHEMA_VERSION,
     EVENT_SCHEMA_VERSION_PREV,
@@ -282,6 +284,13 @@ def _put_data(mut buf: List[UInt8], ev: Event) raises EncodeError:
             _lit(buf, "null")
         _lit(buf, ",\"length\":")
         _put_qu64(buf, ev.sync.length)
+    elif ev.kind == "transition_result" and ev.has_journal:
+        try:
+            var journal_text = encode_journal_event(ev.journal)
+            buf.extend(journal_text.as_bytes())
+            return
+        except:
+            raise EncodeError("journal", "invalid request/result payload")
     elif ev.kind == "transition_result":
         _lit(buf, "{\"region_id\":")
         _put_str(buf, ev.transition.region_id)
@@ -373,7 +382,9 @@ def _put_data(mut buf: List[UInt8], ev: Event) raises EncodeError:
 
 def _put_event(mut buf: List[UInt8], ev: Event) raises EncodeError:
     _lit(buf, "{\"schema_version\":")
-    if (
+    if ev.journal_version or ev.has_journal:
+        _put_str(buf, String("0.2.0"))
+    elif (
         ev.kind == "copy"
         and (ev.copy.pool_private or ev.copy.offset_past_allocation)
     ):
@@ -618,7 +629,7 @@ def encode_session(s: Session) raises EncodeError -> String:
     """Encode one session in canonical form (no trailing newline)."""
     var parts = List[String]()
     parts.append(
-        _member(String("schema_version"), _jstr(String(SESSION_SCHEMA_VERSION_INTEGRITY) if s.has_integrity else String(SESSION_SCHEMA_VERSION)))
+        _member(String("schema_version"), _jstr(String("0.2.0") if s.has_journal else (String(SESSION_SCHEMA_VERSION_INTEGRITY) if s.has_integrity else String(SESSION_SCHEMA_VERSION))))
     )
     parts.append(_member(String("session_id"), _jstr(s.session_id)))
     if s.has_boot_id:
@@ -771,6 +782,12 @@ def encode_session(s: Session) raises EncodeError -> String:
     )
     parts.append(_member(String("quality"), _jobj(quality^)))
     parts.append(_member(String("stop"), _encode_stop(s.stop)))
+    if s.has_journal:
+        try:
+            _ = s.journal.window(s.window_start_ns, s.finalized)
+            parts.append(_member(String("journal"), encode_journal_session(s.journal)))
+        except:
+            raise EncodeError("journal", "invalid window/counters")
     if s.has_verdict:
         if s.verdict_loss_bps < 0 or s.verdict_loss_bps > 10000:
             raise EncodeError("verdict.loss_ratio_bps", "out of range")

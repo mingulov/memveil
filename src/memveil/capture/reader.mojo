@@ -400,6 +400,16 @@ struct CaptureReader:
             raise ReadError(
                 READ_INVALID, lineno, "line " + String(lineno) + ": ts after"
             )
+        if ev.journal_version != self.session.has_journal:
+            raise ReadError(READ_INVALID, lineno, "event/session schema mode mismatch")
+        if ev.has_journal:
+            try:
+                var window = self.session.journal.window(self.session.window_start_ns, self.session.finalized)
+                window.validate_result(ev.journal.to_result(ev.ts_ns))
+                if ev.source_profile_id != self.session.journal.profile_id:
+                    raise Error("journal profile mismatch")
+            except:
+                raise ReadError(READ_INVALID, lineno, "journal profile/window mismatch")
         self._check_identities(ev, lineno)
         var tracked = (
             len(self._ops)

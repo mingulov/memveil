@@ -15,6 +15,7 @@ an empty window is valid and simply matches no event. Device IDs
 must be unique within the catalog.
 """
 
+from memveil.model.journal_session import JournalSession, parse_journal_session
 from memveil.jsonscan import Scanner
 from memveil.model.integrity import Integrity, parse_integrity
 from memveil.model.common import (
@@ -1427,6 +1428,8 @@ def _parse_baseline(mut scan: Scanner) raises -> _Baseline:
 struct Session(Copyable):
     """One validated capture session header."""
 
+    var has_journal: Bool
+    var journal: JournalSession
     var session_id: String
     var has_boot_id: Bool
     var boot_id: String
@@ -1484,6 +1487,8 @@ struct Session(Copyable):
     var verdict_delivered: UInt64
 
     def __init__(out self):
+        self.has_journal = False
+        self.journal = JournalSession()
         self.session_id = String("")
         self.has_boot_id = False
         self.boot_id = String("")
@@ -1541,6 +1546,8 @@ struct Session(Copyable):
         self.verdict_delivered = UInt64(0)
 
     def __copyinit__(mut self, existing: Self):
+        self.has_journal = existing.has_journal
+        self.journal = existing.journal.copy()
         self.session_id = existing.session_id
         self.has_boot_id = existing.has_boot_id
         self.boot_id = existing.boot_id
@@ -1992,7 +1999,8 @@ def parse_session(data: List[UInt8]) raises -> Session:
                     raise ValidationError("schema_version", "duplicate")
                 var v = scan.parse_string()
                 if (
-                    v != SESSION_SCHEMA_VERSION_INTEGRITY
+                    v != "0.2.0"
+                    and v != SESSION_SCHEMA_VERSION_INTEGRITY
                     and v != SESSION_SCHEMA_VERSION
                     and v != SESSION_SCHEMA_VERSION_PREV
                     and v != SESSION_SCHEMA_VERSION_PREV2
@@ -2056,6 +2064,11 @@ def parse_session(data: List[UInt8]) raises -> Session:
                 out.has_end_reason = c.has_end_reason
                 out.end_reason = c.end_reason
                 has_capture = True
+            elif key == "journal":
+                if out.has_journal:
+                    raise ValidationError("journal", "duplicate")
+                out.journal = parse_journal_session(scan)
+                out.has_journal = True
             elif key == "device_catalog":
                 if has_catalog:
                     raise ValidationError("device_catalog", "duplicate")
@@ -2116,7 +2129,13 @@ def parse_session(data: List[UInt8]) raises -> Session:
                 "quality.correlation.relations",
                 "relations need schema 0.1.2",
             )
-    if (out_version == SESSION_SCHEMA_VERSION_INTEGRITY) != out.has_integrity:
+    if (out_version == "0.2.0") != out.has_journal:
+        raise ValidationError("journal", "requires schema 0.2.0")
+    if out.has_journal:
+        _ = out.journal.window(out.window_start_ns, out.finalized)
+        if out.journal.observation_end_ns != out.window_end_ns:
+            raise ValidationError("journal", "observation/capture cut mismatch")
+    if (out_version == SESSION_SCHEMA_VERSION_INTEGRITY or out_version == "0.2.0") != out.has_integrity:
         raise ValidationError("capture.integrity", "required only by schema 0.1.4")
     if out.has_checkpoint_generation:
         if not out.has_integrity or out.finalized or out.end_reason != "checkpoint" or out.checkpoint_generation == 0:
@@ -2125,7 +2144,7 @@ def parse_session(data: List[UInt8]) raises -> Session:
         raise ValidationError("capture.checkpoint_generation", "required for checkpoint")
     if out.stop.has_checkpoint_failures and not out.has_integrity:
         raise ValidationError("stop.checkpoint_failures", "requires schema 0.1.4")
-    if out_version != SESSION_SCHEMA_VERSION and out_version != SESSION_SCHEMA_VERSION_INTEGRITY:
+    if out_version != SESSION_SCHEMA_VERSION and out_version != SESSION_SCHEMA_VERSION_INTEGRITY and out_version != "0.2.0":
         if out.has_verdict:
             raise ValidationError(
                 "verdict",
