@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Exact packaged inputs for qualification; development selection stays explicit."""
 import atexit
-import hashlib
 import os
+import shutil
+import stat
 from pathlib import Path
 import sys
 import tempfile
@@ -39,11 +40,13 @@ class CandidateInput:
         self.bundle = Path(env['MV_BUNDLE_TARBALL']).absolute()
         self.manifest = candidate.load_manifest(self.manifest_path, env.get('MV_CANDIDATE_DIGEST'))
         self.digest = candidate.digest_bytes(candidate.canonical(self.manifest))
-        self._owner = tempfile.TemporaryDirectory(prefix='memveil-candidate-')
+        self._directory = Path(tempfile.mkdtemp(prefix='memveil-candidate-'))
+        self._directory_fd = os.open(self._directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        self._identity = os.fstat(self._directory_fd)
         try:
-            self.root = candidate.verify_bundle(self.manifest, self.bundle, Path(self._owner.name) / 'runtime')
+            self.root = candidate.verify_bundle(self.manifest, self.bundle, self._directory / 'runtime')
         except BaseException:
-            self._owner.cleanup()
+            self.close()
             raise
         self.bin = self.root / 'bin/memveil'
         if not os.access(self.bin, os.X_OK):
@@ -66,7 +69,24 @@ class CandidateInput:
         return path
 
     def close(self):
-        self._owner.cleanup()
+        if self._directory_fd is None: return
+        descriptor, self._directory_fd = self._directory_fd, None
+        try:
+            current = self._directory.lstat()
+            if ((current.st_dev, current.st_ino) != (self._identity.st_dev, self._identity.st_ino)
+                    or not stat.S_ISDIR(current.st_mode)):
+                raise ValueError('candidate extraction ownership changed; cleanup refused')
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            for name in os.listdir(descriptor):
+                info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                if stat.S_ISDIR(info.st_mode): shutil.rmtree(name, dir_fd=descriptor)
+                else: os.unlink(name, dir_fd=descriptor)
+            current = self._directory.lstat()
+            if (current.st_dev, current.st_ino) != (self._identity.st_dev, self._identity.st_ino):
+                raise ValueError('candidate extraction ownership changed; directory removal refused')
+            self._directory.rmdir()
+        finally:
+            os.close(descriptor)
 
 
 def load(env=None, required=False):
