@@ -50,6 +50,8 @@ checks = [
     ("cmake", ["cmake", "--version"]),
     ("ninja", ["ninja", "--version"]),
     ("python", ["python3", "--version"]),
+    ("cc", ["cc", "--version"]),
+    ("ld", ["ld", "--version"]),
 ]
 
 failed = 0
@@ -85,6 +87,8 @@ for name, cmd in checks:
         else:
             print("ok %s: %s (>= %s)"
                   % (name, first.strip(), floors[name]))
+    elif name in ("cc", "ld"):
+        print("ok %s: %s (host linker identity recorded in receipt)" % (name, first.strip()))
     elif first.strip() != want_lines[name]:
         print("FAIL %s: want exactly %r, got %r"
               % (name, want_lines[name], first.strip()))
@@ -505,12 +509,12 @@ main() {
                 MOJO_INCS+=(-I "$ROOT/build/deps/lmb/mojo")
             fi
             if [ -f "$ROOT/src/memveil/main.mojo" ]; then
-                log pixi run --frozen mojo build "${MOJO_INCS[@]}" "${MOJO_SAN[@]}" \
-                    --target-cpu x86-64-v2 \
+                log pixi run --frozen python3 tools/mojo_link.py "${MOJO_INCS[@]}" "${MOJO_SAN[@]}" \
+                    --target-cpu x86-64-v2 -strip-file-prefix="$ROOT/" \
                     -o build/memveil src/memveil/main.mojo
                 mkdir -p build
-                pixi run --frozen mojo build "${MOJO_INCS[@]}" "${MOJO_SAN[@]}" \
-                    --target-cpu x86-64-v2 \
+                pixi run --frozen python3 tools/mojo_link.py "${MOJO_INCS[@]}" "${MOJO_SAN[@]}" \
+                    --target-cpu x86-64-v2 -strip-file-prefix="$ROOT/" \
                     -o build/memveil src/memveil/main.mojo || return 1
             else
                 echo "build: no Mojo targets registered yet" >&2
@@ -576,12 +580,12 @@ main() {
                 echo "build: no BPF targets registered yet" >&2
             fi
             if [ -f "$ROOT/tests/vm/mv_consume.mojo" ]; then
-                log pixi run --frozen mojo build "${MOJO_INCS[@]}" "${MOJO_SAN[@]}" \
-                    --target-cpu x86-64-v2 \
+                log pixi run --frozen python3 tools/mojo_link.py "${MOJO_INCS[@]}" "${MOJO_SAN[@]}" \
+                    --target-cpu x86-64-v2 -strip-file-prefix="$ROOT/" \
                     -o build/vm/mv_consume tests/vm/mv_consume.mojo
                 mkdir -p build/vm
-                pixi run --frozen mojo build "${MOJO_INCS[@]}" "${MOJO_SAN[@]}" \
-                    --target-cpu x86-64-v2 \
+                pixi run --frozen python3 tools/mojo_link.py "${MOJO_INCS[@]}" "${MOJO_SAN[@]}" \
+                    --target-cpu x86-64-v2 -strip-file-prefix="$ROOT/" \
                     -o build/vm/mv_consume tests/vm/mv_consume.mojo \
                     || return 1
             else

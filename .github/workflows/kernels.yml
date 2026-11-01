@@ -44,7 +44,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             clang bpftool cmake ninja-build python3-pytest \
-            strace patchelf python3 \
+            strace patchelf zstd binutils python3 \
             qemu-system-x86 busybox-static bpftrace \
             gcc make flex bison libelf-dev libssl-dev bc \
             dwarves rsync python3-pip

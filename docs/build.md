@@ -13,10 +13,13 @@ the `pixi.lock` file carries authoritative conda package hashes.
   (`python3 tools/install-pixi` installs the locked release
   after verifying its digest; see below).
 - System `clang` and `bpftool` at or above the locked floors, for C eBPF programs.
+- A native `cc` driver and `ld` for Mojo executable linking; their observed
+  versions, executable hashes and any ccache launcher are recorded in the build receipt.
 - `python3` for development-only validation tooling.
 - `python3-pytest` (`apt install python3-pytest`): the pytest-driven suites fail loudly without it.
 - `strace` for the package clean-room audit (`apt install strace`).
-- `patchelf` for `tools/package` RUNPATH normalization (`apt install patchelf`).
+- `patchelf`, `binutils` (`strip`, `readelf`) and `zstd` for canonical runtime packaging.
+  The packager checks availability and records their versions and executable hashes.
 - On Fedora the same set comes from `dnf` (`clang llvm bpftool python3-pytest strace patchelf`).
 
 Run `pixi install` once after cloning. Every Mojo command below runs inside
@@ -196,21 +199,13 @@ receipts. Pinning every ambient OS byte is out of scope:
 drift there is detected, not silently accepted, because
 the build refuses unexpected tool versions.
 
-Packaging-only helpers stay outside that claim as
-documented ambient exceptions: `tools/package` runs
-`patchelf` (RUNPATH normalization) after an availability
-check without recording its version; `tools/package-deb`
-additionally runs `strip` (release ELF), `readelf`
-(dependency floor derivation), and `dpkg-deb` (assembly)
-the same way; and the runtime provenance check shells
-out to `zstd` (archive decompression) after an
-availability check only. The `.deb` control records the
-observed `dpkg-deb` and `patchelf` versions
-(`X-Memveil-Build-Tools`); the bundle manifest and the
-build receipt carry no packaging-helper identities.
-These helpers can change while every build-tool check
-passes, so reproducing a byte-identical package needs
-the same host toolset.
+Packaging helpers remain ambient tools, but `tools/package` checks
+`patchelf`, `strip`, `readelf` and `zstd` before building and records their
+versions and executable SHA-256 values in `MANIFEST.json`. The canonical
+normalization records input and output hashes and the exact operations.
+Debian records its `dpkg-deb` assembly version and the canonical normalizer's
+`patchelf` version. Package formats copy runtime bytes without recompilation,
+RUNPATH rewrites or stripping. Archive metadata can differ.
 
 | Input | Immutable identity | Verified by |
 |---|---|---|
@@ -221,7 +216,7 @@ the same host toolset.
 | libbpf-mojo bridge | `tarball_sha256` in `toolchain.lock.json` | `tools/build`, build receipt, packager |
 | rpm Source0 | Owned selection: an owning checkout contributes tracked plus unignored-untracked files, never a parent's set | `tools/rpm-source0`, Source0 tests |
 | apt tools, runner image | Verified ambient: exact versions in `toolchain.lock.json`, floors where noted | `tools/build` refusal, receipts |
-| Packaging helpers (`patchelf`, `strip`, `zstd`, `dpkg-deb`, `readelf`) | Ambient exception: availability-checked at packaging time, no admission pin | `.deb` control records `dpkg-deb`/`patchelf` versions only |
+| Packaging helpers (`patchelf`, `strip`, `zstd`, `dpkg-deb`, `readelf`) | Ambient, availability checked | Canonical manifest records normalizer versions and executable hashes; `.deb` records assembly version |
 
 Refresh routes, one input at a time with the affected lanes
 re-run:
@@ -247,3 +242,59 @@ and the consumed dependency digests for the build; the bundle
 dependency identities, and the `.deb` control fields (`X-`
 entries) carry the revision, bridge digest, and observed
 `dpkg-deb`/`patchelf` versions into the artifacts.
+
+## Canonical runtime packages
+
+Build the canonical bundle once from clean source, then pass its directory to
+both package adapters:
+
+```sh
+export LMB_PACKAGE="$PWD/third_party/libbpf-mojo-0.2.3.tar.gz"
+./tools/package --out dist --tag bundle
+./tools/package-deb --bundle "$PWD/dist/bundle" --out dist
+./tools/build-rpm --bundle "$PWD/dist/bundle" --work "$PWD/build/rpm" --out "$PWD/dist"
+python3 tools/canonical_runtime.py --bundle dist/bundle
+```
+
+These commands prepare local, unqualified artifacts and do not publish them.
+They do not update `packaging/tested-payload.sha256` or supply qualification
+receipts. Missing qualification still blocks release. Candidate custody and
+release promotion require their separately documented evidence.
+
+The pinned Mojo build uses `-strip-file-prefix` for checkout-independent
+source diagnostics. `tools/mojo_link.py` preserves the selected native `cc`
+driver, cache chain and arguments while replacing its one SDK RUNPATH with
+a relative development path. Missing, duplicated or unexpected RPATH options
+refuse the build. This prevents SDK-prefix length from changing linked ELF
+layout before canonical staging; the normalizer does not recompile or relink. This does not imply archive-byte identity or admission on
+a different CPU/libc environment.
+
+The runtime uses `bin/memveil`, `lib/memveil/*.so*`, `bpf/`, and `profiles/`.
+The executable RUNPATH is `$ORIGIN/../lib/memveil`. Debian and RPM map the
+same bytes to `/usr/bin`, `/usr/lib/memveil` and
+`/usr/share/memveil/profiles`. The manifest's `canonical_runtime` contains
+all runtime entries with normalized path, type, size and SHA-256. Verification
+rejects missing, added, changed and escaping entries. Given an extracted
+installed package, compare it with the bundle using:
+
+```sh
+python3 tools/canonical_runtime.py --bundle dist/bundle --installed extracted-root
+```
+
+`--bundle DIR` is the package-adapter interface for a retained canonical tree.
+Adapters verify its complete file manifest before copying and compare the
+installed runtime inventory afterward. They never mark matching bytes as
+qualified. Keep the matching source export, including the dependency sources
+and attribution under `third_party`, alongside distributable archives.
+
+For package-only verification of a retained bundle, set
+`MV_BUNDLE_TARBALL=/absolute/path/bundle.tar.gz` and run `./tools/test package`.
+An explicit bundle input never triggers a product rebuild. `release-runtime`
+also accepts that input. Debian and RPM install/collection journeys require
+their designated isolated environments; offline extraction equality does not
+satisfy those live gates.
+
+The source-export gate builds two Git-free copies with separate frozen SDK
+installations and unequal source/SDK path lengths, then compares every canonical
+runtime entry. Set `MV_CANONICAL_BUNDLE_DIR` to additionally compare a retained
+checkout bundle. Archive headers and descriptive provenance may differ.

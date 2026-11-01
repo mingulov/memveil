@@ -2,12 +2,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # memveil .rpm build path.
 #
-# Usage: tools/build-rpm --work DIR --out DIR
+# Usage: tools/build-rpm --work DIR --out DIR [--bundle DIR]
+# --bundle consumes a previously built canonical runtime without rebuilding.
 #
 # Builds the memveil .rpm from this tree: Source0 is the tree's
 # own file set (tools/rpm-source0 owns the selection), Source1
 # is the pinned libbpf-mojo tarball from $LMB_PACKAGE, and the
-# spec rebuilds the owner bundle inside rpmbuild. Prints
+# spec copies the verified canonical bundle without recompiling. Prints
 # "build-rpm: <path>" with the built .rpm on success.
 # Exit 0 on success; exit 1 when the build fails; exit 2 on
 # invalid usage or a missing prerequisite. One action per
@@ -23,11 +24,15 @@ usage() {
 
 WORK=""
 OUT=""
+BUNDLE=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --work)
             [ $# -ge 2 ] || { usage >&2; exit 2; }
             WORK="$2"; shift 2;;
+        --bundle)
+            [ $# -ge 2 ] || { usage >&2; exit 2; }
+            BUNDLE="$2"; shift 2;;
         --out)
             [ $# -ge 2 ] || { usage >&2; exit 2; }
             OUT="$2"; shift 2;;
@@ -55,6 +60,12 @@ if [ ! -f "${LMB_PACKAGE:-}" ]; then
     exit 2
 fi
 
+if [ -z "$BUNDLE" ]; then
+    "$ROOT/tools/package" --out "$WORK/canonical" --tag bundle || exit 1
+    BUNDLE="$WORK/canonical/bundle"
+fi
+BUNDLE="$(cd "$BUNDLE" && pwd)" || exit 1
+python3 "$ROOT/tools/canonical_runtime.py" --bundle "$BUNDLE" || exit 1
 SPEC="$ROOT/packaging/rpm/memveil.spec"
 SPEC_VER=$(sed -n 's/^Version: *//p' "$SPEC")
 SRC1=$(sed -n 's/^Source1: *//p' "$SPEC")
@@ -91,7 +102,8 @@ cp "$SPEC" "$WORK/" || {
 # __os_install_post nil; it only gates the -debuginfo
 # subpackage, never the main payload. --nodeps: apt, not
 # the (empty or absent) rpm db, provides the BuildRequires.
-if ! rpmbuild -bb --nodeps --define "_topdir $RTOP" \
+if ! MEMVEIL_CANONICAL_BUNDLE="$BUNDLE" rpmbuild -bb --nodeps \
+    --define "_topdir $RTOP" \
     --define "debug_package %{nil}" "$WORK/memveil.spec" \
     >"$WORK/rpmbuild.log" 2>&1; then
     echo "build-rpm: BLOCKED: rpmbuild failed" >&2

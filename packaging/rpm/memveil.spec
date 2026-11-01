@@ -11,8 +11,8 @@
 #       -o memveil-0.1.0.tar.gz   # Source0
 #   # Source1: the libbpf-mojo tarball whose sha256 matches
 #   # toolchain.lock.json (verified by tools/package at build).
-#   rpmbuild -bb packaging/rpm/memveil.spec \
-#       --define "_sourcedir $PWD" --define "_srcrpmdir $PWD"
+#   tools/package --out dist --tag bundle
+#   tools/build-rpm --work build/rpm --out dist --bundle "$PWD/dist/bundle"
 #
 # The Version tag tracks ENGINE_VERSION in
 # src/memveil/model/report.mojo (bump together; the package
@@ -63,7 +63,6 @@ ExclusiveArch: x86_64
 Source0: memveil-%{version}.tar.gz
 Source1: libbpf-mojo-0.2.3.tar.gz
 BuildRequires: binutils
-BuildRequires: patchelf
 BuildRequires: python3
 Requires: libelf.so.1()(64bit), libz.so.1()(64bit), glibc >= 2.38
 
@@ -83,19 +82,17 @@ installed share dir and qualify receipts land under
 %setup -q
 
 %build
-export LMB_PACKAGE="%{SOURCE1}"
-./tools/package --out %{_builddir}/bundle --tag bundle
+B="${MEMVEIL_CANONICAL_BUNDLE:?Supply a canonical bundle with tools/build-rpm --bundle}"
+python3 tools/canonical_runtime.py --bundle "$B"
 
 %install
-B="%{_builddir}/bundle/bundle"
+B="${MEMVEIL_CANONICAL_BUNDLE:?Canonical bundle directory is required}"
 test -f "$B/bin/memveil" || exit 1
-test -f "$B/lib/libbpf_mojo.so.1" || exit 1
+test -f "$B/lib/memveil/libbpf_mojo.so.1" || exit 1
 test -f "$B/profiles/manifest.txt" || exit 1
 install -D -m0755 "$B/bin/memveil" "%{buildroot}/usr/bin/memveil"
-patchelf --set-rpath '$ORIGIN/../lib/memveil' \
-    "%{buildroot}/usr/bin/memveil"
 mkdir -p "%{buildroot}/usr/lib/memveil"
-cp -rp "$B"/lib/*.so* "%{buildroot}/usr/lib/memveil/"
+cp -rp "$B"/lib/memveil/*.so* "%{buildroot}/usr/lib/memveil/"
 for obj in swiotlb_attempt.bpf.o swiotlb_lifecycle.bpf.o \
     swiotlb_copy.bpf.o; do
   test -f "$B/bpf/$obj" || exit 1
@@ -145,6 +142,8 @@ mkdir -p "%{buildroot}/var/lib/memveil/receipts"
 find "%{buildroot}" -type d -exec chmod 0755 {} +
 find "%{buildroot}" -type f -exec chmod 0644 {} +
 chmod 0755 "%{buildroot}/usr/bin/memveil"
+
+python3 tools/canonical_runtime.py --bundle "$B" --installed "%{buildroot}"
 
 %files
 %defattr(-,root,root,-)

@@ -928,6 +928,34 @@ def main():
             repeated_manifest = _json.load(handle)
         check("export-dirty-parent-revision",
               repeated_manifest.get("memveil_revision") == "export")
+        check("export-repeated-runtime-identical",
+              repeated_manifest["canonical_runtime"] == manifest["canonical_runtime"])
+        # Each export installs its own frozen SDK. Unequal SDK prefixes expose
+        # embedded source paths and linker padding that a same-path rebuild hides.
+        with tempfile.TemporaryDirectory(prefix="mv-independent-longer-source-and-sdk-") as fourth:
+            export_head(fourth)
+            check("export-prefix-lengths-differ", len(fourth) != len(third))
+            other_env = dict(os.environ, LMB_PACKAGE=os.path.join(
+                fourth, "third_party", "libbpf-mojo-0.2.3.tar.gz"))
+            other = subprocess.run(
+                [os.path.join(fourth, "tools", "package"), "--out", os.path.join(fourth, "dist")],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                cwd=fourth, env=other_env, timeout=1500)
+            check("independent-export-package", other.returncode == 0,
+                  other.stdout[-3000:] + other.stderr[-3000:])
+            with open(os.path.join(fourth, "dist", bundles[0], "MANIFEST.json")) as handle:
+                other_manifest = _json.load(handle)
+            check("independent-export-runtime-identical",
+                  other_manifest["canonical_runtime"] == manifest["canonical_runtime"],
+                  "every runtime entry must match across independent source and SDK paths")
+            for entry in manifest["canonical_runtime"]["entries"]:
+                print("source-export runtime: %s %s" % (entry["sha256"], entry["path"]))
+            supplied = os.environ.get("MV_CANONICAL_BUNDLE_DIR")
+            if supplied:
+                with open(os.path.join(supplied, "MANIFEST.json")) as handle:
+                    supplied_manifest = _json.load(handle)
+                check("checkout-export-runtime-identical",
+                      supplied_manifest["canonical_runtime"] == manifest["canonical_runtime"])
         prov_dirty = run_provenance(third)
         check("export-dirty-parent-provenance",
               prov_dirty.returncode == 0, show(prov_dirty))

@@ -60,7 +60,7 @@ def bundle(tmp_path_factory):
                    for m in members), "tarball must hold one top dir"
         tar.extractall(dest)
     root = dest / top
-    for rel in ("bin/memveil", "lib/libbpf_mojo.so.1",
+    for rel in ("bin/memveil", "lib/memveil/libbpf_mojo.so.1",
                 "bpf/swiotlb_attempt.bpf.o", "MANIFEST.json"):
         assert (root / rel).exists(), "bundle lacks %s" % rel
     manifest = json.loads((root / "MANIFEST.json").read_text())
@@ -87,11 +87,11 @@ def test_replaced_bridge_reaches_named_refusal_boundary(bundle, tmp_path):
     root, _ = bundle
     trial = tmp_path / "wrongabi"
     shutil.copytree(root, trial)
-    libs = sorted((trial / "lib").glob("*.so*"))
+    libs = sorted((trial / "lib" / "memveil").glob("*.so*"))
     donor = next((p for p in libs
                   if p.name != "libbpf_mojo.so.1"), None)
     assert donor is not None, "bundle lib/ has no second library"
-    bridge = trial / "lib" / "libbpf_mojo.so.1"
+    bridge = trial / "lib" / "memveil" / "libbpf_mojo.so.1"
     shutil.copyfile(donor, bridge)
     cap = tmp_path / "cap"
     proc = run(str(trial / "bin" / "memveil"), "record",
@@ -120,7 +120,7 @@ def test_absent_bpf_object_refused(bundle, tmp_path):
     proc = run(str(trial / "bin" / "memveil"), "record",
                "--output", str(cap),
                "--object", str(missing),
-               "--bridge", str(trial / "lib" / "libbpf_mojo.so.1"),
+               "--bridge", str(trial / "lib" / "memveil" / "libbpf_mojo.so.1"),
                "--duration", "1", cwd=str(tmp_path))
     assert proc.returncode == 3, proc.stderr
     assert "object unreadable" in proc.stderr, proc.stderr
@@ -133,7 +133,7 @@ def test_unknown_profile_refused(bundle, tmp_path):
     proc = run(str(root / "bin" / "memveil"), "record",
                "--output", str(cap),
                "--object", str(root / "bpf" / "swiotlb_attempt.bpf.o"),
-               "--bridge", str(root / "lib" / "libbpf_mojo.so.1"),
+               "--bridge", str(root / "lib" / "memveil" / "libbpf_mojo.so.1"),
                "--profile", "release-runtime-bogus-0",
                "--duration", "1", cwd=str(tmp_path))
     assert proc.returncode == 3, proc.stderr
@@ -185,7 +185,7 @@ def test_loader_layout(bundle):
     root, manifest = bundle
     binary = root / "bin" / "memveil"
     dyn = dynamic_strings(binary)
-    assert "$ORIGIN/../lib" in dyn, dyn
+    assert "$ORIGIN/../lib/memveil" in dyn, dyn
     assert PKG.runpath_abspaths(dyn) == [], dyn
     proc = run("readelf", "-h", str(binary))
     assert proc.returncode == 0
@@ -193,7 +193,7 @@ def test_loader_layout(bundle):
     shipped = {path.split("/")[-1]
                for path in manifest["files"] if path.startswith("lib/")}
     allow = set(PKG.SYSTEM_ALLOW)
-    for target in [binary] + sorted((root / "lib").glob("*.so*")):
+    for target in [binary] + sorted((root / "lib" / "memveil").glob("*.so*")):
         for name in needed(target):
             assert name in shipped or name in allow, \
                 "%s needs %s: outside closure" % (target.name, name)
@@ -225,8 +225,8 @@ def test_runtime_provenance_pinned(bundle):
     root, manifest = bundle
     prov = manifest["runtime_provenance"]
     libs = sorted(
-        "lib/%s" % path.name
-        for path in (root / "lib").glob("*.so*")
+        "lib/memveil/%s" % path.name
+        for path in (root / "lib" / "memveil").glob("*.so*")
         if path.name != "libbpf_mojo.so.1")
     assert sorted(prov) == libs, prov
     packages = _lock_packages()
@@ -234,14 +234,20 @@ def test_runtime_provenance_pinned(bundle):
         record = prov[rel]
         digest = _sha_file(root / rel)
         assert digest == record["staged_sha256"], rel
-        assert digest == record["member_sha256"], rel
+        if rel in manifest["normalization"]:
+            transformation = manifest["normalization"][rel]
+            assert transformation["source_sha256"] == record["member_sha256"], rel
+            assert transformation["output_sha256"] == digest, rel
+            assert record["pre_normalization_sha256"] == record["member_sha256"], rel
+        else:
+            assert digest == record["member_sha256"], rel
         assert digest == manifest["files"][rel], rel
         entry = packages[record["archive"]]
         assert record["package"] == entry["name"], rel
         assert record["version"] == entry["version"], rel
         assert record["archive_sha256"] == entry["sha256"], rel
         assert record["relocation"] is None, rel
-    assert prov["lib/libstdc++.so.6"]["member"].endswith(
+    assert prov["lib/memveil/libstdc++.so.6"]["member"].endswith(
         ".so.6.0.36")
 
 

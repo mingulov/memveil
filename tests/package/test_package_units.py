@@ -867,14 +867,6 @@ class TestPackagingSeal:
         real_run = package.run
 
         def fake_run(cmd, **kwargs):
-            if cmd[:4] == ["pixi", "run", "--frozen", "mojo"] \
-                    and "build" in cmd:
-                dest = cmd[cmd.index("-o") + 1]
-                shutil.copy2(os.path.join(root, "build", "memveil"),
-                             dest)
-                if link_hook is not None:
-                    link_hook()
-                return real_run(["true"])
             if len(cmd) == 2 and cmd[1] == "version":
                 if version_hook is not None:
                     version_hook()
@@ -883,6 +875,15 @@ class TestPackagingSeal:
                 return real_run(["true"])
             return real_run(cmd, **kwargs)
 
+        real_copy = package.shutil.copy2
+
+        def copy_with_mutation(source, dest, *args, **kwargs):
+            result = real_copy(source, dest, *args, **kwargs)
+            if str(source) == os.path.join(root, "build", "memveil") and link_hook is not None:
+                link_hook()
+            return result
+
+        monkeypatch.setattr(package.shutil, "copy2", copy_with_mutation)
         monkeypatch.setattr(package, "ROOT", root)
         monkeypatch.setattr(
             package, "RUNTIME_LIB_DIR",
@@ -1204,6 +1205,21 @@ class TestPackagingSeal:
             post_verify_hook=mutate,
             expect="swiotlb_attempt.bpf.o")
 
+    @pytest.mark.parametrize("directory", [False, True])
+    def test_normalization_refuses_symlink_before_transform(
+            self, package, receipt, probe, monkeypatch, capsys, directory):
+        def replace(staged):
+            source = os.path.join(staged, "lib")
+            if not directory:
+                source = os.path.join(source, "libbpf_mojo.so.1")
+            outside = os.path.join(probe, "outside-normalization")
+            os.rename(source, outside)
+            os.symlink(outside, source)
+
+        self._refused(
+            package, receipt, probe, monkeypatch, capsys,
+            post_verify_hook=replace, expect="seal before normalization")
+
     def test_staged_dir_symlink_refused(
             self, package, receipt, probe, monkeypatch, capsys):
         def linkdir(staged):
@@ -1456,8 +1472,8 @@ class TestPackagingSeal:
         assert code == 0
         tag, manifest = self._manifest(out)
         libs = sorted(
-            "lib/%s" % name
-            for name in os.listdir(os.path.join(out, tag, "lib"))
+            "lib/memveil/%s" % name
+            for name in os.listdir(os.path.join(out, tag, "lib", "memveil"))
             if name != "libbpf_mojo.so.1")
         assert sorted(manifest["runtime_provenance"]) == libs, \
             manifest["runtime_provenance"]
@@ -1479,8 +1495,8 @@ class TestPackagingSeal:
         tag, manifest = self._manifest(out)
         prov = manifest["runtime_provenance"]
         libs = sorted(
-            "lib/%s" % name
-            for name in os.listdir(os.path.join(out, tag, "lib"))
+            "lib/memveil/%s" % name
+            for name in os.listdir(os.path.join(out, tag, "lib", "memveil"))
             if name != "libbpf_mojo.so.1")
         assert sorted(prov) == libs, prov
         for rel, record in prov.items():
