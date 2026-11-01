@@ -1193,11 +1193,15 @@ suite_pools() {
 }
 
 suite_regions() {
-    run_unit_file tests/unit/test_regions.mojo
+    run_unit_file tests/unit/test_regions.mojo || return 1
+    python3 "$ROOT/tests/journal/test_contracts.py"
 }
 
 suite_conversion_normalize() {
-    run_unit_file tests/unit/test_conversion_normalize.mojo
+    run_unit_file tests/unit/test_conversion_normalize.mojo || return 1
+    run_unit_file tests/unit/test_journal_contracts.mojo || return 1
+    python3 "$ROOT/tests/journal/test_wire.py" || return 1
+    python3 "$ROOT/tests/journal/test_contracts.py"
 }
 
 suite_confidential_hooks() {
@@ -1209,7 +1213,8 @@ suite_region_resolution() {
 }
 
 suite_baseline() {
-    run_unit_file tests/unit/test_baseline.mojo
+    run_unit_file tests/unit/test_baseline.mojo || return 1
+    python3 "$ROOT/tests/journal/test_contracts.py"
 }
 
 suite_confidential_ranges() {
@@ -1466,7 +1471,8 @@ suite_privacy() {
     python3 "$ROOT/tests/privacy/test_canaries.py" || return 1
     python3 "$ROOT/tests/privacy/test_metadata_allowlist.py" || return 1
     python3 "$ROOT/tests/privacy/test_suite_skip_codes.py" || return 1
-    python3 "$ROOT/tests/privacy/test_pytest_guard.py"
+    python3 "$ROOT/tests/privacy/test_pytest_guard.py" || return 1
+    python3 "$ROOT/tests/journal/test_contracts.py"
 }
 
 suite_render_escaping() {
@@ -4239,7 +4245,8 @@ case "$1" in
         usage
         ;;
     schemas)
-        exec "$ROOT/tools/validate-schemas"
+        "$ROOT/tools/validate-schemas" || exit 1
+        python3 "$ROOT/tests/journal/test_contracts.py"
         ;;
     unit)
         suite_unit

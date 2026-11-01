@@ -182,3 +182,5 @@ lane runs 200 seeds; the campaign lane runs 10,000 seeds
 Violations retain their seed and input; promoted regressions
 become named adversarial fixtures. Campaign time is sampling,
 not exhaustive proof.
+
+The source-reviewed provisional journal family is frozen in [conversion journal](conversion-journal.md). Its generated schemas and synthetic fixtures do not admit live collection or enable the current replay reader.
