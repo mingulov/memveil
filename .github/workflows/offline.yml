@@ -67,3 +67,14 @@ jobs:
               release-runtime; do
             ./tools/test "$suite" || exit 1
           done
+      - name: Retain fuzz corpus receipts on every outcome
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: offline-fuzz-evidence
+          path: |
+            build/fuzz-smoke.json
+            build/fuzz-campaign.json
+            build/fuzz-regressions/
+          retention-days: 7
+          if-no-files-found: warn

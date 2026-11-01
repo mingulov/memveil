@@ -6,7 +6,7 @@ Generates a fixed 600,000-record synthetic capture with
 independently known totals, replays it through the built
 report verb, and asserts correctness first (exact counts),
 then the envelope (wall <= 60 s, RSS <= 256 MiB). Also
-checks prefix scaling (100k/300k) and a paced FIFO stream
+checks prefix scaling (100k/300k) and paced regular-file reads
 for steady-state bounds. Prints CSV/JSON measurements to
 stdout. Exits nonzero on the first failure.
 """
@@ -19,10 +19,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, TESTS)
+from preload_env import preload_env
+
 REPO = os.path.dirname(TESTS)
 BIN = os.path.join(REPO, "build", "memveil")
 
@@ -110,13 +112,13 @@ def generate_sealed(path, sid, count):
     return total, size
 
 
-def replay(path, fmt="json"):
+def replay(path, fmt="json", env=None, timeout=None):
     # ru_maxrss is the waited-children high-water mark: exact
     # for the first replayed child, an upper bound after that.
     # The envelope assertion runs on the first replay only.
     start = time.monotonic()
     p = subprocess.run([BIN, "report", "--format", fmt, path],
-                       capture_output=True)
+                       capture_output=True, env=env, timeout=timeout)
     wall = time.monotonic() - start
     rss_kb = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
     return p, wall, rss_kb
@@ -127,6 +129,27 @@ def metric(doc, name):
         if m["name"] == name and "device_id" not in m:
             return m
     raise KeyError(name)
+
+
+def paced_environment(path, receipt, lines, duration_ns, adapter):
+    return dict(preload_env(BIN, adapter), MEMVEIL_PACED_FILE=str(path),
+                MEMVEIL_PACED_RECEIPT=str(receipt), MEMVEIL_PACED_LINES=str(lines),
+                MEMVEIL_PACED_NS=str(duration_ns))
+
+
+def paced_errors(receipt, source_stat, count, size, duration_ns, wall):
+    errors = []
+    for key, expected in [('lines', count), ('bytes', size), ('eof', True), ('error', 0),
+                          ('device', source_stat.st_dev), ('inode', source_stat.st_ino)]:
+        if receipt.get(key) != expected:
+            errors.append(key + ' differs from independent input')
+    if not 0 < receipt.get('max_request_bytes', 0) <= 65536:
+        errors.append('read request exceeded bounded buffer or was absent')
+    if receipt.get('calls', 0) < (size + 65535) // 65536 + 1:
+        errors.append('real read/EOF calls were not reached')
+    if receipt.get('elapsed_ns', 0) < duration_ns or wall * 1000000000 < duration_ns:
+        errors.append('paced duration was not reached')
+    return errors
 
 
 def main():
@@ -198,49 +221,39 @@ def main():
         paced_seconds = int(os.environ.get("MEMVEIL_PACED_SECONDS",
                                            "60"))
         paced_lines = min(COUNT, paced_seconds * 10000)
-        fifo_dir = os.path.join(tmp, "paced")
-        os.makedirs(fifo_dir)
-        shutil.copy(os.path.join(tmp, "full", "session.json"),
-                    os.path.join(fifo_dir, "session.json"))
-        fifo = os.path.join(fifo_dir, "events.ndjson")
-        os.mkfifo(fifo)
-        # Stream from disk: prebuffering the whole paced input
-        # would inflate this process past the product's own
-        # footprint and contaminate the children high-water.
-        errors = []
-
-        def feed():
-            try:
-                with open(events) as src, open(fifo, "w") as out:
-                    start = time.monotonic()
-                    for i in range(paced_lines):
-                        line = src.readline()
-                        if not line:
-                            errors.append("input short at %d" % i)
-                            break
-                        out.write(line)
-                        out.flush()
-                        want = start + (i + 1) * (
-                            paced_seconds / paced_lines)
-                        delay = want - time.monotonic()
-                        if delay > 0:
-                            time.sleep(delay)
-            except Exception as exc:  # noqa: BLE001
-                errors.append(str(exc))
-
-        feeder = threading.Thread(target=feed)
-        feeder.start()
-        p, wall, rss = replay(fifo_dir)
-        feeder.join(timeout=30)
+        check("paced-positive-duration", paced_seconds > 0 and paced_lines > 0)
+        paced_dir = os.path.join(tmp, "paced")
+        os.makedirs(paced_dir)
+        shutil.copy(os.path.join(tmp, "full", "session.json"), paced_dir)
+        paced_file = os.path.join(paced_dir, "events.ndjson")
+        with open(events, 'rb') as src, open(paced_file, 'xb') as dst:
+            for _ in range(paced_lines):
+                line = src.readline()
+                if not line:
+                    check("paced-source-line", False)
+                dst.write(line)
+        adapter = os.path.join(REPO, 'build', 'perf', 'paced_reads.so')
+        os.makedirs(os.path.dirname(adapter), exist_ok=True)
+        subprocess.run(['clang', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+                        '-shared', '-fPIC', os.path.join(TESTS, 'perf', 'paced_reads.c'),
+                        '-o', adapter], check=True)
+        subprocess.run([sys.executable, os.path.join(TESTS, 'perf', 'test_paced_reads.py')], check=True)
+        receipt_path = os.path.join(tmp, 'paced-reads.json')
+        env = paced_environment(paced_file, receipt_path, paced_lines, paced_seconds * 1000000000, adapter)
+        p, wall, rss = replay(paced_dir, env=env)
+        receipt = json.load(open(receipt_path)) if os.path.isfile(receipt_path) else {}
+        errors = paced_errors(receipt, os.stat(paced_file), paced_lines, os.path.getsize(paced_file),
+                              paced_seconds * 1000000000, wall)
         check("paced-errors", not errors, "; ".join(errors[:3]))
         check("paced-exit", p.returncode == 0,
               "exit %d: %s" % (p.returncode, p.stderr[:200]))
         doc = json.loads(p.stdout.decode("utf-8"))
-        check("paced-count",
-              metric(doc, "bounce_attempts")["value"]
-              == str(paced_lines))
-        print("perf: paced %d lines over %ds, rss %d KiB"
-              % (paced_lines, paced_seconds, rss))
+        check("paced-count", metric(doc, "bounce_attempts")["value"] == str(paced_lines))
+        check("paced-bytes", metric(doc, "requested_bounce_bytes")["value"] ==
+              str(sum(SIZES[i % len(SIZES)] for i in range(paced_lines))))
+        check("paced-rss", rss <= rss_budget, "%d KiB" % rss)
+        print("perf: paced %d lines over %ds, rss %d KiB" % (paced_lines, paced_seconds, rss))
+        print('perf: actual paced reads ' + json.dumps(receipt, sort_keys=True))
         sealed = os.path.join(tmp, "sealed")
         sealed_total, sealed_size = generate_sealed(sealed, "sealed-600k", COUNT)
         p, wall, rss = replay(sealed)

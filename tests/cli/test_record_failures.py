@@ -23,6 +23,8 @@ import time
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
+sys.path.insert(0, TESTS)
+from preload_env import preload_env
 BIN = os.path.join(REPO, "build", "memveil")
 SHIM = os.path.join(REPO, "build", "shim", "mvshim.so")
 BRIDGE = os.path.join(REPO, "build", "deps", "lmb", "lib",
@@ -34,21 +36,7 @@ ELF = os.path.join(REPO, "tests", "fixtures", "elf", "ok.o")
 
 
 def _preload(shim):
-    # Sanitizer lane: the ASan runtime must come first in
-    # LD_PRELOAD or its init aborts; interposition still
-    # chains through RTLD_NEXT. Plain mode: shim alone.
-    if os.environ.get("LMB_SANITIZE") != "1":
-        return shim
-    try:
-        out = subprocess.run(
-            ["ldd", BIN], capture_output=True, text=True,
-            check=False).stdout
-    except OSError:
-        return shim
-    for line in out.splitlines():
-        if "libasan" in line and "=>" in line:
-            return line.split("=>")[1].split()[0] + ":" + shim
-    return shim
+    return preload_env(BIN, shim)['LD_PRELOAD']
 
 
 def check(name, cond, detail=""):

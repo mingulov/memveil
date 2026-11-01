@@ -8,10 +8,14 @@ import os
 import re
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'tests'))
+from preload_env import preload_env
+
 BIN = ROOT / 'build/memveil'
 FIXTURE = ROOT / 'tests/fixtures/reader/sealed-complete'
 
@@ -136,7 +140,7 @@ class RecoveryTests(unittest.TestCase):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as root:
                 path, _, _ = self.capture(root)
                 target = path if name == 'directory' else path / name
-                env = dict(os.environ, LD_PRELOAD=str(ROOT / 'build/shim/checkpoint_faults.so'),
+                env = dict(preload_env(BIN, ROOT / 'build/shim/checkpoint_faults.so'),
                            MV_IO_SWAP_READ=str(target))
                 if name == 'directory':
                     env['MV_IO_SWAP_DIRECTORY'] = '1'

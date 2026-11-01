@@ -9,10 +9,14 @@ from pathlib import Path
 import runpy
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'tests'))
+from preload_env import preload_env
+
 FIXTURES = ROOT / 'tests/fixtures/reader'
 BIN = ROOT / 'build/memveil'
 VALIDATOR = runpy.run_path(str(ROOT / 'tools/validate-schemas'))
@@ -39,6 +43,85 @@ class IntegrityTests(unittest.TestCase):
                     walk(item)
         walk(doc['quality'])
         walk(doc['metrics'])
+
+    @classmethod
+    def setUpClass(cls):
+        (ROOT / 'build/shim').mkdir(parents=True, exist_ok=True)
+        subprocess.run(['clang', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+                        '-shared', '-fPIC', str(ROOT / 'tests/cli/capture_faults.c'),
+                        '-o', str(ROOT / 'build/shim/capture_faults.so')], check=True)
+
+    def test_finalized_special_files_refuse_before_reading(self):
+        for fixture in ('sealed-complete', 'sealed-empty', 'complete-stop'):
+            for name in ('session.json', 'events.ndjson'):
+                for kind in ('fifo', 'directory', 'device-link'):
+                    with self.subTest(fixture=fixture, name=name, kind=kind), tempfile.TemporaryDirectory() as tmp:
+                        path = Path(tmp)
+                        for entry in ('session.json', 'events.ndjson'):
+                            shutil.copy(FIXTURES / fixture / entry, path)
+                        target = path / name
+                        target.unlink()
+                        if kind == 'fifo':
+                            os.mkfifo(target)
+                        elif kind == 'directory':
+                            target.mkdir()
+                        else:
+                            target.symlink_to('/dev/null')
+                        for verb in ('report', 'top'):
+                            for flags in ((), ('--allow-partial',), ('--strict',), ('--allow-partial', '--strict')):
+                                proc = subprocess.run([str(BIN), verb, *flags, str(path)],
+                                                      capture_output=True, timeout=3)
+                                self.assertEqual(proc.returncode, 2, proc.stderr)
+                                self.assertEqual(proc.stdout, b'')
+                                self.assertTrue(proc.stderr)
+
+    def test_stream_creation_failure_is_reported_after_regular_open(self):
+        for verb in ('report', 'top'):
+            with self.subTest(verb=verb), tempfile.TemporaryDirectory() as tmp:
+                marker = Path(tmp) / 'reached'
+                env = dict(preload_env(BIN, ROOT / 'build/shim/capture_faults.so'),
+                           MEMVEIL_TEST_NO_BPF='1', MV_FAIL_FDOPEN_EVENTS='1', MV_FAULT_MARKER=str(marker))
+                proc = subprocess.run([str(BIN), verb, str(FIXTURES / 'sealed-complete')],
+                                      env=env, capture_output=True, timeout=3)
+                self.assertEqual(marker.read_text(), 'events-fdopen-failure')
+                self.assertEqual(proc.returncode, 2, proc.stderr)
+                self.assertEqual(proc.stdout, b'')
+                self.assertIn(b'cannot open stream', proc.stderr)
+
+    def test_open_time_fifo_swap_reads_the_pinned_regular_descriptor(self):
+        for verb in ('report', 'top'):
+            for flags in ((), ('--allow-partial',), ('--strict',), ('--allow-partial', '--strict')):
+                with self.subTest(verb=verb, flags=flags), tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp)
+                    for name in ('session.json', 'events.ndjson'):
+                        shutil.copy(FIXTURES / 'sealed-complete' / name, path)
+                    marker = path / 'reached'
+                    env = dict(preload_env(BIN, ROOT / 'build/shim/capture_faults.so'),
+                               MEMVEIL_TEST_NO_BPF='1', MV_FINAL_OPEN_SWAP=str(path / 'events.ndjson'),
+                               MV_FAULT_MARKER=str(marker))
+                    proc = subprocess.run([str(BIN), verb, *flags, str(path)], env=env,
+                                          capture_output=True, timeout=3)
+                    self.assertEqual(marker.read_text(), 'events-open-swap')
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    self.assertTrue(proc.stdout)
+                    self.assertTrue((path / 'events.ndjson').is_fifo())
+                    self.assertEqual((path / 'events.ndjson.saved').read_bytes(),
+                                     (FIXTURES / 'sealed-complete/events.ndjson').read_bytes())
+
+    def test_finalized_regular_symlinks_and_hardlinks_remain_compatible(self):
+        for kind in ('symlink', 'hardlink'):
+            for fixture in ('sealed-complete', 'complete-stop'):
+                with self.subTest(kind=kind, fixture=fixture), tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp)
+                    for name in ('session.json', 'events.ndjson'):
+                        if kind == 'symlink':
+                            (path / name).symlink_to(FIXTURES / fixture / name)
+                        else:
+                            shutil.copy(FIXTURES / fixture / name, path / (name + '.real'))
+                            os.link(path / (name + '.real'), path / name)
+                    for verb in ('report', 'top'):
+                        proc = subprocess.run([str(BIN), verb, str(path)], capture_output=True, timeout=3)
+                        self.assertEqual(proc.returncode, 0, proc.stderr)
 
     def test_pristine_and_partial_all_renderers(self):
         for name, strict_exit in [('sealed-complete', 0), ('sealed-partial', 4),

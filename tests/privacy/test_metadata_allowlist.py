@@ -11,13 +11,15 @@ allowlisted environment names (LMB_NATIVE_LIB and
 MEMVEIL_SIGBLK for artifact selection, SUDO_UID and
 SUDO_GID ownership-only for sudo capture hand-back, never
 persisted or attested) and no /proc cmdline or
-environ file; and the CLI flag set is exactly the frozen
-nineteen (any new flag fails here until reviewed). Exits
+environ file; and the CLI flag set exactly matches the frozen
+inventory (any new flag fails here until reviewed). Exits
 nonzero on the first violation.
 """
 
 import glob
 import json
+import contextlib
+import io
 import os
 import re
 import sys
@@ -39,12 +41,17 @@ FORBIDDEN_PROPS = {
 # payload/cmdline/environ access, and no exfiltration
 # channel; the invoking operator chooses which profile
 # set to trust, exactly like --profile/--object.
+# --compact: top.mojo parse_top_args selects presentation only.
+# --strict: parse_report_args/parse_top_args/parse_record_args select partial-evidence exit policy.
+# --profile-id: bind.mojo parse_bind_args names the profile being generated.
+# These existing selectors add no collection, environment or payload source.
 ALLOWED_FLAGS = {
     "--allow-partial", "--bridge", "--capability", "--cp-object",
     "--device", "--duration", "--format", "--help", "--interval",
     "--json", "--lc-object", "--load-check", "--long-lived-after",
     "--max-events-bytes", "--max-line-bytes", "--max-session-bytes",
     "--object", "--output", "--profile", "--profiles-dir",
+    "--compact", "--strict", "--profile-id",
 }
 
 # SUDO_UID/SUDO_GID reviewed 2026-10-11: read once by
@@ -108,8 +115,26 @@ def schema_props(path):
     return names
 
 
+def audit_flags(flags):
+    check("flags-frozen", flags == ALLOWED_FLAGS,
+          "extra %s missing %s"
+          % (sorted(flags - ALLOWED_FLAGS), sorted(ALLOWED_FLAGS - flags)))
+
+
+def self_check_flag_audit():
+    for changed in (ALLOWED_FLAGS | {'--dump-payload'}, ALLOWED_FLAGS - {'--strict'}):
+        rejected = False
+        with contextlib.redirect_stdout(io.StringIO()):
+            try:
+                audit_flags(changed)
+            except SystemExit as exc:
+                rejected = exc.code == 1
+        check('flags-sensitivity', rejected, 'flag inventory mutation was accepted')
+
+
 def main():
     self_check_extractor()
+    self_check_flag_audit()
     schemas = sorted(glob.glob(os.path.join(REPO, "schemas", "*.json")))
     check("schemas-present", len(schemas) >= 5, "%d files" % len(schemas))
     for path in schemas:
@@ -171,9 +196,7 @@ def main():
     flags = set()
     for path in glob.glob(os.path.join(REPO, "src", "memveil", "cli", "*.mojo")):
         flags.update(re.findall(r'"(--[a-z0-9-]+)"', open(path).read()))
-    check("flags-frozen", flags == ALLOWED_FLAGS,
-          "extra %s missing %s"
-          % (sorted(flags - ALLOWED_FLAGS), sorted(ALLOWED_FLAGS - flags)))
+    audit_flags(flags)
 
     env_names = set()
     proc_hits = []

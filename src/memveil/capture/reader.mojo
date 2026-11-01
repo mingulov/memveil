@@ -630,6 +630,27 @@ struct CaptureReader:
         self.integrity_verified = self.session.has_integrity
 
 
+def _open_regular_stream(path: String, what: String) raises ReadError -> UInt64:
+    """Pin a nonblocking descriptor before admitting a regular input stream."""
+    var cpath = _to_cstr(path)
+    var mode = _to_cstr("rb")
+    var fd = external_call["openat", Int32](Int32(-100), Span(cpath).unsafe_ptr(), Int32(2048 | 524288), UInt32(0))
+    if fd < 0:
+        raise ReadError(READ_IO, 0, what + ": cannot open")
+    try:
+        var ids = file_stat(fd)
+        if ids[3] & UInt64(0o170000) != UInt64(0o100000):
+            raise Error("input is not a regular file")
+    except e:
+        _ = external_call["close", Int32](fd)
+        raise ReadError(READ_INVALID, 0, what + ": " + String(e))
+    var fp = external_call["fdopen", UInt64](fd, Span(mode).unsafe_ptr())
+    if fp == 0:
+        _ = external_call["close", Int32](fd)
+        raise ReadError(READ_IO, 0, what + ": cannot open stream")
+    return fp
+
+
 def _read_bounded(
     path: String, what: String, limit: Int
 ) raises ReadError -> List[UInt8]:
@@ -639,23 +660,7 @@ def _read_bounded(
     is checked before each chunk lands, so a huge file is rejected
     after one chunk over the bound instead of being read fully.
     """
-    var cpath = _to_cstr(path)
-    var mode = _to_cstr("rb")
-    var fd = external_call["openat", Int32](Int32(-100), Span(cpath).unsafe_ptr(), Int32(2048 | 524288), UInt32(0))
-    if fd < 0:
-        raise ReadError(READ_IO, 0, what + ": cannot open")
-    try:
-        var ids = file_stat(fd)
-        if ids[3] & UInt64(0o170000) != UInt64(0o100000):
-            raise Error("session is not a regular file")
-    except e:
-        _ = external_call["close", Int32](fd)
-        raise ReadError(READ_INVALID, 0, what + ": " + String(e))
-    var fp = external_call["fdopen", UInt64](fd, Span(mode).unsafe_ptr())
-    if fp == 0:
-        _ = external_call["close", Int32](fd)
-    if fp == 0:
-        raise ReadError(READ_IO, 0, what + ": cannot open")
+    var fp = _open_regular_stream(path, what)
     var chunk = List[UInt8]()
     for _ in range(_CHUNK_BYTES):
         chunk.append(UInt8(0))
@@ -728,11 +733,7 @@ def read_capture(
     for _ in range(_CHUNK_BYTES):
         out._chunk.append(UInt8(0))
     if not recover:
-        var path = _to_cstr(dir + "/events.ndjson")
-        var mode = _to_cstr("rb")
-        out._fp = external_call["fopen", UInt64](Span(path).unsafe_ptr(), Span(mode).unsafe_ptr())
-        if out._fp == 0:
-            raise ReadError(READ_IO, 0, "cannot open events.ndjson")
+        out._fp = _open_regular_stream(dir + "/events.ndjson", "events.ndjson")
     if recover and not allow_partial:
         while out.has_more():
             _ = out.next_event()

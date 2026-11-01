@@ -22,6 +22,9 @@ on:
     paths:
       - 'bpf/**'
       - 'src/memveil/capture/**'
+      - 'tests/vm/capture_durability*.py'
+      - 'tests/cli/capture_faults.c'
+      - 'tests/cli/test_capture*.py'
 jobs:
   kernels:
     runs-on: ubuntu-26.04

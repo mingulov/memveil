@@ -11,11 +11,27 @@ See the [support table](support.md#capabilities-by-mode) for the shipping modes.
 `./tools/test perf-replay` generates a fixed 600,000-record synthetic
 capture (214,148,895 bytes, under the default 1 GiB input cap) with
 independently known totals. It measures the built `report` verb and verifies
-prefix scaling and a paced FIFO stream. Targets are at most 60 seconds,
+prefix scaling and paced regular-file reads. Targets are at most 60 seconds,
 at most 256 MiB userspace RSS and at least 10,000 records/second, with exact
 counts. Earlier documentation reported 5.5 seconds and 123.5 MiB on a
 16-core x86-64 runner with 59 GiB RAM; those are historical development
 observations, not current-artifact results or a live-path overhead limit.
+
+The default paced leg still reads all 600,000 records over 60 seconds. A test-only
+`fread` adapter calls the real reader, counts bytes/newlines in the returned
+buffer, and delays return to cumulative monotonic deadlines. It never generates
+records or reports and never prebuffers the input; each actual product read is
+at most 64 KiB. Independent receipt checks require the same regular-file identity,
+exact byte/record totals, reached EOF, bounded requests and the full paced duration.
+The product still parses and reduces every record. Exact byte arithmetic and the
+256 MiB RSS check also apply to this leg. The adapter's negative controls reject
+missing, short, unpaced or unbounded read evidence.
+
+This replaces FIFO use as a benchmark transport; capture inputs are regular files
+for all supported versions. No live FIFO replay interface is advertised.
+`MEMVEIL_PACED_SECONDS` selects a shorter laboratory variant; qualification uses
+the default full 60-second workload. Pacing tests reader behavior under delayed
+input delivery and does not qualify live capture or physical storage durability.
 
 ## Region scaling protocol
 
