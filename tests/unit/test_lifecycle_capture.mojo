@@ -18,7 +18,7 @@ channel geometry refuses before any capture exists.
 """
 
 from std.ffi import external_call
-from std.testing import TestSuite, assert_equal, assert_true
+from std.testing import TestSuite, assert_equal, assert_raises, assert_true
 
 from memveil.analysis.engine import Analyzer
 from memveil.capture.collector import (
@@ -4830,6 +4830,15 @@ def test_collector_liveness_size_limit_latch() raises:
     assert_true(not _contains(c.session, String("hooks silent")))
 
 
+def _without_zero_checkpoint_failures(session: String) raises -> String:
+    var parsed = parse_session(_session_bytes(session))
+    assert_true(parsed.stop.has_checkpoint_failures)
+    assert_equal(parsed.stop.checkpoint_failures, UInt64(0))
+    var field = String('"stop":{"checkpoint_failures":"0",')
+    assert_true(_contains(session, field))
+    return session.replace(field, String('"stop":{'))
+
+
 def test_scripted_old_ktimes_byte_identical() raises:
     # Pre-attach ktimes never enter a window: this nested-copy scenario replays byte-identical with liveness on.
     var payloads = List[List[UInt8]]()
@@ -4854,7 +4863,26 @@ def test_scripted_old_ktimes_byte_identical() raises:
     )
     assert_true(_contains(c.session, integrity))
     assert_true(_contains(c.session, String('"schema_version":"0.1.4"')))
-    var legacy = c.session.replace(integrity, String(""))
+    # This scripted writer has no checkpoint failures; prove that new field
+    # before removing only its exact encoding for the legacy comparison.
+    var legacy = _without_zero_checkpoint_failures(c.session)
+    var wrong = c.session.replace(
+        String('"checkpoint_failures":"0"'),
+        String('"checkpoint_failures":"1"'),
+    )
+    var wrong_parsed = parse_session(_session_bytes(wrong))
+    assert_true(wrong_parsed.stop.has_checkpoint_failures)
+    assert_equal(wrong_parsed.stop.checkpoint_failures, UInt64(1))
+    with assert_raises():
+        _ = _without_zero_checkpoint_failures(wrong)
+    var missing = c.session.replace(
+        String('"checkpoint_failures":"0",'), String("")
+    )
+    var missing_parsed = parse_session(_session_bytes(missing))
+    assert_true(not missing_parsed.stop.has_checkpoint_failures)
+    with assert_raises():
+        _ = _without_zero_checkpoint_failures(missing)
+    legacy = legacy.replace(integrity, String(""))
     legacy = legacy.replace(
         String('"schema_version":"0.1.4"'),
         String('"schema_version":"0.1.3"'),
