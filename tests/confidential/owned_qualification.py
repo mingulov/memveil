@@ -81,6 +81,17 @@ def verify_transport(root, admission):
     exact(receipt, {'status', 'semantics', 'kernel_release', 'btf_sha256', 'module_sha256',
                    'runner_sha256', 'oracle_source_sha256', 'pages', 'cycles', 'bpftrace_version',
                    'bpftrace_sha256', 'shared_hook_blind_spot', 'state_claim'}, 'memveil-owned-transport/1')
+    if (not isinstance(receipt['kernel_release'], str)
+            or not re.fullmatch(r'[A-Za-z0-9_.+-]{1,128}', receipt['kernel_release'])):
+        raise ValueError('invalid ordinary kernel identity')
+    for key in ('btf_sha256', 'module_sha256', 'runner_sha256', 'oracle_source_sha256', 'bpftrace_sha256'):
+        if not isinstance(receipt[key], str) or not HASH.fullmatch(receipt[key]):
+            raise ValueError('invalid ordinary artifact digest')
+    lock = read_json(Path(__file__).resolve().parent.parent / 'vm' / 'kernels.lock.json')
+    if receipt['bpftrace_version'] != lock['tools']['bpftrace']:
+        raise ValueError('ordinary tracer version differs from repository lock')
+    if receipt['shared_hook_blind_spot'] is not True:
+        raise ValueError('ordinary shared-hook blind spot must be disclosed')
     if not 1 <= number(receipt['pages']) <= 256:
         raise ValueError('ordinary page count outside bounds')
     if (receipt.get('schema') != 'memveil-owned-transport/1' or receipt.get('status') != 'PASS'
@@ -98,6 +109,8 @@ def verify_transport(root, admission):
         name = item.get('receipt', '')
         if not re.fullmatch(r'cycle-[0-9]+-[0-3]\.json', name):
             raise ValueError('invalid ordinary receipt name')
+        if not isinstance(item['receipt_sha256'], str) or not HASH.fullmatch(item['receipt_sha256']):
+            raise ValueError('invalid ordinary case digest')
         child = root / name
         if digest(child) != item.get('receipt_sha256'):
             raise ValueError('ordinary case digest mismatch')

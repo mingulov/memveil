@@ -105,6 +105,70 @@ class QualificationTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         q.verify_transport(root, a)
 
+    def transport_fixture(self, root, admission):
+        from owned_region import digest
+        cycles = []
+        for i in range(6):
+            name = f'cycle-{i//2}-{i%2}.json'
+            case = {'epoch': str(i+1), 'pages': '3', 'retained_seconds': str(i%2),
+                    'rows': [['shared', '3', 0], ['private', '3', 0]],
+                    'cleanup': 'unloaded', 'status': 'PASS'}
+            (root/name).write_text(json.dumps(case))
+            cycles.append({'epoch': str(i+1), 'retained_seconds': str(i%2), 'receipt': name,
+                           'receipt_sha256': digest(root/name),
+                           'counts': {k: '1' for k in ('shared_entry','private_entry','shared_exit','private_exit')}})
+        lock = json.loads((Path(__file__).resolve().parent.parent/'vm'/'kernels.lock.json').read_text())
+        return {'schema': 'memveil-owned-transport/1', 'status': 'PASS',
+                'semantics': 'ordinary_noop_transport_only', 'state_claim': 'unavailable',
+                'oracle_source_sha256': admission['oracle_source_sha256'], 'pages': '3', 'cycles': cycles,
+                'kernel_release': '7.0.14-070014-generic', 'btf_sha256': 'a'*64, 'module_sha256': 'b'*64,
+                'runner_sha256': 'c'*64, 'bpftrace_version': lock['tools']['bpftrace'],
+                'bpftrace_sha256': 'd'*64, 'shared_hook_blind_spot': True}
+
+    def test_transport_identity_semantics_after_digest_rebinding(self):
+        import owned_qualification as q
+        from owned_region import digest
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            admission, _, _ = self.fixture()
+            good = self.transport_fixture(root, admission)
+            path = root/'transport.json'
+            def bind(receipt, admitted):
+                path.write_text(json.dumps(receipt))
+                admitted['transport_sha256'] = digest(path)
+                self.assertEqual(digest(path), admitted['transport_sha256'])
+            bind(good, admission)
+            self.assertNotEqual(good['kernel_release'], admission['kernel_release'])
+            self.assertNotEqual(good['btf_sha256'], admission['btf_sha256'])
+            self.assertNotEqual(good['module_sha256'], admission['module_sha256'])
+            q.verify_transport(root, admission)
+            cases = []
+            for value in (None, False, [], '', 'x'*129, '7.0.14 extra', '../7.0.14', '7.0.14\n'):
+                cases.append(('kernel_release', value, 'invalid ordinary kernel identity'))
+            for field in ('btf_sha256', 'module_sha256', 'runner_sha256', 'oracle_source_sha256', 'bpftrace_sha256'):
+                for value in (None, False, [], '', 'a'*63, 'A'*64, 'g'*64):
+                    cases.append((field, value, 'invalid ordinary artifact digest'))
+            for value in (None, False, [], '', 'unapproved', good['bpftrace_version']+'\n'):
+                cases.append(('bpftrace_version', value, 'ordinary tracer version differs from repository lock'))
+            for value in (False, None, 1, 'true', []):
+                cases.append(('shared_hook_blind_spot', value, 'ordinary shared-hook blind spot must be disclosed'))
+            for field, value, reason in cases:
+                with self.subTest(field=field, value=value):
+                    bad, admitted = copy.deepcopy((good, admission))
+                    bad[field] = value
+                    if field == 'oracle_source_sha256':
+                        admitted[field] = value
+                    bind(bad, admitted)
+                    with self.assertRaisesRegex(ValueError, reason):
+                        q.verify_transport(root, admitted)
+            for value in (None, False, [], '', 'a'*63, 'A'*64, 'g'*64):
+                with self.subTest(case_digest=value):
+                    bad, admitted = copy.deepcopy((good, admission))
+                    bad['cycles'][0]['receipt_sha256'] = value
+                    bind(bad, admitted)
+                    with self.assertRaisesRegex(ValueError, 'invalid ordinary case digest'):
+                        q.verify_transport(root, admitted)
+
     def test_json_refuses_duplicate_keys_oversize_and_symlinks(self):
         from owned_qualification import read_json
         with tempfile.TemporaryDirectory() as tmp:
