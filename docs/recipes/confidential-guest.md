@@ -18,7 +18,8 @@ semantics before any real platform run. Inventory flags alone are insufficient.
 
 ## Safety and ordinary transport first
 
-Read the [owned oracle operation and safety contract](../../tests/kernel/README.md#test-only-region-oracle-module).
+Read the owned oracle operation and safety contract in the "Test-only region
+oracle module" section of `tests/kernel/README.md` in the source checkout.
 Run its offline native failure matrix, obtain an independent allocation,
 conversion, unwind and unload review, and build against the selected guest
 headers. The ordinary guest runner then exercises per-CPU bpftrace counters,

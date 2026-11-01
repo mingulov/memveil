@@ -78,8 +78,9 @@ never consumes this ledger. The qualification validator compares ordered
 request tuples against a separately extracted, caller-labelled product
 projection under an admitted profile. The live projection adapter remains
 unimplemented; a validator pass on authored fixtures is not guest admission.
-See [owned-region operation and safety](../tests/kernel/README.md#test-only-region-oracle-module)
-and the [confidential recipe](recipes/confidential-guest.md).
+For owned-region operation and safety, read the "Test-only region oracle module"
+section of `tests/kernel/README.md` in the source checkout and the
+[confidential recipe](recipes/confidential-guest.md).
 
 Ordinary per-CPU bpftrace counts, zero-retention control and repeated
 load/unload prove transport only. Native success on an ordinary guest can
