@@ -156,15 +156,12 @@ fn cargo_checkout_profiles(exe: &str) -> Option<String> {
         return None;
     }
     let project = parts[..parts.len() - 3].join("/");
-    for candidate in [
+    [
         format!("{project}/profiles"),
         format!("{project}/../profiles"),
-    ] {
-        if manifest_readable(&candidate) {
-            return Some(candidate);
-        }
-    }
-    None
+    ]
+    .into_iter()
+    .find(|candidate| manifest_readable(candidate))
 }
 
 /// Report one doctor failure on stderr; return EXIT_INVALID.
