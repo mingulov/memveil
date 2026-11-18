@@ -10,8 +10,16 @@ aya-ebpf = "=0.2.1"
 memveil-ebpf-common = { version = "0.0.0", path = "../ebpf-common", default-features = false }
 
 [[bin]]
-name = "memveil-ebpf"
-path = "src/main.rs"
+name = "memveil-ebpf-attempt"
+path = "src/bin/attempt.rs"
+
+[[bin]]
+name = "memveil-ebpf-lifecycle"
+path = "src/bin/lifecycle.rs"
+
+[[bin]]
+name = "memveil-ebpf-copy"
+path = "src/bin/copy.rs"
 
 [profile.release]
 panic = "abort"
