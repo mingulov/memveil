@@ -381,11 +381,25 @@ fn release_binary_builds_reports_version_and_is_stripped() {
 #[test]
 fn frozen_verbs_match_top_help() {
     let bin = release_bin();
-    let live = usage_verbs(&run_help(&bin, ""));
+    let top_help = run_help(&bin, "");
+    let live = usage_verbs(&top_help);
     let frozen: BTreeSet<String> = FROZEN_VERBS.iter().map(ToString::to_string).collect();
     assert_eq!(
         live, frozen,
         "new/renamed verb: live {live:?} vs frozen {frozen:?}"
+    );
+    // Reverse direction: every long flag top --help names must
+    // be frozen, so a newly added top flag fails. --version and
+    // -h are bound by the live guard below, not by --help text:
+    // top --help spells --help (in the per-verb pointers) but
+    // never --version, and -h is short.
+    let live_flags = long_flags(&top_help);
+    let mut want: BTreeSet<String> = FROZEN_TOP_FLAGS.iter().map(ToString::to_string).collect();
+    want.remove("--version");
+    want.remove("-h");
+    assert_eq!(
+        live_flags, want,
+        "top --help names {live_flags:?} vs frozen {want:?}"
     );
     for flag in FROZEN_TOP_FLAGS {
         let out = run(&bin, &[flag]);
