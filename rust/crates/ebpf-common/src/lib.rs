@@ -382,6 +382,153 @@ pub struct Offsets {
     pub fixed_end: u32,
 }
 
+/* Copy-channel field table: 112 bytes, little-endian, `#[repr(C)]`. */
+/// `mv_copy_offs` magic (`"MCFO"`).
+pub const MV_COPY_OFFS_MAGIC: u32 = 0x4F46_434D;
+/// `mv_copy_offs` version.
+pub const MV_COPY_OFFS_VERSION: u16 = 1;
+/// `mv_copy_offs` flags bit: the private-pool offsets are valid.
+pub const MV_COPY_OFFS_HAS_PRIVATE: u16 = 1;
+/// `mv_copy_offs` table length in bytes.
+pub const MV_COPY_OFFS_LEN: usize = 112;
+
+/// Host-resolved kernel field table replacing CO-RE for the copy channel.
+///
+/// aya-ebpf emits no relocations, so every offset the C probe relocates is
+/// resolved once by userspace from kernel BTF and installed into the
+/// single-entry `mv_copy_offs` map before attach (the host loader installs it
+/// with `map_write`, like `mv_offsets`). The probe fails closed on any
+/// inconsistency: a missing entry or a bad magic/version leaves the direction
+/// unresolvable, so `emit_cp` refuses the firing with `BYTE_COVERAGE` and
+/// never emits a guessed direction; a trusted table with inconsistent
+/// contents degrades the event to unknown-with-reason `LAYOUT` while the
+/// request fact (size, direction) is still emitted.
+///
+/// Exact layout, 112 bytes, `#[repr(C)]`, little-endian:
+/// ```text
+/// +0   u32 magic            must equal MV_COPY_OFFS_MAGIC ("MCFO")
+/// +4   u16 version          must equal 1
+/// +6   u16 flags            only bit0 HAS_PRIVATE is defined
+/// +8   u32 pool_start_off   offset of start in io_tlb_pool
+/// +12  u32 pool_start_size  must equal 8 (u64 read)
+/// +16  u32 pool_end_off     offset of end in io_tlb_pool
+/// +20  u32 pool_end_size    must equal 8
+/// +24  u32 pool_nslabs_off  offset of nslabs in io_tlb_pool
+/// +28  u32 pool_nslabs_size must equal 8 (unsigned long read as u64)
+/// +32  u32 pool_slots_off   offset of slots in io_tlb_pool
+/// +36  u32 pool_slots_size  must equal 8 (pointer read as u64)
+/// +40  u32 slot_orig_off    offset of orig_addr in io_tlb_slot
+/// +44  u32 slot_orig_size   must equal 8
+/// +48  u32 slot_alloc_off   offset of alloc_size in io_tlb_slot
+/// +52  u32 slot_alloc_size  must equal 8
+/// +56  u32 dev_parms_off    offset of dma_parms in struct device
+/// +60  u32 dev_parms_size   must equal 8 (pointer read as u64)
+/// +64  u32 mask_off         offset of min_align_mask in device_dma_parameters
+/// +68  u32 mask_size        must equal 4 (u32 read)
+/// +72  u32 slot_size        sizeof(io_tlb_slot): slot stride; must be
+///                           nonzero and fit both slot field extents
+/// +76  u32 reserved0        must equal 0
+/// +80  u32 mem_off          offset of dma_io_tlb_mem in struct device
+///                           (valid iff HAS_PRIVATE)
+/// +84  u32 mem_size         must equal 8 iff HAS_PRIVATE
+/// +88  u32 cc_off           offset of cc_shared in io_tlb_mem
+///                           (valid iff HAS_PRIVATE)
+/// +92  u32 cc_size          must equal 1 iff HAS_PRIVATE (bool read as u8)
+/// +96  u32 dir_to           enum dma_data_direction DMA_TO_DEVICE value
+/// +100 u32 dir_from         enum dma_data_direction DMA_FROM_DEVICE value
+/// +104 u32 dir_bidi         enum dma_data_direction DMA_BIDIRECTIONAL value
+/// +108 u32 reserved1        must equal 0
+/// ```
+/// The 8 (offset, size) pairs are the 8 relocated widths the C probe guards
+/// with `mv_layout_ok`; the size half keeps the width guard in-probe. The
+/// stride replaces `bpf_core_type_size(struct io_tlb_slot)`, the mem/cc
+/// quartet replaces the private-pool `field_exists` chain (with the width
+/// check the C probe applies to `cc_shared`), and the dir trio replaces the
+/// three `bpf_core_enum_value` direction relocations. Offset plausibility
+/// (within the owning struct) is the installer's job from BTF, mirroring the
+/// attempt channel's host-side table validation; the probe checks magic,
+/// version, flags, sizes, and stride sanity.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CopyOffsets {
+    /// Magic, must equal [`MV_COPY_OFFS_MAGIC`].
+    pub magic: u32,
+    /// Version, must equal [`MV_COPY_OFFS_VERSION`].
+    pub version: u16,
+    /// Flags, only [`MV_COPY_OFFS_HAS_PRIVATE`] is defined.
+    pub flags: u16,
+    /// Offset of `start` in `io_tlb_pool`.
+    pub pool_start_off: u32,
+    /// Width of `start`; the probe requires 8.
+    pub pool_start_size: u32,
+    /// Offset of `end` in `io_tlb_pool`.
+    pub pool_end_off: u32,
+    /// Width of `end`; the probe requires 8.
+    pub pool_end_size: u32,
+    /// Offset of `nslabs` in `io_tlb_pool`.
+    pub pool_nslabs_off: u32,
+    /// Width of `nslabs`; the probe requires 8.
+    pub pool_nslabs_size: u32,
+    /// Offset of `slots` in `io_tlb_pool`.
+    pub pool_slots_off: u32,
+    /// Width of `slots`; the probe requires 8.
+    pub pool_slots_size: u32,
+    /// Offset of `orig_addr` in `io_tlb_slot`.
+    pub slot_orig_off: u32,
+    /// Width of `orig_addr`; the probe requires 8.
+    pub slot_orig_size: u32,
+    /// Offset of `alloc_size` in `io_tlb_slot`.
+    pub slot_alloc_off: u32,
+    /// Width of `alloc_size`; the probe requires 8.
+    pub slot_alloc_size: u32,
+    /// Offset of `dma_parms` in `struct device`.
+    pub dev_parms_off: u32,
+    /// Width of `dma_parms`; the probe requires 8.
+    pub dev_parms_size: u32,
+    /// Offset of `min_align_mask` in `device_dma_parameters`.
+    pub mask_off: u32,
+    /// Width of `min_align_mask`; the probe requires 4.
+    pub mask_size: u32,
+    /// Sizeof `io_tlb_slot`: the slot stride.
+    pub slot_size: u32,
+    /// Reserved, must be 0.
+    pub reserved0: u32,
+    /// Offset of `dma_io_tlb_mem` in `struct device` (iff HAS_PRIVATE).
+    pub mem_off: u32,
+    /// Width of `dma_io_tlb_mem`; the probe requires 8 (iff HAS_PRIVATE).
+    pub mem_size: u32,
+    /// Offset of `cc_shared` in `io_tlb_mem` (iff HAS_PRIVATE).
+    pub cc_off: u32,
+    /// Width of `cc_shared`; the probe requires 1 (iff HAS_PRIVATE).
+    pub cc_size: u32,
+    /// `DMA_TO_DEVICE` enumerator value.
+    pub dir_to: u32,
+    /// `DMA_FROM_DEVICE` enumerator value.
+    pub dir_from: u32,
+    /// `DMA_BIDIRECTIONAL` enumerator value.
+    pub dir_bidi: u32,
+    /// Reserved, must be 0.
+    pub reserved1: u32,
+}
+
+impl CopyOffsets {
+    /// Wire length in bytes.
+    pub const LEN: usize = MV_COPY_OFFS_LEN;
+}
+
+const _: () = assert!(core::mem::size_of::<CopyOffsets>() == MV_COPY_OFFS_LEN);
+const _: () = assert!(core::mem::offset_of!(CopyOffsets, magic) == 0);
+const _: () = assert!(core::mem::offset_of!(CopyOffsets, version) == 4);
+const _: () = assert!(core::mem::offset_of!(CopyOffsets, flags) == 6);
+const _: () = assert!(core::mem::offset_of!(CopyOffsets, pool_start_off) == 8);
+const _: () = assert!(core::mem::offset_of!(CopyOffsets, mask_size) == 68);
+const _: () = assert!(core::mem::offset_of!(CopyOffsets, slot_size) == 72);
+const _: () = assert!(core::mem::offset_of!(CopyOffsets, mem_off) == 80);
+const _: () = assert!(core::mem::offset_of!(CopyOffsets, cc_size) == 92);
+const _: () = assert!(core::mem::offset_of!(CopyOffsets, dir_to) == 96);
+const _: () = assert!(core::mem::offset_of!(CopyOffsets, dir_bidi) == 104);
+const _: () = assert!(core::mem::offset_of!(CopyOffsets, reserved1) == 108);
+
 /// Wire decode failure. Names mirror the shared reason vocabulary
 /// (`PAY_*`, plus `TableBad` for the offsets table).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

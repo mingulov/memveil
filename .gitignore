@@ -20,3 +20,4 @@ modules.order
 !tests/fixtures/core/*.bpf.o
 # Rust userspace build output (rewrite/rust-userspace).
 rust/target/
+rust/crates/ebpf/target/

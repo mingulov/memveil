@@ -11,8 +11,10 @@ publish = false
 name = "memveil"
 path = "src/lib.rs"
 
-# `aya = "=0.14.0"` is deliberately absent: Task 8 adds it to [dependencies]
-# for the loader, and declaring it now would trip the unused-dependency warning.
+[dependencies]
+aya = "=0.14.0"
+memveil-ebpf-common = { version = "0.0.0", path = "crates/ebpf-common", features = ["user"] }
+
 [dev-dependencies]
 aya-obj = "=0.3.0"
 
