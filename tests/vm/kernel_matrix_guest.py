@@ -224,8 +224,13 @@ def record_artifacts(km, out, mv, mode):
     if mode == "deb":
         roots = ["/usr/lib/memveil"]
     else:
+        # Mojo bundles keep objects under lib/memveil; Rust
+        # tarballs keep them under bpf/. Both are probed in
+        # order, so either bundle resolves and a bundle with
+        # neither still fails closed below.
         roots = [os.path.join(os.path.dirname(mv), "..", "lib",
                               "memveil"),
+                 os.path.join(os.path.dirname(mv), "..", "bpf"),
                  os.path.dirname(mv)]
     for key, name in BPF_OBJECTS:
         found = None
