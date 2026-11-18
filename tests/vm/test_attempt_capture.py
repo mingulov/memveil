@@ -98,7 +98,8 @@ def run_guest(mode, profile, obj, duration):
     export = tmp / "export"
     export.mkdir()
     cmd = prefix + [
-        "--run", "-m", "6G", "--network", "user",
+        "--run", "-m", "6G", "--disable-microvm",
+        "--network", "user",
         "--qemu-opts=-cpu host",
         "--qemu-opts=-device pcnet,netdev=pcnet0"
         " -netdev user,id=pcnet0,net=10.0.3.0/24",
