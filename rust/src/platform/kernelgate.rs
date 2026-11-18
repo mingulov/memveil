@@ -718,7 +718,7 @@ mod tests {
         read_ftrace_enabled, read_ftrace_text, read_lockdown, remedy_for,
     };
     use crate::platform::reader::open_evidence_reader;
-    use crate::platform::test_support::gate_fixture;
+    use crate::platform::test_support::{TestDir, gate_fixture};
     use crate::platform::tracefs::probe_tracefs;
 
     fn lockdown_of(name: &str) -> LockdownState {
@@ -1064,6 +1064,46 @@ mod tests {
         let malformed =
             open_evidence_reader(&gate_fixture("ftrace-malformed")).expect("fixture opens");
         assert_eq!(read_ftrace_enabled(&malformed).value, "malformed");
+    }
+
+    fn copy_tree(src: &std::path::Path, dst: &std::path::Path) {
+        for entry in std::fs::read_dir(src).expect("read fixture dir") {
+            let entry = entry.expect("dir entry");
+            let target = dst.join(entry.file_name());
+            if entry.file_type().expect("file type").is_dir() {
+                std::fs::create_dir_all(&target).expect("mkdir");
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).expect("copy file");
+            }
+        }
+    }
+
+    #[test]
+    fn btf_unreadable_reason_pins_mojo_rendering() {
+        // A vmlinux path that exists (access: OK) but refuses
+        // the contained open (O_NOFOLLOW symlink: ELOOP maps
+        // to E_DENIED) drives the btf-unreadable lane. The
+        // reason must render byte-identically to Mojo's
+        // `"BTF unreadable: " + String(e)`: pinned Mojo 1.2.0
+        // prints `EvidenceError(code=N, message=M)`, the same
+        // shape as the Rust Display.
+        let tmp = TestDir::create("kgate-unreadable").expect("mkdtemp");
+        copy_tree(std::path::Path::new(&gate_fixture("base")), tmp.path());
+        let vmlinux = tmp.path().join("sys/kernel/btf/vmlinux");
+        std::fs::remove_file(&vmlinux).expect("remove vmlinux");
+        std::os::unix::fs::symlink("../notes", &vmlinux).expect("link vmlinux");
+        let r = open_evidence_reader(tmp.as_str()).expect("scratch opens");
+        let caps = vec!["attempt-trace".to_string(), "mapping-lifecycle".to_string()];
+        let g = kernel_gate(&r, &r.release.clone(), "libz.so.1", &caps);
+        assert!(!g.ok);
+        assert!(g.unknown);
+        assert_eq!(g.code, "btf-unreadable");
+        assert_eq!(
+            g.reason,
+            "BTF unreadable: EvidenceError(code=4, message=/sys/kernel/btf/vmlinux: denied)"
+        );
+        assert_eq!(g.btf.state, "unreadable");
     }
 
     #[test]
