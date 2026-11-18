@@ -46,7 +46,7 @@ is a silent narrowing.
 | offline-environment | PASS | Exit/identical/traced checks. |
 | perf-replay | PASS | Full (600k), prefix, paced, and sealed checks pass: full 4.3s wall at 141k records/s (budget 60s), RSS inside 256MB; paced 600k lines over 60s via the `read` lane (3269 calls, max 64KiB, error 0, exact counts). Sealed: verified, 6.1s. See conflict 4 (resolved). |
 | perf-region | PASS | 234/234 incl. wall/RSS budgets (active-ceiling 2.1s, peak 122.6MB). |
-| soak | FAIL | `soak-quality` cycle 0 fails identically on Mojo (stale expectation, fixed by conflict 2; clean re-run pending). Bypassed triage: full 30-min run, 1282 stable cycles, peak 34MB, max cycle 1.4s, zero failures. Caveat: the release binary was rebuilt mid-run by a concurrent packaging build (`d6bc688`, semantics-preserving clippy fix), so cycles span both hashes with no observed variance. See conflict 2 (resolved). |
+| soak | PASS | Un-bypassed full 30-min run on the updated expectation: 1326 stable cycles, peak 33.8MB, max cycle 0.7s, zero failures; binary hash `70c93779...` identical pre/post (no mid-run rebuild). History: the earlier bypassed triage (1282 cycles) spanned two hashes after a concurrent packaging rebuild (`d6bc688`, semantics-preserving); that run is superseded. Wrapper note: the long run's shell wrapper exited 2 on a trailing re-read parse error caused by an in-place `tools/test` edit landing mid-flight (process bug, mine); the suite evidence above is unaffected (recorded in-process before the wrapper error), and a 1-min wrapper re-run exits 0. See conflict 2 (resolved). |
 | perf-workload | SKIP | pytest 21/21 pass (comparison logic, binary-free); `workloads.py` needs `MEMVEIL_VM_PERF=1` with qualified probes. |
 | perf-overhead | SKIP | pytest 66/66 pass; `overhead.py` needs `MEMVEIL_VM_PERF=1` with qualified probes. |
 | profiles | PASS | Source-layering greps, 7 Mojo unit files, `emit-core-layouts` fixture and built-object checks (local clang-22 objects reproduce the canonical layouts). Binary-independent. |
@@ -231,7 +231,7 @@ B. Rust eBPF CO-RE layouts are a strict superset of the shipped
 | replay full 600k | 3.8s wall, 73MB RSS, 156k/s | 17.0s wall, 127MB RSS, 35k/s | 60s, 256MB |
 | replay sealed 600k | 5.3s wall, 73MB RSS, verified | 20.4s wall, 126MB RSS | 60s, 256MB |
 | region active-ceiling | 2.1s wall, peak 122.6MB | not measured | 60s, 256MB |
-| soak full 30 min (bypassed stale line) | 1282 cycles stable, peak 34MB, max cycle 1.4s | not measured | 256MB envelope |
+| soak full 30 min (un-bypassed) | 1326 cycles stable, peak 33.8MB, max cycle 0.7s | not measured | 256MB envelope |
 
 Absolute thresholds (not Mojo-relative) gate the suites; Rust meets
 every runnable gate with headroom.
