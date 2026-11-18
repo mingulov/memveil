@@ -126,7 +126,15 @@ pub fn decode_payload(raw: &[u8]) -> Result<DecodedAttempt, DecodeError> {
             memveil_ebpf_common::DecodeError::NameLen => "PAY_NAMELEN",
             memveil_ebpf_common::DecodeError::Nul => "PAY_NUL",
             memveil_ebpf_common::DecodeError::Pad => "PAY_PAD",
-            _ => unreachable!("attempt decoder emits no other verdict"),
+            // Unreachable in practice: the attempt decoder emits
+            // no other verdict. Enumerated (not `_`) so a future
+            // DecodeError variant fails the build here instead of
+            // panicking at runtime.
+            memveil_ebpf_common::DecodeError::Kind => "PAY_KIND",
+            memveil_ebpf_common::DecodeError::Dir => "PAY_DIR",
+            memveil_ebpf_common::DecodeError::Reason => "PAY_REASON",
+            memveil_ebpf_common::DecodeError::Range => "PAY_RANGE",
+            memveil_ebpf_common::DecodeError::TableBad => "PAY_TABLE",
         };
         DecodeError::new(reason)
     })?;

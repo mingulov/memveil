@@ -158,7 +158,11 @@ pub fn parse_json_int(text: &str) -> Result<i64, ValidationError> {
 }
 
 /// Parse a JSON integer or null token.
-pub fn parse_maybe_int(text: Option<&str>) -> Result<MaybeI64, ValidationError> {
+///
+/// Kept for report parsers that need nullable integers; no
+/// current caller uses it outside tests.
+#[allow(dead_code)]
+pub(crate) fn parse_maybe_int(text: Option<&str>) -> Result<MaybeI64, ValidationError> {
     match text {
         None => Ok(MaybeI64::absent()),
         Some(s) => parse_json_int(s).map(MaybeI64::of),

@@ -2690,6 +2690,16 @@ mod tests {
     }
 
     #[test]
+    fn reader_nul_in_path() {
+        // A NUL byte in the capture dir refuses as READ_IO in
+        // both modes: the path never reaches the kernel.
+        let limits = default_limits();
+        let nul_dir = format!("{}/x\0y", fixture("missing-session"));
+        expect_error(&nul_dir, false, limits, READ_IO, 0);
+        expect_error(&nul_dir, true, limits, READ_IO, 0);
+    }
+
+    #[test]
     fn reader_empty_and_crlf() {
         let limits = default_limits();
         let mut empty = read_capture(&fixture("empty-events"), false, limits).expect("open");

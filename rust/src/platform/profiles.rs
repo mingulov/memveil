@@ -2988,6 +2988,9 @@ fn hex_nibble(v: u8) -> u8 {
 /// does NOT reuse the canonical event quoter, which passes
 /// DEL through raw: byte-compare the two escapers before
 /// deduplicating (the DEL rule is the only difference).
+/// Carry: report rendering must deduplicate via a
+/// `quote_json`-with-DEL variant or flag, never by silently
+/// changing these receipt bytes.
 fn escape_json(text: &str) -> String {
     let raw = text.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(raw.len() + 2);
@@ -5571,6 +5574,31 @@ mod tests {
         );
         assert!(v.ok);
         assert_eq!(v.reason, "");
+    }
+
+    #[test]
+    fn verify_live_reader_form_agrees_on_refusal() {
+        // Refusal paths agree too: the same signature-mismatch
+        // fixture yields equal ok, reason, and code in both forms.
+        let doc = parse_profile_bytes(
+            live_ref_doc()
+                .replace("unsigned long attrs)", "unsigned long long attrs)")
+                .as_bytes(),
+        )
+        .expect("parses");
+        let caps = caps_of(&["mapping-lifecycle"]);
+        let root = verify_live_interfaces(&fx("kernel-38"), &doc, &caps);
+        let reader = open_evidence_reader(&fx("kernel-38")).expect("fixture opens");
+        let via_reader = verify_live_interfaces_with_reader(&reader, &doc, &caps);
+        assert!(!root.ok);
+        assert!(!via_reader.ok);
+        assert_eq!(via_reader.reason, root.reason);
+        assert_eq!(via_reader.code, root.code);
+        assert!(
+            root.reason.contains("signature mismatch"),
+            "{}",
+            root.reason
+        );
     }
 
     #[test]

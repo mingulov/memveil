@@ -2733,6 +2733,45 @@ mod tests {
     }
 
     #[test]
+    fn prepared_finalize_rename_failure_is_unfinalized() {
+        let tmp = scratch();
+        let target = tmp.path().join("cap");
+        let mut w = EventWriter::new(target.to_str().unwrap(), MIN_EVENTS_BUDGET).expect("create");
+        w.append(&line(0x41, 100)).expect("append");
+        w.prepare().expect("prepare");
+        let _armed = arm(FaultPlan {
+            rename_fail: true,
+            ..Default::default()
+        });
+        let outcome = w.finalize(&line(0x7B, 10)).expect("finalize runs");
+        assert_eq!(outcome.status, "unfinalized");
+        assert!(
+            outcome.message.contains("rename failed"),
+            "{}",
+            outcome.message
+        );
+        assert!(!target.join("session.json").exists());
+        assert!(!target.join("session.finalizing").exists());
+    }
+
+    #[test]
+    fn finalize_reserve_release_failure_is_unfinalized() {
+        let tmp = scratch();
+        let target = tmp.path().join("cap");
+        let mut w = EventWriter::new(target.to_str().unwrap(), MIN_EVENTS_BUDGET).expect("create");
+        w.append(&line(0x41, 100)).expect("append");
+        w.prepare().expect("prepare");
+        let _armed = arm(FaultPlan {
+            truncate_fail: true,
+            ..Default::default()
+        });
+        let outcome = w.finalize(&line(0x7B, 10)).expect("finalize runs");
+        assert_eq!(outcome.status, "unfinalized");
+        assert_eq!(outcome.message, "reserve release failed");
+        assert!(!target.join("session.json").exists());
+    }
+
+    #[test]
     fn checkpoint_dir_fsync_failure_poisons() {
         let tmp = scratch();
         let target = tmp.path().join("cap");

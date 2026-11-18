@@ -131,7 +131,15 @@ pub fn decode_lifecycle(raw: &[u8]) -> Result<DecodedLifecycle, DecodeError> {
             memveil_ebpf_common::DecodeError::Flags => "PAY_FLAGS",
             memveil_ebpf_common::DecodeError::Dir => "PAY_DIR",
             memveil_ebpf_common::DecodeError::Range => "PAY_RANGE",
-            _ => unreachable!("lifecycle decoder emits no other verdict"),
+            // Unreachable in practice: the lifecycle decoder emits
+            // no other verdict. Enumerated (not `_`) so a future
+            // DecodeError variant fails the build here instead of
+            // panicking at runtime.
+            memveil_ebpf_common::DecodeError::NameLen => "PAY_NAMELEN",
+            memveil_ebpf_common::DecodeError::Nul => "PAY_NUL",
+            memveil_ebpf_common::DecodeError::Pad => "PAY_PAD",
+            memveil_ebpf_common::DecodeError::Reason => "PAY_REASON",
+            memveil_ebpf_common::DecodeError::TableBad => "PAY_TABLE",
         };
         DecodeError {
             reason: reason.to_string(),
@@ -166,7 +174,15 @@ pub fn decode_copy(raw: &[u8]) -> Result<DecodedCopy, DecodeError> {
             memveil_ebpf_common::DecodeError::Flags => "PAY_FLAGS",
             memveil_ebpf_common::DecodeError::Dir => "PAY_DIR",
             memveil_ebpf_common::DecodeError::Reason => "PAY_REASON",
-            _ => unreachable!("copy decoder emits no other verdict"),
+            // Unreachable in practice: the copy decoder emits
+            // no other verdict. Enumerated (not `_`) so a future
+            // DecodeError variant fails the build here instead of
+            // panicking at runtime.
+            memveil_ebpf_common::DecodeError::NameLen => "PAY_NAMELEN",
+            memveil_ebpf_common::DecodeError::Nul => "PAY_NUL",
+            memveil_ebpf_common::DecodeError::Pad => "PAY_PAD",
+            memveil_ebpf_common::DecodeError::Range => "PAY_RANGE",
+            memveil_ebpf_common::DecodeError::TableBad => "PAY_TABLE",
         };
         DecodeError {
             reason: reason.to_string(),
@@ -423,7 +439,11 @@ fn record_id(seq: u64) -> String {
 }
 
 /// Render one wire generation as an opaque mapping token.
-fn wire_gen_token(generation: u64) -> String {
+///
+/// Shared `gen-{n}` key namespace with the correlation
+/// registry: both sides must mint identical tokens or
+/// map/unmap pairing silently misattributes.
+pub(crate) fn wire_gen_token(generation: u64) -> String {
     format!("gen-{}", format_u64(generation))
 }
 

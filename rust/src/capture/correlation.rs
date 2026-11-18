@@ -36,6 +36,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use super::lifecycle::wire_gen_token;
 use crate::model::event::Event;
 use crate::model::identity::{
     ACTIVE_MAX, DEVICE_MAX_ID, NESTED_MAX, PENDING_MAX, RESOLVED_MAX, RETIRED_MAX,
@@ -474,10 +475,6 @@ impl CorrelationRegistry {
         Ok(ev)
     }
 
-    fn wire_gen_token(generation: u64) -> String {
-        format!("gen-{}", format_u64(generation))
-    }
-
     /// Pair one MVLC v2 map without requiring an attempt.
     ///
     /// Precedence: wire-identity validation, then duplicate and
@@ -528,7 +525,7 @@ impl CorrelationRegistry {
         if !ev.map_result.has_mapping_id {
             return Err(CorrelationError::new("known identity lacks mapping"));
         }
-        if ev.map_result.mapping_id != Self::wire_gen_token(generation) {
+        if ev.map_result.mapping_id != wire_gen_token(generation) {
             return Err(CorrelationError::new("wire mapping/generation mismatch"));
         }
         if !ev.map_result.has_mapped_bytes {
@@ -766,7 +763,7 @@ impl CorrelationRegistry {
             if !ev.unmap.has_mapping_id {
                 return Err(CorrelationError::new("known identity lacks mapping"));
             }
-            if ev.unmap.mapping_id != Self::wire_gen_token(ev.unmap.wire_generation) {
+            if ev.unmap.mapping_id != wire_gen_token(ev.unmap.wire_generation) {
                 return Err(CorrelationError::new("wire mapping/generation mismatch"));
             }
         }
@@ -886,12 +883,17 @@ fn join_causes(items: &[String]) -> String {
     items.join("; ")
 }
 
+/// Rollup helpers: the session-owned aggregation rule from
+/// the Mojo model, inlined here. The offline analysis engine
+/// reuses these (`pub(crate)`) instead of re-porting the rule,
+/// so producer and analyzer rollups cannot drift apart.
+///
 /// Bound one per-class cause list to the 512-char channel limit.
 ///
 /// Full code-plus-example text first, then codes only, then
 /// trailing causes drop; the first code is always kept. Callers
 /// pass at least one cause.
-fn bound_cause_reason(causes: &[String], codes: &[String]) -> String {
+pub(crate) fn bound_cause_reason(causes: &[String], codes: &[String]) -> String {
     let full = join_causes(causes);
     if full.chars().count() <= 512 {
         return full;
@@ -915,7 +917,11 @@ fn bound_cause_reason(causes: &[String], codes: &[String]) -> String {
 /// The producer and the analyzer apply this same rule:
 /// not_applicable only when every class is, complete only when
 /// every class is, else partial.
-fn rollup_correlation_status(mapping: &Channel, copy: &Channel, sync: &Channel) -> String {
+pub(crate) fn rollup_correlation_status(
+    mapping: &Channel,
+    copy: &Channel,
+    sync: &Channel,
+) -> String {
     if mapping.status == "not_applicable"
         && copy.status == "not_applicable"
         && sync.status == "not_applicable"
@@ -932,7 +938,7 @@ fn rollup_correlation_status(mapping: &Channel, copy: &Channel, sync: &Channel) 
 }
 
 /// Render class tokens plus their kept causes, in class order.
-fn render_rollup(
+pub(crate) fn render_rollup(
     statuses: &[String],
     kept_map: &[String],
     kept_copy: &[String],
@@ -971,7 +977,7 @@ fn render_rollup(
 /// Every affected class keeps its "<class> <status>" token;
 /// causes fill the remaining 512-char budget in fixed class
 /// order, so later detail drops before any class name does.
-fn rollup_correlation_reason(
+pub(crate) fn rollup_correlation_reason(
     mapping: &Channel,
     copy: &Channel,
     sync: &Channel,
@@ -1061,7 +1067,7 @@ fn rollup_correlation_reason(
 /// Fixed class order, bounded reason, per-class refs
 /// concatenated and capped at 8. The session-side loss
 /// convention is 0 when complete, null when partial.
-fn rollup_correlation(
+pub(crate) fn rollup_correlation(
     mapping: &Channel,
     copy: &Channel,
     sync: &Channel,
@@ -1226,6 +1232,15 @@ mod tests {
 
     fn paired(ev: &Event) -> bool {
         ev.source_correlation == "direct"
+    }
+
+    #[test]
+    fn admit_hook_bad_namespace_pins_message() {
+        let mut reg = CorrelationRegistry::new();
+        let err = reg.admit_hook("h", "bogus").unwrap_err();
+        assert_eq!(err.message, "bad namespace bogus: unknown namespace");
+        let err = reg.admit_hook("", "iova").unwrap_err();
+        assert_eq!(err.message, "empty hook name");
     }
 
     #[test]

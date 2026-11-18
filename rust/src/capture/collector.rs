@@ -7252,6 +7252,32 @@ mod tests {
         assert_eq!(final_parsed.stop.checkpoint_failures, 1);
     }
 
+    #[test]
+    fn checkpoint_generation_exhaustion_refuses() {
+        // A checkpoint at generation u64::MAX refuses without
+        // touching the writer and counts one failure.
+        let mut collector = Collector::new(CollectorConfig::default());
+        collector.checkpoint_generation = u64::MAX;
+        let mut writer = ScriptWriter::new();
+        let note = collector.checkpoint(&mut writer, 1000000000);
+        assert_eq!(note, "checkpoint generation exhausted");
+        assert_eq!(collector.checkpoint_failures, 1);
+        assert_eq!(collector.checkpoint_generation, u64::MAX);
+        assert_eq!(writer.checkpoint_calls, 0);
+    }
+
+    #[test]
+    fn evaluate_bridge_overflow_unfinalizable() {
+        // A delivered-plus-staged sum past u64::MAX fails the
+        // run closed ("unfinalizable") instead of trapping.
+        let mut collector = Collector::new(CollectorConfig::default());
+        collector.has_final_stats = true;
+        collector.stats_start = stats_ok(0, 0, 0, 0, 0);
+        collector.stats_final = stats_ok(u64::MAX, u64::MAX, 1, 0, 0);
+        collector.persisted = u64::MAX;
+        assert_eq!(collector.evaluate(), "unfinalizable");
+    }
+
     struct ProbeOut {
         exit_code: i64,
         end_reason: String,

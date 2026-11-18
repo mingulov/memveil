@@ -1499,13 +1499,17 @@ pub fn diff_trace_format(want: &TraceFormat, live: &TraceFormat) -> String {
 }
 
 /// Offsets-table magic ("MFO5" little-endian).
-pub const MV_OFF_TABLE_MAGIC: i64 = 0x3546_4D4D;
-/// Offsets-table version.
-pub const MV_OFF_TABLE_VERSION: i64 = 1;
-/// Fixed-region cap for tabled extents.
-pub const MV_FIXED_MAX: i64 = 128;
-/// Encoded offsets-table length in bytes.
-pub const MV_OFFSETS_TABLE_LEN: i64 = 24;
+///
+/// Re-export of the canonical `memveil-ebpf-common` wire
+/// constant as the `i64` outcome vocabulary this module
+/// uses; values stay linked at compile time.
+pub const MV_OFF_TABLE_MAGIC: i64 = memveil_ebpf_common::MV_OFF_TABLE_MAGIC as i64;
+/// Offsets-table version (canonical re-export, see above).
+pub const MV_OFF_TABLE_VERSION: i64 = memveil_ebpf_common::MV_OFF_TABLE_VERSION as i64;
+/// Fixed-region cap for tabled extents (canonical re-export, see above).
+pub const MV_FIXED_MAX: i64 = memveil_ebpf_common::MV_FIXED_MAX as i64;
+/// Encoded offsets-table length in bytes (canonical re-export, see above).
+pub const MV_OFFSETS_TABLE_LEN: i64 = memveil_ebpf_common::MV_OFFSETS_TABLE_LEN as i64;
 
 /// One live-layout probe: table offsets, or a named refusal.
 ///
@@ -1555,7 +1559,10 @@ fn refuse_probe(message: String) -> OffsetProbe {
 }
 
 fn extents_overlap(a_off: i64, a_w: i64, b_off: i64, b_w: i64) -> bool {
-    a_off < b_off + b_w && b_off < a_off + a_w
+    // Saturating ends match the bpf probe form; probe-reachable
+    // values (parse caps offsets and sizes at i32::MAX) never
+    // saturate, so this only removes the absurd-input panic edge.
+    a_off < b_off.saturating_add(b_w) && b_off < a_off.saturating_add(a_w)
 }
 
 /// Index of the live field named want, or -1.
@@ -1587,13 +1594,13 @@ pub fn validate_table_extents(
     if loc_off < 0 || size_off < 0 || force_off < 0 || fixed_end < 0 {
         return "negative table extent".to_string();
     }
-    if loc_off + 4 > MV_FIXED_MAX {
+    if loc_off.saturating_add(4) > MV_FIXED_MAX {
         return format!("field dev_name extent @{loc_off}:4 exceeds fixed cap {MV_FIXED_MAX}");
     }
-    if size_off + 8 > MV_FIXED_MAX {
+    if size_off.saturating_add(8) > MV_FIXED_MAX {
         return format!("field size extent @{size_off}:8 exceeds fixed cap {MV_FIXED_MAX}");
     }
-    if force_off + 1 > MV_FIXED_MAX {
+    if force_off.saturating_add(1) > MV_FIXED_MAX {
         return format!("field force extent @{force_off}:1 exceeds fixed cap {MV_FIXED_MAX}");
     }
     if extents_overlap(0, 2, loc_off, 4) {
@@ -1617,13 +1624,13 @@ pub fn validate_table_extents(
     if fixed_end > MV_FIXED_MAX {
         return format!("fixed region end {fixed_end} exceeds cap {MV_FIXED_MAX}");
     }
-    if fixed_end < loc_off + 4 {
+    if fixed_end < loc_off.saturating_add(4) {
         return format!("fixed region end {fixed_end} below dev_name extent @{loc_off}:4");
     }
-    if fixed_end < size_off + 8 {
+    if fixed_end < size_off.saturating_add(8) {
         return format!("fixed region end {fixed_end} below size extent @{size_off}:8");
     }
-    if fixed_end < force_off + 1 {
+    if fixed_end < force_off.saturating_add(1) {
         return format!("fixed region end {fixed_end} below force extent @{force_off}:1");
     }
     String::new()
@@ -1694,7 +1701,7 @@ pub fn probe_trace_offsets(data: &[u8]) -> OffsetProbe {
         // including __data_loc descriptors: each is a
         // fixed u32 holding an offset/length pair, not
         // dynamic data itself.
-        let end = field.offset + field.size;
+        let end = field.offset.saturating_add(field.size);
         if end > fixed_end {
             fixed_end = end;
         }

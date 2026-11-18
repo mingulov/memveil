@@ -1323,4 +1323,56 @@ mod tests {
         assert_eq!(fin.status, "finalized");
         assert_eq!(tee.finalized_identity().len(), 6);
     }
+
+    #[test]
+    fn analysis_path_reuses_rollup_helpers() {
+        // The analysis side imports the session-owned rollup rule
+        // from the producer module instead of re-porting it.
+        use crate::capture::correlation::{
+            bound_cause_reason, rollup_correlation, rollup_correlation_reason,
+            rollup_correlation_status,
+        };
+        use crate::model::session::Channel;
+        let complete = Channel {
+            status: "complete_for_scope".to_string(),
+            has_loss_count: true,
+            loss_count: 0,
+            scope: String::new(),
+            reason: String::new(),
+            evidence_refs: Vec::new(),
+        };
+        let partial = Channel {
+            status: "partial".to_string(),
+            ..complete.clone()
+        };
+        assert_eq!(
+            rollup_correlation_status(&complete, &complete, &complete),
+            "complete_for_scope"
+        );
+        assert_eq!(
+            rollup_correlation_status(&partial, &complete, &complete),
+            "partial"
+        );
+        assert_eq!(
+            rollup_correlation_reason(&complete, &complete, &complete, &[], &[], &[]),
+            "all lifecycle events paired"
+        );
+        assert_eq!(
+            bound_cause_reason(
+                &[String::from("CODE_X first example")],
+                &[String::from("CODE_X")]
+            ),
+            "CODE_X first example"
+        );
+        let rolled = rollup_correlation(
+            &partial,
+            &complete,
+            &complete,
+            &[String::from("CODE_X first example")],
+            &[],
+            &[],
+        );
+        assert_eq!(rolled.status, "partial");
+        assert!(rolled.reason.contains("mapping_release partial"));
+    }
 }
