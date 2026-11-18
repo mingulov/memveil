@@ -311,11 +311,11 @@ static PINNED_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 /// Pristine clone of the checkout at HEAD (clean-tree packaging root).
 ///
 /// Tests package from this clone so uncommitted worktree state
-/// (including sibling agents' files) never trips the packager's
-/// clean-tree gate. The clone is content-addressed by HEAD and
-/// pinned per process: a sibling commit mid-run can only add a
-/// new clone dir, never mutate or invalidate this process's
-/// inputs, so every suite stays self-consistent.
+/// (including files from concurrent work) never trips the
+/// packager's clean-tree gate. The clone is content-addressed
+/// by HEAD and pinned per process: a concurrent commit mid-run
+/// can only add a new clone dir, never mutate or invalidate
+/// this process's inputs, so every suite stays self-consistent.
 pub fn pristine_root() -> PathBuf {
     PINNED_ROOT.get_or_init(clone_for_head).clone()
 }

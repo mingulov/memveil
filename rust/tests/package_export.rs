@@ -6,8 +6,8 @@
 //! produce a candidate, a clean tree records its revision, a
 //! git-free export packages with revision `export` (even under
 //! a dirty unrelated parent), manifest hashes bind, and every
-//! referenced manual ships. The provenance-gate matrix over
-//! the Mojo tree stays harness-owned (T3).
+//! referenced manual ships. The provenance-gate matrix is
+//! covered by release requalification instead.
 
 #[path = "package_helpers/mod.rs"]
 mod package_helpers;
@@ -186,7 +186,7 @@ fn export_manifest_hashes_bind_and_manuals_ship() {
 fn candidate_clean_tree() {
     // The script's refusal is proven by dirty_tree_refuses_candidate;
     // this live-tree check only asserts when the worktree is clean
-    // (sibling agents' uncommitted files must not fail this suite).
+    // (uncommitted files from concurrent work must not fail it).
     let out = h::run("git", &["status", "--short"], Some(&h::repo_root()));
     assert!(out.status.success(), "cannot inspect worktree");
     if !String::from_utf8_lossy(&out.stdout).trim().is_empty() {

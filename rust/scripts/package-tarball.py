@@ -979,6 +979,13 @@ def main(argv):
 
         gcc_version = run(["gcc", "--version"]).stdout.splitlines()[0] \
             if shutil.which("gcc") else "unknown"
+        # Known manifest gaps, intentionally unported (not
+        # oversights): no `canonical_runtime` entry — the Rust
+        # baseline (x86-64-v1) runs everywhere >= v1, so no
+        # CPU-floor gate is needed (recorded performance
+        # evidence decides if v3 codegen is warranted); and no
+        # `source_inventory` entry — the port-vs-retire record
+        # for sources lives in the parity notes instead.
         manifest = {
             "bundle": tag,
             "qualification": "unqualified-local-build",

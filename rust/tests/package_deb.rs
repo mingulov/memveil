@@ -9,8 +9,8 @@
 //! only, `X-Memveil-Cargo-Lock` instead of the bridge pin, and
 //! no bridge dlopen in the journey (ldd closure plus the
 //! RUNPATH-resolved private lib prove loading instead).
-//! The generator frozen contract stays owned by T1's
-//! `generators.rs`; the spec contract lives in `package_rpm.rs`;
+//! The generator frozen contract stays owned by the
+//! `generators.rs` suite; the spec contract lives in `package_rpm.rs`;
 //! the journey-helper unit tests of the Python file tested its
 //! own helpers and have no artifact meaning here.
 
@@ -324,6 +324,74 @@ fn md5sums_match_payload() {
         }
     }
     assert_eq!(listed, actual);
+}
+
+#[test]
+fn staged_payload_matches_bundle() {
+    // Build-time binding oracle: the packager's own mapping
+    // must cover one member per category (binary, closure
+    // lib, BPF copy, profiles, docs, worked examples, and
+    // every license/notice text), the extracted .deb must
+    // satisfy the packager's verify, and a hollow staging
+    // must fail it.
+    let deb = h::ensure_deb();
+    let set = h::ensure_tarball();
+    let manifest = set.bundle.join("MANIFEST.json");
+    let extracted = h::deb_extract(&deb, "deb-verify");
+    let script = h::scripts_dir().join("package-deb.py");
+    let probe = format!(
+        "import importlib.util; l = importlib.util.spec_from_file_location('m', {script:?}); \
+         m = importlib.util.module_from_spec(l); l.loader.exec_module(m); \
+         cases = {{'bin/memveil': 'usr/bin/memveil', \
+         'lib/memveil/libgcc_s.so.1': 'usr/lib/memveil/libgcc_s.so.1', \
+         'bpf/swiotlb_attempt.bpf.o': 'usr/lib/memveil/swiotlb_attempt.bpf.o', \
+         'profiles/manifest.txt': 'usr/share/memveil/profiles/manifest.txt', \
+         'docs/quickstart.md': 'usr/share/memveil/docs/quickstart.md', \
+         'examples/real-capture/session.json': \
+         'usr/share/memveil/docs/examples/real-capture/session.json', \
+         'LICENSE': 'usr/share/doc/memveil/LICENSE', \
+         'THIRD-PARTY-NOTICES.md': 'usr/share/doc/memveil/THIRD-PARTY-NOTICES.md', \
+         'LICENSES/GPL-2.0-only.txt': \
+         'usr/share/doc/memveil/LICENSES/GPL-2.0-only.txt', \
+         'licenses/GPL-3.0.txt': 'usr/share/doc/memveil/licenses/GPL-3.0.txt'}}; \
+         bad = [k for k, v in cases.items() if m.installed_file_path(k) != v]; \
+         assert not bad, bad; \
+         print('mapping-ok')"
+    );
+    let text = h::run_ok("python3", &["-B", "-c", &probe], None);
+    assert!(text.contains("mapping-ok"), "{text}");
+    let probe = format!(
+        "import importlib.util, json; \
+         l = importlib.util.spec_from_file_location('m', {script:?}); \
+         m = importlib.util.module_from_spec(l); l.loader.exec_module(m); \
+         manifest = json.load(open({manifest:?})); \
+         m.verify_installed({extracted:?}, manifest); \
+         print('verify-ok')"
+    );
+    let text = h::run_ok("python3", &["-B", "-c", &probe], None);
+    assert!(text.contains("verify-ok"), "{text}");
+    let tmp = h::scratch("deb-verify-neg");
+    let trial = tmp.join("trial");
+    h::run_ok(
+        "cp",
+        &["-r", extracted.to_str().unwrap(), trial.to_str().unwrap()],
+        None,
+    );
+    fs::remove_file(trial.join("usr").join("bin").join("memveil")).unwrap();
+    let probe = format!(
+        "import importlib.util, json; \
+         l = importlib.util.spec_from_file_location('m', {script:?}); \
+         m = importlib.util.module_from_spec(l); l.loader.exec_module(m); \
+         manifest = json.load(open({manifest:?})); \
+         m.verify_installed({trial:?}, manifest)"
+    );
+    let out = h::run("python3", &["-B", "-c", &probe], None);
+    assert!(!out.status.success(), "verify passed a hollow staging");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("usr/bin/memveil"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
@@ -928,8 +996,8 @@ fn install_doctor_uninstall_smoke() {
         // pathname), so the journey qualifies through the
         // installed inspection copies instead of zero-flag
         // discovery. Whether zero-flag qualify should resolve
-        // the FHS copies is a src/ behavior decision owned by
-        // the parity task, not this packaging suite.
+        // the FHS copies is a runtime-behavior decision owned
+        // by the binary suites, not this packaging suite.
         let lib = "/usr/lib/memveil";
         let owned = vec![
             "sudo".to_string(),

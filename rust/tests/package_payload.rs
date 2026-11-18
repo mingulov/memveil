@@ -139,9 +139,9 @@ fn check_missing_file_fails() {
 
 #[test]
 fn collected_manifest_wellformed() {
-    // Adjusted: no committed release byte-pin exists yet (the
-    // cutover requalification pins release bytes), so the
-    // collected manifest's own shape is the wellformedness pin.
+    // Adjusted: no committed release byte-pin exists yet (release
+    // requalification pins release bytes), so the collected
+    // manifest's own shape is the wellformedness pin.
     let (deb, rpm, bundle) = packages();
     let entries = h::payload::collect(&deb, &rpm, &bundle).expect("collect");
     let mut keys: Vec<String> = entries.keys().cloned().collect();

@@ -113,7 +113,7 @@ fn manifest_identity() {
         format!("memveil-{version}")
     );
     // Packages build from the pristine clone: compare against
-    // its HEAD, never the live worktree's (sibling commits
+    // its HEAD, never the live worktree's (concurrent commits
     // must not fail this suite).
     let root = h::pristine_root();
     let head = h::run_ok("git", &["rev-parse", "HEAD"], Some(&root));
@@ -162,6 +162,13 @@ fn manifest_identity() {
     );
     let ebpf = h::json_probe(&manifest, "[c['name'] for c in d['cargo']['ebpf_crates']]");
     assert!(ebpf.contains("aya-ebpf"), "ebpf crates: {ebpf}");
+    // Documented gaps (see the packager's manifest comment):
+    // no CPU-floor gate and no source inventory ride here.
+    assert_eq!(
+        h::json_probe(&manifest, "'canonical_runtime' in d"),
+        "false"
+    );
+    assert_eq!(h::json_probe(&manifest, "'source_inventory' in d"), "false");
 }
 
 #[test]
@@ -590,4 +597,158 @@ fn validate_tag_rejects() {
             String::from_utf8_lossy(&out.stderr)
         );
     }
+}
+
+#[test]
+fn runtime_provenance_pinned() {
+    // Port of the release-runtime provenance binding minus the
+    // pixi archive fields (no lock packages, versions, or
+    // relocations survive): provenance keys equal the staged
+    // lib set, staged bytes bind both the record and files[],
+    // and the normalization entry bridges member to staged.
+    let set = h::ensure_tarball();
+    let manifest = set.bundle.join("MANIFEST.json");
+    let staged: BTreeSet<String> = fs::read_dir(set.bundle.join("lib").join("memveil"))
+        .expect("lib dir")
+        .flatten()
+        .map(|e| e.file_name().to_str().unwrap().to_string())
+        .filter(|n| n.contains(".so"))
+        .map(|n| format!("lib/memveil/{n}"))
+        .collect();
+    assert!(!staged.is_empty(), "no staged shared libraries");
+    let mut want: Vec<&String> = staged.iter().collect();
+    want.sort();
+    let expected = format!(
+        "[{}]",
+        want.iter()
+            .map(|k| format!("{k:?}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    assert_eq!(
+        h::json_probe(&manifest, "sorted(d['runtime_provenance'])"),
+        expected
+    );
+    let probe = format!(
+        "import json; d = json.load(open({manifest:?}));\n\
+         [print('|'.join([rel, d['runtime_provenance'][rel]['staged_sha256'], \
+         d['runtime_provenance'][rel]['member_sha256'], \
+         d['runtime_provenance'][rel]['pre_normalization_sha256'], \
+         d['normalization'][rel]['source_sha256'], \
+         d['normalization'][rel]['output_sha256'], d['files'][rel]])) \
+         for rel in sorted(d['runtime_provenance'])]"
+    );
+    let text = h::run_ok("python3", &["-c", &probe], None);
+    assert!(!text.trim().is_empty(), "provenance probe is empty");
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split('|').collect();
+        assert_eq!(fields.len(), 7, "{line}");
+        let (rel, staged_sha, member, pre, norm_src, norm_out, files_sha) = (
+            fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6],
+        );
+        let digest = h::sha256_file(&set.bundle.join(rel));
+        assert_eq!(staged_sha, digest, "{rel}: staged != file bytes");
+        assert_eq!(files_sha, digest, "{rel}: files[] != file bytes");
+        assert_eq!(norm_src, member, "{rel}: normalization source != member");
+        assert_eq!(norm_out, digest, "{rel}: normalization output != staged");
+        assert_eq!(pre, member, "{rel}: pre-normalization != member");
+    }
+}
+
+#[test]
+fn runtime_licenses_match() {
+    // Port of the release-runtime license binding: the two
+    // staged GCC texts bind record sha256 to file bytes to
+    // files[] (no compiler-vendor texts survive).
+    let set = h::ensure_tarball();
+    let manifest = set.bundle.join("MANIFEST.json");
+    let staged: BTreeSet<String> = fs::read_dir(set.bundle.join("licenses"))
+        .expect("licenses dir")
+        .flatten()
+        .map(|e| e.file_name().to_str().unwrap().to_string())
+        .map(|n| format!("licenses/{n}"))
+        .collect();
+    assert_eq!(staged.len(), 2, "{staged:?}");
+    let mut want: Vec<&String> = staged.iter().collect();
+    want.sort();
+    let expected = format!(
+        "[{}]",
+        want.iter()
+            .map(|k| format!("{k:?}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    assert_eq!(
+        h::json_probe(&manifest, "sorted(d['runtime_licenses'])"),
+        expected
+    );
+    let probe = format!(
+        "import json; d = json.load(open({manifest:?}));\n\
+         [print('%s|%s|%s' % (rel, d['runtime_licenses'][rel]['sha256'], \
+         d['files'][rel])) for rel in sorted(d['runtime_licenses'])]"
+    );
+    let text = h::run_ok("python3", &["-c", &probe], None);
+    assert!(!text.trim().is_empty(), "license probe is empty");
+    for line in text.lines() {
+        let (rel, rest) = line.split_once('|').expect("rel|sha|sha");
+        let (record, files_sha) = rest.split_once('|').expect("sha|sha");
+        let digest = h::sha256_file(&set.bundle.join(rel));
+        assert_eq!(record, digest, "{rel}: record != file bytes");
+        assert_eq!(files_sha, digest, "{rel}: files[] != file bytes");
+    }
+}
+
+#[test]
+fn rebuild_is_deterministic() {
+    // Two builds from the pinned clone must agree on every
+    // files[] hash, on the MANIFEST bytes, and on the tarball
+    // bytes themselves.
+    let root = h::pristine_root();
+    let binary = h::ensure_release_binary();
+    let bpf = h::bpf_out_dir();
+    let script = h::scripts_dir().join("package-tarball.py");
+    let tmp = h::scratch("rebuild-det");
+    let version = h::engine_version();
+    let mut listings = Vec::new();
+    let mut manifests = Vec::new();
+    let mut shas = Vec::new();
+    for leaf in ["first", "second"] {
+        let out = tmp.join(leaf);
+        let args = [
+            script.to_str().unwrap(),
+            "--root",
+            root.to_str().unwrap(),
+            "--binary",
+            binary.to_str().unwrap(),
+            "--bpf-dir",
+            bpf.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ];
+        let proc = h::run("python3", &args, None);
+        assert!(
+            proc.status.success(),
+            "rebuild {leaf}: {}",
+            String::from_utf8_lossy(&proc.stderr)
+        );
+        let bundle = out.join(format!("memveil-{version}"));
+        let manifest = bundle.join("MANIFEST.json");
+        let tarball = out.join(format!("memveil-{version}.tar.gz"));
+        assert!(manifest.is_file(), "rebuild {leaf} lacks a manifest");
+        assert!(tarball.is_file(), "rebuild {leaf} lacks a tarball");
+        let probe = format!(
+            "import json; d = json.load(open({manifest:?})); \
+             [print('%s|%s' % (k, v)) for k, v in sorted(d['files'].items())]"
+        );
+        listings.push(h::run_ok("python3", &["-c", &probe], None));
+        manifests.push(fs::read(&manifest).expect("read manifest"));
+        shas.push(h::sha256_file(&tarball));
+    }
+    assert!(!listings[0].is_empty(), "files[] listing is empty");
+    assert_eq!(listings[0], listings[1], "files[] differ across rebuilds");
+    assert_eq!(
+        manifests[0], manifests[1],
+        "MANIFEST differs across rebuilds"
+    );
+    assert_eq!(shas[0], shas[1], "tarball bytes differ across rebuilds");
 }

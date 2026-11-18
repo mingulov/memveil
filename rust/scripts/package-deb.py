@@ -368,6 +368,75 @@ def verify_bundle(bundle):
     return manifest
 
 
+def installed_file_path(name):
+    """Installed destination of one bundle member.
+
+    Port of the Mojo packager's mapping (and the reverse of
+    the .rpm spec's source()): binary, closure lib, BPF
+    inspection copies, profiles, docs plus worked examples,
+    and every license/notice text each have exactly one FHS
+    destination. Anything else fails closed.
+    """
+    if not isinstance(name, str) or not name \
+            or name.startswith("/"):
+        raise ValueError("invalid bundle file path: %r" % (name,))
+    if any(part in ("", ".", "..") for part in name.split("/")):
+        raise ValueError("invalid bundle file path: %s" % name)
+    if name.startswith(("docs/", "profiles/")):
+        return "usr/share/memveil/" + name
+    if name.startswith("examples/"):
+        return "usr/share/memveil/docs/" + name
+    if name in ("LICENSE", "THIRD-PARTY-NOTICES.md") \
+            or name.startswith(("LICENSES/", "licenses/")):
+        return "usr/share/doc/memveil/" + name
+    if name == "bin/memveil" or name.startswith("lib/memveil/"):
+        return "usr/" + name
+    if name.startswith("bpf/"):
+        return "usr/lib/memveil/" + name[4:]
+    raise ValueError("unknown bundle path: " + name)
+
+
+def verify_installed(root, manifest):
+    """Every staged copy must equal the verified bundle bytes.
+
+    Port of the Mojo packager's installed check (minus the
+    canonical-runtime entry comparison, which has no Rust
+    equivalent): each MANIFEST files[] entry maps to exactly
+    one staged path whose bytes must match, and the docs
+    trees must hold nothing beyond the mapped copies plus
+    the generated copyright/changelog. Raises ValueError.
+    """
+    expected = {}
+    for name, sha256 in manifest["files"].items():
+        target = installed_file_path(name)
+        if target in expected:
+            raise ValueError(
+                "duplicate installed file mapping: " + target)
+        expected[target] = sha256
+    for target, sha256 in sorted(expected.items()):
+        path = os.path.join(root, *target.split("/"))
+        if not os.path.isfile(path) or os.path.islink(path):
+            raise ValueError(
+                "installed file missing from staging: " + target)
+        if sha256_file(path) != sha256:
+            raise ValueError(
+                "installed file differs from bundle: " + target)
+    generated = {"usr/share/doc/memveil/copyright",
+                 "usr/share/doc/memveil/changelog.Debian.gz"}
+    for prefix in ("usr/share/memveil/docs", "usr/share/doc/memveil"):
+        base = os.path.join(root, *prefix.split("/"))
+        for current, _, files in os.walk(base):
+            for leaf in sorted(files):
+                target = os.path.relpath(
+                    os.path.join(current, leaf), root).replace(
+                        os.sep, "/")
+                if target not in expected \
+                        and target not in generated:
+                    raise ValueError(
+                        "extra installed file outside bundle: "
+                        + target)
+
+
 def main(argv):
     canonical_bundle = None
     out_dir = None
@@ -492,6 +561,10 @@ def main(argv):
         for name in ("LICENSES", "licenses"):
             shutil.copytree(os.path.join(bundle, name),
                             os.path.join(licdir, name))
+        try:
+            verify_installed(root, manifest)
+        except ValueError as err:
+            fail("staged payload differs from bundle: %s" % err)
         rerun = run([binary, "version"])
         if rerun.returncode != 0 \
                 or rerun.stdout.strip() != "memveil-" + upstream:
@@ -542,6 +615,10 @@ def main(argv):
                                       memveil_rev, cargo_lock,
                                       build_tools))
 
+        try:
+            verify_installed(root, manifest)
+        except ValueError as err:
+            fail("staged payload differs from bundle: %s" % err)
         write_md5sums(root)
         fix_modes(root)
         out = os.path.join(out_dir, stem + ".deb")

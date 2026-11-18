@@ -9,10 +9,10 @@
 //! known deltas: no bridge (Requires is the glibc floor
 //! alone), no conda texts or libbpf-mojo dirs, no Source1.
 //! The Fedora container journey and the journey-script
-//! preflight unit tests target the harness script
+//! preflight unit tests target the container script
 //! (`tests/package/rpm_journey.sh`), whose bridge-load step
-//! cannot pass on the bridgeless layout until the harness
-//! adapts it: journey execution stays harness-owned (T3) and
+//! cannot pass on the bridgeless layout until that script
+//! adapts: the container journey executes separately and
 //! this suite skips it loudly.
 
 #[path = "package_helpers/mod.rs"]
@@ -372,7 +372,7 @@ fn rpm_fedora_journey() {
     // This suite pins the artifact the journey consumes instead.
     let _ = h::ensure_rpm();
     eprintln!(
-        "skip: Fedora container journey stays harness-owned (T3): \
+        "skip: Fedora container journey executes in its container gate: \
          tests/package/rpm_journey.sh hard-requires libbpf_mojo.so.1"
     );
 }
