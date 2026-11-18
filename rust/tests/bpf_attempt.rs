@@ -1,8 +1,8 @@
 //! Attempt-channel geometry: the embedded attempt-channel BPF object carries
-//! the `mv_swiotlb_attempt` program (tracepoint `swiotlb:swiotlb_bounced`)
-//! plus the three attempt maps with the exact C geometries. Presence-only on
-//! programs: no exact program count is asserted. Parse-only via `aya-obj`; it
-//! never loads anything into the kernel.
+//! exactly the `mv_swiotlb_attempt` program (tracepoint
+//! `swiotlb:swiotlb_bounced`) plus exactly the three attempt maps with the
+//! exact C geometries. Parse-only via `aya-obj`; it never loads anything
+//! into the kernel.
 
 use aya_obj::{Object, ProgramSection};
 
@@ -25,6 +25,13 @@ fn parse_object() -> (Vec<u8>, Object) {
 #[test]
 fn attempt_program_present_with_tracepoint_section() {
     let (bytes, object) = parse_object();
+    let mut programs: Vec<&str> = object.programs.keys().map(String::as_str).collect();
+    programs.sort_unstable();
+    assert_eq!(
+        programs,
+        ["mv_swiotlb_attempt"],
+        "attempt object must carry exactly the ported program"
+    );
     let program = object
         .programs
         .get("mv_swiotlb_attempt")
@@ -43,6 +50,13 @@ fn attempt_program_present_with_tracepoint_section() {
 #[test]
 fn attempt_map_geometries_match_c() {
     let (_, object) = parse_object();
+    let mut names: Vec<&str> = object.maps.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        ["mv_attempts", "mv_counts", "mv_offsets"],
+        "attempt object must carry exactly the 3 C maps"
+    );
     let counts = object
         .maps
         .get("mv_counts")

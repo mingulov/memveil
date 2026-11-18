@@ -290,7 +290,6 @@ fn copy_programs_verify_or_skip() {
             "failed to find",
             "not supported",
             "legacy map definitions",
-            "loadall",
         ];
         if environmental.iter().any(|hint| stderr.contains(hint)) {
             eprintln!("SKIP copy live-load (environmental): {stderr}");

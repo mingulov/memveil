@@ -135,7 +135,11 @@ impl<'a> Btf<'a> {
             ) else {
                 return Err(refuse("type record truncated"));
             };
-            let kind = ((info >> 24) & 31) as u8;
+            // `BTF_INFO_KIND`: 7 bits (bits 24-30); kinds run to 19
+            // (`ENUM64`), so a 4-bit mask would alias `FLOAT`+ onto
+            // void/unknown. The kind flag is bit 31, read separately
+            // as `kind_flag` below.
+            let kind = ((info >> 24) & 0x7f) as u8;
             let kind_flag = info & (1 << 31) != 0;
             let vlen = (info & 0xFFFF) as u16;
             let payload_len: usize = match kind {

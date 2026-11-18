@@ -1,7 +1,9 @@
 [package]
 name = "memveil-ebpf"
 version = "0.0.0"
+# edition 2021: the probes use `gen` as an identifier (reserved in 2024).
 edition = "2021"
+rust-version = "1.97"
 license = "GPL-2.0-only"
 publish = false
 

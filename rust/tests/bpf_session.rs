@@ -507,11 +507,21 @@ fn live_attempt_smoke() {
     } else {
         assert_eq!(counters[2], counters[0], "every observed firing must emit");
         assert!(!frames.is_empty(), "observed firings must deliver frames");
+        let mut last_seq: Option<u64> = None;
         for frame in &frames {
             let Frame::Attempt(record) = frame else {
                 panic!("attempt channel must only deliver attempt frames");
             };
             assert!(record.ktime > 0, "ktime must be sane");
+            if let Some(previous) = last_seq {
+                assert!(
+                    record.seq >= previous,
+                    "seq must be non-decreasing, got {} after {}",
+                    record.seq,
+                    previous
+                );
+            }
+            last_seq = Some(record.seq);
         }
         let stats = session.stats();
         assert_eq!(stats.delivered as usize, frames.len());

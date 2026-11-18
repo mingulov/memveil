@@ -253,9 +253,13 @@ fn check_elf(elf: &[u8], channel: Channel) -> Result<(), SessionError> {
     // Every section-table multiply, add, and u64-to-usize narrowing is
     // checked: `shoff` is file-supplied, and a value near u64::MAX must
     // refuse with `Open`, never panic in debug builds or wrap in release.
+    // Stride by the file's own `shentsize` (a BPF object with extended
+    // section headers must still walk correctly); the 64-byte header reads
+    // below stay fixed since only the first 64 bytes are interpreted.
+    let stride = u64::from(shentsize);
     let Some(shstr) = u64::from(shstrndx)
-        .checked_mul(64)
-        .and_then(|stride| shoff.checked_add(stride))
+        .checked_mul(stride)
+        .and_then(|offset| shoff.checked_add(offset))
         .and_then(|at| usize::try_from(at).ok())
     else {
         return Err(open("section-name table offset overflows"));
@@ -275,8 +279,8 @@ fn check_elf(elf: &[u8], channel: Channel) -> Result<(), SessionError> {
     let mut counts = vec![0usize; channel.expected_sections().len()];
     for index in 0..shnum {
         let Some(header) = u64::from(index)
-            .checked_mul(64)
-            .and_then(|stride| shoff.checked_add(stride))
+            .checked_mul(stride)
+            .and_then(|offset| shoff.checked_add(offset))
             .and_then(|at| usize::try_from(at).ok())
         else {
             return Err(open("section header offset overflows"));

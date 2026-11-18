@@ -50,9 +50,11 @@ const MV_RING_BYTES: u32 = 33_554_432;
 /// Compare-and-swap retries for one generation allocation.
 const MV_CAS_RETRIES: u32 = 8;
 
-/// Stable `enum dma_data_direction` encodings (`dma-direction.h` values 0/1/2,
-/// unchanged across kernels; aya offers no CO-RE enum relocation, so the
-/// argc guard above is the live signature-drift check for these hooks).
+/// `enum dma_data_direction` encodings (`dma-direction.h` values 0/1/2).
+/// Hardcoding is an approved deviation (controller ruling R13): aya offers
+/// no CO-RE enum relocation, the values are stable across 6.0-7.3, and any
+/// renumbering fails closed — unknown values map to `wdir=3`, which the
+/// emit gate below rejects with `BYTE_COVERAGE` (never silently emitted).
 const DMA_BIDIRECTIONAL: i32 = 0;
 /// Stable `enum dma_data_direction` encoding for device-bound transfers.
 const DMA_TO_DEVICE: i32 = 1;
@@ -81,7 +83,10 @@ static MV_GEN_TABLE: HashMap<GenKey, u64> = HashMap::with_max_entries(32768, 0);
 static MV_GEN_NEXT: Array<u64> = Array::with_max_entries(1, 0);
 
 /// Resolve one kernel direction to the wire encoding (TO 1, FROM 2, BIDI 0);
-/// `None` when the value matches nothing (including negatives).
+/// `None` when the value matches nothing (including negatives). Callers
+/// default to `wdir=3`, which the emit gate rejects with `BYTE_COVERAGE`,
+/// so a renumbered kernel enum fails closed instead of emitting a wrong
+/// direction (the argc guard only checks arity, not enum values).
 #[inline(always)]
 fn wire_dir(kdir: i32) -> Option<u16> {
     if kdir < 0 {

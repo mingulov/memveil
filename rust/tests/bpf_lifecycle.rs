@@ -1,8 +1,8 @@
 //! Lifecycle-channel geometry: the embedded lifecycle-channel BPF object carries
-//! the `mv_map_result` (fexit `swiotlb_tbl_map_single`) and `mv_unmap` (fentry
-//! `__swiotlb_tbl_unmap_single`) programs plus the four lifecycle maps with the
-//! exact C geometries. Presence-only on programs: no exact program count is
-//! asserted. Parse-only via `aya-obj`; it never loads anything into the kernel.
+//! exactly the `mv_map_result` (fexit `swiotlb_tbl_map_single`) and `mv_unmap`
+//! (fentry `__swiotlb_tbl_unmap_single`) programs plus exactly the four
+//! lifecycle maps with the exact C geometries. Parse-only via `aya-obj`; it
+//! never loads anything into the kernel.
 
 use aya_obj::{Object, ProgramSection};
 
@@ -25,6 +25,13 @@ fn parse_object() -> Object {
 #[test]
 fn lifecycle_programs_present_with_tracing_sections() {
     let object = parse_object();
+    let mut programs: Vec<&str> = object.programs.keys().map(String::as_str).collect();
+    programs.sort_unstable();
+    assert_eq!(
+        programs,
+        ["mv_map_result", "mv_unmap"],
+        "lifecycle object must carry exactly the 2 ported programs"
+    );
     let map_result = object
         .programs
         .get("mv_map_result")
@@ -51,6 +58,13 @@ fn lifecycle_programs_present_with_tracing_sections() {
 #[test]
 fn lifecycle_map_geometries_match_c() {
     let object = parse_object();
+    let mut names: Vec<&str> = object.maps.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        ["mv_counts", "mv_gen_next", "mv_gen_table", "mv_lifecycle"],
+        "lifecycle object must carry exactly the 4 C maps"
+    );
     let counts = object
         .maps
         .get("mv_counts")

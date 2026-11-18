@@ -41,14 +41,23 @@ fn main() {
     println!("cargo::rerun-if-changed=crates/ebpf-common/Cargo.toml");
 
     // Preflight: fail early with an actionable message when the linker is
-    // missing. Local probe only, so it cannot break offline rebuilds.
-    let linker_ok = Command::new("bpf-linker")
+    // missing or the wrong version. Local probe only, so it cannot break
+    // offline rebuilds.
+    let version = Command::new("bpf-linker")
         .arg("--version")
-        .status()
-        .is_ok_and(|status| status.success());
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default();
+    // `bpf-linker --version` prints `bpf-linker 0.10.4`; match the exact
+    // token so 0.10.40 or a prefixed 10.10.4 cannot slip through.
+    let linker_ok = version
+        .split_whitespace()
+        .any(|token| token.strip_prefix('v').unwrap_or(token) == "0.10.4");
     assert!(
         linker_ok,
-        "bpf-linker 0.10.4 is required on PATH: \
+        "bpf-linker 0.10.4 is required on PATH (got {version:?}): \
          run `cargo install bpf-linker --version 0.10.4 --locked`"
     );
 

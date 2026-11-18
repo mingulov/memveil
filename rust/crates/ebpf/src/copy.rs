@@ -321,7 +321,7 @@ fn emit_cp(
     payload[MV_CP_OFF_VERSION..MV_CP_OFF_VERSION + 2].copy_from_slice(&MV_CP_VERSION.to_le_bytes());
     payload[MV_CP_OFF_KIND..MV_CP_OFF_KIND + 2].copy_from_slice(&kind.to_le_bytes());
     payload[MV_CP_OFF_FLAGS..MV_CP_OFF_FLAGS + 2].copy_from_slice(&base_flags.to_le_bytes());
-    payload[MV_CP_OFF_DIR] = dir as u8;
+    payload[MV_CP_OFF_DIR..MV_CP_OFF_DIR + 2].copy_from_slice(&(dir as u16).to_le_bytes());
     payload[MV_CP_OFF_SEQ..MV_CP_OFF_SEQ + 8].copy_from_slice(&seq.to_le_bytes());
     payload[MV_CP_OFF_KTIME..MV_CP_OFF_KTIME + 8].copy_from_slice(&ktime.to_le_bytes());
     payload[MV_CP_OFF_REQUESTED..MV_CP_OFF_REQUESTED + 8].copy_from_slice(&requested.to_le_bytes());
