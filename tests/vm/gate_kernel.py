@@ -283,13 +283,27 @@ def doctor_doc(proc):
 
 
 def live_gaps(doc, caps):
-    """Caps doctor did not report available and live-verified."""
+    """Caps doctor did not live-verify through record admission.
+
+    Both doctors report a live-checked capability as
+    available-load-unchecked (passive doctor) or available
+    (load-check doctor) with reason "candidate <id>: live
+    interfaces verified (profile unvalidated)". That reason
+    is emitted only after record admission's
+    verify_live_interfaces passes, the same predicate the
+    pre-3a51aed "live-verified ..." reason named, so the
+    gate is exactly as strong under the new vocabulary.
+    """
     got = {c.get("id"): c for c in doc.get("capabilities", [])}
     gaps = []
     for cap in caps:
         entry = got.get(cap) or {}
-        if (entry.get("status") != "available"
-                or not entry.get("reason", "").startswith("live-verified")):
+        reason = entry.get("reason", "")
+        if (entry.get("status") not in ("available",
+                                        "available-load-unchecked")
+                or not reason.startswith("candidate ")
+                or not reason.endswith(": live interfaces verified"
+                                       " (profile unvalidated)")):
             gaps.append("%s (%s)" % (cap, entry.get("reason", "absent")))
     return gaps
 
