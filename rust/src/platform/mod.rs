@@ -14,6 +14,7 @@ pub mod kernelgate;
 pub mod narrow;
 pub mod outcome;
 pub mod prechecks;
+pub mod profiles;
 pub mod reader;
 pub mod runtime;
 pub mod signal;
