@@ -1,6 +1,6 @@
 {
   "schema": "memveil-vm-harness/1",
   "vng": "virtme-ng 1.41",
-  "qemu": "QEMU emulator version 10.2.1",
-  "note": "Exact observed generations. Version matching is a prerequisite, not semantic qualification."
+  "qemu": "QEMU emulator version 10.2.2",
+  "note": "Exact observed generations. Version matching is a prerequisite, not semantic qualification. qemu 10.2.2 observed 2026-11-18 (installed qemu-10.2.2-1.fc44); vng 1.41 and v7.0.14 vmlinuz sha re-verified unchanged same day."
 }
