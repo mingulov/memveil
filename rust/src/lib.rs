@@ -4,6 +4,7 @@
 //! of this crate. The engine version string stays byte-identical with the
 //! Mojo implementation so packaged artifacts keep matching drift guards.
 
+pub mod analysis;
 pub mod bpf;
 pub mod capture;
 pub mod model;
