@@ -32,8 +32,13 @@
 # cargo build --release in rust/) instead of build/memveil.
 # Python suites keep their build/memveil path, which the
 # runner links at the Rust binary; a real build/memveil file
-# is never shadowed (move it aside first). Mojo-only suites
-# are unaffected; rust/PARITY.md triages every suite.
+# is never shadowed (move it aside first). The link stays
+# after the run: remove build/memveil before a Mojo build.
+# Rust mode requires the release binary before dispatch: a
+# missing binary, or a real build/memveil file in the way,
+# exits 1 without running any suite (an unknown suite name
+# then also reports exit 1, not 2). Mojo-only suites are
+# unaffected; rust/PARITY.md triages every suite.
 # LMB_SANITIZE=1 runs Mojo test targets with the address
 # sanitizer (pair with a tools/build --sanitize tree).
 #

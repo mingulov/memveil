@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""The linker adapter preserves the selected driver and changes only its SDK RPATH."""
+"""The linker adapter preserves the selected driver and changes only its SDK RPATH.
+
+Retired with the Mojo build, not deferred to the packagers: the
+adapter normalizes `mojo build` link lines and native-tool link
+identity only, and the cargo build has no link-adapter concept,
+so no port is planned; the packaging suites pin the shipped
+binaries instead."""
 import importlib.util
 from pathlib import Path
 import sys
