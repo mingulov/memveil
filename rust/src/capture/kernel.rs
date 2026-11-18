@@ -2444,4 +2444,34 @@ mod tests {
         assert!(m.message.contains("program fds unknown"), "{}", m.message);
         let _ = kernel.close();
     }
+
+    #[test]
+    fn attach_failure_records_nothing() {
+        // Attach-failure wiring: over a real (unprivileged-open)
+        // session with load skipped, attach() fails
+        // deterministically with NotLoaded before any privileged
+        // call, records no program fds, and misses stay
+        // fail-closed, root or not.
+        let path = crate::platform::test_support::repo_root().join("tests/fixtures/elf/ok.o");
+        let elf = std::fs::read(&path).expect("read ok.o");
+        let mut kernel = AyaKernel::new(
+            elf,
+            "mv_attempts",
+            "mv_swiotlb_attempt",
+            "swiotlb",
+            "swiotlb_bounced",
+        );
+        assert!(kernel.open_session().ok);
+        let attached = kernel.attach();
+        assert!(!attached.ok);
+        assert!(
+            attached.message.contains("session not loaded"),
+            "{}",
+            attached.message
+        );
+        let m = kernel.recursion_misses();
+        assert!(!m.ok);
+        assert!(m.message.contains("program fds unknown"), "{}", m.message);
+        let _ = kernel.close();
+    }
 }
