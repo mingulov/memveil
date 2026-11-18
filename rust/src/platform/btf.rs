@@ -742,7 +742,7 @@ fn aya_refuse(message: String) -> AyaMapVerdict {
 /// counts and names, and zero spine offsets pin the exact
 /// wrapper geometry; STRUCT names stay unpinned (Rust mangling
 /// instantiates them per map). Returns the walk-list index of
-/// the leaf, or -1.
+/// the leaf, -1 on a shape mismatch, -2 on corrupt strings.
 fn aya_def_struct(data: &[u8], walk: &BtfWalk, top: i64, want_ring: bool) -> i64 {
     if !walk.rec_valid(top) {
         return -1;
@@ -759,6 +759,9 @@ fn aya_def_struct(data: &[u8], walk: &BtfWalk, top: i64, want_ring: bool) -> i64
             return -1;
         }
         let phantom = walk.member_type(data, rec, "_t");
+        if phantom == -2 {
+            return -2;
+        }
         if phantom < 0 || !walk.rec_valid(phantom) {
             return -1;
         }
@@ -768,6 +771,9 @@ fn aya_def_struct(data: &[u8], walk: &BtfWalk, top: i64, want_ring: bool) -> i64
         }
     }
     let def = walk.member_type(data, rec, "def");
+    if def == -2 {
+        return -2;
+    }
     if def < 0 || walk.member_offset(data, rec, "def") != 0 {
         return -1;
     }
@@ -779,6 +785,9 @@ fn aya_def_struct(data: &[u8], walk: &BtfWalk, top: i64, want_ring: bool) -> i64
         return -1;
     }
     let inner = walk.member_type(data, rec, "__0");
+    if inner == -2 {
+        return -2;
+    }
     if inner < 0 || walk.member_offset(data, rec, "__0") != 0 {
         return -1;
     }
@@ -790,6 +799,9 @@ fn aya_def_struct(data: &[u8], walk: &BtfWalk, top: i64, want_ring: bool) -> i64
         return -1;
     }
     let leaf = walk.member_type(data, rec, "value");
+    if leaf == -2 {
+        return -2;
+    }
     if leaf < 0 || walk.member_offset(data, rec, "value") != 0 {
         return -1;
     }
@@ -803,25 +815,27 @@ fn aya_def_struct(data: &[u8], walk: &BtfWalk, top: i64, want_ring: bool) -> i64
     rec as i64
 }
 
-/// One flat-leaf member check: 1 pinned, -1 missing, -2 malformed.
+/// One flat-leaf member check: 1 pinned, -1 missing, -2 corrupt, -3 malformed.
 ///
 /// A pinned member is a plain u32 at its flat bit offset.
-/// Missing covers missing names and corrupt strings; the caller
-/// maps the codes into the per-member vocabulary.
+/// The caller maps the codes into the per-member vocabulary.
 fn aya_leaf_member(data: &[u8], walk: &BtfWalk, rec: usize, want: &str, bit: i64) -> i64 {
     let tid = walk.member_type(data, rec, want);
-    if tid == -1 || tid == -2 {
+    if tid == -2 {
+        return -2;
+    }
+    if tid == -1 {
         return -1;
     }
     if !walk.rec_valid(tid) {
-        return -2;
+        return -3;
     }
     let t = (tid - 1) as usize;
     if walk.kinds[t] != 1 || walk.sizes[t] != 4 {
-        return -2;
+        return -3;
     }
     if walk.member_offset(data, rec, want) != bit {
-        return -2;
+        return -3;
     }
     1
 }
@@ -958,6 +972,9 @@ fn aya_check_map(
         return aya_refuse(format!("{word} linkage {link}"));
     }
     let leaf = aya_def_struct(data, walk, top, want_ring);
+    if leaf == -2 {
+        return aya_refuse("BTF strings corrupt".to_string());
+    }
     if leaf < 0 {
         return aya_refuse(format!("{word} bad aya map shape"));
     }
@@ -969,6 +986,9 @@ fn aya_check_map(
         ("value_size", "value", 64),
     ] {
         let pin = aya_leaf_member(data, walk, leaf_rec, member, bit);
+        if pin == -2 {
+            return aya_refuse("BTF strings corrupt".to_string());
+        }
         if pin == -1 {
             return aya_refuse(format!("{word} missing {field}"));
         }
@@ -977,7 +997,11 @@ fn aya_check_map(
         }
     }
     for (member, bit) in [("map_flags", 128), ("id", 160), ("pinning", 192)] {
-        if aya_leaf_member(data, walk, leaf_rec, member, bit) != 1 {
+        let pin = aya_leaf_member(data, walk, leaf_rec, member, bit);
+        if pin == -2 {
+            return aya_refuse("BTF strings corrupt".to_string());
+        }
+        if pin != 1 {
             return aya_refuse(format!("{word} bad aya map shape"));
         }
     }
@@ -3892,6 +3916,27 @@ mod tests {
         let w = read_btf_maps(&out);
         assert!(!w.ok);
         assert_eq!(w.message, "counts bad type");
+    }
+
+    #[test]
+    fn btf_aya_corrupt_strings() {
+        // Corrupt member names refuse in the existing
+        // vocabulary, not the Aya cause: only failures with
+        // no libbpf analog use the new string.
+        let raw = aya_bytes("attempt");
+        let tb = parse_btf(&raw);
+        let ring = struct_rec(&raw, &tb, "RingBuf");
+        let mut out = raw.clone();
+        set_u32(&mut out, tb.recs[ring].off + 12, 0x00FF_FFFF);
+        let v = read_btf_maps(&out);
+        assert!(!v.ok);
+        assert_eq!(v.message, "BTF strings corrupt");
+        let leaf = struct_rec(&raw, &tb, "bpf_map_def");
+        let mut out = raw.clone();
+        set_u32(&mut out, tb.recs[leaf].off + 12, 0x00FF_FFFF);
+        let w = read_btf_maps(&out);
+        assert!(!w.ok);
+        assert_eq!(w.message, "BTF strings corrupt");
     }
 
     #[test]
