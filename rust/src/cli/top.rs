@@ -442,6 +442,37 @@ fn analysis_error_text(message: &str) -> String {
     format!("AnalysisError(message={message})")
 }
 
+/// Reducer surface behind top's replay loops.
+///
+/// Production runs over [`Analyzer`], mapping its typed errors to
+/// their messages; each arm then renders its own prefix. Tests stub
+/// this trait to fail `consume` on demand: no capture file can
+/// trigger a consume failure, because the event parser rejects the
+/// only file-spellable violation (a copy without an observed
+/// measurement) at read time.
+trait TopReducer {
+    /// Fold one event; the message renders bare on the consume path.
+    fn consume(&mut self, ev: &Event) -> Result<(), String>;
+    /// Reduce the stream so far; failures stay internal.
+    fn snapshot(&mut self, horizon_ns: u64, partial: bool) -> Result<Report, String>;
+    /// Reduce the whole capture; failures render wrapped.
+    fn finish(&mut self, end_ns: u64, partial: bool) -> Result<Report, String>;
+}
+
+impl TopReducer for Analyzer {
+    fn consume(&mut self, ev: &Event) -> Result<(), String> {
+        Analyzer::consume(self, ev).map_err(|e| e.message)
+    }
+
+    fn snapshot(&mut self, horizon_ns: u64, partial: bool) -> Result<Report, String> {
+        Analyzer::snapshot(self, horizon_ns, partial).map_err(|e| e.message)
+    }
+
+    fn finish(&mut self, end_ns: u64, partial: bool) -> Result<Report, String> {
+        Analyzer::finish(self, end_ns, partial).map_err(|e| e.message)
+    }
+}
+
 /// Block-header annotation naming the active device filter.
 ///
 /// Empty without a filter, so unfiltered output stays byte for byte
@@ -569,8 +600,8 @@ fn emit_report(
 /// Warns through the run's shared latch before printing; replay and
 /// live share the FilterWatch policy, so a dead filter warns once
 /// per run.
-fn snapshot_block(
-    analyzer: &mut Analyzer,
+fn snapshot_block<A: TopReducer>(
+    analyzer: &mut A,
     opts: &TopOptions,
     horizon_ns: u64,
     seq: i64,
@@ -960,9 +991,9 @@ fn signal_failed(message: &str) -> i64 {
 
 /// Stream events, refreshing at each boundary, then finish.
 #[allow(clippy::too_many_arguments)]
-fn drain(
+fn drain<A: TopReducer>(
     reader: &mut CaptureReader,
-    analyzer: &mut Analyzer,
+    analyzer: &mut A,
     opts: &TopOptions,
     signal: &mut LiveSignalSource,
     clock: &mut MonoClock,
@@ -1009,8 +1040,8 @@ fn drain(
             }
             stopped = wait.state != "none";
         }
-        if let Err(e) = analyzer.consume(&ev) {
-            return top_failed("memveil top: cannot reduce capture: ", &e.message);
+        if let Err(message) = analyzer.consume(&ev) {
+            return top_failed("memveil top: cannot reduce capture: ", &message);
         }
         if stopped {
             return finish_after_signal(reader, analyzer, opts, seq, watch, -1, "");
@@ -1022,7 +1053,7 @@ fn drain(
     seq += 1;
     let mut rep = match analyzer.finish(reader.session.window_end_ns, false) {
         Ok(rep) => rep,
-        Err(e) => return top_failed("memveil top: ", &analysis_error_text(&e.message)),
+        Err(message) => return top_failed("memveil top: ", &analysis_error_text(&message)),
     };
     apply_integrity(
         &mut rep,
@@ -1067,9 +1098,9 @@ fn drain(
 }
 
 /// Handle a pending stop signal; None means keep going.
-fn poll_signal(
+fn poll_signal<A: TopReducer>(
     reader: &mut CaptureReader,
-    analyzer: &mut Analyzer,
+    analyzer: &mut A,
     opts: &TopOptions,
     signal: &mut LiveSignalSource,
     seq: i64,
@@ -1088,9 +1119,9 @@ fn poll_signal(
 }
 
 /// Drain the rest quietly, print the final summary and code.
-fn finish_after_signal(
+fn finish_after_signal<A: TopReducer>(
     reader: &mut CaptureReader,
-    analyzer: &mut Analyzer,
+    analyzer: &mut A,
     opts: &TopOptions,
     seq: i64,
     watch: &mut FilterWatch,
@@ -1109,13 +1140,13 @@ fn finish_after_signal(
             Ok(ev) => ev,
             Err(e) => return top_failed("memveil top: cannot read capture: ", &e.message),
         };
-        if let Err(e) = analyzer.consume(&ev) {
-            return top_failed("memveil top: cannot reduce capture: ", &e.message);
+        if let Err(message) = analyzer.consume(&ev) {
+            return top_failed("memveil top: cannot reduce capture: ", &message);
         }
     }
     let mut rep = match analyzer.finish(reader.session.window_end_ns, false) {
         Ok(rep) => rep,
-        Err(e) => return top_failed("memveil top: ", &analysis_error_text(&e.message)),
+        Err(message) => return top_failed("memveil top: ", &analysis_error_text(&message)),
     };
     apply_integrity(
         &mut rep,
@@ -1163,11 +1194,12 @@ fn finish_after_signal(
 #[cfg(test)]
 mod tests {
     use super::{
-        BoundaryCursor, FilterWatch, StdoutSink, TopOptions, WaitSlices, diagnose_block,
-        filter_header_suffix, finish_live, live_template, parse_top_args, run_top, snapshot_block,
-        top_usage, wait_interval,
+        BoundaryCursor, FilterWatch, StdoutSink, TopOptions, WaitSlices, diagnose_block, drain,
+        filter_header_suffix, finish_after_signal, finish_live, live_template, parse_top_args,
+        run_top, snapshot_block, top_usage, wait_interval,
     };
     use crate::analysis::engine::Analyzer;
+    use crate::capture::reader::{ReaderLimits, read_capture};
     use crate::capture::tee::RefreshSink;
     use crate::model::event::Event;
     use crate::model::metric::{Finding, Metric};
@@ -2378,6 +2410,31 @@ mod tests {
         }
     }
 
+    /// Reducer stub that fails every consume with a mappings-style message.
+    ///
+    /// Both replay loops take any reducer behind the module's narrow
+    /// trait, so this drives the real consume arms without a capture
+    /// file: no file can carry a consume violation past the event
+    /// parser. Snapshot and finish panic when reached, so a loop that
+    /// consults the reducer out of order fails loudly.
+    struct FailingReducer {
+        message: String,
+    }
+
+    impl super::TopReducer for FailingReducer {
+        fn consume(&mut self, _ev: &Event) -> Result<(), String> {
+            Err(self.message.clone())
+        }
+
+        fn snapshot(&mut self, _horizon_ns: u64, _partial: bool) -> Result<Report, String> {
+            panic!("snapshot must not run before the failing consume");
+        }
+
+        fn finish(&mut self, _end_ns: u64, _partial: bool) -> Result<Report, String> {
+            panic!("finish must not run after the failed consume");
+        }
+    }
+
     #[test]
     fn consume_failure_renders_bare_message() {
         // The mappings reducer rejects executed copies without an
@@ -2385,13 +2442,92 @@ mod tests {
         // analysis/mappings.mojo consume raises Error, whose string
         // form is the message alone), so top's consume arms print
         // the message without the AnalysisError(...) wrapper the
-        // finish arms use.
+        // finish arms use. No capture file can carry that violation
+        // past the event parser, so the stub drives both real arms
+        // (drain and finish_after_signal) with the exact trigger
+        // message pinned below.
         let mut probe = Analyzer::new(live_template());
-        let err = probe
+        let message = probe
             .consume(&unobserved_copy())
-            .expect_err("unobserved copy fails");
-        assert_eq!(err.message, "executed copies require observed measurement");
+            .expect_err("unobserved copy fails")
+            .message;
+        assert_eq!(message, "executed copies require observed measurement");
 
+        let scratch = TestDir::create("memveil-top-consume").expect("scratch");
+        if std::env::var("MEMVEIL_TOP_CHILD").is_ok() {
+            let dir = child_scratch().expect("scratch env");
+            let cap = repo("tests/fixtures/attempts");
+            let opts = TopOptions::default();
+            let limits = ReaderLimits {
+                max_session_bytes: opts.max_session_bytes,
+                max_line_bytes: opts.max_line_bytes,
+                max_events_bytes: opts.max_events_bytes,
+            };
+            let want = format!("memveil top: cannot reduce capture: {message}\n");
+
+            // Drain arm: no refresh is due before the first event,
+            // so the failing consume is the first reducer call.
+            let out = format!("{dir}/drain-out.txt");
+            let err_path = format!("{dir}/drain-err.txt");
+            let mut reader = read_capture(&cap, false, limits).expect("fixture reads");
+            let mut stub = FailingReducer {
+                message: message.clone(),
+            };
+            let mut signal = LiveSignalSource::new();
+            let mut clock = MonoClock::new();
+            let mut cursor = BoundaryCursor::new(0, 0, 1);
+            let mut watch = FilterWatch::new(&opts);
+            let saved_out = redirect_fd(1, &out);
+            let saved_err = redirect_fd(2, &err_path);
+            let rc = drain(
+                &mut reader,
+                &mut stub,
+                &opts,
+                &mut signal,
+                &mut clock,
+                &mut cursor,
+                0,
+                &mut watch,
+            );
+            restore_fd(1, saved_out);
+            restore_fd(2, saved_err);
+            assert_eq!(rc, crate::cli::report::EXIT_INVALID);
+            let stderr = read_scratch(&err_path);
+            assert_eq!(stderr, want);
+            assert!(!stderr.contains("AnalysisError("), "{stderr}");
+            assert_eq!(read_scratch(&out), "");
+
+            // Finish-after-signal arm: same failure, same bytes.
+            let out = format!("{dir}/finish-out.txt");
+            let err_path = format!("{dir}/finish-err.txt");
+            let mut reader = read_capture(&cap, false, limits).expect("fixture reads");
+            let mut stub = FailingReducer {
+                message: message.clone(),
+            };
+            let mut watch = FilterWatch::new(&opts);
+            let saved_out = redirect_fd(1, &out);
+            let saved_err = redirect_fd(2, &err_path);
+            let rc = finish_after_signal(&mut reader, &mut stub, &opts, 0, &mut watch, -1, "");
+            restore_fd(1, saved_out);
+            restore_fd(2, saved_err);
+            assert_eq!(rc, crate::cli::report::EXIT_INVALID);
+            let stderr = read_scratch(&err_path);
+            assert_eq!(stderr, want);
+            assert!(!stderr.contains("AnalysisError("), "{stderr}");
+            assert_eq!(read_scratch(&out), "");
+            return;
+        }
+        run_child("consume_failure_renders_bare_message", &scratch);
+    }
+
+    #[test]
+    fn unobserved_copy_rejected_at_read() {
+        // The shared event parser rejects the violating line at read
+        // time (Mojo model/event.mojo copy gate), so a capture file
+        // carrying an unobserved copy fails the read in both
+        // implementations with the exact bytes below, verified
+        // against build/mojo-memveil-compare. The consume arms
+        // themselves are pinned by consume_failure_renders_bare_message.
         let scratch = TestDir::create("memveil-top-consume").expect("scratch");
         if std::env::var("MEMVEIL_TOP_CHILD").is_ok() {
             let dir = child_scratch().expect("scratch env");
@@ -2432,7 +2568,7 @@ mod tests {
             }
             return;
         }
-        run_child("consume_failure_renders_bare_message", &scratch);
+        run_child("unobserved_copy_rejected_at_read", &scratch);
     }
 
     #[test]
