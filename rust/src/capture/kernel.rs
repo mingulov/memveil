@@ -1314,6 +1314,12 @@ impl ChannelPoller for AyaKernel {
 
 impl KernelSource for AyaKernel {
     fn open_session(&mut self) -> OpOut {
+        if self.any_open() {
+            return OpOut {
+                ok: false,
+                message: "session already open".to_string(),
+            };
+        }
         let opened = self.ch0.open_session();
         if !opened.ok {
             return OpOut {
@@ -1349,6 +1355,12 @@ impl KernelSource for AyaKernel {
     }
 
     fn load(&mut self) -> OpOut {
+        if !self.any_open() {
+            return OpOut {
+                ok: false,
+                message: "session not open".to_string(),
+            };
+        }
         let loaded = self.ch0.load();
         if !loaded.ok {
             return OpOut {
@@ -1419,6 +1431,12 @@ impl KernelSource for AyaKernel {
     }
 
     fn attach(&mut self) -> OpOut {
+        if !self.any_open() {
+            return OpOut {
+                ok: false,
+                message: "session not open".to_string(),
+            };
+        }
         let mut done = Vec::new();
         for ch in channel_attach_order() {
             if !self.present(ch) {
@@ -1476,6 +1494,17 @@ impl KernelSource for AyaKernel {
     }
 
     fn stats(&mut self) -> StatsOut {
+        if !self.any_open() {
+            return StatsOut {
+                ok: false,
+                received: 0,
+                delivered: 0,
+                staged: 0,
+                malformed: 0,
+                dropped: 0,
+                message: "session not open".to_string(),
+            };
+        }
         let bad = |message: String| StatsOut {
             ok: false,
             received: 0,
@@ -1564,6 +1593,12 @@ impl KernelSource for AyaKernel {
     }
 
     fn detach(&mut self) -> OpOut {
+        if !self.any_open() {
+            return OpOut {
+                ok: false,
+                message: "session not open".to_string(),
+            };
+        }
         let mut acc = String::new();
         let mut ok = true;
         for ch in channel_detach_order() {
@@ -2169,6 +2204,15 @@ mod tests {
         assert_eq!(kernel.map_info_at(9, "mv_counts").message, "bad channel");
         assert!(!kernel.install_offsets(&[0u8; 24]).ok);
         assert_eq!(kernel.set_copy_armed(true).message, "session not open");
+        // Bare any-open guards, mirroring the Mojo taxonomy.
+        assert!(!kernel.load().ok);
+        assert_eq!(kernel.load().message, "session not open");
+        assert!(!kernel.map_info("mv_counts").ok);
+        assert_eq!(kernel.attach().message, "session not open");
+        assert!(!kernel.stats().ok);
+        assert_eq!(kernel.stats().message, "session not open");
+        assert!(!kernel.read_full().ok);
+        assert_eq!(kernel.detach().message, "session not open");
         // Idempotent close succeeds.
         assert!(kernel.close().ok);
     }
@@ -2185,12 +2229,10 @@ mod tests {
             kernel.map_info_at(2, "mv_counts").message,
             "session not open"
         );
-        // Detach before open aggregates per-channel refusals.
+        // Detach before open hits the bare any-open guard.
         let detached = kernel.detach();
         assert!(!detached.ok);
-        assert!(detached.message.contains("ch0 session not open"));
-        assert!(detached.message.contains("ch1 session not open"));
-        assert!(detached.message.contains("ch2 session not open"));
+        assert_eq!(detached.message, "session not open");
     }
 
     #[test]
@@ -2244,6 +2286,8 @@ mod tests {
             kernel.install_offsets(&[0u8; 24]).message,
             "bad offsets table"
         );
+        // A second open hits the bare any-open guard.
+        assert_eq!(kernel.open_session().message, "session already open");
         assert!(kernel.close().ok);
     }
 
