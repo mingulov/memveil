@@ -137,6 +137,30 @@ def paced_environment(path, receipt, lines, duration_ns, adapter):
                 MEMVEIL_PACED_NS=str(duration_ns))
 
 
+def _rust_mode():
+    # The harness selector (tools/test MEMVEIL_RUST_BIN=1) plus a
+    # direct-run fallback: build/memveil linked at the Rust target.
+    if os.environ.get('MEMVEIL_RUST_BIN') == '1':
+        return True
+    try:
+        return 'rust/target' in os.path.realpath(BIN)
+    except OSError:
+        return False
+
+
+def paced_adapter():
+    # Mode-appropriate pacing interposer: the fread adapter for the
+    # Mojo binary (unchanged path), the read adapter for the Rust
+    # binary (no C stdio). Built unconditionally like before.
+    name = 'paced_reads_rust' if _rust_mode() else 'paced_reads'
+    adapter = os.path.join(REPO, 'build', 'perf', name + '.so')
+    os.makedirs(os.path.dirname(adapter), exist_ok=True)
+    subprocess.run(['clang', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+                    '-shared', '-fPIC', os.path.join(TESTS, 'perf', name + '.c'),
+                    '-o', adapter], check=True)
+    return adapter
+
+
 def paced_errors(receipt, source_stat, count, size, duration_ns, wall):
     errors = []
     for key, expected in [('lines', count), ('bytes', size), ('eof', True), ('error', 0),
@@ -232,11 +256,7 @@ def main():
                 if not line:
                     check("paced-source-line", False)
                 dst.write(line)
-        adapter = os.path.join(REPO, 'build', 'perf', 'paced_reads.so')
-        os.makedirs(os.path.dirname(adapter), exist_ok=True)
-        subprocess.run(['clang', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
-                        '-shared', '-fPIC', os.path.join(TESTS, 'perf', 'paced_reads.c'),
-                        '-o', adapter], check=True)
+        adapter = paced_adapter()
         subprocess.run([sys.executable, os.path.join(TESTS, 'perf', 'test_paced_reads.py')], check=True)
         receipt_path = os.path.join(tmp, 'paced-reads.json')
         env = paced_environment(paced_file, receipt_path, paced_lines, paced_seconds * 1000000000, adapter)
