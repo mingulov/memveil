@@ -1,0 +1,21 @@
+[package]
+name = "memveil-ebpf"
+version = "0.0.0"
+edition = "2021"
+license = "GPL-2.0-only"
+publish = false
+
+[dependencies]
+aya-ebpf = "=0.2.1"
+memveil-ebpf-common = { version = "0.0.0", path = "../ebpf-common", default-features = false }
+
+[[bin]]
+name = "memveil-ebpf"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+
+[workspace]

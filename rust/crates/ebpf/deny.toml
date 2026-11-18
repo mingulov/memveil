@@ -1,0 +1,57 @@
+# Cargo dependency policy for the memveil eBPF crate (GPL-2.0-only, like the
+# kernel-side code it ships as). Mirrors the host scaffold policy; new
+# licenses and sources require review.
+[graph]
+targets = [
+  { triple = "bpfel-unknown-none" },
+]
+all-features = true
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+unmaintained = "deny"
+ignore = []
+
+[licenses]
+allow = [
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "GPL-2.0-only",
+  "GPL-3.0-or-later",
+  "ISC",
+  "MIT",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Zlib",
+]
+confidence-threshold = 0.8
+exceptions = []
+
+[licenses.private]
+ignore = false
+registries = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[sources.allow-org]
+github = []
+gitlab = []
+bitbucket = []

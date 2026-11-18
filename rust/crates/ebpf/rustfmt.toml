@@ -1,0 +1,3 @@
+# Keep channel-declaration order (attempt, lifecycle, copy): the probe ports
+# fill these modules in place and main.rs must not churn.
+reorder_modules = false
