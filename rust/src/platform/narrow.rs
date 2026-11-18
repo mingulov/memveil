@@ -1816,6 +1816,9 @@ fn refuse(message: String) -> ObjectCheck {
 /// tracepoint section. The maps section admits either the
 /// libbpf `.maps` or the Aya/bpf-linker `maps` spelling;
 /// both spellings face identical type and range rigor.
+/// An object carrying both spellings must satisfy both;
+/// when several required sections are bad, the refusal
+/// names the first bad one in section-table order.
 /// Required sections must be PROGBITS inside the file,
 /// and the program symbol must name a non-empty extent
 /// within its section. Any structural defect refuses;
@@ -1936,7 +1939,9 @@ fn verify_object_inner(data: &[u8], want_program: &str, prefix: &str) -> ObjectC
     // Either maps spelling admits: libbpf objects carry
     // `.maps`, Aya/bpf-linker objects carry `maps`. Neither
     // spelling refuses with the existing taxonomy; an object
-    // carrying both must satisfy both below.
+    // carrying both must satisfy both below. When several
+    // required sections are bad, the refusal names the
+    // first bad one in section-table order.
     if !has_maps && !has_aya_maps {
         return refuse("no .maps section".to_string());
     }
@@ -1946,6 +1951,10 @@ fn verify_object_inner(data: &[u8], want_program: &str, prefix: &str) -> ObjectC
     // Required sections must be real PROGBITS content inside
     // the file: names alone admit out-of-file ranges and
     // wrong-type sections that later readers would misparse.
+    // Map bytes, geometry, and pins are not parsed here for
+    // either spelling: read_btf_maps owns that rigor
+    // downstream, and its Aya DATASEC lane is a separate
+    // change. This gate stays presence, type, and range.
     for i in 0..shnum {
         let iu = i as usize;
         let required = str_starts_with(&names[iu], prefix)
@@ -2745,6 +2754,74 @@ mod tests {
         let v = verify_object(&out, PROG);
         assert!(!v.ok);
         assert_eq!(v.message, "no .maps section");
+    }
+
+    /// Add a well-formed libbpf `.maps` to the Aya shape by
+    /// renaming the spare PROGBITS `.debug_frame` section, so
+    /// the object carries both spellings. REL entries and the
+    /// symtab link use section indices, never names, so the
+    /// rename keeps every other check identical.
+    fn both_shapes(raw: &[u8]) -> Vec<u8> {
+        let mut out = aya_shape(raw);
+        let (_, name_at) = section_header(&out, b".debug_frame");
+        out[name_at..name_at + 6].copy_from_slice(b".maps\0");
+        out
+    }
+
+    #[test]
+    fn object_both_shapes_ok() {
+        // Both spellings present and well-formed admits: an
+        // object carrying both must satisfy both, and this
+        // one does.
+        let raw = elf_fixture("ok.o");
+        let v = verify_object(&both_shapes(&raw), PROG);
+        assert!(v.ok, "both shapes refused: {}", v.message);
+        assert_eq!(v.message, "");
+    }
+
+    #[test]
+    fn object_both_shapes_bad_aya() {
+        // Both present with the Aya `maps` mistyped refuses,
+        // even though the `.maps` spelling is well-formed.
+        let raw = elf_fixture("ok.o");
+        let mut shaped = both_shapes(&raw);
+        let (hdr, _) = section_header(&shaped, b"maps");
+        shaped[hdr + 4..hdr + 8].copy_from_slice(&2u32.to_le_bytes());
+        let v = verify_object(&shaped, PROG);
+        assert!(!v.ok);
+        assert_eq!(v.message, "maps section bad type");
+    }
+
+    #[test]
+    fn object_both_shapes_bad_libbpf() {
+        // Both present with the libbpf `.maps` out of range
+        // refuses from the other spelling, whatever its
+        // table position relative to `maps`.
+        let raw = elf_fixture("ok.o");
+        let mut shaped = both_shapes(&raw);
+        let (hdr, _) = section_header(&shaped, b".maps");
+        let past_end = shaped.len() as u64 + 64;
+        shaped[hdr + 24..hdr + 32].copy_from_slice(&past_end.to_le_bytes());
+        let v = verify_object(&shaped, PROG);
+        assert!(!v.ok);
+        assert_eq!(v.message, ".maps section out of range");
+    }
+
+    #[test]
+    fn object_both_shapes_first_bad_wins() {
+        // Both spellings bad: the refusal names the first bad
+        // section in section-table order (`maps` sits earlier
+        // than the renamed spare in the fixture).
+        let raw = elf_fixture("ok.o");
+        let mut shaped = both_shapes(&raw);
+        let (aya_hdr, _) = section_header(&shaped, b"maps");
+        shaped[aya_hdr + 4..aya_hdr + 8].copy_from_slice(&2u32.to_le_bytes());
+        let (lib_hdr, _) = section_header(&shaped, b".maps");
+        let past_end = shaped.len() as u64 + 64;
+        shaped[lib_hdr + 24..lib_hdr + 32].copy_from_slice(&past_end.to_le_bytes());
+        let v = verify_object(&shaped, PROG);
+        assert!(!v.ok);
+        assert_eq!(v.message, "maps section bad type");
     }
 
     #[test]
