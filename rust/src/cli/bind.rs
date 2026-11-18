@@ -2,12 +2,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Mint a bound profile document from live evidence (bind-profile verb).
 
-use crate::capture::collector::EXIT_REFUSAL;
 use crate::capture::run::{MAX_PROFILE_DOC_BYTES, parse_requested_caps, resolve_object};
 use crate::cli::doctor::resolve_profiles_dir;
 use crate::cli::qualify::publish_receipt;
 use crate::cli::report::{
-    CliError, EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, sanitize_diagnostic, write_stderr,
+    CliError, EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, EXIT_REFUSAL, sanitize_diagnostic, write_stderr,
 };
 use crate::platform::artifact_files::join_root;
 use crate::platform::evidence::{KernelInfo, detect_environment, parse_kernel_triple};

@@ -12,7 +12,6 @@
 //! any refusal names its exact cause.
 
 use crate::ENGINE_VERSION;
-use crate::capture::collector::EXIT_REFUSAL;
 use crate::capture::live::LiveWriter;
 use crate::capture::run::{
     MAX_PROFILE_DOC_BYTES, RecordOptions, parse_requested_caps, repair_warning_for, resolve_bridge,
@@ -20,8 +19,8 @@ use crate::capture::run::{
 };
 use crate::cli::doctor::resolve_profiles_dir;
 use crate::cli::report::{
-    CliError, EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, sanitize_diagnostic, write_capture_location,
-    write_stderr,
+    CliError, EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, EXIT_REFUSAL, sanitize_diagnostic,
+    write_capture_location, write_stderr,
 };
 use crate::model::session::parse_session;
 use crate::platform::artifact_files::{

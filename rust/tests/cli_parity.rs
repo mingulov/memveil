@@ -82,6 +82,33 @@ fn maximal_capture_dir(tag: &str) -> PathBuf {
     tmp
 }
 
+/// A checkpoint-recovery capture: verified prefix, no final session.
+///
+/// Derived from sealed-complete by retiring the final session into a
+/// checkpoint generation, so both binaries recover the same verified
+/// prefix under --allow-partial and demand the flag without it.
+fn checkpoint_capture_dir(tag: &str) -> PathBuf {
+    let tmp = std::env::temp_dir().join(format!("memveil-cli-ckpt-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("temp capture dir");
+    let src = fixture("sealed-complete");
+    std::fs::copy(src.join("events.ndjson"), tmp.join("events.ndjson")).expect("copy events");
+    let session = std::fs::read_to_string(src.join("session.json")).expect("read session");
+    let retired = session.replacen("\"finalized\": true", "\"finalized\": false", 1);
+    assert_ne!(retired, session, "sealed session carries finalized:true");
+    let checkpoint = retired.replacen(
+        "\"end_reason\": \"duration\"",
+        "\"end_reason\": \"checkpoint\",\n    \"checkpoint_generation\": \"1\"",
+        1,
+    );
+    assert_ne!(
+        checkpoint, retired,
+        "sealed session carries end_reason:duration"
+    );
+    std::fs::write(tmp.join("checkpoint.json"), checkpoint).expect("write checkpoint");
+    tmp
+}
+
 #[test]
 fn no_verb_prints_usage_to_stderr() {
     let out = run(&bin(), &[]);
@@ -203,6 +230,42 @@ fn report_strict_keeps_full_stdout() {
     assert_eq!(plain.status.code(), Some(0));
     assert_eq!(strict.status.code(), Some(4));
     assert_eq!(strict.stdout, plain.stdout);
+}
+
+#[test]
+fn report_checkpoint_recovery_exits() {
+    let dir = checkpoint_capture_dir("shape");
+    // Without the flag the verified-prefix demand names it.
+    let demand = run_report(&bin(), &[], &dir);
+    assert_eq!(demand.status.code(), Some(2));
+    assert!(demand.stdout.is_empty());
+    assert_eq!(
+        demand.stderr,
+        b"memveil report: cannot read capture: no final session; verified checkpoint prefix 1155 bytes; use --allow-partial to recover\n"
+    );
+    // With the flag the recovery renders and exits 4.
+    let out = run_report(&bin(), &["--allow-partial"], &dir);
+    assert_eq!(out.status.code(), Some(4));
+    assert!(out.stderr.is_empty());
+    assert!(out.stdout.ends_with(b"\n"));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("checkpoint_prefix (verified bytes=1155")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn report_long_lived_flag_sensitive() {
+    let dir = lifecycle("open-at-end");
+    let plain = run_report(&bin(), &[], &dir);
+    assert_eq!(plain.status.code(), Some(0));
+    assert!(!String::from_utf8_lossy(&plain.stdout).contains("LONG_LIVED_ALLOCATION"));
+    let found = run_report(&bin(), &["--long-lived-after", "1s"], &dir);
+    assert_eq!(found.status.code(), Some(0));
+    assert!(found.stderr.is_empty());
+    let text = String::from_utf8_lossy(&found.stdout);
+    assert!(text.contains("LONG_LIVED_ALLOCATION"));
+    assert!(text.contains("not a leak"));
 }
 
 #[test]
@@ -359,6 +422,57 @@ fn report_maximal_bytes_equal_mojo() {
     assert_eq!(ours.status.code(), want.status.code(), "maximal exit");
     assert_eq!(ours.stdout, want.stdout, "maximal stdout bytes");
     assert_eq!(ours.stderr, want.stderr, "maximal stderr bytes");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn report_long_lived_bytes_equal_mojo() {
+    let Some(mojo) = mojo_bin() else {
+        eprintln!("skip: MEMVEIL_MOJO_BIN unset");
+        return;
+    };
+    let open = lifecycle("open-at-end");
+    let nested = lifecycle("lifecycle-nested");
+    let cases: Vec<(&Path, Vec<&str>)> = vec![
+        (&open, vec!["--long-lived-after", "1s"]),
+        (&nested, vec!["--long-lived-after", "1s"]),
+    ];
+    for (dir, extra) in cases {
+        let ours = run_report(&bin(), &extra, dir);
+        let want = run_report(&mojo, &extra, dir);
+        assert_eq!(
+            ours.status.code(),
+            want.status.code(),
+            "{dir:?} {extra:?} exit"
+        );
+        assert_eq!(ours.stdout, want.stdout, "{dir:?} {extra:?} stdout bytes");
+        assert_eq!(ours.stderr, want.stderr, "{dir:?} {extra:?} stderr bytes");
+    }
+}
+
+#[test]
+fn checkpoint_bytes_equal_mojo() {
+    let Some(mojo) = mojo_bin() else {
+        eprintln!("skip: MEMVEIL_MOJO_BIN unset");
+        return;
+    };
+    let dir = checkpoint_capture_dir("mojo");
+    for extra in [vec![], vec!["--allow-partial"]] {
+        let ours = run_report(&bin(), &extra, &dir);
+        let want = run_report(&mojo, &extra, &dir);
+        assert_eq!(
+            ours.status.code(),
+            want.status.code(),
+            "report {extra:?} exit"
+        );
+        assert_eq!(ours.stdout, want.stdout, "report {extra:?} stdout bytes");
+        assert_eq!(ours.stderr, want.stderr, "report {extra:?} stderr bytes");
+    }
+    let ours = run_top(&bin(), &["--allow-partial"], &dir);
+    let want = run_top(&mojo, &["--allow-partial"], &dir);
+    assert_eq!(ours.status.code(), want.status.code(), "top exit");
+    assert_eq!(ours.stdout, want.stdout, "top stdout bytes");
+    assert_eq!(ours.stderr, want.stderr, "top stderr bytes");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -853,15 +967,6 @@ fn task2_errors_equal_mojo() {
             "--capability",
             "conversion-observe",
         ],
-        vec![
-            "bind-profile",
-            "--output",
-            "x",
-            "--object",
-            "tests/fixtures/elf/ok.o",
-            "--profiles-dir",
-            "profiles",
-        ],
     ] {
         let ours = run(&bin(), &args);
         let want = run(&mojo, &args);
@@ -869,6 +974,32 @@ fn task2_errors_equal_mojo() {
         assert_eq!(ours.stdout, want.stdout, "{args:?} stdout bytes");
         assert_eq!(ours.stderr, want.stderr, "{args:?} stderr bytes");
     }
+    // The bind success path mints its output file, so it runs
+    // against a temp dir: the shared path keeps both binaries
+    // byte-comparable while the repo root stays clean.
+    let bind_tmp = std::env::temp_dir().join(format!("memveil-cli-bind-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&bind_tmp);
+    std::fs::create_dir_all(&bind_tmp).expect("bind temp dir");
+    let bind_out = bind_tmp.join("x").to_string_lossy().into_owned();
+    let args = [
+        "bind-profile",
+        "--output",
+        bind_out.as_str(),
+        "--object",
+        "tests/fixtures/elf/ok.o",
+        "--profiles-dir",
+        "profiles",
+    ];
+    let ours = run(&bin(), &args);
+    let want = run(&mojo, &args);
+    assert_eq!(ours.status.code(), want.status.code(), "{args:?} exit");
+    assert_eq!(ours.stdout, want.stdout, "{args:?} stdout bytes");
+    assert_eq!(ours.stderr, want.stderr, "{args:?} stderr bytes");
+    assert!(
+        !repo_root().join("x").exists(),
+        "parity suite must not mint ./x"
+    );
+    let _ = std::fs::remove_dir_all(&bind_tmp);
 }
 
 #[test]

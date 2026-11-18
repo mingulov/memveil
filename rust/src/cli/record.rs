@@ -21,15 +21,15 @@
 //! argv); 1 = error or unfinalizable. Only a broken standard
 //! error escapes as a failure.
 
-use crate::capture::collector::{EXIT_ERROR, EXIT_INVALID, EXIT_REFUSAL};
 use crate::capture::live::LiveWriter;
 use crate::capture::run::{RecordOptions, repair_warning_for, run_collector_with};
 #[cfg(test)]
 use crate::cli::doctor::default_profiles_dir;
 use crate::cli::doctor::resolve_profiles_dir;
 use crate::cli::report::{
-    CliError, EXIT_INTERNAL, EXIT_OK, final_capture_summary, refusal_stderr_lines,
-    sanitize_diagnostic, write_stderr, write_stderr_trusted,
+    CliError, EXIT_ERROR, EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, EXIT_REFUSAL,
+    final_capture_summary, refusal_stderr_lines, sanitize_diagnostic, write_stderr,
+    write_stderr_trusted,
 };
 use crate::platform::stdout::write_stdout;
 

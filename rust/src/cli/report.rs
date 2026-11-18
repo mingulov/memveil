@@ -9,6 +9,7 @@
 //! 4 means checkpoint recovery or incomplete evidence under --strict,
 //! and 2 means invalid input or usage. A rendering
 //! failure on an accepted report is an internal error and exits 1.
+//! An oversized render exits 2 via report_failed, mirroring invalid input.
 
 use crate::analysis::diagnostics::diagnose_report;
 use crate::analysis::engine::Analyzer;
@@ -22,14 +23,18 @@ use crate::platform::stdout::write_stdout;
 use crate::render::render::render;
 use crate::render::text::escape_text;
 
-/// Clean exit: a valid finalized report was rendered.
-pub const EXIT_OK: i64 = 0;
+/// Error exit, shared with the collector.
+pub use crate::capture::collector::EXIT_ERROR;
 /// Internal failure: rendering or output broke on accepted input.
-pub const EXIT_INTERNAL: i64 = 1;
+pub use crate::capture::collector::EXIT_ERROR as EXIT_INTERNAL;
 /// Invalid input or usage.
-pub const EXIT_INVALID: i64 = 2;
+pub use crate::capture::collector::EXIT_INVALID;
+/// Clean exit: a valid finalized report was rendered.
+pub use crate::capture::collector::EXIT_OK;
 /// Checkpoint recovery, or incomplete evidence under --strict.
-pub const EXIT_INCOMPLETE: i64 = 4;
+pub use crate::capture::collector::EXIT_PARTIAL as EXIT_INCOMPLETE;
+/// Refusal: collection, qualification, or minting cannot start.
+pub use crate::capture::collector::EXIT_REFUSAL;
 /// Largest report body ever printed (16 MiB).
 pub const MAX_RENDERED_BYTES: usize = 16777216;
 
@@ -350,7 +355,7 @@ fn is_option(text: &str) -> bool {
 }
 
 /// Strict decimal limit: 1..cap, no leading zeros.
-fn parse_limit(text: &str, what: &str, cap: u64) -> Result<usize, CliError> {
+pub(crate) fn parse_limit(text: &str, what: &str, cap: u64) -> Result<usize, CliError> {
     let raw = text.as_bytes();
     if raw.is_empty() || raw.len() > 10 {
         return Err(CliError {
@@ -490,7 +495,7 @@ pub fn exit_for_report(rep: &Report, strict: bool) -> i64 {
 /// The reducer raises a typed analysis error whose default
 /// rendering is `AnalysisError(message=...)`; the detail rides
 /// through unchanged.
-fn analysis_error_text(message: &str) -> String {
+pub(crate) fn analysis_error_text(message: &str) -> String {
     format!("AnalysisError(message={message})")
 }
 

@@ -21,7 +21,9 @@ use crate::capture::run::{
     attempt_program_names, copy_program_names, decide_record, lifecycle_program_names,
     loadcheck_bridge_sha, parse_requested_caps, resolve_object,
 };
-use crate::cli::report::{EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, sanitize_diagnostic, write_stderr};
+use crate::cli::report::{
+    EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, EXIT_REFUSAL, sanitize_diagnostic, write_stderr,
+};
 use crate::platform::btf::read_object_map_bytes;
 use crate::platform::capabilities::attempt_loss_exact;
 use crate::platform::evidence::{EnvironmentEvidence, GuestInfo, KernelInfo, detect_environment};
@@ -36,7 +38,7 @@ use crate::platform::stdout::write_stdout;
 use crate::render::json::escape_json;
 
 /// Unavailable collection: the requested set is not ready.
-pub const EXIT_UNAVAILABLE: i64 = 3;
+pub const EXIT_UNAVAILABLE: i64 = EXIT_REFUSAL;
 const ZLIB: &str = "libz.so.1";
 const OBJECT_BYTES_CAP: usize = 67108864;
 const CMDLINE_CAP: usize = 65536;

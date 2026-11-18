@@ -35,7 +35,6 @@ use std::cell::RefCell;
 use crate::ENGINE_VERSION;
 use crate::analysis::diagnostics::diagnose_report;
 use crate::analysis::engine::Analyzer;
-use crate::capture::collector::{EXIT_ERROR, EXIT_REFUSAL};
 use crate::capture::reader::{
     CaptureReader, DEFAULT_MAX_EVENTS_BYTES, DEFAULT_MAX_LINE_BYTES, DEFAULT_MAX_SESSION_BYTES,
     ReaderLimits, read_capture,
@@ -46,9 +45,9 @@ use crate::cli::doctor::resolve_profiles_dir;
 use crate::cli::durations::parse_duration_ns;
 use crate::cli::record::parse_record_args;
 use crate::cli::report::{
-    CliError, EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, MAX_RENDERED_BYTES, check_rendered_size,
-    exit_for_report, refusal_stderr_lines, sanitize_diagnostic, write_capture_location,
-    write_stderr, write_stderr_trusted,
+    CliError, EXIT_ERROR, EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, EXIT_REFUSAL, MAX_RENDERED_BYTES,
+    analysis_error_text, check_rendered_size, exit_for_report, parse_limit, refusal_stderr_lines,
+    sanitize_diagnostic, write_capture_location, write_stderr, write_stderr_trusted,
 };
 use crate::model::event::Event;
 use crate::model::report::{Report, apply_checkpoint, apply_integrity};
@@ -253,36 +252,6 @@ fn is_live_flag(tok: &str) -> bool {
     )
 }
 
-/// Strict decimal limit: 1..cap, no leading zeros.
-fn parse_limit(text: &str, what: &str, cap: u64) -> Result<usize, CliError> {
-    let raw = text.as_bytes();
-    if raw.is_empty() || raw.len() > 10 {
-        return Err(CliError {
-            message: format!("{what} needs a decimal value"),
-        });
-    }
-    if raw[0] < 0x31 || raw[0] > 0x39 {
-        return Err(CliError {
-            message: format!("{what} needs a decimal value"),
-        });
-    }
-    let mut v: u64 = 0;
-    for &b in raw {
-        if !b.is_ascii_digit() {
-            return Err(CliError {
-                message: format!("{what} needs a decimal value"),
-            });
-        }
-        v = v * 10 + u64::from(b - 0x30);
-    }
-    if v > cap {
-        return Err(CliError {
-            message: format!("{what} above cap"),
-        });
-    }
-    Ok(v as usize)
-}
-
 fn parse_duration_opt(text: &str, what: &str) -> Result<u64, CliError> {
     match parse_duration_ns(text) {
         Ok(ns) => Ok(ns),
@@ -432,17 +401,14 @@ fn top_failed(prefix: &str, detail: &str) -> i64 {
     }
 }
 
-/// Render a finish-path failure the way the source `String(e)` does.
-///
-/// Finishing raises a typed analysis error whose default rendering
-/// is `AnalysisError(message=...)`; the detail rides through
-/// unchanged. Consume-path failures stay bare: consume raises only
-/// the generic error whose string form is its message.
-fn analysis_error_text(message: &str) -> String {
-    format!("AnalysisError(message={message})")
-}
-
 /// Reducer surface behind top's replay loops.
+///
+/// Finish-path failures render through the shared
+/// [`analysis_error_text`](crate::cli::report::analysis_error_text):
+/// finishing raises a typed analysis error whose default rendering
+/// is `AnalysisError(message=...)`. Consume-path failures stay bare:
+/// consume raises only the generic error whose string form is its
+/// message.
 ///
 /// Production runs over [`Analyzer`], mapping its typed errors to
 /// their messages; each arm then renders its own prefix. Tests stub
