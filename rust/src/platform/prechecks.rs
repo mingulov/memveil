@@ -119,7 +119,7 @@ pub fn check_privilege(reader: &EvidenceReader) -> PreCheck {
         let umap = match read_evidence(reader, P_UID_MAP, UIDMAP_CAP) {
             Ok(umap) => umap,
             Err(e) => {
-                return unknown(format!("user namespace unreadable: {}", e));
+                return unknown(format!("user namespace unreadable: {}", e.message));
             }
         };
         if !is_init_uidmap(&umap) {
@@ -129,7 +129,7 @@ pub fn check_privilege(reader: &EvidenceReader) -> PreCheck {
     let text = match read_evidence(reader, P_STATUS, STATUS_CAP) {
         Ok(raw) => bytes_to_text(&raw),
         Err(e) => {
-            return unknown(format!("CapEff unreadable: {}", e));
+            return unknown(format!("CapEff unreadable: {}", e.message));
         }
     };
     let mut bad = true;
@@ -227,7 +227,7 @@ fn read_mem_val(reader: &EvidenceReader, path: &str, allow_max: bool) -> MemVal 
     let raw = match read_evidence(reader, path, MEMCG_CAP) {
         Ok(raw) => raw,
         Err(e) => {
-            out.why = format!("{path} unreadable: {}", e);
+            out.why = format!("{path} unreadable: {}", e.message);
             return out;
         }
     };
@@ -281,7 +281,7 @@ pub fn check_memcg(reader: &EvidenceReader, need: i64) -> PreCheck {
     let text = match read_evidence(reader, P_CGROUP_SELF, CGROUP_CAP) {
         Ok(raw) => bytes_to_text(&raw),
         Err(e) => {
-            return unknown(format!("cgroup unreadable: {}", e), "");
+            return unknown(format!("cgroup unreadable: {}", e.message), "");
         }
     };
     let mut cgpath = String::new();
@@ -421,7 +421,7 @@ pub fn check_unprivileged_bpf(reader: &EvidenceReader) -> PreCheck {
             return PreCheck {
                 id: "unprivileged-bpf".to_string(),
                 state: "unknown".to_string(),
-                reason: format!("unprivileged_bpf_disabled unreadable: {}", e),
+                reason: format!("unprivileged_bpf_disabled unreadable: {}", e.message),
                 code: String::new(),
             };
         }
@@ -446,7 +446,7 @@ pub fn check_unprivileged_bpf(reader: &EvidenceReader) -> PreCheck {
 mod tests {
     use super::{check_memcg, check_privilege, check_unprivileged_bpf};
     use crate::platform::reader::open_evidence_reader;
-    use crate::platform::test_support::gate_fixture;
+    use crate::platform::test_support::{TestDir, gate_fixture};
 
     fn gate(name: &str) -> String {
         gate_fixture(name)
@@ -618,6 +618,27 @@ mod tests {
             8_388_680,
         );
         assert_eq!(mem.state, "unknown");
+    }
+
+    #[test]
+    fn capeff_read_failure_renders_bare_message() {
+        // file_state sees a readable status file, but the capped
+        // read fails: the reason must carry the bare e.message,
+        // never the EvidenceError(code=..., message=...) wrapper.
+        let tmp = TestDir::create("memveil-pre").expect("mkdtemp");
+        std::fs::write(
+            tmp.path().join("meta.txt"),
+            "arch=x86_64\nrelease=7.0.0-test\neuid=0\n",
+        )
+        .expect("write meta");
+        let proc = tmp.path().join("proc/self");
+        std::fs::create_dir_all(&proc).expect("mkdir proc");
+        std::fs::write(proc.join("status"), vec![b'x'; 70_000]).expect("write status");
+        let reader = open_evidence_reader(tmp.as_str()).expect("fixture opens");
+        let got = check_privilege(&reader);
+        assert_eq!(got.state, "unknown");
+        assert_eq!(got.code, "");
+        assert_eq!(got.reason, "CapEff unreadable: /proc/self/status too large");
     }
 
     #[test]

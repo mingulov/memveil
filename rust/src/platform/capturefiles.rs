@@ -293,6 +293,22 @@ impl RecoveryFiles {
         }
         Ok(raw)
     }
+
+    /// Open events fd for the recovery reader's positional scan.
+    ///
+    /// The capture reader issues `pread` calls against this fd;
+    /// ownership stays here and the fd closes on drop.
+    pub fn events_fd(&self) -> i32 {
+        self.events
+    }
+
+    /// Open-time `events.ndjson` byte size for the recovery reader.
+    ///
+    /// The capture reader bounds its scan with this pinned size
+    /// (`events_ids[5]`), taken before any concurrent growth.
+    pub fn events_len(&self) -> u64 {
+        self.events_ids[5]
+    }
 }
 
 impl Default for RecoveryFiles {
@@ -606,5 +622,15 @@ mod tests {
         assert_eq!(ids[5], 10);
         assert!(ids[6] * 512 >= ids[5]);
         assert_eq!(file_stat(-1).unwrap_err().message, "capture stat failed");
+    }
+
+    #[test]
+    fn events_accessors_match_pinned_identity() {
+        let tmp = capture_dir();
+        let files = open_capture(&tmp);
+        assert!(files.events_fd() >= 0);
+        let ids = file_stat(files.events_fd()).expect("events fd stats");
+        assert_eq!(files.events_len(), ids[5]);
+        assert_eq!(files.events_len(), 8);
     }
 }

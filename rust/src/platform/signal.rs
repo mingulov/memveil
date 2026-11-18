@@ -456,27 +456,31 @@ mod tests {
     }
 
     #[test]
-    fn reexec_guard_refuses_uninherited_mask() {
+    fn reexec_guard_sentinel_paths() {
+        // One test for both sentinel paths: MEMVEIL_SIGBLK is
+        // process-global, so two parallel tests could remove it
+        // mid-flight of each other and send one down the live
+        // re-exec path. Sequential phases cannot race.
+        //
+        // Refuse: the sentinel is set but this thread never
+        // inherited the blocked mask.
         // SAFETY: the sentinel var is private to this test.
         unsafe {
             std::env::set_var("MEMVEIL_SIGBLK", "1");
         }
-        let note = ensure_inherited_signal_block(&[]);
+        let refused = ensure_inherited_signal_block(&[]);
         // SAFETY: restoring the environment.
         unsafe {
             std::env::remove_var("MEMVEIL_SIGBLK");
         }
         assert_eq!(
-            note,
+            refused,
             "signal mask not inherited (MEMVEIL_SIGBLK set,\
              \u{20}SIGHUP/SIGINT/SIGTERM unblocked); refusing"
         );
-    }
 
-    #[test]
-    fn reexec_guard_accepts_inherited_mask() {
-        // Block the mask by hand, then prove the sentinel path
-        // verifies it and lets the caller proceed.
+        // Accept: block the mask by hand, then prove the
+        // sentinel path verifies it and lets the caller proceed.
         let mask = blocked_mask();
         let mut old = [0u8; 128];
         // SAFETY: live 128-byte mask buffers.
