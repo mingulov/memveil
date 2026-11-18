@@ -31,12 +31,12 @@ is a silent narrowing.
 | schemas | PASS | 98 checks pass under the selector (validator only). |
 | reports | PASS | 142/142: golden bytes, exit codes, oracle counts. |
 | doctor | PASS | Mojo units 42+11+9 pass; all live `--json`/text/`--capability`/`--load-check`/hostile-env checks pass after the profiles-discovery fix below. |
-| record | FAIL | 14 Mojo unit files + 13 CLI cases pass. `no-object` and `no-bridge` fail: premises impossible for the Rust binary (embedded objects, statically linked loader). See conflict 1. |
+| record | PASS | 14 Mojo unit files + 13 CLI cases pass; `no-object`/`no-bridge` are documented Rust-mode skips (embedded objects, static loader). See conflict 1 (resolved). |
 | qualify | PASS | Mojo units 47+9, 12 CLI refusal cases, oracle-accepted fixture mint. |
 | top | PASS | Mojo unit plus full CLI harness incl. live-refusal cases. |
 | oracle-ledger | PASS | 12/12 pytest. |
-| quality | FAIL | 27/32 pass. 5 failures are stale pre-integrity expectations, byte-identical on the Mojo binary/sources. See conflict 2. |
-| reader-adversarial | FAIL | Mojo unit 15/15, capture-integrity 11/13, adversarial own-checks 24/24, checkpoint-recovery 7/7. The `fdopen`-injection case cannot fire on Rust (no C stdio). See conflict 3. |
+| quality | PASS | 32/32 on both binaries after the conflict-2 expectation update (integrity-aware `partial`, byte-identical JSON). See conflict 2 (resolved). |
+| reader-adversarial | PASS | Mojo unit 15/15, capture-integrity 13/13 (incl. 1 documented Rust-mode skip), adversarial own-checks 24/24, checkpoint-recovery 7/7. See conflict 3 (resolved). |
 | fuzz-smoke | PASS | Oracle 4/4, 200 cases 0 failures. |
 | fuzz-campaign | PASS | Oracle 4/4, 10000 cases 0 failures (31.6s). |
 | record-failures | PASS | Mojo stdout unit, stdout-errors, capture-failure and durability oracles (LD_PRELOAD shims fire on Rust). |
@@ -44,9 +44,9 @@ is a silent narrowing.
 | privacy | PASS | Canaries, metadata allowlist, skip codes, pytest guard. |
 | render-escaping | PASS | All escaping checks. |
 | offline-environment | PASS | Exit/identical/traced checks. |
-| perf-replay | FAIL | Full (600k) and prefix checks pass: 3.8s wall / 73MB RSS (budgets 60s / 256MB). Sealed phase passes standalone: verified, 5.3s / 73MB. Paced phase blocked on the `fread` adapter. See conflict 4. |
+| perf-replay | PASS | Full (600k), prefix, paced, and sealed checks pass: full 4.3s wall at 141k records/s (budget 60s), RSS inside 256MB; paced 600k lines over 60s via the `read` lane (3269 calls, max 64KiB, error 0, exact counts). Sealed: verified, 6.1s. See conflict 4 (resolved). |
 | perf-region | PASS | 234/234 incl. wall/RSS budgets (active-ceiling 2.1s, peak 122.6MB). |
-| soak | FAIL | `soak-quality` cycle 0 fails identically on Mojo (stale expectation). Bypassed triage: full 30-min run, 1282 stable cycles, peak 34MB, max cycle 1.4s, zero failures. See conflict 2. |
+| soak | FAIL | `soak-quality` cycle 0 fails identically on Mojo (stale expectation, fixed by conflict 2; clean re-run pending). Bypassed triage: full 30-min run, 1282 stable cycles, peak 34MB, max cycle 1.4s, zero failures. Caveat: the release binary was rebuilt mid-run by a concurrent packaging build (`d6bc688`, semantics-preserving clippy fix), so cycles span both hashes with no observed variance. See conflict 2 (resolved). |
 | perf-workload | SKIP | pytest 21/21 pass (comparison logic, binary-free); `workloads.py` needs `MEMVEIL_VM_PERF=1` with qualified probes. |
 | perf-overhead | SKIP | pytest 66/66 pass; `overhead.py` needs `MEMVEIL_VM_PERF=1` with qualified probes. |
 | profiles | PASS | Source-layering greps, 7 Mojo unit files, `emit-core-layouts` fixture and built-object checks (local clang-22 objects reproduce the canonical layouts). Binary-independent. |
@@ -119,6 +119,24 @@ packagers' scope below).
 `tools/package*` / `tools/build-rpm`; the Rust packagers replace those
 entry points and port the assertions.
 
+## Packaging-tool gap lines (not suites; no binary contact)
+
+- `tools/source_inventory.py`: RETIRED from parity scope (no port).
+  Nothing in Rust mode executes it against the binary: it is
+  binary-independent stdlib Python, and its only Rust-mode consumer,
+  the `provenance` suite, passes green without depending on the Mojo
+  input set (git `ls-files` in checkouts; the layout-agnostic
+  `take_tree_inventory` whole-tree walk in archive mode, which already
+  covers `rust/`). The Mojo-layout `INPUT_DIRS` admitted set is
+  consumed only by `tools/package` and `test_source_export`, both in
+  the packagers' needs-port scope, which owns the input-set decision
+  at cutover.
+- `tools/canonical_runtime.py`: UNPORTED. The v1 (`memveil-runtime/1`)
+  Mojo-built bytes stay the canonical runtime baseline; no Rust-mode
+  suite seals or verifies runtime bytes. The perf verdict (Rust replay
+  141k records/s vs Mojo 35k/s on the same 600k input, both exact)
+  decides the v3 Rust runtime seal, owned by the packagers.
+
 ## Rust fixes made for parity
 
 1. Cargo-checkout profiles discovery (`rust/src/cli/doctor.rs`,
@@ -136,47 +154,60 @@ entry points and port the assertions.
    `platform::profiles::tests::manifest_readable_probes_presence`.
    Proved by: `doctor` suite green (was: every live check exit 2).
 
-## Assertion conflicts (need an explicit decision; none worked around)
+## Assertion conflicts (all four resolved per controller ruling)
 
 1. `record` `no-object` / `no-bridge` (`tools/test`, `suite_record`).
-   Expects exit 3 `no object: pass --object PATH` when no `--object`
-   and no bundle/system object file, and exit 3 `no bridge` when no
-   bridge source. The Rust binary embeds its channel objects and links
-   its loader statically, so neither premise can hold: observed exit 3
-   `object refused: no .maps section` (embedded verification, see
-   finding A) and exit 3 `tracefs denied (privilege)` (precheck refusal
-   past discovery), both residue-free. No Rust change can satisfy the
-   assertions without deleting the embedded fallback. Proposal: skip
-   these two cases in Rust mode; discovery coverage stays in
-   `cli_parity.rs` record vectors.
+   RESOLVED (ruling C1: Rust-mode skip, `9ca52a4`): exactly these two
+   cases skip in Rust mode with a documented cause (embedded objects
+   cannot be absent; the static loader has no bridge to discover;
+   refusals stay covered by `record-failures` plus the explicit-path
+   record cases). Mojo path untouched (original conditions preserved).
+   Evidence: `record` suite green in Rust mode with both skips printed.
 2. Stale integrity expectations (5 in `tests/cli/test_uncertainty.py`,
-   1 in `tests/perf/soak.py`). `test_producer_correlation` (2 subtests),
-   `test_relations_copy_only_preserves_occupancy`,
-   `test_relations_lost_release_withholds_occupancy`,
-   `test_region_aggregate_gap_preserves_state`, and soak `soak-quality`
-   expect `complete_for_scope` where both binaries now report `partial`
-   (`Capture integrity unverified`), since capture-integrity
-   verification landed after the test was last touched. Proven
-   Mojo-identical: same 5 failures via the Mojo binary and via `mojo run`
-   of current sources; same `soak-quality` failure via the Mojo binary.
-   Making Rust report `complete_for_scope` would diverge from Mojo.
-   Proposal: update the six expectations to the integrity-aware behavior.
+   1 in `tests/perf/soak.py`). RESOLVED (ruling C2: approved update,
+   `13276b5`): each expectation now asserts the true behavior both
+   binaries exhibit (byte-identical JSON, hashes below; Rust
+   `70c93779...` vs Mojo `5f1021ee...`). Per-expectation record:
+   - `test_producer_correlation` (both subtests): `bounce_attempts`
+     coverage `complete_for_scope` → `partial` (value stays `1`).
+     Report sha256 `258c28aa717b...` / `a7f01302d9c5...`.
+   - `test_relations_copy_only_preserves_occupancy`: live occupancy
+     coverage → `partial` (value stays `4096`), and the
+     `mapping_release` relation status → `partial` (loss `0`;
+     previously hidden behind the first failure). `59d7f7574c84...`.
+   - `test_relations_lost_release_withholds_occupancy`: copy-bytes
+     coverage → `partial` (value stays `5120`). `fd079aba31f7...`.
+   - `test_region_aggregate_gap_preserves_state`: shared-region
+     coverage → `partial` (value stays `8192`). `0f4f06e4dc2d...`.
+   - soak `soak-quality`: detail status → `partial`, loss stays `0`.
+     `7fce051086f7...`.
+   Cause in every case: capture-integrity verification withholds
+   `complete_for_scope` for unverified captures
+   (`Capture integrity unverified`); values are unchanged, only the
+   coverage/status label was stale. Mojo path re-proved green on the
+   updated expectations: `quality` 32/32 plus a 3-cycle unmodified
+   soak, both without the selector.
 3. `reader-adversarial` `test_stream_creation_failure_is_reported_after_regular_open`
    (`tests/cli/test_capture_integrity.py`, `report`+`top` verbs).
-   Expects an LD_PRELOAD `fdopen` failure on `events.ndjson` to yield
-   exit 2 `cannot open stream`. The Rust reader never calls `fdopen`
-   (proven: marker absent, exit 0, normal output; Mojo marker present,
-   exit 2). Routing Rust file reads through C stdio to trip the hook
-   would contort production I/O for the test. Proposal: skip in Rust
-   mode; open-failure refusals stay covered by
-   `test_finalized_special_files_refuse_before_reading` (passes on Rust).
+   RESOLVED (ruling C3: Rust-mode skip, `02f01e4`): skips in Rust mode
+   with cause (no `fdopen` calls to interpose; exit 0 is correct) and a
+   comment pointer to the equivalent native fault tests
+   (`rust/src/capture/writer.rs` `faults::FaultPlan`
+   pwrite/fsync/truncate/rename faults, `rust/src/capture/reader.rs`
+   refusal tests). Open-failure refusals stay covered by
+   `test_finalized_special_files_refuse_before_reading` (green on Rust).
+   Evidence: capture-integrity 13/13 (12 pass + 1 skip) in Rust mode.
 4. `perf-replay` paced phase (`tests/perf/replay.py`,
-   `tests/perf/test_paced_reads.py`). The pacing adapter interposes
-   `fread` only, so no receipt is ever written for the Rust binary and
-   the paced checks plus the `test_paced_reads.py` gate fail. Full,
-   prefix, and sealed checks all pass (numbers below). Proposal: port
-   the adapter to interpose `read` for a Rust-mode paced lane (test-side
-   change).
+   `tests/perf/test_paced_reads.py`). RESOLVED (ruling C4:
+   read-interposing lane, `7ee238f`): new `tests/perf/paced_reads_rust.c`
+   interposes `read` (same env contract and receipt schema as the
+   `fread` adapter, which is untouched); `replay.py` gains a
+   mode-selecting `paced_adapter()` used by the paced phase and the
+   gate test. No assertion changes. Design evidence: strace shows the
+   Rust binary reading the stream with plain 64 KiB `read`s in one pass
+   (sealed and unsealed). Evidence: paced gate 2/2 plus full
+   `perf-replay` green in Rust mode (paced 600k lines over 60s, 3269
+   calls, max 64 KiB, error 0, exact counts/bytes).
 
 ## Findings for follow-up (not suite-scoped fixes)
 
@@ -212,5 +243,8 @@ Test prerequisites were built with the tree's own commands into
 ignored `build/`: `libbpf-mojo` cache via the `prepare_lmb` function
 from `tools/build` (vendored tarball, digest matches the lock pin),
 C native/shim targets via the `tools/build` clang lines, BPF objects
-via the `build_bpf` function. No suite or fixture file was modified.
+via the `build_bpf` function. Suite files changed only per the four
+controller rulings above (2 Rust-mode skips, 6 approved expectation
+updates, 1 Rust-mode skip with pointer, 1 test-side paced lane); no
+fixture file was modified.
 
