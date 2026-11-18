@@ -4006,7 +4006,13 @@ suite_record() {
         --output "$TMP/r-high" --object "$ROOT/tests/fixtures/elf/ok.o" \
         --bridge "$TMP/nolib.so" --max-events-bytes 4294967297
     noobj_bundle="$(dirname "$(dirname "$BIN")")/bpf/swiotlb_attempt.bpf.o"
-    if [ -r "$noobj_bundle" ] \
+    if [ "${MEMVEIL_RUST_BIN:-0}" = 1 ]; then
+        # Rust mode: the binary embeds its channel objects, so a
+        # missing-object discovery refusal is unreachable; refusal
+        # coverage stays in record-failures + the explicit-path
+        # record cases below. Mojo path unchanged.
+        echo "record-cli: no-object skipped (Rust binary embeds objects)"
+    elif [ -r "$noobj_bundle" ] \
         || [ -r /usr/lib/memveil/swiotlb_attempt.bpf.o ]; then
         echo "record-cli: no-object skipped (object discoverable on this host)"
     else
@@ -4014,7 +4020,13 @@ suite_record() {
             --output "$TMP/r-noobj" --bridge "$TMP/nolib.so"
     fi
     nobridge_bundle="$(dirname "$(dirname "$BIN")")/lib/libbpf_mojo.so.1"
-    if [ -r "$nobridge_bundle" ] \
+    if [ "${MEMVEIL_RUST_BIN:-0}" = 1 ]; then
+        # Rust mode: the loader is statically linked, so a
+        # missing-bridge discovery refusal is unreachable; refusal
+        # coverage stays in record-failures + the explicit-path
+        # record cases below. Mojo path unchanged.
+        echo "record-cli: no-bridge skipped (Rust loader is static)"
+    elif [ -r "$nobridge_bundle" ] \
         || [ -r /usr/lib/memveil/libbpf_mojo.so.1 ]; then
         echo "record-cli: no-bridge skipped (bridge discoverable on this host)"
     else
