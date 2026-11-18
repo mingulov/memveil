@@ -27,6 +27,13 @@
 # Exit 0 only when the suite passes; 1 on test failure; 2 on
 # invalid usage; 77 when a suite with unmet inputs skips.
 # One suite per invocation; extra arguments are rejected.
+# MEMVEIL_RUST_BIN=1 points the binary-capable suites at the
+# Rust release build (rust/target/release/memveil, built via
+# cargo build --release in rust/) instead of build/memveil.
+# Python suites keep their build/memveil path, which the
+# runner links at the Rust binary; a real build/memveil file
+# is never shadowed (move it aside first). Mojo-only suites
+# are unaffected; rust/PARITY.md triages every suite.
 # LMB_SANITIZE=1 runs Mojo test targets with the address
 # sanitizer (pair with a tools/build --sanitize tree).
 #
@@ -79,12 +86,56 @@ asan_preload() {
     # come first"). Interposition still chains through
     # RTLD_NEXT. Empty in plain mode.
     if [ "${LMB_SANITIZE:-0}" = 1 ]; then
-        rt=$(ldd "$ROOT/build/memveil" 2>/dev/null | \
+        rt=$(ldd "$(memveil_bin)" 2>/dev/null | \
             sed -n 's/.*libasan[^ ]* => \([^ ]*\).*/\1/p' | head -1)
         if [ -n "$rt" ]; then
             printf '%s:' "$rt"
         fi
     fi
+}
+
+memveil_bin() {
+    # Binary under test. MEMVEIL_RUST_BIN=1 selects the Rust
+    # release build; otherwise the Mojo build tree path is
+    # returned unchanged.
+    if [ "${MEMVEIL_RUST_BIN:-0}" = 1 ]; then
+        printf '%s\n' "$ROOT/rust/target/release/memveil"
+    else
+        printf '%s\n' "$ROOT/build/memveil"
+    fi
+}
+
+memveil_build_hint() {
+    # Rebuild hint matching memveil_bin.
+    if [ "${MEMVEIL_RUST_BIN:-0}" = 1 ]; then
+        printf 'cargo build --release in rust/'
+    else
+        printf 'tools/build'
+    fi
+}
+
+rust_bin_setup() {
+    # In Rust mode the release binary must exist, and the
+    # Python suites (which hardcode build/memveil) must reach
+    # it: link build/memveil at the Rust binary. Refuses to
+    # shadow a real Mojo build; Mojo mode is untouched.
+    if [ "${MEMVEIL_RUST_BIN:-0}" != 1 ]; then
+        return 0
+    fi
+    rust="$ROOT/rust/target/release/memveil"
+    if [ ! -x "$rust" ]; then
+        echo "test: MEMVEIL_RUST_BIN=1 but missing $rust" \
+            "(run cargo build --release in rust/ first)" >&2
+        return 1
+    fi
+    link="$ROOT/build/memveil"
+    if [ -e "$link" ] && [ ! -L "$link" ]; then
+        echo "test: MEMVEIL_RUST_BIN=1 refuses to shadow $link" \
+            "(move the Mojo build aside first)" >&2
+        return 1
+    fi
+    mkdir -p "$ROOT/build"
+    ln -sfn "$rust" "$link"
 }
 
 mojo_san_flags() {
@@ -266,9 +317,9 @@ expect_text_exit() {
 }
 
 suite_reports() {
-    BIN="$ROOT/build/memveil"
+    BIN="$(memveil_bin)"
     if [ ! -x "$BIN" ]; then
-        echo "reports: missing $BIN (run tools/build first)" >&2
+        echo "reports: missing $BIN (run $(memveil_build_hint) first)" >&2
         return 1
     fi
     python3 "$ROOT/tests/cli/test_report_context.py" || return 1
@@ -1236,17 +1287,17 @@ suite_diagnostics() {
 
 suite_top() {
     run_unit_file tests/unit/test_top.mojo || return 1
-    if [ ! -x "$ROOT/build/memveil" ]; then
-        echo "top: missing build/memveil (run tools/build first)" >&2
+    if [ ! -x "$(memveil_bin)" ]; then
+        echo "top: missing $(memveil_bin) (run $(memveil_build_hint) first)" >&2
         return 1
     fi
     python3 "$ROOT/tests/cli/test_top.py"
 }
 
 suite_oracle_ledger() {
-    if [ ! -x "$ROOT/build/memveil" ]; then
-        echo "oracle-ledger: missing build/memveil" \
-            "(run tools/build first)" >&2
+    if [ ! -x "$(memveil_bin)" ]; then
+        echo "oracle-ledger: missing $(memveil_bin)" \
+            "(run $(memveil_build_hint) first)" >&2
         return 1
     fi
     if ! python3 -m pytest --version >/dev/null 2>&1; then
@@ -1381,9 +1432,9 @@ suite_vm_saturation() {
 
 suite_reader_adversarial() {
     run_unit_file tests/unit/test_reader_adversarial.mojo || return 1
-    if [ ! -x "$ROOT/build/memveil" ]; then
-        echo "reader-adversarial: missing build/memveil" \
-            "(run tools/build first)" >&2
+    if [ ! -x "$(memveil_bin)" ]; then
+        echo "reader-adversarial: missing $(memveil_bin)" \
+            "(run $(memveil_build_hint) first)" >&2
         return 1
     fi
     python3 "$ROOT/tests/cli/test_adversarial_cli.py" || return 1
@@ -1391,9 +1442,9 @@ suite_reader_adversarial() {
 }
 
 suite_fuzz_smoke() {
-    if [ ! -x "$ROOT/build/memveil" ]; then
-        echo "fuzz-smoke: missing build/memveil" \
-            "(run tools/build first)" >&2
+    if [ ! -x "$(memveil_bin)" ]; then
+        echo "fuzz-smoke: missing $(memveil_bin)" \
+            "(run $(memveil_build_hint) first)" >&2
         return 1
     fi
     python3 "$ROOT/tests/fuzz/test_oracle.py" || return 1
@@ -1414,9 +1465,9 @@ suite_fuzz_smoke() {
 }
 
 suite_fuzz_campaign() {
-    if [ ! -x "$ROOT/build/memveil" ]; then
-        echo "fuzz-campaign: missing build/memveil" \
-            "(run tools/build first)" >&2
+    if [ ! -x "$(memveil_bin)" ]; then
+        echo "fuzz-campaign: missing $(memveil_bin)" \
+            "(run $(memveil_build_hint) first)" >&2
         return 1
     fi
     seeds=${MEMVEIL_FUZZ_SEEDS:-10000}
@@ -1426,9 +1477,9 @@ suite_fuzz_campaign() {
 
 suite_record_failures() {
     run_unit_file tests/unit/test_stdout.mojo || return 1
-    if [ ! -x "$ROOT/build/memveil" ]; then
-        echo "record-failures: missing build/memveil" \
-            "(run tools/build first)" >&2
+    if [ ! -x "$(memveil_bin)" ]; then
+        echo "record-failures: missing $(memveil_bin)" \
+            "(run $(memveil_build_hint) first)" >&2
         return 1
     fi
     python3 "$ROOT/tests/cli/test_stdout_errors.py" || return 1
@@ -1441,9 +1492,9 @@ suite_record_failures() {
 }
 
 suite_output_paths() {
-    if [ ! -x "$ROOT/build/memveil" ]; then
-        echo "output-paths: missing build/memveil" \
-            "(run tools/build first)" >&2
+    if [ ! -x "$(memveil_bin)" ]; then
+        echo "output-paths: missing $(memveil_bin)" \
+            "(run $(memveil_build_hint) first)" >&2
         return 1
     fi
     python3 "$ROOT/tests/cli/prepare_capture_failures.py" || return 1
@@ -1458,9 +1509,9 @@ suite_vm_cleanup() {
 }
 
 suite_privacy() {
-    if [ ! -x "$ROOT/build/memveil" ]; then
-        echo "privacy: missing build/memveil" \
-            "(run tools/build first)" >&2
+    if [ ! -x "$(memveil_bin)" ]; then
+        echo "privacy: missing $(memveil_bin)" \
+            "(run $(memveil_build_hint) first)" >&2
         return 1
     fi
     python3 "$ROOT/tests/privacy/test_canaries.py" || return 1
@@ -1470,36 +1521,36 @@ suite_privacy() {
 }
 
 suite_render_escaping() {
-    if [ ! -x "$ROOT/build/memveil" ]; then
-        echo "render-escaping: missing build/memveil" \
-            "(run tools/build first)" >&2
+    if [ ! -x "$(memveil_bin)" ]; then
+        echo "render-escaping: missing $(memveil_bin)" \
+            "(run $(memveil_build_hint) first)" >&2
         return 1
     fi
     python3 "$ROOT/tests/privacy/test_render_escaping.py"
 }
 
 suite_offline_environment() {
-    if [ ! -x "$ROOT/build/memveil" ]; then
-        echo "offline-environment: missing build/memveil" \
-            "(run tools/build first)" >&2
+    if [ ! -x "$(memveil_bin)" ]; then
+        echo "offline-environment: missing $(memveil_bin)" \
+            "(run $(memveil_build_hint) first)" >&2
         return 1
     fi
     python3 "$ROOT/tests/privacy/test_offline_environment.py"
 }
 
 suite_perf_replay() {
-    if [ ! -x "$ROOT/build/memveil" ]; then
-        echo "perf-replay: missing build/memveil" \
-            "(run tools/build first)" >&2
+    if [ ! -x "$(memveil_bin)" ]; then
+        echo "perf-replay: missing $(memveil_bin)" \
+            "(run $(memveil_build_hint) first)" >&2
         return 1
     fi
     python3 "$ROOT/tests/perf/replay.py"
 }
 
 suite_perf_region() {
-    if [ ! -x "$ROOT/build/memveil" ]; then
-        echo "perf-region: missing build/memveil" \
-            "(run tools/build first)" >&2
+    if [ ! -x "$(memveil_bin)" ]; then
+        echo "perf-region: missing $(memveil_bin)" \
+            "(run $(memveil_build_hint) first)" >&2
         return 1
     fi
     python3 "$ROOT/tests/perf/region_replay.py"
@@ -1526,9 +1577,9 @@ suite_perf_overhead() {
 }
 
 suite_soak() {
-    if [ ! -x "$ROOT/build/memveil" ]; then
-        echo "soak: missing build/memveil" \
-            "(run tools/build first)" >&2
+    if [ ! -x "$(memveil_bin)" ]; then
+        echo "soak: missing $(memveil_bin)" \
+            "(run $(memveil_build_hint) first)" >&2
         return 1
     fi
     python3 "$ROOT/tests/perf/soak.py"
@@ -1587,9 +1638,9 @@ suite_extracted_robustness() {
 }
 
 suite_preview_package() {
-    if [ ! -x "$ROOT/build/memveil" ]; then
-        echo "preview-package: missing build/memveil" \
-            "(run tools/build first)" >&2
+    if [ ! -x "$(memveil_bin)" ]; then
+        echo "preview-package: missing $(memveil_bin)" \
+            "(run $(memveil_build_hint) first)" >&2
         return 1
     fi
     python3 "$ROOT/tests/package/test_preview.py"
@@ -1975,7 +2026,7 @@ suite_attempts() {
     }
     areport() { # <case> : replay the capture, keep JSON
         python3 "$ROOT/tests/attempts/check_integrity.py" "$TMP/$1" || afailed=1
-        "$ROOT/build/memveil" report --format json \
+        "$(memveil_bin)" report --format json \
             "$TMP/$1" >"$TMP/$1.report.json" 2>"$TMP/$1.report.err"
         rc=$?
         echo "$rc" >"$TMP/$1.report.rc"
@@ -2025,7 +2076,7 @@ suite_attempts() {
         cat "$TMP/zero.report.err" >&2
         afailed=1
     fi
-    "$ROOT/build/memveil" report --strict --format json \
+    "$(memveil_bin)" report --strict --format json \
         "$TMP/zero" >"$TMP/zero.strict.json" 2>"$TMP/zero.strict.err"
     rc=$?
     if [ "$rc" != "4" ]; then
@@ -2112,7 +2163,7 @@ suite_attempts() {
         fi
         # Scripted stops never observe quiescence, so no replayed
         # verdict is complete and strict always exits 4.
-        "$ROOT/build/memveil" report --strict --format json \
+        "$(memveil_bin)" report --strict --format json \
             "$TMP/$1" >"$TMP/$1.strict.json" 2>"$TMP/$1.strict.err"
         rc=$?
         if [ "$rc" != "4" ]; then
@@ -2156,14 +2207,14 @@ suite_attempts() {
         fi
     done
     for fmt in text json markdown; do
-        "$ROOT/build/memveil" report --format "$fmt" "$TMP/canary" \
+        "$(memveil_bin)" report --format "$fmt" "$TMP/canary" \
             >"$TMP/canary.$fmt" 2>"$TMP/canary.$fmt.err"
         rc=$?
         if [ "$rc" != "0" ]; then
             echo "attempts: canary $fmt replay exits $rc, want 0" >&2
             afailed=1
         fi
-        "$ROOT/build/memveil" report --strict --format "$fmt" \
+        "$(memveil_bin)" report --strict --format "$fmt" \
             "$TMP/canary" >"$TMP/canary.$fmt.strict" \
             2>"$TMP/canary.$fmt.strict.err"
         rc=$?
@@ -3419,9 +3470,9 @@ suite_doctor() {
         echo "doctor: oracle rejected doctor2.json" >&2
         return 1
     fi
-    BIN="$ROOT/build/memveil"
+    BIN="$(memveil_bin)"
     if [ ! -x "$BIN" ]; then
-        echo "doctor: missing $BIN (run tools/build first)" >&2
+        echo "doctor: missing $BIN (run $(memveil_build_hint) first)" >&2
         return 1
     fi
     TMP=$(mktemp -d)
@@ -3892,9 +3943,9 @@ suite_record() {
     run_unit_file tests/unit/test_artifact_files.mojo || return 1
     run_unit_file tests/unit/test_qualify.mojo || return 1
     echo "record: unit suites passed"
-    BIN="$ROOT/build/memveil"
+    BIN="$(memveil_bin)"
     if [ ! -x "$BIN" ]; then
-        echo "record: missing $BIN (run tools/build first)" >&2
+        echo "record: missing $BIN (run $(memveil_build_hint) first)" >&2
         return 1
     fi
     TMP=$(mktemp -d)
@@ -4030,9 +4081,9 @@ suite_record() {
 suite_qualify() {
     run_unit_file tests/unit/test_qualify.mojo || return 1
     run_unit_file tests/unit/test_bind.mojo || return 1
-    BIN="$ROOT/build/memveil"
+    BIN="$(memveil_bin)"
     if [ ! -x "$BIN" ]; then
-        echo "qualify: missing $BIN (run tools/build first)" >&2
+        echo "qualify: missing $BIN (run $(memveil_build_hint) first)" >&2
         return 1
     fi
     TMP=$(mktemp -d)
@@ -4233,6 +4284,9 @@ if [ $# -gt 1 ]; then
     echo "test: too many arguments" >&2
     usage >&2
     exit 2
+fi
+if [ "$1" != "--help" ] && [ "$1" != "-h" ]; then
+    rust_bin_setup || exit 1
 fi
 case "$1" in
     --help|-h)
