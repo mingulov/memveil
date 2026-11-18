@@ -6,6 +6,10 @@
 //! verb builds on: exit codes, scrubbed stderr writers, diagnostic
 //! escaping, and refusal lines.
 
+pub mod bind;
+pub mod doctor;
 pub mod durations;
+pub mod qualify;
 pub mod record;
 pub mod report;
+pub mod top;

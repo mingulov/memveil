@@ -24,11 +24,13 @@
 use crate::capture::collector::{EXIT_ERROR, EXIT_INVALID, EXIT_REFUSAL};
 use crate::capture::live::LiveWriter;
 use crate::capture::run::{RecordOptions, repair_warning_for, run_collector_with};
+#[cfg(test)]
+use crate::cli::doctor::default_profiles_dir;
+use crate::cli::doctor::resolve_profiles_dir;
 use crate::cli::report::{
     CliError, EXIT_INTERNAL, EXIT_OK, final_capture_summary, refusal_stderr_lines,
     sanitize_diagnostic, write_stderr, write_stderr_trusted,
 };
-use crate::platform::reader::{EvidenceError, readlink_self};
 use crate::platform::stdout::write_stdout;
 
 /// Usage text for the record verb.
@@ -320,53 +322,6 @@ fn record_misused(detail: &str) -> i64 {
 /// One stdout summary line for a run that reached an end reason.
 fn record_done_line(end_reason: &str, outcome: &str, exit_code: i64) -> String {
     format!("record: end={end_reason} outcome={outcome} exit={exit_code}")
-}
-
-/// Locate the profiles dir from the program path.
-///
-/// Layout contract: the executable lives one directory below
-/// the tree root (`<root>/build/memveil` in a checkout,
-/// `<root>/bin/memveil` packaged), with profiles at
-/// `<root>/profiles`. An executable installed at
-/// `/usr/bin` instead reads the FHS profiles dir. A bare
-/// program name (PATH lookup) falls back to `./profiles`.
-///
-/// This is record's local copy; the doctor verb owns the
-/// canonical resolver once it exists, and this call rewires
-/// to it then.
-fn default_profiles_dir(prog: &str) -> String {
-    let parts: Vec<&str> = prog.split('/').collect();
-    if parts.len() < 2 {
-        return "profiles".to_string();
-    }
-    let mut out = String::new();
-    for (i, part) in parts[..parts.len() - 1].iter().enumerate() {
-        if i != 0 {
-            out.push('/');
-        }
-        out.push_str(part);
-    }
-    if out.is_empty() {
-        out = "/".to_string();
-    }
-    if out == "/" {
-        return "/../profiles".to_string();
-    }
-    if out == "/usr/bin" {
-        return "/usr/share/memveil/profiles".to_string();
-    }
-    out + "/../profiles"
-}
-
-/// Locate the profiles dir from the kernel-resolved binary path.
-///
-/// There is deliberately no argv[0] fallback: when /proc/self/exe
-/// cannot be resolved, guessing from argv[0] or the working
-/// directory could load a planted tree's profiles, so resolution
-/// failure is an explicit error instead.
-fn resolve_profiles_dir() -> Result<String, EvidenceError> {
-    let exe = readlink_self()?;
-    Ok(default_profiles_dir(&exe))
 }
 
 /// Run the record flow against explicit roots; return exit code.

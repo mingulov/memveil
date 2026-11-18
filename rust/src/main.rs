@@ -3,8 +3,12 @@
 
 use memveil::ENGINE_VERSION;
 use memveil::capture::collector::EXIT_REFUSAL;
+use memveil::cli::bind::run_bind;
+use memveil::cli::doctor::run_doctor;
+use memveil::cli::qualify::run_qualify;
 use memveil::cli::record::run_record;
 use memveil::cli::report::{EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, run_report, write_stderr};
+use memveil::cli::top::run_top;
 use memveil::platform::signal::{ensure_inherited_signal_block, ignore_sigpipe};
 use memveil::platform::stdout::write_stdout;
 use std::process::ExitCode;
@@ -63,19 +67,21 @@ fn main() -> ExitCode {
             Err(_) => stdout_failed(),
         }
     }
-    // Extension point: top, doctor, qualify, and bind-profile
-    // dispatch arms land here once those verbs exist; until
-    // then unknown verbs print usage to stderr and exit 2.
-    if verb != "report" && verb != "record" {
+    if verb != "report"
+        && verb != "doctor"
+        && verb != "record"
+        && verb != "top"
+        && verb != "qualify"
+        && verb != "bind-profile"
+    {
         let _ = write_stderr(&top_usage());
         return ExitCode::from(EXIT_INVALID as u8);
     }
     let rest = args[1..].to_vec();
-    // Extension point: top and qualify join record here; every
-    // collector-driving verb needs all runtime threads to
-    // inherit blocked stop signals, otherwise a SIGINT lands
-    // in a worker and never reaches signalfd.
-    if verb == "record" {
+    // Every collector-driving verb needs all runtime threads to
+    // inherit blocked stop signals, otherwise a SIGINT lands in a
+    // worker and never reaches signalfd.
+    if verb == "record" || verb == "top" || verb == "qualify" {
         let full: Vec<String> = std::env::args().collect();
         let note = ensure_inherited_signal_block(&full);
         if !note.is_empty() {
@@ -83,8 +89,16 @@ fn main() -> ExitCode {
             return ExitCode::from(EXIT_REFUSAL as u8);
         }
     }
-    let code = if verb == "record" {
+    let code = if verb == "doctor" {
+        run_doctor(&rest)
+    } else if verb == "record" {
         run_record(&rest)
+    } else if verb == "top" {
+        run_top(&rest)
+    } else if verb == "qualify" {
+        run_qualify(&rest)
+    } else if verb == "bind-profile" {
+        run_bind(&rest)
     } else {
         run_report(&rest)
     };
