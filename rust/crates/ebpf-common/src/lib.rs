@@ -1,3 +1,4 @@
+//! SPDX-License-Identifier: GPL-2.0-or-later
 //! MemVeil eBPF/host shared wire record types and decoders.
 //!
 //! Layouts mirror `bpf/include/memveil_events.h`: attempt 98 B,

@@ -11,6 +11,9 @@
 //! crate's own library, binaries, and integration tests can read it with
 //! `env!`. (A `links`-metadata `DEP_` variable would only reach downstream
 //! build scripts, which this root package has none of.)
+//!
+//! Prerequisite: `bpf-linker` 0.10.4 on PATH. Install it with
+//! `cargo install bpf-linker --version 0.10.4 --locked`.
 
 use std::{env, path::PathBuf, process::Command};
 
@@ -25,6 +28,18 @@ fn main() {
     println!("cargo::rerun-if-changed=crates/ebpf/rust-toolchain.toml");
     println!("cargo::rerun-if-changed=crates/ebpf-common/src");
     println!("cargo::rerun-if-changed=crates/ebpf-common/Cargo.toml");
+
+    // Preflight: fail early with an actionable message when the linker is
+    // missing. Local probe only, so it cannot break offline rebuilds.
+    let linker_ok = Command::new("bpf-linker")
+        .arg("--version")
+        .status()
+        .is_ok_and(|status| status.success());
+    assert!(
+        linker_ok,
+        "bpf-linker 0.10.4 is required on PATH: \
+         run `cargo install bpf-linker --version 0.10.4 --locked`"
+    );
 
     let manifest_dir =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"));
