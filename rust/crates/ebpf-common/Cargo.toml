@@ -1,0 +1,15 @@
+[package]
+name = "memveil-ebpf-common"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.100"
+license = "GPL-3.0-or-later"
+description = "MemVeil eBPF/host shared wire record types and decoders"
+publish = false
+
+[features]
+user = []
+
+[lib]
+name = "memveil_ebpf_common"
+path = "src/lib.rs"

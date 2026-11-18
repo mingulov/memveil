@@ -10,3 +10,6 @@ publish = false
 [lib]
 name = "memveil"
 path = "src/lib.rs"
+
+[workspace]
+members = ["crates/ebpf-common"]
