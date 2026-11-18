@@ -60,10 +60,7 @@ const FROZEN_VERBS: [&str; 8] = [
 /// consume; MAN_FILES/COMPLETION_FILES stay as the content-check
 /// subsets below.
 fn fixed_files() -> BTreeSet<String> {
-    h::FHS_FIXED_FILES
-        .iter()
-        .map(ToString::to_string)
-        .collect()
+    h::FHS_FIXED_FILES.iter().map(ToString::to_string).collect()
 }
 
 /// Max GLIBC need across the extracted payload (binary + lib/*.so*).

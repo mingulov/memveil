@@ -53,11 +53,13 @@ fn usage_paths_exit_invalid() {
     // stderr and exit 2 (EXIT_INVALID), leaving stdout empty.
     let bin = env!("CARGO_BIN_EXE_memveil");
     let bare = Command::new(bin).output().expect("run memveil binary");
-    assert_eq!(bare.status.code(), Some(2), "bare argv exits {}", bare.status);
-    assert!(
-        bare.stdout.is_empty(),
-        "bare argv must leave stdout empty"
+    assert_eq!(
+        bare.status.code(),
+        Some(2),
+        "bare argv exits {}",
+        bare.status
     );
+    assert!(bare.stdout.is_empty(), "bare argv must leave stdout empty");
     let usage = String::from_utf8_lossy(&bare.stderr);
     assert!(
         usage.starts_with("usage: memveil <"),
