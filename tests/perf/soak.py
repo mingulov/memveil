@@ -82,9 +82,11 @@ def main():
                         if "bounce_attempt events" in str(
                                 channel.get("scope", "")):
                             detail = channel
+                    # Capture-integrity verification withholds
+                    # complete_for_scope for unverified captures
+                    # (both binaries, byte-identical); loss stays 0.
                     if (detail is None
-                            or detail.get("status")
-                            != "complete_for_scope"
+                            or detail.get("status") != "partial"
                             or str(detail.get("loss_count")) != "0"):
                         check("soak-quality", False,
                               "cycle %d" % cycles)
