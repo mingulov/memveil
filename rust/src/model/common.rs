@@ -102,6 +102,7 @@ pub fn parse_maybe_u64(text: Option<&str>) -> Result<MaybeU64, ValidationError> 
 /// to `0`. The whole token must be the integer: the document cursor
 /// splits the digit run exactly as the Mojo scanner does, so trailing
 /// garbage never reaches this function from document parsing.
+/// The error is provisional: the owning JSON cursor maps it into its own error type under the reader's field context.
 pub fn parse_json_int(text: &str) -> Result<i64, ValidationError> {
     let raw = text.as_bytes();
     let mut pos = 0;

@@ -4,6 +4,9 @@
 //! Later tasks add event/session/integrity/report/encode modules here.
 
 pub mod common;
+pub mod event;
 pub mod identity;
 pub mod regions;
+pub(crate) mod scan;
+pub mod session;
 pub mod validate;
