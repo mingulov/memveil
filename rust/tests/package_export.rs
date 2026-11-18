@@ -181,17 +181,3 @@ fn export_manifest_hashes_bind_and_manuals_ship() {
         assert!(bundle.join("docs").join(name).is_file(), "docs lack {name}");
     }
 }
-
-#[test]
-fn candidate_clean_tree() {
-    // The script's refusal is proven by dirty_tree_refuses_candidate;
-    // this live-tree check only asserts when the worktree is clean
-    // (uncommitted files from concurrent work must not fail it).
-    let out = h::run("git", &["status", "--short"], Some(&h::repo_root()));
-    assert!(out.status.success(), "cannot inspect worktree");
-    if !String::from_utf8_lossy(&out.stdout).trim().is_empty() {
-        eprintln!(
-            "skip: worktree has uncommitted changes (candidate rule proven by the dirty-clone test)"
-        );
-    }
-}

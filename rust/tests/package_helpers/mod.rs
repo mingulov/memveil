@@ -37,6 +37,44 @@ pub const BPF_OBJECTS: [&str; 3] = [
     "swiotlb_copy.bpf.o",
 ];
 
+/// FHS payload members pinned literally, as root-relative paths:
+/// every member outside the lib/ closure extras, the docs/profiles
+/// mirrors, and format-only files. The single source both the .deb
+/// and the .rpm fixed-set gates consume, so the two formats cannot
+/// drift (the .rpm maps each entry to its /-rooted form).
+pub const FHS_FIXED_FILES: [&str; 30] = [
+    "usr/bin/memveil",
+    "usr/lib/memveil/libgcc_s.so.1",
+    "usr/lib/memveil/swiotlb_attempt.bpf.o",
+    "usr/lib/memveil/swiotlb_lifecycle.bpf.o",
+    "usr/lib/memveil/swiotlb_copy.bpf.o",
+    "usr/share/doc/memveil/copyright",
+    "usr/share/doc/memveil/LICENSE",
+    "usr/share/doc/memveil/THIRD-PARTY-NOTICES.md",
+    "usr/share/doc/memveil/LICENSES/GPL-2.0-only.txt",
+    "usr/share/doc/memveil/LICENSES/GPL-2.0-or-later.txt",
+    "usr/share/doc/memveil/LICENSES/GPL-2.0.txt",
+    "usr/share/doc/memveil/licenses/GPL-3.0.txt",
+    "usr/share/doc/memveil/licenses/RUNTIME.LIBRARY.EXCEPTION",
+    "usr/share/memveil/docs/examples/real-capture/README.md",
+    "usr/share/memveil/docs/examples/real-capture/events.ndjson",
+    "usr/share/memveil/docs/examples/real-capture/session.json",
+    "usr/share/memveil/docs/examples/lifecycle-copy/README.md",
+    "usr/share/memveil/docs/examples/lifecycle-copy/events.ndjson",
+    "usr/share/memveil/docs/examples/lifecycle-copy/session.json",
+    "usr/share/memveil/docs/examples/lifecycle-copy/oracle-phase.log",
+    "usr/share/memveil/docs/examples/lifecycle-copy/fail-phase.log",
+    "usr/share/man/man1/memveil.1",
+    "usr/share/man/man1/memveil-record.1",
+    "usr/share/man/man1/memveil-report.1",
+    "usr/share/man/man1/memveil-top.1",
+    "usr/share/man/man1/memveil-doctor.1",
+    "usr/share/man/man1/memveil-qualify.1",
+    "usr/share/man/man1/memveil-bind-profile.1",
+    "usr/share/bash-completion/completions/memveil",
+    "usr/share/zsh/vendor-completions/_memveil",
+];
+
 /// Root of the Rust workspace (`rust/`).
 pub fn rust_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

@@ -55,35 +55,15 @@ const FROZEN_VERBS: [&str; 8] = [
     "version",
 ];
 
-/// Every member outside lib/ and the docs mirror, pinned literally.
+/// Every member outside lib/ and the docs mirror, from the one
+/// shared pin (`package_helpers::FHS_FIXED_FILES`) both FHS formats
+/// consume; MAN_FILES/COMPLETION_FILES stay as the content-check
+/// subsets below.
 fn fixed_files() -> BTreeSet<String> {
-    let mut fixed = BTreeSet::from([
-        "usr/bin/memveil".to_string(),
-        "usr/lib/memveil/libgcc_s.so.1".to_string(),
-        "usr/lib/memveil/swiotlb_attempt.bpf.o".to_string(),
-        "usr/lib/memveil/swiotlb_lifecycle.bpf.o".to_string(),
-        "usr/lib/memveil/swiotlb_copy.bpf.o".to_string(),
-        "usr/share/doc/memveil/copyright".to_string(),
-        "usr/share/doc/memveil/LICENSE".to_string(),
-        "usr/share/doc/memveil/THIRD-PARTY-NOTICES.md".to_string(),
-        "usr/share/doc/memveil/LICENSES/GPL-2.0-only.txt".to_string(),
-        "usr/share/doc/memveil/LICENSES/GPL-2.0-or-later.txt".to_string(),
-        "usr/share/doc/memveil/LICENSES/GPL-2.0.txt".to_string(),
-        "usr/share/doc/memveil/licenses/GPL-3.0.txt".to_string(),
-        "usr/share/doc/memveil/licenses/RUNTIME.LIBRARY.EXCEPTION".to_string(),
-        "usr/share/memveil/docs/examples/real-capture/README.md".to_string(),
-        "usr/share/memveil/docs/examples/real-capture/events.ndjson".to_string(),
-        "usr/share/memveil/docs/examples/real-capture/session.json".to_string(),
-        "usr/share/memveil/docs/examples/lifecycle-copy/README.md".to_string(),
-        "usr/share/memveil/docs/examples/lifecycle-copy/events.ndjson".to_string(),
-        "usr/share/memveil/docs/examples/lifecycle-copy/session.json".to_string(),
-        "usr/share/memveil/docs/examples/lifecycle-copy/oracle-phase.log".to_string(),
-        "usr/share/memveil/docs/examples/lifecycle-copy/fail-phase.log".to_string(),
-    ]);
-    for name in MAN_FILES.iter().chain(COMPLETION_FILES.iter()) {
-        fixed.insert((*name).to_string());
-    }
-    fixed
+    h::FHS_FIXED_FILES
+        .iter()
+        .map(ToString::to_string)
+        .collect()
 }
 
 /// Max GLIBC need across the extracted payload (binary + lib/*.so*).

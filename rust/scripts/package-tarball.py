@@ -97,6 +97,12 @@ CHANNELS = (
 
 # Host license texts for the shipped libgcc, as (staged rel,
 # candidate host paths): the first readable candidate wins.
+# Portability: the GPL-3 text resolves on Fedora (libgcc
+# COPYING3) and Debian (common-licenses), but the runtime
+# exception text has only the Fedora libgcc path: Debian's
+# common-licenses ships no standalone GCC exception text, so
+# a Debian build fails closed below naming the tried path
+# until a Debian-side source is pinned.
 GCC_LICENSES = (
     ("licenses/GPL-3.0.txt", (
         "/usr/share/licenses/libgcc/COPYING3",

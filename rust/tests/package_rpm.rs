@@ -22,43 +22,14 @@ use package_helpers as h;
 use std::collections::BTreeSet;
 use std::fs;
 
-/// Pinned payload, mirroring the .deb fixed set (independent literal).
+/// Pinned payload, from the one shared pin
+/// (`package_helpers::FHS_FIXED_FILES`) both FHS formats consume,
+/// mapped to the /-rooted form the spec and `rpm -ql` use.
 fn fixed_files() -> BTreeSet<String> {
-    BTreeSet::from(
-        [
-            "/usr/bin/memveil",
-            "/usr/lib/memveil/libgcc_s.so.1",
-            "/usr/lib/memveil/swiotlb_attempt.bpf.o",
-            "/usr/lib/memveil/swiotlb_lifecycle.bpf.o",
-            "/usr/lib/memveil/swiotlb_copy.bpf.o",
-            "/usr/share/doc/memveil/copyright",
-            "/usr/share/doc/memveil/LICENSE",
-            "/usr/share/doc/memveil/THIRD-PARTY-NOTICES.md",
-            "/usr/share/doc/memveil/LICENSES/GPL-2.0-only.txt",
-            "/usr/share/doc/memveil/LICENSES/GPL-2.0-or-later.txt",
-            "/usr/share/doc/memveil/LICENSES/GPL-2.0.txt",
-            "/usr/share/doc/memveil/licenses/GPL-3.0.txt",
-            "/usr/share/doc/memveil/licenses/RUNTIME.LIBRARY.EXCEPTION",
-            "/usr/share/memveil/docs/examples/real-capture/README.md",
-            "/usr/share/memveil/docs/examples/real-capture/events.ndjson",
-            "/usr/share/memveil/docs/examples/real-capture/session.json",
-            "/usr/share/memveil/docs/examples/lifecycle-copy/README.md",
-            "/usr/share/memveil/docs/examples/lifecycle-copy/events.ndjson",
-            "/usr/share/memveil/docs/examples/lifecycle-copy/session.json",
-            "/usr/share/memveil/docs/examples/lifecycle-copy/oracle-phase.log",
-            "/usr/share/memveil/docs/examples/lifecycle-copy/fail-phase.log",
-            "/usr/share/man/man1/memveil.1",
-            "/usr/share/man/man1/memveil-record.1",
-            "/usr/share/man/man1/memveil-report.1",
-            "/usr/share/man/man1/memveil-top.1",
-            "/usr/share/man/man1/memveil-doctor.1",
-            "/usr/share/man/man1/memveil-qualify.1",
-            "/usr/share/man/man1/memveil-bind-profile.1",
-            "/usr/share/bash-completion/completions/memveil",
-            "/usr/share/zsh/vendor-completions/_memveil",
-        ]
-        .map(str::to_string),
-    )
+    h::FHS_FIXED_FILES
+        .iter()
+        .map(|rel| format!("/{rel}"))
+        .collect()
 }
 
 /// The only `%dir`-owned directories.
