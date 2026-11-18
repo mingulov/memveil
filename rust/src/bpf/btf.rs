@@ -306,8 +306,10 @@ impl<'a> Btf<'a> {
         )))
     }
 
-    /// The single struct (or union) record with this name.
-    fn struct_record(&self, name: &str) -> Result<&TypeRec<'a>, SessionError> {
+    /// The single struct (or union) record with this name, or `None`
+    /// when no such struct exists. Several same-named structs refuse:
+    /// absence is the only soft outcome.
+    fn struct_record_opt(&self, name: &str) -> Result<Option<&TypeRec<'a>>, SessionError> {
         let mut found = None;
         for rec in &self.types {
             if rec.kind != KIND_STRUCT && rec.kind != KIND_UNION {
@@ -322,7 +324,13 @@ impl<'a> Btf<'a> {
                 found = Some(rec);
             }
         }
-        found.ok_or_else(|| SessionError::Offsets(format!("BTF missing: struct {name}")))
+        Ok(found)
+    }
+
+    /// The single struct (or union) record with this name.
+    fn struct_record(&self, name: &str) -> Result<&TypeRec<'a>, SessionError> {
+        self.struct_record_opt(name)?
+            .ok_or_else(|| SessionError::Offsets(format!("BTF missing: struct {name}")))
     }
 
     /// Byte size of the named struct.
@@ -330,14 +338,18 @@ impl<'a> Btf<'a> {
         Ok(self.struct_record(name)?.size_or_type)
     }
 
-    /// Byte offset and width of the named member. Bitfields refuse: the
-    /// probe reads whole bytes only.
-    pub(crate) fn struct_member(
+    /// Byte offset and width of the named member, or `None` when the
+    /// struct or member is genuinely absent. Present-but-malformed
+    /// members (bitfield, misalignment, oversize) and corrupt images
+    /// refuse: callers must never mistake them for absence.
+    pub(crate) fn struct_member_opt(
         &self,
         name: &str,
         member: &str,
-    ) -> Result<(u32, u32), SessionError> {
-        let rec = self.struct_record(name)?;
+    ) -> Result<Option<(u32, u32)>, SessionError> {
+        let Some(rec) = self.struct_record_opt(name)? else {
+            return Ok(None);
+        };
         for index in 0..usize::from(rec.vlen) {
             let at = index * 12;
             let (Some(member_name), Some(member_type), Some(raw_off)) = (
@@ -370,11 +382,20 @@ impl<'a> Btf<'a> {
             let width = u32::try_from(self.size_of(member_type)?).map_err(|_| {
                 SessionError::Offsets(format!("BTF invalid: {name}.{member} too large"))
             })?;
-            return Ok((off, width));
+            return Ok(Some((off, width)));
         }
-        Err(SessionError::Offsets(format!(
-            "BTF missing: {name}.{member}"
-        )))
+        Ok(None)
+    }
+
+    /// Byte offset and width of the named member. Bitfields refuse: the
+    /// probe reads whole bytes only.
+    pub(crate) fn struct_member(
+        &self,
+        name: &str,
+        member: &str,
+    ) -> Result<(u32, u32), SessionError> {
+        self.struct_member_opt(name, member)?
+            .ok_or_else(|| SessionError::Offsets(format!("BTF missing: {name}.{member}")))
     }
 
     /// Name of the struct the named member points to, through modifiers.
@@ -569,6 +590,24 @@ mod tests {
         assert_eq!(btf.enum_value("dir", "TO"), Ok(1));
         assert_eq!(btf.enum_value("dir", "FROM"), Ok(2));
         assert!(btf.enum_value("dir", "NOPE").is_err());
+    }
+
+    #[test]
+    fn member_opt_separates_absence_from_malformed() {
+        let image = synthetic();
+        let btf = Btf::parse(&image).expect("synthetic image must parse");
+        assert_eq!(btf.struct_member_opt("pool", "start"), Ok(Some((0, 8))));
+        // Missing struct or member yields None, never an error.
+        assert_eq!(btf.struct_member_opt("pool", "nope"), Ok(None));
+        assert_eq!(btf.struct_member_opt("nope", "start"), Ok(None));
+        // The strict lookup keeps refusing absence with the missing marker.
+        let error = btf
+            .struct_member("pool", "nope")
+            .expect_err("missing member must refuse");
+        assert!(
+            error.to_string().contains("BTF missing:"),
+            "want the missing marker, got: {error}"
+        );
     }
 
     #[test]

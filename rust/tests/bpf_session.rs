@@ -17,13 +17,19 @@
 //! the kernel-side `mv_counts` observed counter: zero observed means the
 //! window was silent and the test SKIPs loudly; nonzero observed with no
 //! decoded frame FAILS. Silence and breakage are never confused.
+//!
+//! Copy-table resolution needs no privilege but does need a supported host:
+//! tests using it SKIP loudly when kernel BTF is unreadable or when the
+//! kernel carries a half-present private-pool chain, which the loader
+//! refuses instead of silently downgrading. Any other resolution failure
+//! FAILS.
 
 use memveil::bpf::{
     ATTACH_ORDER, AttachKind, AttachSpec, Channel, Channels, DETACH_ORDER, Frame, MapSpec,
     ProgramSpec, Session, attempt_specs, check_channel_geometry, copy_specs, lifecycle_specs,
     resolve_attempt_offsets, resolve_copy_offsets, sentinel_copy_offsets, validate_copy_offsets,
 };
-use memveil_ebpf_common::{MV_FLAG_BYTE_COVERAGE, decode_offsets_table};
+use memveil_ebpf_common::{CopyOffsets, MV_FLAG_BYTE_COVERAGE, decode_offsets_table};
 
 /// ELF `e_machine` for BPF objects (`EM_BPF`).
 const EM_BPF: u16 = 247;
@@ -323,9 +329,37 @@ fn attempt_offsets_resolve_live() {
     assert_eq!(&resolved.table[..4], &0x35464D4Du32.to_le_bytes());
 }
 
+/// Resolve the live copy table for `test`, or skip it loudly when the
+/// host cannot resolve by design: no readable kernel BTF, or a
+/// half-present private-pool chain (exactly one of
+/// `device.dma_io_tlb_mem` / `io_tlb_mem.cc_shared` exists), which the
+/// loader refuses instead of silently downgrading. Any other failure is
+/// a real regression and panics.
+fn live_copy_table_or_skip(test: &str) -> Option<CopyOffsets> {
+    match resolve_copy_offsets() {
+        Ok(table) => Some(table),
+        Err(error) => {
+            // Path mirrors the loader's `KERNEL_BTF`.
+            if std::fs::File::open("/sys/kernel/btf/vmlinux").is_err() {
+                eprintln!("SKIP {test}: no readable /sys/kernel/btf/vmlinux ({error})");
+                return None;
+            }
+            if error.to_string().contains("half-present") {
+                eprintln!(
+                    "SKIP {test}: host kernel has a half-present private-pool chain, which the loader refuses ({error})"
+                );
+                return None;
+            }
+            panic!("{test}: live kernel BTF must resolve: {error}");
+        }
+    }
+}
+
 #[test]
 fn copy_offsets_resolve_live_btf() {
-    let table = resolve_copy_offsets().expect("live kernel BTF must resolve");
+    let Some(table) = live_copy_table_or_skip("copy_offsets_resolve_live_btf") else {
+        return;
+    };
     validate_copy_offsets(&table).expect("resolved table must validate");
     eprintln!(
         "copy offsets: pool={}/{}/{} slots={} slot_size={} parms={} mask={} flags={:#x} dir={}/{}/{}",
@@ -501,7 +535,10 @@ fn live_copy_install_and_armed() {
     let bytes = channel_bytes(Channel::Copy);
     let mut session = Session::open(&bytes, "mv_copies").expect("open");
     session.load().expect("load");
-    let table = resolve_copy_offsets().expect("resolve copy offsets");
+    let Some(table) = live_copy_table_or_skip("live_copy_install_and_armed") else {
+        session.close().expect("close after skip");
+        return;
+    };
     session.install_copy_offsets(&table).expect("install");
     let back = session
         .map_read("mv_copy_offs", 0, 112)
@@ -546,7 +583,12 @@ fn live_attach_rollback_and_reattach() {
     copy.load().expect("load copy");
     let offsets = resolve_attempt_offsets().expect("resolve attempt offsets");
     attempt.install_offsets(&offsets.table).expect("install");
-    let table = resolve_copy_offsets().expect("resolve copy offsets");
+    let Some(table) = live_copy_table_or_skip("live_attach_rollback_and_reattach") else {
+        attempt.close().expect("close attempt after skip");
+        lifecycle.close().expect("close lifecycle after skip");
+        copy.close().expect("close copy after skip");
+        return;
+    };
     copy.install_copy_offsets(&table).expect("install");
     let mut channels = Channels::new(attempt, Some(lifecycle), Some(copy));
     // Sabotage the last channel in attach order: the attempt attach must

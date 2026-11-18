@@ -424,9 +424,9 @@ fn need_pointer(
 
 /// Resolve the copy table from raw kernel-BTF bytes: the 8 pool/slot/parms
 /// widths, the slot stride, the private-pool chain, and the direction
-/// enumerators. Absent private-pool fields downgrade to a flag-clear table
-/// (the probe then leaves the private marker clear); present-but-wrong
-/// fields refuse.
+/// enumerators. Both private-pool halves absent downgrades to a flag-clear
+/// table (the probe then leaves the private marker clear); a
+/// present-but-wrong half, or exactly one half present, refuses.
 pub fn resolve_copy_offsets_from_btf(data: &[u8]) -> Result<CopyOffsets, SessionError> {
     let btf = Btf::parse(data)?;
     let pool_size = btf.struct_size("io_tlb_pool")?;
@@ -458,11 +458,14 @@ pub fn resolve_copy_offsets_from_btf(data: &[u8]) -> Result<CopyOffsets, Session
         "min_align_mask",
         4,
     )?;
-    // Private-pool chain: both halves present and well-formed, or neither.
-    // String references were validated at parse, so a lookup error here
-    // means genuinely absent, never a corrupt image.
-    let mem = match btf.struct_member("device", "dma_io_tlb_mem") {
-        Ok((off, 8)) => {
+    // Private-pool chain: both halves present and well-formed (flag
+    // set) or both genuinely absent (flag clear). The optional lookup
+    // separates absence (`None`) from present-but-malformed (bitfield,
+    // misalignment, oversize, corrupt image), which refuses through `?`;
+    // a half-present chain refuses below instead of silently dropping
+    // the present half.
+    let mem = match btf.struct_member_opt("device", "dma_io_tlb_mem")? {
+        Some((off, 8)) => {
             let pointee = btf.member_points_to("device", "dma_io_tlb_mem")?;
             if pointee.as_str() != "io_tlb_mem" {
                 let message = format!(
@@ -477,15 +480,15 @@ pub fn resolve_copy_offsets_from_btf(data: &[u8]) -> Result<CopyOffsets, Session
             }
             Some(off)
         }
-        Ok((_, size)) => {
+        Some((_, size)) => {
             return Err(SessionError::Offsets(format!(
                 "BTF refused: device.dma_io_tlb_mem width {size}, want 8"
             )));
         }
-        Err(_) => None,
+        None => None,
     };
-    let cc = match btf.struct_member("io_tlb_mem", "cc_shared") {
-        Ok((off, 1)) => {
+    let cc = match btf.struct_member_opt("io_tlb_mem", "cc_shared")? {
+        Some((off, 1)) => {
             let mem_size = btf.struct_size("io_tlb_mem")?;
             if off.saturating_add(1) > mem_size {
                 return Err(SessionError::Offsets(format!(
@@ -494,16 +497,23 @@ pub fn resolve_copy_offsets_from_btf(data: &[u8]) -> Result<CopyOffsets, Session
             }
             Some(off)
         }
-        Ok((_, size)) => {
+        Some((_, size)) => {
             return Err(SessionError::Offsets(format!(
                 "BTF refused: io_tlb_mem.cc_shared width {size}, want 1"
             )));
         }
-        Err(_) => None,
+        None => None,
     };
     let (flags, mem_off, mem_size, cc_off, cc_size) = match (mem, cc) {
         (Some(mem_off), Some(cc_off)) => (MV_COPY_OFFS_HAS_PRIVATE, mem_off, 8, cc_off, 1),
-        _ => (0, 0, 0, 0, 0),
+        (None, None) => (0, 0, 0, 0, 0),
+        _ => {
+            return Err(SessionError::Offsets(
+                "BTF refused: private-pool chain is half-present \
+                 (device.dma_io_tlb_mem vs io_tlb_mem.cc_shared)"
+                    .to_owned(),
+            ));
+        }
     };
     let dir_to = btf.enum_value("dma_data_direction", "DMA_TO_DEVICE")?;
     let dir_from = btf.enum_value("dma_data_direction", "DMA_FROM_DEVICE")?;
@@ -865,6 +875,319 @@ mod tests {
         assert_eq!(
             u32::from_le_bytes([bytes[96], bytes[97], bytes[98], bytes[99]]),
             1
+        );
+    }
+
+    /// Shape of the private-pool halves in the synthetic copy image.
+    struct PrivateShape {
+        /// Include `device.dma_io_tlb_mem` (pointer at `io_tlb_mem`).
+        with_mem: bool,
+        /// Emit `device.dma_io_tlb_mem` at a non-byte-aligned bit offset.
+        mem_misaligned: bool,
+        /// Include the `io_tlb_mem` struct at all.
+        with_mem_struct: bool,
+        /// Include `io_tlb_mem.cc_shared`.
+        with_cc: bool,
+        /// Emit `io_tlb_mem.cc_shared` as a bitfield.
+        cc_bitfield: bool,
+        /// Emit `io_tlb_mem.cc_shared` with a gigantic array type whose
+        /// width overflows `u32`.
+        cc_oversize: bool,
+    }
+
+    impl PrivateShape {
+        /// Both halves present and well-formed.
+        fn full() -> Self {
+            Self {
+                with_mem: true,
+                mem_misaligned: false,
+                with_mem_struct: true,
+                with_cc: true,
+                cc_bitfield: false,
+                cc_oversize: false,
+            }
+        }
+
+        /// Both halves absent; the structs stay.
+        fn absent() -> Self {
+            Self {
+                with_mem: false,
+                mem_misaligned: false,
+                with_mem_struct: true,
+                with_cc: false,
+                cc_bitfield: false,
+                cc_oversize: false,
+            }
+        }
+    }
+
+    /// Build a synthetic kernel-BTF image carrying the six copy types
+    /// (`io_tlb_pool`, `io_tlb_slot`, `device`, `device_dma_parameters`,
+    /// `io_tlb_mem`, `dma_data_direction`) with the shaped private halves.
+    /// Layouts mirror the live kernel (pool 0/8/24/56, slot stride 24,
+    /// mask @4, directions 1/2/0).
+    fn copy_btf_image(shape: &PrivateShape) -> Vec<u8> {
+        // BTF type-kind numbers (mirroring the loader's reader).
+        const KIND_INT: u8 = 1;
+        const KIND_PTR: u8 = 2;
+        const KIND_ARRAY: u8 = 3;
+        const KIND_STRUCT: u8 = 4;
+        const KIND_ENUM: u8 = 6;
+
+        let mut strings = vec![0u8];
+        let mut intern = |text: &str| -> u32 {
+            let at = strings.len() as u32;
+            strings.extend_from_slice(text.as_bytes());
+            strings.push(0);
+            at
+        };
+        let pool = intern("io_tlb_pool");
+        let slot = intern("io_tlb_slot");
+        let device = intern("device");
+        let parms = intern("device_dma_parameters");
+        let mem = intern("io_tlb_mem");
+        let dir = intern("dma_data_direction");
+        let start = intern("start");
+        let end = intern("end");
+        let nslabs = intern("nslabs");
+        let slots = intern("slots");
+        let orig = intern("orig_addr");
+        let alloc = intern("alloc_size");
+        let dma_parms = intern("dma_parms");
+        let dma_mem = intern("dma_io_tlb_mem");
+        let mask = intern("min_align_mask");
+        let cc = intern("cc_shared");
+        let to = intern("DMA_TO_DEVICE");
+        let from = intern("DMA_FROM_DEVICE");
+        let bidi = intern("DMA_BIDIRECTIONAL");
+        let u64_name = intern("u64");
+        let u32_name = intern("u32");
+        let u8_name = intern("u8");
+
+        let mut types = Vec::new();
+        let mut next_id = 0u32;
+        let mut record =
+            |name: u32, kind: u8, kind_flag: bool, vlen: u16, size: u32, payload: &[u8]| -> u32 {
+                next_id += 1;
+                types.extend_from_slice(&name.to_le_bytes());
+                let mut info = u32::from(kind) << 24 | u32::from(vlen);
+                if kind_flag {
+                    info |= 1 << 31;
+                }
+                types.extend_from_slice(&info.to_le_bytes());
+                types.extend_from_slice(&size.to_le_bytes());
+                types.extend_from_slice(payload);
+                next_id
+            };
+        let members = |fields: &[(u32, u32, u32)]| -> Vec<u8> {
+            let mut out = Vec::new();
+            for (name, ty, off) in fields {
+                out.extend_from_slice(&name.to_le_bytes());
+                out.extend_from_slice(&ty.to_le_bytes());
+                out.extend_from_slice(&off.to_le_bytes());
+            }
+            out
+        };
+
+        let u64_id = record(u64_name, KIND_INT, false, 0, 8, &1u32.to_le_bytes());
+        let u32_id = record(u32_name, KIND_INT, false, 0, 4, &1u32.to_le_bytes());
+        let u8_id = record(u8_name, KIND_INT, false, 0, 1, &1u32.to_le_bytes());
+        // Oversize decoy: u64 x u32::MAX bytes overflows u32 widths.
+        let mut array_payload = Vec::new();
+        array_payload.extend_from_slice(&u64_id.to_le_bytes());
+        array_payload.extend_from_slice(&u32_id.to_le_bytes());
+        array_payload.extend_from_slice(&u32::MAX.to_le_bytes());
+        let big_id = record(0, KIND_ARRAY, false, 0, 0, &array_payload);
+        let slot_id = record(
+            slot,
+            KIND_STRUCT,
+            false,
+            2,
+            24,
+            &members(&[(orig, u64_id, 0), (alloc, u64_id, 64)]),
+        );
+        let slot_ptr = record(0, KIND_PTR, false, 0, slot_id, &[]);
+        record(
+            pool,
+            KIND_STRUCT,
+            false,
+            4,
+            64,
+            &members(&[
+                (start, u64_id, 0),
+                (end, u64_id, 64),
+                (nslabs, u64_id, 192),
+                (slots, slot_ptr, 448),
+            ]),
+        );
+        let parms_id = record(
+            parms,
+            KIND_STRUCT,
+            false,
+            1,
+            8,
+            &members(&[(mask, u32_id, 32)]),
+        );
+        let parms_ptr = record(0, KIND_PTR, false, 0, parms_id, &[]);
+        // A present member needs its struct; the tests never shape it
+        // otherwise.
+        assert!(!shape.with_mem || shape.with_mem_struct);
+        assert!(!shape.with_cc || shape.with_mem_struct);
+        let mem_ptr = if shape.with_mem_struct {
+            let cc_type = if shape.cc_oversize { big_id } else { u8_id };
+            let cc_off = if shape.cc_bitfield { 1 << 24 } else { 0 };
+            let cc_fields: Vec<(u32, u32, u32)> = if shape.with_cc {
+                vec![(cc, cc_type, cc_off)]
+            } else {
+                Vec::new()
+            };
+            let mem_id = record(
+                mem,
+                KIND_STRUCT,
+                shape.cc_bitfield,
+                cc_fields.len() as u16,
+                8,
+                &members(&cc_fields),
+            );
+            record(0, KIND_PTR, false, 0, mem_id, &[])
+        } else {
+            0
+        };
+        let mut device_fields = vec![(dma_parms, parms_ptr, 0)];
+        if shape.with_mem {
+            let mem_off = if shape.mem_misaligned { 68 } else { 64 };
+            device_fields.push((dma_mem, mem_ptr, mem_off));
+        }
+        record(
+            device,
+            KIND_STRUCT,
+            false,
+            device_fields.len() as u16,
+            16,
+            &members(&device_fields),
+        );
+        let mut values = Vec::new();
+        for (name, value) in [(to, 1u32), (from, 2u32), (bidi, 0u32)] {
+            values.extend_from_slice(&name.to_le_bytes());
+            values.extend_from_slice(&value.to_le_bytes());
+        }
+        record(dir, KIND_ENUM, false, 3, 4, &values);
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&0xEB9Fu16.to_le_bytes());
+        out.push(1);
+        out.push(0);
+        out.extend_from_slice(&24u32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&(types.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(types.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(strings.len() as u32).to_le_bytes());
+        out.extend_from_slice(&types);
+        out.extend_from_slice(&strings);
+        out
+    }
+
+    #[test]
+    fn private_chain_full_present_sets_flag() {
+        let table = resolve_copy_offsets_from_btf(&copy_btf_image(&PrivateShape::full()))
+            .expect("full chain must resolve");
+        assert_ne!(table.flags & MV_COPY_OFFS_HAS_PRIVATE, 0);
+        assert_eq!((table.mem_off, table.mem_size), (8, 8));
+        assert_eq!((table.cc_off, table.cc_size), (0, 1));
+        assert_eq!(
+            (
+                table.pool_start_off,
+                table.pool_end_off,
+                table.pool_nslabs_off,
+                table.pool_slots_off
+            ),
+            (0, 8, 24, 56)
+        );
+        assert_eq!((table.dir_to, table.dir_from, table.dir_bidi), (1, 2, 0));
+    }
+
+    #[test]
+    fn private_chain_fully_absent_downgrades() {
+        // Both halves missing downgrades whether the `io_tlb_mem` struct
+        // itself is present or not.
+        for with_mem_struct in [true, false] {
+            let shape = PrivateShape {
+                with_mem_struct,
+                ..PrivateShape::absent()
+            };
+            let table = resolve_copy_offsets_from_btf(&copy_btf_image(&shape))
+                .expect("absent chain must downgrade");
+            assert_eq!(table.flags & MV_COPY_OFFS_HAS_PRIVATE, 0);
+            assert_eq!(
+                (table.mem_off, table.mem_size, table.cc_off, table.cc_size),
+                (0, 0, 0, 0)
+            );
+        }
+    }
+
+    /// The refusal message of a copy resolution that must fail.
+    /// (`CopyOffsets` has no `Debug`, so `expect_err` is unavailable.)
+    fn expect_refusal(image: &[u8], what: &str) -> String {
+        match resolve_copy_offsets_from_btf(image) {
+            Ok(_) => panic!("{what} must refuse"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn private_chain_half_present_refuses() {
+        let shape = PrivateShape {
+            with_cc: false,
+            ..PrivateShape::full()
+        };
+        let message = expect_refusal(&copy_btf_image(&shape), "mem-only chain");
+        assert!(
+            message.contains("half-present"),
+            "want the half-present refusal, got: {message}"
+        );
+        let shape = PrivateShape {
+            with_mem: false,
+            with_cc: true,
+            ..PrivateShape::absent()
+        };
+        let message = expect_refusal(&copy_btf_image(&shape), "cc-only chain");
+        assert!(
+            message.contains("half-present"),
+            "want the half-present refusal, got: {message}"
+        );
+    }
+
+    #[test]
+    fn private_chain_malformed_refuses() {
+        // Bitfield cc_shared: present but unreadable as a whole byte.
+        let shape = PrivateShape {
+            cc_bitfield: true,
+            ..PrivateShape::full()
+        };
+        let message = expect_refusal(&copy_btf_image(&shape), "bitfield half");
+        assert!(
+            message.contains("bitfield"),
+            "want the bitfield refusal, got: {message}"
+        );
+        // Misaligned dma_io_tlb_mem: bit offset 68 is not byte-aligned.
+        let shape = PrivateShape {
+            mem_misaligned: true,
+            ..PrivateShape::full()
+        };
+        let message = expect_refusal(&copy_btf_image(&shape), "misaligned half");
+        assert!(
+            message.contains("byte-aligned"),
+            "want the misalignment refusal, got: {message}"
+        );
+        // Oversize cc_shared: the array width overflows u32.
+        let shape = PrivateShape {
+            cc_oversize: true,
+            ..PrivateShape::full()
+        };
+        let message = expect_refusal(&copy_btf_image(&shape), "oversize half");
+        assert!(
+            message.contains("too large"),
+            "want the oversize refusal, got: {message}"
         );
     }
 }

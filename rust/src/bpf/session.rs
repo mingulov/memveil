@@ -200,16 +200,22 @@ fn check_loaded(loaded: &LoadedMap, spec: &AttachSpec, tag: &str) -> Result<(), 
     }
 }
 
-/// Read a little-endian `u16` out of `bytes` at `offset`.
+/// Read a little-endian `u16` out of `bytes` at `offset`. The end is
+/// checked: a file-supplied offset near `usize::MAX` yields `None`,
+/// never a debug panic.
 fn le16(bytes: &[u8], offset: usize) -> Option<u16> {
+    let end = offset.checked_add(2)?;
     bytes
-        .get(offset..offset + 2)
+        .get(offset..end)
         .map(|window| u16::from_le_bytes([window[0], window[1]]))
 }
 
-/// Read a little-endian `u64` out of `bytes` at `offset`.
+/// Read a little-endian `u64` out of `bytes` at `offset`. The end is
+/// checked: a file-supplied offset near `usize::MAX` yields `None`,
+/// never a debug panic.
 fn le64(bytes: &[u8], offset: usize) -> Option<u64> {
-    bytes.get(offset..offset + 8).map(|window| {
+    let end = offset.checked_add(8)?;
+    bytes.get(offset..end).map(|window| {
         u64::from_le_bytes([
             window[0], window[1], window[2], window[3], window[4], window[5], window[6], window[7],
         ])
@@ -244,11 +250,23 @@ fn check_elf(elf: &[u8], channel: Channel) -> Result<(), SessionError> {
     if shentsize < 64 || shstrndx >= shnum {
         return Err(open("ELF section table invalid"));
     }
-    let shstr = (shoff + u64::from(shstrndx) * 64) as usize;
-    let (Some(str_off), Some(str_len)) = (
-        le64(elf, shstr + 24).map(|value| value as usize),
-        le64(elf, shstr + 32).map(|value| value as usize),
-    ) else {
+    // Every section-table multiply, add, and u64-to-usize narrowing is
+    // checked: `shoff` is file-supplied, and a value near u64::MAX must
+    // refuse with `Open`, never panic in debug builds or wrap in release.
+    let Some(shstr) = u64::from(shstrndx)
+        .checked_mul(64)
+        .and_then(|stride| shoff.checked_add(stride))
+        .and_then(|at| usize::try_from(at).ok())
+    else {
+        return Err(open("section-name table offset overflows"));
+    };
+    let name_field = |field: usize| {
+        shstr
+            .checked_add(field)
+            .and_then(|at| le64(elf, at))
+            .and_then(|value| usize::try_from(value).ok())
+    };
+    let (Some(str_off), Some(str_len)) = (name_field(24), name_field(32)) else {
         return Err(open("section-name table header truncated"));
     };
     let Some(strtab) = elf.get(str_off..str_off.saturating_add(str_len)) else {
@@ -256,11 +274,19 @@ fn check_elf(elf: &[u8], channel: Channel) -> Result<(), SessionError> {
     };
     let mut counts = vec![0usize; channel.expected_sections().len()];
     for index in 0..shnum {
-        let header = (shoff + u64::from(index) * 64) as usize;
+        let Some(header) = u64::from(index)
+            .checked_mul(64)
+            .and_then(|stride| shoff.checked_add(stride))
+            .and_then(|at| usize::try_from(at).ok())
+        else {
+            return Err(open("section header offset overflows"));
+        };
         let (Some(name_off), Some(_)) = (
-            elf.get(header..header + 4)
-                .map(|window| u32::from_le_bytes([window[0], window[1], window[2], window[3]])),
-            elf.get(header..header + 64),
+            header.checked_add(4).and_then(|end| {
+                elf.get(header..end)
+                    .map(|window| u32::from_le_bytes([window[0], window[1], window[2], window[3]]))
+            }),
+            header.checked_add(64).and_then(|end| elf.get(header..end)),
         ) else {
             return Err(open("section header truncated"));
         };
@@ -1079,5 +1105,51 @@ impl Channels {
         } else {
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal 64-bit BPF ELF header with caller-chosen section-table
+    /// fields; the body is zeros.
+    fn elf_header(shoff: u64, shentsize: u16, shnum: u16, shstrndx: u16) -> Vec<u8> {
+        let mut elf = vec![0u8; 64];
+        elf[..4].copy_from_slice(b"\x7fELF");
+        elf[4] = 2; // 64-bit.
+        elf[18..20].copy_from_slice(&247u16.to_le_bytes()); // EM_BPF.
+        elf[0x28..0x30].copy_from_slice(&shoff.to_le_bytes());
+        elf[0x3a..0x3c].copy_from_slice(&shentsize.to_le_bytes());
+        elf[0x3c..0x3e].copy_from_slice(&shnum.to_le_bytes());
+        elf[0x3e..0x40].copy_from_slice(&shstrndx.to_le_bytes());
+        elf
+    }
+
+    #[test]
+    fn malicious_shoff_refuses_without_panic() {
+        // shstr index arithmetic overflows: shoff near u64::MAX plus a
+        // nonzero shstrndx stride. Plain `+`/`*` panics here in debug.
+        let elf = elf_header(u64::MAX - 32, 64, 2, 1);
+        let error = Session::open(&elf, "mv_attempts").expect_err("overflowing shstr must refuse");
+        assert!(
+            matches!(error, SessionError::Open(_)),
+            "want Open refusal, got: {error}"
+        );
+        // shstr base itself at u64::MAX: the +24/+32 field reads must
+        // refuse, not panic in debug builds.
+        let elf = elf_header(u64::MAX, 64, 1, 0);
+        let error = Session::open(&elf, "mv_attempts").expect_err("max shoff must refuse");
+        assert!(
+            matches!(error, SessionError::Open(_)),
+            "want Open refusal, got: {error}"
+        );
+        // A merely out-of-range (non-overflowing) table refuses the same way.
+        let elf = elf_header(0x1000, 64, 1, 0);
+        let error = Session::open(&elf, "mv_attempts").expect_err("past-EOF table must refuse");
+        assert!(
+            matches!(error, SessionError::Open(_)),
+            "want Open refusal, got: {error}"
+        );
     }
 }
