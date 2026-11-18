@@ -19,8 +19,9 @@
 //! Attach sites are frozen per channel; record selects
 //! which channels exist by passing their object bytes.
 //!
-//! Each channel remembers the program fds its load created
-//! (diffed from /proc/self/fdinfo, no loader call needed).
+//! Each channel remembers the program fds its attach created
+//! (diffed from /proc/self/fdinfo, no loader call needed: Aya
+//! defers program load to attach, unlike the C bridge).
 //! Without copy, recursion_misses sums the per-program
 //! counters; with copy, it identifies each tracing program
 //! by kernel name and reads the fallback counters, so the
@@ -827,16 +828,12 @@ impl ChannelSlot {
                 message: "session not open".to_string(),
             };
         }
-        let before = prog_fds();
+        // No fd diff here: Aya's loader only parses and gates,
+        // so no program fds exist yet; attach records them.
         let res = self.sess.as_mut().expect("open session").load();
         if let Err(e) = res {
             let message = session_message_with(OP_LOAD, &e.to_string(), load_errno(&self.elf));
             return OpOut { ok: false, message };
-        }
-        let after = prog_fds();
-        if let (Some(before), Some(after)) = (before, after) {
-            self.progs = added_fds(&before, &after);
-            self.progs_known = !self.progs.is_empty();
         }
         OpOut {
             ok: true,
@@ -1059,6 +1056,25 @@ impl ChannelSlot {
         }
     }
 
+    /// Record attach-time program fds from one fd-table diff.
+    ///
+    /// Aya creates program fds at attach (the loader only parses),
+    /// so the diff the C-backed control takes at load happens here
+    /// instead; the misses definition below is unchanged. New fds
+    /// replace the record; an empty diff keeps a prior record
+    /// (detach leaves loads behind, so a reattach adds nothing)
+    /// and an unlistable table leaves state untouched.
+    fn note_attach_progs(&mut self, before: &Option<Vec<i64>>, after: &Option<Vec<i64>>) {
+        let (Some(before), Some(after)) = (before, after) else {
+            return;
+        };
+        let added = added_fds(before, after);
+        if !added.is_empty() {
+            self.progs = added;
+            self.progs_known = true;
+        }
+    }
+
     fn attach(&mut self) -> OpOut {
         if !self.is_open() {
             return OpOut {
@@ -1067,11 +1083,16 @@ impl ChannelSlot {
             };
         }
         let specs = self.specs.clone();
+        let before = prog_fds();
         match self.sess.as_mut().expect("open session").attach(&specs) {
-            Ok(()) => OpOut {
-                ok: true,
-                message: String::new(),
-            },
+            Ok(()) => {
+                let after = prog_fds();
+                self.note_attach_progs(&before, &after);
+                OpOut {
+                    ok: true,
+                    message: String::new(),
+                }
+            }
             Err(e) => OpOut {
                 ok: false,
                 message: session_message(OP_ATTACH, &e),
@@ -1739,7 +1760,7 @@ impl KernelSource for AyaKernel {
 #[cfg(test)]
 mod tests {
     use super::{
-        AyaKernel, ChannelPoller, PollRotation, added_fds, channel_attach_order,
+        AyaKernel, ChannelPoller, ChannelSlot, PollRotation, added_fds, channel_attach_order,
         channel_detach_order, encode_frame, fb_flag_reason, fb_valid, fdinfo_u64,
         identify_copy_progs, identify_lifecycle_progs, join_op_message, os_errno,
         parse_prog_misses, parse_prog_name, poll_advance, prog_fds, prog_info, rollback_order,
@@ -2350,5 +2371,77 @@ mod tests {
         assert_eq!(result.exit_code, 3);
         assert_eq!(result.outcome, "refused");
         assert!(!std::path::Path::new(&dir).exists());
+    }
+
+    #[test]
+    fn attach_fd_diff_records_progs() {
+        // Scripted attach-time appearance: new prog fds become known.
+        let mut slot = ChannelSlot::new();
+        let before = Some(vec![3, 4]);
+        let after = Some(vec![3, 4, 9, 10]);
+        slot.note_attach_progs(&before, &after);
+        assert_eq!(slot.progs, vec![9, 10]);
+        assert!(slot.progs_known);
+    }
+
+    #[test]
+    fn attach_fd_diff_empty_stays_unknown() {
+        // No new fds at attach: misses stay fail-closed.
+        let mut slot = ChannelSlot::new();
+        let before = Some(vec![3, 4]);
+        let after = Some(vec![3, 4]);
+        slot.note_attach_progs(&before, &after);
+        assert!(slot.progs.is_empty());
+        assert!(!slot.progs_known);
+    }
+
+    #[test]
+    fn attach_fd_diff_unlistable_keeps_state() {
+        // An unlistable fd table leaves prior state untouched.
+        let mut slot = ChannelSlot::new();
+        slot.note_attach_progs(&None, &None);
+        assert!(!slot.progs_known);
+        let before = Some(vec![3]);
+        slot.note_attach_progs(&before, &None);
+        assert!(slot.progs.is_empty());
+        assert!(!slot.progs_known);
+    }
+
+    #[test]
+    fn attach_fd_diff_reattach_keeps_prior() {
+        // Detach leaves loads behind, so a reattach that adds no
+        // fds keeps the previously identified programs.
+        let mut slot = ChannelSlot::new();
+        let before = Some(vec![3]);
+        let after = Some(vec![3, 9]);
+        slot.note_attach_progs(&before, &after);
+        assert!(slot.progs_known);
+        let re_before = Some(vec![3, 9]);
+        let re_after = Some(vec![3, 9]);
+        slot.note_attach_progs(&re_before, &re_after);
+        assert_eq!(slot.progs, vec![9]);
+        assert!(slot.progs_known);
+    }
+
+    #[test]
+    fn misses_unknown_before_attach() {
+        // End to end over a real (unprivileged-open) session: with
+        // no attach-time fd appearance, misses fail closed, root or
+        // not (load may succeed as root but records nothing).
+        let path = crate::platform::test_support::repo_root().join("tests/fixtures/elf/ok.o");
+        let elf = std::fs::read(&path).expect("read ok.o");
+        let mut kernel = AyaKernel::new(
+            elf,
+            "mv_attempts",
+            "mv_swiotlb_attempt",
+            "swiotlb",
+            "swiotlb_bounced",
+        );
+        assert!(kernel.open_session().ok);
+        let _ = kernel.load();
+        let m = kernel.recursion_misses();
+        assert!(!m.ok);
+        assert!(m.message.contains("program fds unknown"), "{}", m.message);
+        let _ = kernel.close();
     }
 }
