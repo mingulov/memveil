@@ -18,6 +18,6 @@ modules.order
 !tests/fixtures/runtime/bpf/*.bpf.o
 # CO-RE kind fixture (regenerate with tools/emit-core-fixtures).
 !tests/fixtures/core/*.bpf.o
-# Rust userspace build output (rewrite/rust-userspace).
+# Rust userspace build output.
 rust/target/
 rust/crates/ebpf/target/

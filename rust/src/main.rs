@@ -61,6 +61,10 @@ fn main() -> ExitCode {
             Err(_) => stdout_failed(),
         }
     }
+    // `version` ignores trailing arguments and always prints the
+    // engine version (parity with the Mojo dispatcher, which takes
+    // the same branch before argument parsing): extra words after
+    // `memveil --version` are accepted, not an error.
     if verb == "version" || verb == "--version" {
         match write_stdout(&format!("{ENGINE_VERSION}\n")) {
             Ok(()) => return ExitCode::from(EXIT_OK as u8),
