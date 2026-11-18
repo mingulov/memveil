@@ -1323,13 +1323,107 @@ fn map_value_size(walk: &BtfWalk, data: &[u8], tid: i64) -> i64 {
     walk.struct_size(data, tid)
 }
 
+/// Lower-bound map bytes over every map in DATASEC `maps`.
+///
+/// Aya analog of the libbpf loop in read_object_map_bytes:
+/// the same three map types, the same per-type formula,
+/// and the same overflow guards; only the definition
+/// source differs (ELF `maps` entries in DATASEC member
+/// order instead of BTF `__uint`/`__type` spellings). The
+/// member list carries the admission lane's pins (VAR of
+/// offset 0 and size 28, no twice-listed entry), and each
+/// VAR must name a STRUCT, mirroring the libbpf loop's
+/// first per-map gate. No spine or geometry pins apply:
+/// this reader is generic over maps whose expected shape
+/// it cannot know; admission pins its own maps. Unknown
+/// type words and malformed lists refuse in the existing
+/// vocabulary; only missing definition bytes (no libbpf
+/// analog) take the one Aya cause under the map's name.
+fn read_aya_map_bytes(data: &[u8], walk: &BtfWalk, sec: usize) -> ObjectMapBytes {
+    let base = walk.offsets[sec];
+    let mut out = ObjectMapBytes::new();
+    out.ok = true;
+    let mut seen: Vec<i64> = Vec::new();
+    for m in 0..walk.vlens[sec] {
+        let var_tid = u32le(data, base + 12 + m * 12);
+        if !walk.rec_valid(var_tid) {
+            return refuse_map_bytes("bad maps DATASEC".to_string());
+        }
+        let rec = (var_tid - 1) as usize;
+        if walk.kinds[rec] != 14 {
+            return refuse_map_bytes("bad maps DATASEC".to_string());
+        }
+        if u32le(data, base + 12 + m * 12 + 4) != 0
+            || u32le(data, base + 12 + m * 12 + 8) != AYA_MAP_DEF_BYTES
+        {
+            return refuse_map_bytes("bad maps DATASEC".to_string());
+        }
+        if seen.contains(&var_tid) {
+            return refuse_map_bytes("bad maps DATASEC".to_string());
+        }
+        seen.push(var_tid);
+        let Some(name) = walk.type_name(data, rec) else {
+            return refuse_map_bytes("BTF strings corrupt".to_string());
+        };
+        let struct_tid = walk.sizes[rec];
+        if !walk.rec_valid(struct_tid) {
+            return refuse_map_bytes(format!("{name} not a struct"));
+        }
+        if walk.kinds[(struct_tid - 1) as usize] != 4 {
+            return refuse_map_bytes(format!("{name} not a struct"));
+        }
+        let Some(entry) = aya_entry(data, m) else {
+            return refuse_map_bytes(format!("{name} bad aya map shape"));
+        };
+        let map_n = entry[0];
+        let map_m = entry[3];
+        if map_n == MAP_RINGBUF {
+            let total = checked_add(out.bytes, map_m);
+            if total < 0 {
+                return refuse_map_bytes(format!("{name} size overflows"));
+            }
+            out.bytes = total;
+        } else if map_n == MAP_ARRAY {
+            let add = checked_mul(map_m, round8(entry[2]));
+            if add < 0 {
+                return refuse_map_bytes(format!("{name} size overflows"));
+            }
+            let total = checked_add(out.bytes, add);
+            if total < 0 {
+                return refuse_map_bytes(format!("{name} size overflows"));
+            }
+            out.bytes = total;
+        } else if map_n == MAP_HASH {
+            let each = checked_add(round8(entry[1]), round8(entry[2]));
+            if each < 0 {
+                return refuse_map_bytes(format!("{name} size overflows"));
+            }
+            let add = checked_mul(map_m, each);
+            if add < 0 {
+                return refuse_map_bytes(format!("{name} size overflows"));
+            }
+            let total = checked_add(out.bytes, add);
+            if total < 0 {
+                return refuse_map_bytes(format!("{name} size overflows"));
+            }
+            out.bytes = total;
+        } else {
+            return refuse_map_bytes(format!("unsupported map type {map_n} in {name}"));
+        }
+    }
+    out
+}
+
 /// Lower-bound map bytes over every map in .maps.
 ///
 /// Ringbuf counts max_entries; array counts max_entries
 /// times the rounded value size; hash counts max_entries
 /// times the rounded key and value sizes. Any other map
 /// type refuses; an object without a maps DATASEC holds
-/// zero bytes.
+/// zero bytes. Aya objects (DATASEC `maps` plus ELF
+/// definition bytes) count the same bound through the
+/// Aya lane; a `.maps` DATASEC keeps the libbpf loop
+/// below whatever else the object carries.
 pub fn read_object_map_bytes(data: &[u8]) -> ObjectMapBytes {
     let sec = find_section(data, ".BTF");
     if !sec.found {
@@ -1340,6 +1434,7 @@ pub fn read_object_map_bytes(data: &[u8]) -> ObjectMapBytes {
         return refuse_map_bytes(walk.message.clone());
     }
     let mut found: i64 = -1;
+    let mut afound: i64 = -1;
     for i in 0..walk.offsets.len() {
         if walk.kinds[i] != 15 {
             continue;
@@ -1347,18 +1442,25 @@ pub fn read_object_map_bytes(data: &[u8]) -> ObjectMapBytes {
         let Some(text) = walk.type_name(data, i) else {
             return refuse_map_bytes("BTF strings corrupt".to_string());
         };
-        if text != ".maps" {
-            continue;
+        if text == ".maps" {
+            if found >= 0 {
+                return refuse_map_bytes("duplicate maps DATASEC".to_string());
+            }
+            found = i as i64;
+        } else if text == "maps" {
+            if afound >= 0 {
+                return refuse_map_bytes("duplicate maps DATASEC".to_string());
+            }
+            afound = i as i64;
         }
-        if found >= 0 {
-            return refuse_map_bytes("duplicate maps DATASEC".to_string());
-        }
-        found = i as i64;
     }
     let mut out = ObjectMapBytes::new();
     out.ok = true;
     if found < 0 {
-        return out;
+        if afound < 0 {
+            return out;
+        }
+        return read_aya_map_bytes(data, &walk, afound as usize);
     }
     let base = walk.offsets[found as usize];
     for m in 0..walk.vlens[found as usize] {
@@ -1482,8 +1584,10 @@ pub fn read_object_map_bytes(data: &[u8]) -> ObjectMapBytes {
 
 /// Read the mv_copy_fb fallback counter definition.
 ///
-/// Pinned exactly (ARRAY, key 4, value 8, 4 entries:
-/// deferred, recovered, flags, armed). Ring size unused (0).
+/// Accepts libbpf (DATASEC `.maps`) and Aya (DATASEC `maps`)
+/// definitions under the same contract. Pinned exactly
+/// (ARRAY, key 4, value 8, 4 entries: deferred, recovered,
+/// flags, armed). Ring size unused (0).
 pub fn read_btf_copy_fb(data: &[u8]) -> BtfMaps {
     let sec = find_section(data, ".BTF");
     if !sec.found {
@@ -1502,6 +1606,43 @@ pub fn read_btf_copy_fb(data: &[u8]) -> BtfMaps {
     }
     if found == -3 {
         return refuse_maps("duplicate mv_copy_fb".to_string());
+    }
+    // Lane select, mirroring read_btf_maps_inner: libbpf
+    // objects list the fallback in DATASEC `.maps`, Aya
+    // objects in DATASEC `maps`. Corrupt strings or a
+    // duplicated DATASEC of either spelling refuse before
+    // any lane runs; `.maps` membership stays on the libbpf
+    // lane below whatever else the object carries.
+    let cmem = walk.datasec_var(data, ".maps", found);
+    let amem = walk.datasec_var(data, "maps", found);
+    if cmem == -1 || amem == -1 {
+        return refuse_maps("BTF strings corrupt".to_string());
+    }
+    if cmem == -2 || amem == -2 {
+        return refuse_maps("duplicate maps DATASEC".to_string());
+    }
+    if cmem != 1 && amem != 1 {
+        if cmem == 0 && amem == 0 {
+            return refuse_maps("no maps DATASEC".to_string());
+        }
+        return refuse_maps("fallback not in maps DATASEC".to_string());
+    }
+    if cmem != 1 {
+        let exp = AyaExpect {
+            typ: MAP_ARRAY,
+            key: 4,
+            val: 8,
+            max: 4,
+        };
+        let checked = aya_check_map(data, &walk, "mv_copy_fb", "fallback", false, &exp);
+        if !checked.bad.is_empty() {
+            return refuse_maps(checked.bad);
+        }
+        let mut out = BtfMaps::new();
+        out.ok = true;
+        out.message = String::new();
+        out.ring_bytes = 0;
+        return out;
     }
     let mem = walk.datasec_var(data, ".maps", found);
     if mem == 0 {
@@ -3687,6 +3828,15 @@ mod tests {
         set_u32(raw, at, val);
     }
 
+    /// Read one u32 word of one `maps` section entry, for
+    /// asserting mutation preconditions.
+    fn map_word(raw: &[u8], idx: usize, field: usize) -> u32 {
+        let (_, _, off, size) = section_range(raw, b"maps");
+        let at = off + idx * 28 + field * 4;
+        assert!(at + 4 <= off + size);
+        u32::from_le_bytes(raw[at..at + 4].try_into().unwrap())
+    }
+
     #[test]
     fn btf_aya_attempt_ok() {
         // The build's own Aya attempt object admits: DATASEC
@@ -4029,5 +4179,197 @@ mod tests {
         let v = read_btf_maps_ring(&raw, "mv_copies", "copies");
         assert!(!v.ok);
         assert_eq!(v.message, "missing mv_copies");
+    }
+
+    #[test]
+    fn btf_aya_copy_fb_ok() {
+        // The build's own Aya copy object admits its
+        // fallback counter: DATASEC `maps` with exact
+        // ARRAY 4/8/4 geometry (ring size unused).
+        let raw = aya_bytes("copy");
+        let fb = read_btf_copy_fb(&raw);
+        assert!(fb.ok, "Aya copy_fb refused: {}", fb.message);
+        assert_eq!(fb.message, "");
+        assert_eq!(fb.ring_bytes, 0);
+    }
+
+    #[test]
+    fn btf_aya_copy_fb_geometry() {
+        // Every fallback geometry field pins exactly, in the
+        // existing per-field vocabulary.
+        let raw = aya_bytes("copy");
+        let tb = parse_btf(&raw);
+        let idx = datasec_index(&raw, &tb, "maps", "mv_copy_fb");
+        assert_eq!(map_word(&raw, idx, 0), 2);
+        assert_eq!(map_word(&raw, idx, 1), 4);
+        assert_eq!(map_word(&raw, idx, 2), 8);
+        assert_eq!(map_word(&raw, idx, 3), 4);
+        for (field, val, want) in [
+            (0, 27u32, "fallback type 27, want 2"),
+            (3, 5u32, "fallback max_entries 5, want 4"),
+            (1, 8u32, "fallback key 8, want 4"),
+            (2, 4u32, "fallback value 4, want 8"),
+        ] {
+            let mut out = raw.clone();
+            set_map_word(&mut out, idx, field, val);
+            let v = read_btf_copy_fb(&out);
+            assert!(!v.ok, "field {field} admitted");
+            assert_eq!(v.message, want);
+        }
+    }
+
+    #[test]
+    fn btf_aya_copy_fb_shape() {
+        // A malformed fallback spine, a non-struct
+        // fallback, and a missing fallback VAR refuse:
+        // the spine takes the one Aya cause, the rest
+        // the existing vocabulary.
+        let raw = aya_bytes("copy");
+        let tb = parse_btf(&raw);
+        let fb = var_rec(&raw, &tb, "mv_copy_fb");
+        let top = u32_at(&raw, tb.recs[fb].off + 8) as usize - 1;
+        assert_eq!(tb.recs[top].kind, 4);
+        assert_eq!(tb.recs[top].size, 28);
+        assert_eq!(tb.recs[top].vlen, 2);
+        let mut out = raw.clone();
+        set_u32(&mut out, tb.recs[top].off + 8, 20);
+        let v = read_btf_copy_fb(&out);
+        assert!(!v.ok);
+        assert_eq!(v.message, "fallback bad aya map shape");
+        let mut int_tid = 0;
+        for (i, rec) in tb.recs.iter().enumerate() {
+            if rec.kind == 1 {
+                int_tid = i as u32 + 1;
+                break;
+            }
+        }
+        assert_ne!(int_tid, 0);
+        let mut out = raw.clone();
+        set_u32(&mut out, tb.recs[fb].off + 8, int_tid);
+        let w = read_btf_copy_fb(&out);
+        assert!(!w.ok);
+        assert_eq!(w.message, "fallback not a struct");
+        let at = tb.str_base + u32_at(&raw, tb.recs[fb].off) as usize;
+        let mut out = raw.clone();
+        overwrite(&mut out, at, b"mv_copy_fb", b"mv_copy_fz");
+        let m = read_btf_copy_fb(&out);
+        assert!(!m.ok);
+        assert_eq!(m.message, "missing mv_copy_fb");
+    }
+
+    #[test]
+    fn btf_aya_copy_fb_no_datasec() {
+        // Without DATASEC `maps` the refusal stays the
+        // existing vocabulary: unknown shapes stay refused.
+        let raw = aya_bytes("copy");
+        let tb = parse_btf(&raw);
+        let rec = datasec_rec(&raw, &tb, "maps");
+        let at = tb.str_base + u32_at(&raw, tb.recs[rec].off) as usize;
+        let mut out = raw.clone();
+        overwrite(&mut out, at, b"maps", b"mapz");
+        let v = read_btf_copy_fb(&out);
+        assert!(!v.ok);
+        assert_eq!(v.message, "no maps DATASEC");
+    }
+
+    #[test]
+    fn map_bytes_aya_channels() {
+        // The Aya lane counts the same lower bound as the
+        // libbpf fixtures: attempt 8388608 ring + 6*8
+        // counts + 1*24 offsets; lifecycle 33554432 ring +
+        // 6*8 counts + 32768*24 gen_table + 8 gen_next;
+        // copy 33554432 ring + 6*8 counts + 4096*16
+        // claims + 4*8 copy_fb + 1*112 copy_offs (the
+        // checked-in libbpf cp-ok.o fixture predates
+        // mv_copy_offs, hence +112 here).
+        let attempt = read_object_map_bytes(&aya_bytes("attempt"));
+        assert!(attempt.ok, "attempt: {}", attempt.message);
+        assert_eq!(attempt.bytes, 8_388_680);
+        let lc = read_object_map_bytes(&aya_bytes("lifecycle"));
+        assert!(lc.ok, "lifecycle: {}", lc.message);
+        assert_eq!(lc.bytes, 34_340_920);
+        let cp = read_object_map_bytes(&aya_bytes("copy"));
+        assert!(cp.ok, "copy: {}", cp.message);
+        assert_eq!(cp.bytes, 33_620_160);
+    }
+
+    #[test]
+    fn map_bytes_aya_unsupported_type() {
+        // An unknown ELF map-type word refuses in the
+        // existing vocabulary, naming the map.
+        let raw = aya_bytes("copy");
+        let tb = parse_btf(&raw);
+        let idx = datasec_index(&raw, &tb, "maps", "mv_copy_fb");
+        assert_eq!(map_word(&raw, idx, 0), 2);
+        let mut out = raw.clone();
+        set_map_word(&mut out, idx, 0, 5);
+        let v = read_object_map_bytes(&out);
+        assert!(!v.ok);
+        assert_eq!(v.message, "unsupported map type 5 in mv_copy_fb");
+    }
+
+    #[test]
+    fn map_bytes_aya_bad_datasec() {
+        // DATASEC members must be zero-offset 28-byte VARs,
+        // mirroring the admission lane: order is the ELF
+        // association, so a malformed list refuses.
+        let raw = aya_bytes("copy");
+        let tb = parse_btf(&raw);
+        let rec = datasec_rec(&raw, &tb, "maps");
+        let base = tb.recs[rec].off;
+        assert_eq!(u32_at(&raw, base + 12 + 4), 0);
+        assert_eq!(u32_at(&raw, base + 12 + 8), 28);
+        let mut out = raw.clone();
+        set_u32(&mut out, base + 12 + 4, 28);
+        let v = read_object_map_bytes(&out);
+        assert!(!v.ok);
+        assert_eq!(v.message, "bad maps DATASEC");
+        let mut out = raw.clone();
+        set_u32(&mut out, base + 12 + 8, 0);
+        let w = read_object_map_bytes(&out);
+        assert!(!w.ok);
+        assert_eq!(w.message, "bad maps DATASEC");
+    }
+
+    #[test]
+    fn map_bytes_aya_section_missing_or_truncated() {
+        // DATASEC `maps` without ELF definition bytes
+        // refuses under the map's own name: the first
+        // unreadable entry in DATASEC order names it.
+        let raw = aya_bytes("copy");
+        let (_, name_at, _, _) = section_range(&raw, b"maps");
+        let mut out = raw.clone();
+        overwrite(&mut out, name_at, b"maps", b"mapz");
+        let v = read_object_map_bytes(&out);
+        assert!(!v.ok);
+        assert_eq!(v.message, "mv_claims bad aya map shape");
+        let (hdr, _, _, _) = section_range(&raw, b"maps");
+        let mut out = raw.clone();
+        out[hdr + 32..hdr + 40].copy_from_slice(&28u64.to_le_bytes());
+        let w = read_object_map_bytes(&out);
+        assert!(!w.ok);
+        assert_eq!(w.message, "mv_copies bad aya map shape");
+    }
+
+    #[test]
+    fn map_bytes_aya_not_struct() {
+        // A fallback VAR through a bare INT refuses in the
+        // existing vocabulary.
+        let raw = aya_bytes("copy");
+        let tb = parse_btf(&raw);
+        let fb = var_rec(&raw, &tb, "mv_copy_fb");
+        let mut int_tid = 0;
+        for (i, rec) in tb.recs.iter().enumerate() {
+            if rec.kind == 1 {
+                int_tid = i as u32 + 1;
+                break;
+            }
+        }
+        assert_ne!(int_tid, 0);
+        let mut out = raw.clone();
+        set_u32(&mut out, tb.recs[fb].off + 8, int_tid);
+        let v = read_object_map_bytes(&out);
+        assert!(!v.ok);
+        assert_eq!(v.message, "mv_copy_fb not a struct");
     }
 }
