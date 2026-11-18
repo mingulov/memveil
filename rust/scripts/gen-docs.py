@@ -18,7 +18,10 @@ The default binary is `<rust>/target/release/memveil`, or
 `$CARGO_TARGET_DIR/release/memveil` when that variable is
 set. Without --build the binary must already exist: the
 driver fails closed naming `cargo build --release` rather
-than querying a stale or missing binary.
+than querying a stale or missing binary. --build refreshes
+only that default target-dir binary; an explicit --binary
+PATH is queried as-is, so combine --build with --binary
+only when PATH already holds a fresh build.
 """
 
 import os
