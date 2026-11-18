@@ -45,6 +45,43 @@ fn run_report(bin: &Path, extra: &[&str], dir: &Path) -> Output {
     run(bin, &args)
 }
 
+/// A capture whose render is maximal: 4096 catalog devices (the model
+/// cap) with max-length ids, names, and drivers over the sealed
+/// events. Both binaries share the same device and metric caps, so
+/// no valid capture renders past the 16 MiB tripwire; these cases
+/// pin agreement at the size extreme instead.
+fn maximal_capture_dir(tag: &str) -> PathBuf {
+    let tmp = std::env::temp_dir().join(format!("memveil-cli-max-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("temp capture dir");
+    let src = fixture("sealed-complete");
+    for name in ["events.ndjson", "provenance.json"] {
+        std::fs::copy(src.join(name), tmp.join(name)).expect("copy capture file");
+    }
+    let session = std::fs::read_to_string(src.join("session.json")).expect("read session");
+    let key = "\"devices\": [";
+    let open = session.find(key).expect("devices array") + key.len();
+    let close = session[open..].find(']').expect("devices end") + open;
+    // The sealed entry keeps its events resolvable; the padding
+    // fills the catalog to its cap at the field length limits.
+    let mut entries = vec![session[open..close].trim().to_string()];
+    for i in 0..4095 {
+        entries.push(format!(
+            "{{\n        \"device_id\": \"d{i:04}{}\",\n        \"name\": \"n{i:05}{}\",\n        \"driver\": \"g{i:04}{}\",\n        \"identity_status\": \"resolved\"\n      }}",
+            "x".repeat(123),
+            "y".repeat(250),
+            "z".repeat(123),
+        ));
+    }
+    let mut out = session[..open].to_string();
+    out.push('\n');
+    out.push_str(&entries.join(",\n"));
+    out.push('\n');
+    out.push_str(&session[close..]);
+    std::fs::write(tmp.join("session.json"), out).expect("write session");
+    tmp
+}
+
 #[test]
 fn no_verb_prints_usage_to_stderr() {
     let out = run(&bin(), &[]);
@@ -159,6 +196,20 @@ fn report_strict_keeps_full_stdout() {
     assert_eq!(plain.status.code(), Some(0));
     assert_eq!(strict.status.code(), Some(4));
     assert_eq!(strict.stdout, plain.stdout);
+}
+
+#[test]
+fn report_maximal_capture_renders_fully() {
+    let dir = maximal_capture_dir("full");
+    let out = run_report(&bin(), &[], &dir);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stderr.is_empty());
+    assert!(
+        out.stdout.len() > 2_000_000,
+        "maximal render stays large, got {} bytes",
+        out.stdout.len()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -283,6 +334,21 @@ fn report_bytes_equal_mojo_over_sealed() {
             assert_eq!(ours.stderr, want.stderr, "{name} {extra:?} stderr bytes");
         }
     }
+}
+
+#[test]
+fn report_maximal_bytes_equal_mojo() {
+    let Some(mojo) = mojo_bin() else {
+        eprintln!("skip: MEMVEIL_MOJO_BIN unset");
+        return;
+    };
+    let dir = maximal_capture_dir("mojo");
+    let ours = run_report(&bin(), &[], &dir);
+    let want = run_report(&mojo, &[], &dir);
+    assert_eq!(ours.status.code(), want.status.code(), "maximal exit");
+    assert_eq!(ours.stdout, want.stdout, "maximal stdout bytes");
+    assert_eq!(ours.stderr, want.stderr, "maximal stderr bytes");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

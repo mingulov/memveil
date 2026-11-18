@@ -587,13 +587,7 @@ pub fn run_report(args: &[String]) -> i64 {
         }
     };
     if let Err(e) = check_rendered_size(&text, MAX_RENDERED_BYTES) {
-        // An oversized body is an internal error: the line matches
-        // the Mojo text while the exit stays 1 with no stdout.
-        let _ = write_stderr(&format!(
-            "memveil report: {}\n",
-            sanitize_diagnostic(&e.message)
-        ));
-        return EXIT_INTERNAL;
+        return report_failed("memveil report: ", &e.message);
     }
     if write_stdout(&text).is_err() {
         let _ = write_stderr("memveil report: cannot write stdout\n");
@@ -615,7 +609,7 @@ mod tests {
     use super::{
         EXIT_INCOMPLETE, EXIT_INVALID, EXIT_OK, MAX_RENDERED_BYTES, ReportOptions,
         check_rendered_size, exit_for_report, neutralize_controls, parse_report_args,
-        refusal_stderr_lines, report_usage, sanitize_diagnostic, scrub_paths,
+        refusal_stderr_lines, report_failed, report_usage, sanitize_diagnostic, scrub_paths,
     };
     use crate::model::report::Report;
 
@@ -780,6 +774,31 @@ mod tests {
         let err = check_rendered_size("too big", 4).expect_err("over-limit rejects");
         assert_eq!(err.message, "report exceeds size limit");
         assert_eq!(MAX_RENDERED_BYTES, 16777216);
+    }
+
+    #[test]
+    fn oversize_failure_exits_invalid() {
+        // The oversized-render branch delegates to report_failed,
+        // so a body past the cap exits 2 with the Mojo stderr
+        // line. The descriptor write is process-global, so the
+        // write runs in a re-executed child: the parent only
+        // checks the child's exit status and captured stderr,
+        // and parallel harness output in the parent never
+        // observes the line.
+        if std::env::var("MEMVEIL_OVERSIZE_EXIT_CHILD").is_ok() {
+            let code = report_failed("memveil report: ", "report exceeds size limit");
+            std::process::exit(code as i32);
+        }
+        let exe = std::env::current_exe().expect("test binary path resolves");
+        let out = std::process::Command::new(exe)
+            .arg("--exact")
+            .arg("cli::report::tests::oversize_failure_exits_invalid")
+            .arg("--nocapture")
+            .env("MEMVEIL_OVERSIZE_EXIT_CHILD", "1")
+            .output()
+            .expect("child re-exec runs");
+        assert_eq!(out.status.code(), Some(EXIT_INVALID as i32));
+        assert_eq!(out.stderr, b"memveil report: report exceeds size limit\n");
     }
 
     #[test]
