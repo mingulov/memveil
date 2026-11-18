@@ -2244,6 +2244,69 @@ mod tests {
         );
     }
 
+    fn hooked_snapshot(hook: &str, ts: u64, value: u64) -> Event {
+        let mut ev = snapshot_event("swiotlb.bounce_attempts", "dev-1", "p", 3, value);
+        ev.source_hook = hook.to_string();
+        ev.ts_ns = ts;
+        ev
+    }
+
+    #[test]
+    fn counter_sort_tie_keeps_insertion_order() {
+        // Deliberate divergence from the Mojo behavior source: Mojo
+        // orders counter groups with an unstable quicksort while Rust
+        // uses a stable sort, so groups that tie on all four sort keys
+        // (counter, device, profile, unit) keep insertion order here.
+        // The tie is reachable because hook, backend, measurement, and
+        // correlation join the grouping key but not the comparator.
+        // The first-inserted group wins the single metric row; the
+        // loser is disclosed as excluded. Both insertion orders are
+        // pinned, so the winner follows arrival, not values.
+        let r = read_capture(&fixture("tests/fixtures/attempts"), false, default_limits())
+            .expect("read");
+        let mut a = AttemptAnalyzer::new(r.session.clone());
+        a.consume(&hooked_snapshot("hook-a", 100, 10));
+        a.consume(&hooked_snapshot("hook-a", 200, 13));
+        a.consume(&hooked_snapshot("hook-b", 300, 100));
+        a.consume(&hooked_snapshot("hook-b", 400, 200));
+        let rep = a
+            .finish(r.session.window_end_ns, false, false, false)
+            .expect("finish");
+        let rows: Vec<&Metric> = rep
+            .metrics
+            .iter()
+            .filter(|m| m.name == "counter_bounce_attempts")
+            .collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].value, 3);
+        assert_eq!(
+            rows[0].scope,
+            "readings [100,200), device dev-1, aggregate channel"
+        );
+        assert_eq!(
+            rep.limitations.last().unwrap(),
+            "Additional swiotlb.bounce_attempts group (device dev-1, profile p) excluded from metrics; one row per name and dimensions."
+        );
+        let mut b = AttemptAnalyzer::new(r.session.clone());
+        b.consume(&hooked_snapshot("hook-b", 300, 100));
+        b.consume(&hooked_snapshot("hook-b", 400, 200));
+        b.consume(&hooked_snapshot("hook-a", 100, 10));
+        b.consume(&hooked_snapshot("hook-a", 200, 13));
+        let rep2 = b
+            .finish(r.session.window_end_ns, false, false, false)
+            .expect("finish");
+        let agg2 = aggregate_metric(&rep2, "counter_bounce_attempts");
+        assert_eq!(agg2.value, 100);
+        assert_eq!(
+            agg2.scope,
+            "readings [300,400), device dev-1, aggregate channel"
+        );
+        assert_eq!(
+            rep2.limitations.last().unwrap(),
+            "Additional swiotlb.bounce_attempts group (device dev-1, profile p) excluded from metrics; one row per name and dimensions."
+        );
+    }
+
     #[test]
     fn detail_loss() {
         let rep = analyze("tests/fixtures/reader/detail-gap", false);
