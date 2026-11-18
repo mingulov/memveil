@@ -13,6 +13,7 @@ path = "src/lib.rs"
 
 [dependencies]
 aya = "=0.14.0"
+libc = "0.2"
 memveil-ebpf-common = { version = "0.0.0", path = "crates/ebpf-common", features = ["user"] }
 
 [dev-dependencies]
