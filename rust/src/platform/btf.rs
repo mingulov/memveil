@@ -17,6 +17,19 @@
 //! with the value in `nr_elems`; `__type` members resolve as
 //! PTR through modifiers to INT with the size in bytes, or
 //! to STRUCT with the size in bytes for the offsets value.
+//!
+//! Aya/bpf-linker objects carry DATASEC `maps` (not `.maps`)
+//! with Rust-newtype-wrapped VARs (ring/array wrappers through
+//! a shared spine to a flat seven-u32 definition) and the
+//! definition bytes in the ELF `maps` section in DATASEC
+//! member order: bpf-linker emits zero DATASEC offsets, so
+//! order is the only association. The Aya lane pins the same
+//! per-map contract through that shape: wrapper sizes, member
+//! counts and names, the flat leaf layout, and the ELF entry
+//! geometry. Failures with a libbpf analog reuse the exact
+//! libbpf diagnostic; the genuinely new modes (newtype spine,
+//! trailing leaf members, missing definition bytes) share the
+//! one Aya cause (`{word} bad aya map shape`).
 
 const BTF_MAGIC: i64 = 0xEB9F;
 const BTF_VERSION: i64 = 1;
@@ -26,6 +39,8 @@ pub const MAX_KERNEL_BTF_BYTES: usize = 67_108_864;
 const MAP_ARRAY: i64 = 2;
 const MAP_RINGBUF: i64 = 27;
 const MAP_HASH: i64 = 1;
+/// Flat Aya definition entry bytes: seven u32 words.
+const AYA_MAP_DEF_BYTES: i64 = 28;
 const MAX_INT: i64 = 9_223_372_036_854_775_807;
 const MIN_RING_BYTES: i64 = 4096;
 const MAX_RING_BYTES: i64 = 2_147_483_648;
@@ -315,6 +330,21 @@ impl BtfWalk {
         -1
     }
 
+    /// Bit offset of the STRUCT member named want, or -1 (-2 corrupt).
+    fn member_offset(&self, data: &[u8], rec: usize, want: &str) -> i64 {
+        let base = self.offsets[rec];
+        for m in 0..self.vlens[rec] {
+            let name_off = u32le(data, base + 12 + m * 12);
+            let Some(text) = table_text(data, self.str_base, self.str_end, name_off) else {
+                return -2;
+            };
+            if text == want {
+                return u32le(data, base + 12 + m * 12 + 8);
+            }
+        }
+        -1
+    }
+
     fn rec_valid(&self, tid: i64) -> bool {
         tid >= 1 && tid <= self.offsets.len() as i64
     }
@@ -557,6 +587,8 @@ fn is_pow2(v: i64) -> bool {
 
 /// Read the mv_counts/mv_attempts/mv_offsets definitions.
 ///
+/// Accepts libbpf (DATASEC `.maps`) and Aya (DATASEC `maps`)
+/// definitions under the same per-map contract.
 /// mv_counts geometry is pinned exactly (ARRAY, key 4,
 /// value 8, 6 entries); mv_attempts must be RINGBUF with
 /// a sane power-of-two ring size, which is returned; the
@@ -569,6 +601,8 @@ pub fn read_btf_maps(data: &[u8]) -> BtfMaps {
 
 /// Read mv_counts plus one named ringbuf map definition.
 ///
+/// Accepts libbpf (DATASEC `.maps`) and Aya (DATASEC `maps`)
+/// definitions under the same per-map contract.
 /// Same pinned mv_counts geometry as read_btf_maps; the
 /// named ring variable must be RINGBUF with a sane
 /// power-of-two size. Diagnostics name ring_word (short
@@ -679,6 +713,363 @@ fn check_offsets_map(data: &[u8], walk: &BtfWalk) -> String {
     String::new()
 }
 
+/// Expected Aya geometry: max < 0 selects ring-size mode.
+struct AyaExpect {
+    typ: i64,
+    key: i64,
+    val: i64,
+    max: i64,
+}
+
+/// One Aya map verdict: geometry max_entries, or a refusal.
+struct AyaMapVerdict {
+    bad: String,
+    max: i64,
+}
+
+fn aya_refuse(message: String) -> AyaMapVerdict {
+    AyaMapVerdict {
+        bad: message,
+        max: 0,
+    }
+}
+
+/// Resolve one Aya newtype spine to its flat definition STRUCT.
+///
+/// Ring maps wrap `def` once; array maps wrap `def` plus a
+/// zero-sized marker (`_t`); both continue through the shared
+/// two-hop spine to the seven-member flat leaf. Sizes, member
+/// counts and names, and zero spine offsets pin the exact
+/// wrapper geometry; STRUCT names stay unpinned (Rust mangling
+/// instantiates them per map). Returns the walk-list index of
+/// the leaf, or -1.
+fn aya_def_struct(data: &[u8], walk: &BtfWalk, top: i64, want_ring: bool) -> i64 {
+    if !walk.rec_valid(top) {
+        return -1;
+    }
+    let mut rec = (top - 1) as usize;
+    if walk.kinds[rec] != 4 || walk.sizes[rec] != AYA_MAP_DEF_BYTES {
+        return -1;
+    }
+    if want_ring && walk.vlens[rec] != 1 {
+        return -1;
+    }
+    if !want_ring {
+        if walk.vlens[rec] != 2 {
+            return -1;
+        }
+        let phantom = walk.member_type(data, rec, "_t");
+        if phantom < 0 || !walk.rec_valid(phantom) {
+            return -1;
+        }
+        let p = (phantom - 1) as usize;
+        if walk.kinds[p] != 4 || walk.sizes[p] != 0 || walk.vlens[p] != 0 {
+            return -1;
+        }
+    }
+    let def = walk.member_type(data, rec, "def");
+    if def < 0 || walk.member_offset(data, rec, "def") != 0 {
+        return -1;
+    }
+    if !walk.rec_valid(def) {
+        return -1;
+    }
+    rec = (def - 1) as usize;
+    if walk.kinds[rec] != 4 || walk.sizes[rec] != AYA_MAP_DEF_BYTES || walk.vlens[rec] != 1 {
+        return -1;
+    }
+    let inner = walk.member_type(data, rec, "__0");
+    if inner < 0 || walk.member_offset(data, rec, "__0") != 0 {
+        return -1;
+    }
+    if !walk.rec_valid(inner) {
+        return -1;
+    }
+    rec = (inner - 1) as usize;
+    if walk.kinds[rec] != 4 || walk.sizes[rec] != AYA_MAP_DEF_BYTES || walk.vlens[rec] != 1 {
+        return -1;
+    }
+    let leaf = walk.member_type(data, rec, "value");
+    if leaf < 0 || walk.member_offset(data, rec, "value") != 0 {
+        return -1;
+    }
+    if !walk.rec_valid(leaf) {
+        return -1;
+    }
+    rec = (leaf - 1) as usize;
+    if walk.kinds[rec] != 4 || walk.sizes[rec] != AYA_MAP_DEF_BYTES || walk.vlens[rec] != 7 {
+        return -1;
+    }
+    rec as i64
+}
+
+/// One flat-leaf member check: 1 pinned, -1 missing, -2 malformed.
+///
+/// A pinned member is a plain u32 at its flat bit offset.
+/// Missing covers missing names and corrupt strings; the caller
+/// maps the codes into the per-member vocabulary.
+fn aya_leaf_member(data: &[u8], walk: &BtfWalk, rec: usize, want: &str, bit: i64) -> i64 {
+    let tid = walk.member_type(data, rec, want);
+    if tid == -1 || tid == -2 {
+        return -1;
+    }
+    if !walk.rec_valid(tid) {
+        return -2;
+    }
+    let t = (tid - 1) as usize;
+    if walk.kinds[t] != 1 || walk.sizes[t] != 4 {
+        return -2;
+    }
+    if walk.member_offset(data, rec, want) != bit {
+        return -2;
+    }
+    1
+}
+
+/// DATASEC `maps` member-list validation plus index of one VAR.
+///
+/// Every member must be a VAR of offset 0 and size 28 (one flat
+/// definition): bpf-linker emits zero offsets, so list order is
+/// the only ELF association, and any malformed or ambiguous
+/// (twice-listed) entry refuses instead of misassociating.
+/// Returns the 0-based index, -1 malformed, -2 not listed.
+fn aya_layout_index(data: &[u8], walk: &BtfWalk, var_rec: i64) -> i64 {
+    let mut found: i64 = -1;
+    for i in 0..walk.offsets.len() {
+        if walk.kinds[i] != 15 {
+            continue;
+        }
+        let Some(text) = walk.type_name(data, i) else {
+            return -1;
+        };
+        if text != "maps" {
+            continue;
+        }
+        if found >= 0 {
+            return -1;
+        }
+        found = i as i64;
+    }
+    if found < 0 {
+        return -1;
+    }
+    let base = walk.offsets[found as usize];
+    let want = var_rec + 1;
+    let mut index: i64 = -2;
+    let mut seen: Vec<i64> = Vec::new();
+    for m in 0..walk.vlens[found as usize] {
+        let tid = u32le(data, base + 12 + m * 12);
+        if !walk.rec_valid(tid) {
+            return -1;
+        }
+        if walk.kinds[(tid - 1) as usize] != 14 {
+            return -1;
+        }
+        if u32le(data, base + 12 + m * 12 + 4) != 0 {
+            return -1;
+        }
+        if u32le(data, base + 12 + m * 12 + 8) != AYA_MAP_DEF_BYTES {
+            return -1;
+        }
+        if seen.contains(&tid) {
+            return -1;
+        }
+        seen.push(tid);
+        if tid == want {
+            index = m;
+        }
+    }
+    index
+}
+
+/// One flat definition entry: (type, key, value, max), or None.
+///
+/// Entry order follows the DATASEC member order; the trailing
+/// flag words stay unread (the pins cover geometry only).
+fn aya_entry(data: &[u8], index: i64) -> Option<[i64; 4]> {
+    let sec = find_section(data, "maps");
+    if !sec.found {
+        return None;
+    }
+    let at = checked_mul(index, AYA_MAP_DEF_BYTES);
+    if at < 0 {
+        return None;
+    }
+    let end = checked_add(at, 16);
+    if end < 0 || end > sec.size {
+        return None;
+    }
+    let base = sec.offset + at;
+    Some([
+        u32le(data, base),
+        u32le(data, base + 4),
+        u32le(data, base + 8),
+        u32le(data, base + 12),
+    ])
+}
+
+/// Check one Aya map: VAR, membership, linkage, spine, leaf, bytes, pins.
+///
+/// Diagnostics reuse the libbpf vocabulary wherever the failure
+/// has an exact analog (missing/duplicate VARs, DATASEC
+/// membership, linkage, leaf members, per-field pins); the
+/// genuinely new modes (newtype spine, trailing leaf members,
+/// missing definition bytes) share the one Aya cause.
+fn aya_check_map(
+    data: &[u8],
+    walk: &BtfWalk,
+    var: &str,
+    word: &str,
+    want_ring: bool,
+    exp: &AyaExpect,
+) -> AyaMapVerdict {
+    let found = walk.find_var(data, var);
+    if found == -1 {
+        return aya_refuse(format!("missing {var}"));
+    }
+    if found == -2 {
+        return aya_refuse("BTF strings corrupt".to_string());
+    }
+    if found == -3 {
+        return aya_refuse(format!("duplicate {var}"));
+    }
+    let mem = walk.datasec_var(data, "maps", found);
+    if mem == 0 {
+        return aya_refuse("no maps DATASEC".to_string());
+    }
+    if mem == -1 {
+        return aya_refuse("BTF strings corrupt".to_string());
+    }
+    if mem == -2 {
+        return aya_refuse("duplicate maps DATASEC".to_string());
+    }
+    if mem == -4 {
+        return aya_refuse(format!("{word} not in maps DATASEC"));
+    }
+    let top = walk.sizes[found as usize];
+    if !walk.rec_valid(top) {
+        return aya_refuse(format!("{word} not a struct"));
+    }
+    if walk.kinds[(top - 1) as usize] != 4 {
+        return aya_refuse(format!("{word} not a struct"));
+    }
+    let link = walk.var_linkage(data, found);
+    if link != 0 && link != 1 {
+        return aya_refuse(format!("{word} linkage {link}"));
+    }
+    let leaf = aya_def_struct(data, walk, top, want_ring);
+    if leaf < 0 {
+        return aya_refuse(format!("{word} bad aya map shape"));
+    }
+    let leaf_rec = leaf as usize;
+    for (member, field, bit) in [
+        ("type_", "type", 0),
+        ("max_entries", "max_entries", 96),
+        ("key_size", "key", 32),
+        ("value_size", "value", 64),
+    ] {
+        let pin = aya_leaf_member(data, walk, leaf_rec, member, bit);
+        if pin == -1 {
+            return aya_refuse(format!("{word} missing {field}"));
+        }
+        if pin != 1 {
+            return aya_refuse(format!("{word} bad {field}"));
+        }
+    }
+    for (member, bit) in [("map_flags", 128), ("id", 160), ("pinning", 192)] {
+        if aya_leaf_member(data, walk, leaf_rec, member, bit) != 1 {
+            return aya_refuse(format!("{word} bad aya map shape"));
+        }
+    }
+    let index = aya_layout_index(data, walk, found);
+    if index == -1 {
+        return aya_refuse("bad maps DATASEC".to_string());
+    }
+    if index < 0 {
+        return aya_refuse(format!("{word} not in maps DATASEC"));
+    }
+    let Some(entry) = aya_entry(data, index) else {
+        return aya_refuse(format!("{word} bad aya map shape"));
+    };
+    if entry[0] != exp.typ {
+        return aya_refuse(format!("{} type {}, want {}", word, entry[0], exp.typ));
+    }
+    if exp.max < 0 {
+        if !(MIN_RING_BYTES..=MAX_RING_BYTES).contains(&entry[3]) || !is_pow2(entry[3]) {
+            return aya_refuse(format!("{word} ring size {} rejected", entry[3]));
+        }
+    } else {
+        if entry[3] != exp.max {
+            return aya_refuse(format!(
+                "{} max_entries {}, want {}",
+                word, entry[3], exp.max
+            ));
+        }
+        if entry[1] != exp.key {
+            return aya_refuse(format!("{} key {}, want {}", word, entry[1], exp.key));
+        }
+        if entry[2] != exp.val {
+            return aya_refuse(format!("{} value {}, want {}", word, entry[2], exp.val));
+        }
+    }
+    AyaMapVerdict {
+        bad: String::new(),
+        max: entry[3],
+    }
+}
+
+/// Shared worker, Aya lane: DATASEC `maps` plus ELF definitions.
+///
+/// Same map contract as the libbpf lane (pinned counts geometry,
+/// ring type plus sane size, pinned offsets table for attempts);
+/// only the definition source differs (newtype spine plus flat
+/// ELF entries instead of `__uint`/`__type` spellings).
+fn read_aya_maps_inner(
+    data: &[u8],
+    walk: &BtfWalk,
+    ring_var: &str,
+    ring_word: &str,
+    want_offsets: bool,
+) -> BtfMaps {
+    let counts_exp = AyaExpect {
+        typ: MAP_ARRAY,
+        key: 4,
+        val: 8,
+        max: 6,
+    };
+    let checked = aya_check_map(data, walk, "mv_counts", "counts", false, &counts_exp);
+    if !checked.bad.is_empty() {
+        return refuse_maps(checked.bad);
+    }
+    let ring_exp = AyaExpect {
+        typ: MAP_RINGBUF,
+        key: 0,
+        val: 0,
+        max: -1,
+    };
+    let rung = aya_check_map(data, walk, ring_var, ring_word, true, &ring_exp);
+    if !rung.bad.is_empty() {
+        return refuse_maps(rung.bad);
+    }
+    if want_offsets {
+        let off_exp = AyaExpect {
+            typ: MAP_ARRAY,
+            key: 4,
+            val: 24,
+            max: 1,
+        };
+        let off = aya_check_map(data, walk, "mv_offsets", "offsets", false, &off_exp);
+        if !off.bad.is_empty() {
+            return refuse_maps(off.bad);
+        }
+    }
+    let mut out = BtfMaps::new();
+    out.ok = true;
+    out.message = String::new();
+    out.ring_bytes = rung.max;
+    out
+}
+
 /// Shared worker: read_btf_maps with a ring variable name.
 fn read_btf_maps_inner(
     data: &[u8],
@@ -704,18 +1095,30 @@ fn read_btf_maps_inner(
     if counts == -3 {
         return refuse_maps("duplicate mv_counts".to_string());
     }
+    // Lane select: libbpf objects list counts in DATASEC
+    // `.maps`, Aya objects in DATASEC `maps`. Corrupt strings
+    // or a duplicated DATASEC of either spelling refuse before
+    // any lane runs; an object listing counts in `.maps` stays
+    // on the libbpf lane below whatever else it carries, and an
+    // object listing counts only in `maps` takes the Aya lane.
+    // Objects without either spelling, or listing counts in
+    // neither, refuse in the existing vocabulary.
     let cmem = walk.datasec_var(data, ".maps", counts);
-    if cmem == 0 {
-        return refuse_maps("no maps DATASEC".to_string());
-    }
-    if cmem == -1 {
+    let amem = walk.datasec_var(data, "maps", counts);
+    if cmem == -1 || amem == -1 {
         return refuse_maps("BTF strings corrupt".to_string());
     }
-    if cmem == -2 {
+    if cmem == -2 || amem == -2 {
         return refuse_maps("duplicate maps DATASEC".to_string());
     }
-    if cmem == -4 {
+    if cmem != 1 && amem != 1 {
+        if cmem == 0 && amem == 0 {
+            return refuse_maps("no maps DATASEC".to_string());
+        }
         return refuse_maps("counts not in maps DATASEC".to_string());
+    }
+    if cmem != 1 {
+        return read_aya_maps_inner(data, &walk, ring_var, ring_word, want_offsets);
     }
     let counts_struct = walk.sizes[counts as usize];
     if !walk.rec_valid(counts_struct) {
@@ -3056,5 +3459,530 @@ mod tests {
         if fb.ok {
             assert_eq!(fb.ring_bytes, 0);
         }
+    }
+
+    /// Embedded Aya ELF bytes for one channel, copied for mutation.
+    fn aya_bytes(kind: &str) -> Vec<u8> {
+        crate::platform::runtime::embedded_object(kind)
+            .expect("channel ELF embedded")
+            .to_vec()
+    }
+
+    /// (header offset, name bytes offset, file offset, size) of
+    /// one ELF section. Minimal parse for targeting mutations;
+    /// verdicts stay production's.
+    fn section_range(raw: &[u8], want: &[u8]) -> (usize, usize, usize, usize) {
+        let shoff = u64::from_le_bytes(raw[0x28..0x30].try_into().unwrap()) as usize;
+        let shnum = u16::from_le_bytes(raw[0x3C..0x3E].try_into().unwrap()) as usize;
+        let shstrndx = u16::from_le_bytes(raw[0x3E..0x40].try_into().unwrap()) as usize;
+        let str_hdr = shoff + shstrndx * 64;
+        let str_off =
+            u64::from_le_bytes(raw[str_hdr + 24..str_hdr + 32].try_into().unwrap()) as usize;
+        for i in 0..shnum {
+            let hdr = shoff + i * 64;
+            let name_off = u32::from_le_bytes(raw[hdr..hdr + 4].try_into().unwrap()) as usize;
+            let mut end = str_off + name_off;
+            while raw[end] != 0 {
+                end += 1;
+            }
+            if &raw[str_off + name_off..end] == want {
+                let at = str_off + name_off;
+                let off = u64::from_le_bytes(raw[hdr + 24..hdr + 32].try_into().unwrap()) as usize;
+                let size = u64::from_le_bytes(raw[hdr + 32..hdr + 40].try_into().unwrap()) as usize;
+                return (hdr, at, off, size);
+            }
+        }
+        panic!("channel ELF must carry the wanted section");
+    }
+
+    /// One test-side BTF record: kind, vlen, file offset, size word.
+    struct TestRec {
+        kind: i64,
+        vlen: i64,
+        off: usize,
+        size: i64,
+    }
+
+    struct TestBtf {
+        recs: Vec<TestRec>,
+        str_base: usize,
+        str_end: usize,
+    }
+
+    fn u32_at(raw: &[u8], at: usize) -> i64 {
+        super::u32le(raw, at as i64)
+    }
+
+    /// Minimal BTF index over the `.BTF` section for targeting
+    /// mutations; verdicts stay production's.
+    fn parse_btf(raw: &[u8]) -> TestBtf {
+        let (_, _, base, size) = section_range(raw, b".BTF");
+        assert_eq!(super::u16le(raw, base as i64), 0xEB9F);
+        assert!(size > 24);
+        let hdr = super::u32le(raw, base as i64 + 4) as usize;
+        let toff = super::u32le(raw, base as i64 + 8) as usize;
+        let tlen = super::u32le(raw, base as i64 + 12) as usize;
+        let soff = super::u32le(raw, base as i64 + 16) as usize;
+        let slen = super::u32le(raw, base as i64 + 20) as usize;
+        let mut tb = TestBtf {
+            recs: Vec::new(),
+            str_base: base + hdr + soff,
+            str_end: base + hdr + soff + slen,
+        };
+        let mut p = base + hdr + toff;
+        let end = p + tlen;
+        while p < end {
+            let info = u32_at(raw, p + 4);
+            let kind = (info >> 24) & 31;
+            let vlen = info & 65535;
+            let extra: i64 = if kind == 1 || kind == 14 || kind == 17 {
+                4
+            } else if kind == 3 {
+                12
+            } else if kind == 4 || kind == 5 || kind == 15 {
+                vlen * 12
+            } else if kind == 6 || kind == 13 {
+                vlen * 8
+            } else if kind == 19 {
+                vlen * 12
+            } else if matches!(kind, 0 | 2 | 7 | 8 | 9 | 10 | 11 | 12 | 16 | 18) {
+                0
+            } else {
+                panic!("channel BTF must walk");
+            };
+            tb.recs.push(TestRec {
+                kind,
+                vlen,
+                off: p,
+                size: u32_at(raw, p + 8),
+            });
+            p += 12 + extra as usize;
+        }
+        assert_eq!(p, end);
+        tb
+    }
+
+    fn btf_name(raw: &[u8], tb: &TestBtf, name_off: i64) -> String {
+        let mut end = tb.str_base + name_off as usize;
+        assert!(end < tb.str_end);
+        while raw[end] != 0 {
+            end += 1;
+            assert!(end < tb.str_end);
+        }
+        String::from_utf8(raw[tb.str_base + name_off as usize..end].to_vec()).unwrap()
+    }
+
+    fn rec_name(raw: &[u8], tb: &TestBtf, rec: usize) -> String {
+        btf_name(raw, tb, u32_at(raw, tb.recs[rec].off))
+    }
+
+    /// Record index of the VAR named want (exactly one).
+    fn var_rec(raw: &[u8], tb: &TestBtf, want: &str) -> usize {
+        let mut found = None;
+        for (i, rec) in tb.recs.iter().enumerate() {
+            if rec.kind != 14 {
+                continue;
+            }
+            if rec_name(raw, tb, i) == want {
+                assert!(found.is_none(), "VAR name must be unique");
+                found = Some(i);
+            }
+        }
+        found.expect("VAR must exist")
+    }
+
+    /// Record index of the DATASEC named want (exactly one).
+    fn datasec_rec(raw: &[u8], tb: &TestBtf, want: &str) -> usize {
+        let mut found = None;
+        for (i, rec) in tb.recs.iter().enumerate() {
+            if rec.kind != 15 {
+                continue;
+            }
+            if rec_name(raw, tb, i) == want {
+                assert!(found.is_none(), "DATASEC name must be unique");
+                found = Some(i);
+            }
+        }
+        found.expect("DATASEC must exist")
+    }
+
+    /// Record index of the STRUCT named want (exactly one).
+    fn struct_rec(raw: &[u8], tb: &TestBtf, want: &str) -> usize {
+        let mut found = None;
+        for (i, rec) in tb.recs.iter().enumerate() {
+            if rec.kind != 4 {
+                continue;
+            }
+            if rec_name(raw, tb, i) == want {
+                assert!(found.is_none(), "STRUCT name must be unique");
+                found = Some(i);
+            }
+        }
+        found.expect("STRUCT must exist")
+    }
+
+    /// 0-based DATASEC member index of one VAR (test targeting).
+    fn datasec_index(raw: &[u8], tb: &TestBtf, sec: &str, var: &str) -> usize {
+        let want = var_rec(raw, tb, var) as i64 + 1;
+        let rec = datasec_rec(raw, tb, sec);
+        let base = tb.recs[rec].off;
+        for m in 0..tb.recs[rec].vlen {
+            if u32_at(raw, base + 12 + m as usize * 12) == want {
+                return m as usize;
+            }
+        }
+        panic!("VAR must be listed");
+    }
+
+    /// Member (name, type id, bit offset) triple of one record.
+    fn member_at(raw: &[u8], tb: &TestBtf, rec: usize, m: usize) -> (String, i64, i64) {
+        let base = tb.recs[rec].off;
+        let name = btf_name(raw, tb, u32_at(raw, base + 12 + m * 12));
+        let tid = u32_at(raw, base + 12 + m * 12 + 4);
+        let off = u32_at(raw, base + 12 + m * 12 + 8);
+        (name, tid, off)
+    }
+
+    /// Overwrite bytes after asserting their current value.
+    fn overwrite(raw: &mut [u8], at: usize, from: &[u8], to: &[u8]) {
+        assert_eq!(from.len(), to.len());
+        assert_eq!(&raw[at..at + from.len()], from);
+        raw[at..at + to.len()].copy_from_slice(to);
+    }
+
+    fn set_u32(raw: &mut [u8], at: usize, val: u32) {
+        raw[at..at + 4].copy_from_slice(&val.to_le_bytes());
+    }
+
+    /// Write one u32 word of one `maps` section entry: entry idx,
+    /// field 0..4 (type, key_size, value_size, max_entries).
+    fn set_map_word(raw: &mut [u8], idx: usize, field: usize, val: u32) {
+        let (_, _, off, size) = section_range(raw, b"maps");
+        let at = off + idx * 28 + field * 4;
+        assert!(at + 4 <= off + size);
+        set_u32(raw, at, val);
+    }
+
+    #[test]
+    fn btf_aya_attempt_ok() {
+        // The build's own Aya attempt object admits: DATASEC
+        // `maps` with exact per-map geometry (counts ARRAY
+        // 4/8/6, ringbuf 8 MiB, offsets ARRAY 4/24/1).
+        let raw = aya_bytes("attempt");
+        let v = read_btf_maps(&raw);
+        assert!(v.ok, "Aya attempt refused: {}", v.message);
+        assert_eq!(v.message, "");
+        assert_eq!(v.ring_bytes, 8_388_608);
+    }
+
+    #[test]
+    fn btf_aya_lifecycle_ring_ok() {
+        let raw = aya_bytes("lifecycle");
+        let v = read_btf_maps_ring(&raw, "mv_lifecycle", "lifecycle");
+        assert!(v.ok, "Aya lifecycle refused: {}", v.message);
+        assert_eq!(v.message, "");
+        assert_eq!(v.ring_bytes, 33_554_432);
+    }
+
+    #[test]
+    fn btf_aya_copy_ring_ok() {
+        let raw = aya_bytes("copy");
+        let v = read_btf_maps_ring(&raw, "mv_copies", "copies");
+        assert!(v.ok, "Aya copy refused: {}", v.message);
+        assert_eq!(v.message, "");
+        assert_eq!(v.ring_bytes, 33_554_432);
+    }
+
+    #[test]
+    fn btf_aya_bad_chain_shape() {
+        // A malformed newtype spine refuses: the Aya lane pins
+        // the exact wrapper geometry per map. (A STRUCT vlen
+        // flip would desynchronize the walk itself, so the
+        // spine pins are exercised through size words, which
+        // keep the layout aligned, plus cross-wiring below.)
+        let raw = aya_bytes("attempt");
+        let tb = parse_btf(&raw);
+        let ring = struct_rec(&raw, &tb, "RingBuf");
+        assert_eq!(tb.recs[ring].size, 28);
+        let mut out = raw.clone();
+        set_u32(&mut out, tb.recs[ring].off + 8, 20);
+        let v = read_btf_maps(&out);
+        assert!(!v.ok);
+        assert_eq!(v.message, "attempts bad aya map shape");
+        let array = struct_rec(&raw, &tb, "Array_3C_u64_3E_");
+        assert_eq!(tb.recs[array].size, 28);
+        let mut out = raw.clone();
+        set_u32(&mut out, tb.recs[array].off + 8, 20);
+        let w = read_btf_maps(&out);
+        assert!(!w.ok);
+        assert_eq!(w.message, "counts bad aya map shape");
+    }
+
+    #[test]
+    fn btf_aya_crosswired() {
+        // counts through a ring wrapper refuses, and the ring
+        // through an array wrapper refuses: each map kind must
+        // carry its own spine shape.
+        let raw = aya_bytes("attempt");
+        let tb = parse_btf(&raw);
+        let counts = var_rec(&raw, &tb, "mv_counts");
+        let attempts = var_rec(&raw, &tb, "mv_attempts");
+        let ring = struct_rec(&raw, &tb, "RingBuf") as u32 + 1;
+        let array = struct_rec(&raw, &tb, "Array_3C_u64_3E_") as u32 + 1;
+        let mut out = raw.clone();
+        set_u32(&mut out, tb.recs[counts].off + 8, ring);
+        let v = read_btf_maps(&out);
+        assert!(!v.ok);
+        assert_eq!(v.message, "counts bad aya map shape");
+        let mut out = raw.clone();
+        set_u32(&mut out, tb.recs[attempts].off + 8, array);
+        let w = read_btf_maps(&out);
+        assert!(!w.ok);
+        assert_eq!(w.message, "attempts bad aya map shape");
+    }
+
+    #[test]
+    fn btf_aya_not_struct() {
+        // counts through a bare INT refuses in the existing
+        // vocabulary.
+        let raw = aya_bytes("attempt");
+        let tb = parse_btf(&raw);
+        let counts = var_rec(&raw, &tb, "mv_counts");
+        let mut int_tid = 0;
+        for (i, rec) in tb.recs.iter().enumerate() {
+            if rec.kind == 1 {
+                int_tid = i as u32 + 1;
+                break;
+            }
+        }
+        assert_ne!(int_tid, 0);
+        let mut out = raw.clone();
+        set_u32(&mut out, tb.recs[counts].off + 8, int_tid);
+        let v = read_btf_maps(&out);
+        assert!(!v.ok);
+        assert_eq!(v.message, "counts not a struct");
+    }
+
+    #[test]
+    fn btf_aya_linkage() {
+        // An extern counts VAR refuses, mirroring btf_extern.
+        let raw = aya_bytes("attempt");
+        let tb = parse_btf(&raw);
+        let counts = var_rec(&raw, &tb, "mv_counts");
+        assert_eq!(u32_at(&raw, tb.recs[counts].off + 12), 1);
+        let mut out = raw.clone();
+        set_u32(&mut out, tb.recs[counts].off + 12, 2);
+        let v = read_btf_maps(&out);
+        assert!(!v.ok);
+        assert_eq!(v.message, "counts linkage 2");
+    }
+
+    #[test]
+    fn btf_aya_missing_var() {
+        // A renamed counts VAR refuses in the existing vocabulary.
+        let raw = aya_bytes("attempt");
+        let tb = parse_btf(&raw);
+        let counts = var_rec(&raw, &tb, "mv_counts");
+        let at = tb.str_base + u32_at(&raw, tb.recs[counts].off) as usize;
+        let mut out = raw.clone();
+        overwrite(&mut out, at, b"mv_counts", b"mv_countz");
+        let v = read_btf_maps(&out);
+        assert!(!v.ok);
+        assert_eq!(v.message, "missing mv_counts");
+    }
+
+    #[test]
+    fn btf_aya_no_datasec() {
+        // Without DATASEC `maps` the refusal stays the existing
+        // vocabulary: unknown shapes stay refused.
+        let raw = aya_bytes("attempt");
+        let tb = parse_btf(&raw);
+        let rec = datasec_rec(&raw, &tb, "maps");
+        let at = tb.str_base + u32_at(&raw, tb.recs[rec].off) as usize;
+        let mut out = raw.clone();
+        overwrite(&mut out, at, b"maps", b"mapz");
+        let v = read_btf_maps(&out);
+        assert!(!v.ok);
+        assert_eq!(v.message, "no maps DATASEC");
+    }
+
+    #[test]
+    fn btf_aya_datasec_entries_pinned() {
+        // DATASEC members must be zero-offset 28-byte VARs:
+        // order is the ELF association, so a malformed list
+        // refuses instead of misassociating entries.
+        let raw = aya_bytes("attempt");
+        let tb = parse_btf(&raw);
+        let rec = datasec_rec(&raw, &tb, "maps");
+        let base = tb.recs[rec].off;
+        assert_eq!(u32_at(&raw, base + 12 + 4), 0);
+        assert_eq!(u32_at(&raw, base + 12 + 8), 28);
+        let mut out = raw.clone();
+        set_u32(&mut out, base + 12 + 4, 28);
+        let v = read_btf_maps(&out);
+        assert!(!v.ok);
+        assert_eq!(v.message, "bad maps DATASEC");
+        let mut out = raw.clone();
+        set_u32(&mut out, base + 12 + 8, 0);
+        let w = read_btf_maps(&out);
+        assert!(!w.ok);
+        assert_eq!(w.message, "bad maps DATASEC");
+        // A twice-listed VAR is ambiguous: refuse, never guess.
+        let mut out = raw.clone();
+        let tid = u32_at(&raw, base + 12);
+        set_u32(&mut out, base + 12 + 2 * 12, tid as u32);
+        let d = read_btf_maps(&out);
+        assert!(!d.ok);
+        assert_eq!(d.message, "bad maps DATASEC");
+    }
+
+    #[test]
+    fn btf_aya_section_missing_or_truncated() {
+        // DATASEC `maps` without ELF definition bytes refuses:
+        // geometry has no source to pin.
+        let raw = aya_bytes("attempt");
+        let (_, name_at, _, _) = section_range(&raw, b"maps");
+        let mut out = raw.clone();
+        overwrite(&mut out, name_at, b"maps", b"mapz");
+        let v = read_btf_maps(&out);
+        assert!(!v.ok);
+        assert_eq!(v.message, "counts bad aya map shape");
+        // A section too short for the listed entries refuses too.
+        let (hdr, _, _, _) = section_range(&raw, b"maps");
+        let mut out = raw.clone();
+        out[hdr + 32..hdr + 40].copy_from_slice(&28u64.to_le_bytes());
+        let w = read_btf_maps(&out);
+        assert!(!w.ok);
+        assert_eq!(w.message, "counts bad aya map shape");
+    }
+
+    #[test]
+    fn btf_aya_leaf_members() {
+        // The flat bpf_map_def leaf reuses the libbpf member
+        // vocabulary: a missing type member and a non-u32
+        // member refuse exactly like their libbpf analogs.
+        let raw = aya_bytes("attempt");
+        let tb = parse_btf(&raw);
+        let leaf = struct_rec(&raw, &tb, "bpf_map_def");
+        assert_eq!(tb.recs[leaf].vlen, 7);
+        let (name, _, _) = member_at(&raw, &tb, leaf, 0);
+        assert_eq!(name, "type_");
+        let name_off = u32_at(&raw, tb.recs[leaf].off + 12);
+        let mut out = raw.clone();
+        overwrite(
+            &mut out,
+            tb.str_base + name_off as usize,
+            b"type_",
+            b"typo_",
+        );
+        let v = read_btf_maps(&out);
+        assert!(!v.ok);
+        assert_eq!(v.message, "counts missing type");
+        // Retarget the type member at a one-byte INT.
+        let mut narrow = 0;
+        for (i, rec) in tb.recs.iter().enumerate() {
+            if rec.kind == 1 && rec.size == 1 {
+                narrow = i as u32 + 1;
+                break;
+            }
+        }
+        assert_ne!(narrow, 0);
+        let mut out = raw.clone();
+        set_u32(&mut out, tb.recs[leaf].off + 12 + 4, narrow);
+        let w = read_btf_maps(&out);
+        assert!(!w.ok);
+        assert_eq!(w.message, "counts bad type");
+    }
+
+    #[test]
+    fn btf_aya_counts_geometry() {
+        // Every counts geometry field pins exactly, in the
+        // existing per-field vocabulary.
+        let raw = aya_bytes("attempt");
+        let tb = parse_btf(&raw);
+        let idx = datasec_index(&raw, &tb, "maps", "mv_counts");
+        for (field, val, want) in [
+            (0, 27u32, "counts type 27, want 2"),
+            (3, 7u32, "counts max_entries 7, want 6"),
+            (1, 8u32, "counts key 8, want 4"),
+            (2, 4u32, "counts value 4, want 8"),
+        ] {
+            let mut out = raw.clone();
+            set_map_word(&mut out, idx, field, val);
+            let v = read_btf_maps(&out);
+            assert!(!v.ok, "field {field} admitted");
+            assert_eq!(v.message, want);
+        }
+    }
+
+    #[test]
+    fn btf_aya_ring_geometry() {
+        // The ring map pins type 27 plus a sane power-of-two size.
+        let raw = aya_bytes("attempt");
+        let tb = parse_btf(&raw);
+        let idx = datasec_index(&raw, &tb, "maps", "mv_attempts");
+        let mut out = raw.clone();
+        set_map_word(&mut out, idx, 0, 2);
+        let v = read_btf_maps(&out);
+        assert!(!v.ok);
+        assert_eq!(v.message, "attempts type 2, want 27");
+        let mut out = raw.clone();
+        set_map_word(&mut out, idx, 3, 1000);
+        let w = read_btf_maps(&out);
+        assert!(!w.ok);
+        assert_eq!(w.message, "attempts ring size 1000 rejected");
+    }
+
+    #[test]
+    fn btf_aya_offsets_geometry() {
+        // The offsets table pins ARRAY 4/24/1 exactly.
+        let raw = aya_bytes("attempt");
+        let tb = parse_btf(&raw);
+        let idx = datasec_index(&raw, &tb, "maps", "mv_offsets");
+        let mut out = raw.clone();
+        set_map_word(&mut out, idx, 2, 8);
+        let v = read_btf_maps(&out);
+        assert!(!v.ok);
+        assert_eq!(v.message, "offsets value 8, want 24");
+        let mut out = raw.clone();
+        set_map_word(&mut out, idx, 3, 2);
+        let w = read_btf_maps(&out);
+        assert!(!w.ok);
+        assert_eq!(w.message, "offsets max_entries 2, want 1");
+    }
+
+    #[test]
+    fn btf_aya_lifecycle_geometry() {
+        // The lifecycle ring pins per channel, not just admit.
+        let raw = aya_bytes("lifecycle");
+        let tb = parse_btf(&raw);
+        let idx = datasec_index(&raw, &tb, "maps", "mv_lifecycle");
+        let mut out = raw.clone();
+        set_map_word(&mut out, idx, 0, 2);
+        let v = read_btf_maps_ring(&out, "mv_lifecycle", "lifecycle");
+        assert!(!v.ok);
+        assert_eq!(v.message, "lifecycle type 2, want 27");
+    }
+
+    #[test]
+    fn btf_aya_copy_geometry() {
+        // The copies ring pins per channel, not just admit.
+        let raw = aya_bytes("copy");
+        let tb = parse_btf(&raw);
+        let idx = datasec_index(&raw, &tb, "maps", "mv_copies");
+        let mut out = raw.clone();
+        set_map_word(&mut out, idx, 0, 2);
+        let v = read_btf_maps_ring(&out, "mv_copies", "copies");
+        assert!(!v.ok);
+        assert_eq!(v.message, "copies type 2, want 27");
+    }
+
+    #[test]
+    fn btf_aya_missing_ring() {
+        // A wrong ring variable refuses, mirroring btf_missing_ring.
+        let raw = aya_bytes("lifecycle");
+        let v = read_btf_maps_ring(&raw, "mv_copies", "copies");
+        assert!(!v.ok);
+        assert_eq!(v.message, "missing mv_copies");
     }
 }
