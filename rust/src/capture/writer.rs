@@ -1623,6 +1623,8 @@ pub(crate) mod faults {
         pub pwrite_fail_tags: Vec<&'static str>,
         /// Tags whose fsync fails (persistent).
         pub fsync_fail_tags: Vec<&'static str>,
+        /// Tags whose fsync fails exactly once, then passes.
+        pub fsync_fail_once_tags: Vec<&'static str>,
         /// Errno the failing fsync reports.
         pub fsync_errno: i32,
         /// Every ftruncate fails with EIO.
@@ -1659,6 +1661,7 @@ pub(crate) mod faults {
             pwrite_fail_errno: 0,
             pwrite_fail_tags: Vec::new(),
             fsync_fail_tags: Vec::new(),
+            fsync_fail_once_tags: Vec::new(),
             fsync_errno: 0,
             truncate_fail: false,
             rename_fail: false,
@@ -1761,7 +1764,16 @@ pub(crate) mod faults {
         }
         drop(inj);
         trace("sync", tag);
-        let inj = lock();
+        let mut inj = lock();
+        if let Some(pos) = inj.plan.fsync_fail_once_tags.iter().position(|t| *t == tag) {
+            inj.plan.fsync_fail_once_tags.remove(pos);
+            let errno = inj.plan.fsync_errno;
+            // SAFETY: as above.
+            unsafe {
+                *libc::__errno_location() = errno;
+            }
+            return Some(-1);
+        }
         if inj.plan.fsync_fail_tags.contains(&tag) {
             let errno = inj.plan.fsync_errno;
             // SAFETY: as above.
@@ -2736,6 +2748,48 @@ mod tests {
         assert!(err.message.contains("writer poisoned"), "{}", err.message);
         assert_eq!(w.append(&line(0x41, 10)).unwrap_err().kind, "misuse");
         assert!(!target.join("checkpoint.json").exists());
+    }
+
+    #[test]
+    fn checkpoint_one_shot_dir_sync_failure_restores_previous() {
+        let tmp = scratch();
+        let target = tmp.path().join("cap");
+        let mut w = EventWriter::new(target.to_str().unwrap(), MIN_EVENTS_BUDGET).expect("create");
+        w.append(&line(0x41, 100)).expect("append");
+        w.checkpoint(b"checkpoint-one").expect("ckpt1");
+        assert_eq!(
+            read_bytes(&target.join("checkpoint.json")),
+            b"checkpoint-one"
+        );
+        w.append(&line(0x42, 100)).expect("append2");
+        let _armed = arm(FaultPlan {
+            fsync_fail_once_tags: vec!["dir"],
+            fsync_errno: libc::EIO,
+            ..Default::default()
+        });
+        // The exchange sync fails once; the restore re-sync passes, so the
+        // previous checkpoint is wound back and the writer survives with `io`.
+        let err = w.checkpoint(b"checkpoint-two").unwrap_err();
+        assert_eq!(err.kind, "io");
+        assert!(
+            err.message.contains("checkpoint directory sync failed"),
+            "{}",
+            err.message
+        );
+        assert_eq!(
+            read_bytes(&target.join("checkpoint.json")),
+            b"checkpoint-one"
+        );
+        assert!(!target.join("checkpoint.json.tmp").exists());
+        drop(_armed);
+        // The writer continues: a third checkpoint still publishes.
+        w.checkpoint(b"checkpoint-three").expect("ckpt3");
+        assert_eq!(
+            read_bytes(&target.join("checkpoint.json")),
+            b"checkpoint-three"
+        );
+        assert!(!target.join("checkpoint.json.tmp").exists());
+        w.discard();
     }
 
     #[test]
