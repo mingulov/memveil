@@ -432,11 +432,12 @@ fn top_failed(prefix: &str, detail: &str) -> i64 {
     }
 }
 
-/// Render a reducer failure the way the source `String(e)` does.
+/// Render a finish-path failure the way the source `String(e)` does.
 ///
-/// The reducer raises a typed analysis error whose default rendering
+/// Finishing raises a typed analysis error whose default rendering
 /// is `AnalysisError(message=...)`; the detail rides through
-/// unchanged.
+/// unchanged. Consume-path failures stay bare: consume raises only
+/// the generic error whose string form is its message.
 fn analysis_error_text(message: &str) -> String {
     format!("AnalysisError(message={message})")
 }
@@ -1009,10 +1010,7 @@ fn drain(
             stopped = wait.state != "none";
         }
         if let Err(e) = analyzer.consume(&ev) {
-            return top_failed(
-                "memveil top: cannot reduce capture: ",
-                &analysis_error_text(&e.message),
-            );
+            return top_failed("memveil top: cannot reduce capture: ", &e.message);
         }
         if stopped {
             return finish_after_signal(reader, analyzer, opts, seq, watch, -1, "");
@@ -1112,10 +1110,7 @@ fn finish_after_signal(
             Err(e) => return top_failed("memveil top: cannot read capture: ", &e.message),
         };
         if let Err(e) = analyzer.consume(&ev) {
-            return top_failed(
-                "memveil top: cannot reduce capture: ",
-                &analysis_error_text(&e.message),
-            );
+            return top_failed("memveil top: cannot reduce capture: ", &e.message);
         }
     }
     let mut rep = match analyzer.finish(reader.session.window_end_ns, false) {
@@ -1169,7 +1164,7 @@ fn finish_after_signal(
 mod tests {
     use super::{
         BoundaryCursor, FilterWatch, StdoutSink, TopOptions, WaitSlices, diagnose_block,
-        filter_header_suffix, finish_live, live_template, parse_top_args, snapshot_block,
+        filter_header_suffix, finish_live, live_template, parse_top_args, run_top, snapshot_block,
         top_usage, wait_interval,
     };
     use crate::analysis::engine::Analyzer;
@@ -2366,6 +2361,78 @@ mod tests {
             return;
         }
         run_child("finish_live_warns_without_prefixes", &scratch);
+    }
+
+    fn unobserved_copy() -> Event {
+        Event {
+            session_id: "attempts-3-session".to_string(),
+            seq: 1,
+            ts_ns: 1100000000,
+            kind: "copy".to_string(),
+            source_hook: "synthetic-test-adapter:copy".to_string(),
+            source_backend: "synthetic".to_string(),
+            source_profile_id: "synthetic-lifecycle-1".to_string(),
+            source_measurement: "derived".to_string(),
+            source_correlation: "direct".to_string(),
+            ..Event::default()
+        }
+    }
+
+    #[test]
+    fn consume_failure_renders_bare_message() {
+        // The mappings reducer rejects executed copies without an
+        // observed measurement with a bare generic error (Mojo
+        // analysis/mappings.mojo consume raises Error, whose string
+        // form is the message alone), so top's consume arms print
+        // the message without the AnalysisError(...) wrapper the
+        // finish arms use.
+        let mut probe = Analyzer::new(live_template());
+        let err = probe
+            .consume(&unobserved_copy())
+            .expect_err("unobserved copy fails");
+        assert_eq!(err.message, "executed copies require observed measurement");
+
+        let scratch = TestDir::create("memveil-top-consume").expect("scratch");
+        if std::env::var("MEMVEIL_TOP_CHILD").is_ok() {
+            let dir = child_scratch().expect("scratch env");
+            let cap = format!("{dir}/cap");
+            std::fs::create_dir_all(&cap).expect("capture dir");
+            let session = repo("tests/fixtures/attempts/session.json");
+            std::fs::copy(&session, format!("{cap}/session.json")).expect("session copy");
+            let line = "{\"schema_version\": \"0.1.1\", \"session_id\": \"attempts-3-session\", \"seq\": \"1\", \"ts_ns\": \"1100000000\", \"kind\": \"copy\", \"source\": {\"hook\": \"synthetic-test-adapter:copy\", \"backend\": \"synthetic\", \"profile_id\": \"synthetic-lifecycle-1\", \"measurement\": \"derived\", \"correlation\": \"direct\"}, \"data\": {\"operation_id\": \"op-10\", \"mapping_id\": \"m-1\", \"direction\": \"original_to_bounce\", \"bytes\": \"4096\"}}\n";
+            std::fs::write(format!("{cap}/events.ndjson"), line).expect("events write");
+            let out = format!("{dir}/out.txt");
+            let err_path = format!("{dir}/err.txt");
+            let saved_out = redirect_fd(1, &out);
+            let saved_err = redirect_fd(2, &err_path);
+            let rc = run_top(std::slice::from_ref(&cap));
+            restore_fd(1, saved_out);
+            restore_fd(2, saved_err);
+            // The shared event parser rejects the violating line at
+            // read time (Mojo model/event.mojo copy gate), so the
+            // consume arm is unreachable from any capture file and
+            // the Mojo binary cannot render it either: both fail the
+            // read with these exact bytes, verified against
+            // build/mojo-memveil-compare.
+            assert_eq!(rc, crate::cli::report::EXIT_INVALID);
+            let want = "memveil top: cannot read capture: line 1: ValidationError(what=copy.source.measurement, message=executed copies require observed measurement)\n";
+            assert_eq!(read_scratch(&err_path), want);
+            assert_eq!(read_scratch(&out), "");
+            if let Some(bin) = std::env::var_os("MEMVEIL_MOJO_BIN") {
+                let mojo = std::process::Command::new(&bin)
+                    .arg("top")
+                    .arg(&cap)
+                    .output()
+                    .expect("mojo top runs");
+                assert_eq!(mojo.status.code(), Some(rc as i32));
+                assert_eq!(mojo.stderr, want.as_bytes());
+                assert!(mojo.stdout.is_empty());
+            } else {
+                eprintln!("skip: MEMVEIL_MOJO_BIN unset");
+            }
+            return;
+        }
+        run_child("consume_failure_renders_bare_message", &scratch);
     }
 
     #[test]
