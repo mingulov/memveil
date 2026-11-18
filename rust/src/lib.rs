@@ -9,6 +9,7 @@ pub mod bpf;
 pub mod capture;
 pub mod model;
 pub mod platform;
+pub mod render;
 
 /// Engine version reported by `--version` and embedded in reports.
 pub const ENGINE_VERSION: &str = "memveil-0.1.0";
