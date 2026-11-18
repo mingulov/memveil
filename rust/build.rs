@@ -16,10 +16,16 @@
 //! Prerequisite: `bpf-linker` 0.10.4 on PATH. Install it with
 //! `cargo install bpf-linker --version 0.10.4 --locked`.
 
-use std::{env, path::PathBuf, process::Command};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
-/// Nightly that builds the eBPF crate; must match
-/// `crates/ebpf/rust-toolchain.toml`.
+/// Nightly that builds the eBPF crate; must equal the `channel` in
+/// `crates/ebpf/rust-toolchain.toml`. Equality is asserted in `main` by
+/// parsing that file, so drift fails the build instead of silently mixing
+/// a direct cargo invocation with the pinned nightly.
 const BPF_TOOLCHAIN: &str = "nightly-2026-05-20";
 
 /// (channel, `DEP_MEMVEIL_EBPF_<CH>_PATH` suffix): one BPF object per
@@ -30,6 +36,24 @@ const CHANNELS: [(&str, &str); 3] = [
     ("copy", "COPY"),
 ];
 
+/// Read the `channel = "..."` value from a `rust-toolchain.toml`. Minimal
+/// line scan (no TOML parser in a build script): matches a `channel` key
+/// before the first `=` and strips one layer of double quotes.
+fn read_toolchain_channel(path: &Path) -> String {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+    for line in text.lines() {
+        let mut parts = line.splitn(2, '=');
+        let is_channel = parts.next().is_some_and(|key| key.trim() == "channel");
+        if is_channel {
+            if let Some(value) = parts.next() {
+                return value.trim().trim_matches('"').to_owned();
+            }
+        }
+    }
+    panic!("no `channel = ...` line in {}", path.display())
+}
+
 fn main() {
     println!("cargo::rerun-if-changed=crates/ebpf/src");
     println!("cargo::rerun-if-changed=crates/ebpf/src/bin");
@@ -39,6 +63,12 @@ fn main() {
     println!("cargo::rerun-if-changed=crates/ebpf/rust-toolchain.toml");
     println!("cargo::rerun-if-changed=crates/ebpf-common/src");
     println!("cargo::rerun-if-changed=crates/ebpf-common/Cargo.toml");
+    // The child invocation inherits the encoded rustflags below, so a flag
+    // change must rebuild the BPF objects. Watch both spellings: cargo
+    // derives the encoded form from `RUSTFLAGS`, and either may be the one
+    // the caller actually changed.
+    println!("cargo::rerun-if-env-changed=RUSTFLAGS");
+    println!("cargo::rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
 
     // Preflight: fail early with an actionable message when the linker is
     // missing or the wrong version. Local probe only, so it cannot break
@@ -65,10 +95,30 @@ fn main() {
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"));
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR not set"));
 
+    // The eBPF crate pins its own toolchain file; the `+toolchain` override
+    // below must name the same nightly. Parse and compare so the two cannot
+    // drift apart unnoticed.
+    let toolchain_file = manifest_dir.join("crates/ebpf/rust-toolchain.toml");
+    let pinned_channel = read_toolchain_channel(&toolchain_file);
+    assert_eq!(
+        pinned_channel,
+        BPF_TOOLCHAIN,
+        "BPF_TOOLCHAIN ({BPF_TOOLCHAIN}) disagrees with {} ({pinned_channel}): \
+         update both together",
+        toolchain_file.display()
+    );
+
     let target = "bpfel-unknown-none";
-    let mut cmd = Command::new("cargo");
-    cmd.arg(format!("+{BPF_TOOLCHAIN}"));
-    // The `+toolchain` override must win: a leaked `RUSTUP_TOOLCHAIN` or host
+    // The child cargo must be the pinned nightly, selected through rustup.
+    // `$CARGO` is deliberately NOT the vehicle: under rustup it names the
+    // real toolchain cargo binary, which rejects the `+toolchain` override
+    // (`no such command`), so it cannot select the pinned nightly. A bare
+    // `cargo` would depend on PATH resolving to the rustup proxy. `rustup
+    // run` states the requirement directly and fails loudly when rustup is
+    // absent (the old `+toolchain` spelling needed it too).
+    let mut cmd = Command::new("rustup");
+    cmd.args(["run", BPF_TOOLCHAIN, "cargo"]);
+    // The pinned toolchain must win: a leaked `RUSTUP_TOOLCHAIN` or host
     // `RUSTC` override would otherwise build with the host toolchain.
     cmd.env_remove("RUSTUP_TOOLCHAIN");
     cmd.env_remove("RUSTC");
@@ -93,6 +143,13 @@ fn main() {
 
     // Link with bpf-linker and keep BTF: fentry/fexit attach needs it.
     //
+    // Known non-fatal noise: each link warns `unable to open LLVM shared
+    // lib .../libLLVM-22-rust-1.97.0-nightly.so: dlopen failed`. That file
+    // is a 43-byte GNU ld script (`INPUT(libLLVM.so.22...)`), not an ELF
+    // object, and bpf-linker 0.10.4 dlopens the script name instead of the
+    // real library. Links still succeed with BTF intact; re-check if the
+    // linker or nightly pin ever moves.
+    //
     // target-cpu=v3: a *consumed* fetch-add result (old value kept for
     // wrap detection) needs BPF CPU v3, i.e. kernels >= 5.12. MemVeil's
     // floors (attempts 6.0, lifecycle/copy 6.11) are all above that, so
@@ -115,9 +172,9 @@ fn main() {
     }
     cmd.env("CARGO_ENCODED_RUSTFLAGS", flags);
 
-    let status = cmd
-        .status()
-        .expect("spawning pinned nightly cargo for crates/ebpf");
+    let status = cmd.status().unwrap_or_else(|error| {
+        panic!("spawning `rustup run {BPF_TOOLCHAIN} cargo` for crates/ebpf: {error} (is rustup on PATH?)")
+    });
     assert!(
         status.success(),
         "building crates/ebpf with {BPF_TOOLCHAIN} failed: {status}"

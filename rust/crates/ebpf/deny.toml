@@ -11,17 +11,22 @@ all-features = true
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
-unmaintained = "deny"
+# Validated with cargo-deny 0.21.0: `unmaintained` takes a scope there, and
+# "all" keeps the old deny-on-any-unmaintained-crate behavior.
+unmaintained = "all"
 ignore = []
 
 [licenses]
+# GPL-3.0-only and GPL-3.0-or-later are deliberately absent: this crate ships
+# as GPL-2.0-only, which shares no common version with GPL-3 terms, so any
+# dependency under those licenses is refused. (GPL-2.0-or-later stays: that
+# code can be taken under GPL-2.0 terms.)
 allow = [
   "Apache-2.0",
   "BSD-2-Clause",
   "BSD-3-Clause",
   "GPL-2.0-only",
   "GPL-2.0-or-later",
-  "GPL-3.0-or-later",
   "ISC",
   "MIT",
   "MPL-2.0",

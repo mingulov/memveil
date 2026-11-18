@@ -8,6 +8,11 @@ license = "GPL-2.0-only"
 publish = false
 
 [dependencies]
+# aya-build (currently 0.2.0) reaches the BPF link only through Cargo.lock,
+# transitively via aya-ebpf: no manifest pins it. Never `cargo update` this
+# crate unattended — a new aya-build can change generated bindings or the
+# link, so review the lockfile diff and rebuild every channel object after
+# any update.
 aya-ebpf = "=0.2.1"
 memveil-ebpf-common = { version = "0.0.0", path = "../ebpf-common", default-features = false }
 

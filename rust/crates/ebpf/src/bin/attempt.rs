@@ -12,7 +12,9 @@ mod attempt;
 #[path = "../common.rs"]
 mod common;
 
-// Compile-time proof that the shared wire types link into this BPF object.
+// The shared wire const must resolve with the expected type; dependency or
+// type drift fails the build here. Name/type agreement only — const-eval
+// links no code from the dependency into this BPF object.
 const _: u32 = memveil_ebpf_common::MV_MAGIC;
 
 /// BPF license declaration: the kernel gates GPL-only helpers on it.
