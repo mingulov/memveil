@@ -7,6 +7,7 @@
 pub mod analysis;
 pub mod bpf;
 pub mod capture;
+pub mod cli;
 pub mod model;
 pub mod platform;
 pub mod render;
