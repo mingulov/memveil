@@ -21,3 +21,13 @@ aya-obj = "=0.3.0"
 
 [workspace]
 members = ["crates/ebpf-common"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.test]
+# Line tables only: full debuginfo bloats test binaries for no
+# gate benefit; backtraces keep file:line.
+debug = "line-tables-only"
