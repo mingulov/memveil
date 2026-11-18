@@ -173,6 +173,7 @@ impl<'a> Scanner<'a> {
     }
 
     /// Consume `}`.
+    /// Pairs with [`begin_object`]: each call closes one open level.
     pub(crate) fn end_object(&mut self, what: &str) -> Result<(), ValidationError> {
         self.skip_ws();
         self.expect(what, b'}')?;
@@ -192,6 +193,7 @@ impl<'a> Scanner<'a> {
     }
 
     /// Consume `]`.
+    /// Pairs with [`begin_array`]: each call closes one open level.
     pub(crate) fn end_array(&mut self, what: &str) -> Result<(), ValidationError> {
         self.skip_ws();
         self.expect(what, b']')?;

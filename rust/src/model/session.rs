@@ -13,10 +13,11 @@
 //! start <= end; an empty window is valid and simply matches no event.
 //! Device IDs must be unique within the catalog.
 
+use super::integrity::{Integrity, parse_integrity};
 use super::regions::{RegionObservation, check_region_space, check_region_state};
 use super::scan::{
     Scanner, array_is_empty, array_next, expect_colon, object_is_empty, object_next,
-    parse_id_field, parse_nullable_string, parse_nullable_u64, parse_u64_field,
+    parse_id_field, parse_nullable_string, parse_u64_field,
 };
 use super::validate::{ValidationError, check_bounded_text, checked_add};
 
@@ -148,126 +149,6 @@ pub struct StopState {
     pub checkpoint_failures: u64,
     /// True when the checkpoint-failures key was present.
     pub has_checkpoint_failures: bool,
-}
-
-/// Digest of the empty event stream.
-pub const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-/// Integrity kind table size: exactly the ten event kinds.
-pub const INTEGRITY_KIND_COUNT: usize = 10;
-
-/// Name one integrity kind by table index; empty when out of range.
-pub fn integrity_kind(index: usize) -> &'static str {
-    match index {
-        0 => "bounce_attempt",
-        1 => "map_result",
-        2 => "unmap",
-        3 => "copy",
-        4 => "sync_request",
-        5 => "transition_result",
-        6 => "pool_sample",
-        7 => "gap",
-        8 => "marker",
-        9 => "counter_snapshot",
-        _ => "",
-    }
-}
-
-/// Map one kind name to its integrity table index.
-pub fn integrity_kind_index(name: &str) -> Option<usize> {
-    match name {
-        "bounce_attempt" => Some(0),
-        "map_result" => Some(1),
-        "unmap" => Some(2),
-        "copy" => Some(3),
-        "sync_request" => Some(4),
-        "transition_result" => Some(5),
-        "pool_sample" => Some(6),
-        "gap" => Some(7),
-        "marker" => Some(8),
-        "counter_snapshot" => Some(9),
-        _ => None,
-    }
-}
-
-/// Committed-byte snapshot; presence does not establish verification.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Integrity {
-    /// Committed event-file bytes.
-    pub events_bytes: u64,
-    /// Committed line count.
-    pub line_count: u64,
-    /// True when sequence bounds were reported.
-    pub has_seq: bool,
-    /// First committed sequence; zero unless `has_seq`.
-    pub first_seq: u64,
-    /// Last committed sequence; zero unless `has_seq`.
-    pub last_seq: u64,
-    /// Lowercase hex sha256 over literal event bytes.
-    pub events_sha256: String,
-    /// Per-kind line counts in [`integrity_kind`] order.
-    pub kinds: [u64; INTEGRITY_KIND_COUNT],
-}
-
-impl Default for Integrity {
-    fn default() -> Self {
-        Self {
-            events_bytes: 0,
-            line_count: 0,
-            has_seq: false,
-            first_seq: 0,
-            last_seq: 0,
-            events_sha256: EMPTY_SHA256.to_string(),
-            kinds: [0; INTEGRITY_KIND_COUNT],
-        }
-    }
-}
-
-impl Integrity {
-    /// Check self-consistency: kind sum, empty/non-empty rules, digest.
-    pub fn validate(&self) -> Result<(), ValidationError> {
-        let mut total = 0u64;
-        for kind in self.kinds {
-            total = checked_add(total, kind)?;
-        }
-        if total != self.line_count {
-            return Err(ValidationError::new(
-                "capture.integrity.kinds",
-                "sum differs from line_count",
-            ));
-        }
-        if self.line_count == 0 {
-            if self.has_seq || self.events_bytes != 0 || self.events_sha256 != EMPTY_SHA256 {
-                return Err(ValidationError::new(
-                    "capture.integrity",
-                    "invalid empty stream",
-                ));
-            }
-        } else if !self.has_seq
-            || self.first_seq != 0
-            || self.last_seq != self.line_count - 1
-            || self.events_bytes < self.line_count
-        {
-            return Err(ValidationError::new(
-                "capture.integrity",
-                "invalid sequence bounds or byte count",
-            ));
-        }
-        if self.events_sha256.len() != 64 {
-            return Err(ValidationError::new(
-                "capture.integrity.events_sha256",
-                "digest length",
-            ));
-        }
-        for b in self.events_sha256.bytes() {
-            if !(b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
-                return Err(ValidationError::new(
-                    "capture.integrity.events_sha256",
-                    "digest must be lowercase hex",
-                ));
-            }
-        }
-        Ok(())
-    }
 }
 
 /// One validated capture session header.
@@ -518,93 +399,6 @@ fn check_verdict_name(value: &str) -> Result<(), ValidationError> {
         return Ok(());
     }
     Err(ValidationError::new("verdict.name", "bad enum"))
-}
-
-fn parse_integrity(scan: &mut Scanner) -> Result<Integrity, ValidationError> {
-    scan.begin_object("capture.integrity")?;
-    let mut out = Integrity::default();
-    let mut seen: Vec<String> = Vec::new();
-    let mut first_present = false;
-    let mut last_present = false;
-    if !object_is_empty(scan, "capture.integrity")? {
-        loop {
-            scan.skip_ws();
-            let key = scan.parse_string("capture.integrity")?;
-            if seen.contains(&key) {
-                return Err(ValidationError::new("capture.integrity", "duplicate key"));
-            }
-            seen.push(key.clone());
-            expect_colon(scan, "capture.integrity")?;
-            if key == "algorithm" {
-                if scan.parse_string("capture.integrity")? != "sha256" {
-                    return Err(ValidationError::new(
-                        "capture.integrity.algorithm",
-                        "unsupported algorithm",
-                    ));
-                }
-            } else if key == "events_bytes" {
-                out.events_bytes = parse_u64_field(scan, "capture.integrity.events_bytes")?;
-            } else if key == "line_count" {
-                out.line_count = parse_u64_field(scan, "capture.integrity.line_count")?;
-            } else if key == "first_seq" {
-                let v = parse_nullable_u64(scan, "capture.integrity")?;
-                first_present = v.has;
-                out.first_seq = v.value;
-            } else if key == "last_seq" {
-                let v = parse_nullable_u64(scan, "capture.integrity")?;
-                last_present = v.has;
-                out.last_seq = v.value;
-            } else if key == "events_sha256" {
-                out.events_sha256 = scan.parse_string("capture.integrity")?;
-            } else if key == "kinds" {
-                scan.begin_object("capture.integrity.kinds")?;
-                let mut kinds_seen: Vec<String> = Vec::new();
-                if !object_is_empty(scan, "capture.integrity.kinds")? {
-                    loop {
-                        scan.skip_ws();
-                        let name = scan.parse_string("capture.integrity.kinds")?;
-                        let index = match integrity_kind_index(&name) {
-                            Some(index) if !kinds_seen.contains(&name) => index,
-                            _ => {
-                                return Err(ValidationError::new(
-                                    "capture.integrity.kinds",
-                                    "unknown or duplicate kind",
-                                ));
-                            }
-                        };
-                        kinds_seen.push(name);
-                        expect_colon(scan, "capture.integrity.kinds")?;
-                        out.kinds[index] = parse_u64_field(scan, "capture.integrity.kinds")?;
-                        if !object_next(scan, "capture.integrity.kinds")? {
-                            break;
-                        }
-                    }
-                }
-                scan.end_object("capture.integrity.kinds")?;
-                if kinds_seen.len() != INTEGRITY_KIND_COUNT {
-                    return Err(ValidationError::new(
-                        "capture.integrity.kinds",
-                        "missing kind",
-                    ));
-                }
-            } else {
-                return Err(ValidationError::new("capture.integrity", "unknown field"));
-            }
-            if !object_next(scan, "capture.integrity")? {
-                break;
-            }
-        }
-    }
-    scan.end_object("capture.integrity")?;
-    if seen.len() != 7 || first_present != last_present {
-        return Err(ValidationError::new(
-            "capture.integrity",
-            "missing field or mismatched sequence bounds",
-        ));
-    }
-    out.has_seq = first_present;
-    out.validate()?;
-    Ok(out)
 }
 
 fn parse_evidence_item(scan: &mut Scanner) -> Result<EvidenceItem, ValidationError> {
@@ -2144,6 +1938,7 @@ pub fn parse_session(data: &[u8]) -> Result<Session, ValidationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::integrity::EMPTY_SHA256;
     use std::path::PathBuf;
 
     const EV012: &str = include_str!("../../../tests/fixtures/reader/ev012/session.json");
