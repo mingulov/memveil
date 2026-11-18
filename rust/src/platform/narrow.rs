@@ -1811,19 +1811,23 @@ fn refuse(message: String) -> ObjectCheck {
 /// Static admission for a BPF object: class, machine, sections, symbol.
 ///
 /// Requires ELF64LE relocatable EM_BPF with a tracepoint
-/// section, a .maps section, a license section, and the
+/// section, a maps section, a license section, and the
 /// named program as a defined global function living in a
-/// tracepoint section. Required sections must be PROGBITS
-/// inside the file, and the program symbol must name a
-/// non-empty extent within its section. Any structural
-/// defect refuses; this never executes or loads anything.
+/// tracepoint section. The maps section admits either the
+/// libbpf `.maps` or the Aya/bpf-linker `maps` spelling;
+/// both spellings face identical type and range rigor.
+/// Required sections must be PROGBITS inside the file,
+/// and the program symbol must name a non-empty extent
+/// within its section. Any structural defect refuses;
+/// this never executes or loads anything.
 pub fn verify_object(data: &[u8], want_program: &str) -> ObjectCheck {
     verify_object_inner(data, want_program, "tracepoint/")
 }
 
 /// Static admission for one program in a known section kind.
 ///
-/// Same ELF/.maps/license/symbol checks as verify_object,
+/// Same ELF/maps/license/symbol checks as verify_object
+/// (either maps spelling admitted with identical rigor),
 /// but the program must live in a section starting with
 /// section_prefix, one of tracepoint/, fentry/, or fexit/.
 /// Anything else refuses without reading the object.
@@ -1889,6 +1893,7 @@ fn verify_object_inner(data: &[u8], want_program: &str, prefix: &str) -> ObjectC
     let mut sizes: Vec<i64> = Vec::new();
     let mut has_want = false;
     let mut has_maps = false;
+    let mut has_aya_maps = false;
     let mut has_license = false;
     let mut symtab: i64 = -1;
     for i in 0..shnum {
@@ -1908,6 +1913,9 @@ fn verify_object_inner(data: &[u8], want_program: &str, prefix: &str) -> ObjectC
         if sec_name == ".maps" {
             has_maps = true;
         }
+        if sec_name == "maps" {
+            has_aya_maps = true;
+        }
         if sec_name == "license" {
             has_license = true;
         }
@@ -1925,7 +1933,11 @@ fn verify_object_inner(data: &[u8], want_program: &str, prefix: &str) -> ObjectC
         }
         return refuse(format!("no {display} section"));
     }
-    if !has_maps {
+    // Either maps spelling admits: libbpf objects carry
+    // `.maps`, Aya/bpf-linker objects carry `maps`. Neither
+    // spelling refuses with the existing taxonomy; an object
+    // carrying both must satisfy both below.
+    if !has_maps && !has_aya_maps {
         return refuse("no .maps section".to_string());
     }
     if !has_license {
@@ -1936,8 +1948,10 @@ fn verify_object_inner(data: &[u8], want_program: &str, prefix: &str) -> ObjectC
     // wrong-type sections that later readers would misparse.
     for i in 0..shnum {
         let iu = i as usize;
-        let required =
-            str_starts_with(&names[iu], prefix) || names[iu] == ".maps" || names[iu] == "license";
+        let required = str_starts_with(&names[iu], prefix)
+            || names[iu] == ".maps"
+            || names[iu] == "maps"
+            || names[iu] == "license";
         if !required {
             continue;
         }
@@ -2654,6 +2668,107 @@ mod tests {
         let v = verify_object(&raw, PROG);
         assert!(!v.ok);
         assert_eq!(v.message, ".maps section bad type");
+    }
+
+    /// Header offset plus name-table offset of one section.
+    fn section_header(raw: &[u8], want: &[u8]) -> (usize, usize) {
+        let shoff = u64::from_le_bytes(raw[0x28..0x30].try_into().unwrap()) as usize;
+        let shnum = u16::from_le_bytes(raw[0x3C..0x3E].try_into().unwrap()) as usize;
+        let shstrndx = u16::from_le_bytes(raw[0x3E..0x40].try_into().unwrap()) as usize;
+        let str_hdr = shoff + shstrndx * 64;
+        let str_off =
+            u64::from_le_bytes(raw[str_hdr + 24..str_hdr + 32].try_into().unwrap()) as usize;
+        for i in 0..shnum {
+            let hdr = shoff + i * 64;
+            let name_off = u32::from_le_bytes(raw[hdr..hdr + 4].try_into().unwrap()) as usize;
+            let mut end = str_off + name_off;
+            while raw[end] != 0 {
+                end += 1;
+            }
+            if &raw[str_off + name_off..end] == want {
+                return (hdr, str_off + name_off);
+            }
+        }
+        panic!("fixture must carry the wanted section");
+    }
+
+    /// Rewrite the `.maps` section name to `maps`, the Aya/
+    /// bpf-linker spelling, keeping every other byte identical.
+    fn aya_shape(raw: &[u8]) -> Vec<u8> {
+        let mut out = raw.to_vec();
+        let (_, name_at) = section_header(&out, b".maps");
+        out[name_at..name_at + 5].copy_from_slice(b"maps\0");
+        out
+    }
+
+    #[test]
+    fn object_aya_shape_ok() {
+        // The Aya lane admits the bpf-linker `maps` spelling
+        // with the same rigor as the libbpf `.maps` lane.
+        let raw = elf_fixture("ok.o");
+        let v = verify_object(&aya_shape(&raw), PROG);
+        assert!(v.ok, "Aya shape refused: {}", v.message);
+        assert_eq!(v.message, "");
+    }
+
+    #[test]
+    fn object_aya_shape_bad_type() {
+        let raw = elf_fixture("ok.o");
+        let (hdr, _) = section_header(&raw, b".maps");
+        let mut shaped = aya_shape(&raw);
+        shaped[hdr + 4..hdr + 8].copy_from_slice(&2u32.to_le_bytes());
+        let v = verify_object(&shaped, PROG);
+        assert!(!v.ok);
+        assert_eq!(v.message, "maps section bad type");
+    }
+
+    #[test]
+    fn object_aya_shape_out_of_range() {
+        let raw = elf_fixture("ok.o");
+        let (hdr, _) = section_header(&raw, b".maps");
+        let mut shaped = aya_shape(&raw);
+        let past_end = shaped.len() as u64 + 64;
+        shaped[hdr + 24..hdr + 32].copy_from_slice(&past_end.to_le_bytes());
+        let v = verify_object(&shaped, PROG);
+        assert!(!v.ok);
+        assert_eq!(v.message, "maps section out of range");
+    }
+
+    #[test]
+    fn object_neither_maps_shape_refused() {
+        // Neither spelling present refuses with the existing
+        // taxonomy: unknown shapes stay refused, no new cause.
+        let raw = elf_fixture("ok.o");
+        let (_, name_at) = section_header(&raw, b".maps");
+        let mut out = raw.clone();
+        out[name_at..name_at + 6].copy_from_slice(b"xmaps\0");
+        let v = verify_object(&out, PROG);
+        assert!(!v.ok);
+        assert_eq!(v.message, "no .maps section");
+    }
+
+    #[test]
+    fn object_aya_embedded_channels_admitted() {
+        // The build's own Aya objects verify: attempt by
+        // program name, lifecycle/copy per tracing-program
+        // section kind, mirroring object_tracing_ok.
+        let attempt =
+            crate::platform::runtime::embedded_object("attempt").expect("attempt ELF embedded");
+        let v = verify_object(attempt, PROG);
+        assert!(v.ok, "attempt refused: {}", v.message);
+        let lc =
+            crate::platform::runtime::embedded_object("lifecycle").expect("lifecycle ELF embedded");
+        let a = verify_object_program(lc, "mv_map_result", "fexit/");
+        assert!(a.ok, "mv_map_result refused: {}", a.message);
+        let b = verify_object_program(lc, "mv_unmap", "fentry/");
+        assert!(b.ok, "mv_unmap refused: {}", b.message);
+        let cp = crate::platform::runtime::embedded_object("copy").expect("copy ELF embedded");
+        for name in ["mv_sync_device", "mv_sync_cpu", "mv_bounce"] {
+            let p = verify_object_program(cp, name, "fentry/");
+            assert!(p.ok, "{name} refused: {}", p.message);
+        }
+        let x = verify_object_program(cp, "mv_bounce_exit", "fexit/");
+        assert!(x.ok, "mv_bounce_exit refused: {}", x.message);
     }
 
     #[test]
