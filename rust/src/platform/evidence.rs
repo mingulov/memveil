@@ -43,6 +43,7 @@
 //!   the three corroborating flag tokens are read, and only from
 //!   `flags` lines.
 
+use super::btf::MAX_KERNEL_BTF_BYTES;
 use super::reader::{
     EVIDENCE_ABSENT, EVIDENCE_DENIED, EVIDENCE_OK, EvidenceReader, bytes_to_text, file_state,
     read_evidence,
@@ -70,12 +71,6 @@ pub const P_BOOT_CONFIG_PREFIX: &str = "/boot/config-";
 const CPUINFO_CAP: usize = 1_048_576;
 const VMPL_CAP: usize = 64;
 const OS_RELEASE_CAP: usize = 65_536;
-/// Kernel BTF read cap: 64 MiB.
-///
-/// Seam: the canonical value lives with the BTF adapter
-/// (`platform::btf`), which a follow-up task ports; this copy
-/// keeps the evidence adapter self-contained until then.
-const MAX_KERNEL_BTF_BYTES: usize = 67_108_864;
 const BTF_CAP: usize = MAX_KERNEL_BTF_BYTES;
 const TRIPLE_BOUND: i64 = 2_147_483_647;
 const OS_VALUE_KEEP: usize = 64;

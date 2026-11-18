@@ -11,14 +11,8 @@
 //! write diagnostics; callers render those.
 
 use super::hash::sha256_hex;
+use super::narrow::MAX_NARROW_OBJECT_BYTES;
 use super::reader::{geteuid_live, read_host_file};
-
-/// Narrow object read cap: 64 MiB.
-///
-/// Seam: the canonical value lives with the narrow adapter
-/// (`platform::narrow`), which a follow-up task ports; this copy
-/// keeps the snapshot adapter self-contained until then.
-const MAX_NARROW_OBJECT_BYTES: usize = 67_108_864;
 
 /// Join an evidence root with an absolute member path.
 pub fn join_root(root: &str, path: &str) -> String {

@@ -2,15 +2,20 @@
 //! Platform adapters: syscall and file interfaces for capture.
 
 pub mod artifact_files;
+pub mod baseline;
+pub mod btf;
 pub mod capabilities;
 pub mod capturefiles;
 pub mod clock;
 pub mod evidence;
 pub mod gzip;
 pub mod hash;
+pub mod kernelgate;
+pub mod narrow;
 pub mod outcome;
 pub mod prechecks;
 pub mod reader;
+pub mod runtime;
 pub mod signal;
 pub mod stdout;
 pub mod tracefs;
