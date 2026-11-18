@@ -10,8 +10,9 @@
 //! into a fresh temporary directory and runs it over the corpus. The exact C
 //! sources are pinned by FNV-1a hash (`pin_oracle_sources`): any C drift
 //! fails loudly until the pin is updated deliberately. `CC` selects the host
-//! compiler (`cc` by default; must accept `-std=c11 -O2 -Wall -Wextra -Werror`
-//! and `--version`); the resolved `<cc> --version` identity is logged and
+//! compiler (`cc` by default; must accept `-std=c11 -O2 -Wall -Wextra -Werror
+//! -fsanitize=address,undefined -fno-omit-frame-pointer` and `--version`);
+//! the resolved `<cc> --version` identity is logged and
 //! attached to every oracle failure. The oracles self-validate against
 //! `corpus.txt` and print `<tool>: <count> vectors passed` only after
 //! checking every vector and fully consuming both corpus files, so the tests
@@ -96,9 +97,25 @@ fn split_corpus(blob: &[u8], corpus: &str) -> Vec<(u32, Vec<u8>)> {
 }
 
 /// Fresh per-test scratch directory under the system temp dir.
+///
+/// The name carries a nonce (process id, wall-clock nanos, and a per-process
+/// counter), and any stale directory already at that path is removed before
+/// use: a previous crashed run's oracle binary or dump must never be reused.
+/// Clear-or-fail — a removal error fails the test loudly instead of reusing.
 fn workdir(tag: &str) -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("memveil-wire-compat-{}-{tag}", std::process::id()));
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nonce = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "memveil-wire-compat-{}-{nanos:x}-{nonce}-{tag}",
+        std::process::id()
+    ));
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).expect("clear stale workdir");
+    }
     std::fs::create_dir_all(&dir).expect("create workdir");
     dir
 }
@@ -178,11 +195,14 @@ fn cc_identity() -> String {
 }
 
 /// Compile one checked-in C oracle with the host toolchain. Flags mirror the
-/// repository native build minus sanitizers; the oracle self-validates, so a
-/// successful exit proves the build decodes correctly.
+/// repository native build plus AddressSanitizer/UBSan: the oracle parses
+/// untrusted corpus bytes, so a sanitizer abort fails the test loudly instead
+/// of letting an oracle-side over-read skew the differential. The oracle
+/// self-validates, so a successful exit proves the build decodes correctly.
 ///
 /// Allowed `CC`: any host C11 compiler (default `cc`); set `CC` to override.
-/// The value must accept `-std=c11 -O2 -Wall -Wextra -Werror` and `--version`.
+/// The value must accept `-std=c11 -O2 -Wall -Wextra -Werror
+/// -fsanitize=address,undefined -fno-omit-frame-pointer` and `--version`.
 /// The resolved compiler identity is recorded in the test log and attached to
 /// every oracle-build failure, so an exotic `CC` can break the build loudly
 /// but never skew it silently.
@@ -193,7 +213,15 @@ fn compile_oracle(root: &Path, name: &str, work: &Path, cc_id: &str) -> PathBuf 
     let src = root.join("tests/native").join(format!("{name}.c"));
     let out = work.join(name);
     let output = Command::new(&cc)
-        .args(["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror"])
+        .args([
+            "-std=c11",
+            "-O2",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-fsanitize=address,undefined",
+            "-fno-omit-frame-pointer",
+        ])
         .arg("-I")
         .arg(root.join("bpf/include"))
         .arg(&src)
@@ -297,6 +325,10 @@ fn check_dump_matches_corpus_verdicts(dump: &[String], corpus_txt: &Path, corpus
 }
 
 /// Rust decode failures in the shared `PAY_*` vocabulary the C dump uses.
+/// `TableBad` is unreachable from the wire-record decoders (only
+/// `decode_offsets_table` raises it), but the mapping stays total: the token
+/// the C dump never emits would surface as a byte mismatch in the renders,
+/// never as a panic here.
 fn verdict_name(error: DecodeError) -> &'static str {
     match error {
         DecodeError::Short => "PAY_SHORT",
@@ -311,7 +343,7 @@ fn verdict_name(error: DecodeError) -> &'static str {
         DecodeError::Dir => "PAY_DIR",
         DecodeError::Reason => "PAY_REASON",
         DecodeError::Range => "PAY_RANGE",
-        DecodeError::TableBad => panic!("offsets-table error from a wire record decode"),
+        DecodeError::TableBad => "PAY_TABLE_BAD",
     }
 }
 
@@ -847,6 +879,7 @@ fn renders_detect_single_byte_divergence() {
         (DecodeError::Dir, "PAY_DIR"),
         (DecodeError::Reason, "PAY_REASON"),
         (DecodeError::Range, "PAY_RANGE"),
+        (DecodeError::TableBad, "PAY_TABLE_BAD"),
     ];
     for (error, word) in vocab {
         assert_eq!(verdict_name(error), word);
@@ -862,8 +895,13 @@ fn lifecycle_json_corpus_holds_no_wire_fixtures() {
     // `tests/fixtures/lifecycle/` holds analyzer-layer JSON events (session
     // plus per-scenario event streams) consumed only by the analyzer suites;
     // no wire decoder on either side reads them, so no differential applies.
-    // Pin that shape fail-closed: a future `corpus.bin` here must gain
-    // differential coverage instead of silently escaping it.
+    // Pin that shape fail-closed: a future wire fixture here must gain
+    // differential coverage instead of silently escaping it. The name match
+    // is deliberately broad — any `corpus` substring (a renamed `corpus.bin`
+    // still reads as a wire corpus) and any `.bin` file (wire corpora are
+    // `.bin` by convention; none belongs in this analyzer-only dir).
+    // Every ndjson fixture must also be non-empty: an emptied stream would
+    // keep the count above zero while testing nothing.
     let dir = repo_root().join("tests/fixtures/lifecycle");
     let mut ndjson = 0u32;
     let mut stack = vec![dir];
@@ -876,14 +914,24 @@ fn lifecycle_json_corpus_holds_no_wire_fixtures() {
                 stack.push(path);
                 continue;
             }
-            match path.file_name().and_then(|name| name.to_str()) {
-                Some("corpus.bin") | Some("corpus.txt") => panic!(
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            if name.to_lowercase().contains("corpus")
+                || path.extension().and_then(|ext| ext.to_str()) == Some("bin")
+            {
+                panic!(
                     "wire fixture {} needs differential coverage",
                     path.display()
-                ),
-                _ => {}
+                );
             }
             if path.extension().and_then(|ext| ext.to_str()) == Some("ndjson") {
+                let len = path
+                    .metadata()
+                    .unwrap_or_else(|error| panic!("stat {}: {error}", path.display()))
+                    .len();
+                assert!(len > 0, "emptied ndjson fixture {}", path.display());
                 ndjson += 1;
             }
         }
