@@ -1,0 +1,21 @@
+Package: memveil
+Version: @UPSTREAM@-1
+Section: utils
+Priority: optional
+Architecture: amd64
+Depends: @DEPENDS@
+Maintainer: Denis Mingulov <denis@mingulov.com>
+Description: swiotlb bounce-attempt capture and offline replay on x86-64 Linux
+ Record swiotlb bounce activity, mapping lifetimes, and executed
+ copies into a self-describing capture directory, then replay it
+ offline as text, JSON, or Markdown. Counts are try-counts with
+ requested bytes; actual copies come from the copy channel.
+ .
+ Third-party binary package: built outside the archive from the
+ MemVeil sources with the pinned Rust toolchain. Installed
+ runs need no flags or environment: profiles resolve from
+ the installed share dir and qualify receipts land under
+ /var/lib/memveil/receipts.
+X-Memveil-Revision: @REVISION@
+X-Memveil-Cargo-Lock: @CARGO_LOCK@
+X-Memveil-Build-Tools: @BUILD_TOOLS@
