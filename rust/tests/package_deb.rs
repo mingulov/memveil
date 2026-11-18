@@ -900,6 +900,8 @@ fn install_doctor_uninstall_smoke() {
     let tmp = h::scratch("journey");
     let qcap = tmp.join("qcap");
     let qcap_existed = qcap.exists();
+    let qcap2 = tmp.join("qcap2");
+    let qcap2_existed = qcap2.exists();
     let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut install = vec!["-n", "dpkg", "-i"];
         if force_depends {
@@ -998,7 +1000,22 @@ fn install_doctor_uninstall_smoke() {
         // discovery. Whether zero-flag qualify should resolve
         // the FHS copies is a runtime-behavior decision owned
         // by the binary suites, not this packaging suite.
+        //
+        // Two legs cover the smoke contract for the shipped
+        // inspection objects. The loader links statically, so
+        // a bridgeless smoke attaches live, finalizes, then
+        // refuses to mint rather than bind an unbound bridge
+        // identity (exit 1); an explicit --bridge binds the
+        // exercised bytes and mints (exit 0), mirroring
+        // production usage of explicit artifacts.
         let lib = "/usr/lib/memveil";
+        // Bridgeless leg: the refusal contract. No --bridge is
+        // passed, discovery finds no native bridge in the
+        // package, and the finalized smoke must exit 1 with the
+        // exact bridge-unbound diagnostic, minting nothing. The
+        // leftover capture dir corroborates that the smoke
+        // attached and ran before the bridge gate stopped
+        // minting (a plan refusal would exit 3 with no smoke).
         let owned = vec![
             "sudo".to_string(),
             "-n".to_string(),
@@ -1019,42 +1036,118 @@ fn install_doctor_uninstall_smoke() {
             "journey qualify exit: {}",
             qualify.status.code().unwrap_or(-1)
         );
-        if qualify.status.code() == Some(0) {
-            let stdout = String::from_utf8_lossy(&qualify.stdout);
-            assert!(
-                stdout.contains("receipt=/var/lib/memveil/receipts/"),
-                "{stdout}"
-            );
-            let published: Vec<String> = fs::read_dir(receipts)
-                .unwrap()
-                .flatten()
-                .map(|e| e.file_name().to_str().unwrap().to_string())
-                .collect();
-            assert!(!published.is_empty(), "exit 0 published no receipt");
-        } else if qualify.status.code() == Some(3) {
-            let stderr = String::from_utf8_lossy(&qualify.stderr);
-            println!("journey qualify refusal: {}", stderr.trim());
-            for missing in [
-                "no bridge",
-                "no object",
-                "cannot load profiles",
-                "cannot resolve profiles",
-            ] {
-                assert!(!stderr.contains(missing), "{stderr}");
-            }
-            assert!(!stderr.trim().is_empty(), "refusal needs a diagnostic");
-            assert_eq!(
-                fs::read_dir(receipts).unwrap().count(),
-                0,
-                "refused qualify left receipts"
-            );
-        } else {
-            panic!(
-                "qualify exit {}: {}",
-                qualify.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&qualify.stderr)
-            );
-        }
+        assert_eq!(
+            qualify.status.code(),
+            Some(1),
+            "bridgeless smoke must refuse with exit 1: {}",
+            String::from_utf8_lossy(&qualify.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&qualify.stderr);
+        assert!(
+            stderr.contains(
+                "memveil qualify: smoke bridge unbound: bridge identity unbound for this smoke"
+            ),
+            "bridgeless smoke diagnostic changed: {stderr}"
+        );
+        assert!(qcap.is_dir(), "bridgeless smoke left no capture dir");
+        assert_eq!(
+            fs::read_dir(receipts).unwrap().count(),
+            0,
+            "refused qualify left receipts"
+        );
+        // Explicit-bridge leg: the success contract. The
+        // installed package ships no native bridge library, so
+        // no production bridge artifact exists on the journey
+        // host; the test mints a fixture file with fixed bytes
+        // instead. The bridge override only binds receipts
+        // through the admission hash of the exercised bytes
+        // (the loader links statically and never loads the path
+        // for smoke identity), so the fixture exercises the
+        // exact production path of an explicit --bridge
+        // artifact while letting the test pin the expected
+        // binding hash.
+        let fixture = tmp.join("bridge-fixture.so");
+        fs::write(&fixture, b"MEMVEIL-JOURNEY-BRIDGE-FIXTURE-v1\n").unwrap();
+        let owned = vec![
+            "sudo".to_string(),
+            "-n".to_string(),
+            "/usr/bin/memveil".to_string(),
+            "qualify".to_string(),
+            "--output".to_string(),
+            qcap2.to_str().unwrap().to_string(),
+            "--object".to_string(),
+            format!("{lib}/swiotlb_attempt.bpf.o"),
+            "--lc-object".to_string(),
+            format!("{lib}/swiotlb_lifecycle.bpf.o"),
+            "--cp-object".to_string(),
+            format!("{lib}/swiotlb_copy.bpf.o"),
+            "--bridge".to_string(),
+            fixture.to_str().unwrap().to_string(),
+        ];
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let bridged = h::run(refs[0], &refs[1..], Some(&tmp));
+        println!(
+            "journey bridged qualify exit: {}",
+            bridged.status.code().unwrap_or(-1)
+        );
+        assert_eq!(
+            bridged.status.code(),
+            Some(0),
+            "bridged smoke failed: {}",
+            String::from_utf8_lossy(&bridged.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&bridged.stdout);
+        assert!(
+            stdout.contains("receipt=/var/lib/memveil/receipts/"),
+            "{stdout}"
+        );
+        assert!(stdout.contains("caps=attempt-trace"), "{stdout}");
+        // The minted receipt must verify: shape pins plus
+        // bindings to the exact exercised bytes (the fixture
+        // bridge and the installed inspection objects). No CLI
+        // verify verb exists, so the test parses the receipt and
+        // pins every binding hash directly.
+        let published: Vec<String> = fs::read_dir(receipts)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(published.len(), 1, "exit 0 must mint one receipt");
+        let marker = "receipt=";
+        let at = stdout.find(marker).expect("stdout names the receipt");
+        let path = stdout[at + marker.len()..]
+            .lines()
+            .next()
+            .unwrap()
+            .trim()
+            .to_string();
+        assert_eq!(path, format!("{receipts}/{}", published[0]));
+        let bridge_sha = h::sha256_file(&fixture);
+        let attempt_sha = h::sha256_file(std::path::Path::new(&format!(
+            "{lib}/swiotlb_attempt.bpf.o"
+        )));
+        let lc_sha = h::sha256_file(std::path::Path::new(&format!(
+            "{lib}/swiotlb_lifecycle.bpf.o"
+        )));
+        let cp_sha = h::sha256_file(std::path::Path::new(&format!("{lib}/swiotlb_copy.bpf.o")));
+        let probe = format!(
+            "import json; rec = json.load(open({path:?})); \
+             assert rec['schema_version'] == '0.1.0', rec; \
+             assert rec['kind'] == 'memveil-qualification-receipt', rec; \
+             assert rec['grade'] == 'local-auto', rec; \
+             assert rec['capabilities']['attempt-trace']['status'] == 'qualified', \
+             rec['capabilities']; \
+             assert rec['workload']['kind'] == 'smoke', rec['workload']; \
+             art = rec['artifacts']; \
+             assert art['bridge'] == 'sha256:{bridge_sha}', art; \
+             objs = art['objects']; \
+             assert objs['attempt'] == 'sha256:{attempt_sha}', objs; \
+             assert objs['lifecycle'] == 'sha256:{lc_sha}', objs; \
+             assert objs['copy'] == 'sha256:{cp_sha}', objs; \
+             print('receipt-ok')"
+        );
+        let text = h::run_ok("python3", &["-B", "-c", &probe], None);
+        assert!(text.contains("receipt-ok"), "{text}");
     }));
     // Teardown always runs: remove run residue, then uninstall.
     if let Ok(entries) = fs::read_dir(receipts) {
@@ -1068,6 +1161,9 @@ fn install_doctor_uninstall_smoke() {
     }
     if !qcap_existed && qcap.exists() {
         let _ = h::run("sudo", &["-n", "rm", "-rf", qcap.to_str().unwrap()], None);
+    }
+    if !qcap2_existed && qcap2.exists() {
+        let _ = h::run("sudo", &["-n", "rm", "-rf", qcap2.to_str().unwrap()], None);
     }
     let uninst = h::run("sudo", &["-n", "dpkg", "-r", "memveil"], None);
     if failed.is_err() {
