@@ -1232,6 +1232,17 @@ pub fn load_profiles(dir: &str) -> Result<Vec<Profile>, ValidationError> {
     Ok(load_profiles_named(dir)?.profiles)
 }
 
+/// True when `<dir>/manifest.txt` opens within the manifest cap.
+///
+/// Presence probe for executable-relative discovery: callers use it
+/// to prefer an adjacent profiles dir before falling back to a
+/// layout-specific search. Readability, not validity, decides; the
+/// caller loads (and validates) the manifest afterwards, so a
+/// corrupt-but-present manifest still surfaces its real error.
+pub fn manifest_readable(dir: &str) -> bool {
+    read_host_file(&format!("{dir}/manifest.txt"), "manifest.txt", MANIFEST_CAP).is_ok()
+}
+
 /// True when (major, minor, patch) reaches the wanted triple.
 fn triple_ge(
     major: i64,
@@ -4623,6 +4634,12 @@ mod tests {
     #[test]
     fn manifest_missing() {
         expect_manifest_reject("ordinary-7.0", "manifest.txt");
+    }
+
+    #[test]
+    fn manifest_readable_probes_presence() {
+        assert!(manifest_readable(&profiles_dir()));
+        assert!(!manifest_readable(&fx("ordinary-7.0")));
     }
 
     #[test]

@@ -29,7 +29,7 @@ use crate::platform::capabilities::attempt_loss_exact;
 use crate::platform::evidence::{EnvironmentEvidence, GuestInfo, KernelInfo, detect_environment};
 use crate::platform::kernelgate::{BtfFacts, LockdownState, kernel_gate, remedy_for};
 use crate::platform::prechecks::{PreCheck, check_memcg, check_privilege, check_unprivileged_bpf};
-use crate::platform::profiles::{Profile, load_profiles, select_profile_bound};
+use crate::platform::profiles::{Profile, load_profiles, manifest_readable, select_profile_bound};
 use crate::platform::reader::{
     EVIDENCE_ABSENT, EVIDENCE_OK, EvidenceError, EvidenceReader, bytes_to_text, file_state,
     open_evidence_reader, read_evidence, read_host_file, readlink_self,
@@ -119,10 +119,52 @@ pub fn default_profiles_dir(prog: &str) -> String {
 /// There is deliberately no argv[0] fallback: when /proc/self/exe cannot
 /// be resolved, guessing from argv[0] or the working directory could load
 /// a planted tree's profiles, so resolution failure is an explicit error
-/// instead.
+/// instead. A cargo checkout layout (`.../target/{debug,release}/memveil`)
+/// falls back to [`cargo_checkout_profiles`] when no manifest sits beside
+/// the executable; installed and packaged layouts keep exact Mojo behavior.
 pub fn resolve_profiles_dir() -> Result<String, EvidenceError> {
     let exe = readlink_self()?;
-    Ok(default_profiles_dir(&exe))
+    let dir = default_profiles_dir(&exe);
+    if manifest_readable(&dir) {
+        return Ok(dir);
+    }
+    if let Some(found) = cargo_checkout_profiles(&exe) {
+        return Ok(found);
+    }
+    Ok(dir)
+}
+
+/// Profiles dir for a cargo-built executable inside a checkout.
+///
+/// The Mojo layout contract assumes the executable one directory below
+/// the tree root, but cargo builds land at
+/// `<project>/target/{debug,release}/memveil`, two levels deeper (plus
+/// the pre-cutover `rust/` nesting). When the executable path matches
+/// that shape, probe `<project>/profiles` then `<project>/../profiles`
+/// for a readable manifest and return the first hit. Every candidate
+/// anchors at the kernel-resolved executable path, never at argv[0] or
+/// the working directory, so a planted cwd tree cannot hijack discovery.
+/// Returns `None` for non-cargo layouts or when no manifest is found;
+/// the caller then keeps the default dir and its real load error.
+fn cargo_checkout_profiles(exe: &str) -> Option<String> {
+    let parts: Vec<&str> = exe.split('/').collect();
+    if parts.len() < 4 {
+        return None;
+    }
+    let tail = &parts[parts.len() - 3..];
+    if tail[0] != "target" || (tail[1] != "debug" && tail[1] != "release") {
+        return None;
+    }
+    let project = parts[..parts.len() - 3].join("/");
+    for candidate in [
+        format!("{project}/profiles"),
+        format!("{project}/../profiles"),
+    ] {
+        if manifest_readable(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// Report one doctor failure on stderr; return EXIT_INVALID.
@@ -1223,9 +1265,9 @@ pub fn run_doctor(args: &[String]) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DoctorOptions, EXIT_UNAVAILABLE, assess_doctor, default_profiles_dir, doctor_usage,
-        precheck_demotes, render_doctor_json2, render_doctor_text2, resolve_profiles_dir,
-        run_doctor, run_doctor_opts, run_doctor_with,
+        DoctorOptions, EXIT_UNAVAILABLE, assess_doctor, cargo_checkout_profiles,
+        default_profiles_dir, doctor_usage, precheck_demotes, render_doctor_json2,
+        render_doctor_text2, resolve_profiles_dir, run_doctor, run_doctor_opts, run_doctor_with,
     };
     use crate::capture::run::decide_record;
     use crate::platform::evidence::detect_environment;
@@ -1583,6 +1625,67 @@ mod tests {
         );
         assert_eq!(default_profiles_dir("memveil"), "profiles");
         assert_eq!(default_profiles_dir("/memveil"), "/../profiles");
+    }
+
+    fn write_manifest(dir: &std::path::Path) {
+        let profiles = dir.join("profiles");
+        std::fs::create_dir_all(&profiles).expect("mkdir profiles");
+        std::fs::write(profiles.join("manifest.txt"), "p.json\n").expect("write manifest");
+    }
+
+    #[test]
+    fn cargo_checkout_finds_project_profiles() {
+        let tmp = TestDir::create("memveil-cargo-prof").expect("mkdtemp");
+        let project = tmp.path().join("proj");
+        let exe = project.join("target/release/memveil");
+        std::fs::create_dir_all(exe.parent().expect("exe dir")).expect("mkdir exe dir");
+        write_manifest(&project);
+        let got = cargo_checkout_profiles(exe.to_str().expect("utf-8")).expect("found");
+        assert_eq!(got, format!("{}/proj/profiles", tmp.as_str()));
+    }
+
+    #[test]
+    fn cargo_checkout_finds_parent_profiles() {
+        let tmp = TestDir::create("memveil-cargo-prof").expect("mkdtemp");
+        let project = tmp.path().join("root/rust");
+        let exe = project.join("target/debug/memveil");
+        std::fs::create_dir_all(exe.parent().expect("exe dir")).expect("mkdir exe dir");
+        write_manifest(tmp.path().join("root").as_path());
+        let got = cargo_checkout_profiles(exe.to_str().expect("utf-8")).expect("found");
+        assert_eq!(got, format!("{}/root/rust/../profiles", tmp.as_str()));
+    }
+
+    #[test]
+    fn cargo_checkout_prefers_project_over_parent() {
+        let tmp = TestDir::create("memveil-cargo-prof").expect("mkdtemp");
+        let project = tmp.path().join("root/rust");
+        let exe = project.join("target/release/memveil");
+        std::fs::create_dir_all(exe.parent().expect("exe dir")).expect("mkdir exe dir");
+        write_manifest(&project);
+        write_manifest(tmp.path().join("root").as_path());
+        let got = cargo_checkout_profiles(exe.to_str().expect("utf-8")).expect("found");
+        assert_eq!(got, format!("{}/root/rust/profiles", tmp.as_str()));
+    }
+
+    #[test]
+    fn cargo_checkout_rejects_non_cargo_layouts() {
+        assert_eq!(cargo_checkout_profiles("build/memveil"), None);
+        assert_eq!(cargo_checkout_profiles("/opt/mv/bin/memveil"), None);
+        assert_eq!(cargo_checkout_profiles("/usr/bin/memveil"), None);
+        assert_eq!(cargo_checkout_profiles("memveil"), None);
+        assert_eq!(
+            cargo_checkout_profiles("/root/target/deps/memveil-abc123"),
+            None
+        );
+    }
+
+    #[test]
+    fn cargo_checkout_miss_without_manifest() {
+        let tmp = TestDir::create("memveil-cargo-prof").expect("mkdtemp");
+        let project = tmp.path().join("proj");
+        let exe = project.join("target/release/memveil");
+        std::fs::create_dir_all(exe.parent().expect("exe dir")).expect("mkdir exe dir");
+        assert_eq!(cargo_checkout_profiles(exe.to_str().expect("utf-8")), None);
     }
 
     #[test]
