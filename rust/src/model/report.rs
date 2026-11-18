@@ -167,20 +167,17 @@ pub struct Verdict {
 /// Known-loss ratio in basis points, truncated toward zero.
 ///
 /// Division-first form: the exact floor without multiplying the
-/// full count by 10000. Counts are event counts bounded by capture
-/// bytes on disk, so u64 wrap (past ~1.8e19 events) is unreachable;
-/// a wrapped input panics instead of yielding a wrong verdict.
-fn loss_ratio_bps(known_lost: u64, delivered: u64) -> i64 {
-    let total = known_lost
-        .checked_add(delivered)
-        .expect("verdict counts overflow u64");
+/// full count by 10000.
+/// Deviation: Mojo traps on u64 overflow here; Rust computes the exact ratio in u128 per R14.
+fn loss_ratio_bps(known_lost: u128, delivered: u64) -> i64 {
+    let total = known_lost + delivered as u128;
     if total == 0 {
         return 0;
     }
-    let head = (known_lost / total) as i64 * 10000;
+    let head = (known_lost / total) * 10000;
     let rem = known_lost % total;
-    let tail = rem.checked_mul(10000).expect("verdict ratio overflows u64") / total;
-    head + tail as i64
+    let tail = rem * 10000 / total;
+    (head + tail) as i64
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -194,16 +191,13 @@ pub fn verdict_for_counts(
     terminal_lost: u64,
     delivered: u64,
 ) -> Verdict {
-    let mut known_lost = 0u64;
+    // Deviation: Mojo traps when loss legs sum past u64::MAX; Rust accumulates exactly in u128 per R14.
+    let mut known_lost = 0u128;
     if detail_loss_known {
-        known_lost = known_lost
-            .checked_add(detail_lost)
-            .expect("verdict counts overflow u64");
+        known_lost += detail_lost as u128;
     }
     if terminal_loss_known {
-        known_lost = known_lost
-            .checked_add(terminal_lost)
-            .expect("verdict counts overflow u64");
+        known_lost += terminal_lost as u128;
     }
     let all_known = detail_loss_known && terminal_loss_known;
     let any_partial = detail_partial || terminal_partial;
@@ -507,11 +501,46 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "verdict counts overflow")]
-    fn verdict_wrapped_counts_panic() {
-        // Counts past u64 range are unreachable from any real
-        // capture; trapping beats a silently wrong verdict.
-        let _ = counts(true, true, u64::MAX, true, false, true, 0, 1);
+    fn verdict_huge_counts_exact() {
+        // R14: u128 intermediates report the exact ratio where Mojo
+        // traps. Expected values are floor(known*10000/total).
+        let v = counts(true, true, u64::MAX, true, false, true, 0, 1);
+        assert_eq!(v.name, "partial_known_loss");
+        assert_eq!(v.loss_ratio_bps, 9999);
+        let v = counts(
+            true,
+            true,
+            9_000_000_000_000_000_000,
+            true,
+            false,
+            true,
+            0,
+            9_000_000_000_000_000_000,
+        );
+        assert_eq!(v.name, "partial_known_loss");
+        assert_eq!(v.loss_ratio_bps, 5000);
+        let v = counts(
+            true,
+            true,
+            9_000_000_000_000_000_000,
+            true,
+            false,
+            true,
+            0,
+            1_000_000_000_000_000_000,
+        );
+        assert_eq!(v.loss_ratio_bps, 9000);
+    }
+
+    #[test]
+    fn verdict_leg_sum_past_u64_exact() {
+        // Detail + terminal legs summing past u64::MAX stay exact.
+        let v = counts(true, true, u64::MAX, true, true, true, u64::MAX, 0);
+        assert_eq!(v.name, "partial_known_loss");
+        assert_eq!(v.loss_ratio_bps, 10000);
+        let v = counts(true, true, u64::MAX, true, false, true, 1, u64::MAX);
+        assert_eq!(v.name, "partial_known_loss");
+        assert_eq!(v.loss_ratio_bps, 5000);
     }
 
     #[test]
