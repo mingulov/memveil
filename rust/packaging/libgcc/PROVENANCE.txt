@@ -7,8 +7,8 @@ host toolchain: the host libgcc (GCC 16, Fedora) requires the
 GLIBC_ABI_GNU2_TLS node, which raises the install floor to glibc
 2.40 and refuses Ubuntu 24.04 (2.39), Debian bookworm (2.36), and
 older-but-compatible systems. The payload needs only twelve ancient
-_Unwind_* symbols (GCC_3.0/3.3/4.2.0), which any libgcc_s.so.1 of
-the last twenty years provides, so a pinned older provider restores
+_Unwind_* symbols (GCC_3.0/3.3/4.2.0), which any libgcc_s.so.1
+since GCC 4.2 (2007) provides, so a pinned older provider restores
 the honest 2.35 floor with no ABI risk.
 
 Artifact
