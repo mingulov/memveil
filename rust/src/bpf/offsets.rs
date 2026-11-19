@@ -941,6 +941,10 @@ mod tests {
     struct PrivateShape {
         /// Include `device.dma_io_tlb_mem` (pointer at `io_tlb_mem`).
         with_mem: bool,
+        /// Point `io_tlb_pool.slots` at a decoy struct
+        /// (pointee-mismatch negative; orthogonal to the private
+        /// halves).
+        slots_wrong_pointee: bool,
         /// Emit `device.dma_io_tlb_mem` at a non-byte-aligned bit offset.
         mem_misaligned: bool,
         /// Include the `io_tlb_mem` struct at all.
@@ -959,6 +963,7 @@ mod tests {
         fn full() -> Self {
             Self {
                 with_mem: true,
+                slots_wrong_pointee: false,
                 mem_misaligned: false,
                 with_mem_struct: true,
                 with_cc: true,
@@ -971,6 +976,7 @@ mod tests {
         fn absent() -> Self {
             Self {
                 with_mem: false,
+                slots_wrong_pointee: false,
                 mem_misaligned: false,
                 with_mem_struct: true,
                 with_cc: false,
@@ -1028,6 +1034,7 @@ mod tests {
         let u64_name = intern("u64");
         let u32_name = intern("u32");
         let u8_name = intern("u8");
+        let decoy_name = intern("wrong_slot");
 
         let mut types = Vec::new();
         let mut next_id = 0u32;
@@ -1072,6 +1079,23 @@ mod tests {
             &members(&[(orig, u64_id, 0), (alloc, u64_id, 64)]),
         );
         let slot_ptr = record(0, KIND_PTR, false, 0, slot_id, &[]);
+        // Decoy pointee for the mismatch negative: same member
+        // widths as the slot, so kind/width checks pass while the
+        // pointee check refuses.
+        let decoy_id = record(
+            decoy_name,
+            KIND_STRUCT,
+            false,
+            2,
+            24,
+            &members(&[(orig, u64_id, 0), (alloc, u64_id, 64)]),
+        );
+        let decoy_ptr = record(0, KIND_PTR, false, 0, decoy_id, &[]);
+        let slots_ptr = if shape.slots_wrong_pointee {
+            decoy_ptr
+        } else {
+            slot_ptr
+        };
         record(
             pool,
             KIND_STRUCT,
@@ -1082,7 +1106,7 @@ mod tests {
                 (start, u64_id, 0),
                 (end, u64_id, 64),
                 (nslabs, u64_id, 192),
-                (slots, slot_ptr, 448),
+                (slots, slots_ptr, 448),
             ]),
         );
         let parms_id = record(
@@ -1226,6 +1250,27 @@ mod tests {
                 (0, 0, 0, 0)
             );
         }
+    }
+
+    #[test]
+    fn slots_pointee_mismatch_refuses() {
+        // The slots member keeps pointer kind and width but points
+        // at the wrong struct: a kind/width check would pass, the
+        // pointee check refuses naming both sides. Record's install
+        // refuses here; doctor's preflight shares this resolver.
+        let shape = PrivateShape {
+            slots_wrong_pointee: true,
+            ..PrivateShape::full()
+        };
+        let message = expect_refusal(&copy_btf_image(&shape), "pointee mismatch");
+        assert!(
+            message.contains("io_tlb_pool.slots points at wrong_slot"),
+            "want the pointee refusal, got: {message}"
+        );
+        assert!(
+            message.contains("want io_tlb_slot"),
+            "want the expected pointee, got: {message}"
+        );
     }
 
     #[test]

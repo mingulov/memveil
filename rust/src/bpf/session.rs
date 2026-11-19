@@ -306,6 +306,17 @@ pub(crate) fn declared_map_specs(elf: &[u8]) -> Option<Vec<MapSpec>> {
     Some(specs)
 }
 
+/// True when the ELF declares the host-resolved copy table map
+/// (`mv_copy_offs`): the Aya copy family, whose record path
+/// resolves and installs the table between load and attach. The
+/// loader creates exactly the declared maps and the load gate
+/// enforces the exact family set, so declared presence matches
+/// the live `has_map` record checks. Unparseable objects report
+/// false; the loader judges them.
+pub(crate) fn declares_copy_table(elf: &[u8]) -> bool {
+    declared_map_specs(elf).is_some_and(|specs| specs.iter().any(|row| row.name == MAP_COPY_OFFS))
+}
+
 /// Host page size in bytes; 4096 when the query fails.
 pub(crate) fn host_page_size() -> u32 {
     // SAFETY: sysconf with a valid name; -1 means unknown.
@@ -2166,6 +2177,22 @@ mod tests {
         assert!(replay_rings_fit(&crate::bpf::maps::expected_copy_maps_c()));
         let maps = with_ring(Channel::Attempt, "mv_attempts", 2_147_483_648);
         assert!(!replay_rings_fit(&maps));
+    }
+
+    #[test]
+    fn declares_copy_table_matches_family() {
+        // The embedded Aya copy object declares the host-resolved
+        // table; the attempt object, the C-family copy fixture
+        // (offsets via CO-RE), and garbage do not.
+        let copy = std::fs::read(env!("DEP_MEMVEIL_EBPF_COPY_PATH")).expect("read copy ELF");
+        assert!(declares_copy_table(&copy));
+        let attempt =
+            std::fs::read(env!("DEP_MEMVEIL_EBPF_ATTEMPT_PATH")).expect("read attempt ELF");
+        assert!(!declares_copy_table(&attempt));
+        let dir = crate::platform::test_support::repo_root().join("tests/fixtures/elf");
+        let cp = std::fs::read(dir.join("cp-ok.o")).expect("read cp-ok.o");
+        assert!(!declares_copy_table(&cp));
+        assert!(!declares_copy_table(b"not an elf"));
     }
 
     #[test]
