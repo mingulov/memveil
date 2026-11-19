@@ -5875,18 +5875,9 @@ def test_ids_selection_repeats_rejected():
                               "7.0,6.0,7.0")
 
 
-def test_workflow_subset_ids_exist_in_lock():
-    here = os.path.dirname(os.path.abspath(__file__))
-    yml = os.path.join(here, "..", "..", ".github",
-                       "workflows", "kernels.yml")
-    with open(yml) as handle:
-        ids = km.workflow_subset_ids(handle.read())
-    assert ids
-    lock = km.parse_lock(
-        os.path.join(here, "kernels.lock.json"))
-    picked = km.select_kernel_ids(lock["kernels"],
-                                  ",".join(ids))
-    assert [entry["id"] for entry in picked] == ids
+# Cutover: the workflow-subset test retired with the Mojo CI
+# workflows (no kernels.yml selects ids anymore); lock parsing
+# and kernel selection stay pinned by the fixture tests.
 
 
 def test_parse_lock_rejects_duplicate_keys(tmp_path):
@@ -6288,23 +6279,10 @@ def test_row_receipt_scenarios_roundtrip(tmp_path):
     assert ok, detail
 
 
-def test_row_source_identity_reports_commit(tmp_path):
-    ident = km.row_source_identity(
-        os.path.dirname(os.path.abspath(__file__))
-        + "/../..")
-    assert re.fullmatch(r"[0-9a-f]{40}|unknown",
-                        ident["memveil"]["commit"])
-    assert ident["memveil"]["dirty"] in (True, False)
-    assert ident["libbpf_mojo"]["status"] == "pinned"
-
-
-def test_row_toolchain_lock_reports_pins(tmp_path):
-    lock = km.read_toolchain_lock(
-        os.path.dirname(os.path.abspath(__file__))
-        + "/../..")
-    assert re.fullmatch(r"[0-9a-f]{64}",
-                        lock["lock_sha256"])
-    assert lock["toolchain"]["mojo"]["version"]
+# Cutover: the tree-reading identity tests retired with the Mojo
+# toolchain lock (receipt validators below still pin the old
+# receipt shape against fixtures; armed rows fail closed until
+# a Rust toolchain-identity story lands).
 
 
 def test_guest_write_btf_sha(tmp_path):

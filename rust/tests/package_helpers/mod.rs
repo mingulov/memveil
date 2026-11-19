@@ -6,7 +6,7 @@
 //!
 //! The `package_*.rs` integration suites build the three release
 //! packages (tarball, .deb, .rpm) through `rust/scripts/package-*`
-//! and assert artifact parity with the Mojo-tree packaging gates.
+//! and assert artifact parity with the packaging gates.
 //! This module owns path discovery, tool probes, package builds
 //! (shared across test binaries through lock files under
 //! `target/package-test/`), ELF inspection, archive listing, and
@@ -130,12 +130,12 @@ pub fn out_root() -> PathBuf {
     }
 }
 
-/// Mojo-tree fixture inputs (read-only): binary behavior vectors.
+/// Fixture inputs (read-only): binary behavior vectors.
 pub fn fixtures_dir() -> PathBuf {
     repo_root().join("tests").join("fixtures")
 }
 
-/// Mojo-tree valid-empty capture (read-only).
+/// Valid-empty capture fixture (read-only).
 pub fn valid_empty_dir() -> PathBuf {
     repo_root()
         .join("tests")

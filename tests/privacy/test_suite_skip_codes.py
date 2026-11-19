@@ -3,8 +3,8 @@
 """Suite skip-code convention: skips exit 77, never 0.
 
 A suite that runs zero assertions must not report success.
-Drives tools/test buildcache without LMB_PACKAGE (and with a
-bogus path) and requires exit 77 with a 'skipped' diagnostic.
+Drives the env-gated VM suites unarmed (and with a bogus
+arming value) and requires exit 77 with a SKIP diagnostic.
 Exits nonzero on the first failure.
 """
 
@@ -24,18 +24,21 @@ def check(name, cond, detail=""):
 
 
 def main():
-    for label, env_value in (("unset", None),
-                             ("bogus", "/nonexistent-lmb.tgz")):
+    cases = (("vm-kernels", "MEMVEIL_VM_KERNELS", None),
+             ("vm-kernels", "MEMVEIL_VM_KERNELS", "bogus"),
+             ("vm-scenarios", "MEMVEIL_VM_SCENARIOS", None))
+    for suite, var, env_value in cases:
+        label = "%s-%s" % (suite, "unset" if env_value is None else "bogus")
         env = dict(os.environ)
-        env.pop("LMB_PACKAGE", None)
+        env.pop(var, None)
         if env_value is not None:
-            env["LMB_PACKAGE"] = env_value
+            env[var] = env_value
         proc = subprocess.run(
-            [os.path.join(REPO, "tools", "test"), "buildcache"],
+            [os.path.join(REPO, "tools", "test"), suite],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
         check("%s-exit-77" % label, proc.returncode == 77,
               "exit %d" % proc.returncode)
-        check("%s-says-skipped" % label, b"skipped" in proc.stdout)
+        check("%s-says-skipped" % label, b"SKIP" in proc.stdout)
 
 
 if __name__ == "__main__":

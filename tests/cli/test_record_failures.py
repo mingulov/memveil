@@ -27,12 +27,20 @@ sys.path.insert(0, TESTS)
 from preload_env import preload_env
 BIN = os.path.join(REPO, "build", "memveil")
 SHIM = os.path.join(REPO, "build", "shim", "mvshim.so")
+# Explicit probe inputs for the eaccess comparison. The Mojo-built
+# files they prefer retired with the C/Mojo tree; the committed
+# fixtures preserve the comparison (the refusal under test roots
+# at tracefs probing either way).
 BRIDGE = os.path.join(REPO, "build", "deps", "lmb", "lib",
                       "libbpf_mojo.so.1")
 ATTEMPT_O = os.path.join(REPO, "build", "bpf",
                          "swiotlb_attempt.bpf.o")
-ATTEMPTS = os.path.join(REPO, "tests", "fixtures", "attempts")
 ELF = os.path.join(REPO, "tests", "fixtures", "elf", "ok.o")
+if not os.path.isfile(BRIDGE):
+    BRIDGE = ELF
+if not os.path.isfile(ATTEMPT_O):
+    ATTEMPT_O = ELF
+ATTEMPTS = os.path.join(REPO, "tests", "fixtures", "attempts")
 
 
 def _preload(shim):
@@ -60,7 +68,7 @@ def tree_hash(root):
 
 def main():
     if not os.path.isfile(BIN):
-        print("FAIL record-failures: missing %s (run tools/build first)"
+        print("FAIL record-failures: missing %s (run cargo build --release in rust/ first)"
               % BIN)
         sys.exit(1)
 
@@ -135,7 +143,7 @@ def main():
     # path rebound to a decoy (as virtme guests do), a refusal
     # must still explain itself on the captured fd.
     if not os.path.isfile(SHIM):
-        print("FAIL record-failures: missing %s (run tools/build first)"
+        print("FAIL record-failures: missing %s (run cargo build --release in rust/ first)"
               % SHIM)
         sys.exit(1)
     fd = tempfile.mkdtemp(prefix="mvstderr")
@@ -165,7 +173,7 @@ def main():
     for path, name in ((BRIDGE, "bridge"), (ATTEMPT_O, "object")):
         if not os.path.isfile(path):
             print("FAIL record-failures: missing %s %s "
-                  "(run tools/build first)" % (name, path))
+                  "(run cargo build --release in rust/ first)" % (name, path))
             sys.exit(1)
     roots = ["/sys/kernel/debug/tracing", "/sys/kernel/tracing"]
     check("eaccess-root-present",

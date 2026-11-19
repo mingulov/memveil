@@ -22,17 +22,6 @@ BIN = ROOT / 'build/memveil'
 VALIDATOR = runpy.run_path(str(ROOT / 'tools/validate-schemas'))
 
 
-def _rust_mode():
-    # The harness selector (tools/test MEMVEIL_RUST_BIN=1) plus a
-    # direct-run fallback: build/memveil linked at the Rust target.
-    if os.environ.get('MEMVEIL_RUST_BIN') == '1':
-        return True
-    try:
-        return 'rust/target' in BIN.resolve().as_posix()
-    except OSError:
-        return False
-
-
 def report(path, *args):
     return subprocess.run([str(BIN), 'report', *args, str(path)],
                           text=True, capture_output=True)
@@ -86,7 +75,7 @@ class IntegrityTests(unittest.TestCase):
                                 self.assertEqual(proc.stdout, b'')
                                 self.assertTrue(proc.stderr)
 
-    @unittest.skipIf(_rust_mode(), 'Rust reader never calls fdopen (no C stdio), '
+    @unittest.skip('Rust reader never calls fdopen (no C stdio), '
                      'so the injected failure cannot fire; exit 0 with normal '
                      'output is correct. Open-failure refusals stay covered by '
                      'test_finalized_special_files_refuse_before_reading plus the '

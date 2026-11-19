@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Build-artifact contract: `cargo build` compiles each `crates/ebpf` channel
 //! bin for the BPF target and `build.rs` publishes the three ELF paths as
 //! `DEP_MEMVEIL_EBPF_{ATTEMPT,LIFECYCLE,COPY}_PATH`. These tests prove every

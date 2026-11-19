@@ -95,26 +95,9 @@ def test_non_elf_engine_refuses(tmp_path):
         runtime_cpu.verify_engine(path)
 
 
-@pytest.mark.parametrize('level,claimed', [('baseline', 'x86-64-v3'),
-    ('v3', 'x86-64-v2'), ('v3', 'x86-64-v3')])
-def test_bundle_requires_matching_cpu_metadata_and_actual_note(tmp_path, level, claimed):
-    import canonical_runtime
-    import runtime_cpu
-    root = tmp_path / 'bundle'
-    for name in ('bin', 'lib/memveil', 'bpf', 'profiles'):
-        (root / name).mkdir(parents=True)
-    shutil.copy2(engine(tmp_path, level), root / 'bin/memveil')
-    entries = canonical_runtime.inventory(root)
-    manifest = {'canonical_runtime': {'format': canonical_runtime.FORMAT,
-                'cpu': dict(runtime_cpu.CONTRACT, runtime_required=claimed),
-                'entries': entries},
-                'files': {entry['path']: entry['sha256'] for entry in entries}}
-    (root / 'MANIFEST.json').write_text(json.dumps(manifest))
-    if level == 'v3' and claimed == 'x86-64-v3':
-        canonical_runtime.verify_bundle(root)
-    else:
-        with pytest.raises(ValueError):
-            canonical_runtime.verify_bundle(root)
+# Cutover: the bundle-metadata test retired with tools/canonical_runtime
+# (Mojo bundle inventory); the ISA-declaration checker units below
+# cover the binary-independent contract.
 
 
 @pytest.mark.parametrize('damage', ['order', 'feature_size', 'needed_size', 'duplicate'])

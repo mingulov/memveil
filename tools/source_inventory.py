@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Deterministic inventory of admitted source/build inputs.
+"""Deterministic inventory of a source tree.
 
-Walks the owned input set (sources, BPF, profiles, docs, schemas,
-examples, licenses, manifests, locks, builders, vendored inputs),
-recording per-file kind, mode, size, identity hash, and filesystem
-timestamps. Standard library only.
+Walks every file under the root except VCS metadata, build
+outputs, environments, and tool caches, recording per-file
+kind, mode, size, identity hash, and filesystem timestamps.
+Standard library only. (The admitted-inputs subset walk
+retired at the cutover with its Mojo-layout consumers; the
+layout-agnostic tree walk is the only entry point.)
 
 The digest covers path/kind/mode/size/hash only, so it compares
 across checkouts. compare() additionally checks mtimes/ctimes, so
@@ -34,41 +36,14 @@ import sys
 FORMAT = "memveil-source-inventory"
 VERSION = 1
 
-# Owned directories walked for inputs (missing ones contribute
-# nothing). build/, dist/, .pixi/ and VCS metadata are never
-# inputs; neither are test-only fixtures or the tests themselves.
-INPUT_DIRS = (
-    "src",
-    "bpf",
-    "profiles",
-    "docs",
-    "schemas",
-    "examples/real-capture",
-    "examples/lifecycle-copy",
-    "tests/native",
-    "tests/shim",
-    "tests/vm",
-    "third_party",
-    "tools",
-    "LICENSES",
-)
-
-# Owned top-level input files.
-INPUT_FILES = (
-    "toolchain.lock.json",
-    "pixi.toml",
-    "pixi.lock",
-    "LICENSE",
-    "THIRD-PARTY-NOTICES.md",
-)
-
 # Top-level names excluded from the tree walk: outputs,
 # environments, and version control. These match only the
-# first path component, so tools/build stays admitted.
+# first path component.
 EXCLUDED_TOP = frozenset((
     ".git",
     "build",
     "dist",
+    "target",
     ".pixi",
 ))
 
@@ -142,15 +117,15 @@ def describe(root, rel, exclude_top=EXCLUDED_TOP,
     return entry
 
 
-def take_inventory(root, dirs=INPUT_DIRS, files=INPUT_FILES,
+def take_inventory(root, dirs=TREE_DIRS, files=TREE_FILES,
                    exclude_top=EXCLUDED_TOP,
                    exclude_any=EXCLUDED_ANY,
                    exclude_suffixes=EXCLUDED_SUFFIXES,
                    label=FORMAT):
-    """Walk admitted inputs; return the inventory dict.
+    """Walk the tree; return the inventory dict.
 
     Missing inputs contribute nothing, but any read
-    failure on an admitted path raises OSError instead
+    failure on an inventoried path raises OSError instead
     of silently shrinking the inventoried set.
     """
     root = os.path.realpath(root)

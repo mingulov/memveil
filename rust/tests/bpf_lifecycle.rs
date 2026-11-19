@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Lifecycle-channel geometry: the embedded lifecycle-channel BPF object carries
 //! exactly the `mv_map_result` (fexit `swiotlb_tbl_map_single`) and `mv_unmap`
 //! (fentry `__swiotlb_tbl_unmap_single`) programs plus exactly the four

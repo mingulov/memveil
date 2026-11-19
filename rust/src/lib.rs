@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! MemVeil DMA-visibility observer (Rust userspace).
 //!
 //! Wire types, the Aya loader, and the CLI surface live in this crate.

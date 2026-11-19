@@ -50,7 +50,7 @@ def run(args, **kw):
 
 def main():
     if not os.path.isfile(BIN):
-        print("FAIL preview-package: missing %s (run tools/build first)"
+        print("FAIL preview-package: missing %s (run cargo build --release in rust/ first)"
               % BIN)
         sys.exit(1)
     with open(BIN, "rb") as fh:

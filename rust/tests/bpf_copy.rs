@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Copy-channel geometry contract: the `memveil-ebpf-copy` object must carry
 //! the 4 ported programs in pinned emission order with their exact map geometries, plus the
 //! host-resolved `mv_copy_offs` table map that replaces CO-RE (see

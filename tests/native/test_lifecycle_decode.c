@@ -6,9 +6,9 @@
  * runs every vector through the shared mv_decode_lifecycle /
  * mv_decode_copy / mv_effective_bytes from
  * bpf/include/memveil_events.h, asserts each verdict and all
- * decoded fields, and writes a verdict dump. The Mojo decoder
- * writes the same dump format over the same corpus; the
- * native-decode lane diffs the two byte-for-byte.
+ * decoded fields, and writes a verdict dump. The Rust
+ * wire-compat lane compiles this oracle and diffs its dump
+ * byte-for-byte against the Rust decoder over the same corpus.
  *
  * Usage: test_lifecycle_decode corpus.bin corpus.txt out.dump
  * Exit 0 prints "lifecycle-decode: N vectors passed"; any
@@ -639,7 +639,7 @@ static int check_slot_index(void)
     return 0;
 }
 
-/* Pin the lifecycle/copy wire vocabulary the Mojo decoder mirrors:
+/* Pin the lifecycle/copy wire vocabulary the Rust decoder mirrors:
  * record lengths, magics, kinds, flags, reasons, and the map
  * failure sentinel. */
 static int check_wire_vocab(void)

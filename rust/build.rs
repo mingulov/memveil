@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Build script: compiles the three `crates/ebpf` channel bins for the BPF
 //! target with the pinned nightly toolchain and publishes each ELF path as
 //! `DEP_MEMVEIL_EBPF_{ATTEMPT,LIFECYCLE,COPY}_PATH`.

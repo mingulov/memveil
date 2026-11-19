@@ -33,6 +33,11 @@ def _clang_resource_include():
 
 
 def _compile(dst):
+    # Cutover: the bpf/include headers retired with the C tree, so
+    # direct runs fail at the compile below until a pinned
+    # post-cutover regen story lands; suites skip via the
+    # fixture-generation guard and the committed fixtures
+    # carry them.
     cmd = ["clang", "--target=bpf", "-O2", "-g", "-Wall", "-Wextra",
            "-Werror", "-D__BPF__", "-nostdinc", "-isystem",
            _clang_resource_include(),

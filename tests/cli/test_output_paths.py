@@ -49,7 +49,7 @@ def snapshot(root):
 
 def main():
     if not os.path.isfile(BIN):
-        print("FAIL output-paths: missing %s (run tools/build first)"
+        print("FAIL output-paths: missing %s (run cargo build --release in rust/ first)"
               % BIN)
         sys.exit(1)
     tmp = tempfile.mkdtemp(prefix="mvpaths")

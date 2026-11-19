@@ -137,22 +137,10 @@ def paced_environment(path, receipt, lines, duration_ns, adapter):
                 MEMVEIL_PACED_NS=str(duration_ns))
 
 
-def _rust_mode():
-    # The harness selector (tools/test MEMVEIL_RUST_BIN=1) plus a
-    # direct-run fallback: build/memveil linked at the Rust target.
-    if os.environ.get('MEMVEIL_RUST_BIN') == '1':
-        return True
-    try:
-        return 'rust/target' in os.path.realpath(BIN)
-    except OSError:
-        return False
-
-
 def paced_adapter():
-    # Mode-appropriate pacing interposer: the fread adapter for the
-    # Mojo binary (unchanged path), the read adapter for the Rust
-    # binary (no C stdio). Built unconditionally like before.
-    name = 'paced_reads_rust' if _rust_mode() else 'paced_reads'
+    # Pacing interposer: the read adapter for the Rust binary
+    # (no C stdio). Built unconditionally like before.
+    name = 'paced_reads_rust'
     adapter = os.path.join(REPO, 'build', 'perf', name + '.so')
     os.makedirs(os.path.dirname(adapter), exist_ok=True)
     subprocess.run(['clang', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
@@ -178,7 +166,7 @@ def paced_errors(receipt, source_stat, count, size, duration_ns, wall):
 
 def main():
     if not os.path.isfile(BIN):
-        print("FAIL perf-replay: missing %s (run tools/build first)"
+        print("FAIL perf-replay: missing %s (run cargo build --release in rust/ first)"
               % BIN)
         sys.exit(1)
     tmp = tempfile.mkdtemp(prefix="mvperf")

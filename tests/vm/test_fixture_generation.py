@@ -16,8 +16,32 @@ def run(*args):
                           capture_output=True, text=True)
 
 
+def _regen_inputs_present():
+    # C fixture regeneration needs the retired C/Mojo-tree
+    # inputs (sources, toolchain lock, provisioned libbpf
+    # headers). Absent post-cutover: the committed fixtures
+    # carry every suite, and recompile-exactness waits on a
+    # pinned post-cutover regen story (cutover carry).
+    return ((REPO / 'toolchain.lock.json').is_file()
+            and (REPO / 'bpf/programs/swiotlb_attempt.bpf.c').is_file()
+            and (REPO / 'build/deps/include/bpf/bpf_core_read.h').is_file())
+
+
+@pytest.fixture(scope='module', autouse=True)
+def _needs_regen_inputs():
+    # Module scope only: importers (test_core_layouts,
+    # test_gate_kernel) take `generated` below, which skips
+    # on its own; direct-runner tests skip here.
+    if not _regen_inputs_present():
+        pytest.skip("fixture regen inputs retired with the C/Mojo tree; "
+                    "committed fixtures carry the suites")
+
+
 @pytest.fixture(scope='module')
 def generated(tmp_path_factory):
+    if not _regen_inputs_present():
+        pytest.skip("fixture regen inputs retired with the C/Mojo tree; "
+                    "committed fixtures carry the suites")
     out = tmp_path_factory.mktemp('provisional')
     proc = run('--out', out)
     assert proc.returncode == 0, proc.stderr
@@ -94,6 +118,9 @@ def test_actual_source_or_header_drift_is_refused(generated, tmp_path, path):
 
 
 def test_actual_compiler_invoker_drift_is_refused(tmp_path):
+    if not _regen_inputs_present():
+        pytest.skip("fixture regen inputs retired with the C/Mojo tree; "
+                    "committed fixtures carry the suites")
     import shutil
     clang = shutil.which('clang')
     wrapper = tmp_path / 'compiler'

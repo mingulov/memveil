@@ -605,7 +605,7 @@ def dmetric(doc, name, device):
 
 def main():
     if not os.path.isfile(BIN):
-        print("FAIL region-replay: missing %s (run tools/build first)"
+        print("FAIL region-replay: missing %s (run cargo build --release in rust/ first)"
               % BIN)
         sys.exit(1)
     check_oracle_on_frozen_fixtures()

@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Rust tree gates: supply-chain policy (cargo-deny over the
-# root and eBPF manifests) and the Mojo control path (the
-# gated parity tests run against a freshly built Mojo
-# binary, so they never skip silently in CI).
+# Rust gates: supply-chain policy (cargo-deny over the root
+# and eBPF manifests) and the full workspace test suite.
 # Unprivileged; safe for pull requests.
 #
 # Toolchain pins, matching the tree: Rust 1.100.0 plus
@@ -11,11 +9,6 @@
 # bpf-linker 0.10.4 (rust/build.rs prerequisite),
 # cargo-deny 0.21.0 (validated in-tree: see the eBPF
 # deny.toml comment). The advisory DB needs network.
-# The Mojo provisioning mirrors the native workflow.
-#
-# Cutover note: the deny and rust-test jobs survive (they
-# guard the Rust tree); the mojo-parity job retires with
-# the Mojo build.
 name: rust
 
 on:
@@ -55,55 +48,6 @@ jobs:
       - name: Check eBPF manifest
         run: |
           cd rust/crates/ebpf && cargo-deny check
-
-  mojo-parity:
-    runs-on: ubuntu-26.04
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
-      - name: Install pixi
-        run: |
-          python3 tools/install-pixi --prefix "$HOME/.pixi"
-          echo "$HOME/.pixi/bin" >> "$GITHUB_PATH"
-      - name: Install system toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            clang llvm bpftool cmake ninja-build binutils
-      - name: Provision libbpf-mojo tarball
-        run: |
-          VER="$(python3 -c "import json; print(json.load(open('toolchain.lock.json'))['dependencies']['libbpf-mojo']['version'])")"
-          TARBALL="third_party/libbpf-mojo-$VER.tar.gz"
-          WANT="$(python3 -c "import json; print(json.load(open('toolchain.lock.json'))['dependencies']['libbpf-mojo']['tarball_sha256'])")"
-          echo "$WANT  $TARBALL" | sha256sum --check -
-          echo "LMB_PACKAGE=$GITHUB_WORKSPACE/$TARBALL" >> "$GITHUB_ENV"
-      - name: Install Rust toolchains
-        run: |
-          curl -fsSL -o /tmp/rustup-init \
-            https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
-          curl -fsSL -o /tmp/rustup-init.sha256 \
-            https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256
-          (cd /tmp && sha256sum --check rustup-init.sha256)
-          chmod +x /tmp/rustup-init
-          /tmp/rustup-init -y --profile minimal --default-toolchain none
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          rustup toolchain install 1.100.0 --profile minimal \
-            --component clippy,rustfmt
-          rustup toolchain install nightly-2026-05-20 --profile minimal \
-            --component rust-src
-      - name: Install bpf-linker 0.10.4
-        run: cargo install bpf-linker --version 0.10.4 --locked
-      - name: Build Mojo control binary
-        run: ./tools/build
-      - name: Build Rust release binary
-        run: |
-          cd rust && cargo build --locked --release
-      - name: Gated parity tests against the Mojo control
-        run: |
-          cd rust
-          export MEMVEIL_MOJO_BIN="$GITHUB_WORKSPACE/build/memveil"
-          test -x "$MEMVEIL_MOJO_BIN"
-          cargo test --locked --test cli_parity
-          cargo test --locked --lib unobserved_copy_rejected_at_read
 
   rust-test:
     runs-on: ubuntu-26.04

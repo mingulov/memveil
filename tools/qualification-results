@@ -275,7 +275,8 @@ def build_linkage(repo):
 
     Lanes test the build tree as-is; the linkage names the
     exact sealed inventory digest, observed toolchain, and
-    output hashes when tools/build receipted them. A missing
+    output hashes when the build receipted them (pre-cutover
+    Mojo builds; Rust builds record absence). A missing
     or malformed receipt records absence instead of failing
     the lanes.
     """

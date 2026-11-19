@@ -46,7 +46,7 @@ def check(name, cond, detail=""):
 
 def main():
     if not os.path.isfile(BIN):
-        print("FAIL top: missing %s (run tools/build first)" % BIN)
+        print("FAIL top: missing %s (run cargo build --release in rust/ first)" % BIN)
         sys.exit(1)
 
     p = run(["top", "--help"])
@@ -301,8 +301,8 @@ def main():
     # the admission checks below need x86_64 kernel >= 7,
     # mirroring the record/qualify lanes; parser, replay, and
     # no-bridge checks stay unconditional. The floor refusal
-    # itself is pinned fixture-backed in test_qualify.mojo
-    # (test_plan_below_floor_refuses).
+    # itself is pinned fixture-backed in the qualify unit
+    # tests (test_plan_below_floor_refuses).
     eligible = False
     major = platform.release().split(".")[0]
     if (platform.machine() == "x86_64" and len(major) > 0

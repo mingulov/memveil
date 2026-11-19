@@ -3095,11 +3095,11 @@ mod tests {
     #[test]
     fn unobserved_copy_rejected_at_read() {
         // The shared event parser rejects the violating line at read
-        // time (Mojo model/event.mojo copy gate), so a capture file
-        // carrying an unobserved copy fails the read in both
-        // implementations with the exact bytes below, verified
-        // against build/mojo-memveil-compare. The consume arms
-        // themselves are pinned by consume_failure_renders_bare_message.
+        // time (the ported copy gate), so a capture file carrying
+        // an unobserved copy fails the read with the exact bytes
+        // below (verified pre-cutover against the Mojo comparison
+        // binary). The consume arms themselves are pinned by
+        // consume_failure_renders_bare_message.
         let scratch = TestDir::create("memveil-top-consume").expect("scratch");
         if std::env::var("MEMVEIL_TOP_CHILD").is_ok() {
             let dir = child_scratch().expect("scratch env");
@@ -3117,27 +3117,17 @@ mod tests {
             restore_fd(1, saved_out);
             restore_fd(2, saved_err);
             // The shared event parser rejects the violating line at
-            // read time (Mojo model/event.mojo copy gate), so the
-            // consume arm is unreachable from any capture file and
-            // the Mojo binary cannot render it either: both fail the
-            // read with these exact bytes, verified against
-            // build/mojo-memveil-compare.
+            // read time (the ported copy gate), so the consume arm
+            // is unreachable from any capture file: the read fails
+            // with these exact bytes (verified pre-cutover against
+            // the Mojo comparison binary).
             assert_eq!(rc, crate::cli::report::EXIT_INVALID);
             let want = "memveil top: cannot read capture: line 1: ValidationError(what=copy.source.measurement, message=executed copies require observed measurement)\n";
             assert_eq!(read_scratch(&err_path), want);
             assert_eq!(read_scratch(&out), "");
-            if let Some(bin) = std::env::var_os("MEMVEIL_MOJO_BIN") {
-                let mojo = std::process::Command::new(&bin)
-                    .arg("top")
-                    .arg(&cap)
-                    .output()
-                    .expect("mojo top runs");
-                assert_eq!(mojo.status.code(), Some(rc as i32));
-                assert_eq!(mojo.stderr, want.as_bytes());
-                assert!(mojo.stdout.is_empty());
-            } else {
-                eprintln!("skip: MEMVEIL_MOJO_BIN unset");
-            }
+            // Cutover: the Mojo-control arm retired with the Mojo
+            // binary (no comparison target exists); the Rust
+            // assertions above carry this case.
             return;
         }
         run_child("unobserved_copy_rejected_at_read", &scratch);

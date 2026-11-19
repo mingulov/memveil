@@ -18,15 +18,15 @@ Usage: rust/scripts/gen-completions.py --out DIR
 Deterministic: same bytes on every run. `--flag=value` needs
 no handling: the parser only accepts space-separated values.
 
-Deliberate deviation from the Mojo-authored generator
-(`tools/gen-completions`): bash per-verb variables sanitize
-hyphens to underscores in the stem (`bind-profile` becomes
-`_memveil_flags_bind_profile`). The Mojo output emits the
-hyphenated stem verbatim, which is not a valid bash
-identifier: sourcing it prints `command not found` and the
-verb's flags never complete. Completions are generated UX,
-not wire format, so byte-parity with the old output is not
-required; the completed tokens stay identical.
+Deliberate deviation from the retired Mojo-authored generator:
+bash per-verb variables sanitize hyphens to underscores in the
+stem (`bind-profile` becomes `_memveil_flags_bind_profile`).
+The old Mojo output emitted the hyphenated stem verbatim, which
+is not a valid bash identifier: sourcing it prints
+`command not found` and the verb's flags never complete.
+Completions are generated UX, not wire format, so byte-parity
+with the old output is not required; the completed tokens stay
+identical.
 """
 
 import os

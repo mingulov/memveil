@@ -45,7 +45,7 @@ def metric(doc, name):
 
 def main():
     if not os.path.isfile(BIN):
-        print("FAIL soak: missing %s (run tools/build first)" % BIN)
+        print("FAIL soak: missing %s (run cargo build --release in rust/ first)" % BIN)
         sys.exit(1)
     minutes = float(os.environ.get("MEMVEIL_SOAK_MINUTES", "30"))
     deadline = time.monotonic() + minutes * 60

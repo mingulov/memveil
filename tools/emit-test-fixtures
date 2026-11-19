@@ -52,6 +52,12 @@ def command(args):
 
 
 def input_identity(clang):
+    tracked = ['toolchain.lock.json']
+    tracked += sorted({source for source, _ in SOURCES.values()})
+    missing = [rel for rel in tracked if not (ROOT / rel).is_file()]
+    if missing:
+        raise ValueError('fixture regen inputs retired with the C/Mojo tree '
+                         '(cutover); missing: ' + ', '.join(missing))
     version = command([clang, '--version'])
     match = re.search(r'clang version (\d+)\.(\d+)\.(\d+)', version)
     floor = json.loads((ROOT / 'toolchain.lock.json').read_text())[
@@ -114,7 +120,8 @@ def input_identity(clang):
     headers = [p for base in ('bpf/include', 'build/deps/include/bpf')
                for p in (ROOT / base).rglob('*.h')]
     if not (ROOT / 'build/deps/include/bpf/bpf_core_read.h').is_file():
-        raise ValueError('missing libbpf headers; run tools/build first')
+        raise ValueError('missing libbpf headers under build/deps/include '
+                         '(fixture regen needs provisioned headers)')
     return {
         'compiler': {'version': version, 'sha256': sha(driver.resolve()),
                      'invoker_sha256': sha(Path(shutil.which(clang) or clang).resolve()),

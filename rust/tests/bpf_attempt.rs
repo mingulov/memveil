@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Attempt-channel geometry: the embedded attempt-channel BPF object carries
 //! exactly the `mv_swiotlb_attempt` program (tracepoint
 //! `swiotlb:swiotlb_bounced`) plus exactly the three attempt maps with the

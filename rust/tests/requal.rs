@@ -2046,12 +2046,19 @@ fn judge_exports(texts: &BTreeMap<String, String>, inputs: &LiveInputs) -> Resul
     ))
 }
 
+#[allow(unreachable_code)]
 #[test]
 fn requal_dual_capture_7014() {
     if std::env::var(LIVE_VAR).as_deref() != Ok("1") {
         eprintln!("SKIP requal_dual_capture_7014: set MEMVEIL_REQUAL_LIVE=1 with the VM harness");
         return;
     }
+    // Cutover: dual rust-vs-Mojo capture retired permanently (no Mojo
+    // oracle binary exists anymore); single-sided Rust
+    // requalification is future work. The offline export-comparison
+    // tests below keep judging retained captures.
+    eprintln!("SKIP requal_dual_capture_7014: dual rust-vs-Mojo capture retired at cutover");
+    return;
     let inputs = resolve_live().unwrap_or_else(|e| panic!("requal preflight: {e}"));
     println!(
         "requal: vmlinuz {} pinned {}",

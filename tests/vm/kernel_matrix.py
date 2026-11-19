@@ -2173,15 +2173,14 @@ def product_max_ops():
     """Attempt-record cap read from the product source."""
     root = os.path.dirname(os.path.dirname(
         os.path.dirname(os.path.abspath(__file__))))
-    path = os.path.join(root, "src", "memveil", "capture",
-                        "collector.mojo")
+    path = os.path.join(root, "rust", "src", "capture",
+                        "collector.rs")
     try:
         with open(path) as handle:
             text = handle.read()
     except OSError as exc:
         raise ValueError("product MAX_OPS unreadable: %s" % exc)
-    match = re.search(r"^comptime MAX_OPS = (\d+)\s*$", text,
-                      re.M)
+    match = re.search(r"pub const MAX_OPS: u64 = (\d+);", text)
     if not match:
         raise ValueError("product MAX_OPS not found")
     return int(match.group(1))
@@ -2751,13 +2750,8 @@ def select_kernel_ids(entries, text):
     return picked
 
 
-def workflow_subset_ids(yml_text):
-    """Kernel ids from the workflow MV_KERNELS_IDS line."""
-    match = re.search(r"MV_KERNELS_IDS=([0-9A-Za-z.,\-]+)",
-                      yml_text or "")
-    if not match:
-        raise ValueError("workflow subset line missing")
-    return match.group(1).split(",")
+# Cutover: workflow_subset_ids retired with the Mojo CI workflows
+# (no workflow selects kernel ids anymore).
 
 
 def check_artifacts(artifacts, tools):
@@ -4085,11 +4079,14 @@ def row_receipt_files(row_dir):
 
 
 def row_source_identity(repo_root):
-    """Memveil commit plus the pinned libbpf-mojo pin.
+    """Memveil commit plus the pinned support-library pin.
 
     Mute git answers unknown and dirty so callers never
     mistake missing identity for a clean tree. Raises
-    ValueError when the libbpf-mojo pin is not pinned.
+    ValueError: the Mojo toolchain lock this read retired
+    with the cutover, and matrix receipts still need a
+    Rust toolchain-identity story (cutover carry) before
+    armed rows can mint source identity again.
     """
     root = Path(repo_root)
     commit, dirty = repo_identity(root)
@@ -4099,10 +4096,12 @@ def row_source_identity(repo_root):
         pin = lock["dependencies"]["libbpf-mojo"]
     except (OSError, ValueError, KeyError, TypeError):
         raise ValueError(
-            "row source identity needs the pinned lock")
+            "row source identity needs toolchain identity "
+            "(cutover: Mojo lock retired; Rust matrix "
+            "receipt identity is future work)")
     if not isinstance(pin, dict) \
             or pin.get("status") != "pinned":
-        raise ValueError("libbpf-mojo is not pinned")
+        raise ValueError("support library is not pinned")
     return {"memveil": {"commit": commit, "dirty": dirty},
             "libbpf_mojo": {
                 "version": pin.get("version"),
@@ -4111,13 +4110,19 @@ def row_source_identity(repo_root):
 
 
 def read_toolchain_lock(repo_root):
-    """Toolchain pins plus the lock hash for one receipt."""
+    """Toolchain pins plus the lock hash for one receipt.
+
+    Raises ValueError: the Mojo toolchain lock this read
+    retired with the cutover (Rust matrix receipt identity
+    is future work).
+    """
     root = Path(repo_root)
     try:
         raw = (root / "toolchain.lock.json").read_bytes()
         lock = json.loads(raw.decode("utf-8"))
     except (OSError, ValueError):
-        raise ValueError("toolchain lock unreadable")
+        raise ValueError("toolchain lock retired with the cutover; "
+                         "matrix receipts need Rust toolchain identity")
     try:
         pins = lock["toolchain"]
         if not pins["mojo"]["version"] \

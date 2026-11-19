@@ -10,11 +10,9 @@
 #include <time.h>
 #include <unistd.h>
 
-/* Rust-mode paced-reads adapter: interposes read(2) only. The Rust
- * binary reads its event stream with plain 64 KiB reads (one pass,
- * no C stdio), so the fread adapter never fires on it. Same
- * environment contract and receipt schema as paced_reads.c, which
- * keeps serving the Mojo binary unchanged. */
+/* Paced-reads adapter: interposes read(2) only. The Rust binary
+ * reads its event stream with plain 64 KiB reads (one pass, no C
+ * stdio). (The fread adapter retired with the Mojo binary.) */
 static uint64_t calls, bytes, lines, maximum, started, duration, expected;
 static int error, finished, initialized;
 static struct stat target;

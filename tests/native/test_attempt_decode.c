@@ -7,9 +7,9 @@
  * mirroring the BPF program's context walk) and the shared
  * mv_decode_payload (payload records, plus extractor-produced
  * payloads as a pipeline check), asserts each verdict and all
- * decoded fields, and writes a verdict dump. The Mojo decoder
- * writes the same dump format over the same corpus; the attempts
- * lane diffs the two byte-for-byte.
+ * decoded fields, and writes a verdict dump. The Rust
+ * wire-compat lane compiles this oracle and diffs its dump
+ * byte-for-byte against the Rust decoder over the same corpus.
  *
  * ctx-extracted payloads use seq=<record idx> and
  * ktime=1000000000+idx so dumps stay deterministic; both sides

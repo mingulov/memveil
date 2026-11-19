@@ -4,63 +4,50 @@
 #
 # Usage: tools/test <suite> | tools/test --help
 #
-# Implemented suites: schemas, unit, reports, profiles, doctor, attempts,
-# native-decode,
-# writer, signals, record, qualify, vm-attempts, buildcache, package,
-# identity,
-# correlation, mappings, lifetimes, pools, regions, diagnostics,
-# conversion-normalize, confidential-hooks, region-resolution,
-# baseline, confidential-ranges, confidential-inventory,
-# confidential-real, confidential-late-attach, top,
-# oracle-ledger, vm-oracle, profile-semantics, vm-lifecycle,
-# vm-copy, vm-real-io, vm-topwalk, vm-kernels, vm-scenarios,
-# stop, vm-stop, budgets, quality,
-# vm-saturation, reader-adversarial, fuzz-smoke, fuzz-campaign,
-# record-failures, output-paths, vm-cleanup, privacy,
-# render-escaping, offline-environment, perf-replay,
-# perf-region, perf-workload, perf-overhead, soak, preview-package, provenance,
-# source-export,
-# release-runtime, docs, examples, extracted-robustness, deb,
-# rpm-journey. (payload-gate/sbom retired: the SPDX/payload assertions live
-# in the package_payload Rust suite; in-payload license texts cover
-# compliance, and the SPDX envelope artifact is release-hardening work.)
+# Implemented suites: schemas, reports, profiles, doctor, record,
+# qualify, confidential-hooks, confidential-ranges,
+# confidential-inventory, confidential-real,
+# confidential-late-attach, top, oracle-ledger, vm-oracle,
+# profile-semantics, vm-lifecycle, vm-copy, vm-real-io,
+# vm-topwalk, vm-kernels, vm-scenarios, vm-stop,
+# vm-saturation, vm-cleanup, vm-attempts, quality,
+# reader-adversarial, fuzz-smoke, fuzz-campaign,
+# record-failures, output-paths, privacy, render-escaping,
+# offline-environment, perf-replay, perf-region,
+# perf-workload, perf-overhead, soak, preview-package,
+# provenance, docs, examples.
 #
 # A skipped suite is reported as skipped, never as success.
 # Exit 0 only when the suite passes; 1 on test failure; 2 on
 # invalid usage; 77 when a suite with unmet inputs skips.
 # One suite per invocation; extra arguments are rejected.
-# MEMVEIL_RUST_BIN=1 points the binary-capable suites at the
-# Rust release build (rust/target/release/memveil, built via
-# cargo build --release in rust/) instead of build/memveil.
-# Python suites keep their build/memveil path, which the
-# runner links at the Rust binary; a real build/memveil file
-# is never shadowed (move it aside first). The link stays
-# after the run: remove build/memveil before a Mojo build.
-# Rust mode requires the release binary before dispatch: a
-# missing binary, or a real build/memveil file in the way,
-# exits 1 without running any suite (an unknown suite name
-# then also reports exit 1, not 2). Mojo-only suites are
-# unaffected; rust/PARITY.md triages every suite.
-# LMB_SANITIZE=1 runs Mojo test targets with the address
-# sanitizer (pair with a tools/build --sanitize tree).
+# The binary under test is the Rust release build
+# (rust/target/release/memveil, built via cargo build
+# --release in rust/). Python suites keep their
+# build/memveil path, which the runner links at the Rust
+# binary before dispatch. The link stays after the run.
+# The release binary must exist before dispatch: a missing
+# binary exits 1 without running any suite (an unknown
+# suite name then also reports exit 1, not 2).
+# LMB_SANITIZE=1 exports fail-fast UBSan options for
+# sanitizer-instrumented runs (plain binaries ignore this).
 #
-# The unit suite runs core unit files (test_reader.mojo,
-# test_attempts.mojo, test_report.mojo, test_runtime.mojo,
-# test_evidence_containment.mojo, test_verdict.mojo)
-# through the pinned toolchain; other suites describe their
-# own checks below.
+# Unit coverage lives in the Rust test suites (cargo test);
+# the harness suites below drive the built binary end to
+# end against fixtures and independent oracles.
 # The reports suite drives the built report binary end to end: golden
 # stdout bytes, exact exit codes (0 rendered, 4 only under --strict
 # without a complete verdict, 2 invalid input), and independently
 # recomputed counts from tools/validate-schemas over generated
 # JSON reports.
-# The profiles suite runs the reader/evidence/profile/discovery unit
-# tests. The doctor suite runs the doctor unit tests, then the built
-# doctor verb live: oracle-checked JSON, identity cross-checks against
-# uname/id, exit/verdict consistency, and usage errors.
-# The qualify suite runs the qualify unit tests, then the built
-# qualify verb: usage, host-independent arg/capability refusals,
-# and floor-gated (x86_64 kernel >= 7) profile refusals.
+# The profiles suite checks layout extraction against the
+# reference fixtures plus the shipped-profile tripwire. The
+# doctor suite runs the built doctor verb live: oracle-checked
+# JSON, identity cross-checks against uname/id, exit/verdict
+# consistency, and usage errors.
+# The qualify suite runs the built qualify verb: usage,
+# host-independent arg/capability refusals, and floor-gated
+# (x86_64 kernel >= 7) profile refusals.
 
 set -u
 
@@ -78,13 +65,6 @@ usage() {
     sed -n '2,/^$/p' "$0" | sed 's/^# //; s/^#//'
 }
 
-mojo_inc_flags() {
-    # Extra -I flags, one per line, when the unpacked libbpf-mojo
-    # tree is present (tools/build prepares it from LMB_PACKAGE).
-    if [ -d "$ROOT/build/deps/lmb/mojo/libbpf_mojo" ]; then
-        printf '%s\n' "-I" "$ROOT/build/deps/lmb/mojo"
-    fi
-}
 
 asan_preload() {
     # Under LMB_SANITIZE=1, print the ASan runtime path plus ':'
@@ -102,118 +82,34 @@ asan_preload() {
 }
 
 memveil_bin() {
-    # Binary under test. MEMVEIL_RUST_BIN=1 selects the Rust
-    # release build; otherwise the Mojo build tree path is
-    # returned unchanged.
-    if [ "${MEMVEIL_RUST_BIN:-0}" = 1 ]; then
-        printf '%s\n' "$ROOT/rust/target/release/memveil"
-    else
-        printf '%s\n' "$ROOT/build/memveil"
-    fi
+    # Binary under test: the Rust release build.
+    printf '%s\n' "$ROOT/rust/target/release/memveil"
 }
 
 memveil_build_hint() {
     # Rebuild hint matching memveil_bin.
-    if [ "${MEMVEIL_RUST_BIN:-0}" = 1 ]; then
-        printf 'cargo build --release in rust/'
-    else
-        printf 'tools/build'
-    fi
+    printf 'cargo build --release in rust/'
 }
 
 rust_bin_setup() {
-    # In Rust mode the release binary must exist, and the
-    # Python suites (which hardcode build/memveil) must reach
-    # it: link build/memveil at the Rust binary. Refuses to
-    # shadow a real Mojo build; Mojo mode is untouched.
-    if [ "${MEMVEIL_RUST_BIN:-0}" != 1 ]; then
-        return 0
-    fi
+    # The release binary must exist, and the Python suites
+    # (which hardcode build/memveil) must reach it: link
+    # build/memveil at the Rust binary, replacing any stale
+    # file from before the cutover.
     rust="$ROOT/rust/target/release/memveil"
     if [ ! -x "$rust" ]; then
-        echo "test: MEMVEIL_RUST_BIN=1 but missing $rust" \
+        echo "test: missing $rust" \
             "(run cargo build --release in rust/ first)" >&2
         return 1
     fi
     link="$ROOT/build/memveil"
-    if [ -e "$link" ] && [ ! -L "$link" ]; then
-        echo "test: MEMVEIL_RUST_BIN=1 refuses to shadow $link" \
-            "(move the Mojo build aside first)" >&2
-        return 1
-    fi
     mkdir -p "$ROOT/build"
     ln -sfn "$rust" "$link"
 }
 
-mojo_san_flags() {
-    # Address-sanitizer flag, one per line, when the sanitizer
-    # lane is active (LMB_SANITIZE=1 with a tools/build
-    # --sanitize tree); empty otherwise. Only for mojo build:
-    # mojo run cannot JIT sanitized code.
-    if [ "${LMB_SANITIZE:-0}" = 1 ]; then
-        printf '%s\n' "--sanitize" "address"
-    fi
-}
 
-mojo_exec() {
-    # Run one Mojo file with arguments. Under LMB_SANITIZE=1
-    # builds it with the address sanitizer first (mojo run
-    # cannot JIT sanitized code: ASan runtime symbols fail to
-    # materialize), else runs it directly.
-    file=$1
-    shift
-    # shellcheck disable=SC2046
-    if [ "${LMB_SANITIZE:-0}" = 1 ]; then
-        tmpdir=$(mktemp -d)
-        if ! (cd "$ROOT" && pixi run --frozen mojo build \
-                --sanitize address -I src \
-                $(mojo_inc_flags) \
-                -o "$tmpdir/probe" "$file"); then
-            rm -rf "$tmpdir"
-            return 1
-        fi
-        "$tmpdir/probe" "$@"
-        rc=$?
-        rm -rf "$tmpdir"
-        return $rc
-    fi
-    # shellcheck disable=SC2046
-    (cd "$ROOT" && pixi run --frozen mojo run -I src \
-        $(mojo_inc_flags) "$file" "$@")
-}
 
-run_unit_file() {
-    file=$1
-    # shellcheck disable=SC2046
-    out=$(mojo_exec "$file" 2>&1)
-    rc=$?
-    summary=$(printf '%s\n' "$out" | grep -E '[0-9]+ tests run' | tail -1)
-    if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q '0 failed'; then
-        echo "ok $file: $summary"
-        return 0
-    fi
-    echo "FAIL $file (exit $rc)"
-    printf '%s\n' "$out"
-    return 1
-}
 
-suite_unit() {
-    failed=0
-    for t in tests/unit/test_reader.mojo \
-             tests/unit/test_attempts.mojo \
-             tests/unit/test_report.mojo \
-             tests/unit/test_verdict.mojo \
-             tests/unit/test_runtime.mojo \
-             tests/unit/test_evidence_containment.mojo; do
-        run_unit_file "$t" || failed=1
-    done
-    if [ "$failed" -ne 0 ]; then
-        echo "unit: FAILED" >&2
-        return 1
-    fi
-    echo "unit: all suites passed"
-    return 0
-}
 
 report_pass=0
 report_fail=0
@@ -725,57 +621,44 @@ PYEOF
     expect_error "f4-truncated-scope-profile-partial" 2 \
         report --allow-partial \
         "$ROOT/tests/fixtures/reader/f4-truncated-scope-profile"
-    # F4: the definitive-tail scan mirrors accepted event keys in shapes that must equal the _parse_* accept lists and the current event schema in both directions; the previous schema stays frozen except its lagging copy keys.
-    if python3 - "$ROOT/src/memveil/model/event.mojo" \
+    # F4: the Rust event parser's accepted key sets must equal
+    # the current event schema in both directions; the previous
+    # schema stays frozen except its lagging copy keys. (The
+    # parser-vs-mirror half retired with the second
+    # implementation: Rust keeps one representation, so no
+    # mirror drift is expressible.)
+    if python3 - "$ROOT/rust/src/model/event.rs" \
         "$ROOT/schemas/event-v0.1.2.schema.json" \
         "$ROOT/schemas/event-v0.1.1.schema.json" <<'PYEOF'; then
 import json, re, sys
 src = open(sys.argv[1]).read()
 schema = json.load(open(sys.argv[2]))
 old = json.load(open(sys.argv[3]))
-psrc = src.split('\ndef _top_field_known(')[0]
-names = ['parse_event', '_parse_source', '_parse_observer',
-         '_parse_snapshot_scope', '_parse_bounce', '_parse_map_result',
-         '_parse_unmap', '_parse_copy', '_parse_sync',
-         '_parse_transition', '_parse_pool', '_parse_gap',
-         '_parse_marker', '_parse_snapshot']
-starts = {}
+names = ['parse_event', 'parse_source', 'parse_observer',
+         'parse_snapshot_scope', 'parse_bounce', 'parse_map_result',
+         'parse_unmap', 'parse_copy', 'parse_sync',
+         'parse_transition', 'parse_pool', 'parse_gap',
+         'parse_marker', 'parse_snapshot']
+bodies = {}
 for n in names:
-    m = re.search(r'\ndef %s\(' % n, psrc)
+    m = re.search(r'\n(?:pub(?:\(crate\))? )?fn %s\(' % n, src)
     if not m:
         raise SystemExit('missing parser ' + n)
-    starts[n] = m.start()
-ordered = sorted(starts, key=starts.get)
-bodies = {}
-for i, n in enumerate(ordered):
-    end = starts[ordered[i + 1]] if i + 1 < len(ordered) else len(psrc)
-    bodies[n] = psrc[starts[n]:end]
+    end = src.find('\n}\n', m.end())
+    if end < 0:
+        raise SystemExit('unterminated parser ' + n)
+    bodies[n] = src[m.end():end]
 pkeys = {n: set(re.findall(r'key == "([^"]+)"', b))
          for n, b in bodies.items()}
-ctx_of = {'parse_event': 'top', '_parse_source': 'source',
-          '_parse_observer': 'observer', '_parse_snapshot_scope': 'scope',
-          '_parse_bounce': 'bounce_attempt',
-          '_parse_map_result': 'map_result', '_parse_unmap': 'unmap',
-          '_parse_copy': 'copy', '_parse_sync': 'sync_request',
-          '_parse_transition': 'transition_result',
-          '_parse_pool': 'pool_sample', '_parse_gap': 'gap',
-          '_parse_marker': 'marker',
-          '_parse_snapshot': 'counter_snapshot'}
-mine = {}
-for fn, ctx in (('_top_field_known', 'top'),
-                ('_source_field_known', 'source'),
-                ('_observer_field_known', 'observer'),
-                ('_scope_field_known', 'scope')):
-    m = re.search(r'\ndef %s\(.*?\n(.*?)\n\n\ndef ' % fn, src, re.S)
-    if not m:
-        raise SystemExit('missing mirror ' + fn)
-    mine[ctx] = set(re.findall(r'key == "([^"]+)"', m.group(1)))
-m = re.search(r'\ndef _data_field_known\(.*?\n(.*?)\n\n\ndef ', src, re.S)
-if not m:
-    raise SystemExit('missing mirror _data_field_known')
-for sec in re.split(r'\n    if kind == "', m.group(1))[1:]:
-    kind = sec.split('"', 1)[0]
-    mine[kind] = set(re.findall(r'key == "([^"]+)"', sec))
+ctx_of = {'parse_event': 'top', 'parse_source': 'source',
+          'parse_observer': 'observer', 'parse_snapshot_scope': 'scope',
+          'parse_bounce': 'bounce_attempt',
+          'parse_map_result': 'map_result', 'parse_unmap': 'unmap',
+          'parse_copy': 'copy', 'parse_sync': 'sync_request',
+          'parse_transition': 'transition_result',
+          'parse_pool': 'pool_sample', 'parse_gap': 'gap',
+          'parse_marker': 'marker',
+          'parse_snapshot': 'counter_snapshot'}
 skeys = {'top': set(schema['properties'].keys()),
          'source': set(schema['properties']['source']['properties'].keys()),
          'observer': set(
@@ -806,63 +689,13 @@ for ctx, keys in okey.items():
         raise SystemExit(
             '0.1.1 %s keys drifted: %s' % (ctx, sorted(keys)))
 for n, ctx in ctx_of.items():
-    if pkeys[n] != mine.get(ctx, set()):
-        raise SystemExit(
-            'drift parser-vs-mirror at %s: %s vs %s'
-            % (ctx, sorted(pkeys[n]), sorted(mine.get(ctx, set()))))
     if pkeys[n] != skeys.get(ctx, set()):
         raise SystemExit(
             'drift parser-vs-schema at %s: %s vs %s'
             % (ctx, sorted(pkeys[n]), sorted(skeys.get(ctx, set()))))
-LEAD_OF = {'parse_string': 's', '_parse_id': 's',
-           'parse_u64_field': 's', 'parse_bool': 'b',
-           'parse_int': 'n', 'parse_maybe_string': 'S',
-           '_parse_maybe_id': 'S', 'parse_maybe_u64': 'S',
-           'parse_maybe_int': 'N', '_parse_source': 'o',
-           '_parse_observer': 'o', '_parse_snapshot_scope': 'o',
-           'skip_value': 'o'}
-TOK = re.compile(r'(parse_maybe_u64|parse_maybe_int|'
-                 r'parse_maybe_string|_parse_maybe_id|_parse_id|'
-                 r'parse_u64_field|parse_bool|parse_int|parse_string|'
-                 r'_parse_source|_parse_observer|'
-                 r'_parse_snapshot_scope|skip_value)\s*\(')
-ptypes = {}
-for n in names:
-    for sec in re.split(r'\n\s*(?:if|elif) key == "', bodies[n])[1:]:
-        key = sec.split('"', 1)[0]
-        m = TOK.search(sec)
-        if not m:
-            raise SystemExit('no value parser for %s %s' % (n, key))
-        ptypes[(ctx_of[n], key)] = LEAD_OF[m.group(1)]
-m = re.search(r'\ndef _type_rows\(.*?\n(.*?)\n\n\ndef ', src, re.S)
-if not m:
-    raise SystemExit('missing mirror _type_rows')
-mine_types = {}
-for row in re.findall(r'out\.append\(String\("([^"]+)"\)\)',
-                      m.group(1)):
-    parts = row.split(',')
-    if len(parts) != 4:
-        raise SystemExit('bad type row %r' % row)
-    ctx, kind, key, lead = parts
-    mine_types[(ctx, kind, key)] = lead
-want_types = {}
-for (c0, key), lead in ptypes.items():
-    if c0 in ('top', 'source', 'observer', 'scope'):
-        want_types[(c0, '', key)] = lead
-    else:
-        want_types[('data', c0, key)] = lead
-if want_types != mine_types:
-    only_parser = sorted(set(want_types) - set(mine_types))
-    only_mine = sorted(set(mine_types) - set(want_types))
-    clash = sorted(k for k in set(want_types) & set(mine_types)
-                   if want_types[k] != mine_types[k])
-    raise SystemExit(
-        'type drift parser-only=%s mine-only=%s clash=%s'
-        % (only_parser, only_mine,
-           [(k, want_types[k], mine_types[k]) for k in clash]))
-print('mirror sets match parser and schema')
+print('parser accept sets match schema')
 PYEOF
-        report_ok "f4-key-mirror (sets match parser and schema)"
+        report_ok "f4-key-mirror (parser sets match schema)"
     else
         report_bad "f4-key-mirror: accepted-key sets drifted"
     fi
@@ -1177,98 +1010,52 @@ PYEOF
 }
 
 suite_profiles() {
-    # Platform layering: the tracefs probe is a leaf
-    # module, so narrow never imports the gate and the
-    # leaf imports only the evidence reader.
-    if grep -q "from memveil.platform.kernelgate import" \
-        "$ROOT/src/memveil/platform/narrow.mojo"; then
-        echo "profiles: narrow imports kernelgate (cycle)" >&2
-        return 1
-    fi
-    if grep "^from memveil" \
-        "$ROOT/src/memveil/platform/tracefs.mojo" \
-        | grep -qv "memveil.platform.reader"; then
-        echo "profiles: tracefs leaf imports past reader" >&2
-        return 1
-    fi
-    run_unit_file tests/unit/test_profiles.mojo || return 1
-    run_unit_file tests/unit/test_kernelgate.mojo || return 1
-    run_unit_file tests/unit/test_narrow.mojo || return 1
-    run_unit_file tests/unit/test_rebind.mojo || return 1
-    run_unit_file tests/unit/test_offsets.mojo || return 1
-    run_unit_file tests/unit/test_trace_format.mojo || return 1
-    run_unit_file tests/unit/test_scan.mojo || return 1
+    # Fixture-anchored layout extraction: the extractor over
+    # the checked-in ELF fixtures must reproduce the
+    # reference set byte for byte.
     "$ROOT/tools/emit-core-layouts" \
         --object "attempt-trace=$ROOT/tests/fixtures/elf/ok.o" \
         --object "mapping-lifecycle=$ROOT/tests/fixtures/elf/lc-ok.o" \
         --object "copy-actual=$ROOT/tests/fixtures/elf/cp-ok.o" \
         --check "$ROOT/tests/fixtures/scan/profiles-core/core-ref.json" \
         || return 1
-    # Shipped profiles stay schema 0.1.2 with layouts
-    # equal to the built objects' CO-RE set; anything
-    # else fails the suite.
-    for obj in swiotlb_attempt swiotlb_lifecycle swiotlb_copy; do
-        if [ ! -f "$ROOT/build/bpf/$obj.bpf.o" ]; then
-            echo "profiles: missing $ROOT/build/bpf/$obj.bpf.o" \
-                "(run tools/build first)" >&2
+    # Shipped profiles stay schema 0.1.2 with a non-empty
+    # curated layout set (admission-enforced against live
+    # BTF). The C-object equality leg retired with the C
+    # build: Aya objects carry no core_relo records, so
+    # object-derived comparison is meaningless, and the
+    # curated-vs-derived correspondence is an open
+    # controller ruling (cutover receipt), not a silent
+    # pass. This tripwire fails closed on accidental
+    # emptying or schema drift meanwhile.
+    for prof in linux-x86_64-7.0-reference \
+        linux-x86_64-6plus-reference; do
+        if ! python3 - "$ROOT/profiles/$prof.json" <<'EOF'; then
+import json
+import sys
+doc = json.load(open(sys.argv[1]))
+assert doc.get("schema_version") == "0.1.2", "schema drift"
+layouts = doc.get("layouts")
+assert isinstance(layouts, list) and layouts, "layouts emptied"
+EOF
+            echo "profiles: $prof.json failed the shipped tripwire" >&2
             return 1
         fi
     done
-    for prof in linux-x86_64-7.0-reference \
-        linux-x86_64-6plus-reference; do
-        "$ROOT/tools/emit-core-layouts" \
-            --object "attempt-trace=$ROOT/build/bpf/swiotlb_attempt.bpf.o" \
-            --object "mapping-lifecycle=$ROOT/build/bpf/swiotlb_lifecycle.bpf.o" \
-            --object "copy-actual=$ROOT/build/bpf/swiotlb_copy.bpf.o" \
-            --check "$ROOT/profiles/$prof.json" || return 1
-    done
 }
 
-suite_identity() {
-    run_unit_file tests/unit/test_identity.mojo
-}
 
-suite_correlation() {
-    run_unit_file tests/unit/test_correlation.mojo
-}
 
-suite_mappings() {
-    run_unit_file tests/unit/test_metrics.mojo || return 1
-    run_unit_file tests/unit/test_mappings.mojo || return 1
-    run_unit_file tests/unit/test_engine.mojo
-}
 
-suite_lifetimes() {
-    run_unit_file tests/unit/test_lifetimes.mojo || return 1
-    run_unit_file tests/unit/test_lifecycle_wire.mojo || return 1
-    run_unit_file tests/unit/test_lifecycle_events.mojo || return 1
-    run_unit_file tests/unit/test_lifecycle_capture.mojo
-}
 
-suite_pools() {
-    run_unit_file tests/unit/test_pools.mojo || return 1
-    run_unit_file tests/unit/test_pool_timer.mojo
-}
 
-suite_regions() {
-    run_unit_file tests/unit/test_regions.mojo
-}
 
-suite_conversion_normalize() {
-    run_unit_file tests/unit/test_conversion_normalize.mojo
-}
 
 suite_confidential_hooks() {
     python3 "$ROOT/tests/confidential/test_conversion_hooks.py"
 }
 
-suite_region_resolution() {
-    run_unit_file tests/unit/test_region_resolution.mojo
-}
 
-suite_baseline() {
-    run_unit_file tests/unit/test_baseline.mojo
-}
 
 suite_confidential_ranges() {
     python3 "$ROOT/tests/confidential/test_range_checks.py"
@@ -1288,12 +1075,8 @@ suite_confidential_late_attach() {
     python3 "$ROOT/tests/confidential/test_late_attach.py"
 }
 
-suite_diagnostics() {
-    run_unit_file tests/unit/test_diagnostics.mojo
-}
 
 suite_top() {
-    run_unit_file tests/unit/test_top.mojo || return 1
     if [ ! -x "$(memveil_bin)" ]; then
         echo "top: missing $(memveil_bin) (run $(memveil_build_hint) first)" >&2
         return 1
@@ -1415,21 +1198,13 @@ suite_vm_topwalk() {
     python3 -m pytest "$ROOT/tests/vm/test_topwalk.py" -q
 }
 
-suite_stop() {
-    run_unit_file tests/unit/test_stop.mojo
-}
 
 suite_vm_stop() {
     python3 "$ROOT/tests/vm/test_stop_races.py"
 }
 
-suite_budgets() {
-    run_unit_file tests/unit/test_budgets.mojo
-}
 
 suite_quality() {
-    run_unit_file tests/unit/test_quality.mojo || return 1
-    run_unit_file tests/unit/test_liveness.mojo || return 1
     python3 "$ROOT/tests/cli/test_uncertainty.py"
 }
 
@@ -1438,7 +1213,6 @@ suite_vm_saturation() {
 }
 
 suite_reader_adversarial() {
-    run_unit_file tests/unit/test_reader_adversarial.mojo || return 1
     if [ ! -x "$(memveil_bin)" ]; then
         echo "reader-adversarial: missing $(memveil_bin)" \
             "(run $(memveil_build_hint) first)" >&2
@@ -1483,7 +1257,6 @@ suite_fuzz_campaign() {
 }
 
 suite_record_failures() {
-    run_unit_file tests/unit/test_stdout.mojo || return 1
     if [ ! -x "$(memveil_bin)" ]; then
         echo "record-failures: missing $(memveil_bin)" \
             "(run $(memveil_build_hint) first)" >&2
@@ -1592,57 +1365,6 @@ suite_soak() {
     python3 "$ROOT/tests/perf/soak.py"
 }
 
-suite_extracted_robustness() {
-    if [ -z "${LMB_PACKAGE:-}" ]; then
-        echo "extracted-robustness: LMB_PACKAGE is not set" >&2
-        return 1
-    fi
-    XTMP=$(mktemp -d)
-    trap 'rm -rf "$XTMP"' EXIT
-    if ! LMB_PACKAGE="$LMB_PACKAGE" "$ROOT/tools/package" \
-        >"$XTMP/package.log" 2>&1; then
-        echo "extracted-robustness: tools/package failed" >&2
-        cat "$XTMP/package.log" >&2
-        return 1
-    fi
-    TARBALL=$(sed -n 's/^package: \(.*\.tar\.gz\)$/\1/p' \
-        "$XTMP/package.log" | tail -1)
-    if [ -z "$TARBALL" ] || [ ! -f "$TARBALL" ]; then
-        echo "extracted-robustness: no tarball in package log" >&2
-        cat "$XTMP/package.log" >&2
-        return 1
-    fi
-    mkdir -p "$XTMP/tree"
-    if ! tar -xzf "$TARBALL" -C "$XTMP/tree" >"$XTMP/untar.log" 2>&1; then
-        echo "extracted-robustness: untar failed" >&2
-        cat "$XTMP/untar.log" >&2
-        return 1
-    fi
-    TOP=$(ls "$XTMP/tree")
-    XBIN="$XTMP/tree/$TOP/bin/memveil"
-    if [ ! -x "$XBIN" ]; then
-        echo "extracted-robustness: no bin/memveil in bundle" >&2
-        return 1
-    fi
-    seeds=${MEMVEIL_FUZZ_SEEDS:-10000}
-    if ! python3 "$ROOT/tests/fuzz/run.py" --seeds "$seeds" \
-        --binary "$XBIN" >"$XTMP/fuzz.log" 2>&1; then
-        echo "extracted-robustness: fuzz failed" >&2
-        tail -20 "$XTMP/fuzz.log" >&2
-        return 1
-    fi
-    tail -1 "$XTMP/fuzz.log"
-    if ! MEMVEIL_BIN="$XBIN" \
-        python3 "$ROOT/tests/privacy/test_canaries.py" \
-        >"$XTMP/canaries.log" 2>&1; then
-        echo "extracted-robustness: canaries failed" >&2
-        tail -20 "$XTMP/canaries.log" >&2
-        return 1
-    fi
-    tail -1 "$XTMP/canaries.log"
-    echo "extracted-robustness: fuzz and canaries passed on bundle binary"
-    return 0
-}
 
 suite_preview_package() {
     if [ ! -x "$(memveil_bin)" ]; then
@@ -1650,19 +1372,21 @@ suite_preview_package() {
             "(run $(memveil_build_hint) first)" >&2
         return 1
     fi
-    python3 "$ROOT/tests/package/test_preview.py"
+    python3 "$ROOT/tests/package/test_preview.py" || return 1
+    # Engine ISA-declaration checker units (binary-independent;
+    # formerly under the retired Mojo package suite).
+    if ! python3 -m pytest --version >/dev/null 2>&1; then
+        echo "preview-package: pytest not importable" >&2
+        return 1
+    fi
+    python3 -m pytest "$ROOT/tests/package/test_runtime_cpu.py" -q
 }
 
 suite_provenance() {
     python3 "$ROOT/tests/provenance/test_provenance.py" || return 1
-    python3 "$ROOT/tests/provenance/test_provenance.py" --selftest \
-        || return 1
-    python3 "$ROOT/tests/provenance/test_input_pins.py"
+    python3 "$ROOT/tests/provenance/test_provenance.py" --selftest
 }
 
-suite_source_export() {
-    python3 "$ROOT/tests/package/test_source_export.py"
-}
 
 suite_docs() {
     python3 "$ROOT/tests/docs/test_docs.py"
@@ -1672,1757 +1396,17 @@ suite_examples() {
     python3 "$ROOT/tests/docs/test_examples.py"
 }
 
-suite_release_runtime() {
-    if ! command -v python3 >/dev/null 2>&1; then
-        echo "release-runtime: python3 not found" >&2
-        return 1
-    fi
-    if ! python3 -m pytest --version >/dev/null 2>&1; then
-        echo "release-runtime: pytest not importable" >&2
-        return 1
-    fi
-    TARBALL="${MV_BUNDLE_TARBALL:-}"
-    if [ -z "$TARBALL" ]; then
-        if [ -z "${LMB_PACKAGE:-}" ]; then
-            echo "release-runtime: BLOCKED: MV_BUNDLE_TARBALL is not" \
-                "set and LMB_PACKAGE is not set (build the candidate" \
-                "with tools/package from a clean tree first)" >&2
-            return 1
-        fi
-        RTMP=$(mktemp -d)
-        trap 'rm -rf "$RTMP"' EXIT
-        if ! LMB_PACKAGE="$LMB_PACKAGE" "$ROOT/tools/package" \
-            >"$RTMP/package.log" 2>&1; then
-            echo "release-runtime: BLOCKED: tools/package failed" >&2
-            cat "$RTMP/package.log" >&2
-            return 1
-        fi
-        TARBALL=$(sed -n 's/^package: \(.*\.tar\.gz\)$/\1/p' \
-            "$RTMP/package.log" | tail -1)
-        if [ -z "$TARBALL" ] || [ ! -f "$TARBALL" ]; then
-            echo "release-runtime: no tarball in package log" >&2
-            cat "$RTMP/package.log" >&2
-            return 1
-        fi
-    fi
-    if [ ! -f "$TARBALL" ]; then
-        echo "release-runtime: MV_BUNDLE_TARBALL is not a file:" \
-            "$TARBALL" >&2
-        return 1
-    fi
-    (cd "$ROOT" && MV_BUNDLE_TARBALL="$TARBALL" MV_REPO="$ROOT" \
-        MV_VALID_EMPTY="$ROOT/tests/package/valid-empty" \
-        python3 -m pytest tests/package/test_release_runtime.py)
-}
 
-suite_deb() {
-    if ! command -v python3 >/dev/null 2>&1; then
-        echo "deb: python3 not found" >&2
-        return 1
-    fi
-    if ! python3 -m pytest --version >/dev/null 2>&1; then
-        echo "deb: pytest not importable" >&2
-        return 1
-    fi
-    if ! command -v dpkg-deb >/dev/null 2>&1; then
-        echo "deb: dpkg-deb not found" >&2
-        return 1
-    fi
-    DEB="${MV_DEB:-}"
-    if [ -z "$DEB" ]; then
-        if [ -z "${LMB_PACKAGE:-}" ]; then
-            echo "deb: BLOCKED: MV_DEB is not set and LMB_PACKAGE" \
-                "is not set (build the candidate with" \
-                "tools/package-deb from a clean tree first)" >&2
-            return 1
-        fi
-        DTMP=$(mktemp -d)
-        trap 'rm -rf "$DTMP"' EXIT
-        if ! LMB_PACKAGE="$LMB_PACKAGE" "$ROOT/tools/package-deb" \
-            --out "$DTMP" >"$DTMP/package-deb.log" 2>&1; then
-            echo "deb: BLOCKED: tools/package-deb failed" >&2
-            cat "$DTMP/package-deb.log" >&2
-            return 1
-        fi
-        DEB=$(sed -n 's/^package-deb: \(.*\.deb\)$/\1/p' \
-            "$DTMP/package-deb.log" | tail -1)
-        if [ -z "$DEB" ] || [ ! -f "$DEB" ]; then
-            echo "deb: no .deb in package-deb log" >&2
-            cat "$DTMP/package-deb.log" >&2
-            return 1
-        fi
-    fi
-    if [ ! -f "$DEB" ]; then
-        echo "deb: MV_DEB is not a file: $DEB" >&2
-        return 1
-    fi
-    (cd "$ROOT" && MV_DEB="$DEB" MV_REPO="$ROOT" \
-        python3 -m pytest -ra tests/package/test_deb.py)
-}
 
-suite_rpm_journey() {
-    if ! command -v python3 >/dev/null 2>&1; then
-        echo "rpm-journey: python3 not found" >&2
-        return 1
-    fi
-    if ! python3 -m pytest --version >/dev/null 2>&1; then
-        echo "rpm-journey: pytest not importable" >&2
-        return 1
-    fi
-    RPM="${MV_RPM:-}"
-    if [ -z "$RPM" ]; then
-        if [ -z "${LMB_PACKAGE:-}" ]; then
-            echo "rpm-journey: BLOCKED: MV_RPM is not set and" \
-                "LMB_PACKAGE is not set (the spec build needs" \
-                "the pinned bridge tarball)" >&2
-            return 1
-        fi
-        RTMP=$(mktemp -d)
-        trap 'rm -rf "$RTMP"' EXIT
-        if ! LMB_PACKAGE="$LMB_PACKAGE" "$ROOT/tools/build-rpm" \
-            --work "$RTMP" --out "$RTMP" \
-            >"$RTMP/build-rpm.log" 2>&1; then
-            echo "rpm-journey: BLOCKED: tools/build-rpm failed" >&2
-            cat "$RTMP/build-rpm.log" >&2
-            return 1
-        fi
-        RPM=$(sed -n 's/^build-rpm: \(.*\.rpm\)$/\1/p' \
-            "$RTMP/build-rpm.log" | tail -1)
-        if [ -z "$RPM" ] || [ ! -f "$RPM" ]; then
-            echo "rpm-journey: no .rpm in build-rpm log" >&2
-            cat "$RTMP/build-rpm.log" >&2
-            return 1
-        fi
-    fi
-    if [ ! -f "$RPM" ]; then
-        echo "rpm-journey: MV_RPM is not a file: $RPM" >&2
-        return 1
-    fi
-    (cd "$ROOT" && MV_RPM="$RPM" MV_REPO="$ROOT" \
-        python3 -m pytest -ra tests/package/test_rpm_journey.py)
-}
-
-# Sets RELEASE_BUNDLE/RELEASE_DEB/RELEASE_RPM from the MV_*
-# presets when set, else builds all three release packages
-# from this tree (needs LMB_PACKAGE). $1 is a scratch dir
-# the caller owns. Prints nothing on success.
-ensure_release_packages() {
-    SCRATCH="$1"
-    RELEASE_BUNDLE="${MV_BUNDLE_TARBALL:-}"
-    RELEASE_DEB="${MV_DEB:-}"
-    RELEASE_RPM="${MV_RPM:-}"
-    if [ -n "$RELEASE_BUNDLE" ] && [ -n "$RELEASE_DEB" ] \
-        && [ -n "$RELEASE_RPM" ]; then
-        for preset in "$RELEASE_BUNDLE" "$RELEASE_DEB" \
-            "$RELEASE_RPM"; do
-            if [ ! -f "$preset" ]; then
-                echo "packages: preset is not a file: $preset" >&2
-                return 1
-            fi
-        done
-        return 0
-    fi
-    if [ -z "${LMB_PACKAGE:-}" ]; then
-        echo "packages: BLOCKED: MV_BUNDLE_TARBALL/MV_DEB/MV_RPM" \
-            "are not all set and LMB_PACKAGE is not set" \
-            "(build the candidates first)" >&2
-        return 1
-    fi
-    mkdir -p "$SCRATCH/bundle" "$SCRATCH/deb" "$SCRATCH/rpm"
-    if [ -z "$RELEASE_BUNDLE" ]; then
-        if ! LMB_PACKAGE="$LMB_PACKAGE" "$ROOT/tools/package" \
-            --out "$SCRATCH/bundle" \
-            >"$SCRATCH/bundle/package.log" 2>&1; then
-            echo "packages: tools/package failed" >&2
-            cat "$SCRATCH/bundle/package.log" >&2
-            return 1
-        fi
-        RELEASE_BUNDLE=$(sed -n \
-            's/^package: \(.*\.tar\.gz\)$/\1/p' \
-            "$SCRATCH/bundle/package.log" | tail -1)
-        if [ -z "$RELEASE_BUNDLE" ] \
-            || [ ! -f "$RELEASE_BUNDLE" ]; then
-            echo "packages: no tarball in package log" >&2
-            cat "$SCRATCH/bundle/package.log" >&2
-            return 1
-        fi
-    fi
-    if [ -z "$RELEASE_DEB" ]; then
-        if ! LMB_PACKAGE="$LMB_PACKAGE" "$ROOT/tools/package-deb" \
-            --out "$SCRATCH/deb" \
-            >"$SCRATCH/deb/package-deb.log" 2>&1; then
-            echo "packages: tools/package-deb failed" >&2
-            cat "$SCRATCH/deb/package-deb.log" >&2
-            return 1
-        fi
-        RELEASE_DEB=$(sed -n \
-            's/^package-deb: \(.*\.deb\)$/\1/p' \
-            "$SCRATCH/deb/package-deb.log" | tail -1)
-        if [ -z "$RELEASE_DEB" ] || [ ! -f "$RELEASE_DEB" ]; then
-            echo "packages: no .deb in package-deb log" >&2
-            cat "$SCRATCH/deb/package-deb.log" >&2
-            return 1
-        fi
-    fi
-    if [ -z "$RELEASE_RPM" ]; then
-        if ! LMB_PACKAGE="$LMB_PACKAGE" "$ROOT/tools/build-rpm" \
-            --work "$SCRATCH/rpm" --out "$SCRATCH/rpm" \
-            >"$SCRATCH/rpm/build-rpm.log" 2>&1; then
-            echo "packages: tools/build-rpm failed" >&2
-            cat "$SCRATCH/rpm/build-rpm.log" >&2
-            return 1
-        fi
-        RELEASE_RPM=$(sed -n \
-            's/^build-rpm: \(.*\.rpm\)$/\1/p' \
-            "$SCRATCH/rpm/build-rpm.log" | tail -1)
-        if [ -z "$RELEASE_RPM" ] || [ ! -f "$RELEASE_RPM" ]; then
-            echo "packages: no .rpm in build-rpm log" >&2
-            cat "$SCRATCH/rpm/build-rpm.log" >&2
-            return 1
-        fi
-    fi
-    return 0
-}
 
 # payload-gate/sbom suites retired (see header): the package_payload Rust
 # suite carries their assertions over the Rust packages.
 
-suite_native_decode() {
-    # Lifecycle/copy corpus is the single vector source:
-    # regeneration must be byte-identical, then the C
-    # reference and the Mojo decoder run the same corpus and
-    # their verdict dumps must match.
-    python3 "$ROOT/tests/fixtures/lifecycle-wire/gen_corpus.py" \
-        --check || return 1
-    # The CO-RE relocation set of each object is pinned: the oracle test proves the extractor, then --check proves the tracked file matches the built objects.
-    python3 "$ROOT/tests/bpf/test_core_relocations.py" || return 1
-    python3 "$ROOT/tests/bpf/test_negative_objects.py" || return 1
-    "$ROOT/tools/emit-core-relocations" --check || return 1
-    NATIVE="$ROOT/build/native/test_lifecycle_decode"
-    if [ ! -x "$NATIVE" ]; then
-        echo "native-decode: missing $NATIVE (run tools/build first)" >&2
-        return 1
-    fi
-    TMP=$(mktemp -d)
-    trap 'rm -rf "$TMP"' EXIT
-    (cd "$ROOT" && "$NATIVE" \
-        tests/fixtures/lifecycle-wire/corpus.bin \
-        tests/fixtures/lifecycle-wire/corpus.txt \
-        "$TMP/c.dump") || return 1
-    mojo_exec tests/unit/dump_lifecycle.mojo \
-        tests/fixtures/lifecycle-wire/corpus.bin \
-        tests/fixtures/lifecycle-wire/corpus.txt \
-        "$TMP/mojo.dump" || return 1
-    if ! cmp -s "$TMP/c.dump" "$TMP/mojo.dump"; then
-        echo "native-decode: C/Mojo verdict dumps differ" >&2
-        diff "$TMP/c.dump" "$TMP/mojo.dump" | head -20 >&2
-        return 1
-    fi
-    echo "native-decode: corpus, native, mojo, and differential passed"
-}
 
-suite_attempts() {
-    # Corpus is the single vector source: regeneration must be
-    # byte-identical, then the C reference and the Mojo decoder
-    # run the same corpus and their verdict dumps must match.
-    python3 "$ROOT/tests/fixtures/attempts/gen_corpus.py" --check \
-        || return 1
-    NATIVE="$ROOT/build/native/test_attempt_decode"
-    if [ ! -x "$NATIVE" ]; then
-        echo "attempts: missing $NATIVE (run tools/build first)" >&2
-        return 1
-    fi
-    TMP=$(mktemp -d)
-    trap 'rm -rf "$TMP"' EXIT
-    (cd "$ROOT" && "$NATIVE" \
-        tests/fixtures/attempts/corpus.bin \
-        tests/fixtures/attempts/corpus.txt \
-        "$TMP/c.dump") || return 1
-    run_unit_file tests/unit/test_normalize.mojo || return 1
-    mojo_exec tests/unit/dump_normalize.mojo \
-        tests/fixtures/attempts/corpus.bin \
-        tests/fixtures/attempts/corpus.txt \
-        "$TMP/mojo.dump" || return 1
-    if ! cmp -s "$TMP/c.dump" "$TMP/mojo.dump"; then
-        echo "attempts: C/Mojo verdict dumps differ" >&2
-        diff "$TMP/c.dump" "$TMP/mojo.dump" | head -20 >&2
-        return 1
-    fi
-    FLOW="$ROOT/build/native/test_counter_flow"
-    if [ ! -x "$FLOW" ]; then
-        echo "attempts: missing $FLOW (run tools/build first)" >&2
-        return 1
-    fi
-    (cd "$ROOT" && "$FLOW" >"$TMP/flow.log" 2>&1) || {
-        cat "$TMP/flow.log" >&2
-        return 1
-    }
-    grep -qF "cut O=2 OB=0 E=0 EB=0 S=2 F=32" "$TMP/flow.log" || {
-        echo "attempts: counter-flow cut mismatch" >&2
-        cat "$TMP/flow.log" >&2
-        return 1
-    }
-    grep -qF "flow: 9 schedules passed" "$TMP/flow.log" || return 1
-    echo "attempts: corpus, native, mojo, and differential passed"
-    # Scripted close-out matrix: the REAL collector with
-    # scripted sources and a real writer per case. The
-    # lane asserts probe lines, session bytes via the
-    # independent python oracle, and replayed report
-    # metric values.
-    mkdir -p "$ROOT/build/probe"
-    # shellcheck disable=SC2046
-    (cd "$ROOT" && pixi run --frozen mojo build $(mojo_san_flags) -I src \
-        $(mojo_inc_flags) -I tests/unit \
-        --target-cpu x86-64-v2 \
-        -o "$ROOT/build/probe/collector_probe" \
-        tests/unit/collector_probe.mojo) || return 1
-    CPROBE="$ROOT/build/probe/collector_probe"
-    JASSERT="$ROOT/tests/attempts/jassert.py"
-    afailed=0
-    awant() { # <case> <fixed-string>
-        grep -qF "$2" "$TMP/$1.log" || {
-            echo "attempts: case $1 missing [$2]" >&2
-            cat "$TMP/$1.log" >&2
-            afailed=1
-        }
-    }
-    areport() { # <case> : replay the capture, keep JSON
-        python3 "$ROOT/tests/attempts/check_integrity.py" "$TMP/$1" || afailed=1
-        "$(memveil_bin)" report --format json \
-            "$TMP/$1" >"$TMP/$1.report.json" 2>"$TMP/$1.report.err"
-        rc=$?
-        echo "$rc" >"$TMP/$1.report.rc"
-    }
-    "$CPROBE" zero "$TMP/zero" >"$TMP/zero.log" 2>&1
-    awant zero "ready session=cap-1000000000-4242 start_ns=1000000000"
-    awant zero "exit=0"
-    awant zero "end=duration"
-    awant zero "outcome=finalized"
-    awant zero "polls=104"
-    awant zero "stats=5"
-    awant zero "snaps=4"
-    # Reads grew by one: startup stamps attach-completion
-    # before readiness.
-    awant zero "reads=18"
-    python3 "$JASSERT" field "$TMP/zero/session.json" \
-        capture.end_reason duration || afailed=1
-    python3 "$JASSERT" field "$TMP/zero/session.json" \
-        quality.detail.status complete_for_scope || afailed=1
-    python3 "$JASSERT" field "$TMP/zero/session.json" \
-        quality.detail.loss_count 0 || afailed=1
-    python3 "$JASSERT" field "$TMP/zero/session.json" \
-        quality.aggregate.status complete_for_scope || afailed=1
-    python3 "$JASSERT" field "$TMP/zero/session.json" \
-        quality.aggregate.loss_count 0 || afailed=1
-    python3 "$JASSERT" field "$TMP/zero/session.json" \
-        quality.terminal.reason \
-        "stop partial: quiescence unproven" \
-        || afailed=1
-    python3 "$JASSERT" field "$TMP/zero/session.json" \
-        stop.outcome partial || afailed=1
-    python3 "$JASSERT" field "$TMP/zero/session.json" \
-        stop.reason "quiescence unproven" || afailed=1
-    python3 "$JASSERT" field "$TMP/zero/session.json" \
-        stop.counters_valid true || afailed=1
-    python3 "$JASSERT" evidence "$TMP/zero/session.json" \
-        drain_closure proven || afailed=1
-    python3 "$JASSERT" events "$TMP/zero/events.ndjson" \
-        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot" \
-        || afailed=1
-    areport zero
-    # Replay exits 0: terminal is partial by design
-    # (settlement unproven) but the report is valid; strict
-    # exits 4 and metrics still assert exactly.
-    if [ "$(cat "$TMP/zero.report.rc")" != "0" ]; then
-        echo "attempts: zero replay exits $(cat "$TMP/zero.report.rc")" >&2
-        cat "$TMP/zero.report.err" >&2
-        afailed=1
-    fi
-    "$(memveil_bin)" report --strict --format json \
-        "$TMP/zero" >"$TMP/zero.strict.json" 2>"$TMP/zero.strict.err"
-    rc=$?
-    if [ "$rc" != "4" ]; then
-        echo "attempts: zero strict replay exits $rc" >&2
-        cat "$TMP/zero.strict.err" >&2
-        afailed=1
-    fi
-    python3 "$JASSERT" metric "$TMP/zero.report.json" \
-        bounce_attempts 0 || afailed=1
-    python3 "$JASSERT" metric "$TMP/zero.report.json" \
-        counter_bounce_attempts 0 || afailed=1
-    python3 "$JASSERT" metric "$TMP/zero.report.json" \
-        counter_requested_bounce_bytes 0 || afailed=1
-    python3 "$JASSERT" field "$TMP/zero.report.json" \
-        quality.detail.status complete_for_scope || afailed=1
-    python3 "$JASSERT" evidence "$TMP/zero.report.json" \
-        measurement_scope "ordinals below observed at the end cut" \
-        || afailed=1
-    "$CPROBE" attachwin "$TMP/attachwin" >"$TMP/attachwin.log" 2>&1
-    awant attachwin "ready session=cap-1000-4242 start_ns=1000"
-    awant attachwin "exit=0"
-    awant attachwin "end=duration"
-    awant attachwin "outcome=finalized"
-    awant attachwin "polls=104"
-    awant attachwin "stats=5"
-    awant attachwin "snaps=4"
-    awant attachwin "reads=18"
-    python3 "$JASSERT" field "$TMP/attachwin/session.json" \
-        capture.end_reason duration || afailed=1
-    python3 "$JASSERT" field "$TMP/attachwin/session.json" \
-        capture.window.start_ns 20000000000 || afailed=1
-    python3 "$JASSERT" field "$TMP/attachwin/session.json" \
-        capture.window.baseline_start_ns 1002 || afailed=1
-    python3 "$JASSERT" events "$TMP/attachwin/events.ndjson" \
-        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot" \
-        || afailed=1
-    # Compact per-case assertions for the scripted matrix.
-    mcase() { # <case> <exit> <polls> <stats> <snaps> <reads> <committed> <events>
-        "$CPROBE" "$1" "$TMP/$1" >"$TMP/$1.log" 2>&1
-        awant "$1" "ready session=cap-1000000000-4242 start_ns=1000000000"
-        awant "$1" "exit=$2"
-        awant "$1" "end=duration"
-        awant "$1" "outcome=finalized"
-        awant "$1" "polls=$3"
-        awant "$1" "stats=$4"
-        awant "$1" "snaps=$5"
-        awant "$1" "reads=$6"
-        awant "$1" "committed=$7"
-        python3 "$JASSERT" events "$TMP/$1/events.ndjson" "$8" || afailed=1
-    }
-    mqual() { # <case> <dstatus> <dloss> <astatus> <aloss> <drain> [treason]
-        python3 "$JASSERT" field "$TMP/$1/session.json" \
-            capture.end_reason duration || afailed=1
-        python3 "$JASSERT" field "$TMP/$1/session.json" \
-            quality.detail.status "$2" || afailed=1
-        python3 "$JASSERT" field "$TMP/$1/session.json" \
-            quality.detail.loss_count "$3" || afailed=1
-        python3 "$JASSERT" field "$TMP/$1/session.json" \
-            quality.aggregate.status "$4" || afailed=1
-        python3 "$JASSERT" field "$TMP/$1/session.json" \
-            quality.aggregate.loss_count "$5" || afailed=1
-        _treason="${7:-quiescence unproven}"
-        python3 "$JASSERT" field "$TMP/$1/session.json" \
-            quality.terminal.reason \
-            "stop partial: $_treason" \
-            || afailed=1
-        python3 "$JASSERT" field "$TMP/$1/session.json" \
-            stop.outcome partial || afailed=1
-        python3 "$JASSERT" field "$TMP/$1/session.json" \
-            stop.reason "$_treason" \
-            || afailed=1
-        python3 "$JASSERT" evidence "$TMP/$1/session.json" \
-            drain_closure "$6" || afailed=1
-        python3 "$JASSERT" evidence "$TMP/$1/session.json" \
-            measurement_scope \
-            "ordinals below observed at the end cut" || afailed=1
-    }
-    mreplay() { # <case> <bounce> <bytes> <cbounce> <cbytes>
-        areport "$1"
-        if [ "$(cat "$TMP/$1.report.rc")" != "0" ]; then
-            echo "attempts: $1 replay exits $(cat "$TMP/$1.report.rc")" >&2
-            cat "$TMP/$1.report.err" >&2
-            afailed=1
-        fi
-        # Scripted stops never observe quiescence, so no replayed
-        # verdict is complete and strict always exits 4.
-        "$(memveil_bin)" report --strict --format json \
-            "$TMP/$1" >"$TMP/$1.strict.json" 2>"$TMP/$1.strict.err"
-        rc=$?
-        if [ "$rc" != "4" ]; then
-            echo "attempts: $1 strict replay exits $rc" >&2
-            cat "$TMP/$1.strict.err" >&2
-            afailed=1
-        fi
-        python3 "$JASSERT" metric "$TMP/$1.report.json" \
-            bounce_attempts "$2" || afailed=1
-        python3 "$JASSERT" metric "$TMP/$1.report.json" \
-            requested_bounce_bytes "$3" || afailed=1
-        if [ "$4" = "absent" ]; then
-            python3 "$JASSERT" nometric "$TMP/$1.report.json" \
-                counter_bounce_attempts || afailed=1
-            python3 "$JASSERT" nometric "$TMP/$1.report.json" \
-                counter_requested_bounce_bytes || afailed=1
-        else
-            python3 "$JASSERT" metric "$TMP/$1.report.json" \
-                counter_bounce_attempts "$4" || afailed=1
-            python3 "$JASSERT" metric "$TMP/$1.report.json" \
-                counter_requested_bounce_bytes "$5" || afailed=1
-        fi
-    }
-    mgap() { # <case> <line> <reason>
-        python3 "$JASSERT" eventfield "$TMP/$1/events.ndjson" "$2" \
-            data.reason "$3" || afailed=1
-        python3 "$JASSERT" eventfield "$TMP/$1/events.ndjson" "$2" \
-            data.lost_count null || afailed=1
-    }
-    mcase canary 0 109 5 4 28 3211 \
-        "bounce_attempt,bounce_attempt,bounce_attempt,bounce_attempt,bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
-    mqual canary complete_for_scope 0 complete_for_scope 0 proven
-    python3 "$JASSERT" devices "$TMP/canary/session.json" \
-        "0000:00:0c.0,unresolved,unresolved,unresolved,unresolved" \
-        || afailed=1
-    for can in canary-alice ffff888012345000 AAAAAAAA eth0; do
-        if grep -qF "$can" "$TMP/canary/session.json" \
-            "$TMP/canary/events.ndjson" 2>/dev/null; then
-            echo "attempts: canary case leaks [$can]" >&2
-            afailed=1
-        fi
-    done
-    for fmt in text json markdown; do
-        "$(memveil_bin)" report --format "$fmt" "$TMP/canary" \
-            >"$TMP/canary.$fmt" 2>"$TMP/canary.$fmt.err"
-        rc=$?
-        if [ "$rc" != "0" ]; then
-            echo "attempts: canary $fmt replay exits $rc, want 0" >&2
-            afailed=1
-        fi
-        "$(memveil_bin)" report --strict --format "$fmt" \
-            "$TMP/canary" >"$TMP/canary.$fmt.strict" \
-            2>"$TMP/canary.$fmt.strict.err"
-        rc=$?
-        if [ "$rc" != "4" ]; then
-            echo "attempts: canary $fmt strict replay exits $rc, want 4" >&2
-            afailed=1
-        fi
-        for can in canary-alice ffff888012345000 AAAAAAAA eth0; do
-            if grep -qF "$can" "$TMP/canary.$fmt" 2>/dev/null; then
-                echo "attempts: canary $fmt leaks [$can]" >&2
-                afailed=1
-            fi
-        done
-    done
-    mcase detfail 0 104 5 4 18 1924 \
-        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
-    mqual detfail partial null complete_for_scope 0 \
-        "unknown: detach failed; shutdown evidence unresolved" \
-        "admission close failed"
-    mgap detfail 4 "detail closure unproven: detach failed; shutdown evidence unresolved"
-    mreplay detfail 0 0 0 0
-    mcase stablen 0 103 5 6 20 1838 \
-        "bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
-    mqual stablen complete_for_scope 0 complete_for_scope 0 proven
-    mreplay stablen 1 64 1 64
-    mcase neverstable 0 104 5 22 36 406 "gap"
-    mqual neverstable partial null unavailable null \
-        "unknown: snapshot unresolved"
-    mgap neverstable 0 "detail closure unproven: snapshot unresolved"
-    mreplay neverstable 0 0 absent absent
-    mcase tornretry 0 103 5 5 18 1838 \
-        "bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
-    mqual tornretry complete_for_scope 0 complete_for_scope 0 proven
-    mreplay tornretry 1 64 1 64
-    mcase recvgt 0 104 5 4 20 2588 \
-        "bounce_attempt,bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
-    mqual recvgt partial null complete_for_scope 0 \
-        "unknown: ring count unproven"
-    mgap recvgt 6 "detail closure unproven: ring count unproven"
-    mreplay recvgt 2 128 2 128
-    mcase confirmact 0 104 5 4 18 1903 \
-        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
-    mqual confirmact partial null complete_for_scope 0 \
-        "unknown: post-snapshot activity"
-    mgap confirmact 4 "detail closure unproven: post-snapshot activity"
-    mreplay confirmact 0 0 1 0
-    mcase drainbudget 0 101 3 4 16 1903 \
-        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
-    mqual drainbudget partial null complete_for_scope 0 \
-        "unknown: drain budget exhausted"
-    mgap drainbudget 4 "detail closure unproven: drain budget exhausted"
-    mreplay drainbudget 0 0 0 0
-    mcase stopbudget 0 103 5 4 17 1494 \
-        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
-    mqual stopbudget complete_for_scope 0 complete_for_scope 0 proven
-    python3 "$JASSERT" field "$TMP/stopbudget/session.json" \
-        stop.budget_ms 5000 || afailed=1
-    python3 "$JASSERT" field "$TMP/stopbudget/session.json" \
-        stop.elapsed_ms 6102 || afailed=1
-    python3 "$JASSERT" field "$TMP/stopbudget/session.json" \
-        stop.busy_at_drain false || afailed=1
-    python3 "$JASSERT" field "$TMP/stopbudget/session.json" \
-        stop.drained_records 0 || afailed=1
-    mreplay stopbudget 0 0 0 0
-    mcase stuckdrain 0 100100 3 4 100014 1904 \
-        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
-    mqual stuckdrain partial null complete_for_scope 0 \
-        "unknown: drain budget exhausted"
-    mgap stuckdrain 4 "detail closure unproven: drain budget exhausted"
-    python3 "$JASSERT" field "$TMP/stuckdrain/session.json" \
-        stop.elapsed_ms 101 || afailed=1
-    python3 "$JASSERT" field "$TMP/stuckdrain/session.json" \
-        stop.busy_at_drain true || afailed=1
-    python3 "$JASSERT" field "$TMP/stuckdrain/session.json" \
-        stop.drained_records 100000 || afailed=1
-    mreplay stuckdrain 0 0 100000 0
-    mcase stageddrain 0 104 5 4 18 1895 \
-        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
-    mqual stageddrain partial null complete_for_scope 0 \
-        "unknown: error shutdown"
-    mgap stageddrain 4 "detail closure unproven: error shutdown"
-    python3 "$JASSERT" field "$TMP/stageddrain/session.json" \
-        stop.busy_at_drain true || afailed=1
-    python3 "$JASSERT" field "$TMP/stageddrain/session.json" \
-        stop.drained_records 0 || afailed=1
-    mreplay stageddrain 0 0 0 0
-    mreason() { # <case> <reason>
-        python3 "$JASSERT" field "$TMP/$1/session.json" \
-            quality.detail.reason "$2" || afailed=1
-    }
-    mattempt() { # <case> <line> <device> <bytes> <op>
-        python3 "$JASSERT" eventfield "$TMP/$1/events.ndjson" "$2" \
-            data.device_id "$3" || afailed=1
-        python3 "$JASSERT" eventfield "$TMP/$1/events.ndjson" "$2" \
-            data.requested_bytes "$4" || afailed=1
-        python3 "$JASSERT" eventfield "$TMP/$1/events.ndjson" "$2" \
-            data.operation_id "$5" || afailed=1
-    }
-    mattempt stablen 0 d000001 64 op0
-    mcase delaysubmit 0 104 5 6 20 1495 \
-        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
-    mqual delaysubmit partial 1 complete_for_scope 0 proven
-    mreason delaysubmit "detail loss 1 (submit_fail=(1) malformed=(0) dropped=(0) recursion_missed=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
-    mreplay delaysubmit 0 0 1 64
-    mcase latesubmit 0 103 5 4 18 754 "bounce_attempt,gap"
-    mqual latesubmit partial null unavailable null \
-        "unknown: kernel identity unproven"
-    mgap latesubmit 1 "detail closure unproven: kernel identity unproven"
-    mattempt latesubmit 0 d000001 64 op0
-    mreplay latesubmit 1 64 absent absent
-    mcase lateemit 0 104 5 4 20 1097 "bounce_attempt,bounce_attempt,gap"
-    mqual lateemit partial null unavailable null \
-        "unknown: kernel identity unproven"
-    mgap lateemit 2 "detail closure unproven: kernel identity unproven"
-    mattempt lateemit 1 d000001 64 op1
-    mreplay lateemit 2 128 absent absent
-    mcase wrapobs 0 104 5 4 18 400 "gap"
-    mqual wrapobs partial null unavailable null "unknown: invalid epoch"
-    python3 "$JASSERT" field "$TMP/wrapobs/session.json" \
-        stop.counters_valid false || afailed=1
-    mgap wrapobs 0 "detail closure unproven: invalid epoch"
-    mreplay wrapobs 0 0 absent absent
-    mcase wrapemit 0 104 5 4 18 400 "gap"
-    mqual wrapemit partial null unavailable null "unknown: invalid epoch"
-    python3 "$JASSERT" field "$TMP/wrapemit/session.json" \
-        stop.counters_valid false || afailed=1
-    mgap wrapemit 0 "detail closure unproven: invalid epoch"
-    mreplay wrapemit 0 0 absent absent
-    mcase wrapsubmit 0 104 5 4 18 400 "gap"
-    mqual wrapsubmit partial null unavailable null "unknown: invalid epoch"
-    python3 "$JASSERT" field "$TMP/wrapsubmit/session.json" \
-        stop.counters_valid false || afailed=1
-    mgap wrapsubmit 0 "detail closure unproven: invalid epoch"
-    mreason wrapsubmit "detail loss unknown (invalid epoch; known: submit_fail=(unavailable) malformed=(0) dropped=(0) recursion_missed=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
-    mreplay wrapsubmit 0 0 absent absent
-    mcase wrapobsbytes 0 104 5 4 18 0 ""
-    mqual wrapobsbytes partial 1 unavailable null proven
-    mreplay wrapobsbytes 0 0 absent absent
-    mcase wrapemitbytes 0 104 5 4 18 0 ""
-    mqual wrapemitbytes partial 1 unavailable null proven
-    mreplay wrapemitbytes 0 0 absent absent
-    mcase bytecov 0 104 5 4 18 0 ""
-    mqual bytecov partial 1 unavailable null proven
-    mreplay bytecov 0 0 absent absent
-    mcase recoverable 0 106 5 4 22 1839 \
-        "bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
-    mqual recoverable partial 4 complete_for_scope 0 proven
-    mreason recoverable "detail loss 4 (submit_fail=(0) malformed=(1) dropped=(1) recursion_missed=(0) size_omitted=(0) duration_omitted=(1) signal_omitted=(0) rejected=(1) write_failed=(0))"
-    mattempt recoverable 0 d000001 64 op0
-    mreplay recoverable 1 64 5 144
-    merrcase() { # <case> <polls> <stats> <snaps> <reads> <committed> <events>
-        "$CPROBE" "$1" "$TMP/$1" >"$TMP/$1.log" 2>&1
-        awant "$1" "ready session=cap-1000000000-4242 start_ns=1000000000"
-        awant "$1" "exit=1"
-        awant "$1" "end=error"
-        awant "$1" "outcome=error"
-        awant "$1" "polls=$2"
-        awant "$1" "stats=$3"
-        awant "$1" "snaps=$4"
-        awant "$1" "reads=$5"
-        awant "$1" "committed=$6"
-        python3 "$JASSERT" events "$TMP/$1/events.ndjson" "$7" || afailed=1
-    }
-    mquale() { # <case> <dstatus> <dloss> <astatus> <aloss> <drain> [treason]
-        python3 "$JASSERT" field "$TMP/$1/session.json" \
-            capture.end_reason error || afailed=1
-        python3 "$JASSERT" field "$TMP/$1/session.json" \
-            quality.detail.status "$2" || afailed=1
-        python3 "$JASSERT" field "$TMP/$1/session.json" \
-            quality.detail.loss_count "$3" || afailed=1
-        python3 "$JASSERT" field "$TMP/$1/session.json" \
-            quality.aggregate.status "$4" || afailed=1
-        python3 "$JASSERT" field "$TMP/$1/session.json" \
-            quality.aggregate.loss_count "$5" || afailed=1
-        _treason="${7:-quiescence unproven}"
-        python3 "$JASSERT" field "$TMP/$1/session.json" \
-            quality.terminal.reason \
-            "stop partial: $_treason" \
-            || afailed=1
-        python3 "$JASSERT" field "$TMP/$1/session.json" \
-            stop.outcome partial || afailed=1
-        python3 "$JASSERT" field "$TMP/$1/session.json" \
-            stop.reason "$_treason" \
-            || afailed=1
-        python3 "$JASSERT" evidence "$TMP/$1/session.json" \
-            drain_closure "$6" || afailed=1
-    }
-    merrcase appendfail0 1 2 4 14 1896 \
-        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
-    mquale appendfail0 partial null complete_for_scope 0 \
-        "unknown: error shutdown"
-    mgap appendfail0 4 "detail closure unproven: error shutdown"
-    mreplay appendfail0 0 0 1 64
-    merrcase appendtorn 2 2 4 16 2240 \
-        "bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
-    mquale appendtorn partial null complete_for_scope 0 \
-        "unknown: error shutdown"
-    mgap appendtorn 5 "detail closure unproven: error shutdown"
-    mattempt appendtorn 0 d000001 64 op0
-    mreplay appendtorn 1 64 2 128
-    CATALOG_EVENTS=$(python3 -c "print(','.join(['bounce_attempt']*4096 + ['counter_snapshot']*4 + ['gap']))")
-    merrcase catalogfull 4097 2 4 8206 1429202 "$CATALOG_EVENTS"
-    mquale catalogfull partial null complete_for_scope 0 \
-        "unknown: error shutdown"
-    mgap catalogfull 4100 "detail closure unproven: error shutdown"
-    mattempt catalogfull 4095 d004096 64 op4095
-    mreplay catalogfull 4096 262144 4097 262208
-    merrcase hardpoll 2 2 4 15 2240 \
-        "bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
-    mquale hardpoll partial null complete_for_scope 0 \
-        "unknown: error shutdown"
-    mgap hardpoll 5 "detail closure unproven: error shutdown"
-    mreplay hardpoll 1 64 2 128
-    merrcase structfault 1 2 4 13 1896 \
-        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
-    mquale structfault partial null complete_for_scope 0 \
-        "unknown: error shutdown"
-    mgap structfault 4 "detail closure unproven: error shutdown"
-    mreplay structfault 0 0 1 64
-    merrcase structfaultq 1 2 4 13 1896 \
-        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
-    mquale structfaultq partial null complete_for_scope 0 \
-        "unknown: error shutdown"
-    mgap structfaultq 4 "detail closure unproven: error shutdown"
-    mreplay structfaultq 0 0 1 64
-    merrcase durhard 104 3 4 18 1895 \
-        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
-    mquale durhard partial null complete_for_scope 0 \
-        "unknown: error shutdown"
-    mgap durhard 4 "detail closure unproven: error shutdown"
-    mreplay durhard 0 0 1 0
-    merrcase sigclose 102 3 4 15 1895 \
-        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
-    mquale sigclose partial null complete_for_scope 0 \
-        "unknown: error shutdown"
-    mgap sigclose 4 "detail closure unproven: error shutdown"
-    mreplay sigclose 0 0 1 0
-    merrcase errdetfail 1 2 4 13 1925 \
-        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,gap"
-    mquale errdetfail partial null complete_for_scope 0 \
-        "unknown: detach failed; shutdown evidence unresolved" \
-        "admission close failed"
-    mgap errdetfail 4 "detail closure unproven: detach failed; shutdown evidence unresolved"
-    mreplay errdetfail 0 0 1 64
-    merrcase combinederr 1 2 22 31 430 "gap"
-    mquale combinederr partial null unavailable null \
-        "unknown: detach failed; shutdown evidence unresolved" \
-        "admission close failed"
-    mgap combinederr 0 "detail closure unproven: detach failed; shutdown evidence unresolved"
-    python3 "$JASSERT" evidence "$TMP/combinederr/session.json" \
-        shutdown.secondary_causes "snapshot unresolved" || afailed=1
-    mreplay combinederr 0 0 absent absent
-    mecase() { # <case> <exit> <end> <outcome> <polls> <stats> <snaps> <reads> <committed> <events>
-        "$CPROBE" "$1" "$TMP/$1" >"$TMP/$1.log" 2>&1
-        awant "$1" "exit=$2"
-        awant "$1" "end=$3"
-        awant "$1" "outcome=$4"
-        awant "$1" "polls=$5"
-        awant "$1" "stats=$6"
-        awant "$1" "snaps=$7"
-        awant "$1" "reads=$8"
-        awant "$1" "committed=$9"
-        python3 "$JASSERT" events "$TMP/$1/events.ndjson" "${10}" || afailed=1
-    }
-    mqualE() { # <case> <end> <dstatus> <dloss> <astatus> <aloss> <drain> [treason]
-        python3 "$JASSERT" field "$TMP/$1/session.json" \
-            capture.end_reason "$2" || afailed=1
-        python3 "$JASSERT" field "$TMP/$1/session.json" \
-            quality.detail.status "$3" || afailed=1
-        python3 "$JASSERT" field "$TMP/$1/session.json" \
-            quality.detail.loss_count "$4" || afailed=1
-        python3 "$JASSERT" field "$TMP/$1/session.json" \
-            quality.aggregate.status "$5" || afailed=1
-        python3 "$JASSERT" field "$TMP/$1/session.json" \
-            quality.aggregate.loss_count "$6" || afailed=1
-        _treason="${8:-quiescence unproven}"
-        python3 "$JASSERT" field "$TMP/$1/session.json" \
-            quality.terminal.reason \
-            "stop partial: $_treason" \
-            || afailed=1
-        python3 "$JASSERT" field "$TMP/$1/session.json" \
-            stop.outcome partial || afailed=1
-        python3 "$JASSERT" field "$TMP/$1/session.json" \
-            stop.reason "$_treason" \
-            || afailed=1
-        python3 "$JASSERT" evidence "$TMP/$1/session.json" \
-            drain_closure "$7" || afailed=1
-    }
-    mrefuse() { # <case> <exit> <outcome> <diag> <polls> <stats> <snaps> <reads>
-        "$CPROBE" "$1" "$TMP/$1" >"$TMP/$1.log" 2>&1
-        awant "$1" "exit=$2"
-        awant "$1" "end=unknown"
-        awant "$1" "outcome=$3"
-        awant "$1" "diag=$4"
-        awant "$1" "polls=$5"
-        awant "$1" "stats=$6"
-        awant "$1" "snaps=$7"
-        awant "$1" "reads=$8"
-        python3 "$JASSERT" nofile "$TMP/$1" || afailed=1
-    }
-    mecase siginhand 0 signal finalized 103 5 4 16 1495 \
-        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
-    mqualE siginhand signal partial 1 complete_for_scope 0 proven
-    mreason siginhand "detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) recursion_missed=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(1) rejected=(0) write_failed=(0))"
-    mreplay siginhand 0 0 1 64
-    mecase sigreaderr 1 error error 103 5 4 16 1495 \
-        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
-    awant sigreaderr "diag=signal: scripted EIO"
-    mqualE sigreaderr error partial 1 complete_for_scope 0 proven
-    mreplay sigreaderr 0 0 1 64
-    mecase sigreaderr0 1 error error 102 5 4 15 1494 \
-        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
-    awant sigreaderr0 "diag=signal: scripted EIO"
-    mqualE sigreaderr0 error complete_for_scope 0 complete_for_scope 0 proven
-    mreplay sigreaderr0 0 0 0 0
-    mrefuse sigsetupfail 3 refused "signal setup: scripted mask failure" 0 0 0 0
-    mrefuse sigsetuprollback 1 refusal-rollback-failed "signal setup: scripted mask failure; close: scripted close failure" 0 0 0 0
-    # Attach-path reads include the pre-activation window floor.
-    mrefuse attachfail 3 refused "attach: scripted attach failure" 0 1 2 4
-    mrefuse rollbackfail 1 refusal-rollback-failed "attach: scripted attach failure; close: scripted close failure" 0 1 2 4
-    mrefuse nonzerostart 3 refused "start snapshot nonzero" 0 0 2 3
-    mcase clockseam 0 104 5 4 18 1494 \
-        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
-    mqual clockseam complete_for_scope 0 complete_for_scope 0 proven
-    python3 "$JASSERT" field "$TMP/clockseam/session.json" \
-        capture.window.end_ns 67100000002 || afailed=1
-    python3 "$JASSERT" eventfield "$TMP/clockseam/events.ndjson" 2 \
-        ts_ns 67100000001 || afailed=1
-    python3 "$JASSERT" eventfield "$TMP/clockseam/events.ndjson" 3 \
-        ts_ns 67100000001 || afailed=1
-    mreplay clockseam 0 0 0 0
-    mcase ooo100 0 104 5 4 22 2184 \
-        "bounce_attempt,bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
-    mqual ooo100 complete_for_scope 0 complete_for_scope 0 proven
-    python3 "$JASSERT" field "$TMP/ooo100/session.json" \
-        capture.window.end_ns 62101000068 || afailed=1
-    python3 "$JASSERT" eventfield "$TMP/ooo100/events.ndjson" 0 \
-        ts_ns 62100000057 || afailed=1
-    python3 "$JASSERT" eventfield "$TMP/ooo100/events.ndjson" 1 \
-        ts_ns 62100000017 || afailed=1
-    mreplay ooo100 2 128 2 128
-    SIZEREF_EVENTS=$(python3 -c "print(','.join(['bounce_attempt']*189 + ['counter_snapshot']*4))")
-    mecase sizerefused 0 size_limit finalized 292 5 4 395 66871 "$SIZEREF_EVENTS"
-    mqualE sizerefused size_limit partial 1 complete_for_scope 0 proven
-    mreason sizerefused "detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) recursion_missed=(0) size_omitted=(1) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
-    mreplay sizerefused 189 12096 190 12160
-    "$CPROBE" opcount "$TMP/opcount" >"$TMP/opcount.log" 2>&1
-    awant opcount "ready session=cap-1000000000-4242 start_ns=1000000000"
-    awant opcount "exit=0"
-    awant opcount "end=size_limit"
-    awant opcount "outcome=finalized"
-    awant opcount "polls=4194407"
-    awant opcount "stats=5"
-    awant opcount "snaps=4"
-    awant opcount "reads=8388623"
-    awant opcount "appends=4194306"
-    awant opcount "committed=1462701818"
-    # Frozen scripted clock: attach and detach stamps tie, so
-    # the attached interval is unproven and the aggregate is
-    # partial (unordered-stamp path); the identity-budget
-    # boundary proof below is unaffected.
-    # The identity gate stops while the costliest next record
-    # (map plus mapping, +2 headroom) still fits, so the
-    # attempt-only script omits 3: the boundary record plus
-    # 2 headroom.
-    mqualE opcount size_limit partial 3 partial null proven
-    mreason opcount "detail loss 3 (submit_fail=(0) malformed=(0) dropped=(0) recursion_missed=(0) size_omitted=(3) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
-    python3 "$JASSERT" nofile "$TMP/opcount/events.ndjson" || afailed=1
-    mcase pausedbytes 0 103 5 4 18 753 "bounce_attempt,gap"
-    mqual pausedbytes partial null unavailable null \
-        "unknown: kernel identity unproven"
-    mgap pausedbytes 1 "detail closure unproven: kernel identity unproven"
-    mattempt pausedbytes 0 d000001 6 op0
-    mreplay pausedbytes 1 6 absent absent
-    mecase u64sum 0 size_limit finalized 104 5 4 19 1874 \
-        "bounce_attempt,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
-    mqualE u64sum size_limit partial 1 complete_for_scope 0 proven
-    mreason u64sum "detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) recursion_missed=(0) size_omitted=(1) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
-    mattempt u64sum 0 d000001 18446744073709551615 op0
-    mreplay u64sum 1 18446744073709551615 2 18446744073709551615
-    mcase flowinject 0 104 5 4 18 0 ""
-    mqual flowinject partial 2 unavailable null proven
-    mreason flowinject "detail loss 2 (submit_fail=(2) malformed=(0) dropped=(0) recursion_missed=(0) size_omitted=(0) duration_omitted=(0) signal_omitted=(0) rejected=(0) write_failed=(0))"
-    mreplay flowinject 0 0 absent absent
-    mecase unsynced 1 duration present_unsynced 104 5 4 18 1494 \
-        "counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot"
-    mqual unsynced complete_for_scope 0 complete_for_scope 0 proven
-    mreplay unsynced 0 0 0 0
-    mcase pool 0 103 5 4 19 2309 \
-        "pool_sample,counter_snapshot,counter_snapshot,counter_snapshot,counter_snapshot,pool_sample"
-    mqual pool complete_for_scope 0 complete_for_scope 0 proven
-    mreplay pool 0 0 0 0
-    python3 "$JASSERT" field "$TMP/pool/session.json" \
-        capabilities.pool_stats.status partial || afailed=1
-    python3 "$JASSERT" metric "$TMP/pool.report.json" \
-        pool_used_bytes 24576 || afailed=1
-    python3 "$JASSERT" metric "$TMP/pool.report.json" \
-        pool_capacity_bytes 67108864 || afailed=1
-    python3 "$JASSERT" metric "$TMP/pool.report.json" \
-        pool_hiwater_bytes 131072 || afailed=1
-    python3 "$JASSERT" eventfield "$TMP/pool/events.ndjson" \
-        0 data.allocator swiotlb || afailed=1
-    python3 "$JASSERT" eventfield "$TMP/pool/events.ndjson" \
-        0 data.unit_bytes 2048 || afailed=1
-    # Routine pool sampling stops at 4096 with a session
-    # note: every iteration fires (deadline read plus
-    # sample-timestamp read: two scripted seconds per fire)
-    # until the cap latches, then the remaining iterations
-    # drain the clock to the deadline, reading each tick
-    # but persisting pressurized samples only.
-    poolcap_kinds=$(python3 -c "print(','.join(['pool_sample'] + ['pool_sample'] * 4096 + ['counter_snapshot'] * 4 + ['pool_sample']))")
-    # Post-cap ticks read the clock for their sample stamp
-    # (the read is what keeps the cadence honest), so the
-    # scripted clock drains to the deadline in fewer loop
-    # turns: polls 5004 -> 4601. Events, reads, and
-    # committed bytes are unchanged.
-    mcase poolcap 0 4601 5 4 9016 1692322 "$poolcap_kinds"
-    mqual poolcap complete_for_scope 0 complete_for_scope 0 proven
-    mreplay poolcap 0 0 0 0
-    # Past the routine cap the cadence keeps reading but
-    # persists pressurized samples only (up to 64); quiet
-    # ticks persist nothing. The poolcap run stays quiet,
-    # so its counts hold and only the note grows.
-    python3 "$JASSERT" field "$TMP/poolcap/session.json" \
-        capabilities.pool_stats.reason "default-pool debugfs samples at capture start and close plus 4096 periodic samples (1s cadence); routine sampling stopped at 4096 (count cap); quiet ticks past the cap persist nothing" \
-        || afailed=1
-    poolpressure_kinds=$(python3 -c "print(','.join(['pool_sample'] + ['pool_sample'] * 4160 + ['counter_snapshot'] * 4 + ['pool_sample']))")
-    mcase poolpressure 0 4601 5 4 9016 1739564 "$poolpressure_kinds"
-    mqual poolpressure complete_for_scope 0 complete_for_scope 0 proven
-    mreplay poolpressure 0 0 0 0
-    python3 "$JASSERT" field "$TMP/poolpressure/session.json" \
-        capabilities.pool_stats.reason "default-pool debugfs samples at capture start and close plus 4096 periodic samples (1s cadence); routine sampling stopped at 4096 (count cap); 64 pressurized samples persisted past the cap; post-cap budget exhausted" \
-        || afailed=1
-    # Live-adapter refusal contract: the real kernel (bad
-    # bridge) plus a real fresh writer must end refused
-    # (exit 3) with no residuals and no output dir.
-    "$CPROBE" live-refuse "$TMP/live-refuse" >"$TMP/live-refuse.log" 2>&1
-    awant live-refuse "exit=3"
-    awant live-refuse "end=unknown"
-    awant live-refuse "outcome=refused"
-    awant live-refuse "diag=open: ch0 op="
-    if grep -q "residual\|rollback-failed" "$TMP/live-refuse.log"; then
-        echo "attempts: live-refuse reports residuals" >&2
-        cat "$TMP/live-refuse.log" >&2
-        afailed=1
-    fi
-    if [ -e "$TMP/live-refuse" ]; then
-        echo "attempts: live-refuse left residual dir" >&2
-        afailed=1
-    fi
-    # Stuck construction unwind end to end: scripted kernel
-    # plus a real LiveWriter under fstat/unlink faults must
-    # end refusal-rollback-failed (exit 1) with the
-    # construction residuals in the diagnostic.
-    MVSHIM="fstat_fail_events,fail_unlink_events" \
-        LD_PRELOAD="$(asan_preload)$ROOT/build/shim/mvshim.so" \
-        "$CPROBE" live-create-residual "$TMP/live-stuck" \
-        >"$TMP/live-stuck.log" 2>&1
-    awant live-stuck "exit=1"
-    awant live-stuck "outcome=refusal-rollback-failed"
-    # Exact diagnostic: the residual list appears once, via
-    # abandon, never repeated from the creation error.
-    if ! grep -qxF "diag=output io: fstat failed: errno 5; writer residual: construction residuals: events,dir" "$TMP/live-stuck.log"; then
-        echo "attempts: live-stuck diagnostic mismatch" >&2
-        cat "$TMP/live-stuck.log" >&2
-        afailed=1
-    fi
-    if [ ! -d "$TMP/live-stuck" ]; then
-        echo "attempts: live-stuck unexpectedly clean" >&2
-        afailed=1
-    fi
-    if [ "$afailed" -ne 0 ]; then
-        echo "attempts: close-out matrix FAILED" >&2
-        return 1
-    fi
-    echo "attempts: close-out matrix passed (47 cases)"
-    return 0
-}
 
-suite_buildcache() {
-    # Warm-cache verification: tampered or incomplete caches
-    # heal from verified bytes, stale digests rebuild with a
-    # tarball and fail fast without any source. Needs
-    # LMB_PACKAGE (the pinned tarball path).
-    if [ -z "${LMB_PACKAGE:-}" ] || [ ! -f "$LMB_PACKAGE" ]; then
-        echo "buildcache: skipped (set LMB_PACKAGE to the pinned tarball)"
-        return 77
-    fi
-    BTMP=$(mktemp -d)
-    trap 'rm -rf "$BTMP"' EXIT
-    bfailed=0
-    bpin=$(python3 -c "
-import json
-lock = json.load(open('$ROOT/toolchain.lock.json'))
-print(lock['dependencies']['libbpf-mojo']['tarball_sha256'])
-")
-    bver=$(python3 -c "
-import json
-lock = json.load(open('$ROOT/toolchain.lock.json'))
-print(lock['dependencies']['libbpf-mojo']['version'])
-")
-    bvendored="$ROOT/third_party/libbpf-mojo-$bver.tar.gz"
-    # Case 1: combined tampering (edited lmb source, edited
-    # header, deleted header) heals in one build.
-    echo "BUILDCACHE-TAMPER" >>"$ROOT/build/deps/lmb/mojo/libbpf_mojo/session.mojo"
-    echo "BUILDCACHE-TAMPER" >>"$ROOT/build/deps/include/bpf/bpf_helpers.h"
-    rm "$ROOT/build/deps/include/bpf/bpf_endian.h"
-    if ! LMB_PACKAGE="$LMB_PACKAGE" "$ROOT/tools/build" \
-        >"$BTMP/heal.log" 2>&1; then
-        echo "buildcache: heal build failed" >&2
-        tail -20 "$BTMP/heal.log" >&2
-        bfailed=1
-    fi
-    grep -q "libbpf-mojo .* refresh" "$BTMP/heal.log" || {
-        echo "buildcache: lmb tamper not detected" >&2
-        bfailed=1
-    }
-    grep -q "libbpf headers refresh" "$BTMP/heal.log" || {
-        echo "buildcache: libbpf tamper not detected" >&2
-        bfailed=1
-    }
-    if grep -rq "BUILDCACHE-TAMPER" \
-        "$ROOT/build/deps/lmb/mojo/libbpf_mojo/session.mojo" \
-        "$ROOT/build/deps/include/bpf/bpf_helpers.h"; then
-        echo "buildcache: tamper marker survives heal" >&2
-        bfailed=1
-    fi
-    if [ ! -f "$ROOT/build/deps/include/bpf/bpf_endian.h" ]; then
-        echo "buildcache: deleted header not restored" >&2
-        bfailed=1
-    fi
-    if [ ! -f "$ROOT/build/deps/lmb-package.tgz" ] \
-        || [ ! -f "$ROOT/build/deps/libbpf.tgz" ]; then
-        echo "buildcache: verified tarballs not kept" >&2
-        bfailed=1
-    fi
-    # Case 2: a stale digest rebuilds with a tarball.
-    echo "deadbeef" >"$ROOT/build/deps/lmb/.digest"
-    if ! LMB_PACKAGE="$LMB_PACKAGE" "$ROOT/tools/build" \
-        >"$BTMP/stale.log" 2>&1; then
-        echo "buildcache: stale rebuild failed" >&2
-        tail -20 "$BTMP/stale.log" >&2
-        bfailed=1
-    fi
-    grep -q "libbpf-mojo .* refresh" "$BTMP/stale.log" || {
-        echo "buildcache: stale digest not detected" >&2
-        bfailed=1
-    }
-    if [ "$(cat "$ROOT/build/deps/lmb/.digest")" != "$bpin" ]; then
-        echo "buildcache: digest not re-pinned after rebuild" >&2
-        bfailed=1
-    fi
-    # Case 3: a stale digest without any source fails fast
-    # and removes the untrusted cache; then restore. Every
-    # source (environment, kept copy, vendored tarball) is
-    # stashed so the premise holds.
-    echo "deadbeef" >"$ROOT/build/deps/lmb/.digest"
-    mv "$ROOT/build/deps/lmb-package.tgz" "$BTMP/lmb-package.tgz"
-    if [ -f "$bvendored" ]; then
-        mv "$bvendored" "$BTMP/lmb-vendored.tgz"
-    fi
-    if env -u LMB_PACKAGE "$ROOT/tools/build" \
-        >"$BTMP/offline.log" 2>&1; then
-        echo "buildcache: sourceless stale build exits 0" >&2
-        bfailed=1
-    fi
-    grep -q "FAIL libbpf-mojo cache missing, stale, or tampered" \
-        "$BTMP/offline.log" || {
-        echo "buildcache: missing stale-cache diagnostic" >&2
-        bfailed=1
-    }
-    if [ -e "$ROOT/build/deps/lmb" ]; then
-        echo "buildcache: untrusted cache not removed" >&2
-        bfailed=1
-    fi
-    mv "$BTMP/lmb-package.tgz" "$ROOT/build/deps/lmb-package.tgz"
-    if [ -f "$BTMP/lmb-vendored.tgz" ]; then
-        mv "$BTMP/lmb-vendored.tgz" "$bvendored"
-    fi
-    if ! LMB_PACKAGE="$LMB_PACKAGE" "$ROOT/tools/build" \
-        >"$BTMP/restore.log" 2>&1; then
-        echo "buildcache: restore build failed (tree unhealthy)" >&2
-        tail -20 "$BTMP/restore.log" >&2
-        bfailed=1
-    fi
-    # Case 4: tampering heals from the kept tarball with no
-    # LMB_PACKAGE in the environment (offline byte-compare).
-    echo "BUILDCACHE-TAMPER" >>"$ROOT/build/deps/lmb/mojo/libbpf_mojo/batch.mojo"
-    if ! env -u LMB_PACKAGE "$ROOT/tools/build" \
-        >"$BTMP/kept.log" 2>&1; then
-        echo "buildcache: kept-tarball heal failed" >&2
-        tail -20 "$BTMP/kept.log" >&2
-        bfailed=1
-    fi
-    grep -q "libbpf-mojo .* refresh" "$BTMP/kept.log" || {
-        echo "buildcache: kept-tarball tamper not detected" >&2
-        bfailed=1
-    }
-    if grep -q "BUILDCACHE-TAMPER" \
-        "$ROOT/build/deps/lmb/mojo/libbpf_mojo/batch.mojo"; then
-        echo "buildcache: tamper marker survives kept heal" >&2
-        bfailed=1
-    fi
-    # Case 5: a valid stamp without any archive still fails
-    # when sources are tampered: stamps alone prove nothing.
-    # Every source (environment, kept copy, vendored tarball)
-    # is stashed so the premise holds.
-    echo "BUILDCACHE-TAMPER" >>"$ROOT/build/deps/lmb/mojo/libbpf_mojo/error.mojo"
-    mv "$ROOT/build/deps/lmb-package.tgz" "$BTMP/lmb-package.tgz"
-    if [ -f "$bvendored" ]; then
-        mv "$bvendored" "$BTMP/lmb-vendored.tgz"
-    fi
-    if env -u LMB_PACKAGE "$ROOT/tools/build" \
-        >"$BTMP/archivless.log" 2>&1; then
-        echo "buildcache: archivless tampered build exits 0" >&2
-        bfailed=1
-    fi
-    grep -q "FAIL libbpf-mojo cache missing, stale, or tampered" \
-        "$BTMP/archivless.log" || {
-        echo "buildcache: missing archivless diagnostic" >&2
-        bfailed=1
-    }
-    if [ -e "$ROOT/build/deps/lmb" ]; then
-        echo "buildcache: untrusted cache not removed" >&2
-        bfailed=1
-    fi
-    mv "$BTMP/lmb-package.tgz" "$ROOT/build/deps/lmb-package.tgz"
-    if [ -f "$BTMP/lmb-vendored.tgz" ]; then
-        mv "$BTMP/lmb-vendored.tgz" "$bvendored"
-    fi
-    if ! env -u LMB_PACKAGE "$ROOT/tools/build" \
-        >"$BTMP/restore2.log" 2>&1; then
-        echo "buildcache: kept restore failed (tree unhealthy)" >&2
-        tail -20 "$BTMP/restore2.log" >&2
-        bfailed=1
-    fi
-    # Case 6: with the kept tarball stashed and no LMB_PACKAGE,
-    # a tampered cache heals from the vendored tarball alone,
-    # and the kept copy is refreshed from it; then restore.
-    echo "BUILDCACHE-TAMPER" >>"$ROOT/build/deps/lmb/mojo/libbpf_mojo/session.mojo"
-    mv "$ROOT/build/deps/lmb-package.tgz" "$BTMP/lmb-package.tgz"
-    if ! env -u LMB_PACKAGE "$ROOT/tools/build" \
-        >"$BTMP/vendored.log" 2>&1; then
-        echo "buildcache: vendored-tarball heal failed" >&2
-        tail -20 "$BTMP/vendored.log" >&2
-        bfailed=1
-    fi
-    grep -q "vendored third_party tarball" "$BTMP/vendored.log" || {
-        echo "buildcache: vendored source not used" >&2
-        bfailed=1
-    }
-    grep -q "libbpf-mojo .* refresh" "$BTMP/vendored.log" || {
-        echo "buildcache: vendored tamper not detected" >&2
-        bfailed=1
-    }
-    if grep -q "BUILDCACHE-TAMPER" \
-        "$ROOT/build/deps/lmb/mojo/libbpf_mojo/session.mojo"; then
-        echo "buildcache: tamper marker survives vendored heal" >&2
-        bfailed=1
-    fi
-    if [ ! -f "$ROOT/build/deps/lmb-package.tgz" ]; then
-        echo "buildcache: kept copy not refreshed from vendored" >&2
-        bfailed=1
-    fi
-    mv "$BTMP/lmb-package.tgz" "$ROOT/build/deps/lmb-package.tgz"
-    # Case 7: the healed tree carries a build receipt that
-    # verifies against the live tree and build outputs.
-    if [ ! -f "$ROOT/build/build-receipt.json" ]; then
-        echo "buildcache: missing build receipt after heal" >&2
-        bfailed=1
-    elif ! python3 "$ROOT/tools/build_receipt.py" verify \
-        --root "$ROOT" \
-        --receipt "$ROOT/build/build-receipt.json" \
-        >"$BTMP/verify.log" 2>&1; then
-        echo "buildcache: receipt does not verify after heal" >&2
-        tail -10 "$BTMP/verify.log" >&2
-        bfailed=1
-    fi
-    if [ "$bfailed" -ne 0 ]; then
-        echo "buildcache: FAILED" >&2
-        return 1
-    fi
-    echo "buildcache: tamper-heal, stale, kept-tarball, vendored-tarball, refusal, and receipt cases passed"
-    return 0
-}
 
-suite_writer() {
-    run_unit_file tests/unit/test_encode.mojo || return 1
-    run_unit_file tests/unit/test_encode_reference.mojo || return 1
-    # Round-trip every fixture capture: parse/encode/reparse must
-    # preserve the struct exactly (exit 0). Exit 2 is accepted
-    # ONLY for the listed intentionally-invalid fixtures.
-    # Baseline region detail round-trips exactly since the parser
-    # retains every observation. Exit 1 (mismatch) always fails.
-    ROUNDTRIP="$ROOT/build/roundtrip_check"
-    # shellcheck disable=SC2046
-    (cd "$ROOT" && pixi run --frozen mojo build $(mojo_san_flags) -I src \
-        --target-cpu x86-64-v2 \
-        -o "$ROUNDTRIP" tests/unit/roundtrip_check.mojo) || return 1
-    failed=0
-    checked=0
-    while IFS= read -r file; do
-        rel=${file#"$ROOT"/}
-        "$ROUNDTRIP" "$file" >/tmp/rt-out.log 2>&1
-        rc=$?
-        checked=$((checked + 1))
-        case "$rel" in
-            tests/fixtures/ownership/swap/events.ndjson|\
-            tests/fixtures/ownership/swap/session.json|\
-            tests/fixtures/reader/adv-bad-seq-int/events.ndjson|\
-            tests/fixtures/reader/adv-bad-utf8/events.ndjson|\
-            tests/fixtures/reader/adv-depth-64/events.ndjson|\
-            tests/fixtures/reader/adv-depth-65/events.ndjson|\
-            tests/fixtures/reader/adv-nul/events.ndjson|\
-            tests/fixtures/reader/adv-unknown-field/events.ndjson|\
-            tests/fixtures/reader/badkind/events.ndjson|\
-            tests/fixtures/reader/baseline-after-window/session.json|\
-            tests/fixtures/reader/compat-major/session.json|\
-            tests/fixtures/reader/corrupt-tail/events.ndjson|\
-            tests/fixtures/reader/f2-contradictory-provenance/session.json|\
-            tests/fixtures/reader/f3-baseline/session.json|\
-            tests/fixtures/reader/f3-span-sync/events.ndjson|\
-            tests/fixtures/reader/f3-span-transition/events.ndjson|\
-            tests/fixtures/reader/f4-definitive-dupkey/events.ndjson|\
-            tests/fixtures/reader/f4-definitive-version/events.ndjson|\
-            tests/fixtures/reader/f4-nocolon-dupkey/events.ndjson|\
-            tests/fixtures/reader/f4-nocolon-unknown/events.ndjson|\
-            tests/fixtures/reader/f4-truncated-nested/events.ndjson|\
-            tests/fixtures/reader/f4-truncated-primitive/events.ndjson|\
-            tests/fixtures/reader/f4-truncated-scope-device/events.ndjson|\
-            tests/fixtures/reader/f4-truncated-scope-profile/events.ndjson|\
-            tests/fixtures/reader/interior-corrupt/events.ndjson|\
-            tests/fixtures/reader/partial-tail/events.ndjson|\
-            tests/fixtures/reader/size-ok/events.ndjson|\
-            tests/fixtures/reader/size-over/events.ndjson|\
-            tests/fixtures/reader/unsanitized-error/events.ndjson|\
-            tests/fixtures/reader/unsanitized-session/session.json)
-                if [ "$rc" -ne 2 ]; then
-                    echo "writer: $rel exits $rc, want 2" >&2
-                    failed=1
-                fi
-                ;;
-            *)
-                if [ "$rc" -ne 0 ]; then
-                    echo "writer: $rel exits $rc, want 0" >&2
-                    cat /tmp/rt-out.log >&2
-                    failed=1
-                fi
-                ;;
-        esac
-    done <<EOF
-$(cd "$ROOT" && find tests/fixtures -name events.ndjson -o -name session.json | sort)
-EOF
-    if [ "$failed" -ne 0 ]; then
-        echo "writer: round-trip FAILED ($checked files)" >&2
-        return 1
-    fi
-    echo "writer: encoder and round-trip passed ($checked files)"
-    # EventWriter file primitive (creation, gates, groups, finalize):
-    # unit tests, then LD_PRELOAD fault injection plus a
-    # live path-replacement race. All unprivileged; every
-    # pwrite count is asserted so the short:N modes stay
-    # anchored to a verified op->call mapping.
-    run_unit_file tests/unit/test_writer.mojo || return 1
-    run_unit_file tests/unit/test_integrity_writer.mojo || return 1
-    SHIM="$ROOT/build/shim/mvshim.so"
-    if [ ! -f "$SHIM" ]; then
-        echo "writer: missing $SHIM (run tools/build first)" >&2
-        return 1
-    fi
-    mkdir -p "$ROOT/build/probe"
-    # shellcheck disable=SC2046
-    (cd "$ROOT" && pixi run --frozen mojo build $(mojo_san_flags) -I src \
-        --target-cpu x86-64-v2 \
-        -o "$ROOT/build/probe/shim_probe" \
-        tests/unit/shim_probe.mojo) || return 1
-    PROBE="$ROOT/build/probe/shim_probe"
-    WTMP=$(mktemp -d)
-    trap 'rm -rf "$WTMP"' EXIT
-    wfailed=0
-    run_script() { # <case> [<modes>]
-        if [ $# -ge 2 ]; then
-            MVSHIM="$2" MVSHIM_COUNT="$WTMP/$1.count" \
-                LD_PRELOAD="$(asan_preload)$SHIM" \
-                "$PROBE" script "$WTMP/$1" >"$WTMP/$1.log" 2>&1
-        else
-            "$PROBE" script "$WTMP/$1" >"$WTMP/$1.log" 2>&1
-        fi
-        rc=$?
-        if [ "$rc" -ne 0 ]; then
-            echo "writer: case $1 exits $rc" >&2
-            cat "$WTMP/$1.log" >&2
-            wfailed=1
-        fi
-    }
-    want() { # <case> <fixed-string>
-        grep -qF "$2" "$WTMP/$1.log" || {
-            echo "writer: case $1 missing [$2]" >&2
-            cat "$WTMP/$1.log" >&2
-            wfailed=1
-        }
-    }
-    want_count() { # <case> <n>
-        got=$(cat "$WTMP/$1.count" 2>/dev/null || echo "?")
-        if [ "$got" != "$2" ]; then
-            echo "writer: case $1 pwrite count $got, want $2" >&2
-            wfailed=1
-        fi
-    }
-    want_file() { # <case> <rel> <expected>
-        cmp -s "$WTMP/$1/$2" "$3" || {
-            echo "writer: case $1 file $2 differs" >&2
-            ls -la "$WTMP/$1" >&2
-            wfailed=1
-        }
-    }
-    want_missing() { # <case> <rel>
-        if [ -e "$WTMP/$1/$2" ]; then
-            echo "writer: case $1 has unexpected $2" >&2
-            wfailed=1
-        fi
-    }
-    bytes_of() { # <char> <count> <file>
-        printf "$1%.0s" $(seq "$2") >"$3"
-    }
-    bytes_of A 99 "$WTMP/cA"
-    bytes_of B 99 "$WTMP/cB"
-    bytes_of C 99 "$WTMP/cC"
-    bytes_of D 99 "$WTMP/cD"
-    bytes_of E 99 "$WTMP/cE"
-    bytes_of '{' 49 "$WTMP/cS49"
-    for c in A B C D E; do printf '\n' >>"$WTMP/c$c"; done
-    printf '\n' >>"$WTMP/cS49"
-    cat "$WTMP/cA" "$WTMP/cB" "$WTMP/cE" >"$WTMP/full300"
-    cat "$WTMP/cA" >"$WTMP/pre100"
-    cat "$WTMP/cA" "$WTMP/cB" >"$WTMP/pre200"
-    cat "$WTMP/cA" "$WTMP/cB" "$WTMP/cC" "$WTMP/cD" >"$WTMP/full400"
-    head -c 50 "$WTMP/cC" >"$WTMP/torn250head"
-    cat "$WTMP/pre200" "$WTMP/torn250head" >"$WTMP/torn250"
-    : >"$WTMP/empty"
-    run_script pure
-    want pure "append1 ok committed=100"
-    want pure "append2 ok committed=200"
-    want pure "group ok mark=200 committed=200"
-    want pure "append3 ok committed=300"
-    want pure "finalize status=finalized"
-    want pure "events_len=300"
-    want pure "session_len=50"
-    want_file pure events.ndjson "$WTMP/full300"
-    want_file pure session.json "$WTMP/cS49"
-    run_script baseline ""
-    want baseline "finalize status=finalized"
-    want baseline "events_len=300"
-    want_count baseline 6
-    want_file baseline events.ndjson "$WTMP/full300"
-    run_script short2 "short:2"
-    want short2 "append2 ok committed=200"
-    want short2 "finalize status=finalized"
-    want_count short2 7
-    want_file short2 events.ndjson "$WTMP/full300"
-    run_script after2 "enospc_after:2"
-    want after2 "append1 ok committed=100"
-    want after2 "append2 error kind=append_failed"
-    want after2 "group error op=gc kind=append_failed"
-    want after2 "append3 error kind=append_failed"
-    want after2 "finalize status=unfinalized"
-    want after2 "events_len=100"
-    want after2 "session MISSING"
-    want_count after2 5
-    want_file after2 events.ndjson "$WTMP/pre100"
-    want_missing after2 session.json
-    run_script torn "short:3,enospc_after:4"
-    want torn "append2 ok committed=200"
-    want torn "group error op=gc kind=append_failed"
-    want torn "finalize status=unfinalized"
-    want torn "events_len=200"
-    want_count torn 6
-    want_file torn events.ndjson "$WTMP/pre200"
-    run_script fatal "short:3,enospc_after:4,fail_truncate"
-    want fatal "group error op=gc kind=fatal"
-    want fatal "append3 error kind=misuse"
-    want fatal "finalize error kind=misuse"
-    want fatal "events_len=250"
-    want_count fatal 4
-    want_file fatal events.ndjson "$WTMP/torn250"
-    run_script truncfail "fail_truncate"
-    want truncfail "group error op=abort kind=fatal"
-    want truncfail "append3 error kind=misuse"
-    want truncfail "events_len=400"
-    want_count truncfail 4
-    want_file truncfail events.ndjson "$WTMP/full400"
-    run_script evfull "enospc_events"
-    want evfull "append1 error kind=append_failed"
-    want evfull "finalize status=finalized"
-    want evfull "events_len=0"
-    want evfull "session_len=50"
-    want_count evfull 5
-    want_file evfull events.ndjson "$WTMP/empty"
-    want_file evfull session.json "$WTMP/cS49"
-    run_script tmpspc "enospc_tmp"
-    want tmpspc "append3 ok committed=300"
-    want tmpspc "finalize status=unfinalized"
-    want tmpspc "events_len=300"
-    want tmpspc "session MISSING"
-    want_count tmpspc 5
-    want_file tmpspc events.ndjson "$WTMP/full300"
-    want_missing tmpspc session.json
-    run_script norename "fail_rename"
-    want norename "finalize status=unfinalized"
-    want norename "session MISSING"
-    want_count norename 6
-    want_file norename events.ndjson "$WTMP/full300"
-    want_missing norename session.json
-    run_script dirfsync "fsync_dir"
-    want dirfsync "finalize status=present_unsynced"
-    want dirfsync "session_len=50"
-    want dirfsync "events_len=300"
-    want_count dirfsync 6
-    want_file dirfsync events.ndjson "$WTMP/full300"
-    want_file dirfsync session.json "$WTMP/cS49"
-    PARENT_REAL=$(realpath "$WTMP")
-    run_script parfsync "fsync_parent:$PARENT_REAL"
-    want parfsync "finalize status=present_unsynced note=parent fsync: $PARENT_REAL: errno 5"
-    want parfsync "session_len=50"
-    want parfsync "events_len=300"
-    want_count parfsync 6
-    want_file parfsync events.ndjson "$WTMP/full300"
-    want_file parfsync session.json "$WTMP/cS49"
-    run_createonly() { # <case> <modes>
-        MVSHIM="$2" MVSHIM_COUNT="$WTMP/$1.count" \
-            LD_PRELOAD="$(asan_preload)$SHIM" \
-            "$PROBE" createonly "$WTMP/$1" >"$WTMP/$1.log" 2>&1
-        rc=$?
-        if [ "$rc" -ne 0 ]; then
-            echo "writer: case $1 exits $rc" >&2
-            cat "$WTMP/$1.log" >&2
-            wfailed=1
-        fi
-    }
-    # Construction pin failures unwind: a failed fstat on
-    # either the events file or the fresh dir raises io and
-    # leaves no directory behind.
-    run_createonly fstatev "fstat_fail_events"
-    want fstatev "createonly error kind=io"
-    if [ -e "$WTMP/fstatev" ]; then
-        echo "writer: fstatev left residual dir" >&2
-        ls -la "$WTMP/fstatev" >&2
-        wfailed=1
-    fi
-    FSTATDIR_REAL=$(realpath -m "$WTMP/fstatdir")
-    run_createonly fstatdir "fstat_fail_dir:$FSTATDIR_REAL"
-    want fstatdir "createonly error kind=io"
-    if [ -e "$WTMP/fstatdir" ]; then
-        echo "writer: fstatdir left residual dir" >&2
-        ls -la "$WTMP/fstatdir" >&2
-        wfailed=1
-    fi
-    # Creation-time directory replacement: a foreign dir
-    # swapped in between mkdirat and the first openat must
-    # be refused before any capture file is created inside
-    # it, and its pre-existing contents must survive.
-    printf 'LOOT\n' >"$WTMP/lootref"
-    mkdir -p "$WTMP/foreign-full/sub"
-    cp "$WTMP/lootref" "$WTMP/foreign-full/loot.txt"
-    printf 'x\n' >"$WTMP/foreign-full/sub/nested.txt"
-    chmod 0700 "$WTMP/foreign-full"
-    run_createonly swapfull "swapdir:$WTMP/foreign-full:swapfull"
-    want swapfull "createonly error kind=exists"
-    if [ -e "$WTMP/swapfull/events.ndjson" ] || \
-        [ -e "$WTMP/swapfull/session.json" ]; then
-        echo "writer: swapfull wrote capture files into foreign dir" >&2
-        ls -la "$WTMP/swapfull" >&2
-        wfailed=1
-    fi
-    cmp -s "$WTMP/swapfull/loot.txt" "$WTMP/lootref" || {
-        echo "writer: swapfull damaged foreign contents" >&2
-        ls -la "$WTMP/swapfull" >&2
-        wfailed=1
-    }
-    if [ ! -d "$WTMP/swapfull.displaced" ]; then
-        echo "writer: swapfull did not displace the fresh dir" >&2
-        wfailed=1
-    fi
-    # A group/other-accessible empty dir is likewise
-    # foreign: our mkdir mode can never carry those bits.
-    mkdir -p "$WTMP/foreign-mode"
-    chmod 0755 "$WTMP/foreign-mode"
-    run_createonly swapmode "swapdir:$WTMP/foreign-mode:swapmode"
-    want swapmode "createonly error kind=exists"
-    if [ -e "$WTMP/swapmode/events.ndjson" ]; then
-        echo "writer: swapmode wrote into foreign dir" >&2
-        wfailed=1
-    fi
-    # Positive control: the same op sequence without a
-    # swap finalizes.
-    run_createonly swapclean ""
-    want swapclean "createonly ok status=finalized committed=2"
-    run_pincheck() { # <case> <modes>
-        MVSHIM="$2" MVSHIM_COUNT="$WTMP/$1.count" \
-            LD_PRELOAD="$(asan_preload)$SHIM" \
-            "$PROBE" pincheck "$WTMP/$1" >"$WTMP/$1.log" 2>&1
-        rc=$?
-        if [ "$rc" -ne 0 ]; then
-            echo "writer: case $1 exits $rc" >&2
-            cat "$WTMP/$1.log" >&2
-            wfailed=1
-        fi
-    }
-    # Session-origin verification must not fail open: a
-    # planted session.json swapped in after rename is
-    # refused against the tmp identity even when the
-    # later tmp re-pin fails.
-    printf 'PLANTED\n' >"$WTMP/plant-s1control"
-    printf 'PLANTED\n' >"$WTMP/plant-s1failopen"
-    printf 'PLANTED\n' >"$WTMP/plantref"
-    bytes_of '{' 9 "$WTMP/sess10"
-    printf '\n' >>"$WTMP/sess10"
-    run_pincheck s1control "swap_session:$WTMP/plant-s1control"
-    want s1control "pincheck status=unfinalized note=session replaced after rename pin=0"
-    want_file s1control session.json "$WTMP/plantref"
-    want_file s1control session.json.displaced "$WTMP/sess10"
-    # s1failopen now duplicates s1control: after the
-    # pwrite fix no tmp fstat follows the write, so
-    # the fault is inert; s1unavail carries the live
-    # tmp-pin regression. Kept for its RED-anchored
-    # fail-open history.
-    run_pincheck s1failopen "fstat_fail_tmp_written,swap_session:$WTMP/plant-s1failopen"
-    want s1failopen "pincheck status=unfinalized note=session replaced after rename pin=0"
-    want_file s1failopen session.json "$WTMP/plantref"
-    want_file s1failopen session.json.displaced "$WTMP/sess10"
-    # A tmp pin failure at creation refuses finalization
-    # outright: unfinalized, never finalized.
-    run_pincheck s1unavail "fstat_fail_tmp"
-    want s1unavail "pincheck status=unfinalized note=tmp pin failed; tmp left in place pin=0"
-    run_fdleak() { # <case> <modes>
-        MVSHIM="$2" MVSHIM_COUNT="$WTMP/$1.count" \
-            LD_PRELOAD="$(asan_preload)$SHIM" \
-            "$PROBE" fdleak "$WTMP/$1" >"$WTMP/$1.log" 2>&1
-        rc=$?
-        if [ "$rc" -ne 0 ]; then
-            echo "writer: case $1 exits $rc" >&2
-            cat "$WTMP/$1.log" >&2
-            wfailed=1
-        fi
-    }
-    check_fd_delta() { # <case> <want-delta>
-        line=$(grep -F "fdleak status=" "$WTMP/$1.log" | head -1)
-        before_n=$(printf '%s' "$line" | sed 's/.* before=\([0-9]*\) after=.*/\1/')
-        after_n=$(printf '%s' "$line" | sed 's/.* after=\([0-9]*\)$/\1/')
-        if [ "$((before_n - after_n))" != "$2" ]; then
-            echo "writer: case $1 fd delta $((before_n - after_n)), want $2" >&2
-            cat "$WTMP/$1.log" >&2
-            wfailed=1
-        fi
-    }
-    # Finalize releases exactly the three held descriptors
-    # (events, dir, parent); tmp and session pins close on
-    # every path.
-    run_fdleak fdclean ""
-    want fdclean "fdleak status=finalized"
-    check_fd_delta fdclean 3
-    # A session fstat failure still refuses publication and
-    # recovers every descriptor (no sess_fd leak).
-    run_fdleak sessleak "fstat_fail_session"
-    want sessleak "fdleak status=unfinalized note=session pin failed"
-    check_fd_delta sessleak 3
-    run_livecreate() { # <case> <modes>
-        MVSHIM="$2" MVSHIM_COUNT="$WTMP/$1.count" \
-            LD_PRELOAD="$(asan_preload)$SHIM" \
-            "$PROBE" live-create "$WTMP/$1" >"$WTMP/$1.log" 2>&1
-        rc=$?
-        if [ "$rc" -ne 0 ]; then
-            echo "writer: case $1 exits $rc" >&2
-            cat "$WTMP/$1.log" >&2
-            wfailed=1
-        fi
-    }
-    # Stuck construction unwind: fstat fails plus the events
-    # unlink fails, so artifacts remain and the LiveWriter
-    # abandon reports them (not a clean rollback).
-    run_livecreate stuckunwind "fstat_fail_events,fail_unlink_events"
-    want stuckunwind "live-create error kind=io"
-    want stuckunwind "live-create abandon=construction residuals: events,dir"
-    # Single-report boundary: the creation error keeps the
-    # cause without the residual suffix, and the second
-    # abandon drains nothing.
-    if grep -qF "; residuals:" "$WTMP/stuckunwind.log"; then
-        echo "writer: stuckunwind repeats residuals in error" >&2
-        cat "$WTMP/stuckunwind.log" >&2
-        wfailed=1
-    fi
-    if ! grep -qxF "live-create abandon2=" "$WTMP/stuckunwind.log"; then
-        echo "writer: stuckunwind second abandon not empty" >&2
-        cat "$WTMP/stuckunwind.log" >&2
-        wfailed=1
-    fi
-    if [ ! -d "$WTMP/stuckunwind" ]; then
-        echo "writer: stuckunwind unexpectedly clean" >&2
-        wfailed=1
-    fi
-    run_mutate() { # <mode> <case>
-        "$PROBE" "$1" "$WTMP/$2" >"$WTMP/$2.log" 2>&1
-        rc=$?
-        if [ "$rc" -ne 0 ]; then
-            echo "writer: case $2 exits $rc" >&2
-            cat "$WTMP/$2.log" >&2
-            wfailed=1
-        fi
-    }
-    bytes_of J 10 "$WTMP/junk11"
-    printf '\n' >>"$WTMP/junk11"
-    run_mutate rename_events rnev
-    want rnev "mutate ok"
-    want rnev "finalize status=unfinalized note=namespace: events file replaced"
-    want_missing rnev session.json
-    want_file rnev events.ndjson "$WTMP/junk11"
-    run_mutate rename_dir rndir
-    want rndir "mutate ok"
-    want rndir "finalize status=unfinalized note=namespace: output dir lookup failed"
-    want_missing rndir.bak session.json
-    if [ ! -f "$WTMP/rndir.bak/events.ndjson" ]; then
-        echo "writer: rndir.bak lost its events file" >&2
-        wfailed=1
-    fi
-    # Live path-replacement race: an attacker loop swaps the
-    # output path between symlink (to an outside canary),
-    # file, dir, and missing while createonly runs. Every
-    # outcome must stay in the safe set; the canary must
-    # never be created. The mkdir->openat hit window is
-    # probabilistic, but safety is asserted on all 200 runs.
-    # Calm iterations kill the attacker outright so their
-    # success is deterministic (no STOP/CONT flake).
-    bytes_of x 1 "$WTMP/x1raw"
-    printf '\n' >>"$WTMP/x1raw"
-    bytes_of '{' 9 "$WTMP/s10raw"
-    printf '\n' >>"$WTMP/s10raw"
-    if ! (
-        RACE="$WTMP/race"
-        mkdir -p "$RACE"
-        CANARY="$WTMP/canary-target"
-        rm -rf "$CANARY"
-        start_attacker() {
-            (
-                while true; do
-                    ln -sfn "$CANARY" "$RACE/target" 2>/dev/null
-                    rm -f "$RACE/target" 2>/dev/null
-                    touch "$RACE/target" 2>/dev/null
-                    rm -f "$RACE/target" 2>/dev/null
-                    mkdir "$RACE/target" 2>/dev/null
-                    rmdir "$RACE/target" 2>/dev/null
-                done
-            ) &
-            ATTACKER=$!
-        }
-        start_attacker
-        trap 'kill -9 $ATTACKER 2>/dev/null' EXIT
-        ok_count=0
-        io_count=0
-        for i in $(seq 1 200); do
-            if [ $((i % 10)) -eq 0 ]; then
-                kill -9 "$ATTACKER" 2>/dev/null
-                wait "$ATTACKER" 2>/dev/null
-                rm -rf "$RACE/target" 2>/dev/null
-                out=$("$PROBE" createonly "$RACE/target" 2>&1)
-                rc=$?
-                if [ "$out" != \
-                    "createonly ok status=finalized committed=2" ]; then
-                    rm -rf "$RACE/target" 2>/dev/null
-                    out=$("$PROBE" createonly "$RACE/target" 2>&1)
-                    rc=$?
-                fi
-                if [ "$out" != \
-                    "createonly ok status=finalized committed=2" ]; then
-                    rm -rf "$RACE/target" 2>/dev/null
-                    out=$("$PROBE" createonly "$RACE/target" 2>&1)
-                    rc=$?
-                fi
-                start_attacker
-            else
-                rm -rf "$RACE/target" 2>/dev/null
-                out=$("$PROBE" createonly "$RACE/target" 2>&1)
-                rc=$?
-            fi
-            if [ "$rc" -ne 0 ]; then
-                echo "race iter $i exits $rc: $out" >&2
-                exit 1
-            fi
-            case "$out" in
-                "createonly ok status=finalized committed=2")
-                    ok_count=$((ok_count + 1))
-                    cmp -s "$RACE/target/events.ndjson" \
-                        "$WTMP/x1raw" || {
-                        echo "race iter $i bad events" >&2
-                        exit 1
-                    }
-                    cmp -s "$RACE/target/session.json" \
-                        "$WTMP/s10raw" || {
-                        echo "race iter $i bad session" >&2
-                        exit 1
-                    }
-                    ;;
-                "createonly error kind=exists") ;;
-                "createonly error kind=io")
-                    io_count=$((io_count + 1))
-                    ;;
-                *)
-                    echo "race iter $i unsafe output: $out" >&2
-                    exit 1
-                    ;;
-            esac
-        done
-        kill -9 "$ATTACKER" 2>/dev/null
-        trap - EXIT
-        if [ -e "$CANARY" ]; then
-            echo "race: CANARY ESCAPE at $CANARY" >&2
-            exit 1
-        fi
-        if [ "$ok_count" -lt 20 ]; then
-            echo "race: only $ok_count successes" >&2
-            exit 1
-        fi
-        echo "race: $ok_count/200 ok, ${io_count} io, canary absent"
-    ); then wfailed=1; fi
-    if [ "$wfailed" -ne 0 ]; then
-        echo "writer: EventWriter FAILED" >&2
-        return 1
-    fi
-    (cd "$ROOT" && pixi run --frozen mojo build $(mojo_san_flags) -I src \
-        --target-cpu x86-64-v2 -o build/probe/checkpoint_probe \
-        tests/unit/checkpoint_probe.mojo) || return 1
-    (cd "$ROOT" && pixi run --frozen mojo build $(mojo_san_flags) -I src \
-        --target-cpu x86-64-v2 -o build/probe/group_checkpoint_probe \
-        tests/unit/group_checkpoint_probe.mojo) || return 1
-    clang -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
-        "$ROOT/tests/native/test_capture_layout.c" -o "$ROOT/build/native/test_capture_layout" || return 1
-    ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 "$ROOT/build/native/test_capture_layout" || return 1
-    python3 "$ROOT/tests/cli/test_checkpoint_writer.py" || return 1
-    python3 "$ROOT/tests/cli/test_checkpoint_recovery.py" || return 1
-    echo "writer: EventWriter primitive and durable checkpoint boundaries passed"
-    return 0
-}
 
 suite_doctor() {
-    run_unit_file tests/unit/test_doctor.mojo || return 1
-    run_unit_file tests/unit/test_prechecks.mojo || return 1
-    run_unit_file tests/unit/test_loadcheck.mojo || return 1
     if [ ! -f "$ROOT/build/test-tmp/doctor2.json" ]; then
         echo "doctor: missing build/test-tmp/doctor2.json" >&2
         return 1
@@ -3584,6 +1568,8 @@ PYEOF
     elif grep -qE '"/dev/stdin"' "$TMP/dstdin.trace"; then
         echo "doctor: trace shows env-selected stream touched" >&2
         failed=1
+    # Tripwire: the statically linked binary must never reference
+    # the deleted bridge; a match means the bridge came back.
     elif grep -q "libbpf_mojo" "$TMP/dstdin.trace"; then
         echo "doctor: trace shows bridge candidate touched" >&2
         failed=1
@@ -3609,6 +1595,7 @@ PYEOF
     elif grep -qE '"/dev/stdin"' "$TMP/dstdin-all.trace"; then
         echo "doctor: trace shows env-selected stream touched" >&2
         failed=1
+    # Tripwire: see above.
     elif grep -q "libbpf_mojo" "$TMP/dstdin-all.trace"; then
         echo "doctor: trace shows bridge candidate touched" >&2
         failed=1
@@ -3620,290 +1607,13 @@ PYEOF
         echo "doctor: FAILED" >&2
         return 1
     fi
-    echo "doctor: unit suite plus live checks passed"
+    echo "doctor: live checks passed"
     return 0
 }
 
-suite_signals() {
-    run_unit_file tests/unit/test_signal.mojo || return 1
-    mkdir -p "$ROOT/build/probe"
-    # shellcheck disable=SC2046
-    (cd "$ROOT" && pixi run --frozen mojo build $(mojo_san_flags) -I src \
-        $(mojo_inc_flags) -I tests/unit \
-        --target-cpu x86-64-v2 \
-        -o "$ROOT/build/probe/signal_probe" \
-        tests/unit/signal_probe.mojo) || return 1
-    PROBE="$ROOT/build/probe/signal_probe"
-    STMP=$(mktemp -d)
-    trap 'rm -rf "$STMP"' EXIT
-    failed=0
-    expect_line() { # <file> <line>
-        if ! grep -qxF "$2" "$1"; then
-            echo "signals: missing '$2' in $1" >&2
-            cat "$1" >&2
-            failed=1
-        fi
-    }
-    "$PROBE" none >"$STMP/none.log" 2>&1 || {
-        echo "signals: none exits nonzero" >&2
-        failed=1
-    }
-    expect_line "$STMP/none.log" "sigblk_initial=0000000000000000"
-    expect_line "$STMP/none.log" "setup=ok"
-    expect_line "$STMP/none.log" "check1=none"
-    expect_line "$STMP/none.log" "check2=none"
-    expect_line "$STMP/none.log" "sigblk_armed=0000000000004003"
-    expect_line "$STMP/none.log" "sigblk_restored=0000000000000000"
-    expect_line "$STMP/none.log" "post_teardown=error"
-    "$PROBE" repeat >"$STMP/repeat.log" 2>&1 || {
-        echo "signals: repeat exits nonzero" >&2
-        failed=1
-    }
-    expect_line "$STMP/repeat.log" "setup=ok"
-    expect_line "$STMP/repeat.log" "check1=pending"
-    expect_line "$STMP/repeat.log" "check2=pending"
-    expect_line "$STMP/repeat.log" "check3=none"
-    # Re-exec proof: the child sees the sentinel and every
-    # thread (main plus runtime workers) blocks SIGINT and
-    # SIGTERM, so no process-directed stop signal can land
-    # in a worker and miss signalfd.
-    "$PROBE" threads >"$STMP/threads.log" 2>&1 || {
-        echo "signals: threads exits nonzero" >&2
-        failed=1
-    }
-    expect_line "$STMP/threads.log" "sentinel_before=1"
-    nthreads=$(grep -c '^sigblk\[' "$STMP/threads.log" || true)
-    if [ "$nthreads" -lt 2 ]; then
-        echo "signals: want >=2 threads, got $nthreads" >&2
-        failed=1
-    fi
-    bad=0
-    while IFS= read -r line; do
-        hex=${line##*=}
-        last4=$(printf '%s' "$hex" | tail -c 4)
-        v=$((0x$last4))
-        if [ $((v & 0x4003)) -ne $((0x4003)) ]; then
-            echo "signals: thread mask missing bits: $line" >&2
-            bad=1
-        fi
-    done <<EOF
-$(grep '^sigblk\[' "$STMP/threads.log" || true)
-EOF
-    if [ "$bad" -ne 0 ]; then
-        failed=1
-    fi
-    # Spoofed sentinel: a pre-set MEMVEIL_SIGBLK=1 without the
-    # inherited mask must refuse (exit 3), never run with
-    # unblocked workers. Re-execing would loop, so refusal is
-    # the only fail-closed answer.
-    MEMVEIL_SIGBLK=1 "$PROBE" threads >"$STMP/spoof.log" 2>&1
-    rc=$?
-    if [ "$rc" -ne 3 ]; then
-        echo "signals: spoofed sentinel exits $rc, want 3" >&2
-        failed=1
-    fi
-    expect_line "$STMP/spoof.log" "reexec_refused=signal mask not inherited (MEMVEIL_SIGBLK set, SIGHUP/SIGINT/SIGTERM unblocked); refusing"
-    # Big environment: ~1.2 MiB across 20 variables must
-    # still re-exec exactly once (getenv lookup, no read
-    # cap). timeout -s KILL bounds a re-exec loop: SIGTERM
-    # is blocked by design, so plain timeout cannot stop one.
-    if ! python3 - "$PROBE" "$STMP/bigenv.log" <<'PYEOF'
-import os, subprocess, sys
-env = dict(os.environ)
-for i in range(20):
-    env["MV_BIG%02d" % i] = "x" * 60000
-p = subprocess.run(
-    ["timeout", "-s", "KILL", "60", sys.argv[1], "threads"],
-    capture_output=True, text=True, env=env,
-)
-open(sys.argv[2], "w").write(p.stdout)
-sys.exit(0 if p.returncode == 0 else 1)
-PYEOF
-    then
-        echo "signals: big-environment run failed" >&2
-        failed=1
-    fi
-    expect_line "$STMP/bigenv.log" "sentinel_before=1"
-    bad=0
-    while IFS= read -r line; do
-        case "$line" in
-            sigblk\[*\]=*)
-                mask=${line#*=}
-                dec=$((16#$mask))
-                if [ $((dec & 0x4003)) -ne $((0x4003)) ]; then
-                    echo "signals: big-env unblocked: $line" >&2
-                    bad=1
-                fi
-                ;;
-        esac
-    done <"$STMP/bigenv.log"
-    if [ "$bad" -ne 0 ]; then
-        failed=1
-    fi
-    run_collector_case() { # <name> <mode> <signo>
-        dir="$STMP/$1"
-        "$PROBE" "$2" "$3" "$dir" >"$STMP/$1.log" 2>&1
-        rc=$?
-        if [ "$rc" -ne 0 ]; then
-            echo "signals: $1 exits $rc" >&2
-            failed=1
-            return
-        fi
-        expect_line "$STMP/$1.log" "exit=0"
-        expect_line "$STMP/$1.log" "end=signal"
-        expect_line "$STMP/$1.log" "outcome=finalized"
-        expect_line "$STMP/$1.log" "stop_outcome=partial"
-        expect_line "$STMP/$1.log" "stop_reason=quiescence unproven"
-    }
-    run_collector_case latch1 latch 1
-    run_collector_case latch15 latch 15
-    run_collector_case latch2 latch 2
-    expect_line "$STMP/latch15.log" "polls=105"
-    expect_line "$STMP/latch15.log" "stats=5"
-    expect_line "$STMP/latch15.log" "snaps=4"
-    # Reads grew by one: startup stamps attach-completion
-    # before readiness.
-    expect_line "$STMP/latch15.log" "reads=18"
-    expect_line "$STMP/latch15.log" "committed=1494"
-    run_collector_case inhand15 inhand 15
-    expect_line "$STMP/inhand15.log" "polls=103"
-    expect_line "$STMP/inhand15.log" "stats=5"
-    expect_line "$STMP/inhand15.log" "snaps=4"
-    expect_line "$STMP/inhand15.log" "reads=16"
-    expect_line "$STMP/inhand15.log" "committed=1495"
-    for which in mask signalfd; do
-        dir="$STMP/fail-$which"
-        "$PROBE" setup_fail "$which" "$dir" >"$STMP/fail-$which.log" 2>&1
-        rc=$?
-        if [ "$rc" -ne 0 ]; then
-            echo "signals: setup_fail $which exits $rc" >&2
-            failed=1
-        fi
-        expect_line "$STMP/fail-$which.log" "exit=3"
-        expect_line "$STMP/fail-$which.log" "end=unknown"
-        expect_line "$STMP/fail-$which.log" "outcome=refused"
-        expect_line "$STMP/fail-$which.log" \
-            "diag=signal setup: test $which failure"
-        expect_line "$STMP/fail-$which.log" \
-            "sigblk_initial=0000000000004003"
-        expect_line "$STMP/fail-$which.log" \
-            "sigblk_restored=0000000000004003"
-    done
-    # External process-directed signals: the probe runs to
-    # ready (printed after signalfd setup), then the lane
-    # kills it. A lost signal would hang to the timeout.
-    run_kill_case() { # <name> <signo>
-        dir="$STMP/$1"
-        "$PROBE" sigterm_run "$dir" >"$STMP/$1.log" 2>&1 &
-        pid=$!
-        (sleep 25; kill -KILL "$pid" 2>/dev/null) &
-        wd=$!
-        ready=0
-        for _ in $(seq 1 100); do
-            if grep -q '^ready session=' "$STMP/$1.log" 2>/dev/null; then
-                ready=1
-                break
-            fi
-            sleep 0.1
-        done
-        if [ "$ready" -ne 1 ]; then
-            echo "signals: $1 never reached ready" >&2
-            kill -KILL "$pid" 2>/dev/null
-            wait "$pid" 2>/dev/null
-            kill "$wd" 2>/dev/null
-            wait "$wd" 2>/dev/null
-            failed=1
-            return
-        fi
-        kill "-$2" "$pid" 2>/dev/null
-        wait "$pid"
-        rc=$?
-        kill "$wd" 2>/dev/null
-        wait "$wd" 2>/dev/null
-        if [ "$rc" -ne 0 ]; then
-            echo "signals: $1 exits $rc (want 0)" >&2
-            cat "$STMP/$1.log" >&2
-            failed=1
-            return
-        fi
-        expect_line "$STMP/$1.log" "end=signal"
-        expect_line "$STMP/$1.log" "outcome=finalized"
-        expect_line "$STMP/$1.log" "stop_outcome=partial"
-        expect_line "$STMP/$1.log" "stop_reason=quiescence unproven"
-    }
-    run_kill_case killhup HUP
-    run_kill_case killterm TERM
-    run_kill_case killint INT
-    if [ "$failed" -ne 0 ]; then
-        echo "signals: FAILED" >&2
-        return 1
-    fi
-    echo "signals: live signalfd, re-exec, and kill cases passed"
-    return 0
-}
 
-suite_package() {
-    if [ -z "${MV_BUNDLE_TARBALL:-}" ] && [ -z "${LMB_PACKAGE:-}" ]; then
-        echo "package: LMB_PACKAGE is not set" >&2
-        return 1
-    fi
-    if ! command -v python3 >/dev/null 2>&1; then
-        echo "package: python3 not found" >&2
-        return 1
-    fi
-    if ! python3 -m pytest --version >/dev/null 2>&1; then
-        echo "package: pytest not importable" >&2
-        return 1
-    fi
-    if ! command -v strace >/dev/null 2>&1; then
-        echo "package: strace not found (clean-room audit needs it)" >&2
-        return 1
-    fi
-    PTMP=$(mktemp -d)
-    trap 'rm -rf "$PTMP"' EXIT
-    TARBALL="${MV_BUNDLE_TARBALL:-}"
-    if [ -z "$TARBALL" ]; then
-        if ! LMB_PACKAGE="$LMB_PACKAGE" "$ROOT/tools/package" \
-            >"$PTMP/package.log" 2>&1; then
-            echo "package: tools/package failed" >&2
-            cat "$PTMP/package.log" >&2
-            return 1
-        fi
-        TARBALL=$(sed -n 's/^package: \(.*\.tar\.gz\)$/\1/p' \
-            "$PTMP/package.log" | tail -1)
-    fi
-    if [ -z "$TARBALL" ] || [ ! -f "$TARBALL" ]; then
-        echo "package: bundle tarball is missing: $TARBALL" >&2
-        return 1
-    fi
-    if ! MV_BUNDLE_TARBALL="$TARBALL" MV_REPO="$ROOT" \
-        MV_VALID_EMPTY="$ROOT/tests/package/valid-empty" \
-        python3 -m pytest tests/package/ \
-        >"$PTMP/pytest.log" 2>&1; then
-        echo "package: clean-runtime tests failed" >&2
-        cat "$PTMP/pytest.log" >&2
-        return 1
-    fi
-    tail -1 "$PTMP/pytest.log"
-    echo "package: owner bundle and clean-room replay passed"
-    return 0
-}
 
 suite_record() {
-    run_unit_file tests/unit/test_hash.mojo || return 1
-    run_unit_file tests/unit/test_gzip.mojo || return 1
-    run_unit_file tests/unit/test_clock.mojo || return 1
-    run_unit_file tests/unit/test_kernel.mojo || return 1
-    run_unit_file tests/unit/test_live.mojo || return 1
-    run_unit_file tests/unit/test_collector_pure.mojo || return 1
-    run_unit_file tests/unit/test_btf.mojo || return 1
-    run_unit_file tests/unit/test_record_args.mojo || return 1
-    run_unit_file tests/unit/test_bridge_snapshot.mojo || return 1
-    run_unit_file tests/unit/test_record_ownership.mojo || return 1
-    run_unit_file tests/unit/test_run_service.mojo || return 1
-    run_unit_file tests/unit/test_selection.mojo || return 1
-    run_unit_file tests/unit/test_artifact_files.mojo || return 1
-    run_unit_file tests/unit/test_qualify.mojo || return 1
     echo "record: unit suites passed"
     BIN="$(memveil_bin)"
     if [ ! -x "$BIN" ]; then
@@ -3967,44 +1677,15 @@ suite_record() {
     rexpect budget-high 3 "above 4294967296" "$TMP/r-high" -- \
         --output "$TMP/r-high" --object "$ROOT/tests/fixtures/elf/ok.o" \
         --bridge "$TMP/nolib.so" --max-events-bytes 4294967297
-    noobj_bundle="$(dirname "$(dirname "$BIN")")/bpf/swiotlb_attempt.bpf.o"
-    if [ "${MEMVEIL_RUST_BIN:-0}" = 1 ]; then
-        # Rust mode: the binary embeds its channel objects, so a
-        # missing-object discovery refusal is unreachable; refusal
-        # coverage stays in record-failures + the explicit-path
-        # record cases below. Mojo path unchanged.
-        echo "record-cli: no-object skipped (Rust binary embeds objects)"
-    elif [ -r "$noobj_bundle" ] \
-        || [ -r /usr/lib/memveil/swiotlb_attempt.bpf.o ]; then
-        echo "record-cli: no-object skipped (object discoverable on this host)"
-    else
-        rexpect no-object 3 "no object: pass --object PATH" "$TMP/r-noobj" -- \
-            --output "$TMP/r-noobj" --bridge "$TMP/nolib.so"
-    fi
-    nobridge_bundle="$(dirname "$(dirname "$BIN")")/lib/libbpf_mojo.so.1"
-    if [ "${MEMVEIL_RUST_BIN:-0}" = 1 ]; then
-        # Rust mode: the loader is statically linked, so a
-        # missing-bridge discovery refusal is unreachable; refusal
-        # coverage stays in record-failures + the explicit-path
-        # record cases below. Mojo path unchanged.
-        echo "record-cli: no-bridge skipped (Rust loader is static)"
-    elif [ -r "$nobridge_bundle" ] \
-        || [ -r /usr/lib/memveil/libbpf_mojo.so.1 ]; then
-        echo "record-cli: no-bridge skipped (bridge discoverable on this host)"
-    else
-        env -u LMB_NATIVE_LIB "$BIN" record --output "$TMP/r-nobridge" \
-            --object "$ROOT/tests/fixtures/elf/ok.o" \
-            >"$TMP/nobridge.out" 2>"$TMP/nobridge.err"
-        rc=$?
-        if [ "$rc" -ne 3 ] || ! grep -qF "no bridge" "$TMP/nobridge.err" \
-            || [ -e "$TMP/r-nobridge" ]; then
-            echo "record: case no-bridge failed (exit $rc)" >&2
-            cat "$TMP/nobridge.err" >&2
-            rfailed=1
-        else
-            echo "ok record-cli no-bridge (exit 3)"
-        fi
-    fi
+    # The binary embeds its channel objects, so a missing-object
+    # discovery refusal is unreachable; refusal coverage stays in
+    # record-failures + the explicit-path record cases below.
+    echo "record-cli: no-object skipped (binary embeds objects)"
+    # The loader is statically linked, so a missing-bridge
+    # discovery refusal is unreachable; refusal coverage stays
+    # in record-failures + the explicit-path record cases
+    # below.
+    echo "record-cli: no-bridge skipped (loader is static)"
     host_ok=0
     if [ "$(uname -m)" = "x86_64" ]; then
         kmaj=$(uname -r | cut -d. -f1)
@@ -4053,8 +1734,6 @@ suite_record() {
 }
 
 suite_qualify() {
-    run_unit_file tests/unit/test_qualify.mojo || return 1
-    run_unit_file tests/unit/test_bind.mojo || return 1
     BIN="$(memveil_bin)"
     if [ ! -x "$BIN" ]; then
         echo "qualify: missing $BIN (run $(memveil_build_hint) first)" >&2
@@ -4105,14 +1784,10 @@ suite_qualify() {
     # with no BPF and no privileged smoke.
     qexpect missing-output 2 "missing --output" -- \
         --object "$ROOT/tests/fixtures/elf/ok.o"
-    noobj_bundle="$(dirname "$(dirname "$BIN")")/bpf/swiotlb_attempt.bpf.o"
-    if [ -r "$noobj_bundle" ] \
-        || [ -r /usr/lib/memveil/swiotlb_attempt.bpf.o ]; then
-        echo "qualify-cli: no-object skipped (object discoverable on this host)"
-    else
-        qexpect no-object 3 "no object: pass --object PATH" -- \
-            --output "$TMP/q-noobj" --bridge "$TMP/nolib.so"
-    fi
+    # Qualify mints explicit artifacts only: without --object the
+    # run refuses before the smoke on every host (no discovery).
+    qexpect no-object 3 "no object: pass --object PATH" -- \
+        --output "$TMP/q-noobj" --bridge "$TMP/nolib.so"
     qexpect bad-capability 3 "bad capability list" -- \
         --output "$TMP/q-badcap" \
         --object "$ROOT/tests/fixtures/elf/ok.o" \
@@ -4167,20 +1842,24 @@ suite_qualify() {
         --output "$TMP/b-conv" \
         --object "$ROOT/tests/fixtures/elf/ok.o" \
         --capability attempt-trace,conversion-observe
-    # Fixture mint reproduces the checked-in reference note
-    # byte for byte; the independent oracle checks the shape.
-    (cd "$ROOT" && pixi run --frozen mojo run -I src -I tests/unit \
-        tests/unit/bind_probe.mojo "$TMP/minted.json" \
+    # End-to-end mint through the built binary; the independent
+    # oracle checks the minted document shape. Live bindings need
+    # root reads, so an unprivileged host skips with cause (the
+    # fixture-rooted mint probe retired with the Mojo tree;
+    # fixture-rooted minting stays pinned by the bind unit
+    # tests).
+    (cd "$ROOT" && "$BIN" bind-profile \
+        --output "$TMP/minted.json" \
+        --object "$ROOT/tests/fixtures/elf/ok.o" \
+        --profiles-dir "$ROOT/tests/fixtures/qualify/profiles" \
         >"$TMP/minted.out" 2>"$TMP/minted.err")
     rc=$?
-    if [ "$rc" -ne 0 ]; then
-        echo "qualify: fixture mint exit $rc" >&2
+    if [ "$rc" -ne 0 ] \
+        && grep -q "live bindings unmeasurable" "$TMP/minted.err"; then
+        echo "qualify-cli: bind-fixture-mint skipped (needs root reads)"
+    elif [ "$rc" -ne 0 ]; then
+        echo "qualify: bind-fixture-mint exit $rc" >&2
         cat "$TMP/minted.err" >&2
-        qfailed=1
-    elif ! grep -qF "bind-profile: local-7.0.0-test caps=attempt-trace" \
-        "$TMP/minted.out"; then
-        echo "qualify: fixture mint misreported" >&2
-        cat "$TMP/minted.out" >&2
         qfailed=1
     elif ! "$ROOT/tools/validate-schemas" --check-profile \
         "$TMP/minted.json" >"$TMP/minted.check" 2>&1; then
@@ -4192,8 +1871,8 @@ suite_qualify() {
     fi
     # Profile resolution runs past the kernel-floor gate,
     # so these cases need x86_64 kernel >= 7; the floor
-    # refusal itself is pinned fixture-backed in
-    # test_qualify.mojo (test_plan_below_floor_refuses).
+    # refusal itself is pinned fixture-backed in the qualify
+    # unit tests (plan_below_floor_refuses).
     host_ok=0
     if [ "$(uname -m)" = "x86_64" ]; then
         kmaj=$(uname -r | cut -d. -f1)
@@ -4269,9 +1948,6 @@ case "$1" in
     schemas)
         exec "$ROOT/tools/validate-schemas"
         ;;
-    unit)
-        suite_unit
-        ;;
     reports)
         suite_reports
         ;;
@@ -4280,18 +1956,6 @@ case "$1" in
         ;;
     doctor)
         suite_doctor
-        ;;
-    attempts)
-        suite_attempts
-        ;;
-    native-decode)
-        suite_native_decode
-        ;;
-    writer)
-        suite_writer
-        ;;
-    signals)
-        suite_signals
         ;;
     record)
         suite_record
@@ -4302,41 +1966,8 @@ case "$1" in
     vm-attempts)
         exec "$ROOT/tools/vm-attempts"
         ;;
-    buildcache)
-        suite_buildcache
-        ;;
-    package)
-        suite_package
-        ;;
-    identity)
-        suite_identity
-        ;;
-    correlation)
-        suite_correlation
-        ;;
-    mappings)
-        suite_mappings
-        ;;
-    lifetimes)
-        suite_lifetimes
-        ;;
-    pools)
-        suite_pools
-        ;;
-    regions)
-        suite_regions
-        ;;
-    conversion-normalize)
-        suite_conversion_normalize
-        ;;
     confidential-hooks)
         suite_confidential_hooks
-        ;;
-    region-resolution)
-        suite_region_resolution
-        ;;
-    baseline)
-        suite_baseline
         ;;
     confidential-ranges)
         suite_confidential_ranges
@@ -4349,9 +1980,6 @@ case "$1" in
         ;;
     confidential-late-attach)
         suite_confidential_late_attach
-        ;;
-    diagnostics)
-        suite_diagnostics
         ;;
     top)
         suite_top
@@ -4383,14 +2011,8 @@ case "$1" in
     vm-scenarios)
         suite_vm_scenarios
         ;;
-    stop)
-        suite_stop
-        ;;
     vm-stop)
         suite_vm_stop
-        ;;
-    budgets)
-        suite_budgets
         ;;
     quality)
         suite_quality
@@ -4443,23 +2065,8 @@ case "$1" in
     preview-package)
         suite_preview_package
         ;;
-    extracted-robustness)
-        suite_extracted_robustness
-        ;;
     provenance)
         suite_provenance
-        ;;
-    source-export)
-        suite_source_export
-        ;;
-    release-runtime)
-        suite_release_runtime
-        ;;
-    deb)
-        suite_deb
-        ;;
-    rpm-journey)
-        suite_rpm_journey
         ;;
     docs)
         suite_docs

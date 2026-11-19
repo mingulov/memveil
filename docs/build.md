@@ -133,8 +133,8 @@ confidential-platform support follows from this source update.
 
 The source distribution includes the matching first-party source,
 exact pinned libbpf source, upstream notices, build receipt and source
-map. See `third_party/README.md` in the source distribution for
-hashes, rebuild instructions and runtime-source/license limits.
+map. (Vendor-bundle details retired with the Mojo bridge at the
+cutover; this page is rewritten for the Rust product next.)
 
 ## Source sealing
 

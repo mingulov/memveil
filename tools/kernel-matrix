@@ -587,8 +587,8 @@ def scenario_negatives():
             "swiotlb_copy-%s.bpf.o" % name)
         if not path.is_file():
             raise ValueError(
-                "missing negative object %s (run tools/build)"
-                % path)
+                "missing negative object %s (cutover: C probes retired; "
+                "armed runs need Rust-native probe staging)" % path)
         shas[name] = km.sha_file(str(path))
     return shas
 
@@ -653,23 +653,13 @@ def check_scenario_inputs(deb):
     """Negative shas after the deb matches the build.
 
     Raises ValueError when negatives are missing or the
-    deb's copy object differs from the built one. Under
-    MEMVEIL_RUST_BIN=1 the built bytes are the Aya
-    release-build copy object; otherwise the C object.
+    deb's copy object differs from the Aya release-build
+    copy object.
     """
     shas = scenario_negatives()
-    if os.environ.get("MEMVEIL_RUST_BIN") == "1":
-        if deb_copy_object_sha(deb) != rust_copy_object_sha():
-            raise ValueError(
-                "deb copy object differs from the Rust-built Aya bytes")
-        return shas
-    built = ROOT / "build" / "bpf" / "swiotlb_copy.bpf.o"
-    if not built.is_file():
-        raise ValueError("missing built copy object %s "
-                         "(run tools/build)" % built)
-    if deb_copy_object_sha(deb) != km.sha_file(str(built)):
+    if deb_copy_object_sha(deb) != rust_copy_object_sha():
         raise ValueError(
-            "deb copy object differs from %s" % built)
+            "deb copy object differs from the Rust-built Aya bytes")
     return shas
 
 

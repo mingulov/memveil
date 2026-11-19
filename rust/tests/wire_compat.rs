@@ -150,8 +150,8 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 /// ```
 /// and record the new C identity in the commit message.
 const ORACLE_SOURCES: [(&str, u64); 3] = [
-    ("tests/native/test_attempt_decode.c", 0x7ca361be94da8bde),
-    ("tests/native/test_lifecycle_decode.c", 0x23412090e733dbc0),
+    ("tests/native/test_attempt_decode.c", 0xd9167235f239c28b),
+    ("tests/native/test_lifecycle_decode.c", 0x41eb1f84b22fda68),
     ("bpf/include/memveil_events.h", 0xfd99b99a9957d035),
 ];
 

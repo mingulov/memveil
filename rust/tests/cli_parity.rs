@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! CLI parity tests: dispatch, exits, and Mojo byte-equality.
+//! CLI parity tests: dispatch, exits, and output shapes.
 //!
 //! Ungated tests pin exit codes and output shapes through the built
-//! binary. Tests that diff against the Mojo-built binary need
-//! `MEMVEIL_MOJO_BIN` to point at it and pass silently without it,
-//! so a plain `cargo test` stays green where Mojo is absent.
+//! binary. The Mojo byte-equality differentials below retired at
+//! the cutover (no Mojo binary exists anymore) and skip
+//! permanently with cause; byte-identical behavior stays pinned
+//! by the fixture and golden tests.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -24,9 +25,12 @@ fn fixture(name: &str) -> PathBuf {
     repo_root().join("tests/fixtures/reader").join(name)
 }
 
-/// The Mojo-built comparison binary, when the caller provides one.
+/// The Mojo-built comparison binary: permanently retired at the
+/// cutover (no Mojo binary exists anymore). Kept returning None
+/// so the differentials below skip with cause instead of
+/// disappearing silently.
 fn mojo_bin() -> Option<PathBuf> {
-    std::env::var_os("MEMVEIL_MOJO_BIN").map(PathBuf::from)
+    None
 }
 
 fn run(bin: &Path, args: &[&str]) -> Output {
@@ -624,7 +628,7 @@ together.
 #[test]
 fn report_bytes_equal_mojo_over_sealed() {
     let Some(mojo) = mojo_bin() else {
-        eprintln!("skip: MEMVEIL_MOJO_BIN unset");
+        eprintln!("skip: Mojo control retired at cutover");
         return;
     };
     for name in ["sealed-complete", "sealed-empty", "sealed-partial"] {
@@ -652,7 +656,7 @@ fn report_bytes_equal_mojo_over_sealed() {
 #[test]
 fn report_maximal_bytes_equal_mojo() {
     let Some(mojo) = mojo_bin() else {
-        eprintln!("skip: MEMVEIL_MOJO_BIN unset");
+        eprintln!("skip: Mojo control retired at cutover");
         return;
     };
     let dir = maximal_capture_dir("mojo");
@@ -667,7 +671,7 @@ fn report_maximal_bytes_equal_mojo() {
 #[test]
 fn report_long_lived_bytes_equal_mojo() {
     let Some(mojo) = mojo_bin() else {
-        eprintln!("skip: MEMVEIL_MOJO_BIN unset");
+        eprintln!("skip: Mojo control retired at cutover");
         return;
     };
     let open = lifecycle("open-at-end");
@@ -692,7 +696,7 @@ fn report_long_lived_bytes_equal_mojo() {
 #[test]
 fn checkpoint_bytes_equal_mojo() {
     let Some(mojo) = mojo_bin() else {
-        eprintln!("skip: MEMVEIL_MOJO_BIN unset");
+        eprintln!("skip: Mojo control retired at cutover");
         return;
     };
     let dir = checkpoint_capture_dir("mojo");
@@ -949,7 +953,7 @@ fn top_live_mode_refusals() {
 #[test]
 fn top_bytes_equal_mojo_over_fixtures() {
     let Some(mojo) = mojo_bin() else {
-        eprintln!("skip: MEMVEIL_MOJO_BIN unset");
+        eprintln!("skip: Mojo control retired at cutover");
         return;
     };
     let nested = lifecycle("lifecycle-nested");
@@ -1150,7 +1154,7 @@ fn bind_refusals() {
 #[test]
 fn task2_errors_equal_mojo() {
     let Some(mojo) = mojo_bin() else {
-        eprintln!("skip: MEMVEIL_MOJO_BIN unset");
+        eprintln!("skip: Mojo control retired at cutover");
         return;
     };
     let nested = lifecycle("lifecycle-nested").to_string_lossy().into_owned();
@@ -1244,7 +1248,7 @@ fn task2_errors_equal_mojo() {
 #[test]
 fn report_errors_equal_mojo() {
     let Some(mojo) = mojo_bin() else {
-        eprintln!("skip: MEMVEIL_MOJO_BIN unset");
+        eprintln!("skip: Mojo control retired at cutover");
         return;
     };
     let dir = fixture("sealed-complete").to_string_lossy().into_owned();

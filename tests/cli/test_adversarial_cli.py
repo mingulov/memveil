@@ -34,7 +34,7 @@ def check(name, cond, detail=""):
 
 def main():
     if not os.path.isfile(BIN):
-        print("FAIL adversarial-cli: missing %s (run tools/build first)"
+        print("FAIL adversarial-cli: missing %s (run cargo build --release in rust/ first)"
               % BIN)
         sys.exit(1)
 
