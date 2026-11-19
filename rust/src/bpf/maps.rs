@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Map geometry: the frozen per-channel map sets and the exact-set gate.
+//! Map geometry: the frozen per-channel map sets and the two map gates.
 //!
-//! The gate runs over loader-owned [`MapSpec`] rows so both the ELF-time
-//! check (tests parse with `aya-obj` and convert) and the live check after
-//! load (the session converts kernel `map_info`) share one comparator.
+//! The gates run over loader-owned [`MapSpec`] rows. The ELF-time
+//! [`check_maps`] pins shipped objects exactly (tests parse with
+//! `aya-obj` and convert); the load-time [`check_maps_loaded`] runs
+//! over live kernel `map_info` converted by the session and leaves
+//! ring capacity to record admission (upper bound) plus the
+//! collector gate (live size versus the admitted size).
 
 use super::attach::{ProgramSpec, check_programs};
 use super::session::{Channel, SessionError};
@@ -82,7 +85,8 @@ pub fn expected_maps(channel: Channel) -> Vec<MapSpec> {
 
 /// Exact-set map gate: every expected map present with its exact geometry,
 /// no unexpected maps. Ring rows compare type and capacity only: ring
-/// buffers carry no key/value sizes.
+/// buffers carry no key/value sizes. ELF-time only: [`check_maps_loaded`]
+/// is the load-time gate.
 pub fn check_maps(channel: Channel, actual: &[MapSpec]) -> Result<(), SessionError> {
     let expected = expected_maps(channel);
     for want in &expected {
@@ -96,6 +100,62 @@ pub fn check_maps(channel: Channel, actual: &[MapSpec]) -> Result<(), SessionErr
         let same = got.map_type == want.map_type
             && got.max_entries == want.max_entries
             && (ring || (got.key_size, got.value_size) == (want.key_size, want.value_size));
+        if !same {
+            return Err(SessionError::Geometry(format!(
+                "{channel} channel: map {}: want type={} key={} value={} entries={}, got type={} key={} value={} entries={}",
+                want.name,
+                want.map_type,
+                want.key_size,
+                want.value_size,
+                want.max_entries,
+                got.map_type,
+                got.key_size,
+                got.value_size,
+                got.max_entries
+            )));
+        }
+    }
+    for got in actual {
+        if !expected.iter().any(|want| want.name == got.name) {
+            return Err(SessionError::Geometry(format!(
+                "{channel} channel: unexpected map {}",
+                got.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Load-time map gate: every expected map present, no unexpected maps,
+/// non-ring geometry exact, ring type exact, ring capacity upper-bounded
+/// by the frozen size.
+///
+/// Ring capacity is the one relaxation from [`check_maps`]: a smaller
+/// ring is legitimate once admitted (the saturation `-test` objects
+/// carry 4096-byte rings), and record admission (upper bound) plus the
+/// collector gate (live size versus the admitted size) already own the
+/// exact size, mirroring Mojo, which has no load-time exact gate. The
+/// frozen size stays as the load-time ceiling: no admitted object
+/// exceeds it, and a non-power-of-two declaration the kernel silently
+/// rounds up overshoots it and still refuses. Everything else stays
+/// fail-closed with the same refusal texts as [`check_maps`].
+pub fn check_maps_loaded(channel: Channel, actual: &[MapSpec]) -> Result<(), SessionError> {
+    let expected = expected_maps(channel);
+    for want in &expected {
+        let Some(got) = actual.iter().find(|spec| spec.name == want.name) else {
+            return Err(SessionError::Geometry(format!(
+                "{channel} channel: missing map {}",
+                want.name
+            )));
+        };
+        let ring = want.map_type == BPF_MAP_TYPE_RINGBUF;
+        let same = if ring {
+            got.map_type == want.map_type && got.max_entries <= want.max_entries
+        } else {
+            got.map_type == want.map_type
+                && got.max_entries == want.max_entries
+                && (got.key_size, got.value_size) == (want.key_size, want.value_size)
+        };
         if !same {
             return Err(SessionError::Geometry(format!(
                 "{channel} channel: map {}: want type={} key={} value={} entries={}, got type={} key={} value={} entries={}",
@@ -179,6 +239,82 @@ mod tests {
         let mut maps = expected_maps(Channel::Copy);
         maps.push(MapSpec::named("mv_extra", BPF_MAP_TYPE_ARRAY, 4, 8, 1));
         let error = check_maps(Channel::Copy, &maps).expect_err("extra must be refused");
+        assert!(error.to_string().contains("mv_extra"));
+    }
+
+    /// Ring map name per channel.
+    fn ring_name(channel: Channel) -> &'static str {
+        match channel {
+            Channel::Attempt => "mv_attempts",
+            Channel::Lifecycle => "mv_lifecycle",
+            Channel::Copy => "mv_copies",
+        }
+    }
+
+    #[test]
+    fn loaded_gate_admits_test_ring_size() {
+        // Every saturation `-test` object carries a 4096-byte ring:
+        // the load-time gate admits that shape while the ELF-time
+        // gate still pins the frozen capacity.
+        for channel in [Channel::Attempt, Channel::Lifecycle, Channel::Copy] {
+            let ring = ring_name(channel);
+            let maps = tamper(channel, ring, |row| row.max_entries = 4096);
+            check_maps_loaded(channel, &maps).expect("test ring size must load");
+            let error =
+                check_maps(channel, &maps).expect_err("ELF-time gate must still pin capacity");
+            assert!(error.to_string().contains(ring));
+        }
+    }
+
+    #[test]
+    fn loaded_gate_refuses_missing_map() {
+        for channel in [Channel::Attempt, Channel::Lifecycle, Channel::Copy] {
+            let mut maps = expected_maps(channel);
+            let dropped = maps.pop().expect("frozen set is non-empty");
+            let error =
+                check_maps_loaded(channel, &maps).expect_err("missing map must be refused at load");
+            assert!(error.to_string().contains(&dropped.name));
+        }
+        // The C copy family (no `mv_copy_offs`) still refuses at load.
+        let mut maps = expected_maps(Channel::Copy);
+        maps.retain(|row| row.name != "mv_copy_offs");
+        let error = check_maps_loaded(Channel::Copy, &maps)
+            .expect_err("copy family without mv_copy_offs must be refused");
+        assert!(error.to_string().contains("mv_copy_offs"));
+    }
+
+    #[test]
+    fn loaded_gate_refuses_oversize_ring() {
+        // The frozen size is the load-time ceiling: a declared
+        // 8388609 reads back 16777216 live (the kernel rounds a
+        // non-power-of-two ringbuf size up instead of refusing),
+        // and both the declared and the rounded size refuse.
+        for size in [8_388_609u32, 16_777_216u32] {
+            let maps = tamper(Channel::Attempt, "mv_attempts", |row| {
+                row.max_entries = size
+            });
+            let error = check_maps_loaded(Channel::Attempt, &maps)
+                .expect_err("oversize ring must be refused at load");
+            assert!(error.to_string().contains("mv_attempts"));
+        }
+    }
+
+    #[test]
+    fn loaded_gate_keeps_other_geometry() {
+        // Ring capacity is the one relaxation: table sizes, ring
+        // type, and set membership stay exact at load.
+        let maps = tamper(Channel::Attempt, "mv_offsets", |row| row.value_size = 25);
+        let error = check_maps_loaded(Channel::Attempt, &maps)
+            .expect_err("table size must be gated at load");
+        assert!(error.to_string().contains("mv_offsets"));
+        let maps = tamper(Channel::Attempt, "mv_attempts", |row| row.map_type = 2);
+        let error = check_maps_loaded(Channel::Attempt, &maps)
+            .expect_err("ring type must be gated at load");
+        assert!(error.to_string().contains("mv_attempts"));
+        let mut maps = expected_maps(Channel::Copy);
+        maps.push(MapSpec::named("mv_extra", BPF_MAP_TYPE_ARRAY, 4, 8, 1));
+        let error =
+            check_maps_loaded(Channel::Copy, &maps).expect_err("extra map must be refused at load");
         assert!(error.to_string().contains("mv_extra"));
     }
 }

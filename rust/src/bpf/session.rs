@@ -9,7 +9,7 @@
 //! dropping a session releases it too.
 
 use super::attach::{ATTACH_ORDER, AttachKind, AttachSpec, DETACH_ORDER};
-use super::maps::{MapGeometry, MapSpec, check_maps};
+use super::maps::{MapGeometry, MapSpec, check_maps_loaded};
 use super::offsets::{encode_copy_offsets, validate_copy_offsets};
 use super::poll::{Frame, Stats, decode_frame, drain_one};
 use aya::maps::{Array, Map, MapData};
@@ -443,9 +443,10 @@ impl Session {
         !self.links.is_empty()
     }
 
-    /// Load the object: create the kernel maps, then verify every live
-    /// map geometry and program presence against the frozen channel spec.
-    /// A gate failure unloads again, so a refused session is never left
+    /// Load the object: create the kernel maps, then verify live map
+    /// presence and geometry (ring capacity upper-bounded by the frozen
+    /// size) plus program presence against the frozen channel spec. A
+    /// gate failure unloads again, so a refused session is never left
     /// half-loaded. Privileged.
     pub fn load(&mut self) -> Result<(), SessionError> {
         if self.closed {
@@ -471,7 +472,7 @@ impl Session {
                 max_entries: geometry.max_entries,
             });
         }
-        if let Err(error) = check_maps(self.channel, &actual_maps) {
+        if let Err(error) = check_maps_loaded(self.channel, &actual_maps) {
             drop(bpf);
             return Err(error);
         }
