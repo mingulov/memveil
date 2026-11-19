@@ -1460,13 +1460,16 @@ impl KernelSource for AyaKernel {
     }
 
     fn channel_count(&self) -> i64 {
-        if self.ch2.present {
-            return 3;
-        }
+        // Count present channels, not the highest present one:
+        // copy-without-lifecycle is two (Mojo parity).
+        let mut n = 1;
         if self.ch1.present {
-            return 2;
+            n += 1;
         }
-        1
+        if self.ch2.present {
+            n += 1;
+        }
+        n
     }
 
     fn install_offsets(&mut self, table: &[u8]) -> OpOut {
@@ -1566,6 +1569,9 @@ impl KernelSource for AyaKernel {
         // Checked sums fail the read closed on overflow instead of trapping:
         // any wrap breaks the collector identities and fails the run
         // closed, never silently.
+        // Deviation: Mojo traps on these sums; Rust fails the read
+        // closed per the R14 precedent (loud, fail-closed, never a
+        // silent wrapped total).
         let mut received = 0u64;
         let mut delivered = 0u64;
         let mut staged = 0u64;
@@ -2273,6 +2279,10 @@ mod tests {
     fn multi_not_open_taxonomy() {
         let mut kernel = AyaKernel::with_channels(vec![1], "s", "e", vec![2], true, vec![3], true);
         assert_eq!(kernel.channel_count(), 3);
+        // Copy-without-lifecycle counts present channels (2),
+        // not the highest present one.
+        let sparse = AyaKernel::with_channels(vec![1], "s", "e", vec![], false, vec![3], true);
+        assert_eq!(sparse.channel_count(), 2);
         // Present but unopened channels refuse with session state, not bad channel.
         assert_eq!(kernel.stats_at(1).message, "session not open");
         assert_eq!(kernel.stats_at(2).message, "session not open");

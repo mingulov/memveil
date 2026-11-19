@@ -3280,19 +3280,43 @@ impl Collector {
         true
     }
 
-    /// Summed submit_fail over enabled channels' end cuts.
-    fn submit_fail_total(&self) -> u64 {
+    /// Summed submit_fail over enabled channels' end cuts, or
+    /// `None` on overflow. Mojo traps on this sum; a wrapped
+    /// release total would be silently wrong, so callers void to
+    /// unknown instead.
+    fn submit_fail_total(&self) -> Option<u64> {
         let mut total = 0u64;
         if self.has_end_cut {
-            total += self.end_vals[CNT_SUBMIT_FAIL];
+            total = total.checked_add(self.end_vals[CNT_SUBMIT_FAIL])?;
         }
         if self.cfg.has_lifecycle && self.has_end_cut_lc {
-            total += self.end_vals_lc[CNT_SUBMIT_FAIL];
+            total = total.checked_add(self.end_vals_lc[CNT_SUBMIT_FAIL])?;
         }
         if self.cfg.has_copy && self.has_end_cut_cp {
-            total += self.end_vals_cp[CNT_SUBMIT_FAIL];
+            total = total.checked_add(self.end_vals_cp[CNT_SUBMIT_FAIL])?;
         }
-        total
+        Some(total)
+    }
+
+    /// Known-loss detail total with checked arithmetic: `None` when
+    /// any leg overflows (Mojo traps here; the caller voids the
+    /// closure to unknown rather than reporting a wrapped count).
+    fn checked_detail_loss(&self) -> Option<(u64, u64)> {
+        let submit_fail = self.submit_fail_total()?;
+        let mut total = submit_fail;
+        for part in [
+            self.stats_final.malformed - self.stats_start.malformed,
+            self.stats_final.dropped - self.stats_start.dropped,
+            self.recursion_missed,
+            self.size_omitted,
+            self.duration_omitted,
+            self.signal_omitted,
+            self.rejected,
+            self.write_failed,
+        ] {
+            total = total.checked_add(part)?;
+        }
+        Some((submit_fail, total))
     }
 
     /// Per-channel program misses; unknown unless exactly provable.
@@ -3513,8 +3537,10 @@ impl Collector {
         if self.has_recursion {
             missed = format_u64(self.recursion_missed);
         }
-        if self.submit_valid_all() {
-            submit = format_u64(self.submit_fail_total());
+        if self.submit_valid_all()
+            && let Some(failed) = self.submit_fail_total()
+        {
+            submit = format_u64(failed);
         }
         if self.has_final_stats {
             malformed = format_u64(self.stats_final.malformed - self.stats_start.malformed);
@@ -3791,17 +3817,27 @@ impl Collector {
                 );
             }
         }
-        if self.loss_known() {
-            let submit_fail = self.submit_fail_total();
-            let total = submit_fail
-                + (self.stats_final.malformed - self.stats_start.malformed)
-                + (self.stats_final.dropped - self.stats_start.dropped)
-                + self.recursion_missed
-                + self.size_omitted
-                + self.duration_omitted
-                + self.signal_omitted
-                + self.rejected
-                + self.write_failed;
+        // The checked detail total voids a provable closure to
+        // unknown on overflow (Mojo traps on these same sums, so a
+        // wrapped total would be silently wrong): resolve it before
+        // branching so the overflow cause lands in the unknown
+        // reason below.
+        let mut overflowed = false;
+        let known_loss = if self.loss_known() {
+            match self.checked_detail_loss() {
+                Some(pair) => Some(pair),
+                None => {
+                    overflowed = true;
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if overflowed {
+            self.note_unknown("loss counters overflow".to_string());
+        }
+        if let Some((submit_fail, total)) = known_loss {
             if total == 0 {
                 out.q_detail.status = "complete_for_scope".to_string();
             } else {
@@ -7281,6 +7317,107 @@ mod tests {
         collector.stats_final = stats_ok(u64::MAX, u64::MAX, 1, 0, 0);
         collector.persisted = u64::MAX;
         assert_eq!(collector.evaluate(), "unfinalizable");
+    }
+
+    #[test]
+    fn submit_fail_total_checked() {
+        // The cross-channel submit_fail sum refuses to wrap:
+        // None on overflow (Mojo traps here), Some otherwise.
+        let mut collector = Collector::new(CollectorConfig::default());
+        collector.cfg.has_lifecycle = true;
+        collector.has_end_cut = true;
+        collector.has_end_cut_lc = true;
+        collector.end_vals = cut5(u64::MAX, 0, 0, 0, u64::MAX);
+        collector.end_vals_lc = cut5(u64::MAX, 0, 0, 0, u64::MAX);
+        assert_eq!(collector.submit_fail_total(), None);
+        collector.end_vals_lc = zero_cut();
+        assert_eq!(collector.submit_fail_total(), Some(u64::MAX));
+        collector.end_vals = zero_cut();
+        assert_eq!(collector.submit_fail_total(), Some(0));
+    }
+
+    #[test]
+    fn checked_detail_loss_overflows() {
+        // The detail loss total is checked leg by leg: a
+        // recursion count that overflows the submit sum voids
+        // the total instead of wrapping it.
+        let mut collector = Collector::new(CollectorConfig::default());
+        collector.has_end_cut = true;
+        collector.end_vals = cut5(1, 0, 0, 0, 1);
+        collector.has_final_stats = true;
+        collector.stats_start = stats_ok(0, 0, 0, 0, 0);
+        collector.stats_final = stats_ok(0, 0, 0, 0, 0);
+        collector.recursion_missed = u64::MAX;
+        assert_eq!(collector.checked_detail_loss(), None);
+        collector.recursion_missed = 41;
+        assert_eq!(collector.checked_detail_loss(), Some((1, 42)));
+    }
+
+    #[test]
+    fn submit_fail_overflow_voids_detail_loss() {
+        // End to end: two saturated submit_fail legs keep every
+        // other closure proof intact, so only the overflow voids
+        // detail loss to unknown (pre-fix the sum wrapped to a
+        // wrong-but-finite count).
+        let tmp = TestDir::create("memveil-submit-overflow").expect("mkdtemp");
+        let max = u64::MAX;
+        let saturated = cut5(max, 0, 0, 0, max);
+        let opts = RunOpts {
+            channels: 2,
+            ..RunOpts::default()
+        };
+        let c = run_case(
+            tmp.as_str(),
+            vec![],
+            saturated.clone(),
+            saturated,
+            0,
+            zero_cut(),
+            0,
+            &opts,
+        );
+        assert!(
+            c.session
+                .contains("\"detail\":{\"status\":\"partial\",\"loss_count\":null,")
+        );
+        assert!(c.session.contains("loss counters overflow"));
+    }
+
+    #[test]
+    fn detail_leg_overflow_voids_detail_loss() {
+        // End to end: a saturated recursion leg overflows an
+        // otherwise exact detail total the same way.
+        let tmp = TestDir::create("memveil-leg-overflow").expect("mkdtemp");
+        let opts = RunOpts {
+            channels: 1,
+            misses: MissOut {
+                ok: true,
+                count: u64::MAX,
+                ..Default::default()
+            },
+            misses2: MissOut {
+                ok: true,
+                count: u64::MAX,
+                ..Default::default()
+            },
+            use_misses2: true,
+            ..RunOpts::default()
+        };
+        let c = run_case(
+            tmp.as_str(),
+            vec![],
+            cut5(1, 0, 0, 0, 1),
+            zero_cut(),
+            0,
+            zero_cut(),
+            0,
+            &opts,
+        );
+        assert!(
+            c.session
+                .contains("\"detail\":{\"status\":\"partial\",\"loss_count\":null,")
+        );
+        assert!(c.session.contains("loss counters overflow"));
     }
 
     struct ProbeOut {
