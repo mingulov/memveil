@@ -986,6 +986,280 @@ fn embedded_manifest_parser_rejects_malformed() {
     );
 }
 
+/// Open-count swap shim: serves `MV_SWAP_V1` for the first
+/// `MV_SWAP_AFTER` read-opens of `MV_SWAP_TARGET`, `MV_SWAP_V2`
+/// after, and records the open count in `MV_SWAP_COUNTFILE`.
+///
+/// Models a `--bpf-dir` input replaced between validation and
+/// staging: validation (hash + marker probe) sees the original
+/// bytes while the staging copy and the verify re-read see the
+/// replacement. Path redirection only — the script under test
+/// runs unmodified, and the open count pins its read pattern
+/// (any added validation read fails the count instead of
+/// silently testing the wrong state).
+const SWAP_SHIM_C: &str = r#"
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+static int (*real_open)(const char *, int, ...) = 0;
+static int (*real_openat)(int, const char *, int, ...) = 0;
+static int opens = 0;
+
+static void resolve(void) {
+    if (!real_open) {
+        real_open = dlsym(RTLD_NEXT, "open");
+        real_openat = dlsym(RTLD_NEXT, "openat");
+    }
+}
+
+/* Redirect path: the swap target while it is read, else NULL. */
+static const char *redirect(const char *path, int flags) {
+    const char *target;
+    const char *after;
+    int keep;
+    if (!path || (flags & O_ACCMODE) != O_RDONLY)
+        return 0;
+    if (flags & (O_CREAT | O_TMPFILE))
+        return 0;
+    target = getenv("MV_SWAP_TARGET");
+    if (!target || !*target || strcmp(path, target) != 0)
+        return 0;
+    after = getenv("MV_SWAP_AFTER");
+    keep = after ? atoi(after) : 2;
+    opens++;
+    if (opens <= keep)
+        return getenv("MV_SWAP_V1");
+    return getenv("MV_SWAP_V2");
+}
+
+static int do_open(int dirfd, const char *path, int flags, mode_t mode,
+                   int have_mode, int use_at) {
+    const char *swap;
+    resolve();
+    if (!use_at || (dirfd == AT_FDCWD && path && path[0] == '/')) {
+        swap = redirect(path, flags);
+        if (swap && *swap)
+            path = swap;
+    }
+    if (use_at) {
+        if (have_mode)
+            return real_openat(dirfd, path, flags, mode);
+        return real_openat(dirfd, path, flags);
+    }
+    if (have_mode)
+        return real_open(path, flags, mode);
+    return real_open(path, flags);
+}
+
+int open(const char *path, int flags, ...) {
+    if (flags & O_CREAT) {
+        va_list ap;
+        mode_t mode;
+        va_start(ap, flags);
+        mode = va_arg(ap, mode_t);
+        va_end(ap);
+        return do_open(0, path, flags, mode, 1, 0);
+    }
+    return do_open(0, path, flags, 0, 0, 0);
+}
+
+int open64(const char *path, int flags, ...) {
+    if (flags & O_CREAT) {
+        va_list ap;
+        mode_t mode;
+        va_start(ap, flags);
+        mode = va_arg(ap, mode_t);
+        va_end(ap);
+        return do_open(0, path, flags, mode, 1, 0);
+    }
+    return do_open(0, path, flags, 0, 0, 0);
+}
+
+int openat(int dirfd, const char *path, int flags, ...) {
+    if (flags & O_CREAT) {
+        va_list ap;
+        mode_t mode;
+        va_start(ap, flags);
+        mode = va_arg(ap, mode_t);
+        va_end(ap);
+        return do_open(dirfd, path, flags, mode, 1, 1);
+    }
+    return do_open(dirfd, path, flags, 0, 0, 1);
+}
+
+int openat64(int dirfd, const char *path, int flags, ...) {
+    if (flags & O_CREAT) {
+        va_list ap;
+        mode_t mode;
+        va_start(ap, flags);
+        mode = va_arg(ap, mode_t);
+        va_end(ap);
+        return do_open(dirfd, path, flags, mode, 1, 1);
+    }
+    return do_open(dirfd, path, flags, 0, 0, 1);
+}
+
+__attribute__((destructor)) static void report(void) {
+    const char *count = getenv("MV_SWAP_COUNTFILE");
+    FILE *out;
+    if (!count || !*count || opens == 0)
+        return;
+    out = fopen(count, "w");
+    if (!out)
+        return;
+    fprintf(out, "%d\n", opens);
+    fclose(out);
+}
+"#;
+
+#[test]
+fn staged_bpf_swap_refuses() {
+    // Staging TOCTOU contest: a copy input swapped between
+    // validation and staging must refuse. The shim serves the
+    // validated bytes for the first two opens and the
+    // replacement after, so the staged-vs-source check compares
+    // replacement against replacement and passes — exactly the
+    // state that shipped embedded_bpf=original with
+    // files=replacement. Only the staged-vs-executable binding
+    // may refuse this run.
+    if !h::tool_present("cc") {
+        eprintln!("skip: cc absent on this host: the swap shim needs it");
+        return;
+    }
+    let root = h::pristine_root();
+    let binary = h::ensure_release_binary();
+    let out = h::bpf_out_dir();
+    let tmp = h::scratch("bpf-swap");
+    let script = h::scripts_dir().join("package-tarball.py");
+
+    // Replacement bytes: one flipped bit outside the channel
+    // marker (correctly marked, differently hashed), same
+    // length so file metadata stays consistent under the swap.
+    let copy = fs::read(out.join("memveil-ebpf-copy")).unwrap();
+    let marker = b"memveil-channel:copy\0";
+    let at = copy
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .expect("copy marker present");
+    let mut swapped = copy.clone();
+    let mut flip = swapped.len() - 1;
+    if (at..at + marker.len()).contains(&flip) {
+        flip = 0;
+        assert!(
+            !(at..at + marker.len()).contains(&flip),
+            "marker spans the whole object"
+        );
+    }
+    swapped[flip] ^= 0x01;
+    assert!(
+        swapped.windows(marker.len()).any(|w| w == marker),
+        "surgery broke the marker"
+    );
+    assert_ne!(swapped, copy, "surgery left the bytes identical");
+
+    let v1 = tmp.join("copy-v1.o");
+    let v2 = tmp.join("copy-v2.o");
+    fs::write(&v1, &copy).unwrap();
+    fs::write(&v2, &swapped).unwrap();
+
+    let bpf_dir = tmp.join("bpf");
+    fs::create_dir_all(&bpf_dir).unwrap();
+    for channel in ["attempt", "lifecycle"] {
+        let name = format!("memveil-ebpf-{channel}");
+        fs::copy(out.join(&name), bpf_dir.join(&name)).unwrap();
+    }
+    // Absolute without resolving symlinks, exactly as the
+    // script's abspath spells the path it opens: the shim
+    // matches that spelling byte for byte.
+    let bpf_dir = if bpf_dir.is_absolute() {
+        bpf_dir
+    } else {
+        std::env::current_dir().unwrap().join(&bpf_dir)
+    };
+    let target = bpf_dir.join("memveil-ebpf-copy");
+    fs::copy(&v1, &target).unwrap();
+
+    let shim_c = tmp.join("swap.c");
+    let shim_so = tmp.join("swap.so");
+    fs::write(&shim_c, SWAP_SHIM_C).unwrap();
+    let build = h::run(
+        "cc",
+        &[
+            "-shared",
+            "-fPIC",
+            "-O2",
+            "-o",
+            shim_so.to_str().unwrap(),
+            shim_c.to_str().unwrap(),
+            "-ldl",
+        ],
+        None,
+    );
+    assert!(
+        build.status.success(),
+        "swap shim build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let dest = tmp.join("out");
+    let count = tmp.join("swap-count.txt");
+    let proc = std::process::Command::new("python3")
+        .arg(script.to_str().unwrap())
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "--binary",
+            binary.to_str().unwrap(),
+            "--bpf-dir",
+            bpf_dir.to_str().unwrap(),
+            "--out",
+            dest.to_str().unwrap(),
+        ])
+        .env("LD_PRELOAD", shim_so.to_str().unwrap())
+        .env("MV_SWAP_TARGET", target.to_str().unwrap())
+        .env("MV_SWAP_V1", v1.to_str().unwrap())
+        .env("MV_SWAP_V2", v2.to_str().unwrap())
+        .env("MV_SWAP_AFTER", "2")
+        .env("MV_SWAP_COUNTFILE", count.to_str().unwrap())
+        .output()
+        .expect("cannot run package-tarball.py");
+    assert!(!proc.status.success(), "swapped staging packaged");
+    let stderr = String::from_utf8_lossy(&proc.stderr);
+    assert!(
+        stderr.contains("staged BPF copy differs from the binary's embedded manifest")
+            && stderr.contains("bpf/swiotlb_copy.bpf.o"),
+        "{stderr}"
+    );
+    // Exactly the four production reads (validation hash,
+    // marker probe, staging copy, verify re-read): the old
+    // staged-vs-source check saw replacement twice and passed,
+    // so this refusal is the new binding firing, not an
+    // unrelated failure.
+    assert_eq!(
+        fs::read_to_string(&count).unwrap().trim(),
+        "4",
+        "swap shim saw an unexpected read pattern"
+    );
+    assert!(
+        !dest
+            .join(format!("memveil-{}", h::engine_version()))
+            .exists(),
+        "swap refusal left a bundle"
+    );
+    assert!(
+        !dest
+            .join(format!("memveil-{}.tar.gz", h::engine_version()))
+            .exists(),
+        "swap refusal left a tarball"
+    );
+}
+
 #[test]
 fn swapped_bpf_inputs_refuse() {
     // Renamed same-build inputs: occurrence alone accepts them

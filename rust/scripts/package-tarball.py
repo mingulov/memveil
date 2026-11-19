@@ -52,8 +52,9 @@ Requires a release binary (use --build or build it first),
 patchelf, strip, and readelf. Fails closed when the link
 closure names anything outside the shipped lib/ set and the
 system allowlist, and when a BPF inspection input differs
-from the binary's dumped embedded digest or carries another
-channel's marker. Every
+from the binary's dumped embedded digest, carries another
+channel's marker, or stages bytes that differ from the
+dumped digest. Every
 cargo invocation strips RUSTUP_TOOLCHAIN so the repository pin
 wins.
 """
@@ -1505,6 +1506,25 @@ def main(argv):
             elif sha256_file(full) != sha256_file(source):
                 problems.append("staged copy differs from source: %s"
                                 % rel)
+        # The staged BPF inspection copies must equal the exact
+        # bytes the binary embeds: compare the STAGED digests
+        # against the executable's dumped manifest, never against
+        # a fresh read of the mutable --bpf-dir path. The
+        # staged-vs-source check above passes a source swapped
+        # between validation and staging (both sides read the
+        # replacement) while `embedded_bpf` below would record
+        # the validated original: the executable is the single
+        # source of truth, so a staged copy that differs from
+        # its dumped digest refuses here, before the seal.
+        staged_channels = dict(
+            (shipped, channel) for channel, shipped in CHANNELS)
+        for shipped in sorted(staged_channels):
+            rel = "bpf/" + shipped
+            if observed.get(rel) != \
+                    embedded[staged_channels[shipped]]:
+                problems.append(
+                    "staged BPF copy differs from the binary's "
+                    "embedded manifest: %s" % rel)
         for rel, source in sorted(license_sources.items()):
             full = os.path.join(staged, *rel.split("/"))
             if sha256_file(full) != sha256_file(source):
@@ -1699,14 +1719,16 @@ def main(argv):
                     "bpf/swiotlb_copy.bpf.o": "GPL-2.0-only",
                 },
             },
-            # Inspection-copy digests proven equal to the
-            # binary's dumped manifest above: `bpf/<name>` in
-            # files[] must equal this entry, so a manifest for
-            # the wrong probes cannot validate.
+            # Inspection-copy digests the binary itself dumps
+            # for the bytes it embeds: `bpf/<name>` in files[]
+            # must equal this entry (proven against the staged
+            # bytes just above), so a manifest for the wrong
+            # probes cannot validate. The executable is the
+            # single source of truth — never a re-read of the
+            # mutable --bpf-dir path.
             "embedded_bpf": {
-                shipped: digest
-                for shipped, (_source, digest)
-                in sorted(bpf_inputs.items())
+                shipped: embedded[channel]
+                for channel, shipped in CHANNELS
             },
             "files": {},
         }
