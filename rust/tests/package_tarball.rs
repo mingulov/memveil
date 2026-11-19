@@ -413,6 +413,131 @@ fn mismatched_bpf_inputs_refuse() {
 }
 
 #[test]
+fn appended_bpf_overlay_refuses() {
+    // Appended-overlay contest: a correctly marked copy object
+    // that differs from the embedded bytes must refuse even
+    // when its only occurrence is appended past every PT_LOAD
+    // segment. The executable still runs its original bytes;
+    // the manifest must never record the overlay digest.
+    let root = h::pristine_root();
+    let binary = h::ensure_release_binary();
+    let out = h::bpf_out_dir();
+    let tmp = h::scratch("bpf-overlay");
+    let script = h::scripts_dir().join("package-tarball.py");
+
+    // Doctor one byte outside the channel marker: the copy
+    // input stays correctly marked yet differs from the bytes
+    // the binary embeds.
+    let copy = fs::read(out.join("memveil-ebpf-copy")).unwrap();
+    let marker = b"memveil-channel:copy\0";
+    let at = copy
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .expect("copy marker present");
+    let mut doctored = copy.clone();
+    let mut flip = doctored.len() - 1;
+    if (at..at + marker.len()).contains(&flip) {
+        flip = 0;
+        assert!(
+            !(at..at + marker.len()).contains(&flip),
+            "marker spans the whole object"
+        );
+    }
+    doctored[flip] ^= 0x01;
+    assert!(
+        doctored.windows(marker.len()).any(|w| w == marker),
+        "surgery broke the marker"
+    );
+    assert_ne!(doctored, copy, "surgery left the bytes identical");
+
+    let doctored_dir = tmp.join("bpf");
+    fs::create_dir_all(&doctored_dir).unwrap();
+    for channel in ["attempt", "lifecycle"] {
+        let name = format!("memveil-ebpf-{channel}");
+        fs::copy(out.join(&name), doctored_dir.join(&name)).unwrap();
+    }
+    let doctored_copy = doctored_dir.join("memveil-ebpf-copy");
+    fs::write(&doctored_copy, &doctored).unwrap();
+
+    // Marker == channel still passes: only the PT_LOAD binding
+    // may refuse this input.
+    let probe = format!(
+        "import importlib.util; \
+         l = importlib.util.spec_from_file_location('m', {script:?}); \
+         m = importlib.util.module_from_spec(l); l.loader.exec_module(m); \
+         assert m.read_elf_section({doctored_copy:?}, 'memveil_channel') == b'memveil-channel:copy\\0'; \
+         print('overlay-marker-ok')"
+    );
+    let text = h::run_ok("python3", &["-B", "-c", &probe], None);
+    assert!(text.contains("overlay-marker-ok"), "{text}");
+
+    // Overlay binary: the real bytes plus the doctored object
+    // appended past the end of the file.
+    let orig = fs::read(&binary).unwrap();
+    let mut overlaid = orig.clone();
+    overlaid.extend_from_slice(&doctored);
+    let overlaid_path = tmp.join("memveil-overlay");
+    fs::write(&overlaid_path, &overlaid).unwrap();
+    fs::set_permissions(&overlaid_path, fs::metadata(&binary).unwrap().permissions()).unwrap();
+    assert!(
+        overlaid
+            .windows(doctored.len())
+            .any(|w| w == doctored.as_slice()),
+        "overlay occurrence missing"
+    );
+
+    // Prove the geometry with readelf (independent of the
+    // script under test): every PT_LOAD file range ends at or
+    // before the append base.
+    let layout = h::run_ok("readelf", &["-lW", overlaid_path.to_str().unwrap()], None);
+    let mut loads = 0;
+    for line in layout.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.first() != Some(&"LOAD") || fields.len() < 5 {
+            continue;
+        }
+        let hex = |field: &str| {
+            u64::from_str_radix(field.trim_start_matches("0x"), 16).expect("hex field")
+        };
+        assert!(
+            hex(fields[1]) + hex(fields[4]) <= orig.len() as u64,
+            "PT_LOAD reaches the overlay: {line}"
+        );
+        loads += 1;
+    }
+    assert!(loads > 0, "no PT_LOAD segments:\n{layout}");
+
+    let dest = tmp.join("out");
+    let proc = h::run(
+        "python3",
+        &[
+            script.to_str().unwrap(),
+            "--root",
+            root.to_str().unwrap(),
+            "--binary",
+            overlaid_path.to_str().unwrap(),
+            "--bpf-dir",
+            doctored_dir.to_str().unwrap(),
+            "--out",
+            dest.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(!proc.status.success(), "appended overlay packaged");
+    let stderr = String::from_utf8_lossy(&proc.stderr);
+    assert!(
+        stderr.contains("does not embed the swiotlb_copy.bpf.o input"),
+        "{stderr}"
+    );
+    assert!(
+        !dest
+            .join(format!("memveil-{}", h::engine_version()))
+            .exists(),
+        "overlay refusal left a bundle"
+    );
+}
+
+#[test]
 fn swapped_bpf_inputs_refuse() {
     // Renamed same-build inputs: occurrence alone accepts them
     // (every byte is embedded), so the marker gate must refuse.
