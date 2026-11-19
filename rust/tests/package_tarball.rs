@@ -459,7 +459,7 @@ fn appended_bpf_overlay_refuses() {
     let doctored_copy = doctored_dir.join("memveil-ebpf-copy");
     fs::write(&doctored_copy, &doctored).unwrap();
 
-    // Marker == channel still passes: only the PT_LOAD binding
+    // Marker == channel still passes: only the digest binding
     // may refuse this input.
     let probe = format!(
         "import importlib.util; \
@@ -534,6 +534,455 @@ fn appended_bpf_overlay_refuses() {
             .join(format!("memveil-{}", h::engine_version()))
             .exists(),
         "overlay refusal left a bundle"
+    );
+}
+
+/// Extend the last-ending PT_LOAD over `section`'s file range.
+///
+/// Minimal 64-bit little-endian ELF surgery for the
+/// planted-section contest: objcopy plants the bytes but leaves
+/// an allocated section outside every segment, so the covering
+/// LOAD's filesz/memsz grow to the section end. The segment's
+/// old zero tail ([filesz, memsz), kernel-provided BSS before
+/// the extension) is re-zeroed in the file: the newly mapped
+/// file bytes there would otherwise poison globals (observed:
+/// a binary that prints, then parks in pause() instead of
+/// exiting, because a runtime guard reads garbage).
+fn extend_last_load_over_section(path: &Path, section: &str) {
+    fn u64le(raw: &[u8], at: usize) -> u64 {
+        u64::from_le_bytes(raw[at..at + 8].try_into().unwrap())
+    }
+    fn u16le(raw: &[u8], at: usize) -> u16 {
+        u16::from_le_bytes(raw[at..at + 2].try_into().unwrap())
+    }
+    let mut raw = fs::read(path).unwrap();
+    assert!(
+        raw.len() >= 64 && raw[..4] == *b"\x7fELF" && raw[4] == 2 && raw[5] == 1,
+        "not a 64-bit little-endian ELF: {}",
+        path.display()
+    );
+    let e_phoff = u64le(&raw, 0x20) as usize;
+    let e_phentsize = u16le(&raw, 0x36) as usize;
+    let e_phnum = u16le(&raw, 0x38) as usize;
+    let e_shoff = u64le(&raw, 0x28) as usize;
+    let e_shentsize = u16le(&raw, 0x3a) as usize;
+    let e_shnum = u16le(&raw, 0x3c) as usize;
+    let e_shstrndx = u16le(&raw, 0x3e) as usize;
+    assert!(e_phentsize >= 56 && e_phnum > 0, "no program headers");
+    assert!(e_shentsize >= 64 && e_shnum > 0, "no section headers");
+    assert!(e_shstrndx < e_shnum, "no section-name table");
+    let str_base = e_shoff + e_shstrndx * e_shentsize;
+    let str_off = u64le(&raw, str_base + 24) as usize;
+    let str_size = u64le(&raw, str_base + 32) as usize;
+    let mut found = None;
+    for index in 0..e_shnum {
+        let base = e_shoff + index * e_shentsize;
+        let sh_name = u32::from_le_bytes(raw[base..base + 4].try_into().unwrap()) as usize;
+        assert!(sh_name < str_size, "section name overrun");
+        let end = str_off + str_size;
+        let name = raw[str_off + sh_name..end]
+            .split(|byte| *byte == 0)
+            .next()
+            .unwrap();
+        if name == section.as_bytes() {
+            found = Some((u64le(&raw, base + 24), u64le(&raw, base + 32)));
+            break;
+        }
+    }
+    let (sec_off, sec_size) = found.expect("planted section present");
+    let mut best = None;
+    let mut best_end = 0;
+    for index in 0..e_phnum {
+        let base = e_phoff + index * e_phentsize;
+        let p_type = u32::from_le_bytes(raw[base..base + 4].try_into().unwrap());
+        if p_type != 1 {
+            continue;
+        }
+        let off = u64le(&raw, base + 8);
+        let filesz = u64le(&raw, base + 32);
+        let memsz = u64le(&raw, base + 40);
+        if off + filesz > best_end {
+            best_end = off + filesz;
+            best = Some((base, off, filesz, memsz));
+        }
+    }
+    let (base, off, old_filesz, old_memsz) = best.expect("a PT_LOAD exists");
+    assert!(
+        sec_off >= off + old_filesz,
+        "planted section overlaps mapped bytes"
+    );
+    let new_filesz = sec_off + sec_size - off;
+    let new_memsz = new_filesz + (old_memsz - old_filesz);
+    raw[base + 32..base + 40].copy_from_slice(&new_filesz.to_le_bytes());
+    raw[base + 40..base + 48].copy_from_slice(&new_memsz.to_le_bytes());
+    let zero_lo = (off + old_filesz) as usize;
+    let zero_hi = (off + old_memsz) as usize;
+    assert!(
+        zero_hi as u64 <= sec_off,
+        "BSS tail zeroing would touch the planted bytes"
+    );
+    raw[zero_lo..zero_hi].fill(0);
+    fs::write(path, &raw).unwrap();
+}
+
+#[test]
+fn planted_loadable_section_refuses() {
+    // Planted-section contest: a correctly marked copy object
+    // that differs from the embedded bytes must refuse even
+    // when it sits in its own unused loadable section, where
+    // an occurrence search matches it. The executable still
+    // runs its original bytes (the dumped manifest names the
+    // pristine digests); only the digest binding may refuse
+    // this input.
+    if !h::tool_present("objcopy") {
+        eprintln!("skip: objcopy absent on this host: planting needs it");
+        return;
+    }
+    let root = h::pristine_root();
+    let binary = h::ensure_release_binary();
+    let out = h::bpf_out_dir();
+    let tmp = h::scratch("bpf-planted");
+    let script = h::scripts_dir().join("package-tarball.py");
+
+    // Doctor one byte outside the channel marker (as in the
+    // overlay test): correctly marked, differently hashed.
+    let copy = fs::read(out.join("memveil-ebpf-copy")).unwrap();
+    let marker = b"memveil-channel:copy\0";
+    let at = copy
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .expect("copy marker present");
+    let mut doctored = copy.clone();
+    let mut flip = doctored.len() - 1;
+    if (at..at + marker.len()).contains(&flip) {
+        flip = 0;
+        assert!(
+            !(at..at + marker.len()).contains(&flip),
+            "marker spans the whole object"
+        );
+    }
+    doctored[flip] ^= 0x01;
+    assert!(
+        doctored.windows(marker.len()).any(|w| w == marker),
+        "surgery broke the marker"
+    );
+    assert_ne!(doctored, copy, "surgery left the bytes identical");
+    let doctored_obj = tmp.join("doctored-copy.o");
+    fs::write(&doctored_obj, &doctored).unwrap();
+
+    let doctored_dir = tmp.join("bpf");
+    fs::create_dir_all(&doctored_dir).unwrap();
+    for channel in ["attempt", "lifecycle"] {
+        let name = format!("memveil-ebpf-{channel}");
+        fs::copy(out.join(&name), doctored_dir.join(&name)).unwrap();
+    }
+    fs::write(doctored_dir.join("memveil-ebpf-copy"), &doctored).unwrap();
+
+    // Plant the doctored object as a new allocated section,
+    // then extend PT_LOAD over its file range so the planted
+    // bytes are genuinely loadable.
+    let planted_path = tmp.join("memveil-planted");
+    let add_section = format!(".memveil_plant={}", doctored_obj.display());
+    let objcopy = h::run(
+        "objcopy",
+        &[
+            "--add-section",
+            &add_section,
+            "--set-section-flags",
+            ".memveil_plant=alloc,readonly",
+            binary.to_str().unwrap(),
+            planted_path.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(
+        objcopy.status.success(),
+        "objcopy failed: {}",
+        String::from_utf8_lossy(&objcopy.stderr)
+    );
+    extend_last_load_over_section(&planted_path, ".memveil_plant");
+    fs::set_permissions(&planted_path, fs::metadata(&binary).unwrap().permissions()).unwrap();
+
+    // Prove the geometry with readelf (independent of the
+    // script under test): the planted section exists at its
+    // full size, and one PT_LOAD file range covers it wholly.
+    let sections = h::run_ok("readelf", &["-SW", planted_path.to_str().unwrap()], None);
+    let mut geometry = None;
+    for line in sections.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() >= 6 && fields[1] == ".memveil_plant" {
+            let off = u64::from_str_radix(fields[4], 16).expect("section offset");
+            let size = u64::from_str_radix(fields[5], 16).expect("section size");
+            geometry = Some((off, size));
+        }
+    }
+    let (sec_off, sec_size) = geometry.expect("planted section in readelf -SW");
+    assert_eq!(sec_size as usize, doctored.len(), "planted section size");
+    let layout = h::run_ok("readelf", &["-lW", planted_path.to_str().unwrap()], None);
+    let mut covered = false;
+    for line in layout.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.first() != Some(&"LOAD") || fields.len() < 5 {
+            continue;
+        }
+        let hex = |field: &str| {
+            u64::from_str_radix(field.trim_start_matches("0x"), 16).expect("hex field")
+        };
+        if hex(fields[1]) <= sec_off && sec_off + sec_size <= hex(fields[1]) + hex(fields[4]) {
+            covered = true;
+        }
+    }
+    assert!(covered, "no PT_LOAD covers the planted section");
+    // The planted bytes sit exactly there: an occurrence
+    // search scoped to the mapped ranges matches them.
+    let planted_bytes = fs::read(&planted_path).unwrap();
+    let end = sec_off as usize + doctored.len();
+    assert_eq!(&planted_bytes[sec_off as usize..end], doctored.as_slice());
+
+    // The executable still runs its original bytes: version
+    // exits 0 and the dumped manifest names the pristine
+    // OUT_DIR digests, not the planted bytes.
+    let version = h::run(planted_path.to_str().unwrap(), &["version"], None);
+    assert!(version.status.success(), "planted binary fails version");
+    let dumped = h::run(
+        planted_path.to_str().unwrap(),
+        &["--embedded-manifest"],
+        None,
+    );
+    assert!(
+        dumped.status.success(),
+        "planted binary fails --embedded-manifest"
+    );
+    let dumped_text = String::from_utf8_lossy(&dumped.stdout).into_owned();
+    let rows: Vec<&str> = dumped_text.lines().collect();
+    assert_eq!(rows.len(), 3, "manifest rows: {rows:?}");
+    for (row, channel) in rows.iter().zip(["attempt", "lifecycle", "copy"]) {
+        let (name, digest) = row.split_once(' ').expect("channel digest row");
+        assert_eq!(name, channel);
+        assert_eq!(
+            digest,
+            h::sha256_file(&out.join(format!("memveil-ebpf-{channel}"))),
+            "{channel} digest names the planted bytes"
+        );
+    }
+
+    let dest = tmp.join("out");
+    let proc = h::run(
+        "python3",
+        &[
+            script.to_str().unwrap(),
+            "--root",
+            root.to_str().unwrap(),
+            "--binary",
+            planted_path.to_str().unwrap(),
+            "--bpf-dir",
+            doctored_dir.to_str().unwrap(),
+            "--out",
+            dest.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(!proc.status.success(), "planted section packaged");
+    let stderr = String::from_utf8_lossy(&proc.stderr);
+    assert!(
+        stderr.contains("does not embed the swiotlb_copy.bpf.o input"),
+        "{stderr}"
+    );
+    assert!(
+        !dest
+            .join(format!("memveil-{}", h::engine_version()))
+            .exists(),
+        "planted refusal left a bundle"
+    );
+}
+
+#[test]
+fn embedded_manifest_matches_bpf_dir() {
+    // The dumped manifest binds the build: every row must name
+    // the OUT_DIR artifact the binary embeds for that channel.
+    let binary = h::ensure_release_binary();
+    let out = h::bpf_out_dir();
+    let proc = h::run(binary.to_str().unwrap(), &["--embedded-manifest"], None);
+    assert!(
+        proc.status.success(),
+        "--embedded-manifest failed: {}",
+        String::from_utf8_lossy(&proc.stderr)
+    );
+    assert!(
+        proc.stderr.is_empty(),
+        "manifest writes to stderr: {:?}",
+        String::from_utf8_lossy(&proc.stderr)
+    );
+    let text = String::from_utf8(proc.stdout).expect("manifest is UTF-8");
+    let rows: Vec<&str> = text.lines().collect();
+    assert_eq!(rows.len(), 3, "manifest rows: {rows:?}");
+    for (row, channel) in rows.iter().zip(["attempt", "lifecycle", "copy"]) {
+        let (name, digest) = row.split_once(' ').expect("channel digest row");
+        assert_eq!(name, channel);
+        assert_eq!(
+            digest,
+            h::sha256_file(&out.join(format!("memveil-ebpf-{channel}"))),
+            "{channel} digest differs from the build artifact"
+        );
+    }
+}
+
+#[test]
+fn binary_without_manifest_flag_refuses() {
+    // A binary too old for --embedded-manifest refuses
+    // fail-closed with a rebuild pointer instead of falling
+    // back to an occurrence search. The stand-in emulates a
+    // pre-flag binary's unknown-verb path (usage to stderr,
+    // exit 2); the gate depends only on that contract.
+    use std::os::unix::fs::PermissionsExt;
+    let root = h::pristine_root();
+    let out = h::bpf_out_dir();
+    let tmp = h::scratch("bpf-old-binary");
+    let standin = tmp.join("memveil-old");
+    fs::write(
+        &standin,
+        "#!/bin/sh\necho 'usage: memveil <verbs> [args]' >&2\nexit 2\n",
+    )
+    .unwrap();
+    fs::set_permissions(&standin, fs::Permissions::from_mode(0o755)).unwrap();
+    let script = h::scripts_dir().join("package-tarball.py");
+    let dest = tmp.join("out");
+    let proc = h::run(
+        "python3",
+        &[
+            script.to_str().unwrap(),
+            "--root",
+            root.to_str().unwrap(),
+            "--binary",
+            standin.to_str().unwrap(),
+            "--bpf-dir",
+            out.to_str().unwrap(),
+            "--out",
+            dest.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(!proc.status.success(), "flag-less binary packaged");
+    let stderr = String::from_utf8_lossy(&proc.stderr);
+    assert!(
+        stderr.contains("refuses --embedded-manifest")
+            && stderr.contains("predates the embedded-digest binding"),
+        "{stderr}"
+    );
+    assert!(
+        !dest
+            .join(format!("memveil-{}", h::engine_version()))
+            .exists(),
+        "flag-less refusal left a bundle"
+    );
+}
+
+#[test]
+fn embedded_manifest_parser_rejects_malformed() {
+    // Pure-helper probes against the script module: a well
+    // formed dump parses to its three digests, while row
+    // count, order, channel, and digest deviations refuse
+    // instead of binding.
+    let script = h::scripts_dir().join("package-tarball.py");
+    let digest = |byte: &str| byte.repeat(32);
+    let good = format!(
+        "attempt {}\\nlifecycle {}\\ncopy {}\\n",
+        digest("aa"),
+        digest("bb"),
+        digest("cc")
+    );
+    // Dumps travel as Python `\n` escapes (Rust Debug would
+    // double-escape the newlines into literal backslashes).
+    let py = |dump: &str| dump.replace('\n', "\\n");
+    let probe = format!(
+        "import importlib.util; \
+         l = importlib.util.spec_from_file_location('m', {script:?}); \
+         m = importlib.util.module_from_spec(l); l.loader.exec_module(m); \
+         got = m.parse_embedded_manifest('{good}', 'fake-binary'); \
+         assert got == {{'attempt': '{a}', 'lifecycle': '{b}', 'copy': '{c}'}}, got; \
+         print('manifest-ok')",
+        good = py(&good),
+        a = digest("aa"),
+        b = digest("bb"),
+        c = digest("cc"),
+    );
+    let text = h::run_ok("python3", &["-B", "-c", &probe], None);
+    assert!(text.contains("manifest-ok"), "{text}");
+    let cases: &[(&str, String, &str)] = &[
+        (
+            "truncated",
+            format!("attempt {}\n", digest("aa")),
+            "dumps 1 manifest rows",
+        ),
+        (
+            "extra-row",
+            format!("{good}spare {}\n", digest("dd")),
+            "dumps 4 manifest rows",
+        ),
+        (
+            "swapped-order",
+            format!(
+                "lifecycle {}\nattempt {}\ncopy {}\n",
+                digest("bb"),
+                digest("aa"),
+                digest("cc")
+            ),
+            "bad manifest row",
+        ),
+        (
+            "bad-channel",
+            good.replace("copy ", "void "),
+            "bad manifest row",
+        ),
+        (
+            "short-digest",
+            good.replace(&digest("cc"), "cc"),
+            "bad copy digest",
+        ),
+        (
+            "nonhex-digest",
+            good.replace(&digest("cc"), &"zz".repeat(32)),
+            "bad copy digest",
+        ),
+        (
+            "uppercase-digest",
+            good.replace(&digest("cc"), &"CC".repeat(32)),
+            "bad copy digest",
+        ),
+    ];
+    // "truncated" above drops to one row; pin the two-row
+    // cut explicitly so the count message is exact, not implied.
+    let two_rows = format!("attempt {}\nlifecycle {}\n", digest("aa"), digest("bb"));
+    for (leaf, dump, fragment) in cases {
+        let probe = format!(
+            "import importlib.util; \
+             l = importlib.util.spec_from_file_location('m', {script:?}); \
+             m = importlib.util.module_from_spec(l); l.loader.exec_module(m); \
+             m.parse_embedded_manifest('{dump}', 'fake-binary')",
+            dump = py(dump),
+        );
+        let proc = h::run("python3", &["-B", "-c", &probe], None);
+        assert!(!proc.status.success(), "{leaf} dump parsed");
+        assert!(
+            String::from_utf8_lossy(&proc.stderr).contains(fragment),
+            "{leaf}: {}",
+            String::from_utf8_lossy(&proc.stderr)
+        );
+    }
+    // Two-row cut: the count message names the shortfall.
+    let probe = format!(
+        "import importlib.util; \
+         l = importlib.util.spec_from_file_location('m', {script:?}); \
+         m = importlib.util.module_from_spec(l); l.loader.exec_module(m); \
+         m.parse_embedded_manifest('{dump}', 'fake-binary')",
+        dump = py(&two_rows),
+    );
+    let proc = h::run("python3", &["-B", "-c", &probe], None);
+    assert!(!proc.status.success(), "two-row dump parsed");
+    assert!(
+        String::from_utf8_lossy(&proc.stderr).contains("dumps 2 manifest rows"),
+        "{}",
+        String::from_utf8_lossy(&proc.stderr)
     );
 }
 
