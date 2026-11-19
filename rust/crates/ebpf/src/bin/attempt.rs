@@ -10,6 +10,8 @@
 #[path = "../attempt.rs"]
 mod attempt;
 #[path = "../common.rs"]
+// Helpers used only by other channels are dead in this bin by design.
+#[allow(dead_code)]
 mod common;
 
 // The shared wire const must resolve with the expected type; dependency or

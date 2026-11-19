@@ -20,34 +20,20 @@
 
 use core::ffi::c_void;
 
-/// Non-fetch atomic add of `v` to the counter at `ptr`.
+/// Fetching atomic add of `v` to the counter at `ptr`; returns the
+/// previous value so callers can detect a wrapping increment.
+///
+/// Every add site needs wrap detection, so every add goes through this
+/// helper; there is deliberately no non-fetch add.
+///
+/// Needs BPF CPU v3 (see the `target-cpu` flag in the host build): the
+/// consumed result cannot lower to the non-fetch `BPF_ADD` form.
 ///
 /// # Safety
 ///
 /// `ptr` must be a live, 8-byte-aligned map-value pointer for the whole
 /// program run, as returned by `get_ptr_mut`. Concurrent firings on other
 /// CPUs are the reason this is atomic rather than a plain read-add-write.
-#[inline(always)]
-pub unsafe fn count_add(ptr: *mut u64, v: u64) {
-    // The deliberately unused result selects the non-fetch BPF ATOMIC ADD
-    // form, which is the only lowering this backend accepts for the add.
-    let _ = unsafe {
-        core::intrinsics::atomic_xadd::<u64, u64, { core::intrinsics::AtomicOrdering::AcqRel }>(
-            ptr, v,
-        )
-    };
-}
-
-/// Fetching atomic add of `v` to the counter at `ptr`; returns the
-/// previous value so callers can detect a wrapping increment.
-///
-/// Needs BPF CPU v3 (see the `target-cpu` flag in the host build): unlike
-/// [`count_add`], the consumed result cannot lower to the non-fetch
-/// `BPF_ADD` form.
-///
-/// # Safety
-///
-/// Same contract as [`count_add`]: a live, aligned map-value pointer.
 #[inline(always)]
 pub unsafe fn count_fetch_add(ptr: *mut u64, v: u64) -> u64 {
     unsafe {
@@ -61,7 +47,7 @@ pub unsafe fn count_fetch_add(ptr: *mut u64, v: u64) -> u64 {
 ///
 /// # Safety
 ///
-/// Same contract as [`count_add`]: a live, aligned map-value pointer.
+/// Same contract as [`count_fetch_add`]: a live, aligned map-value pointer.
 #[inline(always)]
 pub unsafe fn count_or(ptr: *mut u64, bits: u64) {
     // As above, the discarded result selects the non-fetch BPF ATOMIC OR.
@@ -77,7 +63,7 @@ pub unsafe fn count_or(ptr: *mut u64, bits: u64) {
 ///
 /// # Safety
 ///
-/// Same contract as [`count_add`]: a live, aligned map-value pointer.
+/// Same contract as [`count_fetch_add`]: a live, aligned map-value pointer.
 #[inline(always)]
 pub unsafe fn count_cas(ptr: *mut u64, old: u64, new: u64) -> u64 {
     unsafe {
