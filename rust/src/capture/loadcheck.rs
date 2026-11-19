@@ -339,7 +339,7 @@ pub(crate) fn errno_from_chain(mut err: &(dyn std::error::Error + 'static)) -> O
 /// returned {io_error}. Verifier output: {log}`; the marker is
 /// stable under the pinned loader version, and OS error text
 /// can never contain it.
-fn verifier_log_from_display(message: &str) -> Option<&str> {
+pub(crate) fn verifier_log_from_display(message: &str) -> Option<&str> {
     message
         .split_once(". Verifier output: ")
         .map(|(_, log)| log)

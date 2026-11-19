@@ -12,7 +12,7 @@ use super::attach::{ATTACH_ORDER, AttachKind, AttachSpec, DETACH_ORDER};
 use super::maps::{BPF_MAP_TYPE_RINGBUF, MapGeometry, MapSpec, check_maps_loaded, expected_maps};
 use super::offsets::{encode_copy_offsets, validate_copy_offsets};
 use super::poll::{Frame, Stats, decode_frame, open_consumer};
-use crate::capture::loadcheck::errno_from_chain;
+use crate::capture::loadcheck::{errno_from_chain, verifier_log_from_display, verifier_tail};
 use aya::maps::{Array, Map, MapData, RingBuf};
 use aya::programs::{
     Program, ProgramError,
@@ -1082,33 +1082,178 @@ impl Session {
     }
 }
 
-/// Load and attach one site, returning its link. A program an earlier
-/// attach in this session loaded (rollback or detach leaves loads behind)
-/// skips the load when the recorded site matches.
-fn attach_one(
-    bpf: &mut Ebpf,
-    channel: Channel,
-    spec: &AttachSpec,
-    btf: &mut Option<Btf>,
-    loaded: &mut LoadedMap,
-) -> Result<ActiveLink, String> {
-    let tag = format!("{} channel program `{}`", channel, spec.program);
-    let Some(raw) = bpf.program_mut(&spec.program) else {
-        return Err(format!("{tag}: program not in object"));
-    };
+/// One kernel program-load failure, split for honest reporting:
+/// the syscall errno (when the error chain carries one) plus the
+/// raw verifier log (when the error carries one). Callers shape
+/// these parts; nobody formats the full loader Display.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct LoadFailure {
+    /// Syscall errno from the error chain, if any.
+    pub errno: Option<i32>,
+    /// Raw verifier log text, if any.
+    pub log: Option<String>,
+}
+
+/// One program-load step outcome that is not a fresh load.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LoadStepError {
+    /// Static refusal (missing program, wrong section kind,
+    /// unreadable BTF, target mismatch): message plus the
+    /// underlying errno when one caused it.
+    Refusal { message: String, errno: Option<i32> },
+    /// Kernel load failure: errno plus raw verifier log.
+    Failed(LoadFailure),
+}
+
+/// Split one loader error into its failure parts.
+fn load_failed(error: &ProgramError) -> LoadFailure {
+    let display = error.to_string();
+    LoadFailure {
+        errno: errno_from_chain(error),
+        log: verifier_log_from_display(&display).map(str::to_string),
+    }
+}
+
+/// Load context for one spec: tracing loads name their kernel
+/// function, tracepoint loads take no site.
+fn load_context(spec: &AttachSpec) -> String {
+    match spec.kind {
+        AttachKind::Tracepoint => String::new(),
+        AttachKind::FEntry | AttachKind::FExit => format!(" for {}", spec.target_a),
+    }
+}
+
+/// User text for a kernel program-load failure: the errno's own
+/// strerror plus the `(os error N)` marker the kernel layer parses
+/// for refusal classification — never the loader Display, which
+/// carries the full verifier log. The bounded redacted tail reaches
+/// users through the diagnostic replay instead. Without an errno,
+/// the redacted tail of the carried log; without either, a bare
+/// refusal.
+fn load_failure_text(failure: &LoadFailure) -> String {
+    if let Some(raw) = failure.errno {
+        return std::io::Error::from_raw_os_error(raw).to_string();
+    }
+    if let Some(log) = failure.log.as_ref() {
+        let tail = verifier_tail(log.as_bytes(), false);
+        if !tail.is_empty() {
+            return tail.join("; ");
+        }
+    }
+    "load refused".to_string()
+}
+
+/// Full message for a kernel program-load failure.
+fn format_failed_load(tag: &str, spec: &AttachSpec, failure: &LoadFailure) -> String {
+    format!(
+        "{tag}: load{} failed: {}",
+        load_context(spec),
+        load_failure_text(failure)
+    )
+}
+
+/// Refuse a spec whose attach targets are unusable, before loading.
+fn validate_spec_targets(tag: &str, spec: &AttachSpec) -> Result<(), String> {
     match spec.kind {
         AttachKind::Tracepoint => {
             if spec.target_a.is_empty() || spec.target_b.is_empty() {
                 return Err(format!("{tag}: tracepoint needs a category and an event"));
             }
+        }
+        AttachKind::FEntry | AttachKind::FExit => {
+            if spec.target_a.is_empty() {
+                return Err(format!("{tag}: tracing attach needs a kernel function"));
+            }
+            if !spec.target_b.is_empty() {
+                return Err(format!("{tag}: tracing attach takes no second target"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Load one program per spec without attaching. A program an
+/// earlier load in this session loaded (rollback or detach leaves
+/// loads behind) skips the load when the recorded site matches.
+fn load_one(
+    bpf: &mut Ebpf,
+    tag: &str,
+    spec: &AttachSpec,
+    btf: &mut Option<Btf>,
+    loaded: &mut LoadedMap,
+) -> Result<(), LoadStepError> {
+    let refusal = |message: String, errno: Option<i32>| LoadStepError::Refusal { message, errno };
+    let Some(raw) = bpf.program_mut(&spec.program) else {
+        return Err(refusal(format!("{tag}: program not in object"), Some(2)));
+    };
+    match spec.kind {
+        AttachKind::Tracepoint => {
+            let typed: &mut TracePoint = raw
+                .try_into()
+                .map_err(|_| refusal(format!("{tag}: not a tracepoint program"), Some(22)))?;
+            match typed.load() {
+                Ok(()) => note_loaded(loaded, spec),
+                Err(ProgramError::AlreadyLoaded) => {
+                    check_loaded(loaded, spec, tag).map_err(|message| refusal(message, None))?;
+                }
+                Err(error) => return Err(LoadStepError::Failed(load_failed(&error))),
+            }
+        }
+        AttachKind::FEntry | AttachKind::FExit => {
+            if btf.is_none() {
+                let read = Btf::from_sys_fs().map_err(|error| {
+                    refusal(
+                        format!(
+                            "{tag}: kernel BTF unavailable for {}: {error}",
+                            spec.target_a
+                        ),
+                        errno_from_chain(&error),
+                    )
+                })?;
+                *btf = Some(read);
+            }
+            // `btf` is `Some` here: just loaded, or loaded by an earlier site.
+            let kernel_btf = btf.as_ref().expect("kernel BTF loaded");
+            if spec.kind == AttachKind::FEntry {
+                let typed: &mut FEntry = raw
+                    .try_into()
+                    .map_err(|_| refusal(format!("{tag}: not an fentry program"), Some(22)))?;
+                match typed.load(&spec.target_a, kernel_btf) {
+                    Ok(()) => note_loaded(loaded, spec),
+                    Err(ProgramError::AlreadyLoaded) => {
+                        check_loaded(loaded, spec, tag)
+                            .map_err(|message| refusal(message, None))?;
+                    }
+                    Err(error) => return Err(LoadStepError::Failed(load_failed(&error))),
+                }
+            } else {
+                let typed: &mut FExit = raw
+                    .try_into()
+                    .map_err(|_| refusal(format!("{tag}: not an fexit program"), Some(22)))?;
+                match typed.load(&spec.target_a, kernel_btf) {
+                    Ok(()) => note_loaded(loaded, spec),
+                    Err(ProgramError::AlreadyLoaded) => {
+                        check_loaded(loaded, spec, tag)
+                            .map_err(|message| refusal(message, None))?;
+                    }
+                    Err(error) => return Err(LoadStepError::Failed(load_failed(&error))),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Attach one already-loaded program, returning its link.
+fn link_one(bpf: &mut Ebpf, tag: &str, spec: &AttachSpec) -> Result<ActiveLink, String> {
+    let Some(raw) = bpf.program_mut(&spec.program) else {
+        return Err(format!("{tag}: program not in object"));
+    };
+    match spec.kind {
+        AttachKind::Tracepoint => {
             let typed: &mut TracePoint = raw
                 .try_into()
                 .map_err(|_| format!("{tag}: not a tracepoint program"))?;
-            match typed.load() {
-                Ok(()) => note_loaded(loaded, spec),
-                Err(ProgramError::AlreadyLoaded) => check_loaded(loaded, spec, &tag)?,
-                Err(error) => return Err(format!("{tag}: load failed: {error}")),
-            }
             let id = typed
                 .attach(&spec.target_a, &spec.target_b)
                 .map_err(|error| {
@@ -1122,62 +1267,53 @@ fn attach_one(
                 id,
             })
         }
-        AttachKind::FEntry | AttachKind::FExit => {
-            if spec.target_a.is_empty() {
-                return Err(format!("{tag}: tracing attach needs a kernel function"));
-            }
-            if !spec.target_b.is_empty() {
-                return Err(format!("{tag}: tracing attach takes no second target"));
-            }
-            if btf.is_none() {
-                *btf = Some(Btf::from_sys_fs().map_err(|error| {
-                    format!(
-                        "{tag}: kernel BTF unavailable for {}: {error}",
-                        spec.target_a
-                    )
-                })?);
-            }
-            // `btf` is `Some` here: just loaded, or loaded by an earlier site.
-            let kernel_btf = btf.as_ref().expect("kernel BTF loaded");
-            if spec.kind == AttachKind::FEntry {
-                let typed: &mut FEntry = raw
-                    .try_into()
-                    .map_err(|_| format!("{tag}: not an fentry program"))?;
-                match typed.load(&spec.target_a, kernel_btf) {
-                    Ok(()) => note_loaded(loaded, spec),
-                    Err(ProgramError::AlreadyLoaded) => check_loaded(loaded, spec, &tag)?,
-                    Err(error) => {
-                        return Err(format!("{tag}: load for {} failed: {error}", spec.target_a));
-                    }
-                }
-                let id = typed.attach().map_err(|error| {
-                    format!("{tag}: attach to {} failed: {error}", spec.target_a)
-                })?;
-                Ok(ActiveLink::FEntry {
-                    program: spec.program.clone(),
-                    id,
-                })
-            } else {
-                let typed: &mut FExit = raw
-                    .try_into()
-                    .map_err(|_| format!("{tag}: not an fexit program"))?;
-                match typed.load(&spec.target_a, kernel_btf) {
-                    Ok(()) => note_loaded(loaded, spec),
-                    Err(ProgramError::AlreadyLoaded) => check_loaded(loaded, spec, &tag)?,
-                    Err(error) => {
-                        return Err(format!("{tag}: load for {} failed: {error}", spec.target_a));
-                    }
-                }
-                let id = typed.attach().map_err(|error| {
-                    format!("{tag}: attach to {} failed: {error}", spec.target_a)
-                })?;
-                Ok(ActiveLink::FExit {
-                    program: spec.program.clone(),
-                    id,
-                })
-            }
+        AttachKind::FEntry => {
+            let typed: &mut FEntry = raw
+                .try_into()
+                .map_err(|_| format!("{tag}: not an fentry program"))?;
+            let id = typed
+                .attach()
+                .map_err(|error| format!("{tag}: attach to {} failed: {error}", spec.target_a))?;
+            Ok(ActiveLink::FEntry {
+                program: spec.program.clone(),
+                id,
+            })
+        }
+        AttachKind::FExit => {
+            let typed: &mut FExit = raw
+                .try_into()
+                .map_err(|_| format!("{tag}: not an fexit program"))?;
+            let id = typed
+                .attach()
+                .map_err(|error| format!("{tag}: attach to {} failed: {error}", spec.target_a))?;
+            Ok(ActiveLink::FExit {
+                program: spec.program.clone(),
+                id,
+            })
         }
     }
+}
+
+/// Load and attach one site, returning its link: validate, load the
+/// program, then link it. A program an earlier attach in this
+/// session loaded (rollback or detach leaves loads behind) skips
+/// the load when the recorded site matches.
+fn attach_one(
+    bpf: &mut Ebpf,
+    channel: Channel,
+    spec: &AttachSpec,
+    btf: &mut Option<Btf>,
+    loaded: &mut LoadedMap,
+) -> Result<ActiveLink, String> {
+    let tag = format!("{} channel program `{}`", channel, spec.program);
+    validate_spec_targets(&tag, spec)?;
+    if let Err(step) = load_one(bpf, &tag, spec, btf, loaded) {
+        return Err(match step {
+            LoadStepError::Refusal { message, .. } => message,
+            LoadStepError::Failed(failure) => format_failed_load(&tag, spec, &failure),
+        });
+    }
+    link_one(bpf, &tag, spec)
 }
 
 /// All present channel sessions: attempt plus optional lifecycle/copy.
@@ -1581,6 +1717,128 @@ mod tests {
         assert_eq!(declared.len(), 4);
         check_declared_maps(Channel::Copy, &declared).expect("C copy shape must pre-pass");
         assert!(declared_map_specs(b"not an elf").is_none());
+    }
+
+    #[test]
+    fn load_failure_text_keeps_errno_marker() {
+        // With an errno, the text is the errno's own strerror —
+        // carrying the `(os error N)` marker the kernel layer
+        // parses — and never the loader Display, even when a full
+        // verifier log rides along.
+        for raw in [13, 22] {
+            let failure = LoadFailure {
+                errno: Some(raw),
+                log: Some("jump out of range\nR2=0xffff888012345678\nmore log\n".to_string()),
+            };
+            let text = load_failure_text(&failure);
+            assert_eq!(text, std::io::Error::from_raw_os_error(raw).to_string());
+            assert!(
+                text.contains(&format!("(os error {raw})")),
+                "must keep the classification marker, got: {text}"
+            );
+            assert!(
+                !text.contains("ffff"),
+                "must never format the carried log, got: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn load_failure_text_redacts_without_errno() {
+        // Without an errno, the carried log renders as the bounded
+        // redacted tail: at most four lines, kernel addresses
+        // replaced, control bytes escaped.
+        let failure = LoadFailure {
+            errno: None,
+            log: Some(
+                "1: dropped\n2: dropped\n3: R1=0xffff888012345678\n4: imm=0xFFFFFFFF81234567\n5: ok\n6: ok\n".to_string(),
+            ),
+        };
+        let text = load_failure_text(&failure);
+        assert!(
+            !text.contains("ffff8880") && !text.contains("FFFFFFFF"),
+            "addresses must redact, got: {text}"
+        );
+        assert!(text.contains("0xADDR"), "got: {text}");
+        assert_eq!(text.split("; ").count(), 4, "got: {text}");
+        assert!(
+            !text.contains("dropped"),
+            "tail keeps four lines, got: {text}"
+        );
+        let bare = LoadFailure {
+            errno: None,
+            log: None,
+        };
+        assert_eq!(load_failure_text(&bare), "load refused");
+        let empty = LoadFailure {
+            errno: None,
+            log: Some("\n\n".to_string()),
+        };
+        assert_eq!(load_failure_text(&empty), "load refused");
+    }
+
+    #[test]
+    fn failed_load_message_shape() {
+        // Tracepoint loads name no site; tracing loads name their
+        // kernel function. Both carry the errno marker.
+        let tag = "attempt channel program `mv_swiotlb_attempt`";
+        let spec = AttachSpec::new("mv_swiotlb_attempt", AttachKind::Tracepoint, "s", "e");
+        let failure = LoadFailure {
+            errno: Some(22),
+            log: Some("jump out of range\n".to_string()),
+        };
+        let message = format_failed_load(tag, &spec, &failure);
+        assert!(
+            message.starts_with(&format!("{tag}: load failed: ")),
+            "got: {message}"
+        );
+        assert!(message.contains("(os error 22)"), "got: {message}");
+        assert!(!message.contains("jump out of range"), "got: {message}");
+        let tag = "lifecycle channel program `mv_unmap`";
+        let spec = AttachSpec::new(
+            "mv_unmap",
+            AttachKind::FEntry,
+            "__swiotlb_tbl_unmap_single",
+            "",
+        );
+        let failure = LoadFailure {
+            errno: Some(13),
+            log: None,
+        };
+        let message = format_failed_load(tag, &spec, &failure);
+        assert!(
+            message.starts_with(&format!(
+                "{tag}: load for __swiotlb_tbl_unmap_single failed: "
+            )),
+            "got: {message}"
+        );
+        assert!(message.contains("(os error 13)"), "got: {message}");
+    }
+
+    #[test]
+    fn validate_spec_targets_matrix() {
+        // Every refusal text the attach path ever emitted stays
+        // byte-identical under the split.
+        let tag = "attempt channel program `mv_swiotlb_attempt`";
+        let spec = AttachSpec::new("mv_swiotlb_attempt", AttachKind::Tracepoint, "s", "e");
+        assert!(validate_spec_targets(tag, &spec).is_ok());
+        let spec = AttachSpec::new("mv_swiotlb_attempt", AttachKind::Tracepoint, "", "e");
+        assert_eq!(
+            validate_spec_targets(tag, &spec),
+            Err(format!("{tag}: tracepoint needs a category and an event"))
+        );
+        let spec = AttachSpec::new("mv_unmap", AttachKind::FEntry, "fn", "");
+        assert!(validate_spec_targets(tag, &spec).is_ok());
+        let spec = AttachSpec::new("mv_unmap", AttachKind::FEntry, "", "");
+        assert_eq!(
+            validate_spec_targets(tag, &spec),
+            Err(format!("{tag}: tracing attach needs a kernel function"))
+        );
+        let spec = AttachSpec::new("mv_unmap", AttachKind::FEntry, "fn", "x");
+        assert_eq!(
+            validate_spec_targets(tag, &spec),
+            Err(format!("{tag}: tracing attach takes no second target"))
+        );
     }
 
     #[test]
