@@ -678,19 +678,40 @@ fn spec_no_scriptlets_or_privilege() {
         text.lines().any(|l| l.trim() == "ExclusiveArch: x86_64"),
         "ExclusiveArch x86_64"
     );
+    // The Requires floor sync lives in spec_requires_derived
+    // (placeholder in the committed spec) plus
+    // rpm_manual_deps_only (built artifact vs the oracle).
+}
+
+#[test]
+fn spec_requires_derived() {
+    // The committed spec carries the floor placeholder, never a
+    // literal: package-rpm.py substitutes the floor it derives
+    // from the consumed bundle (shared .deb parser) and then
+    // re-verifies the built .rpm Requires against it, so neither
+    // side can drift. rpm_manual_deps_only pins the built
+    // artifact against the oracle; here the placeholder itself.
+    let text = spec_text();
+    assert_eq!(
+        text.matches("@MEMVEIL_GLIBC_FLOOR@").count(),
+        1,
+        "want exactly one floor placeholder"
+    );
     let requires = text
         .lines()
         .find_map(|line| line.strip_prefix("Requires:").map(str::trim))
         .expect("manual Requires missing (no auto-deps)");
-    let set = h::ensure_tarball();
-    let binary = set.bundle.join("bin").join("memveil");
-    let lib = set.bundle.join("lib").join("memveil").join("libgcc_s.so.1");
-    let (major, minor) = h::glibc_floor(&[binary, lib]);
-    assert_eq!(requires, format!("glibc >= {major}.{minor}"), "{requires}");
+    assert_eq!(requires, "glibc >= @MEMVEIL_GLIBC_FLOOR@", "{requires}");
     assert!(
         !requires.contains("libelf") && !requires.contains("libz"),
         "{requires}"
     );
+    for line in text.lines().filter(|l| l.starts_with("Requires:")) {
+        assert!(
+            !line.chars().any(|c| c.is_ascii_digit()),
+            "literal version leaked into Requires: {line}"
+        );
+    }
 }
 
 fn has_privileged_attr(text: &str) -> bool {

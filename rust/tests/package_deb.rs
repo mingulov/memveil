@@ -179,12 +179,13 @@ fn control_fields() {
 }
 
 #[test]
-fn abi_node_floor() {
-    // The toolchain libgcc requires the non-numeric GLIBC_ABI_GNU2_TLS
-    // node (first provided by glibc 2.40): the payload must actually
-    // carry it (so this derivation is not vacuous), the derived floor
-    // must cover its introducing release, and the packager's own parser
-    // must map it while failing closed on unknown ABI nodes.
+fn floor_without_abi_nodes() {
+    // The pinned Debian libgcc carries no non-numeric GLIBC_ABI_*
+    // nodes, so the derived floor is exactly the numeric max
+    // (2.35, from the shipped lib; the binary needs at most
+    // 2.34): the payload must carry no ABI token at all, and the
+    // packager's own parser must still map the known node while
+    // failing closed on unknown ones.
     let deb = h::ensure_deb();
     let extracted = h::deb_extract(&deb, "deb-abifloor");
     let mut tokens = BTreeSet::new();
@@ -192,15 +193,9 @@ fn abi_node_floor() {
         let text = h::run_ok("readelf", &["-V", elf.to_str().unwrap()], None);
         tokens.extend(h::parse_glibc_abi_tokens(&text));
     }
-    assert!(
-        tokens.contains("GLIBC_ABI_GNU2_TLS"),
-        "payload lost its ABI need: {tokens:?}"
-    );
+    assert!(tokens.is_empty(), "payload gained ABI needs: {tokens:?}");
     let floor = payload_glibc_floor(&extracted);
-    assert!(
-        floor >= (2, 40),
-        "floor {floor:?} under-declares the ABI need"
-    );
+    assert_eq!(floor, (2, 35), "floor {floor:?} is not the 2.35 pin");
     let script = h::scripts_dir().join("package-deb.py");
     let probe = format!(
         "import importlib.util; l = importlib.util.spec_from_file_location('m', {script:?}); \

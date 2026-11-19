@@ -4,7 +4,8 @@
 # BPF inspection objects, and profiles with zero flags or
 # environment. The Rust userspace embeds its eBPF objects and
 # links the Aya loader statically: no bridge ships, and the
-# only private library is the toolchain libgcc.
+# only private library is the pinned Debian libgcc (see
+# rust/packaging/libgcc/PROVENANCE.txt).
 #
 # Build (on an x86-64 host with cargo, rpmbuild, and the
 # repository pin; this package is built outside the archive):
@@ -29,11 +30,12 @@
 # package-name form `glibc >= X.Y` rather than the
 # generator-spelled virtual `libc.so.6(GLIBC_X.Y)(64bit)`
 # provide; its value is the max need across ALL required libc
-# version nodes (numeric GLIBC_x.y plus ABI nodes such as the
-# toolchain libgcc's GLIBC_ABI_GNU2_TLS, first provided by
-# glibc 2.40 -- see the .deb derivation and
-# spec_no_scriptlets_or_privilege), kept in sync by hand
-# because the spec is static text.
+# version nodes (numeric GLIBC_x.y plus ABI nodes -- see the
+# .deb derivation), derived by package-rpm.py from the consumed
+# bundle at build time: the Requires below carries the
+# @MEMVEIL_GLIBC_FLOOR@ placeholder (never a literal), which
+# the packager substitutes and then re-verifies against the
+# built .rpm (spec_requires_derived pins the placeholder).
 # The AutoReq/AutoProv tags are the effective switch on rpm
 # >= 4.9 (the __find_* nil globals predate the fileattrs
 # generators and no longer suppress anything on their own);
@@ -63,7 +65,7 @@ ExclusiveArch: x86_64
 Source0: memveil-%{version}.tar.gz
 BuildRequires: binutils
 BuildRequires: python3
-Requires: glibc >= 2.40
+Requires: glibc >= @MEMVEIL_GLIBC_FLOOR@
 
 %description
 Record swiotlb bounce activity, mapping lifetimes, and executed

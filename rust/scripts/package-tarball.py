@@ -17,8 +17,9 @@ the package.
 Layout of ``dist/memveil-<version>/``::
 
     bin/memveil            relocatable binary (RUNPATH $ORIGIN/../lib/memveil)
-    lib/memveil/*.so*              Rust closure (the toolchain libgcc_s only;
-                           the Aya loader links statically, no bridge ships)
+    lib/memveil/*.so*              Rust closure (the pinned Debian libgcc_s
+                           only; the Aya loader links statically, no
+                           bridge ships)
     bpf/*.bpf.o            Aya BPF objects (attempt, lifecycle,
                            copy) as inspection copies of the
                            bytes embedded in the binary
@@ -84,11 +85,38 @@ SYSTEM_ALLOW = {
 }
 
 # NEEDED names outside SYSTEM_ALLOW that the closure walk may
-# ship, with the tool that locates each provider file. Any
-# other name fails the build instead of guessing.
+# ship. Any other name fails the build instead of guessing.
+# The single entry resolves to the pinned vendored provider
+# below (verified at every build), never to the host toolchain:
+# the host libgcc requires GLIBC_ABI_GNU2_TLS (glibc 2.40 floor),
+# while the payload needs only ancient unwinder symbols.
 CLOSURE_PROVIDERS = {
-    "libgcc_s.so.1": ("gcc", "-print-file-name=libgcc_s.so.1"),
+    "libgcc_s.so.1": "vendored-deb",
 }
+
+# Pinned libgcc provider: Debian trixie libgcc-s1 14.2.0-19
+# (amd64), vendored as the exact archive .deb under
+# rust/packaging/libgcc/. The .deb sha256 is verified before
+# anything is read from it and the member sha256 again after
+# extraction; any mismatch refuses the package. Provenance,
+# adoption proofs, and the update procedure live in
+# rust/packaging/libgcc/PROVENANCE.txt.
+LIBGCC_DIR = os.path.join("rust", "packaging", "libgcc")
+LIBGCC_DEB_NAME = "libgcc-s1_14.2.0-19_amd64.deb"
+LIBGCC_DEB_SHA256 = \
+    "3c71917b490d1a17aed43196a2787a256ecf060526cdb20216a74bedc061b150"
+LIBGCC_SO_MEMBER = "usr/lib/x86_64-linux-gnu/libgcc_s.so.1"
+LIBGCC_SO_SHA256 = \
+    "30c61ab012a4241bed033725a09b61f5fdd3bb7df95ee852d0b096520524c7af"
+LIBGCC_PROVIDER = "debian-stable-libgcc-s1"
+LIBGCC_PROVIDER_VERSION = "14.2.0-19"
+# Vendored GPL-3 text staged next to the Debian binary (Debian's
+# common-licenses grant; same FSF text as the Fedora host copy
+# modulo FSF URL modernization, pinned so every build host
+# stages identical bytes).
+LIBGCC_GPL3_NAME = "GPL-3.txt"
+LIBGCC_GPL3_SHA256 = \
+    "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
 
 # (OUT_DIR channel, shipped BPF file name).
 CHANNELS = (
@@ -99,19 +127,26 @@ CHANNELS = (
 
 # Host license texts for the shipped libgcc, as (staged rel,
 # candidate host paths): the first readable candidate wins.
-# Portability: the GPL-3 text resolves on Fedora (libgcc
-# COPYING3) and Debian (common-licenses). Debian ships no
-# standalone GCC exception text, so the exception entry falls
-# back to the vendored copy below (last candidate, used only
-# when no host text exists).
+# Debian ships no standalone GCC exception text, so the
+# exception entry falls back to the vendored copy below (last
+# candidate, used only when no host text exists). The GPL-3
+# text is vendored instead (VENDORED_LICENSES): it pairs with
+# the vendored Debian binary and stays identical on every
+# build host.
 GCC_LICENSES = (
-    ("licenses/GPL-3.0.txt", (
-        "/usr/share/licenses/libgcc/COPYING3",
-        "/usr/share/common-licenses/GPL-3",
-    )),
     ("licenses/RUNTIME.LIBRARY.EXCEPTION", (
         "/usr/share/licenses/libgcc/COPYING.RUNTIME",
     )),
+)
+
+# Vendored license texts, as (staged rel, repo-root rel,
+# sha256): pinned bytes staged on every host, verified before
+# staging. The GPL-3 grant pairs with the vendored Debian
+# libgcc above.
+VENDORED_LICENSES = (
+    ("licenses/GPL-3.0.txt",
+     os.path.join(LIBGCC_DIR, LIBGCC_GPL3_NAME),
+     LIBGCC_GPL3_SHA256),
 )
 
 # Vendored fallback for the exception entry, root-relative: the
@@ -153,6 +188,18 @@ def contained(path, directory):
     base = os.path.realpath(directory)
     full = os.path.realpath(path)
     return full == base or full.startswith(base + os.sep)
+
+
+def manifest_source(root, source):
+    """Stable manifest display for a license source path.
+
+    Sources inside the input tree record repo-relative (stable
+    across clones); host paths record verbatim.
+    """
+    base = os.path.realpath(root)
+    if source == base or source.startswith(base + os.sep):
+        return os.path.relpath(source, base)
+    return source
 
 
 def tar_member_mode(full, is_dir):
@@ -365,21 +412,179 @@ def resolve_bpf_dir(target_dir, explicit):
         os.path.join(out, "memveil-ebpf-attempt")))
 
 
-def closure_provider(name):
-    """Provider file for a shippable NEEDED name."""
+def closure_provider(name, vendored):
+    """Provider file for a shippable NEEDED name.
+
+    `vendored` maps shippable names to their verified provider
+    files (resolved once per run by `vendored_libgcc`). Unknown
+    names return None so the caller fails instead of guessing.
+    """
     if name not in CLOSURE_PROVIDERS:
         return None
-    tool, flag = CLOSURE_PROVIDERS[name][0], CLOSURE_PROVIDERS[name][1]
-    if shutil.which(tool) is None:
-        fail("cannot locate %s: %s is not installed" % (name, tool))
-    proc = run([tool, flag])
+    if CLOSURE_PROVIDERS[name] != "vendored-deb":
+        fail("no resolver for shippable NEEDED %s" % name)
+    path = vendored.get(name)
+    if path is None or not os.path.isfile(path):
+        fail("vendored provider missing for %s" % name)
+    return path
+
+
+def read_ar_member(archive_path, want_prefix):
+    """Raw bytes of the first ar member starting with want_prefix.
+
+    Minimal System V ar reader for the .deb container: global
+    magic, 60-byte headers, even-byte padding, short names only
+    (long-name references and the symbol/string tables never
+    carry data). Anything malformed fails closed.
+    """
+    try:
+        with open(archive_path, "rb") as handle:
+            archive = handle.read()
+    except OSError as exc:
+        fail("cannot read %s: %s" % (archive_path, exc))
+    if archive[:8] != b"!<arch>\n":
+        fail("not an ar archive: %s" % archive_path)
+    pos = 8
+    while pos + 60 <= len(archive):
+        header = archive[pos:pos + 60]
+        name = header[:16].decode("ascii", "replace").rstrip().rstrip("/")
+        try:
+            size = int(header[48:58].decode("ascii").strip() or "0")
+        except ValueError:
+            fail("bad ar member size in %s" % archive_path)
+        start = pos + 60
+        end = start + size
+        if size < 0 or end > len(archive):
+            fail("ar member overruns %s" % archive_path)
+        if name.startswith(want_prefix):
+            return archive[start:end]
+        pos = end + (end % 2)
+    fail("no %s* member in %s" % (want_prefix, archive_path))
+
+
+def extract_deb_file(deb_path, member):
+    """Exact bytes of `member` from a .deb data archive.
+
+    Verifies nothing itself (callers pin the .deb and the member
+    hashes); refuses unknown data compressions, duplicate
+    members, links, and anything but a regular file.
+    """
+    data = read_ar_member(deb_path, "data.tar")
+    try:
+        tar = tarfile.open(fileobj=io.BytesIO(data), mode="r:*")
+    except (tarfile.TarError, OSError) as exc:
+        fail("cannot open data archive in %s: %s" % (deb_path, exc))
+    with tar:
+        hits = []
+        for info in tar.getmembers():
+            name = info.name
+            if name.startswith("./"):
+                name = name[2:]
+            if name == member:
+                hits.append(info)
+        if len(hits) != 1:
+            fail("want exactly one %s in %s, found %d"
+                 % (member, deb_path, len(hits)))
+        info = hits[0]
+        if not info.isfile() or info.issym() or info.islnk():
+            fail("not a regular file in %s: %s" % (deb_path, member))
+        try:
+            extracted = tar.extractfile(info)
+            raw = extracted.read() if extracted is not None else None
+        except (tarfile.TarError, OSError) as exc:
+            fail("cannot extract %s from %s: %s"
+                 % (member, deb_path, exc))
+    if raw is None:
+        fail("cannot extract %s from %s" % (member, deb_path))
+    return raw
+
+
+def vendored_libgcc(root, scratch):
+    """Verified provider libgcc path, extracted under scratch.
+
+    Verifies the vendored .deb sha256, extracts the single
+    member, verifies the member sha256, and writes it under
+    scratch (re-read after the write). Every mismatch refuses
+    the package.
+    """
+    deb = os.path.join(root, LIBGCC_DIR, LIBGCC_DEB_NAME)
+    if not os.path.isfile(deb) or os.path.islink(deb):
+        fail("vendored libgcc .deb missing: %s"
+             % os.path.join(LIBGCC_DIR, LIBGCC_DEB_NAME))
+    if sha256_file(deb) != LIBGCC_DEB_SHA256:
+        fail("vendored libgcc .deb differs from its pin: %s" % deb)
+    raw = extract_deb_file(deb, LIBGCC_SO_MEMBER)
+    if hashlib.sha256(raw).hexdigest() != LIBGCC_SO_SHA256:
+        fail("vendored libgcc member differs from its pin: %s"
+             % LIBGCC_SO_MEMBER)
+    dest = os.path.join(scratch, "libgcc_s.so.1")
+    if not contained(dest, scratch):
+        fail("vendored libgcc staging escapes: %s" % dest)
+    try:
+        with open(dest, "wb") as handle:
+            handle.write(raw)
+    except OSError as exc:
+        fail("vendored libgcc staging failed: %s" % exc)
+    if sha256_file(dest) != LIBGCC_SO_SHA256:
+        fail("vendored libgcc mis-staged under %s" % scratch)
+    print("package-tarball: vendored libgcc %s verified (%s)"
+          % (LIBGCC_PROVIDER_VERSION, LIBGCC_PROVIDER))
+    return dest
+
+
+def dynamic_symbol_versions(path):
+    """(undefined, defined) versioned-symbol sets from readelf.
+
+    Undefined entries are (name, version) pairs the file imports;
+    defined entries are (name, version) pairs it exports. Both
+    come from `readelf --dyn-syms -W`; any readelf failure or
+    unparsable line fails closed.
+    """
+    proc = run(["readelf", "--dyn-syms", "-W", path])
     if proc.returncode != 0:
-        fail("cannot locate %s: %s %s failed" % (name, tool, flag))
-    candidate = os.path.realpath(proc.stdout.strip().splitlines()[0])
-    if not os.path.isfile(candidate):
-        fail("cannot locate %s: %s printed %r"
-             % (name, tool, proc.stdout.strip()))
-    return candidate
+        fail("readelf --dyn-syms failed on %s:\n%s"
+             % (path, proc.stderr))
+    undefined = set()
+    defined = set()
+    for line in proc.stdout.splitlines():
+        match = re.match(
+            r"^\s*\d+:\s+[0-9a-f]+\s+\d+\s+\S+\s+\S+\s+\S+\s+"
+            r"(\S+)\s+(\S+?)(?:\s+\(\d+\))?\s*$", line)
+        if match is None:
+            continue
+        ndx, name = match.group(1), match.group(2)
+        if "@@" in name:
+            base, version = name.split("@@", 1)
+            if ndx != "UND":
+                defined.add((base, version))
+        elif "@" in name:
+            base, version = name.split("@", 1)
+            if ndx == "UND" and version:
+                undefined.add((base, version))
+    if not undefined and not defined:
+        fail("no dynamic symbols parsed from %s" % path)
+    return undefined, defined
+
+
+def check_libgcc_unwinder(binary, lib):
+    """Refuse when the binary needs libgcc symbols the lib lacks.
+
+    The payload's libgcc needs are its undefined (name, GCC_*
+    version) pairs: every one must be defined by the shipped lib
+    at that same version. A toolchain bump that widens the need
+    refuses here instead of shipping an unsatisfiable pair.
+    """
+    needs, _defined = dynamic_symbol_versions(binary)
+    _needs, provides = dynamic_symbol_versions(lib)
+    missing = sorted((name, version) for name, version in needs
+                     if version.startswith("GCC_")
+                     and (name, version) not in provides)
+    if missing:
+        fail("shipped libgcc lacks %d symbol(s) the binary needs: %s"
+             % (len(missing),
+                ", ".join("%s@%s" % pair for pair in missing)))
+    print("package-tarball: shipped libgcc satisfies the "
+          "binary's unwinder needs")
 
 
 def cargo_tree_closure(rust_dir, manifest, package):
@@ -682,14 +887,17 @@ def notices_text(version, lock_sha, ebpf_lock_sha, crates,
         "are `LICENSE` and `LICENSES/`). All paths below are",
         "bundle-relative.",
         "",
-        "No vendored or patched dependencies: every Rust crate",
-        "below comes from the crates.io registry pinned by",
+        "No vendored or patched Rust dependencies: every Rust",
+        "crate below comes from the crates.io registry pinned by",
         "`rust/Cargo.lock` (sha256 %s) and" % lock_sha,
         "`rust/crates/ebpf/Cargo.lock` (sha256 %s)." % ebpf_lock_sha,
         "The Aya loader links statically and no bridge shared",
         "object ships.",
         "",
-        "- `lib/memveil/libgcc_s.so.1` from the build host toolchain:",
+        "- `lib/memveil/libgcc_s.so.1` from the pinned Debian",
+        "  provider (vendored %s %s, amd64; provenance and" % (
+            "libgcc-s1", LIBGCC_PROVIDER_VERSION),
+        "  adoption proofs in rust/packaging/libgcc/PROVENANCE.txt):",
         "  %s" % lib_source,
         "  GPL-3.0-only WITH GCC-exception-3.1; full texts in",
         "  `licenses/GPL-3.0.txt` plus",
@@ -853,6 +1061,7 @@ def main(argv):
             "version": result.stdout.splitlines()[0],
             "sha256": sha256_file(tool)}
     staged = None
+    provider_work = None
     # A failed run leaves no staging directory and no
     # apparently successful final candidate: every failure
     # below drops this run's tag candidates (once the tag
@@ -911,6 +1120,20 @@ def main(argv):
                      % (binary_input, shipped, source, digest))
         print("package-tarball: binary embeds all three BPF inputs")
 
+        # Pinned closure provider: verify and extract the vendored
+        # libgcc before the closure walk consumes it, and prove it
+        # satisfies the binary's unwinder needs (a toolchain bump
+        # that widens the need refuses here).
+        provider_work = os.path.join(out_dir, ".libgcc")
+        shutil.rmtree(provider_work, ignore_errors=True)
+        try:
+            os.makedirs(provider_work)
+        except OSError as exc:
+            fail("provider staging setup failed: %s" % exc)
+        provider_lib = vendored_libgcc(root, provider_work)
+        check_libgcc_unwinder(binary_input, provider_lib)
+        vendored = {"libgcc_s.so.1": provider_lib}
+
         # Cargo closure facts (offline, locked): the manifest and
         # the generated notices bind exactly these crates.
         lock_path = os.path.join(rust_dir, "Cargo.lock")
@@ -964,7 +1187,7 @@ def main(argv):
                     validate_lib_name(name, os.path.basename(path))
                 except ValueError as err:
                     fail(str(err))
-                provider = closure_provider(name)
+                provider = closure_provider(name, vendored)
                 if provider is None:
                     fail("no source for NEEDED %s (from %s)"
                          % (name, os.path.basename(path)))
@@ -1077,6 +1300,15 @@ def main(argv):
                      % (staged_rel, ", ".join(paths)))
             shutil.copy2(provider, os.path.join(staged, staged_rel))
             license_sources[staged_rel] = os.path.realpath(provider)
+        for staged_rel, root_rel, want_sha in VENDORED_LICENSES:
+            source = os.path.join(root, root_rel)
+            if not os.path.isfile(source) or os.path.islink(source):
+                fail("vendored license text missing: %s" % root_rel)
+            if sha256_file(source) != want_sha:
+                fail("vendored license text differs from its pin: %s"
+                     % root_rel)
+            shutil.copy2(source, os.path.join(staged, staged_rel))
+            license_sources[staged_rel] = os.path.realpath(source)
         # Linked-crate notice files from the locked sources (MIT
         # `bytes` et al.): every Cargo closure record stages its
         # texts here, before the staged-tree walk below binds
@@ -1212,8 +1444,8 @@ def main(argv):
                 "source_root": "input-tree",
                 "source_path": (os.path.abspath(binary_input)
                                 if relative == "bin/memveil"
-                                else "host-toolchain:"
-                                + os.path.basename(relative)),
+                                else os.path.join(
+                                    LIBGCC_DIR, LIBGCC_DEB_NAME)),
                 "staged_input_path": source_relative,
             }
         for relative in list(observed):
@@ -1228,7 +1460,8 @@ def main(argv):
         lib_rel = "lib/memveil/" + sorted(ship)[0]
         notices = notices_text(
             version, lock_sha, ebpf_lock_sha, crates, ebpf_crates,
-            ship[sorted(ship)[0]], lib_provider_sha[lib_rel],
+            os.path.join(LIBGCC_DIR, LIBGCC_DEB_NAME) + " member "
+            + LIBGCC_SO_MEMBER, lib_provider_sha[lib_rel],
             observed[lib_rel])
         with open(os.path.join(staged, "THIRD-PARTY-NOTICES.md"),
                   "w", encoding="utf-8") as handle:
@@ -1246,8 +1479,6 @@ def main(argv):
             fail("canonical executable failed version check: "
                  + rerun.stderr)
 
-        gcc_version = run(["gcc", "--version"]).stdout.splitlines()[0] \
-            if shutil.which("gcc") else "unknown"
         # Known manifest gaps, intentionally unported (not
         # oversights): no `canonical_runtime` entry — the Rust
         # baseline (x86-64-v1) runs everywhere >= v1, so no
@@ -1276,9 +1507,12 @@ def main(argv):
             "system_libraries": sorted(SYSTEM_ALLOW),
             "runtime_provenance": {
                 lib_rel: {
-                    "source_path": ship[sorted(ship)[0]],
-                    "provider": "host-toolchain-gcc",
-                    "provider_version": gcc_version,
+                    "source_path": os.path.join(
+                        LIBGCC_DIR, LIBGCC_DEB_NAME),
+                    "provider": LIBGCC_PROVIDER,
+                    "provider_version": LIBGCC_PROVIDER_VERSION,
+                    "member": LIBGCC_SO_MEMBER,
+                    "deb_sha256": LIBGCC_DEB_SHA256,
                     "member_sha256": lib_provider_sha[lib_rel],
                     "pre_normalization_sha256":
                         lib_provider_sha[lib_rel],
@@ -1288,7 +1522,7 @@ def main(argv):
             },
             "runtime_licenses": {
                 rel: {"sha256": sha256_file(os.path.join(staged, rel)),
-                      "source": source}
+                      "source": manifest_source(root, source)}
                 for rel, source in sorted(license_sources.items())
             },
             "first_party": {
@@ -1466,6 +1700,11 @@ def main(argv):
                 os.unlink(staged)
             else:
                 shutil.rmtree(staged, ignore_errors=True)
+        if provider_work is not None:
+            if os.path.islink(provider_work):
+                os.unlink(provider_work)
+            else:
+                shutil.rmtree(provider_work, ignore_errors=True)
 
 
 if __name__ == "__main__":

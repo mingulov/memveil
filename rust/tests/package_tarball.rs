@@ -460,7 +460,15 @@ fn permissions() {
 fn notices_cover_closure() {
     let set = h::ensure_tarball();
     let text = fs::read_to_string(set.bundle.join("THIRD-PARTY-NOTICES.md")).unwrap();
-    for token in ["aya", "libgcc_s.so.1", "GCC-exception", "Cargo.lock"] {
+    for token in [
+        "aya",
+        "libgcc_s.so.1",
+        "GCC-exception",
+        "Cargo.lock",
+        "libgcc-s1",
+        "14.2.0-19",
+        "PROVENANCE.txt",
+    ] {
         assert!(text.contains(token), "notices lack {token}");
     }
     assert!(
@@ -731,6 +739,150 @@ fn runtime_provenance_pinned() {
         assert_eq!(norm_out, digest, "{rel}: normalization output != staged");
         assert_eq!(pre, member, "{rel}: pre-normalization != member");
     }
+}
+
+#[test]
+fn vendored_libgcc_provenance() {
+    // The shipped lib is the pinned Debian provider: the manifest
+    // record names it, the .deb pin equals the vendored bytes in
+    // the pristine tree, and the member pin equals the
+    // pre-normalization bytes (the staged lib is stripped, so it
+    // binds through the normalization bridge instead).
+    let set = h::ensure_tarball();
+    let manifest = set.bundle.join("MANIFEST.json");
+    let rel = "lib/memveil/libgcc_s.so.1";
+    let field = |key: &str| {
+        h::json_probe(
+            &manifest,
+            &format!("d['runtime_provenance'][{rel:?}][{key:?}]"),
+        )
+    };
+    assert_eq!(field("provider"), "debian-stable-libgcc-s1");
+    assert_eq!(field("provider_version"), "14.2.0-19");
+    assert_eq!(
+        field("member"),
+        "usr/lib/x86_64-linux-gnu/libgcc_s.so.1"
+    );
+    assert_eq!(
+        field("source_path"),
+        "rust/packaging/libgcc/libgcc-s1_14.2.0-19_amd64.deb"
+    );
+    let deb = h::pristine_root()
+        .join("rust")
+        .join("packaging")
+        .join("libgcc")
+        .join("libgcc-s1_14.2.0-19_amd64.deb");
+    assert!(deb.is_file(), "pristine tree lacks the vendored .deb");
+    assert_eq!(field("deb_sha256"), h::sha256_file(&deb));
+    assert_eq!(
+        field("deb_sha256"),
+        "3c71917b490d1a17aed43196a2787a256ecf060526cdb20216a74bedc061b150"
+    );
+    assert_eq!(
+        field("member_sha256"),
+        "30c61ab012a4241bed033725a09b61f5fdd3bb7df95ee852d0b096520524c7af"
+    );
+    assert_eq!(
+        field("member_sha256"),
+        h::json_probe(&manifest, &format!("d['normalization'][{rel:?}]['source_sha256']")),
+        "member pin != normalization source"
+    );
+}
+
+#[test]
+fn staged_gpl3_is_vendored() {
+    // The GPL-3 text pairs with the vendored Debian binary and is
+    // identical on every build host: staged bytes must equal the
+    // vendored bytes in the pristine tree.
+    let set = h::ensure_tarball();
+    let vendored = h::pristine_root()
+        .join("rust")
+        .join("packaging")
+        .join("libgcc")
+        .join("GPL-3.txt");
+    assert!(vendored.is_file(), "pristine tree lacks GPL-3.txt");
+    assert_eq!(
+        fs::read(set.bundle.join("licenses").join("GPL-3.0.txt")).unwrap(),
+        fs::read(&vendored).unwrap(),
+        "staged GPL-3 != vendored GPL-3"
+    );
+}
+
+#[test]
+fn vendored_libgcc_helpers() {
+    // Pure-helper probes against the script module (no packaging
+    // run): extraction returns the pinned member bytes, a doctored
+    // .deb refuses on the pin, and the unwinder gate passes the
+    // real pair while refusing an unsatisfiable one.
+    let script = h::scripts_dir().join("package-tarball.py");
+    let deb = h::pristine_root()
+        .join("rust")
+        .join("packaging")
+        .join("libgcc")
+        .join("libgcc-s1_14.2.0-19_amd64.deb");
+    let probe = format!(
+        "import hashlib, importlib.util; \
+         l = importlib.util.spec_from_file_location('m', {script:?}); \
+         m = importlib.util.module_from_spec(l); l.loader.exec_module(m); \
+         raw = m.extract_deb_file({deb:?}, m.LIBGCC_SO_MEMBER); \
+         assert len(raw) == 182856, len(raw); \
+         assert hashlib.sha256(raw).hexdigest() == m.LIBGCC_SO_SHA256; \
+         assert m.sha256_file({deb:?}) == m.LIBGCC_DEB_SHA256; \
+         print('extract-ok')"
+    );
+    let text = h::run_ok("python3", &["-B", "-c", &probe], None);
+    assert!(text.contains("extract-ok"), "{text}");
+    let tmp = h::scratch("libgcc-doctor");
+    let mut bytes = fs::read(&deb).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0x01;
+    // A doctored .deb under a scratch root refuses on the pin
+    // (vendored_libgcc resolves the .deb under the given root).
+    let root = tmp.join("root");
+    let staged_deb = root
+        .join("rust")
+        .join("packaging")
+        .join("libgcc")
+        .join("libgcc-s1_14.2.0-19_amd64.deb");
+    fs::create_dir_all(staged_deb.parent().unwrap()).unwrap();
+    fs::write(&staged_deb, &bytes).unwrap();
+    let probe = format!(
+        "import importlib.util; \
+         l = importlib.util.spec_from_file_location('m', {script:?}); \
+         m = importlib.util.module_from_spec(l); l.loader.exec_module(m); \
+         m.vendored_libgcc({root:?}, {tmp:?})"
+    );
+    let out = h::run("python3", &["-B", "-c", &probe], None);
+    assert!(!out.status.success(), "doctored .deb verified");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("differs from its pin"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let set = h::ensure_tarball();
+    let binary = set.bundle.join("bin").join("memveil");
+    let lib = set.bundle.join("lib").join("memveil").join("libgcc_s.so.1");
+    let probe = format!(
+        "import importlib.util; \
+         l = importlib.util.spec_from_file_location('m', {script:?}); \
+         m = importlib.util.module_from_spec(l); l.loader.exec_module(m); \
+         m.check_libgcc_unwinder({binary:?}, {lib:?}); print('unwind-ok')"
+    );
+    let text = h::run_ok("python3", &["-B", "-c", &probe], None);
+    assert!(text.contains("unwind-ok"), "{text}");
+    let probe = format!(
+        "import importlib.util; \
+         l = importlib.util.spec_from_file_location('m', {script:?}); \
+         m = importlib.util.module_from_spec(l); l.loader.exec_module(m); \
+         m.check_libgcc_unwinder({binary:?}, {binary:?})"
+    );
+    let out = h::run("python3", &["-B", "-c", &probe], None);
+    assert!(!out.status.success(), "unsatisfiable pair passed");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("shipped libgcc lacks 12 symbol(s)"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]

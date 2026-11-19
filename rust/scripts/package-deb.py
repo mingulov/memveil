@@ -9,8 +9,9 @@ code resolves with zero flags or environment::
 
     usr/bin/memveil                 binary (RUNPATH $ORIGIN/../lib/memveil),
                                     stripped
-    usr/lib/memveil/*.so*           Rust closure (the toolchain libgcc_s
-                                    only), stripped (--strip-unneeded)
+    usr/lib/memveil/*.so*           Rust closure (the pinned Debian
+                                    libgcc_s only), stripped
+                                    (--strip-unneeded)
     usr/lib/memveil/*.bpf.o         Aya BPF inspection objects (attempt,
                                     lifecycle, copy) beside the runtime:
                                     arch-dependent ELF under /usr/share
@@ -108,12 +109,16 @@ def run(argv, **kwargs):
 
 
 # Non-numeric libc version nodes and the glibc release that first
-# provides each. `GLIBC_ABI_GNU2_TLS` (the toolchain libgcc's static-TLS
-# ABI) arrives with glibc 2.40: the same payload bytes fail at `version`
-# under a glibc 2.39 loader (`version GLIBC_ABI_GNU2_TLS not found`) and
-# run under 2.40, so a numeric-only floor would under-declare. An
-# unknown `GLIBC_ABI_*` need fails the package until this table learns
-# its introducing release (prove it on the oldest providing loader).
+# provides each. `GLIBC_ABI_GNU2_TLS` (a static-TLS ABI the former
+# toolchain libgcc required) arrives with glibc 2.40: with that
+# provider the same payload bytes failed at `version` under a
+# glibc 2.39 loader (`version GLIBC_ABI_GNU2_TLS not found`) and
+# ran under 2.40, so a numeric-only floor would have
+# under-declared. The pinned Debian provider carries no ABI
+# nodes; this table stays as the fail-closed guard when a future
+# need appears. An unknown `GLIBC_ABI_*` need fails the package
+# until this table learns its introducing release (prove it on
+# the oldest providing loader).
 GLIBC_ABI_FLOORS = {
     "GLIBC_ABI_GNU2_TLS": (2, 40),
 }

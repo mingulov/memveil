@@ -27,6 +27,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -76,6 +77,48 @@ def verify_bundle(bundle):
         if sha256_file(full) != want:
             fail("bundle payload differs from MANIFEST: %s" % rel)
     return manifest
+
+
+def deb_module():
+    """package-deb.py as a module (shared glibc-floor derivation).
+
+    The RPM Requires derives through the same parser and ABI
+    table as the .deb Depends, so the two floors cannot drift
+    apart; unknown ABI nodes fail here exactly as there.
+    """
+    import importlib.util
+
+    path = os.path.join(HERE, "package-deb.py")
+    if not os.path.isfile(path):
+        fail("shared derivation missing: %s" % path)
+    loaded = importlib.util.spec_from_file_location(
+        "memveil_package_deb", path)
+    module = importlib.util.module_from_spec(loaded)
+    loaded.loader.exec_module(module)
+    return module
+
+
+def bundle_glibc_floor(bundle, deb):
+    """glibc floor derived from the consumed bundle's ELF files.
+
+    Runs the shared .deb derivation over the bundle binary plus
+    every shipped .so, so the RPM Requires always matches the
+    bytes being shipped, never a stale literal.
+    """
+    binary = os.path.join(bundle, "bin", "memveil")
+    libdir = os.path.join(bundle, "lib", "memveil")
+    if not os.path.isfile(binary) or os.path.islink(binary):
+        fail("bundle lacks bin/memveil")
+    if not os.path.isdir(libdir):
+        fail("bundle lacks lib/memveil")
+    elfs = [binary]
+    for name in sorted(os.listdir(libdir)):
+        if re.fullmatch(r"[^/]+\.so(\..*)?", name) \
+                and os.path.isfile(os.path.join(libdir, name)):
+            elfs.append(os.path.join(libdir, name))
+    if len(elfs) < 2:
+        fail("bundle ships no shared library under lib/memveil")
+    return deb.glibc_floor(elfs)
 
 
 def git_tree_clean(root):
@@ -318,6 +361,8 @@ def main(argv):
     bundle = os.path.realpath(bundle)
     manifest = verify_bundle(bundle)
     engine = manifest["engine_version"]
+    floor = bundle_glibc_floor(bundle, deb_module())
+    print("package-rpm: bundle glibc floor %s" % floor)
 
     spec = os.path.join(RUN_RUST_DIR, "packaging", "rpm",
                         "memveil.spec")
@@ -345,6 +390,16 @@ def main(argv):
     build_source0(root, spec_ver, source0)
     work_spec = os.path.join(work, "memveil.spec")
     shutil.copy2(spec, work_spec)
+    # The committed spec carries a floor placeholder, never a
+    # literal: substitute the floor derived from the consumed
+    # bundle above, so Requires always matches the shipped bytes.
+    with open(work_spec, "r", encoding="utf-8") as handle:
+        work_text = handle.read()
+    if work_text.count("@MEMVEIL_GLIBC_FLOOR@") != 1:
+        fail("spec lacks the unique @MEMVEIL_GLIBC_FLOOR@ placeholder")
+    with open(work_spec, "w", encoding="utf-8") as handle:
+        handle.write(work_text.replace("@MEMVEIL_GLIBC_FLOOR@",
+                                       floor))
     # debug_package nil works around rpm builds that run
     # find-debuginfo despite the spec's __os_install_post nil;
     # it only gates the -debuginfo subpackage, never the main
@@ -374,6 +429,21 @@ def main(argv):
     if len(rpms) != 1:
         fail("no .rpm built (see %s)"
              % os.path.join(work, "rpmbuild.log"))
+    # Compat check against the consumed bundle: the built .rpm
+    # must require exactly the derived floor, so a generator or
+    # spec drift can never ship a mismatched Requires.
+    if shutil.which("rpm") is None:
+        fail("rpm is not installed: cannot verify built Requires")
+    query = run(["rpm", "-qp", "--requires", rpms[0]])
+    if query.returncode != 0:
+        fail("rpm -qp --requires failed:\n%s" % query.stderr)
+    want = "glibc >= %s" % floor
+    requires = [line.strip() for line in query.stdout.splitlines()
+                if line.strip()]
+    if want not in requires:
+        fail("built .rpm Requires %s, want %s (bundle floor)"
+             % (requires, want))
+    print("package-rpm: built Requires carries %s" % want)
     dest = os.path.join(out_dir, os.path.basename(rpms[0]))
     shutil.copy2(rpms[0], dest)
     print("package-rpm: %s" % dest)

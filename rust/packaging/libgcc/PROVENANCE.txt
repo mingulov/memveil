@@ -1,0 +1,74 @@
+Pinned libgcc provider for the MemVeil Rust bundle
+====================================================
+
+The bundle ships exactly one shared library, libgcc_s.so.1, for the
+Rust unwinder. It comes from this directory, never from the build
+host toolchain: the host libgcc (GCC 16, Fedora) requires the
+GLIBC_ABI_GNU2_TLS node, which raises the install floor to glibc
+2.40 and refuses Ubuntu 24.04 (2.39), Debian bookworm (2.36), and
+older-but-compatible systems. The payload needs only twelve ancient
+_Unwind_* symbols (GCC_3.0/3.3/4.2.0), which any libgcc_s.so.1 of
+the last twenty years provides, so a pinned older provider restores
+the honest 2.35 floor with no ABI risk.
+
+Artifact
+--------
+libgcc-s1_14.2.0-19_amd64.deb — Debian trixie (stable 13.x), amd64,
+GCC 14.2.0. Canonical source (identical bytes on every mirror):
+
+  https://deb.debian.org/debian/pool/main/g/gcc-14/libgcc-s1_14.2.0-19_amd64.deb
+
+Pins (also enforced by package-tarball.py, which refuses to build
+on any mismatch):
+
+  .deb sha256: 3c71917b490d1a17aed43196a2787a256ecf060526cdb20216a74bedc061b150
+  member usr/lib/x86_64-linux-gnu/libgcc_s.so.1 sha256:
+               30c61ab012a4241bed033725a09b61f5fdd3bb7df95ee852d0b096520524c7af
+
+Verification chain (re-run at adoption, 2026-11-19):
+
+  1. trixie InRelease (Suite: stable, Codename: trixie, Version: 13.7,
+     Date: Sat, 12 Sep 2026 07:55:41 UTC) carries a Good GPG signature
+     from the Debian archive key in debian-archive-keyring
+     (subkey 4CB50190207B4758A3F73A796ED0E7B82643E131).
+  2. main/binary-amd64/Packages.xz matches its InRelease hashes.
+  3. The Packages stanza for libgcc-s1 14.2.0-19 pins the .deb size
+     (72772) and sha256 above; the download matches.
+  4. The extracted libgcc_s.so.1 matches the member sha above and is
+     byte-identical to the file in the debian-stable container image.
+  5. The member needs at most GLIBC_2.35, carries no GLIBC_ABI_*
+     nodes, and defines all twelve _Unwind_* symbols the payload
+     imports at the exact versions it names.
+  6. Loader proof under glibc 2.39: the payload `version` and
+     `report` run with this lib (exit 0) while the toolchain lib
+     refuses to load (GLIBC_ABI_GNU2_TLS not found).
+  7. Unwind proof under glibc 2.39: raise/catch/resume plus an
+     8-frame backtrace walk behave identically to the toolchain
+     lib on a newer loader.
+  8. The packager re-checks (5) at every build: any toolchain bump
+     that needs a newer libgcc symbol refuses instead of shipping
+     a lib that cannot satisfy it.
+
+GPL-3.txt
+---------
+Debian's common-licenses/GPL-3 (sha256
+3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986),
+staged as licenses/GPL-3.0.txt next to this binary. It is the same
+FSF GPLv3 grant as the Fedora host text, differing only in FSF URL
+modernization (https vs http); vendoring it keeps the staged text
+identical on every build host.
+
+License: the shipped lib is GPL-3.0-only WITH GCC-exception-3.1,
+same as before; see the staged licenses/GPL-3.0.txt and
+licenses/RUNTIME.LIBRARY.EXCEPTION plus THIRD-PARTY-NOTICES.md.
+
+Updating the provider
+---------------------
+1. Pick a newer libgcc-s1 from Debian stable; download the .deb
+   over https and verify it against the signed InRelease chain.
+2. Re-run checks 4-7 above (symbol coverage, floor, loader and
+   unwind proofs on the oldest loader the floor admits).
+3. Replace the .deb here, update the two pins in
+   package-tarball.py (LIBGCC_DEB_SHA256, LIBGCC_SO_SHA256), this
+   file, and the floor pins (packager comments, spec derivation,
+   test oracles) when the floor moves.
