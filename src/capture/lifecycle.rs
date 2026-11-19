@@ -1321,10 +1321,7 @@ mod tests {
 
     #[test]
     fn lifecycle_wire_corpus_differential() {
-        let dir = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/lifecycle-wire"
-        );
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/lifecycle-wire");
         let blob = std::fs::read(format!("{dir}/corpus.bin")).expect("corpus.bin");
         let text = std::fs::read_to_string(format!("{dir}/corpus.txt")).expect("corpus.txt");
         let lines: Vec<&str> = text

@@ -1954,8 +1954,7 @@ mod tests {
     const SEL011: &str =
         include_str!("../../tests/fixtures/reader/selection-retained/session.json");
     const COMPAT: &str = include_str!("../../tests/fixtures/reader/compat-major/session.json");
-    const SEALED: &str =
-        include_str!("../../tests/fixtures/reader/sealed-complete/session.json");
+    const SEALED: &str = include_str!("../../tests/fixtures/reader/sealed-complete/session.json");
     const SEALED_EMPTY: &str =
         include_str!("../../tests/fixtures/reader/sealed-empty/session.json");
     const SEALED_PARTIAL: &str =
@@ -1966,8 +1965,7 @@ mod tests {
         include_str!("../../tests/fixtures/reader/complete-stop/session.json");
     const BADKIND_SESS: &str = include_str!("../../tests/fixtures/reader/badkind/session.json");
     const BADSEQ_SESS: &str = include_str!("../../tests/fixtures/reader/badseq/session.json");
-    const F3_BASELINE: &str =
-        include_str!("../../tests/fixtures/reader/f3-baseline/session.json");
+    const F3_BASELINE: &str = include_str!("../../tests/fixtures/reader/f3-baseline/session.json");
     const PROVENANCE: &str = include_str!("../../tests/fixtures/reader/provenance/session.json");
     const F6_DRIVER: &str =
         include_str!("../../tests/fixtures/reader/f6-absent-driver/session.json");

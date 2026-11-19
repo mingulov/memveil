@@ -143,17 +143,11 @@ fn manifest_identity() {
     let root = h::pristine_root();
     assert_eq!(
         h::json_probe(&manifest, "d['cargo']['lock_sha256']"),
-        h::sha256_file(&root.join("rust").join("Cargo.lock"))
+        h::sha256_file(&root.join("Cargo.lock"))
     );
     assert_eq!(
         h::json_probe(&manifest, "d['cargo']['ebpf_lock_sha256']"),
-        h::sha256_file(
-            &root
-                .join("rust")
-                .join("crates")
-                .join("ebpf")
-                .join("Cargo.lock")
-        )
+        h::sha256_file(&root.join("crates").join("ebpf").join("Cargo.lock"))
     );
     let crates = h::json_probe(&manifest, "[c['name'] for c in d['cargo']['crates']]");
     assert!(crates.contains("aya"), "crates: {crates}");
@@ -2300,7 +2294,6 @@ fn vendored_libgcc_provenance() {
         "packaging/libgcc/libgcc-s1_14.2.0-19_amd64.deb"
     );
     let deb = h::pristine_root()
-        .join("rust")
         .join("packaging")
         .join("libgcc")
         .join("libgcc-s1_14.2.0-19_amd64.deb");
@@ -2331,7 +2324,6 @@ fn staged_gpl3_is_vendored() {
     // vendored bytes in the pristine tree.
     let set = h::ensure_tarball();
     let vendored = h::pristine_root()
-        .join("rust")
         .join("packaging")
         .join("libgcc")
         .join("GPL-3.txt");
@@ -2351,7 +2343,6 @@ fn vendored_libgcc_helpers() {
     // real pair while refusing an unsatisfiable one.
     let script = h::scripts_dir().join("package-tarball.py");
     let deb = h::pristine_root()
-        .join("rust")
         .join("packaging")
         .join("libgcc")
         .join("libgcc-s1_14.2.0-19_amd64.deb");
@@ -2375,7 +2366,6 @@ fn vendored_libgcc_helpers() {
     // (vendored_libgcc resolves the .deb under the given root).
     let root = tmp.join("root");
     let staged_deb = root
-        .join("rust")
         .join("packaging")
         .join("libgcc")
         .join("libgcc-s1_14.2.0-19_amd64.deb");
@@ -2573,29 +2563,17 @@ fn crate_texts_match_locked_sources() {
         "no ebpf-closure records"
     );
     let root = h::pristine_root();
-    let main_lock: BTreeSet<(String, String)> =
-        h::cargo_lock_packages(&root.join("rust").join("Cargo.lock"))
+    let main_lock: BTreeSet<(String, String)> = h::cargo_lock_packages(&root.join("Cargo.lock"))
+        .into_iter()
+        .map(|(name, version, _, _)| (name, version))
+        .collect();
+    let ebpf_lock: BTreeSet<(String, String)> =
+        h::cargo_lock_packages(&root.join("crates").join("ebpf").join("Cargo.lock"))
             .into_iter()
             .map(|(name, version, _, _)| (name, version))
             .collect();
-    let ebpf_lock: BTreeSet<(String, String)> = h::cargo_lock_packages(
-        &root
-            .join("rust")
-            .join("crates")
-            .join("ebpf")
-            .join("Cargo.lock"),
-    )
-    .into_iter()
-    .map(|(name, version, _, _)| (name, version))
-    .collect();
-    let main_roots = metadata_roots(&root.join("rust").join("Cargo.toml"));
-    let ebpf_roots = metadata_roots(
-        &root
-            .join("rust")
-            .join("crates")
-            .join("ebpf")
-            .join("Cargo.toml"),
-    );
+    let main_roots = metadata_roots(&root.join("Cargo.toml"));
+    let ebpf_roots = metadata_roots(&root.join("crates").join("ebpf").join("Cargo.toml"));
     let mut leaves = BTreeSet::new();
     for record in &records {
         assert!(

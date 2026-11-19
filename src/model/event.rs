@@ -1567,8 +1567,7 @@ mod tests {
     const BADSEQ: &str = include_str!("../../tests/fixtures/reader/badseq/events.ndjson");
     const COMPAT_LINE: &str =
         include_str!("../../tests/fixtures/reader/compat-major/events.ndjson");
-    const SEALED: &str =
-        include_str!("../../tests/fixtures/reader/sealed-complete/events.ndjson");
+    const SEALED: &str = include_str!("../../tests/fixtures/reader/sealed-complete/events.ndjson");
 
     fn lines_of(doc: &str) -> Vec<&str> {
         doc.split('\n').filter(|l| !l.is_empty()).collect()

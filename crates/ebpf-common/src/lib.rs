@@ -1025,10 +1025,7 @@ mod tests {
 
     #[test]
     fn attempts_corpus_decodes() {
-        let dir = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../tests/fixtures/attempts"
-        );
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/attempts");
         let blob = std::fs::read(std::format!("{dir}/corpus.bin")).expect("corpus.bin");
         let text = std::fs::read_to_string(std::format!("{dir}/corpus.txt")).expect("corpus.txt");
         let records = split_corpus(&blob);
@@ -1103,7 +1100,7 @@ mod tests {
     fn lifecycle_wire_corpus_decodes() {
         let dir = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../tests/fixtures/lifecycle-wire"
+            "/../../tests/fixtures/lifecycle-wire"
         );
         let blob = std::fs::read(std::format!("{dir}/corpus.bin")).expect("corpus.bin");
         let text = std::fs::read_to_string(std::format!("{dir}/corpus.txt")).expect("corpus.txt");

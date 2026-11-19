@@ -5,14 +5,14 @@
 # environment. The Rust userspace embeds its eBPF objects and
 # links the Aya loader statically: no bridge ships, and the
 # only private library is the pinned Debian libgcc (see
-# rust/packaging/libgcc/PROVENANCE.txt).
+# packaging/libgcc/PROVENANCE.txt).
 #
 # Build (on an x86-64 host with cargo, rpmbuild, and the
 # repository pin; this package is built outside the archive):
 #
-#   cargo build --release --locked --offline   # in rust/
-#   rust/scripts/package-tarball.py --out dist
-#   rust/scripts/package-rpm.py --work build/rpm --out dist \
+#   cargo build --release --locked --offline   # at the root
+#   scripts/package-tarball.py --out dist
+#   scripts/package-rpm.py --work build/rpm --out dist \
 #       --bundle "$PWD/dist/memveil-0.1.0"
 #
 # The Version tag tracks the engine version printed by
@@ -154,11 +154,11 @@ for text in LICENSE THIRD-PARTY-NOTICES.md; do
 done
 cp -rp "$B/LICENSES" "$B/licenses" \
     "%{buildroot}/usr/share/doc/memveil/"
-python3 rust/scripts/gen-man.py --binary "%{buildroot}/usr/bin/memveil" \
+python3 scripts/gen-man.py --binary "%{buildroot}/usr/bin/memveil" \
     --out man-pages
 mkdir -p "%{buildroot}/usr/share/man/man1"
 install -m0644 man-pages/*.1 "%{buildroot}/usr/share/man/man1/"
-python3 rust/scripts/gen-completions.py --out completions
+python3 scripts/gen-completions.py --out completions
 install -D -m0644 completions/memveil \
     "%{buildroot}/usr/share/bash-completion/completions/memveil"
 install -D -m0644 completions/_memveil \
