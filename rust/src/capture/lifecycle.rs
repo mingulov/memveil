@@ -1296,9 +1296,7 @@ mod tests {
         assert!(!ev.copy.offset_past_allocation);
     }
 
-    fn read_u32_le(blob: &[u8], pos: usize) -> u32 {
-        u32::from_le_bytes(blob[pos..pos + 4].try_into().unwrap())
-    }
+    use super::super::read_u32_le;
 
     fn read_u64_le(blob: &[u8], pos: usize) -> u64 {
         u64::from_le_bytes(blob[pos..pos + 8].try_into().unwrap())

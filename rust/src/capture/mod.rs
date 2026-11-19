@@ -16,3 +16,10 @@ pub mod run;
 pub mod stop;
 pub mod tee;
 pub mod writer;
+
+/// Test-only little-endian u32 reader shared by the wire
+/// corpus differentials (normalize, lifecycle).
+#[cfg(test)]
+pub(crate) fn read_u32_le(blob: &[u8], pos: usize) -> u32 {
+    u32::from_le_bytes(blob[pos..pos + 4].try_into().unwrap())
+}

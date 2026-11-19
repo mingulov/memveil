@@ -483,9 +483,14 @@ impl Session {
         Ok(())
     }
 
-    /// Live program gate: every expected program present in its section
-    /// kind, no unexpected programs. Sleepable sections were pinned at
-    /// ELF time by the exact-set check and cannot change before load.
+    /// Live program gate, gate two of two: every expected program
+    /// present in its section kind, no unexpected programs. Gate one
+    /// is `check_elf` at open: it pins exact `tracepoint/`/`fentry/`/
+    /// `fexit/` section counts, and a sleepable program lives in
+    /// `fentry.s/`/`fexit.s/`, which never matches a counted prefix,
+    /// so swapping one in breaks the count there. What gate one
+    /// cannot see (sections beyond the counts) this gate refuses by
+    /// exact program set.
     fn check_live_programs(&self, bpf: &Ebpf) -> Result<(), SessionError> {
         use super::attach::expected_programs;
         let expected = expected_programs(self.channel);
@@ -814,6 +819,7 @@ impl Session {
             if bytes.len() != 8 {
                 return Err(SessionError::Map("short counter read".to_owned()));
             }
+            // The length check above makes this conversion infallible.
             out[slot] = u64::from_le_bytes(bytes.try_into().expect("8 bytes"));
         }
         Ok(out)
@@ -827,6 +833,7 @@ impl Session {
             if bytes.len() != 8 {
                 return Err(SessionError::Map("short fallback read".to_owned()));
             }
+            // The length check above makes this conversion infallible.
             out[slot] = u64::from_le_bytes(bytes.try_into().expect("8 bytes"));
         }
         Ok(out)
@@ -1042,10 +1049,17 @@ impl Channels {
     ) -> SessionError {
         let mut message = format!("ch{} {error}", failed.index());
         for channel in done.iter().rev() {
+            // `done` only records channels this call attached, so a
+            // missing session is unreachable; degrade to a message
+            // rather than panicking out of error handling.
             let session = match channel {
-                Channel::Attempt => &mut self.attempt,
-                Channel::Lifecycle => self.lifecycle.as_mut().expect("present channel"),
-                Channel::Copy => self.copy.as_mut().expect("present channel"),
+                Channel::Attempt => Some(&mut self.attempt),
+                Channel::Lifecycle => self.lifecycle.as_mut(),
+                Channel::Copy => self.copy.as_mut(),
+            };
+            let Some(session) = session else {
+                message.push_str(&format!("; rollback ch{}: session absent", channel.index()));
+                continue;
             };
             if let Err(error) = session.detach() {
                 message.push_str(&format!("; rollback ch{}: {error}", channel.index()));

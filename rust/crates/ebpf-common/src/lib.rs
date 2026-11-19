@@ -22,24 +22,16 @@ pub const MV_FLAG_FORCE: u16 = 0x1;
 pub const MV_NAME_MAX: usize = 63;
 /// Attempt field offsets.
 pub const MV_OFF_MAGIC: usize = 0;
-/// Attempt field offsets.
 pub const MV_OFF_VERSION: usize = 4;
-/// Attempt field offsets.
 pub const MV_OFF_FLAGS: usize = 6;
-/// Attempt field offsets.
 pub const MV_OFF_SEQ: usize = 8;
-/// Attempt field offsets.
 pub const MV_OFF_KTIME: usize = 16;
-/// Attempt field offsets.
 pub const MV_OFF_SIZE: usize = 24;
-/// Attempt field offsets.
 pub const MV_OFF_NAME_LEN: usize = 32;
-/// Attempt field offsets.
 pub const MV_OFF_NAME: usize = 34;
 
 /// Tracepoint context bounds (`swiotlb_bounced`).
 pub const MV_CTX_FIXED: usize = 41;
-/// Tracepoint context bounds (`swiotlb_bounced`).
 pub const MV_CTX_READ_CAP: usize = 512;
 
 /* Load-time trace-offset table: 24 bytes, little-endian, packed. */
@@ -55,15 +47,10 @@ pub const MV_OFFSETS_TABLE_LEN: usize = 24;
 /* Counter map indices (`mv_counts`, array of 6 u64). */
 /// Counter map indices.
 pub const MV_CNT_OBSERVED: usize = 0;
-/// Counter map indices.
 pub const MV_CNT_OBSERVED_BYTES: usize = 1;
-/// Counter map indices.
 pub const MV_CNT_EMITTED: usize = 2;
-/// Counter map indices.
 pub const MV_CNT_EMITTED_BYTES: usize = 3;
-/// Counter map indices.
 pub const MV_CNT_SUBMIT_FAIL: usize = 4;
-/// Counter map indices.
 pub const MV_CNT_FLAGS: usize = 5;
 /// Counter map length.
 pub const MV_CNT_LEN: usize = 6;
@@ -71,17 +58,11 @@ pub const MV_CNT_LEN: usize = 6;
 /* Flag word bits (sticky; any set bit invalidates the epoch). */
 /// Flag word bits.
 pub const MV_FLAG_OBSERVED_WRAP: u64 = 1 << 0;
-/// Flag word bits.
 pub const MV_FLAG_OBSERVED_BYTES_WRAP: u64 = 1 << 1;
-/// Flag word bits.
 pub const MV_FLAG_EMITTED_WRAP: u64 = 1 << 2;
-/// Flag word bits.
 pub const MV_FLAG_EMITTED_BYTES_WRAP: u64 = 1 << 3;
-/// Flag word bits.
 pub const MV_FLAG_SUBMIT_WRAP: u64 = 1 << 4;
-/// Flag word bits.
 pub const MV_FLAG_BYTE_COVERAGE: u64 = 1 << 5;
-/// Flag word bits.
 pub const MV_FLAG_ARGCNT: u64 = 1 << 6;
 
 /* Lifecycle v2 wire format: 44 bytes, little-endian, packed. */
@@ -93,35 +74,23 @@ pub const MV_LC_MAGIC: u32 = 0x434C_564D;
 pub const MV_LC_VERSION: u16 = 2;
 /// Lifecycle kinds.
 pub const MV_LC_KIND_MAP: u16 = 1;
-/// Lifecycle kinds.
 pub const MV_LC_KIND_UNMAP: u16 = 2;
 /// Lifecycle flags.
 pub const MV_LC_FLAG_OK: u16 = 0x1;
-/// Lifecycle flags.
 pub const MV_LC_FLAG_SKIP_SYNC: u16 = 0x2;
-/// Lifecycle flags.
 pub const MV_LC_FLAG_GEN_MISS: u16 = 0x4;
-/// Lifecycle flags.
 pub const MV_LC_FLAG_GEN_UNASSIGNED: u16 = 0x8;
 /// Largest assignable mapping generation (0 means unknown).
 pub const MV_LC_GEN_MAX: u64 = 0xFFFF_FFFF_FFFF_FFFE;
 /// Lifecycle field offsets.
 pub const MV_LC_OFF_MAGIC: usize = 0;
-/// Lifecycle field offsets.
 pub const MV_LC_OFF_VERSION: usize = 4;
-/// Lifecycle field offsets.
 pub const MV_LC_OFF_KIND: usize = 6;
-/// Lifecycle field offsets.
 pub const MV_LC_OFF_FLAGS: usize = 8;
-/// Lifecycle field offsets.
 pub const MV_LC_OFF_DIR: usize = 10;
-/// Lifecycle field offsets.
 pub const MV_LC_OFF_SEQ: usize = 12;
-/// Lifecycle field offsets.
 pub const MV_LC_OFF_KTIME: usize = 20;
-/// Lifecycle field offsets.
 pub const MV_LC_OFF_SIZE: usize = 28;
-/// Lifecycle field offsets.
 pub const MV_LC_OFF_GEN: usize = 36;
 
 /* Copy v1 wire format: 48 bytes, little-endian, packed. */
@@ -133,59 +102,44 @@ pub const MV_CP_MAGIC: u32 = 0x5043_564D;
 pub const MV_CP_VERSION: u16 = 1;
 /// Copy kinds.
 pub const MV_CP_KIND_SYNC: u16 = 1;
-/// Copy kinds.
 pub const MV_CP_KIND_COPY: u16 = 2;
 /// Copy flags.
 pub const MV_CP_FLAG_TO_DEVICE: u16 = 0x1;
-/// Copy flags.
 pub const MV_CP_FLAG_KNOWN: u16 = 0x2;
-/// Copy flags.
 pub const MV_CP_FLAG_CLAMPED: u16 = 0x4;
-/// Copy flags.
 pub const MV_CP_FLAG_EARLY_ZERO: u16 = 0x8;
-/// Copy flags.
 pub const MV_CP_FLAG_OFFSET_PAST_ALLOC: u16 = 0x10;
-/// Copy flags.
 pub const MV_CP_FLAG_PRIVATE_POOL: u16 = 0x20;
 /// Copy unknown-effective reasons.
 pub const MV_CP_REASON_NONE: u16 = 0;
-/// Copy unknown-effective reasons.
 pub const MV_CP_REASON_SLOT_READ: u16 = 1;
-/// Copy unknown-effective reasons.
 pub const MV_CP_REASON_MASK_READ: u16 = 2;
-/// Copy unknown-effective reasons.
 pub const MV_CP_REASON_BOUNDS: u16 = 3;
-/// Copy unknown-effective reasons.
 pub const MV_CP_REASON_NOT_COPY: u16 = 4;
-/// Copy unknown-effective reasons.
 pub const MV_CP_REASON_LAYOUT: u16 = 5;
-/// Copy unknown-effective reasons.
 pub const MV_CP_REASON_SHIFT: u16 = 6;
 /// Copy field offsets.
 pub const MV_CP_OFF_MAGIC: usize = 0;
-/// Copy field offsets.
 pub const MV_CP_OFF_VERSION: usize = 4;
-/// Copy field offsets.
 pub const MV_CP_OFF_KIND: usize = 6;
-/// Copy field offsets.
 pub const MV_CP_OFF_FLAGS: usize = 8;
-/// Copy field offsets.
 pub const MV_CP_OFF_DIR: usize = 10;
-/// Copy field offsets.
 pub const MV_CP_OFF_SEQ: usize = 12;
-/// Copy field offsets.
 pub const MV_CP_OFF_KTIME: usize = 20;
-/// Copy field offsets.
 pub const MV_CP_OFF_REQUESTED: usize = 28;
-/// Copy field offsets.
 pub const MV_CP_OFF_EFFECTIVE: usize = 36;
-/// Copy field offsets.
 pub const MV_CP_OFF_REASON: usize = 44;
 
 /// Failure sentinel shared by the map hooks: `(phys_addr_t)
 /// DMA_MAPPING_ERROR`, i.e. all bits set.
 pub const MV_INVALID_PHYS: u64 = 0xFFFF_FFFF_FFFF_FFFF;
 
+// The packed layouts below stay accessor-free by design:
+// emitters build raw payload bytes and every decode path
+// reads through the `read_le*` helpers, so these structs
+// exist only as layout pins (plus `OffsetsTable` as the map
+// value type) and accessors would be dead surface. Direct
+// field borrows are rejected by the compiler (E0793).
 /// Wire attempt record: exactly 98 bytes, packed. Fields are
 /// unaligned; read them with `addr_of!` plus `read_unaligned`.
 #[repr(C, packed)]
@@ -992,7 +946,7 @@ mod tests {
     }
 
     #[test]
-    fn offsets_table_round_trip() {
+    fn offsets_table_decodes() {
         let mut buf = [0u8; 24];
         buf[0..4].copy_from_slice(&MV_OFF_TABLE_MAGIC.to_le_bytes());
         buf[4..6].copy_from_slice(&MV_OFF_TABLE_VERSION.to_le_bytes());
@@ -1016,18 +970,14 @@ mod tests {
         assert_eq!(decode_offsets_table(&buf[..23]), Err(DecodeError::Short));
     }
 
-    fn read_u32_le(buf: &[u8], off: usize) -> u32 {
-        u32::from_le_bytes(buf[off..off + 4].try_into().expect("u32"))
-    }
-
     /// Split a `corpus.bin` blob into `(kind, bytes)` records.
     fn split_corpus(blob: &[u8]) -> Vec<(u32, Vec<u8>)> {
-        let count = read_u32_le(blob, 0) as usize;
+        let count = read_le32(blob, 0) as usize;
         let mut off = 4;
         let mut out = Vec::new();
         for _ in 0..count {
-            let kind = read_u32_le(blob, off);
-            let len = read_u32_le(blob, off + 4) as usize;
+            let kind = read_le32(blob, off);
+            let len = read_le32(blob, off + 4) as usize;
             out.push((kind, blob[off + 8..off + 8 + len].to_vec()));
             off += 8 + len;
         }
@@ -1103,13 +1053,13 @@ mod tests {
                 }
                 (2, "payload") => match verdict_error(verdict) {
                     None => {
-                        assert_eq!(read_u32_le(bytes, 0), MV_MAGIC, "line {idx}: payload magic");
-                        let attempt = decode_attempt(bytes).expect("line decodes");
+                        assert_eq!(read_le32(bytes, 0), MV_MAGIC, "line {idx}: payload magic");
                         assert_eq!(
                             u16::from_le_bytes(bytes[4..6].try_into().expect("ver")),
                             MV_VERSION,
                             "line {idx}: payload version"
                         );
+                        let attempt = decode_attempt(bytes).expect("line decodes");
                         assert_eq!(attempt.size, parse_u64(field(&tail, "size")), "line {idx}");
                         assert_eq!(attempt.force, field(&tail, "force") == "1", "line {idx}");
                         assert_eq!(attempt.seq, parse_u64(field(&tail, "seq")), "line {idx}");
@@ -1175,7 +1125,7 @@ mod tests {
                 (1, "lifecycle") => match verdict_error(verdict) {
                     None => {
                         assert_eq!(
-                            read_u32_le(bytes, 0),
+                            read_le32(bytes, 0),
                             MV_LC_MAGIC,
                             "line {idx}: lifecycle magic"
                         );
@@ -1208,7 +1158,7 @@ mod tests {
                 },
                 (2, "copy") => match verdict_error(verdict) {
                     None => {
-                        assert_eq!(read_u32_le(bytes, 0), MV_CP_MAGIC, "line {idx}: copy magic");
+                        assert_eq!(read_le32(bytes, 0), MV_CP_MAGIC, "line {idx}: copy magic");
                         assert_eq!(
                             u16::from_le_bytes(bytes[4..6].try_into().expect("ver")),
                             MV_CP_VERSION,

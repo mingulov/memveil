@@ -605,9 +605,7 @@ mod tests {
         assert!(!selection_matches(b" dev0 ", "dev0"));
     }
 
-    fn read_u32_le(blob: &[u8], pos: usize) -> u32 {
-        u32::from_le_bytes(blob[pos..pos + 4].try_into().unwrap())
-    }
+    use super::super::read_u32_le;
 
     fn corpus_field<'a>(tail: &[&'a str], key: &str) -> &'a str {
         for tok in tail {
