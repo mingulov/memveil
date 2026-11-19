@@ -16,6 +16,7 @@
 //! Every cargo invocation strips `RUSTUP_TOOLCHAIN` so the
 //! repository pin (1.100.0) wins over ambient overrides.
 
+pub mod journey;
 pub mod payload;
 pub mod sbom;
 

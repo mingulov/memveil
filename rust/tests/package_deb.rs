@@ -18,6 +18,7 @@
 mod package_helpers;
 
 use package_helpers as h;
+use package_helpers::journey as j;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
@@ -797,39 +798,15 @@ fn lintian_overrides_exact() {
     assert_eq!(tags.len(), 2);
 }
 
-fn have_passwordless_sudo() -> bool {
-    h::run("sudo", &["-n", "true"], None).status.success()
-}
-
-/// Retained receipt names in a receipts dir (missing dir: none).
-fn retained_receipts(receipts: &std::path::Path) -> Vec<String> {
-    match fs::read_dir(receipts) {
-        Err(_) => Vec::new(),
-        Ok(entries) => {
-            let mut names: Vec<String> = entries
-                .flatten()
-                .map(|e| e.file_name().to_str().unwrap().to_string())
-                .collect();
-            names.sort();
-            names
-        }
-    }
-}
-
-/// Fresh-state prelude: package absent, receipts fresh. Returns pre-run names.
+/// Fresh-state prelude: package absent (dpkg probe), then the
+/// shared retained-receipts refusal. Returns pre-run names.
 fn preflight_fresh_state(receipts: &str) -> BTreeSet<String> {
     let probe = h::run("dpkg", &["-s", "memveil"], None);
     assert!(
         !probe.status.success(),
         "memveil is already installed: remove it and rerun"
     );
-    let names = retained_receipts(std::path::Path::new(receipts));
-    assert!(
-        names.is_empty(),
-        "refusing install: {receipts} holds retained receipts ({})",
-        names.join(", ")
-    );
-    BTreeSet::new()
+    j::refuse_retained_receipts(receipts)
 }
 
 #[test]
@@ -844,27 +821,27 @@ fn journey_refuses_retained_receipts() {
         "{\"profile_id\": \"x\"}\n",
     )
     .unwrap();
-    let names = retained_receipts(&receipts);
+    let names = j::retained_receipts(&receipts);
     assert_eq!(names, vec!["pre-existing-receipt.json".to_string()]);
-    assert!(retained_receipts(&tmp.join("missing")).is_empty());
+    assert!(j::retained_receipts(&tmp.join("missing")).is_empty());
     let empty = tmp.join("empty");
     fs::create_dir(&empty).unwrap();
-    assert!(retained_receipts(&empty).is_empty());
+    assert!(j::retained_receipts(&empty).is_empty());
 }
 
 #[test]
 fn install_doctor_uninstall_smoke() {
-    if !h::tool_present("dpkg") || !have_passwordless_sudo() {
+    if !h::tool_present("dpkg") || !j::have_passwordless_sudo() {
         eprintln!("skip: install smoke needs dpkg plus passwordless sudo");
         return;
     }
-    if std::env::var("MV_RUSTPKG_JOURNEY").as_deref() == Ok("0") {
+    if j::journey_opted_out() {
         eprintln!("skip: MV_RUSTPKG_JOURNEY=0 opts out of the privileged journey");
         return;
     }
     let deb = h::ensure_deb();
     let version = h::engine_version();
-    let receipts = "/var/lib/memveil/receipts";
+    let receipts = j::RECEIPTS;
     let _preexisting = preflight_fresh_state(receipts);
     // Non-Debian hosts (this Fedora-based one) cannot resolve
     // libc6 through dpkg: install with --force-depends there so
@@ -874,11 +851,10 @@ fn install_doctor_uninstall_smoke() {
     if force_depends {
         eprintln!("note: libc6 unresolvable on this host; journey installs with --force-depends");
     }
-    let tmp = h::scratch("journey");
-    let qcap = tmp.join("qcap");
-    let qcap_existed = qcap.exists();
-    let qcap2 = tmp.join("qcap2");
-    let qcap2_existed = qcap2.exists();
+    // Serialize with the sibling rpm journey: both drive the
+    // same installed tree and cargo runs suites in parallel.
+    let _lock = j::install_lock();
+    let (tmp, qdirs) = j::journey_scratch("journey");
     let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut install = vec!["-n", "dpkg", "-i"];
         if force_depends {
@@ -901,250 +877,15 @@ fn install_doctor_uninstall_smoke() {
             String::from_utf8_lossy(&verify.stderr)
         );
         assert!(String::from_utf8_lossy(&verify.stdout).is_empty());
-        assert!(
-            std::path::Path::new(receipts).is_dir(),
-            "receipts dir missing"
-        );
-        use std::os::unix::fs::MetadataExt;
-        let info = fs::metadata(receipts).unwrap();
-        assert_eq!(info.mode() & 0o7777, 0o755, "{:o}", info.mode());
-        assert_eq!(info.uid(), 0);
-        assert_eq!(info.gid(), 0);
-        assert_eq!(
-            fs::read_dir(receipts).unwrap().count(),
-            0,
-            "fresh install ships receipts"
-        );
-        // Loader closure: ldd resolves everything, and the private
-        // libgcc resolves through the FHS RUNPATH (the load proof;
-        // there is no bridge dlopen in the Rust package).
-        let ldd = h::run_ok("/usr/bin/ldd", &["/usr/bin/memveil"], None);
-        assert!(!ldd.contains("not found"), "{ldd}");
-        // ldd prints the un-normalized $ORIGIN expansion
-        // (/usr/bin/../lib/...), so match the suffix both the
-        // raw and the normalized form share.
-        assert!(ldd.contains("lib/memveil/libgcc_s.so.1"), "{ldd}");
-        let doctor = h::run("/usr/bin/memveil", &["doctor"], None);
-        assert!(doctor.status.code() == Some(0) || doctor.status.code() == Some(3));
-        assert!(!String::from_utf8_lossy(&doctor.stdout).trim().is_empty());
-        let got = h::run_ok("/usr/bin/memveil", &["version"], None);
-        assert_eq!(got.trim(), format!("memveil-{version}"));
-        let cap = tmp.join("cap");
-        let record = std::process::Command::new("/usr/bin/memveil")
-            .args([
-                "record",
-                "--output",
-                cap.to_str().unwrap(),
-                "--duration",
-                "1",
-            ])
-            .current_dir(&tmp)
-            .env_clear()
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .expect("record");
-        let stderr = String::from_utf8_lossy(&record.stderr);
-        for missing in [
-            "no bridge",
-            "no object",
-            "missing --object",
-            "cannot load profiles",
-            "cannot resolve profiles",
-        ] {
-            assert!(!stderr.contains(missing), "{stderr}");
-        }
-        assert!(
-            record.status.code() == Some(0)
-                || record.status.code() == Some(3)
-                || record.status.code() == Some(4),
-            "{stderr}"
-        );
-        if record.status.code() == Some(3) {
-            assert!(!stderr.trim().is_empty());
-            assert!(!cap.exists(), "refused record left a capture dir");
-        } else {
-            assert!(
-                cap.exists(),
-                "exit {} left no capture dir",
-                record.status.code().unwrap_or(-1)
-            );
-        }
-        // Adjusted: Rust qualify requires an explicit --object
-        // (it snapshots file bytes; embedded bytes have no
-        // pathname), so the journey qualifies through the
-        // installed inspection copies instead of zero-flag
-        // discovery. Whether zero-flag qualify should resolve
-        // the FHS copies is a runtime-behavior decision owned
-        // by the binary suites, not this packaging suite.
-        //
-        // Two legs cover the smoke contract for the shipped
-        // inspection objects. The loader links statically, so
-        // a bridgeless smoke attaches live, finalizes, then
-        // refuses to mint rather than bind an unbound bridge
-        // identity (exit 1); an explicit --bridge binds the
-        // exercised bytes and mints (exit 0), mirroring
-        // production usage of explicit artifacts.
-        let lib = "/usr/lib/memveil";
-        // Bridgeless leg: the refusal contract. No --bridge is
-        // passed, discovery finds no native bridge in the
-        // package, and the finalized smoke must exit 1 with the
-        // exact bridge-unbound diagnostic, minting nothing. The
-        // leftover capture dir corroborates that the smoke
-        // attached and ran before the bridge gate stopped
-        // minting (a plan refusal would exit 3 with no smoke).
-        let owned = vec![
-            "sudo".to_string(),
-            "-n".to_string(),
-            "/usr/bin/memveil".to_string(),
-            "qualify".to_string(),
-            "--output".to_string(),
-            qcap.to_str().unwrap().to_string(),
-            "--object".to_string(),
-            format!("{lib}/swiotlb_attempt.bpf.o"),
-            "--lc-object".to_string(),
-            format!("{lib}/swiotlb_lifecycle.bpf.o"),
-            "--cp-object".to_string(),
-            format!("{lib}/swiotlb_copy.bpf.o"),
-        ];
-        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
-        let qualify = h::run(refs[0], &refs[1..], Some(&tmp));
-        println!(
-            "journey qualify exit: {}",
-            qualify.status.code().unwrap_or(-1)
-        );
-        assert_eq!(
-            qualify.status.code(),
-            Some(1),
-            "bridgeless smoke must refuse with exit 1: {}",
-            String::from_utf8_lossy(&qualify.stderr)
-        );
-        let stderr = String::from_utf8_lossy(&qualify.stderr);
-        assert!(
-            stderr.contains(
-                "memveil qualify: smoke bridge unbound: bridge identity unbound for this smoke"
-            ),
-            "bridgeless smoke diagnostic changed: {stderr}"
-        );
-        assert!(
-            !qcap_existed && qcap.is_dir(),
-            "bridgeless smoke left no capture dir"
-        );
-        assert_eq!(
-            fs::read_dir(receipts).unwrap().count(),
-            0,
-            "refused qualify left receipts"
-        );
-        // Explicit-bridge leg: the success contract. The
-        // installed package ships no native bridge library, so
-        // no production bridge artifact exists on the journey
-        // host; the test mints a fixture file with fixed bytes
-        // instead. The bridge override only binds receipts
-        // through the admission hash of the exercised bytes
-        // (the loader links statically and never loads the path
-        // for smoke identity), so the fixture exercises the
-        // exact production path of an explicit --bridge
-        // artifact while letting the test pin the expected
-        // binding hash.
-        let fixture = tmp.join("bridge-fixture.so");
-        fs::write(&fixture, b"MEMVEIL-JOURNEY-BRIDGE-FIXTURE-v1\n").unwrap();
-        let owned = vec![
-            "sudo".to_string(),
-            "-n".to_string(),
-            "/usr/bin/memveil".to_string(),
-            "qualify".to_string(),
-            "--output".to_string(),
-            qcap2.to_str().unwrap().to_string(),
-            "--object".to_string(),
-            format!("{lib}/swiotlb_attempt.bpf.o"),
-            "--lc-object".to_string(),
-            format!("{lib}/swiotlb_lifecycle.bpf.o"),
-            "--cp-object".to_string(),
-            format!("{lib}/swiotlb_copy.bpf.o"),
-            "--bridge".to_string(),
-            fixture.to_str().unwrap().to_string(),
-        ];
-        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
-        let bridged = h::run(refs[0], &refs[1..], Some(&tmp));
-        println!(
-            "journey bridged qualify exit: {}",
-            bridged.status.code().unwrap_or(-1)
-        );
-        assert_eq!(
-            bridged.status.code(),
-            Some(0),
-            "bridged smoke failed: {}",
-            String::from_utf8_lossy(&bridged.stderr)
-        );
-        let stdout = String::from_utf8_lossy(&bridged.stdout);
-        assert!(
-            stdout.contains("receipt=/var/lib/memveil/receipts/"),
-            "{stdout}"
-        );
-        assert!(stdout.contains("caps=attempt-trace"), "{stdout}");
-        // The minted receipt must verify: shape pins plus
-        // bindings to the exact exercised bytes (the fixture
-        // bridge and the installed inspection objects). No CLI
-        // verify verb exists, so the test parses the receipt and
-        // pins every binding hash directly.
-        let published: Vec<String> = fs::read_dir(receipts)
-            .unwrap()
-            .flatten()
-            .map(|e| e.file_name().to_str().unwrap().to_string())
-            .collect();
-        assert_eq!(published.len(), 1, "exit 0 must mint one receipt");
-        let marker = "receipt=";
-        let at = stdout.find(marker).expect("stdout names the receipt");
-        let path = stdout[at + marker.len()..]
-            .lines()
-            .next()
-            .unwrap()
-            .trim()
-            .to_string();
-        assert_eq!(path, format!("{receipts}/{}", published[0]));
-        let bridge_sha = h::sha256_file(&fixture);
-        let attempt_sha = h::sha256_file(std::path::Path::new(&format!(
-            "{lib}/swiotlb_attempt.bpf.o"
-        )));
-        let lc_sha = h::sha256_file(std::path::Path::new(&format!(
-            "{lib}/swiotlb_lifecycle.bpf.o"
-        )));
-        let cp_sha = h::sha256_file(std::path::Path::new(&format!("{lib}/swiotlb_copy.bpf.o")));
-        let probe = format!(
-            "import json; rec = json.load(open({path:?})); \
-             assert rec['schema_version'] == '0.1.0', rec; \
-             assert rec['kind'] == 'memveil-qualification-receipt', rec; \
-             assert rec['grade'] == 'local-auto', rec; \
-             assert rec['capabilities']['attempt-trace']['status'] == 'qualified', \
-             rec['capabilities']; \
-             assert rec['workload']['kind'] == 'smoke', rec['workload']; \
-             art = rec['artifacts']; \
-             assert art['bridge'] == 'sha256:{bridge_sha}', art; \
-             objs = art['objects']; \
-             assert objs['attempt'] == 'sha256:{attempt_sha}', objs; \
-             assert objs['lifecycle'] == 'sha256:{lc_sha}', objs; \
-             assert objs['copy'] == 'sha256:{cp_sha}', objs; \
-             print('receipt-ok')"
-        );
-        let text = h::run_ok("python3", &["-B", "-c", &probe], None);
-        assert!(text.contains("receipt-ok"), "{text}");
+        j::assert_receipts_installed(receipts);
+        j::assert_loader_closure();
+        j::assert_doctor_and_version(&version);
+        j::record_probe(&tmp);
+        j::qualify_legs(&tmp, &qdirs, receipts);
     }));
     // Teardown always runs: remove run residue, then uninstall.
-    if let Ok(entries) = fs::read_dir(receipts) {
-        for entry in entries.flatten() {
-            let _ = h::run(
-                "sudo",
-                &["-n", "rm", "-f", entry.path().to_str().unwrap()],
-                None,
-            );
-        }
-    }
-    if !qcap_existed && qcap.exists() {
-        let _ = h::run("sudo", &["-n", "rm", "-rf", qcap.to_str().unwrap()], None);
-    }
-    if !qcap2_existed && qcap2.exists() {
-        let _ = h::run("sudo", &["-n", "rm", "-rf", qcap2.to_str().unwrap()], None);
-    }
+    j::clear_receipts(receipts);
+    j::remove_qualify_scratch(&qdirs);
     let uninst = h::run("sudo", &["-n", "dpkg", "-r", "memveil"], None);
     if failed.is_err() {
         assert!(uninst.status.success(), "teardown dpkg -r failed");
@@ -1156,12 +897,5 @@ fn install_doctor_uninstall_smoke() {
         String::from_utf8_lossy(&uninst.stderr)
     );
     assert!(!h::run("dpkg", &["-s", "memveil"], None).status.success());
-    for path in [
-        "/usr/lib/memveil",
-        "/usr/share/memveil",
-        "/usr/share/doc/memveil",
-        "/var/lib/memveil",
-    ] {
-        assert!(!std::path::Path::new(path).exists(), "residue: {path}");
-    }
+    j::assert_no_residue();
 }

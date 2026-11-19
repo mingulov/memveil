@@ -8,17 +8,21 @@
 //! `rust/packaging/rpm/memveil.spec`, adjusting only for the
 //! known deltas: no bridge (Requires is the glibc floor
 //! alone), no conda texts or libbpf-mojo dirs, no Source1.
-//! The Fedora container journey and the journey-script
-//! preflight unit tests target the container script
-//! (`tests/package/rpm_journey.sh`), whose bridge-load step
-//! cannot pass on the bridgeless layout until that script
-//! adapts: the container journey executes separately and
-//! this suite skips it loudly.
+//! The install journeys run here: a native
+//! install/verify/run/uninstall smoke through the shared
+//! journey legs (serialized with the .deb journey via the
+//! install lock), plus a docker-gated Fedora container
+//! journey driven by the bridgeless
+//! `rust/scripts/rpm-journey.sh` against the Rust-built .rpm.
+//! The Mojo container script (`tests/package/rpm_journey.sh`)
+//! keeps its bridge-load step for the Mojo-built .rpm and is
+//! not driven here.
 
 #[path = "package_helpers/mod.rs"]
 mod package_helpers;
 
 use package_helpers as h;
+use package_helpers::journey as j;
 use std::collections::BTreeSet;
 use std::fs;
 
@@ -337,15 +341,153 @@ fn rpm_payload_mirrors_repo() {
 }
 
 #[test]
-fn rpm_fedora_journey() {
-    // Harness-owned: the journey script's bridge-load step cannot
-    // pass on the bridgeless layout until the harness adapts it.
-    // This suite pins the artifact the journey consumes instead.
-    let _ = h::ensure_rpm();
-    eprintln!(
-        "skip: Fedora container journey executes in its container gate: \
-         tests/package/rpm_journey.sh hard-requires libbpf_mojo.so.1"
+fn rpm_install_doctor_uninstall_smoke() {
+    if !h::tool_present("rpm") || !j::have_passwordless_sudo() {
+        eprintln!("skip: install smoke needs rpm plus passwordless sudo");
+        return;
+    }
+    if j::journey_opted_out() {
+        eprintln!("skip: MV_RUSTPKG_JOURNEY=0 opts out of the privileged journey");
+        return;
+    }
+    let rpm = h::ensure_rpm();
+    let version = h::engine_version();
+    let receipts = j::RECEIPTS;
+    let probe = h::run("rpm", &["-q", "memveil"], None);
+    assert!(
+        !probe.status.success(),
+        "memveil is already installed: remove it and rerun"
     );
+    let _preexisting = j::refuse_retained_receipts(receipts);
+    // Serialize with the sibling deb journey: both drive the
+    // same installed tree and cargo runs suites in parallel.
+    let _lock = j::install_lock();
+    let (tmp, qdirs) = j::journey_scratch("rpm-journey");
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // The spec Requires only the glibc floor, so a plain
+        // install resolves everywhere (no --nodeps escape).
+        let proc = h::run("sudo", &["-n", "rpm", "-i", rpm.to_str().unwrap()], None);
+        assert!(
+            proc.status.success(),
+            "{}",
+            String::from_utf8_lossy(&proc.stderr)
+        );
+        let status = h::run("rpm", &["-q", "memveil"], None);
+        assert!(status.status.success());
+        let verify = h::run("rpm", &["-V", "memveil"], None);
+        assert!(
+            verify.status.success(),
+            "{}",
+            String::from_utf8_lossy(&verify.stderr)
+        );
+        assert!(String::from_utf8_lossy(&verify.stdout).is_empty());
+        j::assert_receipts_installed(receipts);
+        j::assert_loader_closure();
+        j::assert_doctor_and_version(&version);
+        j::record_probe(&tmp);
+        j::qualify_legs(&tmp, &qdirs, receipts);
+    }));
+    // Teardown always runs: remove run residue, then uninstall.
+    j::clear_receipts(receipts);
+    j::remove_qualify_scratch(&qdirs);
+    let uninst = h::run("sudo", &["-n", "rpm", "-e", "memveil"], None);
+    if failed.is_err() {
+        assert!(uninst.status.success(), "teardown rpm -e failed");
+        panic!("install journey failed (teardown done)");
+    }
+    assert!(
+        uninst.status.success(),
+        "{}",
+        String::from_utf8_lossy(&uninst.stderr)
+    );
+    assert!(!h::run("rpm", &["-q", "memveil"], None).status.success());
+    j::assert_no_residue();
+}
+
+const FEDORA_IMAGE: &str = "fedora:41";
+
+const JOURNEY_STEPS: [&str; 12] = [
+    "dnf-install",
+    "rpm-verify",
+    "version",
+    "receipts-dir",
+    "lib-load",
+    "runpath",
+    "bpf",
+    "no-elf-share",
+    "man-completions",
+    "doctor",
+    "record-probe",
+    "uninstall-clean",
+];
+
+fn docker_usable() -> bool {
+    h::tool_present("docker") && h::run("docker", &["info"], None).status.success()
+}
+
+fn fedora_image_ready() -> bool {
+    if h::run("docker", &["image", "inspect", FEDORA_IMAGE], None)
+        .status
+        .success()
+    {
+        return true;
+    }
+    h::run("docker", &["pull", FEDORA_IMAGE], None)
+        .status
+        .success()
+}
+
+#[test]
+fn rpm_fedora_journey() {
+    if !need_rpm() {
+        return;
+    }
+    if !docker_usable() {
+        eprintln!("skip: docker unusable on this host: the Fedora journey cannot run here");
+        return;
+    }
+    if !fedora_image_ready() {
+        eprintln!("skip: fedora:41 image unavailable (offline?): the container journey needs it");
+        return;
+    }
+    let rpm = h::ensure_rpm();
+    let script = h::scripts_dir().join("rpm-journey.sh");
+    assert!(script.is_file(), "missing rust/scripts/rpm-journey.sh");
+    let rpm_mount = format!("{}:/mnt/m.rpm:ro", rpm.to_str().unwrap());
+    let script_mount = format!("{}:/mnt/journey.sh:ro", script.to_str().unwrap());
+    let out = h::run(
+        "docker",
+        &[
+            "run",
+            "--rm",
+            "-v",
+            &rpm_mount,
+            "-v",
+            &script_mount,
+            FEDORA_IMAGE,
+            "bash",
+            "/mnt/journey.sh",
+            "/mnt/m.rpm",
+        ],
+        None,
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    println!("{stdout}");
+    eprintln!("{stderr}");
+    assert!(out.status.success(), "fedora journey failed (see log above)");
+    for step in JOURNEY_STEPS {
+        assert!(
+            stdout.contains(&format!("journey-ok: {step}")),
+            "journey skipped {step}"
+        );
+    }
+    assert!(
+        stdout.contains("journey qualify receipt: ")
+            || stdout.contains("journey qualify refusal: "),
+        "journey never qualified"
+    );
+    assert!(stdout.contains("journey: all steps passed"));
 }
 
 /// Full spec text (fails when the spec moves).
