@@ -131,6 +131,11 @@ jobs:
             --component rust-src
       - name: Install bpf-linker 0.10.4
         run: cargo install bpf-linker --version 0.10.4 --locked
+      - name: Warm the cargo cache for offline queries
+        run: |
+          cd rust
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path crates/ebpf/Cargo.toml
       - name: Run Rust test suite
         run: |
           cd rust && cargo test --workspace --locked
