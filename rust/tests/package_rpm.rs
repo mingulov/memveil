@@ -359,14 +359,27 @@ fn rpm_install_doctor_uninstall_smoke() {
         "memveil is already installed: remove it and rerun"
     );
     let _preexisting = j::refuse_retained_receipts(receipts);
+    // Non-rpm hosts (ubuntu CI) carry no `glibc` package for
+    // the spec's floor requirement to resolve against:
+    // install with --nodeps there so the journey still
+    // exercises install/verify/run/uninstall, with the
+    // dependency-resolution proof staying on the Fedora
+    // container leg (which runs in this same suite).
+    let nodeps = !h::run("rpm", &["-q", "glibc"], None).status.success();
+    if nodeps {
+        eprintln!("note: no rpm glibc provider on this host; journey installs with --nodeps");
+    }
     // Serialize with the sibling deb journey: both drive the
     // same installed tree and cargo runs suites in parallel.
     let _lock = j::install_lock();
     let (tmp, qdirs) = j::journey_scratch("rpm-journey");
     let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // The spec Requires only the glibc floor, so a plain
-        // install resolves everywhere (no --nodeps escape).
-        let proc = h::run("sudo", &["-n", "rpm", "-i", rpm.to_str().unwrap()], None);
+        let mut install = vec!["-n", "rpm", "-i"];
+        if nodeps {
+            install.push("--nodeps");
+        }
+        install.push(rpm.to_str().unwrap());
+        let proc = h::run("sudo", &install, None);
         assert!(
             proc.status.success(),
             "{}",
@@ -374,7 +387,15 @@ fn rpm_install_doctor_uninstall_smoke() {
         );
         let status = h::run("rpm", &["-q", "memveil"], None);
         assert!(status.status.success());
-        let verify = h::run("rpm", &["-V", "memveil"], None);
+        // A --nodeps install leaves the floor requirement
+        // unsatisfied by construction; verify files only
+        // there (dependency resolution is the Fedora
+        // container leg's proof, in this same suite).
+        let verify = if nodeps {
+            h::run("rpm", &["-V", "--nodeps", "memveil"], None)
+        } else {
+            h::run("rpm", &["-V", "memveil"], None)
+        };
         assert!(
             verify.status.success(),
             "{}",

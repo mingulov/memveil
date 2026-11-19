@@ -13,8 +13,9 @@
 # deny.toml comment). The advisory DB needs network.
 # The Mojo provisioning mirrors the native workflow.
 #
-# Cutover note: the deny job survives (it guards the Rust
-# tree); the mojo-parity job retires with the Mojo build.
+# Cutover note: the deny and rust-test jobs survive (they
+# guard the Rust tree); the mojo-parity job retires with
+# the Mojo build.
 name: rust
 
 on:
@@ -103,3 +104,32 @@ jobs:
           test -x "$MEMVEIL_MOJO_BIN"
           cargo test --locked --test cli_parity
           cargo test --locked --lib unobserved_copy_rejected_at_read
+
+  rust-test:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            binutils cpio patchelf python3-jsonschema rpm zsh
+      - name: Install Rust toolchains
+        run: |
+          curl -fsSL -o /tmp/rustup-init \
+            https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
+          curl -fsSL -o /tmp/rustup-init.sha256 \
+            https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256
+          (cd /tmp && sha256sum --check rustup-init.sha256)
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          rustup toolchain install 1.100.0 --profile minimal \
+            --component clippy,rustfmt
+          rustup toolchain install nightly-2026-05-20 --profile minimal \
+            --component rust-src
+      - name: Install bpf-linker 0.10.4
+        run: cargo install bpf-linker --version 0.10.4 --locked
+      - name: Run Rust test suite
+        run: |
+          cd rust && cargo test --workspace --locked
