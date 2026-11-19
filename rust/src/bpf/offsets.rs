@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Load-time offset tables: tracefs-format probing for the attempt channel
-//! and kernel-BTF resolution for the copy channel.
+//! Load-time offset tables: tracefs-format probing for the attempt channel,
+//! kernel-BTF resolution for the copy channel, and direction verification
+//! for the lifecycle channel.
 //!
 //! Both tables translate live kernel layouts into the exact bytes the
 //! probes read. Resolution is strict: any retype, resize, missing field,
@@ -563,6 +564,65 @@ pub fn resolve_copy_offsets() -> Result<CopyOffsets, SessionError> {
     resolve_copy_offsets_from_btf(&bytes)
 }
 
+/// Frozen `enum dma_data_direction` encodings the Aya lifecycle probe
+/// trusts (`rust/crates/ebpf/src/lifecycle.rs`, matching upstream
+/// `dma-direction.h`): bidirectional 0, to-device 1, from-device 2.
+/// The host verifies live kernel BTF against these before lifecycle
+/// load and refuses on any drift, so a renumbered kernel fails loudly
+/// instead of silently inverting directions.
+pub const EXPECTED_DMA_BIDIRECTIONAL: u32 = 0;
+/// Frozen to-device encoding trusted by the Aya lifecycle probe.
+pub const EXPECTED_DMA_TO_DEVICE: u32 = 1;
+/// Frozen from-device encoding trusted by the Aya lifecycle probe.
+pub const EXPECTED_DMA_FROM_DEVICE: u32 = 2;
+
+/// Resolve the three `dma_data_direction` enumerators from raw
+/// kernel-BTF bytes, in (to, from, bidirectional) order.
+pub fn lifecycle_dirs_from_btf(data: &[u8]) -> Result<(u32, u32, u32), SessionError> {
+    let btf = Btf::parse(data)?;
+    let to = btf.enum_value("dma_data_direction", "DMA_TO_DEVICE")?;
+    let from = btf.enum_value("dma_data_direction", "DMA_FROM_DEVICE")?;
+    let bidi = btf.enum_value("dma_data_direction", "DMA_BIDIRECTIONAL")?;
+    Ok((to, from, bidi))
+}
+
+/// Verify the live kernel BTF carries the frozen direction encodings
+/// before the lifecycle probe loads.
+pub fn verify_lifecycle_dirs() -> Result<(), SessionError> {
+    let bytes = read_capped(KERNEL_BTF, MAX_BTF_BYTES, "kernel BTF")?;
+    verify_lifecycle_dirs_from_btf(&bytes)
+}
+
+/// Byte-slice form of [`verify_lifecycle_dirs`] for fixtures: every
+/// drifted enumerator is named in the refusal.
+pub fn verify_lifecycle_dirs_from_btf(data: &[u8]) -> Result<(), SessionError> {
+    let (to, from, bidi) = lifecycle_dirs_from_btf(data)?;
+    let mut drift = Vec::new();
+    if to != EXPECTED_DMA_TO_DEVICE {
+        drift.push(format!(
+            "DMA_TO_DEVICE is {to}, want {EXPECTED_DMA_TO_DEVICE}"
+        ));
+    }
+    if from != EXPECTED_DMA_FROM_DEVICE {
+        drift.push(format!(
+            "DMA_FROM_DEVICE is {from}, want {EXPECTED_DMA_FROM_DEVICE}"
+        ));
+    }
+    if bidi != EXPECTED_DMA_BIDIRECTIONAL {
+        drift.push(format!(
+            "DMA_BIDIRECTIONAL is {bidi}, want {EXPECTED_DMA_BIDIRECTIONAL}"
+        ));
+    }
+    if drift.is_empty() {
+        Ok(())
+    } else {
+        Err(SessionError::Offsets(format!(
+            "BTF refused: dma_data_direction drift ({})",
+            drift.join("; ")
+        )))
+    }
+}
+
 /// Installer-side strict check: the table the probe would trust and run
 /// on, with no surprises. Stricter than the probe in one place: a set
 /// private flag requires well-formed private widths (the probe would
@@ -926,6 +986,12 @@ mod tests {
     /// Layouts mirror the live kernel (pool 0/8/24/56, slot stride 24,
     /// mask @4, directions 1/2/0).
     fn copy_btf_image(shape: &PrivateShape) -> Vec<u8> {
+        copy_btf_image_with_dirs(shape, 1, 2, 0)
+    }
+
+    /// [`copy_btf_image`] with explicit direction enumerator values, for
+    /// swapped-enum negatives.
+    fn copy_btf_image_with_dirs(shape: &PrivateShape, to: u32, from: u32, bidi: u32) -> Vec<u8> {
         // BTF type-kind numbers (mirroring the loader's reader).
         const KIND_INT: u8 = 1;
         const KIND_PTR: u8 = 2;
@@ -956,9 +1022,9 @@ mod tests {
         let dma_mem = intern("dma_io_tlb_mem");
         let mask = intern("min_align_mask");
         let cc = intern("cc_shared");
-        let to = intern("DMA_TO_DEVICE");
-        let from = intern("DMA_FROM_DEVICE");
-        let bidi = intern("DMA_BIDIRECTIONAL");
+        let to_name = intern("DMA_TO_DEVICE");
+        let from_name = intern("DMA_FROM_DEVICE");
+        let bidi_name = intern("DMA_BIDIRECTIONAL");
         let u64_name = intern("u64");
         let u32_name = intern("u32");
         let u8_name = intern("u8");
@@ -1066,7 +1132,7 @@ mod tests {
             &members(&device_fields),
         );
         let mut values = Vec::new();
-        for (name, value) in [(to, 1u32), (from, 2u32), (bidi, 0u32)] {
+        for (name, value) in [(to_name, to), (from_name, from), (bidi_name, bidi)] {
             values.extend_from_slice(&name.to_le_bytes());
             values.extend_from_slice(&value.to_le_bytes());
         }
@@ -1193,6 +1259,44 @@ mod tests {
         assert!(
             message.contains("too large"),
             "want the oversize refusal, got: {message}"
+        );
+    }
+
+    #[test]
+    fn lifecycle_dirs_verify_normal_values() {
+        // The live shape (1/2/0) verifies: the check is quiet on
+        // every real kernel.
+        verify_lifecycle_dirs_from_btf(&copy_btf_image(&PrivateShape::full()))
+            .expect("normal 1/2/0 directions must verify");
+    }
+
+    #[test]
+    fn lifecycle_dirs_swapped_enum_refuses() {
+        // Swapped TO/FROM: the resolver still reads both values
+        // (this is what the frozen probe would have trusted, and
+        // the copy table accepts them since it installs rather
+        // than assumes), but lifecycle verification refuses
+        // naming exactly the drifted pair.
+        let image = copy_btf_image_with_dirs(&PrivateShape::full(), 2, 1, 0);
+        let (to, from, bidi) = lifecycle_dirs_from_btf(&image).expect("swapped enum must parse");
+        assert_eq!((to, from, bidi), (2, 1, 0));
+        let copy = resolve_copy_offsets_from_btf(&image).expect("swapped enum keeps copy green");
+        assert_eq!((copy.dir_to, copy.dir_from, copy.dir_bidi), (2, 1, 0));
+        let message = match verify_lifecycle_dirs_from_btf(&image) {
+            Ok(()) => panic!("swapped enum must refuse"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            message.contains("DMA_TO_DEVICE is 2"),
+            "want the TO drift, got: {message}"
+        );
+        assert!(
+            message.contains("DMA_FROM_DEVICE is 1"),
+            "want the FROM drift, got: {message}"
+        );
+        assert!(
+            !message.contains("BIDIRECTIONAL"),
+            "bidi is fine, got: {message}"
         );
     }
 }

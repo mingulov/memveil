@@ -46,7 +46,7 @@ use super::collector::{GeomOut, KernelSource, MissOut, PollOut, SnapOut, StatsOu
 use super::loadcheck::{errno_cause, errno_from_chain, errno_name};
 use crate::bpf::{
     AttachKind, AttachSpec, Channel, Frame, Session, SessionError, copy_specs, lifecycle_specs,
-    resolve_copy_offsets,
+    resolve_copy_offsets, verify_lifecycle_dirs,
 };
 use crate::platform::narrow::{MV_OFF_TABLE_MAGIC, MV_OFFSETS_TABLE_LEN};
 use crate::platform::outcome::OpOut;
@@ -872,6 +872,14 @@ impl ChannelSlot {
         if let Err(message) = self.maybe_install_copy_table() {
             return OpOut { ok: false, message };
         }
+        // The Aya lifecycle probe trusts frozen direction
+        // encodings (0/1/2): verify live kernel BTF carries them
+        // between load and attach, so a renumbered
+        // `dma_data_direction` refuses here instead of silently
+        // inverting directions.
+        if let Err(message) = self.maybe_verify_lifecycle_dirs() {
+            return OpOut { ok: false, message };
+        }
         OpOut {
             ok: true,
             message: String::new(),
@@ -906,6 +914,22 @@ impl ChannelSlot {
         {
             Ok(()) => Ok(()),
             Err(e) => Err(session_message(OP_MAP_WRITE, &e)),
+        }
+    }
+
+    /// Verify the frozen lifecycle direction encodings against live
+    /// kernel BTF. Other channels skip silently. Both object
+    /// families share one lifecycle map set, so the check cannot
+    /// tell the frozen Aya probe from a relocating C object and
+    /// verifies unconditionally: every real kernel carries 0/1/2,
+    /// and a renumbered kernel refuses loudly either way.
+    fn maybe_verify_lifecycle_dirs(&self) -> Result<(), String> {
+        if Channel::from_ring(&self.ring) != Some(Channel::Lifecycle) {
+            return Ok(());
+        }
+        match verify_lifecycle_dirs() {
+            Ok(()) => Ok(()),
+            Err(e) => Err(session_message(OP_LOAD, &e)),
         }
     }
 
@@ -2740,6 +2764,35 @@ mod tests {
             u16::from_le_bytes(back[4..6].try_into().expect("version")),
             MV_COPY_OFFS_VERSION
         );
+        let _ = kernel.close();
+    }
+
+    #[test]
+    fn lifecycle_load_verifies_dirs_live() {
+        // Lifecycle sessions verify the frozen direction
+        // encodings against live kernel BTF at load: on this
+        // (normal 0/1/2) kernel the load passes with the check
+        // in place. Needs root + loadable BPF here.
+        // SAFETY: pure id query.
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("SKIP lifecycle_load_verifies_dirs_live: requires root");
+            return;
+        }
+        let runtime = crate::platform::runtime::embedded_object;
+        let mut kernel = AyaKernel::with_channels(
+            runtime("attempt").expect("embedded").to_vec(),
+            "swiotlb",
+            "swiotlb_bounced",
+            runtime("lifecycle").expect("embedded").to_vec(),
+            true,
+            Vec::new(),
+            false,
+        );
+        if !kernel.open_session().ok || !kernel.load().ok {
+            eprintln!("SKIP lifecycle_load_verifies_dirs_live: load refused here");
+            let _ = kernel.close();
+            return;
+        }
         let _ = kernel.close();
     }
 
