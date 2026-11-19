@@ -225,6 +225,22 @@ fn le64(bytes: &[u8], offset: usize) -> Option<u64> {
 /// Open-time ELF sanity: 64-bit BPF object carrying the channel's program
 /// sections. Manual header walk (no object parser on this side): any
 /// truncation refuses.
+/// Fail-closed CO-RE precondition: refuse a relocation-carrying
+/// object when sysfs BTF is unreadable, naming BTF. Objects
+/// without relocations pass through, as do unparseable objects
+/// the loader itself will judge (open already gated structure).
+fn check_core_btf(elf: &[u8], channel: Channel, sys_btf_ok: bool) -> Result<(), SessionError> {
+    let relocations = aya_obj::Object::parse(elf)
+        .map(|object| object.has_btf_relocations())
+        .unwrap_or(false);
+    if relocations && !sys_btf_ok {
+        return Err(SessionError::Load(format!(
+            "{channel} channel: object carries CO-RE relocations but kernel BTF is unreadable"
+        )));
+    }
+    Ok(())
+}
+
 fn check_elf(elf: &[u8], channel: Channel) -> Result<(), SessionError> {
     let open = |why: &str| SessionError::Open(format!("{channel} channel: {why}"));
     if elf.get(..4) != Some(b"\x7fELF".as_slice()) {
@@ -458,6 +474,10 @@ impl Session {
                 self.channel
             )));
         }
+        // Fail-closed CO-RE guard: aya skips BTF relocation silently
+        // when sysfs BTF is unreadable, so a relocation-carrying
+        // object refuses here rather than loading unrelocated code.
+        check_core_btf(&self.elf, self.channel, Btf::from_sys_fs().is_ok())?;
         let bpf = EbpfLoader::new().load(&self.elf).map_err(|error| {
             SessionError::Load(format!("{} channel: load failed: {error}", self.channel))
         })?;
@@ -1151,6 +1171,25 @@ mod tests {
         elf[0x3c..0x3e].copy_from_slice(&shnum.to_le_bytes());
         elf[0x3e..0x40].copy_from_slice(&shstrndx.to_le_bytes());
         elf
+    }
+
+    #[test]
+    fn core_guard_refuses_relocations_without_btf() {
+        // A relocation-carrying object refuses when sysfs BTF is
+        // unreadable, naming BTF; readable BTF passes through to
+        // the loader, as do relocation-free and unparseable
+        // objects (the loader judges the latter itself).
+        let dir = crate::platform::test_support::repo_root().join("tests/fixtures/elf");
+        let cp = std::fs::read(dir.join("cp-ok.o")).expect("read cp-ok.o");
+        let error = check_core_btf(&cp, Channel::Copy, false).expect_err("must refuse without BTF");
+        assert!(
+            error.to_string().contains("BTF"),
+            "refusal must name BTF, got: {error}"
+        );
+        assert!(check_core_btf(&cp, Channel::Copy, true).is_ok());
+        let attempt = std::fs::read(dir.join("ok.o")).expect("read ok.o");
+        assert!(check_core_btf(&attempt, Channel::Attempt, false).is_ok());
+        assert!(check_core_btf(b"not an elf", Channel::Attempt, false).is_ok());
     }
 
     #[test]
