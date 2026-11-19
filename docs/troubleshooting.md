@@ -74,10 +74,14 @@ capture to clean up.
   (closed pipe, full disk). Free the sink and rerun; output
   is never silently dropped.
 - `record` cannot load the bridge on an older userland: the
-  native bridge needs glibc >= 2.35; the offline closure for
-  `report`, `top`, and `doctor` has a glibc 2.35 linkage minimum
-  (both set by the pinned Debian libgcc's highest numeric GLIBC
-  need, libgcc-s1 14.2.0-19; `support.md`).
+  Mojo bridge needs glibc >= 2.38 (GLIBC_2.38 plus
+  GLIBC_ABI_GNU2_TLS from the pinned
+  `third_party/libbpf-mojo-0.2.3.tar.gz` archive); the Rust
+  payload for `report`, `top`, and `doctor` has a glibc 2.35
+  linkage minimum, set by the pinned Debian libgcc
+  (libgcc-s1 14.2.0-19, no ABI nodes) because the host
+  toolchain libgcc would raise the floor to 2.40
+  (`support.md`; `rust/packaging/libgcc/PROVENANCE.txt`).
 - `doctor` exits 3: collection is unavailable or unknown on
   this host. Read its per-hook reasons; they name the exact
   missing piece (BTF, tracefs, profile coverage).

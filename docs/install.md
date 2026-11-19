@@ -26,14 +26,27 @@ capabilities ship, and no collection runs until you invoke
 it. The private libraries under `/usr/lib/memveil/` serve
 only this package's RUNPATH: the `.rpm` disables
 auto-provides so they never satisfy other packages, and
-both formats keep system dependencies manual (libelf,
-zlib, plus a versioned libc floor derived from the staged
-binaries - currently `libc6 >= 2.35` on Debian and `glibc
->= 2.35` on Fedora, set by the pinned Debian libgcc's highest
-numeric GLIBC need (libgcc-s1 14.2.0-19, GLIBC_2.35, no ABI
-nodes; see rust/packaging/libgcc/PROVENANCE.txt).
-On a userland older than that floor the install fails closed at
-install time instead of breaking at load (Debian
+both formats keep system dependencies manual. The two
+products carry different libc floors. The Rust payload
+ships only its binary, BPF objects, and the vendored
+libgcc, with the Aya loader statically linked, so it needs
+neither libelf nor zlib from the system: `libc6 >= 2.35`
+on Debian and `glibc >= 2.35` on Fedora, derived from the
+staged bytes and currently set by the pinned Debian
+libgcc's highest numeric GLIBC need (libgcc-s1
+14.2.0-19, GLIBC_2.35, no ABI nodes; see
+rust/packaging/libgcc/PROVENANCE.txt). The pinned provider
+is deliberate: the build-host toolchain libgcc needs
+GLIBC_ABI_GNU2_TLS, which would raise the floor to 2.40
+and refuse still-compatible userlands, while the payload
+needs only twelve ancient _Unwind_* symbols any libgcc
+since GCC 4.2 (2007) provides. The Mojo bridge
+`libbpf_mojo.so.1` carries its own higher floor instead:
+glibc >= 2.38 (GLIBC_2.38 plus GLIBC_ABI_GNU2_TLS) with
+libelf and zlib from the system, read from the pinned
+`third_party/libbpf-mojo-0.2.3.tar.gz` bridge.
+On a userland older than the Rust floor the install fails
+closed at install time instead of breaking at load (Debian
 bookworm ships libc6 2.36, above the floor).
 
 ## .deb: install, use, uninstall
