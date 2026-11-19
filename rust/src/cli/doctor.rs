@@ -16,6 +16,7 @@
 //! doctor-v0.1.1 schema exactly. Every interpolated evidence fragment is
 //! sanitized for its sink.
 
+use crate::bpf::{SessionError, verify_lifecycle_dirs};
 use crate::capture::loadcheck::{LoadResult, LoadTarget, load_check, load_code_for};
 use crate::capture::run::{
     attempt_program_names, copy_program_names, decide_record, lifecycle_program_names,
@@ -521,6 +522,29 @@ fn result_for_cap(
     }
 }
 
+/// Fold the lifecycle DMA-direction verify into one load result.
+///
+/// Record verifies live kernel BTF carries the frozen
+/// `dma_data_direction` encodings between load and attach and
+/// refuses OP_LOAD on drift; doctor judges the same bytes, so a
+/// verify failure rewrites the loaded lifecycle result into a
+/// no-errno failure carrying the refusal text. Every other row
+/// passes through untouched.
+fn apply_lifecycle_dma_verify(
+    cap_id: &str,
+    mut res: LoadResult,
+    verdict: &Result<(), SessionError>,
+) -> LoadResult {
+    if cap_id != "mapping-lifecycle" || res.state != "loaded" {
+        return res;
+    }
+    if let Err(e) = verdict {
+        res.state = "failed".to_string();
+        res.detail = e.to_string();
+    }
+    res
+}
+
 /// Judge every requested capability through record admission.
 ///
 /// Passive: no BPF load, no attach, no bridge access. Each of the three
@@ -810,6 +834,14 @@ pub fn assess_doctor(opts: &DoctorOptions) -> DoctorReport2 {
                 i,
                 &cap_id,
             );
+            // Record refuses OP_LOAD on DMA-direction drift, so a
+            // loaded lifecycle row is not available until the same
+            // verify passes here.
+            let res = if cap_id == "mapping-lifecycle" && res.state == "loaded" {
+                apply_lifecycle_dma_verify(&cap_id, res, &verify_lifecycle_dirs())
+            } else {
+                res
+            };
             if res.state == "loaded" {
                 out.caps[i].status = "available".to_string();
             } else if res.state == "failed" {
@@ -1268,9 +1300,10 @@ pub fn run_doctor(args: &[String]) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DoctorOptions, EXIT_UNAVAILABLE, assess_doctor, cargo_checkout_profiles,
-        default_profiles_dir, doctor_usage, precheck_demotes, render_doctor_json2,
-        render_doctor_text2, resolve_profiles_dir, run_doctor, run_doctor_opts, run_doctor_with,
+        DoctorOptions, EXIT_UNAVAILABLE, apply_lifecycle_dma_verify, assess_doctor,
+        cargo_checkout_profiles, default_profiles_dir, doctor_usage, precheck_demotes,
+        render_doctor_json2, render_doctor_text2, resolve_profiles_dir, run_doctor,
+        run_doctor_opts, run_doctor_with,
     };
     use crate::capture::run::decide_record;
     use crate::platform::evidence::detect_environment;
@@ -2130,6 +2163,93 @@ mod tests {
             entry.detail, "object unreadable at load",
             "load-check must resolve the embedded object"
         );
+    }
+
+    #[test]
+    fn lifecycle_dma_verify_demotes_loaded_row() {
+        use crate::bpf::SessionError;
+        use crate::capture::loadcheck::LoadResult;
+        let loaded = || LoadResult {
+            object: "lifecycle".to_string(),
+            state: "loaded".to_string(),
+            ..LoadResult::default()
+        };
+        let drift = Err(SessionError::Offsets(
+            "BTF refused: dma_data_direction drift (DMA_TO_DEVICE is 2, want 1)".to_string(),
+        ));
+        // A verify failure rewrites the loaded lifecycle row into
+        // a no-errno failure carrying the refusal text.
+        let demoted = apply_lifecycle_dma_verify("mapping-lifecycle", loaded(), &drift);
+        assert_eq!(demoted.state, "failed");
+        assert!(demoted.errno.is_empty());
+        assert!(
+            demoted.detail.contains("dma_data_direction drift"),
+            "{}",
+            demoted.detail
+        );
+        // A passing verify keeps the loaded row.
+        let kept = apply_lifecycle_dma_verify("mapping-lifecycle", loaded(), &Ok(()));
+        assert_eq!(kept.state, "loaded");
+        // Other capabilities and non-loaded rows pass through even
+        // when the verify fails.
+        let attempt = LoadResult {
+            object: "attempt".to_string(),
+            state: "loaded".to_string(),
+            ..LoadResult::default()
+        };
+        let untouched = apply_lifecycle_dma_verify("attempt-trace", attempt, &drift);
+        assert_eq!(untouched.state, "loaded");
+        let failed = LoadResult {
+            object: "lifecycle".to_string(),
+            state: "failed".to_string(),
+            detail: "load failed".to_string(),
+            ..LoadResult::default()
+        };
+        let kept_fail = apply_lifecycle_dma_verify("mapping-lifecycle", failed, &drift);
+        assert_eq!(kept_fail.state, "failed");
+        assert_eq!(kept_fail.detail, "load failed");
+    }
+
+    #[test]
+    fn load_check_lifecycle_dma_verify_passes_live() {
+        // End to end through assess_doctor: on a kernel carrying the
+        // frozen 0/1/2 encodings the threaded verify passes and a
+        // loaded lifecycle row reads available. Needs root: only
+        // privilege reaches the load phase.
+        // SAFETY: pure id query.
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("SKIP load_check_lifecycle_dma_verify_passes_live: requires root");
+            return;
+        }
+        let mut opts = doctor2_opts(
+            String::new(),
+            profiles_dir(),
+            "attempt-trace,mapping-lifecycle",
+            "",
+            "",
+            "",
+        );
+        opts.load_check = true;
+        let rep = assess_doctor(&opts);
+        assert_eq!(rep.mode, "load-check");
+        let entry = rep
+            .load
+            .iter()
+            .find(|l| l.object == "lifecycle")
+            .expect("lifecycle load entry");
+        if entry.state != "loaded" {
+            eprintln!(
+                "SKIP load_check_lifecycle_dma_verify_passes_live: lifecycle not loaded here ({})",
+                entry.detail
+            );
+            return;
+        }
+        let cap = rep
+            .caps
+            .iter()
+            .find(|c| c.id == "mapping-lifecycle")
+            .expect("lifecycle cap row");
+        assert_eq!(cap.status, "available");
     }
 
     #[test]
