@@ -328,9 +328,10 @@ fn record_done_line(end_reason: &str, outcome: &str, exit_code: i64) -> String {
 ///
 /// `root` is the evidence root ("" for the live host) and
 /// `profiles_dir` holds `manifest.txt`. Absent bridge
-/// and object paths are discovered (explicit user input
-/// wins verbatim and is never root-joined). Refusals print
-/// one diagnostic and exit 3 before any BPF or output
+/// and object paths fall back to the linked loader and
+/// embedded objects (explicit user input wins verbatim
+/// and is never root-joined). Refusals print one
+/// diagnostic and exit 3 before any BPF or output
 /// resource exists.
 pub fn run_record_with(root: &str, profiles_dir: &str, opts: RecordOptions) -> i64 {
     let mut writer = LiveWriter::new();

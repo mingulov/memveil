@@ -444,8 +444,9 @@ pub struct MintOut {
 ///
 /// Never fails: every failure returns err text naming the exact
 /// unmeasurable binding, missing hook, or unresolved object. Object
-/// paths resolve like record admission (explicit, bundle, system);
-/// rings are the canonical sizes, verified live again at qualify.
+/// paths resolve like record admission (explicit path wins,
+/// else the embedded object or a refusal); rings are the
+/// canonical sizes, verified live again at qualify.
 #[allow(clippy::too_many_arguments)]
 pub fn mint_bound_profile(
     root: &str,

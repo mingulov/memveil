@@ -275,6 +275,19 @@ impl<'a> Btf<'a> {
     /// Byte size of the type id. Pointers are 8 (64-bit kernel); arrays
     /// multiply through with overflow refusal.
     fn size_of(&self, id: u32) -> Result<u64, SessionError> {
+        self.size_of_depth(id, 0)
+    }
+
+    /// Byte size with an array-nesting budget. Each array level
+    /// recurses with a fresh modifier loop, so a cyclic array
+    /// would recurse forever; the shared depth cap refuses it
+    /// cleanly instead (real kernel BTF is never cyclic).
+    fn size_of_depth(&self, id: u32, depth: usize) -> Result<u64, SessionError> {
+        if depth > MAX_RESOLVE_DEPTH {
+            return Err(SessionError::Offsets(format!(
+                "BTF invalid: type cycle at {id}"
+            )));
+        }
         let mut current = id;
         for _ in 0..MAX_RESOLVE_DEPTH {
             let rec = self.record(current)?;
@@ -287,7 +300,7 @@ impl<'a> Btf<'a> {
                     let count = read_u32(rec.payload, 8).ok_or_else(|| {
                         SessionError::Offsets("BTF invalid: array truncated".to_owned())
                     })?;
-                    let elem_size = self.size_of(elem)?;
+                    let elem_size = self.size_of_depth(elem, depth + 1)?;
                     return elem_size.checked_mul(u64::from(count)).ok_or_else(|| {
                         SessionError::Offsets("BTF invalid: array size overflows".to_owned())
                     });
@@ -712,6 +725,80 @@ mod tests {
             error.to_string().contains("bitfield"),
             "want the bitfield refusal, got: {error}"
         );
+    }
+
+    /// Build an image whose `wrap.field` member is a cyclic array:
+    /// self-referential, or mutually referential when `mutual`.
+    fn cyclic_image(mutual: bool) -> Vec<u8> {
+        let mut strings = vec![0u8];
+        let mut intern = |text: &str| -> u32 {
+            let at = strings.len() as u32;
+            strings.extend_from_slice(text.as_bytes());
+            strings.push(0);
+            at
+        };
+        let wrap = intern("wrap");
+        let field = intern("field");
+
+        let mut types = Vec::new();
+        let mut record = |name: u32, info: u32, size: u32, payload: &[u8]| {
+            types.extend_from_slice(&name.to_le_bytes());
+            types.extend_from_slice(&info.to_le_bytes());
+            types.extend_from_slice(&size.to_le_bytes());
+            types.extend_from_slice(payload);
+        };
+        // id 1: array of id 1 (self) or id 2 (mutual), 2 elements.
+        let elem1 = if mutual { 2u32 } else { 1u32 };
+        let mut array = Vec::new();
+        array.extend_from_slice(&elem1.to_le_bytes());
+        array.extend_from_slice(&0u32.to_le_bytes());
+        array.extend_from_slice(&2u32.to_le_bytes());
+        record(0, u32::from(KIND_ARRAY) << 24, 0, &array);
+        if mutual {
+            // id 2: array of id 1, 2 elements.
+            let mut array = Vec::new();
+            array.extend_from_slice(&1u32.to_le_bytes());
+            array.extend_from_slice(&0u32.to_le_bytes());
+            array.extend_from_slice(&2u32.to_le_bytes());
+            record(0, u32::from(KIND_ARRAY) << 24, 0, &array);
+        }
+        // Next id: struct wrap with one member of type 1.
+        let mut members = Vec::new();
+        members.extend_from_slice(&field.to_le_bytes());
+        members.extend_from_slice(&1u32.to_le_bytes());
+        members.extend_from_slice(&0u32.to_le_bytes());
+        record(wrap, u32::from(KIND_STRUCT) << 24 | 1, 16, &members);
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&BTF_MAGIC.to_le_bytes());
+        out.push(BTF_VERSION);
+        out.push(0);
+        out.extend_from_slice(&24u32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&(types.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(types.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(strings.len() as u32).to_le_bytes());
+        out.extend_from_slice(&types);
+        out.extend_from_slice(&strings);
+        out
+    }
+
+    #[test]
+    fn cyclic_array_refuses_instead_of_recursing() {
+        // Self- and mutually-referential arrays refuse with the
+        // cycle marker instead of recursing until the stack
+        // overflows (real kernel BTF is never cyclic).
+        for mutual in [false, true] {
+            let image = cyclic_image(mutual);
+            let btf = Btf::parse(&image).expect("cyclic image must parse");
+            let error = btf
+                .struct_member("wrap", "field")
+                .expect_err("cyclic array must refuse");
+            assert!(
+                error.to_string().contains("BTF invalid: type cycle"),
+                "want the cycle refusal, got: {error}"
+            );
+        }
     }
 
     #[test]
