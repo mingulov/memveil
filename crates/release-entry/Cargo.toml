@@ -1,0 +1,8 @@
+[package]
+name = "memveil-release-entry"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+license = "GPL-3.0-or-later"
+description = "MemVeil release entry point: payload closure and frozen SBOM"
+publish = false

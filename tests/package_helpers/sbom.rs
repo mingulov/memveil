@@ -198,6 +198,24 @@ fn parse_crate(value: &str) -> CratePin {
     }
 }
 
+/// Emit the frozen SPDX SBOM over the full closure, exactly once.
+///
+/// The payload files are every copied file (not the 12-entry
+/// subset), reconciled with the full-closure verifier. Delegates
+/// to the release-entry harness library so the custody flow and
+/// the test suite share one emitter. Refuses to overwrite.
+pub fn emit_frozen(
+    manifest_path: &Path,
+    bundle: &Path,
+    deb: &Path,
+    rpm: &Path,
+    lock: &Path,
+    ebpf_lock: &Path,
+    out: &Path,
+) -> Result<(), String> {
+    memveil_release_entry::emit_frozen(manifest_path, bundle, deb, rpm, lock, ebpf_lock, out)
+}
+
 /// Emit the SPDX document; `Err` carries the failure diagnostic.
 pub fn emit_spdx(
     bundle: &Path,

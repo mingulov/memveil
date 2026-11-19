@@ -393,3 +393,105 @@ fn missing_inputs_fail() {
     assert!(h::sbom::emit_spdx(&nope, &deb, &rpm, &lock, &ebpf_lock, &out).is_err());
     assert!(h::sbom::emit_spdx(&bundle, &deb, &rpm, &nope, &ebpf_lock, &out).is_err());
 }
+
+#[test]
+fn full_closure_covers_every_copied_file() {
+    let (deb, rpm, bundle) = packages();
+    let text = h::sbom::manifest_from_bundle(&bundle).expect("manifest");
+    let facts = h::sbom::manifest_facts(&text).expect("facts");
+    let entries = h::payload::collect_full(&deb, &rpm, &bundle, &text).expect("collect full");
+    assert!(entries.len() > 12, "closure is not full: {}", entries.len());
+    assert_eq!(entries.len(), 3 * facts.files.len());
+    for (rel, want) in &facts.files {
+        assert_eq!(entries.get(&format!("bundle/{rel}")), Some(want), "{rel}");
+        assert_eq!(
+            entries.get(&format!("deb/{}", installed(rel))),
+            Some(want),
+            "{rel}"
+        );
+        assert_eq!(
+            entries.get(&format!("rpm/{}", installed(rel))),
+            Some(want),
+            "{rel}"
+        );
+    }
+    for (logical, digest) in &entries {
+        assert!(is_hex64(digest), "{logical}");
+    }
+    assert_eq!(
+        entries.get("bundle/bin/memveil"),
+        entries.get("deb/usr/bin/memveil")
+    );
+    assert_eq!(
+        entries.get("bundle/LICENSE"),
+        entries.get("deb/usr/share/doc/memveil/LICENSE")
+    );
+}
+
+/// Installed FHS destination of one bundle member, as asserted
+/// for the real packages (mirrors the packager mapping).
+fn installed(rel: &str) -> String {
+    if rel.starts_with("docs/") || rel.starts_with("profiles/") {
+        return format!("usr/share/memveil/{rel}");
+    }
+    if rel.starts_with("examples/") {
+        return format!("usr/share/memveil/docs/{rel}");
+    }
+    if rel == "LICENSE"
+        || rel == "THIRD-PARTY-NOTICES.md"
+        || rel.starts_with("LICENSES/")
+        || rel.starts_with("licenses/")
+    {
+        return format!("usr/share/doc/memveil/{rel}");
+    }
+    if rel == "bin/memveil" || rel.starts_with("lib/memveil/") {
+        return format!("usr/{rel}");
+    }
+    if let Some(rest) = rel.strip_prefix("bpf/") {
+        return format!("usr/lib/memveil/{rest}");
+    }
+    panic!("unknown bundle path: {rel}");
+}
+
+#[test]
+fn full_closure_rejects_hollow_bundle() {
+    let (deb, rpm, _) = packages();
+    let tmp = h::scratch("full-hollow");
+    let top = tmp.join("memveil-0.0.0");
+    fs::create_dir(&top).unwrap();
+    let hollow = tmp.join("hollow.tar.gz");
+    let out = h::run(
+        "tar",
+        &["-czf", hollow.to_str().unwrap(), "memveil-0.0.0"],
+        Some(&tmp),
+    );
+    assert!(out.status.success());
+    let text = h::sbom::manifest_from_bundle(&h::ensure_tarball().tarball).expect("manifest");
+    let err = h::payload::collect_full(&deb, &rpm, &hollow, &text).expect_err("hollow must fail");
+    assert!(err.contains("lacks payload member"), "{err}");
+}
+
+#[test]
+fn frozen_sbom_binds_full_payload_once() {
+    let (deb, rpm, bundle) = packages();
+    let (lock, ebpf_lock) = locks();
+    let manifest = h::ensure_tarball().bundle.join("MANIFEST.json");
+    let tmp = h::scratch("spdx-frozen");
+    let out = tmp.join("memveil.spdx.json");
+    h::sbom::emit_frozen(&manifest, &bundle, &deb, &rpm, &lock, &ebpf_lock, &out)
+        .expect("emit frozen");
+    assert_eq!(h::json_probe(&out, "d['spdxVersion']"), "SPDX-2.3");
+    let text = fs::read_to_string(&manifest).unwrap();
+    let entries = h::payload::collect_full(&deb, &rpm, &bundle, &text).expect("collect full");
+    for (logical, digest) in &entries {
+        let probe =
+            format!("[f['checksums'] for f in d['files'] if f['fileName'] == 'payload/{logical}']");
+        let got = h::json_probe(&out, &probe);
+        assert!(got.contains(digest), "{logical}: {got}");
+    }
+    let count: usize = h::json_probe(&out, "len(d['files'])").parse().unwrap();
+    assert_eq!(count, entries.len());
+    let err = h::sbom::emit_frozen(&manifest, &bundle, &deb, &rpm, &lock, &ebpf_lock, &out)
+        .expect_err("overwrite must fail");
+    assert!(err.contains("refusing to overwrite"), "{err}");
+}
