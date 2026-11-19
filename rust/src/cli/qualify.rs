@@ -766,15 +766,40 @@ fn smoke_object_hash(snap: &BridgeSnapshot) -> Result<String, String> {
     Ok(format!("sha256:{}", snap.sha))
 }
 
+/// Refusal when a wanted channel object has no path; "" proceeds.
+///
+/// Qualify mints only explicit artifacts: a wanted lifecycle/copy
+/// channel with neither an explicit flag nor a discovered file
+/// refuses before the smoke, so the smoke never attaches on
+/// embedded bytes the receipt cannot bind and no capture
+/// directory is left behind. Lifecycle reports first, matching
+/// admission order.
+fn missing_channel_object(
+    want_lc: bool,
+    want_cp: bool,
+    lc_object: &str,
+    cp_object: &str,
+) -> String {
+    if want_lc && lc_object.is_empty() {
+        return "no object: pass --lc-object PATH".to_string();
+    }
+    if want_cp && cp_object.is_empty() {
+        return "no object: pass --cp-object PATH".to_string();
+    }
+    String::new()
+}
+
 /// Run the qualify flow against explicit roots; return exit code.
 ///
 /// `root` is the evidence root ("" for the live host) and
 /// `profiles_dir` holds `manifest.txt`; receipts publish under its
 /// receipts dir. The smoke runs the collector in explicit mode
-/// against the planned doc; only a finalized duration-ended smoke
-/// whose session file proves stop.admission_closed mints, and minting
-/// publishes exactly one local-auto receipt. Refusals print one
-/// diagnostic and exit 3 before any receipt exists.
+/// against the planned doc; a wanted lifecycle/copy channel with
+/// no resolved object refuses before the smoke. Only a finalized
+/// duration-ended smoke whose session file proves
+/// stop.admission_closed mints, and minting publishes exactly one
+/// local-auto receipt. Refusals print one diagnostic and exit 3
+/// before any receipt exists.
 pub fn run_qualify_with(root: &str, profiles_dir: &str, opts: &QualifyOptions) -> i64 {
     let output = opts.output.clone();
     let mut bridge = resolve_bridge(&opts.bridge, opts.has_bridge);
@@ -816,6 +841,10 @@ pub fn run_qualify_with(root: &str, profiles_dir: &str, opts: &QualifyOptions) -
     }
     if cp_object.is_empty() && want_cp {
         cp_object = resolve_object("");
+    }
+    let missing = missing_channel_object(want_lc, want_cp, &lc_object, &cp_object);
+    if !missing.is_empty() {
+        return qualify_failed(&missing);
     }
     let lc_snap = open_object_snapshot(&lc_object);
     let cp_snap = open_object_snapshot(&cp_object);
@@ -969,8 +998,9 @@ pub fn run_qualify(args: &[String]) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        QualifyOptions, parse_qualify_args, plan_qualification, publish_receipt, qualify_usage,
-        smoke_bridge_hash, smoke_object_hash, smoke_shutdown_ok,
+        EXIT_REFUSAL, QualifyOptions, missing_channel_object, parse_qualify_args,
+        plan_qualification, publish_receipt, qualify_usage, run_qualify_with, smoke_bridge_hash,
+        smoke_object_hash, smoke_shutdown_ok,
     };
     use crate::capture::run::decide_record;
     use crate::platform::artifact_files::{open_bridge_snapshot, open_object_snapshot};
@@ -1765,5 +1795,74 @@ mod tests {
         assert_eq!(inner.sha, want_bridge);
         assert!(smoked.ok, "{}", smoked.refusal);
         assert_eq!(smoked.object_sha, want_object);
+    }
+
+    #[test]
+    fn channel_object_gate_matrix() {
+        // Wanted channels without a resolved path refuse with the
+        // collector's own wording; lifecycle reports first.
+        assert_eq!(
+            missing_channel_object(true, true, "", ""),
+            "no object: pass --lc-object PATH"
+        );
+        assert_eq!(
+            missing_channel_object(true, false, "", ""),
+            "no object: pass --lc-object PATH"
+        );
+        assert_eq!(
+            missing_channel_object(false, true, "", ""),
+            "no object: pass --cp-object PATH"
+        );
+        assert_eq!(
+            missing_channel_object(true, true, "lc.o", ""),
+            "no object: pass --cp-object PATH"
+        );
+        // Explicit paths proceed, even unprobed: the smoke names
+        // its own failure for a path that never opens.
+        assert_eq!(missing_channel_object(true, true, "lc.o", "cp.o"), "");
+        // Unwanted channels never gate, however empty.
+        assert_eq!(missing_channel_object(false, false, "", ""), "");
+        assert_eq!(missing_channel_object(true, false, "lc.o", ""), "");
+        assert_eq!(missing_channel_object(false, true, "", "cp.o"), "");
+    }
+
+    #[test]
+    fn qualify_refuses_unresolved_lc_before_smoke() {
+        // The fixture plan covers mapping-lifecycle, but no
+        // --lc-object is given and nothing is discovered, so the
+        // run refuses before the smoke: no attach, no capture
+        // directory, no receipt. Unprivileged-safe: the gate
+        // returns before any privileged smoke setup.
+        let tmp = TestDir::create("memveil-qual-gate").expect("scratch");
+        let out = format!("{}/cap", tmp.as_str());
+        let mut opts = base_opts();
+        opts.output = out.clone();
+        opts.capabilities = "attempt-trace,mapping-lifecycle".to_string();
+        let code = run_qualify_with(&host(), &pdir(), &opts);
+        assert_eq!(code, EXIT_REFUSAL);
+        assert!(
+            !std::path::Path::new(&out).exists(),
+            "no capture dir on gate refusal"
+        );
+    }
+
+    #[test]
+    fn qualify_refuses_unresolved_cp_before_smoke() {
+        // Same gate for copy-actual: an explicit lifecycle path
+        // clears the first gate, the missing copy path refuses.
+        let tmp = TestDir::create("memveil-qual-gate").expect("scratch");
+        let out = format!("{}/cap", tmp.as_str());
+        let mut opts = base_opts();
+        opts.output = out.clone();
+        opts.capabilities = "attempt-trace,mapping-lifecycle,copy-actual".to_string();
+        opts.lc_object = "lc.o".to_string();
+        let plan = plan_qualification(&host(), &pdir(), &opts);
+        assert!(plan.ok, "{}", plan.refusal);
+        let code = run_qualify_with(&host(), &pdir(), &opts);
+        assert_eq!(code, EXIT_REFUSAL);
+        assert!(
+            !std::path::Path::new(&out).exists(),
+            "no capture dir on gate refusal"
+        );
     }
 }
