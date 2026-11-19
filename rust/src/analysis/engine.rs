@@ -18,12 +18,11 @@ use super::attempts::{AttemptAnalyzer, window_label};
 use super::mappings::MappingTracker;
 use super::pools::PoolTracker;
 use super::regions::RegionTracker;
-use super::truncate_codepoints;
 use crate::capture::correlation::rollup_correlation;
 use crate::model::event::Event;
 use crate::model::metric::Metric;
 use crate::model::report::Report;
-use crate::model::session::{Channel, Session};
+use crate::model::session::{Channel, Session, truncate_codepoints};
 
 /// Merged metric-row budget.
 pub const MAX_REPORT_METRICS: usize = 4096;

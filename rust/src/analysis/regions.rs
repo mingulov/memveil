@@ -54,6 +54,13 @@ fn append_merged(segments: &mut Vec<Segment>, segment: Segment) {
 
 fn assign(segments: &mut Vec<Segment>, start: u64, end: u64, state: u8, capacity: usize) -> bool {
     // Sorted disjoint intervals permit a bounded splice without rebuilding.
+    // Indexing safety: both searches range over 0..n with the
+    // second starting at `first`, so first <= last <= n. Every
+    // index below is guarded: segments[first] and
+    // segments[last - 1] by first < last, segments[first - 1]
+    // by first > 0, segments[last] by last < n, and
+    // replacement[0]/[tail] by the mandatory middle append
+    // (replacement is never empty, so tail cannot underflow).
     let n = segments.len();
     let mut lo = 0;
     let mut hi = n;

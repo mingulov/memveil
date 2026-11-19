@@ -21,7 +21,6 @@
 
 use std::collections::BTreeMap;
 
-use super::truncate_codepoints;
 use crate::ENGINE_VERSION;
 use crate::capture::correlation::rollup_correlation;
 use crate::model::event::Event;
@@ -30,7 +29,7 @@ use crate::model::report::{
     Report, ReportCap, ReportEnv, incomplete_finding_severity, terminal_loss_leg,
     verdict_for_counts,
 };
-use crate::model::session::{Capability, Channel, Session};
+use crate::model::session::{Capability, Channel, Session, truncate_codepoints};
 use crate::model::validate::{checked_add, format_u64};
 
 const MAX_SUMMANDS: usize = 8;

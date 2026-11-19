@@ -42,7 +42,7 @@ use crate::model::identity::{
     ACTIVE_MAX, DEVICE_MAX_ID, NESTED_MAX, PENDING_MAX, RESOLVED_MAX, RETIRED_MAX,
     check_address_space,
 };
-use crate::model::session::Channel;
+use crate::model::session::{Channel, truncate_codepoints};
 use crate::model::validate::format_u64;
 
 /// Relation class owning mapping/release pairing.
@@ -870,14 +870,6 @@ const CORR_RELATION_SYNC: &str = "sync_attribution";
 const CORR_SCOPE_MAPPING: &str = "mapping and release pairing";
 const CORR_SCOPE_COPY: &str = "copy attribution";
 const CORR_SCOPE_SYNC: &str = "sync attribution";
-
-/// Cap text at limit codepoints, on a char boundary.
-fn truncate_codepoints(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.to_string();
-    }
-    text.chars().take(limit).collect()
-}
 
 fn join_causes(items: &[String]) -> String {
     items.join("; ")

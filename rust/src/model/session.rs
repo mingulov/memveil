@@ -45,6 +45,14 @@ const CORR_RELATION_MAPPING: &str = "mapping_release";
 const CORR_RELATION_COPY: &str = "copy_attribution";
 const CORR_RELATION_SYNC: &str = "sync_attribution";
 
+/// Cap text at limit codepoints, on a char boundary.
+pub(crate) fn truncate_codepoints(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    text.chars().take(limit).collect()
+}
+
 /// One environment evidence record.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EvidenceItem {

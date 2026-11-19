@@ -82,8 +82,11 @@ fn shown(m: &Metric, device_filter: &str) -> bool {
 
 /// Format basis points as an exact two-place percent.
 fn bps_percent(bps: i64) -> String {
-    let whole = (bps / 100) as u64;
-    let frac = (bps % 100) as u64;
+    // Basis points are non-negative by construction; Mojo's
+    // UInt64() conversion traps on negatives, so fail loudly
+    // here too instead of wrapping.
+    let whole = u64::try_from(bps / 100).expect("bps non-negative");
+    let frac = u64::try_from(bps % 100).expect("bps non-negative");
     let mut out = format_u64(whole);
     out.push('.');
     if frac < 10 {

@@ -273,7 +273,7 @@ pub fn render_json(rep: &Report, device_filter: &str) -> String {
     ));
     out.push_str(&format!(
         "    \"loss_ratio_bps\": \"{}\",\n",
-        format_u64(rep.verdict.loss_ratio_bps as u64)
+        format_u64(u64::try_from(rep.verdict.loss_ratio_bps).expect("loss_ratio_bps non-negative"))
     ));
     out.push_str(&format!(
         "    \"delivered\": \"{}\"\n",
@@ -393,7 +393,7 @@ pub fn render_json(rep: &Report, device_filter: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{analyze_fixture, golden};
+    use super::super::analyze_fixture;
     use super::*;
     use crate::model::metric::Metric;
     use crate::model::report::ReportCap;
@@ -607,6 +607,5 @@ mod tests {
     fn golden_inputs_render_deterministically() {
         let rep = analyze_fixture("tests/fixtures/attempts");
         assert_eq!(render_json(&rep, ""), render_json(&rep, ""));
-        let _ = golden("tests/golden/report-attempts.txt");
     }
 }

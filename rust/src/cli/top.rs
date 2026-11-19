@@ -677,7 +677,7 @@ impl LiveAnalyzer for TopLiveAnalyzer {
         self.inner
             .borrow_mut()
             .snapshot(horizon_ns, finalized)
-            .map_err(|e| e.message)
+            .map_err(|e| analysis_error_text(&e.message))
     }
 }
 
@@ -1160,13 +1160,13 @@ fn finish_after_signal<A: TopReducer>(
 #[cfg(test)]
 mod tests {
     use super::{
-        BoundaryCursor, FilterWatch, StdoutSink, TopOptions, WaitSlices, diagnose_block, drain,
-        filter_header_suffix, finish_after_signal, finish_live, live_template, parse_top_args,
-        run_top, snapshot_block, top_usage, wait_interval,
+        BoundaryCursor, FilterWatch, StdoutSink, TopLiveAnalyzer, TopOptions, WaitSlices,
+        diagnose_block, drain, filter_header_suffix, finish_after_signal, finish_live,
+        live_template, parse_top_args, run_top, snapshot_block, top_usage, wait_interval,
     };
     use crate::analysis::engine::Analyzer;
     use crate::capture::reader::{ReaderLimits, read_capture};
-    use crate::capture::tee::RefreshSink;
+    use crate::capture::tee::{LiveAnalyzer, RefreshSink};
     use crate::model::event::Event;
     use crate::model::metric::{Finding, Metric};
     use crate::model::report::{Report, apply_integrity};
@@ -2399,6 +2399,19 @@ mod tests {
         fn finish(&mut self, _end_ns: u64, _partial: bool) -> Result<Report, String> {
             panic!("finish must not run after the failed consume");
         }
+    }
+
+    #[test]
+    fn live_snapshot_failure_renders_wrapped() {
+        // The tee bridge wraps typed snapshot failures as
+        // AnalysisError(message=...), matching Mojo's String(e)
+        // over the raised AnalysisError; consume stays bare
+        // because it raises only the generic error.
+        let mut session = live_template();
+        session.window_end_ns = 100;
+        let analyzer = TopLiveAnalyzer::new(session);
+        let err = analyzer.snapshot(200, false).unwrap_err();
+        assert_eq!(err, "AnalysisError(message=horizon outside session window)");
     }
 
     #[test]
