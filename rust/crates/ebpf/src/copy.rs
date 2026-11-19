@@ -561,6 +561,12 @@ fn claim(frame: u64, id: u64) -> bool {
 }
 
 /// Releases frame's slot; true when it held id (mv_bounce recorded this call).
+///
+/// The id read stays strictly before the frame clear (ordered volatile
+/// accesses, not plain ones): the clear-then-read emission order the compiler chose
+/// for plain accesses lets a concurrent claim on another CPU win the freed
+/// slot mid-release, so the release would read the replacement id, count a
+/// false recovery, and emit a duplicate copy.
 #[inline(always)]
 fn release(frame: u64, id: u64) -> bool {
     for i in 0..MV_CLAIM_PROBES {
@@ -569,10 +575,10 @@ fn release(frame: u64, id: u64) -> bool {
         let Some(slot) = MV_CLAIMS.get_ptr_mut(k) else {
             return true;
         };
-        if unsafe { (*slot).frame } == frame {
-            let mine = unsafe { (*slot).id } == id;
+        if unsafe { crate::common::slot_load(&raw const (*slot).frame) } == frame {
+            let mine = unsafe { crate::common::slot_load(&raw const (*slot).id) } == id;
             unsafe {
-                (*slot).frame = 0;
+                crate::common::slot_store(&raw mut (*slot).frame, 0);
             }
             return mine;
         }

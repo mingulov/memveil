@@ -58,6 +58,43 @@ pub unsafe fn count_or(ptr: *mut u64, bits: u64) {
     };
 }
 
+/// Ordered load of the contended word at `ptr` (claim-slot frame/id).
+///
+/// The release path must read the slot id BEFORE it clears the frame, and
+/// the two touch different words with no data dependence between them, so
+/// plain accesses let the compiler emit the clear first — observed in the
+/// shipped copy object, where the clear retired one instruction before the
+/// id load. That order opens a window: a concurrent claim on another CPU
+/// can win the freed slot and store its own id before the release reads,
+/// so the release misreads a mismatch, counts a false recovery, and emits
+/// a duplicate copy. Volatile pins the compiler order (the BPF backend
+/// cannot select atomic load/store, so intrinsics are not an option
+/// here); on x86-64, the only supported runtime, TSO closes the hardware
+/// window too (the losing outcome is the load-buffering shape TSO
+/// forbids). No portable hardware claim is made: like the probe's other
+/// plain map sharing, this relies on x86-TSO.
+///
+/// # Safety
+///
+/// Same contract as [`count_fetch_add`]: a live, aligned map-value pointer.
+#[inline(always)]
+pub unsafe fn slot_load(ptr: *const u64) -> u64 {
+    unsafe { core::ptr::read_volatile(ptr) }
+}
+
+/// Ordered store of `val` to the contended word at `ptr`.
+///
+/// Pairs with [`slot_load`] (see its ordering rationale): the release
+/// frame clear must stay after the slot id read.
+///
+/// # Safety
+///
+/// Same contract as [`count_fetch_add`]: a live, aligned map-value pointer.
+#[inline(always)]
+pub unsafe fn slot_store(ptr: *mut u64, val: u64) {
+    unsafe { core::ptr::write_volatile(ptr, val) }
+}
+
 /// Old-value compare-and-swap: stores `new` at `ptr` when it currently
 /// holds `old`, and returns the previous value in either case.
 ///
