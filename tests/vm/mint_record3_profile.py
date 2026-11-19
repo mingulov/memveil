@@ -280,7 +280,7 @@ def main():
         fail("usage: mint_record3_profile.py --base DOC "
              "[--out PATH]")
     doc = json.loads(base.read_text())
-    if doc.get("schema_version") != "0.1.1":
+    if doc.get("schema_version") not in ("0.1.1", "0.1.2"):
         fail("shipped doc is not profile 0.1.1")
     attempt = [c for c in doc["capabilities"]
                if c["id"] == "attempt-trace"]

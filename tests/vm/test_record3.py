@@ -48,7 +48,7 @@ def _mint_profile():
     assert proc.returncode == 0, proc.stderr[-2000:]
     with open(out) as handle:
         profile = json.load(handle)
-    assert profile["schema_version"] == "0.1.1", profile
+    assert profile["schema_version"] == "0.1.2", profile
     assert {hook["function"] for hook in profile["hooks"]
             if hook["kind"] == "tracing"} == {
         "swiotlb_tbl_map_single",
@@ -77,8 +77,8 @@ def check_capture_session(events, session, record, tag,
     applicable: attempt counting has nothing to correlate).
     """
     bad = []
-    if record["exit"] != 4:
-        bad.append("%s: record exit %r != 4 (bounded)"
+    if record["exit"] != 0:
+        bad.append("%s: record exit %r != 0 (non-strict)"
                    % (tag, record["exit"]))
     if session["capture"]["finalized"] is not True:
         bad.append("%s: capture not finalized" % tag)
