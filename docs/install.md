@@ -42,7 +42,8 @@ and refuse still-compatible userlands, while the payload
 needs only twelve ancient _Unwind_* symbols any libgcc
 since GCC 4.2 (2007) provides. The Mojo bridge
 `libbpf_mojo.so.1` carries its own higher floor instead:
-glibc >= 2.38 (GLIBC_2.38 plus GLIBC_ABI_GNU2_TLS) with
+glibc >= 2.40 (GLIBC_2.38 plus GLIBC_ABI_GNU2_TLS, first
+provided by glibc 2.40) with
 libelf and zlib from the system, read from the pinned
 `third_party/libbpf-mojo-0.2.3.tar.gz` bridge.
 On a userland older than the Rust floor the install fails

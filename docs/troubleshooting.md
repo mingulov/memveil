@@ -74,9 +74,10 @@ capture to clean up.
   (closed pipe, full disk). Free the sink and rerun; output
   is never silently dropped.
 - `record` cannot load the bridge on an older userland: the
-  Mojo bridge needs glibc >= 2.38 (GLIBC_2.38 plus
+  Mojo bridge needs glibc >= 2.40 (GLIBC_2.38 plus
   GLIBC_ABI_GNU2_TLS from the pinned
-  `third_party/libbpf-mojo-0.2.3.tar.gz` archive); the Rust
+  `third_party/libbpf-mojo-0.2.3.tar.gz` archive, first
+  provided by glibc 2.40); the Rust
   payload for `report`, `top`, and `doctor` has a glibc 2.35
   linkage minimum, set by the pinned Debian libgcc
   (libgcc-s1 14.2.0-19, no ABI nodes) because the host

@@ -79,7 +79,7 @@ doctor leaves the load verdict at `ready (load not checked)`.
 - Memory-cgroup headroom for the BPF maps (see the map
   sizes under Resource defaults); the memcg precheck
   reports `unknown` when outer limits are not visible.
-- glibc 2.35 or later for the Rust payload, 2.38 or later
+- glibc 2.35 or later for the Rust payload, 2.40 or later
   where the Mojo bridge loads. The Rust floor is derived
   from the staged bytes and currently set by the pinned
   Debian libgcc (libgcc-s1 14.2.0-19, GLIBC_2.35, no ABI
@@ -87,7 +87,8 @@ doctor leaves the load verdict at `ready (load not checked)`.
   raise the floor to 2.40 through GLIBC_ABI_GNU2_TLS. The
   Mojo bridge `libbpf_mojo.so.1` needs GLIBC_2.38 plus
   GLIBC_ABI_GNU2_TLS from the pinned
-  `third_party/libbpf-mojo-0.2.3.tar.gz` archive.
+  `third_party/libbpf-mojo-0.2.3.tar.gz` archive, so its
+  floor is 2.40 (first glibc providing that ABI node).
 
 Known out of reach: Kata, CoCo, Contrast, and AKS
 kernel-uvm guests (no BTF; some also lack `FTRACE` or
@@ -179,10 +180,11 @@ does not qualify any kernel or confidential platform.
   has been tested
   on Ubuntu 26.04.1 (glibc 2.43) for specific development artifacts.
   Observed linkage minima are glibc 2.35 for the Rust payload
-  (binary plus vendored libgcc, no ABI nodes) and glibc 2.38
+  (binary plus vendored libgcc, no ABI nodes) and glibc 2.40
   for the Mojo bridge (GLIBC_2.38 plus GLIBC_ABI_GNU2_TLS
   from the pinned `third_party/libbpf-mojo-0.2.3.tar.gz`
-  archive). The Debian libgcc is pinned because the host
+  archive; 2.40 first provides that ABI node). The Debian
+  libgcc is pinned because the host
   toolchain libgcc would raise the Rust floor to 2.40
   through GLIBC_ABI_GNU2_TLS. These
   minima and the CPU build target
