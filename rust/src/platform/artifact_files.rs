@@ -161,7 +161,6 @@ fn to_cstr(text: &str) -> Vec<u8> {
     out
 }
 
-const OWN_STAT_SIZE: usize = 144;
 const OWN_S_IFMT: u64 = 0o170000;
 const OWN_S_IFREG: u64 = 0o100000;
 const OWN_S_IFDIR: u64 = 0o040000;
@@ -183,47 +182,29 @@ fn own_name_is(buf: &[u8], base: usize, nlen: usize, text: &str) -> bool {
     i == nlen
 }
 
-fn own_le32(buf: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
+/// `fstat` one open fd into a correctly aligned `stat`.
+fn own_fstat(fd: i32) -> Option<libc::stat> {
+    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: fstat writes a full struct stat on success; the
+    // MaybeUninit outlives the call and is read only then.
+    let r = unsafe { libc::fstat(fd, st.as_mut_ptr()) };
+    if r != 0 {
+        return None;
+    }
+    // SAFETY: fstat succeeded, so the struct is initialized.
+    Some(unsafe { st.assume_init() })
 }
 
-fn own_le64(buf: &[u8], off: usize) -> u64 {
-    u64::from_le_bytes([
-        buf[off],
-        buf[off + 1],
-        buf[off + 2],
-        buf[off + 3],
-        buf[off + 4],
-        buf[off + 5],
-        buf[off + 6],
-        buf[off + 7],
-    ])
-}
-
-/// `[mode, uid, nlink]` for an open fd (x86-64 stat layout).
+/// `[mode, uid, nlink]` for an open fd, from named stat fields.
 fn own_fstat_ids(fd: i32) -> Option<[u64; 3]> {
-    let mut buf = [0u8; OWN_STAT_SIZE];
-    // SAFETY: 144-byte buffer outlives the call.
-    let r = unsafe { libc::fstat(fd, buf.as_mut_ptr().cast::<libc::stat>()) };
-    if r != 0 {
-        return None;
-    }
-    Some([
-        u64::from(own_le32(&buf, 24)),
-        u64::from(own_le32(&buf, 28)),
-        own_le64(&buf, 16),
-    ])
+    let st = own_fstat(fd)?;
+    Some([u64::from(st.st_mode), u64::from(st.st_uid), st.st_nlink])
 }
 
-/// `[st_dev, st_ino]` for an open fd (x86-64 stat layout).
+/// `[st_dev, st_ino]` for an open fd, from named stat fields.
 fn own_fstat_devino(fd: i32) -> Option<[u64; 2]> {
-    let mut buf = [0u8; OWN_STAT_SIZE];
-    // SAFETY: 144-byte buffer outlives the call.
-    let r = unsafe { libc::fstat(fd, buf.as_mut_ptr().cast::<libc::stat>()) };
-    if r != 0 {
-        return None;
-    }
-    Some([own_le64(&buf, 0), own_le64(&buf, 8)])
+    let st = own_fstat(fd)?;
+    Some([st.st_dev, st.st_ino])
 }
 
 fn own_close_quiet(fd: i32) {
@@ -532,8 +513,8 @@ pub fn restore_capture_ownership(output: &str, want: &[u64]) -> OwnershipRepair 
 #[cfg(test)]
 mod tests {
     use super::{
-        join_root, open_bridge_snapshot, open_object_snapshot, parse_sudo_id,
-        restore_capture_ownership,
+        join_root, open_bridge_snapshot, open_object_snapshot, own_child_ok, own_fd_matches,
+        own_fd_uid, own_fstat_devino, own_fstat_ids, parse_sudo_id, restore_capture_ownership,
     };
     use crate::platform::hash::sha256_hex;
     use crate::platform::reader::{geteuid_live, read_host_file};
@@ -605,6 +586,38 @@ mod tests {
         let pinned = read_host_file(&snap.load_path, "bridge", 4096).expect("alias reads");
         assert_eq!(pinned, b"ORIGINAL-BRIDGE-BYTES\n");
         assert_eq!(snap.sha, sha256_hex(&pinned));
+    }
+
+    #[test]
+    fn fstat_helpers_match_metadata_oracle() {
+        // The named-field readers must agree with std's metadata
+        // oracle on mode, uid, nlink, dev, and ino, and the
+        // predicates built on them must classify accordingly.
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::io::AsRawFd;
+        let tmp = TestDir::create("memveil-ownstat").expect("mkdtemp");
+        let path = tmp.path().join("child.txt");
+        std::fs::write(&path, b"bytes\n").expect("write");
+        let file = std::fs::File::open(&path).expect("open");
+        let fd = file.as_raw_fd();
+        let meta = file.metadata().expect("metadata");
+        let ids = own_fstat_ids(fd).expect("ids");
+        assert_eq!(ids[0], u64::from(meta.mode()));
+        assert_eq!(ids[1], u64::from(meta.uid()));
+        assert_eq!(ids[2], meta.nlink());
+        assert_eq!(
+            own_fstat_devino(fd).expect("devino"),
+            [meta.dev(), meta.ino()]
+        );
+        assert!(own_child_ok(fd));
+        assert_eq!(own_fd_uid(fd), i64::from(meta.uid()));
+        assert!(own_fd_matches(fd, meta.dev(), meta.ino()));
+        assert!(!own_fd_matches(fd, meta.dev(), meta.ino().wrapping_add(1)));
+        assert!(!own_fd_matches(fd, meta.dev().wrapping_add(1), meta.ino()));
+        assert_eq!(own_fstat_ids(-1), None);
+        assert_eq!(own_fstat_devino(-1), None);
+        let dir = std::fs::File::open(tmp.path()).expect("open dir");
+        assert!(!own_child_ok(dir.as_raw_fd()));
     }
 
     #[test]
