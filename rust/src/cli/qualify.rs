@@ -184,22 +184,22 @@ pub fn qualify_usage() -> String {
         "proves the requested channels, publish a\n",
         "machine-local local-auto receipt under\n",
         "<profiles-dir>/receipts (/var/lib/memveil/receipts\n",
-        "for an installed package). Without --bridge, the native\n",
-        "bridge is discovered: LMB_NATIVE_LIB when unprivileged,\n",
-        "then beside the executable, then the system path.\n",
-        "Without --object, --lc-object, or --cp-object, each\n",
-        "BPF object is discovered beside the executable or\n",
-        "under the system directory, else the run refuses.\n",
-        "The smoke attaches, polls, and detaches once; an\n",
-        "idle ring is honest success and still qualifies.\n",
+        "for an installed package). --object and --bridge are\n",
+        "required explicit files: without --object the run\n",
+        "refuses before the smoke, and the receipt binds both\n",
+        "hashes. The smoke loads explicit files only, never\n",
+        "embedded bytes. The smoke attaches, polls, and\n",
+        "detaches once; an idle ring is honest success and\n",
+        "still qualifies.\n",
         "Receipts never claim\n",
         "validated. Diagnostics go to stderr.\n",
         "\n",
         "--capability selects channels as a comma-separated\n",
         "list without spaces (default: attempt-trace, which\n",
-        "is always required). mapping-lifecycle uses\n",
-        "--lc-object and copy-actual uses --cp-object when\n",
-        "given, else the discovered object for that channel.\n",
+        "is always required). mapping-lifecycle needs\n",
+        "--lc-object and copy-actual needs --cp-object when\n",
+        "those channels are wanted, else the run refuses\n",
+        "before the smoke.\n",
     )
     .to_string()
 }
@@ -769,8 +769,8 @@ fn smoke_object_hash(snap: &BridgeSnapshot) -> Result<String, String> {
 /// Refusal when a wanted channel object has no path; "" proceeds.
 ///
 /// Qualify mints only explicit artifacts: a wanted lifecycle/copy
-/// channel with neither an explicit flag nor a discovered file
-/// refuses before the smoke, so the smoke never attaches on
+/// channel without an explicit flag refuses before the
+/// smoke, so the smoke never attaches on
 /// embedded bytes the receipt cannot bind and no capture
 /// directory is left behind. Lifecycle reports first, matching
 /// admission order.
@@ -1136,7 +1136,9 @@ mod tests {
         let text = qualify_usage();
         assert!(text.contains("qualify --output"));
         assert!(text.contains("[--object PATH]"));
-        assert!(text.contains("discover"));
+        assert!(text.contains("required explicit files"));
+        assert!(text.contains("explicit files only"));
+        assert!(!text.contains("discover"));
         assert!(text.contains("/var/lib/memveil/receipts"));
     }
 

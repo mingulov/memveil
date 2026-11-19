@@ -47,12 +47,12 @@ pub fn record_usage() -> String {
         "to 60; N defaults to 1073741824 (1 GiB, the replay\n",
         "default) and must lie in 131072..4294967296; a larger\n",
         "capture replays with the same --max-events-bytes.\n",
-        "Without --bridge, the native bridge is discovered:\n",
-        "LMB_NATIVE_LIB when unprivileged,\n",
-        "then beside the executable, then the system path.\n",
-        "Without --object, --lc-object, or --cp-object, each\n",
-        "BPF object is discovered beside the executable or\n",
-        "under the system directory, else the run refuses.\n",
+        "Without --bridge, the statically linked loader runs\n",
+        "and bridge-bound receipt checks stay unverified: a\n",
+        "local-auto receipt that needs a bridge hash refuses\n",
+        "as bridge-unchecked. Without --object, --lc-object,\n",
+        "or --cp-object, each channel loads its embedded\n",
+        "object bytes; explicit paths win verbatim.\n",
         "Without --profile, the first validated profile passing\n",
         "full identity binding wins, then the first reference\n",
         "profile whose receipt verifies, else the first covering\n",
@@ -64,7 +64,7 @@ pub fn record_usage() -> String {
         "list without spaces (default: attempt-trace, which is\n",
         "always required). mapping-lifecycle uses --lc-object\n",
         "and copy-actual uses --cp-object when given, else the\n",
-        "discovered object for that channel; the winning profile\n",
+        "embedded object for that channel; the winning profile\n",
         "must declare each requested capability supported (or\n",
         "candidate) and either bind the matching object bytes\n",
         "or pass the live check, else the run refuses naming\n",
@@ -616,8 +616,10 @@ mod tests {
         let text = record_usage();
         assert!(text.starts_with("usage: memveil record --output DIR [--object PATH]"));
         assert!(text.contains("[--object PATH]"));
-        assert!(text.contains("discover"));
-        assert!(text.contains("LMB_NATIVE_LIB"));
+        assert!(text.contains("embedded"));
+        assert!(text.contains("statically linked loader"));
+        assert!(!text.contains("discover"));
+        assert!(!text.contains("LMB_NATIVE_LIB"));
         assert!(text.contains("--device NAME"));
         assert!(text.contains("literal"));
         assert!(text.ends_with("usage errors, 1 on error or unfinalizable output.\n"));

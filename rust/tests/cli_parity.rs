@@ -358,27 +358,266 @@ fn help_flag_wins_anywhere() {
 }
 
 #[test]
-fn help_bytes_equal_mojo() {
-    let Some(mojo) = mojo_bin() else {
-        eprintln!("skip: MEMVEIL_MOJO_BIN unset");
-        return;
-    };
-    for args in [
-        vec!["--help"],
-        vec!["help"],
-        vec!["record", "--help"],
-        vec!["report", "--help"],
-        vec!["top", "--help"],
-        vec!["doctor", "--help"],
-        vec!["qualify", "--help"],
-        vec!["bind-profile", "--help"],
-        vec!["--version"],
-    ] {
-        let ours = run(&bin(), &args);
-        let want = run(&mojo, &args);
-        assert_eq!(ours.status.code(), want.status.code(), "{args:?} exit");
-        assert_eq!(ours.stdout, want.stdout, "{args:?} stdout bytes");
-        assert_eq!(ours.stderr, want.stderr, "{args:?} stderr bytes");
+fn help_bytes_pinned_rust() {
+    // Pinned Rust reality (no Mojo oracle): every --help plus
+    // --version byte-pinned. Help prose describes the shipped
+    // product (embedded objects, linked loader, explicit-only
+    // minting); any wording change re-pins here deliberately.
+    const TOP_HELP: &str = r#"usage: memveil <record|report|top|doctor|qualify|bind-profile|help|version> [args]
+
+Attempt/lifecycle/copy capture, live and offline summaries, passive host check. Verbs:
+  record    capture bounce attempts and optional lifecycle/copy channels into a directory.
+  report    read one capture and print metrics.
+  top       observe live or replay one capture with periodic summaries.
+  doctor    inspect the host passively and print capability.
+  qualify   prove this host and mint a local-auto receipt.
+  bind-profile mint a bound profile document for this host.
+  help      print this text.
+  version   print the engine version.
+
+Run 'memveil record --help' for record options.
+Run 'memveil report --help' for report options.
+Run 'memveil top --help' for top options.
+Run 'memveil doctor --help' for doctor options.
+Run 'memveil qualify --help' for qualify options.
+Run 'memveil bind-profile --help' for bind options.
+"#;
+    const HELP_VERB: &str = r#"usage: memveil <record|report|top|doctor|qualify|bind-profile|help|version> [args]
+
+Attempt/lifecycle/copy capture, live and offline summaries, passive host check. Verbs:
+  record    capture bounce attempts and optional lifecycle/copy channels into a directory.
+  report    read one capture and print metrics.
+  top       observe live or replay one capture with periodic summaries.
+  doctor    inspect the host passively and print capability.
+  qualify   prove this host and mint a local-auto receipt.
+  bind-profile mint a bound profile document for this host.
+  help      print this text.
+  version   print the engine version.
+
+Run 'memveil record --help' for record options.
+Run 'memveil report --help' for report options.
+Run 'memveil top --help' for top options.
+Run 'memveil doctor --help' for doctor options.
+Run 'memveil qualify --help' for qualify options.
+Run 'memveil bind-profile --help' for bind options.
+"#;
+    const RECORD_HELP: &str = r#"usage: memveil record --output DIR [--object PATH]
+       [--duration SEC] [--max-events-bytes N]
+       [--bridge PATH] [--profile ID|PATH]
+       [--profiles-dir DIR] [--capability IDS]
+       [--lc-object PATH] [--cp-object PATH]
+       [--device NAME] [--strict]
+
+Capture swiotlb bounce attempts into DIR. SEC defaults
+to 60; N defaults to 1073741824 (1 GiB, the replay
+default) and must lie in 131072..4294967296; a larger
+capture replays with the same --max-events-bytes.
+Without --bridge, the statically linked loader runs
+and bridge-bound receipt checks stay unverified: a
+local-auto receipt that needs a bridge hash refuses
+as bridge-unchecked. Without --object, --lc-object,
+or --cp-object, each channel loads its embedded
+object bytes; explicit paths win verbatim.
+Without --profile, the first validated profile passing
+full identity binding wins, then the first reference
+profile whose receipt verifies, else the first covering
+reference profile verifies its interfaces live; an
+explicit --profile that fails binding (or the live
+check) refuses. Diagnostics go to stderr.
+
+--capability selects extra channels as a comma-separated
+list without spaces (default: attempt-trace, which is
+always required). mapping-lifecycle uses --lc-object
+and copy-actual uses --cp-object when given, else the
+embedded object for that channel; the winning profile
+must declare each requested capability supported (or
+candidate) and either bind the matching object bytes
+or pass the live check, else the run refuses naming
+the capability. Extra channels never run partial:
+without full narrow binding or a passing live check
+the run refuses.
+
+--device NAME keeps only the bounce attempts whose
+observed device name is exactly NAME (a literal
+exact match: no glob, prefix, or case folding).
+Lifecycle/copy records and global counters, pool
+samples, and conversions are always retained, and
+the selector is recorded in the session capture
+filters with its dropped-attempt count.
+
+--strict exits 4 unless the record verdict is complete.
+
+Exit 0 for a finalized capture (including zero-event
+and signal stops; completeness rides in the session
+verdict), 4 under --strict unless the verdict is
+complete, 3 when the run cannot start, 2 on
+usage errors, 1 on error or unfinalizable output.
+"#;
+    const REPORT_HELP: &str = r#"usage: memveil report [--format text|json|markdown] [--allow-partial]
+       [--strict] [--long-lived-after DURATION] [--max-line-bytes N]
+       [--max-session-bytes N] [--max-events-bytes N] DIR
+
+Read the capture in DIR, reduce its events to metrics,
+and print one report on stdout. Diagnostics go to stderr.
+Counts always cover the whole capture window.
+
+  --format NAME     text (default), json, or markdown.
+  --allow-partial   recover a verified checkpoint prefix, or
+                    allow a truncated legacy final record.
+  --strict          exit 4 unless the report verdict is
+                    complete.
+  --long-lived-after DURATION
+                    enable the informational long-lived
+                    finding past this open age. DURATION is
+                    a decimal count with optional unit s,
+                    m, or h (bare digits mean seconds).
+  --max-line-bytes N
+                    per-record cap, at most 65536.
+  --max-session-bytes N
+                    session file cap, at most 16777216.
+  --max-events-bytes N
+                    total work cap, at most 4294967296.
+
+Exit 0 for a rendered report (completeness rides in the
+verdict field), 4 under --strict unless the verdict is
+complete, and 4 for checkpoint recovery. Invalid input or
+usage exits 2; corrupt final captures are never recovered.
+"#;
+    const TOP_VERB_HELP: &str = r#"usage: memveil top [--interval DURATION] [--device NAME]
+       [--strict] [--compact] [--long-lived-after DURATION]
+       [--allow-partial] [--max-line-bytes N]
+       [--max-session-bytes N] [--max-events-bytes N] DIR
+   or: memveil top --output DIR [--object PATH]
+       [--duration SEC] [--max-events-bytes N]
+       [--bridge PATH] [--profile ID|PATH]
+       [--profiles-dir DIR] [--capability IDS]
+       [--lc-object PATH] [--cp-object PATH]
+       [--interval DURATION] [--device NAME]
+       [--strict] [--compact] [--long-lived-after DURATION]
+
+Replay the capture in DIR, printing one text summary per
+interval of capture time plus a final full-window report.
+With --output, observe the live system instead, retaining
+the capture in DIR while printing the same summaries.
+Live collection resolves absent --bridge, --object,
+--lc-object, and --cp-object paths as memveil record
+does: embedded objects and the linked loader unless
+explicit paths name files. Refreshes cover events in
+consumption order; a disordered event below a printed
+horizon reaches the final summary only, never a
+revised refresh.
+Diagnostics go to stderr.
+
+  --interval DURATION
+                    wall sleep between refreshes, default 1s.
+  --device NAME     show only this device's per-device rows
+                    (exact device id or catalog name);
+                    analysis still covers the whole capture.
+                    Blocks name the active filter; a filter
+                    matching no device warns once.
+  --long-lived-after DURATION
+                    enable the informational long-lived
+                    finding past this open age.
+  --strict          exit 4 unless the final verdict is
+                    complete (live mode also runs the
+                    collection strictly).
+  --compact         print the short verdict-plus-headlines
+                    block instead of the full report per
+                    refresh; cannot combine with --device.
+
+DURATION is a decimal count with optional unit s, m, or h
+(bare digits mean seconds); zero and overflow are refused.
+
+Exit 0 for printed summaries (completeness rides in the
+verdict field), 4 under --strict unless the verdict is
+complete, 2 for invalid input or usage. Live mode
+adds 3 for unavailable collection and 1 for errors.
+"#;
+    const DOCTOR_HELP: &str = r#"usage: memveil doctor [--json] [--profiles-dir DIR] [--capability LIST] [--object PATH] [--lc-object PATH] [--cp-object PATH] [--bridge PATH] [--load-check]
+
+Judge every requested capability through record admission
+and print one environment and capability report on stdout.
+Diagnostics go to stderr. Exit 0 when the requested
+capabilities are available, 3 when requested collection
+is unavailable or unknown, 2 on usage or internal errors.
+Profiles resolve from the executable location, never from
+the caller's working directory.
+Passive by default: no BPF load, no bridge access;
+--load-check loads every requested object without attaching.
+
+  --json            print the doctor-v0.1.1 JSON report.
+  --profiles-dir DIR  profiles directory (default: executable-relative).
+  --capability LIST   comma-separated capability ids, or all (default all).
+  --object PATH       attempt channel object (default: embedded).
+  --lc-object PATH    lifecycle channel object (default: embedded).
+  --cp-object PATH    copy channel object (default: embedded).
+  --bridge PATH       bridge file hashed into load-check receipt binding (default: linked loader).
+  --load-check        load every requested object without attaching.
+"#;
+    const QUALIFY_HELP: &str = r#"usage: memveil qualify --output DIR [--object PATH]
+       [--bridge PATH] [--profile ID|PATH]
+       [--profiles-dir DIR] [--capability IDS]
+       [--lc-object PATH] [--cp-object PATH]
+
+Run a short smoke capture into DIR and, when it
+proves the requested channels, publish a
+machine-local local-auto receipt under
+<profiles-dir>/receipts (/var/lib/memveil/receipts
+for an installed package). --object and --bridge are
+required explicit files: without --object the run
+refuses before the smoke, and the receipt binds both
+hashes. The smoke loads explicit files only, never
+embedded bytes. The smoke attaches, polls, and
+detaches once; an idle ring is honest success and
+still qualifies.
+Receipts never claim
+validated. Diagnostics go to stderr.
+
+--capability selects channels as a comma-separated
+list without spaces (default: attempt-trace, which
+is always required). mapping-lifecycle needs
+--lc-object and copy-actual needs --cp-object when
+those channels are wanted, else the run refuses
+before the smoke.
+"#;
+    const BIND_HELP: &str = r#"usage: memveil bind-profile --output PATH [--profile ID|PATH]
+       [--profiles-dir DIR] [--object PATH] [--lc-object PATH]
+       [--cp-object PATH] [--capability LIST] [--profile-id ID]
+
+Mint a bound reference-unvalidated profile document for
+this host: hook definitions come from the covering
+reference, identity bindings and tracepoint format text
+are measured live. Register the minted file first in
+the profiles manifest, then run qualify against it.
+Format text and the kernel image need root reads; run
+under sudo when they deny the current user.
+Attempt-trace is the mandatory base channel; extra
+channels bind together (both objects required) with
+the canonical ring sizes, verified live at qualify.
+Minted documents carry no BTF layouts: signature and
+smoke checks still apply, layout pins do not.
+--object is required: without it the run refuses.
+Extra channels need --lc-object and --cp-object
+together.
+"#;
+    const VERSION_OUT: &str = r#"memveil-0.1.0
+"#;
+    let cases: &[(&[&str], &str, i32)] = &[
+        (&["--help"], TOP_HELP, 0),
+        (&["help"], HELP_VERB, 0),
+        (&["record", "--help"], RECORD_HELP, 0),
+        (&["report", "--help"], REPORT_HELP, 0),
+        (&["top", "--help"], TOP_VERB_HELP, 0),
+        (&["doctor", "--help"], DOCTOR_HELP, 0),
+        (&["qualify", "--help"], QUALIFY_HELP, 0),
+        (&["bind-profile", "--help"], BIND_HELP, 0),
+        (&["--version"], VERSION_OUT, 0),
+    ];
+    for (args, want, code) in cases {
+        let out = run(&bin(), args);
+        assert_eq!(out.status.code(), Some(*code), "{args:?} exit");
+        assert!(out.stderr.is_empty(), "{args:?} stderr");
+        assert_eq!(out.stdout, want.as_bytes(), "{args:?} stdout bytes");
     }
 }
 

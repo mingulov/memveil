@@ -139,11 +139,13 @@ pub fn top_usage() -> String {
         "interval of capture time plus a final full-window report.\n",
         "With --output, observe the live system instead, retaining\n",
         "the capture in DIR while printing the same summaries.\n",
-        "Live collection discovers absent --bridge, --object,\n",
+        "Live collection resolves absent --bridge, --object,\n",
         "--lc-object, and --cp-object paths as memveil record\n",
-        "does. Refreshes cover events in consumption order; a\n",
-        "disordered event below a printed horizon reaches the\n",
-        "final summary only, never a revised refresh.\n",
+        "does: embedded objects and the linked loader unless\n",
+        "explicit paths name files. Refreshes cover events in\n",
+        "consumption order; a disordered event below a printed\n",
+        "horizon reaches the final summary only, never a\n",
+        "revised refresh.\n",
         "Diagnostics go to stderr.\n",
         "\n",
         "  --interval DURATION\n",
@@ -1644,7 +1646,8 @@ mod tests {
     fn top_usage_shape() {
         let text = top_usage();
         assert!(text.contains("[--object PATH]"));
-        assert!(text.contains("discover"));
+        assert!(text.contains("embedded objects"));
+        assert!(!text.contains("discover"));
         assert!(text.contains("[--profiles-dir DIR]"));
         assert!(text.starts_with("usage: memveil top [--interval DURATION]"));
     }

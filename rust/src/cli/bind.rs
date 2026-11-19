@@ -176,8 +176,9 @@ pub fn bind_usage() -> String {
         "the canonical ring sizes, verified live at qualify.\n",
         "Minted documents carry no BTF layouts: signature and\n",
         "smoke checks still apply, layout pins do not.\n",
-        "The BPF object is discovered beside the executable or\n",
-        "under the system path unless --object overrides it.\n",
+        "--object is required: without it the run refuses.\n",
+        "Extra channels need --lc-object and --cp-object\n",
+        "together.\n",
     )
     .to_string()
 }
@@ -444,8 +445,8 @@ pub struct MintOut {
 ///
 /// Never fails: every failure returns err text naming the exact
 /// unmeasurable binding, missing hook, or unresolved object. Object
-/// paths resolve like record admission (explicit path wins,
-/// else the embedded object or a refusal); rings are the
+/// paths are explicit-only (an absent path is a refusal
+/// naming the missing flag); rings are the
 /// canonical sizes, verified live again at qualify.
 #[allow(clippy::too_many_arguments)]
 pub fn mint_bound_profile(
@@ -604,7 +605,8 @@ pub fn mint_bound_profile(
 /// Run the bind flow against explicit roots; return exit code.
 ///
 /// `root` is the evidence root ("" for the live host); `exe_path`
-/// anchors object discovery. Publishes the minted document at
+/// is ignored (retained for call-shape parity). Publishes
+/// the minted document at
 /// opts.output, atomically.
 pub fn run_bind_with(root: &str, exe_path: &str, profiles_dir: &str, opts: &BindOptions) -> i64 {
     let ask = parse_requested_caps(&opts.capabilities);
