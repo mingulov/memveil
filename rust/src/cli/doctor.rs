@@ -19,7 +19,7 @@
 use crate::capture::loadcheck::{LoadResult, LoadTarget, load_check, load_code_for};
 use crate::capture::run::{
     attempt_program_names, copy_program_names, decide_record, lifecycle_program_names,
-    loadcheck_bridge_sha, parse_requested_caps, resolve_object,
+    loadcheck_bridge_sha, parse_requested_caps, resolve_channel_object, resolve_object,
 };
 use crate::cli::report::{
     EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, EXIT_REFUSAL, sanitize_diagnostic, write_stderr,
@@ -760,7 +760,10 @@ pub fn assess_doctor(opts: &DoctorOptions) -> DoctorReport2 {
             } else if kind == "copy" {
                 path = cp_path.clone();
             }
-            let elf = match read_host_file(&path, "object", OBJECT_BYTES_CAP) {
+            // Load targets resolve like admission (explicit path
+            // wins, else the embedded object), so passive and
+            // load-check judge the same bytes under zero-config.
+            let elf = match resolve_channel_object(&path, kind) {
                 Ok(elf) => elf,
                 Err(_) => {
                     synth_caps.push(i);
@@ -2097,6 +2100,36 @@ mod tests {
             ..DoctorOptions::default()
         };
         assert_eq!(run_doctor_opts(&opts), 2);
+    }
+
+    #[test]
+    fn load_check_falls_back_to_embedded() {
+        // Zero-config load-check on the live host judges the
+        // embedded bytes like admission instead of synthesizing
+        // "object unreadable at load". Needs root: unprivileged
+        // the tracefs gate refuses before the load phase runs.
+        // SAFETY: pure id query.
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("SKIP load_check_falls_back_to_embedded: requires root");
+            return;
+        }
+        let mut opts = doctor2_opts(String::new(), profiles_dir(), "attempt-trace", "", "", "");
+        opts.load_check = true;
+        let rep = assess_doctor(&opts);
+        assert_eq!(rep.mode, "load-check");
+        let entry = rep
+            .load
+            .iter()
+            .find(|l| l.object == "attempt")
+            .expect("attempt load entry");
+        if entry.detail == "passive checks did not pass" {
+            eprintln!("SKIP load_check_falls_back_to_embedded: attempt-trace not admitted here");
+            return;
+        }
+        assert_ne!(
+            entry.detail, "object unreadable at load",
+            "load-check must resolve the embedded object"
+        );
     }
 
     #[test]

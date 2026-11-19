@@ -1610,7 +1610,10 @@ pub fn decide_record(
 }
 
 /// Resolve one channel's object bytes: explicit path wins verbatim, else the linked-in artifact.
-fn resolve_channel_object(path: &str, kind: &str) -> Result<Vec<u8>, ()> {
+///
+/// Shared by record admission and doctor load-check so both judge the
+/// same bytes under zero-config.
+pub(crate) fn resolve_channel_object(path: &str, kind: &str) -> Result<Vec<u8>, ()> {
     if !path.is_empty() {
         return read_host_file(path, "object", MAX_NARROW_OBJECT_BYTES).map_err(|_| ());
     }
@@ -2102,7 +2105,8 @@ mod tests {
     use super::{
         ExtraChannel, RecordOptions, ScanDecision, attempt_loss_evidence, decide_record,
         loadcheck_bridge_sha, ownership_warning, parse_requested_caps, render_provenance,
-        repair_warning_for, resolve_bridge, resolve_object, run_collector_with, split_site,
+        repair_warning_for, resolve_bridge, resolve_channel_object, resolve_object,
+        run_collector_with, split_site,
     };
     use crate::capture::collector::EXIT_REFUSAL;
     use crate::capture::live::WriterSource;
@@ -2373,6 +2377,23 @@ mod tests {
     fn resolve_object_explicit_verbatim() {
         assert_eq!(resolve_object("/x/y.o"), "/x/y.o");
         assert_eq!(resolve_object(""), "");
+    }
+
+    #[test]
+    fn resolve_channel_object_explicit_or_embedded() {
+        // Explicit bytes win verbatim; an empty path falls back to
+        // the embedded artifact; unknown kinds and missing files
+        // refuse. Admission and load-check share this rule.
+        for kind in ["attempt", "lifecycle", "copy"] {
+            let got = resolve_channel_object("", kind).expect("embedded bytes");
+            let want = crate::platform::runtime::embedded_object(kind).expect("embedded");
+            assert_eq!(got, want.to_vec());
+        }
+        assert!(resolve_channel_object("", "bogus").is_err());
+        assert!(resolve_channel_object("tests/fixtures/elf/no-such.o", "attempt").is_err());
+        let path = fixture("tests/fixtures/elf/ok.o");
+        let got = resolve_channel_object(&path, "attempt").expect("explicit bytes");
+        assert_eq!(got, std::fs::read(&path).expect("read fixture"));
     }
 
     #[test]
