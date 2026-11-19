@@ -28,12 +28,13 @@ only this package's RUNPATH: the `.rpm` disables
 auto-provides so they never satisfy other packages, and
 both formats keep system dependencies manual (libelf,
 zlib, plus a versioned libc floor derived from the staged
-binaries - currently `libc6 >= 2.40` on Debian and `glibc
->= 2.40` on Fedora, set by the toolchain libgcc's
-`GLIBC_ABI_GNU2_TLS` need (first provided by glibc 2.40).
-On a userland older than that floor (Debian
-bookworm ships libc6 2.36) the install fails closed at
-install time instead of breaking at load.
+binaries - currently `libc6 >= 2.35` on Debian and `glibc
+>= 2.35` on Fedora, set by the pinned Debian libgcc's highest
+numeric GLIBC need (libgcc-s1 14.2.0-19, GLIBC_2.35, no ABI
+nodes; see rust/packaging/libgcc/PROVENANCE.txt).
+On a userland older than that floor the install fails closed at
+install time instead of breaking at load (Debian
+bookworm ships libc6 2.36, above the floor).
 
 ## .deb: install, use, uninstall
 

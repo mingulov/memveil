@@ -79,9 +79,9 @@ doctor leaves the load verdict at `ready (load not checked)`.
 - Memory-cgroup headroom for the BPF maps (see the map
   sizes under Resource defaults); the memcg precheck
   reports `unknown` when outer limits are not visible.
-- glibc 2.40 or later for the native bridge (the toolchain
-  libgcc requires `GLIBC_ABI_GNU2_TLS`, first provided by
-  glibc 2.40).
+- glibc 2.35 or later for the native bridge (set by the
+  pinned Debian libgcc's highest numeric GLIBC need: libgcc-s1
+  14.2.0-19, GLIBC_2.35, no ABI nodes).
 
 Known out of reach: Kata, CoCo, Contrast, and AKS
 kernel-uvm guests (no BTF; some also lack `FTRACE` or
@@ -172,9 +172,10 @@ does not qualify any kernel or confidential platform.
   the per-verb needs above. Compiler-free offline consumption
   has been tested
   on Ubuntu 26.04.1 (glibc 2.43) for specific development artifacts.
-  Observed linkage minima are glibc 2.40 for the offline closure and
-  glibc 2.40 for the bridge, set by the toolchain libgcc's
-  `GLIBC_ABI_GNU2_TLS` need (first provided by glibc 2.40). These
+  Observed linkage minima are glibc 2.35 for the offline closure and
+  glibc 2.35 for the bridge, set by the pinned Debian libgcc's
+  highest numeric GLIBC need (libgcc-s1 14.2.0-19, GLIBC_2.35,
+  no ABI nodes). These
   minima and the CPU build target
   do not qualify Ubuntu 22.04/24.04, every later userland, or every
   eligible CPU; each advertised environment needs an exact-artifact test.
