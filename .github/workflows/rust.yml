@@ -86,6 +86,24 @@ jobs:
       - name: Run Rust test suite
         run: |
           cargo test --workspace --locked
+      - name: Diagnose package verify failures
+        if: failure()
+        run: |
+          echo "--- umask/id/mounts ---"
+          umask; id; mount | grep ' /usr ' || true
+          echo "--- ACLs on /usr/share ---"
+          getfacl -p /usr/share /usr/share/doc 2>/dev/null | head -20 || echo "no getfacl"
+          echo "--- rpm version ---"
+          rpm --version
+          echo "--- reinstall CI-built rpm and compare ---"
+          RPMS=(target/package-test/rpm/*.rpm)
+          sudo rpm -i --nodeps "${RPMS[0]}"
+          rpm -V --nodeps memveil; echo "verify rc=$?"
+          for f in /usr/share/doc/memveil/LICENSE /usr/bin/memveil /usr/lib/memveil/libgcc_s.so.1; do
+            stat -c '%a %n' "$f" 2>/dev/null || echo "missing: $f"
+          done
+          rpm -q --dump memveil 2>/dev/null | grep -E "LICENSE|/usr/bin/memveil|libgcc" | head -6 || true
+          sudo rpm -e memveil || true
       - name: Upload built packages
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
