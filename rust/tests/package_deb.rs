@@ -1026,7 +1026,10 @@ fn install_doctor_uninstall_smoke() {
             ),
             "bridgeless smoke diagnostic changed: {stderr}"
         );
-        assert!(qcap.is_dir(), "bridgeless smoke left no capture dir");
+        assert!(
+            !qcap_existed && qcap.is_dir(),
+            "bridgeless smoke left no capture dir"
+        );
         assert_eq!(
             fs::read_dir(receipts).unwrap().count(),
             0,
