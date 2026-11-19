@@ -1,5 +1,5 @@
 //! Copy-channel geometry contract: the `memveil-ebpf-copy` object must carry
-//! the 4 ported programs in C order with their exact map geometries, plus the
+//! the 4 ported programs in pinned emission order with their exact map geometries, plus the
 //! host-resolved `mv_copy_offs` table map that replaces CO-RE (see
 //! `crates/ebpf/src/copy.rs` for the table layout). Kernel load/attach is
 //! covered by the gated live check at the bottom; everything else runs
@@ -136,7 +136,7 @@ fn copy_programs_present_in_order() {
     let expected: Vec<&str> = EXPECTED_PROGRAMS.iter().map(|(name, _)| *name).collect();
     assert_eq!(
         names, expected,
-        "copy object must carry exactly the 4 ported programs in C order"
+        "copy object must carry exactly the 4 ported programs in pinned emission order"
     );
     for ((name, program), (expected_name, expected_section)) in
         programs.iter().zip(EXPECTED_PROGRAMS.iter())
@@ -187,7 +187,7 @@ fn copy_programs_present_in_order() {
         .collect();
     assert_eq!(
         tracing, expected_sections,
-        "copy object tracing sections must name the 4 hooks in C order"
+        "copy object tracing sections must name the 4 hooks in pinned emission order"
     );
 }
 

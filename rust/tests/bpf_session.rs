@@ -255,21 +255,15 @@ fn frozen_specs_pinned() {
     let attempt = attempt_specs("swiotlb", "swiotlb_bounced");
     assert_eq!(attempt.len(), 1);
     assert_eq!(attempt[0].program, "mv_swiotlb_attempt");
-    assert!(matches!(
-        attempt[0].kind,
-        memveil::bpf::AttachKind::Tracepoint
-    ));
+    assert!(matches!(attempt[0].kind, AttachKind::Tracepoint));
     assert_eq!(attempt[0].target_a, "swiotlb");
     assert_eq!(attempt[0].target_b, "swiotlb_bounced");
     let lifecycle = lifecycle_specs();
     let names: Vec<&str> = lifecycle.iter().map(|spec| spec.program.as_str()).collect();
     assert_eq!(names, ["mv_map_result", "mv_unmap"]);
-    assert!(matches!(lifecycle[0].kind, memveil::bpf::AttachKind::FExit));
+    assert!(matches!(lifecycle[0].kind, AttachKind::FExit));
     assert_eq!(lifecycle[0].target_a, "swiotlb_tbl_map_single");
-    assert!(matches!(
-        lifecycle[1].kind,
-        memveil::bpf::AttachKind::FEntry
-    ));
+    assert!(matches!(lifecycle[1].kind, AttachKind::FEntry));
     assert_eq!(lifecycle[1].target_a, "__swiotlb_tbl_unmap_single");
     let copy = copy_specs();
     let names: Vec<&str> = copy.iter().map(|spec| spec.program.as_str()).collect();
@@ -283,9 +277,9 @@ fn frozen_specs_pinned() {
         ]
     );
     // Bounce entry precedes exit; the sync hooks follow.
-    assert!(matches!(copy[0].kind, memveil::bpf::AttachKind::FEntry));
+    assert!(matches!(copy[0].kind, AttachKind::FEntry));
     assert_eq!(copy[0].target_a, "swiotlb_bounce");
-    assert!(matches!(copy[1].kind, memveil::bpf::AttachKind::FExit));
+    assert!(matches!(copy[1].kind, AttachKind::FExit));
     assert_eq!(copy[1].target_a, "swiotlb_bounce");
     assert_eq!(copy[2].target_a, "__swiotlb_sync_single_for_device");
     assert_eq!(copy[3].target_a, "__swiotlb_sync_single_for_cpu");
@@ -608,7 +602,7 @@ fn live_attach_rollback_and_reattach() {
     let mut bad = attempt_specs("swiotlb", "swiotlb_bounced");
     bad[0] = AttachSpec::new(
         "mv_no_such_program",
-        memveil::bpf::AttachKind::Tracepoint,
+        AttachKind::Tracepoint,
         "swiotlb",
         "swiotlb_bounced",
     );
