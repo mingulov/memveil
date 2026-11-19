@@ -28,9 +28,10 @@ only this package's RUNPATH: the `.rpm` disables
 auto-provides so they never satisfy other packages, and
 both formats keep system dependencies manual (libelf,
 zlib, plus a versioned libc floor derived from the staged
-binaries - currently `libc6 >= 2.38` on Debian and `glibc
->= 2.38` on Fedora, set by the bridge's highest GLIBC
-need). On a userland older than that floor (Debian
+binaries - currently `libc6 >= 2.40` on Debian and `glibc
+>= 2.40` on Fedora, set by the toolchain libgcc's
+`GLIBC_ABI_GNU2_TLS` need (first provided by glibc 2.40).
+On a userland older than that floor (Debian
 bookworm ships libc6 2.36) the install fails closed at
 install time instead of breaking at load.
 

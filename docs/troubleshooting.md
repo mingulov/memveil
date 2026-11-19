@@ -74,9 +74,10 @@ capture to clean up.
   (closed pipe, full disk). Free the sink and rerun; output
   is never silently dropped.
 - `record` cannot load the bridge on an older userland: the
-  native bridge needs glibc >= 2.38; the offline closure for
-  `report`, `top`, and `doctor` has a glibc 2.35 linkage minimum
-  (`support.md`).
+  native bridge needs glibc >= 2.40; the offline closure for
+  `report`, `top`, and `doctor` has a glibc 2.40 linkage minimum
+  (both set by the toolchain libgcc's `GLIBC_ABI_GNU2_TLS` need;
+  `support.md`).
 - `doctor` exits 3: collection is unavailable or unknown on
   this host. Read its per-hook reasons; they name the exact
   missing piece (BTF, tracefs, profile coverage).
