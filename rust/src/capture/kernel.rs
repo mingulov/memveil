@@ -188,6 +188,13 @@ pub fn join_op_message(acc: &str, channel: i64, message: &str) -> String {
     format!("{acc}; {piece}")
 }
 
+/// Accumulate one failed rollback step: `; rollback ch{j}: msg`
+/// (Mojo taxonomy; distinct from the plain channel tag so a failed
+/// rollback never reads as the original attach failure).
+fn rollback_piece(message: &str, channel: i64, detail: &str) -> String {
+    format!("{message}; rollback ch{channel}: {detail}")
+}
+
 /// One bounded poll on one channel; `rotate_poll` owns policy.
 pub trait ChannelPoller {
     /// Poll one channel without touching the short pin.
@@ -600,6 +607,24 @@ pub fn fb_valid(vals: &[u64]) -> bool {
         return false;
     }
     vals[2] == 0
+}
+
+/// Detail text for a failed fallback-counter read: the channel tag
+/// keeps the `fallback: ` infix (Mojo taxonomy).
+fn fb_read_detail(message: &str) -> String {
+    format!("ch2 fallback: {message}")
+}
+
+/// Detail text for invalid fallback counters: the flag reason (or the
+/// short-read marker) joins the channel tag directly, with no infix
+/// (Mojo taxonomy).
+fn fb_invalid_detail(vals: &[u64]) -> String {
+    let reason = if vals.len() == 3 {
+        fb_flag_reason(vals[2])
+    } else {
+        "short fallback read".to_string()
+    };
+    format!("ch2 {reason}")
 }
 
 /// Name for nonzero fallback flags; empty when clean.
@@ -1469,7 +1494,7 @@ impl KernelSource for AyaKernel {
                 for back in rollback_order(&done) {
                     let undone = self.slot(back).detach();
                     if !undone.ok {
-                        message = format!("{message}; {}{}", channel_tag(back), undone.message);
+                        message = rollback_piece(&message, back, &undone.message);
                     }
                 }
                 return OpOut { ok: false, message };
@@ -1638,7 +1663,12 @@ impl KernelSource for AyaKernel {
     fn recursion_misses(&mut self) -> MissOut {
         let m0 = self.ch0.misses();
         if !m0.ok {
-            return m0;
+            // Mojo tags the attempt-misses failure with "ch0 ".
+            return MissOut {
+                ok: false,
+                message: format!("ch0 {}", m0.message),
+                ..Default::default()
+            };
         }
         if !self.ch2.present {
             if !self.ch1.present {
@@ -1710,21 +1740,16 @@ impl KernelSource for AyaKernel {
                 ok: true,
                 message: String::new(),
                 attempt: m0.count,
-                detail_error: format!("ch2 fallback: {}", fb.message),
+                detail_error: fb_read_detail(&fb.message),
                 ..Default::default()
             };
         }
         if !fb_valid(&fb.vals) {
-            let reason = if fb.vals.len() == 3 {
-                fb_flag_reason(fb.vals[2])
-            } else {
-                "short fallback read".to_string()
-            };
             return MissOut {
                 ok: true,
                 message: String::new(),
                 attempt: m0.count,
-                detail_error: format!("ch2 fallback: {reason}"),
+                detail_error: fb_invalid_detail(&fb.vals),
                 ..Default::default()
             };
         }
@@ -1764,10 +1789,10 @@ impl KernelSource for AyaKernel {
 mod tests {
     use super::{
         AyaKernel, ChannelPoller, ChannelSlot, PollRotation, added_fds, channel_attach_order,
-        channel_detach_order, encode_frame, fb_flag_reason, fb_valid, fdinfo_u64,
-        identify_copy_progs, identify_lifecycle_progs, join_op_message, os_errno,
-        parse_prog_misses, parse_prog_name, poll_advance, prog_fds, prog_info, rollback_order,
-        rotate_poll, session_message,
+        channel_detach_order, encode_frame, fb_flag_reason, fb_invalid_detail, fb_read_detail,
+        fb_valid, fdinfo_u64, identify_copy_progs, identify_lifecycle_progs, join_op_message,
+        os_errno, parse_prog_misses, parse_prog_name, poll_advance, prog_fds, prog_info,
+        rollback_order, rollback_piece, rotate_poll, session_message,
     };
     use super::{KernelSource, PollOut};
     use crate::bpf::{Frame, SessionError};
@@ -2526,6 +2551,96 @@ mod tests {
         assert!(m.message.is_empty());
         assert_eq!(m.attempt, 0);
         assert_eq!(m.detail_error, "ch2 copy program count");
+        let _ = kernel.close();
+    }
+
+    #[test]
+    fn ch0_misses_failure_carries_channel_tag() {
+        // Mojo tags the attempt-misses failure ("ch0 " prefix,
+        // zero count); the bare message below the tag pins it.
+        let mut kernel = AyaKernel::new(vec![1, 2, 3], "mv_attempts", "p", "s", "e");
+        let m = kernel.recursion_misses();
+        assert!(!m.ok);
+        assert_eq!(m.count, 0);
+        assert_eq!(m.message, "ch0 session not open");
+        let _ = kernel.close();
+    }
+
+    #[test]
+    fn fb_detail_strings_match_mojo_taxonomy() {
+        // A failed fallback read keeps the `fallback: ` infix;
+        // invalid counters join the flag reason (or the
+        // short-read marker) to the tag directly.
+        assert_eq!(
+            fb_read_detail("short fallback read"),
+            "ch2 fallback: short fallback read"
+        );
+        assert_eq!(
+            fb_invalid_detail(&[7, 7, 3]),
+            "ch2 fallback counters wrapped"
+        );
+        assert_eq!(fb_invalid_detail(&[7, 7, 4]), "ch2 fallback frame lost");
+        assert_eq!(fb_invalid_detail(&[7, 7]), "ch2 short fallback read");
+    }
+
+    #[test]
+    fn rollback_piece_names_rollback_channel() {
+        // Attach rollback joins "; rollback ch{j}: msg", not the
+        // plain channel tag (Mojo taxonomy).
+        assert_eq!(
+            rollback_piece("ch0 boom", 2, "gone"),
+            "ch0 boom; rollback ch2: gone"
+        );
+    }
+
+    #[test]
+    fn live_invalid_fallback_keeps_attempt_known() {
+        // Live-path regression for the invalid-fallback arm:
+        // poisoned fallback flags report ok:true with the
+        // infix-free detail string through a real load/attach.
+        // SAFETY: pure id query.
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("SKIP live_invalid_fallback_keeps_attempt_known: requires root");
+            return;
+        }
+        let attempt = crate::platform::runtime::embedded_object("attempt").expect("embedded");
+        let copy = crate::platform::runtime::embedded_object("copy").expect("embedded");
+        let mut kernel = AyaKernel::with_channels(
+            attempt.to_vec(),
+            "swiotlb",
+            "swiotlb_bounced",
+            Vec::new(),
+            false,
+            copy.to_vec(),
+            true,
+        );
+        if !kernel.open_session().ok {
+            eprintln!("SKIP live_invalid_fallback_keeps_attempt_known: embedded open refused");
+            return;
+        }
+        if !kernel.load().ok {
+            eprintln!("SKIP live_invalid_fallback_keeps_attempt_known: load refused here");
+            let _ = kernel.close();
+            return;
+        }
+        if !kernel.attach().ok {
+            eprintln!("SKIP live_invalid_fallback_keeps_attempt_known: attach refused here");
+            let _ = kernel.close();
+            return;
+        }
+        assert!(kernel.detach().ok);
+        // Poison the fallback flags slot; the counters stay valid.
+        kernel
+            .ch2
+            .sess
+            .as_mut()
+            .expect("open session")
+            .map_write("mv_copy_fb", 2, &4u64.to_le_bytes())
+            .expect("poison fallback flags");
+        let m = kernel.recursion_misses();
+        assert!(m.ok, "detail failure must keep ok:true: {m:?}");
+        assert!(m.message.is_empty());
+        assert_eq!(m.detail_error, "ch2 fallback frame lost");
         let _ = kernel.close();
     }
 
