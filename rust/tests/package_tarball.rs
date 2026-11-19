@@ -699,6 +699,36 @@ fn runtime_licenses_match() {
 }
 
 #[test]
+fn vendored_exception_matches_host() {
+    // The FSF exception grant is immutable: wherever the Fedora
+    // host text exists, the vendored fallback must be byte-identical
+    // to it (Debian builds stage the vendored copy, Fedora builds
+    // the host copy — the pin keeps them one text).
+    let host = std::path::Path::new("/usr/share/licenses/libgcc/COPYING.RUNTIME");
+    if !host.is_file() {
+        eprintln!("skip: no Fedora host exception text here: this host stages the vendored copy");
+        return;
+    }
+    let set = h::ensure_tarball();
+    let vendored = h::packaging_dir().join("RUNTIME.LIBRARY.EXCEPTION");
+    assert!(
+        vendored.is_file(),
+        "missing rust/packaging/RUNTIME.LIBRARY.EXCEPTION"
+    );
+    let staged = fs::read(set.bundle.join("licenses/RUNTIME.LIBRARY.EXCEPTION")).unwrap();
+    assert_eq!(
+        staged,
+        fs::read(host).unwrap(),
+        "staged != Fedora host text"
+    );
+    assert_eq!(
+        staged,
+        fs::read(&vendored).unwrap(),
+        "staged != vendored text"
+    );
+}
+
+#[test]
 fn rebuild_is_deterministic() {
     // Two builds from the pinned clone must agree on every
     // files[] hash, on the MANIFEST bytes, and on the tarball

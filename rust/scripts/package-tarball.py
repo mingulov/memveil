@@ -98,11 +98,10 @@ CHANNELS = (
 # Host license texts for the shipped libgcc, as (staged rel,
 # candidate host paths): the first readable candidate wins.
 # Portability: the GPL-3 text resolves on Fedora (libgcc
-# COPYING3) and Debian (common-licenses), but the runtime
-# exception text has only the Fedora libgcc path: Debian's
-# common-licenses ships no standalone GCC exception text, so
-# a Debian build fails closed below naming the tried path
-# until a Debian-side source is pinned.
+# COPYING3) and Debian (common-licenses). Debian ships no
+# standalone GCC exception text, so the exception entry falls
+# back to the vendored copy below (last candidate, used only
+# when no host text exists).
 GCC_LICENSES = (
     ("licenses/GPL-3.0.txt", (
         "/usr/share/licenses/libgcc/COPYING3",
@@ -112,6 +111,15 @@ GCC_LICENSES = (
         "/usr/share/licenses/libgcc/COPYING.RUNTIME",
     )),
 )
+
+# Vendored fallback for the exception entry, root-relative: the
+# FSF's immutable Version 3.1 grant, byte-identical to the Fedora
+# host text. The tarball suite pins that equality wherever the
+# host text exists, so Fedora builds keep staging host bytes
+# while Debian builds stage these identical bytes. Never edit:
+# any byte change breaks the verbatim grant (and the pin).
+VENDORED_EXCEPTION = os.path.join(
+    "rust", "packaging", "RUNTIME.LIBRARY.EXCEPTION")
 
 BIN_RUNPATH = "$ORIGIN/../lib/memveil"
 
@@ -819,11 +827,14 @@ def main(argv):
         os.makedirs(staged_licenses)
         license_sources = {}
         for staged_rel, candidates in GCC_LICENSES:
-            provider = next((path for path in candidates
+            paths = list(candidates)
+            if staged_rel == "licenses/RUNTIME.LIBRARY.EXCEPTION":
+                paths.append(os.path.join(root, VENDORED_EXCEPTION))
+            provider = next((path for path in paths
                              if os.path.isfile(path)), None)
             if provider is None:
                 fail("missing host license text for %s (tried %s)"
-                     % (staged_rel, ", ".join(candidates)))
+                     % (staged_rel, ", ".join(paths)))
             shutil.copy2(provider, os.path.join(staged, staged_rel))
             license_sources[staged_rel] = os.path.realpath(provider)
         print("package-tarball: license texts staged")
