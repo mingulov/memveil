@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Descriptor-based recovery reads with directory locking and identity checks.
 
+use std::ffi::{OsStr, OsString};
+use std::os::unix::ffi::OsStrExt;
+
 /// One capture-file failure, carrying the Mojo-side message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureError {
@@ -22,10 +25,10 @@ impl std::fmt::Display for CaptureError {
 
 impl std::error::Error for CaptureError {}
 
-/// NUL-terminate a capture path, refusing interior NULs.
-pub fn cstr(text: &str) -> Result<Vec<u8>, CaptureError> {
-    let mut out = Vec::with_capacity(text.len() + 1);
-    for &b in text.as_bytes() {
+/// NUL-terminate raw capture-path bytes, refusing interior NULs.
+pub fn cstr_bytes(raw: &[u8]) -> Result<Vec<u8>, CaptureError> {
+    let mut out = Vec::with_capacity(raw.len() + 1);
+    for &b in raw {
         if b == 0 {
             return Err(CaptureError::new("NUL in capture path".to_string()));
         }
@@ -33,6 +36,11 @@ pub fn cstr(text: &str) -> Result<Vec<u8>, CaptureError> {
     }
     out.push(0);
     Ok(out)
+}
+
+/// NUL-terminate a capture path, refusing interior NULs.
+pub fn cstr(text: &str) -> Result<Vec<u8>, CaptureError> {
+    cstr_bytes(text.as_bytes())
 }
 
 /// Close when open; best effort, no error.
@@ -69,8 +77,13 @@ pub fn file_stat(fd: i32) -> Result<[u64; 7], CaptureError> {
 }
 
 /// Open a capture directory component by component, never a symlink.
-pub fn open_directory(path: &str) -> Result<i32, CaptureError> {
-    let root = cstr(if path.starts_with('/') { "/" } else { "." })?;
+///
+/// The byte-level walk: refusal messages and check order match
+/// [`open_directory`] exactly, and non-UTF-8 components open like
+/// any other bytes.
+pub fn open_directory_os(path: &OsStr) -> Result<i32, CaptureError> {
+    let raw = path.as_bytes();
+    let root = cstr_bytes(if raw.starts_with(b"/") { b"/" } else { b"." })?;
     // SAFETY: NUL-terminated root with AT_FDCWD.
     let mut fd = unsafe {
         libc::openat(
@@ -83,11 +96,11 @@ pub fn open_directory(path: &str) -> Result<i32, CaptureError> {
     if fd < 0 {
         return Err(CaptureError::new("cannot open capture parent".to_string()));
     }
-    for part in path.split('/') {
-        if part.is_empty() || part == "." {
+    for part in raw.split(|b| *b == b'/') {
+        if part.is_empty() || part == b"." {
             continue;
         }
-        let name = match cstr(part) {
+        let name = match cstr_bytes(part) {
             Ok(name) => name,
             Err(e) => {
                 close_fd(fd);
@@ -114,12 +127,17 @@ pub fn open_directory(path: &str) -> Result<i32, CaptureError> {
     Ok(fd)
 }
 
+/// Open a capture directory component by component, never a symlink.
+pub fn open_directory(path: &str) -> Result<i32, CaptureError> {
+    open_directory_os(OsStr::new(path))
+}
+
 /// Pinned capture descriptors with open-time identity.
 pub struct RecoveryFiles {
     directory: i32,
     events: i32,
     checkpoint: i32,
-    path: String,
+    path: OsString,
     directory_ids: [u64; 7],
     events_ids: [u64; 7],
     checkpoint_ids: [u64; 7],
@@ -132,7 +150,7 @@ impl RecoveryFiles {
             directory: -1,
             events: -1,
             checkpoint: -1,
-            path: String::new(),
+            path: OsString::new(),
             directory_ids: [0; 7],
             events_ids: [0; 7],
             checkpoint_ids: [0; 7],
@@ -181,8 +199,17 @@ impl RecoveryFiles {
 
     /// Pin the capture directory and both members.
     pub fn open(&mut self, path: &str) -> Result<(), CaptureError> {
-        self.path = path.to_string();
-        self.directory = open_directory(path)?;
+        self.open_os(OsStr::new(path))
+    }
+
+    /// Pin the capture directory and both members over raw bytes.
+    ///
+    /// The byte-level open: lock, ownership, member, and verify
+    /// order match [`RecoveryFiles::open`] exactly, and non-UTF-8
+    /// directories pin like any other bytes.
+    pub fn open_os(&mut self, path: &OsStr) -> Result<(), CaptureError> {
+        self.path = path.to_os_string();
+        self.directory = open_directory_os(path)?;
         // SAFETY: live directory fd.
         let locked = unsafe { libc::flock(self.directory, libc::LOCK_SH | libc::LOCK_NB) };
         if locked != 0 {
@@ -207,7 +234,7 @@ impl RecoveryFiles {
 
     /// Re-prove the pinned identity; refuse swaps and finalization.
     pub fn verify(&self) -> Result<(), CaptureError> {
-        let current = open_directory(&self.path)?;
+        let current = open_directory_os(&self.path)?;
         let ids = match file_stat(current) {
             Ok(ids) => ids,
             Err(e) => {
@@ -632,5 +659,96 @@ mod tests {
         let ids = file_stat(files.events_fd()).expect("events fd stats");
         assert_eq!(files.events_len(), ids[5]);
         assert_eq!(files.events_len(), 8);
+    }
+
+    #[test]
+    fn str_wrappers_match_os_opens() {
+        // The &str entry points delegate to the byte walk, so every
+        // ASCII shape pins the same detail through both spellings.
+        use super::open_directory_os;
+        use std::ffi::OsStr;
+        let tmp = capture_dir();
+        for path in [
+            tmp.as_str().to_string(),
+            "/nonexistent-memveil-cap-xyz".to_string(),
+            "nonexistent-memveil-cap-xyz".to_string(),
+            "/etc/hostname".to_string(),
+        ] {
+            let via_str = open_directory(&path).map(|fd| {
+                super::close_fd(fd);
+            });
+            let via_os = open_directory_os(OsStr::new(&path)).map(|fd| {
+                super::close_fd(fd);
+            });
+            assert_eq!(
+                via_str.map_err(|e| e.message),
+                via_os.map_err(|e| e.message),
+                "open spellings must agree for {path}"
+            );
+            let mut a = RecoveryFiles::new();
+            let mut b = RecoveryFiles::new();
+            assert_eq!(
+                a.open(&path).map_err(|e| e.message),
+                b.open_os(OsStr::new(&path)).map_err(|e| e.message),
+                "RecoveryFiles spellings must agree for {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn os_open_roundtrip_non_utf8() {
+        // A capture at a non-UTF-8 path pins, verifies, and reads
+        // exactly like its ASCII twin; refusals keep their messages.
+        use super::{close_fd, open_directory_os};
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        let tmp = TestDir::create("memveil-cap-os").expect("mkdtemp");
+        let raw = tmp
+            .path()
+            .join(std::ffi::OsString::from_vec(b"cap\xff".to_vec()));
+        std::fs::create_dir(&raw).expect("mkdir ff dir");
+        std::fs::write(raw.join("checkpoint.json"), b"{}").expect("write checkpoint");
+        std::fs::write(raw.join("events.ndjson"), b"{\"a\":1}\n").expect("write events");
+        let mut files = RecoveryFiles::new();
+        files.open_os(raw.as_os_str()).expect("ff capture opens");
+        files.verify().expect("verify holds");
+        let bytes = files.read_checkpoint(1024).expect("checkpoint reads");
+        assert_eq!(bytes, b"{}");
+        assert_eq!(files.events_len(), 8);
+        // Refusal messages match the ASCII twins byte for byte.
+        let missing = tmp
+            .path()
+            .join(std::ffi::OsString::from_vec(b"no\xff".to_vec()));
+        assert_eq!(
+            open_directory_os(missing.as_os_str()).unwrap_err().message,
+            "capture directory is inaccessible or a symlink"
+        );
+        let ff_file = tmp
+            .path()
+            .join(std::ffi::OsString::from_vec(b"f\xff".to_vec()));
+        std::fs::write(&ff_file, b"x").expect("write ff file");
+        assert_eq!(
+            open_directory_os(ff_file.as_os_str()).unwrap_err().message,
+            "capture directory is inaccessible or a symlink"
+        );
+        assert_eq!(
+            super::cstr_bytes(b"a\0b").unwrap_err().message,
+            "NUL in capture path"
+        );
+        assert_eq!(
+            open_directory_os(OsStr::from_bytes(b"/tmp/x\0y"))
+                .unwrap_err()
+                .message,
+            "NUL in capture path"
+        );
+        // The pinned directory fd really is the ff directory,
+        // not its ASCII parent.
+        let fd = open_directory_os(raw.as_os_str()).expect("ff dir opens");
+        let ids = file_stat(fd).expect("ff dir stats");
+        close_fd(fd);
+        let parent = open_directory_os(tmp.path().as_os_str()).expect("parent opens");
+        let parent_ids = file_stat(parent).expect("parent stats");
+        close_fd(parent);
+        assert_ne!(ids[1], parent_ids[1]);
     }
 }

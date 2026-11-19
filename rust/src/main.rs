@@ -8,7 +8,7 @@ use memveil::cli::doctor::run_doctor_os;
 use memveil::cli::qualify::run_qualify;
 use memveil::cli::record::run_record;
 use memveil::cli::report::{EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, run_report_os, write_stderr};
-use memveil::cli::top::run_top;
+use memveil::cli::top::{run_top, run_top_os};
 use memveil::platform::signal::{ensure_inherited_signal_block, ignore_sigpipe};
 use memveil::platform::stdout::write_stdout;
 use std::ffi::OsString;
@@ -69,8 +69,10 @@ enum Dispatch {
 /// before any further decoding, undecodable ones included. `report`
 /// and `doctor` take raw words and handle undecodable bytes the way
 /// Mojo does (open the raw path, silence an unrenderable echo);
-/// every other subcommand takes text, so a consumed word that
-/// cannot decode is a normal usage error (exit 2), never a panic.
+/// `top` replays raw words the same way but keeps live
+/// collection on text. Every other subcommand takes text, so a
+/// consumed word that cannot decode is a normal usage error
+/// (exit 2), never a panic.
 /// One exception, matching Mojo's per-verb pre-parse scan: when
 /// any word is `--help` or `-h`, help wins over undecodable
 /// siblings and the verb runs (it prints help and returns before
@@ -117,6 +119,14 @@ fn dispatch(raw: &[OsString]) -> Dispatch {
         match arg.to_str() {
             Some(text) => rest.push(text.to_string()),
             None if help_wins => rest.push(arg.to_string_lossy().into_owned()),
+            None if verb == "top" => {
+                // Replay opens the raw directory like Mojo; a live
+                // run keeps text words and stays a usage error.
+                return Dispatch::RunOs {
+                    verb: verb.to_string(),
+                    rest: raw[1..].to_vec(),
+                };
+            }
             None => return Dispatch::InvalidUsage,
         }
     }
@@ -148,6 +158,8 @@ fn main() -> ExitCode {
         Dispatch::RunOs { verb, rest } => {
             let code = if verb == "doctor" {
                 run_doctor_os(&rest)
+            } else if verb == "top" {
+                run_top_os(&rest)
             } else {
                 run_report_os(&rest)
             };
@@ -178,7 +190,7 @@ fn run_text_verb(verb: &str, rest: &[String]) -> ExitCode {
         }
     }
     // Dispatch guarantees one of the four text verbs here;
-    // report and doctor run through the raw arm above.
+    // report, doctor, and undecodable top run through the raw arm above.
     let code = if verb == "record" {
         run_record(rest)
     } else if verb == "top" {
@@ -256,8 +268,9 @@ mod tests {
     fn undecodable_consumed_word_is_invalid_usage() {
         // Text subcommands take UTF-8: a consumed non-UTF-8 word is
         // a normal usage error (exit 2), never an args() panic.
-        // Report and doctor take raw words (see below).
-        for verb in [b"record".as_slice(), b"top", b"qualify", b"bind-profile"] {
+        // Report and doctor take raw words (see below), and top
+        // replays raw words (see below).
+        for verb in [b"record".as_slice(), b"qualify", b"bind-profile"] {
             assert!(is_invalid(&os(&[verb, b"\xff"])), "{verb:?}");
             assert!(
                 is_invalid(&os(&[verb, b"--output", b"\xfe\xfd"])),
@@ -314,6 +327,26 @@ mod tests {
                 assert!(rest.is_empty());
             }
             _ => panic!("bare doctor must dispatch to RunOs"),
+        }
+    }
+
+    #[test]
+    fn top_forwards_raw_words_for_replay() {
+        // An undecodable top word replays through raw bytes like
+        // Mojo; all-UTF-8 words keep the text path (see below),
+        // and --help still wins over undecodable siblings.
+        for shape in [
+            vec![b"top".as_slice(), b"\xff"],
+            vec![b"top", b"--device", b"\xff", b"cap"],
+            vec![b"top", b"cap", b"\xfe\xfd"],
+        ] {
+            match dispatch(&os(&shape)) {
+                Dispatch::RunOs { verb, rest } => {
+                    assert_eq!(verb, "top");
+                    assert_eq!(rest, os(&shape[1..]));
+                }
+                _ => panic!("{shape:?} must dispatch to RunOs"),
+            }
         }
     }
 

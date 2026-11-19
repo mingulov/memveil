@@ -15,7 +15,7 @@ use crate::analysis::diagnostics::diagnose_report;
 use crate::analysis::engine::Analyzer;
 use crate::capture::reader::{
     DEFAULT_MAX_EVENTS_BYTES, DEFAULT_MAX_LINE_BYTES, DEFAULT_MAX_SESSION_BYTES, ReaderLimits,
-    read_capture,
+    read_capture, read_capture_os,
 };
 use crate::cli::durations::parse_duration_ns;
 use crate::model::report::{Report, apply_checkpoint, apply_integrity};
@@ -364,7 +364,7 @@ pub(crate) fn parse_limit(text: &str, what: &str, cap: u64) -> Result<usize, Cli
 /// Byte-wise [`parse_limit`]: non-UTF-8 values fail exactly like
 /// ASCII garbage, because the decimal grammar never echoes its
 /// input (Mojo parses argv bytes the same way).
-fn parse_limit_bytes(raw: &[u8], what: &str, cap: u64) -> Result<usize, CliError> {
+pub(crate) fn parse_limit_bytes(raw: &[u8], what: &str, cap: u64) -> Result<usize, CliError> {
     if raw.is_empty() || raw.len() > 10 {
         return Err(CliError {
             message: format!("{what} needs a decimal value"),
@@ -494,16 +494,24 @@ enum OsParseFail {
     Silent,
 }
 
+/// Byte-wise [`parse_report_args`] result: decoded options plus the raw directory.
+#[derive(Debug)]
+struct ReportArgsOs {
+    /// Decoded flags, formats, durations, and limits.
+    opts: ReportOptions,
+    /// Capture directory positional in raw bytes.
+    dir_os: OsString,
+}
+
 /// Byte-wise [`parse_report_args`] over raw argv words.
 ///
 /// Flags compare as bytes, values that never echo (`--max-*`)
 /// parse as bytes, and values the diagnostics would echo
 /// (`--format`, `--long-lived-after`, unknown options) silence
-/// the run when they cannot decode. Returns the capture
-/// directory positional; the remaining options are validated
-/// for error precedence but unused, because the raw path only
-/// ever probes the directory.
-fn parse_report_args_os(args: &[OsString]) -> Result<OsString, OsParseFail> {
+/// the run when they cannot decode. Error precedence and
+/// recorded values match [`parse_report_args`] exactly.
+fn parse_report_args_os(args: &[OsString]) -> Result<ReportArgsOs, OsParseFail> {
+    let mut opts = ReportOptions::default();
     let mut dir_os = OsString::new();
     let mut has_dir = false;
     let mut i = 0;
@@ -516,7 +524,9 @@ fn parse_report_args_os(args: &[OsString]) -> Result<OsString, OsParseFail> {
                 }));
             }
             match args[i + 1].to_str() {
-                Some(v) if v == "text" || v == "json" || v == "markdown" => {}
+                Some(v) if v == "text" || v == "json" || v == "markdown" => {
+                    opts.format = v.to_string();
+                }
                 Some(v) => {
                     return Err(OsParseFail::Message(CliError {
                         message: format!("unknown format: {v}"),
@@ -526,7 +536,11 @@ fn parse_report_args_os(args: &[OsString]) -> Result<OsString, OsParseFail> {
                 None => return Err(OsParseFail::Silent),
             }
             i += 2;
-        } else if tok == b"--allow-partial" || tok == b"--strict" {
+        } else if tok == b"--allow-partial" {
+            opts.allow_partial = true;
+            i += 1;
+        } else if tok == b"--strict" {
+            opts.strict = true;
             i += 1;
         } else if tok == b"--long-lived-after" {
             if i + 1 >= args.len() {
@@ -539,13 +553,14 @@ fn parse_report_args_os(args: &[OsString]) -> Result<OsString, OsParseFail> {
                 return Err(OsParseFail::Silent);
             };
             match parse_duration_ns(text) {
-                Ok(_) => {}
+                Ok(ns) => opts.long_lived_after_ns = ns,
                 Err(e) => {
                     return Err(OsParseFail::Message(CliError {
                         message: format!("--long-lived-after {e}"),
                     }));
                 }
             }
+            opts.has_long_lived_after = true;
             i += 2;
         } else if tok == b"--max-line-bytes" {
             if i + 1 >= args.len() {
@@ -554,7 +569,7 @@ fn parse_report_args_os(args: &[OsString]) -> Result<OsString, OsParseFail> {
                 }));
             }
             match parse_limit_bytes(args[i + 1].as_bytes(), "--max-line-bytes", 65536) {
-                Ok(_) => {}
+                Ok(v) => opts.max_line_bytes = v,
                 Err(e) => return Err(OsParseFail::Message(e)),
             }
             i += 2;
@@ -565,7 +580,7 @@ fn parse_report_args_os(args: &[OsString]) -> Result<OsString, OsParseFail> {
                 }));
             }
             match parse_limit_bytes(args[i + 1].as_bytes(), "--max-session-bytes", 16777216) {
-                Ok(_) => {}
+                Ok(v) => opts.max_session_bytes = v,
                 Err(e) => return Err(OsParseFail::Message(e)),
             }
             i += 2;
@@ -576,7 +591,7 @@ fn parse_report_args_os(args: &[OsString]) -> Result<OsString, OsParseFail> {
                 }));
             }
             match parse_limit_bytes(args[i + 1].as_bytes(), "--max-events-bytes", 4294967296) {
-                Ok(_) => {}
+                Ok(v) => opts.max_events_bytes = v,
                 Err(e) => return Err(OsParseFail::Message(e)),
             }
             i += 2;
@@ -606,219 +621,7 @@ fn parse_report_args_os(args: &[OsString]) -> Result<OsString, OsParseFail> {
             message: "missing capture directory".to_string(),
         }));
     }
-    Ok(dir_os)
-}
-
-/// Probe a non-UTF-8 capture directory the way [`read_capture`]
-/// opens it, and return the cannot-read detail to emit.
-///
-/// The probe replays the reader's open sequence with the raw
-/// bytes — final-session probe, component-wise directory walk,
-/// lock, ownership, member opens, final-absence recheck — so a
-/// path the reader would refuse fails here with the reader's
-/// exact message. A directory that fully opens is still refused
-/// closed: the String-based reader cannot consume non-UTF-8
-/// paths, and lossy-decoding would risk opening a wrong
-/// U+FFFD-named directory.
-fn probe_capture_dir_os(dir: &OsStr) -> String {
-    let raw = dir.as_bytes();
-    if raw.contains(&0) {
-        return "NUL byte in path".to_string();
-    }
-    // Final-session probe, mirroring read_capture: present means
-    // the finalized path, absent means recovery, any other errno
-    // refuses.
-    let mut session_path = raw.to_vec();
-    session_path.extend_from_slice(b"/session.json");
-    let session_c = [session_path.as_slice(), b"\0"].concat();
-    // SAFETY: NUL-terminated probe path on AT_FDCWD.
-    let probe = unsafe {
-        libc::openat(
-            libc::AT_FDCWD,
-            session_c.as_ptr().cast::<libc::c_char>(),
-            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0 as libc::c_uint,
-        )
-    };
-    if probe >= 0 {
-        // SAFETY: owned probe fd.
-        unsafe {
-            libc::close(probe);
-        }
-        // The finalized capture opens: the reader would read on,
-        // which raw bytes cannot follow — refuse closed.
-        return "capture directory is inaccessible or a symlink".to_string();
-    }
-    if std::io::Error::last_os_error().raw_os_error().unwrap_or(0) != libc::ENOENT {
-        return "cannot establish final session absence".to_string();
-    }
-    // Component-wise walk, mirroring open_directory: never a
-    // symlink, empty and dot components skipped.
-    let root_c: &[u8] = if raw.starts_with(b"/") {
-        b"/\0"
-    } else {
-        b".\0"
-    };
-    // SAFETY: NUL-terminated root on AT_FDCWD.
-    let mut fd = unsafe {
-        libc::openat(
-            libc::AT_FDCWD,
-            root_c.as_ptr().cast::<libc::c_char>(),
-            libc::O_DIRECTORY | libc::O_CLOEXEC,
-            0 as libc::c_uint,
-        )
-    };
-    if fd < 0 {
-        return "cannot open capture parent".to_string();
-    }
-    let mut failed = false;
-    for part in raw.split(|b| *b == b'/') {
-        if part.is_empty() || part == b"." {
-            continue;
-        }
-        if part.contains(&0) {
-            // SAFETY: owned dir fd.
-            unsafe {
-                libc::close(fd);
-            }
-            return "NUL in capture path".to_string();
-        }
-        let name_c = [part, b"\0"].concat();
-        // SAFETY: NUL-terminated component on a live dir fd.
-        let next = unsafe {
-            libc::openat(
-                fd,
-                name_c.as_ptr().cast::<libc::c_char>(),
-                libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0 as libc::c_uint,
-            )
-        };
-        // SAFETY: owned dir fd.
-        unsafe {
-            libc::close(fd);
-        }
-        if next < 0 {
-            failed = true;
-            fd = -1;
-            break;
-        }
-        fd = next;
-    }
-    if failed {
-        return "capture directory is inaccessible or a symlink".to_string();
-    }
-    // SAFETY: live directory fd.
-    let locked = unsafe { libc::flock(fd, libc::LOCK_SH | libc::LOCK_NB) };
-    if locked != 0 {
-        // SAFETY: owned dir fd.
-        unsafe {
-            libc::close(fd);
-        }
-        return "active writer or unavailable capture lock".to_string();
-    }
-    // SAFETY: zeroed stat outlives the call.
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: as above.
-    let rc = unsafe { libc::fstat(fd, &mut st) };
-    if rc != 0 {
-        // SAFETY: owned dir fd.
-        unsafe {
-            libc::close(fd);
-        }
-        return "capture stat failed".to_string();
-    }
-    // SAFETY: pure id query.
-    let euid = unsafe { libc::geteuid() as u64 };
-    if st.st_uid as u64 != euid {
-        // SAFETY: owned dir fd.
-        unsafe {
-            libc::close(fd);
-        }
-        return "capture directory not owned by reader".to_string();
-    }
-    for name in [b"checkpoint.json".as_slice(), b"events.ndjson".as_slice()] {
-        let name_c = [name, b"\0"].concat();
-        // SAFETY: NUL-terminated name on the live directory fd.
-        let mfd = unsafe {
-            libc::openat(
-                fd,
-                name_c.as_ptr().cast::<libc::c_char>(),
-                libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
-                0 as libc::c_uint,
-            )
-        };
-        if mfd < 0 {
-            // SAFETY: owned dir fd.
-            unsafe {
-                libc::close(fd);
-            }
-            return format!(
-                "{}: cannot open regular capture file",
-                String::from_utf8_lossy(name)
-            );
-        }
-        // SAFETY: zeroed stat outlives the call.
-        let mut mst: libc::stat = unsafe { std::mem::zeroed() };
-        // SAFETY: as above.
-        let mrc = unsafe { libc::fstat(mfd, &mut mst) };
-        // SAFETY: owned member fd.
-        unsafe {
-            libc::close(mfd);
-        }
-        if mrc != 0 {
-            // SAFETY: owned dir fd.
-            unsafe {
-                libc::close(fd);
-            }
-            return "capture stat failed".to_string();
-        }
-        if mst.st_mode as u64 & 0o170000 != 0o100000 || mst.st_nlink as u64 != 1 {
-            // SAFETY: owned dir fd.
-            unsafe {
-                libc::close(fd);
-            }
-            return format!(
-                "{}: not a singly linked regular file",
-                String::from_utf8_lossy(name)
-            );
-        }
-        if mst.st_uid as u64 != euid {
-            // SAFETY: owned dir fd.
-            unsafe {
-                libc::close(fd);
-            }
-            return format!("{}: not owned by reader", String::from_utf8_lossy(name));
-        }
-    }
-    // Final-absence recheck, mirroring the recovery verify: a
-    // session finalized between the probe and now refuses.
-    let final_c = b"session.json\0";
-    // SAFETY: NUL-terminated name on the live directory fd.
-    let present = unsafe {
-        libc::openat(
-            fd,
-            final_c.as_ptr().cast::<libc::c_char>(),
-            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0 as libc::c_uint,
-        )
-    };
-    // SAFETY: owned dir fd.
-    unsafe {
-        libc::close(fd);
-    }
-    if present >= 0 {
-        // SAFETY: owned probe fd.
-        unsafe {
-            libc::close(present);
-        }
-        return "final session appeared during recovery; retry finalized capture".to_string();
-    }
-    if std::io::Error::last_os_error().raw_os_error().unwrap_or(0) != libc::ENOENT {
-        return "cannot establish absence of final session".to_string();
-    }
-    // Every open the reader performs succeeds: the reader would
-    // read on, which raw bytes cannot follow — refuse closed.
-    "capture directory is inaccessible or a symlink".to_string()
+    Ok(ReportArgsOs { opts, dir_os })
 }
 
 /// Run the report verb over raw argv words; return the exit code.
@@ -847,8 +650,8 @@ pub fn run_report_os(args: &[OsString]) -> i64 {
         return run_report(&words);
     }
     match parse_report_args_os(args) {
-        Ok(dir_os) => {
-            if dir_os.to_str().is_some() {
+        Ok(parsed) => {
+            if parsed.dir_os.to_str().is_some() {
                 // Unreachable: every non-UTF-8 word except the
                 // capture directory fails or silences the parse
                 // above, so a parsed UTF-8 directory means all
@@ -857,10 +660,7 @@ pub fn run_report_os(args: &[OsString]) -> i64 {
                 // lossy open.
                 return EXIT_INTERNAL;
             }
-            report_failed(
-                "memveil report: cannot read capture: ",
-                &probe_capture_dir_os(&dir_os),
-            )
+            run_report_parsed(&parsed.opts, Some(&parsed.dir_os))
         }
         Err(OsParseFail::Message(e)) => report_failed("memveil report: ", &e.message),
         Err(OsParseFail::Silent) => EXIT_INTERNAL,
@@ -920,15 +720,24 @@ pub fn run_report(args: &[String]) -> i64 {
         Ok(opts) => opts,
         Err(e) => return report_failed("memveil report: ", &e.message),
     };
-    let mut reader = match read_capture(
-        &opts.dir,
-        opts.allow_partial,
-        ReaderLimits {
-            max_session_bytes: opts.max_session_bytes,
-            max_line_bytes: opts.max_line_bytes,
-            max_events_bytes: opts.max_events_bytes,
-        },
-    ) {
+    run_report_parsed(&opts, None)
+}
+
+/// Run the report pipeline over parsed options; return the exit code.
+///
+/// `dir_os` carries the raw capture directory when the words did
+/// not decode; otherwise the report opens `opts.dir`.
+fn run_report_parsed(opts: &ReportOptions, dir_os: Option<&OsStr>) -> i64 {
+    let limits = ReaderLimits {
+        max_session_bytes: opts.max_session_bytes,
+        max_line_bytes: opts.max_line_bytes,
+        max_events_bytes: opts.max_events_bytes,
+    };
+    let opened = match dir_os {
+        Some(raw) => read_capture_os(raw, opts.allow_partial, limits),
+        None => read_capture(&opts.dir, opts.allow_partial, limits),
+    };
+    let mut reader = match opened {
         Ok(reader) => reader,
         Err(e) => return report_failed("memveil report: cannot read capture: ", &e.message),
     };
@@ -1183,7 +992,7 @@ mod tests {
         );
         // A lone non-UTF-8 positional parses to the raw directory.
         let dir = super::parse_report_args_os(&os(&[b"\xff".as_slice()])).expect("dir parses");
-        assert_eq!(dir.as_bytes(), b"\xff".as_slice());
+        assert_eq!(dir.dir_os.as_bytes(), b"\xff".as_slice());
         let dir = super::parse_report_args_os(&os(&[
             b"--format".as_slice(),
             b"json".as_slice(),
@@ -1191,76 +1000,94 @@ mod tests {
             b"a\xffb".as_slice(),
         ]))
         .expect("valid flags parse");
-        assert_eq!(dir.as_bytes(), b"a\xffb".as_slice());
+        assert_eq!(dir.dir_os.as_bytes(), b"a\xffb".as_slice());
+        // Parsed option values ride along for the report run.
+        assert_eq!(dir.opts.format, "json");
+        assert!(dir.opts.strict);
     }
 
     #[test]
-    fn report_os_probe_matches_reader_ascii() {
-        // Differential pin: the raw probe returns the reader's own
-        // failure detail on every ASCII shape, so non-UTF-8 paths
-        // fail exactly the way their ASCII twins do.
-        use crate::capture::reader::{ReaderLimits, read_capture};
-        use crate::platform::test_support::TestDir;
-        let limits = ReaderLimits {
-            max_session_bytes: 16777216,
-            max_line_bytes: 65536,
-            max_events_bytes: 4294967296,
-        };
-        let tmp = TestDir::create("memveil-report-os-probe").expect("mkdtemp");
-        let empty = tmp.path().join("empty");
-        std::fs::create_dir(&empty).expect("mkdir empty");
-        let file = tmp.path().join("file");
-        std::fs::write(&file, b"x".as_slice()).expect("write file");
-        for path in [
-            "/nonexistent-memveil-report-os-xyz".to_string(),
-            "/tmp".to_string(),
-            "/etc/hostname".to_string(),
-            empty.to_str().expect("utf-8").to_string(),
-            file.to_str().expect("utf-8").to_string(),
+    fn report_os_parse_matches_str_parse() {
+        // Differential pin: the byte parser records the &str
+        // parser's own options on every ASCII shape, so a
+        // non-UTF-8 directory runs the same report its UTF-8
+        // twin would.
+        for words in [
+            vec!["capdir"],
+            vec!["--format", "json", "--strict", "--allow-partial", "capdir"],
+            vec![
+                "--long-lived-after",
+                "1h",
+                "--max-line-bytes",
+                "64",
+                "--max-session-bytes",
+                "128",
+                "--max-events-bytes",
+                "256",
+                "capdir",
+            ],
         ] {
-            let want = read_capture(&path, false, limits)
-                .expect_err("shape must refuse")
-                .message;
-            let got = super::probe_capture_dir_os(std::ffi::OsStr::new(&path));
-            assert_eq!(got, want, "probe must mirror the reader for {path}");
+            let text: Vec<String> = words.iter().map(|w| w.to_string()).collect();
+            let mut want = parse_report_args(&text).expect("str parses");
+            // The byte parser keeps the directory raw; the decoded
+            // options must otherwise match exactly.
+            want.dir.clear();
+            let raw: Vec<&[u8]> = words.iter().map(|w| w.as_bytes()).collect();
+            let got = super::parse_report_args_os(&os(&raw)).expect("os parses");
+            assert_eq!(got.opts, want);
+            assert_eq!(got.dir_os.to_str(), Some("capdir"));
+        }
+        // Error precedence matches too: the first bad word wins
+        // in both spellings.
+        for words in [
+            vec!["--format"],
+            vec!["--format", "yaml", "d"],
+            vec!["--bogus", "d"],
+            vec!["a", "b"],
+            vec!["--max-line-bytes", "65537", "d"],
+            vec!["--long-lived-after", "bogus", "d"],
+        ] {
+            let text: Vec<String> = words.iter().map(|w| w.to_string()).collect();
+            let want = parse_report_args(&text).expect_err("str rejects").message;
+            let raw: Vec<&[u8]> = words.iter().map(|w| w.as_bytes()).collect();
+            match super::parse_report_args_os(&os(&raw)) {
+                Err(super::OsParseFail::Message(e)) => assert_eq!(e.message, want),
+                _ => panic!("os must reject {words:?} with a message"),
+            }
         }
     }
 
     #[test]
-    fn report_os_probe_non_utf8_shapes() {
-        use crate::platform::test_support::TestDir;
-        use std::os::unix::ffi::{OsStrExt, OsStringExt};
-        // Nonexistent non-UTF-8 path: the reported case.
-        assert_eq!(
-            super::probe_capture_dir_os(std::ffi::OsStr::from_bytes(b"\xff")),
-            "capture directory is inaccessible or a symlink"
-        );
-        let tmp = TestDir::create("memveil-report-os-ff").expect("mkdtemp");
-        // A non-UTF-8 regular file: session.json under it is ENOTDIR.
-        let ff_file = tmp
-            .path()
-            .join(std::ffi::OsString::from_vec(b"f\xff".to_vec()));
-        std::fs::write(&ff_file, b"x").expect("write ff file");
-        assert_eq!(
-            super::probe_capture_dir_os(ff_file.as_os_str()),
-            "cannot establish final session absence"
-        );
-        // An empty non-UTF-8 directory: recovery opens, checkpoint missing.
-        let ff_dir = tmp
-            .path()
-            .join(std::ffi::OsString::from_vec(b"d\xff".to_vec()));
-        std::fs::create_dir(&ff_dir).expect("mkdir ff dir");
-        assert_eq!(
-            super::probe_capture_dir_os(ff_dir.as_os_str()),
-            "checkpoint.json: cannot open regular capture file"
-        );
-        // A non-UTF-8 directory whose session.json opens is refused
-        // closed: the String reader cannot follow raw bytes.
-        std::fs::write(ff_dir.join("session.json"), b"{}").expect("write session");
-        assert_eq!(
-            super::probe_capture_dir_os(ff_dir.as_os_str()),
-            "capture directory is inaccessible or a symlink"
-        );
+    fn report_os_parse_non_utf8_shapes() {
+        // Values the diagnostics would echo silence the run when
+        // they cannot decode; values that never echo parse as
+        // bytes; the directory keeps its raw bytes.
+        for words in [
+            vec![b"--format".as_slice(), b"\xff", b"cap"],
+            vec![b"--long-lived-after", b"\xff", b"cap"],
+            vec![b"--bogus\xff", b"cap"],
+            vec![b"-\xff", b"cap"],
+        ] {
+            assert!(
+                matches!(
+                    super::parse_report_args_os(&os(&words)),
+                    Err(super::OsParseFail::Silent)
+                ),
+                "{words:?} must silence"
+            );
+        }
+        match super::parse_report_args_os(&os(&[b"--max-line-bytes", b"\xff", b"cap"])) {
+            Err(super::OsParseFail::Message(e)) => {
+                assert_eq!(e.message, "--max-line-bytes needs a decimal value");
+            }
+            _ => panic!("non-UTF-8 limit must fail as bad decimal"),
+        }
+        let parsed =
+            super::parse_report_args_os(&os(&[b"--format", b"json", b"--allow-partial", b"d\xff"]))
+                .expect("raw dir parses");
+        assert_eq!(parsed.opts.format, "json");
+        assert!(parsed.opts.allow_partial);
+        assert_eq!(parsed.dir_os, os(&[b"d\xff".as_slice()])[0]);
     }
 
     #[test]

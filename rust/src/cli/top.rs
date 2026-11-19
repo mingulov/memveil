@@ -37,7 +37,7 @@ use crate::analysis::diagnostics::diagnose_report;
 use crate::analysis::engine::Analyzer;
 use crate::capture::reader::{
     CaptureReader, DEFAULT_MAX_EVENTS_BYTES, DEFAULT_MAX_LINE_BYTES, DEFAULT_MAX_SESSION_BYTES,
-    ReaderLimits, read_capture,
+    ReaderLimits, read_capture, read_capture_os,
 };
 use crate::capture::run::{RecordOptions, repair_warning_for, run_collector_with};
 use crate::capture::tee::{LiveAnalyzer, RefreshSink, TeeWriter};
@@ -46,8 +46,9 @@ use crate::cli::durations::parse_duration_ns;
 use crate::cli::record::parse_record_args;
 use crate::cli::report::{
     CliError, EXIT_ERROR, EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, EXIT_REFUSAL, MAX_RENDERED_BYTES,
-    analysis_error_text, check_rendered_size, exit_for_report, parse_limit, refusal_stderr_lines,
-    sanitize_diagnostic, write_capture_location, write_stderr, write_stderr_trusted,
+    analysis_error_text, check_rendered_size, exit_for_report, parse_limit, parse_limit_bytes,
+    refusal_stderr_lines, sanitize_diagnostic, write_capture_location, write_stderr,
+    write_stderr_trusted,
 };
 use crate::model::event::Event;
 use crate::model::report::{Report, apply_checkpoint, apply_integrity};
@@ -59,6 +60,8 @@ use crate::platform::stdout::write_stdout;
 use crate::render::filter::device_filter_resolves;
 use crate::render::render::render;
 use crate::render::text::render_compact;
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStrExt;
 
 /// Wall sleep between refreshes, default 1s.
 pub const DEFAULT_INTERVAL_NS: u64 = 1_000_000_000;
@@ -393,6 +396,237 @@ pub fn parse_top_args(args: &[String]) -> Result<TopOptions, CliError> {
     Ok(opts)
 }
 
+/// Byte-wise [`parse_top_args`] result: decoded replay options plus raw words.
+struct TopArgsOs {
+    /// Decoded flags, filters, durations, and limits.
+    opts: TopOptions,
+    /// Replay directory positional in raw bytes.
+    dir_os: OsString,
+    /// Raw `--device` value; None when `--device` was absent.
+    device_os: Option<OsString>,
+}
+
+/// Byte-wise [`parse_top_args`] outcome: a replay run, or live mode.
+enum TopOsArgs {
+    /// Replay the raw directory with the decoded options.
+    Replay(Box<TopArgsOs>),
+    /// Live collection: keeps text words, so the caller refuses usage.
+    Live,
+}
+
+/// Raw top parse failure: a printable usage error, or silence.
+///
+/// `Silent` mirrors Mojo's escape-time raise: the diagnostic
+/// would embed non-UTF-8 bytes, so the run exits 1 printing
+/// nothing instead of lossy-decoding a misleading value.
+#[derive(Debug)]
+enum TopOsFail {
+    /// Emit through `top_failed` (exit 2).
+    Message(CliError),
+    /// Exit 1 with no output.
+    Silent,
+}
+
+/// True for record-flow flags, compared as bytes.
+fn is_live_flag_os(tok: &[u8]) -> bool {
+    matches!(
+        tok,
+        b"--output"
+            | b"--object"
+            | b"--bridge"
+            | b"--profile"
+            | b"--profiles-dir"
+            | b"--capability"
+            | b"--lc-object"
+            | b"--cp-object"
+            | b"--duration"
+            | b"--max-events-bytes"
+    )
+}
+
+/// Byte-wise [`parse_top_args`] over raw argv words.
+///
+/// Flags compare as bytes, values that never echo (`--max-*`)
+/// parse as bytes, and values the diagnostics would echo
+/// (`--interval`, `--long-lived-after`, unknown options)
+/// silence the run when they cannot decode. The `--device`
+/// value keeps its raw bytes: a non-UTF-8 filter parses and
+/// fails at the first block, exactly like Mojo. Error checks
+/// run in [`parse_top_args`] order, so precedence matches;
+/// only a live run (which would collect through text words)
+/// returns [`TopOsArgs::Live`] instead of replaying.
+fn parse_top_args_os(args: &[OsString]) -> Result<TopOsArgs, TopOsFail> {
+    let mut opts = TopOptions::default();
+    let mut dir_os = OsString::new();
+    let mut device_os: Option<OsString> = None;
+    let mut has_dir = false;
+    let mut has_live_args = false;
+    let mut stashed_max_events = OsString::new();
+    let mut has_stash = false;
+    let mut i = 0;
+    while i < args.len() {
+        let tok = args[i].as_bytes();
+        if tok == b"--interval" {
+            if i + 1 >= args.len() {
+                return Err(TopOsFail::Message(CliError {
+                    message: "--interval needs a value".to_string(),
+                }));
+            }
+            let Some(text) = args[i + 1].to_str() else {
+                // The duration refusal echoes its input.
+                return Err(TopOsFail::Silent);
+            };
+            match parse_duration_opt(text, "--interval") {
+                Ok(ns) => opts.interval_ns = ns,
+                Err(e) => return Err(TopOsFail::Message(e)),
+            }
+            i += 2;
+        } else if tok == b"--device" {
+            if i + 1 >= args.len() || args[i + 1].is_empty() {
+                return Err(TopOsFail::Message(CliError {
+                    message: "--device needs a value".to_string(),
+                }));
+            }
+            opts.has_device = true;
+            if let Some(text) = args[i + 1].to_str() {
+                opts.device = text.to_string();
+            }
+            device_os = Some(args[i + 1].clone());
+            i += 2;
+        } else if tok == b"--long-lived-after" {
+            if i + 1 >= args.len() {
+                return Err(TopOsFail::Message(CliError {
+                    message: "--long-lived-after needs a value".to_string(),
+                }));
+            }
+            let Some(text) = args[i + 1].to_str() else {
+                // The duration refusal echoes its input.
+                return Err(TopOsFail::Silent);
+            };
+            match parse_duration_opt(text, "--long-lived-after") {
+                Ok(ns) => opts.long_lived_after_ns = ns,
+                Err(e) => return Err(TopOsFail::Message(e)),
+            }
+            opts.has_long_lived_after = true;
+            i += 2;
+        } else if tok == b"--max-line-bytes" {
+            if i + 1 >= args.len() {
+                return Err(TopOsFail::Message(CliError {
+                    message: "--max-line-bytes needs a value".to_string(),
+                }));
+            }
+            match parse_limit_bytes(args[i + 1].as_bytes(), "--max-line-bytes", 65536) {
+                Ok(v) => opts.max_line_bytes = v,
+                Err(e) => return Err(TopOsFail::Message(e)),
+            }
+            i += 2;
+        } else if tok == b"--max-session-bytes" {
+            if i + 1 >= args.len() {
+                return Err(TopOsFail::Message(CliError {
+                    message: "--max-session-bytes needs a value".to_string(),
+                }));
+            }
+            match parse_limit_bytes(args[i + 1].as_bytes(), "--max-session-bytes", 16777216) {
+                Ok(v) => opts.max_session_bytes = v,
+                Err(e) => return Err(TopOsFail::Message(e)),
+            }
+            i += 2;
+        } else if tok == b"--max-events-bytes" {
+            if i + 1 >= args.len() {
+                return Err(TopOsFail::Message(CliError {
+                    message: "--max-events-bytes needs a value".to_string(),
+                }));
+            }
+            stashed_max_events = args[i + 1].clone();
+            has_stash = true;
+            i += 2;
+        } else if tok == b"--allow-partial" {
+            opts.allow_partial = true;
+            i += 1;
+        } else if tok == b"--strict" {
+            opts.strict = true;
+            i += 1;
+        } else if tok == b"--compact" {
+            opts.compact = true;
+            i += 1;
+        } else if is_live_flag_os(tok) {
+            if tok == b"--output" {
+                opts.has_output = true;
+            }
+            has_live_args = true;
+            // Live values are consumed positionally, exactly
+            // like the text parser; a live run never starts.
+            if i + 1 < args.len() {
+                i += 2;
+            } else {
+                i += 1;
+            }
+        } else if tok.first() == Some(&0x2d) {
+            match args[i].to_str() {
+                Some(text) => {
+                    return Err(TopOsFail::Message(CliError {
+                        message: format!("unknown option: {text}"),
+                    }));
+                }
+                // The refusal echoes the token, which cannot decode.
+                None => return Err(TopOsFail::Silent),
+            }
+        } else {
+            if has_dir {
+                return Err(TopOsFail::Message(CliError {
+                    message: "too many arguments".to_string(),
+                }));
+            }
+            dir_os = args[i].clone();
+            has_dir = true;
+            i += 1;
+        }
+    }
+    if opts.allow_partial && opts.has_output {
+        return Err(TopOsFail::Message(CliError {
+            message: "--allow-partial requires replay DIR".to_string(),
+        }));
+    }
+    if has_dir && opts.has_output {
+        return Err(TopOsFail::Message(CliError {
+            message: "cannot combine replay DIR with live --output".to_string(),
+        }));
+    }
+    if opts.compact && opts.has_device {
+        return Err(TopOsFail::Message(CliError {
+            message: "--compact does not take --device".to_string(),
+        }));
+    }
+    if !has_dir && !opts.has_output {
+        return Err(TopOsFail::Message(CliError {
+            message: "missing capture directory".to_string(),
+        }));
+    }
+    if !opts.has_output && has_live_args {
+        return Err(TopOsFail::Message(CliError {
+            message: "live options need --output DIR".to_string(),
+        }));
+    }
+    if opts.has_output {
+        return Ok(TopOsArgs::Live);
+    }
+    if has_stash {
+        match parse_limit_bytes(
+            stashed_max_events.as_bytes(),
+            "--max-events-bytes",
+            4294967296,
+        ) {
+            Ok(v) => opts.max_events_bytes = v,
+            Err(e) => return Err(TopOsFail::Message(e)),
+        }
+    }
+    Ok(TopOsArgs::Replay(Box::new(TopArgsOs {
+        opts,
+        dir_os,
+        device_os,
+    })))
+}
+
 fn top_failed(prefix: &str, detail: &str) -> i64 {
     let line = format!("{prefix}{}\n", sanitize_diagnostic(detail));
     match write_stderr(&line) {
@@ -465,6 +699,7 @@ pub fn filter_header_suffix(filt: &str) -> String {
 pub struct FilterWatch {
     filt: String,
     warned: bool,
+    unrenderable: bool,
 }
 
 impl FilterWatch {
@@ -477,15 +712,38 @@ impl FilterWatch {
                 String::new()
             },
             warned: false,
+            unrenderable: false,
         }
+    }
+
+    /// Mark a device filter that cannot decode as UTF-8.
+    ///
+    /// A non-UTF-8 filter never resolves, so the warn echo would
+    /// be unescapable; Mojo blanks the echo instead of failing
+    /// the warn, then the block render raises and fails the run.
+    pub fn mark_device_unrenderable(&mut self) {
+        self.unrenderable = true;
+    }
+
+    /// True when the device filter cannot decode as UTF-8.
+    pub fn device_unrenderable(&self) -> bool {
+        self.unrenderable
     }
 
     /// Warning line once when filt matches no rows.
     ///
     /// Empty without a filter, once the filter resolves, or once the
     /// run already warned. The warning is a stderr diagnostic, so it
-    /// never fails the run.
+    /// never fails the run. An unrenderable filter warns once with
+    /// a blanked echo, exactly like the Mojo latch.
     pub fn warn_for(&mut self, rep: &Report) -> String {
+        if self.unrenderable {
+            if self.warned {
+                return String::new();
+            }
+            self.warned = true;
+            return "memveil top: --device '' matches no known device\n".to_string();
+        }
         if self.warned || self.filt.is_empty() {
             return String::new();
         }
@@ -582,6 +840,11 @@ fn snapshot_block<A: TopReducer>(
     let line = watch.warn_for(&rep);
     if !line.is_empty() {
         let _ = write_stderr(&line);
+    }
+    if watch.device_unrenderable() {
+        // The Mojo block render raises on the undecodable
+        // filter after the warn: fail with no stdout.
+        return EXIT_INTERNAL;
     }
     match emit_report(
         &mut rep,
@@ -857,6 +1120,15 @@ pub fn run_top(args: &[String]) -> i64 {
         Ok(reader) => reader,
         Err(e) => return top_failed("memveil top: cannot read capture: ", &e.message),
     };
+    run_replay(&mut reader, &opts, false)
+}
+
+/// Stream one opened capture to periodic summaries; return the exit code.
+///
+/// `device_unrenderable` carries a non-UTF-8 `--device` value past
+/// the open: the first block warns with a blanked echo and fails,
+/// exactly like the Mojo block render raise.
+fn run_replay(reader: &mut CaptureReader, opts: &TopOptions, device_unrenderable: bool) -> i64 {
     let mut signal = LiveSignalSource::new();
     let armed = signal.setup();
     if !armed.ok {
@@ -874,11 +1146,14 @@ pub fn run_top(args: &[String]) -> i64 {
         opts.interval_ns,
     );
     let seq = 0;
-    let mut watch = FilterWatch::new(&opts);
+    let mut watch = FilterWatch::new(opts);
+    if device_unrenderable {
+        watch.mark_device_unrenderable();
+    }
     let code = drain(
-        &mut reader,
+        reader,
         &mut analyzer,
-        &opts,
+        opts,
         &mut signal,
         &mut clock,
         &mut cursor,
@@ -887,6 +1162,55 @@ pub fn run_top(args: &[String]) -> i64 {
     );
     signal.teardown();
     code
+}
+
+/// Run the top verb over raw argv words; return the exit code.
+///
+/// The dispatcher routes here only when a word cannot decode
+/// (all-UTF-8 words run through [`run_top`], which owns the
+/// live signal guard): replay opens the raw directory like
+/// Mojo, while a live run keeps text words and stays a usage
+/// error, exactly as before.
+pub fn run_top_os(args: &[OsString]) -> i64 {
+    if args
+        .iter()
+        .any(|a| a.as_bytes() == b"--help" || a.as_bytes() == b"-h")
+    {
+        match write_stdout(&top_usage()) {
+            Ok(()) => return EXIT_OK,
+            Err(_) => {
+                let _ = write_stderr("memveil top: cannot write stdout\n");
+                return EXIT_INTERNAL;
+            }
+        }
+    }
+    match parse_top_args_os(args) {
+        Ok(TopOsArgs::Live) => {
+            let _ = write_stderr(&top_usage());
+            EXIT_INVALID
+        }
+        Ok(TopOsArgs::Replay(parsed)) => {
+            let mut reader = match read_capture_os(
+                &parsed.dir_os,
+                parsed.opts.allow_partial,
+                ReaderLimits {
+                    max_session_bytes: parsed.opts.max_session_bytes,
+                    max_line_bytes: parsed.opts.max_line_bytes,
+                    max_events_bytes: parsed.opts.max_events_bytes,
+                },
+            ) {
+                Ok(reader) => reader,
+                Err(e) => return top_failed("memveil top: cannot read capture: ", &e.message),
+            };
+            let device_unrenderable = parsed
+                .device_os
+                .as_ref()
+                .is_some_and(|raw| raw.to_str().is_none());
+            run_replay(&mut reader, &parsed.opts, device_unrenderable)
+        }
+        Err(TopOsFail::Message(e)) => top_failed("memveil top: ", &e.message),
+        Err(TopOsFail::Silent) => EXIT_INTERNAL,
+    }
 }
 
 const WAIT_SLICE_MS: i64 = 100;
@@ -1039,6 +1363,11 @@ fn drain<A: TopReducer>(
     if !line.is_empty() {
         let _ = write_stderr(&line);
     }
+    if watch.device_unrenderable() {
+        // The Mojo block render raises on the undecodable
+        // filter after the warn: fail with no stdout.
+        return EXIT_INTERNAL;
+    }
     diagnose_block(
         &mut rep,
         opts.has_long_lived_after,
@@ -1132,6 +1461,11 @@ fn finish_after_signal<A: TopReducer>(
     if !line.is_empty() {
         let _ = write_stderr(&line);
     }
+    if watch.device_unrenderable() {
+        // The Mojo block render raises on the undecodable
+        // filter after the warn: fail with no stdout.
+        return EXIT_INTERNAL;
+    }
     diagnose_block(
         &mut rep,
         opts.has_long_lived_after,
@@ -1162,8 +1496,10 @@ mod tests {
     use super::{
         BoundaryCursor, FilterWatch, StdoutSink, TopLiveAnalyzer, TopOptions, WaitSlices,
         diagnose_block, drain, filter_header_suffix, finish_after_signal, finish_live,
-        live_template, parse_top_args, run_top, snapshot_block, top_usage, wait_interval,
+        live_template, parse_top_args, parse_top_args_os, run_top, snapshot_block, top_usage,
+        wait_interval,
     };
+    use super::{EXIT_INTERNAL, TopOsArgs, TopOsFail};
     use crate::analysis::engine::Analyzer;
     use crate::capture::reader::{ReaderLimits, read_capture};
     use crate::capture::tee::{LiveAnalyzer, RefreshSink};
@@ -1310,6 +1646,209 @@ mod tests {
         assert!(text.contains("discover"));
         assert!(text.contains("[--profiles-dir DIR]"));
         assert!(text.starts_with("usage: memveil top [--interval DURATION]"));
+    }
+
+    fn os(words: &[&[u8]]) -> Vec<std::ffi::OsString> {
+        use std::os::unix::ffi::OsStringExt;
+        words
+            .iter()
+            .map(|w| std::ffi::OsString::from_vec(w.to_vec()))
+            .collect()
+    }
+
+    #[test]
+    fn top_os_parse_matches_str_parse() {
+        // Differential pin: the byte parser records the &str
+        // parser's own replay options on every ASCII shape, so a
+        // non-UTF-8 directory replays exactly like its UTF-8 twin.
+        for words in [
+            vec!["capdir"],
+            vec![
+                "--interval",
+                "2s",
+                "--device",
+                "dev-1",
+                "--strict",
+                "--allow-partial",
+                "capdir",
+            ],
+            vec![
+                "--compact",
+                "--long-lived-after",
+                "1h",
+                "--max-line-bytes",
+                "64",
+                "--max-session-bytes",
+                "128",
+                "--max-events-bytes",
+                "256",
+                "capdir",
+            ],
+        ] {
+            let text: Vec<String> = words.iter().map(|w| w.to_string()).collect();
+            let mut want = parse_top_args(&text).expect("str parses");
+            // The byte parser keeps the directory raw; the decoded
+            // options must otherwise match exactly.
+            want.dir.clear();
+            let raw: Vec<&[u8]> = words.iter().map(|w| w.as_bytes()).collect();
+            match parse_top_args_os(&os(&raw)).expect("os parses") {
+                TopOsArgs::Replay(got) => {
+                    assert_eq!(got.opts, want);
+                    assert_eq!(got.dir_os.to_str(), Some("capdir"));
+                }
+                TopOsArgs::Live => panic!("{words:?} must replay, not live"),
+            }
+        }
+        // Error precedence matches too: the first bad word wins
+        // in both spellings.
+        for words in [
+            vec!["--interval", "nope", "capdir"],
+            vec!["--nope", "capdir"],
+            vec!["a", "b"],
+            vec!["--compact", "--device", "d", "capdir"],
+            vec!["--profiles-dir", "/alt", "capdir"],
+            vec!["--max-events-bytes", "99999999999", "capdir"],
+            vec!["--long-lived-after", "0s", "capdir"],
+        ] {
+            let text: Vec<String> = words.iter().map(|w| w.to_string()).collect();
+            let want = parse_top_args(&text).expect_err("str rejects").message;
+            let raw: Vec<&[u8]> = words.iter().map(|w| w.as_bytes()).collect();
+            match parse_top_args_os(&os(&raw)) {
+                Err(TopOsFail::Message(e)) => assert_eq!(e.message, want),
+                _ => panic!("os must reject {words:?} with a message"),
+            }
+        }
+    }
+
+    #[test]
+    fn top_os_parse_non_utf8_shapes() {
+        // Values the diagnostics would echo silence the run when
+        // they cannot decode; values that never echo parse as
+        // bytes; the directory and device keep their raw bytes.
+        for words in [
+            vec![b"--interval".as_slice(), b"\xff", b"cap"],
+            vec![b"--long-lived-after", b"\xff", b"cap"],
+            vec![b"--bogus\xff", b"cap"],
+            vec![b"-\xff", b"cap"],
+        ] {
+            assert!(
+                matches!(parse_top_args_os(&os(&words)), Err(TopOsFail::Silent)),
+                "{words:?} must silence"
+            );
+        }
+        match parse_top_args_os(&os(&[b"--max-events-bytes", b"\xff", b"cap"])) {
+            Err(TopOsFail::Message(e)) => {
+                assert_eq!(e.message, "--max-events-bytes needs a decimal value");
+            }
+            _ => panic!("non-UTF-8 limit must fail as bad decimal"),
+        }
+        // A non-UTF-8 device parses: it fails at the first block,
+        // exactly like Mojo, not at parse time.
+        match parse_top_args_os(&os(&[b"--device", b"\xff", b"d\xff"])) {
+            Ok(TopOsArgs::Replay(got)) => {
+                assert!(got.opts.has_device);
+                assert_eq!(got.device_os.as_ref().expect("raw device").to_str(), None);
+                assert_eq!(got.dir_os.to_str(), None);
+            }
+            _ => panic!("raw device and dir must parse to replay"),
+        }
+        // --compact still refuses a non-UTF-8 device at parse time.
+        match parse_top_args_os(&os(&[b"--compact", b"--device", b"\xff", b"cap"])) {
+            Err(TopOsFail::Message(e)) => {
+                assert_eq!(e.message, "--compact does not take --device");
+            }
+            _ => panic!("compact plus raw device must reject"),
+        }
+    }
+
+    #[test]
+    fn top_os_live_shapes_stay_usage() {
+        // Live checks fire before any collection in both
+        // spellings; a live run keeps text words and stays a
+        // usage error.
+        for words in [
+            vec![b"--output".as_slice(), b"out", b"--allow-partial"],
+            vec![b"cap", b"--output", b"out"],
+            vec![b"d\xff", b"--output", b"out"],
+        ] {
+            let text: Vec<String> = words
+                .iter()
+                .map(|w| String::from_utf8_lossy(w).into_owned())
+                .collect();
+            let str_message = match parse_top_args(&text) {
+                Err(e) => e.message,
+                Ok(_) => panic!("{words:?} must reject in the str parser"),
+            };
+            match parse_top_args_os(&os(&words)) {
+                Err(TopOsFail::Message(e)) => assert_eq!(e.message, str_message),
+                _ => panic!("{words:?} must reject with a message"),
+            }
+        }
+        for words in [
+            vec![b"--output".as_slice(), b"out"],
+            vec![b"--output".as_slice(), b"o\xff"],
+            vec![b"--output".as_slice(), b"out", b"--device", b"\xff"],
+        ] {
+            assert!(
+                matches!(parse_top_args_os(&os(&words)), Ok(TopOsArgs::Live)),
+                "{words:?} must stay live"
+            );
+        }
+    }
+
+    #[test]
+    fn top_unrenderable_device_warns_blank_then_fails() {
+        // A non-UTF-8 filter warns once with a blanked echo and
+        // fails the first block with no stdout, exactly like the
+        // Mojo block render raise; event errors before the first
+        // block still win (pinned live against Mojo).
+        let opts = parse_top_args(&args(&["--device", "d", "capdir"])).expect("parses");
+        let mut watch = FilterWatch::new(&opts);
+        assert!(!watch.device_unrenderable());
+        watch.mark_device_unrenderable();
+        assert!(watch.device_unrenderable());
+        let rep = Report::default();
+        assert_eq!(
+            watch.warn_for(&rep),
+            "memveil top: --device '' matches no known device\n"
+        );
+        assert_eq!(watch.warn_for(&rep), "");
+        // A resolving UTF-8 filter is untouched by the latch.
+        let plain = parse_top_args(&args(&["capdir"])).expect("parses");
+        let mut watch = FilterWatch::new(&plain);
+        assert_eq!(watch.warn_for(&rep), "");
+    }
+
+    struct SnapshotStub;
+
+    impl super::TopReducer for SnapshotStub {
+        fn consume(&mut self, _ev: &Event) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn snapshot(&mut self, _horizon_ns: u64, _partial: bool) -> Result<Report, String> {
+            Ok(Report::default())
+        }
+
+        fn finish(&mut self, _end_ns: u64, _partial: bool) -> Result<Report, String> {
+            Ok(Report::default())
+        }
+    }
+
+    #[test]
+    fn top_unrenderable_snapshot_block_fails_internal() {
+        // The refresh path fails 1 after the warn without
+        // rendering or printing; the stderr line itself is
+        // pinned live against Mojo.
+        let opts = parse_top_args(&args(&["--device", "d", "capdir"])).expect("parses");
+        let mut watch = FilterWatch::new(&opts);
+        watch.mark_device_unrenderable();
+        let mut stub = SnapshotStub;
+        assert_eq!(
+            snapshot_block(&mut stub, &opts, 1, 1, &mut watch),
+            EXIT_INTERNAL
+        );
+        assert!(watch.device_unrenderable());
     }
 
     #[test]

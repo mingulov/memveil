@@ -43,6 +43,8 @@ use crate::model::validate::{ValidationError, checked_add};
 use crate::platform::capturefiles::{RecoveryFiles, file_stat};
 use crate::platform::hash::Sha256;
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 
 /// I/O failure reading the capture.
 pub const READ_IO: u32 = 1;
@@ -1863,24 +1865,33 @@ impl Default for CaptureReader {
     }
 }
 
-/// NUL-terminate a path, refusing interior NULs.
-fn to_cstr(text: &str) -> Result<Vec<u8>, ReadError> {
-    if text.as_bytes().contains(&0) {
+/// NUL-terminate raw path bytes, refusing interior NULs.
+fn to_cstr_bytes(raw: &[u8]) -> Result<Vec<u8>, ReadError> {
+    if raw.contains(&0) {
         return Err(ReadError {
             code: READ_IO,
             line_no: 0,
             message: "NUL byte in path".to_string(),
         });
     }
-    let mut out = Vec::with_capacity(text.len() + 1);
-    out.extend_from_slice(text.as_bytes());
+    let mut out = Vec::with_capacity(raw.len() + 1);
+    out.extend_from_slice(raw);
     out.push(0);
     Ok(out)
 }
 
+/// Join a capture directory and member name at the byte level.
+fn join_member(dir: &[u8], name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(dir.len() + 1 + name.len());
+    out.extend_from_slice(dir);
+    out.push(b'/');
+    out.extend_from_slice(name);
+    out
+}
+
 /// Pin a nonblocking descriptor before admitting a regular input stream.
-fn open_regular_stream(path: &str, what: &str) -> Result<i32, ReadError> {
-    let cpath = to_cstr(path)?;
+fn open_regular_stream_bytes(raw: &[u8], what: &str) -> Result<i32, ReadError> {
+    let cpath = to_cstr_bytes(raw)?;
     // SAFETY: NUL-terminated path on AT_FDCWD.
     let fd = unsafe {
         libc::openat(
@@ -1918,8 +1929,8 @@ fn open_regular_stream(path: &str, what: &str) -> Result<i32, ReadError> {
 /// Chunks stream through a fixed 64 KiB buffer; the running total is
 /// checked before each chunk lands, so a huge file is rejected after one
 /// chunk over the bound instead of being read fully.
-fn read_bounded(path: &str, what: &str, limit: usize) -> Result<Vec<u8>, ReadError> {
-    let fd = open_regular_stream(path, what)?;
+fn read_bounded_bytes(raw: &[u8], what: &str, limit: usize) -> Result<Vec<u8>, ReadError> {
+    let fd = open_regular_stream_bytes(raw, what)?;
     let mut chunk = [0u8; CHUNK_BYTES];
     let mut out = Vec::new();
     loop {
@@ -1969,7 +1980,21 @@ pub fn read_capture(
     allow_partial: bool,
     limits: ReaderLimits,
 ) -> Result<CaptureReader, ReadError> {
-    let final_path = to_cstr(&format!("{dir}/session.json"))?;
+    read_capture_os(OsStr::new(dir), allow_partial, limits)
+}
+
+/// Open the capture in dir over raw bytes: validate session, stream events.
+///
+/// The byte-level open: probe, recovery, and finalized order match
+/// [`read_capture`] exactly, and non-UTF-8 directories open like any
+/// other bytes.
+pub fn read_capture_os(
+    dir: &OsStr,
+    allow_partial: bool,
+    limits: ReaderLimits,
+) -> Result<CaptureReader, ReadError> {
+    let raw = dir.as_bytes();
+    let final_path = to_cstr_bytes(&join_member(raw, b"session.json"))?;
     // SAFETY: NUL-terminated path on AT_FDCWD.
     let probe = unsafe {
         libc::openat(
@@ -1999,7 +2024,7 @@ pub fn read_capture(
     let mut files = RecoveryFiles::new();
     let session_bytes: Vec<u8>;
     if recover {
-        if let Err(e) = files.open(dir) {
+        if let Err(e) = files.open_os(dir) {
             return Err(ReadError {
                 code: READ_INVALID,
                 line_no: 0,
@@ -2017,8 +2042,8 @@ pub fn read_capture(
             }
         }
     } else {
-        session_bytes = read_bounded(
-            &format!("{dir}/session.json"),
+        session_bytes = read_bounded_bytes(
+            &join_member(raw, b"session.json"),
             "session.json",
             limits.max_session_bytes,
         )?;
@@ -2073,7 +2098,7 @@ pub fn read_capture(
         out.devices.insert(device.device_id.clone());
     }
     if !recover {
-        out.fd = open_regular_stream(&format!("{dir}/events.ndjson"), "events.ndjson")?;
+        out.fd = open_regular_stream_bytes(&join_member(raw, b"events.ndjson"), "events.ndjson")?;
     }
     if recover && !allow_partial {
         while out.has_more()? {
@@ -3591,5 +3616,124 @@ mod tests {
                 drain(&mut r).expect("linked capture drains");
             }
         }
+    }
+
+    #[test]
+    fn read_capture_os_matches_str_reader() {
+        // Differential pin: the byte entry point returns the &str
+        // reader's own verdict on every ASCII shape, so existing
+        // callers and corpus verdicts do not move.
+        use super::read_capture_os;
+        use std::ffi::OsStr;
+        let tmp = TestDir::create("memveil-os-diff").expect("mkdtemp");
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir(&empty).expect("mkdir empty");
+        let file = tmp.path().join("file");
+        std::fs::write(&file, b"x").expect("write file");
+        let shapes = [
+            "/nonexistent-memveil-os-diff-xyz".to_string(),
+            "/tmp".to_string(),
+            "/etc/hostname".to_string(),
+            empty.to_str().expect("utf-8").to_string(),
+            file.to_str().expect("utf-8").to_string(),
+            fixture("sealed-complete"),
+            fixture("sealed-empty"),
+            fixture("corrupt-tail"),
+        ];
+        for path in shapes {
+            for allow in [false, true] {
+                let via_str = read_capture(&path, allow, default_limits())
+                    .map(|r| (r.session.session_id.clone(), r.partial))
+                    .map_err(|e| (e.code, e.line_no, e.message));
+                let via_os = read_capture_os(OsStr::new(&path), allow, default_limits())
+                    .map(|r| (r.session.session_id.clone(), r.partial))
+                    .map_err(|e| (e.code, e.line_no, e.message));
+                assert_eq!(via_str, via_os, "spellings must agree for {path}");
+            }
+        }
+        // A drained capture agrees event for event.
+        let mut a =
+            read_capture(&fixture("sealed-complete"), false, default_limits()).expect("str opens");
+        let mut b = read_capture_os(
+            OsStr::new(&fixture("sealed-complete")),
+            false,
+            default_limits(),
+        )
+        .expect("os opens");
+        let ea = drain(&mut a).expect("str drains");
+        let eb = drain(&mut b).expect("os drains");
+        assert_eq!(ea.len(), eb.len());
+        assert_eq!(ea.len(), 3);
+        for (x, y) in ea.iter().zip(eb.iter()) {
+            assert_eq!(x.seq, y.seq);
+            assert_eq!(x.ts_ns, y.ts_ns);
+        }
+        assert_eq!(a.integrity_verified, b.integrity_verified);
+        assert!(a.integrity_verified);
+    }
+
+    #[test]
+    fn read_capture_os_opens_non_utf8() {
+        // Finalized and checkpoint captures at non-UTF-8 paths
+        // open and drain like their ASCII twins.
+        use super::read_capture_os;
+        use std::os::unix::ffi::OsStringExt;
+        let tmp = TestDir::create("memveil-os-ff").expect("mkdtemp");
+        let ff = tmp
+            .path()
+            .join(std::ffi::OsString::from_vec(b"cap\xff".to_vec()));
+        std::fs::create_dir(&ff).expect("mkdir ff dir");
+        // Finalized twin: the sealed session and events verbatim.
+        std::fs::write(
+            ff.join("session.json"),
+            fixture_bytes("reader/sealed-complete/session.json"),
+        )
+        .expect("write session");
+        std::fs::write(
+            ff.join("events.ndjson"),
+            fixture_bytes("reader/sealed-complete/events.ndjson"),
+        )
+        .expect("write events");
+        let mut r = read_capture_os(ff.as_os_str(), false, default_limits()).expect("ff opens");
+        assert!(!r.checkpoint_prefix);
+        assert_eq!(drain(&mut r).expect("ff drains").len(), 3);
+        assert!(r.integrity_verified);
+        // Checkpoint twin: sealed session retired to a checkpoint.
+        let ck = tmp
+            .path()
+            .join(std::ffi::OsString::from_vec(b"ckpt\xff".to_vec()));
+        std::fs::create_dir(&ck).expect("mkdir ck dir");
+        let session = fixture_text("reader/sealed-complete/session.json");
+        let retired = session.replacen("\"finalized\": true", "\"finalized\": false", 1);
+        assert_ne!(retired, session);
+        let checkpoint = retired.replacen(
+            "\"end_reason\": \"duration\"",
+            "\"end_reason\": \"checkpoint\",\n    \"checkpoint_generation\": \"1\"",
+            1,
+        );
+        assert_ne!(checkpoint, retired);
+        std::fs::write(ck.join("checkpoint.json"), checkpoint).expect("write checkpoint");
+        std::fs::write(
+            ck.join("events.ndjson"),
+            fixture_bytes("reader/sealed-complete/events.ndjson"),
+        )
+        .expect("write events");
+        let err = read_capture_os(ck.as_os_str(), false, default_limits()).unwrap_err();
+        assert_eq!(err.code, READ_INVALID);
+        assert!(err.message.contains("--allow-partial"), "{}", err.message);
+        let mut r = read_capture_os(ck.as_os_str(), true, default_limits()).expect("ck recovers");
+        assert!(r.checkpoint_prefix);
+        assert!(r.partial);
+        assert_eq!(drain(&mut r).expect("ck drains").len(), 3);
+        assert!(r.integrity_verified);
+        // Refusals keep their ASCII messages on raw paths.
+        let missing = tmp
+            .path()
+            .join(std::ffi::OsString::from_vec(b"no\xff".to_vec()));
+        let err = read_capture_os(missing.as_os_str(), false, default_limits()).unwrap_err();
+        assert_eq!(
+            err.message,
+            "capture directory is inaccessible or a symlink"
+        );
     }
 }
