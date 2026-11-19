@@ -198,7 +198,7 @@ fn mv_emit_lc(kind: u16, flags: u16, dir: u64, size: u64, gen: u64) -> bool {
 #[inline(always)]
 fn mv_claim_gen(key: &GenKey, gen: u64) -> bool {
     for _ in 0..2 {
-        if MV_GEN_TABLE.insert(key, &gen, BPF_NOEXIST as u64).is_ok() {
+        if MV_GEN_TABLE.insert(key, gen, BPF_NOEXIST as u64).is_ok() {
             return true;
         }
         let Some(slot) = MV_GEN_TABLE.get_ptr_mut(key) else {
@@ -207,7 +207,7 @@ fn mv_claim_gen(key: &GenKey, gen: u64) -> bool {
         if unsafe { *slot } != 0 {
             return false;
         }
-        if MV_GEN_TABLE.insert(key, &gen, BPF_EXIST as u64).is_ok() {
+        if MV_GEN_TABLE.insert(key, gen, BPF_EXIST as u64).is_ok() {
             return true;
         }
     }
@@ -278,9 +278,9 @@ fn try_mv_map_result(ctx: &FExitContext) {
     // holds is none of this record's business, and a tombstone left by a
     // failed delete stays reclaimable.
     if !mv_emit_lc(MV_LC_KIND_MAP, flags, u64::from(wdir), mapping_size, gen) && gen != 0 {
-        if let Some(slot) = MV_GEN_TABLE.get_ptr_mut(&key) {
+        if let Some(slot) = MV_GEN_TABLE.get_ptr_mut(key) {
             if unsafe { count_cas(slot, gen, 0) } == gen {
-                let _ = MV_GEN_TABLE.remove(&key);
+                let _ = MV_GEN_TABLE.remove(key);
             }
         }
     }
@@ -314,7 +314,7 @@ fn try_mv_unmap(ctx: &FEntryContext) {
     }
     let key = GenKey { dev, tlb: tlb_addr };
     let mut gen = 0;
-    if let Some(slot) = MV_GEN_TABLE.get_ptr_mut(&key) {
+    if let Some(slot) = MV_GEN_TABLE.get_ptr_mut(key) {
         let current = unsafe { *slot };
         if current != 0 {
             gen = current;
@@ -324,7 +324,7 @@ fn try_mv_unmap(ctx: &FEntryContext) {
                 flags |= MV_LC_FLAG_GEN_MISS;
             } else {
                 // Owned: a failed delete leaves a functional tombstone the next map reclaims.
-                let _ = MV_GEN_TABLE.remove(&key);
+                let _ = MV_GEN_TABLE.remove(key);
             }
         } else {
             flags |= MV_LC_FLAG_GEN_MISS;
