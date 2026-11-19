@@ -24,7 +24,11 @@
 //! first and takes one more sample), so they agree by first+last sample per
 //! pool with counts within two plus a `used_bytes` envelope (min and max
 //! within one pool unit): sampling phase moves the observed envelope by a
-//! sub-interval blip, never by a sustained level; every other kind compares
+//! sub-interval blip, never by a sustained level. Every sample also carries
+//! a stable signature (kind, source, and the data members outside the live
+//! `used_bytes`/`hiwater_bytes` readings) that must hold across the whole
+//! series on each side and agree across sides, so a middle row with wrong
+//! capacity, unit, or source metadata diverges; every other kind compares
 //! as a full
 //! normalized multiset. The boot pins `swiotlb=force`, so the workload must
 //! be uniformly FORCED; any NORMAL hit (or mix) fails the workload shape.
@@ -38,7 +42,7 @@
 //! kernel bytes pinned by `tests/vm/kernels.lock.json`) and fails closed on
 //! any refusal; boot/timeout flakes retry 3x, divergences never retry.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -429,14 +433,47 @@ fn normalize_event(val: &Json) -> Result<NormEvent, String> {
     })
 }
 
-/// First/last normalized sample, the `used_bytes` envelope, and the sample
-/// count for one pool.
+/// First/last normalized sample, the `used_bytes` envelope, the sample
+/// count, and the distinct stable signatures over EVERY sample for one
+/// pool. A healthy series holds exactly one signature; more means a row
+/// moved a field (capacity, unit, source) the cadence cannot explain.
 struct PoolSeries {
     first: String,
     last: String,
     min_used: u64,
     max_used: u64,
     count: usize,
+    stable: BTreeSet<String>,
+}
+
+/// Stable signature of one `pool_sample` line: kind, source, and the data
+/// members outside the two live readings (`used_bytes`, covered by the
+/// envelope, and `hiwater_bytes`, a watermark that legitimately grows
+/// within a series). Everything else about a pool row is structural and
+/// must not move sample to sample or side to side.
+fn stable_pool_sig(val: &Json) -> Result<String, String> {
+    let kind = val
+        .get("kind")
+        .and_then(Json::as_str)
+        .ok_or_else(|| "sample lacks string kind".to_string())?;
+    let source = val
+        .get("source")
+        .map(canon_string)
+        .unwrap_or_else(|| "null".to_string());
+    let Json::Obj(data) = val
+        .get("data")
+        .ok_or_else(|| "sample lacks data".to_string())?
+    else {
+        return Err("sample data is not an object".to_string());
+    };
+    let held: Vec<(String, Json)> = data
+        .iter()
+        .filter(|(key, _)| key != "used_bytes" && key != "hiwater_bytes")
+        .cloned()
+        .collect();
+    let mut rendered = String::new();
+    canon(&Json::Obj(held), &mut rendered);
+    Ok(format!("{kind}|{source}|{rendered}"))
 }
 
 /// One parsed `events.ndjson` side: normalized multisets per kind plus the
@@ -522,6 +559,7 @@ fn profile_stream(text: &str, window: Option<(u64, u64)>) -> Result<StreamProfil
                 .get("used_bytes")
                 .and_then(Json::as_u64)
                 .ok_or_else(|| format!("line {}: sample lacks numeric used_bytes", lineno + 1))?;
+            let sig = stable_pool_sig(&val).map_err(|e| format!("line {}: {e}", lineno + 1))?;
             // Streams are ts-ordered, so first-seen is earliest.
             match profile.pools.get_mut(pool) {
                 Some(series) => {
@@ -529,6 +567,7 @@ fn profile_stream(text: &str, window: Option<(u64, u64)>) -> Result<StreamProfil
                     series.min_used = series.min_used.min(used);
                     series.max_used = series.max_used.max(used);
                     series.count += 1;
+                    series.stable.insert(sig);
                 }
                 None => {
                     profile.pools.insert(
@@ -539,6 +578,7 @@ fn profile_stream(text: &str, window: Option<(u64, u64)>) -> Result<StreamProfil
                             min_used: used,
                             max_used: used,
                             count: 1,
+                            stable: BTreeSet::from([sig]),
                         },
                     );
                 }
@@ -698,6 +738,20 @@ fn diff_profiles(rust: &StreamProfile, mojo: &StreamProfile) -> DiffReport {
                     report.pool_gaps.insert(
                         (*pool).clone(),
                         format!("count rust={} mojo={}", r.count, m.count),
+                    );
+                } else if r.stable.len() > 1 || m.stable.len() > 1 {
+                    report.pool_gaps.insert(
+                        (*pool).clone(),
+                        format!(
+                            "unstable pool fields within series (rust={} mojo={} variants)",
+                            r.stable.len(),
+                            m.stable.len()
+                        ),
+                    );
+                } else if r.stable != m.stable {
+                    report.pool_gaps.insert(
+                        (*pool).clone(),
+                        "stable pool fields differ across sides".to_string(),
                     );
                 } else if r.first != m.first {
                     report
@@ -976,15 +1030,30 @@ fn requal_window_selects_multisets() {
     assert!(!diff_profiles(&r, &m).is_empty());
 }
 
-/// One synthetic `pool_sample` line.
+/// One synthetic `pool_sample` line, in the real row shape (stable
+/// `capacity_bytes`/`unit`/`allocator`/`unit_bytes` plus the live
+/// `used_bytes`/`hiwater_bytes` readings).
 fn pool_sample(seq: u64, ts: u64, used: u64) -> String {
+    pool_sample_full(seq, ts, used, "67108864", "2048", "debugfs")
+}
+
+/// One synthetic `pool_sample` line with overridable stable fields.
+fn pool_sample_full(
+    seq: u64,
+    ts: u64,
+    used: u64,
+    capacity: &str,
+    unit_bytes: &str,
+    backend: &str,
+) -> String {
     format!(
         "{{\"schema_version\":\"0.1.1\",\"session_id\":\"s\",\"seq\":\"{seq}\",\
          \"ts_ns\":\"{ts}\",\"kind\":\"pool_sample\",\
-         \"source\":{{\"hook\":\"swiotlb:debugfs\",\"backend\":\"debugfs\",\
+         \"source\":{{\"hook\":\"swiotlb:debugfs\",\"backend\":\"{backend}\",\
          \"profile_id\":\"p\",\"measurement\":\"observed\",\"correlation\":\"direct\"}},\
          \"data\":{{\"pool_id\":\"swiotlb-default\",\"used_bytes\":\"{used}\",\
-         \"capacity_bytes\":\"67108864\"}}}}"
+         \"capacity_bytes\":\"{capacity}\",\"unit\":\"bytes\",\"allocator\":\"swiotlb\",\
+         \"unit_bytes\":\"{unit_bytes}\",\"hiwater_bytes\":\"69632\"}}}}"
     )
 }
 
@@ -1083,6 +1152,70 @@ fn requal_pool_envelope_drift_reports() {
         report.pool_gaps["swiotlb-default"],
         "min used_bytes rust=65536 mojo=61440 (beyond 1-unit tolerance)"
     );
+}
+
+#[test]
+fn requal_pool_middle_stable_drift_reports() {
+    // A middle row that moves a stable field (capacity, unit size, source)
+    // diverges even when counts, first+last, and the used envelope agree:
+    // cadence explains timing, never structure.
+    let base = [
+        pool_sample(0, 100, 65536),
+        pool_sample(1, 200, 65536),
+        pool_sample(2, 300, 65536),
+        attempt(3, 300, "s", "op0", 98, false),
+    ]
+    .join("\n");
+    let m = profile_stream(&base, None).expect("mojo parses");
+    for (tag, middle) in [
+        (
+            "capacity",
+            pool_sample_full(1, 200, 65536, "33554432", "2048", "debugfs"),
+        ),
+        (
+            "unit",
+            pool_sample_full(1, 200, 65536, "67108864", "4096", "debugfs"),
+        ),
+        (
+            "source",
+            pool_sample_full(1, 200, 65536, "67108864", "2048", "tracefs"),
+        ),
+    ] {
+        let mutated = [
+            pool_sample(0, 100, 65536),
+            middle,
+            pool_sample(2, 300, 65536),
+            attempt(3, 300, "s", "op0", 98, false),
+        ]
+        .join("\n");
+        let r = profile_stream(&mutated, None).expect("rust parses");
+        let report = diff_profiles(&r, &m);
+        assert!(
+            !report.is_empty(),
+            "{tag}: middle stable drift must diverge: {}",
+            render_report(&report, &r, &m)
+        );
+        assert_eq!(
+            report.pool_gaps["swiotlb-default"],
+            "unstable pool fields within series (rust=2 mojo=1 variants)",
+            "{tag}"
+        );
+    }
+    // A hiwater watermark that grows mid-series stays quiet: it is a live
+    // reading like used_bytes, not structure.
+    let grown = [
+        pool_sample(0, 100, 65536),
+        pool_sample(1, 200, 65536).replace(
+            "\"hiwater_bytes\":\"69632\"",
+            "\"hiwater_bytes\":\"131072\"",
+        ),
+        pool_sample(2, 300, 65536),
+        attempt(3, 300, "s", "op0", 98, false),
+    ]
+    .join("\n");
+    let r = profile_stream(&grown, None).expect("rust parses");
+    let report = diff_profiles(&r, &m);
+    assert!(report.is_empty(), "{}", render_report(&report, &r, &m));
 }
 
 #[test]
