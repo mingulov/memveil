@@ -19,16 +19,22 @@ record and the source pin, and the full copied-file closure
 collected from the three archives must equal the sealed files map.
 Anything stale, tampered, or /1 fails closed with ValueError.
 
-The build receipt is only as truthful as its authoring: it must be
-recorded when the engine was built, because a self-consistent
-prebuilt engine from another commit is otherwise indistinguishable
-at seal time. The seal verifies the receipt strictly but cannot
-manufacture build-time provenance after the fact.
+The packager records the build receipt in the bundle MANIFEST.json
+when the engine is built: source C, tree inventory, tool versions,
+and the engine/BPF output digests. `tools/candidate provenance`
+composes the local-build provenance record from that recorded
+receipt plus the re-hashed artifact subjects, never inventing
+values. The seal requires the provenance receipt to equal the
+recorded receipt and cross-checks the recorded bpf-linker against
+the probed toolchain, so a prebuilt engine from another commit, or
+one swapped after the receipt was recorded, fails closed.
 
 Usage:
   tools/candidate seal --bundle-dir D --artifacts-dir A --policy P \\
       --out M [--source-root R] [--harness-bin H]
-Standard library only. Exit 0 prints the candidate ID; exit 1
+  tools/candidate provenance --bundle-dir D --bundle B --deb E \\
+      --rpm R --source S --sbom J --out P [--source-root R]
+Standard library only. Exit 0 prints the sealed digest; exit 1
 reports the reason on stderr.
 """
 
@@ -483,13 +489,30 @@ def toolchain_channel(root):
     raise ValueError("source toolchain pin has no channel")
 
 
+def check_toolchain_pin(root, tools):
+    """Require the probed cargo/rustc to match the source pin.
+
+    A fully-pinned `channel = "x.y.z"` in rust-toolchain.toml must
+    equal both probed versions; anything else (a named channel or
+    an unparseable pin) leaves the ambient toolchain to the
+    bundle-record cross-checks.
+    """
+    channel = toolchain_channel(root)
+    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", channel or ""):
+        require(tools["cargo"] == channel
+                and tools["rustc"] == channel,
+                "build toolchain differs from the source pin")
+
+
 def verify_bundle_dir(bundle_dir):
     """Verify a bundle directory against its MANIFEST.json.
 
     Every staged file must match files{} exactly with no extras,
     the BPF inspection copies must equal the engine's embedded
-    manifest, and the runtime members must be present. Returns the
-    extracted facts; cross-checks against C happen in the seal.
+    manifest, the recorded build receipt must name the presented
+    engine/BPF bytes, and the runtime members must be present.
+    Returns the extracted facts; cross-checks against C happen in
+    the seal.
     """
     root = Path(bundle_dir)
     require(root.is_dir() and not root.is_symlink(),
@@ -544,6 +567,35 @@ def verify_bundle_dir(bundle_dir):
         require(observed["bpf/" + name] == embedded[name],
                 "bundle BPF copy differs from the engine's "
                 "embedded manifest: bpf/" + name)
+    try:
+        receipt = bundled["build_receipt"]
+    except (KeyError, TypeError) as error:
+        raise ValueError(
+            "bundle MANIFEST.json lacks a build receipt") from error
+    exact(receipt,
+          {"source_commit", "inventory_sha256", "tools", "outputs"},
+          "recorded build receipt")
+    hexid(receipt["source_commit"], 40)
+    hexid(receipt["inventory_sha256"])
+    exact(receipt["tools"], {"cargo", "rustc", "bpf_linker"},
+          "recorded build tools")
+    for tool in ("cargo", "rustc", "bpf_linker"):
+        version(receipt["tools"][tool])
+    outputs = receipt["outputs"]
+    exact(outputs, {"engine_sha256", "bpf"}, "recorded build outputs")
+    hexid(outputs["engine_sha256"])
+    require(isinstance(outputs["bpf"], dict)
+            and set(outputs["bpf"]) == set(BPF_OBJECTS),
+            "recorded build outputs have invalid BPF names")
+    for name in BPF_OBJECTS:
+        hexid(outputs["bpf"][name])
+    require(outputs["engine_sha256"] == observed.get("bin/memveil"),
+            "bundle build receipt engine differs from the staged "
+            "files")
+    for name in BPF_OBJECTS:
+        require(outputs["bpf"][name] == observed.get("bpf/" + name),
+                "bundle build receipt BPF differs from the staged "
+                "files: bpf/" + name)
     require(isinstance(revision, str) and revision,
             "bundle lacks a source revision")
     try:
@@ -564,7 +616,8 @@ def verify_bundle_dir(bundle_dir):
             "manifest_sha256": digest_bytes(manifest_bytes),
             "revision": revision, "lock_sha256": lock_sha,
             "ebpf_lock_sha256": ebpf_lock_sha,
-            "cargo_version": cargo_ver, "rustc_version": rustc_ver}
+            "cargo_version": cargo_ver, "rustc_version": rustc_ver,
+            "build_receipt": receipt}
 
 
 def safe_extract(archive, destination, single_root, symlinks):
@@ -899,12 +952,15 @@ def verify_sbom(sbom, files, artifacts):
                 "SBOM container subject differs: " + entry["name"])
 
 
-def verify_provenance(provenance, source, toolchain, files, subjects):
+def verify_provenance(provenance, source, toolchain, files, subjects,
+                      recorded):
     """Verify local-build provenance; return the receipt digest.
 
     The provenance record must repeat the sealed source/toolchain,
-    its build receipt must name C and the presented engine/BPF
-    bytes, and its subjects must bind the other five artifacts.
+    its build receipt must equal the receipt the packager recorded
+    in the bundle MANIFEST.json, name C and the presented
+    engine/BPF bytes, and its subjects must bind the other five
+    artifacts.
     """
     exact(provenance,
           {"schema", "origin", "source", "toolchain", "build_receipt",
@@ -921,6 +977,9 @@ def verify_provenance(provenance, source, toolchain, files, subjects):
     exact(receipt,
           {"source_commit", "inventory_sha256", "tools", "outputs"},
           "build receipt")
+    require(receipt == recorded,
+            "provenance build receipt differs from the recorded "
+            "build receipt")
     require(receipt["source_commit"] == source["commit"],
             "build receipt source differs from C")
     require(receipt["inventory_sha256"]
@@ -967,17 +1026,17 @@ def create_manifest(bundle_dir, artifacts_dir, policy, source_info):
                     "--untracked-files=all"),
             "candidate source must be clean")
     tools = probe_tool_versions(root)
-    channel = toolchain_channel(root)
-    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", channel or ""):
-        require(tools["cargo"] == channel
-                and tools["rustc"] == channel,
-                "build toolchain differs from the source pin")
+    check_toolchain_pin(root, tools)
     bundled = verify_bundle_dir(bundle_dir)
     require(bundled["revision"] == commit,
             "bundle revision differs from the source commit")
     require(bundled["cargo_version"] == tools["cargo"]
             and bundled["rustc_version"] == tools["rustc"],
             "bundle toolchain record differs")
+    recorded_linker = bundled["build_receipt"]["tools"]["bpf_linker"]
+    require(recorded_linker == tools["bpf_linker"],
+            "recorded bpf-linker %s differs from probed %s"
+            % (recorded_linker, tools["bpf_linker"]))
     roles = discover_artifacts(artifacts_dir, bundled["manifest_bytes"])
     entries, inventory = git_inventory(root, commit)
     require(entries, "empty source inventory")
@@ -1010,7 +1069,8 @@ def create_manifest(bundle_dir, artifacts_dir, policy, source_info):
                 if entry["role"] != "provenance"}
     receipt = verify_provenance(
         read_json(roles["provenance"], sealed=True), source,
-        toolchain, bundled["files"], subjects)
+        toolchain, bundled["files"], subjects,
+        bundled["build_receipt"])
     for entry in records:
         verify_file(roles[entry["role"]], entry)
     policy_path = Path(policy)
@@ -1026,6 +1086,78 @@ def create_manifest(bundle_dir, artifacts_dir, policy, source_info):
     return validate_manifest(doc)
 
 
+def emit_provenance(bundle_dir, source_info, out_path):
+    """Compose local-build provenance from the recorded receipt.
+
+    source_info carries {"root": source checkout} plus one path per
+    subject role ("bundle", "deb", "rpm", "source", "sbom"). Every
+    value is re-verified, never trusted: the source comes from git
+    at C, the toolchain from the probed tools plus the bundle lock
+    record, the receipt is copied verbatim from the bundle
+    MANIFEST.json recording (and must name C, the probed tools, and
+    the presented engine/BPF bytes), and the subjects are the
+    digests of the presented artifact bytes. Writes the canonical
+    provenance once (FileExistsError on overwrite) and returns its
+    digest. The seal re-verifies every bound artifact; the emitter
+    only binds their true digests.
+    """
+    require(isinstance(source_info, dict), "invalid source info")
+    try:
+        root = Path(source_info["root"])
+    except (KeyError, TypeError) as error:
+        raise ValueError("source info lacks the root") from error
+    require(root.is_dir() and not root.is_symlink(),
+            "source root is missing")
+    roles = {}
+    for role in ("bundle", "deb", "rpm", "source", "sbom"):
+        try:
+            path = Path(source_info[role])
+        except (KeyError, TypeError) as error:
+            raise ValueError(
+                "source info lacks the %s path" % role) from error
+        require(not path.is_symlink() and path.is_file(),
+                "subject must be a regular file: " + role)
+        roles[role] = path
+    commit = git(root, "rev-parse", "HEAD")
+    hexid(commit, 40)
+    tree = git(root, "rev-parse", commit + "^{tree}")
+    hexid(tree, 40)
+    require(not git(root, "status", "--porcelain",
+                    "--untracked-files=all"),
+            "provenance source must be clean")
+    tools = probe_tool_versions(root)
+    check_toolchain_pin(root, tools)
+    bundled = verify_bundle_dir(bundle_dir)
+    require(bundled["revision"] == commit,
+            "bundle revision differs from the source commit")
+    require(bundled["cargo_version"] == tools["cargo"]
+            and bundled["rustc_version"] == tools["rustc"],
+            "bundle toolchain record differs")
+    recorded = bundled["build_receipt"]
+    require(recorded["tools"] == tools,
+            "recorded build tools differ from the probed toolchain")
+    entries, inventory = git_inventory(root, commit)
+    require(entries, "empty source inventory")
+    require(recorded["source_commit"] == commit
+            and recorded["inventory_sha256"] == inventory,
+            "build receipt source differs from C")
+    subjects = {path.name: digest(path)
+                for role, path in sorted(roles.items())}
+    require(len(subjects) == len(roles),
+            "subject artifact names must be distinct")
+    source = {"commit": commit, "tree": tree,
+              "inventory_sha256": inventory}
+    toolchain = {"cargo_lock_sha256": bundled["lock_sha256"],
+                 "ebpf_lock_sha256": bundled["ebpf_lock_sha256"],
+                 "tools": tools}
+    provenance = {"schema": PROVENANCE_SCHEMA, "origin": ORIGIN,
+                  "source": source, "toolchain": toolchain,
+                  "build_receipt": recorded, "subjects": subjects}
+    data = canonical(provenance)
+    write_once(out_path, data)
+    return digest_bytes(data)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1037,13 +1169,29 @@ def main(argv=None):
     seal.add_argument("--out", required=True)
     seal.add_argument("--source-root", default=".")
     seal.add_argument("--harness-bin", default=None)
+    origin = commands.add_parser(
+        "provenance",
+        help="record truthful local origin of existing outputs")
+    origin.add_argument("--bundle-dir", required=True)
+    for role in ("bundle", "deb", "rpm", "source", "sbom"):
+        origin.add_argument("--" + role, required=True)
+    origin.add_argument("--out", required=True)
+    origin.add_argument("--source-root", default=".")
     args = parser.parse_args(argv)
     try:
-        manifest = create_manifest(
-            args.bundle_dir, args.artifacts_dir, args.policy,
-            {"root": args.source_root,
-             "harness_bin": args.harness_bin})
-        print(seal_manifest(manifest, args.out))
+        if args.command == "seal":
+            manifest = create_manifest(
+                args.bundle_dir, args.artifacts_dir, args.policy,
+                {"root": args.source_root,
+                 "harness_bin": args.harness_bin})
+            print(seal_manifest(manifest, args.out))
+        else:
+            print(emit_provenance(
+                args.bundle_dir,
+                {"root": args.source_root, "bundle": args.bundle,
+                 "deb": args.deb, "rpm": args.rpm,
+                 "source": args.source, "sbom": args.sbom},
+                args.out))
     except (OSError, ValueError, KeyError, StopIteration,
             subprocess.CalledProcessError, subprocess.TimeoutExpired,
             tarfile.TarError) as error:

@@ -139,6 +139,8 @@ class Workshop:
             "-c", "user.email=fixture@example.invalid",
             "commit", "-qm", "Fixture C")
         commit = git(root, "rev-parse", "HEAD")
+        entries, inventory = m.git_inventory(root, commit)
+        assert entries, "empty fixture inventory"
 
         bundle = self.base / "bundle"
         payload = {
@@ -162,8 +164,25 @@ class Workshop:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
         files = {rel: sha(data) for rel, data in payload.items()}
+        # The build-time receipt the packager records in MANIFEST.json:
+        # source C + tree inventory, probed tool versions, and the
+        # engine/BPF output digests. The honest provenance below
+        # repeats it verbatim; the seal requires the two to match.
+        receipt = {
+            "source_commit": commit,
+            "inventory_sha256": inventory,
+            "tools": dict(tools),
+            "outputs": {
+                "engine_sha256": files["bin/memveil"],
+                "bpf": {name: files["bpf/" + name] for name in
+                        ("swiotlb_attempt.bpf.o",
+                         "swiotlb_lifecycle.bpf.o",
+                         "swiotlb_copy.bpf.o")},
+            },
+        }
         manifest = {
             "bundle": "memveil-fixture",
+            "build_receipt": receipt,
             "engine_version": "0.1.0",
             "memveil_revision": commit,
             "toolchain": {
@@ -256,20 +275,6 @@ class Workshop:
         subjects = {}
         for path in sorted(artifacts.iterdir()):
             subjects[path.name] = sha(path.read_bytes())
-        entries, inventory = m.git_inventory(root, commit)
-        assert entries, "empty fixture inventory"
-        receipt = {
-            "source_commit": commit,
-            "inventory_sha256": inventory,
-            "tools": dict(tools),
-            "outputs": {
-                "engine_sha256": files["bin/memveil"],
-                "bpf": {name: files["bpf/" + name] for name in
-                        ("swiotlb_attempt.bpf.o",
-                         "swiotlb_lifecycle.bpf.o",
-                         "swiotlb_copy.bpf.o")},
-            },
-        }
         provenance = {
             "schema": "memveil-local-build/2",
             "origin": "local-build",
@@ -787,3 +792,264 @@ def test_cli_default_harness_failure_propagates(
     assert len(calls) == 1, calls
     assert calls[0]["argv"] == _expected_default_harness_argv(m, fix)
     assert "RUSTUP_TOOLCHAIN" not in calls[0]["env"]
+
+
+def _emit_source_info(fix):
+    """Explicit emitter inputs: source root + one path per role."""
+    artifacts = fix["artifacts"]
+    deb = sorted(artifacts.glob("*.deb"))
+    rpm = sorted(artifacts.glob("*.rpm"))
+    sbom = sorted(artifacts.glob("*.spdx.json"))
+    tars = sorted(artifacts.glob("*.tar.gz"))
+    assert len(deb) == 1 and len(rpm) == 1 and len(sbom) == 1
+    assert len(tars) == 2
+    bundle = next(path for path in tars
+                  if not path.name.endswith("source.tar.gz"))
+    source = next(path for path in tars
+                  if path.name.endswith("source.tar.gz"))
+    return {"root": str(fix["root"]), "bundle": str(bundle),
+            "deb": str(deb[0]), "rpm": str(rpm[0]),
+            "source": str(source), "sbom": str(sbom[0])}
+
+
+def _present_subjects(fix):
+    """True {name: sha256} of the five non-provenance artifacts."""
+    return {path.name: sha(path.read_bytes())
+            for path in sorted(fix["artifacts"].iterdir())
+            if not path.name.endswith(".provenance.json")}
+
+
+def _reemit_sbom(workshop, fix):
+    """Fresh harness SBOM over the current bundle and packages."""
+    info = _emit_source_info(fix)
+    sbom_out = Path(info["sbom"])
+    sbom_out.unlink()
+    proc = subprocess.run(
+        [workshop.harness_bin(), "sbom-emit",
+         "--manifest", str(fix["bundle_dir"] / "MANIFEST.json"),
+         "--bundle", info["bundle"],
+         "--deb", info["deb"],
+         "--rpm", info["rpm"],
+         "--lock", str(fix["root"] / "Cargo.lock"),
+         "--ebpf-lock",
+         str(fix["root"] / "crates" / "ebpf" / "Cargo.lock"),
+         "--out", str(sbom_out)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert proc.returncode == 0, proc.stderr
+
+
+def _archive_source(root, dest):
+    """Genuine `git archive HEAD` of root, gzip-normalized like builds."""
+    proc = subprocess.run(
+        ["git", "-C", str(root), "archive", "HEAD"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    Path(dest).write_bytes(gzip.compress(proc.stdout, mtime=0))
+
+
+def _packager_module():
+    """Load scripts/package-tarball.py as a module (no main run)."""
+    path = ROOT / "scripts" / "package-tarball.py"
+    spec = importlib.util.spec_from_file_location(
+        "package_tarball_receipt", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_provenance_emitter_binds_recorded_receipt(workshop, tmp_path):
+    m, fix = seal_paths(workshop, tmp_path)
+    root = fix["root"]
+    commit = git(root, "rev-parse", "HEAD")
+    # The packager's tree-inventory construction must match the
+    # seal's exactly: the recorded inventory digest is derived
+    # from the same git tree on both sides.
+    packager = _packager_module()
+    pack_entries, pack_digest = packager.git_tree_inventory(
+        str(root), commit)
+    seal_entries, seal_digest = m.git_inventory(root, commit)
+    assert pack_entries == seal_entries
+    assert pack_digest == seal_digest
+    recorded = json.loads(
+        (fix["bundle_dir"] / "MANIFEST.json").read_text())[
+            "build_receipt"]
+    assert recorded["inventory_sha256"] == seal_digest
+    assert recorded["source_commit"] == commit
+    # The real emission flow: provenance does not exist yet, so
+    # remove the fixture copy, emit from the recorded receipt,
+    # and stage the emitted bytes as the sixth artifact.
+    next(fix["artifacts"].glob("*.provenance.json")).unlink()
+    out = fix["artifacts"] / "memveil-fixture.provenance.json"
+    emitted_digest = m.emit_provenance(
+        fix["bundle_dir"], _emit_source_info(fix), out)
+    raw = out.read_bytes()
+    emitted = json.loads(raw)
+    assert raw == m.canonical(emitted)
+    assert emitted_digest == m.digest_canonical(emitted) == sha(raw)
+    assert emitted["schema"] == "memveil-local-build/2"
+    assert emitted["origin"] == "local-build"
+    assert emitted["build_receipt"] == recorded
+    assert emitted["subjects"] == _present_subjects(fix)
+    assert emitted["source"] == {
+        "commit": commit,
+        "tree": git(root, "rev-parse", "HEAD^{tree}"),
+        "inventory_sha256": seal_digest}
+    assert emitted["toolchain"] == {
+        "cargo_lock_sha256": sha((root / "Cargo.lock").read_bytes()),
+        "ebpf_lock_sha256": sha(
+            (root / "crates" / "ebpf" / "Cargo.lock").read_bytes()),
+        "tools": workshop.tools()}
+    with pytest.raises(FileExistsError):
+        m.emit_provenance(
+            fix["bundle_dir"], _emit_source_info(fix), out)
+    assert out.read_bytes() == raw, "refused emit must not touch bytes"
+    # The CLI emits the same bytes elsewhere and refuses overwrite.
+    cli_out = Path(tmp_path) / "cli.provenance.json"
+    info = _emit_source_info(fix)
+    argv = [str(ROOT / "tools" / "candidate"), "provenance",
+           "--bundle-dir", str(fix["bundle_dir"]),
+           "--bundle", info["bundle"], "--deb", info["deb"],
+           "--rpm", info["rpm"], "--source", info["source"],
+           "--sbom", info["sbom"],
+           "--source-root", str(fix["root"]),
+           "--out", str(cli_out)]
+    proc = subprocess.run(argv, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == sha(cli_out.read_bytes())
+    assert cli_out.read_bytes() == raw
+    rerun = subprocess.run(argv, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, text=True)
+    assert rerun.returncode == 1
+    assert rerun.stderr.strip(), "silent provenance failure"
+    # A real seal runs end-to-end on the emitted provenance.
+    manifest = m.create_manifest(
+        fix["bundle_dir"], fix["artifacts"], fix["policy"],
+        {"root": str(fix["root"]),
+         "harness_bin": workshop.harness_bin()})
+    assert manifest["schema"] == "memveil-candidate/2"
+    assert manifest["build_receipt_sha256"] == m.digest_canonical(
+        recorded)
+
+
+def _advance_fixture_to_c1(fix):
+    """Commit an unrelated file in the fixture root; return C1 facts."""
+    m = api()
+    root = fix["root"]
+    (root / "src" / "c1-note.txt").write_text("second commit\n")
+    git(root, "add", "src/c1-note.txt")
+    git(root, "-c", "user.name=Fixture",
+        "-c", "user.email=fixture@example.invalid",
+        "commit", "-qm", "Fixture C1")
+    commit = git(root, "rev-parse", "HEAD")
+    tree = git(root, "rev-parse", "HEAD^{tree}")
+    return {"commit": commit, "tree": tree,
+            "inventory": m.git_inventory(root, commit)[1]}
+
+
+def _reclaim_bundle_as(fix, commit):
+    """Rewrite the bundle revision claim and re-tar the bundle."""
+    manifest_path = fix["bundle_dir"] / "MANIFEST.json"
+    doc = json.loads(manifest_path.read_text())
+    doc["memveil_revision"] = commit
+    manifest_path.write_text(json.dumps(doc, indent=2, sort_keys=True))
+    rebuild_bundle_tarball(fix)
+
+
+def test_seal_rejects_deep_stale_prebuilt(workshop, tmp_path):
+    m, fix = seal_paths(workshop, tmp_path)
+    # (a) A self-consistent C' build (engine, BPF, receipt recorded
+    # at C') presented as C1: the source archive, SBOM, tarball, and
+    # revision claim are all genuinely C1, but the build-time receipt
+    # still binds C'. The honest staleness already fails; the receipt
+    # forgery below must fail through the recorded receipt alone.
+    first = _advance_fixture_to_c1(fix)
+    _reclaim_bundle_as(fix, first["commit"])
+    info = _emit_source_info(fix)
+    Path(info["source"]).unlink()
+    _archive_source(fix["root"], info["source"])
+    _reemit_sbom(workshop, fix)
+    subjects = _present_subjects(fix)
+    rewrite_provenance(
+        m, fix,
+        lambda doc: doc.update(
+            {"source": {"commit": first["commit"],
+                        "tree": first["tree"],
+                        "inventory_sha256": first["inventory"]},
+             "subjects": dict(subjects)}))
+    with pytest.raises(ValueError, match="[Rr]eceipt|[Ss]ource"):
+        m.create_manifest(
+            fix["bundle_dir"], fix["artifacts"], fix["policy"],
+            {"root": str(fix["root"]),
+             "harness_bin": workshop.harness_bin()})
+    rewrite_provenance(
+        m, fix,
+        lambda doc: doc["build_receipt"].update(
+            {"source_commit": first["commit"],
+             "inventory_sha256": first["inventory"]}))
+    with pytest.raises(ValueError, match="[Rr]ecorded|[Rr]eceipt"):
+        m.create_manifest(
+            fix["bundle_dir"], fix["artifacts"], fix["policy"],
+            {"root": str(fix["root"]),
+             "harness_bin": workshop.harness_bin()})
+
+    # (b) The receipt was recorded at C but the engine was swapped
+    # afterwards; the files map, tarball, and provenance
+    # outputs/subjects were consistently re-pointed at the swapped
+    # bytes. Only the recorded receipt names the build outputs, so
+    # both the seal and a re-emit must refuse through it (the seal's
+    # recorded-receipt gate fires before the stale SBOM/packages).
+    m, fix = seal_paths(workshop, tmp_path / "swapped")
+    engine = fix["bundle_dir"] / "bin" / "memveil"
+    engine.write_bytes(b"synthetic-engine-rebuilt\n")
+    manifest_path = fix["bundle_dir"] / "MANIFEST.json"
+    doc = json.loads(manifest_path.read_text())
+    doc["files"]["bin/memveil"] = sha(engine.read_bytes())
+    manifest_path.write_text(json.dumps(doc, indent=2, sort_keys=True))
+    rebuild_bundle_tarball(fix)
+    subjects = _present_subjects(fix)
+    swapped = sha(engine.read_bytes())
+
+    def forge_outputs(doc):
+        doc["build_receipt"]["outputs"].update(
+            {"engine_sha256": swapped})
+        doc.update({"subjects": dict(subjects)})
+
+    rewrite_provenance(m, fix, forge_outputs)
+    with pytest.raises(ValueError, match="[Rr]eceipt"):
+        m.create_manifest(
+            fix["bundle_dir"], fix["artifacts"], fix["policy"],
+            {"root": str(fix["root"]),
+             "harness_bin": workshop.harness_bin()})
+    with pytest.raises(ValueError, match="[Rr]eceipt"):
+        m.emit_provenance(
+            fix["bundle_dir"], _emit_source_info(fix),
+            tmp_path / "swapped.provenance.json")
+
+
+def test_seal_cross_checks_bpf_linker(workshop, tmp_path):
+    m, fix = seal_paths(workshop, tmp_path)
+    manifest_path = fix["bundle_dir"] / "MANIFEST.json"
+    # A recorded bpf-linker that disagrees with the probed
+    # toolchain fails even when every other record is honest.
+    doc = json.loads(manifest_path.read_text())
+    assert doc["build_receipt"]["tools"]["bpf_linker"] != "9.9.9"
+    doc["build_receipt"]["tools"]["bpf_linker"] = "9.9.9"
+    manifest_path.write_text(json.dumps(doc, indent=2, sort_keys=True))
+    rebuild_bundle_tarball(fix)
+    with pytest.raises(ValueError, match="[Rr]ecorded|[Bb]pf"):
+        m.create_manifest(
+            fix["bundle_dir"], fix["artifacts"], fix["policy"],
+            {"root": str(fix["root"]),
+             "harness_bin": workshop.harness_bin()})
+    # The same holds when the provenance receipt is forged to
+    # match the recorded lie: the probed toolchain still differs.
+    rewrite_provenance(
+        m, fix,
+        lambda doc: doc["build_receipt"]["tools"].update(
+            {"bpf_linker": "9.9.9"}))
+    with pytest.raises(ValueError, match="[Rr]ecorded|[Bb]pf"):
+        m.create_manifest(
+            fix["bundle_dir"], fix["artifacts"], fix["policy"],
+            {"root": str(fix["root"]),
+             "harness_bin": workshop.harness_bin()})

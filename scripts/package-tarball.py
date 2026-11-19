@@ -35,7 +35,8 @@ Layout of ``dist/memveil-<version>/``::
                            the locked crates.io sources
     THIRD-PARTY-NOTICES.md generated attribution (Cargo closure
                            plus the shipped lib; no vendored deps)
-    MANIFEST.json          file hashes, versions, source revisions
+    MANIFEST.json          file hashes, versions, source revisions,
+                           and the build receipt bound at seal time
 
 Usage: scripts/package-tarball.py [--out DIR] [--tag NAME]
     [--root DIR] [--binary PATH] [--bpf-dir DIR] [--build]
@@ -463,6 +464,153 @@ def cargo_tool_versions(rust_dir):
     if rustc_proc.returncode != 0 or not rustc_proc.stdout.split():
         fail("rustc --version failed")
     return (cargo.stdout.split()[1], rustc_proc.stdout.split()[1])
+
+
+def bpf_linker_version(rust_dir):
+    """bpf-linker version under the repository pin.
+
+    Mirrors the seal's toolchain probe: RUSTUP_TOOLCHAIN stripped
+    so the checkout pin wins, parsed as the second `--version`
+    token with a leading `v` dropped, refused unless it looks like
+    a dotted version. Recorded in the build receipt, never guessed.
+    """
+    env = dict(os.environ)
+    env.pop("RUSTUP_TOOLCHAIN", None)
+    try:
+        proc = subprocess.run(
+            ["bpf-linker", "--version"], stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, cwd=rust_dir, env=env,
+        )
+    except OSError as exc:
+        fail("cannot probe bpf-linker: %s" % exc)
+    if proc.returncode != 0 or len(proc.stdout.split()) < 2:
+        fail("bpf-linker --version failed")
+    token = proc.stdout.split()[1]
+    if token.startswith("v"):
+        token = token[1:]
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+"
+                        r"(?:[-+][0-9A-Za-z.+-]+)?", token) \
+            or len(token) > 64:
+        fail("bpf-linker reports a bad version %r" % token)
+    return token
+
+
+def git_tree_inventory(root, commit):
+    """(entries, digest) for the git tree at commit.
+
+    Same construction as the candidate seal's source inventory:
+    entries come from `git ls-tree` plus batched blob reads, so the
+    digest is purely commit-derived and immune to worktree strays.
+    Files carry path/kind/mode/size/sha256, symlinks path/kind/mode/
+    target, directories path/kind/mode, with raw git modes. The
+    digest hashes one sorted-keys JSON line per path-sorted entry.
+    Anything unexpected fails the package instead of recording a
+    digest the seal cannot reproduce.
+    """
+    if not re.fullmatch(r"[0-9a-f]{40}", commit or ""):
+        fail("build receipt needs a commit identity, want 40 hex")
+    env = dict(os.environ)
+    for key in [key for key in env if key.startswith("GIT_")]:
+        env.pop(key)
+    try:
+        proc = subprocess.run(
+            ["git", "-C", root, "ls-tree", "-r", "-t", "-z", commit],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+        )
+    except OSError as exc:
+        fail("cannot read the source tree: %s" % exc)
+    if proc.returncode != 0:
+        fail("unknown source commit %s" % commit)
+    blobs, entries = [], []
+    for record in proc.stdout.split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, raw = record.split(b"\t", 1)
+            mode, kind, oid = metadata.decode("ascii").split()
+            path = raw.decode("utf-8")
+        except (ValueError, UnicodeError):
+            fail("invalid git tree entry")
+        if not path or "\\" in path \
+                or any(part in ("", ".", "..")
+                       for part in path.split("/")) \
+                or any(ord(char) < 33 or ord(char) > 126
+                       for char in path):
+            fail("invalid source tree path")
+        if kind == "tree":
+            if mode != "040000":
+                fail("unsupported tree mode")
+            entries.append({"path": path, "kind": "dir",
+                            "mode": mode})
+        elif kind == "blob" and mode in ("100644", "100755"):
+            entries.append({"path": path, "kind": "file",
+                            "mode": mode, "oid": oid})
+            blobs.append(oid)
+        elif kind == "blob" and mode == "120000":
+            entries.append({"path": path, "kind": "symlink",
+                            "mode": mode, "oid": oid})
+            blobs.append(oid)
+        else:
+            fail("unsupported source archive entry: " + path)
+    content = _git_tree_blobs(root, blobs, env)
+    resolved = []
+    for entry in entries:
+        oid = entry.pop("oid", None)
+        if entry["kind"] == "dir":
+            resolved.append(entry)
+        elif entry["kind"] == "symlink":
+            try:
+                target = content[oid].decode("utf-8")
+            except UnicodeError:
+                fail("invalid symlink target")
+            if not target:
+                fail("empty symlink target")
+            entry["target"] = target
+            resolved.append(entry)
+        else:
+            entry["size"] = len(content[oid])
+            entry["sha256"] = hashlib.sha256(content[oid]).hexdigest()
+            resolved.append(entry)
+    resolved.sort(key=lambda entry: entry["path"])
+    found = hashlib.sha256()
+    for entry in resolved:
+        found.update(json.dumps(
+            entry, sort_keys=True,
+            separators=(",", ":")).encode("utf-8"))
+        found.update(b"\n")
+    return resolved, found.hexdigest()
+
+
+def _git_tree_blobs(root, oids, env):
+    """{oid: bytes} for every oid via one `git cat-file --batch`."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", root, "cat-file", "--batch"],
+            input=("".join(oid + "\n" for oid in oids)).encode(
+                "ascii"),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+        )
+    except OSError as exc:
+        fail("cannot read source blobs: %s" % exc)
+    if proc.returncode != 0:
+        fail("cannot read source blobs")
+    content, rest = {}, proc.stdout
+    for oid in oids:
+        try:
+            header, rest = rest.split(b"\n", 1)
+            found, kind, size = header.decode("ascii").split()
+            size = int(size)
+            data = rest[:size]
+            rest = rest[size:]
+            if rest[:1] != b"\n":
+                fail("cannot read source blobs")
+            rest = rest[1:]
+        except (ValueError, IndexError):
+            fail("cannot read source blobs")
+        if found != oid or kind != "blob" or len(data) != size:
+            fail("cannot read source blobs")
+        content[oid] = data
+    return content
 
 
 def root_markers_present(root):
@@ -1696,6 +1844,31 @@ def main(argv):
             fail("canonical executable failed version check: "
                  + rerun.stderr)
 
+        # Build-time receipt: source C plus the tree inventory, the
+        # probed tool versions, and the engine/BPF output digests,
+        # recorded from the verified staging reads above (never
+        # re-walked). The provenance emitter and the seal bind this
+        # recording: a prebuilt engine from another commit, or one
+        # swapped after packaging, fails against it. Git-free
+        # exports carry no commit identity, so they record no
+        # receipt and cannot seal.
+        build_receipt = None
+        if memveil_rev != "export":
+            _tree_entries, tree_digest = git_tree_inventory(
+                root, memveil_rev)
+            build_receipt = {
+                "source_commit": memveil_rev,
+                "inventory_sha256": tree_digest,
+                "tools": {"cargo": cargo_version,
+                          "rustc": rustc_version,
+                          "bpf_linker": bpf_linker_version(rust_dir)},
+                "outputs": {
+                    "engine_sha256": observed["bin/memveil"],
+                    "bpf": {shipped: observed["bpf/" + shipped]
+                            for _channel, shipped in CHANNELS},
+                },
+            }
+
         # Known manifest gaps, intentionally unported (not
         # oversights): no `canonical_runtime` entry — the Rust
         # baseline (x86-64-v1) runs everywhere >= v1, so no
@@ -1772,6 +1945,8 @@ def main(argv):
         # from a live re-walk: bytes changed after verification
         # fail at archive time instead of shipping self-consistent.
         manifest["files"] = dict(observed)
+        if build_receipt is not None:
+            manifest["build_receipt"] = build_receipt
         manifest_text = json.dumps(
             manifest, indent=2, sort_keys=True) + "\n"
         manifest_bytes = manifest_text.encode("utf-8")
