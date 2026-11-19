@@ -687,8 +687,17 @@ impl Session {
         }
         let mut loader = EbpfLoader::new();
         loader.btf(pre.btf.as_ref());
+        // Bounded rendering, shared with program loads: the loader
+        // Display carries the full verifier log on BTF failures
+        // (`BPF_BTF_LOAD ... Verifier output: ...`), which must
+        // never reach the message unredacted.
         let bpf = loader.load(&self.elf).map_err(|error| {
-            SessionError::Load(format!("{} channel: load failed: {error}", self.channel))
+            let failure = load_failed(&error);
+            SessionError::Load(format!(
+                "{} channel: load failed: {}",
+                self.channel,
+                load_failure_text(&failure)
+            ))
         })?;
         let mut actual_maps = Vec::new();
         for (name, map) in bpf.maps() {
@@ -1170,10 +1179,10 @@ impl Session {
     }
 }
 
-/// One kernel program-load failure, split for honest reporting:
-/// the syscall errno (when the error chain carries one) plus the
-/// raw verifier log (when the error carries one). Callers shape
-/// these parts; nobody formats the full loader Display.
+/// One kernel load failure (object or program load), split for honest
+/// reporting: the syscall errno (when the error chain carries one)
+/// plus the raw verifier log (when the error carries one). Callers
+/// shape these parts; nobody formats the full loader Display.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct LoadFailure {
     /// Syscall errno from the error chain, if any.
@@ -1193,8 +1202,12 @@ pub(crate) enum LoadStepError {
     Failed(LoadFailure),
 }
 
-/// Split one loader error into its failure parts.
-fn load_failed(error: &ProgramError) -> LoadFailure {
+/// Split one loader error into its failure parts. Shared by object
+/// loads ([`Session::load`], where a BTF failure's Display carries
+/// the full verifier log) and program loads: Mojo renders no
+/// BTF-specific shape (object failures there are errno plus clipped
+/// message plus replay tail), so both use the program-load tail.
+fn load_failed(error: &(dyn std::error::Error + 'static)) -> LoadFailure {
     let display = error.to_string();
     LoadFailure {
         errno: errno_from_chain(error),
@@ -1977,6 +1990,81 @@ mod tests {
             log: Some("\n\n".to_string()),
         };
         assert_eq!(load_failure_text(&empty), "load refused");
+    }
+
+    /// Object-load error with the pinned BTF Display shape (`BTF
+    /// error: the BPF_BTF_LOAD syscall returned {io}. Verifier
+    /// output: {log}`), with or without an errno source. The real
+    /// `BtfError::LoadError` fields are private, so the test pins
+    /// the shape the split reads: Display marker plus chain.
+    #[derive(Debug)]
+    struct BtfLoadShaped {
+        errno: Option<std::io::Error>,
+        log: String,
+    }
+
+    impl std::fmt::Display for BtfLoadShaped {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match &self.errno {
+                Some(io) => write!(
+                    f,
+                    "BTF error: the BPF_BTF_LOAD syscall returned {io}. Verifier output: {}",
+                    self.log
+                ),
+                None => write!(
+                    f,
+                    "BTF error: the BPF_BTF_LOAD syscall refused. Verifier output: {}",
+                    self.log
+                ),
+            }
+        }
+    }
+
+    impl std::error::Error for BtfLoadShaped {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.errno.as_ref().map(|io| io as _)
+        }
+    }
+
+    #[test]
+    fn object_load_failure_renders_bounded() {
+        // The object-load split renders through the same bounded
+        // tail as program loads: with an errno, the strerror alone
+        // (keeping the classification marker, never the log);
+        // without, the redacted 4-line tail. Pointer spellings
+        // mirror the program-load test.
+        let log = "1: dropped\n2: dropped\n3: R1=0xffff888012345678\n4: imm=0xFFFFFFFF81234567\n5: ok\n6: ok\n";
+        let shaped = BtfLoadShaped {
+            errno: Some(std::io::Error::from_raw_os_error(22)),
+            log: log.to_string(),
+        };
+        let failure = load_failed(&shaped);
+        assert_eq!(failure.errno, Some(22));
+        assert_eq!(failure.log.as_deref(), Some(log));
+        let text = load_failure_text(&failure);
+        assert_eq!(text, std::io::Error::from_raw_os_error(22).to_string());
+        assert!(text.contains("(os error 22)"), "got: {text}");
+        assert!(
+            !text.contains("ffff") && !text.contains("Verifier output"),
+            "must never format the carried log, got: {text}"
+        );
+        let shaped = BtfLoadShaped {
+            errno: None,
+            log: log.to_string(),
+        };
+        let failure = load_failed(&shaped);
+        assert_eq!(failure.errno, None);
+        let text = load_failure_text(&failure);
+        assert!(
+            !text.contains("ffff8880") && !text.contains("FFFFFFFF"),
+            "addresses must redact, got: {text}"
+        );
+        assert!(text.contains("0xADDR"), "got: {text}");
+        assert_eq!(text.split("; ").count(), 4, "got: {text}");
+        assert!(
+            !text.contains("dropped"),
+            "tail keeps four lines, got: {text}"
+        );
     }
 
     #[test]
