@@ -55,15 +55,15 @@ only the `.deb` binary was run on the kernel matrix.
 
 ## Evidence scope
 
-The release payload is pinned per package in
-`packaging/tested-payload.sha256`: the engine binary, the
-libbpf-mojo bridge, and the three BPF objects of the
-`.deb`, the `.rpm`, and the runtime tarball. The release
-workflow refuses to publish unless every package carries
-exactly its pinned bytes, and publishes the collected
-manifest (`PACKAGED-SHA256.txt`), the SBOM
-(`memveil.spdx.json`), and the checksums (`SHA256SUMS.txt`)
-with signed build provenance for the set.
+The release payload is asserted per package by the
+packaging suites: the engine binary plus the three BPF
+inspection objects of the `.deb`, the `.rpm`, and the
+runtime tarball, with payload-manifest and SPDX checks
+over each. In-payload license texts cover compliance;
+no committed byte-pin manifest exists (the collected
+manifest's shape stands in until requalification pins
+release bytes). Each artifact's `MANIFEST.json` binds
+its own verified bytes.
 
 The `.deb` entry set is the kernel-matrix-tested one. The
 matrix and the AWS SEV-SNP run installed the 0.1.0 `.deb`

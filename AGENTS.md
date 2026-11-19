@@ -13,28 +13,26 @@ This repository must be usable independently. Keep the source, tests, schemas, s
 
 - Read the README, relevant public contracts, and any more specific directory instructions. Inspect the branch, HEAD, worktrees, and existing changes; preserve unrelated work.
 - Establish the bounded task and its acceptance criteria. For bootstrap work, resolve toolchain pins and contracts before relying on them. Referenced files that do not exist are prerequisites to implement, not successful checks.
-- Use the official Modular Mojo guidance when available, and verify syntax/FFI against the pinned compiler's documentation and actual builds. Agent skills are development guidance, never build dependencies.
-- Keep changes and authorized commits scoped to this repository. Coordinate a library ABI change with an explicit dependency revision and matching tests; do not patch a sibling library invisibly.
+- Use the pinned Rust toolchain's documentation and verify syntax/FFI against actual builds. Agent skills are development guidance, never build dependencies.
+- Keep changes and authorized commits scoped to this repository. Coordinate a pinned-input change (toolchain, lockfiles, libgcc provider) with the gates that pin it and matching tests; do not patch vendored inputs invisibly.
 
 ## Architecture and ownership
 
-The selected architecture is **Mojo userspace → small C/libbpf bridge → clang-built C eBPF**. Mojo is the chosen userspace language and a practical systems-language experiment. Early FFI, ownership, safety, and packaging gates remain required. Reproduce blockers and obtain a new owner decision before changing language.
-
-Mojo owns collection orchestration, normalization, correlation/accounting, CLI, trace parsing, reducers, and renderers. `libbpf-mojo` owns native resource lifetimes and bounded transport. MemVeil owns its BPF programs, event meanings, schemas, kernel profiles, and measurement claims. Keep C wrappers in the bridge and one internal Mojo FFI boundary. Python may support development validation; production collection and replay remain Mojo.
+The selected architecture is **Rust userspace → statically linked Aya loader → Rust-compiled eBPF**. Rust owns collection orchestration, normalization, correlation/accounting, CLI, trace parsing, reducers, and renderers. There is no libbpf dependency and no bridge library: the loader links statically into the engine binary. MemVeil owns its BPF programs, event meanings, schemas, kernel profiles, and measurement claims. Confine `unsafe` to FFI boundaries with a safety note on each block. Python may support development validation (packagers, generators, harness); production collection and replay remain Rust.
 
 Implemented module boundaries:
 
 | Path | Responsibility |
 |---|---|
-| `src/memveil/cli/` | Argument handling and command dispatch |
-| `src/memveil/platform/` | Platform evidence and profile selection |
-| `src/memveil/capture/` | Collector, normalization, framing, and capture writer |
-| `src/memveil/model/`, `analysis/`, `render/` | Versioned types, pure state/metric logic, and presentation |
-| `bpf/include/`, `bpf/programs/` | Explicit wire declarations and metadata-only C probes |
+| `src/cli/` | Argument handling and command dispatch |
+| `src/platform/` | Platform evidence and profile selection |
+| `src/capture/` | Collector, normalization, framing, and capture writer |
+| `src/model/`, `src/analysis/`, `src/render/` | Versioned types, pure state/metric logic, and presentation |
+| `crates/ebpf/` | Channel eBPF programs (attempt, lifecycle, copy) |
 | `profiles/`, `schemas/` | Source-backed kernel semantics and external format contracts |
-| `tests/`, `tools/`, `docs/` | Tests/fixtures, public build/test/package entry points, and public documentation |
+| `tests/`, `tools/`, `scripts/`, `docs/` | Tests/fixtures, harness/gates, packagers/generators, and public documentation |
 
-Analysis and replay must not import collection, libbpf, or live environment readers. Lazily load the native bridge so offline reports work without it. No direct Mojo eBPF compiler, GPU dependency, live-path SIMD requirement, plugin framework, daemon, or dashboard in the initial scope. Shared architecture with other observers is later work with demonstrated consumer requirements.
+Analysis and replay must not import collection or live environment readers. No GPU dependency, live-path SIMD requirement, plugin framework, daemon, or dashboard in the initial scope. Shared architecture with other observers is later work with demonstrated consumer requirements.
 
 ## Kernel and probe rules
 
@@ -57,7 +55,7 @@ Analysis and replay must not import collection, libbpf, or live environment read
 
 ## Formats and user behavior
 
-Keep the BPF wire contract, native bridge ABI, external schema, and product version independent. Assert fixed-width layouts, alignment, byte order, bounds, and version compatibility. The accepted versions and reserved future versions are listed in [format compatibility](docs/format-compatibility.md). Keep legacy session `0.1.1`/`0.1.2`/`0.1.3` and event `0.1.1`/`0.1.2` immutable and readable. New captures emit session `0.1.4` integrity metadata; offline readers verify the literal event bytes before emitting report `0.1.4`. Legacy reports remain readable as integrity-unverified and never complete, with event `0.1.2` unchanged; session/event/report `0.2.0` are reserved for the conversion journal. The reserved journal versions are not implemented or accepted yet. The writer, reader, and checkpoint and durability requirements live in [capture integrity](docs/capture-integrity.md). Captures use `session.json`, `events.ndjson`, and optional `report.json`. Preserve synthetic provenance on every export.
+Keep the BPF wire contract, external schema, and product version independent. Assert fixed-width layouts, alignment, byte order, bounds, and version compatibility. The accepted versions and reserved future versions are listed in [format compatibility](docs/format-compatibility.md). Keep legacy session `0.1.1`/`0.1.2`/`0.1.3` and event `0.1.1`/`0.1.2` immutable and readable. New captures emit session `0.1.4` integrity metadata; offline readers verify the literal event bytes before emitting report `0.1.4`. Legacy reports remain readable as integrity-unverified and never complete, with event `0.1.2` unchanged; session/event/report `0.2.0` are reserved for the conversion journal. The reserved journal versions are not implemented or accepted yet. The writer, reader, and checkpoint and durability requirements live in [capture integrity](docs/capture-integrity.md). Captures use `session.json`, `events.ndjson`, and optional `report.json`. Preserve synthetic provenance on every export.
 
 Serialize unsigned 64-bit counts, lengths, timestamps, offsets, and sequences as canonical decimal strings; preserve values above 2^53 exactly and reject overflow beyond u64. Keep signed native errors separate. Use checked arithmetic and null plus a reason for unavailable values. Stream bounded input; reject malformed or unsupported data. The current legacy reader recovers a clean truncated final line only under explicit partial-input mode. The integrity reader rejects altered finalized input in every mode. Recovery uses only a verified checkpoint prefix when no final session exists.
 
@@ -73,14 +71,14 @@ Do not collect or persist payloads, keys, PINs, content hashes, raw addresses, f
 
 ## Build, test, and evidence
 
-Use the implemented `tools/build`, `tools/test <suite>`, and `tools/package` wrappers and their actual help. Compiler/dependency pins are in `toolchain.lock.json` and `pixi.lock`; contributor prerequisites and commands are in [build](docs/build.md). Do not invent `mojo test`. Builds resolve the hash-pinned vendored library bundle, or an explicit matching `LMB_PACKAGE`, without an implicit sibling path. Full corresponding library source is a separate artifact; the consumed bundle provides its bridge binary, Mojo wrappers, and C header.
+Use `cargo build --locked`, `cargo test --workspace --locked`, `tools/test <suite>`, and the `scripts/package-*.py` wrappers and their actual help. Compiler/dependency pins are in `rust-toolchain.toml`, `Cargo.lock`, `crates/ebpf/`, and `build.rs`; contributor prerequisites and commands are in [build](docs/build.md). Do not invent test commands: `cargo test` plus `tools/test` are the runners.
 
 Choose verification that proves the changed behavior:
 
 - Contracts/reducers/readers: independent expected results, exact large integers, malformed input, schema/version rejection, loss/unknown propagation, mapping reuse, ordering, and bounded state. Synthetic fixtures must stay visibly synthetic.
-- Native integration: C/Mojo layout and ownership agreement, short-buffer record retention, partial-failure cleanup, and native sanitizer/FD checks. Native sanitizers do not validate BPF semantics.
+- Native integration: Rust/C layout and ownership agreement (wire-contract oracles), short-buffer record retention, partial-failure cleanup, and FD checks.
 - Kernel adapters: a controlled VM workload and independent oracle, exact profile identity, verifier/attach diagnostics, failures, saturation, and stop behavior. A mock or quiet workload is not evidence of real capture.
-- Packaging: execute the extracted artifact in a clean runtime without a compiler; run offline reporting without collection privileges or the bridge library. Verify included licenses, BPF files, and dependency resolution.
+- Packaging: execute the extracted artifact in a clean runtime without a compiler; run offline reporting without collection privileges. Verify included licenses, BPF files, and dependency resolution.
 - Advertised confidential-memory behavior: real SNP/TDX evidence for each claimed capability. Ordinary Linux supports the initial preview, not confidential-guest qualification.
 
 Use the designated isolated environment for privileged tests and respect existing resource locks. Test alongside other observers only with per-tool oracles, combined overhead measurements, and cleanup/isolation checks; matching outputs are not an oracle when tools observe different events.

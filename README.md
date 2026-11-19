@@ -50,9 +50,9 @@ separately linked binaries that were not matrix-run (see
     tar -xzf memveil-0.1.0.tar.gz && cd memveil-0.1.0
     ./bin/memveil doctor                            # passive host check
     sudo ./bin/memveil record --output /tmp/cap1 --duration 10
-    # The bridge and BPF object are discovered from the bundle
-    # beside the executable, so plain sudo works; --bridge and
-    # --object are optional overrides for non-bundled artifacts.
+    # BPF objects are embedded in the binary with the loader
+    # statically linked, so plain sudo works; --bridge and
+    # --object are optional overrides for non-embedded artifacts.
     sudo cp -r /tmp/cap1 ~/cap1 && sudo chown -R $USER ~/cap1
     ./bin/memveil report --format text ~/cap1       # unprivileged replay
     ./bin/memveil top --interval 1s ~/cap1          # finished-capture replay
@@ -75,44 +75,31 @@ workflow, `RELEASING.md` the release process,
 
 ## Build and test (from source)
 
-Pinned Mojo 1.2.0 toolchain via pixi; see `docs/build.md` and
-`toolchain.lock.json`. The native bridge comes from the pinned
-vendored `libbpf-mojo` library bundle (`third_party/`): bridge
-library, Mojo wrappers, and C header, never a sibling checkout;
-`LMB_PACKAGE` overrides it with another hash-verified tarball.
+Pinned Rust 1.100.0 toolchain (plus nightly-2026-05-20
+for the eBPF child build); see `docs/build.md`,
+`rust-toolchain.toml`, and `Cargo.lock`. No bridge
+library, no vendored native dependencies.
 
-    ./tools/build                                    # build everything
-    ./tools/test --help                              # list suites
-    LMB_PACKAGE=third_party/libbpf-mojo-0.2.3.tar.gz ./tools/test buildcache
-    LMB_PACKAGE=... ./tools/package                  # owner bundle + MANIFEST
+    cargo build --release --locked          # build everything
+    cargo test --workspace --locked         # Rust suites
+    ./tools/test --help                     # list harness suites
 
-`report`, replay `top`, and `doctor` work without the bridge library;
-`record` and live `top` load it at session open, and `qualify` checks
-its binding when proving the host.
+`report`, replay `top`, and `doctor` run anywhere; `record`
+and live `top` load the embedded probes at session open,
+and `qualify` checks artifact bindings when proving the
+host.
 
 ## Licensing
 
 MemVeil is GPL-3.0-or-later (`LICENSE`), except the eBPF
-programs (`bpf/programs/swiotlb_attempt.bpf.c`,
-`bpf/programs/swiotlb_lifecycle.bpf.c`,
-`bpf/programs/swiotlb_copy.bpf.c`, GPL-2.0-only),
-the BPF/userspace shared headers
-(`bpf/include/memveil_events.h` and
-`bpf/include/mv_fentry_types.h`, GPL-2.0-or-later;
-`bpf/include/memveil_control.h`, GPL-2.0-only), and the
-test-only oracle kernel modules
-(`tests/kernel/memveil_dma_oracle.c`,
+programs (`crates/ebpf/`, GPL-2.0-only), the shared
+eBPF-side tables (`crates/ebpf-common/`,
+GPL-2.0-or-later), and the test-only oracle kernel
+modules (`tests/kernel/memveil_dma_oracle.c`,
 `tests/kernel/memveil_region_oracle.c`, and
 `tests/kernel/Makefile`, GPL-2.0-only); texts in
 `LICENSES/`. Every first-party source file carries an
-SPDX header. The BPF build also vendors 13 UAPI headers
-under `bpf/include/uapi/` (byte-exact copies from
-linux-libc-dev 7.0.0-38.38, GPL-2.0 WITH
-Linux-syscall-note; see `bpf/include/uapi/README`),
-whose license text is staged as `LICENSES/GPL-2.0.txt`;
-the vendored `asm/types.h` carries no SPDX line.
-Redistributed third-party components, with their staged
-license texts, are listed in `THIRD-PARTY-NOTICES.md`. The
-owner bundle stages all of these plus the pinned
-libbpf-mojo's own texts; `MANIFEST.json` records the
-first-party license map under `first_party`.
+SPDX header. Redistributed third-party components, with
+their staged license texts, are listed in
+`THIRD-PARTY-NOTICES.md`; per-artifact crate texts ship
+under the bundle's `licenses/crates/`.

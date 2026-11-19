@@ -18,7 +18,7 @@ are not part of the window and never appear in the capture.
 ## Stop stages
 
 Stopping runs six stages in order, implemented and
-unit-tested by `src/memveil/capture/stop.mojo`:
+unit-tested by `src/capture/stop.rs`:
 
 1. `readiness` - measurement ran under a proved session epoch.
 2. `admission-close` - no new writer may begin.
@@ -167,8 +167,9 @@ proves by inventory equality.
 
 ## Kernel-side protocol (staged)
 
-`bpf/include/memveil_control.h` inventories the current probe
-writers and stages an explicit control map (admission epoch
-plus active-writer count). Wiring it into the probe changes
-the BPF object and needs a fresh profile qualification first;
-until then the consumer-side stages above carry the proof.
+The staged kernel-side protocol inventories the current
+probe writers through an explicit control map (admission
+epoch plus active-writer count). Wiring it into the probes
+changes the BPF objects and needs a fresh profile
+qualification first; until then the consumer-side stages
+above carry the proof.

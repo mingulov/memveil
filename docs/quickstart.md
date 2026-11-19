@@ -5,15 +5,15 @@ MemVeil captures swiotlb bounce **attempts**, mapping **lifetimes**,
 and executed **copies** on x86-64 Linux and replays them offline as
 text, JSON, or Markdown. Attempts are try-counts; actual copies come
 from the copy channel. This bundle runs from any directory: no
-compiler, Pixi, network, or source checkout needed. The
+compiler, network, or source checkout needed. The
 [capability table](support.md#capabilities-by-mode) distinguishes the
 shipping collector, offline reducers and laboratory probes.
 Lifecycle/copy collection is qualified through the live
 interface checks on covered kernels (see the support
 envelope) or a machine-local receipt (advanced, step 6); a full
 confidential release is not yet qualified. The host supplies libc,
-libm, libdl, and the dynamic loader for offline use, plus libelf
-and libz for recording; see the support envelope for the exact
+libm, libdl, and the dynamic loader for offline use, plus the
+bundled libgcc for recording; see the support envelope for the exact
 floor and tested OS.
 
 System packages install the same layout instead: see
@@ -55,9 +55,9 @@ needs a capture of your own.
 
 ## 3. Record one capture (privileged, attempt-only)
 
-Recording needs root (BPF load plus tracefs). The bridge
-and BPF object are discovered from the bundle beside the
-executable, so no flags or environment setup are needed
+Recording needs root (BPF load plus tracefs). BPF objects
+are embedded in the binary with the loader statically
+linked, so no flags or environment setup are needed
 and plain `sudo` works:
 
     sudo ./bin/memveil record --output /tmp/cap1 --duration 10
@@ -68,14 +68,11 @@ Normal exit 0 includes finalized output with partial terminal evidence,
 including zero-event and signal stops; inspect the recorded verdict. With
 `--strict`, partial evidence returns 4. Exit 3 names the refusal reason
 (profile, bridge, privilege); exit 2 is a usage error; exit 1 is an error.
-When no object is found anywhere, the refusal is `no
-object: pass --object PATH`. `--object` and `--bridge`
-are optional overrides for non-bundled artifacts;
-without them the bridge resolves from `LMB_NATIVE_LIB`
-when unprivileged (ignored under `sudo`), then beside
-the executable, then the system path, and each BPF
-object resolves beside the executable or under the
-system directory.
+`--object`, `--lc-object`, and `--cp-object` are optional
+overrides for non-embedded artifacts, taken verbatim;
+`--bridge` names the file bound into receipt checks.
+Without them the embedded objects and the linked loader
+run.
 
 Attempt-only recording needs no qualification: without a
 receipt it reports partial diagnostics instead of refusing.
@@ -173,16 +170,22 @@ config/BTF/format/image bindings match the live machine,
 and the recorded hook format text. Mint it from the bundle
 alone - no source checkout - with `bind-profile`:
 
-    sudo ./bin/memveil bind-profile --output profiles/my-host.json
+    sudo ./bin/memveil bind-profile --output profiles/my-host.json \
+        --object bpf/swiotlb_attempt.bpf.o
 
 Expected: `bind-profile: local-<release>
 caps=attempt-trace path=profiles/my-host.json`, exit 0.
 Each refusal names its exact cause with exit 3; exit 2 is
-a usage error. For the extra channels, bind all three at
+a usage error. Minting takes explicit artifacts only:
+without `--object` the run refuses instead of guessing.
+For the extra channels, bind all three at
 once (extra channels bind together):
 
     sudo ./bin/memveil bind-profile --output profiles/my-host.json \
-        --capability attempt-trace,mapping-lifecycle,copy-actual
+        --capability attempt-trace,mapping-lifecycle,copy-actual \
+        --object bpf/swiotlb_attempt.bpf.o \
+        --lc-object bpf/swiotlb_lifecycle.bpf.o \
+        --cp-object bpf/swiotlb_copy.bpf.o
 
 See the [bound-reference recipe](profiles.md) for what the
 minted bytes mean and how to audit them by hand.
@@ -194,14 +197,19 @@ blank lines or duplicates), including under a
 are visible to `doctor` and automatic `record`, so an
 unlisted document stays invisible, and the first covering
 document wins, so appends lose to the shipped reference.
-No environment setup is needed: the bridge and BPF objects
-are discovered from the bundle beside the executable, so
-plain `sudo` works:
+No environment setup is needed: the embedded objects and
+the linked loader run, so plain `sudo` works.
+Qualification mints explicit artifacts only, so name the
+bundle's inspection objects and bind the engine binary
+itself as the loader identity (the loader is statically
+linked; there is no separate bridge file):
 
     { echo my-host.json; cat "$PWD/profiles/manifest.txt"; } > /tmp/manifest.new \
         && mv /tmp/manifest.new "$PWD/profiles/manifest.txt"
     sudo ./bin/memveil qualify --output /tmp/q1 \
-        --profile "$PWD/profiles/my-host.json"
+        --profile "$PWD/profiles/my-host.json" \
+        --object bpf/swiotlb_attempt.bpf.o \
+        --bridge bin/memveil
 
 Qualification runs a 3-second smoke capture (attach, poll,
 detach; no traffic required) and, when the channels prove
@@ -223,24 +231,24 @@ bridge admission at every start - admit the receipt as
 or smoke refusal, or the unchecked receipt); exit 2
 is a usage error; exit 1 is an internal failure
 (unreadable objects, mint/publish failure).
-`--object` and `--bridge` are optional overrides for
-non-bundled artifacts; without them each object is
-discovered beside the executable or under the system
-directory, and the bridge additionally honors
-`LMB_NATIVE_LIB` when unprivileged (under `sudo` the
-environment is ignored). When no object is found
-anywhere, qualify refuses with exit 3 `no object: pass
---object PATH`.
+Without `--object` qualify refuses with exit 3
+`no object: pass --object PATH`; without `--bridge` the
+receipt cannot bind a loader identity and minting fails.
+There is no discovery: every artifact is explicit.
 
-Extra channels qualify the same way, with their objects
-discovered from the bundle:
+Extra channels qualify the same way, naming their
+inspection objects explicitly (wanted channels without
+their object flags refuse before the smoke):
 
     sudo ./bin/memveil qualify --output /tmp/q3 \
         --capability attempt-trace,mapping-lifecycle,copy-actual \
-        --profile "$PWD/profiles/my-host.json"
+        --profile "$PWD/profiles/my-host.json" \
+        --object bpf/swiotlb_attempt.bpf.o \
+        --lc-object bpf/swiotlb_lifecycle.bpf.o \
+        --cp-object bpf/swiotlb_copy.bpf.o \
+        --bridge bin/memveil
 
-(`--lc-object` and `--cp-object` override discovery
-for non-bundled objects.) Then record them per run:
+Then record them per run:
 
     sudo ./bin/memveil record --output /tmp/cap3 \
         --capability attempt-trace,mapping-lifecycle,copy-actual \

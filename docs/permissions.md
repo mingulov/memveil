@@ -16,11 +16,9 @@ Summary table in `support.md`; this page gives the details.
 | `record` | root: BPF load, tracefs, BTF read | creates the capture directory, attaches probes |
 | `qualify` | root: live smoke collection | runs a smoke capture, writes the local receipt |
 
-`record` discovers its bridge and BPF object: explicit
-`--bridge`/`--object` win verbatim, then `LMB_NATIVE_LIB`
-for the bridge when unprivileged (ignored under `sudo`),
-then the executable-relative bundle path (`<root>/lib/memveil`,
-`<root>/bpf`), then the system path. `--profile`
+`record` loads the embedded BPF objects with the
+statically linked loader: explicit `--bridge`/`--object`
+win verbatim. `--profile`
 optionally pins one semantic profile.
 Profiles resolve from the executable location
 (`<root>/bin/memveil` reads `<root>/profiles`), never from the
@@ -53,15 +51,12 @@ directory must not exist, and a refused run creates nothing.
 
 ## Running under sudo
 
-No environment setup is needed: the bridge and BPF object
-are discovered beside the executable
-(`<root>/lib/memveil/libbpf_mojo.so.1`, `<root>/bpf`), so plain
-`sudo` works. `LMB_NATIVE_LIB` is honored only for
-unprivileged runs (ignored under `sudo`); `--bridge` and
-`--object` are optional overrides for non-bundled
+No environment setup is needed: the embedded objects and
+the linked loader run, so plain `sudo` works. `--bridge`
+and `--object` are optional overrides for non-embedded
 artifacts:
 
-    sudo ./bin/memveil record --bridge /path/to/libbpf_mojo.so.1 \
+    sudo ./bin/memveil record --bridge /path/to/bridge-file \
         --object /path/to/swiotlb_attempt.bpf.o --output /tmp/cap1
 
 ## Refusal catalog
@@ -73,25 +68,22 @@ earlier refusal:
 
 1. Usage and `--max-events-bytes` budget (exit 2 for usage,
    exit 3 for an out-of-range budget).
-2. Bridge presence: `no bridge: ...` when discovery
-   finds no bridge (no `--bridge`, nothing beside the
-   executable or under the system path, and no usable
-   `LMB_NATIVE_LIB`). Unprivileged runs read `no bridge:
-   pass --bridge or set LMB_NATIVE_LIB`; privileged
-   runs ignore the env step and read `no bridge:
-   restore the bundled bridge or pass --bridge PATH`.
+2. Bridge binding: without `--bridge` the linked loader
+   runs and bridge-bound receipt checks stay unverified;
+   a local-auto receipt that needs a bridge hash refuses
+   as `bridge unchecked: cannot verify receipts`.
 3. Profiles load: `cannot load profiles: ...` when the
    shipped `profiles/` cannot be read.
 4. Explicit `--profile`: `unknown --profile: <id>`, or
    `profile does not cover this kernel`.
 5. Coverage: `no profile covers this kernel` without
    `--profile`.
-6. Object: `no object: pass --object PATH` (nothing
-   discovered), `object unreadable` (missing path),
+6. Object: `object unreadable` (explicit path missing),
    `object refused: ...` (not a BPF object),
-   `object ring too large`. Requested extra channels
-   refuse the same way with `no object: pass --lc-object
-   PATH` and `no object: pass --cp-object PATH`.
+   `object ring too large`. Absent flags load the
+   embedded objects; nothing refuses for a missing
+   explicit path here (`qualify` and `bind-profile`
+   refuse those instead).
 7. Hook admission: `format unreadable` (tracefs not
    readable, the usual unprivileged refusal),
    `layout: ...` (unreadable layout; offset-only drift

@@ -100,9 +100,12 @@ root), and `$KO` (the built oracle module from step 1).
 `$ROOT` is the source checkout; from an extracted bundle
 the same relative `bin`, `bpf`, `lib`, and `profiles`
 paths apply, except step 1, which needs the module
-source. From a checkout without packaging, the binary is
-`build/memveil`, the objects are under `build/bpf/`, and
-the bridge is `build/deps/lmb/lib/libbpf_mojo.so.1`. The
+source. From a checkout without packaging, build the
+bundle first (`python3 scripts/package-tarball.py --out
+dist`) and point `$ROOT` at the extracted bundle: the
+raw checkout keeps the binary at
+`target/release/memveil` with embedded objects and no
+bridge file. The
 guest sees the host tree read-only, with private overlays
 for `/tmp`, `/dev`, `/proc`, `/sys`, and `/run`: all
 guest outputs below go under `/tmp/rec/`, which step 2
@@ -176,7 +179,7 @@ substitution step is needed.
            --object "$ROOT/bpf/swiotlb_attempt.bpf.o" \
            --lc-object "$ROOT/bpf/swiotlb_lifecycle.bpf.o" \
            --cp-object "$ROOT/bpf/swiotlb_copy.bpf.o" \
-           --bridge "$ROOT/lib/memveil/libbpf_mojo.so.1" \
+           --bridge "$ROOT/bin/memveil" \
            --profile "$ROOT/profiles/linux-x86_64-7.0-reference.json" \
            --capability attempt-trace,mapping-lifecycle,copy-actual \
            >/tmp/rec/record.out 2>/tmp/rec/record.err &

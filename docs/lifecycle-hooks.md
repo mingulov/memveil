@@ -13,11 +13,11 @@ ring sizes) verify in both lanes; anything else refuses.
 
 ## Attach points
 
-All five have a frozen contract: they compile to
-`build/bpf/swiotlb_lifecycle.bpf.o` and `swiotlb_copy.bpf.o`,
-and the owner bundle ships all three BPF objects (attempt,
-lifecycle, copy). The tracing attaches resolve by function
-name through the bridge. Collector integration, multi-channel
+All five have a frozen contract, implemented by the
+shipped lifecycle and copy channel objects (embedded in
+the binary; `bpf/*.bpf.o` inspection copies ship
+alongside). The tracing attaches resolve by function
+name through the statically linked loader. Collector integration, multi-channel
 packaging, capability-requested profile selection, and live VM
 qualification of lifecycle/copy collection are complete; the
 shipped reference profiles declare both capabilities as

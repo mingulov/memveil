@@ -13,7 +13,7 @@ external schema family are independent. The current exact contracts are:
 | Doctor | None (output only) | 0.1.1 | 0.1.0 |
 | Receipt | 0.1.0 | 0.1.0 | None |
 
-The runtime constants and `toolchain.lock.json` define the implemented set;
+The runtime constants and the schema pins in `tests/provenance/test_provenance.py` define the implemented set;
 retained schema files alone do not admit an input. All listed legacy session
 and event inputs remain readable. A capture's event version is checked per
 record; a session version does not silently upgrade its event records.

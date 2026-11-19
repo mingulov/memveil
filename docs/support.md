@@ -79,16 +79,11 @@ doctor leaves the load verdict at `ready (load not checked)`.
 - Memory-cgroup headroom for the BPF maps (see the map
   sizes under Resource defaults); the memcg precheck
   reports `unknown` when outer limits are not visible.
-- glibc 2.35 or later for the Rust payload, 2.40 or later
-  where the Mojo bridge loads. The Rust floor is derived
-  from the staged bytes and currently set by the pinned
-  Debian libgcc (libgcc-s1 14.2.0-19, GLIBC_2.35, no ABI
+- glibc 2.35 or later. The floor is derived from the
+  staged bytes and currently set by the pinned Debian
+  libgcc (libgcc-s1 14.2.0-19, GLIBC_2.35, no ABI
   nodes), pinned because the host toolchain libgcc would
-  raise the floor to 2.40 through GLIBC_ABI_GNU2_TLS. The
-  Mojo bridge `libbpf_mojo.so.1` needs GLIBC_2.38 plus
-  GLIBC_ABI_GNU2_TLS from the pinned
-  `third_party/libbpf-mojo-0.2.3.tar.gz` archive, so its
-  floor is 2.40 (first glibc providing that ABI node).
+  raise the floor to 2.40 through GLIBC_ABI_GNU2_TLS.
 
 Known out of reach: Kata, CoCo, Contrast, and AKS
 kernel-uvm guests (no BTF; some also lack `FTRACE` or
@@ -118,17 +113,9 @@ fallback are not provided.
   `nocaps` drops every capability through `setpriv`
   (CapEff 0 in the dropped child), and `memcg` refuses
   `load-enomem` under its calibrated limit.
-- `libbpf-mojo` 0.2.2 qualifies bridge primitives
-  from Linux 6.0: its own privileged suite runs on
-  7.0.0-38-generic, and this repository's booted
-  matrix qualifies the 6.0 through 6.10 attempt
-  rows below 7.0.
-
-The current source pin uses a clean, untagged libbpf-mojo 0.2.3
-development candidate. The historical 0.2.2 rows above retain their
-original artifact scope. Ordinary live and compiler-free clean-room
-gates for the new candidate remain pending; its source integration
-does not qualify any kernel or confidential platform.
+- This repository's booted matrix (below) qualifies
+  the 6.0 through 6.10 attempt rows below 7.0 for the
+  exact historical bytes named there.
 
 ## Configuration and artifact admission
 
@@ -167,43 +154,44 @@ does not qualify any kernel or confidential platform.
   text change is not automatically detected by the receipt. Attempt-only
   recording can fall back to partial diagnostics.
 - Minimum CPU eligibility is x86-64-v3. The engine's code-generation target
-  remains x86-64-v2, which does not lower its prebuilt libraries' requirements.
-  The binary carries its runtime closure
-  plus the native bridge in `lib/memveil/`. Offline verbs (help,
+  remains x86-64-v2, which does not lower the runtime requirement.
+  The binary carries its runtime closure in `lib/memveil/`
+  (the vendored libgcc for the unwinder) with the Aya loader
+  statically linked; no bridge ships. Offline verbs (help,
   version, doctor, report, replay `top`) need libc, libm,
   libdl, and the dynamic loader from the host; `record` and
-  live `top` additionally load the bridge, which needs libelf
-  and libz. `libpthread` and `libzstd` are permitted by the
+  live `top` additionally use the vendored libgcc.
+  `libpthread` and `libzstd` are permitted by the
   loader allowlist but unused; the manifest's
   `system_libraries` records that allowlist, a superset of
   the per-verb needs above. Compiler-free offline consumption
   has been tested
   on Ubuntu 26.04.1 (glibc 2.43) for specific development artifacts.
-  Observed linkage minima are glibc 2.35 for the Rust payload
-  (binary plus vendored libgcc, no ABI nodes) and glibc 2.40
-  for the Mojo bridge (GLIBC_2.38 plus GLIBC_ABI_GNU2_TLS
-  from the pinned `third_party/libbpf-mojo-0.2.3.tar.gz`
-  archive; 2.40 first provides that ABI node). The Debian
+  Observed linkage minima are glibc 2.35 (binary plus
+  vendored libgcc, no ABI nodes). The Debian
   libgcc is pinned because the host
-  toolchain libgcc would raise the Rust floor to 2.40
+  toolchain libgcc would raise the floor to 2.40
   through GLIBC_ABI_GNU2_TLS. These
   minima and the CPU build target
   do not qualify Ubuntu 22.04/24.04, every later userland, or every
   eligible CPU; each advertised environment needs an exact-artifact test.
-  The [Mojo 1.2.0 runtime requirements](https://mojolang.org/docs/requirements/)
-  specify x86-64-v3. The earlier unmarked closure failed under Nehalem and
-  SandyBridge emulation with illegal instructions in a pinned runtime library.
+  An earlier unmarked closure failed under Nehalem and
+  SandyBridge emulation with illegal instructions in a runtime library.
   The engine now declares its required ISA for the glibc loader to check before
-  library constructors or Mojo execute. On the verified loaders, an incompatible
+  library constructors execute. On the verified loaders, an incompatible
   CPU exits 127 with `CPU ISA level is lower than required`; this is a pre-CLI
   loader refusal, separate from the command exits below. Emulated basic probes
   do not qualify every x86-64-v3 platform or a confidential guest.
 - Profiles resolve from the executable location
   (`<root>/bin/memveil` reads `<root>/profiles`), never from
-  the caller's working directory. The bridge and BPF
-  objects resolve the same way (`<root>/lib/memveil`,
-  `<root>/bpf`) before the system paths, so no
+  the caller's working directory. BPF objects are embedded
+  in the binary with the loader statically linked, so no
   environment setup is needed and plain `sudo` works.
+  `record`, live `top`, and `doctor --load-check` take
+  explicit `--object`/`--lc-object`/`--cp-object` paths and
+  `--bridge` verbatim, defaulting to the embedded objects
+  and the linked loader; `qualify` and `bind-profile` mint
+  explicit artifacts only and refuse without them.
 
 ## Kernel generations
 
@@ -316,8 +304,8 @@ Rerun with a built deb (the tool refuses to overwrite an
 existing evidence dir, so start from a fresh one):
 
 ```sh
-./tools/build
-./tools/package-deb
+cargo build --release --locked
+python3 scripts/package-deb.py --out dist
 rm -rf build/vm/kernels
 MV_DEB=dist/memveil_0.1.0-1_amd64.deb \
   MEMVEIL_VM_KERNELS=1 ./tools/test vm-kernels
@@ -395,14 +383,14 @@ details live in `permissions.md`; surprises go to
   128 KiB..4 GiB, minus a 64 KiB closing reserve); at most
   4,194,304 attempt records; ring buffers of 8 MiB for
   attempt and 32 MiB each for lifecycle and copy (72 MiB
-  with all three channels); the bridge and BPF objects are discovered
-  (explicit `--bridge`/`--object` win verbatim;
-  `LMB_NATIVE_LIB` is honored only when unprivileged;
-  then the executable-relative bundle path, then the
-  system path; objects have no environment step). A
-  missing-everywhere object refuses with exit 3 `no
-  object: pass --object PATH`; requested extra channels
-  refuse with `no object: pass --lc-object PATH` and
+  with all three channels). `record` loads the embedded
+  channel objects with the statically linked loader;
+  explicit `--bridge`/`--object`/`--lc-object`/`--cp-object`
+  paths win verbatim. `qualify` and `bind-profile` take
+  explicit artifacts only: a missing `--object` refuses
+  with exit 3 `no object: pass --object PATH`, and
+  requested extra channels refuse with
+  `no object: pass --lc-object PATH` and
   `no object: pass --cp-object PATH`.
   Extra channels are opt-in per run (`--capability`,
   with `--lc-object`/`--cp-object` as optional

@@ -67,11 +67,15 @@ with the canonical ring sizes, verified live again at
 qualify:
 
     sudo ./bin/memveil bind-profile --output profiles/my-host.json \
-        --capability attempt-trace,mapping-lifecycle,copy-actual
+        --capability attempt-trace,mapping-lifecycle,copy-actual \
+        --object bpf/swiotlb_attempt.bpf.o \
+        --lc-object bpf/swiotlb_lifecycle.bpf.o \
+        --cp-object bpf/swiotlb_copy.bpf.o
 
 Each refusal names its exact cause with exit 3
-(unreadable evidence, no covering reference, undiscoverable
-object); exit 2 is a usage error. A custom `--object`
+(unreadable evidence, no covering reference, missing
+`--object`); exit 2 is a usage error. Minting takes
+explicit artifacts only. A custom `--object`
 still mints the canonical attempt ring: a nonstandard ring
 refuses with a mismatch at qualify, never silently.
 
@@ -419,21 +423,24 @@ checks the kernel floor, resolves the document,
 parses its note, and compares every binding and every
 tracing-hook signature against the live host. Only an
 accepted plan runs the 3-second smoke capture and
-publishes the `local-auto` receipt. From a source
-checkout, point at the source-build artifacts
-explicitly: discovery searches the bundle and system
-locations, while a source build places its objects
-under `build/bpf` and its bridge under `build/deps`,
-so a bare invocation refuses with `no object: pass
---object PATH` (exit 3) before planning. From the
-checkout root, with a fresh unused output directory
-(every attempt needs its own; reuse refuses, see
-step 9):
+publishes the `local-auto` receipt. Minting takes
+explicit artifacts only, so a bare invocation refuses
+with `no object: pass --object PATH` (exit 3) before
+planning. From the checkout root, with a fresh unused
+output directory (every attempt needs its own; reuse
+refuses, see step 9), point at the bundle's inspection
+objects and bind the engine binary as the loader
+identity:
 
-    sudo ./build/memveil qualify --output /tmp/q1 \
-        --object build/bpf/swiotlb_attempt.bpf.o \
-        --bridge build/deps/lmb/lib/libbpf_mojo.so.1 \
+    sudo ./bin/memveil qualify --output /tmp/q1 \
+        --object bpf/swiotlb_attempt.bpf.o \
+        --bridge bin/memveil \
         --profile "$PWD/profiles/my-host.json"
+
+From a raw source checkout instead of a bundle, use
+the release build directory whose object digests match
+`target/release/memveil --embedded-manifest` for
+`--object`, with `target/release/memveil` as `--bridge`.
 
 On success the receipt lands under
 `profiles/receipts/` beside the binary (or under
@@ -485,7 +492,7 @@ qualification. The old receipt then fails against the
 rebound note with `receipt artifacts differ from note`
 until the channel re-qualifies. The
 `rebind_note_object` helper in
-`src/memveil/platform/narrow.mojo` performs exactly
+`src/platform/narrow.rs` performs exactly
 this single-binding replacement (refusing unknown
 bindings, malformed hashes, and lifecycle/copy
 rebinds on 8-field notes); prefer it over editing
@@ -601,7 +608,7 @@ host.
 | `receipt names another kernel` | receipt kernel is not this kernel | re-qualify after upgrade |
 | `receipt bindings differ from note` | doc refreshed past the receipt | re-qualify |
 | `receipt bridge unchecked: ...` | passive path binds no bridge | use record/live top |
-| `no object: pass --object PATH` | no BPF object discovered | pass the object path |
+| `no object: pass --object PATH` | `--object` flag missing | pass the object path |
 | `output exists: output exists` | output dir already holds a capture | use a fresh unused `--output` dir |
 
 ## Boundaries
