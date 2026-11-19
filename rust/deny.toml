@@ -1,6 +1,6 @@
-# Cargo dependency policy for the memveil Rust userspace scaffold.
-# Layout mirrors p11scope's deny.toml policy; the eBPF crate gets its own
-# policy file when it lands. New licenses and sources require review.
+# Cargo dependency policy for the memveil Rust userspace.
+# Layout mirrors p11scope's deny.toml policy; the eBPF crate has its own
+# policy file at crates/ebpf/deny.toml. New licenses and sources require review.
 [graph]
 targets = [
   { triple = "x86_64-unknown-linux-gnu" },

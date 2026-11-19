@@ -1,7 +1,7 @@
-//! MemVeil DMA-visibility observer (Rust userspace scaffold).
+//! MemVeil DMA-visibility observer (Rust userspace).
 //!
-//! Later tasks add wire types, the Aya loader, and the CLI surface on top
-//! of this crate. The engine version string stays byte-identical with the
+//! Wire types, the Aya loader, and the CLI surface live in this crate.
+//! The engine version string stays byte-identical with the
 //! Mojo implementation so packaged artifacts keep matching drift guards.
 //!
 //! Panic policy: fallible production paths return errors and

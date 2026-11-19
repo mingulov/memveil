@@ -1,5 +1,5 @@
 # Cargo dependency policy for the memveil eBPF crate (GPL-2.0-only, like the
-# kernel-side code it ships as). Mirrors the host scaffold policy; new
+# kernel-side code it ships as). Mirrors the host policy; new
 # licenses and sources require review.
 [graph]
 targets = [
