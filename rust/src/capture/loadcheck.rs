@@ -16,7 +16,7 @@
 //! detail says so and the errno stays empty.
 
 use crate::bpf::Session;
-use crate::bpf::session::core_precondition;
+use crate::bpf::session::{SessionError, core_precondition, declared_map_specs, replay_rings_fit};
 use crate::platform::reader::bytes_to_text;
 use aya::{EbpfLoader, VerifierLogLevel};
 
@@ -370,6 +370,14 @@ pub fn diagnose_load(elf: &[u8], programs: &[String]) -> LoadDiag {
             .unwrap_or_else(|| "EINVAL".to_string());
         return out;
     }
+    // Abuse cap: a ring the session refused must not allocate in
+    // the replay either. Empty errno, like other structural replay
+    // refusals (garbage input behaves the same way).
+    if let Some(declared) = declared_map_specs(elf)
+        && !replay_rings_fit(&declared)
+    {
+        return out;
+    }
     let mut loader = EbpfLoader::new();
     loader.verifier_log_level(VerifierLogLevel::VERBOSE);
     loader.btf(pre.btf.as_ref());
@@ -400,8 +408,9 @@ pub fn diagnose_load(elf: &[u8], programs: &[String]) -> LoadDiag {
 /// A failed verdict replays once for the tail in `lines`;
 /// the replay errno substitutes for the verdict errno the
 /// session swallows, and a replay that loads appends the
-/// fixed suffix to the verdict detail. Map sizes are the
-/// objects' declared sizes; no custom BTF. Nothing attaches.
+/// fixed suffix to the verdict detail. Static geometry
+/// refusals skip the replay: no kernel failure to diagnose.
+/// Map sizes are the objects' declared sizes. Nothing attaches.
 pub fn load_check(objects: &[LoadTarget]) -> Vec<LoadResult> {
     let mut out: Vec<LoadResult> = Vec::new();
     let mut sessions: Vec<Option<Session>> = Vec::new();
@@ -437,6 +446,12 @@ pub fn load_check(objects: &[LoadTarget]) -> Vec<LoadResult> {
             Err(e) => {
                 out[i].state = "failed".to_string();
                 out[i].detail = clip_line(&e.to_string(), DETAIL_CAP);
+                if matches!(e, SessionError::Geometry(_)) {
+                    // Static gate refusal: no kernel failure to
+                    // diagnose, and replaying would re-attempt the
+                    // refused allocation.
+                    continue;
+                }
                 let diag = diagnose_load(&target.elf, &target.programs);
                 out[i].errno = diag.errno.clone();
                 out[i].lines = diag.lines.clone();
@@ -623,5 +638,160 @@ mod tests {
     fn diagnose_garbage_elf_has_no_errno() {
         let diag = diagnose_load(&[0u8; 16], &["mv_swiotlb_attempt".to_string()]);
         assert_eq!(diag.errno, "");
+    }
+
+    /// File range of the named section, via the ELF section table.
+    fn section_range(elf: &[u8], want: &str) -> (usize, usize) {
+        let shoff = u64::from_le_bytes(elf[0x28..0x30].try_into().expect("shoff")) as usize;
+        let shentsize = u16::from_le_bytes(elf[0x3a..0x3c].try_into().expect("shentsize")) as usize;
+        let shnum = u16::from_le_bytes(elf[0x3c..0x3e].try_into().expect("shnum")) as usize;
+        let shstrndx = u16::from_le_bytes(elf[0x3e..0x40].try_into().expect("shstrndx")) as usize;
+        let shstr = shoff + shstrndx * shentsize;
+        let str_off =
+            u64::from_le_bytes(elf[shstr + 24..shstr + 32].try_into().expect("str")) as usize;
+        let str_len =
+            u64::from_le_bytes(elf[shstr + 32..shstr + 40].try_into().expect("len")) as usize;
+        let strtab = &elf[str_off..str_off + str_len];
+        for index in 0..shnum {
+            let header = shoff + index * shentsize;
+            let name_off =
+                u32::from_le_bytes(elf[header..header + 4].try_into().expect("name")) as usize;
+            let tail = &strtab[name_off..];
+            let end = tail.iter().position(|byte| *byte == 0).unwrap_or(0);
+            if &tail[..end] == want.as_bytes() {
+                let off = u64::from_le_bytes(elf[header + 24..header + 32].try_into().expect("off"))
+                    as usize;
+                let len = u64::from_le_bytes(elf[header + 32..header + 40].try_into().expect("len"))
+                    as usize;
+                return (off, len);
+            }
+        }
+        panic!("no {want} section");
+    }
+
+    /// Size of one BTF type record at `at`: 12 header bytes plus the
+    /// kind's trailing array.
+    fn btf_type_len(elf: &[u8], at: usize) -> usize {
+        let info = u32::from_le_bytes(elf[at + 4..at + 8].try_into().expect("info"));
+        let kind = (info >> 24) & 31;
+        let vlen = (info & 0xFFFF) as usize;
+        12 + match kind {
+            1 | 14 | 17 => 4,
+            3 => 12,
+            4 | 6 | 15 | 16 => vlen * 12,
+            5 => vlen * 8,
+            13 => vlen * 8,
+            19 => vlen * 16,
+            _ => 0,
+        }
+    }
+
+    /// `ok.o` with every 8 MiB BTF array length widened to 2 GiB:
+    /// sections and programs untouched, the ring declaration
+    /// oversized. Returns the patched bytes plus the patched count.
+    fn oversize_ring_elf() -> (Vec<u8>, usize) {
+        let path = repo_root().join("tests/fixtures/elf/ok.o");
+        let mut elf = std::fs::read(&path).expect("read ok.o fixture");
+        let (off, _) = section_range(&elf, ".BTF");
+        let magic = u16::from_le_bytes(elf[off..off + 2].try_into().expect("magic"));
+        assert_eq!(magic, 0xEB9F, "BTF magic");
+        let hdr = u32::from_le_bytes(elf[off + 4..off + 8].try_into().expect("hdr")) as usize;
+        let type_off =
+            u32::from_le_bytes(elf[off + 8..off + 12].try_into().expect("toff")) as usize;
+        let type_len =
+            u32::from_le_bytes(elf[off + 12..off + 16].try_into().expect("tlen")) as usize;
+        let mut patched = 0;
+        let mut at = off + hdr + type_off;
+        let end = at + type_len;
+        while at + 12 <= end {
+            let info = u32::from_le_bytes(elf[at + 4..at + 8].try_into().expect("info"));
+            if (info >> 24) & 31 == 3 {
+                let len_at = at + 20;
+                let len = u32::from_le_bytes(elf[len_at..len_at + 4].try_into().expect("nelems"));
+                if len == 8_388_608 {
+                    elf[len_at..len_at + 4].copy_from_slice(&2_147_483_648u32.to_le_bytes());
+                    patched += 1;
+                }
+            }
+            at += btf_type_len(&elf, at);
+        }
+        (elf, patched)
+    }
+
+    #[test]
+    fn check_oversize_ring_refused_before_load() {
+        // A real object whose only sin is a 2 GiB ring declaration:
+        // the verdict refuses naming the ring, with no errno and
+        // no replay — the refusal is static, before any syscall
+        // (unprivileged runs see Geometry, not EPERM).
+        let (elf, patched) = oversize_ring_elf();
+        assert!(patched >= 1, "must widen at least the ring array");
+        let target = LoadTarget {
+            kind: "attempt".to_string(),
+            elf,
+            programs: vec!["mv_swiotlb_attempt".to_string()],
+        };
+        let results = load_check(&[target]);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].state, "failed");
+        assert!(
+            results[0].detail.contains("mv_attempts"),
+            "refusal must name the ring, got: {}",
+            results[0].detail
+        );
+        assert_eq!(results[0].errno, "");
+        assert!(results[0].lines.is_empty());
+        assert!(
+            !results[0].detail.contains("diagnostic replay loaded"),
+            "geometry refusals skip the replay, got: {}",
+            results[0].detail
+        );
+    }
+
+    #[test]
+    fn check_drifted_table_refused_before_load() {
+        // badmap.o opens (right sections) but declares mv_counts
+        // with 7 entries: static refusal naming the table, no
+        // replay, on every privilege.
+        let path = repo_root().join("tests/fixtures/elf/badmap.o");
+        let elf = std::fs::read(&path).expect("read badmap.o fixture");
+        let target = LoadTarget {
+            kind: "attempt".to_string(),
+            elf,
+            programs: vec!["mv_swiotlb_attempt".to_string()],
+        };
+        let results = load_check(&[target]);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].state, "failed");
+        assert!(
+            results[0].detail.contains("mv_counts"),
+            "refusal must name the table, got: {}",
+            results[0].detail
+        );
+        assert_eq!(results[0].errno, "");
+        assert!(results[0].lines.is_empty());
+    }
+
+    #[test]
+    fn check_smaller_ring_reaches_past_precheck() {
+        // badring.o declares a 4 MiB ring: smaller than the frozen
+        // 8 MiB, so the pre-check admits it. Unprivileged runs then
+        // fail at the map syscall (EPERM via the replay); root
+        // loads it outright.
+        let path = repo_root().join("tests/fixtures/elf/badring.o");
+        let elf = std::fs::read(&path).expect("read badring.o fixture");
+        let target = LoadTarget {
+            kind: "attempt".to_string(),
+            elf,
+            programs: vec!["mv_swiotlb_attempt".to_string()],
+        };
+        let results = load_check(&[target]);
+        assert_eq!(results.len(), 1);
+        if unsafe { libc::geteuid() } == 0 {
+            assert_eq!(results[0].state, "loaded");
+        } else {
+            assert_eq!(results[0].state, "failed");
+            assert_eq!(results[0].errno, "EPERM");
+        }
     }
 }

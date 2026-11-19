@@ -9,7 +9,7 @@
 //! dropping a session releases it too.
 
 use super::attach::{ATTACH_ORDER, AttachKind, AttachSpec, DETACH_ORDER};
-use super::maps::{MapGeometry, MapSpec, check_maps_loaded};
+use super::maps::{BPF_MAP_TYPE_RINGBUF, MapGeometry, MapSpec, check_maps_loaded, expected_maps};
 use super::offsets::{encode_copy_offsets, validate_copy_offsets};
 use super::poll::{Frame, Stats, decode_frame, open_consumer};
 use crate::capture::loadcheck::errno_from_chain;
@@ -275,6 +275,110 @@ fn check_core_btf(pre: &CorePrecondition, channel: Channel) -> Result<(), Sessio
     Ok(())
 }
 
+/// Declared map rows from one ELF, or `None` when the object does
+/// not parse. `None` passes through to the loader, which parses
+/// before creating anything, so a skipped pre-check can never
+/// allocate.
+pub(crate) fn declared_map_specs(elf: &[u8]) -> Option<Vec<MapSpec>> {
+    let object = aya_obj::Object::parse(elf).ok()?;
+    let mut specs = Vec::new();
+    for (name, map) in object.maps.iter() {
+        specs.push(MapSpec {
+            name: name.clone(),
+            map_type: map.map_type(),
+            key_size: map.key_size(),
+            value_size: map.value_size(),
+            max_entries: map.max_entries(),
+        });
+    }
+    Some(specs)
+}
+
+/// Host page size in bytes; 4096 when the query fails.
+pub(crate) fn host_page_size() -> u32 {
+    // SAFETY: sysconf with a valid name; -1 means unknown.
+    let got = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if got > 0 {
+        u32::try_from(got).unwrap_or(4096)
+    } else {
+        4096
+    }
+}
+
+/// Effective ring bytes the loader will request for a declared
+/// size: page count rounded up to a power of two, times the page
+/// size. Mirrors aya's `adjust_to_page_size` (which mirrors
+/// libbpf); `u64` with a saturating multiply, so a hostile
+/// declaration refuses instead of overflowing.
+fn effective_ring_bytes(declared: u32, page_size: u32) -> u64 {
+    if declared == 0 || page_size == 0 {
+        return 0;
+    }
+    let pages = u64::from(declared.div_ceil(page_size));
+    pages
+        .next_power_of_two()
+        .saturating_mul(u64::from(page_size))
+}
+
+/// Frozen ring ceiling for one channel. Every channel carries
+/// exactly one ring; a missing row refuses everything.
+fn frozen_ring_ceiling(channel: Channel) -> u32 {
+    expected_maps(channel)
+        .iter()
+        .find(|row| row.map_type == BPF_MAP_TYPE_RINGBUF)
+        .map(|row| row.max_entries)
+        .unwrap_or(0)
+}
+
+/// Largest frozen ring ceiling across channels: the abuse cap for
+/// loads that cannot know the channel.
+pub(crate) fn max_frozen_ring_bytes() -> u32 {
+    [Channel::Attempt, Channel::Lifecycle, Channel::Copy]
+        .iter()
+        .map(|channel| frozen_ring_ceiling(*channel))
+        .max()
+        .unwrap_or(0)
+}
+
+/// Pre-load map gate: declared geometry, then the effective
+/// rounded ring size, both before the loader allocates. The
+/// geometry rule is the load-time rule ([`check_maps_loaded`]:
+/// rings upper-bounded so smaller admitted rings pass, both
+/// copy families admitted); the ring rule additionally refuses
+/// declarations whose loader-rounded size overshoots the frozen
+/// ceiling. The live read-back gate after loading stays.
+fn check_declared_maps(channel: Channel, declared: &[MapSpec]) -> Result<(), SessionError> {
+    check_maps_loaded(channel, declared)?;
+    let ceiling = u64::from(frozen_ring_ceiling(channel));
+    let page = host_page_size();
+    for row in declared {
+        if row.map_type != BPF_MAP_TYPE_RINGBUF {
+            continue;
+        }
+        let effective = effective_ring_bytes(row.max_entries, page);
+        if effective > ceiling {
+            return Err(SessionError::Geometry(format!(
+                "{channel} channel: map {}: declared {} rounds to {effective} ring bytes, ceiling {ceiling}",
+                row.name, row.max_entries
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// True when every declared ring fits the largest frozen
+/// ceiling. The diagnostic replay cannot know the channel, so
+/// it enforces only this abuse cap; precise per-channel
+/// ceilings stay with the session pre-check.
+pub(crate) fn replay_rings_fit(declared: &[MapSpec]) -> bool {
+    let ceiling = u64::from(max_frozen_ring_bytes());
+    let page = host_page_size();
+    declared
+        .iter()
+        .filter(|row| row.map_type == BPF_MAP_TYPE_RINGBUF)
+        .all(|row| effective_ring_bytes(row.max_entries, page) <= ceiling)
+}
+
 /// Open-time ELF sanity: 64-bit BPF object carrying the channel's program
 /// sections. Manual header walk (no object parser on this side): any
 /// truncation refuses.
@@ -498,7 +602,8 @@ impl Session {
         !self.links.is_empty()
     }
 
-    /// Load the object: create the kernel maps, then verify live map
+    /// Load the object: refuse renegade declared maps first (no
+    /// allocation), create the kernel maps, then verify live map
     /// presence and geometry (ring capacity upper-bounded by the frozen
     /// size) plus program presence against the frozen channel spec. A
     /// gate failure unloads again, so a refused session is never left
@@ -520,6 +625,11 @@ impl Session {
         // here rather than loading unrelocated code.
         let pre = core_precondition(&self.elf);
         check_core_btf(&pre, self.channel)?;
+        // Declared-geometry gate: refuse renegade maps (notably
+        // oversized rings) before the loader allocates them.
+        if let Some(declared) = declared_map_specs(&self.elf) {
+            check_declared_maps(self.channel, &declared)?;
+        }
         let mut loader = EbpfLoader::new();
         loader.btf(pre.btf.as_ref());
         let bpf = loader.load(&self.elf).map_err(|error| {
@@ -1334,5 +1444,155 @@ mod tests {
             matches!(error, SessionError::Open(_)),
             "want Open refusal, got: {error}"
         );
+    }
+
+    #[test]
+    fn effective_ring_bytes_mirrors_loader() {
+        // Aya's adjust_to_page_size table at 4 KiB pages, plus the
+        // 8388609 case (reads back 16777216 live) and a hostile
+        // declaration that must refuse, never overflow.
+        for (declared, want) in [
+            (0u32, 0u64),
+            (1, 4096),
+            (4095, 4096),
+            (4096, 4096),
+            (4097, 8192),
+            (8192, 8192),
+            (8193, 16384),
+            (8_388_608, 8_388_608),
+            (8_388_609, 16_777_216),
+            (33_554_432, 33_554_432),
+        ] {
+            assert_eq!(
+                effective_ring_bytes(declared, 4096),
+                want,
+                "declared {declared}"
+            );
+        }
+        let huge = effective_ring_bytes(u32::MAX, 4096);
+        assert!(
+            huge > u64::from(u32::MAX),
+            "hostile declaration must stay huge, got {huge}"
+        );
+        assert_eq!(effective_ring_bytes(4096, 0), 0);
+    }
+
+    fn with_ring(channel: Channel, ring: &str, size: u32) -> Vec<MapSpec> {
+        let mut maps = expected_maps(channel);
+        let row = maps
+            .iter_mut()
+            .find(|row| row.name == ring)
+            .unwrap_or_else(|| panic!("no {ring} row for {channel}"));
+        row.max_entries = size;
+        maps
+    }
+
+    #[test]
+    fn declared_gate_admits_frozen_and_smaller_rings() {
+        // Frozen sets load, and smaller rings stay admitted (the
+        // saturation `-test` objects carry 4096-byte rings).
+        for channel in [Channel::Attempt, Channel::Lifecycle, Channel::Copy] {
+            let maps = expected_maps(channel);
+            check_declared_maps(channel, &maps).expect("frozen set must pre-pass");
+            let ring = match channel {
+                Channel::Attempt => "mv_attempts",
+                Channel::Lifecycle => "mv_lifecycle",
+                Channel::Copy => "mv_copies",
+            };
+            let maps = with_ring(channel, ring, 4096);
+            check_declared_maps(channel, &maps).expect("test ring size must pre-pass");
+        }
+    }
+
+    #[test]
+    fn declared_gate_refuses_oversize_and_drift() {
+        // A 2 GiB ring (the upfront parser's ceiling) refuses before
+        // any allocation, as do non-pow2 oversize declarations,
+        // drifted table geometry, and extra maps. Every refusal
+        // names the map.
+        let maps = with_ring(Channel::Attempt, "mv_attempts", 2_147_483_648);
+        let error = check_declared_maps(Channel::Attempt, &maps)
+            .expect_err("2 GiB ring must be refused pre-load");
+        assert!(error.to_string().contains("mv_attempts"));
+        let maps = with_ring(Channel::Attempt, "mv_attempts", 8_388_609);
+        let error = check_declared_maps(Channel::Attempt, &maps)
+            .expect_err("rounded oversize ring must be refused pre-load");
+        assert!(error.to_string().contains("mv_attempts"));
+        let mut maps = expected_maps(Channel::Attempt);
+        let row = maps
+            .iter_mut()
+            .find(|row| row.name == "mv_offsets")
+            .expect("offsets row");
+        row.value_size = 25;
+        let error = check_declared_maps(Channel::Attempt, &maps)
+            .expect_err("table drift must be refused pre-load");
+        assert!(error.to_string().contains("mv_offsets"));
+        let mut maps = expected_maps(Channel::Attempt);
+        maps.push(MapSpec {
+            name: "mv_extra".to_string(),
+            map_type: 2,
+            key_size: 4,
+            value_size: 8,
+            max_entries: 1,
+        });
+        let error = check_declared_maps(Channel::Attempt, &maps)
+            .expect_err("extra map must be refused pre-load");
+        assert!(error.to_string().contains("mv_extra"));
+    }
+
+    #[test]
+    fn declared_gate_admits_both_copy_families() {
+        // Aya shape (5 maps with the offsets table) and C shape
+        // (4 maps, offsets via CO-RE) both pre-pass, including at
+        // the admitted `-test` ring size.
+        let aya = expected_maps(Channel::Copy);
+        check_declared_maps(Channel::Copy, &aya).expect("aya shape must pre-pass");
+        let c = crate::bpf::maps::expected_copy_maps_c();
+        check_declared_maps(Channel::Copy, &c).expect("C shape must pre-pass");
+        for mut maps in [aya, c] {
+            let ring = maps
+                .iter_mut()
+                .find(|row| row.name == "mv_copies")
+                .expect("copy shape carries mv_copies");
+            ring.max_entries = 4096;
+            check_declared_maps(Channel::Copy, &maps).expect("test ring size must pre-pass");
+        }
+    }
+
+    #[test]
+    fn declared_specs_match_frozen_objects() {
+        // The linked objects declare exactly the frozen geometry:
+        // every embedded channel pre-passes, and the C-family
+        // fixture pre-passes as the copy channel's second family.
+        // Unprivileged: parse only, no syscalls but sysconf.
+        for (channel, var) in [
+            (Channel::Attempt, env!("DEP_MEMVEIL_EBPF_ATTEMPT_PATH")),
+            (Channel::Lifecycle, env!("DEP_MEMVEIL_EBPF_LIFECYCLE_PATH")),
+            (Channel::Copy, env!("DEP_MEMVEIL_EBPF_COPY_PATH")),
+        ] {
+            let elf = std::fs::read(var).expect("read embedded object");
+            let declared = declared_map_specs(&elf).expect("embedded object must parse");
+            assert_eq!(declared.len(), expected_maps(channel).len());
+            check_declared_maps(channel, &declared).expect("embedded object must pre-pass");
+        }
+        let dir = crate::platform::test_support::repo_root().join("tests/fixtures/elf");
+        let cp = std::fs::read(dir.join("cp-ok.o")).expect("read cp-ok.o");
+        let declared = declared_map_specs(&cp).expect("cp-ok.o must parse");
+        assert_eq!(declared.len(), 4);
+        check_declared_maps(Channel::Copy, &declared).expect("C copy shape must pre-pass");
+        assert!(declared_map_specs(b"not an elf").is_none());
+    }
+
+    #[test]
+    fn replay_rings_fit_caps_abuse() {
+        // The channel-blind replay cap admits every frozen ring
+        // and refuses gigabyte-scale declarations.
+        assert_eq!(max_frozen_ring_bytes(), 33_554_432);
+        for channel in [Channel::Attempt, Channel::Lifecycle, Channel::Copy] {
+            assert!(replay_rings_fit(&expected_maps(channel)));
+        }
+        assert!(replay_rings_fit(&crate::bpf::maps::expected_copy_maps_c()));
+        let maps = with_ring(Channel::Attempt, "mv_attempts", 2_147_483_648);
+        assert!(!replay_rings_fit(&maps));
     }
 }
