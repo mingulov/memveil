@@ -258,10 +258,31 @@ fn rpm_file_list_exact() {
             parent = parent.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
         }
     }
+    // Per-crate notice files, from the same bundle manifest the .rpm
+    // consumed: every crates/ member plus its parent dirs.
+    let set = h::ensure_tarball();
+    let bundle_manifest = set.bundle.join("MANIFEST.json");
+    let probe = format!(
+        "import json; d = json.load(open({bundle_manifest:?}));\n\
+         [print(k) for k in sorted(d['files']) if k.startswith('licenses/crates/')]"
+    );
+    let mut crates_files = BTreeSet::new();
+    let mut crates_dirs = BTreeSet::from(["/usr/share/doc/memveil/licenses/crates".to_string()]);
+    for rel in h::run_ok("python3", &["-c", &probe], None).lines() {
+        crates_files.insert(format!("/usr/share/doc/memveil/{rel}"));
+        let parent = format!(
+            "/usr/share/doc/memveil/{}",
+            rel.rsplit_once('/').map(|(p, _)| p).unwrap_or("")
+        );
+        crates_dirs.insert(parent);
+    }
+    assert!(!crates_files.is_empty(), "bundle carries no crate texts");
     let mut want = fixed_files();
     want.extend(profiles);
     want.extend(docs);
     want.extend(libs);
+    want.extend(crates_files);
+    want.extend(crates_dirs);
     want.extend(owned_dirs());
     want.extend(tree_dirs);
     let have: BTreeSet<String> = listing.into_iter().collect();
@@ -611,6 +632,7 @@ fn spec_files_cover_fhs() {
             "/usr/share/zsh/vendor-completions/_memveil",
             "%dir /var/lib/memveil",
             "%dir /var/lib/memveil/receipts",
+            "/usr/share/doc/memveil/licenses/crates/",
         ]
         .map(str::to_string),
     );

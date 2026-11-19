@@ -265,6 +265,19 @@ fn file_list_exact() {
         assert!(leaf.contains(".so"), "{path}");
         assert!(!path.contains('%') && !path.contains(' '), "{path}");
     }
+    // Per-crate notice files, from the same bundle manifest the .deb
+    // consumed.
+    let set = h::ensure_tarball();
+    let bundle_manifest = set.bundle.join("MANIFEST.json");
+    let probe = format!(
+        "import json; d = json.load(open({bundle_manifest:?}));\n\
+         [print(k) for k in sorted(d['files']) if k.startswith('licenses/crates/')]"
+    );
+    let mut crates_files = BTreeSet::new();
+    for rel in h::run_ok("python3", &["-c", &probe], None).lines() {
+        crates_files.insert(format!("usr/share/doc/memveil/{rel}"));
+    }
+    assert!(!crates_files.is_empty(), "bundle carries no crate texts");
     let mut want = fixed_files();
     for name in DEB_ONLY_FILES {
         want.insert(name.to_string());
@@ -272,6 +285,7 @@ fn file_list_exact() {
     want.extend(profiles);
     want.extend(docs);
     want.extend(libs);
+    want.extend(crates_files);
     let have: BTreeSet<String> = files.keys().cloned().collect();
     let extra: Vec<&String> = have.difference(&want).collect();
     let missing: Vec<&String> = want.difference(&have).collect();
@@ -385,7 +399,9 @@ fn staged_payload_matches_bundle() {
          'THIRD-PARTY-NOTICES.md': 'usr/share/doc/memveil/THIRD-PARTY-NOTICES.md', \
          'LICENSES/GPL-2.0-only.txt': \
          'usr/share/doc/memveil/LICENSES/GPL-2.0-only.txt', \
-         'licenses/GPL-3.0.txt': 'usr/share/doc/memveil/licenses/GPL-3.0.txt'}}; \
+         'licenses/GPL-3.0.txt': 'usr/share/doc/memveil/licenses/GPL-3.0.txt', \
+         'licenses/crates/bytes-1.12.2/LICENSE': \
+         'usr/share/doc/memveil/licenses/crates/bytes-1.12.2/LICENSE'}}; \
          bad = [k for k, v in cases.items() if m.installed_file_path(k) != v]; \
          assert not bad, bad; \
          print('mapping-ok')"

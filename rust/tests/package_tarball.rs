@@ -13,9 +13,9 @@
 mod package_helpers;
 
 use package_helpers as h;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Docs mirror: every repo `.md` ships byte-identical.
 fn repo_doc_files(root: &std::path::Path) -> BTreeSet<String> {
@@ -64,6 +64,7 @@ fn tarball_layout() {
         "LICENSE",
         "licenses/GPL-3.0.txt",
         "licenses/RUNTIME.LIBRARY.EXCEPTION",
+        "licenses/crates/bytes-1.12.2/LICENSE",
         "THIRD-PARTY-NOTICES.md",
         "MANIFEST.json",
     ] {
@@ -736,15 +737,29 @@ fn runtime_provenance_pinned() {
 fn runtime_licenses_match() {
     // Port of the release-runtime license binding: the two
     // staged GCC texts bind record sha256 to file bytes to
-    // files[] (no compiler-vendor texts survive).
+    // files[] (no compiler-vendor texts survive). The crates/
+    // subtree holds the per-crate texts (bound by
+    // crate_texts_match_locked_sources, not here).
     let set = h::ensure_tarball();
     let manifest = set.bundle.join("MANIFEST.json");
-    let staged: BTreeSet<String> = fs::read_dir(set.bundle.join("licenses"))
+    let mut staged = BTreeSet::new();
+    let mut dirs = BTreeSet::new();
+    for entry in fs::read_dir(set.bundle.join("licenses"))
         .expect("licenses dir")
         .flatten()
-        .map(|e| e.file_name().to_str().unwrap().to_string())
-        .map(|n| format!("licenses/{n}"))
-        .collect();
+    {
+        let name = entry.file_name().to_str().unwrap().to_string();
+        if entry.path().is_dir() {
+            dirs.insert(format!("licenses/{name}"));
+        } else {
+            staged.insert(format!("licenses/{name}"));
+        }
+    }
+    assert_eq!(
+        dirs,
+        BTreeSet::from(["licenses/crates".to_string()]),
+        "{dirs:?}"
+    );
     assert_eq!(staged.len(), 2, "{staged:?}");
     let mut want: Vec<&String> = staged.iter().collect();
     want.sort();
@@ -772,6 +787,244 @@ fn runtime_licenses_match() {
         let digest = h::sha256_file(&set.bundle.join(rel));
         assert_eq!(record, digest, "{rel}: record != file bytes");
         assert_eq!(files_sha, digest, "{rel}: files[] != file bytes");
+    }
+}
+
+/// One manifest crate record: (`R`ust closure vs `E`bpf closure).
+struct CrateRecord {
+    side: char,
+    name: String,
+    version: String,
+    fallback: bool,
+    texts: Vec<String>,
+}
+
+/// Manifest `cargo.crates` + `cargo.ebpf_crates` records.
+fn manifest_crate_records(manifest: &Path) -> Vec<CrateRecord> {
+    let probe = format!(
+        "import json; d = json.load(open({manifest:?}));\n\
+         [print('R|%s|%s|%s|%s' % (c['name'], c['version'], c.get('fallback'), ','.join(c['texts']))) for c in d['cargo']['crates']]\n\
+         [print('E|%s|%s|%s|%s' % (c['name'], c['version'], c.get('fallback'), ','.join(c['texts']))) for c in d['cargo']['ebpf_crates']]"
+    );
+    let mut records = Vec::new();
+    for line in h::run_ok("python3", &["-c", &probe], None).lines() {
+        let mut parts = line.splitn(5, '|');
+        records.push(CrateRecord {
+            side: parts.next().unwrap().chars().next().unwrap(),
+            name: parts.next().unwrap().to_string(),
+            version: parts.next().unwrap().to_string(),
+            fallback: parts.next().unwrap() == "True",
+            texts: parts
+                .next()
+                .unwrap()
+                .split(',')
+                .map(str::to_string)
+                .collect(),
+        });
+    }
+    records
+}
+
+/// Locked crate source dirs: (name, version) -> manifest dir, via an
+/// independent offline cargo metadata query over the pristine input.
+fn metadata_roots(manifest_path: &Path) -> BTreeMap<(String, String), PathBuf> {
+    let out = h::run_unpinned(
+        "cargo",
+        &[
+            "metadata",
+            "--offline",
+            "--locked",
+            "--format-version",
+            "1",
+            "--manifest-path",
+            manifest_path.to_str().unwrap(),
+        ],
+        Some(&h::rust_dir()),
+    );
+    assert!(
+        out.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let tmp = h::scratch("crate-roots");
+    let dump = tmp.join("metadata.json");
+    fs::write(&dump, &out.stdout).unwrap();
+    let probe = format!(
+        "import json, os; d = json.load(open({dump:?}));\n\
+         [print('%s|%s|%s' % (p['name'], p['version'], os.path.dirname(p['manifest_path']))) for p in d['packages']]"
+    );
+    let mut roots = BTreeMap::new();
+    for line in h::run_ok("python3", &["-c", &probe], None).lines() {
+        let mut parts = line.splitn(3, '|');
+        roots.insert(
+            (
+                parts.next().unwrap().to_string(),
+                parts.next().unwrap().to_string(),
+            ),
+            PathBuf::from(parts.next().unwrap()),
+        );
+    }
+    roots
+}
+
+#[test]
+fn crate_texts_match_locked_sources() {
+    // Every linked crate stages its notice files from the LOCKED
+    // sources: each manifest record carries non-empty texts, each
+    // text exists, is non-empty, hashes into files[], and equals
+    // the locked crate source bytes; staged versions equal the
+    // Cargo.lock pins, never latest.
+    let set = h::ensure_tarball();
+    let manifest = set.bundle.join("MANIFEST.json");
+    let records = manifest_crate_records(&manifest);
+    assert!(
+        records.iter().any(|r| r.side == 'R'),
+        "no main-closure records"
+    );
+    assert!(
+        records.iter().any(|r| r.side == 'E'),
+        "no ebpf-closure records"
+    );
+    let root = h::pristine_root();
+    let main_lock: BTreeSet<(String, String)> =
+        h::cargo_lock_packages(&root.join("rust").join("Cargo.lock"))
+            .into_iter()
+            .map(|(name, version, _, _)| (name, version))
+            .collect();
+    let ebpf_lock: BTreeSet<(String, String)> = h::cargo_lock_packages(
+        &root
+            .join("rust")
+            .join("crates")
+            .join("ebpf")
+            .join("Cargo.lock"),
+    )
+    .into_iter()
+    .map(|(name, version, _, _)| (name, version))
+    .collect();
+    let main_roots = metadata_roots(&root.join("rust").join("Cargo.toml"));
+    let ebpf_roots = metadata_roots(
+        &root
+            .join("rust")
+            .join("crates")
+            .join("ebpf")
+            .join("Cargo.toml"),
+    );
+    let mut leaves = BTreeSet::new();
+    for record in &records {
+        assert!(
+            !record.texts.is_empty(),
+            "{} {} stages no texts",
+            record.name,
+            record.version
+        );
+        let lock = if record.side == 'R' {
+            &main_lock
+        } else {
+            &ebpf_lock
+        };
+        assert!(
+            lock.contains(&(record.name.clone(), record.version.clone())),
+            "{} {} is not in the {} lock",
+            record.name,
+            record.version,
+            if record.side == 'R' { "main" } else { "ebpf" }
+        );
+        leaves.insert(format!("{}-{}", record.name, record.version));
+        for text in &record.texts {
+            assert!(text.starts_with("licenses/crates/"), "{text}");
+            let staged = set.bundle.join(text);
+            let bytes = fs::read(&staged).unwrap_or_else(|_| panic!("{text} missing"));
+            assert!(!bytes.is_empty(), "{text} is empty");
+            assert_eq!(
+                h::sha256_file(&staged),
+                h::json_probe(&manifest, &format!("d['files'][{text:?}]")),
+                "{text}: files[] != staged bytes"
+            );
+            if !record.fallback {
+                let roots = if record.side == 'R' {
+                    &main_roots
+                } else {
+                    &ebpf_roots
+                };
+                let dir = roots
+                    .get(&(record.name.clone(), record.version.clone()))
+                    .unwrap_or_else(|| {
+                        panic!("{} {} lacks locked sources", record.name, record.version)
+                    });
+                let base = text.rsplit('/').next().unwrap();
+                let source = dir.join(base);
+                assert_eq!(
+                    fs::read(&source).unwrap_or_else(|_| panic!("{source:?} unreadable")),
+                    bytes,
+                    "{text} != locked source bytes"
+                );
+            }
+        }
+    }
+    // No extra or missing per-crate dirs.
+    let mut actual = BTreeSet::new();
+    for entry in fs::read_dir(set.bundle.join("licenses").join("crates"))
+        .expect("crates dir")
+        .flatten()
+    {
+        assert!(
+            entry.path().is_dir(),
+            "{} is not a dir",
+            entry.path().display()
+        );
+        actual.insert(entry.file_name().to_str().unwrap().to_string());
+    }
+    assert_eq!(actual, leaves);
+}
+
+/// sha256 of the shared Apache-2.0 grant staged for text-less crates.
+/// Re-verify deliberately (it must stay a faithful Apache-2.0 grant)
+/// before updating this pin.
+const SHARED_GRANT_SHA: &str = "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a";
+
+#[test]
+fn shared_grant_text_pinned() {
+    // Exactly the three text-less aya crates take the shared-grant
+    // fallback; every other record stages its own locked texts.
+    let set = h::ensure_tarball();
+    let manifest = set.bundle.join("MANIFEST.json");
+    let records = manifest_crate_records(&manifest);
+    let fallback: BTreeSet<(String, String)> = records
+        .iter()
+        .filter(|r| r.fallback)
+        .map(|r| (r.name.clone(), r.version.clone()))
+        .collect();
+    assert_eq!(
+        fallback,
+        BTreeSet::from([
+            ("aya-ebpf".to_string(), "0.2.1".to_string()),
+            ("aya-ebpf-bindings".to_string(), "0.2.0".to_string()),
+            ("aya-ebpf-macros".to_string(), "0.2.0".to_string()),
+        ]),
+        "{fallback:?}"
+    );
+    for (name, version) in &fallback {
+        let dir = set
+            .bundle
+            .join("licenses")
+            .join("crates")
+            .join(format!("{name}-{version}"));
+        let entries: Vec<_> = fs::read_dir(&dir)
+            .expect("fallback dir")
+            .flatten()
+            .collect();
+        assert_eq!(entries.len(), 1, "{dir:?} holds more than the grant");
+        let file = dir.join("LICENSE-APACHE");
+        assert_eq!(
+            h::sha256_file(&file),
+            SHARED_GRANT_SHA,
+            "{name} grant drift"
+        );
+        let text = fs::read_to_string(&file).unwrap();
+        assert!(
+            text.contains("Apache License") && text.contains("Version 2.0"),
+            "{name} grant is not the Apache-2.0 text"
+        );
     }
 }
 

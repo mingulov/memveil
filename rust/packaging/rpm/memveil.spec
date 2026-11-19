@@ -245,6 +245,7 @@ EOF
 /usr/share/doc/memveil/LICENSES/GPL-2.0.txt
 /usr/share/doc/memveil/licenses/GPL-3.0.txt
 /usr/share/doc/memveil/licenses/RUNTIME.LIBRARY.EXCEPTION
+/usr/share/doc/memveil/licenses/crates/
 /usr/share/man/man1/memveil.1
 /usr/share/man/man1/memveil-record.1
 /usr/share/man/man1/memveil-report.1

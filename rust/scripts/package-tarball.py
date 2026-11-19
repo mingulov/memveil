@@ -30,6 +30,8 @@ Layout of ``dist/memveil-<version>/``::
                            (worked example with oracle logs)
     LICENSE, LICENSES/   MemVeil's own license texts
     licenses/              GCC runtime texts for the shipped lib
+    licenses/crates/       per-crate notice files staged from
+                           the locked crates.io sources
     THIRD-PARTY-NOTICES.md generated attribution (Cargo closure
                            plus the shipped lib; no vendored deps)
     MANIFEST.json          file hashes, versions, source revisions
@@ -408,9 +410,11 @@ def cargo_tree_closure(rust_dir, manifest, package):
 
 
 def cargo_metadata_map(rust_dir, manifest):
-    """({(name, version): (license, source)}, {workspace names}).
+    """({(name, version): (license, source, root)}, {workspace names}).
 
-    Offline and locked, like the tree query above.
+    Offline and locked, like the tree query above. `root` is
+    the crate source directory holding the manifest: the
+    locked bytes license texts stage from.
     """
     proc = run_cargo(
         ["metadata", "--offline", "--locked", "--format-version",
@@ -433,9 +437,15 @@ def cargo_metadata_map(rust_dir, manifest):
             members.add(ident.split(" ")[0])
     packages = {}
     for entry in data.get("packages", []):
+        try:
+            root = os.path.dirname(entry["manifest_path"])
+        except KeyError:
+            fail("cargo metadata lacks manifest_path for %s %s"
+                 % (entry.get("name"), entry.get("version")))
         packages[(entry.get("name"), entry.get("version"))] = (
             entry.get("license") or "NOASSERTION",
             entry.get("source") or "",
+            root,
         )
     return packages, members
 
@@ -451,22 +461,26 @@ FIRST_PARTY_CRATES = frozenset((
 
 
 def third_party_crates(rust_dir, manifest, package):
-    """Sorted third-party (name, version, license, source) records.
+    """(sorted third-party records, {(name, version): crate root}).
 
-    Membership is source-based, not workspace-based: the eBPF
-    workspace consumes memveil-ebpf-common as a path dependency
-    without listing it as a member, and it is still
-    first-party. Unknown path-sourced members fail closed
-    (vendored dependencies need explicit notices handling).
+    Records carry (name, version, license, source); the roots
+    map carries the locked source directory of each record
+    for license-text staging. Membership is source-based,
+    not workspace-based: the eBPF workspace consumes
+    memveil-ebpf-common as a path dependency without
+    listing it as a member, and it is still first-party.
+    Unknown path-sourced members fail closed (vendored
+    dependencies need explicit notices handling).
     """
     closure = cargo_tree_closure(rust_dir, manifest, package)
     packages, members = cargo_metadata_map(rust_dir, manifest)
     records = {}
+    roots = {}
     for name, version in closure:
         key = (name, version)
         if key not in packages:
             fail("cargo metadata lacks %s %s" % (name, version))
-        license_text, source = packages[key]
+        license_text, source, root = packages[key]
         if not source or name in members:
             if name not in FIRST_PARTY_CRATES:
                 fail("vendored path dependency needs notices "
@@ -477,7 +491,182 @@ def third_party_crates(rust_dir, manifest, package):
                  "handling: %s %s (%s)" % (name, version, source))
         records[key] = {"name": name, "version": version,
                         "license": license_text, "source": source}
-    return [records[key] for key in sorted(records)]
+        roots[key] = root
+    ordered = [records[key] for key in sorted(records)]
+    return ordered, roots
+
+
+# Crate source files that count as copyright/permission texts:
+# the leading token of the upper-cased basename must be one of
+# these (so LICENSE, LICENSE-MIT, LICENSE-MIT.txt, COPYING,
+# and UNLICENSE all qualify; LICENSING-notes.md does not).
+CRATE_TEXT_PREFIXES = ("LICENSE", "LICENCE", "COPYING", "NOTICE",
+                       "COPYRIGHT", "UNLICENSE")
+
+# Largest acceptable license text: the Apache-2.0 grant is ~11
+# KiB, so anything past 256 KiB is not a notice file.
+CRATE_TEXT_MAX_BYTES = 262144
+
+
+def crate_text_files(root):
+    """Sorted notice-file basenames in a locked crate directory."""
+    try:
+        names = sorted(os.listdir(root))
+    except OSError as exc:
+        fail("cannot list crate sources at %s: %s" % (root, exc))
+    found = []
+    for name in names:
+        if not name.upper().startswith(CRATE_TEXT_PREFIXES):
+            continue
+        full = os.path.join(root, name)
+        if os.path.islink(full):
+            fail("crate notice is a symlink, refusing to follow: %s"
+                 % full)
+        if not os.path.isfile(full):
+            continue
+        found.append(name)
+    return found
+
+
+def apache_alternative(expr):
+    """True when the SPDX expression offers Apache-2.0 as an option.
+
+    Dual `A OR B` / `A/B` grants and a bare `Apache-2.0` qualify;
+    `WITH`-exception grants do not (the plain grant text alone
+    cannot satisfy them), and neither does an AND-only chain.
+    """
+    tokens = re.split(r"[()\s/]+", expr or "")
+    if "WITH" in tokens:
+        return False
+    if "Apache-2.0" not in tokens:
+        return False
+    return "OR" in tokens or "/" in (expr or "") \
+        or (expr or "").strip() == "Apache-2.0"
+
+
+def stage_crate_texts(staged, crates, ebpf_crates, roots):
+    """Stage locked crate texts under licenses/crates/.
+
+    Fills each record's "texts" with its staged bundle rels
+    (plus "fallback": True when the shared grant below
+    applied) and returns {staged rel: crate source path} for
+    byte verification. Every record must yield at least one
+    text: crates whose locked sources carry notice files
+    stage those bytes; a text-less crate with Apache-2.0 as
+    a grant alternative stages the shared standard text
+    (the most common locked LICENSE-APACHE bytes, with no
+    unique winner failing the package); anything else fails
+    the package.
+    """
+    dest_root = os.path.join(staged, "licenses", "crates")
+    try:
+        os.makedirs(dest_root)
+    except OSError as exc:
+        fail("crate text staging setup failed: %s" % exc)
+    # Shared-grant donor pool: one LICENSE-APACHE per linked
+    # crate that carries it. Copies differ across projects
+    # (appendix trimming, whitespace, filled-in copyright
+    # lines), so the shared text is the most common bytes --
+    # the verbatim standard grant the ecosystem repeats --
+    # and anything without a unique winner fails closed for
+    # a human to resolve. The tarball suite pins the
+    # winning hash, so a lock bump that moves the majority
+    # cannot silently swap the staged grant.
+    donors = []
+    for record in crates + ebpf_crates:
+        root = roots[(record["name"], record["version"])]
+        if "LICENSE-APACHE" in crate_text_files(root):
+            with open(os.path.join(root, "LICENSE-APACHE"),
+                      "rb") as handle:
+                donors.append(handle.read())
+    shared = None
+    if donors:
+        by_hash = {}
+        for data in donors:
+            by_hash.setdefault(hashlib.sha256(data).hexdigest(),
+                               []).append(data)
+        winners = sorted(by_hash.values(), key=len, reverse=True)
+        if len(winners) > 1 and len(winners[0]) == len(winners[1]):
+            fail("no unique majority LICENSE-APACHE among %d "
+                 "locked copies; refusing to pick a shared grant "
+                 "text" % len(donors))
+        shared = winners[0][0]
+        if b"Apache License" not in shared \
+                or b"Version 2.0" not in shared:
+            fail("shared LICENSE-APACHE is not the Apache-2.0 "
+                 "grant text")
+        print("package-tarball: shared grant text wins %d of %d "
+              "locked LICENSE-APACHE copies"
+              % (len(winners[0]), len(donors)))
+    sources = {}
+    for record in crates + ebpf_crates:
+        name, version = record["name"], record["version"]
+        for field in (name, version):
+            if not re.fullmatch(r"[A-Za-z0-9_.\-]+", field or ""):
+                fail("unsafe crate identity for staging: %r %r"
+                     % (name, version))
+        root = roots[(name, version)]
+        leaf = "%s-%s" % (name, version)
+        dest_dir = os.path.join(dest_root, leaf)
+        if not contained(dest_dir, dest_root):
+            fail("crate text staging escapes: %s" % leaf)
+        # Both closures can hold the same crate (same locked
+        # root, verified at the merge): re-staging writes the
+        # identical bytes the byte check below re-verifies.
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+        except OSError as exc:
+            fail("crate text staging setup failed: %s" % exc)
+        texts = []
+        for text in crate_text_files(root):
+            if "/" in text or text in (".", ".."):
+                fail("unsafe crate text name: %s" % text)
+            source = os.path.join(root, text)
+            try:
+                with open(source, "rb") as handle:
+                    data = handle.read()
+            except OSError as exc:
+                fail("cannot read crate text %s: %s" % (source, exc))
+            if not data:
+                fail("empty crate text: %s" % source)
+            if len(data) > CRATE_TEXT_MAX_BYTES:
+                fail("oversize crate text: %s" % source)
+            staged_rel = "licenses/crates/%s/%s" % (leaf, text)
+            dest = os.path.join(dest_dir, text)
+            if not contained(dest, dest_root):
+                fail("crate text staging escapes: %s" % staged_rel)
+            with open(dest, "wb") as handle:
+                handle.write(data)
+            texts.append(staged_rel)
+            sources[staged_rel] = os.path.realpath(source)
+        record["fallback"] = False
+        if not texts:
+            if shared is None or not apache_alternative(
+                    record["license"]):
+                fail("crate %s %s ships no license text and "
+                     "offers no Apache-2.0 alternative "
+                     "(locked sources at %s)"
+                     % (name, version, root))
+            staged_rel = "licenses/crates/%s/LICENSE-APACHE" % leaf
+            dest = os.path.join(dest_dir, "LICENSE-APACHE")
+            if not contained(dest, dest_root):
+                fail("crate text staging escapes: %s" % staged_rel)
+            with open(dest, "wb") as handle:
+                handle.write(shared)
+            # No single source file to re-verify later: the
+            # shared bytes are pinned here, and the staged-tree
+            # walk plus archive-time re-read cover them after.
+            if sha256_file(dest) != hashlib.sha256(shared) \
+                    .hexdigest():
+                fail("shared grant text mis-staged: %s" % staged_rel)
+            texts.append(staged_rel)
+            record["fallback"] = True
+            print("package-tarball: %s %s has no locked notice "
+                  "file; staged the shared Apache-2.0 grant "
+                  "under its %s alternative"
+                  % (name, version, record["license"]))
+        record["texts"] = texts
+    return sources
 
 
 def notices_text(version, lock_sha, ebpf_lock_sha, crates,
@@ -515,6 +704,14 @@ def notices_text(version, lock_sha, ebpf_lock_sha, crates,
         lines.append("- %s %s (%s)" % (
             record["name"], record["version"], record["license"]))
         lines.append("  source: %s" % (record["source"] or "NOASSERTION"))
+        for text in record["texts"]:
+            lines.append("  text: `%s`" % text)
+        if record.get("fallback"):
+            lines.append("  no notice file in the locked sources; "
+                         "redistributed under the Apache-2.0 "
+                         "alternative (shared standard grant text, "
+                         "the most common locked LICENSE-APACHE "
+                         "bytes, verified at package time)")
     lines += [
         "",
         "Statically linked eBPF crates (compiled into `bpf/*.bpf.o`):",
@@ -524,14 +721,24 @@ def notices_text(version, lock_sha, ebpf_lock_sha, crates,
         lines.append("- %s %s (%s)" % (
             record["name"], record["version"], record["license"]))
         lines.append("  source: %s" % (record["source"] or "NOASSERTION"))
+        for text in record["texts"]:
+            lines.append("  text: `%s`" % text)
+        if record.get("fallback"):
+            lines.append("  no notice file in the locked sources; "
+                         "redistributed under the Apache-2.0 "
+                         "alternative (shared standard grant text, "
+                         "the most common locked LICENSE-APACHE "
+                         "bytes, verified at package time)")
     lines += [
         "",
         "License texts: `LICENSE`, `LICENSES/` (MemVeil);",
         "`licenses/GPL-3.0.txt` plus",
-        "`licenses/RUNTIME.LIBRARY.EXCEPTION` (GCC runtime).",
-        "Crate licenses name their SPDX expressions above; full",
-        "crate texts ship with the crates.io sources, not in",
-        "this bundle.",
+        "`licenses/RUNTIME.LIBRARY.EXCEPTION` (GCC runtime);",
+        "`licenses/crates/<name>-<version>/` holds each linked",
+        "crate's notice files staged from the locked crates.io",
+        "sources above (byte-verified at package time). The",
+        "manifest's `cargo.crates` / `cargo.ebpf_crates` records",
+        "bind each crate to its staged texts.",
         "",
     ]
     return "\n".join(lines)
@@ -711,15 +918,22 @@ def main(argv):
             rust_dir, "crates", "ebpf", "Cargo.lock")
         lock_sha = sha256_file(lock_path)
         ebpf_lock_sha = sha256_file(ebpf_lock_path)
-        crates = third_party_crates(
+        crates, crate_roots = third_party_crates(
             rust_dir, os.path.join(rust_dir, "Cargo.toml"),
             "memveil")
-        ebpf_crates = third_party_crates(
+        ebpf_crates, ebpf_roots = third_party_crates(
             rust_dir,
             os.path.join(rust_dir, "crates", "ebpf", "Cargo.toml"),
             "memveil-ebpf")
         if not crates or not ebpf_crates:
             fail("empty Cargo closure; refusing a notice-less bundle")
+        roots = dict(crate_roots)
+        for key, ebpf_root in ebpf_roots.items():
+            if key in roots and roots[key] != ebpf_root:
+                fail("crate %s %s resolves to two source trees: "
+                     "%s vs %s"
+                     % (key[0], key[1], roots[key], ebpf_root))
+            roots[key] = ebpf_root
 
         staged = os.path.join(out_dir, ".stage")
         bindir = os.path.join(staged, "bin")
@@ -863,6 +1077,12 @@ def main(argv):
                      % (staged_rel, ", ".join(paths)))
             shutil.copy2(provider, os.path.join(staged, staged_rel))
             license_sources[staged_rel] = os.path.realpath(provider)
+        # Linked-crate notice files from the locked sources (MIT
+        # `bytes` et al.): every Cargo closure record stages its
+        # texts here, before the staged-tree walk below binds
+        # them into the manifest.
+        crate_text_sources = stage_crate_texts(
+            staged, crates, ebpf_crates, roots)
         print("package-tarball: license texts staged")
 
         # Every staged copy must match the exact source bytes it
@@ -896,6 +1116,12 @@ def main(argv):
             full = os.path.join(staged, *rel.split("/"))
             if sha256_file(full) != sha256_file(source):
                 problems.append("staged license differs: %s" % rel)
+        for rel, source in sorted(crate_text_sources.items()):
+            full = os.path.join(staged, *rel.split("/"))
+            if not os.path.isfile(full) or os.path.islink(full):
+                problems.append("staged crate text missing: %s" % rel)
+            elif sha256_file(full) != sha256_file(source):
+                problems.append("staged crate text differs: %s" % rel)
         # Tree-derived copies must equal the input tree bytes and
         # cover the whole input selection (a deletion under
         # staging is otherwise invisible).
