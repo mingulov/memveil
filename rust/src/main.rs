@@ -12,6 +12,7 @@ use memveil::cli::top::run_top;
 use memveil::platform::signal::{ensure_inherited_signal_block, ignore_sigpipe};
 use memveil::platform::stdout::write_stdout;
 use std::ffi::OsString;
+use std::os::unix::ffi::OsStrExt;
 use std::process::ExitCode;
 
 /// Usage text for the memveil program.
@@ -70,6 +71,10 @@ enum Dispatch {
 /// Mojo does (open the raw path, silence an unrenderable echo);
 /// every other subcommand takes text, so a consumed word that
 /// cannot decode is a normal usage error (exit 2), never a panic.
+/// One exception, matching Mojo's per-verb pre-parse scan: when
+/// any word is `--help` or `-h`, help wins over undecodable
+/// siblings and the verb runs (it prints help and returns before
+/// consuming any word), so undecodable words forward lossily.
 fn dispatch(raw: &[OsString]) -> Dispatch {
     let verb_os = match raw.first() {
         None => return Dispatch::InvalidUsage,
@@ -99,10 +104,19 @@ fn dispatch(raw: &[OsString]) -> Dispatch {
         "record" | "top" | "qualify" | "bind-profile" => {}
         _ => return Dispatch::InvalidUsage,
     }
+    // Mojo's per-verb entry scans every word for --help/-h before
+    // parsing, with a byte-wise comparison an undecodable sibling
+    // never trips. Detect that here, before UTF-8 decoding, and
+    // forward lossily: the verb prints help and returns before
+    // consuming any word, so the lossy words are never used.
+    let help_wins = raw[1..]
+        .iter()
+        .any(|word| word.as_bytes() == b"--help" || word.as_bytes() == b"-h");
     let mut rest = Vec::with_capacity(raw.len().saturating_sub(1));
     for arg in &raw[1..] {
         match arg.to_str() {
             Some(text) => rest.push(text.to_string()),
+            None if help_wins => rest.push(arg.to_string_lossy().into_owned()),
             None => return Dispatch::InvalidUsage,
         }
     }
@@ -249,6 +263,35 @@ mod tests {
                 is_invalid(&os(&[verb, b"--output", b"\xfe\xfd"])),
                 "{verb:?}"
             );
+        }
+    }
+
+    #[test]
+    fn help_wins_over_undecodable_siblings() {
+        // Mojo's per-verb entry scans every word for --help/-h
+        // before parsing with a byte-wise comparison, so an
+        // undecodable sibling never blocks help: all four text
+        // verbs forward and print help (exit 0) instead of
+        // failing usage (exit 2). The flag keeps its bytes and
+        // position does not matter.
+        for verb in [b"record".as_slice(), b"top", b"qualify", b"bind-profile"] {
+            for flag in [b"--help".as_slice(), b"-h"] {
+                let shapes: &[&[&[u8]]] = &[
+                    &[verb, flag, b"\xff"],
+                    &[verb, b"\xff", flag],
+                    &[verb, b"\xff", flag, b"\xfe\xfd"],
+                ];
+                for shape in shapes {
+                    match dispatch(&os(shape)) {
+                        Dispatch::Run { verb: v, rest } => {
+                            assert_eq!(v, String::from_utf8_lossy(verb));
+                            let want = String::from_utf8_lossy(flag).into_owned();
+                            assert!(rest.contains(&want), "{verb:?} {shape:?}: {rest:?}");
+                        }
+                        _ => panic!("{verb:?} {shape:?} must dispatch to Run"),
+                    }
+                }
+            }
         }
     }
 
