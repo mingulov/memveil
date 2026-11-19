@@ -361,15 +361,70 @@ pub(crate) fn max_frozen_ring_bytes() -> u32 {
 /// sub-ceiling declaration up to pow2 x page cannot cross the
 /// ceiling — so any declaration passing here also fits after the
 /// loader's rounding, and a second loop could never fire. The
-/// live read-back gate after loading stays.
-fn check_declared_maps(channel: Channel, declared: &[MapSpec]) -> Result<(), SessionError> {
+/// live read-back gate after loading stays. Diagnostic replays
+/// share this exact rule through [`check_replay_maps`].
+pub(crate) fn check_declared_maps(
+    channel: Channel,
+    declared: &[MapSpec],
+) -> Result<(), SessionError> {
     check_maps_loaded(channel, declared)
 }
 
+/// Channel owning every named program, when the names agree on
+/// exactly one. Diagnostic replays resolve their channel this
+/// way: every caller passes one channel's frozen program set, so
+/// a replay gates exactly what its session's normal path would.
+/// Empty, unknown, or mixed sets yield `None` and the replay
+/// keeps the ring abuse cap.
+pub(crate) fn channel_for_programs(programs: &[String]) -> Option<Channel> {
+    use super::attach::expected_programs;
+    if programs.is_empty() {
+        return None;
+    }
+    let mut found = None;
+    for channel in [Channel::Attempt, Channel::Lifecycle, Channel::Copy] {
+        let expected = expected_programs(channel);
+        let names: Vec<&str> = expected.iter().map(|spec| spec.name.as_str()).collect();
+        if !programs.iter().all(|name| names.contains(&name.as_str())) {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(channel);
+    }
+    found
+}
+
+/// Replay geometry gate: the same declared-map rule as the normal
+/// path ([`check_declared_maps`]) for a replay that names its
+/// channel. The verdict's CO-RE check returns before the declared
+/// gate, so a BTF outage at verdict time can send a renegade
+/// object to replay; if BTF reads again there, a ring-only check
+/// would let an oversized non-ring map reach the loader. A replay
+/// that cannot name its channel keeps the ring abuse cap.
+pub(crate) fn check_replay_maps(
+    channel: Option<Channel>,
+    declared: &[MapSpec],
+) -> Result<(), SessionError> {
+    match channel {
+        Some(channel) => check_declared_maps(channel, declared),
+        None => {
+            if replay_rings_fit(declared) {
+                Ok(())
+            } else {
+                Err(SessionError::Geometry(
+                    "replay refused: ring declaration exceeds the frozen ceiling".to_owned(),
+                ))
+            }
+        }
+    }
+}
+
 /// True when every declared ring fits the largest frozen
-/// ceiling. The diagnostic replay cannot know the channel, so
-/// it enforces only this abuse cap; precise per-channel
-/// ceilings stay with the session pre-check.
+/// ceiling. The fallback for a diagnostic replay that cannot
+/// name its channel; channel-naming replays enforce the precise
+/// per-channel rule through [`check_replay_maps`] instead.
 pub(crate) fn replay_rings_fit(declared: &[MapSpec]) -> bool {
     let ceiling = u64::from(max_frozen_ring_bytes());
     let page = host_page_size();
@@ -2023,5 +2078,65 @@ mod tests {
         assert!(replay_rings_fit(&crate::bpf::maps::expected_copy_maps_c()));
         let maps = with_ring(Channel::Attempt, "mv_attempts", 2_147_483_648);
         assert!(!replay_rings_fit(&maps));
+    }
+
+    #[test]
+    fn channel_for_programs_resolves_frozen_sets() {
+        // One channel's frozen program set — the shape every
+        // replay caller passes — resolves to that channel.
+        use crate::bpf::attach::expected_programs;
+        for channel in [Channel::Attempt, Channel::Lifecycle, Channel::Copy] {
+            let names: Vec<String> = expected_programs(channel)
+                .iter()
+                .map(|spec| spec.name.clone())
+                .collect();
+            assert_eq!(channel_for_programs(&names), Some(channel));
+            // A lone program resolves too.
+            assert_eq!(channel_for_programs(&names[..1]), Some(channel));
+        }
+        // Empty, unknown, and mixed sets stay channel-blind.
+        assert_eq!(channel_for_programs(&[]), None);
+        assert_eq!(channel_for_programs(&["mv_bogus".to_string()]), None);
+        assert_eq!(
+            channel_for_programs(&[
+                "mv_swiotlb_attempt".to_string(),
+                "mv_swiotlb_attempt".to_string(),
+                "mv_bogus".to_string()
+            ]),
+            None
+        );
+        assert_eq!(
+            channel_for_programs(&["mv_swiotlb_attempt".to_string(), "mv_unmap".to_string()]),
+            None
+        );
+    }
+
+    #[test]
+    fn replay_gate_matches_normal_path() {
+        // A channel-naming replay refuses exactly what the normal
+        // path refuses: an oversized non-ring map fails here even
+        // though the ring-only cap would admit it.
+        let mut maps = expected_maps(Channel::Attempt);
+        let row = maps
+            .iter_mut()
+            .find(|row| row.name == "mv_counts")
+            .expect("counts row");
+        row.max_entries = 2_147_483_648;
+        assert!(replay_rings_fit(&maps));
+        let error = check_replay_maps(Some(Channel::Attempt), &maps)
+            .expect_err("oversized non-ring map must be refused on replay");
+        assert!(
+            error.to_string().contains("mv_counts"),
+            "refusal must name the map, got: {error}"
+        );
+        // Frozen sets pass on every channel, and the channel-blind
+        // fallback keeps the old ring-cap verdicts.
+        for channel in [Channel::Attempt, Channel::Lifecycle, Channel::Copy] {
+            let maps = expected_maps(channel);
+            check_replay_maps(Some(channel), &maps).expect("frozen set must replay-pass");
+            check_replay_maps(None, &maps).expect("frozen set must cap-pass");
+        }
+        let maps = with_ring(Channel::Attempt, "mv_attempts", 2_147_483_648);
+        assert!(check_replay_maps(None, &maps).is_err());
     }
 }

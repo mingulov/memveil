@@ -44,7 +44,7 @@
 
 use super::collector::{GeomOut, KernelSource, MissOut, PollOut, SnapOut, StatsOut};
 use super::loadcheck::{errno_cause, errno_from_chain, errno_name};
-use crate::bpf::session::{core_precondition, declared_map_specs, replay_rings_fit};
+use crate::bpf::session::{check_replay_maps, core_precondition, declared_map_specs};
 use crate::bpf::{
     AttachKind, AttachSpec, Channel, Frame, Session, SessionError, copy_specs, lifecycle_specs,
     resolve_copy_offsets, verify_lifecycle_dirs,
@@ -155,15 +155,17 @@ fn session_message_with(op: u32, message: &str, errno: Option<i32>) -> String {
 /// classification. Failed loads leave no kernel state, so the replay
 /// is side-effect free; a replay that loads (or fails without an
 /// errno) yields nothing. The replay shares the session's CO-RE
-/// precondition and ring abuse cap, so it can neither relocate off
-/// a second BTF read nor allocate a refused ring.
-fn load_errno(elf: &[u8]) -> Option<i32> {
+/// precondition and declared-map gate for its channel, so it can
+/// neither relocate off a second BTF read nor allocate a map the
+/// session refused (a channel-blind replay keeps the ring abuse
+/// cap).
+fn load_errno(elf: &[u8], channel: Option<Channel>) -> Option<i32> {
     let pre = core_precondition(elf);
     if pre.relocations && pre.btf.is_none() {
         return None;
     }
     if let Some(declared) = declared_map_specs(elf)
-        && !replay_rings_fit(&declared)
+        && check_replay_maps(channel, &declared).is_err()
     {
         return None;
     }
@@ -880,7 +882,7 @@ impl ChannelSlot {
             let errno = if matches!(e, SessionError::Geometry(_)) {
                 None
             } else {
-                load_errno(&self.elf)
+                load_errno(&self.elf, Channel::from_ring(&self.ring))
             };
             let message = session_message_with(OP_LOAD, &e.to_string(), errno);
             return OpOut { ok: false, message };
@@ -1885,11 +1887,11 @@ mod tests {
         AyaKernel, ChannelPoller, ChannelSlot, PollRotation, added_fds, channel_attach_order,
         channel_detach_order, encode_frame, fb_flag_reason, fb_invalid_detail, fb_read_detail,
         fb_valid, fdinfo_u64, identify_copy_progs, identify_lifecycle_progs, join_op_message,
-        os_errno, parse_prog_misses, parse_prog_name, poll_advance, prog_fds, prog_info,
-        rollback_order, rollback_piece, rotate_poll, session_message,
+        load_errno, os_errno, parse_prog_misses, parse_prog_name, poll_advance, prog_fds,
+        prog_info, rollback_order, rollback_piece, rotate_poll, session_message,
     };
     use super::{KernelSource, PollOut};
-    use crate::bpf::{Frame, SessionError};
+    use crate::bpf::{Channel, Frame, SessionError};
 
     struct ScriptPoller {
         outs: Vec<PollOut>,
@@ -2282,6 +2284,34 @@ mod tests {
         assert!(got2.contains("op=2 domain=2:"), "{got2}");
         assert!(!got2.contains("code="));
         assert_eq!(crate::capture::loadcheck::load_refusal_code(&got2), "");
+    }
+
+    #[test]
+    fn load_errno_replay_refuses_renegade_before_load() {
+        // badmap.o declares mv_counts with 7 entries: the ring-only
+        // cap admits it, but the channel-naming replay shares the
+        // session gate and yields no errno without allocating. The
+        // refusal is userspace, so it holds on every privilege;
+        // pre-fix the replay proceeded to the loader (EPERM
+        // unprivileged).
+        let path = crate::platform::test_support::repo_root().join("tests/fixtures/elf/badmap.o");
+        let elf = std::fs::read(&path).expect("read badmap.o fixture");
+        assert_eq!(load_errno(&elf, Some(Channel::Attempt)), None);
+    }
+
+    #[test]
+    fn load_errno_replay_still_recovers_errno() {
+        // Positive control: an admitted object still replays for
+        // its errno. Unprivileged the map syscall refuses EPERM;
+        // root loads outright and yields nothing.
+        // SAFETY: pure id query.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("SKIP load_errno_replay_still_recovers_errno: running as root");
+            return;
+        }
+        let path = crate::platform::test_support::repo_root().join("tests/fixtures/elf/ok.o");
+        let elf = std::fs::read(&path).expect("read ok.o fixture");
+        assert_eq!(load_errno(&elf, Some(Channel::Attempt)), Some(1));
     }
 
     #[test]

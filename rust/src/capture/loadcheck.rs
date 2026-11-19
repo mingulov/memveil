@@ -18,7 +18,8 @@
 
 use crate::bpf::Session;
 use crate::bpf::session::{
-    SessionError, core_precondition, declared_map_specs, diagnose_program_loads, replay_rings_fit,
+    SessionError, channel_for_programs, check_replay_maps, core_precondition, declared_map_specs,
+    diagnose_program_loads,
 };
 use crate::platform::reader::bytes_to_text;
 use aya::{EbpfLoader, VerifierLogLevel};
@@ -359,7 +360,9 @@ pub(crate) fn verifier_log_from_display(message: &str) -> Option<&str> {
 /// shares the session's CO-RE precondition: one sysfs BTF
 /// read, a fail-closed refusal for relocation-carrying
 /// objects when it fails, and that same parsed BTF handed to
-/// the loader.
+/// the loader. It also shares the session's declared-map gate
+/// for its channel, so a renegade object the verdict sent here
+/// on a BTF outage cannot allocate on replay.
 pub fn diagnose_load(elf: &[u8], programs: &[String]) -> LoadDiag {
     let mut out = LoadDiag::default();
     let pre = core_precondition(elf);
@@ -372,11 +375,14 @@ pub fn diagnose_load(elf: &[u8], programs: &[String]) -> LoadDiag {
             .unwrap_or_else(|| "EINVAL".to_string());
         return out;
     }
-    // Abuse cap: a ring the session refused must not allocate in
-    // the replay either. Empty errno, like other structural replay
+    // Geometry gate: the verdict's CO-RE check returns before
+    // the declared gate, so a BTF outage at verdict time sends
+    // renegade objects here; the replay enforces the same channel
+    // rule before allocating (a channel-blind replay keeps the
+    // ring abuse cap). Empty errno, like other structural replay
     // refusals (garbage input behaves the same way).
     if let Some(declared) = declared_map_specs(elf)
-        && !replay_rings_fit(&declared)
+        && check_replay_maps(channel_for_programs(programs), &declared).is_err()
     {
         return out;
     }
@@ -769,6 +775,61 @@ mod tests {
             "geometry refusals skip the replay, got: {}",
             results[0].detail
         );
+    }
+
+    /// `ok.o` with the 6-entry `mv_counts` BTF array length widened
+    /// to 2 GiB entries: sections and programs untouched, one
+    /// non-ring declaration oversized. Returns the patched bytes
+    /// plus the patched count.
+    fn oversize_counts_elf() -> (Vec<u8>, usize) {
+        let path = repo_root().join("tests/fixtures/elf/ok.o");
+        let mut elf = std::fs::read(&path).expect("read ok.o fixture");
+        let (off, _) = section_range(&elf, ".BTF");
+        let magic = u16::from_le_bytes(elf[off..off + 2].try_into().expect("magic"));
+        assert_eq!(magic, 0xEB9F, "BTF magic");
+        let hdr = u32::from_le_bytes(elf[off + 4..off + 8].try_into().expect("hdr")) as usize;
+        let type_off =
+            u32::from_le_bytes(elf[off + 8..off + 12].try_into().expect("toff")) as usize;
+        let type_len =
+            u32::from_le_bytes(elf[off + 12..off + 16].try_into().expect("tlen")) as usize;
+        let mut patched = 0;
+        let mut at = off + hdr + type_off;
+        let end = at + type_len;
+        while at + 12 <= end {
+            let info = u32::from_le_bytes(elf[at + 4..at + 8].try_into().expect("info"));
+            if (info >> 24) & 31 == 3 {
+                let len_at = at + 20;
+                let len = u32::from_le_bytes(elf[len_at..len_at + 4].try_into().expect("nelems"));
+                if len == 6 {
+                    elf[len_at..len_at + 4].copy_from_slice(&2_147_483_648u32.to_le_bytes());
+                    patched += 1;
+                }
+            }
+            at += btf_type_len(&elf, at);
+        }
+        (elf, patched)
+    }
+
+    #[test]
+    fn replay_refuses_oversize_nonring_map() {
+        // A real object whose only sin is a 2 GiB `mv_counts`
+        // declaration: the ring-only cap admits it, but the replay
+        // shares the session's channel gate and refuses before
+        // allocating — empty errno, no lines. The refusal is
+        // userspace, so it holds on every privilege; pre-fix the
+        // replay proceeded to the loader (EPERM unprivileged).
+        use crate::bpf::session::declared_map_specs;
+        let (elf, patched) = oversize_counts_elf();
+        assert_eq!(patched, 1, "must widen exactly the counts array");
+        let declared = declared_map_specs(&elf).expect("patched object must parse");
+        let counts = declared
+            .iter()
+            .find(|row| row.name == "mv_counts")
+            .expect("patched object declares mv_counts");
+        assert_eq!(counts.max_entries, 2_147_483_648);
+        let diag = diagnose_load(&elf, &["mv_swiotlb_attempt".to_string()]);
+        assert_eq!(diag.errno, "");
+        assert!(diag.lines.is_empty());
     }
 
     #[test]
