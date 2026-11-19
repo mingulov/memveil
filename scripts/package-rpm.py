@@ -332,6 +332,10 @@ def main(argv):
              "(--binary/--bpf-dir/--build)")
     if work is None or out_dir is None:
         fail("want --work DIR --out DIR")
+    # rpmbuild resolves _topdir against its own cwd, so
+    # relative dirs break %prep: absolutize up front.
+    work = os.path.abspath(work)
+    out_dir = os.path.abspath(out_dir)
     if shutil.which("rpmbuild") is None:
         fail("BLOCKED: rpmbuild is not installed")
 
