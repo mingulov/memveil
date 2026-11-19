@@ -1027,6 +1027,527 @@ def test_seal_rejects_deep_stale_prebuilt(workshop, tmp_path):
             tmp_path / "swapped.provenance.json")
 
 
+def _transcribe(row):
+    """Unsigned row transcription hashes, as the runner records."""
+    found = []
+    for path in sorted(Path(row).iterdir()):
+        if path.name == "receipt.json" or not path.is_file() \
+                or path.is_symlink():
+            continue
+        found.append({"name": path.name,
+                      "sha256": sha(path.read_bytes()),
+                      "bytes": path.stat().st_size})
+    return found
+
+
+MATRIX_GATE = "kernel-matrix/2"
+MATRIX_ROW = "row1"
+NONMATRIX_GATE = "synthetic-counts/1"
+
+
+def _ephemeral_key(target):
+    """Fresh Ed25519 signing key; returns (private, public)."""
+    target = Path(target)
+    subprocess.run(
+        ["ssh-keygen", "-q", "-t", "ed25519", "-N", "",
+         "-f", str(target)],
+        check=True, capture_output=True)
+    return target, Path(str(target) + ".pub")
+
+
+def _sign(key, subject):
+    """Sign subject with ssh-keygen -Y; return the signature path."""
+    subprocess.run(
+        ["ssh-keygen", "-Y", "sign", "-f", str(key),
+         "-n", "memveil-candidate", str(subject)],
+        check=True, capture_output=True)
+    return Path(str(subject) + ".sig")
+
+
+def _write_policy(m, path, required_gates, trusted):
+    policy = {"schema": "memveil-candidate-policy/1",
+              "claim": "ordinary-preview",
+              "retention_days": "90",
+              "trusted_keys": list(trusted),
+              "required_gates": required_gates}
+    Path(path).write_bytes(m.canonical(policy))
+    return policy
+
+
+def _sealed_for_qualify(workshop, tmp_path, required_gates):
+    """Seal a manifest bound to a real policy and ephemeral trust.
+
+    The policy lives outside the sealed root (the seal only binds
+    its digest), so the fixture root stays clean.
+    """
+    m, fix = seal_paths(workshop, tmp_path)
+    private, public = _ephemeral_key(Path(tmp_path) / "key")
+    policy_path = Path(tmp_path) / "policy.json"
+    _write_policy(m, policy_path, required_gates,
+                  [sha(public.read_bytes())])
+    manifest = m.create_manifest(
+        fix["bundle_dir"], fix["artifacts"], policy_path,
+        {"root": str(fix["root"]),
+         "harness_bin": workshop.harness_bin()})
+    manifest_path = Path(tmp_path) / "candidate.json"
+    candidate_id = m.seal_manifest(manifest, manifest_path)
+    return m, {"root": fix["root"], "manifest": manifest,
+               "manifest_path": manifest_path,
+               "candidate_id": candidate_id,
+               "policy_path": policy_path,
+               "key": private, "pub": public}
+
+
+def _signed_gate(m, ctx, evidence, gate, inputs_name,
+                 receipt_name, inputs):
+    """Write inputs + gate receipt, sign it, stage the pubkey."""
+    evidence = Path(evidence)
+    inputs_path = evidence / inputs_name
+    inputs_path.write_bytes(m.canonical(inputs))
+    receipt = {"schema": "memveil-gate-receipt/1", "gate": gate,
+               "candidate_sha256": ctx["candidate_id"],
+               "source_commit":
+               ctx["manifest"]["source"]["commit"],
+               "inputs": inputs_name,
+               "inputs_sha256": sha(inputs_path.read_bytes())}
+    receipt_path = evidence / receipt_name
+    receipt_path.write_bytes(m.canonical(receipt))
+    sig = _sign(ctx["key"], receipt_path)
+    shutil.copy2(ctx["pub"], evidence / "signer.pub")
+    return {"receipt": receipt_name,
+            "receipt_sha256": sha(receipt_path.read_bytes()),
+            "signature": sig.name, "public_key": "signer.pub"}
+
+
+def _write_qualification(m, ctx, path, gates):
+    doc = {"schema": "memveil-qualification/1",
+           "candidate_sha256": ctx["candidate_id"],
+           "source_commit":
+           ctx["manifest"]["source"]["commit"],
+           "claim": "ordinary-preview",
+           "evidence_archive":
+           {"name": "qualification-evidence.tar.gz",
+            "size": "1", "sha256": "5" * 64},
+           "gates": gates}
+    Path(path).write_bytes(m.canonical(doc))
+    return doc
+
+
+def _matrix_required_gates():
+    return {MATRIX_GATE:
+            {"environment": "ordinary-linux",
+             "predicates": {"required_rows": "equal",
+                            "failed_rows": "zero",
+                            "skipped_rows": "zero"}}}
+
+
+def _write_matrix_evidence(m, evidence):
+    """One honest matrix row: receipt, cached inputs, raw, summary."""
+    matrix = Path(evidence) / "matrix"
+    row = matrix / MATRIX_ROW
+    row.mkdir(parents=True)
+    oracle = row / "oracle.txt"
+    oracle.write_text("oracle events: 13000\noracle losses: 0\n")
+    cached = {"row": MATRIX_ROW, "oracle_events": "13000",
+              "oracle_losses": "0"}
+    (row / "oracle-inputs.json").write_bytes(m.canonical(cached))
+    files = _transcribe(row)
+    assert {entry["name"] for entry in files} == {
+        "oracle.txt", "oracle-inputs.json"}
+    receipt = {"row": MATRIX_ROW,
+               "oracle": {"text_sha256":
+                          sha(oracle.read_bytes())},
+               "files": files}
+    (row / "receipt.json").write_bytes(m.canonical(receipt))
+    summary = [{"id": MATRIX_ROW, "status": "pass"}]
+    (matrix / "summary.json").write_bytes(m.canonical(summary))
+    return matrix
+
+
+def _matrix_inputs(m, evidence):
+    inventory = m.build_evidence_inventory(evidence, "matrix")
+    assert inventory, "empty matrix inventory"
+    return {"schema": "memveil-matrix-input/2",
+            "matrix_directory": "matrix",
+            "evidence_inventory_sha256":
+            m.digest_canonical(inventory)}
+
+
+def _matrix_qualified(workshop, tmp_path):
+    """Honest signed matrix gate; returns (m, ctx, evidence, q)."""
+    m, ctx = _sealed_for_qualify(workshop, tmp_path,
+                                 _matrix_required_gates())
+    evidence = Path(tmp_path) / "evidence"
+    evidence.mkdir()
+    _write_matrix_evidence(m, evidence)
+    binding = _signed_gate(m, ctx, evidence, MATRIX_GATE,
+                           "inputs.json", "receipt.json",
+                           _matrix_inputs(m, evidence))
+    q_path = Path(tmp_path) / "qualification.json"
+    doc = _write_qualification(m, ctx, q_path,
+                               {MATRIX_GATE: binding})
+    return m, ctx, evidence, q_path, doc
+
+
+def test_matrix_inputs_require_signed_inventory(workshop,
+                                                tmp_path):
+    m, ctx = _sealed_for_qualify(workshop, tmp_path,
+                                 _matrix_required_gates())
+    evidence = Path(tmp_path) / "evidence"
+    evidence.mkdir()
+    _write_matrix_evidence(m, evidence)
+    # /1 inputs fail closed even with a valid signature on them.
+    legacy = {"schema": "memveil-matrix-input/1",
+              "matrix_directory": "matrix",
+              "lock_sha256": "1" * 64}
+    binding = _signed_gate(m, ctx, evidence, MATRIX_GATE,
+                           "inputs.json", "receipt.json",
+                           legacy)
+    q_path = Path(tmp_path) / "qualification.json"
+    _write_qualification(m, ctx, q_path,
+                         {MATRIX_GATE: binding})
+    with pytest.raises(ValueError,
+                       match="invalid fields|[Ff]ail closed"):
+        m.verify_qualification(ctx["manifest_path"], q_path,
+                               ctx["policy_path"], evidence)
+    # A /2-shaped doc with a /1 schema gets the explicit blame.
+    flipped = _matrix_inputs(m, evidence)
+    flipped["schema"] = "memveil-matrix-input/1"
+    binding = _signed_gate(m, ctx, evidence, MATRIX_GATE,
+                           "inputs.json", "receipt.json",
+                           flipped)
+    _write_qualification(m, ctx, q_path,
+                         {MATRIX_GATE: binding})
+    with pytest.raises(ValueError, match="[Ff]ail closed"):
+        m.verify_qualification(ctx["manifest_path"], q_path,
+                               ctx["policy_path"], evidence)
+    # /2 inputs without the inventory digest fail closed too.
+    naked = {"schema": "memveil-matrix-input/2",
+             "matrix_directory": "matrix"}
+    binding = _signed_gate(m, ctx, evidence, MATRIX_GATE,
+                           "inputs.json", "receipt.json",
+                           naked)
+    _write_qualification(m, ctx, q_path,
+                         {MATRIX_GATE: binding})
+    with pytest.raises(ValueError, match="invalid fields"):
+        m.verify_qualification(ctx["manifest_path"], q_path,
+                               ctx["policy_path"], evidence)
+
+
+def test_inventory_rejects_altered_row_receipt(workshop,
+                                               tmp_path):
+    m, ctx, evidence, q_path, _ = _matrix_qualified(
+        workshop, tmp_path)
+    assert m.verify_qualification(
+        ctx["manifest_path"], q_path, ctx["policy_path"],
+        evidence) == {"ok": True, "gates": [MATRIX_GATE]}
+    receipt_path = evidence / "matrix" / MATRIX_ROW \
+        / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["files"][0]["sha256"] = "7" * 64
+    receipt_path.write_bytes(m.canonical(receipt))
+    with pytest.raises(ValueError, match="inventory differs"):
+        m.verify_qualification(ctx["manifest_path"], q_path,
+                               ctx["policy_path"], evidence)
+    # The inventory error fires before signature verification:
+    # breaking the signature as well must not change the blame.
+    (evidence / "receipt.json.sig").write_bytes(b"invalid\n")
+    with pytest.raises(ValueError, match="inventory differs"):
+        m.verify_qualification(ctx["manifest_path"], q_path,
+                               ctx["policy_path"], evidence)
+
+
+def test_inventory_rejects_missing_oracle_inputs(workshop,
+                                                 tmp_path):
+    m, ctx, evidence, q_path, _ = _matrix_qualified(
+        workshop, tmp_path)
+    (evidence / "matrix" / MATRIX_ROW
+     / "oracle-inputs.json").unlink()
+    with pytest.raises(ValueError, match="missing"):
+        m.verify_qualification(ctx["manifest_path"], q_path,
+                               ctx["policy_path"], evidence)
+
+
+def test_inventory_rejects_extra_file(workshop, tmp_path):
+    m, ctx, evidence, q_path, _ = _matrix_qualified(
+        workshop, tmp_path)
+    row = evidence / "matrix" / MATRIX_ROW
+    (row / "extra.bin").write_bytes(b"unretained\n")
+    with pytest.raises(ValueError,
+                       match="unknown|extra|refuses"):
+        m.verify_qualification(ctx["manifest_path"], q_path,
+                               ctx["policy_path"], evidence)
+    (row / "extra.bin").unlink()
+    (evidence / "matrix" / "extra.json").write_text("{}\n")
+    with pytest.raises(ValueError, match="extra"):
+        m.verify_qualification(ctx["manifest_path"], q_path,
+                               ctx["policy_path"], evidence)
+
+
+def test_original_signature_rejects_mutated_evidence(workshop,
+                                                     tmp_path):
+    m, ctx, evidence, q_path, doc = _matrix_qualified(
+        workshop, tmp_path)
+    assert m.verify_qualification(
+        ctx["manifest_path"], q_path, ctx["policy_path"],
+        evidence) == {"ok": True, "gates": [MATRIX_GATE]}
+    signed = {name: sha((evidence / name).read_bytes())
+              for name in ("receipt.json", "receipt.json.sig",
+                           "inputs.json")}
+    # The attack: retained oracle counts change, every unsigned
+    # hash is refreshed (row transcription plus the outer
+    # evidence-archive hash), the cached inputs stay behind.
+    row = evidence / "matrix" / MATRIX_ROW
+    oracle = row / "oracle.txt"
+    original = oracle.read_text()
+    altered = original.replace("13000", "999999")
+    assert original != altered
+    oracle.write_text(altered)
+    receipt_path = row / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["oracle"]["text_sha256"] = sha(
+        oracle.read_bytes())
+    receipt["files"] = _transcribe(row)
+    receipt_path.write_bytes(m.canonical(receipt))
+    doc["evidence_archive"]["sha256"] = "6" * 64
+    q_path.write_bytes(m.canonical(doc))
+    assert signed == {name: sha((evidence / name).read_bytes())
+                      for name in signed}, \
+        "the signed bytes must be untouched"
+    with pytest.raises(ValueError, match="inventory differs"):
+        m.verify_qualification(ctx["manifest_path"], q_path,
+                               ctx["policy_path"], evidence)
+    # The original signature itself still verifies standalone:
+    # only the signed inventory catches the substitution.
+    m.verify_signature(evidence / "receipt.json",
+                       evidence / "receipt.json.sig",
+                       evidence / "signer.pub",
+                       [sha((evidence / "signer.pub")
+                            .read_bytes())])
+
+
+def _nonmatrix_required_gates():
+    return {NONMATRIX_GATE:
+            {"environment": "offline",
+             "predicates": {"events": "equal",
+                            "losses": "zero"}}}
+
+
+def _write_nonmatrix_evidence(m, ctx, evidence):
+    """Golden non-matrix gate: fixed counts over retained raws."""
+    evidence = Path(evidence)
+    evidence.mkdir(exist_ok=True)
+    inputs = {"schema": "memveil-gate-input/1",
+              "environment": "offline",
+              "product": {"events": "12", "losses": "0"},
+              "oracle": {"events": "12", "losses": "0"}}
+    inputs["sources"] = {}
+    for side in ("product", "oracle"):
+        raw = evidence / (side + ".json")
+        raw.write_bytes(m.canonical(inputs[side]))
+        inputs["sources"][side] = {
+            name: {"file": raw.name,
+                   "sha256": sha(raw.read_bytes()),
+                   "path": [name], "encoding": "u64"}
+            for name in inputs[side]}
+    binding = _signed_gate(m, ctx, evidence, NONMATRIX_GATE,
+                           "input.json", "receipt.json",
+                           inputs)
+    return binding
+
+
+def test_nonmatrix_gate_chain_unchanged(workshop, tmp_path):
+    m, ctx = _sealed_for_qualify(
+        workshop, tmp_path, _nonmatrix_required_gates())
+    evidence = Path(tmp_path) / "evidence"
+    binding = _write_nonmatrix_evidence(m, ctx, evidence)
+    q_path = Path(tmp_path) / "qualification.json"
+    _write_qualification(m, ctx, q_path,
+                         {NONMATRIX_GATE: binding})
+    expected = {"ok": True, "gates": [NONMATRIX_GATE]}
+    assert m.verify_qualification(
+        ctx["manifest_path"], q_path, ctx["policy_path"],
+        evidence) == expected
+    assert m.verify_qualification(
+        ctx["manifest_path"], q_path, ctx["policy_path"],
+        evidence) == expected
+
+
+def _write_signed_checksums(m, ctx, evidence):
+    """Signed SHA256SUMS over the sealed artifacts in evidence."""
+    evidence = Path(evidence)
+    text = "".join(entry["sha256"] + "  " + entry["name"]
+                   + "\n" for entry in sorted(
+                       ctx["manifest"]["artifacts"],
+                       key=lambda entry: entry["name"]))
+    (evidence / "SHA256SUMS.txt").write_text(text)
+    _sign(ctx["key"], evidence / "SHA256SUMS.txt")
+
+
+def test_qualify_cli_rederives_signed_gates(workshop,
+                                            tmp_path):
+    m, ctx = _sealed_for_qualify(
+        workshop, tmp_path, _nonmatrix_required_gates())
+    evidence = Path(tmp_path) / "evidence"
+    binding = _write_nonmatrix_evidence(m, ctx, evidence)
+    q_path = Path(tmp_path) / "qualification.json"
+    _write_qualification(m, ctx, q_path,
+                         {NONMATRIX_GATE: binding})
+    _write_signed_checksums(m, ctx, evidence)
+    argv = [str(ROOT / "tools" / "candidate"), "qualify",
+           "--manifest", str(ctx["manifest_path"]),
+           "--qualification", str(q_path),
+           "--policy", str(ctx["policy_path"]),
+           "--evidence-dir", str(evidence)]
+    proc = subprocess.run(argv, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert "re-derived" in proc.stdout
+    (evidence / "product.json").write_bytes(b'{"x": 1}\n')
+    rerun = subprocess.run(argv, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, text=True)
+    assert rerun.returncode == 1
+    assert rerun.stderr.strip(), "silent qualify failure"
+
+
+def test_verify_q_diff_accepts_evidence_only(workshop, tmp_path,
+                                             monkeypatch):
+    m, fix = seal_paths(workshop, tmp_path)
+    root = fix["root"]
+    commit = git(root, "rev-parse", "HEAD")
+    (root / "packaging" / "qualifications").mkdir(
+        parents=True)
+    (root / "packaging" / "qualifications"
+     / "candidate.json").write_text("{}\n")
+    (root / "packaging" / "tested-payload.sha256").write_text(
+        "0" * 64 + "  bundle/LICENSE\n")
+    first = _commit_as(root, "Q evidence",
+                       "packaging/qualifications/candidate.json",
+                       "packaging/tested-payload.sha256")
+    (root / "packaging" / "qualifications"
+     / "remote.json").write_text("{}\n")
+    second = _commit_as(root, "Q remote checks",
+                        "packaging/qualifications/remote.json")
+    monkeypatch.chdir(root)
+    assert m.verify_q_diff(commit, first) is None
+    assert m.verify_q_diff(commit, second) is None
+    assert m.verify_q_diff(commit, commit) is None
+
+
+def _commit_as(root, message, *paths):
+    git(root, "add", *paths)
+    git(root, "-c", "user.name=Fixture",
+        "-c", "user.email=fixture@example.invalid",
+        "commit", "-qm", message)
+    return git(root, "rev-parse", "HEAD")
+
+
+def test_verify_q_diff_rejects_non_evidence(workshop, tmp_path,
+                                            monkeypatch):
+    m, fix = seal_paths(workshop, tmp_path)
+    root = fix["root"]
+    commit = git(root, "rev-parse", "HEAD")
+    (root / "src" / "evil.txt").write_text("source edit\n")
+    bad = _commit_as(root, "Q source edit", "src/evil.txt")
+    monkeypatch.chdir(root)
+    with pytest.raises(ValueError, match="evidence-only"):
+        m.verify_q_diff(commit, bad)
+    with pytest.raises(ValueError):
+        m.verify_q_diff(bad, commit)
+    # A merge of two evidence-only sides still fails, in a fresh
+    # checkout whose history holds no other violation.
+    other = workshop.fresh(tmp_path / "merge")["root"]
+    base = git(other, "rev-parse", "HEAD")
+    branch = git(other, "rev-parse", "--abbrev-ref", "HEAD")
+    (other / "packaging" / "qualifications").mkdir(
+        parents=True)
+    (other / "packaging" / "qualifications"
+     / "side.json").write_text("{}\n")
+    git(other, "checkout", "-qb", "side")
+    _commit_as(other, "Q side evidence",
+               "packaging/qualifications/side.json")
+    git(other, "checkout", "-q", branch)
+    (other / "packaging" / "qualifications").mkdir(
+        parents=True, exist_ok=True)
+    (other / "packaging" / "qualifications"
+     / "main.json").write_text("{}\n")
+    _commit_as(other, "Q main evidence",
+               "packaging/qualifications/main.json")
+    git(other, "-c", "user.name=Fixture",
+        "-c", "user.email=fixture@example.invalid",
+        "merge", "--no-ff", "-q", "side", "-m", "Q merge")
+    merged = git(other, "rev-parse", "HEAD")
+    monkeypatch.chdir(other)
+    with pytest.raises(ValueError, match="merge"):
+        m.verify_q_diff(base, merged)
+
+
+def test_tested_payload_matches_candidate_closure(workshop,
+                                                  tmp_path):
+    m, manifest = sealed_manifest(workshop, tmp_path)
+    expected = m.expected_payload(manifest)
+    path = Path(tmp_path) / "tested.txt"
+    path.write_text("".join(
+        value + "  " + name + "\n"
+        for name, value in sorted(expected.items())))
+    assert m.verify_tested_payload(manifest, path) == expected
+    entries = dict(expected)
+    entries.pop("bundle/LICENSE")
+    path.write_text("".join(
+        value + "  " + name + "\n"
+        for name, value in sorted(entries.items())))
+    with pytest.raises(ValueError):
+        m.verify_tested_payload(manifest, path)
+    path.write_text("bogus line\n")
+    with pytest.raises(ValueError):
+        m.verify_tested_payload(manifest, path)
+
+
+def test_qualify_candidate_exports_tested_payload(workshop,
+                                                  tmp_path):
+    m, ctx = _sealed_for_qualify(
+        workshop, tmp_path, _nonmatrix_required_gates())
+    evidence = Path(tmp_path) / "evidence"
+    binding = _write_nonmatrix_evidence(m, ctx, evidence)
+    _write_signed_checksums(m, ctx, evidence)
+    archive = Path(tmp_path) / "evidence.tar.gz"
+    with tarfile.open(archive, "w:gz") as stream:
+        stream.add(evidence, arcname="evidence")
+    root = ctx["root"]
+    qualifications = root / "packaging" / "qualifications"
+    qualifications.mkdir(parents=True)
+    q_repo = qualifications / "qualification.json"
+    doc = _write_qualification(m, ctx, q_repo,
+                               {NONMATRIX_GATE: binding})
+    doc["evidence_archive"] = {
+        "name": archive.name, "size": str(archive.stat()
+                                          .st_size),
+        "sha256": sha(archive.read_bytes())}
+    q_repo.write_bytes(m.canonical(doc))
+    expected = m.expected_payload(ctx["manifest"])
+    rendered = "".join(value + "  " + name + "\n"
+                       for name, value in sorted(
+                           expected.items()))
+    (root / "packaging" / "tested-payload.sha256").write_text(
+        rendered)
+    _commit_as(root, "Q evidence",
+               "packaging/qualifications",
+               "packaging/tested-payload.sha256")
+    out = Path(tmp_path) / "tested.txt"
+    assert m.qualify_candidate(
+        str(root), ctx["manifest_path"], q_repo,
+        ctx["policy_path"], archive, out) == expected
+    assert out.read_bytes() == (
+        root / "packaging" / "tested-payload.sha256"
+    ).read_bytes()
+    (root / "src" / "dirty.txt").write_text("dirty\n")
+    with pytest.raises(ValueError, match="non-evidence"):
+        m.qualify_candidate(
+            str(root), ctx["manifest_path"], q_repo,
+            ctx["policy_path"], archive,
+            Path(tmp_path) / "tested-dirty.txt")
+
+
 def test_seal_cross_checks_bpf_linker(workshop, tmp_path):
     m, fix = seal_paths(workshop, tmp_path)
     manifest_path = fix["bundle_dir"] / "MANIFEST.json"

@@ -29,11 +29,23 @@ recorded receipt and cross-checks the recorded bpf-linker against
 the probed toolchain, so a prebuilt engine from another commit, or
 one swapped after the receipt was recorded, fails closed.
 
+Qualification rederives every required signed gate over retained
+evidence without rebuilding: each gate receipt is verified against
+pinned trust, non-matrix measurements are re-read from retained
+sources and their predicates rederived, and the matrix gate binds
+every consumed evidence file through a signed noncircular inventory
+digest that is verified before its signature is trusted. An
+evidence-only commit Q carries the qualification and tested
+payload; anything stale, tampered, unsigned, or /1 fails closed
+with ValueError.
+
 Usage:
   tools/candidate seal --bundle-dir D --artifacts-dir A --policy P \\
       --out M [--source-root R] [--harness-bin H]
   tools/candidate provenance --bundle-dir D --bundle B --deb E \\
       --rpm R --source S --sbom J --out P [--source-root R]
+  tools/candidate qualify --manifest M --qualification Q --policy P \\
+      --evidence-dir E
 Standard library only. Exit 0 prints the sealed digest; exit 1
 reports the reason on stderr.
 """
@@ -47,11 +59,21 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 
 SCHEMA = "memveil-candidate/2"
 PROVENANCE_SCHEMA = "memveil-local-build/2"
+MATRIX_INPUT_SCHEMA = "memveil-matrix-input/2"
+QUALIFICATION_SCHEMA = "memveil-qualification/1"
+GATE_RECEIPT_SCHEMA = "memveil-gate-receipt/1"
+GATE_INPUT_SCHEMA = "memveil-gate-input/1"
+POLICY_SCHEMA = "memveil-candidate-policy/1"
+MATRIX_GATE = "kernel-matrix/2"
+SIGNING_NAMESPACE = "memveil-candidate"
+EVIDENCE_TESTED = "packaging/tested-payload.sha256"
+EVIDENCE_QUALIFICATIONS = "packaging/qualifications/"
 ORIGIN = "local-build"
 ROLES = frozenset({"bundle", "deb", "rpm", "source", "sbom", "provenance"})
 BPF_OBJECTS = ("swiotlb_attempt.bpf.o", "swiotlb_lifecycle.bpf.o",
@@ -1158,6 +1180,578 @@ def emit_provenance(bundle_dir, source_info, out_path):
     return digest_bytes(data)
 
 
+def evidence_only_path(path):
+    """True when a tree path may change in an evidence commit."""
+    if path == EVIDENCE_TESTED:
+        return True
+    if not path.startswith(EVIDENCE_QUALIFICATIONS):
+        return False
+    leaf = path[len(EVIDENCE_QUALIFICATIONS):]
+    return "/" not in leaf and leaf.endswith(".json") \
+        and len(leaf) > len(".json")
+
+
+def _git_bytes(root, *args):
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), *args],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=git_env())
+    except OSError as error:
+        raise ValueError("cannot run git: %s" % error) from error
+    require(proc.returncode == 0,
+            "git %s failed" % " ".join(args[:2]))
+    return proc.stdout
+
+
+def _git_paths(root, *args):
+    """Decode a -z git path list; refuse undecodable names."""
+    paths = []
+    for entry in _git_bytes(root, *args).split(b"\0"):
+        if not entry:
+            continue
+        try:
+            paths.append(entry.decode("utf-8"))
+        except UnicodeError as error:
+            raise ValueError(
+                "invalid tree path encoding") from error
+    return paths
+
+
+def _verify_q_diff(root, c_commit, q_commit):
+    hexid(c_commit, 40)
+    hexid(q_commit, 40)
+    git(root, "merge-base", "--is-ancestor", c_commit, q_commit)
+    # Check every commit, so an intermediate source edit cannot be
+    # hidden by a revert.
+    commits = git(root, "rev-list", c_commit + ".." + q_commit)
+    for commit in commits.splitlines():
+        parents = git(root, "rev-list", "--parents", "-n", "1",
+                      commit).split()[1:]
+        require(len(parents) == 1,
+                "evidence-only history cannot contain merges")
+        for path in _git_paths(root, "diff", "--name-only",
+                               "-z", parents[0], commit):
+            require(evidence_only_path(path),
+                    "Q is not evidence-only: " + path)
+
+
+def verify_q_diff(c_commit, q_commit):
+    """Require Q to be evidence-only over C in this checkout.
+
+    Runs in the current working directory, which must be the
+    source checkout. Only packaging/tested-payload.sha256 and
+    packaging/qualifications/*.json may change; merges fail.
+    Returns None; raises ValueError otherwise.
+    """
+    _verify_q_diff(".", c_commit, q_commit)
+    return None
+
+
+def verify_signature(subject, signature, public_key, trusted):
+    """Verify an ssh-keygen -Y Ed25519 signature over subject."""
+    require(digest(public_key) in trusted,
+            "untrusted signing key")
+    data = read_regular(subject)
+    read_regular(signature)
+    try:
+        key = read_regular(public_key).decode().strip()
+    except UnicodeError as error:
+        raise ValueError("unsupported signing key") from error
+    require(key.startswith("ssh-ed25519 ")
+            and "\n" not in key, "unsupported signing key")
+    with tempfile.TemporaryDirectory(
+            prefix="candidate-trust-") as tmp:
+        allowed = Path(tmp) / "allowed"
+        allowed.write_text("qualifier " + key + "\n")
+        result = subprocess.run(
+            ["ssh-keygen", "-Y", "verify", "-f", str(allowed),
+             "-I", "qualifier", "-n", SIGNING_NAMESPACE,
+             "-s", str(signature)],
+            input=data, capture_output=True)
+    require(result.returncode == 0,
+            "signature verification failed")
+
+
+def validate_policy(policy):
+    exact(policy, {"schema", "claim", "required_gates",
+                   "trusted_keys", "retention_days"}, "policy")
+    require(policy["schema"] == POLICY_SCHEMA,
+            "unsupported candidate policy")
+    require(policy["claim"] in ("ordinary-preview", "snp-journal",
+                                "security-workflow"),
+            "unsupported release claim")
+    require(isinstance(policy["trusted_keys"], list),
+            "invalid trusted keys")
+    for key in policy["trusted_keys"]:
+        hexid(key)
+    require(30 <= parse_size(policy["retention_days"]) <= 90,
+            "campaign retention must be 30 to 90 days")
+    require(isinstance(policy["required_gates"], dict)
+            and policy["required_gates"],
+            "required gates are empty")
+    for ident, gate in policy["required_gates"].items():
+        require(re.fullmatch(r"[a-z][a-z0-9-]*/[1-9][0-9]*",
+                             ident),
+                "gate IDs must be versioned")
+        require(isinstance(gate, dict)
+                and {"environment", "predicates"} <= set(gate)
+                <= {"environment", "predicates", "limits",
+                    "adapter"},
+                "gate policy has invalid fields")
+        require(gate.get("adapter") in (None, "paced-replay/1"),
+                "unknown gate adapter")
+        require(isinstance(gate["predicates"], dict)
+                and gate["predicates"],
+                "empty required predicates")
+        for name, operation in gate["predicates"].items():
+            require(re.fullmatch(r"[a-z][a-z0-9_-]*", name)
+                    and operation in ("equal", "zero",
+                                      "at-most", "at-least"),
+                    "invalid gate predicate")
+        limits = gate.get("limits", {})
+        require(isinstance(limits, dict), "invalid gate limits")
+        for name, value in limits.items():
+            require(name in gate["predicates"],
+                    "limit without predicate")
+            parse_size(value)
+        require(gate["environment"] in ("offline",
+                                        "ordinary-linux", "snp",
+                                        "tdx", "hyperv"),
+                "unknown gate environment")
+    environments = {gate["environment"]
+                    for gate in
+                    policy["required_gates"].values()}
+    if policy["claim"] != "ordinary-preview":
+        require("snp" in environments,
+                "SNP qualification required")
+    if policy["claim"] == "security-workflow":
+        require({"tdx", "hyperv"} <= environments,
+                "TDX and Hyper-V qualification required")
+    return policy
+
+
+def verify_measurement_sources(record, base):
+    sources = record.get("sources")
+    exact(sources, {"product", "oracle"},
+          "retained measurement sources")
+    product_files = {binding["file"]
+                     for binding in sources["product"].values()}
+    oracle_files = {binding["file"]
+                    for binding in sources["oracle"].values()}
+    require(not product_files & oracle_files,
+            "product and oracle measurements require separate "
+            "retained sources")
+    for side in ("product", "oracle"):
+        exact(sources[side], record[side],
+              side + " source bindings")
+        for name, binding in sources[side].items():
+            exact(binding, {"file", "sha256", "path",
+                            "encoding"},
+                  "measurement source binding")
+            path = Path(base) / relative(binding["file"])
+            data = read_regular(path)
+            require(digest_bytes(data)
+                    == hexid(binding["sha256"]),
+                    "retained measurement file changed")
+            value = read_json(path)
+            require(canonical(value)
+                    == canonical(json.loads(
+                        data, object_pairs_hook=unique)),
+                    "measurement file changed while reading")
+            require(isinstance(binding["path"], list)
+                    and len(binding["path"]) <= 64,
+                    "invalid measurement path")
+            for key in binding["path"]:
+                require((isinstance(value, dict)
+                         and isinstance(key, str)
+                         and key in value)
+                        or (isinstance(value, list)
+                            and type(key) is int
+                            and 0 <= key < len(value)),
+                        "measurement path absent")
+                value = value[key]
+            if binding["encoding"] == "boolean":
+                require(type(value) is bool,
+                        "measurement boolean required")
+                value = "1" if value else "0"
+            else:
+                require(binding["encoding"] == "u64"
+                        and (type(value) is int
+                             or isinstance(value, str)),
+                        "unsigned measurement required")
+                value = str(value)
+                parse_size(value)
+            require(value == record[side][name],
+                    "retained measurement differs: " + side
+                    + "/" + name)
+
+
+def rederive_measurements(record, requirement):
+    require(set(record) in ({"schema", "environment", "product",
+                              "oracle"},
+                             {"schema", "environment", "product",
+                              "oracle", "sources"}),
+            "gate inputs have invalid fields")
+    require(record["schema"] == GATE_INPUT_SCHEMA,
+            "unsupported gate input schema")
+    require(record["environment"] == requirement["environment"],
+            "gate environment mismatch")
+    predicates = requirement["predicates"]
+    require(bool(predicates), "empty gate predicates")
+    exact(record["product"], predicates, "product measurements")
+    exact(record["oracle"], predicates, "oracle measurements")
+    for name, operation in predicates.items():
+        actual = parse_size(record["product"][name])
+        expected = parse_size(record["oracle"][name])
+        if name in requirement.get("limits", {}):
+            require(record["oracle"][name]
+                    == requirement["limits"][name],
+                    "oracle threshold differs from fixed "
+                    "policy: " + name)
+        if operation == "equal":
+            require(actual == expected and expected > 0,
+                    "oracle counts differ: " + name)
+        elif operation == "zero":
+            require(actual == expected == 0,
+                    "loss or cleanup failure: " + name)
+        elif operation == "at-least":
+            require(actual >= expected > 0,
+                    "minimum measurement failed: " + name)
+        elif operation == "at-most":
+            require(actual <= expected and expected > 0,
+                    "maximum measurement failed: " + name)
+        else:
+            raise ValueError("unknown oracle predicate")
+    if requirement.get("adapter") == "paced-replay/1":
+        actual, oracle = record["product"], record["oracle"]
+        minimum = (parse_size(oracle["read_bytes"]) + 65535) \
+            // 65536 + 1
+        require(parse_size(oracle["read_calls"]) == minimum
+                and parse_size(actual["read_calls"])
+                >= minimum,
+                "real read/EOF calls were not proven")
+        require(parse_size(actual["rss_bytes"]) > 0,
+                "RSS measurement is absent")
+        require(parse_size(actual["max_request_bytes"]) > 0,
+                "read request measurement is absent")
+    return True
+
+
+def _matrix_rows():
+    """Row-allowlist oracle from tests/vm/kernel_matrix.py (lazy)."""
+    vmdir = str(Path(__file__).resolve().parents[1]
+                / "tests" / "vm")
+    if vmdir not in sys.path:
+        sys.path.insert(0, vmdir)
+    import kernel_matrix
+    return kernel_matrix
+
+
+def _required_evidence(path, label):
+    """Digest of a required evidence file; ValueError when absent."""
+    try:
+        mode = os.lstat(path).st_mode
+    except OSError as error:
+        raise ValueError(
+            "matrix evidence is missing required file: "
+            + label) from error
+    require(stat.S_ISREG(mode),
+            "matrix evidence requires a regular file: "
+            + label)
+    try:
+        data = read_regular(path)
+    except OSError as error:
+        raise ValueError(
+            "matrix evidence is missing required file: "
+            + label) from error
+    return digest_bytes(data)
+
+
+def _row_inventory_files(allowlist, row):
+    """{relpath: sha256} for one matrix row directory.
+
+    Every retained file must be allowlisted row evidence; the row
+    receipt and cached oracle inputs are required and hashed
+    explicitly, since their bytes are evidence while the row-local
+    transcription inventory never authenticates itself. The raw
+    boot command line stays forensic-only, matching the row
+    receipt construction.
+    """
+    found = {}
+    for dirpath, _dirnames, filenames in os.walk(row):
+        for name in sorted(filenames):
+            path = Path(dirpath) / name
+            rel = path.relative_to(row).as_posix()
+            if rel in ("receipt.json", "oracle-inputs.json",
+                       "vng-cmd.txt"):
+                continue
+            if path.is_symlink() or not path.is_file():
+                raise ValueError(
+                    "matrix row refuses non-file %s" % rel)
+            if not allowlist(rel):
+                raise ValueError(
+                    "matrix row refuses unknown file %s" % rel)
+            try:
+                found[rel] = digest(path)
+            except OSError as error:
+                raise ValueError(
+                    "matrix row cannot hash %s" % rel) from error
+    label = Path(row).name
+    for required in ("receipt.json", "oracle-inputs.json"):
+        found[required] = _required_evidence(
+            Path(row) / required, label + "/" + required)
+    return found
+
+
+def build_evidence_inventory(evidence_dir, matrix_directory):
+    """Map every consumed matrix evidence file to its SHA-256.
+
+    Keys are matrix-relative POSIX paths: per-row receipt.json,
+    oracle-inputs.json and retained raws, plus summary.json. The
+    signed gate receipt stays outside its own inventory, so the
+    binding is noncircular. Raises ValueError on missing, extra,
+    unknown, or non-regular evidence.
+    """
+    base = Path(evidence_dir)
+    mdir = base / relative(matrix_directory)
+    if mdir.is_symlink() or not mdir.is_dir():
+        raise ValueError(
+            "matrix evidence directory is missing: "
+            + matrix_directory)
+    allowlist = _matrix_rows()._row_rel_known
+    inventory = {}
+    for name in sorted(os.listdir(mdir)):
+        full = mdir / name
+        mode = os.lstat(full).st_mode
+        if stat.S_ISLNK(mode):
+            raise ValueError(
+                "matrix evidence refuses symlink: " + name)
+        if stat.S_ISDIR(mode):
+            for rel, found in sorted(
+                    _row_inventory_files(allowlist,
+                                         full).items()):
+                inventory[name + "/" + rel] = found
+        elif stat.S_ISREG(mode) and name == "summary.json":
+            inventory["summary.json"] = _required_evidence(
+                full, "summary.json")
+        else:
+            raise ValueError(
+                "matrix evidence has an extra file: " + name)
+    if "summary.json" not in inventory:
+        raise ValueError(
+            "matrix evidence is missing required file: "
+            "summary.json")
+    return inventory
+
+
+def verify_evidence_inventory(inputs, evidence_dir):
+    """Recompute the matrix inventory; reject altered evidence.
+
+    Every digest is recomputed from the evidence bytes and the
+    canonical inventory must equal the signed digest exactly, so
+    altered, missing, or extra files fail before any evaluation.
+    Returns None; raises ValueError otherwise.
+    """
+    exact(inputs, {"schema", "matrix_directory",
+                   "evidence_inventory_sha256"},
+          "matrix inputs")
+    require(inputs["schema"] == MATRIX_INPUT_SCHEMA,
+            "unsupported matrix input schema %r: /1 inputs "
+            "fail closed" % (inputs.get("schema"),))
+    pinned = hexid(inputs["evidence_inventory_sha256"])
+    rebuilt = build_evidence_inventory(
+        evidence_dir, inputs["matrix_directory"])
+    require(digest_canonical(rebuilt) == pinned,
+            "matrix evidence inventory differs from the "
+            "signed inputs")
+    return None
+
+
+def verify_qualification(candidate, qualification, policy,
+                         evidence_dir):
+    """Rederive every required signed gate over an evidence dir.
+
+    For the matrix gate the evidence inventory digests are
+    verified before the signature, the signature before any
+    predicate, and predicates before export; other gates verify
+    the signature chain, then retained measurements, then
+    predicates. Returns {"ok": True, "gates": [...]} with the
+    verified gate IDs sorted; raises ValueError otherwise. The
+    qualification's evidence_archive entry is shape-checked only:
+    archive bytes are verified by whoever extracts them.
+    """
+    manifest = load_manifest(candidate)
+    candidate_id = digest(candidate)
+    require(digest(policy) == manifest["policy_sha256"],
+            "policy differs from candidate")
+    validated = validate_policy(read_json(policy))
+    doc = read_json(qualification, sealed=True)
+    exact(doc, {"schema", "candidate_sha256", "source_commit",
+                "claim", "gates", "evidence_archive"},
+          "qualification")
+    require(doc["schema"] == QUALIFICATION_SCHEMA
+            and doc["candidate_sha256"] == candidate_id
+            and doc["source_commit"]
+            == manifest["source"]["commit"]
+            and doc["claim"] == validated["claim"],
+            "qualification subject mismatch")
+    exact(doc["gates"], validated["required_gates"],
+          "required qualification gates")
+    archive = doc["evidence_archive"]
+    exact(archive, {"name", "size", "sha256"},
+          "evidence archive")
+    relative(archive["name"])
+    parse_size(archive["size"])
+    hexid(archive["sha256"])
+    base = Path(evidence_dir)
+    for ident in sorted(doc["gates"]):
+        gate = doc["gates"][ident]
+        exact(gate, {"receipt", "receipt_sha256", "signature",
+                     "public_key"},
+              "gate receipt binding")
+        for key in ("receipt", "signature", "public_key"):
+            relative(gate[key])
+        receipt = base / gate["receipt"]
+        if ident == MATRIX_GATE:
+            record = read_json(receipt, sealed=True)
+            exact(record,
+                  {"schema", "gate", "candidate_sha256",
+                   "source_commit", "inputs", "inputs_sha256"},
+                  "signed gate receipt")
+            relative(record["inputs"])
+            retained = read_json(base / record["inputs"],
+                                 sealed=True)
+            verify_evidence_inventory(retained, base)
+            require(digest(receipt)
+                    == hexid(gate["receipt_sha256"]),
+                    "retained receipt changed")
+            verify_signature(receipt, base / gate["signature"],
+                             base / gate["public_key"],
+                             validated["trusted_keys"])
+            require(record["schema"] == GATE_RECEIPT_SCHEMA
+                    and record["gate"] == ident
+                    and record["candidate_sha256"]
+                    == candidate_id
+                    and record["source_commit"]
+                    == manifest["source"]["commit"],
+                    "gate subject mismatch")
+            require(digest(base / record["inputs"])
+                    == hexid(record["inputs_sha256"]),
+                    "retained gate inputs changed")
+        else:
+            require(digest(receipt)
+                    == hexid(gate["receipt_sha256"]),
+                    "retained receipt changed")
+            verify_signature(receipt, base / gate["signature"],
+                             base / gate["public_key"],
+                             validated["trusted_keys"])
+            record = read_json(receipt, sealed=True)
+            exact(record,
+                  {"schema", "gate", "candidate_sha256",
+                   "source_commit", "inputs", "inputs_sha256"},
+                  "signed gate receipt")
+            require(record["schema"] == GATE_RECEIPT_SCHEMA
+                    and record["gate"] == ident
+                    and record["candidate_sha256"]
+                    == candidate_id
+                    and record["source_commit"]
+                    == manifest["source"]["commit"],
+                    "gate subject mismatch")
+            relative(record["inputs"])
+            inputs = base / record["inputs"]
+            require(digest(inputs)
+                    == hexid(record["inputs_sha256"]),
+                    "retained gate inputs changed")
+            retained = read_json(inputs, sealed=True)
+            verify_measurement_sources(retained, base)
+            rederive_measurements(
+                retained,
+                validated["required_gates"][ident])
+    return {"ok": True, "gates": sorted(doc["gates"])}
+
+
+def verify_signed_checksums(manifest, evidence, trusted):
+    """Verify the signed artifact checksums against the manifest."""
+    evidence = Path(evidence)
+    verify_signature(evidence / "SHA256SUMS.txt",
+                     evidence / "SHA256SUMS.txt.sig",
+                     evidence / "signer.pub", trusted)
+    expected = "".join(
+        entry["sha256"] + "  " + entry["name"] + "\n"
+        for entry in sorted(manifest["artifacts"],
+                            key=lambda entry: entry["name"]))
+    require(read_regular(evidence / "SHA256SUMS.txt")
+            == expected.encode(),
+            "signed checksums differ from candidate")
+    return expected
+
+
+def verify_tested_payload(manifest, tested_path):
+    """Verify a tested-payload file against the candidate closure."""
+    try:
+        text = read_regular(tested_path).decode()
+    except UnicodeError as error:
+        raise ValueError(
+            "invalid tested payload line") from error
+    entries = {}
+    for line in text.splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        parts = line.split()
+        require(len(parts) == 2, "invalid tested payload line")
+        found, name = parts
+        hexid(found)
+        require(name not in entries,
+                "duplicate tested payload entry")
+        entries[name] = found
+    require(entries == expected_payload(manifest),
+            "Q tested payload differs from candidate closure")
+    return entries
+
+
+def qualify_candidate(source, manifest_path, qualification_path,
+                      policy_path, evidence_archive, output):
+    """Qualify an evidence archive; export the tested payload.
+
+    Requires HEAD evidence-only over C with no other worktree
+    changes, verifies the sealed archive bytes, rederives every
+    required signed gate over the extracted evidence plus the
+    signed artifact checksums, then writes the expected payload
+    once and returns it. Remote custody checks and the matrix
+    lock binding at export belong to their own stages.
+    """
+    manifest = load_manifest(manifest_path)
+    commit = git(source, "rev-parse", "HEAD")
+    _verify_q_diff(source, manifest["source"]["commit"],
+                   commit)
+    changes = _git_paths(source, "diff", "--name-only", "-z",
+                         "HEAD")
+    changes += _git_paths(source, "ls-files", "--others",
+                          "--exclude-standard", "-z")
+    for path in changes:
+        require(evidence_only_path(path),
+                "qualification source has non-evidence "
+                "changes: " + path)
+    doc = read_json(qualification_path, sealed=True)
+    verify_file(evidence_archive, doc["evidence_archive"])
+    with tempfile.TemporaryDirectory(
+            prefix="candidate-qualify-") as tmp:
+        evidence = safe_extract(evidence_archive,
+                                Path(tmp) / "evidence", True,
+                                False)
+        verify_qualification(manifest_path, qualification_path,
+                             policy_path, evidence)
+        verify_signed_checksums(
+            manifest, evidence,
+            read_json(policy_path)["trusted_keys"])
+    expected = expected_payload(manifest)
+    write_once(output, "".join(
+        value + "  " + name + "\n"
+        for name, value in sorted(expected.items())).encode())
+    return expected
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1177,6 +1771,13 @@ def main(argv=None):
         origin.add_argument("--" + role, required=True)
     origin.add_argument("--out", required=True)
     origin.add_argument("--source-root", default=".")
+    qualify = commands.add_parser(
+        "qualify",
+        help="rederive all required signed gates over evidence")
+    qualify.add_argument("--manifest", required=True)
+    qualify.add_argument("--qualification", required=True)
+    qualify.add_argument("--policy", required=True)
+    qualify.add_argument("--evidence-dir", required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "seal":
@@ -1185,6 +1786,16 @@ def main(argv=None):
                 {"root": args.source_root,
                  "harness_bin": args.harness_bin})
             print(seal_manifest(manifest, args.out))
+        elif args.command == "qualify":
+            verify_qualification(
+                args.manifest, args.qualification,
+                args.policy, args.evidence_dir)
+            verify_signed_checksums(
+                load_manifest(args.manifest),
+                args.evidence_dir,
+                read_json(args.policy)["trusted_keys"])
+            print("all required signed qualification inputs "
+                  "re-derived")
         else:
             print(emit_provenance(
                 args.bundle_dir,
