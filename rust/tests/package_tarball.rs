@@ -1261,6 +1261,206 @@ fn staged_bpf_swap_refuses() {
 }
 
 #[test]
+fn staged_binary_exec_split_refuses() {
+    // --binary exec/read-split contest: a --binary replaced
+    // between the validation hash and the manifest probe (and
+    // restored before staging) must refuse. The shim serves the
+    // pristine bytes for every read-open while exec sees the
+    // doctored on-disk file — LD_PRELOAD redirects open/openat
+    // only — so validation hashes and stages V1 while the dumped
+    // manifest and the --bpf-dir check see V2: exactly the state
+    // that shipped embedded_bpf=V2 with files=V1. Only the
+    // staged-executable re-dump binding may refuse this run.
+    if !h::tool_present("cc") {
+        eprintln!("skip: cc absent on this host: the swap shim needs it");
+        return;
+    }
+    let root = h::pristine_root();
+    let binary = h::ensure_release_binary();
+    let out = h::bpf_out_dir();
+    let tmp = h::scratch("binary-split");
+    let script = h::scripts_dir().join("package-tarball.py");
+
+    // Doctored copy object: one flipped bit outside the channel
+    // marker (correctly marked, differently hashed), same length.
+    let copy = fs::read(out.join("memveil-ebpf-copy")).unwrap();
+    let marker = b"memveil-channel:copy\0";
+    let at = copy
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .expect("copy marker present");
+    let mut doctored = copy.clone();
+    let mut flip = doctored.len() - 1;
+    if (at..at + marker.len()).contains(&flip) {
+        flip = 0;
+        assert!(
+            !(at..at + marker.len()).contains(&flip),
+            "marker spans the whole object"
+        );
+    }
+    doctored[flip] ^= 0x01;
+    assert!(
+        doctored.windows(marker.len()).any(|w| w == marker),
+        "surgery broke the marker"
+    );
+    assert_ne!(doctored, copy, "surgery left the bytes identical");
+    let doctored_obj = tmp.join("doctored-copy.o");
+    fs::write(&doctored_obj, &doctored).unwrap();
+    let doctored_sha = h::sha256_file(&doctored_obj);
+
+    // V2 binary: pristine bytes with the single baked copy-digest
+    // row replaced by the doctored copy's digest. Same length,
+    // still executes; dumps the doctored row for copy.
+    let v1 = fs::read(&binary).unwrap();
+    let pristine_sha = h::sha256_file(&out.join("memveil-ebpf-copy"));
+    let hits = v1
+        .windows(pristine_sha.len())
+        .filter(|window| *window == pristine_sha.as_bytes())
+        .count();
+    assert_eq!(hits, 1, "baked copy digest is not unique");
+    let at = v1
+        .windows(pristine_sha.len())
+        .position(|window| window == pristine_sha.as_bytes())
+        .unwrap();
+    let mut v2 = v1.clone();
+    v2[at..at + pristine_sha.len()].copy_from_slice(doctored_sha.as_bytes());
+    assert_ne!(v2, v1, "digest surgery left the bytes identical");
+
+    let v1_path = tmp.join("binary-v1");
+    let v2_path = tmp.join("binary-v2");
+    fs::write(&v1_path, &v1).unwrap();
+    fs::write(&v2_path, &v2).unwrap();
+
+    // Absolute without resolving symlinks, exactly as the
+    // script's abspath spells the path it opens: the shim
+    // matches that spelling byte for byte.
+    let mut target = tmp.join("memveil-input");
+    if !target.is_absolute() {
+        target = std::env::current_dir().unwrap().join(&target);
+    }
+    fs::copy(&v2_path, &target).unwrap();
+    fs::set_permissions(&target, fs::metadata(&binary).unwrap().permissions()).unwrap();
+
+    // The doctored input still executes and dumps the doctored
+    // copy row: validation genuinely sees V2's manifest.
+    let version = h::run(target.to_str().unwrap(), &["version"], None);
+    assert!(version.status.success(), "V2 binary fails version");
+    let dumped = h::run(target.to_str().unwrap(), &["--embedded-manifest"], None);
+    assert!(
+        dumped.status.success(),
+        "V2 binary fails --embedded-manifest"
+    );
+    let dumped_text = String::from_utf8_lossy(&dumped.stdout).into_owned();
+    let rows: Vec<&str> = dumped_text.lines().collect();
+    assert_eq!(rows.len(), 3, "manifest rows: {rows:?}");
+    for (row, channel) in rows.iter().zip(["attempt", "lifecycle", "copy"]) {
+        let (name, digest) = row.split_once(' ').expect("channel digest row");
+        assert_eq!(name, channel);
+        let want = if channel == "copy" {
+            doctored_sha.clone()
+        } else {
+            h::sha256_file(&out.join(format!("memveil-ebpf-{channel}")))
+        };
+        assert_eq!(digest, want, "{channel} row is not V2's");
+    }
+
+    // --bpf-dir inputs matching V2's dump: pristine attempt and
+    // lifecycle plus the doctored copy (whose marker still
+    // passes: only the exec/read split may refuse this run).
+    let bpf_dir = tmp.join("bpf");
+    fs::create_dir_all(&bpf_dir).unwrap();
+    for channel in ["attempt", "lifecycle"] {
+        let name = format!("memveil-ebpf-{channel}");
+        fs::copy(out.join(&name), bpf_dir.join(&name)).unwrap();
+    }
+    fs::copy(&doctored_obj, bpf_dir.join("memveil-ebpf-copy")).unwrap();
+    let probe = format!(
+        "import importlib.util; \
+         l = importlib.util.spec_from_file_location('m', {script:?}); \
+         m = importlib.util.module_from_spec(l); l.loader.exec_module(m); \
+         assert m.read_elf_section({doctored_obj:?}, 'memveil_channel') == b'memveil-channel:copy\\0'; \
+         print('split-marker-ok')"
+    );
+    let text = h::run_ok("python3", &["-B", "-c", &probe], None);
+    assert!(text.contains("split-marker-ok"), "{text}");
+
+    let shim_c = tmp.join("swap.c");
+    let shim_so = tmp.join("swap.so");
+    fs::write(&shim_c, SWAP_SHIM_C).unwrap();
+    let build = h::run(
+        "cc",
+        &[
+            "-shared",
+            "-fPIC",
+            "-O2",
+            "-o",
+            shim_so.to_str().unwrap(),
+            shim_c.to_str().unwrap(),
+            "-ldl",
+        ],
+        None,
+    );
+    assert!(
+        build.status.success(),
+        "swap shim build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    // AFTER=3 serves V1 to every read-open of --binary (the run
+    // performs two: validation hash and staging copy); only the
+    // manifest-probe exec sees the on-disk V2.
+    let dest = tmp.join("out");
+    let count = tmp.join("swap-count.txt");
+    let proc = std::process::Command::new("python3")
+        .arg(script.to_str().unwrap())
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "--binary",
+            target.to_str().unwrap(),
+            "--bpf-dir",
+            bpf_dir.to_str().unwrap(),
+            "--out",
+            dest.to_str().unwrap(),
+        ])
+        .env("LD_PRELOAD", shim_so.to_str().unwrap())
+        .env("MV_SWAP_TARGET", target.to_str().unwrap())
+        .env("MV_SWAP_V1", v1_path.to_str().unwrap())
+        .env("MV_SWAP_V2", v2_path.to_str().unwrap())
+        .env("MV_SWAP_AFTER", "3")
+        .env("MV_SWAP_COUNTFILE", count.to_str().unwrap())
+        .output()
+        .expect("cannot run package-tarball.py");
+    assert!(!proc.status.success(), "split --binary packaged");
+    let stderr = String::from_utf8_lossy(&proc.stderr);
+    assert!(
+        stderr.contains("staged executable dumps a different embedded manifest than validated")
+            && stderr.contains("bin/memveil"),
+        "{stderr}"
+    );
+    // Exactly the two production reads of --binary (validation
+    // hash, staging copy): the seal binds the pinned digest and
+    // the staged re-dump, never a third re-read.
+    assert_eq!(
+        fs::read_to_string(&count).unwrap().trim(),
+        "2",
+        "swap shim saw an unexpected read pattern"
+    );
+    assert!(
+        !dest
+            .join(format!("memveil-{}", h::engine_version()))
+            .exists(),
+        "split refusal left a bundle"
+    );
+    assert!(
+        !dest
+            .join(format!("memveil-{}.tar.gz", h::engine_version()))
+            .exists(),
+        "split refusal left a tarball"
+    );
+}
+
+#[test]
 fn swapped_bpf_inputs_refuse() {
     // Renamed same-build inputs: occurrence alone accepts them
     // (every byte is embedded), so the marker gate must refuse.

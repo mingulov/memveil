@@ -51,10 +51,12 @@ Usage: rust/scripts/package-tarball.py [--out DIR] [--tag NAME]
 Requires a release binary (use --build or build it first),
 patchelf, strip, and readelf. Fails closed when the link
 closure names anything outside the shipped lib/ set and the
-system allowlist, and when a BPF inspection input differs
+system allowlist, when a BPF inspection input differs
 from the binary's dumped embedded digest, carries another
 channel's marker, or stages bytes that differ from the
-dumped digest. Every
+dumped digest, and when the staged executable differs from
+the validated --binary bytes or dumps a different embedded
+manifest than validated. Every
 cargo invocation strips RUSTUP_TOOLCHAIN so the repository pin
 wins.
 """
@@ -1483,7 +1485,7 @@ def main(argv):
         # was copied from; a torn copy or a source changed under
         # staging fails here, before the manifest is written.
         # Maps staged rels to the source paths they must equal.
-        expect = {"bin/memveil": binary_input}
+        expect = {}
         for name in ship:
             expect["lib/" + name] = ship[name]
         for shipped, (source, _digest) in bpf_inputs.items():
@@ -1506,6 +1508,20 @@ def main(argv):
             elif sha256_file(full) != sha256_file(source):
                 problems.append("staged copy differs from source: %s"
                                 % rel)
+        # The staged executable must equal the exact --binary bytes
+        # validated above: compare the STAGED digest against the
+        # PINNED validation-time digest, never against a fresh
+        # read of the mutable --binary path. A staged-vs-source
+        # re-read passes a source swapped between validation and
+        # staging (both sides read the replacement) while the
+        # pinned digest records the validated original: the
+        # pinned digest is the single source of truth, so a
+        # staged copy that differs from it refuses here.
+        if not os.path.isfile(binary) or os.path.islink(binary):
+            problems.append("staged copy missing: bin/memveil")
+        elif observed.get("bin/memveil") != binary_input_sha:
+            problems.append("staged executable differs from the "
+                            "validated binary: bin/memveil")
         # The staged BPF inspection copies must equal the exact
         # bytes the binary embeds: compare the STAGED digests
         # against the executable's dumped manifest, never against
@@ -1525,6 +1541,21 @@ def main(argv):
                 problems.append(
                     "staged BPF copy differs from the binary's "
                     "embedded manifest: %s" % rel)
+        # The dumped manifest must describe the STAGED executable:
+        # re-dump `--embedded-manifest` from the staged copy and
+        # require the validation-time rows. The validation probe
+        # executes the mutable --binary path while every other
+        # validation read opens it, so a --binary replaced between
+        # the validation hash and the probe (and restored before
+        # staging) validates one binary's bytes against another's
+        # manifest; only the staged executable re-dumping the same
+        # rows proves the seal binds a single binary. Anything
+        # else refuses here, before the seal.
+        staged_embedded = embedded_manifest(binary)
+        if staged_embedded != embedded:
+            problems.append(
+                "staged executable dumps a different embedded "
+                "manifest than validated: bin/memveil")
         for rel, source in sorted(license_sources.items()):
             full = os.path.join(staged, *rel.split("/"))
             if sha256_file(full) != sha256_file(source):
