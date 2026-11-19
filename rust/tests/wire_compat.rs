@@ -39,10 +39,11 @@
 //!   verdict, raised solely by `mv_validate_offsets` failure. The test
 //!   asserts Rust `decode_offsets_table` validity matches that verdict on
 //!   every record, with both verdict sides present in the corpus.
-//! * `effective` lines: the C oracle provably always emits `OK` plus the four
-//!   rule outputs, and no Rust effective-rule helper exists in Plan 1, so the
-//!   full line shape and value domains are pinned, not differentially
-//!   compared (waiver requested in the task report).
+//! * `effective` lines: the 25-byte rule inputs decode through the real
+//!   `memveil::capture::lifecycle::effective_bytes` and the Rust output
+//!   renders the expected C dump line, exactly like the wire classes above.
+//!   (The C oracle provably always emits `OK` plus the four rule outputs,
+//!   so the render has no reject branch.)
 //! * `tests/fixtures/lifecycle/`: analyzer-layer JSON events consumed only by
 //!   the analyzer suites; no wire decoder on either side reads them, so no
 //!   differential applies. The test pins that directory shape fail-closed
@@ -53,6 +54,7 @@
 //! the Rust render, a corrupted magic flips `OK` to `PAY_MAGIC`, and every
 //! `DecodeError` maps to a distinct `PAY_*` word.
 
+use memveil::capture::lifecycle::effective_bytes;
 use memveil_ebpf_common::{
     DecodeError, decode_attempt, decode_copy, decode_lifecycle, decode_offsets_table,
 };
@@ -618,29 +620,28 @@ const PIN_TABLE_BYTES: [u8; 24] = [
     0x29, 0x00, 0x00, 0x00, // fixed_end = 41
 ];
 
-/// Check one C `effective` dump line against the exact shape the oracle emits.
-/// `parse_eff_line` (`tests/native/test_lifecycle_decode.c:311-352`) rejects
-/// any non-`OK` verdict (lines 330-333) and `check_eff_vector` unconditionally
-/// dumps the `OK` line with all four rule outputs (lines 499-502), so an
-/// `effective` dump line is provably always
-/// `<idx> effective OK effective=<u64> clamped=<0|1> earlyzero=<0|1>
-/// offsetpast=<0|1>`. No Rust `mv_effective_bytes` counterpart exists in Plan 1
-/// (see the module docs), so the values are shape-pinned here, not
-/// differentially compared.
-fn check_effective_dump_line(words: &[&str], idx: usize, line: &str) {
-    assert_eq!(
-        words.len(),
-        7,
-        "record {idx}: effective dump shape in {line:?}"
-    );
-    assert_eq!(
-        words[2], "OK",
-        "record {idx}: effective verdict is always OK"
-    );
-    parse_kv_u64(words[3], "effective=", idx, line);
-    parse_kv_bit(words[4], "clamped=", idx, line);
-    parse_kv_bit(words[5], "earlyzero=", idx, line);
-    parse_kv_bit(words[6], "offsetpast=", idx, line);
+/// Expected C dump line for one effective-rule vector from the real Rust
+/// rule helper. The 25-byte input layout is decoded here from the C
+/// oracle's mapping (`check_eff_vector`: size u64le, tlb_offset i64le,
+/// alloc_size u64le, orig_valid nonzero) — deliberately not via a
+/// shared helper, so the differential stays independent of the
+/// Rust-side mapping. `parse_eff_line` rejects any non-`OK` verdict
+/// and `check_eff_vector` unconditionally dumps the `OK` line, so
+/// the render has no reject branch.
+fn render_effective(idx: usize, bytes: &[u8]) -> String {
+    assert_eq!(bytes.len(), 25, "record {idx}: effective input length");
+    let size = u64::from_le_bytes(bytes[0..8].try_into().expect("size u64"));
+    let off = i64::from_le_bytes(bytes[8..16].try_into().expect("off i64"));
+    let alloc = u64::from_le_bytes(bytes[16..24].try_into().expect("alloc u64"));
+    let valid = bytes[24] != 0;
+    let got = effective_bytes(size, off, alloc, valid);
+    format!(
+        "{idx} effective OK effective={} clamped={} earlyzero={} offsetpast={}",
+        got.effective,
+        u8::from(got.clamped),
+        u8::from(got.early_zero),
+        u8::from(got.offset_past),
+    )
 }
 
 /// Exact per-class record counts. Regenerate after a corpus change with e.g.
@@ -815,13 +816,7 @@ fn lifecycle_copy_matches_c_dump() {
                 copy_compared += 1;
             }
             3 => {
-                // 25-byte effective-rule inputs, not wire records: the rule
-                // helper has no Rust counterpart in Plan 1, so the provably
-                // fixed C line shape is pinned (see check_effective_dump_line)
-                // instead of differentially compared.
-                assert_eq!(bytes.len(), 25, "record {idx}: effective input length");
-                let words = split_c_line(&dump[idx], idx, "effective");
-                check_effective_dump_line(&words, idx, &dump[idx]);
+                assert_eq!(render_effective(idx, bytes), dump[idx], "record {idx}");
                 effective_seen += 1;
             }
             _ => panic!("record {idx}: unexpected kind {kind}"),

@@ -5,10 +5,10 @@
 //! and parses. They never load anything into the kernel, so they run
 //! unprivileged.
 //!
-//! The program-count assertion is deliberately relaxed (0+ programs): the
-//! channel stubs are still empty and each probe task owns its own exact
-//! program+map geometry test (see the TODO on each test below). This file
-//! only guards the per-channel artifact plumbing.
+//! The program-count assertion is deliberately relaxed (0+ programs):
+//! exact program+map geometry is pinned per channel by
+//! `bpf_attempt.rs`, `bpf_lifecycle.rs`, and `bpf_copy.rs`.
+//! This file only guards the per-channel artifact plumbing.
 
 use std::path::Path;
 
@@ -141,32 +141,32 @@ fn check_channel_elf(channel: &str, path: &str) {
         declares_gpl_license(&bytes),
         "{channel} ELF at {path:?} must declare a GPL-compatible license"
     );
-    // 0+ programs is accepted here: the empty stubs build license-only ELFs
-    // until the probe tasks land (see the TODO on each test). Parsing must
-    // still succeed so a corrupt object cannot slip through.
+    // 0+ programs is accepted here: geometry is pinned per
+    // channel by the bpf_* suites. Parsing must still succeed
+    // so a corrupt object cannot slip through.
     let _object = aya_obj::Object::parse(&bytes).unwrap_or_else(|error| {
         panic!("aya-obj must parse the {channel} ELF at {path:?}: {error}")
     });
 }
 
-// TODO(T5): the attempt probe task tightens this channel to its exact
-// program+map geometry in its own test; this file keeps only the
+// The attempt channel's exact program+map geometry is pinned
+// by bpf_attempt.rs; this file keeps only the
 // ELF-exists/magic/EM_BPF/parses/license plumbing assertion.
 #[test]
 fn attempt_elf_exists_and_parses() {
     check_channel_elf("attempt", env!("DEP_MEMVEIL_EBPF_ATTEMPT_PATH"));
 }
 
-// TODO(T6): the lifecycle probe task tightens this channel to its exact
-// program+map geometry in its own test; this file keeps only the
+// The lifecycle channel's exact program+map geometry is
+// pinned by bpf_lifecycle.rs; this file keeps only the
 // ELF-exists/magic/EM_BPF/parses/license plumbing assertion.
 #[test]
 fn lifecycle_elf_exists_and_parses() {
     check_channel_elf("lifecycle", env!("DEP_MEMVEIL_EBPF_LIFECYCLE_PATH"));
 }
 
-// TODO(T7): the copy probe task tightens this channel to its exact
-// program+map geometry in its own test; this file keeps only the
+// The copy channel's exact program+map geometry is pinned
+// by bpf_copy.rs; this file keeps only the
 // ELF-exists/magic/EM_BPF/parses/license plumbing assertion.
 #[test]
 fn copy_elf_exists_and_parses() {

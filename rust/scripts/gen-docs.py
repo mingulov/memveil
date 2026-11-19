@@ -12,7 +12,8 @@ Usage: rust/scripts/gen-docs.py --out DIR [--binary PATH] [--build]
   --out DIR      staging directory (required)
   --binary PATH  memveil binary to query (default: the
                  release binary beside the sources)
-  --build        run `cargo build --release` first
+  --build        run `cargo build --release --locked
+                 --offline` first (repository pin wins)
 
 The default binary is `<rust>/target/release/memveil`, or
 `$CARGO_TARGET_DIR/release/memveil` when that variable is
@@ -75,9 +76,15 @@ def main(argv):
     if not out_dir:
         fail("--out DIR is required")
     if build:
+        # Mirror the tarball build: locked + offline, with the
+        # ambient RUSTUP_TOOLCHAIN stripped so the repository
+        # pin wins.
+        env = dict(os.environ)
+        env.pop("RUSTUP_TOOLCHAIN", None)
         try:
             proc = subprocess.run(
-                ["cargo", "build", "--release"], cwd=RUST_DIR)
+                ["cargo", "build", "--release", "--locked",
+                 "--offline"], cwd=RUST_DIR, env=env)
         except OSError as err:
             fail("cannot run cargo build --release: %s" % err)
         if proc.returncode != 0:

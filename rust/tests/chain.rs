@@ -163,18 +163,13 @@ fn record_report_top_live_chain() {
         return;
     }
     if !Path::new("/sys/kernel/btf/vmlinux").is_file() {
-        eprintln!("SKIP record_report_top_live_chain: guest BTF unreadable");
+        eprintln!("SKIP record_report_top_live_chain: host BTF missing");
         return;
     }
     let root = repo_root();
     let aya_obj = PathBuf::from(env!("DEP_MEMVEIL_EBPF_ATTEMPT_PATH"));
-    let bridge = root.join("build/deps/lmb/lib/libbpf_mojo.so.1");
     let profiles = root.join("profiles");
-    for (tag, path) in [
-        ("Aya object", &aya_obj),
-        ("bridge", &bridge),
-        ("profiles dir", &profiles),
-    ] {
+    for (tag, path) in [("Aya object", &aya_obj), ("profiles dir", &profiles)] {
         if !path.exists() {
             eprintln!(
                 "SKIP record_report_top_live_chain: {tag} missing: {}",
@@ -185,7 +180,10 @@ fn record_report_top_live_chain() {
     }
     let work = workdir("live");
     let cap = work.join("cap");
-    // Leg 0: record a real 2 s capture.
+    // Leg 0: record a real 2 s capture. No --bridge: an empty
+    // bridge is the normal case for record (the loader links
+    // statically); the install journeys cover the
+    // explicit-bridge path.
     let record = run(&[
         "record",
         "--duration",
@@ -194,8 +192,6 @@ fn record_report_top_live_chain() {
         cap.to_str().expect("tmp path is UTF-8"),
         "--object",
         aya_obj.to_str().expect("object path is UTF-8"),
-        "--bridge",
-        bridge.to_str().expect("bridge path is UTF-8"),
         "--profiles-dir",
         profiles.to_str().expect("profiles path is UTF-8"),
     ]);

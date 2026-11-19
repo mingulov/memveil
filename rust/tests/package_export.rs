@@ -6,8 +6,10 @@
 //! produce a candidate, a clean tree records its revision, a
 //! git-free export packages with revision `export` (even under
 //! a dirty unrelated parent), manifest hashes bind, and every
-//! referenced manual ships. The provenance-gate matrix is
-//! covered by release requalification instead.
+//! referenced manual ships. The provenance gate itself is
+//! covered by the `provenance` harness suite (which exercises
+//! the gate including its archive-mode logic), plus the
+//! export-tree run below against a real HEAD archive.
 
 #[path = "package_helpers/mod.rs"]
 mod package_helpers;
@@ -180,4 +182,49 @@ fn export_manifest_hashes_bind_and_manuals_ship() {
     ] {
         assert!(bundle.join("docs").join(name).is_file(), "docs lack {name}");
     }
+}
+
+#[test]
+fn export_tree_passes_provenance_gate() {
+    // End-to-end: a HEAD archive export passes its own
+    // provenance gate from its own tree (the gate's archive
+    // mode), proving the sealed file set carries the gate.
+    if !h::tool_present("git") || !h::tool_present("python3") || !h::tool_present("tar") {
+        eprintln!("skip: export gate run needs git plus python3 plus tar");
+        return;
+    }
+    let tmp = h::scratch("export-gate");
+    let archive = tmp.join("head.tar");
+    let proc = h::run(
+        "git",
+        &["archive", "--output", archive.to_str().unwrap(), "HEAD"],
+        Some(&h::repo_root()),
+    );
+    assert!(
+        proc.status.success(),
+        "{}",
+        String::from_utf8_lossy(&proc.stderr)
+    );
+    let tree = tmp.join("tree");
+    fs::create_dir_all(&tree).unwrap();
+    let proc = h::run(
+        "tar",
+        &["-xf", archive.to_str().unwrap(), "-C", tree.to_str().unwrap()],
+        None,
+    );
+    assert!(
+        proc.status.success(),
+        "{}",
+        String::from_utf8_lossy(&proc.stderr)
+    );
+    assert!(tree.join("tests").join("provenance").join("test_provenance.py").is_file());
+    let gate = h::run("python3", &["tests/provenance/test_provenance.py"], Some(&tree));
+    let stdout = String::from_utf8_lossy(&gate.stdout);
+    assert!(
+        gate.status.success(),
+        "export gate failed: {}{}",
+        String::from_utf8_lossy(&gate.stderr),
+        stdout[stdout.len().saturating_sub(2000)..].to_string()
+    );
+    assert!(stdout.contains("provenance: all checks passed"), "{stdout}");
 }
