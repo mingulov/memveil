@@ -10,9 +10,10 @@ all-features = true
 [advisories]
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
-vulnerability = "deny"
 yanked = "deny"
-unmaintained = "deny"
+# Validated with cargo-deny 0.21.0: `unmaintained` takes a scope there, and
+# "all" keeps the old deny-on-any-unmaintained-crate behavior.
+unmaintained = "all"
 ignore = []
 
 [licenses]
