@@ -68,7 +68,7 @@ def tree_hash(root):
 
 def main():
     if not os.path.isfile(BIN):
-        print("FAIL record-failures: missing %s (run cargo build --release in rust/ first)"
+        print("FAIL record-failures: missing %s (run cargo build --release first)"
               % BIN)
         sys.exit(1)
 
@@ -143,7 +143,7 @@ def main():
     # path rebound to a decoy (as virtme guests do), a refusal
     # must still explain itself on the captured fd.
     if not os.path.isfile(SHIM):
-        print("FAIL record-failures: missing %s (run cargo build --release in rust/ first)"
+        print("FAIL record-failures: missing %s (run cargo build --release first)"
               % SHIM)
         sys.exit(1)
     fd = tempfile.mkdtemp(prefix="mvstderr")
@@ -173,7 +173,7 @@ def main():
     for path, name in ((BRIDGE, "bridge"), (ATTEMPT_O, "object")):
         if not os.path.isfile(path):
             print("FAIL record-failures: missing %s %s "
-                  "(run cargo build --release in rust/ first)" % (name, path))
+                  "(run cargo build --release first)" % (name, path))
             sys.exit(1)
     roots = ["/sys/kernel/debug/tracing", "/sys/kernel/tracing"]
     check("eaccess-root-present",

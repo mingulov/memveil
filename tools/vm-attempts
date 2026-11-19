@@ -47,7 +47,7 @@ if [ ! -r "/boot/vmlinuz-$REL" ] || [ ! -w /dev/kvm ]; then
     echo "vm-attempts: vng runs under sudo -n" >&2
 fi
 if [ ! -x "$ROOT/build/memveil" ]; then
-    echo "vm-attempts: missing $ROOT/build/memveil (run cargo build --release in rust/)" >&2
+    echo "vm-attempts: missing $ROOT/build/memveil (run cargo build --release)" >&2
     exit 1
 fi
 if [ ! -f "$ROOT/build/bpf/swiotlb_attempt.bpf.o" ]; then

@@ -214,7 +214,7 @@ def main():
     check("docs-present", len(docs) >= 8, "%d docs" % len(docs))
 
     usage_src = open(os.path.join(
-        ROOT, "rust", "src", "main.rs")).read()
+        ROOT, "src", "main.rs")).read()
     match = re.search(r"usage: memveil <([^>]+)>", usage_src)
     check("verbs-from-source", bool(match))
     verbs = set(match.group(1).split("|"))
@@ -224,7 +224,7 @@ def main():
         " ".join(sorted(verbs)))
 
     if not os.path.isfile(BIN):
-        print("FAIL docs: missing %s (run cargo build --release in rust/ first)" % BIN)
+        print("FAIL docs: missing %s (run cargo build --release first)" % BIN)
         sys.exit(1)
     help_text = {}
     for verb in sorted(verbs):

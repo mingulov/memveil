@@ -166,7 +166,7 @@ def paced_errors(receipt, source_stat, count, size, duration_ns, wall):
 
 def main():
     if not os.path.isfile(BIN):
-        print("FAIL perf-replay: missing %s (run cargo build --release in rust/ first)"
+        print("FAIL perf-replay: missing %s (run cargo build --release first)"
               % BIN)
         sys.exit(1)
     tmp = tempfile.mkdtemp(prefix="mvperf")

@@ -46,7 +46,7 @@ def check(name, cond, detail=""):
 
 def main():
     if not os.path.isfile(BIN):
-        print("FAIL top: missing %s (run cargo build --release in rust/ first)" % BIN)
+        print("FAIL top: missing %s (run cargo build --release first)" % BIN)
         sys.exit(1)
 
     p = run(["top", "--help"])

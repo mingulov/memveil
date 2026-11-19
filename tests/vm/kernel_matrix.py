@@ -2173,7 +2173,7 @@ def product_max_ops():
     """Attempt-record cap read from the product source."""
     root = os.path.dirname(os.path.dirname(
         os.path.dirname(os.path.abspath(__file__))))
-    path = os.path.join(root, "rust", "src", "capture",
+    path = os.path.join(root, "src", "capture",
                         "collector.rs")
     try:
         with open(path) as handle:

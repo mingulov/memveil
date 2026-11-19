@@ -1,6 +1,8 @@
-.pixi/
 build/
 dist/
+target/
+# Legacy pre-cutover Pixi environment litter (no pixi manifest remains).
+.pixi/
 __pycache__/
 *.o
 *.bpf.o
@@ -10,14 +12,14 @@ Module.symvers
 *.mod.c
 *.cmd
 modules.order
-# Committed test fixtures (regenerate elf/ with tools/emit-elf-fixtures
-# after rebuilding the BPF object; narrow object.o files are static stubs).
+# Committed test fixtures (elf/ and core/ regenerate from their
+# emit tools once a pinned post-cutover C regen story lands;
+# narrow object.o files are static stubs).
 !tests/fixtures/elf/*.o
 !tests/fixtures/narrow/*/*.o
 # Runtime discovery markers are static readability stubs, never loaded.
 !tests/fixtures/runtime/bpf/*.bpf.o
 # CO-RE kind fixture (regenerate with tools/emit-core-fixtures).
 !tests/fixtures/core/*.bpf.o
-# Rust userspace build output.
-rust/target/
-rust/crates/ebpf/target/
+# Direct eBPF-crate builds (the workspace build uses target/).
+crates/ebpf/target/

@@ -143,7 +143,7 @@ def main():
               % (args.seeds,))
         return 1
     if not os.path.isfile(args.binary):
-        print("FAIL fuzz: missing %s (run cargo build --release in rust/ first)"
+        print("FAIL fuzz: missing %s (run cargo build --release first)"
               % args.binary)
         return 1
     with open(args.binary, "rb") as fh:

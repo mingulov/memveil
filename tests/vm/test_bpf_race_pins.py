@@ -19,9 +19,9 @@ import re
 REPO = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LIFECYCLE = os.path.join(
-    REPO, "rust", "crates", "ebpf", "src", "lifecycle.rs")
+    REPO, "crates", "ebpf", "src", "lifecycle.rs")
 COPY = os.path.join(
-    REPO, "rust", "crates", "ebpf", "src", "copy.rs")
+    REPO, "crates", "ebpf", "src", "copy.rs")
 
 
 def read(path):

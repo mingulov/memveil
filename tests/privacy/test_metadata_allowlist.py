@@ -27,7 +27,7 @@ import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
-RUST = os.path.join(REPO, "rust")
+RUST = REPO
 
 FORBIDDEN_PROPS = {
     "payload", "payload_bytes", "key", "key_material", "private_key",

@@ -22,8 +22,8 @@
 # invalid usage; 77 when a suite with unmet inputs skips.
 # One suite per invocation; extra arguments are rejected.
 # The binary under test is the Rust release build
-# (rust/target/release/memveil, built via cargo build
-# --release in rust/). Python suites keep their
+# (target/release/memveil, built via cargo build
+# --release). Python suites keep their
 # build/memveil path, which the runner links at the Rust
 # binary before dispatch. The link stays after the run.
 # The release binary must exist before dispatch: a missing
@@ -83,12 +83,12 @@ asan_preload() {
 
 memveil_bin() {
     # Binary under test: the Rust release build.
-    printf '%s\n' "$ROOT/rust/target/release/memveil"
+    printf '%s\n' "$ROOT/target/release/memveil"
 }
 
 memveil_build_hint() {
     # Rebuild hint matching memveil_bin.
-    printf 'cargo build --release in rust/'
+    printf 'cargo build --release'
 }
 
 rust_bin_setup() {
@@ -96,10 +96,10 @@ rust_bin_setup() {
     # (which hardcode build/memveil) must reach it: link
     # build/memveil at the Rust binary, replacing any stale
     # file from before the cutover.
-    rust="$ROOT/rust/target/release/memveil"
+    rust="$ROOT/target/release/memveil"
     if [ ! -x "$rust" ]; then
         echo "test: missing $rust" \
-            "(run cargo build --release in rust/ first)" >&2
+            "(run cargo build --release first)" >&2
         return 1
     fi
     link="$ROOT/build/memveil"
@@ -627,7 +627,7 @@ PYEOF
     # parser-vs-mirror half retired with the second
     # implementation: Rust keeps one representation, so no
     # mirror drift is expressible.)
-    if python3 - "$ROOT/rust/src/model/event.rs" \
+    if python3 - "$ROOT/src/model/event.rs" \
         "$ROOT/schemas/event-v0.1.2.schema.json" \
         "$ROOT/schemas/event-v0.1.1.schema.json" <<'PYEOF'; then
 import json, re, sys

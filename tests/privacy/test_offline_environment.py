@@ -33,7 +33,7 @@ def check(name, cond, detail=""):
 
 def main():
     if not os.path.isfile(BIN):
-        print("FAIL offline-environment: missing %s (run cargo build --release in rust/ first)"
+        print("FAIL offline-environment: missing %s (run cargo build --release first)"
               % BIN)
         sys.exit(1)
     if not shutil.which("strace"):

@@ -52,7 +52,7 @@ def tables_rectangular(md):
 
 def main():
     if not os.path.isfile(BIN):
-        print("FAIL render-escaping: missing %s (run cargo build --release in rust/ first)"
+        print("FAIL render-escaping: missing %s (run cargo build --release first)"
               % BIN)
         sys.exit(1)
     for cap in ("escape", "privacy-canary"):

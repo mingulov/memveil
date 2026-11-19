@@ -622,12 +622,12 @@ def rust_copy_object_sha():
     byte-for-byte, and the newest wins. Missing or
     divergent sets fail closed with an actionable cause.
     """
-    base = ROOT / "rust" / "target" / "release" / "build" / "memveil"
+    base = ROOT / "target" / "release" / "build" / "memveil"
     try:
         names = sorted(os.listdir(str(base)))
     except OSError:
         raise ValueError("missing Rust BPF artifacts under %s "
-                         "(run cargo build --release in rust/)" % base)
+                         "(run cargo build --release)" % base)
     channels = ("attempt", "lifecycle", "copy")
     sets = [os.path.join(str(base), name, "out") for name in names
             if all(os.path.isfile(os.path.join(
@@ -635,7 +635,7 @@ def rust_copy_object_sha():
                 for channel in channels)]
     if not sets:
         raise ValueError("no Rust BPF artifacts under %s "
-                         "(run cargo build --release in rust/)" % base)
+                         "(run cargo build --release)" % base)
     first = {channel: km.sha_file(os.path.join(
         sets[0], "memveil-ebpf-" + channel)) for channel in channels}
     for other in sets[1:]:

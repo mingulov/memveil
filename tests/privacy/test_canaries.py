@@ -38,7 +38,7 @@ def run(args):
 
 def main():
     if not os.path.isfile(BIN):
-        print("FAIL canaries: missing %s (run cargo build --release in rust/ first)" % BIN)
+        print("FAIL canaries: missing %s (run cargo build --release first)" % BIN)
         sys.exit(1)
 
     outputs = {}

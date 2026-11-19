@@ -34,7 +34,7 @@ def full(argv):
 
 def main():
     if not os.path.isfile(BIN):
-        print("FAIL stdout-errors: missing %s (run cargo build --release in rust/ first)"
+        print("FAIL stdout-errors: missing %s (run cargo build --release first)"
               % BIN)
         sys.exit(1)
 

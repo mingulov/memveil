@@ -64,21 +64,21 @@ STATIC_INPUTS = [
     "examples/lifecycle-copy/events.ndjson",
     "examples/lifecycle-copy/session.json",
     "profiles/manifest.txt",
-    "rust/Cargo.toml", "rust/Cargo.lock",
-    "rust/deny.toml",
-    "rust/build.rs", "rust/src/lib.rs", "rust/src/main.rs",
-    "rust/crates/ebpf/Cargo.toml", "rust/crates/ebpf/Cargo.lock",
-    "rust/crates/ebpf/rust-toolchain.toml",
-    "rust/crates/ebpf/deny.toml",
-    "rust/crates/ebpf-common/Cargo.toml",
-    "rust/packaging/deb/control.in",
-    "rust/packaging/deb/copyright",
-    "rust/packaging/deb/lintian-overrides",
-    "rust/packaging/rpm/memveil.spec",
-    "rust/packaging/libgcc/PROVENANCE.txt",
-    "rust/packaging/libgcc/libgcc-s1_14.2.0-19_amd64.deb",
-    "rust/packaging/libgcc/GPL-3.txt",
-    "rust/packaging/RUNTIME.LIBRARY.EXCEPTION",
+    "Cargo.toml", "Cargo.lock",
+    "deny.toml",
+    "build.rs", "src/lib.rs", "src/main.rs",
+    "crates/ebpf/Cargo.toml", "crates/ebpf/Cargo.lock",
+    "crates/ebpf/rust-toolchain.toml",
+    "crates/ebpf/deny.toml",
+    "crates/ebpf-common/Cargo.toml",
+    "packaging/deb/control.in",
+    "packaging/deb/copyright",
+    "packaging/deb/lintian-overrides",
+    "packaging/rpm/memveil.spec",
+    "packaging/libgcc/PROVENANCE.txt",
+    "packaging/libgcc/libgcc-s1_14.2.0-19_amd64.deb",
+    "packaging/libgcc/GPL-3.txt",
+    "packaging/RUNTIME.LIBRARY.EXCEPTION",
     "rust-toolchain.toml", "mise.toml",
 ]
 
@@ -375,13 +375,13 @@ def main(argv):
         check("license-text-%s" % ident, os.path.isfile(staged), staged)
     check("license-default", os.path.isfile(os.path.join(ROOT, "LICENSE")))
 
-    with open(os.path.join(ROOT, "rust", "Cargo.toml")) as handle:
+    with open(os.path.join(ROOT, "Cargo.toml")) as handle:
         product_version = _cargo_version(handle.read())
     check("cargo-version", bool(product_version), product_version)
     with open(os.path.join(ROOT, "rust-toolchain.toml")) as handle:
         host_channel = _toolchain_channel(handle.read())
     with open(os.path.join(
-            ROOT, "rust", "crates", "ebpf", "rust-toolchain.toml")) as handle:
+            ROOT, "crates", "ebpf", "rust-toolchain.toml")) as handle:
         ebpf_channel = _toolchain_channel(handle.read())
     check("toolchain-pinned", bool(host_channel) and bool(ebpf_channel),
           "%s / %s" % (host_channel, ebpf_channel))
@@ -391,15 +391,15 @@ def main(argv):
     check("toolchain-mise-agrees",
           bool(mise_rust) and mise_rust.group(1) == host_channel,
           mise_rust.group(1) if mise_rust else "no rust pin")
-    with open(os.path.join(ROOT, "rust", "build.rs")) as handle:
+    with open(os.path.join(ROOT, "build.rs")) as handle:
         build_rs = handle.read()
     bpf_toolchain = re.search(
         r'BPF_TOOLCHAIN[^\n"]*"([^"\n]+)"', build_rs)
     check("toolchain-ebpf-agrees-build",
           bool(bpf_toolchain) and bpf_toolchain.group(1) == ebpf_channel,
           bpf_toolchain.group(1) if bpf_toolchain else "no BPF pin")
-    for rel in ("rust/Cargo.lock", "rust/crates/ebpf/Cargo.lock",
-                "rust/deny.toml", "rust/crates/ebpf/deny.toml"):
+    for rel in ("Cargo.lock", "crates/ebpf/Cargo.lock",
+                "deny.toml", "crates/ebpf/deny.toml"):
         path = os.path.join(ROOT, rel)
         check("pinfile-" + rel.replace("/", "-"),
               os.path.isfile(path) and os.path.getsize(path) > 0, rel)
@@ -474,7 +474,7 @@ def main(argv):
     else:
         print("ok engine-version-matches-cargo (no built binary; skipped)")
 
-    with open(os.path.join(ROOT, "rust", "packaging", "rpm",
+    with open(os.path.join(ROOT, "packaging", "rpm",
                            "memveil.spec")) as handle:
         spec = handle.read()
     mspec = re.search(r"^Version:\s*(\S+)", spec, re.M)
