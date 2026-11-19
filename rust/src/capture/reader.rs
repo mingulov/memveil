@@ -2677,12 +2677,10 @@ mod tests {
 
     #[test]
     fn reader_missing() {
-        // Ground truth, verified against the Mojo implementation: a
-        // missing dir or a capture without session.json enters the
-        // recovery path, whose open failures are READ_INVALID; only a
-        // finalized capture with a missing events file is READ_IO. (The
-        // sibling Mojo unit test still expects READ_IO for all three
-        // and fails against its own implementation.)
+        // Contract: a missing dir or a capture without
+        // session.json enters the recovery path, whose open
+        // failures are READ_INVALID; only a finalized capture
+        // with a missing events file is READ_IO.
         let limits = default_limits();
         expect_error(&fixture("no-such-dir"), false, limits, READ_INVALID, 0);
         expect_error(&fixture("missing-events"), false, limits, READ_IO, 0);

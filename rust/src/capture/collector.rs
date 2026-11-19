@@ -15,6 +15,11 @@
 //! in the live writer module and is reused here, not redefined.
 //! Poll batches carry raw payload bytes: the ring yields items
 //! directly, so there is no bridge frame header to decode.
+//!
+//! Post-release follow-up: split the scripted test harness out
+//! of this module. The file mirrors the Mojo source 1:1 today,
+//! which keeps the port reviewable; the split must preserve
+//! behavior and the scripted matrix exactly.
 
 use super::correlation::CorrelationRegistry;
 use super::lifecycle::{

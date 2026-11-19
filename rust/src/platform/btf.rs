@@ -2459,9 +2459,12 @@ fn type_bits(walk: &BtfWalk, data: &[u8], tid: i64, budget: i64) -> TypeBits {
             }
             out.ok = true;
             out.kind = "array".to_string();
-            // Wrapping: the Mojo source multiplies raw u32-range
-            // values here; inputs that would overflow refuse
-            // elsewhere or stay deterministic, never panic.
+            // Wrapping: `count` is u32-range (widened to i64)
+            // but `sub.bits` comes from the recursive element
+            // resolution, so the product can exceed i64 on
+            // degenerate inputs; wrapping keeps the width
+            // deterministic instead of panicking. Valid BTF
+            // (sane count times width) never differs.
             out.bits = count.wrapping_mul(sub.bits);
             return out;
         }

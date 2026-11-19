@@ -2307,6 +2307,7 @@ mod tests {
     fn create_refuses_other_owned_dir() {
         // SAFETY: pure id query.
         if unsafe { libc::geteuid() } != 0 {
+            eprintln!("SKIP create_refuses_other_owned_dir: requires root (chown fixture)");
             return;
         }
         let tmp = scratch();

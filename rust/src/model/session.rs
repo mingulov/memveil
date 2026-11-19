@@ -39,7 +39,8 @@ pub const SESSION_SCHEMA_VERSION: &str = "0.1.3";
 pub const SESSION_SCHEMA_VERSION_PREV: &str = "0.1.2";
 /// Oldest accepted session schema.
 pub const SESSION_SCHEMA_VERSION_PREV2: &str = "0.1.1";
-const PRODUCT_NAME: &str = "memveil";
+/// Frozen product name echoed into every session document.
+pub(crate) const PRODUCT_NAME: &str = "memveil";
 const CORR_RELATION_MAPPING: &str = "mapping_release";
 const CORR_RELATION_COPY: &str = "copy_attribution";
 const CORR_RELATION_SYNC: &str = "sync_attribution";

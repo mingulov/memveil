@@ -428,11 +428,6 @@ impl LifecycleLedger {
     }
 }
 
-/// Map one decoded MVLC v2 record onto a normalized Event.
-///
-/// Kind, timestamp, per-probe hook name, and payload are set;
-/// the collector stamps the capture-derived source block and
-/// runs the correlation registry before persisting.
 /// Mint one record-local id; never kernel identity.
 fn record_id(seq: u64) -> String {
     format!("lc-{}", format_u64(seq))
@@ -447,6 +442,11 @@ pub(crate) fn wire_gen_token(generation: u64) -> String {
     format!("gen-{}", format_u64(generation))
 }
 
+/// Map one decoded MVLC v2 record onto a normalized Event.
+///
+/// Kind, timestamp, per-probe hook name, and payload are set;
+/// the collector stamps the capture-derived source block and
+/// runs the correlation registry before persisting.
 pub fn normalize_lifecycle_event(d: &DecodedLifecycle) -> Event {
     let mut ev = Event {
         ts_ns: d.ktime,

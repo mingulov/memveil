@@ -70,11 +70,13 @@ pub fn filter_line_counts(line: &str, function: &str) -> bool {
 
 /// True when the first token is a dotted clone of function.
 fn filter_line_is_clone(line: &str, function: &str) -> bool {
-    let tok = first_token(line);
+    let tok = line.split(' ').next().unwrap_or("");
     if tok == function {
         return false;
     }
-    tok.starts_with(&format!("{function}."))
+    tok.len() > function.len()
+        && tok.starts_with(function)
+        && tok.as_bytes()[function.len()] == b'.'
 }
 
 /// Count one function in available_filter_functions.

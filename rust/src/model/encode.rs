@@ -19,13 +19,11 @@ use super::event::{EVENT_SCHEMA_VERSION, EVENT_SCHEMA_VERSION_PREV, Event};
 use super::integrity::{Integrity, integrity_kind};
 use super::regions::RegionObservation;
 use super::session::{
-    Capability, Channel, DeviceEntry, EvidenceItem, SESSION_SCHEMA_VERSION,
+    Capability, Channel, DeviceEntry, EvidenceItem, PRODUCT_NAME, SESSION_SCHEMA_VERSION,
     SESSION_SCHEMA_VERSION_INTEGRITY, Session, StopState,
 };
 use std::fmt;
 
-/// Frozen product name echoed into every session document.
-const PRODUCT_NAME: &str = "memveil";
 /// Typical event lines are 300-400 bytes; longer ones grow the buffer.
 const LINE_RESERVE: usize = 512;
 /// NDJSON line cap including the trailing newline.
