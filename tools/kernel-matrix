@@ -458,6 +458,17 @@ def run_one(entry, args, kind, source, disk_img, tools, run_id,
         job["bundle"] = source
     job["repo"] = str(ROOT)
     t0 = time.monotonic()
+    for tool in ("bpftrace", "bpftool"):
+        # vng passes no PATH into the guest, so the guest
+        # cannot resolve the pinned tools by name: hand it
+        # the host-resolved absolute paths (the shared
+        # rootfs makes them valid in-guest). Host preflight
+        # already verified these versions against the lock.
+        path = shutil.which(tool)
+        if not path or not os.path.isabs(path):
+            return stage_fail("tools", "tool-unresolved",
+                              "%s not on PATH" % tool, t0)
+        job[tool] = path
     if stage is not None:
         try:
             stage(export, job)

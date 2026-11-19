@@ -219,8 +219,9 @@ def first_line(proc):
     return ""
 
 
-def record_artifacts(km, out, mv, mode):
+def record_artifacts(km, out, mv, mode, tools):
     bpf = {}
+    paths = {}
     if mode == "deb":
         roots = ["/usr/lib/memveil"]
     else:
@@ -242,23 +243,31 @@ def record_artifacts(km, out, mv, mode):
         if not found:
             fail("bpf object missing: %s" % name)
         bpf[key] = km.sha_file(found)
+        paths[key] = found
     dpkg_version = ""
     if mode == "deb":
         proc = sh(["dpkg-query", "-W", "-f=${Version}", "memveil"])
         dpkg_version = (proc.stdout or "").strip()
         if proc.returncode != 0 or not dpkg_version:
             fail("dpkg-query for memveil failed")
-    bpftrace = sh(["bpftrace", "--version"])
-    bpftool = sh(["bpftool", "--version"])
+    # Absolute host-resolved paths: vng passes no PATH into
+    # the guest, so bare names would fall through to
+    # whatever the guest image carries.
+    bpftrace = sh([tools["bpftrace"], "--version"])
+    bpftool = sh([tools["bpftool"], "--version"])
     if not first_line(bpftrace) or not first_line(bpftool):
         fail("bpftrace or bpftool version unreadable")
     write(os.path.join(out, "artifacts.json"), json.dumps(
         {"mode": mode, "binary": {"path": mv,
                                  "sha256": km.sha_file(mv)},
          "dpkg_version": dpkg_version, "bpf": bpf,
+         "bpf_paths": paths,
          "bpftrace": first_line(bpftrace),
-         "bpftool": first_line(bpftool)},
+         "bpftool": first_line(bpftool),
+         "bpftrace_path": tools["bpftrace"],
+         "bpftool_path": tools["bpftool"]},
         indent=2, sort_keys=True) + "\n")
+    return paths
 
 
 def mark_dmesg(km):
@@ -285,9 +294,9 @@ def export_dmesg(km, out, fatal=True):
             fail("dmesg unavailable")
 
 
-def snapshot_progs(out, idx):
+def snapshot_progs(out, idx, bpftool):
     stamp = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
-    proc = sh(["bpftool", "prog", "show", "--json"], timeout=60)
+    proc = sh([bpftool, "prog", "show", "--json"], timeout=60)
     if proc.returncode != 0:
         fail("bpftool snapshot %d failed" % idx)
     write(os.path.join(out, "progs%d.json" % idx),
@@ -361,6 +370,12 @@ def run(argv):
     dd_count = int(job.get("dd_count", 128))
     deb = job.get("deb")
     bundle = job.get("bundle")
+    guest_tools = {}
+    for tool in ("bpftrace", "bpftool"):
+        path = job.get(tool)
+        if not path or not os.path.isabs(path):
+            fail("job lacks absolute %s path" % tool)
+        guest_tools[tool] = path
     sys.path.insert(0, os.path.join(repo, "tests", "vm"))
     try:
         import kernel_matrix as km
@@ -386,7 +401,10 @@ def run(argv):
         fail("job needs deb or bundle")
     if not mv or not os.path.isfile(mv):
         fail("memveil binary missing: %r" % mv)
-    record_artifacts(km, out, mv, mode)
+    bpf_paths = record_artifacts(km, out, mv, mode, guest_tools)
+    doctor_objects = ["--object", bpf_paths["attempt"],
+                      "--lc-object", bpf_paths["lifecycle"],
+                      "--cp-object", bpf_paths["copy"]]
     release = os.uname().release
     write(os.path.join(out, "uname.txt"),
           release + "\n" + Path("/proc/cmdline").read_text())
@@ -425,7 +443,11 @@ def run(argv):
     subprocess.run(["mount", "-t", "debugfs", "none",
                     "/sys/kernel/debug"],
                    capture_output=True)
-    proc = sh([mv, "doctor", "--json", "--capability", "all"])
+    # Explicit objects: bundle layouts are undiscoverable
+    # (exe-relative bundle path plus system only), so the
+    # resolved artifacts ride along as flags in every mode.
+    proc = sh([mv, "doctor", "--json", "--capability", "all"]
+              + doctor_objects)
     write(os.path.join(out, "doctor-passive.json"),
           proc.stdout or "")
     write(os.path.join(out, "doctor-passive.stderr"),
@@ -433,7 +455,7 @@ def run(argv):
     write(os.path.join(out, "doctor-passive.exit"),
           str(proc.returncode))
     proc = sh([mv, "doctor", "--json", "--capability", "all",
-               "--load-check"])
+               "--load-check"] + doctor_objects)
     write(os.path.join(out, "doctor.json"), proc.stdout or "")
     write(os.path.join(out, "doctor.stderr"), proc.stderr or "")
     write(os.path.join(out, "doctor.exit"), str(proc.returncode))
@@ -527,14 +549,38 @@ def run(argv):
           oracle_mode + "\n")
     oracle_out = open(os.path.join(out, "oracle.txt"), "w")
     oracle_err = open(os.path.join(out, "oracle.stderr"), "w")
-    opid = subprocess.Popen(["bpftrace", "-q", "-e", prog],
+    opid = subprocess.Popen([guest_tools["bpftrace"], "-q", "-e", prog],
                             stdout=oracle_out, stderr=oracle_err,
                             start_new_session=True)
-    time.sleep(3)
-    if opid.poll() is not None:
+    # Attach latency is load-dependent (measured 4-8 s on a
+    # loaded host for either pinned generation), so a blind
+    # settle races snapshot 0 and window bracketing. Wait
+    # for the oracle's own first interval line instead: a T
+    # line proves the program runs with its probes
+    # attached, and snapshot 0 plus prog_presence still
+    # judge the attachment fail-closed below.
+    oracle_txt = os.path.join(out, "oracle.txt")
+    ready = False
+    for _ in range(240):
+        if opid.poll() is not None:
+            break
+        try:
+            with open(oracle_txt) as handle:
+                for line in handle:
+                    if line.startswith("T "):
+                        ready = True
+                        break
+        except OSError:
+            pass
+        if ready:
+            break
+        time.sleep(0.5)
+    if not ready:
         oracle_out.close()
         oracle_err.close()
-        fail("oracle exited early (missing hook not omitted?)")
+        if opid.poll() is not None:
+            fail("oracle exited early (missing hook not omitted?)")
+        fail("oracle not ready in 120s")
     hist_status = None
     if oracle_mode == "countonly":
         try:
@@ -545,7 +591,7 @@ def run(argv):
         write(os.path.join(out, "hist.status"),
               hist_status + "\n")
     times = {}
-    times[0] = snapshot_progs(out, 0)
+    times[0] = snapshot_progs(out, 0, guest_tools["bpftool"])
     cap = os.path.join(out, "cap")
     record_out = open(os.path.join(out, "record.out"), "w")
     record_err = open(os.path.join(out, "record.stderr"), "w")
@@ -571,7 +617,7 @@ def run(argv):
         opid.send_signal(signal.SIGINT)
         fail("record exited %d before ready; see record.stderr"
              % (rpid.returncode,))
-    times[1] = snapshot_progs(out, 1)
+    times[1] = snapshot_progs(out, 1, guest_tools["bpftool"])
     # Settle before the workload so edge samples bracket cleanly.
     time.sleep(4)
     base = check_base(dev)
@@ -639,7 +685,7 @@ def run(argv):
         except OSError as exc:
             fail("hist snapshot after phases failed: %s" % exc)
         hist_remove(HIST_EVENT)
-    times[2] = snapshot_progs(out, 2)
+    times[2] = snapshot_progs(out, 2, guest_tools["bpftool"])
     try:
         rpid.wait(timeout=duration + 120)
     except subprocess.TimeoutExpired:
@@ -652,7 +698,7 @@ def run(argv):
     record_out.close()
     record_err.close()
     write(os.path.join(out, "record.exit"), str(rpid.returncode))
-    times[3] = snapshot_progs(out, 3)
+    times[3] = snapshot_progs(out, 3, guest_tools["bpftool"])
     write(os.path.join(out, "progs_times.json"),
           json.dumps({str(k): v for k, v in sorted(times.items())},
                      indent=2, sort_keys=True) + "\n")
@@ -674,7 +720,7 @@ def run(argv):
         busy_err.close()
         fail("busy loader exited early")
     busy_times = {}
-    busy_times[0] = snapshot_progs(busy_dir, 0)
+    busy_times[0] = snapshot_progs(busy_dir, 0, guest_tools["bpftool"])
     busy_cap = os.path.join(busy_dir, "cap")
     busy_rec_out = open(os.path.join(busy_dir,
                                      "record.out"), "w")
@@ -699,7 +745,7 @@ def run(argv):
              % (qpid.returncode,))
     ready_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
     time.sleep(20)
-    busy_times[1] = snapshot_progs(busy_dir, 1)
+    busy_times[1] = snapshot_progs(busy_dir, 1, guest_tools["bpftool"])
     stop_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
     qpid.send_signal(signal.SIGINT)
     try:
@@ -710,7 +756,7 @@ def run(argv):
         bpid.send_signal(signal.SIGTERM)
         fail("busy record did not stop on SIGINT")
     exit_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
-    busy_times[2] = snapshot_progs(busy_dir, 2)
+    busy_times[2] = snapshot_progs(busy_dir, 2, guest_tools["bpftool"])
     write(os.path.join(busy_dir, "progs_times.json"),
           json.dumps({str(k): v
                       for k, v in sorted(busy_times.items())},
