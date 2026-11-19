@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Rust tree gates: supply-chain policy (cargo-deny over the
+# root and eBPF manifests) and the Mojo control path (the
+# gated parity tests run against a freshly built Mojo
+# binary, so they never skip silently in CI).
+# Unprivileged; safe for pull requests.
+#
+# Toolchain pins, matching the tree: Rust 1.100.0 plus
+# nightly-2026-05-20 for the eBPF child build
+# (rust-toolchain.toml, rust/build.rs BPF_TOOLCHAIN),
+# bpf-linker 0.10.4 (rust/build.rs prerequisite),
+# cargo-deny 0.21.0 (validated in-tree: see the eBPF
+# deny.toml comment). The advisory DB needs network.
+# The Mojo provisioning mirrors the native workflow.
+#
+# Cutover note: the deny job survives (it guards the Rust
+# tree); the mojo-parity job retires with the Mojo build.
+name: rust
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  deny:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - name: Install Rust 1.100.0 (cargo metadata only, no build)
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          rustup toolchain install 1.100.0 --profile minimal
+      - name: Install cargo-deny 0.21.0
+        run: |
+          VER=0.21.0
+          TARBALL="cargo-deny-$VER-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL -o /tmp/deny.tar.gz \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/$VER/$TARBALL"
+          echo "a2170b854ff697e79e39c4c538981c9c1bdd803addbae6719a4cb66b4585a903  /tmp/deny.tar.gz" | sha256sum --check -
+          mkdir -p /tmp/deny-dist
+          tar -xzf /tmp/deny.tar.gz -C /tmp/deny-dist
+          echo "/tmp/deny-dist/cargo-deny-$VER-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
+          cargo-deny --version
+      - name: Check root manifest
+        run: |
+          cd rust && cargo-deny check
+      - name: Check eBPF manifest
+        run: |
+          cd rust/crates/ebpf && cargo-deny check
+
+  mojo-parity:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - name: Install pixi
+        run: |
+          python3 tools/install-pixi --prefix "$HOME/.pixi"
+          echo "$HOME/.pixi/bin" >> "$GITHUB_PATH"
+      - name: Install system toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang llvm bpftool cmake ninja-build binutils
+      - name: Provision libbpf-mojo tarball
+        run: |
+          VER="$(python3 -c "import json; print(json.load(open('toolchain.lock.json'))['dependencies']['libbpf-mojo']['version'])")"
+          TARBALL="third_party/libbpf-mojo-$VER.tar.gz"
+          WANT="$(python3 -c "import json; print(json.load(open('toolchain.lock.json'))['dependencies']['libbpf-mojo']['tarball_sha256'])")"
+          echo "$WANT  $TARBALL" | sha256sum --check -
+          echo "LMB_PACKAGE=$GITHUB_WORKSPACE/$TARBALL" >> "$GITHUB_ENV"
+      - name: Install Rust toolchains
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          rustup toolchain install 1.100.0 --profile minimal \
+            --component clippy,rustfmt
+          rustup toolchain install nightly-2026-05-20 --profile minimal \
+            --component rust-src
+      - name: Install bpf-linker 0.10.4
+        run: cargo install bpf-linker --version 0.10.4 --locked
+      - name: Build Mojo control binary
+        run: ./tools/build
+      - name: Build Rust release binary
+        run: |
+          cd rust && cargo build --locked --release
+      - name: Gated parity tests against the Mojo control
+        run: |
+          cd rust
+          export MEMVEIL_MOJO_BIN="$GITHUB_WORKSPACE/build/memveil"
+          test -x "$MEMVEIL_MOJO_BIN"
+          cargo test --locked --test cli_parity
+          cargo test --locked --lib unobserved_copy_rejected_at_read
