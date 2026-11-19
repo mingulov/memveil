@@ -1,7 +1,7 @@
 //! SPDX-License-Identifier: GPL-2.0-only
 //! MemVeil copy-channel BPF object: the sync/bounce fentry/fexit programs
-//! plus their maps once the copy port lands, built for bpfel-unknown-none
-//! and embedded by the host build as `DEP_MEMVEIL_EBPF_COPY_PATH`.
+//! plus their maps, built for bpfel-unknown-none and embedded by the host
+//! build as `DEP_MEMVEIL_EBPF_COPY_PATH`.
 #![no_std]
 #![no_main]
 #![feature(core_intrinsics)]

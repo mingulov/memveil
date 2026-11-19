@@ -98,7 +98,7 @@ static MV_COPY_OFFS: Array<CopyOffsets> = Array::with_max_entries(1, 0);
 #[inline(always)]
 fn raise(bit: u64) {
     if let Some(slot) = MV_COUNTS.get_ptr_mut(MV_CNT_FLAGS as u32) {
-        crate::common::count_or(slot, bit);
+        unsafe { crate::common::count_or(slot, bit) };
     }
 }
 
@@ -108,7 +108,7 @@ fn submit_fail() {
     let Some(slot) = MV_COUNTS.get_ptr_mut(MV_CNT_SUBMIT_FAIL as u32) else {
         return;
     };
-    if crate::common::count_fetch_add(slot, 1) == u64::MAX {
+    if unsafe { crate::common::count_fetch_add(slot, 1) } == u64::MAX {
         raise(MV_FLAG_SUBMIT_WRAP);
     }
 }
@@ -117,7 +117,7 @@ fn submit_fail() {
 #[inline(always)]
 fn fb_raise(bit: u64) {
     if let Some(slot) = MV_COPY_FB.get_ptr_mut(MV_CP_FB_FLAGS) {
-        crate::common::count_or(slot, bit);
+        unsafe { crate::common::count_or(slot, bit) };
     }
 }
 
@@ -127,7 +127,7 @@ fn fb_deferred() {
     let Some(slot) = MV_COPY_FB.get_ptr_mut(MV_CP_FB_DEFERRED) else {
         return;
     };
-    if crate::common::count_fetch_add(slot, 1) == u64::MAX {
+    if unsafe { crate::common::count_fetch_add(slot, 1) } == u64::MAX {
         fb_raise(MV_CP_FB_FLAG_DEFERRED_WRAP);
     }
 }
@@ -138,7 +138,7 @@ fn fb_recovered() {
     let Some(slot) = MV_COPY_FB.get_ptr_mut(MV_CP_FB_RECOVERED) else {
         return;
     };
-    if crate::common::count_fetch_add(slot, 1) == u64::MAX {
+    if unsafe { crate::common::count_fetch_add(slot, 1) } == u64::MAX {
         fb_raise(MV_CP_FB_FLAG_RECOVERED_WRAP);
     }
 }
@@ -282,7 +282,7 @@ fn emit_cp(
         return 0;
     };
     // Step 1: every firing advances observed first.
-    let seq = crate::common::count_fetch_add(observed, 1);
+    let seq = unsafe { crate::common::count_fetch_add(observed, 1) };
     if seq == u64::MAX {
         raise(MV_FLAG_OBSERVED_WRAP);
         submit_fail();
@@ -308,7 +308,7 @@ fn emit_cp(
     let Some(observed_bytes) = MV_COUNTS.get_ptr_mut(MV_CNT_OBSERVED_BYTES as u32) else {
         return 0;
     };
-    let before = crate::common::count_fetch_add(observed_bytes, requested);
+    let before = unsafe { crate::common::count_fetch_add(observed_bytes, requested) };
     if before > u64::MAX - requested {
         raise(MV_FLAG_OBSERVED_BYTES_WRAP);
         submit_fail();
@@ -338,10 +338,10 @@ fn emit_cp(
     ) else {
         return 0;
     };
-    if crate::common::count_fetch_add(emitted, 1) == u64::MAX {
+    if unsafe { crate::common::count_fetch_add(emitted, 1) } == u64::MAX {
         raise(MV_FLAG_EMITTED_WRAP);
     }
-    if crate::common::count_fetch_add(emitted_bytes, requested) > u64::MAX - requested {
+    if unsafe { crate::common::count_fetch_add(emitted_bytes, requested) } > u64::MAX - requested {
         raise(MV_FLAG_EMITTED_BYTES_WRAP);
     }
     0
@@ -491,7 +491,7 @@ fn lost() {
     let Some(observed) = MV_COUNTS.get_ptr_mut(MV_CNT_OBSERVED as u32) else {
         return;
     };
-    if crate::common::count_fetch_add(observed, 1) == u64::MAX {
+    if unsafe { crate::common::count_fetch_add(observed, 1) } == u64::MAX {
         raise(MV_FLAG_OBSERVED_WRAP);
     }
     submit_fail();
@@ -548,7 +548,7 @@ fn claim(frame: u64, id: u64) -> bool {
             return false;
         };
         if unsafe { (*slot).frame } == 0
-            && crate::common::count_cas(unsafe { &raw mut (*slot).frame }, 0, frame) == 0
+            && unsafe { crate::common::count_cas(&raw mut (*slot).frame, 0, frame) } == 0
         {
             unsafe {
                 (*slot).id = id;
@@ -581,7 +581,7 @@ fn release(frame: u64, id: u64) -> bool {
 
 #[fentry(function = "__swiotlb_sync_single_for_device")]
 pub fn mv_sync_device(ctx: FEntryContext) -> u32 {
-    if crate::common::func_arg_cnt(ctx.as_ptr()) != MV_ARGS_SYNC {
+    if unsafe { crate::common::func_arg_cnt(ctx.as_ptr()) } != MV_ARGS_SYNC {
         raise(MV_FLAG_ARGCNT);
         return 0;
     }
@@ -604,7 +604,7 @@ pub fn mv_sync_device(ctx: FEntryContext) -> u32 {
 
 #[fentry(function = "__swiotlb_sync_single_for_cpu")]
 pub fn mv_sync_cpu(ctx: FEntryContext) -> u32 {
-    if crate::common::func_arg_cnt(ctx.as_ptr()) != MV_ARGS_SYNC {
+    if unsafe { crate::common::func_arg_cnt(ctx.as_ptr()) } != MV_ARGS_SYNC {
         raise(MV_FLAG_ARGCNT);
         return 0;
     }
@@ -625,7 +625,7 @@ pub fn mv_sync_cpu(ctx: FEntryContext) -> u32 {
 
 #[fentry(function = "swiotlb_bounce")]
 pub fn mv_bounce(ctx: FEntryContext) -> u32 {
-    if crate::common::func_arg_cnt(ctx.as_ptr()) != MV_ARGS_BOUNCE {
+    if unsafe { crate::common::func_arg_cnt(ctx.as_ptr()) } != MV_ARGS_BOUNCE {
         raise(MV_FLAG_ARGCNT);
         return 0;
     }
@@ -652,7 +652,7 @@ pub fn mv_bounce(ctx: FEntryContext) -> u32 {
 /// Records the copy when mv_bounce skipped this call or found no free slot.
 #[fexit(function = "swiotlb_bounce")]
 pub fn mv_bounce_exit(ctx: FExitContext) -> u32 {
-    if crate::common::func_arg_cnt(ctx.as_ptr()) != MV_ARGS_BOUNCE {
+    if unsafe { crate::common::func_arg_cnt(ctx.as_ptr()) } != MV_ARGS_BOUNCE {
         raise(MV_FLAG_ARGCNT);
         return 0;
     }

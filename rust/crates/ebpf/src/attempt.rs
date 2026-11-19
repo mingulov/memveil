@@ -57,7 +57,7 @@ fn mv_raise(bit: u64) {
     let Some(slot) = MV_COUNTS.get_ptr_mut(MV_CNT_FLAGS as u32) else {
         return;
     };
-    count_or(slot, bit);
+    unsafe { count_or(slot, bit) };
 }
 
 /// Checked submit_fail increment; the wrapped value is never trusted.
@@ -66,7 +66,7 @@ fn mv_submit_fail() {
     let Some(slot) = MV_COUNTS.get_ptr_mut(MV_CNT_SUBMIT_FAIL as u32) else {
         return;
     };
-    let old = count_fetch_add(slot, 1);
+    let old = unsafe { count_fetch_add(slot, 1) };
     if old == u64::MAX {
         mv_raise(MV_FLAG_SUBMIT_WRAP);
     }
@@ -101,7 +101,7 @@ pub fn mv_swiotlb_attempt(ctx: TracePointContext) -> u32 {
     let Some(observed) = MV_COUNTS.get_ptr_mut(MV_CNT_OBSERVED as u32) else {
         return 0;
     };
-    let seq = count_fetch_add(observed, 1);
+    let seq = unsafe { count_fetch_add(observed, 1) };
     if seq == u64::MAX {
         mv_raise(MV_FLAG_OBSERVED_WRAP);
         mv_submit_fail();
@@ -153,7 +153,7 @@ pub fn mv_swiotlb_attempt(ctx: TracePointContext) -> u32 {
     let Some(observed_bytes) = MV_COUNTS.get_ptr_mut(MV_CNT_OBSERVED_BYTES as u32) else {
         return 0;
     };
-    let before = count_fetch_add(observed_bytes, size);
+    let before = unsafe { count_fetch_add(observed_bytes, size) };
     if before > u64::MAX - size {
         mv_raise(MV_FLAG_OBSERVED_BYTES_WRAP);
         mv_submit_fail();
@@ -243,10 +243,10 @@ pub fn mv_swiotlb_attempt(ctx: TracePointContext) -> u32 {
     ) else {
         return 0;
     };
-    if count_fetch_add(emitted, 1) == u64::MAX {
+    if unsafe { count_fetch_add(emitted, 1) } == u64::MAX {
         mv_raise(MV_FLAG_EMITTED_WRAP);
     }
-    if count_fetch_add(emitted_bytes, size) > u64::MAX - size {
+    if unsafe { count_fetch_add(emitted_bytes, size) } > u64::MAX - size {
         mv_raise(MV_FLAG_EMITTED_BYTES_WRAP);
     }
     0

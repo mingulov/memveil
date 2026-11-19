@@ -104,7 +104,7 @@ fn wire_dir(kdir: i32) -> Option<u16> {
 #[inline(always)]
 fn mv_raise(bit: u64) {
     if let Some(slot) = MV_COUNTS.get_ptr_mut(MV_CNT_FLAGS as u32) {
-        count_or(slot, bit);
+        unsafe { count_or(slot, bit) };
     }
 }
 
@@ -114,7 +114,7 @@ fn mv_submit_fail() {
     let Some(slot) = MV_COUNTS.get_ptr_mut(MV_CNT_SUBMIT_FAIL as u32) else {
         return;
     };
-    if count_fetch_add(slot, 1) == u64::MAX {
+    if unsafe { count_fetch_add(slot, 1) } == u64::MAX {
         mv_raise(MV_FLAG_SUBMIT_WRAP);
     }
 }
@@ -128,7 +128,7 @@ fn mv_emit_lc(kind: u16, flags: u16, dir: u64, size: u64, gen: u64) -> bool {
         return false;
     };
     // Step 1: every firing advances observed first.
-    let seq = count_fetch_add(observed, 1);
+    let seq = unsafe { count_fetch_add(observed, 1) };
     if seq == u64::MAX {
         mv_raise(MV_FLAG_OBSERVED_WRAP);
         mv_submit_fail();
@@ -152,7 +152,7 @@ fn mv_emit_lc(kind: u16, flags: u16, dir: u64, size: u64, gen: u64) -> bool {
     let Some(observed_bytes) = MV_COUNTS.get_ptr_mut(MV_CNT_OBSERVED_BYTES as u32) else {
         return false;
     };
-    let before = count_fetch_add(observed_bytes, size);
+    let before = unsafe { count_fetch_add(observed_bytes, size) };
     if before > u64::MAX - size {
         mv_raise(MV_FLAG_OBSERVED_BYTES_WRAP);
         mv_submit_fail();
@@ -181,10 +181,10 @@ fn mv_emit_lc(kind: u16, flags: u16, dir: u64, size: u64, gen: u64) -> bool {
     ) else {
         return true;
     };
-    if count_fetch_add(emitted, 1) == u64::MAX {
+    if unsafe { count_fetch_add(emitted, 1) } == u64::MAX {
         mv_raise(MV_FLAG_EMITTED_WRAP);
     }
-    if count_fetch_add(emitted_bytes, size) > u64::MAX - size {
+    if unsafe { count_fetch_add(emitted_bytes, size) } > u64::MAX - size {
         mv_raise(MV_FLAG_EMITTED_BYTES_WRAP);
     }
     true
@@ -226,7 +226,7 @@ fn mv_alloc_gen() -> Option<u64> {
         if current >= MV_LC_GEN_MAX {
             return None;
         }
-        let previous = count_cas(counter, current, current + 1);
+        let previous = unsafe { count_cas(counter, current, current + 1) };
         if previous == current {
             return Some(current + 1);
         }
@@ -246,7 +246,7 @@ pub fn mv_map_result(ctx: FExitContext) -> i32 {
 }
 
 fn try_mv_map_result(ctx: &FExitContext) {
-    if func_arg_cnt(ctx.as_ptr()) != MV_ARGS_MAP_SINGLE {
+    if unsafe { func_arg_cnt(ctx.as_ptr()) } != MV_ARGS_MAP_SINGLE {
         mv_raise(MV_FLAG_ARGCNT);
         return;
     }
@@ -279,7 +279,7 @@ fn try_mv_map_result(ctx: &FExitContext) {
     // failed delete stays reclaimable.
     if !mv_emit_lc(MV_LC_KIND_MAP, flags, u64::from(wdir), mapping_size, gen) && gen != 0 {
         if let Some(slot) = MV_GEN_TABLE.get_ptr_mut(&key) {
-            if count_cas(slot, gen, 0) == gen {
+            if unsafe { count_cas(slot, gen, 0) } == gen {
                 let _ = MV_GEN_TABLE.remove(&key);
             }
         }
@@ -295,7 +295,7 @@ pub fn mv_unmap(ctx: FEntryContext) -> i32 {
 }
 
 fn try_mv_unmap(ctx: &FEntryContext) {
-    if func_arg_cnt(ctx.as_ptr()) != MV_ARGS_UNMAP {
+    if unsafe { func_arg_cnt(ctx.as_ptr()) } != MV_ARGS_UNMAP {
         mv_raise(MV_FLAG_ARGCNT);
         return;
     }
@@ -318,7 +318,7 @@ fn try_mv_unmap(ctx: &FEntryContext) {
         let current = unsafe { *slot };
         if current != 0 {
             gen = current;
-            if count_cas(slot, gen, 0) != gen {
+            if unsafe { count_cas(slot, gen, 0) } != gen {
                 // Lost to a concurrent owner: miss without escalation, the key stays live-owned.
                 gen = 0;
                 flags |= MV_LC_FLAG_GEN_MISS;

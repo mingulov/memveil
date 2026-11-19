@@ -10,6 +10,13 @@
 //! whose consumed result needs BPF CPU v3 (the host build passes
 //! `-C target-cpu=v3`). Each channel bin includes this file as
 //! `crate::common` next to its own channel module.
+//!
+//! Every helper is `unsafe fn`: each dereferences a caller-provided raw
+//! pointer (map-value slots from `get_ptr_mut`, or the probe context for
+//! [`func_arg_cnt`]), and only the caller can vouch for the pointer. All
+//! current call sites pass `get_ptr_mut` results, field projections of
+//! them, or `ctx.as_ptr()` — but that audit lives at the call sites, not
+//! in these signatures, so the unsafety is marked, not assumed.
 
 use core::ffi::c_void;
 
@@ -21,7 +28,7 @@ use core::ffi::c_void;
 /// program run, as returned by `get_ptr_mut`. Concurrent firings on other
 /// CPUs are the reason this is atomic rather than a plain read-add-write.
 #[inline(always)]
-pub fn count_add(ptr: *mut u64, v: u64) {
+pub unsafe fn count_add(ptr: *mut u64, v: u64) {
     // The deliberately unused result selects the non-fetch BPF ATOMIC ADD
     // form, which is the only lowering this backend accepts for the add.
     let _ = unsafe {
@@ -42,7 +49,7 @@ pub fn count_add(ptr: *mut u64, v: u64) {
 ///
 /// Same contract as [`count_add`]: a live, aligned map-value pointer.
 #[inline(always)]
-pub fn count_fetch_add(ptr: *mut u64, v: u64) -> u64 {
+pub unsafe fn count_fetch_add(ptr: *mut u64, v: u64) -> u64 {
     unsafe {
         core::intrinsics::atomic_xadd::<u64, u64, { core::intrinsics::AtomicOrdering::AcqRel }>(
             ptr, v,
@@ -56,7 +63,7 @@ pub fn count_fetch_add(ptr: *mut u64, v: u64) -> u64 {
 ///
 /// Same contract as [`count_add`]: a live, aligned map-value pointer.
 #[inline(always)]
-pub fn count_or(ptr: *mut u64, bits: u64) {
+pub unsafe fn count_or(ptr: *mut u64, bits: u64) {
     // As above, the discarded result selects the non-fetch BPF ATOMIC OR.
     let _ = unsafe {
         core::intrinsics::atomic_or::<u64, u64, { core::intrinsics::AtomicOrdering::AcqRel }>(
@@ -72,7 +79,7 @@ pub fn count_or(ptr: *mut u64, bits: u64) {
 ///
 /// Same contract as [`count_add`]: a live, aligned map-value pointer.
 #[inline(always)]
-pub fn count_cas(ptr: *mut u64, old: u64, new: u64) -> u64 {
+pub unsafe fn count_cas(ptr: *mut u64, old: u64, new: u64) -> u64 {
     unsafe {
         core::intrinsics::atomic_cxchg::<
             u64,
@@ -93,6 +100,9 @@ pub fn count_cas(ptr: *mut u64, old: u64, new: u64) -> u64 {
 /// `ctx` must be the program's own fentry/fexit context pointer. A wrong
 /// pointer fails the probe invocation; it cannot corrupt host memory.
 #[inline(always)]
-pub fn func_arg_cnt(ctx: *mut c_void) -> i64 {
+pub unsafe fn func_arg_cnt(ctx: *mut c_void) -> i64 {
+    // The generated binding returns `c_long`: 64 bits on every BPF target,
+    // so `as i64` is a lossless identity there (and sign-extending, never
+    // truncating, on any platform where `c_long` is 32 bits).
     unsafe { aya_ebpf::helpers::generated::bpf_get_func_arg_cnt(ctx) as i64 }
 }
