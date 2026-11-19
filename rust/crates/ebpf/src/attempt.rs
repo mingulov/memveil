@@ -176,7 +176,7 @@ pub fn mv_swiotlb_attempt(ctx: TracePointContext) -> u32 {
         return 0;
     }
     // Step 5: read the name straight into the payload name field, then check
-    // NUL placement. dlen is in 1..64 here, so the read and the write stay in
+    // NUL placement. dlen is in 1..=64 here, so the read and the write stay in
     // bounds. Re-check on the read's own value: the compiler folds the cap
     // into loc math older verifiers cannot link to dlen.
     let mut payload = [0u8; MV_PAYLOAD_LEN];

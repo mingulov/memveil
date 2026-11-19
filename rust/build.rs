@@ -94,9 +94,9 @@ fn main() {
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"));
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR not set"));
 
-    // The eBPF crate pins its own toolchain file; the `+toolchain` override
-    // below must name the same nightly. Parse and compare so the two cannot
-    // drift apart unnoticed.
+    // The eBPF crate pins its own toolchain file; the `rustup run`
+    // selection below must name the same nightly. Parse and compare so
+    // the two cannot drift apart unnoticed.
     let toolchain_file = manifest_dir.join("crates/ebpf/rust-toolchain.toml");
     let pinned_channel = read_toolchain_channel(&toolchain_file);
     assert_eq!(

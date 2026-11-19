@@ -33,9 +33,10 @@ use memveil_ebpf_common::{
     MV_FLAG_OBSERVED_WRAP, MV_FLAG_SUBMIT_WRAP, MV_INVALID_PHYS,
 };
 
-/// Expected hook argument counts (verified live, not assumed).
+/// Expected `__swiotlb_sync_single_for_device` / `__swiotlb_sync_single_for_cpu`
+/// argument count (verified live, not assumed).
 const MV_ARGS_SYNC: i64 = 5;
-/// Expected hook argument counts (verified live, not assumed).
+/// Expected `swiotlb_bounce` argument count (verified live, not assumed).
 const MV_ARGS_BOUNCE: i64 = 5;
 
 /// One pool slot covers 1 << 11 bytes. A literal like the C probe's
@@ -46,26 +47,26 @@ const MV_IO_TLB_SHIFT: u32 = 11;
 /// 32 MiB holds the measured dd burst (196,608 records, ~11 MiB).
 const MV_RING_BYTES: u32 = 33_554_432;
 
-/// Claim table: 4096 slots, 8 linear probes per frame.
+/// Claim-table slot count (one entry per slot).
 const MV_CLAIM_SLOTS: u32 = 4096;
-/// Claim table: 4096 slots, 8 linear probes per frame.
+/// Linear probes per frame when claiming or releasing a slot.
 const MV_CLAIM_PROBES: u32 = 8;
 
-/// Fallback counters: deferred, recovered, flags, armed.
+/// `mv_copy_fb` index: entry-side deferrals (claim table full at fentry).
 const MV_CP_FB_DEFERRED: u32 = 0;
-/// Fallback counters: deferred, recovered, flags, armed.
+/// `mv_copy_fb` index: exit-side recoveries (calls recorded by fexit).
 const MV_CP_FB_RECOVERED: u32 = 1;
-/// Fallback counters: deferred, recovered, flags, armed.
+/// `mv_copy_fb` index: sticky fallback flag word.
 const MV_CP_FB_FLAGS: u32 = 2;
-/// Fallback counters: deferred, recovered, flags, armed.
+/// `mv_copy_fb` index: fexit recovery gate (armed only at exactly 1).
 const MV_CP_FB_ARMED: u32 = 3;
-/// Fallback counters: deferred, recovered, flags, armed.
+/// `mv_copy_fb` entry count.
 const MV_CP_FB_LEN: u32 = 4;
-/// Fallback flag bits.
+/// Sticky bit: the deferred counter wrapped.
 const MV_CP_FB_FLAG_DEFERRED_WRAP: u64 = 1 << 0;
-/// Fallback flag bits.
+/// Sticky bit: the recovered counter wrapped.
 const MV_CP_FB_FLAG_RECOVERED_WRAP: u64 = 1 << 1;
-/// Fallback flag bits.
+/// Sticky bit: a call was lost to a missing trampoline frame.
 const MV_CP_FB_FLAG_FRAME_LOST: u64 = 1 << 2;
 
 // `CopyOffsets` and the `MV_COPY_OFFS_*` constants live in
