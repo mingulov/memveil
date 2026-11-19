@@ -417,12 +417,13 @@ fn rpm_install_doctor_uninstall_smoke() {
         } else {
             h::run("rpm", &["-V", "memveil"], None)
         };
+        let verify_stdout = String::from_utf8_lossy(&verify.stdout).into_owned();
+        let verify_stderr = String::from_utf8_lossy(&verify.stderr).into_owned();
         assert!(
             verify.status.success(),
-            "{}",
-            String::from_utf8_lossy(&verify.stderr)
+            "rpm -V failed:\nstdout:\n{verify_stdout}\nstderr:\n{verify_stderr}"
         );
-        assert!(String::from_utf8_lossy(&verify.stdout).is_empty());
+        assert!(verify_stdout.is_empty());
         j::assert_receipts_installed(receipts);
         j::assert_loader_closure();
         j::assert_doctor_and_version(&version);
