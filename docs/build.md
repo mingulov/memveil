@@ -123,9 +123,8 @@ The one shipped shared library, `libgcc_s.so.1` for the
 Rust unwinder, comes from the pinned Debian archive in
 `packaging/libgcc/` (see `PROVENANCE.txt` there), never
 from the build host. The packager refuses on any pin
-mismatch. See the
-[root notices](../THIRD-PARTY-NOTICES.md) for the full
-third-party inventory.
+mismatch. See the root `THIRD-PARTY-NOTICES.md` for the
+full third-party inventory.
 
 ## Source sealing
 
