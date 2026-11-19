@@ -424,9 +424,12 @@ fn need_pointer(
 
 /// Resolve the copy table from raw kernel-BTF bytes: the 8 pool/slot/parms
 /// widths, the slot stride, the private-pool chain, and the direction
-/// enumerators. Both private-pool halves absent downgrades to a flag-clear
-/// table (the probe then leaves the private marker clear); a
-/// present-but-wrong half, or exactly one half present, refuses.
+/// enumerators. A private-pool chain with both halves absent, or with
+/// exactly one half present, downgrades to a flag-clear table (the
+/// probe then leaves the private marker clear): privacy is a marker
+/// the probes set only when fully provable, and ordinary kernels
+/// carry the mem half without `cc_shared`. Only a present-but-wrong
+/// half (bitfield, misalignment, oversize, corrupt image) refuses.
 pub fn resolve_copy_offsets_from_btf(data: &[u8]) -> Result<CopyOffsets, SessionError> {
     let btf = Btf::parse(data)?;
     let pool_size = btf.struct_size("io_tlb_pool")?;
@@ -459,11 +462,12 @@ pub fn resolve_copy_offsets_from_btf(data: &[u8]) -> Result<CopyOffsets, Session
         4,
     )?;
     // Private-pool chain: both halves present and well-formed (flag
-    // set) or both genuinely absent (flag clear). The optional lookup
-    // separates absence (`None`) from present-but-malformed (bitfield,
-    // misalignment, oversize, corrupt image), which refuses through `?`;
-    // a half-present chain refuses below instead of silently dropping
-    // the present half.
+    // set), else flag clear. The optional lookup separates absence
+    // (`None`) from present-but-malformed (bitfield, misalignment,
+    // oversize, corrupt image), which refuses through `?`; a
+    // half-present chain downgrades like a fully absent one (the
+    // present half alone proves nothing about pool privacy, and
+    // ordinary kernels carry exactly the mem half).
     let mem = match btf.struct_member_opt("device", "dma_io_tlb_mem")? {
         Some((off, 8)) => {
             let pointee = btf.member_points_to("device", "dma_io_tlb_mem")?;
@@ -506,14 +510,9 @@ pub fn resolve_copy_offsets_from_btf(data: &[u8]) -> Result<CopyOffsets, Session
     };
     let (flags, mem_off, mem_size, cc_off, cc_size) = match (mem, cc) {
         (Some(mem_off), Some(cc_off)) => (MV_COPY_OFFS_HAS_PRIVATE, mem_off, 8, cc_off, 1),
-        (None, None) => (0, 0, 0, 0, 0),
-        _ => {
-            return Err(SessionError::Offsets(
-                "BTF refused: private-pool chain is half-present \
-                 (device.dma_io_tlb_mem vs io_tlb_mem.cc_shared)"
-                    .to_owned(),
-            ));
-        }
+        // Absent or half-present: the marker is unprovable, so the
+        // table leaves it clear and the probe never sets it.
+        _ => (0, 0, 0, 0, 0),
     };
     let dir_to = btf.enum_value("dma_data_direction", "DMA_TO_DEVICE")?;
     let dir_from = btf.enum_value("dma_data_direction", "DMA_FROM_DEVICE")?;
@@ -1135,26 +1134,32 @@ mod tests {
     }
 
     #[test]
-    fn private_chain_half_present_refuses() {
-        let shape = PrivateShape {
-            with_cc: false,
-            ..PrivateShape::full()
-        };
-        let message = expect_refusal(&copy_btf_image(&shape), "mem-only chain");
-        assert!(
-            message.contains("half-present"),
-            "want the half-present refusal, got: {message}"
-        );
-        let shape = PrivateShape {
-            with_mem: false,
-            with_cc: true,
-            ..PrivateShape::absent()
-        };
-        let message = expect_refusal(&copy_btf_image(&shape), "cc-only chain");
-        assert!(
-            message.contains("half-present"),
-            "want the half-present refusal, got: {message}"
-        );
+    fn private_chain_half_present_downgrades() {
+        // One half present (the mem-only shape is what ordinary
+        // kernels carry) downgrades to flag-clear like a fully
+        // absent chain: the present half alone proves nothing
+        // about pool privacy, and the probe leaves the marker
+        // clear. Present-but-malformed halves still refuse (see
+        // the malformed test below).
+        for shape in [
+            PrivateShape {
+                with_cc: false,
+                ..PrivateShape::full()
+            },
+            PrivateShape {
+                with_mem: false,
+                with_cc: true,
+                ..PrivateShape::absent()
+            },
+        ] {
+            let table = resolve_copy_offsets_from_btf(&copy_btf_image(&shape))
+                .expect("half-present chain must downgrade");
+            assert_eq!(table.flags & MV_COPY_OFFS_HAS_PRIVATE, 0);
+            assert_eq!(
+                (table.mem_off, table.mem_size, table.cc_off, table.cc_size),
+                (0, 0, 0, 0)
+            );
+        }
     }
 
     #[test]

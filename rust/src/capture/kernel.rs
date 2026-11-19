@@ -45,7 +45,8 @@
 use super::collector::{GeomOut, KernelSource, MissOut, PollOut, SnapOut, StatsOut};
 use super::loadcheck::{errno_cause, errno_from_chain, errno_name};
 use crate::bpf::{
-    AttachKind, AttachSpec, Frame, Session, SessionError, copy_specs, lifecycle_specs,
+    AttachKind, AttachSpec, Channel, Frame, Session, SessionError, copy_specs, lifecycle_specs,
+    resolve_copy_offsets,
 };
 use crate::platform::narrow::{MV_OFF_TABLE_MAGIC, MV_OFFSETS_TABLE_LEN};
 use crate::platform::outcome::OpOut;
@@ -863,9 +864,48 @@ impl ChannelSlot {
             let message = session_message_with(OP_LOAD, &e.to_string(), load_errno(&self.elf));
             return OpOut { ok: false, message };
         }
+        // Aya-family copy objects run on the host-resolved field
+        // table: install it between load and attach so every copy
+        // firing reads trusted offsets. A resolution or install
+        // failure refuses loudly here, before any firing can
+        // misread.
+        if let Err(message) = self.maybe_install_copy_table() {
+            return OpOut { ok: false, message };
+        }
         OpOut {
             ok: true,
             message: String::new(),
+        }
+    }
+
+    /// Resolve the copy field table from live kernel BTF and
+    /// install it for Aya-family copy sessions. Other channels,
+    /// and C-family (CO-RE) objects carrying no table map, skip
+    /// silently.
+    fn maybe_install_copy_table(&mut self) -> Result<(), String> {
+        if Channel::from_ring(&self.ring) != Some(Channel::Copy) {
+            return Ok(());
+        }
+        if !self
+            .sess
+            .as_ref()
+            .expect("open session")
+            .has_map("mv_copy_offs")
+        {
+            return Ok(());
+        }
+        let table = match resolve_copy_offsets() {
+            Ok(table) => table,
+            Err(e) => return Err(session_message(OP_MAP_WRITE, &e)),
+        };
+        match self
+            .sess
+            .as_mut()
+            .expect("open session")
+            .install_copy_offsets(&table)
+        {
+            Ok(()) => Ok(()),
+            Err(e) => Err(session_message(OP_MAP_WRITE, &e)),
         }
     }
 
@@ -2654,6 +2694,88 @@ mod tests {
         assert!(m.ok, "detail failure must keep ok:true: {m:?}");
         assert!(m.message.is_empty());
         assert_eq!(m.detail_error, "ch2 fallback frame lost");
+        let _ = kernel.close();
+    }
+
+    #[test]
+    fn copy_load_installs_field_table() {
+        // Aya-family copy sessions resolve the field table from
+        // live kernel BTF at load: the map reads back a valid
+        // table afterwards (pre-fix it stayed zeroed and every
+        // firing was refused). Needs root + loadable BPF here.
+        // SAFETY: pure id query.
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("SKIP copy_load_installs_field_table: requires root");
+            return;
+        }
+        use memveil_ebpf_common::{MV_COPY_OFFS_MAGIC, MV_COPY_OFFS_VERSION};
+        let runtime = crate::platform::runtime::embedded_object;
+        let mut kernel = AyaKernel::with_channels(
+            runtime("attempt").expect("embedded").to_vec(),
+            "swiotlb",
+            "swiotlb_bounced",
+            Vec::new(),
+            false,
+            runtime("copy").expect("embedded").to_vec(),
+            true,
+        );
+        if !kernel.open_session().ok || !kernel.load().ok {
+            eprintln!("SKIP copy_load_installs_field_table: load refused here");
+            let _ = kernel.close();
+            return;
+        }
+        let back = kernel
+            .ch2
+            .sess
+            .as_ref()
+            .expect("open session")
+            .map_read("mv_copy_offs", 0, 112)
+            .expect("table reads back");
+        assert_eq!(back.len(), 112);
+        assert_eq!(
+            u32::from_le_bytes(back[0..4].try_into().expect("magic")),
+            MV_COPY_OFFS_MAGIC
+        );
+        assert_eq!(
+            u16::from_le_bytes(back[4..6].try_into().expect("version")),
+            MV_COPY_OFFS_VERSION
+        );
+        let _ = kernel.close();
+    }
+
+    #[test]
+    fn copy_load_skips_table_for_c_shape() {
+        // C-family (CO-RE) copy objects carry no table map: load
+        // succeeds without an install attempt. Guards the C flow
+        // against the Aya-only wiring above.
+        // SAFETY: pure id query.
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("SKIP copy_load_skips_table_for_c_shape: requires root");
+            return;
+        }
+        let mut kernel = AyaKernel::with_channels(
+            elf_fixture("ok.o"),
+            "swiotlb",
+            "swiotlb_bounced",
+            Vec::new(),
+            false,
+            elf_fixture("cp-ok.o"),
+            true,
+        );
+        if !kernel.open_session().ok || !kernel.load().ok {
+            eprintln!("SKIP copy_load_skips_table_for_c_shape: load refused here");
+            let _ = kernel.close();
+            return;
+        }
+        assert!(
+            !kernel
+                .ch2
+                .sess
+                .as_ref()
+                .expect("open session")
+                .has_map("mv_copy_offs"),
+            "C-shape copy carries no table map"
+        );
         let _ = kernel.close();
     }
 

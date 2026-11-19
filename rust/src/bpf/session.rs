@@ -610,6 +610,14 @@ impl Session {
     }
 
     /// Live geometry of one map.
+    /// True when the loaded object carries the named map. Tells
+    /// Aya-family copy objects (host-resolved table map) from
+    /// C-family ones (CO-RE, no table map) after the load gate
+    /// admitted either shape.
+    pub fn has_map(&self, name: &str) -> bool {
+        self.bpf.as_ref().is_some_and(|bpf| bpf.map(name).is_some())
+    }
+
     pub fn map_info(&self, name: &str) -> Result<MapGeometry, SessionError> {
         if self.closed {
             return Err(SessionError::NotOpen("session not open".to_owned()));
