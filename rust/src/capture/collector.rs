@@ -11398,7 +11398,8 @@ mod tests {
             r#""schema_version":"0.1.4","#,
             r#""schema_version":"0.1.3","#,
         );
-        assert_eq!(mask_output_fs(&legacy), mask_output_fs(GOLDEN_SESSION));
+        let golden = GOLDEN_SESSION.replace("memveil-0.1.0", crate::ENGINE_VERSION);
+        assert_eq!(mask_output_fs(&legacy), mask_output_fs(&golden));
     }
 
     fn without_zero_checkpoint_failures(session: &str) -> String {

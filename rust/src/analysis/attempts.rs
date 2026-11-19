@@ -2038,7 +2038,9 @@ mod tests {
         let rep = analyze("tests/fixtures/attempts", false);
         assert_eq!(rep.session_id, "attempts-3-session");
         assert!(rep.synthetic);
-        assert_eq!(rep.engine_version, "memveil-0.1.0");
+        assert_eq!(rep.engine_version, ENGINE_VERSION);
+        // Parity pin: the single-sourced version stays
+        // byte-identical with Mojo's ENGINE_VERSION.
         assert_eq!(crate::ENGINE_VERSION, "memveil-0.1.0");
         assert_eq!(rep.metrics.len(), 14);
         let attempts = metric_by_name(&rep, "bounce_attempts", "");

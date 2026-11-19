@@ -542,7 +542,7 @@ mod tests {
         let mut rep = Report {
             session_id: "u64probe".to_string(),
             synthetic: true,
-            engine_version: "memveil-0.1.0".to_string(),
+            engine_version: crate::ENGINE_VERSION.to_string(),
             window_start_ns: 100,
             window_end_ns: 200,
             ..Report::default()

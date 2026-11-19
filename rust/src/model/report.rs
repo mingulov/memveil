@@ -390,7 +390,7 @@ mod tests {
         assert_eq!(r.verified_events, 0);
         assert_eq!(r.session_id, "");
         assert!(!r.synthetic);
-        assert_eq!(r.engine_version, "memveil-0.1.0");
+        assert_eq!(r.engine_version, ENGINE_VERSION);
         assert_eq!(r.window_start_ns, 0);
         assert_eq!(r.window_end_ns, 0);
         assert!(r.devices.is_empty());
