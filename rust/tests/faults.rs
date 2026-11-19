@@ -31,7 +31,7 @@ use memveil::capture::collector::{
     PollOut, SnapOut, StatsOut, all_zero, byte_coverage_valid, byte_identity, count_identity,
     counters_valid, submit_valid,
 };
-use memveil::capture::live::{LiveWriter, WriterSource};
+use memveil::capture::live::LiveWriter;
 use memveil::model::session::EvidenceItem;
 use memveil::platform::outcome::OpOut;
 use memveil::platform::signal::SignalOut;
@@ -546,6 +546,11 @@ fn ring_flood_submit_fail_is_counted_never_silent() {
         "detail partial with count: {}",
         p.session
     );
+    assert_eq!(
+        p.events.matches("\"kind\":\"counter_snapshot\"").count(),
+        4,
+        "quiet flow persists four snapshots"
+    );
     let _ = std::fs::remove_dir_all(&work);
 }
 
@@ -568,6 +573,21 @@ fn wrapped_submit_counter_renders_unavailable() {
         p.session.contains("submit_fail=(unavailable)"),
         "unavailable: {}",
         p.session
+    );
+    assert_eq!(
+        p.events.matches("\"kind\":\"gap\"").count(),
+        1,
+        "wrap closes with one gap marker"
+    );
+    assert!(
+        p.events.contains("detail closure unproven: invalid epoch"),
+        "gap reason: {}",
+        p.events
+    );
+    assert!(
+        !p.events.contains("\"kind\":\"counter_snapshot\""),
+        "unreadable counters persist no snapshots: {}",
+        p.events
     );
     let _ = std::fs::remove_dir_all(&work);
 }
@@ -657,6 +677,11 @@ fn wrong_probe_argc_takes_unknown_with_reason() {
             .contains("unknown: lifecycle argument count mismatch"),
         "argc evidence: {}",
         p.session
+    );
+    assert_eq!(
+        p.events.matches("\"kind\":\"counter_snapshot\"").count(),
+        4,
+        "attempt channel persists four snapshots"
     );
     let _ = std::fs::remove_dir_all(&work);
 }

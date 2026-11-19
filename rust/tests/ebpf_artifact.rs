@@ -76,14 +76,10 @@ fn license_section_range(bytes: &[u8]) -> Option<(usize, usize)> {
     ) else {
         return None;
     };
-    let Some(strtab) = bytes.get(str_off..str_off.saturating_add(str_len)) else {
-        return None;
-    };
+    let strtab = bytes.get(str_off..str_off.saturating_add(str_len))?;
     for index in 0..shnum {
         let header = (shoff + u64::from(index) * 64) as usize;
-        let Some(name_off) = le32(bytes, header).map(|value| value as usize) else {
-            return None;
-        };
+        let name_off = le32(bytes, header).map(|value| value as usize)?;
         let name = strtab.get(name_off..).and_then(|tail| {
             tail.iter()
                 .position(|byte| *byte == 0)
