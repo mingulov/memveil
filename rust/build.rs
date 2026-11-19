@@ -121,9 +121,12 @@ fn main() {
     // `RUSTC` override would otherwise build with the host toolchain.
     cmd.env_remove("RUSTUP_TOOLCHAIN");
     cmd.env_remove("RUSTC");
-    // Clippy/coverage wrappers are host-only: the pinned nightly has no
-    // clippy-driver, so inheriting them breaks the BPF build under
-    // `cargo clippy`.
+    // Clippy wrappers are host-toolchain-bound: host `cargo clippy` exports
+    // its own clippy-driver path via `RUSTC_WORKSPACE_WRAPPER`, and the
+    // pinned-nightly child fails hard (exit 101, "cannot find a built-in
+    // macro") when it inherits the host driver — reproduced: no wrapper
+    // exits 0, stable-driver wrapper exits 101, pinned-nightly-driver
+    // wrapper exits 0. Strip both so the child never inherits them.
     cmd.env_remove("RUSTC_WORKSPACE_WRAPPER");
     cmd.env_remove("RUSTC_WRAPPER");
     cmd.args([
