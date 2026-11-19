@@ -1652,8 +1652,11 @@ impl KernelSource for AyaKernel {
             }
             let m1 = self.ch1.misses();
             if !m1.ok {
+                // Detail failures keep ok:true: the attempt count
+                // stays known and the collector voids only the
+                // detail side (Mojo parity).
                 return MissOut {
-                    ok: false,
+                    ok: true,
                     message: String::new(),
                     attempt: m0.count,
                     detail_error: format!("ch1 {}", m1.message),
@@ -1678,7 +1681,7 @@ impl KernelSource for AyaKernel {
         let lc = self.ch1.misses_lifecycle();
         if !lc.ok && self.ch1.present {
             return MissOut {
-                ok: false,
+                ok: true,
                 message: String::new(),
                 attempt: m0.count,
                 detail_error: format!("ch1 {}", lc.message),
@@ -1688,7 +1691,7 @@ impl KernelSource for AyaKernel {
         let cp = self.ch2.misses_copy();
         if !cp.ok {
             return MissOut {
-                ok: false,
+                ok: true,
                 message: String::new(),
                 attempt: m0.count,
                 detail_error: format!("ch2 {}", cp.message),
@@ -1704,7 +1707,7 @@ impl KernelSource for AyaKernel {
         let fb = self.ch2.read_fb();
         if !fb.ok {
             return MissOut {
-                ok: false,
+                ok: true,
                 message: String::new(),
                 attempt: m0.count,
                 detail_error: format!("ch2 fallback: {}", fb.message),
@@ -1718,7 +1721,7 @@ impl KernelSource for AyaKernel {
                 "short fallback read".to_string()
             };
             return MissOut {
-                ok: false,
+                ok: true,
                 message: String::new(),
                 attempt: m0.count,
                 detail_error: format!("ch2 fallback: {reason}"),
@@ -2442,6 +2445,87 @@ mod tests {
         let m = kernel.recursion_misses();
         assert!(!m.ok);
         assert!(m.message.contains("program fds unknown"), "{}", m.message);
+        let _ = kernel.close();
+    }
+
+    fn elf_fixture(name: &str) -> Vec<u8> {
+        let path = crate::platform::test_support::repo_root().join("tests/fixtures/elf/ok.o");
+        let dir = path.parent().expect("fixture dir").to_path_buf();
+        std::fs::read(dir.join(name)).unwrap_or_else(|_| panic!("read {name}"))
+    }
+
+    #[test]
+    fn lifecycle_misses_failure_keeps_attempt_known() {
+        // Live-path regression: a lifecycle detail failure voids
+        // only the detail side (ok:true + detail_error), so the
+        // collector keeps the exact attempt aggregate instead of
+        // voiding it with an empty reason (Mojo parity).
+        let mut kernel = AyaKernel::with_channels(
+            elf_fixture("ok.o"),
+            "swiotlb",
+            "swiotlb_bounced",
+            elf_fixture("lc-ok.o"),
+            true,
+            Vec::new(),
+            false,
+        );
+        assert!(kernel.open_session().ok);
+        // Attempt counted zero programs; lifecycle never attached.
+        kernel.ch0.progs_known = true;
+        let m = kernel.recursion_misses();
+        assert!(m.ok, "detail failure must keep ok:true: {m:?}");
+        assert!(m.message.is_empty());
+        assert_eq!(m.attempt, 0);
+        assert_eq!(m.detail_error, "ch1 program fds unknown");
+        let _ = kernel.close();
+    }
+
+    #[test]
+    fn lifecycle_identify_failure_keeps_attempt_known() {
+        // Same ladder through misses_lifecycle: unidentifiable
+        // programs (here: zero known fds) report the detail
+        // cause with ok:true.
+        let mut kernel = AyaKernel::with_channels(
+            elf_fixture("ok.o"),
+            "swiotlb",
+            "swiotlb_bounced",
+            elf_fixture("lc-ok.o"),
+            true,
+            elf_fixture("cp-ok.o"),
+            true,
+        );
+        assert!(kernel.open_session().ok);
+        kernel.ch0.progs_known = true;
+        kernel.ch1.progs_known = true;
+        let m = kernel.recursion_misses();
+        assert!(m.ok, "detail failure must keep ok:true: {m:?}");
+        assert!(m.message.is_empty());
+        assert_eq!(m.attempt, 0);
+        assert_eq!(m.detail_error, "ch1 lifecycle program count");
+        let _ = kernel.close();
+    }
+
+    #[test]
+    fn copy_identify_failure_keeps_attempt_known() {
+        // Copy-without-lifecycle through misses_copy: same
+        // ok:true + detail_error shape.
+        let mut kernel = AyaKernel::with_channels(
+            elf_fixture("ok.o"),
+            "swiotlb",
+            "swiotlb_bounced",
+            Vec::new(),
+            false,
+            elf_fixture("cp-ok.o"),
+            true,
+        );
+        assert!(kernel.open_session().ok);
+        kernel.ch0.progs_known = true;
+        kernel.ch2.progs_known = true;
+        let m = kernel.recursion_misses();
+        assert!(m.ok, "detail failure must keep ok:true: {m:?}");
+        assert!(m.message.is_empty());
+        assert_eq!(m.attempt, 0);
+        assert_eq!(m.detail_error, "ch2 copy program count");
         let _ = kernel.close();
     }
 
