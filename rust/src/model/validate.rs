@@ -6,11 +6,13 @@
 //! and report layers so all three refuse the same malformed input.
 //!
 //! [`ValidationError`] is the shared scalar-failure type for the whole
-//! model layer: later document parsers reuse it unchanged. Its display
-//! rendering matches the Mojo original
+//! model layer: later document parsers reuse it unchanged. Semantic
+//! failures render as the Mojo original
 //! (`ValidationError(what=..., message=...)`), and relabeling sites nest
 //! the inner rendering inside the new message, exactly as the Mojo
-//! `ValidationError(what, String(e))` chain does.
+//! `ValidationError(what, String(e))` chain does. Structural scanner
+//! failures carry the cursor byte offset and render as the Mojo scanner
+//! error (`ScanError(offset=..., message=...)`).
 
 use std::fmt;
 
@@ -21,33 +23,56 @@ pub struct ValidationError {
     pub what: String,
     /// Machine-stable reason (e.g. `"leading zero"`, `"overflow"`).
     pub message: String,
+    /// Scanner byte offset for structural failures; `None` for semantic ones.
+    pub offset: Option<usize>,
 }
 
 impl ValidationError {
-    /// Build an error from field name and reason.
+    /// Build a semantic error from field name and reason.
     pub fn new(what: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             what: what.into(),
             message: message.into(),
+            offset: None,
+        }
+    }
+
+    /// Build a structural scanner error at byte `offset`.
+    ///
+    /// `what` still names the enclosing schema object for diagnostics;
+    /// the rendering drops it, exactly like the Mojo original
+    /// (`ScanError(offset=..., message=...)`).
+    pub fn scan(offset: usize, what: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            what: what.into(),
+            message: message.into(),
+            offset: Some(offset),
         }
     }
 
     /// Relabel an inner failure under a new field, nesting its rendering.
+    ///
+    /// The result is always semantic: the inner rendering (scanner or
+    /// scalar) is captured verbatim in the new message.
     pub fn wrap(what: impl Into<String>, inner: &ValidationError) -> Self {
         Self {
             what: what.into(),
             message: inner.to_string(),
+            offset: None,
         }
     }
 }
 
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "ValidationError(what={}, message={})",
-            self.what, self.message
-        )
+        match self.offset {
+            Some(offset) => write!(f, "ScanError(offset={}, message={})", offset, self.message),
+            None => write!(
+                f,
+                "ValidationError(what={}, message={})",
+                self.what, self.message
+            ),
+        }
     }
 }
 
@@ -258,13 +283,33 @@ mod tests {
 
     #[test]
     fn error_display_matches_mojo_rendering() {
-        let err = ValidationError {
-            what: "u64".to_string(),
-            message: "leading zero".to_string(),
-        };
+        let err = ValidationError::new("u64", "leading zero");
+        assert_eq!(err.offset, None);
         assert_eq!(
             err.to_string(),
             "ValidationError(what=u64, message=leading zero)"
+        );
+    }
+
+    #[test]
+    fn scan_error_renders_mojo_offset_form() {
+        let err = ValidationError::scan(1, "event", "expected byte 34");
+        assert_eq!(err.offset, Some(1));
+        assert_eq!(
+            err.to_string(),
+            "ScanError(offset=1, message=expected byte 34)"
+        );
+    }
+
+    #[test]
+    fn wrap_nests_scan_rendering_and_clears_offset() {
+        let inner = ValidationError::scan(309, "data", "invalid utf-8 in string");
+        let err = ValidationError::wrap("event.data", &inner);
+        assert_eq!(err.offset, None);
+        assert_eq!(
+            err.to_string(),
+            "ValidationError(what=event.data, \
+             message=ScanError(offset=309, message=invalid utf-8 in string))"
         );
     }
 }

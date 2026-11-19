@@ -2371,6 +2371,26 @@ mod tests {
     }
 
     #[test]
+    fn reader_scanner_errors_carry_byte_offsets() {
+        // Pinned against the Mojo reader: structural failures render
+        // the scanner byte offset, not just the line number.
+        let dir = fixture("interior-corrupt");
+        let mut r = read_capture(&dir, false, default_limits()).expect("open");
+        let err = drain(&mut r).unwrap_err();
+        assert_eq!(
+            err.message,
+            "line 2: ScanError(offset=1, message=expected byte 34)"
+        );
+        let dir = fixture("adv-bad-utf8");
+        let mut r = read_capture(&dir, false, default_limits()).expect("open");
+        let err = drain(&mut r).unwrap_err();
+        assert_eq!(
+            err.message,
+            "line 1: ScanError(offset=309, message=invalid utf-8 in string)"
+        );
+    }
+
+    #[test]
     fn reader_corrupt_tail_not_recovered() {
         let dir = fixture("corrupt-tail");
         expect_error(&dir, false, default_limits(), READ_PARSE, 3);

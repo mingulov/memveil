@@ -12,11 +12,16 @@
 //!
 //! Error convention: every failure is a [`ValidationError`]. Structural
 //! failures (string escapes, booleans, brackets, commas, colons, truncated
-//! input, excessive depth) name the enclosing schema object in `what` and
-//! keep the scanner message verbatim. Numeric-token failures wrap the
-//! scalar error under the reader's field context: required u64/integer
-//! readers use the field path (like `event.seq`), while the generic
-//! nullable readers use the scalar name (`u64`, `integer`).
+//! input, excessive depth) name the enclosing schema object in `what`,
+//! keep the scanner message verbatim, and carry the cursor byte offset,
+//! so they render as the Mojo `ScanError(offset=..., message=...)`.
+//! Offsets step exactly like the scanner ported: a consumed offending
+//! byte reports the position behind the cursor (`pos - 1`), anything
+//! else reports the cursor itself, and a bad span reports its start.
+//! Numeric-token failures wrap the scalar error under the reader's field
+//! context: required u64/integer readers use the field path (like
+//! `event.seq`), while the generic nullable readers use the scalar name
+//! (`u64`, `integer`).
 
 use super::common::{
     MaybeI64, MaybeString, MaybeU64, parse_json_int, parse_maybe_u64,
@@ -88,7 +93,11 @@ impl<'a> Scanner<'a> {
     /// Peek the next byte without consuming it.
     pub(crate) fn peek(&self, what: &str) -> Result<u8, ValidationError> {
         if self.pos >= self.data.len() {
-            return Err(ValidationError::new(what, "unexpected end of input"));
+            return Err(ValidationError::scan(
+                self.pos,
+                what,
+                "unexpected end of input",
+            ));
         }
         Ok(self.data[self.pos])
     }
@@ -101,7 +110,7 @@ impl<'a> Scanner<'a> {
         if self.data.len() - self.pos >= 5 && self.match_word(b"false") {
             return Ok(false);
         }
-        Err(ValidationError::new(what, "bad boolean"))
+        Err(ValidationError::scan(self.pos, what, "bad boolean"))
     }
 
     /// Parse `null`.
@@ -109,7 +118,7 @@ impl<'a> Scanner<'a> {
         if self.data.len() - self.pos >= 4 && self.match_word(b"null") {
             return Ok(());
         }
-        Err(ValidationError::new(what, "bad null"))
+        Err(ValidationError::scan(self.pos, what, "bad null"))
     }
 
     /// Parse one JSON integer, wrapping token failures under `field`.
@@ -153,12 +162,17 @@ impl<'a> Scanner<'a> {
             if b == b'\\' {
                 self.parse_escape(what, &mut out)?;
             } else if b < 0x20 {
-                return Err(ValidationError::new(what, "control in string"));
+                return Err(ValidationError::scan(
+                    self.pos - 1,
+                    what,
+                    "control in string",
+                ));
             } else {
                 out.push(b);
             }
         }
-        String::from_utf8(out).map_err(|_| ValidationError::new(what, "invalid utf-8 in string"))
+        String::from_utf8(out)
+            .map_err(|_| ValidationError::scan(self.pos, what, "invalid utf-8 in string"))
     }
 
     /// Consume `{`, enforcing the depth cap.
@@ -167,7 +181,7 @@ impl<'a> Scanner<'a> {
         self.expect(what, b'{')?;
         self.depth += 1;
         if self.depth > self.max_depth {
-            return Err(ValidationError::new(what, "nesting too deep"));
+            return Err(ValidationError::scan(self.pos, what, "nesting too deep"));
         }
         Ok(())
     }
@@ -187,7 +201,7 @@ impl<'a> Scanner<'a> {
         self.expect(what, b'[')?;
         self.depth += 1;
         if self.depth > self.max_depth {
-            return Err(ValidationError::new(what, "nesting too deep"));
+            return Err(ValidationError::scan(self.pos, what, "nesting too deep"));
         }
         Ok(())
     }
@@ -209,7 +223,7 @@ impl<'a> Scanner<'a> {
         end: usize,
     ) -> Result<&'a [u8], ValidationError> {
         if end < start || end > self.data.len() {
-            return Err(ValidationError::new(what, "bad span"));
+            return Err(ValidationError::scan(start, what, "bad span"));
         }
         let data: &'a [u8] = self.data;
         Ok(&data[start..end])
@@ -242,7 +256,7 @@ impl<'a> Scanner<'a> {
                     } else if s == b'}' {
                         break;
                     } else {
-                        return Err(ValidationError::new(what, "want , or }"));
+                        return Err(ValidationError::scan(self.pos, what, "want , or }"));
                     }
                 }
             }
@@ -260,7 +274,7 @@ impl<'a> Scanner<'a> {
                     } else if s == b']' {
                         break;
                     } else {
-                        return Err(ValidationError::new(what, "want , or ]"));
+                        return Err(ValidationError::scan(self.pos, what, "want , or ]"));
                     }
                 }
             }
@@ -277,7 +291,11 @@ impl<'a> Scanner<'a> {
 
     fn take(&mut self, what: &str) -> Result<u8, ValidationError> {
         if self.pos >= self.data.len() {
-            return Err(ValidationError::new(what, "unexpected end of input"));
+            return Err(ValidationError::scan(
+                self.pos,
+                what,
+                "unexpected end of input",
+            ));
         }
         let b = self.data[self.pos];
         self.pos += 1;
@@ -287,7 +305,11 @@ impl<'a> Scanner<'a> {
     fn expect(&mut self, what: &str, want: u8) -> Result<(), ValidationError> {
         let got = self.take(what)?;
         if got != want {
-            return Err(ValidationError::new(what, format!("expected byte {want}")));
+            return Err(ValidationError::scan(
+                self.pos - 1,
+                what,
+                format!("expected byte {want}"),
+            ));
         }
         Ok(())
     }
@@ -306,7 +328,7 @@ impl<'a> Scanner<'a> {
     fn skip_number(&mut self, what: &str) -> Result<(), ValidationError> {
         let c = self.peek(what)?;
         if c != b'-' && !c.is_ascii_digit() {
-            return Err(ValidationError::new(what, "bad value"));
+            return Err(ValidationError::scan(self.pos, what, "bad value"));
         }
         while self.pos < self.data.len() {
             let b = self.data[self.pos];
@@ -327,19 +349,23 @@ impl<'a> Scanner<'a> {
                 b'0'..=b'9' => u32::from(b - b'0'),
                 b'A'..=b'F' => u32::from(b - b'A') + 10,
                 b'a'..=b'f' => u32::from(b - b'a') + 10,
-                _ => return Err(ValidationError::new(what, "bad hex digit")),
+                _ => return Err(ValidationError::scan(self.pos - 1, what, "bad hex digit")),
             };
             value = value * 16 + digit;
         }
         Ok(value)
     }
 
-    fn emit_utf8(what: &str, out: &mut Vec<u8>, cp: u32) -> Result<(), ValidationError> {
+    fn emit_utf8(&self, what: &str, out: &mut Vec<u8>, cp: u32) -> Result<(), ValidationError> {
         if cp > 0x10FFFF {
-            return Err(ValidationError::new(what, "code point out of range"));
+            return Err(ValidationError::scan(
+                self.pos,
+                what,
+                "code point out of range",
+            ));
         }
         if (0xD800..0xE000).contains(&cp) {
-            return Err(ValidationError::new(what, "lone surrogate"));
+            return Err(ValidationError::scan(self.pos, what, "lone surrogate"));
         }
         if cp < 0x80 {
             out.push(cp as u8);
@@ -377,15 +403,15 @@ impl<'a> Scanner<'a> {
                     self.expect(what, b'u')?;
                     let low = self.take_hex4(what)?;
                     if !(0xDC00..0xE000).contains(&low) {
-                        return Err(ValidationError::new(what, "bad low surrogate"));
+                        return Err(ValidationError::scan(self.pos, what, "bad low surrogate"));
                     }
                     let cp = 0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00);
-                    Self::emit_utf8(what, out, cp)?;
+                    self.emit_utf8(what, out, cp)?;
                 } else {
-                    Self::emit_utf8(what, out, unit)?;
+                    self.emit_utf8(what, out, unit)?;
                 }
             }
-            _ => return Err(ValidationError::new(what, "bad escape")),
+            _ => return Err(ValidationError::scan(self.pos - 1, what, "bad escape")),
         }
         Ok(())
     }
@@ -408,7 +434,8 @@ pub(crate) fn object_next(scan: &mut Scanner, what: &str) -> Result<bool, Valida
     if c == b'}' {
         return Ok(false);
     }
-    Err(ValidationError::new(
+    Err(ValidationError::scan(
+        scan.offset(),
         what,
         format!("want , or }} in {what}"),
     ))
@@ -431,14 +458,22 @@ pub(crate) fn array_next(scan: &mut Scanner, what: &str) -> Result<bool, Validat
     if c == b']' {
         return Ok(false);
     }
-    Err(ValidationError::new(what, format!("want , or ] in {what}")))
+    Err(ValidationError::scan(
+        scan.offset(),
+        what,
+        format!("want , or ] in {what}"),
+    ))
 }
 
 /// Consume the colon between an object key and its value.
 pub(crate) fn expect_colon(scan: &mut Scanner, what: &str) -> Result<(), ValidationError> {
     scan.skip_ws();
     if scan.peek(what)? != b':' {
-        return Err(ValidationError::new(what, format!("want : in {what}")));
+        return Err(ValidationError::scan(
+            scan.offset(),
+            what,
+            format!("want : in {what}"),
+        ));
     }
     scan.take(what)?;
     scan.skip_ws();
@@ -871,6 +906,100 @@ mod tests {
         assert_eq!(
             err_of(s.span_bytes("w", 0, 99).map(|_| ())),
             ("w".to_string(), "bad span".to_string())
+        );
+    }
+
+    fn offset_of(result: Result<(), ValidationError>) -> Option<usize> {
+        result.unwrap_err().offset
+    }
+
+    #[test]
+    fn structural_errors_carry_cursor_offsets() {
+        // A consumed offending byte reports the position behind the
+        // cursor; anything else reports the cursor itself.
+        let mut s = scan("{oops");
+        s.begin_object("c").unwrap();
+        assert_eq!(offset_of(s.parse_string("c").map(|_| ())), Some(1));
+        assert_eq!(offset_of(scan("").peek("c").map(|_| ())), Some(0));
+        assert_eq!(offset_of(scan("nul").parse_null("c").map(|_| ())), Some(0));
+        assert_eq!(offset_of(scan("truX").parse_bool("c").map(|_| ())), Some(0));
+        assert_eq!(
+            offset_of(scan("\"a\x01b\"").parse_string("c").map(|_| ())),
+            Some(2)
+        );
+        assert_eq!(
+            offset_of(scan("\"\\q\"").parse_string("c").map(|_| ())),
+            Some(2)
+        );
+        assert_eq!(
+            offset_of(scan("\"\\u12Z4\"").parse_string("c").map(|_| ())),
+            Some(5)
+        );
+        assert_eq!(
+            offset_of(scan("\"\\uDC00\"").parse_string("c").map(|_| ())),
+            Some(7)
+        );
+        assert_eq!(
+            offset_of(scan("\"\\uD800\\u0041\"").parse_string("c").map(|_| ())),
+            Some(13)
+        );
+        assert_eq!(
+            offset_of(scan("\"\u{0}ff\"").parse_string("c").map(|_| ())),
+            Some(1)
+        );
+        assert_eq!(
+            offset_of(scan("{\u{0}}").skip_value("c").map(|_| ())),
+            Some(1)
+        );
+        let raw: &[u8] = b"\"d\xffv\"";
+        assert_eq!(
+            offset_of(Scanner::new(raw).parse_string("c").map(|_| ())),
+            Some(5)
+        );
+        assert_eq!(offset_of(scan("x").skip_value("c").map(|_| ())), Some(0));
+        assert_eq!(
+            offset_of(scan(r#"{"a": 1"#).skip_value("c").map(|_| ())),
+            Some(7)
+        );
+        assert_eq!(
+            offset_of(scan(r#"{"a": 1 "b": 2}"#).skip_value("c").map(|_| ())),
+            Some(8)
+        );
+        assert_eq!(
+            offset_of(scan("[1 2]").skip_value("c").map(|_| ())),
+            Some(3)
+        );
+        let mut s = scan(r#"{"a" 1}"#);
+        s.begin_object("c").unwrap();
+        s.skip_ws();
+        s.parse_string("c").unwrap();
+        assert_eq!(offset_of(expect_colon(&mut s, "c")), Some(5));
+        let mut s = scan(r#"{"a": 1 "b": 2}"#);
+        s.begin_object("c").unwrap();
+        s.skip_ws();
+        s.parse_string("c").unwrap();
+        expect_colon(&mut s, "c").unwrap();
+        s.parse_int("c.n").unwrap();
+        assert_eq!(offset_of(object_next(&mut s, "c").map(|_| ())), Some(8));
+        let mut s = scan("[1 2]");
+        s.begin_array("c").unwrap();
+        s.parse_int("c.n").unwrap();
+        assert_eq!(offset_of(array_next(&mut s, "c").map(|_| ())), Some(3));
+        let mut s = Scanner::with_max_depth(b"{", 0);
+        assert_eq!(offset_of(s.begin_object("c").map(|_| ())), Some(1));
+        let s = scan("abcdef");
+        assert_eq!(offset_of(s.span_bytes("w", 4, 1).map(|_| ())), Some(4));
+    }
+
+    #[test]
+    fn structural_errors_render_as_scan_errors() {
+        let mut s = scan("{oops");
+        s.begin_object("c").unwrap();
+        let err = s.parse_string("c").unwrap_err();
+        assert_eq!(err.what, "c");
+        assert_eq!(
+            err.to_string(),
+            "ScanError(offset=1, message=expected byte 34)"
         );
     }
 }
