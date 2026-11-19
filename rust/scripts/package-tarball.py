@@ -1517,11 +1517,14 @@ def main(argv):
         # pinned digest records the validated original: the
         # pinned digest is the single source of truth, so a
         # staged copy that differs from it refuses here.
+        staged_binary_ok = True
         if not os.path.isfile(binary) or os.path.islink(binary):
             problems.append("staged copy missing: bin/memveil")
+            staged_binary_ok = False
         elif observed.get("bin/memveil") != binary_input_sha:
             problems.append("staged executable differs from the "
                             "validated binary: bin/memveil")
+            staged_binary_ok = False
         # The staged BPF inspection copies must equal the exact
         # bytes the binary embeds: compare the STAGED digests
         # against the executable's dumped manifest, never against
@@ -1550,12 +1553,16 @@ def main(argv):
         # staging) validates one binary's bytes against another's
         # manifest; only the staged executable re-dumping the same
         # rows proves the seal binds a single binary. Anything
-        # else refuses here, before the seal.
-        staged_embedded = embedded_manifest(binary)
-        if staged_embedded != embedded:
-            problems.append(
-                "staged executable dumps a different embedded "
-                "manifest than validated: bin/memveil")
+        # else refuses here, before the seal. The re-dump runs
+        # only a digest-verified staged binary: a mismatch or a
+        # symlink recorded above already refuses below, and
+        # probing it would execute bytes already deemed invalid.
+        if staged_binary_ok:
+            staged_embedded = embedded_manifest(binary)
+            if staged_embedded != embedded:
+                problems.append(
+                    "staged executable dumps a different embedded "
+                    "manifest than validated: bin/memveil")
         for rel, source in sorted(license_sources.items()):
             full = os.path.join(staged, *rel.split("/"))
             if sha256_file(full) != sha256_file(source):

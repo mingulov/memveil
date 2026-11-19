@@ -1118,6 +1118,189 @@ __attribute__((destructor)) static void report(void) {
 }
 "#;
 
+/// `SWAP_SHIM_C` plus a staged-probe marker: a constructor that
+/// appends to `MV_MARK_FILE` when this process is the staged
+/// binary (`/proc/self/exe == MV_MARK_STAGED`) invoked with
+/// `--embedded-manifest`. The validation probe runs the
+/// `--binary` path (a different exe) and `version` runs lack
+/// the flag, so the marker exists iff the seal re-dumped the
+/// staged copy — a deterministic execution signal, no timing
+/// involved. Without `MV_MARK_STAGED`/`MV_MARK_FILE` the
+/// constructor returns before any open, leaving the swap
+/// behavior (and its pinned counts) unchanged.
+const SWAP_MARK_SHIM_C: &str = r#"
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+static int (*real_open)(const char *, int, ...) = 0;
+static int (*real_openat)(int, const char *, int, ...) = 0;
+static int opens = 0;
+
+static void resolve(void) {
+    if (!real_open) {
+        real_open = dlsym(RTLD_NEXT, "open");
+        real_openat = dlsym(RTLD_NEXT, "openat");
+    }
+}
+
+/* Redirect path: the swap target while it is read, else NULL. */
+static const char *redirect(const char *path, int flags) {
+    const char *target;
+    const char *after;
+    int keep;
+    if (!path || (flags & O_ACCMODE) != O_RDONLY)
+        return 0;
+    if (flags & (O_CREAT | O_TMPFILE))
+        return 0;
+    target = getenv("MV_SWAP_TARGET");
+    if (!target || !*target || strcmp(path, target) != 0)
+        return 0;
+    after = getenv("MV_SWAP_AFTER");
+    keep = after ? atoi(after) : 2;
+    opens++;
+    if (opens <= keep)
+        return getenv("MV_SWAP_V1");
+    return getenv("MV_SWAP_V2");
+}
+
+static int do_open(int dirfd, const char *path, int flags, mode_t mode,
+                   int have_mode, int use_at) {
+    const char *swap;
+    resolve();
+    if (!use_at || (dirfd == AT_FDCWD && path && path[0] == '/')) {
+        swap = redirect(path, flags);
+        if (swap && *swap)
+            path = swap;
+    }
+    if (use_at) {
+        if (have_mode)
+            return real_openat(dirfd, path, flags, mode);
+        return real_openat(dirfd, path, flags);
+    }
+    if (have_mode)
+        return real_open(path, flags, mode);
+    return real_open(path, flags);
+}
+
+int open(const char *path, int flags, ...) {
+    if (flags & O_CREAT) {
+        va_list ap;
+        mode_t mode;
+        va_start(ap, flags);
+        mode = va_arg(ap, mode_t);
+        va_end(ap);
+        return do_open(0, path, flags, mode, 1, 0);
+    }
+    return do_open(0, path, flags, 0, 0, 0);
+}
+
+int open64(const char *path, int flags, ...) {
+    if (flags & O_CREAT) {
+        va_list ap;
+        mode_t mode;
+        va_start(ap, flags);
+        mode = va_arg(ap, mode_t);
+        va_end(ap);
+        return do_open(0, path, flags, mode, 1, 0);
+    }
+    return do_open(0, path, flags, 0, 0, 0);
+}
+
+int openat(int dirfd, const char *path, int flags, ...) {
+    if (flags & O_CREAT) {
+        va_list ap;
+        mode_t mode;
+        va_start(ap, flags);
+        mode = va_arg(ap, mode_t);
+        va_end(ap);
+        return do_open(dirfd, path, flags, mode, 1, 1);
+    }
+    return do_open(dirfd, path, flags, 0, 0, 1);
+}
+
+int openat64(int dirfd, const char *path, int flags, ...) {
+    if (flags & O_CREAT) {
+        va_list ap;
+        mode_t mode;
+        va_start(ap, flags);
+        mode = va_arg(ap, mode_t);
+        va_end(ap);
+        return do_open(dirfd, path, flags, mode, 1, 1);
+    }
+    return do_open(dirfd, path, flags, 0, 0, 1);
+}
+
+/* Staged-probe marker: when this process IS the staged binary
+   invoked with --embedded-manifest, append one line to
+   MV_MARK_FILE. The validation probe runs the --binary path
+   (a different /proc/self/exe) and `version` runs lack the
+   flag, so the marker fires only for the seal re-dump. */
+__attribute__((constructor)) static void mark_staged_probe(void) {
+    static const char flag[] = "--embedded-manifest";
+    const char *want_exe = getenv("MV_MARK_STAGED");
+    const char *mark_file = getenv("MV_MARK_FILE");
+    char exe[4096];
+    char cmd[4096];
+    ssize_t got;
+    size_t i;
+    int fd;
+    int seen = 0;
+    if (!want_exe || !*want_exe || !mark_file || !*mark_file)
+        return;
+    resolve();
+    if (!real_openat)
+        return;
+    got = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+    if (got <= 0 || (size_t)got >= sizeof(exe) - 1)
+        return;
+    exe[got] = '\0';
+    if (strcmp(exe, want_exe) != 0)
+        return;
+    fd = real_openat(AT_FDCWD, "/proc/self/cmdline", O_RDONLY);
+    if (fd < 0)
+        return;
+    got = read(fd, cmd, sizeof(cmd));
+    close(fd);
+    if (got <= 0)
+        return;
+    for (i = 0; i + sizeof(flag) - 1 <= (size_t)got; i++) {
+        if (memcmp(cmd + i, flag, sizeof(flag) - 1) == 0) {
+            seen = 1;
+            break;
+        }
+    }
+    if (!seen)
+        return;
+    fd = real_openat(AT_FDCWD, mark_file,
+                     O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0)
+        return;
+    if (write(fd, "probed\n", 7) != 7) {
+        close(fd);
+        return;
+    }
+    close(fd);
+}
+
+__attribute__((destructor)) static void report(void) {
+    const char *count = getenv("MV_SWAP_COUNTFILE");
+    FILE *out;
+    if (!count || !*count || opens == 0)
+        return;
+    out = fopen(count, "w");
+    if (!out)
+        return;
+    fprintf(out, "%d\n", opens);
+    fclose(out);
+}
+"#;
+
 #[test]
 fn staged_bpf_swap_refuses() {
     // Staging TOCTOU contest: a copy input swapped between
@@ -1457,6 +1640,170 @@ fn staged_binary_exec_split_refuses() {
             .join(format!("memveil-{}.tar.gz", h::engine_version()))
             .exists(),
         "split refusal left a tarball"
+    );
+}
+
+#[test]
+fn staged_binary_mismatch_skips_probe() {
+    // Invalid-staged-binary contest: a staged copy replaced
+    // between the immediate copy check and the seal walk must
+    // refuse on the digest mismatch WITHOUT executing the
+    // rejected bytes. The shim serves the validated bytes for
+    // the first staged read (the immediate check) and
+    // same-behavior/different-digest bytes after (the seal
+    // walk), while its constructor marks MV_MARK_FILE iff the
+    // staged path is ever exec'd with --embedded-manifest.
+    // Pre-fix the seal probed the mismatch (marker present);
+    // post-fix the probe is skipped (marker absent) and the
+    // refusal names the mismatch, never a probe error.
+    if !h::tool_present("cc") {
+        eprintln!("skip: cc absent on this host: the swap shim needs it");
+        return;
+    }
+    let root = h::pristine_root();
+    let binary = h::ensure_release_binary();
+    let tmp = h::scratch("binary-mismatch");
+    let script = h::scripts_dir().join("package-tarball.py");
+
+    // V2: pristine bytes plus one trailing byte. Still a valid
+    // ELF with identical behavior (proven below) but a
+    // different digest, so the seal reads a mismatch while
+    // every exec of the on-disk V1 succeeds.
+    let v1 = fs::read(&binary).unwrap();
+    let mut v2 = v1.clone();
+    v2.push(0x00);
+    let v1_path = tmp.join("binary-v1");
+    let v2_path = tmp.join("binary-v2");
+    fs::write(&v1_path, &v1).unwrap();
+    fs::write(&v2_path, &v2).unwrap();
+    fs::set_permissions(&v2_path, fs::metadata(&binary).unwrap().permissions()).unwrap();
+    assert_ne!(
+        h::sha256_file(&v1_path),
+        h::sha256_file(&v2_path),
+        "V2 digest surgery left the bytes identical"
+    );
+    let pristine_version = h::run(binary.to_str().unwrap(), &["version"], None);
+    assert!(pristine_version.status.success());
+    let v2_version = h::run(v2_path.to_str().unwrap(), &["version"], None);
+    assert!(v2_version.status.success(), "V2 binary fails version");
+    assert_eq!(
+        v2_version.stdout, pristine_version.stdout,
+        "V2 version differs"
+    );
+    let pristine_dump = h::run(binary.to_str().unwrap(), &["--embedded-manifest"], None);
+    assert!(pristine_dump.status.success());
+    let v2_dump = h::run(v2_path.to_str().unwrap(), &["--embedded-manifest"], None);
+    assert!(
+        v2_dump.status.success(),
+        "V2 binary fails --embedded-manifest"
+    );
+    assert_eq!(v2_dump.stdout, pristine_dump.stdout, "V2 manifest differs");
+
+    let dest = tmp.join("out");
+    fs::create_dir_all(&dest).unwrap();
+    // Swap spelling: absolute without resolving symlinks,
+    // exactly as the script's abspath spells the staged path
+    // it opens. Marker spelling: canonical, exactly as
+    // /proc/self/exe spells the staged path at exec time.
+    let mut target = dest.join(".stage").join("bin").join("memveil");
+    if !target.is_absolute() {
+        target = std::env::current_dir().unwrap().join(&target);
+    }
+    let staged_exe = dest
+        .canonicalize()
+        .unwrap()
+        .join(".stage")
+        .join("bin")
+        .join("memveil");
+    let mark = tmp.join("probe-marker.txt");
+    assert!(!mark.exists(), "scratch marker already exists");
+
+    let shim_c = tmp.join("swap.c");
+    let shim_so = tmp.join("swap.so");
+    fs::write(&shim_c, SWAP_MARK_SHIM_C).unwrap();
+    let build = h::run(
+        "cc",
+        &[
+            "-shared",
+            "-fPIC",
+            "-O2",
+            "-o",
+            shim_so.to_str().unwrap(),
+            shim_c.to_str().unwrap(),
+            "-ldl",
+        ],
+        None,
+    );
+    assert!(
+        build.status.success(),
+        "swap shim build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    // AFTER=1 serves V1 to the immediate copy check and V2 to
+    // the seal walk: exactly the invalid-staged state. The
+    // on-disk --binary and --bpf-dir stay pristine, so the
+    // validation probe and the BPF binding genuinely pass and
+    // only the staged-executable seal may refuse this run.
+    let count = tmp.join("swap-count.txt");
+    let proc = std::process::Command::new("python3")
+        .arg(script.to_str().unwrap())
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "--binary",
+            binary.to_str().unwrap(),
+            "--bpf-dir",
+            h::bpf_out_dir().to_str().unwrap(),
+            "--out",
+            dest.to_str().unwrap(),
+        ])
+        .env("LD_PRELOAD", shim_so.to_str().unwrap())
+        .env("MV_SWAP_TARGET", target.to_str().unwrap())
+        .env("MV_SWAP_V1", v1_path.to_str().unwrap())
+        .env("MV_SWAP_V2", v2_path.to_str().unwrap())
+        .env("MV_SWAP_AFTER", "1")
+        .env("MV_SWAP_COUNTFILE", count.to_str().unwrap())
+        .env("MV_MARK_STAGED", staged_exe.to_str().unwrap())
+        .env("MV_MARK_FILE", mark.to_str().unwrap())
+        .output()
+        .expect("cannot run package-tarball.py");
+    assert!(!proc.status.success(), "mismatched staging packaged");
+    let stderr = String::from_utf8_lossy(&proc.stderr);
+    assert!(
+        stderr.contains("staged executable differs from the validated binary")
+            && stderr.contains("bin/memveil"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("staged tree differs from its sources"),
+        "refusal is not the problems-list seal: {stderr}"
+    );
+    assert!(
+        !stderr.contains("--embedded-manifest"),
+        "probe error surfaced for an invalid staged binary: {stderr}"
+    );
+    assert!(!mark.exists(), "seal probed an invalid staged binary");
+    // Exactly the two production reads of the staged path
+    // (immediate copy check, seal walk): the refusal is the
+    // staged-vs-pinned binding firing on the post-check swap,
+    // not an unrelated failure.
+    assert_eq!(
+        fs::read_to_string(&count).unwrap().trim(),
+        "2",
+        "swap shim saw an unexpected read pattern"
+    );
+    assert!(
+        !dest
+            .join(format!("memveil-{}", h::engine_version()))
+            .exists(),
+        "mismatch refusal left a bundle"
+    );
+    assert!(
+        !dest
+            .join(format!("memveil-{}.tar.gz", h::engine_version()))
+            .exists(),
+        "mismatch refusal left a tarball"
     );
 }
 
