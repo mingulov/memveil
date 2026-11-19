@@ -369,14 +369,21 @@ impl<'a> Btf<'a> {
                 continue;
             }
             // With kind_flag set, the high 8 bits carry the bitfield width
-            // (0 for plain members); without it the whole word is the bit
-            // offset.
+            // (0 for plain members) and the low 24 are the bit offset; the
+            // nonzero-width arm above already refused true bitfields. Without
+            // the flag the whole word is the bit offset, so the mask applies
+            // only to the flagged encoding: masking an unflagged word would
+            // silently wrap bit offsets at or above 2^24 (2 MiB members).
             if rec.kind_flag && raw_off >> 24 != 0 {
                 return Err(SessionError::Offsets(format!(
                     "BTF refused: {name}.{member} is a bitfield"
                 )));
             }
-            let bit_off = raw_off & 0x00FF_FFFF;
+            let bit_off = if rec.kind_flag {
+                raw_off & 0x00FF_FFFF
+            } else {
+                raw_off
+            };
             if bit_off % 8 != 0 {
                 return Err(SessionError::Offsets(format!(
                     "BTF refused: {name}.{member} is not byte-aligned"
@@ -633,5 +640,88 @@ mod tests {
         let last = bad.len() - 1;
         bad[last] = b'x';
         assert!(Btf::parse(&bad).is_err());
+    }
+
+    /// Build a one-member image: `struct big` with a single `u64 field`
+    /// at the caller-chosen raw offset word and kind flag.
+    fn flagged_image(kind_flag: bool, raw_off: u32) -> Vec<u8> {
+        let mut strings = vec![0u8];
+        let mut intern = |text: &str| -> u32 {
+            let at = strings.len() as u32;
+            strings.extend_from_slice(text.as_bytes());
+            strings.push(0);
+            at
+        };
+        let big = intern("big");
+        let field = intern("field");
+        let u64_name = intern("u64");
+
+        let mut types = Vec::new();
+        let mut record = |name: u32, info: u32, size: u32, payload: &[u8]| {
+            types.extend_from_slice(&name.to_le_bytes());
+            types.extend_from_slice(&info.to_le_bytes());
+            types.extend_from_slice(&size.to_le_bytes());
+            types.extend_from_slice(payload);
+        };
+        // id 1: u64 INT.
+        record(u64_name, u32::from(KIND_INT) << 24, 8, &1u32.to_le_bytes());
+        // id 2: struct big with one member at the raw offset word.
+        let mut info = u32::from(KIND_STRUCT) << 24 | 1;
+        if kind_flag {
+            info |= 1 << 31;
+        }
+        let mut members = Vec::new();
+        members.extend_from_slice(&field.to_le_bytes());
+        members.extend_from_slice(&1u32.to_le_bytes());
+        members.extend_from_slice(&raw_off.to_le_bytes());
+        record(big, info, 0x200008, &members);
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&BTF_MAGIC.to_le_bytes());
+        out.push(BTF_VERSION);
+        out.push(0);
+        out.extend_from_slice(&24u32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&(types.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(types.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(strings.len() as u32).to_le_bytes());
+        out.extend_from_slice(&types);
+        out.extend_from_slice(&strings);
+        out
+    }
+
+    #[test]
+    fn member_offset_mask_follows_kind_flag() {
+        // Unflagged: the whole word is the bit offset, so a 2^24-bit
+        // (2 MiB) member resolves instead of wrapping to zero.
+        let image = flagged_image(false, 0x0100_0000);
+        let btf = Btf::parse(&image).expect("unflagged image must parse");
+        assert_eq!(btf.struct_member("big", "field"), Ok((0x200000, 8)));
+        // Flagged with a zero width byte: the low 24 bits are the bit
+        // offset and the mask still applies.
+        let image = flagged_image(true, 0x0001_0000);
+        let btf = Btf::parse(&image).expect("flagged image must parse");
+        assert_eq!(btf.struct_member("big", "field"), Ok((0x2000, 8)));
+        // Flagged with a nonzero width byte: a bitfield, refused.
+        let image = flagged_image(true, (5 << 24) | 16);
+        let btf = Btf::parse(&image).expect("bitfield image must parse");
+        let error = btf
+            .struct_member("big", "field")
+            .expect_err("bitfield must refuse");
+        assert!(
+            error.to_string().contains("bitfield"),
+            "want the bitfield refusal, got: {error}"
+        );
+    }
+
+    #[test]
+    fn member_offset_mask_boundary_pinned() {
+        // Just below the wrap point both encodings agree.
+        let image = flagged_image(false, 0x00FF_FFF8);
+        let btf = Btf::parse(&image).expect("boundary image must parse");
+        assert_eq!(btf.struct_member("big", "field"), Ok((0x1FFFFF, 8)));
+        let image = flagged_image(true, 0x00FF_FFF8);
+        let btf = Btf::parse(&image).expect("boundary image must parse");
+        assert_eq!(btf.struct_member("big", "field"), Ok((0x1FFFFF, 8)));
     }
 }
