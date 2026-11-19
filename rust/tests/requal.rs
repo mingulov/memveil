@@ -1210,6 +1210,47 @@ fn requal_json_parser_shapes() {
     assert!(parse_json("{\"a\":1} x").is_err());
 }
 
+#[test]
+fn requal_loss_count_requires_canonical_zero() {
+    // Only the canonical string "0" certifies lossless: null and missing
+    // mean unknown (session 0.1.4 distinguishes them from measured zero),
+    // and numeric or padded forms are not canonical counts.
+    let detail =
+        |loss: &str| parse_json(&format!("{{\"loss_count\":{loss}}}")).expect("detail parses");
+    assert_eq!(loss_div("rust", &detail("\"0\"")), None);
+    assert_eq!(
+        loss_div("rust", &detail("\"5\"")),
+        Some("rust lost 5 events".to_string())
+    );
+    for (raw, want) in [
+        ("null", "rust loss_count is not canonical: null"),
+        ("0", "rust loss_count is not canonical: 0"),
+        ("5", "rust loss_count is not canonical: 5"),
+        ("\"00\"", "rust loss_count is not canonical: \"00\""),
+        ("\"+0\"", "rust loss_count is not canonical: \"+0\""),
+        ("\" 0\"", "rust loss_count is not canonical: \" 0\""),
+        ("\"\"", "rust loss_count is not canonical: \"\""),
+        ("true", "rust loss_count is not canonical: true"),
+    ] {
+        assert_eq!(
+            loss_div("rust", &detail(raw)),
+            Some(want.to_string()),
+            "raw {raw}"
+        );
+    }
+    let missing = parse_json("{}").expect("empty detail parses");
+    assert_eq!(
+        loss_div("rust", &missing),
+        Some("rust loss_count missing (unknown loss, not zero)".to_string())
+    );
+    assert_eq!(canonical_u64("0"), Some(0));
+    assert_eq!(canonical_u64("18446744073709551615"), Some(u64::MAX));
+    assert_eq!(canonical_u64("18446744073709551616"), None);
+    assert_eq!(canonical_u64("00"), None);
+    assert_eq!(canonical_u64("+0"), None);
+    assert_eq!(canonical_u64(""), None);
+}
+
 // ---------------------------------------------------------------------------
 // Live dual-capture cell (needs MEMVEIL_REQUAL_LIVE=1 + the VM harness).
 // ---------------------------------------------------------------------------
@@ -1641,6 +1682,42 @@ fn u64_field(val: &Json, key: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("{key:?} is not numeric"))
 }
 
+/// Canonical decimal count: all digits, no leading zero, no sign, nonempty.
+/// `str::parse::<u64>` alone is looser (it accepts `+0` and `00`), so the
+/// shape check comes first.
+fn canonical_u64(text: &str) -> Option<u64> {
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if text.len() > 1 && text.starts_with('0') {
+        return None;
+    }
+    text.parse::<u64>().ok()
+}
+
+/// Loss verdict for one side's `quality.detail`: `None` when the side
+/// measured zero loss, else the divergence line. Session 0.1.4 carries
+/// counts as canonical decimal strings and distinguishes null (unknown)
+/// from measured zero, so only the string `"0"` certifies lossless: a
+/// missing, null, numeric, or malformed `loss_count` diverges instead of
+/// defaulting to zero.
+fn loss_div(side: &str, detail: &Json) -> Option<String> {
+    match detail.get("loss_count") {
+        Some(Json::Str(text)) => match canonical_u64(text) {
+            Some(0) => None,
+            Some(loss) => Some(format!("{side} lost {loss} events")),
+            None => Some(format!("{side} loss_count is not canonical: {text:?}")),
+        },
+        Some(other) => Some(format!(
+            "{side} loss_count is not canonical: {}",
+            canon_string(other)
+        )),
+        None => Some(format!(
+            "{side} loss_count missing (unknown loss, not zero)"
+        )),
+    }
+}
+
 /// Judge one attempt's exports: oracle integrity, quiet margins, per-side
 /// oracle equality, then the cross-side stream diff. Returns the one-line
 /// evidence summary.
@@ -1782,9 +1859,8 @@ fn judge_exports(texts: &BTreeMap<String, String>, inputs: &LiveInputs) -> Resul
                 detail.get("reason").and_then(Json::as_str).unwrap_or("?")
             ));
         }
-        let loss = detail.get("loss_count").and_then(Json::as_u64).unwrap_or(0);
-        if loss != 0 {
-            divs.push(format!("{side} lost {loss} events"));
+        if let Some(div) = loss_div(side, detail) {
+            divs.push(div);
         }
         let profile = profile_stream(&texts[&format!("{side}.events.ndjson")], Some((start, end)))
             .map_err(|e| format!("{side} events: {e}"))?;
