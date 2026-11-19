@@ -694,3 +694,96 @@ def test_payload_closure_defaults_to_cargo_run(workshop, tmp_path):
         ROOT, workshop.harness_bin(), bundle, debs[0], rpms[0])
     assert fallback == explicit
     assert fallback, "empty payload closure"
+
+
+def _role_archives(fix):
+    """The bundle/deb/rpm paths the seal discovers in the fixture."""
+    artifacts = fix["artifacts"]
+    debs = sorted(artifacts.glob("*.deb"))
+    rpms = sorted(artifacts.glob("*.rpm"))
+    assert len(debs) == 1 and len(rpms) == 1
+    bundle = artifacts / "memveil-fixture.tar.gz"
+    assert bundle.is_file()
+    return bundle, debs[0], rpms[0]
+
+
+def _expected_default_harness_argv(m, fix):
+    """Exact `cargo run` fallback argv against the sealed root."""
+    bundle, deb, rpm = _role_archives(fix)
+    return ["cargo", "run", "--manifest-path",
+            str(Path(fix["root"]) / "Cargo.toml"),
+            "-p", m.HARNESS_PACKAGE,
+            "--locked", "--offline", "--", "payload-closure",
+            "--bundle", str(bundle), "--deb", str(deb),
+            "--rpm", str(rpm)]
+
+
+def test_create_manifest_default_harness_uses_locked_offline_run(
+        workshop, tmp_path, monkeypatch):
+    m, fix = seal_paths(workshop, tmp_path)
+    monkeypatch.setenv("RUSTUP_TOOLCHAIN", "seal-default-probe")
+    real_run = subprocess.run
+    calls = []
+
+    def fake_run(argv, **kw):
+        if isinstance(argv, list) and argv[:2] == ["cargo", "run"]:
+            env = kw.get("env")
+            calls.append({"argv": list(argv),
+                          "env": dict(env) if env is not None
+                          else None})
+            tail = argv[argv.index("--") + 1:]
+            args = dict(kw)
+            args["env"] = None
+            return real_run(
+                [workshop.harness_bin(), *tail], **args)
+        return real_run(argv, **kw)
+
+    monkeypatch.setattr(m.subprocess, "run", fake_run)
+    manifest = m.create_manifest(
+        fix["bundle_dir"], fix["artifacts"], fix["policy"],
+        {"root": str(fix["root"])})
+    assert manifest["schema"] == "memveil-candidate/2"
+    assert len(calls) == 1, calls
+    assert calls[0]["argv"] == _expected_default_harness_argv(m, fix)
+    assert "--locked" in calls[0]["argv"]
+    assert "--offline" in calls[0]["argv"]
+    assert calls[0]["env"] is not None, \
+        "default path must pass an explicit environment"
+    assert "RUSTUP_TOOLCHAIN" not in calls[0]["env"]
+    assert calls[0]["env"] == {
+        key: value for key, value in os.environ.items()
+        if key != "RUSTUP_TOOLCHAIN"}
+
+
+def test_cli_default_harness_failure_propagates(
+        workshop, tmp_path, monkeypatch, capsys):
+    m, fix = seal_paths(workshop, tmp_path)
+    monkeypatch.setenv("RUSTUP_TOOLCHAIN", "seal-default-probe")
+    real_run = subprocess.run
+    calls = []
+
+    def fake_run(argv, **kw):
+        if isinstance(argv, list) and argv[:2] == ["cargo", "run"]:
+            env = kw.get("env")
+            calls.append({"argv": list(argv),
+                          "env": dict(env) if env is not None
+                          else None})
+            return subprocess.CompletedProcess(
+                argv, 1, stdout="", stderr="cargo run boom\n")
+        return real_run(argv, **kw)
+
+    monkeypatch.setattr(m.subprocess, "run", fake_run)
+    out = Path(tmp_path) / "candidate.json"
+    with pytest.raises(SystemExit) as failure:
+        m.main(["seal",
+                "--bundle-dir", str(fix["bundle_dir"]),
+                "--artifacts-dir", str(fix["artifacts"]),
+                "--policy", str(fix["policy"]),
+                "--source-root", str(fix["root"]),
+                "--out", str(out)])
+    assert failure.value.code == 1
+    assert "payload closure failed" in capsys.readouterr().err
+    assert not out.exists(), "failed seal must not write a manifest"
+    assert len(calls) == 1, calls
+    assert calls[0]["argv"] == _expected_default_harness_argv(m, fix)
+    assert "RUSTUP_TOOLCHAIN" not in calls[0]["env"]
