@@ -9,6 +9,7 @@ use memveil::cli::qualify::run_qualify;
 use memveil::cli::record::run_record;
 use memveil::cli::report::{EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, run_report_os, write_stderr};
 use memveil::cli::top::{run_top, run_top_os};
+use memveil::platform::runtime::embedded_manifest;
 use memveil::platform::signal::{ensure_inherited_signal_block, ignore_sigpipe};
 use memveil::platform::stdout::write_stdout;
 use std::ffi::OsString;
@@ -54,6 +55,13 @@ enum Dispatch {
     Help,
     /// Print the engine version to stdout; exit 0.
     Version,
+    /// Print the embedded BPF manifest to stdout; exit 0.
+    ///
+    /// Hidden packager surface (kept out of usage text):
+    /// one `channel digest` line per channel, naming the
+    /// build-baked SHA-256 of the bytes `embedded_object`
+    /// serves.
+    EmbeddedManifest,
     /// Run one verb with decoded UTF-8 arguments. `raw` is the
     /// byte-exact argv tail (verb word plus rest) the signal
     /// re-exec forwards; decoded `rest` never reaches `execv`.
@@ -106,6 +114,11 @@ fn dispatch(raw: &[OsString]) -> Dispatch {
     // `memveil --version` are accepted, not an error.
     if verb == "version" || verb == "--version" {
         return Dispatch::Version;
+    }
+    // Hidden packager probe: trailing words are ignored like
+    // `version`, before any further decoding.
+    if verb == "--embedded-manifest" {
+        return Dispatch::EmbeddedManifest;
     }
     if verb == "report" || verb == "doctor" {
         return Dispatch::RunOs {
@@ -167,6 +180,19 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::from(EXIT_OK as u8),
             Err(_) => stdout_failed(),
         },
+        Dispatch::EmbeddedManifest => {
+            let mut text = String::new();
+            for (channel, digest) in embedded_manifest() {
+                text.push_str(channel);
+                text.push(' ');
+                text.push_str(digest);
+                text.push('\n');
+            }
+            match write_stdout(&text) {
+                Ok(()) => ExitCode::from(EXIT_OK as u8),
+                Err(_) => stdout_failed(),
+            }
+        }
         Dispatch::RunOs { verb, rest } => {
             let code = if verb == "doctor" {
                 run_doctor_os(&rest)
@@ -241,6 +267,10 @@ mod tests {
         matches!(dispatch(raw), Dispatch::Version)
     }
 
+    fn is_manifest(raw: &[OsString]) -> bool {
+        matches!(dispatch(raw), Dispatch::EmbeddedManifest)
+    }
+
     #[test]
     fn empty_and_unknown_verbs_are_invalid_usage() {
         assert!(is_invalid(&[]));
@@ -276,6 +306,19 @@ mod tests {
             assert!(is_version(&os(&[verb, b"extra", b"--bogus"])));
             assert!(is_version(&os(&[verb, b"\xff"])));
         }
+    }
+
+    #[test]
+    fn embedded_manifest_flag_is_hidden_but_stable() {
+        // The packager probe dispatches before decoding and
+        // ignores trailing words like `version`, yet stays
+        // out of the usage text and disturbs no other verb.
+        assert!(is_manifest(&os(&[b"--embedded-manifest"])));
+        assert!(is_manifest(&os(&[b"--embedded-manifest", b"extra"])));
+        assert!(is_manifest(&os(&[b"--embedded-manifest", b"\xff"])));
+        assert!(!top_usage().contains("embedded-manifest"));
+        assert!(is_invalid(&os(&[b"--embedded-manifes"])));
+        assert!(is_invalid(&os(&[b"--embedded-manifestx"])));
     }
 
     #[test]

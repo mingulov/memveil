@@ -91,6 +91,31 @@ pub fn embedded_object(kind: &str) -> Option<&'static [u8]> {
     }
 }
 
+/// Build-baked SHA-256 of one channel's embedded object, or None.
+///
+/// The build script hashes the same staged copy
+/// [`embedded_object`] embeds, so this digest names exactly
+/// the bytes the runtime serves — the identity the packager
+/// binds inspection copies to. `kind` is `attempt`,
+/// `lifecycle`, or `copy`; anything else has no artifact.
+pub fn embedded_digest(kind: &str) -> Option<&'static str> {
+    match kind {
+        "attempt" => Some(env!("DEP_MEMVEIL_EBPF_ATTEMPT_DIGEST")),
+        "lifecycle" => Some(env!("DEP_MEMVEIL_EBPF_LIFECYCLE_DIGEST")),
+        "copy" => Some(env!("DEP_MEMVEIL_EBPF_COPY_DIGEST")),
+        _ => None,
+    }
+}
+
+/// (channel, digest) rows in channel order for `--embedded-manifest`.
+pub fn embedded_manifest() -> [(&'static str, &'static str); 3] {
+    [
+        ("attempt", env!("DEP_MEMVEIL_EBPF_ATTEMPT_DIGEST")),
+        ("lifecycle", env!("DEP_MEMVEIL_EBPF_LIFECYCLE_DIGEST")),
+        ("copy", env!("DEP_MEMVEIL_EBPF_COPY_DIGEST")),
+    ]
+}
+
 /// Resolve the native bridge path, or "" when none applies.
 ///
 /// Retargeted: the Rust binary links the Aya loader
@@ -130,9 +155,10 @@ pub fn discover_object(_kind: &str, explicit: &str, has_explicit: bool, _exe_pat
 #[cfg(test)]
 mod tests {
     use super::{
-        UidPair, discover_bridge, discover_object, embedded_object, exe_root, is_privileged,
-        live_uids,
+        UidPair, discover_bridge, discover_object, embedded_digest, embedded_manifest,
+        embedded_object, exe_root, is_privileged, live_uids,
     };
+    use crate::platform::hash::sha256_hex;
 
     const EXE: &str = "tests/fixtures/runtime/bin/memveil";
     const ENV_BRIDGE: &str = "tests/fixtures/runtime/env-bridge.so";
@@ -219,6 +245,24 @@ mod tests {
             let machine = u16::from_le_bytes([bytes[18], bytes[19]]);
             assert_eq!(machine, 247, "kind {kind}");
         }
+    }
+
+    #[test]
+    fn embedded_digests_name_the_served_bytes() {
+        // The binding is exact: each baked digest must equal
+        // the SHA-256 of the bytes `embedded_object` serves
+        // for that channel, and the manifest must carry the
+        // same three rows in channel order.
+        let manifest = embedded_manifest();
+        assert_eq!(manifest.map(|row| row.0), ["attempt", "lifecycle", "copy"]);
+        for (channel, digest) in manifest {
+            assert_eq!(Some(digest), embedded_digest(channel));
+            let bytes = embedded_object(channel).expect("channel embedded");
+            assert_eq!(digest, sha256_hex(bytes), "kind {channel}");
+            assert_eq!(digest.len(), 64, "kind {channel}");
+        }
+        assert!(embedded_digest("bogus").is_none());
+        assert!(embedded_digest("").is_none());
     }
 
     #[test]

@@ -15,6 +15,18 @@
 //!
 //! Prerequisite: `bpf-linker` 0.10.4 on PATH. Install it with
 //! `cargo install bpf-linker --version 0.10.4 --locked`.
+//!
+//! The script also publishes each artifact's SHA-256 as
+//! `DEP_MEMVEIL_EBPF_<CH>_DIGEST`, hashed from the same
+//! `OUT_DIR` copy the crate embeds, so the packager can bind
+//! inspection copies to the exact bytes the binary runs
+//! (an occurrence search cannot tell planted bytes apart
+//! from the runtime bytes).
+
+// Reuse the crate's dependency-free SHA-256 rather than a
+// second implementation or a new build dependency.
+#[path = "src/platform/hash.rs"]
+mod hash;
 
 use std::{
     env,
@@ -194,6 +206,15 @@ fn main() {
         println!(
             "cargo::rustc-env=DEP_MEMVEIL_EBPF_{dep_suffix}_PATH={}",
             dest.display()
+        );
+        // Digest of the staged copy the crate embeds (not the
+        // build-tree original): the manifest the binary dumps
+        // must name exactly the bytes `embedded_object` serves.
+        let staged = std::fs::read(&dest)
+            .unwrap_or_else(|error| panic!("hashing {}: {error}", dest.display()));
+        println!(
+            "cargo::rustc-env=DEP_MEMVEIL_EBPF_{dep_suffix}_DIGEST={}",
+            hash::sha256_hex(&staged)
         );
     }
 }

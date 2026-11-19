@@ -51,8 +51,8 @@ Usage: rust/scripts/package-tarball.py [--out DIR] [--tag NAME]
 Requires a release binary (use --build or build it first),
 patchelf, strip, and readelf. Fails closed when the link
 closure names anything outside the shipped lib/ set and the
-system allowlist, and when a BPF inspection input is absent
-from the binary's mapped segments or carries another
+system allowlist, and when a BPF inspection input differs
+from the binary's dumped embedded digest or carries another
 channel's marker. Every
 cargo invocation strips RUSTUP_TOOLCHAIN so the repository pin
 wins.
@@ -139,10 +139,9 @@ CHANNELS = (
 BPF_MARKER_SECTION = "memveil_channel"
 BPF_MARKER_PREFIX = b"memveil-channel:"
 
-# Program-header type for loadable segments: the loader maps
-# exactly these file ranges, so the inspection gate searches
-# only them (an appended overlay is never runtime-visible).
-PT_LOAD = 1
+# Channels the `--embedded-manifest` probe must report, in
+# dump order.
+MANIFEST_CHANNELS = ("attempt", "lifecycle", "copy")
 
 # Host license texts for the shipped libgcc, as (staged rel,
 # candidate host paths): the first readable candidate wins.
@@ -284,57 +283,64 @@ def check_bpf_markers(bpf_inputs):
                  % (source, found, want))
 
 
-def pt_load_ranges(data, path):
-    """File ranges the loader maps: [(offset, filesz)] per PT_LOAD.
+def parse_embedded_manifest(text, binary):
+    """{channel: sha256} from `--embedded-manifest` output.
 
-    Minimal 64-bit little-endian program-header reader matching
-    read_elf_section's validation. Truncation or inconsistency
-    fails closed, as does a file without PT_LOAD (nothing in it
-    is runtime-visible).
+    Strict shape: exactly one `channel digest` line per known
+    channel, in dump order, with a 64-character lowercase hex
+    digest each. Anything else fails closed: a truncated or
+    hand-edited dump must never bind inspection copies.
     """
-    if len(data) < 64 or data[:4] != b"\x7fELF":
-        fail("not an ELF file: %s" % path)
-    if data[4] != 2 or data[5] != 1:
-        fail("want 64-bit little-endian ELF: %s" % path)
-    (e_phoff,) = struct.unpack_from("<Q", data, 0x20)
-    (e_phentsize, e_phnum) = struct.unpack_from("<HH", data, 0x36)
-    if e_phentsize < 56 or e_phnum == 0:
-        fail("no program headers in %s" % path)
-    if e_phoff + e_phentsize * e_phnum > len(data):
-        fail("program headers overrun %s" % path)
-    ranges = []
-    for index in range(e_phnum):
-        base = e_phoff + index * e_phentsize
-        (p_type, _flags, p_offset, _vaddr, _paddr, p_filesz,
-         _memsz, _align) = struct.unpack_from(
-            "<IIQQQQQQ", data, base)
-        if p_type != PT_LOAD:
-            continue
-        if p_offset + p_filesz > len(data):
-            fail("PT_LOAD segment overruns %s" % path)
-        ranges.append((p_offset, p_filesz))
-    if not ranges:
-        fail("no PT_LOAD segments in %s" % path)
-    return ranges
+    rows = text.splitlines()
+    if len(rows) != len(MANIFEST_CHANNELS):
+        fail("binary %s dumps %d manifest rows, want %d"
+             % (binary, len(rows), len(MANIFEST_CHANNELS)))
+    found = {}
+    for row, channel in zip(rows, MANIFEST_CHANNELS):
+        fields = row.split(" ")
+        if len(fields) != 2 or fields[0] != channel:
+            fail("binary %s dumps a bad manifest row %r, want "
+                 "'%s <sha256>'" % (binary, row, channel))
+        digest = fields[1]
+        if len(digest) != 64 or any(
+                byte not in "0123456789abcdef" for byte in digest):
+            fail("binary %s dumps a bad %s digest %r: want 64 "
+                 "lowercase hex" % (binary, channel, digest))
+        found[channel] = digest
+    return found
 
 
-def embedded_in_loads(binary_bytes, ranges, obj):
-    """True when obj occurs wholly inside one PT_LOAD range.
+def embedded_manifest(binary):
+    """{channel: sha256} the binary reports for its embedded objects.
 
-    The runtime maps only PT_LOAD file ranges (the embedded
-    objects compile into .rodata), so an occurrence spanning
-    ranges or sitting in an appended overlay is not the bytes
-    the binary runs. bytes.find with start/end bounds keeps the
-    search inside each range without copying.
+    Runs the hidden `--embedded-manifest` probe, which prints
+    the build-baked digest of the exact bytes `embedded_object`
+    serves per channel. A binary that predates the flag (or
+    otherwise fails the probe) refuses with a rebuild pointer
+    instead of falling back to an occurrence search, which
+    cannot tell planted bytes apart from the runtime bytes.
     """
-    if not obj:
-        return False
-    for offset, filesz in ranges:
-        if len(obj) > filesz:
-            continue
-        if binary_bytes.find(obj, offset, offset + filesz) != -1:
-            return True
-    return False
+    try:
+        proc = subprocess.run(
+            [binary, "--embedded-manifest"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=60,
+        )
+    except OSError as exc:
+        fail("cannot run %s --embedded-manifest: %s" % (binary, exc))
+    except subprocess.TimeoutExpired:
+        fail("binary %s hangs on --embedded-manifest" % binary)
+    if proc.returncode != 0:
+        hint = ""
+        for line in proc.stderr.splitlines():
+            if line.strip():
+                hint = ": %s" % line.strip()[:160]
+                break
+        fail("binary %s refuses --embedded-manifest (exit %d%s): "
+             "it predates the embedded-digest binding; rebuild the "
+             "release binary from this source before packaging"
+             % (binary, proc.returncode, hint))
+    return parse_embedded_manifest(proc.stdout, binary)
 
 
 def manifest_source(root, source):
@@ -1245,40 +1251,35 @@ def main(argv):
         # binary runs: --binary and --bpf-dir resolve
         # independently, so a stale or mixed pair would
         # otherwise ship a consistent manifest for probes
-        # zero-config `record` never executes. The binary
-        # embeds each object verbatim in .rodata, so every
-        # inspection input must occur inside the PT_LOAD file
-        # ranges the loader maps; a whole-file substring would
-        # also match an appended overlay the executable never
-        # references. Anything absent from the mapped ranges
-        # refuses here, before staging.
-        try:
-            with open(binary_input, "rb") as handle:
-                binary_bytes = handle.read()
-        except OSError as exc:
-            fail("cannot read release binary: %s" % exc)
-        load_ranges = pt_load_ranges(binary_bytes, binary_input)
+        # zero-config `record` never executes. Identity first:
+        # each path must carry its own channel marker, so a
+        # renamed same-build input refuses naming the
+        # mistitled channel. The marker travels with the
+        # bytes, so requiring marker == expected channel per
+        # path closes the swap.
+        check_bpf_markers(bpf_inputs)
+        print("package-tarball: BPF inputs carry their channel markers")
+
+        # Then the binding: each inspection input's digest must
+        # equal the build-baked digest the binary dumps for its
+        # channel — the hash of the exact bytes `embedded_object`
+        # serves. An occurrence search cannot make this
+        # distinction: correctly marked bytes planted in an
+        # unused loadable section occur inside the mapped
+        # ranges while the executable keeps running its
+        # original copy. Anything else refuses here, before
+        # staging.
+        embedded = embedded_manifest(binary_input)
+        expect = dict((shipped, channel)
+                      for channel, shipped in CHANNELS)
         for shipped, (source, digest) in sorted(bpf_inputs.items()):
-            try:
-                with open(source, "rb") as handle:
-                    obj = handle.read()
-            except OSError as exc:
-                fail("cannot read BPF input %s: %s" % (source, exc))
-            if not embedded_in_loads(binary_bytes, load_ranges, obj):
+            if digest != embedded[expect[shipped]]:
                 fail("binary %s does not embed the %s input "
                      "(%s sha256 %s): --binary and --bpf-dir "
                      "come from different builds"
                      % (binary_input, shipped, source, digest))
-        print("package-tarball: binary embeds all three BPF inputs")
-
-        # Occurrence proves the bytes are embedded, not that each
-        # path holds its own channel: a same-build rename (swapped
-        # attempt/copy, one object supplied twice) passes the
-        # mapped-range check and would stage under the wrong name.
-        # The marker travels with the bytes, so requiring
-        # marker == expected channel per path closes the swap.
-        check_bpf_markers(bpf_inputs)
-        print("package-tarball: BPF inputs carry their channel markers")
+        print("package-tarball: BPF inspection digests match "
+              "the embedded manifest")
 
         # Pinned closure provider: verify and extract the vendored
         # libgcc before the closure walk consumes it, and prove it
@@ -1698,10 +1699,10 @@ def main(argv):
                     "bpf/swiotlb_copy.bpf.o": "GPL-2.0-only",
                 },
             },
-            # Inspection-copy digests proven embedded in the
-            # binary above: `bpf/<name>` in files[] must equal
-            # this entry, so a manifest for the wrong probes
-            # cannot validate.
+            # Inspection-copy digests proven equal to the
+            # binary's dumped manifest above: `bpf/<name>` in
+            # files[] must equal this entry, so a manifest for
+            # the wrong probes cannot validate.
             "embedded_bpf": {
                 shipped: digest
                 for shipped, (_source, digest)
