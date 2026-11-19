@@ -41,6 +41,7 @@ use crate::platform::reader::{
     file_state, open_evidence_reader, read_evidence, read_host_file,
 };
 use crate::platform::tracefs::{probe_tracefs, tracefs_translate};
+use crate::render::json::escape_json;
 
 /// Profile schema version minted by current writers.
 pub const PROFILE_SCHEMA_VERSION: &str = "0.1.1";
@@ -2984,64 +2985,6 @@ pub struct ReceiptVerdict {
     pub caps: Vec<String>,
     /// True on a pure bridge rotation.
     pub bridge_mismatch: bool,
-}
-
-fn hex_nibble(v: u8) -> u8 {
-    if v < 10 { b'0' + v } else { b'a' + v - 10 }
-}
-
-/// Render one value as a quoted JSON string literal.
-///
-/// Narrow local mirror of the report renderer's escaper:
-/// short escapes for quote, backslash, and common controls
-/// and `\u00XX` for the rest, including DEL (0x7F); valid
-/// multibyte UTF-8 passes through raw. This deliberately
-/// does NOT reuse the canonical event quoter, which passes
-/// DEL through raw: byte-compare the two escapers before
-/// deduplicating (the DEL rule is the only difference).
-/// Carry: report rendering must deduplicate via a
-/// `quote_json`-with-DEL variant or flag, never by silently
-/// changing these receipt bytes.
-fn escape_json(text: &str) -> String {
-    let raw = text.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(raw.len() + 2);
-    out.push(0x22);
-    for &b in raw {
-        if b == 0x22 {
-            out.push(0x5C);
-            out.push(0x22);
-        } else if b == 0x5C {
-            out.push(0x5C);
-            out.push(0x5C);
-        } else if b == 0x0A {
-            out.push(0x5C);
-            out.push(0x6E);
-        } else if b == 0x09 {
-            out.push(0x5C);
-            out.push(0x74);
-        } else if b == 0x0D {
-            out.push(0x5C);
-            out.push(0x72);
-        } else if b == 0x08 {
-            out.push(0x5C);
-            out.push(0x62);
-        } else if b == 0x0C {
-            out.push(0x5C);
-            out.push(0x66);
-        } else if b < 0x20 || b == 0x7F {
-            out.push(0x5C);
-            out.push(0x75);
-            out.push(0x30);
-            out.push(0x30);
-            out.push(hex_nibble(b / 16));
-            out.push(hex_nibble(b % 16));
-        } else {
-            out.push(b);
-        }
-    }
-    out.push(0x22);
-    // Escapes are ASCII and the input was valid UTF-8.
-    String::from_utf8(out).expect("quoted valid UTF-8 stays valid")
 }
 
 /// Render a local-auto qualification receipt (schema 0.1.0).
