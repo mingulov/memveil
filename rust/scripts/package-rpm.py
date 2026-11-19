@@ -395,11 +395,16 @@ def main(argv):
     # bundle above, so Requires always matches the shipped bytes.
     with open(work_spec, "r", encoding="utf-8") as handle:
         work_text = handle.read()
-    if work_text.count("@MEMVEIL_GLIBC_FLOOR@") != 1:
-        fail("spec lacks the unique @MEMVEIL_GLIBC_FLOOR@ placeholder")
+    lines = work_text.splitlines(keepends=True)
+    hits = [i for i, line in enumerate(lines)
+            if "@MEMVEIL_GLIBC_FLOOR@" in line
+            and not line.lstrip().startswith("#")]
+    if len(hits) != 1:
+        fail("spec lacks the unique @MEMVEIL_GLIBC_FLOOR@ Requires")
+    lines[hits[0]] = lines[hits[0]].replace("@MEMVEIL_GLIBC_FLOOR@",
+                                            floor)
     with open(work_spec, "w", encoding="utf-8") as handle:
-        handle.write(work_text.replace("@MEMVEIL_GLIBC_FLOOR@",
-                                       floor))
+        handle.writelines(lines)
     # debug_package nil works around rpm builds that run
     # find-debuginfo despite the spec's __os_install_post nil;
     # it only gates the -debuginfo subpackage, never the main

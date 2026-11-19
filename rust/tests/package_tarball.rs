@@ -759,10 +759,7 @@ fn vendored_libgcc_provenance() {
     };
     assert_eq!(field("provider"), "debian-stable-libgcc-s1");
     assert_eq!(field("provider_version"), "14.2.0-19");
-    assert_eq!(
-        field("member"),
-        "usr/lib/x86_64-linux-gnu/libgcc_s.so.1"
-    );
+    assert_eq!(field("member"), "usr/lib/x86_64-linux-gnu/libgcc_s.so.1");
     assert_eq!(
         field("source_path"),
         "rust/packaging/libgcc/libgcc-s1_14.2.0-19_amd64.deb"
@@ -784,7 +781,10 @@ fn vendored_libgcc_provenance() {
     );
     assert_eq!(
         field("member_sha256"),
-        h::json_probe(&manifest, &format!("d['normalization'][{rel:?}]['source_sha256']")),
+        h::json_probe(
+            &manifest,
+            &format!("d['normalization'][{rel:?}]['source_sha256']")
+        ),
         "member pin != normalization source"
     );
 }

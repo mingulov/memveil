@@ -692,10 +692,14 @@ fn spec_requires_derived() {
     // side can drift. rpm_manual_deps_only pins the built
     // artifact against the oracle; here the placeholder itself.
     let text = spec_text();
+    let functional = text
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .filter(|l| l.contains("@MEMVEIL_GLIBC_FLOOR@"))
+        .count();
     assert_eq!(
-        text.matches("@MEMVEIL_GLIBC_FLOOR@").count(),
-        1,
-        "want exactly one floor placeholder"
+        functional, 1,
+        "want exactly one functional floor placeholder"
     );
     let requires = text
         .lines()
@@ -803,13 +807,31 @@ fn spec_build_spells_pinned_inputs() {
 
 #[test]
 fn rpmspec_parse() {
+    // The committed spec carries the floor placeholder (which
+    // rpmspec rightly rejects standalone), so parse the derived
+    // form exactly as package-rpm.py feeds it to rpmbuild: the
+    // placeholder substituted with the oracle floor from the
+    // consumed bundle.
     let spec = h::packaging_dir().join("rpm").join("memveil.spec");
     assert!(spec.is_file());
     if !h::tool_present("rpmspec") {
         eprintln!("skip: rpmspec absent on this host");
         return;
     }
-    let out = h::run("rpmspec", &["-P", spec.to_str().unwrap()], None);
+    let set = h::ensure_tarball();
+    let binary = set.bundle.join("bin").join("memveil");
+    let lib = set.bundle.join("lib").join("memveil").join("libgcc_s.so.1");
+    let (major, minor) = h::glibc_floor(&[binary, lib]);
+    let text = fs::read_to_string(&spec).unwrap();
+    assert!(
+        text.contains("@MEMVEIL_GLIBC_FLOOR@"),
+        "committed spec lost its floor placeholder"
+    );
+    let derived = text.replace("@MEMVEIL_GLIBC_FLOOR@", &format!("{major}.{minor}"));
+    let tmp = h::scratch("rpmspec-parse");
+    let probe = tmp.join("memveil.spec");
+    fs::write(&probe, derived).unwrap();
+    let out = h::run("rpmspec", &["-P", probe.to_str().unwrap()], None);
     assert!(
         out.status.success(),
         "{}",
