@@ -414,10 +414,10 @@ fn mismatched_bpf_inputs_refuse() {
 
 #[test]
 fn swapped_bpf_inputs_refuse() {
-    // The tier-2 substitution: occurrence alone accepts a renamed
-    // same-build input (every byte is embedded), so the marker
-    // gate must refuse it. Both the swapped attempt/copy pair and
-    // the attempt-object-supplied-twice pair refuse naming the
+    // Renamed same-build inputs: occurrence alone accepts them
+    // (every byte is embedded), so the marker gate must refuse.
+    // Both the swapped attempt/copy pair and the
+    // attempt-object-supplied-twice pair refuse naming the
     // mistitled channel.
     let root = h::pristine_root();
     let binary = h::ensure_release_binary();
