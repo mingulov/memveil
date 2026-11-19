@@ -4,10 +4,10 @@
 use memveil::ENGINE_VERSION;
 use memveil::capture::collector::EXIT_REFUSAL;
 use memveil::cli::bind::run_bind;
-use memveil::cli::doctor::run_doctor;
+use memveil::cli::doctor::run_doctor_os;
 use memveil::cli::qualify::run_qualify;
 use memveil::cli::record::run_record;
-use memveil::cli::report::{EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, run_report, write_stderr};
+use memveil::cli::report::{EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, run_report_os, write_stderr};
 use memveil::cli::top::run_top;
 use memveil::platform::signal::{ensure_inherited_signal_block, ignore_sigpipe};
 use memveil::platform::stdout::write_stdout;
@@ -55,6 +55,8 @@ enum Dispatch {
     Version,
     /// Run one verb with decoded UTF-8 arguments.
     Run { verb: String, rest: Vec<String> },
+    /// Run one byte-wise verb with raw argv words.
+    RunOs { verb: String, rest: Vec<OsString> },
 }
 
 /// Classify raw argv words without panicking on non-UTF-8 bytes.
@@ -63,9 +65,11 @@ enum Dispatch {
 /// undecodable words. The dispatcher compares byte-wise like the Mojo
 /// original: an undecodable verb matches nothing and falls through to
 /// usage (exit 2), while `help` and `version` ignore trailing words
-/// before any further decoding, undecodable ones included. Every
-/// subcommand takes text, so a consumed word that cannot decode is a
-/// normal usage error (exit 2), never a panic.
+/// before any further decoding, undecodable ones included. `report`
+/// and `doctor` take raw words and handle undecodable bytes the way
+/// Mojo does (open the raw path, silence an unrenderable echo);
+/// every other subcommand takes text, so a consumed word that
+/// cannot decode is a normal usage error (exit 2), never a panic.
 fn dispatch(raw: &[OsString]) -> Dispatch {
     let verb_os = match raw.first() {
         None => return Dispatch::InvalidUsage,
@@ -85,8 +89,14 @@ fn dispatch(raw: &[OsString]) -> Dispatch {
     if verb == "version" || verb == "--version" {
         return Dispatch::Version;
     }
+    if verb == "report" || verb == "doctor" {
+        return Dispatch::RunOs {
+            verb: verb.to_string(),
+            rest: raw[1..].to_vec(),
+        };
+    }
     match verb {
-        "report" | "doctor" | "record" | "top" | "qualify" | "bind-profile" => {}
+        "record" | "top" | "qualify" | "bind-profile" => {}
         _ => return Dispatch::InvalidUsage,
     }
     let mut rest = Vec::with_capacity(raw.len().saturating_sub(1));
@@ -108,21 +118,33 @@ fn main() -> ExitCode {
         return ExitCode::from(EXIT_INTERNAL as u8);
     }
     let raw: Vec<OsString> = std::env::args_os().skip(1).collect();
-    let (verb, rest) = match dispatch(&raw) {
+    match dispatch(&raw) {
         Dispatch::InvalidUsage => {
             let _ = write_stderr(&top_usage());
-            return ExitCode::from(EXIT_INVALID as u8);
+            ExitCode::from(EXIT_INVALID as u8)
         }
         Dispatch::Help => match write_stdout(&top_usage()) {
-            Ok(()) => return ExitCode::from(EXIT_OK as u8),
+            Ok(()) => ExitCode::from(EXIT_OK as u8),
             Err(_) => stdout_failed(),
         },
         Dispatch::Version => match write_stdout(&format!("{ENGINE_VERSION}\n")) {
-            Ok(()) => return ExitCode::from(EXIT_OK as u8),
+            Ok(()) => ExitCode::from(EXIT_OK as u8),
             Err(_) => stdout_failed(),
         },
-        Dispatch::Run { verb, rest } => (verb, rest),
-    };
+        Dispatch::RunOs { verb, rest } => {
+            let code = if verb == "doctor" {
+                run_doctor_os(&rest)
+            } else {
+                run_report_os(&rest)
+            };
+            ExitCode::from(code as u8)
+        }
+        Dispatch::Run { verb, rest } => run_text_verb(&verb, &rest),
+    }
+}
+
+/// Run one decoded-text verb: the signal guard, then the verb.
+fn run_text_verb(verb: &str, rest: &[String]) -> ExitCode {
     // Every collector-driving verb needs all runtime threads to
     // inherit blocked stop signals, otherwise a SIGINT lands in a
     // worker and never reaches signalfd.
@@ -133,7 +155,7 @@ fn main() -> ExitCode {
         // forwarded word already decoded above.
         let mut full = Vec::with_capacity(rest.len() + 2);
         full.push(String::new());
-        full.push(verb.clone());
+        full.push(verb.to_string());
         full.extend(rest.iter().cloned());
         let note = ensure_inherited_signal_block(&full);
         if !note.is_empty() {
@@ -141,18 +163,16 @@ fn main() -> ExitCode {
             return ExitCode::from(EXIT_REFUSAL as u8);
         }
     }
-    let code = if verb == "doctor" {
-        run_doctor(&rest)
-    } else if verb == "record" {
-        run_record(&rest)
+    // Dispatch guarantees one of the four text verbs here;
+    // report and doctor run through the raw arm above.
+    let code = if verb == "record" {
+        run_record(rest)
     } else if verb == "top" {
-        run_top(&rest)
+        run_top(rest)
     } else if verb == "qualify" {
-        run_qualify(&rest)
-    } else if verb == "bind-profile" {
-        run_bind(&rest)
+        run_qualify(rest)
     } else {
-        run_report(&rest)
+        run_bind(rest)
     };
     ExitCode::from(code as u8)
 }
@@ -220,16 +240,10 @@ mod tests {
 
     #[test]
     fn undecodable_consumed_word_is_invalid_usage() {
-        // Every subcommand takes text: a consumed non-UTF-8 word is
+        // Text subcommands take UTF-8: a consumed non-UTF-8 word is
         // a normal usage error (exit 2), never an args() panic.
-        for verb in [
-            b"report".as_slice(),
-            b"doctor",
-            b"record",
-            b"top",
-            b"qualify",
-            b"bind-profile",
-        ] {
+        // Report and doctor take raw words (see below).
+        for verb in [b"record".as_slice(), b"top", b"qualify", b"bind-profile"] {
             assert!(is_invalid(&os(&[verb, b"\xff"])), "{verb:?}");
             assert!(
                 is_invalid(&os(&[verb, b"--output", b"\xfe\xfd"])),
@@ -239,15 +253,30 @@ mod tests {
     }
 
     #[test]
+    fn report_and_doctor_forward_raw_words() {
+        // Byte-wise verbs handle undecodable bytes the Mojo way,
+        // so dispatch forwards raw words, undecodable ones included.
+        for verb in [b"report".as_slice(), b"doctor"] {
+            match dispatch(&os(&[verb, b"\xff", b"--flag"])) {
+                Dispatch::RunOs { verb: v, rest } => {
+                    assert_eq!(v, String::from_utf8_lossy(verb));
+                    assert_eq!(rest, os(&[b"\xff", b"--flag"]));
+                }
+                _ => panic!("{verb:?} must dispatch to RunOs"),
+            }
+        }
+        match dispatch(&os(&[b"doctor"])) {
+            Dispatch::RunOs { verb: v, rest } => {
+                assert_eq!(v, "doctor");
+                assert!(rest.is_empty());
+            }
+            _ => panic!("bare doctor must dispatch to RunOs"),
+        }
+    }
+
+    #[test]
     fn known_verbs_decode_and_forward_rest() {
-        for verb in [
-            b"report".as_slice(),
-            b"doctor",
-            b"record",
-            b"top",
-            b"qualify",
-            b"bind-profile",
-        ] {
+        for verb in [b"record".as_slice(), b"top", b"qualify", b"bind-profile"] {
             match dispatch(&os(&[verb, b"cap", b"--flag"])) {
                 Dispatch::Run { verb: v, rest } => {
                     assert_eq!(v, String::from_utf8_lossy(verb));
@@ -255,13 +284,6 @@ mod tests {
                 }
                 _ => panic!("{verb:?} must dispatch to Run"),
             }
-        }
-        match dispatch(&os(&[b"report"])) {
-            Dispatch::Run { verb: v, rest } => {
-                assert_eq!(v, "report");
-                assert!(rest.is_empty());
-            }
-            _ => panic!("bare report must dispatch to Run"),
         }
     }
 }

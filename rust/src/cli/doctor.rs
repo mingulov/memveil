@@ -37,6 +37,8 @@ use crate::platform::reader::{
 };
 use crate::platform::stdout::write_stdout;
 use crate::render::json::escape_json;
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStrExt;
 
 /// Unavailable collection: the requested set is not ready.
 pub const EXIT_UNAVAILABLE: i64 = EXIT_REFUSAL;
@@ -1297,6 +1299,169 @@ pub fn run_doctor(args: &[String]) -> i64 {
     })
 }
 
+/// Stand-in for a non-UTF-8 path option.
+///
+/// Mojo opens the raw bytes and fails when they are unopenable;
+/// a NUL-containing path can never open, so routing one through
+/// the normal String flow renders the exact unreadable
+/// diagnostics without lossy-decoding a misleading path. A
+/// non-UTF-8 path that does exist is refused the same closed
+/// way: the String-based readers cannot consume it.
+const UNREADABLE_PATH: &str = "\0";
+
+/// Raw doctor parse failure: a printable usage error, or silence.
+///
+/// `Silent` mirrors Mojo's escape-time raise on the echoed
+/// token: exit 1 with no output.
+#[derive(Debug)]
+enum OsDoctorFail {
+    /// Emit through `doctor_failed` (exit 2).
+    Message(String),
+    /// Exit 1 with no output.
+    Silent,
+}
+
+/// Byte-wise doctor parse over raw argv words.
+///
+/// Flags compare as bytes; path values that cannot decode route
+/// as [`UNREADABLE_PATH`], and a capabilities value that cannot
+/// decode routes as `,`, whose empty segments refuse with `bad
+/// capability list` — mirroring Mojo's split, which maps
+/// undecodable segments to empty. An undecodable word in flag
+/// position silences the run: the unknown-option refusal would
+/// echo it.
+fn parse_doctor_args_os(args: &[OsString]) -> Result<DoctorOptions, OsDoctorFail> {
+    let mut as_json = false;
+    let mut profiles_dir = String::new();
+    let mut has_profiles_dir = false;
+    let mut capabilities = "all".to_string();
+    let mut object = String::new();
+    let mut lc_object = String::new();
+    let mut cp_object = String::new();
+    let mut bridge = String::new();
+    let mut has_bridge = false;
+    let mut load_check = false;
+    let mut i = 0;
+    while i < args.len() {
+        let tok = args[i].as_bytes();
+        if tok == b"--json" {
+            as_json = true;
+            i += 1;
+        } else if tok == b"--load-check" {
+            load_check = true;
+            i += 1;
+        } else if tok == b"--profiles-dir" {
+            if i + 1 >= args.len() || args[i + 1].is_empty() {
+                return Err(OsDoctorFail::Message(
+                    "--profiles-dir needs a value".to_string(),
+                ));
+            }
+            profiles_dir = args[i + 1].to_str().unwrap_or(UNREADABLE_PATH).to_string();
+            has_profiles_dir = true;
+            i += 2;
+        } else if tok == b"--capability" {
+            if i + 1 >= args.len() || args[i + 1].is_empty() {
+                return Err(OsDoctorFail::Message(
+                    "--capability needs a value".to_string(),
+                ));
+            }
+            capabilities = args[i + 1].to_str().unwrap_or(",").to_string();
+            i += 2;
+        } else if tok == b"--object" {
+            if i + 1 >= args.len() || args[i + 1].is_empty() {
+                return Err(OsDoctorFail::Message("--object needs a value".to_string()));
+            }
+            object = args[i + 1].to_str().unwrap_or(UNREADABLE_PATH).to_string();
+            i += 2;
+        } else if tok == b"--lc-object" {
+            if i + 1 >= args.len() || args[i + 1].is_empty() {
+                return Err(OsDoctorFail::Message(
+                    "--lc-object needs a value".to_string(),
+                ));
+            }
+            lc_object = args[i + 1].to_str().unwrap_or(UNREADABLE_PATH).to_string();
+            i += 2;
+        } else if tok == b"--cp-object" {
+            if i + 1 >= args.len() || args[i + 1].is_empty() {
+                return Err(OsDoctorFail::Message(
+                    "--cp-object needs a value".to_string(),
+                ));
+            }
+            cp_object = args[i + 1].to_str().unwrap_or(UNREADABLE_PATH).to_string();
+            i += 2;
+        } else if tok == b"--bridge" {
+            if i + 1 >= args.len() || args[i + 1].is_empty() {
+                return Err(OsDoctorFail::Message("--bridge needs a value".to_string()));
+            }
+            bridge = args[i + 1].to_str().unwrap_or(UNREADABLE_PATH).to_string();
+            has_bridge = true;
+            i += 2;
+        } else {
+            match args[i].to_str() {
+                Some(text) => {
+                    return Err(OsDoctorFail::Message(format!("unknown option: {text}")));
+                }
+                None => return Err(OsDoctorFail::Silent),
+            }
+        }
+    }
+    if !has_profiles_dir {
+        match resolve_profiles_dir() {
+            Ok(dir) => profiles_dir = dir,
+            Err(e) => {
+                return Err(OsDoctorFail::Message(format!(
+                    "cannot resolve profiles location: {}",
+                    e.message
+                )));
+            }
+        }
+    }
+    Ok(DoctorOptions {
+        root: String::new(),
+        profiles_dir,
+        as_json,
+        capabilities,
+        object,
+        lc_object,
+        cp_object,
+        bridge,
+        has_bridge,
+        load_check,
+    })
+}
+
+/// Run the doctor verb over raw argv words; return the exit code.
+///
+/// Byte-identical to [`run_doctor`] on UTF-8 input (which it
+/// delegates to); non-UTF-8 words follow Mojo's byte-wise
+/// argv handling instead of failing as usage.
+pub fn run_doctor_os(args: &[OsString]) -> i64 {
+    if args
+        .iter()
+        .any(|a| a.as_bytes() == b"--help" || a.as_bytes() == b"-h")
+    {
+        match write_stdout(&doctor_usage()) {
+            Ok(()) => return EXIT_OK,
+            Err(_) => {
+                let _ = write_stderr("memveil doctor: cannot write stdout\n");
+                return EXIT_INTERNAL;
+            }
+        }
+    }
+    let words: Option<Vec<String>> = args
+        .iter()
+        .map(|a| a.to_str().map(str::to_string))
+        .collect();
+    if let Some(words) = words {
+        return run_doctor(&words);
+    }
+    match parse_doctor_args_os(args) {
+        Ok(opts) => run_doctor_opts(&opts),
+        Err(OsDoctorFail::Message(detail)) => doctor_failed(&detail),
+        Err(OsDoctorFail::Silent) => EXIT_INTERNAL,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2257,5 +2422,142 @@ mod tests {
         let drep = assess_doctor(&live38_opts());
         let js = render_doctor_json2(&drep);
         assert!(js.contains("\"schema_version\": \"0.1.1\""));
+    }
+
+    fn os(words: &[&[u8]]) -> Vec<std::ffi::OsString> {
+        use std::os::unix::ffi::OsStringExt;
+        words
+            .iter()
+            .map(|w| std::ffi::OsString::from_vec(w.to_vec()))
+            .collect()
+    }
+
+    #[test]
+    fn doctor_os_unknown_option_silences_non_utf8() {
+        // Mojo raises echoing the token and exits 1 with no output;
+        // the ASCII twin keeps its exact message.
+        assert!(matches!(
+            super::parse_doctor_args_os(&os(&[b"\xff".as_slice()])),
+            Err(super::OsDoctorFail::Silent)
+        ));
+        assert!(matches!(
+            super::parse_doctor_args_os(&os(&[b"--\xff".as_slice()])),
+            Err(super::OsDoctorFail::Silent)
+        ));
+        match super::parse_doctor_args_os(&os(&[b"--bogus".as_slice()])) {
+            Err(super::OsDoctorFail::Message(detail)) => {
+                assert_eq!(detail, "unknown option: --bogus");
+            }
+            other => panic!("--bogus must fail loudly, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn doctor_os_routes_non_utf8_values() {
+        // Paths route as the never-openable stand-in, capabilities
+        // as the empty-segment list; UTF-8 values pass verbatim.
+        let opts = super::parse_doctor_args_os(&os(&[
+            b"--object".as_slice(),
+            b"\xff".as_slice(),
+            b"--profiles-dir".as_slice(),
+            profiles_dir().as_bytes(),
+        ]))
+        .expect("object routes");
+        assert_eq!(opts.object, "\0");
+        let opts = super::parse_doctor_args_os(&os(&[
+            b"--lc-object".as_slice(),
+            b"a\xffb".as_slice(),
+            b"--profiles-dir".as_slice(),
+            profiles_dir().as_bytes(),
+        ]))
+        .expect("lc routes");
+        assert_eq!(opts.lc_object, "\0");
+        let opts = super::parse_doctor_args_os(&os(&[
+            b"--cp-object".as_slice(),
+            b"\xff".as_slice(),
+            b"--profiles-dir".as_slice(),
+            profiles_dir().as_bytes(),
+        ]))
+        .expect("cp routes");
+        assert_eq!(opts.cp_object, "\0");
+        let opts = super::parse_doctor_args_os(&os(&[
+            b"--bridge".as_slice(),
+            b"\xff".as_slice(),
+            b"--profiles-dir".as_slice(),
+            profiles_dir().as_bytes(),
+        ]))
+        .expect("bridge routes");
+        assert_eq!(opts.bridge, "\0");
+        assert!(opts.has_bridge);
+        let opts =
+            super::parse_doctor_args_os(&os(&[b"--profiles-dir".as_slice(), b"\xff".as_slice()]))
+                .expect("profiles dir routes");
+        assert_eq!(opts.profiles_dir, "\0");
+        let opts = super::parse_doctor_args_os(&os(&[
+            b"--capability".as_slice(),
+            b"\xff".as_slice(),
+            b"--profiles-dir".as_slice(),
+            profiles_dir().as_bytes(),
+        ]))
+        .expect("capability routes");
+        assert_eq!(opts.capabilities, ",");
+        let opts = super::parse_doctor_args_os(&os(&[
+            b"--capability".as_slice(),
+            b"attempt-trace".as_slice(),
+            b"--object".as_slice(),
+            b"obj.o".as_slice(),
+            b"--profiles-dir".as_slice(),
+            profiles_dir().as_bytes(),
+        ]))
+        .expect("utf-8 values pass");
+        assert_eq!(opts.capabilities, "attempt-trace");
+        assert_eq!(opts.object, "obj.o");
+        // Needs-a-value rules are unchanged.
+        for flag in [b"--object".as_slice(), b"--capability".as_slice()] {
+            let flag_text = String::from_utf8_lossy(flag).into_owned();
+            match super::parse_doctor_args_os(&os(&[flag])) {
+                Err(super::OsDoctorFail::Message(detail)) => {
+                    assert_eq!(detail, format!("{flag_text} needs a value"));
+                }
+                other => panic!("{flag_text} must need a value, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn doctor_os_unreadable_routing_matches_missing() {
+        // The stand-ins render exactly like a missing path: the
+        // routing leaks no NUL or comma into any diagnostic.
+        let missing = "/nonexistent-memveil-doctor-os-xyz";
+        let oto = |object: &str| {
+            doctor2_opts(
+                fx("ordinary-7.0"),
+                profiles_dir(),
+                "attempt-trace",
+                object,
+                "",
+                "",
+            )
+        };
+        let routed = assess_doctor(&oto("\0"));
+        let absent = assess_doctor(&oto(missing));
+        assert_eq!(routed, absent);
+        assert!(
+            routed.summary.contains("unreadable"),
+            "object flow must be reached, got: {}",
+            routed.summary
+        );
+        // Profiles, bridge, and capability stand-ins refuse identically.
+        let a = load_profiles("\0").expect_err("nul profiles must refuse");
+        let b = load_profiles(missing).expect_err("missing profiles must refuse");
+        assert_eq!(a.to_string(), b.to_string());
+        assert_eq!(crate::capture::run::loadcheck_bridge_sha("\0", true), "");
+        assert_eq!(
+            crate::capture::run::loadcheck_bridge_sha("\0", true),
+            crate::capture::run::loadcheck_bridge_sha(missing, true)
+        );
+        let caps = crate::capture::run::parse_requested_caps(",");
+        assert!(!caps.ok);
+        assert_eq!(caps.err, "bad capability list");
     }
 }
