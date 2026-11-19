@@ -573,8 +573,12 @@ def safe_extract(archive, destination, single_root, symlinks):
     Refuses absolute or escaping names, duplicates, links and
     special files, and special permission bits. Source archives
     may carry symlinks (recorded, never followed); bundles may
-    not. With single_root, require one top directory and return
-    it; otherwise return the destination itself.
+    not. A symlink that is a path prefix of another member is
+    refused before anything is extracted, and symlinks are
+    created only after all other members, so no write can pass
+    through an extracted link. With single_root, require one
+    top directory and return it; otherwise return the
+    destination itself.
     """
     destination = Path(destination)
     destination.mkdir(mode=0o700)
@@ -590,6 +594,7 @@ def safe_extract(archive, destination, single_root, symlinks):
             raise ValueError(
                 "cannot list archive: %s" % error) from error
         names = set()
+        links = set()
         require(members and len(members) <= 100000,
                 "invalid archive member count")
         total = 0
@@ -604,6 +609,8 @@ def safe_extract(archive, destination, single_root, symlinks):
             require(not entry.mode & 0o7000,
                     "archive special permission bits forbidden")
             names.add(name)
+            if entry.issym():
+                links.add(name)
             total += entry.size
             require(total <= 8 * 1024 ** 3,
                     "archive exceeds extraction limit")
@@ -612,7 +619,17 @@ def safe_extract(archive, destination, single_root, symlinks):
             require(len(tops) == 1
                     and any("/" in name for name in names),
                     "archive requires one root")
-        for entry in members:
+        parents = set()
+        for name in names:
+            parts = name.split("/")
+            for cut in range(1, len(parts)):
+                parents.add("/".join(parts[:cut]))
+        clash = sorted(links & parents)
+        require(not clash,
+                "archive member escapes through a symlink: "
+                + (clash[0] if clash else ""))
+        ordered = sorted(members, key=lambda entry: entry.issym())
+        for entry in ordered:
             path = destination / entry.name
             if entry.isdir():
                 path.mkdir(parents=True, exist_ok=True)

@@ -9,6 +9,7 @@ directory, and only the verification logic under test is real.
 import gzip
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -652,3 +653,44 @@ def test_noncanonical_sealed_bytes_rejected(workshop, tmp_path):
     path.write_text(json.dumps(manifest, indent=2))
     with pytest.raises(ValueError, match="[Cc]anonical"):
         m.load_manifest(path)
+
+
+@pytest.mark.parametrize("link_first", [True, False])
+def test_safe_extract_rejects_symlink_prefix_attack(tmp_path,
+                                                    link_first):
+    m = api()
+    archive = Path(tmp_path) / "evil.tar.gz"
+    outside = Path(tmp_path) / "outside"
+    outside.mkdir()
+    sentinel = outside / "pwned"
+    link = tarfile.TarInfo("evil")
+    link.type = tarfile.SYMTYPE
+    link.linkname = str(outside)
+    data = b"pwned\n"
+    member = tarfile.TarInfo("evil/pwned")
+    member.size = len(data)
+    ordered = [(link, None), (member, io.BytesIO(data))]
+    if not link_first:
+        ordered.reverse()
+    with tarfile.open(archive, "w:gz") as stream:
+        for info, payload in ordered:
+            stream.addfile(info, payload)
+    with pytest.raises(ValueError, match="[Ss]ymlink"):
+        m.safe_extract(archive, Path(tmp_path) / "dest", False, True)
+    assert not sentinel.exists(), "extraction escaped the scratch dir"
+
+
+def test_payload_closure_defaults_to_cargo_run(workshop, tmp_path):
+    m, fix = seal_paths(workshop, tmp_path)
+    artifacts = fix["artifacts"]
+    debs = sorted(artifacts.glob("*.deb"))
+    rpms = sorted(artifacts.glob("*.rpm"))
+    assert len(debs) == 1 and len(rpms) == 1
+    bundle = artifacts / "memveil-fixture.tar.gz"
+    assert bundle.is_file()
+    fallback = m.collect_payload_closure(
+        ROOT, None, bundle, debs[0], rpms[0])
+    explicit = m.collect_payload_closure(
+        ROOT, workshop.harness_bin(), bundle, debs[0], rpms[0])
+    assert fallback == explicit
+    assert fallback, "empty payload closure"
