@@ -71,7 +71,8 @@ fn main() {
 
     // Preflight: fail early with an actionable message when the linker is
     // missing or the wrong version. Local probe only, so it cannot break
-    // offline rebuilds.
+    // offline rebuilds. Limitation: no rerun trigger watches the external
+    // binary, so a bare bpf-linker swap alone does not rerun the build.
     let version = Command::new("bpf-linker")
         .arg("--version")
         .output()
