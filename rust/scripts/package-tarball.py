@@ -51,8 +51,10 @@ Usage: rust/scripts/package-tarball.py [--out DIR] [--tag NAME]
 Requires a release binary (use --build or build it first),
 patchelf, strip, and readelf. Fails closed when the link
 closure names anything outside the shipped lib/ set and the
-system allowlist. Every cargo invocation strips
-RUSTUP_TOOLCHAIN so the repository pin wins.
+system allowlist, and when a BPF inspection input is absent
+from the binary or carries another channel's marker. Every
+cargo invocation strips RUSTUP_TOOLCHAIN so the repository pin
+wins.
 """
 
 import gzip
@@ -63,6 +65,7 @@ import os
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tarfile
@@ -124,6 +127,16 @@ CHANNELS = (
     ("lifecycle", "swiotlb_lifecycle.bpf.o"),
     ("copy", "swiotlb_copy.bpf.o"),
 )
+
+# Channel identity marker: each Aya channel object carries a
+# `memveil_channel` section holding `memveil-channel:<name>\0`
+# (the MEMVEIL_CHANNEL statics in rust/crates/ebpf/src/bin/).
+# The packager requires marker == expected channel per
+# --bpf-dir path after the occurrence check, so a renamed
+# (swapped) input refuses instead of staging under the wrong
+# channel; the expectation is identity (no frozen tables).
+BPF_MARKER_SECTION = "memveil_channel"
+BPF_MARKER_PREFIX = b"memveil-channel:"
 
 # Host license texts for the shipped libgcc, as (staged rel,
 # candidate host paths): the first readable candidate wins.
@@ -188,6 +201,81 @@ def contained(path, directory):
     base = os.path.realpath(directory)
     full = os.path.realpath(path)
     return full == base or full.startswith(base + os.sep)
+
+
+def read_elf_section(path, section):
+    """Raw bytes of `section` in the ELF file at path, or None.
+
+    Minimal 64-bit little-endian section reader: validates the
+    ELF magic, class, and data encoding, then walks the section
+    headers through the section-name table. Truncation or
+    inconsistency fails closed; a well-formed file without the
+    section (or without section names) returns None.
+    """
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read()
+    except OSError as exc:
+        fail("cannot read %s: %s" % (path, exc))
+    if len(data) < 64 or data[:4] != b"\x7fELF":
+        fail("not an ELF file: %s" % path)
+    if data[4] != 2 or data[5] != 1:
+        fail("want 64-bit little-endian ELF: %s" % path)
+    (e_shoff,) = struct.unpack_from("<Q", data, 0x28)
+    (e_shentsize, e_shnum, e_shstrndx) = struct.unpack_from(
+        "<HHH", data, 0x3A)
+    if e_shentsize < 64 or e_shnum == 0:
+        fail("no section headers in %s" % path)
+    if e_shoff + e_shentsize * e_shnum > len(data):
+        fail("section headers overrun %s" % path)
+    if e_shstrndx == 0:
+        return None
+    if e_shstrndx >= e_shnum:
+        fail("no section-name table in %s" % path)
+    base = e_shoff + e_shstrndx * e_shentsize
+    (str_off, str_size) = struct.unpack_from("<QQ", data, base + 24)
+    if str_off + str_size > len(data):
+        fail("section names overrun %s" % path)
+    names = data[str_off:str_off + str_size]
+    for index in range(e_shnum):
+        base = e_shoff + index * e_shentsize
+        (sh_name,) = struct.unpack_from("<I", data, base)
+        if sh_name >= len(names):
+            fail("section name overruns %s" % path)
+        name = names[sh_name:].split(b"\0", 1)[0] \
+            .decode("ascii", "replace")
+        if name != section:
+            continue
+        (sh_offset, sh_size) = struct.unpack_from(
+            "<QQ", data, base + 24)
+        if sh_offset + sh_size > len(data):
+            fail("section %s overruns %s" % (section, path))
+        return data[sh_offset:sh_offset + sh_size]
+    return None
+
+
+def check_bpf_markers(bpf_inputs):
+    """Refuse --bpf-dir inputs whose channel marker mismatches.
+
+    `bpf_inputs` maps shipped names to (source path, digest) as
+    built in main(); the expected marker comes from the CHANNELS
+    table (marker == channel name per path). A missing section or
+    mistitled bytes refuses naming the file, so a renamed input
+    can never stage under the wrong channel.
+    """
+    expect = dict((shipped, channel)
+                  for channel, shipped in CHANNELS)
+    for shipped, (source, _digest) in sorted(bpf_inputs.items()):
+        channel = expect[shipped]
+        want = BPF_MARKER_PREFIX + channel.encode("ascii") + b"\0"
+        found = read_elf_section(source, BPF_MARKER_SECTION)
+        if found is None:
+            fail("BPF input %s lacks the %s section: --bpf-dir "
+                 "is stale or mixed" % (source, BPF_MARKER_SECTION))
+        if found != want:
+            fail("BPF input %s carries channel %r, want %r: "
+                 "--bpf-dir inputs are swapped or mixed"
+                 % (source, found, want))
 
 
 def manifest_source(root, source):
@@ -1119,6 +1207,15 @@ def main(argv):
                      "come from different builds"
                      % (binary_input, shipped, source, digest))
         print("package-tarball: binary embeds all three BPF inputs")
+
+        # Occurrence proves the bytes are embedded, not that each
+        # path holds its own channel: a same-build rename (swapped
+        # attempt/copy, one object supplied twice) passes the
+        # substring check and would stage under the wrong name.
+        # The marker travels with the bytes, so requiring
+        # marker == expected channel per path closes the swap.
+        check_bpf_markers(bpf_inputs)
+        print("package-tarball: BPF inputs carry their channel markers")
 
         # Pinned closure provider: verify and extract the vendored
         # libgcc before the closure walk consumes it, and prove it

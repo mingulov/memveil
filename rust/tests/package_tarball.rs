@@ -413,6 +413,146 @@ fn mismatched_bpf_inputs_refuse() {
 }
 
 #[test]
+fn swapped_bpf_inputs_refuse() {
+    // The tier-2 substitution: occurrence alone accepts a renamed
+    // same-build input (every byte is embedded), so the marker
+    // gate must refuse it. Both the swapped attempt/copy pair and
+    // the attempt-object-supplied-twice pair refuse naming the
+    // mistitled channel.
+    let root = h::pristine_root();
+    let binary = h::ensure_release_binary();
+    let out = h::bpf_out_dir();
+    let script = h::scripts_dir().join("package-tarball.py");
+    for (leaf, sources) in [
+        ("swap", ["copy", "lifecycle", "attempt"]),
+        ("both", ["attempt", "lifecycle", "attempt"]),
+    ] {
+        let tmp = h::scratch(&format!("bpf-{leaf}"));
+        let renamed = tmp.join("bpf");
+        fs::create_dir_all(&renamed).unwrap();
+        for (channel, source) in ["attempt", "lifecycle", "copy"].iter().zip(sources.iter()) {
+            let bytes = fs::read(out.join(format!("memveil-ebpf-{source}"))).unwrap();
+            fs::write(renamed.join(format!("memveil-ebpf-{channel}")), &bytes).unwrap();
+        }
+        let dest = tmp.join("out");
+        let proc = h::run(
+            "python3",
+            &[
+                script.to_str().unwrap(),
+                "--root",
+                root.to_str().unwrap(),
+                "--binary",
+                binary.to_str().unwrap(),
+                "--bpf-dir",
+                renamed.to_str().unwrap(),
+                "--out",
+                dest.to_str().unwrap(),
+            ],
+            None,
+        );
+        assert!(!proc.status.success(), "{leaf} pair packaged");
+        let stderr = String::from_utf8_lossy(&proc.stderr);
+        assert!(
+            stderr.contains("carries channel") && stderr.contains("swapped or mixed"),
+            "{leaf}: {stderr}"
+        );
+        assert!(
+            !dest
+                .join(format!("memveil-{}", h::engine_version()))
+                .exists(),
+            "{leaf} refusal left a bundle"
+        );
+    }
+}
+
+#[test]
+fn bpf_marker_helpers() {
+    // Pure-helper probes against the script module: the real
+    // objects read back their exact markers, a name-erased input
+    // reads None, and the gate refuses missing and mistitled
+    // markers plus non-ELF input.
+    let script = h::scripts_dir().join("package-tarball.py");
+    let out = h::bpf_out_dir();
+    let attempt = out.join("memveil-ebpf-attempt");
+    let lifecycle = out.join("memveil-ebpf-lifecycle");
+    let copy = out.join("memveil-ebpf-copy");
+    let probe = format!(
+        "import importlib.util; \
+         l = importlib.util.spec_from_file_location('m', {script:?}); \
+         m = importlib.util.module_from_spec(l); l.loader.exec_module(m); \
+         assert m.read_elf_section({attempt:?}, 'memveil_channel') == b'memveil-channel:attempt\\0'; \
+         assert m.read_elf_section({lifecycle:?}, 'memveil_channel') == b'memveil-channel:lifecycle\\0'; \
+         assert m.read_elf_section({copy:?}, 'memveil_channel') == b'memveil-channel:copy\\0'; \
+         print('markers-ok')"
+    );
+    let text = h::run_ok("python3", &["-B", "-c", &probe], None);
+    assert!(text.contains("markers-ok"), "{text}");
+    let tmp = h::scratch("bpf-marker-surgery");
+    let probe = format!(
+        "import importlib.util, struct; \
+         l = importlib.util.spec_from_file_location('m', {script:?}); \
+         m = importlib.util.module_from_spec(l); l.loader.exec_module(m); \
+         raw = bytearray(open({copy:?}, 'rb').read()); \
+         e_shoff, = struct.unpack_from('<Q', raw, 0x28); \
+         e_shentsize, e_shnum, e_shstrndx = struct.unpack_from('<HHH', raw, 0x3a); \
+         base = e_shoff + e_shstrndx * e_shentsize; \
+         str_off, str_size = struct.unpack_from('<QQ', raw, base + 24); \
+         names = bytes(raw[str_off:str_off + str_size]); \
+         assert names.count(b'memveil_channel') == 1, 'shstrtab name is not unique'; \
+         at = str_off + names.index(b'memveil_channel'); \
+         raw[at:at + 15] = b'\\0' * 15; \
+         open({tmp:?} + '/noname.o', 'wb').write(raw); \
+         assert m.read_elf_section({tmp:?} + '/noname.o', 'memveil_channel') is None; \
+         print('noname-ok')"
+    );
+    let text = h::run_ok("python3", &["-B", "-c", &probe], None);
+    assert!(text.contains("noname-ok"), "{text}");
+    let probe = format!(
+        "import importlib.util; \
+         l = importlib.util.spec_from_file_location('m', {script:?}); \
+         m = importlib.util.module_from_spec(l); l.loader.exec_module(m); \
+         m.check_bpf_markers({{'swiotlb_copy.bpf.o': ({tmp:?} + '/noname.o', 'x')}})"
+    );
+    let proc = h::run("python3", &["-B", "-c", &probe], None);
+    assert!(!proc.status.success(), "missing marker passed");
+    assert!(
+        String::from_utf8_lossy(&proc.stderr).contains("lacks the memveil_channel section"),
+        "{}",
+        String::from_utf8_lossy(&proc.stderr)
+    );
+    let probe = format!(
+        "import importlib.util; \
+         l = importlib.util.spec_from_file_location('m', {script:?}); \
+         m = importlib.util.module_from_spec(l); l.loader.exec_module(m); \
+         raw = bytearray(open({copy:?}, 'rb').read()); \
+         raw = raw.replace(b'memveil-channel:copy', b'memveil-channel:copy'.replace(b'copy', b'VOID')); \
+         open({tmp:?} + '/mistitled.o', 'wb').write(raw); \
+         m.check_bpf_markers({{'swiotlb_copy.bpf.o': ({tmp:?} + '/mistitled.o', 'x')}})"
+    );
+    let proc = h::run("python3", &["-B", "-c", &probe], None);
+    assert!(!proc.status.success(), "mistitled marker passed");
+    assert!(
+        String::from_utf8_lossy(&proc.stderr).contains("carries channel"),
+        "{}",
+        String::from_utf8_lossy(&proc.stderr)
+    );
+    let probe = format!(
+        "import importlib.util; \
+         l = importlib.util.spec_from_file_location('m', {script:?}); \
+         m = importlib.util.module_from_spec(l); l.loader.exec_module(m); \
+         open({tmp:?} + '/garbage.o', 'wb').write(b'not an elf'); \
+         m.read_elf_section({tmp:?} + '/garbage.o', 'memveil_channel')"
+    );
+    let proc = h::run("python3", &["-B", "-c", &probe], None);
+    assert!(!proc.status.success(), "non-ELF input parsed");
+    assert!(
+        String::from_utf8_lossy(&proc.stderr).contains("not an ELF file"),
+        "{}",
+        String::from_utf8_lossy(&proc.stderr)
+    );
+}
+
+#[test]
 fn shipped_lib_stripped() {
     let set = h::ensure_tarball();
     let binary = set.bundle.join("bin").join("memveil");
