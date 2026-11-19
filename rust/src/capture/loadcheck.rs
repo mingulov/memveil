@@ -13,8 +13,10 @@
 //! open in input order so the kernel charges the same peak as
 //! record), then replays failures for the verifier tail. The
 //! replay also supplies the errno the session verdict
-//! swallows; when the replay itself loads, the detail says so
-//! and the errno stays empty.
+//! swallows; its explicit status — not the errno's
+//! emptiness — decides whether the detail says the replay
+//! loaded, since a structural replay failure also leaves
+//! the errno empty.
 
 use crate::bpf::Session;
 use crate::bpf::session::{
@@ -226,6 +228,16 @@ fn clean_verifier_line(raw: &[u8]) -> String {
     )
 }
 
+/// Clean one structural cause line: escape, redact
+/// addresses, then cap at one tail line. A relocation or
+/// parse failure's loader Display carries no verifier log,
+/// but the text still derives from object bytes, so it gets
+/// the same treatment as a tail line — never the full
+/// Display.
+pub(crate) fn clean_cause_line(text: &str) -> String {
+    clip_line(&redact_pointers(&escape_line(text)), TAIL_LINE_CAP)
+}
+
 /// Last 4 non-empty verifier lines, redacted, capped.
 ///
 /// A truncated log gains the fixed first line naming the
@@ -260,13 +272,34 @@ pub fn verifier_tail(log: &[u8], truncated: bool) -> Vec<String> {
     out
 }
 
+/// Explicit diagnostic-replay outcome.
+///
+/// Aya structural failures (relocation, object parse)
+/// carry neither errno nor verifier text, so an empty
+/// replay errno cannot mean the replay loaded: only this
+/// status says so. (The Mojo bridge attaches a numeric
+/// code to every failure, which is why its empty-errno
+/// inference holds there and cannot hold here.)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ReplayStatus {
+    /// The replay object and its programs loaded.
+    Loaded,
+    /// The replay failed or refused before loading. The
+    /// fail-closed default: an unknown replay never reads
+    /// as loaded.
+    #[default]
+    Failed,
+}
+
 /// One load replay: errno name plus verifier tail lines.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LoadDiag {
-    /// Errno name; empty when the replay loaded.
+    /// Errno name; empty when the replay failure carries none.
     pub errno: String,
     /// Verifier tail lines on failure.
     pub lines: Vec<String>,
+    /// Explicit outcome: empty errno no longer means loaded.
+    pub status: ReplayStatus,
 }
 
 /// One object load attempt: state, errno name, detail.
@@ -356,13 +389,16 @@ pub(crate) fn verifier_log_from_display(message: &str) -> Option<&str> {
 /// errno and tails the failing program's log. Every path
 /// releases the object; nothing attaches. Unknown program
 /// names skip. The loader grows its log buffer internally, so
-/// the tail never carries a truncation marker. The replay
-/// shares the session's CO-RE precondition: one sysfs BTF
-/// read, a fail-closed refusal for relocation-carrying
-/// objects when it fails, and that same parsed BTF handed to
-/// the loader. It also shares the session's declared-map gate
-/// for its channel, so a renegade object the verdict sent here
-/// on a BTF outage cannot allocate on replay.
+/// the tail never carries a truncation marker. The outcome is
+/// explicit: a structural replay failure (relocation, parse,
+/// gate refusal) leaves the errno empty with status failed,
+/// never loaded. The replay shares the session's CO-RE
+/// precondition: one sysfs BTF read, a fail-closed refusal
+/// for relocation-carrying objects when it fails, and that
+/// same parsed BTF handed to the loader. It also shares the
+/// session's declared-map gate for its channel, so a renegade
+/// object the verdict sent here on a BTF outage cannot
+/// allocate on replay.
 pub fn diagnose_load(elf: &[u8], programs: &[String]) -> LoadDiag {
     let mut out = LoadDiag::default();
     let pre = core_precondition(elf);
@@ -379,8 +415,9 @@ pub fn diagnose_load(elf: &[u8], programs: &[String]) -> LoadDiag {
     // the declared gate, so a BTF outage at verdict time sends
     // renegade objects here; the replay enforces the same channel
     // rule before allocating (a channel-blind replay keeps the
-    // ring abuse cap). Empty errno, like other structural replay
-    // refusals (garbage input behaves the same way).
+    // ring abuse cap). Status stays failed with an empty errno,
+    // like other structural replay refusals (garbage input
+    // behaves the same way).
     if let Some(declared) = declared_map_specs(elf)
         && check_replay_maps(channel_for_programs(programs), &declared).is_err()
     {
@@ -405,7 +442,9 @@ pub fn diagnose_load(elf: &[u8], programs: &[String]) -> LoadDiag {
         }
     };
     // A maps-only replay can never see a verifier rejection: load
-    // the named programs too, still without attaching.
+    // the named programs too, still without attaching. The
+    // status starts failed, so only a replay that loads
+    // everything reports loaded.
     if let Err(failure) =
         diagnose_program_loads(&mut bpf, programs, pre.btf.as_ref(), pre.read_errno)
     {
@@ -420,6 +459,8 @@ pub fn diagnose_load(elf: &[u8], programs: &[String]) -> LoadDiag {
                 out.lines = tail;
             }
         }
+    } else {
+        out.status = ReplayStatus::Loaded;
     }
     out
 }
@@ -431,8 +472,9 @@ pub fn diagnose_load(elf: &[u8], programs: &[String]) -> LoadDiag {
 /// in input (record) order so the kernel charges the same peak
 /// as record, then releases all. A failed verdict replays once
 /// for the tail in `lines`; the replay errno substitutes for
-/// the verdict errno the session swallows, and a replay that
-/// loads appends the fixed suffix to the verdict detail.
+/// the verdict errno the session swallows, and a replay whose
+/// status is loaded appends the fixed suffix to the verdict
+/// detail.
 /// Static geometry refusals skip the replay: no kernel failure
 /// to diagnose. Map sizes are the objects' declared sizes.
 /// Nothing attaches.
@@ -484,7 +526,7 @@ pub fn load_check(objects: &[LoadTarget]) -> Vec<LoadResult> {
                 let diag = diagnose_load(&target.elf, &target.programs);
                 out[i].errno = diag.errno.clone();
                 out[i].lines = diag.lines.clone();
-                if diag.errno.is_empty() {
+                if diag.status == ReplayStatus::Loaded {
                     out[i].detail = clip_line(
                         &format!("{}; diagnostic replay loaded", out[i].detail),
                         DETAIL_CAP,
@@ -502,8 +544,8 @@ pub fn load_check(objects: &[LoadTarget]) -> Vec<LoadResult> {
 #[cfg(test)]
 mod tests {
     use super::{
-        LoadTarget, diagnose_load, errno_name, load_check, load_code_for, load_refusal_code,
-        verifier_tail,
+        LoadTarget, ReplayStatus, diagnose_load, errno_name, load_check, load_code_for,
+        load_refusal_code, verifier_tail,
     };
     use crate::platform::test_support::repo_root;
 
@@ -667,6 +709,7 @@ mod tests {
     fn diagnose_garbage_elf_has_no_errno() {
         let diag = diagnose_load(&[0u8; 16], &["mv_swiotlb_attempt".to_string()]);
         assert_eq!(diag.errno, "");
+        assert_eq!(diag.status, ReplayStatus::Failed);
     }
 
     /// File range of the named section, via the ELF section table.
@@ -830,6 +873,7 @@ mod tests {
         let diag = diagnose_load(&elf, &["mv_swiotlb_attempt".to_string()]);
         assert_eq!(diag.errno, "");
         assert!(diag.lines.is_empty());
+        assert_eq!(diag.status, ReplayStatus::Failed);
     }
 
     #[test]
@@ -959,5 +1003,89 @@ mod tests {
             assert_eq!(results[0].state, "failed");
             assert_eq!(results[0].errno, "EPERM");
         }
+    }
+
+    /// Minimal attempt-channel ELF that passes the open-time
+    /// section check but fails the loader's parse: the
+    /// tracepoint section's data range lies beyond EOF, which
+    /// the open check never reads but Aya's eager section walk
+    /// rejects. Fails like a relocation error: no errno, no
+    /// verifier text.
+    fn unparseable_attempt_elf() -> Vec<u8> {
+        let mut elf = vec![0u8; 280];
+        elf[0..4].copy_from_slice(b"\x7fELF");
+        elf[4] = 2; // 64-bit
+        elf[5] = 1; // little-endian
+        elf[6] = 1; // version
+        elf[18..20].copy_from_slice(&247u16.to_le_bytes()); // BPF
+        elf[0x28..0x30].copy_from_slice(&64u64.to_le_bytes()); // shoff
+        elf[0x3a..0x3c].copy_from_slice(&64u16.to_le_bytes()); // shentsize
+        elf[0x3c..0x3e].copy_from_slice(&3u16.to_le_bytes()); // shnum
+        elf[0x3e..0x40].copy_from_slice(&1u16.to_le_bytes()); // shstrndx
+        // Section 1: the name table at offset 256.
+        elf[128..132].copy_from_slice(&1u32.to_le_bytes()); // sh_name
+        elf[132..136].copy_from_slice(&3u32.to_le_bytes()); // STRTAB
+        elf[152..160].copy_from_slice(&256u64.to_le_bytes()); // sh_offset
+        elf[160..168].copy_from_slice(&24u64.to_le_bytes()); // sh_size
+        // Section 2: the tracepoint program, data beyond EOF.
+        elf[192..196].copy_from_slice(&11u32.to_le_bytes()); // sh_name
+        elf[196..200].copy_from_slice(&1u32.to_le_bytes()); // PROGBITS
+        elf[216..224].copy_from_slice(&0x1_0000u64.to_le_bytes()); // sh_offset
+        elf[224..232].copy_from_slice(&64u64.to_le_bytes()); // sh_size
+        // Name table: "" / ".shstrtab" / "tracepoint/x".
+        elf[256..280].copy_from_slice(b"\0.shstrtab\0tracepoint/x\0");
+        elf
+    }
+
+    #[test]
+    fn check_unparseable_object_claims_no_replay_loaded() {
+        // The verdict fails in the loader's parse (no errno, no
+        // verifier text — the relocation shape); the replay fails
+        // the same way. The detail must keep the structural cause
+        // and must not claim the replay loaded. Pre-fix the detail
+        // read `load refused; diagnostic replay loaded`.
+        // Userspace-only: the parse fails before any syscall, so
+        // this holds on every privilege.
+        let elf = unparseable_attempt_elf();
+        let diag = diagnose_load(&elf, &["mv_swiotlb_attempt".to_string()]);
+        assert_eq!(diag.errno, "");
+        assert!(diag.lines.is_empty());
+        assert_eq!(diag.status, ReplayStatus::Failed);
+        let target = LoadTarget {
+            kind: "attempt".to_string(),
+            elf,
+            programs: vec!["mv_swiotlb_attempt".to_string()],
+        };
+        let results = load_check(&[target]);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].state, "failed");
+        assert_eq!(results[0].errno, "");
+        assert!(results[0].lines.is_empty());
+        assert!(
+            !results[0].detail.contains("diagnostic replay loaded"),
+            "a failed replay must not claim loaded, got: {}",
+            results[0].detail
+        );
+        assert!(
+            results[0].detail.contains("error parsing"),
+            "the verdict must keep the structural cause, got: {}",
+            results[0].detail
+        );
+    }
+
+    #[test]
+    fn diagnose_loaded_object_reports_loaded() {
+        // The honest suffix path: a replay that loads everything
+        // reports loaded with an empty errno. Needs root: only
+        // privilege reaches past map creation.
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("SKIP diagnose_loaded_object_reports_loaded: needs root");
+            return;
+        }
+        let target = attempt_target();
+        let diag = diagnose_load(&target.elf, &target.programs);
+        assert_eq!(diag.status, ReplayStatus::Loaded);
+        assert_eq!(diag.errno, "");
+        assert!(diag.lines.is_empty());
     }
 }

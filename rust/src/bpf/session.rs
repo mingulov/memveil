@@ -14,7 +14,9 @@ use super::attach::{
 use super::maps::{BPF_MAP_TYPE_RINGBUF, MapGeometry, MapSpec, check_maps_loaded, expected_maps};
 use super::offsets::{encode_copy_offsets, validate_copy_offsets};
 use super::poll::{Frame, Stats, decode_frame, open_consumer};
-use crate::capture::loadcheck::{errno_from_chain, verifier_log_from_display, verifier_tail};
+use crate::capture::loadcheck::{
+    clean_cause_line, errno_from_chain, verifier_log_from_display, verifier_tail,
+};
 use aya::maps::{Array, Map, MapData, RingBuf};
 use aya::programs::{
     Program, ProgramError,
@@ -1191,15 +1193,20 @@ impl Session {
 }
 
 /// One kernel load failure (object or program load), split for honest
-/// reporting: the syscall errno (when the error chain carries one)
-/// plus the raw verifier log (when the error carries one). Callers
-/// shape these parts; nobody formats the full loader Display.
+/// reporting: the syscall errno (when the error chain carries one),
+/// the raw verifier log (when the error carries one), plus the
+/// bounded structural cause (the chain text relocation and parse
+/// failures carry instead of either). Callers shape these parts;
+/// nobody formats the full loader Display.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct LoadFailure {
     /// Syscall errno from the error chain, if any.
     pub errno: Option<i32>,
     /// Raw verifier log text, if any.
     pub log: Option<String>,
+    /// Bounded structural cause from the error chain, if any:
+    /// cleaned like one tail line, never the full Display.
+    pub cause: Option<String>,
 }
 
 /// One program-load step outcome that is not a fresh load.
@@ -1217,12 +1224,41 @@ pub(crate) enum LoadStepError {
 /// loads ([`Session::load`], where a BTF failure's Display carries
 /// the full verifier log) and program loads: Mojo renders no
 /// BTF-specific shape (object failures there are errno plus clipped
-/// message plus replay tail), so both use the program-load tail.
+/// message plus replay tail), so both use the program-load tail —
+/// and the clipped chain message below is that clipped message
+/// for failures that carry no errno.
 fn load_failed(error: &(dyn std::error::Error + 'static)) -> LoadFailure {
     let display = error.to_string();
     LoadFailure {
         errno: errno_from_chain(error),
         log: verifier_log_from_display(&display).map(str::to_string),
+        cause: structural_cause(error),
+    }
+}
+
+/// Bounded structural cause: every non-empty error-chain
+/// Display joined, cleaned like one tail line. The leaf
+/// names the failure (an unknown symbol, a bad section);
+/// the wrappers name the function or section it struck.
+/// Empty when the chain carries nothing printable.
+fn structural_cause(error: &(dyn std::error::Error + 'static)) -> Option<String> {
+    let mut parts = Vec::new();
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(err) = current {
+        let text = err.to_string();
+        if !text.is_empty() {
+            parts.push(text);
+        }
+        current = err.source();
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let cleaned = clean_cause_line(&parts.join(": "));
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
     }
 }
 
@@ -1240,8 +1276,9 @@ fn load_context(spec: &AttachSpec) -> String {
 /// for refusal classification — never the loader Display, which
 /// carries the full verifier log. The bounded redacted tail reaches
 /// users through the diagnostic replay instead. Without an errno,
-/// the redacted tail of the carried log; without either, a bare
-/// refusal.
+/// the redacted tail of the carried log; without that, the
+/// bounded structural cause (relocation and parse failures
+/// carry only this); without that, a bare refusal.
 fn load_failure_text(failure: &LoadFailure) -> String {
     if let Some(raw) = failure.errno {
         return std::io::Error::from_raw_os_error(raw).to_string();
@@ -1251,6 +1288,9 @@ fn load_failure_text(failure: &LoadFailure) -> String {
         if !tail.is_empty() {
             return tail.join("; ");
         }
+    }
+    if let Some(cause) = failure.cause.as_deref().filter(|cause| !cause.is_empty()) {
+        return cause.to_string();
     }
     "load refused".to_string()
 }
@@ -1463,6 +1503,7 @@ pub(crate) fn diagnose_program_loads(
         return Err(LoadFailure {
             errno: btf_errno,
             log: None,
+            cause: None,
         });
     }
     let mut slot = kernel_btf.cloned();
@@ -1477,6 +1518,7 @@ pub(crate) fn diagnose_program_loads(
                 LoadStepError::Refusal { errno, .. } => LoadFailure {
                     errno: errno.or(Some(2)),
                     log: None,
+                    cause: None,
                 },
                 LoadStepError::Failed(failure) => failure,
             });
@@ -1955,6 +1997,7 @@ mod tests {
             let failure = LoadFailure {
                 errno: Some(raw),
                 log: Some("jump out of range\nR2=0xffff888012345678\nmore log\n".to_string()),
+                cause: Some("error relocating section".to_string()),
             };
             let text = load_failure_text(&failure);
             assert_eq!(text, std::io::Error::from_raw_os_error(raw).to_string());
@@ -1979,6 +2022,7 @@ mod tests {
             log: Some(
                 "1: dropped\n2: dropped\n3: R1=0xffff888012345678\n4: imm=0xFFFFFFFF81234567\n5: ok\n6: ok\n".to_string(),
             ),
+            cause: Some("error relocating section".to_string()),
         };
         let text = load_failure_text(&failure);
         assert!(
@@ -1994,11 +2038,13 @@ mod tests {
         let bare = LoadFailure {
             errno: None,
             log: None,
+            cause: None,
         };
         assert_eq!(load_failure_text(&bare), "load refused");
         let empty = LoadFailure {
             errno: None,
             log: Some("\n\n".to_string()),
+            cause: None,
         };
         assert_eq!(load_failure_text(&empty), "load refused");
     }
@@ -2078,6 +2124,120 @@ mod tests {
         );
     }
 
+    /// Loader-side structural error with the pinned Aya
+    /// relocation chain shape (`error relocating section` over
+    /// ``error relocating `sec` `` over the detail), carrying
+    /// no errno source and no verifier marker. The real
+    /// relocation error fields are private, so the test pins
+    /// the shape the split reads: the Display chain.
+    #[derive(Debug)]
+    struct RelocationShaped {
+        detail: RelocationDetail,
+    }
+
+    #[derive(Debug)]
+    struct RelocationDetail {
+        section: String,
+        leaf: RelocationLeaf,
+    }
+
+    #[derive(Debug)]
+    struct RelocationLeaf {
+        detail: String,
+    }
+
+    impl std::fmt::Display for RelocationShaped {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("error relocating section")
+        }
+    }
+
+    impl std::error::Error for RelocationShaped {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.detail)
+        }
+    }
+
+    impl std::fmt::Display for RelocationDetail {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "error relocating `{}`", self.section)
+        }
+    }
+
+    impl std::error::Error for RelocationDetail {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.leaf)
+        }
+    }
+
+    impl std::fmt::Display for RelocationLeaf {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.detail)
+        }
+    }
+
+    impl std::error::Error for RelocationLeaf {}
+
+    fn relocation_shaped(section: &str, detail: &str) -> RelocationShaped {
+        RelocationShaped {
+            detail: RelocationDetail {
+                section: section.to_string(),
+                leaf: RelocationLeaf {
+                    detail: detail.to_string(),
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn relocation_failure_renders_structural_cause() {
+        // Aya CO-RE relocation errors carry neither errno nor
+        // verifier text: the renderer keeps their bounded
+        // structural cause instead of degrading to `load
+        // refused`. `NoBTF` is a real loader-side structural
+        // error with the same shape (no source at all); the
+        // shaped chain pins the relocation join.
+        let failure = load_failed(&aya::EbpfError::NoBTF);
+        assert_eq!(failure.errno, None);
+        assert_eq!(failure.log, None);
+        assert_eq!(failure.cause.as_deref(), Some("no BTF parsed for object"));
+        assert_eq!(load_failure_text(&failure), "no BTF parsed for object");
+        let shaped = relocation_shaped("mv_prog", "unknown symbol, index `5`");
+        let failure = load_failed(&shaped);
+        assert_eq!(failure.errno, None);
+        assert_eq!(failure.log, None);
+        assert_eq!(
+            failure.cause.as_deref(),
+            Some("error relocating section: error relocating `mv_prog`: unknown symbol, index `5`")
+        );
+        assert_eq!(
+            load_failure_text(&failure),
+            "error relocating section: error relocating `mv_prog`: unknown symbol, index `5`"
+        );
+    }
+
+    #[test]
+    fn structural_cause_is_bounded_and_redacted() {
+        // The cause is one cleaned line: a hostile detail clips
+        // at the tail line cap, kernel addresses redact, and
+        // control bytes escape — never the full Display.
+        let shaped = relocation_shaped("mv_prog", &"y".repeat(500));
+        let failure = load_failed(&shaped);
+        let cause = failure.cause.expect("a relocation cause");
+        assert!(cause.len() <= 256, "cause must clip, got {}", cause.len());
+        assert!(
+            cause.starts_with("error relocating section: "),
+            "got: {cause}"
+        );
+        let shaped = relocation_shaped("mv_prog", "stuck at 0xffff888012345678\nnext");
+        let failure = load_failed(&shaped);
+        let text = load_failure_text(&failure);
+        assert!(!text.contains("ffff8880"), "got: {text}");
+        assert!(text.contains("0xADDR"), "got: {text}");
+        assert!(!text.contains('\n'), "got: {text:?}");
+        assert!(text.contains("\\n"), "got: {text:?}");
+    }
+
     #[test]
     fn failed_load_message_shape() {
         // Tracepoint loads name no site; tracing loads name their
@@ -2087,6 +2247,7 @@ mod tests {
         let failure = LoadFailure {
             errno: Some(22),
             log: Some("jump out of range\n".to_string()),
+            cause: None,
         };
         let message = format_failed_load(tag, &spec, &failure);
         assert!(
@@ -2105,6 +2266,7 @@ mod tests {
         let failure = LoadFailure {
             errno: Some(13),
             log: None,
+            cause: None,
         };
         let message = format_failed_load(tag, &spec, &failure);
         assert!(
