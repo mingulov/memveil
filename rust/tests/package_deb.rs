@@ -876,7 +876,15 @@ fn install_doctor_uninstall_smoke() {
             "{}",
             String::from_utf8_lossy(&verify.stderr)
         );
-        assert!(String::from_utf8_lossy(&verify.stdout).is_empty());
+        // Slim images exclude docs/man at install time (then
+        // verify reports them `missing`): clear
+        // /etc/dpkg/dpkg.cfg.d/excludes first, as the CI job
+        // does, to prove the full payload.
+        assert!(
+            String::from_utf8_lossy(&verify.stdout).is_empty(),
+            "dpkg --verify noisy: {}",
+            String::from_utf8_lossy(&verify.stdout)
+        );
         j::assert_receipts_installed(receipts);
         j::assert_loader_closure();
         j::assert_doctor_and_version(&version);

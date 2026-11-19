@@ -115,6 +115,10 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             binutils cpio file patchelf python3-jsonschema rpm \
             zsh
+          # Slim images exclude docs/man at install time; real
+          # installs ship them, so clear the exclusion to prove
+          # the full .deb payload in the install journey.
+          sudo rm -f /etc/dpkg/dpkg.cfg.d/excludes
       - name: Install Rust toolchains
         run: |
           curl -fsSL -o /tmp/rustup-init \
