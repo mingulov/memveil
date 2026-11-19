@@ -24,6 +24,15 @@ const _: u32 = memveil_ebpf_common::MV_MAGIC;
 #[no_mangle]
 static LICENSE: [u8; 4] = *b"GPL\0";
 
+/// Channel identity marker: self-describing bytes that travel with the
+/// object so packaging and load checks can prove which channel's bytes
+/// they stage (`memveil-channel:<name>` plus NUL). The packaging scripts
+/// read this section and refuse on mismatch or absence; the name must stay
+/// identical to the channel filename stem.
+#[link_section = "memveil_channel"]
+#[no_mangle]
+static MEMVEIL_CHANNEL: [u8; 24] = *b"memveil-channel:attempt\0";
+
 /// Required panic handler for the freestanding binary. Probe code must never
 /// panic; a bug that does stalls the invocation instead of emitting garbage.
 #[panic_handler]
