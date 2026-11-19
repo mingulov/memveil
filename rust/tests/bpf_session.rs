@@ -706,7 +706,8 @@ fn live_load_rejects_tampered_geometry() {
         error.to_string().contains("mv_offsets"),
         "refusal must name mv_offsets, got: {error}"
     );
-    // A non-power-of-two ring size cannot even load; the kernel refuses it.
+    // A non-power-of-two ring size loads (the loader rounds it up to pow2,
+    // mirroring libbpf) but overshoots the frozen ceiling, so load refuses it.
     let tampered = tamper_map_u32(&bytes, 8_388_608, 8_388_609);
     let mut session = Session::open(&tampered, "mv_attempts").expect("open tampered ring");
     session

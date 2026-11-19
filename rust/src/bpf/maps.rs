@@ -216,8 +216,10 @@ fn check_copy_maps_loaded(actual: &[MapSpec]) -> Result<(), SessionError> {
 /// collector gate (live size versus the admitted size) already own the
 /// exact size, mirroring Mojo, which has no load-time exact gate. The
 /// frozen size stays as the load-time ceiling: no admitted object
-/// exceeds it, and a non-power-of-two declaration the kernel silently
-/// rounds up overshoots it and still refuses. Everything else stays
+/// exceeds it, and a non-power-of-two declaration the loader rounds up
+/// to pow2 (aya `adjust_to_page_size`, mirroring libbpf; the kernel
+/// itself requires pow2) overshoots it and still refuses.
+/// Everything else stays
 /// fail-closed with the same refusal texts as [`check_maps`].
 pub fn check_maps_loaded(channel: Channel, actual: &[MapSpec]) -> Result<(), SessionError> {
     if channel == Channel::Copy {
@@ -441,9 +443,9 @@ mod tests {
     #[test]
     fn loaded_gate_refuses_oversize_ring() {
         // The frozen size is the load-time ceiling: a declared
-        // 8388609 reads back 16777216 live (the kernel rounds a
-        // non-power-of-two ringbuf size up instead of refusing),
-        // and both the declared and the rounded size refuse.
+        // 8388609 reads back 16777216 live (the loader rounds a
+        // non-power-of-two ringbuf size up to pow2 instead of
+        // refusing), and both the declared and the rounded size refuse.
         for size in [8_388_609u32, 16_777_216u32] {
             let maps = tamper(Channel::Attempt, "mv_attempts", |row| {
                 row.max_entries = size
