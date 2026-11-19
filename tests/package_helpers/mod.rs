@@ -30,6 +30,7 @@ use std::process::Output;
 use std::process::Stdio;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 /// Shipped BPF object file names (inspection copies).
 pub const BPF_OBJECTS: [&str; 3] = [
@@ -156,6 +157,35 @@ pub fn tool_present(name: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// Spawn with a bounded retry on ETXTBSY only.
+///
+/// Under parallel load a sibling thread's still-pre-exec child can hold an
+/// inherited write fd to a freshly-written fixture at our exec instant (POSIX
+/// fork-inheritance race; fd tables are process-global, CLOEXEC applies only
+/// at exec). Holders normally exec within milliseconds, but a wedged box can
+/// stall a fresh fork for seconds, so the budget spans 6 s; every other spawn
+/// error panics immediately, and persistent ETXTBSY still panics (reporting
+/// the retry count). Proven necessary by `staged_binary_exec_split_refuses`
+/// flaking on full parallel runs (green isolated) with `Text file busy`;
+/// the mechanism was reproduced deterministically with lingering pre-exec
+/// children (see the T6 handoff notes).
+fn spawn_output(command: &mut Command, cmd: &str) -> Output {
+    let mut tries = 0;
+    loop {
+        match command.output() {
+            Ok(out) => return out,
+            Err(err) if err.raw_os_error() == Some(26) && tries < 600 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(err) if tries > 0 => {
+                panic!("cannot run {cmd}: {err} (after {tries} ETXTBSY retries)")
+            }
+            Err(err) => panic!("cannot run {cmd}: {err}"),
+        }
+    }
+}
+
 /// Run a command, panicking only when it cannot spawn.
 pub fn run(cmd: &str, args: &[&str], cwd: Option<&Path>) -> Output {
     let mut command = Command::new(cmd);
@@ -163,11 +193,8 @@ pub fn run(cmd: &str, args: &[&str], cwd: Option<&Path>) -> Output {
     if let Some(dir) = cwd {
         command.current_dir(dir);
     }
-    command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap_or_else(|err| panic!("cannot run {cmd}: {err}"))
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    spawn_output(&mut command, cmd)
 }
 
 /// Run a command with `RUSTUP_TOOLCHAIN` stripped (repo pin wins).
@@ -178,11 +205,8 @@ pub fn run_unpinned(cmd: &str, args: &[&str], cwd: Option<&Path>) -> Output {
     if let Some(dir) = cwd {
         command.current_dir(dir);
     }
-    command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap_or_else(|err| panic!("cannot run {cmd}: {err}"))
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    spawn_output(&mut command, cmd)
 }
 
 /// Stdout of a command that must succeed.

@@ -2777,3 +2777,29 @@ fn rebuild_is_deterministic() {
     );
     assert_eq!(shas[0], shas[1], "tarball bytes differ across rebuilds");
 }
+
+#[test]
+fn spawn_retries_transient_txtbsy() {
+    // A sibling's still-pre-exec child can hold an inherited write fd to a
+    // freshly-written fixture at our exec instant (ETXTBSY); h::run must ride
+    // through the transient instead of panicking. Deterministic: the holder
+    // rendezvous guarantees the first spawn attempt hits the busy window.
+    let tmp = h::scratch("txtbsy-retry");
+    let target = tmp.join("probe");
+    fs::copy("/bin/true", &target).unwrap();
+    let held_path = target.clone();
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let handle = std::thread::spawn(move || {
+        let held = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&held_path)
+            .unwrap();
+        tx.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(held);
+    });
+    rx.recv().unwrap();
+    let out = h::run(target.to_str().unwrap(), &[], None);
+    assert!(out.status.success(), "spawn must survive transient ETXTBSY");
+    handle.join().unwrap();
+}
