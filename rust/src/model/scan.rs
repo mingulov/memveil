@@ -11,21 +11,22 @@
 //! span until the kind is known, then re-parses the span.
 //!
 //! Error convention: every failure is a [`ValidationError`]. Structural
-//! failures (string escapes, booleans, brackets, commas, colons, truncated
-//! input, excessive depth) name the enclosing schema object in `what`,
-//! keep the scanner message verbatim, and carry the cursor byte offset,
-//! so they render as the Mojo `ScanError(offset=..., message=...)`.
-//! Offsets step exactly like the scanner ported: a consumed offending
-//! byte reports the position behind the cursor (`pos - 1`), anything
-//! else reports the cursor itself, and a bad span reports its start.
-//! Numeric-token failures wrap the scalar error under the reader's field
-//! context: required u64/integer readers use the field path (like
-//! `event.seq`), while the generic nullable readers use the scalar name
-//! (`u64`, `integer`).
+//! failures (string escapes, booleans, integers, brackets, commas,
+//! colons, truncated input, excessive depth) name the enclosing schema
+//! object in `what`, keep the scanner message verbatim, and carry the
+//! cursor byte offset, so they render as the Mojo
+//! `ScanError(offset=..., message=...)`. Offsets step exactly like the
+//! scanner ported: a consumed offending byte reports the position
+//! behind the cursor (`pos - 1`), anything else reports the cursor
+//! itself, and a bad span reports its start. Integer failures are bare
+//! scan errors: unlike the u64 token readers, `parse_int` never wraps
+//! under the reader's field. Token-level u64 failures wrap the scalar
+//! error under the reader's field context: required readers use the
+//! field path (like `event.seq`), while the generic nullable readers
+//! use the scalar name (`u64`).
 
 use super::common::{
-    MaybeI64, MaybeString, MaybeU64, parse_json_int, parse_maybe_u64,
-    parse_u64_field as token_u64_field,
+    MaybeI64, MaybeString, MaybeU64, parse_maybe_u64, parse_u64_field as token_u64_field,
 };
 use super::validate::{ValidationError, check_opaque_id};
 
@@ -121,30 +122,66 @@ impl<'a> Scanner<'a> {
         Err(ValidationError::scan(self.pos, what, "bad null"))
     }
 
-    /// Parse one JSON integer, wrapping token failures under `field`.
+    /// Parse one JSON integer, failing bare like the ported scanner.
     ///
-    /// Steps exactly like the scanner this ports: an optional `-` sign,
-    /// then a maximal digit run. A lone zero consumes one byte; longer
-    /// zero-led runs fail the shared token parser, as does a missing
-    /// digit run. The provisional token error is wrapped under `field`,
-    /// paralleling the required-u64 reader.
+    /// Steps exactly like the scanner this ports: an optional `-`
+    /// sign, then digits validated during the scan. A missing digit
+    /// run fails `bad integer` at the cursor behind the sign; a
+    /// zero-led run fails `leading zero` at the second digit; an
+    /// overflowing digit run fails `integer overflow` at the
+    /// overflowing digit, and an out-of-range run at the run end.
+    /// Failures are bare scan errors carrying the cursor offset —
+    /// never wrapped under `field`, which only names the reading
+    /// for the struct. Every caller propagates them upward.
     pub(crate) fn parse_int(&mut self, field: &str) -> Result<i64, ValidationError> {
-        let start = self.pos;
-        let mut pos = start;
-        if pos < self.data.len() && self.data[pos] == b'-' {
-            pos += 1;
+        let mut neg = false;
+        if self.pos < self.data.len() && self.data[self.pos] == b'-' {
+            neg = true;
+            self.pos += 1;
         }
-        if pos < self.data.len() && self.data[pos] == b'0' {
-            pos += 1;
+        if self.pos >= self.data.len() {
+            return Err(ValidationError::scan(self.pos, field, "bad integer"));
         }
-        while pos < self.data.len() && self.data[pos].is_ascii_digit() {
-            pos += 1;
+        let first = self.data[self.pos];
+        if !first.is_ascii_digit() {
+            return Err(ValidationError::scan(self.pos, field, "bad integer"));
         }
-        self.pos = pos;
-        let token = &self.data[start..pos];
-        let text = core::str::from_utf8(token)
-            .map_err(|_| ValidationError::new("integer", "bad integer"))?;
-        parse_json_int(text).map_err(|inner| ValidationError::wrap(field, &inner))
+        if first == b'0' {
+            self.pos += 1;
+            if self.pos < self.data.len() {
+                let nxt = self.data[self.pos];
+                if nxt.is_ascii_digit() {
+                    return Err(ValidationError::scan(self.pos, field, "leading zero"));
+                }
+            }
+            return Ok(0);
+        }
+        let mut acc: u64 = 0;
+        while self.pos < self.data.len() {
+            let b = self.data[self.pos];
+            if !b.is_ascii_digit() {
+                break;
+            }
+            let digit = u64::from(b - b'0');
+            if acc > (u64::MAX - digit) / 10 {
+                return Err(ValidationError::scan(self.pos, field, "integer overflow"));
+            }
+            acc = acc * 10 + digit;
+            self.pos += 1;
+        }
+        if !neg && acc > i64::MAX as u64 {
+            return Err(ValidationError::scan(self.pos, field, "integer overflow"));
+        }
+        if neg && acc > i64::MAX as u64 + 1 {
+            return Err(ValidationError::scan(self.pos, field, "integer overflow"));
+        }
+        if !neg {
+            return Ok(acc as i64);
+        }
+        if acc == i64::MAX as u64 + 1 {
+            return Ok(i64::MIN);
+        }
+        Ok(-(acc as i64))
     }
 
     /// Parse one JSON string; the cursor must sit on its quote.
@@ -518,8 +555,8 @@ pub(crate) fn parse_nullable_u64(
 
 /// Parse a JSON integer or null at the cursor.
 ///
-/// Token failures wrap under `integer`, paralleling the nullable
-/// u64 reader; the caller supplies `what` for structural failures.
+/// Integer failures stay bare scan errors (named `integer` for the
+/// struct); the caller supplies `what` for structural failures.
 pub(crate) fn parse_nullable_int(
     scan: &mut Scanner,
     what: &str,
@@ -629,29 +666,39 @@ mod tests {
     }
 
     #[test]
-    fn integer_failures_wrap_under_the_field() {
-        for bad in ["", "-", "x", "-x"] {
+    fn integer_failures_are_bare_scan_errors() {
+        // Mojo raises bare ScanError(offset, message): the field
+        // names the reading for the struct but never wraps.
+        for (bad, offset) in [("", 0), ("-", 1), ("x", 0), ("-x", 1)] {
             let err = scan(bad).parse_int("observer.cpu").unwrap_err();
             assert_eq!(err.what, "observer.cpu");
+            assert_eq!(err.message, "bad integer");
+            assert_eq!(err.offset, Some(offset));
             assert_eq!(
-                err.message,
-                "ValidationError(what=integer, message=bad integer)"
+                err.to_string(),
+                format!("ScanError(offset={offset}, message=bad integer)")
             );
         }
-        let err = scan("00").parse_int("observer.cpu").unwrap_err();
-        assert_eq!(err.what, "observer.cpu");
-        assert_eq!(
-            err.message,
-            "ValidationError(what=integer, message=leading zero)"
-        );
-        let err = scan("-01").parse_int("f").unwrap_err();
-        assert!(err.message.ends_with("leading zero)"), "{err}");
+        for (bad, offset) in [("00", 1), ("-01", 2)] {
+            let err = scan(bad).parse_int("observer.cpu").unwrap_err();
+            assert_eq!(err.what, "observer.cpu");
+            assert_eq!(err.message, "leading zero");
+            assert_eq!(err.offset, Some(offset));
+            assert_eq!(
+                err.to_string(),
+                format!("ScanError(offset={offset}, message=leading zero)")
+            );
+        }
+        // Range overflow reports the run end; digit overflow the
+        // overflowing digit.
         let err = scan("9223372036854775808").parse_int("f").unwrap_err();
-        assert!(err.message.ends_with("integer overflow)"), "{err}");
+        assert_eq!(err.message, "integer overflow");
+        assert_eq!(err.offset, Some(19));
         let err = scan("99999999999999999999999999")
             .parse_int("f")
             .unwrap_err();
-        assert!(err.message.ends_with("integer overflow)"), "{err}");
+        assert_eq!(err.message, "integer overflow");
+        assert_eq!(err.offset, Some(19));
     }
 
     #[test]
@@ -860,10 +907,8 @@ mod tests {
         assert_eq!(out.value, 5);
         let err = parse_nullable_int(&mut scan("01"), "c").unwrap_err();
         assert_eq!(err.what, "integer");
-        assert_eq!(
-            err.message,
-            "ValidationError(what=integer, message=leading zero)"
-        );
+        assert_eq!(err.message, "leading zero");
+        assert_eq!(err.offset, Some(1));
     }
 
     #[test]

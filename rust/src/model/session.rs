@@ -2929,6 +2929,18 @@ mod tests {
             ("size-ok", 0, "event", "expected byte 123"),
             ("size-over", 0, "event", "expected byte 123"),
             ("unsanitized-error", 0, "event", "unknown event field"),
+            // Bare integer failures (Mojo ScanError): one fixture
+            // per message class through observer.cpu.
+            ("adv-int-bad", 0, "observer.cpu", "bad integer"),
+            ("adv-int-leading-zero", 0, "observer.cpu", "leading zero"),
+            ("adv-int-overflow", 0, "observer.cpu", "integer overflow"),
+        ];
+        // Cursor offsets for the bare integer fixtures above,
+        // verified against the Mojo parser's ScanError offsets.
+        let int_offsets: &[(&str, usize, usize)] = &[
+            ("adv-int-bad", 0, 243),
+            ("adv-int-leading-zero", 0, 252),
+            ("adv-int-overflow", 0, 266),
         ];
         let session_rejects: &[(&str, &str, &str)] = &[
             ("compat-major", "schema_version", "bad const"),
@@ -2981,6 +2993,10 @@ mod tests {
                         let err = verdict.unwrap_err();
                         assert_eq!(err.what, pin.2, "{name}:{index} what");
                         assert_eq!(err.message, pin.3, "{name}:{index} message");
+                        if let Some(off) = int_offsets.iter().find(|o| o.0 == name && o.1 == index)
+                        {
+                            assert_eq!(err.offset, Some(off.2), "{name}:{index} offset");
+                        }
                     }
                     None => {
                         verdict.unwrap_or_else(|err| panic!("{name}:{index} must parse: {err}"));

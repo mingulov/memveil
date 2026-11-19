@@ -1996,7 +1996,9 @@ mod tests {
     }
 
     #[test]
-    fn integer_and_u64_token_failures_wrap() {
+    fn integer_and_u64_token_failure_shapes() {
+        // Integers fail bare with the cursor offset (Mojo
+        // ScanError); u64 tokens wrap under the field.
         let base = doc("marker", r#"{"text": "t"}"#);
         let with = |observer: &str| {
             base.replace(
@@ -2009,16 +2011,17 @@ mod tests {
         ))
         .unwrap_err();
         assert_eq!(err.what, "observer.cpu");
-        assert_eq!(
-            err.message,
-            "ValidationError(what=integer, message=leading zero)"
-        );
+        assert_eq!(err.message, "leading zero");
+        assert_eq!(err.offset, Some(234));
         let map = |data: &str| doc("map_result", data);
         let err = parse(&map(
             r#"{"operation_id": "op", "success": true, "mapping_id": "m", "return_code": 01, "mapped_bytes": "4", "wire_generation": null, "wire_identity": null}"#,
         ))
         .unwrap_err();
         assert_eq!(err.what, "integer");
+        assert_eq!(err.message, "leading zero");
+        // Span-relative: data re-parses on its own cursor.
+        assert_eq!(err.offset, Some(75));
         let event = parse(&map(
             r#"{"operation_id": "op", "success": true, "mapping_id": "m", "return_code": -0, "mapped_bytes": "4", "wire_generation": null, "wire_identity": null}"#,
         ))
