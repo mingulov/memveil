@@ -109,7 +109,7 @@ def check_three_channel():
 
 def main():
     if not os.path.isfile(BIN):
-        print("FAIL examples: missing %s (run tools/build first)"
+        print("FAIL examples: missing %s (run cargo build --release first)"
               % BIN)
         sys.exit(1)
     readme = open(os.path.join(EXAMPLE, "README.md")).read()

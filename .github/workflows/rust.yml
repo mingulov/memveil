@@ -1,0 +1,88 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Rust gates: supply-chain policy (cargo-deny over the root
+# and eBPF manifests) and the full workspace test suite.
+# Unprivileged; safe for pull requests.
+#
+# Toolchain pins, matching the tree: Rust 1.100.0 plus
+# nightly-2026-05-20 for the eBPF child build
+# (rust-toolchain.toml, build.rs BPF_TOOLCHAIN),
+# bpf-linker 0.10.4 (build.rs prerequisite),
+# cargo-deny 0.21.0 (validated in-tree: see the eBPF
+# deny.toml comment). The advisory DB needs network.
+name: rust
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  deny:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - name: Install Rust 1.100.0 (cargo metadata only, no build)
+        run: |
+          curl -fsSL -o /tmp/rustup-init \
+            https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
+          curl -fsSL -o /tmp/rustup-init.sha256 \
+            https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256
+          (cd /tmp && sha256sum --check rustup-init.sha256)
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          rustup toolchain install 1.100.0 --profile minimal
+      - name: Install cargo-deny 0.21.0
+        run: |
+          VER=0.21.0
+          TARBALL="cargo-deny-$VER-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL -o /tmp/deny.tar.gz \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/$VER/$TARBALL"
+          echo "a2170b854ff697e79e39c4c538981c9c1bdd803addbae6719a4cb66b4585a903  /tmp/deny.tar.gz" | sha256sum --check -
+          mkdir -p /tmp/deny-dist
+          tar -xzf /tmp/deny.tar.gz -C /tmp/deny-dist
+          echo "/tmp/deny-dist/cargo-deny-$VER-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
+          cargo-deny --version
+      - name: Check root manifest
+        run: |
+          cargo-deny check
+      - name: Check eBPF manifest
+        run: |
+          cd crates/ebpf && cargo-deny check
+
+  rust-test:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            binutils cpio file patchelf python3-jsonschema rpm \
+            zsh
+          # Slim images exclude docs/man at install time; real
+          # installs ship them, so clear the exclusion to prove
+          # the full .deb payload in the install journey.
+          sudo rm -f /etc/dpkg/dpkg.cfg.d/excludes
+      - name: Install Rust toolchains
+        run: |
+          curl -fsSL -o /tmp/rustup-init \
+            https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
+          curl -fsSL -o /tmp/rustup-init.sha256 \
+            https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256
+          (cd /tmp && sha256sum --check rustup-init.sha256)
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          rustup toolchain install 1.100.0 --profile minimal \
+            --component clippy,rustfmt
+          rustup toolchain install nightly-2026-05-20 --profile minimal \
+            --component rust-src
+      - name: Install bpf-linker 0.10.4
+        run: cargo install bpf-linker --version 0.10.4 --locked
+      - name: Warm the cargo cache for offline queries
+        run: |
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path crates/ebpf/Cargo.toml
+      - name: Run Rust test suite
+        run: |
+          cargo test --workspace --locked

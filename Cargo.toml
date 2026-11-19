@@ -1,0 +1,31 @@
+[package]
+name = "memveil"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+license = "GPL-3.0-or-later"
+description = "MemVeil DMA-visibility observer (Rust userspace)"
+publish = false
+
+[lib]
+name = "memveil"
+path = "src/lib.rs"
+
+[dependencies]
+aya = "=0.14.0"
+aya-obj = "=0.3.0"
+libc = "0.2"
+memveil-ebpf-common = { version = "0.0.0", path = "crates/ebpf-common", features = ["user"] }
+
+[workspace]
+members = ["crates/ebpf-common"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.test]
+# Line tables only: full debuginfo bloats test binaries for no
+# gate benefit; backtraces keep file:line.
+debug = "line-tables-only"

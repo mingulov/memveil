@@ -3,7 +3,7 @@
 
 This test-only Python/bpftrace kit prepares an operator to measure both
 `set_memory_decrypted` and `set_memory_encrypted`. It is separate from MemVeil's
-Mojo/C/libbpf runtime, product wire formats, and profile admission. Local tests
+probe runtime, product wire formats, and profile admission. Local tests
 use authored synthetic streams and processes. They do not attach BPF, load a
 module, resolve a real caller, or qualify a confidential platform.
 

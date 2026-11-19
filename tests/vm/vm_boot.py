@@ -55,7 +55,13 @@ def run_guest(sub, timeout=900, network=False):
         "--append", "swiotlb=force",
     ]
     if network:
+        # Microvm boots carry no pcnet NIC, so network guests
+        # need the full machine (same flag as the attempt
+        # lane's argv). Scoped to this branch: pcnet exists
+        # only in network guests, and non-network lanes keep
+        # their current boot path unchanged.
         cmd += [
+            "--disable-microvm",
             "--network", "user",
             "--qemu-opts=-cpu host",
             "--qemu-opts=-device pcnet,netdev=pcnet0"

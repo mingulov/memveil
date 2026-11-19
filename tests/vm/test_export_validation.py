@@ -290,6 +290,20 @@ IDENTITY_DOC = dict(
         'lc_sha', 'cp_sha', 'ko_sha')})
 
 
+def test_identity_accepts_distro_suffixes(tmp_path):
+    # Fedora '_' and Debian '+' suffixes are valid releases in
+    # both the export identity and the attempt ledger.
+    for pos, release in enumerate(
+            ('7.2.13-200.fc44.x86_64', '6.12.0+deb13-amd64')):
+        export_validation.identity(dict(IDENTITY_DOC, release=release))
+        home = tmp_path / ('attempt%d' % pos)
+        home.mkdir()
+        run = attempt_export(
+            home, lambda doc, release=release: doc['identity'].update(
+                release=release))
+        assert test_attempt_capture.verify_exports(run, 'correctness')
+
+
 def retention_run(tmp_path, gate='bundle', files=None):
     run = tmp_path / 'run'
     export = run / 'export'

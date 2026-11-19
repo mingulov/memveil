@@ -9,20 +9,19 @@ runner. These pins run on every host and fail closed if
 the fixed semantics silently revert: exist-only generation
 insert, delete-own-generation unmap, and an avalanched
 call id. White-box by design: the flags are the fix.
+(Ported to the Rust probes at the cutover; the C-probe
+originals retired with the C tree.)
 """
 
 import os
 import re
-import sys
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 REPO = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LIFECYCLE = os.path.join(
-    REPO, "bpf", "programs", "swiotlb_lifecycle.bpf.c")
+    REPO, "crates", "ebpf", "src", "lifecycle.rs")
 COPY = os.path.join(
-    REPO, "bpf", "programs", "swiotlb_copy.bpf.c")
+    REPO, "crates", "ebpf", "src", "copy.rs")
 
 
 def read(path):
@@ -33,13 +32,11 @@ def read(path):
 def test_gen_insert_is_exist_only():
     src = read(LIFECYCLE)
     assert re.search(
-        r"bpf_map_update_elem\(&mv_gen_table, key, &gen,\s*"
-        r"BPF_NOEXIST\)",
+        r"MV_GEN_TABLE\.insert\(key, gen, BPF_NOEXIST as u64\)",
         src), "gen claim has no exist-only insert"
-    assert not re.search(
-        r"bpf_map_update_elem\(&mv_gen_table[^)]*BPF_ANY\)",
-        src), "gen_table still takes BPF_ANY; concurrent " \
-        "same-key maps would overwrite"
+    assert "BPF_ANY" not in src, \
+        "gen_table takes BPF_ANY; concurrent same-key maps " \
+        "would overwrite"
 
 
 def test_gen_insert_reclaims_tombstones():
@@ -49,8 +46,8 @@ def test_gen_insert_reclaims_tombstones():
     src = read(LIFECYCLE)
     assert "BPF_NOEXIST" in src, "insert is not exist-only"
     assert re.search(
-        r"EEXIST[\s\S]{0,800}BPF_EXIST", src), \
-        "no tombstone-reclaim path after EEXIST"
+        r"fn mv_claim_gen[\s\S]{0,1200}BPF_EXIST", src), \
+        "no tombstone-reclaim path in the claim function"
 
 
 def test_unmap_deletes_own_generation():
@@ -58,8 +55,8 @@ def test_unmap_deletes_own_generation():
     # unmap path must tombstone only the generation it read.
     src = read(LIFECYCLE)
     assert re.search(
-        r"BPF_PROG\(mv_unmap[\s\S]*?"
-        r"__sync_val_compare_and_swap\(slot", src), \
+        r"fn try_mv_unmap[\s\S]*?"
+        r"count_cas\(slot, gen, 0\)", src), \
         "unmap has no compare-and-swap tombstone on its slot"
 
 
@@ -67,9 +64,10 @@ def test_lost_map_cleans_own_generation():
     # The lost-record cleanup must not delete a newer
     # generation that won the key after our insert.
     src = read(LIFECYCLE)
-    assert re.search(
-        r"BPF_PROG\(mv_map_result[\s\S]*?"
-        r"__sync_val_compare_and_swap\(slot", src), \
+    m = re.search(
+        r"fn mv_map_result[\s\S]*?fn try_mv_unmap", src)
+    assert m, "mv_map_result region not found"
+    assert "count_cas(slot, gen, 0)" in m.group(0), \
         "map cleanup has no compare-and-swap on its slot"
 
 
@@ -78,12 +76,13 @@ def test_call_id_avalanches():
     # avalanches all three inputs (splitmix64 finalizer).
     src = read(COPY)
     m = re.search(
-        r"static __always_inline __u64 mv_call_id\("
+        r"fn call_id\("
         r"[\s\S]*?\n\}\n",
         src)
-    assert m, "mv_call_id not found"
+    assert m, "call_id not found"
     body = m.group(0)
-    assert "0xBF58476D1CE4E5B9" in body, \
+    flat = body.replace("_", "").lower()
+    assert "0xbf58476d1ce4e5b9" in flat, \
         "call id lacks the avalanche mixer"
-    assert "tlb_addr ^ (size" not in body, \
+    assert "tlb_addr ^" not in body, \
         "call id still uses the plain XOR shape"

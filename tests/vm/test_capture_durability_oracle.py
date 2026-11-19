@@ -15,6 +15,11 @@ from unittest.mock import patch
 
 from capture_durability import validate_barrier
 
+PROBE = Path(__file__).resolve().parents[2] / "build/probe/checkpoint_probe"
+PROBE_GONE = not PROBE.is_file()
+PROBE_CAUSE = ("checkpoint_probe retired with the Mojo tree (cutover); "
+               "durability oracle needs a Rust probe binary")
+
 
 class BarrierTests(unittest.TestCase):
     def test_earlier_success_cannot_pass_the_fullness_boundary(self):
@@ -29,6 +34,7 @@ class BarrierTests(unittest.TestCase):
         finally:
             child.stdout.close()
 
+    @unittest.skipIf(PROBE_GONE, PROBE_CAUSE)
     def test_real_writer_publishes_only_after_the_mock_exhaustion_barrier(self):
         from capture_durability_guest import finalize_after_fullness, require_stopped_unfinalized, ROOT
         from test_capture_failures import environment

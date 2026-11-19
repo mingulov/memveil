@@ -10,7 +10,7 @@ the first failing gate in validation order (see
 
 | stderr | Meaning | Fix |
 |---|---|---|
-| `no bridge: ...` | bridge discovered nowhere | pass `--bridge PATH`, or keep the bundled `lib/memveil/libbpf_mojo.so.1` beside `bin/` (unprivileged runs may also set `LMB_NATIVE_LIB`; privileged runs ignore it) |
+| `bridge unchecked: ...` | receipt needs a bridge hash but none was bound | pass `--bridge PATH` naming the file to bind (the engine binary binds the loader itself) |
 | `unknown --profile: ...` | typo or unshipped id | drop `--profile` for auto-select, or check `profiles/manifest.txt` |
 | `object unreadable` | `--object` path missing | point at the shipped `bpf/swiotlb_attempt.bpf.o` |
 | `object refused: ...` | file is not a usable BPF object | use the shipped object; ELFs from other tools are refused |
@@ -73,10 +73,12 @@ capture to clean up.
 - `memveil` prints nothing and exits 1: stdout is blocked
   (closed pipe, full disk). Free the sink and rerun; output
   is never silently dropped.
-- `record` cannot load the bridge on an older userland: the
-  native bridge needs glibc >= 2.38; the offline closure for
-  `report`, `top`, and `doctor` has a glibc 2.35 linkage minimum
-  (`support.md`).
+- `record` cannot start on an older userland: the
+  payload has a glibc 2.35 linkage minimum, set by the
+  pinned Debian libgcc (libgcc-s1 14.2.0-19, no ABI
+  nodes) because the host toolchain libgcc would raise
+  the floor to 2.40 (`support.md`;
+  `packaging/libgcc/PROVENANCE.txt`).
 - `doctor` exits 3: collection is unavailable or unknown on
   this host. Read its per-hook reasons; they name the exact
   missing piece (BTF, tracefs, profile coverage).

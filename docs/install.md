@@ -3,9 +3,10 @@
 
 Third-party system packages for Debian/Ubuntu (`.deb`) and
 Fedora (`.rpm`). Both install the same FHS layout, so every
-installed run needs zero flags and zero environment: the
-bridge and BPF objects are discovered from the system paths,
-profiles resolve from the installed share dir, and
+installed run needs zero flags and zero environment: BPF
+objects are embedded in the binary with the loader
+statically linked, profiles resolve from the installed
+share dir, and
 `qualify` receipts land in the state dir. The
 [bundle flow](quickstart.md) stays available for machines
 without package installs.
@@ -13,7 +14,7 @@ without package installs.
 | Path | Contents |
 |---|---|
 | `/usr/bin/memveil` | The CLI (RUNPATH `$ORIGIN/../lib/memveil`) |
-| `/usr/lib/memveil/` | Private Mojo closure, `libbpf_mojo.so.1`, BPF objects |
+| `/usr/lib/memveil/` | Private closure: the vendored libgcc plus BPF inspection objects |
 | `/usr/share/memveil/profiles/` | Profile manifest plus shipped profiles |
 | `/usr/share/memveil/docs/` | This manuals tree plus the worked example |
 | `/usr/share/doc/memveil/` | Copyright, licenses, and notices |
@@ -26,13 +27,23 @@ capabilities ship, and no collection runs until you invoke
 it. The private libraries under `/usr/lib/memveil/` serve
 only this package's RUNPATH: the `.rpm` disables
 auto-provides so they never satisfy other packages, and
-both formats keep system dependencies manual (libelf,
-zlib, plus a versioned libc floor derived from the staged
-binaries - currently `libc6 >= 2.38` on Debian and `glibc
->= 2.38` on Fedora, set by the bridge's highest GLIBC
-need). On a userland older than that floor (Debian
-bookworm ships libc6 2.36) the install fails closed at
-install time instead of breaking at load.
+both formats keep system dependencies manual. The payload
+ships only its binary, BPF objects, and the vendored
+libgcc, with the Aya loader statically linked, so it needs
+neither libelf nor zlib from the system: `libc6 >= 2.35`
+on Debian and `glibc >= 2.35` on Fedora, derived from the
+staged bytes and currently set by the pinned Debian
+libgcc's highest numeric GLIBC need (libgcc-s1
+14.2.0-19, GLIBC_2.35, no ABI nodes; see
+packaging/libgcc/PROVENANCE.txt). The pinned provider
+is deliberate: the build-host toolchain libgcc needs
+GLIBC_ABI_GNU2_TLS, which would raise the floor to 2.40
+and refuse still-compatible userlands, while the payload
+needs only twelve ancient _Unwind_* symbols any libgcc
+since GCC 4.2 (2007) provides.
+On a userland older than the floor the install fails
+closed at install time instead of breaking at load (Debian
+bookworm ships libc6 2.36, above the floor).
 
 ## .deb: install, use, uninstall
 
@@ -82,28 +93,21 @@ directory stays behind with your receipts.
 
 ## .rpm: build, install, use, uninstall
 
-Build with real `rpmbuild` (the conda/pixi Mojo toolchain
-cannot enter Fedora, so the package is built outside the
-archive from a source tree with the contributor toolchain
-from [build](build.md) plus `rpmbuild`):
+Build with real `rpmbuild` from a source tree with the
+contributor toolchain from [build](build.md) plus
+`rpmbuild`:
 
 
-    SPEC_VER=$(sed -n 's/^Version: *//p' packaging/rpm/memveil.spec)
-    SRC1=$(sed -n 's/^Source1: *//p' packaging/rpm/memveil.spec)
-    mkdir -p ~/rpmbuild/{SOURCES,BUILD,RPMS,SRPMS,BUILDROOT}
-    git archive --prefix=memveil-$SPEC_VER/ HEAD \
-        -o ~/rpmbuild/SOURCES/memveil-$SPEC_VER.tar.gz
-    cp third_party/libbpf-mojo-0.2.3.tar.gz ~/rpmbuild/SOURCES/$SRC1
-    rpmbuild -bb --define "_topdir $HOME/rpmbuild" \
-        --define "debug_package %{nil}" packaging/rpm/memveil.spec
+    cargo build --release --locked
+    python3 scripts/package-rpm.py --out dist
 
 
-Expected: `Wrote: ~/rpmbuild/RPMS/x86_64/memveil-0.1.0-1*.x86_64.rpm`
+Expected: `Wrote: dist/memveil-0.1.0-1*.x86_64.rpm`
 (the release may carry a distro suffix on Fedora
-builders). The bridge tarball must match the
-`tarball_sha256` pin in `toolchain.lock.json`; the build
-refuses anything else. (`third_party/` carries the pinned
-bytes; any lock-matching tarball works as `Source1`.)
+builders). The packager assembles its Source0 from the
+owning checkout (tracked plus unignored-untracked files,
+never a parent's set) and refuses foreign or changed
+source inputs; no build fallback is permitted.
 
 Install on Fedora (dependency resolution proves `Requires`
 holds on the target distro):
@@ -137,8 +141,8 @@ When the containerized `rpm-journey` lane cannot run, the
 same flow by hand is the gate. On the build host, run the
 build above, then on (or in) a Fedora target run install,
 `rpm -V`, `memveil version`, zero-flag `memveil doctor`,
-the `ldd` plus `python3`/ctypes bridge-load probe from the
-`.deb` journey, zero-env `memveil record`, privileged
+`ldd` showing only the vendored libgcc plus host libc,
+zero-env `memveil record`, privileged
 `memveil qualify` (receipt under
 `/var/lib/memveil/receipts/` on a qualifying host, else a
 past-resolution exit 3), uninstall, and the residue check.
@@ -156,8 +160,9 @@ for development; receipts then stay beside it at
 same flag to see them. Only the installed
 `/usr/share/memveil/profiles` maps to
 `/var/lib/memveil/receipts`. `--bridge` and `--object`
-likewise override discovery for non-shipped artifacts;
-without them the installed system paths resolve with no
-environment (under `sudo` the environment is ignored by
-design). See [support](support.md) for the capability
-envelope and [build](build.md) for the toolchain.
+likewise select non-shipped artifacts explicitly;
+without them the embedded objects and the linked loader
+run with no environment (under `sudo` the environment is
+ignored by design). See [support](support.md) for the
+capability envelope and [build](build.md) for the
+toolchain.

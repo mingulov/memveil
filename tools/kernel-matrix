@@ -14,6 +14,11 @@ a summary table merged across runs.
 
 Every verdict predicate lives in tests/vm/kernel_matrix.py;
 this tool only gathers evidence files and boots guests.
+
+On guests whose rootfs cannot install the deb (dpkg missing or
+unmet Debian dependencies, e.g. a Fedora rootfs), use the
+tarball bundle via --bundle instead: dpkg failures there are
+environmental, not verdicts.
 """
 
 import argparse
@@ -453,6 +458,17 @@ def run_one(entry, args, kind, source, disk_img, tools, run_id,
         job["bundle"] = source
     job["repo"] = str(ROOT)
     t0 = time.monotonic()
+    for tool in ("bpftrace", "bpftool"):
+        # vng passes no PATH into the guest, so the guest
+        # cannot resolve the pinned tools by name: hand it
+        # the host-resolved absolute paths (the shared
+        # rootfs makes them valid in-guest). Host preflight
+        # already verified these versions against the lock.
+        path = shutil.which(tool)
+        if not path or not os.path.isabs(path):
+            return stage_fail("tools", "tool-unresolved",
+                              "%s not on PATH" % tool, t0)
+        job[tool] = path
     if stage is not None:
         try:
             stage(export, job)
@@ -571,8 +587,8 @@ def scenario_negatives():
             "swiotlb_copy-%s.bpf.o" % name)
         if not path.is_file():
             raise ValueError(
-                "missing negative object %s (run tools/build)"
-                % path)
+                "missing negative object %s (cutover: C probes retired; "
+                "armed runs need Rust-native probe staging)" % path)
         shas[name] = km.sha_file(str(path))
     return shas
 
@@ -598,20 +614,52 @@ def deb_copy_object_sha(deb):
         raise ValueError("deb read timed out: %s" % deb)
 
 
+def rust_copy_object_sha():
+    """Sha256 of the release build's Aya copy object.
+
+    Mirrors the tarball packager's OUT_DIR rule: every
+    complete build-script output set must agree
+    byte-for-byte, and the newest wins. Missing or
+    divergent sets fail closed with an actionable cause.
+    """
+    base = ROOT / "target" / "release" / "build" / "memveil"
+    try:
+        names = sorted(os.listdir(str(base)))
+    except OSError:
+        raise ValueError("missing Rust BPF artifacts under %s "
+                         "(run cargo build --release)" % base)
+    channels = ("attempt", "lifecycle", "copy")
+    sets = [os.path.join(str(base), name, "out") for name in names
+            if all(os.path.isfile(os.path.join(
+                str(base), name, "out", "memveil-ebpf-" + channel))
+                for channel in channels)]
+    if not sets:
+        raise ValueError("no Rust BPF artifacts under %s "
+                         "(run cargo build --release)" % base)
+    first = {channel: km.sha_file(os.path.join(
+        sets[0], "memveil-ebpf-" + channel)) for channel in channels}
+    for other in sets[1:]:
+        for channel in channels:
+            if km.sha_file(os.path.join(
+                    other, "memveil-ebpf-" + channel)) != first[channel]:
+                raise ValueError("divergent Rust BPF sets: %s vs %s"
+                                 % (sets[0], other))
+    newest = max(sets, key=lambda out: os.path.getmtime(
+        os.path.join(out, "memveil-ebpf-attempt")))
+    return km.sha_file(os.path.join(newest, "memveil-ebpf-copy"))
+
+
 def check_scenario_inputs(deb):
     """Negative shas after the deb matches the build.
 
     Raises ValueError when negatives are missing or the
-    deb's copy object differs from the built one.
+    deb's copy object differs from the Aya release-build
+    copy object.
     """
     shas = scenario_negatives()
-    built = ROOT / "build" / "bpf" / "swiotlb_copy.bpf.o"
-    if not built.is_file():
-        raise ValueError("missing built copy object %s "
-                         "(run tools/build)" % built)
-    if deb_copy_object_sha(deb) != km.sha_file(str(built)):
+    if deb_copy_object_sha(deb) != rust_copy_object_sha():
         raise ValueError(
-            "deb copy object differs from %s" % built)
+            "deb copy object differs from the Rust-built Aya bytes")
     return shas
 
 
@@ -884,9 +932,12 @@ def main(argv=None):
         ROOT / "tests" / "vm" / "kernels.lock.json"),
                         help="kernels lock path")
     parser.add_argument("--deb", default=os.environ.get("MV_DEB"),
-                        help="memveil .deb to install (or MV_DEB)")
+                        help="memveil .deb to install (or MV_DEB); "
+                             "needs a Debian guest rootfs")
     parser.add_argument("--bundle",
-                        help="owner bundle dir with bin/memveil")
+                        help="owner bundle dir with bin/memveil "
+                             "(tarball bundle; the path for "
+                             "non-Debian guest rootfs)")
     parser.add_argument("--disk-img",
                         help="NVMe backing image (created if missing)")
     parser.add_argument("--duration", type=int, default=60,

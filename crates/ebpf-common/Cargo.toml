@@ -1,0 +1,17 @@
+[package]
+name = "memveil-ebpf-common"
+version = "0.0.0"
+edition = "2024"
+# Floor is the pinned eBPF nightly, not the host stable: this crate also
+# builds for the BPF target under nightly-2026-05-20 (rustc 1.97).
+rust-version = "1.97"
+license = "GPL-2.0-or-later"
+description = "MemVeil eBPF/host shared wire record types and decoders"
+publish = false
+
+[features]
+user = []
+
+[lib]
+name = "memveil_ebpf_common"
+path = "src/lib.rs"

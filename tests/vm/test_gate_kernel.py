@@ -311,19 +311,28 @@ def test_doctor_doc_refuses_error_exit():
 
 
 def test_live_gaps_require_available_and_live_verified():
-    ok = {"id": "copy-actual", "status": "available",
-          "reason": "live-verified under reference profile x"}
+    passive = {"id": "copy-actual",
+               "status": "available-load-unchecked",
+               "reason": "candidate x: live interfaces verified"
+                         " (profile unvalidated)"}
+    loaded = {"id": "mapping-lifecycle", "status": "available",
+              "reason": "candidate x: live interfaces verified"
+                        " (profile unvalidated)"}
     doc = {"capabilities": [
-        ok,
-        {"id": "mapping-lifecycle", "status": "available",
-         "reason": "profile claims support"},
+        passive,
+        loaded,
         {"id": "attempt-trace", "status": "unavailable",
-         "reason": "live-verified earlier"}]}
-    assert gate_kernel.live_gaps(doc, ["copy-actual"]) == []
+         "reason": "live check failed: hook absent"},
+        {"id": "mapping-lifecycle-stale", "status": "available",
+         "reason": "live-verified under reference profile x"}]}
     assert gate_kernel.live_gaps(
-        doc, ["attempt-trace", "mapping-lifecycle", "absent-cap"]) == [
-        "attempt-trace (live-verified earlier)",
-        "mapping-lifecycle (profile claims support)",
+        doc, ["copy-actual", "mapping-lifecycle"]) == []
+    assert gate_kernel.live_gaps(
+        doc, ["attempt-trace", "mapping-lifecycle-stale",
+              "absent-cap"]) == [
+        "attempt-trace (live check failed: hook absent)",
+        "mapping-lifecycle-stale "
+        "(live-verified under reference profile x)",
         "absent-cap (absent)"]
 
 

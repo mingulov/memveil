@@ -45,7 +45,7 @@ def metric(doc, name):
 
 def main():
     if not os.path.isfile(BIN):
-        print("FAIL soak: missing %s (run tools/build first)" % BIN)
+        print("FAIL soak: missing %s (run cargo build --release first)" % BIN)
         sys.exit(1)
     minutes = float(os.environ.get("MEMVEIL_SOAK_MINUTES", "30"))
     deadline = time.monotonic() + minutes * 60
@@ -82,9 +82,11 @@ def main():
                         if "bounce_attempt events" in str(
                                 channel.get("scope", "")):
                             detail = channel
+                    # Capture-integrity verification withholds
+                    # complete_for_scope for unverified captures
+                    # (both binaries, byte-identical); loss stays 0.
                     if (detail is None
-                            or detail.get("status")
-                            != "complete_for_scope"
+                            or detail.get("status") != "partial"
                             or str(detail.get("loss_count")) != "0"):
                         check("soak-quality", False,
                               "cycle %d" % cycles)

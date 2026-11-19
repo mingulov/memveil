@@ -206,7 +206,7 @@ work, and each is tested separately:
    size/depth bounds, session/sequence/window/identity cross-record rules -
    and independently recomputes the fixture's expected report. It validates
    local files only.
-3. The product reader (Mojo) strictly parses and cross-validates untrusted
+3. The product reader (Rust) strictly parses and cross-validates untrusted
    captures at runtime; its bounds and rejection behavior have their own
    tests.
 

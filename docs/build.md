@@ -1,334 +1,272 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Build and toolchain guide
 
-This repository builds with a pinned Mojo toolchain managed by pixi, plus
-system C tooling for eBPF programs and test fixtures. Pinned versions live
-in `toolchain.lock.json` (pixi, Mojo, and ninja are exact; system
-clang, bpftool, cmake, and dev-only Python carry minimum floors);
-the `pixi.lock` file carries authoritative conda package hashes.
+This repository builds with a pinned Rust toolchain plus
+system C tooling for test shims and fixtures. Pinned
+versions live in `rust-toolchain.toml` (Rust 1.100.0),
+`crates/ebpf/rust-toolchain.toml` (nightly-2026-05-20 for
+the eBPF child build), `Cargo.lock` plus
+`crates/ebpf/Cargo.lock` (exact dependency closures), and
+`build.rs` (`BPF_TOOLCHAIN`, `BPF_LINKER_VERSION`).
+`cargo build --locked` refuses any drift from the locks.
+
+If your environment forces `RUSTUP_TOOLCHAIN`, unset it
+first so the repository pins win (`env -u
+RUSTUP_TOOLCHAIN cargo ...`).
 
 ## Prerequisites
 
-- `pixi` 0.83.0 exactly, to create the Mojo environment
-  (`python3 tools/install-pixi` installs the locked release
-  after verifying its digest; see below).
-- System `clang` and `bpftool` at or above the locked floors, for C eBPF programs.
-- A native `cc` driver and `ld` for Mojo executable linking; their observed
-  versions, executable hashes and any ccache launcher are recorded in the build receipt.
-- `readelf` from `binutils` verifies the engine's loadable CPU requirement after linking.
-- `python3` for development-only validation tooling.
-- `python3-pytest` (`apt install python3-pytest`): the pytest-driven suites fail loudly without it.
-- `strace` for the package clean-room audit (`apt install strace`).
-- `patchelf`, `binutils` (`strip`, `readelf`) and `zstd` for canonical runtime packaging.
-  The packager checks availability and records their versions and executable hashes.
-- On Fedora the same set comes from `dnf` (`clang llvm bpftool python3-pytest strace patchelf binutils zstd`).
-
-Run `pixi install` once after cloning. Every Mojo command below runs inside
-that environment; the `tools/` wrappers do this for you.
+- Rust 1.100.0 via rustup (`rust-toolchain.toml`
+  selects it automatically), plus the nightly-2026-05-20
+  toolchain and `bpf-linker` 0.10.4 for the eBPF child
+  build (`build.rs` refuses anything else).
+- A native `clang` for the C test shims, the C wire
+  oracles, and the perf pacing adapters (compiled
+  on demand by the suites that use them).
+- `python3` for the packagers, doc generators, and the
+  harness runner; `python3-pytest` for the pytest-driven
+  suites.
+- `readelf` (ELF inspection in tests), `sha256sum`,
+  `dpkg-deb`, `rpmbuild`, `rpm2cpio`, and `cpio` for the
+  packaging suites; on Fedora the same set comes from
+  `dnf`.
+- `strace` for the offline-environment audit.
+- `bpftool`, QEMU/KVM, and passwordless `sudo` only for
+  the armed VM lanes.
 
 ## Layout and wrappers
 
 | Path | Purpose |
 |---|---|
-| `tools/build` | Single supported build path; also `--check-toolchain` |
-| `tools/test <suite>` | Suite runner; `--help` lists suites |
-| `tools/package` | Standalone artifact builder |
+| `Cargo.toml`, `build.rs` | Workspace root; the build script compiles the eBPF channels |
+| `src/` | CLI, platform, capture, model, analysis, and render modules |
+| `crates/ebpf/` | Aya eBPF channel programs (attempt, lifecycle, copy) |
+| `crates/ebpf-common/` | Shared eBPF-side decode tables |
+| `scripts/` | `package-tarball.py`, `package-deb.py`, `package-rpm.py`, `gen-man.py`, `gen-completions.py`, `gen-docs.py` |
+| `packaging/` | deb templates, rpm spec, and the pinned libgcc provider |
+| `tools/test <suite>` | Harness suite runner; `--help` lists suites |
 | `tools/validate-schemas` | Schema and capture validator (Python standard library only) |
-| `src/memveil/` | CLI, platform, capture, model, analysis, and render modules |
-| `bpf/` | MemVeil-only wire declarations and metadata-only C probes |
+| `bpf/include/memveil_events.h` | Shared wire-contract header for the C oracles |
 | `schemas/`, `profiles/` | External format contracts and kernel semantic profiles |
-| `tests/` | Unit, fixture, native, VM, kernel, and confidential suites |
+| `tests/` | Rust integration suites, harness suites, fixtures, and native oracles |
 
-Wrappers print their underlying pinned commands to the build log and return
-nonzero on failure. A skipped privileged test is reported as skipped, never
-as success evidence. Public build/test suites work from a standalone clone
-using only this repository.
+Build, test, package, and document generation:
 
-See [offline fixture generation](fixture-generation.md) for compiler-bound
-provisional fixtures and the complete isolated-runner preflight.
+```sh
+cargo build --release --locked
+cargo test --workspace --locked
+cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings
+./tools/test --help              # list harness suites
+./tools/test reports             # one harness suite
+python3 scripts/package-tarball.py --out dist
+python3 scripts/gen-docs.py --out /tmp/docs --build
+```
 
-## Verified toolchain probes
+Public build/test suites work from a standalone clone
+using only this repository. A skipped privileged test is
+reported as skipped, never as success evidence.
 
-The following was verified against Mojo 1.1.0 by compiling and running
-small probes; skill guidance alone was not trusted. Probe sources were
-disposable development checks, not shipped tests.
-
-- Integers: `UInt64`/`Int` are exact, including values above 2^53 and
-  round-trips through `String`. Unsigned overflow **wraps silently** even
-  in unoptimized builds.
-- CLI input: `std.sys.argv` works (first element is the program name);
-  `std.sys.exit` and `std.sys.stderr` compile.
-- There is no `std.json`: importing it fails to resolve.
-- `std.ffi.external_call` calls linked C (a `getpid` probe returned the
-  caller's PID). `std.ffi.OwnedDLHandle` loads a named `.so` at runtime
-  and a missing library raises a catchable error.
-- Files: `open()` read/write round-trips; `std.pathlib.Path.exists()`
-  works; `std.os` provides `mkdir`, `listdir`, `remove`, and `getenv`.
-  `os.rename` does not exist.
-- `std.time.perf_counter_ns` and `std.time.sleep` compile; there is no
-  `std.time.now`.
-- `mojo build` offers `-O` levels (default 3), `-g` levels (default
-  none), and `--sanitize address|thread`. There is no Mojo UBSan flag.
+See [offline fixture generation](fixture-generation.md)
+for compiler-bound provisional fixtures and the complete
+isolated-runner preflight.
 
 ## Application behavior
 
-Implemented in `src/memveil/` with owning tests per feature:
+Implemented in `src/` with owning tests per feature:
 
-- Capture parsing and report generation in owned Mojo modules with
-  explicit size, depth, and nesting bounds; parsing and accounting are
-  never moved into C or Python.
-- Explicit checked u64 arithmetic helpers that fail closed instead of
-  wrapping.
-- Lazy bridge loading through `OwnedDLHandle`, so offline commands work
-  without the bridge library present. String arguments to retrieved
-  callables must use `as_c_string_span()`, never a raw `String`.
-- Atomic no-replace publication through an inline `renameat2`
-  FFI call with `RENAME_NOREPLACE`: if the target already
+- Capture parsing and report generation in owned Rust
+  modules with explicit size, depth, and nesting bounds;
+  parsing and accounting are never moved into C or Python.
+- Explicit checked `u64` arithmetic helpers that fail
+  closed instead of wrapping.
+- A statically linked Aya loader: offline commands work
+  with no bridge library, and `--bridge` names only a
+  file whose bytes bind receipt checks.
+- Atomic no-replace publication: if the target already
   exists the run refuses to overwrite it instead of
   replacing it.
-- Signal handling through centralized FFI: `record` re-execs once under
-  an inherited mask and consumes signals via signalfd; teardown runs in
-  normal control flow.
-- Sanitizer evidence is recorded per task. `mojo run` cannot JIT
-  sanitized code (ASan runtime symbols fail to materialize), so
-  the sanitizer lane builds each Mojo test target first, then
-  executes the binary.
+- Signal handling through a centralized guard: `record`
+  re-execs once under an inherited mask and consumes
+  signals via signalfd; teardown runs in normal control
+  flow.
 
 ## Compiler settings
 
-- Shipped builds keep the compiler's normal safety checks enabled.
-  Explicit input validation never depends on debug assertions.
-- Optimization and debug info use `-O` and `-g` levels recorded in the
-  build log.
-- `tools/build --sanitize` builds host C targets with
-  `-fsanitize=address,undefined` and Mojo targets with
-  `--sanitize address` (BPF objects unaffected) and records
-  `sanitize=address` in `build/build-receipt.json`;
-  `LMB_SANITIZE=1` runs the test runner's Mojo targets the
-  same way. The Mojo driver offers address and thread
-  sanitizers only (the lane uses address); native C is the
-  only UBSan coverage. The sanitize CI workflow runs the
-  offline suites plus the native suites in this mode with
-  zero tolerated reports. Each result is separate evidence.
-- No compiler internals, unfinished async, or unstable APIs are used.
-  `mojo format` keeps sources canonical.
+- Shipped builds keep the compiler's normal safety checks
+  enabled. Explicit input validation never depends on
+  debug assertions.
+- Edition 2024, `rust-version 1.100`. Optimization and
+  debug info follow the release profile recorded by
+  `cargo build --release --locked`.
+- No sanitizer lane is wired into CI. `unsafe` is
+  confined to FFI boundaries (Aya helpers, libc calls,
+  signal handling) with a `SAFETY` note on each block;
+  new `unsafe` needs a bound it cannot exceed and a test
+  that trips the bound.
+- No compiler internals or unstable APIs are used on the
+  stable toolchain. `cargo fmt` keeps sources canonical;
+  `cargo clippy --locked --all-targets -- -D warnings`
+  must stay clean.
 
 ## Dependencies
 
-`libbpf-mojo` is consumed as a pinned bundle, vendored at
-`third_party/libbpf-mojo-<version>.tar.gz` and verified against the
-`tarball_sha256` pin in `toolchain.lock.json` on every build; release
-builds never use an implicit sibling path. The bundle carries the
-prebuilt native bridge plus Mojo wrapper sources and the C
-interface header (no native implementation sources); the build
-links the prebuilt bridge, it never compiles it. `LMB_PACKAGE`
-overrides the vendored bytes with another tarball, which must
-match the same pin before the build accepts it. The current pin is the
-clean, untagged libbpf-mojo 0.2.3 development candidate at
-`4a22288a397dec5158766fdfcd7a2a6691d1a9fb`, with ABI 1 and the
-existing SONAME. It replaces the previous dirty 0.2.2 development
-bundle; it is not a published v0.2.3 release. Ordinary live collection
-and compiler-free clean-room qualification remain pending, and no
-confidential-platform support follows from this source update.
+Rust crates come from the crates.io registry pinned by
+`Cargo.lock` and `crates/ebpf/Cargo.lock`; there are no
+vendored or patched dependencies. `cargo-deny` gates
+advisories, bans, licenses, and sources for both
+manifests (see `deny.toml` and
+`crates/ebpf/deny.toml`). The eBPF crates link no
+libbpf: Aya loads through its own statically linked
+runtime.
 
-The source distribution includes the matching first-party source,
-exact pinned libbpf source, upstream notices, build receipt and source
-map. See `third_party/README.md` in the source distribution for
-hashes, rebuild instructions and runtime-source/license limits.
+The one shipped shared library, `libgcc_s.so.1` for the
+Rust unwinder, comes from the pinned Debian archive in
+`packaging/libgcc/` (see `PROVENANCE.txt` there), never
+from the build host. The packager refuses on any pin
+mismatch. See the root `THIRD-PARTY-NOTICES.md` for the
+full third-party inventory.
 
 ## Source sealing
 
-`tools/build` settles resolved dependency inputs (the
-libbpf-mojo wrappers and libbpf headers compilers consume)
-before sealing, then seals the source inventory plus the
-resolved inputs (`tools/source_inventory.py`) and finalizes
-`build/build-receipt.json` after compiling: any mid-build
-input change (content, mode, membership, or a touch restoring
-identical bytes, in sources or resolved dependencies) fails
-the build. Restore detection assumes the mutation and the
-restore land in distinct timestamp quanta. `tools/package`
-loads one pinned receipt baseline and verifies every phase
-against those same bytes (never re-reading the receipt path),
-checks every staged source-derived and build-output copy
-against its seal (missing expected copies fail as well as
-differing bytes or modes; staged symlinks are rejected), and
-reads manifest lock metadata from seal-checked bytes. The
-manifest records the verification reads, and every archived
-file binds to those verified bytes as consumed, so bytes
-changed after verification fail the package instead of
-shipping. The manifest records the full inventory and its
-digest next to the descriptive git revision. A failed run
-leaves no staging directory and no final candidate for its
-tag: the archive digest is computed while writing the
-verified bytes, then the tarball hashes, renames into place,
-and hashes again with every read bound to the write digest,
-and any failure drops the tag's bundle and tarball. Explicit
-bundle tags validate before any failure cleanup can act, so
-cleanup only ever drops candidates for a valid tag.
+The packagers seal what they consume: every staged file
+is read through a verified digest, the staged tree is
+compared byte-for-byte against those digests (missing
+and extra files fail as well as differing bytes), and a
+failed run leaves no staging directory and no final
+candidate. The release binary embeds its three channel
+objects at build time; the packager binds the staged
+objects to the exact bytes the binary embeds
+(`--embedded-manifest`) and refuses a mix of builds.
+`MANIFEST.json` records the source digest, receipt
+hash, and dependency identities next to the descriptive
+git revision.
 
 ## Runtime provenance
 
-The Mojo runtime closure ships from the pixi environment, which
-the source seal does not cover, so `tools/package` verifies
-every staged runtime file except the natively built bridge
-against pinned package bytes (`tools/runtime_provenance.py`).
-The packager downloads the locked `.conda` archives (cached
-under `build/deps/runtime/`), verifies each against the
-seal-checked `pixi.lock` bytes, parses each archive from one
-verified in-memory snapshot, and compares staged bytes against
-archive members: exact match, or match through a declared conda
-prefix relocation whose original and staged digests are both
-recorded. Binary relocations follow the installer c-string
-transform (the prefix takes the placeholder's place, the
-suffix stays, zeros pad the field end). Symlink chains resolve
-on both sides, staged symlinks fail, and staged runtime license
-texts must equal their archive members. The manifest records
-owner package, archive digest, member, digests, and
-transformation per file; the staged tree check re-binds staged
-bytes to the verified digests, and any unowned, missing, or
-mismatched payload fails the package. Archive streams
-decompress with the `zstd` CLI, a packaging prerequisite like
-patchelf.
+The bundle carries no toolchain runtime: the only
+shipped shared object is the pinned libgcc above, and
+the manifest records its provider archive, member, and
+digests. Crate provenance comes from the locked
+registries (`Cargo.lock` shas), not from archives. Staged
+symlinks fail; staged license texts must equal their
+locked sources.
 
 ## Pinned executable inputs
 
-Build and automation inputs have explicit admission rules. Immutable pins
-are verified before use; selected system tools are checked against exact
-versions or minimum floors in the lock. The native `cc`/linker chain and
-packaging helpers are availability-checked ambient inputs whose observed
-identities are retained. Their recorded hashes expose changes but do not
-automatically refuse version drift or qualify a resulting artifact.
-
-Packaging helpers remain ambient tools, but `tools/package` checks
-`patchelf`, `strip`, `readelf` and `zstd` before building and records their
-versions and executable SHA-256 values in `MANIFEST.json`. The canonical
-normalization records input and output hashes and the exact operations.
-Debian records its `dpkg-deb` assembly version and the canonical normalizer's
-`patchelf` version. Package formats copy runtime bytes without recompilation,
-RUNPATH rewrites or stripping. Archive metadata can differ.
+Build and automation inputs have explicit admission
+rules. Immutable pins are verified before use; selected
+system tools are checked against exact versions or
+minimum floors. The native `cc` chain and packaging
+helpers are availability-checked ambient inputs whose
+observed identities are retained. Their recorded hashes
+expose changes but do not automatically refuse version
+drift or qualify a resulting artifact.
 
 | Input | Immutable identity | Verified by |
 |---|---|---|
 | Automation actions | Full commit SHA plus the tag comment in `.github/workflows/*.yml` | Provenance gate |
-| pixi installer | Versioned release tarball plus `release_sha256` in `toolchain.lock.json` | `tools/install-pixi`, provenance and input-pins gates |
-| Conda toolchain | `pixi.lock` hashes with `--frozen` resolution and exact first-line checks | `tools/build` |
-| libbpf source | `tarball_sha256` in `toolchain.lock.json` | `tools/build` fetch, build receipt |
-| libbpf-mojo bridge | `tarball_sha256` in `toolchain.lock.json` | `tools/build`, build receipt, packager |
-| rpm Source0 | Owned selection: an owning checkout contributes tracked plus unignored-untracked files, never a parent's set | `tools/rpm-source0`, Source0 tests |
-| apt tools, runner image | Verified ambient: exact versions in `toolchain.lock.json`, floors where noted | `tools/build` refusal, receipts |
-| Native `cc`, cache launcher, `collect2` and linker | Ambient, availability and selected chain checked | Build receipt records observed versions and executable hashes |
-| Packaging helpers (`patchelf`, `strip`, `zstd`, `dpkg-deb`, `readelf`) | Ambient, availability checked | Canonical manifest records normalizer versions and executable hashes; `.deb` records assembly version |
+| Rust toolchains | `rust-toolchain.toml` plus `crates/ebpf/rust-toolchain.toml`, cross-checked against `mise.toml` and `build.rs` | Provenance gate, build refusal |
+| Crate closures | `Cargo.lock` plus `crates/ebpf/Cargo.lock` with `--locked` builds | `cargo build`, provenance gate |
+| `bpf-linker` | Version pin in `build.rs` | Build refusal |
+| `cargo-deny` | 0.21.0, validated in-tree | CI deny jobs |
+| libgcc provider | `.deb` plus member pins in `packaging/libgcc/PROVENANCE.txt` | Packager refusal |
+| rpm Source0 | Owned selection: an owning checkout contributes tracked plus unignored-untracked files, never a parent's set | Packager refusal |
+| Native `cc` and linker | Ambient, availability checked | Tests compile shims and oracles on demand |
+| Packaging helpers (`dpkg-deb`, `rpmbuild`, `readelf`, `sha256sum`) | Ambient, availability checked | Packager refusal, manifest records versions |
 
-Refresh routes, one input at a time with the affected lanes
-re-run:
+Refresh routes, one input at a time with the affected
+lanes re-run:
 
-- Actions: resolve the tag to its commit with `git ls-remote`
-  against the action repository (corroborate with the
-  published tag listing), then update the SHA and the tag
-  comment together.
-- pixi: set the new `version`, `release_asset`,
-  `release_url`, and `release_sha256` together; confirm the
-  digest by downloading the versioned asset independently and
-  running `tools/install-pixi` from a clean prefix.
-- Conda, libbpf, bridge: update the lock, the vendored bytes
-  where applicable, and the recorded hashes together; the
-  build and the provenance gate re-verify each side.
-- Ambient tools: re-qualify the new versions, then update the
-  expected lines in the lock; builds keep refusing anything
-  else.
+- Actions: resolve the tag to its commit with `git
+  ls-remote` against the action repository (corroborate
+  with the published tag listing), then update the SHA
+  and the tag comment together.
+- Toolchains, crates, linker: update the pins, locks,
+  and recorded hashes together; the build and the
+  provenance gate re-verify each side.
+- libgcc: re-run the adoption proofs in
+  `packaging/libgcc/PROVENANCE.txt`, then update the
+  pins; the packager refuses anything else.
+- Ambient tools: re-qualify the new versions; builds
+  keep refusing absences.
 
-`build/build-receipt.json` retains the observed tool versions
-and the consumed dependency digests for the build; the bundle
-`MANIFEST.json` carries the source digest, receipt hash, and
-dependency identities, and the `.deb` control fields (`X-`
-entries) carry the revision, bridge digest, and observed
-`dpkg-deb`/`patchelf` versions into the artifacts.
+The bundle `MANIFEST.json` carries the source digest,
+receipt hash, and dependency identities, and the `.deb`
+control fields (`X-` entries) carry the revision, cargo
+lock digest, and observed tool versions into the
+artifacts.
 
 ## Canonical runtime packages
 
-Build the canonical bundle once from clean source, then pass its directory to
-both package adapters:
+Build the canonical bundle once from clean source, then
+pass its directory to both package adapters:
 
 ```sh
-export LMB_PACKAGE="$PWD/third_party/libbpf-mojo-0.2.3.tar.gz"
-./tools/package --out dist --tag bundle
-./tools/package-deb --bundle "$PWD/dist/bundle" --out dist
-./tools/build-rpm --bundle "$PWD/dist/bundle" --work "$PWD/build/rpm" --out "$PWD/dist"
-python3 tools/canonical_runtime.py --bundle dist/bundle
+cargo build --release --locked
+python3 scripts/package-tarball.py --out dist
+python3 scripts/package-deb.py --bundle "$PWD/dist/memveil-0.1.0" --out dist
+python3 scripts/package-rpm.py --work build/rpm --out dist \
+    --bundle "$PWD/dist/memveil-0.1.0"
 ```
 
-These commands prepare local, unqualified artifacts and do not publish them.
-They do not update `packaging/tested-payload.sha256` or supply qualification
-receipts. Missing qualification still blocks release. Candidate custody and
-release promotion require their separately documented evidence.
+These commands prepare local, unqualified artifacts and
+do not publish them. Missing qualification still blocks
+release. Candidate custody and release promotion require
+their separately documented evidence.
 
-The pinned Mojo build uses `-strip-file-prefix` for checkout-independent
-source diagnostics. `tools/mojo_link.py` preserves the selected native `cc`
-driver, cache chain and arguments while replacing its one SDK RUNPATH with
-a relative development path. Missing, duplicated or unexpected RPATH options
-refuse the build. This prevents SDK-prefix length from changing linked ELF
-layout before canonical staging; the normalizer does not recompile or relink. This does not imply archive-byte identity or admission on
-a different CPU/libc environment.
+The runtime uses `bin/memveil`, `lib/memveil/*.so*`,
+`bpf/`, and `profiles/`. The executable RUNPATH is
+`$ORIGIN/../lib/memveil`. Debian and RPM map the same
+bytes to `/usr/bin`, `/usr/lib/memveil` and
+`/usr/share/memveil/profiles`. The manifest's file
+inventory contains all runtime entries with normalized
+path, type, size and SHA-256. Verification rejects
+missing, added, changed and escaping entries.
 
-The runtime uses `bin/memveil`, `lib/memveil/*.so*`, `bpf/`, and `profiles/`.
-The executable RUNPATH is `$ORIGIN/../lib/memveil`. Debian and RPM map the
-same bytes to `/usr/bin`, `/usr/lib/memveil` and
-`/usr/share/memveil/profiles`. The manifest's `canonical_runtime` contains
-all runtime entries with normalized path, type, size and SHA-256. Verification
-rejects missing, added, changed and escaping entries. Given an extracted
-installed package, compare it with the bundle using:
+The minimum runtime CPU eligibility is **x86-64-v3**.
+The engine keeps x86-64-v2 code generation; that does
+not lower the runtime requirement. Its single link adds
+the `GNU_PROPERTY_X86_ISA_1_NEEDED` v3 declaration. The
+build and bundle verifier inspect the actual loadable
+property and refuse an absent, weaker or stronger
+declaration. A compatible glibc loader checks the
+declaration before library constructors execute. An
+incompatible CPU produces `CPU ISA level is lower than
+required` and exits 127 on the verified loaders. This
+is a pre-CLI loader refusal, separate from MemVeil
+command exits. CPU eligibility and recorded tool
+identities do not qualify an artifact or environment.
+The artifact's libc floor is derived from its complete
+ELF closure; the vendor's development-system minimum
+alone is insufficient.
 
-```sh
-python3 tools/canonical_runtime.py --bundle dist/bundle --installed extracted-root
-```
+`--bundle DIR` is the package-adapter interface for a
+retained canonical tree. Adapters retain its verified
+complete file manifest before copying. They compare
+every copied runtime, license, notice, manual and
+example at its installed destination before executing
+the staged engine and again before assembly. Generated
+package metadata, man pages and completions are
+separate outputs. Matching bytes do not grant
+qualification. Keep the matching source export
+alongside distributable archives.
 
-In `memveil-runtime/1`, every entry's `size` is an unsigned 64-bit decimal
-JSON string: `"0"` or digits beginning with `1` through `9`, up to
-`"18446744073709551615"`. JSON numbers, signs, leading zeros, whitespace,
-non-ASCII digits and overflow are rejected. Verification compares the validated
-integer with the file's actual byte length. Existing build and source receipt
-formats retain their own integer fields.
+For package-only verification of a retained bundle,
+build the packages from that bundle directory and run
+the packaging suites against them; an explicit bundle
+input never triggers a product rebuild. Debian and RPM
+install/collection journeys require their designated
+isolated environments; offline extraction equality
+does not satisfy those live gates.
 
-The minimum runtime CPU eligibility is **x86-64-v3**, as required by the
-[selected Mojo 1.2.0 runtime](https://mojolang.org/docs/requirements/).
-The engine keeps x86-64-v2 code generation; that does not lower the requirements
-of its prebuilt libraries. Its single link adds the
-`GNU_PROPERTY_X86_ISA_1_NEEDED` v3 declaration with `-z x86-64-v3`.
-The build and bundle verifier inspect the actual loadable property and refuse
-an absent, weaker or stronger declaration. Provider libraries are not rewritten.
+The source-export gate archives the tree Git-free and
+runs the provenance gate from the export itself, then
+packages from the export to prove the release candidate
+needs no repository metadata.
 
-The build receipt and `canonical_runtime.cpu` record separate `code_generation`
-(`x86-64-v2`), `runtime_required` (`x86-64-v3`), and `enforcement`
-(`gnu-property-x86-isa-needed`) fields. A compatible glibc loader checks the
-declaration before library constructors or Mojo execute. An incompatible CPU
-produces `CPU ISA level is lower than required` and exits 127 on the verified
-loaders. This is a pre-CLI loader refusal, separate from MemVeil command exits.
-CPU eligibility and recorded tool identities do not qualify an artifact or
-environment. The artifact's libc floor is derived from its complete ELF closure;
-the vendor's development-system minimum alone is insufficient.
-
-`--bundle DIR` is the package-adapter interface for a retained canonical tree.
-Adapters retain its verified complete file manifest before copying. They
-compare every copied runtime, license, notice, manual and example at its
-installed destination before executing the staged engine and again before
-assembly. Generated package metadata, man pages and completions are separate
-outputs. Matching bytes do not grant qualification. Keep the matching source export, including the dependency sources
-and attribution under `third_party`, alongside distributable archives.
-
-For package-only verification of a retained bundle, set
-`MV_BUNDLE_TARBALL=/absolute/path/bundle.tar.gz` and run `./tools/test package`.
-An explicit bundle input never triggers a product rebuild. `release-runtime`
-also accepts that input. Debian and RPM install/collection journeys require
-their designated isolated environments; offline extraction equality does not
-satisfy those live gates.
-
-The source-export gate builds two Git-free copies with separate frozen SDK
-installations and unequal source/SDK path lengths, then compares every canonical
-runtime entry. Set `MV_CANONICAL_BUNDLE_DIR` to additionally compare a retained
-checkout bundle. Archive headers and descriptive provenance may differ.
-
-RPM assembly also binds its supplied bridge archive to the source lock and
-compares the current source inventory (content, membership and modes) with the
-bundle's sealed build inputs before constructing Source0 or invoking rpmbuild.
-File timestamps may differ across identical exports. Foreign or changed source
-inputs refuse; no build fallback or qualification inference is permitted.
+RPM assembly compares the current source inventory
+(content, membership and modes) with the sealed build
+inputs before constructing Source0 or invoking rpmbuild.
+File timestamps may differ across identical exports.
+Foreign or changed source inputs refuse; no build
+fallback or qualification inference is permitted.

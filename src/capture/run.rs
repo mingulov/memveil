@@ -1,0 +1,2559 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//! Shared collection service: admission plus the collector run.
+//!
+//! The record verb, live top, and the qualify smoke share
+//! this one narrow boundary: run options with fixed
+//! defaults, capability parsing, profile admission
+//! ([`decide_record`]), artifact discovery, and
+//! [`run_collector_with`], which runs admission plus
+//! collection and returns the raw outcome. Pre-run
+//! refusals return exit 3 with an unprefixed diagnostic
+//! and create no BPF or output resource; each command
+//! adds its own verb prefix and renders its own output.
+//! Ownership repair of a finalized capture stays shared
+//! through [`repair_warning_for`] (pure: it returns the
+//! warn-once line, else ""), while writing that line
+//! stays with the calling command. Argument parsing and
+//! presentation stay in the commands.
+//!
+//! Objects resolve explicitly or from the linked-in
+//! artifacts ("": the statically linked loader needs no
+//! bridge file, so an empty bridge is the normal case,
+//! not a refusal).
+
+use super::collector::{Collector, CollectorConfig, EXIT_REFUSAL, RunResult};
+use super::kernel::AyaKernel;
+use super::live::WriterSource;
+use super::loadcheck::{LoadDiag, diagnose_load, load_refusal_code};
+use super::reader::DEFAULT_MAX_EVENTS_BYTES as REPLAY_MAX_EVENTS_BYTES;
+use crate::model::session::EvidenceItem;
+use crate::model::validate::check_opaque_id;
+use crate::platform::artifact_files::{join_root, open_bridge_snapshot, restore_capture_ownership};
+use crate::platform::btf::{read_btf_copy_fb, read_btf_maps, read_btf_maps_ring};
+use crate::platform::capabilities::{attempt_loss_exact, cap_floor_ok, cap_floor_refusal};
+use crate::platform::clock::{MonoClock, check_timens_live};
+use crate::platform::evidence::{KernelInfo, detect_environment};
+use crate::platform::hash::sha256_hex;
+use crate::platform::kernelgate::{GateVerdict, kernel_gate, remedy_for};
+use crate::platform::narrow::{
+    LiveValue, MAX_NARROW_BTF_BYTES, MAX_NARROW_FORMAT_BYTES, MAX_NARROW_IMAGE_BYTES,
+    MAX_NARROW_OBJECT_BYTES, MAX_NARROW_RING_BYTES, NarrowLive, OffsetProbe, check_narrow,
+    check_narrow_extra, parse_narrow_note, probe_trace_offsets, read_live_bid, read_live_bytes,
+    read_live_config, verify_object, verify_object_program,
+};
+use crate::platform::profiles::{
+    Profile, ProfileHook, default_receipts_dir, load_profiles, parse_profile_bytes,
+    select_attempt_hook, select_profile, tracing_gap, verify_live_interfaces, verify_live_receipt,
+    verify_qualification_receipt,
+};
+use crate::platform::reader::{
+    host_file_denied, open_evidence_reader, read_evidence, read_host_file, readlink_self,
+};
+use crate::platform::runtime::{discover_bridge, discover_object, embedded_object, live_uids};
+use crate::platform::signal::LiveSignalSource;
+use crate::platform::tracefs::{probe_tracefs, tracefs_translate};
+
+/// Default capture duration in seconds.
+pub const DEFAULT_DURATION_S: u64 = 60;
+/// Default events budget: always replays under the report cap.
+pub const DEFAULT_MAX_EVENTS_BYTES: u64 = REPLAY_MAX_EVENTS_BYTES as u64;
+/// Minimum record budget in bytes.
+pub const MIN_RECORD_BYTES: u64 = 131072;
+/// Maximum record budget in bytes.
+pub const MAX_RECORD_BYTES: u64 = 4294967296;
+/// Profile document read cap in bytes.
+pub const MAX_PROFILE_DOC_BYTES: usize = 1048576;
+const ZLIB: &str = "libz.so.1";
+const PROGRAM: &str = "mv_swiotlb_attempt";
+const ATTEMPT_CAP: &str = "attempt-trace";
+const LIFECYCLE_CAP: &str = "mapping-lifecycle";
+const COPY_CAP: &str = "copy-actual";
+const CONVERT_CAP: &str = "conversion-observe";
+const RING_LC_MAP: &str = "mv_lifecycle";
+const RING_CP_MAP: &str = "mv_copies";
+
+/// Parsed record arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordOptions {
+    /// Capture duration in seconds.
+    pub duration_s: u64,
+    /// Events budget in bytes.
+    pub max_events_bytes: u64,
+    /// Output capture directory.
+    pub output: String,
+    /// Explicit attempt object path.
+    pub object: String,
+    /// Explicit bridge path.
+    pub bridge: String,
+    /// True when --bridge was passed.
+    pub has_bridge: bool,
+    /// Explicit profile id or path.
+    pub profile: String,
+    /// True when --profile was passed.
+    pub has_profile: bool,
+    /// Profiles directory.
+    pub profiles_dir: String,
+    /// True when --profiles-dir was passed.
+    pub has_profiles_dir: bool,
+    /// Explicit lifecycle object path.
+    pub lc_object: String,
+    /// Explicit copy object path.
+    pub cp_object: String,
+    /// Requested capabilities list.
+    pub capabilities: String,
+    /// Device selector.
+    pub device: String,
+    /// True when --device was passed.
+    pub has_device: bool,
+    /// Strict exit mode.
+    pub strict: bool,
+}
+
+impl Default for RecordOptions {
+    fn default() -> Self {
+        Self {
+            duration_s: DEFAULT_DURATION_S,
+            max_events_bytes: DEFAULT_MAX_EVENTS_BYTES,
+            output: String::new(),
+            object: String::new(),
+            bridge: String::new(),
+            has_bridge: false,
+            profile: String::new(),
+            has_profile: false,
+            profiles_dir: String::new(),
+            has_profiles_dir: false,
+            lc_object: String::new(),
+            cp_object: String::new(),
+            capabilities: String::new(),
+            device: String::new(),
+            has_device: false,
+            strict: false,
+        }
+    }
+}
+
+/// One admitted extra channel: verified bytes, hash, ring.
+///
+/// Lifecycle and copy channels admit identically shaped
+/// artifacts (verified object bytes, sha256, bound ring
+/// size) through the same static checks; the struct
+/// keeps that accounting grouped while each channel's
+/// programs, ring map, and event semantics stay
+/// explicit at its own call site. `present` False
+/// carries empty artifacts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExtraChannel {
+    /// True when the channel was requested and verified.
+    pub present: bool,
+    /// Verified object bytes.
+    pub elf: Vec<u8>,
+    /// Bound ring size.
+    pub ring_bytes: i64,
+    /// Object sha256.
+    pub object_sha: String,
+}
+
+/// One admission decision: mode, hook, identity, bytes.
+///
+/// `ok` False carries an exit-3 `refusal`; otherwise
+/// `kind` is validated, local-auto, candidate, or partial, `hook`
+/// is the selected tracepoint hook with a verified live
+/// layout, and `elf` is the verified object bytes (read
+/// once, hashed and handed to the session unchanged).
+/// Bound decisions also carry the measured narrow
+/// identities (config/src, btf, format, image, image
+/// build-id); partial decisions leave them empty so the
+/// capture marks each one unavailable. `selected_caps`
+/// names the requested capabilities in order; a selected
+/// extra channel carries its verified object bytes, hash,
+/// and bound ring size in `lc`/`cp`, and never runs
+/// partial. `layout_evidence` carries one line per
+/// checked 0.1.2 layout item. Admitted decisions carry
+/// the probed
+/// load-time table offsets (`off_*`, -1 when never
+/// probed). Refusals carry a machine `refusal_code`
+/// (`profile` for selection refusals), whether the
+/// evidence was `refusal_unknown`, and a user `fix`
+/// line ("" when none applies).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanDecision {
+    /// True when admission succeeded.
+    pub ok: bool,
+    /// Refusal reason; empty when ok.
+    pub refusal: String,
+    /// Machine refusal code.
+    pub refusal_code: String,
+    /// True when the refusal is uncertainty.
+    pub refusal_unknown: bool,
+    /// User fix line.
+    pub fix: String,
+    /// validated, local-auto, candidate, or partial.
+    pub kind: String,
+    /// Admitted profile.
+    pub profile: Profile,
+    /// Selected tracepoint hook.
+    pub hook: ProfileHook,
+    /// Human decision reason.
+    pub reason: String,
+    /// Object sha256.
+    pub object_sha: String,
+    /// Bound ring size.
+    pub ring_bytes: i64,
+    /// Probed dev_name offset.
+    pub off_loc: i64,
+    /// Probed size offset.
+    pub off_size: i64,
+    /// Probed force offset.
+    pub off_force: i64,
+    /// Probed dynamic-data floor.
+    pub off_fixed_end: i64,
+    /// Verified object bytes.
+    pub elf: Vec<u8>,
+    /// Tracepoint system.
+    pub tp_system: String,
+    /// Tracepoint event.
+    pub tp_event: String,
+    /// Measured config identity.
+    pub measured_config: LiveValue,
+    /// Measured config source.
+    pub measured_config_src: String,
+    /// Measured BTF identity.
+    pub measured_btf: LiveValue,
+    /// Measured format identity.
+    pub measured_format: LiveValue,
+    /// Measured image identity.
+    pub measured_image: LiveValue,
+    /// Measured image build-id.
+    pub measured_image_bid: LiveValue,
+    /// Requested capabilities in order.
+    pub selected_caps: String,
+    /// One line per checked layout item.
+    pub layout_evidence: Vec<String>,
+    /// Admitted lifecycle channel.
+    pub lc: ExtraChannel,
+    /// Admitted copy channel.
+    pub cp: ExtraChannel,
+}
+
+impl Default for ScanDecision {
+    fn default() -> Self {
+        Self {
+            ok: false,
+            refusal: String::new(),
+            refusal_code: String::new(),
+            refusal_unknown: false,
+            fix: String::new(),
+            kind: String::new(),
+            profile: Profile::default(),
+            hook: ProfileHook::default(),
+            reason: String::new(),
+            object_sha: String::new(),
+            ring_bytes: 0,
+            off_loc: -1,
+            off_size: -1,
+            off_force: -1,
+            off_fixed_end: -1,
+            elf: Vec::new(),
+            tp_system: String::new(),
+            tp_event: String::new(),
+            measured_config: LiveValue {
+                state: String::new(),
+                value: String::new(),
+                detail: String::new(),
+            },
+            measured_config_src: String::new(),
+            measured_btf: LiveValue {
+                state: String::new(),
+                value: String::new(),
+                detail: String::new(),
+            },
+            measured_format: LiveValue {
+                state: String::new(),
+                value: String::new(),
+                detail: String::new(),
+            },
+            measured_image: LiveValue {
+                state: String::new(),
+                value: String::new(),
+                detail: String::new(),
+            },
+            measured_image_bid: LiveValue {
+                state: String::new(),
+                value: String::new(),
+                detail: String::new(),
+            },
+            selected_caps: String::new(),
+            layout_evidence: Vec::new(),
+            lc: ExtraChannel::default(),
+            cp: ExtraChannel::default(),
+        }
+    }
+}
+
+fn refuse_scan(reason: String) -> ScanDecision {
+    ScanDecision {
+        ok: false,
+        refusal: reason,
+        refusal_code: "profile".to_string(),
+        ..Default::default()
+    }
+}
+
+/// One kernel-gate refusal: reason, code, unknown flag, fix.
+fn refuse_scan_gate(gate: &GateVerdict) -> ScanDecision {
+    ScanDecision {
+        ok: false,
+        refusal: gate.reason.clone(),
+        refusal_code: gate.code.clone(),
+        refusal_unknown: gate.unknown,
+        fix: gate.remedy.clone(),
+        ..Default::default()
+    }
+}
+
+/// One live refusal code, defaulting to the selection class.
+fn live_skip_code(code: &str) -> String {
+    if code.is_empty() {
+        return "profile".to_string();
+    }
+    code.to_string()
+}
+
+/// One live-check refusal: reason, code, unknown flag, fix.
+fn refuse_scan_live(reason: String, code: &str, unknown: bool) -> ScanDecision {
+    let refusal_code = live_skip_code(code);
+    let fix = remedy_for(&refusal_code);
+    ScanDecision {
+        ok: false,
+        refusal: reason,
+        refusal_code,
+        refusal_unknown: unknown,
+        fix,
+        ..Default::default()
+    }
+}
+
+/// Last path component: refusal reasons leak no layout.
+fn refusal_basename(path: &str) -> String {
+    let b = path.as_bytes();
+    let mut cut = 0;
+    for (i, byte) in b.iter().enumerate() {
+        if *byte == 0x2F {
+            cut = i + 1;
+        }
+    }
+    if cut >= b.len() {
+        return path.to_string();
+    }
+    String::from_utf8(b[cut..].to_vec()).unwrap_or_else(|_| path.to_string())
+}
+
+/// Parsed capability request: caps in order, or err.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CapsOut {
+    /// True when the request parsed.
+    pub ok: bool,
+    /// Requested caps in order.
+    pub caps: Vec<String>,
+    /// Parse failure; empty when ok.
+    pub err: String,
+}
+
+/// Split a comma capability list (strict, no spaces).
+fn split_caps(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = Vec::new();
+    for byte in text.as_bytes() {
+        if *byte == 0x2C {
+            out.push(String::from_utf8(cur.clone()).unwrap_or_default());
+            cur = Vec::new();
+        } else {
+            cur.push(*byte);
+        }
+    }
+    out.push(String::from_utf8(cur).unwrap_or_default());
+    out
+}
+
+/// Parse requested capabilities in order, deduplicated.
+///
+/// Empty means attempt-trace alone; the sole item "all"
+/// expands to the three record channels. Unknown ids,
+/// empty items, and requests without attempt-trace
+/// refuse: the attempt channel is the mandatory base
+/// channel.
+pub fn parse_requested_caps(want: &str) -> CapsOut {
+    let mut out = CapsOut::default();
+    if want == "all" {
+        out.caps.push(ATTEMPT_CAP.to_string());
+        out.caps.push(LIFECYCLE_CAP.to_string());
+        out.caps.push(COPY_CAP.to_string());
+        out.ok = true;
+        return out;
+    }
+    let mut items = Vec::new();
+    if want.is_empty() {
+        items.push(ATTEMPT_CAP.to_string());
+    } else {
+        items = split_caps(want);
+    }
+    for item in &items {
+        if item.is_empty() {
+            out.err = "bad capability list".to_string();
+            return out;
+        }
+        if item != ATTEMPT_CAP && item != LIFECYCLE_CAP && item != COPY_CAP && item != CONVERT_CAP {
+            out.err = format!("unknown capability: {item}");
+            return out;
+        }
+        let mut seen = false;
+        for have in &out.caps {
+            if have == item {
+                seen = true;
+                break;
+            }
+        }
+        if !seen {
+            out.caps.push(item.clone());
+        }
+    }
+    let mut has_attempt = false;
+    for cap in &out.caps {
+        if cap == ATTEMPT_CAP {
+            has_attempt = true;
+            break;
+        }
+    }
+    if !has_attempt {
+        out.err = "attempt-trace is required".to_string();
+        return out;
+    }
+    out.ok = true;
+    out
+}
+
+/// True when the doc admits the capability for capture.
+///
+/// Both supported and candidate declarations select;
+/// the decision kind already tells them apart. Only
+/// unsupported or missing declarations refuse.
+fn cap_selectable(doc: &Profile, cap: &str) -> bool {
+    for c in &doc.caps {
+        if c.id == cap {
+            return c.status == "supported" || c.status == "candidate";
+        }
+    }
+    false
+}
+
+/// First hook a requested cap names that the doc lacks.
+fn cap_unknown_hook(doc: &Profile, cap: &str) -> String {
+    for c in &doc.caps {
+        if c.id == cap {
+            for want in &c.hooks {
+                let mut found = false;
+                for h in &doc.hooks {
+                    if h.name == *want {
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    return want.clone();
+                }
+            }
+            return String::new();
+        }
+    }
+    String::new()
+}
+
+/// One frozen tracing program: name plus section kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProgWant {
+    name: String,
+    section: String,
+}
+
+fn lc_progs() -> Vec<ProgWant> {
+    vec![
+        ProgWant {
+            name: "mv_map_result".to_string(),
+            section: "fexit/".to_string(),
+        },
+        ProgWant {
+            name: "mv_unmap".to_string(),
+            section: "fentry/".to_string(),
+        },
+    ]
+}
+
+fn cp_progs() -> Vec<ProgWant> {
+    vec![
+        ProgWant {
+            name: "mv_bounce".to_string(),
+            section: "fentry/".to_string(),
+        },
+        ProgWant {
+            name: "mv_bounce_exit".to_string(),
+            section: "fexit/".to_string(),
+        },
+        ProgWant {
+            name: "mv_sync_device".to_string(),
+            section: "fentry/".to_string(),
+        },
+        ProgWant {
+            name: "mv_sync_cpu".to_string(),
+            section: "fentry/".to_string(),
+        },
+    ]
+}
+
+/// Frozen attempt program names for load diagnostics.
+pub fn attempt_program_names() -> Vec<String> {
+    vec![PROGRAM.to_string()]
+}
+
+/// Frozen lifecycle program names for load diagnostics.
+pub fn lifecycle_program_names() -> Vec<String> {
+    lc_progs().iter().map(|w| w.name.clone()).collect()
+}
+
+/// Frozen copy program names for load diagnostics.
+pub fn copy_program_names() -> Vec<String> {
+    cp_progs().iter().map(|w| w.name.clone()).collect()
+}
+
+/// True when a diagnostic names an EINVAL/EACCES load errno.
+fn is_load_errno_failure(diagnostic: &str) -> bool {
+    if diagnostic.contains("code=-22") {
+        return true;
+    }
+    diagnostic.contains("code=-13")
+}
+
+/// True when the diagnostic tags one load channel.
+fn has_channel(diagnostic: &str, channel: i64) -> bool {
+    let tag = format!("ch{channel} ");
+    if diagnostic.starts_with(&tag) {
+        return true;
+    }
+    diagnostic.contains(&format!("; {tag}"))
+}
+
+/// 0/1/2 for the load channel a diagnostic blames, else 0.
+///
+/// Session and load errors carry a ch0/ch1/ch2 tag from
+/// the kernel layer; the verifier replay diagnoses the
+/// blamed object's load. Untagged diagnostics replay
+/// the attempt object.
+fn load_fail_channel(diagnostic: &str) -> i64 {
+    if has_channel(diagnostic, 1) {
+        return 1;
+    }
+    if has_channel(diagnostic, 2) {
+        return 2;
+    }
+    0
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ExtraOut {
+    ok: bool,
+    refusal: String,
+    elf: Vec<u8>,
+    sha: String,
+    ring: i64,
+}
+
+/// Static admission for one extra channel object.
+///
+/// Verifies every frozen tracing program in its section
+/// kind over the resolved bytes, and reads the channel
+/// ring size from BTF. Refusals name the channel word.
+fn verify_extra_object(
+    elf: &[u8],
+    word: &str,
+    ring_var: &str,
+    ring_word: &str,
+    wants: &[ProgWant],
+) -> ExtraOut {
+    let mut out = ExtraOut::default();
+    for want in wants {
+        let chk = verify_object_program(elf, &want.name, &want.section);
+        if !chk.ok {
+            out.refusal = format!("{word} object refused: {}", chk.message);
+            return out;
+        }
+    }
+    let maps = read_btf_maps_ring(elf, ring_var, ring_word);
+    if !maps.ok {
+        out.refusal = format!("{word} object refused: {}", maps.message);
+        return out;
+    }
+    if maps.ring_bytes > MAX_NARROW_RING_BYTES {
+        out.refusal = format!("{word} object ring too large");
+        return out;
+    }
+    if word == "cp" {
+        let fb = read_btf_copy_fb(elf);
+        if !fb.ok {
+            out.refusal = format!("{word} object refused: {}", fb.message);
+            return out;
+        }
+    }
+    out.ok = true;
+    out.elf = elf.to_vec();
+    out.sha = sha256_hex(elf);
+    out.ring = maps.ring_bytes;
+    out
+}
+
+/// Split a `system:event` hook name into C identifiers.
+fn split_site(name: &str) -> Option<(String, String)> {
+    let raw = name.as_bytes();
+    let mut cut: Option<usize> = None;
+    for (i, byte) in raw.iter().enumerate() {
+        if *byte == 0x3A {
+            if cut.is_some() {
+                return None;
+            }
+            cut = Some(i);
+        }
+    }
+    let cut = cut?;
+    if cut == 0 || cut + 1 >= raw.len() {
+        return None;
+    }
+    for (i, byte) in raw.iter().enumerate() {
+        if i == cut {
+            continue;
+        }
+        let ok = byte.is_ascii_alphanumeric() || *byte == 0x5F;
+        if !ok {
+            return None;
+        }
+    }
+    let sys = String::from_utf8(raw[..cut].to_vec()).ok()?;
+    let evt = String::from_utf8(raw[cut + 1..].to_vec()).ok()?;
+    Some((sys, evt))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BindingOut {
+    ok: bool,
+    reason: String,
+    config: LiveValue,
+    config_src: String,
+    btf: LiveValue,
+    format: LiveValue,
+    image: LiveValue,
+    image_bid: LiveValue,
+}
+
+fn live_value_empty() -> LiveValue {
+    LiveValue {
+        state: String::new(),
+        value: String::new(),
+        detail: String::new(),
+    }
+}
+
+impl Default for BindingOut {
+    fn default() -> Self {
+        Self {
+            ok: false,
+            reason: String::new(),
+            config: live_value_empty(),
+            config_src: String::new(),
+            btf: live_value_empty(),
+            format: live_value_empty(),
+            image: live_value_empty(),
+            image_bid: live_value_empty(),
+        }
+    }
+}
+
+/// Full narrow binding of one doc against live identity.
+///
+/// Release must equal the recorded revision, the note
+/// must parse, every live source must match, requested
+/// extra channels must bind their object bytes and ring
+/// sizes, and the live format bytes must equal the
+/// embedded text.
+#[allow(clippy::too_many_arguments)]
+fn check_binding(
+    root: &str,
+    release: &str,
+    doc: &Profile,
+    hook: &ProfileHook,
+    object_sha: &str,
+    ring_bytes: i64,
+    format_bytes: &[u8],
+    lc_sha: &str,
+    lc_ring: i64,
+    cp_sha: &str,
+    cp_ring: i64,
+    want_lc: bool,
+    want_cp: bool,
+) -> BindingOut {
+    let mut out = BindingOut::default();
+    if release != doc.identity.source.revision {
+        out.reason = "release != revision".to_string();
+        return out;
+    }
+    let parsed = parse_narrow_note(&doc.identity.source.note);
+    if !parsed.ok {
+        out.reason = parsed.message;
+        return out;
+    }
+    let bind = parsed.bindings;
+    let mut live = NarrowLive::new();
+    let cfg = read_live_config(root, release, ZLIB);
+    live.config = cfg.value;
+    live.config_src = cfg.src;
+    live.btf = read_live_bytes(root, "/sys/kernel/btf/vmlinux", "btf", MAX_NARROW_BTF_BYTES);
+    live.format = LiveValue {
+        state: "value".to_string(),
+        value: sha256_hex(format_bytes),
+        detail: String::new(),
+    };
+    live.object = LiveValue {
+        state: "value".to_string(),
+        value: object_sha.to_string(),
+        detail: String::new(),
+    };
+    live.image = read_live_bytes(
+        root,
+        &format!("/boot/vmlinuz-{release}"),
+        "image",
+        MAX_NARROW_IMAGE_BYTES,
+    );
+    live.image_bid = read_live_bid(root);
+    live.ring = LiveValue {
+        state: "value".to_string(),
+        value: format!("{ring_bytes}"),
+        detail: String::new(),
+    };
+    out.config = live.config.clone();
+    out.config_src = live.config_src.clone();
+    out.btf = live.btf.clone();
+    out.format = live.format.clone();
+    out.image = live.image.clone();
+    out.image_bid = live.image_bid.clone();
+    let verdict = check_narrow(&bind, &live);
+    if verdict.state != "bound" {
+        out.reason = format!("{} {}", verdict.state, verdict.key);
+        return out;
+    }
+    live.lc_object = LiveValue {
+        state: "value".to_string(),
+        value: lc_sha.to_string(),
+        detail: String::new(),
+    };
+    live.lc_ring = LiveValue {
+        state: "value".to_string(),
+        value: format!("{lc_ring}"),
+        detail: String::new(),
+    };
+    live.cp_object = LiveValue {
+        state: "value".to_string(),
+        value: cp_sha.to_string(),
+        detail: String::new(),
+    };
+    live.cp_ring = LiveValue {
+        state: "value".to_string(),
+        value: format!("{cp_ring}"),
+        detail: String::new(),
+    };
+    let extra = check_narrow_extra(&bind, &live, want_lc, want_cp);
+    if extra.state != "bound" {
+        out.reason = format!("{} {}", extra.state, extra.key);
+        return out;
+    }
+    if !hook.format_has {
+        out.reason = "uncheckable format_text".to_string();
+        return out;
+    }
+    let want = hook.format_text.as_bytes();
+    if want.len() != format_bytes.len() {
+        out.reason = "mismatch format_text".to_string();
+        return out;
+    }
+    for i in 0..want.len() {
+        if want[i] != format_bytes[i] {
+            out.reason = "mismatch format_text".to_string();
+            return out;
+        }
+    }
+    out.ok = true;
+    out.reason = String::new();
+    out
+}
+
+/// Measure live narrow identities without comparing.
+///
+/// Reads the same live sources `check_binding`
+/// hashes (config plus source, btf, format, image,
+/// image build-id) for live-path candidates, which
+/// carry no parsed note to compare against. The hook
+/// rides along for the call shape only; no format
+/// text comparison runs here.
+fn measure_binding(
+    root: &str,
+    release: &str,
+    _hook: &ProfileHook,
+    format_bytes: &[u8],
+) -> BindingOut {
+    let mut out = BindingOut::default();
+    let mut live = NarrowLive::new();
+    let cfg = read_live_config(root, release, ZLIB);
+    live.config = cfg.value;
+    live.config_src = cfg.src;
+    live.btf = read_live_bytes(root, "/sys/kernel/btf/vmlinux", "btf", MAX_NARROW_BTF_BYTES);
+    live.format = LiveValue {
+        state: "value".to_string(),
+        value: sha256_hex(format_bytes),
+        detail: String::new(),
+    };
+    live.image = read_live_bytes(
+        root,
+        &format!("/boot/vmlinuz-{release}"),
+        "image",
+        MAX_NARROW_IMAGE_BYTES,
+    );
+    live.image_bid = read_live_bid(root);
+    out.config = live.config.clone();
+    out.config_src = live.config_src.clone();
+    out.btf = live.btf.clone();
+    out.format = live.format.clone();
+    out.image = live.image.clone();
+    out.image_bid = live.image_bid.clone();
+    out.ok = true;
+    out.reason = String::new();
+    out
+}
+
+fn covers(kernel: &KernelInfo, doc: &Profile) -> bool {
+    select_profile(kernel, std::slice::from_ref(doc)).has_profile
+}
+
+/// True when a verifying receipt covers every wanted cap.
+///
+/// The receipt at <receipts-dir>/<id>.json must verify
+/// against the doc, the live kernel, and the resolved
+/// bridge hash, and qualify each requested capability.
+/// Docs with a parseable narrow note verify exactly;
+/// docs with no usable note verify against fresh live
+/// measurements plus the given live-resolved object
+/// shas. An empty pdir, a missing file, or any verify
+/// failure yields False: scan falls through to the next
+/// candidate. `bridge_mismatch` reports True when the
+/// receipt was otherwise valid but named another
+/// bridge, so the fallback reason can name it. Never
+/// raises.
+#[allow(clippy::too_many_arguments)]
+fn receipt_covers(
+    doc: &Profile,
+    kernel: &KernelInfo,
+    want: &[String],
+    pdir: &str,
+    bridge_sha: &str,
+    root: &str,
+    obj_attempt: &str,
+    obj_lc: &str,
+    obj_cp: &str,
+) -> (bool, bool) {
+    if pdir.is_empty() {
+        return (false, false);
+    }
+    let path = format!("{}/{}.json", default_receipts_dir(pdir), doc.profile_id);
+    let raw = match read_host_file(&path, "receipt", MAX_PROFILE_DOC_BYTES) {
+        Ok(raw) => raw,
+        Err(_) => return (false, false),
+    };
+    let noted = doc.identity.source.has_note && parse_narrow_note(&doc.identity.source.note).ok;
+    let hit_caps: Vec<String> = if noted {
+        let v = verify_qualification_receipt(&raw, doc, kernel, bridge_sha);
+        if !v.ok {
+            return (false, v.bridge_mismatch);
+        }
+        v.caps
+    } else {
+        let v = verify_live_receipt(
+            &raw,
+            doc,
+            kernel,
+            bridge_sha,
+            root,
+            ZLIB,
+            obj_attempt,
+            obj_lc,
+            obj_cp,
+        );
+        if !v.ok {
+            return (false, v.bridge_mismatch);
+        }
+        v.caps
+    };
+    for cap in want {
+        let mut found = false;
+        for hit in &hit_caps {
+            if hit == cap {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return (false, false);
+        }
+    }
+    (true, false)
+}
+
+/// Read hook format bytes; "" when readable.
+///
+/// Failures name the translated path and the evidence
+/// error, keeping the `format unreadable` prefix the
+/// release gate matches.
+fn read_format(root: &str, hook: &ProfileHook) -> Result<Vec<u8>, String> {
+    let treader = match open_evidence_reader(root) {
+        Ok(treader) => treader,
+        Err(e) => {
+            return Err(format!("format unreadable: {}: {}", hook.format_path, e));
+        }
+    };
+    let fpath = tracefs_translate(&probe_tracefs(&treader), &hook.format_path);
+    match read_evidence(&treader, &fpath, MAX_NARROW_FORMAT_BYTES) {
+        Ok(raw) => Ok(raw),
+        Err(e) => Err(format!("format unreadable: {fpath}: {e}")),
+    }
+}
+
+struct AdmittedHook {
+    hook: ProfileHook,
+    raw: Vec<u8>,
+    sys: String,
+    evt: String,
+    probe: OffsetProbe,
+}
+
+/// Select, read, verify, and probe one doc's hook.
+///
+/// "" when admitted, with the table offsets probed from
+/// the same raw buffer the format binding hashes, so the
+/// offsets inherit that binding.
+fn admit_hook(root: &str, doc: &Profile) -> Result<AdmittedHook, String> {
+    let sel = select_attempt_hook(doc);
+    if !sel.ok {
+        return Err(sel.refusal);
+    }
+    let hook = sel.hook;
+    let raw = read_format(root, &hook)?;
+    let probe = probe_trace_offsets(&raw);
+    if !probe.ok {
+        return Err(format!("layout: {}", probe.message));
+    }
+    let Some((sys, evt)) = split_site(&hook.name) else {
+        return Err("bad hook site".to_string());
+    };
+    Ok(AdmittedHook {
+        hook,
+        raw,
+        sys,
+        evt,
+        probe,
+    })
+}
+
+/// First reason a doc cannot satisfy the request, else "".
+///
+/// Every requested extra capability needs a supported
+/// or candidate declaration whose named hooks all
+/// exist in the doc; the message names the capability
+/// and the document. The attempt channel keeps its
+/// legacy hook selection and refusals below.
+fn selection_gap(doc: &Profile, caps: &[String]) -> String {
+    for cap in caps {
+        if cap == ATTEMPT_CAP {
+            continue;
+        }
+        if !cap_selectable(doc, cap) {
+            return format!("capability {cap} unsupported by {}", doc.profile_id);
+        }
+        let missing = cap_unknown_hook(doc, cap);
+        if !missing.is_empty() {
+            return format!("capability {cap} names unknown hook {missing}");
+        }
+    }
+    String::new()
+}
+
+/// First privilege-independent selection gap, else "".
+fn static_gap(doc: &Profile, caps: &[String]) -> String {
+    let gap = selection_gap(doc, caps);
+    if !gap.is_empty() {
+        return gap;
+    }
+    tracing_gap(doc, caps)
+}
+
+/// True when the doc carries a parseable narrow note.
+fn noted_doc(doc: &Profile) -> bool {
+    if !doc.identity.source.has_note {
+        return false;
+    }
+    parse_narrow_note(&doc.identity.source.note).ok
+}
+
+/// True when a noted-doc receipt routes without privilege.
+///
+/// Reuses receipt coverage for noted docs only; callers
+/// must never pass a live doc here, whose receipt check
+/// reads fresh live measurements behind the gate. Sets
+/// denied_drop when the receipt file itself is denied,
+/// bridge_drop when the receipt is blocked only by the
+/// bridge.
+fn static_receipt_ok(
+    doc: &Profile,
+    kernel: &KernelInfo,
+    want: &[String],
+    pdir: &str,
+    bridge_sha: &str,
+) -> (bool, bool, bool) {
+    let (ok, bridge_drop) = receipt_covers(doc, kernel, want, pdir, bridge_sha, "", "", "", "");
+    if ok {
+        return (true, false, false);
+    }
+    let mut denied_drop = false;
+    if !pdir.is_empty() {
+        let path = format!("{}/{}.json", default_receipts_dir(pdir), doc.profile_id);
+        if host_file_denied(&path) {
+            denied_drop = true;
+        }
+    }
+    (false, denied_drop, bridge_drop)
+}
+
+/// One unreadable-gate refusal: unknown, never admitted.
+fn refuse_gate_unreadable(detail: String) -> ScanDecision {
+    let mut out = refuse_scan(format!("kernel gate unreadable: {detail}"));
+    out.refusal_unknown = true;
+    out
+}
+
+/// True when the doc can only take the live path.
+///
+/// Reference docs (any status but validated) whose
+/// narrow note is unusable - the source carries no
+/// note or the note fails to parse - never bind
+/// exactly; they verify live interfaces instead.
+/// Docs with a parseable note never take the live
+/// path.
+fn live_doc(doc: &Profile) -> bool {
+    if doc.status == "validated" {
+        return false;
+    }
+    if !doc.identity.source.has_note {
+        return true;
+    }
+    !parse_narrow_note(&doc.identity.source.note).ok
+}
+/// Decide admission: scan, object statics, hook, binding.
+///
+/// Explicit mode resolves one doc (file first, then id)
+/// and enforces full binding when bindings exist. Scan
+/// mode tries each covering validated doc in order, then
+/// each covering reference doc whose receipt under
+/// the receipts dir for the profiles dir verifies
+/// (against the doc, the live kernel, and
+/// ``bridge_sha``, the bare hex sha256 of the
+/// resolved bridge) and covers the
+/// requested capabilities ("" disables receipts), and
+/// falls back to the first covering doc as partial. A
+/// receipt blocked only by the bridge falls through to
+/// partial with a reason naming the bridge mismatch,
+/// never local-auto; requested extras with an unchecked
+/// bridge ("") refuse unknown as bridge-unchecked
+/// instead. Static object failures refuse
+/// everywhere; identity failures fall through in scan
+/// mode only. Requested extra capabilities need a
+/// supported declaration, a resolvable object path, and
+/// full extended binding; they never fall back to
+/// partial. Reference docs without a usable narrow
+/// note take the live path instead: their tracing
+/// interfaces verify against the live host, and
+/// success admits a candidate carrying measured
+/// identities without exact binding.
+///
+/// Empty object paths resolve to the linked-in
+/// artifacts; only an explicit unreadable path refuses.
+#[allow(clippy::too_many_arguments)]
+pub fn decide_record(
+    root: &str,
+    kernel: &KernelInfo,
+    profiles: &[Profile],
+    explicit: &str,
+    has_explicit: bool,
+    object_path: &str,
+    lc_object: &str,
+    cp_object: &str,
+    want_caps: &str,
+    profiles_dir: &str,
+    bridge_sha: &str,
+) -> ScanDecision {
+    let mut out = ScanDecision::default();
+    let ask = parse_requested_caps(want_caps);
+    if !ask.ok {
+        return refuse_scan(ask.err);
+    }
+    let mut want_lc = false;
+    let mut want_cp = false;
+    for cap in &ask.caps {
+        if cap == LIFECYCLE_CAP {
+            want_lc = true;
+        }
+        if cap == COPY_CAP {
+            want_cp = true;
+        }
+        if cap == CONVERT_CAP {
+            return refuse_scan("capability conversion-observe has no record channel".to_string());
+        }
+    }
+    for cap in &ask.caps {
+        if !cap_floor_ok(cap, &kernel.release) {
+            return refuse_scan(cap_floor_refusal(cap, &kernel.release));
+        }
+    }
+    let want_extra = want_lc || want_cp;
+    let mut selected = ask.caps[0].clone();
+    for cap in ask.caps.iter().skip(1) {
+        selected = selected + "," + cap;
+    }
+    let mut candidates: Vec<Profile> = Vec::new();
+    let want_explicit = has_explicit;
+    if want_explicit {
+        let doc_bytes = read_host_file(explicit, "profile", MAX_PROFILE_DOC_BYTES);
+        if let Ok(doc_bytes) = doc_bytes {
+            match parse_profile_bytes(&doc_bytes) {
+                Ok(doc) => candidates.push(doc),
+                Err(e) => {
+                    return refuse_scan(format!("cannot parse --profile: {e}"));
+                }
+            }
+        } else {
+            let mut found = false;
+            for p in profiles {
+                if p.profile_id == explicit {
+                    candidates.push(p.clone());
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return refuse_scan(format!("unknown --profile: {}", refusal_basename(explicit)));
+            }
+        }
+        if !covers(kernel, &candidates[0]) {
+            return refuse_scan("profile does not cover this kernel".to_string());
+        }
+    } else {
+        for p in profiles {
+            if covers(kernel, p) {
+                candidates.push(p.clone());
+            }
+        }
+        if candidates.is_empty() {
+            return refuse_scan("no profile covers this kernel".to_string());
+        }
+    }
+    if want_lc && lc_object.is_empty() && embedded_object("lifecycle").is_none() {
+        return refuse_scan("no object: pass --lc-object PATH".to_string());
+    }
+    if want_cp && cp_object.is_empty() && embedded_object("copy").is_none() {
+        return refuse_scan("no object: pass --cp-object PATH".to_string());
+    }
+    let elf: Vec<u8> = match resolve_channel_object(object_path, "attempt") {
+        Ok(elf) => elf,
+        Err(_) => return refuse_scan("object unreadable".to_string()),
+    };
+    let accuse = verify_object(&elf, PROGRAM);
+    if !accuse.ok {
+        return refuse_scan(format!("object refused: {}", accuse.message));
+    }
+    let maps = read_btf_maps(&elf);
+    if !maps.ok {
+        return refuse_scan(format!("object refused: {}", maps.message));
+    }
+    let ring = maps.ring_bytes;
+    let sha = sha256_hex(&elf);
+    if ring > MAX_NARROW_RING_BYTES {
+        return refuse_scan("object ring too large".to_string());
+    }
+    let mut lc = ExtraOut::default();
+    if want_lc {
+        let lc_elf = match resolve_channel_object(lc_object, "lifecycle") {
+            Ok(elf) => elf,
+            Err(_) => return refuse_scan("lc object unreadable".to_string()),
+        };
+        lc = verify_extra_object(&lc_elf, "lc", RING_LC_MAP, "lifecycle", &lc_progs());
+        if !lc.ok {
+            return refuse_scan(lc.refusal.clone());
+        }
+    }
+    let mut cp = ExtraOut::default();
+    if want_cp {
+        let cp_elf = match resolve_channel_object(cp_object, "copy") {
+            Ok(elf) => elf,
+            Err(_) => return refuse_scan("cp object unreadable".to_string()),
+        };
+        cp = verify_extra_object(&cp_elf, "cp", RING_CP_MAP, "copy", &cp_progs());
+        if !cp.ok {
+            return refuse_scan(cp.refusal.clone());
+        }
+    }
+    let gate_reader = match open_evidence_reader(root) {
+        Ok(reader) => reader,
+        Err(e) => return refuse_gate_unreadable(e.to_string()),
+    };
+    // Privilege-independent selection refuses before the
+    // kernel gate. Receipt checks against fresh live
+    // measurements, hook format reads, live checks, and
+    // bindings all run after it.
+    if want_explicit {
+        let egap = static_gap(&candidates[0], &ask.caps);
+        if !egap.is_empty() {
+            return refuse_scan(egap);
+        }
+    } else if want_extra {
+        let mut pool: Vec<usize> = Vec::new();
+        let mut denied_drop = false;
+        let mut bridge_drop = false;
+        for (i, candidate) in candidates.iter().enumerate() {
+            if candidate.status == "validated" || live_doc(candidate) {
+                pool.push(i);
+            } else if noted_doc(candidate) {
+                let (ok_static, dd, bd) =
+                    static_receipt_ok(candidate, kernel, &ask.caps, profiles_dir, bridge_sha);
+                if ok_static {
+                    pool.push(i);
+                } else if dd {
+                    denied_drop = true;
+                } else if bd {
+                    bridge_drop = true;
+                }
+            }
+        }
+        let bridge_open = bridge_drop && bridge_sha.is_empty();
+        if !pool.is_empty() {
+            let mut last_gap = String::new();
+            let mut all_gapped = true;
+            for r in pool {
+                let g = static_gap(&candidates[r], &ask.caps);
+                if g.is_empty() {
+                    all_gapped = false;
+                    break;
+                }
+                last_gap = g;
+            }
+            if all_gapped {
+                if bridge_open {
+                    return refuse_scan_live(
+                        "bridge unchecked: cannot verify receipts".to_string(),
+                        "bridge-unchecked",
+                        true,
+                    );
+                }
+                return refuse_scan(last_gap);
+            }
+        } else if !denied_drop {
+            if bridge_open {
+                return refuse_scan_live(
+                    "bridge unchecked: cannot verify receipts".to_string(),
+                    "bridge-unchecked",
+                    true,
+                );
+            }
+            return refuse_scan("no profile satisfies requested capabilities".to_string());
+        }
+    }
+    let gated = kernel_gate(&gate_reader, &kernel.release, ZLIB, &ask.caps);
+    if !gated.ok {
+        return refuse_scan_gate(&gated);
+    }
+    let mut order: Vec<usize> = Vec::new();
+    let mut order_receipt: Vec<bool> = Vec::new();
+    let mut order_live: Vec<bool> = Vec::new();
+    let mut saw_bridge_mismatch = false;
+    let mut saw_noted_bridge_mismatch = false;
+    if want_explicit {
+        order.push(0);
+        order_receipt.push(false);
+        order_live.push(live_doc(&candidates[0]));
+    } else {
+        for (i, candidate) in candidates.iter().enumerate() {
+            if candidate.status == "validated" {
+                order.push(i);
+                order_receipt.push(false);
+                order_live.push(false);
+            }
+        }
+        for (i, candidate) in candidates.iter().enumerate() {
+            if candidate.status == "validated" {
+                continue;
+            }
+            let (covers, mism) = receipt_covers(
+                candidate,
+                kernel,
+                &ask.caps,
+                profiles_dir,
+                bridge_sha,
+                root,
+                &sha,
+                &lc.sha,
+                &cp.sha,
+            );
+            if covers {
+                order.push(i);
+                order_receipt.push(true);
+                order_live.push(false);
+            } else if mism {
+                saw_bridge_mismatch = true;
+                if !live_doc(candidate) {
+                    saw_noted_bridge_mismatch = true;
+                }
+            }
+        }
+        for (i, candidate) in candidates.iter().enumerate() {
+            if candidate.status == "validated" {
+                continue;
+            }
+            if live_doc(candidate) {
+                order.push(i);
+                order_receipt.push(false);
+                order_live.push(true);
+            }
+        }
+    }
+    let mut skip_reason = String::new();
+    let mut skip_code = "profile".to_string();
+    let mut skip_unknown = false;
+    for oi in 0..order.len() {
+        let doc = candidates[order[oi]].clone();
+        let gap = selection_gap(&doc, &ask.caps);
+        if !gap.is_empty() {
+            if want_explicit {
+                return refuse_scan(gap);
+            }
+            skip_reason = gap;
+            skip_code = "profile".to_string();
+            skip_unknown = false;
+            continue;
+        }
+        let tgap = tracing_gap(&doc, &ask.caps);
+        if !tgap.is_empty() {
+            if want_explicit {
+                return refuse_scan(tgap);
+            }
+            skip_reason = tgap;
+            skip_code = "profile".to_string();
+            skip_unknown = false;
+            continue;
+        }
+        let admitted = match admit_hook(root, &doc) {
+            Ok(admitted) => admitted,
+            Err(herr) => {
+                if want_explicit {
+                    return refuse_scan(herr);
+                }
+                skip_reason = herr;
+                skip_code = "profile".to_string();
+                skip_unknown = false;
+                continue;
+            }
+        };
+        if order_live[oi] {
+            let live = verify_live_interfaces(root, &doc, &ask.caps);
+            if !live.ok {
+                if want_explicit {
+                    if want_extra {
+                        return refuse_scan_live(
+                            format!("live check failed: {}", live.reason),
+                            &live.code,
+                            live.unknown,
+                        );
+                    }
+                    out.ok = true;
+                    out.kind = "partial".to_string();
+                    out.reason = format!(
+                        "explicit {} (reference, live check failed: {})",
+                        doc.profile_id, live.reason
+                    );
+                    out.profile = doc;
+                    out.hook = admitted.hook;
+                    out.object_sha = sha.clone();
+                    out.ring_bytes = ring;
+                    out.off_loc = admitted.probe.loc_off;
+                    out.off_size = admitted.probe.size_off;
+                    out.off_force = admitted.probe.force_off;
+                    out.off_fixed_end = admitted.probe.fixed_end;
+                    out.elf = elf.clone();
+                    out.tp_system = admitted.sys;
+                    out.tp_event = admitted.evt;
+                    out.selected_caps = selected.clone();
+                    return out;
+                }
+                skip_reason = format!("live check failed: {}", live.reason);
+                skip_code = live_skip_code(&live.code);
+                skip_unknown = live.unknown;
+                continue;
+            }
+            out.layout_evidence = live.evidence;
+            let measured = measure_binding(root, &kernel.release, &admitted.hook, &admitted.raw);
+            out.ok = true;
+            out.kind = "candidate".to_string();
+            out.reason = format!(
+                "candidate {}: live interfaces verified (profile unvalidated)",
+                doc.profile_id
+            );
+            out.profile = doc;
+            out.hook = admitted.hook;
+            out.object_sha = sha.clone();
+            out.ring_bytes = ring;
+            out.off_loc = admitted.probe.loc_off;
+            out.off_size = admitted.probe.size_off;
+            out.off_force = admitted.probe.force_off;
+            out.off_fixed_end = admitted.probe.fixed_end;
+            out.elf = elf.clone();
+            out.tp_system = admitted.sys;
+            out.tp_event = admitted.evt;
+            out.measured_config = measured.config;
+            out.measured_config_src = measured.config_src;
+            out.measured_btf = measured.btf;
+            out.measured_format = measured.format;
+            out.measured_image = measured.image;
+            out.measured_image_bid = measured.image_bid;
+            out.selected_caps = selected.clone();
+            out.lc.present = want_lc;
+            out.cp.present = want_cp;
+            if want_lc {
+                out.lc.elf = lc.elf.clone();
+                out.lc.object_sha = lc.sha.clone();
+                out.lc.ring_bytes = lc.ring;
+            }
+            if want_cp {
+                out.cp.elf = cp.elf.clone();
+                out.cp.object_sha = cp.sha.clone();
+                out.cp.ring_bytes = cp.ring;
+            }
+            return out;
+        }
+        let parsed = parse_narrow_note(&doc.identity.source.note);
+        if !parsed.ok {
+            if want_explicit {
+                if want_extra {
+                    return refuse_scan(format!("binding failed: {}", parsed.message));
+                }
+                // Unparseable bindings are never validated,
+                // whatever the document status claims: without
+                // a parsed note no identity check ran. Both
+                // statuses proceed as unbound partials with
+                // wording that reserves "validated" for
+                // successful binding checks.
+                out.ok = true;
+                out.kind = "partial".to_string();
+                if doc.status == "validated" {
+                    out.reason = format!("explicit {} (unbound, no bindings)", doc.profile_id);
+                } else {
+                    out.reason = format!("explicit {} (reference, no bindings)", doc.profile_id);
+                }
+                out.profile = doc;
+                out.hook = admitted.hook;
+                out.object_sha = sha.clone();
+                out.ring_bytes = ring;
+                out.off_loc = admitted.probe.loc_off;
+                out.off_size = admitted.probe.size_off;
+                out.off_force = admitted.probe.force_off;
+                out.off_fixed_end = admitted.probe.fixed_end;
+                out.elf = elf.clone();
+                out.tp_system = admitted.sys;
+                out.tp_event = admitted.evt;
+                out.selected_caps = selected.clone();
+                return out;
+            }
+            skip_reason = format!("binding failed: {}", parsed.message);
+            skip_code = "profile".to_string();
+            skip_unknown = false;
+            continue;
+        }
+        let bound = check_binding(
+            root,
+            &kernel.release,
+            &doc,
+            &admitted.hook,
+            &sha,
+            ring,
+            &admitted.raw,
+            &lc.sha,
+            lc.ring,
+            &cp.sha,
+            cp.ring,
+            want_lc,
+            want_cp,
+        );
+        if !bound.ok {
+            if want_explicit {
+                return refuse_scan(format!("binding failed: {}", bound.reason));
+            }
+            skip_reason = format!("binding failed: {}", bound.reason);
+            skip_code = "profile".to_string();
+            skip_unknown = false;
+            continue;
+        }
+        out.ok = true;
+        if doc.status == "validated" {
+            out.kind = "validated".to_string();
+            out.reason = format!("validated {}: bindings hold", doc.profile_id);
+        } else if order_receipt[oi] {
+            out.kind = "local-auto".to_string();
+            out.reason = format!(
+                "local-auto {}: receipt verified, bindings hold",
+                doc.profile_id
+            );
+        } else {
+            out.kind = "candidate".to_string();
+            out.reason = format!(
+                "candidate {}: bindings hold (profile unvalidated)",
+                doc.profile_id
+            );
+        }
+        out.profile = doc;
+        out.hook = admitted.hook;
+        out.object_sha = sha.clone();
+        out.ring_bytes = ring;
+        out.off_loc = admitted.probe.loc_off;
+        out.off_size = admitted.probe.size_off;
+        out.off_force = admitted.probe.force_off;
+        out.off_fixed_end = admitted.probe.fixed_end;
+        out.elf = elf.clone();
+        out.tp_system = admitted.sys;
+        out.tp_event = admitted.evt;
+        out.measured_config = bound.config;
+        out.measured_config_src = bound.config_src;
+        out.measured_btf = bound.btf;
+        out.measured_format = bound.format;
+        out.measured_image = bound.image;
+        out.measured_image_bid = bound.image_bid;
+        out.selected_caps = selected.clone();
+        out.lc.present = want_lc;
+        out.cp.present = want_cp;
+        if want_lc {
+            out.lc.elf = lc.elf.clone();
+            out.lc.object_sha = lc.sha.clone();
+            out.lc.ring_bytes = lc.ring;
+        }
+        if want_cp {
+            out.cp.elf = cp.elf.clone();
+            out.cp.object_sha = cp.sha.clone();
+            out.cp.ring_bytes = cp.ring;
+        }
+        return out;
+    }
+    // Scan mode only: explicit always returns inside the loop.
+    if want_extra {
+        if bridge_sha.is_empty() && saw_noted_bridge_mismatch {
+            return refuse_scan_live(
+                "bridge unchecked: cannot verify receipts".to_string(),
+                "bridge-unchecked",
+                true,
+            );
+        }
+        if skip_reason.is_empty() {
+            return refuse_scan("no profile satisfies requested capabilities".to_string());
+        }
+        return refuse_scan_live(skip_reason, &skip_code, skip_unknown);
+    }
+    let first = candidates[0].clone();
+    let admitted = match admit_hook(root, &first) {
+        Ok(admitted) => admitted,
+        Err(perr) => return refuse_scan(perr),
+    };
+    out.ok = true;
+    out.kind = "partial".to_string();
+    let mut had_validated = false;
+    for candidate in &candidates {
+        if candidate.status == "validated" {
+            had_validated = true;
+            break;
+        }
+    }
+    if saw_bridge_mismatch {
+        out.reason = format!("partial {}: receipt bridge mismatch", first.profile_id);
+    } else if had_validated {
+        out.reason = format!("partial {}: narrow identity unverified", first.profile_id);
+    } else {
+        out.reason = format!("partial {}: no validated profile", first.profile_id);
+    }
+    out.profile = first;
+    out.hook = admitted.hook;
+    out.object_sha = sha.clone();
+    out.ring_bytes = ring;
+    out.off_loc = admitted.probe.loc_off;
+    out.off_size = admitted.probe.size_off;
+    out.off_force = admitted.probe.force_off;
+    out.off_fixed_end = admitted.probe.fixed_end;
+    out.elf = elf.clone();
+    out.tp_system = admitted.sys;
+    out.tp_event = admitted.evt;
+    out.selected_caps = selected.clone();
+    out
+}
+
+/// Resolve one channel's object bytes: explicit path wins verbatim, else the linked-in artifact.
+///
+/// Shared by record admission and doctor load-check so both judge the
+/// same bytes under zero-config.
+pub(crate) fn resolve_channel_object(path: &str, kind: &str) -> Result<Vec<u8>, ()> {
+    if !path.is_empty() {
+        return read_host_file(path, "object", MAX_NARROW_OBJECT_BYTES).map_err(|_| ());
+    }
+    embedded_object(kind).map(|b| b.to_vec()).ok_or(())
+}
+/// Sha256 of the resolved bridge, else "" when unreadable.
+///
+/// Load-check admission binds receipts to the resolved
+/// bridge bytes; an unresolvable bridge leaves every
+/// receipt unchecked.
+pub fn loadcheck_bridge_sha(bridge: &str, has_bridge: bool) -> String {
+    let path = resolve_bridge(bridge, has_bridge);
+    let snap = open_bridge_snapshot(&path);
+    snap.sha.clone()
+}
+
+/// Explicit --bridge verbatim, else zero-config discovery.
+///
+/// Thin delegate over discover_bridge: the ambient env
+/// value, live uids, and kernel-resolved executable path
+/// feed the pure order. Never argv[0], PATH, or the working directory.
+pub fn resolve_bridge(bridge: &str, has_bridge: bool) -> String {
+    let exe_path = readlink_self().unwrap_or_default();
+    let env_value = std::env::var("LMB_NATIVE_LIB").unwrap_or_default();
+    discover_bridge(bridge, has_bridge, &env_value, live_uids(), &exe_path)
+}
+
+/// Explicit object path verbatim, else the linked-in artifact.
+///
+/// `kind` is attempt, lifecycle, or copy. An explicit
+/// path wins unprobed; otherwise "" names the embedded
+/// object bytes the loader carries.
+pub fn resolve_object(explicit: &str) -> String {
+    let has_explicit = !explicit.is_empty();
+    discover_object("", explicit, has_explicit, "")
+}
+
+/// Live boot id when present and well-formed, else None.
+fn read_boot_id(root: &str) -> Option<String> {
+    let mut raw = read_host_file(
+        &join_root(root, "/proc/sys/kernel/random/boot_id"),
+        "boot_id",
+        4096,
+    )
+    .ok()?;
+    while !raw.is_empty() && raw[raw.len() - 1] == 0x0A {
+        raw.pop();
+    }
+    if raw.is_empty() {
+        return None;
+    }
+    let text = String::from_utf8(raw).ok()?;
+    check_opaque_id(&text).ok()?;
+    Some(text)
+}
+
+fn decision_item(reason: String) -> EvidenceItem {
+    EvidenceItem {
+        item_type: "provenance".to_string(),
+        source: "profile.decision".to_string(),
+        interpretation: reason,
+    }
+}
+
+fn value_item(source: String, value: String) -> EvidenceItem {
+    EvidenceItem {
+        item_type: "provenance".to_string(),
+        source,
+        interpretation: value,
+    }
+}
+
+/// Attempt-loss bound item on kernels before 6.7, else empty.
+pub fn attempt_loss_evidence(release: &str) -> Vec<EvidenceItem> {
+    let mut out = Vec::new();
+    if attempt_loss_exact(release) {
+        return out;
+    }
+    out.push(EvidenceItem {
+        item_type: "attempt-loss-bound".to_string(),
+        source: format!("kernel {release}"),
+        interpretation: "attempt loss counts are a lower bound before 6.7: trace_call_bpf skipped programs without counting them".to_string(),
+    });
+    out
+}
+
+/// Append one present channel's hash and ring provenance.
+///
+/// Lifecycle and copy channels report the identical pair
+/// (``<name>.object.sha256``, ``<name>.ring.bytes``);
+/// absent channels append nothing.
+fn append_channel_evidence(evidence: &mut Vec<EvidenceItem>, name: &str, channel: &ExtraChannel) {
+    if !channel.present {
+        return;
+    }
+    evidence.push(value_item(
+        format!("{name}.object.sha256"),
+        channel.object_sha.clone(),
+    ));
+    evidence.push(value_item(
+        format!("{name}.ring.bytes"),
+        format!("{}", channel.ring_bytes),
+    ));
+}
+
+/// Append one layout item per checked CO-RE layout line.
+///
+/// Each line was verified against kernel BTF by the live
+/// layout check; the item names that source.
+fn append_layout_evidence(evidence: &mut Vec<EvidenceItem>, lines: &[String]) {
+    for line in lines {
+        evidence.push(EvidenceItem {
+            item_type: "layout".to_string(),
+            source: "kernel BTF".to_string(),
+            interpretation: line.clone(),
+        });
+    }
+}
+
+/// One provenance item from a measured live identity.
+///
+/// Valued reads render their bare hex; anything else is
+/// an explicit unavailable marker, never empty or zero.
+/// Empty states mean no binding ran (partial decisions);
+/// other states carry the read failure reason.
+pub fn render_provenance(source: &str, v: &LiveValue) -> EvidenceItem {
+    let mut item = EvidenceItem {
+        item_type: "provenance".to_string(),
+        source: source.to_string(),
+        interpretation: String::new(),
+    };
+    if v.state == "value" {
+        item.interpretation = v.value.clone();
+    } else if v.state.is_empty() {
+        item.interpretation = "unavailable: narrow identity unverified".to_string();
+    } else if v.detail.is_empty() {
+        item.interpretation = format!("unavailable: {}", v.state);
+    } else {
+        item.interpretation = format!("unavailable: {}: {}", v.state, v.detail);
+    }
+    item
+}
+
+/// Run admission plus collection; return the raw outcome.
+///
+/// `root` is the evidence root ("" for the live host) and
+/// `profiles_dir` holds `manifest.txt`. Absent bridge
+/// and object paths are discovered (explicit user input
+/// wins verbatim and is never root-joined). Pre-run
+/// refusals return exit 3 with an empty end reason and
+/// the diagnostic unprefixed; the caller adds its verb
+/// prefix. The collector runs only on approval, so
+/// refusals create no BPF or output resource.
+pub fn run_collector_with<W: WriterSource>(
+    root: &str,
+    profiles_dir: &str,
+    opts: RecordOptions,
+    writer: &mut W,
+) -> RunResult {
+    if opts.max_events_bytes < MIN_RECORD_BYTES {
+        return RunResult {
+            exit_code: EXIT_REFUSAL,
+            end_reason: String::new(),
+            outcome: String::new(),
+            diagnostic: format!("budget {} below 131072", opts.max_events_bytes),
+            fix: String::new(),
+            code: String::new(),
+            unknown: false,
+            trusted: true,
+        };
+    }
+    if opts.max_events_bytes > MAX_RECORD_BYTES {
+        return RunResult {
+            exit_code: EXIT_REFUSAL,
+            end_reason: String::new(),
+            outcome: String::new(),
+            diagnostic: format!("budget {} above 4294967296", opts.max_events_bytes),
+            fix: String::new(),
+            code: String::new(),
+            unknown: false,
+            trusted: true,
+        };
+    }
+    // The statically linked loader needs no bridge file:
+    // an empty bridge is the normal case, not a refusal.
+    // The snapshot's open file description feeds the
+    // admission hash and the provenance below, so no
+    // pathname swap can slip a different bridge between
+    // the receipt check and the run. An unreadable
+    // bridge hashes to "": receipts cannot admit
+    // local-auto, and provenance marks the identity
+    // uncheckable.
+    let bridge = resolve_bridge(&opts.bridge, opts.has_bridge);
+    let snap = open_bridge_snapshot(&bridge);
+    let bridge_sha = snap.sha.clone();
+    let mut bridge_v = LiveValue {
+        state: String::new(),
+        value: String::new(),
+        detail: String::new(),
+    };
+    if !bridge_sha.is_empty() {
+        bridge_v.state = "value".to_string();
+        bridge_v.value = bridge_sha.clone();
+    } else if bridge.is_empty() {
+        bridge_v.state = "uncheckable".to_string();
+        bridge_v.detail = "no bridge file (statically linked loader)".to_string();
+    } else {
+        bridge_v.state = "uncheckable".to_string();
+        bridge_v.detail = "bridge unreadable".to_string();
+    }
+    let object_path = resolve_object(&opts.object);
+    let lc_object = resolve_object(&opts.lc_object);
+    let cp_object = resolve_object(&opts.cp_object);
+    let reader = match open_evidence_reader(root) {
+        Ok(reader) => reader,
+        Err(e) => {
+            return RunResult {
+                exit_code: EXIT_REFUSAL,
+                end_reason: String::new(),
+                outcome: String::new(),
+                diagnostic: format!("cannot open evidence: {e}"),
+                fix: String::new(),
+                code: String::new(),
+                unknown: false,
+                trusted: false,
+            };
+        }
+    };
+    let env = detect_environment(&reader);
+    if !env.kernel.eligible_floor {
+        return RunResult {
+            exit_code: EXIT_REFUSAL,
+            end_reason: String::new(),
+            outcome: String::new(),
+            diagnostic: format!("kernel {} below floor 6.0", env.kernel.release),
+            fix: String::new(),
+            code: String::new(),
+            unknown: false,
+            trusted: true,
+        };
+    }
+    let profiles = match load_profiles(profiles_dir) {
+        Ok(profiles) => profiles,
+        Err(e) => {
+            return RunResult {
+                exit_code: EXIT_REFUSAL,
+                end_reason: String::new(),
+                outcome: String::new(),
+                diagnostic: format!("cannot load profiles: {e}"),
+                fix: String::new(),
+                code: String::new(),
+                unknown: false,
+                trusted: false,
+            };
+        }
+    };
+    let decision = decide_record(
+        root,
+        &env.kernel,
+        &profiles,
+        &opts.profile,
+        opts.has_profile,
+        &object_path,
+        &lc_object,
+        &cp_object,
+        &opts.capabilities,
+        profiles_dir,
+        &bridge_sha,
+    );
+    if !decision.ok {
+        return RunResult {
+            exit_code: EXIT_REFUSAL,
+            end_reason: String::new(),
+            outcome: String::new(),
+            diagnostic: decision.refusal.clone(),
+            fix: decision.fix.clone(),
+            code: decision.refusal_code.clone(),
+            unknown: decision.refusal_unknown,
+            trusted: true,
+        };
+    }
+    let timens = check_timens_live();
+    if !timens.ok {
+        return RunResult {
+            exit_code: EXIT_REFUSAL,
+            end_reason: String::new(),
+            outcome: String::new(),
+            diagnostic: "time namespace unverifiable".to_string(),
+            fix: String::new(),
+            code: String::new(),
+            unknown: false,
+            trusted: true,
+        };
+    }
+    if timens.offset {
+        return RunResult {
+            exit_code: EXIT_REFUSAL,
+            end_reason: String::new(),
+            outcome: String::new(),
+            diagnostic: "time namespace offset present".to_string(),
+            fix: String::new(),
+            code: String::new(),
+            unknown: false,
+            trusted: true,
+        };
+    }
+    if decision.off_loc < 0
+        || decision.off_size < 0
+        || decision.off_force < 0
+        || decision.off_fixed_end < 0
+    {
+        return RunResult {
+            exit_code: EXIT_REFUSAL,
+            end_reason: String::new(),
+            outcome: String::new(),
+            diagnostic: "admission did not probe offsets".to_string(),
+            fix: String::new(),
+            code: String::new(),
+            unknown: false,
+            trusted: true,
+        };
+    }
+    // Live captures sample the default SWIOTLB pool counters at
+    // start, periodically, and close; unreadable counters stay
+    // in the samples as unavailable halves, never as failed runs.
+    let mut cfg = CollectorConfig {
+        duration_s: opts.duration_s,
+        max_events_bytes: opts.max_events_bytes,
+        output: opts.output.clone(),
+        profile_id: decision.profile.profile_id.clone(),
+        grade: decision.kind.clone(),
+        off_loc: decision.off_loc,
+        off_size: decision.off_size,
+        off_force: decision.off_force,
+        off_fixed_end: decision.off_fixed_end,
+        has_pool_sample: true,
+        pid: std::process::id() as i64,
+        has_ring_bytes: true,
+        ring_bytes: decision.ring_bytes as u32,
+        has_lifecycle: decision.lc.present,
+        lifecycle_ring_bytes: decision.lc.ring_bytes as u32,
+        has_copy: decision.cp.present,
+        copy_ring_bytes: decision.cp.ring_bytes as u32,
+        has_device_filter: opts.has_device,
+        device_filter: opts.device.clone(),
+        strict: opts.strict,
+        ..Default::default()
+    };
+    if let Some(boot_id) = read_boot_id(root) {
+        cfg.has_boot_id = true;
+        cfg.boot_id = boot_id;
+    }
+    cfg.guest = env.guest.clone();
+    cfg.evidence.push(decision_item(decision.reason.clone()));
+    cfg.evidence.push(value_item(
+        "object.sha256".to_string(),
+        decision.object_sha.clone(),
+    ));
+    cfg.evidence.push(value_item(
+        "ring.bytes".to_string(),
+        format!("{}", decision.ring_bytes),
+    ));
+    cfg.evidence.push(value_item(
+        "capabilities.selected".to_string(),
+        decision.selected_caps.clone(),
+    ));
+    let loss_bound = attempt_loss_evidence(&env.kernel.release);
+    for item in &loss_bound {
+        cfg.evidence.push(item.clone());
+    }
+    cfg.attempt_loss_lower_bound = !attempt_loss_exact(&env.kernel.release);
+    append_channel_evidence(&mut cfg.evidence, "lc", &decision.lc);
+    append_channel_evidence(&mut cfg.evidence, "cp", &decision.cp);
+    append_layout_evidence(&mut cfg.evidence, &decision.layout_evidence);
+    if env.kernel.release.is_empty() {
+        cfg.evidence.push(value_item(
+            "kernel.release".to_string(),
+            "unavailable: release unknown".to_string(),
+        ));
+    } else {
+        cfg.evidence.push(value_item(
+            "kernel.release".to_string(),
+            env.kernel.release.clone(),
+        ));
+    }
+    cfg.evidence.push(render_provenance(
+        "kernel.build_id",
+        &decision.measured_image_bid,
+    ));
+    cfg.evidence.push(render_provenance(
+        "config.sha256",
+        &decision.measured_config,
+    ));
+    let mut config_src = LiveValue {
+        state: String::new(),
+        value: String::new(),
+        detail: String::new(),
+    };
+    if !decision.measured_config_src.is_empty() {
+        config_src.state = "value".to_string();
+        config_src.value = decision.measured_config_src.clone();
+    }
+    cfg.evidence
+        .push(render_provenance("config.src", &config_src));
+    cfg.evidence
+        .push(render_provenance("btf.sha256", &decision.measured_btf));
+    cfg.evidence.push(render_provenance(
+        "format.sha256",
+        &decision.measured_format,
+    ));
+    cfg.evidence
+        .push(render_provenance("image.sha256", &decision.measured_image));
+    cfg.evidence
+        .push(render_provenance("bridge.sha256", &bridge_v));
+    cfg.evidence.push(value_item(
+        "bridge.abi".to_string(),
+        "abi-v1 (required)".to_string(),
+    ));
+    let mut kernel = AyaKernel::with_channels(
+        decision.elf.clone(),
+        &decision.tp_system,
+        &decision.tp_event,
+        decision.lc.elf.clone(),
+        decision.lc.present,
+        decision.cp.elf.clone(),
+        decision.cp.present,
+    );
+    let mut clock = MonoClock::new();
+    let mut signal = LiveSignalSource::new();
+    let mut collector = Collector::new(cfg);
+    let mut out = collector.run(&mut kernel, &mut clock, &mut signal, writer);
+    // Retain the bridge snapshot through the run above and
+    // the load replay below: this explicit binding keeps
+    // the fd open across the whole collection.
+    let _snap = snap;
+    if is_load_errno_failure(&out.diagnostic) {
+        let fail_ch = load_fail_channel(&out.diagnostic);
+        let diag: LoadDiag = if fail_ch == 1 {
+            diagnose_load(&decision.lc.elf, &lifecycle_program_names())
+        } else if fail_ch == 2 {
+            diagnose_load(&decision.cp.elf, &copy_program_names())
+        } else {
+            diagnose_load(&decision.elf, &attempt_program_names())
+        };
+        for line in &diag.lines {
+            out.diagnostic += &format!("\n{line}");
+        }
+    }
+    if out.exit_code == EXIT_REFUSAL && out.code.is_empty() {
+        let lcode = load_refusal_code(&out.diagnostic);
+        if !lcode.is_empty() {
+            out.code = lcode;
+            let code = out.code.clone();
+            out.fix = remedy_for(&code);
+        }
+    }
+    out
+}
+
+/// Warn-once line for a failed ownership repair, with newline.
+///
+/// The record-flow wording stays fixed across callers:
+/// live top and the qualify smoke reuse the record
+/// flow, so their repair warnings keep the record
+/// prefix, as before.
+pub fn ownership_warning(uid: i64, gid: i64) -> String {
+    format!("memveil record: warning: cannot restore capture ownership to {uid}:{gid}\n")
+}
+
+/// Restore a finalized capture's ownership; warn, or "".
+///
+/// Best-effort hand-back of a root-made capture to the
+/// invoking user through the writer's finalize pin
+/// (dev/inode continuity; only the recorded dir and
+/// files transfer). Returns the warn-once line when an
+/// attempted repair did not hold, else "": the capture
+/// stands either way. Call only for a finalized
+/// outcome; never raises.
+pub fn repair_warning_for<W: WriterSource>(output: &str, writer: &W) -> String {
+    let repair = restore_capture_ownership(output, &writer.finalized_identity());
+    if repair.attempted && !repair.repaired {
+        return ownership_warning(repair.uid, repair.gid);
+    }
+    String::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ExtraChannel, RecordOptions, ScanDecision, attempt_loss_evidence, decide_record,
+        loadcheck_bridge_sha, ownership_warning, parse_requested_caps, render_provenance,
+        repair_warning_for, resolve_bridge, resolve_channel_object, resolve_object,
+        run_collector_with, split_site,
+    };
+    use crate::capture::collector::EXIT_REFUSAL;
+    use crate::capture::live::WriterSource;
+    use crate::platform::evidence::KernelInfo;
+    use crate::platform::narrow::LiveValue;
+    use crate::platform::profiles::load_profiles;
+    use crate::platform::test_support::{TestDir, repo_root};
+
+    fn fixture(path: &str) -> String {
+        repo_root()
+            .join(path)
+            .to_str()
+            .expect("fixture path must be UTF-8")
+            .to_string()
+    }
+
+    fn live_value(state: &str, value: &str, detail: &str) -> LiveValue {
+        LiveValue {
+            state: state.to_string(),
+            value: value.to_string(),
+            detail: detail.to_string(),
+        }
+    }
+
+    #[test]
+    fn caps_parse_matrix() {
+        let empty = parse_requested_caps("");
+        assert!(empty.ok);
+        assert_eq!(empty.caps, vec!["attempt-trace".to_string()]);
+        let all = parse_requested_caps("all");
+        assert!(all.ok);
+        assert_eq!(all.caps.len(), 3);
+        assert_eq!(all.caps[1], "mapping-lifecycle");
+        assert_eq!(all.caps[2], "copy-actual");
+        let dup = parse_requested_caps("attempt-trace,copy-actual,attempt-trace");
+        assert!(dup.ok);
+        assert_eq!(dup.caps.len(), 2);
+        let bad = parse_requested_caps("attempt-trace,,copy-actual");
+        assert!(!bad.ok);
+        assert_eq!(bad.err, "bad capability list");
+        let unknown = parse_requested_caps("attempt-trace,nope");
+        assert!(!unknown.ok);
+        assert_eq!(unknown.err, "unknown capability: nope");
+        let noattempt = parse_requested_caps("copy-actual");
+        assert!(!noattempt.ok);
+        assert_eq!(noattempt.err, "attempt-trace is required");
+    }
+
+    fn scan_kernel() -> KernelInfo {
+        KernelInfo {
+            release: "7.0.0-test".to_string(),
+            arch: "x86_64".to_string(),
+            eligible_floor: true,
+            floor_reason: String::new(),
+        }
+    }
+
+    fn scan_profiles() -> Vec<crate::platform::profiles::Profile> {
+        load_profiles(&fixture("tests/fixtures/scan/profiles")).expect("load profiles")
+    }
+
+    #[test]
+    fn service_extra_channels_grouped() {
+        // Requested extras verify as artifacts and land
+        // grouped per channel (bytes, hash, ring), never
+        // partial: the decision carries all three objects.
+        let profiles = scan_profiles();
+        let decision = decide_record(
+            &fixture("tests/fixtures/scan/ok"),
+            &scan_kernel(),
+            &profiles,
+            &fixture("tests/fixtures/scan/profiles/valid-lc.json"),
+            true,
+            &fixture("tests/fixtures/elf/ok.o"),
+            &fixture("tests/fixtures/elf/lc-ok.o"),
+            &fixture("tests/fixtures/elf/cp-ok.o"),
+            "attempt-trace,mapping-lifecycle,copy-actual",
+            &fixture("tests/fixtures/scan/profiles"),
+            "",
+        );
+        assert!(decision.ok, "{}", decision.refusal);
+        assert_eq!(decision.kind, "validated");
+        assert_eq!(decision.ring_bytes, 8388608);
+        assert!(decision.lc.present);
+        assert!(decision.cp.present);
+        assert_eq!(decision.lc.ring_bytes, 33554432);
+        assert_eq!(decision.cp.ring_bytes, 33554432);
+        // Hashes bind the exact admitted bytes.
+        assert_eq!(decision.object_sha.len(), 64);
+        assert_eq!(decision.lc.object_sha.len(), 64);
+        assert_eq!(decision.cp.object_sha.len(), 64);
+        assert!(!decision.elf.is_empty());
+        assert!(!decision.lc.elf.is_empty());
+        assert!(!decision.cp.elf.is_empty());
+        assert_eq!(
+            decision.selected_caps,
+            "attempt-trace,mapping-lifecycle,copy-actual"
+        );
+    }
+
+    #[test]
+    fn service_unknown_profile_refuses() {
+        let profiles = scan_profiles();
+        let decision = decide_record(
+            &fixture("tests/fixtures/scan/ok"),
+            &scan_kernel(),
+            &profiles,
+            "no-such-profile",
+            true,
+            &fixture("tests/fixtures/elf/ok.o"),
+            "",
+            "",
+            "",
+            &fixture("tests/fixtures/scan/profiles"),
+            "",
+        );
+        assert!(!decision.ok);
+        assert!(decision.refusal.contains("unknown --profile"));
+        assert_eq!(decision.refusal_code, "profile");
+    }
+
+    #[test]
+    fn service_bad_caps_refuse() {
+        let profiles = scan_profiles();
+        let decision = decide_record(
+            &fixture("tests/fixtures/scan/ok"),
+            &scan_kernel(),
+            &profiles,
+            "",
+            false,
+            &fixture("tests/fixtures/elf/ok.o"),
+            "",
+            "",
+            "attempt-trace,nope",
+            &fixture("tests/fixtures/scan/profiles"),
+            "",
+        );
+        assert!(!decision.ok);
+        assert!(decision.refusal.contains("unknown capability"));
+    }
+
+    #[test]
+    fn service_conversion_cap_refuses() {
+        let profiles = scan_profiles();
+        let decision = decide_record(
+            &fixture("tests/fixtures/scan/ok"),
+            &scan_kernel(),
+            &profiles,
+            "",
+            false,
+            &fixture("tests/fixtures/elf/ok.o"),
+            "",
+            "",
+            "attempt-trace,conversion-observe",
+            &fixture("tests/fixtures/scan/profiles"),
+            "",
+        );
+        assert!(!decision.ok);
+        assert!(
+            decision
+                .refusal
+                .contains("conversion-observe has no record channel")
+        );
+    }
+
+    #[test]
+    fn service_unreadable_object_refuses() {
+        let profiles = scan_profiles();
+        let decision = decide_record(
+            &fixture("tests/fixtures/scan/ok"),
+            &scan_kernel(),
+            &profiles,
+            "",
+            false,
+            "/nonexistent/object.o",
+            "",
+            "",
+            "",
+            &fixture("tests/fixtures/scan/profiles"),
+            "",
+        );
+        assert!(!decision.ok);
+        assert_eq!(decision.refusal, "object unreadable");
+    }
+
+    #[test]
+    fn service_no_coverage_refuses() {
+        let profiles = scan_profiles();
+        let kernel = KernelInfo {
+            release: "7.0.0-test".to_string(),
+            arch: "riscv64".to_string(),
+            eligible_floor: true,
+            floor_reason: String::new(),
+        };
+        let decision = decide_record(
+            &fixture("tests/fixtures/scan/ok"),
+            &kernel,
+            &profiles,
+            "",
+            false,
+            &fixture("tests/fixtures/elf/ok.o"),
+            "",
+            "",
+            "",
+            &fixture("tests/fixtures/scan/profiles"),
+            "",
+        );
+        assert!(!decision.ok);
+        assert_eq!(decision.refusal, "no profile covers this kernel");
+    }
+
+    #[test]
+    fn service_missing_extra_object_refuses() {
+        // An explicit unreadable extra object names its channel.
+        let profiles = scan_profiles();
+        let decision = decide_record(
+            &fixture("tests/fixtures/scan/ok"),
+            &scan_kernel(),
+            &profiles,
+            "",
+            false,
+            &fixture("tests/fixtures/elf/ok.o"),
+            "/nonexistent/lc.o",
+            "",
+            "attempt-trace,mapping-lifecycle",
+            &fixture("tests/fixtures/scan/profiles"),
+            "",
+        );
+        assert!(!decision.ok);
+        assert_eq!(decision.refusal, "lc object unreadable");
+    }
+
+    #[test]
+    fn split_site_matrix() {
+        assert_eq!(
+            split_site("swiotlb:swiotlb_bounced"),
+            Some(("swiotlb".to_string(), "swiotlb_bounced".to_string()))
+        );
+        assert_eq!(split_site("nosite"), None);
+        assert_eq!(split_site(":evt"), None);
+        assert_eq!(split_site("sys:"), None);
+        assert_eq!(split_site("a:b:c"), None);
+        assert_eq!(split_site("sy-s:evt"), None);
+        assert_eq!(split_site("sys:ev t"), None);
+    }
+
+    #[test]
+    fn render_provenance_matrix() {
+        let v = render_provenance("k", &live_value("value", "ab12", ""));
+        assert_eq!(v.interpretation, "ab12");
+        let u = render_provenance("k", &live_value("", "", ""));
+        assert_eq!(u.interpretation, "unavailable: narrow identity unverified");
+        let s = render_provenance("k", &live_value("mismatch", "", ""));
+        assert_eq!(s.interpretation, "unavailable: mismatch");
+        let d = render_provenance("k", &live_value("uncheckable", "", "denied"));
+        assert_eq!(d.interpretation, "unavailable: uncheckable: denied");
+    }
+
+    #[test]
+    fn ownership_warning_shape() {
+        assert_eq!(
+            ownership_warning(1000, 100),
+            "memveil record: warning: cannot restore capture ownership to 1000:100\n"
+        );
+    }
+
+    #[test]
+    fn resolve_object_explicit_verbatim() {
+        assert_eq!(resolve_object("/x/y.o"), "/x/y.o");
+        assert_eq!(resolve_object(""), "");
+    }
+
+    #[test]
+    fn resolve_channel_object_explicit_or_embedded() {
+        // Explicit bytes win verbatim; an empty path falls back to
+        // the embedded artifact; unknown kinds and missing files
+        // refuse. Admission and load-check share this rule.
+        for kind in ["attempt", "lifecycle", "copy"] {
+            let got = resolve_channel_object("", kind).expect("embedded bytes");
+            let want = crate::platform::runtime::embedded_object(kind).expect("embedded");
+            assert_eq!(got, want.to_vec());
+        }
+        assert!(resolve_channel_object("", "bogus").is_err());
+        assert!(resolve_channel_object("tests/fixtures/elf/no-such.o", "attempt").is_err());
+        let path = fixture("tests/fixtures/elf/ok.o");
+        let got = resolve_channel_object(&path, "attempt").expect("explicit bytes");
+        assert_eq!(got, std::fs::read(&path).expect("read fixture"));
+    }
+
+    #[test]
+    fn resolve_bridge_explicit_verbatim() {
+        assert_eq!(resolve_bridge("/x/y.so", true), "/x/y.so");
+    }
+
+    #[test]
+    fn loadcheck_bridge_sha_empty() {
+        // No bridge anywhere: empty hash, never raises.
+        let sha = loadcheck_bridge_sha("/nonexistent-bridge.so", true);
+        assert_eq!(sha, "");
+    }
+
+    #[test]
+    fn attempt_loss_evidence_matrix() {
+        assert!(attempt_loss_evidence("7.3.0").is_empty());
+        let old = attempt_loss_evidence("6.1.0");
+        assert_eq!(old.len(), 1);
+        assert_eq!(old[0].item_type, "attempt-loss-bound");
+        assert!(old[0].interpretation.contains("lower bound before 6.7"));
+    }
+
+    struct NullWriter;
+
+    impl WriterSource for NullWriter {
+        fn create(&mut self, _path: &str, _budget: u64) -> crate::capture::live::CreateOut {
+            crate::capture::live::CreateOut {
+                ok: true,
+                kind: String::new(),
+                message: String::new(),
+            }
+        }
+        fn append(&mut self, _line: &[u8]) -> crate::capture::live::AppendOut {
+            crate::capture::live::AppendOut {
+                ok: true,
+                kind: String::new(),
+                message: String::new(),
+            }
+        }
+        fn append_closing(&mut self, _line: &[u8]) -> crate::capture::live::AppendOut {
+            self.append(_line)
+        }
+        fn group_begin(&mut self) -> crate::capture::live::GroupOut {
+            crate::capture::live::GroupOut {
+                ok: true,
+                mark: 0,
+                kind: String::new(),
+            }
+        }
+        fn group_abort(&mut self, _mark: u64) -> crate::capture::live::AppendOut {
+            self.append(&[])
+        }
+        fn checkpoint(&mut self, _session: &[u8]) -> crate::capture::live::AppendOut {
+            self.append(&[])
+        }
+        fn finalize(&mut self, _session: &[u8]) -> crate::capture::live::FinalOut {
+            crate::capture::live::FinalOut {
+                status: "finalized".to_string(),
+                note: String::new(),
+            }
+        }
+        fn abandon(&mut self) -> String {
+            String::new()
+        }
+        fn discard(&mut self) {}
+        fn committed_len(&self) -> u64 {
+            0
+        }
+        fn finalized_identity(&self) -> Vec<u64> {
+            Vec::new()
+        }
+    }
+
+    fn run_opts() -> RecordOptions {
+        RecordOptions {
+            output: "/nonexistent-refusal/cap".to_string(),
+            bridge: "test-bridge".to_string(),
+            has_bridge: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn service_run_bad_budgets_refuse() {
+        // Budgets gate before any resource exists.
+        for budget in [131071u64, 4294967297u64] {
+            let mut opts = run_opts();
+            opts.max_events_bytes = budget;
+            let mut writer = NullWriter;
+            let out = run_collector_with("", "", opts, &mut writer);
+            assert_eq!(out.exit_code, EXIT_REFUSAL);
+            assert!(out.diagnostic.contains("budget"));
+            assert!(out.trusted);
+        }
+    }
+
+    #[test]
+    fn service_run_no_bridge_proceeds() {
+        // The statically linked loader needs no bridge
+        // file: an empty bridge proceeds to evidence,
+        // which "" (live host) opens, then to profiles.
+        let tmp = TestDir::create("memveil-run").expect("mkdtemp");
+        let mut opts = run_opts();
+        opts.has_bridge = false;
+        opts.bridge = String::new();
+        opts.profiles_dir = format!("{}/no-profiles", tmp.as_str());
+        let mut writer = NullWriter;
+        let out = run_collector_with("", &opts.profiles_dir.clone(), opts, &mut writer);
+        assert_eq!(out.exit_code, EXIT_REFUSAL);
+        // Past bridge resolution, the missing profiles dir refuses.
+        assert!(out.diagnostic.contains("cannot load profiles"));
+        assert!(!out.trusted);
+    }
+
+    #[test]
+    fn service_run_cannot_open_evidence() {
+        let opts = run_opts();
+        let mut writer = NullWriter;
+        let out = run_collector_with("/nonexistent-evidence-root-xyz", "", opts, &mut writer);
+        assert_eq!(out.exit_code, EXIT_REFUSAL);
+        assert!(out.diagnostic.contains("cannot open evidence"));
+        assert!(!out.trusted);
+    }
+
+    #[test]
+    fn service_run_cannot_load_profiles() {
+        let tmp = TestDir::create("memveil-run").expect("mkdtemp");
+        let mut opts = run_opts();
+        opts.profiles_dir = format!("{}/no-profiles", tmp.as_str());
+        let mut writer = NullWriter;
+        let out = run_collector_with("", &opts.profiles_dir.clone(), opts, &mut writer);
+        assert_eq!(out.exit_code, EXIT_REFUSAL);
+        assert!(out.diagnostic.contains("cannot load profiles"));
+        assert!(!out.trusted);
+    }
+
+    #[test]
+    fn repair_warning_unattempted_empty() {
+        // No finalize pin, no sudo: nothing attempted, no warning.
+        let writer = NullWriter;
+        assert_eq!(repair_warning_for("/tmp/whatever", &writer), "");
+    }
+
+    #[test]
+    fn scan_decision_defaults_unprobed() {
+        let d = ScanDecision::default();
+        assert!(!d.ok);
+        assert_eq!(d.off_loc, -1);
+        assert_eq!(d.off_size, -1);
+        assert_eq!(d.off_force, -1);
+        assert_eq!(d.off_fixed_end, -1);
+        assert!(!d.lc.present);
+        assert!(!d.cp.present);
+    }
+
+    #[test]
+    fn extra_channel_default_absent() {
+        let c = ExtraChannel::default();
+        assert!(!c.present);
+        assert!(c.elf.is_empty());
+    }
+}

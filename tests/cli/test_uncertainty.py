@@ -72,7 +72,9 @@ class Uncertainty(unittest.TestCase):
                 self.quality('correlation', status)
                 r = self.report()
                 self.assertIsNone(self.metric(r, 'live_observed_allocation_bytes')['value'])
-                self.assertEqual(self.metric(r, 'bounce_attempts')['coverage'], 'complete_for_scope')
+                # Capture-integrity verification withholds complete_for_scope
+                # for unverified captures (both binaries, byte-identical).
+                self.assertEqual(self.metric(r, 'bounce_attempts')['coverage'], 'partial')
                 self.incomplete(r)
 
     def test_pressure_gap_and_fresh_run(self):
@@ -177,13 +179,15 @@ class Uncertainty(unittest.TestCase):
         r = self.report()
         live = self.metric(r, 'live_observed_allocation_bytes')
         self.assertEqual(live['value'], '4096')
-        self.assertEqual(live['coverage'], 'complete_for_scope')
+        # Capture-integrity verification withholds complete_for_scope
+        # for unverified captures (both binaries, byte-identical).
+        self.assertEqual(live['coverage'], 'partial')
         cp = self.metric(r, 'copy_original_to_bounce_bytes')
         self.assertEqual(cp['value'], '5120')
         self.assertEqual(cp['coverage'], 'partial')
         rel = r['quality']['correlation']['relations']
         self.assertEqual(
-            rel['mapping_release']['status'], 'complete_for_scope')
+            rel['mapping_release']['status'], 'partial')
         self.assertEqual(rel['copy_attribution']['status'], 'partial')
         self.assertEqual(rel['copy_attribution']['loss_count'], '1')
         self.incomplete(r)
@@ -195,7 +199,9 @@ class Uncertainty(unittest.TestCase):
             self.metric(r, 'live_observed_allocation_bytes')['value'])
         cp = self.metric(r, 'copy_original_to_bounce_bytes')
         self.assertEqual(cp['value'], '5120')
-        self.assertEqual(cp['coverage'], 'complete_for_scope')
+        # Capture-integrity verification withholds complete_for_scope
+        # for unverified captures (both binaries, byte-identical).
+        self.assertEqual(cp['coverage'], 'partial')
         rel = r['quality']['correlation']['relations']
         self.assertEqual(rel['mapping_release']['status'], 'partial')
         self.assertEqual(rel['mapping_release']['loss_count'], '1')
@@ -426,7 +432,9 @@ class Uncertainty(unittest.TestCase):
         self.events.append(self.gap('aggregate', self.events[-1]))
         r = self.report(0)
         self.assertEqual(self.metric(r, 'known_shared_region_bytes')['value'], '8192')
-        self.assertEqual(self.metric(r, 'known_shared_region_bytes')['coverage'], 'complete_for_scope')
+        # Capture-integrity verification withholds complete_for_scope
+        # for unverified captures (both binaries, byte-identical).
+        self.assertEqual(self.metric(r, 'known_shared_region_bytes')['coverage'], 'partial')
 
     def test_combined_quality_reasons_fit_report(self):
         self.load('lifecycle/open-at-end')

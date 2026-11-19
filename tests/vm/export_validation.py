@@ -53,7 +53,7 @@ def sha(value):
 def identity(doc):
     keys(doc,('release','swiotlb_force','config_sha','btf_sha','bridge_sha',
               'consume_sha','lc_sha','cp_sha','ko_sha'),('iface',))
-    if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+[-A-Za-z0-9.]*',doc['release']):
+    if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+[-A-Za-z0-9.+_]*',doc['release']):
         raise ValueError('invalid kernel release')
     if doc['swiotlb_force'] is not True: raise ValueError('missing force boot option')
     for key,value in doc.items():
@@ -771,7 +771,7 @@ def validate_attempt_exports(got, mode=None):
         raise ValueError('readiness acknowledgement differs from record stdout')
     ident=ledger['identity']
     keys(ident,('release','config_src','config_sha','btf_sha','format_sha','image_sha','image_bid'))
-    if type(ident['release']) is not str or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+[-A-Za-z0-9.]*',ident['release']):
+    if type(ident['release']) is not str or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+[-A-Za-z0-9.+_]*',ident['release']):
         raise ValueError('invalid kernel release')
     for key in ('config_sha','btf_sha','format_sha','image_sha'):sha(ident[key])
     if ident['config_src'] not in ('gz','file'):raise ValueError('invalid config source')

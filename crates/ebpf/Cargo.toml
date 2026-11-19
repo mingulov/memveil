@@ -1,0 +1,36 @@
+[package]
+name = "memveil-ebpf"
+version = "0.0.0"
+# edition 2021: the probes use `gen` as an identifier (reserved in 2024).
+edition = "2021"
+rust-version = "1.97"
+license = "GPL-2.0-only"
+publish = false
+
+[dependencies]
+# aya-build (currently 0.2.0) reaches the BPF link only through Cargo.lock,
+# transitively via aya-ebpf: no manifest pins it. Never `cargo update` this
+# crate unattended — a new aya-build can change generated bindings or the
+# link, so review the lockfile diff and rebuild every channel object after
+# any update.
+aya-ebpf = "=0.2.1"
+memveil-ebpf-common = { version = "0.0.0", path = "../ebpf-common", default-features = false }
+
+[[bin]]
+name = "memveil-ebpf-attempt"
+path = "src/bin/attempt.rs"
+
+[[bin]]
+name = "memveil-ebpf-lifecycle"
+path = "src/bin/lifecycle.rs"
+
+[[bin]]
+name = "memveil-ebpf-copy"
+path = "src/bin/copy.rs"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+
+[workspace]

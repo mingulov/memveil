@@ -1,0 +1,12 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Source: third-party binary build; see X-Memveil-Revision in DEBIAN/control
+
+Files: *
+Copyright: See LICENSE and THIRD-PARTY-NOTICES.md in this directory.
+License: GPL-3.0-or-later
+ The MemVeil sources are available under GPL-3.0-or-later; the full
+ license text is in LICENSE. On Debian systems the GPL-3 text is
+ also in /usr/share/common-licenses/GPL-3. BPF objects are
+ GPL-2.0-only (LICENSES/). The shipped libgcc runtime library is
+ GPL-3.0-only WITH GCC-exception-3.1 (licenses/), with notices in
+ THIRD-PARTY-NOTICES.md.

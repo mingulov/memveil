@@ -28,7 +28,7 @@ BIN = os.path.join(REPO, "build", "memveil")
 
 def _report_for(fixture):
     if not os.path.isfile(BIN):
-        pytest.skip("missing build/memveil (run tools/build first)")
+        pytest.skip("missing build/memveil (run cargo build --release first)")
     out = subprocess.run(
         [BIN, "report", "--format", "json",
          os.path.join(REPO, "tests", "fixtures", fixture)],

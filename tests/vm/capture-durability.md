@@ -22,12 +22,17 @@ Then supply exact candidate inputs and an absent evidence directory:
 MEMVEIL_VM_CAPTURE_FAILURES=1 python3 tests/vm/capture_durability.py \
   --binary /path/to/candidate/bin/memveil \
   --binary-sha256 ACTUAL_EXECUTABLE_SHA256 \
-  --object /path/to/candidate/lib/memveil/swiotlb_attempt.bpf.o \
-  --bridge /path/to/candidate/lib/libbpf_mojo.so.1 \
+  --object /path/to/candidate/bpf/swiotlb_attempt.bpf.o \
+  --bridge /path/to/candidate/lib/memveil/libgcc_s.so.1 \
   --profile /path/to/admitted-profile.json \
   --kernel /path/to/selected-vmlinuz --kernel-config /path/to/selected.config \
   --out /path/to/new-evidence-directory
 ```
+
+(The pre-cutover Mojo candidate kept objects under `lib/memveil/`
+with a `lib/libbpf_mojo.so.1` bridge; Rust candidates stage
+`bpf/*.bpf.o` inspection objects with a statically linked
+loader, so any shipped file fills the `--bridge` slot.)
 
 The runner acquires the existing VM suite lease and creates four exclusive
 128 MiB disk images. It never formats or mounts a host device. Guest mutation

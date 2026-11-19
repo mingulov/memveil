@@ -3,17 +3,14 @@
 """Provenance gate: licenses, pins, versions, and packager inputs.
 
 Every first-party source file carries an SPDX identifier from a
-known set with its license text staged; third-party notices name
-the exact pinned bridge; the toolchain lock has no unknown
-origins and agrees with the pixi manifest; product, schema, and
-bridge versions stay distinct; and every static input
-tools/package needs from this tree exists. Pinned-bridge bytes
-(LMB_PACKAGE hash, staged license copies) are verified at pack
-time, not here. Each schema family ships its current contract
-plus any retained (superseded but still shipped) versions
-pinned in the lock. Exits nonzero on the first failure.
-Standard library only. `test_provenance.py --selftest`
-exercises the schema-file rule.
+known set with its license text staged; Cargo pins the exact
+toolchain and dependency closure; the engine, spec, and
+toolchain versions agree; and every static input the Rust
+build and packagers need from this tree exists. Each schema
+family ships its current contract plus any retained
+(superseded but still shipped) versions pinned below. Exits
+nonzero on the first failure. Standard library only.
+`test_provenance.py --selftest` exercises the schema-file rule.
 
 The file inventory comes from Git only when this source root
 owns its Git top level; a standalone source archive (outside
@@ -48,22 +45,17 @@ KNOWN_IDS = {
     "GPL-2.0-or-later": "LICENSES/GPL-2.0-or-later.txt",
 }
 
-UAPI_PREFIX = "bpf/include/uapi/"
-UAPI_IDS = {
-    "GPL-2.0 WITH Linux-syscall-note": "LICENSES/GPL-2.0.txt",
-}
-
 CODE_SUFFIXES = (
-    ".mojo", ".c", ".h", ".py", ".sh", ".md", ".yml", ".yaml",
+    ".rs", ".c", ".h", ".py", ".sh", ".md", ".yml", ".yaml",
 )
 CODE_BASENAMES = ("Makefile", "CMakeLists.txt", "Dockerfile")
-SKIP_DIRS = ("build", "dist", ".pixi", "__pycache__", ".pytest_cache",
-             ".git", ".mypy_cache")
+SKIP_DIRS = ("build", "dist", "target", ".pixi", "__pycache__",
+             ".pytest_cache", ".git", ".mypy_cache")
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 STATIC_INPUTS = [
-    "LICENSE", "THIRD-PARTY-NOTICES.md",
+    "LICENSE",
     "LICENSES/GPL-2.0.txt",
     "LICENSES/GPL-2.0-only.txt", "LICENSES/GPL-2.0-or-later.txt",
     "docs/quickstart.md", "docs/support.md", "docs/privacy.md",
@@ -72,8 +64,22 @@ STATIC_INPUTS = [
     "examples/lifecycle-copy/events.ndjson",
     "examples/lifecycle-copy/session.json",
     "profiles/manifest.txt",
-    "bpf/programs/swiotlb_attempt.bpf.c",
-    "src/memveil/main.mojo", "toolchain.lock.json",
+    "Cargo.toml", "Cargo.lock",
+    "deny.toml",
+    "build.rs", "src/lib.rs", "src/main.rs",
+    "crates/ebpf/Cargo.toml", "crates/ebpf/Cargo.lock",
+    "crates/ebpf/rust-toolchain.toml",
+    "crates/ebpf/deny.toml",
+    "crates/ebpf-common/Cargo.toml",
+    "packaging/deb/control.in",
+    "packaging/deb/copyright",
+    "packaging/deb/lintian-overrides",
+    "packaging/rpm/memveil.spec",
+    "packaging/libgcc/PROVENANCE.txt",
+    "packaging/libgcc/libgcc-s1_14.2.0-19_amd64.deb",
+    "packaging/libgcc/GPL-3.txt",
+    "packaging/RUNTIME.LIBRARY.EXCEPTION",
+    "rust-toolchain.toml", "mise.toml",
 ]
 
 
@@ -152,13 +158,8 @@ def is_code(rel):
     # They inherit the repository default license (LICENSE).
     if parts[0] == "tests" and len(parts) > 1 and parts[1] == "golden":
         return False
-    # The x86 asm/types.h UAPI shim carries no SPDX tag and must
-    # stay byte-identical to the vendor package; the vendored set
-    # is licensed per bpf/include/uapi/README (hash-checked below).
-    if rel == "bpf/include/uapi/asm/types.h":
-        return False
     base = parts[-1]
-    if rel == "pixi.toml" or parts[0] == "tools":
+    if parts[0] == "tools":
         return True
     if base in CODE_BASENAMES or base.startswith("Dockerfile"):
         return True
@@ -178,53 +179,6 @@ def spdx_of(path):
     return found
 
 
-def verify_uapi_readme():
-    """Vendored UAPI bytes must match bpf/include/uapi/README hashes."""
-    root = os.path.join(ROOT, "bpf", "include", "uapi")
-    try:
-        with open(os.path.join(root, "README")) as handle:
-            text = handle.read()
-    except OSError:
-        return False, "README missing"
-    want = {}
-    for line in text.splitlines():
-        parts = line.split()
-        if len(parts) == 2 and HEX64.match(parts[0]):
-            want[parts[1]] = parts[0]
-    if len(want) != 13:
-        return False, "got %d hashes" % len(want)
-    for rel in sorted(want):
-        path = os.path.join(root, rel)
-        if not os.path.isfile(path):
-            return False, "missing " + rel
-        with open(path, "rb") as handle:
-            got = hashlib.sha256(handle.read()).hexdigest()
-        if got != want[rel]:
-            return False, "drift " + rel
-    return True, "13 files"
-
-
-VENDOR_TOKEN = "unknown-linux-musl"
-
-
-def redacted_lock_text(lock):
-    """Lock JSON with exactly the validated vendor token exempted.
-
-    The pixi release pin names the upstream musl asset, whose
-    target triple legitimately contains "unknown" as the vendor
-    field. Only that token occurrence inside each release field
-    is removed before placeholder scanning, so placeholder text
-    hiding anywhere else in those fields still fails the gate.
-    """
-    redacted = json.dumps(lock)
-    for key in ("release_url", "release_asset"):
-        field = lock["toolchain"]["pixi"].get(key, "")
-        if field and VENDOR_TOKEN in field:
-            redacted = redacted.replace(
-                field, field.replace(VENDOR_TOKEN, "", 1), 1)
-    return redacted
-
-
 # Schema families: filename prefix, current-version lock key,
 # retained-versions lock key. The session family uses the bare
 # schema_version key. A family without a retained key ships only
@@ -242,9 +196,26 @@ SCHEMA_FAMILIES = (
     ("session-v", "schema_version", "schema_retained_versions"),
 )
 
+# Shipped schema pins (cutover: carried verbatim from the retired
+# toolchain lock's product contracts; product, schema, and
+# toolchain versions stay independent by policy, not by format).
+SCHEMA_CONTRACTS = {
+    "schema_version": "0.1.4",
+    "event_schema_version": "0.1.2",
+    "event_retained_versions": ["0.1.1"],
+    "profile_schema_version": "0.1.2",
+    "profile_retained_versions": ["0.1.1"],
+    "doctor_schema_version": "0.1.1",
+    "doctor_retained_versions": ["0.1.0"],
+    "report_schema_version": "0.1.4",
+    "report_retained_versions": ["0.1.3", "0.1.2", "0.1.1", "0.1.0"],
+    "receipt_schema_version": "0.1.0",
+    "schema_retained_versions": ["0.1.3", "0.1.2", "0.1.1"],
+}
+
 
 def schema_file_status(basenames, contracts):
-    """(bad, missing, inconsistent) for schema files against the lock.
+    """(bad, missing, inconsistent) for schema files against the pins.
 
     bad: files matching no pinned (current or retained) version
     for their own family, including unknown families.
@@ -294,9 +265,8 @@ def schema_file_status(basenames, contracts):
 
 
 def run_selftest():
-    """Exercise the schema-file rule against the real lock and tree."""
-    with open(os.path.join(ROOT, "toolchain.lock.json")) as handle:
-        contracts = json.load(handle)["product_contracts"]
+    """Exercise the schema-file rule against the pins and tree."""
+    contracts = SCHEMA_CONTRACTS
     real = sorted(os.path.basename(path) for path in glob.glob(
         os.path.join(ROOT, "schemas", "*.json")))
     results = []
@@ -327,7 +297,7 @@ def run_selftest():
     check("missing-current-fails", missing == [dropped],
           "; ".join(missing))
     retained = contracts["schema_retained_versions"]
-    check("lock-has-retained-fixture", bool(retained), repr(retained))
+    check("pins-have-retained-fixture", bool(retained), repr(retained))
     if retained:
         dropped = "session-v%s.schema.json" % retained[0]
         _, missing, _ = schema_file_status(
@@ -344,22 +314,17 @@ def run_selftest():
     _, _, inconsistent = schema_file_status(real, malformed)
     check("retained-malformed-fails", len(inconsistent) == 1,
           "; ".join(inconsistent))
-    with open(os.path.join(ROOT, "toolchain.lock.json")) as handle:
-        full_lock = json.load(handle)
-    redacted = redacted_lock_text(full_lock).lower()
-    check("placeholder-real-lock-clean",
-          "unknown" not in redacted and "tbd" not in redacted,
-          redacted[:200])
-    tampered = json.loads(json.dumps(full_lock))
-    tampered_asset = "pixi-TBD-unknown-linux-musl.tar.gz"
-    tampered["toolchain"]["pixi"]["release_asset"] = tampered_asset
-    tampered["toolchain"]["pixi"]["release_url"] = \
-        "https://github.com/prefix-dev/pixi/releases/download/v%s/%s" \
-        % (tampered["toolchain"]["pixi"]["version"], tampered_asset)
-    redacted = redacted_lock_text(tampered).lower()
-    check("placeholder-tampered-asset-detected",
-          "tbd" in redacted, redacted[:200])
     return results
+
+
+def _cargo_version(text):
+    match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.M)
+    return match.group(1) if match else ""
+
+
+def _toolchain_channel(text):
+    match = re.search(r'^channel\s*=\s*"([^"]+)"', text, re.M)
+    return match.group(1) if match else ""
 
 
 def main(argv):
@@ -393,66 +358,51 @@ def main(argv):
 
     offenders = []
     seen_ids = set()
-    seen_uapi = set()
     for rel in sorted(files):
         if not is_code(rel):
             continue
         found = spdx_of(os.path.join(ROOT, rel))
         if found is None:
             offenders.append(rel + " (missing)")
-        elif rel.startswith(UAPI_PREFIX):
-            if found not in UAPI_IDS:
-                offenders.append(rel + " (unknown id %s)" % found)
-            else:
-                seen_uapi.add(found)
         elif found not in KNOWN_IDS:
             offenders.append(rel + " (unknown id %s)" % found)
         else:
             seen_ids.add(found)
     check("spdx-coverage", not offenders, "; ".join(offenders[:5]))
-    check("uapi-readme-hashes", *verify_uapi_readme())
 
     for ident in sorted(seen_ids):
         staged = os.path.join(ROOT, KNOWN_IDS[ident])
         check("license-text-%s" % ident, os.path.isfile(staged), staged)
-    for ident in sorted(seen_uapi):
-        staged = os.path.join(ROOT, UAPI_IDS[ident])
-        check("license-text-uapi", os.path.isfile(staged), staged)
     check("license-default", os.path.isfile(os.path.join(ROOT, "LICENSE")))
 
-    lock_path = os.path.join(ROOT, "toolchain.lock.json")
-    with open(lock_path) as handle:
-        lock = json.load(handle)
-    check("lock-version", lock.get("lock_version") == "1.0.0")
-    pin = lock["dependencies"]["libbpf-mojo"]
-    check("lock-pin-fields",
-          pin.get("status") == "pinned"
-          and pin.get("version") and pin.get("source_commit")
-          and HEX64.match(pin.get("tarball_sha256", "")),
-          json.dumps(pin, sort_keys=True)[:160])
-    # The pixi release pin names the upstream x86-64 musl asset,
-    # whose target triple legitimately contains "unknown" as the
-    # vendor field; only that validated token is exempted before
-    # scanning for placeholder text, so placeholders hiding
-    # elsewhere in the release fields still fail the gate.
-    dumped = redacted_lock_text(lock).lower()
-    check("lock-no-unknown",
-          "unknown" not in dumped and "tbd" not in dumped)
-
-    pixi_pin = lock["toolchain"]["pixi"]
-    pixi_asset_ok = (
-        pixi_pin.get("release_asset", "").startswith("pixi-")
-        and pixi_pin.get("release_asset", "").endswith(".tar.gz"))
-    pixi_url_ok = (pixi_pin.get("release_url")
-                   == "https://github.com/prefix-dev/pixi/releases/"
-                   "download/v%s/%s"
-                   % (pixi_pin.get("version", ""),
-                      pixi_pin.get("release_asset", "")))
-    check("lock-pixi-release-pin",
-          bool(pixi_pin.get("version"))
-          and pixi_asset_ok and pixi_url_ok
-          and HEX64.match(pixi_pin.get("release_sha256", "")),
-          json.dumps(pixi_pin, sort_keys=True)[:160])
+    with open(os.path.join(ROOT, "Cargo.toml")) as handle:
+        product_version = _cargo_version(handle.read())
+    check("cargo-version", bool(product_version), product_version)
+    with open(os.path.join(ROOT, "rust-toolchain.toml")) as handle:
+        host_channel = _toolchain_channel(handle.read())
+    with open(os.path.join(
+            ROOT, "crates", "ebpf", "rust-toolchain.toml")) as handle:
+        ebpf_channel = _toolchain_channel(handle.read())
+    check("toolchain-pinned", bool(host_channel) and bool(ebpf_channel),
+          "%s / %s" % (host_channel, ebpf_channel))
+    with open(os.path.join(ROOT, "mise.toml")) as handle:
+        mise = handle.read()
+    mise_rust = re.search(r'^rust\s*=\s*"([^"]+)"', mise, re.M)
+    check("toolchain-mise-agrees",
+          bool(mise_rust) and mise_rust.group(1) == host_channel,
+          mise_rust.group(1) if mise_rust else "no rust pin")
+    with open(os.path.join(ROOT, "build.rs")) as handle:
+        build_rs = handle.read()
+    bpf_toolchain = re.search(
+        r'BPF_TOOLCHAIN[^\n"]*"([^"\n]+)"', build_rs)
+    check("toolchain-ebpf-agrees-build",
+          bool(bpf_toolchain) and bpf_toolchain.group(1) == ebpf_channel,
+          bpf_toolchain.group(1) if bpf_toolchain else "no BPF pin")
+    for rel in ("Cargo.lock", "crates/ebpf/Cargo.lock",
+                "deny.toml", "crates/ebpf/deny.toml"):
+        path = os.path.join(ROOT, rel)
+        check("pinfile-" + rel.replace("/", "-"),
+              os.path.isfile(path) and os.path.getsize(path) > 0, rel)
 
     workflows = sorted(glob.glob(os.path.join(
         ROOT, ".github", "workflows", "*.yml")))
@@ -484,8 +434,6 @@ def main(argv):
               not piped_shell
               and "pixi.sh/install.sh" not in text,
               piped_shell.group(0).strip() if piped_shell else "")
-        check("ci-pixi-bootstrap-%s" % base,
-              "tools/install-pixi" in text)
         runners = re.findall(r"^\s*runs-on:\s*(.+?)\s*$",
                              text, re.M)
         check("ci-runners-known-%s" % base,
@@ -499,25 +447,12 @@ def main(argv):
     check("notices-present", os.path.isfile(notices_path))
     with open(notices_path) as handle:
         notices = handle.read()
-    check("notices-pin",
-          pin["version"] in notices
-          and pin["source_commit"] in notices)
     lowered = notices.lower()
     check("notices-no-placeholders",
           "todo" not in lowered and "tbd" not in lowered
           and "xxx" not in lowered)
 
-    with open(os.path.join(ROOT, "pixi.toml")) as handle:
-        pixi = handle.read()
-    mver = re.search(r'^version\s*=\s*"([^"]+)"', pixi, re.M)
-    mmojo = re.search(r'^mojo\s*=\s*"==([^"]+)"', pixi, re.M)
-    check("pixi-manifest", bool(mver) and bool(mmojo))
-    product_version = mver.group(1)
-    check("lock-mojo-agrees-pixi",
-          lock["toolchain"]["mojo"]["version"] == mmojo.group(1))
-    check("pixi-license-declared", 'license = "GPL-3.0-or-later"' in pixi)
-
-    contracts = lock["product_contracts"]
+    contracts = SCHEMA_CONTRACTS
     schemas = sorted(glob.glob(os.path.join(ROOT, "schemas", "*.json")))
     check("schemas-present", len(schemas) >= 4, str(len(schemas)))
     bad, missing, inconsistent = schema_file_status(
@@ -526,9 +461,6 @@ def main(argv):
     check("schemas-pinned-present", not missing, "; ".join(missing[:5]))
     check("schemas-retained-consistent", not inconsistent,
           "; ".join(inconsistent[:5]))
-    check("versions-distinct-note",
-          any("independent" in d
-              for d in lock.get("decisions", [])))
 
     binary = os.path.join(ROOT, "build", "memveil")
     if os.path.isfile(binary):
@@ -536,17 +468,17 @@ def main(argv):
                               stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, text=True)
         engine = proc.stdout.strip()
-        check("engine-version-matches-pixi",
+        check("engine-version-matches-cargo",
               proc.returncode == 0
               and engine == "memveil-" + product_version, engine)
     else:
-        print("ok engine-version-matches-pixi (no built binary; skipped)")
+        print("ok engine-version-matches-cargo (no built binary; skipped)")
 
     with open(os.path.join(ROOT, "packaging", "rpm",
                            "memveil.spec")) as handle:
         spec = handle.read()
     mspec = re.search(r"^Version:\s*(\S+)", spec, re.M)
-    check("spec-version-matches-pixi",
+    check("spec-version-matches-cargo",
           bool(mspec) and mspec.group(1) == product_version,
           mspec.group(1) if mspec else "no Version line")
 

@@ -47,15 +47,17 @@ if [ ! -r "/boot/vmlinuz-$REL" ] || [ ! -w /dev/kvm ]; then
     echo "vm-attempts: vng runs under sudo -n" >&2
 fi
 if [ ! -x "$ROOT/build/memveil" ]; then
-    echo "vm-attempts: missing $ROOT/build/memveil (run tools/build)" >&2
+    echo "vm-attempts: missing $ROOT/build/memveil (run cargo build --release)" >&2
     exit 1
 fi
 if [ ! -f "$ROOT/build/bpf/swiotlb_attempt.bpf.o" ]; then
-    echo "vm-attempts: missing production BPF object (run tools/build)" >&2
+    echo "vm-attempts: missing production BPF object (cutover: C probes retired;" >&2
+    echo "vm-attempts: armed runs need Rust-native probe staging)" >&2
     exit 1
 fi
 if [ ! -f "$ROOT/build/bpf/swiotlb_attempt-test.bpf.o" ]; then
-    echo "vm-attempts: missing saturation BPF object (run tools/build)" >&2
+    echo "vm-attempts: missing saturation BPF object (cutover: C probes retired;" >&2
+    echo "vm-attempts: armed runs need Rust-native probe staging)" >&2
     exit 1
 fi
 echo "vm-attempts: $($VNG --version 2>/dev/null)"

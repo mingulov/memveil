@@ -1,0 +1,3 @@
+# Keep channel-first declaration order in src/bin/*.rs (channel module, then
+# common): alphabetical reorder would churn those two-line heads.
+reorder_modules = false

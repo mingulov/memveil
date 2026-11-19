@@ -40,8 +40,11 @@ plus a `receipt.json` of schema `memveil-matrix-row/1` inside
 it. The receipt carries the full qualification fields:
 
 - `source`: the memveil commit and dirty flag plus the pinned
-  libbpf-mojo version and tarball hash.
-- `toolchain`: the toolchain lock pins and the lock hash.
+  support-library version and tarball hash (pre-cutover
+  rows; minted-new rows await the Rust toolchain-identity
+  story).
+- `toolchain`: the toolchain pins and the lock hash
+  (pre-cutover rows; see above).
 - `artifacts`: the guest-measured binary hash, dpkg version, BPF
   object hashes, and bpftrace/bpftool versions (never paths).
 - `kernel`: release, boot label, uname, modules, version,

@@ -36,7 +36,7 @@ SEED_DIRS = [
     os.path.join("tests", "fixtures", "reader", "sealed-empty"),
 ]
 CRASH_MARKERS = (b"Traceback", b"panic", b"AssertionError",
-                 b"Segmentation fault", b"mojo: error")
+                 b"Segmentation fault")
 
 
 def mutate(rng, data):
@@ -143,7 +143,7 @@ def main():
               % (args.seeds,))
         return 1
     if not os.path.isfile(args.binary):
-        print("FAIL fuzz: missing %s (run tools/build first)"
+        print("FAIL fuzz: missing %s (run cargo build --release first)"
               % args.binary)
         return 1
     with open(args.binary, "rb") as fh:
@@ -227,7 +227,7 @@ def main():
                    elapsed_seconds=time.monotonic()-started, outcomes=dict(outcomes),
                    corpus_families=dict(families),
                    parser_branch_coverage=dict(status='NOT_MEASURED', reason=
-                       'Pinned Mojo compiler exposes no documented coverage instrumentation; case counts are sampling, not branch coverage.'))
+                       'No coverage instrumentation is wired into this lane; case counts are sampling, not branch coverage.'))
     if args.receipt:
         args.receipt.parent.mkdir(parents=True, exist_ok=True)
         args.receipt.write_text(json.dumps(receipt, indent=2) + '\n')

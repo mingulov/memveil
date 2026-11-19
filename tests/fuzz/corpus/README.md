@@ -26,5 +26,5 @@ Receipts under `build/fuzz-*.json` bind the executable, seed file hashes, seed
 range, timeout, elapsed time, outcomes, and family sampling. Failed inputs and
 the oracle reason remain under `build/fuzz-regressions/`. CI retains those
 receipts on every outcome. These are sampling records, not parser branch
-coverage. The pinned Mojo build interface has no documented coverage option;
+coverage. No coverage instrumentation is wired into this lane;
 its coverage status is explicitly NOT_MEASURED. No percentage is invented.

@@ -1,9 +1,12 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Reproducing offline BPF fixtures
 
-The build accepts the system clang floor in `toolchain.lock.json`. Different
+The build accepts the system clang available on the host. Different
 accepted compiler builds can emit different instruction, BTF and DWARF bytes.
 A compiler floor is not an exact object identity or kernel qualification.
+The C probe sources and their header inputs retired at the cutover, so
+regeneration waits on a pinned post-cutover story; the committed
+fixtures carry every suite meanwhile.
 
 Historical fixtures under `tests/fixtures/` and qualified profiles under
 `profiles/` retain their recorded identities. In particular, the committed
@@ -14,11 +17,9 @@ historical bytes; it is appropriate when recreating that environment. A
 mismatch is not permission to replace a historical hash with the local one.
 
 For offline tests on another accepted compiler, generate separate provisional
-fixtures after the normal build has fetched the pinned libbpf headers:
+fixtures once a pinned regen story lands:
 
 ```sh
-pixi install
-./tools/build
 ./tools/emit-test-fixtures
 ./tools/emit-test-fixtures --check
 ./tools/test profile-semantics
@@ -41,7 +42,7 @@ without replacing its historical object:
 ```
 
 The provisional manifest records SHA-256 identities for sources, generator
-implementations, product/UAPI/libbpf headers, compiler resource headers,
+implementations, product and compiler headers, compiler resource headers,
 compiler driver and invoker, loaded compiler configuration, and loaded
 compiler shared libraries. Configuration paths and effective compiler commands
 come from dry-runs of each actual BPF compilation, including its target and flags;

@@ -3,10 +3,10 @@
 
 The extractor reads an object's .BTF/.BTF.ext core relocations and
 emits profile-schema 0.1.2 layout items; --check gates that a profile
-carries exactly the extracted set. Oracles: the bpf_core field,
-enum, and type sites in bpf/programs/swiotlb_copy.bpf.c and
-swiotlb_lifecycle.bpf.c, the local types in
-bpf/include/mv_fentry_types.h, and the relo_kinds.bpf.c source.
+carries exactly the extracted set. Oracles: the committed ELF
+fixtures plus the relo_kinds.bpf.c source (the C-probe oracles
+retired with the C tree; recompile-exactness legs skip until a
+pinned post-cutover regen story lands).
 """
 from test_fixture_generation import generated  # noqa: F401
 

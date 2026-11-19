@@ -3,33 +3,34 @@
 
 ## Prerequisites
 
-Pinned Mojo 1.2.0 toolchain via pixi plus the
-floored system tools; see [build](docs/build.md)
-and `toolchain.lock.json`. The native bridge
-resolves from the hash-pinned vendored bundle
-in `third_party/`, or an explicit matching
-`LMB_PACKAGE`.
+Pinned Rust 1.100.0 toolchain (plus
+nightly-2026-05-20 for the eBPF child build)
+plus the floored system tools; see
+[build](docs/build.md), `rust-toolchain.toml`,
+and `Cargo.lock`. No bridge library, no
+vendored native dependencies.
 
 ## Build and test
 
 ```sh
-./tools/build                    # build everything
-./tools/test --help              # list suites
-./tools/test unit                # one suite
+cargo build --release --locked   # build everything
+cargo test --workspace --locked  # Rust suites
+./tools/test --help              # list harness suites
+./tools/test reports             # one harness suite
 ```
 
 Run the suites that cover a change; run the
 full gate before declaring green. Do not
-invent a Mojo test command: `tools/test` is
-the only runner. Privileged fixtures belong
-in the designated isolated environment.
+invent test commands: `cargo test` plus
+`tools/test` are the runners. Privileged
+fixtures belong in the designated isolated
+environment.
 
 ## Style and scope
 
 - Keep changes scoped to this repository;
-  coordinate a library ABI change with an
-  explicit dependency revision and matching
-  tests.
+  coordinate a pinned-input change with the
+  gates that pin it and matching tests.
 - Every first-party source file carries an
   SPDX header; keep the [agent
   instructions](AGENTS.md) measurement

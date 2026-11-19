@@ -6,7 +6,7 @@ Read-only: probes the live host's evidence sources and either prints
 a JSON inventory (default, for receipts) or writes a capability
 fixture directory (--emit-fixture DIR). The fixture mirrors the
 evidence root directly (host path P becomes DIR + P) plus a
-meta.txt header (arch/release/euid/denied) that the Mojo evidence
+meta.txt header (arch/release/euid/denied) that the evidence
 reader consumes.
 
 Emitted content policy: doctor-consumed text (cpuinfo, os-release,

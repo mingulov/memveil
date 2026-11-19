@@ -167,13 +167,11 @@ texts in `LICENSES/`). The BPF objects are
 MemVeil's own GPL-2.0-only builds. The
 runtime closure's third-party components are
 listed per file with texts in
-`THIRD-PARTY-NOTICES.md`: the bridge is
-Apache-2.0 WITH LLVM-exception, its
-statically linked libbpf 1.7.0 is
-BSD-2-Clause, libgcc/libstdc++ are
-GPL-3.0-only WITH GCC-exception-3.1, and
-the Mojo runtime ships its own licence plus
-third-party notices. This section,
+`THIRD-PARTY-NOTICES.md`: the vendored libgcc is
+GPL-3.0-only WITH GCC-exception-3.1, and each
+crates.io dependency carries its staged text. The
+product links no libbpf and ships no toolchain
+runtime. This section,
 `LICENSE`, `LICENSES/`, and the notices
 file together are the licence answer; if
 they disagree, the staged texts win.

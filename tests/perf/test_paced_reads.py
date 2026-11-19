@@ -30,10 +30,10 @@ class PacedReadsTests(unittest.TestCase):
 
     def test_adapter_paces_actual_regular_file_reads(self):
         source = ROOT / 'tests/fixtures/reader/sealed-complete'
-        shim = ROOT / 'build/perf/paced_reads.so'
+        from replay import paced_adapter, paced_environment, replay
+        shim = Path(paced_adapter())
         with tempfile.TemporaryDirectory() as tmp:
             receipt = Path(tmp) / 'reads.json'
-            from replay import paced_environment, replay
             env = paced_environment(source / 'events.ndjson', receipt, 3, 60000000, shim)
             for inherited in os.environ.get('LD_PRELOAD', '').replace(':', ' ').split():
                 self.assertIn(os.path.realpath(inherited), [os.path.realpath(p) for p in env['LD_PRELOAD'].split(':')])

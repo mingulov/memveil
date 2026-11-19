@@ -9,15 +9,26 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
 
+# Output shim: C source. The shims stay uninstrumented even in
+# sanitizer runs: they are LD_PRELOADed, and a statically linked
+# sanitizer runtime inside a preloaded library aborts ASan init
+# ("runtime does not come first"); the preloaded-into binaries
+# stay fully checked. (The Mojo probe binaries formerly built
+# here retired with the Mojo tree; their suites gate with cause.)
+SHIMS = {
+    'build/shim/capture_faults.so': 'tests/cli/capture_faults.c',
+    'build/shim/checkpoint_faults.so': 'tests/shim/checkpoint_faults.c',
+    'build/shim/mvshim.so': 'tests/shim/mvshim.c',
+}
+CC = ['clang', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+      '-shared', '-fPIC']
+
 
 def prepare():
-    inputs = sorted((ROOT / 'src').rglob('*.mojo')) + [
-        ROOT / 'tests/unit/checkpoint_probe.mojo', ROOT / 'tests/cli/capture_faults.c',
-        ROOT / 'pixi.lock']
+    inputs = sorted(ROOT / src for src in SHIMS.values())
     stamp = {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs}
-    stamp['sanitize'] = os.environ.get('LMB_SANITIZE', '0')
-    manifest = ROOT / 'build/probe/capture-failure-inputs.json'
-    outputs = [ROOT / 'build/probe/checkpoint_probe', ROOT / 'build/shim/capture_faults.so']
+    manifest = ROOT / 'build/shim/capture-failure-inputs.json'
+    outputs = [ROOT / rel for rel in SHIMS]
     if manifest.exists() and all(p.is_file() for p in outputs):
         saved = json.loads(manifest.read_text())
         if saved.get('inputs') == stamp and saved.get('outputs') == {
@@ -25,12 +36,9 @@ def prepare():
             return
     for output in outputs:
         output.parent.mkdir(parents=True, exist_ok=True)
-    sanitizer = ['--sanitize', 'address'] if stamp['sanitize'] == '1' else []
-    subprocess.run(['pixi', 'run', '--frozen', 'mojo', 'build', *sanitizer, '-I', 'src',
-                    '--target-cpu', 'x86-64-v2', '-o', str(outputs[0]),
-                    'tests/unit/checkpoint_probe.mojo'], cwd=ROOT, check=True)
-    subprocess.run(['clang', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-shared', '-fPIC',
-                    'tests/cli/capture_faults.c', '-o', str(outputs[1])], cwd=ROOT, check=True)
+    for rel, src in SHIMS.items():
+        subprocess.run([*CC, '-o', str(ROOT / rel), str(ROOT / src)],
+                       cwd=ROOT, check=True)
     manifest.write_text(json.dumps(dict(inputs=stamp, outputs={
         str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in outputs}), indent=2) + '\n')
 
