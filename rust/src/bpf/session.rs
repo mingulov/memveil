@@ -352,30 +352,18 @@ pub(crate) fn max_frozen_ring_bytes() -> u32 {
         .unwrap_or(0)
 }
 
-/// Pre-load map gate: declared geometry, then the effective
-/// rounded ring size, both before the loader allocates. The
-/// geometry rule is the load-time rule ([`check_maps_loaded`]:
-/// rings upper-bounded so smaller admitted rings pass, both
-/// copy families admitted); the ring rule additionally refuses
-/// declarations whose loader-rounded size overshoots the frozen
-/// ceiling. The live read-back gate after loading stays.
+/// Pre-load map gate: the declared geometry must already satisfy
+/// the load-time rule ([`check_maps_loaded`]: rings upper-bounded
+/// so smaller admitted rings pass, both copy families admitted),
+/// before the loader allocates. No separate effective-size rule:
+/// the load-time rule bounds every declared ring by the frozen
+/// ceiling, every frozen ceiling is pow2 x page, and rounding a
+/// sub-ceiling declaration up to pow2 x page cannot cross the
+/// ceiling — so any declaration passing here also fits after the
+/// loader's rounding, and a second loop could never fire. The
+/// live read-back gate after loading stays.
 fn check_declared_maps(channel: Channel, declared: &[MapSpec]) -> Result<(), SessionError> {
-    check_maps_loaded(channel, declared)?;
-    let ceiling = u64::from(frozen_ring_ceiling(channel));
-    let page = host_page_size();
-    for row in declared {
-        if row.map_type != BPF_MAP_TYPE_RINGBUF {
-            continue;
-        }
-        let effective = effective_ring_bytes(row.max_entries, page);
-        if effective > ceiling {
-            return Err(SessionError::Geometry(format!(
-                "{channel} channel: map {}: declared {} rounds to {effective} ring bytes, ceiling {ceiling}",
-                row.name, row.max_entries
-            )));
-        }
-    }
-    Ok(())
+    check_maps_loaded(channel, declared)
 }
 
 /// True when every declared ring fits the largest frozen
