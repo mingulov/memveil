@@ -58,7 +58,10 @@ impl MapSpec {
     }
 }
 
-/// Frozen map set per channel.
+/// Frozen map set per channel. The Copy row is the Aya family (the
+/// host-resolved `mv_copy_offs` table map replaces CO-RE there); the
+/// C family lives in [`expected_copy_maps_c`] and the load-time gate
+/// admits both.
 pub fn expected_maps(channel: Channel) -> Vec<MapSpec> {
     let counts = || MapSpec::named("mv_counts", BPF_MAP_TYPE_ARRAY, 4, 8, 6);
     match channel {
@@ -81,6 +84,22 @@ pub fn expected_maps(channel: Channel) -> Vec<MapSpec> {
             MapSpec::named("mv_copy_offs", BPF_MAP_TYPE_ARRAY, 4, 112, 1),
         ],
     }
+}
+
+/// Frozen C-family Copy map set: the clang-built object resolves field
+/// offsets through loader-applied CO-RE relocations against kernel BTF
+/// (the loader performs them at `Session::load`, the same derivation
+/// the C objects always used), so it carries exactly the four maps the
+/// C source defines and no `mv_copy_offs` table map. Geometry is pinned
+/// with the same rigor as the Aya family: counts 6x8, claims 4096x16,
+/// fallback 4x8, copies ring 32 MiB.
+pub fn expected_copy_maps_c() -> Vec<MapSpec> {
+    vec![
+        MapSpec::named("mv_counts", BPF_MAP_TYPE_ARRAY, 4, 8, 6),
+        MapSpec::named("mv_claims", BPF_MAP_TYPE_ARRAY, 4, 16, 4096),
+        MapSpec::named("mv_copy_fb", BPF_MAP_TYPE_ARRAY, 4, 8, 4),
+        MapSpec::named("mv_copies", BPF_MAP_TYPE_RINGBUF, 0, 0, 33_554_432),
+    ]
 }
 
 /// Exact-set map gate: every expected map present with its exact geometry,
@@ -126,9 +145,70 @@ pub fn check_maps(channel: Channel, actual: &[MapSpec]) -> Result<(), SessionErr
     Ok(())
 }
 
+/// Single-family load-time check against one expected set: every
+/// expected map present, no unexpected maps, non-ring geometry exact,
+/// ring type exact, ring capacity upper-bounded by the frozen size.
+/// Returns the bare reason on refusal; callers prefix the channel.
+fn check_loaded_against(expected: &[MapSpec], actual: &[MapSpec]) -> Result<(), String> {
+    for want in expected {
+        let Some(got) = actual.iter().find(|spec| spec.name == want.name) else {
+            return Err(format!("missing map {}", want.name));
+        };
+        let ring = want.map_type == BPF_MAP_TYPE_RINGBUF;
+        let same = if ring {
+            got.map_type == want.map_type && got.max_entries <= want.max_entries
+        } else {
+            got.map_type == want.map_type
+                && got.max_entries == want.max_entries
+                && (got.key_size, got.value_size) == (want.key_size, want.value_size)
+        };
+        if !same {
+            return Err(format!(
+                "map {}: want type={} key={} value={} entries={}, got type={} key={} value={} entries={}",
+                want.name,
+                want.map_type,
+                want.key_size,
+                want.value_size,
+                want.max_entries,
+                got.map_type,
+                got.key_size,
+                got.value_size,
+                got.max_entries
+            ));
+        }
+    }
+    for got in actual {
+        if !expected.iter().any(|want| want.name == got.name) {
+            return Err(format!("unexpected map {}", got.name));
+        }
+    }
+    Ok(())
+}
+
+/// Copy load-time check: the Aya family ([`expected_maps`]) or the C
+/// family ([`expected_copy_maps_c`]), each exact per family. A set
+/// matching neither refuses naming both family reasons, so a
+/// near-miss against either family stays diagnosable.
+fn check_copy_maps_loaded(actual: &[MapSpec]) -> Result<(), SessionError> {
+    let channel = Channel::Copy;
+    let aya = expected_maps(channel);
+    let c = expected_copy_maps_c();
+    let aya_err = check_loaded_against(&aya, actual).err();
+    let c_err = check_loaded_against(&c, actual).err();
+    match (aya_err, c_err) {
+        (None, _) | (_, None) => Ok(()),
+        (Some(aya_why), Some(c_why)) => Err(SessionError::Geometry(format!(
+            "{channel} channel: maps match neither copy family (Aya: {aya_why}; C: {c_why})"
+        ))),
+    }
+}
+
 /// Load-time map gate: every expected map present, no unexpected maps,
 /// non-ring geometry exact, ring type exact, ring capacity upper-bounded
-/// by the frozen size.
+/// by the frozen size. The Copy channel admits two families: the Aya
+/// shape (5 maps with `mv_copy_offs`) and the C shape (4 maps, no
+/// `mv_copy_offs`, offsets via loader-applied CO-RE); a set matching
+/// neither refuses naming both family reasons.
 ///
 /// Ring capacity is the one relaxation from [`check_maps`]: a smaller
 /// ring is legitimate once admitted (the saturation `-test` objects
@@ -140,46 +220,12 @@ pub fn check_maps(channel: Channel, actual: &[MapSpec]) -> Result<(), SessionErr
 /// rounds up overshoots it and still refuses. Everything else stays
 /// fail-closed with the same refusal texts as [`check_maps`].
 pub fn check_maps_loaded(channel: Channel, actual: &[MapSpec]) -> Result<(), SessionError> {
+    if channel == Channel::Copy {
+        return check_copy_maps_loaded(actual);
+    }
     let expected = expected_maps(channel);
-    for want in &expected {
-        let Some(got) = actual.iter().find(|spec| spec.name == want.name) else {
-            return Err(SessionError::Geometry(format!(
-                "{channel} channel: missing map {}",
-                want.name
-            )));
-        };
-        let ring = want.map_type == BPF_MAP_TYPE_RINGBUF;
-        let same = if ring {
-            got.map_type == want.map_type && got.max_entries <= want.max_entries
-        } else {
-            got.map_type == want.map_type
-                && got.max_entries == want.max_entries
-                && (got.key_size, got.value_size) == (want.key_size, want.value_size)
-        };
-        if !same {
-            return Err(SessionError::Geometry(format!(
-                "{channel} channel: map {}: want type={} key={} value={} entries={}, got type={} key={} value={} entries={}",
-                want.name,
-                want.map_type,
-                want.key_size,
-                want.value_size,
-                want.max_entries,
-                got.map_type,
-                got.key_size,
-                got.value_size,
-                got.max_entries
-            )));
-        }
-    }
-    for got in actual {
-        if !expected.iter().any(|want| want.name == got.name) {
-            return Err(SessionError::Geometry(format!(
-                "{channel} channel: unexpected map {}",
-                got.name
-            )));
-        }
-    }
-    Ok(())
+    check_loaded_against(&expected, actual)
+        .map_err(|reason| SessionError::Geometry(format!("{channel} channel: {reason}")))
 }
 
 /// Whole-object geometry gate: programs then maps.
@@ -268,19 +314,128 @@ mod tests {
 
     #[test]
     fn loaded_gate_refuses_missing_map() {
-        for channel in [Channel::Attempt, Channel::Lifecycle, Channel::Copy] {
+        for channel in [Channel::Attempt, Channel::Lifecycle] {
             let mut maps = expected_maps(channel);
             let dropped = maps.pop().expect("frozen set is non-empty");
             let error =
                 check_maps_loaded(channel, &maps).expect_err("missing map must be refused at load");
             assert!(error.to_string().contains(&dropped.name));
         }
-        // The C copy family (no `mv_copy_offs`) still refuses at load.
+        // Copy without `mv_claims` matches neither family: both pin it.
         let mut maps = expected_maps(Channel::Copy);
-        maps.retain(|row| row.name != "mv_copy_offs");
+        maps.retain(|row| row.name != "mv_claims");
         let error = check_maps_loaded(Channel::Copy, &maps)
-            .expect_err("copy family without mv_copy_offs must be refused");
+            .expect_err("copy without mv_claims must be refused at load");
+        assert!(error.to_string().contains("mv_claims"));
+    }
+
+    #[test]
+    fn loaded_copy_gate_admits_both_families() {
+        // Aya shape: the frozen 5-map set with the offsets table.
+        let aya = expected_maps(Channel::Copy);
+        check_maps_loaded(Channel::Copy, &aya).expect("aya copy shape must load");
+        // C shape: exactly the 4 C maps, no `mv_copy_offs` (field
+        // offsets arrive via loader-applied CO-RE instead).
+        let c = expected_copy_maps_c();
+        assert_eq!(c.len(), 4);
+        assert!(!c.iter().any(|row| row.name == "mv_copy_offs"));
+        check_maps_loaded(Channel::Copy, &c).expect("C copy shape must load");
+        // The shared rows pin identical geometry in both families.
+        for row in &c {
+            let a_row = aya
+                .iter()
+                .find(|a_row| a_row.name == row.name)
+                .unwrap_or_else(|| panic!("aya shape lacks the C row {}", row.name));
+            assert_eq!(
+                (row.map_type, row.key_size, row.value_size, row.max_entries),
+                (
+                    a_row.map_type,
+                    a_row.key_size,
+                    a_row.value_size,
+                    a_row.max_entries
+                ),
+                "shared row {} must pin the same geometry in both families",
+                row.name
+            );
+        }
+        // The admitted `-test` ring size loads in both families.
+        for mut maps in [aya, c] {
+            let ring = maps
+                .iter_mut()
+                .find(|row| row.name == "mv_copies")
+                .expect("copy shape carries mv_copies");
+            ring.max_entries = 4096;
+            check_maps_loaded(Channel::Copy, &maps).expect("test ring size must load");
+        }
+    }
+
+    fn tamper_c(map: &str, f: impl FnOnce(&mut MapSpec)) -> Vec<MapSpec> {
+        let mut maps = expected_copy_maps_c();
+        let row = maps
+            .iter_mut()
+            .find(|row| row.name == map)
+            .unwrap_or_else(|| panic!("no {map} C row"));
+        f(row);
+        maps
+    }
+
+    #[test]
+    fn loaded_copy_gate_pins_c_family_geometry() {
+        // Every C row is pinned with the same rigor as the Aya family:
+        // a drifted row matches neither shape and the refusal names it.
+        let maps = tamper_c("mv_claims", |row| row.value_size = 8);
+        let error = check_maps_loaded(Channel::Copy, &maps)
+            .expect_err("drifted claims row must be refused");
+        assert!(error.to_string().contains("mv_claims"));
+        let maps = tamper_c("mv_copy_fb", |row| row.max_entries = 5);
+        let error = check_maps_loaded(Channel::Copy, &maps)
+            .expect_err("drifted fallback row must be refused");
+        assert!(error.to_string().contains("mv_copy_fb"));
+        let maps = tamper_c("mv_counts", |row| row.max_entries = 7);
+        let error = check_maps_loaded(Channel::Copy, &maps)
+            .expect_err("drifted counts row must be refused");
+        assert!(error.to_string().contains("mv_counts"));
+        let maps = tamper_c("mv_copies", |row| row.map_type = BPF_MAP_TYPE_ARRAY);
+        let error =
+            check_maps_loaded(Channel::Copy, &maps).expect_err("retyped ring must be refused");
+        assert!(error.to_string().contains("mv_copies"));
+        // A fifth map is neither shape, even when it is the table map
+        // with drifted geometry (no sneaking a bad table in as C).
+        let mut maps = expected_copy_maps_c();
+        maps.push(MapSpec::named("mv_extra", BPF_MAP_TYPE_ARRAY, 4, 8, 1));
+        let error = check_maps_loaded(Channel::Copy, &maps).expect_err("extra map must refuse");
+        assert!(error.to_string().contains("mv_extra"));
+        let mut maps = expected_copy_maps_c();
+        maps.push(MapSpec::named(
+            "mv_copy_offs",
+            BPF_MAP_TYPE_ARRAY,
+            4,
+            113,
+            1,
+        ));
+        let error =
+            check_maps_loaded(Channel::Copy, &maps).expect_err("drifted table map must refuse");
         assert!(error.to_string().contains("mv_copy_offs"));
+    }
+
+    #[test]
+    fn loaded_copy_gate_neither_shape_names_both_families() {
+        let maps = tamper_c("mv_claims", |row| row.value_size = 8);
+        let error =
+            check_maps_loaded(Channel::Copy, &maps).expect_err("neither shape must be refused");
+        let message = error.to_string();
+        assert!(
+            message.contains("neither copy family"),
+            "want the neither-family diagnostic, got: {message}"
+        );
+        assert!(
+            message.contains("Aya: ") && message.contains("C: "),
+            "want both family reasons, got: {message}"
+        );
+        assert!(
+            message.contains("mv_claims"),
+            "want the drifted map named, got: {message}"
+        );
     }
 
     #[test]
