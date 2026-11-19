@@ -54,8 +54,14 @@ enum Dispatch {
     Help,
     /// Print the engine version to stdout; exit 0.
     Version,
-    /// Run one verb with decoded UTF-8 arguments.
-    Run { verb: String, rest: Vec<String> },
+    /// Run one verb with decoded UTF-8 arguments. `raw` is the
+    /// byte-exact argv tail (verb word plus rest) the signal
+    /// re-exec forwards; decoded `rest` never reaches `execv`.
+    Run {
+        verb: String,
+        rest: Vec<String>,
+        raw: Vec<OsString>,
+    },
     /// Run one byte-wise verb with raw argv words.
     RunOs { verb: String, rest: Vec<OsString> },
 }
@@ -76,7 +82,12 @@ enum Dispatch {
 /// One exception, matching Mojo's per-verb pre-parse scan: when
 /// any word is `--help` or `-h`, help wins over undecodable
 /// siblings and the verb runs (it prints help and returns before
-/// consuming any word), so undecodable words forward lossily.
+/// consuming any word), so undecodable words decode lossily for
+/// the verb. The signal re-exec still forwards the raw words:
+/// lossy decoding can expand one ignored word past
+/// `MAX_ARG_STRLEN` (44,000 `0xff` bytes become 132,000) and
+/// trip `E2BIG` before help ever runs, while the Mojo `argv()`
+/// preserves raw bytes and its re-exec succeeds.
 fn dispatch(raw: &[OsString]) -> Dispatch {
     let verb_os = match raw.first() {
         None => return Dispatch::InvalidUsage,
@@ -133,6 +144,7 @@ fn dispatch(raw: &[OsString]) -> Dispatch {
     Dispatch::Run {
         verb: verb.to_string(),
         rest,
+        raw: raw.to_vec(),
     }
 }
 
@@ -165,24 +177,26 @@ fn main() -> ExitCode {
             };
             ExitCode::from(code as u8)
         }
-        Dispatch::Run { verb, rest } => run_text_verb(&verb, &rest),
+        Dispatch::Run { verb, rest, raw } => run_text_verb(&verb, &rest, &raw),
     }
 }
 
 /// Run one decoded-text verb: the signal guard, then the verb.
-fn run_text_verb(verb: &str, rest: &[String]) -> ExitCode {
+fn run_text_verb(verb: &str, rest: &[String], raw: &[OsString]) -> ExitCode {
     // Every collector-driving verb needs all runtime threads to
     // inherit blocked stop signals, otherwise a SIGINT lands in a
-    // worker and never reaches signalfd.
+    // worker and never reaches signalfd. The guard applies to the
+    // help path too, exactly as the Mojo entry does (a preset
+    // sentinel with an unblocked mask refuses even --help).
     if verb == "record" || verb == "top" || verb == "qualify" {
         // The re-exec guard resolves /proc/self/exe for argv[0] and
         // only forwards words from index 1 on, so element 0 is a
-        // placeholder and the decoded verb and rest follow; every
-        // forwarded word already decoded above.
-        let mut full = Vec::with_capacity(rest.len() + 2);
-        full.push(String::new());
-        full.push(verb.to_string());
-        full.extend(rest.iter().cloned());
+        // placeholder and the raw verb and rest words follow.
+        // Raw bytes are required here, never the decoded rest:
+        // see the dispatch note on lossy E2BIG expansion.
+        let mut full = Vec::with_capacity(raw.len() + 1);
+        full.push(OsString::new());
+        full.extend(raw.iter().cloned());
         let note = ensure_inherited_signal_block(&full);
         if !note.is_empty() {
             let _ = write_stderr(&format!("memveil {verb}: {note}\n"));
@@ -296,10 +310,13 @@ mod tests {
                 ];
                 for shape in shapes {
                     match dispatch(&os(shape)) {
-                        Dispatch::Run { verb: v, rest } => {
+                        Dispatch::Run { verb: v, rest, raw } => {
                             assert_eq!(v, String::from_utf8_lossy(verb));
                             let want = String::from_utf8_lossy(flag).into_owned();
                             assert!(rest.contains(&want), "{verb:?} {shape:?}: {rest:?}");
+                            // The re-exec tail keeps raw bytes:
+                            // the lossy rest never reaches execv.
+                            assert_eq!(raw, os(shape), "{verb:?} {shape:?}");
                         }
                         _ => panic!("{verb:?} {shape:?} must dispatch to Run"),
                     }
@@ -354,11 +371,34 @@ mod tests {
     fn known_verbs_decode_and_forward_rest() {
         for verb in [b"record".as_slice(), b"top", b"qualify", b"bind-profile"] {
             match dispatch(&os(&[verb, b"cap", b"--flag"])) {
-                Dispatch::Run { verb: v, rest } => {
+                Dispatch::Run { verb: v, rest, raw } => {
                     assert_eq!(v, String::from_utf8_lossy(verb));
                     assert_eq!(rest, vec!["cap".to_string(), "--flag".to_string()]);
+                    assert_eq!(raw, os(&[verb, b"cap", b"--flag"]));
                 }
                 _ => panic!("{verb:?} must dispatch to Run"),
+            }
+        }
+    }
+
+    #[test]
+    fn help_path_keeps_max_argstrlen_word_byte_exact() {
+        // The re-exec tail must carry the 44,000-byte 0xff word
+        // unexpanded: lossy decoding would grow it to 132,000
+        // bytes and trip E2BIG before the verb prints help.
+        // The verb still runs on the lossy words and returns
+        // before consuming any of them.
+        let big = vec![0xff; 44_000];
+        for verb in [b"record".as_slice(), b"top", b"qualify", b"bind-profile"] {
+            let words = os(&[verb, big.as_slice(), b"--help"]);
+            match dispatch(&words) {
+                Dispatch::Run { verb: v, rest, raw } => {
+                    assert_eq!(v, String::from_utf8_lossy(verb), "{verb:?}");
+                    assert_eq!(raw, words, "{verb:?}");
+                    assert_eq!(raw[1].len(), 44_000, "{verb:?}");
+                    assert!(rest.contains(&"--help".to_string()), "{verb:?}");
+                }
+                _ => panic!("{verb:?} with --help must dispatch to Run"),
             }
         }
     }

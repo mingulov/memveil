@@ -14,6 +14,8 @@
 //! land with the collector task; nothing here changes then.
 
 use super::outcome::OpOut;
+use std::ffi::{OsStr, OsString};
+use std::os::unix::ffi::OsStrExt;
 
 /// One signal check: none, pending, or error.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +76,33 @@ fn cstr_bytes(text: &str) -> Vec<u8> {
     out
 }
 
+/// One NUL-terminated argv body from raw bytes, never decoded.
+fn cstr_bytes_os(arg: &OsStr) -> Vec<u8> {
+    let mut out = arg.as_bytes().to_vec();
+    out.push(0);
+    out
+}
+
+/// Assemble the re-exec argv storage: the resolved exe path first,
+/// then one NUL-terminated body per forwarded word (`args[0]` is
+/// the caller's argv[0] placeholder and is skipped, exactly as the
+/// Mojo guard skips its own argv[0]). Words cross byte-exact,
+/// never decoded: the Mojo `argv()` preserves raw bytes, and a
+/// lossy-decoded word could expand past `MAX_ARG_STRLEN` and trip
+/// `E2BIG` before the verb ever runs (44,000 `0xff` bytes would
+/// become 132,000). Interior NULs pass through here and truncate
+/// at exec, exactly as the language-side builder behaves.
+fn argv_storage(exe: &[u8], args: &[OsString]) -> Vec<Vec<u8>> {
+    let mut storage: Vec<Vec<u8>> = Vec::new();
+    let mut exe_path = exe.to_vec();
+    exe_path.push(0);
+    storage.push(exe_path);
+    for arg in args.iter().skip(1) {
+        storage.push(cstr_bytes_os(arg));
+    }
+    storage
+}
+
 /// True when MEMVEIL_SIGBLK=1 is set (exact lookup).
 ///
 /// Uses the environment, not a capped /proc/self/environ scan: a
@@ -107,7 +136,12 @@ pub fn ignore_sigpipe() -> bool {
 /// Returns "" when the caller may proceed (already
 /// inherited), else a refusal note (re-exec failed or
 /// impossible). A successful re-exec never returns.
-pub fn ensure_inherited_signal_block(args: &[String]) -> String {
+///
+/// `args[0]` is a placeholder for the resolved exe path;
+/// `args[1..]` are the raw argv words the child receives.
+/// Raw bytes are required here, not decoded text: the
+/// re-exec must forward exactly what the parent received.
+pub fn ensure_inherited_signal_block(args: &[OsString]) -> String {
     if !ignore_sigpipe() {
         return "cannot ignore SIGPIPE before re-exec".to_string();
     }
@@ -173,15 +207,7 @@ pub fn ensure_inherited_signal_block(args: &[String]) -> String {
     }
     // argv[0] is the resolved path; readlink wrote n
     // bytes and never NUL-terminates, so terminate here.
-    // Interior NULs truncate at exec, exactly as the
-    // language-side builder behaves.
-    let mut storage: Vec<Vec<u8>> = Vec::new();
-    let mut exe_path = exe_buf[..n as usize].to_vec();
-    exe_path.push(0);
-    storage.push(exe_path);
-    for arg in args.iter().skip(1) {
-        storage.push(cstr_bytes(arg));
-    }
+    let storage = argv_storage(&exe_buf[..n as usize], args);
     let mut argv: Vec<*const libc::c_char> = storage
         .iter()
         .map(|a| a.as_ptr().cast::<libc::c_char>())
@@ -376,9 +402,11 @@ impl Drop for LiveSignalSource {
 #[cfg(test)]
 mod tests {
     use super::{
-        LiveSignalSource, READ_ERROR, READ_NONE, READ_PENDING, READ_RETRY, blocked_mask,
-        classify_signal_read, ensure_inherited_signal_block,
+        LiveSignalSource, READ_ERROR, READ_NONE, READ_PENDING, READ_RETRY, argv_storage,
+        blocked_mask, classify_signal_read, ensure_inherited_signal_block,
     };
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
 
     #[test]
     fn classify() {
@@ -453,6 +481,48 @@ mod tests {
         assert_eq!(got.state, "pending");
         assert_eq!(got.message, "");
         src.teardown();
+    }
+
+    #[test]
+    fn reexec_argv_forwards_raw_bytes_unexpanded() {
+        // The 44,000-byte 0xff word beside --help must cross
+        // the re-exec as 44,000 bytes plus NUL: lossy decoding
+        // would expand it to 132,000 bytes and trip E2BIG
+        // before the verb prints help (Mojo's argv() preserves
+        // raw bytes, so its re-exec succeeds and exits 0).
+        let big = OsString::from_vec(vec![0xff; 44_000]);
+        let args = vec![
+            OsString::new(),
+            OsString::from("record"),
+            big,
+            OsString::from("--help"),
+        ];
+        let storage = argv_storage(b"/resolved/memveil", &args);
+        assert_eq!(storage.len(), 4);
+        assert_eq!(storage[0], b"/resolved/memveil\0");
+        assert_eq!(storage[1], b"record\0");
+        assert_eq!(storage[2].len(), 44_001);
+        assert!(storage[2][..44_000].iter().all(|&b| b == 0xff));
+        assert_eq!(storage[2][44_000], 0);
+        assert_eq!(storage[3], b"--help\0");
+    }
+
+    #[test]
+    fn reexec_argv_skips_placeholder_and_keeps_nuls() {
+        // args[0] is the caller's placeholder, never forwarded;
+        // interior NULs pass through and truncate at exec.
+        let args = vec![
+            OsString::from("placeholder"),
+            OsString::from_vec(b"a\0b".to_vec()),
+            OsString::new(),
+        ];
+        let storage = argv_storage(b"/x", &args);
+        assert_eq!(
+            storage,
+            vec![b"/x\0".to_vec(), b"a\0b\0".to_vec(), b"\0".to_vec()]
+        );
+        let empty = argv_storage(b"/x", &[]);
+        assert_eq!(empty, vec![b"/x\0".to_vec()]);
     }
 
     #[test]
