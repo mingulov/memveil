@@ -17,6 +17,16 @@ Usage: rust/scripts/gen-completions.py --out DIR
 
 Deterministic: same bytes on every run. `--flag=value` needs
 no handling: the parser only accepts space-separated values.
+
+Deliberate deviation from the Mojo-authored generator
+(`tools/gen-completions`): bash per-verb variables sanitize
+hyphens to underscores in the stem (`bind-profile` becomes
+`_memveil_flags_bind_profile`). The Mojo output emits the
+hyphenated stem verbatim, which is not a valid bash
+identifier: sourcing it prints `command not found` and the
+verb's flags never complete. Completions are generated UX,
+not wire format, so byte-parity with the old output is not
+required; the completed tokens stay identical.
 """
 
 import os
@@ -100,7 +110,7 @@ def render_bash():
     ]
     for verb in sorted(FROZEN_FLAGS):
         lines.append('_memveil_flags_%s="%s"' % (
-            verb, " ".join(FROZEN_FLAGS[verb])))
+            verb.replace("-", "_"), " ".join(FROZEN_FLAGS[verb])))
     lines.append('_memveil_format_values="%s"' % " ".join(
         FROZEN_FORMAT_VALUES))
     lines.extend([
@@ -123,7 +133,7 @@ def render_bash():
     ])
     for verb in sorted(FROZEN_FLAGS):
         lines.append('        %s) flags="$_memveil_flags_%s" ;;'
-                     % (verb, verb))
+                     % (verb, verb.replace("-", "_")))
     lines.extend([
         "        *) return 0 ;;",
         "    esac",

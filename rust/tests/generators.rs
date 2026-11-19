@@ -792,6 +792,8 @@ fn gen_completions_bash_functional() {
         }
         let done = cmd.output().expect("bash drives the completion");
         assert_eq!(done.status.code(), Some(0), "drive exits");
+        let noise = String::from_utf8_lossy(&done.stderr);
+        assert!(noise.is_empty(), "sourcing the completion is quiet: {noise}");
         let text = String::from_utf8(done.stdout).expect("replies are UTF-8");
         let mut replies: Vec<String> = text
             .lines()
@@ -811,6 +813,23 @@ fn gen_completions_bash_functional() {
     assert_eq!(
         complete(&["memveil", "record", "-"], 2),
         sorted(frozen_flags("record"))
+    );
+    // Every flag-bearing verb gets the full-set case: the
+    // hyphenated `bind-profile` stem once emitted an invalid
+    // bash identifier (empty completion + `command not found`
+    // on source), and `doctor`/`qualify` had no functional
+    // coverage at all.
+    assert_eq!(
+        complete(&["memveil", "bind-profile", "-"], 2),
+        sorted(frozen_flags("bind-profile"))
+    );
+    assert_eq!(
+        complete(&["memveil", "doctor", "-"], 2),
+        sorted(frozen_flags("doctor"))
+    );
+    assert_eq!(
+        complete(&["memveil", "qualify", "-"], 2),
+        sorted(frozen_flags("qualify"))
     );
     assert_eq!(
         complete(&["memveil", "report", "--for"], 2),
