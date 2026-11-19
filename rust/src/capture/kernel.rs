@@ -44,6 +44,7 @@
 
 use super::collector::{GeomOut, KernelSource, MissOut, PollOut, SnapOut, StatsOut};
 use super::loadcheck::{errno_cause, errno_from_chain, errno_name};
+use crate::bpf::session::{core_precondition, declared_map_specs, replay_rings_fit};
 use crate::bpf::{
     AttachKind, AttachSpec, Channel, Frame, Session, SessionError, copy_specs, lifecycle_specs,
     resolve_copy_offsets, verify_lifecycle_dirs,
@@ -153,9 +154,22 @@ fn session_message_with(op: u32, message: &str, errno: Option<i32>) -> String {
 /// load replays once to recover the authoritative errno for refusal
 /// classification. Failed loads leave no kernel state, so the replay
 /// is side-effect free; a replay that loads (or fails without an
-/// errno, as geometry verdicts do) yields nothing.
+/// errno) yields nothing. The replay shares the session's CO-RE
+/// precondition and ring abuse cap, so it can neither relocate off
+/// a second BTF read nor allocate a refused ring.
 fn load_errno(elf: &[u8]) -> Option<i32> {
-    match EbpfLoader::new().load(elf) {
+    let pre = core_precondition(elf);
+    if pre.relocations && pre.btf.is_none() {
+        return None;
+    }
+    if let Some(declared) = declared_map_specs(elf)
+        && !replay_rings_fit(&declared)
+    {
+        return None;
+    }
+    let mut loader = EbpfLoader::new();
+    loader.btf(pre.btf.as_ref());
+    match loader.load(elf) {
         Ok(bpf) => {
             drop(bpf);
             None
@@ -861,7 +875,14 @@ impl ChannelSlot {
         // so no program fds exist yet; attach records them.
         let res = self.sess.as_mut().expect("open session").load();
         if let Err(e) = res {
-            let message = session_message_with(OP_LOAD, &e.to_string(), load_errno(&self.elf));
+            // Static gate refusal: no kernel failure to diagnose,
+            // and replaying would re-attempt the refused allocation.
+            let errno = if matches!(e, SessionError::Geometry(_)) {
+                None
+            } else {
+                load_errno(&self.elf)
+            };
+            let message = session_message_with(OP_LOAD, &e.to_string(), errno);
             return OpOut { ok: false, message };
         }
         // Aya-family copy objects run on the host-resolved field
