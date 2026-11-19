@@ -678,6 +678,32 @@ def main(argv):
                 bpf_dir, "memveil-ebpf-" + channel)
             bpf_inputs[shipped] = (source, sha256_file(source))
 
+        # The bpf/ inspection copies must be the exact bytes the
+        # binary runs: --binary and --bpf-dir resolve
+        # independently, so a stale or mixed pair would
+        # otherwise ship a consistent manifest for probes
+        # zero-config `record` never executes. The binary
+        # embeds each object verbatim, so every inspection
+        # input must occur in the binary bytes; anything
+        # absent refuses here, before staging.
+        try:
+            with open(binary_input, "rb") as handle:
+                binary_bytes = handle.read()
+        except OSError as exc:
+            fail("cannot read release binary: %s" % exc)
+        for shipped, (source, digest) in sorted(bpf_inputs.items()):
+            try:
+                with open(source, "rb") as handle:
+                    obj = handle.read()
+            except OSError as exc:
+                fail("cannot read BPF input %s: %s" % (source, exc))
+            if not obj or obj not in binary_bytes:
+                fail("binary %s does not embed the %s input "
+                     "(%s sha256 %s): --binary and --bpf-dir "
+                     "come from different builds"
+                     % (binary_input, shipped, source, digest))
+        print("package-tarball: binary embeds all three BPF inputs")
+
         # Cargo closure facts (offline, locked): the manifest and
         # the generated notices bind exactly these crates.
         lock_path = os.path.join(rust_dir, "Cargo.lock")
@@ -1051,6 +1077,15 @@ def main(argv):
                     "bpf/swiotlb_lifecycle.bpf.o": "GPL-2.0-only",
                     "bpf/swiotlb_copy.bpf.o": "GPL-2.0-only",
                 },
+            },
+            # Inspection-copy digests proven embedded in the
+            # binary above: `bpf/<name>` in files[] must equal
+            # this entry, so a manifest for the wrong probes
+            # cannot validate.
+            "embedded_bpf": {
+                shipped: digest
+                for shipped, (_source, digest)
+                in sorted(bpf_inputs.items())
             },
             "files": {},
         }

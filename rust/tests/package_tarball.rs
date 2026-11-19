@@ -335,6 +335,83 @@ fn bpf_objects_match_build_and_stay_unstripped() {
 }
 
 #[test]
+fn bpf_inspection_copies_match_embedded() {
+    // The bpf/ inspection copies are the bytes the binary runs: each
+    // staged copy must occur in the staged binary, and the manifest's
+    // embedded_bpf entry must bind the same digest as files[].
+    let set = h::ensure_tarball();
+    let binary = fs::read(set.bundle.join("bin").join("memveil")).unwrap();
+    let manifest = set.bundle.join("MANIFEST.json");
+    for name in h::BPF_OBJECTS {
+        let obj = fs::read(set.bundle.join("bpf").join(name)).unwrap();
+        assert!(!obj.is_empty(), "{name} is empty");
+        assert!(
+            binary
+                .windows(obj.len())
+                .any(|window| window == obj.as_slice()),
+            "{name} is not embedded in the staged binary"
+        );
+        let rel = format!("bpf/{name}");
+        let embedded = h::json_probe(&manifest, &format!("d['embedded_bpf'][{name:?}]"));
+        assert_eq!(
+            embedded,
+            h::json_probe(&manifest, &format!("d['files'][{rel:?}]")),
+            "{name}: embedded_bpf != files[]"
+        );
+        assert_eq!(
+            embedded,
+            h::sha256_file(&set.bundle.join("bpf").join(name)),
+            "{name}: embedded_bpf != staged bytes"
+        );
+    }
+}
+
+#[test]
+fn mismatched_bpf_inputs_refuse() {
+    // --binary with a stale --bpf-dir must refuse before staging: a
+    // one-byte-doctored copy-channel object is a different build's bytes
+    // and never occurs in the binary.
+    let root = h::pristine_root();
+    let binary = h::ensure_release_binary();
+    let out = h::bpf_out_dir();
+    let tmp = h::scratch("bpf-mismatch");
+    let doctored = tmp.join("bpf");
+    fs::create_dir_all(&doctored).unwrap();
+    for channel in ["attempt", "lifecycle", "copy"] {
+        let name = format!("memveil-ebpf-{channel}");
+        let mut bytes = fs::read(out.join(&name)).unwrap();
+        if channel == "copy" {
+            let last = bytes.len() - 1;
+            bytes[last] ^= 0x01;
+        }
+        fs::write(doctored.join(&name), &bytes).unwrap();
+    }
+    let script = h::scripts_dir().join("package-tarball.py");
+    let dest = tmp.join("out");
+    let proc = h::run(
+        "python3",
+        &[
+            script.to_str().unwrap(),
+            "--root",
+            root.to_str().unwrap(),
+            "--binary",
+            binary.to_str().unwrap(),
+            "--bpf-dir",
+            doctored.to_str().unwrap(),
+            "--out",
+            dest.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(!proc.status.success(), "mixed --binary/--bpf-dir packaged");
+    let stderr = String::from_utf8_lossy(&proc.stderr);
+    assert!(
+        stderr.contains("does not embed the swiotlb_copy.bpf.o input"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn shipped_lib_stripped() {
     let set = h::ensure_tarball();
     let binary = set.bundle.join("bin").join("memveil");
