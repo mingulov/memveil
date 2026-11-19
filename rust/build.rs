@@ -44,11 +44,10 @@ fn read_toolchain_channel(path: &Path) -> String {
         .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
     for line in text.lines() {
         let mut parts = line.splitn(2, '=');
-        let is_channel = parts.next().is_some_and(|key| key.trim() == "channel");
-        if is_channel {
-            if let Some(value) = parts.next() {
-                return value.trim().trim_matches('"').to_owned();
-            }
+        if parts.next().is_some_and(|key| key.trim() == "channel")
+            && let Some(value) = parts.next()
+        {
+            return value.trim().trim_matches('"').to_owned();
         }
     }
     panic!("no `channel = ...` line in {}", path.display())
