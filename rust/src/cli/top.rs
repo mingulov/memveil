@@ -459,7 +459,6 @@ fn parse_top_args_os(args: &[OsString]) -> Result<TopOsArgs, TopOsFail> {
     let mut opts = TopOptions::default();
     let mut dir_os = OsString::new();
     let mut device_os: Option<OsString> = None;
-    let mut has_dir = false;
     let mut has_live_args = false;
     let mut stashed_max_events = OsString::new();
     let mut has_stash = false;
@@ -572,13 +571,15 @@ fn parse_top_args_os(args: &[OsString]) -> Result<TopOsArgs, TopOsFail> {
                 None => return Err(TopOsFail::Silent),
             }
         } else {
-            if has_dir {
+            // An empty positional leaves the directory empty, so
+            // a later word still claims it — exactly like Mojo's
+            // `opts.dir != ""` rule and the &str parser above.
+            if !dir_os.is_empty() {
                 return Err(TopOsFail::Message(CliError {
                     message: "too many arguments".to_string(),
                 }));
             }
             dir_os = args[i].clone();
-            has_dir = true;
             i += 1;
         }
     }
@@ -587,7 +588,7 @@ fn parse_top_args_os(args: &[OsString]) -> Result<TopOsArgs, TopOsFail> {
             message: "--allow-partial requires replay DIR".to_string(),
         }));
     }
-    if has_dir && opts.has_output {
+    if !dir_os.is_empty() && opts.has_output {
         return Err(TopOsFail::Message(CliError {
             message: "cannot combine replay DIR with live --output".to_string(),
         }));
@@ -597,7 +598,7 @@ fn parse_top_args_os(args: &[OsString]) -> Result<TopOsArgs, TopOsFail> {
             message: "--compact does not take --device".to_string(),
         }));
     }
-    if !has_dir && !opts.has_output {
+    if dir_os.is_empty() && !opts.has_output {
         return Err(TopOsFail::Message(CliError {
             message: "missing capture directory".to_string(),
         }));
@@ -1793,6 +1794,56 @@ mod tests {
                 matches!(parse_top_args_os(&os(&words)), Ok(TopOsArgs::Live)),
                 "{words:?} must stay live"
             );
+        }
+    }
+
+    #[test]
+    fn top_os_empty_positional_matches_str_parse() {
+        // Mojo keys its positional rule on `dir != ""`, so an
+        // empty word never claims the directory: option-only
+        // lines read as missing, and a later word still takes it.
+        for words in [
+            vec![b"".as_slice(), b"--device".as_slice(), b"\xff".as_slice()],
+            vec![b"".as_slice(), b"--duration".as_slice(), b"\xff".as_slice()],
+            vec![b"".as_slice()],
+        ] {
+            match parse_top_args_os(&os(&words)) {
+                Err(TopOsFail::Message(e)) => {
+                    assert_eq!(e.message, "missing capture directory")
+                }
+                _ => panic!("{words:?} must read as missing"),
+            }
+        }
+        // A non-empty directory still refuses a second word.
+        match parse_top_args_os(&os(&[b"\xff".as_slice(), b"".as_slice()])) {
+            Err(TopOsFail::Message(e)) => assert_eq!(e.message, "too many arguments"),
+            _ => panic!("second positional must reject"),
+        }
+        // An empty word plus live --output stays live (no replay
+        // DIR to combine), exactly like the &str parser; a later
+        // word still claims the replay directory in both.
+        assert!(
+            matches!(
+                parse_top_args_os(&os(&[
+                    b"".as_slice(),
+                    b"--output".as_slice(),
+                    b"out".as_slice()
+                ])),
+                Ok(TopOsArgs::Live)
+            ),
+            "empty dir plus --output must stay live"
+        );
+        let live = parse_top_args(&args(&["", "--output", "out"])).expect("str stays live");
+        assert!(live.has_output);
+        let mut want = parse_top_args(&args(&["", "capdir"])).expect("str claims the later word");
+        assert_eq!(want.dir, "capdir");
+        want.dir.clear();
+        match parse_top_args_os(&os(&[b"".as_slice(), b"capdir".as_slice()])) {
+            Ok(TopOsArgs::Replay(got)) => {
+                assert_eq!(got.opts, want);
+                assert_eq!(got.dir_os.to_str(), Some("capdir"));
+            }
+            _ => panic!("later word must claim the replay dir"),
         }
     }
 

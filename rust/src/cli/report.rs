@@ -513,7 +513,6 @@ struct ReportArgsOs {
 fn parse_report_args_os(args: &[OsString]) -> Result<ReportArgsOs, OsParseFail> {
     let mut opts = ReportOptions::default();
     let mut dir_os = OsString::new();
-    let mut has_dir = false;
     let mut i = 0;
     while i < args.len() {
         let tok = args[i].as_bytes();
@@ -606,17 +605,19 @@ fn parse_report_args_os(args: &[OsString]) -> Result<ReportArgsOs, OsParseFail> 
                 None => return Err(OsParseFail::Silent),
             }
         } else {
-            if has_dir {
+            // An empty positional leaves the directory empty, so
+            // a later word still claims it — exactly like Mojo's
+            // `opts.dir != ""` rule and the &str parser above.
+            if !dir_os.is_empty() {
                 return Err(OsParseFail::Message(CliError {
                     message: "too many arguments".to_string(),
                 }));
             }
             dir_os = args[i].clone();
-            has_dir = true;
             i += 1;
         }
     }
-    if !has_dir {
+    if dir_os.is_empty() {
         return Err(OsParseFail::Message(CliError {
             message: "missing capture directory".to_string(),
         }));
@@ -1004,6 +1005,54 @@ mod tests {
         // Parsed option values ride along for the report run.
         assert_eq!(dir.opts.format, "json");
         assert!(dir.opts.strict);
+    }
+
+    #[test]
+    fn report_os_empty_positional_overwrites() {
+        // Mojo keys its positional rule on `dir != ""`, so an
+        // empty word never claims the directory: a later word
+        // still takes it, and a lone empty word reads as missing.
+        for words in [
+            vec![b"".as_slice(), b"\xff".as_slice()],
+            vec![b"".as_slice(), b"".as_slice(), b"\xff".as_slice()],
+            vec![b"".as_slice(), b"--strict".as_slice(), b"\xff".as_slice()],
+        ] {
+            let parsed =
+                super::parse_report_args_os(&os(&words)).expect("later word claims the dir");
+            assert_eq!(parsed.dir_os.as_bytes(), b"\xff".as_slice());
+        }
+        let parsed = super::parse_report_args_os(&os(&[
+            b"".as_slice(),
+            b"--strict".as_slice(),
+            b"\xff".as_slice(),
+        ]))
+        .expect("flags ride along");
+        assert!(parsed.opts.strict);
+        // A non-empty directory still refuses a second word, and
+        // an empty-only line still reads as missing — the &str
+        // parser agrees on every ASCII twin.
+        assert_eq!(
+            os_fail_message(&[b"\xff".as_slice(), b"".as_slice()]),
+            "too many arguments"
+        );
+        assert_eq!(
+            os_fail_message(&[b"".as_slice()]),
+            "missing capture directory"
+        );
+        let mut want =
+            parse_report_args(&args(&["", "capdir"])).expect("str claims the later word");
+        assert_eq!(want.dir, "capdir");
+        want.dir.clear();
+        let got = super::parse_report_args_os(&os(&[b"".as_slice(), b"capdir".as_slice()]))
+            .expect("os claims the later word");
+        assert_eq!(got.opts, want);
+        assert_eq!(got.dir_os.to_str(), Some("capdir"));
+        assert_eq!(
+            parse_report_args(&args(&[""]))
+                .expect_err("str reads empty as missing")
+                .message,
+            "missing capture directory"
+        );
     }
 
     #[test]
