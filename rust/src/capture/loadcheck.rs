@@ -8,15 +8,18 @@
 //!
 //! Loads run through the statically linked Aya loader: there is
 //! no bridge path to open. `load_check` judges each object the
-//! way record loads it ([`Session`](crate::bpf::Session) open
-//! plus load, successes held open in input order so the kernel
-//! charges the same peak as record), then replays failures for
-//! the verifier tail. The replay also supplies the errno the
-//! session verdict swallows; when the replay itself loads, the
-//! detail says so and the errno stays empty.
+//! way record loads it ([`Session`](crate::bpf::Session) open,
+//! load, then programs through the verifier; successes held
+//! open in input order so the kernel charges the same peak as
+//! record), then replays failures for the verifier tail. The
+//! replay also supplies the errno the session verdict
+//! swallows; when the replay itself loads, the detail says so
+//! and the errno stays empty.
 
 use crate::bpf::Session;
-use crate::bpf::session::{SessionError, core_precondition, declared_map_specs, replay_rings_fit};
+use crate::bpf::session::{
+    SessionError, core_precondition, declared_map_specs, diagnose_program_loads, replay_rings_fit,
+};
 use crate::platform::reader::bytes_to_text;
 use aya::{EbpfLoader, VerifierLogLevel};
 
@@ -347,18 +350,17 @@ pub(crate) fn verifier_log_from_display(message: &str) -> Option<&str> {
 
 /// Reload one object for its verifier log; never attaches.
 ///
-/// Loads the object with verbose log capture; on failure
-/// names the errno and tails the failing program's log.
-/// Every path releases the object; nothing attaches. The
-/// program names ride along for the call shape only: the
-/// loader yields the failing program's log, not per-program
-/// logs. The loader grows its log buffer internally, so the
-/// tail never carries a truncation marker. The replay shares
-/// the session's CO-RE precondition: one sysfs BTF read, a
-/// fail-closed refusal for relocation-carrying objects when
-/// it fails, and that same parsed BTF handed to the loader.
+/// Loads the object with verbose log capture, then loads the
+/// named programs without attaching; on failure names the
+/// errno and tails the failing program's log. Every path
+/// releases the object; nothing attaches. Unknown program
+/// names skip. The loader grows its log buffer internally, so
+/// the tail never carries a truncation marker. The replay
+/// shares the session's CO-RE precondition: one sysfs BTF
+/// read, a fail-closed refusal for relocation-carrying
+/// objects when it fails, and that same parsed BTF handed to
+/// the loader.
 pub fn diagnose_load(elf: &[u8], programs: &[String]) -> LoadDiag {
-    let _ = programs;
     let mut out = LoadDiag::default();
     let pre = core_precondition(elf);
     if pre.relocations && pre.btf.is_none() {
@@ -381,10 +383,8 @@ pub fn diagnose_load(elf: &[u8], programs: &[String]) -> LoadDiag {
     let mut loader = EbpfLoader::new();
     loader.verifier_log_level(VerifierLogLevel::VERBOSE);
     loader.btf(pre.btf.as_ref());
-    match loader.load(elf) {
-        Ok(bpf) => {
-            drop(bpf);
-        }
+    let mut bpf = match loader.load(elf) {
+        Ok(bpf) => bpf,
         Err(e) => {
             if let Some(raw) = errno_from_chain(&e) {
                 out.errno = errno_name(0 - raw);
@@ -395,6 +395,24 @@ pub fn diagnose_load(elf: &[u8], programs: &[String]) -> LoadDiag {
                     out.lines = tail;
                 }
             }
+            return out;
+        }
+    };
+    // A maps-only replay can never see a verifier rejection: load
+    // the named programs too, still without attaching.
+    if let Err(failure) =
+        diagnose_program_loads(&mut bpf, programs, pre.btf.as_ref(), pre.read_errno)
+    {
+        // A corrupt (non-errno) BTF blob reads as invalid input.
+        out.errno = failure
+            .errno
+            .map(|raw| errno_name(0 - raw))
+            .unwrap_or_else(|| "EINVAL".to_string());
+        if let Some(log) = failure.log.as_ref() {
+            let tail = verifier_tail(log.as_bytes(), false);
+            if !tail.is_empty() {
+                out.lines = tail;
+            }
         }
     }
     out
@@ -402,15 +420,16 @@ pub fn diagnose_load(elf: &[u8], programs: &[String]) -> LoadDiag {
 
 /// Load every object without attaching; report each.
 ///
-/// Probes every verdict the way record's session load runs,
-/// keeping earlier loads open in input (record) order so the
-/// kernel charges the same peak as record, then releases all.
-/// A failed verdict replays once for the tail in `lines`;
-/// the replay errno substitutes for the verdict errno the
-/// session swallows, and a replay that loads appends the
-/// fixed suffix to the verdict detail. Static geometry
-/// refusals skip the replay: no kernel failure to diagnose.
-/// Map sizes are the objects' declared sizes. Nothing attaches.
+/// Probes every verdict the way record loads it (maps, then
+/// programs through the verifier), keeping earlier loads open
+/// in input (record) order so the kernel charges the same peak
+/// as record, then releases all. A failed verdict replays once
+/// for the tail in `lines`; the replay errno substitutes for
+/// the verdict errno the session swallows, and a replay that
+/// loads appends the fixed suffix to the verdict detail.
+/// Static geometry refusals skip the replay: no kernel failure
+/// to diagnose. Map sizes are the objects' declared sizes.
+/// Nothing attaches.
 pub fn load_check(objects: &[LoadTarget]) -> Vec<LoadResult> {
     let mut out: Vec<LoadResult> = Vec::new();
     let mut sessions: Vec<Option<Session>> = Vec::new();
@@ -439,7 +458,11 @@ pub fn load_check(objects: &[LoadTarget]) -> Vec<LoadResult> {
         let Some(sess) = sessions[i].as_mut() else {
             continue;
         };
-        match sess.load() {
+        let verdict = match sess.load() {
+            Ok(()) => sess.load_programs(),
+            Err(error) => Err(error),
+        };
+        match verdict {
             Ok(()) => {
                 out[i].state = "loaded".to_string();
             }
@@ -770,6 +793,88 @@ mod tests {
         );
         assert_eq!(results[0].errno, "");
         assert!(results[0].lines.is_empty());
+    }
+
+    /// File range of the first section whose name starts with the
+    /// prefix.
+    fn section_range_prefix(elf: &[u8], prefix: &str) -> (usize, usize) {
+        let shoff = u64::from_le_bytes(elf[0x28..0x30].try_into().expect("shoff")) as usize;
+        let shentsize = u16::from_le_bytes(elf[0x3a..0x3c].try_into().expect("shentsize")) as usize;
+        let shnum = u16::from_le_bytes(elf[0x3c..0x3e].try_into().expect("shnum")) as usize;
+        let shstrndx = u16::from_le_bytes(elf[0x3e..0x40].try_into().expect("shstrndx")) as usize;
+        let shstr = shoff + shstrndx * shentsize;
+        let str_off =
+            u64::from_le_bytes(elf[shstr + 24..shstr + 32].try_into().expect("str")) as usize;
+        let str_len =
+            u64::from_le_bytes(elf[shstr + 32..shstr + 40].try_into().expect("len")) as usize;
+        let strtab = &elf[str_off..str_off + str_len];
+        for index in 0..shnum {
+            let header = shoff + index * shentsize;
+            let name_off =
+                u32::from_le_bytes(elf[header..header + 4].try_into().expect("name")) as usize;
+            let tail = &strtab[name_off..];
+            let end = tail.iter().position(|byte| *byte == 0).unwrap_or(0);
+            if tail[..end].starts_with(prefix.as_bytes()) {
+                let off = u64::from_le_bytes(elf[header + 24..header + 32].try_into().expect("off"))
+                    as usize;
+                let len = u64::from_le_bytes(elf[header + 32..header + 40].try_into().expect("len"))
+                    as usize;
+                return (off, len);
+            }
+        }
+        panic!("no {prefix} section");
+    }
+
+    /// Embedded attempt object with its first instruction replaced
+    /// by `ja +32767` (a jump out of range): sections, maps, and
+    /// programs untouched, so every geometry gate passes and only
+    /// the verifier refuses.
+    fn verifier_rejected_attempt_elf() -> Vec<u8> {
+        let path = env!("DEP_MEMVEIL_EBPF_ATTEMPT_PATH");
+        let mut elf = std::fs::read(path).expect("read attempt ELF");
+        let (off, len) = section_range_prefix(&elf, "tracepoint/");
+        assert!(len >= 8, "program section must hold one instruction");
+        elf[off..off + 8].copy_from_slice(&[0x05, 0x00, 0xFF, 0x7F, 0x00, 0x00, 0x00, 0x00]);
+        elf
+    }
+
+    #[test]
+    fn check_verifier_rejected_control() {
+        // The load-check runs the verifier: a geometry-clean object
+        // whose program jumps out of range fails with the verifier
+        // errno plus a bounded tail — never `loaded`, never a bare
+        // geometry refusal. Needs root: only privilege reaches the
+        // verifier.
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("SKIP check_verifier_rejected_control: needs root");
+            return;
+        }
+        let target = LoadTarget {
+            kind: "attempt".to_string(),
+            elf: verifier_rejected_attempt_elf(),
+            programs: vec!["mv_swiotlb_attempt".to_string()],
+        };
+        let results = load_check(&[target]);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].state, "failed");
+        assert_eq!(results[0].errno, "EINVAL");
+        assert!(
+            !results[0].lines.is_empty() && results[0].lines.len() <= 4,
+            "replay must tail the rejection, got: {:?}",
+            results[0].lines
+        );
+        assert!(
+            results[0].detail.contains("mv_swiotlb_attempt")
+                && results[0].detail.contains("load failed")
+                && results[0].detail.contains("(os error 22)"),
+            "detail must name the program load failure, got: {}",
+            results[0].detail
+        );
+        assert!(
+            !results[0].detail.contains("Verifier output"),
+            "detail must never carry the full log, got: {}",
+            results[0].detail
+        );
     }
 
     #[test]

@@ -8,7 +8,9 @@
 //! (programs linked). `close` releases everything and is idempotent;
 //! dropping a session releases it too.
 
-use super::attach::{ATTACH_ORDER, AttachKind, AttachSpec, DETACH_ORDER};
+use super::attach::{
+    ATTACH_ORDER, AttachKind, AttachSpec, DETACH_ORDER, attempt_specs, copy_specs, lifecycle_specs,
+};
 use super::maps::{BPF_MAP_TYPE_RINGBUF, MapGeometry, MapSpec, check_maps_loaded, expected_maps};
 use super::offsets::{encode_copy_offsets, validate_copy_offsets};
 use super::poll::{Frame, Stats, decode_frame, open_consumer};
@@ -187,11 +189,21 @@ fn note_loaded(loaded: &mut LoadedMap, spec: &AttachSpec) {
 }
 
 /// Accept an already-loaded program only when this session loaded it for
-/// the same site.
+/// the same site. A siteless tracepoint load (from verifier-only
+/// loading, which takes no site) is claimed by any tracepoint
+/// site: the loaded binary is site-independent and the attach
+/// names its site explicitly, so no confusion is possible.
 fn check_loaded(loaded: &LoadedMap, spec: &AttachSpec, tag: &str) -> Result<(), String> {
     match loaded.get(&spec.program) {
         Some((kind, target_a, target_b))
             if *kind == spec.kind && *target_a == spec.target_a && *target_b == spec.target_b =>
+        {
+            Ok(())
+        }
+        Some((AttachKind::Tracepoint, target_a, target_b))
+            if spec.kind == AttachKind::Tracepoint
+                && target_a.is_empty()
+                && target_b.is_empty() =>
         {
             Ok(())
         }
@@ -722,6 +734,39 @@ impl Session {
                     "{} channel: unexpected program {name}",
                     self.channel
                 )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Load every channel program without attaching: the verifier
+    /// judges each program the way record's attach will. Refuses on
+    /// a closed or unloaded session. Loaded programs stay loaded
+    /// until close, like attach's; a later attach skips the load per
+    /// site. Privileged.
+    pub fn load_programs(&mut self) -> Result<(), SessionError> {
+        if self.closed {
+            return Err(SessionError::NotOpen("session not open".to_owned()));
+        }
+        let channel = self.channel;
+        let specs = match channel {
+            Channel::Attempt => attempt_specs("", ""),
+            Channel::Lifecycle => lifecycle_specs(),
+            Channel::Copy => copy_specs(),
+        };
+        let Some(bpf) = self.bpf.as_mut() else {
+            return Err(SessionError::NotLoaded("session not loaded".to_owned()));
+        };
+        let mut kernel_btf: Option<Btf> = None;
+        for spec in &specs {
+            let tag = format!("{channel} channel program `{}`", spec.program);
+            if let Err(step) = load_one(bpf, &tag, spec, &mut kernel_btf, &mut self.loaded) {
+                return Err(match step {
+                    LoadStepError::Refusal { message, .. } => SessionError::Load(message),
+                    LoadStepError::Failed(failure) => {
+                        SessionError::Load(format_failed_load(&tag, spec, &failure))
+                    }
+                });
             }
         }
         Ok(())
@@ -1316,6 +1361,63 @@ fn attach_one(
     link_one(bpf, &tag, spec)
 }
 
+/// Frozen spec for one program name, across channels. Load-only
+/// lookups need no attach site: tracepoint loads take none, and
+/// the tracing specs carry frozen targets.
+pub(crate) fn spec_for_program(name: &str) -> Option<AttachSpec> {
+    attempt_specs("", "")
+        .into_iter()
+        .chain(lifecycle_specs())
+        .chain(copy_specs())
+        .find(|spec| spec.program == name)
+}
+
+/// Load named programs on a loaded object without attaching,
+/// returning the first failure's parts. Unknown names skip (the
+/// object as a whole is judged elsewhere); tracing loads reuse
+/// the caller's pre-read BTF and never re-read sysfs.
+pub(crate) fn diagnose_program_loads(
+    bpf: &mut Ebpf,
+    programs: &[String],
+    kernel_btf: Option<&Btf>,
+    btf_errno: Option<i32>,
+) -> Result<(), LoadFailure> {
+    let mut specs = Vec::new();
+    for name in programs {
+        if let Some(spec) = spec_for_program(name) {
+            specs.push(spec);
+        }
+    }
+    if kernel_btf.is_none()
+        && specs
+            .iter()
+            .any(|spec| matches!(spec.kind, AttachKind::FEntry | AttachKind::FExit))
+    {
+        return Err(LoadFailure {
+            errno: btf_errno,
+            log: None,
+        });
+    }
+    let mut slot = kernel_btf.cloned();
+    let mut loaded = LoadedMap::new();
+    for spec in &specs {
+        let tag = format!("diagnostic program `{}`", spec.program);
+        if let Err(step) = load_one(bpf, &tag, spec, &mut slot, &mut loaded) {
+            return Err(match step {
+                // Structural refusals without an errno (a target
+                // mismatch, unreachable on a fresh replay) default
+                // to missing, keeping the replay errno total.
+                LoadStepError::Refusal { errno, .. } => LoadFailure {
+                    errno: errno.or(Some(2)),
+                    log: None,
+                },
+                LoadStepError::Failed(failure) => failure,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// All present channel sessions: attempt plus optional lifecycle/copy.
 pub struct Channels {
     attempt: Session,
@@ -1553,6 +1655,63 @@ mod tests {
             matches!(error, SessionError::NotOpen(_)),
             "want NotOpen refusal, got: {error}"
         );
+    }
+
+    #[test]
+    fn load_programs_refuses_before_load_and_after_close() {
+        // The load-without-attach gate: an opened session refuses
+        // program loads until the maps exist, and a closed session
+        // refuses as not-open. Unprivileged: no load, no verifier.
+        let path = env!("DEP_MEMVEIL_EBPF_ATTEMPT_PATH");
+        let bytes = std::fs::read(path).expect("read attempt ELF");
+        let mut session = Session::open(&bytes, "mv_attempts").expect("open");
+        let error = session
+            .load_programs()
+            .expect_err("unloaded program load must refuse");
+        assert!(
+            matches!(error, SessionError::NotLoaded(_)),
+            "want NotLoaded refusal, got: {error}"
+        );
+        session.close().expect("close");
+        let error = session
+            .load_programs()
+            .expect_err("closed program load must refuse");
+        assert!(
+            matches!(error, SessionError::NotOpen(_)),
+            "want NotOpen refusal, got: {error}"
+        );
+    }
+
+    #[test]
+    fn spec_for_program_resolves_frozen_sets() {
+        // Every frozen program name resolves to its kind: the
+        // tracepoint with no site (loads take none), tracing with
+        // frozen kernel targets. Unknown names stay unknown.
+        let spec = spec_for_program("mv_swiotlb_attempt").expect("attempt resolves");
+        assert_eq!(spec.kind, AttachKind::Tracepoint);
+        for (name, kind, target) in [
+            ("mv_map_result", AttachKind::FExit, "swiotlb_tbl_map_single"),
+            ("mv_unmap", AttachKind::FEntry, "__swiotlb_tbl_unmap_single"),
+            ("mv_bounce", AttachKind::FEntry, "swiotlb_bounce"),
+            ("mv_bounce_exit", AttachKind::FExit, "swiotlb_bounce"),
+            (
+                "mv_sync_device",
+                AttachKind::FEntry,
+                "__swiotlb_sync_single_for_device",
+            ),
+            (
+                "mv_sync_cpu",
+                AttachKind::FEntry,
+                "__swiotlb_sync_single_for_cpu",
+            ),
+        ] {
+            let spec = spec_for_program(name).unwrap_or_else(|| panic!("{name} resolves"));
+            assert_eq!(spec.kind, kind, "{name}");
+            assert_eq!(spec.target_a, target, "{name}");
+            assert_eq!(spec.target_b, "", "{name}");
+        }
+        assert_eq!(spec_for_program("mv_bogus"), None);
+        assert_eq!(spec_for_program(""), None);
     }
 
     #[test]
@@ -1813,6 +1972,30 @@ mod tests {
             "got: {message}"
         );
         assert!(message.contains("(os error 13)"), "got: {message}");
+    }
+
+    #[test]
+    fn check_loaded_claims_siteless_tracepoint() {
+        // Same-site claims pass; a siteless tracepoint load (from
+        // verifier-only loading) is claimed by any tracepoint
+        // site. Sited mismatches and tracing mismatches refuse.
+        let mut loaded = LoadedMap::new();
+        let tag = "attempt channel program `mv_swiotlb_attempt`";
+        let siteless = AttachSpec::new("mv_swiotlb_attempt", AttachKind::Tracepoint, "", "");
+        note_loaded(&mut loaded, &siteless);
+        let sited = AttachSpec::new("mv_swiotlb_attempt", AttachKind::Tracepoint, "s", "e");
+        assert!(check_loaded(&loaded, &sited, tag).is_ok());
+        assert!(check_loaded(&loaded, &siteless, tag).is_ok());
+        let mut loaded = LoadedMap::new();
+        note_loaded(&mut loaded, &sited);
+        let other = AttachSpec::new("mv_swiotlb_attempt", AttachKind::Tracepoint, "s", "x");
+        assert!(check_loaded(&loaded, &other, tag).is_err());
+        let mut loaded = LoadedMap::new();
+        let entry = AttachSpec::new("mv_unmap", AttachKind::FEntry, "fn_a", "");
+        note_loaded(&mut loaded, &entry);
+        let other = AttachSpec::new("mv_unmap", AttachKind::FEntry, "fn_b", "");
+        assert!(check_loaded(&loaded, &other, tag).is_err());
+        assert!(check_loaded(&loaded, &entry, tag).is_ok());
     }
 
     #[test]
