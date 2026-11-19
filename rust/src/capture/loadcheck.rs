@@ -16,6 +16,7 @@
 //! detail says so and the errno stays empty.
 
 use crate::bpf::Session;
+use crate::bpf::session::core_precondition;
 use crate::platform::reader::bytes_to_text;
 use aya::{EbpfLoader, VerifierLogLevel};
 
@@ -352,12 +353,26 @@ fn verifier_log_from_display(message: &str) -> Option<&str> {
 /// program names ride along for the call shape only: the
 /// loader yields the failing program's log, not per-program
 /// logs. The loader grows its log buffer internally, so the
-/// tail never carries a truncation marker.
+/// tail never carries a truncation marker. The replay shares
+/// the session's CO-RE precondition: one sysfs BTF read, a
+/// fail-closed refusal for relocation-carrying objects when
+/// it fails, and that same parsed BTF handed to the loader.
 pub fn diagnose_load(elf: &[u8], programs: &[String]) -> LoadDiag {
     let _ = programs;
     let mut out = LoadDiag::default();
+    let pre = core_precondition(elf);
+    if pre.relocations && pre.btf.is_none() {
+        // The BTF read's own errno names the failure; a
+        // corrupt (non-errno) blob reads as invalid input.
+        out.errno = pre
+            .read_errno
+            .map(|raw| errno_name(0 - raw))
+            .unwrap_or_else(|| "EINVAL".to_string());
+        return out;
+    }
     let mut loader = EbpfLoader::new();
     loader.verifier_log_level(VerifierLogLevel::VERBOSE);
+    loader.btf(pre.btf.as_ref());
     match loader.load(elf) {
         Ok(bpf) => {
             drop(bpf);

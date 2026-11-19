@@ -12,6 +12,7 @@ use super::attach::{ATTACH_ORDER, AttachKind, AttachSpec, DETACH_ORDER};
 use super::maps::{MapGeometry, MapSpec, check_maps_loaded};
 use super::offsets::{encode_copy_offsets, validate_copy_offsets};
 use super::poll::{Frame, Stats, decode_frame, open_consumer};
+use crate::capture::loadcheck::errno_from_chain;
 use aya::maps::{Array, Map, MapData, RingBuf};
 use aya::programs::{
     Program, ProgramError,
@@ -222,18 +223,51 @@ fn le64(bytes: &[u8], offset: usize) -> Option<u64> {
     })
 }
 
-/// Open-time ELF sanity: 64-bit BPF object carrying the channel's program
-/// sections. Manual header walk (no object parser on this side): any
-/// truncation refuses.
-/// Fail-closed CO-RE precondition: refuse a relocation-carrying
-/// object when sysfs BTF is unreadable, naming BTF. Objects
-/// without relocations pass through, as do unparseable objects
-/// the loader itself will judge (open already gated structure).
-fn check_core_btf(elf: &[u8], channel: Channel, sys_btf_ok: bool) -> Result<(), SessionError> {
+/// One shared sysfs BTF read for CO-RE loads: the parsed BTF (when
+/// the read succeeded), whether the ELF carries BTF relocations, and
+/// the read's errno (when the read failed with one). Normal and
+/// diagnostic loads derive from the same read: relocation-carrying
+/// objects refuse without it, and the loader always receives this
+/// same parsed BTF — never a second silent read that could observe a
+/// different sysfs.
+#[derive(Debug)]
+pub(crate) struct CorePrecondition {
+    /// Parsed sysfs BTF; `None` when the read failed.
+    pub btf: Option<Btf>,
+    /// True when the ELF carries BTF relocations.
+    pub relocations: bool,
+    /// The sysfs read's errno; `None` on success or on a
+    /// non-errno (corrupt blob) read failure.
+    pub read_errno: Option<i32>,
+}
+
+/// Read the CO-RE precondition once: probe the ELF for BTF
+/// relocations, then read and parse sysfs BTF a single time.
+/// Unparseable objects report no relocations; the loader itself
+/// judges them (open already gated structure).
+pub(crate) fn core_precondition(elf: &[u8]) -> CorePrecondition {
     let relocations = aya_obj::Object::parse(elf)
         .map(|object| object.has_btf_relocations())
         .unwrap_or(false);
-    if relocations && !sys_btf_ok {
+    match Btf::from_sys_fs() {
+        Ok(btf) => CorePrecondition {
+            btf: Some(btf),
+            relocations,
+            read_errno: None,
+        },
+        Err(error) => CorePrecondition {
+            btf: None,
+            relocations,
+            read_errno: errno_from_chain(&error),
+        },
+    }
+}
+
+/// Fail-closed CO-RE verdict over one precondition: refuse a
+/// relocation-carrying object when sysfs BTF is unreadable, naming
+/// BTF. Objects without relocations pass through.
+fn check_core_btf(pre: &CorePrecondition, channel: Channel) -> Result<(), SessionError> {
+    if pre.relocations && pre.btf.is_none() {
         return Err(SessionError::Load(format!(
             "{channel} channel: object carries CO-RE relocations but kernel BTF is unreadable"
         )));
@@ -241,6 +275,9 @@ fn check_core_btf(elf: &[u8], channel: Channel, sys_btf_ok: bool) -> Result<(), 
     Ok(())
 }
 
+/// Open-time ELF sanity: 64-bit BPF object carrying the channel's program
+/// sections. Manual header walk (no object parser on this side): any
+/// truncation refuses.
 fn check_elf(elf: &[u8], channel: Channel) -> Result<(), SessionError> {
     let open = |why: &str| SessionError::Open(format!("{channel} channel: {why}"));
     if elf.get(..4) != Some(b"\x7fELF".as_slice()) {
@@ -476,11 +513,16 @@ impl Session {
                 self.channel
             )));
         }
-        // Fail-closed CO-RE guard: aya skips BTF relocation silently
-        // when sysfs BTF is unreadable, so a relocation-carrying
-        // object refuses here rather than loading unrelocated code.
-        check_core_btf(&self.elf, self.channel, Btf::from_sys_fs().is_ok())?;
-        let bpf = EbpfLoader::new().load(&self.elf).map_err(|error| {
+        // Fail-closed CO-RE guard over one shared sysfs read: aya
+        // skips BTF relocation silently when its own read fails, so
+        // the loader receives this same parsed BTF instead of
+        // reading again, and a relocation-carrying object refuses
+        // here rather than loading unrelocated code.
+        let pre = core_precondition(&self.elf);
+        check_core_btf(&pre, self.channel)?;
+        let mut loader = EbpfLoader::new();
+        loader.btf(pre.btf.as_ref());
+        let bpf = loader.load(&self.elf).map_err(|error| {
             SessionError::Load(format!("{} channel: load failed: {error}", self.channel))
         })?;
         let mut actual_maps = Vec::new();
@@ -1199,22 +1241,51 @@ mod tests {
     }
 
     #[test]
+    fn core_precondition_probes_relocations_once() {
+        // The relocation probe reads the real fixtures: the C copy
+        // object carries relocations, the attempt object does not,
+        // and unparseable bytes report none (the loader judges
+        // those itself). The sysfs read outcome stays consistent:
+        // parsed BTF and a read errno never coexist.
+        let dir = crate::platform::test_support::repo_root().join("tests/fixtures/elf");
+        let cp = std::fs::read(dir.join("cp-ok.o")).expect("read cp-ok.o");
+        let pre = core_precondition(&cp);
+        assert!(pre.relocations, "cp-ok.o must carry relocations");
+        assert_eq!(pre.btf.is_some(), pre.read_errno.is_none());
+        let attempt = std::fs::read(dir.join("ok.o")).expect("read ok.o");
+        let pre = core_precondition(&attempt);
+        assert!(!pre.relocations, "ok.o must be relocation-free");
+        assert_eq!(pre.btf.is_some(), pre.read_errno.is_none());
+        let pre = core_precondition(b"not an elf");
+        assert!(!pre.relocations, "garbage must report no relocations");
+        assert_eq!(pre.btf.is_some(), pre.read_errno.is_none());
+    }
+
+    #[test]
     fn core_guard_refuses_relocations_without_btf() {
         // A relocation-carrying object refuses when sysfs BTF is
         // unreadable, naming BTF; readable BTF passes through to
-        // the loader, as do relocation-free and unparseable
-        // objects (the loader judges the latter itself).
+        // the loader, as do relocation-free objects. The fixture
+        // parse stays real; only the sysfs outcome is staged.
         let dir = crate::platform::test_support::repo_root().join("tests/fixtures/elf");
         let cp = std::fs::read(dir.join("cp-ok.o")).expect("read cp-ok.o");
-        let error = check_core_btf(&cp, Channel::Copy, false).expect_err("must refuse without BTF");
+        let mut pre = core_precondition(&cp);
+        pre.btf = None;
+        pre.read_errno = Some(2);
+        let error = check_core_btf(&pre, Channel::Copy).expect_err("must refuse without BTF");
         assert!(
             error.to_string().contains("BTF"),
             "refusal must name BTF, got: {error}"
         );
-        assert!(check_core_btf(&cp, Channel::Copy, true).is_ok());
+        let pre = core_precondition(&cp);
+        if pre.btf.is_some() {
+            assert!(check_core_btf(&pre, Channel::Copy).is_ok());
+        }
         let attempt = std::fs::read(dir.join("ok.o")).expect("read ok.o");
-        assert!(check_core_btf(&attempt, Channel::Attempt, false).is_ok());
-        assert!(check_core_btf(b"not an elf", Channel::Attempt, false).is_ok());
+        let mut pre = core_precondition(&attempt);
+        pre.btf = None;
+        pre.read_errno = Some(2);
+        assert!(check_core_btf(&pre, Channel::Attempt).is_ok());
     }
 
     #[test]
