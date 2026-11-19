@@ -113,7 +113,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            binutils cpio patchelf python3-jsonschema rpm zsh
+            binutils cpio file patchelf python3-jsonschema rpm \
+            zsh
       - name: Install Rust toolchains
         run: |
           curl -fsSL -o /tmp/rustup-init \
