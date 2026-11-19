@@ -600,11 +600,14 @@ fn check_ctx_ok_against_rust(idx: usize, fields: &CtxOkFields, line: &str) {
 }
 
 /// `PIN_TABLE` (`tests/native/test_attempt_decode.c:269-271`) as 24 wire
-/// bytes: magic `0x35464D4D`, version 1, reserved 0, `loc_off` 8, `size_off`
-/// 32, `force_off` 40, `fixed_end` 41. Kind-1 `ctx` records always run under
-/// this table, so a `CTX_TABLE_BAD` verdict on one would prove the pin went
-/// stale; the attempts test asserts the Rust validator accepts these exact
-/// bytes and that no kind-1 line carries that verdict.
+/// bytes: magic `MV_OFF_TABLE_MAGIC`, version 1, reserved 0, `loc_off` 8,
+/// `size_off` 32, `force_off` 40, `fixed_end` 41. The bytes stay literal on
+/// purpose: they pin the C side independently, so deriving them from the
+/// Rust const would make the differential self-referential. Kind-1 `ctx`
+/// records always run under this table, so a `CTX_TABLE_BAD` verdict on one
+/// would prove the pin went stale; the attempts test asserts the Rust
+/// validator accepts these exact bytes and that no kind-1 line carries that
+/// verdict.
 const PIN_TABLE_BYTES: [u8; 24] = [
     0x4D, 0x4D, 0x46, 0x35, // magic = MV_OFF_TABLE_MAGIC
     0x01, 0x00, // version

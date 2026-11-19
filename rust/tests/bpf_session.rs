@@ -29,7 +29,9 @@ use memveil::bpf::{
     ProgramSpec, Session, attempt_specs, check_channel_geometry, copy_specs, lifecycle_specs,
     resolve_attempt_offsets, resolve_copy_offsets, sentinel_copy_offsets, validate_copy_offsets,
 };
-use memveil_ebpf_common::{CopyOffsets, MV_FLAG_BYTE_COVERAGE, decode_offsets_table};
+use memveil_ebpf_common::{
+    CopyOffsets, MV_FLAG_BYTE_COVERAGE, MV_OFF_TABLE_MAGIC, decode_offsets_table,
+};
 
 /// ELF `e_machine` for BPF objects (`EM_BPF`).
 const EM_BPF: u16 = 247;
@@ -326,7 +328,7 @@ fn attempt_offsets_resolve_live() {
         table.loc_off, table.size_off, table.force_off, table.fixed_end, resolved.moved
     );
     // The probe trusts magic/version only; extents were validated at resolve.
-    assert_eq!(&resolved.table[..4], &0x35464D4Du32.to_le_bytes());
+    assert_eq!(&resolved.table[..4], &MV_OFF_TABLE_MAGIC.to_le_bytes());
 }
 
 /// Resolve the live copy table for `test`, or skip it loudly when the
@@ -651,7 +653,7 @@ fn live_negative_corrupt_attempt_table() {
     // itself would refuse this, which is exactly the point.
     let mut corrupt = resolve_attempt_offsets().expect("resolve").table;
     corrupt[0] ^= 0xff;
-    assert_ne!(&corrupt[..4], &0x35464D4Du32.to_le_bytes());
+    assert_ne!(&corrupt[..4], &MV_OFF_TABLE_MAGIC.to_le_bytes());
     session
         .map_write("mv_offsets", 0, &corrupt)
         .expect("seed corrupt table");
