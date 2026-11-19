@@ -85,24 +85,24 @@ jobs:
           cargo fetch --locked --manifest-path crates/ebpf/Cargo.toml
       - name: Restore stock /usr/share permissions
         run: |
-          # The runner image ships /usr/share and /usr/share/doc with
-          # mode 777 plus default ACLs. Files the rpm installs under
-          # them inherit those ACLs, and rpm 6 verify reports the
-          # unexpected ACLs as mode (.M) differences even though the
-          # numeric modes match. Restore stock state so the install
-          # journey verifies like on a real system.
+          # The runner image ships /usr/share with mode 777 plus
+          # default ACLs on many subdirs. Files the rpm installs
+          # under them inherit those ACLs, and rpm 6 verify reports
+          # the unexpected ACLs as mode (.M) differences even though
+          # the numeric modes match. Strip default ACLs under
+          # /usr/share and restore stock top-level modes so the
+          # install journey verifies like on a real system.
           echo "--- before ---"
           stat -c '%a %n' /usr/share /usr/share/doc
-          getfacl -p /usr/share /usr/share/doc 2>/dev/null | grep -E '^# file|default:' || true
-          sudo setfacl -b -k /usr/share /usr/share/doc
+          echo "default-ACL entries under /usr/share: $(getfacl -R -p /usr/share 2>/dev/null | grep -c '^default:' || true)"
+          sudo find /usr/share -type d -exec setfacl -k {} +
+          sudo setfacl -b /usr/share /usr/share/doc
           sudo chmod 755 /usr/share /usr/share/doc
           echo "--- after ---"
           stat -c '%a %n' /usr/share /usr/share/doc
-          if getfacl -p /usr/share /usr/share/doc 2>/dev/null | grep -q 'default:'; then
-            echo "WARNING: default ACLs remain"
-          else
-            echo "no default ACLs remain"
-          fi
+          REMAIN=$(getfacl -R -p /usr/share 2>/dev/null | grep -c '^default:' || true)
+          echo "default-ACL entries remaining under /usr/share: $REMAIN"
+          test "$REMAIN" -eq 0 || echo "WARNING: default ACLs remain"
       - name: Run Rust test suite
         run: |
           cargo test --workspace --locked
