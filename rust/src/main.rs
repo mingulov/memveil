@@ -11,6 +11,7 @@ use memveil::cli::report::{EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, run_report, wri
 use memveil::cli::top::run_top;
 use memveil::platform::signal::{ensure_inherited_signal_block, ignore_sigpipe};
 use memveil::platform::stdout::write_stdout;
+use std::ffi::OsString;
 use std::process::ExitCode;
 
 /// Usage text for the memveil program.
@@ -44,49 +45,96 @@ fn stdout_failed() -> ! {
     std::process::exit(EXIT_INTERNAL as i32)
 }
 
-fn main() -> ExitCode {
-    if !ignore_sigpipe() {
-        let _ = write_stderr("memveil: cannot ignore SIGPIPE\n");
-        return ExitCode::from(EXIT_INTERNAL as u8);
-    }
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.is_empty() {
-        let _ = write_stderr(&top_usage());
-        return ExitCode::from(EXIT_INVALID as u8);
-    }
-    let verb = args[0].as_str();
+/// Top-level dispatch decision over raw argv words (minus argv[0]).
+enum Dispatch {
+    /// Print usage to stderr; exit 2.
+    InvalidUsage,
+    /// Print usage to stdout; exit 0.
+    Help,
+    /// Print the engine version to stdout; exit 0.
+    Version,
+    /// Run one verb with decoded UTF-8 arguments.
+    Run { verb: String, rest: Vec<String> },
+}
+
+/// Classify raw argv words without panicking on non-UTF-8 bytes.
+///
+/// Linux passes arbitrary bytes, and `std::env::args()` panics on
+/// undecodable words. The dispatcher compares byte-wise like the Mojo
+/// original: an undecodable verb matches nothing and falls through to
+/// usage (exit 2), while `help` and `version` ignore trailing words
+/// before any further decoding, undecodable ones included. Every
+/// subcommand takes text, so a consumed word that cannot decode is a
+/// normal usage error (exit 2), never a panic.
+fn dispatch(raw: &[OsString]) -> Dispatch {
+    let verb_os = match raw.first() {
+        None => return Dispatch::InvalidUsage,
+        Some(word) => word,
+    };
+    let verb = match verb_os.to_str() {
+        None => return Dispatch::InvalidUsage,
+        Some(word) => word,
+    };
     if verb == "help" || verb == "--help" || verb == "-h" {
-        match write_stdout(&top_usage()) {
-            Ok(()) => return ExitCode::from(EXIT_OK as u8),
-            Err(_) => stdout_failed(),
-        }
+        return Dispatch::Help;
     }
     // `version` ignores trailing arguments and always prints the
     // engine version (parity with the Mojo dispatcher, which takes
     // the same branch before argument parsing): extra words after
     // `memveil --version` are accepted, not an error.
     if verb == "version" || verb == "--version" {
-        match write_stdout(&format!("{ENGINE_VERSION}\n")) {
-            Ok(()) => return ExitCode::from(EXIT_OK as u8),
-            Err(_) => stdout_failed(),
+        return Dispatch::Version;
+    }
+    match verb {
+        "report" | "doctor" | "record" | "top" | "qualify" | "bind-profile" => {}
+        _ => return Dispatch::InvalidUsage,
+    }
+    let mut rest = Vec::with_capacity(raw.len().saturating_sub(1));
+    for arg in &raw[1..] {
+        match arg.to_str() {
+            Some(text) => rest.push(text.to_string()),
+            None => return Dispatch::InvalidUsage,
         }
     }
-    if verb != "report"
-        && verb != "doctor"
-        && verb != "record"
-        && verb != "top"
-        && verb != "qualify"
-        && verb != "bind-profile"
-    {
-        let _ = write_stderr(&top_usage());
-        return ExitCode::from(EXIT_INVALID as u8);
+    Dispatch::Run {
+        verb: verb.to_string(),
+        rest,
     }
-    let rest = args[1..].to_vec();
+}
+
+fn main() -> ExitCode {
+    if !ignore_sigpipe() {
+        let _ = write_stderr("memveil: cannot ignore SIGPIPE\n");
+        return ExitCode::from(EXIT_INTERNAL as u8);
+    }
+    let raw: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let (verb, rest) = match dispatch(&raw) {
+        Dispatch::InvalidUsage => {
+            let _ = write_stderr(&top_usage());
+            return ExitCode::from(EXIT_INVALID as u8);
+        }
+        Dispatch::Help => match write_stdout(&top_usage()) {
+            Ok(()) => return ExitCode::from(EXIT_OK as u8),
+            Err(_) => stdout_failed(),
+        },
+        Dispatch::Version => match write_stdout(&format!("{ENGINE_VERSION}\n")) {
+            Ok(()) => return ExitCode::from(EXIT_OK as u8),
+            Err(_) => stdout_failed(),
+        },
+        Dispatch::Run { verb, rest } => (verb, rest),
+    };
     // Every collector-driving verb needs all runtime threads to
     // inherit blocked stop signals, otherwise a SIGINT lands in a
     // worker and never reaches signalfd.
     if verb == "record" || verb == "top" || verb == "qualify" {
-        let full: Vec<String> = std::env::args().collect();
+        // The re-exec guard resolves /proc/self/exe for argv[0] and
+        // only forwards words from index 1 on, so element 0 is a
+        // placeholder and the decoded verb and rest follow; every
+        // forwarded word already decoded above.
+        let mut full = Vec::with_capacity(rest.len() + 2);
+        full.push(String::new());
+        full.push(verb.clone());
+        full.extend(rest.iter().cloned());
         let note = ensure_inherited_signal_block(&full);
         if !note.is_empty() {
             let _ = write_stderr(&format!("memveil {verb}: {note}\n"));
@@ -107,4 +155,113 @@ fn main() -> ExitCode {
         run_report(&rest)
     };
     ExitCode::from(code as u8)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::ffi::OsStringExt;
+
+    fn os(words: &[&[u8]]) -> Vec<OsString> {
+        words
+            .iter()
+            .map(|w| OsString::from_vec(w.to_vec()))
+            .collect()
+    }
+
+    fn is_invalid(raw: &[OsString]) -> bool {
+        matches!(dispatch(raw), Dispatch::InvalidUsage)
+    }
+
+    fn is_help(raw: &[OsString]) -> bool {
+        matches!(dispatch(raw), Dispatch::Help)
+    }
+
+    fn is_version(raw: &[OsString]) -> bool {
+        matches!(dispatch(raw), Dispatch::Version)
+    }
+
+    #[test]
+    fn empty_and_unknown_verbs_are_invalid_usage() {
+        assert!(is_invalid(&[]));
+        assert!(is_invalid(&os(&[b"bogus-verb"])));
+        assert!(is_invalid(&os(&[b"bogus-verb", b"\xff"])));
+    }
+
+    #[test]
+    fn undecodable_verb_falls_through_to_usage() {
+        // Mojo compares argv byte-wise: a verb that matches nothing
+        // prints usage and exits 2 instead of panicking.
+        assert!(is_invalid(&os(&[b"\xff"])));
+        assert!(is_invalid(&os(&[b"rep\xffrt"])));
+        assert!(is_invalid(&os(&[b"\xff", b"report"])));
+    }
+
+    #[test]
+    fn help_ignores_trailing_words_before_decoding() {
+        for verb in [b"help".as_slice(), b"--help", b"-h"] {
+            assert!(is_help(&os(&[verb])));
+            assert!(is_help(&os(&[verb, b"extra"])));
+            assert!(is_help(&os(&[verb, b"\xff"])));
+        }
+    }
+
+    #[test]
+    fn version_ignores_trailing_words_before_decoding() {
+        // Parity with the Mojo dispatcher: words after `version`
+        // are accepted, never decoded, so even non-UTF-8 bytes
+        // print the engine version instead of panicking.
+        for verb in [b"version".as_slice(), b"--version"] {
+            assert!(is_version(&os(&[verb])));
+            assert!(is_version(&os(&[verb, b"extra", b"--bogus"])));
+            assert!(is_version(&os(&[verb, b"\xff"])));
+        }
+    }
+
+    #[test]
+    fn undecodable_consumed_word_is_invalid_usage() {
+        // Every subcommand takes text: a consumed non-UTF-8 word is
+        // a normal usage error (exit 2), never an args() panic.
+        for verb in [
+            b"report".as_slice(),
+            b"doctor",
+            b"record",
+            b"top",
+            b"qualify",
+            b"bind-profile",
+        ] {
+            assert!(is_invalid(&os(&[verb, b"\xff"])), "{verb:?}");
+            assert!(
+                is_invalid(&os(&[verb, b"--output", b"\xfe\xfd"])),
+                "{verb:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn known_verbs_decode_and_forward_rest() {
+        for verb in [
+            b"report".as_slice(),
+            b"doctor",
+            b"record",
+            b"top",
+            b"qualify",
+            b"bind-profile",
+        ] {
+            match dispatch(&os(&[verb, b"cap", b"--flag"])) {
+                Dispatch::Run { verb: v, rest } => {
+                    assert_eq!(v, String::from_utf8_lossy(verb));
+                    assert_eq!(rest, vec!["cap".to_string(), "--flag".to_string()]);
+                }
+                _ => panic!("{verb:?} must dispatch to Run"),
+            }
+        }
+        match dispatch(&os(&[b"report"])) {
+            Dispatch::Run { verb: v, rest } => {
+                assert_eq!(v, "report");
+                assert!(rest.is_empty());
+            }
+            _ => panic!("bare report must dispatch to Run"),
+        }
+    }
 }
