@@ -11,8 +11,8 @@
 use super::attach::{ATTACH_ORDER, AttachKind, AttachSpec, DETACH_ORDER};
 use super::maps::{MapGeometry, MapSpec, check_maps_loaded};
 use super::offsets::{encode_copy_offsets, validate_copy_offsets};
-use super::poll::{Frame, Stats, decode_frame, drain_one};
-use aya::maps::{Array, Map, MapData};
+use super::poll::{Frame, Stats, decode_frame, open_consumer};
+use aya::maps::{Array, Map, MapData, RingBuf};
 use aya::programs::{
     Program, ProgramError,
     fentry::{FEntry, FEntryLinkId},
@@ -395,6 +395,7 @@ pub struct Session {
     ring: String,
     channel: Channel,
     bpf: Option<Ebpf>,
+    consumer: Option<RingBuf<MapData>>,
     links: Vec<ActiveLink>,
     loaded: LoadedMap,
     received: u64,
@@ -430,6 +431,7 @@ impl Session {
             ring: ring.to_owned(),
             channel,
             bpf: None,
+            consumer: None,
             links: Vec::new(),
             loaded: LoadedMap::new(),
             received: 0,
@@ -500,7 +502,29 @@ impl Session {
             drop(bpf);
             return Err(error);
         }
+        // Pin one owned ring consumer for the session's life; a
+        // consumer built per poll remaps the ring every record and
+        // stalls under flood. A consumer failure unloads again, like
+        // the gates above, so a refused session is never left
+        // half-loaded.
+        let consumer = match bpf.map(&self.ring) {
+            Some(map) => match open_consumer(map, &self.ring) {
+                Ok(consumer) => consumer,
+                Err(error) => {
+                    drop(bpf);
+                    return Err(error);
+                }
+            },
+            None => {
+                drop(bpf);
+                return Err(SessionError::Load(format!(
+                    "{} channel: ring map `{}` missing",
+                    self.channel, self.ring
+                )));
+            }
+        };
         self.bpf = Some(bpf);
+        self.consumer = Some(consumer);
         Ok(())
     }
 
@@ -600,12 +624,12 @@ impl Session {
         if self.closed {
             return Err(SessionError::NotOpen("session not open".to_owned()));
         }
-        let Some(bpf) = self.bpf.as_mut() else {
+        let Some(consumer) = self.consumer.as_mut() else {
             return Err(SessionError::NotLoaded("session not loaded".to_owned()));
         };
         let deadline = Instant::now() + Duration::from_millis(u64::from(timeout_ms));
         loop {
-            match drain_one(bpf, &self.ring)? {
+            match consumer.next().map(|item| item.to_vec()) {
                 Some(bytes) => {
                     self.received = self.received.wrapping_add(1);
                     match decode_frame(self.channel, &bytes) {
@@ -900,6 +924,7 @@ impl Session {
         }
         let result = self.detach();
         self.bpf = None;
+        self.consumer = None;
         self.closed = true;
         result
     }
@@ -1190,6 +1215,27 @@ mod tests {
         let attempt = std::fs::read(dir.join("ok.o")).expect("read ok.o");
         assert!(check_core_btf(&attempt, Channel::Attempt, false).is_ok());
         assert!(check_core_btf(b"not an elf", Channel::Attempt, false).is_ok());
+    }
+
+    #[test]
+    fn poll_refuses_before_load_and_after_close() {
+        // The pinned-consumer gate: an opened session refuses poll
+        // until load pins the consumer, and a closed session refuses
+        // as not-open. Unprivileged: no load, no ring, no waiting.
+        let path = env!("DEP_MEMVEIL_EBPF_ATTEMPT_PATH");
+        let bytes = std::fs::read(path).expect("read attempt ELF");
+        let mut session = Session::open(&bytes, "mv_attempts").expect("open");
+        let error = session.poll(0).expect_err("unloaded poll must refuse");
+        assert!(
+            matches!(error, SessionError::NotLoaded(_)),
+            "want NotLoaded refusal, got: {error}"
+        );
+        session.close().expect("close");
+        let error = session.poll(0).expect_err("closed poll must refuse");
+        assert!(
+            matches!(error, SessionError::NotOpen(_)),
+            "want NotOpen refusal, got: {error}"
+        );
     }
 
     #[test]

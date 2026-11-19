@@ -7,11 +7,12 @@
 //! count stays visible through [`Stats`].
 
 use super::session::{Channel, SessionError};
-use aya::maps::RingBuf;
+use aya::maps::{Map, MapData, RingBuf};
 use memveil_ebpf_common::{
     Attempt, Copy, Lifecycle, decode_attempt, decode_copy, decode_lifecycle,
 };
 use std::convert::TryFrom;
+use std::os::fd::AsFd;
 
 /// One decoded event frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,18 +57,29 @@ pub(crate) fn decode_frame(channel: Channel, bytes: &[u8]) -> Result<Frame, Sess
     }
 }
 
-/// Drain one raw item from the ring map without waiting. The consumer
-/// position lives in the shared ring page, so constructing the consumer per
-/// call is correct (each call re-reads the published position); it costs a
-/// transient mapping pair per poll, which a later task may pin with an
-/// owned consumer handle.
-pub(crate) fn drain_one(bpf: &aya::Ebpf, ring: &str) -> Result<Option<Vec<u8>>, SessionError> {
-    let map = bpf
-        .map(ring)
-        .ok_or_else(|| SessionError::Poll(format!("ring map `{ring}` missing")))?;
-    let mut consumer = RingBuf::try_from(map)
-        .map_err(|error| SessionError::Poll(format!("ring open: {error}")))?;
-    Ok(consumer.next().map(|item| item.to_vec()))
+/// Open one owned ring consumer over a duplicated map fd. The session
+/// pins the consumer at load and polls through it for life: building a
+/// consumer per poll remaps the ring every record (mmap pair per item),
+/// which stalls the collector under flood while the Mojo bridge's pinned
+/// consumer keeps up. The source map stays in the loader (geometry gates
+/// keep reading it there); only this consumer reads the ring.
+pub(crate) fn open_consumer(map: &Map, ring: &str) -> Result<RingBuf<MapData>, SessionError> {
+    let data = match map {
+        Map::RingBuf(data) => data,
+        _ => {
+            return Err(SessionError::Load(format!(
+                "ring map `{ring}` is not a ring buffer"
+            )));
+        }
+    };
+    let dup =
+        data.fd().as_fd().try_clone_to_owned().map_err(|error| {
+            SessionError::Load(format!("ring map `{ring}` fd dup failed: {error}"))
+        })?;
+    let owned = MapData::from_fd(dup)
+        .map_err(|error| SessionError::Load(format!("ring map `{ring}` reopen failed: {error}")))?;
+    RingBuf::try_from(Map::RingBuf(owned))
+        .map_err(|error| SessionError::Load(format!("ring map `{ring}` open failed: {error}")))
 }
 
 #[cfg(test)]
