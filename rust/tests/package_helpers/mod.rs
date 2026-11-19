@@ -711,13 +711,45 @@ pub fn runpath_abspaths(dynamic: &str) -> Vec<String> {
     found
 }
 
-/// Max `GLIBC_x.y` need across ELF files.
+/// Introducing release of a non-numeric libc ABI need (mirrors the
+/// packager's `GLIBC_ABI_FLOORS`; unknown nodes fail the suite until both
+/// tables learn them together).
+pub fn abi_floor(token: &str) -> (u32, u32) {
+    match token {
+        "GLIBC_ABI_GNU2_TLS" => (2, 40),
+        _ => panic!("unknown libc ABI need {token}: extend abi_floor"),
+    }
+}
+
+/// Every `GLIBC_ABI_*` token in `readelf -V` output, deduplicated.
+pub fn parse_glibc_abi_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut rest = text;
+    while let Some(pos) = rest.find("GLIBC_ABI_") {
+        rest = &rest[pos..];
+        let end = rest
+            .find(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+            .unwrap_or(rest.len());
+        let token = rest[..end].to_string();
+        rest = &rest[end..];
+        if !tokens.contains(&token) {
+            tokens.push(token);
+        }
+    }
+    tokens
+}
+
+/// Max libc need across ELF files: numeric `GLIBC_x.y` needs plus the
+/// introducing release of every `GLIBC_ABI_*` need.
 pub fn glibc_floor(paths: &[PathBuf]) -> (u32, u32) {
     let mut floor = (0u32, 0u32);
     for path in paths {
         let text = run_ok("readelf", &["-V", path_to_str(path).as_str()], None);
         for need in parse_glibc_floor(&text) {
             floor = floor.max(need);
+        }
+        for token in parse_glibc_abi_tokens(&text) {
+            floor = floor.max(abi_floor(&token));
         }
     }
     assert_ne!(floor, (0, 0), "no GLIBC need in {paths:?}");

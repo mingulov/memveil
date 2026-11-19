@@ -64,8 +64,8 @@ fn fixed_files() -> BTreeSet<String> {
     h::FHS_FIXED_FILES.iter().map(ToString::to_string).collect()
 }
 
-/// Max GLIBC need across the extracted payload (binary + lib/*.so*).
-fn payload_glibc_floor(extracted: &std::path::Path) -> (u32, u32) {
+/// Staged payload ELF files (binary + lib/*.so*).
+fn payload_elfs(extracted: &std::path::Path) -> Vec<PathBuf> {
     let libdir = extracted.join("usr").join("lib").join("memveil");
     let mut elfs = vec![extracted.join("usr").join("bin").join("memveil")];
     let mut libs: Vec<PathBuf> = fs::read_dir(&libdir)
@@ -81,7 +81,12 @@ fn payload_glibc_floor(extracted: &std::path::Path) -> (u32, u32) {
     libs.sort();
     elfs.extend(libs);
     assert!(elfs.len() > 1, "no shipped ELF to derive a floor from");
-    h::glibc_floor(&elfs)
+    elfs
+}
+
+/// Max libc need across the extracted payload (binary + lib/*.so*).
+fn payload_glibc_floor(extracted: &std::path::Path) -> (u32, u32) {
+    h::glibc_floor(&payload_elfs(extracted))
 }
 
 fn repo_tree_files(root: &std::path::Path, subdir: &str, suffix: &str) -> BTreeSet<String> {
@@ -170,6 +175,55 @@ fn control_fields() {
     assert_eq!(
         deb.file_name().unwrap().to_str().unwrap(),
         format!("memveil_{version}-1_amd64.deb")
+    );
+}
+
+#[test]
+fn abi_node_floor() {
+    // The toolchain libgcc requires the non-numeric GLIBC_ABI_GNU2_TLS
+    // node (first provided by glibc 2.40): the payload must actually
+    // carry it (so this derivation is not vacuous), the derived floor
+    // must cover its introducing release, and the packager's own parser
+    // must map it while failing closed on unknown ABI nodes.
+    let deb = h::ensure_deb();
+    let extracted = h::deb_extract(&deb, "deb-abifloor");
+    let mut tokens = BTreeSet::new();
+    for elf in payload_elfs(&extracted) {
+        let text = h::run_ok("readelf", &["-V", elf.to_str().unwrap()], None);
+        tokens.extend(h::parse_glibc_abi_tokens(&text));
+    }
+    assert!(
+        tokens.contains("GLIBC_ABI_GNU2_TLS"),
+        "payload lost its ABI need: {tokens:?}"
+    );
+    let floor = payload_glibc_floor(&extracted);
+    assert!(
+        floor >= (2, 40),
+        "floor {floor:?} under-declares the ABI need"
+    );
+    let script = h::scripts_dir().join("package-deb.py");
+    let probe = format!(
+        "import importlib.util; l = importlib.util.spec_from_file_location('m', {script:?}); \
+         m = importlib.util.module_from_spec(l); l.loader.exec_module(m); \
+         assert m.parse_glibc_floor('Name: GLIBC_2.35  Flags: none') == (2, 35); \
+         assert m.parse_glibc_floor('Name: GLIBC_ABI_GNU2_TLS  Flags: none') == (2, 40); \
+         assert m.parse_glibc_floor('Name: GLIBC_2.35\\nName: GLIBC_ABI_GNU2_TLS') == (2, 40); \
+         assert m.parse_glibc_floor('Name: GCC_4.2.0  Flags: none') is None; \
+         print('abi-ok')"
+    );
+    let text = h::run_ok("python3", &["-B", "-c", &probe], None);
+    assert!(text.contains("abi-ok"), "{text}");
+    let probe = format!(
+        "import importlib.util; l = importlib.util.spec_from_file_location('m', {script:?}); \
+         m = importlib.util.module_from_spec(l); l.loader.exec_module(m); \
+         m.parse_glibc_floor('Name: GLIBC_ABI_FUTURE_X  Flags: none')"
+    );
+    let out = h::run("python3", &["-B", "-c", &probe], None);
+    assert!(!out.status.success(), "unknown ABI node passed");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("unknown libc ABI need GLIBC_ABI_FUTURE_X"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 

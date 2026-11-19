@@ -28,8 +28,10 @@
 # staged ELF files require). The floor uses the portable
 # package-name form `glibc >= X.Y` rather than the
 # generator-spelled virtual `libc.so.6(GLIBC_X.Y)(64bit)`
-# provide; its value is the max GLIBC_x.y need across the
-# staged binary and lib (see the .deb derivation and
+# provide; its value is the max need across ALL required libc
+# version nodes (numeric GLIBC_x.y plus ABI nodes such as the
+# toolchain libgcc's GLIBC_ABI_GNU2_TLS, first provided by
+# glibc 2.40 -- see the .deb derivation and
 # spec_no_scriptlets_or_privilege), kept in sync by hand
 # because the spec is static text.
 # The AutoReq/AutoProv tags are the effective switch on rpm
@@ -61,7 +63,7 @@ ExclusiveArch: x86_64
 Source0: memveil-%{version}.tar.gz
 BuildRequires: binutils
 BuildRequires: python3
-Requires: glibc >= 2.35
+Requires: glibc >= 2.40
 
 %description
 Record swiotlb bounce activity, mapping lifetimes, and executed

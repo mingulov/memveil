@@ -107,13 +107,28 @@ def run(argv, **kwargs):
     return proc
 
 
+# Non-numeric libc version nodes and the glibc release that first
+# provides each. `GLIBC_ABI_GNU2_TLS` (the toolchain libgcc's static-TLS
+# ABI) arrives with glibc 2.40: the same payload bytes fail at `version`
+# under a glibc 2.39 loader (`version GLIBC_ABI_GNU2_TLS not found`) and
+# run under 2.40, so a numeric-only floor would under-declare. An
+# unknown `GLIBC_ABI_*` need fails the package until this table learns
+# its introducing release (prove it on the oldest providing loader).
+GLIBC_ABI_FLOORS = {
+    "GLIBC_ABI_GNU2_TLS": (2, 40),
+}
+
+
 def parse_glibc_floor(version_info):
-    """Max GLIBC_x.y need in readelf -V output, as (x, y) or None.
+    """Max libc need in readelf -V output, as (x, y) or None.
 
     Pure parser over the `.gnu.version_r` listing: every
     `GLIBC_<major>.<minor>` token is a minimum libc the
-    file must load against, so the max wins. Non-glibc
-    tokens (ELFUTILS_, GCC_, GLIBC_PRIVATE) never match.
+    file must load against, so the max wins, and every
+    `GLIBC_ABI_*` token maps through GLIBC_ABI_FLOORS to
+    its introducing release. Non-glibc tokens (ELFUTILS_,
+    GCC_, GLIBC_PRIVATE) never match. Unknown ABI nodes
+    fail closed via `fail`.
     """
     floor = None
     for major, minor in re.findall(r"GLIBC_(\d+)\.(\d+)",
@@ -121,17 +136,27 @@ def parse_glibc_floor(version_info):
         need = (int(major), int(minor))
         if floor is None or need > floor:
             floor = need
+    for token in sorted(set(re.findall(r"GLIBC_ABI_[A-Z0-9_]+",
+                                       version_info))):
+        if token not in GLIBC_ABI_FLOORS:
+            fail("unknown libc ABI need %s: extend GLIBC_ABI_FLOORS "
+                 "with its introducing release" % token)
+        need = GLIBC_ABI_FLOORS[token]
+        if floor is None or need > floor:
+            floor = need
     return floor
 
 
 def glibc_floor(paths):
-    """Max GLIBC_x.y need across staged ELF files, as "X.Y".
+    """Max libc need across staged ELF files, as "X.Y".
 
     Runs readelf -V over the staged binary plus every
-    shipped .so and takes the max, so the Depends libc6
-    floor always matches the bytes being shipped, never a
-    stale literal. Fails closed when readelf fails or no
-    GLIBC need is found.
+    shipped .so and takes the max over numeric and ABI
+    needs alike, so the Depends libc6 floor always
+    matches the bytes being shipped, never a stale
+    literal. Fails closed when readelf fails, when no
+    libc need is found, or when an unknown ABI node
+    appears.
     """
     floor = None
     for path in sorted(paths):
