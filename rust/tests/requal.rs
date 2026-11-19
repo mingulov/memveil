@@ -22,7 +22,10 @@
 //! on each recorder's attach instant, so only the FINAL value per counter
 //! agrees. `pool_sample` rows are likewise cadence-driven (one side attaches
 //! first and takes one more sample), so they agree by first+last sample per
-//! pool with counts within one; every other kind compares as a full
+//! pool with counts within two plus a `used_bytes` envelope (min and max
+//! within one pool unit): sampling phase moves the observed envelope by a
+//! sub-interval blip, never by a sustained level; every other kind compares
+//! as a full
 //! normalized multiset. The boot pins `swiotlb=force`, so the workload must
 //! be uniformly FORCED; any NORMAL hit (or mix) fails the workload shape.
 //!
@@ -257,8 +260,18 @@ impl<'a> Parser<'a> {
         if !digits(self) {
             return Err(self.error("want digits"));
         }
-        while digits(self) {
+        // Strict means strict: JSON forbids leading zeros, so `0` starts a
+        // number only alone, before `.`, or before an exponent. This matches
+        // the product reader, which rejects `01` too.
+        if self.bytes[self.pos] == b'0' {
             self.pos += 1;
+            if digits(self) {
+                return Err(self.error("leading zero"));
+            }
+        } else {
+            while digits(self) {
+                self.pos += 1;
+            }
         }
         if self.peek() == Some(b'.') {
             self.pos += 1;
@@ -416,10 +429,13 @@ fn normalize_event(val: &Json) -> Result<NormEvent, String> {
     })
 }
 
-/// First/last normalized sample plus the sample count for one pool.
+/// First/last normalized sample, the `used_bytes` envelope, and the sample
+/// count for one pool.
 struct PoolSeries {
     first: String,
     last: String,
+    min_used: u64,
+    max_used: u64,
     count: usize,
 }
 
@@ -435,10 +451,11 @@ struct StreamProfile {
     counters_final: BTreeMap<(String, String), String>,
     /// (counter_id, scope canon) -> snapshot count, in stream order.
     counters_seen: BTreeMap<(String, String), usize>,
-    /// pool_id -> first/last/count of its `pool_sample` series.
+    /// pool_id -> first/last/envelope/count of its `pool_sample` series.
     pools: BTreeMap<String, PoolSeries>,
-    /// ts_ns of every `bounce_attempt` line, for margin checks.
-    attempt_ts: Vec<u64>,
+    /// (kind, ts_ns) of every line outside the window, for margin checks.
+    /// Empty when no window was given.
+    outside_window: Vec<(String, u64)>,
     total_lines: usize,
 }
 
@@ -452,7 +469,7 @@ fn profile_stream(text: &str, window: Option<(u64, u64)>) -> Result<StreamProfil
         counters_final: BTreeMap::new(),
         counters_seen: BTreeMap::new(),
         pools: BTreeMap::new(),
-        attempt_ts: Vec::new(),
+        outside_window: Vec::new(),
         total_lines: 0,
     };
     for (lineno, line) in text.lines().enumerate() {
@@ -463,6 +480,13 @@ fn profile_stream(text: &str, window: Option<(u64, u64)>) -> Result<StreamProfil
         let event = normalize_event(&val).map_err(|e| format!("line {}: {e}", lineno + 1))?;
         profile.total_lines += 1;
         *profile.counts.entry(event.kind.clone()).or_insert(0) += 1;
+        let in_window =
+            window.is_none_or(|(start, end)| start <= event.ts_ns && event.ts_ns <= end);
+        if !in_window {
+            profile
+                .outside_window
+                .push((event.kind.clone(), event.ts_ns));
+        }
         if event.kind == "counter_snapshot" {
             let data = val
                 .get("data")
@@ -494,10 +518,16 @@ fn profile_stream(text: &str, window: Option<(u64, u64)>) -> Result<StreamProfil
                 .get("pool_id")
                 .and_then(Json::as_str)
                 .ok_or_else(|| format!("line {}: sample lacks pool_id", lineno + 1))?;
+            let used = data
+                .get("used_bytes")
+                .and_then(Json::as_u64)
+                .ok_or_else(|| format!("line {}: sample lacks numeric used_bytes", lineno + 1))?;
             // Streams are ts-ordered, so first-seen is earliest.
             match profile.pools.get_mut(pool) {
                 Some(series) => {
                     series.last = event.canon;
+                    series.min_used = series.min_used.min(used);
+                    series.max_used = series.max_used.max(used);
                     series.count += 1;
                 }
                 None => {
@@ -506,17 +536,14 @@ fn profile_stream(text: &str, window: Option<(u64, u64)>) -> Result<StreamProfil
                         PoolSeries {
                             first: event.canon.clone(),
                             last: event.canon,
+                            min_used: used,
+                            max_used: used,
                             count: 1,
                         },
                     );
                 }
             }
             continue;
-        }
-        let in_window =
-            window.is_none_or(|(start, end)| start <= event.ts_ns && event.ts_ns <= end);
-        if event.kind == "bounce_attempt" {
-            profile.attempt_ts.push(event.ts_ns);
         }
         if in_window {
             profile
@@ -532,7 +559,7 @@ fn profile_stream(text: &str, window: Option<(u64, u64)>) -> Result<StreamProfil
     for lines in profile.multisets.values_mut() {
         lines.sort();
     }
-    profile.attempt_ts.sort_unstable();
+    profile.outside_window.sort();
     Ok(profile)
 }
 
@@ -598,6 +625,17 @@ fn multiset_gap(rust: &[String], mojo: &[String]) -> (Vec<String>, Vec<String>) 
     }
     (only_rust, only_mojo)
 }
+
+/// Pool-envelope tolerance in bytes: one pool unit (`unit_bytes` 2048 on
+/// swiotlb-default). Sampling phase legitimately moves the `used_bytes`
+/// envelope by one unit: a sub-sample-interval transient is caught by the
+/// phase that lands on it and straddled by the other. Observed in 2 of 7
+/// kept dual runs (one side max 67584, other 65536) with both sides'
+/// `hiwater_bytes` agreeing at 69632 — the transient was real, the blip is
+/// phase, and exact max/min would false-diverge. First/last stay exact, so
+/// a systematic one-unit skew still diverges there; the envelope only
+/// scopes *middle* content to uncharacterized-size drift.
+const POOL_ENVELOPE_TOLERANCE: u64 = 2048;
 
 /// Compare two profiles: every non-counter kind as a normalized multiset,
 /// counters by stream-final value per `(counter_id, scope)`.
@@ -669,6 +707,22 @@ fn diff_profiles(rust: &StreamProfile, mojo: &StreamProfile) -> DiffReport {
                     report
                         .pool_gaps
                         .insert((*pool).clone(), "last sample differs".to_string());
+                } else if r.min_used.abs_diff(m.min_used) > POOL_ENVELOPE_TOLERANCE {
+                    report.pool_gaps.insert(
+                        (*pool).clone(),
+                        format!(
+                            "min used_bytes rust={} mojo={} (beyond 1-unit tolerance)",
+                            r.min_used, m.min_used
+                        ),
+                    );
+                } else if r.max_used.abs_diff(m.max_used) > POOL_ENVELOPE_TOLERANCE {
+                    report.pool_gaps.insert(
+                        (*pool).clone(),
+                        format!(
+                            "max used_bytes rust={} mojo={} (beyond 1-unit tolerance)",
+                            r.max_used, m.max_used
+                        ),
+                    );
                 }
             }
             (Some(r), None) => {
@@ -716,6 +770,52 @@ fn render_report(report: &DiffReport, rust: &StreamProfile, mojo: &StreamProfile
     out
 }
 
+/// Kinds whose lines legitimately fall outside the workload window: the
+/// cadence-driven series span recorder attach (before the workload) to
+/// recorder exit (after it), so nearly every sample is out-of-window by
+/// construction. Workload-driven events must never be.
+const CADENCE_KINDS: [&str; 2] = ["counter_snapshot", "pool_sample"];
+
+/// Quiet-margin divergences for one side: every out-of-window line is either
+/// an exempt cadence-series sample or a divergence. A novel kind outside the
+/// window fails closed instead of silently escaping the multiset (which only
+/// holds in-window lines).
+fn margin_divs(profile: &StreamProfile, side: &str) -> Vec<String> {
+    let mut divs = Vec::new();
+    for (kind, ts) in &profile.outside_window {
+        if CADENCE_KINDS.contains(&kind.as_str()) {
+            continue;
+        }
+        divs.push(format!("{side} {kind} persisted outside workload at {ts}"));
+    }
+    divs
+}
+
+/// Internal conservation for one side: the attempts counter final must equal
+/// the persisted in-window bounce count, and the counter must exist under
+/// exactly one scope. The single-scope requirement is the asserted form of
+/// what the judge used to assume silently with a `.find`: a second scope
+/// would otherwise escape the check entirely.
+fn conservation_div(profile: &StreamProfile, side: &str, events_len: usize) -> Option<String> {
+    let hits: Vec<&String> = profile
+        .counters_final
+        .iter()
+        .filter(|((id, _), _)| id == "swiotlb.bounce_attempts")
+        .map(|(_, value)| value)
+        .collect();
+    match hits.as_slice() {
+        [value] if value.parse::<usize>().ok() == Some(events_len) => None,
+        [value] => Some(format!(
+            "{side} counter final {value} vs {events_len} persisted attempts"
+        )),
+        [] => Some(format!("{side} emits no swiotlb.bounce_attempts counter")),
+        _ => Some(format!(
+            "{side} attempts counter spans {} scopes, want exactly 1",
+            hits.len()
+        )),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Offline differ tests (no VM; always run).
 // ---------------------------------------------------------------------------
@@ -734,13 +834,29 @@ fn attempt(seq: u64, ts: u64, session: &str, op: &str, size: u64, forced: bool) 
 
 /// One synthetic `counter_snapshot` line.
 fn snapshot(seq: u64, ts: u64, id: &str, value: u64) -> String {
+    snapshot_scope(seq, ts, id, "{\"profile_id\":\"p\"}", value)
+}
+
+/// One synthetic `counter_snapshot` line under an explicit scope document.
+fn snapshot_scope(seq: u64, ts: u64, id: &str, scope: &str, value: u64) -> String {
     format!(
         "{{\"schema_version\":\"0.1.1\",\"session_id\":\"s\",\"seq\":\"{seq}\",\
          \"ts_ns\":\"{ts}\",\"kind\":\"counter_snapshot\",\
          \"source\":{{\"hook\":\"swiotlb:swiotlb_bounced\",\"backend\":\"tracepoint\",\
          \"profile_id\":\"p\",\"measurement\":\"observed\",\"correlation\":\"direct\"}},\
          \"data\":{{\"counter_id\":\"{id}\",\"epoch\":\"0\",\
-         \"scope\":{{\"profile_id\":\"p\"}},\"value\":\"{value}\",\"unit\":\"count\"}}}}"
+         \"scope\":{scope},\"value\":\"{value}\",\"unit\":\"count\"}}}}"
+    )
+}
+
+/// One synthetic line of an arbitrary kind with empty data.
+fn kind_line(kind: &str, seq: u64, ts: u64) -> String {
+    format!(
+        "{{\"schema_version\":\"0.1.1\",\"session_id\":\"s\",\"seq\":\"{seq}\",\
+         \"ts_ns\":\"{ts}\",\"kind\":\"{kind}\",\
+         \"source\":{{\"hook\":\"swiotlb:swiotlb_bounced\",\"backend\":\"tracepoint\",\
+         \"profile_id\":\"p\",\"measurement\":\"observed\",\"correlation\":\"direct\"}},\
+         \"data\":{{}}}}"
     )
 }
 
@@ -874,11 +990,11 @@ fn pool_sample(seq: u64, ts: u64, used: u64) -> String {
 
 #[test]
 fn requal_pool_series_agrees_within_cadence() {
-    // One side takes an extra middle sample: first+last agree, counts
-    // within one — equivalent.
+    // One side takes an extra middle sample inside the shared envelope:
+    // first+last agree, min/max agree, counts within two — equivalent.
     let rust = [
         pool_sample(0, 100, 10),
-        pool_sample(1, 200, 12),
+        pool_sample(1, 200, 10),
         pool_sample(2, 300, 10),
         attempt(3, 300, "s", "op0", 98, false),
     ]
@@ -893,6 +1009,80 @@ fn requal_pool_series_agrees_within_cadence() {
     let m = profile_stream(&mojo, None).expect("mojo parses");
     let report = diff_profiles(&r, &m);
     assert!(report.is_empty(), "{}", render_report(&report, &r, &m));
+}
+
+#[test]
+fn requal_pool_envelope_tolerates_one_unit_blip() {
+    // A one-unit middle blip on one side only is phase, not content: the
+    // observed 67584-vs-65536 split stays equivalent.
+    let flat = [
+        pool_sample(0, 100, 65536),
+        pool_sample(1, 200, 65536),
+        pool_sample(2, 300, 65536),
+        attempt(3, 300, "s", "op0", 98, false),
+    ]
+    .join("\n");
+    let blip = [
+        pool_sample(0, 100, 65536),
+        pool_sample(1, 200, 67584),
+        pool_sample(2, 300, 65536),
+        attempt(3, 300, "s", "op0", 98, false),
+    ]
+    .join("\n");
+    let r = profile_stream(&blip, None).expect("rust parses");
+    let m = profile_stream(&flat, None).expect("mojo parses");
+    let report = diff_profiles(&r, &m);
+    assert!(report.is_empty(), "{}", render_report(&report, &r, &m));
+}
+
+#[test]
+fn requal_pool_envelope_drift_reports() {
+    // A middle excursion beyond one unit diverges even when first+last agree
+    // and counts are close: phase explains a blip, never a sustained level.
+    let base = [
+        pool_sample(0, 100, 65536),
+        pool_sample(1, 200, 65536),
+        pool_sample(2, 300, 65536),
+        attempt(3, 300, "s", "op0", 98, false),
+    ]
+    .join("\n");
+    let shifted = [
+        pool_sample(0, 100, 65536),
+        pool_sample(1, 200, 69632),
+        pool_sample(2, 300, 65536),
+        attempt(3, 300, "s", "op0", 98, false),
+    ]
+    .join("\n");
+    let r = profile_stream(&base, None).expect("rust parses");
+    let m = profile_stream(&shifted, None).expect("mojo parses");
+    let report = diff_profiles(&r, &m);
+    assert!(
+        !report.is_empty(),
+        "middle max beyond tolerance must diverge: {}",
+        render_report(&report, &r, &m)
+    );
+    assert_eq!(
+        report.pool_gaps["swiotlb-default"],
+        "max used_bytes rust=65536 mojo=69632 (beyond 1-unit tolerance)"
+    );
+    let dipped = [
+        pool_sample(0, 100, 65536),
+        pool_sample(1, 200, 61440),
+        pool_sample(2, 300, 65536),
+        attempt(3, 300, "s", "op0", 98, false),
+    ]
+    .join("\n");
+    let m = profile_stream(&dipped, None).expect("mojo parses");
+    let report = diff_profiles(&r, &m);
+    assert!(
+        !report.is_empty(),
+        "middle min beyond tolerance must diverge: {}",
+        render_report(&report, &r, &m)
+    );
+    assert_eq!(
+        report.pool_gaps["swiotlb-default"],
+        "min used_bytes rust=65536 mojo=61440 (beyond 1-unit tolerance)"
+    );
 }
 
 #[test]
@@ -933,6 +1123,66 @@ fn requal_pool_first_or_last_drift_reports() {
 }
 
 #[test]
+fn requal_margins_flag_workload_lines_not_cadence() {
+    // Window [50, 150]: the in-window attempt is quiet; the cadence series
+    // before/after it is exempt; the out-of-window attempt and the novel
+    // `gap` line diverge.
+    let stream = [
+        pool_sample(0, 10, 10),
+        snapshot(1, 20, "swiotlb.bounce_attempts", 0),
+        attempt(2, 100, "s", "op0", 98, false),
+        attempt(3, 900, "s", "op1", 98, false),
+        kind_line("gap", 4, 950),
+        pool_sample(5, 960, 10),
+        snapshot(6, 970, "swiotlb.bounce_attempts", 1),
+    ]
+    .join("\n");
+    let profile = profile_stream(&stream, Some((50, 150))).expect("parses");
+    assert_eq!(
+        margin_divs(&profile, "rust"),
+        vec![
+            "rust bounce_attempt persisted outside workload at 900".to_string(),
+            "rust gap persisted outside workload at 950".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn requal_conservation_asserts_single_scope() {
+    let one = [
+        attempt(0, 100, "s", "op0", 98, false),
+        snapshot(1, 100, "swiotlb.bounce_attempts", 1),
+    ]
+    .join("\n");
+    let profile = profile_stream(&one, None).expect("parses");
+    assert_eq!(conservation_div(&profile, "rust", 1), None);
+    assert!(conservation_div(&profile, "rust", 2).is_some());
+    // Same counter under two scopes: the conservation check must flag the
+    // split instead of silently comparing one scope's final.
+    let two = [
+        attempt(0, 100, "s", "op0", 98, false),
+        snapshot(1, 100, "swiotlb.bounce_attempts", 1),
+        snapshot_scope(
+            2,
+            100,
+            "swiotlb.bounce_attempts",
+            "{\"profile_id\":\"q\"}",
+            0,
+        ),
+    ]
+    .join("\n");
+    let profile = profile_stream(&two, None).expect("parses");
+    assert_eq!(
+        conservation_div(&profile, "rust", 1),
+        Some("rust attempts counter spans 2 scopes, want exactly 1".to_string())
+    );
+    // No attempts counter at all still diverges.
+    let none = attempt(0, 100, "s", "op0", 98, false);
+    let profile = profile_stream(&none, None).expect("parses");
+    assert!(conservation_div(&profile, "rust", 1).is_some());
+}
+
+#[test]
 fn requal_malformed_line_fails_loud() {
     assert!(profile_stream("{\"kind\":\n", None).is_err());
     assert!(profile_stream("", None).is_err());
@@ -949,7 +1199,12 @@ fn requal_json_parser_shapes() {
         canon_string(&val),
         "{\"b\":[1,-2.5,1e3,true,null,\"a\\\"bA\"]}"
     );
-    assert!(parse_json("{\"a\":01}").is_ok());
+    assert!(parse_json("{\"a\":01}").is_err());
+    assert!(parse_json("{\"a\":-01}").is_err());
+    assert!(parse_json("{\"a\":0}").is_ok());
+    assert!(parse_json("{\"a\":-0}").is_ok());
+    assert!(parse_json("{\"a\":0.5}").is_ok());
+    assert!(parse_json("{\"a\":0e1}").is_ok());
     assert!(parse_json("{\"a\":}").is_err());
     assert!(parse_json("{\"a\":1} ").is_ok());
     assert!(parse_json("{\"a\":1} x").is_err());
@@ -970,6 +1225,14 @@ const MOJO_VAR: &str = "MEMVEIL_REQUAL_MOJO_BIN";
 const GUEST_KERNEL: &str = "v7.0.14";
 /// Release the guest must report.
 const GUEST_RELEASE: &str = "7.0.14-070014-generic";
+/// Guest `/sys/kernel/btf/vmlinux` sha256 the judge pins: identical across
+/// seven kept dual-capture runs of the pinned v7.0.14 image, so drift means
+/// the kernel bytes moved under the pin. Re-record deliberately if the
+/// kernels-lock pin ever changes.
+const GUEST_BTF_SHA: &str = "ec3aa895be1da974a3116c24cd31adccc5e49fef1b4b089dc588aa9e32419a05";
+/// Guest `swiotlb_bounced/format` sha256, same provenance and discipline as
+/// [`GUEST_BTF_SHA`]: the probe offsets derive from this text.
+const GUEST_FORMAT_SHA: &str = "7e95fff18d1bd16c18342d821e78680a0126ff84054936fbc641e181810f0b62";
 /// Ordinary-cell shape: 2 vCPU / 4 GiB, full machine (the pcnet stimulus
 /// NIC needs legacy PCI, so microvm stays off).
 const GUEST_CPUS: &str = "2";
@@ -1390,6 +1653,18 @@ fn judge_exports(texts: &BTreeMap<String, String>, inputs: &LiveInputs) -> Resul
             ledger.get("guest_release").map(canon_string)
         ));
     }
+    // The ledger records the guest BTF and tracepoint-format shas; the judge
+    // pins them, not just the release: the probes decode against exactly
+    // these bytes, so drift voids the judged streams.
+    for (key, want) in [("btf_sha", GUEST_BTF_SHA), ("format_sha", GUEST_FORMAT_SHA)] {
+        let seen = ledger
+            .get(key)
+            .and_then(Json::as_str)
+            .ok_or_else(|| format!("ledger lacks {key}"))?;
+        if seen != want {
+            return Err(format!("guest {key} drift: want {want} got {seen}"));
+        }
+    }
     for side in ["mojo", "rust"] {
         let exit = u64_field(&ledger, &format!("{side}_exit"))?;
         if exit != 0 {
@@ -1513,11 +1788,7 @@ fn judge_exports(texts: &BTreeMap<String, String>, inputs: &LiveInputs) -> Resul
         }
         let profile = profile_stream(&texts[&format!("{side}.events.ndjson")], Some((start, end)))
             .map_err(|e| format!("{side} events: {e}"))?;
-        for ts in &profile.attempt_ts {
-            if !(*ts >= start && *ts <= end) {
-                divs.push(format!("{side} persisted outside workload at {ts}"));
-            }
-        }
+        divs.extend(margin_divs(&profile, side));
         let events = profile
             .multisets
             .get("bounce_attempt")
@@ -1545,22 +1816,9 @@ fn judge_exports(texts: &BTreeMap<String, String>, inputs: &LiveInputs) -> Resul
             ));
         }
         // Internal conservation: the attempts counter final must equal the
-        // persisted bounce count on each side.
-        let counter_key = profile
-            .counters_final
-            .iter()
-            .find(|((id, _), _)| id == "swiotlb.bounce_attempts");
-        match counter_key {
-            Some((_, value)) if value.parse::<usize>().ok() == Some(events.len()) => {}
-            Some((_, value)) => {
-                divs.push(format!(
-                    "{side} counter final {value} vs {} persisted attempts",
-                    events.len()
-                ));
-            }
-            None => {
-                divs.push(format!("{side} emits no swiotlb.bounce_attempts counter"));
-            }
+        // persisted bounce count on each side, under exactly one scope.
+        if let Some(div) = conservation_div(&profile, side, events.len()) {
+            divs.push(div);
         }
         sides.insert(side, profile);
     }
