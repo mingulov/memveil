@@ -496,7 +496,10 @@ fn rpm_fedora_journey() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     println!("{stdout}");
     eprintln!("{stderr}");
-    assert!(out.status.success(), "fedora journey failed (see log above)");
+    assert!(
+        out.status.success(),
+        "fedora journey failed (see log above)"
+    );
     for step in JOURNEY_STEPS {
         assert!(
             stdout.contains(&format!("journey-ok: {step}")),

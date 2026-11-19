@@ -329,9 +329,7 @@ pub fn qualify_legs(tmp: &Path, scratch_dirs: &QualifyScratch, receipts: &str) {
         .to_string();
     assert_eq!(path, format!("{receipts}/{}", published[0]));
     let bridge_sha = sha256_file(&fixture);
-    let attempt_sha = sha256_file(Path::new(&format!(
-        "{lib}/swiotlb_attempt.bpf.o"
-    )));
+    let attempt_sha = sha256_file(Path::new(&format!("{lib}/swiotlb_attempt.bpf.o")));
     let lc_sha = sha256_file(Path::new(&format!("{lib}/swiotlb_lifecycle.bpf.o")));
     let cp_sha = sha256_file(Path::new(&format!("{lib}/swiotlb_copy.bpf.o")));
     let probe = format!(

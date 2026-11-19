@@ -209,7 +209,12 @@ fn export_tree_passes_provenance_gate() {
     fs::create_dir_all(&tree).unwrap();
     let proc = h::run(
         "tar",
-        &["-xf", archive.to_str().unwrap(), "-C", tree.to_str().unwrap()],
+        &[
+            "-xf",
+            archive.to_str().unwrap(),
+            "-C",
+            tree.to_str().unwrap(),
+        ],
         None,
     );
     assert!(
@@ -217,14 +222,23 @@ fn export_tree_passes_provenance_gate() {
         "{}",
         String::from_utf8_lossy(&proc.stderr)
     );
-    assert!(tree.join("tests").join("provenance").join("test_provenance.py").is_file());
-    let gate = h::run("python3", &["tests/provenance/test_provenance.py"], Some(&tree));
+    assert!(
+        tree.join("tests")
+            .join("provenance")
+            .join("test_provenance.py")
+            .is_file()
+    );
+    let gate = h::run(
+        "python3",
+        &["tests/provenance/test_provenance.py"],
+        Some(&tree),
+    );
     let stdout = String::from_utf8_lossy(&gate.stdout);
     assert!(
         gate.status.success(),
         "export gate failed: {}{}",
         String::from_utf8_lossy(&gate.stderr),
-        stdout[stdout.len().saturating_sub(2000)..].to_string()
+        &stdout[stdout.len().saturating_sub(2000)..]
     );
     assert!(stdout.contains("provenance: all checks passed"), "{stdout}");
 }

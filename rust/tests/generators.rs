@@ -793,7 +793,10 @@ fn gen_completions_bash_functional() {
         let done = cmd.output().expect("bash drives the completion");
         assert_eq!(done.status.code(), Some(0), "drive exits");
         let noise = String::from_utf8_lossy(&done.stderr);
-        assert!(noise.is_empty(), "sourcing the completion is quiet: {noise}");
+        assert!(
+            noise.is_empty(),
+            "sourcing the completion is quiet: {noise}"
+        );
         let text = String::from_utf8(done.stdout).expect("replies are UTF-8");
         let mut replies: Vec<String> = text
             .lines()
