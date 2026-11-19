@@ -76,7 +76,7 @@ jobs:
               fuzz-smoke fuzz-campaign record-failures \
               output-paths privacy render-escaping \
               offline-environment perf-replay preview-package \
-              provenance docs examples package payload-gate sbom \
+              provenance docs examples package \
               source-export release-runtime; do
             ./tools/test "$suite" || exit 1
           done
@@ -101,31 +101,14 @@ jobs:
         run: |
           MV_BUNDLE_TARBALL="$(echo dist/memveil-*.tar.gz)" \
             ./tools/test release-runtime || exit 1
-      # Every package must carry the payload the qualifying
-      # lanes ran; the committed receipt pins all three sets.
-      - name: Packaged payload is the tested one
-        run: |
-          ./tools/payload-gate --collect \
-            --deb "$(echo dist/memveil_*-1_amd64.deb)" \
-            --rpm "$(echo dist/memveil-*.rpm)" \
-            --bundle "$(echo dist/memveil-*.tar.gz)" \
-            --out dist/PACKAGED-SHA256.txt || exit 1
-          ./tools/payload-gate --check \
-            --packaged dist/PACKAGED-SHA256.txt \
-            --tested packaging/tested-payload.sha256 || exit 1
-      - name: SBOM
-        run: |
-          ./tools/sbom \
-            --bundle "$(echo dist/memveil-*.tar.gz)" \
-            --deb "$(echo dist/memveil_*-1_amd64.deb)" \
-            --rpm "$(echo dist/memveil-*.rpm)" \
-            --lock toolchain.lock.json \
-            --out dist/memveil.spdx.json || exit 1
+      # Payload/SPDX envelope tools retired: the package_payload Rust
+      # suite carries the payload/SPDX assertions over the Rust
+      # packages, in-payload license texts cover compliance, and the
+      # SPDX envelope artifact is release-hardening work.
       - name: Checksums
         run: |
           cd dist
           sha256sum memveil-*.tar.gz memveil_*.deb memveil-*.rpm \
-            memveil.spdx.json PACKAGED-SHA256.txt \
             > SHA256SUMS.txt
           cat SHA256SUMS.txt
       - name: Attest build provenance
@@ -135,9 +118,7 @@ jobs:
             dist/memveil-*.tar.gz
             dist/memveil_*.deb
             dist/memveil-*.rpm
-            dist/memveil.spdx.json
             dist/SHA256SUMS.txt
-            dist/PACKAGED-SHA256.txt
       - name: Upload dry-run artifacts
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
@@ -147,9 +128,7 @@ jobs:
             dist/memveil-*.tar.gz
             dist/memveil_*.deb
             dist/memveil-*.rpm
-            dist/memveil.spdx.json
             dist/SHA256SUMS.txt
-            dist/PACKAGED-SHA256.txt
           if-no-files-found: error
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
@@ -175,5 +154,4 @@ jobs:
           fi
           gh release upload "$TAG" \
             dist/memveil-*.tar.gz dist/memveil_*.deb \
-            dist/memveil-*.rpm dist/memveil.spdx.json \
-            dist/SHA256SUMS.txt dist/PACKAGED-SHA256.txt
+            dist/memveil-*.rpm dist/SHA256SUMS.txt

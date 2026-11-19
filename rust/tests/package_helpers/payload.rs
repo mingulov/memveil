@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Payload-manifest collect/check port (12 entries, no bridge).
 //!
-//! Mirrors `tools/payload-gate` over the Rust release packages:
-//! the engine binary plus the three BPF inspection objects in
+//! Collect/check over the Rust release packages (ported from the
+//! retired `tools/payload-gate`): the engine binary plus the three
+//! BPF inspection objects in
 //! each of the .deb, the .rpm, and the owner bundle. The two
 //! bridge entries per package are gone with the C bridge
 //! (documented delta: 12 entries, not 15).

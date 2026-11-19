@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Payload-gate and SBOM ports over the three Rust packages.
 //!
-//! Ports `tests/package/test_payload_gate.py` and
-//! `tests/package/test_sbom.py` onto the helper collect/check
-//! and SPDX emit ports, adjusting only for the known deltas:
+//! Collect/check and SPDX emit coverage over the three Rust
+//! packages (ported from the retired harness suites),
+//! adjusting only for the known deltas:
 //! 12 payload entries (no bridge), Cargo crate pins instead of
 //! the bridge/toolchain lock pins, and no committed byte-pin
 //! manifest (the collected manifest's shape stands in until

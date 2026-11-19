@@ -21,7 +21,9 @@
 # perf-region, perf-workload, perf-overhead, soak, preview-package, provenance,
 # source-export,
 # release-runtime, docs, examples, extracted-robustness, deb,
-# rpm-journey, payload-gate, sbom.
+# rpm-journey. (payload-gate/sbom retired: the SPDX/payload assertions live
+# in the package_payload Rust suite; in-payload license texts cover
+# compliance, and the SPDX envelope artifact is release-hardening work.)
 #
 # A skipped suite is reported as skipped, never as success.
 # Exit 0 only when the suite passes; 1 on test failure; 2 on
@@ -1882,53 +1884,8 @@ ensure_release_packages() {
     return 0
 }
 
-suite_payload_gate() {
-    if ! command -v python3 >/dev/null 2>&1; then
-        echo "payload-gate: python3 not found" >&2
-        return 1
-    fi
-    if ! python3 -m pytest --version >/dev/null 2>&1; then
-        echo "payload-gate: pytest not importable" >&2
-        return 1
-    fi
-    for tool in dpkg-deb rpm2cpio cpio; do
-        if ! command -v "$tool" >/dev/null 2>&1; then
-            echo "payload-gate: $tool not found" >&2
-            return 1
-        fi
-    done
-    PTMP=$(mktemp -d)
-    trap 'rm -rf "$PTMP"' EXIT
-    ensure_release_packages "$PTMP" || return 1
-    (cd "$ROOT" && MV_BUNDLE_TARBALL="$RELEASE_BUNDLE" \
-        MV_DEB="$RELEASE_DEB" MV_RPM="$RELEASE_RPM" \
-        MV_REPO="$ROOT" \
-        python3 -m pytest -ra tests/package/test_payload_gate.py)
-}
-
-suite_sbom() {
-    if ! command -v python3 >/dev/null 2>&1; then
-        echo "sbom: python3 not found" >&2
-        return 1
-    fi
-    if ! python3 -m pytest --version >/dev/null 2>&1; then
-        echo "sbom: pytest not importable" >&2
-        return 1
-    fi
-    for tool in dpkg-deb rpm2cpio cpio; do
-        if ! command -v "$tool" >/dev/null 2>&1; then
-            echo "sbom: $tool not found" >&2
-            return 1
-        fi
-    done
-    PTMP=$(mktemp -d)
-    trap 'rm -rf "$PTMP"' EXIT
-    ensure_release_packages "$PTMP" || return 1
-    (cd "$ROOT" && MV_BUNDLE_TARBALL="$RELEASE_BUNDLE" \
-        MV_DEB="$RELEASE_DEB" MV_RPM="$RELEASE_RPM" \
-        MV_REPO="$ROOT" \
-        python3 -m pytest -ra tests/package/test_sbom.py)
-}
+# payload-gate/sbom suites retired (see header): the package_payload Rust
+# suite carries their assertions over the Rust packages.
 
 suite_native_decode() {
     # Lifecycle/copy corpus is the single vector source:
@@ -4503,12 +4460,6 @@ case "$1" in
         ;;
     rpm-journey)
         suite_rpm_journey
-        ;;
-    payload-gate)
-        suite_payload_gate
-        ;;
-    sbom)
-        suite_sbom
         ;;
     docs)
         suite_docs

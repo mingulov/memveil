@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! SPDX 2.3 emit port over the Rust release packages.
 //!
-//! Mirrors `tools/sbom`: every fact comes from recorded
+//! SPDX emit over the Rust release packages (ported from the
+//! retired `tools/sbom`): every fact comes from recorded
 //! inputs (the bundle MANIFEST.json, the Cargo lockfiles, the
 //! collected payload hashes). The bridge/toolchain pins become
 //! Cargo crate pins plus cargo/rustc versions; the conda
