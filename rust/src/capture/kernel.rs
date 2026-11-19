@@ -572,11 +572,14 @@ pub fn prog_info(fd: i64) -> ProgInfo {
         name: String::new(),
         misses: 0,
     };
-    let info = vec![0u8; PROG_INFO_SIZE];
+    // The kernel writes the info struct through this pointer, so the
+    // buffer is mutably borrowed: writing through a shared borrow
+    // would be undefined behavior.
+    let mut info = vec![0u8; PROG_INFO_SIZE];
     let mut attr = [0u8; 16];
     attr[0..4].copy_from_slice(&(fd as u32).to_le_bytes());
     attr[4..8].copy_from_slice(&(PROG_INFO_SIZE as u32).to_le_bytes());
-    attr[8..16].copy_from_slice(&(info.as_ptr() as u64).to_le_bytes());
+    attr[8..16].copy_from_slice(&(info.as_mut_ptr() as u64).to_le_bytes());
     // SAFETY: attr points at the two live buffers; the call
     // reads and writes them synchronously and returns 0/-1.
     let rc = unsafe {
