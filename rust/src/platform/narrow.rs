@@ -1817,7 +1817,8 @@ fn refuse(message: String) -> ObjectCheck {
 /// libbpf `.maps` or the Aya/bpf-linker `maps` spelling;
 /// both spellings face identical type and range rigor.
 /// An object carrying both spellings must satisfy both;
-/// when several required sections are bad, the refusal
+/// neither spelling refuses as `no .maps section`.
+/// When several required sections are bad, the refusal
 /// names the first bad one in section-table order.
 /// Required sections must be PROGBITS inside the file,
 /// and the program symbol must name a non-empty extent
@@ -2691,8 +2692,16 @@ mod tests {
             let hdr = shoff + i * 64;
             let name_off = u32::from_le_bytes(raw[hdr..hdr + 4].try_into().unwrap()) as usize;
             let mut end = str_off + name_off;
+            assert!(
+                end < raw.len(),
+                "fixture section names must be NUL-terminated"
+            );
             while raw[end] != 0 {
                 end += 1;
+                assert!(
+                    end < raw.len(),
+                    "fixture section names must be NUL-terminated"
+                );
             }
             if &raw[str_off + name_off..end] == want {
                 return (hdr, str_off + name_off);

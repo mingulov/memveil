@@ -156,6 +156,9 @@ fn cargo_checkout_profiles(exe: &str) -> Option<String> {
         return None;
     }
     let project = parts[..parts.len() - 3].join("/");
+    if project.is_empty() {
+        return None;
+    }
     [
         format!("{project}/profiles"),
         format!("{project}/../profiles"),
@@ -1674,6 +1677,14 @@ mod tests {
             cargo_checkout_profiles("/root/target/deps/memveil-abc123"),
             None
         );
+    }
+
+    #[test]
+    fn cargo_checkout_rejects_empty_project() {
+        // A cargo-shaped path with no project prefix (/target/...)
+        // is not a checkout: refuse rather than probing /profiles.
+        assert_eq!(cargo_checkout_profiles("/target/release/memveil"), None);
+        assert_eq!(cargo_checkout_profiles("/target/debug/memveil"), None);
     }
 
     #[test]

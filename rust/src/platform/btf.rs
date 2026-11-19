@@ -739,8 +739,9 @@ fn aya_refuse(message: String) -> AyaMapVerdict {
 /// Ring maps wrap `def` once; array maps wrap `def` plus a
 /// zero-sized marker (`_t`); both continue through the shared
 /// two-hop spine to the seven-member flat leaf. Sizes, member
-/// counts and names, and zero spine offsets pin the exact
-/// wrapper geometry; STRUCT names stay unpinned (Rust mangling
+/// counts and names, zero `def`/`__0`/`value` offsets, and the
+/// trailing `_t` marker offset pin the exact wrapper
+/// geometry; STRUCT names stay unpinned (Rust mangling
 /// instantiates them per map). Returns the walk-list index of
 /// the leaf, -1 on a shape mismatch, -2 on corrupt strings.
 fn aya_def_struct(data: &[u8], walk: &BtfWalk, top: i64, want_ring: bool) -> i64 {
@@ -762,7 +763,12 @@ fn aya_def_struct(data: &[u8], walk: &BtfWalk, top: i64, want_ring: bool) -> i64
         if phantom == -2 {
             return -2;
         }
-        if phantom < 0 || !walk.rec_valid(phantom) {
+        // The zero-sized marker trails the 28-byte wrapper: any
+        // other placement is a toolchain layout change.
+        if phantom < 0 || walk.member_offset(data, rec, "_t") != AYA_MAP_DEF_BYTES * 8 {
+            return -1;
+        }
+        if !walk.rec_valid(phantom) {
             return -1;
         }
         let p = (phantom - 1) as usize;
@@ -1644,6 +1650,10 @@ pub fn read_btf_copy_fb(data: &[u8]) -> BtfMaps {
         out.ring_bytes = 0;
         return out;
     }
+    // Intentionally re-queried: the lane select above already
+    // pinned `.maps` membership, but the libbpf lane below stays
+    // readable (and correct) standalone; the pure re-query
+    // always agrees with the first.
     let mem = walk.datasec_var(data, ".maps", found);
     if mem == 0 {
         return refuse_maps("no maps DATASEC".to_string());
@@ -3759,6 +3769,19 @@ mod tests {
         found.expect("VAR must exist")
     }
 
+    /// Record index of a DATASEC other than want (duplication targeting).
+    fn other_datasec(raw: &[u8], tb: &TestBtf, want: &str) -> usize {
+        for (i, rec) in tb.recs.iter().enumerate() {
+            if rec.kind != 15 {
+                continue;
+            }
+            if rec_name(raw, tb, i) != want {
+                return i;
+            }
+        }
+        panic!("second DATASEC must exist");
+    }
+
     /// Record index of the DATASEC named want (exactly one).
     fn datasec_rec(raw: &[u8], tb: &TestBtf, want: &str) -> usize {
         let mut found = None;
@@ -3824,7 +3847,10 @@ mod tests {
 
     /// Write one u32 word of one `maps` section entry: entry idx,
     /// field 0..4 (type, key_size, value_size, max_entries).
-    fn set_map_word(raw: &mut [u8], idx: usize, field: usize, val: u32) {
+    /// Asserts the from-value first, so a toolchain regen that
+    /// moves the layout fails loudly instead of mutating blind.
+    fn set_map_word(raw: &mut [u8], idx: usize, field: usize, from: u32, val: u32) {
+        assert_eq!(map_word(raw, idx, field), from, "entry {idx} field {field}");
         let (_, _, off, size) = section_range(raw, b"maps");
         let at = off + idx * 28 + field * 4;
         assert!(at + 4 <= off + size);
@@ -3893,6 +3919,29 @@ mod tests {
         let w = read_btf_maps(&out);
         assert!(!w.ok);
         assert_eq!(w.message, "counts bad aya map shape");
+    }
+
+    #[test]
+    fn btf_aya_phantom_offset_pinned() {
+        // The array wrapper's zero-sized `_t` marker trails the
+        // 28-byte body at bit 224; any other placement refuses.
+        let raw = aya_bytes("attempt");
+        let tb = parse_btf(&raw);
+        let array = struct_rec(&raw, &tb, "Array_3C_u64_3E_");
+        let mut at = None;
+        for m in 0..tb.recs[array].vlen {
+            let (name, _, off) = member_at(&raw, &tb, array, m as usize);
+            if name == "_t" {
+                assert_eq!(off, 224);
+                at = Some(tb.recs[array].off + 12 + m as usize * 12 + 8);
+            }
+        }
+        let at = at.expect("_t member present");
+        let mut out = raw.clone();
+        set_u32(&mut out, at, 0);
+        let v = read_btf_maps(&out);
+        assert!(!v.ok);
+        assert_eq!(v.message, "counts bad aya map shape");
     }
 
     #[test]
@@ -3981,6 +4030,27 @@ mod tests {
         let v = read_btf_maps(&out);
         assert!(!v.ok);
         assert_eq!(v.message, "no maps DATASEC");
+    }
+
+    #[test]
+    fn btf_aya_duplicate_maps_datasec_refuses() {
+        // Two DATASEC `maps` refuse before any lane runs, in
+        // both the admitting and the counting readers.
+        let raw = aya_bytes("attempt");
+        let tb = parse_btf(&raw);
+        let maps = datasec_rec(&raw, &tb, "maps");
+        let maps_name = u32_at(&raw, tb.recs[maps].off);
+        let other = other_datasec(&raw, &tb, "maps");
+        let other_name = u32_at(&raw, tb.recs[other].off);
+        assert_ne!(other_name, maps_name);
+        let mut out = raw.clone();
+        set_u32(&mut out, tb.recs[other].off, maps_name as u32);
+        let v = read_btf_maps(&out);
+        assert!(!v.ok);
+        assert_eq!(v.message, "duplicate maps DATASEC");
+        let w = read_object_map_bytes(&out);
+        assert!(!w.ok);
+        assert_eq!(w.message, "duplicate maps DATASEC");
     }
 
     #[test]
@@ -4099,14 +4169,14 @@ mod tests {
         let raw = aya_bytes("attempt");
         let tb = parse_btf(&raw);
         let idx = datasec_index(&raw, &tb, "maps", "mv_counts");
-        for (field, val, want) in [
-            (0, 27u32, "counts type 27, want 2"),
-            (3, 7u32, "counts max_entries 7, want 6"),
-            (1, 8u32, "counts key 8, want 4"),
-            (2, 4u32, "counts value 4, want 8"),
+        for (field, from, val, want) in [
+            (0, 2u32, 27u32, "counts type 27, want 2"),
+            (3, 6u32, 7u32, "counts max_entries 7, want 6"),
+            (1, 4u32, 8u32, "counts key 8, want 4"),
+            (2, 8u32, 4u32, "counts value 4, want 8"),
         ] {
             let mut out = raw.clone();
-            set_map_word(&mut out, idx, field, val);
+            set_map_word(&mut out, idx, field, from, val);
             let v = read_btf_maps(&out);
             assert!(!v.ok, "field {field} admitted");
             assert_eq!(v.message, want);
@@ -4120,12 +4190,12 @@ mod tests {
         let tb = parse_btf(&raw);
         let idx = datasec_index(&raw, &tb, "maps", "mv_attempts");
         let mut out = raw.clone();
-        set_map_word(&mut out, idx, 0, 2);
+        set_map_word(&mut out, idx, 0, 27, 2);
         let v = read_btf_maps(&out);
         assert!(!v.ok);
         assert_eq!(v.message, "attempts type 2, want 27");
         let mut out = raw.clone();
-        set_map_word(&mut out, idx, 3, 1000);
+        set_map_word(&mut out, idx, 3, 8_388_608, 1000);
         let w = read_btf_maps(&out);
         assert!(!w.ok);
         assert_eq!(w.message, "attempts ring size 1000 rejected");
@@ -4138,12 +4208,12 @@ mod tests {
         let tb = parse_btf(&raw);
         let idx = datasec_index(&raw, &tb, "maps", "mv_offsets");
         let mut out = raw.clone();
-        set_map_word(&mut out, idx, 2, 8);
+        set_map_word(&mut out, idx, 2, 24, 8);
         let v = read_btf_maps(&out);
         assert!(!v.ok);
         assert_eq!(v.message, "offsets value 8, want 24");
         let mut out = raw.clone();
-        set_map_word(&mut out, idx, 3, 2);
+        set_map_word(&mut out, idx, 3, 1, 2);
         let w = read_btf_maps(&out);
         assert!(!w.ok);
         assert_eq!(w.message, "offsets max_entries 2, want 1");
@@ -4156,7 +4226,7 @@ mod tests {
         let tb = parse_btf(&raw);
         let idx = datasec_index(&raw, &tb, "maps", "mv_lifecycle");
         let mut out = raw.clone();
-        set_map_word(&mut out, idx, 0, 2);
+        set_map_word(&mut out, idx, 0, 27, 2);
         let v = read_btf_maps_ring(&out, "mv_lifecycle", "lifecycle");
         assert!(!v.ok);
         assert_eq!(v.message, "lifecycle type 2, want 27");
@@ -4169,7 +4239,7 @@ mod tests {
         let tb = parse_btf(&raw);
         let idx = datasec_index(&raw, &tb, "maps", "mv_copies");
         let mut out = raw.clone();
-        set_map_word(&mut out, idx, 0, 2);
+        set_map_word(&mut out, idx, 0, 27, 2);
         let v = read_btf_maps_ring(&out, "mv_copies", "copies");
         assert!(!v.ok);
         assert_eq!(v.message, "copies type 2, want 27");
@@ -4203,18 +4273,14 @@ mod tests {
         let raw = aya_bytes("copy");
         let tb = parse_btf(&raw);
         let idx = datasec_index(&raw, &tb, "maps", "mv_copy_fb");
-        assert_eq!(map_word(&raw, idx, 0), 2);
-        assert_eq!(map_word(&raw, idx, 1), 4);
-        assert_eq!(map_word(&raw, idx, 2), 8);
-        assert_eq!(map_word(&raw, idx, 3), 4);
-        for (field, val, want) in [
-            (0, 27u32, "fallback type 27, want 2"),
-            (3, 5u32, "fallback max_entries 5, want 4"),
-            (1, 8u32, "fallback key 8, want 4"),
-            (2, 4u32, "fallback value 4, want 8"),
+        for (field, from, val, want) in [
+            (0, 2u32, 27u32, "fallback type 27, want 2"),
+            (3, 4u32, 5u32, "fallback max_entries 5, want 4"),
+            (1, 4u32, 8u32, "fallback key 8, want 4"),
+            (2, 8u32, 4u32, "fallback value 4, want 8"),
         ] {
             let mut out = raw.clone();
-            set_map_word(&mut out, idx, field, val);
+            set_map_word(&mut out, idx, field, from, val);
             let v = read_btf_copy_fb(&out);
             assert!(!v.ok, "field {field} admitted");
             assert_eq!(v.message, want);
@@ -4303,12 +4369,32 @@ mod tests {
         let raw = aya_bytes("copy");
         let tb = parse_btf(&raw);
         let idx = datasec_index(&raw, &tb, "maps", "mv_copy_fb");
-        assert_eq!(map_word(&raw, idx, 0), 2);
         let mut out = raw.clone();
-        set_map_word(&mut out, idx, 0, 5);
+        set_map_word(&mut out, idx, 0, 2, 5);
         let v = read_object_map_bytes(&out);
         assert!(!v.ok);
         assert_eq!(v.message, "unsupported map type 5 in mv_copy_fb");
+    }
+
+    #[test]
+    fn map_bytes_spine_mutation_counts_but_not_admitted() {
+        // Counting-vs-admission division: a spine-mutated object
+        // still counts the same byte bound (the counter reads
+        // ELF words only) while the admitting reader refuses it.
+        let raw = aya_bytes("attempt");
+        let before = read_object_map_bytes(&raw);
+        assert!(before.ok, "attempt: {}", before.message);
+        let tb = parse_btf(&raw);
+        let array = struct_rec(&raw, &tb, "Array_3C_u64_3E_");
+        assert_eq!(tb.recs[array].size, 28);
+        let mut out = raw.clone();
+        set_u32(&mut out, tb.recs[array].off + 8, 20);
+        let counted = read_object_map_bytes(&out);
+        assert!(counted.ok, "mutated: {}", counted.message);
+        assert_eq!(counted.bytes, before.bytes);
+        let v = read_btf_maps(&out);
+        assert!(!v.ok);
+        assert_eq!(v.message, "counts bad aya map shape");
     }
 
     #[test]
@@ -4340,6 +4426,11 @@ mod tests {
         // refuses under the map's own name: the first
         // unreadable entry in DATASEC order names it.
         let raw = aya_bytes("copy");
+        let tb = parse_btf(&raw);
+        let rec = datasec_rec(&raw, &tb, "maps");
+        assert_eq!(tb.recs[rec].vlen, 5);
+        assert_eq!(datasec_index(&raw, &tb, "maps", "mv_claims"), 0);
+        assert_eq!(datasec_index(&raw, &tb, "maps", "mv_copies"), 1);
         let (_, name_at, _, _) = section_range(&raw, b"maps");
         let mut out = raw.clone();
         overwrite(&mut out, name_at, b"maps", b"mapz");
