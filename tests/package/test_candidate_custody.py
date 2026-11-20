@@ -1120,6 +1120,19 @@ def test_release_qualify_extracts_to_fresh_path():
         assert "evidence" not in targets, line
 
 
+def test_release_import_attests_stored_subjects():
+    m = api()
+    doc = _release_workflow()
+    job = doc["jobs"]["import"]
+    assert job["permissions"].get("attestations") == "write"
+    steps = [step for step in job["steps"]
+             if "attest" in str(step.get("uses", "")).lower()]
+    assert steps, "import job attests nothing"
+    text = json.dumps(steps)
+    assert m.PREDICATE in text
+    assert "custody-out/stored" in text
+
+
 def test_release_digest_never_in_shell():
     doc = _release_workflow()
     for job, spec in sorted(doc["jobs"].items()):

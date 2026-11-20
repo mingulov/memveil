@@ -429,6 +429,8 @@ jobs:
     permissions:
       contents: read
       actions: write
+      attestations: write
+      id-token: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
@@ -499,6 +501,14 @@ jobs:
           path: custody-out/stored
           if-no-files-found: error
           retention-days: 90
+      - name: Attest the stored subjects
+        # Pinned by tag: record the commit SHA pin when network
+        # allows (every other action here pins by SHA).
+        uses: actions/attest@v2
+        with:
+          subject-path: custody-out/stored/*
+          predicate-type: 'https://memveil.org/attestations/memveil-candidate-import/1'
+          predicate: '{}'
       - name: Report the custody binding
         run: |
           set -eu
