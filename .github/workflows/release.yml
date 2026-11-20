@@ -505,9 +505,7 @@ jobs:
           if-no-files-found: error
           retention-days: 90
       - name: Attest the stored subjects
-        # Pinned by tag: record the commit SHA pin when network
-        # allows (every other action here pins by SHA).
-        uses: actions/attest@v2
+        uses: actions/attest@ce27ba3b4a9a139d9a20a4a07d69fabb52f1e5bc  # v2
         with:
           subject-path: custody-out/stored/*
           predicate-type: 'https://memveil.org/attestations/memveil-candidate-import/1'

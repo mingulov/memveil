@@ -5965,16 +5965,20 @@ def _required_row_ids(lock):
 
 
 def verify_tested_rows(out_dir, lock, manifest):
-    """Re-evaluate every required row's oracle predicates.
+    """Re-derive every required row's receipt, then its predicates.
 
     The evidence inventory is already verified by the caller;
-    this replays the per-row predicate core shared by qualify
-    and export: the cached oracle inputs must transcribe the
-    retained raw files, the oracle predicates must re-derive
-    ok, the re-derived checks must equal the receipt's
-    recorded checks, and the row must name this candidate.
-    Returns the {row id: checks} map; raises ValueError and
-    writes nothing otherwise.
+    this is the row core shared by qualify and export. Every
+    row under the out dir must first re-derive PASS from its
+    own receipt (verify_matrix_out: validated receipt, files[]
+    hashes matching the retained bytes, rec/summary merge,
+    exact required row set), then each required row replays
+    its predicates: the cached oracle inputs must transcribe
+    the retained raw files, the oracle predicates must
+    re-derive ok, the re-derived checks must equal the
+    receipt's recorded checks, and the row must name this
+    candidate. Returns the {row id: checks} map; raises
+    ValueError and writes nothing otherwise.
     """
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]
@@ -5982,6 +5986,11 @@ def verify_tested_rows(out_dir, lock, manifest):
     import candidate
     candidate.validate_manifest(manifest)
     wanted = _required_row_ids(lock)
+    report = verify_matrix_out(out_dir)
+    candidate.require(
+        report["ok"]
+        and {row["id"] for row in report["rows"]} == set(wanted),
+        "required matrix rows did not pass")
     want_id = candidate.digest_bytes(
         candidate.canonical(manifest))
     checked = {}
@@ -6028,11 +6037,6 @@ def export_tested_candidate(out_dir, lock, manifest, destination):
     import candidate
     candidate.validate_manifest(manifest)
     wanted = _required_row_ids(lock)
-    report = verify_matrix_out(out_dir)
-    candidate.require(
-        report["ok"]
-        and {row["id"] for row in report["rows"]} == set(wanted),
-        "required matrix rows did not pass")
     verify_tested_rows(out_dir, lock, manifest)
     expected_engine = manifest["files"]["bin/memveil"]
     for ident, entry in wanted.items():

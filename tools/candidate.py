@@ -1691,8 +1691,9 @@ def verify_qualification(candidate, qualification, policy,
     predicate, and predicates before export; other gates verify
     the signature chain, then retained measurements, then
     predicates. The matrix row set comes from the lock at C in
-    the source tree, and every required row re-evaluates the
-    same shared predicates the tested export runs. Returns
+    the source tree, and every required row re-runs the
+    same shared row verification the tested export runs
+    (receipt consistency plus predicates). Returns
     {"ok": True, "gates": [...], "trusted_keys": [...],
     "claim": ...} with the verified gate IDs sorted and the
     validated policy's pinned trust and claim; raises

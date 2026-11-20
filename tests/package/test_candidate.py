@@ -1999,12 +1999,39 @@ def test_qualify_rejects_mismatched_recorded_checks(workshop,
     receipt_path = row / "receipt.json"
     receipt = json.loads(receipt_path.read_text())
     # The attack: the recorded checks no longer match what the
-    # predicates re-derive from the cached inputs.
+    # predicates re-derive from the cached inputs. The shared
+    # receipt re-derivation refuses first (the row no longer
+    # re-derives PASS), exactly as the tested export always
+    # did; the predicate path stays covered by the
+    # failing-predicates test above.
     receipt["actual"]["checks"][0]["ok"] = \
         not receipt["actual"]["checks"][0]["ok"]
     receipt_path.write_bytes(m.canonical(receipt))
     _resign_matrix_inputs(m, ctx, evidence, q_path)
-    with pytest.raises(ValueError, match="[Pp]redicates"):
+    with pytest.raises(ValueError,
+                       match="required matrix rows did not pass"):
+        m.verify_qualification(ctx["manifest_path"], q_path,
+                               ctx["policy_path"], evidence,
+                               source_tree=str(ctx["root"]))
+
+
+def test_qualify_rejects_receipt_files_drift(workshop,
+                                             tmp_path):
+    m, ctx, evidence, q_path, _ = _matrix_qualified(
+        workshop, tmp_path)
+    row = evidence / "matrix" / MATRIX_ROW
+    receipt_path = row / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    # The attack: the receipt's files[] inventory no longer
+    # matches the retained row bytes (one hash rewritten)
+    # while every predicate input and recorded check stays
+    # honest, so only receipt-internal consistency can refuse.
+    assert receipt["files"][0]["sha256"] != "0" * 64
+    receipt["files"][0]["sha256"] = "0" * 64
+    receipt_path.write_bytes(m.canonical(receipt))
+    _resign_matrix_inputs(m, ctx, evidence, q_path)
+    with pytest.raises(ValueError,
+                       match="required matrix rows did not pass"):
         m.verify_qualification(ctx["manifest_path"], q_path,
                                ctx["policy_path"], evidence,
                                source_tree=str(ctx["root"]))

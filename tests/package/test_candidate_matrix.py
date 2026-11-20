@@ -19,8 +19,7 @@ sys.path.insert(0, str(ROOT / 'tools'))
 sys.path.insert(0, str(ROOT / 'tests/package'))
 import kernel_matrix as km
 import candidate as c
-from test_kernel_matrix import (_ev_pass, _row_ctx, _row_job,
-                                _admitted_entry)
+from test_kernel_matrix import _admitted_entry
 from test_candidate import (_ephemeral_key, _write_policy,
                             _write_qualification, _signed_gate,
                             _matrix_lock, _write_real_matrix_row,
