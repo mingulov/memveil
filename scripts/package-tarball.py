@@ -45,10 +45,16 @@ Usage: scripts/package-tarball.py [--out DIR] [--tag NAME]
   --tag NAME   bundle directory name (default: memveil-<version>)
   --root DIR   input tree (default: auto-detected checkout root)
   --binary PATH  release binary (default: <root>/target/
-               release/memveil, honoring $CARGO_TARGET_DIR)
+               release/memveil, honoring $CARGO_TARGET_DIR;
+               forbidden with --build, which consumes
+               cargo's own reported artifact paths)
   --bpf-dir DIR  build-script OUT_DIR holding memveil-ebpf-*
                (default: auto-detected under the target dir)
   --build      run `cargo build --release --locked --offline` first
+               with an explicit --target-dir plus a pinned
+               build.build-dir, scrubbed redirect environment,
+               and JSON artifact paths, so only this
+               invocation's bytes can be packaged
   --candidate  sealable bundle: requires --build from the root
                and forbids --binary/--bpf-dir; only this mode
                records a build receipt the seal accepts
@@ -662,23 +668,129 @@ def resolve_root(explicit):
 
 
 def resolve_target_dir(root):
+    """Development lookup dir, honoring the ambient override.
+
+    In-flow builds never use this: they pin an explicit
+    target dir that beats every redirect mechanism.
+    """
     override = os.environ.get("CARGO_TARGET_DIR")
     if override:
         return os.path.abspath(override)
     return os.path.join(root, "target")
 
 
+# Environment redirects that steer cargo outputs away from the
+# source root. Verified on cargo 1.100.0 (`cargo build --help`
+# plus share/doc/rust/html/cargo/reference/config.html, and
+# live precedence probes): the --target-dir CLI flag beats
+# CARGO_TARGET_DIR/CARGO_BUILD_TARGET_DIR, which beat the
+# build.target-dir config file; intermediates follow
+# build.build-dir (CARGO_BUILD_BUILD_DIR or config) unless a
+# CLI --config override pins them; CARGO_BUILD_TARGET selects
+# a target-triple output subdir. In-flow builds pin the CLI
+# side and scrub all four, so only this invocation's bytes
+# can be packaged.
+BUILD_REDIRECT_ENV = (
+    "CARGO_TARGET_DIR",
+    "CARGO_BUILD_TARGET_DIR",
+    "CARGO_BUILD_BUILD_DIR",
+    "CARGO_BUILD_TARGET",
+)
+
+
+def pinned_target_dir(root):
+    """Explicit in-flow target dir, immune to redirects."""
+    return os.path.join(os.path.abspath(root), "target")
+
+
+def select_built_binary(stdout, bin_name, target_dir):
+    """Cargo's own release binary path from JSON build output.
+
+    Requires exactly one built executable for the named bin
+    target, an existing regular file under the pinned target
+    dir. Anything else (no artifact, ambiguity, a path
+    outside the pin) fails closed.
+    """
+    target_dir = os.path.abspath(target_dir)
+    found = []
+    for line in stdout.splitlines():
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(message, dict) \
+                or message.get("reason") != "compiler-artifact":
+            continue
+        target = message.get("target") or {}
+        if target.get("name") != bin_name \
+                or "bin" not in (target.get("kind") or []):
+            continue
+        executable = message.get("executable")
+        if not executable or not isinstance(executable, str):
+            continue
+        found.append(executable)
+    if len(set(found)) != 1:
+        fail("cargo reported %d %s binaries, want exactly one"
+             % (len(set(found)), bin_name))
+    binary = os.path.abspath(found[0])
+    if os.path.commonpath([target_dir, binary]) != target_dir:
+        fail("cargo reported a binary outside the pinned "
+             "target dir: %s" % found[0])
+    if not os.path.isfile(binary) or os.path.islink(binary):
+        fail("cargo-reported binary is not a regular file: %s"
+             % found[0])
+    return binary
+
+
+def build_release_binary(rust_dir, target_dir,
+                         bin_name="memveil"):
+    """Build release in-flow, return cargo's own binary path.
+
+    Pins --target-dir plus a CLI build.build-dir override
+    (both beat environment and config files), scrubs every
+    redirect variable, and consumes the JSON artifact paths,
+    so exactly this invocation's bytes are packaged. Fails
+    closed on any build error or path surprise.
+    """
+    target_dir = os.path.abspath(target_dir)
+    if any(char in target_dir for char in "\"\\\n"):
+        fail("refusing a target dir that needs config "
+             "escaping: %s" % target_dir)
+    env = dict(os.environ)
+    env.pop("RUSTUP_TOOLCHAIN", None)
+    for name in BUILD_REDIRECT_ENV:
+        env.pop(name, None)
+    try:
+        proc = subprocess.run(
+            ["cargo",
+             "--config",
+             'build.build-dir="%s"' % target_dir,
+             "build", "--release", "--locked", "--offline",
+             "--target-dir", target_dir,
+             "--message-format=json"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, cwd=rust_dir, env=env)
+    except OSError as exc:
+        fail("cannot run cargo build: %s" % exc)
+    if proc.returncode != 0:
+        print(proc.stdout)
+        print(proc.stderr, file=sys.stderr)
+        fail("cargo build --release failed")
+    print("package-tarball: in-flow cargo build pinned to %s "
+          "(redirect environment scrubbed)" % target_dir)
+    return select_built_binary(proc.stdout, bin_name,
+                               target_dir)
+
+
 def resolve_binary(root, explicit, build):
-    """Release binary, building it first under --build."""
+    """Release binary: the in-flow build's own path, else lookup."""
     rust_dir = root
     if build:
-        proc = run_cargo(
-            ["build", "--release", "--locked", "--offline"],
-            rust_dir)
-        if proc.returncode != 0:
-            print(proc.stdout)
-            print(proc.stderr, file=sys.stderr)
-            fail("cargo build --release failed")
+        if explicit is not None:
+            fail("--build forbids --binary: the fresh in-flow "
+                 "binary is packaged")
+        return build_release_binary(
+            rust_dir, pinned_target_dir(root))
     if explicit is not None:
         binary = os.path.abspath(explicit)
     else:
@@ -690,9 +802,15 @@ def resolve_binary(root, explicit, build):
     return binary
 
 
-def bpf_candidates(target_dir):
-    """Complete OUT_DIR sets holding all three channel artifacts."""
-    base = os.path.join(target_dir, "release", "build", "memveil")
+def bpf_candidates(release_dir):
+    """Complete OUT_DIR sets holding all three channel artifacts.
+
+    Rooted at the release dir cargo actually used (derived
+    from the packaged binary's own path under --build), so a
+    target-triple output subdir cannot desynchronize the
+    search from the build.
+    """
+    base = os.path.join(release_dir, "build", "memveil")
     found = []
     try:
         names = sorted(os.listdir(base))
@@ -707,7 +825,7 @@ def bpf_candidates(target_dir):
     return found
 
 
-def resolve_bpf_dir(target_dir, explicit):
+def resolve_bpf_dir(release_dir, explicit):
     """OUT_DIR for the BPF inspection copies.
 
     Several build-script output dirs can hold copies; every
@@ -723,10 +841,10 @@ def resolve_bpf_dir(target_dir, explicit):
             fail("--bpf-dir lacks channel artifacts: %s"
                  % ", ".join(missing))
         return out
-    sets = bpf_candidates(target_dir)
+    sets = bpf_candidates(release_dir)
     if not sets:
         fail("no BPF artifacts under %s (run cargo build "
-             "--release, or pass --bpf-dir)" % target_dir)
+             "--release, or pass --bpf-dir)" % release_dir)
     first = {channel: sha256_file(os.path.join(
         sets[0], "memveil-ebpf-" + channel))
         for channel, _ in CHANNELS}
@@ -1424,10 +1542,14 @@ def main(argv):
         cargo_version, rustc_version = cargo_tool_versions(rust_dir)
         print("package-tarball: cargo %s rustc %s (RUSTUP_TOOLCHAIN "
               "stripped)" % (cargo_version, rustc_version))
-        target_dir = resolve_target_dir(root)
         binary_input = resolve_binary(root, binary_opt, build)
         binary_input_sha = sha256_file(binary_input)
-        bpf_dir = resolve_bpf_dir(target_dir, bpf_opt)
+        if build:
+            release_dir = os.path.dirname(binary_input)
+        else:
+            release_dir = os.path.join(
+                resolve_target_dir(root), "release")
+        bpf_dir = resolve_bpf_dir(release_dir, bpf_opt)
         bpf_inputs = {}
         for channel, shipped in CHANNELS:
             source = os.path.join(

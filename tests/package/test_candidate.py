@@ -644,6 +644,138 @@ def test_candidate_packager_cli_validates_before_build():
     assert "forbids" in proc.stderr
 
 
+def test_select_built_binary_parses_cargo_json(tmp_path):
+    packager = _packager_module()
+    target = Path(tmp_path) / "target"
+    release = target / "release"
+    release.mkdir(parents=True)
+    binary = release / "memveil"
+    binary.write_bytes(b"fresh\n")
+    line = json.dumps({"reason": "compiler-artifact",
+                       "target": {"name": "memveil",
+                                  "kind": ["bin"]},
+                       "executable": str(binary),
+                       "filenames": [str(binary)]})
+    noise = "\n".join([
+        json.dumps({"reason": "compiler-artifact",
+                    "target": {"name": "memveil",
+                               "kind": ["lib"]},
+                    "filenames": [str(release / "libmemveil.rlib")]}),
+        json.dumps({"reason": "build-finished", "success": True}),
+        "not json at all"])
+    assert packager.select_built_binary(
+        noise + "\n" + line + "\n", "memveil",
+        str(target)) == str(binary)
+    # The same path repeated is one binary; two distinct
+    # paths are ambiguous and fail closed.
+    assert packager.select_built_binary(
+        line + "\n" + line, "memveil",
+        str(target)) == str(binary)
+    with pytest.raises(SystemExit):
+        packager.select_built_binary(noise, "memveil",
+                                     str(target))
+    other = release / "memveil-alt"
+    other.write_bytes(b"fresh\n")
+    alt = json.dumps({"reason": "compiler-artifact",
+                      "target": {"name": "memveil",
+                                 "kind": ["bin"]},
+                      "executable": str(other),
+                      "filenames": [str(other)]})
+    with pytest.raises(SystemExit):
+        packager.select_built_binary(line + "\n" + alt,
+                                     "memveil", str(target))
+    outside = Path(tmp_path) / "shadow" / "memveil"
+    outside.parent.mkdir(parents=True)
+    outside.write_bytes(b"stale\n")
+    escaped = json.dumps(
+        {"reason": "compiler-artifact",
+         "target": {"name": "memveil", "kind": ["bin"]},
+         "executable": str(outside),
+         "filenames": [str(outside)]})
+    with pytest.raises(SystemExit):
+        packager.select_built_binary(escaped, "memveil",
+                                     str(target))
+
+
+def _redirect_probe_crate(path):
+    """Tiny crate with a build script emitting an OUT_DIR marker."""
+    path = Path(path)
+    (path / "src").mkdir(parents=True)
+    (path / ".cargo").mkdir(parents=True)
+    (path / "Cargo.toml").write_text(
+        "[package]\nname = \"redirprobe\"\nversion = \"0.1.0\"\n"
+        "edition = \"2021\"\n")
+    (path / "src" / "main.rs").write_text(
+        "fn main() { println!(\"fresh\"); }\n")
+    (path / "build.rs").write_text(
+        "use std::env;\nuse std::fs;\n"
+        "fn main() {\n"
+        "    let out = env::var(\"OUT_DIR\").unwrap();\n"
+        "    fs::write(out + \"/probe-marker.txt\",\n"
+        "              \"fresh-marker\\n\").unwrap();\n"
+        "}\n")
+    env = dict(os.environ)
+    env.pop("RUSTUP_TOOLCHAIN", None)
+    proc = subprocess.run(
+        ["cargo", "generate-lockfile", "--offline"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, cwd=str(path), env=env)
+    assert proc.returncode == 0, proc.stderr
+    return path
+
+
+def test_in_flow_build_ignores_redirects(tmp_path, monkeypatch):
+    packager = _packager_module()
+    proj = _redirect_probe_crate(tmp_path / "proj")
+    shadow = Path(tmp_path) / "shadow"
+    cfg_shadow = Path(tmp_path) / "cfgshadow"
+    cfg_build = Path(tmp_path) / "cfgbuild"
+    env_build = Path(tmp_path) / "envbuild"
+    for path in (shadow, cfg_shadow, cfg_build, env_build):
+        path.mkdir(parents=True)
+    # Stale bytes planted where the redirects point: a
+    # full shadow release tree plus config-redirected
+    # target and intermediates dirs.
+    (shadow / "release").mkdir(parents=True)
+    stale = shadow / "release" / "redirprobe"
+    stale.write_bytes(b"stale-binary\n")
+    (shadow / "release" / "build").mkdir(parents=True)
+    (cfg_shadow / "sentinel.txt").write_text("stale\n")
+    (proj / ".cargo" / "config.toml").write_text(
+        "[build]\n"
+        "target-dir = %s\n" % json.dumps(str(cfg_shadow))
+        + "build-dir = %s\n" % json.dumps(str(cfg_build)))
+    monkeypatch.setenv("CARGO_TARGET_DIR", str(shadow))
+    monkeypatch.setenv("CARGO_BUILD_BUILD_DIR", str(env_build))
+    monkeypatch.setenv("CARGO_BUILD_TARGET_DIR", str(shadow))
+    target = proj / "target"
+    binary = packager.build_release_binary(
+        str(proj), str(target), bin_name="redirprobe")
+    # The fresh in-flow bytes are packaged: cargo's own
+    # reported path under the pinned dir, and its bytes
+    # differ from the planted stale shadow.
+    assert binary == str(target / "release" / "redirprobe")
+    assert Path(binary).read_bytes() != b"stale-binary\n"
+    assert stale.read_bytes() == b"stale-binary\n"
+    # Every redirect stayed empty of fresh outputs: the
+    # config-redirected dirs hold only the planted stale
+    # bytes, and the env-redirected intermediates dir is
+    # untouched, while the pinned tree carries the fresh
+    # build-script marker.
+    assert (cfg_shadow / "sentinel.txt").read_text() == "stale\n"
+    assert sorted(path.name for path in cfg_shadow.iterdir()) == \
+        ["sentinel.txt"]
+    assert list(cfg_build.iterdir()) == []
+    assert list(env_build.iterdir()) == []
+    assert sorted(path.name
+                  for path in (shadow / "release").iterdir()) == \
+        ["build", "redirprobe"]
+    markers = sorted(target.rglob("probe-marker.txt"))
+    assert markers, "no fresh build-script marker under the pin"
+    assert all(marker.read_text() == "fresh-marker\n"
+               for marker in markers)
+
+
 def test_seal_rejects_smuggled_deb_payload(workshop, tmp_path):
     m, fix = seal_paths(workshop, tmp_path)
     path = next(fix["artifacts"].glob("*.deb"))
