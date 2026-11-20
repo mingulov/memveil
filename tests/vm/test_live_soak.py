@@ -870,6 +870,66 @@ def test_live_gate_refuses_identity_mismatch(tmp_path):
         c.verify_live_campaigns(retained, evidence, manifest)
 
 
+def _rebind_exit_oracle(c, evidence, doc, mode):
+    fresh = c.digest(evidence / ('live/%s-exit.json' % mode))
+    for key, binding in doc['sources']['oracle'].items():
+        if key.startswith(mode + '_'):
+            binding['sha256'] = fresh
+    (evidence / 'live-inputs.json').write_bytes(c.canonical(doc))
+    return c.read_json(evidence / 'live-inputs.json', sealed=True)
+
+
+def test_live_gate_refuses_nonzero_guest_exit(tmp_path):
+    import json
+    sys.path.insert(0, str(ROOT / 'tools'))
+    import candidate as c
+    manifest = _live_manifest()
+    evidence, doc = live_gate_evidence(tmp_path, manifest)
+    exit_path = evidence / 'live/soak-exit.json'
+    exit_doc = json.loads(exit_path.read_bytes())
+    exit_doc['guest_exit'] = 1
+    exit_path.write_bytes(
+        json.dumps(exit_doc, sort_keys=True).encode())
+    retained = _rebind_exit_oracle(c, evidence, doc, 'soak')
+    with pytest.raises(ValueError, match='guest exit'):
+        c.verify_live_campaigns(retained, evidence, manifest)
+
+
+@pytest.mark.parametrize('bad_exit', ['0', True, 0.0, None])
+def test_live_gate_refuses_non_integer_guest_exit(
+        tmp_path, bad_exit):
+    import json
+    sys.path.insert(0, str(ROOT / 'tools'))
+    import candidate as c
+    manifest = _live_manifest()
+    evidence, doc = live_gate_evidence(tmp_path, manifest)
+    exit_path = evidence / 'live/overhead-exit.json'
+    exit_doc = json.loads(exit_path.read_bytes())
+    exit_doc['guest_exit'] = bad_exit
+    exit_path.write_bytes(
+        json.dumps(exit_doc, sort_keys=True).encode())
+    retained = _rebind_exit_oracle(c, evidence, doc, 'overhead')
+    with pytest.raises(ValueError, match='guest exit'):
+        c.verify_live_campaigns(retained, evidence, manifest)
+
+
+def test_live_gate_refuses_host_totals_mismatch(tmp_path):
+    import json
+    sys.path.insert(0, str(ROOT / 'tools'))
+    import candidate as c
+    manifest = _live_manifest()
+    evidence, doc = live_gate_evidence(tmp_path, manifest)
+    exit_path = evidence / 'live/soak-exit.json'
+    exit_doc = json.loads(exit_path.read_bytes())
+    exit_doc['totals'] = dict(exit_doc['totals'])
+    exit_doc['totals']['legs'] = '999'
+    exit_path.write_bytes(
+        json.dumps(exit_doc, sort_keys=True).encode())
+    retained = _rebind_exit_oracle(c, evidence, doc, 'soak')
+    with pytest.raises(ValueError, match='host totals'):
+        c.verify_live_campaigns(retained, evidence, manifest)
+
+
 def test_verify_live_campaign_accepts_honest_pool(tmp_path):
     m = api()
     manifest = _live_manifest()

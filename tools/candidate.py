@@ -1647,8 +1647,10 @@ def verify_live_campaigns(retained, base, manifest):
     verifier under its requested mode, and the verified
     totals must equal the bound scalars on both sides.
     The host exit.json beside each export must name the
-    candidate. Runs after the scalar re-derivation, which
-    owns the inputs shape. Raises ValueError otherwise.
+    candidate, record an integer guest exit of zero, and
+    carry host totals equal to the replayed totals. Runs
+    after the scalar re-derivation, which owns the inputs
+    shape. Raises ValueError otherwise.
     """
     live = _live_campaigns()
     files = _resolve_live_files(retained, base)
@@ -1679,6 +1681,18 @@ def verify_live_campaigns(retained, base, manifest):
         require(isinstance(exit_doc, dict)
                 and exit_doc.get("candidate") == candidate_id,
                 "live %s oracle names another candidate"
+                % mode)
+        raw_exit = exit_doc.get("guest_exit")
+        try:
+            coerced_exit = int(raw_exit)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "live %s guest exit refuses" % mode)
+        require(type(raw_exit) is int
+                and coerced_exit == 0,
+                "live %s guest exit refuses" % mode)
+        require(exit_doc.get("totals") == totals,
+                "live %s host totals differ from replay"
                 % mode)
 
 
