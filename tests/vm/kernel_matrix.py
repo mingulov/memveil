@@ -295,14 +295,20 @@ def _unique_object(pairs):
     return obj
 
 
-def parse_lock(path):
-    """Parse and validate one kernels.lock.json file."""
+def parse_lock_bytes(data):
+    """Validate lock document bytes against the full lock grammar.
+
+    This is the single shared grammar both the tested export
+    and qualification run: the same malformed lock is refused
+    on both paths. Returns the parsed document; raises
+    LockError otherwise.
+    """
     try:
-        doc = json.loads(Path(path).read_text(),
+        doc = json.loads(bytes(data).decode("utf-8"),
                          object_pairs_hook=_unique_object)
     except LockError:
         raise
-    except (OSError, ValueError) as exc:
+    except (TypeError, ValueError) as exc:
         raise LockError("unreadable lock: %s" % exc)
     _need(isinstance(doc, dict), "bad lock object")
     _no_extra(doc, _TOP_KEYS, "top level")
@@ -382,6 +388,15 @@ def parse_lock(path):
         for probe in omitted:
             _need(probe in PROBES, "bad omitted probe for " + ident)
     return doc
+
+
+def parse_lock(path):
+    """Parse and validate one kernels.lock.json file."""
+    try:
+        data = Path(path).read_bytes()
+    except OSError as exc:
+        raise LockError("unreadable lock: %s" % exc)
+    return parse_lock_bytes(data)
 
 
 def _below_floor(release):

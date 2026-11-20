@@ -1108,7 +1108,7 @@ def main(argv=None):
                     args.lock, manifest["source"]["commit"],
                     args.source_tree)
                 lock = candidate.read_json(args.lock)
-                km.parse_lock(args.lock)
+                km.parse_lock_bytes(Path(args.lock).read_bytes())
                 inputs = _matrix_inputs_for_export(
                     args.evidence_dir, args.qualification)
                 matrix_dir = inputs.get("matrix_directory") \

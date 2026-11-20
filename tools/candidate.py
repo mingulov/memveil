@@ -1720,8 +1720,11 @@ def _matrix_lock_from_tree(source_tree, commit):
 
     Reads tests/vm/kernels.lock.json at the candidate source
     commit from the given checkout without checking anything
-    out, so the required row set is pinned by C itself.
-    Returns the parsed lock; raises ValueError otherwise.
+    out, so the required row set is pinned by C itself. The
+    bytes then run the shared full-grammar validation the
+    tested export runs, so a malformed lock schema is refused
+    here instead of only at export. Returns the parsed lock;
+    raises ValueError otherwise.
     """
     hexid(commit, 40)
     try:
@@ -1736,7 +1739,9 @@ def _matrix_lock_from_tree(source_tree, commit):
             % error) from error
     require(proc.returncode == 0,
             "source tree has no matrix lock at " + commit)
-    return _parse_json(proc.stdout)
+    lock = _parse_json(proc.stdout)
+    _matrix_rows().parse_lock_bytes(proc.stdout)
+    return lock
 
 
 def verify_evidence_inventory(inputs, evidence_dir):

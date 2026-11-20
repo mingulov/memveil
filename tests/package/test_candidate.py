@@ -2442,6 +2442,91 @@ def test_qualify_refuses_foreign_tested_bytes(
                                source_tree=str(ctx["root"]))
 
 
+@pytest.mark.parametrize("damage", ["bad-schema", "missing-schema"])
+def test_qualify_refuses_malformed_lock_schema(workshop,
+                                               tmp_path, damage):
+    m, fix = seal_paths(workshop, tmp_path)
+    root = fix["root"]
+    # The attack: C carries a lock whose schema field is
+    # damaged but whose JSON stays valid and whose row set
+    # stays intact, so a row-set-only check would accept it.
+    lock_path = root / "tests" / "vm" / "kernels.lock.json"
+    lock = json.loads(lock_path.read_bytes())
+    if damage == "bad-schema":
+        lock["schema"] = "bogus-schema/9"
+    else:
+        del lock["schema"]
+    assert [entry["id"] for entry in lock["kernels"]] == \
+        [MATRIX_ROW]
+    lock_path.write_bytes(m.canonical(lock))
+    git(root, "add", "tests/vm/kernels.lock.json")
+    git(root, "-c", "user.name=Fixture",
+        "-c", "user.email=fixture@example.invalid",
+        "commit", "-qm", "Fixture C with damaged lock schema")
+    commit = git(root, "rev-parse", "HEAD")
+    _entries, inventory = m.git_inventory(root, commit)
+    # Rebind every C-pinned byte to the damaged commit: the
+    # seal pins bytes, not lock grammar, so it must still
+    # accept and only the shared grammar validation refuses.
+    staged = json.loads(
+        (fix["bundle_dir"] / "MANIFEST.json").read_text())
+    staged["memveil_revision"] = commit
+    staged["build_receipt"]["source_commit"] = commit
+    staged["build_receipt"]["inventory_sha256"] = inventory
+    (fix["bundle_dir"] / "MANIFEST.json").write_text(
+        json.dumps(staged, indent=2, sort_keys=True) + "\n")
+    bundle_tar = next(fix["artifacts"].glob(
+        "memveil-fixture.tar.gz"))
+    bundle_tar.unlink()
+    deterministic_tar_gz(fix["bundle_dir"], "memveil-fixture",
+                         bundle_tar)
+    proc = subprocess.run(
+        ["git", "-C", str(root), "archive", "HEAD"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        check=True)
+    source_tar = next(fix["artifacts"].glob("*source.tar.gz"))
+    source_tar.write_bytes(gzip.compress(proc.stdout, mtime=0))
+    sbom_path = next(fix["artifacts"].glob("*.spdx.json"))
+    sbom_path.unlink()
+    proc = subprocess.run(
+        _sbom_emit_argv(workshop, fix, sbom_path),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True)
+    assert proc.returncode == 0, proc.stderr
+    provenance_path = next(fix["artifacts"].glob(
+        "*.provenance.json"))
+    provenance_path.unlink()
+    m.emit_provenance(fix["bundle_dir"], _emit_source_info(fix),
+                      provenance_path)
+    # Seal and qualify honestly over the damaged C: the
+    # shared full-grammar validation must refuse.
+    private, public = _ephemeral_key(Path(tmp_path) / "key")
+    policy_path = Path(tmp_path) / "policy.json"
+    _write_policy(m, policy_path, _matrix_required_gates(),
+                  [sha(public.read_bytes())])
+    manifest = m.create_manifest(
+        fix["bundle_dir"], fix["artifacts"], policy_path,
+        {"root": str(fix["root"]),
+         "harness_bin": workshop.harness_bin()})
+    manifest_path = Path(tmp_path) / "candidate.json"
+    candidate_id = m.seal_manifest(manifest, manifest_path)
+    ctx = {"manifest": manifest, "candidate_id": candidate_id,
+           "key": private, "pub": public}
+    evidence = Path(tmp_path) / "evidence"
+    evidence.mkdir()
+    _write_matrix_evidence(m, ctx, evidence)
+    binding = _signed_gate(m, ctx, evidence, MATRIX_GATE,
+                           "inputs.json", "receipt.json",
+                           _matrix_inputs(m, evidence))
+    q_path = Path(tmp_path) / "qualification.json"
+    _write_qualification(m, ctx, q_path,
+                         {MATRIX_GATE: binding})
+    with pytest.raises(ValueError, match="bad schema"):
+        m.verify_qualification(manifest_path, q_path,
+                               policy_path, evidence,
+                               source_tree=str(root))
+
+
 def _nonmatrix_required_gates():
     return {NONMATRIX_GATE:
             {"environment": "offline",
