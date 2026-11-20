@@ -475,8 +475,15 @@ def test_installed_leaf_and_parent_aliases_refuse_without_touching_foreign_files
     assert (foreign / 'memveil').read_bytes() == b'unchanged'
 
 
-def _campaign_metric(units):
-    return {'valid': True, 'counts_ok': True, 'throughput': 100.0, 'p99': 5.0,
+def _campaign_metric(units, seconds):
+    # Honest cached values derive from the retained bytes
+    # through the verifier's own re-derivation, so the
+    # fixture can never drift from the re-derivation rule.
+    derived = api().rederived_metric(
+        {'start_ns': '0', 'end_ns': str(seconds * 10**9)},
+        {'completed_units': units, 'operation_seconds': [0.5]})
+    return {'valid': True, 'counts_ok': True,
+            'throughput': derived['throughput'], 'p99': derived['p99'],
             'completed_units': units, 'operation_seconds': [0.5]}
 
 
@@ -484,8 +491,8 @@ def _campaign_window(start_ns, seconds):
     return {'elapsed_seconds': float(seconds),
             'window': {'start_ns': str(start_ns),
                        'end_ns': str(start_ns + seconds * 10**9)},
-            'metrics': {'block': _campaign_metric('16777216'),
-                        'network': _campaign_metric('32')},
+            'metrics': {'block': _campaign_metric('16777216', seconds),
+                        'network': _campaign_metric('32', seconds)},
             'samples': [{'elapsed_monotonic_ns': str(start_ns), 'rss_kib': '1024',
                          'fd_count': '8', 'map_memlock_bytes': {}}]}
 
@@ -557,8 +564,10 @@ def _write_campaign(export, manifest, mode, legs, comparisons, extra=None):
               'candidate': c.digest_bytes(c.canonical(manifest)),
               'mode': mode, 'environment': 'ordinary-linux', 'kernel': 'test-kernel',
               'btf_sha256': 'ab' * 32, 'config_sha256': 'cd' * 32,
-              'source': {}, 'toolchain': {}, 'build_receipt_sha256': 'ef' * 32,
-              'runtime_files': {}, 'helpers': {}, 'legs': legs, 'comparisons': comparisons,
+              'source': manifest['source'], 'toolchain': manifest['toolchain'],
+              'build_receipt_sha256': manifest['build_receipt_sha256'],
+              'runtime_files': manifest['files'],
+              'helpers': {}, 'legs': legs, 'comparisons': comparisons,
               'cleanup': {'before': {}, 'after': {}}}
     if extra:
         result.update(extra)
@@ -661,13 +670,14 @@ def _overhead_export(export, manifest):
 def _soak_export(export, manifest, mixed_legs=30):
     # Honest soak schedule: mixed attempt legs, then one pool
     # leg last. The pool leg reuses the honest pool-leg
-    # fixture verbatim; mixed windows are self-consistent
-    # per leg (cross-leg window layout is not verified).
+    # fixture verbatim (window 0..4261s); mixed windows start
+    # past it at 100s spacing, so no two workload windows
+    # overlap.
     legs, files = [], []
     for ordinal in range(mixed_legs):
         leg, leg_files = _overhead_product_leg(
             ordinal, 'attempt-record-summary',
-            ordinal * 100 * 10**9)
+            (4262 + ordinal * 100) * 10**9)
         legs.append(leg)
         files.append(leg_files)
     pool_leg, pool_files = _pool_leg()
@@ -684,7 +694,20 @@ def _soak_export(export, manifest, mixed_legs=30):
 
 
 def _live_manifest():
-    return {'schema': 'test-manifest/1', 'files': {'bin/memveil': 'ab' * 32}}
+    return {'schema': 'test-manifest/1',
+            'source': {'commit': 'a' * 40, 'tree': 'b' * 40,
+                       'inventory_sha256': 'c' * 64},
+            'toolchain': {'cargo_lock_sha256': 'd' * 64,
+                          'ebpf_lock_sha256': 'e' * 64},
+            'build_receipt_sha256': 'ef' * 32,
+            'files': {'bin/memveil': 'ab' * 32}}
+
+
+def _verify(m, export, manifest, mode):
+    """Verify one fixture export through resolved campaign bytes."""
+    return m.verify_live_campaign(
+        export, manifest, mode,
+        (export / 'campaign.json').read_bytes())
 
 
 def live_gate_evidence(tmp_path, manifest):
@@ -709,7 +732,7 @@ def live_gate_evidence(tmp_path, manifest):
         slot.mkdir(parents=True)
         build(slot, manifest)
         campaign = json.loads((slot / 'campaign.json').read_bytes())
-        totals = m.verify_live_campaign(slot, manifest, mode)
+        totals = _verify(m, slot, manifest, mode)
         assert campaign['totals'] == totals
         exit_doc = {'guest_exit': 0, 'candidate': campaign['candidate'],
                     'totals': totals}
@@ -780,6 +803,12 @@ def test_live_gate_refuses_pool_in_campaign_slot(tmp_path):
     shutil.rmtree(slot)
     slot.mkdir()
     _pool_export(slot, manifest)
+    # Re-bind the substituted file so the refusal comes
+    # from the mode check, not the digest check.
+    fresh = c.digest(slot / 'campaign.json')
+    for key, binding in doc['sources']['product'].items():
+        if key.startswith('soak_'):
+            binding['sha256'] = fresh
     with pytest.raises(ValueError, match='differs from requested'):
         c.verify_live_campaigns(doc, evidence, manifest)
 
@@ -797,13 +826,57 @@ def test_live_gate_refuses_scalar_drift(tmp_path):
         c.verify_live_campaigns(retained, evidence, manifest)
 
 
+def test_live_gate_refuses_wrong_file_replay(tmp_path):
+    import json
+    sys.path.insert(0, str(ROOT / 'tools'))
+    import candidate as c
+    manifest = _live_manifest()
+    evidence, doc = live_gate_evidence(tmp_path, manifest)
+    # Substitute unsigned bytes at the replay path: the
+    # totals still match the bound scalars, but the file no
+    # longer matches its signed digest.
+    campaign_path = evidence / 'live/overhead/campaign.json'
+    campaign = json.loads(campaign_path.read_bytes())
+    campaign['kernel'] = 'wrong-file-replay'
+    campaign_path.write_bytes(
+        json.dumps(campaign, sort_keys=True).encode())
+    with pytest.raises(ValueError, match='file changed'):
+        c.verify_live_campaigns(doc, evidence, manifest)
+
+
+def test_live_gate_refuses_identity_mismatch(tmp_path):
+    import json
+    sys.path.insert(0, str(ROOT / 'tools'))
+    import candidate as c
+    manifest = _live_manifest()
+    evidence, doc = live_gate_evidence(tmp_path, manifest)
+    # A campaign run against another candidate: re-bind the
+    # signed digests to the substituted bytes (as a confused
+    # signer would), keeping every scalar intact. The
+    # manifest identity check must still refuse.
+    campaign_path = evidence / 'live/soak/campaign.json'
+    campaign = json.loads(campaign_path.read_bytes())
+    campaign['source'] = {'commit': 'f' * 40, 'tree': 'e' * 40,
+                          'inventory_sha256': 'd' * 64}
+    campaign_path.write_bytes(
+        json.dumps(campaign, sort_keys=True).encode())
+    fresh = c.digest(campaign_path)
+    for key, binding in doc['sources']['product'].items():
+        if key.startswith('soak_'):
+            binding['sha256'] = fresh
+    (evidence / 'live-inputs.json').write_bytes(c.canonical(doc))
+    retained = c.read_json(evidence / 'live-inputs.json', sealed=True)
+    with pytest.raises(ValueError, match='candidate manifest'):
+        c.verify_live_campaigns(retained, evidence, manifest)
+
+
 def test_verify_live_campaign_accepts_honest_pool(tmp_path):
     m = api()
     manifest = _live_manifest()
     export = tmp_path / 'export'
     export.mkdir()
     _pool_export(export, manifest)
-    assert m.verify_live_campaign(export, manifest, 'pool') == {
+    assert _verify(m, export, manifest, 'pool') == {
         'legs': '1', 'failed_legs': '0', 'target_failures': '0',
         'cleanup_mismatches': '0'}
 
@@ -817,7 +890,7 @@ def test_verify_live_campaign_refuses_tampered_leg(tmp_path):
     target = export / 'completed-0/capture/events.ndjson'
     target.write_bytes(b'x' + target.read_bytes()[1:])
     with pytest.raises(ValueError, match='changed'):
-        m.verify_live_campaign(export, manifest, 'pool')
+        _verify(m, export, manifest, 'pool')
 
 
 def test_verify_live_campaign_refuses_missing_leg(tmp_path):
@@ -829,7 +902,7 @@ def test_verify_live_campaign_refuses_missing_leg(tmp_path):
     _pool_export(export, manifest)
     shutil.rmtree(export / 'completed-0')
     with pytest.raises(ValueError, match='inventory'):
-        m.verify_live_campaign(export, manifest, 'pool')
+        _verify(m, export, manifest, 'pool')
 
 
 def test_verify_live_campaign_refuses_predicate_mismatch(tmp_path):
@@ -859,7 +932,7 @@ def test_verify_live_campaign_refuses_predicate_mismatch(tmp_path):
         else:
             path.write_bytes((json.dumps(doc, sort_keys=True) + '\n').encode())
     with pytest.raises(ValueError, match='loss'):
-        m.verify_live_campaign(export, manifest, 'pool')
+        _verify(m, export, manifest, 'pool')
 
 
 def test_verify_live_campaign_accepts_honest_overhead(tmp_path):
@@ -868,7 +941,7 @@ def test_verify_live_campaign_accepts_honest_overhead(tmp_path):
     export = tmp_path / 'export'
     export.mkdir()
     _overhead_export(export, manifest)
-    assert m.verify_live_campaign(export, manifest, 'overhead') == {
+    assert _verify(m, export, manifest, 'overhead') == {
         'legs': '20', 'failed_legs': '0', 'target_failures': '0',
         'cleanup_mismatches': '0'}
 
@@ -890,8 +963,111 @@ def test_verify_live_campaign_refuses_workload_tamper(tmp_path):
             path.write_bytes(json.dumps(doc, sort_keys=True).encode())
         else:
             path.write_bytes((json.dumps(doc, sort_keys=True) + '\n').encode())
+    # A bare cached-value tamper refuses at re-derivation,
+    # before the comparison replay runs.
+    with pytest.raises(ValueError, match='retained operations'):
+        _verify(m, export, manifest, 'overhead')
+    # A derivation-consistent tamper (latencies and cache
+    # moved together) still refuses at the comparison
+    # replay: the re-derived verdict differs from the
+    # claimed measurement.
+    export = tmp_path / 'consistent'
+    export.mkdir()
+    _overhead_export(export, manifest)
+    for path, nested in ((export / 'campaign.json', True),
+                         (export / 'completed-1/observations.json', False)):
+        doc = json.loads(path.read_bytes())
+        leg = doc['legs'][1] if nested else doc
+        metric = leg['workload']['metrics']['block']
+        metric['operation_seconds'] = [50.0]
+        metric['p99'] = 50.0
+        if nested:
+            path.write_bytes(json.dumps(doc, sort_keys=True).encode())
+        else:
+            path.write_bytes((json.dumps(doc, sort_keys=True) + '\n').encode())
     with pytest.raises(ValueError, match='retained workloads'):
-        m.verify_live_campaign(export, manifest, 'overhead')
+        _verify(m, export, manifest, 'overhead')
+
+
+def test_verify_live_campaign_refuses_nonzero_leg(tmp_path):
+    import json
+    m = api()
+    manifest = _live_manifest()
+    export = tmp_path / 'export'
+    export.mkdir()
+    _pool_export(export, manifest)
+    for path, nested in ((export / 'campaign.json', True),
+                         (export / 'completed-0/observations.json', False)):
+        doc = json.loads(path.read_bytes())
+        leg = doc['legs'][0] if nested else doc
+        leg['product_exit'] = 1
+        if nested:
+            doc['pool']['observation']['product_exit'] = 1
+            path.write_bytes(json.dumps(doc, sort_keys=True).encode())
+        else:
+            path.write_bytes((json.dumps(doc, sort_keys=True) + '\n').encode())
+    with pytest.raises(ValueError, match='exit differs'):
+        _verify(m, export, manifest, 'pool')
+
+
+def test_verify_live_campaign_refuses_tampered_cached_metric(
+        tmp_path):
+    import json
+    m = api()
+    manifest = _live_manifest()
+    export = tmp_path / 'export'
+    export.mkdir()
+    _overhead_export(export, manifest)
+    # Scale every cached throughput together: the pairwise
+    # ratios (and the claimed measurements) are unchanged,
+    # so a cached-value compare would still accept while the
+    # retained operation bytes disagree with every cache.
+    campaign_path = export / 'campaign.json'
+    doc = json.loads(campaign_path.read_bytes())
+    for ordinal, leg in enumerate(doc['legs']):
+        for section in ('warmup', 'workload'):
+            for metric in leg[section]['metrics'].values():
+                metric['throughput'] /= 2.0
+        obs_path = export / ('completed-%d/observations.json'
+                             % ordinal)
+        obs = json.loads(obs_path.read_bytes())
+        for section in ('warmup', 'workload'):
+            for metric in obs[section]['metrics'].values():
+                metric['throughput'] /= 2.0
+        obs_path.write_bytes(
+            (json.dumps(obs, sort_keys=True) + '\n').encode())
+    campaign_path.write_bytes(
+        json.dumps(doc, sort_keys=True).encode())
+    with pytest.raises(ValueError, match='retained operations'):
+        _verify(m, export, manifest, 'overhead')
+
+
+def test_verify_live_campaign_refuses_overlapping_soak_windows(
+        tmp_path):
+    import json
+    m = api()
+    manifest = _live_manifest()
+    export = tmp_path / 'export'
+    export.mkdir()
+    _soak_export(export, manifest, mixed_legs=30)
+    # Slide leg 1's workload window back over leg 0,
+    # keeping its duration (and every derived metric)
+    # intact: overlap alone must refuse.
+    for path, nested in ((export / 'campaign.json', True),
+                         (export / 'completed-1/observations.json', False)):
+        doc = json.loads(path.read_bytes())
+        leg = doc['legs'][1] if nested else doc
+        window = leg['workload']['window']
+        window['start_ns'] = str(int(window['start_ns'])
+                                 - 50 * 10**9)
+        window['end_ns'] = str(int(window['end_ns'])
+                               - 50 * 10**9)
+        if nested:
+            path.write_bytes(json.dumps(doc, sort_keys=True).encode())
+        else:
+            path.write_bytes((json.dumps(doc, sort_keys=True) + '\n').encode())
+    with pytest.raises(ValueError, match='windows overlap'):
+        _verify(m, export, manifest, 'soak')
 
 
 def test_verify_live_campaign_refuses_mode_mismatch(tmp_path):
@@ -901,16 +1077,16 @@ def test_verify_live_campaign_refuses_mode_mismatch(tmp_path):
     export.mkdir()
     _pool_export(export, manifest)
     with pytest.raises(ValueError, match='differs from requested'):
-        m.verify_live_campaign(export, manifest, 'soak')
+        _verify(m, export, manifest, 'soak')
     with pytest.raises(ValueError, match='requested'):
-        m.verify_live_campaign(export, manifest, 'nope')
+        _verify(m, export, manifest, 'nope')
     other = tmp_path / 'other'
     other.mkdir()
     _overhead_export(other, manifest)
     with pytest.raises(ValueError, match='differs from requested'):
-        m.verify_live_campaign(other, manifest, 'pool')
-    assert m.verify_live_campaign(
-        other, manifest, 'overhead')['legs'] == '20'
+        _verify(m, other, manifest, 'pool')
+    assert _verify(
+        m, other, manifest, 'overhead')['legs'] == '20'
 
 
 def test_verify_live_campaign_accepts_honest_soak(tmp_path):
@@ -919,7 +1095,7 @@ def test_verify_live_campaign_accepts_honest_soak(tmp_path):
     export = tmp_path / 'export'
     export.mkdir()
     _soak_export(export, manifest)
-    assert m.verify_live_campaign(export, manifest, 'soak') == {
+    assert _verify(m, export, manifest, 'soak') == {
         'legs': '31', 'failed_legs': '0', 'target_failures': '0',
         'cleanup_mismatches': '0'}
 
@@ -935,8 +1111,9 @@ def test_verify_live_campaign_excludes_off_legs_from_soak_time(
     doc = json.loads((export / 'campaign.json').read_bytes())
     assert doc['mixed_seconds'] == 1800.0
     # Slip an off leg before the pool leg, keeping ordinals
-    # and files consistent; its window must not count.
-    off, _ = _overhead_off_leg(30, 30 * 100 * 10**9)
+    # and files consistent; its window must not count. Its
+    # window sits past the last mixed leg, overlapping none.
+    off, _ = _overhead_off_leg(30, (4262 + 30 * 100) * 10**9)
     legs = doc['legs']
     legs.insert(-1, off)
     for ordinal, leg in enumerate(legs):
@@ -955,8 +1132,8 @@ def test_verify_live_campaign_excludes_off_legs_from_soak_time(
     _write_campaign(shifted, manifest, 'soak', legs, [],
                     {'mixed_seconds': 1800.0,
                      'campaign_seconds_before_pool': 1900.0})
-    assert m.verify_live_campaign(
-        shifted, manifest, 'soak')['legs'] == '32'
+    assert _verify(
+        m, shifted, manifest, 'soak')['legs'] == '32'
     # The same export claiming the off window counted
     # refuses: mixed time excludes off legs.
     tampered = json.loads(
@@ -965,7 +1142,7 @@ def test_verify_live_campaign_excludes_off_legs_from_soak_time(
     (shifted / 'campaign.json').write_text(
         json.dumps(tampered, sort_keys=True))
     with pytest.raises(ValueError, match='soak measurement'):
-        m.verify_live_campaign(shifted, manifest, 'soak')
+        _verify(m, shifted, manifest, 'soak')
 
 
 def test_verify_live_campaign_refuses_soak_schedule_drift(
@@ -987,7 +1164,7 @@ def test_verify_live_campaign_refuses_soak_schedule_drift(
         else:
             path.write_bytes((json.dumps(doc, sort_keys=True) + '\n').encode())
     with pytest.raises(ValueError, match='schedule differs'):
-        m.verify_live_campaign(export, manifest, 'soak')
+        _verify(m, export, manifest, 'soak')
 
 
 def _export_argv_export(cmd):

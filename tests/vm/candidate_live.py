@@ -560,6 +560,40 @@ def campaign_totals(result):
             'cleanup_mismatches': str(mismatches)}
 
 
+def rederived_metric(window, metric):
+    """Throughput/p99 re-derived from retained operation bytes.
+
+    The cached throughput/p99 in a campaign export are guest
+    claims; the retained evidence is completed_units,
+    operation_seconds, and the window. Re-derivation repeats
+    the collector's exact arithmetic (units over elapsed,
+    nearest-rank p99 over the operation latencies), so
+    honest bytes reproduce the cached values bit for bit
+    while a tampered cache refuses. Value bounds (elapsed,
+    counts) belong to the window check; this helper only
+    refuses misshapen retention that would crash the
+    arithmetic. Raises ValueError otherwise.
+    """
+    if not isinstance(metric, dict):
+        raise ValueError('campaign workload metric differs')
+    start, end = int(window['start_ns']), int(window['end_ns'])
+    elapsed = (end - start) / 10**9
+    if elapsed <= 0:
+        raise ValueError('campaign workload window differs')
+    seconds = metric.get('operation_seconds')
+    if not isinstance(seconds, list) or not seconds:
+        raise ValueError('campaign workload operations absent')
+    for sample in seconds:
+        if type(sample) not in (int, float) \
+                or not math.isfinite(sample) or sample < 0:
+            raise ValueError(
+                'campaign workload operations differ')
+    units = int(metric['completed_units'])
+    ordered = sorted(seconds)
+    return {'throughput': units / elapsed,
+            'p99': ordered[math.ceil(.99 * len(ordered)) - 1]}
+
+
 def _verify_workload_window(observation, required_seconds):
     from support.candidate_input import candidate
     candidate.exact(observation, {'elapsed_seconds', 'window', 'metrics', 'samples'},
@@ -589,6 +623,13 @@ def _verify_workload_window(observation, required_seconds):
                                  'map_memlock_bytes'}, 'campaign sample')
         if int(sample['rss_kib']) > 256 * 1024:
             raise ValueError('campaign userspace RSS exceeded 256 MiB')
+    for kind in ('block', 'network'):
+        derived = rederived_metric(window, metrics[kind])
+        for field in ('throughput', 'p99'):
+            if metrics[kind][field] != derived[field]:
+                raise ValueError(
+                    'campaign workload %s differs from '
+                    'retained operations: %s' % (field, kind))
 
 
 def _verify_leg_events(data):
@@ -673,6 +714,8 @@ def _verify_leg_content(ordinal, leg, files):
     from support.candidate_input import candidate
     if leg.get('status') != 'PASS':
         raise ValueError('campaign leg did not pass: ' + str(ordinal))
+    if leg.get('mode') != 'off' and leg.get('product_exit') != 0:
+        raise ValueError('campaign leg exit differs: ' + str(ordinal))
     if leg.get('retained_verification') != 'verified-capture':
         raise ValueError('campaign leg capture unverified: ' + str(ordinal))
     if leg.get('cleanup_errors'):
@@ -779,16 +822,31 @@ def _verify_overhead_targets(legs, comparisons):
         if row.get('target_required') is not True:
             raise ValueError('campaign comparison target flag differs')
         baselines, observers = pairs[row['mode']]
+        # The verdict replays from re-derived metrics, never
+        # the cached values: every leg's cache already proved
+        # equal to its retained operations above, and the
+        # comparison consumes the re-derivation so a cache
+        # that ever disagreed with its bytes could not move
+        # the verdict.
+        def derived(entry):
+            workload = entry['workload']
+            runs = dict(rederived_metric(
+                workload['window'],
+                workload['metrics'][row['metric']]))
+            runs['valid'] = True
+            runs['counts_ok'] = True
+            return runs
         measurement = compare(row['mode'] + '/' + row['metric'],
-            [entry['workload']['metrics'][row['metric']] for entry in baselines],
-            [entry['workload']['metrics'][row['metric']] for entry in observers])
+            [derived(entry) for entry in baselines],
+            [derived(entry) for entry in observers])
         status, reason = assess(measurement)
         if (status, reason) != (row['status'], row['reason']) \
                 or measurement != row['measurement']:
             raise ValueError('campaign comparison differs from retained workloads')
 
 
-def verify_live_campaign(evidence_dir, manifest, requested_mode):
+def verify_live_campaign(evidence_dir, manifest, requested_mode,
+                         campaign_data):
     """Re-verify one exported campaign from retained bytes; return totals.
 
     Checks the campaign schema and candidate binding, the exact
@@ -805,22 +863,38 @@ def verify_live_campaign(evidence_dir, manifest, requested_mode):
     verified totals dict (canonical decimal strings) for the
     host exit.json oracle.
 
+    campaign_data carries the campaign.json bytes resolved
+    through the caller's trust anchor (the signed source
+    digests at qualification time, the fresh export at
+    campaign time): the verifier opens no campaign file by
+    bare path. Every other compared byte chains to those
+    bytes: leg observations must equal the campaign copy,
+    capture files must match the retained digests, event
+    inventories must match the retained counts, and the
+    progress chain fields must match the campaign header.
     The export mode must equal the requested mode: the
     export is attacker-influenced, so the caller binds what
-    it asked for and a mismatch refuses. Soak mixed time
+    it asked for and a mismatch refuses. The campaign's
+    source, toolchain, build receipt, and runtime files must
+    equal the manifest under qualification, so a campaign
+    run against another candidate refuses. Soak mixed time
     covers mixed legs only (off legs are excluded, never
-    counted), and every mixed leg must run the soak
-    schedule (attempt-record-summary).
+    counted), every mixed leg must run the soak schedule
+    (attempt-record-summary), and overlapping workload
+    windows refuse (overlap would double-count time).
     """
     from support.candidate_input import candidate
     base = Path(evidence_dir)
     if base.is_symlink() or not base.is_dir():
         raise ValueError('campaign evidence root differs')
-    try:
-        data = candidate.read_regular(base / 'campaign.json', CAMPAIGN_JSON_LIMIT)
-    except OSError:
+    if not isinstance(campaign_data, (bytes, bytearray)) \
+            or not campaign_data \
+            or len(campaign_data) > CAMPAIGN_JSON_LIMIT:
         raise ValueError('campaign evidence incomplete: campaign.json')
-    result = json.loads(data, object_pairs_hook=candidate.unique)
+    result = json.loads(bytes(campaign_data),
+                        object_pairs_hook=candidate.unique)
+    if not isinstance(result, dict):
+        raise ValueError('campaign evidence incomplete: campaign.json')
     mode = result.get('mode')
     if mode not in CAMPAIGN_MODES:
         raise ValueError('unknown live campaign mode: ' + str(mode))
@@ -847,6 +921,18 @@ def verify_live_campaign(evidence_dir, manifest, requested_mode):
     candidate_id = candidate.digest_bytes(candidate.canonical(manifest))
     if result['candidate'] != candidate_id:
         raise ValueError('campaign candidate differs')
+    if result['source'] != manifest.get('source'):
+        raise ValueError(
+            'campaign source differs from the candidate manifest')
+    if result['toolchain'] != manifest.get('toolchain'):
+        raise ValueError(
+            'campaign toolchain differs from the candidate manifest')
+    if result['build_receipt_sha256'] != manifest.get('build_receipt_sha256'):
+        raise ValueError(
+            'campaign build receipt differs from the candidate manifest')
+    if result['runtime_files'] != manifest.get('files'):
+        raise ValueError(
+            'campaign runtime files differ from the candidate manifest')
     candidate.hexid(result['btf_sha256'])
     candidate.hexid(result['config_sha256'])
     candidate.hexid(result['build_receipt_sha256'])
@@ -915,6 +1001,13 @@ def verify_live_campaign(evidence_dir, manifest, requested_mode):
                     raise ValueError(
                         'campaign soak schedule differs: '
                         + str(leg.get('mode')))
+            spans = sorted(
+                (int(leg['workload']['window']['start_ns']),
+                 int(leg['workload']['window']['end_ns']))
+                for leg in legs)
+            for first, second in zip(spans, spans[1:]):
+                if second[0] < first[1]:
+                    raise ValueError('campaign soak windows overlap')
             measured = sum(int(leg['workload']['window']['end_ns'])
                            - int(leg['workload']['window']['start_ns'])
                            for leg in mixed) / 10**9
@@ -1073,8 +1166,14 @@ def host(mode, candidate=None, opts=None):
             result = json.loads((export / 'campaign.json').read_bytes())
             if result['candidate'] != selected.digest or result['cleanup']['before'] != result['cleanup']['after']:
                 raise ValueError('candidate receipt identity or cleanup mismatch')
+            # The host anchors to its fresh export: these bytes
+            # were just written by this run in this process, so
+            # reading them here crosses no trust boundary. The
+            # qualification path instead resolves the same bytes
+            # through the signed source digests.
             totals = verify_live_campaign(
-                export, selected.manifest, mode)
+                export, selected.manifest, mode,
+                (export / 'campaign.json').read_bytes())
             (out / 'exit.json').write_text(json.dumps(
                 {'guest_exit': proc.returncode, 'candidate': selected.digest,
                  'totals': totals}) + '\n')

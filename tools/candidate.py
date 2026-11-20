@@ -1590,12 +1590,59 @@ def _live_campaigns():
     return candidate_live
 
 
+def _resolve_live_files(retained, base):
+    """Campaign bytes resolved only through signed digests.
+
+    Every live scalar binding must name its campaign's own
+    export file (product: live/<mode>/campaign.json, oracle:
+    live/<mode>-exit.json); a binding naming any other file
+    is a wrong-file replay and refuses, as do disagreeing
+    digests for one file or bytes that fail the signed
+    digest. Returns {relpath: bytes} for the four campaign
+    files. Raises ValueError otherwise.
+    """
+    sources = retained.get("sources")
+    require(isinstance(sources, dict),
+            "live campaign bindings are missing")
+    resolved = {}
+    for mode in LIVE_CAMPAIGNS:
+        for side, leaf in (
+                ("product", "live/%s/campaign.json" % mode),
+                ("oracle", "live/%s-exit.json" % mode)):
+            bindings = sources.get(side)
+            require(isinstance(bindings, dict),
+                    "live campaign bindings are missing")
+            digests = set()
+            for name in LIVE_TOTALS:
+                binding = bindings.get("%s_%s" % (mode, name))
+                require(isinstance(binding, dict)
+                        and binding.get("file") == leaf,
+                        "live %s replay resolves outside "
+                        "the campaign export" % mode)
+                digests.add(hexid(binding.get("sha256")))
+            require(len(digests) == 1,
+                    "live %s bindings disagree" % mode)
+            try:
+                data = read_regular(Path(base) / relative(leaf))
+            except OSError as error:
+                raise ValueError(
+                    "live %s evidence is missing" % leaf) \
+                    from error
+            require(digest_bytes(data) == digests.pop(),
+                    "live %s file changed" % leaf)
+            resolved[leaf] = data
+    return resolved
+
+
 def verify_live_campaigns(retained, base, manifest):
     """Re-verify both retained live campaigns from bytes.
 
     The live gate binds the overhead and soak campaigns'
     totals as <campaign>_<total> product/oracle scalars,
-    so pool-only evidence can never satisfy it. Each
+    so pool-only evidence can never satisfy it. The four
+    campaign files resolve only through the signed source
+    digests: no replay file opens by bare path, and every
+    compared byte traces to a signed digest. Each
     live/<campaign> export must pass the campaign
     verifier under its requested mode, and the verified
     totals must equal the bound scalars on both sides.
@@ -1604,11 +1651,13 @@ def verify_live_campaigns(retained, base, manifest):
     owns the inputs shape. Raises ValueError otherwise.
     """
     live = _live_campaigns()
+    files = _resolve_live_files(retained, base)
     candidate_id = digest_bytes(canonical(manifest))
     for mode in LIVE_CAMPAIGNS:
         try:
             totals = live.verify_live_campaign(
-                Path(base) / "live" / mode, manifest, mode)
+                Path(base) / "live" / mode, manifest, mode,
+                files["live/%s/campaign.json" % mode])
         except (OSError, ValueError) as error:
             raise ValueError(
                 "live %s evidence refuses: %s"
@@ -1621,9 +1670,10 @@ def verify_live_campaigns(retained, base, manifest):
                         "live %s %s differs from retained "
                         "bytes" % (side, key))
         try:
-            exit_doc = read_json(
-                Path(base) / ("live/%s-exit.json" % mode))
-        except OSError as error:
+            exit_doc = json.loads(
+                files["live/%s-exit.json" % mode],
+                object_pairs_hook=unique)
+        except ValueError as error:
             raise ValueError(
                 "live %s oracle is missing" % mode) from error
         require(isinstance(exit_doc, dict)
