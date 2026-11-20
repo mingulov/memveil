@@ -543,6 +543,7 @@ def test_journey_tampered_executable_post_prep_refuses(
         sealed, tmp_path):
     import hashlib
     import json
+    import shutil
     record = tmp_path / 'prep.json'
     result = subprocess.run(
         [sys.executable,
@@ -552,26 +553,31 @@ def test_journey_tampered_executable_post_prep_refuses(
         cwd=str(ROOT))
     assert result.returncode == 0, result.stderr[-2000:]
     doc = json.loads(record.read_text())
-    staged = Path(doc['suites']['deb']['staged'])
-    saved = staged.read_bytes()
-    try:
-        with staged.open('ab') as stream:
-            stream.write(b'# tampered-post-prep\n')
-        environment = candidate_clean_env()
-        environment.update(sealed)
-        environment['MV_JOURNEY_PREP'] = str(record)
-        result = _launch_journey('deb', environment,
-                                 'journey_gate_matrix')
-        combined = result.stdout + result.stderr
-        assert result.returncode == 2, combined
-        assert 'changed' in combined, combined
-    finally:
-        # Restore the staged bytes so later tests inherit
-        # no tamper.
-        staged.write_bytes(saved)
-        assert hashlib.sha256(
-            staged.read_bytes()).hexdigest() \
-            == doc['suites']['deb']['sha256']
+    original = Path(doc['suites']['deb']['path'])
+    original_digest = hashlib.sha256(
+        original.read_bytes()).hexdigest()
+    assert original_digest == doc['suites']['deb']['sha256']
+    # Mutate a private copy, never the shared build output:
+    # the copy lives in this test's directory, the record is
+    # repointed at it, and no restoration is needed.
+    private = tmp_path / 'private-exe'
+    shutil.copyfile(original, private)
+    private.chmod(0o755)
+    doc['suites']['deb']['staged'] = str(private)
+    record.write_text(json.dumps(doc))
+    with private.open('ab') as stream:
+        stream.write(b'# tampered-post-prep\n')
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MV_JOURNEY_PREP'] = str(record)
+    result = _launch_journey('deb', environment,
+                             'journey_gate_matrix')
+    combined = result.stdout + result.stderr
+    assert result.returncode == 2, combined
+    assert 'changed' in combined, combined
+    assert hashlib.sha256(
+        original.read_bytes()).hexdigest() \
+        == original_digest
 
 
 def test_journey_record_non_string_path_refuses(sealed,
