@@ -1139,6 +1139,26 @@ def test_release_seal_job_holds_no_secrets():
     assert "GH_TOKEN" not in text
 
 
+def test_release_checkouts_persist_no_credentials():
+    doc = _release_workflow()
+    seen = 0
+    for job, spec in sorted(doc["jobs"].items()):
+        for step in spec.get("steps", []):
+            if not str(step.get("uses", "")).startswith(
+                    "actions/checkout@"):
+                continue
+            seen += 1
+            assert (step.get("with") or {}).get(
+                "persist-credentials") is False, job
+    assert seen == 6, seen
+
+
+def test_release_seal_permissions_are_minimal():
+    doc = _release_workflow()
+    assert doc["jobs"]["seal"]["permissions"] == {
+        "contents": "read", "actions": "write"}
+
+
 def test_release_custody_runs_no_sealed_harness():
     doc = _release_workflow()
     whole = json.dumps(doc["jobs"])
