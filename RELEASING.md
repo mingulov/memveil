@@ -544,5 +544,3 @@ and publishes the release with the qualified notes.
 Watch every dispatch (`gh run list -w release.yml`,
 `gh run view <id>`); a failed stage is re-dispatched,
 never patched in place.
-
-```
