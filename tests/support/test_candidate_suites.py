@@ -162,7 +162,7 @@ def test_perf_workload_derouted_skips_with_reason(sealed):
         'de-routed suite executed its runner'
 
 
-def test_unlisted_dispatch_skip_fails(sealed):
+def test_unarmed_dispatch_skip_preserved(sealed):
     environment = {key: value
                    for key, value in candidate_clean_env().items()
                    if not key.startswith('MEMVEIL_VM_')}
@@ -174,9 +174,63 @@ def test_unlisted_dispatch_skip_fails(sealed):
         env=environment, capture_output=True, text=True,
         timeout=120)
     combined = result.stdout + result.stderr
-    assert result.returncode == 1, combined
-    assert 'FAIL' in combined and 'deferral' in combined, \
-        combined
+    assert result.returncode == 77, combined
+    assert 'SKIP' in combined, combined
+    assert 'FAIL' not in combined, combined
+
+
+def test_unarmed_runner_skip_preserved_end_to_end(sealed):
+    environment = {key: value
+                   for key, value in candidate_clean_env().items()
+                   if not key.startswith('MEMVEIL_VM_')}
+    environment.update(sealed)
+    result = subprocess.run(
+        [sys.executable,
+         str(ROOT / 'tests/support/candidate_suite.py'),
+         'vm-live-soak'],
+        env=environment, capture_output=True, text=True,
+        timeout=120)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 77, combined
+    assert 'SKIP' in combined, combined
+    assert 'FAIL' not in combined, combined
+
+
+def test_armed_unexpected_skip_fails(sealed, monkeypatch,
+                                     capsys):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support import candidate_suite as dispatch_mod
+    from support import candidate_input
+    for key in list(os.environ):
+        if key in candidate_input.OVERRIDES \
+                or key.startswith(
+                    ('MEMVEIL_VM_', 'MEMVEIL_TEST_')):
+            monkeypatch.delenv(key, raising=False)
+    for key, value in sealed.items():
+        monkeypatch.setenv(key, value)
+    from types import SimpleNamespace
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=77)
+    monkeypatch.setattr(dispatch_mod.subprocess, 'run',
+                        fake_run)
+    # Unarmed: the matrix lane never executes and 77 passes.
+    assert dispatch_mod.dispatch(
+        'vm-kernels', [], dict(os.environ)) == 77
+    assert calls == []
+    # Armed: the lane executes, and its 77 fails.
+    monkeypatch.setenv('MEMVEIL_VM_KERNELS', '1')
+    assert dispatch_mod.dispatch(
+        'vm-kernels', [], dict(os.environ)) == 1
+    assert len(calls) == 1
+    assert 'kernel-matrix' in calls[0][1]
+    assert 'after arming' in capsys.readouterr().err
+    # A suite with no arming variable fails any 77.
+    assert dispatch_mod.dispatch(
+        'perf-replay', [], dict(os.environ)) == 1
+    assert 'deferral' in capsys.readouterr().err
 
 
 def test_deferred_allowlist_shape_validated():

@@ -12,14 +12,43 @@ sys.path.insert(0, str(ROOT / 'tests'))
 from support.candidate_input import load
 from support.deferred_skips import lookup
 
+# Arming variable per dispatched suite that needs one: an
+# unarmed 77 passes through, an armed 77 fails as an
+# unexpected skip. Variables mirror the runners (live
+# campaigns arm per mode in tests/vm/candidate_live.py;
+# the matrix lanes arm in the vm branch below). A suite
+# without an entry runs unarmed and any 77 from it fails.
+SUITE_ARMING = {
+    'perf-overhead': 'MEMVEIL_VM_PERF',
+    'vm-live-soak': 'MEMVEIL_VM_LIVE_SOAK',
+    'vm-kernels': 'MEMVEIL_VM_KERNELS',
+    'vm-scenarios': 'MEMVEIL_VM_SCENARIOS',
+}
 
-def _checked(suite, code):
-    """Fail an unlisted suite skip; listed skips pass through."""
-    if code == 77 and lookup(suite) is None:
+
+def _checked(suite, code, live):
+    """Keep an unarmed 77; fail a skip once armed.
+
+    A deferred suite always passes its skip through. A
+    suite with an arming variable passes 77 through only
+    while unarmed; after arming, or for a suite with no
+    arming variable, 77 is an unexpected skip and fails.
+    """
+    if code != 77:
+        return code
+    if lookup(suite) is not None:
+        return code
+    var = SUITE_ARMING.get(suite)
+    if var is not None and live.get(var) != '1':
+        return code
+    if var is None:
         print('FAIL: suite %s skipped without a deferral '
               'entry' % suite, file=sys.stderr, flush=True)
-        return 1
-    return code
+    else:
+        print('FAIL: suite %s skipped after arming '
+              '(%s=1)' % (suite, var),
+              file=sys.stderr, flush=True)
+    return 1
 
 
 def _run(suite, argv, live, selected):
@@ -62,7 +91,7 @@ def _run(suite, argv, live, selected):
             else 'MEMVEIL_VM_KERNELS'
         if live.get(armed) != '1':
             print('SKIP: needs ' + armed + '=1')
-            return _checked(suite, 77)
+            return _checked(suite, 77, live)
         args = [str(ROOT / 'tools/kernel-matrix')]
         if scenarios:
             args += ['--scenarios', '--kernels', '7.0',
@@ -99,7 +128,7 @@ def _run(suite, argv, live, selected):
     else:
         command = [sys.executable, *command]
     return _checked(suite, subprocess.run(
-        command, cwd=ROOT, env=env).returncode)
+        command, cwd=ROOT, env=env).returncode, live)
 
 
 def dispatch(suite, argv, env):
@@ -108,8 +137,9 @@ def dispatch(suite, argv, env):
     Returns the suite exit code. Partial or otherwise
     invalid candidate inputs print a diagnostic and raise
     SystemExit(2); dispatch never falls back to the build
-    tree. A suite skip passes only with a deferral entry;
-    an unlisted skip fails. Extra argv entries are appended
+    tree. An unarmed suite passes 77 through; a deferred
+    suite passes its recorded skip; any other 77 fails as
+    an unexpected skip. Extra argv entries are appended
     to the suite command.
     """
     try:
@@ -119,7 +149,8 @@ def dispatch(suite, argv, env):
         raise SystemExit(2)
     atexit.register(selected.close)
     live = os.environ if env is None else env
-    return _checked(suite, _run(suite, argv, live, selected))
+    return _checked(suite, _run(suite, argv, live, selected),
+                    live)
 
 
 if __name__ == '__main__':
