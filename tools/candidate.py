@@ -1270,7 +1270,8 @@ def _verify_q_diff(root, c_commit, q_commit):
         require(len(parents) == 1,
                 "evidence-only history cannot contain merges")
         for path in _git_paths(root, "diff", "--name-only",
-                               "-z", parents[0], commit):
+                               "--no-renames", "-z", parents[0],
+                               commit):
             require(evidence_only_path(path),
                     "Q is not evidence-only: " + path)
 
@@ -1894,8 +1895,8 @@ def qualify_candidate(source, manifest_path, qualification_path,
     commit = git(source, "rev-parse", "HEAD")
     _verify_q_diff(source, manifest["source"]["commit"],
                    commit)
-    changes = _git_paths(source, "diff", "--name-only", "-z",
-                         "HEAD")
+    changes = _git_paths(source, "diff", "--name-only",
+                         "--no-renames", "-z", "HEAD")
     changes += _git_paths(source, "ls-files", "--others",
                           "--exclude-standard", "-z")
     for path in changes:

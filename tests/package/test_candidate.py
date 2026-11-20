@@ -1622,6 +1622,26 @@ def test_verify_q_diff_rejects_non_evidence(workshop, tmp_path,
         m.verify_q_diff(base, merged)
 
 
+def test_verify_q_diff_rejects_source_to_evidence_rename(
+        workshop, tmp_path, monkeypatch):
+    m, fix = seal_paths(workshop, tmp_path)
+    root = fix["root"]
+    commit = git(root, "rev-parse", "HEAD")
+    (root / "packaging" / "qualifications").mkdir(
+        parents=True)
+    # A rename out of the source tree reads as one evidence
+    # path under rename detection; the deleted source side
+    # must still fail the evidence-only rule.
+    git(root, "mv", "src/engine.txt",
+        "packaging/qualifications/renamed.json")
+    renamed = _commit_as(
+        root, "Q rename",
+        "packaging/qualifications/renamed.json")
+    monkeypatch.chdir(root)
+    with pytest.raises(ValueError, match="evidence-only"):
+        m.verify_q_diff(commit, renamed)
+
+
 def test_tested_payload_matches_candidate_closure(workshop,
                                                   tmp_path):
     m, manifest = sealed_manifest(workshop, tmp_path)
@@ -1680,6 +1700,18 @@ def test_qualify_candidate_exports_tested_payload(workshop,
     assert out.read_bytes() == (
         root / "packaging" / "tested-payload.sha256"
     ).read_bytes()
+    # A staged rename out of the source tree reads as one
+    # evidence path under rename detection; the worktree
+    # check must still see the moved source side.
+    git(root, "mv", "src/engine.txt",
+        "packaging/qualifications/staged.json")
+    with pytest.raises(ValueError, match="non-evidence"):
+        m.qualify_candidate(
+            str(root), ctx["manifest_path"], q_repo,
+            ctx["policy_path"], archive,
+            Path(tmp_path) / "tested-renamed.txt")
+    git(root, "mv", "packaging/qualifications/staged.json",
+        "src/engine.txt")
     (root / "src" / "dirty.txt").write_text("dirty\n")
     with pytest.raises(ValueError, match="non-evidence"):
         m.qualify_candidate(
