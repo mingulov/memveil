@@ -1911,6 +1911,32 @@ def test_inventory_rejects_symlinked_row_directory(workshop,
                                source_tree=str(ctx["root"]))
 
 
+def test_inventory_rejects_tampered_vng_cmd(workshop,
+                                            tmp_path):
+    m, ctx, evidence, q_path, _ = _matrix_qualified(
+        workshop, tmp_path)
+    row = evidence / "matrix" / MATRIX_ROW
+    # Honest presence first: the boot command line is
+    # allowlisted evidence, and the row receipt still
+    # excludes its raw bytes.
+    (row / "vng-cmd.txt").write_text("vng --run guest\n")
+    receipt = json.loads((row / "receipt.json").read_text())
+    assert "vng-cmd.txt" not in [
+        entry["name"] for entry in receipt["files"]]
+    _resign_matrix_inputs(m, ctx, evidence, q_path)
+    assert m.verify_qualification(
+        ctx["manifest_path"], q_path, ctx["policy_path"],
+        evidence, source_tree=str(ctx["root"]))["ok"] is True
+    # The attack: the redaction-replay input changes after
+    # signing. The signed inventory binds it, so the
+    # substitution fails before any evaluation.
+    (row / "vng-cmd.txt").write_text("vng --run other\n")
+    with pytest.raises(ValueError, match="inventory differs"):
+        m.verify_qualification(ctx["manifest_path"], q_path,
+                               ctx["policy_path"], evidence,
+                               source_tree=str(ctx["root"]))
+
+
 def test_original_signature_rejects_mutated_evidence(workshop,
                                                      tmp_path):
     m, ctx, evidence, q_path, doc = _matrix_qualified(

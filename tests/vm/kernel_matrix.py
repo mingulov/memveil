@@ -3977,6 +3977,7 @@ _ROW_TOP_FILES = frozenset({
     "report.json", "report-json.stderr", "report.out",
     "report.stderr", "sev-sysfs.txt", "udev.exit", "udev.out",
     "uname.txt", "version.txt", "workload.txt",
+    "vng-cmd.txt",
 })
 _ROW_TOP_RES = (
     re.compile(r"progs[0-9]+\.json"),
@@ -4067,9 +4068,12 @@ def row_receipt_files(row_dir):
     """Hashed inventory of one row dir, in receipt order.
 
     Every regular file must be allowlisted evidence; the
-    receipt itself and the raw boot command line are known
-    but never inventoried. Raises ValueError on symlinks,
-    unreadable files, or unknown evidence.
+    receipt itself and the raw boot command line stay out
+    of this row-local transcription (raw command lines
+    never cross into receipts) while the outer evidence
+    inventory binds the command line bytes. Raises
+    ValueError on symlinks, unreadable files, or unknown
+    evidence.
     """
     root = Path(row_dir)
     found = []

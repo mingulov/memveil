@@ -1546,8 +1546,10 @@ def _row_inventory_files(allowlist, row):
     receipt and cached oracle inputs are required and hashed
     explicitly, since their bytes are evidence while the row-local
     transcription inventory never authenticates itself. The raw
-    boot command line stays forensic-only, matching the row
-    receipt construction.
+    boot command line is allowlisted evidence too: the redaction
+    replay reads it, so the signed inventory binds its bytes
+    (only the digest crosses; the row receipt itself still
+    excludes raw command lines).
     """
     found = {}
     for dirpath, dirnames, filenames in os.walk(row):
@@ -1560,8 +1562,7 @@ def _row_inventory_files(allowlist, row):
         for name in sorted(filenames):
             path = Path(dirpath) / name
             rel = path.relative_to(row).as_posix()
-            if rel in ("receipt.json", "oracle-inputs.json",
-                       "vng-cmd.txt"):
+            if rel in ("receipt.json", "oracle-inputs.json"):
                 continue
             if path.is_symlink() or not path.is_file():
                 raise ValueError(
