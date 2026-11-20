@@ -193,6 +193,8 @@ def checkout_identity(exclude=()):
 # source. The default lives under the checkout root;
 # MV_JOURNEY_PREP_DIR relocates it.
 JOURNEY_PREP_DIRNAME = '.candidate-prep'
+JOURNEY_RECORDS_DIRNAME = 'records'
+JOURNEY_STAGES_DIRNAME = 'stages'
 
 
 def journey_prep_dir():
@@ -225,6 +227,19 @@ def journey_prep_dir():
     return candidate
 
 
+def journey_records_dir():
+    """Records subdir inside the tool-owned prep directory.
+
+    Every prep record lives under this one directory;
+    staged executables live under the sibling stages
+    root instead. Prep and launch derive the same path
+    through this one function, never by recomputing the
+    name; a record destination anywhere else refuses.
+    """
+    return str(Path(journey_prep_dir())
+               / JOURNEY_RECORDS_DIRNAME)
+
+
 def journey_staging_root():
     """Staging root inside the tool-owned prep directory.
 
@@ -236,7 +251,8 @@ def journey_staging_root():
     through this one function, never by recomputing the
     name.
     """
-    return str(Path(journey_prep_dir()) / 'stages')
+    return str(Path(journey_prep_dir())
+               / JOURNEY_STAGES_DIRNAME)
 
 
 def refuse_symlinked_path(path):
@@ -266,27 +282,29 @@ def refuse_symlinked_path(path):
 def resolve_journey_record(name):
     """Validate a prep record path; return its absolute form.
 
-    The record must live under the tool-owned prep
-    directory, so records, stages, and publication
-    scratch share the one excluded location. Refuses an
+    The record must live under the records subdir of the
+    tool-owned prep directory (staged executables live
+    under the sibling stages subdir instead), so records,
+    stages, and publication scratch share the one
+    excluded location while staying disjoint. Refuses an
     empty name, a symlink at the record path itself or
     any parent component, and any destination outside
-    the directory. Both the prep tool and the launcher
-    validate through this one function, before any
-    staging, exclusion, or publication step derives
+    the records subdir. Both the prep tool and the
+    launcher validate through this one function, before
+    any staging, exclusion, or publication step derives
     paths from the record.
     """
     if not name:
         raise ValueError(
             'journey prep record must live under %s'
-            % JOURNEY_PREP_DIRNAME)
+            % JOURNEY_RECORDS_DIRNAME)
     raw = Path(os.path.abspath(name))
     refuse_symlinked_path(raw)
     resolved = raw.resolve()
-    if Path(journey_prep_dir()) not in resolved.parents:
+    if Path(journey_records_dir()) not in resolved.parents:
         raise ValueError(
             'journey prep record must live under %s: %s'
-            % (JOURNEY_PREP_DIRNAME, name))
+            % (JOURNEY_RECORDS_DIRNAME, name))
     return str(resolved)
 
 

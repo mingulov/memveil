@@ -142,7 +142,8 @@ extracted robustness suite reuses the supplied archive. Pacing remains
 segments. Native pacing/oracle helpers retain separate identities; they do
 not replace candidate product bytes. The `deb` and `rpm-journey` suites
 launch prebuilt executables: run
-`tests/support/journey_prep.py .candidate-prep/prep.json` first and
+`tests/support/journey_prep.py .candidate-prep/records/prep.json`
+first and
 point `MV_JOURNEY_PREP` at its record; dispatch refuses without it and
 never invokes a build itself.
 

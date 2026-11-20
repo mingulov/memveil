@@ -14,9 +14,10 @@ symlinks anywhere in the staging path refuse. Usage:
     tests/support/journey_prep.py RECORD
 
 RECORD is the JSON record file to write, under the
-tool-owned prep directory (MV_JOURNEY_PREP_DIR
-relocates it from the checkout default); dispatch
-reads it through MV_JOURNEY_PREP. The record
+records subdir of the tool-owned prep directory
+(MV_JOURNEY_PREP_DIR relocates it from the checkout
+default); dispatch reads it through MV_JOURNEY_PREP.
+The record
 binds the checkout the executables were built from
 (HEAD commit plus worktree digest), the dispatched
 suite's build target, and the hashed staged bytes, so
@@ -42,7 +43,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tests'))
 from support.candidate_suite import JOURNEY_SUITES, \
     checkout_identity, journey_identity_excludes, \
-    journey_prep_dir, journey_staging_root, \
+    journey_prep_dir, journey_records_dir, \
+    journey_staging_root, \
     refuse_symlinked_path, resolve_journey_record
 
 SCHEMA = 'memveil-journey-prep/1'
@@ -128,8 +130,16 @@ def _stage_bytes(staged, data, suite):
     Exclusive creation fails when the path already exists,
     so a previous stage is never overwritten; no-follow
     refuses a planted symlink instead of writing through
-    it.
+    it. The destination must stay under the stages root:
+    a stage write aimed at the records subdir (or
+    anywhere else) refuses instead of replacing tool
+    outputs.
     """
+    root = Path(journey_staging_root())
+    if root not in Path(os.path.abspath(staged)).parents:
+        raise ValueError(
+            'fixture prep stages outside the stages '
+            'directory: %s' % staged)
     try:
         fd = os.open(staged, os.O_WRONLY | os.O_CREAT
                      | os.O_EXCL | os.O_NOFOLLOW, 0o700)
@@ -161,16 +171,16 @@ def _publish_record_atomically(raw_abs, record_abs, payload):
     or the new one, never partial JSON. The unresolved
     path is replaced, so a planted leaf symlink is
     swapped, never followed. Publication stays inside
-    the tool-owned prep directory: a record path outside
-    it refuses instead of scattering scratch beside
-    user paths. A failed publish removes the temp file
-    and refuses.
+    the records subdir of the tool-owned prep directory:
+    a record path outside it refuses instead of
+    scattering scratch beside user paths. A failed
+    publish removes the temp file and refuses.
     """
-    top = Path(journey_prep_dir())
+    records = Path(journey_records_dir())
     parent = record_abs.parent
-    if parent != top and top not in parent.parents:
+    if parent != records and records not in parent.parents:
         raise ValueError(
-            'fixture prep publishes outside the owned '
+            'fixture prep publishes outside the records '
             'directory: %s' % record_abs)
     try:
         fd, tmp_name = tempfile.mkstemp(
@@ -232,15 +242,17 @@ def build_executable(target):
 def prepare(record_path):
     """Build every journey suite; write the record file.
 
-    The record lives under the tool-owned prep directory
-    (refused elsewhere). The tracked-content boundary
-    check runs before any directory creation, mode
-    change, or write: only a prep directory empty of
-    tracked content proceeds to creation. Checkout
-    identity is recorded before the first build and
-    re-verified after the last: the two must agree, so
-    an edit during prep refuses instead of mislabelling
-    an older executable.
+    The record lives under the records subdir of the
+    tool-owned prep directory (refused elsewhere);
+    staged executables live under the sibling stages
+    subdir. The tracked-content boundary check runs
+    before any directory creation, mode change, or
+    write: only a prep directory empty of tracked
+    content proceeds to creation. Checkout identity is
+    recorded before the first build and re-verified
+    after the last: the two must agree, so an edit
+    during prep refuses instead of mislabelling an older
+    executable.
     The prep directory holding every record, stage, and
     publication scratch file is excluded wholesale from
     the digest through the exclusion list shared with

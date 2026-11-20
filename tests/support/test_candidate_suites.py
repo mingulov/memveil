@@ -45,10 +45,10 @@ def candidate_clean_env():
 
 
 def _prep_record_path(tag):
-    """Unique record path inside the tool-owned prep dir."""
+    """Unique record path in the prep dir's records subdir."""
     sys.path.insert(0, str(ROOT / 'tests'))
-    from support.candidate_suite import journey_prep_dir
-    return Path(journey_prep_dir()) / (
+    from support.candidate_suite import journey_records_dir
+    return Path(journey_records_dir()) / (
         '%s-%d-%s.json'
         % (tag, os.getpid(), uuid.uuid4().hex[:8]))
 
@@ -583,12 +583,13 @@ def test_journey_identity_excludes_prep_dir_wholesale():
     top = Path(journey_prep_dir())
     top.mkdir(parents=True, exist_ok=True)
     tag = 'wholesale-%d' % os.getpid()
-    record = top / (tag + '.json')
+    record = top / 'records' / (tag + '.json')
+    record.parent.mkdir(parents=True, exist_ok=True)
     record.write_text('{}\n')
     staged = top / 'stages' / 'stage' / 'staged-exe'
     staged.parent.mkdir(parents=True, exist_ok=True)
     staged.write_bytes(b'staged-bytes\n')
-    scratch = top / (tag + '.json.stale.tmp')
+    scratch = top / 'records' / (tag + '.json.stale.tmp')
     scratch.write_bytes(b'{"partial": ')
     source = ROOT / (tag + '-source.py')
     source.write_text('print("source")\n')
@@ -633,14 +634,21 @@ def test_journey_identity_excludes_prep_dir_wholesale():
         'def journey_prep_dir') \
         + dispatch_text.count(
             'def journey_prep_dir') == 1
+    assert prep_text.count(
+        'def journey_records_dir') \
+        + dispatch_text.count(
+            'def journey_records_dir') == 1
     assert 'journey_identity_excludes(' in prep_text
     assert dispatch_text.count(
         'journey_identity_excludes(') >= 2
     assert 'journey_staging_root(' in prep_text
+    assert 'journey_records_dir(' in prep_text
     assert 'journey_prep_dir(' in prep_text
     assert '.candidate-prep' not in prep_text
     assert "'stages'" not in prep_text
     assert '.stages' not in prep_text
+    assert "'records'" not in prep_text
+    assert '.records' not in prep_text
 
 
 def test_journey_identity_hashes_outside_link_as_link(
@@ -859,7 +867,7 @@ def test_journey_prep_dir_refuses_tracked_content(
         with pytest.raises(ValueError, match='tracked'):
             journey_identity_excludes()
         with pytest.raises(ValueError, match='tracked'):
-            prep.prepare(str(top / 'prep.json'))
+            prep.prepare(str(top / 'records' / 'prep.json'))
     finally:
         if saved is None:
             os.environ.pop('GIT_INDEX_FILE', None)
@@ -915,7 +923,8 @@ def test_journey_prep_refuses_tracked_before_any_write(
             shutil.rmtree(top, ignore_errors=True)
             assert not os.path.lexists(top)
             with pytest.raises(ValueError, match='tracked'):
-                prep.prepare(str(top / 'prep.json'))
+                prep.prepare(
+                    str(top / 'records' / 'prep.json'))
             assert not os.path.lexists(top), \
                 'refused prep created its directory'
         finally:
@@ -963,6 +972,61 @@ def test_journey_record_outside_prep_dir_refuses(
         assert 'must live under' in combined, combined
     finally:
         stray.unlink(missing_ok=True)
+
+
+def test_journey_record_into_stages_refuses(
+        tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import journey_prep_dir, \
+        journey_staging_root
+    import support.journey_prep as prep
+    fake = tmp_path / 'fake-exe'
+    fake.write_bytes(b'#!/bin/sh\necho fake\n')
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    staged_record = Path(
+        journey_staging_root()) / 'prep.json'
+    with pytest.raises(ValueError, match='must live under'):
+        prep.prepare(str(staged_record))
+    assert not os.path.lexists(staged_record)
+    # The old top-level layout refuses too: records live
+    # only under the records subdir now.
+    legacy = Path(journey_prep_dir()) / 'prep.json'
+    with pytest.raises(ValueError, match='must live under'):
+        prep.prepare(str(legacy))
+    assert not os.path.lexists(legacy)
+
+
+def test_journey_stage_into_records_refuses(tmp_path):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import journey_records_dir
+    import support.journey_prep as prep
+    records = Path(journey_records_dir())
+    records.mkdir(parents=True, exist_ok=True)
+    aimed = records / 'smuggled-exe'
+    with pytest.raises(ValueError,
+                       match='outside the stages'):
+        prep._stage_bytes(aimed, b'#!/bin/sh\necho x\n',
+                          'deb')
+    assert not os.path.lexists(aimed)
+
+
+def test_journey_honest_layout_accepts(tmp_path,
+                                       monkeypatch):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import journey_records_dir, \
+        journey_staging_root
+    import support.journey_prep as prep
+    fake = tmp_path / 'fake-exe'
+    fake.write_bytes(b'#!/bin/sh\necho fake\n')
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    record_path = _prep_record_path('prep')
+    record = prep.prepare(str(record_path))
+    assert record_path.parent == Path(journey_records_dir())
+    root = Path(journey_staging_root())
+    for suite, entry in record['suites'].items():
+        assert root in Path(entry['staged']).parents, suite
 
 
 def test_journey_retired_stage_cleanup_keeps_record_valid(
