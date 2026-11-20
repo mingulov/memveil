@@ -788,7 +788,7 @@ def _verify_overhead_targets(legs, comparisons):
             raise ValueError('campaign comparison differs from retained workloads')
 
 
-def verify_live_campaign(evidence_dir, manifest):
+def verify_live_campaign(evidence_dir, manifest, requested_mode):
     """Re-verify one exported campaign from retained bytes; return totals.
 
     Checks the campaign schema and candidate binding, the exact
@@ -804,6 +804,13 @@ def verify_live_campaign(evidence_dir, manifest):
     ones. Raises ValueError on anything else; returns the
     verified totals dict (canonical decimal strings) for the
     host exit.json oracle.
+
+    The export mode must equal the requested mode: the
+    export is attacker-influenced, so the caller binds what
+    it asked for and a mismatch refuses. Soak mixed time
+    covers mixed legs only (off legs are excluded, never
+    counted), and every mixed leg must run the soak
+    schedule (attempt-record-summary).
     """
     from support.candidate_input import candidate
     base = Path(evidence_dir)
@@ -817,6 +824,13 @@ def verify_live_campaign(evidence_dir, manifest):
     mode = result.get('mode')
     if mode not in CAMPAIGN_MODES:
         raise ValueError('unknown live campaign mode: ' + str(mode))
+    if requested_mode not in CAMPAIGN_MODES:
+        raise ValueError(
+            'unknown requested campaign mode: ' + str(requested_mode))
+    if mode != requested_mode:
+        raise ValueError(
+            'campaign mode %s differs from requested %s'
+            % (mode, requested_mode))
     expected_top = {'schema', 'candidate', 'mode', 'environment', 'kernel',
                     'btf_sha256', 'config_sha256', 'source', 'toolchain',
                     'build_receipt_sha256', 'runtime_files', 'helpers',
@@ -890,10 +904,17 @@ def verify_live_campaign(evidence_dir, manifest):
                     or result['pool'].get('observation') != legs[0]:
                 raise ValueError('campaign pool shape differs')
         else:
-            mixed = [leg for leg in legs if 'pool_oracle' not in leg]
+            mixed = [leg for leg in legs
+                     if 'pool_oracle' not in leg
+                     and leg.get('mode') != 'off']
             if len(mixed) < 2 or len(pooled) != 1 \
                     or 'pool_oracle' not in legs[-1]:
                 raise ValueError('campaign soak shape differs')
+            for leg in mixed:
+                if leg.get('mode') != 'attempt-record-summary':
+                    raise ValueError(
+                        'campaign soak schedule differs: '
+                        + str(leg.get('mode')))
             measured = sum(int(leg['workload']['window']['end_ns'])
                            - int(leg['workload']['window']['start_ns'])
                            for leg in mixed) / 10**9
@@ -1052,7 +1073,8 @@ def host(mode, candidate=None, opts=None):
             result = json.loads((export / 'campaign.json').read_bytes())
             if result['candidate'] != selected.digest or result['cleanup']['before'] != result['cleanup']['after']:
                 raise ValueError('candidate receipt identity or cleanup mismatch')
-            totals = verify_live_campaign(export, selected.manifest)
+            totals = verify_live_campaign(
+                export, selected.manifest, mode)
             (out / 'exit.json').write_text(json.dumps(
                 {'guest_exit': proc.returncode, 'candidate': selected.digest,
                  'totals': totals}) + '\n')
