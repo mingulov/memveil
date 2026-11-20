@@ -159,9 +159,18 @@ def _publish_record_atomically(raw_abs, record_abs, payload):
     os.replace: a concurrent launch reads the old record
     or the new one, never partial JSON. The unresolved
     path is replaced, so a planted leaf symlink is
-    swapped, never followed. A failed publish removes
-    the temp file and refuses.
+    swapped, never followed. Publication stays inside
+    the tool-owned prep directory: a record path outside
+    it refuses instead of scattering scratch beside
+    user paths. A failed publish removes the temp file
+    and refuses.
     """
+    top = Path(journey_prep_dir())
+    parent = record_abs.parent
+    if parent != top and top not in parent.parents:
+        raise ValueError(
+            'fixture prep publishes outside the owned '
+            'directory: %s' % record_abs)
     try:
         fd, tmp_name = tempfile.mkstemp(
             prefix=record_abs.name + '.', suffix='.tmp',

@@ -1168,6 +1168,77 @@ def test_journey_record_reads_valid_under_concurrent_prep(
     assert sum(counts) >= 50
 
 
+def test_journey_publication_scratch_stays_invisible(
+        sealed, tmp_path, monkeypatch):
+    # A lingering publication temp file inside the
+    # tool-owned directory never enters checkout
+    # identity: overlapping prep and launch accept with
+    # it present, and the digest matches the
+    # scratch-free digest. The real publish temp is
+    # recorded too, proving it lands inside the excluded
+    # directory.
+    harness = ('#!/bin/sh\necho journey-marker\n'
+               'echo "running 1 tests"\n'
+               'echo "test journey_probe ... ok"\n'
+               'echo "test result: ok. 1 passed; 0 failed; '
+               '0 ignored; 0 measured; 0 filtered out"\n')
+    fake = tmp_path / 'fake-exe'
+    fake.write_text(harness)
+    fake.chmod(0o755)
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import checkout_identity, \
+        journey_identity_excludes, journey_prep_dir
+    import support.journey_prep as prep
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    temps = []
+    real_replace = os.replace
+
+    def recording(src, dst):
+        temps.append(src)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, 'replace', recording)
+    top = Path(journey_prep_dir())
+    record_path = _prep_record_path('prep')
+    record = prep.prepare(str(record_path))
+    assert temps, 'record publish bypassed os.replace'
+    for temp in temps:
+        assert Path(temp).name.startswith(
+            record_path.name + '.')
+        assert Path(temp).name.endswith('.tmp')
+        assert top in Path(temp).resolve().parents, temp
+    excludes = journey_identity_excludes()
+    assert excludes == [str(top)]
+    scratch = record_path.parent / (
+        record_path.name + '.stale.tmp')
+    scratch.write_bytes(b'{"schema": "partial-')
+    try:
+        _, with_scratch = checkout_identity(
+            exclude=excludes)
+        scratch.unlink()
+        _, without = checkout_identity(exclude=excludes)
+        assert with_scratch == without
+        assert record['tree'] == without
+        scratch.write_bytes(b'{"schema": "partial-')
+        again = prep.prepare(str(_prep_record_path('prep2')))
+        assert again['tree'] == record['tree']
+        environment = candidate_clean_env()
+        environment.update(sealed)
+        environment['MV_JOURNEY_PREP'] = str(record_path)
+        result = _launch_journey('deb', environment)
+        combined = result.stdout + result.stderr
+        assert result.returncode == 0, combined
+        assert '1 passed' in combined, combined
+        with pytest.raises(ValueError, match='outside'):
+            prep._publish_record_atomically(
+                tmp_path / 'x.json', tmp_path / 'x.json',
+                '{}\n')
+        assert not (tmp_path / 'x.json').exists()
+    finally:
+        scratch.unlink(missing_ok=True)
+
+
 def test_journey_prep_refuses_symlinked_staging_path(
         tmp_path, monkeypatch):
     sys.path.insert(0, str(ROOT / 'tests'))
