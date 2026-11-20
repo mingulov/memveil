@@ -1716,6 +1716,14 @@ def _write_real_matrix_row(m, matrix_dir, doc):
                run_id="20261101T000000Z")
     files = {"job.json": json.dumps(job),
              "vng.exit": ev["vng_exit"],
+             # Local-only host command line with an
+             # address-like payload: the collector writes
+             # it, but receipts, the signed inventory,
+             # replays, and shipped archives must all
+             # ignore it.
+             "vng-cmd.txt":
+             "sudo -n vng --run 0x7f8a1b2c3d4e "
+             "--rwdir=/tmp/export=/work/0123456789abcdef\n",
              "artifacts.json": ev["artifacts_text"],
              "uname.txt": ev["uname_text"],
              "mods.txt": ev["mods_text"],
@@ -1779,7 +1787,8 @@ def _write_real_matrix_row(m, matrix_dir, doc):
         {"rc": ev["busy_validate_rc"],
          "out": ev["busy_validate_out"]}) + "\n")
     ev["export_redact_error"] = km.scan_export_redaction(
-        row, skip={"receipt.json", "oracle-inputs.json"})
+        row, skip={"receipt.json", "oracle-inputs.json"}
+        | km.REDACT_SKIP_LOCAL)
     rec = km.evaluate_row(ev)
     assert rec["ok"], rec
     rec.update(run_id="20261101T000000Z", elapsed=1.0,
@@ -2058,30 +2067,95 @@ def test_inventory_rejects_symlinked_row_directory(workshop,
                                source_tree=str(ctx["root"]))
 
 
-def test_inventory_rejects_tampered_vng_cmd(workshop,
-                                            tmp_path):
+def test_redaction_replay_ignores_local_vng_cmd(workshop,
+                                                  tmp_path):
     m, ctx, evidence, q_path, _ = _matrix_qualified(
         workshop, tmp_path)
     row = evidence / "matrix" / MATRIX_ROW
-    # Honest presence first: the boot command line is
-    # allowlisted evidence, and the row receipt still
-    # excludes its raw bytes.
-    (row / "vng-cmd.txt").write_text("vng --run guest\n")
+    # The fixture row carries a local-only host command
+    # line with an address-like payload. The payload is
+    # meaningful: an unskipped scan names it.
+    raw = (row / "vng-cmd.txt").read_text()
+    assert "0x" in raw
+    assert km.scan_export_redaction(
+        row, skip={"receipt.json",
+                   "oracle-inputs.json"}) == \
+        "vng-cmd.txt: redacted text keeps 0x address"
+    # The pinned skip set ignores it, and the row receipt
+    # still excludes its raw bytes.
+    assert km.REDACT_SKIP_LOCAL == frozenset({"vng-cmd.txt"})
+    assert km.scan_export_redaction(
+        row, skip={"receipt.json", "oracle-inputs.json"}
+        | km.REDACT_SKIP_LOCAL) is None
     receipt = json.loads((row / "receipt.json").read_text())
     assert "vng-cmd.txt" not in [
         entry["name"] for entry in receipt["files"]]
-    _resign_matrix_inputs(m, ctx, evidence, q_path)
     assert m.verify_qualification(
         ctx["manifest_path"], q_path, ctx["policy_path"],
         evidence, source_tree=str(ctx["root"]))["ok"] is True
-    # The attack: the redaction-replay input changes after
-    # signing. The signed inventory binds it, so the
-    # substitution fails before any evaluation.
-    (row / "vng-cmd.txt").write_text("vng --run other\n")
-    with pytest.raises(ValueError, match="inventory differs"):
-        m.verify_qualification(ctx["manifest_path"], q_path,
-                               ctx["policy_path"], evidence,
-                               source_tree=str(ctx["root"]))
+    # Rewriting the local-only bytes after signing changes
+    # no verdict: the signed inventory never bound them and
+    # the replay never reads them.
+    (row / "vng-cmd.txt").write_text(
+        "vng --run 0xaaaaaaaaaaaaaaaa --rwdir=/tmp/x\n")
+    assert m.verify_qualification(
+        ctx["manifest_path"], q_path, ctx["policy_path"],
+        evidence, source_tree=str(ctx["root"]))["ok"] is True
+
+
+def test_evidence_archive_excludes_local_vng_cmd(workshop,
+                                                 tmp_path):
+    m, ctx, evidence, q_path, _ = _matrix_qualified(
+        workshop, tmp_path)
+    row = evidence / "matrix" / MATRIX_ROW
+    assert (row / "vng-cmd.txt").is_file()
+    archive = Path(tmp_path) / "qualification-evidence.tar.gz"
+    excluded = m.build_evidence_archive(evidence, archive)
+    assert excluded == ["matrix/" + MATRIX_ROW + "/vng-cmd.txt"]
+    with tarfile.open(archive, "r:gz") as stream:
+        names = stream.getnames()
+    assert names[0] == "evidence"
+    assert "evidence/matrix/" + MATRIX_ROW + "/vng-cmd.txt" \
+        not in names
+    assert not any(Path(name).name == "vng-cmd.txt"
+                   for name in names)
+    assert "evidence/matrix/" + MATRIX_ROW + "/oracle.txt" \
+        in names
+    # The packed archive still extracts and verifies: the
+    # exclusion drops only the local-only bytes.
+    inner = m.safe_extract(archive, Path(tmp_path) / "packed",
+                           True, False)
+    assert not (inner / "matrix" / MATRIX_ROW
+                / "vng-cmd.txt").exists()
+    assert m.verify_qualification(
+        ctx["manifest_path"], q_path, ctx["policy_path"],
+        inner, source_tree=str(ctx["root"]))["ok"] is True
+    # Builder edges fail closed: symlinks never pack, and
+    # the destination is never overwritten.
+    (row / "linked.txt").symlink_to(row / "oracle.txt")
+    with pytest.raises(ValueError, match="symlink"):
+        m.build_evidence_archive(
+            evidence, Path(tmp_path) / "linked.tar.gz")
+    (row / "linked.txt").unlink()
+    with pytest.raises(ValueError, match="refusing to overwrite"):
+        m.build_evidence_archive(evidence, archive)
+
+
+def test_pack_evidence_cli_reports_digest(workshop, tmp_path):
+    m, ctx, evidence, _q_path, _doc = _matrix_qualified(
+        workshop, tmp_path)
+    archive = Path(tmp_path) / "cli-evidence.tar.gz"
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "candidate.py"),
+         "pack-evidence", "--evidence-dir", str(evidence),
+         "--out", str(archive)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip().splitlines() == [
+        sha(archive.read_bytes())]
+    assert "excluded local-only: matrix/" + MATRIX_ROW \
+        + "/vng-cmd.txt" in proc.stderr
 
 
 def test_original_signature_rejects_mutated_evidence(workshop,
@@ -2526,8 +2600,7 @@ def test_qualify_candidate_exports_tested_payload(workshop,
     binding = _write_nonmatrix_evidence(m, ctx, evidence)
     _write_signed_checksums(m, ctx, evidence)
     archive = Path(tmp_path) / "evidence.tar.gz"
-    with tarfile.open(archive, "w:gz") as stream:
-        stream.add(evidence, arcname="evidence")
+    assert m.build_evidence_archive(evidence, archive) == []
     root = ctx["root"]
     qualifications = root / "packaging" / "qualifications"
     qualifications.mkdir(parents=True)

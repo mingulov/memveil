@@ -27,9 +27,13 @@ Mode to jobs:
    the required gates, the trusted qualifier key digests, and
    the campaign retention (30 to 90 days).
 2. Run the kernel matrix campaign against the tree at C and sign
-   the gate receipts. Pack the campaign evidence as
-   `qualification-evidence.tar.gz` with `qualification.json`
-   beside the matrix directory at the archive root.
+   the gate receipts. Pack the campaign evidence with
+   `./tools/candidate pack-evidence --evidence-dir <dir> --out
+   qualification-evidence.tar.gz` (it drops the local-only
+   `vng-cmd.txt` host command lines, which never ship, and
+   prints the archive digest for the qualification record),
+   with `qualification.json` beside the matrix directory at
+   the archive root.
 
 ## Seal and qualify
 

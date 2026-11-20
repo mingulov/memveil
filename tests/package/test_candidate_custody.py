@@ -322,8 +322,10 @@ class CustodyBase:
             _matrix_inputs(c, evidence))
         _write_signed_checksums(c, ctx, evidence)
         archive_path = self.base / (ARCHIVE + ".bytes")
-        with tarfile.open(archive_path, "w:gz") as stream:
-            stream.add(evidence, arcname="evidence")
+        assert c.build_evidence_archive(
+            evidence, archive_path) == [
+                "matrix/" + _admitted_entry()["id"]
+                + "/vng-cmd.txt"]
         archive_entry = {
             "name": ARCHIVE,
             "size": str(archive_path.stat().st_size),
@@ -693,8 +695,10 @@ def test_import_rejects_foreign_build_origin(
         "matrix-receipt.json", _matrix_inputs(c, evidence))
     _write_signed_checksums(c, ctx, evidence)
     archive_path = Path(tmp_path) / "foreign.tar.gz"
-    with tarfile.open(archive_path, "w:gz") as stream:
-        stream.add(evidence, arcname="evidence")
+    assert c.build_evidence_archive(
+        evidence, archive_path) == [
+            "matrix/" + _admitted_entry()["id"]
+            + "/vng-cmd.txt"]
     archive_bytes = archive_path.read_bytes()
     doc = {"schema": "memveil-qualification/1",
            "candidate_sha256": patched_id,
@@ -762,8 +766,10 @@ def test_import_rejects_failing_row_predicates(
     doc = copy.deepcopy(fix["qualification"])
     doc["gates"][MATRIX_GATE] = matrix_binding
     archive_path = Path(tmp_path) / "tampered.tar.gz"
-    with tarfile.open(archive_path, "w:gz") as stream:
-        stream.add(inner, arcname="evidence")
+    # The inner tree was extracted from a packed archive,
+    # so the local-only command line is already gone and
+    # the repack excludes nothing.
+    assert c.build_evidence_archive(inner, archive_path) == []
     archive_bytes = archive_path.read_bytes()
     doc["evidence_archive"] = {
         "name": ARCHIVE, "size": str(len(archive_bytes)),

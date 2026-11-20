@@ -1546,10 +1546,9 @@ def _row_inventory_files(allowlist, row):
     receipt and cached oracle inputs are required and hashed
     explicitly, since their bytes are evidence while the row-local
     transcription inventory never authenticates itself. The raw
-    boot command line is allowlisted evidence too: the redaction
-    replay reads it, so the signed inventory binds its bytes
-    (only the digest crosses; the row receipt itself still
-    excludes raw command lines).
+    boot command line stays local-only: skipped here, skipped
+    by the redaction replay, and excluded from the evidence
+    archive builder, matching the row receipt construction.
     """
     found = {}
     for dirpath, dirnames, filenames in os.walk(row):
@@ -1562,7 +1561,8 @@ def _row_inventory_files(allowlist, row):
         for name in sorted(filenames):
             path = Path(dirpath) / name
             rel = path.relative_to(row).as_posix()
-            if rel in ("receipt.json", "oracle-inputs.json"):
+            if rel in ("receipt.json", "oracle-inputs.json",
+                       "vng-cmd.txt"):
                 continue
             if path.is_symlink() or not path.is_file():
                 raise ValueError(
@@ -1634,6 +1634,77 @@ def build_evidence_inventory(evidence_dir, matrix_directory):
             "matrix evidence is missing required file: "
             "summary.json")
     return inventory
+
+
+def build_evidence_archive(evidence_dir, dest):
+    """Pack qualification evidence, excluding local-only files.
+
+    Writes dest as a gzip tar holding the evidence directory
+    under a single "evidence" root in sorted order, so the
+    archive extracts through safe_extract's single-root gate.
+    Row-local files (the matrix REDACT_SKIP_LOCAL set,
+    resolved lazily like the row allowlist) are excluded at
+    any depth: host command lines never ship. Symlinks and
+    non-regular files fail closed instead of silently
+    dropping bytes, and a failed run leaves no partial
+    archive behind. Refuses to overwrite dest. Returns the
+    sorted excluded evidence-relative paths.
+    """
+    excluded_names = set(_matrix_rows().REDACT_SKIP_LOCAL)
+    base = Path(evidence_dir)
+    require(base.is_dir() and not base.is_symlink(),
+            "evidence directory is missing")
+    dest = Path(dest)
+    require(not os.path.lexists(dest),
+            "refusing to overwrite " + dest.name)
+    dirs = []
+    entries = []
+    excluded = []
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames.sort()
+        here = Path(dirpath)
+        rel = here.relative_to(base).as_posix()
+        if rel != ".":
+            dirs.append((rel, here))
+        for name in sorted(dirnames):
+            if os.path.islink(here / name):
+                raise ValueError(
+                    "evidence archive refuses symlink "
+                    + (here / name).relative_to(base)
+                    .as_posix())
+        for name in sorted(filenames):
+            path = here / name
+            member = path.relative_to(base).as_posix()
+            if name in excluded_names:
+                excluded.append(member)
+                continue
+            if path.is_symlink():
+                raise ValueError(
+                    "evidence archive refuses symlink "
+                    + member)
+            if not path.is_file():
+                raise ValueError(
+                    "evidence archive refuses non-file "
+                    + member)
+            entries.append((member, path))
+    try:
+        with tarfile.open(dest, "w:gz") as stream:
+            stream.add(base, arcname="evidence",
+                       recursive=False)
+            for rel, full in sorted(dirs):
+                stream.add(full, arcname="evidence/" + rel,
+                           recursive=False)
+            for rel, full in sorted(entries):
+                stream.add(full, arcname="evidence/" + rel,
+                           recursive=False)
+    except (tarfile.TarError, OSError) as error:
+        try:
+            os.unlink(dest)
+        except OSError:
+            pass
+        raise ValueError(
+            "evidence archive failed: %s" % error) from error
+    return sorted(excluded)
 
 
 def _matrix_lock_from_tree(source_tree, commit):
@@ -2023,6 +2094,12 @@ def main(argv=None):
     sign.add_argument("--artifacts-dir", required=True)
     sign.add_argument("--key", required=True)
     sign.add_argument("--out-dir", required=True)
+    pack = commands.add_parser(
+        "pack-evidence",
+        help="pack qualification evidence without "
+        "local-only files")
+    pack.add_argument("--evidence-dir", required=True)
+    pack.add_argument("--out", required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "seal":
@@ -2045,6 +2122,13 @@ def main(argv=None):
         elif args.command == "sign-checksums":
             print(sign_checksums(args.artifacts_dir, args.key,
                                  args.out_dir))
+        elif args.command == "pack-evidence":
+            excluded = build_evidence_archive(
+                args.evidence_dir, args.out)
+            print(digest(args.out))
+            for member in excluded:
+                print("excluded local-only: " + member,
+                      file=sys.stderr)
         else:
             print(emit_provenance(
                 args.bundle_dir,

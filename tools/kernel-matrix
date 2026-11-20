@@ -479,7 +479,8 @@ def collect_one(entry, export, tools, dd_count, elapsed, run_id,
         rc, out = run_validator(busy)
         ev["busy_validate_rc"] = rc
         ev["busy_validate_out"] = out
-    ev["export_redact_error"] = km.scan_export_redaction(export)
+    ev["export_redact_error"] = km.scan_export_redaction(
+        export, skip=km.REDACT_SKIP_LOCAL)
     manifest_path = os.environ.get("MV_CANDIDATE_MANIFEST")
     if manifest_path:
         sys.path.insert(0, str(ROOT / "tools"))

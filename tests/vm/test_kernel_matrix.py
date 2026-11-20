@@ -5396,6 +5396,22 @@ def test_scan_export_redaction_rejects_undecodable(tmp_path):
     assert error is not None and "console.txt" in error
 
 
+def test_scan_export_redaction_skips_local_vng_cmd(tmp_path):
+    row = _admitted_row(tmp_path, **{
+        "vng-cmd.txt":
+        "sudo -n vng --run 0xdeadbeef12345678 "
+        "--rwdir=/tmp/export=/work/0123456789abcdef\n"})
+    # The payload is meaningful: an unskipped scan names the
+    # local-only file.
+    error = km.scan_export_redaction(str(row))
+    assert error is not None and "vng-cmd.txt" in error
+    # The pinned local-only skip set ignores it, exactly as
+    # the collect-time scan and the redaction replay do.
+    assert km.REDACT_SKIP_LOCAL == frozenset({"vng-cmd.txt"})
+    assert km.scan_export_redaction(
+        str(row), skip=km.REDACT_SKIP_LOCAL) is None
+
+
 def test_evaluate_export_redact_error_fails():
     ev = _ev_pass()
     ev["export_redact_error"] = "record.stderr: raw address"
@@ -6620,6 +6636,9 @@ def test_run_one_collect_path_writes_receipt(tmp_path,
         collect=fake_collect)
     assert rec["ok"] is True
     row = tmp_path / "6.6"
+    # The collector keeps the host command line beside the
+    # row evidence for local debugging; it never ships.
+    assert (row / "vng-cmd.txt").read_text() == "true\n"
     km.validate_row_receipt(
         json.loads((row / "receipt.json").read_text()))
     ok, detail = km.rederive_row(row, rec)
