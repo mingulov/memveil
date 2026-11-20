@@ -218,18 +218,31 @@ MEMVEIL_VM_LIVE_SOAK=1 tools/test vm-live-soak
 ```
 
 Each run prints its receipt directory
-(`candidate campaign receipt: ...`); retain the receipt's
-`export/` content plus its `exit.json` under
-`dist/evidence/live-<mode>/` (`campaign.json`, the
-completed legs, the progress files, `exit.json`). Live
-campaigns run long (tens of minutes to hours); the pool
-leg alone spans over seventy minutes.
+(`candidate campaign receipt: ...`); stage both campaigns
+at the verified paths before signing anything: each
+receipt's `export/` content goes under
+`dist/evidence/live/<mode>/` (`campaign.json`, the
+completed legs, the progress files) and its `exit.json`
+beside it as `dist/evidence/live/<mode>-exit.json`:
 
-6. Stage the signed checksums into the evidence dir,
-write the signed matrix gate receipt over the campaign
-inventory, and pack the evidence (the packer prints the
-archive digest and drops the local-only `vng-cmd.txt`
-host command lines, which never ship):
+```sh
+OVERHEAD=<receipt dir printed by the perf-overhead run>
+SOAK=<receipt dir printed by the vm-live-soak run>
+mkdir -p dist/evidence/live/overhead dist/evidence/live/soak
+cp -r "$OVERHEAD"/export/. dist/evidence/live/overhead/
+cp "$OVERHEAD"/exit.json dist/evidence/live/overhead-exit.json
+cp -r "$SOAK"/export/. dist/evidence/live/soak/
+cp "$SOAK"/exit.json dist/evidence/live/soak-exit.json
+```
+
+Live campaigns run long (tens of minutes to hours); the
+pool leg alone spans over seventy minutes.
+
+6. Stage the signed checksums into the evidence dir and
+write the signed gate receipts over the staged campaigns:
+the matrix receipt first, then the live receipt. Nothing
+packs yet: the archive packs once in step 7, after both
+receipts exist.
 
 ```sh
 cp dist/signed/SHA256SUMS.txt dist/signed/SHA256SUMS.txt.sig \
@@ -264,8 +277,6 @@ print("matrix gate inputs ready")
 EOF
 ssh-keygen -Y sign -f "$KEYDIR/qualifier.key" \
   -n memveil-candidate dist/evidence/matrix-receipt.json
-./tools/candidate pack-evidence --evidence-dir dist/evidence \
-  --out dist/qualification-evidence.tar.gz
 ```
 
 Write one receipt per required gate the same way (inputs
@@ -345,54 +356,38 @@ gate entry to `qualification.json` beside the matrix one:
   --out dist/evidence/live-receipt.json
 ```
 
-Step 7's `gates` map gains a `live-campaign/1` entry
-pointing at `live-receipt.json`, its digest, the
-`live-receipt.json.sig` signature, and `signer.pub`;
-step 8's `qualify` rederives it through the
-live gate path (signature chain, retained measurement
-sources, predicates, plus the campaign verifier run over
-both retained exports).
+Step 7 assembles both receipts into `qualification.json`
+beside the archive; step 8's `qualify` rederives each
+gate through its path (signature chain, retained
+measurement sources, predicates, plus the campaign
+verifier run over both retained exports for the live
+gate).
 
-7. Write `qualification.json` beside the archive file,
+7. Assemble `qualification.json` from both verified gate
+receipts with one command: the assembler re-verifies
+every receipt (signature, subject, inputs digest,
+re-derived measurements, and the live campaign verifier
+over both retained exports), then packs the evidence
+archive once and writes the qualification beside it,
 never inside it: the record carries the archive digest,
 so an inner copy would be self-referential and is
-refused. Bind one gate entry per receipt:
+refused. The packer prints the archive digest and drops
+the local-only `vng-cmd.txt` host command lines, which
+never ship:
 
 ```sh
-python3 - dist dist/candidate.json <<'EOF'
-import hashlib
-import sys
-sys.path.insert(0, "tools")
-import candidate as c
-from pathlib import Path
-scratch = Path(sys.argv[1])
-manifest = c.load_manifest(sys.argv[2])
-candidate_id = c.digest_bytes(c.canonical(manifest))
-archive = scratch / "qualification-evidence.tar.gz"
-receipt = scratch / "evidence" / "matrix-receipt.json"
-doc = {"schema": "memveil-qualification/1",
-       "candidate_sha256": candidate_id,
-       "source_commit": manifest["source"]["commit"],
-       "claim": "ordinary-preview",
-       "evidence_archive":
-       {"name": "qualification-evidence.tar.gz",
-        "size": str(archive.stat().st_size),
-        "sha256": hashlib.sha256(
-            archive.read_bytes()).hexdigest()},
-       "gates":
-       {"kernel-matrix/2":
-        {"receipt": "matrix-receipt.json",
-         "receipt_sha256": hashlib.sha256(
-             receipt.read_bytes()).hexdigest(),
-         "signature": "matrix-receipt.json.sig",
-         "public_key": "signer.pub"}}}
-(scratch / "qualification.json").write_bytes(
-    c.canonical(doc))
-print("qualification written")
-EOF
+./tools/candidate write-qualification \
+  --manifest dist/candidate.json \
+  --policy packaging/candidate-policy.json \
+  --gates dist/evidence/matrix-receipt.json \
+    dist/evidence/live-receipt.json \
+  --evidence-dir dist/evidence \
+  --out dist/qualification.json
 ```
 
-(The `claim` must equal the policy's claim.)
+(The recorded `claim` comes from the policy, and the
+receipt set must equal the policy's required gates
+exactly.)
 
 8. Qualify the evidence locally, rechecking the archive
 bytes against the record first:

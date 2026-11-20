@@ -1621,6 +1621,23 @@ def test_release_runbook_requires_both_live_campaigns():
     assert "live/soak/" in text
 
 
+def test_release_runbook_orders_stage_sign_pack_once():
+    text = (ROOT / "RELEASING.md").read_text()
+    staged = text.index("dist/evidence/live/soak-exit.json")
+    assert "dist/evidence/live/overhead-exit.json" in text
+    signed = text.index("write-gate-receipt")
+    packed = text.index("write-qualification")
+    assert staged < signed < packed
+    assert "pack-evidence" not in text, \
+        "the runbook packs once via write-qualification"
+    block = text[packed:packed + 800]
+    assert "matrix-receipt.json" in block
+    assert "live-receipt.json" in block
+    flat = " ".join(text.split())
+    assert "packs once in step 7, after both receipts " \
+        "exist" in flat
+
+
 def test_release_version_binding():
     m = api()
     for version, claim in [("0.1.1", "ordinary-preview"),
