@@ -25,7 +25,10 @@ tarball the packaging suites built (run the cargo
 package_tarball suite first); a missing tarball fails closed
 with the remedy. The sealed-input tests build synthetic
 candidates in tmp and need git, dpkg-deb, rpmbuild, cargo,
-and bpf-linker on PATH.
+and bpf-linker on PATH. Under dispatched candidate inputs
+those legs return early: they prove dev-only machinery,
+while dispatched runs prove the bundle()-consuming legs
+against the real seal.
 
 Dropped from the Mojo-era file, with reasons: the replaced
 bridge refusal (the Rust package has no dlopen bridge), the
@@ -48,7 +51,7 @@ import tarfile
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from support.candidate_input import load
+from support.candidate_input import load, requested
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]
                        / "tools"))
@@ -367,11 +370,29 @@ def _installed_set(root):
     return found
 
 
+def _dev_only_seal_leg():
+    """True when a synthetic-seal leg must return early.
+
+    Dispatched runs consume the real seal through bundle();
+    sealing synthetic inputs there would prove machinery,
+    not the candidate. The early return keeps the conftest
+    fail-on-skip guard intact: these legs are dev-only by
+    design, not deferred, so they record no skip.
+    """
+    if requested():
+        print("release-runtime: synthetic-seal leg is dev-only; "
+              "dispatched runs prove the bundle()-consuming legs")
+        return True
+    return False
+
+
 def test_installed_closure_matches_candidate(tmp_path):
     # The sealed .deb/.rpm pair installs exactly the candidate
     # files closure: every manifest member lands at its mapped
     # FHS path with equal bytes, nothing is missing, and
     # nothing extra ships besides the generated deb files.
+    if _dev_only_seal_leg():
+        return
     sealed = seal_candidate(tmp_path, "closure")
     manifest = sealed["manifest"]
     selected = load(env=candidate_env(sealed),
@@ -616,6 +637,8 @@ def test_sealed_inputs_used(tmp_path, audited_target_dir):
     # test, but the control, file-list, staging,
     # engine-version, installed-man, docs, and closure legs
     # that execute ensure_deb/ensure_rpm in candidate mode.
+    if _dev_only_seal_leg():
+        return
     sealed = seal_candidate(
         tmp_path, "markers", deb_name="sealed-marker.deb",
         rpm_name="sealed-marker.rpm", shaped=True)
@@ -672,6 +695,8 @@ def test_candidate_loader_env_operator_refused(
     # with an operator suffix appended, and the present-but-
     # empty value each fail closed naming the variable. The
     # inputs are valid; only the env is tainted.
+    if _dev_only_seal_leg():
+        return
     sealed = seal_candidate(tmp_path, "refused")
     target_dir = audited_target_dir
     binary = _test_binary("package_deb", target_dir)
@@ -703,6 +728,8 @@ def test_candidate_loader_env_cargo_only_proceeds(
     # recognizes cargo's own injection (here spelled
     # explicitly, no cargo involved) while the suite still
     # consumes the sealed inputs.
+    if _dev_only_seal_leg():
+        return
     sealed = seal_candidate(tmp_path, "cargoonly")
     target_dir = audited_target_dir
     ran = _run_sealed_suite(
@@ -724,6 +751,8 @@ def test_no_build_outputs_needed(tmp_path, audited_target_dir):
     # development BPF bytes differ, and the
     # candidate-mode code never names a build output path
     # at all.
+    if _dev_only_seal_leg():
+        return
     sealed = seal_candidate(tmp_path, "nobuild", shaped=True)
     target_dir = audited_target_dir
     for suite, tests in CANDIDATE_SUITES:
@@ -769,6 +798,32 @@ def test_no_build_outputs_needed(tmp_path, audited_target_dir):
         hits = [line.strip() for line in text.splitlines()
                 if needle in line]
         assert hits == [], "%s references %s" % (rel, hits)
+
+
+def test_dispatched_env_returns_synthetic_seal_legs_early(
+        tmp_path, audited_target_dir, monkeypatch, capsys):
+    # Under dispatched candidate inputs every synthetic-seal
+    # leg returns before sealing anything: the seal-machinery
+    # spy must never fire. In dev the guard stays quiet.
+    monkeypatch.setenv("MV_BUNDLE_TARBALL", "dispatched")
+    monkeypatch.setenv("MV_CANDIDATE_MANIFEST", "dispatched")
+    assert requested()
+    this = sys.modules[__name__]
+    def fail(*args, **kwargs):
+        raise AssertionError(
+            "synthetic seal machinery ran under dispatch")
+    monkeypatch.setattr(this, "seal_candidate", fail)
+    test_installed_closure_matches_candidate(tmp_path)
+    test_sealed_inputs_used(tmp_path, audited_target_dir)
+    test_candidate_loader_env_operator_refused(
+        tmp_path, audited_target_dir)
+    test_candidate_loader_env_cargo_only_proceeds(
+        tmp_path, audited_target_dir)
+    test_no_build_outputs_needed(tmp_path, audited_target_dir)
+    assert "dev-only" in capsys.readouterr().out
+    monkeypatch.delenv("MV_BUNDLE_TARBALL")
+    monkeypatch.delenv("MV_CANDIDATE_MANIFEST")
+    assert _dev_only_seal_leg() is False
 
 
 if __name__ == "__main__":
