@@ -460,6 +460,26 @@ def _owned_sweep_roots(expected):
     return sorted(roots)
 
 
+def _refuse_alias_chain(root, rel):
+    """Refuse aliases at rel or on its ancestor chain.
+
+    Every component from root-exclusive to rel-inclusive is
+    lstatted without following: a symlink at a sweep root
+    (or above it) would otherwise redirect the whole
+    subtree the verifier walks while the mapped leaves
+    still resolve through it. Missing components are the
+    mapped-file checks' business, not this sweep's: only
+    links refuse here. Raises ValueError naming the alias.
+    """
+    parts = rel.split("/")
+    for stop in range(1, len(parts) + 1):
+        node = os.path.join(root, *parts[:stop])
+        if os.path.islink(node):
+            raise ValueError(
+                "installed candidate contains an alias: "
+                + "/".join(parts[:stop]))
+
+
 def verify_installed(root, manifest, live=False):
     """Every staged copy must equal the verified bundle bytes.
 
@@ -472,13 +492,17 @@ def verify_installed(root, manifest, live=False):
     enumerate first-class as (path, target): any alias
     refuses naming what it points at. Raises ValueError.
 
-    Staging roots check the package-exclusive tree the
-    packager built. Live roots check a real install: the
-    exact member checks still cover every mapped file, but
-    the extra-member sweep scopes to the manifest-derived
-    owned roots, so unrelated system binaries beside the
-    package accept while added files and aliases under
-    owned paths still refuse.
+    Aliases refuse at every level: each mapped path and
+    each sweep root is lstatted together with its ancestor
+    chain, so a link at an owned root (or above it) cannot
+    redirect the verified subtree. Staging roots check the
+    package-exclusive tree the packager built. Live roots
+    check a real install: the exact member checks still
+    cover every mapped file, but the extra-member sweep
+    scopes to the manifest-derived owned roots, so
+    unrelated system binaries beside the package accept
+    while added files and aliases under owned paths still
+    refuse.
     """
     expected = {}
     for name, sha256 in manifest["files"].items():
@@ -488,6 +512,7 @@ def verify_installed(root, manifest, live=False):
                 "duplicate installed file mapping: " + target)
         expected[target] = sha256
     for target, sha256 in sorted(expected.items()):
+        _refuse_alias_chain(root, target)
         path = os.path.join(root, *target.split("/"))
         if not os.path.isfile(path) or os.path.islink(path):
             raise ValueError(
@@ -509,6 +534,7 @@ def verify_installed(root, manifest, live=False):
                     "usr/share/memveil",
                     "usr/share/doc/memveil")
     for prefix in prefixes:
+        _refuse_alias_chain(root, prefix)
         base = os.path.join(root, *prefix.split("/"))
         for current, dirs, files in os.walk(base):
             for leaf in sorted(dirs):

@@ -534,6 +534,53 @@ def test_installed_closure_live_scopes_owned_paths(tmp_path):
         DEBPKG.verify_installed(str(root), manifest)
 
 
+@pytest.mark.qualification
+def test_installed_closure_refuses_symlink_at_sweep_root(tmp_path):
+    # A symlink AT an owned root (not under it) redirects
+    # the whole subtree the sweep walks while every mapped
+    # leaf still resolves through it: the roots themselves
+    # must lstat as non-links, in both scopings.
+    members = {
+        "bin/memveil": b"live binary\n",
+        "lib/memveil/libx.so.1": b"live lib\n",
+        "bpf/o.bpf.o": b"live object\n",
+        "profiles/p.json": b"{}\n",
+        "docs/d.md": b"# live\n",
+    }
+    manifest = {"files": {
+        name: hashlib.sha256(data).hexdigest()
+        for name, data in members.items()}}
+    root = tmp_path / "live-root"
+    for name, data in members.items():
+        dest = root / DEBPKG.installed_file_path(name)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+    DEBPKG.verify_installed(str(root), manifest, live=True)
+    DEBPKG.verify_installed(str(root), manifest)
+    shadow = tmp_path / "shadow"
+    shutil.move(str(root / "usr/lib/memveil"), str(shadow))
+    (root / "usr/lib/memveil").symlink_to(
+        shadow, target_is_directory=True)
+    with pytest.raises(ValueError, match="alias"):
+        DEBPKG.verify_installed(str(root), manifest, live=True)
+    with pytest.raises(ValueError, match="usr/lib/memveil"):
+        DEBPKG.verify_installed(str(root), manifest)
+    (root / "usr/lib/memveil").unlink()
+    shutil.move(str(shadow), str(root / "usr/lib/memveil"))
+    DEBPKG.verify_installed(str(root), manifest, live=True)
+    DEBPKG.verify_installed(str(root), manifest)
+    # A link above the owned root redirects the same way.
+    ancestor_shadow = tmp_path / "ancestor-shadow"
+    shutil.move(str(root / "usr/lib"), str(ancestor_shadow))
+    (root / "usr/lib").symlink_to(
+        ancestor_shadow, target_is_directory=True)
+    with pytest.raises(ValueError, match="usr/lib"):
+        DEBPKG.verify_installed(str(root), manifest, live=True)
+    (root / "usr/lib").unlink()
+    shutil.move(str(ancestor_shadow), str(root / "usr/lib"))
+    DEBPKG.verify_installed(str(root), manifest, live=True)
+
+
 # Re-homed tests the candidate legs execute per suite:
 # every test with a candidate branch plus the structural
 # pins that prove the seal is real-shaped. Excluded with
