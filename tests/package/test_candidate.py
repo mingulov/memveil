@@ -776,6 +776,53 @@ def test_in_flow_build_ignores_redirects(tmp_path, monkeypatch):
                for marker in markers)
 
 
+def test_in_flow_build_uses_fresh_ephemeral_target_dir(tmp_path):
+    packager = _packager_module()
+    proj = _redirect_probe_crate(tmp_path / "proj")
+    # Decoy reusable dir with stale bytes plus stale cache
+    # markers, as a pre-existing root/target would hold
+    # after a linker swap cargo cannot see.
+    decoy = proj / "target"
+    (decoy / "release").mkdir(parents=True)
+    stale = decoy / "release" / "redirprobe"
+    stale.write_bytes(b"stale-binary\n")
+    cached = decoy / "release" / "build" / "redirprobe-stale" \
+        / "out"
+    cached.mkdir(parents=True)
+    (cached / "probe-marker.txt").write_text("stale-marker\n")
+    before = sorted(path.relative_to(decoy).as_posix()
+                    for path in decoy.rglob("*"))
+    fresh = packager.fresh_target_dir()
+    try:
+        assert Path(fresh).is_dir()
+        assert Path(fresh) != decoy
+        binary = packager.resolve_binary(
+            str(proj), None, True, fresh,
+            bin_name="redirprobe")
+        # Cargo's own reported path under the fresh dir, and
+        # the fresh build-script marker: only this
+        # invocation's bytes are consumed.
+        assert binary == str(
+            Path(fresh) / "release" / "redirprobe")
+        assert Path(binary).read_bytes() != b"stale-binary\n"
+        markers = sorted(Path(fresh).rglob("probe-marker.txt"))
+        assert markers, "no fresh marker under the fresh dir"
+        assert all(marker.read_text() == "fresh-marker\n"
+                   for marker in markers)
+        # The decoy reusable dir is byte-identical: no
+        # fresh outputs landed there and the stale bytes
+        # were never packaged.
+        assert stale.read_bytes() == b"stale-binary\n"
+        assert sorted(path.relative_to(decoy).as_posix()
+                      for path in decoy.rglob("*")) == before
+    finally:
+        packager.drop_target_dir(fresh)
+    assert not Path(fresh).exists()
+    # Dropping twice, or dropping nothing, never fails.
+    packager.drop_target_dir(fresh)
+    packager.drop_target_dir(None)
+
+
 def test_seal_rejects_smuggled_deb_payload(workshop, tmp_path):
     m, fix = seal_paths(workshop, tmp_path)
     path = next(fix["artifacts"].glob("*.deb"))

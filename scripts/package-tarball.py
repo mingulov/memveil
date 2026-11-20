@@ -51,10 +51,11 @@ Usage: scripts/package-tarball.py [--out DIR] [--tag NAME]
   --bpf-dir DIR  build-script OUT_DIR holding memveil-ebpf-*
                (default: auto-detected under the target dir)
   --build      run `cargo build --release --locked --offline` first
-               with an explicit --target-dir plus a pinned
-               build.build-dir, scrubbed redirect environment,
-               and JSON artifact paths, so only this
-               invocation's bytes can be packaged
+               in a fresh per-build target dir (explicit
+               --target-dir plus a pinned build.build-dir,
+               scrubbed redirect environment, JSON artifact
+               paths, dir removed after packaging), so only
+               this invocation's bytes can be packaged
   --candidate  sealable bundle: requires --build from the root
                and forbids --binary/--bpf-dir; only this mode
                records a build receipt the seal accepts
@@ -84,6 +85,7 @@ import struct
 import subprocess
 import sys
 import tarfile
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUN_ROOT_DIR = os.path.dirname(HERE)
@@ -670,8 +672,8 @@ def resolve_root(explicit):
 def resolve_target_dir(root):
     """Development lookup dir, honoring the ambient override.
 
-    In-flow builds never use this: they pin an explicit
-    target dir that beats every redirect mechanism.
+    In-flow builds never use this: they build in a fresh
+    per-build dir that beats every redirect mechanism.
     """
     override = os.environ.get("CARGO_TARGET_DIR")
     if override:
@@ -698,9 +700,31 @@ BUILD_REDIRECT_ENV = (
 )
 
 
-def pinned_target_dir(root):
-    """Explicit in-flow target dir, immune to redirects."""
-    return os.path.join(os.path.abspath(root), "target")
+def fresh_target_dir():
+    """Fresh per-build cargo target dir, immune to redirects.
+
+    A new mkdtemp dir per in-flow build: no reusable dir
+    means no cached-artifact staleness versus the probed
+    linker, by construction. The caller removes it after
+    packaging via drop_target_dir.
+    """
+    try:
+        return tempfile.mkdtemp(prefix="memveil-cargo-target-")
+    except OSError as exc:
+        fail("cannot create a fresh target dir: %s" % exc)
+
+
+def drop_target_dir(target_dir):
+    """Remove a fresh target dir; never fail the packaging."""
+    if target_dir is None:
+        return
+    try:
+        if os.path.islink(target_dir):
+            os.unlink(target_dir)
+        else:
+            shutil.rmtree(target_dir, ignore_errors=True)
+    except OSError:
+        pass
 
 
 def select_built_binary(stdout, bin_name, target_dir):
@@ -746,11 +770,13 @@ def build_release_binary(rust_dir, target_dir,
                          bin_name="memveil"):
     """Build release in-flow, return cargo's own binary path.
 
-    Pins --target-dir plus a CLI build.build-dir override
-    (both beat environment and config files), scrubs every
-    redirect variable, and consumes the JSON artifact paths,
-    so exactly this invocation's bytes are packaged. Fails
-    closed on any build error or path surprise.
+    The caller passes a fresh per-build target dir; the
+    build pins --target-dir plus a CLI build.build-dir
+    override (both beat environment and config files),
+    scrubs every redirect variable, and consumes only the
+    JSON artifact paths, so exactly this invocation's bytes
+    are packaged. Fails closed on any build error or path
+    surprise.
     """
     target_dir = os.path.abspath(target_dir)
     if any(char in target_dir for char in "\"\\\n"):
@@ -782,15 +808,18 @@ def build_release_binary(rust_dir, target_dir,
                                target_dir)
 
 
-def resolve_binary(root, explicit, build):
+def resolve_binary(root, explicit, build, fresh_target=None,
+                   bin_name="memveil"):
     """Release binary: the in-flow build's own path, else lookup."""
     rust_dir = root
     if build:
         if explicit is not None:
             fail("--build forbids --binary: the fresh in-flow "
                  "binary is packaged")
-        return build_release_binary(
-            rust_dir, pinned_target_dir(root))
+        if fresh_target is None:
+            fail("in-flow build needs a fresh target dir")
+        return build_release_binary(rust_dir, fresh_target,
+                                    bin_name=bin_name)
     if explicit is not None:
         binary = os.path.abspath(explicit)
     else:
@@ -1515,6 +1544,7 @@ def main(argv):
             "sha256": sha256_file(tool)}
     staged = None
     provider_work = None
+    fresh_target = None
     # A failed run leaves no staging directory and no
     # apparently successful final candidate: every failure
     # below drops this run's tag candidates (once the tag
@@ -1542,7 +1572,10 @@ def main(argv):
         cargo_version, rustc_version = cargo_tool_versions(rust_dir)
         print("package-tarball: cargo %s rustc %s (RUSTUP_TOOLCHAIN "
               "stripped)" % (cargo_version, rustc_version))
-        binary_input = resolve_binary(root, binary_opt, build)
+        if build:
+            fresh_target = fresh_target_dir()
+        binary_input = resolve_binary(root, binary_opt, build,
+                                      fresh_target)
         binary_input_sha = sha256_file(binary_input)
         if build:
             release_dir = os.path.dirname(binary_input)
@@ -2265,6 +2298,7 @@ def main(argv):
                 os.unlink(provider_work)
             else:
                 shutil.rmtree(provider_work, ignore_errors=True)
+        drop_target_dir(fresh_target)
 
 
 if __name__ == "__main__":
