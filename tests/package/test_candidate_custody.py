@@ -1433,6 +1433,20 @@ def test_release_qualify_reads_qualification_beside_evidence():
         "run"]
 
 
+def test_release_qualify_binds_manifest_to_dispatched_c():
+    doc = _release_workflow()
+    steps = doc["jobs"]["qualify"]["steps"]
+    collect = next(step for step in steps
+                   if "campaign evidence" in step.get("name", ""))
+    assert "SOURCE_COMMIT" in (collect.get("env") or {}), \
+        "qualify must receive the dispatched source commit"
+    run = collect["run"]
+    assert "candidate.verify_q_bound(" in run
+    assert "GITHUB_SHA" in run
+    assert run.index("candidate.verify_q_bound(") < run.index(
+        "candidate.safe_extract(")
+
+
 def test_release_qualify_reverifies_q_bytes():
     doc = _release_workflow()
     steps = doc["jobs"]["qualify"]["steps"]

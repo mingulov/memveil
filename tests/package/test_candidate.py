@@ -2813,6 +2813,54 @@ def test_verify_q_diff_rejects_source_to_evidence_rename(
         m.verify_q_diff(commit, renamed)
 
 
+def _q_bound_repo(workshop, tmp_path):
+    """Source repo at C with an evidence-only Q child on top."""
+    m, fix = seal_paths(workshop, tmp_path)
+    root = fix["root"]
+    commit = git(root, "rev-parse", "HEAD")
+    (root / "packaging" / "qualifications").mkdir(
+        parents=True)
+    (root / "packaging" / "qualifications"
+     / "candidate.json").write_text("{}\n")
+    first = _commit_as(
+        root, "Q evidence",
+        "packaging/qualifications/candidate.json")
+    return m, root, commit, first
+
+
+def test_verify_q_bound_accepts_honest_triple(workshop,
+                                              tmp_path):
+    m, root, commit, first = _q_bound_repo(workshop,
+                                           tmp_path)
+    manifest = {"source": {"commit": commit}}
+    assert m.verify_q_bound(manifest, commit, first,
+                            str(root)) is None
+
+
+def test_verify_q_bound_refuses_wrong_c(workshop, tmp_path):
+    m, root, commit, first = _q_bound_repo(workshop,
+                                           tmp_path)
+    manifest = {"source": {"commit": "1" * 40}}
+    assert manifest["source"]["commit"] != commit
+    with pytest.raises(ValueError, match="dispatched"):
+        m.verify_q_bound(manifest, commit, first,
+                         str(root))
+    with pytest.raises(ValueError, match="dispatched"):
+        m.verify_q_bound({}, commit, first, str(root))
+
+
+def test_verify_q_bound_refuses_non_evidence_q(workshop,
+                                               tmp_path):
+    m, fix = seal_paths(workshop, tmp_path)
+    root = fix["root"]
+    commit = git(root, "rev-parse", "HEAD")
+    (root / "src" / "evil.txt").write_text("source edit\n")
+    bad = _commit_as(root, "Q source edit", "src/evil.txt")
+    manifest = {"source": {"commit": commit}}
+    with pytest.raises(ValueError, match="evidence-only"):
+        m.verify_q_bound(manifest, commit, bad, str(root))
+
+
 def test_tested_payload_matches_candidate_closure(workshop,
                                                   tmp_path):
     m, manifest = sealed_manifest(workshop, tmp_path)

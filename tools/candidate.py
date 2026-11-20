@@ -1320,6 +1320,26 @@ def verify_q_diff(c_commit, q_commit):
     return None
 
 
+def verify_q_bound(manifest, c_commit, q_commit, checkout_root):
+    """Bind a loaded manifest to its dispatched source and Q.
+
+    Requires manifest["source"]["commit"] == c_commit and Q
+    evidence-only over C in checkout_root: a manifest sealing
+    a different source, or a Q carrying non-evidence edits,
+    fails closed even when the policy and lock bytes match.
+    Returns None; raises ValueError otherwise.
+    """
+    source = manifest.get("source") \
+        if isinstance(manifest, dict) else None
+    sealed = source.get("commit") \
+        if isinstance(source, dict) else None
+    require(sealed == c_commit,
+            "manifest source differs from the dispatched "
+            "source commit")
+    _verify_q_diff(checkout_root, c_commit, q_commit)
+    return None
+
+
 def verify_signature(subject, signature, public_key, trusted):
     """Verify an ssh-keygen -Y Ed25519 signature over subject."""
     require(digest(public_key) in trusted,

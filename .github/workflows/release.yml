@@ -126,6 +126,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
           DRAFT_RELEASE_ID: ${{ inputs.draft_release_id }}
         run: |
           set -eu
@@ -145,6 +146,9 @@ jobs:
               api, repo, os.environ["DRAFT_RELEASE_ID"], tag)
           manifest = candidate.load_manifest(
               "packaging/qualifications/candidate.json", sha)
+          candidate.verify_q_bound(
+              manifest, os.environ["SOURCE_COMMIT"],
+              os.environ["GITHUB_SHA"], ".")
           draft = Path(sys.argv[1])
           for entry in manifest["artifacts"]:
               dest = draft / entry["name"]
