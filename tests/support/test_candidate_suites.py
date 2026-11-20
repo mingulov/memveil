@@ -1521,10 +1521,10 @@ def test_journey_tampered_executable_post_prep_refuses(
     combined = result.stdout + result.stderr
     assert result.returncode == 2, combined
     # The tampered copy sits outside the stages tree, so
-    # containment refuses before any byte is read; the
-    # launch-time digest refusal stays pinned by the
-    # lying-record test.
-    assert 'outside the stages' in combined, combined
+    # the shared scan refuses its claim before any byte
+    # is read; the launch-time digest refusal stays
+    # pinned by the lying-record test.
+    assert 'invalid claim' in combined, combined
     assert hashlib.sha256(
         original.read_bytes()).hexdigest() \
         == original_digest
@@ -1632,7 +1632,7 @@ def test_journey_record_non_string_path_refuses(sealed,
     import json
     sys.path.insert(0, str(ROOT / 'tests'))
     from support.candidate_suite import checkout_identity, \
-        journey_identity_excludes
+        journey_identity_excludes, journey_staging_root
     record_path = _prep_record_path('prep')
     record_path.parent.mkdir(parents=True, exist_ok=True)
     commit, tree = checkout_identity(
@@ -1666,9 +1666,10 @@ def test_journey_record_non_string_path_refuses(sealed,
     # the refusal above fires on the type check. The bad
     # record is removed first, since the scan covers every
     # record in the directory. The unstaged path carries
-    # the honest staged name, so the control exercises the
-    # missing-file check rather than the staged-filename
-    # binding.
+    # the honest staged name inside the owned staging
+    # root, so the control exercises the missing-file
+    # check rather than the claim rule or the
+    # staged-filename binding.
     record_path.unlink()
     control_path = _prep_record_path('prep-control')
     commit, tree = checkout_identity(
@@ -1678,7 +1679,9 @@ def test_journey_record_non_string_path_refuses(sealed,
          'commit': commit, 'tree': tree,
          'suites': {'deb': {'path': str(tmp_path / 'orig'),
                             'staged': str(
-                                tmp_path / 'package_deb'),
+                                Path(journey_staging_root())
+                                / 'unstaged-probe.staged'
+                                / 'package_deb'),
                             'sha256': '0' * 64,
                             'target': 'package_deb'}}}))
     environment['MV_JOURNEY_PREP'] = str(control_path)
@@ -2158,7 +2161,9 @@ def test_journey_launcher_refuses_exe_outside_stages(
     # A digest-matching executable outside the configured
     # stages tree refuses: copying a valid record between
     # two prep roots must not execute the original root's
-    # bytes.
+    # bytes. The shared scan refuses the outside-root
+    # claim before dispatch; the launch-time containment
+    # check stays as defense in depth.
     harness = ('#!/bin/sh\necho journey-marker\n'
                'echo "running 1 tests"\n'
                'echo "test journey_probe ... ok"\n'
@@ -2168,8 +2173,8 @@ def test_journey_launcher_refuses_exe_outside_stages(
     stub.write_text(harness)
     stub.chmod(0o755)
     # The outside file carries the honest staged name, so
-    # this leg exercises containment rather than the
-    # staged-filename binding.
+    # this leg exercises the staged-path claim rule
+    # rather than the staged-filename binding.
     outside = tmp_path / TARGETS['deb']
     shutil.copyfile(stub, outside)
     outside.chmod(0o755)
@@ -2194,7 +2199,7 @@ def test_journey_launcher_refuses_exe_outside_stages(
     result = _launch_journey('deb', environment)
     combined = result.stdout + result.stderr
     assert result.returncode == 2, combined
-    assert 'outside the stages' in combined, combined
+    assert 'invalid claim' in combined, combined
     assert 'journey-marker' not in result.stdout, combined
 
 
@@ -2206,18 +2211,19 @@ def test_journey_launcher_refuses_outside_exe_without_reading(
     from support.candidate_suite import checkout_identity, \
         journey_identity_excludes, journey_staging_root
     from support.journey_prep import TARGETS
-    # Containment precedes any byte read: the outside
-    # executable is unreadable, yet the refusal is still
-    # the containment error rather than an IO error, so
-    # the launch never opens unauthorized bytes.
+    # The claim rule judges the staged-path spelling
+    # without opening any byte: the outside executable
+    # is unreadable, yet the refusal is still the claim
+    # error rather than an IO error, so the launch never
+    # opens unauthorized bytes.
     harness = ('#!/bin/sh\necho journey-marker\n'
                'echo "running 1 tests"\n'
                'echo "test journey_probe ... ok"\n'
                'echo "test result: ok. 1 passed; 0 failed; '
                '0 ignored; 0 measured; 0 filtered out"\n')
     # The outside file carries the honest staged name, so
-    # this leg exercises containment rather than the
-    # staged-filename binding.
+    # this leg exercises the staged-path claim rule
+    # rather than the staged-filename binding.
     outside = tmp_path / TARGETS['deb']
     outside.write_text(harness)
     digest = hashlib.sha256(
@@ -2246,7 +2252,7 @@ def test_journey_launcher_refuses_outside_exe_without_reading(
         outside.chmod(0o755)
     combined = result.stdout + result.stderr
     assert result.returncode == 2, combined
-    assert 'outside the stages' in combined, combined
+    assert 'invalid claim' in combined, combined
     assert 'not executable' not in combined, combined
     assert 'unreadable' not in combined, combined
     assert 'Traceback' not in combined, combined
@@ -3158,7 +3164,7 @@ def test_journey_scan_validates_suite_entries(tmp_path):
     sys.path.insert(0, str(ROOT / 'tests'))
     from support.candidate_suite import \
         _prep_suite_entry_error, checkout_identity, \
-        journey_identity_excludes, \
+        journey_identity_excludes, journey_staging_root, \
         refuse_unowned_prep_contents
     # The shared predicate pins the writer's entry shape:
     # one definition, used by both the scan and dispatch.
@@ -3194,8 +3200,15 @@ def test_journey_scan_validates_suite_entries(tmp_path):
              'commit': commit, 'tree': tree,
              'suites': {'deb': entry}}))
 
+    # The well-shaped record also carries a valid
+    # claim (known suite and target, absolute staged
+    # path inside the owned staging root, canonical
+    # digest), so the scan passes it.
     write_record({'path': str(tmp_path / 'orig'),
-                  'staged': str(tmp_path / 'package_deb'),
+                  'staged': str(
+                      Path(journey_staging_root())
+                      / 'entries-probe.staged'
+                      / 'package_deb'),
                   'sha256': '0' * 64,
                   'target': 'package_deb'})
     refuse_unowned_prep_contents()
@@ -3352,3 +3365,150 @@ def test_journey_scan_refuses_linked_staged_exe(
     combined = result.stdout + result.stderr
     assert result.returncode == 0, combined
     assert 'journey-marker' in result.stdout, combined
+
+
+def test_journey_scan_validates_suite_claims(tmp_path):
+    import json
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import \
+        _prep_suite_claim_error, checkout_identity, \
+        journey_identity_excludes, journey_staging_root, \
+        refuse_unowned_prep_contents
+    from support.journey_prep import TARGETS
+    root = Path(journey_staging_root())
+    honest = {'path': str(tmp_path / 'orig'),
+              'staged': str(root / 'claims-probe.staged'
+                            / TARGETS['deb']),
+              'sha256': 'ab' * 32,
+              'target': TARGETS['deb']}
+    # The shared predicate pins the claim rule: known
+    # suite, the suite's own target, an absolute staged
+    # path inside the owned staging root, and a
+    # canonical digest.
+    assert _prep_suite_claim_error('deb', honest) is None
+    assert _prep_suite_claim_error(
+        'rpm-journey',
+        dict(honest,
+             staged=str(root / 'claims-probe.staged'
+                        / TARGETS['rpm-journey']),
+             target=TARGETS['rpm-journey'])) is None
+    assert _prep_suite_claim_error('nope', honest) \
+        is not None
+    assert _prep_suite_claim_error(
+        'deb',
+        dict(honest, target=TARGETS['rpm-journey'])) \
+        is not None
+    assert _prep_suite_claim_error(
+        'deb', dict(honest, staged='relative/staged')) \
+        is not None
+    assert _prep_suite_claim_error(
+        'deb',
+        dict(honest,
+             staged=str(tmp_path / TARGETS['deb']))) \
+        is not None
+    for bad_digest in ('0' * 63, '0' * 65, 'A' * 64,
+                       'g' * 64, ''):
+        assert _prep_suite_claim_error(
+            'deb', dict(honest, sha256=bad_digest)) \
+            is not None, bad_digest
+    dispatch_text = (
+        ROOT / 'tests/support/candidate_suite.py').read_text()
+    prep_text = (
+        ROOT / 'tests/support/journey_prep.py').read_text()
+    assert prep_text.count(
+        'def _prep_suite_claim_error') \
+        + dispatch_text.count(
+            'def _prep_suite_claim_error') == 1
+    # The scan applies it to every claim of every
+    # record: an invalid claim refuses loudly instead of
+    # entering the digest map or dropping silently.
+    commit, tree = checkout_identity(
+        exclude=journey_identity_excludes())
+    record_path = _prep_record_path('stub-claims')
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def write_record(suites):
+        record_path.write_text(json.dumps(
+            {'schema': 'memveil-journey-prep/1',
+             'commit': commit, 'tree': tree,
+             'suites': suites}))
+
+    write_record({'deb': honest})
+    refuse_unowned_prep_contents()
+    bad_suites = [
+        {'nope': honest},
+        {'deb': dict(
+            honest, target=TARGETS['rpm-journey'])},
+        {'deb': dict(honest, staged='relative/staged')},
+        {'deb': dict(
+            honest,
+            staged=str(tmp_path / TARGETS['deb']))},
+        {'deb': dict(honest, sha256='0' * 63)},
+        {'deb': dict(honest, sha256='A' * 64)},
+        {'deb': dict(honest, sha256='g' * 64)},
+    ]
+    for bad in bad_suites:
+        write_record(bad)
+        with pytest.raises(ValueError, match='invalid claim'):
+            refuse_unowned_prep_contents()
+    write_record({'deb': honest})
+    refuse_unowned_prep_contents()
+
+
+def test_journey_launcher_refuses_unknown_suite_claim(
+        sealed, tmp_path):
+    import hashlib
+    import json
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import checkout_identity, \
+        journey_identity_excludes, journey_staging_root
+    from support.journey_prep import TARGETS
+    harness = ('#!/bin/sh\necho journey-marker\n'
+               'echo "running 1 tests"\n'
+               'echo "test journey_probe ... ok"\n'
+               'echo "test result: ok. 1 passed; 0 failed; '
+               '0 ignored; 0 measured; 0 filtered out"\n')
+    tag = '%d-%s' % (os.getpid(), uuid.uuid4().hex[:8])
+    stage_dir = Path(journey_staging_root()) / (
+        'stub-claim-%s.staged' % tag)
+    stage_dir.mkdir(parents=True)
+    staged = stage_dir / TARGETS['deb']
+    staged.write_text(harness)
+    staged.chmod(0o755)
+    digest = hashlib.sha256(
+        staged.read_bytes()).hexdigest()
+    commit, tree = checkout_identity(
+        exclude=journey_identity_excludes())
+    record_path = _prep_record_path('stub-claim')
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def write_record(suite):
+        record_path.write_text(json.dumps(
+            {'schema': 'memveil-journey-prep/1',
+             'commit': commit, 'tree': tree,
+             'suites': {suite: {
+                 'path': str(staged),
+                 'staged': str(staged),
+                 'sha256': digest,
+                 'target': TARGETS['deb']}}}))
+
+    # The unknown-suite claim refuses loudly at launch
+    # instead of dropping silently; the staged bytes
+    # never execute.
+    write_record('nope')
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MV_JOURNEY_PREP'] = str(record_path)
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 2, combined
+    assert 'invalid claim' in combined, combined
+    assert 'journey-marker' not in result.stdout, combined
+    # Honest control: the same bytes claimed under the
+    # known suite launch green.
+    write_record('deb')
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert 'journey-marker' in result.stdout, combined
+    assert '1 passed' in combined, combined
