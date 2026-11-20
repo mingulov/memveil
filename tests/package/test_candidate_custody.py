@@ -1636,6 +1636,23 @@ def test_release_runbook_orders_stage_sign_pack_once():
     flat = " ".join(text.split())
     assert "packs once in step 7, after both receipts " \
         "exist" in flat
+    assert "prints the qualification record digest" in flat
+    assert "prints the archive digest" not in flat
+
+
+def test_release_runbook_shell_blocks_parse(tmp_path):
+    text = (ROOT / "RELEASING.md").read_text()
+    blocks = re.findall(r"```sh\n(.*?)```", text, re.S)
+    assert blocks, "the runbook carries no shell blocks"
+    for index, block in enumerate(blocks):
+        probe = tmp_path / ("runbook-%d.sh" % index)
+        probe.write_text(block)
+        proc = subprocess.run(
+            ["bash", "-n", str(probe)],
+            capture_output=True, text=True)
+        assert proc.returncode == 0, \
+            "shell block %d fails bash -n: %s" % (
+                index, proc.stderr.strip())
 
 
 def test_release_version_binding():

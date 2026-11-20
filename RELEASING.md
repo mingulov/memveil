@@ -226,8 +226,8 @@ completed legs, the progress files) and its `exit.json`
 beside it as `dist/evidence/live/<mode>-exit.json`:
 
 ```sh
-OVERHEAD=<receipt dir printed by the perf-overhead run>
-SOAK=<receipt dir printed by the vm-live-soak run>
+OVERHEAD="<receipt dir printed by the perf-overhead run>"
+SOAK="<receipt dir printed by the vm-live-soak run>"
 mkdir -p dist/evidence/live/overhead dist/evidence/live/soak
 cp -r "$OVERHEAD"/export/. dist/evidence/live/overhead/
 cp "$OVERHEAD"/exit.json dist/evidence/live/overhead-exit.json
@@ -371,9 +371,9 @@ over both retained exports), then packs the evidence
 archive once and writes the qualification beside it,
 never inside it: the record carries the archive digest,
 so an inner copy would be self-referential and is
-refused. The packer prints the archive digest and drops
-the local-only `vng-cmd.txt` host command lines, which
-never ship:
+refused. The packer prints the qualification record
+digest and drops the local-only `vng-cmd.txt` host
+command lines, which never ship:
 
 ```sh
 ./tools/candidate write-qualification \
@@ -506,7 +506,7 @@ the ref the import ran at):
 
 ```sh
 gh run list -w release.yml
-RUN_ID=<import run id from the listing above>
+RUN_ID="<import run id from the listing above>"
 REPO_ID=$(gh api repos/<OWNER>/<REPO> -q .id)
 gh api repos/<OWNER>/<REPO>/actions/runs/$RUN_ID/artifacts \
   -q '.artifacts[]
@@ -588,7 +588,7 @@ against the binding and rejects any other check):
 
 ```sh
 gh run list -w release.yml
-DRY_RUN_ID=<dry-run run id from the listing above>
+DRY_RUN_ID="<dry-run run id from the listing above>"
 gh api repos/<OWNER>/<REPO>/commits/$Q2/check-runs \
   -q '.check_runs[]
       | select(.name == "promotion-dry-run/1")
