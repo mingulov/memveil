@@ -25,6 +25,8 @@
 
 use super::DirLock;
 use super::run;
+use super::run_candidate;
+use super::run_candidate_ok;
 use super::run_ok;
 use super::scratch;
 use super::sha256_file;
@@ -116,10 +118,10 @@ pub fn assert_loader_closure() {
 /// Zero-flag doctor (exit 0 or 3, nonempty stdout) plus the
 /// exact installed version.
 pub fn assert_doctor_and_version(version: &str) {
-    let doctor = run(INSTALLED_BIN, &["doctor"], None);
+    let doctor = run_candidate(INSTALLED_BIN, &["doctor"], None);
     assert!(doctor.status.code() == Some(0) || doctor.status.code() == Some(3));
     assert!(!String::from_utf8_lossy(&doctor.stdout).trim().is_empty());
-    let got = run_ok(INSTALLED_BIN, &["version"], None);
+    let got = run_candidate_ok(INSTALLED_BIN, &["version"], None);
     assert_eq!(got.trim(), format!("memveil-{version}"));
 }
 
@@ -129,6 +131,8 @@ pub fn assert_doctor_and_version(version: &str) {
 /// leaves no capture dir, a run (0/4) leaves one.
 pub fn record_probe(tmp: &Path) {
     let cap = tmp.join("cap");
+    // `env_clear` below already scrubs the loader override, so
+    // this leg needs no `run_candidate` wrapper.
     let record = std::process::Command::new(INSTALLED_BIN)
         .args([
             "record",
@@ -234,7 +238,9 @@ pub fn qualify_legs(tmp: &Path, scratch_dirs: &QualifyScratch, receipts: &str) {
         format!("{lib}/swiotlb_copy.bpf.o"),
     ];
     let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
-    let qualify = run(refs[0], &refs[1..], Some(tmp));
+    // The scrubbed spawn plus sudo's own env_reset (verified to
+    // drop the override) leave the binary's loader env clean.
+    let qualify = run_candidate(refs[0], &refs[1..], Some(tmp));
     println!(
         "journey qualify exit: {}",
         qualify.status.code().unwrap_or(-1)
@@ -291,7 +297,7 @@ pub fn qualify_legs(tmp: &Path, scratch_dirs: &QualifyScratch, receipts: &str) {
         fixture.to_str().unwrap().to_string(),
     ];
     let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
-    let bridged = run(refs[0], &refs[1..], Some(tmp));
+    let bridged = run_candidate(refs[0], &refs[1..], Some(tmp));
     println!(
         "journey bridged qualify exit: {}",
         bridged.status.code().unwrap_or(-1)

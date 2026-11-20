@@ -735,7 +735,9 @@ fn installed_man_matches_current_help() {
         } else {
             vec![&verb, "--help"]
         };
-        let out = h::run(bin, &args, None);
+        // Sealed bytes run scrubbed: neither cargo's nor an
+        // operator's loader override may redirect them.
+        let out = h::run_candidate(bin, &args, None);
         assert!(out.status.success(), "{verb}");
         let help = String::from_utf8_lossy(&out.stdout).into_owned();
         let text = fs::read_to_string(
@@ -1085,6 +1087,66 @@ fn install_doctor_uninstall_smoke() {
     );
     assert!(!h::run("dpkg", &["-s", "memveil"], None).status.success());
     j::assert_no_residue();
+}
+
+#[test]
+fn installed_closure_wiring() {
+    if !h::candidate_mode() {
+        eprintln!("skip: installed-closure wiring needs candidate inputs");
+        return;
+    }
+    // The Rust wiring (not just the packager predicate): the
+    // sealed .deb extracts to a tree the closure leg accepts,
+    // and a hollowed tree refuses through the same function.
+    let deb = h::ensure_deb();
+    let extracted = h::deb_extract(&deb, "closure-wiring");
+    j::assert_installed_closure(&extracted);
+    let tmp = h::scratch("closure-wiring-neg");
+    let trial = tmp.join("trial");
+    h::run_ok(
+        "cp",
+        &["-r", extracted.to_str().unwrap(), trial.to_str().unwrap()],
+        None,
+    );
+    fs::remove_file(trial.join("usr").join("bin").join("memveil")).unwrap();
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        j::assert_installed_closure(&trial);
+    }));
+    assert!(refused.is_err(), "closure wiring passed a hollow tree");
+}
+
+#[test]
+fn candidate_spawn_scrubs_loader_env() {
+    // The enforcement primitive every candidate-binary spawn
+    // applies, proved without touching the process env: an
+    // explicitly tainted child env reaches a plain spawn
+    // (control) but never a scrubbed one. Mode-independent: no
+    // candidate inputs are consulted, so this runs in both.
+    let taint = "/nonexistent-memveil-loader-taint";
+    assert!(!std::path::Path::new(taint).exists());
+    let mut control = std::process::Command::new("printenv");
+    control.arg("LD_LIBRARY_PATH").env("LD_LIBRARY_PATH", taint);
+    let control = control.output().expect("spawn printenv");
+    let mut scrubbed = std::process::Command::new("printenv");
+    scrubbed
+        .arg("LD_LIBRARY_PATH")
+        .env("LD_LIBRARY_PATH", taint);
+    h::scrub_loader_env(&mut scrubbed);
+    let scrubbed = scrubbed.output().expect("spawn printenv");
+    assert!(control.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&control.stdout).trim(),
+        taint,
+        "control spawn never saw the taint"
+    );
+    assert!(
+        !scrubbed.status.success(),
+        "scrubbed spawn leaked the override"
+    );
+    assert!(
+        String::from_utf8_lossy(&scrubbed.stdout).trim().is_empty(),
+        "scrubbed spawn env holds the override"
+    );
 }
 
 #[test]

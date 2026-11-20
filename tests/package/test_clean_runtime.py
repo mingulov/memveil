@@ -286,7 +286,8 @@ def test_cleanroom_no_pixi(tmp_path):
     assert any("checkout" in hit for hit in audit_trace(
         checkout, "/", "/repo")), "checkout open accepted"
     sealed = seal_candidate(tmp_path, "nopixi")
-    selected = load(env=candidate_env(sealed))
+    selected = load(env=candidate_env(sealed),
+                    required=True)
     try:
         assert (selected.root / "MANIFEST.json").is_file()
     finally:

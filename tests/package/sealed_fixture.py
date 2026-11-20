@@ -10,7 +10,8 @@ paths and no build outputs.
 
 Requires git, dpkg-deb, rpmbuild, cargo, and bpf-linker on
 PATH; missing tools fail closed (install them, do not skip:
-skips would mask the mapping proof).
+skips would mask the mapping proof). Shaped seals also
+require rustc, readelf, rpm, rpm2cpio, and cpio.
 """
 
 import atexit
@@ -36,7 +37,48 @@ import candidate as protocol
 REQUIRED_TOOLS = ("git", "dpkg-deb", "rpmbuild", "cargo",
                   "bpf-linker", "python3")
 
+# Extra tools the shaped seal needs over the minimal one:
+# rustc compiles the stub engine/lib, readelf derives the
+# control floor, and rpm/rpm2cpio/cpio verify the rebuilt
+# pair.
+SHAPED_TOOLS = ("rustc", "readelf", "rpm", "rpm2cpio",
+                "cpio")
+
+# Engine version the stub sources implement; the shaped seal
+# refuses a workshop bundle that drifts from it.
+STUB_VERSION = "0.1.0"
+
+# Full-shape bundle members the shaped seal adds over the
+# workshop payload: exact names the real packagers and the
+# fixed file pins require, synthetic bytes (every consumer
+# hashes them post-build, so bytes never matter, names do).
+SHAPED_EXTRA_FILES = {
+    "examples/real-capture/README.md":
+    b"synthetic example\n",
+    "examples/real-capture/events.ndjson":
+    b"synthetic example\n",
+    "examples/real-capture/session.json":
+    b"synthetic example\n",
+    "examples/lifecycle-copy/README.md":
+    b"synthetic example\n",
+    "examples/lifecycle-copy/events.ndjson":
+    b"synthetic example\n",
+    "examples/lifecycle-copy/session.json":
+    b"synthetic example\n",
+    "examples/lifecycle-copy/oracle-phase.log":
+    b"synthetic example\n",
+    "examples/lifecycle-copy/fail-phase.log":
+    b"synthetic example\n",
+    "LICENSES/GPL-2.0-or-later.txt":
+    b"synthetic license\n",
+    "LICENSES/GPL-2.0.txt":
+    b"synthetic license\n",
+    "licenses/RUNTIME.LIBRARY.EXCEPTION":
+    b"synthetic exception\n",
+}
+
 _workshop = None
+_stub_binaries = None
 
 
 def require_tool(name):
@@ -149,17 +191,208 @@ def _make_executable_bundle(fix):
                          roles["bundle"])
 
 
+def _sha_bytes(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def _stub_build_env():
+    return {key: value for key, value in os.environ.items()
+            if key != "RUSTUP_TOOLCHAIN"}
+
+
+def _build_stub_binaries(dest):
+    """Compile the stub engine + closure lib once per process.
+
+    Direct rustc, no cargo project (the stubs need no
+    dependencies and must not touch the workspace lock):
+    the engine answers the packager-observed surface
+    (`version`, top and per-verb `--help`), the cdylib is a
+    well-formed ELF .so. Returns (engine_bytes, lib_bytes).
+    """
+    global _stub_binaries
+    if _stub_binaries is not None:
+        return _stub_binaries
+    require_tool("rustc")
+    env = _stub_build_env()
+    out = Path(dest) / "stub-build"
+    out.mkdir(parents=True, exist_ok=True)
+    engine = out / "stub-engine"
+    proc = subprocess.run(
+        ["rustc", "--edition=2021", "-O",
+         "tests/package/stub_engine.rs",
+         "-o", str(engine)],
+        cwd=str(ROOT), stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, env=env)
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    lib = out / "libstub.so"
+    proc = subprocess.run(
+        ["rustc", "--edition=2021", "-O",
+         "--crate-type=cdylib",
+         "tests/package/stub_lib.rs",
+         "-o", str(lib)],
+        cwd=str(ROOT), stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, env=env)
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    proc = subprocess.run(
+        [str(engine), "version"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True)
+    assert proc.returncode == 0 and proc.stdout.strip() == \
+        "memveil-" + STUB_VERSION, proc.stderr[-1000:]
+    proc = subprocess.run(
+        [str(engine), "--help"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True)
+    assert proc.returncode == 0 and proc.stdout.strip(), \
+        "stub engine --help failed"
+    proc = subprocess.run(
+        ["readelf", "-V", str(lib)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True)
+    assert proc.returncode == 0, \
+        "stub lib is not well-formed ELF"
+    _stub_binaries = (engine.read_bytes(), lib.read_bytes())
+    return _stub_binaries
+
+
+def _bundle_tarball(artifacts):
+    """Locate the bundle tarball structurally (pre-rebind).
+
+    Name- and bytes-blind: the .tar.gz carrying a top-level
+    MANIFEST.json is the bundle (the source archive is a bare
+    git export). Used when the manifest was just rewritten
+    and digest matching cannot work yet.
+    """
+    found = []
+    for tarball in sorted(artifacts.glob("*.tar.gz")):
+        try:
+            with tarfile.open(tarball, "r:gz") as tar:
+                names = tar.getnames()
+        except (tarfile.TarError, OSError):
+            continue
+        if not names:
+            continue
+        top = names[0].split("/")[0]
+        if top + "/MANIFEST.json" in names:
+            found.append((tarball, top))
+    assert len(found) == 1, \
+        "want exactly one bundle tarball in %s" % artifacts
+    return found[0]
+
+
+def _shape_bundle(fix, dest):
+    """Upgrade a fresh fixture to real package shape.
+
+    The workshop's minimal payload (synthetic engine text,
+    hand-staged pair) cannot satisfy the re-homed control,
+    file-list, or installed-man assertions. The shaped seal
+    instead stages a full-shape bundle -- stub engine and
+    closure lib plus the exact example/license names the
+    fixed pins require -- and rebuilds the .deb/.rpm pair
+    through the real packaging scripts, so control fields,
+    generated pages, and the sealed file sets are all
+    script-shaped with synthetic bytes. The BPF copies stay
+    synthetic (only ever equality-compared) and the fixture
+    source root stays untouched (the seal still binds it).
+    """
+    for name in SHAPED_TOOLS:
+        require_tool(name)
+    Path(dest).mkdir(parents=True, exist_ok=True)
+    bundle = fix["bundle_dir"]
+    manifest_path = bundle / "MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["engine_version"] == STUB_VERSION, \
+        "stub sources implement %s, bundle says %s" % (
+            STUB_VERSION, manifest["engine_version"])
+    engine_bytes, lib_bytes = _build_stub_binaries(dest)
+    files = dict(manifest["files"])
+    engine = bundle / "bin" / "memveil"
+    engine.write_bytes(engine_bytes)
+    # The packagers execute the staged engine (the `version`
+    # rerun, man generation); the workshop stages mode-blind.
+    engine.chmod(0o755)
+    files["bin/memveil"] = _sha_bytes(engine_bytes)
+    # The synthetic-text lib cannot survive the packagers'
+    # readelf derivation; the stub .so takes its name slot.
+    (bundle / "lib" / "memveil"
+     / "libfixture.so.1").unlink()
+    del files["lib/memveil/libfixture.so.1"]
+    (bundle / "lib" / "memveil"
+     / "libgcc_s.so.1").write_bytes(lib_bytes)
+    files["lib/memveil/libgcc_s.so.1"] = _sha_bytes(lib_bytes)
+    for rel, data in SHAPED_EXTRA_FILES.items():
+        assert rel not in files, rel
+        path = bundle / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        files[rel] = _sha_bytes(data)
+    # The workshop's demo example has no FHS destination in
+    # the real packagers (they stage only the two worked
+    # examples), so it leaves the shaped closure.
+    demo = bundle / "examples" / "demo" / "fixture.txt"
+    demo.unlink()
+    del files["examples/demo/fixture.txt"]
+    manifest["files"] = files
+    manifest["build_receipt"]["outputs"]["engine_sha256"] = \
+        files["bin/memveil"]
+    # The .deb transcribes the patchelf record into
+    # X-Memveil-Build-Tools; the fixture runs no patchelf.
+    manifest["packaging_tools"] = {
+        "patchelf": {"version": "0.0.0"}}
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    epoch_env = dict(os.environ)
+    epoch_env["SOURCE_DATE_EPOCH"] = str(FIXED_EPOCH)
+    deb_out = Path(dest) / "shaped-deb"
+    deb_out.mkdir(exist_ok=True)
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "package-deb.py"),
+         "--bundle", str(bundle), "--out", str(deb_out)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, env=epoch_env)
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    debs = list(deb_out.glob("*.deb"))
+    assert len(debs) == 1, debs
+    for old in fix["artifacts"].glob("*.deb"):
+        old.unlink()
+    shutil.copy2(debs[0], fix["artifacts"] / debs[0].name)
+    rpm_work = Path(dest) / "shaped-rpm-work"
+    rpm_out = Path(dest) / "shaped-rpm"
+    rpm_out.mkdir(exist_ok=True)
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "package-rpm.py"),
+         "--bundle", str(bundle), "--root", str(fix["root"]),
+         "--work", str(rpm_work), "--out", str(rpm_out)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, env=epoch_env)
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    rpms = list(rpm_out.glob("*.rpm"))
+    assert len(rpms) == 1, rpms
+    for old in fix["artifacts"].glob("*.rpm"):
+        old.unlink()
+    shutil.copy2(rpms[0], fix["artifacts"] / rpms[0].name)
+    # Re-tar so the bundle artifact matches the upgraded
+    # manifest before the seal binds the bytes.
+    tarball, arcname = _bundle_tarball(fix["artifacts"])
+    deterministic_tar_gz(bundle, arcname, tarball)
+
+
 def seal_candidate(tmp_path, name, deb_name=None,
-                   rpm_name=None):
+                   rpm_name=None, shaped=False):
     """Seal one synthetic candidate; return its paths and manifest.
 
     deb_name/rpm_name rename the sealed pair (extensions must
     stay .deb/.rpm); the SBOM and provenance are re-emitted to
-    bind the new names before the seal.
+    bind the new names before the seal. shaped=True rebuilds
+    the pair through the real packaging scripts from a
+    full-shape bundle, for legs that assert re-homed
+    control/file-list/installed-man behavior.
     """
     shop = workshop()
     fix = shop.fresh(Path(tmp_path) / name)
     artifacts = fix["artifacts"]
+    if shaped:
+        _shape_bundle(fix, Path(tmp_path) / (name + "-shape"))
     if deb_name is not None:
         assert deb_name.endswith(".deb"), deb_name
         originals = list(artifacts.glob("*.deb"))

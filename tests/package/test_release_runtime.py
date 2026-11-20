@@ -11,8 +11,11 @@ manifest plus the packager's system allowlist.
 
 Installed mapping: the sealed .deb/.rpm pair install exactly
 the candidate files closure (extra/missing/tampered members
-refuse), the packaging journeys consume the sealed paths and
-never rebuild, and candidate mode needs no build outputs.
+refuse), every re-homed packaging leg consumes the sealed
+paths and never rebuilds, candidate mode needs no build
+outputs, and foreign loader overrides refuse pre-exec while
+every candidate spawn runs scrubbed. All candidate legs
+build and run inside one audited target dir.
 
 Environment: MV_BUNDLE_TARBALL plus MV_CANDIDATE_MANIFEST
 (candidate mode: the verified root replaces the tarball),
@@ -371,7 +374,8 @@ def test_installed_closure_matches_candidate(tmp_path):
     # nothing extra ships besides the generated deb files.
     sealed = seal_candidate(tmp_path, "closure")
     manifest = sealed["manifest"]
-    selected = load(env=candidate_env(sealed))
+    selected = load(env=candidate_env(sealed),
+                    required=True)
     try:
         assert selected is not None
         assert selected.manifest == manifest
@@ -423,15 +427,71 @@ def test_installed_closure_matches_candidate(tmp_path):
         DEBPKG.verify_installed(str(dest), manifest)
 
 
+# Re-homed tests the candidate legs execute per suite:
+# every test with a candidate branch plus the structural
+# pins that prove the seal is real-shaped. Excluded with
+# reasons: the floor/BPF/stripped/loader pins need real
+# bytes the synthetic seal never carries, lintian_gate is
+# host-tool dependent, the pure spec lints are dev-owned,
+# and the privileged/container journeys need a full engine
+# (the real-seal journey pass owns them).
+CANDIDATE_DEB_TESTS = (
+    "sealed_inputs_used",
+    "control_fields",
+    "file_list_exact",
+    "staged_payload_matches_bundle",
+    "bpf_objects_match_build",
+    "installed_man_matches_current_help",
+    "docs_mirror_repo_and_links_resolve",
+    "lintian_overrides_exact",
+    "changelog_debian",
+    "installed_closure_wiring",
+    "no_maintainer_scripts",
+    "receipts_state_dir_staged",
+    "md5sums_match_payload",
+    "modes_owners_no_privilege_bits",
+    "man_and_completions_present",
+    "copyright_points_at_texts",
+    "no_elf_under_usr_share",
+)
+
+CANDIDATE_RPM_TESTS = (
+    "sealed_inputs_used",
+    "rpm_header",
+    "rpm_manual_deps_only",
+    "rpm_file_list_exact",
+    "rpm_modes_owners",
+    "rpm_payload_mirrors_repo",
+    "rpmspec_parse",
+    "spec_version_matches_engine",
+)
+
+CANDIDATE_SUITES = (("package_deb", CANDIDATE_DEB_TESTS),
+                    ("package_rpm", CANDIDATE_RPM_TESTS))
+
+
+@pytest.fixture(scope="module")
+def audited_target_dir(tmp_path_factory):
+    """One audited cargo target dir for the candidate legs.
+
+    Every leg builds and runs inside this dir, so the
+    no-outputs assertions audit exactly the tree cargo used:
+    nothing lands in the ambient target dir unaudited.
+    """
+    return tmp_path_factory.mktemp("audited-target")
+
+
 _binaries = {}
 
 
-def _test_binary(name):
-    found = _binaries.get(name)
+def _test_binary(name, target_dir):
+    key = (name, str(target_dir))
+    found = _binaries.get(key)
     if found is not None and found.is_file():
         return found
-    env = {key: value for key, value in os.environ.items()
-           if key != "RUSTUP_TOOLCHAIN"}
+    env = {item: value for item, value in os.environ.items()
+           if item != "RUSTUP_TOOLCHAIN"}
+    env["CARGO_TARGET_DIR"] = str(target_dir)
     proc = subprocess.run(
         ["cargo", "test", "--locked", "--no-run",
          "--test", name],
@@ -448,72 +508,145 @@ def _test_binary(name):
                 found = ROOT / found
             assert found.is_file(), \
                 "cargo named a missing test binary: %s" % found
-            _binaries[name] = found
+            try:
+                found.relative_to(target_dir)
+            except ValueError:
+                raise AssertionError(
+                    "test binary escaped the audited "
+                    "target dir: %s" % found)
+            _binaries[key] = found
             return found
     raise AssertionError(
         "cargo named no test binary for %s" % name)
 
 
-def _run_sealed_suite(sealed, suite, target_dir, extra=None):
-    binary = _test_binary(suite)
+def _run_sealed_suite(sealed, suite, target_dir, tests,
+                      extra=None):
+    binary = _test_binary(suite, target_dir)
     assert binary is not None, suite
-    env = {"PATH": os.environ.get("PATH", ""),
-           "CARGO_TARGET_DIR": str(target_dir),
-           "MV_RUSTPKG_REBUILD": "1"}
-    env.update(candidate_env(sealed))
-    if extra:
-        env.update(extra)
-    return subprocess.run(
-        [str(binary), "sealed_inputs_used", "--nocapture"],
-        cwd=str(ROOT), stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True, env=env)
-
-
-def test_sealed_inputs_used(tmp_path):
-    # The install journeys consume the sealed .deb/.rpm paths
-    # from the candidate manifest and never rebuild: the seal
-    # carries a marker-named pair, rebuilds are requested, and
-    # the helpers must still resolve exactly the sealed paths.
-    sealed = seal_candidate(
-        tmp_path, "markers", deb_name="sealed-marker.deb",
-        rpm_name="sealed-marker.rpm")
-    assert sealed["deb"].name == "sealed-marker.deb"
-    assert sealed["rpm"].name == "sealed-marker.rpm"
-    target_dir = tmp_path / "sealed-target"
-    target_dir.mkdir()
-    for suite, marker in (("package_deb", "sealed-marker.deb"),
-                          ("package_rpm", "sealed-marker.rpm")):
-        proc = _run_sealed_suite(sealed, suite, target_dir)
-        assert proc.returncode == 0, proc.stderr[-3000:]
+    ran = {}
+    for name in tests:
+        env = {"PATH": os.environ.get("PATH", ""),
+               "CARGO_TARGET_DIR": str(target_dir),
+               "MV_RUSTPKG_REBUILD": "1"}
+        env.update(candidate_env(sealed))
+        if extra:
+            env.update(extra)
+        proc = subprocess.run(
+            [str(binary), name, "--nocapture"],
+            cwd=str(ROOT), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, env=env)
         combined = proc.stdout + proc.stderr
+        assert proc.returncode == 0, \
+            "%s %s failed: %s" % (
+                suite, name, proc.stderr[-3000:])
         assert "1 passed" in combined, \
-            "%s ran no sealed-input test" % suite
-        assert marker in combined, \
-            "%s never consumed %s" % (suite, marker)
-    # The cargo-driven shape dispatch uses must work too:
-    # cargo injects LD_LIBRARY_PATH into the test binary, which
-    # the loader forbids, so the helpers scrub it for the
-    # loader probe. This leg fails if the scrub regresses.
+            "%s ran no %s" % (suite, name)
+        ran[name] = combined
+    return ran
+
+
+def _cargo_suite_env(sealed, target_dir):
+    # The cargo-driven shape dispatch uses, audited: the
+    # ambient target dir and rebuild request never leak in
+    # (both are set explicitly below), the repo pin wins.
     env = {key: value for key, value in os.environ.items()
-           if key != "RUSTUP_TOOLCHAIN"}
+           if key not in ("RUSTUP_TOOLCHAIN",
+                          "CARGO_TARGET_DIR",
+                          "MV_RUSTPKG_REBUILD")}
+    env["CARGO_TARGET_DIR"] = str(target_dir)
+    env["MV_RUSTPKG_REBUILD"] = "1"
     env.update(candidate_env(sealed))
-    proc = subprocess.run(
-        ["cargo", "test", "--locked", "--test", "package_deb",
-         "sealed_inputs_used", "--", "--nocapture"],
-        cwd=str(ROOT), stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True, env=env)
-    assert proc.returncode == 0, proc.stderr[-3000:]
-    combined = proc.stdout + proc.stderr
-    assert "1 passed" in combined, combined[-2000:]
-    assert "sealed-marker.deb" in combined, \
-        "cargo-driven run never consumed the sealed .deb"
-    # Even with rebuilds requested, candidate mode must not
-    # build any package output under the target dir.
-    leftovers = sorted(
+    return env
+
+
+def _run_cargo_suite(sealed, suite, target_dir, tests):
+    env = _cargo_suite_env(sealed, target_dir)
+    ran = {}
+    for name in tests:
+        proc = subprocess.run(
+            ["cargo", "test", "--locked", "--test", suite,
+             name, "--", "--nocapture"],
+            cwd=str(ROOT), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, env=env)
+        combined = proc.stdout + proc.stderr
+        assert proc.returncode == 0, \
+            "cargo %s %s failed: %s" % (
+                suite, name, proc.stderr[-3000:])
+        assert "1 passed" in combined, \
+            "cargo %s ran no %s: %s" % (
+                suite, name, combined[-2000:])
+        ran[name] = combined
+    return ran
+
+
+def _assert_binaries_built_here(target_dir):
+    # The cargo-driven legs must compile inside the audited
+    # dir: each suite leaves its test binary there.
+    for suite, _ in CANDIDATE_SUITES:
+        found = [path for path in target_dir.rglob(
+            suite + "-*")
+            if path.is_file()
+            and os.access(path, os.X_OK)]
+        assert found, \
+            "cargo left no %s test binary in %s" % (
+                suite, target_dir)
+
+
+def _package_outputs(target_dir):
+    # Package outputs the helpers could emit under the
+    # candidate-writable work subtree (every ensure_* writes
+    # beneath it, rebuild-scoped or not).
+    work = target_dir / "package-test"
+    if not work.is_dir():
+        return []
+    return sorted(
         path.relative_to(target_dir).as_posix()
-        for base, _, files in os.walk(target_dir)
+        for base, _, files in os.walk(work)
         for path in (Path(base) / name for name in files)
         if path.suffix in (".deb", ".rpm"))
+
+
+def test_sealed_inputs_used(tmp_path, audited_target_dir):
+    # The install journeys consume the sealed .deb/.rpm paths
+    # from the candidate manifest and never rebuild: the seal
+    # carries a marker-named pair, rebuilds are requested,
+    # and every re-homed leg must still resolve exactly the
+    # sealed paths -- not only the sealed-input threading
+    # test, but the control, file-list, staging,
+    # engine-version, installed-man, docs, and closure legs
+    # that execute ensure_deb/ensure_rpm in candidate mode.
+    sealed = seal_candidate(
+        tmp_path, "markers", deb_name="sealed-marker.deb",
+        rpm_name="sealed-marker.rpm", shaped=True)
+    assert sealed["deb"].name == "sealed-marker.deb"
+    assert sealed["rpm"].name == "sealed-marker.rpm"
+    target_dir = audited_target_dir
+    markers = {"package_deb": "sealed-marker.deb",
+               "package_rpm": "sealed-marker.rpm"}
+    for suite, tests in CANDIDATE_SUITES:
+        ran = _run_sealed_suite(sealed, suite, target_dir,
+                                tests)
+        assert markers[suite] in \
+            ran["sealed_inputs_used"], \
+            "%s never consumed %s" % (
+                suite, markers[suite])
+    # The cargo-driven shape dispatch uses must work too:
+    # cargo injects LD_LIBRARY_PATH into the test binary,
+    # which the entry check recognizes (cargo-only passes)
+    # while every candidate spawn still runs scrubbed. This
+    # leg fails if recognition or the scrub regresses.
+    for suite, tests in CANDIDATE_SUITES:
+        ran = _run_cargo_suite(sealed, suite, target_dir,
+                               tests)
+        assert markers[suite] in \
+            ran["sealed_inputs_used"], \
+            "cargo-driven %s never consumed %s" % (
+                suite, markers[suite])
+    _assert_binaries_built_here(target_dir)
+    # Even with rebuilds requested, candidate mode must not
+    # build any package output under the audited dir.
+    leftovers = _package_outputs(target_dir)
     assert leftovers == [], leftovers
     # Partial candidate inputs fail closed, never silently
     # fall back to building.
@@ -521,7 +654,7 @@ def test_sealed_inputs_used(tmp_path):
            "CARGO_TARGET_DIR": str(target_dir),
            "MV_BUNDLE_TARBALL":
            str(sealed["bundle"])}
-    binary = _test_binary("package_deb")
+    binary = _test_binary("package_deb", target_dir)
     proc = subprocess.run(
         [str(binary), "sealed_inputs_used", "--nocapture"],
         cwd=str(ROOT), stdout=subprocess.PIPE,
@@ -532,31 +665,75 @@ def test_sealed_inputs_used(tmp_path):
         "partial-input refusal must name both inputs"
 
 
-def test_no_build_outputs_needed(tmp_path):
-    # Candidate mode consults no build outputs: the sealed
-    # resolution runs under a fresh empty target dir (no
-    # release binary, no BPF outputs, no prior packages), the
-    # installed BPF bytes are compared against the verified
-    # candidate root even though the development BPF bytes
-    # differ, and the candidate-mode code never names a build
-    # output path at all.
-    sealed = seal_candidate(tmp_path, "nobuild")
-    target_dir = tmp_path / "empty-target"
-    target_dir.mkdir()
-    for suite in ("package_deb", "package_rpm"):
-        proc = _run_sealed_suite(sealed, suite, target_dir)
-        assert proc.returncode == 0, proc.stderr[-3000:]
-        assert "1 passed" in proc.stdout + proc.stderr, \
-            "%s ran no sealed-input test" % suite
-    built = sorted(
-        path.relative_to(target_dir).as_posix()
-        for base, _, files in os.walk(target_dir)
-        for path in (Path(base) / name for name in files)
-        if path.suffix in (".deb", ".rpm")
-        or path.name == "memveil"
-        or path.name.startswith("memveil-ebpf-"))
+def test_candidate_loader_env_operator_refused(
+        tmp_path, audited_target_dir):
+    # An operator loader override refuses pre-exec in
+    # candidate mode: the bare value, the cargo-shaped value
+    # with an operator suffix appended, and the present-but-
+    # empty value each fail closed naming the variable. The
+    # inputs are valid; only the env is tainted.
+    sealed = seal_candidate(tmp_path, "refused")
+    target_dir = audited_target_dir
+    binary = _test_binary("package_deb", target_dir)
+    cases = {"/tmp/memveil-operator-taint": "bare",
+             str(target_dir / "debug")
+             + ":/tmp/memveil-operator-taint": "suffixed",
+             "": "empty"}
+    for tainted, label in cases.items():
+        env = {"PATH": os.environ.get("PATH", ""),
+               "CARGO_TARGET_DIR": str(target_dir),
+               "MV_RUSTPKG_REBUILD": "1",
+               "LD_LIBRARY_PATH": tainted}
+        env.update(candidate_env(sealed))
+        proc = subprocess.run(
+            [str(binary), "sealed_inputs_used",
+             "--nocapture"],
+            cwd=str(ROOT), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, env=env)
+        combined = proc.stdout + proc.stderr
+        assert proc.returncode != 0, \
+            "%s override silently accepted" % label
+        assert "LD_LIBRARY_PATH" in combined, \
+            "%s refusal must name the variable" % label
+
+
+def test_candidate_loader_env_cargo_only_proceeds(
+        tmp_path, audited_target_dir):
+    # A cargo-shaped loader value proceeds: the entry check
+    # recognizes cargo's own injection (here spelled
+    # explicitly, no cargo involved) while the suite still
+    # consumes the sealed inputs.
+    sealed = seal_candidate(tmp_path, "cargoonly")
+    target_dir = audited_target_dir
+    ran = _run_sealed_suite(
+        sealed, "package_deb", target_dir,
+        ("sealed_inputs_used",),
+        extra={"LD_LIBRARY_PATH":
+               str(target_dir / "debug")})
+    assert sealed["deb"].name in \
+        ran["sealed_inputs_used"]
+
+
+def test_no_build_outputs_needed(tmp_path, audited_target_dir):
+    # Candidate mode consults no build outputs: every
+    # re-homed leg runs against the sealed pair with
+    # rebuilds requested, yet no package output appears
+    # under the audited dir, no release tree is emitted
+    # there at all, the installed BPF bytes are compared
+    # against the verified candidate root even though the
+    # development BPF bytes differ, and the
+    # candidate-mode code never names a build output path
+    # at all.
+    sealed = seal_candidate(tmp_path, "nobuild", shaped=True)
+    target_dir = audited_target_dir
+    for suite, tests in CANDIDATE_SUITES:
+        _run_sealed_suite(sealed, suite, target_dir, tests)
+    built = _package_outputs(target_dir)
     assert built == [], built
-    selected = load(env=candidate_env(sealed))
+    assert not (target_dir / "release").exists(), \
+        "candidate mode emitted a release tree"
+    selected = load(env=candidate_env(sealed),
+                    required=True)
     try:
         staged = tmp_path / "bpf-staged"
         staged.mkdir()

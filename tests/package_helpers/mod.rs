@@ -151,6 +151,10 @@ pub fn rebuild_requested() -> bool {
 ///
 /// Panics when exactly one is set: partial candidate inputs
 /// fail closed, never silently fall back to building.
+/// Candidate mode also refuses foreign `LD_LIBRARY_PATH`
+/// values before anything runs (see
+/// `check_candidate_loader_env`): every candidate-mode test
+/// reaches this predicate before its first spawn.
 pub fn candidate_mode() -> bool {
     let bundle = std::env::var("MV_BUNDLE_TARBALL").unwrap_or_default();
     let manifest = std::env::var("MV_CANDIDATE_MANIFEST").unwrap_or_default();
@@ -159,7 +163,88 @@ pub fn candidate_mode() -> bool {
         "candidate inputs partial: qualification requires both \
          MV_BUNDLE_TARBALL and MV_CANDIDATE_MANIFEST"
     );
-    !bundle.is_empty()
+    let mode = !bundle.is_empty();
+    if mode {
+        check_candidate_loader_env();
+    }
+    mode
+}
+
+/// Loader dirs cargo injects, recognized in candidate mode.
+///
+/// Observed (cargo 1.100 `cargo test`, dev profile): the
+/// profile dir under the active target dir plus the toolchain
+/// sysroot lib dirs, exactly
+/// `<target>/debug:<sysroot>/lib/rustlib/<host>/lib:<sysroot>/lib`
+/// (`CARGO_TARGET_DIR` is honored by both cargo and
+/// `target_dir`, so the first component always matches; the
+/// sysroot is queried under the repo pin, matching how cargo
+/// itself was invoked). An ambient operator value is APPENDED
+/// after cargo's own components (observed), and cargo never
+/// sets the var empty, so any component outside this set --
+/// including empty ones (a bare colon means the cwd) -- is
+/// foreign. The release profile dir mirrors the dev one; a
+/// `deps` subdir is NOT injected for integration tests
+/// (observed), so it stays unrecognized. Query failures
+/// shrink the recognized set instead of widening it: an
+/// unprovable value refuses.
+fn cargo_loader_dirs() -> &'static [String] {
+    static DIRS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    DIRS.get_or_init(|| {
+        let target = target_dir();
+        let mut dirs = vec![
+            target.join("debug").to_str().unwrap().to_string(),
+            target.join("release").to_str().unwrap().to_string(),
+        ];
+        let sysroot = run_unpinned("rustc", &["--print", "sysroot"], Some(&rust_dir()));
+        if !sysroot.status.success() {
+            return dirs;
+        }
+        let sysroot = String::from_utf8_lossy(&sysroot.stdout).trim().to_string();
+        if sysroot.is_empty() {
+            return dirs;
+        }
+        let release = run_unpinned("rustc", &["-vV"], Some(&rust_dir()));
+        if !release.status.success() {
+            return dirs;
+        }
+        let host = String::from_utf8_lossy(&release.stdout)
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("host: ")
+                    .map(str::trim)
+                    .map(str::to_string)
+            });
+        let Some(host) = host else { return dirs };
+        if host.is_empty() {
+            return dirs;
+        }
+        dirs.push(format!("{sysroot}/lib/rustlib/{host}/lib"));
+        dirs.push(format!("{sysroot}/lib"));
+        dirs
+    })
+}
+
+/// Refuse foreign loader overrides in candidate mode (fail closed).
+///
+/// Absent passes; present passes only when EVERY component is
+/// a recognized cargo-injected dir (present-but-empty refuses,
+/// matching the loader's own presence ban). Recognition is not
+/// trust: every candidate-binary spawn scrubs the var
+/// regardless (see `run_candidate`), so even a cargo-shaped
+/// operator value can never reach sealed bytes; this check is
+/// the early tripwire, the scrubbing is the enforcement.
+fn check_candidate_loader_env() {
+    let Ok(value) = std::env::var("LD_LIBRARY_PATH") else {
+        return;
+    };
+    let dirs = cargo_loader_dirs();
+    let ok = value.split(':').all(|c| dirs.contains(&c.to_string()));
+    assert!(
+        ok,
+        "candidate LD_LIBRARY_PATH refused: {value:?} (only cargo-injected loader dirs pass: \
+         {dirs:?}; unset LD_LIBRARY_PATH or drop the operator override)"
+    );
 }
 
 /// True when `name` resolves on PATH.
@@ -228,6 +313,49 @@ pub fn run_unpinned(cmd: &str, args: &[&str], cwd: Option<&Path>) -> Output {
 /// Stdout of a command that must succeed.
 pub fn run_ok(cmd: &str, args: &[&str], cwd: Option<&Path>) -> String {
     let out = run(cmd, args, cwd);
+    assert!(
+        out.status.success(),
+        "{cmd} {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Strip the loader override from a child command.
+///
+/// The single primitive every candidate-binary spawn applies
+/// (`run_candidate`); public so the scrub test can prove it
+/// without mutating the process env (unsound under parallel
+/// libtest).
+pub fn scrub_loader_env(cmd: &mut Command) {
+    cmd.env_remove("LD_LIBRARY_PATH");
+}
+
+/// Run a CANDIDATE binary: the loader override never reaches it.
+///
+/// Cargo injects `LD_LIBRARY_PATH` into every test process and
+/// an operator value would ride along too: both are stripped
+/// on every spawn of sealed bytes (the sealed-man run, the
+/// installed doctor/version/qualify legs), so qualification
+/// can never execute the candidate under a redirected loader.
+/// The candidate-mode entry check (`candidate_mode`) refuses
+/// foreign values even earlier; this is the enforcement at
+/// exec. Tool spawns (cargo, python probes, package managers)
+/// stay on `run`: they never execute candidate bytes.
+pub fn run_candidate(cmd: &str, args: &[&str], cwd: Option<&Path>) -> Output {
+    let mut command = Command::new(cmd);
+    command.args(args);
+    scrub_loader_env(&mut command);
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    spawn_output(&mut command, cmd)
+}
+
+/// Stdout of a candidate binary that must succeed.
+pub fn run_candidate_ok(cmd: &str, args: &[&str], cwd: Option<&Path>) -> String {
+    let out = run_candidate(cmd, args, cwd);
     assert!(
         out.status.success(),
         "{cmd} {args:?} failed: {}",
