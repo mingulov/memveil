@@ -3705,3 +3705,67 @@ def test_journey_scan_passes_under_concurrent_publish(
         assert PUBLISH_SCRATCH_RE.fullmatch(
             Path(temp).name) is not None, temp
     refuse_unowned_prep_contents()
+
+
+def test_journey_scan_refuses_claim_through_staged_link(
+        tmp_path):
+    import hashlib
+    import json
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import \
+        _prep_suite_claim_error, checkout_identity, \
+        journey_identity_excludes, journey_staging_root, \
+        refuse_unowned_prep_contents
+    from support.journey_prep import TARGETS
+    tag = '%d-%s' % (os.getpid(), uuid.uuid4().hex[:8])
+    root = Path(journey_staging_root())
+    stage_dir = root / ('honest-%s.staged' % tag)
+    stage_dir.mkdir(parents=True)
+    staged = stage_dir / TARGETS['deb']
+    staged.write_bytes(b'#!/bin/sh\necho honest\n')
+    staged.chmod(0o755)
+    digest = hashlib.sha256(
+        staged.read_bytes()).hexdigest()
+    link = root / ('link-%s.staged' % tag)
+    link.symlink_to(stage_dir, target_is_directory=True)
+    honest = {'path': str(tmp_path / 'orig'),
+              'staged': str(staged),
+              'sha256': digest,
+              'target': TARGETS['deb']}
+    # The attack spelling traverses the staged link and
+    # collapses textually onto the honest staged file.
+    attack = dict(
+        honest,
+        staged=str(link / '..' / stage_dir.name
+                   / TARGETS['deb']))
+    assert os.path.abspath(attack['staged']) \
+        == str(staged)
+    assert _prep_suite_claim_error('deb', honest) is None
+    reason = _prep_suite_claim_error('deb', attack)
+    assert reason is not None \
+        and 'symlink' in reason, reason
+    commit, tree = checkout_identity(
+        exclude=journey_identity_excludes())
+    record_path = _prep_record_path('stub-linkclaim')
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def write_record(suites):
+        record_path.write_text(json.dumps(
+            {'schema': 'memveil-journey-prep/1',
+             'commit': commit, 'tree': tree,
+             'suites': suites}))
+
+    # The honest claim indexes while the unreferenced
+    # staged link sits beside it, skipped.
+    write_record({'deb': honest})
+    refuse_unowned_prep_contents()
+    # The link-traversing claim refuses at the scan
+    # instead of indexing its digest under the honest
+    # file's entry.
+    write_record({'deb': attack})
+    with pytest.raises(ValueError, match='invalid claim') \
+            as caught:
+        refuse_unowned_prep_contents()
+    assert 'symlink' in str(caught.value), caught.value
+    write_record({'deb': honest})
+    refuse_unowned_prep_contents()

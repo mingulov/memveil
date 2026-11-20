@@ -405,9 +405,9 @@ def refuse_unowned_prep_contents():
     record-shape and suite-entry predicates shared with
     the launcher, and every suite claim must pass the
     suite-claim predicate (known suite, suite target,
-    absolute staged path inside the owned staging
-    root, canonical digest) before it enters the
-    digest map; anything not a
+    absolute staged path with link-free ancestors
+    inside the owned staging root, canonical digest)
+    before it enters the digest map; anything not a
     record or publication scratch refuses (notably
     untracked source inside an in-checkout override,
     which would vanish from checkout identity through
@@ -697,17 +697,27 @@ def _prep_suite_claim_error(suite, entry):
     scan: a claim enters the bound-path digest map only
     when the suite key names a dispatched journey suite,
     the entry target equals that suite's build target,
-    the staged path is absolute and inside the owned
-    staging root, and the digest is a canonical 64-hex
-    SHA-256. Callers check entry shape through
+    the staged path is absolute with link-free
+    ancestors, normalizes inside the owned staging
+    root, and the digest is a canonical 64-hex SHA-256.
+    Callers check entry shape through
     _prep_suite_entry_error first; this predicate judges
-    values, never types. The launcher enforces the same
+    values, never types. The link walk runs on the raw
+    spelling before any normalization: collapsing
+    dot-dot textually first would hide a traversed
+    link, indexing the claim's digest under a different
+    regular staged file the claim never legitimately
+    bound. Only ancestors walk here: the leaf itself
+    stays for the staged-entry check, where a
+    symlinked staged entry refuses whether or not a
+    record binds it. The launcher enforces the same
     properties at its own checks before exec (target
     match, absolute link-free staged path inside the
-    stages tree, digest equality against the recomputed
-    hash), so a claim passing here still re-verifies
-    there; the scan refuses early so foreign content
-    never hides behind an unbound skip.
+    stages tree,
+    digest equality against the recomputed hash), so a
+    claim passing here still re-verifies there; the
+    scan refuses early so foreign content never hides
+    behind an unbound skip.
     """
     from support.journey_prep import TARGETS
     if not isinstance(entry, dict):
@@ -720,6 +730,10 @@ def _prep_suite_claim_error(suite, entry):
     if not isinstance(staged, str) or not os.path.isabs(
             staged):
         return 'staged path is not absolute'
+    try:
+        refuse_symlinked_path(Path(staged).parent)
+    except ValueError:
+        return 'staged path traverses a symlink'
     root = Path(journey_staging_root())
     if root not in Path(os.path.abspath(staged)).parents:
         return 'staged path is outside the owned staging root'
