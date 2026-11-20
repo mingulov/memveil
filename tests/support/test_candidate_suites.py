@@ -459,12 +459,16 @@ def _journey_stub_record(tmp_path, script, suite='deb'):
     import shutil
     sys.path.insert(0, str(ROOT / 'tests'))
     from support.candidate_suite import checkout_identity, \
-        journey_identity_excludes
+        journey_identity_excludes, journey_staging_root
     from support.journey_prep import TARGETS
     stub = tmp_path / ('stub-' + suite)
     stub.write_text(script)
     stub.chmod(0o755)
-    staged = tmp_path / ('staged-' + suite)
+    staged_dir = Path(journey_staging_root()) / (
+        'stub-%s-%d-%s.staged'
+        % (suite, os.getpid(), uuid.uuid4().hex[:8]))
+    staged_dir.mkdir(parents=True)
+    staged = staged_dir / TARGETS[suite]
     shutil.copyfile(stub, staged)
     staged.chmod(0o755)
     record_path = _prep_record_path('stub-' + suite)
@@ -1859,6 +1863,129 @@ def test_journey_launcher_ignores_original_post_stage(
     result = _launch_journey('deb', environment)
     combined = result.stdout + result.stderr
     assert result.returncode == 0, combined
+    assert '1 passed' in combined, combined
+
+
+def test_journey_launcher_refuses_exe_outside_stages(
+        sealed, tmp_path):
+    import hashlib
+    import json
+    import shutil
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import checkout_identity, \
+        journey_identity_excludes, journey_staging_root
+    from support.journey_prep import TARGETS
+    # A digest-matching executable outside the configured
+    # stages tree refuses: copying a valid record between
+    # two prep roots must not execute the original root's
+    # bytes.
+    harness = ('#!/bin/sh\necho journey-marker\n'
+               'echo "running 1 tests"\n'
+               'echo "test journey_probe ... ok"\n'
+               'echo "test result: ok. 1 passed; 0 failed; '
+               '0 ignored; 0 measured; 0 filtered out"\n')
+    stub = tmp_path / 'stub-outside'
+    stub.write_text(harness)
+    stub.chmod(0o755)
+    outside = tmp_path / 'outside-stages-exe'
+    shutil.copyfile(stub, outside)
+    outside.chmod(0o755)
+    assert Path(journey_staging_root()).resolve() \
+        not in outside.resolve().parents
+    record_path = _prep_record_path('stub-outside')
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    commit, tree = checkout_identity(
+        exclude=journey_identity_excludes())
+    record_path.write_text(json.dumps(
+        {'schema': 'memveil-journey-prep/1',
+         'commit': commit, 'tree': tree,
+         'suites': {'deb': {
+             'path': str(stub),
+             'staged': str(outside),
+             'sha256': hashlib.sha256(
+                 outside.read_bytes()).hexdigest(),
+             'target': TARGETS['deb']}}}))
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MV_JOURNEY_PREP'] = str(record_path)
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 2, combined
+    assert 'outside the stages' in combined, combined
+    assert 'journey-marker' not in result.stdout, combined
+
+
+def test_journey_launcher_refuses_symlinked_exe(
+        sealed, tmp_path):
+    import hashlib
+    import json
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import checkout_identity, \
+        journey_identity_excludes, journey_staging_root
+    from support.journey_prep import TARGETS
+    # A staged path that is a link refuses outright, even
+    # when it points at digest-matching bytes inside the
+    # stages tree: links are never followed on launch.
+    harness = ('#!/bin/sh\necho journey-marker\n'
+               'echo "running 1 tests"\n'
+               'echo "test journey_probe ... ok"\n'
+               'echo "test result: ok. 1 passed; 0 failed; '
+               '0 ignored; 0 measured; 0 filtered out"\n')
+    tag = '%d-%s' % (os.getpid(), uuid.uuid4().hex[:8])
+    target_dir = Path(journey_staging_root()) / (
+        'stub-target-%s.staged' % tag)
+    target_dir.mkdir(parents=True)
+    target = target_dir / TARGETS['deb']
+    target.write_text(harness)
+    target.chmod(0o755)
+    link_dir = Path(journey_staging_root()) / (
+        'stub-link-%s.staged' % tag)
+    link_dir.mkdir(parents=True)
+    link = link_dir / TARGETS['deb']
+    link.symlink_to(target)
+    record_path = _prep_record_path('stub-link')
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    commit, tree = checkout_identity(
+        exclude=journey_identity_excludes())
+    record_path.write_text(json.dumps(
+        {'schema': 'memveil-journey-prep/1',
+         'commit': commit, 'tree': tree,
+         'suites': {'deb': {
+             'path': str(target),
+             'staged': str(link),
+             'sha256': hashlib.sha256(
+                 target.read_bytes()).hexdigest(),
+             'target': TARGETS['deb']}}}))
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MV_JOURNEY_PREP'] = str(record_path)
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 2, combined
+    assert 'not a plain file' in combined, combined
+    assert 'journey-marker' not in result.stdout, combined
+
+
+def test_journey_launcher_accepts_honest_staged_exe(
+        sealed, tmp_path):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import journey_staging_root
+    harness = ('#!/bin/sh\necho journey-marker\n'
+               'echo "running 1 tests"\n'
+               'echo "test journey_probe ... ok"\n'
+               'echo "test result: ok. 1 passed; 0 failed; '
+               '0 ignored; 0 measured; 0 filtered out"\n')
+    _, staged, record_path = _journey_stub_record(
+        tmp_path, harness)
+    assert Path(journey_staging_root()) in \
+        staged.resolve().parents
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MV_JOURNEY_PREP'] = str(record_path)
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert 'journey-marker' in result.stdout, combined
     assert '1 passed' in combined, combined
 
 

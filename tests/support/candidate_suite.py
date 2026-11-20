@@ -541,7 +541,12 @@ def _run_journey(suite, argv, live):
     suite's), and the staged executable bytes (re-hashed
     before exec); a stale record, a rebuilt-from-dirty
     checkout, a suite mixup, a missing or aliased staged
-    executable, or digest drift refuses. The tool-owned
+    executable, an executable outside the stages
+    directory, or digest drift refuses. The staged path
+    must be a regular file (links refuse outright, never
+    followed) resolving strictly inside the configured
+    stages tree: a digest match alone never authorizes
+    an outside path. The tool-owned
     prep directory holding every record, stage, and
     publication scratch file is excluded wholesale from
     the digest through the exclusion list shared with
@@ -588,8 +593,17 @@ def _run_journey(suite, argv, live):
             'journey prep record names another suite\'s '
             'executable: ' + suite)
     staged = Path(entry['staged'])
-    if not staged.is_absolute() or staged.is_symlink() \
-            or not staged.is_file():
+    if not staged.is_absolute():
+        raise ValueError(
+            'recorded journey staged executable is not a '
+            'plain file: ' + entry['staged'])
+    try:
+        mode = os.lstat(staged).st_mode
+    except OSError:
+        raise ValueError(
+            'recorded journey staged executable is not a '
+            'plain file: ' + entry['staged'])
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
         raise ValueError(
             'recorded journey staged executable is not a '
             'plain file: ' + entry['staged'])
@@ -603,6 +617,14 @@ def _run_journey(suite, argv, live):
             'recorded journey staged executable changed; '
             're-run tests/support/journey_prep.py: '
             + suite)
+    stages_root = Path(
+        os.path.realpath(journey_staging_root()))
+    if stages_root not in Path(
+            os.path.realpath(entry['staged'])).parents:
+        raise ValueError(
+            'recorded journey staged executable is outside '
+            'the stages directory; re-run '
+            'tests/support/journey_prep.py: ' + suite)
     commit, tree = checkout_identity(
         exclude=journey_identity_excludes())
     if commit != record['commit'] or tree != record['tree']:
