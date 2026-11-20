@@ -14,6 +14,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -1522,6 +1523,29 @@ def test_release_digest_never_in_shell():
                 not in step["run"], job
             assert "${{ inputs.source_commit }}" \
                 not in step["run"], job
+
+
+def test_release_key_recipe_stays_outside_the_tree():
+    text = (ROOT / "RELEASING.md").read_text()
+    match = re.search(r"^KEYDIR=\"([^\"]+)\"$", text, re.M)
+    assert match, "key recipe must define KEYDIR"
+    keydir = Path(os.path.expandvars(match.group(1)))
+    try:
+        outside = not keydir.resolve().is_relative_to(
+            ROOT.resolve())
+    except OSError:
+        outside = True
+    if not outside:
+        proc = subprocess.run(
+            ["git", "-C", str(ROOT), "check-ignore", "-q",
+             str(keydir)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert proc.returncode == 0, str(keydir)
+    for hit in re.finditer(
+            r"qualifier(?:-derived)?\.(?:key|pub)", text):
+        before = text[max(0, hit.start() - 9):hit.start()]
+        assert before.endswith("$KEYDIR/"), \
+            text[max(0, hit.start() - 60):hit.end() + 20]
 
 
 def test_release_version_binding():

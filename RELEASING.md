@@ -60,7 +60,9 @@ move the Q1 branch after dispatching on it.
 - The qualifier Ed25519 key (step 0). The same key signs
   the artifact checksums, the gate receipts, and the
   remote-check receipts; its derived public bytes go in
-  the policy.
+  the policy. THE key location is
+  `$HOME/.memveil-qualifier/`, outside the checkout, so
+  key material never dirties the tree the seal gates on.
 - Toolchains: Rust 1.100.0 (`rust-toolchain.toml`),
   nightly-2026-05-20 plus bpf-linker 0.10.4 for the eBPF
   child build (`build.rs`), packaging tools (`binutils`,
@@ -73,18 +75,28 @@ move the Q1 branch after dispatching on it.
 
 ## 0. Key and policy, before C is fixed
 
-Generate the qualifier key, derive the exact public bytes
-the signer will write, and hash them for the policy:
+Generate the qualifier key OUTSIDE the checkout,
+derive the exact public bytes the signer will write, and
+hash them for the policy. THE key location is
+`$HOME/.memveil-qualifier/`; no key file is ever created
+inside the checkout, so this step leaves the tree clean
+for the seal's clean-tree gate:
 
 ```sh
-ssh-keygen -q -t ed25519 -N '' -f qualifier.key
-ssh-keygen -y -f qualifier.key > qualifier-derived.pub
-sha256sum qualifier-derived.pub
+KEYDIR="$HOME/.memveil-qualifier"
+mkdir -p "$KEYDIR"
+chmod 700 "$KEYDIR"
+ssh-keygen -q -t ed25519 -N '' -f "$KEYDIR/qualifier.key"
+ssh-keygen -y -f "$KEYDIR/qualifier.key" \
+  > "$KEYDIR/qualifier-derived.pub"
+sha256sum "$KEYDIR/qualifier-derived.pub"
 ```
 
-Put that digest in `packaging/candidate-policy.json` at C
-(`trusted_keys`), with the claim, gates, and retention the
-release needs, then fix C with the policy committed.
+Keep `KEYDIR` exported for the steps below (like
+`CANDIDATE_SHA256` and `DEB`). Put that digest in
+`packaging/candidate-policy.json` at C (`trusted_keys`),
+with the claim, gates, and retention the release needs,
+then fix C with the policy committed.
 
 ## Seal and sign locally
 
@@ -158,9 +170,9 @@ policy key:
 ```sh
 ./tools/candidate sign-checksums \
   --artifacts-dir dist/artifacts \
-  --key qualifier.key \
+  --key "$KEYDIR/qualifier.key" \
   --out-dir dist/signed
-cmp qualifier-derived.pub dist/signed/signer.pub
+cmp "$KEYDIR/qualifier-derived.pub" dist/signed/signer.pub
 ls dist/signed
 ```
 
@@ -223,8 +235,8 @@ receipt = {"schema": "memveil-gate-receipt/1",
     c.canonical(receipt))
 print("matrix gate inputs ready")
 EOF
-ssh-keygen -Y sign -f qualifier.key -n memveil-candidate \
-  dist/evidence/matrix-receipt.json
+ssh-keygen -Y sign -f "$KEYDIR/qualifier.key" \
+  -n memveil-candidate dist/evidence/matrix-receipt.json
 ./tools/candidate pack-evidence --evidence-dir dist/evidence \
   --out dist/qualification-evidence.tar.gz
 ```
