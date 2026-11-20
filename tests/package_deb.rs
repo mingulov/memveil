@@ -1151,22 +1151,75 @@ fn installed_closure_wiring() {
     }
     // The Rust wiring (not just the packager predicate): the
     // sealed .deb extracts to a tree the closure leg accepts,
-    // and a hollowed tree refuses through the same function.
+    // and doctored trees refuse through the same function.
+    fn trial_copy(tmp: &std::path::Path, extracted: &std::path::Path, name: &str) -> PathBuf {
+        let trial = tmp.join(name);
+        h::run_ok(
+            "cp",
+            &["-r", extracted.to_str().unwrap(), trial.to_str().unwrap()],
+            None,
+        );
+        trial
+    }
+    fn refusal_message(f: impl FnOnce() + std::panic::UnwindSafe) -> String {
+        match std::panic::catch_unwind(f) {
+            Ok(()) => panic!("closure wiring passed a doctored tree"),
+            Err(payload) => payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|line| line.to_string()))
+                .unwrap_or_default(),
+        }
+    }
     let deb = h::ensure_deb();
     let extracted = h::deb_extract(&deb, "closure-wiring");
     j::assert_installed_closure(&extracted);
     let tmp = h::scratch("closure-wiring-neg");
-    let trial = tmp.join("trial");
-    h::run_ok(
-        "cp",
-        &["-r", extracted.to_str().unwrap(), trial.to_str().unwrap()],
-        None,
-    );
+    let trial = trial_copy(&tmp, &extracted, "trial");
     fs::remove_file(trial.join("usr").join("bin").join("memveil")).unwrap();
-    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let message = refusal_message(std::panic::AssertUnwindSafe(|| {
         j::assert_installed_closure(&trial);
     }));
-    assert!(refused.is_err(), "closure wiring passed a hollow tree");
+    assert!(message.contains("usr/bin/memveil"), "{message}");
+    // An extra member under the lib prefix refuses, as do an
+    // extra alias (naming its target) and an aliased member.
+    let extra = trial_copy(&tmp, &extracted, "extra");
+    fs::write(
+        extra
+            .join("usr")
+            .join("lib")
+            .join("memveil")
+            .join("smuggled.so"),
+        b"not in the closure",
+    )
+    .unwrap();
+    let message = refusal_message(std::panic::AssertUnwindSafe(|| {
+        j::assert_installed_closure(&extra);
+    }));
+    assert!(message.contains("smuggled.so"), "{message}");
+    let linked = trial_copy(&tmp, &extracted, "linked");
+    std::os::unix::fs::symlink(
+        "nowhere-link-target",
+        linked
+            .join("usr")
+            .join("lib")
+            .join("memveil")
+            .join("alias.so"),
+    )
+    .unwrap();
+    let message = refusal_message(std::panic::AssertUnwindSafe(|| {
+        j::assert_installed_closure(&linked);
+    }));
+    assert!(message.contains("alias.so"), "{message}");
+    assert!(message.contains("nowhere-link-target"), "{message}");
+    let aliased = trial_copy(&tmp, &extracted, "aliased");
+    let member = aliased.join("usr").join("bin").join("memveil");
+    fs::remove_file(&member).unwrap();
+    std::os::unix::fs::symlink("nowhere-alias-target", &member).unwrap();
+    let message = refusal_message(std::panic::AssertUnwindSafe(|| {
+        j::assert_installed_closure(&aliased);
+    }));
+    assert!(message.contains("usr/bin/memveil"), "{message}");
 }
 
 #[test]

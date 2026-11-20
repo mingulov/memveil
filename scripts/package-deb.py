@@ -446,9 +446,11 @@ def verify_installed(root, manifest):
     Port of the Mojo packager's installed check (minus the
     canonical-runtime entry comparison, which has no Rust
     equivalent): each MANIFEST files[] entry maps to exactly
-    one staged path whose bytes must match, and the docs
-    trees must hold nothing beyond the mapped copies plus
-    the generated copyright/changelog. Raises ValueError.
+    one staged path whose bytes must match, and the mapped
+    prefixes must hold nothing beyond the mapped copies
+    plus the generated copyright/changelog. Symlinks
+    enumerate first-class as (path, target): any alias
+    refuses naming what it points at. Raises ValueError.
     """
     expected = {}
     for name, sha256 in manifest["files"].items():
@@ -467,13 +469,34 @@ def verify_installed(root, manifest):
                 "installed file differs from bundle: " + target)
     generated = {"usr/share/doc/memveil/copyright",
                  "usr/share/doc/memveil/changelog.Debian.gz"}
-    for prefix in ("usr/share/memveil/docs", "usr/share/doc/memveil"):
+    # Extra-member sweep over the mapped prefixes (man
+    # pages, completions, and lintian overrides ship outside
+    # them and stay owned by their own pins): every file and
+    # every symlink must be a mapped bundle member or a
+    # generated file, or the tree refuses.
+    for prefix in ("usr/bin", "usr/lib/memveil",
+                   "usr/share/memveil",
+                   "usr/share/doc/memveil"):
         base = os.path.join(root, *prefix.split("/"))
-        for current, _, files in os.walk(base):
+        for current, dirs, files in os.walk(base):
+            for leaf in sorted(dirs):
+                full = os.path.join(current, leaf)
+                if os.path.islink(full):
+                    target = os.path.relpath(
+                        full, root).replace(os.sep, "/")
+                    raise ValueError(
+                        "extra installed symlink outside "
+                        "bundle: " + target + " -> "
+                        + os.readlink(full))
             for leaf in sorted(files):
+                full = os.path.join(current, leaf)
                 target = os.path.relpath(
-                    os.path.join(current, leaf), root).replace(
-                        os.sep, "/")
+                    full, root).replace(os.sep, "/")
+                if os.path.islink(full):
+                    raise ValueError(
+                        "extra installed symlink outside "
+                        "bundle: " + target + " -> "
+                        + os.readlink(full))
                 if target not in expected \
                         and target not in generated:
                     raise ValueError(

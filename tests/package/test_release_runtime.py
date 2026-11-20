@@ -359,14 +359,25 @@ def _extract_rpm(rpm, dest):
 
 
 def _installed_set(root):
+    # Symlinks enumerate first-class as "path -> target"
+    # (never skipped): any alias outside the expected set
+    # shows up in the set difference.
     found = set()
-    for base, _, files in os.walk(root):
+    for base, dirs, files in os.walk(root):
         for name in files:
             full = os.path.join(base, name)
+            rel = os.path.relpath(full, root).replace(
+                os.sep, "/")
             if os.path.islink(full):
-                continue
-            found.add(os.path.relpath(full, root).replace(
-                os.sep, "/"))
+                found.add(rel + " -> " + os.readlink(full))
+            else:
+                found.add(rel)
+        for name in dirs:
+            full = os.path.join(base, name)
+            if os.path.islink(full):
+                found.add(os.path.relpath(
+                    full, root).replace(os.sep, "/")
+                    + " -> " + os.readlink(full))
     return found
 
 
@@ -446,6 +457,27 @@ def test_installed_closure_matches_candidate(tmp_path):
     alias.symlink_to("nowhere-alias-target")
     with pytest.raises(ValueError):
         DEBPKG.verify_installed(str(dest), manifest)
+    alias.unlink()
+    alias.write_bytes(saved)
+    DEBPKG.verify_installed(str(dest), manifest)
+    # An extra member under the lib prefix refuses, as does
+    # an extra alias: both name their path, the alias also
+    # its target, and the installed set carries the link.
+    smuggled = dest / "usr" / "lib" / "memveil" / "smuggled.so"
+    smuggled.write_bytes(b"not in the closure\n")
+    with pytest.raises(ValueError, match="smuggled"):
+        DEBPKG.verify_installed(str(dest), manifest)
+    smuggled.unlink()
+    link = dest / "usr" / "lib" / "memveil" / "alias.so"
+    link.symlink_to("nowhere-link-target")
+    with pytest.raises(ValueError, match="alias"):
+        DEBPKG.verify_installed(str(dest), manifest)
+    with pytest.raises(ValueError, match="nowhere-link-target"):
+        DEBPKG.verify_installed(str(dest), manifest)
+    assert "usr/lib/memveil/alias.so -> nowhere-link-target" \
+        in _installed_set(str(dest))
+    link.unlink()
+    DEBPKG.verify_installed(str(dest), manifest)
 
 
 # Re-homed tests the candidate legs execute per suite:
