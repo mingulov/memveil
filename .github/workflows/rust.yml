@@ -197,24 +197,24 @@ jobs:
           rustup toolchain install nightly-2026-05-20 --profile minimal \
             --component rust-src
       - name: Install bpf-linker 0.10.4
-        run: cargo install bpf-linker --version 0.10.4 --locked
+        run: env -u RUSTUP_TOOLCHAIN cargo install bpf-linker --version 0.10.4 --locked
       - name: Warm the cargo cache for offline queries
         run: |
-          cargo fetch --locked
-          cargo fetch --locked --manifest-path crates/ebpf/Cargo.toml
+          env -u RUSTUP_TOOLCHAIN cargo fetch --locked
+          env -u RUSTUP_TOOLCHAIN cargo fetch --locked --manifest-path crates/ebpf/Cargo.toml
       - name: Require pytest and PyYAML on the system interpreter
         run: |
           python3 -m pytest --version
           python3 -c "import yaml"
       - name: Build the release binary under test
         run: |
-          cargo build --locked --release
+          env -u RUSTUP_TOOLCHAIN cargo build --locked --release
           test -x target/release/memveil
           mkdir -p build
           ln -sfn "$GITHUB_WORKSPACE/target/release/memveil" build/memveil
       - name: Build the dev bundle tarball the runtime suites need
         run: |
-          cargo test --locked --test package_tarball
+          env -u RUSTUP_TOOLCHAIN cargo test --locked --test package_tarball
       - name: Run the audited offline pytest selection
         run: |
           set -eu

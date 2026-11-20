@@ -2303,12 +2303,14 @@ def write_qualification(manifest_path, policy_path, gate_paths,
     equal the policy's required gates exactly: unknown,
     missing, or duplicate gates refuse. Matrix row predicates
     are not re-derived here (they need the source lock at C);
-    qualify owns them. On success packs the evidence once,
-    writes the archive beside the qualification under the
-    required evidence name, and writes the sealed
-    qualification binding its real digest and size, so the
-    digest can never describe bytes packed later. Returns the
-    qualification digest hex.
+    qualify owns them. Refuses before the first write when
+    either output path already exists, so a failed re-run
+    never orphans a previous run's outputs. On success packs
+    the evidence once, writes the archive beside the
+    qualification under the required evidence name, and
+    writes the sealed qualification binding its real digest
+    and size, so the digest can never describe bytes packed
+    later. Returns the qualification digest hex.
     """
     require(gate_paths, "no gate receipts")
     manifest = load_manifest(manifest_path)
@@ -2387,6 +2389,14 @@ def write_qualification(manifest_path, policy_path, gate_paths,
             "qualification must live beside the evidence "
             "archive, never inside it")
     archive = out.parent / "qualification-evidence.tar.gz"
+    # Refuse output collision before the first write: a
+    # failed re-run must never orphan a previous run's
+    # qualification or archive, so the failure-path unlink
+    # below only removes an archive this run packed.
+    require(not os.path.lexists(out),
+            "refusing to overwrite " + out.name)
+    require(not os.path.lexists(archive),
+            "refusing to overwrite " + archive.name)
     build_evidence_archive(base, archive)
     doc = {"schema": QUALIFICATION_SCHEMA,
            "candidate_sha256": candidate_id,
@@ -2423,8 +2433,10 @@ def write_remote(import_path, check_paths, out_path):
     which re-verifies all of this against policy trust. The
     check set must equal the required remote checks exactly.
     Writes the sealed remote custody record binding the
-    import-run identity, the custody statement digest, and
-    the verified checks. Returns the record digest hex.
+    import-run identity, the custody statement file bytes
+    digest (what promote re-hashes, not a re-canonicalized
+    digest), and the verified checks. Returns the record
+    digest hex.
     """
     require(check_paths, "no remote checks")
     custody = read_json(import_path, sealed=True)
@@ -2532,7 +2544,7 @@ def write_remote(import_path, check_paths, out_path):
            "artifact_sha256": first["artifact_sha256"],
            "signer_commit": first["signer_commit"],
            "custody_sha256":
-           digest_bytes(canonical(custody)),
+           digest(import_path),
            "checks": {ident: bindings[ident]
                       for ident in sorted(bindings)}}
     write_once(out_path, canonical(doc))

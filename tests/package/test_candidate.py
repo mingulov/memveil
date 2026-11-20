@@ -3242,6 +3242,30 @@ def test_write_qualification_refuses_inconsistent(workshop,
         evidence / "qualification.json"))
     assert proc.returncode == 1
     assert proc.stderr.strip(), "silent nesting refusal"
+    # Pre-existing outputs refuse before the first write:
+    # a failed re-run never orphans a previous run's
+    # archive, and a taken qualification path assembles no
+    # fresh archive beside it.
+    stale = Path(tmp_path) / "stale"
+    stale.mkdir()
+    sentinel = stale / "qualification-evidence.tar.gz"
+    sentinel.write_bytes(b"previous run archive")
+    proc = _run_cli(_qualification_cli(
+        ctx, [first, second], evidence,
+        stale / "qualification.json"))
+    assert proc.returncode == 1
+    assert proc.stderr.strip(), "silent output refusal"
+    assert sentinel.read_bytes() == b"previous run archive"
+    taken = Path(tmp_path) / "taken"
+    taken.mkdir()
+    (taken / "qualification.json").write_bytes(b"old")
+    proc = _run_cli(_qualification_cli(
+        ctx, [first, second], evidence,
+        taken / "qualification.json"))
+    assert proc.returncode == 1
+    assert proc.stderr.strip(), "silent output refusal"
+    assert not (taken / "qualification-evidence.tar.gz") \
+        .exists()
     # Inputs rewritten after signing no longer match the receipt.
     _write_gate_inputs(m, evidence, "inputs-1.json",
                        {"events": "13", "losses": "0"})
@@ -3415,6 +3439,21 @@ def test_write_remote_binds_import(workshop, tmp_path):
         "environment": "offline",
         "product": {"preserved_assets": "2", "failures": "0"},
         "oracle": {"preserved_assets": "2", "failures": "0"}}
+    # A non-canonical import file is refused at author
+    # time (promote's sealed read would refuse it too), so
+    # it can never author a custody binding promote
+    # rejects.
+    loose = Path(tmp_path) / "custody-loose.json"
+    loose.write_bytes(json.dumps(
+        json.loads(custody_path.read_bytes()),
+        indent=1, sort_keys=True).encode() + b"\n")
+    proc = _run_cli(
+        [str(ROOT / "tools" / "candidate"), "write-remote",
+         "--import", str(loose),
+         "--checks", *[str(path) for path in paths],
+         "--out", str(Path(tmp_path) / "remote-loose.json")])
+    assert proc.returncode == 1
+    assert proc.stderr.strip(), "silent sealing refusal"
     # Wrong candidate in one receipt: the signature is valid
     # over those bytes, so only the import binding refuses.
     stray = _check_binding(
@@ -3583,7 +3622,27 @@ def test_ci_selection_audited():
     assert "sys.exit(1)" in guard
     apt = next(run for run in runs.values()
                if "apt-get install" in run)
-    installed = set(re.findall(r"[a-z0-9][a-z0-9+.-]*", apt))
+    # Tokenize the install command only: comments must not
+    # satisfy the pin, so strip them and join continuations
+    # before splitting the install arguments.
+    joined = []
+    pending = ""
+    for line in apt.splitlines():
+        code = line.split("#", 1)[0].rstrip()
+        if code.endswith("\\"):
+            pending += code[:-1] + " "
+        else:
+            pending += code
+            joined.append(pending)
+            pending = ""
+    if pending.strip():
+        joined.append(pending)
+    install = next(cmd for cmd in joined
+                   if "apt-get install" in cmd)
+    installed = {
+        token for token in install.split(
+            "apt-get install", 1)[1].split()
+        if not token.startswith("-")}
     for package in ("binutils", "bpftrace", "bpftool",
                     "cpio", "python3-pytest", "python3-yaml",
                     "rpm", "rpm2cpio", "strace"):
@@ -3595,6 +3654,17 @@ def test_ci_selection_audited():
     assert "build/memveil" in whole
     assert "cargo test --locked --test package_tarball" \
         in whole
+    # Every cargo invocation in this job must unset
+    # RUSTUP_TOOLCHAIN first, so a set variable cannot
+    # silently redirect toolchain selection.
+    sites = []
+    for name, run in sorted(runs.items()):
+        for match in re.finditer(
+                r"(?<![\w./-])cargo(?=\s)", run):
+            assert run[:match.start()].endswith(
+                "env -u RUSTUP_TOOLCHAIN "), (name, run)
+            sites.append(name)
+    assert len(sites) == 5, sites
     selected = next(
         run for run in runs.values()
         if "-m pytest" in run
