@@ -133,6 +133,35 @@ def test_export_rejects_tampered_cache_x9(tmp_path, damage):
     assert not output.exists()
 
 
+def test_verify_refuses_v1_row_at_rust_binding(tmp_path):
+    doc, lock, row, ev, rec, receipt = exported_fixture(tmp_path)
+    # A historical /1 receipt: structurally valid (it
+    # re-derives PASS) but its Mojo-era sections predate the
+    # Rust row bindings, so acceptance refuses at the version
+    # gate instead of comparing across meanings.
+    receipt["schema"] = "memveil-matrix-row/1"
+    receipt["source"] = {
+        "memveil": {"commit": doc["source"]["commit"],
+                    "dirty": False},
+        "libbpf_mojo": {"version": "0.3.0",
+                        "tarball_sha256": "f" * 64,
+                        "status": "pinned"}}
+    receipt["toolchain"] = {
+        "lock_version": "1",
+        "recorded_on": "2026-10-24",
+        "lock_sha256": "a" * 64,
+        "toolchain": {"mojo": {"version": "1.2.0"},
+                      "pixi": {"version": "0.1.0"}}}
+    (row / "receipt.json").write_text(json.dumps(receipt))
+    assert km.rederive_row(row)[0]
+    with pytest.raises(ValueError, match="predates Rust bindings"):
+        km.verify_tested_rows(tmp_path, lock, doc)
+    output = tmp_path / "refused.txt"
+    with pytest.raises(ValueError, match="predates Rust bindings"):
+        km.export_tested_candidate(tmp_path, lock, doc, output)
+    assert not output.exists()
+
+
 def test_export_rejects_receipt_missing_one_bpf_object(tmp_path):
     doc, lock, row, ev, rec, receipt = exported_fixture(tmp_path)
     del receipt['artifacts']['bpf']['copy']

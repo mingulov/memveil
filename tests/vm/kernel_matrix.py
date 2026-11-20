@@ -3951,7 +3951,8 @@ def prog_misses(progs, names):
     return total
 
 
-ROW_RECEIPT_SCHEMA = "memveil-matrix-row/1"
+ROW_RECEIPT_SCHEMA_V1 = "memveil-matrix-row/1"
+ROW_RECEIPT_SCHEMA = "memveil-matrix-row/2"
 QUAL_DURATION_S = 60
 QUAL_DD_COUNT = 128
 PROFILE_REASON = ("matrix rows assert lock expectations and "
@@ -4333,6 +4334,42 @@ def _check_row_checks(checks):
     return checks
 
 
+def _check_row_source_v1(source):
+    """Frozen /1 source grammar (Mojo-era support-library pin).
+
+    Historical receipts keep verifying through this reader;
+    new receipts use the /2 Cargo-lock sections instead.
+    """
+    if not isinstance(source, dict) \
+            or set(source) != {"memveil", "libbpf_mojo"}:
+        raise ValueError("row receipt rejects source")
+    memveil = source["memveil"]
+    if not isinstance(memveil, dict) \
+            or set(memveil) != {"commit", "dirty"}:
+        raise ValueError("row receipt rejects source")
+    if memveil["commit"] != "unknown":
+        _check_hex(memveil["commit"], 40, "source commit")
+    if memveil["dirty"] is not True \
+            and memveil["dirty"] is not False:
+        raise ValueError("row receipt rejects source")
+    if memveil["commit"] == "unknown" \
+            and memveil["dirty"] is not True:
+        raise ValueError("row receipt rejects source")
+    pin = source["libbpf_mojo"]
+    if not isinstance(pin, dict) \
+            or set(pin) != {"version", "tarball_sha256",
+                            "status"}:
+        raise ValueError("row receipt rejects source")
+    if not isinstance(pin["version"], str) \
+            or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+",
+                                 pin["version"]):
+        raise ValueError("row receipt rejects source")
+    _check_hex(pin["tarball_sha256"], 64, "source tarball")
+    if pin["status"] != "pinned":
+        raise ValueError("row receipt rejects source")
+    return source
+
+
 def _check_row_source(source):
     if not isinstance(source, dict) \
             or set(source) != {"memveil", "locks"}:
@@ -4359,6 +4396,36 @@ def _check_row_source(source):
     _check_hex(locks["ebpf_lock_sha256"], 64,
                "source ebpf lock")
     return source
+
+
+def _check_row_toolchain_v1(toolchain):
+    """Frozen /1 toolchain grammar (Mojo-era toolchain lock).
+
+    Historical receipts keep verifying through this reader;
+    new receipts use the /2 Cargo/rustc/bpf-linker sections.
+    """
+    if not isinstance(toolchain, dict) \
+            or set(toolchain) != {"lock_version",
+                                  "recorded_on",
+                                  "lock_sha256",
+                                  "toolchain"}:
+        raise ValueError("row receipt rejects toolchain")
+    for key in ("lock_version", "recorded_on"):
+        if not isinstance(toolchain[key], str) \
+                or not toolchain[key]:
+            raise ValueError("row receipt rejects toolchain")
+    _check_hex(toolchain["lock_sha256"], 64,
+               "toolchain lock hash")
+    pins = toolchain["toolchain"]
+    if not isinstance(pins, dict):
+        raise ValueError("row receipt rejects toolchain")
+    try:
+        if not pins["mojo"]["version"] \
+                or not pins["pixi"]["version"]:
+            raise KeyError("pins")
+    except (KeyError, TypeError):
+        raise ValueError("row receipt rejects toolchain")
+    return toolchain
 
 
 def _check_row_toolchain(toolchain):
@@ -4878,11 +4945,14 @@ def write_row_receipt(row_dir, rec, entry, ctx):
 def validate_row_receipt(doc):
     """Strict grammar for one matrix row receipt.
 
-    Beyond shapes, the verdict conjunction, the smoke
-    label, the boot label, and the pass-evidence rules
-    are recomputed: a pass with admitted caps needs
-    measured guest artifacts, a clean oracle, and
-    structured channel losses.
+    Accepts the /2 Rust shape and the historical /1
+    Mojo-era shape, dispatching the source/toolchain
+    section readers by the receipt schema; every other
+    section shares one grammar. Beyond shapes, the verdict
+    conjunction, the smoke label, the boot label, and the
+    pass-evidence rules are recomputed: a pass with
+    admitted caps needs measured guest artifacts, a clean
+    oracle, and structured channel losses.
     """
     if not isinstance(doc, dict) or set(doc) != {
             "schema", "id", "release", "run_id", "mode",
@@ -4891,7 +4961,13 @@ def validate_row_receipt(doc):
             "expected", "actual", "oracle", "losses",
             "cleanup", "negatives", "files"}:
         raise ValueError("row receipt has a bad shape")
-    if doc["schema"] != ROW_RECEIPT_SCHEMA:
+    if doc["schema"] == ROW_RECEIPT_SCHEMA_V1:
+        check_source = _check_row_source_v1
+        check_toolchain = _check_row_toolchain_v1
+    elif doc["schema"] == ROW_RECEIPT_SCHEMA:
+        check_source = _check_row_source
+        check_toolchain = _check_row_toolchain
+    else:
         raise ValueError("row receipt has a bad schema")
     if not isinstance(doc["id"], str) or not re.fullmatch(
             r"[A-Za-z0-9_.-]+", doc["id"]):
@@ -4930,8 +5006,8 @@ def validate_row_receipt(doc):
     if command["kind"] not in ("deb", "bundle"):
         raise ValueError("row receipt rejects its command")
     _check_hex(command["source_sha256"], 64, "command source")
-    _check_row_source(doc["source"])
-    _check_row_toolchain(doc["toolchain"])
+    check_source(doc["source"])
+    check_toolchain(doc["toolchain"])
     artifacts = doc["artifacts"]
     if not isinstance(artifacts, dict) \
             or artifacts.get("status") not in ("measured",
@@ -5981,12 +6057,15 @@ def verify_tested_rows(out_dir, lock, manifest):
     predicates and its row-to-candidate bindings: the cached
     oracle inputs must transcribe the retained raw files, the
     oracle predicates must re-derive ok, the re-derived checks
-    must equal the receipt's recorded checks, the row must
-    name this candidate, and the row must have tested these
-    exact bytes (pinned lock entry, full-run non-smoke mode,
-    source, toolchain, executable, selected artifact, BPF
-    objects, runtime closure). Returns the {row id: checks}
-    map; raises ValueError and writes nothing otherwise.
+    must equal the receipt's recorded checks, the receipt must
+    carry the /2 Rust shape (historical /1 receipts verify
+    structurally but predate the Rust bindings and refuse
+    here), the row must name this candidate, and the row must
+    have tested these exact bytes (pinned lock entry, full-run
+    non-smoke mode, source, toolchain, executable, selected
+    artifact, BPF objects, runtime closure). Returns the {row
+    id: checks} map; raises ValueError and writes nothing
+    otherwise.
 
     Toolchain binding is split: the receipt's single lock slot
     binds the Cargo lock only (receipt toolchain lock_sha256
@@ -6026,6 +6105,10 @@ def verify_tested_rows(out_dir, lock, manifest):
             result["checks"] == receipt["actual"]["checks"],
             "matrix recorded checks differ from re-derived "
             "predicates")
+        candidate.require(
+            receipt.get("schema") == ROW_RECEIPT_SCHEMA,
+            "matrix row schema predates Rust bindings: "
+            + str(receipt.get("schema")))
         candidate.require(
             inputs.get("entry") == entry,
             "matrix expectations differ from "

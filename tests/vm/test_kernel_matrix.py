@@ -6107,7 +6107,7 @@ def test_row_receipt_roundtrip_admitted_pass(tmp_path):
     row = _admitted_row(tmp_path)
     doc = km.write_row_receipt(row, _row_rec(), _lock_entry(),
                                _row_ctx())
-    assert doc["schema"] == "memveil-matrix-row/1"
+    assert doc["schema"] == "memveil-matrix-row/2"
     assert doc["actual"]["ok"] is True
     assert doc["smoke"] is False
     assert doc["losses"]["present"] is True
@@ -6115,6 +6115,75 @@ def test_row_receipt_roundtrip_admitted_pass(tmp_path):
     km.validate_row_receipt(doc)
     ok, detail = km.rederive_row(row)
     assert ok, detail
+
+
+def _v1_source_toolchain():
+    """Historical /1 sections (Mojo-era identities)."""
+    source = {
+        "memveil": {"commit": "e" * 40, "dirty": False},
+        "libbpf_mojo": {"version": "0.3.0",
+                        "tarball_sha256": "f" * 64,
+                        "status": "pinned"},
+    }
+    toolchain = {
+        "lock_version": "1",
+        "recorded_on": "2026-10-24",
+        "lock_sha256": "a" * 64,
+        "toolchain": {"mojo": {"version": "1.2.0"},
+                      "pixi": {"version": "0.1.0"}},
+    }
+    return source, toolchain
+
+
+def test_row_receipt_v1_historical_verifies(tmp_path):
+    row = _admitted_row(tmp_path)
+    doc = km.write_row_receipt(row, _row_rec(), _lock_entry(),
+                               _row_ctx())
+    source, toolchain = _v1_source_toolchain()
+    doc["schema"] = "memveil-matrix-row/1"
+    doc["source"] = source
+    doc["toolchain"] = toolchain
+    (row / "receipt.json").write_text(json.dumps(doc))
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row)
+    assert ok, detail
+
+
+@pytest.mark.parametrize("damage", ["v2-schema-v1-source",
+                                    "v2-schema-v1-toolchain",
+                                    "v1-schema-v2-source",
+                                    "v1-schema-v2-toolchain",
+                                    "v1-unpinned",
+                                    "v1-bad-tarball",
+                                    "v1-missing-pixi"])
+def test_row_receipt_cross_shape_refuses(tmp_path, damage):
+    row = _admitted_row(tmp_path)
+    doc = km.write_row_receipt(row, _row_rec(), _lock_entry(),
+                               _row_ctx())
+    source, toolchain = _v1_source_toolchain()
+    if damage == "v2-schema-v1-source":
+        doc["source"] = source
+    elif damage == "v2-schema-v1-toolchain":
+        doc["toolchain"] = toolchain
+    elif damage == "v1-schema-v2-source":
+        doc["schema"] = "memveil-matrix-row/1"
+        doc["toolchain"] = toolchain
+    elif damage == "v1-schema-v2-toolchain":
+        doc["schema"] = "memveil-matrix-row/1"
+        doc["source"] = source
+    else:
+        doc["schema"] = "memveil-matrix-row/1"
+        doc["source"] = source
+        doc["toolchain"] = toolchain
+        if damage == "v1-unpinned":
+            doc["source"]["libbpf_mojo"]["status"] = "floating"
+        elif damage == "v1-bad-tarball":
+            doc["source"]["libbpf_mojo"]["tarball_sha256"] = \
+                "zz" * 32
+        else:
+            del doc["toolchain"]["toolchain"]["pixi"]
+    with pytest.raises(ValueError):
+        km.validate_row_receipt(doc)
 
 
 def test_row_receipt_excludes_raw_command(tmp_path):
