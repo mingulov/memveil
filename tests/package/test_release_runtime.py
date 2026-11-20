@@ -1099,8 +1099,9 @@ def test_fedora_journey_candidate_without_docker_fails(
     # the lane fails, while dev still skips. The bogus
     # candidate pair proves the gate fires before any seal
     # read; the sealed pair proves it under valid inputs.
-    # rpm tooling must exist (the lane returns before the
-    # gate without it, in both modes).
+    # rpm tooling must exist (the lane stops at the rpm
+    # tool gate without it -- a dev skip, a candidate
+    # refusal -- before the docker gate).
     assert shutil.which("rpm") is not None, \
         "fedora gate test needs rpm on PATH"
     target_dir = audited_target_dir
@@ -1139,6 +1140,73 @@ def test_fedora_journey_candidate_without_docker_fails(
     assert proc.returncode != 0, combined[-2000:]
     assert "candidate Fedora journey refused" in combined, \
         combined[-2000:]
+
+
+@pytest.mark.dev_fixture
+def test_tool_gates_candidate_without_tools_fail(
+        tmp_path, audited_target_dir):
+    # Missing packaging tooling cannot silently skip the
+    # pinned checks in candidate mode: with every tool
+    # faked absent (an empty PATH, so the `command -v`
+    # presence probe resolves nothing) each lane fails,
+    # while dev still skips. The bogus candidate pair
+    # proves the gates fire before any seal read; the
+    # sealed pair proves it under valid inputs.
+    target_dir = audited_target_dir
+    bindir = tmp_path / "notools"
+    bindir.mkdir()
+    sealed = seal_candidate(tmp_path, "notools")
+    lanes = (("package_rpm", "rpm_header", "rpm absent"),
+             ("package_rpm", "rpm_payload_mirrors_repo",
+              "rpm2cpio/cpio absent"),
+             ("package_rpm", "rpmspec_parse",
+              "rpmspec absent"),
+             ("package_deb", "lintian_gate",
+              "lintian absent"))
+
+    def gated(binary, lane, env):
+        return subprocess.run(
+            [str(binary), lane, "--nocapture"],
+            cwd=str(ROOT), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, env=env)
+
+    for suite, lane, missing in lanes:
+        binary = _test_binary(suite, target_dir)
+        dev = {"PATH": str(bindir),
+               "CARGO_TARGET_DIR": str(target_dir)}
+        proc = gated(binary, lane, dev)
+        combined = proc.stdout + proc.stderr
+        assert proc.returncode == 0, \
+            "%s %s dev: %s" % (
+                suite, lane, combined[-2000:])
+        assert "1 passed" in combined, \
+            "%s %s dev ran none: %s" % (
+                suite, lane, combined[-2000:])
+        assert missing in combined, \
+            "%s %s dev: %s" % (
+                suite, lane, combined[-2000:])
+        bogus = dict(dev, MV_BUNDLE_TARBALL="dispatched",
+                     MV_CANDIDATE_MANIFEST="dispatched")
+        proc = gated(binary, lane, bogus)
+        combined = proc.stdout + proc.stderr
+        assert proc.returncode != 0, \
+            "%s %s bogus candidate passed: %s" % (
+                suite, lane, combined[-2000:])
+        assert "candidate tool gate refused" in combined, \
+            "%s %s bogus: %s" % (
+                suite, lane, combined[-2000:])
+        assert missing in combined, \
+            "%s %s bogus: %s" % (
+                suite, lane, combined[-2000:])
+        candidate = dict(dev, **candidate_env(sealed))
+        proc = gated(binary, lane, candidate)
+        combined = proc.stdout + proc.stderr
+        assert proc.returncode != 0, \
+            "%s %s sealed candidate passed: %s" % (
+                suite, lane, combined[-2000:])
+        assert "candidate tool gate refused" in combined, \
+            "%s %s sealed: %s" % (
+                suite, lane, combined[-2000:])
 
 
 if __name__ == "__main__":

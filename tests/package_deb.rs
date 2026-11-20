@@ -909,11 +909,18 @@ fn receipts_state_dir_staged() {
 
 #[test]
 fn lintian_gate() {
-    if !h::tool_present("lintian") {
-        eprintln!(
-            "skip: lintian absent on this host (not installed; structural pins assert instead)"
-        );
-        return;
+    match j::tool_gate(
+        "lintian",
+        h::tool_present("lintian"),
+        h::candidate_mode(),
+        "the error-scan gate needs it",
+    ) {
+        j::JourneyGate::Proceed => {}
+        j::JourneyGate::Skip(reason) => {
+            eprintln!("skip: {reason}");
+            return;
+        }
+        j::JourneyGate::Fail(reason) => panic!("{reason}"),
     }
     let deb = h::ensure_deb();
     let out = h::run("lintian", &[deb.to_str().unwrap()], None);
@@ -1049,6 +1056,43 @@ fn journey_gate_matrix() {
                 assert!(reason.contains("MV_RUSTPKG_JOURNEY=0"), "{reason}");
             }
             other => panic!("{tool}: candidate opt-out must fail, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn tool_gate_matrix() {
+    // Present tooling proceeds in both modes; absence
+    // skips in dev and fails in candidate mode, naming
+    // the missing tool in both. Both suites share the gate.
+    for (tool, need) in [
+        ("rpm", "header pins need `rpm -qp`"),
+        ("rpm2cpio/cpio", "cannot extract the payload"),
+        ("rpmspec", "the spec check needs `rpmspec -P`"),
+        ("lintian", "the error-scan gate needs it"),
+    ] {
+        assert_eq!(
+            j::tool_gate(tool, true, false, need),
+            j::JourneyGate::Proceed,
+            "{tool}"
+        );
+        assert_eq!(
+            j::tool_gate(tool, true, true, need),
+            j::JourneyGate::Proceed,
+            "{tool}"
+        );
+        match j::tool_gate(tool, false, false, need) {
+            j::JourneyGate::Skip(reason) => {
+                assert!(reason.contains(tool), "{tool}: {reason}");
+            }
+            other => panic!("{tool}: dev must skip cleanly, got {other:?}"),
+        }
+        match j::tool_gate(tool, false, true, need) {
+            j::JourneyGate::Fail(reason) => {
+                assert!(reason.contains("candidate"), "{reason}");
+                assert!(reason.contains(tool), "{tool}: {reason}");
+            }
+            other => panic!("{tool}: candidate must fail, got {other:?}"),
         }
     }
 }

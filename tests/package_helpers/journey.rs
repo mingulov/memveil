@@ -114,6 +114,24 @@ pub fn journey_gate(
     JourneyGate::Proceed
 }
 
+/// Decide a tool-presence gate entry (pure: test the matrix directly).
+///
+/// `tool` names the missing binary (or bundle, e.g.
+/// "rpm2cpio/cpio") and `need` says what the gated check
+/// needs it for. Absence skips in dev but fails in
+/// candidate mode: qualification must run the pinned
+/// checks, never silently pass them.
+pub fn tool_gate(tool: &str, present: bool, candidate: bool, need: &str) -> JourneyGate {
+    if present {
+        return JourneyGate::Proceed;
+    }
+    let reason = format!("{tool} absent on this host: {need}");
+    if candidate {
+        return JourneyGate::Fail(format!("candidate tool gate refused: {reason}"));
+    }
+    JourneyGate::Skip(reason)
+}
+
 /// Cross-process install lock: held across install/run/uninstall.
 pub fn install_lock() -> DirLock {
     DirLock::acquire("install-journey")

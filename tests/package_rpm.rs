@@ -124,11 +124,19 @@ fn rpm_payload_floor(rpm: &std::path::Path) -> (u32, u32) {
 }
 
 fn need_rpm() -> bool {
-    if !h::tool_present("rpm") {
-        eprintln!("skip: rpm absent on this host: header pins need `rpm -qp`");
-        return false;
+    match j::tool_gate(
+        "rpm",
+        h::tool_present("rpm"),
+        h::candidate_mode(),
+        "header pins need `rpm -qp`",
+    ) {
+        j::JourneyGate::Proceed => true,
+        j::JourneyGate::Skip(reason) => {
+            eprintln!("skip: {reason}");
+            false
+        }
+        j::JourneyGate::Fail(reason) => panic!("{reason}"),
     }
-    true
 }
 
 #[test]
@@ -383,9 +391,18 @@ fn rpm_modes_owners() {
 
 #[test]
 fn rpm_payload_mirrors_repo() {
-    if !h::tool_present("rpm2cpio") || !h::tool_present("cpio") {
-        eprintln!("skip: rpm2cpio/cpio absent: cannot extract the payload");
-        return;
+    match j::tool_gate(
+        "rpm2cpio/cpio",
+        h::tool_present("rpm2cpio") && h::tool_present("cpio"),
+        h::candidate_mode(),
+        "cannot extract the payload",
+    ) {
+        j::JourneyGate::Proceed => {}
+        j::JourneyGate::Skip(reason) => {
+            eprintln!("skip: {reason}");
+            return;
+        }
+        j::JourneyGate::Fail(reason) => panic!("{reason}"),
     }
     let rpm = h::ensure_rpm();
     let dest = h::rpm_extract(&rpm, "rpm-mirror");
@@ -958,9 +975,18 @@ fn rpmspec_parse() {
     // consumed bundle.
     let spec = h::packaging_dir().join("rpm").join("memveil.spec");
     assert!(spec.is_file());
-    if !h::tool_present("rpmspec") {
-        eprintln!("skip: rpmspec absent on this host");
-        return;
+    match j::tool_gate(
+        "rpmspec",
+        h::tool_present("rpmspec"),
+        h::candidate_mode(),
+        "the spec check needs `rpmspec -P`",
+    ) {
+        j::JourneyGate::Proceed => {}
+        j::JourneyGate::Skip(reason) => {
+            eprintln!("skip: {reason}");
+            return;
+        }
+        j::JourneyGate::Fail(reason) => panic!("{reason}"),
     }
     // Candidate mode derives the floor from the sealed
     // payload, never a fresh bundle build.
