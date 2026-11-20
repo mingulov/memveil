@@ -1610,6 +1610,17 @@ def test_release_runbook_binds_dryrun_published_check():
     assert 'select(.name == "dry-run")' not in text
 
 
+def test_release_runbook_requires_both_live_campaigns():
+    text = (ROOT / "RELEASING.md").read_text()
+    flat = " ".join(text.split())
+    assert "The gate requires both campaigns" in flat
+    assert "pool-only evidence is forbidden" in flat
+    assert "A pool-only `live/` directory is forbidden" \
+        in flat
+    assert "live/overhead/" in text
+    assert "live/soak/" in text
+
+
 def test_release_version_binding():
     m = api()
     for version, claim in [("0.1.1", "ordinary-preview"),

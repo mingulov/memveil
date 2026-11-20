@@ -687,39 +687,114 @@ def _live_manifest():
     return {'schema': 'test-manifest/1', 'files': {'bin/memveil': 'ab' * 32}}
 
 
-def test_live_gate_inputs_verify_through_qualify_path(tmp_path):
+def live_gate_evidence(tmp_path, manifest):
+    """Evidence dir with both campaigns, exit oracles, and inputs doc.
+
+    Returns (evidence, inputs doc): live/overhead and
+    live/soak hold complete exports, live/<mode>-exit.json
+    the host oracles, and live-inputs.json binds all eight
+    per-campaign totals on both sides. Shared with the
+    qualification-path tests, which seal their own manifest.
+    """
     import json
     m = api()
     sys.path.insert(0, str(ROOT / 'tools'))
     import candidate as c
-    manifest = _live_manifest()
     evidence = tmp_path / 'evidence'
     live = evidence / 'live'
-    live.mkdir(parents=True)
-    _pool_export(live, manifest)
-    campaign = json.loads((live / 'campaign.json').read_bytes())
-    totals = m.verify_live_campaign(live, manifest, 'pool')
-    assert campaign['totals'] == totals
-    exit_doc = {'guest_exit': 0, 'candidate': campaign['candidate'],
-                'totals': totals}
-    (live / 'exit.json').write_bytes(json.dumps(exit_doc, sort_keys=True).encode())
-    def bindings(name):
-        return {key: {'file': 'live/' + name,
-                      'sha256': c.digest(live / name),
-                      'path': ['totals', key], 'encoding': 'u64'}
-                for key in ('cleanup_mismatches', 'failed_legs', 'legs',
-                            'target_failures')}
+    builders = {'overhead': _overhead_export, 'soak': _soak_export}
+    product, oracle, sources = {}, {}, {'product': {}, 'oracle': {}}
+    for mode, build in builders.items():
+        slot = live / mode
+        slot.mkdir(parents=True)
+        build(slot, manifest)
+        campaign = json.loads((slot / 'campaign.json').read_bytes())
+        totals = m.verify_live_campaign(slot, manifest, mode)
+        assert campaign['totals'] == totals
+        exit_doc = {'guest_exit': 0, 'candidate': campaign['candidate'],
+                    'totals': totals}
+        exit_name = mode + '-exit.json'
+        (live / exit_name).write_bytes(
+            json.dumps(exit_doc, sort_keys=True).encode())
+        for key, value in totals.items():
+            prefixed = '%s_%s' % (mode, key)
+            product[prefixed] = value
+            oracle[prefixed] = value
+            sources['product'][prefixed] = {
+                'file': 'live/%s/campaign.json' % mode,
+                'sha256': c.digest(slot / 'campaign.json'),
+                'path': ['totals', key], 'encoding': 'u64'}
+            sources['oracle'][prefixed] = {
+                'file': 'live/' + exit_name,
+                'sha256': c.digest(live / exit_name),
+                'path': ['totals', key], 'encoding': 'u64'}
     doc = {'schema': 'memveil-gate-input/1', 'environment': 'ordinary-linux',
-           'product': dict(totals), 'oracle': dict(totals),
-           'sources': {'product': bindings('campaign.json'),
-                       'oracle': bindings('exit.json')}}
+           'product': product, 'oracle': oracle, 'sources': sources}
     (evidence / 'live-inputs.json').write_bytes(c.canonical(doc))
+    return evidence, doc
+
+
+def test_live_gate_inputs_verify_through_qualify_path(tmp_path):
+    sys.path.insert(0, str(ROOT / 'tools'))
+    import candidate as c
+    manifest = _live_manifest()
+    evidence, doc = live_gate_evidence(tmp_path, manifest)
     assert c.validate_inputs_doc(doc) == 'gate'
     policy, _ = c.validate_policy(ROOT / 'packaging/candidate-policy.json')
     requirement = policy['required_gates']['live-campaign/1']
     retained = c.read_json(evidence / 'live-inputs.json', sealed=True)
     c.verify_measurement_sources(retained, evidence)
     assert c.rederive_measurements(retained, requirement) is True
+    c.verify_live_campaigns(retained, evidence, manifest)
+
+
+def test_live_gate_refuses_overhead_only(tmp_path):
+    import shutil
+    sys.path.insert(0, str(ROOT / 'tools'))
+    import candidate as c
+    manifest = _live_manifest()
+    evidence, doc = live_gate_evidence(tmp_path, manifest)
+    shutil.rmtree(evidence / 'live/soak')
+    with pytest.raises(ValueError):
+        c.verify_live_campaigns(doc, evidence, manifest)
+
+
+def test_live_gate_refuses_soak_only(tmp_path):
+    import shutil
+    sys.path.insert(0, str(ROOT / 'tools'))
+    import candidate as c
+    manifest = _live_manifest()
+    evidence, doc = live_gate_evidence(tmp_path, manifest)
+    shutil.rmtree(evidence / 'live/overhead')
+    with pytest.raises(ValueError):
+        c.verify_live_campaigns(doc, evidence, manifest)
+
+
+def test_live_gate_refuses_pool_in_campaign_slot(tmp_path):
+    import shutil
+    sys.path.insert(0, str(ROOT / 'tools'))
+    import candidate as c
+    manifest = _live_manifest()
+    evidence, doc = live_gate_evidence(tmp_path, manifest)
+    slot = evidence / 'live/soak'
+    shutil.rmtree(slot)
+    slot.mkdir()
+    _pool_export(slot, manifest)
+    with pytest.raises(ValueError, match='differs from requested'):
+        c.verify_live_campaigns(doc, evidence, manifest)
+
+
+def test_live_gate_refuses_scalar_drift(tmp_path):
+    import json
+    sys.path.insert(0, str(ROOT / 'tools'))
+    import candidate as c
+    manifest = _live_manifest()
+    evidence, doc = live_gate_evidence(tmp_path, manifest)
+    doc['product']['soak_legs'] = '32'
+    (evidence / 'live-inputs.json').write_bytes(c.canonical(doc))
+    retained = c.read_json(evidence / 'live-inputs.json', sealed=True)
+    with pytest.raises(ValueError, match='retained bytes'):
+        c.verify_live_campaigns(retained, evidence, manifest)
 
 
 def test_verify_live_campaign_accepts_honest_pool(tmp_path):

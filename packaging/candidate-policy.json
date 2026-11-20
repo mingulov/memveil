@@ -12,10 +12,14 @@
     "live-campaign/1": {
       "environment": "ordinary-linux",
       "predicates": {
-        "cleanup_mismatches": "zero",
-        "failed_legs": "zero",
-        "legs": "equal",
-        "target_failures": "zero"
+        "overhead_cleanup_mismatches": "zero",
+        "overhead_failed_legs": "zero",
+        "overhead_legs": "equal",
+        "overhead_target_failures": "zero",
+        "soak_cleanup_mismatches": "zero",
+        "soak_failed_legs": "zero",
+        "soak_legs": "equal",
+        "soak_target_failures": "zero"
       }
     }
   },

@@ -3304,6 +3304,90 @@ def test_write_qualification_assembles_matrix_gate(workshop,
         "claim": "ordinary-preview"}
 
 
+def _live_required_gates(m):
+    predicates = {}
+    for mode in m.LIVE_CAMPAIGNS:
+        for name in m.LIVE_TOTALS:
+            predicates["%s_%s" % (mode, name)] = \
+                "equal" if name == "legs" else "zero"
+    assert set(predicates) == {
+        "overhead_legs", "overhead_failed_legs",
+        "overhead_target_failures",
+        "overhead_cleanup_mismatches", "soak_legs",
+        "soak_failed_legs", "soak_target_failures",
+        "soak_cleanup_mismatches"}, predicates
+    return {m.LIVE_GATE: {"environment": "ordinary-linux",
+                          "predicates": predicates}}
+
+
+def test_write_qualification_requires_both_live_campaigns(
+        workshop, tmp_path):
+    import test_live_soak as live_fix
+    m = api()
+    _, ctx = _sealed_for_qualify(
+        workshop, tmp_path, _live_required_gates(m))
+    evidence, _doc = live_fix.live_gate_evidence(
+        tmp_path, ctx["manifest"])
+    inputs_path = evidence / "live-inputs.json"
+    receipt_path = evidence / "live-receipt.json"
+    proc = _run_cli(_receipt_cli(ctx, m.LIVE_GATE, inputs_path,
+                                 receipt_path))
+    assert proc.returncode == 0, proc.stderr
+    q_path = Path(tmp_path) / "qualification.json"
+    proc = _run_cli(_qualification_cli(
+        ctx, [receipt_path], evidence, q_path))
+    assert proc.returncode == 0, proc.stderr
+    qualified = m.verify_qualification(
+        ctx["manifest_path"], q_path, ctx["policy_path"],
+        evidence, source_tree=str(ctx["root"]))
+    assert qualified == {
+        "ok": True, "gates": [m.LIVE_GATE],
+        "trusted_keys": [sha(ctx["pub"].read_bytes())],
+        "claim": "ordinary-preview"}
+    # Overhead-only evidence refuses, naming the missing
+    # campaign; soak-only refuses symmetrically.
+    soak = evidence / "live/soak"
+    parked = Path(tmp_path) / "parked-soak"
+    soak.rename(parked)
+    try:
+        out = Path(tmp_path) / "soakless"
+        out.mkdir()
+        proc = _run_cli(_qualification_cli(
+            ctx, [receipt_path], evidence, out / "q.json"))
+        assert proc.returncode == 1, proc.stdout
+        assert "soak" in proc.stderr, proc.stderr
+    finally:
+        parked.rename(soak)
+    overhead = evidence / "live/overhead"
+    parked = Path(tmp_path) / "parked-overhead"
+    overhead.rename(parked)
+    try:
+        out = Path(tmp_path) / "overheadless"
+        out.mkdir()
+        proc = _run_cli(_qualification_cli(
+            ctx, [receipt_path], evidence, out / "q.json"))
+        assert proc.returncode == 1, proc.stdout
+        assert "overhead" in proc.stderr, proc.stderr
+    finally:
+        parked.rename(overhead)
+    # A damaged campaign with intact bound files refuses in
+    # the verifier, not the scalar path: the scalars alone
+    # would pass.
+    leg = evidence / "live/soak/completed-0"
+    parked = Path(tmp_path) / "parked-leg"
+    leg.rename(parked)
+    try:
+        out = Path(tmp_path) / "damaged"
+        out.mkdir()
+        proc = _run_cli(_qualification_cli(
+            ctx, [receipt_path], evidence, out / "q.json"))
+        assert proc.returncode == 1, proc.stdout
+        assert "live soak evidence refuses" in proc.stderr, \
+            proc.stderr
+    finally:
+        parked.rename(leg)
+
+
 class _DraftApi:
     """Minimal holding-draft stub serving the sealed bytes."""
 

@@ -272,61 +272,66 @@ Write one receipt per required gate the same way (inputs
 file, canonical receipt binding its digest, `ssh-keygen
 -Y sign` with namespace `memveil-candidate`).
 
-For `live-campaign/1`, the inputs file carries the
-campaign totals twice: the guest claim from
-`campaign.json` as the product side and the host-verified
-totals from `exit.json` as the oracle side. Host
-acceptance re-verified the export from retained bytes
-before writing `exit.json`, so transcribing both files is
-a checkable copy: `qualify` re-reads the retained bytes
-behind every binding. Author
-`dist/evidence/live-inputs.json` manually with this exact
-shape (values from the verified `campaign.json` totals
-and the `exit.json` totals; digests of the two retained
-files):
+For `live-campaign/1`, the inputs file carries BOTH campaigns:
+the overhead export and the soak export, each twice
+(the guest claim from `campaign.json` as the product side
+and the host-verified totals from `exit.json` as the
+oracle side). The gate requires both campaigns; pool-only
+evidence is forbidden and refuses: a `live/` directory
+holding only a pool campaign (or any single campaign) never
+satisfies this gate. Host acceptance re-verified each
+export from retained bytes before writing its `exit.json`,
+so transcribing the files is a checkable copy: `qualify`
+re-runs the campaign verifier over both retained exports
+behind the bindings, not just the signed scalars. Retain
+the evidence as `live/overhead/` and `live/soak/` (each a
+complete export: `campaign.json`, the `completed-N` legs,
+the `progress-N.json` files) with the host oracles beside
+them as `live/overhead-exit.json` and `live/soak-exit.json`.
+Author `dist/evidence/live-inputs.json` manually with this
+exact shape (values from the verified `campaign.json`
+totals and the `exit.json` totals per campaign; digests of
+the four retained files):
 
 ```json
 {"schema": "memveil-gate-input/1",
  "environment": "ordinary-linux",
- "product": {"cleanup_mismatches": "0", "failed_legs": "0",
-             "legs": "20", "target_failures": "0"},
- "oracle": {"cleanup_mismatches": "0", "failed_legs": "0",
-            "legs": "20", "target_failures": "0"},
+ "product": {"overhead_cleanup_mismatches": "0",
+             "overhead_failed_legs": "0", "overhead_legs": "20",
+             "overhead_target_failures": "0",
+             "soak_cleanup_mismatches": "0",
+             "soak_failed_legs": "0", "soak_legs": "31",
+             "soak_target_failures": "0"},
+ "oracle": {"overhead_cleanup_mismatches": "0",
+            "overhead_failed_legs": "0", "overhead_legs": "20",
+            "overhead_target_failures": "0",
+            "soak_cleanup_mismatches": "0",
+            "soak_failed_legs": "0", "soak_legs": "31",
+            "soak_target_failures": "0"},
  "sources": {
    "product": {
-     "cleanup_mismatches": {"file": "live/campaign.json",
-       "sha256": "<campaign.json sha256>",
-       "path": ["totals", "cleanup_mismatches"], "encoding": "u64"},
-     "failed_legs": {"file": "live/campaign.json",
-       "sha256": "<campaign.json sha256>",
-       "path": ["totals", "failed_legs"], "encoding": "u64"},
-     "legs": {"file": "live/campaign.json",
-       "sha256": "<campaign.json sha256>",
+     "overhead_legs": {"file": "live/overhead/campaign.json",
+       "sha256": "<overhead campaign.json sha256>",
        "path": ["totals", "legs"], "encoding": "u64"},
-     "target_failures": {"file": "live/campaign.json",
-       "sha256": "<campaign.json sha256>",
-       "path": ["totals", "target_failures"], "encoding": "u64"}},
+     "soak_legs": {"file": "live/soak/campaign.json",
+       "sha256": "<soak campaign.json sha256>",
+       "path": ["totals", "legs"], "encoding": "u64"}},
    "oracle": {
-     "cleanup_mismatches": {"file": "live/exit.json",
-       "sha256": "<exit.json sha256>",
-       "path": ["totals", "cleanup_mismatches"], "encoding": "u64"},
-     "failed_legs": {"file": "live/exit.json",
-       "sha256": "<exit.json sha256>",
-       "path": ["totals", "failed_legs"], "encoding": "u64"},
-     "legs": {"file": "live/exit.json",
-       "sha256": "<exit.json sha256>",
+     "overhead_legs": {"file": "live/overhead-exit.json",
+       "sha256": "<overhead exit.json sha256>",
        "path": ["totals", "legs"], "encoding": "u64"},
-     "target_failures": {"file": "live/exit.json",
-       "sha256": "<exit.json sha256>",
-       "path": ["totals", "target_failures"], "encoding": "u64"}}}}
+     "soak_legs": {"file": "live/soak-exit.json",
+       "sha256": "<soak exit.json sha256>",
+       "path": ["totals", "legs"], "encoding": "u64"}}}}
 ```
 
-(`live/` is the retained campaign directory holding
-`campaign.json`, the `completed-N` legs, the
-`progress-N.json` files, and the host `exit.json` beside
-them. The `legs` value is the verified leg count: 40,
-30, or 20 for overhead depending on journal admission, a
-soak-dependent count for soak, 1 for pool.)
+(Only the `legs` bindings are shown; bind every other
+measurement the same way, each to its own campaign file.
+The `overhead_legs` value is the verified overhead leg
+count: 40, 30, or 20 depending on journal admission. The
+`soak_legs` value is the verified soak leg count: at
+least 3 (mixed legs plus the closing pool leg). A
+pool-only `live/` directory is forbidden: it refuses.)
 
 Then sign the receipt with the authoring CLI and add the
 gate entry to `qualification.json` beside the matrix one:
@@ -343,9 +348,10 @@ gate entry to `qualification.json` beside the matrix one:
 Step 7's `gates` map gains a `live-campaign/1` entry
 pointing at `live-receipt.json`, its digest, the
 `live-receipt.json.sig` signature, and `signer.pub`;
-step 8's `qualify` rederives it through the existing
-non-matrix gate path (signature chain, retained
-measurement sources, predicates).
+step 8's `qualify` rederives it through the
+live gate path (signature chain, retained measurement
+sources, predicates, plus the campaign verifier run over
+both retained exports).
 
 7. Write `qualification.json` beside the archive file,
 never inside it: the record carries the archive digest,

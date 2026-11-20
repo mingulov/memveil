@@ -92,6 +92,10 @@ REMOTE_CUSTODY_SCHEMA = "memveil-remote-custody/1"
 REMOTE_GATE_SCHEMA = "memveil-remote-gate/1"
 CHECK_FILE_SCHEMA = "memveil-remote-check/1"
 MATRIX_GATE = "kernel-matrix/2"
+LIVE_GATE = "live-campaign/1"
+LIVE_CAMPAIGNS = ("overhead", "soak")
+LIVE_TOTALS = ("legs", "failed_legs", "target_failures",
+               "cleanup_mismatches")
 GATE_ID_RE = r"[a-z][a-z0-9-]*/[1-9][0-9]*"
 # Required remote checks with their count measurement. Mirrors
 # candidate_custody.REMOTE_CHECKS exactly; the mirror is pinned
@@ -1576,6 +1580,58 @@ def _matrix_rows():
     return kernel_matrix
 
 
+def _live_campaigns():
+    """Installed-campaign verifier from tests/vm/candidate_live.py (lazy)."""
+    vmdir = str(Path(__file__).resolve().parents[1]
+                / "tests" / "vm")
+    if vmdir not in sys.path:
+        sys.path.insert(0, vmdir)
+    import candidate_live
+    return candidate_live
+
+
+def verify_live_campaigns(retained, base, manifest):
+    """Re-verify both retained live campaigns from bytes.
+
+    The live gate binds the overhead and soak campaigns'
+    totals as <campaign>_<total> product/oracle scalars,
+    so pool-only evidence can never satisfy it. Each
+    live/<campaign> export must pass the campaign
+    verifier under its requested mode, and the verified
+    totals must equal the bound scalars on both sides.
+    The host exit.json beside each export must name the
+    candidate. Runs after the scalar re-derivation, which
+    owns the inputs shape. Raises ValueError otherwise.
+    """
+    live = _live_campaigns()
+    candidate_id = digest_bytes(canonical(manifest))
+    for mode in LIVE_CAMPAIGNS:
+        try:
+            totals = live.verify_live_campaign(
+                Path(base) / "live" / mode, manifest, mode)
+        except (OSError, ValueError) as error:
+            raise ValueError(
+                "live %s evidence refuses: %s"
+                % (mode, error)) from error
+        for side in ("product", "oracle"):
+            for name in LIVE_TOTALS:
+                key = "%s_%s" % (mode, name)
+                require(retained[side].get(key)
+                        == totals[name],
+                        "live %s %s differs from retained "
+                        "bytes" % (side, key))
+        try:
+            exit_doc = read_json(
+                Path(base) / ("live/%s-exit.json" % mode))
+        except OSError as error:
+            raise ValueError(
+                "live %s oracle is missing" % mode) from error
+        require(isinstance(exit_doc, dict)
+                and exit_doc.get("candidate") == candidate_id,
+                "live %s oracle names another candidate"
+                % mode)
+
+
 def _required_evidence(path, label):
     """Digest of a required evidence file; ValueError when absent."""
     try:
@@ -1961,6 +2017,9 @@ def verify_qualification(candidate, qualification, policy,
             rederive_measurements(
                 retained,
                 validated["required_gates"][ident])
+            if ident == LIVE_GATE:
+                verify_live_campaigns(retained, base,
+                                      manifest)
     return {"ok": True, "gates": sorted(doc["gates"]),
             "trusted_keys": list(validated["trusted_keys"]),
             "claim": validated["claim"]}
@@ -2380,6 +2439,9 @@ def write_qualification(manifest_path, policy_path, gate_paths,
             rederive_measurements(
                 retained,
                 validated["required_gates"][ident])
+            if ident == LIVE_GATE:
+                verify_live_campaigns(retained, base,
+                                      manifest)
     out = Path(out_path)
     try:
         nested = out.resolve().relative_to(root)
