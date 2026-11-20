@@ -69,6 +69,57 @@ class GitHub:
                 stdout=stream, check=True)
 
 
+def select_holding_draft(releases, tag):
+    """The single draft release tagged `tag`; fail closed otherwise.
+
+    Get-by-tag misses pending drafts, so callers list
+    releases and filter here: the match must be exactly one
+    draft carrying this tag. An absent tag, a published
+    release, or an ambiguous listing all fail closed.
+    """
+    matches = [item for item in releases
+               if isinstance(item, dict)
+               and item.get('tag_name') == tag
+               and item.get('draft') is True]
+    c.require(len(matches) == 1,
+              'holding draft is missing or ambiguous: ' + tag)
+    return matches[0]
+
+
+def find_holding_draft(api, repo, tag):
+    """Fetch the release list and select the holding draft."""
+    releases = api.json('repos/' + repository(repo)
+                        + '/releases?per_page=100')
+    c.require(isinstance(releases, list),
+              'release listing is malformed')
+    return select_holding_draft(releases, tag)
+
+
+def download_draft_asset(api, repo, release, name, dest):
+    """Download one uploaded draft asset by exact name.
+
+    The asset must exist exactly once with state uploaded;
+    the download goes by asset ID, never by tag. Returns
+    the asset record; callers verify the bytes.
+    """
+    repository(repo)
+    assets = release.get('assets')
+    c.require(isinstance(assets, list),
+              'draft assets are malformed')
+    matches = [asset for asset in assets
+               if isinstance(asset, dict)
+               and asset.get('name') == name]
+    c.require(len(matches) == 1,
+              'draft asset is missing or ambiguous: ' + name)
+    asset = matches[0]
+    c.require(asset.get('state') == 'uploaded',
+              'draft asset is not uploaded: ' + name)
+    ident = decimal(str(asset.get('id')))
+    api.download('repos/' + repo + '/releases/assets/' + ident,
+                 dest)
+    return asset
+
+
 def import_assets(api, repo, release_id, asset_ids, manifest,
                   destination, extra=None):
     repository(repo); decimal(release_id)

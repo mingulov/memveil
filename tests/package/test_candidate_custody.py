@@ -425,6 +425,97 @@ class FakeRelease:
         Path(destination).write_bytes(self.data[name])
 
 
+class FakeList:
+    """Stub list-releases endpoint serving one listing."""
+
+    def __init__(self, releases):
+        self.calls = []
+        self.releases = copy.deepcopy(releases)
+
+    def json(self, path):
+        self.calls.append(("GET", path))
+        assert path == "repos/" + REPO \
+            + "/releases?per_page=100", path
+        return copy.deepcopy(self.releases)
+
+    def download(self, path, destination):
+        self.calls.append(("DOWNLOAD", path))
+        ident = path.rsplit("/", 1)[1]
+        Path(destination).write_bytes(
+            ("asset-bytes:%s\n" % ident).encode())
+
+
+def _draft_listing(tag):
+    return [
+        {"id": 7, "draft": False, "tag_name": "v0.1.0",
+         "assets": []},
+        {"id": 9, "draft": True, "tag_name": tag,
+         "assets": [
+             {"id": 101,
+              "name": "qualification-evidence.tar.gz",
+              "state": "uploaded"},
+             {"id": 102, "name": "candidate.json",
+              "state": "uploaded"}]},
+        {"id": 11, "draft": False, "tag_name": "v0.1.1",
+         "assets": []},
+    ]
+
+
+def test_find_holding_draft_selects_draft_only():
+    m = api()
+    tag = "candidate-" + "1" * 64
+    found = m.find_holding_draft(
+        FakeList(_draft_listing(tag)), REPO, tag)
+    assert found["id"] == 9
+    assert found["draft"] is True
+
+
+def test_find_holding_draft_rejects_absent_tag():
+    m = api()
+    with pytest.raises(ValueError, match="missing or ambiguous"):
+        m.find_holding_draft(
+            FakeList(_draft_listing("candidate-" + "1" * 64)),
+            REPO, "candidate-" + "2" * 64)
+
+
+def test_find_holding_draft_ignores_published_same_tag():
+    m = api()
+    tag = "candidate-" + "1" * 64
+    listing = [{"id": 7, "draft": False, "tag_name": tag,
+                "assets": []}]
+    with pytest.raises(ValueError, match="missing or ambiguous"):
+        m.find_holding_draft(FakeList(listing), REPO, tag)
+
+
+def test_download_draft_asset_uses_asset_id(tmp_path):
+    m = api()
+    tag = "candidate-" + "1" * 64
+    listing = FakeList(_draft_listing(tag))
+    release = m.find_holding_draft(listing, REPO, tag)
+    dest = Path(tmp_path) / "evidence.tar.gz"
+    asset = m.download_draft_asset(
+        listing, REPO, release, "qualification-evidence.tar.gz",
+        dest)
+    assert asset["id"] == 101
+    assert ("DOWNLOAD",
+            "repos/" + REPO + "/releases/assets/101") \
+        in listing.calls
+    assert dest.read_bytes() == b"asset-bytes:101\n"
+    with pytest.raises(ValueError, match="missing or ambiguous"):
+        m.download_draft_asset(listing, REPO, release,
+                               "absent.bin", dest)
+
+
+def test_download_draft_asset_refuses_unuploaded(tmp_path):
+    m = api()
+    release = {"id": 9, "draft": True, "tag_name": "t",
+               "assets": [{"id": 103, "name": "half.bin",
+                           "state": "open"}]}
+    with pytest.raises(ValueError, match="not uploaded"):
+        m.download_draft_asset(FakeList([]), REPO, release,
+                               "half.bin", tmp_path / "half.bin")
+
+
 def custody_statement(fix, ids):
     return {
         "schema": "memveil-candidate-import/1",
@@ -1250,6 +1341,18 @@ def test_release_modes_gate_each_stage():
         "if"]
     for job in ("import", "dry-run", "promote"):
         assert "needs" not in doc["jobs"][job], job
+
+
+def test_release_draft_lookups_list_and_filter():
+    doc = _release_workflow()
+    whole = json.dumps(doc["jobs"])
+    assert "releases/tags/" not in whole
+    assert "gh release download" not in whole
+    for job in ("qualify", "import"):
+        text = json.dumps(doc["jobs"][job])
+        assert "find_holding_draft" in text, job
+    assert "download_draft_asset" in json.dumps(
+        doc["jobs"]["qualify"])
 
 
 def test_release_qualify_consumes_same_run_seal():

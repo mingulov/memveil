@@ -377,9 +377,19 @@ jobs:
               sys.exit("sealed digest differs from dispatched candidate")
           EOF
           mkdir -p evidence-dl
-          gh release download \
-            "candidate-$CANDIDATE_SHA256" \
-            -p qualification-evidence.tar.gz -D evidence-dl
+          python3 - <<'EOF'
+          import os
+          import sys
+          sys.path.insert(0, "tools")
+          import candidate_custody as custody
+          repo = os.environ["GITHUB_REPOSITORY"]
+          tag = "candidate-" + os.environ["CANDIDATE_SHA256"]
+          api = custody.GitHub()
+          release = custody.find_holding_draft(api, repo, tag)
+          custody.download_draft_asset(
+              api, repo, release, "qualification-evidence.tar.gz",
+              "evidence-dl/qualification-evidence.tar.gz")
+          EOF
           EVIDENCE_DIR=$(python3 - \
             evidence-dl/qualification-evidence.tar.gz \
             evidence <<'EOF'
@@ -509,12 +519,16 @@ jobs:
             | grep -m1 '^version = ' | cut -d'"' -f2)
           test -n "$VERSION"
           export FINAL_TAG="v$VERSION"
-          gh api \
-            "repos/$GITHUB_REPOSITORY/releases/tags/candidate-$CANDIDATE_SHA256" \
-            > release.json
           python3 - release.json > request.json <<'EOF'
           import json, os, sys
-          release = json.load(open(sys.argv[1]))
+          sys.path.insert(0, "tools")
+          import candidate_custody as custody
+          repo = os.environ["GITHUB_REPOSITORY"]
+          tag = "candidate-" + os.environ["CANDIDATE_SHA256"]
+          release = custody.find_holding_draft(
+              custody.GitHub(), repo, tag)
+          with open(sys.argv[1], "w") as stream:
+              json.dump(release, stream, sort_keys=True)
           print(json.dumps({
               "repository": os.environ["GITHUB_REPOSITORY"],
               "source_commit": os.environ["SOURCE_COMMIT"],
