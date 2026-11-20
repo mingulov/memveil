@@ -651,6 +651,71 @@ def test_journey_identity_excludes_prep_dir_wholesale():
     assert '.stages' not in prep_text
 
 
+def test_journey_identity_hashes_outside_link_as_link(
+        tmp_path):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import checkout_identity, \
+        journey_identity_excludes, journey_staging_root
+    root = Path(journey_staging_root())
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / ('stage-target-%d' % os.getpid())
+    target.write_bytes(b'staged-bytes\n')
+    link = ROOT / ('outside-link-%d' % os.getpid())
+    git_dir = subprocess.run(
+        ['git', '-C', str(ROOT), 'rev-parse', '--git-dir'],
+        capture_output=True, text=True)
+    assert git_dir.returncode == 0, git_dir.stderr
+    resolved = Path(git_dir.stdout.strip())
+    if not resolved.is_absolute():
+        resolved = ROOT / resolved
+    index_copy = tmp_path / 'index-copy'
+    shutil.copyfile(resolved / 'index', index_copy)
+    try:
+        saved = os.environ.get('GIT_INDEX_FILE')
+        os.environ['GIT_INDEX_FILE'] = str(index_copy)
+        try:
+            link.symlink_to(target)
+            added = subprocess.run(
+                ['git', '-C', str(ROOT), 'add', '-f',
+                 str(link)],
+                capture_output=True, text=True)
+            assert added.returncode == 0, added.stderr
+            excludes = journey_identity_excludes()
+            _, with_link = checkout_identity(
+                exclude=excludes)
+            # The link hashes as the link it is: target
+            # bytes never leak into the digest.
+            target.write_bytes(b'rewritten-staged-bytes\n')
+            assert checkout_identity(
+                exclude=excludes)[1] == with_link
+        finally:
+            if saved is None:
+                os.environ.pop('GIT_INDEX_FILE', None)
+            else:
+                os.environ['GIT_INDEX_FILE'] = saved
+        # Removing the link changes the digest: it never
+        # vanished through its excluded target.
+        link.unlink()
+        _, without = checkout_identity(
+            exclude=journey_identity_excludes())
+        assert without != with_link
+        # Repointing (even dangling) changes it too: the
+        # hashed bytes are the link text.
+        link.symlink_to(tmp_path / 'elsewhere')
+        _, repointed = checkout_identity(
+            exclude=journey_identity_excludes())
+        assert repointed != with_link
+        untouched = subprocess.run(
+            ['git', '-C', str(ROOT), 'diff', '--cached',
+             '--quiet'],
+            capture_output=True, text=True)
+        assert untouched.returncode == 0, \
+            'real index gained staged changes'
+    finally:
+        link.unlink(missing_ok=True)
+        target.unlink(missing_ok=True)
+
+
 def test_journey_in_checkout_prep_and_launch_accepts(
         sealed, tmp_path, monkeypatch):
     # The record and its stage live inside the checkout, so

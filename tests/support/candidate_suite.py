@@ -114,15 +114,22 @@ def checkout_identity(exclude=()):
     """(commit, tree digest) binding this checkout's exact state.
 
     commit is HEAD; the tree digest is SHA-256 over the
-    sorted worktree bytes (relpath plus file content) of
-    every tracked and every untracked non-ignored file,
-    so it binds the sources the recorded executables were
-    built from, clean or dirty. Ignored build outputs never
-    enter the digest. exclude holds absolute paths skipped
-    by identity; an excluded directory skips its whole
-    subtree, so present and future files under it never
-    enter the digest. Refuses when any listed file is
-    unreadable. Shared with the prep tool, which imports it
+    sorted worktree bytes of every tracked and every
+    untracked non-ignored file, so it binds the sources
+    the recorded executables were built from, clean or
+    dirty: each entry hashes its relpath, its kind tag,
+    and its bytes (file content, or the link target text
+    for a symlink, so a link hashes as the link it is
+    and never vanishes through its target). Ignored
+    build outputs never enter the digest. exclude holds
+    absolute paths skipped by identity, compared against
+    the unresolved spelling of each listed path: an
+    excluded directory skips its whole subtree lexically,
+    so present and future files under it never enter the
+    digest, while a link outside the set stays hashed
+    wherever its target points. Refuses when any listed
+    file is unreadable or is neither a plain file nor a
+    link. Shared with the prep tool, which imports it
     from here.
     """
     head = _git_lines('rev-parse', 'HEAD')[0].strip()
@@ -130,7 +137,7 @@ def checkout_identity(exclude=()):
             or any(char not in '0123456789abcdef'
                    for char in head):
         raise ValueError('checkout identity unavailable')
-    skip = {str(Path(name).resolve()) for name in exclude}
+    skip = {os.path.abspath(entry) for entry in exclude}
     names = []
     for args in (['ls-files', '-z'],
                  ['ls-files', '--others', '--exclude-standard',
@@ -143,11 +150,29 @@ def checkout_identity(exclude=()):
         if '/' in name and name.split('/')[0] in ('', '.', '..'):
             raise ValueError('checkout identity unavailable')
         full = ROOT / name
-        resolved = str(full.resolve())
-        if any(resolved == entry
-               or resolved.startswith(entry + os.sep)
+        text = os.path.abspath(str(full))
+        if any(text == entry
+               or text.startswith(entry + os.sep)
                for entry in skip):
             continue
+        try:
+            mode = os.lstat(full).st_mode
+        except OSError as exc:
+            raise ValueError(
+                'checkout identity unavailable: %s' % exc)
+        if stat.S_ISLNK(mode):
+            try:
+                target = os.readlink(os.fsencode(full))
+            except OSError as exc:
+                raise ValueError(
+                    'checkout identity unavailable: %s'
+                    % exc)
+            material.update(name.encode('utf-8') + b'\0')
+            material.update(b'link\0' + target + b'\0')
+            continue
+        if not stat.S_ISREG(mode):
+            raise ValueError(
+                'checkout identity unavailable: %s' % name)
         try:
             with open(full, 'rb') as stream:
                 content = stream.read()
@@ -155,7 +180,7 @@ def checkout_identity(exclude=()):
             raise ValueError(
                 'checkout identity unavailable: %s' % exc)
         material.update(name.encode('utf-8') + b'\0')
-        material.update(content + b'\0')
+        material.update(b'file\0' + content + b'\0')
     return head, material.hexdigest()
 
 
