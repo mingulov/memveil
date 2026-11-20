@@ -1055,6 +1055,59 @@ def test_cli_import_accepts_exact_draft(
     assert "candidate-custody" in rerun.stderr
 
 
+def _release_workflow():
+    yaml = pytest.importorskip("yaml")
+    path = ROOT / ".github" / "workflows" / "release.yml"
+    return yaml.safe_load(path.read_text())
+
+
+def test_release_workflow_parses_and_shells_check():
+    doc = _release_workflow()
+    assert {"seal", "qualify", "sign", "import", "dry-run",
+            "promote"} <= set(doc["jobs"])
+    for job, spec in sorted(doc["jobs"].items()):
+        for step in spec.get("steps", []):
+            if "run" not in step:
+                continue
+            proc = subprocess.run(
+                ["bash", "-n"], input=step["run"], text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE)
+            assert proc.returncode == 0, "%s: %s" % (
+                job, proc.stderr)
+
+
+def test_release_checkouts_use_no_input_ref():
+    doc = _release_workflow()
+    for job, spec in sorted(doc["jobs"].items()):
+        for step in spec.get("steps", []):
+            if not str(step.get("uses", "")).startswith(
+                    "actions/checkout@"):
+                continue
+            ref = (step.get("with") or {}).get("ref", "")
+            assert "${{ inputs" not in str(ref), job
+
+
+def test_release_sign_job_has_no_source_checkout():
+    doc = _release_workflow()
+    text = json.dumps(doc["jobs"]["sign"])
+    assert "source_commit" not in text
+    assert "SOURCE_COMMIT" not in text
+    assert "candidate-src" not in text
+
+
+def test_release_digest_never_in_shell():
+    doc = _release_workflow()
+    for job, spec in sorted(doc["jobs"].items()):
+        for step in spec.get("steps", []):
+            if "run" not in step:
+                continue
+            assert "${{ inputs.candidate_sha256 }}" \
+                not in step["run"], job
+            assert "${{ inputs.source_commit }}" \
+                not in step["run"], job
+
+
 def test_release_version_binding():
     m = api()
     for version, claim in [("0.1.1", "ordinary-preview"),

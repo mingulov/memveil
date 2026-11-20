@@ -1,10 +1,21 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Dispatch-only release pipeline: seal -> qualify/export -> import ->
-# dry-run -> promote. Every dispatch re-verifies the sealed candidate
-# from the source commit before running its custody stage, so nothing
-# promotes bytes that skipped export. Custody dispatches run with the
-# workflow ref at the qualification commit Q (evidence-only over C);
-# see RELEASING.md for the operator order.
+# Dispatch-only release pipeline: seal -> sign -> qualify ->
+# import -> dry-run -> promote. Every dispatch re-verifies the
+# sealed candidate from the source commit before running its
+# custody stage, so nothing promotes bytes that skipped export.
+# Custody dispatches run with the workflow ref at the
+# qualification commit Q (evidence-only over C); see
+# RELEASING.md for the operator order.
+#
+# Two-checkout trust rule: every job checks out the trusted
+# workflow ref for its tools and scripts, and jobs that need
+# the candidate source materialize C as a data-only worktree
+# (never executed, only read through --source-root/--root).
+# Dispatch inputs are validated as data (digest pattern,
+# 40-hex commit plus a git object check) before use, and
+# digests are compared in Python, never interpolated into
+# shell. Signing runs in its own job over trusted code plus
+# sealed bytes only, away from the candidate build.
 #
 # Toolchain pins, matching the tree: Rust 1.100.0 plus
 # nightly-2026-05-20 for the eBPF child build
@@ -47,7 +58,33 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
-          ref: ${{ inputs.source_commit }}
+          fetch-depth: 0
+      - name: Validate dispatch inputs as data
+        env:
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -eu
+          python3 - <<'EOF'
+          import os
+          import re
+          import sys
+          sha = os.environ.get("CANDIDATE_SHA256") or ""
+          commit = os.environ.get("SOURCE_COMMIT") or ""
+          if not re.fullmatch(r"[0-9a-f]{64}", sha):
+              sys.exit("candidate_sha256 is not 64 lowercase hex")
+          if not re.fullmatch(r"[0-9a-f]{40}", commit):
+              sys.exit("source_commit is not 40 lowercase hex")
+          EOF
+          git cat-file -e "$SOURCE_COMMIT^{commit}"
+      - name: Materialize the candidate source as data
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -eu
+          git worktree add --detach candidate-src "$SOURCE_COMMIT"
+          test "$(git -C candidate-src rev-parse HEAD)" \
+            = "$SOURCE_COMMIT"
       - name: Install Rust toolchains
         run: |
           curl -fsSL -o /tmp/rustup-init \
@@ -76,7 +113,7 @@ jobs:
         run: |
           set -eu
           python3 scripts/package-tarball.py --build --candidate \
-            --out dist --tag bundle
+            --root candidate-src --out dist --tag bundle
           python3 scripts/package-deb.py --bundle dist/bundle --out dist/deb
           python3 scripts/package-rpm.py --work work/rpm --out dist/rpm \
             --bundle dist/bundle
@@ -86,7 +123,7 @@ jobs:
           cp "$1" dist/artifacts/
           set -- dist/rpm/*.rpm; test $# -eq 1 && test -f "$1"
           cp "$1" dist/artifacts/
-          git archive --format=tar HEAD | gzip -n \
+          git -C candidate-src archive --format=tar HEAD | gzip -n \
             > dist/artifacts/memveil-source.tar.gz
       - name: Emit the frozen SBOM
         run: |
@@ -102,9 +139,11 @@ jobs:
             --bundle dist/artifacts/bundle.tar.gz \
             --deb "$DEB" \
             --rpm "$RPM" \
-            --lock Cargo.lock \
-            --ebpf-lock crates/ebpf/Cargo.lock
+            --lock candidate-src/Cargo.lock \
+            --ebpf-lock candidate-src/crates/ebpf/Cargo.lock
       - name: Record provenance and seal
+        env:
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
         run: |
           set -eu
           set -- dist/artifacts/*.deb; test $# -eq 1 && test -f "$1"
@@ -119,24 +158,116 @@ jobs:
             --source dist/artifacts/memveil-source.tar.gz \
             --sbom dist/artifacts/memveil.spdx.json \
             --out dist/artifacts/memveil.provenance.json \
-            --source-root .
+            --source-root candidate-src
           ./tools/candidate seal \
             --bundle-dir dist/bundle \
             --artifacts-dir dist/artifacts \
-            --policy packaging/candidate-policy.json \
-            --out candidate.json
-          test "$(sha256sum < candidate.json | cut -d' ' -f1)" \
-            = "${{ inputs.candidate_sha256 }}"
-      - name: Sign the artifact checksums
+            --policy candidate-src/packaging/candidate-policy.json \
+            --out candidate.json \
+            --source-root candidate-src
+          python3 - candidate.json <<'EOF'
+          import hashlib
+          import os
+          import sys
+          with open(sys.argv[1], "rb") as stream:
+              got = hashlib.sha256(stream.read()).hexdigest()
+          if got != os.environ["CANDIDATE_SHA256"]:
+              sys.exit("sealed digest differs from dispatched candidate")
+          EOF
+      - name: Stage the unsigned sealed set
+        run: |
+          set -eu
+          rm -rf sealed && mkdir sealed
+          cp candidate.json sealed/
+          cp dist/artifacts/* sealed/
+          cp target/debug/memveil-release-entry sealed/
+          set -- sealed/*; test $# -eq 8
+          ls sealed
+      - name: Upload the unsigned sealed candidate
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: sealed-unsigned-${{ inputs.candidate_sha256 }}
+          path: sealed/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Check for the holding draft
+        id: draft
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+        run: |
+          if gh api \
+            "repos/$GITHUB_REPOSITORY/releases/tags/candidate-$CANDIDATE_SHA256" \
+            >/dev/null 2>&1; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  sign:
+    needs: seal
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - name: Validate the candidate digest as data
+        env:
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+        run: |
+          set -eu
+          python3 - <<'EOF'
+          import os
+          import re
+          import sys
+          sha = os.environ.get("CANDIDATE_SHA256") or ""
+          if not re.fullmatch(r"[0-9a-f]{64}", sha):
+              sys.exit("candidate_sha256 is not 64 lowercase hex")
+          EOF
+      - name: Sign the sealed artifact checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
           QUALIFIER_SIGNING_KEY: ${{ secrets.QUALIFIER_SIGNING_KEY }}
         run: |
           set -eu
+          gh run download "$GITHUB_RUN_ID" \
+            -n "sealed-unsigned-$CANDIDATE_SHA256" -D sealed-unsigned
+          set -- sealed-unsigned/*; test $# -eq 8
+          python3 - sealed-unsigned/candidate.json <<'EOF'
+          import hashlib
+          import os
+          import sys
+          with open(sys.argv[1], "rb") as stream:
+              got = hashlib.sha256(stream.read()).hexdigest()
+          if got != os.environ["CANDIDATE_SHA256"]:
+              sys.exit("sealed digest differs from dispatched candidate")
+          EOF
+          python3 - sealed-unsigned/candidate.json sealed-unsigned \
+            sign-input <<'EOF'
+          import json
+          import shutil
+          import sys
+          from pathlib import Path
+          manifest = json.loads(Path(sys.argv[1]).read_bytes())
+          src = Path(sys.argv[2])
+          dest = Path(sys.argv[3])
+          dest.mkdir()
+          names = sorted(entry["name"]
+                         for entry in manifest["artifacts"])
+          if len(names) != 6:
+              sys.exit("sealed set holds no six artifacts")
+          for name in names:
+              if "/" in name:
+                  sys.exit("invalid sealed artifact name")
+              shutil.copy2(src / name, dest / name)
+          EOF
           test -n "$QUALIFIER_SIGNING_KEY"
           umask 077
           printf '%s\n' "$QUALIFIER_SIGNING_KEY" > qualifier.key
           ./tools/candidate sign-checksums \
-            --artifacts-dir dist/artifacts \
+            --artifacts-dir sign-input \
             --key qualifier.key \
             --out-dir dist/signed
           rm -f qualifier.key
@@ -144,11 +275,11 @@ jobs:
         run: |
           set -eu
           rm -rf sealed && mkdir sealed
-          cp candidate.json sealed/
-          cp dist/artifacts/* sealed/
+          cp sealed-unsigned/candidate.json sealed/
+          cp sign-input/* sealed/
           cp dist/signed/SHA256SUMS.txt dist/signed/SHA256SUMS.txt.sig \
             dist/signed/signer.pub sealed/
-          cp target/debug/memveil-release-entry sealed/
+          cp sealed-unsigned/memveil-release-entry sealed/
           set -- sealed/*; test $# -eq 11
           ls sealed
       - name: Upload the sealed candidate
@@ -158,21 +289,9 @@ jobs:
           path: sealed/
           if-no-files-found: error
           retention-days: 90
-      - name: Check for the holding draft
-        id: draft
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if gh api \
-            "repos/$GITHUB_REPOSITORY/releases/tags/candidate-${{ inputs.candidate_sha256 }}" \
-            >/dev/null 2>&1; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-          fi
 
   qualify:
-    needs: seal
+    needs: [seal, sign]
     if: needs.seal.outputs.present == 'true'
     runs-on: ubuntu-26.04
     permissions:
@@ -181,7 +300,33 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
-          ref: ${{ inputs.source_commit }}
+          fetch-depth: 0
+      - name: Validate dispatch inputs as data
+        env:
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -eu
+          python3 - <<'EOF'
+          import os
+          import re
+          import sys
+          sha = os.environ.get("CANDIDATE_SHA256") or ""
+          commit = os.environ.get("SOURCE_COMMIT") or ""
+          if not re.fullmatch(r"[0-9a-f]{64}", sha):
+              sys.exit("candidate_sha256 is not 64 lowercase hex")
+          if not re.fullmatch(r"[0-9a-f]{40}", commit):
+              sys.exit("source_commit is not 40 lowercase hex")
+          EOF
+          git cat-file -e "$SOURCE_COMMIT^{commit}"
+      - name: Materialize the candidate source as data
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -eu
+          git worktree add --detach candidate-src "$SOURCE_COMMIT"
+          test "$(git -C candidate-src rev-parse HEAD)" \
+            = "$SOURCE_COMMIT"
       - name: Install matrix tools
         run: |
           sudo apt-get update
@@ -189,15 +334,23 @@ jobs:
       - name: Collect the candidate and the campaign evidence
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
         run: |
           set -eu
           gh run download "$GITHUB_RUN_ID" \
-            -n "sealed-${{ inputs.candidate_sha256 }}" -D sealed
-          test "$(sha256sum < sealed/candidate.json | cut -d' ' -f1)" \
-            = "${{ inputs.candidate_sha256 }}"
+            -n "sealed-$CANDIDATE_SHA256" -D sealed
+          python3 - sealed/candidate.json <<'EOF'
+          import hashlib
+          import os
+          import sys
+          with open(sys.argv[1], "rb") as stream:
+              got = hashlib.sha256(stream.read()).hexdigest()
+          if got != os.environ["CANDIDATE_SHA256"]:
+              sys.exit("sealed digest differs from dispatched candidate")
+          EOF
           mkdir -p evidence evidence-dl
           gh release download \
-            "candidate-${{ inputs.candidate_sha256 }}" \
+            "candidate-$CANDIDATE_SHA256" \
             -p qualification-evidence.tar.gz -D evidence-dl
           python3 - evidence-dl/qualification-evidence.tar.gz \
             evidence <<'EOF'
@@ -216,8 +369,9 @@ jobs:
           ./tools/candidate qualify \
             --manifest sealed/candidate.json \
             --qualification evidence/qualification.json \
-            --policy packaging/candidate-policy.json \
-            --evidence-dir evidence
+            --policy candidate-src/packaging/candidate-policy.json \
+            --evidence-dir evidence \
+            --source-tree candidate-src
           # Derived only after the qualify gate above
           # authenticated the same bytes; the export branch below
           # authenticates them once more before evaluating them.
@@ -245,11 +399,11 @@ jobs:
             --verify-out \
             --out "evidence/$MATRIX_DIR" \
             --export-tested tested-payload.sha256 \
-            --lock tests/vm/kernels.lock.json \
+            --lock candidate-src/tests/vm/kernels.lock.json \
             --evidence-dir evidence \
             --qualification evidence/qualification.json \
-            --policy packaging/candidate-policy.json \
-            --source-tree .
+            --policy candidate-src/packaging/candidate-policy.json \
+            --source-tree candidate-src
       - name: Upload the tested payload
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
@@ -268,6 +422,24 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           fetch-depth: 0
+      - name: Validate dispatch inputs as data
+        env:
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -eu
+          python3 - <<'EOF'
+          import os
+          import re
+          import sys
+          sha = os.environ.get("CANDIDATE_SHA256") or ""
+          commit = os.environ.get("SOURCE_COMMIT") or ""
+          if not re.fullmatch(r"[0-9a-f]{64}", sha):
+              sys.exit("candidate_sha256 is not 64 lowercase hex")
+          if not re.fullmatch(r"[0-9a-f]{40}", commit):
+              sys.exit("source_commit is not 40 lowercase hex")
+          EOF
+          git cat-file -e "$SOURCE_COMMIT^{commit}"
       - name: Install custody tools
         run: |
           sudo apt-get update
@@ -334,6 +506,24 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           fetch-depth: 0
+      - name: Validate dispatch inputs as data
+        env:
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -eu
+          python3 - <<'EOF'
+          import os
+          import re
+          import sys
+          sha = os.environ.get("CANDIDATE_SHA256") or ""
+          commit = os.environ.get("SOURCE_COMMIT") or ""
+          if not re.fullmatch(r"[0-9a-f]{64}", sha):
+              sys.exit("candidate_sha256 is not 64 lowercase hex")
+          if not re.fullmatch(r"[0-9a-f]{40}", commit):
+              sys.exit("source_commit is not 40 lowercase hex")
+          EOF
+          git cat-file -e "$SOURCE_COMMIT^{commit}"
       - name: Install custody tools
         run: |
           sudo apt-get update
@@ -384,6 +574,24 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           fetch-depth: 0
+      - name: Validate dispatch inputs as data
+        env:
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -eu
+          python3 - <<'EOF'
+          import os
+          import re
+          import sys
+          sha = os.environ.get("CANDIDATE_SHA256") or ""
+          commit = os.environ.get("SOURCE_COMMIT") or ""
+          if not re.fullmatch(r"[0-9a-f]{64}", sha):
+              sys.exit("candidate_sha256 is not 64 lowercase hex")
+          if not re.fullmatch(r"[0-9a-f]{40}", commit):
+              sys.exit("source_commit is not 40 lowercase hex")
+          EOF
+          git cat-file -e "$SOURCE_COMMIT^{commit}"
       - name: Install custody tools
         run: |
           sudo apt-get update
