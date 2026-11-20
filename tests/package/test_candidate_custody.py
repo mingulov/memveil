@@ -1562,6 +1562,36 @@ def test_release_key_recipe_stays_outside_the_tree():
             text[max(0, hit.start() - 60):hit.end() + 20]
 
 
+def test_release_runbook_orders_dryrun_before_its_record():
+    text = (ROOT / "RELEASING.md").read_text()
+    dispatch = text.index("Dispatch dry-run")
+    provisional = text.index("provisional dry-run receipt")
+    final = text.index("final promotion evidence")
+    promote = text.index("Dispatch promote")
+    assert dispatch < provisional < final < promote
+    flat = " ".join(text.split())
+    assert "dispatch dry-run before recording its check " \
+        "binding" in flat
+    assert "do not record `promotion-dry-run/1` here" in flat
+    assert "`promote` runs `promote` only, with the ref " \
+        "at Q3" in flat
+    assert "`promotion-dry-run/1` at Q2" in flat
+    readme = (ROOT / "packaging" / "qualifications"
+              / "README.md").read_text()
+    assert "Q3" in readme
+    assert "dry-run` and `promote` with the ref at Q2" \
+        not in readme
+
+
+def test_release_runbook_defers_dryrun_binding_past_dispatch():
+    text = (ROOT / "RELEASING.md").read_text()
+    assembly = text[
+        text.index(
+            "Assemble `packaging/qualifications/remote.json`"):
+        text.index("push origin HEAD:release-q2")]
+    assert "promotion-dry-run/1" not in assembly
+
+
 def test_release_version_binding():
     m = api()
     for version, claim in [("0.1.1", "ordinary-preview"),

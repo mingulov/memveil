@@ -15,7 +15,7 @@ between C and Q (see the evidence-only rule).
 | `packaging/qualifications/candidate.json` | `memveil-candidate/2` | operator, sealing locally |
 | `packaging/qualifications/qualification.json` | `memveil-qualification/1` | qualifier, with the campaign |
 | `packaging/tested-payload.sha256` | checksum lines | operator, exporting locally |
-| `packaging/qualifications/remote.json` | `memveil-remote-custody/1` | operator, after a clean import |
+| `packaging/qualifications/remote.json` | `memveil-remote-custody/1` | operator, after a clean import (finalized after a green dry-run) |
 
 `candidate.json` is a byte copy of the sealed manifest: its
 SHA-256 must equal the dispatched `candidate_sha256`, and its
@@ -78,9 +78,12 @@ The operator seals, signs, campaigns, qualifies, and
 exports locally, commits Q1 (the first three records
 above), and stages the holding draft; then walk one stage
 per dispatch: `qualify` and `import` with the ref at Q1,
-`dry-run` and `promote` with the ref at Q2 (Q1 plus
-`remote.json`). Dry-run refuses when the final tag already
-exists; after it is green, the owner creates `v<version>`
+`dry-run` with the ref at Q2 (Q1 plus `remote.json` with
+the four pre-dry-run bindings), `promote` with the ref at
+Q3 (Q2 with `remote.json` finalized to all five bindings
+after a green dry-run). Dry-run refuses when the final tag
+already exists; after it is green, the dry-run binding is
+recorded and Q3 frozen, then the owner creates `v<version>`
 on C and only then dispatches promote with the matching
 authorization. Promote requires the tag to resolve to C.
 Every dispatch consumes draft or recorded bytes only and

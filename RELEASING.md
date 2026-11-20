@@ -27,7 +27,7 @@ Mode to jobs (dispatch with the ref at the stated commit):
   consumes the recorded import only and validates the
   proposed `vX.Y.Z` tag without mutating anything; it
   refuses when the tag already exists.
-- `promote` runs `promote` only, with the ref at Q2: it
+- `promote` runs `promote` only, with the ref at Q3: it
   consumes the recorded import only, requires the tag to
   resolve to C, then creates and publishes the release with
   the qualified notes. A rerun of the same tag fails instead
@@ -37,12 +37,15 @@ Q1 is the qualification commit over C carrying
 `packaging/qualifications/candidate.json`,
 `packaging/qualifications/qualification.json`, and
 `packaging/tested-payload.sha256`. Q2 is Q1 plus
-`packaging/qualifications/remote.json`, committed after a
-clean import. Dispatches name a branch (or tag) whose HEAD
-is the required commit: `gh workflow run --ref` takes a
-branch or tag, never a raw SHA, and the run checks out the
-ref at start time, so freeze one branch per Q and never
-move the Q1 branch after dispatching on it.
+`packaging/qualifications/remote.json` with the four
+pre-dry-run check bindings, committed after a clean
+import. Q3 is Q2 with `remote.json` finalized to all five
+bindings, committed after a green dry-run. Dispatches name
+a branch (or tag) whose HEAD is the required commit: `gh
+workflow run --ref` takes a branch or tag, never a raw SHA,
+and the run checks out the ref at start time, so freeze one
+branch per Q (`release-q1`, `release-q2`, `release-q3`)
+and never move a Q branch after dispatching on it.
 
 ## Prerequisites
 
@@ -393,8 +396,12 @@ gh workflow run release.yml --ref release-q1 \
 ```
 
 13. After a green import, record the remote receipt and
-commit Q2. Fetch the immutable import coordinates (the
-signer commit is Q1, the ref the import ran at):
+commit Q2. Record four bindings now; do not record
+`promotion-dry-run/1` here: its check-run is published by
+the dry-run dispatch in step 14, so dispatch dry-run
+before recording its check binding (step 15). Fetch the
+immutable import coordinates (the signer commit is Q1,
+the ref the import ran at):
 
 ```sh
 gh run list -w release.yml
@@ -423,22 +430,23 @@ from these values: `candidate_sha256`, `source_commit`
 `run_id`, `artifact_id`, `artifact_sha256` (the zip
 digest without the `sha256:` prefix), `signer_commit`
 (Q1), `custody_sha256`, and `checks`: one signed
-binding per required remote check
-(`tampered-payload/1`, `promotion-dry-run/1`,
-`independent-attestation/1`, `required-checks/1`,
-`no-overwrite/1`), each carrying its published
-check-run ID, run ID, and head SHA (Q1), the signed
-receipt over its offline inputs, the inputs, the
-base64 signature (`ssh-keygen -Y sign` with namespace
+binding per check published so far
+(`tampered-payload/1`, `independent-attestation/1`,
+`required-checks/1`, `no-overwrite/1`), each carrying
+its published check-run ID, run ID, and head SHA (Q1,
+the ref it was published against), the signed receipt
+over its offline inputs, the inputs, the base64
+signature (`ssh-keygen -Y sign` with namespace
 `memveil-candidate`, as in step 6), and the public
 key. Promote re-checks every binding against the live
 check-runs API: each run must be completed and
 successful, on the bound head SHA, from the
-github-actions app, under the bound run. The five
-check-runs are published out of band today; their
-exact contract is the one `verify_remote_checks`
-enforces. Commit the receipt as Q2 on a second frozen
-branch:
+github-actions app, under the bound run. The four
+check-runs above are published out of band today; the
+dry-run check-run is published by the step-14 dispatch
+instead. The exact contract for all of them is the one
+`verify_remote_checks` enforces. Commit the receipt as
+Q2 on a second frozen branch:
 
 ```sh
 git add packaging/qualifications/remote.json
@@ -462,21 +470,68 @@ gh workflow run release.yml --ref release-q2 \
   -f import_artifact_id="$ARTIFACT_ID"
 ```
 
-15. After the dry-run dispatch is green, tag `vX.Y.Z`
-on C (owner step, outside the workflow; the version
-comes from `Cargo.toml` at C):
+Dry-run consumes only the recorded import coordinates
+from Q2's `remote.json` (run, artifact, signer, custody)
+and ignores the check bindings; promote enforces the
+bindings, so four suffice here.
+
+15. After the dry-run dispatch is green, record the
+provisional dry-run receipt and carry it forward. The
+dry-run ran at Q2, so its `promotion-dry-run/1`
+check-run carries head SHA Q2:
+
+```sh
+gh run list -w release.yml
+DRY_RUN_ID=<dry-run run id from the listing above>
+gh api repos/<OWNER>/<REPO>/actions/runs/$DRY_RUN_ID/jobs \
+  -q '.jobs[]
+      | select(.name == "dry-run")
+      | "\(.id) \(.check_run_url)"'
+```
+
+That prints the job ID and its check-run URL; keep the
+numeric check-run ID from the URL tail. Write the
+provisional receipt beside the scratch evidence (kept
+under ignored `dist/`, never committed as is): the
+check-run ID, the run ID, head SHA Q2, the signed
+receipt over the dry-run's offline inputs, the inputs,
+the base64 signature (`ssh-keygen -Y sign` with
+namespace `memveil-candidate`, as in step 6), and the
+public key.
+
+16. Assemble the final promotion evidence: the same
+import coordinates with all five check bindings (the
+four at Q1 plus `promotion-dry-run/1` at Q2 from the
+provisional receipt). Commit the finalized receipt as
+Q3 on a third frozen branch:
+
+```sh
+git add packaging/qualifications/remote.json
+git commit -m "Finalize promotion evidence for $CANDIDATE_SHA256"
+Q3=$(git rev-parse HEAD)
+git diff --name-only "$C..$Q3"
+git push origin HEAD:release-q3
+```
+
+The diff must list exactly the same four
+qualification paths (`remote.json` amended, still
+evidence-only over C).
+
+17. After the dry-run dispatch is green and Q3 is
+frozen, tag `vX.Y.Z` on C (owner step, outside the
+workflow; the version comes from `Cargo.toml` at C):
 
 ```sh
 git tag "v<VERSION>" "$C"
 git push origin "v<VERSION>"
 ```
 
-16. Dispatch promote with the ref at Q2, the same
+18. Dispatch promote with the ref at Q3, the same
 recorded import IDs, and `promote_authorization`
 retyping the candidate digest:
 
 ```sh
-gh workflow run release.yml --ref release-q2 \
+gh workflow run release.yml --ref release-q3 \
   -f mode=promote -f candidate_sha256="$CANDIDATE_SHA256" \
   -f source_commit="$C" \
   -f import_run_id="$RUN_ID" \
