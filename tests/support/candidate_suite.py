@@ -41,6 +41,25 @@ JOURNEY_SUITES = ('deb', 'rpm-journey')
 
 JOURNEY_PREP_SCHEMA = 'memveil-journey-prep/1'
 
+# pytest files per dispatched pytest suite. Development
+# fixture tests live in the same files but carry a
+# deselecting marker (see tests/conftest.py), so the
+# dispatched path runs zero builds; the selection tests
+# consume these same lists, so selection and tests cannot
+# drift.
+PYTEST_SELECTIONS = {
+    'package': ('tests/package/test_release_runtime.py',
+                'tests/package/test_clean_runtime.py'),
+    'release-runtime':
+    ('tests/package/test_release_runtime.py',),
+}
+
+
+def pytest_dispatch_argv(*files):
+    """pytest argv for one dispatched qualification selection."""
+    return ['-m', 'pytest', *files, '-q', '-m',
+            'qualification']
+
 
 def _checked(suite, code, live):
     """Keep an unarmed 77; fail a skip once armed.
@@ -153,12 +172,10 @@ def _run(suite, argv, live, selected):
         'perf-overhead': ['tests/vm/candidate_live.py',
                           'overhead'],
         'vm-live-soak': ['tests/vm/candidate_live.py', 'soak'],
-        'release-runtime': ['-m', 'pytest',
-                            'tests/package/test_release_runtime.py',
-                            '-q'],
-        'package': ['-m', 'pytest',
-                    'tests/package/test_release_runtime.py',
-                    'tests/package/test_clean_runtime.py', '-q'],
+        'release-runtime': pytest_dispatch_argv(
+            *PYTEST_SELECTIONS['release-runtime']),
+        'package': pytest_dispatch_argv(
+            *PYTEST_SELECTIONS['package']),
     }
     if suite in ('vm-kernels', 'vm-scenarios'):
         scenarios = suite == 'vm-scenarios'

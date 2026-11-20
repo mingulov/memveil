@@ -138,6 +138,7 @@ def run(*argv, **kwargs):
     )
 
 
+@pytest.mark.qualification
 def test_manifest_hashes(bundle):
     root, manifest = bundle
     assert manifest["bundle"] == root.name
@@ -162,6 +163,7 @@ def test_manifest_hashes(bundle):
             "hash mismatch on %s" % rel
 
 
+@pytest.mark.qualification
 def test_license_first_party(bundle):
     root, manifest = bundle
     first = manifest.get("first_party", {})
@@ -177,6 +179,7 @@ def test_license_first_party(bundle):
         assert (root / rel).is_file(), "staged text lacks %s" % rel
 
 
+@pytest.mark.qualification
 def test_help_version(bundle):
     root, manifest = bundle
     binary = str(root / "bin" / "memveil")
@@ -191,6 +194,7 @@ def test_help_version(bundle):
         "memveil-" + manifest["engine_version"]
 
 
+@pytest.mark.qualification
 def test_doctor_exit_verdict_consistent(bundle):
     root, _ = bundle
     binary = str(root / "bin" / "memveil")
@@ -213,6 +217,7 @@ def metric(report, name):
     return hits[0]
 
 
+@pytest.mark.qualification
 def test_report_example_all_formats(bundle):
     root, _ = bundle
     binary = str(root / "bin" / "memveil")
@@ -234,6 +239,7 @@ def test_report_example_all_formats(bundle):
     assert "| detail | partial | 0 |" in md.stdout
 
 
+@pytest.mark.qualification
 def test_valid_empty_replays_zero(bundle):
     root, _ = bundle
     binary = str(root / "bin" / "memveil")
@@ -251,7 +257,8 @@ def test_valid_empty_replays_zero(bundle):
         "value"] is None
 
 
-def test_cleanroom_no_pixi(tmp_path):
+@pytest.mark.qualification
+def test_cleanroom_no_pixi():
     # The clean room admits an environment where development
     # libraries are already absent: nothing in this file
     # requires pixi paths, the audit accepts a trace with none,
@@ -285,6 +292,14 @@ def test_cleanroom_no_pixi(tmp_path):
         "O_RDONLY|O_CLOEXEC) = 3\n"
     assert any("checkout" in hit for hit in audit_trace(
         checkout, "/", "/repo")), "checkout open accepted"
+
+
+@pytest.mark.dev_fixture
+def test_cleanroom_sealed_fixture_loads(tmp_path):
+    # Development machinery the audit legs never need: a
+    # synthetic seal loads through the candidate loader with
+    # its manifest readable. Sealing builds, so this leg
+    # stays out of dispatched qualification.
     sealed = seal_candidate(tmp_path, "nopixi")
     selected = load(env=candidate_env(sealed),
                     required=True)
@@ -294,6 +309,7 @@ def test_cleanroom_no_pixi(tmp_path):
         selected.close()
 
 
+@pytest.mark.qualification
 def test_replay_audited_cleanroom(bundle, tmp_path):
     if not shutil.which("strace"):
         pytest.fail("strace is required for the syscall audit")
@@ -341,6 +357,7 @@ BAD_OBJECT_DIAG = \
     "memveil record: object refused: object too small\n"
 
 
+@pytest.mark.qualification
 def test_denied_bad_object(bundle, tmp_path):
     root, _ = bundle
     binary = str(root / "bin" / "memveil")
@@ -356,6 +373,7 @@ def test_denied_bad_object(bundle, tmp_path):
     assert not out.exists(), "denied run must create no capture"
 
 
+@pytest.mark.qualification
 def test_denied_unprivileged_live(bundle, tmp_path):
     if os.geteuid() == 0:
         pytest.skip("live denial needs an unprivileged caller")

@@ -136,6 +136,7 @@ def sha_file(path):
     return digest.hexdigest()
 
 
+@pytest.mark.qualification
 def test_absent_bpf_object_refused(bundle, tmp_path):
     root, _ = bundle
     trial = tmp_path / "noobj"
@@ -152,6 +153,7 @@ def test_absent_bpf_object_refused(bundle, tmp_path):
     assert not cap.exists(), "refused record left a capture dir"
 
 
+@pytest.mark.qualification
 def test_unknown_profile_refused(bundle, tmp_path):
     root, _ = bundle
     cap = tmp_path / "cap"
@@ -166,6 +168,7 @@ def test_unknown_profile_refused(bundle, tmp_path):
     assert not cap.exists(), "refused record left a capture dir"
 
 
+@pytest.mark.qualification
 def test_top_replays_valid_empty(bundle):
     root, _ = bundle
     proc = run(str(root / "bin" / "memveil"), "top",
@@ -191,6 +194,7 @@ def dynamic_strings(path):
     return proc.stdout
 
 
+@pytest.mark.qualification
 def test_loader_layout(bundle):
     root, manifest = bundle
     binary = root / "bin" / "memveil"
@@ -222,6 +226,7 @@ def test_loader_layout(bundle):
                     target.name, name)
 
 
+@pytest.mark.qualification
 def test_runtime_provenance_pinned(bundle):
     root, manifest = bundle
     prov = manifest["runtime_provenance"]
@@ -244,6 +249,7 @@ def test_runtime_provenance_pinned(bundle):
         assert record["license"], rel
 
 
+@pytest.mark.qualification
 def test_runtime_licenses_match(bundle):
     root, manifest = bundle
     texts = manifest["runtime_licenses"]
@@ -257,6 +263,7 @@ def test_runtime_licenses_match(bundle):
         assert digest == manifest["files"][rel], rel
 
 
+@pytest.mark.qualification
 def test_permissions(bundle):
     root, _ = bundle
     binary = root / "bin" / "memveil"
@@ -274,6 +281,7 @@ def test_permissions(bundle):
     assert not bad, "; ".join(bad[:5])
 
 
+@pytest.mark.qualification
 def test_tar_members_normalized_modes():
     # The tarball carries explicit directory members (0755) and
     # normalized file modes (0644, executable bit kept), never
@@ -306,6 +314,7 @@ def test_tar_members_normalized_modes():
                     member.name, mode)
 
 
+@pytest.mark.qualification
 def test_bare_env_record_fails_past_discovery(bundle, tmp_path):
     # Zero-config: bundled record with an empty environment and
     # no --object must resolve the bundled objects. It then
@@ -397,6 +406,7 @@ def _dev_only_seal_leg():
     return False
 
 
+@pytest.mark.dev_fixture
 def test_installed_closure_matches_candidate(tmp_path):
     # The sealed .deb/.rpm pair installs exactly the candidate
     # files closure: every manifest member lands at its mapped
@@ -660,6 +670,7 @@ def _package_outputs(target_dir):
         if path.suffix in (".deb", ".rpm"))
 
 
+@pytest.mark.dev_fixture
 def test_sealed_inputs_used(tmp_path, audited_target_dir):
     # The install journeys consume the sealed .deb/.rpm paths
     # from the candidate manifest and never rebuild: the seal
@@ -723,6 +734,7 @@ def test_sealed_inputs_used(tmp_path, audited_target_dir):
         "partial-input refusal must name both inputs"
 
 
+@pytest.mark.dev_fixture
 def test_candidate_inputs_set_but_empty_refuse(audited_target_dir):
     # Set-but-empty is invalid input, never dev mode: one
     # empty plus one set fails, both empty fails, and both
@@ -770,6 +782,7 @@ def test_candidate_inputs_set_but_empty_refuse(audited_target_dir):
         "unset inputs must stay dev"
 
 
+@pytest.mark.dev_fixture
 def test_candidate_loader_env_operator_refused(
         tmp_path, audited_target_dir):
     # An operator loader override refuses pre-exec in
@@ -804,6 +817,7 @@ def test_candidate_loader_env_operator_refused(
             "%s refusal must name the variable" % label
 
 
+@pytest.mark.dev_fixture
 def test_candidate_loader_env_cargo_only_proceeds(
         tmp_path, audited_target_dir):
     # A cargo-shaped loader value proceeds: the entry check
@@ -823,6 +837,7 @@ def test_candidate_loader_env_cargo_only_proceeds(
         ran["sealed_inputs_used"]
 
 
+@pytest.mark.dev_fixture
 def test_no_build_outputs_needed(tmp_path, audited_target_dir):
     # Candidate mode consults no build outputs: every
     # re-homed leg runs against the sealed pair with
@@ -882,6 +897,7 @@ def test_no_build_outputs_needed(tmp_path, audited_target_dir):
         assert hits == [], "%s references %s" % (rel, hits)
 
 
+@pytest.mark.dev_fixture
 def test_dispatched_env_returns_synthetic_seal_legs_early(
         tmp_path, audited_target_dir, monkeypatch, capsys):
     # Under dispatched candidate inputs every synthetic-seal
@@ -906,6 +922,127 @@ def test_dispatched_env_returns_synthetic_seal_legs_early(
     monkeypatch.delenv("MV_BUNDLE_TARBALL")
     monkeypatch.delenv("MV_CANDIDATE_MANIFEST")
     assert _dev_only_seal_leg() is False
+
+
+def _selection_marks(path):
+    """{test name: {markers}} for one dispatched file (AST)."""
+    import ast
+    found = {}
+    tree = ast.parse(path.read_text())
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) \
+                or not node.name.startswith("test_"):
+            continue
+        marks = set()
+        for decorator in node.decorator_list:
+            value = decorator
+            while isinstance(value, ast.Call):
+                value = value.func
+            if isinstance(value, ast.Attribute) \
+                    and value.attr in ("qualification",
+                                       "dev_fixture") \
+                    and isinstance(value.value, ast.Attribute) \
+                    and value.value.attr == "mark":
+                marks.add(value.attr)
+        found[node.name] = marks
+    return found
+
+
+@pytest.mark.qualification
+def test_selection_markers_cover_every_test():
+    # Every test in a dispatched file carries exactly one
+    # selection marker: an unmarked fixture test would
+    # silently rejoin qualification and build there.
+    sys.path.insert(0, str(ROOT / "tests"))
+    from support import candidate_suite as dispatch_mod
+    files = set()
+    for names in dispatch_mod.PYTEST_SELECTIONS.values():
+        files.update(names)
+    assert files == {
+        "tests/package/test_release_runtime.py",
+        "tests/package/test_clean_runtime.py"}, files
+    for name in sorted(files):
+        for test, marks in sorted(
+                _selection_marks(ROOT / name).items()):
+            assert marks in ({"qualification"},
+                             {"dev_fixture"}), \
+                "%s:%s carries %s" % (name, test, marks)
+
+
+@pytest.mark.qualification
+def test_dispatched_selection_collects_only_qualification():
+    # The real dispatch argv, collected without running:
+    # every qualification test is collected and no
+    # development fixture test is.
+    sys.path.insert(0, str(ROOT / "tests"))
+    from support import candidate_suite as dispatch_mod
+    for suite, files in sorted(
+            dispatch_mod.PYTEST_SELECTIONS.items()):
+        argv = dispatch_mod.pytest_dispatch_argv(*files)
+        assert argv[:2] == ["-m", "pytest"], argv
+        assert argv[-2:] == ["-m", "qualification"], argv
+        env = {key: value for key, value in os.environ.items()
+               if key not in ("MV_BUNDLE_TARBALL",
+                              "MV_CANDIDATE_MANIFEST",
+                              "MV_CANDIDATE_DIGEST")}
+        proc = subprocess.run(
+            [sys.executable, *argv, "--collect-only",
+             "-p", "no:cacheprovider"],
+            cwd=str(ROOT), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, env=env)
+        assert proc.returncode == 0, proc.stderr[-2000:]
+        collected = {line.split("::")[0]
+                     + "::" + line.split("::")[1].split()[0]
+                     for line in proc.stdout.splitlines()
+                     if "::" in line}
+        assert collected, "dispatch collects no %s" % suite
+        for path in files:
+            for test, marks in _selection_marks(
+                    ROOT / path).items():
+                node = "%s::%s" % (path, test)
+                if marks == {"qualification"}:
+                    assert node in collected, \
+                        "%s drops %s" % (suite, node)
+                else:
+                    assert node not in collected, \
+                        "%s keeps fixture %s" % (suite, node)
+
+
+@pytest.mark.dev_fixture
+def test_dispatched_selection_builds_nothing(tmp_path):
+    # The dispatched qualification selection runs green
+    # with cargo shadowed: no collected test may invoke a
+    # build. Runs against the dev tarball (the selection,
+    # not the bundle source, is under test); the cargo
+    # stub fails loudly and leaves a sentinel.
+    sys.path.insert(0, str(ROOT / "tests"))
+    from support import candidate_suite as dispatch_mod
+    bindir = tmp_path / "shadowbin"
+    bindir.mkdir()
+    sentinel = tmp_path / "cargo-invoked"
+    stub = bindir / "cargo"
+    stub.write_text(
+        '#!/bin/sh\necho CARGO-SHADOWED-STUB >&2\n'
+        'touch "%s"\nexit 99\n' % sentinel)
+    stub.chmod(0o755)
+    env = {key: value for key, value in os.environ.items()
+           if key not in ("MV_BUNDLE_TARBALL",
+                          "MV_CANDIDATE_MANIFEST",
+                          "MV_CANDIDATE_DIGEST")}
+    env["PATH"] = str(bindir) + ":/usr/bin:/bin"
+    argv = dispatch_mod.pytest_dispatch_argv(
+        *dispatch_mod.PYTEST_SELECTIONS["package"])
+    result = subprocess.run(
+        [sys.executable, *argv, "-p", "no:cacheprovider"],
+        cwd=str(ROOT), stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, env=env,
+        timeout=900)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined[-3000:]
+    assert "passed" in combined, combined[-1000:]
+    assert "CARGO-SHADOWED-STUB" not in combined, combined
+    assert not sentinel.exists(), \
+        "dispatched selection invoked cargo"
 
 
 if __name__ == "__main__":
