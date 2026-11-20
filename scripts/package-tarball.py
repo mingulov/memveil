@@ -40,6 +40,7 @@ Layout of ``dist/memveil-<version>/``::
 
 Usage: scripts/package-tarball.py [--out DIR] [--tag NAME]
     [--root DIR] [--binary PATH] [--bpf-dir DIR] [--build]
+    [--candidate]
   --out DIR    stage directory (default: dist/)
   --tag NAME   bundle directory name (default: memveil-<version>)
   --root DIR   input tree (default: auto-detected checkout root)
@@ -48,6 +49,9 @@ Usage: scripts/package-tarball.py [--out DIR] [--tag NAME]
   --bpf-dir DIR  build-script OUT_DIR holding memveil-ebpf-*
                (default: auto-detected under the target dir)
   --build      run `cargo build --release --locked --offline` first
+  --candidate  sealable bundle: requires --build from the root
+               and forbids --binary/--bpf-dir; only this mode
+               records a build receipt the seal accepts
 
 Requires a release binary (use --build or build it first),
 patchelf, strip, and readelf. Fails closed when the link
@@ -371,6 +375,29 @@ def tar_member_mode(full, is_dir):
 def fail(message):
     print("package-tarball: %s" % message, file=sys.stderr)
     sys.exit(1)
+
+
+def candidate_built_from_source(candidate, build, binary_opt,
+                                bpf_opt):
+    """Whether this run records a sealable build receipt.
+
+    Only candidate mode (--candidate with --build from the
+    input root and no --binary/--bpf-dir override) builds the
+    engine and BPF objects from the sealed tree in-flow, so
+    only it records built_from_source. Every other mode
+    (development --binary runs included) records a receipt
+    the seal refuses. Raises SystemExit on a candidate run
+    that tries to mix --build with prebuilt overrides, or to
+    skip the build.
+    """
+    if not candidate:
+        return False
+    if not build:
+        fail("candidate mode requires --build from the root")
+    if binary_opt is not None or bpf_opt is not None:
+        fail("candidate mode forbids --binary and --bpf-dir "
+             "overrides")
+    return True
 
 
 def run(argv, **kwargs):
@@ -1318,6 +1345,7 @@ def main(argv):
     binary_opt = None
     bpf_opt = None
     build = False
+    candidate = False
     args = list(argv)
     while args:
         opt = args.pop(0)
@@ -1342,7 +1370,12 @@ def main(argv):
         if opt == "--build":
             build = True
             continue
+        if opt == "--candidate":
+            candidate = True
+            continue
         fail("unknown option: %s" % opt)
+    built_from_source = candidate_built_from_source(
+        candidate, build, binary_opt, bpf_opt)
     if tag is not None:
         try:
             validate_tag(tag)
@@ -1850,14 +1883,17 @@ def main(argv):
                  + rerun.stderr)
 
         # Build-time receipt: source C plus the tree inventory, the
-        # probed tool versions, the engine/BPF output digests, and
-        # the build-time worktree cleanliness, recorded from the
-        # verified staging reads above (never re-walked). The
-        # provenance emitter and the seal bind this recording: a
-        # prebuilt engine from another commit, one swapped after
-        # packaging, or one built from a dirty tree fails against
-        # it. Git-free exports carry no commit identity, so they
-        # record no receipt and cannot seal.
+        # probed tool versions, the engine/BPF output digests, the
+        # build-time worktree cleanliness, and whether this run
+        # built the engine and BPF objects from the input root
+        # in-flow, recorded from the verified staging reads above
+        # (never re-walked). The provenance emitter and the seal
+        # bind this recording: only candidate mode (--candidate
+        # with --build and no prebuilt overrides) records a
+        # receipt the seal accepts, so stale prebuilt bytes
+        # repackaged at C with a fresh receipt still fail. Git-free
+        # exports carry no commit identity, so they record no
+        # receipt and cannot seal.
         build_receipt = None
         if memveil_rev != "export":
             _tree_entries, tree_digest = git_tree_inventory(
@@ -1874,6 +1910,7 @@ def main(argv):
                             for _channel, shipped in CHANNELS},
                 },
                 "clean_tree": clean_tree,
+                "built_from_source": built_from_source,
             }
 
         # Known manifest gaps, intentionally unported (not

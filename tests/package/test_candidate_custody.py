@@ -175,6 +175,7 @@ class CustodyBase:
                          "swiotlb_copy.bpf.o")},
             },
             "clean_tree": True,
+            "built_from_source": True,
         }
         bundled = {
             "bundle": "memveil-custody",

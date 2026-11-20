@@ -74,7 +74,8 @@ def sealed(tmp_path):
                          'bpf_linker': '0.10.4'},
                'outputs': {'engine_sha256': files['bin/memveil'],
                            'bpf': bpf},
-               'clean_tree': True}
+               'clean_tree': True,
+               'built_from_source': True}
     bm = {'files': files, 'embedded_bpf': bpf,
           'engine_version': '0.1.0',
           'memveil_revision': 'a' * 40,

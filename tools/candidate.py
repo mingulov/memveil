@@ -26,9 +26,11 @@ cleanliness. `tools/candidate provenance`
 composes the local-build provenance record from that recorded
 receipt plus the re-hashed artifact subjects, never inventing
 values. The seal requires the provenance receipt to equal the
-recorded receipt and cross-checks the recorded bpf-linker against
-the probed toolchain, so a prebuilt engine from another commit, or
-one swapped after the receipt was recorded, fails closed.
+recorded receipt, cross-checks the recorded bpf-linker against
+the probed toolchain, and requires the receipt to record an
+in-flow candidate-mode build, so a prebuilt engine repackaged at
+C with a fresh receipt, or one swapped after the receipt was
+recorded, fails closed.
 
 Qualification rederives every required signed gate over retained
 evidence without rebuilding: each gate receipt is verified against
@@ -630,12 +632,14 @@ def verify_bundle_dir(bundle_dir):
             "bundle MANIFEST.json lacks a build receipt") from error
     exact(receipt,
           {"source_commit", "inventory_sha256", "tools", "outputs",
-           "clean_tree"},
+           "clean_tree", "built_from_source"},
           "recorded build receipt")
     hexid(receipt["source_commit"], 40)
     hexid(receipt["inventory_sha256"])
     require(receipt["clean_tree"] is True,
             "bundle was built from a dirty worktree")
+    require(receipt["built_from_source"] is True,
+            "bundle was not built from source in candidate mode")
     exact(receipt["tools"], {"cargo", "rustc", "bpf_linker"},
           "recorded build tools")
     for tool in ("cargo", "rustc", "bpf_linker"):
@@ -1054,7 +1058,7 @@ def verify_provenance(provenance, source, toolchain, files, subjects,
     receipt = provenance["build_receipt"]
     exact(receipt,
           {"source_commit", "inventory_sha256", "tools", "outputs",
-           "clean_tree"},
+           "clean_tree", "built_from_source"},
           "build receipt")
     require(receipt == recorded,
             "provenance build receipt differs from the recorded "

@@ -164,10 +164,11 @@ class Workshop:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
         files = {rel: sha(data) for rel, data in payload.items()}
-        # The build-time receipt the packager records in MANIFEST.json:
-        # source C + tree inventory, probed tool versions, and the
-        # engine/BPF output digests. The honest provenance below
-        # repeats it verbatim; the seal requires the two to match.
+        # The build-time receipt the packager records in MANIFEST.json
+        # in candidate mode: source C + tree inventory, probed tool
+        # versions, the engine/BPF output digests, and the in-flow
+        # build flag. The honest provenance below repeats it
+        # verbatim; the seal requires the two to match.
         receipt = {
             "source_commit": commit,
             "inventory_sha256": inventory,
@@ -180,6 +181,7 @@ class Workshop:
                          "swiotlb_copy.bpf.o")},
             },
             "clean_tree": True,
+            "built_from_source": True,
         }
         manifest = {
             "bundle": "memveil-fixture",
@@ -509,6 +511,79 @@ def test_seal_requires_clean_tree_receipt(workshop, tmp_path):
             fix["bundle_dir"], fix["artifacts"], fix["policy"],
             {"root": str(fix["root"]),
              "harness_bin": workshop.harness_bin()})
+
+
+def test_seal_rejects_prebuilt_receipt(workshop, tmp_path):
+    m, fix = seal_paths(workshop, tmp_path)
+    # Codex's miss, replayed: stale prebuilt bytes repackaged at
+    # C carry a fresh, self-consistent receipt naming C and the
+    # staged bytes — but the packager recorded it outside
+    # candidate mode, so the seal must still refuse.
+    manifest_path = fix["bundle_dir"] / "MANIFEST.json"
+    doc = json.loads(manifest_path.read_text())
+    assert doc["build_receipt"]["built_from_source"] is True
+    doc["build_receipt"]["built_from_source"] = False
+    manifest_path.write_text(
+        json.dumps(doc, indent=2, sort_keys=True))
+    rebuild_bundle_tarball(fix)
+    rewrite_provenance(
+        m, fix,
+        lambda doc: doc["build_receipt"].update(
+            {"built_from_source": False}))
+    _rebind_provenance_subjects(m, fix)
+    with pytest.raises(ValueError, match="[Cc]andidate mode"):
+        m.create_manifest(
+            fix["bundle_dir"], fix["artifacts"], fix["policy"],
+            {"root": str(fix["root"]),
+             "harness_bin": workshop.harness_bin()})
+    with pytest.raises(ValueError, match="[Cc]andidate mode"):
+        m.emit_provenance(
+            fix["bundle_dir"], _emit_source_info(fix),
+            tmp_path / "prebuilt.provenance.json")
+
+
+def test_candidate_mode_requires_in_flow_build():
+    packager = _packager_module()
+    # Only --candidate with --build from the root and no
+    # prebuilt overrides records a sealable receipt.
+    assert packager.candidate_built_from_source(
+        True, True, None, None) is True
+    # Development runs (plain --build or --binary) record a
+    # receipt the seal refuses.
+    assert packager.candidate_built_from_source(
+        False, True, None, None) is False
+    assert packager.candidate_built_from_source(
+        False, False, "/prebuilt/memveil", None) is False
+    assert packager.candidate_built_from_source(
+        False, False, None, "/prebuilt/bpf") is False
+    # Candidate mode without the in-flow build, or mixed with
+    # prebuilt inputs, fails instead of recording.
+    with pytest.raises(SystemExit):
+        packager.candidate_built_from_source(
+            True, False, None, None)
+    with pytest.raises(SystemExit):
+        packager.candidate_built_from_source(
+            True, True, "/prebuilt/memveil", None)
+    with pytest.raises(SystemExit):
+        packager.candidate_built_from_source(
+            True, True, None, "/prebuilt/bpf")
+
+
+def test_candidate_packager_cli_validates_before_build():
+    packager = str(ROOT / "scripts" / "package-tarball.py")
+    proc = subprocess.run(
+        [sys.executable, packager, "--candidate", "--tag", "t"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True)
+    assert proc.returncode == 1
+    assert "requires --build" in proc.stderr
+    proc = subprocess.run(
+        [sys.executable, packager, "--candidate", "--build",
+         "--binary", "/prebuilt/memveil", "--tag", "t"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True)
+    assert proc.returncode == 1
+    assert "forbids" in proc.stderr
 
 
 def test_seal_rejects_tampered_source_archive(workshop, tmp_path):

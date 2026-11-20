@@ -75,7 +75,8 @@ jobs:
       - name: Build the bundle, deb, and rpm
         run: |
           set -eu
-          python3 scripts/package-tarball.py --build --out dist --tag bundle
+          python3 scripts/package-tarball.py --build --candidate \
+            --out dist --tag bundle
           python3 scripts/package-deb.py --bundle dist/bundle --out dist/deb
           python3 scripts/package-rpm.py --work work/rpm --out dist/rpm \
             --bundle dist/bundle
