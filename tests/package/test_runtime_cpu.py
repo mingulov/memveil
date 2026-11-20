@@ -25,11 +25,27 @@ def engine(tmp_path, level):
     obj = tmp_path / 'probe.o'
     subprocess.run(['cc', '-march=x86-64', '-O2', '-c', str(source), '-o', str(obj)],
                    check=True, capture_output=True)
+    # Control the input note: the compiler may emit its own property
+    # note, and the linker merges it with -z, so strip it and let the
+    # explicit -z flag below be the only ISA signal.
+    subprocess.run(['objcopy', '-R', '.note.gnu.property', str(obj)],
+                   check=True, capture_output=True)
     link = ['ld', '-m', 'elf_x86_64', '-e', 'main']
     if level != 'baseline':
         link.extend(['-z', 'x86-64-' + level])
     subprocess.run([*link, str(obj), '-o', str(output)],
                    check=True, capture_output=True)
+    # Assert the fixture setup independently of the verifier: without
+    # this, a silently omitted note would pass for the wrong reason.
+    notes = subprocess.run(['readelf', '--notes', str(output)],
+                           check=True, capture_output=True, text=True).stdout
+    needed = [line.split('x86 ISA needed:')[1].strip()
+              for line in notes.splitlines() if 'x86 ISA needed:' in line]
+    if level == 'baseline':
+        assert needed == [], 'setup: baseline probe must declare no ISA, got %r' % (needed,)
+    else:
+        assert needed == ['x86-64-' + level], \
+            'setup: probe must declare exactly x86-64-%s, got %r' % (level, needed)
     return output
 
 
