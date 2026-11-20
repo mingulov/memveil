@@ -18,7 +18,10 @@
 # 40-hex commit plus a git object check) before use, and
 # digests are compared in Python, never interpolated into
 # shell. Signing runs in its own job over trusted code plus
-# sealed bytes only, away from the candidate build.
+# sealed bytes only, away from the candidate build. Custody
+# jobs build the verifier from the trusted checkout inside
+# the job and never execute sealed bytes: the sealed set
+# carries no executable harness.
 #
 # Toolchain pins, matching the tree: Rust 1.100.0 plus
 # nightly-2026-05-20 for the eBPF child build
@@ -53,8 +56,6 @@ permissions: {}
 jobs:
   seal:
     runs-on: ubuntu-26.04
-    outputs:
-      present: ${{ steps.draft.outputs.present }}
     permissions:
       contents: read
       actions: write
@@ -194,8 +195,7 @@ jobs:
           rm -rf sealed && mkdir sealed
           cp candidate.json sealed/
           cp dist/artifacts/* sealed/
-          cp target/debug/memveil-release-entry sealed/
-          set -- sealed/*; test $# -eq 8
+          set -- sealed/*; test $# -eq 7
           ls sealed
       - name: Upload the unsigned sealed candidate
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -204,23 +204,12 @@ jobs:
           path: sealed/
           if-no-files-found: error
           retention-days: 90
-      - name: Check for the holding draft
-        id: draft
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
-        run: |
-          if gh api \
-            "repos/$GITHUB_REPOSITORY/releases/tags/candidate-$CANDIDATE_SHA256" \
-            >/dev/null 2>&1; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-          fi
 
   sign:
     needs: seal
     runs-on: ubuntu-26.04
+    outputs:
+      present: ${{ steps.draft.outputs.present }}
     permissions:
       contents: read
       actions: write
@@ -248,7 +237,7 @@ jobs:
           set -eu
           gh run download "$GITHUB_RUN_ID" \
             -n "sealed-unsigned-$CANDIDATE_SHA256" -D sealed-unsigned
-          set -- sealed-unsigned/*; test $# -eq 8
+          set -- sealed-unsigned/*; test $# -eq 7
           python3 - sealed-unsigned/candidate.json <<'EOF'
           import hashlib
           import os
@@ -293,8 +282,7 @@ jobs:
           cp sign-input/* sealed/
           cp dist/signed/SHA256SUMS.txt dist/signed/SHA256SUMS.txt.sig \
             dist/signed/signer.pub sealed/
-          cp sealed-unsigned/memveil-release-entry sealed/
-          set -- sealed/*; test $# -eq 11
+          set -- sealed/*; test $# -eq 10
           ls sealed
       - name: Upload the sealed candidate
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -303,10 +291,23 @@ jobs:
           path: sealed/
           if-no-files-found: error
           retention-days: 90
+      - name: Check for the holding draft
+        id: draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+        run: |
+          if gh api \
+            "repos/$GITHUB_REPOSITORY/releases/tags/candidate-$CANDIDATE_SHA256" \
+            >/dev/null 2>&1; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
 
   qualify:
     needs: [seal, sign]
-    if: needs.seal.outputs.present == 'true'
+    if: needs.sign.outputs.present == 'true'
     runs-on: ubuntu-26.04
     permissions:
       contents: read
@@ -460,6 +461,21 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends cpio rpm
+      - name: Build the verifier from the trusted checkout
+        run: |
+          set -eu
+          curl -fsSL -o /tmp/rustup-init \
+            https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
+          curl -fsSL -o /tmp/rustup-init.sha256 \
+            https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256
+          (cd /tmp && sha256sum --check rustup-init.sha256)
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --profile minimal --default-toolchain none
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup toolchain install 1.100.0 --profile minimal
+          cargo fetch --locked
+          cargo build -p memveil-release-entry --locked --offline
+          test -x target/debug/memveil-release-entry
       - name: Import the holding draft
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -495,7 +511,7 @@ jobs:
           ./tools/candidate-custody import \
             --request request.json \
             --out custody-out \
-            --harness-bin sealed/memveil-release-entry
+            --harness-bin target/debug/memveil-release-entry
       - name: Upload the stored candidate
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
@@ -550,6 +566,21 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends cpio rpm
+      - name: Build the verifier from the trusted checkout
+        run: |
+          set -eu
+          curl -fsSL -o /tmp/rustup-init \
+            https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
+          curl -fsSL -o /tmp/rustup-init.sha256 \
+            https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256
+          (cd /tmp && sha256sum --check rustup-init.sha256)
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --profile minimal --default-toolchain none
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup toolchain install 1.100.0 --profile minimal
+          cargo fetch --locked
+          cargo build -p memveil-release-entry --locked --offline
+          test -x target/debug/memveil-release-entry
       - name: Validate the proposed tag without mutation
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -582,7 +613,7 @@ jobs:
           ./tools/candidate-custody dry-run \
             --request request.json \
             --out custody-out \
-            --harness-bin sealed/memveil-release-entry
+            --harness-bin target/debug/memveil-release-entry
 
   promote:
     needs: import
@@ -618,6 +649,21 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends cpio rpm
+      - name: Build the verifier from the trusted checkout
+        run: |
+          set -eu
+          curl -fsSL -o /tmp/rustup-init \
+            https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
+          curl -fsSL -o /tmp/rustup-init.sha256 \
+            https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256
+          (cd /tmp && sha256sum --check rustup-init.sha256)
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --profile minimal --default-toolchain none
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup toolchain install 1.100.0 --profile minimal
+          cargo fetch --locked
+          cargo build -p memveil-release-entry --locked --offline
+          test -x target/debug/memveil-release-entry
       - name: Publish the qualified release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -650,4 +696,4 @@ jobs:
           ./tools/candidate-custody promote \
             --request request.json \
             --out custody-out \
-            --harness-bin sealed/memveil-release-entry
+            --harness-bin target/debug/memveil-release-entry

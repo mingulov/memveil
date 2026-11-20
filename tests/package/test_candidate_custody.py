@@ -1106,6 +1106,39 @@ def test_release_sign_job_has_no_source_checkout():
     assert "candidate-src" not in text
 
 
+def test_release_seal_job_holds_no_secrets():
+    doc = _release_workflow()
+    text = json.dumps(doc["jobs"]["seal"])
+    assert "secrets." not in text
+    assert "QUALIFIER_SIGNING_KEY" not in text
+    assert "GH_TOKEN" not in text
+
+
+def test_release_custody_runs_no_sealed_harness():
+    doc = _release_workflow()
+    whole = json.dumps(doc["jobs"])
+    assert "sealed/memveil-release-entry" not in whole
+    assert "sealed-unsigned/memveil-release-entry" not in whole
+    assert "QUALIFIER_SIGNING_KEY" in whole
+    keyed = [job for job, spec in doc["jobs"].items()
+             if "QUALIFIER_SIGNING_KEY" in json.dumps(spec)]
+    assert keyed == ["sign"], keyed
+    for job in ("import", "dry-run", "promote"):
+        text = json.dumps(doc["jobs"][job])
+        assert "cargo build -p memveil-release-entry" in text, job
+        assert "cargo fetch --locked" in text, job
+        found = [line.strip() for step in doc["jobs"][job]["steps"]
+                 for line in str(step.get("run", "")).splitlines()
+                 if "--harness-bin" in line]
+        assert found, job
+        for line in found:
+            assert "sealed" not in line, (job, line)
+            assert "target/debug/memveil-release-entry" in line, \
+                (job, line)
+    assert "--harness-bin" not in json.dumps(
+        doc["jobs"]["qualify"])
+
+
 def test_release_qualify_extracts_to_fresh_path():
     doc = _release_workflow()
     steps = doc["jobs"]["qualify"]["steps"]
