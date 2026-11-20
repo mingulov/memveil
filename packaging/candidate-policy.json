@@ -1,0 +1,16 @@
+{
+  "claim": "ordinary-preview",
+  "required_gates": {
+    "kernel-matrix/2": {
+      "environment": "ordinary-linux",
+      "predicates": {
+        "failed_rows": "zero",
+        "required_rows": "equal",
+        "skipped_rows": "zero"
+      }
+    }
+  },
+  "retention_days": "30",
+  "schema": "memveil-candidate-policy/1",
+  "trusted_keys": []
+}

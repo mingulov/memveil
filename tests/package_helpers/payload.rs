@@ -119,6 +119,22 @@ fn extract_bundle(tarball: &Path, tmp: &Path) -> Result<PathBuf, String> {
     Ok(tops.into_iter().next().unwrap())
 }
 
+/// Hash the full copied-file closure of a package set.
+///
+/// Every `files{}` entry of the bundle manifest is hashed in all
+/// three archives (`bundle/<rel>` plus installed `deb/`/`rpm/`
+/// destinations). Delegates to the release-entry harness library
+/// so the custody seal and the test suite share one collection
+/// implementation.
+pub fn collect_full(
+    deb: &Path,
+    rpm: &Path,
+    bundle: &Path,
+    manifest_text: &str,
+) -> Result<BTreeMap<String, String>, String> {
+    memveil_release_entry::collect_full(bundle, deb, rpm, manifest_text)
+}
+
 /// Hash the 12 payload members of a package set.
 pub fn collect(deb: &Path, rpm: &Path, bundle: &Path) -> Result<BTreeMap<String, String>, String> {
     for (path, label) in [(deb, "--deb"), (rpm, "--rpm"), (bundle, "--bundle")] {

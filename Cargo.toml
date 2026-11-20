@@ -17,8 +17,11 @@ aya-obj = "=0.3.0"
 libc = "0.2"
 memveil-ebpf-common = { version = "0.0.0", path = "crates/ebpf-common", features = ["user"] }
 
+[dev-dependencies]
+memveil-release-entry = { version = "0.1.0", path = "crates/release-entry" }
+
 [workspace]
-members = ["crates/ebpf-common"]
+members = ["crates/ebpf-common", "crates/release-entry"]
 
 [profile.release]
 lto = true

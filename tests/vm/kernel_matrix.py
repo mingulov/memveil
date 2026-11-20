@@ -13,6 +13,7 @@ import json
 import os
 import re
 import subprocess
+import tomllib
 from pathlib import Path
 
 SCHEMA = "memveil-kernel-matrix/2"
@@ -294,14 +295,20 @@ def _unique_object(pairs):
     return obj
 
 
-def parse_lock(path):
-    """Parse and validate one kernels.lock.json file."""
+def parse_lock_bytes(data):
+    """Validate lock document bytes against the full lock grammar.
+
+    This is the single shared grammar both the tested export
+    and qualification run: the same malformed lock is refused
+    on both paths. Returns the parsed document; raises
+    LockError otherwise.
+    """
     try:
-        doc = json.loads(Path(path).read_text(),
+        doc = json.loads(bytes(data).decode("utf-8"),
                          object_pairs_hook=_unique_object)
     except LockError:
         raise
-    except (OSError, ValueError) as exc:
+    except (TypeError, ValueError) as exc:
         raise LockError("unreadable lock: %s" % exc)
     _need(isinstance(doc, dict), "bad lock object")
     _no_extra(doc, _TOP_KEYS, "top level")
@@ -381,6 +388,15 @@ def parse_lock(path):
         for probe in omitted:
             _need(probe in PROBES, "bad omitted probe for " + ident)
     return doc
+
+
+def parse_lock(path):
+    """Parse and validate one kernels.lock.json file."""
+    try:
+        data = Path(path).read_bytes()
+    except OSError as exc:
+        raise LockError("unreadable lock: %s" % exc)
+    return parse_lock_bytes(data)
 
 
 def _below_floor(release):
@@ -2333,19 +2349,23 @@ def assert_redacted(text):
 REDACT_SKIP_FILES = ("artifacts.json", "progs0.json",
                      "progs1.json", "progs2.json",
                      "progs3.json", "report.json",
-                     "configid.txt", "btf-sha.txt")
+                     "configid.txt", "btf-sha.txt",
+                     "events_summary.json")
 
 
-def scan_export_redaction(export):
+def scan_export_redaction(export, skip=()):
     """Assert every guest text export is redacted.
 
     Skips exactly the capture dirs (product output,
     covered by the product privacy suites) and the files
-    that carry hashes and bpftool tags by design. Returns
-    None when clean, else the first offending file and
-    reason.
+    that carry hashes and bpftool tags by design. The
+    skip set holds extra row-relative paths to ignore, so
+    a later re-execution can exclude host files written
+    after the collect-time scan. Returns None when clean,
+    else the first offending file and reason.
     """
     root = str(export)
+    skip = frozenset(skip)
     for dirpath, dirnames, filenames in os.walk(root):
         rel = os.path.relpath(dirpath, root)
         if rel == "." and "cap" in dirnames:
@@ -2356,6 +2376,8 @@ def scan_export_redaction(export):
             if name in REDACT_SKIP_FILES:
                 continue
             path = os.path.join(dirpath, name)
+            if os.path.relpath(path, root) in skip:
+                continue
             try:
                 with open(path, "rb") as handle:
                     text = handle.read().decode("utf-8")
@@ -2376,6 +2398,9 @@ def shrink_busy_events(busy_dir):
     Writes events_summary.json beside the capture and only
     then unlinks the 1 GB events file; on any read or
     parse failure the file is kept and the error returned.
+    The summary also binds the counter deltas derived from
+    the same bytes, so the cached busy counters stay
+    verifiable after their source file is gone.
     """
     path = os.path.join(str(busy_dir), "cap", "events.ndjson")
     try:
@@ -2391,8 +2416,16 @@ def shrink_busy_events(busy_dir):
         counts = persisted_counts(text.splitlines(keepends=True))
     except ValueError as exc:
         return None, "busy events: %s" % exc
+    try:
+        counters = counter_deltas(
+            text.splitlines(keepends=True))
+        counters_error = None
+    except ValueError as exc:
+        counters, counters_error = None, str(exc)
     summary = {"sha256": hashlib.sha256(raw).hexdigest(),
-               "bytes": len(raw), "counts": counts}
+               "bytes": len(raw), "counts": counts,
+               "counters": counters,
+               "counters_error": counters_error}
     dest = os.path.join(str(busy_dir), "events_summary.json")
     try:
         with open(dest, "w") as handle:
@@ -3933,15 +3966,18 @@ def prog_misses(progs, names):
     return total
 
 
-ROW_RECEIPT_SCHEMA = "memveil-matrix-row/1"
+ROW_RECEIPT_SCHEMA_V1 = "memveil-matrix-row/1"
+ROW_RECEIPT_SCHEMA = "memveil-matrix-row/2"
 QUAL_DURATION_S = 60
 QUAL_DD_COUNT = 128
 PROFILE_REASON = ("matrix rows assert lock expectations and "
                   "doctor verdicts, not shipped profiles")
 
 _ROW_TOP_FILES = frozenset({
-    "job.json", "cache.txt", "cache-FAIL.txt", "download.txt",
+    "oracle-inputs.json", "job.json", "cache.txt",
+    "cache-FAIL.txt", "download.txt",
     "console.txt", "vng.exit", "FAIL.txt", "validate.txt",
+    "validate.json",
     "artifacts.json", "blockstat.json", "configid.txt",
     "btf-sha.txt", "dev.txt", "dmesg.txt", "dmesg_scan.json",
     "doctor.exit", "doctor.json", "doctor.stderr",
@@ -3971,7 +4007,7 @@ _ROW_BUSY_FILES = frozenset({
     "busy.stderr", "events_summary.json", "report.exit",
     "report.json", "report.out", "report.stderr",
     "report-json.exit", "report-json.stderr",
-    "progs_times.json", "validate.txt",
+    "progs_times.json", "validate.txt", "validate.json",
 })
 _ROW_BUSY_RES = (re.compile(r"progs[0-9]+\.json"),)
 _ROW_NEG_RE = re.compile(
@@ -3992,6 +4028,13 @@ _ROW_SCN_FILES = frozenset({
 })
 _ROW_RECEIPT_SELF = "receipt.json"
 _ROW_RAW_COMMAND = "vng-cmd.txt"
+# Row-local files the redaction scans skip by row-relative
+# path: host command lines never leave the collection host
+# (local-only evidence), so neither the collect-time scan
+# nor the replay reads them. The row receipt, the signed
+# evidence inventory, and the evidence archive builder skip
+# the same files.
+REDACT_SKIP_LOCAL = frozenset({_ROW_RAW_COMMAND})
 
 _BUSY_EVENTS_TOKENS = (
     ("busy events unreadable", "busy-events-unreadable"),
@@ -4047,9 +4090,11 @@ def row_receipt_files(row_dir):
     """Hashed inventory of one row dir, in receipt order.
 
     Every regular file must be allowlisted evidence; the
-    receipt itself and the raw boot command line are known
-    but never inventoried. Raises ValueError on symlinks,
-    unreadable files, or unknown evidence.
+    receipt itself and the local-only boot command line
+    stay out of this row-local transcription (raw command
+    lines never cross into receipts, the signed inventory,
+    replays, or shipped archives). Raises ValueError on
+    symlinks, unreadable files, or unknown evidence.
     """
     root = Path(row_dir)
     found = []
@@ -4078,62 +4123,119 @@ def row_receipt_files(row_dir):
     return found
 
 
+_TOOL_VERSION_RE = re.compile(
+    r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.+-]+)?")
+
+
+def _probe_build_tools(repo_root):
+    """{cargo, rustc, bpf_linker} versions under the repo pin.
+
+    Mirrors the candidate sealer's probes: every invocation
+    strips RUSTUP_TOOLCHAIN and runs in the source root so
+    the checkout pin wins over ambient overrides.
+    """
+    env = {key: value for key, value in os.environ.items()
+           if key != "RUSTUP_TOOLCHAIN"}
+    found = {}
+    for tool, argv in (("cargo", ["cargo", "--version"]),
+                      ("rustc", ["rustc", "--version"]),
+                      ("bpf_linker", ["bpf-linker",
+                                     "--version"])):
+        try:
+            proc = subprocess.run(
+                argv, cwd=str(repo_root), stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, env=env)
+        except OSError as error:
+            raise ValueError(
+                "cannot probe %s: %s" % (tool, error)) from error
+        if proc.returncode != 0:
+            raise ValueError("cannot probe " + tool)
+        try:
+            token = proc.stdout.split()[1]
+        except IndexError as error:
+            raise ValueError(
+                "cannot probe " + tool) from error
+        token = token[1:] if token.startswith("v") else token
+        if not _TOOL_VERSION_RE.fullmatch(token) \
+                or len(token) > 64:
+            raise ValueError(
+                "cannot probe %s: bad version %r"
+                % (tool, token))
+        found[tool] = token
+    return found
+
+
+def _read_toolchain_channel(repo_root):
+    """`channel` value from the source root rust-toolchain.toml."""
+    path = Path(repo_root) / "rust-toolchain.toml"
+    try:
+        with open(path, "rb") as handle:
+            doc = tomllib.load(handle)
+    except OSError as error:
+        raise ValueError(
+            "source lacks rust-toolchain.toml") from error
+    except tomllib.TOMLDecodeError as error:
+        raise ValueError(
+            "source toolchain pin is invalid") from error
+    try:
+        channel = doc["toolchain"]["channel"]
+    except (KeyError, TypeError) as error:
+        raise ValueError(
+            "source toolchain pin has no channel") from error
+    if not isinstance(channel, str) or not channel:
+        raise ValueError(
+            "source toolchain pin has no channel")
+    return channel
+
+
+def _read_cargo_lock_sha(root, rel):
+    """SHA-256 of one Cargo lock file under the source root."""
+    try:
+        raw = (Path(root) / rel).read_bytes()
+    except OSError as error:
+        raise ValueError(
+            "source lacks %s" % rel) from error
+    if not raw:
+        raise ValueError("source lock is empty: " + rel)
+    return hashlib.sha256(raw).hexdigest()
+
+
 def row_source_identity(repo_root):
-    """Memveil commit plus the pinned support-library pin.
+    """Memveil commit plus the Cargo lock identities.
 
     Mute git answers unknown and dirty so callers never
     mistake missing identity for a clean tree. Raises
-    ValueError: the Mojo toolchain lock this read retired
-    with the cutover, and matrix receipts still need a
-    Rust toolchain-identity story (cutover carry) before
-    armed rows can mint source identity again.
+    ValueError when either Cargo lock is missing or empty.
     """
     root = Path(repo_root)
     commit, dirty = repo_identity(root)
-    try:
-        lock = json.loads(
-            (root / "toolchain.lock.json").read_text())
-        pin = lock["dependencies"]["libbpf-mojo"]
-    except (OSError, ValueError, KeyError, TypeError):
-        raise ValueError(
-            "row source identity needs toolchain identity "
-            "(cutover: Mojo lock retired; Rust matrix "
-            "receipt identity is future work)")
-    if not isinstance(pin, dict) \
-            or pin.get("status") != "pinned":
-        raise ValueError("support library is not pinned")
     return {"memveil": {"commit": commit, "dirty": dirty},
-            "libbpf_mojo": {
-                "version": pin.get("version"),
-                "tarball_sha256": pin.get("tarball_sha256"),
-                "status": pin.get("status")}}
+            "locks": {
+                "cargo_lock_sha256": _read_cargo_lock_sha(
+                    root, "Cargo.lock"),
+                "ebpf_lock_sha256": _read_cargo_lock_sha(
+                    root, "crates/ebpf/Cargo.lock")}}
 
 
 def read_toolchain_lock(repo_root):
     """Toolchain pins plus the lock hash for one receipt.
 
-    Raises ValueError: the Mojo toolchain lock this read
-    retired with the cutover (Rust matrix receipt identity
-    is future work).
+    Returns {"lock_sha256", "ebpf_lock_sha256", "channel",
+    "tools"}: lock_sha256 is the Cargo.lock digest so the
+    tested export's toolchain binding keeps holding, and
+    tools carries the probed cargo/rustc/bpf-linker
+    versions. Raises ValueError when a lock, the channel
+    pin, or a probe is missing or malformed.
     """
     root = Path(repo_root)
-    try:
-        raw = (root / "toolchain.lock.json").read_bytes()
-        lock = json.loads(raw.decode("utf-8"))
-    except (OSError, ValueError):
-        raise ValueError("toolchain lock retired with the cutover; "
-                         "matrix receipts need Rust toolchain identity")
-    try:
-        pins = lock["toolchain"]
-        if not pins["mojo"]["version"] \
-                or not pins["pixi"]["version"]:
-            raise KeyError("pins")
-    except (KeyError, TypeError):
-        raise ValueError("toolchain lock has no mojo/pixi")
-    return {"lock_version": lock.get("lock_version"),
-            "recorded_on": lock.get("recorded_on"),
-            "lock_sha256": hashlib.sha256(raw).hexdigest(),
-            "toolchain": pins}
+    tools = _probe_build_tools(root)
+    channel = _read_toolchain_channel(root)
+    return {"lock_sha256": _read_cargo_lock_sha(
+                root, "Cargo.lock"),
+            "ebpf_lock_sha256": _read_cargo_lock_sha(
+                root, "crates/ebpf/Cargo.lock"),
+            "channel": channel,
+            "tools": tools}
 
 
 def sanitize_cleanup_error(text, kind):
@@ -4252,7 +4354,12 @@ def _check_row_checks(checks):
     return checks
 
 
-def _check_row_source(source):
+def _check_row_source_v1(source):
+    """Frozen /1 source grammar (Mojo-era support-library pin).
+
+    Historical receipts keep verifying through this reader;
+    new receipts use the /2 Cargo-lock sections instead.
+    """
     if not isinstance(source, dict) \
             or set(source) != {"memveil", "libbpf_mojo"}:
         raise ValueError("row receipt rejects source")
@@ -4283,7 +4390,40 @@ def _check_row_source(source):
     return source
 
 
-def _check_row_toolchain(toolchain):
+def _check_row_source(source):
+    if not isinstance(source, dict) \
+            or set(source) != {"memveil", "locks"}:
+        raise ValueError("row receipt rejects source")
+    memveil = source["memveil"]
+    if not isinstance(memveil, dict) \
+            or set(memveil) != {"commit", "dirty"}:
+        raise ValueError("row receipt rejects source")
+    if memveil["commit"] != "unknown":
+        _check_hex(memveil["commit"], 40, "source commit")
+    if memveil["dirty"] is not True \
+            and memveil["dirty"] is not False:
+        raise ValueError("row receipt rejects source")
+    if memveil["commit"] == "unknown" \
+            and memveil["dirty"] is not True:
+        raise ValueError("row receipt rejects source")
+    locks = source["locks"]
+    if not isinstance(locks, dict) \
+            or set(locks) != {"cargo_lock_sha256",
+                              "ebpf_lock_sha256"}:
+        raise ValueError("row receipt rejects source")
+    _check_hex(locks["cargo_lock_sha256"], 64,
+               "source cargo lock")
+    _check_hex(locks["ebpf_lock_sha256"], 64,
+               "source ebpf lock")
+    return source
+
+
+def _check_row_toolchain_v1(toolchain):
+    """Frozen /1 toolchain grammar (Mojo-era toolchain lock).
+
+    Historical receipts keep verifying through this reader;
+    new receipts use the /2 Cargo/rustc/bpf-linker sections.
+    """
     if not isinstance(toolchain, dict) \
             or set(toolchain) != {"lock_version",
                                   "recorded_on",
@@ -4302,6 +4442,32 @@ def _check_row_toolchain(toolchain):
     try:
         if not pins["mojo"]["version"] \
                 or not pins["pixi"]["version"]:
+            raise KeyError("pins")
+    except (KeyError, TypeError):
+        raise ValueError("row receipt rejects toolchain")
+    return toolchain
+
+
+def _check_row_toolchain(toolchain):
+    if not isinstance(toolchain, dict) \
+            or set(toolchain) != {"lock_sha256",
+                                  "ebpf_lock_sha256",
+                                  "channel",
+                                  "tools"}:
+        raise ValueError("row receipt rejects toolchain")
+    _check_hex(toolchain["lock_sha256"], 64,
+               "toolchain lock hash")
+    _check_hex(toolchain["ebpf_lock_sha256"], 64,
+               "toolchain ebpf lock hash")
+    if not isinstance(toolchain["channel"], str) \
+            or not toolchain["channel"]:
+        raise ValueError("row receipt rejects toolchain")
+    pins = toolchain["tools"]
+    if not isinstance(pins, dict):
+        raise ValueError("row receipt rejects toolchain")
+    try:
+        if not pins["cargo"] or not pins["rustc"] \
+                or not pins["bpf_linker"]:
             raise KeyError("pins")
     except (KeyError, TypeError):
         raise ValueError("row receipt rejects toolchain")
@@ -4799,11 +4965,14 @@ def write_row_receipt(row_dir, rec, entry, ctx):
 def validate_row_receipt(doc):
     """Strict grammar for one matrix row receipt.
 
-    Beyond shapes, the verdict conjunction, the smoke
-    label, the boot label, and the pass-evidence rules
-    are recomputed: a pass with admitted caps needs
-    measured guest artifacts, a clean oracle, and
-    structured channel losses.
+    Accepts the /2 Rust shape and the historical /1
+    Mojo-era shape, dispatching the source/toolchain
+    section readers by the receipt schema; every other
+    section shares one grammar. Beyond shapes, the verdict
+    conjunction, the smoke label, the boot label, and the
+    pass-evidence rules are recomputed: a pass with
+    admitted caps needs measured guest artifacts, a clean
+    oracle, and structured channel losses.
     """
     if not isinstance(doc, dict) or set(doc) != {
             "schema", "id", "release", "run_id", "mode",
@@ -4812,7 +4981,13 @@ def validate_row_receipt(doc):
             "expected", "actual", "oracle", "losses",
             "cleanup", "negatives", "files"}:
         raise ValueError("row receipt has a bad shape")
-    if doc["schema"] != ROW_RECEIPT_SCHEMA:
+    if doc["schema"] == ROW_RECEIPT_SCHEMA_V1:
+        check_source = _check_row_source_v1
+        check_toolchain = _check_row_toolchain_v1
+    elif doc["schema"] == ROW_RECEIPT_SCHEMA:
+        check_source = _check_row_source
+        check_toolchain = _check_row_toolchain
+    else:
         raise ValueError("row receipt has a bad schema")
     if not isinstance(doc["id"], str) or not re.fullmatch(
             r"[A-Za-z0-9_.-]+", doc["id"]):
@@ -4851,8 +5026,8 @@ def validate_row_receipt(doc):
     if command["kind"] not in ("deb", "bundle"):
         raise ValueError("row receipt rejects its command")
     _check_hex(command["source_sha256"], 64, "command source")
-    _check_row_source(doc["source"])
-    _check_row_toolchain(doc["toolchain"])
+    check_source(doc["source"])
+    check_toolchain(doc["toolchain"])
     artifacts = doc["artifacts"]
     if not isinstance(artifacts, dict) \
             or artifacts.get("status") not in ("measured",
@@ -5441,3 +5616,594 @@ def verify_matrix_out(out_dir):
     ok = not problems and bool(rows) \
         and all(row["ok"] for row in rows)
     return {"ok": ok, "rows": rows, "problems": problems}
+
+
+_CACHE_RAW_TEXT = (
+    ("doctor_text", "doctor.json"),
+    ("doctor_passive_text", "doctor-passive.json"),
+    ("sev_sysfs_text", "sev-sysfs.txt"),
+    ("uname_text", "uname.txt"),
+    ("mods_text", "mods.txt"),
+    ("configid_text", "configid.txt"),
+    ("version_text", "version.txt"),
+    ("lockdown_text", "lockdown.txt"),
+    ("hooks_text", "hooks.json"),
+    ("artifacts_text", "artifacts.json"),
+    ("dmesg_text", "dmesg.txt"),
+    ("dmesg_scan_text", "dmesg_scan.json"),
+    ("session_text", "cap/session.json"),
+    ("workload_text", "workload.txt"),
+    ("oracle_text", "oracle.txt"),
+    ("hist_status_text", "hist.status"),
+    ("hist_before_text", "hist_before.txt"),
+    ("hist_after_text", "hist_after.txt"),
+    ("blockstat_text", "blockstat.json"),
+    ("busy_times_text", "busy/times.json"),
+    ("busy_out_text", "busy/busy.out"),
+    ("busy_session_text", "busy/cap/session.json"),
+    ("oracle_stderr", "oracle.stderr"),
+    ("vng_exit", "vng.exit"),
+    ("fail_txt", "FAIL.txt"),
+    ("doctor_exit", "doctor.exit"),
+    ("doctor_passive_exit", "doctor-passive.exit"),
+    ("record_exit", "record.exit"),
+    ("report_exit", "report.exit"),
+    ("report_json_exit", "report-json.exit"),
+    ("udev_exit", "udev.exit"),
+    ("udev_out", "udev.out"),
+    ("busy_record_exit", "busy/record.exit"),
+    ("busy_end_reason", "busy/end_reason.txt"),
+    ("busy_report_exit", "busy/report.exit"),
+    ("busy_report_json_exit", "busy/report-json.exit"),
+)
+
+_MISSING_EVENTS = "missing events.ndjson"
+
+
+def _retained_text(row, rel):
+    """Decoded retained text, None when absent.
+
+    Raises ValueError when the path is not a regular file
+    or cannot be read as UTF-8.
+    """
+    path = row / rel
+    if path.is_symlink() \
+            or (path.exists() and not path.is_file()):
+        raise ValueError(
+            "matrix retained %s is not a regular file"
+            % rel)
+    if not path.exists():
+        return None
+    try:
+        return path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeError):
+        raise ValueError(
+            "matrix retained %s is unreadable" % rel)
+
+
+def _reread_miss_snaps(row, subdir, count):
+    """Re-derive bpftool snapshots from retained files.
+
+    Mirrors the collector's snapshot gathering exactly,
+    including which unreadable timestamp or program list
+    becomes None. Returns [[nsecs-or-None, text-or-None]].
+    """
+    base = row / subdir if subdir else row
+    prefix = subdir + "/" if subdir else ""
+    try:
+        times = json.loads(
+            (base / "progs_times.json").read_bytes())
+    except (OSError, ValueError):
+        times = {}
+    if not isinstance(times, dict):
+        times = {}
+    snaps = []
+    for idx in range(count):
+        try:
+            nsecs = int(times[str(idx)])
+        except (KeyError, TypeError, ValueError):
+            nsecs = None
+        snaps.append([nsecs, _retained_text(
+            row, "%sprogs%d.json" % (prefix, idx))])
+    return snaps
+
+
+def _reread_events_derivations(row):
+    """Re-run the collect-time events derivations.
+
+    Mirrors gather_persisted/gather_counters/gather_unpaired
+    exactly, including which OSError/ValueError becomes
+    which error string. Returns the {persisted,
+    persisted_bytes, persisted_copy_dirs, events_error,
+    counters, counters_error, unpaired_count, unpaired_bytes,
+    unpaired_error} map.
+    """
+    path = row / "cap" / "events.ndjson"
+    if path.is_symlink() \
+            or (path.exists() and not path.is_file()):
+        raise ValueError(
+            "matrix retained cap/events.ndjson is not a "
+            "regular file")
+    try:
+        with open(path) as handle:
+            counts = persisted_counts(handle)
+        with open(path) as handle:
+            byts = persisted_bytes(handle)
+        with open(path) as handle:
+            dirs = persisted_copy_dirs(handle)
+        events_error = None
+    except OSError:
+        counts, byts, dirs, events_error = \
+            None, None, None, _MISSING_EVENTS
+    except ValueError as exc:
+        counts, byts, dirs, events_error = \
+            None, None, None, str(exc)
+    try:
+        with open(path) as handle:
+            counters = counter_deltas(handle)
+        counters_error = None
+    except OSError:
+        counters, counters_error = None, _MISSING_EVENTS
+    except ValueError as exc:
+        counters, counters_error = None, str(exc)
+    try:
+        with open(path) as handle:
+            unpaired_count, unpaired_bytes = unpaired_maps(
+                handle)
+        unpaired_error = None
+    except OSError:
+        unpaired_count, unpaired_bytes, unpaired_error = \
+            None, None, _MISSING_EVENTS
+    except ValueError as exc:
+        unpaired_count, unpaired_bytes, unpaired_error = \
+            None, None, str(exc)
+    return {"persisted": counts, "persisted_bytes": byts,
+            "persisted_copy_dirs": dirs,
+            "events_error": events_error,
+            "counters": counters,
+            "counters_error": counters_error,
+            "unpaired_count": unpaired_count,
+            "unpaired_bytes": unpaired_bytes,
+            "unpaired_error": unpaired_error}
+
+
+def _reread_busy_summary(row):
+    """Expected busy derivations, or None when none retained.
+
+    A retained busy events file re-executes (and a coexisting
+    summary must agree with it); otherwise the shrink summary
+    binds the counts, bytes, and counters. Returns None when
+    neither is retained. Raises ValueError on incoherent or
+    shapeless retained busy evidence.
+    """
+    events = row / "busy" / "cap" / "events.ndjson"
+    if events.is_symlink() \
+            or (events.exists() and not events.is_file()):
+        raise ValueError(
+            "matrix retained busy/cap/events.ndjson is not "
+            "a regular file")
+    summary_path = row / "busy" / "events_summary.json"
+    if summary_path.is_symlink() or (
+            summary_path.exists()
+            and not summary_path.is_file()):
+        raise ValueError(
+            "matrix retained busy/events_summary.json is "
+            "not a regular file")
+    if events.exists():
+        saved = _reread_events_derivations(row / "busy")
+        try:
+            size = os.path.getsize(events)
+        except OSError:
+            size = None
+        expected = {"busy_persisted": saved["persisted"],
+                    "busy_events_error":
+                    saved["events_error"],
+                    "busy_events_bytes": size,
+                    "busy_counters": saved["counters"],
+                    "busy_counters_error":
+                    saved["counters_error"]}
+        if summary_path.exists():
+            summary = _load_busy_summary(summary_path)
+            if summary["counts"] != saved["persisted"] \
+                    or summary["bytes"] != size \
+                    or summary["counters"] \
+                    != saved["counters"] \
+                    or summary["counters_error"] \
+                    != saved["counters_error"]:
+                raise ValueError(
+                    "matrix retained busy summary differs "
+                    "from retained busy events")
+        return expected
+    if not summary_path.exists():
+        return None
+    summary = _load_busy_summary(summary_path)
+    return {"busy_persisted": summary["counts"],
+            "busy_events_error": None,
+            "busy_events_bytes": summary["bytes"],
+            "busy_counters": summary["counters"],
+            "busy_counters_error":
+            summary["counters_error"]}
+
+
+def _load_busy_summary(path):
+    """Strict busy summary; old shapes fail closed."""
+    try:
+        summary = json.loads(path.read_bytes())
+    except (OSError, ValueError):
+        raise ValueError(
+            "matrix retained busy/events_summary.json is "
+            "unreadable")
+    if not isinstance(summary, dict):
+        raise ValueError(
+            "matrix retained busy summary is not an object")
+    for key in ("counts", "bytes", "counters",
+                "counters_error"):
+        if key not in summary:
+            raise ValueError(
+                "matrix retained busy summary lacks " + key)
+    if not isinstance(summary["counts"], dict) \
+            or not isinstance(summary["bytes"], int) \
+            or isinstance(summary["bytes"], bool):
+        raise ValueError(
+            "matrix retained busy summary is malformed")
+    counters = summary["counters"]
+    error = summary["counters_error"]
+    if counters is not None and not isinstance(counters, dict):
+        raise ValueError(
+            "matrix retained busy summary is malformed")
+    if error is not None and not isinstance(error, str):
+        raise ValueError(
+            "matrix retained busy summary is malformed")
+    return summary
+
+
+def _check_retained_validate(row, rel, rc_field, out_field,
+                             inputs):
+    """Compare cached validate outcome against retained bytes.
+
+    A row that ran validation must furnish its validate.json
+    record; a row that never ran it (no record, both cached
+    values None) is left to the predicates. Raises ValueError
+    on missing bytes for a claimed outcome, on a malformed
+    record, or on any disagreement.
+    """
+    path = row / rel
+    if path.is_symlink() \
+            or (path.exists() and not path.is_file()):
+        raise ValueError(
+            "matrix retained %s is not a regular file" % rel)
+    cached_rc = inputs.get(rc_field)
+    cached_out = inputs.get(out_field)
+    if not path.exists():
+        if cached_rc is None and cached_out is None:
+            return None
+        raise ValueError(
+            "matrix row cannot furnish retained validate "
+            "bytes: " + rel)
+    try:
+        doc = json.loads(path.read_bytes())
+    except (OSError, ValueError):
+        raise ValueError(
+            "matrix retained %s is unreadable" % rel)
+    if not isinstance(doc, dict) or set(doc) != {"rc", "out"}:
+        raise ValueError(
+            "matrix retained %s is malformed" % rel)
+    if (doc["rc"] is not None
+            and (not isinstance(doc["rc"], int)
+                 or isinstance(doc["rc"], bool))) \
+            or (doc["out"] is not None
+                and not isinstance(doc["out"], str)):
+        raise ValueError(
+            "matrix retained %s is malformed" % rel)
+    if cached_rc != doc["rc"] or cached_out != doc["out"]:
+        raise ValueError(
+            "matrix cached %s differs from retained %s"
+            % (rc_field, rel))
+    return None
+
+
+def verify_row_cache_vs_raw(row_dir, inputs):
+    """Prove the cached inputs transcribe the retained raw files.
+
+    Every predicate-consumed cached scalar must equal the
+    bytes of the raw file the collector read: transcribed
+    texts, exit/status files, refusal probes, the oracle
+    mode, and the validate records. Derivations re-execute
+    from retained files instead of trusting cached values:
+    persisted counts, bytes, copy directions, counter
+    deltas, and unpaired maps re-derive from the retained
+    events file; bpftool snapshots re-derive from the
+    retained program lists; busy counts, bytes, and counters
+    re-derive from retained busy events or bind to the
+    shrink summary written from them; the redaction scan
+    re-runs over the retained row. A cached value must have
+    its raw file still retained (and vice versa), and rows
+    that claim an outcome without retained bytes refuse.
+
+    Never-gathered inputs (refused rows, where the
+    collector skips the admitted block) carry None or
+    absent values and no retained source files; they pass
+    here and the predicates decide them. Gathered-but-lost
+    inputs carry the collector's own missing-file errors
+    and must match the re-derivation exactly.
+
+    Three inputs need no file comparison: the lock entry
+    binds in the shared row verifier, the candidate digest
+    and closure bind to the manifest, and the host tool
+    versions plus cache directory are cross-checked against
+    retained files inside the predicates themselves.
+    Raises ValueError on
+    any disagreement, even when the cache and the raw side
+    each verify independently; returns None when the cache
+    faithfully transcribes the retained evidence.
+    """
+    if not isinstance(inputs, dict):
+        raise ValueError(
+            "matrix cached inputs must be an object")
+    row = Path(row_dir)
+    for field, rel in _CACHE_RAW_TEXT:
+        raw = _retained_text(row, rel)
+        cached = inputs.get(field)
+        if cached is None and raw is None:
+            continue
+        if cached is None or raw is None or cached != raw:
+            raise ValueError(
+                "matrix cached %s differs from retained %s"
+                % (field, rel))
+    refusals = inputs.get("refusals")
+    if refusals is None:
+        refusals = {}
+    if not isinstance(refusals, dict):
+        raise ValueError(
+            "matrix cached refusals must be an object")
+    labels = ["cap-" + cap for cap in CAPS] + ["combined"]
+    for label in labels:
+        probe = refusals.get(label)
+        if probe is None:
+            probe = {}
+        if not isinstance(probe, dict):
+            raise ValueError(
+                "matrix cached refusal %s must be an object"
+                % label)
+        for key in ("exit", "out", "exists"):
+            rel = "record-%s.%s" % (label, key)
+            raw = _retained_text(row, rel)
+            cached = probe.get(key)
+            if cached is None and raw is None:
+                continue
+            if cached is None or raw is None \
+                    or cached != raw:
+                raise ValueError(
+                    "matrix cached refusal %s.%s differs "
+                    "from retained %s" % (label, key, rel))
+    mode = (_retained_text(row, "oracle.mode") or "").strip() \
+        or None
+    if inputs.get("oracle_mode") != mode:
+        raise ValueError(
+            "matrix cached oracle_mode differs from "
+            "retained oracle.mode")
+    for field, subdir, count in (("miss_snaps", "", 4),
+                                 ("busy_miss_snaps", "busy",
+                                  3)):
+        cached = inputs.get(field)
+        if cached is None:
+            continue
+        if cached != _reread_miss_snaps(row, subdir, count):
+            raise ValueError(
+                "matrix cached %s differs from retained "
+                "snapshots" % field)
+    events = row / "cap" / "events.ndjson"
+    retained = events.is_file() and not events.is_symlink()
+    if not retained and inputs.get("persisted") is None \
+            and inputs.get("persisted_bytes") is None \
+            and inputs.get("events_error") is None \
+            and "persisted_copy_dirs" not in inputs \
+            and "counters" not in inputs \
+            and "counters_error" not in inputs \
+            and "unpaired_count" not in inputs \
+            and "unpaired_bytes" not in inputs \
+            and "unpaired_error" not in inputs:
+        pass
+    else:
+        for key, expected in sorted(
+                _reread_events_derivations(row).items()):
+            if inputs.get(key) != expected:
+                raise ValueError(
+                    "matrix cached %s differs from retained "
+                    "events" % key)
+    busy = _reread_busy_summary(row)
+    if busy is None:
+        errors = (inputs.get("busy_events_error"),
+                  inputs.get("busy_counters_error"))
+        if inputs.get("busy_persisted") is not None \
+                or inputs.get("busy_events_bytes") \
+                is not None \
+                or inputs.get("busy_counters") is not None \
+                or errors not in (
+                    (None, None),
+                    (_MISSING_EVENTS, _MISSING_EVENTS)):
+            raise ValueError(
+                "matrix cached busy counts differ from "
+                "retained busy evidence")
+    else:
+        for key, expected in sorted(busy.items()):
+            if inputs.get(key) != expected:
+                raise ValueError(
+                    "matrix cached %s differs from retained "
+                    "busy evidence" % key)
+    _check_retained_validate(row, "validate.json",
+                             "validate_rc", "validate_out",
+                             inputs)
+    _check_retained_validate(row, "busy/validate.json",
+                             "busy_validate_rc",
+                             "busy_validate_out", inputs)
+    redacted = scan_export_redaction(
+        row, skip={"receipt.json", "oracle-inputs.json"}
+        | REDACT_SKIP_LOCAL)
+    if inputs.get("export_redact_error") != redacted:
+        raise ValueError(
+            "matrix cached export_redact_error differs from "
+            "retained scan")
+    return None
+
+
+def _required_row_ids(lock):
+    """{row id: lock entry} for a matrix lock; ValueError if malformed."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]
+                            / "tools"))
+    import candidate
+    rows = lock.get("kernels") if isinstance(lock, dict) else None
+    candidate.require(isinstance(rows, list) and rows,
+                      "required matrix rows are empty")
+    candidate.require(all(
+        isinstance(row, dict) and isinstance(row.get("id"), str)
+        and row["id"] for row in rows),
+        "required matrix row lacks an id")
+    wanted = {row["id"]: row for row in rows}
+    candidate.require(len(wanted) == len(rows),
+                      "duplicate required matrix row")
+    return wanted
+
+
+def verify_tested_rows(out_dir, lock, manifest):
+    """Re-derive every required row's receipt, predicates, bindings.
+
+    The evidence inventory is already verified by the caller;
+    this is the full acceptance core shared by qualify,
+    export, and custody. Every row under the out dir must
+    first re-derive PASS from its own receipt
+    (verify_matrix_out: validated receipt, files[] hashes
+    matching the retained bytes, rec/summary merge, exact
+    required row set), then each required row replays its
+    predicates and its row-to-candidate bindings: the cached
+    oracle inputs must transcribe the retained raw files, the
+    oracle predicates must re-derive ok, the re-derived checks
+    must equal the receipt's recorded checks, the receipt must
+    carry the /2 Rust shape (historical /1 receipts verify
+    structurally but predate the Rust bindings and refuse
+    here), the row must name this candidate, and the row must
+    have tested these exact bytes (pinned lock entry, full-run
+    non-smoke mode, source, toolchain, executable, selected
+    artifact, BPF objects, runtime closure). Returns the {row
+    id: checks} map; raises ValueError and writes nothing
+    otherwise.
+
+    Toolchain binding is split: the receipt's single lock slot
+    binds the Cargo lock only (receipt toolchain lock_sha256
+    against manifest toolchain cargo_lock_sha256). The eBPF
+    lock is bound at seal via manifest toolchain
+    ebpf_lock_sha256, and the eBPF object bytes are bound here
+    via the manifest files bpf/... digest checks below.
+    """
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]
+                            / "tools"))
+    import candidate
+    candidate.validate_manifest(manifest)
+    wanted = _required_row_ids(lock)
+    report = verify_matrix_out(out_dir)
+    candidate.require(
+        report["ok"]
+        and {row["id"] for row in report["rows"]} == set(wanted),
+        "required matrix rows did not pass")
+    want_id = candidate.digest_bytes(
+        candidate.canonical(manifest))
+    expected_engine = manifest["files"]["bin/memveil"]
+    checked = {}
+    for ident, entry in wanted.items():
+        row = Path(out_dir) / ident
+        receipt = candidate.read_json(row / "receipt.json")
+        inputs = candidate.read_json(row / "oracle-inputs.json")
+        candidate.require(
+            inputs.get("candidate_sha256") == want_id,
+            "matrix candidate differs")
+        verify_row_cache_vs_raw(row, inputs)
+        result = evaluate_row(inputs)
+        candidate.require(result["ok"],
+                          "matrix oracle predicates failed: "
+                          + ident)
+        candidate.require(
+            result["checks"] == receipt["actual"]["checks"],
+            "matrix recorded checks differ from re-derived "
+            "predicates")
+        candidate.require(
+            receipt.get("schema") == ROW_RECEIPT_SCHEMA,
+            "matrix row schema predates Rust bindings: "
+            + str(receipt.get("schema")))
+        candidate.require(
+            inputs.get("entry") == entry,
+            "matrix expectations differ from "
+            "pinned lock")
+        candidate.require(
+            receipt["mode"] == "matrix"
+            and not receipt["smoke"],
+            "required matrix row was skipped or smoke-only")
+        candidate.require(
+            receipt["source"]["memveil"] == {
+                "commit": manifest["source"]["commit"],
+                "dirty": False},
+            "matrix product source differs")
+        candidate.require(
+            receipt["toolchain"]["lock_sha256"]
+            == manifest["toolchain"]["cargo_lock_sha256"],
+            "matrix toolchain differs")
+        candidate.require(
+            receipt["artifacts"]["binary_sha256"]
+            == expected_engine,
+            "matrix executable differs from candidate")
+        expected_source = (
+            candidate.artifact(manifest, "deb")["sha256"]
+            if receipt["command"]["kind"] == "deb"
+            else expected_engine)
+        candidate.require(
+            receipt["command"]["source_sha256"]
+            == expected_source,
+            "matrix selected artifact differs")
+        aliases = {"attempt": "swiotlb_attempt.bpf.o",
+                   "lifecycle": "swiotlb_lifecycle.bpf.o",
+                   "copy": "swiotlb_copy.bpf.o"}
+        present = receipt["artifacts"]["bpf"]
+        candidate.require(
+            isinstance(present, dict)
+            and {aliases.get(name, name) for name in present}
+            == set(aliases.values())
+            and len(present) == len(aliases),
+            "matrix BPF object set differs from candidate")
+        for name, digest in present.items():
+            filename = aliases.get(
+                name, name if name.endswith(".bpf.o")
+                else name + ".bpf.o")
+            candidate.require(
+                manifest["files"].get("bpf/" + filename)
+                == digest,
+                "matrix BPF object differs")
+        candidate.require(
+            inputs.get("candidate_files") == manifest["files"],
+            "matrix runtime/profile closure differs")
+        checked[ident] = result["checks"]
+    return checked
+
+
+def export_tested_candidate(out_dir, lock, manifest, destination):
+    """Export payload expectations after every locked row proves itself.
+
+    Acceptance is exactly verify_tested_rows (receipts,
+    predicates, and every row-to-candidate binding); this
+    wrapper only writes the expected payload once the shared
+    core accepts. Returns the expected payload map; raises
+    ValueError and writes nothing otherwise.
+    """
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]
+                            / "tools"))
+    import candidate
+    candidate.validate_manifest(manifest)
+    verify_tested_rows(out_dir, lock, manifest)
+    expected = candidate.expected_payload(manifest)
+    candidate.write_once(
+        destination,
+        "".join(value + "  " + name + "\n"
+                for name, value in sorted(expected.items()))
+        .encode())
+    return expected

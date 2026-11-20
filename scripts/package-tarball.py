@@ -35,18 +35,30 @@ Layout of ``dist/memveil-<version>/``::
                            the locked crates.io sources
     THIRD-PARTY-NOTICES.md generated attribution (Cargo closure
                            plus the shipped lib; no vendored deps)
-    MANIFEST.json          file hashes, versions, source revisions
+    MANIFEST.json          file hashes, versions, source revisions,
+                           and the build receipt bound at seal time
 
 Usage: scripts/package-tarball.py [--out DIR] [--tag NAME]
     [--root DIR] [--binary PATH] [--bpf-dir DIR] [--build]
+    [--candidate]
   --out DIR    stage directory (default: dist/)
   --tag NAME   bundle directory name (default: memveil-<version>)
   --root DIR   input tree (default: auto-detected checkout root)
   --binary PATH  release binary (default: <root>/target/
-               release/memveil, honoring $CARGO_TARGET_DIR)
+               release/memveil, honoring $CARGO_TARGET_DIR;
+               forbidden with --build, which consumes
+               cargo's own reported artifact paths)
   --bpf-dir DIR  build-script OUT_DIR holding memveil-ebpf-*
                (default: auto-detected under the target dir)
   --build      run `cargo build --release --locked --offline` first
+               in a fresh per-build target dir (explicit
+               --target-dir plus a pinned build.build-dir,
+               scrubbed redirect environment, JSON artifact
+               paths, dir removed after packaging), so only
+               this invocation's bytes can be packaged
+  --candidate  sealable bundle: requires --build from the root
+               and forbids --binary/--bpf-dir; only this mode
+               records a build receipt the seal accepts
 
 Requires a release binary (use --build or build it first),
 patchelf, strip, and readelf. Fails closed when the link
@@ -73,6 +85,7 @@ import struct
 import subprocess
 import sys
 import tarfile
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUN_ROOT_DIR = os.path.dirname(HERE)
@@ -372,6 +385,29 @@ def fail(message):
     sys.exit(1)
 
 
+def candidate_built_from_source(candidate, build, binary_opt,
+                                bpf_opt):
+    """Whether this run records a sealable build receipt.
+
+    Only candidate mode (--candidate with --build from the
+    input root and no --binary/--bpf-dir override) builds the
+    engine and BPF objects from the sealed tree in-flow, so
+    only it records built_from_source. Every other mode
+    (development --binary runs included) records a receipt
+    the seal refuses. Raises SystemExit on a candidate run
+    that tries to mix --build with prebuilt overrides, or to
+    skip the build.
+    """
+    if not candidate:
+        return False
+    if not build:
+        fail("candidate mode requires --build from the root")
+    if binary_opt is not None or bpf_opt is not None:
+        fail("candidate mode forbids --binary and --bpf-dir "
+             "overrides")
+    return True
+
+
 def run(argv, **kwargs):
     proc = subprocess.run(
         argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -465,6 +501,153 @@ def cargo_tool_versions(rust_dir):
     return (cargo.stdout.split()[1], rustc_proc.stdout.split()[1])
 
 
+def bpf_linker_version(rust_dir):
+    """bpf-linker version under the repository pin.
+
+    Mirrors the seal's toolchain probe: RUSTUP_TOOLCHAIN stripped
+    so the checkout pin wins, parsed as the second `--version`
+    token with a leading `v` dropped, refused unless it looks like
+    a dotted version. Recorded in the build receipt, never guessed.
+    """
+    env = dict(os.environ)
+    env.pop("RUSTUP_TOOLCHAIN", None)
+    try:
+        proc = subprocess.run(
+            ["bpf-linker", "--version"], stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, cwd=rust_dir, env=env,
+        )
+    except OSError as exc:
+        fail("cannot probe bpf-linker: %s" % exc)
+    if proc.returncode != 0 or len(proc.stdout.split()) < 2:
+        fail("bpf-linker --version failed")
+    token = proc.stdout.split()[1]
+    if token.startswith("v"):
+        token = token[1:]
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+"
+                        r"(?:[-+][0-9A-Za-z.+-]+)?", token) \
+            or len(token) > 64:
+        fail("bpf-linker reports a bad version %r" % token)
+    return token
+
+
+def git_tree_inventory(root, commit):
+    """(entries, digest) for the git tree at commit.
+
+    Same construction as the candidate seal's source inventory:
+    entries come from `git ls-tree` plus batched blob reads, so the
+    digest is purely commit-derived and immune to worktree strays.
+    Files carry path/kind/mode/size/sha256, symlinks path/kind/mode/
+    target, directories path/kind/mode, with raw git modes. The
+    digest hashes one sorted-keys JSON line per path-sorted entry.
+    Anything unexpected fails the package instead of recording a
+    digest the seal cannot reproduce.
+    """
+    if not re.fullmatch(r"[0-9a-f]{40}", commit or ""):
+        fail("build receipt needs a commit identity, want 40 hex")
+    env = dict(os.environ)
+    for key in [key for key in env if key.startswith("GIT_")]:
+        env.pop(key)
+    try:
+        proc = subprocess.run(
+            ["git", "-C", root, "ls-tree", "-r", "-t", "-z", commit],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+        )
+    except OSError as exc:
+        fail("cannot read the source tree: %s" % exc)
+    if proc.returncode != 0:
+        fail("unknown source commit %s" % commit)
+    blobs, entries = [], []
+    for record in proc.stdout.split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, raw = record.split(b"\t", 1)
+            mode, kind, oid = metadata.decode("ascii").split()
+            path = raw.decode("utf-8")
+        except (ValueError, UnicodeError):
+            fail("invalid git tree entry")
+        if not path or "\\" in path \
+                or any(part in ("", ".", "..")
+                       for part in path.split("/")) \
+                or any(ord(char) < 33 or ord(char) > 126
+                       for char in path):
+            fail("invalid source tree path")
+        if kind == "tree":
+            if mode != "040000":
+                fail("unsupported tree mode")
+            entries.append({"path": path, "kind": "dir",
+                            "mode": mode})
+        elif kind == "blob" and mode in ("100644", "100755"):
+            entries.append({"path": path, "kind": "file",
+                            "mode": mode, "oid": oid})
+            blobs.append(oid)
+        elif kind == "blob" and mode == "120000":
+            entries.append({"path": path, "kind": "symlink",
+                            "mode": mode, "oid": oid})
+            blobs.append(oid)
+        else:
+            fail("unsupported source archive entry: " + path)
+    content = _git_tree_blobs(root, blobs, env)
+    resolved = []
+    for entry in entries:
+        oid = entry.pop("oid", None)
+        if entry["kind"] == "dir":
+            resolved.append(entry)
+        elif entry["kind"] == "symlink":
+            try:
+                target = content[oid].decode("utf-8")
+            except UnicodeError:
+                fail("invalid symlink target")
+            if not target:
+                fail("empty symlink target")
+            entry["target"] = target
+            resolved.append(entry)
+        else:
+            entry["size"] = len(content[oid])
+            entry["sha256"] = hashlib.sha256(content[oid]).hexdigest()
+            resolved.append(entry)
+    resolved.sort(key=lambda entry: entry["path"])
+    found = hashlib.sha256()
+    for entry in resolved:
+        found.update(json.dumps(
+            entry, sort_keys=True,
+            separators=(",", ":")).encode("utf-8"))
+        found.update(b"\n")
+    return resolved, found.hexdigest()
+
+
+def _git_tree_blobs(root, oids, env):
+    """{oid: bytes} for every oid via one `git cat-file --batch`."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", root, "cat-file", "--batch"],
+            input=("".join(oid + "\n" for oid in oids)).encode(
+                "ascii"),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+        )
+    except OSError as exc:
+        fail("cannot read source blobs: %s" % exc)
+    if proc.returncode != 0:
+        fail("cannot read source blobs")
+    content, rest = {}, proc.stdout
+    for oid in oids:
+        try:
+            header, rest = rest.split(b"\n", 1)
+            found, kind, size = header.decode("ascii").split()
+            size = int(size)
+            data = rest[:size]
+            rest = rest[size:]
+            if rest[:1] != b"\n":
+                fail("cannot read source blobs")
+            rest = rest[1:]
+        except (ValueError, IndexError):
+            fail("cannot read source blobs")
+        if found != oid or kind != "blob" or len(data) != size:
+            fail("cannot read source blobs")
+        content[oid] = data
+    return content
+
+
 def root_markers_present(root):
     return (
         os.path.isfile(os.path.join(root, "profiles", "manifest.txt"))
@@ -487,23 +670,156 @@ def resolve_root(explicit):
 
 
 def resolve_target_dir(root):
+    """Development lookup dir, honoring the ambient override.
+
+    In-flow builds never use this: they build in a fresh
+    per-build dir that beats every redirect mechanism.
+    """
     override = os.environ.get("CARGO_TARGET_DIR")
     if override:
         return os.path.abspath(override)
     return os.path.join(root, "target")
 
 
-def resolve_binary(root, explicit, build):
-    """Release binary, building it first under --build."""
+# Environment redirects that steer cargo outputs away from the
+# source root. Verified on cargo 1.100.0 (`cargo build --help`
+# plus share/doc/rust/html/cargo/reference/config.html, and
+# live precedence probes): the --target-dir CLI flag beats
+# CARGO_TARGET_DIR/CARGO_BUILD_TARGET_DIR, which beat the
+# build.target-dir config file; intermediates follow
+# build.build-dir (CARGO_BUILD_BUILD_DIR or config) unless a
+# CLI --config override pins them; CARGO_BUILD_TARGET selects
+# a target-triple output subdir. In-flow builds pin the CLI
+# side and scrub all four, so only this invocation's bytes
+# can be packaged.
+BUILD_REDIRECT_ENV = (
+    "CARGO_TARGET_DIR",
+    "CARGO_BUILD_TARGET_DIR",
+    "CARGO_BUILD_BUILD_DIR",
+    "CARGO_BUILD_TARGET",
+)
+
+
+def fresh_target_dir():
+    """Fresh per-build cargo target dir, immune to redirects.
+
+    A new mkdtemp dir per in-flow build: no reusable dir
+    means no cached-artifact staleness versus the probed
+    linker, by construction. The caller removes it after
+    packaging via drop_target_dir.
+    """
+    try:
+        return tempfile.mkdtemp(prefix="memveil-cargo-target-")
+    except OSError as exc:
+        fail("cannot create a fresh target dir: %s" % exc)
+
+
+def drop_target_dir(target_dir):
+    """Remove a fresh target dir; never fail the packaging."""
+    if target_dir is None:
+        return
+    try:
+        if os.path.islink(target_dir):
+            os.unlink(target_dir)
+        else:
+            shutil.rmtree(target_dir, ignore_errors=True)
+    except OSError:
+        pass
+
+
+def select_built_binary(stdout, bin_name, target_dir):
+    """Cargo's own release binary path from JSON build output.
+
+    Requires exactly one built executable for the named bin
+    target, an existing regular file under the pinned target
+    dir. Anything else (no artifact, ambiguity, a path
+    outside the pin) fails closed.
+    """
+    target_dir = os.path.abspath(target_dir)
+    found = []
+    for line in stdout.splitlines():
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(message, dict) \
+                or message.get("reason") != "compiler-artifact":
+            continue
+        target = message.get("target") or {}
+        if target.get("name") != bin_name \
+                or "bin" not in (target.get("kind") or []):
+            continue
+        executable = message.get("executable")
+        if not executable or not isinstance(executable, str):
+            continue
+        found.append(executable)
+    if len(set(found)) != 1:
+        fail("cargo reported %d %s binaries, want exactly one"
+             % (len(set(found)), bin_name))
+    binary = os.path.abspath(found[0])
+    if os.path.commonpath([target_dir, binary]) != target_dir:
+        fail("cargo reported a binary outside the pinned "
+             "target dir: %s" % found[0])
+    if not os.path.isfile(binary) or os.path.islink(binary):
+        fail("cargo-reported binary is not a regular file: %s"
+             % found[0])
+    return binary
+
+
+def build_release_binary(rust_dir, target_dir,
+                         bin_name="memveil"):
+    """Build release in-flow, return cargo's own binary path.
+
+    The caller passes a fresh per-build target dir; the
+    build pins --target-dir plus a CLI build.build-dir
+    override (both beat environment and config files),
+    scrubs every redirect variable, and consumes only the
+    JSON artifact paths, so exactly this invocation's bytes
+    are packaged. Fails closed on any build error or path
+    surprise.
+    """
+    target_dir = os.path.abspath(target_dir)
+    if any(char in target_dir for char in "\"\\\n"):
+        fail("refusing a target dir that needs config "
+             "escaping: %s" % target_dir)
+    env = dict(os.environ)
+    env.pop("RUSTUP_TOOLCHAIN", None)
+    for name in BUILD_REDIRECT_ENV:
+        env.pop(name, None)
+    try:
+        proc = subprocess.run(
+            ["cargo",
+             "--config",
+             'build.build-dir="%s"' % target_dir,
+             "build", "--release", "--locked", "--offline",
+             "--target-dir", target_dir,
+             "--message-format=json"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, cwd=rust_dir, env=env)
+    except OSError as exc:
+        fail("cannot run cargo build: %s" % exc)
+    if proc.returncode != 0:
+        print(proc.stdout)
+        print(proc.stderr, file=sys.stderr)
+        fail("cargo build --release failed")
+    print("package-tarball: in-flow cargo build pinned to %s "
+          "(redirect environment scrubbed)" % target_dir)
+    return select_built_binary(proc.stdout, bin_name,
+                               target_dir)
+
+
+def resolve_binary(root, explicit, build, fresh_target=None,
+                   bin_name="memveil"):
+    """Release binary: the in-flow build's own path, else lookup."""
     rust_dir = root
     if build:
-        proc = run_cargo(
-            ["build", "--release", "--locked", "--offline"],
-            rust_dir)
-        if proc.returncode != 0:
-            print(proc.stdout)
-            print(proc.stderr, file=sys.stderr)
-            fail("cargo build --release failed")
+        if explicit is not None:
+            fail("--build forbids --binary: the fresh in-flow "
+                 "binary is packaged")
+        if fresh_target is None:
+            fail("in-flow build needs a fresh target dir")
+        return build_release_binary(rust_dir, fresh_target,
+                                    bin_name=bin_name)
     if explicit is not None:
         binary = os.path.abspath(explicit)
     else:
@@ -515,9 +831,15 @@ def resolve_binary(root, explicit, build):
     return binary
 
 
-def bpf_candidates(target_dir):
-    """Complete OUT_DIR sets holding all three channel artifacts."""
-    base = os.path.join(target_dir, "release", "build", "memveil")
+def bpf_candidates(release_dir):
+    """Complete OUT_DIR sets holding all three channel artifacts.
+
+    Rooted at the release dir cargo actually used (derived
+    from the packaged binary's own path under --build), so a
+    target-triple output subdir cannot desynchronize the
+    search from the build.
+    """
+    base = os.path.join(release_dir, "build", "memveil")
     found = []
     try:
         names = sorted(os.listdir(base))
@@ -532,7 +854,7 @@ def bpf_candidates(target_dir):
     return found
 
 
-def resolve_bpf_dir(target_dir, explicit):
+def resolve_bpf_dir(release_dir, explicit):
     """OUT_DIR for the BPF inspection copies.
 
     Several build-script output dirs can hold copies; every
@@ -548,10 +870,10 @@ def resolve_bpf_dir(target_dir, explicit):
             fail("--bpf-dir lacks channel artifacts: %s"
                  % ", ".join(missing))
         return out
-    sets = bpf_candidates(target_dir)
+    sets = bpf_candidates(release_dir)
     if not sets:
         fail("no BPF artifacts under %s (run cargo build "
-             "--release, or pass --bpf-dir)" % target_dir)
+             "--release, or pass --bpf-dir)" % release_dir)
     first = {channel: sha256_file(os.path.join(
         sets[0], "memveil-ebpf-" + channel))
         for channel, _ in CHANNELS}
@@ -1157,7 +1479,7 @@ def git_rev_or_none(path):
 def git_clean(path):
     if not owns_git_root(path):
         fail("cannot inspect owning Git tree at %s" % path)
-    proc = run(["git", "-C", path, "status", "--short"])
+    proc = run(["git", "-C", path, "status", "--porcelain"])
     if proc.returncode != 0:
         fail("cannot inspect %s" % path)
     return proc.stdout.strip() == ""
@@ -1170,6 +1492,7 @@ def main(argv):
     binary_opt = None
     bpf_opt = None
     build = False
+    candidate = False
     args = list(argv)
     while args:
         opt = args.pop(0)
@@ -1194,7 +1517,12 @@ def main(argv):
         if opt == "--build":
             build = True
             continue
+        if opt == "--candidate":
+            candidate = True
+            continue
         fail("unknown option: %s" % opt)
+    built_from_source = candidate_built_from_source(
+        candidate, build, binary_opt, bpf_opt)
     if tag is not None:
         try:
             validate_tag(tag)
@@ -1216,6 +1544,7 @@ def main(argv):
             "sha256": sha256_file(tool)}
     staged = None
     provider_work = None
+    fresh_target = None
     # A failed run leaves no staging directory and no
     # apparently successful final candidate: every failure
     # below drops this run's tag candidates (once the tag
@@ -1225,6 +1554,7 @@ def main(argv):
         if memveil_rev is not None:
             if not git_clean(root):
                 fail("worktree has uncommitted changes; commit first")
+            clean_tree = True
         else:
             # Git-free source export: no commit identity to record
             # and no worktree state to enforce. The manifest says
@@ -1232,16 +1562,27 @@ def main(argv):
             # build, and tarball mtimes fall back to the youngest
             # staged file instead of the commit clock.
             memveil_rev = "export"
+            # No receipt is recorded below, so the seal's
+            # clean_tree requirement can never pass: the export
+            # cleanliness value stays false by absence.
+            clean_tree = False
             print("package-tarball: git-free export; "
                   "revision recorded as export")
         rust_dir = root
         cargo_version, rustc_version = cargo_tool_versions(rust_dir)
         print("package-tarball: cargo %s rustc %s (RUSTUP_TOOLCHAIN "
               "stripped)" % (cargo_version, rustc_version))
-        target_dir = resolve_target_dir(root)
-        binary_input = resolve_binary(root, binary_opt, build)
+        if build:
+            fresh_target = fresh_target_dir()
+        binary_input = resolve_binary(root, binary_opt, build,
+                                      fresh_target)
         binary_input_sha = sha256_file(binary_input)
-        bpf_dir = resolve_bpf_dir(target_dir, bpf_opt)
+        if build:
+            release_dir = os.path.dirname(binary_input)
+        else:
+            release_dir = os.path.join(
+                resolve_target_dir(root), "release")
+        bpf_dir = resolve_bpf_dir(release_dir, bpf_opt)
         bpf_inputs = {}
         for channel, shipped in CHANNELS:
             source = os.path.join(
@@ -1696,6 +2037,37 @@ def main(argv):
             fail("canonical executable failed version check: "
                  + rerun.stderr)
 
+        # Build-time receipt: source C plus the tree inventory, the
+        # probed tool versions, the engine/BPF output digests, the
+        # build-time worktree cleanliness, and whether this run
+        # built the engine and BPF objects from the input root
+        # in-flow, recorded from the verified staging reads above
+        # (never re-walked). The provenance emitter and the seal
+        # bind this recording: only candidate mode (--candidate
+        # with --build and no prebuilt overrides) records a
+        # receipt the seal accepts, so stale prebuilt bytes
+        # repackaged at C with a fresh receipt still fail. Git-free
+        # exports carry no commit identity, so they record no
+        # receipt and cannot seal.
+        build_receipt = None
+        if memveil_rev != "export":
+            _tree_entries, tree_digest = git_tree_inventory(
+                root, memveil_rev)
+            build_receipt = {
+                "source_commit": memveil_rev,
+                "inventory_sha256": tree_digest,
+                "tools": {"cargo": cargo_version,
+                          "rustc": rustc_version,
+                          "bpf_linker": bpf_linker_version(rust_dir)},
+                "outputs": {
+                    "engine_sha256": observed["bin/memveil"],
+                    "bpf": {shipped: observed["bpf/" + shipped]
+                            for _channel, shipped in CHANNELS},
+                },
+                "clean_tree": clean_tree,
+                "built_from_source": built_from_source,
+            }
+
         # Known manifest gaps, intentionally unported (not
         # oversights): no `canonical_runtime` entry — the Rust
         # baseline (x86-64-v1) runs everywhere >= v1, so no
@@ -1772,6 +2144,8 @@ def main(argv):
         # from a live re-walk: bytes changed after verification
         # fail at archive time instead of shipping self-consistent.
         manifest["files"] = dict(observed)
+        if build_receipt is not None:
+            manifest["build_receipt"] = build_receipt
         manifest_text = json.dumps(
             manifest, indent=2, sort_keys=True) + "\n"
         manifest_bytes = manifest_text.encode("utf-8")
@@ -1924,6 +2298,7 @@ def main(argv):
                 os.unlink(provider_work)
             else:
                 shutil.rmtree(provider_work, ignore_errors=True)
+        drop_target_dir(fresh_target)
 
 
 if __name__ == "__main__":

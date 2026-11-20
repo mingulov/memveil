@@ -36,15 +36,17 @@ see `docs/privacy.md` for the capture privacy rules.
 ## Matrix row receipts
 
 `tools/kernel-matrix` writes one evidence directory per kernel
-plus a `receipt.json` of schema `memveil-matrix-row/1` inside
-it. The receipt carries the full qualification fields:
+plus a `receipt.json` of schema `memveil-matrix-row/2` inside
+it. Historical `memveil-matrix-row/1` receipts (Mojo-era
+source/toolchain sections) keep verifying through the
+versioned reader but predate the Rust row bindings. The
+receipt carries the full qualification fields:
 
-- `source`: the memveil commit and dirty flag plus the pinned
-  support-library version and tarball hash (pre-cutover
-  rows; minted-new rows await the Rust toolchain-identity
-  story).
-- `toolchain`: the toolchain pins and the lock hash
-  (pre-cutover rows; see above).
+- `source`: the memveil commit and dirty flag plus the Cargo
+  and eBPF lock digests.
+- `toolchain`: the Cargo lock digest, eBPF lock digest,
+  toolchain channel, and probed cargo/rustc/bpf-linker
+  versions.
 - `artifacts`: the guest-measured binary hash, dpkg version, BPF
   object hashes, and bpftrace/bpftool versions (never paths).
 - `kernel`: release, boot label, uname, modules, version,
@@ -57,7 +59,9 @@ it. The receipt carries the full qualification fields:
 - `workload` and `command`: the executed workload
   (duration, dd count, deb or bundle kind) and the sanitized
   invocation selector. Raw command lines and paths never
-  cross; the boot command file stays out of the inventory.
+  cross into the receipt; the boot command file stays out of
+  the row-local transcription while the signed evidence
+  inventory binds its bytes.
 - `expected` and `actual`: the lock verdicts plus the row
   checks (or per-scenario statuses) with the row verdict.
 - `oracle`: the oracle mode, text hash, stderr presence, and

@@ -3411,6 +3411,37 @@ def test_shrink_busy_events_missing_file(tmp_path):
     assert error
 
 
+def test_shrink_busy_events_binds_counters(tmp_path):
+    cap = tmp_path / "busy" / "cap"
+    cap.mkdir(parents=True)
+    text = '{"kind": "bounce_attempt"}\n' \
+        '{"kind": "counter_snapshot", "data": ' \
+        '{"counter_id": "c", "epoch": 0, "value": 5}}\n' \
+        '{"kind": "counter_snapshot", "data": ' \
+        '{"counter_id": "c", "epoch": 0, "value": 9}}\n'
+    (cap / "events.ndjson").write_text(text)
+    summary, error = km.shrink_busy_events(
+        str(tmp_path / "busy"))
+    assert error is None
+    assert summary["counters"] == {"c": 4}
+    assert summary["counters_error"] is None
+
+
+def test_shrink_busy_events_records_counter_error(tmp_path):
+    cap = tmp_path / "busy" / "cap"
+    cap.mkdir(parents=True)
+    text = '{"kind": "counter_snapshot", "data": ' \
+        '{"counter_id": "c", "epoch": 0, "value": 9}}\n' \
+        '{"kind": "counter_snapshot", "data": ' \
+        '{"counter_id": "c", "epoch": 0, "value": 5}}\n'
+    (cap / "events.ndjson").write_text(text)
+    summary, error = km.shrink_busy_events(
+        str(tmp_path / "busy"))
+    assert error is None
+    assert summary["counters"] is None
+    assert "backwards" in summary["counters_error"]
+
+
 def _counter_lines(pairs):
     lines = []
     for seq, (ident, epoch, value) in enumerate(pairs):
@@ -5150,6 +5181,40 @@ def test_run_validator_transcript_unwritable(tmp_path,
     assert "transcript unwritten" in out
 
 
+def test_run_validator_retains_record(tmp_path):
+    tool = _tool_module()
+    export = tmp_path / "row"
+    cap = export / "cap"
+    cap.mkdir(parents=True)
+    (cap / "session.json").write_text("{}")
+    (cap / "events.ndjson").write_text("")
+    rc, out = tool.run_validator(str(export))
+    record = json.loads(
+        (export / "validate.json").read_text())
+    assert record == {"rc": rc, "out": out}
+
+
+def test_run_validator_notes_unretained_record(tmp_path,
+                                               monkeypatch):
+    tool = _tool_module()
+    export = tmp_path / "row"
+    cap = export / "cap"
+    cap.mkdir(parents=True)
+    (cap / "session.json").write_text("{}")
+    (cap / "events.ndjson").write_text("")
+    real_write_text = tool.Path.write_text
+
+    def selective(self, *args, **kwargs):
+        if str(self).endswith("validate.json"):
+            raise OSError("synthetic unwritable")
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(tool.Path, "write_text", selective)
+    rc, out = tool.run_validator(str(export))
+    assert "validate record unwritten" in out
+    assert not (export / "validate.json").exists()
+
+
 def test_release_agrees_rejects_rc_mismatch():
     assert not km.release_agrees_with_upstream(
         "7.3.0-070300rc5-generic", "7.3-rc3")
@@ -5329,6 +5394,22 @@ def test_scan_export_redaction_rejects_undecodable(tmp_path):
     (tmp_path / "console.txt").write_bytes(b"\xff\xfe\x00bad")
     error = km.scan_export_redaction(str(tmp_path))
     assert error is not None and "console.txt" in error
+
+
+def test_scan_export_redaction_skips_local_vng_cmd(tmp_path):
+    row = _admitted_row(tmp_path, **{
+        "vng-cmd.txt":
+        "sudo -n vng --run 0xdeadbeef12345678 "
+        "--rwdir=/tmp/export=/work/0123456789abcdef\n"})
+    # The payload is meaningful: an unskipped scan names the
+    # local-only file.
+    error = km.scan_export_redaction(str(row))
+    assert error is not None and "vng-cmd.txt" in error
+    # The pinned local-only skip set ignores it, exactly as
+    # the collect-time scan and the redaction replay do.
+    assert km.REDACT_SKIP_LOCAL == frozenset({"vng-cmd.txt"})
+    assert km.scan_export_redaction(
+        str(row), skip=km.REDACT_SKIP_LOCAL) is None
 
 
 def test_evaluate_export_redact_error_fails():
@@ -5910,16 +5991,16 @@ def _row_ctx(**over):
         "timeout": False,
         "source": {
             "memveil": {"commit": "e" * 40, "dirty": False},
-            "libbpf_mojo": {"version": "0.2.2",
-                            "tarball_sha256": "f" * 64,
-                            "status": "pinned"},
+            "locks": {"cargo_lock_sha256": "f" * 64,
+                      "ebpf_lock_sha256": "0" * 64},
         },
         "toolchain": {
-            "lock_version": "1.0.0",
-            "recorded_on": "2026-10-30",
             "lock_sha256": "a" * 64,
-            "toolchain": {"pixi": {"version": "0.83.0"},
-                          "mojo": {"version": "1.2.0"}},
+            "ebpf_lock_sha256": "b" * 64,
+            "channel": "1.100.0",
+            "tools": {"cargo": "1.100.0",
+                      "rustc": "1.100.0",
+                      "bpf_linker": "0.10.4"},
         },
         "lock_tools": {"bpftrace": "bpftrace v0.25.0",
                        "bpftool": "bpftool v7.7.0"},
@@ -6042,7 +6123,7 @@ def test_row_receipt_roundtrip_admitted_pass(tmp_path):
     row = _admitted_row(tmp_path)
     doc = km.write_row_receipt(row, _row_rec(), _lock_entry(),
                                _row_ctx())
-    assert doc["schema"] == "memveil-matrix-row/1"
+    assert doc["schema"] == "memveil-matrix-row/2"
     assert doc["actual"]["ok"] is True
     assert doc["smoke"] is False
     assert doc["losses"]["present"] is True
@@ -6050,6 +6131,75 @@ def test_row_receipt_roundtrip_admitted_pass(tmp_path):
     km.validate_row_receipt(doc)
     ok, detail = km.rederive_row(row)
     assert ok, detail
+
+
+def _v1_source_toolchain():
+    """Historical /1 sections (Mojo-era identities)."""
+    source = {
+        "memveil": {"commit": "e" * 40, "dirty": False},
+        "libbpf_mojo": {"version": "0.3.0",
+                        "tarball_sha256": "f" * 64,
+                        "status": "pinned"},
+    }
+    toolchain = {
+        "lock_version": "1",
+        "recorded_on": "2026-10-24",
+        "lock_sha256": "a" * 64,
+        "toolchain": {"mojo": {"version": "1.2.0"},
+                      "pixi": {"version": "0.1.0"}},
+    }
+    return source, toolchain
+
+
+def test_row_receipt_v1_historical_verifies(tmp_path):
+    row = _admitted_row(tmp_path)
+    doc = km.write_row_receipt(row, _row_rec(), _lock_entry(),
+                               _row_ctx())
+    source, toolchain = _v1_source_toolchain()
+    doc["schema"] = "memveil-matrix-row/1"
+    doc["source"] = source
+    doc["toolchain"] = toolchain
+    (row / "receipt.json").write_text(json.dumps(doc))
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row)
+    assert ok, detail
+
+
+@pytest.mark.parametrize("damage", ["v2-schema-v1-source",
+                                    "v2-schema-v1-toolchain",
+                                    "v1-schema-v2-source",
+                                    "v1-schema-v2-toolchain",
+                                    "v1-unpinned",
+                                    "v1-bad-tarball",
+                                    "v1-missing-pixi"])
+def test_row_receipt_cross_shape_refuses(tmp_path, damage):
+    row = _admitted_row(tmp_path)
+    doc = km.write_row_receipt(row, _row_rec(), _lock_entry(),
+                               _row_ctx())
+    source, toolchain = _v1_source_toolchain()
+    if damage == "v2-schema-v1-source":
+        doc["source"] = source
+    elif damage == "v2-schema-v1-toolchain":
+        doc["toolchain"] = toolchain
+    elif damage == "v1-schema-v2-source":
+        doc["schema"] = "memveil-matrix-row/1"
+        doc["toolchain"] = toolchain
+    elif damage == "v1-schema-v2-toolchain":
+        doc["schema"] = "memveil-matrix-row/1"
+        doc["source"] = source
+    else:
+        doc["schema"] = "memveil-matrix-row/1"
+        doc["source"] = source
+        doc["toolchain"] = toolchain
+        if damage == "v1-unpinned":
+            doc["source"]["libbpf_mojo"]["status"] = "floating"
+        elif damage == "v1-bad-tarball":
+            doc["source"]["libbpf_mojo"]["tarball_sha256"] = \
+                "zz" * 32
+        else:
+            del doc["toolchain"]["toolchain"]["pixi"]
+    with pytest.raises(ValueError):
+        km.validate_row_receipt(doc)
 
 
 def test_row_receipt_excludes_raw_command(tmp_path):
@@ -6279,10 +6429,116 @@ def test_row_receipt_scenarios_roundtrip(tmp_path):
     assert ok, detail
 
 
-# Cutover: the tree-reading identity tests retired with the Mojo
-# toolchain lock (receipt validators below still pin the old
-# receipt shape against fixtures; armed rows fail closed until
-# a Rust toolchain-identity story lands).
+# Row source/toolchain identity reads the Rust tree: the git
+# revision, both Cargo lock digests, the rust-toolchain
+# channel, and probed cargo/rustc/bpf-linker versions.
+
+
+def _rust_identity_root(tmp_path):
+    root = tmp_path / "repo"
+    (root / "crates" / "ebpf").mkdir(parents=True)
+    (root / "Cargo.lock").write_text("cargo-lock-bytes\n")
+    (root / "crates" / "ebpf" / "Cargo.lock").write_text(
+        "ebpf-lock-bytes\n")
+    (root / "rust-toolchain.toml").write_text(
+        '[toolchain]\nchannel = "1.100.0"\n')
+    return root
+
+
+def _git_commit_all(root):
+    import subprocess
+    subprocess.run(["git", "-C", str(root), "init", "-q"],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "add", "."],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "-c",
+                    "user.name=t", "-c", "user.email=t@t",
+                    "commit", "-qm", "identity"],
+                   check=True, capture_output=True)
+    proc = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True)
+    return proc.stdout.strip()
+
+
+def test_row_source_identity_rust_locks(tmp_path):
+    root = _rust_identity_root(tmp_path)
+    identity = km.row_source_identity(root)
+    assert identity["memveil"] == {"commit": "unknown",
+                                   "dirty": True}
+    assert identity["locks"] == {
+        "cargo_lock_sha256": hashlib.sha256(
+            b"cargo-lock-bytes\n").hexdigest(),
+        "ebpf_lock_sha256": hashlib.sha256(
+            b"ebpf-lock-bytes\n").hexdigest()}
+
+
+def test_row_source_identity_git_revision(tmp_path):
+    root = _rust_identity_root(tmp_path)
+    head = _git_commit_all(root)
+    assert km.row_source_identity(root)["memveil"] == {
+        "commit": head, "dirty": False}
+    (root / "dirty.txt").write_text("uncommitted\n")
+    assert km.row_source_identity(root)["memveil"] == {
+        "commit": head, "dirty": True}
+
+
+def test_row_source_identity_refuses_missing_lock(tmp_path):
+    root = _rust_identity_root(tmp_path)
+    (root / "Cargo.lock").unlink()
+    with pytest.raises(ValueError, match="[Ll]ock"):
+        km.row_source_identity(root)
+    root = _rust_identity_root(tmp_path / "second")
+    (root / "crates" / "ebpf" / "Cargo.lock").unlink()
+    with pytest.raises(ValueError, match="[Ll]ock"):
+        km.row_source_identity(root)
+
+
+def test_read_toolchain_lock_rust(tmp_path):
+    root = _rust_identity_root(tmp_path)
+    toolchain = km.read_toolchain_lock(root)
+    assert toolchain["lock_sha256"] == hashlib.sha256(
+        b"cargo-lock-bytes\n").hexdigest()
+    assert toolchain["ebpf_lock_sha256"] == hashlib.sha256(
+        b"ebpf-lock-bytes\n").hexdigest()
+    assert toolchain["channel"] == "1.100.0"
+    assert set(toolchain["tools"]) == {"cargo", "rustc",
+                                       "bpf_linker"}
+    for value in toolchain["tools"].values():
+        assert re.fullmatch(
+            r"[0-9]+\.[0-9]+\.[0-9]+"
+            r"(?:[-+][0-9A-Za-z.+-]+)?", value), value
+
+
+def test_read_toolchain_lock_strips_rustup_override(
+        tmp_path, monkeypatch):
+    root = _rust_identity_root(tmp_path)
+    monkeypatch.setenv("RUSTUP_TOOLCHAIN",
+                       "bogus-nonexistent-toolchain")
+    assert km.read_toolchain_lock(root)["tools"]["cargo"]
+
+
+def test_read_toolchain_lock_refuses_missing_channel(
+        tmp_path):
+    root = _rust_identity_root(tmp_path)
+    (root / "rust-toolchain.toml").unlink()
+    with pytest.raises(ValueError, match="rust-toolchain"):
+        km.read_toolchain_lock(root)
+
+
+def test_read_toolchain_lock_refuses_missing_lock(tmp_path):
+    root = _rust_identity_root(tmp_path)
+    (root / "crates" / "ebpf" / "Cargo.lock").unlink()
+    with pytest.raises(ValueError, match="[Ll]ock"):
+        km.read_toolchain_lock(root)
+
+
+def test_read_toolchain_lock_refuses_unprobable_tools(
+        tmp_path, monkeypatch):
+    root = _rust_identity_root(tmp_path)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    with pytest.raises(ValueError, match="cannot probe"):
+        km.read_toolchain_lock(root)
 
 
 def test_guest_write_btf_sha(tmp_path):
@@ -6380,6 +6636,9 @@ def test_run_one_collect_path_writes_receipt(tmp_path,
         collect=fake_collect)
     assert rec["ok"] is True
     row = tmp_path / "6.6"
+    # The collector keeps the host command line beside the
+    # row evidence for local debugging; it never ships.
+    assert (row / "vng-cmd.txt").read_text() == "true\n"
     km.validate_row_receipt(
         json.loads((row / "receipt.json").read_text()))
     ok, detail = km.rederive_row(row, rec)

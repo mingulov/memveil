@@ -123,11 +123,16 @@ dependencies = [
  "aya-obj",
  "libc",
  "memveil-ebpf-common",
+ "memveil-release-entry",
 ]
 
 [[package]]
 name = "memveil-ebpf-common"
 version = "0.0.0"
+
+[[package]]
+name = "memveil-release-entry"
+version = "0.1.0"
 
 [[package]]
 name = "object"
