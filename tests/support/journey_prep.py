@@ -44,8 +44,8 @@ sys.path.insert(0, str(ROOT / 'tests'))
 from support.candidate_suite import JOURNEY_SUITES, \
     checkout_identity, journey_identity_excludes, \
     journey_prep_dir, journey_records_dir, \
-    journey_staging_root, \
-    refuse_symlinked_path, resolve_journey_record
+    journey_staging_root, refuse_symlinked_path, \
+    refuse_unowned_prep_contents, resolve_journey_record
 
 SCHEMA = 'memveil-journey-prep/1'
 
@@ -245,10 +245,12 @@ def prepare(record_path):
     The record lives under the records subdir of the
     tool-owned prep directory (refused elsewhere);
     staged executables live under the sibling stages
-    subdir. The tracked-content boundary check runs
-    before any directory creation, mode change, or
-    write: only a prep directory empty of tracked
-    content proceeds to creation. Checkout identity is
+    subdir. The tracked-content and tool-owned-content
+    boundary checks run before any directory creation,
+    mode change, or write: only a prep directory empty
+    of tracked content and holding nothing outside
+    tool-owned records, stages, and publication scratch
+    proceeds to creation. Checkout identity is
     recorded before the first build and re-verified
     after the last: the two must agree, so an edit
     during prep refuses instead of mislabelling an older
@@ -266,6 +268,7 @@ def prepare(record_path):
     record_abs = Path(resolve_journey_record(record_path))
     raw_abs = Path(os.path.abspath(record_path))
     excludes = journey_identity_excludes()
+    refuse_unowned_prep_contents()
     _ensure_owned_dir(record_abs.parent)
     staged_dir = _private_stage_dir(record_abs)
     commit_before, tree_before = checkout_identity(

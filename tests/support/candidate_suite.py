@@ -208,7 +208,10 @@ def journey_prep_dir():
     or unset keeps the default. A relative override, or
     one covering the checkout itself, refuses: tool
     outputs must never scatter beside user paths or
-    swallow versioned source from identity.
+    swallow versioned source from identity. The cover
+    check compares resolved paths component-wise, so
+    every ancestor of the checkout refuses, including
+    the filesystem root.
     """
     override = os.environ.get('MV_JOURNEY_PREP_DIR')
     if not override:
@@ -217,14 +220,14 @@ def journey_prep_dir():
         raise ValueError(
             'journey prep directory must be absolute: %s'
             % override)
-    candidate = str(Path(override).resolve())
-    root = str(ROOT)
+    candidate = Path(override).resolve()
+    root = ROOT.resolve()
     if candidate == root \
-            or root.startswith(candidate + os.sep):
+            or candidate in root.parents:
         raise ValueError(
             'journey prep directory must not cover the '
             'checkout: %s' % override)
-    return candidate
+    return str(candidate)
 
 
 def journey_records_dir():
@@ -337,6 +340,129 @@ def journey_identity_excludes():
     return [top]
 
 
+def refuse_unowned_prep_contents():
+    """Refuse prep-directory content outside tool-owned entries.
+
+    The prep directory holds only the records and stages
+    subdirs: JSON prep records plus publication scratch
+    (<record>.<random>.tmp) under records, and fresh
+    stage directories (<record-stem>-<random>.staged)
+    holding the staged executables under stages. Anything
+    else (notably untracked source inside an in-checkout
+    override) would vanish from checkout identity through
+    the wholesale exclusion, so it refuses before any
+    write or mode change. A missing directory is fine:
+    the prep tool creates it. Entries are judged by name
+    and kind alone; links are never followed, and link
+    safety stays with the checks consuming each path.
+    """
+    from support.journey_prep import TARGETS
+    top = Path(journey_prep_dir())
+    try:
+        mode = os.lstat(top).st_mode
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise ValueError(
+            'journey prep directory unavailable: %s' % exc)
+    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+        raise ValueError(
+            'journey prep directory is not a directory: '
+            '%s' % top)
+    staged_names = set(TARGETS.values())
+
+    def refuse(entry):
+        raise ValueError(
+            'journey prep directory holds content outside '
+            'tool-owned records and stages; refusing: %s'
+            % entry)
+
+    def children(directory):
+        try:
+            with os.scandir(directory) as scanner:
+                return list(scanner)
+        except FileNotFoundError:
+            return []
+        except OSError as exc:
+            raise ValueError(
+                'journey prep directory unreadable: %s'
+                % exc)
+
+    def kind(entry):
+        try:
+            mode = os.lstat(entry.path).st_mode
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise ValueError(
+                'journey prep directory unreadable: %s'
+                % exc)
+        if stat.S_ISLNK(mode):
+            return 'link'
+        if stat.S_ISDIR(mode):
+            return 'dir'
+        if stat.S_ISREG(mode):
+            return 'file'
+        return 'other'
+
+    def real_dir(path):
+        try:
+            mode = os.lstat(path).st_mode
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise ValueError(
+                'journey prep directory unreadable: %s'
+                % exc)
+        return stat.S_ISDIR(mode)
+
+    def check_records(directory):
+        for child in children(directory):
+            entry_kind = kind(child)
+            if entry_kind is None:
+                continue
+            if entry_kind == 'dir':
+                check_records(child.path)
+            elif entry_kind in ('file', 'link') \
+                    and (child.name.endswith('.json')
+                         or child.name.endswith('.tmp')):
+                continue
+            else:
+                refuse(child.path)
+
+    def check_stage(directory):
+        for child in children(directory):
+            entry_kind = kind(child)
+            if entry_kind is None:
+                continue
+            if entry_kind not in ('file', 'link') \
+                    or child.name not in staged_names:
+                refuse(child.path)
+
+    def check_stages(directory):
+        for child in children(directory):
+            entry_kind = kind(child)
+            if entry_kind is None:
+                continue
+            if not child.name.endswith('.staged'):
+                refuse(child.path)
+            if entry_kind == 'dir':
+                check_stage(child.path)
+            elif entry_kind != 'link':
+                refuse(child.path)
+
+    for child in children(top):
+        if child.name not in (JOURNEY_RECORDS_DIRNAME,
+                              JOURNEY_STAGES_DIRNAME):
+            refuse(child.path)
+        if kind(child) not in ('dir', 'link'):
+            refuse(child.path)
+    if real_dir(top / JOURNEY_RECORDS_DIRNAME):
+        check_records(str(top / JOURNEY_RECORDS_DIRNAME))
+    if real_dir(top / JOURNEY_STAGES_DIRNAME):
+        check_stages(str(top / JOURNEY_STAGES_DIRNAME))
+
+
 def _journey_record(live):
     """Validated prep record for the journey launcher.
 
@@ -446,6 +572,7 @@ def _run_journey(suite, argv, live):
     """
     from support.journey_prep import TARGETS
     record = _journey_record(live)
+    refuse_unowned_prep_contents()
     entry = record['suites'].get(suite)
     if not isinstance(entry, dict) \
             or set(entry) \

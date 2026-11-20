@@ -954,6 +954,150 @@ def test_journey_prep_refuses_tracked_before_any_write(
             shutil.rmtree(top, ignore_errors=True)
 
 
+def test_journey_prep_dir_refuses_filesystem_root(
+        tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import journey_prep_dir
+    import support.journey_prep as prep
+    fake = tmp_path / 'fake-exe'
+    fake.write_bytes(b'#!/bin/sh\necho fake\n')
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    # The filesystem root and every ancestor of the
+    # checkout refuse; a parent directory is not the
+    # checkout itself, yet covers it all the same.
+    monkeypatch.setenv('MV_JOURNEY_PREP_DIR', '/')
+    with pytest.raises(ValueError, match='must not cover'):
+        journey_prep_dir()
+    monkeypatch.setenv('MV_JOURNEY_PREP_DIR',
+                       str(ROOT.parent))
+    with pytest.raises(ValueError, match='must not cover'):
+        journey_prep_dir()
+    # A refused root override attempts no mode change:
+    # the refusal lands before any write or chmod, and
+    # the root mode is untouched.
+    monkeypatch.setenv('MV_JOURNEY_PREP_DIR', '/')
+    calls = []
+    real_chmod = os.chmod
+
+    def recording(path, mode):
+        calls.append((str(path), mode))
+        return real_chmod(path, mode)
+
+    monkeypatch.setattr(os, 'chmod', recording)
+    before = os.stat('/').st_mode
+    with pytest.raises(ValueError, match='must not cover'):
+        prep.prepare('/records/prep.json')
+    assert calls == [], 'refused prep attempted chmod'
+    assert os.stat('/').st_mode == before
+    assert not os.path.lexists('/records')
+
+
+def test_journey_prep_refuses_untracked_source_in_override(
+        tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import journey_prep_dir
+    import support.journey_prep as prep
+    # Untracked source needs an in-checkout prep root: a
+    # fresh probe directory, never the operator's dir.
+    fresh = ROOT / ('probe-prep-%d-%s'
+                    % (os.getpid(), uuid.uuid4().hex[:8]))
+    monkeypatch.setenv('MV_JOURNEY_PREP_DIR', str(fresh))
+    assert Path(journey_prep_dir()) == fresh
+    fake = tmp_path / 'fake-exe'
+    fake.write_bytes(b'#!/bin/sh\necho fake\n')
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    calls = []
+    real_chmod = os.chmod
+
+    def recording(path, mode):
+        calls.append((str(path), mode))
+        return real_chmod(path, mode)
+
+    monkeypatch.setattr(os, 'chmod', recording)
+    try:
+        fresh.mkdir(parents=True)
+        plant = fresh / 'untracked-source.py'
+        plant.write_text('print("untracked")\n')
+        rel = fresh.relative_to(ROOT)
+        listed = subprocess.run(
+            ['git', '-C', str(ROOT), 'ls-files', '--others',
+             '--exclude-standard', '-z', '--', str(rel)],
+            capture_output=True, text=True)
+        assert listed.returncode == 0, listed.stderr
+        assert (rel / plant.name).as_posix() in \
+            listed.stdout.split('\0'), \
+            'plant is not untracked-but-visible'
+        with pytest.raises(ValueError,
+                           match='tool-owned'):
+            prep.prepare(str(fresh / 'records' / 'prep.json'))
+        assert calls == [], 'refused prep attempted chmod'
+        assert not (fresh / 'records').exists(), \
+            'refused prep created its records dir'
+        assert plant.read_text() == 'print("untracked")\n'
+    finally:
+        shutil.rmtree(fresh, ignore_errors=True)
+
+
+def test_journey_prep_accepts_tool_owned_override(
+        tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import journey_prep_dir
+    import support.journey_prep as prep
+    # An in-checkout override holding only tool-owned
+    # entries (records, stages, a prior record, and a
+    # lingering publication scratch file) proceeds.
+    fresh = ROOT / ('probe-prep-%d-%s'
+                    % (os.getpid(), uuid.uuid4().hex[:8]))
+    monkeypatch.setenv('MV_JOURNEY_PREP_DIR', str(fresh))
+    assert Path(journey_prep_dir()) == fresh
+    fake = tmp_path / 'fake-exe'
+    fake.write_bytes(b'#!/bin/sh\necho fake\n')
+    fake.chmod(0o755)
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    try:
+        (fresh / 'records').mkdir(parents=True)
+        (fresh / 'stages').mkdir(parents=True)
+        (fresh / 'records' / 'prior.json').write_text('{}\n')
+        (fresh / 'records' / 'prior.json.stale.tmp') \
+            .write_bytes(b'{"schema": "partial-')
+        record = prep.prepare(
+            str(fresh / 'records' / 'prep.json'))
+        assert (fresh / 'records' / 'prep.json').is_file()
+        for suite, entry in record['suites'].items():
+            staged = Path(entry['staged'])
+            assert (fresh / 'stages') in staged.parents, \
+                suite
+            assert staged.is_file(), suite
+    finally:
+        shutil.rmtree(fresh, ignore_errors=True)
+
+
+def test_journey_prep_accepts_fresh_override(
+        tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    import support.journey_prep as prep
+    # A fresh override path, existing nowhere on disk,
+    # is created and proceeds.
+    fresh = tmp_path / 'fresh-prep-root'
+    monkeypatch.setenv('MV_JOURNEY_PREP_DIR', str(fresh))
+    fake = tmp_path / 'fake-exe'
+    fake.write_bytes(b'#!/bin/sh\necho fake\n')
+    fake.chmod(0o755)
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    assert not os.path.lexists(fresh)
+    record = prep.prepare(
+        str(fresh / 'records' / 'prep.json'))
+    assert (fresh / 'records' / 'prep.json').is_file()
+    for suite, entry in record['suites'].items():
+        staged = Path(entry['staged'])
+        assert (fresh / 'stages') in staged.parents, suite
+        assert staged.is_file(), suite
+
+
 def test_staged_state_baseline_tolerates_preset_changes(
         tmp_path):
     # The clean-index assertion compares against a
