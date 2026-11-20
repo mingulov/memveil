@@ -3,10 +3,12 @@
 """Fixture-prep phase for journey qualification.
 
 Builds the journey test executables once, stages their
-verified bytes into an owned directory beside the record,
-and records the staged paths plus SHA-256 digests, so
-qualification can launch them directly without invoking
-cargo. Usage:
+verified bytes into a fresh private directory beside the
+record, and records the staged paths plus SHA-256 digests,
+so qualification can launch them directly without invoking
+cargo. Each prep creates its own staging directory: a
+previous stage is never reused or overwritten, and
+symlinks anywhere in the staging path refuse. Usage:
 
     tests/support/journey_prep.py RECORD
 
@@ -26,6 +28,8 @@ qualification path itself contains no cargo invocation.
 import hashlib
 import json
 import os
+import stat
+import tempfile
 from pathlib import Path
 import subprocess
 import sys
@@ -39,6 +43,103 @@ SCHEMA = 'memveil-journey-prep/1'
 
 # Dispatch suite name to cargo test target.
 TARGETS = {'deb': 'package_deb', 'rpm-journey': 'package_rpm'}
+
+
+def _refuse_symlinked_path(path):
+    """Refuse when any existing component of path is a symlink.
+
+    Walks the unresolved absolute path from the leaf to the
+    root with lstat, never following: a planted link
+    anywhere along the staging path would redirect staged
+    bytes outside the operator's directory. Missing
+    components are skipped: the stage setup creates them as
+    real directories and re-checks afterwards.
+    """
+    for candidate in (path, *path.parents):
+        try:
+            mode = os.lstat(candidate).st_mode
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ValueError(
+                'staging path unavailable: %s' % exc)
+        if stat.S_ISLNK(mode):
+            raise ValueError(
+                'staging path refuses symlink: %s' % candidate)
+
+
+def _private_stage_dir(record_abs):
+    """Create a fresh private staging directory beside the record.
+
+    Each prep gets its own unique directory (exclusive
+    creation: the call fails rather than reusing an
+    existing path), so a concurrent prep can never replace
+    staged bytes between hashing and launch. Symlinks
+    anywhere in the staging path refuse, both before and
+    after the parent setup; the created directory is
+    re-verified as a real directory whose resolved path
+    equals its spelled path. Previous stages are never
+    reused or overwritten: they stay beside the record for
+    operator cleanup.
+    """
+    parent = record_abs.parent
+    _refuse_symlinked_path(parent)
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ValueError(
+            'staging directory unavailable: %s' % exc)
+    _refuse_symlinked_path(parent)
+    try:
+        staged_dir = Path(tempfile.mkdtemp(
+            prefix=record_abs.stem + '-', suffix='.staged',
+            dir=str(parent)))
+    except OSError as exc:
+        raise ValueError(
+            'staging directory unavailable: %s' % exc)
+    try:
+        mode = os.lstat(staged_dir).st_mode
+    except OSError as exc:
+        raise ValueError(
+            'staging directory unavailable: %s' % exc)
+    if not stat.S_ISDIR(mode) or stat.S_ISLNK(mode):
+        raise ValueError(
+            'staging path refuses symlink: %s' % staged_dir)
+    if os.path.realpath(staged_dir) != str(staged_dir):
+        raise ValueError(
+            'staging path changed during prep: %s'
+            % staged_dir)
+    os.chmod(staged_dir, 0o700)
+    return staged_dir
+
+
+def _stage_bytes(staged, data, suite):
+    """Write staged bytes exactly once; refuse overwrite or alias.
+
+    Exclusive creation fails when the path already exists,
+    so a previous stage is never overwritten; no-follow
+    refuses a planted symlink instead of writing through
+    it.
+    """
+    try:
+        fd = os.open(staged, os.O_WRONLY | os.O_CREAT
+                     | os.O_EXCL | os.O_NOFOLLOW, 0o700)
+    except FileExistsError:
+        raise ValueError(
+            'fixture prep refuses to overwrite staged '
+            'executable: %s' % suite)
+    except OSError as exc:
+        raise ValueError(
+            'fixture prep cannot stage executable %s: %s'
+            % (suite, exc))
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(data)
+    except OSError as exc:
+        raise ValueError(
+            'fixture prep cannot stage executable %s: %s'
+            % (suite, exc))
+    os.chmod(staged, 0o700)
 
 
 def build_executable(target):
@@ -89,21 +190,19 @@ def prepare(record_path):
         raise ValueError(
             'prep targets differ from dispatched journey '
             'suites')
-    record_abs = Path(record_path).resolve()
+    raw_abs = Path(os.path.abspath(record_path))
+    _refuse_symlinked_path(raw_abs.parent)
+    record_abs = raw_abs.resolve()
+    staged_dir = _private_stage_dir(record_abs)
     commit_before, tree_before = checkout_identity(
         exclude=[str(record_abs)])
-    staged_dir = record_abs.parent \
-        / (record_abs.stem + '.staged')
-    staged_dir.mkdir(parents=True, exist_ok=True)
-    os.chmod(staged_dir, 0o700)
     suites = {}
     for suite in JOURNEY_SUITES:
         executable = build_executable(TARGETS[suite])
         data = executable.read_bytes()
         digest = hashlib.sha256(data).hexdigest()
         staged = staged_dir / TARGETS[suite]
-        staged.write_bytes(data)
-        os.chmod(staged, 0o700)
+        _stage_bytes(staged, data, suite)
         if hashlib.sha256(staged.read_bytes()).hexdigest() \
                 != digest:
             raise ValueError(

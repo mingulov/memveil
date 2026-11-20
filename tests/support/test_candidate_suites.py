@@ -630,6 +630,138 @@ def test_journey_prep_refuses_mid_prep_edit(tmp_path,
         prep.prepare(str(tmp_path / 'prep.json'))
 
 
+def test_journey_prep_uses_fresh_private_stage(tmp_path,
+                                              monkeypatch):
+    import hashlib
+    sys.path.insert(0, str(ROOT / 'tests'))
+    import support.journey_prep as prep
+    first = tmp_path / 'first-exe'
+    first.write_bytes(
+        b'#!/bin/sh\necho first-stage\n' + b'A' * 4096)
+    second = tmp_path / 'second-exe'
+    second.write_bytes(
+        b'#!/bin/sh\necho second-stage\n' + b'B' * 4096)
+    current = [first]
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: current[0])
+    record_path = tmp_path / 'prep.json'
+    record_one = prep.prepare(str(record_path))
+    stage_one = Path(
+        record_one['suites']['deb']['staged']).parent
+    current[0] = second
+    record_two = prep.prepare(str(record_path))
+    stage_two = Path(
+        record_two['suites']['deb']['staged']).parent
+    assert stage_one != stage_two
+    # The second prep left the first stage's hashed bytes
+    # intact instead of overwriting them.
+    for suite, entry in record_one['suites'].items():
+        assert hashlib.sha256(
+            Path(entry['staged']).read_bytes()).hexdigest() \
+            == entry['sha256'], suite
+    for suite, entry in record_two['suites'].items():
+        assert hashlib.sha256(
+            Path(entry['staged']).read_bytes()).hexdigest() \
+            == entry['sha256'], suite
+
+
+def test_journey_concurrent_preps_keep_private_stages(
+        tmp_path, monkeypatch):
+    import hashlib
+    import threading
+    sys.path.insert(0, str(ROOT / 'tests'))
+    import support.journey_prep as prep
+    fakes = {}
+    for tag in ('alpha', 'beta'):
+        fake = tmp_path / ('fake-' + tag)
+        fake.write_bytes(
+            b'#!/bin/sh\necho ' + tag.encode() + b'\n'
+            + tag.encode() * 65536)
+        fakes[tag] = fake
+    barrier = threading.Barrier(2)
+
+    def build(target):
+        tag = threading.current_thread().name
+        barrier.wait(timeout=120)
+        return fakes[tag]
+
+    monkeypatch.setattr(prep, 'build_executable', build)
+    record_path = tmp_path / 'prep.json'
+    outcomes = {}
+
+    def run(tag):
+        try:
+            outcomes[tag] = (
+                'ok', prep.prepare(str(record_path)))
+        except Exception as exc:
+            outcomes[tag] = ('error', repr(exc))
+
+    threads = [threading.Thread(target=run, args=(tag,),
+                               name=tag)
+               for tag in ('alpha', 'beta')]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=300)
+    assert not any(thread.is_alive() for thread in threads)
+    for tag in ('alpha', 'beta'):
+        status, record = outcomes[tag]
+        assert status == 'ok', (tag, record)
+    stages = [Path(outcomes[tag][1]['suites']['deb']
+                   ['staged']).parent
+              for tag in ('alpha', 'beta')]
+    assert stages[0] != stages[1]
+    for tag in ('alpha', 'beta'):
+        for suite, entry in \
+                outcomes[tag][1]['suites'].items():
+            assert hashlib.sha256(
+                Path(entry['staged'])
+                .read_bytes()).hexdigest() \
+                == entry['sha256'], (tag, suite)
+
+
+def test_journey_prep_refuses_symlinked_staging_path(
+        tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    import support.journey_prep as prep
+    fake = tmp_path / 'fake-exe'
+    fake.write_bytes(b'#!/bin/sh\necho fake\n')
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    real = tmp_path / 'real'
+    real.mkdir()
+    linked = tmp_path / 'linked'
+    linked.symlink_to(real, target_is_directory=True)
+    with pytest.raises(ValueError, match='symlink'):
+        prep.prepare(str(linked / 'prep.json'))
+    assert sorted(entry.name for entry in real.iterdir()) \
+        == []
+
+
+def test_journey_prep_leaves_planted_stage_name_untouched(
+        tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    import support.journey_prep as prep
+    fake = tmp_path / 'fake-exe'
+    fake.write_bytes(b'#!/bin/sh\necho fake\n')
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    victim = tmp_path / 'victim'
+    victim.mkdir()
+    sentinel = victim / 'sentinel'
+    sentinel.write_text('untouched\n')
+    record_path = tmp_path / 'prep.json'
+    plant = tmp_path / 'prep.staged'
+    plant.symlink_to(victim, target_is_directory=True)
+    record = prep.prepare(str(record_path))
+    assert plant.is_symlink()
+    assert sentinel.read_text() == 'untouched\n'
+    assert sorted(entry.name for entry in victim.iterdir()) \
+        == ['sentinel']
+    for suite, entry in record['suites'].items():
+        assert Path(entry['staged']).parent != plant, suite
+
+
 def test_journey_launcher_ignores_original_post_stage(
         sealed, tmp_path):
     harness = ('#!/bin/sh\necho journey-marker\n'
