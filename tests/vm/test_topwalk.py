@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from evidence_retention import (expected_from_verified,
                                 retain_failure)
 import gate_kernel  # noqa: E402
+import guest_lifecycle
 from lifecycle_env import (BRIDGE, COPY_PROBE, LIFECYCLE_PROBE,
                            ensure_oracle_module,
                            require_lifecycle_env)
@@ -31,7 +32,6 @@ from vm_boot import run_guest, verify_exports
 
 REPO = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-MEMVEIL = os.path.join(REPO, "build", "memveil")
 ATTEMPT_PROBE = os.path.join(
     REPO, "build", "bpf", "swiotlb_attempt.bpf.o")
 POOL_SLOT_BYTES = 2048
@@ -83,6 +83,8 @@ def test_topwalk_live_top_walkthrough():
         assert ident["release"] == gate_kernel.selected().release, ident
         ledger = json.loads(got["walk.json"].read_text())
         assert ledger["memveil_rc"] == 0, ledger
+        memveil, selected = guest_lifecycle.topwalk_replay_binary(REPO)
+        guest_lifecycle.assert_topwalk_memveil_binding(ledger, selected)
         assert ledger["end_reason"] == "duration", ledger
         for cap in ("bounce_attempts", "mapping_lifecycle",
                     "copy_bytes"):
@@ -103,7 +105,7 @@ def test_topwalk_live_top_walkthrough():
         shutil.copyfile(got["cap-events.ndjson"],
                         os.path.join(capdir, "events.ndjson"))
         replay = subprocess.run(
-            [MEMVEIL, "top", capdir],
+            [memveil, "top", capdir],
             capture_output=True, text=True, timeout=300)
         assert replay.returncode == ledger["memveil_rc"], \
             replay.stderr[-2000:]

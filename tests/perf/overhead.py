@@ -46,6 +46,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "tests", "vm"))
+sys.path.insert(0, os.path.join(REPO, "tests"))
+from support.candidate_input import binary
+BIN = binary(os.path.join(REPO, "build", "memveil"))
 
 from compare import assess, compare
 from overhead_guest import (DD_BYTES, FLOOD_COUNT, MEASURED_MAX_S,
@@ -84,7 +87,7 @@ def need(path, what):
 
 
 def armed_preflight():
-    ok = need(os.path.join(REPO, "build", "memveil"), "binary")
+    ok = need(BIN, "binary")
     for name in ("swiotlb_attempt.bpf.o", "swiotlb_lifecycle.bpf.o",
                  "swiotlb_copy.bpf.o",
                  "swiotlb_lifecycle-test.bpf.o",
@@ -174,7 +177,7 @@ def snapshot_campaign(tmp, sub, ledger_name, validate_ledger):
             raise ValueError("guest artifact mismatch: " + key)
     artifacts = ledger["artifacts"]
     for key, path in (
-            ("memveil_sha", os.path.join(REPO, "build", "memveil")),
+            ("memveil_sha", BIN),
             ("attempt_sha", os.path.join(
                 REPO, "build", "bpf", "swiotlb_attempt.bpf.o")),
             ("lc_sha", os.path.join(

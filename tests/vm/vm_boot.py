@@ -14,6 +14,7 @@ import json
 import fcntl
 import shutil
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -25,10 +26,65 @@ from test_attempt_capture import cleanup, gate_prefix
 
 REPO = Path(__file__).resolve().parent.parent.parent
 GUEST_FLOW = REPO / "tests" / "vm" / "guest_lifecycle.py"
+TESTS = Path(__file__).resolve().parent.parent
+
+
+def guest_exec_command(sub, work, repo, selected=None):
+    """Guest --exec string, with the candidate env when selected.
+
+    Candidate mode prepends the manifest, tarball, and
+    expected digest so the guest re-verifies the same
+    candidate before any guest work.
+    """
+    if selected is None:
+        return f"python3 {GUEST_FLOW} {sub} {work} /tmp/export {repo}"
+    guest = ["python3", str(GUEST_FLOW), sub, work,
+             "/tmp/export", str(repo)]
+    return shlex.join(
+        ["env",
+         "MV_CANDIDATE_MANIFEST=" + str(selected.manifest_path),
+         "MV_BUNDLE_TARBALL=" + str(selected.bundle),
+         "MV_CANDIDATE_DIGEST=" + selected.digest,
+         *guest])
+
+
+def guest_artifact_paths(sub, repo, selected=None):
+    """Host-side expected paths for guest identity hashes.
+
+    Candidate mode resolves the lifecycle/copy objects
+    under the verified root for every subcommand; a
+    saturation guest still runs the dev test objects, so
+    its identity refuses here instead of passing mixed
+    bytes as qualified. Consume/bridge keep dev paths
+    (the candidate carries no bridge).
+    """
+    repo = str(repo)
+    table = {
+        "consume_sha": os.path.join(repo, "build", "vm", "mv_consume"),
+        "lc_sha": os.path.join(repo, "build", "bpf",
+                               "swiotlb_lifecycle-test.bpf.o"
+                               if sub == "saturation"
+                               else "swiotlb_lifecycle.bpf.o"),
+        "cp_sha": os.path.join(repo, "build", "bpf",
+                               "swiotlb_copy-test.bpf.o"
+                               if sub == "saturation"
+                               else "swiotlb_copy.bpf.o"),
+        "bridge_sha": os.path.join(repo, "build", "deps", "lmb",
+                                   "lib", "libbpf_mojo.so.1"),
+    }
+    if selected is not None:
+        table["lc_sha"] = str(selected.path(
+            "bpf/swiotlb_lifecycle.bpf.o"))
+        table["cp_sha"] = str(selected.path(
+            "bpf/swiotlb_copy.bpf.o"))
+    return table
 
 
 def run_guest(sub, timeout=900, network=False):
     """Boot the guest, run one lifecycle subcommand, return dir+proc."""
+    sys.path.insert(0, str(TESTS))
+    from support.candidate_input import load
+    selected = load()
     prefix, env = gate_prefix()
     from lifecycle_env import ensure_oracle_module
     from harness_env import check_harness_versions
@@ -70,7 +126,7 @@ def run_guest(sub, timeout=900, network=False):
     cmd += [
         f"--rwdir=/tmp/export={export}",
         "--exec",
-        f"python3 {GUEST_FLOW} {sub} {work} /tmp/export {REPO}",
+        guest_exec_command(sub, work, REPO, selected),
     ]
     try:
         from vm_process import run_owned_guest
@@ -105,19 +161,24 @@ def verify_exports(tmp, sub, names):
     from export_validation import validate_lifecycle_exports
     validate_lifecycle_exports(got, sub)
     if "identity.json" in got:
+        sys.path.insert(0, str(TESTS))
+        from support.candidate_input import load
+        selected = load()
         from lifecycle_env import ORACLE_KO, module_build_identity
         expected = module_build_identity()
         identity = json.loads(got["identity.json"].read_text())
         for key in ("release", "config_sha", "btf_sha"):
             assert identity[key] == expected[key], "guest kernel identity drift: " + key
-        for key, path in (("consume_sha",REPO/"build/vm/mv_consume"),
-                          ("lc_sha",REPO/("build/bpf/swiotlb_lifecycle-test.bpf.o" if sub=="saturation" else "build/bpf/swiotlb_lifecycle.bpf.o")),
-                          ("cp_sha",REPO/("build/bpf/swiotlb_copy-test.bpf.o" if sub=="saturation" else "build/bpf/swiotlb_copy.bpf.o")),
-                          ("bridge_sha",REPO/"build/deps/lmb/lib/libbpf_mojo.so.1"),
-                          ("ko_sha",Path(ORACLE_KO))):
+        paths = guest_artifact_paths(sub, REPO, selected)
+        for key, path in (("consume_sha", paths["consume_sha"]),
+                          ("lc_sha", paths["lc_sha"]),
+                          ("cp_sha", paths["cp_sha"]),
+                          ("bridge_sha", paths["bridge_sha"]),
+                          ("ko_sha", Path(ORACLE_KO))):
             assert identity[key] == sha_file(path), "guest artifact mismatch: " + key
     return VerifiedExports(got, verified)
 
 
-__all__ = ["REPO", "GUEST_FLOW", "run_guest", "verify_exports",
+__all__ = ["REPO", "GUEST_FLOW", "guest_exec_command",
+           "guest_artifact_paths", "run_guest", "verify_exports",
            "cleanup", "gate_prefix"]

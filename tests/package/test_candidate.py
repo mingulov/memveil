@@ -6,6 +6,8 @@ bundle, archive, and receipt below is assembled in a temporary
 directory, and only the verification logic under test is real.
 """
 
+import ast
+import base64
 import copy
 import gzip
 import hashlib
@@ -14,6 +16,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -25,6 +28,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "tests" / "vm"))
 import kernel_matrix as km
+import candidate_custody as cc
 from test_kernel_matrix import (_admitted_entry, _ev_pass, _row_ctx,
                                 _row_job)
 
@@ -1913,6 +1917,7 @@ def _sealed_for_qualify(workshop, tmp_path, required_gates):
                "manifest_path": manifest_path,
                "candidate_id": candidate_id,
                "policy_path": policy_path,
+               "artifacts": fix["artifacts"],
                "key": private, "pub": public}
 
 
@@ -3058,3 +3063,812 @@ def test_sign_checksums_cleans_partial_signature_on_failure(
         m.sign_checksums(staged, private, out)
     assert list(out.iterdir()) == [], \
         "failed sign must leave no partial triple"
+
+
+# Authoring CLIs: gate receipts, qualifications, remote custody.
+#
+# The verify side (qualify, custody promote) re-derives every gate
+# from retained evidence; these CLIs author the signed records an
+# honest qualifier writes after running the gates. Tests use
+# ephemeral ssh-keygen keys and synthetic seals only.
+
+
+def _write_gate_inputs(m, evidence, inputs_name, counts=None):
+    """Gate inputs plus retained raw bindings over evidence raws."""
+    evidence = Path(evidence)
+    evidence.mkdir(exist_ok=True)
+    counts = {"events": "12", "losses": "0"} \
+        if counts is None else dict(counts)
+    inputs = {"schema": "memveil-gate-input/1",
+              "environment": "offline",
+              "product": dict(counts), "oracle": dict(counts)}
+    inputs["sources"] = {}
+    for side in ("product", "oracle"):
+        raw = evidence / (side + ".json")
+        raw.write_bytes(m.canonical(inputs[side]))
+        inputs["sources"][side] = {
+            name: {"file": raw.name,
+                   "sha256": sha(raw.read_bytes()),
+                   "path": [name], "encoding": "u64"}
+            for name in inputs[side]}
+    path = evidence / inputs_name
+    path.write_bytes(m.canonical(inputs))
+    return path
+
+
+def _two_gate_policy():
+    req = {"environment": "offline",
+           "predicates": {"events": "equal", "losses": "zero"}}
+    return {"synthetic-counts/1": copy.deepcopy(req),
+            "synthetic-counts/2": copy.deepcopy(req)}
+
+
+def _receipt_cli(ctx, gate, inputs_path, out_path):
+    return [str(ROOT / "tools" / "candidate"),
+            "write-gate-receipt",
+            "--gate", gate,
+            "--candidate", str(ctx["manifest_path"]),
+            "--inputs", str(inputs_path),
+            "--key", str(ctx["key"]),
+            "--out", str(out_path)]
+
+
+def _run_cli(argv):
+    return subprocess.run(argv, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True)
+
+
+def test_write_gate_receipt_roundtrip(workshop, tmp_path):
+    m, ctx = _sealed_for_qualify(
+        workshop, tmp_path, _nonmatrix_required_gates())
+    staged = Path(tmp_path) / "staged"
+    inputs_path = _write_gate_inputs(m, staged, "inputs.json")
+    out = Path(tmp_path) / "receipt.json"
+    proc = _run_cli(_receipt_cli(ctx, NONMATRIX_GATE,
+                                 inputs_path, out))
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == sha(out.read_bytes())
+    record = m.read_json(out, sealed=True)
+    assert record == {
+        "schema": "memveil-gate-receipt/1", "gate": NONMATRIX_GATE,
+        "candidate_sha256": ctx["candidate_id"],
+        "source_commit": ctx["manifest"]["source"]["commit"],
+        "inputs": "inputs.json",
+        "inputs_sha256": sha(inputs_path.read_bytes())}
+    sig = Path(str(out) + ".sig")
+    pub = out.parent / "signer.pub"
+    assert sig.is_file() and pub.is_file()
+    assert pub.read_bytes() == ctx["pub"].read_bytes()
+    trusted = [sha(pub.read_bytes())]
+    m.verify_signature(out, sig, pub, trusted)
+    tampered = bytearray(out.read_bytes())
+    tampered[-20] ^= 1
+    out.write_bytes(bytes(tampered))
+    with pytest.raises(ValueError):
+        m.verify_signature(out, sig, pub, trusted)
+    # The receipt binds the inputs bytes: re-emitting over
+    # changed inputs records a different digest.
+    _write_gate_inputs(m, staged, "inputs.json",
+                       {"events": "13", "losses": "0"})
+    out2 = Path(tmp_path) / "receipt2.json"
+    proc = _run_cli(_receipt_cli(ctx, NONMATRIX_GATE,
+                                 inputs_path, out2))
+    assert proc.returncode == 0, proc.stderr
+    assert m.read_json(out2, sealed=True)["inputs_sha256"] \
+        != record["inputs_sha256"]
+
+
+def _qualification_cli(ctx, gates, evidence, out_path):
+    return [str(ROOT / "tools" / "candidate"),
+            "write-qualification",
+            "--manifest", str(ctx["manifest_path"]),
+            "--policy", str(ctx["policy_path"]),
+            "--gates", *[str(gate) for gate in gates],
+            "--evidence-dir", str(evidence),
+            "--out", str(out_path)]
+
+
+def test_write_qualification_refuses_inconsistent(workshop,
+                                                  tmp_path):
+    m, ctx = _sealed_for_qualify(
+        workshop, tmp_path, _two_gate_policy())
+    evidence = Path(tmp_path) / "evidence"
+    inputs1 = _write_gate_inputs(m, evidence, "inputs-1.json")
+    inputs2 = _write_gate_inputs(m, evidence, "inputs-2.json")
+    first = evidence / "receipt-1.json"
+    second = evidence / "receipt-2.json"
+    for gate, inputs_path, out in (
+            ("synthetic-counts/1", inputs1, first),
+            ("synthetic-counts/2", inputs2, second)):
+        proc = _run_cli(_receipt_cli(ctx, gate, inputs_path,
+                                     out))
+        assert proc.returncode == 0, proc.stderr
+    # Positive control: the exact set assembles, binds the
+    # packed archive beside the qualification, and re-derives
+    # through the real verifier.
+    q_path = Path(tmp_path) / "qualification.json"
+    proc = _run_cli(_qualification_cli(
+        ctx, [first, second], evidence, q_path))
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == sha(q_path.read_bytes())
+    doc = m.read_json(q_path, sealed=True)
+    assert set(doc["gates"]) == {"synthetic-counts/1",
+                                 "synthetic-counts/2"}
+    archive = Path(tmp_path) / "qualification-evidence.tar.gz"
+    assert archive.is_file()
+    assert doc["evidence_archive"] == {
+        "name": "qualification-evidence.tar.gz",
+        "size": str(archive.stat().st_size),
+        "sha256": sha(archive.read_bytes())}
+    assert m.verify_qualification(
+        ctx["manifest_path"], q_path, ctx["policy_path"],
+        evidence, source_tree=str(ctx["root"])) == {
+            "ok": True,
+            "gates": ["synthetic-counts/1",
+                      "synthetic-counts/2"],
+            "trusted_keys": [sha(ctx["pub"].read_bytes())],
+            "claim": "ordinary-preview"}
+    refusals = []
+    # Unknown gate: honestly signed but outside the policy.
+    ninth = evidence / "receipt-9.json"
+    proc = _run_cli(_receipt_cli(ctx, "synthetic-counts/9",
+                                 inputs1, ninth))
+    assert proc.returncode == 0, proc.stderr
+    refusals.append([first, second, ninth])
+    refusals.append([first])
+    refusals.append([first, first])
+    for rank, gates in enumerate(refusals):
+        proc = _run_cli(_qualification_cli(
+            ctx, gates, evidence,
+            Path(tmp_path) / ("q-%d.json" % rank)))
+        assert proc.returncode == 1, gates
+        assert proc.stderr.strip(), \
+            "silent qualification refusal: %r" % (gates,)
+    # Corrupted signature over an otherwise honest receipt.
+    forged = evidence / "receipt-forged.json"
+    forged_sig = Path(str(forged) + ".sig")
+    shutil.copy2(first, forged)
+    shutil.copy2(str(first) + ".sig", forged_sig)
+    damaged = bytearray(forged_sig.read_bytes())
+    damaged[-20] ^= 1
+    forged_sig.write_bytes(bytes(damaged))
+    proc = _run_cli(_qualification_cli(
+        ctx, [forged, second], evidence,
+        Path(tmp_path) / "q-forged.json"))
+    assert proc.returncode == 1
+    assert proc.stderr.strip(), "silent signature refusal"
+    # The qualification lives beside the evidence, never in it.
+    proc = _run_cli(_qualification_cli(
+        ctx, [first, second], evidence,
+        evidence / "qualification.json"))
+    assert proc.returncode == 1
+    assert proc.stderr.strip(), "silent nesting refusal"
+    # Pre-existing outputs refuse before the first write:
+    # a failed re-run never orphans a previous run's
+    # archive, and a taken qualification path assembles no
+    # fresh archive beside it.
+    stale = Path(tmp_path) / "stale"
+    stale.mkdir()
+    sentinel = stale / "qualification-evidence.tar.gz"
+    sentinel.write_bytes(b"previous run archive")
+    proc = _run_cli(_qualification_cli(
+        ctx, [first, second], evidence,
+        stale / "qualification.json"))
+    assert proc.returncode == 1
+    assert proc.stderr.strip(), "silent output refusal"
+    assert sentinel.read_bytes() == b"previous run archive"
+    taken = Path(tmp_path) / "taken"
+    taken.mkdir()
+    (taken / "qualification.json").write_bytes(b"old")
+    proc = _run_cli(_qualification_cli(
+        ctx, [first, second], evidence,
+        taken / "qualification.json"))
+    assert proc.returncode == 1
+    assert proc.stderr.strip(), "silent output refusal"
+    assert not (taken / "qualification-evidence.tar.gz") \
+        .exists()
+    # Inputs rewritten after signing no longer match the receipt.
+    _write_gate_inputs(m, evidence, "inputs-1.json",
+                       {"events": "13", "losses": "0"})
+    proc = _run_cli(_qualification_cli(
+        ctx, [first, second], evidence,
+        Path(tmp_path) / "q-drifted.json"))
+    assert proc.returncode == 1
+    assert proc.stderr.strip(), "silent drift refusal"
+
+
+def test_write_qualification_assembles_matrix_gate(workshop,
+                                                   tmp_path):
+    m, ctx = _sealed_for_qualify(
+        workshop, tmp_path, _matrix_required_gates())
+    evidence = Path(tmp_path) / "evidence"
+    evidence.mkdir()
+    _write_matrix_evidence(m, ctx, evidence)
+    inputs_path = evidence / "inputs.json"
+    inputs_path.write_bytes(
+        m.canonical(_matrix_inputs(m, evidence)))
+    receipt_path = evidence / "receipt.json"
+    proc = _run_cli(_receipt_cli(ctx, MATRIX_GATE, inputs_path,
+                                 receipt_path))
+    assert proc.returncode == 0, proc.stderr
+    q_path = Path(tmp_path) / "qualification.json"
+    proc = _run_cli(_qualification_cli(
+        ctx, [receipt_path], evidence, q_path))
+    assert proc.returncode == 0, proc.stderr
+    qualified = m.verify_qualification(
+        ctx["manifest_path"], q_path, ctx["policy_path"],
+        evidence, source_tree=str(ctx["root"]))
+    assert qualified == {
+        "ok": True, "gates": [MATRIX_GATE],
+        "trusted_keys": [sha(ctx["pub"].read_bytes())],
+        "claim": "ordinary-preview"}
+
+
+def _live_required_gates(m):
+    predicates = {}
+    for mode in m.LIVE_CAMPAIGNS:
+        for name in m.LIVE_TOTALS:
+            predicates["%s_%s" % (mode, name)] = \
+                "equal" if name == "legs" else "zero"
+    assert set(predicates) == {
+        "overhead_legs", "overhead_failed_legs",
+        "overhead_target_failures",
+        "overhead_cleanup_mismatches", "soak_legs",
+        "soak_failed_legs", "soak_target_failures",
+        "soak_cleanup_mismatches"}, predicates
+    return {m.LIVE_GATE: {"environment": "ordinary-linux",
+                          "predicates": predicates}}
+
+
+def test_write_qualification_requires_both_live_campaigns(
+        workshop, tmp_path):
+    import test_live_soak as live_fix
+    m = api()
+    _, ctx = _sealed_for_qualify(
+        workshop, tmp_path, _live_required_gates(m))
+    evidence, _doc = live_fix.live_gate_evidence(
+        tmp_path, ctx["manifest"])
+    inputs_path = evidence / "live-inputs.json"
+    receipt_path = evidence / "live-receipt.json"
+    proc = _run_cli(_receipt_cli(ctx, m.LIVE_GATE, inputs_path,
+                                 receipt_path))
+    assert proc.returncode == 0, proc.stderr
+    q_path = Path(tmp_path) / "qualification.json"
+    proc = _run_cli(_qualification_cli(
+        ctx, [receipt_path], evidence, q_path))
+    assert proc.returncode == 0, proc.stderr
+    qualified = m.verify_qualification(
+        ctx["manifest_path"], q_path, ctx["policy_path"],
+        evidence, source_tree=str(ctx["root"]))
+    assert qualified == {
+        "ok": True, "gates": [m.LIVE_GATE],
+        "trusted_keys": [sha(ctx["pub"].read_bytes())],
+        "claim": "ordinary-preview"}
+    # Overhead-only evidence refuses, naming the missing
+    # campaign; soak-only refuses symmetrically.
+    soak = evidence / "live/soak"
+    parked = Path(tmp_path) / "parked-soak"
+    soak.rename(parked)
+    try:
+        out = Path(tmp_path) / "soakless"
+        out.mkdir()
+        proc = _run_cli(_qualification_cli(
+            ctx, [receipt_path], evidence, out / "q.json"))
+        assert proc.returncode == 1, proc.stdout
+        assert "soak" in proc.stderr, proc.stderr
+    finally:
+        parked.rename(soak)
+    overhead = evidence / "live/overhead"
+    parked = Path(tmp_path) / "parked-overhead"
+    overhead.rename(parked)
+    try:
+        out = Path(tmp_path) / "overheadless"
+        out.mkdir()
+        proc = _run_cli(_qualification_cli(
+            ctx, [receipt_path], evidence, out / "q.json"))
+        assert proc.returncode == 1, proc.stdout
+        assert "overhead" in proc.stderr, proc.stderr
+    finally:
+        parked.rename(overhead)
+    # A damaged campaign with intact bound files refuses in
+    # the verifier, not the scalar path: the scalars alone
+    # would pass.
+    leg = evidence / "live/soak/completed-0"
+    parked = Path(tmp_path) / "parked-leg"
+    leg.rename(parked)
+    try:
+        out = Path(tmp_path) / "damaged"
+        out.mkdir()
+        proc = _run_cli(_qualification_cli(
+            ctx, [receipt_path], evidence, out / "q.json"))
+        assert proc.returncode == 1, proc.stdout
+        assert "live soak evidence refuses" in proc.stderr, \
+            proc.stderr
+    finally:
+        parked.rename(leg)
+
+
+class _DraftApi:
+    """Minimal holding-draft stub serving the sealed bytes."""
+
+    def __init__(self, repo, release_id, tag, artifacts,
+                 manifest):
+        self.repo = repo
+        self.release_id = release_id
+        self.tag = tag
+        self.blobs = {}
+        self.records = []
+        self.asset_ids = {}
+        entries = sorted(manifest["artifacts"],
+                         key=lambda entry: entry["name"])
+        for rank, entry in enumerate(entries, 101):
+            ident = str(rank)
+            self.blobs[ident] = artifacts / entry["name"]
+            self.asset_ids[entry["name"]] = ident
+            self.records.append({
+                "name": entry["name"], "id": rank,
+                "url": "https://api.github.com/repos/" + repo
+                + "/releases/assets/" + ident,
+                "state": "uploaded",
+                "size": int(entry["size"]),
+                "digest": "sha256:" + entry["sha256"]})
+
+    def json(self, path):
+        assert path == "repos/%s/releases/%s" % (
+            self.repo, self.release_id), path
+        return {"id": int(self.release_id), "draft": True,
+                "tag_name": self.tag,
+                "assets": [dict(record)
+                           for record in self.records]}
+
+    def download(self, path, destination):
+        ident = path.rsplit("/", 1)[1]
+        Path(destination).write_bytes(
+            self.blobs[ident].read_bytes())
+
+
+def _import_custody(ctx, tmp_path):
+    """Honest import record via the real import_assets flow."""
+    m = api()
+    repo = "example/project"
+    draft = _DraftApi(repo, "1", "candidate-fixture",
+                      ctx["artifacts"], ctx["manifest"])
+    custody = cc.import_assets(
+        draft, repo, "1", draft.asset_ids, ctx["manifest"],
+        Path(tmp_path) / "stored")
+    path = Path(tmp_path) / "custody.json"
+    path.write_bytes(m.canonical(custody))
+    return path, custody
+
+
+def _check_binding(ctx, workdir, rank, ident, measurement,
+                   head, candidate_override=None):
+    """One signed remote-gate binding over offline counts."""
+    m = api()
+    counts = {measurement: "2", "failures": "0"}
+    inputs = {"schema": "memveil-gate-input/1",
+              "environment": "offline",
+              "product": dict(counts), "oracle": dict(counts)}
+    receipt = {"schema": "memveil-remote-gate/1",
+               "gate": ident,
+               "candidate_sha256": ctx["candidate_id"],
+               "source_commit":
+               ctx["manifest"]["source"]["commit"],
+               "inputs_sha256": sha(m.canonical(inputs))}
+    if candidate_override is not None:
+        receipt["candidate_sha256"] = candidate_override
+    subject = Path(workdir) / ("remote-%d.receipt" % rank)
+    subject.write_bytes(m.canonical(receipt))
+    sig = _sign(ctx["key"], subject)
+    binding = {
+        "check_id": str(rank), "run_id": "9",
+        "head_sha": head, "receipt": receipt,
+        "inputs": inputs,
+        "signature_base64": base64.b64encode(
+            sig.read_bytes()).decode(),
+        "public_key": ctx["pub"].read_text()}
+    subject.unlink()
+    sig.unlink()
+    return binding
+
+
+def _write_check_file(m, path, envelope, binding):
+    doc = {"schema": "memveil-remote-check/1",
+           "import_run": dict(envelope), "check": binding}
+    Path(path).write_bytes(m.canonical(doc))
+    return doc
+
+
+def test_write_remote_binds_import(workshop, tmp_path):
+    m, ctx = _sealed_for_qualify(
+        workshop, tmp_path, _nonmatrix_required_gates())
+    custody_path, _ = _import_custody(ctx, tmp_path)
+    head = ctx["manifest"]["source"]["commit"]
+    envelope = {"repository_id": "9", "run_id": "8",
+                "artifact_id": "7",
+                "artifact_sha256": sha(b"fixture-stored-zip"),
+                "signer_commit": head}
+    workdir = Path(tmp_path) / "checks-work"
+    workdir.mkdir()
+    paths = []
+    for rank, (ident, measurement) in enumerate(
+            sorted(cc.REMOTE_CHECKS.items()), 1):
+        binding = _check_binding(ctx, workdir, rank, ident,
+                                 measurement, head)
+        path = Path(tmp_path) / ("check-%d.json" % rank)
+        _write_check_file(m, path, envelope, binding)
+        paths.append(path)
+    out = Path(tmp_path) / "remote.json"
+    proc = _run_cli(
+        [str(ROOT / "tools" / "candidate"), "write-remote",
+         "--import", str(custody_path),
+         "--checks", *[str(path) for path in paths],
+         "--out", str(out)])
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == sha(out.read_bytes())
+    doc = m.read_json(out, sealed=True)
+    assert doc["schema"] == "memveil-remote-custody/1"
+    assert doc["candidate_sha256"] == ctx["candidate_id"]
+    assert doc["source_commit"] == head
+    assert doc["repository"] == "example/project"
+    assert doc["repository_id"] == "9"
+    assert doc["run_id"] == "8"
+    assert doc["artifact_id"] == "7"
+    assert doc["artifact_sha256"] == envelope["artifact_sha256"]
+    assert doc["signer_commit"] == head
+    assert doc["custody_sha256"] == sha(
+        custody_path.read_bytes())
+    assert set(doc["checks"]) == set(cc.REMOTE_CHECKS)
+    assert doc["checks"]["no-overwrite/1"]["inputs"] == {
+        "schema": "memveil-gate-input/1",
+        "environment": "offline",
+        "product": {"preserved_assets": "2", "failures": "0"},
+        "oracle": {"preserved_assets": "2", "failures": "0"}}
+    # A non-canonical import file is refused at author
+    # time (promote's sealed read would refuse it too), so
+    # it can never author a custody binding promote
+    # rejects.
+    loose = Path(tmp_path) / "custody-loose.json"
+    loose.write_bytes(json.dumps(
+        json.loads(custody_path.read_bytes()),
+        indent=1, sort_keys=True).encode() + b"\n")
+    proc = _run_cli(
+        [str(ROOT / "tools" / "candidate"), "write-remote",
+         "--import", str(loose),
+         "--checks", *[str(path) for path in paths],
+         "--out", str(Path(tmp_path) / "remote-loose.json")])
+    assert proc.returncode == 1
+    assert proc.stderr.strip(), "silent sealing refusal"
+    # Wrong candidate in one receipt: the signature is valid
+    # over those bytes, so only the import binding refuses.
+    stray = _check_binding(
+        ctx, workdir, 1, "independent-attestation/1",
+        cc.REMOTE_CHECKS["independent-attestation/1"], head,
+        candidate_override="f" * 64)
+    stray_path = Path(tmp_path) / "check-stray.json"
+    _write_check_file(m, stray_path, envelope, stray)
+    proc = _run_cli(
+        [str(ROOT / "tools" / "candidate"), "write-remote",
+         "--import", str(custody_path), "--checks",
+         str(stray_path), *[str(path) for path in paths[1:]],
+         "--out", str(Path(tmp_path) / "remote-stray.json")])
+    assert proc.returncode == 1
+    assert proc.stderr.strip(), "silent import-binding refusal"
+    # Disagreeing import-run envelope across the check files.
+    other = dict(envelope, artifact_sha256="e" * 64)
+    forked = Path(tmp_path) / "check-forked.json"
+    _write_check_file(
+        m, forked, other, _check_binding(
+            ctx, workdir, 2, "no-overwrite/1",
+            cc.REMOTE_CHECKS["no-overwrite/1"], head))
+    proc = _run_cli(
+        [str(ROOT / "tools" / "candidate"), "write-remote",
+         "--import", str(custody_path), "--checks",
+         str(paths[0]), str(forked),
+         *[str(path) for path in paths[2:]],
+         "--out", str(Path(tmp_path) / "remote-forked.json")])
+    assert proc.returncode == 1
+    assert proc.stderr.strip(), "silent envelope refusal"
+    # An incomplete check set assembles nothing.
+    proc = _run_cli(
+        [str(ROOT / "tools" / "candidate"), "write-remote",
+         "--import", str(custody_path), "--checks",
+         *[str(path) for path in paths[:4]],
+         "--out", str(Path(tmp_path) / "remote-short.json")])
+    assert proc.returncode == 1
+    assert proc.stderr.strip(), "silent incomplete refusal"
+    # A foreign public key breaks the check signature.
+    _, foreign = _ephemeral_key(Path(tmp_path) / "foreign")
+    tampered = _check_binding(
+        ctx, workdir, 3, "promotion-dry-run/1",
+        cc.REMOTE_CHECKS["promotion-dry-run/1"], head)
+    tampered["public_key"] = foreign.read_text()
+    tampered_path = Path(tmp_path) / "check-tampered.json"
+    _write_check_file(m, tampered_path, envelope, tampered)
+    proc = _run_cli(
+        [str(ROOT / "tools" / "candidate"), "write-remote",
+         "--import", str(custody_path), "--checks",
+         *[str(path) for path in paths[:2]],
+         str(tampered_path),
+         *[str(path) for path in paths[3:]],
+         "--out", str(Path(tmp_path) / "remote-tampered.json")])
+    assert proc.returncode == 1
+    assert proc.stderr.strip(), "silent signature refusal"
+
+
+def test_remote_checks_mirror_custody():
+    m = api()
+    assert m.REMOTE_CHECKS == cc.REMOTE_CHECKS
+
+
+CI_SELECTION = ROOT / "tests" / "pytest-ci-selection.json"
+CI_SELECTION_SCHEMA = "memveil-pytest-ci-selection/1"
+CI_SKIPS = ROOT / "tests" / "pytest-ci-expected-skips.json"
+CI_SKIPS_SCHEMA = "memveil-pytest-ci-expected-skips/1"
+# MEMVEIL_* names that never arm privileged behavior: evidence
+# paths, measurement parameters, and harness controls. Every
+# other MEMVEIL_* name fails the CI unarmed guard closed as
+# potentially arming, including future unknown names.
+CI_UNARMED_ALLOW_EXACT = frozenset({
+    "MEMVEIL_EVIDENCE_DIR", "MEMVEIL_OWNED_EVIDENCE",
+    "MEMVEIL_ORACLE_KVER", "MEMVEIL_SOAK_MINUTES",
+    "MEMVEIL_PACED_SECONDS", "MEMVEIL_PACED_FILE",
+    "MEMVEIL_PACED_RECEIPT", "MEMVEIL_PACED_LINES",
+    "MEMVEIL_PACED_NS", "MEMVEIL_FUZZ_SEEDS", "MEMVEIL_SIGBLK"})
+CI_UNARMED_ALLOW_PREFIXES = ("MEMVEIL_TEST_",)
+
+
+def _ci_selection():
+    return json.loads(CI_SELECTION.read_text())
+
+
+def _rust_workflow():
+    import yaml
+    path = ROOT / ".github" / "workflows" / "rust.yml"
+    return yaml.safe_load(path.read_text())
+
+
+def test_ci_selection_audited():
+    sel = _ci_selection()
+    assert set(sel) == {"schema", "run", "exclude",
+                        "unarmed_allow_env"}
+    assert sel["schema"] == CI_SELECTION_SCHEMA
+    run = sel["run"]
+    assert run == sorted(set(run)), \
+        "run list must be sorted unique"
+    exclude = sel["exclude"]
+    assert isinstance(exclude, dict) and exclude
+    assert list(exclude) == sorted(exclude), \
+        "exclude map must be sorted"
+    for path, reason in exclude.items():
+        assert isinstance(reason, str) and reason.strip(), \
+            path
+    assert not (set(run) & set(exclude)), "listed twice"
+    found = []
+    for dirpath, dirnames, filenames in os.walk(ROOT):
+        dirnames[:] = sorted(
+            name for name in dirnames
+            if name not in (".git", ".pixi", "target",
+                            "__pycache__", "node_modules",
+                            ".venv"))
+        for name in sorted(filenames):
+            if name.startswith("test_") \
+                    and name.endswith(".py"):
+                found.append(Path(dirpath, name)
+                             .relative_to(ROOT).as_posix())
+    found = sorted(found)
+    assert found, "no pytest files found"
+    assert [path for path in found
+            if not path.startswith("tests/")] == [], \
+        "pytest files must live under tests/"
+    assert set(found) == set(run) | set(exclude), \
+        "unaudited pytest files: %s" % sorted(
+            set(found) - set(run) - set(exclude))
+    runner = (ROOT / "tools" / "test").read_text()
+    for path, reason in sorted(exclude.items()):
+        text = (ROOT / path).read_text()
+        if "collects no tests" in reason:
+            assert not re.search(
+                r"(?m)^\s*(async\s+)?def test", text), path
+        for token in re.findall(r"MEMVEIL_[A-Z0-9_]+",
+                                reason):
+            assert token in text, (path, token)
+        if "tools/test" in reason:
+            assert path in runner, path
+    allow = sel["unarmed_allow_env"]
+    assert set(allow) == {"exact", "prefixes"}
+    assert set(allow["exact"]) == set(CI_UNARMED_ALLOW_EXACT)
+    assert allow["exact"] == sorted(allow["exact"])
+    assert list(allow["prefixes"]) == \
+        list(CI_UNARMED_ALLOW_PREFIXES)
+    skips_doc = json.loads(CI_SKIPS.read_text())
+    assert set(skips_doc) == {"schema", "skips"}
+    assert skips_doc["schema"] == CI_SKIPS_SCHEMA
+    skips = skips_doc["skips"]
+    assert isinstance(skips, list) and skips
+    # Reasons render joined at runtime while sources split
+    # them across literals (the AST joins implicit
+    # concatenation), and shared helpers attribute skips to
+    # their callers: every allowlisted reason must equal a
+    # string literal somewhere in the selection. The CI gate
+    # enforces the exact runtime string per file.
+    consts = set()
+    for path in run:
+        text = (ROOT / path).read_text()
+        consts.update(
+            node.value for node in ast.walk(ast.parse(text))
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str))
+    for entry in skips:
+        assert set(entry) == {"id", "reason", "count"}, entry
+        assert type(entry["count"]) is int \
+            and entry["count"] >= 1, entry
+        assert entry["id"] in run, entry
+        reason = entry["reason"]
+        assert isinstance(reason, str) and reason.strip(), \
+            entry
+        assert reason in consts, entry
+    assert [(entry["id"], entry["reason"])
+            for entry in skips] == sorted(
+                (entry["id"], entry["reason"])
+                for entry in skips), \
+        "skips must be sorted by (id, reason)"
+    assert len({(entry["id"], entry["reason"])
+                for entry in skips}) == len(skips), \
+        "duplicate skip entry"
+    doc = _rust_workflow()
+    assert set(doc["jobs"]) == {"deny", "rust-test", "pytest"}
+    job = doc["jobs"]["pytest"]
+    assert job["runs-on"] == "ubuntu-26.04"
+    assert job["permissions"] == {"contents": "read"}
+    steps = job["steps"]
+    checkouts = [step for step in steps
+                 if str(step.get("uses", "")).startswith(
+                     "actions/checkout@")]
+    assert len(checkouts) == 1
+    deny_checkout = next(
+        step["uses"] for step in doc["jobs"]["deny"]["steps"]
+        if str(step.get("uses", "")).startswith(
+            "actions/checkout@"))
+    assert checkouts[0]["uses"] == deny_checkout, \
+        "checkout pin drift"
+    assert (checkouts[0].get("with") or {}).get(
+        "persist-credentials") is False
+    runs = {str(step.get("name", "")): str(step.get("run", ""))
+            for step in steps if "run" in step}
+    guard = next(run for name, run in runs.items()
+                 if "guard" in name.lower())
+    assert "pytest-ci-selection.json" in guard
+    assert "unarmed_allow_env" in guard
+    assert "MEMVEIL_" in guard
+    assert "sys.exit(1)" in guard
+    apt = next(run for run in runs.values()
+               if "apt-get install" in run)
+    # Tokenize the install command only: comments must not
+    # satisfy the pin, so strip them and join continuations
+    # before splitting the install arguments.
+    joined = []
+    pending = ""
+    for line in apt.splitlines():
+        code = line.split("#", 1)[0].rstrip()
+        if code.endswith("\\"):
+            pending += code[:-1] + " "
+        else:
+            pending += code
+            joined.append(pending)
+            pending = ""
+    if pending.strip():
+        joined.append(pending)
+    install = next(cmd for cmd in joined
+                   if "apt-get install" in cmd)
+    installed = {
+        token for token in install.split(
+            "apt-get install", 1)[1].split()
+        if not token.startswith("-")}
+    for package in ("binutils", "bpftrace", "bpftool",
+                    "cpio", "python3-pytest", "python3-yaml",
+                    "rpm", "rpm2cpio", "strace"):
+        assert package in installed, package
+    whole = json.dumps(job)
+    assert "import yaml" in whole
+    assert "pytest --version" in whole
+    assert "cargo build" in whole and "--release" in whole
+    assert "build/memveil" in whole
+    assert "cargo test --locked --test package_tarball" \
+        in whole
+    # Every cargo invocation in this job must unset
+    # RUSTUP_TOOLCHAIN first, so a set variable cannot
+    # silently redirect toolchain selection.
+    sites = []
+    for name, run in sorted(runs.items()):
+        for match in re.finditer(
+                r"(?<![\w./-])cargo(?=\s)", run):
+            assert run[:match.start()].endswith(
+                "env -u RUSTUP_TOOLCHAIN "), (name, run)
+            sites.append(name)
+    assert len(sites) == 5, sites
+    selected = next(
+        run for run in runs.values()
+        if "-m pytest" in run
+        and "pytest-ci-selection.json" in run)
+    assert "FILES" in selected
+    assert "-rs" in selected
+    assert "pytest_skip_gate.py" in selected
+    assert "pytest-ci-expected-skips.json" in selected
+    assert "PIPESTATUS" in selected
+    for name, run in sorted(runs.items()):
+        proc = subprocess.run(
+            ["bash", "-n"], input=run, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert proc.returncode == 0, (name, proc.stderr)
+
+
+def test_ci_skip_gate_reports(tmp_path):
+    gate = ROOT / "tools" / "pytest_skip_gate.py"
+    skips = json.loads(CI_SKIPS.read_text())["skips"]
+
+    def lines(counts):
+        return ["SKIPPED [1] %s: %s" % (entry["id"], entry["reason"])
+                for entry, count in zip(skips, counts)
+                for _ in range(count)]
+
+    def check(report_lines):
+        report = tmp_path / "report.txt"
+        report.write_text("1 passed\n" + "\n".join(report_lines)
+                          + "\n")
+        return subprocess.run(
+            [sys.executable, str(gate), str(CI_SKIPS),
+             str(report)],
+            capture_output=True, text=True)
+
+    full = [entry["count"] for entry in skips]
+    proc = check(lines(full))
+    assert proc.returncode == 0, proc.stderr
+    assert "all listed" in proc.stdout
+    # Grouped lines contribute their bracketed multiplicity,
+    # not one: the first entry's count arrives as one [3]
+    # line plus single lines for the rest.
+    assert full[0] >= 3, "grouped case needs a count of 3+"
+    grouped = ["SKIPPED [3] %s: %s"
+               % (skips[0]["id"], skips[0]["reason"])]
+    grouped += ["SKIPPED [1] %s: %s"
+                % (skips[0]["id"], skips[0]["reason"])] \
+        * (full[0] - 3)
+    for entry, count in zip(skips[1:], full[1:]):
+        grouped += ["SKIPPED [1] %s: %s"
+                    % (entry["id"], entry["reason"])] * count
+    proc = check(grouped)
+    assert proc.returncode == 0, proc.stderr
+    assert "all listed" in proc.stdout
+    short_grouped = ["SKIPPED [2] %s: %s"
+                     % (skips[0]["id"], skips[0]["reason"])]
+    proc = check(short_grouped)
+    assert proc.returncode == 1, proc.stdout
+    assert "count differs" in proc.stderr
+    proc = check(["SKIPPED [0] %s: %s"
+                  % (skips[0]["id"], skips[0]["reason"])])
+    assert proc.returncode == 1, proc.stdout
+    proc = check(["SKIPPED [1] " + skips[0]["id"]])
+    assert proc.returncode == 1, proc.stdout
+    proc = check(lines(full) + [
+        "SKIPPED [1] tests/vm/test_live_soak.py: "
+        "synthetic unlisted reason"])
+    assert proc.returncode == 1, proc.stdout
+    assert "unlisted skip" in proc.stderr
+    short = list(full)
+    short[0] -= 1
+    proc = check(lines(short))
+    assert proc.returncode == 1, proc.stdout
+    assert "count differs" in proc.stderr
+    proc = check([])
+    assert proc.returncode == 1, proc.stdout
+    assert "stale allowlist entry" in proc.stderr
+    proc = subprocess.run(
+        [sys.executable, str(gate)],
+        capture_output=True, text=True)
+    assert proc.returncode == 2
+    proc = subprocess.run(
+        [sys.executable, str(gate), str(tmp_path / "missing.json"),
+         str(tmp_path / "missing.txt")],
+        capture_output=True, text=True)
+    assert proc.returncode == 1

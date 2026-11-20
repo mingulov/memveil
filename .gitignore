@@ -23,3 +23,7 @@ modules.order
 !tests/fixtures/core/*.bpf.o
 # Direct eBPF-crate builds (the workspace build uses target/).
 crates/ebpf/target/
+# Journey fixture-prep outputs: records, stages, and
+# publication scratch (tool-owned; excluded from
+# checkout identity and refused when tracked).
+/.candidate-prep/

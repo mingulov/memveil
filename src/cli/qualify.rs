@@ -47,6 +47,7 @@ const SMOKE_NOTE: &str = "smoke: attach/poll/detach, no traffic required";
 const ZLIB: &str = "libz.so.1";
 const ATTEMPT: &str = "attempt-trace";
 const CONVERT: &str = "conversion-observe";
+const JOURNAL: &str = "conversion-journal";
 const LIFECYCLE: &str = "mapping-lifecycle";
 const COPY: &str = "copy-actual";
 
@@ -383,6 +384,9 @@ pub fn plan_qualification(root: &str, profiles_dir: &str, opts: &QualifyOptions)
     for cap in &ask.caps {
         if cap == CONVERT {
             return refuse_plan("capability conversion-observe has no record channel".to_string());
+        }
+        if cap == JOURNAL {
+            return refuse_plan("capability conversion-journal has no record channel".to_string());
         }
     }
     let reader = match open_evidence_reader(root) {
@@ -1203,6 +1207,20 @@ mod tests {
             plan.refusal,
             "capability conversion-observe has no record channel"
         );
+    }
+
+    #[test]
+    fn plan_journal_refuses() {
+        for want in ["conversion-journal", "attempt-trace,conversion-journal"] {
+            let mut opts = base_opts();
+            opts.capabilities = want.to_string();
+            let plan = plan_qualification(&host(), &pdir(), &opts);
+            assert!(!plan.ok, "{want}");
+            assert_eq!(
+                plan.refusal, "capability conversion-journal has no record channel",
+                "{want}"
+            );
+        }
     }
 
     #[test]

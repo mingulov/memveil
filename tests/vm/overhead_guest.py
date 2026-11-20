@@ -754,8 +754,31 @@ def profile_id(path):
 
 
 def build_ctx(gate, iface, dev):
-    """Fixed collector paths plus the owned workload endpoints."""
+    """Fixed collector paths plus the owned workload endpoints.
+
+    Candidate mode resolves the collector binary and the
+    Aya objects under the verified root; the lab test
+    objects, bridge, and kernel-specific gate profile
+    keep dev paths (outside the candidate closure).
+    """
     repo = gate.repo
+    if gate.candidate is not None:
+        candidate = gate.candidate
+        return {
+            "memveil": str(candidate.path("bin/memveil")),
+            "attempt_obj": str(candidate.path(
+                "bpf/swiotlb_attempt.bpf.o")),
+            "lc_obj": gate.lc_obj,
+            "cp_obj": gate.cp_obj,
+            "lc_test_obj": gate.lc_test_obj,
+            "cp_test_obj": gate.cp_test_obj,
+            "bridge": gate.bridge,
+            "profile": os.path.join(repo, "build", "vm",
+                                    "gate-profile.json"),
+            "gateway": GATEWAY,
+            "iface": iface,
+            "dev": dev,
+        }
     return {
         "memveil": os.path.join(repo, "build", "memveil"),
         "attempt_obj": os.path.join(

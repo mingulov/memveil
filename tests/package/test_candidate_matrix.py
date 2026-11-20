@@ -423,6 +423,10 @@ def test_matrix_uses_verified_bundle_and_exact_deb_adapter(
                            bundle=None, scenarios=False)
     assert matrix_tool().select_candidate_inputs(args) is selected
     assert args.deb == str(selected.artifact('deb'))
+    args = SimpleNamespace(deb=None, bundle=None, scenarios=True)
+    assert matrix_tool().select_candidate_inputs(args) is selected
+    assert args.deb == str(selected.artifact('deb'))
+    assert args.bundle is None
     selected.close()
 
 

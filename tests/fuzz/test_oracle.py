@@ -6,11 +6,15 @@ import json
 from pathlib import Path
 import subprocess
 import shutil
+import sys
 import tempfile
 import unittest
 import run
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'tests'))
+from support.candidate_input import binary
+BIN = binary(str(ROOT / 'build/memveil'))
 
 
 class OracleTests(unittest.TestCase):
@@ -25,7 +29,7 @@ class OracleTests(unittest.TestCase):
             with self.subTest(fixture=fixture, channel=channel):
                 path = ROOT / 'tests/fixtures/reader' / fixture
                 for flags, code in [((), 0), (('--strict',), 4 if fixture == 'quality-detail-counters' else 0)]:
-                    proc = subprocess.run([str(ROOT / 'build/memveil'), 'report', '--format', 'json',
+                    proc = subprocess.run([BIN, 'report', '--format', 'json',
                                            *flags, str(path)], capture_output=True)
                     self.assertEqual(proc.returncode, code, proc.stderr)
                     self.assertIsNone(run.check(path, code, proc.stdout, b'', strict=bool(flags)))
@@ -35,7 +39,7 @@ class OracleTests(unittest.TestCase):
 
     def test_rejects_parseable_but_false_reports(self):
         path = ROOT / 'tests/fixtures/reader/sealed-complete'
-        proc = subprocess.run([str(ROOT / 'build/memveil'), 'report', '--format', 'json', str(path)], capture_output=True)
+        proc = subprocess.run([BIN, 'report', '--format', 'json', str(path)], capture_output=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         doc = json.loads(proc.stdout)
         self.assertIsNone(run.check(path, 0, proc.stdout, b''))
@@ -63,7 +67,7 @@ class OracleTests(unittest.TestCase):
             run.checkpoint(path)
             with (path / 'events.ndjson').open('ab') as stream:
                 stream.write(b'unverified suffix')
-            proc = subprocess.run([str(ROOT / 'build/memveil'), 'report', '--format', 'json',
+            proc = subprocess.run([BIN, 'report', '--format', 'json',
                                    '--allow-partial', str(path)], capture_output=True)
             self.assertEqual(proc.returncode, 4, proc.stderr)
             self.assertIsNone(run.check(path, 4, proc.stdout, b'', allow_partial=True))
@@ -81,7 +85,7 @@ class OracleTests(unittest.TestCase):
 
     def test_legacy_complete_claim_is_rejected(self):
         path = ROOT / 'tests/fixtures/reader/complete-stop'
-        proc = subprocess.run([str(ROOT / 'build/memveil'), 'report', '--format', 'json', str(path)], capture_output=True)
+        proc = subprocess.run([BIN, 'report', '--format', 'json', str(path)], capture_output=True)
         self.assertEqual(proc.returncode, 0)
         doc = json.loads(proc.stdout)
         doc['verdict']['name'] = 'complete'

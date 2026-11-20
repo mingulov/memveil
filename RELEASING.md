@@ -57,9 +57,10 @@ and never move a Q branch after dispatching on it.
   key digests, and the campaign retention (30 to 90 days).
   Claims pair with versions: `ordinary-preview` for `0.1.x`,
   `snp-journal` for `0.2.x`, `security-workflow` for
-  `0.3.x`. The shipped template names the one required
-  gate, `kernel-matrix/2`, with empty `trusted_keys`; fill
-  in the key digest from step 0 before fixing C.
+  `0.3.x`. The shipped template names the required gates,
+  `kernel-matrix/2` and `live-campaign/1`, with empty
+  `trusted_keys`; fill in the key digest from step 0
+  before fixing C.
 - The qualifier Ed25519 key (step 0). The same key signs
   the artifact checksums, the gate receipts, and the
   remote-check receipts; its derived public bytes go in
@@ -201,11 +202,47 @@ tool header. `--lock` defaults to the checkout's
 `tests/vm/kernels.lock.json`, which is C's lock when run
 here.)
 
-6. Stage the signed checksums into the evidence dir,
-write the signed matrix gate receipt over the campaign
-inventory, and pack the evidence (the packer prints the
-archive digest and drops the local-only `vng-cmd.txt`
-host command lines, which never ship):
+5b. Run the installed-candidate live campaigns. Each
+needs its arming flag plus the same sealed inputs; host
+acceptance re-verifies the export from retained bytes
+and writes the verified totals into the receipt's
+`exit.json`:
+
+```sh
+MV_BUNDLE_TARBALL=$PWD/dist/artifacts/bundle.tar.gz \
+MV_CANDIDATE_MANIFEST=$PWD/dist/artifacts/candidate.json \
+MEMVEIL_VM_PERF=1 tools/test perf-overhead
+MV_BUNDLE_TARBALL=$PWD/dist/artifacts/bundle.tar.gz \
+MV_CANDIDATE_MANIFEST=$PWD/dist/artifacts/candidate.json \
+MEMVEIL_VM_LIVE_SOAK=1 tools/test vm-live-soak
+```
+
+Each run prints its receipt directory
+(`candidate campaign receipt: ...`); stage both campaigns
+at the verified paths before signing anything: each
+receipt's `export/` content goes under
+`dist/evidence/live/<mode>/` (`campaign.json`, the
+completed legs, the progress files) and its `exit.json`
+beside it as `dist/evidence/live/<mode>-exit.json`:
+
+```sh
+OVERHEAD="<receipt dir printed by the perf-overhead run>"
+SOAK="<receipt dir printed by the vm-live-soak run>"
+mkdir -p dist/evidence/live/overhead dist/evidence/live/soak
+cp -r "$OVERHEAD"/export/. dist/evidence/live/overhead/
+cp "$OVERHEAD"/exit.json dist/evidence/live/overhead-exit.json
+cp -r "$SOAK"/export/. dist/evidence/live/soak/
+cp "$SOAK"/exit.json dist/evidence/live/soak-exit.json
+```
+
+Live campaigns run long (tens of minutes to hours); the
+pool leg alone spans over seventy minutes.
+
+6. Stage the signed checksums into the evidence dir and
+write the signed gate receipts over the staged campaigns:
+the matrix receipt first, then the live receipt. Nothing
+packs yet: the archive packs once in step 7, after both
+receipts exist.
 
 ```sh
 cp dist/signed/SHA256SUMS.txt dist/signed/SHA256SUMS.txt.sig \
@@ -240,55 +277,117 @@ print("matrix gate inputs ready")
 EOF
 ssh-keygen -Y sign -f "$KEYDIR/qualifier.key" \
   -n memveil-candidate dist/evidence/matrix-receipt.json
-./tools/candidate pack-evidence --evidence-dir dist/evidence \
-  --out dist/qualification-evidence.tar.gz
 ```
 
 Write one receipt per required gate the same way (inputs
 file, canonical receipt binding its digest, `ssh-keygen
--Y sign` with namespace `memveil-candidate`); the matrix
-gate above is the only one the shipped policy requires.
+-Y sign` with namespace `memveil-candidate`).
 
-7. Write `qualification.json` beside the archive file,
-never inside it: the record carries the archive digest,
-so an inner copy would be self-referential and is
-refused. Bind one gate entry per receipt:
+For `live-campaign/1`, the inputs file carries BOTH campaigns:
+the overhead export and the soak export, each twice
+(the guest claim from `campaign.json` as the product side
+and the host-verified totals from `exit.json` as the
+oracle side). The gate requires both campaigns; pool-only
+evidence is forbidden and refuses: a `live/` directory
+holding only a pool campaign (or any single campaign) never
+satisfies this gate. Host acceptance re-verified each
+export from retained bytes before writing its `exit.json`,
+so transcribing the files is a checkable copy: `qualify`
+re-runs the campaign verifier over both retained exports
+behind the bindings, not just the signed scalars. Retain
+the evidence as `live/overhead/` and `live/soak/` (each a
+complete export: `campaign.json`, the `completed-N` legs,
+the `progress-N.json` files) with the host oracles beside
+them as `live/overhead-exit.json` and `live/soak-exit.json`.
+Author `dist/evidence/live-inputs.json` manually with this
+exact shape (values from the verified `campaign.json`
+totals and the `exit.json` totals per campaign; digests of
+the four retained files):
 
-```sh
-python3 - dist dist/candidate.json <<'EOF'
-import hashlib
-import sys
-sys.path.insert(0, "tools")
-import candidate as c
-from pathlib import Path
-scratch = Path(sys.argv[1])
-manifest = c.load_manifest(sys.argv[2])
-candidate_id = c.digest_bytes(c.canonical(manifest))
-archive = scratch / "qualification-evidence.tar.gz"
-receipt = scratch / "evidence" / "matrix-receipt.json"
-doc = {"schema": "memveil-qualification/1",
-       "candidate_sha256": candidate_id,
-       "source_commit": manifest["source"]["commit"],
-       "claim": "ordinary-preview",
-       "evidence_archive":
-       {"name": "qualification-evidence.tar.gz",
-        "size": str(archive.stat().st_size),
-        "sha256": hashlib.sha256(
-            archive.read_bytes()).hexdigest()},
-       "gates":
-       {"kernel-matrix/2":
-        {"receipt": "matrix-receipt.json",
-         "receipt_sha256": hashlib.sha256(
-             receipt.read_bytes()).hexdigest(),
-         "signature": "matrix-receipt.json.sig",
-         "public_key": "signer.pub"}}}
-(scratch / "qualification.json").write_bytes(
-    c.canonical(doc))
-print("qualification written")
-EOF
+```json
+{"schema": "memveil-gate-input/1",
+ "environment": "ordinary-linux",
+ "product": {"overhead_cleanup_mismatches": "0",
+             "overhead_failed_legs": "0", "overhead_legs": "20",
+             "overhead_target_failures": "0",
+             "soak_cleanup_mismatches": "0",
+             "soak_failed_legs": "0", "soak_legs": "31",
+             "soak_target_failures": "0"},
+ "oracle": {"overhead_cleanup_mismatches": "0",
+            "overhead_failed_legs": "0", "overhead_legs": "20",
+            "overhead_target_failures": "0",
+            "soak_cleanup_mismatches": "0",
+            "soak_failed_legs": "0", "soak_legs": "31",
+            "soak_target_failures": "0"},
+ "sources": {
+   "product": {
+     "overhead_legs": {"file": "live/overhead/campaign.json",
+       "sha256": "<overhead campaign.json sha256>",
+       "path": ["totals", "legs"], "encoding": "u64"},
+     "soak_legs": {"file": "live/soak/campaign.json",
+       "sha256": "<soak campaign.json sha256>",
+       "path": ["totals", "legs"], "encoding": "u64"}},
+   "oracle": {
+     "overhead_legs": {"file": "live/overhead-exit.json",
+       "sha256": "<overhead exit.json sha256>",
+       "path": ["totals", "legs"], "encoding": "u64"},
+     "soak_legs": {"file": "live/soak-exit.json",
+       "sha256": "<soak exit.json sha256>",
+       "path": ["totals", "legs"], "encoding": "u64"}}}}
 ```
 
-(The `claim` must equal the policy's claim.)
+(Only the `legs` bindings are shown; bind every other
+measurement the same way, each to its own campaign file.
+The `overhead_legs` value is the verified overhead leg
+count: 40, 30, or 20 depending on journal admission. The
+`soak_legs` value is the verified soak leg count: at
+least 3 (mixed legs plus the closing pool leg). A
+pool-only `live/` directory is forbidden: it refuses.)
+
+Then sign the receipt with the authoring CLI and add the
+gate entry to `qualification.json` beside the matrix one:
+
+```sh
+./tools/candidate write-gate-receipt \
+  --gate live-campaign/1 \
+  --candidate dist/candidate.json \
+  --inputs dist/evidence/live-inputs.json \
+  --key "$KEYDIR/qualifier.key" \
+  --out dist/evidence/live-receipt.json
+```
+
+Step 7 assembles both receipts into `qualification.json`
+beside the archive; step 8's `qualify` rederives each
+gate through its path (signature chain, retained
+measurement sources, predicates, plus the campaign
+verifier run over both retained exports for the live
+gate).
+
+7. Assemble `qualification.json` from both verified gate
+receipts with one command: the assembler re-verifies
+every receipt (signature, subject, inputs digest,
+re-derived measurements, and the live campaign verifier
+over both retained exports), then packs the evidence
+archive once and writes the qualification beside it,
+never inside it: the record carries the archive digest,
+so an inner copy would be self-referential and is
+refused. The packer prints the qualification record
+digest and drops the local-only `vng-cmd.txt` host
+command lines, which never ship:
+
+```sh
+./tools/candidate write-qualification \
+  --manifest dist/candidate.json \
+  --policy packaging/candidate-policy.json \
+  --gates dist/evidence/matrix-receipt.json \
+    dist/evidence/live-receipt.json \
+  --evidence-dir dist/evidence \
+  --out dist/qualification.json
+```
+
+(The recorded `claim` comes from the policy, and the
+receipt set must equal the policy's required gates
+exactly.)
 
 8. Qualify the evidence locally, rechecking the archive
 bytes against the record first:
@@ -407,7 +506,7 @@ the ref the import ran at):
 
 ```sh
 gh run list -w release.yml
-RUN_ID=<import run id from the listing above>
+RUN_ID="<import run id from the listing above>"
 REPO_ID=$(gh api repos/<OWNER>/<REPO> -q .id)
 gh api repos/<OWNER>/<REPO>/actions/runs/$RUN_ID/artifacts \
   -q '.artifacts[]
@@ -489,7 +588,7 @@ against the binding and rejects any other check):
 
 ```sh
 gh run list -w release.yml
-DRY_RUN_ID=<dry-run run id from the listing above>
+DRY_RUN_ID="<dry-run run id from the listing above>"
 gh api repos/<OWNER>/<REPO>/commits/$Q2/check-runs \
   -q '.check_runs[]
       | select(.name == "promotion-dry-run/1")

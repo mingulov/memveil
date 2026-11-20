@@ -440,15 +440,69 @@ def installed_file_path(name):
     raise ValueError("unknown bundle path: " + name)
 
 
-def verify_installed(root, manifest):
+def _owned_sweep_roots(expected):
+    """Manifest-derived owned sweep roots for live installs.
+
+    Each expected installed path contributes the longest
+    leading prefix ending in the package namespace: the
+    FHS subtrees the package owns outright. Shared system
+    directories (no namespace component) contribute
+    nothing, so unrelated system files beside the package
+    never refuse a live install.
+    """
+    roots = set()
+    for target in expected:
+        parts = target.split("/")
+        for stop in range(len(parts) - 1, 0, -1):
+            if parts[stop - 1] == "memveil":
+                roots.add("/".join(parts[:stop]))
+                break
+    return sorted(roots)
+
+
+def _refuse_alias_chain(root, rel):
+    """Refuse aliases at rel or on its ancestor chain.
+
+    Every component from root-exclusive to rel-inclusive is
+    lstatted without following: a symlink at a sweep root
+    (or above it) would otherwise redirect the whole
+    subtree the verifier walks while the mapped leaves
+    still resolve through it. Missing components are the
+    mapped-file checks' business, not this sweep's: only
+    links refuse here. Raises ValueError naming the alias.
+    """
+    parts = rel.split("/")
+    for stop in range(1, len(parts) + 1):
+        node = os.path.join(root, *parts[:stop])
+        if os.path.islink(node):
+            raise ValueError(
+                "installed candidate contains an alias: "
+                + "/".join(parts[:stop]))
+
+
+def verify_installed(root, manifest, live=False):
     """Every staged copy must equal the verified bundle bytes.
 
     Port of the Mojo packager's installed check (minus the
     canonical-runtime entry comparison, which has no Rust
     equivalent): each MANIFEST files[] entry maps to exactly
-    one staged path whose bytes must match, and the docs
-    trees must hold nothing beyond the mapped copies plus
-    the generated copyright/changelog. Raises ValueError.
+    one staged path whose bytes must match, and the mapped
+    prefixes must hold nothing beyond the mapped copies
+    plus the generated copyright/changelog. Symlinks
+    enumerate first-class as (path, target): any alias
+    refuses naming what it points at. Raises ValueError.
+
+    Aliases refuse at every level: each mapped path and
+    each sweep root is lstatted together with its ancestor
+    chain, so a link at an owned root (or above it) cannot
+    redirect the verified subtree. Staging roots check the
+    package-exclusive tree the packager built. Live roots
+    check a real install: the exact member checks still
+    cover every mapped file, but the extra-member sweep
+    scopes to the manifest-derived owned roots, so
+    unrelated system binaries beside the package accept
+    while added files and aliases under owned paths still
+    refuse.
     """
     expected = {}
     for name, sha256 in manifest["files"].items():
@@ -458,6 +512,7 @@ def verify_installed(root, manifest):
                 "duplicate installed file mapping: " + target)
         expected[target] = sha256
     for target, sha256 in sorted(expected.items()):
+        _refuse_alias_chain(root, target)
         path = os.path.join(root, *target.split("/"))
         if not os.path.isfile(path) or os.path.islink(path):
             raise ValueError(
@@ -467,13 +522,39 @@ def verify_installed(root, manifest):
                 "installed file differs from bundle: " + target)
     generated = {"usr/share/doc/memveil/copyright",
                  "usr/share/doc/memveil/changelog.Debian.gz"}
-    for prefix in ("usr/share/memveil/docs", "usr/share/doc/memveil"):
+    # Extra-member sweep over the mapped prefixes (man
+    # pages, completions, and lintian overrides ship outside
+    # them and stay owned by their own pins): every file and
+    # every symlink must be a mapped bundle member or a
+    # generated file, or the tree refuses.
+    if live:
+        prefixes = _owned_sweep_roots(expected)
+    else:
+        prefixes = ("usr/bin", "usr/lib/memveil",
+                    "usr/share/memveil",
+                    "usr/share/doc/memveil")
+    for prefix in prefixes:
+        _refuse_alias_chain(root, prefix)
         base = os.path.join(root, *prefix.split("/"))
-        for current, _, files in os.walk(base):
+        for current, dirs, files in os.walk(base):
+            for leaf in sorted(dirs):
+                full = os.path.join(current, leaf)
+                if os.path.islink(full):
+                    target = os.path.relpath(
+                        full, root).replace(os.sep, "/")
+                    raise ValueError(
+                        "extra installed symlink outside "
+                        "bundle: " + target + " -> "
+                        + os.readlink(full))
             for leaf in sorted(files):
+                full = os.path.join(current, leaf)
                 target = os.path.relpath(
-                    os.path.join(current, leaf), root).replace(
-                        os.sep, "/")
+                    full, root).replace(os.sep, "/")
+                if os.path.islink(full):
+                    raise ValueError(
+                        "extra installed symlink outside "
+                        "bundle: " + target + " -> "
+                        + os.readlink(full))
                 if target not in expected \
                         and target not in generated:
                     raise ValueError(

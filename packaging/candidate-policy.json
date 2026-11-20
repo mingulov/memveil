@@ -8,6 +8,19 @@
         "required_rows": "equal",
         "skipped_rows": "zero"
       }
+    },
+    "live-campaign/1": {
+      "environment": "ordinary-linux",
+      "predicates": {
+        "overhead_cleanup_mismatches": "zero",
+        "overhead_failed_legs": "zero",
+        "overhead_legs": "equal",
+        "overhead_target_failures": "zero",
+        "soak_cleanup_mismatches": "zero",
+        "soak_failed_legs": "zero",
+        "soak_legs": "equal",
+        "soak_target_failures": "zero"
+      }
     }
   },
   "retention_days": "30",

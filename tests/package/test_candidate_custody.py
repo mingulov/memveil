@@ -1610,6 +1610,51 @@ def test_release_runbook_binds_dryrun_published_check():
     assert 'select(.name == "dry-run")' not in text
 
 
+def test_release_runbook_requires_both_live_campaigns():
+    text = (ROOT / "RELEASING.md").read_text()
+    flat = " ".join(text.split())
+    assert "The gate requires both campaigns" in flat
+    assert "pool-only evidence is forbidden" in flat
+    assert "A pool-only `live/` directory is forbidden" \
+        in flat
+    assert "live/overhead/" in text
+    assert "live/soak/" in text
+
+
+def test_release_runbook_orders_stage_sign_pack_once():
+    text = (ROOT / "RELEASING.md").read_text()
+    staged = text.index("dist/evidence/live/soak-exit.json")
+    assert "dist/evidence/live/overhead-exit.json" in text
+    signed = text.index("write-gate-receipt")
+    packed = text.index("write-qualification")
+    assert staged < signed < packed
+    assert "pack-evidence" not in text, \
+        "the runbook packs once via write-qualification"
+    block = text[packed:packed + 800]
+    assert "matrix-receipt.json" in block
+    assert "live-receipt.json" in block
+    flat = " ".join(text.split())
+    assert "packs once in step 7, after both receipts " \
+        "exist" in flat
+    assert "prints the qualification record digest" in flat
+    assert "prints the archive digest" not in flat
+
+
+def test_release_runbook_shell_blocks_parse(tmp_path):
+    text = (ROOT / "RELEASING.md").read_text()
+    blocks = re.findall(r"```sh\n(.*?)```", text, re.S)
+    assert blocks, "the runbook carries no shell blocks"
+    for index, block in enumerate(blocks):
+        probe = tmp_path / ("runbook-%d.sh" % index)
+        probe.write_text(block)
+        proc = subprocess.run(
+            ["bash", "-n", str(probe)],
+            capture_output=True, text=True)
+        assert proc.returncode == 0, \
+            "shell block %d fails bash -n: %s" % (
+                index, proc.stderr.strip())
+
+
 def test_release_version_binding():
     m = api()
     for version, claim in [("0.1.1", "ordinary-preview"),

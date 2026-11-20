@@ -100,6 +100,82 @@ def dmesg_after_marker(text, marker):
     return lines[hits[0] + 1:]
 
 
+def load_guest_candidate(repo):
+    """Verified candidate for this guest, or None in dev.
+
+    The propagated MV_CANDIDATE_DIGEST must match the
+    manifest bytes; any mismatch refuses here, before the
+    guest touches hardware or starts work.
+    """
+    sys.path.insert(0, os.path.join(repo, "tests"))
+    from support.candidate_input import load
+    return load()
+
+
+def guest_bpf_objects(repo, candidate=None):
+    """Lifecycle/copy BPF objects: verified Aya or dev tree.
+
+    Candidate mode resolves the verified Aya objects under
+    the verified root; the candidate carries no bridge.
+    """
+    if candidate is not None:
+        return {"lc_obj": str(candidate.path(
+                    "bpf/swiotlb_lifecycle.bpf.o")),
+                "cp_obj": str(candidate.path(
+                    "bpf/swiotlb_copy.bpf.o"))}
+    return {"lc_obj": os.path.join(
+                repo, "build", "bpf", "swiotlb_lifecycle.bpf.o"),
+            "cp_obj": os.path.join(
+                repo, "build", "bpf", "swiotlb_copy.bpf.o")}
+
+
+def topwalk_product_paths(repo, candidate=None):
+    """(memveil, attempt object) for a topwalk leg.
+
+    Candidate mode resolves the verified packaged bytes
+    under the verified root; dev resolves the build tree.
+    """
+    if candidate is not None:
+        return (str(candidate.path("bin/memveil")),
+                str(candidate.path(
+                    "bpf/swiotlb_attempt.bpf.o")))
+    return (os.path.join(repo, "build", "memveil"),
+            os.path.join(
+                repo, "build", "bpf", "swiotlb_attempt.bpf.o"))
+
+
+def topwalk_replay_binary(repo):
+    """(replay binary, selection-or-None) for host top replay.
+
+    Candidate inputs select the verified packaged bytes via
+    load()/binary(); without them the dev tree binary runs.
+    """
+    sys.path.insert(0, os.path.join(repo, "tests"))
+    from support.candidate_input import binary, load
+    development = os.path.join(repo, "build", "memveil")
+    selected = load()
+    if selected is None:
+        return development, None
+    return binary(development), selected
+
+
+def assert_topwalk_memveil_binding(ledger, selected):
+    """Refuse unless walk.json names the verified binary.
+
+    A selected candidate pins bin/memveil bytes; the guest
+    records the executed binary's sha in walk.json, so a
+    mismatch proves the leg ran foreign bytes. Dev runs
+    (no selection) record without asserting.
+    """
+    if selected is None:
+        return
+    pinned = selected.manifest["files"]["bin/memveil"]
+    if ledger.get("memveil_sha") != pinned:
+        raise ValueError(
+            "walk.json memveil_sha differs from the verified "
+            "candidate binary")
+
+
 class Gate:
     """One subcommand run: paths, checks, consumer control."""
 
@@ -117,6 +193,11 @@ class Gate:
             repo, "build", "bpf", "swiotlb_copy.bpf.o")
         self.lc_test_obj = os.path.join(
             repo, "build", "bpf", "swiotlb_lifecycle-test.bpf.o")
+        self.candidate = load_guest_candidate(repo)
+        if self.candidate is not None:
+            resolved = guest_bpf_objects(repo, self.candidate)
+            self.lc_obj = resolved["lc_obj"]
+            self.cp_obj = resolved["cp_obj"]
         self.consumers = []
         self.oracle_loaded = False
         self.cp_test_obj = os.path.join(
@@ -1078,9 +1159,8 @@ def run_topwalk(gate):
     comparison. An independent debugfs witness brackets the
     run; BPF inventory must settle back to baseline.
     """
-    memveil = os.path.join(gate.repo, "build", "memveil")
-    attempt_obj = os.path.join(
-        gate.repo, "build", "bpf", "swiotlb_attempt.bpf.o")
+    memveil, attempt_obj = topwalk_product_paths(
+        gate.repo, gate.candidate)
     profile = os.path.join(
         gate.repo, "build", "vm", "gate-profile.json")
     for path in (memveil, attempt_obj, profile):

@@ -26,7 +26,9 @@ sys.path.insert(0, TESTS)
 from preload_env import preload_env
 
 REPO = os.path.dirname(TESTS)
-BIN = os.path.join(REPO, "build", "memveil")
+sys.path.insert(0, os.path.join(REPO, "tests"))
+from support.candidate_input import binary, load
+BIN = binary(os.path.join(REPO, "build", "memveil"))
 
 COUNT = 600000
 WINDOW_START = 1000000000
@@ -165,6 +167,8 @@ def paced_errors(receipt, source_stat, count, size, duration_ns, wall):
 
 
 def main():
+    if load() and int(os.environ.get('MEMVEIL_PACED_SECONDS', '60')) != 60:
+        raise ValueError('qualification pacing requires the full 60-second workload')
     if not os.path.isfile(BIN):
         print("FAIL perf-replay: missing %s (run cargo build --release first)"
               % BIN)

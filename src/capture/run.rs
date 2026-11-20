@@ -69,6 +69,10 @@ const ATTEMPT_CAP: &str = "attempt-trace";
 const LIFECYCLE_CAP: &str = "mapping-lifecycle";
 const COPY_CAP: &str = "copy-actual";
 const CONVERT_CAP: &str = "conversion-observe";
+/// Planned journal selector (`docs/format-compatibility.md`): recognized
+/// by the parser so admission answers it explicitly (exit 3, no record
+/// channel) instead of as an unknown id (exit 2).
+const JOURNAL_CAP: &str = "conversion-journal";
 const RING_LC_MAP: &str = "mv_lifecycle";
 const RING_CP_MAP: &str = "mv_copies";
 
@@ -378,10 +382,14 @@ fn split_caps(text: &str) -> Vec<String> {
 /// Parse requested capabilities in order, deduplicated.
 ///
 /// Empty means attempt-trace alone; the sole item "all"
-/// expands to the three record channels. Unknown ids,
-/// empty items, and requests without attempt-trace
-/// refuse: the attempt channel is the mandatory base
-/// channel.
+/// expands to the three record channels. Unknown ids and
+/// empty items refuse. Requests naming an ordinary
+/// capability without attempt-trace refuse: the attempt
+/// channel is the mandatory base channel. Journal-only
+/// lists (conversion-journal and conversion-observe,
+/// which name global conversion collection) need no
+/// attempt hook; every consumer refuses them explicitly
+/// as channel-less (exit 3), never as unknown (exit 2).
 pub fn parse_requested_caps(want: &str) -> CapsOut {
     let mut out = CapsOut::default();
     if want == "all" {
@@ -402,7 +410,12 @@ pub fn parse_requested_caps(want: &str) -> CapsOut {
             out.err = "bad capability list".to_string();
             return out;
         }
-        if item != ATTEMPT_CAP && item != LIFECYCLE_CAP && item != COPY_CAP && item != CONVERT_CAP {
+        if item != ATTEMPT_CAP
+            && item != LIFECYCLE_CAP
+            && item != COPY_CAP
+            && item != CONVERT_CAP
+            && item != JOURNAL_CAP
+        {
             out.err = format!("unknown capability: {item}");
             return out;
         }
@@ -418,13 +431,16 @@ pub fn parse_requested_caps(want: &str) -> CapsOut {
         }
     }
     let mut has_attempt = false;
+    let mut has_ordinary = false;
     for cap in &out.caps {
         if cap == ATTEMPT_CAP {
             has_attempt = true;
-            break;
+        }
+        if cap == ATTEMPT_CAP || cap == LIFECYCLE_CAP || cap == COPY_CAP {
+            has_ordinary = true;
         }
     }
-    if !has_attempt {
+    if has_ordinary && !has_attempt {
         out.err = "attempt-trace is required".to_string();
         return out;
     }
@@ -1118,6 +1134,9 @@ pub fn decide_record(
         }
         if cap == CONVERT_CAP {
             return refuse_scan("capability conversion-observe has no record channel".to_string());
+        }
+        if cap == JOURNAL_CAP {
+            return refuse_scan("capability conversion-journal has no record channel".to_string());
         }
     }
     for cap in &ask.caps {
@@ -2153,6 +2172,18 @@ mod tests {
         let noattempt = parse_requested_caps("copy-actual");
         assert!(!noattempt.ok);
         assert_eq!(noattempt.err, "attempt-trace is required");
+        // Journal-only lists parse without attempt hooks;
+        // mixed journal/ordinary lists keep the requirement.
+        let journal = parse_requested_caps("conversion-journal");
+        assert!(journal.ok);
+        assert_eq!(journal.caps, vec!["conversion-journal".to_string()]);
+        let observe = parse_requested_caps("conversion-observe");
+        assert!(observe.ok);
+        let mixed_journal = parse_requested_caps("copy-actual,conversion-journal");
+        assert!(!mixed_journal.ok);
+        assert_eq!(mixed_journal.err, "attempt-trace is required");
+        let mixed_ok = parse_requested_caps("attempt-trace,conversion-journal");
+        assert!(mixed_ok.ok);
     }
 
     fn scan_kernel() -> KernelInfo {
@@ -2270,6 +2301,34 @@ mod tests {
                 .refusal
                 .contains("conversion-observe has no record channel")
         );
+    }
+
+    #[test]
+    fn service_journal_cap_refuses() {
+        let profiles = scan_profiles();
+        for want in ["conversion-journal", "attempt-trace,conversion-journal"] {
+            let decision = decide_record(
+                &fixture("tests/fixtures/scan/ok"),
+                &scan_kernel(),
+                &profiles,
+                "",
+                false,
+                &fixture("tests/fixtures/elf/ok.o"),
+                "",
+                "",
+                want,
+                &fixture("tests/fixtures/scan/profiles"),
+                "",
+            );
+            assert!(!decision.ok, "{want}");
+            assert!(
+                decision
+                    .refusal
+                    .contains("conversion-journal has no record channel"),
+                "{want}: {}",
+                decision.refusal
+            );
+        }
     }
 
     #[test]

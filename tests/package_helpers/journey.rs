@@ -25,6 +25,8 @@
 
 use super::DirLock;
 use super::run;
+use super::run_candidate;
+use super::run_candidate_ok;
 use super::run_ok;
 use super::scratch;
 use super::sha256_file;
@@ -44,12 +46,90 @@ pub const INSTALLED_BIN: &str = "/usr/bin/memveil";
 
 /// True when passwordless sudo works (privileged journeys need it).
 pub fn have_passwordless_sudo() -> bool {
-    run("sudo", &["-n", "true"], None).status.success()
+    have_passwordless_sudo_with("sudo")
+}
+
+/// Probe one sudo binary name.
+///
+/// A missing binary reads as unusable, never panics in the
+/// spawn: the install smoke tests call this before the gate,
+/// so an absent sudo must reach the gate as `false` (a clean
+/// dev skip, a candidate failure), not abort the suite.
+pub fn have_passwordless_sudo_with(sudo: &str) -> bool {
+    if !super::tool_present(sudo) {
+        return false;
+    }
+    run(sudo, &["-n", "true"], None).status.success()
 }
 
 /// True when `MV_RUSTPKG_JOURNEY=0` opts out of privileged journeys.
 pub fn journey_opted_out() -> bool {
     std::env::var("MV_RUSTPKG_JOURNEY").as_deref() == Ok("0")
+}
+
+/// Install-journey entry verdict.
+#[derive(Debug, PartialEq, Eq)]
+pub enum JourneyGate {
+    /// Run the privileged journey.
+    Proceed,
+    /// Dev-only skip with its print line.
+    Skip(String),
+    /// Candidate-mode refusal with its panic line.
+    Fail(String),
+}
+
+/// Decide the install-journey entry (pure: test the matrix directly).
+///
+/// `tool` names the package manager ("dpkg"/"rpm") for
+/// diagnostics. Missing tooling, missing passwordless sudo,
+/// or the `MV_RUSTPKG_JOURNEY=0` opt-out skips in dev but
+/// fails in candidate mode: qualification must run the
+/// journey, never silently pass it.
+pub fn journey_gate(
+    tool: &str,
+    tool_present: bool,
+    sudo_ok: bool,
+    opted_out: bool,
+    candidate: bool,
+) -> JourneyGate {
+    if !tool_present || !sudo_ok {
+        let reason = format!("install smoke needs {tool} plus passwordless sudo");
+        if candidate {
+            return JourneyGate::Fail(format!("candidate install journey refused: {reason}"));
+        }
+        return JourneyGate::Skip(reason);
+    }
+    if opted_out {
+        if candidate {
+            return JourneyGate::Fail(
+                "candidate install journey refused: MV_RUSTPKG_JOURNEY=0 opt-out \
+                 forbidden in candidate mode"
+                    .to_string(),
+            );
+        }
+        return JourneyGate::Skip(
+            "MV_RUSTPKG_JOURNEY=0 opts out of the privileged journey".to_string(),
+        );
+    }
+    JourneyGate::Proceed
+}
+
+/// Decide a tool-presence gate entry (pure: test the matrix directly).
+///
+/// `tool` names the missing binary (or bundle, e.g.
+/// "rpm2cpio/cpio") and `need` says what the gated check
+/// needs it for. Absence skips in dev but fails in
+/// candidate mode: qualification must run the pinned
+/// checks, never silently pass them.
+pub fn tool_gate(tool: &str, present: bool, candidate: bool, need: &str) -> JourneyGate {
+    if present {
+        return JourneyGate::Proceed;
+    }
+    let reason = format!("{tool} absent on this host: {need}");
+    if candidate {
+        return JourneyGate::Fail(format!("candidate tool gate refused: {reason}"));
+    }
+    JourneyGate::Skip(reason)
 }
 
 /// Cross-process install lock: held across install/run/uninstall.
@@ -116,10 +196,10 @@ pub fn assert_loader_closure() {
 /// Zero-flag doctor (exit 0 or 3, nonempty stdout) plus the
 /// exact installed version.
 pub fn assert_doctor_and_version(version: &str) {
-    let doctor = run(INSTALLED_BIN, &["doctor"], None);
+    let doctor = run_candidate(INSTALLED_BIN, &["doctor"], None);
     assert!(doctor.status.code() == Some(0) || doctor.status.code() == Some(3));
     assert!(!String::from_utf8_lossy(&doctor.stdout).trim().is_empty());
-    let got = run_ok(INSTALLED_BIN, &["version"], None);
+    let got = run_candidate_ok(INSTALLED_BIN, &["version"], None);
     assert_eq!(got.trim(), format!("memveil-{version}"));
 }
 
@@ -129,6 +209,8 @@ pub fn assert_doctor_and_version(version: &str) {
 /// leaves no capture dir, a run (0/4) leaves one.
 pub fn record_probe(tmp: &Path) {
     let cap = tmp.join("cap");
+    // `env_clear` below already scrubs the loader override, so
+    // this leg needs no `run_candidate` wrapper.
     let record = std::process::Command::new(INSTALLED_BIN)
         .args([
             "record",
@@ -234,7 +316,9 @@ pub fn qualify_legs(tmp: &Path, scratch_dirs: &QualifyScratch, receipts: &str) {
         format!("{lib}/swiotlb_copy.bpf.o"),
     ];
     let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
-    let qualify = run(refs[0], &refs[1..], Some(tmp));
+    // The scrubbed spawn plus sudo's own env_reset (verified to
+    // drop the override) leave the binary's loader env clean.
+    let qualify = run_candidate(refs[0], &refs[1..], Some(tmp));
     println!(
         "journey qualify exit: {}",
         qualify.status.code().unwrap_or(-1)
@@ -291,7 +375,7 @@ pub fn qualify_legs(tmp: &Path, scratch_dirs: &QualifyScratch, receipts: &str) {
         fixture.to_str().unwrap().to_string(),
     ];
     let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
-    let bridged = run(refs[0], &refs[1..], Some(tmp));
+    let bridged = run_candidate(refs[0], &refs[1..], Some(tmp));
     println!(
         "journey bridged qualify exit: {}",
         bridged.status.code().unwrap_or(-1)
@@ -401,4 +485,47 @@ pub fn journey_scratch(name: &str) -> (PathBuf, QualifyScratch) {
     let tmp = scratch(name);
     let dirs = QualifyScratch::under(&tmp);
     (tmp, dirs)
+}
+
+/// Installed-closure leg over a staged tree (candidate mode only):
+/// the extracted tree must equal the verified candidate
+/// files closure, through the packager's own predicate.
+/// Missing, tampered, aliased, and extra members refuse.
+pub fn assert_installed_closure(root: &Path) {
+    installed_closure(root, false);
+}
+
+/// Installed-closure leg over a live root (candidate mode only):
+/// same predicate scoped to MemVeil-owned paths. A live
+/// `/usr/bin` holds unrelated system binaries the sweep
+/// must ignore, while added files and aliases under owned
+/// paths still refuse.
+pub fn assert_installed_closure_live(root: &Path) {
+    installed_closure(root, true);
+}
+
+/// Installed-closure check, staged or live scoped.
+fn installed_closure(root: &Path, live: bool) {
+    assert!(
+        super::candidate_mode(),
+        "installed-closure check needs candidate inputs"
+    );
+    let script = super::scripts_dir()
+        .join("package-deb.py")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let flag = if live { ", True" } else { "" };
+    let text = super::loader_probe(
+        &[
+            "import importlib.util",
+            &format!("spec = importlib.util.spec_from_file_location('pkgdeb', {script:?})"),
+            "pkgdeb = importlib.util.module_from_spec(spec)",
+            "spec.loader.exec_module(pkgdeb)",
+            &format!("pkgdeb.verify_installed(sys.argv[1], selected.manifest{flag})"),
+            "print('closure-ok')",
+        ],
+        &[root.to_str().unwrap()],
+    );
+    assert!(text.contains("closure-ok"), "{text}");
 }

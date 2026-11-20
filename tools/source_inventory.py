@@ -132,6 +132,12 @@ def take_inventory(root, dirs=TREE_DIRS, files=TREE_FILES,
     entries = {}
 
     def record(rel):
+        if dirs != TREE_DIRS:
+            # Only the finite versioned evidence names can
+            # vary after a build.
+            from candidate import evidence_only_path
+            if evidence_only_path(rel.replace(os.sep, "/")):
+                return None
         entry = describe(
             root, rel, exclude_top=exclude_top,
             exclude_any=exclude_any,

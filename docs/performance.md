@@ -118,3 +118,98 @@ and replay `top`, checking exact counts and child RSS.
 no always-on-service claim and does not exercise real collection, writer
 settlement or confidential guests. Retain binary and input hashes, the
 command, duration, cycle count, RSS, counts, quality and cleanup for each run.
+
+## Exact packaged qualification
+
+Set both `MV_BUNDLE_TARBALL` and `MV_CANDIDATE_MANIFEST` to retained immutable
+candidate files, optionally pinning `MV_CANDIDATE_DIGEST`. The qualification
+loader verifies the canonical manifest, archive hash, full file closure,
+source, toolchain and build receipt before executing anything. Each process
+extracts into its own exclusive temporary directory. It never rebuilds the
+product. Artifact roles such as deb and rpm resolve beside the candidate
+manifest and must match its hashes. Existing `MEMVEIL_BIN`, `MV_DEB`, `MV_RPM`,
+library injection and similar product overrides are refused. A fuzz `--binary`
+may only name the loader's verified executable. Development runs without these
+inputs retain their existing scope; unsupported qualification suites fail
+closed.
+
+`tools/test perf-replay`, `perf-region`, `soak`, `privacy`, `fuzz-smoke`,
+`fuzz-campaign`, `perf-overhead`, `vm-live-soak`,
+`vm-kernels`, `vm-scenarios`, `extracted-robustness`, `package`,
+`release-runtime`, `deb` and `rpm-journey` consume the selected bytes. The
+extracted robustness suite reuses the supplied archive. Pacing remains
+600,000 records over 60 seconds and the region ceiling remains 65,536
+segments. Native pacing/oracle helpers retain separate identities; they do
+not replace candidate product bytes. The `deb` and `rpm-journey` suites
+launch prebuilt executables: run
+`tests/support/journey_prep.py .candidate-prep/records/prep.json`
+first and
+point `MV_JOURNEY_PREP` at its record; dispatch refuses without it and
+never invokes a build itself.
+
+`MEMVEIL_VM_PERF=1 tools/test perf-overhead` in candidate mode installs the
+verified deb in an ephemeral guest and runs five separately paired baseline
+runs for each of `attempt-record-summary`, actual `live-top-1s`, no-stack
+`journal-summary`, and `journal-callers-detail`. Summary targets remain at
+most 5% throughput decrease and 10% p99 increase. Caller-enabled journal
+detail is reported separately. Live top must cover the measured window with
+one-second refreshes: adjacent refreshes must remain within 0.5–1.5 seconds,
+both window edges within 1.5 seconds, and at least 59 refreshes for a
+sixty-second window. Missing middle intervals or startup bursts fail. Missing
+or unadmitted requested journal support skips its row with a recorded reason;
+an attach refusal is never a performance pass.
+
+`perf-workload` is DEFERRED under qualification inputs: the sealed
+candidate carries no retired perf-workload guest inputs, so dispatch
+skips the suite with its recorded reason instead of executing it. It
+remains a laboratory consumer measurement in development runs only; it
+never executes against candidate bytes and never produces a
+product-summary receipt.
+
+Installed campaign workload units are a 16 MiB direct scratch read and 32
+paced packets to the guest's emulated peer, run concurrently. Each leg warms
+for ten seconds and measures for at least sixty. Throughput counts completed
+bytes/packets over wall time. p99 is the nearest-rank latency of those
+complete operations, including helper process overhead; it is not per-request
+device or per-packet latency. The exact same protocol runs in each paired
+baseline.
+
+`MEMVEIL_VM_LIVE_SOAK=1 tools/test vm-live-soak` requires the same candidate
+inputs. It runs repeated one-minute captures with concurrent scratch block
+and peer-network traffic for at least thirty measured active minutes, then
+one 4,260-second live capture whose pool samples must span more than seventy
+minutes. Readiness, warmup, reporting and cleanup time never count toward
+the thirty-minute total; campaign wall time is reported separately. The pool
+case uses one 16 KiB direct read and one peer packet per second so it
+exercises the full sampling duration within the default event-byte budget; it
+is not an overhead measurement. The first 4,096 periodic pool samples must
+demonstrate timed coverage. After that routine cap, quiet sampling
+legitimately stops persisting records. A separately identified intrusive
+pool-only `strace` oracle therefore checks positive reads of the exact
+used/capacity debugfs paths through the measured post-cap interval, excluding
+finalization. Each label needs at least 4,096 reads; gaps above three seconds
+or bursts below half a second fail. Trace delivery must remain within 250 ms.
+The tracer, parser, candidate executable, process start identity and guest
+nonce are bound in the receipt. Raw trace lines remain in bounded memory;
+only labels, positive byte counts and monotonic receive timestamps are
+retained. The oracle is never attached on overhead legs and proves read
+cadence, not pressure behavior. The repeated-capture case retains the mixed
+workload specified above. It records all quality channels, stop facts,
+process RSS/FD samples, BPF program/map/link inventories, installed byte
+identities, capture hashes and cleanup. Userspace RSS remains bounded by
+256 MiB; map memory is reported separately and unknown map memory stays null.
+Captures and progress remain in the exported evidence directory. Failed
+captures and checkpoints are retained with bounded, allowlisted exports and
+failure observations. Independent cleanup/export failures do not replace the
+original product exit; export failure leaves the owned local evidence in a
+second host-backed evidence directory. Failure exports are explicitly
+unverified. This is distinct from the offline replay `soak` suite.
+
+Live campaigns require the pinned VM tool versions, KVM, root in the
+isolated guest, and the exclusive suite lease. The host root remains
+read-only; package installation uses guest overlays, the scratch NVMe image
+is created for that one run, and cleanup addresses only the owned guest
+process group and scratch image. Unarmed live soak exits 77. Armed missing
+prerequisites, capture refusal, quality/loss failures or cleanup failures
+fail the campaign. An ordinary guest receipt makes no confidential-platform
+qualification claim.
