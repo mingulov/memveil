@@ -431,18 +431,19 @@ class FakeRelease:
         Path(destination).write_bytes(self.data[name])
 
 
-class FakeList:
-    """Stub list-releases endpoint serving one listing."""
+class FakeDraft:
+    """Stub get-release endpoint serving one draft record."""
 
-    def __init__(self, releases):
+    def __init__(self, release_id, record):
         self.calls = []
-        self.releases = copy.deepcopy(releases)
+        self.release_id = release_id
+        self.record = copy.deepcopy(record)
 
     def json(self, path):
         self.calls.append(("GET", path))
-        assert path == "repos/" + REPO \
-            + "/releases?per_page=100", path
-        return copy.deepcopy(self.releases)
+        assert path == "repos/" + REPO + "/releases/" \
+            + self.release_id, path
+        return copy.deepcopy(self.record)
 
     def download(self, path, destination):
         self.calls.append(("DOWNLOAD", path))
@@ -451,64 +452,92 @@ class FakeList:
             ("asset-bytes:%s\n" % ident).encode())
 
 
-def _draft_listing(tag):
-    return [
-        {"id": 7, "draft": False, "tag_name": "v0.1.0",
-         "assets": []},
-        {"id": 9, "draft": True, "tag_name": tag,
-         "assets": [
-             {"id": 101,
-              "name": "qualification-evidence.tar.gz",
-              "state": "uploaded"},
-             {"id": 102, "name": "candidate.json",
-              "state": "uploaded"}]},
-        {"id": 11, "draft": False, "tag_name": "v0.1.1",
-         "assets": []},
-    ]
+def _draft_record(tag, ident=9):
+    return {
+        "id": ident, "draft": True, "tag_name": tag,
+        "assets": [
+            {"id": 101,
+             "name": "qualification-evidence.tar.gz",
+             "state": "uploaded"},
+            {"id": 102, "name": "candidate.json",
+             "state": "uploaded"}],
+    }
 
 
-def test_find_holding_draft_selects_draft_only():
+def test_get_holding_draft_by_id_success(custody_base,
+                                         tmp_path):
+    m = api()
+    fix = fresh(custody_base, tmp_path)
+    stub = FakeRelease(fix)
+    release = m.get_holding_draft(
+        stub, REPO, "1", "candidate-fixture")
+    assert release["id"] == 1
+    assert release["draft"] is True
+    assert ("GET", "repos/" + REPO + "/releases/1") \
+        in stub.calls
+    dest = Path(tmp_path) / ARCHIVE
+    asset = m.download_draft_asset(
+        stub, REPO, release, ARCHIVE, dest)
+    assert asset["name"] == ARCHIVE
+    assert dest.read_bytes() == fix["archive_bytes"]
+
+
+@pytest.mark.parametrize("release_id",
+                         ["", "abc", "12a", "-5", " 7", "0"])
+def test_get_holding_draft_rejects_bad_id(release_id):
     m = api()
     tag = "candidate-" + "1" * 64
-    found = m.find_holding_draft(
-        FakeList(_draft_listing(tag)), REPO, tag)
-    assert found["id"] == 9
-    assert found["draft"] is True
+    stub = FakeDraft("9", _draft_record(tag))
+    with pytest.raises(ValueError,
+                       match="invalid immutable remote ID"):
+        m.get_holding_draft(stub, REPO, release_id, tag)
+    assert stub.calls == []
 
 
-def test_find_holding_draft_rejects_absent_tag():
-    m = api()
-    with pytest.raises(ValueError, match="missing or ambiguous"):
-        m.find_holding_draft(
-            FakeList(_draft_listing("candidate-" + "1" * 64)),
-            REPO, "candidate-" + "2" * 64)
-
-
-def test_find_holding_draft_ignores_published_same_tag():
+@pytest.mark.parametrize(
+    "case", ["wrong-id", "published", "retagged", "malformed"])
+def test_get_holding_draft_rejects_bad_record(case):
     m = api()
     tag = "candidate-" + "1" * 64
-    listing = [{"id": 7, "draft": False, "tag_name": tag,
-                "assets": []}]
-    with pytest.raises(ValueError, match="missing or ambiguous"):
-        m.find_holding_draft(FakeList(listing), REPO, tag)
+    record = _draft_record(tag)
+    if case == "wrong-id":
+        record["id"] = 10
+    elif case == "published":
+        record["draft"] = False
+    elif case == "retagged":
+        record["tag_name"] = "candidate-" + "2" * 64
+    else:
+        record = [{"not": "a release"}]
+    stub = FakeDraft("9", record)
+    with pytest.raises(ValueError,
+                       match="missing, published, or retagged"):
+        m.get_holding_draft(stub, REPO, "9", tag)
+
+
+def test_get_holding_draft_rejects_empty_tag():
+    m = api()
+    stub = FakeDraft("9", _draft_record("candidate-x"))
+    with pytest.raises(ValueError,
+                       match="invalid holding draft tag"):
+        m.get_holding_draft(stub, REPO, "9", "")
 
 
 def test_download_draft_asset_uses_asset_id(tmp_path):
     m = api()
     tag = "candidate-" + "1" * 64
-    listing = FakeList(_draft_listing(tag))
-    release = m.find_holding_draft(listing, REPO, tag)
+    stub = FakeDraft("9", _draft_record(tag))
+    release = m.get_holding_draft(stub, REPO, "9", tag)
     dest = Path(tmp_path) / "evidence.tar.gz"
     asset = m.download_draft_asset(
-        listing, REPO, release, "qualification-evidence.tar.gz",
+        stub, REPO, release, "qualification-evidence.tar.gz",
         dest)
     assert asset["id"] == 101
     assert ("DOWNLOAD",
             "repos/" + REPO + "/releases/assets/101") \
-        in listing.calls
+        in stub.calls
     assert dest.read_bytes() == b"asset-bytes:101\n"
     with pytest.raises(ValueError, match="missing or ambiguous"):
-        m.download_draft_asset(listing, REPO, release,
+        m.download_draft_asset(stub, REPO, release,
                                "absent.bin", dest)
 
 
@@ -518,8 +547,9 @@ def test_download_draft_asset_refuses_unuploaded(tmp_path):
                "assets": [{"id": 103, "name": "half.bin",
                            "state": "open"}]}
     with pytest.raises(ValueError, match="not uploaded"):
-        m.download_draft_asset(FakeList([]), REPO, release,
-                               "half.bin", tmp_path / "half.bin")
+        m.download_draft_asset(FakeDraft("9", release), REPO,
+                               release, "half.bin",
+                               tmp_path / "half.bin")
 
 
 def custody_statement(fix, ids):
@@ -1373,14 +1403,22 @@ def test_release_modes_gate_each_stage():
         assert "needs" not in doc["jobs"][job], job
 
 
-def test_release_draft_lookups_list_and_filter():
+def test_release_draft_lookups_use_direct_id():
     doc = _release_workflow()
     whole = json.dumps(doc["jobs"])
+    assert "find_holding_draft" not in whole
+    assert "select_holding_draft" not in whole
+    assert "releases?per_page" not in whole
     assert "releases/tags/" not in whole
     assert "gh release download" not in whole
+    trigger = doc.get("on", doc.get(True))
+    inputs = trigger["workflow_dispatch"]["inputs"]
+    assert "draft_release_id" in inputs
     for job in ("qualify", "import"):
         text = json.dumps(doc["jobs"][job])
-        assert "find_holding_draft" in text, job
+        assert "get_holding_draft" in text, job
+        assert "DRAFT_RELEASE_ID" in text, job
+        assert "[0-9]+" in text, job
     assert "download_draft_asset" in json.dumps(
         doc["jobs"]["qualify"])
 

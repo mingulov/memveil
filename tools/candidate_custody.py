@@ -69,30 +69,26 @@ class GitHub:
                 stdout=stream, check=True)
 
 
-def select_holding_draft(releases, tag):
-    """The single draft release tagged `tag`; fail closed otherwise.
+def get_holding_draft(api, repo, release_id, tag):
+    """Fetch the holding draft release by its immutable ID.
 
-    Get-by-tag misses pending drafts, so callers list
-    releases and filter here: the match must be exactly one
-    draft carrying this tag. An absent tag, a published
-    release, or an ambiguous listing all fail closed.
+    The record must carry the requested ID, still be a
+    draft, and carry the expected candidate tag; a missing,
+    published, or retagged record fails closed. Callers pass
+    the recorded draft ID, never a listing lookup.
     """
-    matches = [item for item in releases
-               if isinstance(item, dict)
-               and item.get('tag_name') == tag
-               and item.get('draft') is True]
-    c.require(len(matches) == 1,
-              'holding draft is missing or ambiguous: ' + tag)
-    return matches[0]
-
-
-def find_holding_draft(api, repo, tag):
-    """Fetch the release list and select the holding draft."""
-    releases = api.json('repos/' + repository(repo)
-                        + '/releases?per_page=100')
-    c.require(isinstance(releases, list),
-              'release listing is malformed')
-    return select_holding_draft(releases, tag)
+    repository(repo); decimal(release_id)
+    c.require(isinstance(tag, str) and tag,
+              'invalid holding draft tag')
+    release = api.json('repos/' + repo + '/releases/'
+                       + release_id)
+    c.require(isinstance(release, dict)
+              and str(release.get('id')) == release_id
+              and release.get('draft') is True
+              and release.get('tag_name') == tag,
+              'holding draft is missing, published, or '
+              'retagged')
+    return release
 
 
 def download_draft_asset(api, repo, release, name, dest):

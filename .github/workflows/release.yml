@@ -72,6 +72,11 @@ on:
         required: false
         type: string
         default: ''
+      draft_release_id:
+        description: 'Holding draft release ID (qualify/import only)'
+        required: false
+        type: string
+        default: ''
 
 permissions: {}
 
@@ -333,6 +338,7 @@ jobs:
         env:
           CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
+          DRAFT_RELEASE_ID: ${{ inputs.draft_release_id }}
         run: |
           set -eu
           python3 - <<'EOF'
@@ -345,6 +351,9 @@ jobs:
               sys.exit("candidate_sha256 is not 64 lowercase hex")
           if not re.fullmatch(r"[0-9a-f]{40}", commit):
               sys.exit("source_commit is not 40 lowercase hex")
+          draft_id = os.environ.get("DRAFT_RELEASE_ID") or ""
+          if not re.fullmatch(r"[0-9]+", draft_id):
+              sys.exit("draft_release_id is not a decimal ID")
           EOF
           git cat-file -e "$SOURCE_COMMIT^{commit}"
       - name: Materialize the candidate source as data
@@ -363,6 +372,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+          DRAFT_RELEASE_ID: ${{ inputs.draft_release_id }}
         run: |
           set -eu
           gh run download "$GITHUB_RUN_ID" \
@@ -385,7 +395,8 @@ jobs:
           repo = os.environ["GITHUB_REPOSITORY"]
           tag = "candidate-" + os.environ["CANDIDATE_SHA256"]
           api = custody.GitHub()
-          release = custody.find_holding_draft(api, repo, tag)
+          release = custody.get_holding_draft(
+              api, repo, os.environ["DRAFT_RELEASE_ID"], tag)
           custody.download_draft_asset(
               api, repo, release, "qualification-evidence.tar.gz",
               "evidence-dl/qualification-evidence.tar.gz")
@@ -479,6 +490,7 @@ jobs:
         env:
           CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
+          DRAFT_RELEASE_ID: ${{ inputs.draft_release_id }}
         run: |
           set -eu
           python3 - <<'EOF'
@@ -491,6 +503,9 @@ jobs:
               sys.exit("candidate_sha256 is not 64 lowercase hex")
           if not re.fullmatch(r"[0-9a-f]{40}", commit):
               sys.exit("source_commit is not 40 lowercase hex")
+          draft_id = os.environ.get("DRAFT_RELEASE_ID") or ""
+          if not re.fullmatch(r"[0-9]+", draft_id):
+              sys.exit("draft_release_id is not a decimal ID")
           EOF
           git cat-file -e "$SOURCE_COMMIT^{commit}"
       - name: Install custody tools
@@ -519,6 +534,7 @@ jobs:
           GITHUB_EVENT_NAME: workflow_dispatch
           SOURCE_COMMIT: ${{ inputs.source_commit }}
           CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+          DRAFT_RELEASE_ID: ${{ inputs.draft_release_id }}
         run: |
           set -eu
           VERSION=$(git show "$SOURCE_COMMIT:Cargo.toml" \
@@ -531,8 +547,9 @@ jobs:
           import candidate_custody as custody
           repo = os.environ["GITHUB_REPOSITORY"]
           tag = "candidate-" + os.environ["CANDIDATE_SHA256"]
-          release = custody.find_holding_draft(
-              custody.GitHub(), repo, tag)
+          release = custody.get_holding_draft(
+              custody.GitHub(), repo,
+              os.environ["DRAFT_RELEASE_ID"], tag)
           with open(sys.argv[1], "w") as stream:
               json.dump(release, stream, sort_keys=True)
           print(json.dumps({
