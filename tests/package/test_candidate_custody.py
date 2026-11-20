@@ -1106,6 +1106,20 @@ def test_release_sign_job_has_no_source_checkout():
     assert "candidate-src" not in text
 
 
+def test_release_qualify_extracts_to_fresh_path():
+    doc = _release_workflow()
+    steps = doc["jobs"]["qualify"]["steps"]
+    collect = next(step for step in steps
+                   if "campaign evidence" in step.get("name", ""))
+    for line in collect["run"].splitlines():
+        words = line.strip().split()
+        if not words or words[0] != "mkdir":
+            continue
+        targets = [word for word in words[1:]
+                   if not word.startswith("-")]
+        assert "evidence" not in targets, line
+
+
 def test_release_digest_never_in_shell():
     doc = _release_workflow()
     for job, spec in sorted(doc["jobs"].items()):

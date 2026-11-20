@@ -359,7 +359,7 @@ jobs:
           if got != os.environ["CANDIDATE_SHA256"]:
               sys.exit("sealed digest differs from dispatched candidate")
           EOF
-          mkdir -p evidence evidence-dl
+          mkdir -p evidence-dl
           gh release download \
             "candidate-$CANDIDATE_SHA256" \
             -p qualification-evidence.tar.gz -D evidence-dl
