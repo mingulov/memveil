@@ -125,10 +125,10 @@ def test_soak_clock_excludes_nonworkload(monkeypatch):
     monkeypatch.setattr(m.time, 'monotonic', lambda: clock[0])
     m.run_soak(one, result)
     assert len(result['legs']) == 16
-    assert result['measured_mixed_seconds'] == 900
+    assert result['mixed_seconds'] == 900
     assert result['campaign_seconds_before_pool'] == 1800
     with pytest.raises(ValueError):
-        m.validate_duration(1800, result['measured_mixed_seconds'], 1, 1)
+        m.validate_duration(1800, result['mixed_seconds'], 1, 1)
 
 
 def test_pool_requires_periodic_proof(tmp_path, monkeypatch):
@@ -207,6 +207,23 @@ def test_journal_rows_need_capability():
     with pytest.raises(ValueError):
         m.require_campaign_targets([{'mode': 'attempt-record-summary', 'metric': 'block',
                                      'status': 'SKIP', 'reason': 'unsupported'}])
+
+
+def test_admitted_journal_detail_fail_refuses_campaign():
+    m = api()
+    def one(mode, seconds):
+        return {'workload': {'elapsed_seconds': seconds,
+                'window': {'start_ns': '0', 'end_ns': str(seconds * 10**9)},
+                'metrics': {kind: dict(paired_run()) for kind in ('block', 'network')}}}
+    result = {'comparisons': []}
+    m.run_overhead(one, result, admit=lambda mode: (True, ''))
+    assert len(result['comparisons']) == 8
+    assert all(row['target_required'] for row in result['comparisons'])
+    detail = [row for row in result['comparisons'] if row['mode'] == 'journal-callers-detail']
+    assert len(detail) == 2
+    detail[0]['status'] = 'FAIL'
+    with pytest.raises(ValueError, match='target failed'):
+        m.require_campaign_targets(result['comparisons'])
 
 
 def test_journal_admission_maps_doctor_verdicts(tmp_path):

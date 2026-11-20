@@ -191,7 +191,7 @@ def run_soak(one, result):
         measured_ns += duration
         count += 1
     if count < 2: raise ValueError('soak lacks repeated capture/stop')
-    result['measured_mixed_seconds'] = measured_ns / 10**9
+    result['mixed_seconds'] = measured_ns / 10**9
     result['campaign_seconds_before_pool'] = time.monotonic() - started
     one('attempt-record-summary', POOL_SECONDS, True)
 
@@ -508,11 +508,11 @@ def run_overhead(one, result, admit):
             status, reason = assess(comparison)
             result['comparisons'].append({'mode': mode, 'metric': metric, 'status': status,
                 'reason': reason, 'measurement': comparison,
-                'target_required': mode != 'journal-callers-detail'})
+                'target_required': True})
     for mode, reason in skipped.items():
         for metric in ('block', 'network'):
             result['comparisons'].append({'mode': mode, 'metric': metric, 'status': 'SKIP',
-                'reason': reason, 'target_required': mode != 'journal-callers-detail'})
+                'reason': reason, 'target_required': True})
 
 
 def require_campaign_targets(comparisons):
