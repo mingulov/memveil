@@ -12,9 +12,9 @@ between C and Q (see the evidence-only rule).
 | Path | Schema | Written by |
 |---|---|---|
 | `packaging/candidate-policy.json` (at C) | `memveil-candidate-policy/1` | release owner, before the seal |
-| `packaging/qualifications/candidate.json` | `memveil-candidate/2` | `release` workflow seal job |
+| `packaging/qualifications/candidate.json` | `memveil-candidate/2` | operator, sealing locally |
 | `packaging/qualifications/qualification.json` | `memveil-qualification/1` | qualifier, with the campaign |
-| `packaging/tested-payload.sha256` | checksum lines | `release` workflow qualify job |
+| `packaging/tested-payload.sha256` | checksum lines | operator, exporting locally |
 | `packaging/qualifications/remote.json` | `memveil-remote-custody/1` | operator, after a clean import |
 
 `candidate.json` is a byte copy of the sealed manifest: its
@@ -74,12 +74,15 @@ newline).
 
 ## Dispatch order
 
-One `mode: seal` dispatch runs seal, sign, and qualify
-(the holding draft with the campaign evidence must exist
-before dispatching); then walk one custody stage per
-dispatch with the ref at Q: `import`, `dry-run`, `promote`.
-Dry-run refuses when the final tag already exists; after it
-is green, the owner creates `v<version>` on C and only then
-dispatches promote with the matching authorization. Promote
-requires the tag to resolve to C. Custody dispatches consume
-stored bytes only and never rebuild the candidate.
+The operator seals, signs, campaigns, qualifies, and
+exports locally, commits Q1 (the first three records
+above), and stages the holding draft; then walk one stage
+per dispatch: `qualify` and `import` with the ref at Q1,
+`dry-run` and `promote` with the ref at Q2 (Q1 plus
+`remote.json`). Dry-run refuses when the final tag already
+exists; after it is green, the owner creates `v<version>`
+on C and only then dispatches promote with the matching
+authorization. Promote requires the tag to resolve to C.
+Every dispatch consumes draft or recorded bytes only and
+never rebuilds the candidate. See
+[RELEASING.md](../../RELEASING.md) for the exact choreography.

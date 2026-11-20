@@ -1,44 +1,42 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Dispatch-only release pipeline: one mode per dispatch, each
-# dispatch runs only its own stage and never rebuilds another
-# stage's bytes. Mode to jobs:
-#   seal    -> seal, sign, qualify in one run (the holding
-#              draft with the campaign evidence must exist
-#              before dispatching; qualify consumes this
-#              run's sealed bytes, never a rebuild)
+# dispatch runs only its own stage. The operator seals and
+# signs locally (the primary path); the hosted flow only
+# re-verifies and carries those bytes. Mode to jobs:
+#   qualify -> qualify (independent re-verification: the
+#              draft assets by recorded ID plus Q's records,
+#              digests plus qualify plus export, zero builds)
 #   import  -> import (consumes the sealed set via the draft
 #              assets, stores the remote artifact, attests)
 #   dry-run -> dry-run (consumes the recorded import only)
 #   promote -> promote (consumes the recorded import only)
-# Custody stages consume stored bytes with digest verification
-# (sealed artifact, draft assets, remote artifact) and run
-# zero builds of the candidate. Custody dispatches run with
-# the workflow ref at the qualification commit Q (evidence-
-# only over C); dry-run validates the proposed tag while it
-# must not exist yet, so the owner creates the final tag on C
-# after a green dry-run and only then dispatches promote.
-# See RELEASING.md for the operator order.
+# Every job consumes draft or recorded bytes with digest
+# verification and runs zero builds of the candidate. All
+# dispatches run with the workflow ref at the qualification
+# commit Q (evidence-only over C); dry-run validates the
+# proposed tag while it must not exist yet, so the owner
+# creates the final tag on C after a green dry-run and only
+# then dispatches promote. See RELEASING.md for the operator
+# order.
 #
-# Two-checkout trust rule: every job checks out the trusted
-# workflow ref for its tools and scripts, and jobs that need
-# the candidate source materialize C as a data-only worktree
-# (never executed, only read through --source-root/--root).
-# Checkouts persist no credentials: later git steps run
-# unauthenticated and gh carries its own GH_TOKEN, so a
-# compromised build step gains no push or fetch capability.
-# Dispatch inputs are validated as data (digest pattern,
-# 40-hex commit plus a git object check) before use, and
-# digests are compared in Python, never interpolated into
-# shell. Signing runs in its own job over trusted code plus
-# sealed bytes only, away from the candidate build. Custody
-# jobs build the verifier from the trusted checkout inside
-# the job and never execute sealed bytes: the sealed set
-# carries no executable harness.
+# Trust rule: every job checks out the trusted workflow ref
+# for its tools and scripts, and reads C's bytes (policy,
+# lock, Cargo version) with git show from that checkout,
+# data-only, never executed and never built. Checkouts
+# persist no credentials: later git steps run unauthenticated
+# and gh carries its own GH_TOKEN, so a compromised step
+# gains no push or fetch capability. Dispatch inputs are
+# validated as data (digest pattern, 40-hex commit plus a git
+# object check, decimal IDs) before use, and digests are
+# compared in Python, never interpolated into shell. Signing
+# is local-only: no signing key ever enters this workflow.
+# Custody jobs build the verifier from the trusted checkout
+# inside the job and never execute sealed bytes: the sealed
+# set carries no executable harness.
 #
-# Toolchain pins, matching the tree: Rust 1.100.0 plus
-# nightly-2026-05-20 for the eBPF child build
-# (rust-toolchain.toml, build.rs BPF_TOOLCHAIN) and bpf-linker
-# 0.10.4 (build.rs prerequisite).
+# Toolchain pin for the in-job verifier builds, matching the
+# tree: Rust 1.100.0 (rust-toolchain.toml). No eBPF toolchain
+# is installed here: nothing builds the candidate hosted.
 name: release
 
 on:
@@ -48,7 +46,7 @@ on:
         description: 'Pipeline stage to run'
         required: true
         type: choice
-        options: [seal, import, dry-run, promote]
+        options: [qualify, import, dry-run, promote]
       candidate_sha256:
         description: 'Sealed candidate digest to release'
         required: true
@@ -81,250 +79,8 @@ on:
 permissions: {}
 
 jobs:
-  seal:
-    if: inputs.mode == 'seal'
-    runs-on: ubuntu-26.04
-    permissions:
-      contents: read
-      actions: write
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Validate dispatch inputs as data
-        env:
-          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
-          SOURCE_COMMIT: ${{ inputs.source_commit }}
-        run: |
-          set -eu
-          python3 - <<'EOF'
-          import os
-          import re
-          import sys
-          sha = os.environ.get("CANDIDATE_SHA256") or ""
-          commit = os.environ.get("SOURCE_COMMIT") or ""
-          if not re.fullmatch(r"[0-9a-f]{64}", sha):
-              sys.exit("candidate_sha256 is not 64 lowercase hex")
-          if not re.fullmatch(r"[0-9a-f]{40}", commit):
-              sys.exit("source_commit is not 40 lowercase hex")
-          EOF
-          git cat-file -e "$SOURCE_COMMIT^{commit}"
-      - name: Pin the sealed clock to C
-        env:
-          SOURCE_COMMIT: ${{ inputs.source_commit }}
-        run: |
-          set -eu
-          EPOCH=$(git log -1 --format=%ct "$SOURCE_COMMIT")
-          case "$EPOCH" in
-            ""|*[!0-9]*)
-              echo "not an epoch: $EPOCH" >&2; exit 1;;
-          esac
-          echo "SOURCE_DATE_EPOCH=$EPOCH" >> "$GITHUB_ENV"
-      - name: Materialize the candidate source as data
-        env:
-          SOURCE_COMMIT: ${{ inputs.source_commit }}
-        run: |
-          set -eu
-          git worktree add --detach candidate-src "$SOURCE_COMMIT"
-          test "$(git -C candidate-src rev-parse HEAD)" \
-            = "$SOURCE_COMMIT"
-      - name: Install Rust toolchains
-        run: |
-          curl -fsSL -o /tmp/rustup-init \
-            https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
-          curl -fsSL -o /tmp/rustup-init.sha256 \
-            https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256
-          (cd /tmp && sha256sum --check rustup-init.sha256)
-          chmod +x /tmp/rustup-init
-          /tmp/rustup-init -y --profile minimal --default-toolchain none
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          rustup toolchain install 1.100.0 --profile minimal
-          rustup toolchain install nightly-2026-05-20 --profile minimal \
-            --component rust-src
-      - name: Install bpf-linker 0.10.4
-        run: cargo install bpf-linker --version 0.10.4 --locked
-      - name: Install packaging tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            binutils cpio dpkg-dev patchelf rpm
-      - name: Warm the cargo cache for offline builds
-        run: |
-          cargo fetch --locked
-          cargo fetch --locked --manifest-path crates/ebpf/Cargo.toml
-      - name: Build the bundle, deb, and rpm
-        run: |
-          set -eu
-          python3 scripts/package-tarball.py --build --candidate \
-            --root candidate-src --out dist --tag bundle
-          python3 scripts/package-deb.py --bundle dist/bundle --out dist/deb
-          python3 scripts/package-rpm.py --work work/rpm --out dist/rpm \
-            --bundle dist/bundle
-          mkdir -p dist/artifacts
-          cp dist/bundle.tar.gz dist/artifacts/
-          set -- dist/deb/*.deb; test $# -eq 1 && test -f "$1"
-          cp "$1" dist/artifacts/
-          set -- dist/rpm/*.rpm; test $# -eq 1 && test -f "$1"
-          cp "$1" dist/artifacts/
-          git -C candidate-src archive --format=tar HEAD | gzip -n \
-            > dist/artifacts/memveil-source.tar.gz
-      - name: Emit the frozen SBOM
-        run: |
-          set -eu
-          cargo build -p memveil-release-entry --locked --offline
-          set -- dist/artifacts/*.deb; test $# -eq 1 && test -f "$1"
-          DEB=$1
-          set -- dist/artifacts/*.rpm; test $# -eq 1 && test -f "$1"
-          RPM=$1
-          target/debug/memveil-release-entry sbom-emit \
-            --manifest dist/bundle/MANIFEST.json \
-            --out dist/artifacts/memveil.spdx.json \
-            --bundle dist/artifacts/bundle.tar.gz \
-            --deb "$DEB" \
-            --rpm "$RPM" \
-            --lock candidate-src/Cargo.lock \
-            --ebpf-lock candidate-src/crates/ebpf/Cargo.lock
-      - name: Record provenance and seal
-        env:
-          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
-        run: |
-          set -eu
-          set -- dist/artifacts/*.deb; test $# -eq 1 && test -f "$1"
-          DEB=$1
-          set -- dist/artifacts/*.rpm; test $# -eq 1 && test -f "$1"
-          RPM=$1
-          ./tools/candidate provenance \
-            --bundle-dir dist/bundle \
-            --bundle dist/artifacts/bundle.tar.gz \
-            --deb "$DEB" \
-            --rpm "$RPM" \
-            --source dist/artifacts/memveil-source.tar.gz \
-            --sbom dist/artifacts/memveil.spdx.json \
-            --out dist/artifacts/memveil.provenance.json \
-            --source-root candidate-src
-          ./tools/candidate seal \
-            --bundle-dir dist/bundle \
-            --artifacts-dir dist/artifacts \
-            --policy candidate-src/packaging/candidate-policy.json \
-            --out candidate.json \
-            --source-root candidate-src
-          python3 - candidate.json <<'EOF'
-          import hashlib
-          import os
-          import sys
-          with open(sys.argv[1], "rb") as stream:
-              got = hashlib.sha256(stream.read()).hexdigest()
-          if got != os.environ["CANDIDATE_SHA256"]:
-              sys.exit("sealed digest differs from dispatched candidate")
-          EOF
-      - name: Stage the unsigned sealed set
-        run: |
-          set -eu
-          rm -rf sealed && mkdir sealed
-          cp candidate.json sealed/
-          cp dist/artifacts/* sealed/
-          set -- sealed/*; test $# -eq 7
-          ls sealed
-      - name: Upload the unsigned sealed candidate
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        with:
-          name: sealed-unsigned-${{ inputs.candidate_sha256 }}
-          path: sealed/
-          if-no-files-found: error
-          retention-days: 90
-
-  sign:
-    needs: seal
-    if: inputs.mode == 'seal'
-    runs-on: ubuntu-26.04
-    permissions:
-      contents: read
-      actions: write
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
-        with:
-          persist-credentials: false
-      - name: Validate the candidate digest as data
-        env:
-          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
-        run: |
-          set -eu
-          python3 - <<'EOF'
-          import os
-          import re
-          import sys
-          sha = os.environ.get("CANDIDATE_SHA256") or ""
-          if not re.fullmatch(r"[0-9a-f]{64}", sha):
-              sys.exit("candidate_sha256 is not 64 lowercase hex")
-          EOF
-      - name: Sign the sealed artifact checksums
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
-          QUALIFIER_SIGNING_KEY: ${{ secrets.QUALIFIER_SIGNING_KEY }}
-        run: |
-          set -eu
-          gh run download "$GITHUB_RUN_ID" \
-            -n "sealed-unsigned-$CANDIDATE_SHA256" -D sealed-unsigned
-          set -- sealed-unsigned/*; test $# -eq 7
-          python3 - sealed-unsigned/candidate.json <<'EOF'
-          import hashlib
-          import os
-          import sys
-          with open(sys.argv[1], "rb") as stream:
-              got = hashlib.sha256(stream.read()).hexdigest()
-          if got != os.environ["CANDIDATE_SHA256"]:
-              sys.exit("sealed digest differs from dispatched candidate")
-          EOF
-          python3 - sealed-unsigned/candidate.json sealed-unsigned \
-            sign-input <<'EOF'
-          import json
-          import shutil
-          import sys
-          from pathlib import Path
-          manifest = json.loads(Path(sys.argv[1]).read_bytes())
-          src = Path(sys.argv[2])
-          dest = Path(sys.argv[3])
-          dest.mkdir()
-          names = sorted(entry["name"]
-                         for entry in manifest["artifacts"])
-          if len(names) != 6:
-              sys.exit("sealed set holds no six artifacts")
-          for name in names:
-              if "/" in name:
-                  sys.exit("invalid sealed artifact name")
-              shutil.copy2(src / name, dest / name)
-          EOF
-          test -n "$QUALIFIER_SIGNING_KEY"
-          umask 077
-          printf '%s\n' "$QUALIFIER_SIGNING_KEY" > qualifier.key
-          ./tools/candidate sign-checksums \
-            --artifacts-dir sign-input \
-            --key qualifier.key \
-            --out-dir dist/signed
-          rm -f qualifier.key
-      - name: Stage the sealed set
-        run: |
-          set -eu
-          rm -rf sealed && mkdir sealed
-          cp sealed-unsigned/candidate.json sealed/
-          cp sign-input/* sealed/
-          cp dist/signed/SHA256SUMS.txt dist/signed/SHA256SUMS.txt.sig \
-            dist/signed/signer.pub sealed/
-          set -- sealed/*; test $# -eq 10
-          ls sealed
-      - name: Upload the sealed candidate
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        with:
-          name: sealed-${{ inputs.candidate_sha256 }}
-          path: sealed/
-          if-no-files-found: error
-          retention-days: 90
-
   qualify:
-    needs: [seal, sign]
-    if: inputs.mode == 'seal'
+    if: inputs.mode == 'qualify'
     runs-on: ubuntu-26.04
     permissions:
       contents: read
@@ -356,18 +112,17 @@ jobs:
               sys.exit("draft_release_id is not a decimal ID")
           EOF
           git cat-file -e "$SOURCE_COMMIT^{commit}"
-      - name: Materialize the candidate source as data
+      - name: Read the candidate policy and lock from C
         env:
           SOURCE_COMMIT: ${{ inputs.source_commit }}
         run: |
           set -eu
-          git worktree add --detach candidate-src "$SOURCE_COMMIT"
-          test "$(git -C candidate-src rev-parse HEAD)" \
-            = "$SOURCE_COMMIT"
-      - name: Install matrix tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cpio rpm
+          git show "$SOURCE_COMMIT:packaging/candidate-policy.json" \
+            > c-policy.json
+          git show "$SOURCE_COMMIT:tests/vm/kernels.lock.json" \
+            > c-lock.json
+          test -s c-policy.json
+          test -s c-lock.json
       - name: Collect the candidate and the campaign evidence
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -375,45 +130,54 @@ jobs:
           DRAFT_RELEASE_ID: ${{ inputs.draft_release_id }}
         run: |
           set -eu
-          gh run download "$GITHUB_RUN_ID" \
-            -n "sealed-$CANDIDATE_SHA256" -D sealed
-          python3 - sealed/candidate.json <<'EOF'
-          import hashlib
-          import os
-          import sys
-          with open(sys.argv[1], "rb") as stream:
-              got = hashlib.sha256(stream.read()).hexdigest()
-          if got != os.environ["CANDIDATE_SHA256"]:
-              sys.exit("sealed digest differs from dispatched candidate")
-          EOF
-          mkdir -p evidence-dl
-          python3 - <<'EOF'
+          mkdir -p draft evidence-dl
+          python3 - draft evidence-dl <<'EOF'
           import os
           import sys
           sys.path.insert(0, "tools")
+          import candidate
           import candidate_custody as custody
+          from pathlib import Path
           repo = os.environ["GITHUB_REPOSITORY"]
-          tag = "candidate-" + os.environ["CANDIDATE_SHA256"]
+          sha = os.environ["CANDIDATE_SHA256"]
+          tag = "candidate-" + sha
           api = custody.GitHub()
           release = custody.get_holding_draft(
               api, repo, os.environ["DRAFT_RELEASE_ID"], tag)
+          manifest = candidate.load_manifest(
+              "packaging/qualifications/candidate.json", sha)
+          draft = Path(sys.argv[1])
+          for entry in manifest["artifacts"]:
+              dest = draft / entry["name"]
+              custody.download_draft_asset(
+                  api, repo, release, entry["name"], dest)
+              candidate.verify_file(dest, entry)
+          dl = Path(sys.argv[2])
           custody.download_draft_asset(
               api, repo, release, "qualification-evidence.tar.gz",
-              "evidence-dl/qualification-evidence.tar.gz")
+              dl / "qualification-evidence.tar.gz")
           custody.download_draft_asset(
               api, repo, release, "qualification.json",
-              "evidence-dl/qualification.json")
+              dl / "qualification.json")
+          doc = candidate.read_json(
+              "packaging/qualifications/qualification.json",
+              sealed=True)
+          candidate.require(
+              (dl / "qualification.json").read_bytes()
+              == Path("packaging/qualifications"
+                      "/qualification.json").read_bytes(),
+              "draft qualification differs from Q")
+          candidate.verify_file(
+              dl / "qualification-evidence.tar.gz",
+              doc["evidence_archive"])
           EOF
           EVIDENCE_DIR=$(python3 - \
             evidence-dl/qualification-evidence.tar.gz \
-            evidence evidence-dl/qualification.json <<'EOF'
+            evidence <<'EOF'
           import sys
           sys.path.insert(0, "tools")
           import candidate
           from pathlib import Path
-          doc = candidate.read_json(sys.argv[3], sealed=True)
-          candidate.verify_file(
-              sys.argv[1], doc["evidence_archive"])
           inner = candidate.safe_extract(
               sys.argv[1], Path(sys.argv[2]), True, False)
           print(inner)
@@ -421,23 +185,21 @@ jobs:
           )
           test -n "$EVIDENCE_DIR"
           echo "EVIDENCE_DIR=$EVIDENCE_DIR" >> "$GITHUB_ENV"
-          cp sealed/SHA256SUMS.txt sealed/SHA256SUMS.txt.sig \
-            sealed/signer.pub "$EVIDENCE_DIR"/
       - name: Qualify and export the tested payload
         run: |
           set -eu
           test -n "$EVIDENCE_DIR"
           ./tools/candidate qualify \
-            --manifest sealed/candidate.json \
-            --qualification evidence-dl/qualification.json \
-            --policy candidate-src/packaging/candidate-policy.json \
+            --manifest packaging/qualifications/candidate.json \
+            --qualification packaging/qualifications/qualification.json \
+            --policy c-policy.json \
             --evidence-dir "$EVIDENCE_DIR" \
-            --source-tree candidate-src
+            --source-tree .
           # Derived only after the qualify gate above
           # authenticated the same bytes; the export branch below
           # authenticates them once more before evaluating them.
           MATRIX_DIR=$(python3 - "$EVIDENCE_DIR" \
-            evidence-dl/qualification.json <<'EOF'
+            packaging/qualifications/qualification.json <<'EOF'
           import sys
           sys.path.insert(0, "tools")
           import candidate
@@ -455,16 +217,17 @@ jobs:
           EOF
           )
           test -n "$MATRIX_DIR"
-          MV_CANDIDATE_MANIFEST=sealed/candidate.json \
+          MV_CANDIDATE_MANIFEST=packaging/qualifications/candidate.json \
           ./tools/kernel-matrix \
             --verify-out \
             --out "$EVIDENCE_DIR/$MATRIX_DIR" \
             --export-tested tested-payload.sha256 \
-            --lock candidate-src/tests/vm/kernels.lock.json \
+            --lock c-lock.json \
             --evidence-dir "$EVIDENCE_DIR" \
-            --qualification evidence-dl/qualification.json \
-            --policy candidate-src/packaging/candidate-policy.json \
-            --source-tree candidate-src
+            --qualification packaging/qualifications/qualification.json \
+            --policy c-policy.json \
+            --source-tree .
+          cmp tested-payload.sha256 packaging/tested-payload.sha256
       - name: Upload the tested payload
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:

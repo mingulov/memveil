@@ -1231,8 +1231,8 @@ def _release_workflow():
 
 def test_release_workflow_parses_and_shells_check():
     doc = _release_workflow()
-    assert {"seal", "qualify", "sign", "import", "dry-run",
-            "promote"} <= set(doc["jobs"])
+    assert set(doc["jobs"]) == {"qualify", "import", "dry-run",
+                                "promote"}
     for job, spec in sorted(doc["jobs"].items()):
         for step in spec.get("steps", []):
             if "run" not in step:
@@ -1256,20 +1256,13 @@ def test_release_checkouts_use_no_input_ref():
             assert "${{ inputs" not in str(ref), job
 
 
-def test_release_sign_job_has_no_source_checkout():
+def test_release_signing_is_local_only():
     doc = _release_workflow()
-    text = json.dumps(doc["jobs"]["sign"])
-    assert "source_commit" not in text
-    assert "SOURCE_COMMIT" not in text
-    assert "candidate-src" not in text
-
-
-def test_release_seal_job_holds_no_secrets():
-    doc = _release_workflow()
-    text = json.dumps(doc["jobs"]["seal"])
-    assert "secrets." not in text
-    assert "QUALIFIER_SIGNING_KEY" not in text
-    assert "GH_TOKEN" not in text
+    whole = json.dumps(doc["jobs"])
+    assert "QUALIFIER_SIGNING_KEY" not in whole
+    assert "sign-checksums" not in whole
+    assert "candidate-src" not in whole
+    assert "worktree" not in whole
 
 
 def test_release_checkouts_persist_no_credentials():
@@ -1283,13 +1276,7 @@ def test_release_checkouts_persist_no_credentials():
             seen += 1
             assert (step.get("with") or {}).get(
                 "persist-credentials") is False, job
-    assert seen == 6, seen
-
-
-def test_release_seal_permissions_are_minimal():
-    doc = _release_workflow()
-    assert doc["jobs"]["seal"]["permissions"] == {
-        "contents": "read", "actions": "write"}
+    assert seen == 4, seen
 
 
 def test_release_qualify_permissions_hold_actions_write():
@@ -1298,15 +1285,11 @@ def test_release_qualify_permissions_hold_actions_write():
         "contents": "read", "actions": "write"}
 
 
-def test_release_custody_runs_no_sealed_harness():
+def test_release_custody_builds_trusted_harness():
     doc = _release_workflow()
     whole = json.dumps(doc["jobs"])
     assert "sealed/memveil-release-entry" not in whole
     assert "sealed-unsigned/memveil-release-entry" not in whole
-    assert "QUALIFIER_SIGNING_KEY" in whole
-    keyed = [job for job, spec in doc["jobs"].items()
-             if "QUALIFIER_SIGNING_KEY" in json.dumps(spec)]
-    assert keyed == ["sign"], keyed
     for job in ("import", "dry-run", "promote"):
         text = json.dumps(doc["jobs"][job])
         assert "cargo build -p memveil-release-entry" in text, job
@@ -1345,7 +1328,8 @@ def test_release_qualify_uses_the_returned_inner_root():
     assert "inner = candidate.safe_extract(" in collect["run"]
     assert "EVIDENCE_DIR=$(python3" in collect["run"]
     assert "GITHUB_ENV" in collect["run"]
-    assert '"$EVIDENCE_DIR"/' in collect["run"]
+    assert "sealed/" not in collect["run"]
+    assert "sealed-" not in collect["run"]
     export = next(step for step in steps
                   if "tested payload" in step.get("name", ""))
     assert '"$EVIDENCE_DIR"' in export["run"]
@@ -1390,16 +1374,14 @@ def test_release_modes_gate_each_stage():
     trigger = doc.get("on", doc.get(True))
     modes = trigger["workflow_dispatch"]["inputs"]["mode"][
         "options"]
-    assert modes == ["seal", "import", "dry-run", "promote"]
-    assert doc["jobs"]["seal"]["if"] == "inputs.mode == 'seal'"
-    assert doc["jobs"]["sign"]["if"] == "inputs.mode == 'seal'"
+    assert modes == ["qualify", "import", "dry-run", "promote"]
     assert doc["jobs"]["qualify"]["if"] == \
-        "inputs.mode == 'seal'"
+        "inputs.mode == 'qualify'"
     assert doc["jobs"]["import"]["if"] == \
         "inputs.mode == 'import'"
     assert "promote_authorization" in doc["jobs"]["promote"][
         "if"]
-    for job in ("import", "dry-run", "promote"):
+    for job in ("qualify", "import", "dry-run", "promote"):
         assert "needs" not in doc["jobs"][job], job
 
 
@@ -1428,54 +1410,58 @@ def test_release_qualify_reads_qualification_beside_evidence():
     steps = doc["jobs"]["qualify"]["steps"]
     collect = next(step for step in steps
                    if "campaign evidence" in step.get("name", ""))
-    assert "evidence-dl/qualification.json" in collect["run"]
+    assert 'dl / "qualification-evidence.tar.gz"' in collect[
+        "run"]
+    assert 'dl / "qualification.json"' in collect["run"]
     export = next(step for step in steps
                   if "tested payload" in step.get("name", ""))
     assert export["run"].count(
-        "--qualification evidence-dl/qualification.json") == 2
+        "--qualification "
+        "packaging/qualifications/qualification.json") == 2
     assert '"$EVIDENCE_DIR"/qualification.json' not in export[
         "run"]
 
 
-def test_release_qualify_consumes_same_run_seal():
+def test_release_qualify_reverifies_q_bytes():
     doc = _release_workflow()
-    qualify = doc["jobs"]["qualify"]
-    needs = qualify.get("needs", [])
-    if isinstance(needs, str):
-        needs = [needs]
-    assert "seal" in needs and "sign" in needs
-    # The sealed bytes come from this run's own artifact,
-    # never from a second dispatch's rebuild.
-    collect = next(
-        step for step in qualify["steps"]
-        if "campaign evidence" in step.get("name", ""))
-    assert 'gh run download "$GITHUB_RUN_ID"' in collect["run"]
-    assert '-n "sealed-$CANDIDATE_SHA256"' in collect["run"]
-    # No second-dispatch machinery remains: no
-    # draft-presence output gates the job, and no step
-    # triggers another workflow run.
-    assert "outputs" not in doc["jobs"]["sign"]
-    whole = json.dumps(doc["jobs"])
-    assert "needs.sign.outputs.present" not in whole
-    assert "steps.draft.outputs" not in whole
-    for job, spec in sorted(doc["jobs"].items()):
-        for step in spec.get("steps", []):
-            run = str(step.get("run", ""))
-            assert "gh workflow run" not in run, job
-            assert "/dispatches" not in run, job
+    steps = doc["jobs"]["qualify"]["steps"]
+    collect = next(step for step in steps
+                   if "campaign evidence" in step.get("name", ""))
+    assert "candidate.verify_file(" in collect["run"]
+    assert "draft qualification differs from Q" in collect[
+        "run"]
+    reads = next(step for step in steps
+                 if "policy and lock" in step.get("name", ""))
+    assert "git show " in reads["run"]
+    export = next(step for step in steps
+                  if "tested payload" in step.get("name", ""))
+    assert "cmp tested-payload.sha256 " \
+        "packaging/tested-payload.sha256" in export["run"]
+    assert "--source-tree ." in export["run"]
 
 
-def test_release_custody_stages_never_rebuild():
+def test_release_no_build_or_seal_steps_anywhere():
     doc = _release_workflow()
     forbidden = ("package-tarball", "package-deb",
                  "package-rpm", "sbom-emit", "candidate seal",
                  "candidate provenance", "sign-checksums",
                  "bpf-linker", "nightly-", "--release",
-                 "candidate-src")
-    for job in ("import", "dry-run", "promote"):
-        text = json.dumps(doc["jobs"][job])
+                 "candidate-src", "worktree",
+                 "sealed-", "sealed/",
+                 "gh run download", "gh workflow run",
+                 "/dispatches")
+    for job, spec in sorted(doc["jobs"].items()):
+        text = json.dumps(spec)
         for marker in forbidden:
             assert marker not in text, (job, marker)
+
+
+def test_release_qualify_builds_nothing():
+    doc = _release_workflow()
+    text = json.dumps(doc["jobs"]["qualify"])
+    for marker in ("cargo", "rustup", "apt-get",
+                   "pip install"):
+        assert marker not in text, marker
 
 
 def test_release_promote_needs_no_dryrun():
