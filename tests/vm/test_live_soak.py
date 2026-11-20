@@ -913,6 +913,25 @@ def test_live_gate_refuses_non_integer_guest_exit(
         c.verify_live_campaigns(retained, evidence, manifest)
 
 
+def test_live_gate_refuses_huge_guest_exit(tmp_path):
+    import json
+    sys.path.insert(0, str(ROOT / 'tools'))
+    import candidate as c
+    manifest = _live_manifest()
+    evidence, doc = live_gate_evidence(tmp_path, manifest)
+    exit_path = evidence / 'live/soak-exit.json'
+    exit_doc = json.loads(exit_path.read_bytes())
+    # int() of infinity raises OverflowError, not
+    # TypeError/ValueError: the gate must still refuse
+    # cleanly instead of propagating a traceback.
+    exit_doc['guest_exit'] = float('inf')
+    exit_path.write_bytes(
+        json.dumps(exit_doc, sort_keys=True).encode())
+    retained = _rebind_exit_oracle(c, evidence, doc, 'soak')
+    with pytest.raises(ValueError, match='guest exit'):
+        c.verify_live_campaigns(retained, evidence, manifest)
+
+
 def test_live_gate_refuses_host_totals_mismatch(tmp_path):
     import json
     sys.path.insert(0, str(ROOT / 'tools'))

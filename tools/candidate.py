@@ -1685,7 +1685,7 @@ def verify_live_campaigns(retained, base, manifest):
         raw_exit = exit_doc.get("guest_exit")
         try:
             coerced_exit = int(raw_exit)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise ValueError(
                 "live %s guest exit refuses" % mode)
         require(type(raw_exit) is int

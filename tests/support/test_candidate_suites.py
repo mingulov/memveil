@@ -669,6 +669,8 @@ def test_journey_record_non_string_path_refuses(sealed,
         {'schema': 'memveil-journey-prep/1',
          'commit': commit, 'tree': tree,
          'suites': {'deb': {'path': 12345,
+                            'staged': str(
+                                tmp_path / 'unstaged'),
                             'sha256': '0' * 64,
                             'target': 'package_deb'}}}))
     environment = candidate_clean_env()
@@ -684,6 +686,31 @@ def test_journey_record_non_string_path_refuses(sealed,
     assert result.returncode == 2, combined
     assert 'Traceback' not in combined, combined
     assert 'lacks suite' in combined, combined
+    # Control: the same complete record with a valid path
+    # type passes the entry check and fails later, proving
+    # the refusal above fires on the type check.
+    control_path = tmp_path / 'prep-control.json'
+    commit, tree = checkout_identity(
+        exclude=[str(control_path.resolve())])
+    control_path.write_text(json.dumps(
+        {'schema': 'memveil-journey-prep/1',
+         'commit': commit, 'tree': tree,
+         'suites': {'deb': {'path': str(tmp_path / 'orig'),
+                            'staged': str(
+                                tmp_path / 'unstaged'),
+                            'sha256': '0' * 64,
+                            'target': 'package_deb'}}}))
+    environment['MV_JOURNEY_PREP'] = str(control_path)
+    result = subprocess.run(
+        [sys.executable,
+         str(ROOT / 'tests/support/candidate_suite.py'),
+         'deb'],
+        env=environment, capture_output=True, text=True,
+        timeout=120)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 2, combined
+    assert 'lacks suite' not in combined, combined
+    assert 'not a plain file' in combined, combined
 
 
 def test_journey_prep_refuses_mid_prep_edit(tmp_path,
