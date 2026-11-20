@@ -442,7 +442,7 @@ def run(mode, request, out, harness_bin=None):
                               out / 'evidence', True, False)
     qualified = c.verify_qualification(
         out / 'candidate.json', out / 'qualification.json',
-        out / 'policy.json', evidence)
+        out / 'policy.json', evidence, source_tree=root)
     paths, bundled = verify_artifacts(
         root, manifest, stored, harness_bin)
     expected_checksums = c.verify_signed_checksums(

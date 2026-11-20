@@ -48,7 +48,7 @@ Usage:
   tools/candidate provenance --bundle-dir D --bundle B --deb E \\
       --rpm R --source S --sbom J --out P [--source-root R]
   tools/candidate qualify --manifest M --qualification Q --policy P \\
-      --evidence-dir E
+      --evidence-dir E [--source-tree S]
 Standard library only. Exit 0 prints the sealed digest; exit 1
 reports the reason on stderr.
 """
@@ -1635,6 +1635,30 @@ def build_evidence_inventory(evidence_dir, matrix_directory):
     return inventory
 
 
+def _matrix_lock_from_tree(source_tree, commit):
+    """Parse the matrix lock from C's tree bytes.
+
+    Reads tests/vm/kernels.lock.json at the candidate source
+    commit from the given checkout without checking anything
+    out, so the required row set is pinned by C itself.
+    Returns the parsed lock; raises ValueError otherwise.
+    """
+    hexid(commit, 40)
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(source_tree), "show",
+             "%s:tests/vm/kernels.lock.json" % commit],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=git_env())
+    except OSError as error:
+        raise ValueError(
+            "cannot read the source matrix lock: %s"
+            % error) from error
+    require(proc.returncode == 0,
+            "source tree has no matrix lock at " + commit)
+    return _parse_json(proc.stdout)
+
+
 def verify_evidence_inventory(inputs, evidence_dir):
     """Recompute the matrix inventory; reject altered evidence.
 
@@ -1659,22 +1683,24 @@ def verify_evidence_inventory(inputs, evidence_dir):
 
 
 def verify_qualification(candidate, qualification, policy,
-                         evidence_dir):
+                         evidence_dir, source_tree="."):
     """Rederive every required signed gate over an evidence dir.
 
     For the matrix gate the evidence inventory digests are
     verified before the signature, the signature before any
     predicate, and predicates before export; other gates verify
     the signature chain, then retained measurements, then
-    predicates. Returns {"ok": True, "gates": [...],
-    "trusted_keys": [...], "claim": ...} with the verified gate
-    IDs sorted and the validated policy's pinned trust and
-    claim; raises ValueError otherwise. Callers reuse the
-    returned trust and claim instead of re-reading the policy
-    file, so the bytes verified here are the bytes used
-    downstream. The qualification's evidence_archive entry is
-    shape-checked only: archive bytes are verified by whoever
-    extracts them.
+    predicates. The matrix row set comes from the lock at C in
+    the source tree, and every required row re-evaluates the
+    same shared predicates the tested export runs. Returns
+    {"ok": True, "gates": [...], "trusted_keys": [...],
+    "claim": ...} with the verified gate IDs sorted and the
+    validated policy's pinned trust and claim; raises
+    ValueError otherwise. Callers reuse the returned trust and
+    claim instead of re-reading the policy file, so the bytes
+    verified here are the bytes used downstream. The
+    qualification's evidence_archive entry is shape-checked
+    only: archive bytes are verified by whoever extracts them.
     """
     manifest = load_manifest(candidate)
     candidate_id = digest(candidate)
@@ -1734,6 +1760,11 @@ def verify_qualification(candidate, qualification, policy,
             require(digest(base / record["inputs"])
                     == hexid(record["inputs_sha256"]),
                     "retained gate inputs changed")
+            lock = _matrix_lock_from_tree(
+                source_tree, manifest["source"]["commit"])
+            _matrix_rows().verify_tested_rows(
+                base / relative(retained["matrix_directory"]),
+                lock, manifest)
         else:
             require(digest(receipt)
                     == hexid(gate["receipt_sha256"]),
@@ -1945,7 +1976,7 @@ def qualify_candidate(source, manifest_path, qualification_path,
                                 False)
         qualified = verify_qualification(
             manifest_path, qualification_path, policy_path,
-            evidence)
+            evidence, source_tree=source)
         verify_signed_checksums(
             manifest, evidence, qualified["trusted_keys"])
     expected = expected_payload(manifest)
@@ -1981,6 +2012,9 @@ def main(argv=None):
     qualify.add_argument("--qualification", required=True)
     qualify.add_argument("--policy", required=True)
     qualify.add_argument("--evidence-dir", required=True)
+    qualify.add_argument("--source-tree", default=".",
+                         help="source checkout carrying the "
+                         "matrix lock at C")
     sign = commands.add_parser(
         "sign-checksums",
         help="hash staged artifacts and sign the checksums")
@@ -1998,7 +2032,8 @@ def main(argv=None):
         elif args.command == "qualify":
             qualified = verify_qualification(
                 args.manifest, args.qualification,
-                args.policy, args.evidence_dir)
+                args.policy, args.evidence_dir,
+                source_tree=args.source_tree)
             verify_signed_checksums(
                 load_manifest(args.manifest),
                 args.evidence_dir,

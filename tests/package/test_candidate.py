@@ -6,6 +6,7 @@ bundle, archive, and receipt below is assembled in a temporary
 directory, and only the verification logic under test is real.
 """
 
+import copy
 import gzip
 import hashlib
 import importlib.util
@@ -22,6 +23,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "tests" / "vm"))
+import kernel_matrix as km
+from test_kernel_matrix import (_admitted_entry, _ev_pass, _row_ctx,
+                                _row_job)
 
 
 def api():
@@ -133,6 +138,9 @@ class Workshop:
             '{"schema":"fixture-policy/1"}\n')
         (root / "src" / "engine.txt").write_text("synthetic engine\n")
         os.symlink("engine.txt", root / "src" / "engine-link.txt")
+        (root / "tests" / "vm").mkdir(parents=True)
+        (root / "tests" / "vm" / "kernels.lock.json").write_bytes(
+            m.canonical(_matrix_lock(_admitted_entry())))
         git(root, "init", "-q")
         git(root, "add", ".")
         git(root, "-c", "user.name=Fixture",
@@ -1272,22 +1280,85 @@ def test_seal_rejects_deep_stale_prebuilt(workshop, tmp_path):
             tmp_path / "swapped.provenance.json")
 
 
-def _transcribe(row):
-    """Unsigned row transcription hashes, as the runner records."""
-    found = []
-    for path in sorted(Path(row).iterdir()):
-        if path.name == "receipt.json" or not path.is_file() \
-                or path.is_symlink():
-            continue
-        found.append({"name": path.name,
-                      "sha256": sha(path.read_bytes()),
-                      "bytes": path.stat().st_size})
-    return found
-
-
 MATRIX_GATE = "kernel-matrix/2"
-MATRIX_ROW = "row1"
+MATRIX_ROW = _admitted_entry()["id"]
 NONMATRIX_GATE = "synthetic-counts/1"
+
+
+def _matrix_lock(entry):
+    return {"schema": km.SCHEMA, "recorded_on": "2026-11-19",
+            "archive": "https://kernel.ubuntu.com/mainline",
+            "archive_queried": "2026-11-19",
+            "tools": {"bpftrace": "bpftrace v0.25.0",
+                      "bpftool": "bpftool v7.7.0"},
+            "kernels": [entry]}
+
+
+def _write_real_matrix_row(m, matrix_dir, doc):
+    """Honest matrix row bound to a sealed manifest.
+
+    Builds a passing admitted row from the shared matrix
+    fixtures, binds its receipt to the manifest (source,
+    toolchain, executable, BPF, closure, candidate ID), and
+    writes the row directory plus the <id>.json rec and
+    summary.json beside it. Returns (ev, rec, receipt, row).
+    """
+    ev = _ev_pass()
+    ev["duration"] = 60
+    hooks = json.loads(ev["hooks_text"])
+    hooks["btf"] = True
+    ev["hooks_text"] = json.dumps(hooks)
+    ev["candidate_sha256"] = m.digest_bytes(m.canonical(doc))
+    ev["candidate_files"] = copy.deepcopy(doc["files"])
+    rec = km.evaluate_row(ev)
+    assert rec["ok"], rec
+    rec.update(run_id="20261101T000000Z", elapsed=1.0,
+               timeout=False, release=ev["entry"]["release"])
+    matrix_dir = Path(matrix_dir)
+    row = matrix_dir / ev["entry"]["id"]
+    row.mkdir(parents=True)
+    job = _row_job()
+    job.update(id=ev["entry"]["id"],
+               release=ev["entry"]["release"],
+               run_id=rec["run_id"])
+    files = {"job.json": json.dumps(job),
+             "oracle-inputs.json": json.dumps(ev),
+             "vng.exit": "0",
+             "artifacts.json": ev["artifacts_text"],
+             "uname.txt": ev["uname_text"],
+             "mods.txt": ev["mods_text"],
+             "hooks.json": ev["hooks_text"],
+             "btf-sha.txt": "2" * 64,
+             "oracle.txt": ev["oracle_text"],
+             "oracle.stderr": ev["oracle_stderr"],
+             "oracle.mode": "full",
+             "doctor.json": ev["doctor_text"],
+             "doctor-passive.json": ev["doctor_passive_text"],
+             "sev-sysfs.txt": ev["sev_sysfs_text"],
+             "dmesg.txt": ev["dmesg_text"],
+             "dmesg_scan.json": ev["dmesg_scan_text"],
+             "cap/session.json": ev["session_text"],
+             "workload.txt": ev["workload_text"],
+             "blockstat.json": ev["blockstat_text"],
+             "busy/times.json": ev["busy_times_text"],
+             "busy/busy.out": ev["busy_out_text"],
+             "busy/cap/session.json": ev["busy_session_text"]}
+    for name, value in files.items():
+        target = row / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(value)
+    ctx = _row_ctx(
+        kernel_selector="--kernel " + ev["entry"]["id"],
+        source_sha256=m.artifact(doc, "deb")["sha256"])
+    ctx["source"]["memveil"] = {"commit": doc["source"]["commit"],
+                                "dirty": False}
+    ctx["toolchain"]["lock_sha256"] = \
+        doc["toolchain"]["cargo_lock_sha256"]
+    receipt = km.write_row_receipt(row, rec, ev["entry"], ctx)
+    (matrix_dir / (ev["entry"]["id"] + ".json")).write_text(
+        json.dumps(rec))
+    (matrix_dir / "summary.json").write_text(json.dumps([rec]))
+    return ev, rec, receipt, row
 
 
 def _ephemeral_key(target):
@@ -1302,6 +1373,12 @@ def _ephemeral_key(target):
 
 def _sign(key, subject):
     """Sign subject with ssh-keygen -Y; return the signature path."""
+    stale = Path(str(subject) + ".sig")
+    # ssh-keygen prompts instead of overwriting a stale
+    # signature, so remove it first; the signer always writes
+    # fresh bytes for the current subject.
+    if stale.exists():
+        stale.unlink()
     subprocess.run(
         ["ssh-keygen", "-Y", "sign", "-f", str(key),
          "-n", "memveil-candidate", str(subject)],
@@ -1386,26 +1463,13 @@ def _matrix_required_gates():
                             "skipped_rows": "zero"}}}
 
 
-def _write_matrix_evidence(m, evidence):
-    """One honest matrix row: receipt, cached inputs, raw, summary."""
+def _write_matrix_evidence(m, ctx, evidence):
+    """One honest matrix row bound to the sealed manifest."""
     matrix = Path(evidence) / "matrix"
-    row = matrix / MATRIX_ROW
-    row.mkdir(parents=True)
-    oracle = row / "oracle.txt"
-    oracle.write_text("oracle events: 13000\noracle losses: 0\n")
-    cached = {"row": MATRIX_ROW, "oracle_events": "13000",
-              "oracle_losses": "0"}
-    (row / "oracle-inputs.json").write_bytes(m.canonical(cached))
-    files = _transcribe(row)
-    assert {entry["name"] for entry in files} == {
-        "oracle.txt", "oracle-inputs.json"}
-    receipt = {"row": MATRIX_ROW,
-               "oracle": {"text_sha256":
-                          sha(oracle.read_bytes())},
-               "files": files}
-    (row / "receipt.json").write_bytes(m.canonical(receipt))
-    summary = [{"id": MATRIX_ROW, "status": "pass"}]
-    (matrix / "summary.json").write_bytes(m.canonical(summary))
+    matrix.mkdir(parents=True)
+    _ev, _rec, _receipt, row = _write_real_matrix_row(
+        m, matrix, ctx["manifest"])
+    assert row.name == MATRIX_ROW, row.name
     return matrix
 
 
@@ -1424,7 +1488,7 @@ def _matrix_qualified(workshop, tmp_path):
                                  _matrix_required_gates())
     evidence = Path(tmp_path) / "evidence"
     evidence.mkdir()
-    _write_matrix_evidence(m, evidence)
+    _write_matrix_evidence(m, ctx, evidence)
     binding = _signed_gate(m, ctx, evidence, MATRIX_GATE,
                            "inputs.json", "receipt.json",
                            _matrix_inputs(m, evidence))
@@ -1440,7 +1504,7 @@ def test_matrix_inputs_require_signed_inventory(workshop,
                                  _matrix_required_gates())
     evidence = Path(tmp_path) / "evidence"
     evidence.mkdir()
-    _write_matrix_evidence(m, evidence)
+    _write_matrix_evidence(m, ctx, evidence)
     # /1 inputs fail closed even with a valid signature on them.
     legacy = {"schema": "memveil-matrix-input/1",
               "matrix_directory": "matrix",
@@ -1454,7 +1518,8 @@ def test_matrix_inputs_require_signed_inventory(workshop,
     with pytest.raises(ValueError,
                        match="invalid fields|[Ff]ail closed"):
         m.verify_qualification(ctx["manifest_path"], q_path,
-                               ctx["policy_path"], evidence)
+                               ctx["policy_path"], evidence,
+                               source_tree=str(ctx["root"]))
     # A /2-shaped doc with a /1 schema gets the explicit blame.
     flipped = _matrix_inputs(m, evidence)
     flipped["schema"] = "memveil-matrix-input/1"
@@ -1465,7 +1530,8 @@ def test_matrix_inputs_require_signed_inventory(workshop,
                          {MATRIX_GATE: binding})
     with pytest.raises(ValueError, match="[Ff]ail closed"):
         m.verify_qualification(ctx["manifest_path"], q_path,
-                               ctx["policy_path"], evidence)
+                               ctx["policy_path"], evidence,
+                               source_tree=str(ctx["root"]))
     # /2 inputs without the inventory digest fail closed too.
     naked = {"schema": "memveil-matrix-input/2",
              "matrix_directory": "matrix"}
@@ -1476,7 +1542,8 @@ def test_matrix_inputs_require_signed_inventory(workshop,
                          {MATRIX_GATE: binding})
     with pytest.raises(ValueError, match="invalid fields"):
         m.verify_qualification(ctx["manifest_path"], q_path,
-                               ctx["policy_path"], evidence)
+                               ctx["policy_path"], evidence,
+                               source_tree=str(ctx["root"]))
 
 
 def test_inventory_rejects_altered_row_receipt(workshop,
@@ -1485,7 +1552,7 @@ def test_inventory_rejects_altered_row_receipt(workshop,
         workshop, tmp_path)
     assert m.verify_qualification(
         ctx["manifest_path"], q_path, ctx["policy_path"],
-        evidence) == {"ok": True, "gates": [MATRIX_GATE],
+        evidence, source_tree=str(ctx["root"])) == {"ok": True, "gates": [MATRIX_GATE],
                       "trusted_keys": [sha(
                           ctx["pub"].read_bytes())],
                       "claim": "ordinary-preview"}
@@ -1496,13 +1563,15 @@ def test_inventory_rejects_altered_row_receipt(workshop,
     receipt_path.write_bytes(m.canonical(receipt))
     with pytest.raises(ValueError, match="inventory differs"):
         m.verify_qualification(ctx["manifest_path"], q_path,
-                               ctx["policy_path"], evidence)
+                               ctx["policy_path"], evidence,
+                               source_tree=str(ctx["root"]))
     # The inventory error fires before signature verification:
     # breaking the signature as well must not change the blame.
     (evidence / "receipt.json.sig").write_bytes(b"invalid\n")
     with pytest.raises(ValueError, match="inventory differs"):
         m.verify_qualification(ctx["manifest_path"], q_path,
-                               ctx["policy_path"], evidence)
+                               ctx["policy_path"], evidence,
+                               source_tree=str(ctx["root"]))
 
 
 def test_inventory_rejects_missing_oracle_inputs(workshop,
@@ -1513,7 +1582,8 @@ def test_inventory_rejects_missing_oracle_inputs(workshop,
      / "oracle-inputs.json").unlink()
     with pytest.raises(ValueError, match="missing"):
         m.verify_qualification(ctx["manifest_path"], q_path,
-                               ctx["policy_path"], evidence)
+                               ctx["policy_path"], evidence,
+                               source_tree=str(ctx["root"]))
 
 
 def test_inventory_rejects_extra_file(workshop, tmp_path):
@@ -1524,12 +1594,14 @@ def test_inventory_rejects_extra_file(workshop, tmp_path):
     with pytest.raises(ValueError,
                        match="unknown|extra|refuses"):
         m.verify_qualification(ctx["manifest_path"], q_path,
-                               ctx["policy_path"], evidence)
+                               ctx["policy_path"], evidence,
+                               source_tree=str(ctx["root"]))
     (row / "extra.bin").unlink()
     (evidence / "matrix" / "extra.json").write_text("{}\n")
     with pytest.raises(ValueError, match="extra"):
         m.verify_qualification(ctx["manifest_path"], q_path,
-                               ctx["policy_path"], evidence)
+                               ctx["policy_path"], evidence,
+                               source_tree=str(ctx["root"]))
 
 
 def test_inventory_rejects_symlinked_row_directory(workshop,
@@ -1542,7 +1614,8 @@ def test_inventory_rejects_symlinked_row_directory(workshop,
     os.symlink("real.d", row / "linked.d")
     with pytest.raises(ValueError, match="symlink"):
         m.verify_qualification(ctx["manifest_path"], q_path,
-                               ctx["policy_path"], evidence)
+                               ctx["policy_path"], evidence,
+                               source_tree=str(ctx["root"]))
 
 
 def test_original_signature_rejects_mutated_evidence(workshop,
@@ -1551,7 +1624,7 @@ def test_original_signature_rejects_mutated_evidence(workshop,
         workshop, tmp_path)
     assert m.verify_qualification(
         ctx["manifest_path"], q_path, ctx["policy_path"],
-        evidence) == {"ok": True, "gates": [MATRIX_GATE],
+        evidence, source_tree=str(ctx["root"])) == {"ok": True, "gates": [MATRIX_GATE],
                       "trusted_keys": [sha(
                           ctx["pub"].read_bytes())],
                       "claim": "ordinary-preview"}
@@ -1571,7 +1644,7 @@ def test_original_signature_rejects_mutated_evidence(workshop,
     receipt = json.loads(receipt_path.read_text())
     receipt["oracle"]["text_sha256"] = sha(
         oracle.read_bytes())
-    receipt["files"] = _transcribe(row)
+    receipt["files"] = km.row_receipt_files(row)
     receipt_path.write_bytes(m.canonical(receipt))
     doc["evidence_archive"]["sha256"] = "6" * 64
     q_path.write_bytes(m.canonical(doc))
@@ -1580,7 +1653,8 @@ def test_original_signature_rejects_mutated_evidence(workshop,
         "the signed bytes must be untouched"
     with pytest.raises(ValueError, match="inventory differs"):
         m.verify_qualification(ctx["manifest_path"], q_path,
-                               ctx["policy_path"], evidence)
+                               ctx["policy_path"], evidence,
+                               source_tree=str(ctx["root"]))
     # The original signature itself still verifies standalone:
     # only the signed inventory catches the substitution.
     m.verify_signature(evidence / "receipt.json",
@@ -1588,6 +1662,53 @@ def test_original_signature_rejects_mutated_evidence(workshop,
                        evidence / "signer.pub",
                        [sha((evidence / "signer.pub")
                             .read_bytes())])
+
+
+def _resign_matrix_inputs(m, ctx, evidence, q_path):
+    """Rebuild the matrix inputs and re-sign them over evidence."""
+    binding = _signed_gate(m, ctx, evidence, MATRIX_GATE,
+                           "inputs.json", "receipt.json",
+                           _matrix_inputs(m, evidence))
+    _write_qualification(m, ctx, q_path,
+                         {MATRIX_GATE: binding})
+
+
+def test_qualify_rejects_failing_row_predicates(workshop,
+                                                tmp_path):
+    m, ctx, evidence, q_path, _ = _matrix_qualified(
+        workshop, tmp_path)
+    row = evidence / "matrix" / MATRIX_ROW
+    cached_path = row / "oracle-inputs.json"
+    ev = json.loads(cached_path.read_text())
+    # The attack: the campaign's persisted counts change, so the
+    # re-derived predicates fail while the inventory and every
+    # signature still verify.
+    ev["persisted"]["bounce_attempt"] = 1
+    cached_path.write_text(json.dumps(ev))
+    _resign_matrix_inputs(m, ctx, evidence, q_path)
+    with pytest.raises(ValueError, match="[Pp]redicates"):
+        m.verify_qualification(ctx["manifest_path"], q_path,
+                               ctx["policy_path"], evidence,
+                               source_tree=str(ctx["root"]))
+
+
+def test_qualify_rejects_mismatched_recorded_checks(workshop,
+                                                    tmp_path):
+    m, ctx, evidence, q_path, _ = _matrix_qualified(
+        workshop, tmp_path)
+    row = evidence / "matrix" / MATRIX_ROW
+    receipt_path = row / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    # The attack: the recorded checks no longer match what the
+    # predicates re-derive from the cached inputs.
+    receipt["actual"]["checks"][0]["ok"] = \
+        not receipt["actual"]["checks"][0]["ok"]
+    receipt_path.write_bytes(m.canonical(receipt))
+    _resign_matrix_inputs(m, ctx, evidence, q_path)
+    with pytest.raises(ValueError, match="[Pp]redicates"):
+        m.verify_qualification(ctx["manifest_path"], q_path,
+                               ctx["policy_path"], evidence,
+                               source_tree=str(ctx["root"]))
 
 
 def _nonmatrix_required_gates():
@@ -1633,10 +1754,10 @@ def test_nonmatrix_gate_chain_unchanged(workshop, tmp_path):
                 "claim": "ordinary-preview"}
     assert m.verify_qualification(
         ctx["manifest_path"], q_path, ctx["policy_path"],
-        evidence) == expected
+        evidence, source_tree=str(ctx["root"])) == expected
     assert m.verify_qualification(
         ctx["manifest_path"], q_path, ctx["policy_path"],
-        evidence) == expected
+        evidence, source_tree=str(ctx["root"])) == expected
 
 
 def _write_signed_checksums(m, ctx, evidence):
@@ -1664,7 +1785,8 @@ def test_qualify_cli_rederives_signed_gates(workshop,
            "--manifest", str(ctx["manifest_path"]),
            "--qualification", str(q_path),
            "--policy", str(ctx["policy_path"]),
-           "--evidence-dir", str(evidence)]
+           "--evidence-dir", str(evidence),
+           "--source-tree", str(ctx["root"])]
     proc = subprocess.run(argv, stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE, text=True)
     assert proc.returncode == 0, proc.stderr
@@ -1672,6 +1794,33 @@ def test_qualify_cli_rederives_signed_gates(workshop,
     (evidence / "product.json").write_bytes(b'{"x": 1}\n')
     rerun = subprocess.run(argv, stdout=subprocess.PIPE,
                            stderr=subprocess.PIPE, text=True)
+    assert rerun.returncode == 1
+    assert rerun.stderr.strip(), "silent qualify failure"
+
+
+def test_qualify_cli_evaluates_matrix_rows(workshop,
+                                           tmp_path):
+    m, ctx, evidence, q_path, _ = _matrix_qualified(
+        workshop, tmp_path)
+    _write_signed_checksums(m, ctx, evidence)
+    argv = [str(ROOT / "tools" / "candidate"), "qualify",
+           "--manifest", str(ctx["manifest_path"]),
+           "--qualification", str(q_path),
+           "--policy", str(ctx["policy_path"]),
+           "--evidence-dir", str(evidence),
+           "--source-tree", str(ctx["root"])]
+    proc = subprocess.run(argv, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert "re-derived" in proc.stdout
+    # Without the source tree the lock cannot load, so the
+    # same evidence refuses instead of skipping predicates.
+    bare = [entry for entry in argv
+            if entry != "--source-tree"
+            and entry != str(ctx["root"])]
+    rerun = subprocess.run(bare, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, text=True,
+                           cwd=str(tmp_path))
     assert rerun.returncode == 1
     assert rerun.stderr.strip(), "silent qualify failure"
 

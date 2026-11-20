@@ -5510,6 +5510,66 @@ def verify_row_cache_vs_raw(row_dir, inputs):
     return None
 
 
+def _required_row_ids(lock):
+    """{row id: lock entry} for a matrix lock; ValueError if malformed."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]
+                            / "tools"))
+    import candidate
+    rows = lock.get("kernels") if isinstance(lock, dict) else None
+    candidate.require(isinstance(rows, list) and rows,
+                      "required matrix rows are empty")
+    candidate.require(all(
+        isinstance(row, dict) and isinstance(row.get("id"), str)
+        and row["id"] for row in rows),
+        "required matrix row lacks an id")
+    wanted = {row["id"]: row for row in rows}
+    candidate.require(len(wanted) == len(rows),
+                      "duplicate required matrix row")
+    return wanted
+
+
+def verify_tested_rows(out_dir, lock, manifest):
+    """Re-evaluate every required row's oracle predicates.
+
+    The evidence inventory is already verified by the caller;
+    this replays the per-row predicate core shared by qualify
+    and export: the cached oracle inputs must transcribe the
+    retained raw files, the oracle predicates must re-derive
+    ok, the re-derived checks must equal the receipt's
+    recorded checks, and the row must name this candidate.
+    Returns the {row id: checks} map; raises ValueError and
+    writes nothing otherwise.
+    """
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]
+                            / "tools"))
+    import candidate
+    candidate.validate_manifest(manifest)
+    wanted = _required_row_ids(lock)
+    want_id = candidate.digest_bytes(
+        candidate.canonical(manifest))
+    checked = {}
+    for ident in wanted:
+        row = Path(out_dir) / ident
+        receipt = candidate.read_json(row / "receipt.json")
+        inputs = candidate.read_json(row / "oracle-inputs.json")
+        candidate.require(
+            inputs.get("candidate_sha256") == want_id,
+            "matrix candidate differs")
+        verify_row_cache_vs_raw(row, inputs)
+        result = evaluate_row(inputs)
+        candidate.require(result["ok"],
+                          "matrix oracle predicates failed: "
+                          + ident)
+        candidate.require(
+            result["checks"] == receipt["actual"]["checks"],
+            "matrix recorded checks differ from re-derived "
+            "predicates")
+        checked[ident] = result["checks"]
+    return checked
+
+
 def export_tested_candidate(out_dir, lock, manifest, destination):
     """Export payload expectations after every locked row proves itself.
 
@@ -5532,21 +5592,13 @@ def export_tested_candidate(out_dir, lock, manifest, destination):
                             / "tools"))
     import candidate
     candidate.validate_manifest(manifest)
-    rows = lock.get("kernels") if isinstance(lock, dict) else None
-    candidate.require(isinstance(rows, list) and rows,
-                      "required matrix rows are empty")
-    candidate.require(all(
-        isinstance(row, dict) and isinstance(row.get("id"), str)
-        and row["id"] for row in rows),
-        "required matrix row lacks an id")
-    wanted = {row["id"]: row for row in rows}
-    candidate.require(len(wanted) == len(rows),
-                      "duplicate required matrix row")
+    wanted = _required_row_ids(lock)
     report = verify_matrix_out(out_dir)
     candidate.require(
         report["ok"]
         and {row["id"] for row in report["rows"]} == set(wanted),
         "required matrix rows did not pass")
+    verify_tested_rows(out_dir, lock, manifest)
     expected_engine = manifest["files"]["bin/memveil"]
     for ident, entry in wanted.items():
         row = Path(out_dir) / ident
@@ -5568,20 +5620,6 @@ def export_tested_candidate(out_dir, lock, manifest, destination):
         candidate.require(inputs.get("entry") == entry,
                           "matrix expectations differ from "
                           "pinned lock")
-        candidate.require(
-            inputs.get("candidate_sha256")
-            == candidate.digest_bytes(
-                candidate.canonical(manifest)),
-            "matrix candidate differs")
-        verify_row_cache_vs_raw(row, inputs)
-        result = evaluate_row(inputs)
-        candidate.require(result["ok"],
-                          "matrix oracle predicates failed: "
-                          + ident)
-        candidate.require(
-            result["checks"] == receipt["actual"]["checks"],
-            "matrix recorded checks differ from re-derived "
-            "predicates")
         candidate.require(
             receipt["artifacts"]["binary_sha256"]
             == expected_engine,

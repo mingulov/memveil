@@ -1107,7 +1107,8 @@ def main(argv=None):
                 candidate.verify_qualification(
                     os.environ["MV_CANDIDATE_MANIFEST"],
                     args.qualification, args.policy,
-                    args.evidence_dir)
+                    args.evidence_dir,
+                    source_tree=args.source_tree)
                 km.export_tested_candidate(
                     args.out, lock, manifest, args.export_tested)
             except (OSError, ValueError, KeyError) as error:

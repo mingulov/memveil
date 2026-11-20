@@ -25,12 +25,16 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "tests/package"))
+sys.path.insert(0, str(ROOT / "tests" / "vm"))
 import candidate as c
+from test_kernel_matrix import _admitted_entry
 from test_candidate import (
     cargo_build_harness, git, probe_tools, sha, _commit_as,
     _ephemeral_key, _sign, _write_policy,
     _write_nonmatrix_evidence, _write_signed_checksums,
-    _nonmatrix_required_gates, NONMATRIX_GATE)
+    _nonmatrix_required_gates, NONMATRIX_GATE,
+    _matrix_lock, _matrix_inputs, _matrix_required_gates,
+    _write_real_matrix_row, _signed_gate, MATRIX_GATE)
 
 
 def api():
@@ -125,12 +129,17 @@ class CustodyBase:
             '[toolchain]\nchannel = "%s"\n' % tools["cargo"])
         _write_policy(c, root / "packaging"
                       / "candidate-policy.json",
-                      _nonmatrix_required_gates(), trusted)
+                      {**_nonmatrix_required_gates(),
+                       **_matrix_required_gates()},
+                      trusted)
         (root / "src" / "engine.txt").write_text(
             "synthetic engine\n")
         os.symlink("engine.txt", root / "src" / "engine-link.txt")
         (root / "docs" / "release-notes.md").write_text(
             "# %s\n\nTest release notes.\n" % VERSION)
+        (root / "tests" / "vm").mkdir(parents=True)
+        (root / "tests" / "vm" / "kernels.lock.json").write_bytes(
+            c.canonical(_matrix_lock(_admitted_entry())))
         git(root, "init", "-q")
         git(root, "add", ".")
         git(root, "-c", "user.name=Fixture",
@@ -295,6 +304,11 @@ class CustodyBase:
                "key": private, "pub": public}
         evidence = self.base / "evidence"
         binding = _write_nonmatrix_evidence(c, ctx, evidence)
+        _write_real_matrix_row(c, evidence / "matrix", manifest)
+        matrix_binding = _signed_gate(
+            c, ctx, evidence, MATRIX_GATE, "matrix-inputs.json",
+            "matrix-receipt.json",
+            _matrix_inputs(c, evidence))
         _write_signed_checksums(c, ctx, evidence)
         archive_path = self.base / (ARCHIVE + ".bytes")
         with tarfile.open(archive_path, "w:gz") as stream:
@@ -308,7 +322,8 @@ class CustodyBase:
                "source_commit": commit,
                "claim": "ordinary-preview",
                "evidence_archive": archive_entry,
-               "gates": {NONMATRIX_GATE: binding}}
+               "gates": {NONMATRIX_GATE: binding,
+                         MATRIX_GATE: matrix_binding}}
         (self.base / "qualification.json").write_bytes(
             c.canonical(doc))
         expected = c.expected_payload(manifest)
@@ -661,6 +676,10 @@ def test_import_rejects_foreign_build_origin(
            "key": fix["key"], "pub": fix["pub"]}
     evidence = Path(tmp_path) / "evidence-foreign"
     binding = _write_nonmatrix_evidence(c, ctx, evidence)
+    _write_real_matrix_row(c, evidence / "matrix", patched)
+    matrix_binding = _signed_gate(
+        c, ctx, evidence, MATRIX_GATE, "matrix-inputs.json",
+        "matrix-receipt.json", _matrix_inputs(c, evidence))
     _write_signed_checksums(c, ctx, evidence)
     archive_path = Path(tmp_path) / "foreign.tar.gz"
     with tarfile.open(archive_path, "w:gz") as stream:
@@ -674,7 +693,8 @@ def test_import_rejects_foreign_build_origin(
                "name": ARCHIVE,
                "size": str(len(archive_bytes)),
                "sha256": sha(archive_bytes)},
-           "gates": {NONMATRIX_GATE: binding}}
+           "gates": {NONMATRIX_GATE: binding,
+                     MATRIX_GATE: matrix_binding}}
     patched_fix = dict(fix, manifest=patched,
                        candidate_id=patched_id,
                        candidate_bytes=c.canonical(patched),
@@ -690,6 +710,52 @@ def test_import_rejects_foreign_build_origin(
     with pytest.raises(ValueError, match="origin"):
         m.run("import",
               import_request(patched_fix, q1, release.ids),
+              Path(tmp_path) / "out", custody_base.harness_bin())
+
+
+def test_import_rejects_failing_row_predicates(
+        custody_base, tmp_path, monkeypatch):
+    m = api()
+    fix = fresh(custody_base, tmp_path)
+    # The attack: the campaign's persisted counts change, so the
+    # re-derived row predicates fail while the inventory and
+    # every signature still verify.
+    evidence = Path(tmp_path) / "evidence-tampered"
+    with tarfile.open(fileobj=io.BytesIO(
+            fix["archive_bytes"]), mode="r:gz") as stream:
+        stream.extractall(evidence)
+    inner = evidence / "evidence"
+    row = next(path for path in (inner / "matrix").iterdir()
+               if path.is_dir())
+    cached_path = row / "oracle-inputs.json"
+    cached = json.loads(cached_path.read_text())
+    cached["persisted"]["bounce_attempt"] = 1
+    cached_path.write_text(json.dumps(cached))
+    ctx = {"manifest": fix["manifest"],
+           "candidate_id": fix["candidate_id"],
+           "key": fix["key"], "pub": fix["pub"]}
+    matrix_binding = _signed_gate(
+        c, ctx, inner, MATRIX_GATE, "matrix-inputs.json",
+        "matrix-receipt.json", _matrix_inputs(c, inner))
+    doc = copy.deepcopy(fix["qualification"])
+    doc["gates"][MATRIX_GATE] = matrix_binding
+    archive_path = Path(tmp_path) / "tampered.tar.gz"
+    with tarfile.open(archive_path, "w:gz") as stream:
+        stream.add(inner, arcname="evidence")
+    archive_bytes = archive_path.read_bytes()
+    doc["evidence_archive"] = {
+        "name": ARCHIVE, "size": str(len(archive_bytes)),
+        "sha256": sha(archive_bytes)}
+    tampered_fix = dict(
+        fix, qualification_bytes=c.canonical(doc),
+        archive_bytes=archive_bytes)
+    q1 = commit_q(fix["root"], q1_entries(tampered_fix))
+    release = FakeRelease(tampered_fix)
+    armed(monkeypatch, fix["root"], "import", q1)
+    monkeypatch.setattr(m, "GitHub", lambda: release)
+    with pytest.raises(ValueError, match="[Pp]redicates"):
+        m.run("import",
+              import_request(tampered_fix, q1, release.ids),
               Path(tmp_path) / "out", custody_base.harness_bin())
 
 

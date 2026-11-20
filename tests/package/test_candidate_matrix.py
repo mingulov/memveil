@@ -23,6 +23,7 @@ from test_kernel_matrix import (_ev_pass, _row_ctx, _row_job,
                                 _admitted_entry)
 from test_candidate import (_ephemeral_key, _write_policy,
                             _write_qualification, _signed_gate,
+                            _matrix_lock, _write_real_matrix_row,
                             sha)
 
 
@@ -57,77 +58,16 @@ def _matrix_manifest(commit='c' * 40, policy_sha='9' * 64):
             'artifacts': arts}
 
 
-def _matrix_lock(entry):
-    return {'schema': km.SCHEMA, 'recorded_on': '2026-11-19',
-            'archive': 'https://kernel.ubuntu.com/mainline',
-            'archive_queried': '2026-11-19',
-            'tools': {'bpftrace': 'bpftrace v0.25.0',
-                      'bpftool': 'bpftool v7.7.0'},
-            'kernels': [entry]}
-
-
 def exported_fixture(tmp_path, commit='c' * 40,
                      policy_sha='9' * 64):
     assert hasattr(km, 'export_tested_candidate'), \
         'matrix tested export is missing'
     tmp_path = Path(tmp_path)
     tmp_path.mkdir(parents=True, exist_ok=True)
-    ev = _ev_pass()
-    ev['duration'] = 60
-    hooks = json.loads(ev['hooks_text'])
-    hooks['btf'] = True
-    ev['hooks_text'] = json.dumps(hooks)
     doc = _matrix_manifest(commit=commit, policy_sha=policy_sha)
-    ev['candidate_sha256'] = c.digest_bytes(c.canonical(doc))
-    ev['candidate_files'] = copy.deepcopy(doc['files'])
-    rec = km.evaluate_row(ev)
-    assert rec['ok'], rec
-    rec.update(run_id='20261101T000000Z', elapsed=1.0,
-               timeout=False, release=ev['entry']['release'])
-    row = tmp_path / ev['entry']['id']
-    row.mkdir()
-    job = _row_job()
-    job.update(id=ev['entry']['id'],
-               release=ev['entry']['release'],
-               run_id=rec['run_id'])
-    files = {'job.json': json.dumps(job),
-             'oracle-inputs.json': json.dumps(ev),
-             'vng.exit': '0',
-             'artifacts.json': ev['artifacts_text'],
-             'uname.txt': ev['uname_text'],
-             'mods.txt': ev['mods_text'],
-             'hooks.json': ev['hooks_text'],
-             'btf-sha.txt': '2' * 64,
-             'oracle.txt': ev['oracle_text'],
-             'oracle.stderr': ev['oracle_stderr'],
-             'oracle.mode': 'full',
-             'doctor.json': ev['doctor_text'],
-             'doctor-passive.json': ev['doctor_passive_text'],
-             'sev-sysfs.txt': ev['sev_sysfs_text'],
-             'dmesg.txt': ev['dmesg_text'],
-             'dmesg_scan.json': ev['dmesg_scan_text'],
-             'cap/session.json': ev['session_text'],
-             'workload.txt': ev['workload_text'],
-             'blockstat.json': ev['blockstat_text'],
-             'busy/times.json': ev['busy_times_text'],
-             'busy/busy.out': ev['busy_out_text'],
-             'busy/cap/session.json': ev['busy_session_text']}
-    for name, value in files.items():
-        target = row / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(value)
+    ev, rec, receipt, row = _write_real_matrix_row(
+        c, tmp_path, doc)
     lock = _matrix_lock(copy.deepcopy(ev['entry']))
-    ctx = _row_ctx(
-        kernel_selector='--kernel ' + ev['entry']['id'],
-        source_sha256=c.artifact(doc, 'deb')['sha256'])
-    ctx['source']['memveil'] = {'commit': doc['source']['commit'],
-                                'dirty': False}
-    ctx['toolchain']['lock_sha256'] = \
-        doc['toolchain']['cargo_lock_sha256']
-    receipt = km.write_row_receipt(row, rec, ev['entry'], ctx)
-    (tmp_path / (ev['entry']['id'] + '.json')).write_text(
-        json.dumps(rec))
-    (tmp_path / 'summary.json').write_text(json.dumps([rec]))
     return doc, lock, row, ev, rec, receipt
 
 
