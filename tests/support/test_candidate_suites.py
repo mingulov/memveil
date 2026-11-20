@@ -26,11 +26,15 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 PARTIAL_SUITES = ['perf-replay', 'perf-region', 'soak',
-                  'fuzz-smoke', 'privacy',
-                  'extracted-robustness', 'package',
-                  'release-runtime', 'perf-overhead',
-                  'perf-workload', 'vm-live-soak']
-assert len(PARTIAL_SUITES) == 11
+                  'fuzz-smoke', 'fuzz-campaign', 'privacy',
+                  'extracted-robustness', 'package', 'deb',
+                  'rpm-journey', 'release-runtime', 'perf-overhead',
+                  'perf-workload', 'vm-live-soak', 'vm-kernels',
+                  'vm-scenarios']
+# NOTE: keep in sync with the candidate-mode suite list in tools/test;
+# a newly routed suite must be added here or its partial-input refusal
+# goes unpinned.
+assert len(PARTIAL_SUITES) == 16
 
 
 def candidate_clean_env():
@@ -40,10 +44,14 @@ def candidate_clean_env():
 
 
 @pytest.mark.parametrize('suite', PARTIAL_SUITES)
-def test_partial_input_refuses_pre_build(suite, tmp_path):
-    env = dict(os.environ,
-               MV_BUNDLE_TARBALL=str(tmp_path / 'missing'))
-    env.pop('MV_CANDIDATE_MANIFEST', None)
+@pytest.mark.parametrize('present,missing', [
+    ('MV_BUNDLE_TARBALL', 'MV_CANDIDATE_MANIFEST'),
+    ('MV_CANDIDATE_MANIFEST', 'MV_BUNDLE_TARBALL'),
+])
+def test_partial_input_refuses_pre_build(suite, present, missing,
+                                         tmp_path):
+    env = dict(os.environ, **{present: str(tmp_path / 'missing')})
+    env.pop(missing, None)
     env['MV_KERNELS_OUT'] = str(
         tmp_path / 'kernels-must-not-exist')
     env['MV_SCENARIOS_OUT'] = str(
