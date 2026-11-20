@@ -1364,7 +1364,8 @@ def test_inventory_rejects_altered_row_receipt(workshop,
         ctx["manifest_path"], q_path, ctx["policy_path"],
         evidence) == {"ok": True, "gates": [MATRIX_GATE],
                       "trusted_keys": [sha(
-                          ctx["pub"].read_bytes())]}
+                          ctx["pub"].read_bytes())],
+                      "claim": "ordinary-preview"}
     receipt_path = evidence / "matrix" / MATRIX_ROW \
         / "receipt.json"
     receipt = json.loads(receipt_path.read_text())
@@ -1429,7 +1430,8 @@ def test_original_signature_rejects_mutated_evidence(workshop,
         ctx["manifest_path"], q_path, ctx["policy_path"],
         evidence) == {"ok": True, "gates": [MATRIX_GATE],
                       "trusted_keys": [sha(
-                          ctx["pub"].read_bytes())]}
+                          ctx["pub"].read_bytes())],
+                      "claim": "ordinary-preview"}
     signed = {name: sha((evidence / name).read_bytes())
               for name in ("receipt.json", "receipt.json.sig",
                            "inputs.json")}
@@ -1504,7 +1506,8 @@ def test_nonmatrix_gate_chain_unchanged(workshop, tmp_path):
     _write_qualification(m, ctx, q_path,
                          {NONMATRIX_GATE: binding})
     expected = {"ok": True, "gates": [NONMATRIX_GATE],
-                "trusted_keys": [sha(ctx["pub"].read_bytes())]}
+                "trusted_keys": [sha(ctx["pub"].read_bytes())],
+                "claim": "ordinary-preview"}
     assert m.verify_qualification(
         ctx["manifest_path"], q_path, ctx["policy_path"],
         evidence) == expected

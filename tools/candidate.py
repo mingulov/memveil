@@ -161,8 +161,8 @@ def read_regular(path, limit=DOCUMENT_LIMIT):
     return value
 
 
-def read_json(path, sealed=False):
-    data = read_regular(path)
+def _parse_json(data):
+    """Strict-parse document bytes; duplicate keys fail closed."""
     try:
         value = json.loads(
             data, object_pairs_hook=unique,
@@ -180,6 +180,12 @@ def read_json(path, sealed=False):
             for child in item:
                 depth(child, level + 1)
     depth(value)
+    return value
+
+
+def read_json(path, sealed=False):
+    data = read_regular(path)
+    value = _parse_json(data)
     if sealed:
         require(data == canonical(value),
                 "document bytes are not canonical")
@@ -1313,7 +1319,16 @@ def verify_signature(subject, signature, public_key, trusted):
             "signature verification failed")
 
 
-def validate_policy(policy):
+def validate_policy(path):
+    """Read, hash, and validate the candidate policy from one read.
+
+    The file bytes are read exactly once; hashing and parsing
+    consume those same bytes, so the returned digest binds the
+    validated document and no later re-read can substitute it.
+    Returns (policy, digest_hex); raises ValueError otherwise.
+    """
+    data = read_regular(path)
+    policy = _parse_json(data)
     exact(policy, {"schema", "claim", "required_gates",
                    "trusted_keys", "retention_days"}, "policy")
     require(policy["schema"] == POLICY_SCHEMA,
@@ -1368,7 +1383,7 @@ def validate_policy(policy):
     if policy["claim"] == "security-workflow":
         require({"tdx", "hyperv"} <= environments,
                 "TDX and Hyper-V qualification required")
-    return policy
+    return policy, digest_bytes(data)
 
 
 def verify_measurement_sources(record, base):
@@ -1636,19 +1651,20 @@ def verify_qualification(candidate, qualification, policy,
     predicate, and predicates before export; other gates verify
     the signature chain, then retained measurements, then
     predicates. Returns {"ok": True, "gates": [...],
-    "trusted_keys": [...]} with the verified gate IDs sorted and
-    the validated policy's pinned trust; raises ValueError
-    otherwise. Callers reuse the returned trust instead of
-    re-reading the policy file, so the bytes verified here are
-    the bytes used downstream. The qualification's
-    evidence_archive entry is shape-checked only: archive bytes
-    are verified by whoever extracts them.
+    "trusted_keys": [...], "claim": ...} with the verified gate
+    IDs sorted and the validated policy's pinned trust and
+    claim; raises ValueError otherwise. Callers reuse the
+    returned trust and claim instead of re-reading the policy
+    file, so the bytes verified here are the bytes used
+    downstream. The qualification's evidence_archive entry is
+    shape-checked only: archive bytes are verified by whoever
+    extracts them.
     """
     manifest = load_manifest(candidate)
     candidate_id = digest(candidate)
-    require(digest(policy) == manifest["policy_sha256"],
+    validated, policy_digest = validate_policy(policy)
+    require(policy_digest == manifest["policy_sha256"],
             "policy differs from candidate")
-    validated = validate_policy(read_json(policy))
     doc = read_json(qualification, sealed=True)
     exact(doc, {"schema", "candidate_sha256", "source_commit",
                 "claim", "gates", "evidence_archive"},
@@ -1732,7 +1748,8 @@ def verify_qualification(candidate, qualification, policy,
                 retained,
                 validated["required_gates"][ident])
     return {"ok": True, "gates": sorted(doc["gates"]),
-            "trusted_keys": list(validated["trusted_keys"])}
+            "trusted_keys": list(validated["trusted_keys"]),
+            "claim": validated["claim"]}
 
 
 def checksums_text(artifacts_dir):

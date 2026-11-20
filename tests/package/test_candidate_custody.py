@@ -758,6 +758,44 @@ def test_promote_requires_tag_resolving_to_C(
     assert any(line.startswith("release edit ") for line in lines)
 
 
+def test_promote_reads_policy_once(
+        custody_base, tmp_path, monkeypatch):
+    m = api()
+    fix = fresh(custody_base, tmp_path)
+    source = fix["manifest"]["source"]["commit"]
+    _q1, q2, remote, archive = qualify_two(fix)
+    git(fix["root"], "tag", TAG, source)
+    armed(monkeypatch, fix["root"], "promote", q2)
+    stub = FakeRemote(fix, remote, archive)
+    monkeypatch.setattr(m, "GitHub", lambda: stub)
+    fake_gh(monkeypatch, tmp_path)
+    out = Path(tmp_path) / "out"
+    policy_path = out / "policy.json"
+    reads = []
+    real_read_regular = c.read_regular
+
+    def counting_read_regular(path, *args, **kwargs):
+        if Path(str(path)) == policy_path:
+            reads.append(path)
+            if len(reads) > 1:
+                raise ValueError("policy re-read")
+        return real_read_regular(path, *args, **kwargs)
+
+    real_read_json = c.read_json
+
+    def refusing_read_json(path, *args, **kwargs):
+        if Path(str(path)) == policy_path:
+            raise ValueError(
+                "policy must not load via read_json")
+        return real_read_json(path, *args, **kwargs)
+
+    monkeypatch.setattr(c, "read_regular", counting_read_regular)
+    monkeypatch.setattr(c, "read_json", refusing_read_json)
+    assert m.run("promote", stored_request(fix, q2),
+                 out, custody_base.harness_bin()) is None
+    assert len(reads) == 1
+
+
 @pytest.mark.parametrize("damage", ["flag", "timestamp", "fork"])
 def test_promote_rejects_expired_artifact(
         custody_base, tmp_path, monkeypatch, damage):

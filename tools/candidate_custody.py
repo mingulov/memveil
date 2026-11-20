@@ -445,12 +445,12 @@ def run(mode, request, out, harness_bin=None):
         out / 'policy.json', evidence)
     paths, bundled = verify_artifacts(
         root, manifest, stored, harness_bin)
-    policy = c.read_json(out / 'policy.json')
     expected_checksums = c.verify_signed_checksums(
         manifest, evidence, qualified['trusted_keys'])
     if mode == 'promote':
         verify_remote_checks(remote['checks'], api, repo, source,
-                             request['candidate_sha256'], policy)
+                             request['candidate_sha256'],
+                             qualified)
     if mode == 'import':
         c.write_once(stored / 'custody.json', c.canonical(custody))
         checksums = expected_checksums \
@@ -465,7 +465,7 @@ def run(mode, request, out, harness_bin=None):
         version = tomllib.loads(version_source)['package'][
             'version']
         verify_release_version(tag, bundled['engine_version'],
-                               version, policy['claim'])
+                               version, qualified['claim'])
         c.require(re.fullmatch(
             r'v[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?', tag),
             'invalid final tag')
@@ -511,7 +511,7 @@ def run(mode, request, out, harness_bin=None):
 
 
 def verify_remote_checks(checks, api, repo, source, candidate_id,
-                         policy):
+                         trust):
     c.exact(checks, REMOTE_CHECKS, 'required remote checks')
     for ident, binding in checks.items():
         c.exact(binding, {'check_id', 'run_id', 'head_sha',
@@ -556,7 +556,7 @@ def verify_remote_checks(checks, api, repo, source, candidate_id,
                          binding['public_key'].encode())
             c.verify_signature(tmp / 'receipt', tmp / 'signature',
                                tmp / 'public',
-                               policy['trusted_keys'])
+                               trust['trusted_keys'])
         c.rederive_measurements(
             binding['inputs'], {'environment': 'offline',
                                 'predicates':
