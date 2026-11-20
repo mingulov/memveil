@@ -1262,6 +1262,12 @@ def test_release_seal_permissions_are_minimal():
         "contents": "read", "actions": "write"}
 
 
+def test_release_qualify_permissions_hold_actions_write():
+    doc = _release_workflow()
+    assert doc["jobs"]["qualify"]["permissions"] == {
+        "contents": "read", "actions": "write"}
+
+
 def test_release_custody_runs_no_sealed_harness():
     doc = _release_workflow()
     whole = json.dumps(doc["jobs"])
@@ -1316,6 +1322,18 @@ def test_release_qualify_uses_the_returned_inner_root():
     assert "--evidence-dir evidence" not in export["run"]
     assert '"evidence/' not in export["run"]
     assert "evidence/qualification.json" not in export["run"]
+
+
+def test_release_qualify_verifies_archive_before_extract():
+    doc = _release_workflow()
+    steps = doc["jobs"]["qualify"]["steps"]
+    collect = next(step for step in steps
+                   if "campaign evidence" in step.get("name", ""))
+    run = collect["run"]
+    assert 'doc["evidence_archive"]' in run
+    assert "candidate.verify_file(" in run
+    assert run.index("candidate.verify_file(") < run.index(
+        "candidate.safe_extract(")
 
 
 def test_release_import_attests_stored_subjects():

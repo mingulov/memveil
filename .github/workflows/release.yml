@@ -323,7 +323,7 @@ jobs:
     runs-on: ubuntu-26.04
     permissions:
       contents: read
-      actions: read
+      actions: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
@@ -395,11 +395,14 @@ jobs:
           EOF
           EVIDENCE_DIR=$(python3 - \
             evidence-dl/qualification-evidence.tar.gz \
-            evidence <<'EOF'
+            evidence evidence-dl/qualification.json <<'EOF'
           import sys
           sys.path.insert(0, "tools")
           import candidate
           from pathlib import Path
+          doc = candidate.read_json(sys.argv[3], sealed=True)
+          candidate.verify_file(
+              sys.argv[1], doc["evidence_archive"])
           inner = candidate.safe_extract(
               sys.argv[1], Path(sys.argv[2]), True, False)
           print(inner)
