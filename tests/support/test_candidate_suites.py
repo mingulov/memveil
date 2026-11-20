@@ -436,6 +436,29 @@ def test_journey_launcher_runs_recorded_binary(sealed,
     assert 'journey_prep.py' in combined, combined
 
 
+def test_journey_record_non_string_path_refuses(sealed,
+                                               tmp_path):
+    import json
+    record_path = tmp_path / 'prep.json'
+    record_path.write_text(json.dumps(
+        {'schema': 'memveil-journey-prep/1',
+         'suites': {'deb': {'path': 12345,
+                            'sha256': '0' * 64}}}))
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MV_JOURNEY_PREP'] = str(record_path)
+    result = subprocess.run(
+        [sys.executable,
+         str(ROOT / 'tests/support/candidate_suite.py'),
+         'deb'],
+        env=environment, capture_output=True,
+        text=True, timeout=120)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 2, combined
+    assert 'Traceback' not in combined, combined
+    assert 'lacks suite' in combined, combined
+
+
 def test_journey_shadowed_cargo_stays_green(sealed, tmp_path):
     record = tmp_path / 'prep.json'
     result = subprocess.run(

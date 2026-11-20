@@ -120,7 +120,9 @@ def _run_journey(suite, argv, live):
     """
     entry = _journey_record(live).get(suite)
     if not isinstance(entry, dict) \
-            or set(entry) != {'path', 'sha256'}:
+            or set(entry) != {'path', 'sha256'} \
+            or not isinstance(entry['path'], str) \
+            or not isinstance(entry['sha256'], str):
         raise ValueError(
             'journey prep record lacks suite: ' + suite)
     path = Path(entry['path'])

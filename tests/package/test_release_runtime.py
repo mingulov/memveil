@@ -656,7 +656,7 @@ def _run_sealed_suite(sealed, suite, target_dir, tests,
 
 
 def _cargo_suite_env(sealed, target_dir):
-    # The cargo-driven shape dispatch uses, audited: the
+    # The cargo-driven development shape, audited: the
     # ambient target dir and rebuild request never leak in
     # (both are set explicitly below), the repo pin wins.
     env = {key: value for key, value in os.environ.items()
