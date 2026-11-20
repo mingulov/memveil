@@ -223,17 +223,19 @@ def resolve_journey_record(name):
     The record must live under the tool-owned prep
     directory, so records, stages, and publication
     scratch share the one excluded location. Refuses an
-    empty name, a symlinked parent component, and any
-    destination outside the directory. Both the prep
-    tool and the launcher validate through this one
-    function.
+    empty name, a symlink at the record path itself or
+    any parent component, and any destination outside
+    the directory. Both the prep tool and the launcher
+    validate through this one function, before any
+    staging, exclusion, or publication step derives
+    paths from the record.
     """
     if not name:
         raise ValueError(
             'journey prep record must live under %s'
             % JOURNEY_PREP_DIRNAME)
     raw = Path(os.path.abspath(name))
-    refuse_symlinked_path(raw.parent)
+    refuse_symlinked_path(raw)
     resolved = raw.resolve()
     if Path(journey_prep_dir()) not in resolved.parents:
         raise ValueError(

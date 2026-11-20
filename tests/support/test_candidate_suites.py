@@ -1245,6 +1245,78 @@ def test_journey_prep_refuses_symlinked_staging_root(
             shutil.move(str(aside), str(root))
 
 
+def test_journey_prep_refuses_symlinked_record(
+        tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import journey_prep_dir
+    import support.journey_prep as prep
+    fake = tmp_path / 'fake-exe'
+    fake.write_bytes(b'#!/bin/sh\necho fake\n')
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    top = Path(journey_prep_dir())
+    top.mkdir(parents=True, exist_ok=True)
+    target = top / ('target-%d.json' % os.getpid())
+    target.write_text('{"existing": true}\n')
+    link = top / ('link-%d.json' % os.getpid())
+    link.symlink_to(target)
+    with pytest.raises(ValueError, match='symlink'):
+        prep.prepare(str(link))
+    assert link.is_symlink()
+    assert target.read_text() == '{"existing": true}\n'
+
+
+def test_journey_launcher_refuses_symlinked_record(
+        sealed, tmp_path):
+    harness = ('#!/bin/sh\necho journey-marker\n'
+               'echo "running 1 tests"\n'
+               'echo "test journey_probe ... ok"\n'
+               'echo "test result: ok. 1 passed; 0 failed; '
+               '0 ignored; 0 measured; 0 filtered out"\n')
+    _, _, record_path = _journey_stub_record(
+        tmp_path, harness)
+    link = record_path.parent / (
+        'link-%s.json' % uuid.uuid4().hex[:8])
+    link.symlink_to(record_path)
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MV_JOURNEY_PREP'] = str(link)
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 2, combined
+    assert 'symlink' in combined, combined
+    assert 'Traceback' not in combined, combined
+    assert 'journey-marker' not in result.stdout, combined
+
+
+def test_journey_prep_refuses_symlinked_prep_dir(
+        tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import journey_prep_dir
+    import support.journey_prep as prep
+    fake = tmp_path / 'fake-exe'
+    fake.write_bytes(b'#!/bin/sh\necho fake\n')
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    top = Path(journey_prep_dir())
+    aside = tmp_path / 'prep-dir-aside'
+    if top.exists() or top.is_symlink():
+        shutil.move(str(top), str(aside))
+    try:
+        real = tmp_path / 'real'
+        real.mkdir()
+        top.symlink_to(real, target_is_directory=True)
+        with pytest.raises(ValueError, match='symlink'):
+            prep.prepare(str(top / 'prep.json'))
+        assert sorted(
+            entry.name for entry in real.iterdir()) == []
+    finally:
+        if top.is_symlink():
+            top.unlink()
+        if aside.exists():
+            shutil.move(str(aside), str(top))
+
+
 def test_journey_launcher_ignores_original_post_stage(
         sealed, tmp_path):
     harness = ('#!/bin/sh\necho journey-marker\n'
