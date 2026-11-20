@@ -3940,7 +3940,8 @@ PROFILE_REASON = ("matrix rows assert lock expectations and "
                   "doctor verdicts, not shipped profiles")
 
 _ROW_TOP_FILES = frozenset({
-    "job.json", "cache.txt", "cache-FAIL.txt", "download.txt",
+    "oracle-inputs.json", "job.json", "cache.txt",
+    "cache-FAIL.txt", "download.txt",
     "console.txt", "vng.exit", "FAIL.txt", "validate.txt",
     "artifacts.json", "blockstat.json", "configid.txt",
     "btf-sha.txt", "dev.txt", "dmesg.txt", "dmesg_scan.json",
@@ -5441,3 +5442,169 @@ def verify_matrix_out(out_dir):
     ok = not problems and bool(rows) \
         and all(row["ok"] for row in rows)
     return {"ok": ok, "rows": rows, "problems": problems}
+
+
+_CACHE_RAW_TEXT = (
+    ("doctor_text", "doctor.json"),
+    ("doctor_passive_text", "doctor-passive.json"),
+    ("sev_sysfs_text", "sev-sysfs.txt"),
+    ("uname_text", "uname.txt"),
+    ("mods_text", "mods.txt"),
+    ("configid_text", "configid.txt"),
+    ("version_text", "version.txt"),
+    ("lockdown_text", "lockdown.txt"),
+    ("hooks_text", "hooks.json"),
+    ("artifacts_text", "artifacts.json"),
+    ("dmesg_text", "dmesg.txt"),
+    ("dmesg_scan_text", "dmesg_scan.json"),
+    ("session_text", "cap/session.json"),
+    ("workload_text", "workload.txt"),
+    ("oracle_text", "oracle.txt"),
+    ("hist_status_text", "hist.status"),
+    ("hist_before_text", "hist_before.txt"),
+    ("hist_after_text", "hist_after.txt"),
+    ("blockstat_text", "blockstat.json"),
+    ("busy_times_text", "busy/times.json"),
+    ("busy_out_text", "busy/busy.out"),
+    ("busy_session_text", "busy/cap/session.json"),
+    ("oracle_stderr", "oracle.stderr"),
+)
+
+
+def verify_row_cache_vs_raw(row_dir, inputs):
+    """Prove the cached inputs transcribe the retained raw files.
+
+    Every transcribed text field must equal the bytes of the
+    raw file the collector read, and a cached value must have
+    its raw file still retained (and vice versa). Raises
+    ValueError on any disagreement, even when the cache and
+    the raw side each verify independently; returns None when
+    the cache faithfully transcribes the retained evidence.
+    """
+    if not isinstance(inputs, dict):
+        raise ValueError(
+            "matrix cached inputs must be an object")
+    row = Path(row_dir)
+    for field, rel in _CACHE_RAW_TEXT:
+        path = row / rel
+        if path.is_symlink() \
+                or (path.exists() and not path.is_file()):
+            raise ValueError(
+                "matrix retained %s is not a regular file"
+                % rel)
+        if not path.exists():
+            raw = None
+        else:
+            try:
+                raw = path.read_bytes().decode("utf-8")
+            except (OSError, UnicodeError):
+                raise ValueError(
+                    "matrix retained %s is unreadable" % rel)
+        cached = inputs.get(field)
+        if cached is None and raw is None:
+            continue
+        if cached is None or raw is None or cached != raw:
+            raise ValueError(
+                "matrix cached %s differs from retained %s"
+                % (field, rel))
+    return None
+
+
+def export_tested_candidate(out_dir, lock, manifest, destination):
+    """Export payload expectations after every locked row proves itself.
+
+    Each required row must re-derive PASS from its receipt, keep
+    its cached oracle inputs consistent with the retained raw
+    files, re-execute the oracle predicates, and bind the exact
+    candidate source, toolchain, executable, selected artifact,
+    BPF objects, and runtime closure. Returns the expected
+    payload map; raises ValueError and writes nothing otherwise.
+    """
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]
+                            / "tools"))
+    import candidate
+    candidate.validate_manifest(manifest)
+    rows = lock.get("kernels") if isinstance(lock, dict) else None
+    candidate.require(isinstance(rows, list) and rows,
+                      "required matrix rows are empty")
+    candidate.require(all(
+        isinstance(row, dict) and isinstance(row.get("id"), str)
+        and row["id"] for row in rows),
+        "required matrix row lacks an id")
+    wanted = {row["id"]: row for row in rows}
+    candidate.require(len(wanted) == len(rows),
+                      "duplicate required matrix row")
+    report = verify_matrix_out(out_dir)
+    candidate.require(
+        report["ok"]
+        and {row["id"] for row in report["rows"]} == set(wanted),
+        "required matrix rows did not pass")
+    expected_engine = manifest["files"]["bin/memveil"]
+    for ident, entry in wanted.items():
+        row = Path(out_dir) / ident
+        receipt = candidate.read_json(row / "receipt.json")
+        candidate.require(
+            receipt["mode"] == "matrix"
+            and not receipt["smoke"],
+            "required matrix row was skipped or smoke-only")
+        candidate.require(
+            receipt["source"]["memveil"] == {
+                "commit": manifest["source"]["commit"],
+                "dirty": False},
+            "matrix product source differs")
+        candidate.require(
+            receipt["toolchain"]["lock_sha256"]
+            == manifest["toolchain"]["cargo_lock_sha256"],
+            "matrix toolchain differs")
+        inputs = candidate.read_json(row / "oracle-inputs.json")
+        candidate.require(inputs.get("entry") == entry,
+                          "matrix expectations differ from "
+                          "pinned lock")
+        candidate.require(
+            inputs.get("candidate_sha256")
+            == candidate.digest_bytes(
+                candidate.canonical(manifest)),
+            "matrix candidate differs")
+        verify_row_cache_vs_raw(row, inputs)
+        result = evaluate_row(inputs)
+        candidate.require(result["ok"],
+                          "matrix oracle predicates failed: "
+                          + ident)
+        candidate.require(
+            result["checks"] == receipt["actual"]["checks"],
+            "matrix recorded checks differ from re-derived "
+            "predicates")
+        candidate.require(
+            receipt["artifacts"]["binary_sha256"]
+            == expected_engine,
+            "matrix executable differs from candidate")
+        expected_source = (
+            candidate.artifact(manifest, "deb")["sha256"]
+            if receipt["command"]["kind"] == "deb"
+            else expected_engine)
+        candidate.require(
+            receipt["command"]["source_sha256"]
+            == expected_source,
+            "matrix selected artifact differs")
+        aliases = {"attempt": "swiotlb_attempt.bpf.o",
+                   "lifecycle": "swiotlb_lifecycle.bpf.o",
+                   "copy": "swiotlb_copy.bpf.o"}
+        for name, digest in receipt["artifacts"]["bpf"].items():
+            filename = aliases.get(
+                name, name if name.endswith(".bpf.o")
+                else name + ".bpf.o")
+            candidate.require(
+                manifest["files"].get("bpf/" + filename)
+                == digest,
+                "matrix BPF object differs")
+        candidate.require(
+            inputs.get("candidate_files") == manifest["files"],
+            "matrix runtime/profile closure differs")
+    expected = candidate.expected_payload(manifest)
+    candidate.write_once(
+        destination,
+        "".join(value + "  " + name + "\n"
+                for name, value in sorted(expected.items()))
+        .encode())
+    return expected

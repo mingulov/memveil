@@ -1508,10 +1508,13 @@ def build_evidence_inventory(evidence_dir, matrix_directory):
     """Map every consumed matrix evidence file to its SHA-256.
 
     Keys are matrix-relative POSIX paths: per-row receipt.json,
-    oracle-inputs.json and retained raws, plus summary.json. The
-    signed gate receipt stays outside its own inventory, so the
-    binding is noncircular. Raises ValueError on missing, extra,
-    unknown, or non-regular evidence.
+    oracle-inputs.json and retained raws, the <id>.json sidecar
+    recs the tested export re-derives against, plus
+    summary.json. A sidecar is admitted only when it names a
+    retained row directory, so unrelated files still fail as
+    extra. The signed gate receipt stays outside its own
+    inventory, so the binding is noncircular. Raises ValueError
+    on missing, extra, unknown, or non-regular evidence.
     """
     base = Path(evidence_dir)
     mdir = base / relative(matrix_directory)
@@ -1521,12 +1524,19 @@ def build_evidence_inventory(evidence_dir, matrix_directory):
             + matrix_directory)
     allowlist = _matrix_rows()._row_rel_known
     inventory = {}
-    for name in sorted(os.listdir(mdir)):
-        full = mdir / name
-        mode = os.lstat(full).st_mode
+    names = sorted(os.listdir(mdir))
+    modes = {}
+    for name in names:
+        mode = os.lstat(mdir / name).st_mode
         if stat.S_ISLNK(mode):
             raise ValueError(
                 "matrix evidence refuses symlink: " + name)
+        modes[name] = mode
+    rows = {name for name, mode in modes.items()
+            if stat.S_ISDIR(mode)}
+    for name in names:
+        full = mdir / name
+        mode = modes[name]
         if stat.S_ISDIR(mode):
             for rel, found in sorted(
                     _row_inventory_files(allowlist,
@@ -1535,6 +1545,9 @@ def build_evidence_inventory(evidence_dir, matrix_directory):
         elif stat.S_ISREG(mode) and name == "summary.json":
             inventory["summary.json"] = _required_evidence(
                 full, "summary.json")
+        elif stat.S_ISREG(mode) and name.endswith(".json") \
+                and name[:-5] in rows:
+            inventory[name] = _required_evidence(full, name)
         else:
             raise ValueError(
                 "matrix evidence has an extra file: " + name)
