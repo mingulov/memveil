@@ -67,6 +67,14 @@ fn read_toolchain_channel(path: &Path) -> String {
 }
 
 fn main() {
+    // NOTE (candidate qualification): this child eBPF build is NOT skipped
+    // when MV_BUNDLE_TARBALL/MV_CANDIDATE_MANIFEST are set. The library
+    // embeds the objects via include_bytes!(env!(DEP_MEMVEIL_EBPF_*)),
+    // which fails compilation when the vars are absent, so skipping would
+    // require test-only fallback paths in the shipped binary. Candidate
+    // verdicts never consume these built bytes (marker-identity tests prove
+    // sealed-path consumption); the compile is scaffolding like the test
+    // harness itself.
     println!("cargo::rerun-if-changed=crates/ebpf/src");
     println!("cargo::rerun-if-changed=crates/ebpf/src/bin");
     println!("cargo::rerun-if-changed=crates/ebpf/src/common.rs");
