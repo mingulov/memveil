@@ -393,25 +393,30 @@ def refuse_unowned_prep_contents():
     content checks cannot apply, and safety comes from
     nonconforming siblings refusing plus the launcher
     re-validating its own record before exec. A
-    symlinked record refuses outright: links are
-    detected without following and never skipped. Under
+    symlinked record or a symlinked scratch file
+    refuses outright: links are detected without
+    following and never skipped. Under
     stages, every
-    stage directory holds only staged executables, and
-    a staged file whose path some valid record binds
+    stage directory holds only staged executables; a
+    symlinked staged entry refuses outright instead of
+    skipping the digest lookup, whether or not a valid
+    record binds it. A regular staged file whose path
+    some valid record binds
     must hash to one of the digests claimed for that
     exact path: a digest claimed for another path never
     authorizes these bytes, so a staged file cannot pass
     on a digest recorded for a different file. Anything
-    else refuses. Files no record binds (a stage
+    else refuses. Regular files no record binds (a stage
     mid-publish, a retired stage awaiting operator
     cleanup) are inert, since launch reads only bound
     paths and re-hashes them, so they refuse nowhere
     here. The prep directory's own components
     are verified link-free before the scan. A missing
     directory is fine: the prep tool creates it. Entries
-    are judged without following links: a symlinked
-    record refuses here, and link safety elsewhere stays
-    with the checks consuming each path.
+    are judged without following links: a linked
+    record, scratch file, or staged entry refuses here,
+    and link safety elsewhere stays with the checks
+    consuming each path.
     """
     from support.journey_prep import TARGETS
     top = Path(journey_prep_dir())
@@ -532,11 +537,10 @@ def refuse_unowned_prep_contents():
                     % child.path)
             elif entry_kind == 'link' \
                     and child.name.endswith('.tmp'):
-                # Publication scratch is never read back,
-                # so a linked scratch file is inert; only
-                # the exact producer name on real files is
-                # judged below.
-                continue
+                raise ValueError(
+                    'journey prep directory holds a '
+                    'symlinked publication scratch file; '
+                    'refusing: %s' % child.path)
             elif entry_kind == 'file' \
                     and child.name.endswith('.tmp'):
                 if PUBLISH_SCRATCH_RE.fullmatch(
@@ -558,7 +562,10 @@ def refuse_unowned_prep_contents():
                     or child.name not in staged_names:
                 refuse(child.path)
             if entry_kind == 'link':
-                continue
+                raise ValueError(
+                    'journey prep directory holds a '
+                    'symlinked staged executable; '
+                    'refusing: %s' % child.path)
             claimed = referenced.get(
                 os.path.abspath(child.path))
             if claimed is None:

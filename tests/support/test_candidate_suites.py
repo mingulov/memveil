@@ -2346,10 +2346,17 @@ def test_journey_launcher_refuses_symlinked_exe(
     environment = candidate_clean_env()
     environment.update(sealed)
     environment['MV_JOURNEY_PREP'] = str(record_path)
+    # The shared scan refuses the linked staged entry
+    # before dispatch: the link never reaches the
+    # launch-time plain-file check.
+    from support.candidate_suite import \
+        refuse_unowned_prep_contents
+    with pytest.raises(ValueError, match='symlinked staged'):
+        refuse_unowned_prep_contents()
     result = _launch_journey('deb', environment)
     combined = result.stdout + result.stderr
     assert result.returncode == 2, combined
-    assert 'not a plain file' in combined, combined
+    assert 'symlinked staged' in combined, combined
     assert 'journey-marker' not in result.stdout, combined
 
 
@@ -3248,3 +3255,100 @@ def test_journey_prep_verifies_roots_before_any_write(
     assert (records / 'prep.json').is_file()
     for suite, entry in record['suites'].items():
         assert Path(entry['staged']).is_file(), suite
+
+
+def test_journey_scan_refuses_symlinked_scratch(
+        sealed, tmp_path):
+    harness = ('#!/bin/sh\necho journey-marker\n'
+               'echo "running 1 tests"\n'
+               'echo "test journey_probe ... ok"\n'
+               'echo "test result: ok. 1 passed; 0 failed; '
+               '0 ignored; 0 measured; 0 filtered out"\n')
+    _, _, record_path = _journey_stub_record(
+        tmp_path, harness)
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import \
+        refuse_unowned_prep_contents
+    outside = tmp_path / 'scratch-target'
+    outside.write_bytes(b'{"schema": "partial-')
+    # A linked scratch file refuses even in the exact
+    # producer shape: links never skip the grammar.
+    shaped = record_path.parent / (
+        record_path.name + '.deadbeef.tmp')
+    shaped.symlink_to(outside)
+    with pytest.raises(
+            ValueError, match='symlinked publication'):
+        refuse_unowned_prep_contents()
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MV_JOURNEY_PREP'] = str(record_path)
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 2, combined
+    assert 'symlinked publication' in combined, combined
+    assert 'journey-marker' not in result.stdout, combined
+    # A misshapen linked scratch file refuses too: the
+    # link refuses before any name judgment.
+    shaped.unlink()
+    misshapen = record_path.parent / 'notes.tmp'
+    misshapen.symlink_to(outside)
+    with pytest.raises(
+            ValueError, match='symlinked publication'):
+        refuse_unowned_prep_contents()
+    # Honest control: without the links the same record
+    # launches.
+    misshapen.unlink()
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert 'journey-marker' in result.stdout, combined
+
+
+def test_journey_scan_refuses_linked_staged_exe(
+        sealed, tmp_path):
+    import shutil
+    harness = ('#!/bin/sh\necho journey-marker\n'
+               'echo "running 1 tests"\n'
+               'echo "test journey_probe ... ok"\n'
+               'echo "test result: ok. 1 passed; 0 failed; '
+               '0 ignored; 0 measured; 0 filtered out"\n')
+    _, staged, record_path = _journey_stub_record(
+        tmp_path, harness)
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import \
+        journey_staging_root, refuse_unowned_prep_contents
+    from support.journey_prep import TARGETS
+    backup = tmp_path / 'staged-backup'
+    shutil.copyfile(staged, backup)
+    staged.unlink()
+    staged.symlink_to(backup)
+    # The record binds this staged path, yet the link
+    # refuses instead of skipping the digest lookup.
+    with pytest.raises(ValueError, match='symlinked staged'):
+        refuse_unowned_prep_contents()
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MV_JOURNEY_PREP'] = str(record_path)
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 2, combined
+    assert 'symlinked staged' in combined, combined
+    assert 'journey-marker' not in result.stdout, combined
+    # Honest control: the regular file back in place
+    # launches, and a regular unbound staged file stays
+    # inert beside it.
+    staged.unlink()
+    shutil.copyfile(backup, staged)
+    staged.chmod(0o755)
+    stray_dir = Path(journey_staging_root()) / (
+        'stray-%d-%s.staged'
+        % (os.getpid(), uuid.uuid4().hex[:8]))
+    stray_dir.mkdir(parents=True)
+    stray = stray_dir / TARGETS['deb']
+    stray.write_bytes(b'#!/bin/sh\necho stray-unbound\n')
+    stray.chmod(0o755)
+    refuse_unowned_prep_contents()
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert 'journey-marker' in result.stdout, combined
