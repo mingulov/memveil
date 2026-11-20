@@ -68,3 +68,11 @@ newline).
 - Final release tag: `v<version>` from `Cargo.toml` at C.
 - Campaign retention is 30 to 90 days; workflow artifacts keep
   90 days so the evidence outlives the campaign.
+
+## Dispatch order
+
+Dry-run and promote are separate workflow dispatches with
+the ref at Q. Dry-run refuses when the final tag already
+exists; after it is green, the owner creates `v<version>`
+on C and only then dispatches promote with the matching
+authorization. Promote requires the tag to resolve to C.

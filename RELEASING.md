@@ -51,12 +51,15 @@ a human can follow and audit it.
    reported run, artifact, and custody digests in
    `packaging/qualifications/remote.json` and fold them into Q
    (still evidence-only over C).
-6. Dispatch `mode: dry-run` with the ref at Q. The job
-   re-verifies the chain and validates the proposed `vX.Y.Z`
-   tag without mutating anything; it refuses when the tag
-   already exists.
-7. Tag `vX.Y.Z` on C. Dispatch `mode: promote` with the ref at
-   Q and `promote_authorization` retyping the candidate digest.
+6. Dispatch `mode: dry-run` with the ref at Q, as its own
+   dispatch. The job re-verifies the chain and validates the
+   proposed `vX.Y.Z` tag without mutating anything; it
+   refuses when the tag already exists, so dry-run never
+   chains into promote inside one run.
+7. After the dry-run dispatch is green, tag `vX.Y.Z` on C
+   (owner step, outside the workflow). Then dispatch
+   `mode: promote` with the ref at Q and
+   `promote_authorization` retyping the candidate digest.
    The job re-verifies the whole chain, requires the tag to
    resolve to C, then creates and publishes the release with
    the qualified notes. A rerun of the same tag fails instead

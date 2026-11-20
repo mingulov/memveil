@@ -1133,6 +1133,20 @@ def test_release_import_attests_stored_subjects():
     assert "custody-out/stored" in text
 
 
+def test_release_dryrun_stands_alone():
+    doc = _release_workflow()
+    assert doc["jobs"]["dry-run"]["if"] == \
+        "inputs.mode == 'dry-run'"
+
+
+def test_release_promote_needs_no_dryrun():
+    doc = _release_workflow()
+    needs = doc["jobs"]["promote"].get("needs", [])
+    if isinstance(needs, str):
+        needs = [needs]
+    assert "dry-run" not in needs
+
+
 def test_release_digest_never_in_shell():
     doc = _release_workflow()
     for job, spec in sorted(doc["jobs"].items()):

@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Dispatch-only release pipeline: seal -> sign -> qualify ->
-# import -> dry-run -> promote. Every dispatch re-verifies the
-# sealed candidate from the source commit before running its
-# custody stage, so nothing promotes bytes that skipped export.
-# Custody dispatches run with the workflow ref at the
-# qualification commit Q (evidence-only over C); see
-# RELEASING.md for the operator order.
+# import, then dry-run or promote as separate dispatches.
+# Every dispatch re-verifies the sealed candidate from the
+# source commit before running its custody stage, so nothing
+# promotes bytes that skipped export. Custody dispatches run
+# with the workflow ref at the qualification commit Q
+# (evidence-only over C); dry-run validates the proposed tag
+# while it must not exist yet, so the owner creates the final
+# tag on C after a green dry-run and only then dispatches
+# promote. See RELEASING.md for the operator order.
 #
 # Two-checkout trust rule: every job checks out the trusted
 # workflow ref for its tools and scripts, and jobs that need
@@ -517,7 +520,7 @@ jobs:
 
   dry-run:
     needs: import
-    if: inputs.mode == 'dry-run' || inputs.mode == 'promote'
+    if: inputs.mode == 'dry-run'
     runs-on: ubuntu-26.04
     permissions:
       contents: read
@@ -584,7 +587,7 @@ jobs:
             --harness-bin sealed/memveil-release-entry
 
   promote:
-    needs: dry-run
+    needs: import
     if: inputs.mode == 'promote' && inputs.promote_authorization == inputs.candidate_sha256
     runs-on: ubuntu-26.04
     permissions:
