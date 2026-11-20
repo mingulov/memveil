@@ -594,6 +594,35 @@ def test_candidate_packager_cli_validates_before_build():
     assert "forbids" in proc.stderr
 
 
+def test_seal_rejects_smuggled_deb_payload(workshop, tmp_path):
+    m, fix = seal_paths(workshop, tmp_path)
+    path = next(fix["artifacts"].glob("*.deb"))
+    stage = Path(tmp_path) / "deb-rescue"
+    for args in (["dpkg-deb", "-x", str(path), str(stage)],
+                 ["dpkg-deb", "-e", str(path),
+                  str(stage / "DEBIAN")]):
+        proc = subprocess.run(
+            args, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True)
+        assert proc.returncode == 0, proc.stderr
+    smuggled = stage / "usr" / "lib" / "memveil" \
+        / "libevil.so.1"
+    smuggled.write_bytes(b"smuggled runtime\n")
+    repacked = Path(tmp_path) / path.name
+    proc = subprocess.run(
+        ["dpkg-deb", "-b", str(stage), str(repacked)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True)
+    assert proc.returncode == 0, proc.stderr
+    path.unlink()
+    shutil.move(str(repacked), str(path))
+    with pytest.raises(ValueError, match="unmapped"):
+        m.create_manifest(
+            fix["bundle_dir"], fix["artifacts"], fix["policy"],
+            {"root": str(fix["root"]),
+             "harness_bin": workshop.harness_bin()})
+
+
 def test_seal_rejects_tampered_source_archive(workshop, tmp_path):
     m, fix = seal_paths(workshop, tmp_path)
     path = next(fix["artifacts"].glob("*source.tar.gz"))

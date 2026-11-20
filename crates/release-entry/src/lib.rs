@@ -20,6 +20,7 @@
 mod hash;
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -459,13 +460,87 @@ fn extract_rpm(rpm: &Path, tmp: &Path) -> Result<PathBuf, String> {
     Ok(dest)
 }
 
+/// Generated installed files that are not copied bundle bytes.
+///
+/// Both package formats ship identical generated files from the
+/// same generators: man pages under `usr/share/man/man1/`
+/// (one `memveil*.1` page per CLI verb, uncompressed) plus the
+/// exact completion, copyright, changelog, and lintian paths
+/// below. Every other installed file must map from the bundle
+/// manifest; anything else refuses.
+const GENERATED_ALLOW_EXACT: &[&str] = &[
+    "usr/share/bash-completion/completions/memveil",
+    "usr/share/zsh/vendor-completions/_memveil",
+    "usr/share/doc/memveil/copyright",
+    "usr/share/doc/memveil/changelog.Debian.gz",
+    "usr/share/lintian/overrides/memveil",
+];
+
+/// True when an installed path is pinned generated packaging output.
+fn generated_allowed(rel: &str) -> bool {
+    if GENERATED_ALLOW_EXACT.contains(&rel) {
+        return true;
+    }
+    if let Some(rest) = rel.strip_prefix("usr/share/man/man1/") {
+        return !rest.is_empty() && !rest.contains('/') && rest.ends_with(".1");
+    }
+    false
+}
+
+/// Actual regular files under an extraction root, as posix relpaths.
+fn actual_payload_files(root: &Path, label: &str) -> Result<BTreeSet<String>, String> {
+    fn walk(
+        root: &Path,
+        dir: &Path,
+        out: &mut BTreeSet<String>,
+        label: &str,
+    ) -> Result<(), String> {
+        let entries = fs::read_dir(dir)
+            .map_err(|err| format!("{label}: extracted tree list failed: {err}"))?;
+        for entry in entries {
+            let entry =
+                entry.map_err(|err| format!("{label}: extracted tree list failed: {err}"))?;
+            let kind = entry
+                .file_type()
+                .map_err(|err| format!("{label}: extracted tree list failed: {err}"))?;
+            if kind.is_dir() {
+                walk(root, &entry.path(), out, label)?;
+            } else if kind.is_file() {
+                let full = entry.path();
+                let rel = full
+                    .strip_prefix(root)
+                    .map_err(|_| format!("{label}: extracted path escapes its root"))?;
+                let mut posix = String::new();
+                for (idx, part) in rel.components().enumerate() {
+                    let text = part
+                        .as_os_str()
+                        .to_str()
+                        .ok_or_else(|| format!("{label}: extracted path is not UTF-8"))?;
+                    if idx > 0 {
+                        posix.push('/');
+                    }
+                    posix.push_str(text);
+                }
+                out.insert(posix);
+            } else {
+                return Err(format!("{label}: links and special files are forbidden"));
+            }
+        }
+        Ok(())
+    }
+    let mut out = BTreeSet::new();
+    walk(root, root, &mut out, label)?;
+    Ok(out)
+}
+
 /// Hash the full copied-file closure of a package set.
 ///
 /// Every `files{}` entry of the bundle manifest is hashed in all
 /// three archives: `bundle/<rel>` plus `deb/<installed>` and
-/// `rpm/<installed>` at the mapped FHS destinations. Generated
-/// package files (control data, man pages, completions) are
-/// outside the copied set and are not collected.
+/// `rpm/<installed>` at the mapped FHS destinations. The actual
+/// installed deb/rpm file sets must equal the mapped expected
+/// sets modulo the pinned generated allowlist above: a smuggled
+/// extra file refuses even when every mapped file matches.
 pub fn collect_full(
     bundle: &Path,
     deb: &Path,
@@ -506,16 +581,31 @@ pub fn collect_full(
     let rpm_root = extract_rpm(rpm, &scratch.path)?;
     let bundle_root = extract_bundle(bundle, &scratch.path)?;
     let mut entries = BTreeMap::new();
+    let mut installed_expected = BTreeSet::new();
     for rel in facts.files.keys() {
         // The mapping rejects absolute and escaping names, so
         // the joins below cannot leave the extraction roots.
         let installed = installed_file_path(rel)?;
+        installed_expected.insert(installed.clone());
         let data = read_payload(&bundle_root, rel, "payload-closure")?;
         entries.insert(format!("bundle/{rel}"), sha256_bytes(&data));
         let data = read_payload(&deb_root, &installed, "payload-closure")?;
         entries.insert(format!("deb/{installed}"), sha256_bytes(&data));
         let data = read_payload(&rpm_root, &installed, "payload-closure")?;
         entries.insert(format!("rpm/{installed}"), sha256_bytes(&data));
+    }
+    for (root, label) in [(&deb_root, "deb"), (&rpm_root, "rpm")] {
+        let actual = actual_payload_files(root, "payload-closure")?;
+        let extra: Vec<&str> = actual
+            .iter()
+            .map(String::as_str)
+            .filter(|path| !installed_expected.contains(*path) && !generated_allowed(path))
+            .collect();
+        if let Some(first) = extra.first() {
+            return Err(format!(
+                "payload-closure: {label} carries unmapped payload file: {first}"
+            ));
+        }
     }
     Ok(entries)
 }
