@@ -63,17 +63,20 @@ Mode to jobs:
    `packaging/qualifications/remote.json` and fold them into Q
    (still evidence-only over C).
 6. Dispatch `mode: dry-run` with the ref at Q, as its own
-   dispatch. The job consumes the recorded import only and
-   validates the proposed `vX.Y.Z` tag without mutating
+   dispatch, passing the recorded `import_run_id` and
+   `import_artifact_id` from `remote.json`. The job consumes
+   that recorded import only (the CLI cross-checks the
+   dispatched IDs against Q and verifies the stored bytes)
+   and validates the proposed `vX.Y.Z` tag without mutating
    anything; it refuses when the tag already exists, so
    dry-run never triggers a fresh import and never chains
    into promote inside one run.
 7. After the dry-run dispatch is green, tag `vX.Y.Z` on C
    (owner step, outside the workflow). Then dispatch
-   `mode: promote` with the ref at Q and
-   `promote_authorization` retyping the candidate digest.
-   The job consumes the recorded import only, requires the
-   tag to resolve to C, then creates and publishes the
-   release with the qualified notes. A rerun of the same tag
-   fails instead of replacing uploaded files; rollback is
-   a new tag.
+   `mode: promote` with the ref at Q, the same recorded
+   import IDs, and `promote_authorization` retyping the
+   candidate digest. The job consumes the recorded import
+   only, requires the tag to resolve to C, then creates and
+   publishes the release with the qualified notes. A rerun
+   of the same tag fails instead of replacing uploaded
+   files; rollback is a new tag.

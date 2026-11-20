@@ -819,6 +819,25 @@ def test_dryrun_requires_no_tag_yet(
               Path(tmp_path) / "out", custody_base.harness_bin())
 
 
+@pytest.mark.parametrize("field,forged", [("run_id", "9"),
+                                          ("artifact_id", "6")])
+def test_consumer_refuses_import_ids_differing_from_Q(
+        custody_base, tmp_path, monkeypatch, field, forged):
+    m = api()
+    fix = fresh(custody_base, tmp_path)
+    _q1, q2, remote, archive = qualify_two(fix)
+    armed(monkeypatch, fix["root"], "dry-run", q2)
+    stub = FakeRemote(fix, remote, archive)
+    monkeypatch.setattr(m, "GitHub", lambda: stub)
+    fake_gh(monkeypatch, tmp_path)
+    request = stored_request(fix, q2)
+    assert request[field] != forged
+    request[field] = forged
+    with pytest.raises(ValueError, match="immutable IDs differ"):
+        m.run("dry-run", request, Path(tmp_path) / "out",
+              custody_base.harness_bin())
+
+
 def test_promote_requires_tag_resolving_to_C(
         custody_base, tmp_path, monkeypatch):
     m = api()
@@ -1210,6 +1229,36 @@ def test_release_promote_needs_no_dryrun():
     if isinstance(needs, str):
         needs = [needs]
     assert "dry-run" not in needs
+
+
+def test_release_consumers_take_recorded_import_ids():
+    doc = _release_workflow()
+    trigger = doc.get("on", doc.get(True))
+    inputs = trigger["workflow_dispatch"]["inputs"]
+    assert "import_run_id" in inputs
+    assert "import_artifact_id" in inputs
+    for job in ("dry-run", "promote"):
+        text = json.dumps(doc["jobs"][job])
+        assert "IMPORT_RUN_ID" in text, job
+        assert "IMPORT_ARTIFACT_ID" in text, job
+        assert "packaging/qualifications/remote.json" not in text, \
+            job
+
+
+def test_release_consumers_never_import_or_attest():
+    doc = _release_workflow()
+    for job in ("dry-run", "promote"):
+        spec = doc["jobs"][job]
+        for step in spec.get("steps", []):
+            uses = str(step.get("uses", ""))
+            assert "actions/upload-artifact" not in uses, job
+            assert "actions/attest" not in uses, job
+            run = str(step.get("run", ""))
+            assert "gh release upload" not in run, job
+            assert "candidate-custody import" not in run, job
+        text = json.dumps(spec)
+        assert "attestations: write" not in text, job
+        assert "actions: write" not in text, job
 
 
 def test_release_digest_never_in_shell():

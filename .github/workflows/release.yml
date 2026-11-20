@@ -57,6 +57,16 @@ on:
         required: false
         type: string
         default: ''
+      import_run_id:
+        description: 'Recorded import workflow run ID (consumers only)'
+        required: false
+        type: string
+        default: ''
+      import_artifact_id:
+        description: 'Recorded import artifact ID (consumers only)'
+        required: false
+        type: string
+        default: ''
 
 permissions: {}
 
@@ -554,6 +564,8 @@ jobs:
         env:
           CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
+          IMPORT_RUN_ID: ${{ inputs.import_run_id }}
+          IMPORT_ARTIFACT_ID: ${{ inputs.import_artifact_id }}
         run: |
           set -eu
           python3 - <<'EOF'
@@ -566,6 +578,12 @@ jobs:
               sys.exit("candidate_sha256 is not 64 lowercase hex")
           if not re.fullmatch(r"[0-9a-f]{40}", commit):
               sys.exit("source_commit is not 40 lowercase hex")
+          run_id = os.environ.get("IMPORT_RUN_ID") or ""
+          artifact_id = os.environ.get("IMPORT_ARTIFACT_ID") or ""
+          if not re.fullmatch(r"[1-9][0-9]*", run_id):
+              sys.exit("import_run_id is not a positive decimal ID")
+          if not re.fullmatch(r"[1-9][0-9]*", artifact_id):
+              sys.exit("import_artifact_id is not a positive decimal ID")
           EOF
           git cat-file -e "$SOURCE_COMMIT^{commit}"
       - name: Install custody tools
@@ -594,23 +612,23 @@ jobs:
           GITHUB_EVENT_NAME: workflow_dispatch
           SOURCE_COMMIT: ${{ inputs.source_commit }}
           CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+          IMPORT_RUN_ID: ${{ inputs.import_run_id }}
+          IMPORT_ARTIFACT_ID: ${{ inputs.import_artifact_id }}
         run: |
           set -eu
           VERSION=$(git show "$SOURCE_COMMIT:Cargo.toml" \
             | grep -m1 '^version = ' | cut -d'"' -f2)
           test -n "$VERSION"
           export FINAL_TAG="v$VERSION"
-          python3 - packaging/qualifications/remote.json \
-            > request.json <<'EOF'
-          import json, os, sys
-          remote = json.load(open(sys.argv[1]))
+          python3 - > request.json <<'EOF'
+          import json, os
           print(json.dumps({
               "repository": os.environ["GITHUB_REPOSITORY"],
               "source_commit": os.environ["SOURCE_COMMIT"],
               "qualification_commit": os.environ["GITHUB_SHA"],
               "candidate_sha256": os.environ["CANDIDATE_SHA256"],
-              "run_id": remote["run_id"],
-              "artifact_id": remote["artifact_id"],
+              "run_id": os.environ["IMPORT_RUN_ID"],
+              "artifact_id": os.environ["IMPORT_ARTIFACT_ID"],
               "tag": os.environ["FINAL_TAG"]},
               indent=2, sort_keys=True))
           EOF
@@ -634,6 +652,8 @@ jobs:
         env:
           CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
+          IMPORT_RUN_ID: ${{ inputs.import_run_id }}
+          IMPORT_ARTIFACT_ID: ${{ inputs.import_artifact_id }}
         run: |
           set -eu
           python3 - <<'EOF'
@@ -646,6 +666,12 @@ jobs:
               sys.exit("candidate_sha256 is not 64 lowercase hex")
           if not re.fullmatch(r"[0-9a-f]{40}", commit):
               sys.exit("source_commit is not 40 lowercase hex")
+          run_id = os.environ.get("IMPORT_RUN_ID") or ""
+          artifact_id = os.environ.get("IMPORT_ARTIFACT_ID") or ""
+          if not re.fullmatch(r"[1-9][0-9]*", run_id):
+              sys.exit("import_run_id is not a positive decimal ID")
+          if not re.fullmatch(r"[1-9][0-9]*", artifact_id):
+              sys.exit("import_artifact_id is not a positive decimal ID")
           EOF
           git cat-file -e "$SOURCE_COMMIT^{commit}"
       - name: Install custody tools
@@ -674,23 +700,23 @@ jobs:
           GITHUB_EVENT_NAME: workflow_dispatch
           SOURCE_COMMIT: ${{ inputs.source_commit }}
           CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+          IMPORT_RUN_ID: ${{ inputs.import_run_id }}
+          IMPORT_ARTIFACT_ID: ${{ inputs.import_artifact_id }}
         run: |
           set -eu
           VERSION=$(git show "$SOURCE_COMMIT:Cargo.toml" \
             | grep -m1 '^version = ' | cut -d'"' -f2)
           test -n "$VERSION"
           export FINAL_TAG="v$VERSION"
-          python3 - packaging/qualifications/remote.json \
-            > request.json <<'EOF'
-          import json, os, sys
-          remote = json.load(open(sys.argv[1]))
+          python3 - > request.json <<'EOF'
+          import json, os
           print(json.dumps({
               "repository": os.environ["GITHUB_REPOSITORY"],
               "source_commit": os.environ["SOURCE_COMMIT"],
               "qualification_commit": os.environ["GITHUB_SHA"],
               "candidate_sha256": os.environ["CANDIDATE_SHA256"],
-              "run_id": remote["run_id"],
-              "artifact_id": remote["artifact_id"],
+              "run_id": os.environ["IMPORT_RUN_ID"],
+              "artifact_id": os.environ["IMPORT_ARTIFACT_ID"],
               "tag": os.environ["FINAL_TAG"]},
               indent=2, sort_keys=True))
           EOF
