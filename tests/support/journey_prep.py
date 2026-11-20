@@ -174,7 +174,12 @@ def _publish_record_atomically(raw_abs, record_abs, payload):
     the records subdir of the tool-owned prep directory:
     a record path outside it refuses instead of
     scattering scratch beside user paths. A failed
-    publish removes the temp file and refuses.
+    publish removes the temp file and refuses. The temp
+    name shape (<record>.json.<mkstemp characters>.tmp)
+    is load-bearing: the prep-directory validator
+    accepts exactly this pattern as publication
+    scratch, so the prefix and suffix here must not
+    change without updating it.
     """
     records = Path(journey_records_dir())
     parent = record_abs.parent

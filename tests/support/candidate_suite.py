@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import sys
@@ -196,6 +197,17 @@ JOURNEY_PREP_DIRNAME = '.candidate-prep'
 JOURNEY_RECORDS_DIRNAME = 'records'
 JOURNEY_STAGES_DIRNAME = 'stages'
 
+# Publication scratch naming rule, pinned to the prep
+# publisher: the publisher writes through tempfile.mkstemp
+# with prefix <record>.json. and suffix .tmp, so every
+# genuine scratch file is exactly
+# <record>.json.<eight mkstemp characters>.tmp (lowercase,
+# digits, underscore). The validator requires this full
+# shape: any other .tmp name refuses instead of passing
+# as scratch.
+PUBLISH_SCRATCH_RE = re.compile(
+    r'.+\.json\.[a-z0-9_]{8}\.tmp')
+
 
 def journey_prep_dir():
     """Absolute path of the tool-owned prep directory.
@@ -367,18 +379,23 @@ def refuse_unowned_prep_contents():
     publisher emits can never be one the checks reject.
     The prep directory holds only the records and
     stages subdirs. Under records, every JSON file must
-    parse as a valid prep record through the shape
-    predicate shared with the launcher; anything not a
+    parse as a valid prep record through the
+    record-shape and suite-entry predicates shared with
+    the launcher; anything not a
     record or publication scratch refuses (notably
     untracked source inside an in-checkout override,
     which would vanish from checkout identity through
-    the wholesale exclusion). Publication scratch
-    (<record>.<random>.tmp) is judged by its name
-    pattern alone: it is partial JSON by nature (a temp
-    file may hold a torn write), so content checks
-    cannot apply, and safety comes from nonconforming
-    siblings refusing plus the launcher re-validating
-    its own record before exec. Under stages, every
+    the wholesale exclusion). Publication scratch is
+    judged by its exact producer name alone
+    (<record>.json.<eight mkstemp characters>.tmp, the
+    shape the prep publisher emits): it is partial JSON
+    by nature (a temp file may hold a torn write), so
+    content checks cannot apply, and safety comes from
+    nonconforming siblings refusing plus the launcher
+    re-validating its own record before exec. A
+    symlinked record refuses outright: links are
+    detected without following and never skipped. Under
+    stages, every
     stage directory holds only staged executables, and
     a staged file whose path some valid record binds
     must hash to one of the digests claimed for that
@@ -392,8 +409,9 @@ def refuse_unowned_prep_contents():
     here. The prep directory's own components
     are verified link-free before the scan. A missing
     directory is fine: the prep tool creates it. Entries
-    are judged without following links, and link safety
-    stays with the checks consuming each path.
+    are judged without following links: a symlinked
+    record refuses here, and link safety elsewhere stays
+    with the checks consuming each path.
     """
     from support.journey_prep import TARGETS
     top = Path(journey_prep_dir())
@@ -476,18 +494,18 @@ def refuse_unowned_prep_contents():
                 'journey prep directory holds a prep '
                 'record with an invalid shape: %s (%s)'
                 % (path, reason))
+        for name, entry in record['suites'].items():
+            reason = _prep_suite_entry_error(entry)
+            if reason is not None:
+                raise ValueError(
+                    'journey prep directory holds a prep '
+                    'record with an invalid shape: %s '
+                    '(suite %s: %s)' % (path, name, reason))
         for entry in record['suites'].values():
-            if not isinstance(entry, dict):
-                continue
-            staged = entry.get('staged')
-            digest = entry.get('sha256')
-            if not isinstance(staged, str) \
-                    or not isinstance(digest, str):
-                continue
-            path = os.path.abspath(staged)
+            path = os.path.abspath(entry['staged'])
             if path not in referenced:
                 referenced[path] = set()
-            referenced[path].add(digest)
+            referenced[path].add(entry['sha256'])
 
     def staged_digest(path):
         try:
@@ -507,11 +525,23 @@ def refuse_unowned_prep_contents():
             if entry_kind == 'dir':
                 check_records(child.path)
             elif entry_kind == 'link' \
-                    and (child.name.endswith('.json')
-                         or child.name.endswith('.tmp')):
+                    and child.name.endswith('.json'):
+                raise ValueError(
+                    'journey prep directory holds a '
+                    'symlinked prep record; refusing: %s'
+                    % child.path)
+            elif entry_kind == 'link' \
+                    and child.name.endswith('.tmp'):
+                # Publication scratch is never read back,
+                # so a linked scratch file is inert; only
+                # the exact producer name on real files is
+                # judged below.
                 continue
             elif entry_kind == 'file' \
                     and child.name.endswith('.tmp'):
+                if PUBLISH_SCRATCH_RE.fullmatch(
+                        child.name) is None:
+                    refuse(child.path)
                 continue
             elif entry_kind == 'file' \
                     and child.name.endswith('.json'):
@@ -574,10 +604,11 @@ def _prep_record_shape_error(record):
     file present, so no forked copy can drift. Mirrors
     the prep record writer exactly: the schema tag, the
     40-hex HEAD commit and 64-hex tree digest bindings,
-    and the per-suite table. Suite entry shapes stay
-    with the launcher: a record whose entries are
-    misshapen still parses here and refuses at dispatch
-    with the suite error, never silently.
+    and the per-suite table. Suite entries carry their
+    own shape predicate below, applied by the scan to
+    every entry of every record and by the launcher to
+    its selected entry, so a misshapen entry refuses on
+    both paths, never silently.
     """
     if not isinstance(record, dict) \
             or record.get('schema') != JOURNEY_PREP_SCHEMA \
@@ -595,6 +626,29 @@ def _prep_record_shape_error(record):
         return 'tree binding differs'
     if set(record) != {'schema', 'commit', 'tree', 'suites'}:
         return 'record keys differ'
+    return None
+
+
+def _prep_suite_entry_error(entry):
+    """Prep-record suite-entry shape reason; None when valid.
+
+    The one suite-entry shape predicate shared by the
+    prep-directory scan and the launcher: the scan applies
+    it to every entry of every record file present, and
+    the launcher applies it to its selected entry before
+    exec, so a misshapen entry refuses on both paths.
+    Mirrors the prep record writer exactly: the provenance
+    path, the staged path, the staged-bytes digest, and
+    the build target, each a string.
+    """
+    if not isinstance(entry, dict) \
+            or set(entry) \
+            != {'path', 'staged', 'sha256', 'target'} \
+            or not isinstance(entry['path'], str) \
+            or not isinstance(entry['staged'], str) \
+            or not isinstance(entry['sha256'], str) \
+            or not isinstance(entry['target'], str):
+        return 'suite entry differs'
     return None
 
 
@@ -711,13 +765,7 @@ def _run_journey(suite, argv, live):
     record = _journey_record(live)
     refuse_unowned_prep_contents()
     entry = record['suites'].get(suite)
-    if not isinstance(entry, dict) \
-            or set(entry) \
-            != {'path', 'staged', 'sha256', 'target'} \
-            or not isinstance(entry['path'], str) \
-            or not isinstance(entry['staged'], str) \
-            or not isinstance(entry['sha256'], str) \
-            or not isinstance(entry['target'], str):
+    if _prep_suite_entry_error(entry) is not None:
         raise ValueError(
             'journey prep record lacks suite: ' + suite)
     if TARGETS.get(suite) != entry['target']:

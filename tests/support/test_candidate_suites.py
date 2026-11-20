@@ -628,7 +628,7 @@ def test_journey_identity_excludes_prep_dir_wholesale():
              'sha256': hashlib.sha256(
                  staged.read_bytes()).hexdigest(),
              'target': 'package_deb'}}}))
-    scratch = top / 'records' / (tag + '.json.stale.tmp')
+    scratch = top / 'records' / (tag + '.json.stale000.tmp')
     scratch.write_bytes(b'{"partial": ')
     source = ROOT / (tag + '-source.py')
     source.write_text('print("source")\n')
@@ -1103,7 +1103,7 @@ def test_journey_prep_accepts_tool_owned_override(
         assert (fresh / 'records' / 'prior.json').is_file()
         for suite, entry in prior['suites'].items():
             assert Path(entry['staged']).is_file(), suite
-        (fresh / 'records' / 'prior.json.stale.tmp') \
+        (fresh / 'records' / 'prior.json.stale000.tmp') \
             .write_bytes(b'{"schema": "partial-')
         record = prep.prepare(
             str(fresh / 'records' / 'prep.json'))
@@ -1657,13 +1657,19 @@ def test_journey_record_non_string_path_refuses(sealed,
     combined = result.stdout + result.stderr
     assert result.returncode == 2, combined
     assert 'Traceback' not in combined, combined
-    assert 'lacks suite' in combined, combined
+    # The misshapen entry refuses at the shared scan
+    # before dispatch: the scan validates suite entries
+    # through the same predicate as the launcher.
+    assert 'invalid shape' in combined, combined
     # Control: the same complete record with a valid path
     # type passes the entry check and fails later, proving
-    # the refusal above fires on the type check. The
-    # unstaged path carries the honest staged name, so the
-    # control exercises the missing-file check rather than
-    # the staged-filename binding.
+    # the refusal above fires on the type check. The bad
+    # record is removed first, since the scan covers every
+    # record in the directory. The unstaged path carries
+    # the honest staged name, so the control exercises the
+    # missing-file check rather than the staged-filename
+    # binding.
+    record_path.unlink()
     control_path = _prep_record_path('prep-control')
     commit, tree = checkout_identity(
         exclude=journey_identity_excludes())
@@ -1943,7 +1949,7 @@ def test_journey_publication_scratch_stays_invisible(
     excludes = journey_identity_excludes()
     assert excludes == [str(top)]
     scratch = record_path.parent / (
-        record_path.name + '.stale.tmp')
+        record_path.name + '.stale000.tmp')
     scratch.write_bytes(b'{"schema": "partial-')
     try:
         _, with_scratch = checkout_identity(
@@ -3055,3 +3061,145 @@ def test_journey_launcher_refuses_cross_suite_staged_exe(
         combined = result.stdout + result.stderr
         assert result.returncode == 0, combined
         assert marker in result.stdout, combined
+
+
+def test_journey_scan_judges_scratch_by_producer_name(
+        tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import PUBLISH_SCRATCH_RE, \
+        journey_records_dir, refuse_unowned_prep_contents
+    import support.journey_prep as prep
+    fake = tmp_path / 'fake-exe'
+    fake.write_bytes(b'#!/bin/sh\necho fake\n')
+    fake.chmod(0o755)
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    records = Path(journey_records_dir())
+    records.mkdir(parents=True, exist_ok=True)
+    # Genuine publisher output matches the pinned
+    # pattern: the rule under test accepts exactly what
+    # the publisher emits.
+    temps = []
+    real_replace = os.replace
+
+    def recording(src, dst):
+        temps.append(src)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, 'replace', recording)
+    prep.prepare(str(records / 'prep.json'))
+    assert temps, 'record publish bypassed os.replace'
+    for temp in temps:
+        assert PUBLISH_SCRATCH_RE.fullmatch(
+            Path(temp).name) is not None, temp
+    # A lingering scratch file in the exact producer
+    # shape passes the scan...
+    honest = records / 'prep.json.deadbeef.tmp'
+    honest.write_bytes(b'{"schema": "partial-')
+    refuse_unowned_prep_contents()
+    # ...while any other .tmp name refuses.
+    honest.unlink()
+    for impostor in ('notes.tmp', 'prep.json.tmp',
+                     'prep.json.stale.tmp',
+                     'prep.json.DEADBEEF.tmp',
+                     'prep.txt.deadbeef.tmp',
+                     '.json.deadbeef.tmp'):
+        plant = records / impostor
+        plant.write_bytes(b'{"schema": "partial-')
+        with pytest.raises(ValueError, match='tool-owned'):
+            refuse_unowned_prep_contents()
+        plant.unlink()
+    refuse_unowned_prep_contents()
+
+
+def test_journey_scan_refuses_symlinked_record(
+        sealed, tmp_path):
+    harness = ('#!/bin/sh\necho journey-marker\n'
+               'echo "running 1 tests"\n'
+               'echo "test journey_probe ... ok"\n'
+               'echo "test result: ok. 1 passed; 0 failed; '
+               '0 ignored; 0 measured; 0 filtered out"\n')
+    _, _, record_path = _journey_stub_record(
+        tmp_path, harness)
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import \
+        refuse_unowned_prep_contents
+    link = record_path.parent / (
+        'alias-%s.json' % uuid.uuid4().hex[:8])
+    link.symlink_to(record_path)
+    with pytest.raises(ValueError, match='symlink'):
+        refuse_unowned_prep_contents()
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MV_JOURNEY_PREP'] = str(record_path)
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 2, combined
+    assert 'symlink' in combined, combined
+    assert 'journey-marker' not in result.stdout, combined
+    # Honest control: without the link the same record
+    # launches.
+    link.unlink()
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert 'journey-marker' in result.stdout, combined
+
+
+def test_journey_scan_validates_suite_entries(tmp_path):
+    import json
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import \
+        _prep_suite_entry_error, checkout_identity, \
+        journey_identity_excludes, \
+        refuse_unowned_prep_contents
+    # The shared predicate pins the writer's entry shape:
+    # one definition, used by both the scan and dispatch.
+    good = {'path': 'p', 'staged': 's', 'sha256': 'd',
+            'target': 't'}
+    assert _prep_suite_entry_error(good) is None
+    assert _prep_suite_entry_error(None) is not None
+    assert _prep_suite_entry_error(['p']) is not None
+    assert _prep_suite_entry_error(
+        {'path': 'p', 'staged': 's',
+         'sha256': 'd'}) is not None
+    assert _prep_suite_entry_error(
+        dict(good, sha256=12345)) is not None
+    assert _prep_suite_entry_error(
+        dict(good, extra=1)) is not None
+    dispatch_text = (
+        ROOT / 'tests/support/candidate_suite.py').read_text()
+    prep_text = (
+        ROOT / 'tests/support/journey_prep.py').read_text()
+    assert prep_text.count(
+        'def _prep_suite_entry_error') \
+        + dispatch_text.count(
+            'def _prep_suite_entry_error') == 1
+    # The scan applies it to every entry of every record.
+    commit, tree = checkout_identity(
+        exclude=journey_identity_excludes())
+    record_path = _prep_record_path('stub-entries')
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def write_record(entry):
+        record_path.write_text(json.dumps(
+            {'schema': 'memveil-journey-prep/1',
+             'commit': commit, 'tree': tree,
+             'suites': {'deb': entry}}))
+
+    write_record({'path': str(tmp_path / 'orig'),
+                  'staged': str(tmp_path / 'package_deb'),
+                  'sha256': '0' * 64,
+                  'target': 'package_deb'})
+    refuse_unowned_prep_contents()
+    for bad in ('not-an-entry',
+                {'path': str(tmp_path / 'orig'),
+                 'staged': str(tmp_path / 'package_deb'),
+                 'sha256': '0' * 64},
+                {'path': str(tmp_path / 'orig'),
+                 'staged': str(tmp_path / 'package_deb'),
+                 'sha256': 12345,
+                 'target': 'package_deb'}):
+        write_record(bad)
+        with pytest.raises(ValueError, match='invalid shape'):
+            refuse_unowned_prep_contents()
