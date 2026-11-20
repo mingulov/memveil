@@ -204,14 +204,16 @@ def journey_prep_dir():
     the prep tool and the launcher derive it through
     this one function, never by recomputing the name.
     MV_JOURNEY_PREP_DIR overrides the checkout default
-    with an absolute path (resolved before use); empty
-    or unset keeps the default. A relative override, or
-    one covering the checkout itself, refuses: tool
-    outputs must never scatter beside user paths or
-    swallow versioned source from identity. The cover
-    check compares resolved paths component-wise, so
-    every ancestor of the checkout refuses, including
-    the filesystem root.
+    with an absolute path (checked link-free on its
+    unresolved spelling, then resolved before use);
+    empty or unset keeps the default. Refuses a relative
+    override, any symlink along the override, or an
+    override covering the checkout itself: tool outputs
+    must never scatter beside user paths or swallow
+    versioned source from identity. The cover check
+    compares resolved paths component-wise, so every
+    ancestor of the checkout refuses, including the
+    filesystem root.
     """
     override = os.environ.get('MV_JOURNEY_PREP_DIR')
     if not override:
@@ -220,6 +222,7 @@ def journey_prep_dir():
         raise ValueError(
             'journey prep directory must be absolute: %s'
             % override)
+    refuse_symlinked_path(Path(override))
     candidate = Path(override).resolve()
     root = ROOT.resolve()
     if candidate == root \
@@ -261,14 +264,20 @@ def journey_staging_root():
 def refuse_symlinked_path(path):
     """Refuse when any existing component of path is a symlink.
 
-    Walks the unresolved absolute path from the leaf to
-    the root with lstat, never following: a planted link
-    anywhere along the path would redirect tool outputs
-    outside the operator's directory. Missing components
+    Walks the raw path from the leaf to the root with
+    lstat, never following: a planted link anywhere
+    along the path would redirect tool outputs outside
+    the operator's directory. The path is walked exactly
+    as spelled, since callers must never normalize it
+    first: collapsing dot-dot textually can hide a
+    traversed link. Relative paths resolve against the
+    current directory for the walk. Missing components
     are skipped: the setup creates them as real
     directories and re-checks afterwards. Shared with
     the prep tool, which imports it from here.
     """
+    if not path.is_absolute():
+        path = Path.cwd() / path
     for candidate in (path, *path.parents):
         try:
             mode = os.lstat(candidate).st_mode
@@ -309,7 +318,7 @@ def resolve_journey_record(name):
             'journey prep record must be a JSON record '
             'under %s: %s'
             % (JOURNEY_RECORDS_DIRNAME, name))
-    raw = Path(os.path.abspath(name))
+    raw = Path(name)
     refuse_symlinked_path(raw)
     resolved = raw.resolve()
     if Path(journey_records_dir()) not in resolved.parents:
@@ -377,13 +386,15 @@ def refuse_unowned_prep_contents():
     binds (a stage mid-publish, a retired stage awaiting
     operator cleanup) are inert, since launch reads only
     referenced paths and re-hashes them, so they refuse
-    nowhere here. A missing directory is fine:
-    the prep tool creates it. Entries are judged without
-    following links, and link safety stays with the
-    checks consuming each path.
+    nowhere here. The prep directory's own components
+    are verified link-free before the scan. A missing
+    directory is fine: the prep tool creates it. Entries
+    are judged without following links, and link safety
+    stays with the checks consuming each path.
     """
     from support.journey_prep import TARGETS
     top = Path(journey_prep_dir())
+    refuse_symlinked_path(top)
     try:
         mode = os.lstat(top).st_mode
     except FileNotFoundError:
@@ -644,10 +655,12 @@ def _run_journey(suite, argv, live):
     checkout, a suite mixup, a missing or aliased staged
     executable, an executable outside the stages
     directory, or digest drift refuses. The staged path
-    must be a regular file (links refuse outright, never
-    followed) resolving strictly inside the configured
-    stages tree: a digest match alone never authorizes
-    an outside path. The tool-owned
+    must be a regular file with every path component
+    link-free (links refuse outright, never followed),
+    normalizing strictly inside the configured stages
+    tree (itself link-free at every component): a digest
+    match alone never authorizes an outside path. The
+    tool-owned
     prep directory holding every record, stage, and
     publication scratch file is excluded wholesale from
     the digest through the exclusion list shared with
@@ -708,6 +721,9 @@ def _run_journey(suite, argv, live):
         raise ValueError(
             'recorded journey staged executable is not a '
             'plain file: ' + entry['staged'])
+    refuse_symlinked_path(staged)
+    stages_root = Path(journey_staging_root())
+    refuse_symlinked_path(stages_root)
     if not os.access(staged, os.X_OK):
         raise ValueError(
             'recorded journey staged executable is not '
@@ -718,10 +734,8 @@ def _run_journey(suite, argv, live):
             'recorded journey staged executable changed; '
             're-run tests/support/journey_prep.py: '
             + suite)
-    stages_root = Path(
-        os.path.realpath(journey_staging_root()))
     if stages_root not in Path(
-            os.path.realpath(entry['staged'])).parents:
+            os.path.abspath(entry['staged'])).parents:
         raise ValueError(
             'recorded journey staged executable is outside '
             'the stages directory; re-run '

@@ -1117,6 +1117,68 @@ def test_journey_prep_accepts_tool_owned_override(
         shutil.rmtree(fresh, ignore_errors=True)
 
 
+def test_journey_prep_dir_refuses_symlinked_override_ancestor(
+        tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import journey_prep_dir
+    import support.journey_prep as prep
+    fake = tmp_path / 'fake-exe'
+    fake.write_bytes(b'#!/bin/sh\necho fake\n')
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    # An override reached through a symlinked ancestor
+    # refuses on the unresolved spelling instead of
+    # resolving onto the honest-looking directory.
+    real = tmp_path / 'real-ancestor'
+    real.mkdir()
+    link = tmp_path / 'link-ancestor'
+    link.symlink_to(real, target_is_directory=True)
+    override = link / 'prep-ancestor'
+    monkeypatch.setenv('MV_JOURNEY_PREP_DIR', str(override))
+    with pytest.raises(ValueError, match='symlink'):
+        journey_prep_dir()
+    with pytest.raises(ValueError, match='symlink'):
+        prep.prepare(
+            str(override / 'records' / 'prep.json'))
+    assert sorted(entry.name for entry in real.iterdir()) \
+        == []
+
+
+def test_journey_prep_refuses_dotdot_hidden_symlink(
+        sealed, tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import journey_prep_dir
+    import support.journey_prep as prep
+    fake = tmp_path / 'fake-exe'
+    fake.write_bytes(b'#!/bin/sh\necho fake\n')
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    top = Path(journey_prep_dir())
+    real = tmp_path / 'real-dotdot'
+    real.mkdir()
+    link = tmp_path / 'link-dotdot'
+    link.symlink_to(real, target_is_directory=True)
+    # The spelling collapses into the records subdir,
+    # hiding the traversed link from a normalizing walk;
+    # the raw-component walk still refuses it.
+    spelled = link / 'x' / '..' / '..' / top.name \
+        / 'records' / 'prep.json'
+    collapsed = top / 'records' / 'prep.json'
+    assert os.path.abspath(spelled) == str(collapsed)
+    with pytest.raises(ValueError, match='symlink'):
+        prep.prepare(str(spelled))
+    assert not os.path.lexists(collapsed)
+    assert sorted(entry.name for entry in real.iterdir()) \
+        == []
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MV_JOURNEY_PREP'] = str(spelled)
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 2, combined
+    assert 'symlink' in combined, combined
+
+
 def test_journey_prep_accepts_fresh_override(
         tmp_path, monkeypatch):
     sys.path.insert(0, str(ROOT / 'tests'))
@@ -2116,6 +2178,55 @@ def test_journey_launcher_refuses_exe_outside_stages(
     assert result.returncode == 2, combined
     assert 'outside the stages' in combined, combined
     assert 'journey-marker' not in result.stdout, combined
+
+
+def test_journey_launcher_refuses_symlinked_stages_root(
+        sealed, tmp_path):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import journey_staging_root
+    harness = ('#!/bin/sh\necho journey-marker\n'
+               'echo "running 1 tests"\n'
+               'echo "test journey_probe ... ok"\n'
+               'echo "test result: ok. 1 passed; 0 failed; '
+               '0 ignored; 0 measured; 0 filtered out"\n')
+    _, staged, record_path = _journey_stub_record(
+        tmp_path, harness)
+    # The stages root itself is a link to bytes matching
+    # the record: containment must refuse the link, never
+    # follow it onto the honest-looking bytes.
+    root = Path(journey_staging_root())
+    real = tmp_path / 'stages-real'
+    real.mkdir()
+    shutil.copytree(staged.parent,
+                    real / staged.parent.name)
+    aside = tmp_path / 'stages-root-aside'
+    shutil.move(str(root), str(aside))
+    try:
+        root.symlink_to(real, target_is_directory=True)
+        environment = candidate_clean_env()
+        environment.update(sealed)
+        environment['MV_JOURNEY_PREP'] = str(record_path)
+        result = _launch_journey('deb', environment)
+        combined = result.stdout + result.stderr
+        assert result.returncode == 2, combined
+        assert 'symlink' in combined, combined
+        assert 'Traceback' not in combined, combined
+        assert 'journey-marker' not in result.stdout, \
+            combined
+    finally:
+        if root.is_symlink():
+            root.unlink()
+        if aside.exists():
+            shutil.move(str(aside), str(root))
+    # The honest tree underneath still launches: the
+    # refusal above fires on the link, not the setup.
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MV_JOURNEY_PREP'] = str(record_path)
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert '1 passed' in combined, combined
 
 
 def test_journey_launcher_refuses_symlinked_exe(
