@@ -316,10 +316,10 @@ def resolve_journey_record(name):
     under the sibling stages subdir instead), so records,
     stages, and publication scratch share the one
     excluded location while staying disjoint. The
-    destination must end in .json with a nonempty
-    stem and no newline, matching the records the
-    checks accept, so the publish path can never emit
-    a record the next check rejects, and so the
+    destination must pass the record-name predicate
+    shared with the checks (.json ending, nonempty
+    stem, no newline), so the publish path can never
+    emit a record the next check rejects, and so the
     publisher's scratch file for the record always
     passes the scanner's scratch pattern. Refuses an
     empty name, a non-JSON name, a bare .json or
@@ -334,20 +334,15 @@ def resolve_journey_record(name):
         raise ValueError(
             'journey prep record must live under %s'
             % JOURNEY_RECORDS_DIRNAME)
-    if not name.endswith('.json'):
-        raise ValueError(
-            'journey prep record must be a JSON record '
-            'under %s: %s'
-            % (JOURNEY_RECORDS_DIRNAME, name))
     # The publisher's scratch file for the record
     # (<name>.<token>.tmp) must pass the scanner's
     # publication-scratch pattern, which needs at least
     # one character before .json and matches no newline:
     # a bare .json or a newline name could never match,
     # so such names refuse here instead of failing
-    # mid-publish.
-    leaf = Path(name).name
-    if leaf == '.json' or '\n' in leaf:
+    # mid-publish. The scan judges existing records by
+    # this same predicate before reading their claims.
+    if _prep_record_name_error(name) is not None:
         raise ValueError(
             'journey prep record must be a JSON record '
             'under %s: %s'
@@ -401,9 +396,11 @@ def refuse_unowned_prep_contents():
     publisher emits can never be one the checks reject.
     The prep directory holds only the records and
     stages subdirs. Under records, every JSON file must
-    parse as a valid prep record through the
-    record-shape and suite-entry predicates shared with
-    the launcher, and every suite claim must pass the
+    pass the record-name predicate shared with the
+    publisher before it is read, then parse as a valid
+    prep record through the record-shape and
+    suite-entry predicates shared with the launcher,
+    and every suite claim must pass the
     suite-claim predicate (known suite, suite target,
     absolute staged path with link-free ancestors
     inside the owned staging root, canonical digest)
@@ -580,6 +577,13 @@ def refuse_unowned_prep_contents():
                 continue
             elif entry_kind == 'file' \
                     and child.name.endswith('.json'):
+                reason = _prep_record_name_error(
+                    child.name)
+                if reason is not None:
+                    raise ValueError(
+                        'journey prep directory holds a '
+                        'prep record with an invalid name: '
+                        '%s (%s)' % (child.path, reason))
                 check_record_file(child.path)
             else:
                 refuse(child.path)
@@ -630,6 +634,27 @@ def refuse_unowned_prep_contents():
         check_records(str(top / JOURNEY_RECORDS_DIRNAME))
     if real_dir(top / JOURNEY_STAGES_DIRNAME):
         check_stages(str(top / JOURNEY_STAGES_DIRNAME))
+
+
+def _prep_record_name_error(name):
+    """Prep-record name grammar reason; None when valid.
+
+    The one record-name predicate shared by the
+    publish path and every check path: the resolver
+    applies it before deriving any path from the name,
+    and the prep-directory scan applies it to every
+    record file before reading its claims, so an
+    ill-named record refuses on both paths instead of
+    refusing at publish while an existing copy still
+    reads. A record name ends in .json with a nonempty
+    stem and no newline, matching the publisher's
+    scratch output the scanner accepts.
+    """
+    leaf = Path(name).name
+    if not leaf.endswith('.json') or leaf == '.json' \
+            or '\n' in leaf:
+        return 'record name differs'
+    return None
 
 
 def _prep_record_shape_error(record):

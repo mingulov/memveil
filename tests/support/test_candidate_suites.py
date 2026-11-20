@@ -3769,3 +3769,60 @@ def test_journey_scan_refuses_claim_through_staged_link(
     assert 'symlink' in str(caught.value), caught.value
     write_record({'deb': honest})
     refuse_unowned_prep_contents()
+
+
+def test_journey_scan_refuses_ill_named_record(tmp_path):
+    import json
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import \
+        _prep_record_name_error, checkout_identity, \
+        journey_identity_excludes, journey_records_dir, \
+        refuse_unowned_prep_contents, resolve_journey_record
+    # One shared predicate on both paths: the resolver
+    # and the scan judge the same grammar.
+    assert _prep_record_name_error('prep.json') is None
+    assert _prep_record_name_error('.json') is not None
+    assert _prep_record_name_error('we\nird.json') \
+        is not None
+    dispatch_text = (
+        ROOT / 'tests/support/candidate_suite.py').read_text()
+    prep_text = (
+        ROOT / 'tests/support/journey_prep.py').read_text()
+    assert prep_text.count(
+        'def _prep_record_name_error') \
+        + dispatch_text.count(
+            'def _prep_record_name_error') == 1
+    records = Path(journey_records_dir())
+    records.mkdir(parents=True, exist_ok=True)
+    commit, tree = checkout_identity(
+        exclude=journey_identity_excludes())
+    payload = json.dumps(
+        {'schema': 'memveil-journey-prep/1',
+         'commit': commit, 'tree': tree, 'suites': {}})
+    # An ill-named record refuses at the scan before its
+    # claims are read: even unreadable bytes refuse for
+    # the name, never for their content.
+    bare = records / '.json'
+    bare.write_text('{not json\n')
+    with pytest.raises(ValueError, match='invalid name'):
+        refuse_unowned_prep_contents()
+    bare.write_text(payload)
+    with pytest.raises(ValueError, match='invalid name'):
+        refuse_unowned_prep_contents()
+    bare.unlink()
+    weird = records / 'we\nird.json'
+    weird.write_text(payload)
+    with pytest.raises(ValueError, match='invalid name'):
+        refuse_unowned_prep_contents()
+    weird.unlink()
+    # Honest names pass the resolver and the scan.
+    honest = _prep_record_path('stub-honestname')
+    honest.write_text(payload)
+    resolve_journey_record(str(honest))
+    refuse_unowned_prep_contents()
+    # Publishing an ill-named record still refuses at
+    # the resolver.
+    for bad in ('.json', 'we\nird.json'):
+        with pytest.raises(ValueError,
+                            match='must be a JSON'):
+            resolve_journey_record(str(records / bad))
