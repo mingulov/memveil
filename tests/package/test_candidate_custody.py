@@ -1172,6 +1172,23 @@ def test_release_qualify_extracts_to_fresh_path():
         assert "evidence" not in targets, line
 
 
+def test_release_qualify_uses_the_returned_inner_root():
+    doc = _release_workflow()
+    steps = doc["jobs"]["qualify"]["steps"]
+    collect = next(step for step in steps
+                   if "campaign evidence" in step.get("name", ""))
+    assert "inner = candidate.safe_extract(" in collect["run"]
+    assert "EVIDENCE_DIR=$(python3" in collect["run"]
+    assert "GITHUB_ENV" in collect["run"]
+    assert '"$EVIDENCE_DIR"/' in collect["run"]
+    export = next(step for step in steps
+                  if "tested payload" in step.get("name", ""))
+    assert '"$EVIDENCE_DIR"' in export["run"]
+    assert "--evidence-dir evidence" not in export["run"]
+    assert '"evidence/' not in export["run"]
+    assert "evidence/qualification.json" not in export["run"]
+
+
 def test_release_import_attests_stored_subjects():
     m = api()
     doc = _release_workflow()

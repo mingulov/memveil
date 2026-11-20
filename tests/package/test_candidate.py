@@ -1081,6 +1081,21 @@ def test_safe_extract_rejects_symlink_prefix_attack(tmp_path,
     assert not sentinel.exists(), "extraction escaped the scratch dir"
 
 
+def test_safe_extract_returns_the_inner_root(tmp_path):
+    m = api()
+    archive = Path(tmp_path) / "single.tar.gz"
+    with tarfile.open(archive, "w:gz") as stream:
+        data = b"inner\n"
+        member = tarfile.TarInfo("evidence/kept.txt")
+        member.size = len(data)
+        stream.addfile(member, io.BytesIO(data))
+    dest = Path(tmp_path) / "dest"
+    inner = m.safe_extract(archive, dest, True, False)
+    assert inner == dest / "evidence"
+    assert (inner / "kept.txt").read_bytes() == b"inner\n"
+    assert not (dest / "kept.txt").exists()
+
+
 def test_payload_closure_defaults_to_cargo_run(workshop, tmp_path):
     m, fix = seal_paths(workshop, tmp_path)
     artifacts = fix["artifacts"]
