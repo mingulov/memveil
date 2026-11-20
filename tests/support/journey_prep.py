@@ -42,10 +42,11 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tests'))
 from support.candidate_suite import JOURNEY_SUITES, \
-    checkout_identity, journey_identity_excludes, \
-    journey_prep_dir, journey_records_dir, \
-    journey_staging_root, refuse_symlinked_path, \
-    refuse_unowned_prep_contents, resolve_journey_record
+    _prep_staged_spelling_error, checkout_identity, \
+    journey_identity_excludes, journey_prep_dir, \
+    journey_records_dir, journey_staging_root, \
+    refuse_symlinked_path, refuse_unowned_prep_contents, \
+    resolve_journey_record
 
 SCHEMA = 'memveil-journey-prep/1'
 
@@ -311,6 +312,15 @@ def prepare(record_path):
         data = executable.read_bytes()
         digest = hashlib.sha256(data).hexdigest()
         staged = staged_dir / TARGETS[suite]
+        # The emitted spelling must satisfy the same
+        # canonical-spelling predicate the scan's
+        # claim check applies: the publisher can never
+        # emit a staged path its own checks reject.
+        reason = _prep_staged_spelling_error(str(staged))
+        if reason is not None:
+            raise ValueError(
+                'fixture prep staged spelling differs: %s'
+                % reason)
         _stage_bytes(staged, data, suite)
         if hashlib.sha256(staged.read_bytes()).hexdigest() \
                 != digest:

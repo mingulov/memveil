@@ -403,6 +403,7 @@ def refuse_unowned_prep_contents():
     and every suite claim must pass the
     suite-claim predicate (known suite, suite target,
     absolute staged path with link-free ancestors
+    in the canonical spelling the publisher emits,
     inside the owned staging root, canonical digest)
     before it enters the digest map; anything not a
     record or publication scratch refuses (notably
@@ -715,6 +716,39 @@ def _prep_suite_entry_error(entry):
     return None
 
 
+def _prep_staged_spelling_error(staged):
+    """Staged-path spelling reason; None when canonical.
+
+    The one staged-path spelling predicate shared by
+    the prep publisher and the scan's suite-claim
+    check: the publisher applies it to every staged
+    path it emits, and the claim check applies it to
+    every claimed staged path before the claim's
+    digest enters the bound-path map, so a spelling
+    the publisher can never emit refuses instead of
+    normalizing onto a real staged file. The canonical
+    spelling is the absolute path with single
+    separators, no trailing separator, and no dot or
+    dot-dot components: exactly what joining the owned
+    staging root, the fresh stage directory, and the
+    build target produces. A claim like
+    stages/<missing-dir>/../<real-file> would otherwise
+    skip the missing component in the ancestor walk
+    yet normalize onto the real file, indexing its
+    digest under bytes it never legitimately bound.
+    Judges the raw spelling only, never the
+    filesystem: existence and link checks stay with
+    their own predicates.
+    """
+    if not isinstance(staged, str) or not os.path.isabs(
+            staged):
+        return 'staged path is not absolute'
+    if any(part in ('', '.', '..')
+           for part in staged.split('/')[1:]):
+        return 'staged path is not the canonical spelling'
+    return None
+
+
 def _prep_suite_claim_error(suite, entry):
     """Suite-claim validity reason; None when the claim can bind.
 
@@ -723,8 +757,10 @@ def _prep_suite_claim_error(suite, entry):
     when the suite key names a dispatched journey suite,
     the entry target equals that suite's build target,
     the staged path is absolute with link-free
-    ancestors, normalizes inside the owned staging
-    root, and the digest is a canonical 64-hex SHA-256.
+    ancestors, uses exactly the canonical absolute
+    spelling the publisher emits, normalizes inside
+    the owned staging root, and the digest is a
+    canonical 64-hex SHA-256.
     Callers check entry shape through
     _prep_suite_entry_error first; this predicate judges
     values, never types. The link walk runs on the raw
@@ -735,7 +771,11 @@ def _prep_suite_claim_error(suite, entry):
     bound. Only ancestors walk here: the leaf itself
     stays for the staged-entry check, where a
     symlinked staged entry refuses whether or not a
-    record binds it. The launcher enforces the same
+    record binds it. The canonical-spelling check
+    follows the link walk, so a link-traversing claim
+    still reports the link: either way the claim
+    refuses before its digest is indexed. The launcher
+    enforces the same
     properties at its own checks before exec (target
     match, absolute link-free staged path inside the
     stages tree,
@@ -759,6 +799,9 @@ def _prep_suite_claim_error(suite, entry):
         refuse_symlinked_path(Path(staged).parent)
     except ValueError:
         return 'staged path traverses a symlink'
+    reason = _prep_staged_spelling_error(staged)
+    if reason is not None:
+        return reason
     root = Path(journey_staging_root())
     if root not in Path(os.path.abspath(staged)).parents:
         return 'staged path is outside the owned staging root'

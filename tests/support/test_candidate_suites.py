@@ -3826,3 +3826,133 @@ def test_journey_scan_refuses_ill_named_record(tmp_path):
         with pytest.raises(ValueError,
                             match='must be a JSON'):
             resolve_journey_record(str(records / bad))
+
+
+def test_journey_scan_refuses_noncanonical_staged_claim(
+        tmp_path):
+    import hashlib
+    import json
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import \
+        _prep_staged_spelling_error, _prep_suite_claim_error, \
+        checkout_identity, journey_identity_excludes, \
+        journey_staging_root, refuse_unowned_prep_contents
+    from support.journey_prep import TARGETS
+    tag = '%d-%s' % (os.getpid(), uuid.uuid4().hex[:8])
+    root = Path(journey_staging_root())
+    stage_dir = root / ('honest-%s.staged' % tag)
+    stage_dir.mkdir(parents=True)
+    staged = stage_dir / TARGETS['deb']
+    staged.write_bytes(b'#!/bin/sh\necho honest\n')
+    staged.chmod(0o755)
+    digest = hashlib.sha256(
+        staged.read_bytes()).hexdigest()
+    honest = {'path': str(tmp_path / 'orig'),
+              'staged': str(staged),
+              'sha256': digest,
+              'target': TARGETS['deb']}
+    assert _prep_staged_spelling_error(str(staged)) is None
+    assert _prep_suite_claim_error('deb', honest) is None
+    # Every attack spelling normalizes onto the honest
+    # staged file: the missing directory never exists,
+    # so the ancestor walk skips it, yet the digest
+    # would index under the honest file's entry.
+    attacks = [
+        str(root / ('missing-%s' % tag) / '..'
+            / stage_dir.name / TARGETS['deb']),
+        # (Joined as text: joining through the path
+        # type would collapse the dot component away.)
+        str(stage_dir) + '/./' + TARGETS['deb'],
+        str(root) + '//' + stage_dir.name + '/'
+        + TARGETS['deb'],
+        str(staged) + '/',
+    ]
+    for spelling in attacks:
+        assert os.path.abspath(spelling) == str(staged), \
+            spelling
+        reason = _prep_staged_spelling_error(spelling)
+        assert reason is not None \
+            and 'canonical spelling' in reason, spelling
+        reason = _prep_suite_claim_error(
+            'deb', dict(honest, staged=spelling))
+        assert reason is not None \
+            and 'canonical spelling' in reason, spelling
+    dispatch_text = (
+        ROOT / 'tests/support/candidate_suite.py').read_text()
+    prep_text = (
+        ROOT / 'tests/support/journey_prep.py').read_text()
+    assert prep_text.count(
+        'def _prep_staged_spelling_error') \
+        + dispatch_text.count(
+            'def _prep_staged_spelling_error') == 1
+    assert '_prep_staged_spelling_error(' in prep_text
+    commit, tree = checkout_identity(
+        exclude=journey_identity_excludes())
+    record_path = _prep_record_path('stub-canonclaim')
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def write_record(suites):
+        record_path.write_text(json.dumps(
+            {'schema': 'memveil-journey-prep/1',
+             'commit': commit, 'tree': tree,
+             'suites': suites}))
+
+    write_record({'deb': honest})
+    refuse_unowned_prep_contents()
+    for spelling in attacks:
+        write_record(
+            {'deb': dict(honest, staged=spelling)})
+        with pytest.raises(ValueError, match='invalid claim') \
+                as caught:
+            refuse_unowned_prep_contents()
+        assert 'canonical spelling' in str(caught.value), \
+            spelling
+    write_record({'deb': honest})
+    refuse_unowned_prep_contents()
+
+
+def test_journey_canonical_claim_dispatches(sealed,
+                                            tmp_path):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import \
+        _prep_staged_spelling_error
+    harness = ('#!/bin/sh\necho journey-marker\n'
+               'echo "running 1 tests"\n'
+               'echo "test journey_probe ... ok"\n'
+               'echo "test result: ok. 1 passed; 0 failed; '
+               '0 ignored; 0 measured; 0 filtered out"\n')
+    stub, staged, record_path = _journey_stub_record(
+        tmp_path, harness)
+    # The honest claim uses the canonical spelling the
+    # publisher emits, so it indexes and dispatches.
+    assert _prep_staged_spelling_error(str(staged)) is None
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MV_JOURNEY_PREP'] = str(record_path)
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert 'journey-marker' in result.stdout, combined
+    assert '1 passed' in combined, combined
+
+
+def test_journey_publisher_emits_canonical_staged_spellings(
+        tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import \
+        _prep_staged_spelling_error
+    import support.journey_prep as prep
+    fake = tmp_path / 'fake-exe'
+    fake.write_bytes(b'#!/bin/sh\necho fake\n')
+    fake.chmod(0o755)
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    record = prep.prepare(str(_prep_record_path('canon')))
+    # Every publisher-emitted staged path satisfies the
+    # exact matcher the claim check applies, so honest
+    # output always indexes.
+    for suite, entry in record['suites'].items():
+        assert _prep_staged_spelling_error(
+            entry['staged']) is None, suite
+        assert os.path.abspath(entry['staged']) \
+            == entry['staged'], suite
