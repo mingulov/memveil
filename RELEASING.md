@@ -398,8 +398,9 @@ gh workflow run release.yml --ref release-q1 \
 13. After a green import, record the remote receipt and
 commit Q2. Record four bindings now; do not record
 `promotion-dry-run/1` here: its check-run is published by
-the dry-run dispatch in step 14, so dispatch dry-run
-before recording its check binding (step 15). Fetch the
+the dry-run dispatch in step 14 (under MV31-15), so
+dispatch dry-run before recording its check binding
+(step 15). Fetch the
 immutable import coordinates (the signer commit is Q1,
 the ref the import ran at):
 
@@ -477,27 +478,36 @@ bindings, so four suffice here.
 
 15. After the dry-run dispatch is green, record the
 provisional dry-run receipt and carry it forward. The
-dry-run ran at Q2, so its `promotion-dry-run/1`
-check-run carries head SHA Q2:
+dry-run ran at Q2, so the check-run named exactly
+`promotion-dry-run/1` carries head SHA Q2. That
+check-run is published under MV31-15 at Q2: select it
+by its exact check name, never the dispatch's native
+`dry-run` job check (promote re-checks the name
+against the binding and rejects any other check):
 
 ```sh
 gh run list -w release.yml
 DRY_RUN_ID=<dry-run run id from the listing above>
-gh api repos/<OWNER>/<REPO>/actions/runs/$DRY_RUN_ID/jobs \
-  -q '.jobs[]
-      | select(.name == "dry-run")
-      | "\(.id) \(.check_run_url)"'
+gh api repos/<OWNER>/<REPO>/commits/$Q2/check-runs \
+  -q '.check_runs[]
+      | select(.name == "promotion-dry-run/1")
+      | "\(.id) \(.head_sha) \(.details_url)"'
 ```
 
-That prints the job ID and its check-run URL; keep the
-numeric check-run ID from the URL tail. Write the
-provisional receipt beside the scratch evidence (kept
-under ignored `dist/`, never committed as is): the
-check-run ID, the run ID, head SHA Q2, the signed
-receipt over the dry-run's offline inputs, the inputs,
-the base64 signature (`ssh-keygen -Y sign` with
-namespace `memveil-candidate`, as in step 6), and the
-public key.
+That prints the check-run ID, its head SHA, and its
+details URL; keep the numeric check-run ID once the
+head SHA reads Q2 and the details URL sits under run
+$DRY_RUN_ID. The MV31-15 producer is deferred per the
+accepted D1 carry, so Q3 awaits that evidence:
+finalize Q3 only after this check-run exists and is
+green. Write the provisional receipt beside the
+scratch evidence (kept under ignored `dist/`, never
+committed as is): the check-run ID, the run ID, head
+SHA Q2, the signed receipt over the dry-run's offline
+inputs, the inputs, the base64 signature
+(`ssh-keygen -Y sign` with namespace
+`memveil-candidate`, as in step 6), and the public
+key.
 
 16. Assemble the final promotion evidence: the same
 import coordinates with all five check bindings (the

@@ -1592,6 +1592,20 @@ def test_release_runbook_defers_dryrun_binding_past_dispatch():
     assert "promotion-dry-run/1" not in assembly
 
 
+def test_release_runbook_binds_dryrun_published_check():
+    text = (ROOT / "RELEASING.md").read_text()
+    step15 = text[
+        text.index("provisional dry-run receipt"):
+        text.index("final promotion evidence")]
+    assert 'select(.name == "promotion-dry-run/1")' in step15
+    assert "MV31-15" in step15
+    flat = " ".join(step15.split())
+    assert "Q3 awaits that evidence" in flat
+    assert "never the dispatch's native" in flat
+    assert "promotion-dry-run/1" in api().REMOTE_CHECKS
+    assert 'select(.name == "dry-run")' not in text
+
+
 def test_release_version_binding():
     m = api()
     for version, claim in [("0.1.1", "ordinary-preview"),
