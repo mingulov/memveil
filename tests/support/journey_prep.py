@@ -142,6 +142,40 @@ def _stage_bytes(staged, data, suite):
     os.chmod(staged, 0o700)
 
 
+def _publish_record_atomically(raw_abs, record_abs, payload):
+    """Publish the record through a same-directory temp file.
+
+    The payload is fully written and fsynced to an
+    exclusively created temp file in the record's own
+    directory, then moved over the record path with
+    os.replace: a concurrent launch reads the old record
+    or the new one, never partial JSON. The unresolved
+    path is replaced, so a planted leaf symlink is
+    swapped, never followed. A failed publish removes
+    the temp file and refuses.
+    """
+    try:
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=record_abs.name + '.', suffix='.tmp',
+            dir=str(record_abs.parent))
+    except OSError as exc:
+        raise ValueError(
+            'fixture prep cannot publish record: %s' % exc)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp_name, raw_abs)
+    except (OSError, ValueError) as exc:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise ValueError(
+            'fixture prep cannot publish record: %s' % exc)
+
+
 def build_executable(target):
     """Compile one test target without running it; return its path.
 
@@ -229,7 +263,8 @@ def prepare(record_path):
             'tests/support/journey_prep.py')
     record = {'schema': SCHEMA, 'commit': commit_before,
               'tree': tree_before, 'suites': suites}
-    Path(record_path).write_text(
+    _publish_record_atomically(
+        raw_abs, record_abs,
         json.dumps(record, indent=2, sort_keys=True) + '\n')
     return record
 

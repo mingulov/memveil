@@ -824,6 +824,106 @@ def test_journey_concurrent_preps_keep_private_stages(
                 == entry['sha256'], (tag, suite)
 
 
+def test_journey_record_publishes_via_temp_replace(
+        tmp_path, monkeypatch):
+    import json
+    sys.path.insert(0, str(ROOT / 'tests'))
+    import support.journey_prep as prep
+    fake = tmp_path / 'fake-exe'
+    fake.write_bytes(b'#!/bin/sh\necho fake\n')
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    calls = []
+    real_replace = os.replace
+
+    def recording(src, dst):
+        calls.append((src, dst))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, 'replace', recording)
+    record_path = tmp_path / 'prep.json'
+    before = prep.prepare(str(record_path))
+    assert json.loads(record_path.read_text()) == before
+    first_inode = record_path.stat().st_ino
+    assert calls, 'record publish bypassed os.replace'
+    want = record_path.resolve()
+    for src, dst in calls:
+        assert Path(src).parent == want.parent
+        assert Path(dst).resolve() == want
+    prep.prepare(str(record_path))
+    assert record_path.stat().st_ino != first_inode
+
+
+def test_journey_record_reads_valid_under_concurrent_prep(
+        tmp_path, monkeypatch):
+    import json
+    import threading
+    sys.path.insert(0, str(ROOT / 'tests'))
+    import support.journey_prep as prep
+    payloads = []
+    for index in range(4):
+        fake = tmp_path / ('fake-%d' % index)
+        fake.write_bytes(
+            b'#!/bin/sh\necho payload-%d\n' % index
+            + bytes((index,)) * 65536)
+        payloads.append(fake)
+
+    def build(target):
+        return payloads[int(threading.current_thread().name)]
+
+    monkeypatch.setattr(prep, 'build_executable', build)
+    record_path = tmp_path / 'prep.json'
+    barrier = threading.Barrier(4)
+    stop = threading.Event()
+    errors = []
+    counts = []
+
+    def run_preps(tag):
+        try:
+            barrier.wait(timeout=120)
+            for _ in range(5):
+                prep.prepare(str(record_path))
+        except Exception as exc:
+            errors.append(repr(exc))
+
+    def run_reads():
+        import time
+        try:
+            parsed = 0
+            while not stop.is_set():
+                time.sleep(0.001)
+                try:
+                    text = record_path.read_text(
+                        encoding='utf-8')
+                except FileNotFoundError:
+                    continue
+                doc = json.loads(text)
+                assert doc['schema'] == \
+                    'memveil-journey-prep/1'
+                assert set(doc) == {
+                    'schema', 'commit', 'tree', 'suites'}
+                parsed += 1
+            counts.append(parsed)
+        except Exception as exc:
+            errors.append(repr(exc))
+
+    threads = [threading.Thread(
+        target=run_preps, args=(tag,), name=str(tag))
+        for tag in range(4)]
+    threads += [threading.Thread(target=run_reads)
+                for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads[:4]:
+        thread.join(timeout=300)
+    stop.set()
+    for thread in threads[4:]:
+        thread.join(timeout=300)
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == []
+    assert sum(counts) >= 50
+
+
 def test_journey_prep_refuses_symlinked_staging_path(
         tmp_path, monkeypatch):
     sys.path.insert(0, str(ROOT / 'tests'))
