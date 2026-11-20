@@ -91,11 +91,15 @@ def test_export_accepts_consistent_row(tmp_path):
         km.export_tested_candidate(tmp_path, lock, doc, output)
 
 
-@pytest.mark.parametrize('damage', ['actual', 'oracle', 'expected',
-                                    'missing-row', 'source',
-                                    'profile', 'toolchain',
-                                    'package', 'bpf'])
-def test_export_rejects_tampered_cache_x9(tmp_path, damage):
+@pytest.mark.parametrize('damage,blame', [
+    ('actual', None), ('oracle', None), ('expected', None),
+    ('missing-row', None), ('source', None), ('profile', None),
+    ('toolchain', None), ('package', None), ('bpf', None),
+    ('engine', 'matrix executable differs'),
+    ('smoke', 'smoke-only'),
+    ('entry', 'pinned lock')])
+def test_export_rejects_tampered_cache_x12(tmp_path, damage,
+                                           blame):
     doc, lock, row, ev, rec, receipt = exported_fixture(tmp_path)
     if damage == 'actual':
         ev['persisted']['bounce_attempt'] = 1
@@ -122,13 +126,34 @@ def test_export_rejects_tampered_cache_x9(tmp_path, damage):
         (row / 'artifacts.json').write_text(json.dumps(measured))
         ev['artifacts_text'] = json.dumps(measured)
         receipt['artifacts']['bpf']['attempt'] = '9' * 64
+    if damage == 'engine':
+        # Same attack shape as the qualify-side foreign-bytes
+        # test: the row tested a different engine, kept
+        # consistent across retained, cached, and receipt
+        # bytes, so only the shared binding refuses, with the
+        # same blame the qualify path reports.
+        measured = json.loads((row / 'artifacts.json').read_text())
+        measured['binary']['sha256'] = '9' * 64
+        (row / 'artifacts.json').write_text(json.dumps(measured))
+        ev['artifacts_text'] = json.dumps(measured)
+        receipt['artifacts']['binary_sha256'] = '9' * 64
+    if damage == 'smoke':
+        job = json.loads((row / 'job.json').read_text())
+        job['duration'] = 61
+        (row / 'job.json').write_text(json.dumps(job))
+        receipt['command']['duration_s'] = 61
+        receipt['workload']['duration_s'] = 61
+        receipt['smoke'] = True
+    if damage == 'entry':
+        assert ev['entry']['upstream'] != '9.9.99'
+        ev['entry']['upstream'] = '9.9.99'
     # Update the unsigned transcription hashes; the old PASS
     # booleans remain.
     (row / 'oracle-inputs.json').write_text(json.dumps(ev))
     receipt['files'] = km.row_receipt_files(row)
     (row / 'receipt.json').write_text(json.dumps(receipt))
     output = tmp_path / 'refused.txt'
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=blame):
         km.export_tested_candidate(tmp_path, lock, doc, output)
     assert not output.exists()
 

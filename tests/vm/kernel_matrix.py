@@ -5908,10 +5908,11 @@ def verify_row_cache_vs_raw(row_dir, inputs):
     and must match the re-derivation exactly.
 
     Three inputs need no file comparison: the lock entry
-    binds at export, the candidate digest and closure bind
-    to the manifest, and the host tool versions plus cache
-    directory are cross-checked against retained files
-    inside the predicates themselves. Raises ValueError on
+    binds in the shared row verifier, the candidate digest
+    and closure bind to the manifest, and the host tool
+    versions plus cache directory are cross-checked against
+    retained files inside the predicates themselves.
+    Raises ValueError on
     any disagreement, even when the cache and the raw side
     each verify independently; returns None when the cache
     faithfully transcribes the retained evidence.
