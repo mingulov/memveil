@@ -204,7 +204,12 @@ JOURNEY_STAGES_DIRNAME = 'stages'
 # <record>.json.<eight mkstemp characters>.tmp (lowercase,
 # digits, underscore). The validator requires this full
 # shape: any other .tmp name refuses instead of passing
-# as scratch.
+# as scratch. The resolver admits only record names
+# whose publisher output matches this pattern (a
+# nonempty stem before .json, no newline), so every
+# name accepted here is one the publisher can emit for
+# an accepted record, and every publisher-emittable
+# scratch name passes here.
 PUBLISH_SCRATCH_RE = re.compile(
     r'.+\.json\.[a-z0-9_]{8}\.tmp')
 
@@ -311,12 +316,16 @@ def resolve_journey_record(name):
     under the sibling stages subdir instead), so records,
     stages, and publication scratch share the one
     excluded location while staying disjoint. The
-    destination must end in .json, matching the records
-    the checks accept, so the publish path can never
-    emit a record the next check rejects. Refuses an
-    empty name, a non-JSON name, a symlink at the record
-    path itself or any parent component, and any
-    destination outside the records subdir. Both the
+    destination must end in .json with a nonempty
+    stem and no newline, matching the records the
+    checks accept, so the publish path can never emit
+    a record the next check rejects, and so the
+    publisher's scratch file for the record always
+    passes the scanner's scratch pattern. Refuses an
+    empty name, a non-JSON name, a bare .json or
+    newline name, a symlink at the record path itself
+    or any parent component, and any destination
+    outside the records subdir. Both the
     prep tool and the launcher validate through this
     one function, before any staging, exclusion, or
     publication step derives paths from the record.
@@ -326,6 +335,19 @@ def resolve_journey_record(name):
             'journey prep record must live under %s'
             % JOURNEY_RECORDS_DIRNAME)
     if not name.endswith('.json'):
+        raise ValueError(
+            'journey prep record must be a JSON record '
+            'under %s: %s'
+            % (JOURNEY_RECORDS_DIRNAME, name))
+    # The publisher's scratch file for the record
+    # (<name>.<token>.tmp) must pass the scanner's
+    # publication-scratch pattern, which needs at least
+    # one character before .json and matches no newline:
+    # a bare .json or a newline name could never match,
+    # so such names refuse here instead of failing
+    # mid-publish.
+    leaf = Path(name).name
+    if leaf == '.json' or '\n' in leaf:
         raise ValueError(
             'journey prep record must be a JSON record '
             'under %s: %s'

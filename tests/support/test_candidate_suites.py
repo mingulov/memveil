@@ -3512,3 +3512,196 @@ def test_journey_launcher_refuses_unknown_suite_claim(
     assert result.returncode == 0, combined
     assert 'journey-marker' in result.stdout, combined
     assert '1 passed' in combined, combined
+
+
+def test_journey_record_without_stem_refuses(sealed, tmp_path,
+                                            monkeypatch):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import journey_prep_dir, \
+        journey_staging_root, resolve_journey_record
+    import support.journey_prep as prep
+    fake = tmp_path / 'fake-exe'
+    fake.write_bytes(b'#!/bin/sh\necho fake\n')
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    records = Path(journey_prep_dir()) / 'records'
+    root = Path(journey_staging_root())
+    before = sorted(root.iterdir()) if root.exists() \
+        else []
+    # A bare .json and a newline name refuse at the
+    # resolver on both paths: their publisher scratch
+    # could never pass the scanner, so they refuse here
+    # instead of failing mid-publish.
+    for bad in ('.json', 'we\nird.json'):
+        target = records / bad
+        with pytest.raises(ValueError, match='must be a JSON'):
+            resolve_journey_record(str(target))
+        with pytest.raises(ValueError, match='must be a JSON'):
+            prep.prepare(str(target))
+        assert not os.path.lexists(target)
+        environment = candidate_clean_env()
+        environment.update(sealed)
+        environment['MV_JOURNEY_PREP'] = str(target)
+        result = _launch_journey('deb', environment)
+        combined = result.stdout + result.stderr
+        assert result.returncode == 2, combined
+        assert 'must be a JSON' in combined, combined
+    after = sorted(root.iterdir()) if root.exists() \
+        else []
+    assert after == before, 'refused prep staged bytes'
+
+
+def test_journey_record_odd_names_launch(sealed, tmp_path,
+                                        monkeypatch):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import journey_records_dir, \
+        refuse_unowned_prep_contents, resolve_journey_record
+    import support.journey_prep as prep
+    harness = ('#!/bin/sh\necho journey-marker\n'
+               'echo "running 1 tests"\n'
+               'echo "test journey_probe ... ok"\n'
+               'echo "test result: ok. 1 passed; 0 failed; '
+               '0 ignored; 0 measured; 0 filtered out"\n')
+    fake = tmp_path / 'fake-exe'
+    fake.write_text(harness)
+    fake.chmod(0o755)
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    records = Path(journey_records_dir())
+    tag = '%d-%s' % (os.getpid(), uuid.uuid4().hex[:8])
+    names = ['multi.dot-%s.json' % tag,
+             '.dotfile-%s.json' % tag]
+    for name in names:
+        target = records / name
+        resolve_journey_record(str(target))
+        prep.prepare(str(target))
+        assert target.is_file()
+    refuse_unowned_prep_contents()
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    for name in names:
+        environment['MV_JOURNEY_PREP'] = str(records / name)
+        result = _launch_journey('deb', environment)
+        combined = result.stdout + result.stderr
+        assert result.returncode == 0, combined
+        assert 'journey-marker' in result.stdout, combined
+        assert '1 passed' in combined, combined
+
+
+def test_journey_record_and_scratch_grammars_align(
+        tmp_path):
+    import tempfile
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import PUBLISH_SCRATCH_RE, \
+        journey_records_dir, resolve_journey_record
+    records = Path(journey_records_dir())
+    # Every accepted record name yields scanner-passing
+    # publisher output: the resolver, the publisher, and
+    # the scanner share one grammar.
+    for name in ('prep.json', 'a.json', 'my.record.json',
+                 '.hidden.json', 'with-dash_1.json'):
+        resolved = resolve_journey_record(
+            str(records / name))
+        assert Path(resolved).name == name
+        scratch = name + '.deadbeef.tmp'
+        assert PUBLISH_SCRATCH_RE.fullmatch(scratch) \
+            is not None, scratch
+    # The reverse direction: representative
+    # scanner-accepted names recover a
+    # resolver-accepted record, so nothing accepted is
+    # unemittable.
+    for scratch in ('x.json.deadbeef.tmp',
+                    '.h.json.12345678.tmp',
+                    'a.b.json.zzzzzzzz.tmp'):
+        assert PUBLISH_SCRATCH_RE.fullmatch(scratch) \
+            is not None, scratch
+        record = scratch[:len(scratch) - len('.deadbeef.tmp')]
+        resolve_journey_record(str(records / record))
+    # The platform's real mkstemp token matches the
+    # alphabet the scanner pins.
+    fd, temp = tempfile.mkstemp(prefix='probe.json.',
+                                suffix='.tmp',
+                                dir=str(tmp_path))
+    os.close(fd)
+    try:
+        token = Path(temp).name[
+            len('probe.json.'):-len('.tmp')]
+        assert re.fullmatch(r'[a-z0-9_]{8}', token) \
+            is not None, token
+        assert PUBLISH_SCRATCH_RE.fullmatch(
+            Path(temp).name) is not None, temp
+    finally:
+        os.unlink(temp)
+    for bad in ('.json', 'we\nird.json'):
+        with pytest.raises(ValueError, match='must be a JSON'):
+            resolve_journey_record(str(records / bad))
+
+
+def test_journey_scan_passes_under_concurrent_publish(
+        tmp_path, monkeypatch):
+    import threading
+    import time
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import \
+        PUBLISH_SCRATCH_RE, refuse_unowned_prep_contents
+    import support.journey_prep as prep
+    fake = tmp_path / 'fake-exe'
+    fake.write_bytes(b'#!/bin/sh\necho fake\n')
+    fake.chmod(0o755)
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    record_path = _prep_record_path('concurrent.publish')
+    real_replace = os.replace
+    temps = []
+    lock = threading.Lock()
+
+    def delayed(src, dst):
+        with lock:
+            temps.append(src)
+        time.sleep(0.005)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, 'replace', delayed)
+    errors = []
+    scans = []
+
+    def run_preps():
+        try:
+            for _ in range(10):
+                prep.prepare(str(record_path))
+        except Exception as exc:
+            with lock:
+                errors.append(repr(exc))
+
+    def run_scans():
+        try:
+            count = 0
+            for _ in range(200):
+                refuse_unowned_prep_contents()
+                count += 1
+            with lock:
+                scans.append(count)
+        except Exception as exc:
+            with lock:
+                errors.append(repr(exc))
+
+    threads = [threading.Thread(target=run_preps)
+               for _ in range(2)]
+    threads += [threading.Thread(target=run_scans)
+                for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=300)
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == []
+    assert sum(scans) == 400
+    assert temps, 'record publish bypassed os.replace'
+    # Every observed publish temp carried the exact
+    # producer shape the scanner accepts.
+    for temp in temps:
+        assert Path(temp).name.startswith(
+            record_path.name + '.')
+        assert PUBLISH_SCRATCH_RE.fullmatch(
+            Path(temp).name) is not None, temp
+    refuse_unowned_prep_contents()

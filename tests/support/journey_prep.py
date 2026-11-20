@@ -179,7 +179,10 @@ def _publish_record_atomically(raw_abs, record_abs, payload):
     is load-bearing: the prep-directory validator
     accepts exactly this pattern as publication
     scratch, so the prefix and suffix here must not
-    change without updating it.
+    change without updating it. The record name
+    reaching here passed the resolver's nonempty-stem
+    rule, so the emitted temp name always matches the
+    scanner's pattern.
     """
     records = Path(journey_records_dir())
     parent = record_abs.parent
