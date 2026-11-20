@@ -100,6 +100,35 @@ def dmesg_after_marker(text, marker):
     return lines[hits[0] + 1:]
 
 
+def load_guest_candidate(repo):
+    """Verified candidate for this guest, or None in dev.
+
+    The propagated MV_CANDIDATE_DIGEST must match the
+    manifest bytes; any mismatch refuses here, before the
+    guest touches hardware or starts work.
+    """
+    sys.path.insert(0, os.path.join(repo, "tests"))
+    from support.candidate_input import load
+    return load()
+
+
+def guest_bpf_objects(repo, candidate=None):
+    """Lifecycle/copy BPF objects: verified Aya or dev tree.
+
+    Candidate mode resolves the verified Aya objects under
+    the verified root; the candidate carries no bridge.
+    """
+    if candidate is not None:
+        return {"lc_obj": str(candidate.path(
+                    "bpf/swiotlb_lifecycle.bpf.o")),
+                "cp_obj": str(candidate.path(
+                    "bpf/swiotlb_copy.bpf.o"))}
+    return {"lc_obj": os.path.join(
+                repo, "build", "bpf", "swiotlb_lifecycle.bpf.o"),
+            "cp_obj": os.path.join(
+                repo, "build", "bpf", "swiotlb_copy.bpf.o")}
+
+
 class Gate:
     """One subcommand run: paths, checks, consumer control."""
 
@@ -117,6 +146,11 @@ class Gate:
             repo, "build", "bpf", "swiotlb_copy.bpf.o")
         self.lc_test_obj = os.path.join(
             repo, "build", "bpf", "swiotlb_lifecycle-test.bpf.o")
+        self.candidate = load_guest_candidate(repo)
+        if self.candidate is not None:
+            resolved = guest_bpf_objects(repo, self.candidate)
+            self.lc_obj = resolved["lc_obj"]
+            self.cp_obj = resolved["cp_obj"]
         self.consumers = []
         self.oracle_loaded = False
         self.cp_test_obj = os.path.join(

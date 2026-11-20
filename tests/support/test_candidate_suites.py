@@ -10,10 +10,13 @@ names. Runner wiring is pinned here: every runner family
 resolves the packaged binary in candidate mode, truncated
 replay/soak workloads refuse, a conflicting --binary fails
 closed pre-exec, and a missing packaged binary never falls
-back to the build tree.
+back to the build tree. Guests receive the candidate env,
+resolve BPF under the verified root, and refuse a digest
+mismatch before any guest work.
 """
 import os
 from pathlib import Path
+import re
 import runpy
 import shutil
 import subprocess
@@ -299,3 +302,164 @@ def test_no_build_fallback(sealed, tmp_path):
         timeout=120)
     assert refused.returncode != 0
     assert 'build' not in refused.stdout
+
+
+def test_guest_env_propagated(sealed):
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    script = ('import sys; sys.path.insert(0, '
+              + repr(str(ROOT / 'tests')) + '); '
+                'sys.path.insert(0, '
+              + repr(str(ROOT / 'tests/vm')) + '); '
+                'from support.candidate_input import load; '
+                'import vm_boot; '
+                'selected = load(); '
+                'print(vm_boot.guest_exec_command('
+                "'matrix', '/tmp/vmgate-work', '/repo', "
+                'selected)); '
+                'print(vm_boot.guest_exec_command('
+                "'matrix', '/tmp/vmgate-work', '/repo', None))")
+    result = subprocess.run(
+        [sys.executable, '-c', script],
+        env=environment, capture_output=True, text=True,
+        timeout=120)
+    assert result.returncode == 0, result.stderr
+    propagated, dev = result.stdout.splitlines()
+    assert 'MV_CANDIDATE_MANIFEST=' + sealed[
+        'MV_CANDIDATE_MANIFEST'] in propagated
+    assert 'MV_BUNDLE_TARBALL=' + sealed[
+        'MV_BUNDLE_TARBALL'] in propagated
+    sys.path.insert(0, str(ROOT / 'tools'))
+    import candidate
+    digest = candidate.digest_bytes(
+        Path(sealed['MV_CANDIDATE_MANIFEST']).read_bytes())
+    assert re.fullmatch(r'[0-9a-f]{64}', digest)
+    assert 'MV_CANDIDATE_DIGEST=' + digest in propagated
+    assert 'guest_lifecycle.py' in propagated
+    assert 'matrix' in propagated
+    assert dev.startswith('python3 ')
+    assert dev.endswith(
+        ' matrix /tmp/vmgate-work /tmp/export /repo')
+    assert 'MV_CANDIDATE' not in dev
+    assert 'MV_BUNDLE' not in dev
+
+
+def test_guest_uses_candidate_bpf(sealed):
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    script = ('import os, sys; sys.path.insert(0, '
+              + repr(str(ROOT / 'tests')) + '); '
+                'sys.path.insert(0, '
+              + repr(str(ROOT / 'tests/vm')) + '); '
+                'from types import SimpleNamespace; '
+                'from support.candidate_input import load; '
+                'import guest_lifecycle, overhead_guest, '
+                'vm_boot; '
+                'selected = load(); '
+                'print("root=" + str(selected.root)); '
+                'resolved = guest_lifecycle.guest_bpf_objects('
+                '"/repo", selected); '
+                'assert os.path.isfile(resolved["lc_obj"]); '
+                'assert os.path.isfile(resolved["cp_obj"]); '
+                'print("lc=" + resolved["lc_obj"]); '
+                'print("cp=" + resolved["cp_obj"]); '
+                'dev = guest_lifecycle.guest_bpf_objects('
+                '"/repo", None); '
+                'print("dev-lc=" + dev["lc_obj"]); '
+                'print("dev-cp=" + dev["cp_obj"]); '
+                'stub = SimpleNamespace(repo="/repo", '
+                'candidate=selected, lc_obj=resolved['
+                '"lc_obj"], cp_obj=resolved["cp_obj"], '
+                'lc_test_obj="/repo/build/bpf/'
+                'swiotlb_lifecycle-test.bpf.o", '
+                'cp_test_obj="/repo/build/bpf/'
+                'swiotlb_copy-test.bpf.o", bridge="/repo/'
+                'build/deps/lmb/lib/libbpf_mojo.so.1"); '
+                'ctx = overhead_guest.build_ctx('
+                'stub, "ethX", "/dev/X"); '
+                'assert os.path.isfile(ctx["memveil"]); '
+                'assert os.path.isfile(ctx["attempt_obj"]); '
+                'print("ctx-memveil=" + ctx["memveil"]); '
+                'print("ctx-attempt=" + ctx["attempt_obj"]); '
+                'print("ctx-lc=" + ctx["lc_obj"]); '
+                'print("ctx-cp=" + ctx["cp_obj"]); '
+                'plain = SimpleNamespace(repo="/repo", '
+                'candidate=None, lc_obj=dev["lc_obj"], '
+                'cp_obj=dev["cp_obj"], lc_test_obj="/repo/'
+                'build/bpf/swiotlb_lifecycle-test.bpf.o", '
+                'cp_test_obj="/repo/build/bpf/'
+                'swiotlb_copy-test.bpf.o", bridge="/repo/'
+                'build/deps/lmb/lib/libbpf_mojo.so.1"); '
+                'dctx = overhead_guest.build_ctx('
+                'plain, "ethX", "/dev/X"); '
+                'print("devctx-memveil=" + dctx["memveil"]); '
+                'table = vm_boot.guest_artifact_paths('
+                '"matrix", "/repo", selected); '
+                'print("art-lc=" + table["lc_sha"]); '
+                'print("art-cp=" + table["cp_sha"]); '
+                'dtable = vm_boot.guest_artifact_paths('
+                '"matrix", "/repo", None); '
+                'print("devart-lc=" + dtable["lc_sha"]); '
+                'stable = vm_boot.guest_artifact_paths('
+                '"saturation", "/repo", None); '
+                'print("devsat-lc=" + stable["lc_sha"])')
+    result = subprocess.run(
+        [sys.executable, '-c', script],
+        env=environment, capture_output=True, text=True,
+        timeout=120)
+    assert result.returncode == 0, result.stderr
+    assert 'libbpf_mojo.so' not in result.stdout
+    facts = dict(
+        line.split('=', 1)
+        for line in result.stdout.splitlines())
+    root = facts['root']
+    for key in ('lc', 'cp', 'ctx-memveil', 'ctx-attempt',
+                'ctx-lc', 'ctx-cp', 'art-lc', 'art-cp'):
+        assert facts[key].startswith(root + '/'), key
+    assert facts['lc'].endswith(
+        'bpf/swiotlb_lifecycle.bpf.o')
+    assert facts['cp'].endswith('bpf/swiotlb_copy.bpf.o')
+    assert facts['ctx-attempt'].endswith(
+        'bpf/swiotlb_attempt.bpf.o')
+    assert facts['ctx-memveil'].endswith('bin/memveil')
+    assert facts['ctx-lc'] == facts['lc']
+    assert facts['ctx-cp'] == facts['cp']
+    assert facts['art-lc'] == facts['lc']
+    assert facts['art-cp'] == facts['cp']
+    assert facts['dev-lc'] == (
+        '/repo/build/bpf/swiotlb_lifecycle.bpf.o')
+    assert facts['dev-cp'] == (
+        '/repo/build/bpf/swiotlb_copy.bpf.o')
+    assert facts['devctx-memveil'] == '/repo/build/memveil'
+    assert facts['devart-lc'] == (
+        '/repo/build/bpf/swiotlb_lifecycle.bpf.o')
+    assert facts['devsat-lc'] == (
+        '/repo/build/bpf/swiotlb_lifecycle-test.bpf.o')
+
+
+def test_guest_identity_mismatch_refuses(sealed):
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    script = ('import sys; sys.path.insert(0, '
+              + repr(str(ROOT / 'tests')) + '); '
+                'sys.path.insert(0, '
+              + repr(str(ROOT / 'tests/vm')) + '); '
+                'from guest_lifecycle import '
+                'load_guest_candidate; '
+                'selected = load_guest_candidate("/repo"); '
+                'print("digest=" + selected.digest)')
+    control = subprocess.run(
+        [sys.executable, '-c', script],
+        env=environment, capture_output=True, text=True,
+        timeout=120)
+    assert control.returncode == 0, control.stderr
+    assert re.fullmatch(r'digest=[0-9a-f]{64}\n',
+                        control.stdout)
+    tampered = dict(environment, MV_CANDIDATE_DIGEST='0' * 64)
+    refused = subprocess.run(
+        [sys.executable, '-c', script],
+        env=tampered, capture_output=True, text=True,
+        timeout=120)
+    assert refused.returncode != 0
+    assert 'digest' in refused.stderr
+    assert 'digest=' not in refused.stdout
