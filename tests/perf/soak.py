@@ -11,6 +11,7 @@ service claim. Exits nonzero on the first failure.
 """
 
 import json
+import math
 import os
 import re
 import resource
@@ -25,7 +26,9 @@ REPO = os.path.dirname(TESTS)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from replay import SIZES, generate  # noqa: E402
 
-BIN = os.path.join(REPO, "build", "memveil")
+sys.path.insert(0, os.path.join(REPO, "tests"))
+from support.candidate_input import binary, load
+BIN = binary(os.path.join(REPO, "build", "memveil"))
 COUNT = 50000
 
 
@@ -48,6 +51,8 @@ def main():
         print("FAIL soak: missing %s (run cargo build --release first)" % BIN)
         sys.exit(1)
     minutes = float(os.environ.get("MEMVEIL_SOAK_MINUTES", "30"))
+    if not math.isfinite(minutes) or minutes <= 0 or (load() and minutes < 30):
+        raise ValueError('qualification offline soak requires at least 30 minutes')
     deadline = time.monotonic() + minutes * 60
     tmp = tempfile.mkdtemp(prefix="mvsoak")
     try:

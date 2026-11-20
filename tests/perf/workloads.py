@@ -36,6 +36,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "tests", "vm"))
 sys.path.insert(0, os.path.join(REPO, "tests", "perf"))
 
+sys.path.insert(0, os.path.join(REPO, "tests"))
+from support.candidate_input import load
+CANDIDATE = load()
+LC_PROBE = str(CANDIDATE.path('bpf/swiotlb_lifecycle.bpf.o')) if CANDIDATE else os.path.join(REPO, 'build/bpf/swiotlb_lifecycle.bpf.o')
+CP_PROBE = str(CANDIDATE.path('bpf/swiotlb_copy.bpf.o')) if CANDIDATE else os.path.join(REPO, 'build/bpf/swiotlb_copy.bpf.o')
+
 from compare import assess, compare
 from export_validation import validate_perf_pairs
 from consume import check_conservation, parse_consume_file
@@ -52,11 +58,9 @@ def need(path, what):
 
 
 def armed_preflight():
-    ok = need(os.path.join(REPO, "build", "bpf",
-                           "swiotlb_lifecycle.bpf.o"),
+    ok = need(LC_PROBE,
               "lifecycle probes")
-    ok = need(os.path.join(REPO, "build", "bpf",
-                           "swiotlb_copy.bpf.o"),
+    ok = need(CP_PROBE,
               "copy probes") and ok
     ok = need(os.path.join(REPO, "build", "vm", "mv_consume"),
               "consumer") and ok
@@ -221,8 +225,7 @@ def main():
         print("perf-workload: SKIP: needs MEMVEIL_VM_PERF=1 "
               "with qualified probes")
         return 77
-    probe = os.path.join(REPO, "build", "bpf",
-                         "swiotlb_lifecycle.bpf.o")
+    probe = LC_PROBE
     if not os.path.isfile(probe):
         print("FAIL perf-workload: armed but lifecycle probes "
               "not qualified")

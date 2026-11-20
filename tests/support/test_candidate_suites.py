@@ -6,9 +6,11 @@ partial inputs fail closed with exit 2, unarmed live soak
 skips with 77, packaged-binary selection resolves the
 verified executable, candidate package runs never pass on
 skips, and source inventories exclude versioned evidence
-names. Runner wiring belongs to a later task; the
-selection test here pins the shared selector the runners
-consume.
+names. Runner wiring is pinned here: every runner family
+resolves the packaged binary in candidate mode, truncated
+replay/soak workloads refuse, a conflicting --binary fails
+closed pre-exec, and a missing packaged binary never falls
+back to the build tree.
 """
 import os
 from pathlib import Path
@@ -73,7 +75,8 @@ def test_unarmed_soak_skips_77():
                                     'perf/region_replay.py',
                                     'perf/soak.py',
                                     'privacy/test_canaries.py'])
-def test_packaged_binary_selected(sealed, runner, tmp_path):
+def test_verified_binary_selected_over_dev_default(
+        sealed, runner, tmp_path):
     environment = candidate_clean_env()
     environment.update(sealed)
     fake = tmp_path / 'build' / 'memveil'
@@ -139,3 +142,160 @@ def test_inventory_excludes_only_named_evidence_files(tmp_path):
             .take_inventory(tmp_path)['files']}
     assert 'packaging/qualifications/qualification.json' \
         in tree
+
+
+IMPORT_RUNNERS = ['perf/replay.py', 'perf/region_replay.py',
+                  'perf/soak.py', 'perf/overhead.py',
+                  'privacy/test_canaries.py',
+                  'fuzz/test_oracle.py']
+
+
+@pytest.mark.parametrize('runner',
+                         IMPORT_RUNNERS + ['fuzz/run.py',
+                                           'perf/workloads.py'])
+def test_runners_select_packaged_binary(sealed, runner, tmp_path):
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    fake = tmp_path / 'build' / 'memveil'
+    fake.parent.mkdir(parents=True)
+    fake.write_text('#!/bin/sh\necho fake-build-tree\n')
+    fake.chmod(0o755)
+    development = str(ROOT / 'build' / 'memveil')
+    if runner == 'fuzz/run.py':
+        regress = tmp_path / 'regress'
+        result = subprocess.run(
+            [sys.executable, str(ROOT / 'tests/fuzz/run.py'),
+             '--seeds', '1', '--regress', str(regress)],
+            env=environment, capture_output=True, text=True,
+            timeout=120)
+        lines = [line for line in
+                 result.stdout.splitlines()
+                 if line.startswith('fuzz: binary ')]
+        assert len(lines) == 1, result.stdout + result.stderr
+        resolved = lines[0].split(' sha256 ')[0][len(
+            'fuzz: binary '):]
+        assert resolved != str(fake)
+        assert resolved != development
+        assert resolved.endswith('bin/memveil')
+        # The runner subprocess owns its extraction: it
+        # cleans up on exit, so execution is proved by the
+        # failure signature below, not by re-running the
+        # printed path here. The synthetic packaged script
+        # echoes instead of reporting, so executing it fails
+        # the pristine positive; executing the build tree
+        # would pass and exit 0.
+        assert result.returncode == 1, \
+            result.stdout + result.stderr
+        assert 'FAIL pristine positive' in result.stdout
+        return
+    if runner == 'perf/workloads.py':
+        script = ('import os, runpy; value = runpy.run_path('
+                  + repr(str(ROOT / 'tests' / runner))
+                  + '); assert os.path.isfile('
+                    'value["LC_PROBE"]); assert os.path.isfile('
+                    'value["CP_PROBE"]); '
+                    'print(value["LC_PROBE"]); '
+                    'print(value["CP_PROBE"])')
+        result = subprocess.run(
+            [sys.executable, '-c', script],
+            env=environment, capture_output=True, text=True,
+            timeout=120)
+        assert result.returncode == 0, result.stderr
+        probes = result.stdout.splitlines()
+        assert len(probes) == 2, result.stdout
+        for probe in probes:
+            assert probe != str(fake)
+            assert probe != os.path.join(
+                str(ROOT), 'build', 'bpf',
+                os.path.basename(probe))
+        return
+    if runner == 'fuzz/test_oracle.py':
+        environment['PYTHONPATH'] = str(
+            ROOT / 'tests' / 'fuzz') + (
+                os.pathsep + environment['PYTHONPATH']
+                if environment.get('PYTHONPATH') else '')
+    script = ('import runpy, subprocess; resolved = '
+              'runpy.run_path('
+              + repr(str(ROOT / 'tests' / runner))
+              + ')["BIN"]; print(resolved); proc = '
+                'subprocess.run([resolved], capture_output=True, '
+                'text=True); print(proc.stdout, end="")')
+    result = subprocess.run(
+        [sys.executable, '-c', script],
+        env=environment, capture_output=True, text=True,
+        timeout=120)
+    assert result.returncode == 0, result.stderr
+    assert str(fake) not in result.stdout.splitlines()
+    assert development not in result.stdout.splitlines()
+    assert 'packaged-synthetic' in result.stdout
+
+
+def test_replay_requires_pacing(sealed):
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MEMVEIL_PACED_SECONDS'] = '5'
+    result = subprocess.run(
+        [sys.executable, str(ROOT / 'tests/perf/replay.py')],
+        env=environment, capture_output=True, text=True,
+        timeout=600)
+    assert result.returncode != 0
+    assert 'pacing' in result.stderr
+
+
+def test_soak_requires_30min(sealed):
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MEMVEIL_SOAK_MINUTES'] = '1'
+    result = subprocess.run(
+        [sys.executable, str(ROOT / 'tests/perf/soak.py')],
+        env=environment, capture_output=True, text=True,
+        timeout=600)
+    assert result.returncode != 0
+    assert '30 minutes' in result.stderr
+
+
+def test_fuzz_binary_conflict_refuses(sealed, tmp_path):
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    result = subprocess.run(
+        [sys.executable, str(ROOT / 'tests/fuzz/run.py'),
+         '--seeds', '1', '--binary',
+         str(tmp_path / 'foreign')],
+        env=environment, capture_output=True, text=True,
+        timeout=120)
+    assert result.returncode != 0
+    assert '--binary override' in result.stderr
+    assert 'packaged-synthetic' not in result.stdout
+
+
+def test_no_build_fallback(sealed, tmp_path):
+    decoy = tmp_path / 'memveil'
+    decoy.write_text('#!/bin/sh\necho fake-build-tree\n')
+    decoy.chmod(0o755)
+    broken = candidate_clean_env()
+    broken.update(sealed)
+    broken['MV_BUNDLE_TARBALL'] = str(
+        tmp_path / 'missing.tar.gz')
+    overridden = dict(broken, MEMVEIL_BIN=str(decoy))
+    script = ('import runpy, subprocess; resolved = '
+              'runpy.run_path('
+              + repr(str(ROOT / 'tests/privacy'
+                         / 'test_canaries.py'))
+              + ')["BIN"]; print(resolved); proc = '
+                'subprocess.run([resolved], capture_output=True, '
+                'text=True); print(proc.stdout, end="")')
+    result = subprocess.run(
+        [sys.executable, '-c', script],
+        env=overridden, capture_output=True, text=True,
+        timeout=120)
+    assert result.returncode != 0
+    assert 'fake-build-tree' not in result.stdout
+    probe = ('import runpy; print(runpy.run_path('
+             + repr(str(ROOT / 'tests/perf/replay.py'))
+             + ')["BIN"])')
+    refused = subprocess.run(
+        [sys.executable, '-c', probe],
+        env=broken, capture_output=True, text=True,
+        timeout=120)
+    assert refused.returncode != 0
+    assert 'build' not in refused.stdout
