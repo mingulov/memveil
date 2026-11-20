@@ -1279,10 +1279,19 @@ def test_release_checkouts_persist_no_credentials():
     assert seen == 4, seen
 
 
-def test_release_qualify_permissions_hold_actions_write():
+def test_release_permissions_pin_exact_matrix():
     doc = _release_workflow()
+    assert doc.get("permissions") == {}
     assert doc["jobs"]["qualify"]["permissions"] == {
-        "contents": "read", "actions": "write"}
+        "contents": "read"}
+    assert doc["jobs"]["import"]["permissions"] == {
+        "contents": "read", "attestations": "write",
+        "id-token": "write"}
+    assert doc["jobs"]["dry-run"]["permissions"] == {
+        "contents": "read", "actions": "read"}
+    assert doc["jobs"]["promote"]["permissions"] == {
+        "contents": "write", "actions": "read",
+        "checks": "read"}
 
 
 def test_release_custody_builds_trusted_harness():

@@ -84,7 +84,6 @@ jobs:
     runs-on: ubuntu-26.04
     permissions:
       contents: read
-      actions: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
@@ -241,7 +240,6 @@ jobs:
     runs-on: ubuntu-26.04
     permissions:
       contents: read
-      actions: write
       attestations: write
       id-token: write
     steps:
@@ -356,7 +354,6 @@ jobs:
     permissions:
       contents: read
       actions: read
-      attestations: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
@@ -445,7 +442,7 @@ jobs:
     permissions:
       contents: write
       actions: read
-      attestations: read
+      checks: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
