@@ -37,7 +37,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tests'))
 from support.candidate_suite import JOURNEY_SUITES, \
-    checkout_identity
+    checkout_identity, journey_identity_excludes
 
 SCHEMA = 'memveil-journey-prep/1'
 
@@ -184,7 +184,9 @@ def prepare(record_path):
     and re-verified after the last: the two must agree, so
     an edit during prep refuses instead of mislabelling an
     older executable. The record file itself and the staged
-    copies are excluded from the digest.
+    copies are derived outputs excluded from the digest
+    through the exclusion list shared with the launcher, so
+    both sides hash the identical source set.
     """
     if set(JOURNEY_SUITES) != set(TARGETS):
         raise ValueError(
@@ -194,8 +196,12 @@ def prepare(record_path):
     _refuse_symlinked_path(raw_abs.parent)
     record_abs = raw_abs.resolve()
     staged_dir = _private_stage_dir(record_abs)
+    planned = [str(staged_dir / TARGETS[suite])
+               for suite in JOURNEY_SUITES]
+    excludes = journey_identity_excludes(
+        str(record_abs), planned)
     commit_before, tree_before = checkout_identity(
-        exclude=[str(record_abs)])
+        exclude=excludes)
     suites = {}
     for suite in JOURNEY_SUITES:
         executable = build_executable(TARGETS[suite])
@@ -214,10 +220,8 @@ def prepare(record_path):
                          'target': TARGETS[suite]}
         print('prep: %s -> %s sha256:%s'
               % (suite, staged, digest[:16]))
-    staged_paths = [entry['staged']
-                    for entry in suites.values()]
     commit_after, tree_after = checkout_identity(
-        exclude=[str(record_abs)] + staged_paths)
+        exclude=excludes)
     if commit_after != commit_before \
             or tree_after != tree_before:
         raise ValueError(

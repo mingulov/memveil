@@ -539,6 +539,83 @@ def test_journey_honest_prep_and_launch_accepts(sealed,
     assert '0 failed' in combined, combined
 
 
+def test_journey_identity_excludes_stage_not_sources():
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import checkout_identity, \
+        journey_identity_excludes
+    probe = ROOT / ('journey-exclusion-probe-%d' % os.getpid())
+    probe.mkdir()
+    try:
+        record = probe / 'prep.json'
+        record.write_text('{}\n')
+        staged = probe / 'staged-exe'
+        staged.write_bytes(b'staged-bytes\n')
+        source = probe / 'source.py'
+        source.write_text('print("source")\n')
+        excludes = journey_identity_excludes(
+            str(record), [str(staged)])
+        assert excludes == [str(record.resolve()),
+                            str(staged.resolve())]
+        _, first = checkout_identity(exclude=excludes)
+        with staged.open('ab') as stream:
+            stream.write(b'more-staged-bytes\n')
+        with record.open('ab') as stream:
+            stream.write(b'more-record-bytes\n')
+        assert checkout_identity(
+            exclude=excludes)[1] == first
+        with source.open('ab') as stream:
+            stream.write(b'more-source-bytes\n')
+        assert checkout_identity(
+            exclude=excludes)[1] != first
+    finally:
+        shutil.rmtree(probe, ignore_errors=True)
+    prep_text = (ROOT / 'tests/support/journey_prep.py') \
+        .read_text()
+    dispatch_text = (
+        ROOT / 'tests/support/candidate_suite.py').read_text()
+    assert prep_text.count(
+        'def journey_identity_excludes') \
+        + dispatch_text.count(
+            'def journey_identity_excludes') == 1
+    assert 'journey_identity_excludes(' in prep_text
+    assert dispatch_text.count(
+        'journey_identity_excludes(') >= 2
+
+
+def test_journey_in_checkout_prep_and_launch_accepts(
+        sealed, tmp_path, monkeypatch):
+    # The record and its stage live inside the checkout, so
+    # the digest would see them: identical exclusion sets on
+    # both sides accept instead of self-invalidating.
+    harness = ('#!/bin/sh\necho journey-marker\n'
+               'echo "running 1 tests"\n'
+               'echo "test journey_probe ... ok"\n'
+               'echo "test result: ok. 1 passed; 0 failed; '
+               '0 ignored; 0 measured; 0 filtered out"\n')
+    fake = tmp_path / 'fake-exe'
+    fake.write_text(harness)
+    fake.chmod(0o755)
+    sys.path.insert(0, str(ROOT / 'tests'))
+    import support.journey_prep as prep
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    probe = ROOT / ('journey-roundtrip-probe-%d' % os.getpid())
+    probe.mkdir()
+    try:
+        prep.prepare(str(probe / 'prep.json'))
+        environment = candidate_clean_env()
+        environment.update(sealed)
+        environment['MV_JOURNEY_PREP'] = str(
+            probe / 'prep.json')
+        result = _launch_journey('deb', environment)
+        combined = result.stdout + result.stderr
+        assert result.returncode == 0, combined
+        assert 'journey-marker' in result.stdout, combined
+        assert '1 passed' in combined, combined
+    finally:
+        shutil.rmtree(probe, ignore_errors=True)
+
+
 def test_journey_tampered_executable_post_prep_refuses(
         sealed, tmp_path):
     import hashlib

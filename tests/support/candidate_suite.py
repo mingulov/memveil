@@ -117,10 +117,10 @@ def checkout_identity(exclude=()):
     every tracked and every untracked non-ignored file,
     so it binds the sources the recorded executables were
     built from, clean or dirty. Ignored build outputs never
-    enter the digest. exclude holds absolute paths (the
-    prep record itself) skipped by identity. Refuses when
-    any listed file is unreadable. Shared with the prep
-    tool, which imports it from here.
+    enter the digest. exclude holds absolute paths skipped
+    by identity. Refuses when any listed file is
+    unreadable. Shared with the prep tool, which imports it
+    from here.
     """
     head = _git_lines('rev-parse', 'HEAD')[0].strip()
     if len(head) != 40 \
@@ -151,6 +151,23 @@ def checkout_identity(exclude=()):
         material.update(name.encode('utf-8') + b'\0')
         material.update(content + b'\0')
     return head, material.hexdigest()
+
+
+def journey_identity_excludes(record_path, staged_paths):
+    """Checkout-identity exclusion set shared by prep and launch.
+
+    The prep record and its staged executables are derived
+    outputs, never source: the prep tool (before and after
+    its builds) and the journey launcher exclude the same
+    absolute paths from the checkout digest, so a freshly
+    prepared record verifies instead of self-invalidating.
+    Both sides call this one function; no duplicated lists
+    to drift.
+    """
+    excludes = [str(Path(record_path).resolve())]
+    excludes.extend(str(Path(path).resolve())
+                   for path in staged_paths)
+    return excludes
 
 
 def _journey_record(live):
@@ -232,10 +249,14 @@ def _run_journey(suite, argv, live):
     suite's), and the staged executable bytes (re-hashed
     before exec); a stale record, a rebuilt-from-dirty
     checkout, a suite mixup, a missing or aliased staged
-    executable, or digest drift refuses. The staged copy
-    is the only executed path: the original build output
-    is provenance only and is never resolved here. The
-    run's own output must carry executed-test evidence
+    executable, or digest drift refuses. The record and
+    every staged executable it names are derived outputs
+    excluded from the digest through the exclusion list
+    shared with the prep tool, so both sides hash the
+    identical source set. The staged copy is the only
+    executed path: the original build output is
+    provenance only and is never resolved here. The run's
+    own output must carry executed-test evidence
     (the load-bearing control: a stub reporting bare
     success has none). No build invocation on this path.
 
@@ -287,7 +308,14 @@ def _run_journey(suite, argv, live):
             'recorded journey staged executable changed; '
             're-run tests/support/journey_prep.py: '
             + suite)
-    commit, tree = checkout_identity(exclude=[name])
+    staged_paths = [
+        other['staged'] for other in record['suites'].values()
+        if isinstance(other, dict)
+        and isinstance(other.get('staged'), str)
+        and Path(other['staged']).is_absolute()]
+    commit, tree = checkout_identity(exclude=
+                                     journey_identity_excludes(
+                                         name, staged_paths))
     if commit != record['commit'] or tree != record['tree']:
         raise ValueError(
             'checkout changed since fixture prep; re-run '
