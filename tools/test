@@ -16,7 +16,7 @@
 # offline-environment, perf-replay, perf-region,
 # perf-workload, perf-overhead, soak, preview-package,
 # provenance, docs, examples, candidate, candidate-matrix,
-# candidate-custody.
+# candidate-custody, candidate-inputs, vm-live-soak.
 #
 # A skipped suite is reported as skipped, never as success.
 # Exit 0 only when the suite passes; 1 on test failure; 2 on
@@ -29,7 +29,10 @@
 # binary before dispatch. The link stays after the run.
 # The release binary must exist before dispatch: a missing
 # binary exits 1 without running any suite (an unknown
-# suite name then also reports exit 1, not 2).
+# suite name then also reports exit 1, not 2). Candidate
+# mode routes before this check and never touches the
+# build tree, so qualification works with an empty dev
+# build tree.
 # LMB_SANITIZE=1 exports fail-fast UBSan options for
 # sanitizer-instrumented runs (plain binaries ignore this).
 #
@@ -49,10 +52,34 @@
 # The qualify suite runs the built qualify verb: usage,
 # host-independent arg/capability refusals, and floor-gated
 # (x86_64 kernel >= 7) profile refusals.
+# With MV_BUNDLE_TARBALL or MV_CANDIDATE_MANIFEST set, the
+# suite routes through tests/support/candidate_suite.py
+# before any build-tree access: perf-replay, perf-region,
+# soak, privacy, fuzz-smoke, fuzz-campaign, perf-overhead,
+# perf-workload, vm-live-soak, release-runtime, package,
+# deb, rpm-journey, vm-kernels, vm-scenarios and
+# extracted-robustness run against the verified candidate.
+# Partial inputs fail closed with exit 2, as do other
+# suites given candidate inputs. Unarmed vm-live-soak
+# without candidate inputs skips with exit 77. The
+# candidate-inputs suite aggregates the loader and
+# dispatch tests.
 
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+if [ "$#" = 1 ] && [ "$1" != --help ] && [ "$1" != -h ] && \
+   { [ "${MV_BUNDLE_TARBALL+x}" = x ] || [ "${MV_CANDIDATE_MANIFEST+x}" = x ]; }; then
+    exec python3 "$ROOT/tests/support/candidate_suite.py" "$1"
+fi
+if [ "$#" = 1 ] && [ "$1" = vm-live-soak ]; then
+    echo "vm-live-soak: SKIP: needs candidate inputs" >&2
+    exit 77
+fi
+if [ "$#" = 1 ] && [ "$1" = candidate-inputs ]; then
+    exec python3 -m pytest "$ROOT/tests/support/test_candidate_input.py" "$ROOT/tests/support/test_candidate_suites.py" -q
+fi
 
 if [ "${LMB_SANITIZE:-0}" = 1 ]; then
     # UBSan prints and recovers by default, which would let a
