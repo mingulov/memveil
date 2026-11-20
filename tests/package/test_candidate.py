@@ -6,6 +6,7 @@ bundle, archive, and receipt below is assembled in a temporary
 directory, and only the verification logic under test is real.
 """
 
+import ast
 import base64
 import copy
 import gzip
@@ -3518,6 +3519,8 @@ def test_remote_checks_mirror_custody():
 
 CI_SELECTION = ROOT / "tests" / "pytest-ci-selection.json"
 CI_SELECTION_SCHEMA = "memveil-pytest-ci-selection/1"
+CI_SKIPS = ROOT / "tests" / "pytest-ci-expected-skips.json"
+CI_SKIPS_SCHEMA = "memveil-pytest-ci-expected-skips/1"
 # MEMVEIL_* names that never arm privileged behavior: evidence
 # paths, measurement parameters, and harness controls. Every
 # other MEMVEIL_* name fails the CI unarmed guard closed as
@@ -3594,6 +3597,41 @@ def test_ci_selection_audited():
     assert allow["exact"] == sorted(allow["exact"])
     assert list(allow["prefixes"]) == \
         list(CI_UNARMED_ALLOW_PREFIXES)
+    skips_doc = json.loads(CI_SKIPS.read_text())
+    assert set(skips_doc) == {"schema", "skips"}
+    assert skips_doc["schema"] == CI_SKIPS_SCHEMA
+    skips = skips_doc["skips"]
+    assert isinstance(skips, list) and skips
+    # Reasons render joined at runtime while sources split
+    # them across literals (the AST joins implicit
+    # concatenation), and shared helpers attribute skips to
+    # their callers: every allowlisted reason must equal a
+    # string literal somewhere in the selection. The CI gate
+    # enforces the exact runtime string per file.
+    consts = set()
+    for path in run:
+        text = (ROOT / path).read_text()
+        consts.update(
+            node.value for node in ast.walk(ast.parse(text))
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str))
+    for entry in skips:
+        assert set(entry) == {"id", "reason", "count"}, entry
+        assert type(entry["count"]) is int \
+            and entry["count"] >= 1, entry
+        assert entry["id"] in run, entry
+        reason = entry["reason"]
+        assert isinstance(reason, str) and reason.strip(), \
+            entry
+        assert reason in consts, entry
+    assert [(entry["id"], entry["reason"])
+            for entry in skips] == sorted(
+                (entry["id"], entry["reason"])
+                for entry in skips), \
+        "skips must be sorted by (id, reason)"
+    assert len({(entry["id"], entry["reason"])
+                for entry in skips}) == len(skips), \
+        "duplicate skip entry"
     doc = _rust_workflow()
     assert set(doc["jobs"]) == {"deny", "rust-test", "pytest"}
     job = doc["jobs"]["pytest"]
@@ -3670,8 +3708,58 @@ def test_ci_selection_audited():
         if "-m pytest" in run
         and "pytest-ci-selection.json" in run)
     assert "FILES" in selected
+    assert "-rs" in selected
+    assert "pytest_skip_gate.py" in selected
+    assert "pytest-ci-expected-skips.json" in selected
+    assert "PIPESTATUS" in selected
     for name, run in sorted(runs.items()):
         proc = subprocess.run(
             ["bash", "-n"], input=run, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         assert proc.returncode == 0, (name, proc.stderr)
+
+
+def test_ci_skip_gate_reports(tmp_path):
+    gate = ROOT / "tools" / "pytest_skip_gate.py"
+    skips = json.loads(CI_SKIPS.read_text())["skips"]
+
+    def lines(counts):
+        return ["SKIPPED [1] %s: %s" % (entry["id"], entry["reason"])
+                for entry, count in zip(skips, counts)
+                for _ in range(count)]
+
+    def check(report_lines):
+        report = tmp_path / "report.txt"
+        report.write_text("1 passed\n" + "\n".join(report_lines)
+                          + "\n")
+        return subprocess.run(
+            [sys.executable, str(gate), str(CI_SKIPS),
+             str(report)],
+            capture_output=True, text=True)
+
+    full = [entry["count"] for entry in skips]
+    proc = check(lines(full))
+    assert proc.returncode == 0, proc.stderr
+    assert "all listed" in proc.stdout
+    proc = check(lines(full) + [
+        "SKIPPED [1] tests/vm/test_live_soak.py: "
+        "synthetic unlisted reason"])
+    assert proc.returncode == 1, proc.stdout
+    assert "unlisted skip" in proc.stderr
+    short = list(full)
+    short[0] -= 1
+    proc = check(lines(short))
+    assert proc.returncode == 1, proc.stdout
+    assert "count differs" in proc.stderr
+    proc = check([])
+    assert proc.returncode == 1, proc.stdout
+    assert "stale allowlist entry" in proc.stderr
+    proc = subprocess.run(
+        [sys.executable, str(gate)],
+        capture_output=True, text=True)
+    assert proc.returncode == 2
+    proc = subprocess.run(
+        [sys.executable, str(gate), str(tmp_path / "missing.json"),
+         str(tmp_path / "missing.txt")],
+        capture_output=True, text=True)
+    assert proc.returncode == 1

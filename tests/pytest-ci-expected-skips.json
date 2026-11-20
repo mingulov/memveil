@@ -1,0 +1,35 @@
+{
+  "schema": "memveil-pytest-ci-expected-skips/1",
+  "skips": [
+    {
+      "count": 6,
+      "id": "tests/cli/test_capture_failures.py",
+      "reason": "checkpoint_probe retired with the Mojo tree (cutover); durability/failure oracles need a Rust probe binary"
+    },
+    {
+      "count": 1,
+      "id": "tests/cli/test_capture_integrity.py",
+      "reason": "Rust reader never calls fdopen (no C stdio), so the injected failure cannot fire; exit 0 with normal output is correct. Open-failure refusals stay covered by test_finalized_special_files_refuse_before_reading plus the native fault-injection harness (src/capture/writer.rs faults::FaultPlan pwrite/fsync/truncate/rename faults) and reader refusal tests in src/capture/reader.rs."
+    },
+    {
+      "count": 1,
+      "id": "tests/vm/test_capture_durability_oracle.py",
+      "reason": "checkpoint_probe retired with the Mojo tree (cutover); durability oracle needs a Rust probe binary"
+    },
+    {
+      "count": 3,
+      "id": "tests/vm/test_core_layouts.py",
+      "reason": "fixture regen inputs retired with the C/Mojo tree; committed fixtures carry the suites"
+    },
+    {
+      "count": 12,
+      "id": "tests/vm/test_fixture_generation.py",
+      "reason": "fixture regen inputs retired with the C/Mojo tree; committed fixtures carry the suites"
+    },
+    {
+      "count": 3,
+      "id": "tests/vm/test_gate_kernel.py",
+      "reason": "fixture regen inputs retired with the C/Mojo tree; committed fixtures carry the suites"
+    }
+  ]
+}

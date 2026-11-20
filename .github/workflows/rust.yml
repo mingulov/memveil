@@ -220,4 +220,6 @@ jobs:
           set -eu
           mapfile -t FILES < <(python3 -c 'import json; print("\n".join(json.load(open("tests/pytest-ci-selection.json"))["run"]))')
           test "${#FILES[@]}" -gt 0
-          python3 -m pytest "${FILES[@]}" -q
+          python3 -m pytest "${FILES[@]}" -q -rs 2>&1 | tee pytest-ci.log
+          test "${PIPESTATUS[0]}" -eq 0
+          python3 tools/pytest_skip_gate.py tests/pytest-ci-expected-skips.json pytest-ci.log
