@@ -149,21 +149,34 @@ pub fn rebuild_requested() -> bool {
 
 /// True when both candidate inputs are set (qualification mode).
 ///
-/// Panics when exactly one is set: partial candidate inputs
-/// fail closed, never silently fall back to building.
-/// Candidate mode also refuses foreign `LD_LIBRARY_PATH`
-/// values before anything runs (see
-/// `check_candidate_loader_env`): every candidate-mode test
-/// reaches this predicate before its first spawn.
+/// Presence is tested, not truthiness: unset means dev, but
+/// set-but-empty (or non-unicode) is invalid input and
+/// panics, never collapsing into dev mode. Exactly one set
+/// panics as partial: partial candidate inputs fail closed,
+/// never silently fall back to building. Candidate mode
+/// also refuses foreign `LD_LIBRARY_PATH` values before
+/// anything runs (see `check_candidate_loader_env`): every
+/// candidate-mode test reaches this predicate before its
+/// first spawn.
 pub fn candidate_mode() -> bool {
-    let bundle = std::env::var("MV_BUNDLE_TARBALL").unwrap_or_default();
-    let manifest = std::env::var("MV_CANDIDATE_MANIFEST").unwrap_or_default();
+    for key in ["MV_BUNDLE_TARBALL", "MV_CANDIDATE_MANIFEST"] {
+        if let Some(raw) = std::env::var_os(key) {
+            if raw.is_empty() {
+                panic!("candidate inputs invalid: {key} is set but empty");
+            }
+            if std::env::var(key).is_err() {
+                panic!("candidate inputs invalid: {key} is not unicode");
+            }
+        }
+    }
+    let bundle_set = std::env::var_os("MV_BUNDLE_TARBALL").is_some();
+    let manifest_set = std::env::var_os("MV_CANDIDATE_MANIFEST").is_some();
     assert!(
-        bundle.is_empty() == manifest.is_empty(),
+        bundle_set == manifest_set,
         "candidate inputs partial: qualification requires both \
          MV_BUNDLE_TARBALL and MV_CANDIDATE_MANIFEST"
     );
-    let mode = !bundle.is_empty();
+    let mode = bundle_set;
     if mode {
         check_candidate_loader_env();
     }

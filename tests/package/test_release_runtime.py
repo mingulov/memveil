@@ -688,6 +688,53 @@ def test_sealed_inputs_used(tmp_path, audited_target_dir):
         "partial-input refusal must name both inputs"
 
 
+def test_candidate_inputs_set_but_empty_refuse(audited_target_dir):
+    # Set-but-empty is invalid input, never dev mode: one
+    # empty plus one set fails, both empty fails, and both
+    # unset stays dev (the leg skips cleanly). The refusal
+    # fires before any input is read, so the set side needs
+    # no valid seal here.
+    target_dir = audited_target_dir
+    binary = _test_binary("package_deb", target_dir)
+    for key in ("MV_BUNDLE_TARBALL", "MV_CANDIDATE_MANIFEST"):
+        env = {"PATH": os.environ.get("PATH", ""),
+               "CARGO_TARGET_DIR": str(target_dir),
+               "MV_BUNDLE_TARBALL": "dispatched",
+               "MV_CANDIDATE_MANIFEST": "dispatched"}
+        env[key] = ""
+        proc = subprocess.run(
+            [str(binary), "sealed_inputs_used", "--nocapture"],
+            cwd=str(ROOT), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, env=env)
+        assert proc.returncode != 0, \
+            "empty %s silently accepted" % key
+        assert "invalid" in proc.stderr + proc.stdout, \
+            "empty-input refusal must say invalid"
+        assert key in proc.stderr + proc.stdout, \
+            "empty-input refusal must name the variable"
+    env = {"PATH": os.environ.get("PATH", ""),
+           "CARGO_TARGET_DIR": str(target_dir),
+           "MV_BUNDLE_TARBALL": "",
+           "MV_CANDIDATE_MANIFEST": ""}
+    proc = subprocess.run(
+        [str(binary), "sealed_inputs_used", "--nocapture"],
+        cwd=str(ROOT), stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, env=env)
+    assert proc.returncode != 0, \
+        "both-empty candidate inputs silently accepted"
+    assert "invalid" in proc.stderr + proc.stdout, \
+        "both-empty refusal must say invalid"
+    env = {"PATH": os.environ.get("PATH", ""),
+           "CARGO_TARGET_DIR": str(target_dir)}
+    proc = subprocess.run(
+        [str(binary), "sealed_inputs_used", "--nocapture"],
+        cwd=str(ROOT), stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, env=env)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert "1 passed" in proc.stdout + proc.stderr, \
+        "unset inputs must stay dev"
+
+
 def test_candidate_loader_env_operator_refused(
         tmp_path, audited_target_dir):
     # An operator loader override refuses pre-exec in
