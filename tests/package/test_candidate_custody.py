@@ -953,4 +953,3 @@ def test_release_version_binding():
             ("v0.4.0", "0.4.0", "0.4.0", "security-workflow")]:
         with pytest.raises(ValueError):
             m.verify_release_version(tag, binary, source, claim)
-
