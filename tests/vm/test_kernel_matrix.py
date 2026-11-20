@@ -3411,6 +3411,37 @@ def test_shrink_busy_events_missing_file(tmp_path):
     assert error
 
 
+def test_shrink_busy_events_binds_counters(tmp_path):
+    cap = tmp_path / "busy" / "cap"
+    cap.mkdir(parents=True)
+    text = '{"kind": "bounce_attempt"}\n' \
+        '{"kind": "counter_snapshot", "data": ' \
+        '{"counter_id": "c", "epoch": 0, "value": 5}}\n' \
+        '{"kind": "counter_snapshot", "data": ' \
+        '{"counter_id": "c", "epoch": 0, "value": 9}}\n'
+    (cap / "events.ndjson").write_text(text)
+    summary, error = km.shrink_busy_events(
+        str(tmp_path / "busy"))
+    assert error is None
+    assert summary["counters"] == {"c": 4}
+    assert summary["counters_error"] is None
+
+
+def test_shrink_busy_events_records_counter_error(tmp_path):
+    cap = tmp_path / "busy" / "cap"
+    cap.mkdir(parents=True)
+    text = '{"kind": "counter_snapshot", "data": ' \
+        '{"counter_id": "c", "epoch": 0, "value": 9}}\n' \
+        '{"kind": "counter_snapshot", "data": ' \
+        '{"counter_id": "c", "epoch": 0, "value": 5}}\n'
+    (cap / "events.ndjson").write_text(text)
+    summary, error = km.shrink_busy_events(
+        str(tmp_path / "busy"))
+    assert error is None
+    assert summary["counters"] is None
+    assert "backwards" in summary["counters_error"]
+
+
 def _counter_lines(pairs):
     lines = []
     for seq, (ident, epoch, value) in enumerate(pairs):
@@ -5148,6 +5179,40 @@ def test_run_validator_transcript_unwritable(tmp_path,
     monkeypatch.setattr(tool.Path, "write_text", boom)
     rc, out = tool.run_validator(str(export))
     assert "transcript unwritten" in out
+
+
+def test_run_validator_retains_record(tmp_path):
+    tool = _tool_module()
+    export = tmp_path / "row"
+    cap = export / "cap"
+    cap.mkdir(parents=True)
+    (cap / "session.json").write_text("{}")
+    (cap / "events.ndjson").write_text("")
+    rc, out = tool.run_validator(str(export))
+    record = json.loads(
+        (export / "validate.json").read_text())
+    assert record == {"rc": rc, "out": out}
+
+
+def test_run_validator_notes_unretained_record(tmp_path,
+                                               monkeypatch):
+    tool = _tool_module()
+    export = tmp_path / "row"
+    cap = export / "cap"
+    cap.mkdir(parents=True)
+    (cap / "session.json").write_text("{}")
+    (cap / "events.ndjson").write_text("")
+    real_write_text = tool.Path.write_text
+
+    def selective(self, *args, **kwargs):
+        if str(self).endswith("validate.json"):
+            raise OSError("synthetic unwritable")
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(tool.Path, "write_text", selective)
+    rc, out = tool.run_validator(str(export))
+    assert "validate record unwritten" in out
+    assert not (export / "validate.json").exists()
 
 
 def test_release_agrees_rejects_rc_mismatch():

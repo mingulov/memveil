@@ -27,6 +27,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "tests/package"))
 sys.path.insert(0, str(ROOT / "tests" / "vm"))
 import candidate as c
+import kernel_matrix as km
 from test_kernel_matrix import _admitted_entry
 from test_candidate import (
     cargo_build_harness, git, probe_tools, sha, _commit_as,
@@ -717,9 +718,10 @@ def test_import_rejects_failing_row_predicates(
         custody_base, tmp_path, monkeypatch):
     m = api()
     fix = fresh(custody_base, tmp_path)
-    # The attack: the campaign's persisted counts change, so the
-    # re-derived row predicates fail while the inventory and
-    # every signature still verify.
+    # The attack: the oracle counts change identically in the
+    # retained raw file and the cached transcription, with
+    # every unsigned hash refreshed, so only the re-derived
+    # row predicates can refuse.
     evidence = Path(tmp_path) / "evidence-tampered"
     with tarfile.open(fileobj=io.BytesIO(
             fix["archive_bytes"]), mode="r:gz") as stream:
@@ -727,10 +729,20 @@ def test_import_rejects_failing_row_predicates(
     inner = evidence / "evidence"
     row = next(path for path in (inner / "matrix").iterdir()
                if path.is_dir())
+    oracle = row / "oracle.txt"
+    altered = oracle.read_text().replace("13000", "12000")
+    assert altered != oracle.read_text()
+    oracle.write_text(altered)
     cached_path = row / "oracle-inputs.json"
     cached = json.loads(cached_path.read_text())
-    cached["persisted"]["bounce_attempt"] = 1
+    cached["oracle_text"] = altered
     cached_path.write_text(json.dumps(cached))
+    receipt_path = row / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["oracle"]["text_sha256"] = sha(
+        oracle.read_bytes())
+    receipt["files"] = km.row_receipt_files(row)
+    receipt_path.write_bytes(c.canonical(receipt))
     ctx = {"manifest": fix["manifest"],
            "candidate_id": fix["candidate_id"],
            "key": fix["key"], "pub": fix["pub"]}

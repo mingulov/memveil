@@ -201,6 +201,127 @@ def test_verify_row_cache_vs_raw(tmp_path):
         km.verify_row_cache_vs_raw(row, None)
 
 
+@pytest.mark.parametrize('field,value', [
+    ('vng_exit', '1'),
+    ('fail_txt', 'guest failed\n'),
+    ('doctor_exit', '1'),
+    ('doctor_passive_exit', '1'),
+    ('record_exit', '0'),
+    ('report_exit', '0'),
+    ('report_json_exit', '0'),
+    ('udev_exit', '1\n'),
+    ('udev_out', 'tampered\n'),
+    ('busy_record_exit', '1'),
+    ('busy_end_reason', 'tampered\n'),
+    ('busy_report_exit', '1'),
+    ('busy_report_json_exit', '1'),
+    ('oracle_mode', 'countonly'),
+])
+def test_cache_scalar_mismatch_refuses(tmp_path, field, value):
+    doc, lock, row, ev, rec, receipt = exported_fixture(tmp_path)
+    bad = copy.deepcopy(ev)
+    bad[field] = value
+    with pytest.raises(ValueError, match='differs from retained'):
+        km.verify_row_cache_vs_raw(row, bad)
+
+
+def test_cache_refusal_mismatch_refuses(tmp_path):
+    doc, lock, row, ev, rec, receipt = exported_fixture(tmp_path)
+    bad = copy.deepcopy(ev)
+    bad['refusals'] = {'cap-attempt-trace': {
+        'exit': '0', 'out': '', 'exists': '1'}}
+    with pytest.raises(ValueError, match='differs from retained'):
+        km.verify_row_cache_vs_raw(row, bad)
+
+
+def test_missing_retained_exit_refuses(tmp_path):
+    doc, lock, row, ev, rec, receipt = exported_fixture(tmp_path)
+    (row / 'record.exit').unlink()
+    with pytest.raises(ValueError, match='differs from retained'):
+        km.verify_row_cache_vs_raw(row, ev)
+
+
+@pytest.mark.parametrize('field', ['miss_snaps',
+                                    'busy_miss_snaps'])
+def test_cache_snaps_mismatch_refuses(tmp_path, field):
+    doc, lock, row, ev, rec, receipt = exported_fixture(tmp_path)
+    bad = copy.deepcopy(ev)
+    bad[field][0][0] += 1
+    with pytest.raises(ValueError, match='differs from retained'):
+        km.verify_row_cache_vs_raw(row, bad)
+
+
+@pytest.mark.parametrize('key,sub', [
+    ('persisted', 'bounce_attempt'),
+    ('persisted_bytes', 'requested'),
+    ('persisted_copy_dirs', 'original_to_bounce'),
+    ('counters', 'swiotlb.bounce_attempts'),
+])
+def test_cache_rederivation_mismatch_refuses(tmp_path, key,
+                                             sub):
+    doc, lock, row, ev, rec, receipt = exported_fixture(tmp_path)
+    bad = copy.deepcopy(ev)
+    bad[key][sub] = 1
+    with pytest.raises(ValueError, match='differs from retained'):
+        km.verify_row_cache_vs_raw(row, bad)
+
+
+def test_cache_unpaired_mismatch_refuses(tmp_path):
+    doc, lock, row, ev, rec, receipt = exported_fixture(tmp_path)
+    bad = copy.deepcopy(ev)
+    bad['unpaired_count'] = 1
+    with pytest.raises(ValueError, match='differs from retained'):
+        km.verify_row_cache_vs_raw(row, bad)
+
+
+@pytest.mark.parametrize('field,value', [
+    ('busy_persisted', {'bounce_attempt': 1}),
+    ('busy_events_bytes', 1),
+    ('busy_counters', {'swiotlb.bounce_attempts': 1}),
+])
+def test_cache_busy_mismatch_refuses(tmp_path, field, value):
+    doc, lock, row, ev, rec, receipt = exported_fixture(tmp_path)
+    bad = copy.deepcopy(ev)
+    bad[field] = value
+    with pytest.raises(ValueError, match='differs from retained'):
+        km.verify_row_cache_vs_raw(row, bad)
+
+
+@pytest.mark.parametrize('field', ['validate_rc',
+                                    'busy_validate_rc'])
+def test_cache_validate_rc_mismatch_refuses(tmp_path, field):
+    doc, lock, row, ev, rec, receipt = exported_fixture(tmp_path)
+    bad = copy.deepcopy(ev)
+    bad[field] = 1
+    with pytest.raises(ValueError, match='differs from retained'):
+        km.verify_row_cache_vs_raw(row, bad)
+
+
+def test_cache_validate_out_mismatch_refuses(tmp_path):
+    doc, lock, row, ev, rec, receipt = exported_fixture(tmp_path)
+    bad = copy.deepcopy(ev)
+    bad['validate_out'] += 'tampered\n'
+    with pytest.raises(ValueError, match='differs from retained'):
+        km.verify_row_cache_vs_raw(row, bad)
+
+
+@pytest.mark.parametrize('rel', ['validate.json',
+                                  'busy/validate.json'])
+def test_missing_validate_record_refuses(tmp_path, rel):
+    doc, lock, row, ev, rec, receipt = exported_fixture(tmp_path)
+    (row / rel).unlink()
+    with pytest.raises(ValueError, match='cannot furnish'):
+        km.verify_row_cache_vs_raw(row, ev)
+
+
+def test_cache_redaction_mismatch_refuses(tmp_path):
+    doc, lock, row, ev, rec, receipt = exported_fixture(tmp_path)
+    bad = copy.deepcopy(ev)
+    bad['export_redact_error'] = 'oracle.txt: redacted text'
+    with pytest.raises(ValueError, match='differs from retained'):
+        km.verify_row_cache_vs_raw(row, bad)
+
+
 def matrix_tool():
     from importlib.machinery import SourceFileLoader
     from importlib.util import spec_from_loader, module_from_spec

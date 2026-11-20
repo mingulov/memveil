@@ -224,6 +224,25 @@ def gather_miss_snaps(export, count=4):
     return snaps
 
 
+def _retain_validation(export, rc, out):
+    """Retain one validation outcome; note when it cannot be.
+
+    Writes the validate.txt transcript plus the validate.json
+    {rc, out} record the cache/raw check compares against. A
+    record that cannot be written is noted in the returned
+    outcome, which downstream refuses for lack of retained
+    bytes.
+    """
+    out = out + _write_transcript(export, out)
+    try:
+        Path(export, "validate.json").write_text(
+            json.dumps({"rc": rc, "out": out}) + "\n")
+    except OSError as exc:
+        return rc, out + "\n[validate record unwritten: %s]" \
+            % exc
+    return rc, out
+
+
 def run_validator(export):
     cap = os.path.join(export, "cap")
     if not os.path.isdir(cap):
@@ -234,11 +253,11 @@ def run_validator(export):
             capture_output=True, text=True,
             timeout=CAPTURE_TIMEOUT)
     except subprocess.TimeoutExpired:
-        out = "validate-schemas timed out"
-        return 99, out + _write_transcript(export, out)
+        return _retain_validation(
+            export, 99, "validate-schemas timed out")
     out = ((proc.stdout or "") + (proc.stderr or "")).strip()
-    return proc.returncode, \
-        out[-2000:] + _write_transcript(export, out)
+    return _retain_validation(export, proc.returncode,
+                              out[-2000:])
 
 
 def _write_transcript(export, out):

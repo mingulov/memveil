@@ -2333,19 +2333,23 @@ def assert_redacted(text):
 REDACT_SKIP_FILES = ("artifacts.json", "progs0.json",
                      "progs1.json", "progs2.json",
                      "progs3.json", "report.json",
-                     "configid.txt", "btf-sha.txt")
+                     "configid.txt", "btf-sha.txt",
+                     "events_summary.json")
 
 
-def scan_export_redaction(export):
+def scan_export_redaction(export, skip=()):
     """Assert every guest text export is redacted.
 
     Skips exactly the capture dirs (product output,
     covered by the product privacy suites) and the files
-    that carry hashes and bpftool tags by design. Returns
-    None when clean, else the first offending file and
-    reason.
+    that carry hashes and bpftool tags by design. The
+    skip set holds extra row-relative paths to ignore, so
+    a later re-execution can exclude host files written
+    after the collect-time scan. Returns None when clean,
+    else the first offending file and reason.
     """
     root = str(export)
+    skip = frozenset(skip)
     for dirpath, dirnames, filenames in os.walk(root):
         rel = os.path.relpath(dirpath, root)
         if rel == "." and "cap" in dirnames:
@@ -2356,6 +2360,8 @@ def scan_export_redaction(export):
             if name in REDACT_SKIP_FILES:
                 continue
             path = os.path.join(dirpath, name)
+            if os.path.relpath(path, root) in skip:
+                continue
             try:
                 with open(path, "rb") as handle:
                     text = handle.read().decode("utf-8")
@@ -2376,6 +2382,9 @@ def shrink_busy_events(busy_dir):
     Writes events_summary.json beside the capture and only
     then unlinks the 1 GB events file; on any read or
     parse failure the file is kept and the error returned.
+    The summary also binds the counter deltas derived from
+    the same bytes, so the cached busy counters stay
+    verifiable after their source file is gone.
     """
     path = os.path.join(str(busy_dir), "cap", "events.ndjson")
     try:
@@ -2391,8 +2400,16 @@ def shrink_busy_events(busy_dir):
         counts = persisted_counts(text.splitlines(keepends=True))
     except ValueError as exc:
         return None, "busy events: %s" % exc
+    try:
+        counters = counter_deltas(
+            text.splitlines(keepends=True))
+        counters_error = None
+    except ValueError as exc:
+        counters, counters_error = None, str(exc)
     summary = {"sha256": hashlib.sha256(raw).hexdigest(),
-               "bytes": len(raw), "counts": counts}
+               "bytes": len(raw), "counts": counts,
+               "counters": counters,
+               "counters_error": counters_error}
     dest = os.path.join(str(busy_dir), "events_summary.json")
     try:
         with open(dest, "w") as handle:
@@ -3943,6 +3960,7 @@ _ROW_TOP_FILES = frozenset({
     "oracle-inputs.json", "job.json", "cache.txt",
     "cache-FAIL.txt", "download.txt",
     "console.txt", "vng.exit", "FAIL.txt", "validate.txt",
+    "validate.json",
     "artifacts.json", "blockstat.json", "configid.txt",
     "btf-sha.txt", "dev.txt", "dmesg.txt", "dmesg_scan.json",
     "doctor.exit", "doctor.json", "doctor.stderr",
@@ -3972,7 +3990,7 @@ _ROW_BUSY_FILES = frozenset({
     "busy.stderr", "events_summary.json", "report.exit",
     "report.json", "report.out", "report.stderr",
     "report-json.exit", "report-json.stderr",
-    "progs_times.json", "validate.txt",
+    "progs_times.json", "validate.txt", "validate.json",
 })
 _ROW_BUSY_RES = (re.compile(r"progs[0-9]+\.json"),)
 _ROW_NEG_RE = re.compile(
@@ -5468,38 +5486,306 @@ _CACHE_RAW_TEXT = (
     ("busy_out_text", "busy/busy.out"),
     ("busy_session_text", "busy/cap/session.json"),
     ("oracle_stderr", "oracle.stderr"),
+    ("vng_exit", "vng.exit"),
+    ("fail_txt", "FAIL.txt"),
+    ("doctor_exit", "doctor.exit"),
+    ("doctor_passive_exit", "doctor-passive.exit"),
+    ("record_exit", "record.exit"),
+    ("report_exit", "report.exit"),
+    ("report_json_exit", "report-json.exit"),
+    ("udev_exit", "udev.exit"),
+    ("udev_out", "udev.out"),
+    ("busy_record_exit", "busy/record.exit"),
+    ("busy_end_reason", "busy/end_reason.txt"),
+    ("busy_report_exit", "busy/report.exit"),
+    ("busy_report_json_exit", "busy/report-json.exit"),
 )
+
+_MISSING_EVENTS = "missing events.ndjson"
+
+
+def _retained_text(row, rel):
+    """Decoded retained text, None when absent.
+
+    Raises ValueError when the path is not a regular file
+    or cannot be read as UTF-8.
+    """
+    path = row / rel
+    if path.is_symlink() \
+            or (path.exists() and not path.is_file()):
+        raise ValueError(
+            "matrix retained %s is not a regular file"
+            % rel)
+    if not path.exists():
+        return None
+    try:
+        return path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeError):
+        raise ValueError(
+            "matrix retained %s is unreadable" % rel)
+
+
+def _reread_miss_snaps(row, subdir, count):
+    """Re-derive bpftool snapshots from retained files.
+
+    Mirrors the collector's snapshot gathering exactly,
+    including which unreadable timestamp or program list
+    becomes None. Returns [[nsecs-or-None, text-or-None]].
+    """
+    base = row / subdir if subdir else row
+    prefix = subdir + "/" if subdir else ""
+    try:
+        times = json.loads(
+            (base / "progs_times.json").read_bytes())
+    except (OSError, ValueError):
+        times = {}
+    if not isinstance(times, dict):
+        times = {}
+    snaps = []
+    for idx in range(count):
+        try:
+            nsecs = int(times[str(idx)])
+        except (KeyError, TypeError, ValueError):
+            nsecs = None
+        snaps.append([nsecs, _retained_text(
+            row, "%sprogs%d.json" % (prefix, idx))])
+    return snaps
+
+
+def _reread_events_derivations(row):
+    """Re-run the collect-time events derivations.
+
+    Mirrors gather_persisted/gather_counters/gather_unpaired
+    exactly, including which OSError/ValueError becomes
+    which error string. Returns the {persisted,
+    persisted_bytes, persisted_copy_dirs, events_error,
+    counters, counters_error, unpaired_count, unpaired_bytes,
+    unpaired_error} map.
+    """
+    path = row / "cap" / "events.ndjson"
+    if path.is_symlink() \
+            or (path.exists() and not path.is_file()):
+        raise ValueError(
+            "matrix retained cap/events.ndjson is not a "
+            "regular file")
+    try:
+        with open(path) as handle:
+            counts = persisted_counts(handle)
+        with open(path) as handle:
+            byts = persisted_bytes(handle)
+        with open(path) as handle:
+            dirs = persisted_copy_dirs(handle)
+        events_error = None
+    except OSError:
+        counts, byts, dirs, events_error = \
+            None, None, None, _MISSING_EVENTS
+    except ValueError as exc:
+        counts, byts, dirs, events_error = \
+            None, None, None, str(exc)
+    try:
+        with open(path) as handle:
+            counters = counter_deltas(handle)
+        counters_error = None
+    except OSError:
+        counters, counters_error = None, _MISSING_EVENTS
+    except ValueError as exc:
+        counters, counters_error = None, str(exc)
+    try:
+        with open(path) as handle:
+            unpaired_count, unpaired_bytes = unpaired_maps(
+                handle)
+        unpaired_error = None
+    except OSError:
+        unpaired_count, unpaired_bytes, unpaired_error = \
+            None, None, _MISSING_EVENTS
+    except ValueError as exc:
+        unpaired_count, unpaired_bytes, unpaired_error = \
+            None, None, str(exc)
+    return {"persisted": counts, "persisted_bytes": byts,
+            "persisted_copy_dirs": dirs,
+            "events_error": events_error,
+            "counters": counters,
+            "counters_error": counters_error,
+            "unpaired_count": unpaired_count,
+            "unpaired_bytes": unpaired_bytes,
+            "unpaired_error": unpaired_error}
+
+
+def _reread_busy_summary(row):
+    """Expected busy derivations, or None when none retained.
+
+    A retained busy events file re-executes (and a coexisting
+    summary must agree with it); otherwise the shrink summary
+    binds the counts, bytes, and counters. Returns None when
+    neither is retained. Raises ValueError on incoherent or
+    shapeless retained busy evidence.
+    """
+    events = row / "busy" / "cap" / "events.ndjson"
+    if events.is_symlink() \
+            or (events.exists() and not events.is_file()):
+        raise ValueError(
+            "matrix retained busy/cap/events.ndjson is not "
+            "a regular file")
+    summary_path = row / "busy" / "events_summary.json"
+    if summary_path.is_symlink() or (
+            summary_path.exists()
+            and not summary_path.is_file()):
+        raise ValueError(
+            "matrix retained busy/events_summary.json is "
+            "not a regular file")
+    if events.exists():
+        saved = _reread_events_derivations(row / "busy")
+        try:
+            size = os.path.getsize(events)
+        except OSError:
+            size = None
+        expected = {"busy_persisted": saved["persisted"],
+                    "busy_events_error":
+                    saved["events_error"],
+                    "busy_events_bytes": size,
+                    "busy_counters": saved["counters"],
+                    "busy_counters_error":
+                    saved["counters_error"]}
+        if summary_path.exists():
+            summary = _load_busy_summary(summary_path)
+            if summary["counts"] != saved["persisted"] \
+                    or summary["bytes"] != size \
+                    or summary["counters"] \
+                    != saved["counters"] \
+                    or summary["counters_error"] \
+                    != saved["counters_error"]:
+                raise ValueError(
+                    "matrix retained busy summary differs "
+                    "from retained busy events")
+        return expected
+    if not summary_path.exists():
+        return None
+    summary = _load_busy_summary(summary_path)
+    return {"busy_persisted": summary["counts"],
+            "busy_events_error": None,
+            "busy_events_bytes": summary["bytes"],
+            "busy_counters": summary["counters"],
+            "busy_counters_error":
+            summary["counters_error"]}
+
+
+def _load_busy_summary(path):
+    """Strict busy summary; old shapes fail closed."""
+    try:
+        summary = json.loads(path.read_bytes())
+    except (OSError, ValueError):
+        raise ValueError(
+            "matrix retained busy/events_summary.json is "
+            "unreadable")
+    if not isinstance(summary, dict):
+        raise ValueError(
+            "matrix retained busy summary is not an object")
+    for key in ("counts", "bytes", "counters",
+                "counters_error"):
+        if key not in summary:
+            raise ValueError(
+                "matrix retained busy summary lacks " + key)
+    if not isinstance(summary["counts"], dict) \
+            or not isinstance(summary["bytes"], int) \
+            or isinstance(summary["bytes"], bool):
+        raise ValueError(
+            "matrix retained busy summary is malformed")
+    counters = summary["counters"]
+    error = summary["counters_error"]
+    if counters is not None and not isinstance(counters, dict):
+        raise ValueError(
+            "matrix retained busy summary is malformed")
+    if error is not None and not isinstance(error, str):
+        raise ValueError(
+            "matrix retained busy summary is malformed")
+    return summary
+
+
+def _check_retained_validate(row, rel, rc_field, out_field,
+                             inputs):
+    """Compare cached validate outcome against retained bytes.
+
+    A row that ran validation must furnish its validate.json
+    record; a row that never ran it (no record, both cached
+    values None) is left to the predicates. Raises ValueError
+    on missing bytes for a claimed outcome, on a malformed
+    record, or on any disagreement.
+    """
+    path = row / rel
+    if path.is_symlink() \
+            or (path.exists() and not path.is_file()):
+        raise ValueError(
+            "matrix retained %s is not a regular file" % rel)
+    cached_rc = inputs.get(rc_field)
+    cached_out = inputs.get(out_field)
+    if not path.exists():
+        if cached_rc is None and cached_out is None:
+            return None
+        raise ValueError(
+            "matrix row cannot furnish retained validate "
+            "bytes: " + rel)
+    try:
+        doc = json.loads(path.read_bytes())
+    except (OSError, ValueError):
+        raise ValueError(
+            "matrix retained %s is unreadable" % rel)
+    if not isinstance(doc, dict) or set(doc) != {"rc", "out"}:
+        raise ValueError(
+            "matrix retained %s is malformed" % rel)
+    if (doc["rc"] is not None
+            and (not isinstance(doc["rc"], int)
+                 or isinstance(doc["rc"], bool))) \
+            or (doc["out"] is not None
+                and not isinstance(doc["out"], str)):
+        raise ValueError(
+            "matrix retained %s is malformed" % rel)
+    if cached_rc != doc["rc"] or cached_out != doc["out"]:
+        raise ValueError(
+            "matrix cached %s differs from retained %s"
+            % (rc_field, rel))
+    return None
 
 
 def verify_row_cache_vs_raw(row_dir, inputs):
     """Prove the cached inputs transcribe the retained raw files.
 
-    Every transcribed text field must equal the bytes of the
-    raw file the collector read, and a cached value must have
-    its raw file still retained (and vice versa). Raises
-    ValueError on any disagreement, even when the cache and
-    the raw side each verify independently; returns None when
-    the cache faithfully transcribes the retained evidence.
+    Every predicate-consumed cached scalar must equal the
+    bytes of the raw file the collector read: transcribed
+    texts, exit/status files, refusal probes, the oracle
+    mode, and the validate records. Derivations re-execute
+    from retained files instead of trusting cached values:
+    persisted counts, bytes, copy directions, counter
+    deltas, and unpaired maps re-derive from the retained
+    events file; bpftool snapshots re-derive from the
+    retained program lists; busy counts, bytes, and counters
+    re-derive from retained busy events or bind to the
+    shrink summary written from them; the redaction scan
+    re-runs over the retained row. A cached value must have
+    its raw file still retained (and vice versa), and rows
+    that claim an outcome without retained bytes refuse.
+
+    Never-gathered inputs (refused rows, where the
+    collector skips the admitted block) carry None or
+    absent values and no retained source files; they pass
+    here and the predicates decide them. Gathered-but-lost
+    inputs carry the collector's own missing-file errors
+    and must match the re-derivation exactly.
+
+    Three inputs need no file comparison: the lock entry
+    binds at export, the candidate digest and closure bind
+    to the manifest, and the host tool versions plus cache
+    directory are cross-checked against retained files
+    inside the predicates themselves. Raises ValueError on
+    any disagreement, even when the cache and the raw side
+    each verify independently; returns None when the cache
+    faithfully transcribes the retained evidence.
     """
     if not isinstance(inputs, dict):
         raise ValueError(
             "matrix cached inputs must be an object")
     row = Path(row_dir)
     for field, rel in _CACHE_RAW_TEXT:
-        path = row / rel
-        if path.is_symlink() \
-                or (path.exists() and not path.is_file()):
-            raise ValueError(
-                "matrix retained %s is not a regular file"
-                % rel)
-        if not path.exists():
-            raw = None
-        else:
-            try:
-                raw = path.read_bytes().decode("utf-8")
-            except (OSError, UnicodeError):
-                raise ValueError(
-                    "matrix retained %s is unreadable" % rel)
+        raw = _retained_text(row, rel)
         cached = inputs.get(field)
         if cached is None and raw is None:
             continue
@@ -5507,6 +5793,99 @@ def verify_row_cache_vs_raw(row_dir, inputs):
             raise ValueError(
                 "matrix cached %s differs from retained %s"
                 % (field, rel))
+    refusals = inputs.get("refusals")
+    if refusals is None:
+        refusals = {}
+    if not isinstance(refusals, dict):
+        raise ValueError(
+            "matrix cached refusals must be an object")
+    labels = ["cap-" + cap for cap in CAPS] + ["combined"]
+    for label in labels:
+        probe = refusals.get(label)
+        if probe is None:
+            probe = {}
+        if not isinstance(probe, dict):
+            raise ValueError(
+                "matrix cached refusal %s must be an object"
+                % label)
+        for key in ("exit", "out", "exists"):
+            rel = "record-%s.%s" % (label, key)
+            raw = _retained_text(row, rel)
+            cached = probe.get(key)
+            if cached is None and raw is None:
+                continue
+            if cached is None or raw is None \
+                    or cached != raw:
+                raise ValueError(
+                    "matrix cached refusal %s.%s differs "
+                    "from retained %s" % (label, key, rel))
+    mode = (_retained_text(row, "oracle.mode") or "").strip() \
+        or None
+    if inputs.get("oracle_mode") != mode:
+        raise ValueError(
+            "matrix cached oracle_mode differs from "
+            "retained oracle.mode")
+    for field, subdir, count in (("miss_snaps", "", 4),
+                                 ("busy_miss_snaps", "busy",
+                                  3)):
+        cached = inputs.get(field)
+        if cached is None:
+            continue
+        if cached != _reread_miss_snaps(row, subdir, count):
+            raise ValueError(
+                "matrix cached %s differs from retained "
+                "snapshots" % field)
+    events = row / "cap" / "events.ndjson"
+    retained = events.is_file() and not events.is_symlink()
+    if not retained and inputs.get("persisted") is None \
+            and inputs.get("persisted_bytes") is None \
+            and inputs.get("events_error") is None \
+            and "persisted_copy_dirs" not in inputs \
+            and "counters" not in inputs \
+            and "counters_error" not in inputs \
+            and "unpaired_count" not in inputs \
+            and "unpaired_bytes" not in inputs \
+            and "unpaired_error" not in inputs:
+        pass
+    else:
+        for key, expected in sorted(
+                _reread_events_derivations(row).items()):
+            if inputs.get(key) != expected:
+                raise ValueError(
+                    "matrix cached %s differs from retained "
+                    "events" % key)
+    busy = _reread_busy_summary(row)
+    if busy is None:
+        errors = (inputs.get("busy_events_error"),
+                  inputs.get("busy_counters_error"))
+        if inputs.get("busy_persisted") is not None \
+                or inputs.get("busy_events_bytes") \
+                is not None \
+                or inputs.get("busy_counters") is not None \
+                or errors not in (
+                    (None, None),
+                    (_MISSING_EVENTS, _MISSING_EVENTS)):
+            raise ValueError(
+                "matrix cached busy counts differ from "
+                "retained busy evidence")
+    else:
+        for key, expected in sorted(busy.items()):
+            if inputs.get(key) != expected:
+                raise ValueError(
+                    "matrix cached %s differs from retained "
+                    "busy evidence" % key)
+    _check_retained_validate(row, "validate.json",
+                             "validate_rc", "validate_out",
+                             inputs)
+    _check_retained_validate(row, "busy/validate.json",
+                             "busy_validate_rc",
+                             "busy_validate_out", inputs)
+    redacted = scan_export_redaction(
+        row, skip={"receipt.json", "oracle-inputs.json"})
+    if inputs.get("export_redact_error") != redacted:
+        raise ValueError(
+            "matrix cached export_redact_error differs from "
+            "retained scan")
     return None
 
 

@@ -1294,6 +1294,63 @@ def _matrix_lock(entry):
             "kernels": [entry]}
 
 
+def _spread_bytes(total, count):
+    """Exact integer split of total bytes over count lines."""
+    base, rem = divmod(total, count)
+    return [base + 1 if idx < rem else base
+            for idx in range(count)]
+
+
+def _emit_matrix_events(ev):
+    """events.ndjson lines re-deriving the cached derivations.
+
+    Emits one line per persisted event with byte fields that
+    sum exactly to the cached byte sums, mapping IDs that
+    pair every successful map with an unmap, and counter
+    snapshots that delta exactly to the cached counters.
+    """
+    lines = []
+    for size in _spread_bytes(
+            ev["persisted_bytes"]["requested"],
+            ev["persisted"]["bounce_attempt"]):
+        lines.append({"kind": "bounce_attempt",
+                      "data": {"requested_bytes": size}})
+    for idx, size in enumerate(_spread_bytes(
+            ev["persisted_bytes"]["mapped"],
+            ev["persisted"]["map_result"])):
+        lines.append({"kind": "map_result",
+                      "data": {"success": True,
+                             "mapping_id": "m%d" % idx,
+                             "mapped_bytes": size}})
+    for idx in range(ev["persisted"]["unmap"]):
+        if idx < ev["persisted"]["map_result"]:
+            ident = "m%d" % idx
+        else:
+            ident = "stray%d" % idx
+        lines.append({"kind": "unmap",
+                      "data": {"mapping_id": ident}})
+    copied = ev["persisted_bytes"]["copy"]
+    for direction in ("original_to_bounce",
+                      "bounce_to_original"):
+        for size in _spread_bytes(
+                copied[direction],
+                ev["persisted_copy_dirs"][direction]):
+            lines.append({"kind": "copy",
+                          "data": {"direction": direction,
+                                 "bytes": size}})
+    for size in _spread_bytes(ev["persisted_bytes"]["sync"],
+                              ev["persisted"]["sync_request"]):
+        lines.append({"kind": "sync_request",
+                      "data": {"length": size}})
+    for ident in sorted(ev["counters"]):
+        for value in (0, ev["counters"][ident]):
+            lines.append({"kind": "counter_snapshot",
+                          "data": {"counter_id": ident,
+                                 "epoch": 0, "value": value}})
+    return "".join(json.dumps(line, sort_keys=True) + "\n"
+                   for line in lines)
+
+
 def _write_real_matrix_row(m, matrix_dir, doc):
     """Honest matrix row bound to a sealed manifest.
 
@@ -1301,29 +1358,39 @@ def _write_real_matrix_row(m, matrix_dir, doc):
     fixtures, binds its receipt to the manifest (source,
     toolchain, executable, BPF, closure, candidate ID), and
     writes the row directory plus the <id>.json rec and
-    summary.json beside it. Returns (ev, rec, receipt, row).
+    summary.json beside it. Every predicate-consumed cached
+    value is backed by retained bytes: exit/status files,
+    the oracle mode, program snapshots, a generated events
+    file re-deriving the cached counts, the busy shrink
+    summary, validate records, and an honestly scanned
+    redaction outcome. Returns (ev, rec, receipt, row).
     """
     ev = _ev_pass()
     ev["duration"] = 60
     hooks = json.loads(ev["hooks_text"])
     hooks["btf"] = True
     ev["hooks_text"] = json.dumps(hooks)
+    for field in ("miss_snaps", "busy_miss_snaps"):
+        ev[field] = [[nsecs, text]
+                     for nsecs, text in ev[field]]
     ev["candidate_sha256"] = m.digest_bytes(m.canonical(doc))
     ev["candidate_files"] = copy.deepcopy(doc["files"])
-    rec = km.evaluate_row(ev)
-    assert rec["ok"], rec
-    rec.update(run_id="20261101T000000Z", elapsed=1.0,
-               timeout=False, release=ev["entry"]["release"])
+    ev["persisted"]["counter_snapshot"] = \
+        2 * len(ev["counters"])
+    ev["oracle_mode"] = "full"
+    ev["unpaired_count"] = 0
+    ev["unpaired_bytes"] = 0
+    ev["unpaired_error"] = None
+    ev["busy_events_bytes"] = 1048576
     matrix_dir = Path(matrix_dir)
     row = matrix_dir / ev["entry"]["id"]
     row.mkdir(parents=True)
     job = _row_job()
     job.update(id=ev["entry"]["id"],
                release=ev["entry"]["release"],
-               run_id=rec["run_id"])
+               run_id="20261101T000000Z")
     files = {"job.json": json.dumps(job),
-             "oracle-inputs.json": json.dumps(ev),
-             "vng.exit": "0",
+             "vng.exit": ev["vng_exit"],
              "artifacts.json": ev["artifacts_text"],
              "uname.txt": ev["uname_text"],
              "mods.txt": ev["mods_text"],
@@ -1333,13 +1400,26 @@ def _write_real_matrix_row(m, matrix_dir, doc):
              "oracle.stderr": ev["oracle_stderr"],
              "oracle.mode": "full",
              "doctor.json": ev["doctor_text"],
+             "doctor.exit": ev["doctor_exit"],
              "doctor-passive.json": ev["doctor_passive_text"],
+             "doctor-passive.exit":
+             ev["doctor_passive_exit"],
              "sev-sysfs.txt": ev["sev_sysfs_text"],
              "dmesg.txt": ev["dmesg_text"],
              "dmesg_scan.json": ev["dmesg_scan_text"],
              "cap/session.json": ev["session_text"],
+             "record.exit": ev["record_exit"],
+             "report.exit": ev["report_exit"],
+             "report-json.exit": ev["report_json_exit"],
              "workload.txt": ev["workload_text"],
              "blockstat.json": ev["blockstat_text"],
+             "udev.exit": ev["udev_exit"],
+             "udev.out": ev["udev_out"],
+             "busy/record.exit": ev["busy_record_exit"],
+             "busy/end_reason.txt": ev["busy_end_reason"],
+             "busy/report.exit": ev["busy_report_exit"],
+             "busy/report-json.exit":
+             ev["busy_report_json_exit"],
              "busy/times.json": ev["busy_times_text"],
              "busy/busy.out": ev["busy_out_text"],
              "busy/cap/session.json": ev["busy_session_text"]}
@@ -1347,6 +1427,41 @@ def _write_real_matrix_row(m, matrix_dir, doc):
         target = row / name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(value)
+    (row / "cap" / "events.ndjson").write_text(
+        _emit_matrix_events(ev))
+    for field, subdir, count in (("miss_snaps", "", 4),
+                                 ("busy_miss_snaps", "busy",
+                                  3)):
+        snaps = ev[field]
+        base = row / subdir if subdir else row
+        (base / "progs_times.json").write_text(json.dumps(
+            {str(idx): snaps[idx][0]
+             for idx in range(count)}))
+        for idx in range(count):
+            (base / ("progs%d.json" % idx)).write_text(
+                snaps[idx][1])
+    summary = {"sha256": sha(b"fixture-busy-events"),
+               "bytes": ev["busy_events_bytes"],
+               "counts": ev["busy_persisted"],
+               "counters": ev["busy_counters"],
+               "counters_error": ev["busy_counters_error"]}
+    (row / "busy" / "events_summary.json").write_text(
+        json.dumps(summary))
+    (row / "validate.json").write_text(json.dumps(
+        {"rc": ev["validate_rc"],
+         "out": ev["validate_out"]}) + "\n")
+    (row / "busy" / "validate.json").write_text(json.dumps(
+        {"rc": ev["busy_validate_rc"],
+         "out": ev["busy_validate_out"]}) + "\n")
+    ev["export_redact_error"] = km.scan_export_redaction(
+        row, skip={"receipt.json", "oracle-inputs.json"})
+    rec = km.evaluate_row(ev)
+    assert rec["ok"], rec
+    rec.update(run_id="20261101T000000Z", elapsed=1.0,
+               timeout=False, release=ev["entry"]["release"])
+    job.update(run_id=rec["run_id"])
+    (row / "job.json").write_text(json.dumps(job))
+    (row / "oracle-inputs.json").write_text(json.dumps(ev))
     ctx = _row_ctx(
         kernel_selector="--kernel " + ev["entry"]["id"],
         source_sha256=m.artifact(doc, "deb")["sha256"])
@@ -1678,13 +1793,25 @@ def test_qualify_rejects_failing_row_predicates(workshop,
     m, ctx, evidence, q_path, _ = _matrix_qualified(
         workshop, tmp_path)
     row = evidence / "matrix" / MATRIX_ROW
+    # The attack: the oracle counts change identically in the
+    # retained raw file and the cached transcription, with
+    # every unsigned hash refreshed, so only the re-derived
+    # predicates (persisted counts above the oracle bounds)
+    # can refuse.
+    oracle = row / "oracle.txt"
+    altered = oracle.read_text().replace("13000", "12000")
+    assert altered != oracle.read_text()
+    oracle.write_text(altered)
     cached_path = row / "oracle-inputs.json"
     ev = json.loads(cached_path.read_text())
-    # The attack: the campaign's persisted counts change, so the
-    # re-derived predicates fail while the inventory and every
-    # signature still verify.
-    ev["persisted"]["bounce_attempt"] = 1
+    ev["oracle_text"] = altered
     cached_path.write_text(json.dumps(ev))
+    receipt_path = row / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["oracle"]["text_sha256"] = sha(
+        oracle.read_bytes())
+    receipt["files"] = km.row_receipt_files(row)
+    receipt_path.write_bytes(m.canonical(receipt))
     _resign_matrix_inputs(m, ctx, evidence, q_path)
     with pytest.raises(ValueError, match="[Pp]redicates"):
         m.verify_qualification(ctx["manifest_path"], q_path,
