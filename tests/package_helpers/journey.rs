@@ -46,7 +46,20 @@ pub const INSTALLED_BIN: &str = "/usr/bin/memveil";
 
 /// True when passwordless sudo works (privileged journeys need it).
 pub fn have_passwordless_sudo() -> bool {
-    run("sudo", &["-n", "true"], None).status.success()
+    have_passwordless_sudo_with("sudo")
+}
+
+/// Probe one sudo binary name.
+///
+/// A missing binary reads as unusable, never panics in the
+/// spawn: the install smoke tests call this before the gate,
+/// so an absent sudo must reach the gate as `false` (a clean
+/// dev skip, a candidate failure), not abort the suite.
+pub fn have_passwordless_sudo_with(sudo: &str) -> bool {
+    if !super::tool_present(sudo) {
+        return false;
+    }
+    run(sudo, &["-n", "true"], None).status.success()
 }
 
 /// True when `MV_RUSTPKG_JOURNEY=0` opts out of privileged journeys.

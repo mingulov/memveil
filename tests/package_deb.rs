@@ -1054,6 +1054,17 @@ fn journey_gate_matrix() {
 }
 
 #[test]
+fn sudo_probe_short_circuits_absent_tool() {
+    // Neither tool is probed by spawning blindly: an absent
+    // sudo binary reads as unusable (the gate matrix above
+    // turns that into a clean dev skip or a candidate
+    // failure), never panics. The absent name must be false;
+    // the real probe is the control that it still returns.
+    assert!(!j::have_passwordless_sudo_with("memveil-absent-sudo-probe"));
+    let _ = j::have_passwordless_sudo();
+}
+
+#[test]
 fn install_doctor_uninstall_smoke() {
     match j::journey_gate(
         "dpkg",
