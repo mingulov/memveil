@@ -53,6 +53,24 @@ def _prep_record_path(tag):
         % (tag, os.getpid(), uuid.uuid4().hex[:8]))
 
 
+def _staged_state():
+    """Byte-stable staged-change summary of the live index.
+
+    Captured before a test body that must leave the index
+    alone and compared after: the index must be unchanged,
+    whatever it held before, so pre-existing staged work
+    never reads as test contamination. Honors
+    GIT_INDEX_FILE like every git query, so index-copy
+    checks read the copy.
+    """
+    result = subprocess.run(
+        ['git', '-C', str(ROOT), 'diff', '--cached',
+         '--name-status', '-z'],
+        capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
 @pytest.fixture(autouse=True)
 def _private_journey_prep_root(tmp_path, monkeypatch):
     """Point the prep root at a private tmp dir for one test.
@@ -670,6 +688,7 @@ def test_journey_identity_hashes_outside_link_as_link(
         resolved = ROOT / resolved
     index_copy = tmp_path / 'index-copy'
     shutil.copyfile(resolved / 'index', index_copy)
+    baseline = _staged_state()
     try:
         saved = os.environ.get('GIT_INDEX_FILE')
         os.environ['GIT_INDEX_FILE'] = str(index_copy)
@@ -705,11 +724,7 @@ def test_journey_identity_hashes_outside_link_as_link(
         _, repointed = checkout_identity(
             exclude=journey_identity_excludes())
         assert repointed != with_link
-        untouched = subprocess.run(
-            ['git', '-C', str(ROOT), 'diff', '--cached',
-             '--quiet'],
-            capture_output=True, text=True)
-        assert untouched.returncode == 0, \
+        assert _staged_state() == baseline, \
             'real index gained staged changes'
     finally:
         link.unlink(missing_ok=True)
@@ -856,6 +871,7 @@ def test_journey_prep_dir_refuses_tracked_content(
         resolved = ROOT / resolved
     index_copy = tmp_path / 'index-copy'
     shutil.copyfile(resolved / 'index', index_copy)
+    baseline = _staged_state()
     saved = os.environ.get('GIT_INDEX_FILE')
     os.environ['GIT_INDEX_FILE'] = str(index_copy)
     try:
@@ -875,11 +891,7 @@ def test_journey_prep_dir_refuses_tracked_content(
             os.environ['GIT_INDEX_FILE'] = saved
         plant.unlink(missing_ok=True)
         shutil.rmtree(top, ignore_errors=True)
-        untouched = subprocess.run(
-            ['git', '-C', str(ROOT), 'diff', '--cached',
-             '--quiet'],
-            capture_output=True, text=True)
-        assert untouched.returncode == 0, \
+        assert _staged_state() == baseline, \
             'real index gained staged changes'
 
 
@@ -912,6 +924,7 @@ def test_journey_prep_refuses_tracked_before_any_write(
             resolved = ROOT / resolved
         index_copy = tmp_path / 'index-copy'
         shutil.copyfile(resolved / 'index', index_copy)
+        baseline = _staged_state()
         saved = os.environ.get('GIT_INDEX_FILE')
         os.environ['GIT_INDEX_FILE'] = str(index_copy)
         try:
@@ -932,17 +945,75 @@ def test_journey_prep_refuses_tracked_before_any_write(
                 os.environ.pop('GIT_INDEX_FILE', None)
             else:
                 os.environ['GIT_INDEX_FILE'] = saved
-        untouched = subprocess.run(
-            ['git', '-C', str(ROOT), 'diff', '--cached',
-             '--quiet'],
-            capture_output=True, text=True)
-        assert untouched.returncode == 0, \
+        assert _staged_state() == baseline, \
             'real index gained staged changes'
     finally:
         if top.is_symlink():
             top.unlink(missing_ok=True)
         else:
             shutil.rmtree(top, ignore_errors=True)
+
+
+def test_staged_state_baseline_tolerates_preset_changes(
+        tmp_path):
+    # The clean-index assertion compares against a
+    # baseline instead of demanding emptiness: a
+    # pre-existing staged change passes, a new one fails.
+    # Staged into an index copy, never the real index.
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import \
+        journey_identity_excludes
+    before = _staged_state()
+    probe = ROOT / ('baseline-probe-%d.txt' % os.getpid())
+    probe.write_text('baseline\n')
+    extra = ROOT / ('baseline-extra-%d.txt' % os.getpid())
+    git_dir = subprocess.run(
+        ['git', '-C', str(ROOT), 'rev-parse', '--git-dir'],
+        capture_output=True, text=True)
+    assert git_dir.returncode == 0, git_dir.stderr
+    resolved = Path(git_dir.stdout.strip())
+    if not resolved.is_absolute():
+        resolved = ROOT / resolved
+    index_copy = tmp_path / 'index-copy'
+    shutil.copyfile(resolved / 'index', index_copy)
+    saved = os.environ.get('GIT_INDEX_FILE')
+    os.environ['GIT_INDEX_FILE'] = str(index_copy)
+    try:
+        added = subprocess.run(
+            ['git', '-C', str(ROOT), 'add', '-f',
+             str(probe)],
+            capture_output=True, text=True)
+        assert added.returncode == 0, added.stderr
+        baseline = _staged_state()
+        assert baseline != '', 'preset staged nothing'
+        # An emptiness check would false-positive here.
+        dirty = subprocess.run(
+            ['git', '-C', str(ROOT), 'diff', '--cached',
+             '--quiet'],
+            capture_output=True, text=True)
+        assert dirty.returncode != 0, \
+            'preset baseline left the copy clean'
+        # The checked operation stages nothing: the
+        # summary still equals the preset baseline.
+        journey_identity_excludes()
+        assert _staged_state() == baseline
+        # ...but a further staged change is detected.
+        extra.write_text('extra\n')
+        added = subprocess.run(
+            ['git', '-C', str(ROOT), 'add', '-f',
+             str(extra)],
+            capture_output=True, text=True)
+        assert added.returncode == 0, added.stderr
+        assert _staged_state() != baseline
+    finally:
+        if saved is None:
+            os.environ.pop('GIT_INDEX_FILE', None)
+        else:
+            os.environ['GIT_INDEX_FILE'] = saved
+        probe.unlink(missing_ok=True)
+        extra.unlink(missing_ok=True)
+    assert _staged_state() == before, \
+        'real index gained staged changes'
 
 
 def test_journey_record_outside_prep_dir_refuses(
