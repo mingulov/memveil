@@ -744,21 +744,42 @@ def test_journey_prep_dir_refuses_tracked_content(tmp_path):
     top.mkdir(parents=True, exist_ok=True)
     plant = top / ('tracked-%d.txt' % os.getpid())
     plant.write_text('force-added\n')
-    added = subprocess.run(
-        ['git', '-C', str(ROOT), 'add', '-f', str(plant)],
+    # Stage into a COPY of the index, never the real one: a
+    # kill between add and cleanup must not leave the
+    # operator's checkout dirty.
+    git_dir = subprocess.run(
+        ['git', '-C', str(ROOT), 'rev-parse', '--git-dir'],
         capture_output=True, text=True)
-    assert added.returncode == 0, added.stderr
+    assert git_dir.returncode == 0, git_dir.stderr
+    resolved = Path(git_dir.stdout.strip())
+    if not resolved.is_absolute():
+        resolved = ROOT / resolved
+    index_copy = tmp_path / 'index-copy'
+    shutil.copyfile(resolved / 'index', index_copy)
+    saved = os.environ.get('GIT_INDEX_FILE')
+    os.environ['GIT_INDEX_FILE'] = str(index_copy)
     try:
+        added = subprocess.run(
+            ['git', '-C', str(ROOT), 'add', '-f',
+             str(plant)],
+            capture_output=True, text=True)
+        assert added.returncode == 0, added.stderr
         with pytest.raises(ValueError, match='tracked'):
             journey_identity_excludes()
         with pytest.raises(ValueError, match='tracked'):
             prep.prepare(str(top / 'prep.json'))
     finally:
-        subprocess.run(
-            ['git', '-C', str(ROOT), 'reset', '-q', '--',
-             str(plant)],
-            capture_output=True, text=True)
+        if saved is None:
+            os.environ.pop('GIT_INDEX_FILE', None)
+        else:
+            os.environ['GIT_INDEX_FILE'] = saved
         plant.unlink(missing_ok=True)
+        untouched = subprocess.run(
+            ['git', '-C', str(ROOT), 'diff', '--cached',
+             '--quiet'],
+            capture_output=True, text=True)
+        assert untouched.returncode == 0, \
+            'real index gained staged changes'
 
 
 def test_journey_record_outside_prep_dir_refuses(
