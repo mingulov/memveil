@@ -402,3 +402,31 @@ pub fn journey_scratch(name: &str) -> (PathBuf, QualifyScratch) {
     let dirs = QualifyScratch::under(&tmp);
     (tmp, dirs)
 }
+
+/// Installed-closure leg (candidate mode only): the installed
+/// tree must equal the verified candidate files closure,
+/// through the packager's own predicate. Missing, tampered,
+/// aliased, and extra members refuse.
+pub fn assert_installed_closure(root: &Path) {
+    assert!(
+        super::candidate_mode(),
+        "installed-closure check needs candidate inputs"
+    );
+    let script = super::scripts_dir()
+        .join("package-deb.py")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let text = super::loader_probe(
+        &[
+            "import importlib.util",
+            &format!("spec = importlib.util.spec_from_file_location('pkgdeb', {script:?})"),
+            "pkgdeb = importlib.util.module_from_spec(spec)",
+            "spec.loader.exec_module(pkgdeb)",
+            "pkgdeb.verify_installed(sys.argv[1], selected.manifest)",
+            "print('closure-ok')",
+        ],
+        &[root.to_str().unwrap()],
+    );
+    assert!(text.contains("closure-ok"), "{text}");
+}

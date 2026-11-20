@@ -11,7 +11,8 @@
 //! (shared across test binaries through lock files under
 //! `target/package-test/`), ELF inspection, archive listing, and
 //! the payload-manifest collect/check plus SPDX emit ports used
-//! by `package_payload.rs`.
+//! by `package_payload.rs`, and the sealed candidate inputs
+//! qualification consumes instead of building.
 //!
 //! Every cargo invocation strips `RUSTUP_TOOLCHAIN` so the
 //! repository pin (1.100.0) wins over ambient overrides.
@@ -146,6 +147,21 @@ pub fn rebuild_requested() -> bool {
     std::env::var("MV_RUSTPKG_REBUILD").as_deref() == Ok("1")
 }
 
+/// True when both candidate inputs are set (qualification mode).
+///
+/// Panics when exactly one is set: partial candidate inputs
+/// fail closed, never silently fall back to building.
+pub fn candidate_mode() -> bool {
+    let bundle = std::env::var("MV_BUNDLE_TARBALL").unwrap_or_default();
+    let manifest = std::env::var("MV_CANDIDATE_MANIFEST").unwrap_or_default();
+    assert!(
+        bundle.is_empty() == manifest.is_empty(),
+        "candidate inputs partial: qualification requires both \
+         MV_BUNDLE_TARBALL and MV_CANDIDATE_MANIFEST"
+    );
+    !bundle.is_empty()
+}
+
 /// True when `name` resolves on PATH.
 pub fn tool_present(name: &str) -> bool {
     Command::new("sh")
@@ -262,6 +278,122 @@ impl Drop for DirLock {
     }
 }
 
+/// Run a candidate-loader probe: `lines` execute with the
+/// verified selection bound to `selected` (argv[1:] carries
+/// `args`). Loader failures exit nonzero, failing closed.
+///
+/// Cargo injects its deps dir as `LD_LIBRARY_PATH` into every
+/// test binary it spawns; the probe strips it so the loader
+/// validates the dispatch-attested environment (which forbids
+/// the override), mirroring how `run_unpinned` strips
+/// `RUSTUP_TOOLCHAIN`. The probe itself (system python3)
+/// resolves nothing through it.
+pub fn loader_probe(lines: &[&str], args: &[&str]) -> String {
+    let root = repo_root();
+    let mut script = vec![
+        format!(
+            "import sys; sys.path.insert(0, {:?}); sys.path.insert(0, {:?})",
+            root.join("tests").to_str().unwrap(),
+            root.join("tools").to_str().unwrap(),
+        ),
+        "from support.candidate_input import load".to_string(),
+        "selected = load()".to_string(),
+        "assert selected is not None, 'candidate inputs vanished'".to_string(),
+    ];
+    script.extend(lines.iter().map(ToString::to_string));
+    let script = script.join("\n");
+    let mut command = Command::new("python3");
+    command.arg("-B").arg("-c").arg(&script).args(args);
+    command.env_remove("LD_LIBRARY_PATH");
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let out = spawn_output(&mut command, "python3");
+    assert!(
+        out.status.success(),
+        "loader probe failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Sealed candidate inputs, resolved once per process through
+/// the loader (which verifies the bundle, the manifest, and
+/// every artifact digest): the sealed .deb/.rpm paths, the
+/// verified manifest copy, and the bound engine version.
+pub struct CandidateInputs {
+    /// Sealed .deb path from the candidate manifest.
+    pub deb: PathBuf,
+    /// Sealed .rpm path from the candidate manifest.
+    pub rpm: PathBuf,
+    /// Loader-verified manifest bytes, staged under scratch.
+    pub manifest: PathBuf,
+    /// Engine version bound by the candidate bundle manifest.
+    pub engine_version: String,
+}
+
+static CANDIDATE_INPUTS: std::sync::OnceLock<CandidateInputs> = std::sync::OnceLock::new();
+
+/// Resolve the sealed candidate inputs (candidate mode only).
+pub fn candidate_inputs() -> &'static CandidateInputs {
+    assert!(candidate_mode(), "sealed inputs need candidate inputs");
+    CANDIDATE_INPUTS.get_or_init(|| {
+        let staged = scratch("candidate-manifest");
+        let dest = staged.join("candidate.json");
+        let text = loader_probe(
+            &[
+                "import candidate, json",
+                "from pathlib import Path",
+                "out = Path(sys.argv[1])",
+                "out.write_bytes(candidate.canonical(selected.manifest))",
+                "print(selected.artifact('deb'))",
+                "print(selected.artifact('rpm'))",
+                "print(json.load(open(selected.root / 'MANIFEST.json'))\
+                 ['engine_version'])",
+                "print(out)",
+            ],
+            &[dest.to_str().unwrap()],
+        );
+        let mut lines = text.lines();
+        let deb = PathBuf::from(lines.next().unwrap_or(""));
+        let rpm = PathBuf::from(lines.next().unwrap_or(""));
+        let engine_version = lines.next().unwrap_or("").to_string();
+        let manifest = PathBuf::from(lines.next().unwrap_or(""));
+        assert!(deb.is_file(), "sealed .deb missing");
+        assert!(rpm.is_file(), "sealed .rpm missing");
+        assert!(manifest.is_file(), "verified manifest missing");
+        assert!(!engine_version.is_empty(), "no engine version");
+        CandidateInputs {
+            deb,
+            rpm,
+            manifest,
+            engine_version,
+        }
+    })
+}
+
+/// Stage verified candidate members under scratch; return the dir.
+///
+/// Each rel passes through the loader's digest-checked
+/// `path()`, so staged bytes are the sealed bytes.
+pub fn candidate_stage(rels: &[&str]) -> PathBuf {
+    assert!(candidate_mode(), "candidate staging needs candidate inputs");
+    let staged = scratch("candidate-stage");
+    let mut args = vec![staged.to_str().unwrap()];
+    args.extend(rels);
+    loader_probe(
+        &[
+            "import shutil",
+            "from pathlib import Path",
+            "out = Path(sys.argv[1])",
+            "for rel in sys.argv[2:]:",
+            "    dest = out / rel",
+            "    dest.parent.mkdir(parents=True, exist_ok=True)",
+            "    shutil.copyfile(selected.path(rel), dest)",
+        ],
+        &args,
+    );
+    staged
+}
+
 /// Ensure the release binary exists (builds it when missing).
 pub fn ensure_release_binary() -> PathBuf {
     let binary = release_binary();
@@ -291,7 +423,13 @@ pub fn ensure_release_binary() -> PathBuf {
 }
 
 /// Engine version from the release binary (`0.1.0`).
+///
+/// Candidate mode returns the manifest-bound version instead:
+/// no build may run behind a sealed qualification.
 pub fn engine_version() -> String {
+    if candidate_mode() {
+        return candidate_inputs().engine_version.clone();
+    }
     let binary = ensure_release_binary();
     let version = run_ok(binary.to_str().unwrap(), &["version"], None);
     version
@@ -547,7 +685,13 @@ pub fn ensure_tarball() -> TarballSet {
 }
 
 /// Ensure the .deb exists (built from the shared bundle).
+///
+/// Candidate mode returns the sealed .deb instead: no build
+/// may run behind a sealed qualification, even rebuild-gated.
 pub fn ensure_deb() -> PathBuf {
+    if candidate_mode() {
+        return candidate_inputs().deb.clone();
+    }
     let version = engine_version();
     let out_dir = out_root().join("deb");
     let deb = out_dir.join(format!("memveil_{version}-1_amd64.deb"));
@@ -607,7 +751,13 @@ fn find_rpm(out_dir: &std::path::Path, version: &str) -> Option<PathBuf> {
 }
 
 /// Ensure the .rpm exists (built from the shared bundle).
+///
+/// Candidate mode returns the sealed .rpm instead: no build
+/// may run behind a sealed qualification, even rebuild-gated.
 pub fn ensure_rpm() -> PathBuf {
+    if candidate_mode() {
+        return candidate_inputs().rpm.clone();
+    }
     let version = engine_version();
     let out_dir = out_root().join("rpm");
     if (!rebuild_requested() || RPM_READY.load(Ordering::SeqCst))

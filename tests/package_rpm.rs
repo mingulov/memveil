@@ -57,6 +57,18 @@ fn scratch_db(name: &str) -> std::path::PathBuf {
     db.join("rpmdb")
 }
 
+/// Verified-manifest members under `prefix` with `suffix`.
+fn manifest_members(manifest: &std::path::Path, prefix: &str, suffix: &str) -> Vec<String> {
+    let expr = format!(
+        "'\\n'.join(sorted(k for k in d['files'] \
+         if k.startswith('{prefix}') and k.endswith('{suffix}')))"
+    );
+    h::json_probe(manifest, &expr)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
 fn repo_tree_files(root: &std::path::Path, subdir: &str, suffix: &str) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     let base = root.join(subdir);
@@ -146,10 +158,14 @@ fn rpm_header() {
     assert_eq!(fields[3], "x86_64");
     let version = h::engine_version();
     assert_eq!(fields[1], version, "rpm Version vs engine");
-    assert_eq!(
-        rpm.file_name().unwrap().to_str().unwrap(),
-        format!("memveil-{version}-{}.{}.rpm", fields[2], fields[3])
-    );
+    // Sealed artifact names come from the manifest (the loader
+    // binds them); only dev builds carry the fixed pattern.
+    if !h::candidate_mode() {
+        assert_eq!(
+            rpm.file_name().unwrap().to_str().unwrap(),
+            format!("memveil-{version}-{}.{}.rpm", fields[2], fields[3])
+        );
+    }
 }
 
 #[test]
@@ -236,13 +252,39 @@ fn rpm_file_list_exact() {
         assert!(!leaf.contains('/'), "{path}");
         assert!(leaf.contains(".so"), "{path}");
     }
-    let root = h::pristine_root();
-    let mut profiles: BTreeSet<String> = repo_tree_files(&root, "profiles", ".json")
+    // Candidate mode derives the expected sets from the
+    // verified manifest, never the checkout or a fresh bundle.
+    let (profile_rels, doc_rels): (Vec<String>, Vec<String>) = if h::candidate_mode() {
+        // Manifest rels are tree-rooted; strip to the
+        // subdir-relative form the installed map expects.
+        let manifest = &h::candidate_inputs().manifest;
+        let strip = |rels: Vec<String>, prefix: &str| {
+            rels.into_iter()
+                .map(|rel| rel.strip_prefix(prefix).unwrap().to_string())
+                .collect::<Vec<String>>()
+        };
+        (
+            strip(
+                manifest_members(manifest, "profiles/", ".json"),
+                "profiles/",
+            ),
+            strip(manifest_members(manifest, "docs/", ".md"), "docs/"),
+        )
+    } else {
+        let root = h::pristine_root();
+        (
+            repo_tree_files(&root, "profiles", ".json")
+                .into_iter()
+                .collect(),
+            repo_tree_files(&root, "docs", ".md").into_iter().collect(),
+        )
+    };
+    let mut profiles: BTreeSet<String> = profile_rels
         .into_iter()
         .map(|rel| format!("/usr/share/memveil/profiles/{rel}"))
         .collect();
     profiles.insert("/usr/share/memveil/profiles/manifest.txt".to_string());
-    let docs: BTreeSet<String> = repo_tree_files(&root, "docs", ".md")
+    let docs: BTreeSet<String> = doc_rels
         .into_iter()
         .map(|rel| format!("/usr/share/memveil/docs/{rel}"))
         .collect();
@@ -258,17 +300,27 @@ fn rpm_file_list_exact() {
             parent = parent.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
         }
     }
-    // Per-crate notice files, from the same bundle manifest the .rpm
+    // Per-crate notice files: candidate mode reads the
+    // verified manifest, dev the bundle manifest the .rpm
     // consumed: every crates/ member plus its parent dirs.
-    let set = h::ensure_tarball();
-    let bundle_manifest = set.bundle.join("MANIFEST.json");
-    let probe = format!(
-        "import json; d = json.load(open({bundle_manifest:?}));\n\
-         [print(k) for k in sorted(d['files']) if k.startswith('licenses/crates/')]"
-    );
+    // Empty suffix matches every member under the prefix.
+    let crate_rels: Vec<String> = if h::candidate_mode() {
+        manifest_members(&h::candidate_inputs().manifest, "licenses/crates/", "")
+    } else {
+        let set = h::ensure_tarball();
+        let bundle_manifest = set.bundle.join("MANIFEST.json");
+        let probe = format!(
+            "import json; d = json.load(open({bundle_manifest:?}));\n\
+             [print(k) for k in sorted(d['files']) if k.startswith('licenses/crates/')]"
+        );
+        h::run_ok("python3", &["-c", &probe], None)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
     let mut crates_files = BTreeSet::new();
     let mut crates_dirs = BTreeSet::from(["/usr/share/doc/memveil/licenses/crates".to_string()]);
-    for rel in h::run_ok("python3", &["-c", &probe], None).lines() {
+    for rel in &crate_rels {
         crates_files.insert(format!("/usr/share/doc/memveil/{rel}"));
         let parent = format!(
             "/usr/share/doc/memveil/{}",
@@ -336,19 +388,44 @@ fn rpm_payload_mirrors_repo() {
     }
     let rpm = h::ensure_rpm();
     let dest = h::rpm_extract(&rpm, "rpm-mirror");
-    let root = h::pristine_root();
-    for (subdir, suffix, inst) in [
-        ("profiles", ".json", "usr/share/memveil/profiles"),
-        ("docs", ".md", "usr/share/memveil/docs"),
-    ] {
-        for rel in repo_tree_files(&root, subdir, suffix) {
-            let staged = dest.join(inst).join(&rel);
-            assert!(staged.is_file(), "{rel}");
+    // Candidate mode mirrors the verified manifest, never the
+    // checkout.
+    if h::candidate_mode() {
+        let manifest = &h::candidate_inputs().manifest;
+        let mut rels = manifest_members(manifest, "profiles/", ".json");
+        rels.extend(manifest_members(manifest, "docs/", ".md"));
+        let refs: Vec<&str> = rels.iter().map(String::as_str).collect();
+        let staged = h::candidate_stage(&refs);
+        for rel in &rels {
+            let inst = if rel.starts_with("profiles/") {
+                "usr/share/memveil/profiles"
+            } else {
+                "usr/share/memveil/docs"
+            };
+            let sub = rel.split_once('/').map(|(_, rest)| rest).unwrap();
+            let seen = dest.join(inst).join(sub);
+            assert!(seen.is_file(), "{rel}");
             assert_eq!(
-                fs::read(&staged).unwrap(),
-                fs::read(root.join(subdir).join(&rel)).unwrap(),
+                fs::read(&seen).unwrap(),
+                fs::read(staged.join(rel)).unwrap(),
                 "{rel}"
             );
+        }
+    } else {
+        let root = h::pristine_root();
+        for (subdir, suffix, inst) in [
+            ("profiles", ".json", "usr/share/memveil/profiles"),
+            ("docs", ".md", "usr/share/memveil/docs"),
+        ] {
+            for rel in repo_tree_files(&root, subdir, suffix) {
+                let staged = dest.join(inst).join(&rel);
+                assert!(staged.is_file(), "{rel}");
+                assert_eq!(
+                    fs::read(&staged).unwrap(),
+                    fs::read(root.join(subdir).join(&rel)).unwrap(),
+                    "{rel}"
+                );
+            }
         }
     }
     assert!(
@@ -424,6 +501,11 @@ fn rpm_install_doctor_uninstall_smoke() {
             "rpm -V failed:\nstdout:\n{verify_stdout}\nstderr:\n{verify_stderr}"
         );
         assert!(verify_stdout.is_empty());
+        // Sealed installs prove the installed tree equals the
+        // verified candidate closure before running anything.
+        if h::candidate_mode() {
+            j::assert_installed_closure(std::path::Path::new("/"));
+        }
         j::assert_receipts_installed(receipts);
         j::assert_loader_closure();
         j::assert_doctor_and_version(&version);
@@ -586,6 +668,10 @@ fn spec_section(text: &str, name: &str) -> String {
 
 #[test]
 fn spec_version_matches_engine() {
+    if h::candidate_mode() {
+        eprintln!("skip: the committed spec pins checkout source, not sealed artifacts");
+        return;
+    }
     let text = spec_text();
     let version = text
         .lines()
@@ -819,10 +905,16 @@ fn rpmspec_parse() {
         eprintln!("skip: rpmspec absent on this host");
         return;
     }
-    let set = h::ensure_tarball();
-    let binary = set.bundle.join("bin").join("memveil");
-    let lib = set.bundle.join("lib").join("memveil").join("libgcc_s.so.1");
-    let (major, minor) = h::glibc_floor(&[binary, lib]);
+    // Candidate mode derives the floor from the sealed
+    // payload, never a fresh bundle build.
+    let (major, minor) = if h::candidate_mode() {
+        rpm_payload_floor(&h::ensure_rpm())
+    } else {
+        let set = h::ensure_tarball();
+        let binary = set.bundle.join("bin").join("memveil");
+        let lib = set.bundle.join("lib").join("memveil").join("libgcc_s.so.1");
+        h::glibc_floor(&[binary, lib])
+    };
     let text = fs::read_to_string(&spec).unwrap();
     assert!(
         text.contains("@MEMVEIL_GLIBC_FLOOR@"),
@@ -838,4 +930,37 @@ fn rpmspec_parse() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+#[test]
+fn sealed_inputs_used() {
+    if !h::candidate_mode() {
+        eprintln!("skip: sealed-input threading needs candidate inputs");
+        return;
+    }
+    // The journey consumes the sealed pair from beside the
+    // manifest: never a build output, even rebuild-gated.
+    let inputs = h::candidate_inputs();
+    let manifest = std::env::var("MV_CANDIDATE_MANIFEST").unwrap();
+    let manifest_dir = std::path::Path::new(&manifest).parent().unwrap();
+    assert_eq!(
+        inputs.rpm.parent().unwrap(),
+        manifest_dir,
+        "sealed .rpm must sit beside the manifest"
+    );
+    assert_eq!(
+        inputs.deb.parent().unwrap(),
+        manifest_dir,
+        "sealed .deb must sit beside the manifest"
+    );
+    let work = h::work_dir();
+    assert!(
+        !inputs.rpm.starts_with(&work),
+        "resolved a build output, not the sealed input"
+    );
+    assert!(inputs.rpm.is_file());
+    assert_eq!(inputs.rpm.extension().unwrap(), "rpm");
+    assert!(inputs.deb.is_file());
+    eprintln!("sealed .rpm: {}", inputs.rpm.display());
+    eprintln!("sealed .deb: {}", inputs.deb.display());
 }

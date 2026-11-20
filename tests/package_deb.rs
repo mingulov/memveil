@@ -89,6 +89,18 @@ fn payload_glibc_floor(extracted: &std::path::Path) -> (u32, u32) {
     h::glibc_floor(&payload_elfs(extracted))
 }
 
+/// Verified-manifest members under `prefix` with `suffix`.
+fn manifest_members(manifest: &std::path::Path, prefix: &str, suffix: &str) -> Vec<String> {
+    let expr = format!(
+        "'\\n'.join(sorted(k for k in d['files'] \
+         if k.startswith('{prefix}') and k.endswith('{suffix}')))"
+    );
+    h::json_probe(manifest, &expr)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
 fn repo_tree_files(root: &std::path::Path, subdir: &str, suffix: &str) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     let base = root.join(subdir);
@@ -148,11 +160,26 @@ fn control_fields() {
     );
     let rev = h::deb_field(&deb, "X-Memveil-Revision");
     let rev = rev.trim();
-    assert!(
-        rev == "export" || (rev.len() == 40 && rev.chars().all(|c| c.is_ascii_hexdigit())),
-        "{rev}"
-    );
-    let lock = h::sha256_file(&h::pristine_root().join("Cargo.lock"));
+    if h::candidate_mode() {
+        // Sealed control fields bind the sealed source, never
+        // the checkout the qualification happens to run from.
+        let manifest = &h::candidate_inputs().manifest;
+        let want = h::json_probe(manifest, "d['source']['commit']");
+        assert_eq!(rev, want, "sealed revision vs manifest");
+    } else {
+        assert!(
+            rev == "export" || (rev.len() == 40 && rev.chars().all(|c| c.is_ascii_hexdigit())),
+            "{rev}"
+        );
+    }
+    let lock = if h::candidate_mode() {
+        h::json_probe(
+            &h::candidate_inputs().manifest,
+            "d['toolchain']['cargo_lock_sha256']",
+        )
+    } else {
+        h::sha256_file(&h::pristine_root().join("Cargo.lock"))
+    };
     assert_eq!(h::deb_field(&deb, "X-Memveil-Cargo-Lock").trim(), lock);
     let tools = h::deb_field(&deb, "X-Memveil-Build-Tools");
     let tools = tools.trim();
@@ -172,10 +199,14 @@ fn control_fields() {
         String::from_utf8_lossy(&lmb.stdout).trim().is_empty(),
         "stale bridge field present"
     );
-    assert_eq!(
-        deb.file_name().unwrap().to_str().unwrap(),
-        format!("memveil_{version}-1_amd64.deb")
-    );
+    // Sealed artifact names come from the manifest (the loader
+    // binds them); only dev builds carry the fixed pattern.
+    if !h::candidate_mode() {
+        assert_eq!(
+            deb.file_name().unwrap().to_str().unwrap(),
+            format!("memveil_{version}-1_amd64.deb")
+        );
+    }
 }
 
 #[test]
@@ -226,13 +257,39 @@ fn floor_without_abi_nodes() {
 fn file_list_exact() {
     let deb = h::ensure_deb();
     let (files, _dirs) = h::deb_listing(&deb);
-    let root = h::pristine_root();
-    let mut profiles: BTreeSet<String> = repo_tree_files(&root, "profiles", ".json")
+    // Candidate mode derives the expected sets from the
+    // verified manifest, never the checkout or a fresh bundle.
+    let (profile_rels, doc_rels): (Vec<String>, Vec<String>) = if h::candidate_mode() {
+        // Manifest rels are tree-rooted; strip to the
+        // subdir-relative form the installed map expects.
+        let manifest = &h::candidate_inputs().manifest;
+        let strip = |rels: Vec<String>, prefix: &str| {
+            rels.into_iter()
+                .map(|rel| rel.strip_prefix(prefix).unwrap().to_string())
+                .collect::<Vec<String>>()
+        };
+        (
+            strip(
+                manifest_members(manifest, "profiles/", ".json"),
+                "profiles/",
+            ),
+            strip(manifest_members(manifest, "docs/", ".md"), "docs/"),
+        )
+    } else {
+        let root = h::pristine_root();
+        (
+            repo_tree_files(&root, "profiles", ".json")
+                .into_iter()
+                .collect(),
+            repo_tree_files(&root, "docs", ".md").into_iter().collect(),
+        )
+    };
+    let mut profiles: BTreeSet<String> = profile_rels
         .into_iter()
         .map(|rel| format!("usr/share/memveil/profiles/{rel}"))
         .collect();
     profiles.insert("usr/share/memveil/profiles/manifest.txt".to_string());
-    let docs: BTreeSet<String> = repo_tree_files(&root, "docs", ".md")
+    let docs: BTreeSet<String> = doc_rels
         .into_iter()
         .map(|rel| format!("usr/share/memveil/docs/{rel}"))
         .collect();
@@ -260,17 +317,25 @@ fn file_list_exact() {
         assert!(leaf.contains(".so"), "{path}");
         assert!(!path.contains('%') && !path.contains(' '), "{path}");
     }
-    // Per-crate notice files, from the same bundle manifest the .deb
+    // Per-crate notice files: candidate mode reads the
+    // verified manifest, dev the bundle manifest the .deb
     // consumed.
-    let set = h::ensure_tarball();
-    let bundle_manifest = set.bundle.join("MANIFEST.json");
-    let probe = format!(
-        "import json; d = json.load(open({bundle_manifest:?}));\n\
-         [print(k) for k in sorted(d['files']) if k.startswith('licenses/crates/')]"
-    );
     let mut crates_files = BTreeSet::new();
-    for rel in h::run_ok("python3", &["-c", &probe], None).lines() {
-        crates_files.insert(format!("usr/share/doc/memveil/{rel}"));
+    if h::candidate_mode() {
+        // Empty suffix matches every member under the prefix.
+        for rel in manifest_members(&h::candidate_inputs().manifest, "licenses/crates/", "") {
+            crates_files.insert(format!("usr/share/doc/memveil/{rel}"));
+        }
+    } else {
+        let set = h::ensure_tarball();
+        let bundle_manifest = set.bundle.join("MANIFEST.json");
+        let probe = format!(
+            "import json; d = json.load(open({bundle_manifest:?}));\n\
+             [print(k) for k in sorted(d['files']) if k.startswith('licenses/crates/')]"
+        );
+        for rel in h::run_ok("python3", &["-c", &probe], None).lines() {
+            crates_files.insert(format!("usr/share/doc/memveil/{rel}"));
+        }
     }
     assert!(!crates_files.is_empty(), "bundle carries no crate texts");
     let mut want = fixed_files();
@@ -376,8 +441,11 @@ fn staged_payload_matches_bundle() {
     // satisfy the packager's verify, and a hollow staging
     // must fail it.
     let deb = h::ensure_deb();
-    let set = h::ensure_tarball();
-    let manifest = set.bundle.join("MANIFEST.json");
+    let manifest = if h::candidate_mode() {
+        h::candidate_inputs().manifest.clone()
+    } else {
+        h::ensure_tarball().bundle.join("MANIFEST.json")
+    };
     let extracted = h::deb_extract(&deb, "deb-verify");
     let script = h::scripts_dir().join("package-deb.py");
     let probe = format!(
@@ -477,6 +545,21 @@ fn shipped_elf_stripped() {
 fn bpf_objects_match_build() {
     let deb = h::ensure_deb();
     let extracted = h::deb_extract(&deb, "deb-bpfbytes");
+    // Candidate mode compares against the verified candidate
+    // root, never the development build outputs.
+    if h::candidate_mode() {
+        let staged = h::candidate_stage(&[
+            "bpf/swiotlb_attempt.bpf.o",
+            "bpf/swiotlb_lifecycle.bpf.o",
+            "bpf/swiotlb_copy.bpf.o",
+        ]);
+        for name in h::BPF_OBJECTS {
+            let want = staged.join("bpf").join(name);
+            let seen = extracted.join("usr").join("lib").join("memveil").join(name);
+            assert_eq!(fs::read(&seen).unwrap(), fs::read(&want).unwrap(), "{name}");
+        }
+        return;
+    }
     let out = h::bpf_out_dir();
     for (channel, name) in [
         ("attempt", h::BPF_OBJECTS[0]),
@@ -627,7 +710,13 @@ fn roff(line: &str) -> String {
 fn installed_man_matches_current_help() {
     let deb = h::ensure_deb();
     let extracted = h::deb_extract(&deb, "deb-manhelp");
-    let binary = h::ensure_release_binary();
+    // Candidate mode runs the sealed binary itself, never a
+    // development build.
+    let binary = if h::candidate_mode() {
+        extracted.join("usr").join("bin").join("memveil")
+    } else {
+        h::ensure_release_binary()
+    };
     let bin = binary.to_str().unwrap();
     let mut pages = vec![("".to_string(), "memveil.1".to_string())];
     for verb in [
@@ -720,20 +809,39 @@ fn loader_closure() {
 fn docs_mirror_repo_and_links_resolve() {
     let deb = h::ensure_deb();
     let extracted = h::deb_extract(&deb, "deb-docs");
-    let root = h::pristine_root();
     let docs = extracted
         .join("usr")
         .join("share")
         .join("memveil")
         .join("docs");
-    for rel in repo_tree_files(&root, "docs", ".md") {
-        let staged = docs.join(&rel);
-        assert!(staged.is_file(), "{rel}");
-        assert_eq!(
-            fs::read(&staged).unwrap(),
-            fs::read(root.join("docs").join(&rel)).unwrap(),
-            "{rel}"
-        );
+    // Candidate mode mirrors the verified manifest, never the
+    // checkout.
+    if h::candidate_mode() {
+        let manifest = &h::candidate_inputs().manifest;
+        let rels = manifest_members(manifest, "docs/", ".md");
+        let refs: Vec<&str> = rels.iter().map(String::as_str).collect();
+        let staged = h::candidate_stage(&refs);
+        for rel in &rels {
+            let sub = rel.strip_prefix("docs/").unwrap();
+            let seen = docs.join(sub);
+            assert!(seen.is_file(), "{rel}");
+            assert_eq!(
+                fs::read(&seen).unwrap(),
+                fs::read(staged.join(rel)).unwrap(),
+                "{rel}"
+            );
+        }
+    } else {
+        let root = h::pristine_root();
+        for rel in repo_tree_files(&root, "docs", ".md") {
+            let staged = docs.join(&rel);
+            assert!(staged.is_file(), "{rel}");
+            assert_eq!(
+                fs::read(&staged).unwrap(),
+                fs::read(root.join("docs").join(&rel)).unwrap(),
+                "{rel}"
+            );
+        }
     }
     // Local markdown links resolve inside the installed tree.
     let mut stack = vec![docs.clone()];
@@ -836,19 +944,23 @@ fn lintian_overrides_exact() {
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .map(str::to_string)
         .collect();
-    let template =
-        fs::read_to_string(h::packaging_dir().join("deb").join("lintian-overrides")).unwrap();
-    let want: BTreeSet<String> = template
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(str::to_string)
-        .collect();
-    assert!(!want.is_empty());
-    assert_eq!(lines, want);
+    // The checkout template comparison is dev-only: a sealed
+    // package answers to its own source, not this checkout.
+    if !h::candidate_mode() {
+        let template =
+            fs::read_to_string(h::packaging_dir().join("deb").join("lintian-overrides")).unwrap();
+        let want: BTreeSet<String> = template
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(str::to_string)
+            .collect();
+        assert!(!want.is_empty());
+        assert_eq!(lines, want);
+    }
     // The override set pins the known-justified tags line by line.
     let mut tags: BTreeSet<String> = BTreeSet::new();
-    for line in &want {
+    for line in &lines {
         if line.contains("binary-from-other-architecture") {
             tags.insert("bpf".to_string());
         } else if line.contains("uncompressed-manual-page") {
@@ -947,6 +1059,11 @@ fn install_doctor_uninstall_smoke() {
             "dpkg --verify noisy: {}",
             String::from_utf8_lossy(&verify.stdout)
         );
+        // Sealed installs prove the installed tree equals the
+        // verified candidate closure before running anything.
+        if h::candidate_mode() {
+            j::assert_installed_closure(std::path::Path::new("/"));
+        }
         j::assert_receipts_installed(receipts);
         j::assert_loader_closure();
         j::assert_doctor_and_version(&version);
@@ -968,4 +1085,37 @@ fn install_doctor_uninstall_smoke() {
     );
     assert!(!h::run("dpkg", &["-s", "memveil"], None).status.success());
     j::assert_no_residue();
+}
+
+#[test]
+fn sealed_inputs_used() {
+    if !h::candidate_mode() {
+        eprintln!("skip: sealed-input threading needs candidate inputs");
+        return;
+    }
+    // The journey consumes the sealed pair from beside the
+    // manifest: never a build output, even rebuild-gated.
+    let inputs = h::candidate_inputs();
+    let manifest = std::env::var("MV_CANDIDATE_MANIFEST").unwrap();
+    let manifest_dir = std::path::Path::new(&manifest).parent().unwrap();
+    assert_eq!(
+        inputs.deb.parent().unwrap(),
+        manifest_dir,
+        "sealed .deb must sit beside the manifest"
+    );
+    assert_eq!(
+        inputs.rpm.parent().unwrap(),
+        manifest_dir,
+        "sealed .rpm must sit beside the manifest"
+    );
+    let work = h::work_dir();
+    assert!(
+        !inputs.deb.starts_with(&work),
+        "resolved a build output, not the sealed input"
+    );
+    assert!(inputs.deb.is_file());
+    assert_eq!(inputs.deb.extension().unwrap(), "deb");
+    assert!(inputs.rpm.is_file());
+    eprintln!("sealed .deb: {}", inputs.deb.display());
+    eprintln!("sealed .rpm: {}", inputs.rpm.display());
 }
