@@ -8,6 +8,15 @@
         "required_rows": "equal",
         "skipped_rows": "zero"
       }
+    },
+    "live-campaign/1": {
+      "environment": "ordinary-linux",
+      "predicates": {
+        "cleanup_mismatches": "zero",
+        "failed_legs": "zero",
+        "legs": "equal",
+        "target_failures": "zero"
+      }
     }
   },
   "retention_days": "30",

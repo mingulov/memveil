@@ -473,3 +473,392 @@ def test_installed_leaf_and_parent_aliases_refuse_without_touching_foreign_files
     with pytest.raises(ValueError, match='alias'):
         api().verify_installed(doc, root)
     assert (foreign / 'memveil').read_bytes() == b'unchanged'
+
+
+def _campaign_metric(units):
+    return {'valid': True, 'counts_ok': True, 'throughput': 100.0, 'p99': 5.0,
+            'completed_units': units, 'operation_seconds': [0.5]}
+
+
+def _campaign_window(start_ns, seconds):
+    return {'elapsed_seconds': float(seconds),
+            'window': {'start_ns': str(start_ns),
+                       'end_ns': str(start_ns + seconds * 10**9)},
+            'metrics': {'block': _campaign_metric('16777216'),
+                        'network': _campaign_metric('32')},
+            'samples': [{'elapsed_monotonic_ns': str(start_ns), 'rss_kib': '1024',
+                         'fd_count': '8', 'map_memlock_bytes': {}}]}
+
+
+def _campaign_quality():
+    return {key: {'status': 'complete_for_scope', 'loss_count': '0'}
+            for key in ('detail', 'aggregate', 'correlation', 'baseline', 'terminal')}
+
+
+def _campaign_capture(session_bytes, events_bytes, kinds):
+    import hashlib
+    return {'quality': _campaign_quality(), 'stop': {}, 'kinds': kinds,
+            'session_sha256': hashlib.sha256(session_bytes).hexdigest(),
+            'events_sha256': hashlib.sha256(events_bytes).hexdigest()}
+
+
+def _campaign_retained(session_bytes, events_bytes):
+    import hashlib
+    return {'session.json': {'bytes': str(len(session_bytes)),
+                             'sha256': hashlib.sha256(session_bytes).hexdigest(),
+                             'truncated': False},
+            'events.ndjson': {'bytes': str(len(events_bytes)),
+                              'sha256': hashlib.sha256(events_bytes).hexdigest(),
+                              'truncated': False}}
+
+
+def _pool_leg():
+    import json
+    session_bytes = json.dumps({'quality': _campaign_quality(), 'stop': {}}).encode()
+    samples = [str(tick * 1025000000) for tick in range(4150)]
+    events = ''.join(json.dumps({'kind': 'pool_sample', 'ts_ns': tick}) + '\n'
+                     for tick in samples)
+    events += json.dumps({'kind': 'bounce_attempt', 'ts_ns': '1'}) + '\n'
+    events_bytes = events.encode()
+    records = []
+    for field in ('used', 'capacity'):
+        for tick in range(4261):
+            records.append({'field': field, 'returned_bytes': '3',
+                            'received_ns': str(tick * 10**9)})
+    leg = {'ordinal': '0', 'mode': 'attempt-record-summary', 'status': 'PASS',
+           'bpf_before': {}, 'bpf_after': {}, 'product_exit': 0, 'cleanup_errors': [],
+           'output': {'ready': True, 'refresh_ns': [], 'error': None},
+           'warmup': _campaign_window(0, 10),
+           'workload': _campaign_window(0, 4261),
+           'stop_signal_ns': str(4262 * 10**9),
+           'pool_oracle': {'records': records, 'errors': [], 'cleanup': 'detached'},
+           'capture': _campaign_capture(
+               session_bytes, events_bytes,
+               {'pool_sample': '4150', 'bounce_attempt': '1'}),
+           'retained_capture': _campaign_retained(session_bytes, events_bytes),
+           'retained_verification': 'verified-capture'}
+    return leg, {'session.json': session_bytes, 'events.ndjson': events_bytes}
+
+
+def _write_export_leg(export, ordinal, leg, files):
+    slot = export / ('completed-' + str(ordinal))
+    (slot / 'capture').mkdir(parents=True)
+    for name, data in files.items():
+        (slot / 'capture' / name).write_bytes(data)
+    api().write_observations(slot / 'observations.json', leg)
+
+
+def _write_campaign(export, manifest, mode, legs, comparisons, extra=None):
+    import json
+    m = api()
+    sys.path.insert(0, str(ROOT / 'tools'))
+    import candidate as c
+    result = {'schema': 'memveil-installed-campaign/1',
+              'candidate': c.digest_bytes(c.canonical(manifest)),
+              'mode': mode, 'environment': 'ordinary-linux', 'kernel': 'test-kernel',
+              'btf_sha256': 'ab' * 32, 'config_sha256': 'cd' * 32,
+              'source': {}, 'toolchain': {}, 'build_receipt_sha256': 'ef' * 32,
+              'runtime_files': {}, 'helpers': {}, 'legs': legs, 'comparisons': comparisons,
+              'cleanup': {'before': {}, 'after': {}}}
+    if extra:
+        result.update(extra)
+    result['totals'] = m.campaign_totals(result)
+    with (export / 'campaign.json').open('x') as stream:
+        json.dump(result, stream, sort_keys=True)
+    for ordinal in range(len(legs)):
+        m.write_observations(export / ('progress-' + str(ordinal) + '.json'),
+                             {'schema': result['schema'], 'candidate': result['candidate'],
+                              'mode': mode, 'legs': legs[:ordinal + 1]})
+    return result
+
+
+def _pool_export(export, manifest):
+    leg, files = _pool_leg()
+    _write_export_leg(export, 0, leg, files)
+    return _write_campaign(export, manifest, 'pool', [leg], [],
+                           {'pool': {'legs': 1, 'observation': leg}})
+
+
+def _overhead_product_leg(ordinal, mode, start_ns):
+    import json
+    session_bytes = json.dumps({'quality': _campaign_quality(), 'stop': {}}).encode()
+    events_bytes = ''.join(json.dumps({'kind': 'bounce_attempt', 'ts_ns': str(tick)})
+                           + '\n' for tick in range(3)).encode()
+    output = {'ready': True, 'refresh_ns': [], 'error': None}
+    if mode == 'live-top-1s':
+        output['refresh_ns'] = [str(start_ns + tick * 10**9) for tick in range(1, 60)]
+    leg = {'ordinal': str(ordinal), 'mode': mode, 'status': 'PASS',
+           'bpf_before': {}, 'bpf_after': {}, 'product_exit': 0, 'cleanup_errors': [],
+           'output': output,
+           'warmup': _campaign_window(start_ns, 10),
+           'workload': _campaign_window(start_ns, 60),
+           'stop_signal_ns': str(start_ns + 61 * 10**9),
+           'capture': _campaign_capture(session_bytes, events_bytes,
+                                        {'bounce_attempt': '3'}),
+           'retained_capture': _campaign_retained(session_bytes, events_bytes),
+           'retained_verification': 'verified-capture'}
+    return leg, {'session.json': session_bytes, 'events.ndjson': events_bytes}
+
+
+def _overhead_off_leg(ordinal, start_ns):
+    return {'ordinal': str(ordinal), 'mode': 'off', 'status': 'PASS',
+            'bpf_before': {}, 'bpf_after': {}, 'product_exit': None, 'cleanup_errors': [],
+            'warmup': _campaign_window(start_ns, 10),
+            'workload': _campaign_window(start_ns, 60),
+            'capture': None, 'retained_capture': {},
+            'retained_verification': 'verified-capture'}, {}
+
+
+def _overhead_export(export, manifest):
+    m = api()
+    skipped = {'journal-summary', 'journal-callers-detail'}
+    legs, files = [], []
+    ordinal = 0
+    for mode, pair in m.schedule():
+        if mode in skipped:
+            continue
+        order = ('off', mode) if pair % 2 == 0 else (mode, 'off')
+        for label in order:
+            start_ns = ordinal * 100 * 10**9
+            if label == 'off':
+                leg, leg_files = _overhead_off_leg(ordinal, start_ns)
+            else:
+                leg, leg_files = _overhead_product_leg(ordinal, label, start_ns)
+            legs.append(leg)
+            files.append(leg_files)
+            ordinal += 1
+    pairs = {mode: ([], []) for mode in m.MODES if mode not in skipped}
+    index = 0
+    for mode, pair in m.schedule():
+        if mode in skipped:
+            continue
+        first, second = legs[index], legs[index + 1]
+        index += 2
+        observations = {first['mode']: first, second['mode']: second}
+        pairs[mode][0].append(observations['off'])
+        pairs[mode][1].append(observations[mode])
+    comparisons = []
+    for mode, (baselines, observers) in pairs.items():
+        for metric in ('block', 'network'):
+            measurement = m.compare(
+                mode + '/' + metric,
+                [row['workload']['metrics'][metric] for row in baselines],
+                [row['workload']['metrics'][metric] for row in observers])
+            status, reason = m.assess(measurement)
+            comparisons.append({'mode': mode, 'metric': metric, 'status': status,
+                                'reason': reason, 'measurement': measurement,
+                                'target_required': True})
+    for mode in sorted(skipped):
+        for metric in ('block', 'network'):
+            comparisons.append({'mode': mode, 'metric': metric, 'status': 'SKIP',
+                                'reason': 'conversion-journal not admitted (test)',
+                                'target_required': True})
+    for number, (leg, leg_files) in enumerate(zip(legs, files)):
+        _write_export_leg(export, number, leg, leg_files)
+    return _write_campaign(export, manifest, 'overhead', legs, comparisons)
+
+
+def _live_manifest():
+    return {'schema': 'test-manifest/1', 'files': {'bin/memveil': 'ab' * 32}}
+
+
+def test_live_gate_inputs_verify_through_qualify_path(tmp_path):
+    import json
+    m = api()
+    sys.path.insert(0, str(ROOT / 'tools'))
+    import candidate as c
+    manifest = _live_manifest()
+    evidence = tmp_path / 'evidence'
+    live = evidence / 'live'
+    live.mkdir(parents=True)
+    _pool_export(live, manifest)
+    campaign = json.loads((live / 'campaign.json').read_bytes())
+    totals = m.verify_live_campaign(live, manifest)
+    assert campaign['totals'] == totals
+    exit_doc = {'guest_exit': 0, 'candidate': campaign['candidate'],
+                'totals': totals}
+    (live / 'exit.json').write_bytes(json.dumps(exit_doc, sort_keys=True).encode())
+    def bindings(name):
+        return {key: {'file': 'live/' + name,
+                      'sha256': c.digest(live / name),
+                      'path': ['totals', key], 'encoding': 'u64'}
+                for key in ('cleanup_mismatches', 'failed_legs', 'legs',
+                            'target_failures')}
+    doc = {'schema': 'memveil-gate-input/1', 'environment': 'ordinary-linux',
+           'product': dict(totals), 'oracle': dict(totals),
+           'sources': {'product': bindings('campaign.json'),
+                       'oracle': bindings('exit.json')}}
+    (evidence / 'live-inputs.json').write_bytes(c.canonical(doc))
+    assert c.validate_inputs_doc(doc) == 'gate'
+    policy, _ = c.validate_policy(ROOT / 'packaging/candidate-policy.json')
+    requirement = policy['required_gates']['live-campaign/1']
+    retained = c.read_json(evidence / 'live-inputs.json', sealed=True)
+    c.verify_measurement_sources(retained, evidence)
+    assert c.rederive_measurements(retained, requirement) is True
+
+
+def test_verify_live_campaign_accepts_honest_pool(tmp_path):
+    m = api()
+    manifest = _live_manifest()
+    export = tmp_path / 'export'
+    export.mkdir()
+    _pool_export(export, manifest)
+    assert m.verify_live_campaign(export, manifest) == {
+        'legs': '1', 'failed_legs': '0', 'target_failures': '0',
+        'cleanup_mismatches': '0'}
+
+
+def test_verify_live_campaign_refuses_tampered_leg(tmp_path):
+    m = api()
+    manifest = _live_manifest()
+    export = tmp_path / 'export'
+    export.mkdir()
+    _pool_export(export, manifest)
+    target = export / 'completed-0/capture/events.ndjson'
+    target.write_bytes(b'x' + target.read_bytes()[1:])
+    with pytest.raises(ValueError, match='changed'):
+        m.verify_live_campaign(export, manifest)
+
+
+def test_verify_live_campaign_refuses_missing_leg(tmp_path):
+    import shutil
+    m = api()
+    manifest = _live_manifest()
+    export = tmp_path / 'export'
+    export.mkdir()
+    _pool_export(export, manifest)
+    shutil.rmtree(export / 'completed-0')
+    with pytest.raises(ValueError, match='inventory'):
+        m.verify_live_campaign(export, manifest)
+
+
+def test_verify_live_campaign_refuses_predicate_mismatch(tmp_path):
+    import hashlib
+    import json
+    m = api()
+    manifest = _live_manifest()
+    export = tmp_path / 'export'
+    export.mkdir()
+    _pool_export(export, manifest)
+    session_path = export / 'completed-0/capture/session.json'
+    session = json.loads(session_path.read_bytes())
+    session['quality']['detail']['loss_count'] = '5'
+    fresh = json.dumps(session, sort_keys=True).encode()
+    session_path.write_bytes(fresh)
+    digest = hashlib.sha256(fresh).hexdigest()
+    for path, nested in ((export / 'campaign.json', True),
+                         (export / 'completed-0/observations.json', False)):
+        doc = json.loads(path.read_bytes())
+        leg = doc['legs'][0] if nested else doc
+        leg['capture']['quality']['detail']['loss_count'] = '5'
+        leg['capture']['session_sha256'] = digest
+        leg['retained_capture']['session.json']['sha256'] = digest
+        leg['retained_capture']['session.json']['bytes'] = str(len(fresh))
+        if nested:
+            path.write_bytes(json.dumps(doc, sort_keys=True).encode())
+        else:
+            path.write_bytes((json.dumps(doc, sort_keys=True) + '\n').encode())
+    with pytest.raises(ValueError, match='loss'):
+        m.verify_live_campaign(export, manifest)
+
+
+def test_verify_live_campaign_accepts_honest_overhead(tmp_path):
+    m = api()
+    manifest = _live_manifest()
+    export = tmp_path / 'export'
+    export.mkdir()
+    _overhead_export(export, manifest)
+    assert m.verify_live_campaign(export, manifest) == {
+        'legs': '20', 'failed_legs': '0', 'target_failures': '0',
+        'cleanup_mismatches': '0'}
+
+
+def test_verify_live_campaign_refuses_workload_tamper(tmp_path):
+    import json
+    m = api()
+    manifest = _live_manifest()
+    export = tmp_path / 'export'
+    export.mkdir()
+    _overhead_export(export, manifest)
+    for path, nested in ((export / 'campaign.json', True),
+                         (export / 'completed-1/observations.json', False)):
+        doc = json.loads(path.read_bytes())
+        leg = doc['legs'][1] if nested else doc
+        assert leg['mode'] == 'attempt-record-summary'
+        leg['workload']['metrics']['block']['throughput'] = 50.0
+        if nested:
+            path.write_bytes(json.dumps(doc, sort_keys=True).encode())
+        else:
+            path.write_bytes((json.dumps(doc, sort_keys=True) + '\n').encode())
+    with pytest.raises(ValueError, match='retained workloads'):
+        m.verify_live_campaign(export, manifest)
+
+
+def _export_argv_export(cmd):
+    for token in cmd:
+        if token.startswith('--rwdir=/tmp/export='):
+            return Path(token[len('--rwdir=/tmp/export='):])
+    raise AssertionError('guest argv lacks the export mount')
+
+
+def test_host_acceptance_reverifies_export(sealed, monkeypatch, tmp_path):
+    import json
+    from types import SimpleNamespace
+    m = api()
+    previous = _sealed_arming_env(monkeypatch, sealed)
+    monkeypatch.setenv('MEMVEIL_VM_LIVE_SOAK', '1')
+    monkeypatch.setattr(m, 'ROOT', tmp_path)
+    from support.candidate_input import load
+    probe = load(env=dict(sealed))
+    manifest, digest = probe.manifest, probe.digest
+    probe.close()
+    honest = tmp_path / 'honest'
+    honest.mkdir()
+    _pool_export(honest, manifest)
+    def fake_guest(cmd, timeout):
+        import shutil
+        export = _export_argv_export(cmd)
+        shutil.copytree(honest, export, dirs_exist_ok=True)
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setitem(sys.modules, 'test_attempt_capture',
+                        SimpleNamespace(gate_prefix=lambda: (['true'], None)))
+    monkeypatch.setitem(sys.modules, 'vm_process',
+                        SimpleNamespace(run_owned_guest=fake_guest))
+    try:
+        receipt = m.host('pool', opts={'out': str(tmp_path)})
+    finally:
+        _restore_sealed(previous)
+    assert receipt['mode'] == 'pool' and receipt['candidate'] == digest
+    exit_doc = json.loads((Path(receipt['evidence']) / 'exit.json').read_text())
+    assert exit_doc['totals'] == {'legs': '1', 'failed_legs': '0',
+                                  'target_failures': '0', 'cleanup_mismatches': '0'}
+
+
+def test_host_acceptance_refuses_tampered_export(sealed, monkeypatch, tmp_path):
+    import shutil
+    from types import SimpleNamespace
+    m = api()
+    previous = _sealed_arming_env(monkeypatch, sealed)
+    monkeypatch.setenv('MEMVEIL_VM_LIVE_SOAK', '1')
+    monkeypatch.setattr(m, 'ROOT', tmp_path)
+    from support.candidate_input import load
+    probe = load(env=dict(sealed))
+    manifest = probe.manifest
+    probe.close()
+    tampered = tmp_path / 'tampered'
+    tampered.mkdir()
+    _pool_export(tampered, manifest)
+    shutil.rmtree(tampered / 'completed-0')
+    def fake_guest(cmd, timeout):
+        export = _export_argv_export(cmd)
+        shutil.copytree(tampered, export, dirs_exist_ok=True)
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setitem(sys.modules, 'test_attempt_capture',
+                        SimpleNamespace(gate_prefix=lambda: (['true'], None)))
+    monkeypatch.setitem(sys.modules, 'vm_process',
+                        SimpleNamespace(run_owned_guest=fake_guest))
+    try:
+        with pytest.raises(ValueError, match='inventory'):
+            m.host('pool', opts={'out': str(tmp_path)})
+    finally:
+        _restore_sealed(previous)
