@@ -6,9 +6,13 @@ Reads one pytest -rs report (short summary lines) and the
 expected-skips allowlist, and compares the multisets of
 (file, reason) pairs: -rs locations collapse line numbers
 (they churn on every edit and pytest versions disagree on
-their presence) while per-pair counts stay exact. Any
-unlisted skip fails; any stale allowlist entry fails too,
-so the one place stays truthful. Usage:
+their presence) while per-pair counts stay exact. The
+bracketed number is pytest's grouping multiplicity (one
+line covers N identical skips), so each line contributes
+its count, not one. Any unlisted skip fails; any stale
+allowlist entry fails too, so the one place stays
+truthful. A SKIPPED line outside the grammar fails
+closed instead of silently undercounting. Usage:
 pytest_skip_gate.py ALLOWLIST REPORT.
 """
 import json
@@ -17,16 +21,28 @@ import sys
 from collections import Counter
 
 SCHEMA = "memveil-pytest-ci-expected-skips/1"
-LINE = re.compile(r"^SKIPPED \[\d+\] (\S+?)(?::\d+)?: (.*)$")
+LINE = re.compile(r"^SKIPPED \[(\d+)\] (\S+?)(?::\d+)?: (.*)$")
 
 
 def parse_rs(text):
-    """Multiset of (file, reason) over -rs summary lines."""
+    """Multiset of (file, reason) over -rs summary lines.
+
+    Each line contributes its bracketed multiplicity;
+    malformed SKIPPED lines and zero counts raise
+    instead of silently dropping skips.
+    """
     found = Counter()
     for line in text.splitlines():
         match = LINE.match(line)
         if match:
-            found[(match[1], match[2])] += 1
+            count = int(match[1])
+            if count < 1:
+                raise ValueError(
+                    "skip summary count is zero: " + line)
+            found[(match[2], match[3])] += count
+        elif line.startswith("SKIPPED"):
+            raise ValueError(
+                "unparsed skip summary line: " + line)
     return found
 
 

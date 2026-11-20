@@ -22,7 +22,7 @@
       "reason": "fixture regen inputs retired with the C/Mojo tree; committed fixtures carry the suites"
     },
     {
-      "count": 12,
+      "count": 20,
       "id": "tests/vm/test_fixture_generation.py",
       "reason": "fixture regen inputs retired with the C/Mojo tree; committed fixtures carry the suites"
     },

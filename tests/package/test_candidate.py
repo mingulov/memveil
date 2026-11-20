@@ -3741,6 +3741,31 @@ def test_ci_skip_gate_reports(tmp_path):
     proc = check(lines(full))
     assert proc.returncode == 0, proc.stderr
     assert "all listed" in proc.stdout
+    # Grouped lines contribute their bracketed multiplicity,
+    # not one: the first entry's count arrives as one [3]
+    # line plus single lines for the rest.
+    assert full[0] >= 3, "grouped case needs a count of 3+"
+    grouped = ["SKIPPED [3] %s: %s"
+               % (skips[0]["id"], skips[0]["reason"])]
+    grouped += ["SKIPPED [1] %s: %s"
+                % (skips[0]["id"], skips[0]["reason"])] \
+        * (full[0] - 3)
+    for entry, count in zip(skips[1:], full[1:]):
+        grouped += ["SKIPPED [1] %s: %s"
+                    % (entry["id"], entry["reason"])] * count
+    proc = check(grouped)
+    assert proc.returncode == 0, proc.stderr
+    assert "all listed" in proc.stdout
+    short_grouped = ["SKIPPED [2] %s: %s"
+                     % (skips[0]["id"], skips[0]["reason"])]
+    proc = check(short_grouped)
+    assert proc.returncode == 1, proc.stdout
+    assert "count differs" in proc.stderr
+    proc = check(["SKIPPED [0] %s: %s"
+                  % (skips[0]["id"], skips[0]["reason"])])
+    assert proc.returncode == 1, proc.stdout
+    proc = check(["SKIPPED [1] " + skips[0]["id"]])
+    assert proc.returncode == 1, proc.stdout
     proc = check(lines(full) + [
         "SKIPPED [1] tests/vm/test_live_soak.py: "
         "synthetic unlisted reason"])
