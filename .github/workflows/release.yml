@@ -77,6 +77,17 @@ jobs:
               sys.exit("source_commit is not 40 lowercase hex")
           EOF
           git cat-file -e "$SOURCE_COMMIT^{commit}"
+      - name: Pin the sealed clock to C
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -eu
+          EPOCH=$(git log -1 --format=%ct "$SOURCE_COMMIT")
+          case "$EPOCH" in
+            ""|*[!0-9]*)
+              echo "not an epoch: $EPOCH" >&2; exit 1;;
+          esac
+          echo "SOURCE_DATE_EPOCH=$EPOCH" >> "$GITHUB_ENV"
       - name: Materialize the candidate source as data
         env:
           SOURCE_COMMIT: ${{ inputs.source_commit }}

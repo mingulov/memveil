@@ -316,6 +316,20 @@ def write_changelog(licdir, upstream, memveil_rev):
         handle.write(buffer.getvalue())
 
 
+def clamp_mtimes(root, epoch):
+    """Pin every staged mtime to the changelog clock.
+
+    dpkg-deb archives member mtimes verbatim, so uniform
+    stamps are what make one source regenerate one .deb;
+    SOURCE_DATE_EPOCH pins the bytes, ordinary builds stamp
+    a single build time.
+    """
+    for base, dirs, files in os.walk(root):
+        for name in dirs + files:
+            os.utime(os.path.join(base, name),
+                     (epoch, epoch))
+
+
 def tool_line(argv):
     """First version line of a required packaging tool.
 
@@ -651,6 +665,7 @@ def main(argv):
             fail("staged payload differs from bundle: %s" % err)
         write_md5sums(root)
         fix_modes(root)
+        clamp_mtimes(root, changelog_epoch())
         out = os.path.join(out_dir, stem + ".deb")
         if not contained(out, out_dir):
             fail(".deb target escapes output dir: %s" % stem)

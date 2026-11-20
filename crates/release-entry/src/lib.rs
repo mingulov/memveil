@@ -760,6 +760,7 @@ const SPDX_VERSION: &str = "SPDX-2.3";
 /// full-closure verifier: a 12-entry subset would fail it. Like
 /// the retained port, only the creation timestamp varies between
 /// runs. Refuses to overwrite an existing output.
+#[allow(clippy::too_many_arguments)]
 pub fn emit_frozen(
     manifest_path: &Path,
     bundle: &Path,
@@ -768,6 +769,7 @@ pub fn emit_frozen(
     lock: &Path,
     ebpf_lock: &Path,
     out: &Path,
+    created: Option<&str>,
 ) -> Result<(), String> {
     for (path, label) in [
         (manifest_path, "--manifest"),
@@ -820,7 +822,7 @@ pub fn emit_frozen(
             ));
         }
     }
-    let created = utc_now()?;
+    let created = stamp_created(created)?;
     let doc = render(&facts, &payload, &checksums, &created, bundle, deb, rpm)?;
     write_once_bytes(out, doc.as_bytes())
 }
@@ -925,8 +927,23 @@ fn json_escape(text: &str) -> String {
 }
 
 /// Current UTC time as `YYYY-MM-DDTHH:MM:SSZ` (via `date -u`).
-fn utc_now() -> Result<String, String> {
-    let out = run("date", &["-u", "+%Y-%m-%dT%H:%M:%SZ"], None);
+/// Creation stamp from an explicit epoch: no wall clock.
+///
+/// `--created` wins; otherwise `SOURCE_DATE_EPOCH` supplies the
+/// epoch (the seal pins it to the source commit time). Neither
+/// may be absent: sealed bytes never carry a wall-clock stamp.
+fn stamp_created(flag: Option<&str>) -> Result<String, String> {
+    let raw = match flag {
+        Some(value) => Some(value.to_string()),
+        None => std::env::var("SOURCE_DATE_EPOCH").ok(),
+    };
+    let raw =
+        raw.ok_or_else(|| "sbom: creation time needs --created or SOURCE_DATE_EPOCH".to_string())?;
+    if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("sbom: creation time is not an epoch".to_string());
+    }
+    let arg = format!("@{raw}");
+    let out = run("date", &["-u", "-d", &arg, "+%Y-%m-%dT%H:%M:%SZ"], None);
     if !out.status.success() {
         return Err("sbom: cannot stamp creation time".to_string());
     }

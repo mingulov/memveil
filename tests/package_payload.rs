@@ -478,8 +478,17 @@ fn frozen_sbom_binds_full_payload_once() {
     let manifest = h::ensure_tarball().bundle.join("MANIFEST.json");
     let tmp = h::scratch("spdx-frozen");
     let out = tmp.join("memveil.spdx.json");
-    h::sbom::emit_frozen(&manifest, &bundle, &deb, &rpm, &lock, &ebpf_lock, &out)
-        .expect("emit frozen");
+    h::sbom::emit_frozen(
+        &manifest,
+        &bundle,
+        &deb,
+        &rpm,
+        &lock,
+        &ebpf_lock,
+        &out,
+        Some("1763596800"),
+    )
+    .expect("emit frozen");
     assert_eq!(h::json_probe(&out, "d['spdxVersion']"), "SPDX-2.3");
     let text = fs::read_to_string(&manifest).unwrap();
     let entries = h::payload::collect_full(&deb, &rpm, &bundle, &text).expect("collect full");
@@ -491,7 +500,16 @@ fn frozen_sbom_binds_full_payload_once() {
     }
     let count: usize = h::json_probe(&out, "len(d['files'])").parse().unwrap();
     assert_eq!(count, entries.len());
-    let err = h::sbom::emit_frozen(&manifest, &bundle, &deb, &rpm, &lock, &ebpf_lock, &out)
-        .expect_err("overwrite must fail");
+    let err = h::sbom::emit_frozen(
+        &manifest,
+        &bundle,
+        &deb,
+        &rpm,
+        &lock,
+        &ebpf_lock,
+        &out,
+        Some("1763596800"),
+    )
+    .expect_err("overwrite must fail");
     assert!(err.contains("refusing to overwrite"), "{err}");
 }

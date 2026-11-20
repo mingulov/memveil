@@ -35,7 +35,8 @@ from test_candidate import (
     _write_nonmatrix_evidence, _write_signed_checksums,
     _nonmatrix_required_gates, NONMATRIX_GATE,
     _matrix_lock, _matrix_inputs, _matrix_required_gates,
-    _write_real_matrix_row, _signed_gate, MATRIX_GATE)
+    _write_real_matrix_row, _signed_gate, MATRIX_GATE,
+    FIXED_EPOCH, deterministic_tar_gz, _clamp_tree)
 
 
 def api():
@@ -222,8 +223,10 @@ class CustodyBase:
         artifacts = self.base / "artifacts"
         artifacts.mkdir(parents=True)
         bundle_tar = artifacts / "memveil-custody.tar.gz"
-        with tarfile.open(bundle_tar, "w:gz") as stream:
-            stream.add(bundle, arcname="memveil-custody")
+        deterministic_tar_gz(bundle, "memveil-custody",
+                             bundle_tar)
+        epoch_env = dict(os.environ)
+        epoch_env["SOURCE_DATE_EPOCH"] = str(FIXED_EPOCH)
         staged = self.base / "staged"
         for rel in files:
             target = staged / c.installed_file_path(rel)
@@ -236,11 +239,13 @@ class CustodyBase:
             "Package: memveil-custody\nVersion: %s\n"
             "Architecture: amd64\nMaintainer: Fixture\n"
             "Description: synthetic custody fixture\n" % VERSION)
+        _clamp_tree(deb_stage / "payload")
         proc = subprocess.run(
             ["dpkg-deb", "-b", str(deb_stage / "payload"),
              str(artifacts
                  / ("memveil-custody_%s_amd64.deb" % VERSION))],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=epoch_env)
         assert proc.returncode == 0, proc.stderr
         rpm_top = self.base / "rpm-top"
         for leaf in ("BUILD", "RPMS", "SOURCES", "SPECS", "SRPMS"):
@@ -259,8 +264,12 @@ class CustodyBase:
             "- fixture\n" % VERSION)
         proc = subprocess.run(
             ["rpmbuild", "-bb", "--define", "_topdir %s" % rpm_top,
-             "--define", "payload %s" % staged, str(spec)],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+             "--define", "payload %s" % staged,
+             "--define",
+             "use_source_date_epoch_as_buildtime 1",
+             str(spec)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=epoch_env)
         assert proc.returncode == 0, proc.stderr[-3000:]
         rpms = list((rpm_top / "RPMS").rglob("*.rpm"))
         assert len(rpms) == 1, rpms
@@ -280,6 +289,7 @@ class CustodyBase:
              "--lock", str(root / "Cargo.lock"),
              "--ebpf-lock",
              str(root / "crates" / "ebpf" / "Cargo.lock"),
+             "--created", str(FIXED_EPOCH),
              "--out", str(sbom_out)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         assert proc.returncode == 0, proc.stderr

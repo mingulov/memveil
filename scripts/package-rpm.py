@@ -418,7 +418,12 @@ def main(argv):
     build = subprocess.run(
         ["rpmbuild", "-bb", "--nodeps",
          "--define", "_topdir %s" % rtop,
-         "--define", "debug_package %{nil}", work_spec],
+         "--define", "debug_package %{nil}",
+         # Pin the buildtime header to SOURCE_DATE_EPOCH
+         # (the seal pins it to C) instead of wall clock,
+         # so one source regenerates one .rpm.
+         "--define", "use_source_date_epoch_as_buildtime 1",
+         work_spec],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, env=env)
     with open(os.path.join(work, "rpmbuild.log"), "w") as handle:

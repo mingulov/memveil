@@ -19,7 +19,7 @@ use std::path::PathBuf;
 const USAGE: &str = "usage: memveil-release-entry payload-closure \
     --bundle B --deb D --rpm R [--manifest M]\n       \
     memveil-release-entry sbom-emit --manifest M --bundle B --deb D --rpm R \
-    --lock L --ebpf-lock E --out S\n";
+    --lock L --ebpf-lock E --out S [--created EPOCH]\n";
 
 fn usage_error(detail: &str) -> ! {
     eprintln!("memveil-release-entry: {detail}\n{USAGE}");
@@ -96,6 +96,7 @@ fn sbom_emit(argv: &[String]) {
             "--lock",
             "--ebpf-lock",
             "--out",
+            "--created",
         ]
         .contains(&flag.as_str())
         {
@@ -110,6 +111,7 @@ fn sbom_emit(argv: &[String]) {
         &required(&flags, "--lock"),
         &required(&flags, "--ebpf-lock"),
         &required(&flags, "--out"),
+        flags.get("--created").map(String::as_str),
     );
     if let Err(err) = result {
         eprintln!("memveil-release-entry: {err}");

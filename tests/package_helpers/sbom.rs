@@ -212,8 +212,18 @@ pub fn emit_frozen(
     lock: &Path,
     ebpf_lock: &Path,
     out: &Path,
+    created: Option<&str>,
 ) -> Result<(), String> {
-    memveil_release_entry::emit_frozen(manifest_path, bundle, deb, rpm, lock, ebpf_lock, out)
+    memveil_release_entry::emit_frozen(
+        manifest_path,
+        bundle,
+        deb,
+        rpm,
+        lock,
+        ebpf_lock,
+        out,
+        created,
+    )
 }
 
 /// Emit the SPDX document; `Err` carries the failure diagnostic.

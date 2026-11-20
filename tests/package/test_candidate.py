@@ -40,11 +40,52 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
+FIXED_EPOCH = 1763596800
+FIXED_DATE = "%d +0000" % FIXED_EPOCH
+
+
 def git(root, *args, **kw):
+    env = dict(os.environ)
+    env["GIT_AUTHOR_DATE"] = FIXED_DATE
+    env["GIT_COMMITTER_DATE"] = FIXED_DATE
     return subprocess.run(
         ["git", "-C", str(root), *args],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, check=True, **kw).stdout.strip()
+        text=True, check=True, env=env, **kw).stdout.strip()
+
+
+def deterministic_tar_gz(tree, arcname, dest):
+    """Bundle tarball with pinned members, order, and stamps.
+
+    Members sort, carry the fixed epoch with zeroed
+    ownership, and the gzip header stamps the same epoch,
+    so two builds of one tree hash identically.
+    """
+    tree = Path(tree)
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as stream:
+        for base, dirs, files in os.walk(tree):
+            dirs.sort()
+            for name in sorted(files):
+                full = os.path.join(base, name)
+                rel = os.path.relpath(full, tree)
+                arc = arcname + "/" + rel.replace(os.sep, "/")
+                info = stream.gettarinfo(full, arc)
+                info.mtime = FIXED_EPOCH
+                info.uid = info.gid = 0
+                info.uname = info.gname = ""
+                with open(full, "rb") as handle:
+                    stream.addfile(info, handle)
+    Path(dest).write_bytes(
+        gzip.compress(buf.getvalue(), mtime=FIXED_EPOCH))
+
+
+def _clamp_tree(tree):
+    """Pin every mtime under tree to the fixed epoch."""
+    for base, dirs, files in os.walk(tree):
+        for name in dirs + files:
+            os.utime(os.path.join(base, name),
+                     (FIXED_EPOCH, FIXED_EPOCH))
 
 
 def cargo_build_harness():
@@ -222,9 +263,11 @@ class Workshop:
 
         artifacts = self.base / "artifacts"
         artifacts.mkdir(parents=True)
-        with tarfile.open(artifacts / "memveil-fixture.tar.gz",
-                          "w:gz") as stream:
-            stream.add(bundle, arcname="memveil-fixture")
+        deterministic_tar_gz(
+            bundle, "memveil-fixture",
+            artifacts / "memveil-fixture.tar.gz")
+        epoch_env = dict(os.environ)
+        epoch_env["SOURCE_DATE_EPOCH"] = str(FIXED_EPOCH)
         staged = self.base / "staged"
         for rel in files:
             target = staged / m.installed_file_path(rel)
@@ -237,10 +280,12 @@ class Workshop:
             "Package: memveil-fixture\nVersion: 0.1.0\n"
             "Architecture: amd64\nMaintainer: Fixture\n"
             "Description: synthetic seal fixture\n")
+        _clamp_tree(deb_stage / "payload")
         proc = subprocess.run(
             ["dpkg-deb", "-b", str(deb_stage / "payload"),
              str(artifacts / "memveil-fixture_0.1.0_amd64.deb")],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=epoch_env)
         assert proc.returncode == 0, proc.stderr
         rpm_top = self.base / "rpm-top"
         for leaf in ("BUILD", "RPMS", "SOURCES", "SPECS", "SRPMS"):
@@ -258,8 +303,12 @@ class Workshop:
             "%changelog\n* Thu Nov 19 2026 Fixture - 0.1.0-1\n- fixture\n")
         proc = subprocess.run(
             ["rpmbuild", "-bb", "--define", "_topdir %s" % rpm_top,
-             "--define", "payload %s" % staged, str(spec)],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+             "--define", "payload %s" % staged,
+             "--define",
+             "use_source_date_epoch_as_buildtime 1",
+             str(spec)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=epoch_env)
         assert proc.returncode == 0, proc.stderr[-3000:]
         rpms = list((rpm_top / "RPMS").rglob("*.rpm"))
         assert len(rpms) == 1, rpms
@@ -280,6 +329,7 @@ class Workshop:
              "--lock", str(root / "Cargo.lock"),
              "--ebpf-lock",
              str(root / "crates" / "ebpf" / "Cargo.lock"),
+             "--created", str(FIXED_EPOCH),
              "--out", str(sbom_out)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         assert proc.returncode == 0, proc.stderr
@@ -726,6 +776,98 @@ def test_seal_rejects_sbom_closure_mismatch(workshop, tmp_path):
              "harness_bin": workshop.harness_bin()})
 
 
+def _sbom_emit_argv(workshop, fix, out, created=True):
+    argv = [workshop.harness_bin(), "sbom-emit",
+           "--manifest",
+           str(fix["bundle_dir"] / "MANIFEST.json"),
+           "--bundle",
+           str(next(fix["artifacts"].glob(
+               "memveil-fixture.tar.gz"))),
+           "--deb", str(next(fix["artifacts"].glob("*.deb"))),
+           "--rpm", str(next(fix["artifacts"].glob("*.rpm"))),
+           "--lock", str(fix["root"] / "Cargo.lock"),
+           "--ebpf-lock",
+           str(fix["root"] / "crates" / "ebpf"
+               / "Cargo.lock")]
+    if created:
+        argv += ["--created", str(FIXED_EPOCH)]
+    return argv + ["--out", str(out)]
+
+
+def _want_created():
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(
+        FIXED_EPOCH, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_sbom_emit_is_deterministic(workshop, tmp_path):
+    _m, fix = seal_paths(workshop, tmp_path)
+    first = Path(tmp_path) / "first.spdx.json"
+    second = Path(tmp_path) / "second.spdx.json"
+    for out in (first, second):
+        proc = subprocess.run(
+            _sbom_emit_argv(workshop, fix, out),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True)
+        assert proc.returncode == 0, proc.stderr
+    assert first.read_bytes() == second.read_bytes()
+    doc = json.loads(first.read_bytes())
+    assert doc["creationInfo"]["created"] == _want_created()
+
+
+def test_sbom_emit_refuses_missing_stamp(workshop, tmp_path,
+                                         monkeypatch):
+    _m, fix = seal_paths(workshop, tmp_path)
+    monkeypatch.delenv("SOURCE_DATE_EPOCH", raising=False)
+    proc = subprocess.run(
+        _sbom_emit_argv(workshop, fix,
+                        Path(tmp_path) / "nostamp.spdx.json",
+                        created=False),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True)
+    assert proc.returncode == 1
+    assert "creation time" in proc.stderr
+
+
+def test_sbom_emit_honors_source_date_epoch(workshop,
+                                            tmp_path,
+                                            monkeypatch):
+    _m, fix = seal_paths(workshop, tmp_path)
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", str(FIXED_EPOCH))
+    out = Path(tmp_path) / "env.spdx.json"
+    proc = subprocess.run(
+        _sbom_emit_argv(workshop, fix, out, created=False),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True)
+    assert proc.returncode == 0, proc.stderr
+    doc = json.loads(out.read_bytes())
+    assert doc["creationInfo"]["created"] == _want_created()
+
+
+def test_seal_is_deterministic(tmp_path):
+    m = api()
+    harness = cargo_build_harness()
+    ids = []
+    sets = []
+    for leaf in ("det-a", "det-b"):
+        shop = Workshop(tmp_path / leaf)
+        fix = shop.fresh(tmp_path / (leaf + "-use"))
+        manifest = m.create_manifest(
+            fix["bundle_dir"], fix["artifacts"], fix["policy"],
+            {"root": str(fix["root"]),
+             "harness_bin": harness})
+        out = tmp_path / (leaf + ".json")
+        ids.append(m.seal_manifest(manifest, out))
+        sets.append({path.name: path.read_bytes()
+                     for path in sorted(
+                         fix["artifacts"].iterdir())})
+    assert sets[0].keys() == sets[1].keys()
+    for name in sets[0]:
+        assert sets[0][name] == sets[1][name], name
+    assert ids[0] == ids[1]
+
+
 def test_seal_rejects_provenance_subject_mismatch(workshop, tmp_path):
     m, fix = seal_paths(workshop, tmp_path)
     rewrite_provenance(
@@ -1087,6 +1229,7 @@ def _reemit_sbom(workshop, fix):
          "--lock", str(fix["root"] / "Cargo.lock"),
          "--ebpf-lock",
          str(fix["root"] / "crates" / "ebpf" / "Cargo.lock"),
+         "--created", str(FIXED_EPOCH),
          "--out", str(sbom_out)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     assert proc.returncode == 0, proc.stderr
