@@ -1172,6 +1172,38 @@ def test_release_dryrun_stands_alone():
         "inputs.mode == 'dry-run'"
 
 
+def test_release_modes_gate_each_stage():
+    doc = _release_workflow()
+    trigger = doc.get("on", doc.get(True))
+    modes = trigger["workflow_dispatch"]["inputs"]["mode"][
+        "options"]
+    assert modes == ["seal", "import", "dry-run", "promote"]
+    assert doc["jobs"]["seal"]["if"] == "inputs.mode == 'seal'"
+    assert doc["jobs"]["sign"]["if"] == "inputs.mode == 'seal'"
+    qualify = doc["jobs"]["qualify"]["if"]
+    assert "inputs.mode == 'seal'" in qualify
+    assert "needs.sign.outputs.present == 'true'" in qualify
+    assert doc["jobs"]["import"]["if"] == \
+        "inputs.mode == 'import'"
+    assert "promote_authorization" in doc["jobs"]["promote"][
+        "if"]
+    for job in ("import", "dry-run", "promote"):
+        assert "needs" not in doc["jobs"][job], job
+
+
+def test_release_custody_stages_never_rebuild():
+    doc = _release_workflow()
+    forbidden = ("package-tarball", "package-deb",
+                 "package-rpm", "sbom-emit", "candidate seal",
+                 "candidate provenance", "sign-checksums",
+                 "bpf-linker", "nightly-", "--release",
+                 "candidate-src")
+    for job in ("import", "dry-run", "promote"):
+        text = json.dumps(doc["jobs"][job])
+        for marker in forbidden:
+            assert marker not in text, (job, marker)
+
+
 def test_release_promote_needs_no_dryrun():
     doc = _release_workflow()
     needs = doc["jobs"]["promote"].get("needs", [])

@@ -1,14 +1,21 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Dispatch-only release pipeline: seal -> sign -> qualify ->
-# import, then dry-run or promote as separate dispatches.
-# Every dispatch re-verifies the sealed candidate from the
-# source commit before running its custody stage, so nothing
-# promotes bytes that skipped export. Custody dispatches run
-# with the workflow ref at the qualification commit Q
-# (evidence-only over C); dry-run validates the proposed tag
-# while it must not exist yet, so the owner creates the final
-# tag on C after a green dry-run and only then dispatches
-# promote. See RELEASING.md for the operator order.
+# Dispatch-only release pipeline: one mode per dispatch, each
+# dispatch runs only its own stage and never rebuilds another
+# stage's bytes. Mode to jobs:
+#   seal    -> seal, sign, qualify (qualify only after the
+#              holding draft exists; re-dispatch seal then)
+#   import  -> import (consumes the sealed set via the draft
+#              assets, stores the remote artifact, attests)
+#   dry-run -> dry-run (consumes the recorded import only)
+#   promote -> promote (consumes the recorded import only)
+# Custody stages consume stored bytes with digest verification
+# (sealed artifact, draft assets, remote artifact) and run
+# zero builds of the candidate. Custody dispatches run with
+# the workflow ref at the qualification commit Q (evidence-
+# only over C); dry-run validates the proposed tag while it
+# must not exist yet, so the owner creates the final tag on C
+# after a green dry-run and only then dispatches promote.
+# See RELEASING.md for the operator order.
 #
 # Two-checkout trust rule: every job checks out the trusted
 # workflow ref for its tools and scripts, and jobs that need
@@ -33,10 +40,10 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'Custody stage to run'
+        description: 'Pipeline stage to run'
         required: true
         type: choice
-        options: [import, dry-run, promote]
+        options: [seal, import, dry-run, promote]
       candidate_sha256:
         description: 'Sealed candidate digest to release'
         required: true
@@ -55,6 +62,7 @@ permissions: {}
 
 jobs:
   seal:
+    if: inputs.mode == 'seal'
     runs-on: ubuntu-26.04
     permissions:
       contents: read
@@ -207,6 +215,7 @@ jobs:
 
   sign:
     needs: seal
+    if: inputs.mode == 'seal'
     runs-on: ubuntu-26.04
     outputs:
       present: ${{ steps.draft.outputs.present }}
@@ -307,7 +316,7 @@ jobs:
 
   qualify:
     needs: [seal, sign]
-    if: needs.sign.outputs.present == 'true'
+    if: inputs.mode == 'seal' && needs.sign.outputs.present == 'true'
     runs-on: ubuntu-26.04
     permissions:
       contents: read
@@ -428,7 +437,7 @@ jobs:
           retention-days: 90
 
   import:
-    needs: qualify
+    if: inputs.mode == 'import'
     runs-on: ubuntu-26.04
     permissions:
       contents: read
@@ -485,8 +494,6 @@ jobs:
           CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
         run: |
           set -eu
-          gh run download "$GITHUB_RUN_ID" \
-            -n "sealed-$CANDIDATE_SHA256" -D sealed
           VERSION=$(git show "$SOURCE_COMMIT:Cargo.toml" \
             | grep -m1 '^version = ' | cut -d'"' -f2)
           test -n "$VERSION"
@@ -533,7 +540,6 @@ jobs:
           cat custody-out/SUBJECTS.txt
 
   dry-run:
-    needs: import
     if: inputs.mode == 'dry-run'
     runs-on: ubuntu-26.04
     permissions:
@@ -590,8 +596,6 @@ jobs:
           CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
         run: |
           set -eu
-          gh run download "$GITHUB_RUN_ID" \
-            -n "sealed-$CANDIDATE_SHA256" -D sealed
           VERSION=$(git show "$SOURCE_COMMIT:Cargo.toml" \
             | grep -m1 '^version = ' | cut -d'"' -f2)
           test -n "$VERSION"
@@ -616,7 +620,6 @@ jobs:
             --harness-bin target/debug/memveil-release-entry
 
   promote:
-    needs: import
     if: inputs.mode == 'promote' && inputs.promote_authorization == inputs.candidate_sha256
     runs-on: ubuntu-26.04
     permissions:
@@ -673,8 +676,6 @@ jobs:
           CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
         run: |
           set -eu
-          gh run download "$GITHUB_RUN_ID" \
-            -n "sealed-$CANDIDATE_SHA256" -D sealed
           VERSION=$(git show "$SOURCE_COMMIT:Cargo.toml" \
             | grep -m1 '^version = ' | cut -d'"' -f2)
           test -n "$VERSION"
