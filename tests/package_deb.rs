@@ -1006,14 +1006,68 @@ fn journey_refuses_retained_receipts() {
 }
 
 #[test]
-fn install_doctor_uninstall_smoke() {
-    if !h::tool_present("dpkg") || !j::have_passwordless_sudo() {
-        eprintln!("skip: install smoke needs dpkg plus passwordless sudo");
-        return;
+fn journey_gate_matrix() {
+    // Missing tooling, missing sudo, and the opt-out skip in
+    // dev but fail in candidate mode; full tooling proceeds
+    // in both. Both package managers share the gate.
+    for tool in ["dpkg", "rpm"] {
+        assert_eq!(
+            j::journey_gate(tool, true, true, false, false),
+            j::JourneyGate::Proceed,
+            "{tool}"
+        );
+        assert_eq!(
+            j::journey_gate(tool, true, true, false, true),
+            j::JourneyGate::Proceed,
+            "{tool}"
+        );
+        for (present, sudo) in [(false, true), (true, false), (false, false)] {
+            match j::journey_gate(tool, present, sudo, false, false) {
+                j::JourneyGate::Skip(reason) => {
+                    assert!(reason.contains(tool), "{tool}: {reason}");
+                    assert!(reason.contains("passwordless sudo"), "{reason}");
+                }
+                other => panic!("{tool}: dev must skip cleanly, got {other:?}"),
+            }
+            match j::journey_gate(tool, present, sudo, false, true) {
+                j::JourneyGate::Fail(reason) => {
+                    assert!(reason.contains("candidate"), "{reason}");
+                    assert!(reason.contains(tool), "{tool}: {reason}");
+                }
+                other => panic!("{tool}: candidate must fail, got {other:?}"),
+            }
+        }
+        match j::journey_gate(tool, true, true, true, false) {
+            j::JourneyGate::Skip(reason) => {
+                assert!(reason.contains("MV_RUSTPKG_JOURNEY=0"), "{reason}");
+            }
+            other => panic!("{tool}: dev opt-out must skip, got {other:?}"),
+        }
+        match j::journey_gate(tool, true, true, true, true) {
+            j::JourneyGate::Fail(reason) => {
+                assert!(reason.contains("candidate"), "{reason}");
+                assert!(reason.contains("MV_RUSTPKG_JOURNEY=0"), "{reason}");
+            }
+            other => panic!("{tool}: candidate opt-out must fail, got {other:?}"),
+        }
     }
-    if j::journey_opted_out() {
-        eprintln!("skip: MV_RUSTPKG_JOURNEY=0 opts out of the privileged journey");
-        return;
+}
+
+#[test]
+fn install_doctor_uninstall_smoke() {
+    match j::journey_gate(
+        "dpkg",
+        h::tool_present("dpkg"),
+        j::have_passwordless_sudo(),
+        j::journey_opted_out(),
+        h::candidate_mode(),
+    ) {
+        j::JourneyGate::Proceed => {}
+        j::JourneyGate::Skip(reason) => {
+            eprintln!("skip: {reason}");
+            return;
+        }
+        j::JourneyGate::Fail(reason) => panic!("{reason}"),
     }
     let deb = h::ensure_deb();
     let version = h::engine_version();

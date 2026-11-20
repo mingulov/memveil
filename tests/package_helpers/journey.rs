@@ -54,6 +54,53 @@ pub fn journey_opted_out() -> bool {
     std::env::var("MV_RUSTPKG_JOURNEY").as_deref() == Ok("0")
 }
 
+/// Install-journey entry verdict.
+#[derive(Debug, PartialEq, Eq)]
+pub enum JourneyGate {
+    /// Run the privileged journey.
+    Proceed,
+    /// Dev-only skip with its print line.
+    Skip(String),
+    /// Candidate-mode refusal with its panic line.
+    Fail(String),
+}
+
+/// Decide the install-journey entry (pure: test the matrix directly).
+///
+/// `tool` names the package manager ("dpkg"/"rpm") for
+/// diagnostics. Missing tooling, missing passwordless sudo,
+/// or the `MV_RUSTPKG_JOURNEY=0` opt-out skips in dev but
+/// fails in candidate mode: qualification must run the
+/// journey, never silently pass it.
+pub fn journey_gate(
+    tool: &str,
+    tool_present: bool,
+    sudo_ok: bool,
+    opted_out: bool,
+    candidate: bool,
+) -> JourneyGate {
+    if !tool_present || !sudo_ok {
+        let reason = format!("install smoke needs {tool} plus passwordless sudo");
+        if candidate {
+            return JourneyGate::Fail(format!("candidate install journey refused: {reason}"));
+        }
+        return JourneyGate::Skip(reason);
+    }
+    if opted_out {
+        if candidate {
+            return JourneyGate::Fail(
+                "candidate install journey refused: MV_RUSTPKG_JOURNEY=0 opt-out \
+                 forbidden in candidate mode"
+                    .to_string(),
+            );
+        }
+        return JourneyGate::Skip(
+            "MV_RUSTPKG_JOURNEY=0 opts out of the privileged journey".to_string(),
+        );
+    }
+    JourneyGate::Proceed
+}
+
 /// Cross-process install lock: held across install/run/uninstall.
 pub fn install_lock() -> DirLock {
     DirLock::acquire("install-journey")

@@ -440,13 +440,19 @@ fn rpm_payload_mirrors_repo() {
 
 #[test]
 fn rpm_install_doctor_uninstall_smoke() {
-    if !h::tool_present("rpm") || !j::have_passwordless_sudo() {
-        eprintln!("skip: install smoke needs rpm plus passwordless sudo");
-        return;
-    }
-    if j::journey_opted_out() {
-        eprintln!("skip: MV_RUSTPKG_JOURNEY=0 opts out of the privileged journey");
-        return;
+    match j::journey_gate(
+        "rpm",
+        h::tool_present("rpm"),
+        j::have_passwordless_sudo(),
+        j::journey_opted_out(),
+        h::candidate_mode(),
+    ) {
+        j::JourneyGate::Proceed => {}
+        j::JourneyGate::Skip(reason) => {
+            eprintln!("skip: {reason}");
+            return;
+        }
+        j::JourneyGate::Fail(reason) => panic!("{reason}"),
     }
     let rpm = h::ensure_rpm();
     let version = h::engine_version();
