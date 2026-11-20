@@ -32,18 +32,19 @@ Mode to jobs:
    `./tools/candidate pack-evidence --evidence-dir <dir> --out
    qualification-evidence.tar.gz` (it drops the local-only
    `vng-cmd.txt` host command lines, which never ship, and
-   prints the archive digest for the qualification record),
-   with `qualification.json` beside the matrix directory at
-   the archive root.
+   prints the archive digest for the qualification record).
+   Keep `qualification.json` beside the archive file, never
+   inside it: the record carries the archive digest, so an
+   inner copy would be self-referential and is refused.
 
 ## Seal and qualify
 
 3. Create the holding draft release tagged
    `candidate-<candidate_sha256>` and upload the campaign
-   evidence archive (`qualification-evidence.tar.gz`) to it.
-   The seal dispatch below qualifies the sealed bytes
-   against exactly this evidence, so the draft must exist
-   before dispatching.
+   evidence archive (`qualification-evidence.tar.gz`) plus
+   `qualification.json` beside it. The seal dispatch below
+   qualifies the sealed bytes against exactly this evidence,
+   so the draft must exist before dispatching.
 4. Dispatch the workflow once with `mode: seal`,
    `candidate_sha256`, and `source_commit: C`. The seal job
    builds the bundle, `.deb`, and `.rpm` from C, emits the
@@ -60,7 +61,9 @@ Mode to jobs:
    `packaging/qualifications/README.md` for the layout and the
    evidence-only rule. Then upload the six sealed artifacts
    from the run's `sealed-<candidate_sha256>` artifact to the
-   holding draft, so it holds all seven assets before import.
+   holding draft, so it holds all eight assets (six sealed
+   plus the evidence archive and `qualification.json`)
+   before import.
 
 ## Walk the custody stages
 

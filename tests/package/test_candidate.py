@@ -2205,6 +2205,36 @@ def test_pack_evidence_cli_reports_digest(workshop, tmp_path):
         + "/vng-cmd.txt" in proc.stderr
 
 
+def test_qualification_inside_evidence_is_refused(workshop,
+                                                 tmp_path):
+    m, ctx, evidence, q_path, _ = _matrix_qualified(
+        workshop, tmp_path)
+    # The old self-referential layout: the digest record
+    # consumed from inside its own evidence dir.
+    inner = evidence / "qualification.json"
+    inner.write_bytes(q_path.read_bytes())
+    with pytest.raises(ValueError, match="beside the evidence"):
+        m.verify_qualification(ctx["manifest_path"], inner,
+                               ctx["policy_path"], evidence,
+                               source_tree=str(ctx["root"]))
+    # The external layout verifies over the same bytes; the
+    # unread inner copy is ignored, never trusted.
+    assert m.verify_qualification(
+        ctx["manifest_path"], q_path, ctx["policy_path"],
+        evidence, source_tree=str(ctx["root"]))["ok"] is True
+
+
+def test_evidence_archive_refuses_inner_qualification(
+        workshop, tmp_path):
+    m, ctx, evidence, q_path, _ = _matrix_qualified(
+        workshop, tmp_path)
+    (evidence / "qualification.json").write_bytes(
+        q_path.read_bytes())
+    with pytest.raises(ValueError, match="never inside"):
+        m.build_evidence_archive(
+            evidence, Path(tmp_path) / "inner.tar.gz")
+
+
 def test_original_signature_rejects_mutated_evidence(workshop,
                                                      tmp_path):
     m, ctx, evidence, q_path, doc = _matrix_qualified(

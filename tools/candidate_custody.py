@@ -411,11 +411,21 @@ def run(mode, request, out, harness_bin=None):
               'evidence archive name mismatch')
     c.parse_size(archive_record['size'])
     c.hexid(archive_record['sha256'])
+    # The archive-digest record ships beside the archive as a
+    # draft asset: pin the draft copy to the Q-committed
+    # bytes, which the qualification step below re-verifies
+    # over the stored evidence.
+    qualification_record = {
+        'name': 'qualification.json',
+        'size': str((out / 'qualification.json').stat()
+                    .st_size),
+        'sha256': c.digest(out / 'qualification.json')}
     api = GitHub()
     if mode == 'import':
         custody = import_assets(
             api, repo, request['release_id'], request['asset_ids'],
-            manifest, out / 'stored', [archive_record])
+            manifest, out / 'stored',
+            [archive_record, qualification_record])
         stored = out / 'stored'
     else:
         checked_git_file(root, qualification,
@@ -466,7 +476,8 @@ def run(mode, request, out, harness_bin=None):
         stored = extract_zip(out / 'stored.zip', out / 'stored')
         expected_names = {entry['name']
                           for entry in manifest['artifacts']} | {
-                              archive_record['name'], 'custody.json'}
+                              archive_record['name'],
+                              'qualification.json', 'custody.json'}
         c.require({path.name for path in stored.iterdir()}
                   == expected_names,
                   'stored artifact has missing or extra files')

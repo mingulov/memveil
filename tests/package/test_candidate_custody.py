@@ -392,13 +392,19 @@ class FakeRelease:
         records = list(fix["manifest"]["artifacts"]) + [{
             "name": ARCHIVE,
             "size": str(len(fix["archive_bytes"])),
-            "sha256": sha(fix["archive_bytes"])}]
+            "sha256": sha(fix["archive_bytes"])}, {
+            "name": "qualification.json",
+            "size": str(len(fix["qualification_bytes"])),
+            "sha256": sha(fix["qualification_bytes"])}]
         assets = []
         for rank, entry in enumerate(records, 100):
             ident = str(rank)
             self.ids[entry["name"]] = ident
             if entry["name"] == ARCHIVE:
                 self.data[entry["name"]] = fix["archive_bytes"]
+            elif entry["name"] == "qualification.json":
+                self.data[entry["name"]] = \
+                    fix["qualification_bytes"]
             else:
                 self.data[entry["name"]] = (
                     fix["artifacts"] / entry["name"]).read_bytes()
@@ -535,6 +541,8 @@ def stored_zip(fix, custody):
                 entry["name"],
                 (fix["artifacts"] / entry["name"]).read_bytes())
         stream.writestr(ARCHIVE, fix["archive_bytes"])
+        stream.writestr("qualification.json",
+                        fix["qualification_bytes"])
         stream.writestr("custody.json", c.canonical(custody))
     return buffer.getvalue()
 
@@ -714,7 +722,11 @@ def test_import_accepts_exact_draft(custody_base, tmp_path,
     names = {entry["name"]
              for entry in fix["manifest"]["artifacts"]}
     assert {path.name for path in stored.iterdir()} == names | {
-        ARCHIVE, "custody.json"}
+        ARCHIVE, "qualification.json", "custody.json"}
+    # The external digest record pinned the draft copy to
+    # the Q-committed bytes.
+    assert (stored / "qualification.json").read_bytes() == \
+        fix["qualification_bytes"]
     custody = json.loads((stored / "custody.json").read_bytes())
     assert custody == custody_statement(fix, release.ids)
     subjects = (out / "SUBJECTS.txt").read_text().splitlines()
@@ -723,7 +735,7 @@ def test_import_accepts_exact_draft(custody_base, tmp_path,
     assert len(subjects) == len(names) + 1
     assert ("GET", "repos/" + REPO + "/releases/1") in release.calls
     assert sum(1 for call in release.calls
-               if call[0] == "DOWNLOAD") == len(names) + 1
+               if call[0] == "DOWNLOAD") == len(names) + 2
 
 
 @pytest.mark.parametrize("damage", ["not-draft", "extra",
@@ -1353,6 +1365,20 @@ def test_release_draft_lookups_list_and_filter():
         assert "find_holding_draft" in text, job
     assert "download_draft_asset" in json.dumps(
         doc["jobs"]["qualify"])
+
+
+def test_release_qualify_reads_qualification_beside_evidence():
+    doc = _release_workflow()
+    steps = doc["jobs"]["qualify"]["steps"]
+    collect = next(step for step in steps
+                   if "campaign evidence" in step.get("name", ""))
+    assert "evidence-dl/qualification.json" in collect["run"]
+    export = next(step for step in steps
+                  if "tested payload" in step.get("name", ""))
+    assert export["run"].count(
+        "--qualification evidence-dl/qualification.json") == 2
+    assert '"$EVIDENCE_DIR"/qualification.json' not in export[
+        "run"]
 
 
 def test_release_qualify_consumes_same_run_seal():

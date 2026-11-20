@@ -21,7 +21,9 @@ between C and Q (see the evidence-only rule).
 SHA-256 must equal the dispatched `candidate_sha256`, and its
 `source.commit` must equal C. `qualification.json` binds one
 signed gate receipt per required gate plus the evidence archive
-record (`qualification-evidence.tar.gz`). `remote.json` binds the
+record (`qualification-evidence.tar.gz`). The digest record
+lives beside the archive file, never inside it; consumers
+refuse an inner copy. `remote.json` binds the
 import run that staged the candidate: repository, run, artifact,
 signer commit, and custody digests.
 
@@ -62,8 +64,9 @@ newline).
 ## Rendezvous names
 
 - Holding draft release tag: `candidate-<candidate_sha256>`
-  (exactly seven assets: the six sealed artifacts plus
-  `qualification-evidence.tar.gz`).
+  (exactly eight assets: the six sealed artifacts plus
+  `qualification-evidence.tar.gz` and `qualification.json`
+  beside it).
 - Stored workflow artifact name: `candidate-<candidate_sha256>`.
 - Final release tag: `v<version>` from `Cargo.toml` at C.
 - Campaign retention is 30 to 90 days; workflow artifacts keep

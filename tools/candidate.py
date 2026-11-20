@@ -1644,11 +1644,14 @@ def build_evidence_archive(evidence_dir, dest):
     archive extracts through safe_extract's single-root gate.
     Row-local files (the matrix REDACT_SKIP_LOCAL set,
     resolved lazily like the row allowlist) are excluded at
-    any depth: host command lines never ship. Symlinks and
-    non-regular files fail closed instead of silently
-    dropping bytes, and a failed run leaves no partial
-    archive behind. Refuses to overwrite dest. Returns the
-    sorted excluded evidence-relative paths.
+    any depth: host command lines never ship. An
+    evidence-root qualification.json is refused outright: the
+    archive-digest record lives beside the archive, never
+    inside it. Symlinks and non-regular files fail closed
+    instead of silently dropping bytes, and a failed run
+    leaves no partial archive behind. Refuses to overwrite
+    dest. Returns the sorted excluded evidence-relative
+    paths.
     """
     excluded_names = set(_matrix_rows().REDACT_SKIP_LOCAL)
     base = Path(evidence_dir)
@@ -1675,6 +1678,11 @@ def build_evidence_archive(evidence_dir, dest):
         for name in sorted(filenames):
             path = here / name
             member = path.relative_to(base).as_posix()
+            if member == "qualification.json":
+                raise ValueError(
+                    "evidence archive refuses the inner "
+                    "qualification record: it lives beside "
+                    "the archive, never inside it")
             if name in excluded_names:
                 excluded.append(member)
                 continue
@@ -1774,6 +1782,13 @@ def verify_qualification(candidate, qualification, policy,
     verified here are the bytes used downstream. The
     qualification's evidence_archive entry is shape-checked
     only: archive bytes are verified by whoever extracts them.
+    The archive-digest record lives beside the evidence
+    archive, never inside it: a qualification consumed from
+    inside its own evidence dir is the old self-referential
+    layout (unconstructable honestly, since the digest would
+    bind bytes containing the digest) and fails closed here,
+    so every path through this verifier (qualify, export,
+    import) uses the external layout.
     """
     manifest = load_manifest(candidate)
     candidate_id = digest(candidate)
@@ -1799,6 +1814,14 @@ def verify_qualification(candidate, qualification, policy,
     parse_size(archive["size"])
     hexid(archive["sha256"])
     base = Path(evidence_dir)
+    try:
+        nested = Path(qualification).resolve().relative_to(
+            base.resolve())
+    except ValueError:
+        nested = None
+    require(nested is None,
+            "qualification must live beside the evidence "
+            "archive, never inside it")
     for ident in sorted(doc["gates"]):
         gate = doc["gates"][ident]
         exact(gate, {"receipt", "receipt_sha256", "signature",

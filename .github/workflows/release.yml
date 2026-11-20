@@ -389,6 +389,9 @@ jobs:
           custody.download_draft_asset(
               api, repo, release, "qualification-evidence.tar.gz",
               "evidence-dl/qualification-evidence.tar.gz")
+          custody.download_draft_asset(
+              api, repo, release, "qualification.json",
+              "evidence-dl/qualification.json")
           EOF
           EVIDENCE_DIR=$(python3 - \
             evidence-dl/qualification-evidence.tar.gz \
@@ -412,7 +415,7 @@ jobs:
           test -n "$EVIDENCE_DIR"
           ./tools/candidate qualify \
             --manifest sealed/candidate.json \
-            --qualification "$EVIDENCE_DIR"/qualification.json \
+            --qualification evidence-dl/qualification.json \
             --policy candidate-src/packaging/candidate-policy.json \
             --evidence-dir "$EVIDENCE_DIR" \
             --source-tree candidate-src
@@ -420,7 +423,7 @@ jobs:
           # authenticated the same bytes; the export branch below
           # authenticates them once more before evaluating them.
           MATRIX_DIR=$(python3 - "$EVIDENCE_DIR" \
-            "$EVIDENCE_DIR"/qualification.json <<'EOF'
+            evidence-dl/qualification.json <<'EOF'
           import sys
           sys.path.insert(0, "tools")
           import candidate
@@ -445,7 +448,7 @@ jobs:
             --export-tested tested-payload.sha256 \
             --lock candidate-src/tests/vm/kernels.lock.json \
             --evidence-dir "$EVIDENCE_DIR" \
-            --qualification "$EVIDENCE_DIR"/qualification.json \
+            --qualification evidence-dl/qualification.json \
             --policy candidate-src/packaging/candidate-policy.json \
             --source-tree candidate-src
       - name: Upload the tested payload
