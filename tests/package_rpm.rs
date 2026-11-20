@@ -568,18 +568,68 @@ fn fedora_image_ready() -> bool {
         .success()
 }
 
+/// Decide the Fedora container journey entry (pure: test the matrix directly).
+///
+/// Docker/image absence skips in dev but fails in candidate
+/// mode: qualification cannot claim dependency resolution
+/// it never ran.
+fn fedora_gate(docker_usable: bool, image_ready: bool, candidate: bool) -> j::JourneyGate {
+    if !docker_usable || !image_ready {
+        let reason = if !docker_usable {
+            "docker unusable on this host: the Fedora journey cannot run here".to_string()
+        } else {
+            format!("{FEDORA_IMAGE} image unavailable (offline?): the container journey needs it")
+        };
+        if candidate {
+            return j::JourneyGate::Fail(format!("candidate Fedora journey refused: {reason}"));
+        }
+        return j::JourneyGate::Skip(reason);
+    }
+    j::JourneyGate::Proceed
+}
+
+#[test]
+fn fedora_gate_matrix() {
+    // Usable docker with the image proceeds in both modes;
+    // either half missing skips in dev and fails in
+    // candidate mode, naming the missing half.
+    assert_eq!(fedora_gate(true, true, false), j::JourneyGate::Proceed);
+    assert_eq!(fedora_gate(true, true, true), j::JourneyGate::Proceed);
+    for (usable, ready, missing) in [
+        (false, false, "docker unusable"),
+        (false, true, "docker unusable"),
+        (true, false, "fedora:41 image unavailable"),
+    ] {
+        match fedora_gate(usable, ready, false) {
+            j::JourneyGate::Skip(reason) => {
+                assert!(reason.contains(missing), "{reason}");
+            }
+            other => panic!("dev must skip cleanly, got {other:?}"),
+        }
+        match fedora_gate(usable, ready, true) {
+            j::JourneyGate::Fail(reason) => {
+                assert!(reason.contains("candidate"), "{reason}");
+                assert!(reason.contains(missing), "{reason}");
+            }
+            other => panic!("candidate must fail, got {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn rpm_fedora_journey() {
     if !need_rpm() {
         return;
     }
-    if !docker_usable() {
-        eprintln!("skip: docker unusable on this host: the Fedora journey cannot run here");
-        return;
-    }
-    if !fedora_image_ready() {
-        eprintln!("skip: fedora:41 image unavailable (offline?): the container journey needs it");
-        return;
+    let usable = docker_usable();
+    let ready = usable && fedora_image_ready();
+    match fedora_gate(usable, ready, h::candidate_mode()) {
+        j::JourneyGate::Proceed => {}
+        j::JourneyGate::Skip(reason) => {
+            eprintln!("skip: {reason}");
+            return;
+        }
+        j::JourneyGate::Fail(reason) => panic!("{reason}"),
     }
     let rpm = h::ensure_rpm();
     let script = h::scripts_dir().join("rpm-journey.sh");

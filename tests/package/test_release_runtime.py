@@ -1045,5 +1045,55 @@ def test_dispatched_selection_builds_nothing(tmp_path):
         "dispatched selection invoked cargo"
 
 
+@pytest.mark.dev_fixture
+def test_fedora_journey_candidate_without_docker_fails(
+        tmp_path, audited_target_dir):
+    # The Fedora dependency-resolution journey cannot be
+    # skipped in candidate mode: with docker faked absent
+    # the lane fails, while dev still skips. The bogus
+    # candidate pair proves the gate fires before any seal
+    # read; the sealed pair proves it under valid inputs.
+    # rpm tooling must exist (the lane returns before the
+    # gate without it, in both modes).
+    assert shutil.which("rpm") is not None, \
+        "fedora gate test needs rpm on PATH"
+    target_dir = audited_target_dir
+    binary = _test_binary("package_rpm", target_dir)
+    bindir = tmp_path / "nodocker"
+    bindir.mkdir()
+    stub = bindir / "docker"
+    stub.write_text("#!/bin/sh\necho nodocker-stub >&2\nexit 1\n")
+    stub.chmod(0o755)
+    path = str(bindir) + os.pathsep + os.environ.get(
+        "PATH", "")
+
+    def journey(env):
+        return subprocess.run(
+            [str(binary), "rpm_fedora_journey", "--nocapture"],
+            cwd=str(ROOT), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, env=env)
+
+    dev = {"PATH": path, "CARGO_TARGET_DIR": str(target_dir)}
+    proc = journey(dev)
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode == 0, combined[-2000:]
+    assert "1 passed" in combined, combined[-2000:]
+    assert "docker unusable" in combined, combined[-2000:]
+    bogus = dict(dev, MV_BUNDLE_TARBALL="dispatched",
+                 MV_CANDIDATE_MANIFEST="dispatched")
+    proc = journey(bogus)
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode != 0, combined[-2000:]
+    assert "candidate Fedora journey refused" in combined, \
+        combined[-2000:]
+    sealed = seal_candidate(tmp_path, "fedora")
+    candidate = dict(dev, **candidate_env(sealed))
+    proc = journey(candidate)
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode != 0, combined[-2000:]
+    assert "candidate Fedora journey refused" in combined, \
+        combined[-2000:]
+
+
 if __name__ == "__main__":
     sys.exit("run via: python3 -m pytest tests/package/")
