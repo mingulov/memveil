@@ -58,7 +58,9 @@
 # soak, privacy, fuzz-smoke, fuzz-campaign, perf-overhead,
 # perf-workload, vm-live-soak, release-runtime, package,
 # deb, rpm-journey, vm-kernels, vm-scenarios and
-# extracted-robustness run against the verified candidate.
+# extracted-robustness run against the verified candidate;
+# perf-workload is deferred and skips with its recorded
+# reason instead of running.
 # Partial inputs fail closed with exit 2, as do other
 # suites given candidate inputs. Unarmed vm-live-soak
 # without candidate inputs skips with exit 77; armed

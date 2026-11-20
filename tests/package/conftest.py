@@ -5,6 +5,7 @@ import sys
 import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from support.candidate_input import requested, load
+from support.deferred_skips import unlisted_skips
 
 
 def pytest_sessionstart(session):
@@ -19,4 +20,11 @@ def pytest_sessionfinish(session, exitstatus):
     if requested() and reporter \
             and reporter.stats.get('skipped') \
             and session.exitstatus == 0:
-        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+        unlisted = unlisted_skips(
+            reporter.stats.get('skipped'))
+        if unlisted:
+            reporter.write_line(
+                'candidate session refuses unlisted skips:')
+            for line in unlisted:
+                reporter.write_line('  ' + line)
+            session.exitstatus = pytest.ExitCode.TESTS_FAILED

@@ -143,6 +143,112 @@ def test_conftest_fails_candidate_skips(sealed, tmp_path):
     assert result.returncode == 1
 
 
+def test_perf_workload_derouted_skips_with_reason(sealed):
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    result = subprocess.run(
+        [sys.executable,
+         str(ROOT / 'tests/support/candidate_suite.py'),
+         'perf-workload'],
+        env=environment, capture_output=True, text=True,
+        timeout=120)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 77, combined
+    assert 'mv_consume' in combined and 'bridge' in combined \
+        and 'oracle ko' in combined, combined
+    assert 'MV31-12' in combined, combined
+    assert 'perf-workload:' not in combined, \
+        'de-routed suite executed its runner'
+
+
+def test_unlisted_dispatch_skip_fails(sealed):
+    environment = {key: value
+                   for key, value in candidate_clean_env().items()
+                   if not key.startswith('MEMVEIL_VM_')}
+    environment.update(sealed)
+    result = subprocess.run(
+        [sys.executable,
+         str(ROOT / 'tests/support/candidate_suite.py'),
+         'vm-kernels'],
+        env=environment, capture_output=True, text=True,
+        timeout=120)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 1, combined
+    assert 'FAIL' in combined and 'deferral' in combined, \
+        combined
+
+
+def test_deferred_allowlist_shape_validated():
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support import deferred_skips as ds
+    from types import SimpleNamespace
+    ds.validate()
+    entry = ds.lookup('perf-workload')
+    assert entry['owning-card'] == 'MV31-12'
+    assert ds.listed_reason(entry['reason'])
+    assert not ds.listed_reason('unlisted reason')
+    assert ds.lookup('vm-kernels') is None
+    bad_lists = [
+        [{'suite': 'x', 'reason': 'r'}],
+        [{'suite': 'x', 'reason': 'r',
+          'owning-card': 'MV31-12', 'extra': 1}],
+        [{'suite': '', 'reason': 'r',
+          'owning-card': 'MV31-12'}],
+        [{'suite': 'x', 'reason': '  ',
+          'owning-card': 'MV31-12'}],
+        [{'suite': 'x', 'reason': 'r',
+          'owning-card': 'MV31'}],
+        [dict(entry), dict(entry)],
+        'not-a-list',
+    ]
+    for bad in bad_lists:
+        with pytest.raises(ValueError):
+            ds.validate(bad)
+    assert ds.skip_reason(SimpleNamespace(
+        longrepr=('f', 1, 'Skipped: ' + entry['reason']))) \
+        == entry['reason']
+    assert ds.skip_reason(SimpleNamespace(
+        longrepr=('f', 1, 'Skipped'))) is None
+    assert ds.skip_reason(
+        SimpleNamespace(longrepr='weird')) is None
+    assert ds.unlisted_skips([SimpleNamespace(
+        nodeid='a',
+        longrepr=('f', 1, 'Skipped: nope'))]) != []
+    assert ds.unlisted_skips([SimpleNamespace(
+        nodeid='a', longrepr=(
+            'f', 1, 'Skipped: ' + entry['reason']))]) == []
+
+
+def test_conftest_passes_listed_skip_reason(sealed, tmp_path):
+    import json
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.deferred_skips import lookup
+    reason = lookup('perf-workload')['reason']
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['PYTHONPATH'] = str(ROOT / 'tests') + (
+        os.pathsep + environment['PYTHONPATH']
+        if environment.get('PYTHONPATH') else '')
+    shutil.copy(str(ROOT / 'tests/package/conftest.py'),
+                tmp_path / 'conftest.py')
+    (tmp_path / 'test_listed_skip.py').write_text(
+        'import pytest\n'
+        'pytestmark = pytest.mark.skip(reason='
+        + json.dumps(reason) + ')\n'
+        'def test_skip():\n'
+        '    pass\n')
+    result = subprocess.run(
+        [sys.executable, '-m', 'pytest',
+         'test_listed_skip.py', '-q', '-p',
+         'no:cacheprovider'],
+        env=environment, capture_output=True, text=True,
+        cwd=tmp_path)
+    assert 'skipped' in result.stdout, \
+        result.stdout + result.stderr
+    assert result.returncode == 0, \
+        result.stdout + result.stderr
+
+
 def test_inventory_excludes_only_named_evidence_files(tmp_path):
     sys.path.insert(0, str(ROOT / 'tools'))
     import source_inventory
