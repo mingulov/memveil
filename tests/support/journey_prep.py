@@ -14,8 +14,9 @@ symlinks anywhere in the staging path refuse. Usage:
     tests/support/journey_prep.py RECORD
 
 RECORD is the JSON record file to write, under the
-tool-owned prep directory at the checkout root;
-dispatch reads it through MV_JOURNEY_PREP. The record
+tool-owned prep directory (MV_JOURNEY_PREP_DIR
+relocates it from the checkout default); dispatch
+reads it through MV_JOURNEY_PREP. The record
 binds the checkout the executables were built from
 (HEAD commit plus worktree digest), the dispatched
 suite's build target, and the hashed staged bytes, so

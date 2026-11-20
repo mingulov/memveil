@@ -54,31 +54,23 @@ def _prep_record_path(tag):
 
 
 @pytest.fixture(autouse=True)
-def _clean_journey_prep_dir():
-    """Remove prep-dir entries the test added; keep the rest.
+def _private_journey_prep_root(tmp_path, monkeypatch):
+    """Point the prep root at a private tmp dir for one test.
 
-    Journey tests share the checkout's tool-owned prep
-    directory; only entries created during the test are
-    removed afterwards, so operator outputs survive.
+    No test in this file may create, delete, or move
+    anything under the operator's real prep directory:
+    every prep-root-touching path derives from the
+    override below, which resolves under this test's own
+    tmp_path. Tests needing tracked content relocate the
+    override to a fresh in-checkout path instead (never
+    the real directory).
     """
-    sys.path.insert(0, str(ROOT / 'tests'))
-    from support.candidate_suite import journey_prep_dir
-    top = Path(journey_prep_dir())
-    before = {entry.name for entry in top.iterdir()} \
-        if top.is_dir() and not top.is_symlink() else None
-    yield
-    if before is None:
-        if top.is_symlink() or top.is_file():
-            top.unlink(missing_ok=True)
-        else:
-            shutil.rmtree(top, ignore_errors=True)
-    elif top.is_dir() and not top.is_symlink():
-        for entry in top.iterdir():
-            if entry.name not in before:
-                if entry.is_dir() and not entry.is_symlink():
-                    shutil.rmtree(entry, ignore_errors=True)
-                else:
-                    entry.unlink(missing_ok=True)
+    root = tmp_path / 'prep-root'
+    monkeypatch.setenv('MV_JOURNEY_PREP_DIR', str(root))
+    yield root
+    shutil.rmtree(root, ignore_errors=True)
+    if root.is_symlink():
+        root.unlink(missing_ok=True)
 
 
 @pytest.mark.parametrize('suite', PARTIAL_SUITES)
@@ -800,12 +792,47 @@ def test_journey_prep_dir_ignored_narrowly_by_git():
     assert outside.returncode == 1
 
 
-def test_journey_prep_dir_refuses_tracked_content(tmp_path):
+def test_journey_prep_root_resolves_under_tmp(
+        tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import JOURNEY_PREP_DIRNAME, \
+        journey_prep_dir
+    # The test run's prep root lives under this test's
+    # tmp_path, so no test can touch the operator dir.
+    private = Path(journey_prep_dir()).resolve()
+    assert tmp_path.resolve() in private.parents, private
+    assert private != ROOT / JOURNEY_PREP_DIRNAME
+    assert ROOT / JOURNEY_PREP_DIRNAME \
+        not in private.parents
+    # The default is unchanged once the override lifts.
+    monkeypatch.delenv('MV_JOURNEY_PREP_DIR')
+    assert journey_prep_dir() == str(
+        ROOT / JOURNEY_PREP_DIRNAME)
+    # A relative override, or one covering the checkout
+    # itself, refuses instead of scattering outputs or
+    # swallowing source from identity.
+    monkeypatch.setenv('MV_JOURNEY_PREP_DIR',
+                       'relative/prep')
+    with pytest.raises(ValueError, match='absolute'):
+        journey_prep_dir()
+    monkeypatch.setenv('MV_JOURNEY_PREP_DIR', str(ROOT))
+    with pytest.raises(ValueError, match='must not cover'):
+        journey_prep_dir()
+
+
+def test_journey_prep_dir_refuses_tracked_content(
+        tmp_path, monkeypatch):
     sys.path.insert(0, str(ROOT / 'tests'))
     from support.candidate_suite import \
         journey_identity_excludes, journey_prep_dir
     import support.journey_prep as prep
+    # Tracked content needs an in-checkout prep root: a
+    # fresh probe directory, never the operator's dir.
+    fresh = ROOT / ('probe-prep-%d-%s'
+                    % (os.getpid(), uuid.uuid4().hex[:8]))
+    monkeypatch.setenv('MV_JOURNEY_PREP_DIR', str(fresh))
     top = Path(journey_prep_dir())
+    assert top == fresh
     top.mkdir(parents=True, exist_ok=True)
     plant = top / ('tracked-%d.txt' % os.getpid())
     plant.write_text('force-added\n')
@@ -839,6 +866,7 @@ def test_journey_prep_dir_refuses_tracked_content(tmp_path):
         else:
             os.environ['GIT_INDEX_FILE'] = saved
         plant.unlink(missing_ok=True)
+        shutil.rmtree(top, ignore_errors=True)
         untouched = subprocess.run(
             ['git', '-C', str(ROOT), 'diff', '--cached',
              '--quiet'],
@@ -848,14 +876,17 @@ def test_journey_prep_dir_refuses_tracked_content(tmp_path):
 
 
 def test_journey_prep_refuses_tracked_before_any_write(
-        tmp_path):
+        tmp_path, monkeypatch):
     sys.path.insert(0, str(ROOT / 'tests'))
     from support.candidate_suite import journey_prep_dir
     import support.journey_prep as prep
+    # Tracked content needs an in-checkout prep root: a
+    # fresh probe directory, never the operator's dir.
+    fresh = ROOT / ('probe-prep-%d-%s'
+                    % (os.getpid(), uuid.uuid4().hex[:8]))
+    monkeypatch.setenv('MV_JOURNEY_PREP_DIR', str(fresh))
     top = Path(journey_prep_dir())
-    aside = tmp_path / 'prep-dir-aside'
-    if top.exists() or top.is_symlink():
-        shutil.move(str(top), str(aside))
+    assert top == fresh
     try:
         # Plant the tracked file, stage it into an index
         # copy, then remove the directory from disk: the
@@ -900,11 +931,9 @@ def test_journey_prep_refuses_tracked_before_any_write(
             'real index gained staged changes'
     finally:
         if top.is_symlink():
-            top.unlink()
+            top.unlink(missing_ok=True)
         else:
             shutil.rmtree(top, ignore_errors=True)
-        if aside.exists():
-            shutil.move(str(aside), str(top))
 
 
 def test_journey_record_outside_prep_dir_refuses(
@@ -1565,7 +1594,9 @@ def test_journey_shadowed_cargo_stays_green(sealed, tmp_path):
     assert result.returncode == 0, result.stderr[-2000:]
     bindir, sentinel = _shadow_cargo_bin(tmp_path)
     env = {'PATH': bindir + ':/usr/bin:/bin',
-           'MV_JOURNEY_PREP': str(record)}
+           'MV_JOURNEY_PREP': str(record),
+           'MV_JOURNEY_PREP_DIR': os.environ[
+               'MV_JOURNEY_PREP_DIR']}
     env.update(sealed)
     result = subprocess.run(
         [sys.executable,
@@ -1597,7 +1628,9 @@ def test_journey_shadowed_rehomed_legs_green(tmp_path):
     assert result.returncode == 0, result.stderr[-2000:]
     bindir, sentinel = _shadow_cargo_bin(tmp_path)
     env = {'PATH': bindir + ':/usr/bin:/bin',
-           'MV_JOURNEY_PREP': str(record)}
+           'MV_JOURNEY_PREP': str(record),
+           'MV_JOURNEY_PREP_DIR': os.environ[
+               'MV_JOURNEY_PREP_DIR']}
     env.update(candidate_env(sealed))
     targets = {'package_deb': 'deb',
                'package_rpm': 'rpm-journey'}

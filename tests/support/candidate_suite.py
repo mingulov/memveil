@@ -184,13 +184,14 @@ def checkout_identity(exclude=()):
     return head, material.hexdigest()
 
 
-# Tool-owned output directory (relative to the checkout
-# root) holding every fixture-prep record, stage, and
-# publication scratch file. Prep writes only here,
-# launch reads only here, and checkout identity excludes
-# the directory wholesale, so any number of records
-# coexist without invalidating each other, and scratch
-# never reads as source.
+# Tool-owned output directory holding every
+# fixture-prep record, stage, and publication scratch
+# file. Prep writes only here, launch reads only here,
+# and checkout identity excludes the directory
+# wholesale, so any number of records coexist without
+# invalidating each other, and scratch never reads as
+# source. The default lives under the checkout root;
+# MV_JOURNEY_PREP_DIR relocates it.
 JOURNEY_PREP_DIRNAME = '.candidate-prep'
 
 
@@ -200,8 +201,28 @@ def journey_prep_dir():
     The single location for fixture-prep outputs; both
     the prep tool and the launcher derive it through
     this one function, never by recomputing the name.
+    MV_JOURNEY_PREP_DIR overrides the checkout default
+    with an absolute path (resolved before use); empty
+    or unset keeps the default. A relative override, or
+    one covering the checkout itself, refuses: tool
+    outputs must never scatter beside user paths or
+    swallow versioned source from identity.
     """
-    return str(ROOT / JOURNEY_PREP_DIRNAME)
+    override = os.environ.get('MV_JOURNEY_PREP_DIR')
+    if not override:
+        return str(ROOT / JOURNEY_PREP_DIRNAME)
+    if not os.path.isabs(override):
+        raise ValueError(
+            'journey prep directory must be absolute: %s'
+            % override)
+    candidate = str(Path(override).resolve())
+    root = str(ROOT)
+    if candidate == root \
+            or root.startswith(candidate + os.sep):
+        raise ValueError(
+            'journey prep directory must not cover the '
+            'checkout: %s' % override)
+    return candidate
 
 
 def journey_staging_root():
@@ -215,7 +236,7 @@ def journey_staging_root():
     through this one function, never by recomputing the
     name.
     """
-    return str(ROOT / JOURNEY_PREP_DIRNAME / 'stages')
+    return str(Path(journey_prep_dir()) / 'stages')
 
 
 def refuse_symlinked_path(path):
@@ -280,18 +301,22 @@ def journey_identity_excludes():
     repeat prep sees no earlier output, and deleting a
     retired stage keeps the current record valid. Both
     sides call this one function; no duplicated lists
-    to drift. Refuses when the directory holds tracked
-    files: the exclusion must never mask versioned
-    source, even force-added.
+    to drift. Refuses when the effective directory holds
+    tracked files: the exclusion must never mask
+    versioned source, even force-added.
     """
-    tracked = [entry for entry in _git_lines(
-        'ls-files', '-z', '--', JOURNEY_PREP_DIRNAME)
-        if entry]
-    if tracked:
-        raise ValueError(
-            'journey prep directory holds tracked files; '
-            'refusing: %s' % tracked[0])
-    return [journey_prep_dir()]
+    top = journey_prep_dir()
+    rel = os.path.relpath(top, str(ROOT))
+    if rel != '.' and rel != '..' \
+            and not rel.startswith('..' + os.sep):
+        tracked = [entry for entry in _git_lines(
+            'ls-files', '-z', '--', rel)
+            if entry]
+        if tracked:
+            raise ValueError(
+                'journey prep directory holds tracked '
+                'files; refusing: %s' % tracked[0])
+    return [top]
 
 
 def _journey_record(live):
