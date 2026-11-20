@@ -289,18 +289,26 @@ def resolve_journey_record(name):
     tool-owned prep directory (staged executables live
     under the sibling stages subdir instead), so records,
     stages, and publication scratch share the one
-    excluded location while staying disjoint. Refuses an
-    empty name, a symlink at the record path itself or
-    any parent component, and any destination outside
-    the records subdir. Both the prep tool and the
-    launcher validate through this one function, before
-    any staging, exclusion, or publication step derives
-    paths from the record.
+    excluded location while staying disjoint. The
+    destination must end in .json, matching the records
+    the checks accept, so the publish path can never
+    emit a record the next check rejects. Refuses an
+    empty name, a non-JSON name, a symlink at the record
+    path itself or any parent component, and any
+    destination outside the records subdir. Both the
+    prep tool and the launcher validate through this
+    one function, before any staging, exclusion, or
+    publication step derives paths from the record.
     """
     if not name:
         raise ValueError(
             'journey prep record must live under %s'
             % JOURNEY_RECORDS_DIRNAME)
+    if not name.endswith('.json'):
+        raise ValueError(
+            'journey prep record must be a JSON record '
+            'under %s: %s'
+            % (JOURNEY_RECORDS_DIRNAME, name))
     raw = Path(os.path.abspath(name))
     refuse_symlinked_path(raw)
     resolved = raw.resolve()
@@ -341,20 +349,38 @@ def journey_identity_excludes():
 
 
 def refuse_unowned_prep_contents():
-    """Refuse prep-directory content outside tool-owned entries.
+    """Refuse prep content outside valid tool-owned shape.
 
-    The prep directory holds only the records and stages
-    subdirs: JSON prep records plus publication scratch
-    (<record>.<random>.tmp) under records, and fresh
-    stage directories (<record-stem>-<random>.staged)
-    holding the staged executables under stages. Anything
-    else (notably untracked source inside an in-checkout
-    override) would vanish from checkout identity through
-    the wholesale exclusion, so it refuses before any
-    write or mode change. A missing directory is fine:
-    the prep tool creates it. Entries are judged by name
-    and kind alone; links are never followed, and link
-    safety stays with the checks consuming each path.
+    The one prep shape validator shared by the publish
+    path and every check path: the prep tool runs it
+    before any write, and the launcher runs the
+    identical function before exec, so a record the
+    publisher emits can never be one the checks reject.
+    The prep directory holds only the records and
+    stages subdirs. Under records, every JSON file must
+    parse as a valid prep record through the shape
+    predicate shared with the launcher; anything not a
+    record or publication scratch refuses (notably
+    untracked source inside an in-checkout override,
+    which would vanish from checkout identity through
+    the wholesale exclusion). Publication scratch
+    (<record>.<random>.tmp) is judged by its name
+    pattern alone: it is partial JSON by nature (a temp
+    file may hold a torn write), so content checks
+    cannot apply, and safety comes from nonconforming
+    siblings refusing plus the launcher re-validating
+    its own record before exec. Under stages, every
+    stage directory holds only staged executables, and
+    a staged file whose path some valid record
+    references must hash to a digest some valid record
+    references; anything else refuses. Files no record
+    binds (a stage mid-publish, a retired stage awaiting
+    operator cleanup) are inert, since launch reads only
+    referenced paths and re-hashes them, so they refuse
+    nowhere here. A missing directory is fine:
+    the prep tool creates it. Entries are judged without
+    following links, and link safety stays with the
+    checks consuming each path.
     """
     from support.journey_prep import TARGETS
     top = Path(journey_prep_dir())
@@ -370,6 +396,8 @@ def refuse_unowned_prep_contents():
             'journey prep directory is not a directory: '
             '%s' % top)
     staged_names = set(TARGETS.values())
+    referenced_paths = set()
+    referenced_digests = set()
 
     def refuse(entry):
         raise ValueError(
@@ -416,6 +444,41 @@ def refuse_unowned_prep_contents():
                 % exc)
         return stat.S_ISDIR(mode)
 
+    def check_record_file(path):
+        try:
+            with open(path, encoding='utf-8') as stream:
+                record = json.load(stream)
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                'journey prep directory holds a prep '
+                'record that fails to parse: %s (%s)'
+                % (path, exc))
+        reason = _prep_record_shape_error(record)
+        if reason is not None:
+            raise ValueError(
+                'journey prep directory holds a prep '
+                'record with an invalid shape: %s (%s)'
+                % (path, reason))
+        for entry in record['suites'].values():
+            if not isinstance(entry, dict):
+                continue
+            staged = entry.get('staged')
+            if isinstance(staged, str):
+                referenced_paths.add(os.path.abspath(staged))
+            digest = entry.get('sha256')
+            if isinstance(digest, str):
+                referenced_digests.add(digest)
+
+    def staged_digest(path):
+        try:
+            with open(path, 'rb') as stream:
+                return hashlib.sha256(
+                    stream.read()).hexdigest()
+        except OSError as exc:
+            raise ValueError(
+                'journey prep directory holds unreadable '
+                'staged bytes: %s (%s)' % (path, exc))
+
     def check_records(directory):
         for child in children(directory):
             entry_kind = kind(child)
@@ -423,10 +486,16 @@ def refuse_unowned_prep_contents():
                 continue
             if entry_kind == 'dir':
                 check_records(child.path)
-            elif entry_kind in ('file', 'link') \
+            elif entry_kind == 'link' \
                     and (child.name.endswith('.json')
                          or child.name.endswith('.tmp')):
                 continue
+            elif entry_kind == 'file' \
+                    and child.name.endswith('.tmp'):
+                continue
+            elif entry_kind == 'file' \
+                    and child.name.endswith('.json'):
+                check_record_file(child.path)
             else:
                 refuse(child.path)
 
@@ -438,6 +507,18 @@ def refuse_unowned_prep_contents():
             if entry_kind not in ('file', 'link') \
                     or child.name not in staged_names:
                 refuse(child.path)
+            if entry_kind == 'link':
+                continue
+            if os.path.abspath(child.path) \
+                    not in referenced_paths:
+                continue
+            if staged_digest(child.path) \
+                    not in referenced_digests:
+                raise ValueError(
+                    'journey prep directory holds staged '
+                    'bytes matching no digest referenced '
+                    'by any valid prep record: %s'
+                    % child.path)
 
     def check_stages(directory):
         for child in children(directory):
@@ -463,6 +544,40 @@ def refuse_unowned_prep_contents():
         check_stages(str(top / JOURNEY_STAGES_DIRNAME))
 
 
+def _prep_record_shape_error(record):
+    """Prep-record shape reason; None when valid.
+
+    The one prep-record shape predicate shared by the
+    publish path and every check path: the launcher
+    validates its own record through it, and the
+    prep-directory validator applies it to every record
+    file present, so no forked copy can drift. Mirrors
+    the prep record writer exactly: the schema tag, the
+    40-hex HEAD commit and 64-hex tree digest bindings,
+    and the per-suite table. Suite entry shapes stay
+    with the launcher: a record whose entries are
+    misshapen still parses here and refuses at dispatch
+    with the suite error, never silently.
+    """
+    if not isinstance(record, dict) \
+            or record.get('schema') != JOURNEY_PREP_SCHEMA \
+            or not isinstance(record.get('suites'), dict):
+        return 'schema or suite table differs'
+    commit = record.get('commit')
+    if not isinstance(commit, str) or len(commit) != 40 \
+            or any(char not in '0123456789abcdef'
+                   for char in commit):
+        return 'commit binding differs'
+    tree = record.get('tree')
+    if not isinstance(tree, str) or len(tree) != 64 \
+            or any(char not in '0123456789abcdef'
+                   for char in tree):
+        return 'tree binding differs'
+    if set(record) != {'schema', 'commit', 'tree', 'suites'}:
+        return 'record keys differ'
+    return None
+
+
 def _journey_record(live):
     """Validated prep record for the journey launcher.
 
@@ -483,21 +598,7 @@ def _journey_record(live):
     except (OSError, ValueError) as exc:
         raise ValueError(
             'journey prep record unreadable: %s' % exc)
-    if not isinstance(record, dict) \
-            or record.get('schema') != JOURNEY_PREP_SCHEMA \
-            or not isinstance(record.get('suites'), dict):
-        raise ValueError('journey prep record shape differs')
-    commit = record.get('commit')
-    if not isinstance(commit, str) or len(commit) != 40 \
-            or any(char not in '0123456789abcdef'
-                   for char in commit):
-        raise ValueError('journey prep record shape differs')
-    tree = record.get('tree')
-    if not isinstance(tree, str) or len(tree) != 64 \
-            or any(char not in '0123456789abcdef'
-                   for char in tree):
-        raise ValueError('journey prep record shape differs')
-    if set(record) != {'schema', 'commit', 'tree', 'suites'}:
+    if _prep_record_shape_error(record) is not None:
         raise ValueError('journey prep record shape differs')
     return record
 

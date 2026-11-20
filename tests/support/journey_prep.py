@@ -249,8 +249,9 @@ def prepare(record_path):
     boundary checks run before any directory creation,
     mode change, or write: only a prep directory empty
     of tracked content and holding nothing outside
-    tool-owned records, stages, and publication scratch
-    proceeds to creation. Checkout identity is
+    valid tool-owned records, digest-bound stages, and
+    publication scratch proceeds to creation. Checkout
+    identity is
     recorded before the first build and re-verified
     after the last: the two must agree, so an edit
     during prep refuses instead of mislabelling an older

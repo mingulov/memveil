@@ -517,16 +517,21 @@ def test_journey_launcher_runs_recorded_binary(sealed,
     assert result.returncode == 0, combined
     assert 'journey-marker' in result.stdout, combined
     assert '1 passed' in combined, combined
+    result = launched('rpm-journey')
+    combined = result.stdout + result.stderr
+    assert result.returncode == 2, combined
+    assert 'lacks suite' in combined, combined
     with staged.open('ab') as stream:
         stream.write(b'# tampered\n')
     result = launched('deb')
     combined = result.stdout + result.stderr
     assert result.returncode == 2, combined
-    assert 'changed' in combined, combined
-    result = launched('rpm-journey')
-    combined = result.stdout + result.stderr
-    assert result.returncode == 2, combined
-    assert 'lacks suite' in combined, combined
+    # Tampered bytes match no digest any valid record
+    # references, so the shared prep-directory validator
+    # refuses before launch; the launch-time digest
+    # refusal stays pinned by the lying-record test.
+    assert 'matching no digest referenced' in combined, \
+        combined
     bare = {key: value for key, value in environment.items()
             if key != 'MV_JOURNEY_PREP'}
     result = subprocess.run(
@@ -602,15 +607,27 @@ def test_journey_identity_excludes_prep_dir_wholesale():
     sys.path.insert(0, str(ROOT / 'tests'))
     from support.candidate_suite import checkout_identity, \
         journey_identity_excludes, journey_prep_dir
+    import hashlib
+    import json
     top = Path(journey_prep_dir())
     top.mkdir(parents=True, exist_ok=True)
     tag = 'wholesale-%d' % os.getpid()
-    record = top / 'records' / (tag + '.json')
-    record.parent.mkdir(parents=True, exist_ok=True)
-    record.write_text('{}\n')
     staged = top / 'stages' / 'stage' / 'staged-exe'
     staged.parent.mkdir(parents=True, exist_ok=True)
     staged.write_bytes(b'staged-bytes\n')
+    record = top / 'records' / (tag + '.json')
+    record.parent.mkdir(parents=True, exist_ok=True)
+    commit, tree = checkout_identity(
+        exclude=journey_identity_excludes())
+    record.write_text(json.dumps(
+        {'schema': 'memveil-journey-prep/1',
+         'commit': commit, 'tree': tree,
+         'suites': {'deb': {
+             'path': str(top / 'provenance-exe'),
+             'staged': str(staged),
+             'sha256': hashlib.sha256(
+                 staged.read_bytes()).hexdigest(),
+             'target': 'package_deb'}}}))
     scratch = top / 'records' / (tag + '.json.stale.tmp')
     scratch.write_bytes(b'{"partial": ')
     source = ROOT / (tag + '-source.py')
@@ -661,8 +678,24 @@ def test_journey_identity_excludes_prep_dir_wholesale():
         + dispatch_text.count(
             'def journey_records_dir') == 1
     assert 'journey_identity_excludes(' in prep_text
+    assert prep_text.count(
+        'def refuse_unowned_prep_contents') \
+        + dispatch_text.count(
+            'def refuse_unowned_prep_contents') == 1
+    assert prep_text.count(
+        'def _prep_record_shape_error') \
+        + dispatch_text.count(
+            'def _prep_record_shape_error') == 1
+    assert prep_text.count(
+        'def resolve_journey_record') \
+        + dispatch_text.count(
+            'def resolve_journey_record') == 1
+    assert 'refuse_unowned_prep_contents(' in prep_text
+    assert 'resolve_journey_record(' in prep_text
     assert dispatch_text.count(
         'journey_identity_excludes(') >= 2
+    assert dispatch_text.count(
+        'refuse_unowned_prep_contents(') >= 2
     assert 'journey_staging_root(' in prep_text
     assert 'journey_records_dir(' in prep_text
     assert 'journey_prep_dir(' in prep_text
@@ -1050,8 +1083,9 @@ def test_journey_prep_accepts_tool_owned_override(
     from support.candidate_suite import journey_prep_dir
     import support.journey_prep as prep
     # An in-checkout override holding only tool-owned
-    # entries (records, stages, a prior record, and a
-    # lingering publication scratch file) proceeds.
+    # entries (records, stages, a prior record from an
+    # earlier prep, and a lingering publication scratch
+    # file) proceeds.
     fresh = ROOT / ('probe-prep-%d-%s'
                     % (os.getpid(), uuid.uuid4().hex[:8]))
     monkeypatch.setenv('MV_JOURNEY_PREP_DIR', str(fresh))
@@ -1064,7 +1098,11 @@ def test_journey_prep_accepts_tool_owned_override(
     try:
         (fresh / 'records').mkdir(parents=True)
         (fresh / 'stages').mkdir(parents=True)
-        (fresh / 'records' / 'prior.json').write_text('{}\n')
+        prior = prep.prepare(
+            str(fresh / 'records' / 'prior.json'))
+        assert (fresh / 'records' / 'prior.json').is_file()
+        for suite, entry in prior['suites'].items():
+            assert Path(entry['staged']).is_file(), suite
         (fresh / 'records' / 'prior.json.stale.tmp') \
             .write_bytes(b'{"schema": "partial-')
         record = prep.prepare(
@@ -1216,6 +1254,40 @@ def test_journey_record_into_stages_refuses(
     assert not os.path.lexists(legacy)
 
 
+def test_journey_prep_refuses_txt_record_destination(
+        sealed, tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import journey_prep_dir, \
+        journey_staging_root
+    import support.journey_prep as prep
+    fake = tmp_path / 'fake-exe'
+    fake.write_bytes(b'#!/bin/sh\necho fake\n')
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    # A record destination outside the JSON record shape
+    # refuses before anything is written: the publish path
+    # and the checks share the one destination rule, so a
+    # published record is always one the checks accept.
+    target = Path(journey_prep_dir()) / 'records' \
+        / 'prep.txt'
+    root = Path(journey_staging_root())
+    before = sorted(root.iterdir()) if root.exists() \
+        else []
+    with pytest.raises(ValueError, match='must be a JSON'):
+        prep.prepare(str(target))
+    assert not os.path.lexists(target)
+    after = sorted(root.iterdir()) if root.exists() \
+        else []
+    assert after == before, 'refused prep staged bytes'
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MV_JOURNEY_PREP'] = str(target)
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 2, combined
+    assert 'must be a JSON' in combined, combined
+
+
 def test_journey_stage_into_records_refuses(tmp_path):
     sys.path.insert(0, str(ROOT / 'tests'))
     from support.candidate_suite import journey_records_dir
@@ -1246,6 +1318,39 @@ def test_journey_honest_layout_accepts(tmp_path,
     root = Path(journey_staging_root())
     for suite, entry in record['suites'].items():
         assert root in Path(entry['staged']).parents, suite
+
+
+def test_journey_honest_record_and_stage_accepts(
+        sealed, tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import \
+        refuse_unowned_prep_contents
+    import support.journey_prep as prep
+    harness = ('#!/bin/sh\necho journey-marker\n'
+               'echo "running 1 tests"\n'
+               'echo "test journey_probe ... ok"\n'
+               'echo "test result: ok. 1 passed; 0 failed; '
+               '0 ignored; 0 measured; 0 filtered out"\n')
+    fake = tmp_path / 'fake-exe'
+    fake.write_text(harness)
+    fake.chmod(0o755)
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    record_path = _prep_record_path('prep')
+    prep.prepare(str(record_path))
+    # An honest record with its referenced stages passes
+    # the shared validator directly, across a repeat prep,
+    # and at launch.
+    refuse_unowned_prep_contents()
+    prep.prepare(str(_prep_record_path('prep-next')))
+    refuse_unowned_prep_contents()
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MV_JOURNEY_PREP'] = str(record_path)
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert '1 passed' in combined, combined
 
 
 def test_journey_retired_stage_cleanup_keeps_record_valid(
@@ -1355,6 +1460,103 @@ def test_journey_tampered_executable_post_prep_refuses(
     assert hashlib.sha256(
         original.read_bytes()).hexdigest() \
         == original_digest
+
+
+def test_journey_prep_refuses_unreferenced_staged_bytes(
+        sealed, tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    import support.journey_prep as prep
+    harness = ('#!/bin/sh\necho journey-marker\n'
+               'echo "running 1 tests"\n'
+               'echo "test journey_probe ... ok"\n'
+               'echo "test result: ok. 1 passed; 0 failed; '
+               '0 ignored; 0 measured; 0 filtered out"\n')
+    fake = tmp_path / 'fake-exe'
+    fake.write_text(harness)
+    fake.chmod(0o755)
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    record_path = _prep_record_path('prep')
+    record = prep.prepare(str(record_path))
+    staged = Path(record['suites']['deb']['staged'])
+    with staged.open('ab') as stream:
+        stream.write(b'# unreferenced-bytes\n')
+    # Staged bytes matching no digest any valid record
+    # references refuse on the publish path (before any
+    # new write) and on the check path through the
+    # identical validator.
+    with pytest.raises(
+            ValueError,
+            match='matching no digest referenced'):
+        prep.prepare(str(_prep_record_path('prep-next')))
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MV_JOURNEY_PREP'] = str(record_path)
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 2, combined
+    assert 'matching no digest referenced' in combined, \
+        combined
+    assert 'journey-marker' not in result.stdout, combined
+
+
+def test_journey_launcher_refuses_lying_record_digest(
+        sealed, tmp_path):
+    import hashlib
+    import json
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import checkout_identity, \
+        journey_identity_excludes, journey_staging_root
+    from support.journey_prep import TARGETS
+    # Two records bind the same staged path: the honest
+    # record names the true digest (so the shared
+    # validator accepts the bytes), the lying record
+    # names another digest for the same path, and the
+    # launch-time re-hash refuses it.
+    harness = ('#!/bin/sh\necho journey-marker\n'
+               'echo "running 1 tests"\n'
+               'echo "test journey_probe ... ok"\n'
+               'echo "test result: ok. 1 passed; 0 failed; '
+               '0 ignored; 0 measured; 0 filtered out"\n')
+    tag = '%d-%s' % (os.getpid(), uuid.uuid4().hex[:8])
+    stage_dir = Path(journey_staging_root()) / (
+        'stub-lying-%s.staged' % tag)
+    stage_dir.mkdir(parents=True)
+    staged = stage_dir / TARGETS['deb']
+    staged.write_text(harness)
+    staged.chmod(0o755)
+    digest = hashlib.sha256(
+        staged.read_bytes()).hexdigest()
+    assert digest != '0' * 64
+    commit, tree = checkout_identity(
+        exclude=journey_identity_excludes())
+    honest = _prep_record_path('stub-honest')
+    honest.parent.mkdir(parents=True, exist_ok=True)
+    honest.write_text(json.dumps(
+        {'schema': 'memveil-journey-prep/1',
+         'commit': commit, 'tree': tree,
+         'suites': {'deb': {
+             'path': str(staged),
+             'staged': str(staged),
+             'sha256': digest,
+             'target': TARGETS['deb']}}}))
+    lying = _prep_record_path('stub-lying')
+    lying.write_text(json.dumps(
+        {'schema': 'memveil-journey-prep/1',
+         'commit': commit, 'tree': tree,
+         'suites': {'deb': {
+             'path': str(staged),
+             'staged': str(staged),
+             'sha256': '0' * 64,
+             'target': TARGETS['deb']}}}))
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MV_JOURNEY_PREP'] = str(lying)
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 2, combined
+    assert 'changed' in combined, combined
+    assert 'journey-marker' not in result.stdout, combined
 
 
 def test_journey_record_non_string_path_refuses(sealed,
@@ -1643,6 +1845,7 @@ def test_journey_publication_scratch_stays_invisible(
     fake = tmp_path / 'fake-exe'
     fake.write_text(harness)
     fake.chmod(0o755)
+    import json
     sys.path.insert(0, str(ROOT / 'tests'))
     from support.candidate_suite import checkout_identity, \
         journey_identity_excludes, journey_prep_dir
@@ -1691,7 +1894,7 @@ def test_journey_publication_scratch_stays_invisible(
         with pytest.raises(ValueError, match='outside'):
             prep._publish_record_atomically(
                 tmp_path / 'x.json', tmp_path / 'x.json',
-                '{}\n')
+                json.dumps(record))
         assert not (tmp_path / 'x.json').exists()
     finally:
         scratch.unlink(missing_ok=True)
