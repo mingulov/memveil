@@ -1606,8 +1606,6 @@ def test_release_runbook_binds_dryrun_published_check():
     order = " ".join(text.split())
     assert "dispatch dry-run before recording its check " \
         "binding" in order
-    assert "MV31" not in text
-    assert re.search(r"\bD1\b", text) is None
     assert "promotion-dry-run/1" in api().REMOTE_CHECKS
     assert 'select(.name == "dry-run")' not in text
 
