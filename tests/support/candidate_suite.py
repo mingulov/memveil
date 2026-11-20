@@ -36,7 +36,8 @@ SUITE_ARMING = {
 # Journey suites launch prebuilt executables, never cargo:
 # tests/support/journey_prep.py builds them once and
 # records their paths, MV_JOURNEY_PREP names the record,
-# and the launcher below re-hashes before exec.
+# and the launcher below verifies checkout, suite, and
+# bytes before exec plus executed-test evidence after.
 JOURNEY_SUITES = ('deb', 'rpm-journey')
 
 JOURNEY_PREP_SCHEMA = 'memveil-journey-prep/1'
@@ -86,11 +87,79 @@ def _checked(suite, code, live):
     return 1
 
 
+def _git_lines(*argv):
+    """Stdout lines of a read-only git query in this checkout.
+
+    Refuses when git is absent or the query fails: checkout
+    identity is load-bearing, never optional.
+    """
+    try:
+        proc = subprocess.run(
+            ['git', '-C', str(ROOT), *argv],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, errors='replace')
+    except OSError as exc:
+        raise ValueError(
+            'checkout identity unavailable: %s' % exc)
+    if proc.returncode != 0:
+        raise ValueError(
+            'checkout identity unavailable: git %s refused'
+            % argv[0])
+    return proc.stdout.split('\0')
+
+
+def checkout_identity(exclude=()):
+    """(commit, tree digest) binding this checkout's exact state.
+
+    commit is HEAD; the tree digest is SHA-256 over the
+    sorted worktree bytes (relpath plus file content) of
+    every tracked and every untracked non-ignored file,
+    so it binds the sources the recorded executables were
+    built from, clean or dirty. Ignored build outputs never
+    enter the digest. exclude holds absolute paths (the
+    prep record itself) skipped by identity. Refuses when
+    any listed file is unreadable. Shared with the prep
+    tool, which imports it from here.
+    """
+    head = _git_lines('rev-parse', 'HEAD')[0].strip()
+    if len(head) != 40 \
+            or any(char not in '0123456789abcdef'
+                   for char in head):
+        raise ValueError('checkout identity unavailable')
+    skip = {str(Path(name).resolve()) for name in exclude}
+    names = []
+    for args in (['ls-files', '-z'],
+                 ['ls-files', '--others', '--exclude-standard',
+                  '-z']):
+        for entry in _git_lines(*args):
+            if entry:
+                names.append(entry)
+    material = hashlib.sha256()
+    for name in sorted(set(names)):
+        if '/' in name and name.split('/')[0] in ('', '.', '..'):
+            raise ValueError('checkout identity unavailable')
+        full = ROOT / name
+        if str(full.resolve()) in skip:
+            continue
+        try:
+            with open(full, 'rb') as stream:
+                content = stream.read()
+        except OSError as exc:
+            raise ValueError(
+                'checkout identity unavailable: %s' % exc)
+        material.update(name.encode('utf-8') + b'\0')
+        material.update(content + b'\0')
+    return head, material.hexdigest()
+
+
 def _journey_record(live):
     """Validated prep record for the journey launcher.
 
     Refuses a missing, unreadable, or misshapen record
-    instead of falling back to a build.
+    instead of falling back to a build. Returns the
+    (record, record path) pair: the launcher needs the
+    path to exclude the record itself from checkout
+    identity.
     """
     name = live.get('MV_JOURNEY_PREP', '')
     if not name:
@@ -108,23 +177,94 @@ def _journey_record(live):
             or record.get('schema') != JOURNEY_PREP_SCHEMA \
             or not isinstance(record.get('suites'), dict):
         raise ValueError('journey prep record shape differs')
-    return record['suites']
+    commit = record.get('commit')
+    if not isinstance(commit, str) or len(commit) != 40 \
+            or any(char not in '0123456789abcdef'
+                   for char in commit):
+        raise ValueError('journey prep record shape differs')
+    tree = record.get('tree')
+    if not isinstance(tree, str) or len(tree) != 64 \
+            or any(char not in '0123456789abcdef'
+                   for char in tree):
+        raise ValueError('journey prep record shape differs')
+    if set(record) != {'schema', 'commit', 'tree', 'suites'}:
+        raise ValueError('journey prep record shape differs')
+    return record, name
+
+
+def _require_harness_evidence(suite, stdout):
+    """Refuse output without executed-test evidence.
+
+    A genuine test-suite run prints the harness envelope
+    (`running N tests` plus a `test result: ok.` summary)
+    with one `... ok` line per executed check; a stub
+    reporting bare success prints none of it. Requires at
+    least one executed check, a passing summary with zero
+    failures, and summary counts consistent with the
+    executed lines. Raises ValueError otherwise.
+    """
+    import re
+    running = [line for line in stdout.splitlines()
+               if re.fullmatch(r'running (\d+) tests?', line)]
+    if not running or int(running[0].split()[1]) < 1:
+        raise ValueError(
+            'journey suite produced no executed-test '
+            'evidence: ' + suite)
+    passed = [line for line in stdout.splitlines()
+              if re.fullmatch(r'test \S+ \.\.\. ok', line)]
+    summary = [line for line in stdout.splitlines()
+               if re.match(r'test result: ok\. (\d+) passed; '
+                           r'0 failed', line)]
+    if not summary or int(summary[0].split()[3]) < 1 \
+            or int(summary[0].split()[3]) != len(passed):
+        raise ValueError(
+            'journey suite produced no executed-test '
+            'evidence: ' + suite)
 
 
 def _run_journey(suite, argv, live):
     """Launch one recorded journey executable directly.
 
-    The recorded bytes are re-hashed before exec; a stale
-    record, a missing or aliased executable, or digest
-    drift refuses. No build invocation on this path.
+    The record must bind this checkout (commit plus tree
+    digest recomputed live), the requested suite (the
+    recorded build target must equal the dispatched
+    suite's), and the executable bytes (re-hashed before
+    exec); a stale record, a rebuilt-from-dirty checkout, a
+    suite mixup, a missing or aliased executable, or digest
+    drift refuses. The run's own output must carry
+    executed-test evidence (the load-bearing control: a
+    stub reporting bare success has none). No build
+    invocation on this path.
+
+    Chain of custody: the prep tool builds each suite
+    executable, hashes the bytes it just built, binds the
+    checkout state it built from, and writes the one
+    record file this launcher reads back. A hand-written
+    record never passes through the prep tool, so it can
+    only name bytes the writer already holds; any
+    substitution (another binary, a rebuilt checkout, a
+    bare-success stub) breaks at least one verified
+    binding. Residual: a local writer who hand-builds a
+    binary, forges harness output inside it, and hand-writes
+    a fully consistent record defeats file checks; that
+    fraud is active (not a stale artifact) and re-running
+    the prep tool exposes it (the honest record names
+    different bytes).
     """
-    entry = _journey_record(live).get(suite)
+    from support.journey_prep import TARGETS
+    record, name = _journey_record(live)
+    entry = record['suites'].get(suite)
     if not isinstance(entry, dict) \
-            or set(entry) != {'path', 'sha256'} \
+            or set(entry) != {'path', 'sha256', 'target'} \
             or not isinstance(entry['path'], str) \
-            or not isinstance(entry['sha256'], str):
+            or not isinstance(entry['sha256'], str) \
+            or not isinstance(entry['target'], str):
         raise ValueError(
             'journey prep record lacks suite: ' + suite)
+    if TARGETS.get(suite) != entry['target']:
+        raise ValueError(
+            'journey prep record names another suite\'s '
+            'executable: ' + suite)
     path = Path(entry['path'])
     if not path.is_absolute() or path.is_symlink() \
             or not path.is_file():
@@ -140,12 +280,27 @@ def _run_journey(suite, argv, live):
         raise ValueError(
             'recorded journey executable changed; re-run '
             'tests/support/journey_prep.py: ' + suite)
+    commit, tree = checkout_identity(exclude=[name])
+    if commit != record['commit'] or tree != record['tree']:
+        raise ValueError(
+            'checkout changed since fixture prep; re-run '
+            'tests/support/journey_prep.py: ' + suite)
     env = dict(live)
     env['MV_VALID_EMPTY'] = str(
         ROOT / 'tests/package/valid-empty')
     env.pop('RUSTUP_TOOLCHAIN', None)
-    return subprocess.run(
-        [str(path), *argv], cwd=ROOT, env=env).returncode
+    proc = subprocess.run(
+        [str(path), *argv], cwd=ROOT, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, errors='replace')
+    if proc.stdout:
+        print(proc.stdout, end='', flush=True)
+    if proc.stderr:
+        print(proc.stderr, end='', file=sys.stderr, flush=True)
+    if proc.returncode != 0:
+        return proc.returncode
+    _require_harness_evidence(suite, proc.stdout)
+    return 0
 
 
 def _run(suite, argv, live, selected):

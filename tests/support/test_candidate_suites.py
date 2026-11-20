@@ -351,7 +351,9 @@ def test_journey_prep_records_executables(tmp_path):
     import hashlib
     import json
     sys.path.insert(0, str(ROOT / 'tests'))
-    from support.candidate_suite import JOURNEY_SUITES
+    from support.candidate_suite import JOURNEY_SUITES, \
+        checkout_identity
+    from support.journey_prep import TARGETS
     record = tmp_path / 'prep.json'
     result = subprocess.run(
         [sys.executable,
@@ -362,9 +364,15 @@ def test_journey_prep_records_executables(tmp_path):
     assert result.returncode == 0, result.stderr[-2000:]
     doc = json.loads(record.read_text())
     assert doc['schema'] == 'memveil-journey-prep/1'
+    assert set(doc) == {'schema', 'commit', 'tree', 'suites'}
     assert set(doc['suites']) == set(JOURNEY_SUITES)
+    commit, tree = checkout_identity(
+        exclude=[str(record.resolve())])
+    assert doc['commit'] == commit
+    assert doc['tree'] == tree
     for suite, entry in doc['suites'].items():
-        assert set(entry) == {'path', 'sha256'}, suite
+        assert set(entry) == {'path', 'sha256', 'target'}, suite
+        assert entry['target'] == TARGETS[suite], suite
         exe = Path(entry['path'])
         assert exe.is_absolute(), suite
         assert exe.is_file() and not exe.is_symlink(), suite
@@ -384,35 +392,60 @@ def test_journey_dispatch_never_invokes_cargo():
         'qualification dispatch must not name cargo'
 
 
-def test_journey_launcher_runs_recorded_binary(sealed,
-                                               tmp_path):
+def _journey_stub_record(tmp_path, script, suite='deb'):
+    """Hand-written prep-shaped record for one stub script."""
     import hashlib
     import json
-    stub = tmp_path / 'fake-journey'
-    stub.write_text('#!/bin/sh\necho journey-marker\n')
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import checkout_identity
+    from support.journey_prep import TARGETS
+    stub = tmp_path / ('stub-' + suite)
+    stub.write_text(script)
     stub.chmod(0o755)
-    digest = hashlib.sha256(stub.read_bytes()).hexdigest()
-    record_path = tmp_path / 'prep.json'
+    record_path = tmp_path / ('prep-' + suite + '.json')
+    commit, tree = checkout_identity(
+        exclude=[str(record_path.resolve())])
     record_path.write_text(json.dumps(
         {'schema': 'memveil-journey-prep/1',
-         'suites': {'deb': {'path': str(stub),
-                            'sha256': digest}}}))
+         'commit': commit, 'tree': tree,
+         'suites': {suite: {
+             'path': str(stub),
+             'sha256': hashlib.sha256(
+                 stub.read_bytes()).hexdigest(),
+             'target': TARGETS[suite]}}}))
+    return stub, record_path
+
+
+def _launch_journey(suite, environment, *argv):
+    return subprocess.run(
+        [sys.executable,
+         str(ROOT / 'tests/support/candidate_suite.py'),
+         suite, *argv],
+        env=environment, capture_output=True,
+        text=True, timeout=120)
+
+
+def test_journey_launcher_runs_recorded_binary(sealed,
+                                               tmp_path):
+    harness = ('#!/bin/sh\necho journey-marker\n'
+               'echo "running 1 tests"\n'
+               'echo "test journey_probe ... ok"\n'
+               'echo "test result: ok. 1 passed; 0 failed; '
+               '0 ignored; 0 measured; 0 filtered out"\n')
+    stub, record_path = _journey_stub_record(
+        tmp_path, harness)
     environment = candidate_clean_env()
     environment.update(sealed)
     environment['MV_JOURNEY_PREP'] = str(record_path)
 
     def launched(suite):
-        return subprocess.run(
-            [sys.executable,
-             str(ROOT / 'tests/support/candidate_suite.py'),
-             suite],
-            env=environment, capture_output=True,
-            text=True, timeout=120)
+        return _launch_journey(suite, environment)
 
     result = launched('deb')
     combined = result.stdout + result.stderr
     assert result.returncode == 0, combined
     assert 'journey-marker' in result.stdout, combined
+    assert '1 passed' in combined, combined
     with stub.open('ab') as stream:
         stream.write(b'# tampered\n')
     result = launched('deb')
@@ -436,14 +469,112 @@ def test_journey_launcher_runs_recorded_binary(sealed,
     assert 'journey_prep.py' in combined, combined
 
 
+def test_journey_launcher_refuses_bare_success_stub(sealed,
+                                                   tmp_path):
+    # A stub that exits 0 with bare output (no harness
+    # envelope, no executed checks) refuses even though
+    # its record fields are fully consistent.
+    stub, record_path = _journey_stub_record(
+        tmp_path, '#!/bin/sh\necho journey-marker\n')
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MV_JOURNEY_PREP'] = str(record_path)
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 2, combined
+    assert 'executed-test evidence' in combined, combined
+    # A forged envelope with zero executed checks refuses
+    # too: the summary must claim a positive count that
+    # matches the executed lines.
+    forged = ('#!/bin/sh\necho "running 0 tests"\n'
+              'echo "test result: ok. 0 passed; 0 failed; '
+              '0 ignored; 0 measured; 0 filtered out"\n')
+    stub.write_text(forged)
+    import hashlib
+    import json
+    record = json.loads(record_path.read_text())
+    record['suites']['deb']['sha256'] = hashlib.sha256(
+        stub.read_bytes()).hexdigest()
+    record_path.write_text(json.dumps(record))
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 2, combined
+    assert 'executed-test evidence' in combined, combined
+
+
+def test_journey_honest_prep_and_launch_accepts(sealed,
+                                                tmp_path):
+    # The prep tool's own record launches green: checkout,
+    # suite, and bytes verify, and the real run carries
+    # executed-test evidence. A unit filter keeps the leg
+    # fast and sudo-free.
+    record = tmp_path / 'prep.json'
+    result = subprocess.run(
+        [sys.executable,
+         str(ROOT / 'tests/support/journey_prep.py'),
+         str(record)],
+        capture_output=True, text=True, timeout=900,
+        cwd=str(ROOT))
+    assert result.returncode == 0, result.stderr[-2000:]
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MV_JOURNEY_PREP'] = str(record)
+    result = _launch_journey('deb', environment,
+                             'journey_gate_matrix')
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert '1 passed' in combined, combined
+    assert '0 failed' in combined, combined
+
+
+def test_journey_tampered_executable_post_prep_refuses(
+        sealed, tmp_path):
+    import hashlib
+    import json
+    record = tmp_path / 'prep.json'
+    result = subprocess.run(
+        [sys.executable,
+         str(ROOT / 'tests/support/journey_prep.py'),
+         str(record)],
+        capture_output=True, text=True, timeout=900,
+        cwd=str(ROOT))
+    assert result.returncode == 0, result.stderr[-2000:]
+    doc = json.loads(record.read_text())
+    exe = Path(doc['suites']['deb']['path'])
+    saved = exe.read_bytes()
+    try:
+        with exe.open('ab') as stream:
+            stream.write(b'# tampered-post-prep\n')
+        environment = candidate_clean_env()
+        environment.update(sealed)
+        environment['MV_JOURNEY_PREP'] = str(record)
+        result = _launch_journey('deb', environment,
+                                 'journey_gate_matrix')
+        combined = result.stdout + result.stderr
+        assert result.returncode == 2, combined
+        assert 'changed' in combined, combined
+    finally:
+        # Restore the prebuilt bytes so later tests inherit
+        # no tamper.
+        exe.write_bytes(saved)
+        assert hashlib.sha256(exe.read_bytes()).hexdigest() \
+            == doc['suites']['deb']['sha256']
+
+
 def test_journey_record_non_string_path_refuses(sealed,
                                                tmp_path):
     import json
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import checkout_identity
     record_path = tmp_path / 'prep.json'
+    commit, tree = checkout_identity(
+        exclude=[str(record_path.resolve())])
     record_path.write_text(json.dumps(
         {'schema': 'memveil-journey-prep/1',
+         'commit': commit, 'tree': tree,
          'suites': {'deb': {'path': 12345,
-                            'sha256': '0' * 64}}}))
+                            'sha256': '0' * 64,
+                            'target': 'package_deb'}}}))
     environment = candidate_clean_env()
     environment.update(sealed)
     environment['MV_JOURNEY_PREP'] = str(record_path)
@@ -451,8 +582,8 @@ def test_journey_record_non_string_path_refuses(sealed,
         [sys.executable,
          str(ROOT / 'tests/support/candidate_suite.py'),
          'deb'],
-        env=environment, capture_output=True,
-        text=True, timeout=120)
+        env=environment, capture_output=True, text=True,
+        timeout=120)
     combined = result.stdout + result.stderr
     assert result.returncode == 2, combined
     assert 'Traceback' not in combined, combined
