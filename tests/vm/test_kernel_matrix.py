@@ -5975,16 +5975,16 @@ def _row_ctx(**over):
         "timeout": False,
         "source": {
             "memveil": {"commit": "e" * 40, "dirty": False},
-            "libbpf_mojo": {"version": "0.2.2",
-                            "tarball_sha256": "f" * 64,
-                            "status": "pinned"},
+            "locks": {"cargo_lock_sha256": "f" * 64,
+                      "ebpf_lock_sha256": "0" * 64},
         },
         "toolchain": {
-            "lock_version": "1.0.0",
-            "recorded_on": "2026-10-30",
             "lock_sha256": "a" * 64,
-            "toolchain": {"pixi": {"version": "0.83.0"},
-                          "mojo": {"version": "1.2.0"}},
+            "ebpf_lock_sha256": "b" * 64,
+            "channel": "1.100.0",
+            "tools": {"cargo": "1.100.0",
+                      "rustc": "1.100.0",
+                      "bpf_linker": "0.10.4"},
         },
         "lock_tools": {"bpftrace": "bpftrace v0.25.0",
                        "bpftool": "bpftool v7.7.0"},
@@ -6344,10 +6344,116 @@ def test_row_receipt_scenarios_roundtrip(tmp_path):
     assert ok, detail
 
 
-# Cutover: the tree-reading identity tests retired with the Mojo
-# toolchain lock (receipt validators below still pin the old
-# receipt shape against fixtures; armed rows fail closed until
-# a Rust toolchain-identity story lands).
+# Row source/toolchain identity reads the Rust tree: the git
+# revision, both Cargo lock digests, the rust-toolchain
+# channel, and probed cargo/rustc/bpf-linker versions.
+
+
+def _rust_identity_root(tmp_path):
+    root = tmp_path / "repo"
+    (root / "crates" / "ebpf").mkdir(parents=True)
+    (root / "Cargo.lock").write_text("cargo-lock-bytes\n")
+    (root / "crates" / "ebpf" / "Cargo.lock").write_text(
+        "ebpf-lock-bytes\n")
+    (root / "rust-toolchain.toml").write_text(
+        '[toolchain]\nchannel = "1.100.0"\n')
+    return root
+
+
+def _git_commit_all(root):
+    import subprocess
+    subprocess.run(["git", "-C", str(root), "init", "-q"],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "add", "."],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "-c",
+                    "user.name=t", "-c", "user.email=t@t",
+                    "commit", "-qm", "identity"],
+                   check=True, capture_output=True)
+    proc = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True)
+    return proc.stdout.strip()
+
+
+def test_row_source_identity_rust_locks(tmp_path):
+    root = _rust_identity_root(tmp_path)
+    identity = km.row_source_identity(root)
+    assert identity["memveil"] == {"commit": "unknown",
+                                   "dirty": True}
+    assert identity["locks"] == {
+        "cargo_lock_sha256": hashlib.sha256(
+            b"cargo-lock-bytes\n").hexdigest(),
+        "ebpf_lock_sha256": hashlib.sha256(
+            b"ebpf-lock-bytes\n").hexdigest()}
+
+
+def test_row_source_identity_git_revision(tmp_path):
+    root = _rust_identity_root(tmp_path)
+    head = _git_commit_all(root)
+    assert km.row_source_identity(root)["memveil"] == {
+        "commit": head, "dirty": False}
+    (root / "dirty.txt").write_text("uncommitted\n")
+    assert km.row_source_identity(root)["memveil"] == {
+        "commit": head, "dirty": True}
+
+
+def test_row_source_identity_refuses_missing_lock(tmp_path):
+    root = _rust_identity_root(tmp_path)
+    (root / "Cargo.lock").unlink()
+    with pytest.raises(ValueError, match="[Ll]ock"):
+        km.row_source_identity(root)
+    root = _rust_identity_root(tmp_path / "second")
+    (root / "crates" / "ebpf" / "Cargo.lock").unlink()
+    with pytest.raises(ValueError, match="[Ll]ock"):
+        km.row_source_identity(root)
+
+
+def test_read_toolchain_lock_rust(tmp_path):
+    root = _rust_identity_root(tmp_path)
+    toolchain = km.read_toolchain_lock(root)
+    assert toolchain["lock_sha256"] == hashlib.sha256(
+        b"cargo-lock-bytes\n").hexdigest()
+    assert toolchain["ebpf_lock_sha256"] == hashlib.sha256(
+        b"ebpf-lock-bytes\n").hexdigest()
+    assert toolchain["channel"] == "1.100.0"
+    assert set(toolchain["tools"]) == {"cargo", "rustc",
+                                       "bpf_linker"}
+    for value in toolchain["tools"].values():
+        assert re.fullmatch(
+            r"[0-9]+\.[0-9]+\.[0-9]+"
+            r"(?:[-+][0-9A-Za-z.+-]+)?", value), value
+
+
+def test_read_toolchain_lock_strips_rustup_override(
+        tmp_path, monkeypatch):
+    root = _rust_identity_root(tmp_path)
+    monkeypatch.setenv("RUSTUP_TOOLCHAIN",
+                       "bogus-nonexistent-toolchain")
+    assert km.read_toolchain_lock(root)["tools"]["cargo"]
+
+
+def test_read_toolchain_lock_refuses_missing_channel(
+        tmp_path):
+    root = _rust_identity_root(tmp_path)
+    (root / "rust-toolchain.toml").unlink()
+    with pytest.raises(ValueError, match="rust-toolchain"):
+        km.read_toolchain_lock(root)
+
+
+def test_read_toolchain_lock_refuses_missing_lock(tmp_path):
+    root = _rust_identity_root(tmp_path)
+    (root / "crates" / "ebpf" / "Cargo.lock").unlink()
+    with pytest.raises(ValueError, match="[Ll]ock"):
+        km.read_toolchain_lock(root)
+
+
+def test_read_toolchain_lock_refuses_unprobable_tools(
+        tmp_path, monkeypatch):
+    root = _rust_identity_root(tmp_path)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    with pytest.raises(ValueError, match="cannot probe"):
+        km.read_toolchain_lock(root)
 
 
 def test_guest_write_btf_sha(tmp_path):

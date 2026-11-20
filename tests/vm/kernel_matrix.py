@@ -13,6 +13,7 @@ import json
 import os
 import re
 import subprocess
+import tomllib
 from pathlib import Path
 
 SCHEMA = "memveil-kernel-matrix/2"
@@ -4097,62 +4098,119 @@ def row_receipt_files(row_dir):
     return found
 
 
+_TOOL_VERSION_RE = re.compile(
+    r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.+-]+)?")
+
+
+def _probe_build_tools(repo_root):
+    """{cargo, rustc, bpf_linker} versions under the repo pin.
+
+    Mirrors the candidate sealer's probes: every invocation
+    strips RUSTUP_TOOLCHAIN and runs in the source root so
+    the checkout pin wins over ambient overrides.
+    """
+    env = {key: value for key, value in os.environ.items()
+           if key != "RUSTUP_TOOLCHAIN"}
+    found = {}
+    for tool, argv in (("cargo", ["cargo", "--version"]),
+                      ("rustc", ["rustc", "--version"]),
+                      ("bpf_linker", ["bpf-linker",
+                                     "--version"])):
+        try:
+            proc = subprocess.run(
+                argv, cwd=str(repo_root), stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, env=env)
+        except OSError as error:
+            raise ValueError(
+                "cannot probe %s: %s" % (tool, error)) from error
+        if proc.returncode != 0:
+            raise ValueError("cannot probe " + tool)
+        try:
+            token = proc.stdout.split()[1]
+        except IndexError as error:
+            raise ValueError(
+                "cannot probe " + tool) from error
+        token = token[1:] if token.startswith("v") else token
+        if not _TOOL_VERSION_RE.fullmatch(token) \
+                or len(token) > 64:
+            raise ValueError(
+                "cannot probe %s: bad version %r"
+                % (tool, token))
+        found[tool] = token
+    return found
+
+
+def _read_toolchain_channel(repo_root):
+    """`channel` value from the source root rust-toolchain.toml."""
+    path = Path(repo_root) / "rust-toolchain.toml"
+    try:
+        with open(path, "rb") as handle:
+            doc = tomllib.load(handle)
+    except OSError as error:
+        raise ValueError(
+            "source lacks rust-toolchain.toml") from error
+    except tomllib.TOMLDecodeError as error:
+        raise ValueError(
+            "source toolchain pin is invalid") from error
+    try:
+        channel = doc["toolchain"]["channel"]
+    except (KeyError, TypeError) as error:
+        raise ValueError(
+            "source toolchain pin has no channel") from error
+    if not isinstance(channel, str) or not channel:
+        raise ValueError(
+            "source toolchain pin has no channel")
+    return channel
+
+
+def _read_cargo_lock_sha(root, rel):
+    """SHA-256 of one Cargo lock file under the source root."""
+    try:
+        raw = (Path(root) / rel).read_bytes()
+    except OSError as error:
+        raise ValueError(
+            "source lacks %s" % rel) from error
+    if not raw:
+        raise ValueError("source lock is empty: " + rel)
+    return hashlib.sha256(raw).hexdigest()
+
+
 def row_source_identity(repo_root):
-    """Memveil commit plus the pinned support-library pin.
+    """Memveil commit plus the Cargo lock identities.
 
     Mute git answers unknown and dirty so callers never
     mistake missing identity for a clean tree. Raises
-    ValueError: the Mojo toolchain lock this read retired
-    with the cutover, and matrix receipts still need a
-    Rust toolchain-identity story (cutover carry) before
-    armed rows can mint source identity again.
+    ValueError when either Cargo lock is missing or empty.
     """
     root = Path(repo_root)
     commit, dirty = repo_identity(root)
-    try:
-        lock = json.loads(
-            (root / "toolchain.lock.json").read_text())
-        pin = lock["dependencies"]["libbpf-mojo"]
-    except (OSError, ValueError, KeyError, TypeError):
-        raise ValueError(
-            "row source identity needs toolchain identity "
-            "(cutover: Mojo lock retired; Rust matrix "
-            "receipt identity is future work)")
-    if not isinstance(pin, dict) \
-            or pin.get("status") != "pinned":
-        raise ValueError("support library is not pinned")
     return {"memveil": {"commit": commit, "dirty": dirty},
-            "libbpf_mojo": {
-                "version": pin.get("version"),
-                "tarball_sha256": pin.get("tarball_sha256"),
-                "status": pin.get("status")}}
+            "locks": {
+                "cargo_lock_sha256": _read_cargo_lock_sha(
+                    root, "Cargo.lock"),
+                "ebpf_lock_sha256": _read_cargo_lock_sha(
+                    root, "crates/ebpf/Cargo.lock")}}
 
 
 def read_toolchain_lock(repo_root):
     """Toolchain pins plus the lock hash for one receipt.
 
-    Raises ValueError: the Mojo toolchain lock this read
-    retired with the cutover (Rust matrix receipt identity
-    is future work).
+    Returns {"lock_sha256", "ebpf_lock_sha256", "channel",
+    "tools"}: lock_sha256 is the Cargo.lock digest so the
+    tested export's toolchain binding keeps holding, and
+    tools carries the probed cargo/rustc/bpf-linker
+    versions. Raises ValueError when a lock, the channel
+    pin, or a probe is missing or malformed.
     """
     root = Path(repo_root)
-    try:
-        raw = (root / "toolchain.lock.json").read_bytes()
-        lock = json.loads(raw.decode("utf-8"))
-    except (OSError, ValueError):
-        raise ValueError("toolchain lock retired with the cutover; "
-                         "matrix receipts need Rust toolchain identity")
-    try:
-        pins = lock["toolchain"]
-        if not pins["mojo"]["version"] \
-                or not pins["pixi"]["version"]:
-            raise KeyError("pins")
-    except (KeyError, TypeError):
-        raise ValueError("toolchain lock has no mojo/pixi")
-    return {"lock_version": lock.get("lock_version"),
-            "recorded_on": lock.get("recorded_on"),
-            "lock_sha256": hashlib.sha256(raw).hexdigest(),
-            "toolchain": pins}
+    tools = _probe_build_tools(root)
+    channel = _read_toolchain_channel(root)
+    return {"lock_sha256": _read_cargo_lock_sha(
+                root, "Cargo.lock"),
+            "ebpf_lock_sha256": _read_cargo_lock_sha(
+                root, "crates/ebpf/Cargo.lock"),
+            "channel": channel,
+            "tools": tools}
 
 
 def sanitize_cleanup_error(text, kind):
@@ -4273,7 +4331,7 @@ def _check_row_checks(checks):
 
 def _check_row_source(source):
     if not isinstance(source, dict) \
-            or set(source) != {"memveil", "libbpf_mojo"}:
+            or set(source) != {"memveil", "locks"}:
         raise ValueError("row receipt rejects source")
     memveil = source["memveil"]
     if not isinstance(memveil, dict) \
@@ -4287,40 +4345,38 @@ def _check_row_source(source):
     if memveil["commit"] == "unknown" \
             and memveil["dirty"] is not True:
         raise ValueError("row receipt rejects source")
-    pin = source["libbpf_mojo"]
-    if not isinstance(pin, dict) \
-            or set(pin) != {"version", "tarball_sha256",
-                            "status"}:
+    locks = source["locks"]
+    if not isinstance(locks, dict) \
+            or set(locks) != {"cargo_lock_sha256",
+                              "ebpf_lock_sha256"}:
         raise ValueError("row receipt rejects source")
-    if not isinstance(pin["version"], str) \
-            or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+",
-                                 pin["version"]):
-        raise ValueError("row receipt rejects source")
-    _check_hex(pin["tarball_sha256"], 64, "source tarball")
-    if pin["status"] != "pinned":
-        raise ValueError("row receipt rejects source")
+    _check_hex(locks["cargo_lock_sha256"], 64,
+               "source cargo lock")
+    _check_hex(locks["ebpf_lock_sha256"], 64,
+               "source ebpf lock")
     return source
 
 
 def _check_row_toolchain(toolchain):
     if not isinstance(toolchain, dict) \
-            or set(toolchain) != {"lock_version",
-                                  "recorded_on",
-                                  "lock_sha256",
-                                  "toolchain"}:
+            or set(toolchain) != {"lock_sha256",
+                                  "ebpf_lock_sha256",
+                                  "channel",
+                                  "tools"}:
         raise ValueError("row receipt rejects toolchain")
-    for key in ("lock_version", "recorded_on"):
-        if not isinstance(toolchain[key], str) \
-                or not toolchain[key]:
-            raise ValueError("row receipt rejects toolchain")
     _check_hex(toolchain["lock_sha256"], 64,
                "toolchain lock hash")
-    pins = toolchain["toolchain"]
+    _check_hex(toolchain["ebpf_lock_sha256"], 64,
+               "toolchain ebpf lock hash")
+    if not isinstance(toolchain["channel"], str) \
+            or not toolchain["channel"]:
+        raise ValueError("row receipt rejects toolchain")
+    pins = toolchain["tools"]
     if not isinstance(pins, dict):
         raise ValueError("row receipt rejects toolchain")
     try:
-        if not pins["mojo"]["version"] \
-                or not pins["pixi"]["version"]:
+        if not pins["cargo"] or not pins["rustc"] \
+                or not pins["bpf_linker"]:
             raise KeyError("pins")
     except (KeyError, TypeError):
         raise ValueError("row receipt rejects toolchain")
