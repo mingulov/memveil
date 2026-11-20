@@ -524,6 +524,54 @@ def test_seal_rejects_tampered_source_archive(workshop, tmp_path):
              "harness_bin": workshop.harness_bin()})
 
 
+def _retar_source_archive(path, tree):
+    """Re-tar an extracted source tree over the source artifact."""
+    path.unlink()
+    with tarfile.open(path, "w:gz") as stream:
+        for base, dirs, files in os.walk(tree):
+            dirs.sort()
+            for name in sorted(files):
+                full = os.path.join(base, name)
+                stream.add(
+                    full, arcname=os.path.relpath(full, tree))
+
+
+def _rebind_provenance_subjects(m, fix):
+    """Point fixture provenance subjects at the staged bytes."""
+    path = next(fix["artifacts"].glob("*.provenance.json"))
+    doc = json.loads(path.read_text())
+    doc["subjects"] = {
+        entry.name: sha(entry.read_bytes())
+        for entry in sorted(fix["artifacts"].iterdir())
+        if entry.name != path.name}
+    path.write_bytes(m.canonical(doc))
+
+
+def test_seal_rejects_source_mode_flip(workshop, tmp_path):
+    m, fix = seal_paths(workshop, tmp_path)
+    path = next(fix["artifacts"].glob("*source.tar.gz"))
+    tree = Path(tmp_path) / "resrc"
+    m.safe_extract(path, tree, False, True)
+    seal = {"root": str(fix["root"]),
+            "harness_bin": workshop.harness_bin()}
+    # Control: a faithful re-tar still seals.
+    _retar_source_archive(path, tree)
+    _rebind_provenance_subjects(m, fix)
+    m.create_manifest(
+        fix["bundle_dir"], fix["artifacts"], fix["policy"],
+        seal)
+    # A 644 -> 755 flip on one archived file refuses.
+    target = tree / "src" / "engine.txt"
+    assert not target.stat().st_mode & 0o100
+    target.chmod(0o755)
+    _retar_source_archive(path, tree)
+    _rebind_provenance_subjects(m, fix)
+    with pytest.raises(ValueError, match="[Mm]odes"):
+        m.create_manifest(
+            fix["bundle_dir"], fix["artifacts"], fix["policy"],
+            seal)
+
+
 def test_seal_rejects_lock_mismatch(workshop, tmp_path):
     m, fix = seal_paths(workshop, tmp_path)
     manifest_path = fix["bundle_dir"] / "MANIFEST.json"

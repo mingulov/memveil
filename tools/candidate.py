@@ -853,8 +853,13 @@ def bundle_tarball_matches(path, manifest_bytes):
 
 
 def walk_files(root):
-    """({rel: sha256}, {rel: target}, {dirs}) under root, no follows."""
-    files, links, dirs = {}, {}, set()
+    """({rel: sha256}, {rel: target}, {dirs}, {rel: exec}) walk.
+
+    The fourth map records the owner-execute bit per regular
+    file, so archive verifiers can bind executable bits to
+    their pinned source instead of trusting tar modes.
+    """
+    files, links, dirs, execs = {}, {}, set(), {}
     for current, subdirs, names in os.walk(root):
         for leaf in sorted(subdirs + names):
             full = os.path.join(current, leaf)
@@ -878,7 +883,9 @@ def walk_files(root):
                 links[rel] = os.readlink(full)
             else:
                 files[rel] = digest(full)
-    return files, links, dirs
+                execs[rel] = bool(
+                    os.lstat(full).st_mode & 0o100)
+    return files, links, dirs, execs
 
 
 def verify_source_archive(path, entries):
@@ -886,7 +893,8 @@ def verify_source_archive(path, entries):
 
     Returns the archived Cargo lock digests. Every file must match
     by bytes, every symlink by target, with no missing or extra
-    entries; modes come from git, never from tar extraction.
+    entries; the owner-execute bit must match the git mode
+    (100755 iff executable).
     """
     want_files = {entry["path"]: entry["sha256"]
                   for entry in entries if entry["kind"] == "file"}
@@ -894,13 +902,17 @@ def verify_source_archive(path, entries):
                   for entry in entries if entry["kind"] == "symlink"}
     want_dirs = {entry["path"] for entry in entries
                  if entry["kind"] == "dir"}
+    want_exec = {entry["path"]: entry["mode"] == "100755"
+                 for entry in entries if entry["kind"] == "file"}
     with tempfile.TemporaryDirectory(
             prefix="candidate-source-") as tmp:
         root = safe_extract(path, Path(tmp) / "source", False, True)
-        files, links, dirs = walk_files(root)
+        files, links, dirs, execs = walk_files(root)
     require(files == want_files, "source archive differs from C")
     require(links == want_links, "source archive differs from C")
     require(dirs == want_dirs, "source archive differs from C")
+    require(execs == want_exec,
+            "source archive modes differ from C")
     locks = {}
     for key, name in (("cargo_lock_sha256", "Cargo.lock"),
                       ("ebpf_lock_sha256",
@@ -915,9 +927,9 @@ def verify_bundle_tarball(path, bundle_dir):
     with tempfile.TemporaryDirectory(
             prefix="candidate-bundle-") as tmp:
         root = safe_extract(path, Path(tmp) / "bundle", True, False)
-        files, links, _dirs = walk_files(root)
+        files, links, _dirs, _execs = walk_files(root)
         require(not links, "bundle tarball carries symlinks")
-        want, _, _ = walk_files(Path(bundle_dir))
+        want, _, _, _ = walk_files(Path(bundle_dir))
     require(files == want, "bundle tarball differs from its directory")
 
 
