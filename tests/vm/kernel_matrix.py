@@ -5519,6 +5519,13 @@ def export_tested_candidate(out_dir, lock, manifest, destination):
     candidate source, toolchain, executable, selected artifact,
     BPF objects, and runtime closure. Returns the expected
     payload map; raises ValueError and writes nothing otherwise.
+
+    Toolchain binding is split: the receipt's single lock slot
+    binds the Cargo lock only (receipt toolchain lock_sha256
+    against manifest toolchain cargo_lock_sha256). The eBPF
+    lock is bound at seal via manifest toolchain
+    ebpf_lock_sha256, and the eBPF object bytes are bound at
+    export via the manifest files bpf/... digest checks below.
     """
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]
@@ -5590,7 +5597,14 @@ def export_tested_candidate(out_dir, lock, manifest, destination):
         aliases = {"attempt": "swiotlb_attempt.bpf.o",
                    "lifecycle": "swiotlb_lifecycle.bpf.o",
                    "copy": "swiotlb_copy.bpf.o"}
-        for name, digest in receipt["artifacts"]["bpf"].items():
+        present = receipt["artifacts"]["bpf"]
+        candidate.require(
+            isinstance(present, dict)
+            and {aliases.get(name, name) for name in present}
+            == set(aliases.values())
+            and len(present) == len(aliases),
+            "matrix BPF object set differs from candidate")
+        for name, digest in present.items():
             filename = aliases.get(
                 name, name if name.endswith(".bpf.o")
                 else name + ".bpf.o")

@@ -194,6 +194,17 @@ def test_export_rejects_tampered_cache_x9(tmp_path, damage):
     assert not output.exists()
 
 
+def test_export_rejects_receipt_missing_one_bpf_object(tmp_path):
+    doc, lock, row, ev, rec, receipt = exported_fixture(tmp_path)
+    del receipt['artifacts']['bpf']['copy']
+    receipt['files'] = km.row_receipt_files(row)
+    (row / 'receipt.json').write_text(json.dumps(receipt))
+    output = tmp_path / 'refused.txt'
+    with pytest.raises(ValueError):
+        km.export_tested_candidate(tmp_path, lock, doc, output)
+    assert not output.exists()
+
+
 @pytest.mark.parametrize('target', ['oracle.txt', 'oracle.stderr',
                                     'artifacts.json', 'uname.txt'])
 def test_export_rejects_raw_mutation_with_fresh_hashes(

@@ -131,6 +131,52 @@ def test_candidate_input_loader(sealed):
         api().load(env={}, required=True)
 
 
+def test_artifact_path_resolves_all_manifest_roles(sealed):
+    import candidate
+    selected = api().load(env=sealed)
+    try:
+        assert set(candidate.ROLES) == {
+            'bundle', 'deb', 'rpm', 'source', 'sbom',
+            'provenance'}
+        for role in sorted(candidate.ROLES):
+            entry = candidate.artifact(selected.manifest,
+                                       role)
+            path = selected.artifact_path(role)
+            assert path.is_file()
+            assert path.name == entry['name']
+            if role == 'bundle':
+                assert path == selected.bundle
+            else:
+                assert path.parent == selected.manifest_path \
+                    .parent
+    finally:
+        selected.close()
+
+
+@pytest.mark.parametrize('role', ['kernel', '', 'deb ',
+                                  None, 0, ['deb']])
+def test_artifact_path_rejects_unknown_role(sealed, role):
+    selected = api().load(env=sealed)
+    try:
+        with pytest.raises(ValueError, match='role'):
+            selected.artifact_path(role)
+    finally:
+        selected.close()
+
+
+def test_artifact_path_rejects_tampered_artifact(sealed):
+    selected = api().load(env=sealed)
+    try:
+        deb = selected.artifact_path('deb')
+        assert deb.is_file()
+        with deb.open('ab') as handle:
+            handle.write(b'tampered')
+        with pytest.raises(ValueError, match='mismatch'):
+            selected.artifact_path('deb')
+    finally:
+        selected.close()
+
+
 def test_real_loader_selects_packaged_binary_and_cleans_owned_root(
         sealed, tmp_path):
     selected = api().load(env=sealed)

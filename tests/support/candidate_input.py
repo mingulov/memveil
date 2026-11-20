@@ -118,6 +118,14 @@ class CandidateInput:
                 'permission')
 
     def artifact(self, role):
+        return self.artifact_path(role)
+
+    def artifact_path(self, role):
+        if not isinstance(role, str) \
+                or role not in candidate.ROLES:
+            raise ValueError(
+                'unknown candidate artifact role: %r'
+                % (role,))
         entry = candidate.artifact(self.manifest, role)
         path = self.bundle if role == 'bundle' \
             else self.manifest_path.parent / entry['name']
