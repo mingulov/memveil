@@ -554,13 +554,26 @@ def test_journey_identity_excludes_stage_not_sources():
         source.write_text('print("source")\n')
         excludes = journey_identity_excludes(
             str(record), [str(staged)])
+        root = probe / 'prep.stages'
         assert excludes == [str(record.resolve()),
+                            str(root.resolve()),
                             str(staged.resolve())]
         _, first = checkout_identity(exclude=excludes)
         with staged.open('ab') as stream:
             stream.write(b'more-staged-bytes\n')
         with record.open('ab') as stream:
             stream.write(b'more-record-bytes\n')
+        assert checkout_identity(
+            exclude=excludes)[1] == first
+        # A later stage under the root (absent when the
+        # list was built) stays excluded; removing the
+        # whole root is invisible too.
+        future = root / 'future-stage' / 'staged-exe'
+        future.parent.mkdir(parents=True)
+        future.write_bytes(b'future-staged-bytes\n')
+        assert checkout_identity(
+            exclude=excludes)[1] == first
+        shutil.rmtree(root, ignore_errors=True)
         assert checkout_identity(
             exclude=excludes)[1] == first
         with source.open('ab') as stream:
@@ -580,6 +593,8 @@ def test_journey_identity_excludes_stage_not_sources():
     assert 'journey_identity_excludes(' in prep_text
     assert dispatch_text.count(
         'journey_identity_excludes(') >= 2
+    assert 'journey_staging_root' in prep_text
+    assert '.stages' not in prep_text
 
 
 def test_journey_in_checkout_prep_and_launch_accepts(
@@ -611,6 +626,84 @@ def test_journey_in_checkout_prep_and_launch_accepts(
         combined = result.stdout + result.stderr
         assert result.returncode == 0, combined
         assert 'journey-marker' in result.stdout, combined
+        assert '1 passed' in combined, combined
+    finally:
+        shutil.rmtree(probe, ignore_errors=True)
+
+
+def test_journey_retired_stage_cleanup_keeps_record_valid(
+        sealed, tmp_path, monkeypatch):
+    # Repeat prep, delete the retired first stage, launch
+    # the second record: the retired stage never entered
+    # the digest, so cleanup cannot self-invalidate.
+    harness = ('#!/bin/sh\necho journey-marker\n'
+               'echo "running 1 tests"\n'
+               'echo "test journey_probe ... ok"\n'
+               'echo "test result: ok. 1 passed; 0 failed; '
+               '0 ignored; 0 measured; 0 filtered out"\n')
+    fake = tmp_path / 'fake-exe'
+    fake.write_text(harness)
+    fake.chmod(0o755)
+    sys.path.insert(0, str(ROOT / 'tests'))
+    import support.journey_prep as prep
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    probe = ROOT / ('journey-cleanup-probe-%d' % os.getpid())
+    probe.mkdir()
+    try:
+        first = prep.prepare(str(probe / 'prep.json'))
+        stage_one = Path(
+            first['suites']['deb']['staged']).parent
+        prep.prepare(str(probe / 'prep.json'))
+        shutil.rmtree(stage_one)
+        environment = candidate_clean_env()
+        environment.update(sealed)
+        environment['MV_JOURNEY_PREP'] = str(
+            probe / 'prep.json')
+        result = _launch_journey('deb', environment)
+        combined = result.stdout + result.stderr
+        assert result.returncode == 0, combined
+        assert 'journey-marker' in result.stdout, combined
+        assert '1 passed' in combined, combined
+    finally:
+        shutil.rmtree(probe, ignore_errors=True)
+
+
+def test_journey_repeat_prep_keeps_identity_pure(
+        sealed, tmp_path, monkeypatch):
+    # Prep, launch, prep again, launch: both launches
+    # accept, and the second record binds the identical
+    # checkout identity (no earlier stage pollutes it).
+    harness = ('#!/bin/sh\necho journey-marker\n'
+               'echo "running 1 tests"\n'
+               'echo "test journey_probe ... ok"\n'
+               'echo "test result: ok. 1 passed; 0 failed; '
+               '0 ignored; 0 measured; 0 filtered out"\n')
+    fake = tmp_path / 'fake-exe'
+    fake.write_text(harness)
+    fake.chmod(0o755)
+    sys.path.insert(0, str(ROOT / 'tests'))
+    import support.journey_prep as prep
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    probe = ROOT / ('journey-purity-probe-%d' % os.getpid())
+    probe.mkdir()
+    try:
+        first = prep.prepare(str(probe / 'prep.json'))
+        environment = candidate_clean_env()
+        environment.update(sealed)
+        environment['MV_JOURNEY_PREP'] = str(
+            probe / 'prep.json')
+        result = _launch_journey('deb', environment)
+        combined = result.stdout + result.stderr
+        assert result.returncode == 0, combined
+        assert '1 passed' in combined, combined
+        second = prep.prepare(str(probe / 'prep.json'))
+        assert second['commit'] == first['commit']
+        assert second['tree'] == first['tree']
+        result = _launch_journey('deb', environment)
+        combined = result.stdout + result.stderr
+        assert result.returncode == 0, combined
         assert '1 passed' in combined, combined
     finally:
         shutil.rmtree(probe, ignore_errors=True)
@@ -964,6 +1057,24 @@ def test_journey_prep_leaves_planted_stage_name_untouched(
         == ['sentinel']
     for suite, entry in record['suites'].items():
         assert Path(entry['staged']).parent != plant, suite
+
+
+def test_journey_prep_refuses_symlinked_staging_root(
+        tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    import support.journey_prep as prep
+    fake = tmp_path / 'fake-exe'
+    fake.write_bytes(b'#!/bin/sh\necho fake\n')
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    real = tmp_path / 'real'
+    real.mkdir()
+    root = tmp_path / 'prep.stages'
+    root.symlink_to(real, target_is_directory=True)
+    with pytest.raises(ValueError, match='symlink'):
+        prep.prepare(str(tmp_path / 'prep.json'))
+    assert sorted(entry.name for entry in real.iterdir()) \
+        == []
 
 
 def test_journey_launcher_ignores_original_post_stage(

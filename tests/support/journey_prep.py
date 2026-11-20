@@ -3,8 +3,9 @@
 """Fixture-prep phase for journey qualification.
 
 Builds the journey test executables once, stages their
-verified bytes into a fresh private directory beside the
-record, and records the staged paths plus SHA-256 digests,
+verified bytes into a fresh private directory under the
+staging root beside the record, and records the staged
+paths plus SHA-256 digests,
 so qualification can launch them directly without invoking
 cargo. Each prep creates its own staging directory: a
 previous stage is never reused or overwritten, and
@@ -37,7 +38,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tests'))
 from support.candidate_suite import JOURNEY_SUITES, \
-    checkout_identity, journey_identity_excludes
+    checkout_identity, journey_identity_excludes, \
+    journey_staging_root
 
 SCHEMA = 'memveil-journey-prep/1'
 
@@ -69,18 +71,20 @@ def _refuse_symlinked_path(path):
 
 
 def _private_stage_dir(record_abs):
-    """Create a fresh private staging directory beside the record.
+    """Create a fresh private stage under the root.
 
-    Each prep gets its own unique directory (exclusive
-    creation: the call fails rather than reusing an
-    existing path), so a concurrent prep can never replace
-    staged bytes between hashing and launch. Symlinks
-    anywhere in the staging path refuse, both before and
-    after the parent setup; the created directory is
-    re-verified as a real directory whose resolved path
-    equals its spelled path. Previous stages are never
-    reused or overwritten: they stay beside the record for
-    operator cleanup.
+    The staging root (derived from the record path through
+    the shared helper) holds every stage for this record;
+    each prep gets its own unique directory inside it
+    (exclusive creation: the call fails rather than reusing
+    an existing path), so a concurrent prep can never
+    replace staged bytes between hashing and launch.
+    Symlinks anywhere in the staging path refuse, both
+    before and after the directory setup; the root and the
+    created directory are each re-verified as a real
+    directory whose resolved path equals its spelled path.
+    Previous stages are never reused or overwritten: they
+    stay under the root for operator cleanup.
     """
     parent = record_abs.parent
     _refuse_symlinked_path(parent)
@@ -90,10 +94,28 @@ def _private_stage_dir(record_abs):
         raise ValueError(
             'staging directory unavailable: %s' % exc)
     _refuse_symlinked_path(parent)
+    root = Path(journey_staging_root(str(record_abs)))
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ValueError(
+            'staging directory unavailable: %s' % exc)
+    try:
+        mode = os.lstat(root).st_mode
+    except OSError as exc:
+        raise ValueError(
+            'staging directory unavailable: %s' % exc)
+    if not stat.S_ISDIR(mode) or stat.S_ISLNK(mode):
+        raise ValueError(
+            'staging path refuses symlink: %s' % root)
+    if os.path.realpath(root) != str(root):
+        raise ValueError(
+            'staging path changed during prep: %s' % root)
+    os.chmod(root, 0o700)
     try:
         staged_dir = Path(tempfile.mkdtemp(
             prefix=record_abs.stem + '-', suffix='.staged',
-            dir=str(parent)))
+            dir=str(root)))
     except OSError as exc:
         raise ValueError(
             'staging directory unavailable: %s' % exc)
@@ -217,10 +239,11 @@ def prepare(record_path):
     Checkout identity is recorded before the first build
     and re-verified after the last: the two must agree, so
     an edit during prep refuses instead of mislabelling an
-    older executable. The record file itself and the staged
-    copies are derived outputs excluded from the digest
-    through the exclusion list shared with the launcher, so
-    both sides hash the identical source set.
+    older executable. The record file itself, the staging
+    root holding every present and future stage, and the
+    listed staged copies are derived outputs excluded from
+    the digest through the exclusion list shared with the
+    launcher, so both sides hash the identical source set.
     """
     if set(JOURNEY_SUITES) != set(TARGETS):
         raise ValueError(
